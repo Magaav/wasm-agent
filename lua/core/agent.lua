@@ -2773,18 +2773,22 @@ function M:run_body(text, images)
         local repeats = self.fake_answer_repeats
         -- The evidence is the markup itself, verbatim (18/11 round 2, finding 3): the event and the
         -- step's trace entry carry what was taken out of the message, not only a bounded quote, so a
-        -- reader of the run record can see exactly what the model wrote.
+        -- reader of the run record can see exactly what the model wrote. Bounded at the source and
+        -- counted rather than dropped (18/11 round 3, item 6): the row says how many bytes the whole
+        -- markup had even when only the first of them are kept.
         local removed = fabricated.removed or ""
+        local removed_bytes = tonumber(fabricated.removed_bytes) or #removed
+        local dropped = tonumber(fabricated.removed_dropped_bytes) or 0
         telemetry.event(self.session_id, self.run_id, "", "fake_tool_result", "step", {
           round = round, repeats = repeats, limit = fake_answer.MAX_REPEATS,
           tags = table.concat(fabricated.tags, ","), blocks = fabricated.blocks,
           excerpt = fabricated.excerpt:sub(1, 200), removed = removed,
           removed_count = #(fabricated.removed_blocks or {}),
-          removed_bytes = #removed, tool = fabricated.tool })
+          removed_bytes = removed_bytes, removed_dropped_bytes = dropped, tool = fabricated.tool })
         trace[#trace + 1] = { kind = "fake_tool_result", ok = false, round = round, repeats = repeats,
           tags = table.concat(fabricated.tags, ","), blocks = fabricated.blocks,
           excerpt = fabricated.excerpt:sub(1, 200), removed = removed,
-          removed_bytes = #removed, tool = fabricated.tool }
+          removed_bytes = removed_bytes, removed_dropped_bytes = dropped, tool = fabricated.tool }
         result.content = fabricated.stripped
         reply = ""
         decision_phase = "fake_tool_result"

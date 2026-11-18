@@ -70,14 +70,34 @@ M.KEEP_CLOSED = 256
 -- The longest single blocking slice. The node does the blocking natively, so this is not a relay
 -- limit; it is what keeps a wait interruptible by a stop/steer without a long call to unwind.
 M.SLICE_MS = 1000
--- How many times ONE script may be told the same op is still pending before the script ends by name
--- (18/11 round 2, finding 7). A script that re-waited on an op that never settles used to loop for as
--- long as the op lived and held one of the sandbox's four session slots the whole time: it now ends
--- with a named reason and the slot is released. This is NOT a wall clock on waiting (the approved rule
--- stands: a script is never killed for waiting, and the CPU guard is the only hard stop for computing)
--- - it counts pending ANSWERS for one op, so a script that waits on four different calls for five
--- minutes each is untouched.
+-- How many times ONE script may be told the same op is still pending WITHOUT PROGRESS before the
+-- script ends by name (18/11 round 2, finding 7; narrowed 18/11 round 3, item 2).
+--
+-- A script that re-waited on an op that never settles used to loop for as long as the op lived and
+-- held one of the sandbox's four session slots the whole time: it now ends with a named reason and
+-- the slot is released. What counts is narrow on purpose, because the first cut of this bound counted
+-- every pending ANSWER and that is a wall clock under another name:
+--
+--   * only a wait that spent its WHOLE budget (>= M.full_wait_ms()) counts. A poll (wait_s:0, or a
+--     wait that returned early because a short op of the same batch settled under until:"any") spends
+--     none of the budget the bound is about, so a pool loop that finishes 25 short ops while one long
+--     build runs can no longer kill the build, and a wait_s:0 call awaited at once is untouched;
+--   * a wait that saw PROGRESS (bytes written, a progress counter that moved, a promotion) resets the
+--     count, so a long build with steady output survives however long the script watches it;
+--   * the count is per op, so a script that waits on four different calls for five minutes each is
+--     untouched.
+--
+-- This is NOT a wall clock on waiting (the approved rule stands: a script is never killed for waiting,
+-- and the CPU guard is the only hard stop for computing). It is the one case where "wait a little
+-- longer" and "this handle will never change" are the same thing: an op that shows nothing at all
+-- while it is waited on for the whole budget, again and again.
 M.PENDING_ANSWER_LIMIT = 20
+-- The shortest wait that can count against it: anything under this is a poll, and a poll is not a
+-- wait. A caller does not have to know the number; it is the difference between "I asked to wait" and
+-- "I glanced".
+M.FULL_WAIT_MS = 30000
+-- How far short of its budget a wait may return and still be read as having spent it.
+M.WHOLE_WAIT_SLACK_MS = 250
 -- The name the script's end carries, so the failure layer, the explainer and a test agree on it.
 M.WAIT_BOUND_CODE = "codemode_wait_never_settles"
 function M.pending_answer_limit()
@@ -85,6 +105,30 @@ function M.pending_answer_limit()
   local value = tonumber(raw)
   if value and value >= 1 then return math.floor(value) end
   return M.PENDING_ANSWER_LIMIT
+end
+
+-- The same for the whole-budget threshold M.FULL_WAIT_MS, so a test can hold the rule with one-second
+-- waits instead of fifteen-minute ones. Production default: 30 s.
+function M.full_wait_ms()
+  local raw = (host.getenv and host.getenv("WASM_AGENT_CODEMODE_WAIT_FULL_MS")) or nil
+  local value = tonumber(raw)
+  if value and value >= 1 then return math.floor(value) end
+  return M.FULL_WAIT_MS
+end
+
+-- The fields of a pending answer that mean the op DID something. The clock fields the same answer
+-- carries (elapsed_ms, remaining_ms, output_idle_ms) are deliberately absent: they move on their own,
+-- and a fingerprint over them would read the passing of time as progress - which is the bug this
+-- bound exists to not have (18/11 round 3, item 2).
+M.PROGRESS_FIELDS = { "output_bytes", "bytes", "progress", "promoted", "shell_exited", "state" }
+function M.progress_fingerprint(progress)
+  if type(progress) ~= "table" then return "" end
+  local parts = {}
+  for _, key in ipairs(M.PROGRESS_FIELDS) do
+    local value = progress[key]
+    if value ~= nil then parts[#parts + 1] = key .. "=" .. tostring(value) end
+  end
+  return table.concat(parts, ";")
 end
 
 -- ---------------------------------------------------------------------------- the record on disk
@@ -363,6 +407,18 @@ for _, name in ipairs({ "bash", "operation" }) do
   M.EXECUTORS[name].settle = function(dispatch, opts, record, state)
     return operation_result(dispatch, record.op, state)
   end
+  -- One step below the node, after the fact (18/11 round 3, item 5): the operation tool action
+  -- "background" re-nices a running operation in its own process group and answers the record with
+  -- the priority it now runs at. Best effort by design - a node that cannot renice keeps running the
+  -- work at the node's priority and the wait still works - so a refusal is recorded, never thrown.
+  M.EXECUTORS[name].demote = function(dispatch, record)
+    local answer, why = operation_call(dispatch, "background", { action = "background", id = record.op })
+    if not answer then record.demote_error = tostring(why) return nil, why end
+    if type(answer) == "table" and answer.cpu_priority ~= nil then
+      record.cpu_priority = tostring(answer.cpu_priority)
+    end
+    return answer
+  end
 end
 
 -- The outbox family: a WhatsApp send is a durable queue job (`lua/core/whatsapp.lua`), so the id the
@@ -569,14 +625,12 @@ function M.invoke(dispatch, opts, name, params, raw, wait_s)
   end
   local started_at = now_seconds()
   local budget = M.effective_ms(wait_s, remaining_of(opts))
-  -- Is this call backgrounded? A call the script does not wait for at all (wait_s 0) is, and only a
-  -- backgrounded operation runs at low CPU priority (18/11 round 2, finding 9): the priority belongs to
-  -- the spawned process, so the fact has to be known before the start, and "does the caller wait" is
-  -- the one thing knowable then.
-  local saved_background = opts.background
-  opts.background = budget == 0
+  -- The call starts at the node's own priority, whatever wait it named (18/11 round 3, item 5). The
+  -- priority of work nobody waits for is applied at the ONE boundary where that becomes a fact - the end
+  -- of the script that left the handle behind (M.background, called by lua/core/codemode.lua): at spawn
+  -- the only knowable thing is the wait the caller asked for, which is a guess, and a wait_s:0 call the
+  -- script resumes at once is foreground work from beginning to end.
   local started = executor.start(dispatch, opts, params, raw)
-  opts.background = saved_background
   if type(started) ~= "table" then return dispatch(name, params, raw) end
   if started.result ~= nil then
     -- The call finished as it always did: a refusal, a guarded command, an immediate answer.
@@ -609,6 +663,41 @@ function M.invoke(dispatch, opts, name, params, raw, wait_s)
   record.reason = reason
   M.save(scope, index)
   return handle(record, math.floor(budget / 1000))
+end
+
+-- ---------------------------------------------------------------------------- background(scope)
+-- The end of a script's wait. A handle the script leaves behind is work NOBODY is waiting for any more,
+-- and that is the one fact that should put it a step below the node (18/11 round 3, item 5). It is
+-- applied here, once, at the boundary where the harness stops waiting - not at the spawn (where the only
+-- knowable fact is the wait_s the caller asked for, which is a guess) and not on the way to pending (a
+-- wait_s:0 call the script resumes at once must keep the node's own priority while it is waited on).
+--
+-- A read in every other sense: it dispatches no effect of the call, only the re-nice of work that is
+-- already running. Best effort, and said: an executor with nothing to lower (the outbox: a queued
+-- message is not this process's CPU) is skipped, and a node that refuses the call keeps the priority it
+-- had with the refusal on the record, never in the way of the caller.
+function M.background(scope, dispatch, opts)
+  opts = type(opts) == "table" and opts or {}
+  local index = M.open(scope)
+  local lowered, failed = {}, {}
+  for id, record in pairs(index.ops or {}) do
+    local executor = executor_of(record)
+    if open_record(record) and record.state == "running" and executor
+      and type(executor.demote) == "function" then
+      local ok, why = pcall(executor.demote, dispatch, record)
+      if ok then
+        lowered[#lowered + 1] = tostring(id)
+      else
+        record.demote_error = tostring(why)
+        failed[#failed + 1] = tostring(id)
+      end
+    end
+  end
+  if #failed > 0 or #lowered > 0 then M.save(scope, index) end
+  if #lowered == 0 and #failed == 0 then return nil end
+  local answer = { count = #lowered, ops = lowered }
+  if #failed > 0 then answer.failed = failed end
+  return answer
 end
 
 -- ---------------------------------------------------------------------------- pending(): the pool
@@ -696,7 +785,13 @@ function M.wait(dispatch, opts, asked, wait_opts)
       else
         -- `until:"any"` stops *waiting* after the first op that settled; the ops after it are still
         -- answered, with the state they have now, so the caller can see its whole pool.
-        local state, reason = executor_poll(executor, dispatch, opts, record, stop_waiting and 0 or remaining())
+        -- How much of its budget THIS op was given, and how much of it the poll really spent: the
+        -- ground of the bound below. A wait that returned early (a short op of the same batch settled)
+        -- spent only part of what the call asked for, and a poll was given none of it.
+        local allowance = stop_waiting and 0 or remaining()
+        local poll_started = now_seconds()
+        local state, reason = executor_poll(executor, dispatch, opts, record, allowance)
+        local spent_ms = math.max(0, math.floor((now_seconds() - poll_started) * 1000))
         if not state then
           entry = { op = id, tool = record.tool, state = "pending", waited_s = 0,
             progress = { state = "unknown", reason = tostring(reason) } }
@@ -718,17 +813,32 @@ function M.wait(dispatch, opts, asked, wait_opts)
           -- script ends BY NAME instead of looping on a handle that will not change, and the sandbox
           -- slot comes back. The handle itself is untouched and still resumable - nothing is lost but
           -- this script's loop.
+          --
+          -- The count only moves for a wait that SPENT ITS WHOLE BUDGET and saw NO PROGRESS
+          -- (18/11 round 3, item 2): a poll spends none of it, a wait cut short by a settled sibling
+          -- did not use what it asked for, and any change in the op's own progress fields resets the
+          -- count. A long build watched for an hour, and the pool loop that finishes short calls
+          -- beside it, therefore survive; a silent op that is re-waited forever still ends here.
           local answers = opts.pending_answers
           if type(answers) ~= "table" then answers = {}; opts.pending_answers = answers end
-          answers[id] = (tonumber(answers[id]) or 0) + 1
+          local seen = answers[id]
+          if type(seen) ~= "table" then seen = { count = 0, progress = nil }; answers[id] = seen end
+          local fingerprint = M.progress_fingerprint(record.progress)
+          if seen.progress ~= fingerprint then
+            seen.count = 0
+            seen.progress = fingerprint
+          elseif allowance >= M.full_wait_ms() and spent_ms + M.WHOLE_WAIT_SLACK_MS >= allowance then
+            seen.count = seen.count + 1
+          end
           local limit = M.pending_answer_limit()
-          if answers[id] >= limit then
-            error(string.format("%s: op %s (%s) answered pending %d times in this script without "
-              .. "settling; the call itself is still running and its handle is kept. This is not a CPU "
-              .. "stop and not a wall-clock limit on waiting: it is the bound on ONE op that never "
-              .. "settles. Take the handle to a new step (pending() lists it, wait(op) resumes it "
-              .. "there) or stop it with cancel(%s).",
-              M.WAIT_BOUND_CODE, id, tostring(record.tool or "call"), answers[id], id), 0)
+          if seen.count >= limit then
+            error(string.format("%s: op %s (%s) was waited on %d times in this script for its whole "
+              .. "budget without progress: no output, no counter, no state change. The call itself is "
+              .. "still running and its handle is kept. This is not a CPU stop and not a wall-clock "
+              .. "limit on waiting, and a wait that saw any progress does not count: it is the bound "
+              .. "on ONE op that never settles and never moves. Take the handle to a new step "
+              .. "(pending() lists it, wait(op) resumes it there) or stop it with cancel(%s).",
+              M.WAIT_BOUND_CODE, id, tostring(record.tool or "call"), seen.count, id), 0)
           end
         end
       end
@@ -853,7 +963,7 @@ end
 -- in one place.
 M.WAIT_HELP = {
   name = "wait",
-  description = "Resume one pending call, or a batch of up to 20, that answered {state:\"pending\", op}. Answers one entry per op in the order asked: {state:\"done\", op, tool, result} with the call's normal result, {state:\"failed\", op, reason} when it failed, {state:\"pending\", op, progress, waited_s} while it is still running. It dispatches nothing and never re-runs an effect, so it batches with anything. wait_s defaults to 60 and is capped at 300 (a script has no clock for a wait to outlive). A wait on one op that never settles ends the script by name (codemode_wait_never_settles, after " .. tostring(M.PENDING_ANSWER_LIMIT) .. " pending answers in one script) and the handle survives, so the next script resumes it. until:\"any\" stops waiting at the first op that settled and still answers every op, finished or not, so a step can drop the finished, add new calls and wait again - a work pool that grows and shrinks, e.g. const open = (await pending()).ops.map(o => o.op); const done = (await Promise.all(open.map(op => wait(op, {wait_s:0})))).filter(e => e.state !== 'pending').map(e => e.op);",
+  description = "Resume one pending call, or a batch of up to 20, that answered {state:\"pending\", op}. Answers one entry per op in the order asked: {state:\"done\", op, tool, result} with the call's normal result, {state:\"failed\", op, reason} when it failed, {state:\"pending\", op, progress, waited_s} while it is still running. It dispatches nothing and never re-runs an effect, so it batches with anything. wait_s defaults to 60 and is capped at 300 (a script has no clock for a wait to outlive). A wait on one op that never settles ends the script by name (codemode_wait_never_settles) after " .. tostring(M.PENDING_ANSWER_LIMIT) .. " waits that each spent their whole budget - 30 s or more - WITHOUT PROGRESS: no change in that op's output, counters or state. A shorter poll does not count, and any progress resets the count. The handle survives, so the next script resumes it. until:\"any\" stops waiting at the first op that settled and still answers every op, finished or not, so a step can drop the finished, add new calls and wait again - a work pool that grows and shrinks, e.g. const open = (await pending()).ops.map(o => o.op); const done = (await Promise.all(open.map(op => wait(op, {wait_s:0})))).filter(e => e.state !== 'pending').map(e => e.op);",
   code = "const first = await tools.bash({command:'bash scripts/fast.sh'});\nif (first.state === 'pending') {\n  const [log, resumed] = await Promise.all([tools.read({path:'fast.log'}), wait(first.op, {wait_s:120})]);\n  return {resumed: resumed.state, tail: first.progress && first.progress.tail};\n}\nreturn {code: first.code};",
 }
 

@@ -153,6 +153,11 @@ struct Entry {
     owned_child: Mutex<Option<Value>>,
     index: Arc<index::Index>,
     cancel: AtomicBool,
+    /// Lower this operation's CPU priority as soon as it is spawned (18/11 round 3, item 5). A code
+    /// mode call that goes pending asks for this before the supervisor has necessarily spawned the
+    /// child - a wait_s:0 call goes pending at once - so the request is a flag the spawn site reads,
+    /// not a call that has to win a race with the start.
+    demote: AtomicBool,
     state: Mutex<Value>,
     settled: Condvar,
     started: Instant,
@@ -509,7 +514,16 @@ impl Manager {
         // settle whose write failed is never dropped from the record that still holds it.
         entries.retain(|_, entry| {
             let state = entry.state.lock().unwrap_or_else(|e| e.into_inner());
-            !(state["settled"].as_bool().unwrap_or(false) && state.get("persistence_error").is_none())
+            if state["settled"].as_bool().unwrap_or(false) != true {
+                return true;
+            }
+            // A settle whose own record could not be written is the one state the registry is the LAST
+            // copy of: it is kept until a caller has read it (snapshot marks persistence_error_reported
+            // when it answers one) and retired at the next admission after that (18/11 round 3, item 6),
+            // instead of holding a registry slot for ever the first time a disk write failed.
+            // Retire unless this is the one entry the registry must still hand out: a settle whose own
+            // record could not be written and that nobody has read yet.
+            !(state.get("persistence_error").is_none() || state["persistence_error_reported"] == true)
         });
         if entries.len() >= limit {
             return Err(error("operation_registry_full"));
@@ -543,6 +557,7 @@ impl Manager {
             owned_child: Mutex::new(None),
             index,
             cancel: AtomicBool::new(false),
+            demote: AtomicBool::new(false),
             state: Mutex::new(state),
             settled: Condvar::new(),
             started: Instant::now(),
@@ -667,6 +682,17 @@ impl Manager {
         if let Some(entry) = self.entries.lock().map_err(error)?.get(id).cloned() {
             let mut state = entry.state.lock().map_err(error)?.clone();
             let elapsed = entry.started.elapsed();
+            // THIS answer is the report (18/11 round 3, item 6): a settle whose own record could not be
+            // written lives only in the registry, so it is kept until somebody has read it and retired at
+            // the next admission after that. The flag is set on the entry, not only on this copy.
+            if state["settled"] == true && state.get("persistence_error").is_some()
+                && state["persistence_error_reported"] != true
+            {
+                state["persistence_error_reported"] = json!(true);
+                if let Ok(mut held) = entry.state.lock() {
+                    held["persistence_error_reported"] = json!(true);
+                }
+            }
             if state["settled"] != true {
                 state["elapsed_ms"] = json!(elapsed.as_millis() as u64);
                 state["remaining_ms"] = json!(entry
@@ -733,6 +759,52 @@ impl Manager {
         if let Some(entry) = self.entries.lock().map_err(error)?.get(id) {
             entry.cancel.store(true, Ordering::Release);
         }
+        self.snapshot(id)
+    }
+    /// Lower a running operation's CPU priority now that nobody is waiting for it (18/11 round 3,
+    /// item 5). Code mode calls this the moment a call GOES PENDING, so the fact is decided after the
+    /// start instead of guessed before it: a wait_s:0 call that the script resumes at once keeps the
+    /// node's own priority, and a call left to run on its own yields one step.
+    ///
+    /// Best effort, and said: the request is a flag the spawn site applies (a wait_s:0 call goes
+    /// pending before its child exists), a command that already exited keeps the priority it had, and a
+    /// node that refuses the renice records it under cpu_priority_error - the work itself is never
+    /// disturbed by any of it. Answers the operation's state, which now names the priority it runs at.
+    pub fn background(&self, id: &str) -> io::Result<Value> {
+        validate_id(id)?;
+        let entry = self
+            .entries
+            .lock()
+            .map_err(error)?
+            .get(id)
+            .cloned()
+            .ok_or_else(|| error("operation_not_attached"))?;
+        entry.demote.store(true, Ordering::Release);
+        let pid = entry
+            .owned_child
+            .lock()
+            .map_err(error)?
+            .as_ref()
+            .and_then(|child| child.get("process_id"))
+            .and_then(Value::as_u64);
+        let mut failure = None;
+        if let Some(pid) = pid {
+            if let Err(error) = Process::demote(pid as u32) {
+                failure = Some(error.to_string());
+            }
+        }
+        {
+            let mut held = entry.state.lock().map_err(error)?;
+            if held["settled"] != true {
+                held["cpu_priority"] = json!(Process::demoted_priority());
+                held["background"] = json!(true);
+                if let Some(why) = failure {
+                    held["cpu_priority_error"] = json!(why);
+                }
+            }
+        }
+        // Persisted by the settle that is already going to write this record (it reads the same state),
+        // never by a second writer that could race it.
         self.snapshot(id)
     }
     pub fn read(&self, id: &str, stream: &str, offset: u64, limit: usize) -> io::Result<Value> {
@@ -899,6 +971,17 @@ fn execute(spec: &Spec, dir: &Path, entry: &Entry, secrets: &[Vec<u8>]) -> io::R
     if let Some(pid)=process.owned_id() {
         if let Ok(Some(stamp))=legacy::creation(pid) {
             *entry.owned_child.lock().unwrap()=Some(json!({"process_id":pid,"creation_stamp":stamp}));
+        }
+        // Nobody was waiting for this work before it started (Manager::background): the priority is
+        // lowered here, at the one moment the pid exists. A failure is recorded on the operation, never
+        // thrown at the work: the command runs either way.
+        if entry.demote.load(Ordering::Acquire) {
+            match Process::demote(pid) {
+                Ok(()) => entry.state.lock().unwrap()["cpu_priority"] = json!(Process::demoted_priority()),
+                Err(error) => {
+                    entry.state.lock().unwrap()["cpu_priority_error"] = json!(error.to_string())
+                }
+            }
         }
     }
     let execution_started = Instant::now();

@@ -588,3 +588,173 @@ the variable still set) and the fast path is green. Nothing in this round touche
   and unit-test level. Nothing here opens a second listener.
 * A model-facing sentence that only a live model can judge (does the notice make it call the tool?) is
   not verifiable in a hermetic row, same as round 1.
+
+---
+
+## Round 3 - the review of 18/11 21:40 (items 1-6)
+
+Base: origin/main `e5ba9089`, rebased FIRST (the branch's two commits rewritten onto it). Nothing
+pushed. Every row below ran on this node (avell, x86_64, 16 cores) in its own scratch HOME with
+`WASM_AGENT_LUA_ROOT` pointing at the tree under test, no vault, no relay, no rendezvous, and the
+provider replaced before any paid call.
+
+### 1. The report lives in docs/missions/reports, and there is no root REPORT.md
+
+The root `REPORT.md` carried round 2's text and nothing else did. Its content is now the "Round 2"
+section of THIS file (the rounds in the order they were measured, the shape harness-land.md already
+uses), the root file is deleted, and the deletion rides in the rebased commit - so the branch neither
+adds a root report nor leaves one behind. origin/main's own root `REPORT.md` (land-gate-fix) was
+byte-identical to `docs/missions/reports/land-gate-fix.md`, which is why deleting it loses nothing.
+
+### 2. The wait bound counts waits that spent their whole budget WITH NO PROGRESS
+
+The first cut counted every pending ANSWER for an op (limit 20). That is a wall clock under another
+name, and it failed in three measured ways: a `wait_s:0` poll loop hit 20 at once, a long build
+awaited with `wait_s:60` died at about 20 minutes, and the `until:"any"` pool loop added one to the
+long op every time a SHORT op finished. The rule now (lua/core/codemode_pending.lua):
+
+| what the wait did | counts? |
+| --- | --- |
+| poll (`wait_s:0`), or a wait cut short because a short op of the same batch settled | no - it spent none of the budget the bound is about |
+| spent its whole budget (>= `M.FULL_WAIT_MS`, 30 s) and the op's progress fields did not change | **one** |
+| spent its whole budget and the bytes / counters / state DID change | no - any progress resets the count to zero |
+
+The fingerprint is over `output_bytes`, `bytes`, `progress`, `promoted`, `shell_exited` and `state`
+only: the clock fields the same answer carries (`elapsed_ms`, `remaining_ms`, `output_idle_ms`) are
+deliberately absent, or the passing of time would read as progress. The failure text says what it
+counts and that a wait with progress never counts; `WAIT_HELP` says the same to the model.
+
+The row is `scripts/test-codemode-wait-bound.lua` (29 checks), rewritten around the three cases the
+review named, plus the poll case:
+
+    sixty polls of one op do not end anything
+    a silent op re-waited for its whole budget ends the script by name codemode_wait_never_settles,
+      says "without progress", "not a CPU stop", "not a wall-clock", names the op and the cancel(id)
+    a long op with steady progress awaited 40 times survives (the row saw the bytes it survived by)
+    the pool loop with 25 short ops finishing does not kill the long one, still pending afterwards
+    in a real sandbox: 60 polls of one handle, and a 25-op pool, neither end the script
+
+How the numbers stay fast, and what that does NOT measure: the row shrinks the two numbers the code
+reads (whole-budget threshold, count) on its own copy of the module, and every wait goes through that
+copy's `M.wait` - the code under test. The production numbers (30 000 ms, 20) are asserted as
+constants in the same row instead of being waited out; a row that measured 20 x 30 s of deliberate
+silence would cost ten minutes and prove nothing more about the rule.
+
+### 3. A connect timeout is not a stall
+
+lua/core/run_failure.lua mapped `timeout: connect` / `connect: timeout` onto `provider_stalled`
+(retryable). Nothing was sent in that case and no answer was awaited, so it is not a stall: it now has
+its own class, `provider_unreachable` ("the provider could not be reached: the connection never
+opened"), which also takes "connection refused", "failed to lookup address", "dns error", "network is
+unreachable" and "no route to host". Still retryable - the network may come back in a second - but a
+different next step for the reader: the node's route, endpoint and account, not the model's patience.
+`provider_stalled` keeps exactly `provider_stalled` and `timeout: receive response`.
+Row: `scripts/test-no-silent-stops.lua` (84 checks), which now asserts both spellings of the connect
+timeout, a refused connection and an unresolvable name are `provider_unreachable`, never a stall.
+
+### 4. Indented-code masking: one tab, and the first line
+
+lua/core/fake_answer.lua masked an indented block only after a newline and only for four spaces, so a
+block indented with ONE TAB and a block that was the FIRST line of the message were both read as the
+model imitating a tool result - and the model's own fixture was cut for it. The mask is now applied to
+every line, line 1 included, and a single tab counts as an indent (one tab stop). Row:
+`scripts/test-fake-answer-original-span.lua` (24 checks): the tab block, the first-line block in both
+spellings, and the two controls - two spaces are not an indent, and a bare imitation at byte 0 is
+still fake.
+
+### 5. The CPU priority is lowered when the call GOES PENDING, not from the wait_s it named
+
+Round 2 decided the priority at spawn from `wait_s == 0` - a guess about the future, and wrong for a
+`wait_s:0` call the script resumes at once. The guess is gone: a code-mode call now always starts at
+the node's own priority, and the priority is lowered at the one boundary where "nobody is waiting" is a
+fact - the end of the script that left the handle behind (`M.background(scope, dispatch)`, called from
+lua/core/codemode.lua's `finish`). The lowering itself is a new operation action,
+`operation background` (rust/wa-operation, `Manager::background`), which re-nices the running
+operation's whole process group on unix (`setpriority(PRIO_PGRP)`) and sets below-normal on Windows;
+it is best effort and says so (`cpu_priority_error`), and a call that goes pending before its child
+exists is lowered by the flag the spawn site reads. `Spec.background` stays for an explicit
+`operation start`, which is backgrounded by definition.
+Rows: `scripts/test-operation-cpu-priority.lua` (18 checks - the priority is still `default` while a
+script can still wait, `M.background` lowers it, a real script reports `pending_backgrounded` and the
+operation's own record names the lower priority, and a call resumed and finished inside the script is
+never lowered) and rust `background_lowers_a_running_operation_and_names_the_priority_it_runs_at`.
+
+### 6. The telemetry "removed" field is bounded; a settle that could not be written is retired after it is reported
+
+* `removed` - the markup the model wrote, kept verbatim as the evidence - is now bounded at
+  `fake_answer.EVIDENCE_BYTES` = 2000 bytes, and what is dropped is COUNTED, not silently lost: the
+  trace entry and the event carry `removed_bytes` (the whole markup's size) and
+  `removed_dropped_bytes`, so kept + dropped is the whole fabrication. Row:
+  `scripts/test-fake-answer-evidence.lua` (20 checks) with a 12 KB fabrication, plus the small case
+  that drops nothing.
+* A settle whose own record could not be written (`persistence_error`) was the one entry the registry
+  never retired - a registry slot lost for ever the first time a disk write failed. It is now kept
+  exactly until a caller has read it (`snapshot` marks `persistence_error_reported` on the entry) and
+  retired at the next admission after that. Row: rust
+  `a_settle_that_could_not_be_written_is_reported_once_then_retired`, which makes the operation's own
+  directory read-only between admission and settle, so the failure is the real one and not a stub.
+
+### Texts to approve (verbatim, as they now read)
+
+1. `WAIT_HELP.description` (lua/core/codemode_pending.lua), the sentence that changed:
+
+       A wait on one op that never settles ends the script by name (codemode_wait_never_settles)
+       after 20 waits that each spent their whole budget - 30 s or more - WITHOUT PROGRESS: no change
+       in that op's output, counters or state. A shorter poll does not count, and any progress resets
+       the count. The handle survives, so the next script resumes it.
+
+2. The bound's failure sentence (what the script and the model see when it ends):
+
+       codemode_wait_never_settles: op <id> (<tool>) was waited on 20 times in this script for its
+       whole budget without progress: no output, no counter, no state change. The call itself is
+       still running and its handle is kept. This is not a CPU stop and not a wall-clock limit on
+       waiting, and a wait that saw any progress does not count: it is the bound on ONE op that never
+       settles and never moves. Take the handle to a new step (pending() lists it, wait(op) resumes it
+       there) or stop it with cancel(<id>).
+
+3. The failure class's sentence (lua/core/run_failure.lua):
+
+       run_failed: provider_unreachable - the provider could not be reached: the connection never
+       opened: <the transport's own words>
+
+4. The operation tool's new action, as the model sees it (lua/core/tools.lua): the enum gains
+   `"background"`, described as
+
+       background only lowers a running operation's CPU priority once nobody is waiting for it; code
+       mode does that by itself when a call goes pending.
+
+5. A codemode result that lowered handles carries one new key, `pending_backgrounded`:
+   `{count, ops:[...], failed?:[...]}` - the calls this script stopped waiting for that now run one
+   step below the node.
+
+### The fast path, after all of it
+
+    fast: lua 240/240 passed (56 excluded: scripts/fast-path.exclude)
+    fast: rust wa-capabilities ok (9s)
+    fast: rust wa-operation ok (4s)           (cargo test -p wa-operation: 44 passed, 1 ignored)
+    fast result ok (274 checks, 0 failed, 0 skipped)
+    fast path ok (274 checks, 0 skipped, 162s)
+
+That run measured commit d95c8ba2. This section was written after it: the commit that carries these
+numbers differs from the measured tree ONLY in this file.
+
+Five runs are worth naming rather than hiding, because four of them were mine:
+
+* run 1 red on the RELEASE timing row `deadline_covers_both_streams_without_serial_graces` (its own
+  1400 ms bound) while 240 Lua rows ran beside it. It passes alone 3/3 on this tree, and the whole
+  `cargo test -p wa-operation` suite passes on the BASE (stashed tree, twice) and on this tree
+  (twice), so it is a pre-existing load-sensitive row and not this round's; its own comment already
+  records the same measurement under the release gate's uncapped test threads.
+* run 2 red on my own new rust row `a_settle_that_could_not_be_written_is_reported_once_then_retired`,
+  which raced its own fixture: the window between admission and settle was a `sleep 1`, and the cleanup
+  ran while the second operation was still writing. Fixed, not retried: the command now WAITS for a
+  file the test creates (so the window stays open for as long as the machine needs and closes exactly
+  when the directory is read-only), and the second operation is waited out before the fixture is
+  removed. 6/6 green, 0.09 s each.
+* run 3 red on my own Lua row `test-operation-cpu-priority.lua`, which assumed a `wait_s:0` call always
+  answers a handle. A call that settles inside the start answers its RESULT instead - the script waited
+  for it from beginning to end - and the row now reads both shapes.
+* run 5 red on the same row again: its "nothing was lowered for it" assertion was reading a handle the
+  row's PREVIOUS script had left open (the row cancelled it through the operation tool, which stops the
+  work but does not close the pending handle - so the next script's sweep lowered it, correctly). The
+  row now cancels from inside a script and asserts on its own op. 5/5 green, and green in run 6.

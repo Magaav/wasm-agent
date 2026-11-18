@@ -78,6 +78,38 @@ check(event and event.payload and event.payload.removed == SHAPE,
 check(event and event.payload and tonumber(event.payload.removed_bytes) == #SHAPE,
   'with its byte count: ' .. tostring(event and event.payload and event.payload.removed_bytes))
 
+-- The evidence is verbatim AND bounded (18/11 round 3, item 6): a model can write a megabyte of
+-- markup, and a record that keeps a megabyte in every fabricated step is a cost with no reader. What is
+-- kept is byte for byte, and what is not is COUNTED rather than silently dropped.
+local ESC = string.char(92)
+local huge = "<result>" .. string.char(10) .. "<name>bash</name>" .. string.char(10) .. "<output>" .. string.char(10)
+  .. string.rep("fabricated line of output" .. string.char(10), 400)
+  .. "</output>" .. string.char(10) .. "</result>"
+local big_sid, big_reply = run('fake-evidence-bounded', { { content = huge, tool_calls = {},
+  finish_reason = 'stop', usage = usage }, answer('done.') })
+check(big_reply == 'done.', 'the turn with the huge fabrication answers with the model next step')
+local big_entry
+for _, row in ipairs(memory.session_messages(big_sid, { all = true }) or {}) do
+  for _, item in ipairs(row.trace or {}) do
+    if type(item) == 'table' and item.kind == 'fake_tool_result' then big_entry = item end
+  end
+end
+check(big_entry ~= nil, 'the huge fabrication has its trace entry')
+check(big_entry and #big_entry.removed == fake_answer.EVIDENCE_BYTES,
+  'the kept evidence is bounded at EVIDENCE_BYTES: ' .. tostring(big_entry and #big_entry.removed)
+    .. ' of ' .. tostring(fake_answer.EVIDENCE_BYTES))
+check(big_entry and tonumber(big_entry.removed_bytes) == #huge,
+  'and the row still says how many bytes the whole markup had: '
+    .. tostring(big_entry and big_entry.removed_bytes) .. ' vs ' .. #huge)
+check(big_entry and (#big_entry.removed + tonumber(big_entry.removed_dropped_bytes or 0)) == #huge,
+  'kept + dropped is the whole markup, so nothing about it is unattested: '
+    .. tostring(big_entry and #big_entry.removed) .. ' + '
+    .. tostring(big_entry and big_entry.removed_dropped_bytes))
+check(big_entry and big_entry.removed == huge:sub(1, fake_answer.EVIDENCE_BYTES),
+  'and what is kept is the original bytes, from the start')
+check(entry and tonumber(entry.removed_dropped_bytes) == 0,
+  'a small fabrication drops nothing: ' .. tostring(entry and entry.removed_dropped_bytes))
+
 -- Nothing fabricated reaches the answer, and the notice says what happened.
 local last = rows[#rows]
 check(last and last.role == 'assistant' and last.content == 'the listing is in.',

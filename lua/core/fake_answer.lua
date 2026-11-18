@@ -38,6 +38,12 @@ M.ELEMENTS = {
 -- The code this detector ends a turn with, exported so the failure layer and a test agree on the name
 -- instead of spelling it twice.
 M.CODE = "fake_tool_result"
+-- Bytes of the removed markup kept in the evidence (18/11 round 3, item 6). The evidence is verbatim -
+-- that is the point of it - but the record is written once per fabricated step into a trace row and an
+-- event, not into a dump: a model can write a megabyte of markup, and a megabyte of it in every row is
+-- a cost with no reader. The first EVIDENCE_BYTES bytes are kept byte for byte and the rest is counted
+-- in removed_dropped_bytes, so nothing about the fabrication is unattested.
+M.EVIDENCE_BYTES = 2000
 
 local FENCE = "\96\96\96"
 local TILDE = "~~~"
@@ -47,6 +53,16 @@ local TILDE = "~~~"
 -- original text.
 local function blank(region)
   return (region:gsub("[^\n]", " "))
+end
+
+-- Is this line indented code? One tab is a tab stop (four columns, Markdown's rule) and four spaces
+-- are four spaces; anything else is prose. The line's own bytes are blanked, never dropped, so the
+-- mask keeps the message's length and every span after it still means the same byte.
+local function mask_indented_line(line)
+  local lead = line:match("^[ \t]*") or ""
+  if lead == "" then return line end
+  if lead:find("\t", 1, true) == nil and #lead < 4 then return line end
+  return blank(line)
 end
 
 -- Text with the code in it masked IN PLACE: closed fences, an unterminated fence (the rest of the
@@ -60,12 +76,13 @@ local function mask_code(text)
   at = out:find(TILDE, 1, true)
   if at then out = out:sub(1, at - 1) .. blank(out:sub(at)) end
   out = out:gsub("\96[^\96\n]-\96", blank)
-  -- Markdown's indented code: a line that starts with four spaces or a tab. Conservative on purpose
-  -- (a deeply indented list continuation is masked too): failing to see a fake is a wrong answer kept
-  -- in the record, while seeing one inside code is the model's own work deleted.
-  out = out:gsub("([\n])([ \t][ \t][ \t][ \t][^\n]*)", function(newline, line)
-    return newline .. blank(line)
-  end)
+  -- Markdown's indented code, on EVERY line including the first: four columns of spaces or ONE tab.
+  -- Conservative on purpose (a deeply indented list continuation is masked too): failing to see a fake
+  -- is a wrong answer kept in the record, while seeing one inside code is the model's own work deleted.
+  -- The newline-separated form this started as missed two cases (18/11 round 3, item 4): a block
+  -- indented with a single tab (one byte, not four) and a message whose FIRST line is the block - a
+  -- model answering with an indented <result> fixture was read as imitating a tool result.
+  out = out:gsub("[^\n]+", function(line) return mask_indented_line(line) end)
   return out
 end
 
@@ -159,11 +176,20 @@ function M.scan(content)
   pieces[#pieces + 1] = content:sub(at)
   local quote = content:sub(first.from, math.min(first.to, first.from + 240) - 1)
   local text = table.concat(removed, "\n")
+  -- Verbatim, and bounded (M.EVIDENCE_BYTES): what is kept is byte for byte what the model wrote, and
+  -- what is not is counted rather than silently dropped.
+  local kept = text
+  local dropped = 0
+  if #text > M.EVIDENCE_BYTES then
+    kept = text:sub(1, M.EVIDENCE_BYTES)
+    dropped = #text - #kept
+  end
   return { code = M.CODE, tags = tags, blocks = #removed,
     excerpt = (quote:gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")),
     -- The evidence, verbatim: what was taken out of the message is kept in the run record, byte for
     -- byte, not only as the bounded excerpt the notice and the status line can afford.
-    removed = text, removed_blocks = removed,
+    removed = kept, removed_bytes = #text, removed_dropped_bytes = dropped,
+    removed_blocks = removed,
     tool = named_tool(text),
     stripped = (table.concat(pieces):gsub("^%s+", ""):gsub("%s+$", "")) }
 end

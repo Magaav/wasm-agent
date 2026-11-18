@@ -295,6 +295,85 @@ fn the_registry_ceiling_refuses_by_name_and_creates_nothing() {
     remove_fixture(root);
 }
 
+/// 18/11 round 3, item 5: the CPU priority of work nobody waits for is lowered AFTER the fact and by
+/// name - an operation starts at the node's own priority and Manager::background moves it one step
+/// below, saying so in the record. The caller decides when; the registry only applies it.
+#[test]
+fn background_lowers_a_running_operation_and_names_the_priority_it_runs_at() {
+    let (m, root) = fixture();
+    fs::create_dir_all(&root).unwrap();
+    let mut spec = shell("sleep 3");
+    spec.timeout = Duration::from_secs(60);
+    let id = m.start(spec).unwrap();
+    let before = m.snapshot(&id).unwrap();
+    assert_eq!(before["cpu_priority"], "default",
+        "a call nobody has decided about yet runs at the node's own priority: {before}");
+    let after = m.background(&id).unwrap();
+    assert_eq!(after["cpu_priority"], Process::demoted_priority(),
+        "the answer names the priority it now runs at: {after}");
+    assert_eq!(after["background"], true, "{after}");
+    assert_eq!(m.snapshot(&id).unwrap()["cpu_priority"], Process::demoted_priority(),
+        "and the operation's own record keeps it");
+    // Lowering a settled operation is a read, not a failure: there is simply nothing left to yield.
+    let done = settled(&m, &id);
+    assert_eq!(done["settled"], true, "{done}");
+    m.background(&id).unwrap();
+    // An id nobody tracks is refused BY NAME rather than answered with a state that does not exist.
+    let refused = m.background("op-unattached").unwrap_err().to_string();
+    assert!(refused.contains("invalid_operation_id") || refused.contains("operation_not_attached"),
+        "an unknown handle is refused by name: {refused}");
+    drop(m);
+    remove_fixture(root);
+}
+
+/// 18/11 round 3, item 6: a settle whose own record could not be written is the ONE state the registry
+/// alone holds. It is reported once (a read of the operation) and retired at the next admission after
+/// that, instead of holding a registry slot for ever the first time a disk write failed.
+#[cfg(unix)]
+#[test]
+fn a_settle_that_could_not_be_written_is_reported_once_then_retired() {
+    use std::os::unix::fs::PermissionsExt;
+    let (m, root) = fixture();
+    fs::create_dir_all(&root).unwrap();
+    let tracked = |m: &Manager| m.list().as_array().map(|rows| rows.len()).unwrap_or(0);
+    // The window between admission and settle is opened by the command itself, not by a race: the shell
+    // waits for a file the test creates, so a loaded machine (the fast path runs this beside 240 rows)
+    // cannot make the settle happen before the directory is read-only.
+    let gate = root.join("ready");
+    let command = format!("while [ ! -f {} ]; do sleep 0.05; done", gate.display());
+    let mut spec = shell(&command);
+    spec.timeout = Duration::from_secs(120);
+    let first = m.start(spec).unwrap();
+    let dir = root.join(&first);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !dir.join("state.json").exists() {
+        assert!(Instant::now() < deadline, "the admission record never appeared in {}", dir.display());
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o500)).unwrap();
+    // The settle now runs against a directory nothing can be written into.
+    fs::write(&gate, b"go").unwrap();
+    let outcome = m.wait(&first, Duration::from_secs(120)).unwrap();
+    assert!(outcome["persistence_error"].is_string(),
+        "the settle recorded that its record could not be written: {outcome}");
+    // Reported: reading the operation IS the report, and it says so.
+    let read = m.snapshot(&first).unwrap();
+    assert_eq!(read["persistence_error_reported"], true,
+        "the answer that reports it marks it reported: {read}");
+    // Retired at the next admission, exactly like any other settled operation.
+    let second = m.start(shell("printf next")).unwrap();
+    assert_eq!(tracked(&m), 1,
+        "the reported entry is retired at admission instead of keeping a slot for ever, tracked={}",
+        tracked(&m));
+    // The second operation is waited out before the fixture is removed: a supervisor still writing
+    // into its own directory makes the deletion fail under load, which is a fact about this row and not
+    // about the registry.
+    settled(&m, &second);
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+    drop(m);
+    remove_fixture(root);
+}
+
 #[test]
 fn accepted_output_before_initialization_is_pending_not_a_launch_failure() {
     let (m, root) = fixture();
@@ -305,8 +384,8 @@ fn accepted_output_before_initialization_is_pending_not_a_launch_failure() {
     let index = m.index().unwrap();
     let state = json!({"state":"accepted","settled":false,"timing":timing_payload()});
     let entry = Arc::new(Entry {owned_child:Mutex::new(None),index,
-        cancel:AtomicBool::new(false),state:Mutex::new(state),settled:Condvar::new(),
-        started:Instant::now(),deadline_ms:AtomicU64::new(300000)});
+        cancel:AtomicBool::new(false),demote:AtomicBool::new(false),state:Mutex::new(state),
+        settled:Condvar::new(),started:Instant::now(),deadline_ms:AtomicU64::new(300000)});
     m.entries.lock().unwrap().insert(id.into(),entry.clone());
     for stream in ["stdout","stderr"] {
         assert_eq!(File::open(root.join(id).join(stream)).unwrap_err().kind(),io::ErrorKind::NotFound);

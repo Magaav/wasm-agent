@@ -956,6 +956,12 @@ local function run_script(memory,args,role,ctx,catalog,current_catalog,dispatch,
   if type(result)=='table' and result.summary==nil then result.summary=summary_of(result.calls) end
   local settled=pending_calls.announce(scope)
   if settled then result.pending_settled=settled end
+  -- Every handle this script stops waiting for is work nobody is waiting for any more: its CPU
+  -- priority is lowered HERE, once, at the boundary where the harness stops waiting (18/11 round 3,
+  -- item 5). Never at the spawn (the wait_s a caller named is a guess about the future) and never on
+  -- the way to pending (a wait_s:0 call the script resumes at once is foreground work throughout).
+  local lowered=pending_calls.background(scope,dispatch,popts)
+  if lowered then result.pending_backgrounded=lowered end
   -- What the session holds after this script (its writes committed, or none if it failed).
   local vars=session_vars(memory,scope)
   if #vars>0 then result.vars=vars end

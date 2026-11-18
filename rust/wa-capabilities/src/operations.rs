@@ -473,6 +473,10 @@ pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<V
         "allocation_safety" => manager().allocation_safety(args),
         "identity" => manager().identity(),
         "status" => manager().snapshot(id),
+        // Nobody is waiting for this operation any more: lower its CPU priority now that the fact is
+        // known (18/11 round 3, item 5). The answer is the operation's state, with the priority it now
+        // runs at; a failure to renice is recorded on that state, never turned into a failed call.
+        "background" => manager().background(id),
         "await" => {
             // Foreground bash can complete while its adopted descendants remain supervised.
             // Default to the command boundary for those operations; explicit operation start

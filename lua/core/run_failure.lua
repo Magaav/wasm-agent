@@ -44,7 +44,19 @@ M.PREFIX = "run_failed: "
 local CLASSES = {
   { code = "provider_stalled", retryable = true,
     why = "the provider did not answer within its deadline",
-    match = { "provider_stalled", "timeout: receive response", "timeout: connect", "connect: timeout" } },
+    -- Only a deadline that passed AFTER the connection opened: the request was sent and the answer
+    -- never came. A connect timeout is not a stall (18/11 round 3, item 3): nothing was sent, no
+    -- answer was awaited, and reading it as "the provider took too long to think" sends the reader
+    -- to the wrong place. It keeps its own name, below.
+    match = { "provider_stalled", "timeout: receive response" } },
+  -- The provider could not be reached at all: the connection never opened, the name did not resolve,
+  -- or the peer refused. Retryable like a stall (the network may be back in a second) but a different
+  -- fact, with a different next step: look at the node's route, the endpoint and the account, not at
+  -- the model's patience (18/11 round 3, item 3).
+  { code = "provider_unreachable", retryable = true,
+    why = "the provider could not be reached: the connection never opened",
+    match = { "timeout: connect", "connect: timeout", "connection refused", "failed to lookup address",
+      "dns error", "network is unreachable", "no route to host" } },
   -- A message that imitates a tool result is not an answer: the model has to call the tool it was
   -- describing. Nothing was dispatched and nothing was answered, so a rerun can plausibly finish it
   -- (18/11, session 100c54ab, where the fabricated block ended the turn as if it had answered).

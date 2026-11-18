@@ -31,6 +31,22 @@ check(fake_answer.scan(open_fence) == nil, "an unterminated fence is still code:
 local indented = "Example:\n\n    " .. SHAPE:gsub("\n", "\n    ") .. "\n\nEnd of the example."
 check(fake_answer.scan(indented) == nil, "markup inside an indented code block is code: " ..
   tostring(fake_answer.scan(indented) and fake_answer.scan(indented).stripped))
+-- The same block indented with ONE TAB, and a block that is the FIRST line of the message
+-- (18/11 round 3, item 4): the mask this started as wanted a newline in front of the line and four
+-- SPACES, so a tab-indented fixture and a message that opened with an indented block were both read as
+-- the model imitating a tool result - and the model's own code was cut for it.
+local tabbed = "Example:\n\n\t" .. SHAPE:gsub("\n", "\n\t") .. "\n\nEnd of the example."
+check(fake_answer.scan(tabbed) == nil, "one tab is an indented code block too: " ..
+  tostring(fake_answer.scan(tabbed) and fake_answer.scan(tabbed).stripped))
+local first_line = "    " .. SHAPE:gsub("\n", "\n    ")
+check(fake_answer.scan(first_line) == nil, "and so is a block that opens the message: " ..
+  tostring(fake_answer.scan(first_line) and fake_answer.scan(first_line).stripped))
+local first_line_tab = "\t" .. SHAPE:gsub("\n", "\n\t")
+check(fake_answer.scan(first_line_tab) == nil, "in its tab spelling: " ..
+  tostring(fake_answer.scan(first_line_tab) and fake_answer.scan(first_line_tab).stripped))
+-- A message that merely STARTS with spaces is prose, and a bare imitation is still found.
+check(fake_answer.scan("  " .. SHAPE) ~= nil, "two spaces are not an indent: a bare imitation is still fake")
+check(fake_answer.scan(SHAPE) ~= nil, "and so is one at byte 0 with no indent at all")
 
 -- ---------------------------------------------------------------- the cut is made in the original
 local code = FENCE3 .. "lua\nlocal x = 1\nprint(x)\n" .. FENCE3

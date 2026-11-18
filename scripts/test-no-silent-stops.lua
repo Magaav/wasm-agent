@@ -62,7 +62,19 @@ eq(run_failure.classify("provider_error: timeout: receive response").code, "prov
   "a receive timeout is a stall")
 eq(run_failure.classify("provider_error: timeout: receive response (provider_stalled: no response within 90s)").code,
   "provider_stalled", "the host's own marker wins, and it survives the provider_error prefix")
-eq(run_failure.classify("provider_error: timeout: connect").code, "provider_stalled", "a connect timeout is a stall")
+-- A connect timeout is NOT a stall (18/11 round 3, item 3): nothing was sent and no answer was
+-- awaited, so reading it as "the provider took too long to think" sends the reader to the wrong place.
+eq(run_failure.classify("provider_error: timeout: connect").code, "provider_unreachable",
+  "a connect timeout keeps its own name")
+eq(run_failure.classify("provider_error: timeout: connect").retryable, true,
+  "and is still worth retrying: the network may come back")
+eq(run_failure.classify("provider_error: connect: timeout").code, "provider_unreachable",
+  "in the transport's other spelling too")
+eq(run_failure.classify("provider_error: io: Connection refused (os error 111)").code, "provider_unreachable",
+  "a refused connection is unreachable, not stalled")
+eq(run_failure.classify("provider_error: failed to lookup address information").code, "provider_unreachable",
+  "and so is a name that does not resolve")
+ok(run_failure.classify("timeout: connect").code ~= "provider_stalled", "a connect timeout is never a stall")
 eq(run_failure.classify("provider_error: 500 server_error").code, "provider_error", "any other provider fault")
 eq(run_failure.classify("provider_error: 401 unauthorized").retryable, true,
   "a provider fault is retryable as a class; the retry itself is the provider layer's decision")

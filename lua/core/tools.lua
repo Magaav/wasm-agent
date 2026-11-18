@@ -430,7 +430,8 @@ M.admin = {
     command = { type = "string" }, cwd = { type = "string" },
     timeout_seconds = { type = "integer", minimum = 1, maximum = 86400, description = "Kill the command after this many seconds. Defaults to the node's foreground deadline (" .. exec_deadline_seconds() .. "s); raise it for a build or a full test gate, lower it to fail fast." } }, { "command" }),
   schema("operation", "Start, observe, read streamed output, wait briefly for, or cancel a supervised external operation. A launch receipt is not completion. Output read uses byte cursors; when text_lossy is true, decode content_base64 for exact bytes instead of concatenating content. `await` on work adopted by foreground bash defaults to the shell command result after output reaches EOF or is idle for 100ms; descendants remain supervised and may still produce output. Set wait_for=`settled` to await their full operation. Explicitly started operations always await full settlement. Jobs are automation rules, not operations. No automatic replay after an unknown outcome.", {
-    action = { type = "string", enum = {"start", "list", "status", "read", "wait", "await", "cancel"} },
+    action = { type = "string", enum = {"start", "list", "status", "read", "wait", "await", "cancel", "background"},
+      description = "background only lowers a running operation's CPU priority once nobody is waiting for it; code mode does that by itself when a call goes pending." },
     id = { type = "string" }, command = { type = "string" }, cwd = { type = "string" },
     timeout_seconds = { type = "integer", minimum = 1, maximum = 86400 },
     stream = { type = "string", enum = {"stdout", "stderr"} }, offset = { type = "integer", minimum = 0 },

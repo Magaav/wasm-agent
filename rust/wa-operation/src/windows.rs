@@ -350,6 +350,28 @@ impl Process {
     pub fn priority(background: bool) -> String {
         if background { "below_normal".to_string() } else { "default".to_string() }
     }
+    /// Lower a RUNNING operation's CPU priority to below normal, after the fact (18/11 round 3,
+    /// item 5): the call has gone pending, so nobody is waiting for it any more. The job object owns
+    /// the process, so the priority class is set on the process itself by pid. Best effort: a command
+    /// that already exited, or a handle that cannot be opened, is not an error about the work.
+    pub fn demote(pid: u32) -> io::Result<()> {
+        unsafe {
+            let process = OpenProcess(PROCESS_SET_INFORMATION, 0, pid);
+            if process.is_null() {
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() == Some(ERROR_INVALID_PARAMETER as i32) {
+                    return Ok(());
+                }
+                return Err(error);
+            }
+            let process = Handle(process);
+            check(SetPriorityClass(process.0, BELOW_NORMAL_PRIORITY_CLASS))
+        }
+    }
+    /// The priority name the record carries after a demote (see priority()).
+    pub fn demoted_priority() -> String {
+        Self::priority(true)
+    }
     pub fn read(&mut self, stderr: bool, buffer: &mut [u8]) -> io::Result<Option<usize>> {
         let pipe = if stderr { self.stderr.0 } else { self.stdout.0 };
         let mut available = 0;

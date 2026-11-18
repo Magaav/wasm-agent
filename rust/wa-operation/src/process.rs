@@ -117,6 +117,35 @@ impl Process {
     pub fn containment() -> &'static str {
         "posix_process_group"
     }
+    /// Lower a RUNNING operation's CPU priority, after the fact (18/11 round 3, item 5).
+    ///
+    /// A call that has gone pending is work nobody is waiting for any more, and that is the only fact
+    /// that should put it one step below the node. The command is its own process group (spawn sets
+    /// process_group(0)), so ONE PRIO_PGRP call covers the shell and everything it started. Best
+    /// effort in the sense that matters: a group that has already exited is not an error about the
+    /// work, and a node that refuses the call keeps the priority it had - the caller records that.
+    pub fn demote(pid: u32) -> io::Result<()> {
+        let nice = operation_nice();
+        if nice <= 0 {
+            return Ok(());
+        }
+        if unsafe { libc::setpriority(libc::PRIO_PGRP, pid, nice) } < 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ESRCH) {
+                return Ok(());
+            }
+            return Err(error);
+        }
+        // The leader itself, in case it is already a session of its own.
+        unsafe {
+            libc::setpriority(libc::PRIO_PROCESS, pid, nice);
+        }
+        Ok(())
+    }
+    /// The priority name the record carries after a demote (see priority()).
+    pub fn demoted_priority() -> String {
+        Self::priority(true)
+    }
     /// What the operation's own record says about the CPU priority it runs at: the node's own for a
     /// call somebody waits for, one step lower for a backgrounded one.
     pub fn priority(background: bool) -> String {

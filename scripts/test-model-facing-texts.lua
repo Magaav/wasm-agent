@@ -55,6 +55,10 @@ check(help:find("remaining time", 1, true) == nil,
 check(help:find("never settles", 1, true) ~= nil and help:find("codemode_wait_never_settles", 1, true) ~= nil,
   'and it names the bound that DOES exist: one op that never settles: ' .. help:sub(1, 400))
 check(help:find("until:\"any\"", 1, true) ~= nil, 'the rest of the contract is unchanged')
+check(help:find("WITHOUT PROGRESS", 1, true) ~= nil,
+  'and the bound is stated as it is measured - without progress, not per pending answer: ' .. help:sub(1, 500))
+check(help:find("pending answers in one script", 1, true) == nil,
+  'the old wording (a count of pending answers) is gone: ' .. help:sub(1, 500))
 
 -- ---------------------------------------------------------------- the notice names a callable tool
 local scan = fake_answer.scan("<result>\n<name>bash</name>\n<output>x</output>\n</result>")
