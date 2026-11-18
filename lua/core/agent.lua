@@ -1064,7 +1064,8 @@ function M:build_context()
     catalog=catalog and raw_code.without_codemode(catalog)
   end
   -- `only`: no direct calls at all. The guidance is one sentence, because the list is already empty.
-  local raw_only = (raw_code.only and raw_code.only()) or false
+  -- Policy-aware: `only` empties the declared surface only where the channel can actually run a block.
+  local raw_only = (raw_code.only and raw_code.only(self.codemode_policy)) or false
   if raw_only then
     tool_list=raw_code.without_generic(tool_list)
     catalog=catalog and raw_code.without_generic(catalog)
@@ -1628,6 +1629,13 @@ function M:run(text, images)
   local resource_ctx={session_id=self.session_id,user_id=self.user,run_id=self.run_id,subagent=self.subagent}
   local claimed=resources.begin(resource_ctx)
   if not claimed.ok then error("run_resource_refused: "..json.encode(claimed)) end
+  -- Taking over a session claim another run left behind is a fact, not housekeeping (item 5, 18/11):
+  -- the operator reads which run held it and that nothing was replayed.
+  if claimed.audit then
+    self.emit({type="status",text=claimed.audit})
+    pcall(telemetry.event,self.session_id,self.run_id,"","resource","reclaimed",
+      {key=claimed.reclaimed and claimed.reclaimed.key,prior_run=claimed.reclaimed and claimed.reclaimed.run})
+  end
   self.run_counts={model_calls=0,tool_calls=0,started_at=host.now(),tokens_reported=0,usage_calls=0,usage_unknown=0}
   -- Initialized after provider/child selection is pinned, before the new user row.
   self.run_counts.context_growth={version=1,known=false,source='awaiting_baseline',partial=false,pending=false,compactions=0}
@@ -1737,9 +1745,13 @@ function M:run(text, images)
   -- Releasing the claim is unconditional on every exit path: a run that ended holds nothing, so
   -- the next `wa resume` never needs the process killed. Uncertainty is not a lock - the host
   -- records it in the claim's history and deletes the claim (rust/wa-capabilities/src/resources.rs).
+  -- The release happens on EVERY path, and marking uncertainty can never stand in for it: a failed run
+  -- whose uncertainty write failed kept `session:<id>` claimed, so the next `--resume` was answered
+  -- run_resource_refused (18/11). Both facts are reported; neither cancels the other.
   local marked=not ok and resources.uncertain(resource_ctx) or {ok=true}
-  local released=marked.ok and resources.finish(resource_ctx) or marked
+  local released=resources.finish(resource_ctx)
   if not released.ok then
+    released.uncertain=marked.ok~=true and marked or nil
     self.emit({type="error",error="resource_release_failed: "..json.encode(released)})
     ok,result=false,"resource_release_failed: "..json.encode(released)
   end
@@ -2581,7 +2593,10 @@ function M:run_body(text, images)
     -- The raw code channel (lua/core/raw_code.lua, WASM_AGENT_RAW_CODE): a ```js run block in the reply
     -- is appended here as the codemode call it stands for, so everything below - recording, dispatch,
     -- redaction, projection, the cut/limit refusal - treats it as that call. Off: nothing is read.
-    local raw_run = raw_code.active(self.codemode_policy)
+    -- Read whenever the MODE is on, not only when code mode happens to be ready: a run block the node
+    -- cannot run is answered by name (codemode_not_enabled), never left in the text as the answer.
+    local raw_channel = raw_code.mode() ~= nil
+    local raw_run = raw_channel
       and raw_code.take(result, raw_code.stop_sequences(self.codemode_policy) ~= nil) or nil
     if raw_run and raw_run.restored_fence then
       self.emit({ type = "status", text = "the raw-code stop sequence ended the reply at a code fence that was not a run block" })
@@ -2613,6 +2628,22 @@ function M:run_body(text, images)
       telemetry.event(self.session_id, self.run_id, "", "tool_call", "repaired",
         { calls = repaired_calls, recovered = recovered_calls,
           arrived_name = tostring(first_refused.arrived or "") })
+    end
+    -- A step whose only action the harness never turned into a call is not an answer (18/11: a run block
+    -- the parser did not see ended the turn with `0 tools` and rc 0). The turn fails by name, so a
+    -- scripted `wa chat --once` returns non-zero instead of reporting a silent success.
+    if raw_channel and #calls == 0 then
+      local missed = raw_code.unexecuted(result.content or "", raw_code.mode())
+      if missed then
+        local reason = "run_block_not_executed: " .. missed.reason
+        local span = trace[#trace]
+        if type(span) == "table" and span.kind == "model_call" then span.ok = false; span.error = reason end
+        record_turn(self, { role = "assistant", content = result.content or "", ok = false, debug = self.debug })
+        self.pending_failure = { trace = trace, round = round, attempts = transient_attempt + 1 }
+        telemetry.event(self.session_id, self.run_id, "", "step", "end", { outcome = "run_block_not_executed" })
+        self.emit({ type = "status", text = reason })
+        error(reason)
+      end
     end
     local assistant = { role = "assistant", content = result.content or "" }
     reply_phase = result.final_phase or ""
@@ -2973,7 +3004,7 @@ function M:run_body(text, images)
         -- RAW_CODE=only: `codemode` is not a call here. A model that remembers it (its own history, its
         -- training) gets an answer it can act on, instead of a script it never wrote as a block.
         -- Measured 17/11: a fresh session, only-mode on, still answered with a JSON codemode call.
-        if function_.name == "codemode" and not raw_code.is_raw(call.id) and raw_code.only() then
+        if function_.name == "codemode" and not raw_code.is_raw(call.id) and raw_code.only(self.codemode_policy) then
           return { error = "codemode_only", effect = "none",
             note = "code is not a tool call on this node: end your message with one ```js run block, and "
               .. "it runs as a single script where every tool is tools.<name>(args)." }

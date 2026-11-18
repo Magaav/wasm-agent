@@ -61,7 +61,13 @@ M.STOP = "\n```\n"
 -- loop already does for every capability.
 M.ONLY_GENERIC = { bash = true, read = true, write = true, edit = true, ls = true, grep = true, shell = true }
 
-function M.only() return M.mode() == "only" end
+-- `only`: nothing is declared and the run block is the only way to act. Given a policy it also requires
+-- the channel to be able to run one: a node whose code mode is off declared NOTHING and then refused to
+-- start the turn (no_dispatchable_tools, 18/11) while its ordinary tools were there all along.
+function M.only(policy)
+  if policy ~= nil then return M.active(policy) and M.mode() == "only" end
+  return M.mode() == "only"
+end
 
 function M.without_generic(list)
   if type(list) ~= "table" then return list end
@@ -125,23 +131,46 @@ local function is_run(info)
   return (lang == "js" or lang == "javascript") and rest == "run"
 end
 
--- Fenced blocks, CommonMark-style: an opening fence of 3+ backticks (indented at most three spaces,
+-- An opening fence: 3+ backticks or 3+ tildes, indented at most three spaces, info string free of its own
+-- fence character. CommonMark reads both and a model writes both: measured on HEAD (18/11) a `~~~js run
+-- block never ran and the turn ended with it as the answer (scripts/test-codeact-default.lua).
+local function fence(line, opening)
+  local indent, mark, info = line:match('^( ? ? ?)([`~]+)(.*)$')
+  if not mark then return nil end
+  local char = mark:sub(1, 1)
+  if mark:gsub(char, '') ~= '' or #mark < 3 then return nil end
+  if opening then
+    -- An info string carries no fence character of its own; a bare fence line opens a block with an empty
+    -- info string (not a run block), so both cases keep the info exactly as written.
+    if info:find(char, 1, true) then return nil end
+    return char, #mark, info
+  end
+  if info:match('%S') then return nil end -- a closing fence line holds nothing but the fence
+  return char, #mark, info
+end
+
+-- A fence of either character: what a reply must hold before it is worth parsing.
+local function has_fence(text)
+  return text:find('```', 1, true) ~= nil or text:find('~~~', 1, true) ~= nil
+end
+
+-- Fenced blocks, CommonMark-style: an opening fence of 3+ backticks or 3+ tildes (indented at most three
 -- no backtick in its info string) closes at a line of at least as many backticks and nothing else.
 -- A fence inside another block is that block's text. An unclosed block runs to the end.
 function M.parse(text)
   local blocks, lines, open = {}, lines_of(tostring(text or "")), nil
   for index, line in ipairs(lines) do
     if open then
-      local ticks = line.text:match("^ ? ? ?(```+)%s*$")
-      if ticks and #ticks >= open.ticks then
+      local char, ticks = fence(line.text, false)
+      if char == open.char and ticks >= open.ticks then
         open.close = index
         blocks[#blocks + 1] = open
         open = nil
       end
     else
-      local ticks, info = line.text:match("^ ? ? ?(```+)(.*)$")
-      if ticks and not info:find("`", 1, true) then
-        open = { open = index, ticks = #ticks, run = is_run(info) }
+      local char, ticks, info = fence(line.text, true)
+      if char then
+        open = { open = index, char = char, ticks = ticks, run = is_run(info) }
       end
     end
   end
@@ -163,7 +192,7 @@ end
 function M.retag(text)
   local out = {}
   for line in (tostring(text or "") .. "\n"):gmatch("([^\n]*)\n") do
-    local ticks, info = line:match("^( ? ? ?```+)(.*)$")
+    local ticks, info = line:match("^( ? ? ?[`~]+)(.*)$")
     if ticks then
       local tag = tostring(info or ""):gsub("%s+$", "")
       if tag == "js" or tag == "javascript" then line = ticks .. "js run" end
@@ -171,6 +200,31 @@ function M.retag(text)
     out[#out + 1] = line
   end
   return table.concat(out, "\n")
+end
+
+-- A run block the parser did not turn into a call is still an action the model asked for. Returns the
+-- first one it can see ({line, text, reason}) so the loop can fail the turn by name instead of recording
+-- the block as the answer (18/11: a 4-space indented block ended the turn with `0 tools` and rc 0).
+function M.unexecuted(text, mode)
+  local lines = lines_of(tostring(text or ''))
+  for index, line in ipairs(lines) do
+    local indent, mark, info = line.text:match('^([ \t]*)([`~]+)(.*)$')
+    if mark then
+      local char = mark:sub(1, 1)
+      local tag = tostring(info or ''):lower():gsub('%s+$', '')
+      local intended = mark == string.rep(char, #mark) and #mark >= 3
+        and (tag == 'js run' or tag == 'javascript run' or (mode == 'only' and (tag == 'js' or tag == 'javascript')))
+      if intended then
+        local why = #indent > 3
+          and string.format('it is indented %d spaces, so it is an indented code block and not a fence', #indent)
+          or 'it is inside another block, or its fence never closes'
+        return { line = index, text = line.text, reason = string.format(
+          'the %sjs run block at line %d did not run: %s; write it at the start of a line, as %sjs run ... %s',
+          string.rep(char, 3), index, why, string.rep(char, 3), string.rep(char, 3)) }
+      end
+    end
+  end
+  return nil
 end
 
 -- A tool call the model wrote as TEXT, in its own training format, because the request declared no tool
@@ -310,10 +364,10 @@ function M.take(result, stop_sent)
   -- Call markup in the text, and no real tool call: in `first`/`only` the model had nothing declared to
   -- call with, so its own format leaked into the text. A run block, if any, still wins below.
   local native = (#(result.tool_calls or {}) == 0) and M.native_calls(content) or nil
-  if native and not content:sub(1, native.start - 1):find("```", 1, true) then
+  if native and not has_fence(content:sub(1, native.start - 1)) then
     return take_native(result, native)
   end
-  if not content:find("```", 1, true) then return nil end
+  if not has_fence(content) then return nil end
   -- `only` mode: code is the *only* way to act, so an untagged ```js fence is the action, not a sample.
   -- Measured 17/11: told "end your message with one ```js run block", the model wrote ```js — a sample by
   -- the harness's rule, so nothing ran and no tool was left to fall back to. The tag is honoured as

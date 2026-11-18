@@ -51,6 +51,40 @@ local function complete_listing(result, what)
   return text
 end
 
+-- The one command that establishes wave authority for a shared repository (item 4, 18/11). The refusal
+-- used to be six words (`wave_registration_required`) with no way out, so the only exit was moving the
+-- queue file by hand.
+M.WAVE_REGISTER_COMMAND = 'node scripts/wave-entry.mjs register <repo> <wave-config.json> <attestation.json>'
+
+-- Whether this session is the human's own top-level conversation (`wa chat` by the operator, or a session
+-- it started directly), which works in place when the node has no wave authority at all.
+local function operator_session(session)
+  if not session then return false end
+  if tostring(session.parent_session_id or '') ~= '' or tostring(session.fork_parent_id or '') ~= '' then return false end
+  return tostring(session.objective or '') ~= 'subagent'
+end
+
+-- One admission refusal as a value: what happened, whether this session may work in place anyway, and the
+-- sentence a reader acts on. A node with NO registration is not the same fact as a wave that refuses: the
+-- operator's own session on such a node keeps working (in place, said out loud), while a child still
+-- refuses because it is part of a shared wave that has no owner.
+function M.wave_admission_outcome(reason, options)
+  options = options or {}
+  local text = tostring(reason or '')
+  local absent = text:find('wave_registration_required', 1, true) ~= nil
+  if absent and options.operator_session then
+    return { ok = true, in_place = true,
+      note = 'no wave authority on this node (' .. text .. '): this top-level operator session works in place;'
+        .. ' register the repository with ' .. M.WAVE_REGISTER_COMMAND .. ' to give its waves an owner' }
+  end
+  local message = 'workspace_wave_admission_refused:' .. text
+  if absent then
+    message = message .. ' - the shared wave store exists without a registration for this repository;'
+      .. ' establish it with: ' .. M.WAVE_REGISTER_COMMAND
+  end
+  return { ok = false, code = 'workspace_wave_admission_refused', message = message }
+end
+
 local function wave_admission(root,phase)
   local lua_root=host.getenv('WASM_AGENT_LUA_ROOT')
   local entry=(lua_root and lua_root~='') and (lua_root..'/scripts/wave-entry.mjs') or (dofile('lua/core/update.lua').install_dir()..'/scripts/wave-entry.mjs')
@@ -229,6 +263,37 @@ local function inspect_source(memory, user_id, node_id, source_session_id)
     (why_not ~= "" and why_not or "workspace_source_empty")
 end
 
+-- One line: what this session's tools are bound to, and what to do next. Written for both readers at
+-- once - the operator and the model - because `status` used to return a structure whose every field was
+-- empty for a session that needs no worktree, and a model called it three times in a row (18/11).
+function M.status_line(memory, session_id)
+  local workspace = memory.session_workspace(session_id)
+  local bound = tostring(memory.session_worktree(session_id) or '')
+  local state = tostring(workspace and workspace.state or '')
+  local reason = tostring(workspace and workspace.error or '')
+  local function commit(value) local text = tostring(value or '') return text == '' and 'unknown' or text:sub(1, 12) end
+  if workspace and workspace.required == true then
+    if state == 'allocated' then
+      return string.format('workspace allocated: %s on branch %s (base %s); nothing to bind - work there',
+        tostring(workspace.worktree or ''), tostring(workspace.branch or workspace.workspace_branch or ''),
+        commit(workspace.base_commit or workspace.workspace_base_commit))
+    elseif state == 'pending' or state == 'allocating' or state == 'unknown' then
+      return string.format('workspace %s%s; next: session_worktree action=recover finishes the allocation',
+        state, reason ~= '' and (': ' .. reason) or '')
+    elseif state == 'failed' then
+      return string.format('workspace failed: %s; next: fix that cause, then session_worktree action=allocate',
+        reason ~= '' and reason or 'no reason recorded')
+    end
+    return string.format('workspace %s%s; next: session_worktree action=recover', state,
+      reason ~= '' and (': ' .. reason) or '')
+  end
+  if bound ~= '' then
+    return string.format('bound to %s (not a managed workspace); next: work there, or session_worktree action=clear',
+      bound)
+  end
+  return "no workspace required: this session's tools run in the node's own directory; nothing to bind, keep working"
+end
+
 -- The same decision `ensure` makes, taken before this node creates the child's session.
 function M.preflight_source(memory, source_session_id, user_id, node_id)
   return inspect_source(memory, user_id, node_id, source_session_id)
@@ -306,7 +371,15 @@ function M.ensure(memory, session_id, source_session_id, options)
   if workspace.state == "allocated" then
     local admitted,why=true,nil
     if not direct_owner then admitted,why=wave_admission(workspace.start_state.source_root,'produce') end
-    if not admitted then return nil,'workspace_wave_admission_refused:'..tostring(why) end
+    if not admitted then
+      local verdict=M.wave_admission_outcome(why,{operator_session=operator_session(session)})
+      if not verdict.ok then return nil,verdict.message end
+      -- Admitted in place, and recorded on the binding: a session working without the shared wave is a
+      -- fact the next reader has to be able to see.
+      workspace.start_state=workspace.start_state or {}
+      workspace.start_state.wave_admission='absent_operator_in_place'
+      pcall(memory.journal,'wave_admission',session_id,{in_place=true,reason=tostring(why)})
+    end
     local valid, err = verify_binding(memory, session_id, workspace)
     if valid then return workspace end
     mark(memory, session_id, workspace, "failed", err)
@@ -331,9 +404,9 @@ function M.ensure(memory, session_id, source_session_id, options)
   local admitted,admission_why=true,nil
   if not direct_owner then admitted,admission_why=wave_admission(root,'allocate') end
   if not admitted then
-    local why='workspace_wave_admission_refused:'..tostring(admission_why)
-    mark(memory,session_id,workspace,'failed',why)
-    return nil,why
+    local verdict=M.wave_admission_outcome(admission_why,{operator_session=operator_session(session)})
+    if not verdict.ok then mark(memory,session_id,workspace,'failed',verdict.message) return nil,verdict.message end
+    start_state.wave_admission='absent_operator_in_place'
   end
   local dirty = tostring(inspected.status or "")
   local start_state = {

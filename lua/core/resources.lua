@@ -26,7 +26,15 @@ function M.begin(ctx)
     local prior=result.claim
     local recovered=call("reconcile",{key=key,principal=prior.principal,run=prior.run,
       evidence="New explicit run claims session execution after the prior owner ended; no effects replayed."})
-    if recovered.ok then result=M.claim(ctx,{key}) end
+    if recovered.ok then
+      result=M.claim(ctx,{key})
+      if result.ok then
+        -- An audit line: a stale claim taken over is a fact the operator reads, with nothing replayed.
+        result.reclaimed={key=key,principal=prior.principal,run=prior.run}
+        result.audit=string.format("run lock reclaimed: %s was held by run %s (principal %s), which is no "..
+          "longer running; no effect was replayed",key,tostring(prior.run),tostring(prior.principal))
+      end
+    end
   end
   if not result.ok then return result end
   local exclusive=ctx.subagent and ctx.subagent.resources and ctx.subagent.resources.exclusive

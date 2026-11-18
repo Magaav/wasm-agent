@@ -593,3 +593,26 @@ sandbox against arbitrary shell or manual DB edits. Legacy unprovable effects ma
 require an actual owner decision and remain blocked. No speedup is asserted from
 the synthetic history fixture; it proves bounded relevant lookup and no repeated
 historical state-file reads, not features shipped per hour.
+
+## No registration on a node: what a session does (18/11)
+
+`wave-entry.mjs` answers `wave_registration_required` when the shared wave store exists but this
+repository has no `registration.json` in it. That refusal is not a dead end, and who is admitted depends
+on what the session is:
+
+- **A top-level operator session** (`wa chat` by the human on this node) works in place. There is no wave
+  for it to belong to, so its binding records `start_state.wave_admission = "absent_operator_in_place"`
+  and its tools run in its own checkout, unchanged. It is never refused for the missing registration,
+  because an operator who cannot work on their own node has no way to fix anything.
+- **A child or delegated session** still refuses: it is part of a shared wave, and a wave with no owner
+  cannot say who may land. The refusal carries the reason and the one command that fixes it:
+
+  ```
+  node scripts/wave-entry.mjs register <repo> <wave-config.json> <attestation.json>
+  ```
+
+  The config names the repository and its source root; the attestation is the independent bootstrap
+  admission (see "Registration" above). Both paths are checked by the entrypoint itself.
+
+`session_worktree status` repeats the same sentence in one line (`status_line`), so a model that asks
+where it is bound reads the reason and the next action instead of an empty structure.

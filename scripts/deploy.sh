@@ -382,6 +382,24 @@ while :; do
 done
 [ "$TREE_WAITED" = "0" ] || note "canonical tree is quiet after ${TREE_WAITED}s (origin/main ${MAIN_NOW:0:12}); continuing"
 
+# 0c. The canonical runtime binding is decided HERE, before the build (item 9, 18/11). It used to be resolved in
+#     the installing phase, after ~4 minutes of build and prove, so a second worktree on branch main cost the
+#     whole build to learn one fact. The same script decides it in both places, and its message names every
+#     candidate path. With WA_RUNTIME_WORKTREE set explicitly the operator has chosen, so nothing is decided.
+if [ -z "${WA_RUNTIME_WORKTREE:-}" ]; then
+  BINDING_PREFLIGHT_SCRIPT="${SOURCE_ROOT:-$ROOT}/scripts/runtime-install-binding.mjs"
+  BINDING_PREFLIGHT_REPO="${SOURCE_ROOT:-$ROOT}"
+  if command -v cygpath >/dev/null 2>&1; then
+    BINDING_PREFLIGHT_SCRIPT="$(cygpath -w "$BINDING_PREFLIGHT_SCRIPT")"
+    BINDING_PREFLIGHT_REPO="$(cygpath -w "$BINDING_PREFLIGHT_REPO")"
+  fi
+  if ! WA_RUNTIME_WORKTREE="$(node "$BINDING_PREFLIGHT_SCRIPT" "$BINDING_PREFLIGHT_REPO" 2>&1)"; then
+    fail "canonical runtime binding refused before anything was built: $WA_RUNTIME_WORKTREE"
+  fi
+  export WA_RUNTIME_WORKTREE
+  note "runtime worktree resolved before the build: $WA_RUNTIME_WORKTREE"
+fi
+
 # 1. Clean. A build from a half-edited tree is not reproducible, and the file being edited is often the one
 #    that matters.
 DIRTY="$(git status --porcelain | wc -l | tr -d ' ')"
