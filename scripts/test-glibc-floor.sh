@@ -13,10 +13,21 @@
 #     test, which is a different sentence), so the guard is not a blanket refusal;
 #   * scripts/upgrade.sh refuses the candidate before the proof and before the backup, with the running
 #     binary untouched;
-#   * scripts/deploy.sh and scripts/upgrade.sh call the guard BEFORE the point where anything is swapped or
-#     restarted, and the lib is sourced and shipped beside an installed copy (a copy without it could not
-#     make the check at all);
-#   * scripts/publish-node-binaries.sh measures with the same function, and a malformed --glibc is refused.
+#   * scripts/deploy.sh guards BEFORE it executes the candidate - the block is read out of the script by its
+#     markers and run against fixtures, and its line is asserted to precede the first `"$NEW" --...`, the
+#     `--capability-digest` that used to swallow a too-new binary as a broken one;
+#   * a host whose `sort` has no `-V` (busybox, on the same glibc hosts this check exists for) is "unknown",
+#     not "refused": the comparison says so out loud and the binary is allowed through, because a check that
+#     cannot measure must not refuse every artifact in the fleet;
+#   * scripts/fleet-install.sh carries the four functions itself, so the copy of the script a node gets from
+#     `curl` still makes the check - and the two copies are diffed here, byte for byte, so there is one
+#     implementation and not two that drift;
+#   * scripts/upgrade.sh calls the guard before the scratch proof, the backup and the swap, and the lib is
+#     sourced and shipped beside an installed deploy.sh;
+#   * scripts/publish-node-binaries.sh measures with the same function, and a malformed --glibc is refused;
+#   * the byte scan equals the ELF's own `.gnu.version_r` maximum on real linked binaries, and on the built
+#     artifacts when WA_GLIBC_ARTIFACT_DIR names them - the check that catches a `GLIBC_x.y` string that is
+#     only text in the payload.
 #
 # No network, no node, no cargo, no zig: the artifacts are fixture ELFs (a header and symbol strings) and
 # the host's glibc is stood in for by WA_GLIBC_HOST, the way WA_BOOTSTRAP_LIBC stands in for the probe in
@@ -153,13 +164,25 @@ contains "$out" "artifact_does_not_run_here" "it reaches the exec test instead"
 [ "$(sha "$step/bin/wa")" = "$old_sha" ] || fail "the installed binary was replaced by an artifact that does not run"
 ok
 
-# A copy of the script without its lib cannot make the check, and refuses rather than installing blind.
+# A copy of the script with NO lib beside it is exactly the shape a node gets from `curl ... fleet-install.sh`,
+# and the floor check has to work there: the block travels inside the script. (Before this, that copy refused
+# every install with glibc_floor_lib_missing - a gate that was off precisely where it was needed.)
 mkdir -p "$WORK/lonely"
 cp "$FLEET" "$WORK/lonely/fleet-install.sh"
 out="$(WA_GLIBC_HOST=2.35 TARGET="$step/bin/wa" bash "$WORK/lonely/fleet-install.sh" "file://$step/art/wa-needs-2.39" 2>&1)"; rc=$?
-expect_status 1 "$rc" "fleet-install without scripts/lib/glibc-floor.sh"
-contains "$out" "glibc_floor_lib_missing:" "the missing lib is a named refusal"
-[ "$(sha "$step/bin/wa")" = "$old_sha" ] || fail "a fleet-install without its lib replaced the binary"
+expect_status 1 "$rc" "a standalone fleet-install.sh (no lib beside it) with a 2.39 artifact on a 2.35 host"
+contains "$out" "glibc_floor_exceeded:" "the standalone copy makes the floor check itself"
+contains "$out" "needs GLIBC_2.39" "and names the version the artifact needs"
+contains "$out" "has glibc 2.35" "and the version the host has"
+absent "$out" "glibc_floor_lib_missing" "it does not refuse for want of a lib it no longer needs"
+[ "$(sha "$step/bin/wa")" = "$old_sha" ] || fail "the standalone copy replaced the binary despite the refusal"
+ok
+# ...and the control: the same standalone copy lets a 2.31 artifact past the floor and stops at the exec test,
+# so the inline block is a check and not a blanket refusal.
+out="$(WA_GLIBC_HOST=2.35 TARGET="$step/bin/wa" bash "$WORK/lonely/fleet-install.sh" "file://$step/art/wa-needs-2.31" 2>&1)"; rc=$?
+absent "$out" "glibc_floor_exceeded" "the standalone copy does not refuse a 2.31 artifact on a 2.35 host"
+contains "$out" "artifact_does_not_run_here" "it reaches the exec test instead"
+[ "$(sha "$step/bin/wa")" = "$old_sha" ] || fail "the standalone copy replaced the binary with one that does not run"
 ok
 
 # ---- 4. scripts/upgrade.sh refuses the candidate before the proof and the backup -------------------
@@ -195,6 +218,65 @@ deploy_prove="$(line_of "$ROOT/scripts/deploy.sh" 'wa_phase proving')"
 ok
 [ "$deploy_guard" -lt "$deploy_prove" ] || fail "deploy.sh guards at line $deploy_guard, after the prove phase at $deploy_prove"
 ok
+# ...and before the deploy EXECUTES the candidate at all. The first line that runs $NEW is
+# "--capability-digest", and a binary built against a newer glibc dies there with "the binary being
+# installed cannot state its capability digest": a sentence about a broken artifact where the cause is a
+# host that is too old, and the one refusal an operator could act on is never said (review of a9b60cc9).
+deploy_exec="$(line_of "$ROOT/scripts/deploy.sh" '"$NEW" --')"
+deploy_digest="$(line_of "$ROOT/scripts/deploy.sh" 'cannot state its capability digest')"
+deploy_begin="$(line_of "$ROOT/scripts/deploy.sh" '# wa-deploy-glibc-guard: begin')"
+deploy_end="$(line_of "$ROOT/scripts/deploy.sh" '# wa-deploy-glibc-guard: end')"
+[ "$deploy_begin" -gt 0 ] && [ "$deploy_end" -gt "$deploy_begin" ] \
+  || fail "the glibc guard block is not marked in scripts/deploy.sh (begin=$deploy_begin, end=$deploy_end)"
+ok
+[ "$deploy_exec" -gt 0 ] || fail "scripts/deploy.sh never runs the candidate: there is no '"$NEW" --...' line"
+ok
+[ "$deploy_end" -lt "$deploy_exec" ] \
+  || fail "deploy.sh guards at $deploy_begin-$deploy_end but first RUNS the candidate at $deploy_exec (the --capability-digest line is at $deploy_digest), so a too-new binary is reported as a broken one instead of as glibc_floor_exceeded"
+ok
+# ...and the bytes it measures are the bytes this deploy would install: the guard is after all three
+# assignments of NEW/NEW_SENTINEL (Lua fast path, a published binary, a binary built here).
+for assign in 'NEW="$INSTALLED_BIN"' 'NEW="$BINARY_STAGE/wa"' 'fail "no built sentinel at $NEW_SENTINEL"'; do
+  assign_line="$(line_of "$ROOT/scripts/deploy.sh" "$assign")"
+  [ "$assign_line" -gt 0 ] || fail "scripts/deploy.sh no longer has the line: $assign"
+  [ "$deploy_begin" -gt "$assign_line" ] \
+    || fail "the guard begins at $deploy_begin, before NEW/NEW_SENTINEL are final at $assign_line ($assign)"
+  ok
+done
+# The block itself, read out of deploy.sh by its markers and RUN against fixtures - the seam
+# scripts/test-deploy-node-binaries.sh uses for the prebuilt branch. `fail`/`note` are the only names the
+# block uses besides the lib's own functions, so they are the only stubs.
+GUARD_BLOCK="$WORK/deploy-glibc-guard.sh"
+awk '/^# wa-deploy-glibc-guard: begin$/{on=1; next} on && /^# wa-deploy-glibc-guard: end$/{exit} on{print}' \
+  "$ROOT/scripts/deploy.sh" > "$GUARD_BLOCK"
+[ -s "$GUARD_BLOCK" ] || fail "could not read the glibc guard out of deploy.sh (its markers are gone)"
+ok
+guard_block_out=""
+guard_block_rc=0
+run_guard_block() { # <NEW> <NEW_SENTINEL> <host glibc> [<lib>]
+  guard_block_out="$(WA_GLIBC_HOST="$3" NEW="$1" NEW_SENTINEL="$2" bash -c '
+    [ -n "$1" ] && . "$1"
+    fail() { printf "deploy-refused: %s\n" "$*"; exit 9; }
+    note() { printf "deploy-note: %s\n" "$*"; }
+    . "$2"
+  ' _ "$4" "$GUARD_BLOCK" 2>&1)"
+  guard_block_rc=$?
+}
+run_guard_block "$step/art/wa-needs-2.39" "$step/art/wa-needs-2.31" 2.35 "$LIB"
+expect_status 9 "$guard_block_rc" "the deploy guard refuses a candidate needing GLIBC_2.39 on a 2.35 host"
+contains "$guard_block_out" "refused(glibc_floor_exceeded)" "deploy.sh's own block names the glibc refusal"
+contains "$guard_block_out" "needs GLIBC_2.39" "and the version the candidate needs"
+contains "$guard_block_out" "has glibc 2.35" "and the version the host has"
+absent "$guard_block_out" "capability digest" "NOT the digest error a too-new binary used to die on"
+run_guard_block "$step/art/wa-needs-2.31" "$step/art/wa-needs-2.31" 2.35 "$LIB"
+expect_status 0 "$guard_block_rc" "a candidate at 2.31 on a 2.35 host passes the deploy guard"
+absent "$guard_block_out" "glibc_floor_exceeded" "nothing is refused when the floor is satisfied"
+run_guard_block "$step/art/wa-needs-2.31" "$step/art/wa-needs-2.39" 2.35 "$LIB"
+expect_status 9 "$guard_block_rc" "the supervisor is guarded too (a sentinel that cannot start cannot roll back)"
+contains "$guard_block_out" "wa-needs-2.39" "the refusal names the supervisor"
+run_guard_block "$step/art/wa-needs-2.39" "$step/art/wa-needs-2.31" 2.35 ""
+expect_status 0 "$guard_block_rc" "a deploy with no lib beside it degrades to a note"
+contains "$guard_block_out" "deploy-note:" "the deploy says the floor was not measured instead of skipping silently"
 deploy_upgrade="$(line_of "$ROOT/scripts/deploy.sh" 'bash "$UPGRADE" "$CANDIDATE"')"
 [ "$deploy_guard" -lt "$deploy_upgrade" ] || fail "deploy.sh guards at $deploy_guard, after the upgrade.sh call at $deploy_upgrade"
 ok
@@ -223,13 +305,127 @@ ok
 grep -q 'wa_glibc_max_symbol' "$PUBLISH" || fail "scripts/publish-node-binaries.sh does not measure with wa_glibc_max_symbol"
 ok
 # One definition: no second copy of the scan in any script (the publisher and the three installers must
-# answer the same question about the same bytes, or the pin is a promise nobody checks).
+# answer the same question about the same bytes, or the pin is a promise nobody checks). The ONE copy
+# allowed is scripts/fleet-install.sh's, which travels inside that script because the script travels alone -
+# and it is not a second implementation: section 8 diffs the two blocks and fails on a differing byte.
 second="$(grep -rln "grep -a -o 'GLIBC_" "$ROOT/scripts" 2>/dev/null \
-  | grep -v 'scripts/lib/glibc-floor.sh' | grep -v 'scripts/test-glibc-floor.sh')"
+  | grep -v 'scripts/lib/glibc-floor.sh' | grep -v 'scripts/test-glibc-floor.sh' | grep -v 'scripts/fleet-install.sh')"
 [ -z "$second" ] || fail "a second copy of the glibc scan lives in: $second"
 ok
 out="$(bash "$PUBLISH" --glibc 2.3l --check 2>&1)"; rc=$?
 expect_status 2 "$rc" "a malformed --glibc floor"
 contains "$out" "glibc_floor_malformed:" "the malformed floor is a named refusal"
+
+# ---- 7. a host without a version sort: "unknown", not "refused" -----------------------------------
+# `sort -V` is GNU coreutils' version sort, and a glibc host can be without it in two ways - both stubbed
+# below. A busybox `sort` REJECTS the option, so every pipeline answers nothing and "nothing" read as "not
+# covered"; a `sort` that ignores the flag silently answers byte order, which puts 2.9 above 2.10. A third
+# shim answers the first two comparisons it is asked and then fails: the shape in which the scan succeeds
+# and the comparison does not, which is the guard's own "unknown" branch. None of the three may turn into
+# a refusal of a binary the host can run.
+mkdir -p "$WORK/nosortv/bin" "$WORK/flaky/bin"
+real_sort="$(command -v sort)"
+cat > "$WORK/nosortv/bin/sort" <<SHIM
+#!/bin/sh
+# A busybox `sort`: rejects -V.
+for a in "\$@"; do case \$a in *V*) echo "sort: unrecognized option: V" >&2; exit 1 ;; esac; done
+exec $real_sort "\$@"
+SHIM
+cat > "$WORK/flaky/bin/sort" <<SHIM
+#!/bin/sh
+# Answers with the real sort while its counter allows, then fails on -V.
+n=\$(( \$(cat "\$WA_TEST_SORT_COUNT" 2>/dev/null || echo 0) + 1 ))
+printf '%s\n' "\$n" > "\$WA_TEST_SORT_COUNT"
+[ "\$n" -le 2 ] && exec $real_sort "\$@"
+echo "sort: unrecognized option: V" >&2
+exit 1
+SHIM
+chmod +x "$WORK/nosortv/bin/sort" "$WORK/flaky/bin/sort" 2>/dev/null || true
+out="$(PATH="$WORK/nosortv/bin:$PATH" bash -c 'printf "2.35\n2.39\n" | sort -V' 2>&1)"; rc=$?
+expect_status 1 "$rc" "the shim really is a sort without -V"
+contains "$out" "unrecognized option" "and it fails the way busybox does"
+out="$(PATH="$WORK/nosortv/bin:$PATH" bash -c '. "$1"; wa_glibc_max_symbol "$2"' _ "$LIB" "$newer" 2>&1)"
+contains "$out" "glibc_floor_unknown:" "with no version order the measurement says so instead of answering nothing"
+grep -qF "GLIBC_2.39" <<< "$out" && fail "the measurement answered a floor it could not order: $out"
+ok
+PATH="$WORK/nosortv/bin:$PATH" bash -c '. "$1"; wa_glibc_covers 2.35 2.39' _ "$LIB" >/dev/null 2>&1
+expect_status 2 "$?" "without a version sort a comparison answers 2 (unknown), not 1 (not covered)"
+out="$(PATH="$WORK/nosortv/bin:$PATH" WA_GLIBC_HOST=2.35 bash -c '. "$1"; wa_glibc_guard "$2" wa' _ "$LIB" "$newer" 2>&1)"; rc=$?
+expect_status 0 "$rc" "a 2.39 artifact on a 2.35 host whose sort has no -V is ALLOWED, not refused"
+contains "$out" "glibc_floor_unknown:" "the unmeasurable check is said out loud"
+absent "$out" "glibc_floor_exceeded" "and it is not reported as exceeding the floor"
+# The same rule where the scan HAS answered and only the comparison fails: allow, with the reason, never a
+# refusal. A host refusing its own /bin/true off its own check is the shape of the bug this prevents.
+SORT_COUNT="$WORK/sort-count"; : > "$SORT_COUNT"
+out="$(PATH="$WORK/flaky/bin:$PATH" WA_TEST_SORT_COUNT="$SORT_COUNT" WA_GLIBC_HOST=2.35 bash -c '. "$1"; wa_glibc_guard "$2" wa' _ "$LIB" "$newer" 2>&1)"; rc=$?
+expect_status 0 "$rc" "a comparison that answers nothing while the scan answered is still an allow"
+contains "$out" "cannot compare the two" "the guard's own unknown branch names the reason"
+absent "$out" "glibc_floor_exceeded" "and refuses nothing"
+
+# ---- 8. one implementation: the copy inside fleet-install.sh IS the lib's block ---------------------
+# A copy that drifts is two behaviours with one name, and the whole point of this lib is that the publisher
+# and the three installers cannot disagree about the same bytes. The blocks are compared byte for byte, so
+# "one behaviour" is a text the test can read rather than an intention two files share.
+block_of() { awk '/^# wa-glibc-floor-begin$/{on=1} on{print} on && /^# wa-glibc-floor-end$/{exit}' "$1"; }
+block_of "$LIB" > "$WORK/block-lib"
+block_of "$FLEET" > "$WORK/block-fleet"
+[ -s "$WORK/block-lib" ] || fail "the lib carries no wa-glibc-floor block (its markers are gone)"
+ok
+[ -s "$WORK/block-fleet" ] || fail "scripts/fleet-install.sh carries no wa-glibc-floor block; a copy of the script without it cannot make the check"
+ok
+if ! diff -u "$WORK/block-lib" "$WORK/block-fleet" > "$WORK/block-diff" 2>&1; then
+  sed 's/^/  /' "$WORK/block-diff" >&2
+  fail "the fleet-install copy of the glibc floor drifted from the lib's block: one behaviour means one text"
+fi
+ok
+contains "$(cat "$WORK/block-lib")" "wa_glibc_guard()" "the shared block holds the guard itself"
+contains "$(cat "$WORK/block-lib")" "wa_glibc_max_symbol()" "and the measurement it guards with"
+[ "$(count_of "$LIB" "# wa-glibc-floor-begin")" = 1 ] || fail "the lib has more than one wa-glibc-floor block"
+ok
+
+# ---- 9. the scan against the ELF's own answer ------------------------------------------------------
+# The byte scan counts ANY `GLIBC_x.y` string in a file: a doc line, a comment, another binary's floor
+# embedded in the payload. It is a shortcut that happens to be right for every artifact this project has
+# built, and the way to keep it right is to compare it with the answer the loader itself reads -
+# `.gnu.version_r`, through `readelf -V` - on real linked binaries. A disagreement means either a payload
+# string (this scan would refuse a binary the fleet can run) or a scan bug, and both are wanted here and
+# not on mail.
+verneed_max() { # <file> -> the newest GLIBC version .gnu.version_r names
+  readelf -V "$1" 2>/dev/null | awk '
+    /Version needs section/ {on = 1; next}
+    /Version symbols section|Version definition section/ {on = 0}
+    on {print}
+  ' | grep -o 'GLIBC_[0-9][0-9.]*[0-9]' | sed 's/^GLIBC_//' | LC_ALL=C sort -uV | tail -1
+}
+scan_is_the_elf_answer() { # <file> <what>
+  local scan elf
+  scan="$(wa_glibc_max_symbol "$1")"
+  elf="$(verneed_max "$1")"
+  if [ -z "$elf" ] && [ -z "$scan" ]; then return 0; fi
+  [ -n "$elf" ] || fail "$2: readelf read no version needs from $1, so there is nothing to compare"
+  [ "$scan" = "$elf" ] \
+    || fail "$2: the byte scan says '$scan' and .gnu.version_r says '$elf' - a GLIBC_ string that no version need carries is being read as a floor"
+  ok
+}
+if command -v readelf >/dev/null 2>&1; then
+  checked_elfs=0
+  for candidate in /bin/true /bin/ls "$(command -v sort 2>/dev/null)"; do
+    [ -n "$candidate" ] && [ -f "$candidate" ] || continue
+    scan_is_the_elf_answer "$candidate" "the scan against .gnu.version_r of $candidate"
+    checked_elfs=$((checked_elfs + 1))
+  done
+  [ "$checked_elfs" -gt 0 ] || fail "no linked ELF on this host to compare the scan with"
+artifacts="${WA_GLIBC_ARTIFACT_DIR:-}"
+  if [ -n "$artifacts" ] && [ -d "$artifacts" ]; then
+    for artifact in "$artifacts"/wa "$artifacts"/wa-*; do
+      [ -f "$artifact" ] || continue
+      scan_is_the_elf_answer "$artifact" "the scan against .gnu.version_r of $(basename "$artifact")"
+    done
+  else
+    echo "scan against the ELF: BUILT ARTIFACTS SKIPPED (WA_GLIBC_ARTIFACT_DIR is not a directory - this is the case it earns the most: WA_GLIBC_ARTIFACT_DIR=<proof dir> bash scripts/test-glibc-floor.sh)"
+  fi
+else
+  echo "scan against the ELF: SKIPPED (no readelf here; binutils is what reads .gnu.version_r)"
+fi
 
 echo "glibc floor ok ($checks checks)"
