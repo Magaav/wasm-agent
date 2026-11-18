@@ -46,6 +46,13 @@ lost commits, newest first:
   <sha> the subject of the commit that would be lost
 ```
 
+A binary older than `--build-info` cannot answer, and the record is then the only evidence left - and the
+record can be a lie. MEASURED on this machine's own node and on `work`, 18/11: `installed.txt` said
+`commit=14963b6f sha256=4248d61b` while the bytes were `fc6a9d80`, and `14963b6f` IS an ancestor of main.
+So the fallback is checked against the bytes first: `wa_record_describes` compares the record's `sha256=` with
+the installed binary's, and a mismatch refuses as `downgrade_unprovable(record_not_this_binary)`, quoting both
+hashes. The override is the same `--force --reason`, and it records `ancestry_unverified=yes`.
+
 Three answers, and "cannot tell" is never treated as "no": refusing on your own ignorance blocks a first
 install. Unknown is recorded as `ancestry_unverified=yes`.
 

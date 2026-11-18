@@ -16,6 +16,17 @@ MEASURED 18/11 (the mission's premises, re-checked on the live nodes while doing
 That table is the whole argument for rule 1: a record written by the installing party was wrong on two of three
 nodes, and the previous guard compared the tree against that record.
 
+## A finding while seeding: the coordinator runs the same unlanded build
+
+`/home/victor/.local/bin/wa` on this node is sha256 `fc6a9d80` - the same bytes as `work` - and its
+`installed.txt` claims `commit=14963b6f`. So the 18/11 shape was not a peer's problem: the node that decides
+deploys could itself have been replaced by a deploy of main, because `14963b6f` is an ancestor of main and the old
+guard believed the record. That is why the guard now checks the record against the bytes (`wa_record_describes`,
+`downgrade_unprovable(record_not_this_binary)`): on this node a deploy of main would now refuse and ask for
+`--force --reason` instead of quietly removing the codeact build. No pin was seeded for avell (the mission named
+three nodes); the mechanism can record one with `wa update avell --pin --bytes fc6a9d80...` once the operator
+decides which way the coordinator should go.
+
 ## The five rules, and where each one lives
 
 1. **The binary answers for itself.** `rust/wa-host/build.rs` compiles in commit, tree, dirty and every ancestor;
@@ -59,7 +70,7 @@ transport.
 |---|---|---|
 | `scripts/test-build-info.sh` | 20 | 0 failed — fields, commit/tree/dirty against git, every `--contains` exit code, works with no HOME |
 | `scripts/test-install-record.sh` | 35 | 0 failed — writer, caller `commit=` dropped, dead/hanging binary, ancestry verdicts, a real `rollback-node.sh` restore, and the REAL binary's record equal to its own `--build-info` |
-| `scripts/test-deploy-ancestry.sh` | 19 | 0 failed — refusal with the lost commit's subject, `--force` without reason refused, `--force --reason` recorded in deploy.log, record-as-fallback |
+| `scripts/test-deploy-ancestry.sh` | 25 | 0 failed — refusal with the lost commit's subject, `--force` without reason refused, `--force --reason` recorded in deploy.log, record-as-fallback |
 | `scripts/test-publish-shared-commit.sh` | 15 | 0 failed — unpushed commit, pushed branch, detached HEAD both ways, named override, manifest fields |
 | `scripts/test-node-pins.sh` | 38 | 0 failed — store, supersede/history, overdue, clear-as-record, CLI `--pin`/`--unpin`, gate refusal, fleet view |
 | `scripts/test-fleetops.lua` (existing) | 147 | 0 failed |
