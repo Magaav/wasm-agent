@@ -446,7 +446,10 @@ impl<'a> Client<'a> {
                     Ok(reply) if reply.request_id == request_id => {
                         if reply.ok {
                             let inner_status = reply.status.unwrap_or(200);
-                            self.cache.record_success(&target.node_id, relay, now_ms);
+                            // The relay carried the call, so the peer is reachable - but the relay's URL is a
+                            // service, not one of the peer's direct addresses. Recorded as an address it was
+                            // dialled directly on the next call and failed `invalid port value` first.
+                            self.cache.record_relay_success(&target.node_id, now_ms);
                             Event::new("call", &caller.node_id, &target.node_id)
                                 .levels(Some(caller.level), Some(target.level))
                                 .verb(verb.as_str())

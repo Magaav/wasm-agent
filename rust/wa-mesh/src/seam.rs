@@ -340,9 +340,12 @@ pub fn addresses(cache: &PeerCache, node: &RosterNode) -> Vec<String> {
     if !enabled() || !routes("addresses") {
         return native();
     }
+    // What the cache learned, and only what can be dialled directly: a service URL is a transport (see
+    // `wa_mesh_core::cache`), and handing one across the seam would make a component that answers faithfully
+    // return a peer "address" no direct call can reach (`resolve_failed:invalid port value`).
     let learned: Vec<String> = cache
         .peer(&node.node_id)
-        .map(|entry| entry.addresses.clone())
+        .map(|entry| entry.addresses.iter().filter(|address| RosterNode::is_direct_address(address)).cloned().collect())
         .unwrap_or_default();
     let request = json!({"op": "addresses", "target": node_json(node), "learned": learned});
     routed(
@@ -350,9 +353,18 @@ pub fn addresses(cache: &PeerCache, node: &RosterNode) -> Vec<String> {
         request,
         native,
         |answer| {
+            // The component's answer is held to the same rule as the native one: an entry that is not a
+            // `host:port` is a service, and a service is never a peer's direct address.
             answer
                 .as_array()
-                .map(|items| items.iter().filter_map(|item| item.as_str().map(str::to_string)).collect())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| item.as_str())
+                        .filter(|address| RosterNode::is_direct_address(address))
+                        .map(str::to_string)
+                        .collect()
+                })
                 .unwrap_or_else(|| cache.addresses(node))
         },
         |_| None,
@@ -512,6 +524,49 @@ mod tests {
             attest_message("3f2a", "8c11", "read", "sessions", "ab12", 7),
             attest::message("3f2a", "8c11", "read", "sessions", "ab12", 7)
         );
+    }
+
+
+    /// The measured defect on `work` (2026-11-18): the peer cache held `avell`'s only address as the relay URL,
+    /// `https://rendezvous.colmeio.com` (recorded because a relayed call had succeeded), and every call to
+    /// `avell` began with a direct attempt that failed `resolve_failed:invalid port value`. A service is a
+    /// transport, so the seam hands out no address a direct call cannot reach - and a component cannot put one
+    /// back, because its answer is held to the same rule.
+    #[test]
+    fn a_service_url_in_the_peer_cache_is_never_handed_out_as_an_address() {
+        let _lock = crate::testkit::ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _env = crate::testkit::EnvGuard::set(&[("WA_MESH_COMPONENT", None)]);
+        let roster = roster_of(&fleet_key(), vec![node("laptop", 0, &[]), node("avell", 1, &[])]);
+        let avell = &roster.nodes[1];
+        // The file as it was measured, with the one address it named.
+        let text = json!({
+            "schema": wa_mesh_core::cache::CACHE_SCHEMA,
+            "saved_at_ms": 1_794_917_636_071u64,
+            "peers": { avell.node_id.clone(): {
+                "node_id": avell.node_id,
+                "name": "avell",
+                "level": 0,
+                "public_key": avell.public_key,
+                "addresses": ["https://rendezvous.colmeio.com"],
+                "source": "roster",
+                "last_ok_ms": 1_794_917_636_071u64,
+                "last_error": "resolve_failed:invalid port value",
+            }},
+        })
+        .to_string();
+        let cache = PeerCache::parse(&text).expect("the measured cache file parses");
+        assert_eq!(cache.peer(&avell.node_id).expect("the entry").addresses.len(), 1, "the file does hold it");
+        assert!(
+            addresses(&cache, avell).is_empty(),
+            "a service URL is not a direct address to try: {:?}",
+            addresses(&cache, avell)
+        );
+
+        // ...and a real direct address learned later still works, so the rule refuses the service and
+        // nothing else.
+        let mut cache = cache;
+        cache.record_success(&avell.node_id, "100.84.12.7:8799", 1_794_917_700_000);
+        assert_eq!(addresses(&cache, avell), vec!["100.84.12.7:8799".to_string()]);
     }
 
     /// A component that was asked for and is not installed is a *reported* fallback, not a silent one, and

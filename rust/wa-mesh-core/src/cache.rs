@@ -16,6 +16,14 @@
 //! roster's level and key over whatever the directory said - is here, because the `wa:mesh` guest
 //! answers it too (`addresses`). Reading and rewriting `peers.json` is the node's (`wa_mesh::cache`),
 //! and a component that is handed the addresses and the cached entry never sees a path.
+//!
+//! **Only a direct address is an address here.** A service URL - the rendezvous or relay a managed node
+//! reaches its fleet through, a binding's `state.service` - is a *transport*, not a peer: it is dialled
+//! through `wa_mesh::relay`, which resolves the URL itself. Stored as a peer's address it is dialled
+//! directly and fails `resolve_failed:invalid port value` before the relay is ever tried. Measured on
+//! `work` 2026-11-18: `avell`'s cached address was `https://rendezvous.colmeio.com`, the relay, because
+//! a relayed call had succeeded; every call to `avell` then began with a failed direct attempt. So
+//! `push_address` refuses what is not `host:port`, and `addresses` skips one an older file already holds.
 use crate::roster::{Roster, RosterNode};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -203,6 +211,16 @@ impl PeerCache {
     }
 
     /// An address that just worked is worth remembering in front of the others of its class.
+    /// A call that succeeded *through the relay*. The peer is reachable and that is worth remembering -
+    /// but the relay's URL is not one of its direct addresses, so nothing is added to `addresses`: it is the
+    /// transport that worked, and a direct attempt at it fails with `invalid port value`.
+    pub fn record_relay_success(&mut self, node_id: &str, now_ms: u64) {
+        if let Some(entry) = self.peers.get_mut(node_id) {
+            entry.last_ok_ms = now_ms;
+            entry.last_error.clear();
+        }
+    }
+
     pub fn record_success(&mut self, node_id: &str, address: &str, now_ms: u64) {
         if let Some(entry) = self.peers.get_mut(node_id) {
             entry.last_ok_ms = now_ms;
@@ -248,7 +266,9 @@ impl PeerCache {
             let mut cached: Vec<String> = entry
                 .addresses
                 .iter()
-                .filter(|address| !ordered.contains(address))
+                // A file written before this rule existed can hold a service URL; it is not an address to
+                // dial, so it is not returned here either. Nothing is deleted from the file by a read.
+                .filter(|address| !ordered.contains(address) && RosterNode::is_direct_address(address))
                 .cloned()
                 .collect();
             cached.sort_by_key(|address| RosterNode::address_rank(address));
@@ -274,6 +294,11 @@ impl PeerCache {
 fn push_address(entry: &mut CachedPeer, address: &str) {
     let address = address.trim();
     if address.is_empty() || entry.addresses.iter().any(|known| known == address) {
+        return;
+    }
+    // A service URL is a transport, never a peer's direct address (see the module header). Refused at the one
+    // door every writer uses - roster, rendezvous and a call that worked.
+    if !RosterNode::is_direct_address(address) {
         return;
     }
     if entry.addresses.len() >= MAX_CACHED_ADDRESSES {
@@ -338,6 +363,60 @@ mod tests {
         assert_eq!(peer.source, Source::Roster);
         // the address is still learned: it is a hint about where, not about who
         assert!(cache.addresses(&roster.nodes[0]).contains(&"6.6.6.6:8891".to_string()));
+    }
+
+    /// The measured defect (work, 2026-11-18): the relay's URL was stored as `avell`'s only address
+    /// because a relayed call had succeeded, and every direct call to it failed
+    /// `resolve_failed:invalid port value` first. A service is a transport, not an address: it is
+    /// refused at every door a writer uses, and one an older file already holds is not returned.
+    #[test]
+    fn a_service_url_is_never_a_peers_direct_address() {
+        let roster = roster();
+        let oracle = &roster.nodes[1];
+        let mut cache = PeerCache::empty();
+        cache.merge_roster(&roster, 1_762_000_000);
+
+        // Every writer, with the URL that was measured.
+        cache.record_success(&oracle.node_id, "https://rendezvous.colmeio.com", 1_762_000_100);
+        cache.merge_rendezvous(
+            &serde_json::json!({"nodes":[{"node_id": oracle.node_id, "endpoints": ["https://rendezvous.colmeio.com"]}]}),
+            1_762_000_100,
+        );
+        let entry = cache.peer(&oracle.node_id).expect("the roster put it there");
+        assert!(entry.addresses.is_empty(), "a service URL is not an address: {:?}", entry.addresses);
+        assert!(cache.addresses(oracle).is_empty());
+
+        // A relayed call did reach the peer; that fact is kept, and it keeps nothing dialable.
+        cache.record_relay_success(&oracle.node_id, 1_762_000_200);
+        let entry = cache.peer(&oracle.node_id).unwrap();
+        assert_eq!(entry.last_ok_ms, 1_762_000_200);
+        assert!(entry.addresses.is_empty(), "reaching a peer through the relay adds no direct address");
+
+        // The file an older build wrote: the URL is in it, and reading it must not hand that out to dial.
+        let poisoned = serde_json::json!({
+            "schema": CACHE_SCHEMA,
+            "saved_at_ms": 1_794_917_636_071u64,
+            "peers": { oracle.node_id.clone(): {
+                "node_id": oracle.node_id, "name": "avell", "level": 0,
+                "public_key": oracle.public_key,
+                "addresses": ["https://rendezvous.colmeio.com"],
+                "source": "roster", "last_ok_ms": 1_794_917_636_071u64,
+                "last_error": "resolve_failed:invalid port value",
+            }},
+        })
+        .to_string();
+        let loaded = PeerCache::parse(&poisoned).expect("the measured file still parses");
+        assert!(loaded.addresses(oracle).is_empty(), "an address this build would not store is not dialled either");
+    }
+
+    #[test]
+    fn the_direct_address_rule_is_the_one_the_roster_signs_with() {
+        for good in ["10.0.0.4:8891", "oracle.example.net:8891", "[fe80::1]:8891", "localhost:8799"] {
+            assert!(RosterNode::is_direct_address(good), "{good} is a direct address");
+        }
+        for bad in ["https://rendezvous.colmeio.com", "rendezvous.colmeio.com", "10.0.0.4", "10.0.0.4:", ":8891", "http://10.0.0.4:8891/x", ""] {
+            assert!(!RosterNode::is_direct_address(bad), "{bad} is not a direct address");
+        }
     }
 
     #[cfg(feature = "fs")]

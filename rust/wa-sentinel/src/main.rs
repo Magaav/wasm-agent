@@ -44,6 +44,10 @@ mod instance;
 // Observation of the request queue: status, progress and failure, kept where `status`, `/health` and the
 // window can read them. Dispatch never consults it.
 mod queue;
+// Observation of the protocol directories: one audit line per (id, problem) instead of one per tick, and a
+// directory that cannot be observed retired instead of asked forever. Measured on `work` 2026-11-18:
+// 523,067 `return-observation-problem` lines for 75 ids, all of them the same missing-file error.
+mod observation;
 
 // Who owns the watcher's role: the supervisor a deploy must not fight, and the one a kill switch must ask.
 // The decision is a pure function over facts about *the watcher* - the supervisor it was told about, its
@@ -108,6 +112,15 @@ mod quiet_launch_tests;
 mod intake_tests;
 #[cfg(test)]
 mod queue_tests;
+// Withdrawing a request: the operator's answer to a request that is held and no longer wanted, and the
+// refusal that keeps a claimed one running. A file of its own because it is about the queue's contract.
+#[cfg(test)]
+#[path = "withdraw_tests.rs"]
+mod withdraw_tests;
+// The return-observation lane: one line per (id, problem), then the directory leaves the lane.
+#[cfg(test)]
+#[path = "observation_tests.rs"]
+mod observation_tests;
 #[cfg(test)]
 mod publish_loop_tests;
 
@@ -140,7 +153,9 @@ pub(crate) fn sentinel_dir() -> PathBuf {
     // `claimed` too: a request is renamed into it before it is performed, and a missing directory
     // would make that rename fail - which, after the claim-before-work change, would mean no request
     // was ever processed at all. It is created here with the others so it cannot be forgotten.
-    for sub in ["requests", "done", "failed", "claimed"] {
+    // `withdrawn` is a lane of its own and not `done`: a request the operator took out of the queue never
+    // ran, and a later reader must not find it among the ones that settled with a result.
+    for sub in ["requests", "done", "failed", "claimed", "withdrawn"] {
         let _ = std::fs::create_dir_all(dir.join(sub));
     }
     dir
@@ -2023,6 +2038,74 @@ fn verb_recover(reason:&str)->Result<String> {
     Ok("node recovered; interrupted effects must be reconciled".into())
 }
 
+/// `request withdraw <id>`: take a request that has not started out of the queue, once, with one audit line.
+///
+/// The two halves of the rule, and why they are not the same:
+///
+///   * a **queued or held** request is withdrawn - renamed out of `requests/` into `withdrawn/`, so no later
+///     watcher tick can claim it. A held request is the one this exists for: it never fails and never runs
+///     until the node is idle, so an operator who no longer wants it had nothing to say but "stop the
+///     sentinel", which is not an answer;
+///   * a **claimed** request is refused by name. The watcher is performing it *now*: its effect may be half
+///     done, and a supervisor that drops an effect in flight is the exact failure class this process exists
+///     to prevent. The refusal says where the request is, and that its result will be reported.
+///
+/// It touches the queue and the two records that would otherwise outlive it (the observation row and, for a
+/// deploy that named a session, the outcome record the watchdog would later report as *silent*). Nothing is
+/// replayed, performed or deleted: the request file is kept, in a lane that says what happened to it.
+pub(crate) fn withdraw_request(id: &str, reason: &str) -> Result<String> {
+    let id = id.trim();
+    let id = id.strip_suffix(".json").unwrap_or(id);
+    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+        bail!("withdraw_request_id_invalid: {id:?} is not a request id; the id is the file name in {}/requests, and `wa-sentinel status` prints it; nothing was moved", sentinel_dir().display());
+    }
+    let queued=sentinel_dir().join("requests").join(format!("{id}.json"));
+    let withdrawn=sentinel_dir().join("withdrawn").join(format!("{id}.json"));
+    let request: Value;
+    {
+        // The same lock the claim takes: "is it still queued?" and the rename must be one decision, or a
+        // watcher ticking between the two answers makes this refuse a request it had already taken.
+        let _lock=queue_lock()?;
+        if sentinel_dir().join("claimed").join(format!("{id}.json")).exists() {
+            bail!("withdraw_refused_claimed: {id} is claimed - the watcher is performing it now, and a request in flight is never withdrawn or replayed; wait for its row in `wa-sentinel status` (it is reported in the queue section when it settles)");
+        }
+        if !queued.exists() {
+            for lane in ["done", "failed", "withdrawn"] {
+                if sentinel_dir().join(lane).join(format!("{id}.json")).exists() {
+                    bail!("withdraw_not_queued: {id} is already in {lane}/, so there is nothing in the queue to withdraw; nothing was moved");
+                }
+            }
+            bail!("withdraw_unknown_request: no request {id} is queued; nothing was moved and `wa-sentinel status` lists the ids that are");
+        }
+        if withdrawn.exists() {
+            bail!("withdraw_identity_collision: {} already exists, so this request cannot be moved without overwriting evidence; nothing was moved", withdrawn.display());
+        }
+        let bytes=std::fs::read(&queued).with_context(|| format!("read the request {}", queued.display()))?;
+        request=serde_json::from_slice(&bytes)
+            .with_context(|| format!("{id} in the queue is not a readable request file, so it is not withdrawn; nothing was moved"))?;
+        std::fs::rename(&queued,&withdrawn)
+            .with_context(|| format!("move {} out of the queue", queued.display()))?;
+    }
+    let verb=request["verb"].as_str().unwrap_or("(no verb recorded)").to_string();
+    clear_deferral(id);
+    let detail=format!("withdrawn before it ran ({reason})");
+    queue::observe(&request,id,"withdrawn","withdrawn",&detail);
+    // A deploy that named a session has a durable outcome record, and an unanswered one is reported *silent*
+    // by the watchdog an hour later. Withdrawing it settles that record, so the session hears the one thing it
+    // has to hear: the deploy it asked for was never started. Done outside the queue lock on purpose - settling
+    // writes the notice into the box, which takes the same lock.
+    let mut note=String::new();
+    if verb=="deploy" && request.get("expected_sha").is_none() {
+        match deploy_outcome::settle(id,"failure",&format!("withdrawn by the operator before the sentinel performed it: {reason}; nothing was installed")) {
+            Ok(true)=>note="; its session was told the deploy was withdrawn, not silently left pending".into(),
+            Ok(false)=>{},
+            Err(error)=>{audit("withdraw-outcome-failed",id,&format!("{error:#}"));note=format!("; the deploy outcome record could not be settled: {error:#}");}
+        }
+    }
+    audit("withdraw",id,reason);
+    Ok(format!("withdrawn {verb} {id}: moved to {}{note}; no watcher tick can claim it now",withdrawn.display()))
+}
+
 fn perform(request: &Value) -> Result<String> {
     if request.get("expected_sha").is_some() {
         deploy_protocol::validate(request,request["id"].as_str().unwrap_or(""))?;
@@ -2577,6 +2660,10 @@ fn print_request_help() {
     println!("  --file <path>                    the exported spell plan (spell)");
     println!("  --if-no-pending                  deploy only: write nothing when a deploy request is already queued");
     println!();
+    println!();
+    println!("  withdraw <id> [--reason <text>]  take a queued or held request out of the queue (a claimed one is refused:");
+    println!("                                   the watcher is performing it). `status` prints each waiting id.");
+    println!();
     println!("`upgrade` is retired: deploy is the only installer, and `request upgrade` is refused by name.");
     println!("Nothing is written for a verb this list does not name, and `request --help` writes nothing at all.");
 }
@@ -2599,6 +2686,31 @@ fn request(args: &[String]) -> Result<()> {
     // would hide the migration: the caller must know the replacement, not just that the word is gone.
     if verb == "upgrade" {
         bail!("upgrade_disabled_use_deploy: `upgrade` is retired; deploy is the only installer. Request deploy --expected-sha <full main SHA> --owner <owner> --session <session>");
+    }
+    // `withdraw` takes the *id* of a request that already exists, so it is parsed here and not by the
+    // drop-box parser below: it writes no request file, it moves one out of the queue. It is handled before
+    // the verb list because that list is "what may be written", and withdrawing writes nothing.
+    if verb == "withdraw" {
+        let mut id: Option<String> = None;
+        let mut reason = "no reason given".to_string();
+        let mut index = 1;
+        while index < args.len() {
+            if args[index] == "--reason" {
+                reason = args.get(index + 1).filter(|value| !value.starts_with("--"))
+                    .context("withdraw --reason needs a value; nothing was withdrawn")?.clone();
+                index += 2;
+                continue;
+            }
+            if args[index].starts_with("--") {
+                bail!("unknown withdraw option {}; nothing was withdrawn (the form is: request withdraw <id> [--reason TEXT])", args[index]);
+            }
+            if id.is_some() { bail!("withdraw takes one request id; nothing was withdrawn"); }
+            id = Some(args[index].clone());
+            index += 1;
+        }
+        let id = id.context("withdraw needs the id of the request: wa-sentinel request withdraw <id> [--reason TEXT] - the ids are the ones wa-sentinel status prints; nothing was withdrawn")?;
+        say(&withdraw_request(&id, &reason)?);
+        return Ok(());
     }
     // ... and neither is a verb this sentinel cannot perform. Refused HERE, by name, before any file
     // exists: a `failed` record is evidence about an effect that was attempted, and no effect is attempted
@@ -2964,6 +3076,9 @@ fn watch() -> Result<()> {
     say(&format!("watching: node on port {}, requests in {}", node_port(), sentinel_dir().join("requests").display()));
     say(&format!("stop it with: wa-sentinel stop   (or create {})", stop_path().display()));
     let mut held = Held::default();
+    // What the previous watcher already said about protocol directories it cannot observe, so this one does
+    // not say it again: the record is on disk, because a restart every minute must not repeat every line.
+    let mut observations = observation::Observations::load();
     let mut down_since: Option<Instant> = None;
     let mut announced = false;
     let mut triggers = TriggerState::default();
@@ -2999,16 +3114,9 @@ fn watch() -> Result<()> {
             }
         }
         if stop_path().exists() || service_stopping(){continue;}
-        if let Ok(entries)=std::fs::read_dir(sentinel_dir().join("deploy-protocol")) {
-            for entry in entries.flatten() {
-                if stop_path().exists() || service_stopping(){break;}
-                if entry.path().is_dir() {
-                    if let Some(id)=entry.file_name().to_str() {
-                        if let Err(error)=sentinel_return::observe(id) {audit("return-observation-problem",id,&error.to_string());}
-                    }
-                }
-            }
-        }
+        // The return-observation lane, once per tick: a directory is asked once per (id, problem) and a
+        // structural problem retires it, instead of the same sentence being written a thousand times an hour.
+        observations.pass();
         if stop_path().exists() || service_stopping(){continue;}
         check_triggers(&mut triggers);
         if stop_path().exists() || service_stopping(){continue;}
@@ -3252,6 +3360,9 @@ fn reap_children() {
 /// One request still waiting in the box, as `status` has to read it: what was asked, which commit it would
 /// install, and when it was queued. Facts only - reading it neither claims, performs nor retries it.
 pub(crate) struct Pending {
+    /// The request id: the file stem, and the name `request withdraw` takes. It is printed because a status
+    /// line that cannot name what it is about leaves the operator to guess which file to move.
+    pub(crate) id: String,
     pub(crate) verb: String,
     pub(crate) target: Option<String>,
     pub(crate) queued_at: Option<u64>,
@@ -3287,12 +3398,18 @@ pub(crate) fn pending_requests(dir: &Path) -> Vec<Pending> {
             let queued_stamp = path.file_stem().and_then(|stem| stem.to_str()).and_then(stamp_seconds);
             match std::fs::read(path).ok().and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok()) {
                 Some(request) => Some(Pending {
+                    id: path.file_stem().and_then(|stem| stem.to_str()).unwrap_or("").to_string(),
                     verb: request.get("verb").and_then(Value::as_str).unwrap_or("(no verb recorded)").to_string(),
                     target: recorded_target(&request),
                     queued_at: request.get("queued_at").and_then(Value::as_u64).or(queued_stamp),
                 }),
                 // A file the sentinel cannot read is still a fact about the queue, not an empty one.
-                None => Some(Pending { verb: "(unreadable request)".to_string(), target: None, queued_at: queued_stamp }),
+                None => Some(Pending {
+                    id: path.file_stem().and_then(|stem| stem.to_str()).unwrap_or("").to_string(),
+                    verb: "(unreadable request)".to_string(),
+                    target: None,
+                    queued_at: queued_stamp,
+                }),
             }
         })
         .collect()
@@ -3311,7 +3428,26 @@ pub(crate) fn hold_label(verb: &str, activity: Option<bool>, node_up: bool) -> S
     }
 }
 
-/// One line per waiting request: verb, target commit, queue time and why it is still there.
+/// What the operator can do about a request that has not run: the two actions that exist, named.
+///
+/// A held request used to be a fact with no verb attached - "held: node busy" told the operator what was
+/// wrong and never what to do, so the only way to drop a deploy that was no longer wanted was to stop the
+/// whole sentinel. Both halves are here: unblocking depends on *why* it is held (a busy node goes idle when
+/// the turn ends; anything else has its own cause), and withdrawing is the same command for every state the
+/// request is in before it is claimed.
+pub(crate) fn next_step(label: &str, id: &str) -> String {
+    let unblock = if label.starts_with("held: node busy") {
+        "end the turn (no further tool calls) so the node goes idle, and the next watcher tick runs it"
+    } else if label.starts_with("held:") {
+        "clear what holds it, and the next watcher tick runs it"
+    } else {
+        "nothing blocks it: the next watcher tick runs it"
+    };
+    format!("next: {unblock}; or withdraw it: wa-sentinel request withdraw {id}")
+}
+
+/// One line per waiting request: verb, target commit, queue time, why it is still there, and what can be done
+/// about it (the id, then unblock or withdraw).
 ///
 /// The count this replaces (`requests: 1 waiting`) made somebody read the log to learn what was queued and
 /// why it had not run. Every field here is either in the request file or computed by the same predicate the
@@ -3328,16 +3464,19 @@ pub(crate) fn pending_lines(dir: &Path, now: u64, activity: Option<bool>, node_u
                 Some(at) => format!("{} ({})", utc_stamp(at), age(now, at)),
                 None => "at an unrecorded time".to_string(),
             };
+            let label = hold_label(&pending.verb, activity, node_up);
             let mut line = format!(
                 "  waiting  {}  {}  queued {}  {}",
                 pending.verb,
                 target,
                 queued,
-                hold_label(&pending.verb, activity, node_up)
+                label
             );
             if !watching {
                 line.push_str("; no watcher is running, so nothing would perform it");
             }
+            // The action, on the same line as the reason: the operator reads one line and can act on it.
+            line.push_str(&format!("; {}", next_step(&label, &pending.id)));
             line
         })
         .collect()
@@ -3571,6 +3710,7 @@ const HELP: &str = r#"wa-sentinel - the process outside the node.
   request wake     --session ID --prompt TEXT [--reason TEXT]
   request run      --script PATH [--reason TEXT]
   request spell    --file PATH [--reason TEXT]
+  request withdraw <id> [--reason TEXT]  (queued or held only: a claimed request is refused by name)
   instance add <name> --port N --client-port N [--role master|guest] [--master ID]
                      [--home PATH] [--install-dir PATH] [--binary PATH] [--ui PATH]
                      [--share KEY=VALUE]...

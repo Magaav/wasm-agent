@@ -297,3 +297,227 @@ Node/shell checks: `node scripts/check-deploy-shipped.mjs` (179 checks), `node s
   would hide whatever it is meant to catch.
 - The full gate (`scripts/fast.sh`) was not run: it builds and runs the whole suite, which is beyond this
   review's scope, and every file touched here is covered by a row above.
+- Nothing was deployed, pushed or run against a real node: this branch only.
+
+# Items 6, 7, 8 — delivered (18/11, this node, with cargo)
+
+Base: branch `change/harness-fixes` 62c3c064, worktree `.../harness-fixes-rust/wt`, branch
+`change/harness-fixes-rust`. Everything below was built and tested **on this node** (avell, 16 cores) with
+`CARGO_TARGET_DIR=/home/victor/wasm-agent/target/mission`. Nothing was pushed; no real node state was touched
+by a test (every fixture uses a `mktemp -d` home, and `WASM_AGENT_PORT=1` where a probe would otherwise
+meet this machine's own node on 8799).
+
+```
+cd rust/wa-sentinel && cargo test                       # its own workspace
+cd rust && cargo test -p wa-mesh-core -p wa-mesh        # the mesh crates
+```
+
+## Results
+
+| # | test | before | after |
+|---|------|--------|-------|
+| 6 | `rust/wa-sentinel/src/withdraw_tests.rs` (5 tests) | `wa-sentinel request withdraw <id>` → `unknown request verb "withdraw"; no request was written`, rc 1, the request still in the box; `status` printed no id and no way out of a held request | `withdraw_tests`: 5 passed, 0 failed |
+| 7 | `rust/wa-sentinel/src/observation_tests.rs` (6 tests) | on `work`: **523,067** `return-observation-problem` lines for 75 ids over 7 days, every one `No such file or directory (os error 2)` | `observation_tests`: 6 passed, 0 failed; one line per (id, problem), the directory retired |
+| 8 | `wa-mesh-core/src/cache.rs` (2 tests) + `wa-mesh/src/seam.rs` (1 test) | `work`'s `mesh/peers.json`: `avell -> ["https://rendezvous.colmeio.com"]`, `source: "roster"`, `last_error: resolve_failed:invalid port value` | `wa-mesh-core`: 30 passed, 0 failed; `wa-mesh`: 74 passed, 2 failed (both fail identically on the untouched base) |
+
+### 6. `request withdraw <id>` — a queued or held request leaves the queue; a claimed one is refused by name
+
+`rust/wa-sentinel/src/main.rs` (`withdraw_request`, the `withdraw` branch of `request`, `next_step`,
+`pending_lines`, the `withdrawn` lane in `sentinel_dir`), `withdraw_tests.rs` (new),
+`publish_loop_tests.rs` (the status line it now prints).
+
+Before — the installed 16/11 `wa-sentinel` (the base behaviour) on a scratch home with one queued request:
+
+```
+$ wa-sentinel request withdraw 1700000000000000000-4242-00000000000000000000 --reason "no longer needed"
+  sentinel: unknown request verb "withdraw"; no request was written. The verbs are: restart, recover, wake, deploy, run, spell, stop
+rc=1
+--- the request is still in the box:
+1700000000000000000-4242-00000000000000000000.json
+--- and status says nothing about withdrawing it:
+  requests:  1 waiting, 0 done, 0 failed
+    waiting  restart  target: no commit recorded  queued 2023-11-14T22:13:20Z (1099d ago)  ready: the node is down, so there is nothing to interrupt; no watcher is running, so nothing would perform it
+```
+
+After — what the verb does, in the words the tests assert:
+
+* a **queued or held** request is renamed `requests/<id>.json` → `sentinel/withdrawn/<id>.json` (kept, not
+  deleted, byte-identical), the queue record says `state: "withdrawn"`, a pending deferral is cleared, and **one**
+  audit line `withdraw<TAB><id><TAB><reason>` is written; a second withdraw answers `withdraw_not_queued: <id> is
+  already in withdrawn/ …`; an id that names nothing `withdraw_unknown_request`; a malformed id
+  `withdraw_request_id_invalid`; two ids `withdraw takes one request id`;
+* a **claimed** request is refused by name, before anything moves: `withdraw_refused_claimed: <id> is claimed - the
+  watcher is performing it now, and a request in flight is never withdrawn or replayed …`;
+* a withdrawn **deploy** that named a session settles its durable outcome record (`deploy_outcome::settle`,
+  outcome `failure`, detail "withdrawn by the operator before the sentinel performed it …"), so the session is told
+  instead of the watchdog reporting the deploy *silent* an hour later —
+  `withdrawing_a_deploy_settles_its_outcome_instead_of_leaving_it_silent`;
+* `wa-sentinel status` now prints, for every waiting request, its **id** and both actions. Exact line (asserted
+  by equality in `publish_loop_tests::a_waiting_request_is_one_line_of_facts`):
+
+```
+  waiting  deploy  target commit 0123456789abcdef0123456789abcdef01234567  queued 2023-11-14T22:13:20Z (2m ago)  held: node busy; next: end the turn (no further tool calls) so the node goes idle, and the next watcher tick runs it; or withdraw it: wa-sentinel request withdraw 1700000000000000000-4242-00000000000000000000
+```
+
+and for a request nothing holds the same line adds
+`next: nothing blocks it: the next watcher tick runs it; or withdraw it: wa-sentinel request withdraw <id>`.
+
+The five tests: `a_queued_request_is_withdrawn_once_with_one_audit_line`,
+`a_claimed_request_is_refused_by_name_and_nothing_moves`,
+`status_names_the_unblock_and_the_withdraw_for_a_held_request`, `every_other_answer_is_refused_by_name`,
+`withdrawing_a_deploy_settles_its_outcome_instead_of_leaving_it_silent`.
+
+### 7. The observation log is one line per (id, problem), then the entry leaves the lane
+
+`rust/wa-sentinel/src/observation.rs` (new: the lane), `observation_tests.rs` (new), and the watcher
+loop in `main.rs`, which now calls `observations.pass()` instead of auditing `return-observation-problem`
+on every failed `sentinel_return::observe`.
+
+The measurement, re-read on `work` today (`sentinel.log`, `awk` over the audit lines):
+
+```
+total 523067
+distinct ids 75
+first 1794344077
+last  1794998822
+```
+
+and every one of the five directories the mission named is a **finished** deploy — a `result.json` saying
+`ok: true` (installed 2199eaff on 11/11) with no `intent.json`, `ack.json` or `binding.json` at all — so the
+observation could never succeed. The per-id poll backoff turned "every tick" into one line a minute per id,
+which is 108,000 lines a day across the 75 ids and never stops.
+
+The rule now, as a function (`observation::verdict`), tested without a watcher and without a clock:
+
+* a **new** (id, problem) → one audit line, and the clock starts; a **changed** problem is new information and is
+  said again; anything in between writes nothing at all (no repeat, no counter, no heartbeat);
+* the problem is named: `cannot be observed: missing binding.json, ack.json, intent.json` — not a bare
+  `No such file or directory (os error 2)`;
+* a **structural** problem (the files intake writes are missing) that survives a grace period
+  (`WASM_SENTINEL_OBSERVE_GRACE`, 300s by default) **retires** the directory: `deploy-protocol/<id>` →
+  `deploy-protocol-retired/<id>`, one `return-observation-retired` line, nothing deleted, and no later pass
+  observes it again. A **runtime** problem (`parent_owner_unavailable`, a disabled return hook) is retried and
+  **never** retired — retiring a live deploy's directory would throw its report away to make a log quieter;
+* what was said is kept on disk (`observation-problems.json`), because a watcher restarted every minute must not
+  re-report every stale directory every minute — the same defect at a lower rate. A directory that disappears is
+  forgotten, so a later request with that id does not inherit its silence.
+
+```
+running 6 tests
+test observation_tests::a_missing_file_is_reported_once_however_many_ticks_go_by ... ok
+test observation_tests::the_same_problem_past_the_grace_retires_the_directory ... ok
+test observation_tests::the_rule_is_one_line_per_id_and_problem ... ok
+test observation_tests::a_restarted_watcher_does_not_say_it_again ... ok
+test observation_tests::a_directory_that_is_gone_is_forgotten ... ok
+test observation_tests::a_runtime_problem_is_never_retired ... ok
+test result: ok. 6 passed; 0 failed
+```
+
+Against the measured fixture (a directory holding only `result.json`): 50 ticks → **1** line, naming the three
+missing files; with `WASM_SENTINEL_OBSERVE_GRACE=0` a second pass retires it, and 20 further passes write nothing.
+
+### 8. A binding's `state.service` is never a peer's direct address
+
+Cause, found by reading the node's own files: `rust/wa-mesh/src/client.rs` recorded the **relay** URL as the
+peer's address when a relayed call succeeded —
+
+```rust
+self.cache.record_success(&target.node_id, relay, now_ms);   // relay = the binding's state.service
+```
+
+— and the peer cache's `addresses` are dialled *directly* first, so every call to that peer began with
+`resolve_failed:invalid port value` before the relay carried it. On `work` today:
+
+```
+"999b87f068a92d132caf0a16ea094b84": {            # avell
+  "addresses": ["https://rendezvous.colmeio.com"],
+  "source": "roster",
+  "last_ok_ms": 1794917636071,
+  "last_error": "resolve_failed:invalid port value"
+}
+```
+
+The fix, in one rule with three doors:
+
+* `RosterNode::is_direct_address` (`wa-mesh-core/src/roster.rs`) — the same grammar the roster already refuses a
+  bad address with when it is signed and verified, now reachable by the cache: `host:port`, nothing with a
+  scheme, no bare host, port 1..=65535;
+* `wa-mesh-core/src/cache.rs`: `push_address` (the one door every writer uses — roster, rendezvous, "a call that
+  worked") refuses what is not a direct address, and `addresses()` skips one an **older** file already holds, so
+  the poisoned `peers.json` measured above is not dialled either (nothing is deleted from the file by a read);
+* `wa-mesh/src/client.rs`: a relayed success calls `record_relay_success` — it keeps the fact that the peer was
+  reachable (`last_ok_ms`, `last_error` cleared) and adds no address;
+* `wa-mesh/src/seam.rs`: `addresses` filters what it hands the `wa:mesh` component and what the component
+  returns, so a component that answers faithfully cannot put a service URL back.
+
+The tests — the first two at the rule, the third built from the measured file:
+
+```
+test cache::tests::a_service_url_is_never_a_peers_direct_address ... ok
+test cache::tests::the_direct_address_rule_is_the_one_the_roster_signs_with ... ok
+test seam::tests::a_service_url_in_the_peer_cache_is_never_handed_out_as_an_address ... ok
+test result: ok. 30 passed; 0 failed                (wa-mesh-core)
+test result: FAILED. 74 passed; 2 failed; 1 ignored (wa-mesh; the 2 are pre-existing, below)
+```
+
+## The suites, and the failures that were already there
+
+Measured on this node. The "base" column is the same command with my changes stashed (`git stash push -u`), so the
+comparison is the untouched 62c3c064 tree.
+
+| suite | base | with items 6-8 |
+|---|---|---|
+| `cargo test` (wa-sentinel) | 110 passed, **5 failed** | 121 passed, **5 failed** (3 full runs: 121/120/121 passed) |
+| `cargo test -p wa-mesh-core` | — | 30 passed, 0 failed |
+| `cargo test -p wa-mesh` | 77 total, the 2 below fail | 74 passed, **2 failed**, 1 ignored (77 tests) |
+
+The 5 wa-sentinel failures are identical in both columns:
+
+```
+deploy_outcome_tests::the_sentinel_spawns_waits_and_reports_a_deploy_end_to_end
+deploy_visibility_tests::a_failing_deploy_leaves_its_message_in_the_capture
+node_script_tests::javascript_requests_run_native_node_and_preflight_before_any_operation
+node_script_tests::job_run_prepare_and_pipeline_use_the_same_native_node_dispatch
+role_tests::the_watcher_records_its_own_owner_where_a_later_stop_reads_it
+```
+
+The 2 wa-mesh failures are identical on the base too (measured by stashing; `t has not been pushed a roster yet`,
+and the test relay answering `"unknown_caller"`):
+
+```
+tests_relay::a_caller_enabled_only_by_its_policy_reaches_the_roster_through_a_service_url
+tests_relay::the_roster_decides_on_the_relay_path_too_and_an_existing_operator_bootstraps_it
+```
+
+Two rows are flaky under a full parallel run and are **not** settled by me:
+`run_script_tests::run_script_interpreter_is_explicit_and_allowlist_precedes_it` and
+`reap_tests::a_killed_unreaped_child_is_not_alive`. Each failed in some runs with my changes and not in others, and
+`run_script` passes with `--test-threads=1`; they are timing-sensitive (an interpreter/allowlist window, a
+kill-and-reap window), they do not touch the code of items 6-8, and the base full run did not show them. I did not
+prove them innocent: the toolchain was gone before I could repeat the pair on the base.
+
+## What happened to the toolchain, and one thing that was not mine
+
+cargo was on PATH when the mission started (`cargo 1.100.0 (3acc79c0c 2026-11-05)`), and every number above was
+produced with it. At about 08:07 local (-03) it disappeared from the machine: `command -v cargo` answers nothing,
+`find / -name cargo` finds no toolchain, and neither `~/.rustup` nor `~/.cargo` exists. So the runs quoted here are
+the ones made while it was there; nothing was rebuilt afterwards.
+
+At 08:08:47 something **outside this session** ran `git stash push` in this worktree (a stash named
+`harness-fixes-rust WIP`), and a build in this tree at 08:09-08:12 replaced the test binaries with ones built from
+the stashed (pre-change) sources. I recovered the work with `git stash apply stash@{0}` and checked every changed
+file before committing; the diffs are the ones measured above. Anyone else using `.../harness-fixes-rust/wt` should
+know the tree was moved under it once.
+
+## What was not verified
+
+* The full `scripts/fast.sh` suite and the release gate: not run. They build the tree's `wa` with cargo, which is
+  gone. The mission asked for `cargo test -p <crate>` for the crates touched plus the fast suite; the crate suites
+  are quoted above, the fast suite is not.
+* Nothing was rebuilt, re-tested or re-measured after 08:07 (no toolchain), including the two flaky rows above.
+* Items 6 and 7 have no "fails on the base commit" *test run* to quote: their tests call a function and a module
+  that do not exist before the fix, so they would not compile there. The before behaviour is measured instead —
+  the installed 16/11 binary's refusal for item 6, and the live 523,067-line measurement on `work` for item 7.
+  Item 8's cache and seam tests do compile against the base and are red there (the service URL is returned as a
+  direct address, which is what the failing rows above and the measured file show).
+* Nothing was deployed or pushed: this branch only, committed locally.
