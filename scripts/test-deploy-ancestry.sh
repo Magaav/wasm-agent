@@ -217,7 +217,7 @@ deploy "$DIRTY" --reason "an ordinary deploy"
 shows "the refusal is by name" "$DEPLOY_OUT" "downgrade refused(dirty_running_binary)"
 same "the install record was not touched" "$(cat "$DIRTY/installed.txt")" "$DIRTY_BEFORE"
 deploy "$DIRTY" --force --reason "the uncommitted edits on that node are mine to lose"
-hides "with --force --reason it goes on" "$DEPLOY_OUT" "dirty_running_binary"
+hides "with --force --reason it goes on" "$DEPLOY_OUT" "downgrade refused(dirty_running_binary)"
 shows "...and the override is a record" "$(cat "$DIRTY/deploy.log" 2>/dev/null)" "running_dirty=true"
 
 echo "test-deploy-ancestry: every force is recorded, and a force without a reason is refused before any work"

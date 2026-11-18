@@ -286,27 +286,73 @@ if [ "$state" != current ] || [ "$check" = 1 ]; then
     fail "candidate_names_no_commit: wa --build-info answered nothing on this bundle's binary (a build older than the flag); a release this node cannot identify installs nothing"
   fi
   # A BUNDLE THAT DOES NOT CONTAIN WHAT IS RUNNING IS A DOWNGRADE. A release install has no checkout at all, so
-  # there is no git to ask: the candidate binary carries its own ancestry (`wa --contains`, compiled in by
+  # there is no git to ask: the candidate binary carries its own ancestry (wa --contains, compiled in by
   # rust/wa-host/build.rs), and that is the one witness available. Refused by name unless the operator says
   # --force --reason <text>, which is then recorded in installed.txt.
-  if [ "$check" != 1 ] && [ -x "$prefix/wa" ] && RUNNING_INFO="$(wa_build_info "$prefix/wa")"; then
-    RUNNING_COMMIT="$(wa_build_field "$RUNNING_INFO" commit)"
+  #
+  # WHAT IS RUNNING HERE IS ASKED THE SAME WAY ON EVERY PATH (wa_running_identity, scripts/lib/install-record.sh):
+  # the binary first, and the record only when the record is about THESE bytes. An earlier revision asked only
+  # the binary and let "it cannot say" through, so a node whose binary predates --build-info was replaced with
+  # no ancestry question at all - and "cannot tell" is refused now, not noted.
+  #
+  # The message below used to say "the sentinel's 'wa update <node> --rollback'" between DOUBLE quotes: in bash that
+  # is a command substitution, so a refusal on this path ran 'wa update <node> --rollback' as a command and put
+  # its output in the middle of the sentence. Quoted as a word now.
+  RUNNING_DIR="$(dirname -- "$prefix/wa")"
+  wa_running_identity "$RUNNING_DIR" || true
+  RUNNING_COMMIT="$WA_RUNNING_COMMIT"; RUNNING_SOURCE="$WA_RUNNING_SOURCE"
+  RUNNING_WHY="$WA_RUNNING_WHY"; RUNNING_DIRTY="$WA_RUNNING_DIRTY"
+  if [ -x "$prefix/wa" ] && [ -z "$WA_RUNNING_BIN" ]; then
+    RUNNING_COMMIT="$(wa_build_field "$(wa_build_info "$prefix/wa" 2>/dev/null)" commit)"
     [ "$RUNNING_COMMIT" = unknown ] && RUNNING_COMMIT=""
-    if [ -n "$RUNNING_COMMIT" ] && [ "$RUNNING_COMMIT" != "$candidate_commit" ]; then
-      wa_ancestry_verdict "" "$candidate_commit" "$RUNNING_COMMIT" "$bundle/wa"
-      case $? in
-        0) ANCESTRY_CHECKED=yes
-           say "ancestry ok: this bundle contains the running commit ${RUNNING_COMMIT:0:12}" ;;
-        1) if [ "$force" = 1 ] && [ -n "${reason:-}" ]; then
-             ANCESTRY_CHECKED=override
-             say "OVERRIDE, recorded: ${candidate_commit:0:12} does not contain running commit ${RUNNING_COMMIT:0:12}; going on because --force --reason says so"
-           else
-             fail "downgrade_refused: this bundle (${candidate_commit:0:12}) does not contain the RUNNING commit ${RUNNING_COMMIT:0:12}, so installing it would remove work that is running now (${WA_ANCESTRY_WHY:-reason unknown}). Nothing was installed. To go back on purpose use the sentinel's `wa update <node> --rollback` (it records a pin), or say --force --reason <text> and the override is recorded"
-           fi ;;
-        *) ANCESTRY_CHECKED=unknown
-           say "cannot tell whether this bundle goes backwards: ${WA_ANCESTRY_WHY:-unknown}; carrying on and recording ancestry_unverified=yes" ;;
-      esac
+    [ -n "$RUNNING_COMMIT" ] && RUNNING_SOURCE=binary
+  fi
+  ANCESTRY_CHECKED=unknown
+  if [ "$check" = 1 ]; then
+    say "check only: the ancestry question needs the install; on a real run this bundle would be checked against what $prefix runs (\${RUNNING_COMMIT:-nothing that names a commit})"
+  elif [ "$RUNNING_SOURCE" = record_mismatch ]; then
+    if [ "$force" = 1 ] && [ -n "${reason:-}" ]; then
+      ANCESTRY_CHECKED=override
+      say "OVERRIDE, recorded: the install record beside $prefix/wa is not these bytes (${RUNNING_WHY:-record mismatch}); going on because --force --reason says so"
+      say "force_requested reason=${reason:-} by=$(id -un 2>/dev/null || echo unknown) at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    else
+      fail "downgrade_unprovable(record_not_this_binary): $prefix/installed.txt names a sha256 that is not the running binary's, so the record says nothing about what this node runs (${RUNNING_WHY:-no detail}). Nothing was installed. Pass --force --reason <text> and the override is recorded."
     fi
+  elif [ "$RUNNING_DIRTY" = true ]; then
+    if [ "$force" = 1 ] && [ -n "${reason:-}" ]; then
+      ANCESTRY_CHECKED=override
+      say "OVERRIDE, recorded: the running binary reports dirty=true, so its bytes carry uncommitted work; going on because --force --reason says so"
+      say "force_requested reason=${reason:-} by=$(id -un 2>/dev/null || echo unknown) at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    else
+      fail "downgrade_refused(dirty_running_binary): the binary at $prefix/wa reports commit ${RUNNING_COMMIT:0:12} with dirty=true, so those bytes are a commit PLUS edits no commit contains - installing this bundle destroys them and no rollback brings them back. Nothing was installed. Commit them in that tree and rebuild, or say --force --reason <text> to lose them on purpose (recorded)."
+    fi
+  elif [ -z "$RUNNING_COMMIT" ]; then
+    # Nothing here names a commit and nothing claims to: a first install, which is not a downgrade.
+    say "nothing at $prefix/wa names a commit (${RUNNING_WHY:-no detail}) - a first install, not a downgrade"
+    ANCESTRY_CHECKED=first_install
+  elif [ "$RUNNING_COMMIT" != "$candidate_commit" ]; then
+    wa_ancestry_verdict "" "$candidate_commit" "$RUNNING_COMMIT" "$bundle/wa"
+    case $? in
+      0) ANCESTRY_CHECKED=yes
+         say "ancestry ok: this bundle contains the running commit ${RUNNING_COMMIT:0:12}" ;;
+      1) if [ "$force" = 1 ] && [ -n "${reason:-}" ]; then
+           ANCESTRY_CHECKED=override
+           say "OVERRIDE, recorded: ${candidate_commit:0:12} does not contain running commit ${RUNNING_COMMIT:0:12}; going on because --force --reason says so"
+           say "force_requested reason=${reason:-} by=$(id -un 2>/dev/null || echo unknown) at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+         else
+           fail "downgrade_refused: this bundle (${candidate_commit:0:12}) does not contain the RUNNING commit ${RUNNING_COMMIT:0:12}, so installing it would remove work that is running now (${WA_ANCESTRY_WHY:-reason unknown}). Nothing was installed. To go back on purpose use the sentinel's 'wa update <node> --rollback' (it records a pin), or say --force --reason <text> and the override is recorded"
+         fi ;;
+      *) if [ "$force" = 1 ] && [ -n "${reason:-}" ]; then
+           ANCESTRY_CHECKED=override
+           say "OVERRIDE, recorded: nothing could establish whether this bundle goes backwards (${WA_ANCESTRY_WHY:-unknown}); going on because --force --reason says so"
+           say "force_requested reason=${reason:-} by=$(id -un 2>/dev/null || echo unknown) at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+         else
+           fail "refused(ancestry_unknown): nothing can establish whether this bundle goes backwards: ${WA_ANCESTRY_WHY:-the verdict answered nothing}. Nothing was installed. Make it answerable (a bundle built by the current build.rs carries its own ancestry), or say --force --reason <text> and the override is recorded."
+         fi ;;
+    esac
+  else
+    ANCESTRY_CHECKED=yes
+    say "the bundle is the running commit (${RUNNING_COMMIT:0:12}): nothing to compare"
   fi
   say "verified: $(mval wa_version) - every member matches"
 fi

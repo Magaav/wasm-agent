@@ -630,7 +630,7 @@ else
         note "ancestry_override=$(printf '%s' "$REASON" | tr '\r\n' '  ') ancestry_replaced=$RUNNING_COMMIT ancestry_target=$COMMIT ancestry_by=$(id -un 2>/dev/null || echo unknown)"
         note "OVERRIDE, recorded: $COMMIT does not contain running commit $RUNNING_COMMIT; the deploy goes on because --force --reason says so"
       else
-        fail "downgrade refused(node_not_contained): the running binary is commit $RUNNING_COMMIT ($RUNNING_WHY; ${WA_ANCESTRY_LOST_COUNT:-?} commit(s) would be lost) and this tree $COMMIT does not contain it - replacing would remove work that is running now. Lost commits, newest first:
+        fail "downgrade refused(node_not_contained): the running binary is commit $RUNNING_COMMIT ($RUNNING_WHY; ${WA_ANCESTRY_LOST_COUNT:-?} commit(s) would be lost; ${WA_ANCESTRY_WHY:-no detail}) and this tree $COMMIT does not contain it - replacing would remove work that is running now. Lost commits, newest first:
 ${WA_ANCESTRY_LOST:-  (the lost commits could not be listed)}
 Nothing was built and nothing was installed. To go back on purpose use 'wa update <node> --rollback' (it restores the previous pair and records a pin), or pass --force --reason <text> to deploy this tree anyway (recorded in installed.txt)."
       fi ;;

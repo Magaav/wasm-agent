@@ -44,7 +44,7 @@ HEALTH=${HEALTH:-http://127.0.0.1:8799/health}
 # restarts the node on its own next check, and a boot measured 17/11 took ~80 s - a healthy artifact was
 # rolled back as dead (and the rollback then looked dead too).
 UNIT=${UNIT:-}
-FORCE=0; REASON=""
+FORCE=${FORCE:-0}; REASON=${REASON:-}
 # The record writer and the ancestry verdict (scripts/lib/install-record.sh): this script installs bytes it
 # did not build, so only the binary can say which commit they are (18/11: a record named a commit the bytes
 # were not).
@@ -299,23 +299,64 @@ if [ -z "$CANDIDATE_COMMIT" ]; then
 else
   say "artifact reports its own build: ${CANDIDATE_COMMIT:0:12} (tree ${CANDIDATE_TREE:0:12}, dirty $CANDIDATE_DIRTY)"
 fi
-RUNNING_COMMIT=""
-if [ -x "$TARGET" ] && RUNNING_INFO="$(wa_build_info "$TARGET")"; then
+# WHAT IS RUNNING HERE, asked of the binary first and of the record only when the record is about THESE bytes
+# (wa_running_identity, scripts/lib/install-record.sh). This script used to ask only the binary and treat "it
+# cannot say" as free passage, so a node whose binary predates --build-info was replaced with no ancestry
+# question at all, and a record naming another sha256 was never noticed.
+wa_running_identity "$(dirname "$TARGET")"
+RUNNING_COMMIT="$WA_RUNNING_COMMIT"; RUNNING_SOURCE="$WA_RUNNING_SOURCE"
+RUNNING_WHY="$WA_RUNNING_WHY"; RUNNING_DIRTY="$WA_RUNNING_DIRTY"
+if [ -z "$WA_RUNNING_BIN" ] && [ -x "$TARGET" ] && RUNNING_INFO="$(wa_build_info "$TARGET")"; then
   RUNNING_COMMIT="$(wa_build_field "$RUNNING_INFO" commit)"
   [ "$RUNNING_COMMIT" = unknown ] && RUNNING_COMMIT=""
+  RUNNING_DIRTY="$(wa_build_field "$RUNNING_INFO" dirty)"; [ -n "$RUNNING_DIRTY" ] || RUNNING_DIRTY=unknown
+  RUNNING_SOURCE="binary"; RUNNING_WHY="the running binary reports it"
 fi
+say "running here: ${RUNNING_COMMIT:-nothing that names a commit} (${RUNNING_SOURCE:-none}, dirty ${RUNNING_DIRTY})"
+FORCE_REASON=""
+[ "$FORCE" = 1 ] && FORCE_REASON="$REASON"
+force_needs_reason() { # <what this artifact would lose>
+  if [ "$FORCE" = 1 ] && [ -n "$FORCE_REASON" ]; then
+    ANCESTRY_STATE=override
+    say "OVERRIDE, recorded: $1; going on because --force --reason says so"
+    say "force_requested reason=$FORCE_REASON by=$(id -un 2>/dev/null || echo unknown) at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    return 0
+  fi
+  return 1
+}
 ANCESTRY_STATE=unknown
-if [ -n "$RUNNING_COMMIT" ] && [ -n "$CANDIDATE_COMMIT" ]; then
+if [ "$RUNNING_SOURCE" = record_mismatch ]; then
+  # The record beside the running binary names another sha256: its commit= says nothing about what is running.
+  if ! force_needs_reason "the install record is not these bytes"; then
+    die "downgrade_unprovable(record_not_this_binary): $(dirname "$TARGET")/installed.txt names a sha256 that is not the running binary's, so the record says nothing about what is installed here ($RUNNING_WHY). Nothing was replaced. Pass --force --reason <text> and the override is recorded in installed.txt."
+  fi
+elif [ "$RUNNING_DIRTY" = true ]; then
+  # Those bytes are a commit PLUS uncommitted edits: no commit anywhere contains them, and the ancestry
+  # question below cannot see them at all.
+  if ! force_needs_reason "the running binary reports dirty=true, so its bytes carry uncommitted work"; then
+    die "downgrade_refused(dirty_running_binary): the running binary reports commit ${RUNNING_COMMIT:0:12} with dirty=true, so those bytes are a commit PLUS edits no commit contains - installing this artifact destroys them and no rollback brings them back. Nothing was replaced. Commit them in that tree and rebuild, or pass --force --reason <text> to lose them on purpose (recorded)."
+  fi
+elif [ -z "$RUNNING_COMMIT" ]; then
+  # Nothing here names a commit and nothing claims to: a first install, which is not a downgrade. (A record
+  # naming another sha256 was refused above.)
+  say "nothing at $TARGET names a commit ($RUNNING_WHY) - a first install, not a downgrade"
+  ANCESTRY_STATE=first_install
+elif [ -z "$CANDIDATE_COMMIT" ]; then
+  # The artifact cannot say which commit it is, so nothing can be compared. Unknown refuses.
+  if ! force_needs_reason "the artifact cannot name its own commit, so it cannot be shown to contain what is running"; then
+    die "refused(ancestry_unknown): this artifact cannot report its own build (it predates --build-info), so nothing can show it contains the running commit $RUNNING_COMMIT. Nothing was replaced. Publish (or fetch) an artifact built with the current build.rs, or pass --force --reason <text> and the override is recorded."
+  fi
+else
   wa_ancestry_verdict "" "$CANDIDATE_COMMIT" "$RUNNING_COMMIT" "$tmp/wa"
   case $? in
-    0) ANCESTRY_STATE=yes ;;
-    1) if [ "$FORCE" = 1 ] && [ -n "$REASON" ]; then
-         ANCESTRY_STATE=override
-         say "OVERRIDE, recorded: ${CANDIDATE_COMMIT:0:12} does not contain running commit ${RUNNING_COMMIT:0:12}; going on because --force --reason says so"
-       else
+    0) ANCESTRY_STATE=yes
+       say "ancestry ok: this artifact contains the running commit ${RUNNING_COMMIT:0:12}" ;;
+    1) if ! force_needs_reason "this artifact does not contain the running commit ${RUNNING_COMMIT:0:12}"; then
          die "downgrade_refused: this artifact (${CANDIDATE_COMMIT:0:12}) does not contain the RUNNING commit ${RUNNING_COMMIT:0:12} (${WA_ANCESTRY_WHY:-reason unknown}) - installing it would remove work that is running now. Nothing was replaced. To go back on purpose: 'wa update <node> --rollback' (records a pin), or --force --reason <text>"
        fi ;;
-    *) say "cannot tell whether this artifact goes backwards: ${WA_ANCESTRY_WHY:-unknown}; carrying on and recording ancestry_unverified=yes" ;;
+    *) if ! force_needs_reason "nothing could establish whether this artifact goes backwards (${WA_ANCESTRY_WHY:-unknown})"; then
+         die "refused(ancestry_unknown): nothing can establish whether this artifact goes backwards: ${WA_ANCESTRY_WHY:-the verdict answered nothing}. Nothing was replaced. Make it answerable (an artifact built by the current build.rs carries its own ancestry), or pass --force --reason <text> and the override is recorded."
+       fi ;;
   esac
 fi
 

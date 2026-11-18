@@ -152,20 +152,35 @@ if [ -n "$SOURCE_ROOT" ]; then
   SOURCE_COMMIT="$(git -C "$SOURCE_ROOT" rev-parse HEAD 2>/dev/null || true)"
   if [ -z "${WA_SOURCE_UI_DIR:-}" ] && [ -d "$SOURCE_ROOT/ui" ]; then SOURCE_UI="$SOURCE_ROOT/ui"; fi
 fi
-# WHO SAYS WHAT IS INSTALLED: the installed binary, asked for its own build (`wa --build-info`, compiled in
+# WHO SAYS WHAT IS INSTALLED: the installed binary, asked for its own build (wa --build-info, compiled in
 # by rust/wa-host/build.rs). The record is only a fallback for an install older than that flag, and it is
 # named as a fallback. MEASURED 18/11: an installed.txt said commit=14963b6f for bytes built from 8 commits
 # that were on no landed branch - every check downstream compared against the record, so nothing noticed.
-PREVIOUS_COMMIT=""
-PREVIOUS_SOURCE="none"
-if [ -x "$INSTALLED" ] && PREVIOUS_INFO="$(wa_build_info "$INSTALLED")"; then
-  PREVIOUS_COMMIT="$(wa_build_field "$PREVIOUS_INFO" commit)"
-  [ "$PREVIOUS_COMMIT" = unknown ] && PREVIOUS_COMMIT=""
-  [ -n "$PREVIOUS_COMMIT" ] && PREVIOUS_SOURCE="binary"
-fi
-if [ -z "$PREVIOUS_COMMIT" ]; then
-  PREVIOUS_COMMIT="$(sed -n 's/^commit=//p' "$INSTALL_DIR/installed.txt" 2>/dev/null | head -1)"
-  [ -n "$PREVIOUS_COMMIT" ] && PREVIOUS_SOURCE="record"
+#
+# AND THE RECORD IS ONLY EVIDENCE WHEN IT IS ABOUT THESE BYTES (wa_record_describes). This script used to fall
+# back to installed.txt's commit= without asking, so on a node whose record named another sha256 the whole
+# ancestry check below compared the candidate against bytes that are not installed - the 18/11 shape with the
+# opposite sign. Now the answer is "nothing can say what is running", and the caller refuses.
+wa_running_identity "$INSTALL_DIR"
+PREVIOUS_COMMIT="$WA_RUNNING_COMMIT"
+PREVIOUS_SOURCE="$WA_RUNNING_SOURCE"
+PREVIOUS_WHY="$WA_RUNNING_WHY"
+PREVIOUS_DIRTY="$WA_RUNNING_DIRTY"
+pre_upgrade_refuse() { # <rule> <sentence>: refuse a move nobody can prove, unless the operator recorded a reason
+  if [ -n "${WA_UPGRADE_FORCE_REASON:-}" ]; then
+    UPGRADE_ANCESTRY_OVERRIDE="$WA_UPGRADE_FORCE_REASON"
+    say "OVERRIDE, recorded: $1; going on because WA_UPGRADE_FORCE_REASON says so"
+    say "force_requested rule=$1 reason=$WA_UPGRADE_FORCE_REASON by=$(id -un 2>/dev/null || echo unknown) at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    return 0
+  fi
+  say "refused($1): $2"
+  say "nothing was installed, and the running pair is untouched. To go back on purpose: 'wa update <node> --rollback' (restores the previous pair and records a pin), or set WA_UPGRADE_FORCE_REASON=<text> and the override is recorded in installed.txt"
+  exit 2
+}
+if [ "$PREVIOUS_SOURCE" = record_mismatch ]; then
+  pre_upgrade_refuse "record_not_this_binary" "the install record beside $INSTALLED is not about these bytes, so nothing can say what this node runs ($PREVIOUS_WHY)"
+elif [ "$PREVIOUS_DIRTY" = true ]; then
+  pre_upgrade_refuse "dirty_running_binary" "the running binary reports commit ${PREVIOUS_COMMIT:0:12} with dirty=true, so its bytes are a commit PLUS edits no commit contains - installing the candidate destroys them and no rollback brings them back"
 fi
 # The record as THIS script found it, captured once. `record_install` runs twice in one upgrade (after the
 # swap, and again as the last write), and the second call used to re-read the file it had just written - so
@@ -194,7 +209,9 @@ fi
 # lose. The verdict and the wording come from scripts/lib/install-record.sh, which is also what deploy.sh,
 # fleet-install.sh and bootstrap.sh ask - one rule, whichever script is replacing the node.
 if [ -n "$PREVIOUS_COMMIT" ] && [ "$PREVIOUS_COMMIT" != unknown ]; then
-  wa_ancestry_verdict "${SOURCE_ROOT:-}" "${SOURCE_COMMIT:-}" "$PREVIOUS_COMMIT" "${NEW:-$INSTALLED}"
+  # The 5th argument is the RUNNING binary: it can answer "does the running build already contain the target?"
+  # and that settles a running commit this checkout has never seen (the 18/11 shape).
+  wa_ancestry_verdict "${SOURCE_ROOT:-}" "${SOURCE_COMMIT:-}" "$PREVIOUS_COMMIT" "${NEW:-$INSTALLED}" "$INSTALLED"
   ANCESTRY=$?
   case "$ANCESTRY" in
     0) ;;
@@ -202,13 +219,17 @@ if [ -n "$PREVIOUS_COMMIT" ] && [ "$PREVIOUS_COMMIT" != unknown ]; then
       if [ -n "${WA_UPGRADE_FORCE_REASON:-}" ]; then
         UPGRADE_ANCESTRY_OVERRIDE="$WA_UPGRADE_FORCE_REASON"
         say "OVERRIDE, recorded: ${SOURCE_COMMIT:-the candidate} does not contain running commit ${PREVIOUS_COMMIT:0:12}; going on because WA_UPGRADE_FORCE_REASON says so"
+        say "force_requested rule=node_not_contained reason=$WA_UPGRADE_FORCE_REASON by=$(id -un 2>/dev/null || echo unknown) at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
       else
         say "refusing a candidate from ${SOURCE_COMMIT:-unknown}: it does not contain the RUNNING commit ${PREVIOUS_COMMIT} (${PREVIOUS_SOURCE} says so; ${WA_ANCESTRY_LOST_COUNT:-?} commit(s) would be lost)"
         printf '%s\n' "${WA_ANCESTRY_LOST:-  (the lost commits could not be listed)}" | sed 's/^/  lost: /'
         say "nothing was installed. To go back on purpose: 'wa update <node> --rollback' (restores the previous pair and records a pin), or set WA_UPGRADE_FORCE_REASON=<text> and the override is recorded"
         exit 2
       fi ;;
-    *) say "cannot tell whether this candidate goes backwards: ${WA_ANCESTRY_WHY:-unknown}; carrying on, and the record says ancestry_unverified=yes" ;;
+    *)
+      # UNKNOWN REFUSES. "Carrying on and recording ancestry_unverified=yes" was this script's answer to a
+      # verdict it could not reach, and that is the 18/11 hole in one line.
+      pre_upgrade_refuse "ancestry_unknown" "nothing can establish whether this candidate goes backwards: ${WA_ANCESTRY_WHY:-the verdict answered nothing} (running commit ${PREVIOUS_COMMIT:-unknown}, ${PREVIOUS_WHY:-source unknown})" ;;
   esac
 fi
 
