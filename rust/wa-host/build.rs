@@ -76,11 +76,16 @@ fn generate_build_info() {
     println!("cargo:rerun-if-env-changed=WA_BUILD_SOURCE_COMMIT");
     println!("cargo:rerun-if-env-changed=WA_BUILD_SOURCE_TREE");
 
-    let git = |arguments: &[&str]| -> Option<String> {
+    // A git run that SUCCEEDED, with its stdout trimmed - which may legitimately be empty. The distinction
+    // matters and was measured by scripts/test-build-info.sh: `git status --porcelain` on a CLEAN tree prints
+    // nothing, and reading "no output" as "the command failed" made every clean build report dirty=unknown.
+    let git_raw = |arguments: &[&str]| -> Option<String> {
         let output = Command::new("git").arg("-C").arg(&root).args(arguments).output().ok()?;
         if !output.status.success() { return None; }
-        let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if text.is_empty() { None } else { Some(text) }
+        Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    };
+    let git = |arguments: &[&str]| -> Option<String> {
+        git_raw(arguments).filter(|text| !text.is_empty())
     };
     // A hash is only a hash: 40 or 64 lowercase hex, and nothing else may reach a record whose checks
     // compare it.
@@ -100,7 +105,7 @@ fn generate_build_info() {
         .unwrap_or_default();
     // Dirtiness is a fact about the tree this build read, and "unknown" when it cannot be established: a
     // build with no git and no stamp must not claim to be a clean build of anything.
-    let dirty = match git(&["status", "--porcelain", "--untracked-files=no"]) {
+    let dirty = match git_raw(&["status", "--porcelain", "--untracked-files=no"]) {
         Some(changes) => if changes.is_empty() { "false" } else { "true" },
         None => "unknown",
     };
