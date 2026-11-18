@@ -18,13 +18,13 @@ UNKNOWN REFUSES (fail closed) unless `--force --reason`, on every path, with the
 | 4 | `--force` without `--reason` | refused at the parser in `deploy.sh`; refused by the pin gate in `remote_update.lua`/`update.lua`; every force recorded (who, when, why, what it overrode) | `test-deploy-ancestry.sh`, `test-node-pins.sh`, `test-remote-update.lua` |
 | 5 | pins blocked their own fix | release when the target CONTAINS the awaited commit (with a tree, not `''`); release written as a record; a rollback records `rolled_back_from` and defaults `await` to it; `--unpin` named in the answer | `test-node-pins.sh`, `test-remote-update.lua` |
 | 6 | the pin lived only in the coordinator | the node writes its own pin on a rollback (`node_id` too); `scripts/lib/node-pins.sh` read by upgrade/fleet-install/bootstrap; `pins.active(name, node_id)` resolves aliases | `test-remote-update.lua`, `test-node-pins.sh`, `test-install-guards.sh` |
-| 7 | a stale local `refs/remotes/*` counted as published | `scripts/lib/shared-commit.sh` asks the REMOTE (`git ls-remote`); used by publish-node-binaries, publish-components, deploy.sh, ship-wave.mjs, codemode-build.mjs, fast-binary.sh | `test-publish-shared-commit.sh` (real bare remote; the stale-ref case) |
+| 7 | a stale local `refs/remotes/*` counted as published | `scripts/lib/shared-commit.sh` asks the REMOTE (`git ls-remote`); used by publish-node-binaries, publish-components, deploy.sh (before the build), ship-wave.mjs, codemode-build.mjs, fast-binary.sh | `test-publish-shared-commit.sh` (real bare remote; the stale-ref case), `test-deploy-ancestry.sh` (the deploy refuses an unshared tree, then accepts a recorded force) |
 | 8 | a `dirty=true` running binary was replaceable | `downgrade refused(dirty_running_binary)`, and `dirty=unknown` refuses as `ancestry_unknown` | `test-deploy-ancestry.sh`, `test-install-guards.sh` |
 | 9 | backticks inside a double-quoted message | single-quoted; a check for the shape in every installer | `test-install-guards.sh` |
 
-## Verified at the final commit
+## Verified at c84d0498 (a clean rebuild of `wa` from that commit, then the battery)
 
-`test-install-record` 56/0, `test-deploy-ancestry` 51/0, `test-install-guards` 44/0, `test-node-pins` 56/0,
+`test-install-record` 56/0, `test-deploy-ancestry` 58/0, `test-install-guards` 44/0, `test-node-pins` 56/0,
 `test-publish-shared-commit` 33/0, `test-build-info` 24/0, `test-ship-wave` 14/0, `test-wave-ship` 21/0,
 `check-deploy-shipped` 179 ok, `check-deploy-docs` 6 ok, `cargo test -p wa-host build_info` 4 passed,
 `test-remote-update.lua` 75 ok, `test-fleetops.lua` 147/0, `test-update-all/-banner/-release/-watcher` 43/227/16/45 ok.

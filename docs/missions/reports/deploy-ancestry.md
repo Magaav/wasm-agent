@@ -223,7 +223,10 @@ refusing" below).
 Test: `scripts/test-publish-shared-commit.sh` now uses a real bare remote and real pushes, and asserts the exact
 hole: a local `refs/remotes/origin/main` naming a commit the remote does not have is **not** an answer (verdict 1,
 and the publisher still refuses), containment through a pushed head, a detached HEAD both ways, and an
-unanswerable remote refusing.
+unanswerable remote refusing. `test-deploy-ancestry.sh` adds the deploy path: a clone whose `origin` has no branch
+containing its HEAD is refused `refused(commit_not_on_pushed_branch)` ("no branch contains it", "Nothing was built
+and nothing was installed") with nothing installed, and `--force --reason` goes on and records
+`commit_not_on_pushed_branch accepted with --force --reason`.
 
 **8. A dirty running binary refuses.** `deploy.sh` and the other three paths refuse
 `downgrade refused(dirty_running_binary)` when the running binary reports `dirty=true`, and
@@ -237,10 +240,12 @@ it is single-quoted now, and `test-install-guards.sh` checks every installer for
 
 ## Verified (commands run, results read back)
 
+Run at commit c84d0498, on this node, after a clean rebuild of `wa` from that commit (the binary reports it).
+
 | test | result |
 |---|---|
 | `scripts/test-install-record.sh` | 56 checks, 0 failed |
-| `scripts/test-deploy-ancestry.sh` | 51 checks, 0 failed |
+| `scripts/test-deploy-ancestry.sh` | 58 checks, 0 failed |
 | `scripts/test-install-guards.sh` (new) | 44 checks, 0 failed |
 | `scripts/test-node-pins.sh` | 56 checks, 0 failed |
 | `scripts/test-publish-shared-commit.sh` (rewritten) | 33 checks, 0 failed |
@@ -284,9 +289,9 @@ ready receipt for an unshared commit.
   its restart/recovery against a REAL systemd unit was not, and its `pkill` is shadowed in the test.
 - A DEEP (non-shallow) build reporting `ancestors_complete=true` was not observed here: this worktree is a shallow
   clone, so the shallow case is the one that ran. The rule is asserted in both directions (field and verdict agree).
-- `deploy.sh`'s new `commit_not_on_pushed_branch` precondition was exercised on unlanded trees (it refuses) and by
-  the deploy test's fixtures (whose `origin` is this worktree, so their commit IS shared there); it was not run
-  against a real push in this round.
+- `deploy.sh`'s `commit_not_on_pushed_branch` precondition was exercised in both directions on a fixture whose
+  `origin` is a bare repository with no matching branch (refused, then accepted with `--force --reason`); it was
+  not exercised against this project's real remote.
 - `source_shared=` is only ever `unknown` in the binaries built here (nothing stamps it except
   `lib/fast-binary.sh`), so no install path refuses on it yet; no rule reads it.
 - The exit-path of the release (`kind=released`) was verified by the store's own test, not by a live deploy that
