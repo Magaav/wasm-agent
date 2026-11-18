@@ -76,61 +76,260 @@ M.RUNTIME={'mcp-client.mjs','mcp-client-core.mjs','mcp-server-core.mjs','mcp-ses
  'mcp-mail.mjs','web-core.mjs','web-http-outcomes.mjs'}
 -- ---- what an approval IS, and what the kernel re-checks before it hands a value over ------------
 --
--- The approval a connector that names a vault entry carries is a DIGEST over what its launch is: the
--- program, its arguments, every script file it runs and the environment names it asks for
--- (docs/VAULT.md, 18/11). Until it existed the approval was one boolean in memory.db, while the
--- scripts it runs live in a directory the agent can write - so an approved connector's script could be
--- replaced afterwards and the vault value handed to the new code. The digest is recomputed twice: here,
--- when a call is decided on (a change since the operator approved it refuses `mcp_vault_approval_stale`),
--- and again in rust/wa-capabilities/src/operations.rs, from the bytes on disk, immediately before a
--- value is read. Editing a script or an argument after the approval therefore voids it.
+-- The approval a connector that names a vault entry carries is a DIGEST over what its launch is
+-- (docs/VAULT.md, 18/11): the program, the directory it runs in, the plain environment it asks for, its
+-- arguments in order, every FILE it can run or load, and the vault names it asks for. Until it existed
+-- the approval was one boolean in memory.db, while the scripts it runs live in a directory the agent can
+-- write - so an approved connector's script could be replaced afterwards and the value handed to the new
+-- code. The digest is recomputed twice: here, when a call is decided on (a change since the operator
+-- approved it refuses `mcp_vault_approval_stale`), and again in
+-- rust/wa-capabilities/src/operations.rs, from the bytes on disk, immediately before a value is read.
+-- Editing a script, an argument, the cwd or the environment it asks for therefore voids the approval.
 --
 -- ONE canonical text, shared with the Rust side (`approval_text`): one form, two implementations, and
 -- each side's test pins the same fixture digest (scripts/test-mcp-vault-approval.lua). Every field is
 -- percent-escaped, so a newline, a space or a tab inside an argument cannot forge a line of it.
+--
+-- v2 (this round) added the cwd and the plain (non-vault) environment, and replaced "every absolute
+-- argument with a script extension" with the CLOSURE of the code the connector can load (M.vault_manifest
+-- below): a relative script, an extensionless program, a package runner and an imported module were each
+-- a way to run bytes the digest never named. A connector whose code cannot be closed this way is REFUSED
+-- rather than approved with a digest that only looks complete.
+M.APPROVAL_FORM='mcp-vault-approval/v2'
+-- Bounds: an approval is re-read before every call, and a connector that needs more than this is one
+-- whose coverage cannot be proven cheaply, so it is refused by name instead.
+M.MAX_FILES=2048
+M.MAX_FILE_BYTES=16*1024*1024
+M.MAX_TOTAL_BYTES=64*1024*1024
 local function approval_field(text)
  return (tostring(text):gsub('[^%w%._~/:@+,=%-]', function(ch) return string.format('%%%02X', ch:byte()) end))
 end
 function M.vault_approval_text(manifest)
  manifest=type(manifest)=='table' and manifest or {}
- local lines={'mcp-vault-approval/v1','program '..approval_field(manifest.program or '')}
+ local lines={M.APPROVAL_FORM,'program '..approval_field(manifest.program or ''),
+  'cwd '..approval_field(manifest.cwd or '')}
+ -- Sorted by name, so the digest says the same thing whatever order the caller built the list in.
+ local ordered={}
+ for _,entry in ipairs(manifest.env or {})do ordered[#ordered+1]=entry end
+ table.sort(ordered,function(a,b)return tostring(a.name or '')<tostring(b.name or '') end)
+ for _,entry in ipairs(ordered)do
+  lines[#lines+1]='env '..approval_field(tostring(entry.name or '')..'='..tostring(entry.ref or ''))
+ end
  for _,arg in ipairs(manifest.args or {})do lines[#lines+1]='arg '..approval_field(arg) end
  for _,file in ipairs(manifest.files or {})do lines[#lines+1]='file '..approval_field(file.path)..' '..tostring(file.sha256 or ''):lower() end
  for _,name in ipairs(manifest.vault or {})do lines[#lines+1]='vault '..approval_field(name) end
  return table.concat(lines,'\n')..'\n'
 end
--- The script files a connector runs: this node's MCP runtime (the client it launches and everything that
--- client can import) plus every script its own definition names. A program binary is covered only when
--- it IS a script: /usr/bin/node is the platform's, not the connector's.
+-- ---- the code a connector can load, and the forms whose coverage cannot be proven ----------------
+--
+-- What is hashed is decided by what a launch can RUN, not by a name's extension:
+--
+--   * the program, unless it lives under a platform root (/usr/bin, /bin, /nix/store...): /usr/bin/node
+--     is the interpreter the connector runs ON, replaced by a package manager and not by the agent; a
+--     program anywhere else - ~/bin/conn, <install>/bin/mail-mcp - is the connector's own code and is
+--     hashed whether it is a script, a binary or has no extension at all;
+--   * every argument that is a path and exists as a file (so --config /etc/conn.json is covered, and a
+--     relative ./conn.mjs, which node resolves from the cwd, is REFUSED rather than silently skipped);
+--   * everything those files can load in turn: a JS import/require of a local path, a shell source/'.'.
+--     A bare package name (node_modules), a package runner (npx, uvx, bunx...) and an import whose name is
+--     computed are code this digest cannot name, so a connector that needs them is refused.
 local SCRIPT_EXT={mjs=true,cjs=true,js=true,lua=true,sh=true,bash=true,py=true,rb=true,pl=true,ps1=true,bat=true}
-local function script_file(path)
- if type(path)~='string' or path=='' then return false end
- if not (path:sub(1,1)=='/' or path:match('^%a:[/\\]')) then return false end
- local ext=path:match('%.([%w]+)$')
+local JS_EXT={mjs=true,cjs=true,js=true}
+local SHELL_EXT={sh=true,bash=true}
+-- Where the platform's own programs live. A program under one of these is not the connector's code.
+local PLATFORM_ROOTS={'/bin/','/sbin/','/usr/bin/','/usr/sbin/','/usr/lib/','/usr/lib64/','/usr/libexec/',
+ '/lib/','/lib64/','/usr/local/bin/','/usr/local/sbin/','/opt/homebrew/','/nix/store/','/snap/','/System/'}
+-- Programs whose code comes from somewhere this digest cannot see: a package cache or a registry.
+local PACKAGE_RUNNERS={npx=true,uvx=true,bunx=true,pipx=true,npm=true,pnpm=true,yarn=true,corepack=true}
+-- Node's own modules: a bare name that is one of these is the platform, not node_modules.
+local BUILTIN={assert=true,async_hooks=true,buffer=true,child_process=true,cluster=true,console=true,
+ constants=true,crypto=true,dgram=true,diagnostics_channel=true,dns=true,domain=true,events=true,
+ fs=true,http=true,http2=true,https=true,inspector=true,module=true,net=true,os=true,path=true,
+ perf_hooks=true,process=true,punycode=true,querystring=true,readline=true,repl=true,stream=true,
+ string_decoder=true,sys=true,timers=true,tls=true,trace_events=true,tty=true,url=true,util=true,
+ v8=true,vm=true,wasi=true,worker_threads=true,zlib=true}
+local function absolute_path(value)
+ return type(value)=='string' and (value:sub(1,1)=='/' or value:match('^%a:[/\\]')~=nil)
+end
+local function normalize(path)
+ path=tostring(path or ''):gsub('\\','/')
+ local drive=path:match('^(%a:)/')
+ if drive then path=path:sub(#drive+1) end
+ local absolute=path:sub(1,1)=='/'
+ local parts={}
+ for part in path:gmatch('[^/]+')do
+  if part=='.' then
+  elseif part=='..' then
+   if #parts>0 and parts[#parts]~='..' then table.remove(parts) elseif not absolute then parts[#parts+1]='..' end
+  else parts[#parts+1]=part end
+ end
+ local joined=table.concat(parts,'/')
+ if drive then return drive..'/'..joined end
+ return (absolute and '/' or '')..joined
+end
+local function dirname(path)return (tostring(path):match('^(.*)/[^/]*$')) or '' end
+local function basename(path)return (tostring(path):gsub('\\','/'):match('([^/]+)$')) or tostring(path) end
+local function platform_root(path)
+ local value=(normalize(path)..'/'):gsub('^%a:/','/')
+ for _,root in ipairs(PLATFORM_ROOTS)do if value:sub(1,#root)==root then return true end end
+ return false
+end
+-- A path-shaped argument is one the launch could read: it has a separator, or it carries a known script
+-- extension (`conn.mjs`, resolved from the cwd). A URL is data, never a local path.
+local function looks_like_path(value)
+ if type(value)~='string' or value=='' then return false end
+ if value:match('^%a[%w+.%-]*://') then return false end
+ if value:find('[/\\]') then return true end
+ local ext=value:match('%.([%w]+)$')
  return ext~=nil and SCRIPT_EXT[ext:lower()]==true
 end
--- The manifest an approval records, and the one a launch is checked against: paths in a stable order,
--- each file's sha256 as it is NOW, the arguments in order, the vault names sorted.
+local function platform_module(spec)
+ if spec:sub(1,5)=='node:' then return true end
+ return spec:match('^[%w_%-]+$')~=nil and BUILTIN[spec]==true
+end
+-- Which scanner a file needs: the extension, or the shebang when it has none (a program named `conn`
+-- with #!/usr/bin/env node is JavaScript, and it is followed as such).
+local function language(path,content)
+ local ext=(tostring(path):match('%.([%w]+)$') or ''):lower()
+ if ext=='' and type(content)=='string' and content:sub(1,2)=='#!' then
+  local line=(content:match('^#!([^\n]*)') or ''):lower()
+  if line:find('node') then return 'js' end
+  if line:find('bash') or line:find('/sh') or line:find('%f[%w]sh%f[%W]') then return 'sh' end
+  return 'other'
+ end
+ if JS_EXT[ext] then return 'js' end
+ if SHELL_EXT[ext] then return 'sh' end
+ if ext=='' then return 'binary' end
+ if SCRIPT_EXT[ext] then return 'other' end
+ return 'data'
+end
+-- The names a script loads, as this digest can follow them. Anything else is named as a problem: a name
+-- this cannot resolve is a file this approval cannot cover.
+local function module_refs(kind,content)
+ local refs={}
+ if kind=='js' then
+  for spec in content:gmatch('from%s*[\'\"]([^\'\"]+)[\'\"]')do refs[#refs+1]=spec end
+  for spec in content:gmatch('import%s*[\'\"]([^\'\"]+)[\'\"]')do refs[#refs+1]=spec end
+  for spec in content:gmatch('import%s*%(%s*[\'\"]([^\'\"]+)[\'\"]%s*%)')do refs[#refs+1]=spec end
+  for spec in content:gmatch('require%s*%(%s*[\'\"]([^\'\"]+)[\'\"]%s*%)')do refs[#refs+1]=spec end
+ elseif kind=='sh' then
+  for target in content:gmatch('[%s;]source%s+([^%s;]+)')do refs[#refs+1]=target end
+  for target in content:gmatch('[\n;]%s*%.%s+([^%s;]+)')do refs[#refs+1]=target end
+ end
+ return refs
+end
+-- An import whose argument is not a literal string is code chosen while it runs, so no digest of files
+-- can say what it will load.
+local function computed_import(kind,content)
+ if kind~='js' then return nil end
+ if content:find('import%s*%(%s*[^%s\'\"]') then return 'import' end
+ if content:find('require%s*%(%s*[^%s\'\"]') then return 'require' end
+ return nil
+end
+local RESOLVE_EXT={'.mjs','.js','.cjs','/index.mjs','/index.js','/index.cjs'}
+local function resolve_local(base,spec)
+ if spec:sub(1,5)=='file:' then spec=spec:sub(6):gsub('^//','') end
+ local candidate=absolute_path(spec) and normalize(spec) or normalize(base..'/'..spec)
+ if host.path_kind(candidate)=='file' then return candidate end
+ if not candidate:match('%.%w+$') then
+  for _,ext in ipairs(RESOLVE_EXT)do
+   if host.path_kind(candidate..ext)=='file' then return candidate..ext end
+  end
+ end
+ return nil
+end
+-- The manifest an approval records, and the one a launch is checked against: the paths in a stable order,
+-- each file's sha256 as it is NOW, the arguments in order, the vault names sorted, and the reasons
+-- coverage could not be proven (`problems`, empty when it could).
 function M.vault_manifest(definition,directory)
  local list=type(definition)=='table' and definition or {}
- local files,seen={}, {}
+ local files,seen,problems,queue={}, {}, {}, {}
+ local total=0
  local function add(path)
-  if not script_file(path) or seen[path] then return end
-  if host.path_kind(path)~='file' then return end
+  if type(path)~='string' or path=='' then return end
+  path=normalize(path)
+  if seen[path] then return end
+  if host.path_kind(path)~='file' then
+   problems[#problems+1]='a file it runs cannot be read ('..path..')'
+   return
+  end
   local content=host.read_file(path)
-  if type(content)~='string' then return end
+  if type(content)~='string' then problems[#problems+1]='a file it runs cannot be read ('..path..')';return end
+  if #content>M.MAX_FILE_BYTES or total+#content>M.MAX_TOTAL_BYTES or #files>=M.MAX_FILES then
+   problems[#problems+1]='its code is larger than an approval can cover ('..path..')'
+   return
+  end
+  local kind=language(path,content)
+  -- Its language loads code this digest cannot follow (a python package, a ruby gem): refused by name
+  -- rather than hashed and left open. JavaScript and shell are the two it CAN follow.
+  if kind=='other' then
+   problems[#problems+1]='a script in a language whose module system this digest cannot follow ('..path..')'
+   return
+  end
+  total=total+#content
   seen[path]=true;files[#files+1]={path=path,sha256=host.sha256(content)}
+  queue[#queue+1]={path=path,content=content,kind=kind}
  end
  if type(directory)=='string' and directory~='' then
   for _,name in ipairs(M.RUNTIME)do add(directory..'/'..name) end
  end
- add(list.program)
- for _,arg in ipairs(type(list.args)=='table' and list.args or {})do add(arg) end
+ -- The program: the interpreter is the platform's, its own code is the connector's.
+ local program=tostring(list.program or '')
+ local name=basename(program):lower()
+ if program=='' then
+  problems[#problems+1]='it names no program'
+ elseif PACKAGE_RUNNERS[name] then
+  problems[#problems+1]='its program is a package runner ('..name..'), whose code comes from a cache or a registry rather than from files this approval can name'
+ elseif not absolute_path(program) then
+  problems[#problems+1]='its program is not an absolute path ('..program..'): a bare name is resolved through PATH, which this digest does not name'
+ elseif not platform_root(program) then
+  add(program)
+ end
+ -- The arguments: a path is covered when it is absolute and exists; a relative one is resolved from the
+ -- connector's cwd and cannot be.
+ local args={}
+ for _,arg in ipairs(type(list.args)=='table' and list.args or {})do
+  local value=tostring(arg);args[#args+1]=value
+  if looks_like_path(value) then
+   if not absolute_path(value) then
+    problems[#problems+1]='an argument is a path resolved from its own directory ('..value..'): only an absolute path can be covered'
+   elseif host.path_kind(normalize(value))=='file' then
+    add(value)
+   end
+   -- An absolute path that is not there yet is neither a problem nor a hole: when a file appears there,
+   -- the manifest the gate recomputes changes and the approval goes stale, and the kernel refuses a path
+   -- argument its file list does not name. What is covered is what exists.
+  end
+ end
+ -- The closure: what each covered file loads in turn.
+ local index=0
+ while index<#queue do
+  index=index+1
+  local entry=queue[index]
+  local computed=computed_import(entry.kind,entry.content)
+  if computed then
+   problems[#problems+1]='a script loads code by a computed name ('..computed..' in '..entry.path..')'
+  end
+  for _,spec in ipairs(module_refs(entry.kind,entry.content))do
+   if platform_module(spec) then
+   elseif spec:sub(1,1)=='.' or spec:sub(1,1)=='/' or spec:sub(1,5)=='file:' then
+    local target=resolve_local(dirname(entry.path),spec)
+    if not target then
+     problems[#problems+1]='a script loads a file that cannot be found ('..spec..' in '..entry.path..')'
+    else add(target) end
+   else
+    problems[#problems+1]='a script imports a package ('..spec..' in '..entry.path..'), whose code lives outside the files this approval can name'
+   end
+  end
+ end
  table.sort(files,function(a,b)return a.path<b.path end)
- local args={};for _,arg in ipairs(type(list.args)=='table' and list.args or {})do args[#args+1]=tostring(arg) end
- local names={};for name in pairs(type(list.vault_env)=='table' and list.vault_env or {})do names[#names+1]=tostring(name) end
+ local env={}
+ for key,ref in pairs(type(list.env)=='table' and list.env or {})do env[#env+1]={name=tostring(key),ref=tostring(ref)} end
+ table.sort(env,function(a,b)return a.name<b.name end)
+ local names={};for vault_name in pairs(type(list.vault_env)=='table' and list.vault_env or {})do names[#names+1]=tostring(vault_name) end
  table.sort(names)
- local manifest={program=tostring(list.program or ''),args=args,files=files,vault=names}
+ local manifest={form=M.APPROVAL_FORM,program=program,cwd=tostring(list.cwd or ''),env=env,args=args,
+  files=files,vault=names,problems=problems}
  manifest.sha256=host.sha256(M.vault_approval_text(manifest))
  return manifest
 end
@@ -217,6 +416,9 @@ local VAULT_ENV_OPERATOR = 'mcp_vault_env_requires_operator'
 -- they cover, or the program, an argument or a script changed after the operator gave it.
 local VAULT_APPROVAL_MISSING = 'mcp_vault_approval_missing'
 local VAULT_APPROVAL_STALE = 'mcp_vault_approval_stale'
+-- The third: the code cannot be CLOSED - a relative script, a package runner, an import of a module the
+-- digest cannot name - so there is no honest digest to record and nothing is approved.
+local VAULT_CODE_NOT_COVERED = 'mcp_vault_code_not_covered'
 -- How to give the approval again, in the one wording every refusal here uses: the operator's own
 -- terminal, probe then on - and never a model's call.
 local function approve_again(id)
@@ -225,6 +427,19 @@ end
 
 function M.names_vault(definition)
  return type(definition)=='table' and type(definition.vault_env)=='table' and next(definition.vault_env)~=nil
+end
+
+-- The refusal a connector whose code cannot be covered answers, at the moment an operator would approve
+-- it and on every call afterwards: a digest over an incomplete file list is worse than no approval,
+-- because it reads as one. The reasons are the digest's own words (M.vault_manifest's problems list).
+local function coverage_refusal(id, manifest)
+ local problems = type(manifest)=='table' and manifest.problems or {}
+ if #problems == 0 then return nil end
+ return fail(VAULT_CODE_NOT_COVERED, { id = id, outcome = 'not_submitted', tool_call_issued = false, problems = problems,
+  note = "this connector runs code a digest cannot cover, so it was not approved: "
+    .. table.concat(problems, '; ')
+    .. ". A vault connector's program and every path it runs must be absolute, its imports must resolve "
+    .. "to files beside it, and a package runner or a computed import is refused (docs/VAULT.md). Nothing was launched." })
 end
 
 -- The refusal every unapproved launch of a vault connector answers. One sentence, because the model that
@@ -241,11 +456,15 @@ local function vault_gate(row, ctx, id)
  -- digest from the bytes on disk before it reads a value; this check is what turns that into a refusal
  -- the model can read, before a process is started at all.
  local approved=row.vault_approval
- if type(approved)~='table' or type(approved.sha256)~='string' or approved.sha256=='' then
+ -- A row approved before approvals named their form predates the digest that says what they cover (the
+ -- cwd and the plain environment are v2's, and so is the closure of the code): it is refused with that
+ -- sentence, not with a mismatch the operator cannot act on.
+ if type(approved)~='table' or type(approved.sha256)~='string' or approved.sha256=='' or tostring(approved.form or '')~=M.APPROVAL_FORM then
   return fail(VAULT_APPROVAL_MISSING,{id=id,outcome='not_submitted',tool_call_issued=false,
    note='this connector\'s approval predates the digest that says what it covers, so nothing was launched and no value was read.'..approve_again(id)})
  end
  local now=M.vault_manifest(row.definition,M.script_dir())
+ local uncovered=coverage_refusal(id,now);if uncovered then return uncovered end
  if now.sha256~=approved.sha256 then
   return fail(VAULT_APPROVAL_STALE,{id=id,outcome='not_submitted',tool_call_issued=false,approved=approved.sha256,now=now.sha256,
    note='this connector\'s program, arguments or scripts changed after the operator approved it, so nothing was launched and no value was read.'..approve_again(id)})
@@ -547,8 +766,15 @@ function M.control(args,ctx)
   return mutate(raw,function(current)current.servers[args.id]=nil;return {ok=true,id=args.id,removed=true}end)
  end
  if action=='enable' or action=='disable' then
+  -- The manifest the operator's "on" records, computed ONCE: the coverage refusal comes before the
+  -- registry is touched, and the row stores the same digest that was checked.
+  local approval
   if action=='enable' then
    local gate=vault_gate(row,ctx,args.id);if gate then return gate end
+   if ctx.operator and M.names_vault(row.definition) then
+    approval=M.vault_manifest(row.definition,M.script_dir())
+    local uncovered=coverage_refusal(args.id,approval);if uncovered then return uncovered end
+   end
   end
   if action=='enable' and (not row.probe or row.probe.ok~=true or not row.probe.schema_hash)then return fail('mcp_probe_required') end
   if action=='enable' then
@@ -564,7 +790,7 @@ function M.control(args,ctx)
     -- approves (M.vault_manifest), so a script or an argument changed later voids it.
     if ctx.operator and M.names_vault(row.definition) then
      current.servers[args.id].vault_approved=true
-     current.servers[args.id].vault_approval=M.vault_manifest(current.servers[args.id].definition,M.script_dir())
+     current.servers[args.id].vault_approval=approval or M.vault_manifest(current.servers[args.id].definition,M.script_dir())
     end
    end
    return {ok=true,id=args.id,enabled=action=='enable',vault_approved=current.servers[args.id].vault_approved==true or nil}
@@ -573,14 +799,21 @@ function M.control(args,ctx)
   -- The gate is BEFORE invoke: an unapproved vault connector is never launched, so the value is never
   -- handed to a program a model chose.
   local gate=vault_gate(row,ctx,args.id);if gate then return gate end
-  local answer=M.invoke({action='probe',server=row.definition},ctx)
+  -- A probe is the operator's own act and what records the approval, so the coverage check is here too:
+  -- nothing is probed, and no digest is recorded, for a connector whose code cannot be closed.
+  local approval
+  if ctx.operator and M.names_vault(row.definition) then
+   approval=M.vault_manifest(row.definition,M.script_dir())
+   local uncovered=coverage_refusal(args.id,approval);if uncovered then return uncovered end
+  end
+  local answer=M.invoke({action='probe',server=row.definition,vault_approval=approval},ctx)
   -- A fresh probe is the one operation that may replace the cached catalogue, so it is also what clears a
   -- staleness note: the next call is measured against the list this probe just read.
   local saved=mutate(raw,function(current)
    current.servers[args.id].probe=answer;current.servers[args.id].probe_stale=nil;current.servers[args.id].enabled=false
-   if ctx.operator and M.names_vault(row.definition) then
+   if approval then
     current.servers[args.id].vault_approved=true
-    current.servers[args.id].vault_approval=M.vault_manifest(current.servers[args.id].definition,M.script_dir())
+    current.servers[args.id].vault_approval=approval
    end
    return {ok=true}
   end)

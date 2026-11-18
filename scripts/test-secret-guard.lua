@@ -39,6 +39,34 @@ for _, c in ipairs({
 end
 -- The node's data directory is RESOLVED at load, not assumed: a node whose store lives elsewhere is
 -- covered by the same rule.
+-- 19/11: the request and seed files a launch is spawned from decide WHICH program gets the vault
+-- values, so they are a root of the same kind as the store and the scripts.
+for _, c in ipairs({
+  {'read', {path = '~/.wasm-agent/mcp/'..'requests/r1.json'}},
+  {'bash', {command = 'cat ~/.wasm-agent/mcp/'..'requests/r1.json'}},
+  {'write', {path = data .. '/mcp/'..'requests/r1.seed.json', content = 'x'}},
+}) do
+  local r = call(c[1], c[2])
+  check(r.error == 'secret_path_denied' and r.root ~= nil,
+    'refused: ' .. c[1] .. ' ' .. json.encode(c[2]) .. ' -> ' .. json.encode(r))
+end
+-- Each root is refused with the reason it is a root: the credentials sentence is the truth about a key
+-- file and the wrong fact about the store, a script directory or a launch request.
+local function note(kind, args)
+  local r = call(kind, args)
+  check(r.error == 'secret_path_denied' and type(r.note) == 'string', 'refused with a note: ' .. kind)
+  return r.note
+end
+local store_note = note('read', {path = '~/.wasm-agent/memory.db'})
+local code_note = note('write', {path = '~/.wasm-agent/scripts/mcp-client.mjs', content = 'x'})
+local request_note = note('read', {path = '~/.wasm-agent/mcp/'..'requests/r1.json'})
+check(store_note ~= sg.NOTE and store_note:find('store') ~= nil, 'the node store has its own note: ' .. store_note)
+check(code_note ~= sg.NOTE and code_note:find('code') ~= nil, 'the connector code has its own note: ' .. code_note)
+check(request_note ~= sg.NOTE and request_note:find('launch') ~= nil,
+  'and the launch request its own: ' .. request_note)
+check(sg.NOTE:find('credentials are reachable only through their connectors', 1, true) ~= nil,
+  'the credentials note itself is unchanged')
+
 local data = dofile('lua/core/paths.lua').data()
 check(sg.check('write', {path = data .. '/memory.db'}) ~= nil, 'the resolved data directory is covered: ' .. data)
 check(sg.check('read', {path = data .. '/scripts/mcp-client.mjs'}) ~= nil, 'and its script directory')

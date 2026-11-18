@@ -5,7 +5,15 @@ import {dirname,resolve} from 'node:path';
 import {createHash} from 'node:crypto';
 import {openMCP,canonical} from './mcp-client-core.mjs';
 const at=process.argv.indexOf('--seed-file');if(at<0||!process.argv[at+1])throw Error('mcp_seed_file_required');
-const seed=JSON.parse(readFileSync(process.argv[at+1],'utf8'));
+// The kernel read this seed, checked the "server" inside it against the operator's approval, and handed
+// this process the sha256 of THAT read: a seed rewritten in between is refused before anything is
+// connected, let alone spawned with the vault values in this environment (round 5, docs/VAULT.md).
+const seedPath=process.argv[at+1];
+if(!process.env.WA_MCP_REQUEST_SHA256)throw Error('mcp_request_not_approved');
+if(process.env.WA_MCP_REQUEST_FILE!==seedPath)throw Error('mcp_request_path_mismatch');
+const seedBytes=readFileSync(seedPath);
+if(createHash('sha256').update(seedBytes).digest('hex')!==process.env.WA_MCP_REQUEST_SHA256)throw Error('mcp_request_changed_since_approval');
+const seed=JSON.parse(seedBytes.toString('utf8'));
 for(const [key,expected]of Object.entries(seed.credential_hashes||{})){const [field,name]=key.split(':');const variable=seed.server[field]?.[name];if(createHash('sha256').update(process.env[variable]??'<missing>').digest('hex')!==expected)throw Error('mcp_environment_reference_changed');}
 if(typeof seed.token!=='string'||seed.token.length<48||!Array.isArray(seed.read_tools)||seed.read_tools.length===0)throw Error('invalid_mcp_read_session');
 const connection=await openMCP(seed.server),allowed=new Set(seed.read_tools),requests=new Set();let busy=false,closing=false,idle;

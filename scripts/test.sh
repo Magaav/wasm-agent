@@ -1302,7 +1302,7 @@ if AGENT_CORE="$(env -u CARGO_TARGET_DIR bash scripts/build-agent-core.sh 2>/dev
 else
   echo "note: agent-core not built (no wasi-sdk); core-component checks skipped"
 fi
-gate_run node --test --test-reporter=tap scripts/test-mcp.mjs scripts/test-mcp-session.mjs scripts/test-web.mjs scripts/test-mcp-runtime-closure.mjs scripts/test-whatsapp-connector-http.mjs scripts/test-whatsapp-transcript-watchdog.mjs
+gate_run node --test --test-reporter=tap scripts/test-mcp.mjs scripts/test-mcp-session.mjs scripts/test-mcp-request-seal.mjs scripts/test-web.mjs scripts/test-mcp-runtime-closure.mjs scripts/test-whatsapp-connector-http.mjs scripts/test-whatsapp-transcript-watchdog.mjs
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-envelope.lua" "$BIN" --db "$DB.envelope" | grep 'envelope ok'
 MCP_RECOVERY_BIN="$BIN"
 if command -v cygpath >/dev/null 2>&1; then MCP_RECOVERY_BIN="$(cygpath -m "$BIN")"; fi

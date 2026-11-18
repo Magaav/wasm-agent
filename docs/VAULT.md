@@ -472,22 +472,84 @@ node's vault and puts each value in the child's environment at launch, by refere
 (`rust/wa-capabilities/src/operations.rs`, `docs/MCP.md`). The entry NAME travels through Lua, the
 definition and the request file; the value never does.
 
-**The approval is a digest, not a flag (18/11).** Only the operator may start such a connector
-(`/mcp <id> probe`, then `/mcp <id> on` at their own terminal), and that act records a SHA-256 over what
-the launch IS: the program, its arguments in order, every script file the connector runs (this node's MCP
-runtime plus every `.mjs`/`.js`/`.sh`/`.py`... the definition names) and the vault names it asks for.
-Two places check it, and either one refuses:
+**The approval is a digest, not a flag (18/11; form v2, 19/11).** Only the operator may start such a
+connector (`/mcp <id> probe`, then `/mcp <id> on` at their own terminal), and that act records a SHA-256
+over what the launch IS: the program, the directory it runs in, the plain (non-vault) environment it asks
+for, its arguments in order, **every file it can run or load**, and the vault names it asks for.
 
-* `lua/core/mcp.lua` recomputes it before a call or an enable - `mcp_vault_approval_stale` when a script or
-  an argument changed after the operator approved it, `mcp_vault_approval_missing` for a row approved
-  before digests existed;
-* the kernel recomputes it from the bytes on disk immediately before it reads a value -
-  `vault_approval_required`, `vault_approval_unreadable:<path>`, `vault_approval_script_not_covered:<path>`
-  or `vault_approval_mismatch`. Nothing is launched and no value is read.
+"Every file it can run or load" is the CLOSURE of the code, not a list of names with a script extension
+(that was v1, and it was not true: a relative `conn.mjs`, an extensionless program and every imported
+module were never hashed):
 
-So editing a connector's script or an argument after the approval voids the approval. A deploy that
-replaces the MCP runtime changes those bytes too, which is why a vault connector asks for the operator's
-probe/on again after an upgrade: that is the cost of the check, and it is the point of it.
+* the program, unless it lives under a platform root (`/usr/bin`, `/bin`, `/usr/lib`, `/nix/store`,
+  `/snap`, `/usr/local/bin`, `/opt/homebrew`...): `/usr/bin/node` is the interpreter the connector runs
+  ON; a program anywhere else - `~/bin/conn`, `<install>/bin/mail-mcp`, with an extension, without one,
+  a script or a compiled binary - is the connector's own code and is hashed;
+* every argument that is a path and exists as a file, so `--config /etc/conn.json` is covered too, and
+  each of those files' own local `import`/`require` (JavaScript) or `source`/`.` (shell), and theirs in
+  turn;
+* the node's MCP runtime (`M.RUNTIME` in `lua/core/mcp.lua`), which is what actually speaks MCP for a
+  custom connector.
+
+A connector whose code cannot be closed is REFUSED rather than approved with a digest that only looks
+complete (`mcp_vault_code_not_covered`, whose `problems` list names each reason):
+
+* a relative path (`conn.mjs`, `./conn.mjs`): node resolves it from the connector's own directory, which
+  the digest names but does not contain;
+* a program that is a bare name (`node`): it is resolved through PATH, and a name is not a file;
+* a package runner (`npx`, `uvx`, `bunx`, `pnpm`, `yarn`, `pipx`, `corepack`): its code comes from a
+  cache or a registry;
+* an import of a bare package (`import x from 'left-pad'`, i.e. `node_modules`) or an import whose name is
+  computed (`import(name)`): the digest can name neither;
+* a Python, Ruby, Perl, PowerShell or Lua script as the connector's own program or as an argument: those
+  module systems load files this digest cannot follow. JavaScript (followed through its imports) and shell
+  (followed through `source`/`.` of absolute paths) are the two it can follow.
+
+So a connector that names a vault entry names an ABSOLUTE program and absolute paths. On a node whose
+`node` is not provisioned (`WA_NODE` unset and no `<install>/node`), `M.node_program()` answers the bare
+name `node`; a vault connector whose program `/mcp <key> share` rewrote to that cannot be approved until
+the node names its interpreter by its absolute path - the refusal says which form is wrong.
+
+Three places check it, and any one of them refuses:
+
+* `lua/core/mcp.lua` recomputes it before a call, a probe or an enable - `mcp_vault_approval_stale` when a
+  script, an argument, the cwd or the environment changed after the operator approved it;
+  `mcp_vault_approval_missing` for a row approved before this form (a v1 digest is refused by name rather
+  than compared against a text it could never match); `mcp_vault_code_not_covered` for the forms above;
+* `rust/wa-capabilities/src/operations.rs` recomputes it from the bytes on disk immediately before it reads
+  a value - `vault_approval_required`, `vault_approval_digest_form`,
+  `vault_approval_unreadable:<path>`, `vault_approval_script_not_covered:<path>`,
+  `vault_approval_program_not_covered:<path>`, `vault_approval_program_not_absolute:<path>`,
+  `vault_approval_package_runner:<path>`, `vault_approval_path_not_absolute:<path>` or
+  `vault_approval_mismatch`;
+* the request file the child is about to read is checked against the same approval and sealed -
+  `vault_request_program_mismatch`, `vault_request_arguments_mismatch`,
+  `vault_request_cwd_mismatch`, `vault_request_environment_mismatch`,
+  `vault_request_file_not_covered:<path>`, `vault_request_program_not_covered:<path>`,
+  `vault_request_path_not_absolute:<path>`, `vault_request_transport_not_checked`,
+  `vault_request_unreadable`, `vault_request_unnamed` (below, and `docs/MCP.md`).
+
+Nothing is launched and no value is read when any of them refuses.
+
+So editing a connector's script, changing an argument, moving its cwd or adding an environment name after
+the approval voids the approval, and so does a deploy that replaces the MCP runtime: a vault connector
+asks for the operator's probe/on again after an upgrade.
+
+**The request the child reads is sealed (19/11).** `lua/core/mcp.lua` writes the whole launch to
+`<data>/mcp/requests/<uuid>.json` - the file `scripts/mcp-client.mjs` spawns `server.program`,
+`server.args` and `server.cwd` from - and `lua/core/mcp_session.lua` writes the equivalent seed for a read
+session. The approval above describes the CONNECTOR's command, and until this was closed nothing compared
+the two, while the directory was writable by the agent (it is in `secret_guard.ROOTS` now): a background
+loop could rewrite `server.program` between the console's write and the child's read and choose the program
+that got the value. Two halves close it:
+
+* the kernel reads that file, refuses unless its `server` is the program, the arguments and the cwd the
+  operator approved, and gives the child the sha256 of the exact bytes it read
+  (`WA_MCP_REQUEST_FILE`, `WA_MCP_REQUEST_SHA256`) - `seal_request` in
+  `rust/wa-capabilities/src/operations.rs`;
+* the child reads the file ONCE and hashes those same bytes before spawning or connecting
+  (`mcp_request_changed_since_approval`, `mcp_request_path_mismatch`, `mcp_request_not_approved`), so a
+  rewrite after the kernel's check reaches nothing.
 
 **The residual hole, stated rather than hidden.** The agent and the node run as the same uid. The agent's
 own tools refuse `memory.db` (and its `-wal`/`-shm`) and the connector script directories

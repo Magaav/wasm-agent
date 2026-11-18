@@ -4317,16 +4317,28 @@ fn image_drop_dir() -> std::path::PathBuf {
 /// A symlink is still followed before the question is asked - that is the point of resolving first,
 /// since a link is exactly how a path that looks local reads a private file.
 fn image_roots() -> Vec<std::path::PathBuf> {
+    image_roots_in(std::env::current_dir().ok(), std::path::PathBuf::from(wa_host_support::paths::resolve_home()))
+}
+
+/// The same list with the session's directory and the home injected, so the question can be asked about
+/// a directory a test chose. The process's working directory is the session's own folder - UNLESS it is
+/// the user's home, which is the review's point: a session started in HOME is the session with every
+/// private file one path away, so the exclusion is about the DIRECTORY and not about how it was named
+/// (round 5, LOW). What such a session still gets is the node's state root and the drop directory.
+fn image_roots_in(cwd: Option<std::path::PathBuf>, home: std::path::PathBuf) -> Vec<std::path::PathBuf> {
+    let resolve = |path: std::path::PathBuf| std::fs::canonicalize(&path).unwrap_or(path);
     let mut roots: Vec<std::path::PathBuf> = Vec::new();
-    let mut add = |root: String| {
-        if root.trim().is_empty() { return; }
-        let path = std::path::PathBuf::from(root);
-        let resolved = std::fs::canonicalize(&path).unwrap_or(path);
+    let mut add = |root: std::path::PathBuf| {
+        let resolved = resolve(root);
         if !roots.contains(&resolved) { roots.push(resolved); }
     };
-    if let Ok(cwd) = std::env::current_dir() { add(cwd.to_string_lossy().to_string()); }
-    add(wa_host_support::paths::state_root().to_string_lossy().to_string());
-    add(image_drop_dir().to_string_lossy().to_string());
+    let home = resolve(home);
+    if let Some(cwd) = cwd {
+        let cwd = resolve(cwd);
+        if cwd != home { add(cwd); }
+    }
+    add(wa_host_support::paths::state_root());
+    add(image_drop_dir());
     roots
 }
 
@@ -5647,6 +5659,22 @@ mod image_and_token_tests {
     // The review's LOW (18/11): the roots were all of HOME plus the machine's temp dir, so a dropped
     // path was a way to read any of them into a message. They are now the session's folders and one
     // explicit, configurable drop directory.
+    // Round 5's LOW: when the process's directory IS the user's home, the cwd root handed all of HOME
+    // back - the same list, under another name.
+    #[test]
+    fn a_session_started_in_home_does_not_get_home_back_through_its_own_directory() {
+        let home = scratch_dir("home");
+        let canonical = std::fs::canonicalize(&home).unwrap_or(home.clone());
+        let roots = super::image_roots_in(Some(home.clone()), home.clone());
+        assert!(!roots.iter().any(|root| root == &canonical), "HOME is not an image root: {roots:?}");
+        assert_eq!(roots, super::image_roots_in(Some(home.clone()), home.clone()), "and it is stable");
+        // A directory of the session's own is still allowed, which is what the root is for.
+        let work = scratch_dir("work");
+        let work_roots = super::image_roots_in(Some(work.clone()), home.clone());
+        let work = std::fs::canonicalize(&work).unwrap_or(work);
+        assert!(work_roots.iter().any(|root| root == &work), "the session's own folder: {work_roots:?}");
+    }
+
     #[test]
     fn the_allowed_directories_are_the_sessions_folders_and_one_drop_dir() {
         let canonical = |path: std::path::PathBuf| std::fs::canonicalize(&path).unwrap_or(path);

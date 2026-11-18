@@ -771,3 +771,192 @@ unmeasured percentage is the empty ball, not the full one.
 * the self-wake row's `⏰` (U+23F0): not in the font either.
 * the window (`ui/`, `scripts/probe-*.js`): it draws with its own font stack and already forces the text
   presentation of `👣`, so nothing there is drawn by a fallback face.
+
+## Round 5 - the security verification of round 3 (19/11)
+
+Three items from the review of `e8e9cd63`. Each one is fixed with a test that fails without the fix;
+nothing from rounds 1-3 was reworded (the new model-visible strings are listed at the end for approval).
+
+| # | hole | fix | test |
+|---|---|---|---|
+| 1 HIGH | `lua/core/mcp.lua` writes the whole launch to `<data>/mcp/requests/<uuid>.json`, `scripts/mcp-client-core.mjs` spawns `server.program`/`args`/`cwd` FROM that file with the vault values in its environment, `approval_problem` never reads it, and the directory was not in `secret_guard` - so a background loop rewrote `server.program` between the write and the read | the kernel reads the file, refuses unless its `server` is the program/arguments/cwd the operator approved, and gives the child the sha256 of the exact bytes it read; the child (`mcp-client.mjs`, `mcp-session.mjs`) hashes the bytes it read and refuses anything else before spawning; `<data>/mcp/requests` is in `secret_guard.ROOTS` | operations.rs `the_request_the_child_reads_must_name_the_approved_command`, `the_request_seal_is_the_sha256_of_the_bytes_the_kernel_read`; `scripts/test-mcp-request-seal.mjs` (5 tests, real processes: the smuggled program never runs) |
+| 2 HIGH | "every script file the connector runs" was false: only an absolute arg with a script extension plus the runtime was hashed - a relative `conn.mjs` (resolved from the cwd), an extensionless program (`~/bin/conn`), `npx`/`uvx` package code and every imported/sourced module were not | the manifest is the CLOSURE of the code (form `mcp-vault-approval/v2`): a program outside the platform's roots is hashed whatever it is, every existing path argument is hashed, and each hashed file's local `import`/`require`/`source` is followed in turn; a connector whose code cannot be closed is REFUSED by name instead of approved, in the console and again in the kernel | test-mcp-vault-approval.lua (49 checks: the import is in the digest, an extensionless shebang program is covered, and a relative path, a bare program, a package runner, a bare import, a computed import and a python script are each refused); operations.rs `a_program_the_platform_does_not_own_must_be_in_the_digest`, `a_relative_path_or_a_package_runner_cannot_be_approved` |
+| 3 LOW | the digest did not cover the cwd or the plain (non-vault) environment; `memory.db` and the script directories were refused with the credentials note; `image_roots` allowed the process's cwd even when that cwd is HOME | `cwd` and `env NAME=REF` lines in the canonical text (sorted); one note per kind of root; `image_roots_in` drops the cwd when it is the home | the canonical-text fixture digest on both sides, six assertions in test-mcp-vault-approval.lua (a moved cwd or another variable is another digest), host.rs `a_session_started_in_home_does_not_get_home_back_through_its_own_directory`, and a guard probe whose `checks`/`failed` are printed |
+
+### 1. The request the child is spawned from
+
+The approval has always described the CONNECTOR's command (`M.vault_manifest(definition, ...)`), while the
+launch the kernel starts is `node mcp-client.mjs --request-file <file>` and the file is what decides
+`server.program`, `server.args` and `server.cwd`. Two halves now meet:
+
+* `seal_request` (`rust/wa-capabilities/src/operations.rs`) runs on every launch that names
+  `--request-file`/`--seed-file`. For a vault launch it refuses unless the file's `server` names the
+  approved program, the approved arguments (in order) and the approved cwd
+  (`vault_request_program_mismatch`, `vault_request_arguments_mismatch`,
+  `vault_request_cwd_mismatch`, `vault_request_environment_mismatch`,
+  `vault_request_transport_not_checked`, `vault_request_file_not_covered:<path>`,
+  `vault_request_program_not_covered:<path>`, `vault_request_path_not_absolute:<path>`,
+  `vault_request_unreadable`, and `vault_request_unnamed` for a vault launch that names no file). It then
+  puts the sha256 of the bytes it read in the child's environment (`WA_MCP_REQUEST_FILE`,
+  `WA_MCP_REQUEST_SHA256`).
+* the seam between the two is a test of its own: `scripts/test-mcp-request-shape.lua` (11 checks) asks the
+  real console to build a request for a definition that names a vault entry and compares that file with
+  the approval the same call carries - program, arguments, cwd, the environment (the definition's own
+  references plus one self-reference per vault name) and the file list. Without it the two halves are
+  proven apart from each other.
+* the child reads the file ONCE and hashes those same bytes (`mcp_request_not_approved`,
+  `mcp_request_path_mismatch`, `mcp_request_changed_since_approval`), so a rewrite after the kernel's read
+  cannot reach a spawn - which is the whole attack, since the child inherits the vault values.
+
+`<data>/mcp/requests` is now in `lua/core/secret_guard.lua`'s roots, so the plain routes (read/ls/grep/
+write/edit, and a bash command naming it) are refused to the agent's own tools as well.
+
+### 2. What "the code the connector runs" is, and what is refused
+
+`M.vault_manifest` no longer asks "is this an absolute path with a script extension". It collects:
+
+* the runtime (`M.RUNTIME`) and, in turn, everything each of those files imports;
+* the definition's program, UNLESS it lives under a platform root (`/bin`, `/usr/bin`, `/usr/lib`,
+  `/usr/libexec`, `/sbin`, `/usr/sbin`, `/usr/local/bin`, `/usr/local/sbin`, `/lib`, `/lib64`,
+  `/nix/store`, `/snap`, `/opt/homebrew`, `/System`) - `/usr/bin/node` is the interpreter the connector
+  runs ON; `~/bin/conn`, `<install>/bin/mail-mcp`, a script or a compiled binary anywhere else, is the
+  connector's own code and is hashed, extension or no extension;
+* every argument that is a path and exists as a file, plus the local modules each of those loads
+  (`from './lib/x.mjs'`, `import('./x.mjs')`, `require('./x')`, shell `source`/`.`), recursively.
+  An absolute path argument that does not exist yet is neither a problem nor a hole: the moment a file
+  appears there, the manifest the gate recomputes changes and the approval goes stale.
+
+A connector whose code cannot be closed is refused with `mcp_vault_code_not_covered` (and a `problems`
+list) at the operator's own probe/on, instead of being approved with a digest that only looks complete:
+
+    a relative script            conn.mjs / ./conn.mjs   "resolved from its own directory"
+    a program that is a name     node                     "not an absolute path ... resolved through PATH"
+    a package runner             npx uvx bunx pnpm yarn pipx corepack   "whose code comes from a cache or a registry"
+    a bare package import        import x from 'left-pad' "whose code lives outside the files this approval can name"
+    a computed import            import(name)             "loads code by a computed name"
+    python/ruby/perl/ps/lua      conn.py                   "a language whose module system this digest cannot follow"
+
+JavaScript (followed through its imports) and shell (followed through `source`/`.` of absolute paths) are
+the two languages the digest CAN follow; anything else is refused rather than hashed and left open. The
+kernel repeats the shape checks from the bytes on disk (`vault_approval_program_not_absolute`,
+`vault_approval_package_runner`, `vault_approval_path_not_absolute`,
+`vault_approval_program_not_covered`), so an approval minted before the rule cannot launch either.
+
+A consequence worth naming: a vault connector's program must be ABSOLUTE. `/mcp <key> share` rewrites a
+`.../node` program to this node's `node_program()`, which is the bare name `node` when nothing is
+provisioned (`WA_NODE` unset, no `<install>/node`); such a row can no longer be approved, and the refusal
+says which file the digest is missing. On the test node `node_program()` answers
+`/home/victor/.local/share/mise/shims/node` (absolute, not a platform root - so it is hashed like any other
+program), and `scripts/test-mcp-share.lua` pins an absolute `WA_NODE` for the one definition it approves.
+
+### 3. cwd, the plain environment, the notes, and the cwd-as-HOME image root
+
+The canonical text is now (both sides, fixture digest `7f39ce12...` pinned in Rust and Lua):
+
+    mcp-vault-approval/v2
+    program P
+    cwd C
+    env NAME=REF        (sorted by name)
+    arg A ...           (in order)
+    file PATH SHA ...   (sorted by path)
+    vault NAME ...      (sorted)
+
+so moving a connector, or adding a variable it asks for, voids the approval. The form is versioned and the
+console refuses an older row with the sentence it already had for pre-digest approvals
+(`mcp_vault_approval_missing`), the kernel with `vault_approval_digest_form` - a v1 digest is not compared
+against a text it can never match. Cost, stated plainly: every vault connector needs the operator's
+probe/on once after this upgrade.
+
+`secret_guard` keeps the credentials sentence for the credential roots and now answers the matched root's
+own reason: the node's store (`memory.db`), the connector code directories, and the launch request/seed
+directory each get their own `note`. The credentials sentence itself is byte-identical.
+
+`image_roots` is `image_roots_in(cwd, home)`: the session's own directory is allowed unless it IS the
+home, which is what the review measured - a session started in HOME had all of HOME back through its cwd.
+
+### Verified, with the commands
+
+* `cargo test --lib -p wa-capabilities`: **313 passed, 0 failed** (307 before; six new tests, and the
+  canonical-text fixture re-pinned for v2). `cargo check --workspace --all-targets`: no error (pre-existing
+  warnings only).
+* `node --test scripts/test-mcp-request-seal.mjs`: **5/5** - an unsealed request, a seal for other bytes and
+  a seal for another path each refuse; the approved bytes really do spawn the fixture peer; and the attack
+  (seal the honest bytes, then rewrite `server.program` to a program that writes a marker) is refused with
+  the marker file absent.
+* Lua suites, run with a scratch `WASM_AGENT_HOME`, a scratch `WA_MCP_SCRIPT_DIR` holding copies of the
+  eight runtime files and `WASM_AGENT_LUA_ROOT=$PWD`:
+
+      WASM_AGENT_LUA_ROOT=$PWD WASM_AGENT_HOME=<tmp> WA_MCP_SCRIPT_DIR=<tmp>/scripts \
+        WA_SCRIPT=$PWD/scripts/test-mcp-vault-approval.lua wa --db <tmp>/v.db    # ok (49 checks)
+      ... test-mcp-request-shape.lua 11 (the console's request vs the approval it carries)
+      ... test-mcp-share.lua 44, test-mcp-command.lua 132, test-mcp-node-runtime.lua 142,
+          test-mcp-native.lua 29, test-mcp-session-settlement.lua 22, test-codemode-blocks.lua 26,
+          test-mcp.lua 48 (with MCP_TEST_SOURCE and WA_NODE), test-secret-guard.lua see below.
+* The gate's own node set (`scripts/test.sh`, which now also runs the new file): 21 tests, 20 pass.
+* A guard probe (`/tmp/guard-probe.lua`, printed as JSON): 10/10 - the request directory refused through
+  read/write/bash and through the RESOLVED data path, the three notes distinct, the credentials note
+  unchanged, an ordinary file still allowed.
+
+### Pre-existing on this node (not this round)
+
+* `scripts/test-mcp-runtime-closure.mjs` - "every MCP runtime list is the real import closure" fails with
+  `Cannot read properties of null` because `scripts/install.sh` has no `MCP_RUNTIME` line: measured at
+  `e8e9cd63` (`git show e8e9cd63:scripts/install.sh | grep -c MCP_RUNTIME` -> 0), and this round does not
+  touch `install.sh`. It is a red gate line that predates the mission; named, not fixed.
+* `scripts/test-secret-guard.lua` stops at "a script cannot read them either" with `codemode_not_enabled`
+  (a binary built without `WA_CODEMODE_BUILD_ASSETS`). Confirmed pre-existing by running the BASE version of
+  the file (`git show e8e9cd63:scripts/test-secret-guard.lua`) against this tree: the same line, the same
+  error. The new checks in that file sit BEFORE that line and run; nothing failed before it.
+* Round 4's `test-cli-wake-row.lua` (1 of 30) and `test-cli-input.lua` (2 of 16) are unchanged.
+* `node --test` of the four-file set is red only because of the runtime-closure item above.
+
+### Not verified, named
+
+* No end-to-end vault launch on this node: no connector here names `vault_env`, and a test vault is not
+  opened. The kernel half is tested on the real functions, the child half on real processes; the two halves
+  are proven separately, never in one launch with a real value.
+* The interpreter that runs the CLIENT (`node_program()`) is not in the digest - it is the platform's
+  runtime, not the connector's code. An agent-writable `node` earlier on PATH would be a hole of the same
+  family; it is named in `docs/VAULT.md` rather than hidden.
+* Windows path forms (`C:\\...`) go through the same helpers and are covered by unit tests
+  (`is_absolute_path`, `basename`, `platform_root`), but nothing was run on Windows this round.
+
+### Every NEW model-visible string (rounds 1-3 strings are untouched; these need the same approval)
+
+    mcp_vault_code_not_covered          note: "this connector runs code a digest cannot cover, so it was not
+                                        approved: <problems>. A vault connector's program and every path it runs
+                                        must be absolute, its imports must resolve to files beside it, and a
+                                        package runner or a computed import is refused (docs/VAULT.md). Nothing
+                                        was launched."
+    mcp_vault_approval_missing          UNCHANGED sentence, now also used for a pre-v2 approval form
+    vault_approval_digest_form          "this connector's approval predates the fields that say what it covers
+                                        (its directory, its plain environment and every file it can load), so
+                                        nothing was launched and no value was read. Approve it again at the
+                                        operator's terminal: /mcp <id> probe, then /mcp <id> on"
+    vault_approval_program_not_absolute   "its program is a bare name, which is resolved through PATH rather
+                                        than named by the digest ... Name the absolute path of its interpreter or
+                                        binary: /mcp <id> probe, then /mcp <id> on"
+    vault_approval_package_runner       "its program is a package runner (<name>), whose code comes from a cache
+                                        or a registry rather than from files an approval can name ..."
+    vault_approval_path_not_absolute    "this connector runs a path relative to its own directory, which the
+                                        digest cannot name ... Name its absolute path: /mcp <id> probe, then
+                                        /mcp <id> on"
+    vault_approval_program_not_covered  "this connector's own program is not a file the approval names ..."
+    vault_request_unnamed / _unreadable / _transport_not_checked / _program_mismatch /
+    _arguments_mismatch / _cwd_mismatch / _environment_mismatch / _file_not_covered /
+    _program_not_covered / _path_not_absolute
+                                        "the request this launch reads names a program (<p>) the operator did
+                                        not approve (<q>), so nothing was launched and no value was read ..."
+    mcp_request_unreadable / mcp_request_too_large   (the kernel's own launch refusals, same shape)
+    mcp_request_not_approved / mcp_request_path_mismatch / mcp_request_changed_since_approval
+                                        (what the child refuses; they surface as the answer's `error`)
+    secret_guard notes, per kind of root:
+      store    "this is the node's own store: it holds the MCP registry, every connector's approval and the
+                session ledger, so an agent tool neither reads nor writes it (wa show / wa vault are the surfaces)"
+      code     "this directory holds the code an approved connector runs: an agent tool neither reads nor writes
+                it, so the bytes that were approved are the bytes that run"
+      request  "these are the kernel's own per-launch request and seed files: a launch is spawned from the bytes
+                the kernel read and approved, so an agent tool neither reads nor writes them"
+    the coverage reasons quoted inside mcp_vault_code_not_covered (a relative path, a bare program, a package
+    runner, a package import, a computed import, an unfollowable language, a file that cannot be read, code
+    larger than an approval can cover).

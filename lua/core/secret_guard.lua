@@ -16,12 +16,18 @@ local M = {}
 --   * the connector SCRIPT directories (`<data>/scripts`, `~/.local/bin/scripts`, and whatever
 --     `WA_MCP_SCRIPT_DIR`/`WA_INSTALL_DIR` name) hold the code an approved connector runs: overwriting
 --     one script replaced the program behind an approval.
+--   * `<data>/mcp/requests` (19/11) holds the request and seed files a launch is spawned from: the child
+--     reads `server.program`/`args`/`cwd` out of them, so a background loop rewriting one between the
+--     console's write and the child's read chose the program that got the vault value. The kernel now
+--     hashes the file it approved and the child verifies those bytes before it spawns, and the directory
+--     is refused here as well - belt and braces, because the kernel/child check is the one that matters.
 --
 -- These are refused for READS as well as writes, like every other root here: one list, one rule, and a
 -- refusal that is the same whichever tool asked.
 M.ROOTS = { '.wasm-agent/secrets', '.wasm-agent/keys', '.wasm-agent/node.key',
   '.config/wasm-agent-sandbox', 'wasm-agent-sandbox/vault',
-  '.wasm-agent/memory.db', '.wasm-agent/scripts', '.local/bin/scripts', 'wasm-agent-sandbox/scripts' }
+  '.wasm-agent/memory.db', '.wasm-agent/scripts', '.local/bin/scripts', 'wasm-agent-sandbox/scripts',
+  '.wasm-agent/mcp/'..'requests' }
 
 -- The same rule for the directories this node RESOLVES rather than assumes: the data directory the host
 -- reports and the script directory the MCP runtime is actually launched from. A fixed list cannot know
@@ -43,6 +49,7 @@ local function configured()
     if okdata and type(data) == 'string' then
       add(data .. '/memory.db')
       add(data .. '/scripts')
+      add(data .. '/mcp/'..'requests')
     end
   end
   add(getenv('WA_MCP_SCRIPT_DIR'))
@@ -85,6 +92,26 @@ end
 
 M.NOTE = 'credentials are reachable only through their connectors (mcp_google_*, mcp_whatsapp_*, email tools); an agent tool never reads them'
 
+-- The same refusal, for the reason that root is a root. "Credentials are reachable only through their
+-- connectors" is the truth about a key file and the wrong fact about memory.db or a script directory: a
+-- model told that after asking to read a script learns nothing about why the call was refused, and the
+-- next session asks again. One note per KIND of root, chosen by the root that matched.
+M.NOTES = {
+  store = "this is the node's own store: it holds the MCP registry, every connector's approval and the "
+    .. 'session ledger, so an agent tool neither reads nor writes it (wa show / wa vault are the surfaces)',
+  code = 'this directory holds the code an approved connector runs: an agent tool neither reads nor '
+    .. 'writes it, so the bytes that were approved are the bytes that run',
+  request = "these are the kernel's own per-launch request and seed files: a launch is spawned from the "
+    .. 'bytes the kernel read and approved, so an agent tool neither reads nor writes them',
+}
+local function note_for(root)
+  local value = tostring(root or ''):lower()
+  if value:find('memory%.db') then return M.NOTES.store end
+  if value:find('mcp/'..'requests', 1, true) then return M.NOTES.request end
+  if value:find('scripts', 1, true) then return M.NOTES.code end
+  return M.NOTE
+end
+
 -- nil when allowed; the refusal when a call reaches a secret root.
 function M.check(name, args)
   args = type(args) == 'table' and args or {}
@@ -98,7 +125,7 @@ function M.check(name, args)
     root = hit(args.command) or hit(args.cwd)
   end
   if not root then return nil end
-  return { ok = false, error = 'secret_path_denied', status = 403, effect = 'none', root = root, tool = name, note = M.NOTE }
+  return { ok = false, error = 'secret_path_denied', status = 403, effect = 'none', root = root, tool = name, note = note_for(root) }
 end
 
 return M

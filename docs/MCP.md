@@ -124,23 +124,55 @@ entries to store there (`wa vault set <entry> --stdin`), then `/mcp <key> probe`
 ### What an approval covers, and what the kernel re-checks
 
 An operator's `/mcp <key> probe` (or `on`) is the approval, and it is a digest rather than a boolean since
-18/11: the row records a SHA-256 over the launch - the program, its arguments in order, **every script file
-the connector runs** (this node's MCP runtime in the script directory, plus each `.mjs`/`.js`/`.sh`/
-`.py`... the definition names) and the vault environment names it asks for (`M.vault_manifest` in
-`lua/core/mcp.lua`).
+18/11 (form `mcp-vault-approval/v2` since 19/11): the row records a SHA-256 over the launch - the program,
+the directory it runs in, the plain (non-vault) environment it asks for, its arguments in order, **every
+file the connector can run or load** (this node's MCP runtime in the script directory, the connector's own
+program when it is not a platform one, and the closure of what those files import in turn) and the vault
+environment names it asks for (`M.vault_manifest` in `lua/core/mcp.lua`).
 
-Two checks use it, and either one refuses:
+What is NOT covered cannot be approved: a relative script (`conn.mjs`), a program that is a bare name
+(`node`), a package runner (`npx`, `uvx`...), an import of a bare package or by a computed name, and a
+Python/Ruby/Perl/PowerShell/Lua script are each refused by name (`mcp_vault_code_not_covered`, with the
+reasons) instead of being hashed and left open. `docs/VAULT.md` lists them.
 
-* the console gate recomputes it before a call or an enable - `mcp_vault_approval_stale` when a script or an
-  argument changed after the operator approved it, `mcp_vault_approval_missing` for a row approved before
-  digests existed;
+Three checks use the digest, and either of the first two refuses:
+
+* the console gate recomputes it before a call, a probe or an enable - `mcp_vault_approval_stale` when a
+  script, an argument, the cwd or the environment changed after the operator approved it,
+  `mcp_vault_approval_missing` for a row approved before this form, `mcp_vault_code_not_covered` for a
+  connector whose code cannot be closed;
 * `rust/wa-capabilities/src/operations.rs` recomputes it from the bytes on disk immediately before it reads
-  a value - `vault_approval_required`, `vault_approval_unreadable:<path>`,
-  `vault_approval_script_not_covered:<path>`, `vault_approval_mismatch`. Nothing is launched and no value is
-  read.
+  a value - `vault_approval_required`, `vault_approval_digest_form`,
+  `vault_approval_unreadable:<path>`, `vault_approval_script_not_covered:<path>`,
+  `vault_approval_program_not_covered:<path>`, `vault_approval_program_not_absolute:<path>`,
+  `vault_approval_package_runner:<path>`, `vault_approval_path_not_absolute:<path>` or
+  `vault_approval_mismatch`. Nothing is launched and no value is read;
+* the request file the child reads is checked against the same approval and sealed (next section).
 
-Editing a connector's script or an argument after the approval therefore voids it, and so does a deploy that
-replaces the MCP runtime: a vault connector asks for the operator's probe/on again after an upgrade.
+Editing a connector's script, an argument, its cwd or the environment it asks for after the approval
+therefore voids it, and so does a deploy that replaces the MCP runtime: a vault connector asks for the
+operator's probe/on again after an upgrade.
+
+### The request the child reads, and why it is sealed
+
+A request-scoped call is a file: `lua/core/mcp.lua` writes the whole launch to
+`<data>/mcp/requests/<uuid>.json`, and `scripts/mcp-client.mjs` spawns `server.program`,
+`server.args` and `server.cwd` FROM that file, with the vault values in its environment. A read session
+has the same shape (`<uuid>.seed.json`, `scripts/mcp-session.mjs`). The approval covers the CONNECTOR's
+command, so the kernel checks that the file names exactly it:
+
+* `seal_request` (kernel) refuses `vault_request_program_mismatch`, `vault_request_arguments_mismatch`,
+  `vault_request_cwd_mismatch`, `vault_request_environment_mismatch`,
+  `vault_request_file_not_covered:<path>`, `vault_request_program_not_covered:<path>`,
+  `vault_request_path_not_absolute`,
+  `vault_request_transport_not_checked`, `vault_request_unreadable` or `vault_request_unnamed`, and hands
+  the child the sha256 of the exact bytes it read (`WA_MCP_REQUEST_FILE`, `WA_MCP_REQUEST_SHA256`);
+* the child hashes the bytes IT read, once, and refuses `mcp_request_not_approved`,
+  `mcp_request_path_mismatch` or `mcp_request_changed_since_approval` before anything is spawned or
+  connected - so a rewrite between the kernel's check and the child's read is refused rather than run.
+
+`<data>/mcp/requests` is in `lua/core/secret_guard.lua`'s roots as well, with a note that says what it
+is instead of the credentials sentence, so the plain routes to it are refused to the agent's own tools.
 
 **What this does not fix.** The agent runs as the node's uid, so the row itself is still reachable by a
 route the tool-level guard does not see (a deliberately obfuscated shell write; the plain routes are

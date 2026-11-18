@@ -112,6 +112,15 @@ end
 ok(in_registry('vault-fixture') == nil, 'the refused definition is not in the registry')
 -- The same definition imported from a peer LANDS (a shared connector is meant to arrive names-only) but
 -- disabled and unapproved.
+-- A shared connector's program is rewritten to THIS node's node (federation.import_here), and round 5
+-- refuses to approve a program that is a bare name: a name on PATH is code the digest cannot name. This
+-- test has no provisioned node, so node_program() would answer 'node'; a real node answers an absolute
+-- path (WA_NODE, or the node the installer provisions), which is what it answers here.
+local real_getenv = host.getenv
+host.getenv = function(name)
+  if name == 'WA_NODE' then return '/usr/bin/node' end
+  return real_getenv(name)
+end
 local shared_vault = { id = 'vault-shared', name = 'Shared vault fixture', transport = 'stdio', program = '/usr/bin/node',
   args = { dir .. '/mcp-shared-fixture.mjs' }, tools = { echo = 'read' }, timeout_seconds = 5,
   vault_env = { FIXTURE_TOKEN = 'fixture_token' } }
@@ -131,6 +140,7 @@ ok(approved.error ~= 'mcp_vault_env_requires_operator', 'the operator probe is n
   .. tostring(approved.error) .. ' ' .. tostring(approved.detail))
 local after = in_registry('vault-shared')
 ok(after and after.vault_approved == true, 'the operator probe is the approval')
+host.getenv = real_getenv
 ok(after and after.definition.vault_env and after.definition.vault_env.FIXTURE_TOKEN == 'fixture_token',
   'the entry stays a name on the row')
 ok(not json.encode(after):find('secret', 1, true), 'no value reaches the registry')
