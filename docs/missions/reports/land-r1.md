@@ -135,6 +135,17 @@ At HEAD (b89c0ae1), in /home/victor/Work/missions/land-r1/wt:
     lua 227/227 passed (56 excluded: scripts/fast-path.exclude); every rust crate this change touches ok
     (wa-capabilities 9s, wa-sentinel 34s, wa-mesh 0s, ...); every contract check ok.
 
+Re-run at the next HEAD, 60ba92a4 (this report committed), so the green is the committed tree and not only a
+working one - the binary was rebuilt for that commit, which is why the elapsed time matches rather than drops:
+
+    fast result ok (262 checks, 0 failed, 0 skipped)
+    fast path ok (262 checks, 0 skipped, 158s)
+    FAIL lines in the log: 0
+
+That run is at 60ba92a4. The tree differs from it by this paragraph and nothing else (one docs file), so no
+further rebuild was spent; the last code commit it measures is b89c0ae1, and the merges under it are 09381239
+and 2ca9b46d.
+
 ### Two earlier gate runs, and why they are not the measurement
 
 Both are named because a red that is dismissed without its cause is how a real one gets through.
