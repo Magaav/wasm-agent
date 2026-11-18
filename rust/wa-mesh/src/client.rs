@@ -499,13 +499,28 @@ impl<'a> Client<'a> {
                             // another call's is an unverified refusal with no code to keep.
                             return match other {
                                 Err(error) => Err((attempt, error)),
-                                Ok(_) => Ok(Outcome::Refused {
-                                    node: target.clone(),
-                                    code: "unverified_reply".into(),
-                                    verified: false,
-                                    status: 200,
-                                    detail: String::new(),
-                                }),
+                                Ok(_) => {
+                                    // A refusal is audited where it is decided, on this arm too. The
+                                    // verdict is the same statement the allow-listed branch below
+                                    // emits; without it a node's mesh.jsonl said nothing about an
+                                    // answer that arrived signed, verified and belonged to another
+                                    // call (review of 18/11, item 2: the early return replaced an arm
+                                    // that emitted, and kept only its shape).
+                                    Event::new("call", &caller.node_id, &target.node_id)
+                                        .levels(Some(caller.level), Some(target.level))
+                                        .verb(verb.as_str())
+                                        .verdict("deny", "unverified_reply")
+                                        .transport("relay", "relay")
+                                        .outcome(false, None, elapsed, 1)
+                                        .emit(self.audit);
+                                    Ok(Outcome::Refused {
+                                        node: target.clone(),
+                                        code: "unverified_reply".into(),
+                                        verified: false,
+                                        status: 200,
+                                        detail: String::new(),
+                                    })
+                                }
                             };
                         };
                         Event::new("call", &caller.node_id, &target.node_id)

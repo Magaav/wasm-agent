@@ -791,6 +791,118 @@ fn the_relay_answer_carries_the_targets_signature_so_a_forged_relay_cannot_answe
 }
 
 // ---------------------------------------------------------------------------------------------------
+// An answer that verifies but names another call: a refusal, audited as one.
+// ---------------------------------------------------------------------------------------------------
+
+/// A relay that carries ONE answer, chosen by the test: the two fields a real relay hands on
+/// (\`status\` and \`body\`, headers dropped - \`relay::RelayClient::send\`). Nothing here forwards to a
+/// node, so the caller's own verification is the only thing that decides what the answer is.
+struct StubRelay {
+    address: SocketAddr,
+    stop: Arc<AtomicBool>,
+    join: Option<std::thread::JoinHandle<()>>,
+}
+
+impl StubRelay {
+    fn start(answer: String) -> StubRelay {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("stub relay bind");
+        let address = listener.local_addr().expect("stub relay address");
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = stop.clone();
+        let answer = Arc::new(answer);
+        let join = std::thread::spawn(move || {
+            for incoming in listener.incoming() {
+                if thread_stop.load(Ordering::SeqCst) {
+                    break;
+                }
+                let Ok(mut stream) = incoming else { continue };
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+                let answer = answer.clone();
+                std::thread::spawn(move || {
+                    if http::read_request(&mut stream, http::MAX_BODY).is_err() {
+                        return;
+                    }
+                    let body = json!({"status": 200, "body": answer.as_str()}).to_string();
+                    let _ = http::write_response(&mut stream, 200, &[], body.as_bytes());
+                });
+            }
+        });
+        StubRelay { address, stop, join: Some(join) }
+    }
+
+    fn url(&self) -> String {
+        self.address.to_string()
+    }
+}
+
+impl Drop for StubRelay {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        let _ = std::net::TcpStream::connect_timeout(&self.address, Duration::from_millis(250));
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
+/// The early return on the relay path (client.rs, \`let Some(code) = wire::pre_auth_code(&text) else\`)
+/// is a verdict like the arm it replaces: \`unverified_reply\` AND the audit deny line the arm below
+/// emits. The refusal this fixes (7d7eeb9e) kept its allow-listed code and its event; the branch beside
+/// it returned the same \`Refused\` shape with no \`Event\` at all, so a node's \`mesh.jsonl\` said nothing
+/// about an answer that arrived signed, verified, and belonged to a different call.
+#[test]
+fn an_answer_that_verifies_but_names_another_call_is_an_unverified_refusal_and_is_audited() {
+    let _lock = testkit::ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _env = testkit::EnvGuard::set(&[("WA_MESH", None), ("WASM_AGENT_MESH", None)]);
+    crate::gate::reset_cache();
+    let fleet = fleet();
+    // t's own key signs the answer, so \`RelayAnswer::open\` verifies it and the roster has nothing to
+    // complain about. What is wrong is the request id inside: this answer belongs to another call.
+    let identity = fleet.t.reload();
+    let reply = MeshReply {
+        schema: wire::SCHEMA,
+        request_id: "another-call".into(),
+        from_node_id: fleet.t.node.node_id.clone(),
+        ok: true,
+        status: Some(200),
+        body: Some("{\"ran\":\"read\"}".into()),
+        error: None,
+        reason: None,
+        detail: None,
+        verb: Some("read".into()),
+    };
+    let sealed = RelayAnswer::seal(
+        &identity,
+        &fleet.t.node.node_id,
+        &fleet.a.node.node_id,
+        &reply,
+    );
+    let relay = StubRelay::start(sealed.encode());
+    let a_dir = NodeDir::new(&fleet.a, member_policy(&fleet.fleet_key.public_key, true), Some(&fleet.roster));
+    let policy = a_dir.policy();
+    let audit = MemorySink::new();
+    let mut cache = crate::cache::PeerCache::empty();
+    cache.merge_roster(&fleet.roster, wire::now_millis());
+    let inner = inner_request(&fleet.a, &fleet.t.node, "read");
+    let mut caller = client(&fleet.a.identity, &fleet.roster, &policy, &mut cache, &audit, Some(relay.url()));
+    match caller.call("t", "read", json!({"path": "README.md"}), inner) {
+        Outcome::Refused { code, verified, status, .. } => {
+            assert_eq!(code, "unverified_reply", "an answer for another call is not this call's answer");
+            assert!(!verified, "a mismatched answer is a diagnosis, never a result");
+            assert_eq!(status, 200, "the relay carried an answer; the verdict is the caller's");
+        }
+        other => panic!("an answer that names another call must be refused: {other:?}"),
+    }
+    let lines = audit.lines();
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("unverified_reply") && line.contains("deny")),
+        "the unverified refusal is audited as a deny, like every other refusal: {lines:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------------
 // The two live blockers of 07/11, end to end on loopback.
 // ---------------------------------------------------------------------------------------------------
 
