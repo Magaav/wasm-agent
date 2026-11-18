@@ -84,6 +84,39 @@ same "the way out of a pin with no await does not promise a deploy" "$(value esc
 same "...and names --unpin" "$(value escape_no_await_names_unpin)" "yes"
 same "a pin that HAS an await names the commit that releases it" "$(value escape_with_await_names_it)" "yes"
 
+echo "test-node-pins: a LEGACY await (the commit the pin rolled back from) is ignored on read (item 7)"
+# Pins already on live nodes carry await=<rolled_back_from> from the old default. Honouring it would release each
+# one on the very move it exists to stop, and rewriting the store is a bigger risk than a rule at the read - so
+# the rule is at the read, it says so in one line, and an operator's OWN await of that commit is still kept.
+same "the legacy record is found" "$(value legacy_pin_found)" "yes"
+same "its await is ignored, not honoured" "$(value legacy_await_ignored)" "yes"
+same "...and the record says which commit was ignored" "$(value legacy_await_note)" "$(value contain_pin_from)"
+same "so a target CONTAINING that commit does NOT release it" "$(value legacy_not_released_by_containment)" "false"
+same "the summary carries the one-line note" "$(value legacy_summary_says_ignored)" "yes"
+same "an operator's own await of that same commit is kept" "$(value explicit_await_kept)" "yes"
+same "...because the writer marks it explicit" "$(value explicit_marker_written)" "yes"
+same "...and that one DOES release by containment" "$(value explicit_released_by_containment)" "true"
+
+echo "test-node-pins: the install-side reader applies the same rule (scripts/lib/node-pins.sh)"
+# The deploy side reads the same file in shell, the request gate reads it in Lua: one record, two readers, one
+# answer. Sourced directly against a scratch store - no binary and no build.
+FROM_SHA="$(value contain_pin_from)"
+SHELLHOME="$WORK/shell-home"; mkdir -p "$SHELLHOME/.wasm-agent"
+shell_gate() { WASM_AGENT_HOME="$SHELLHOME" bash -c '. "$1"; wa_node_pin_gate legacy-shell "" "" ""' _ "$ROOT/scripts/lib/node-pins.sh" 2>&1; }
+printf 'schema=wasm-agent-pins/1\nid=1egacy0002\nnode=legacy-shell\nkind=rollback\nstate=active\ncommit=unknown\nrolled_back_from=%s\nawait=%s\nreason=legacy record\n\n' "$FROM_SHA" "$FROM_SHA" > "$SHELLHOME/.wasm-agent/pins.txt"
+SHELL_OUT="$(shell_gate)"; SHELL_RC=$?
+same "the node is still pinned (the record is in force)" "$SHELL_RC" "3"
+shows "it names the pin" "$SHELL_OUT" "legacy record"
+hides "it does not claim an awaited commit" "$SHELL_OUT" "awaits"
+same "it says the await was ignored, once" "$(printf '%s' "$SHELL_OUT" | grep -c 'IGNORED')" "1"
+shows "...naming the commit it ignored" "$SHELL_OUT" "await=$(printf '%s' "$FROM_SHA" | cut -c1-12) is IGNORED"
+shows "...and why (it is what the pin rolled back from)" "$SHELL_OUT" "rolled back from"
+printf 'schema=wasm-agent-pins/1\nid=1egacy0003\nnode=legacy-shell\nkind=rollback\nstate=active\ncommit=unknown\nrolled_back_from=%s\nawait=%s\nawait_explicit=yes\nreason=an operator named it\n\n' "$FROM_SHA" "$FROM_SHA" >> "$SHELLHOME/.wasm-agent/pins.txt"
+SHELL_OUT="$(shell_gate)"; SHELL_RC=$?
+same "an explicit await of that commit still pins the node" "$SHELL_RC" "3"
+shows "...and the summary names it" "$SHELL_OUT" "awaits"
+same "...with no IGNORED line" "$(printf '%s' "$SHELL_OUT" | grep -c 'IGNORED')" "0"
+
 echo "test-node-pins: the fleet view"
 same "the report lists the pins" "$(value fleet_pins)" "1"
 same "and flags the overdue ones" "$(value fleet_overdue)" "1"

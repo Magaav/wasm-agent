@@ -53,6 +53,21 @@ local function read(path)
   return text
 end
 
+-- AN await= THAT IS THE COMMIT THE PIN ROLLED BACK FROM IS IGNORED, ON READ, WITH ONE LINE (round-4 item 7).
+-- Before round 3 that field was DEFAULTED to rolled_back_from, so pins already written on live nodes carry it,
+-- and honouring it would release each one exactly on the move it exists to stop. The files are NOT migrated -
+-- an append-only store that a new build silently rewrites is a worse risk than a rule at the read - so the rule
+-- is here, in the one function every reader in Lua goes through, and a record that named its await explicitly
+-- (await_explicit=yes, written above) keeps it.
+local function ignore_legacy_await(record)
+  local await, from = trim(record.await), trim(record.rolled_back_from)
+  if await == '' or from == '' or await ~= from then return record end
+  if trim(record.await_explicit) == 'yes' then return record end
+  record.await_ignored = await
+  record.await = ''
+  return record
+end
+
 -- Parse the file into records. A malformed line is kept as-is under "unparsed" rather than dropped: a
 -- record this reader does not understand is a fact about the writer, not permission to ignore it.
 function M.parse(text)
@@ -75,6 +90,7 @@ function M.parse(text)
     end
   end
   if current and (current.id or next(current)) then records[#records + 1] = current end
+  for _, record in ipairs(records) do ignore_legacy_await(record) end
   return records
 end
 
@@ -131,7 +147,7 @@ local function caller_name()
 end
 
 local function field_block(record)
-  local order = { 'id', 'node', 'node_id', 'kind', 'state', 'commit', 'binary_sha256', 'rolled_back_from', 'reason', 'by', 'at', 'until_', 'await', 'supersedes' }
+  local order = { 'id', 'node', 'node_id', 'kind', 'state', 'commit', 'binary_sha256', 'rolled_back_from', 'reason', 'by', 'at', 'until_', 'await', 'await_explicit', 'supersedes' }
   local lines = { 'schema=' .. M.SCHEMA }
   for _, key in ipairs(order) do
     if record[key] ~= nil and record[key] ~= '' then
@@ -180,14 +196,20 @@ function M.set(fields)
     kind = trim(fields.kind) ~= '' and trim(fields.kind) or 'pin',
     commit = trim(fields.commit) ~= '' and trim(fields.commit) or 'unknown',
     binary_sha256 = trim(fields.binary_sha256),
-    -- The commit a rollback went BACK from. It is the pin's default "await": the reason a pin must not become a
-    -- permanent trap is that the history it went back from keeps moving, and a target that contains that commit
-    -- is the operator's own statement that the way forward is open again.
+    -- The commit a rollback went BACK from, kept for the reader and for the pin's own sentence. It is NOT a
+    -- default "await": it used to be filled in as one, and because that history contains the change being held
+    -- off, the next ordinary deploy of main released the pin on the very move it was written to stop (round-3
+    -- item 2). Only an operator names an await.
     rolled_back_from = trim(fields.rolled_back_from),
     reason = reason, by = trim(fields.by) ~= '' and trim(fields.by) or caller_name(), at = at,
     until_ = trim(fields.until_), await = trim(fields.await),
     supersedes = previous and previous.id or '',
   }
+  -- AN AWAIT THIS READER WILL NOT IGNORE. An operator may name the commit the pin rolled back from - a statement
+  -- that the way forward is open again once that history lands. A record written before round 4 cannot say whether
+  -- its await was named or defaulted, and the read rule below ignores await == rolled_back_from in that case
+  -- (round-4 item 7); this marker is what separates the two from now on.
+  if record.await ~= '' then record.await_explicit = 'yes' end
   local written, problem = M.write(record)
   if not written then return nil, problem end
   record.summary = M.summary_line(record)
@@ -292,6 +314,10 @@ function M.summary_line(record)
     parts[#parts + 1] = 'until ' .. trim(record.until_) .. (late and ' (OVERDUE)' or '')
   end
   if trim(record.await) ~= '' then parts[#parts + 1] = 'awaits ' .. trim(record.await):sub(1, 12) end
+  -- the one-line note for a legacy record: what was ignored, and why it is not a release (round-4 item 7)
+  if trim(record.await_ignored) ~= '' then
+    parts[#parts + 1] = 'await ' .. trim(record.await_ignored):sub(1, 12) .. ' IGNORED (a legacy record defaulted it to the commit the pin rolled back from, which is not a release)'
+  end
   return table.concat(parts, ', ')
 end
 

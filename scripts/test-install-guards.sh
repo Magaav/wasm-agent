@@ -29,6 +29,31 @@ shows() { case "$2" in *"$3"*) ok "$1" ;; *) bad "$1: '$3' not found in '$(print
 hides() { case "$2" in *"$3"*) bad "$1: '$3' should not be there" ;; *) ok "$1" ;; esac; }
 
 WORK="$(mktemp -d)"; trap 'kill %1 %2 2>/dev/null; rm -rf "$WORK"' EXIT
+# A SCRATCH HOME, AND A REFUSAL IF IT IS NOT ONE (round-4 item 5). FLEET_HOME used to be "" for the cases that
+# needed no pin store, and "" means "pass no WASM_AGENT_HOME" - so fleet-install.sh fell back to
+# WASM_AGENT_HOME or $HOME/.wasm-agent, this machine's REAL pin store and the real node name. Nothing was written
+# by that, but a test that READS the operator's pins to decide what to assert is not a fixture: on a pinned machine
+# those assertions are about that pin, and the run says nothing about the code.
+REAL_HOME="${HOME:-}"
+SCRATCH_HOME="$WORK/scratch-home"; mkdir -p "$SCRATCH_HOME"
+export HOME="$SCRATCH_HOME"
+export WASM_AGENT_HOME="$SCRATCH_HOME"
+# CHECKED, NOT ASSUMED. Every fleet-install.sh run goes through this, so an edit that unsets HOME or points it back
+# at the operator's is a refusal by name rather than a quiet read of a real $HOME/.wasm-agent.
+scratch_home_required() {
+  local real="${REAL_HOME%/}"
+  case "${HOME:-}" in
+    ''|"$real"|"$real"/.wasm-agent|"$real"/.wasm-agent/*)
+      printf 'refused(test_needs_scratch_home): HOME is %s, which is the real home of this machine. This test reads a node pin store and must never read %s/.wasm-agent. Nothing was installed.\n' "${HOME:-unset}" "${REAL_HOME:-?}" >&2
+      exit 2 ;;
+  esac
+  case "${WASM_AGENT_HOME:-}" in
+    ''|"$real"|"$real"/.wasm-agent|"$real"/.wasm-agent/*)
+      printf 'refused(test_needs_scratch_home): WASM_AGENT_HOME is %s, which is the real agent home of this machine. Set it to a scratch directory. Nothing was installed.\n' "${WASM_AGENT_HOME:-unset}" >&2
+      exit 2 ;;
+  esac
+}
+scratch_home_required
 SHIM="$WORK/bin"; mkdir -p "$SHIM"
 # pkill is shadowed so a passing run cannot touch this machine's node; systemctl answers "no service here".
 printf '#!/bin/sh\nexit 0\n' > "$SHIM/pkill"; chmod +x "$SHIM/pkill"
@@ -65,10 +90,12 @@ done
 [ -n "$PORT" ] && ok "a local /health is serving on 127.0.0.1:$PORT" || bad "could not start a local /health server"
 
 # WASM_AGENT_HOME: the node's own pin store lives under it (scripts/lib/node-pins.sh), and a scratch one keeps
-# this test away from whatever this machine is actually pinned to.
-FLEET_HOME=""
+# this test away from whatever this machine is actually pinned to. Every case starts from the SCRATCH home set at
+# the top of this file - there is no "pass nothing and inherit the real one" state any more (item 5).
+FLEET_HOME="$SCRATCH_HOME"
 fleet() { # <install-dir> <artifact> <args...> -> FLEET_OUT, FLEET_RC
   local dir="$1" artifact="$2"; shift 2
+  scratch_home_required
   # env, not a bare assignment: ${FLEET_HOME:+...} is one word, and "VAR=value command" only works when it is a
   # command-prefix assignment rather than an argument.
   FLEET_OUT="$(env HEALTH="http://127.0.0.1:${PORT:-9}/health" HEALTH_WAIT=2 ${FLEET_HOME:+WASM_AGENT_HOME=$FLEET_HOME} \
@@ -158,7 +185,7 @@ fleet "$E" "$WORK/artifact-ok" --force --reason "the operator decides this node 
 same "--force --reason installs over the node's own pin -> 0" "$FLEET_RC" "0"
 shows "...saying the override out loud" "$FLEET_OUT" "OVERRIDE, recorded"
 shows "...and the install record carries it" "$(cat "$E/installed.txt" 2>/dev/null)" "ancestry=override"
-FLEET_HOME=""
+FLEET_HOME="$SCRATCH_HOME"
 
 echo "test-install-guards: fleet-install.sh - a binary that cannot name its commit is UNKNOWN (item 1)"
 # Round 3 of the review: "nothing names a commit" was read as "a first install", so an install whose binary
@@ -203,6 +230,40 @@ shows "...and says nothing was installed" "$E_OUT" "nothing was installed"
 same "the running binary was not replaced" "$(head -1 "$E/wa")" "#!/bin/sh"
 grep -qF 'NODE_PIN_LIB:-}" ]; then' "$ROOT/scripts/fleet-install.sh" \
   && bad "the pin gate is still wrapped in a skip" || ok "the pin gate no longer has a skip path"
+
+echo "test-install-guards: upgrade.sh - the unverified-candidate override needs a reason (item 6)"
+# WA_ALLOW_UNVERIFIED_UPGRADE=1 was the whole override: one word, no sentence beside it, so installed.txt could
+# not say why the node moved - while every other override in these scripts demands its reason (round-4 item 6).
+# The switch now says WHAT is waived and WA_UPGRADE_FORCE_REASON says WHY. All three runs are bounded: the two
+# refusals happen before anything is touched, and the third stops at the scratch proof (the candidate answers
+# --version and then fails /health), so the install directory still holds the bytes it started with.
+UPGDIR="$WORK/upgrade-guard"; mkdir -p "$UPGDIR"
+stub "$UPGDIR/wa" "$H40" false 0
+CANDIDATE="$WORK/vendor-candidate"
+printf '#!/bin/sh\ncase "$1" in\n  --version) echo "wasm-agent 9.9.9 (vendor build, no stamp)" ;;\n  *) exit 1 ;;\nesac\n' > "$CANDIDATE"
+chmod +x "$CANDIDATE"
+# Two ports nothing is using, asked of the kernel rather than guessed: upgrade.sh installs nothing here, but a
+# run that reached the port step must not collide with the /health server above.
+free_port() { python3 -c 'import socket\ns=socket.socket()\ns.bind(("127.0.0.1",0))\nprint(s.getsockname()[1])\ns.close()' 2>/dev/null; }
+UPG_PORT="$(free_port)"; UPG_CLIENT_PORT="$(free_port)"
+upgrade_run() { # <VAR=value...> -> UPG_OUT, UPG_RC
+  UPG_OUT="$(env PATH="$SHIM:$PATH" WA_INSTALL_DIR="$UPGDIR" WA_PORT="$UPG_PORT" WA_CLIENT_PORT="$UPG_CLIENT_PORT" \
+    WA_IDLE_TIMEOUT=1 "$@" timeout 120 bash "$ROOT/scripts/upgrade.sh" "$CANDIDATE" 2>&1)"
+  UPG_RC=$?
+}
+upgrade_run
+same "a candidate that cannot name itself is refused" "$UPG_RC" "2"
+shows "...by name" "$UPG_OUT" "refused(candidate_commit_unknown)"
+upgrade_run WA_ALLOW_UNVERIFIED_UPGRADE=1
+same "the switch alone is refused too (it is not an override on its own)" "$UPG_RC" "2"
+shows "...demanding the reason" "$UPG_OUT" "refused(override_reason_required)"
+shows "...and naming the variable that carries it" "$UPG_OUT" "WA_UPGRADE_FORCE_REASON=<text>"
+upgrade_run WA_ALLOW_UNVERIFIED_UPGRADE=1 WA_UPGRADE_FORCE_REASON="the vendor artifact carries no build stamp"
+hides "with a reason it goes past the check" "$UPG_OUT" "refused(override_reason_required)"
+shows "...saying the override out loud" "$UPG_OUT" "OVERRIDE, recorded"
+shows "...and recording the reason against the rule it overrode" "$UPG_OUT" "force_requested rule=candidate_commit_unknown reason=the vendor artifact carries no build stamp"
+shows "the run is still bounded (the stub stops at the scratch proof)" "$UPG_OUT" "did not answer /health on a scratch port"
+same "nothing was installed" "$(head -1 "$UPGDIR/wa")" "#!/bin/sh"
 
 echo "test-install-guards: upgrade.sh and bootstrap.sh ask the same question (structural)"
 # These two cannot be run here without building a node (they install one), so what is asserted is that they route

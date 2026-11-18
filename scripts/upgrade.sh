@@ -223,10 +223,24 @@ PREVIOUS_BRANCH="$(sed -n 's/^branch=//p' "$INSTALL_DIR/installed.txt" 2>/dev/nu
 UPGRADE_VIA_WANTED="${WA_UPGRADE_VIA:-}"
 UPGRADE_REASON_WANTED="${WA_UPGRADE_REASON:-}"
 unset WA_UPGRADE_VIA WA_UPGRADE_REASON
-if [ -n "$PREVIOUS_COMMIT" ] && [ "$PREVIOUS_COMMIT" != unknown ] \
-    && [ -z "$SOURCE_COMMIT" ] && [ "${WA_ALLOW_UNVERIFIED_UPGRADE:-}" != 1 ]; then
-  say "refused(candidate_commit_unknown): the candidate $(basename "$NEW") cannot report its own build, so nothing can show whether it contains the installed commit $PREVIOUS_COMMIT - and the installed tree's HEAD is not that answer (it can be another commit entirely). Nothing was installed, and the running pair is untouched. Install a build made by the current rust/wa-host/build.rs (wa --build-info answers on it), or set WA_ALLOW_UNVERIFIED_UPGRADE=1 for an intentional operator override."
+# AN OVERRIDE NEEDS ITS REASON (round-4 item 6). WA_ALLOW_UNVERIFIED_UPGRADE=1 used to be the whole override: one
+# word, no sentence beside it, unlike every other override in this script (WA_UPGRADE_FORCE_REASON) and its
+# siblings (ALLOW_UNPUSHED_REASON in the two publishers). An override nobody can read later is not a decision
+# anyone can review, and installed.txt could not say why this node moved - the same complaint the deploy side
+# answers with --force --reason. So the switch says WHAT is waived and the reason says WHY, and the reason is what
+# reaches installed.txt as ancestry_override=.
+if [ -n "$PREVIOUS_COMMIT" ] && [ "$PREVIOUS_COMMIT" != unknown ] && [ -z "$SOURCE_COMMIT" ]; then
+  if [ "${WA_ALLOW_UNVERIFIED_UPGRADE:-}" != 1 ]; then
+    say "refused(candidate_commit_unknown): the candidate $(basename "$NEW") cannot report its own build, so nothing can show whether it contains the installed commit $PREVIOUS_COMMIT - and the installed tree's HEAD is not that answer (it can be another commit entirely). Nothing was installed, and the running pair is untouched. Install a build made by the current rust/wa-host/build.rs (wa --build-info answers on it), or set WA_ALLOW_UNVERIFIED_UPGRADE=1 together with WA_UPGRADE_FORCE_REASON=<text> for an intentional operator override, and the reason is recorded in installed.txt."
   exit 2
+  fi
+  if [ -z "${WA_UPGRADE_FORCE_REASON:-}" ]; then
+    say "refused(override_reason_required): WA_ALLOW_UNVERIFIED_UPGRADE=1 installs a candidate that cannot report its own build, so nothing can show whether it contains the installed commit $PREVIOUS_COMMIT - and an override nobody can read later is not a decision anyone can review. Say why: WA_ALLOW_UNVERIFIED_UPGRADE=1 WA_UPGRADE_FORCE_REASON=<text> (the reason is recorded in installed.txt). Nothing was installed, and the running pair is untouched. Install a build made by the current rust/wa-host/build.rs instead (wa --build-info answers on it) and no override is needed."
+    exit 2
+  fi
+  UPGRADE_ANCESTRY_OVERRIDE="$WA_UPGRADE_FORCE_REASON"
+  say "OVERRIDE, recorded: the candidate $(basename "$NEW") cannot report its own build, so nothing can show whether it contains the installed commit $PREVIOUS_COMMIT; going on because WA_ALLOW_UNVERIFIED_UPGRADE=1 and WA_UPGRADE_FORCE_REASON say so"
+  say "force_requested rule=candidate_commit_unknown reason=$WA_UPGRADE_FORCE_REASON by=$(id -un 2>/dev/null || echo unknown) at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 fi
 # A candidate that does not contain what is RUNNING is a downgrade, and the refusal lists what it would
 # lose. The verdict and the wording come from scripts/lib/install-record.sh, which is also what deploy.sh,

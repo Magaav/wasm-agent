@@ -71,6 +71,30 @@ wa_node_pin_active() {
   return 0
 }
 
+
+# THE AWAIT THIS RECORD ACTUALLY NAMES (round-4 item 7). Before round 3 a pin DEFAULTED its await to the commit it
+# rolled back from, so pins already written on live nodes carry await=<that commit> - and honouring it releases the
+# pin on exactly the move it exists to stop. The files are NOT migrated (an append-only store a new build silently
+# rewrites is a worse risk than a rule at the read): an await equal to rolled_back_from is ignored unless the record
+# says await_explicit=yes, which is what a record written by lua/core/pins.lua now carries when an OPERATOR named
+# the commit. wa_pin_await_note is the one-line statement of that, printed once by the gate.
+wa_pin_await_value() {
+  local block="${1:-}" await from explicit
+  await="$(wa_pin_field "$block" await)"
+  [ -n "$await" ] || return 0
+  from="$(wa_pin_field "$block" rolled_back_from)"
+  explicit="$(wa_pin_field "$block" await_explicit)"
+  if [ -n "$from" ] && [ "$await" = "$from" ] && [ "$explicit" != yes ]; then return 0; fi
+  printf '%s' "$await"
+}
+wa_pin_await_note() {
+  local block="${1:-}" await from explicit
+  await="$(wa_pin_field "$block" await)"
+  from="$(wa_pin_field "$block" rolled_back_from)"
+  explicit="$(wa_pin_field "$block" await_explicit)"
+  [ -n "$await" ] && [ -n "$from" ] && [ "$await" = "$from" ] && [ "$explicit" != yes ] || return 0
+  printf 'node-pin: await=%s is IGNORED on this record: it is the commit the pin rolled back from, which is not a release (a legacy pin; nothing was rewritten)\n' "$(printf '%s' "$await" | cut -c1-12)"
+}
 # wa_pin_summary <block> -> one line a human (and a refusal) can act on.
 wa_pin_summary() {
   local block="${1:-}" node commit reason until_ await from
@@ -78,7 +102,7 @@ wa_pin_summary() {
   commit="$(wa_pin_field "$block" commit)"; [ -n "$commit" ] || commit=unknown
   reason="$(wa_pin_field "$block" reason)"
   until_="$(wa_pin_field "$block" until)"
-  await="$(wa_pin_field "$block" await)"
+  await="$(wa_pin_await_value "$block")"
   from="$(wa_pin_field "$block" rolled_back_from)"
   printf '%s pinned to %s' "${node:-?}" "$(printf '%s' "$commit" | cut -c1-12)"
   [ -n "$from" ] && printf ' (rolled back from %s)' "$(printf '%s' "$from" | cut -c1-12)"
@@ -96,7 +120,7 @@ wa_pin_released() {
   [ -n "$target" ] || return 2
   pinned="$(wa_pin_field "$block" commit)"
   [ -n "$pinned" ] && [ "$pinned" = "$target" ] && return 0
-  await="$(wa_pin_field "$block" await)"
+  await="$(wa_pin_await_value "$block")"
   [ -n "$await" ] || return 1
   [ "$await" = "$target" ] && return 0
   [ -n "$tree" ] && [ -d "$tree" ] || return 2
@@ -117,7 +141,7 @@ wa_pin_escape() {
   # No block handed over? Read the one that is in force, so the sentence is about THIS node's pin and not
   # about a pin in general.
   [ -n "$block" ] || block="$(wa_node_pin_active "$name" "")"
-  [ -n "$block" ] && await="$(wa_pin_field "$block" await)"
+  [ -n "$block" ] && await="$(wa_pin_await_value "$block")"
   if [ -n "$await" ]; then
     printf "wa update %s --unpin --reason <text> (releases it and records why); or install a target that contains the awaited commit %s (that releases it by itself); or pass --force --reason <text> and it is recorded"       "$name" "$(printf '%s' "$await" | cut -c1-12)"
   else
@@ -130,8 +154,11 @@ wa_pin_escape() {
 #   -> 3 the node is pinned and this target does not release it
 # Prints the record either way, so a caller's refusal can quote it.
 wa_node_pin_gate() {
-  local name="${1:-}" id="${2:-}" target="${3:-}" tree="${4:-}" block
+  local name="${1:-}" id="${2:-}" target="${3:-}" tree="${4:-}" block note
   block="$(wa_node_pin_active "$name" "$id")" || return 0
+  # one line, once, for a record whose await is the commit it rolled back from (round-4 item 7)
+  note="$(wa_pin_await_note "$block")"
+  [ -n "$note" ] && printf '%s\n' "$note"
   if [ -n "$target" ]; then
     wa_pin_released "$block" "$target" "$tree"
     case $? in

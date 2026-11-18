@@ -1853,22 +1853,6 @@ fn watch_deploy_exit(mut child: std::process::Child, capture: PathBuf, started: 
 ///   2. `scripts/<file>` beside the *installed binary* (the install directory) - this
 ///      is where an install that ships the script puts it.
 ///   3. `scripts/<file>` under the current directory, for a watcher started from a checkout.
-/// Does the copy shipped beside the running binary win over an explicitly pinned script?
-///
-/// THREE-VALUED, because the comparison can fail and it used to answer "no" when it did: an unreadable mtime kept
-/// the pinned installer, which is exactly the month-old pin the shipped-copy rule exists to retire - the rule
-/// failed open precisely where it could not measure, and silently (no audit line). "Cannot compare" now means the
-/// shipped copy wins, and the caller's audit line says which case it was (round-3: reading the sentinel's
-/// request handling for the same fail-open shape).
-pub(crate) fn shipped_wins(shipped: Option<std::time::SystemTime>, pin: Option<std::time::SystemTime>) -> (bool, &'static str) {
-    match (shipped, pin) {
-        (Some(shipped), Some(pin)) if shipped > pin => (true, "the shipped copy is newer than the pinned one"),
-        (Some(_), Some(_)) => (false, "the pinned copy is at least as new as the shipped one"),
-        (Some(_), None) => (true, "the pinned copy's timestamp cannot be read, so it cannot be shown to be as new as the shipped copy"),
-        (None, _) => (true, "the shipped copy's timestamp cannot be read, so neither copy can be shown to be the newer one: the copy that ships with this binary runs"),
-    }
-}
-
 fn resolve_script(file: &str, override_env: &str) -> Result<PathBuf> {
     if let Ok(explicit) = std::env::var(override_env) {
         if Path::new(&explicit).exists() {
@@ -1877,13 +1861,18 @@ fn resolve_script(file: &str, override_env: &str) -> Result<PathBuf> {
             // a sentinel that obeyed it ran a month-old installer for ever. The pin still wins when it is
             // at least as new as the shipped copy.
             if let Some(shipped) = std::env::current_exe().ok().and_then(|me| me.parent().map(|d| d.join("scripts").join(file))) {
-                if shipped.exists() {
-                    let modified = |path: &Path| std::fs::metadata(path).and_then(|meta| meta.modified()).ok();
-                    let (wins, why) = shipped_wins(modified(&shipped), modified(Path::new(&explicit)));
-                    if wins {
-                        audit("script-pin-stale", &explicit, &format!("{why}; using {} instead", shipped.display()));
-                        return Ok(shipped);
-                    }
+                // Round-4 item 8: this is main's comparison, unchanged. A round-3 draft made "cannot compare" mean
+                // "the shipped copy wins" (a three-valued shipped_wins with its own test). That is a behaviour
+                // change nobody asked for, it was outside this mission's brief, and no test shows it is needed:
+                // the fail-open it was meant to close is a pin whose mtime cannot be read, which the audit line
+                // below already makes visible whenever the comparison says the shipped copy is newer. Reverted.
+                let newer = |a: &Path, b: &Path| -> bool {
+                    match (std::fs::metadata(a).and_then(|m| m.modified()), std::fs::metadata(b).and_then(|m| m.modified())) {
+                        (Ok(x), Ok(y)) => x > y, _ => false }
+                };
+                if shipped.exists() && newer(&shipped, Path::new(&explicit)) {
+                    audit("script-pin-stale", &explicit, &format!("using the newer shipped {} instead", shipped.display()));
+                    return Ok(shipped);
                 }
             }
             return Ok(PathBuf::from(explicit));
@@ -4000,21 +3989,6 @@ mod forced_deploy_tests {
         assert!(!blank.iter().any(|arg| arg == "--force"), "a force with no reason must not reach the installer: {blank:?}");
     }
 
-    #[test]
-    fn a_script_pin_that_cannot_be_compared_loses_to_the_shipped_copy() {
-        use std::time::{Duration, SystemTime};
-        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
-        let newer = base + Duration::from_secs(60);
-        assert_eq!(shipped_wins(Some(newer), Some(base)).0, true, "a newer shipped copy replaces a stale pin");
-        assert_eq!(shipped_wins(Some(base), Some(newer)).0, false, "a pin at least as new as the shipped copy stays");
-        assert_eq!(shipped_wins(Some(base), Some(base)).0, false, "equal timestamps keep the operator's pin");
-        let (wins, why) = shipped_wins(Some(base), None);
-        assert!(wins, "{why}");
-        assert!(why.contains("cannot be read"), "{why}");
-        let (wins, why) = shipped_wins(None, Some(base));
-        assert!(wins, "an unreadable shipped copy must not silently keep a month-old pin: {why}");
-        assert!(why.contains("cannot be read"), "{why}");
-    }
 
     #[test]
     fn a_forced_deploy_without_a_reason_is_refused_before_a_file_exists() {

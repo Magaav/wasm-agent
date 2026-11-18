@@ -120,6 +120,32 @@ if ok_git() then
   local escape_with_await = tostring(pins.escape_hatch('edge2', held))
   say('escape_with_await_names_it',
     escape_with_await:find('contains the awaited commit', 1, true) ~= nil and 'yes' or 'no')
+
+  -- ---- round-4 item 7: an await that IS the commit the pin rolled back from is ignored on read ----------
+  -- Pins already on live nodes carry it: before round 3 the writer DEFAULTED await to rolled_back_from, so
+  -- honouring it releases each pin on the very move it exists to stop. The record below is written the way those
+  -- files hold it (raw text, no await_explicit marker) because the writer cannot produce that shape any more.
+  local legacy_handle = io.open(pins.path(), 'a')
+  if legacy_handle then
+    legacy_handle:write('\nschema=wasm-agent-pins/1\nid=1egacy0001\nnode=legacy-node\nkind=rollback\nstate=active\ncommit=unknown\nrolled_back_from=' .. first .. '\nawait=' .. first .. '\nreason=written before the default was removed\n\n')
+    legacy_handle:close()
+  end
+  local legacy_active = pins.active('legacy-node')
+  say('legacy_pin_found', legacy_active and 'yes' or 'no')
+  say('legacy_await_ignored', (legacy_active and trim0(legacy_active.await) == '') and 'yes' or 'no')
+  say('legacy_await_note', legacy_active and trim0(legacy_active.await_ignored) or 'missing')
+  say('legacy_not_released_by_containment',
+    tostring((pins.released(legacy_active, second, repo) or {}).released))
+  say('legacy_summary_says_ignored',
+    (pins.summary_line(legacy_active):find('IGNORED', 1, true) ~= nil) and 'yes' or 'no')
+  -- ...and the same await NAMED by an operator is kept: the marker is what separates a statement from a default
+  local explicit_pin = pins.set({ node = 'explicit-node', commit = 'unknown', rolled_back_from = first,
+    await = first, reason = 'the operator named the commit it went back from' })
+  local explicit_active = pins.active('explicit-node')
+  say('explicit_await_kept', (explicit_active and trim0(explicit_active.await) == first) and 'yes' or 'no')
+  say('explicit_marker_written', explicit_pin and trim0(explicit_pin.await_explicit) or 'missing')
+  say('explicit_released_by_containment',
+    tostring((pins.released(explicit_active, second, repo) or {}).released))
 else
   say('contain_repo', 'no git')
 end
