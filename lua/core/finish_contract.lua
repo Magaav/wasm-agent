@@ -22,7 +22,7 @@
 --               this session's evidence, and it is not an answer (land-routing 00:50).
 --   compaction  the step answered with a context-compaction summary, so the turn ended on a summary
 --               instead of continuing the task (edit-transport 01:01: the model's own <analysis> +
---               <summary>; the harness's own checkpoint template is the same shape).
+--               <summary>; the harness's own checkpoint/prefix template, in FULL, is the same shape).
 --   plan        a first-person intent at the end of a run that executed NOTHING at all (round 3, item 2:
 --               a run that ran a tool has an action, and its closing sentence is the answer to the
 --               request). Conservative: a short answer whose LAST sentence asks this agent to do
@@ -135,16 +135,26 @@ local function without_summary_blocks(text)
   return rest
 end
 
--- The harness's own checkpoint template (lua/core/agent.lua, CHECKPOINT_SUMMARY_PROMPT): the same shape
--- when a model reproduces it, and a plan when it does not, so it is named here rather than mistaken for
--- an answer.
-local CHECKPOINT_HEADINGS = { "## goal", "## progress", "## next steps" }
-local function is_checkpoint(text)
+-- The harness's OWN compaction formats, quoted from lua/core/agent.lua: the checkpoint template
+-- (CHECKPOINT_SUMMARY_PROMPT, "Use this EXACT format") and the split-turn prefix template
+-- (PREFIX_SUMMARY_PROMPT). A signature is a template's WHOLE heading set. Round 3, item 6: generic
+-- headings are not a signature - "## Goal / ## Progress / ## Next steps" is also what a user asks for in
+-- an answer, and that answer is the answer, so the three-heading test was the false positive. The test
+-- reads these headings back out of agent.lua, so the list here cannot drift from the template there.
+local SUMMARY_TEMPLATES = {
+  { "## goal", "## constraints & preferences", "## progress", "## key decisions", "## next steps" },
+  { "## original request", "## early progress", "## context for suffix" },
+}
+local function is_harness_summary(text)
   local lowered = text:lower()
-  for _, heading in ipairs(CHECKPOINT_HEADINGS) do
-    if not lowered:find(heading, 1, true) then return false end
+  for _, headings in ipairs(SUMMARY_TEMPLATES) do
+    local all = true
+    for _, heading in ipairs(headings) do
+      if not lowered:find(heading, 1, true) then all = false break end
+    end
+    if all then return true end
   end
-  return true
+  return false
 end
 
 function M.compaction(text)
@@ -152,8 +162,8 @@ function M.compaction(text)
   local tagged = raw:find("<summary>", 1, true) ~= nil or raw:find("<analysis>", 1, true) ~= nil
   local cleaned = without_summary_blocks(raw)
   local summary_only = tagged and trim(cleaned) == ""
-  local checkpoint_only = is_checkpoint(raw)
-  if not (summary_only or checkpoint_only) then return nil end
+  local harness_summary = is_harness_summary(raw)
+  if not (summary_only or harness_summary) then return nil end
   return {
     shape = "compaction",
     notice = "[Harness notice] This message was a context-compaction summary, not an answer: nothing ran "

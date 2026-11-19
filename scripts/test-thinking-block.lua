@@ -193,8 +193,22 @@ eq(finish_contract.shutdown('A node shutdown ends the claim; nothing ran.'), nil
 local SUMMARY = '<analysis>The task is half done and the context is full.</analysis>\n\n'
   .. '<summary>1. The work in progress.\n2. What is next.</summary>'
 eq((finish_contract.compaction(SUMMARY) or {}).shape, 'compaction', 'the measured edit-transport answer (01:01)')
-eq((finish_contract.compaction('## Goal\nnothing\n## Progress\n## Next Steps\n1. go') or {}).shape, 'compaction',
-  'the harness\'s own checkpoint template is the same shape')
+-- Round 3, item 6: the harness's OWN template, in full, is a compaction; the three generic headings a
+-- user asks for are an answer. The headings are read back out of agent.lua below, so this list cannot
+-- drift from the template the harness actually asks for.
+local HARNESS_CHECKPOINT = '## Goal\n[the goal]\n\n## Constraints & Preferences\n- (none)\n\n## Progress\n'
+  .. '### Done\n- [x] it\n\n### In Progress\n- [ ] none\n\n### Blocked\n- none\n\n'
+  .. '## Key Decisions\n- **d**: because\n\n## Next Steps\n1. push'
+eq((finish_contract.compaction(HARNESS_CHECKPOINT) or {}).shape, 'compaction',
+  'round 3: the harness\'s own checkpoint format, all of its headings, is still a compaction')
+eq(finish_contract.compaction('## Goal\nKeep the gate green.\n\n## Progress\n- the gate is green\n\n'
+  .. '## Next Steps\n1. push the branch'), nil,
+  'round 3: the three generic headings a user asked for are an answer, not a compaction')
+local agent_source = io.open('lua/core/agent.lua'):read('a')
+for _, heading in ipairs({ '## Goal', '## Constraints & Preferences', '## Progress', '## Key Decisions',
+  '## Next Steps', '## Original Request', '## Early Progress', '## Context for Suffix' }) do
+  has(agent_source, heading, 'the template heading ' .. heading .. ' is still the harness\'s own')
+end
 eq(finish_contract.compaction('The gate is green and the report is written.'), nil, 'an ordinary answer is not a summary')
 
 -- ------------------------------------------------------------------ 4. a plan instead of an action
