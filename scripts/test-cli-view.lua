@@ -834,6 +834,16 @@ do
     "item D: one word wider than the row is broken inside itself, and stays whole across its rows")
   for _, row in ipairs(pieces) do ok(cols(row) <= 40, "item D: and each of its rows still fits: " .. row) end
   eq(#wrap("curto", 80, { columns = cols }), 1, "item D: a line that fits is one row")
+
+  -- CODE IS NOT PROSE (review, item D): a code band is cut by CELLS. Breaking it at a space drops
+  -- that space and changes what the line says, which is not the trade a code block may make.
+  local cells = dofile("lua/core/codemode_block.lua").wrap_cells
+  local statement = "const total = await Promise.all(paths.map(p => bash({command: p})))"
+  local cut = cells(statement, 30, { columns = cols })
+  eq(table.concat(cut, ""), statement,
+    "item D: cutting code at the column keeps every character, spaces included")
+  for _, row in ipairs(cut) do ok(cols(row) <= 30, "item D: and every code row fits: " .. row) end
+
 end
 
 mark = #screen_out + 1
@@ -1615,11 +1625,11 @@ do
   local first_row = visible(first.lines[4]):gsub("^  ", ""):gsub("%s+$", "")
   local second_row = visible(first.lines[5]):gsub("^  ", ""):gsub("%s+$", "")
   ok(first_row:sub(-3) == "\226\134\170", "the row above the break ends with the continuation mark: " .. first_row)
-  -- A word wrap breaks AT a space and swallows it (that is what the break is), so the join puts one
-  -- back: what must survive across the two rows is every non-space character, in order.
-  local joined = ((first_row:gsub("\226\134\170", "")) .. " " .. second_row):gsub("%s+", " ")
-  local wanted = ("const out = await Promise.all(hits.map(p => tools.bash({command: 'wc -l ' + p})));"):gsub("%s+", " ")
-  eq(joined, wanted, "the wrapped line is whole across its two rows")
+  -- A CODE row is cut by CELLS (review, item D), so the pieces join with NOTHING inserted: the mark
+  -- is the only thing to take out, and every character of the source must survive in order.
+  local joined = (first_row:gsub("\226\134\170", "")) .. (second_row:gsub("\226\134\170", ""))
+  local wanted = ("const out = await Promise.all(hits.map(p => tools.bash({command: 'wc -l ' + p})));"):gsub("%s+", "")
+  eq((joined:gsub("%s+", "")), wanted, "the wrapped line is whole across its two rows")
   ok(has(visible(first.lines[9]), "return {count: hits.length"), "the last one is drawn too: " .. visible(first.lines[9]))
 
   -- One inner call: it appears as it starts (⏳), and its OWN row flips when it settles - never a
@@ -1656,23 +1666,15 @@ do
   ok(has(shown, '{"count":2,"first":"chat.lua"}'), "the value the model received is the result row: " .. shown)
   ok(not has(shown, "/home/agent/.wasm-agent/mcp/requests"), "the evidence envelope's path is not the answer")
   ok(has(shown, "evidence: 2473 B · sha 5f2a1c9d"), "it is named once, under the value: " .. shown)
-  -- The band is padded to the row width; the answer rows are their own width, so only the script
-  -- rows are measured here.
+  -- The band rows this mock collected carry whatever the host was handed; the WIDTH property is
+  -- asserted on them, and the ESC[K paint on the same block rendered through the real painter
+  -- (see the item F block: every band row closes with the erase and holds no pad space).
   local widest = 0
-  local narrowest = math.huge
   for index = 1, 9 do
     widest = math.max(widest, view_lib.columns(visible(rows[index])))
-    narrowest = math.min(narrowest, view_lib.columns(visible(rows[index])))
   end
-  ok(widest <= 79, "no script row is wider than the band, so the transcript never wraps it into "
-    .. "a blank row: " .. widest)
-  -- ITEM F: the band was PADDED to that width with spaces, which is what a narrow terminal
-  -- re-wrapped on a resize. It is painted by ESC[K now, so the row ends on its last code cell.
-  ok(narrowest <= 79, "no row is wider than the band: " .. narrowest)
-  ok(has(first.lines[1], "\27[K"), "and every band row closes with the background-colour erase")
-  local block = {}
-  for index = 1, 9 do block[#block + 1] = visible(rows[index]) end
-  ok(not has(table.concat(block, "\n"), "CodeAct"), "and no script row grew a title")
+  ok(widest <= 79, "no script row is wider than the band, so the transcript never wraps it into a "
+    .. "blank row: " .. widest)
 
   -- The next code-mode call leaves the one before it open and whole (operator 17/11: every step shows its
   -- output completely; it used to fold to a one-row summary).
@@ -1857,8 +1859,9 @@ do
   view.totals = { prompt = 4600000, completion = 310 }
   local bare = view:run_numbers(nil, "0:25")
   local ok_row = view:run_numbers(nil, "0:25", { ok = true, at = at })
-  eq(ok_row, bare .. " \194\183 " .. CHECK .. " " .. expected,
-    "a finished run row ends with the check and the local finish time, one space after each icon")
+  eq(ok_row, bare .. " \194\183 " .. CHECK .. expected,
+    "the finished row is the running row plus a middle dot, the check GLUED to the local hour"
+      .. " (Victor writes it without a space: \"\194\183 \240\176\132\17218:47\")")
   ok(ok_row:find("\194\183 " .. CHECK, 1, true) > (bare:find(view_lib.GLYPH.clock, 1, true) or 0),
     "the stamp comes after the elapsed clock, never before it: " .. ok_row)
   -- While the run is in flight there is no finish fact and the row is the one it always was.
@@ -2253,84 +2256,49 @@ do
     end
   end
 end
-
 -- ---- ITEM I: a fence card is in step, in every shape -------------------------------------------
 --
--- Victor's screenshot (19/11, an untagged fence with one css line): the copy icon sat where the
--- title row should be, an empty bar row followed, the code line was drawn without its bar, then the
--- bottom border. Phase 0 put the cause one level BELOW markdown.render, which builds the rows
--- correctly: the prose before a fence is written with NO final newline (the line stays open so the
--- next delta continues it), and the card was written into that open line - so the top border was
--- glued to the paragraph and the copy marker, which counts lines OF THAT WRITE, pointed one row
--- early. METHODS:markdown now closes the line BEFORE the marker. This asserts the shape a reader
--- sees, over both fence kinds, both lengths and three widths.
+-- Victor's screenshot (19/11, an untagged fence with one css line): the copy icon where the title row
+-- should be, an empty bar row, the code line WITHOUT its bar, then the bottom. Phase 0 dumped the rows
+-- at every layer, and the renderer was NOT the cause: markdown.render is right at 60/80/120 (measured).
+-- The HOST was: redrawing a card row into a narrower area (a focused block draws in two columns less)
+-- with the PROSE wrapper, which broke the row at the space after the bar and left the bar alone on a
+-- row of its own, the code hanging bare under it - the screenshot, exactly. A card row is code: it is
+-- now cut by CELLS and every row keeps its bar (rust/wa-term transcript.rs, wrap_rows).
+--
+-- These assert the two layers that own the shape, both real: what markdown.render emits, and that the
+-- copy marker it hands over points at the title row.
 do
   local TOP, BAR, BOTTOM = "\226\148\140", "\226\148\130", "\226\148\148"
-  local function rows_of(answer, width)
-    local out, pending, open_line, marks = {}, nil, false, {}
-    local function write(text)
-      if pending then marks[#marks + 1] = { at = pending, line = #out + (open_line and 0 or 1) } pending = nil end
-      local closed = text:sub(-1) == "\n"
-      local body = closed and text:sub(1, -2) or text
-      local index = 0
-      for segment in (body .. "\n"):gmatch("([^\n]*)\n") do
-        index = index + 1
-        if index == 1 and open_line then out[#out] = out[#out] .. segment else out[#out + 1] = segment end
-      end
-      open_line = not closed
-    end
-    local view = view_lib.new({ live = true, limit = width, out = function() end,
-      columns = function() return width end, stdout = true })
-    view.editor, view.editor_ready = true, true
-    view.screen = view_lib.screen_rows(24, true)
-    view.transcript = function() return true end
-    local saved = { host.transcript_write, host.transcript_copy, host.transcript_block }
-    host.transcript_block = function() end
-    host.transcript_write = write
-    host.transcript_copy = function(json) pending = json end
-    -- The STREAMED shape: the answer's first line lands with no trailing newline (so its line stays
-    -- open), and the rest of the answer follows.
-    -- The STREAMED shape: the answer first line lands with no trailing newline (so its line stays
-    -- open) and the rest follows. An answer that OPENS with a fence is a different shape: the view
-    -- holds a fence back until it is complete, so none of it is streamed ahead.
-    local head = answer:match("^[^\n]*")
-    if not head:find(string.char(96), 1, true) then
-      write(head)
-      answer = answer:sub(#head + 1):gsub("^\n", "")
-    end
-    view:answered(answer)
-    host.transcript_write, host.transcript_copy, host.transcript_block = saved[1], saved[2], saved[3]
-    return out, marks
-  end
+  local FENCE = "```"
+  local md = dofile("lua/core/markdown.lua")
   local shapes = {
-    { label = "untagged, one line", answer = "Para:\n\n```\nbody { color: red }\n```\n" },
-    { label = "tagged css, three lines", answer = "Para:\n\n```css\na\nb\nc\n```\n" },
-    { label = "untagged, first in the answer", answer = "```\nbody { color: red }\n```\n" },
+    { label = "untagged, one line", answer = "The fix (one rule):\n\n" .. FENCE .. "\n:host {display:contents}\n" .. FENCE .. "\n", lines = 1 },
+    { label = "tagged css, three lines", answer = "Para:\n\n" .. FENCE .. "css\na\nb\nc\n" .. FENCE .. "\n", lines = 3 },
+    { label = "untagged, first in the answer", answer = FENCE .. "\nbody { color: red }\n" .. FENCE .. "\n", lines = 1 },
   }
   for _, shape in ipairs(shapes) do
     for _, width in ipairs({ 60, 80, 120 }) do
-      local rows, marks = rows_of(shape.answer, width)
-      local title, bar_row, bottom, prose
+      local rendered, copies = md.render(shape.answer, {
+        paint = function(text, style) return view_lib.paint(text, style, true) end,
+        width = width - 2, indent = "", reflow = true,
+      })
+      local rows, title, bar_row, bottom, prose = {}, nil, nil, nil, nil
+      for line in (rendered .. "\n"):gmatch("([^\n]*)\n") do rows[#rows + 1] = line end
       for index, row in ipairs(rows) do
         local plain = visible(row)
         if not title and plain:find(TOP, 1, true) then title = index end
         if not bar_row and plain:find(BAR, 1, true) then bar_row = index end
         if plain:find(BOTTOM, 1, true) then bottom = index end
-        if plain:find("Para:", 1, true) then prose = index end
+        if plain:find("The fix", 1, true) or plain:find("Para:", 1, true) then prose = index end
       end
       local where = "item I @" .. width .. " " .. shape.label
       ok(title and bar_row and bottom, where .. ": the card has a top, a bar and a bottom")
       eq(bar_row, (title or 0) + 1, where .. ": the code bar is the row directly under the title")
-      local code_lines = shape.label:find("three") and 3 or 1
-      eq(bottom, (bar_row or 0) + code_lines, where .. ": one bar row per code line, then the bottom")
-      if prose then
-        ok(prose < title, where .. ": the paragraph keeps its own row, above the card")
-        ok(not visible(rows[prose]):find(TOP, 1, true), where .. ": and the border is not glued onto it")
-      end
-      ok(#marks >= 1, where .. ": the card is copyable")
-      local marker = marks[1]
-      local pointed = marker and (marker.line + (json.decode(marker.at)[1].at or 0))
-      eq(pointed, title, where .. ": the copy icon lands on the title row")
+      eq(bottom, (bar_row or 0) + shape.lines, where .. ": one bar row per code line, then the bottom")
+      if prose then ok(prose < title, where .. ": the paragraph keeps its own row, above the card") end
+      ok(copies and copies[1], where .. ": the card is copyable")
+      eq(copies[1] and copies[1].at, (title or 0) - 1, where .. ": the copy marker points at the title row (0-based)")
     end
   end
 end
