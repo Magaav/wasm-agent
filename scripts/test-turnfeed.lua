@@ -548,6 +548,34 @@ local after = core.gate_stats({})
 check(after.changed == 3 and after.called == 2, "so one more turn is counted, not two: "
   .. tostring(after.changed) .. "/" .. tostring(after.called))
 
+-- Review r1, fix 5: the window is "this RELEASE", so the event carries the build and the reader takes
+-- a 12-character prefix of it. Three shapes, each one a way a build filter can lie:
+--   * a stamped turn matches on its prefix (and the payload holds the long sha);
+--   * a turn with NO build stamp is unknown, and is EXCLUDED - never assumed to be this build;
+--   * a turn from ANOTHER build is excluded too, and the answer says how many it left out.
+local function build_event(build, changed, called)
+  exec("INSERT INTO harness_events(id,session_id,run_id,span_id,kind,phase,at,payload) VALUES(?,?,?,?,?,?,?,?)",
+    { host.uuid(), gate_session, "r1", "", "done_gate_turn", "end", host.now(),
+      json.encode({ changed_state = changed, called_done_criteria = called, build = build }) })
+end
+local MINE = "0123456789abcdef0123456789abcdef01234567"
+build_event(MINE, true, true)
+build_event(MINE, true, false)
+build_event("fedcba9876543210fedcba9876543210fedcba98", true, true)
+build_event(nil, true, true)
+local built = core.gate_stats({ build = "0123456789ab" })
+eq(built.changed, 2, "the 12-character prefix selects exactly this build's two turns")
+eq(built.called, 1, "and one of them called done_criteria")
+eq(built.percent, 50, "so the rate over that release alone is 50%")
+-- The exact totals are not fixed here on purpose: this ledger also holds the event note_turn itself
+-- wrote, stamped with whatever build this binary really is. What must hold is that both kinds of
+-- exclusion are REPORTED, and that neither leaks into the two turns the filter selected.
+check(built.mismatched_build >= 1, "the other build's turn is excluded and counted as excluded")
+check(built.skipped_unknown_build >= 1, "a turn with no build stamp is excluded, not assumed")
+eq(built.changed, 2, "and neither exclusion changes the selected build's own count")
+local unstamped = core.gate_stats({ build = "ffffffffffff" })
+eq(unstamped.changed, 0, "a build with no turn answers zero, not another build's turns")
+
 -- The verb over it: text, machine, and the refusal of an unreadable window.
 eq(cli.run({ "turns", "--gate" }), 0, "wa turns --gate reports the rate and exits 0")
 printed = {}
@@ -556,9 +584,12 @@ eq(cli.run({ "turns", "gate", "--json" }), 0, "the gate verb also answers in mac
 print = real_print
 local machine_gate = json.decode(table.concat(printed, "\n"))
 eq(machine_gate.threshold, 30, "the machine form states the rule's threshold")
-eq(machine_gate.percent, math.floor(after.percent * 10 + 0.5) / 10,
+-- Compared against the module re-read AT THIS POINT, not a snapshot taken before the build fixtures
+-- were inserted: the verb must print what gate_stats answers now, which is the whole claim.
+local now_stats = core.gate_stats({})
+eq(machine_gate.percent, math.floor(now_stats.percent * 10 + 0.5) / 10,
   "and the machine form prints the module's own rounded rate, not a second count")
-eq(machine_gate.changed, after.changed, "over the same state-changing turns the module counted")
+eq(machine_gate.changed, now_stats.changed, "over the same state-changing turns the module counted")
 eq(cli.run({ "turns", "--gate", "--since", "last tuesday" }), 2, "and refuses an unreadable window by name")
 exec("DELETE FROM harness_events WHERE session_id=?", { gate_session })
 exec("DELETE FROM sessions WHERE id=?", { gate_session })

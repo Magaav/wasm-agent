@@ -21,7 +21,8 @@ wa turns - the model's own harness complaints, grouped into a queue
 
   wa turns [--since 24h] [--top N] [--json] [--no-peers] [--no-digest] [--nodes a,b]
   wa turns --day YYYY-MM-DD [--top N] [--json]   one day's themes and counts, from the run journal
-  wa turns --gate [--since 24h] [--json]         the capture rate: state-changing turns, and how many
+  wa turns --gate [--since 24h] [--build SHA12] [--json]
+                                                 the capture rate: state-changing turns, and how many
                                                  called done_criteria (change/done-gate-trial, item 3)
   wa turns digest [--since 24h]
   wa turns fixed <cluster> --sha <commit> [--note TEXT]
@@ -72,7 +73,7 @@ local function refused(message)
 end
 
 local VALUED = { ["--since"] = true, ["--top"] = true, ["--nodes"] = true, ["--sha"] = true,
-  ["--note"] = true, ["--day"] = true, ["--limit"] = true }
+  ["--note"] = true, ["--day"] = true, ["--limit"] = true, ["--build"] = true }
 
 -- One collection, shared by every verb that reports: the local notes plus every peer that answered.
 local function collect(args)
@@ -220,8 +221,10 @@ local function gate_report(args)
   local since_text = flag(args, '--since')
   local since, problem = core.parse_since(since_text, host.now())
   if problem then return refused(problem) end
-  local stats = core.gate_stats({ since = since })
+  local build = flag(args, '--build')
+  local stats = core.gate_stats({ since = since, build = build })
   local window = since_text and since_text ~= '' and since_text or 'all time'
+  if build and build ~= '' then window = window .. ', build ' .. tostring(build) end
   if stats.changed == 0 then
     -- Unknown is not zero: no event is not the same as a measured 0%, and the rule deletes a gate on
     -- evidence, so this says which fact is missing rather than printing a number.
@@ -230,6 +233,12 @@ local function gate_report(args)
         changed = 0, called = 0, percent = nil, reason = 'no_state_changing_turn' }))
     else
       print(string.format('wa turns --gate (%s): no state-changing turn recorded yet', window))
+      if build and build ~= '' then
+        -- Review r1, fix 5: a build filter that matched nothing must not read like a measured zero, and
+        -- it must say what it excluded - a turn with no build stamp is unknown, not this build.
+        print(string.format('  %d event(s) read; %d carried no build stamp and %d were another build',
+          stats.events, stats.skipped_unknown_build or 0, stats.mismatched_build or 0))
+      end
       print('the run journal holds ' .. tostring(stats.events) .. ' gate event(s); the capture rate is unmeasured, not 0%')
     end
     return 0
@@ -239,7 +248,8 @@ local function gate_report(args)
   if has(args, '--json') then
     print(json.encode({ available = true, since = window, events = stats.events, changed = stats.changed,
       called = stats.called, percent = math.floor(percent * 10 + 0.5) / 10, sessions = stats.sessions,
-      threshold = 30, side = verdict }))
+      threshold = 30, side = verdict, build = stats.build,
+      skipped_unknown_build = stats.skipped_unknown_build, mismatched_build = stats.mismatched_build }))
     return 0
   end
   local lines = {}

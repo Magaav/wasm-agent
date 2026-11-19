@@ -378,9 +378,32 @@ function M.gate_stats(opts)
   local rows = query("SELECT payload, session_id, at FROM harness_events WHERE " .. where .. " ORDER BY at", params)
   local changed, called = 0, 0
   local sessions = {}
+  -- Review r1, fix 5: the operator's window is "a day of missions on the RELEASE that carries this
+  -- change", and a window that mixes builds answers a different question. build is the source commit
+  -- the binary embedded (done_gate.note_turn); the filter is a PREFIX, because an operator has a
+  -- 12-character sha in front of them and the payload holds the long one.
+  --
+  -- Unknown is not yes: a turn whose event carries no build (written before this stamp, or by a binary
+  -- that could not name itself) is EXCLUDED when a build was asked for, never assumed to be it. And a
+  -- filter that matches nothing says so by returning changed = 0, which the caller reports as
+  -- unmeasured rather than as 0%.
+  local want = opts.build and tostring(opts.build):lower():gsub('%s', '') or nil
+  if want == '' then want = nil end
+  local skipped_unknown_build = 0
+  local mismatched = 0
   for _, row in ipairs(rows) do
     local ok, payload = pcall(json.decode, row.payload or '')
     payload = ok and type(payload) == 'table' and payload or {}
+    if want then
+      local build = type(payload.build) == 'string' and payload.build:lower() or ''
+      if build == '' then
+        skipped_unknown_build = skipped_unknown_build + 1
+        payload = {}
+      elseif build:sub(1, #want) ~= want then
+        mismatched = mismatched + 1
+        payload = {}
+      end
+    end
     -- unknown is not yes: a payload that does not say the turn changed state is not counted as one.
     if payload.changed_state == true then
       changed = changed + 1
@@ -392,7 +415,8 @@ function M.gate_stats(opts)
   for _ in pairs(sessions) do session_count = session_count + 1 end
   local percent = changed > 0 and (called * 100 / changed) or nil
   return { available = true, events = #rows, changed = changed, called = called,
-    percent = percent, sessions = session_count, since = since }
+    percent = percent, sessions = session_count, since = since, build = want,
+    skipped_unknown_build = skipped_unknown_build, mismatched_build = mismatched }
 end
 
 local function previous_user_seq(session_id, seq)

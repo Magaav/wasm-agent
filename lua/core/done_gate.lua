@@ -671,6 +671,11 @@ function M.note_turn(state, ctx)
       M.EVENT, "end", {
         changed_state = state.effected == true,
         called_done_criteria = state.done_criteria_called == true,
+        -- Review r1, fix 5: WHICH BUILD the turn ran on, as the source commit the binary embedded. The
+        -- operator's window is "a day of missions on the release that carries this change", and a
+        -- window measured without a build stamp is every build mixed together. Empty is UNKNOWN and
+        -- stays empty (turn_journal's own rule); it is never filled from HEAD.
+        build = dep("turn_journal").build_of(),
       })
   end)
   return true
