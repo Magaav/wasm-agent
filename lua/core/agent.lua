@@ -1131,6 +1131,19 @@ function M:build_context()
   local agents, agents_path, tool_list, catalog, workdir
   local code_ctx={session_id=self.session_id,user_id=self.user,role=self.role,subagent=self.subagent,codemode_policy=self.codemode_policy}
   self.codemode_policy=dofile('lua/core/codemode_policy.lua').pin(memory,self.role,code_ctx)
+  -- Which raw-code mode THIS THREAD acts in (rel review r2, item 6). A thread that has a frozen prefix
+  -- keeps the mode it was started in - the prefix and every answer since were written for that door -
+  -- and a thread without one takes the switch and records it with the prefix it is about to freeze.
+  local raw_code_lib=dofile('lua/core/raw_code.lua')
+  local frozen_record=select(1,dofile('lua/core/prompt_cache.lua').read({
+    session_id=self.session_id,user_id=self.user,role=self.role}))
+  if frozen_record and type(frozen_record.raw_mode)=='string' then
+    self.codemode_policy.raw_mode=frozen_record.raw_mode
+    self.mode_source='frozen'
+  else
+    self.codemode_policy.raw_mode=raw_code_lib.mode()
+    self.mode_source='switch'
+  end
   if self.subagent then
     -- A child deliberately does NOT read the operator instruction file: those
     -- rules name internal paths and the deploy shape, and a child is exactly the
@@ -1209,7 +1222,7 @@ function M:build_context()
     -- Native mode (arm B) has ONE guidance source (rel review r2, item 1): the run-tool sentence with
     -- the batching instruction inside it. The codemode sentences are not sent beside it, because they
     -- name a call and a direct-call shortcut this node does not offer.
-    local native_mode = raw_code.mode() == 'native'
+    local native_mode = raw_code.mode_of(self.codemode_policy) == 'native'
     local block=dofile('lua/core/codemode_policy.lua').prompt(code_catalog,{raw_first=raw_first,raw_only=raw_only,native=native_mode})
     -- `only` already opened with the run-block sentence; appending "you may also run a script" under it
     -- offers a choice the node does not have, and the model reads the offer (17/11: DeepSeek answered
@@ -1258,7 +1271,7 @@ function M:build_context()
   local cache_ctx={session_id=self.session_id,user_id=self.user,role=self.role}
   local frozen, prefix_report=prompt_cache.enforce(cache_ctx,{
     system=first, tools=tool_list, parts=parts, orchestration=orchestration_enabled,
-    facts=facts, catalog=catalog or tool_list})
+    facts=facts, catalog=catalog or tool_list, raw_mode=self.codemode_policy.raw_mode})
   if frozen then first, tool_list = frozen.system, frozen.tools end
   if prefix_report and (prefix_report.corrupt or prefix_report.store_error) then
     self.emit({type='status',text='prompt prefix record '

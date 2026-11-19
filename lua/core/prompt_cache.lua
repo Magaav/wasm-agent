@@ -92,7 +92,10 @@ local function decode(record)
  return {system=record.system, system_sha256=sha(record.system),
    tools=tools, tools_sha256=sha(json.encode(tools)),
    orchestration=record.orchestration==true, parts=record.parts or {},
-   record=record, raw_value=record.raw_value, at=record.at}
+   record=record, raw_value=record.raw_value, at=record.at,
+   -- The raw-code mode this thread was STARTED in (rel review r2, item 6): nil on a record written
+   -- before this field existed, and the caller then falls back to the switch.
+   raw_mode=record.raw_mode}
 end
 M.decode=decode
 
@@ -181,7 +184,8 @@ local function current_state(current)
  -- while proving that an `/mcp` toggle reaches a running session with the tool names it added).
  return {system=system,tools_json=tools_json,tools=current.tools or {},system_sha256=sha(system),tools_sha256=sha(tools_json),
    parts=current.parts or {},orchestration=current.orchestration==true,
-   facts=current.facts or (current.parts or {}).facts or {}}
+   facts=current.facts or (current.parts or {}).facts or {},
+   raw_mode=current.raw_mode}
 end
 
 -- Freeze the prefix on this session's first turn, or return the frozen one. `current` is what this
@@ -202,6 +206,8 @@ function M.enforce(ctx,current)
     tools=now.tools_json,tools_sha256=now.tools_sha256,parts=now.parts,
     orchestration=now.orchestration and true or false,
     orchestration_noted=now.orchestration and true or false,
+    -- Recorded once, at the freeze, and never rewritten: it is why a thread keeps the mode it started in.
+    raw_mode=now.raw_mode,
     state=state_hash(now.system_sha256,now.tools_sha256)}
   value.noted=value.state
   local written,why=write_row(k,value)

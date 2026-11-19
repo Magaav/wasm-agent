@@ -1694,6 +1694,10 @@ WA_SCRIPT=scripts/test-mode-parity.lua "$BIN" --db "$DB" | grep "mode parity ok"
 # R2: no switch + a tool-calling provider = the native mode; every other provider keeps the
 # block default; an explicit switch always wins.
 WA_SCRIPT=scripts/test-default-mode.lua "$BIN" --db "$DB" | grep "default mode ok"
+# The three small raw-mode rules (rel r2 item 6): the mode is cached per process and a provider switch
+# drops it, RAW_CODE=bash keeps its old meaning without the A/B arm, and a thread keeps the mode its
+# prefix was frozen in.
+WA_SCRIPT=scripts/test-raw-mode-small.lua "$BIN" --db "$DB" | grep "raw mode small rules ok"
 
 # Test the shipping registry, including missing/stale/invalid negative controls.
 ( export WA_EMBEDDED_SOURCE_ROOT="$WASM_AGENT_LUA_ROOT"; unset WASM_AGENT_LUA_ROOT

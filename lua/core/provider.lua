@@ -284,6 +284,10 @@ function M.set_provider(id, revision)
       -- state file become visible to an interpreter that had cached the old one.
       M.provider_override = nil
       M.overrides = nil
+      -- The raw-code mode is cached per process and its default comes from this route's row
+      -- (rel review r2, item 6): a switch invalidates the cache, or the rest of this process would
+      -- keep acting in the previous route's mode.
+      pcall(function() dofile('lua/core/raw_code.lua').reset_mode_cache() end)
       return {ok=true}
     end
   end

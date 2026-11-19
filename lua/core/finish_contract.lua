@@ -57,7 +57,7 @@ local function without_inline_code(text)
   return rest
 end
 
-function M.markup(text)
+function M.markup(text,policy)
   local raw = tostring(text or "")
   -- A fenced block is a SAMPLE the model wrote, and the raw channel has already looked there for an
   -- action: an answer that quotes a call format inside a fence (a report about this very detector does)
@@ -66,7 +66,9 @@ function M.markup(text)
   -- The scan is mode-aware (rel review r2, item 5): the <bash>/<invoke> pairs are the native
   -- transport's own formats, so only a native node names them. Every other mode sees a27490af's list.
   local raw_lib = dofile("lua/core/raw_code.lua")
-  local mode = raw_lib.mode()
+  -- The thread's mode when the caller has one (a frozen thread keeps the mode it started in), else the
+  -- process switch.
+  local mode = policy and raw_lib.mode_of(policy) or raw_lib.mode()
   local found = raw_lib.markup_in_text(without_inline_code(raw), mode)
   if not found then return nil end
   return {
@@ -79,7 +81,7 @@ function M.markup(text)
     -- is the one the mode actually honours.
     -- rel r1 R4: the operator sentence stays VERBATIM for every mode but native; a native node is
     -- told to call the run tool it has, because a fenced block names a channel that mode does not use.
-    notice = (dofile("lua/core/raw_code.lua").mode() == "native")
+    notice = (mode == "native")
       and ("[Harness notice] This message had no action: your message contains tool-call markup as "
         .. "text, so nothing ran. The markup was " .. found.marker .. ", and no call could be read "
         .. "from it. Act by calling the run tool with the script in its `code` argument.")

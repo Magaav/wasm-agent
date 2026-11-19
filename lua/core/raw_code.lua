@@ -66,7 +66,7 @@ M.ONLY_GENERIC = { bash = true, read = true, write = true, edit = true, ls = tru
 -- the channel to be able to run one: a node whose code mode is off declared NOTHING and then refused to
 -- start the turn (no_dispatchable_tools, 18/11) while its ordinary tools were there all along.
 function M.only(policy)
-  if policy ~= nil then return M.active(policy) and M.mode() == "only" end
+  if policy ~= nil then return M.active(policy) and M.mode_of(policy) == "only" end
   return M.mode() == "only"
 end
 
@@ -104,9 +104,31 @@ function M.default_mode()
   return M.DEFAULT
 end
 local OFF = { codemode = true, off = true, ["0"] = true, ["false"] = true, no = true }
+
+-- The answer is cached for the PROCESS (rel review r2, item 6). default_mode() reads the model profile
+-- and the provider settings, and every mode() reader called it again - 26 call sites, some per tool
+-- call - so one turn could load and decode the same two modules dozens of times. The switch and the
+-- provider row do not change inside a process; a caller that changes one asks for it, and
+-- M.reset_mode_cache() is what that path calls (and what a test switching modes calls).
+local MODE_CACHE = nil
+function M.reset_mode_cache() MODE_CACHE = nil end
+
+-- The mode THIS THREAD was started in, when the caller has a policy to carry it. A session freezes its
+-- prompt prefix on its first turn and the mode is part of what it froze (lua/core/prompt_cache.lua,
+-- raw_mode): a thread that started in only keeps only when the node's default later moves to native,
+-- because its whole transcript was written for that door.
+function M.mode_of(policy)
+  if type(policy) == "table" and type(policy.raw_mode) == "string" then return policy.raw_mode end
+  return M.mode()
+end
+
 function M.mode()
   local value = tostring(host.getenv("WASM_AGENT_RAW_CODE") or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
-  if value == "" then return M.default_mode() end
+  if value == "" then
+    if MODE_CACHE then return MODE_CACHE end
+    MODE_CACHE = M.default_mode()
+    return MODE_CACHE
+  end
   if OFF[value] then return nil end
   if value == "1" or value == "on" or value == "true" then return "on" end
   if value == "stop" then return "stop" end
@@ -124,23 +146,32 @@ function M.mode()
   -- SAFETY NET (below) - a model that writes <bash>{}<bash> as plain text instead of calling the run
   -- tool must earn ONE named continue, never a silent ending. An unknown value returns nil, and nil
   -- means off, so these two have to be named or the net never runs.
-  if value == "native" or value == "bash" then return value end
+  -- native is this branch's own transport. bash is NOT: a27490af did not know that value, so
+  -- WASM_AGENT_RAW_CODE=bash meant "off" there (an unknown value returns nil, and nil closes the raw
+  -- channel). It keeps that meaning here unless the A/B switch names the bash arm, which is the only
+  -- thing that ever meant arm D (rel review r2, item 6).
+  if value == "native" then return value end
+  if value == "bash" then
+    local arms_ok, arms = pcall(dofile, "lua/core/ab_arms.lua")
+    if arms_ok and type(arms) == "table" and arms.current and arms.current() == "bash" then return "bash" end
+    return nil
+  end
   return nil
 end
 
 -- Active only where a codemode call could have run: the switch is on and code mode is enabled.
 function M.active(policy)
-  return M.mode() ~= nil and type(policy) == "table" and policy.enabled == true
+  return M.mode_of(policy) ~= nil and type(policy) == "table" and policy.enabled == true
 end
 
 -- Raw first: the run block is the way of working, codemode is not declared, history renders as text.
 function M.first(policy)
-  local mode = M.mode()
+  local mode = M.mode_of(policy)
   return M.active(policy) and (mode == "first" or mode == "only")
 end
 
 function M.stop_sequences(policy)
-  local mode = M.mode()
+  local mode = M.mode_of(policy)
   -- The tagged arms stop at their own closer (next-round.md 19/11 ~15:50): the harness supplies the
   -- end of the block, so anything the model writes after it is cut rather than read as an action.
   if (mode == "e2" or mode == "e3") and M.active(policy) then return { "</codeact>" } end
@@ -791,7 +822,7 @@ function M.take(result, stop_sent, policy)
   -- a tool call; a model that instead writes its trained call format as TEXT (<bash>, <invoke>,
   -- <tool_call>, DeepSeek's DSML bar) has done nothing, and the harness used to accept that text as
   -- the answer. The reader names it so the loop can ask once, by name; a second one fails the run.
-  local mode_now = M.mode()
+  local mode_now = M.mode_of(policy)
   if (mode_now == "native" or mode_now == "bash") and #(result.tool_calls or {}) == 0 then
     -- Skip code before scanning (rel review r1, R4): a fenced sample or an inline mention of a tag is
     -- the model TALKING about a call shape, and failing that answer would be the false positive this

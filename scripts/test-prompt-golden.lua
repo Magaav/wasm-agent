@@ -55,8 +55,12 @@ local ROOT = (host.getenv('WASM_AGENT_LUA_ROOT') or '.') .. '/fixtures/prompt-go
 local real = host.getenv
 
 -- One build, exactly as the first request makes it.
+-- '' (an empty string) in env means UNSET for that key: the arm-B rows must not inherit a switch the
+-- caller happened to export, or a gate run with WASM_AGENT_RAW_CODE=only would assert the wrong node
+-- (measured: this test failed that way when the runner exported only).
 local function build(env, subagent)
   host.getenv = function(k)
+    if env[k] == '' then return nil end
     if env[k] ~= nil then return env[k] end
     return real(k)
   end
@@ -107,14 +111,14 @@ if tool_calling then
   local TOOL_CALL = raw.guidance_for('tool_call')
   local CODEMODE_LINE = 'one ' .. TICK .. 'codemode' .. TICK .. ' call runs JavaScript'
   for _, envelope in ipairs({ 'progressive', 'full' }) do
-    local master = build({ WASM_AGENT_ENVELOPE_MODE = envelope }, nil)
+    local master = build({ WASM_AGENT_RAW_CODE = '', WASM_AGENT_ENVELOPE_MODE = envelope }, nil)
     eq(names_of(master.tools), 'run', 'default ' .. envelope .. ': a master declares the run tool alone')
     eq(master.bot.codeact_transport, 'tool_call', 'default ' .. envelope .. ': the tool-call transport')
     has(master.system, TOOL_CALL, 'default ' .. envelope .. ': the run-tool guidance')
     has(master.system, 'One run(code) can do a whole step', 'default ' .. envelope .. ': the batching sentence')
     has_not(master.system, CODEMODE_LINE, 'default ' .. envelope .. ': no codemode guidance')
 
-    local child = build({ WASM_AGENT_ENVELOPE_MODE = envelope },
+    local child = build({ WASM_AGENT_RAW_CODE = '', WASM_AGENT_ENVELOPE_MODE = envelope },
       { id = 'orchestration-worker', allowed = { 'read', 'write', 'bash', 'ls', 'run', 'codemode', 'edit' } })
     eq(names_of(child.tools), 'run', 'default ' .. envelope .. ': a child declares the run tool alone')
     has(child.system, TOOL_CALL, 'default ' .. envelope .. ': the child gets the run-tool guidance')

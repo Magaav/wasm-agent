@@ -70,7 +70,7 @@ function M.bootstrap(catalog,ctx)
    -- Native mode is arm B (rel review r1, R3): the ONE door is `run`, and `codemode` is not
    -- declared beside it. Every other mode keeps a27490af's surface byte for byte (R1/R5), which
    -- is why this reads the mode rather than a transport decision.
-   local native_mode = dofile('lua/core/raw_code.lua').mode() == 'native'
+   local native_mode = dofile('lua/core/raw_code.lua').mode_of(ctx and ctx.codemode_policy) == 'native'
    if native_mode then
     -- Through the one helper below: the progressive surface and the full one are the same list.
     for _,kept in ipairs(M.native_surface({item},core,orchestration)) do out[#out+1]=kept end
@@ -109,7 +109,7 @@ function M.schemas(catalog,ctx)
  if M.mode(ctx)=='progressive' then return M.bootstrap(catalog,ctx) end
  -- A native node declares the same one door in the full envelope (rel review r2, item 3). Read from
  -- the same function the progressive envelope reads, so the two cannot drift.
- if dofile('lua/core/raw_code.lua').mode()=='native' then
+ if dofile('lua/core/raw_code.lua').mode_of(ctx and ctx.codemode_policy)=='native' then
   local code_mode=dofile('lua/core/codemode_policy.lua').enforced(ctx)
   if not code_mode then return catalog end
   local orchestration=false

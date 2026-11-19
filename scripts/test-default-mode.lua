@@ -37,9 +37,26 @@ else
 end
 
 -- An explicit switch always wins, and it wins by naming the mode it asks for.
-for _, want in ipairs({ 'only', 'first', 'native', 'bash', 'stop', 'on' }) do
+for _, want in ipairs({ 'only', 'first', 'native', 'stop', 'on' }) do
   ok(mode_with(want) == want, 'explicit ' .. want .. ' is honoured (got ' .. tostring(mode_with(want)) .. ')')
 end
+-- 'bash' is NOT one of them (rel r2, item 6): a27490af did not know the value, so it means "no raw
+-- channel" - and this branch keeps that meaning unless the A/B arm switch names the bash arm, which is
+-- what "arm D" always meant. Both halves are asserted, so neither can drift.
+ok(mode_with('bash') == nil, 'explicit bash alone means no raw channel (got ' .. tostring(mode_with('bash')) .. ')')
+local without_arm = mode_with('bash')
+local arm_ok, arm_lib = pcall(dofile, 'lua/core/ab_arms.lua')
+ok(arm_ok and type(arm_lib) == 'table', 'the A/B switch module is readable')
+local real_arm_getenv = host.getenv
+host.getenv = function(k)
+  if k == 'WASM_AGENT_RAW_CODE' then return 'bash' end
+  if k == 'WA_AB_ARM' then return 'bash' end
+  return real(k)
+end
+local with_arm = raw.mode()
+host.getenv = real
+ok(with_arm == 'bash', 'and RAW_CODE=bash WITH the bash arm is the bash transport (got ' .. tostring(with_arm) .. ')')
+ok(without_arm == nil, 'the two readings differ, so the arm switch is the only thing that names it')
 -- "off" is the absent mode: it answers nil, which every reader treats as no raw channel.
 ok(mode_with('off') == nil, 'explicit off means no raw channel')
 ok(mode_with('codemode') == nil, 'explicit codemode means no raw channel (the codemode tool is the channel)')
