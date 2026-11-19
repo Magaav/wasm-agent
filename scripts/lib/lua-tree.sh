@@ -27,7 +27,7 @@ wa_lua_tree_files() {
   local root="${1:-}"
   ( cd "$root" 2>/dev/null || exit 1
     { find lua/core lua/vendor -type f \( -name '*.lua' -o -name '*.sql' \) 2>/dev/null
-      printf '%s\n' AGENTS.orchestrator.md AGENTS.subagents.md
+      printf '%s\n' AGENTS.orchestrator.md AGENTS.subagents.md AGENTS.omarchy.md AGENTS.sandbox.md
     } | LC_ALL=C sort )
 }
 

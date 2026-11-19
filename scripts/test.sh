@@ -1157,6 +1157,19 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-tool-cues.lua" "$BIN" --db "$DB.too
 # undeclared permitted tool; the generated prompt docs match the code (scripts/sync-prompt-docs.lua).
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-prompt-tool-names.lua" "$BIN" --db "$DB.prompt-tool-names" | grep 'prompt tool names ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-project-instructions.lua" "$BIN" --db "$DB.project-instructions" | grep 'project instructions ok'
+# Environment notes: `AGENTS.<environment>.md` for what is true of this machine (an Omarchy
+# desktop, a sandboxed container), chosen by one detector, with sandbox winning when both apply and
+# neither note when neither matches. Fixture env and fixture filesystem, so the gate answers the same
+# on every host - a detection only observable where it runs is a detection nobody has tested.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-environment-notes.lua" "$BIN" --db "$DB.environment-notes" | grep 'environment notes ok'
+# ...and the two notes are in the set the deploy actually stages, asked of the function that answers
+# it (scripts/lib/lua-tree.sh) rather than of a copy of its list. A note that is embedded but not
+# staged, or staged but not embedded, reaches some nodes and not others.
+LUA_TREE_LIST="$(bash -c '. "$1/scripts/lib/lua-tree.sh" && wa_lua_tree_files "$1"' _ "$WASM_AGENT_LUA_ROOT")" \
+  || { echo "the Lua tree file list could not be produced"; exit 1; }
+for note in AGENTS.omarchy.md AGENTS.sandbox.md; do
+  printf '%s\n' "$LUA_TREE_LIST" | grep -qx "$note" || { echo "the deployed Lua tree does not stage $note"; exit 1; }
+done
 (cd "$WASM_AGENT_LUA_ROOT" && WA_SCRIPT=scripts/sync-prompt-docs.lua "$BIN" --db "$DB.prompt-docs") | grep 'sync-prompt-docs: ok'
 # Candidate batching is opt-in; exact evidence/order and response-group telemetry stay visible.
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-batching-guidance.lua" "$BIN" --db "$DB.batching-guidance" | grep 'batching guidance ok'
