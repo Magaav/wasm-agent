@@ -1666,6 +1666,9 @@ WA_SCRIPT=scripts/test-codeact-transports.lua "$BIN" --db "$DB" | grep "codeact 
 # The model profile and the transport it decides (docs/AGENT-SEAT.md, principle 7): a measurement is
 # read, a missing one is named, and the guidance never offers two transports.
 WA_SCRIPT=scripts/test-conform-profile.lua "$BIN" --db "$DB" | grep "conform profile ok"
+# The A/B arms as one build (next-round.md 19/11 ~17:30): the tagged transports and their single-source
+# rules, one row per rule, through the real parser.
+WA_SCRIPT=scripts/test-arm-tag.lua "$BIN" --db "$DB" | grep "arm tag ok"
 
 # Test the shipping registry, including missing/stale/invalid negative controls.
 ( export WA_EMBEDDED_SOURCE_ROOT="$WASM_AGENT_LUA_ROOT"; unset WASM_AGENT_LUA_ROOT

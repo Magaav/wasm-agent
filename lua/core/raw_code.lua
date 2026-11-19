@@ -655,6 +655,43 @@ end
 
 function M.take(result, stop_sent, policy)
   local content = result.content or ""
+  -- The tagged arms (E2/E3) are a different transport for the same action, so they enter through this
+  -- same door and form the same codemode call. Their parser answers either an act (with its code), a
+  -- named finish, or invalid_message_shape with the reason.
+  local arm = dofile("lua/core/ab_arms.lua").current()
+  if arm == "e2" or arm == "e3" then
+    local tags = dofile("lua/core/arm_tag.lua")
+    local parsed = tags.parse(content, arm)
+    if parsed.shape == "act" then
+      local code = { code = parsed.code }
+      local id = "call_raw_" .. (host.uuid():gsub("-", ""))
+      local calls = {}
+      for _, call in ipairs(result.tool_calls or {}) do calls[#calls + 1] = call end
+      calls[#calls + 1] = { id = id, type = "function", ["function"] = { name = "codemode", arguments = json.encode(code) } }
+      result.tool_calls = calls
+      local entry = { id = id, index = 1, blocks = 1, bytes = #parsed.code, notes = {} }
+      if parsed.message and parsed.message ~= "" then
+        entry.notes[#entry.notes + 1] = "progress: " .. parsed.message
+      end
+      if parsed.dropped then
+        entry.notes[#entry.notes + 1] = parsed.dropped_reason
+      end
+      result.content = (parsed.message or "")
+      if result.finish_reason == "stop" or result.finish_reason == nil then
+        result.raw_finish_reason = result.finish_reason
+        result.finish_reason = "tool_calls"
+      end
+      entry.calls = { [id] = entry }
+      return entry
+    end
+    if parsed.shape == "finish" then
+      result.content = parsed.final_message or ""
+      result.arm_final = true
+      return nil
+    end
+    -- Neither shape: nothing runs, and the reason is named so the loop can continue once.
+    return { invalid_message_shape = true, reason = parsed.reason }
+  end
   -- Call markup in the text, and no real tool call: in `first`/`only` the model had nothing declared to
   -- call with, so its own format leaked into the text. A run block, if any, still wins below.
   local native = (#(result.tool_calls or {}) == 0) and M.native_calls(content) or nil

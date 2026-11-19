@@ -1115,6 +1115,34 @@ function M:build_context()
   end
   -- WASM_AGENT_RAW_CODE=first (lua/core/raw_code.lua): the provider is not shown `codemode`; a run block
   -- is the way to run a script. The tool loop still dispatches the call the block stands for.
+  -- The A/B arm's single door (lua/core/ab_arms.lua): an arm declares an allow-list of tools, and a
+  -- name that is not on it is not declared. codemode keeps the node's ordinary surface.
+  local ab_arms = dofile('lua/core/ab_arms.lua')
+  local ab_arm = ab_arms.current()
+  if ab_arm then
+    local door = ab_arms.door(ab_arm)
+    if door.tools ~= nil then
+      local kept = {}
+      for _, item in ipairs(tool_list) do
+        local name = item['function'] and item['function'].name or ''
+        if door.tools[name] then kept[#kept + 1] = item end
+      end
+      tool_list = kept
+      if ab_arm == 'run_tool' or ab_arm == 'bash' then
+        -- The one door is declared even where the node's own mode would have hidden it.
+        for _, item in ipairs(tools.catalog(self.role)) do
+          local name = item['function'] and item['function'].name or ''
+          if door.tools[name] then
+            local present = false
+            for _, kept_item in ipairs(tool_list) do
+              if kept_item['function'].name == name then present = true end
+            end
+            if not present then tool_list[#tool_list + 1] = item end
+          end
+        end
+      end
+    end
+  end
   local raw_first=raw_code.first(self.codemode_policy)
   if raw_first then
     tool_list=raw_code.without_codemode(tool_list)
@@ -1160,6 +1188,13 @@ function M:build_context()
     if transport_source == 'default' and not raw_code.TRANSPORT_NOTICE_SHOWN and transport_notice then
       raw_code.TRANSPORT_NOTICE_SHOWN = true
       block=block..'\n'..transport_notice
+    end
+    -- An A/B arm may carry its own guidance instead (arm D's shell sentence, arm E2/E3's tags).
+    if ab_arm then
+      local arm_door = ab_arms.door(ab_arm)
+      if arm_door.guidance then
+        block = arm_door.guidance
+      end
     end
     first=first..'\n\n'..block
     parts=parts or {};parts.codemode=host.sha256(block)
@@ -2723,6 +2758,19 @@ function M:run_body(text, images)
       and raw_code.take(result, raw_code.stop_sequences(self.codemode_policy) ~= nil, self.codemode_policy) or nil
     if raw_run and raw_run.restored_fence then
       self.emit({ type = "status", text = "the raw-code stop sequence ended the reply at a code fence that was not a run block" })
+    end
+    -- Arm E2/E3: a message in neither shape runs nothing and does not end the turn. The model is
+    -- told once, by name (19/11 ~16:40); a second consecutive one fails the run by that name.
+    if raw_run and raw_run.invalid_message_shape then
+      local tags = dofile('lua/core/arm_tag.lua')
+      local arm_name = dofile('lua/core/ab_arms.lua').current()
+      self.finish_continues = (self.finish_continues or 0) + 1
+      if self.finish_continues > 1 then
+        error('arm_tag_continue: ' .. tags.FAILURE .. ' (' .. tostring(raw_run.reason) .. ')')
+      end
+      messages[#messages + 1] = { role = 'user', content = tags.continue_for(arm_name) }
+      self.emit({ type = 'status', text = tags.FAILURE .. ': ' .. tostring(raw_run.reason) })
+      goto next_round
     end
     local calls, call_repairs = provider.repair_calls(result.tool_calls or {}, tool_list,
       (self.prefix and self.prefix.catalog) or tools.all(self.role))
