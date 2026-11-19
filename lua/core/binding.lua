@@ -830,7 +830,8 @@ function M.tick()
     if not r then
       -- A register that keeps failing must not be retried every 2 s for the length of an outage: a fleet
       -- coming back at once is what filled the rendezvous' cap on 19/11. The next attempt waits a
-      -- jittered, doubling interval, capped at 30 s, while the POLL below keeps its own 2 s rhythm.
+      -- jittered interval that doubles from 1 s to a 16 s ceiling (2^4: the exponent is capped at five
+      -- FAILURES, not at a number of seconds), while the POLL below keeps its own 2 s rhythm.
       local failures=(M.registration_failures or 0)+1
       M.registration_failures=failures
       local wait=math.min(30,2^(math.min(failures,5)-1))
