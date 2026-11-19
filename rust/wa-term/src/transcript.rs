@@ -472,12 +472,16 @@ impl Transcript {
                 rows.extend(wrapped);
                 continue;
             }
+            // The running call's line is a STATUS row: one screen row, always (see `clip_row`).
+            let is_live = self.live_row == Some((index, line_index));
             if content.is_some() {
                 // The affordance is part of the row, so the wrap and the click agree about where it
                 // ends: the icon takes its columns from the text and the header wraps two columns
                 // narrower, which is what a reader sees either way.
                 rows.extend(wrap_rows(&format!("{COPY_PREFIX}{line}"), inner));
                 copies.push((start, content.expect("checked").clone()));
+            } else if is_live {
+                rows.push(clip_row(line, inner));
             } else {
                 rows.extend(wrap_rows(line, inner));
             }
@@ -854,6 +858,25 @@ pub fn wrap_rows(line: &str, width: usize) -> Vec<String> {
     row.push_str(&esc);
     rows.push(row);
     rows
+}
+
+/// `line` cut to ONE screen row of at most `width` cells, escapes kept whole and a continuation
+/// mark where it was cut: the rule for every STATUS row, and the reason it is a clip.
+///
+/// A row whose text changes must not change HEIGHT. The running call's line is rewritten in place
+/// every quarter second (its clock, the tail of its output), and while it was wrapped like prose each
+/// new tail could add a row - which moved every row above and below it, the bounce Victor reported on
+/// 19/11. Clipped, the row is one row whatever it says, and the full output still lands in the block
+/// when the call settles.
+fn clip_row(line: &str, width: usize) -> String {
+    let width = width.max(1);
+    if width == 1 { return wrap_rows(line, 1).remove(0).chars().next().map(String::from).unwrap_or_default(); }
+    let mut rows = wrap_rows(line, width);
+    if rows.len() <= 1 { return rows.pop().unwrap_or_default(); }
+    // Make room for the mark FIRST, so the row cannot come out `width`+1 and wrap after all.
+    let mut first = wrap_rows(line, width - 1).into_iter().next().unwrap_or_default();
+    first.push('\u{2026}');
+    first
 }
 
 /// Follow the SGR state through `esc` (escape sequences only): a reset clears it, colours add up.

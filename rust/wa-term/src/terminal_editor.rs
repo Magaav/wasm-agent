@@ -828,13 +828,16 @@ impl Editor {
         frame.push_str(&format!("\x1b[{};1H\x1b[2K{border}{}{RESET}", bottom, "\u{2500}".repeat(self.width)));
         // The footer under the box - hints or the last run's numbers on the left, the model on the
         // right - and the slash menu above the input, opening upward toward the chat.
-        let right: String = self.footer_right.chars().take(self.width / 2).collect();
+        // By CELLS, never by characters: this row carries Nerd Font icons and the footer's own
+        // number runs, and a row one cell too wide WRAPS - which moves the box and the chat above it
+        // (Victor, 19/11: the bounce is the row under the box changing height).
+        let right: String = clip_cells(&self.footer_right, self.width / 2);
         let right_width: usize = right.chars().map(cell_width).sum();
         let room = self.width.saturating_sub(right_width + if right.is_empty() { 0 } else { 1 });
         let bash_hint = BASH_FOOTER.to_string();
         let (color, text) = if !self.notice.is_empty() { (NOTICE, &self.notice) }
             else if self.bash { (BASH, &bash_hint) } else { (HINT, &self.footer) };
-        let footer: String = text.chars().take(room).collect();
+        let footer: String = clip_cells(text, room);
         frame.push_str(&format!("\x1b[{};1H\x1b[2K{color}{footer}{RESET}", self.footer_row()));
         if !right.is_empty() {
             frame.push_str(&format!("\x1b[{};{}H{MODEL}{right}{RESET}", self.footer_row(), self.width - right_width + 1));
@@ -847,7 +850,7 @@ impl Editor {
                 let command = &self.commands[index];
                 let name = format!("{:<name_width$}", command.name);
                 let room = self.width.saturating_sub(name.chars().count() + 1);
-                let hint: String = command.hint.chars().take(room).collect();
+                let hint: String = clip_cells(&command.hint, room);
                 let color = if first + offset == selected { SELECTED } else { RESET };
                 frame.push_str(&format!("\x1b[{};1H\x1b[2K{color}{name}{RESET}{HINT}{hint}{RESET}", top - menu + offset));
             }
