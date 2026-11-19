@@ -23,7 +23,10 @@ loader, no second prompt section. `AGENTS.windows.md` remains unimplemented and 
 | `2e315203` | item 3: this report (first version) |
 | `70ab6cb2` | r1 MUST 1: delivery - embed, stage, dev-sync pack, `EMBEDDED` runtime fallback |
 | `ea17f6b9` | r1 MUST 2: an empty read is a file (docker's 0-byte `/.dockerenv`) |
-| (next) | r1 SHOULD: titles, podman marker, roster clause, xdph wording |
+| `5e97d0d5` | r1 SHOULD: titles, podman marker, roster clause, xdph wording |
+| `bb73e1ee` | r1 MUST 3: this report, and LAYERED-PROMPT naming podman's marker |
+| `232f3e6d` | r2 item 1: the test asserts the binary embeds both notes; nowhere-on-disk is strict |
+| (this commit) | r2 item 2: this table names every commit |
 
 ## Review r1 items, and what each fix does
 
@@ -84,7 +87,8 @@ installed one with this worktree's tree, scratch `WASM_AGENT_HOME` per run:
 
 | check | result |
 |---|---|
-| `scripts/test-environment-notes.lua` | `environment notes ok (45 checks, 0 skipped)` |
+| `scripts/test-environment-notes.lua` (45 checks at r1) | `environment notes ok (45 checks, 0 skipped)` |
+| `scripts/test-environment-notes.lua` (48 checks after r2 item 1, run against the worktree's own binary) | `environment notes ok (48 checks, 0 skipped)` |
 | `scripts/test-project-instructions.lua` | `project instructions ok (9 checks, 0 skipped)` |
 | `scripts/test-prompt-tool-names.lua` | `prompt tool names ok (286 checks, 0 skipped)` |
 | `bash scripts/sync-prompt-docs.sh --check` | `sync-prompt-docs: ok (4 blocks current)` |
