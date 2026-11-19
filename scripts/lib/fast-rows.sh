@@ -34,7 +34,12 @@ wa_fast_row_candidates() {
   excluded=$(sed -n 's/^\(scripts\/test-[^ #]*\.lua\).*/\1/p' scripts/fast-path.exclude 2>/dev/null)
   for f in scripts/test-*.lua; do
     [ -f "$f" ] || continue
-    printf '%s\n' "$excluded" | grep -qxF "$f" || printf '%s\n' "$f"
+    # A HERE-STRING, NOT A PIPE (measured 19/11: under `set -o pipefail` this read is a race - `grep -q`
+    # exits at the first match, the printf on the other end of the pipe dies of SIGPIPE, and the PIPELINE
+    # then reports failure, so an excluded row was printed as a CANDIDATE. It fired in 4 of 12 concurrent
+    # runs and read as a corrupt inventory; the inventory was correct all along. `<<<` gives grep the same
+    # words with no second process to signal.
+    grep -qxF "$f" <<< "$excluded" || printf '%s\n' "$f"
   done
 }
 
