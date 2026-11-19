@@ -460,6 +460,33 @@ end
 --
 -- Cells, not bytes, are what the limit counts, and it walks the string one CHARACTER at a time with
 -- its byte width, so a multi-byte character is never split.
+-- A CODE LINE cut by CELLS: the exact column, no regard for words.
+--
+-- Code is not prose (review, item D): breaking it at a space DROPS that space and changes what the
+-- reader sees the line say. A statement is cut where it stops fitting, with M.wrap_marked marking
+-- the break so the pieces read as one line. Prose uses M.wrap; code uses this.
+function M.wrap_cells(text, limit, o)
+  o = M.opts(o)
+  local value = tostring(text or "")
+  limit = math.max(8, tonumber(limit) or 80)
+  if o.columns(value) <= limit then return { value } end
+  local rows, start, used, index = {}, 1, 0, 1
+  while index <= #value do
+    local byte = value:byte(index)
+    local size = (byte >= 240 and 4) or (byte >= 224 and 3) or (byte >= 192 and 2) or 1
+    local piece = value:sub(index, index + size - 1)
+    local cells = o.columns(piece)
+    if used + cells > limit and index > start then
+      rows[#rows + 1] = value:sub(start, index - 1)
+      start, used = index, 0
+    end
+    used = used + cells
+    index = index + size
+  end
+  if start <= #value then rows[#rows + 1] = value:sub(start) end
+  return rows
+end
+
 function M.wrap(text, limit, o)
   o = M.opts(o)
   local value = tostring(text or "")
@@ -524,10 +551,10 @@ function M.wrap_marked(text, limit, o, mark)
   o = M.opts(o)
   mark = mark or "\226\134\170"
   limit = math.max(8, tonumber(limit) or 80)
-  local whole = M.wrap(text, limit, o)
+  local whole = M.wrap_cells(text, limit, o)
   if #whole <= 1 then return whole end
   local room = math.max(1, limit - o.columns(mark))
-  local pieces = M.wrap(text, room, o)
+  local pieces = M.wrap_cells(text, room, o)
   if #pieces <= 1 then return pieces end
   for index = 1, #pieces - 1 do pieces[index] = pieces[index] .. mark end
   return pieces
