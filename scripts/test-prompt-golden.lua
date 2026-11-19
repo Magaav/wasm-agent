@@ -123,37 +123,42 @@ for _, case in ipairs(cases) do
 end
 
 -- ---------------------------------------------------------------- a default node is arm B
--- No switch at all: the provider row decides (model_profile.builtin_transport), the same row a real
--- node reads. On a tool-calling provider the node is native, and a native node - in EITHER envelope, as
--- a master OR a child - declares the run tool alone, is sent the run-tool guidance, and is not sent the
+-- No switch at all: the provider ROW decides (model_profile.builtin_transport), the same row a real node
+-- reads. On a tool-calling provider the node is native, and a native node - in EITHER envelope, as a
+-- master OR a child - declares the run tool alone, is sent the run-tool guidance, and is not sent the
 -- codemode guidance.
+--
+-- These rows do not SKIP (rel review r3, item 2), and they are not made to pass by a stub: measured, a
+-- stubbed provider.settings in THIS copy never reaches raw_code, which dofiles its own copy - the build
+-- kept answering native under a stub that named a provider with no row. So the row is ASSERTED instead:
+-- the node's own provider must answer tool_call, and if it ever does not, this test FAILS by name rather
+-- than quietly printing "did not apply". That is honest because the decision is a literal table in the
+-- tree, not machine state: model_profile.DEFAULT_TRANSPORTS has one entry, opencode-go -> tool_call, and
+-- provider.active() resolves to the first provider when a remembered id matches none.
 local provider = dofile('lua/core/provider.lua')
 local profile = dofile('lua/core/model_profile.lua')
 local settings_ok, settings = pcall(provider.settings)
 ok(settings_ok and type(settings) == 'table', 'the node has a provider row to decide from')
-local tool_calling = profile.builtin_transport(settings.provider) == profile.TOOL_CALL
-ok(type(tool_calling) == 'boolean', 'the provider row answers yes or no, never unknown')
-if tool_calling then
+eq(profile.builtin_transport(settings.provider), profile.TOOL_CALL,
+  'the node provider (' .. tostring(settings.provider) .. ') has a tool_call row, so the arm-B rows apply')
+
+do
   local TOOL_CALL = raw.guidance_for('tool_call')
   local CODEMODE_LINE = 'one ' .. TICK .. 'codemode' .. TICK .. ' call runs JavaScript'
   for _, envelope in ipairs({ 'progressive', 'full' }) do
     local master = build({ WASM_AGENT_RAW_CODE = '', WASM_AGENT_ENVELOPE_MODE = envelope }, nil)
-    eq(names_of(master.tools), 'run', 'default ' .. envelope .. ': a master declares the run tool alone')
-    eq(master.bot.codeact_transport, 'tool_call', 'default ' .. envelope .. ': the tool-call transport')
-    has(master.system, TOOL_CALL, 'default ' .. envelope .. ': the run-tool guidance')
-    has(master.system, 'One run(code) can do a whole step', 'default ' .. envelope .. ': the batching sentence')
-    has_not(master.system, CODEMODE_LINE, 'default ' .. envelope .. ': no codemode guidance')
+    eq(master.bot.codeact_transport, 'tool_call', 'arm B ' .. envelope .. ': the tool-call transport')
+    eq(names_of(master.tools), 'run', 'arm B ' .. envelope .. ': a master declares the run tool alone')
+    has(master.system, TOOL_CALL, 'arm B ' .. envelope .. ': the run-tool guidance')
+    has(master.system, 'One run(code) can do a whole step', 'arm B ' .. envelope .. ': the batching sentence')
+    has_not(master.system, CODEMODE_LINE, 'arm B ' .. envelope .. ': no codemode guidance')
 
     local child = build({ WASM_AGENT_RAW_CODE = '', WASM_AGENT_ENVELOPE_MODE = envelope },
       { id = 'orchestration-worker', allowed = { 'read', 'write', 'bash', 'ls', 'run', 'codemode', 'edit' } })
-    eq(names_of(child.tools), 'run', 'default ' .. envelope .. ': a child declares the run tool alone')
-    has(child.system, TOOL_CALL, 'default ' .. envelope .. ': the child gets the run-tool guidance')
-    has_not(child.system, CODEMODE_LINE, 'default ' .. envelope .. ': the child gets no codemode guidance')
+    eq(names_of(child.tools), 'run', 'arm B ' .. envelope .. ': a child declares the run tool alone')
+    has(child.system, TOOL_CALL, 'arm B ' .. envelope .. ': the child gets the run-tool guidance')
+    has_not(child.system, CODEMODE_LINE, 'arm B ' .. envelope .. ': the child gets no codemode guidance')
   end
-else
-  -- Not a silent pass: this node's provider keeps the block default, which the goldens above already
-  -- cover, and the arm-B rows are recorded as not applicable BY NAME.
-  print('prompt golden: ' .. tostring(settings.provider) .. ' has no tool-call row, arm-B rows did not apply')
 end
 
 -- ---------------------------------------------------------------- the two cited differences
