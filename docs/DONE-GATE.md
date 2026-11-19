@@ -74,9 +74,12 @@ recorded next to the request.
   keeps a plain question out of the gate entirely.
 - **a work-shaped request with no gate** → **recorded, not re-entered.** The run changed the world and
   recorded nothing to test it against; the harness cannot invent the criterion, so it writes a gate row
-  with status `uncaptured` and the close code `no_checks_recorded`, and says so on the status line. An
-  extra round of "record your checks" would be a turn spent on paperwork nobody asked for, and the
-  operator asked for no nudge text. A skipped capture is a visible fact, never a silent one.
+  with status `uncaptured` and the close code `no_checks_recorded`. An extra round of "record your
+  checks" would be a turn spent on paperwork nobody asked for, and the operator asked for no nudge text.
+  A skipped capture is a visible fact, never a silent one - but since change/done-gate-trial (19/11) it
+  is visible where it can be counted, not in the operator output: every state-changing turn writes one
+  `done_gate_unchecked` event to the run journal (the session, whether the turn changed state, and
+  whether `done_criteria` was called), and `wa turns --gate` reports the share.
 - **a gate whose checks pass** → the gate closes `passed`, and the turn ends.
 - **a gate whose checks fail** → the run is **re-entered**: the next user turn is the operator's words,
   verbatim, plus the failing check output, marked `[done gate · harness]` so no later reader mistakes it

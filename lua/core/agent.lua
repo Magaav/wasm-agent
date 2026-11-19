@@ -2234,6 +2234,9 @@ function M:run_body(text, images)
     if gate.disabled then return nil, { action = "disabled" } end
     gate.called_tools = (self.run_counts.tool_calls or 0) > 0
     gate.effected = (gate.effects or 0) > 0 or not changeset.empty(self.changes)
+    -- Item 1 (change/done-gate-trial): the one counted record of this turn's gate outcome, written once
+    -- per run whichever branch below the turn ends on (done_gate.note_turn latches on the state).
+    done_gate.note_turn(gate, { run_id = self.run_id })
     local changes_digest, changed_files = gate_changes()
     local evidence = table.concat({
       "The working agent's candidate answer to this turn:", "", tostring(candidate or ""), "",
@@ -3185,6 +3188,10 @@ function M:run_body(text, images)
 
     local dispatch_ctx = { session_id = self.session_id, user_id = self.user, node_id = self.node,
       run_id = self.run_id, subagent = self.subagent, run_origin=self.run_origin, changes = self.changes, codemode_policy=self.codemode_policy,
+      -- Item 1 (change/done-gate-trial): the gate state this run's tool calls may mark, so a
+      -- done_criteria call is counted from the door every call goes through (tools.dispatch), whether
+      -- the model called it directly or from inside a script.
+      gate = gate,
       model_call = true, reviewed_paths = self.reviewed_paths,
       commit_audits = self.commit_audits, audit_step = self.audit_step,
       model = self.model, reasoning = (provider.reasoning(self.model) or {}).selected,
