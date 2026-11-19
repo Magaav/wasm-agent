@@ -57,7 +57,12 @@ allow-list of anchors, never a disable switch.
 
 The websocket takes the machine's anchors **only when it names a bundle**; otherwise
 `tungstenite::connect` runs unchanged (its own bundle, its own redirect handling). That is an
-allow-list switch, and it means the path every deployment uses today is untouched.
+allow-list switch, and it means the path every deployment uses today is untouched. On the anchors
+path the socket is dialled here (10 s connect, every resolved address tried) and tungstenite still
+performs the TLS wrap and the upgrade (`client_tls_with_config`); what that path does **not** do is
+follow a websocket redirect, which `tungstenite::connect` would. No endpoint wa talks to over `wss`
+answers with a redirect (`web.whatsapp.com` and the mesh guests answer the upgrade directly), and it
+is stated here rather than discovered later.
 
 ## Tests, and where they are wired
 
@@ -167,6 +172,17 @@ Also deliberately not changed, with the reason:
 13. `ws_handshake: the url names no host` / `ws_handshake: {io error}` / `ws_handshake: the host
     resolved to no address` / `ws_handshake: interrupted` (the websocket's own refusals on the
     anchors path)
+
+## Self-review (this is self-review, not an independent review)
+
+Read back before reporting: the loader refuses (never defaults) on every unreadable or
+certificate-free source and on a non-UTF-8 value; no path disables verification or widens
+`fs`/`net` grants; `agent()` in `wa-capabilities` remembers only a built agent, so a broken
+environment cannot be cached as a permanent failure; the anchor cache in `wa-tls` is keyed by both
+variables, so a test that changes them cannot read another test's answer; every new test drives the
+function real use takes (`UreqTransport::post`, `exchange`, `WsConn::open`, `respond`,
+`build_config_with`/`agent_for_stream`) and none of them asserts on a mock; `bash -n scripts/test.sh`
+parses; the tree is clean and every item is its own commit.
 
 ## What I did not do
 
