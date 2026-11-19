@@ -1231,6 +1231,16 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-provider-rate-limit-recovery.lua" "
 # `provider_error: io: An established connection was aborted ... (os error 10053)` because
 # neither spelling was in the connection bucket; only a manual Continue resumed the run.
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-provider-connection-abort-recovery.lua" "$BIN" --db "$DB.provider-connection-abort" | grep 'provider connection abort recovery ok'
+# A two-minute outage in the middle of a run must not end it (19/11 12:17 UTC, home internet down: the
+# run stopped with 'provider refused the request' x3 and 'run_failed: provider_http_502
+# vault_upstream_unreachable (gaierror)', and nothing resumed when the link came back). The vault's own
+# 502 was claimed by the short refusal bucket because 502 is a transient STATUS, so a dead LINK was
+# treated as a provider answer. This row drives the bytes the real vault/wa_vault.py sends (measured in
+# PHASE 0 against a closed port and an unresolvable host) through a real turn: the run waits visibly,
+# survives the outage, finishes with the right answer, never re-runs a tool call it already made, fails
+# at once by name on auth, stops on cancellation, and gives an unclassified provider failure a bounded
+# five retries before naming it. Hermetic: the provider is replaced; no network, no inference.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-network-outage-recovery.lua" "$BIN" --db "$DB.provider-network-outage" | grep 'network outage recovery ok'
 # A route must refuse a model it cannot serve before the first provider request - and only that.
 # A child with `gpt-6-luna` on the opencode-go route failed in 0.67s with zero tool calls on the
 # edge's `Model does not support this protocol`, and 26 child runs of `deepseek-v4.1-flash` died
