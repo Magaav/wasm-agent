@@ -174,4 +174,35 @@ check(nodes_lib.RELAY_PEER_BUDGET_MS > 0
   and nodes_lib.RELAY_PEER_BUDGET_MS < nodes_lib.RELAY_DEADLINE_SECONDS * 1000,
   "the budget a peer adopts by is inside the relay hold")
 
+-- 7. Items 5 and 2: the adopted op belongs to the CALLING peer's own session, never to another
+-- session by name, and no wait this change adds can outlive the relay's hold.
+local owned = peer_bash("sleep 4", 1000)
+check(owned.state == "pending", "a peer op is adopted for the ownership check")
+local function lists(session_ctx, ctx_user)
+  local page = tools.dispatch(memory, "operation", { action = "list" }, "master",
+    { session_id = session_ctx, user_id = ctx_user or "master" }) or {}
+  for _, entry in ipairs(page.operations or {}) do
+    if tostring(entry.operation_id or "") == owned.op then return true end
+  end
+  return false
+end
+check(lists("peer:rp-scratch-peer"), "the peer that asked sees its own adopted operation")
+check(not lists(sid), "a local session does not see it (nothing is visible by name)")
+check(not lists("peer:rp-other-peer"), "and neither does another peer")
+local stolen = tools.dispatch(memory, "operation", { action = "status", id = owned.op }, "master",
+  { session_id = sid, user_id = "master" }) or {}
+check(stolen.error ~= nil, "and a local session cannot reach it by id: " .. tostring(stolen.error))
+local peer_cancelled = tools.dispatch(memory, "operation", { action = "cancel", id = owned.op },
+  "master", peer_ctx) or {}
+check(peer_cancelled.cancelled ~= false, "the peer that owns it can stop it")
+
+-- The executor's own slice, and the budget the peer adopts by, both sit INSIDE the relay's hold:
+-- that is what makes "the relay never carries the long wait" a number instead of a promise.
+local pending_lib = dofile("lua/core/codemode_pending.lua")
+local nodes_lib2 = dofile("lua/core/nodes.lua")
+check(nodes_lib2.RELAY_PEER_BUDGET_MS < nodes_lib2.RELAY_DEADLINE_SECONDS * 1000,
+  "the peer answers a handle inside the relay hold (" .. tostring(nodes_lib2.RELAY_PEER_BUDGET_MS) .. " ms)")
+check(pending_lib.EXECUTORS["remote"] ~= nil and type(pending_lib.EXECUTORS["remote"].poll) == "function",
+  "the caller half is a real executor, so wait(op) resumes it")
+
 print("remote pending ok (" .. tostring(checks) .. " checks)")
