@@ -61,6 +61,18 @@ case "$out" in *"class=still_passing"*) ;; *) fail "the same commit on both side
 # The exit code is about the comparison and the change, not about the mission verdict: a comparison that
 # ran and found the row passing on both sides is a success of this tool.
 [ "$code" = 0 ] || fail "a completed comparison exited $code, not 0: $out"
+# EACH SIDE RAN WITH ITS OWN HOME AND LEDGER (item 7 of the node-ops round). Both calls used
+# "$scratch/home" before, so the base row read the ledger the change row had just written - and a row
+# about a restore or a first run would grade the other side's state. The worker now prints both paths as
+# fields, so this is the run's own answer and not a reading of its logs.
+base_home="$(printf '%s\n' "$out" | sed -n 's/^base_home=//p')"
+change_home="$(printf '%s\n' "$out" | sed -n 's/^change_home=//p')"
+[ -n "$base_home" ] && [ -n "$change_home" ] || fail "the comparison did not name both homes, so the separate-ledger rule was not checked: $out"
+[ "$base_home" != "$change_home" ] || fail "both sides of the comparison ran with the SAME home ($base_home), so they shared one ledger"
+case "$change_home" in "$base_home"/*) fail "the change side home ($change_home) is inside the base side home ($base_home): one ledger" ;; esac
+case "$base_home" in "$change_home"/*) fail "the base side home ($base_home) is inside the change side home ($change_home): one ledger" ;; esac
+case "$base_home" in */base/*) ;; *) fail "the base side home is not under the base side root: $base_home" ;; esac
+case "$change_home" in */change/*) ;; *) fail "the change side home is not under the change side root: $change_home" ;; esac
 worktrees_after="$(git worktree list | wc -l)"
 [ "$worktrees_before" = "$worktrees_after" ] || fail "the comparison left a worktree behind ($worktrees_before before, $worktrees_after after)"
 # Nothing was written inside the tree under test: the row's own files are unchanged.
@@ -137,4 +149,4 @@ if [ -n "$base_sha" ]; then
   case "$verb_out" in *row_at_sha_row_absent_at_base*) ;; *) fail "wa test did not pass the worker's absent-at-base refusal through: $verb_out" ;; esac
 fi
 
-echo 'test-row-at-sha: ok (four classes and the skip convention, a real comparison with no worktree left behind, every refusal named, the wa test verb run for real, and a --at that is a command substitution refused before any shell runs - proved by the file it would have created not existing)'
+echo 'test-row-at-sha: ok (four classes and the skip convention, a real comparison with no worktree left behind, every refusal named, the wa test verb run for real, and a --at that is a command substitution refused before any shell runs - proved by the file it would have created not existing, and the base and change sides run with separate homes and separate ledgers)'

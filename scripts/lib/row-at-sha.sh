@@ -116,7 +116,7 @@ wa_row_at_sha() { # <sha> <row> [repo-root]
   [ -n "$bin" ] && [ -x "$bin" ] || { printf 'refused(row_at_sha_binary_missing): no wa binary to run the row with (WA_BIN, or a wa on PATH)\n' >&2; return 2; }
   scratch="$(wa_row_at_sha_root "$repo")"
   rm -rf "$scratch"; mkdir -p "$scratch" || { printf 'refused(row_at_sha_scratch_failed): cannot create %s\n' "$scratch" >&2; return 2; }
-  base_tree="$scratch/base"
+  base_tree="$scratch/base-tree"
   # The cleanup is one function and it runs on every exit path, including a refusal below: a base worktree
   # left behind is the leak this round already fixed once (item 6).
   # The trap body runs after this function returned, so it cannot read its locals: it reads the two
@@ -124,7 +124,7 @@ wa_row_at_sha() { # <sha> <row> [repo-root]
   # scope (measured: `repo: unbound variable` on the way out).
   WA_ROW_AT_SHA_REPO="$repo" WA_ROW_AT_SHA_SCRATCH="$scratch"
   cleanup_row_at_sha() {
-    git -C "$WA_ROW_AT_SHA_REPO" worktree remove --force "$WA_ROW_AT_SHA_SCRATCH/base" >/dev/null 2>&1
+    git -C "$WA_ROW_AT_SHA_REPO" worktree remove --force "$WA_ROW_AT_SHA_SCRATCH/base-tree" >/dev/null 2>&1
     rm -rf "$WA_ROW_AT_SHA_SCRATCH"
   }
   # THE CALLER'S EXIT TRAP IS PUT BACK, NOT REPLACED (item 8): this is a LIBRARY, and a test that sources
@@ -151,11 +151,20 @@ wa_row_at_sha() { # <sha> <row> [repo-root]
   fi
   [ -f "$base_tree/$row" ] || { printf 'refused(row_at_sha_row_absent_at_base): %s does not exist at %s, so there is nothing to run there\n' "$row" "$sha" >&2; finish_row_at_sha 2; return 2; }
   printf 'row_at_sha: base %s and change %s, row %s\n' "$(printf '%s' "$sha" | cut -c1-12)" "$repo" "$row"
-  base_code="$(wa_row_at_sha_run "$bin" "$base_tree" "$row" "$scratch/home")"
-  change_code="$(wa_row_at_sha_run "$bin" "$repo" "$row" "$scratch/home")"
+  # EACH SIDE GETS ITS OWN SCRATCH HOME (item 7 of the node-ops round). MEASURED: both calls used
+  # "$scratch/home", and the home is built as home-<row name>, so the base run and the change run shared
+  # ONE data directory and ONE ledger.db - the base row read the database the change row had just
+  # written, and a row that tests restore, migration or a first-run path graded the other side's state.
+  # The comparison is the difference between two INDEPENDENT runs; sharing the store is the one thing
+  # that makes its two numbers not comparable.
+  base_code="$(wa_row_at_sha_run "$bin" "$base_tree" "$row" "$scratch/base")"
+  change_code="$(wa_row_at_sha_run "$bin" "$repo" "$row" "$scratch/change")"
   class="$(wa_row_at_sha_classify "$base_code" "$change_code")"
   meaning="$(wa_row_at_sha_meaning "$class")"
-  printf 'class=%s\nbase_code=%s\nchange_code=%s\nbinary=%s\n' "$class" "$base_code" "$change_code" "$bin"
+  # The two homes are part of the ANSWER: a comparison whose sides shared one ledger is not a
+  # comparison (item 7), and a caller must be able to see that without opening the logs.
+  local row_name; row_name=$(printf '%s' "$row" | tr '/.' '__')
+  printf 'class=%s\nbase_code=%s\nchange_code=%s\nbinary=%s\nbase_home=%s\nchange_home=%s\n' "$class" "$base_code" "$change_code" "$bin" "$scratch/base/home-$row_name" "$scratch/change/home-$row_name"
   printf 'row_at_sha: %s: base exit %s, change exit %s - %s\n' "$class" "$base_code" "$change_code" "$meaning"
   # The exit code answers ONE question: did the comparison complete, and did the change break the row?
   # It does not encode the mission verdict, because that is what `class=` is for and a caller reading an
