@@ -8,8 +8,6 @@
 --
 --   #33  the <turn> block is KEPT and stripped from the visible answer into the run journal
 --        (session, mission, build, mode, the three fields); the envelope says so.
---   #22/#51  a mis-tagged fence, a cut run block and a reasoning-only step each get ONE named
---        continue, and the notice names the real cause.
 --   #34  a code-mode script's effect is what its own calls did, so a read-only script is not gated.
 --   #37  a pending handle always carries operation_id and its log paths as plain fields.
 --   #43  operation list/await answer ids and state by default; a body only when asked, and bounded.
@@ -23,10 +21,6 @@ memory.setup()
 local journal = dofile("lua/core/turn_journal.lua")
 journal.setup()
 local raw_code = dofile("lua/core/raw_code.lua")
--- A detector this build does not have is a FAILURE to report, not a crash that hides the other checks:
--- a base tree with no M.unrun answers nil here and every check below that needs it says so by name.
-local unrun = raw_code.unrun or function() return nil end
-
 local checks, failed = 0, 0
 local function ok(value, label)
   checks = checks + 1
@@ -102,37 +96,6 @@ ok(bad == nil and bad_error == "turn_day_must_be_YYYY-MM-DD",
 local agent_source = host.read_file("lua/core/agent.lua") or ""
 ok(agent_source:find("The harness removes this block from the answer it shows", 1, true) ~= nil,
   "#33: the envelope states that the harness removes the block")
-
--- ---- #22/#51: the one automatic continue, by name ---------------------------------------------
-local tagged = unrun(table.concat({
-  "Here is the fix.",
-  "",
-  string.rep(string.char(96), 3) .. "js",
-  "return 1",
-  string.rep(string.char(96), 3),
-}, "\n"), { enabled = true })
--- prose around the block means an explanation, not a miss
-ok(tagged == nil, "#22: a js block with prose around it is a sample, not a miss")
-
-local only_block = unrun(string.rep(string.char(96), 3) .. "js\nreturn 1\n"
-  .. string.rep(string.char(96), 3), { enabled = true })
-ok(only_block and only_block.code == "run_block_tagged_js",
-  "#22: a message whose only content is a js block is the mis-tagged action")
-ok(only_block and only_block.notice:find("tagged js, not js run", 1, true) ~= nil,
-  "#22: and the notice names the real cause: " .. tostring(only_block and only_block.notice))
-
-local run_tag = string.rep(string.char(96), 3) .. "js run\nreturn 1\n" .. string.rep(string.char(96), 3)
-ok(unrun(run_tag, { enabled = true }) == nil, "#22: a correct run block is not a miss")
-
-local cut = unrun(string.rep(string.char(96), 3) .. "js run\nreturn 1", { enabled = true })
-ok(cut and cut.code == "run_block_cut", "#22: a reply that ends inside a run block is named")
-ok(cut and cut.notice:find("cut inside a run block", 1, true) ~= nil,
-  "#22: and says what happened")
-
--- code mode off: a plain js block could not run, so it is text
-ok(unrun(string.rep(string.char(96), 3) .. "js\nreturn 1\n"
-  .. string.rep(string.char(96), 3), { enabled = false }) == nil,
-  "#22: with code mode off a js block is text, never a failed action")
 
 -- ---- #34: a script's effect is what its calls did ---------------------------------------------
 local tools_lib = dofile("lua/core/tools.lua")

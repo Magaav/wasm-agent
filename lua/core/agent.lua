@@ -2695,53 +2695,19 @@ function M:run_body(text, images)
           arrived_name = tostring(first_refused.arrived or "") })
     end
     -- A step whose only action the harness never turned into a call is not an answer (18/11: a run block
-    -- the parser did not see ended the turn with 0 tools and rc 0). Item #22/#51: the FIRST such step
-    -- gets ONE automatic continue with a named notice - the model is told exactly what was wrong with
-    -- its block and asked for it again - because a cut reply or a mis-tagged fence is a hiccup, not an
-    -- answer. A SECOND one in the same run fails the turn by name, so a node can never exit rc=0 with
-    -- the action unexecuted. Both outcomes are counted in the journal.
+    -- the parser did not see ended the turn with `0 tools` and rc 0). The turn fails by name, so a
+    -- scripted `wa chat --once` returns non-zero instead of reporting a silent success.
     if raw_channel and #calls == 0 then
       local missed = raw_code.unexecuted(result.content or "", self.codemode_policy)
-      local unrun = nil
-      if not missed then unrun = raw_code.unrun(result.content or "", self.codemode_policy) end
-      local problem = nil
       if missed then
-        problem = { code = "run_block_not_executed", reason = missed.reason }
-      elseif unrun then
-        problem = { code = unrun.code, reason = unrun.notice }
-      end
-      if problem then
-        self.auto_continues = (self.auto_continues or 0) + 1
-        local continues = self.auto_continues
-        telemetry.event(self.session_id, self.run_id, "", "run_block",
-          continues == 1 and "continue" or "failed",
-          { round = round, code = problem.code, attempts = continues })
-        if continues > 1 then
-          local reason = "run_block_not_executed: " .. problem.reason
-          local span = trace[#trace]
-          if type(span) == "table" and span.kind == "model_call" then span.ok = false; span.error = reason end
-          record_turn(self, { role = "assistant", content = result.content or "", ok = false, debug = self.debug })
-          self.pending_failure = { trace = trace, round = round, attempts = transient_attempt + 1 }
-          telemetry.event(self.session_id, self.run_id, "", "step", "end",
-            { outcome = "run_block_not_executed" })
-          self.emit({ type = "status", text = reason })
-          error(reason)
-        end
-        -- The step's own row is recorded here, exactly as the answer path would record it: the model
-        -- must see in its context the text it wrote, or the continue repeats the same block blind.
-        record_turn(self, { id = assistant_id, role = "assistant", content = result.content or "",
-          tool_calls = calls, debug = self.debug, reasoning = result.reasoning or "",
-          phase = result.final_phase or "", reasoning_items = result.reasoning_items })
-        -- The notice is a durable row, marked as the harness speaking so it is never read as the
-        -- operator's words (the same phase rule the done gate and the fake-result notice use).
-        local notice = "[harness] run_block_not_executed: " .. problem.reason
-          .. "\n\nThis is not a new user request: send the same action again, correctly, and finish the task."
-        record_turn(self, { role = "user", content = notice, phase = "run_block" })
-        messages[#messages + 1] = { role = "user", content = notice }
-        self.emit({ type = "status", text = "the action did not run (" .. problem.code .. "); continuing once" })
-        -- The loop's own end label: no local's scope is entered, and the next round rebuilds the
-        -- context with the step and the notice in it.
-        goto next_round
+        local reason = "run_block_not_executed: " .. missed.reason
+        local span = trace[#trace]
+        if type(span) == "table" and span.kind == "model_call" then span.ok = false; span.error = reason end
+        record_turn(self, { role = "assistant", content = result.content or "", ok = false, debug = self.debug })
+        self.pending_failure = { trace = trace, round = round, attempts = transient_attempt + 1 }
+        telemetry.event(self.session_id, self.run_id, "", "step", "end", { outcome = "run_block_not_executed" })
+        self.emit({ type = "status", text = reason })
+        error(reason)
       end
     end
     local assistant = { role = "assistant", content = result.content or "" }
@@ -2941,23 +2907,6 @@ function M:run_body(text, images)
       -- it had nothing to say instead of like it had failed. Explicit output
       -- limits do not eliminate this failure; detect it even with Pi-style caps.
       if provider.visible_text(reply) == "" then
-        ::after_reasoning_only::
-        -- Item #22/#51: a turn that ends with reasoning only is a hiccup, not an answer. ONE automatic
-        -- continue says what the harness saw (it reasoned and stopped without writing anything), counted
-        -- in the journal; a second one falls through to the named failure below.
-        local reasoned = #tostring(result.reasoning or "") > 0
-        if reasoned and (self.auto_continues or 0) == 0 then
-          self.auto_continues = 1
-          local notice = "[harness] reasoning_only: your step ended with reasoning and no answer and no "
-            .. "tool call, so nothing was written."
-            .. "\n\nThis is not a new user request: answer the request now, or send the action as one "
-            .. string.rep(string.char(96), 3) .. "js run block."
-          record_turn(self, { role = "user", content = notice, phase = "reasoning_only" })
-          messages[#messages + 1] = { role = "user", content = notice }
-          telemetry.event(self.session_id, self.run_id, "", "reasoning_only", "continue", { round = round })
-          self.emit({ type = "status", text = "the step ended with reasoning only; continuing once" })
-          goto after_reasoning_only
-        end
         local reason = provider.empty_reply_reason(result)
         -- One rule for the end of a step, and it is the same rule in every mode: never end a turn on an
         -- unexecuted action or on a plan, and never end it because the model wrote in the wrong field. The
