@@ -665,15 +665,23 @@ do
       -- (rust/wa-operation/src/lib.rs "pub fn cancel" -> self.snapshot(id)), so the snapshot still says
       -- "running" for as long as the supervisor takes to notice. That is not a failure and not a success:
       -- watch it, briefly and by observation, and answer what was SEEN.
+      -- OBSERVED, NOT SPUN (review r2, MUST 2). host.sleep takes whole MILLISECONDS (rust/wa-capabilities:
+      -- "Block this interpreter for a bounded number of milliseconds"), so 0.2 was 0 ms and the old loop
+      -- sent back-to-back relayed status calls for three seconds. Now: whole milliseconds, a doubling
+      -- pause between calls, and a HARD CALL CAP, so the observation is a handful of calls by construction.
       local clock = function() return tonumber(host.monotonic_ms and host.monotonic_ms() or 0) or 0 end
+      local CALL_CAP = 5
       local stop_by = clock() + 3000
+      local pause = 200
       local state = answer
-      repeat
+      local calls = 0
+      while calls < CALL_CAP and clock() < stop_by do
+        calls = calls + 1
         local observed, why_state = remote_operation(dispatch, record, { action = "status", id = record.op })
         if not observed then
           return { op = record.op, tool = "remote", node = record.node, cancelled = false,
             cancel_requested = true, error = "cancel_not_confirmed", state = state.state,
-            why = tostring(why_state),
+            why = tostring(why_state), calls = calls,
             note = "the stop was requested and the peer could not be asked again; the operation may still "
               .. "be running - check status on that node" }
         end
@@ -681,16 +689,17 @@ do
         local name = tostring(observed.state or "")
         if observed.cancelled == true or name == "cancelled" then
           return { op = record.op, tool = "remote", node = record.node, cancelled = true,
-            state = "cancelled" }
+            state = "cancelled", calls = calls }
         end
         if observed.settled == true then
-          -- It settled without being cancelled: the call had finished first, and its outcome is retained.
           return { op = record.op, tool = "remote", node = record.node, cancelled = false,
-            error = "finished", state = name,
+            error = "finished", state = name, calls = calls,
             note = "the call had finished first; wait(op) re-reads its retained result, and nothing was re-run" }
         end
-        if host.sleep then host.sleep(0.2) end
-      until clock() >= stop_by
+        if clock() >= stop_by then break end
+        if host.sleep then host.sleep(pause) end
+        pause = math.min(pause * 2, 800)
+      end
       return { op = record.op, tool = "remote", node = record.node, cancelled = false,
         cancel_requested = true, error = "cancel_not_confirmed", state = tostring(state.state or "running"),
         note = "the stop was requested and the operation had not settled when this answer was formed; it "
