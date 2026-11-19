@@ -1681,6 +1681,10 @@ WASM_AGENT_RAW_CODE=native WA_SCRIPT=scripts/test-leak-net.lua "$BIN" --db "$DB"
 # A native node has ONE source of native guidance (rel r2 item 1): the run-tool sentence plus the
 # batching sentence, never the codemode guidance, asserted on the prompt build_context really builds.
 WA_SCRIPT=scripts/test-native-guidance.lua "$BIN" --db "$DB" | grep "native guidance ok"
+# The FULL built system prompt and declared tool list for every explicit mode, checked against goldens
+# RECORDED ON a27490af (rel r2 item 4), plus the arm-B shape of a default node (progressive and full,
+# master and child). Regenerate the goldens only by running scripts/generate-prompt-goldens.lua there.
+WA_SCRIPT=scripts/test-prompt-golden.lua "$BIN" --db "$DB" | grep "prompt golden ok"
 # Every explicit mode builds a prompt and tool list byte-identical to a27490af (rel r1 R1):
 # the golden hashes come FROM a27490af, not from this build.
 WA_SCRIPT=scripts/test-mode-parity.lua "$BIN" --db "$DB" | grep "mode parity ok"
