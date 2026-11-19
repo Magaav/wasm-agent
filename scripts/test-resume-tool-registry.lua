@@ -132,6 +132,15 @@ check(tostring(reply):find("no_dispatchable_tools", 1, true) ~= nil,
 check(tostring(reply):find("frozen", 1, true) ~= nil,
   "the refusal names why the list is empty: " .. tostring(reply):sub(1, 300))
 check(#bodies == 0, "nothing is sent to the provider for a run that cannot dispatch: " .. tostring(#bodies) .. " request(s)")
+-- #53 (19/11): a resume that cannot run must EXIT non-zero. The run is still not a crash (the reply is
+-- returned, so an interactive reader sees why), and the refusal is a fact the caller can see: the flag
+-- below is what `wa chat --once` turns into exit 1 (chat.turn_ok), so a scripted orchestrator can never
+-- read "nothing ran" as "the turn finished".
+check(type(bricked.turn_refused) == "string" and bricked.turn_refused:find("no_dispatchable_tools", 1, true) ~= nil,
+  "the refused run records that nothing ran: " .. tostring(bricked.turn_refused):sub(1, 120))
+local chat = dofile("lua/core/chat.lua")
+check(chat.turn_ok(true, bricked) == false, "a refused run exits non-zero: the turn did not run")
+check(chat.turn_ok(true, {}) == true, "a run that answered exits zero (no refusal recorded)")
 local state = memory.session_state(bricked_id) or {}
 check(state.state == "failed", "the refused run is recorded as failed, not as an answer: " .. tostring(state.state))
 local rows = memory.session_messages(bricked_id, { all = true }) or {}
@@ -159,5 +168,6 @@ local answered = healthy:run("is your registry there?")
 check(tostring(answered):find("answered", 1, true) ~= nil, "a run with tools still runs: " .. tostring(answered))
 check(#bodies == 1, "exactly one request for one answered turn, got " .. tostring(#bodies))
 check((memory.session_state(healthy_id) or {}).state == "answered", "the healthy thread settles as answered")
+check(chat.turn_ok(true, healthy) == true, "a healthy thread ends as a finished turn (exit 0)")
 
 print(string.format("resume tool registry: %d checks", checks))

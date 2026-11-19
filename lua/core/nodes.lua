@@ -536,8 +536,10 @@ function M.request(node, path, body, inner_headers)
     -- Bounded overall: the relay holds ~20s per attempt, so an absent node would
     -- otherwise keep the caller waiting for well over a minute before it hears
     -- anything. Two attempts is enough to cover a node that is between polls.
-    local DEADLINE, started = 60, host.now()
-    for attempt = 1, 3 do
+    -- The three numbers live in ONE place (M.RELAY_*), because the model-facing error names the cap it
+    -- hit and a number written twice drifts (19/11, item E).
+    local DEADLINE, started = M.RELAY_DEADLINE_SECONDS, host.now()
+    for attempt = 1, M.RELAY_ATTEMPTS do
       local relay_headers = M.signed_headers("relay-send")
       if not relay_headers then return { error = "no_identity" } end
       local envelope = json.encode({
@@ -589,8 +591,10 @@ function M.request(node, path, body, inner_headers)
       if attempt < 3 then host.sleep(750 * attempt) end
     end
     -- Say that it is retryable, and which reason it kept hitting: "could not
-    -- reach the node" and "the node is busy" call for different next steps.
-    return { error = last_error or "relay_timeout", rid = rid, retryable = true }
+    -- reach the node" and "the node is busy" call for different next steps. The cap itself travels with
+    -- the answer, so the sentence the model reads is built from what this loop enforced.
+    return { error = last_error or "relay_timeout", rid = rid, retryable = true,
+      deadline_seconds = DEADLINE, attempts = M.RELAY_ATTEMPTS }
   end
   return { error = "no_route" }
 end
@@ -765,6 +769,34 @@ function M.operator_status(node, opts)
   return value
 end
 
+-- The relay's own numbers, in one place. The relay holds a queued call about RELAY_ATTEMPT_HOLD_SECONDS
+-- (rust/wa-rendezvous), this loop makes RELAY_ATTEMPTS of them, and it stops after RELAY_DEADLINE_SECONDS
+-- of its own clock. The model-facing error names these, because a caller told only "timed out" re-issues
+-- the same long call for ever (19/11, item E).
+M.RELAY_ATTEMPT_HOLD_SECONDS = 20
+M.RELAY_ATTEMPTS = 3
+M.RELAY_DEADLINE_SECONDS = 60
+
+-- The reasons the relay deadline produces. Any of them means the same thing to the caller: the answer did
+-- not arrive in time, and the action may or may not have run on that node.
+M.RELAY_DEADLINE_REASONS = { relay_timeout = true, node_no_answer = true, node_not_attached = true,
+  node_busy = true, request_in_flight = true }
+
+-- Model-facing: the real cap, and the exact call that does the same work ON that node instead of through
+-- the relay. Numbers are read from the constants above, never written twice.
+function M.relay_deadline_note(node, reason)
+  local name = tostring((node and (node.name or node.node_id)) or "the peer")
+  local why = (reason and reason ~= "") and (" (last reason: " .. tostring(reason) .. ")") or ""
+  return string.format(
+    "%s did not answer a relayed call within %d s (%d attempts; the relay holds a queued call about %d s "
+      .. "each), so this call stopped waiting%s. Nothing here says the action did not run: read that node's "
+      .. "state before re-issuing it. Work that needs longer is started ON that node and awaited there: "
+      .. 'tools.remote({node:"%s", capability:"operation", action:"start", command:"<the command>"}) returns '
+      .. 'its id, and tools.remote({node:"%s", capability:"operation", action:"await", id:"<id>", '
+      .. 'wait_s:300}) waits for it.',
+    name, M.RELAY_DEADLINE_SECONDS, M.RELAY_ATTEMPTS, M.RELAY_ATTEMPT_HOLD_SECONDS, why, name, name)
+end
+
 -- Call a capability on a peer: direct when possible, else through the relay.
 function M.remote_call(selector, capability, args)
   local node = M.find(selector)
@@ -795,7 +827,23 @@ function M.remote_call(selector, capability, args)
     return refusal
   end
   if response.error then
-    return { error = "remote_error", detail = tostring(response.error), node = node.name,
+    local detail = tostring(response.error)
+    if M.RELAY_DEADLINE_REASONS[detail] then
+      -- The sentence and the fix are supplied here, so the refusal renderer keeps them verbatim
+      -- (lua/core/refusal.lua, M.finalize) and the model reads the cap rather than a bare code.
+      local name = tostring(node.name or node.node_id or "the peer")
+      return { error = "remote_error", detail = detail, node = node.name,
+        retryable = response.retryable, rid = response.rid,
+        deadline_seconds = response.deadline_seconds or M.RELAY_DEADLINE_SECONDS,
+        attempts = response.attempts or M.RELAY_ATTEMPTS,
+        message = M.relay_deadline_note(node, detail),
+        fix = string.format('Start the work on that node and await it there: '
+          .. 'tools.remote({node:"%s", capability:"operation", action:"start", command:"<the command>"}) '
+          .. 'then tools.remote({node:"%s", capability:"operation", action:"await", id:"<id>", '
+          .. 'wait_s:300}).', name, name),
+        input = tostring(capability or "the remote call") }
+    end
+    return { error = "remote_error", detail = detail, node = node.name,
       retryable = response.retryable, rid = response.rid }
   end
   if tonumber(response.status) ~= 200 then

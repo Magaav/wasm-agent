@@ -224,8 +224,9 @@ local cut2=cut.requests[2]
 local u=index_of(cut2,function(m) return m.role=='assistant' and m.content:find('```js run',1,true) end)
 check(u and cut2.messages[u].content=='Writing.\n```js run\nreturn "never";','first: an unterminated block is rendered as sent, without a closing fence')
 local two=run('first',{{content='a\n```js run\nreturn 1;\n```\nb\n```js run\nreturn 2;\n```\nOutput: 2'},{content='done'}})
-check(#two.dispatched==1 and two.dispatched[1]=='return 2;' and two.tool.content:find('only the last one ran',1,true) and two.tool.content:find('dropped',1,true),
-  'first: two blocks run the last, text after is dropped, both said')
+check(#two.dispatched==2 and two.dispatched[1]=='return 1;' and two.dispatched[2]=='return 2;'
+  and two.tool.content:find('run block 2 of 2',1,true) and two.tool.content:find('dropped',1,true),
+  'first: two blocks both run in order, each labelled, text after the last is dropped and said')
 local empty=run('first',{{content='```js run\n\n```'},{content='done'}})
 check(#empty.dispatched==0 and empty.tool.content:find('raw_code_empty',1,true),'first: an empty block is refused')
 

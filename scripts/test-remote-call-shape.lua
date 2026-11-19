@@ -184,4 +184,32 @@ local replayed=false;for _,m in ipairs(sent[2].messages)do if m.role=='assistant
 check(replayed,'preamble replayed to the provider, not dropped')
 local out=json.decode(tool_row.content)
 check(out.content=='remote-ok\n' and out.normalized:find('appended }',1,true),'truncated call ran once completed, and says so')
+-- The relay's deadline (item E, 19/11): before this, a relayed call that ran out of time answered
+-- "relay_timeout" and nothing else, so the model's next step was the same long call again. The sentence
+-- now names the cap the loop enforces and the exact call that starts the work ON that node.
+local function has(text,needle) return tostring(text):find(needle,1,true)~=nil end
+check(nodes.RELAY_DEADLINE_SECONDS==60 and nodes.RELAY_ATTEMPTS==3 and nodes.RELAY_ATTEMPT_HOLD_SECONDS==20,
+  'the cap the sentence names is the one the relay loop enforces')
+local deadline_note=nodes.relay_deadline_note({name='work'},'relay_timeout')
+check(has(deadline_note,'within 60 s'),'the note names the real cap: '..deadline_note:sub(1,120))
+check(has(deadline_note,'3 attempts'),'the note names the attempt count')
+check(has(deadline_note,'tools.remote({node:"work", capability:"operation", action:"start"'),
+  'the note carries the exact tools.operation start call on that node')
+check(has(deadline_note,'action:"await"'),'and the await that collects it')
+-- Through the caller: a relayed call that timed out answers with that sentence, not a bare code. Neither
+-- the roster nor the network is reached (find and request are stubbed for two lines).
+local real_find, real_request, real_mesh = nodes.find, nodes.request, nodes.mesh_enabled
+local peer_id=string.rep('b',64)
+nodes.find=function() return { name='work', node_id=peer_id } end
+nodes.mesh_enabled=function() return false end -- the relay path is the one under test
+nodes.request=function() return { error='relay_timeout', retryable=true, deadline_seconds=60, attempts=3, rid='rid-1' } end
+local timed_out=nodes.remote_call('work','bash',{command='cargo test'})
+nodes.find, nodes.request, nodes.mesh_enabled = real_find, real_request, real_mesh
+check(type(timed_out)=='table' and timed_out.error=='remote_error' and timed_out.detail=='relay_timeout',
+  'the caller reports the relay timeout: '..tostring(timed_out and timed_out.error))
+check(has(timed_out.message,'within 60 s') and has(timed_out.fix,'action:"start"'),
+  'and the model gets the cap and the start call in message and fix')
+check(timed_out.deadline_seconds==60 and timed_out.attempts==3,'the numbers travel with the answer')
+check(timed_out.retryable==true,'it is still marked retryable: the action may not have run')
+
 print('remote call shape ok ('..checks..' checks, 0 skipped)')

@@ -133,6 +133,7 @@ local PURE = {
   "lua/core/raw_code.lua",         -- the run block, and a model's own call markup, turned into a call
   "lua/core/codemode_harness.lua", -- the JS prelude a script is wrapped in (vars, results, parallel)
   "lua/core/tool_output.lua",      -- a tool's result as the model reads it
+  "lua/core/finish_contract.lua",  -- what ends a turn: the shapes that are not an answer (round 2)
 }
 
 -- Never reloadable, and named one by one rather than by a pattern: a list a reviewer can read is the
@@ -433,6 +434,12 @@ local PROBE = {
     assert(found and found.calls[1] and found.calls[1].code == "return 1;", "native_calls")
     local blocks = module.parse("```js run\nreturn 2;\n```")
     assert(type(blocks) == "table" and blocks[1] and blocks[1].run, "parse")
+  end,
+  ["lua/core/finish_contract.lua"] = function(module)
+    -- The real scan on a fixed input: found is not names-the-shape.
+    local found = module.markup('done <ds_tool>{"command":"ls"}</ds_tool>')
+    assert(found and found.shape == "markup", "markup")
+    assert(module.plan("Let me read the file.") ~= nil, "plan")
   end,
   ["lua/core/codemode_harness.lua"] = function(module)
     local text = module.decorate("return 3;", {})
