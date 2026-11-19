@@ -576,6 +576,10 @@ end
 -- at whatever width the window has when it draws - so a resize reflows it (29/10). Tables, fences
 -- and rules are still laid out at `width`).
 -- Returns the rendered text, one line per `\n`, with no trailing newline.
+-- A card row inside a fence: the host is told this row is CODE, not prose.
+-- Marker: \1f\1 at the start of the row. Stripped at draw time, never on screen.
+local FENCE_MARK = "\1f\1"
+
 function M.render(text, opts)
   opts = opts or {}
   local paint = opts.paint or function(plain) return plain end
@@ -655,6 +659,11 @@ function M.render(text, opts)
       -- re-wrapped card row is what Victor 19/11 screenshot shows (the bar alone on a row, the code
       -- hanging bare under it). Two columns narrower at rest means the same rows fit focused and
       -- unfocused: one rendering, both states (parity).
+            -- Two columns of slack (item I, review MUST 1b): a FOCUSED block draws its rows inside a
+      -- border that takes two cells. Without the slack a card wrapped to the full width is cut
+      -- again by the host on the first focus - the card mid-word, which is what a reader sees as
+      -- the broken card. With it, the rows the renderer emits are the rows a focused block draws:
+      -- one rendering, both states (parity).
       local room = math.max(8, width - columns(indent) - 4)
       for _, code_line in ipairs(body) do
         code_line = code_line:gsub("\t", "    ")
@@ -673,7 +682,7 @@ function M.render(text, opts)
             -- A code block's own colour is the base; a token adds its syntax colour on top.
             parts[#parts + 1] = paint(piece, style or "mdCodeBlock")
           end)
-          out[#out + 1] = table.concat(parts)
+          out[#out + 1] = FENCE_MARK .. table.concat(parts)
         end
       end
       out[#out + 1] = paint(indent .. "\226\148\148\226\148\128", "mdCodeBlockBorder")

@@ -820,10 +820,57 @@ pub fn wrap_rows(line: &str, width: usize) -> Vec<String> {
         }
         cells.push((std::mem::take(&mut esc), ch, cell_width_of(ch)));
     }
+    // A marked CARD row (item I): cut by CELLS, keeping the bar and its one space on every row, and
+    // marking a continuation with U+21AA exactly as the renderer's own wrap does.
+    if let Some(rest) = line.strip_prefix("\u{1}f\u{1}") {
+        let (mut card, mut esc): (Vec<(String, char, usize)>, String) = (Vec::new(), String::new());
+        let mut chars = rest.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '\x1b' {
+                esc.push(ch);
+                if chars.peek() == Some(&'[') {
+                    esc.push(chars.next().unwrap());
+                    for c in chars.by_ref() { esc.push(c); if ('@'..='~').contains(&c) { break; } }
+                }
+                continue;
+            }
+            card.push((std::mem::take(&mut esc), ch, cell_width_of(ch)));
+        }
+        let cells_of: usize = card.iter().map(|c| c.2).sum();
+        if cells_of <= width { return vec![rest.to_string()]; }
+        // The bar and the one space after it: every continuation row repeats them.
+        let mut head = 1usize;
+        while head < card.len() && card[head].1 == ' ' { head += 1; }
+        let head_cells: usize = card[..head].iter().map(|c| c.2).sum();
+        let (mut rows, mut row, mut cols, mut first) = (Vec::new(), String::new(), 0usize, true);
+        for (prefix, ch, w) in card.iter() {
+            if first {
+                row.push_str(prefix);
+                row.push(*ch);
+                cols += *w;
+                if *ch == ' ' { continue }
+                first = false;
+                continue;
+            }
+            if cols + *w > width && cols > head_cells {
+                rows.push(std::mem::take(&mut row));
+                let bar = &card[0];
+                row.push_str(&bar.0);
+                row.push(bar.1);
+                row.push_str(&bar.0);
+                row.push('\u{21aa}');
+                cols = bar.2 + cell_width_of('\u{21aa}');
+            }
+            row.push_str(prefix);
+            row.push(*ch);
+            cols += *w;
+        }
+        rows.push(row);
+        return rows;
+    }
     let total: usize = cells.iter().map(|c| c.2).sum();
     if total <= width { return vec![line.to_string()]; }
-    // A row that is too wide only because of trailing spaces (a padded band: the code-mode block pads its
-    // rows to the screen) is cut at the width, never wrapped: the wrap was a whole blank band row under
+    // A row that is too wide only because of trailing spaces (a padded band: the code-mode block pads its    // rows to the screen) is cut at the width, never wrapped: the wrap was a whole blank band row under
     // every code line, and under every row when a focus border took two columns (operator 17/11).
     let trailing = cells.iter().rev().take_while(|c| c.1 == ' ').count();
     if total - trailing <= width {
@@ -1569,6 +1616,68 @@ mod tests {
     ///
     /// markdown.lua now leaves two columns of slack, so the rows it emits fit a focused block exactly
     /// and nothing is re-wrapped. PARITY (review rule 14): one rendering, both states.
+    /// Item I, the shape Victor photographed on 19/11, through the REAL draw path.
+    ///
+    /// A card row is marked by the renderer (\u{1}f\u{1}) and cut by CELLS here, so every row keeps
+    /// its bar and a continuation says so. Measured BEFORE this fix, the same rows at 40 and 30
+    /// columns came out as the bar alone and the code hanging bare under it:
+    ///
+    ///     [│ :host] [  ::slotted(colmeio-offline-banner){disp] [  lay:contents]
+    ///
+    /// which is the screenshot. This asserts the fixed shape, so it FAILS on the old code.
+    #[test]
+    fn a_marked_card_row_is_cut_by_cells_and_keeps_its_bar() {
+        let card = "\u{1}f\u{1}\u{2502} :host ::slotted(colmeio-offline-banner){display:contents";
+        for width in [59usize, 40, 30, 20] {
+            let rows: Vec<String> = wrap_rows(card, width).iter().map(|r| crate::selection::plain(r)).collect();
+            assert!(!rows.is_empty(), "the card draws at {width}");
+            for row in &rows {
+                assert!(row.starts_with('\u{2502}'),
+                    "at {width} every card row starts with the bar: {row:?} in {rows:?}");
+                assert!(row.chars().count() > 1,
+                    "and none is the bar alone (the empty bar row of the screenshot): {rows:?}");
+                assert!(visible(row) <= width, "and fits the width at {width}: {row:?}");
+            }
+            if rows.len() > 1 {
+                assert!(rows[1].starts_with("\u{2502}\u{21aa}"),
+                    "the continuation row says it continues: {:?}", rows[1]);
+            }
+        }
+        let one = wrap_rows(card, 80);
+        assert_eq!(one.len(), 1, "a card row that fits is one row");
+        assert!(!crate::selection::plain(&one[0]).contains('\u{1}'),
+            "and the marker never reaches the screen");
+    }
+
+    /// Item I, resize (MUST 1b): a card row is cut at DRAW time from the row the renderer stored,
+    /// so shrinking the window re-cuts it and widening puts it back - it never falls to the prose
+    /// rule, which is what broke the card on a resize.
+    #[test]
+    fn a_marked_card_row_survives_a_shrink_and_a_widening() {
+        let card = "\u{1}f\u{1}\u{2502} :host ::slotted(colmeio-offline-banner){display:contents";
+        let mut t = plain(Transcript::default());
+        t.write(&format!("{card}\n"));
+        for width in [80usize, 70, 60, 70, 80] {
+            let rows: Vec<String> = t.view(width, 6).iter().map(|r| crate::selection::plain(r)).collect();
+            let card_rows: Vec<&String> = rows.iter().filter(|r| !r.trim().is_empty()).collect();
+            assert!(!card_rows.is_empty(), "the card draws at {width}");
+            for row in &card_rows {
+                assert!(row.starts_with('\u{2502}'),
+                    "at {width} every card row keeps its bar after the resize: {row:?} in {rows:?}");
+                assert!(row.chars().count() > 1, "and none is the bar alone at {width}: {rows:?}");
+                assert!(visible(row) <= width, "and fits the new width at {width}: {row:?}");
+            }
+        }
+    }
+
+    /// A BLOCKQUOTE opens with the same bar and is not a card: no marker, so it keeps the prose rule
+    /// and hangs under its bar, which is the shape a quote has.
+    #[test]
+    fn a_quote_keeps_the_prose_rule_because_it_carries_no_marker() {
+        let rows: Vec<String> = wrap_rows("\u{2502} quoted words wrap under the bar", 16)
+            .iter().map(|r| crate::selection::plain(r)).collect();
+        assert_eq!(rows[1], "  wrap under the", "a quote still hangs: {rows:?}");
+    }
     #[test]
     fn a_card_wrapped_with_two_columns_of_slack_fits_the_focused_draw() {
         for area in [120usize, 80, 60, 40] {
