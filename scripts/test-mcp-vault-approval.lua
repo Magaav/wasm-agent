@@ -513,6 +513,28 @@ ok(has(problems_text(manifest_of(interpreter_definition('/usr/bin/node', { '-pe'
 ok(has(problems_text(manifest_of(interpreter_definition('/bin/sh', { '-ec', 'echo hi' }))), 'inline code'),
   'and the same cluster on a shell (-ec is -e and -c): '
    .. problems_text(manifest_of(interpreter_definition('/bin/sh', { '-ec', 'echo hi' }))))
+-- 4d. Round 9, item 4: the FAMILY is decided from the program's REALPATH, as the kernel decides it.
+-- A symlink named `node` that points at bash is the SHELL family: `-c` is then inline shell code, which
+-- the js family's flag list (-e, --eval, -p, --print) would not have named at all. Both sides follow the
+-- link now; before this round Lua judged the name it was called by.
+if host.path_facts and host.exec then
+  local link = dir .. '/bin/node-to-bash'
+  local made = host.exec('ln -sf /bin/sh ' .. link, nil, 20)
+  if host.path_kind(link) == 'file' then
+    assert(host.exec('ln -sf /bin/bash ' .. link, nil, 20))
+    local via_link = manifest_of(interpreter_definition(link, { connector, '-c', 'echo hi' }))
+    ok(has(problems_text(via_link), 'inline code'),
+      'a symlink named node that points at bash is the shell family (-c is inline code): '
+       .. problems_text(via_link))
+    -- The SAME link under a js flag is not a js flag: -p means nothing to a shell, and the family
+    -- decided the answer both times.
+    local js_flag = manifest_of(interpreter_definition(link, { connector, '-p', '1' }))
+    ok(not has(problems_text(js_flag), 'inline code'),
+      'and -p, the js family\'s flag, is not code for the shell it really is: ' .. problems_text(js_flag))
+  else
+    print('skip: this host cannot make a symlink (' .. tostring(made) .. ')')
+  end
+end
 -- 4c. A LONG option is never split: --preserve-symlinks begins with -p and is not -p.
 ok(not has(problems_text(manifest_of(interpreter_definition('/usr/bin/node',
     { connector, '--preserve-symlinks' }))), 'inline code'),
@@ -556,6 +578,47 @@ local vm_context = dir .. '/vm-context.mjs'
 assert(host.write_file(vm_context, 'export const go = (code) => runInThisContext(code);\n'))
 ok(has(problems_text(manifest_of(interpreter_definition('/usr/bin/node', { vm_context }))), 'vm'),
   'runInThisContext is refused even without the module name in the file')
+
+-- Round 9, item 3: the three spellings the quote class and the receiver rule did not cover.
+-- (a) A TEMPLATE literal: require(`vm`) is require('vm') with the one quote the class lacked.
+local vm_template = dir .. '/vm-template.mjs'
+local backtick = string.char(96)
+assert(host.write_file(vm_template,
+  'const engine = require(' .. backtick .. 'vm' .. backtick .. ');\nexport const go = (c) => engine.Script(c);\n'))
+local template_manifest = manifest_of(interpreter_definition('/usr/bin/node', { vm_template }))
+local template_text = problems_text(template_manifest)
+-- The receiver rule alone would catch the .Script call; this asserts the TEMPLATE specifier is named as such,
+-- so a future edit that drops the backtick from VM_QUOTE fails here and not silently.
+ok(has(template_text, 'template literal'),
+  'require(`vm`) in a template literal is refused as such: ' .. template_text)
+local vm_template_import = dir .. '/vm-template-import.mjs'
+assert(host.write_file(vm_template_import,
+  'const m = await import(' .. backtick .. 'node:vm' .. backtick .. ');\nexport default m;\n'))
+ok(has(problems_text(manifest_of(interpreter_definition('/usr/bin/node', { vm_template_import }))), 'template literal'),
+  'import(`node:vm`) in a template literal is refused too')
+-- (b) process.getBuiltinModule: the module by HANDLE, with no require and no import in the file...
+local vm_builtin = dir .. '/vm-builtin.mjs'
+assert(host.write_file(vm_builtin,
+  "const engine = process.getBuiltinModule('node:vm');\nexport const go = (c) => engine.Script(c);\n"))
+local builtin_manifest = manifest_of(interpreter_definition('/usr/bin/node', { vm_builtin }))
+ok(has(problems_text(builtin_manifest), 'getBuiltinModule'),
+  'process.getBuiltinModule(\'node:vm\') is refused by the call: ' .. problems_text(builtin_manifest))
+-- (c) ... and the DESTRUCTURING form, whose calls are bare names (`Script(c)`) that the receiver rule
+-- (x.Script() needs a dot) never matches: the refusal has to come from the getBuiltinModule call itself.
+local vm_destructured = dir .. '/vm-destructured.mjs'
+assert(host.write_file(vm_destructured,
+  "const { Script, compileFunction } = process.getBuiltinModule('vm');\nexport const go = (c) => new Script(c);\n"))
+local destructured_manifest = manifest_of(interpreter_definition('/usr/bin/node', { vm_destructured }))
+ok(has(problems_text(destructured_manifest), 'getBuiltinModule'),
+  'the destructuring form is refused by the getBuiltinModule call: ' .. problems_text(destructured_manifest))
+-- Neither new rule refuses an ordinary connector: a plain require of fs and a template literal in a test
+-- are not code this digest cannot name.
+local plain = dir .. '/plain-template.mjs'
+assert(host.write_file(plain,
+  "import { readFile } from 'node:fs/promises';\nexport const name = (x) => " .. backtick .. 'file:${x}' .. backtick .. ';\n'))
+eq(#manifest_of(interpreter_definition('/usr/bin/node', { plain })).problems, 0,
+  'a template literal and an ordinary import are not refused: '
+   .. problems_text(manifest_of(interpreter_definition('/usr/bin/node', { plain }))))
 
 -- 4. The interpreter is resolved with the PATH the CHILD gets, not the one host.getenv answers: the
 -- kernel resolves a bare program name against the process PATH (host.executable_on_path) while

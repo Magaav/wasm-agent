@@ -529,7 +529,14 @@ end
 -- so a symlink or another name cannot choose another family's rules.
 local INTERPRETERS={node='js',nodejs='js',sh='sh',bash='sh',dash='sh',zsh='sh',ksh='sh'}
 local function interpreter_family(program)
- local name=basename(tostring(program or '')):lower():gsub('%.exe$','')
+ -- Round 9: the REALPATH, as the kernel decides it (operations.rs, interpreter_family). A symlink named
+ -- `node` that points at bash is the shell family, and one that points at python is refused by name;
+ -- judging the name it was called by let a link choose the rules that applied to it. path_facts falls
+ -- back to the path itself when the file is not there, which is the kernel's real_path fallback too.
+ local facts=path_facts(program)
+ local real=facts and tostring(facts.path or '') or ''
+ if real=='' then real=tostring(program or '') end
+ local name=basename(real):lower():gsub('%.exe$','')
  if INTERPRETERS[name] then return INTERPRETERS[name] end
  if SCRIPT_EXT[(name:match('%.([%w]+)$') or ''):lower()] then return 'script' end
  if refused_interpreter_or_wrapper(name) then return 'other' end
@@ -566,6 +573,8 @@ end
 -- What a digest of FILES cannot follow: a string it would evaluate, a process it would start, a module
 -- whose name is chosen while it runs. Refused by name, in the connector's own code.
 local QUOTE_CLASS='['..string.char(39)..string.char(34)..']'
+-- Round 9: the same class PLUS the backtick, for the module specifiers a template literal carries.
+local VM_QUOTE='['..string.char(39)..string.char(34)..string.char(96)..']'
 local function refused_construct(kind,content,path)
  if kind=='js' then
   if content:find('child_process',1,true) and not RUNTIME_NAME[basename(path)] then
@@ -589,6 +598,24 @@ local function refused_construct(kind,content,path)
    or content:find('import%s*%(%s*'..QUOTE_CLASS..'node:vm'..QUOTE_CLASS)
    or content:find('import%s*%(%s*'..QUOTE_CLASS..'vm'..QUOTE_CLASS) then
    return 'it evaluates a string as code (vm: runInThisContext, vm.Script), whose source no digest of files names'
+  end
+  -- Round 9: a TEMPLATE literal is a string literal too. require(`vm`) and import(`node:vm`) are the same
+  -- module the quote class above (single and double) sees, spelled with the one quote it did not include.
+  if content:find('require%s*%(%s*'..VM_QUOTE..'node:vm'..VM_QUOTE)
+   or content:find('require%s*%(%s*'..VM_QUOTE..'vm'..VM_QUOTE)
+   or content:find('import%s*%(%s*'..VM_QUOTE..'node:vm'..VM_QUOTE)
+   or content:find('import%s*%(%s*'..VM_QUOTE..'vm'..VM_QUOTE)
+   or content:find('from%s*'..VM_QUOTE..'node:vm'..VM_QUOTE)
+   or content:find('from%s*'..VM_QUOTE..'vm'..VM_QUOTE) then
+   return 'it evaluates a string as code (vm: require/import in a template literal), whose source no digest of files names'
+  end
+  -- Round 9: `process.getBuiltinModule('vm')` reaches the same module with NO require and NO import, so
+  -- neither of the checks above can see it - and the DESTRUCTURING form
+  -- (`{Script, compileFunction} = process.getBuiltinModule('vm')`) then calls bare names the receiver rule
+  -- (`x.Script(`) never matches. Any builtin by handle is the same hole (child_process, fs, vm), so the
+  -- CALL is refused whatever module it names: a connector that needs a builtin imports it by name.
+  if content:find('process%s*%.%s*getBuiltinModule%s*%(') then
+   return 'it reaches a builtin module by handle (process.getBuiltinModule), whose code no digest of files names'
   end
   -- Round 8: the module bound to ANOTHER name. Requiring node:vm into a variable called v and calling
   -- v.Script(code) is the same string a check for the literal name vm cannot see, so these methods are
