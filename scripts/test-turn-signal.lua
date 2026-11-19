@@ -12,10 +12,17 @@
 --   #37  a pending handle always carries operation_id and its log paths as plain fields.
 --   #43  operation list/await answer ids and state by default; a body only when asked, and bounded.
 local json = dofile("lua/vendor/json.lua")
-local home = os.getenv("WASM_AGENT_HOME") or ""
-if home == "" or home == os.getenv("HOME") .. "/.wasm-agent" or home:find("/%.wasm%-agent$") then
-  error("this test writes a ledger: it refuses to run against a real node home (" .. home .. ")")
-end
+-- Item 3 (review 19/11): the guard that used to stand here compared WASM_AGENT_HOME with
+-- HOME .. "/.wasm-agent", and that can never fire - the host resolves HOME FROM WASM_AGENT_HOME
+-- (rust/wa-host-support/src/paths.rs), so the comparison saw <home>/.wasm-agent and never the home
+-- itself. The rule is scripts/lib/test-home-guard.lua: an allow-list (the home must sit under
+-- GATE_ROOT, else TMPDIR) plus a refusal of the live node's own markers. It is driven below with
+-- injected probes, so the rule is checked here too, not only trusted.
+local home_guard = dofile("scripts/lib/test-home-guard.lua")
+local test_home = os.getenv("WASM_AGENT_HOME") or ""
+local scratch_root = os.getenv("GATE_ROOT") or os.getenv("TMPDIR") or ""
+local guard_reason = home_guard.reason({ home = test_home, scratch = scratch_root })
+if guard_reason then error("this test writes a ledger: it refuses to run (" .. guard_reason .. ")") end
 local memory = dofile("lua/core/memory.lua")
 memory.setup()
 local journal = dofile("lua/core/turn_journal.lua")
@@ -34,6 +41,56 @@ local function eq(actual, expected, label)
   end
 end
 
+-- ---- item 3: the home guard, driven with injected probes --------------------------------
+-- Each case is the rule's whole point: a home it cannot prove safe refuses.
+local function guard_case(label, opts, expect_refuse, why)
+  local reason = home_guard.reason(opts)
+  if expect_refuse then
+    ok(reason ~= nil, "#3: refuses " .. label .. " (" .. why .. ")")
+  else
+    ok(reason == nil, "#3: allows " .. label .. " (got: " .. tostring(reason) .. ")")
+  end
+end
+local no_files = function() return false end
+guard_case("an unset home", { scratch = "/tmp", exists = no_files }, true, "nothing to write into")
+guard_case("an unset scratch root", { home = "/tmp/wa-1", exists = no_files }, true,
+  "a home cannot be told from a real one")
+guard_case("the real home as the test home",
+  { home = "/home/victor", scratch = "/tmp", exists = no_files }, true, "outside the scratch root")
+guard_case("a home that does not sit under the scratch root",
+  { home = "/home/victor/Work/scratch", scratch = "/tmp", exists = no_files }, true, "not under it")
+guard_case("a sibling with the scratch root as a name prefix",
+  { home = "/tmp/wa-10", scratch = "/tmp/wa-1", exists = no_files }, true, "a boundary, not a prefix")
+-- Measured on this node: TMPDIR is <state>/tmp, so the gate's own scratch home lives INSIDE the
+-- state root and that is the supported case - its .wasm-agent/ is its own, not the live one. What
+-- the rule refuses is the LIVE home, and that is the markers' job, not the allow-list's.
+guard_case("a scratch home under a scratch root inside the state root",
+  { home = "/home/victor/.wasm-agent/tmp/wa-1", scratch = "/home/victor/.wasm-agent/tmp", exists = no_files },
+  false, "this node's own TMPDIR is <state>/tmp")
+guard_case("the live state root as the home",
+  { home = "/home/victor/.wasm-agent", scratch = "/home/victor/.wasm-agent/tmp",
+    exists = function(p) return p == "/home/victor/.wasm-agent/.wasm-agent/" .. home_guard.MARKERS[1] or
+      p == "/home/victor/.wasm-agent/" .. home_guard.MARKERS[1] end },
+  true, "outside the scratch root, and it carries a key")
+guard_case("a scratch home with the node key in it",
+  { home = "/tmp/wa-1", scratch = "/tmp",
+    exists = function(p) return p == "/tmp/wa-1/.wasm-agent/" .. home_guard.MARKERS[1] end },
+  true, "a live node's own key")
+guard_case("a scratch home with the ledger in it",
+  { home = "/tmp/wa-1", scratch = "/tmp",
+    exists = function(p) return p == "/tmp/wa-1/.wasm-agent/" .. home_guard.MARKERS[2] end },
+  true, "a live node's own ledger")
+guard_case("a scratch home with no markers",
+  { home = "/tmp/wa-1", scratch = "/tmp", exists = no_files }, false, "a scratch ledger is safe")
+guard_case("a symlinked scratch root, when resolved",
+  { home = "/private/tmp/wa-1", scratch = "/tmp", exists = no_files,
+    resolve = function(p) if p:find("/private/tmp") then return (p:gsub("/private/tmp", "/tmp")) end return p end },
+  false, "resolving both sides keeps /tmp/.. under /tmp")
+-- The comparison that used to guard this row, measured: the host resolves HOME from
+-- WASM_AGENT_HOME, so HOME .. "/.wasm-agent" is always <home>/.wasm-agent and never <home>.
+eq(test_home, os.getenv("HOME"), "#3: HOME already IS the test home here, so the old comparison never fired")
+ok(test_home ~= os.getenv("HOME") .. "/.wasm-agent",
+  "#3: the old right-hand side is not the home, and could never equal it")
 -- ---- #33: the split, the note, and the journal row --------------------------------------------
 local answer = table.concat({
   "42",
@@ -187,7 +244,14 @@ ok(bad == nil and bad_error == "turn_day_must_be_YYYY-MM-DD",
   "#33: a malformed day is refused by name, never read as the last N notes")
 
 -- the envelope says the harness removes the block
-local agent_source = host.read_file("lua/core/agent.lua") or ""
+-- The source is read through WASM_AGENT_LUA_ROOT when it is set: these two checks read the
+-- tree under test, not the process's cwd, so they cannot fail because a runner started
+-- somewhere else (measured: they did, from a shell outside the worktree).
+local lua_root = os.getenv("WASM_AGENT_LUA_ROOT") or "."
+local function source_of(path)
+  return host.read_file(lua_root .. "/" .. path) or host.read_file(path) or ""
+end
+local agent_source = source_of("lua/core/agent.lua")
 ok(agent_source:find("The harness removes this block from the answer it shows", 1, true) ~= nil,
   "#33: the envelope states that the harness removes the block")
 
@@ -233,7 +297,7 @@ if type(agent_lib.script_effect) == "function" then
     "#34: an unreadable answer is unknown, and unknown is an effect")
   ok(agent_lib.script_effect(nil) == true, "#34: no result at all is unknown too, never a read")
   -- The one fact that ties the rule to the loop: the loop asks THIS function.
-  ok((host.read_file("lua/core/agent.lua") or ""):find("effect = M.script_effect(output)", 1, true) ~= nil,
+  ok(source_of("lua/core/agent.lua"):find("effect = M.script_effect(output)", 1, true) ~= nil,
     "#34: the codemode branch of the dispatch loop answers with that function")
 end
 
