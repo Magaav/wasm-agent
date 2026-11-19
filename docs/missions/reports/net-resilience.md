@@ -24,38 +24,61 @@ separate worktree of `ac7717e0`: `is_rate_limited=true`, `is_connection_lost=fal
 **Roster.** `fetch_peers` assigned `cache, cache_at = peers` on every path with `peers` initialised to
 `{}`, so one failed `/nodes` read erased the fleet and every call answered `unknown_node`.
 
-## Items (brief numbering) and the commits that implement them
+## Items, in the BRIEF's numbering, and the commits that implement them
 
-1. **A transient error never ends a run.** `95c51654` (link class), `564952d8` (MUST 1), `ed6ab83f`
-   (status outranks body). `LINK_EVIDENCE`/`is_link_down`; `is_final` allow-list (401/403, 400/422/404/
-   413/415, unknown model, content refusal) read BEFORE any body text; plain 5xx/408/425/429 now wait with
-   NO total cap (1 s doubling to a 30 s cap, jittered), and only an UNCHANGED repeat is bounded
-   (`identical_repeat_ceiling`, default 10) and then named.
-2. **The wait is visible.** `95c51654`, `564952d8`. Row: `waiting for the network · <provider>
-   unreachable · retry in Ns (N, no limit - it waits until the wait stops helping, Esc stops the run)`;
-   recovery line `network back after NmNNs` (`374a60bc`: only after a REAL link failure and a
-   measurable wait).
-3. **Unknown is not final.** `6be1efef`. `is_unknown_failure` + `unknown_retries` = 5, then fail by
-   name through `run_failure.classify`.
-4. **Missions safety net.** `60f42483`, `29648369`. `RECOVERABLE_FAILURE` learned
-   `vault_upstream_unreachable`, `provider_http_5`, `provider_unreachable`, `waiting for the network`;
-   and a tail that already repeated one failure unchanged is NOT re-driven.
-5. **A caller cannot storm a node.** `7a48bb73`, `e403c8df`, `374a60bc`. `RELAY_MAX_IN_FLIGHT` = 4 per
-   target, refused by name (`peer_busy_caller`) before anything is sent; the counter is now NODE-WIDE
-   (one file per peer under `paths.data()`, TTL 120 s), because the old table was per interpreter and
-   `wa call` is its own process. `relay_backoff_ms` doubles 750 ms to 8 s, jittered, honours
-   `Retry-After`. The slot is released on EVERY path and every body is decoded safely (`e403c8df`).
-6. **The rendezvous sheds fairly.** `ef56769c`, `29648369`. `reserved_lanes_at` scaled to the cap,
-   `is_priority_lane` (now including `/register` - `7e50b670`), `lane_refusal` (per-caller 8, per-target
-   32), `Retry-After` in header and `retry_after_ms` in body on every shed, and the shed decision reads
-   the LIVE open count.
-7. **A binding check survives the outage.** `ef56769c`, `7e50b670`. `M.authorize` remembers a POSITIVE
-   admission for `ADMISSION_CACHE_SECONDS` (600 s) and falls back to it only on a LINK failure; the
-   binding TICK uses the same cached authority, still names the outage, and keeps polling.
-8. **A real storm converges.** `4e4fee17`. `rust/wa-rendezvous/tests/storm.rs`: four scratch nodes with
-   real ed25519 keys, 300 held sockets past the base cap, a proxy the test owns that CUTS the link for
-   60 s, then every node must answer a REAL signed relayed call (measured 252 ms after the restore,
-   peak 301 connections). **It fails on the base registry** with `503 too_many_connections`.
+Brief items 1-4 are the provider/missions half; items 5-8 are the second-evidence (relay deadlock) half.
+
+**Item 1 - a transient error never ends a run, and a final one fails at once by name.**
+`95c51654` (link class + patient wait), `6be1efef` (unknown class), `564952d8` (MUST 1),
+`ed6ab83f` (status outranks the body). `LINK_EVIDENCE`/`is_link_down`; `is_final` allow-list
+(401/403, 400/422/404/413/415, unknown model, content refusal) read BEFORE any body text; plain
+5xx/408/425/429 wait with NO total cap (1 s doubling to a 30 s cap, jittered); a failure matching NO
+class is retried 5 times then failed by name (`is_unknown_failure`/`unknown_retries`); only an
+UNCHANGED repeat is bounded (`identical_repeat_ceiling`, default 10) and then named.
+
+**Item 2 - the run row says it is waiting, and one line when it comes back.**
+`95c51654`, `564952d8`, `374a60bc`. Row: `waiting for the network · <provider> unreachable · retry
+in Ns (N, no limit - it waits until the wait stops helping, Esc stops the run)`; recovery line
+`network back after NmNNs`, emitted only after a REAL link failure and a measurable wait.
+
+**Item 3 - mesh/relay: the roster is re-learned, and an unreachable peer stays in it.**
+`bc1e2869`, `374a60bc`. A failed roster read keeps every known peer marked `online=false` with
+`last_seen`; `remote_call` answers `peer_offline:<name> (last seen ...)`; a COLD cache during an
+outage answers `roster_unavailable` (never `unknown_node`); a SUCCESSFUL read may still remove a peer.
+
+**Item 4 - missions need no launcher change; the launcher's continue pattern is the safety net.**
+`60f42483`, `29648369`. `RECOVERABLE_FAILURE` learned `vault_upstream_unreachable`,
+`provider_http_5`, `provider_unreachable`, `waiting for the network`; a tail that already repeated
+one failure unchanged is NOT re-driven.
+
+**Item 5 - callers back off with jitter and hold at most N relayed calls per node.**
+`7a48bb73`, `e403c8df`, `374a60bc`. `RELAY_MAX_IN_FLIGHT` = 4 per target, refused by name
+(`peer_busy_caller`) before anything is sent; the counter is NODE-WIDE (one file per peer under
+`paths.data()`, TTL 120 s), because the old table was per interpreter and `wa call` is its own
+process. `relay_backoff_ms` doubles 750 ms to 8 s, jittered, honours `Retry-After`. The slot is
+released on EVERY path and every transport body is decoded safely (`e403c8df`).
+
+**Item 6 - the rendezvous sheds load fairly, with Retry-After.**
+`ef56769c`, `7e50b670`, `29648369`. `reserved_lanes_at` scaled to the cap (so a test cap of 16
+reserves 4); `is_priority_lane` covers `/relay/poll`, `/relay/respond`, `/bindings/*`, `/lookup`,
+`/health`, `/service` AND `/register`; `lane_refusal` caps per-caller (8) and per-target (32);
+`Retry-After` in the header and `retry_after_ms` in the body on every shed; the decision reads the
+LIVE open count.
+
+**Item 7 - a binding check survives a rendezvous outage.**
+`ef56769c`, `7e50b670`. `M.authorize` remembers a POSITIVE admission for `ADMISSION_CACHE_SECONDS`
+(600 s) and falls back to it only on a LINK failure - a registry that ANSWERS (removed, revoked,
+expired) still refuses at once, and a caller never admitted before is refused. The binding TICK uses
+the same cached authority, keeps polling when `/register` fails, and still names the outage.
+
+**Item 8 - a test that reproduces the storm and asserts the fleet converges.**
+`4e4fee17`. `rust/wa-rendezvous/tests/storm.rs`: four scratch nodes with real ed25519 keys, 300 held
+sockets past the base cap, and a proxy the test owns that CUTS the link for 60 s; every node must then
+answer a REAL signed relayed call (measured 252 ms after the restore, peak 301 connections), and
+ordinary traffic converges. **It fails on the base registry** with `503 too_many_connections`.
+
+MUST 3 (item 6/7's deadlock) was additionally proved with a direct probe: on the base a failing
+`/register` gives `POLLS=0` and no tick state; here it gives `POLLS=1` and `state=attached`.
 
 MUST 3 was additionally proved with a direct probe: on the base, a failing `/register` gives
 `POLLS=0` and no tick state; here it gives `POLLS=1` and `state=attached`.
