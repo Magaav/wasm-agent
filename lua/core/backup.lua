@@ -459,31 +459,40 @@ end
 
 local function process_holders(path)
   local self_pid = (self_process_id()):gsub('[^%w]', '')
+  -- ONE PASS OVER EVERY OPEN DESCRIPTOR (measured 19/11: the nested `for d in /proc/[0-9]*; do for f in
+  -- "$d"/fd/*; readlink` loop took 11.5s on this node - 1,647 processes and 10,744 descriptors - while the
+  -- same question answered from ONE `ls -l /proc/[0-9]*/fd/*` pass takes 126ms. The slow scan is why a
+  -- restore of three stores took 130s and was killed by the row watchdog at 120s, and why the row's own
+  -- 20s holder had expired before the scan reached it - a timing defect wearing the name of a missing
+  -- feature.
+  local awk_program = table.concat({
+    'BEGIN { lp=length(p) }',
+    '{ line=$0; n=length(line); if (n < lp) next',
+    '  target=substr(line, n-lp+1)',
+    '  if (target != p && substr(line, n-lp-3) != p "-wal" && substr(line, n-lp-3) != p "-shm") next',
+    '  if (match(line, /[/]proc[/][0-9]+[/]fd[/]/) == 0) next',
+    '  pid=substr(line, RSTART+6, RLENGTH-10)',
+    '  if (pid == self || pid == par) next',
+    '  print pid }',
+  }, '\n')
   local script = table.concat({
     'p=' .. shell_quote_arg(path),
     "self='" .. self_pid .. "'",
-    -- The exec shell is a child of the process running this restore, so its parent is that process
-    -- even when runtime_info could not answer: the caller is excluded by two independent facts.
-    'ppid=$PPID',
-    'if [ ! -d /proc ] || [ ! -r /proc/self/fd ]; then echo "$(printf %s unavailable)"; exit 0; fi',
-    'found=0',
-    'for d in /proc/[0-9]*; do',
-    '  pid=${d#/proc/}',
-    '  [ -n "$self" ] && [ "$pid" = "$self" ] && continue',
-    '  [ -n "$ppid" ] && [ "$pid" = "$ppid" ] && continue',
-    '  held=0',
-    '  for f in "$d"/fd/*; do',
-    '    t=$(readlink "$f" 2>/dev/null) || continue',
-    '    case "$t" in "$p"|"$p-wal"|"$p-shm") held=1; break ;; esac',
-    '  done',
-    '  [ "$held" = 1 ] || continue',
+    'par=$PPID',
+    'if [ ! -d /proc ] || [ ! -r /proc/self/fd ]; then echo unavailable; exit 0; fi',
+    'list="${TMPDIR:-/tmp}/wa-holder-$$.list"',
+    'ls -l /proc/[0-9]*/fd/* 2>/dev/null | awk -v p="$p" -v self="$self" -v par="$par" '
+      .. shell_quote_arg(awk_program) .. ' | sort -u > "$list"',
+    'if [ ! -s "$list" ]; then rm -f "$list"; echo none; exit 0; fi',
+    'while IFS= read -r pid; do',
+    '  d=/proc/$pid',
+    '  [ -d "$d" ] || continue',
     '  comm=$(tr "\\000" " " < "$d/cmdline" 2>/dev/null | cut -c1-120)',
     '  [ -n "$comm" ] || comm=$(cat "$d/comm" 2>/dev/null)',
     '  unit=$(sed -n "s|.*/\\([^/]*\\.service\\)$|\\1|p" "$d/cgroup" 2>/dev/null | head -1)',
     '  printf "%s\\t%s\\t%s\\n" "$pid" "$comm" "$unit"',
-    '  found=1',
-    'done',
-    '[ "$found" = 1 ] || echo "$(printf %s none)"',
+    'done < "$list"',
+    'rm -f "$list"',
     'exit 0',
   }, '\n')
   local ran, raw = pcall(host.exec, script, '', 60)
