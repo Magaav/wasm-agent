@@ -1660,6 +1660,9 @@ WA_SCRIPT=scripts/test-thinking-block.lua "$BIN" --db "$DB" | grep "thinking blo
 # The adapter contract (docs/AGENT-SEAT.md, principles 2 and 3): a recorded provider stream becomes one
 # normalized message. Two providers' own shapes are replayed; no live call is made.
 WA_SCRIPT=scripts/test-adapters.lua "$BIN" --db "$DB" | grep "adapters ok"
+# The two CodeAct transports (docs/AGENT-SEAT.md, principle 2): a fenced run block and a native run
+# call are one pathway, and raw blocks travel byte for byte.
+WA_SCRIPT=scripts/test-codeact-transports.lua "$BIN" --db "$DB" | grep "codeact transports ok"
 
 # Test the shipping registry, including missing/stale/invalid negative controls.
 ( export WA_EMBEDDED_SOURCE_ROOT="$WASM_AGENT_LUA_ROOT"; unset WASM_AGENT_LUA_ROOT

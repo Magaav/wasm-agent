@@ -509,6 +509,69 @@ function M.markup_in_text(text)
   return nil
 end
 
+-- The SECOND transport (docs/AGENT-SEAT.md, principle 2): a native tool call run({code, raw?}).
+--
+-- A fenced run block and a run call are the same action, so this adds no pathway: it turns the
+-- arguments into the call M.take forms for a block, and that call dispatches as codemode. What the
+-- model chooses is only the transport; the results come back the same way.
+--
+-- raw carries named raw blocks - a file body, a patch - as an object, and every value is emitted as
+-- a JSON string literal, so the bytes reach the script exactly as the model wrote them and are never
+-- escaped *inside* the code (principle 4). One JSON encode is lossless and reversible; hand-quoting
+-- is not. The names are identifiers the script reads, so only identifier-shaped names are accepted:
+-- a name that is not one would silently become a different variable.
+local RAW_PREFIX = "__raw"
+
+function M.run_tool_schema()
+  return { name = "run", description = "Run one script, the same way a fenced js run block does: "
+    .. "code is the script, and every tool inside it is tools.<name>(args). Use raw to carry file "
+    .. "bodies or patches exactly, as an object keyed by the variable name the script should read "
+    .. "(each value reaches the script byte for byte, never escaped into the code).",
+    schema = { type = "object", properties = {
+      code = { type = "string" },
+      raw = { type = "object", additionalProperties = { type = "string" } },
+    }, required = { "code" } } }
+end
+
+-- The run call as the codemode call it stands for, or nil and a model-facing refusal. Pure: no
+-- host, no state - the caller dispatches what this returns.
+function M.native_run(args)
+  local args_type = type(args)
+  if args_type == "string" then
+    local ok, decoded = pcall(json.decode, args)
+    args = ok and type(decoded) == "table" and decoded or { code = args }
+  elseif args_type ~= "table" then
+    args = {}
+  end
+  local code = args.code
+  if type(code) ~= "string" or not code:find("%S") then
+    return nil, { error = "run_needs_code", effect = "none",
+      note = "the run call needs code: the script is the string it runs, exactly as a fenced run block is" }
+  end
+  local raw = args.raw
+  if raw == nil then return { code = code } end
+  if type(raw) ~= "table" then
+    return nil, { error = "run_raw_not_object", effect = "none",
+      note = "raw is an object of name -> text (one entry per raw block); it is not a string" }
+  end
+  local names = {}
+  for name in pairs(raw) do names[#names + 1] = name end
+  table.sort(names)
+  for _, name in ipairs(names) do
+    if type(name) ~= "string" or not name:match("^[%a_][%w_]*$") then
+      return nil, { error = "run_raw_name", effect = "none",
+        note = "a raw block name must be an identifier the script can read (letters, digits, _), "
+          .. "because that name is the variable the bytes arrive in" }
+    end
+    if type(raw[name]) ~= "string" then
+      return nil, { error = "run_raw_not_text", effect = "none", name = name,
+        note = "raw block " .. name .. " is not text; raw blocks carry file bodies and patches, not values" }
+    end
+  end
+  local literal = json.encode(raw)
+  return { code = "const " .. RAW_PREFIX .. " = " .. literal .. ";\n" .. code, raw_blocks = names }
+end
+
 -- The native-markup path of `take`: the calls run as raw-channel codemode calls; the text before the
 -- markup stays as the step's thought.
 local function take_native(result, found)

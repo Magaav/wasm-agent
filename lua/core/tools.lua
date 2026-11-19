@@ -825,6 +825,11 @@ function M.catalog(role)
     },{'route','task'})
     for _, item in ipairs(M.admin) do list[#list + 1] = item end
     if host.quickjs then
+      -- The native transport of the same action (docs/AGENT-SEAT.md, principle 2): the run tool is the
+      -- fenced js run block as a tool call, so a model that prefers tool calls acts the same way and its
+      -- results come back through the same pathway.
+      local run_tool=dofile('lua/core/raw_code.lua').run_tool_schema()
+      list[#list+1]=schema(run_tool.name,run_tool.description,run_tool.schema.properties,run_tool.schema.required)
       list[#list+1]=schema('codemode','JavaScript sandbox that calls approved native tools: await tools.<name>(args), text(value), return. Preferred for multi-step programmatic work. Connector tools (MCP servers such as mail and WhatsApp, peers) are callable only here; peers are read with tools.remote. searchTools("text"|"*") finds tools (searchTools("select:a,b") adds their schemas). Await every call; effectful calls run serially. A call still running after wait_s (default 60) returns {state:"pending", op}; wait(op | [ops]) resumes it and batches with other calls. No filesystem, network or Node APIs.',{code={type='string'},timeout_ms={type='integer',minimum=1,maximum=300000}},{'code'})
     end
     for _, item in ipairs(mcp.schemas()) do list[#list+1]=item end
@@ -1752,8 +1757,15 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
         note = "this memory is not in a scope you may delete from; a scoped caller deletes only its own facts" }
     end
     return { id = args.id, forgotten = memory.forget(args.id) and true or false }
-  elseif name == 'codemode' then
+  elseif name == 'run' or name == 'codemode' then
     if not is_master(role) then return {error='forbidden_for_role:'..role} end
+    -- One pathway (docs/AGENT-SEAT.md, principle 2): a run call becomes the codemode call a fenced
+    -- run block forms, and everything after this line is the same code for both transports.
+    if name == 'run' then
+      local call,refused=dofile('lua/core/raw_code.lua').native_run(args)
+      if not call then return refused end
+      args=call
+    end
     local catalog=routed_catalog or M.all(role)
     local execution=M.discovery_execution(memory,ctx)
     return dofile('lua/core/codemode.lua').run(memory,args,role,ctx,catalog,function()
