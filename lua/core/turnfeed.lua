@@ -355,7 +355,8 @@ end
 --
 --   * the denominator is every state-changing turn, not only the ones that skipped the capture. Counting
 --     only the skips would report 0% by construction and answer the rule with a tautology;
---   * done_gate_unchecked is written once per run by lua/core/done_gate.lua (M.note_turn), so a run that
+--   * done_gate_turn (formerly done_gate_unchecked; both names are read) is written once per run by
+--     lua/core/done_gate.lua (M.note_turn), so a run that
 --     re-entered the gate ten times contributes ONE turn to each side;
 --   * a turn is counted from its event, so it is counted once even if two rows carry its session;
 --   * an absent ledger is UNKNOWN, never 0% - a rule that deletes a gate on an unmeasured zero deletes
@@ -369,7 +370,10 @@ function M.gate_stats(opts)
   opts = opts or {}
   local since = opts.since
   local params = {}
-  local where = "kind='done_gate_unchecked'"
+  -- Review r1, fix 3: the event was renamed to done_gate_turn because it is written for every
+  -- state-changing turn, not only the unchecked ones. Rows written before the rename still count: the
+  -- reader asks for both names, so a window that straddles the rename is measured, not truncated.
+  local where = "kind IN ('done_gate_turn','done_gate_unchecked')"
   if since then where = where .. " AND at>=?"; params[#params + 1] = since end
   local rows = query("SELECT payload, session_id, at FROM harness_events WHERE " .. where .. " ORDER BY at", params)
   local changed, called = 0, 0

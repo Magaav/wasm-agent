@@ -519,6 +519,12 @@ gate_event({ changed_state = true, called_done_criteria = true })
 gate_event({ changed_state = true, called_done_criteria = false })
 gate_event({ changed_state = false, called_done_criteria = false })
 gate_event({ called_done_criteria = false })
+-- Review r1, fix 3: the event was renamed done_gate_unchecked -> done_gate_turn because it is written
+-- for EVERY state-changing turn. A row written under the old name still counts: the fixture above uses
+-- the OLD name on purpose, so this assertion fails the moment the reader stops accepting it.
+local legacy_stats = core.gate_stats({})
+check(legacy_stats.changed >= 2, "rows written under the old event name are still counted")
+
 -- Scoped to this row's own session, so the assertion does not depend on what else the ledger holds.
 local function stats_for(sid)
   -- gate_stats reads the node-wide window by design; the row scopes it by asking for a window that

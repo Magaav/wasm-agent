@@ -658,7 +658,11 @@ end
 --
 -- The payload carries no request text, no answer and no tool output: the session, the two booleans and
 -- the gate id when there was one. A measurement must never be a second copy of the transcript.
-M.EVENT = "done_gate_unchecked"
+-- Review r1, fix 3 (change/done-gate-trial): the event is written for EVERY state-changing turn, so its
+-- old name (done_gate_unchecked) described only the minority that skipped the capture. The name is now
+-- done_gate_turn; the old rows still count, and the reader knows both names (M.EVENT_LEGACY).
+M.EVENT = "done_gate_turn"
+M.EVENT_LEGACY = "done_gate_unchecked"
 function M.note_turn(state, ctx)
   if state.gate_counted then return false end
   state.gate_counted = true
