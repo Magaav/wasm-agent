@@ -205,4 +205,18 @@ check(nodes_lib2.RELAY_PEER_BUDGET_MS < nodes_lib2.RELAY_DEADLINE_SECONDS * 1000
 check(pending_lib.EXECUTORS["remote"] ~= nil and type(pending_lib.EXECUTORS["remote"].poll) == "function",
   "the caller half is a real executor, so wait(op) resumes it")
 
+-- 8. Item 1 names bash, batch and operation. Two of those are already safe and must not be turned into
+-- handles by this change: a batch is read-only on the wire (so it can carry no long effect), and a
+-- remote operation await past the relay bound is INTERRUPTED (await_interrupted), never cancelled. So
+-- the executor refuses to adopt anything but bash, and an interrupted await still answers "running".
+local executor = pending_lib.EXECUTORS["remote"]
+check(executor.applies({ node = "rp-scratch-peer", capability = "batch", calls = {} }) == false,
+  "a batch is not adopted: it is read-only on the wire and has no long effect to protect")
+check(executor.applies({ node = "rp-scratch-peer", capability = "operation", action = "await", id = "x" }) == false,
+  "a remote operation await is not adopted: the peer interrupts that wait and never cancels the work")
+check(executor.applies({ node = "rp-scratch-peer", capability = "bash", command = "sleep 300" }) == true,
+  "bash is the one capability adopted")
+check(executor.applies({ capability = "bash", command = "sleep 1" }) == false,
+  "a local bash with no node is not the remote executor's business")
+
 print("remote pending ok (" .. tostring(checks) .. " checks)")
