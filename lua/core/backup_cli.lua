@@ -96,7 +96,11 @@ function M.run(verb, args)
         .. ') was restored on disk and an OPEN process keeps its old view: restart the node before it reads these bytes')
     end
     for _, item in ipairs(result.restored) do
-      say('  ' .. item.source .. (item.previous and ('  (previous kept at ' .. item.previous .. ')') or ''))
+      -- 'previous kept at' is printed only for a file this restore MOVED ASIDE and then found there:
+      -- backup.lua sets `previous` after checking the move, so the line cannot promise a way back that
+      -- does not exist (item 2 of the node-ops round).
+      say('  ' .. item.source .. (item.previous and ('  (previous kept at ' .. item.previous .. ')') or '  (no previous file)'))
+      for _, note in ipairs(item.journal or {}) do say('    ' .. note) end
     end
     return 0
   end

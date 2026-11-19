@@ -107,26 +107,62 @@ assert(ticked.ok, 'the periodic tick failed: ' .. json.encode(ticked))
 local again = backup.tick({ interval_s = 3600 })
 assert(again.ok and again.skipped == 'interval_not_elapsed', 'a second tick inside the interval did not skip: ' .. json.encode(again))
 
--- (3) Restore, and check the DATA came back.
+-- (3) Restore, and check the DATA came back - read from the RESTORED FILE AT THE STORE'S OWN PATH, by a
+-- FRESH process. Item 3 of the node-ops round: the older version of this test read the snapshot's COPY
+-- (snapshot.dir .. / .. copy), which proves the snapshot was intact and says nothing about the restore.
+-- The bytes that matter are the bytes at the path a node opens, and the process that reads them must be
+-- one that did not have the store open when it was replaced (this one did: its own connection keeps the
+-- pages it already read, which is what the module reports as reopen_required).
 local restored = backup.restore(snapshot.dir, { stamp = 'fixture' })
 assert(restored.ok, 'restore refused: ' .. tostring(restored.error) .. ': ' .. tostring(restored.detail))
 assert(#restored.restored == #manifest.stores, 'restore put back ' .. #restored.restored .. ' of ' .. #manifest.stores .. ' stores')
--- The DATA, read from the restored FILE. This process opened the ledger before the snapshot, so its own
--- connection keeps the pages it already read (SQLite's rule, not this module's): the restore reports that
--- as reopen_required instead of pretending, and the test asserts the bytes a restarted node would read.
 assert(restored.reopen_required and #restored.reopen > 0, 'the restore did not say the live ledger needs the node restarted before it reads these bytes')
 local ledger_source = nil
 for _, store in ipairs(manifest.stores) do
   if store.source == sql_ledger then ledger_source = store end
 end
 assert(ledger_source, 'the manifest does not name the live ledger, so the restore cannot be read back')
-local restored_ledger = snapshot.dir .. '/' .. ledger_source.copy
-sql('ATTACH DATABASE ? AS rb', { restored_ledger })
-local rb = rows('SELECT COUNT(*) AS n FROM rb.memories')
-sql('DETACH DATABASE rb')
-assert(tonumber(rb[1].n) == before, 'the restored ledger file holds ' .. tostring(rb[1].n) .. ' memory rows, the snapshot had ' .. before)
--- The way back is the ledger's own previous file: it existed before the restore, and it was moved aside
--- rather than deleted. (A fixture store the restore created had no previous file, which is not a miss.)
+-- The restored FILE and the snapshot COPY must be the same bytes, and the file must be at the store path.
+assert(host.path_kind(sql_ledger) == 'file', 'after the restore there is no file at the ledger path ' .. sql_ledger)
+assert(host.file_sha256(sql_ledger) == ledger_source.sha256,
+  'the file at ' .. sql_ledger .. ' does not hash to the manifest: the restore wrote somewhere else or was tampered with')
+
+-- A FRESH process, over the store's own path. sqlite3 is the cheapest reader that shares nothing with this
+-- process. Absent, the row says SKIP by name - a skip is never a pass, and fast.sh prints it under the
+-- counts.
+local function sqlite3_read(db, statement)
+  local command = 'sqlite3 ' .. ('%q'):format(db) .. ' ' .. ('%q'):format(statement)
+  local ok, raw = pcall(host.exec, command, '', 60)
+  if not ok then return nil, 'the reader did not run: ' .. tostring(raw) end
+  local answer = type(raw) == 'string' and (select(2, pcall(json.decode, raw))) or raw
+  if type(answer) ~= 'table' then return nil, 'the reader answered nothing readable: ' .. tostring(raw) end
+  if tonumber(answer.code) ~= 0 then
+    return nil, 'the reader refused: ' .. tostring(answer.stderr or answer.code)
+  end
+  return (tostring(answer.stdout or ''):gsub('%s+$', ''))
+end
+local has_sqlite3 = host.executable_on_path and host.executable_on_path('sqlite3') ~= nil
+if not has_sqlite3 then
+  print('SKIP test-backup-restore: no sqlite3 on PATH, so the restored ledger cannot be read by a fresh process')
+else
+  -- The marker row written BEFORE the snapshot is there, and the row written after it is not: that is the
+  -- data coming back, not a file existing.
+  local probe = sqlite3_read(sql_ledger, [[SELECT COUNT(*) FROM memories WHERE content LIKE 'restore probe row%']])
+  assert(probe ~= nil, 'the fresh reader could not read the restored ledger')
+  assert(tonumber(probe) == 1, 'the restored ledger does not hold the row the snapshot took (count ' .. tostring(probe) .. ')')
+  local after = sqlite3_read(sql_ledger, [[SELECT COUNT(*) FROM memories WHERE content LIKE 'a row written after the snapshot%']])
+  assert(after ~= nil, 'the fresh reader could not count the post-snapshot row')
+  assert(tonumber(after) == 0, 'the restored ledger still holds the post-snapshot row, so this is not the snapshot')
+  local total = sqlite3_read(sql_ledger, 'SELECT COUNT(*) FROM memories')
+  assert(total ~= nil and tonumber(total) == before,
+    'the restored ledger holds ' .. tostring(total) .. ' memory rows; the snapshot had ' .. before)
+  -- The file passes SQLite's own check as a fresh reader sees it: a swap that left a journal behind would
+  -- show here, and that is the failure mode the -wal removal below is about.
+  local verdict = sqlite3_read(sql_ledger, 'PRAGMA integrity_check')
+  assert(verdict == 'ok', 'the restored ledger does not pass integrity_check as a fresh reader sees it: ' .. tostring(verdict))
+end
+-- The way back is the ledger's own previous file: it existed before the restore, it was moved aside rather
+-- than deleted, and the restore's report says so only because the move was checked.
 local ledger_entry = nil
 for _, item in ipairs(restored.restored) do
   if item.source == sql_ledger then ledger_entry = item end
@@ -134,6 +170,8 @@ end
 assert(ledger_entry, 'the restore did not report the ledger among the stores it put back')
 assert(ledger_entry.previous and host.path_kind(ledger_entry.previous) == 'file',
   'the ledger the restore replaced was not kept, so there is no way back: ' .. tostring(ledger_entry.previous))
+assert(host.file_sha256(ledger_entry.previous) ~= ledger_entry.sha256,
+  'the file kept as the way back hashes to the RESTORED bytes, so it is not the previous file')
 
 -- (3) A directory that holds no manifest is refused by name, and nothing is written.
 local bare = paths.config() .. '/backups/fixture-no-manifest'
@@ -173,4 +211,68 @@ assert(count('memories') == before_dry, 'a dry run changed the ledger')
 local code = cli.run('restore', {})
 assert(code == 2, 'wa restore with no --from exited ' .. tostring(code) .. ', not 2')
 
-print('backup restore ok: manifest ' .. #manifest.stores .. ' store(s), restore put them back, 5 refusals named, nothing written by any of them')
+
+-- (9) A store a LIVE PROCESS holds is refused by name, with the process and the command that stops it -
+-- and nothing of the node's is touched. Item 2 of the node-ops round: this is the measured failure (a
+-- restore replaced the ledger under a serving node, which kept answering from its old connection and its
+-- old -wal). The holder here is the test's own detached process, on a fixture store the snapshot names.
+local fixture_held = data .. '/held-fixture.db'
+sql('ATTACH DATABASE ? AS hf', { fixture_held })
+sql('CREATE TABLE IF NOT EXISTS hf.t (x INTEGER)')
+sql('DELETE FROM hf.t'); sql('INSERT INTO hf.t VALUES (1)')
+sql('DETACH DATABASE hf')
+local held_snapshot = backup.run('test-holder')
+assert(held_snapshot.ok, 'the holder fixture snapshot failed: ' .. json.encode(held_snapshot))
+local holder_pid_file = data .. '/holder.pid'
+local holder_start = host.exec("setsid sh -c 'echo $$ > " .. holder_pid_file .. "; exec 3<" .. fixture_held
+  .. "; sleep 20' >/dev/null 2>&1 </dev/null & echo started", '', 30)
+local holder_start_answer = type(holder_start) == 'string' and (select(2, pcall(json.decode, holder_start))) or holder_start
+assert(type(holder_start_answer) == 'table' and tonumber(holder_start_answer.code) == 0,
+  'the holder fixture could not be started: ' .. tostring(holder_start))
+host.sleep(1)
+local holder_pid = (host.read_file(holder_pid_file) or ''):gsub('%s+', '')
+assert(holder_pid ~= '', 'the holder fixture recorded no pid, so this check cannot be made')
+local held_bytes = host.file_sha256(fixture_held)
+local refused_held = backup.restore(held_snapshot.dir, { stamp = 'held' })
+assert(refused_held.ok == false and refused_held.error == 'restore_store_held',
+  'a store a live process holds was not refused as restore_store_held: ' .. json.encode(refused_held))
+assert(tostring(refused_held.detail):find(fixture_held, 1, true) ~= nil,
+  'the refusal does not name the store that is held: ' .. tostring(refused_held.detail))
+assert(tostring(refused_held.detail):find('pid ' .. holder_pid, 1, true) ~= nil,
+  'the refusal does not name the process holding it (pid ' .. holder_pid .. '): ' .. tostring(refused_held.detail))
+assert(tostring(refused_held.detail):find('kill ' .. holder_pid, 1, true) ~= nil,
+  'the refusal does not give the one command that stops the holder: ' .. tostring(refused_held.detail))
+assert(refused_held.stop and #refused_held.stop > 0, 'the refusal carries no stop command')
+assert(host.file_sha256(fixture_held) == held_bytes, 'a refused restore changed the held store anyway')
+-- The holder goes, and the same restore now proceeds.
+host.exec('kill ' .. holder_pid .. ' 2>/dev/null; exit 0', '', 30)
+host.sleep(1)
+host.exec('rm -f ' .. ('%q'):format(holder_pid_file) .. '; exit 0', '', 30)
+-- A journal file of the OLD store, put there by hand: the restore must remove it, not leave it for SQLite
+-- to replay into the restored file.
+assert(host.write_file(fixture_held .. '-wal', 'stale journal of the old store'), 'the stale-wal fixture could not be written')
+assert(host.path_kind(fixture_held .. '-wal') == 'file', 'the stale-wal fixture is not there')
+local freed = backup.restore(held_snapshot.dir, { stamp = 'freed' })
+assert(freed.ok, 'with the holder gone the restore was still refused: ' .. tostring(freed.error) .. ': ' .. tostring(freed.detail))
+assert(host.path_kind(fixture_held .. '-wal') == 'missing',
+  'the stale -wal of the old store survived the restore: SQLite would replay it into the restored file')
+local journal_reported = false
+for _, item in ipairs(freed.restored) do
+  if item.source == fixture_held then
+    for _, note in ipairs(item.journal or {}) do if note:find('removed the stale -wal', 1, true) then journal_reported = true end end
+  end
+end
+assert(journal_reported, 'the restore removed the stale -wal but did not report it: ' .. json.encode(freed.restored))
+
+-- (10) The report of what was kept is TRUE, not printed. A store the restore created where no file existed
+-- has no previous file, and the report says so instead of naming a path that does not exist.
+local created_entry = nil
+for _, item in ipairs(freed.restored) do
+  if item.source == fixture_held then created_entry = item end
+end
+assert(created_entry, 'the restore did not report the fixture store')
+if created_entry.previous then
+  assert(host.path_kind(created_entry.previous) == 'file',
+    'the restore reports a previous file that is not there: ' .. tostring(created_entry.previous))
+end
+print('backup restore ok: manifest ' .. #manifest.stores .. ' store(s), restore put them back, 7 refusals named, a held store refused with its pid, the stale journal removed, nothing written by any refusal')

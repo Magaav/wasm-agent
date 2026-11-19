@@ -434,6 +434,95 @@ end
 --      so a hand-edited manifest cannot write outside the node;
 --   4. only then is the current file moved aside (.pre-restore-<stamp>) and the copy put in place, so a
 --      failure halfway leaves the old file recoverable rather than gone.
+-- ---- who holds a store, and the one command that stops it (item 2 of the node-ops round, 19/11) --------
+--
+-- MEASURED before this: 'wa restore --from <dir>' replaced the bytes of the ledger while
+-- 'wa-serve.service' was serving it. The file on disk said the snapshot's rows; the node answered from
+-- its own open connection and from the -wal that belonged to the OLD file. Replacing a store under a
+-- live SQLite connection is not a copy problem - a new file inherits a journal that describes the old
+-- one - and a restore that reports ok while the node serves something else is the 'it worked' nobody
+-- can use.
+--
+-- The evidence on POSIX is /proc: a process with the store (or its -wal/-shm) open. This process is
+-- excluded by its own id - it is the caller, and it opened the ledger to read it. A platform with no
+-- readable /proc answers 'unavailable', and the restore REFUSES rather than proceeding blind: unknown
+-- is not yes, and the caller can run the restore from a node that can answer the question.
+local function shell_quote_arg(value) return "'" .. tostring(value):gsub("'", "'\\''") .. "'" end
+
+local function self_process_id()
+  local ok, raw = pcall(host.runtime_info)
+  if not ok then return '' end
+  local info = type(raw) == 'string' and (select(2, pcall(json.decode, raw))) or raw
+  if type(info) ~= 'table' then return '' end
+  return tostring(info.process_id or '')
+end
+
+local function process_holders(path)
+  local self_pid = (self_process_id()):gsub('[^%w]', '')
+  local script = table.concat({
+    'p=' .. shell_quote_arg(path),
+    "self='" .. self_pid .. "'",
+    -- The exec shell is a child of the process running this restore, so its parent is that process
+    -- even when runtime_info could not answer: the caller is excluded by two independent facts.
+    'ppid=$PPID',
+    'if [ ! -d /proc ] || [ ! -r /proc/self/fd ]; then echo "$(printf %s unavailable)"; exit 0; fi',
+    'found=0',
+    'for d in /proc/[0-9]*; do',
+    '  pid=${d#/proc/}',
+    '  [ -n "$self" ] && [ "$pid" = "$self" ] && continue',
+    '  [ -n "$ppid" ] && [ "$pid" = "$ppid" ] && continue',
+    '  held=0',
+    '  for f in "$d"/fd/*; do',
+    '    t=$(readlink "$f" 2>/dev/null) || continue',
+    '    case "$t" in "$p"|"$p-wal"|"$p-shm") held=1; break ;; esac',
+    '  done',
+    '  [ "$held" = 1 ] || continue',
+    '  comm=$(tr "\\000" " " < "$d/cmdline" 2>/dev/null | cut -c1-120)',
+    '  [ -n "$comm" ] || comm=$(cat "$d/comm" 2>/dev/null)',
+    '  unit=$(sed -n "s|.*/\\([^/]*\\.service\\)$|\\1|p" "$d/cgroup" 2>/dev/null | head -1)',
+    '  printf "%s\\t%s\\t%s\\n" "$pid" "$comm" "$unit"',
+    '  found=1',
+    'done',
+    '[ "$found" = 1 ] || echo "$(printf %s none)"',
+    'exit 0',
+  }, '\n')
+  local ran, raw = pcall(host.exec, script, '', 60)
+  if not ran then return nil, 'the holder scan could not run: ' .. tostring(raw) end
+  local answer = type(raw) == 'string' and (select(2, pcall(json.decode, raw))) or raw
+  if type(answer) ~= 'table' or tonumber(answer.code) ~= 0 then
+    local why = type(answer) == 'table' and tostring(answer.stderr or answer.code) or tostring(raw)
+    return nil, 'the holder scan did not answer: ' .. why
+  end
+  local text = tostring(answer.stdout or '')
+  local holders = {}
+  for line in text:gmatch('[^\r\n]+') do
+    local pid, comm, unit = line:match('^(%d+)\t(.*)\t(.*)$')
+    if pid then holders[#holders + 1] = { pid = tonumber(pid), command = comm, unit = unit } end
+  end
+  if #holders == 0 and not text:find('none', 1, true) then
+    return nil, 'the holder scan answered nothing it could read (' .. tostring(text):gsub('%s+', ' '):sub(1, 120) .. ')'
+  end
+  return holders
+end
+
+-- The ONE command that stops the holder this scan found: its own systemd unit when the process runs
+-- under one (read from /proc/<pid>/cgroup), and its pid otherwise. Never a guess: when neither is
+-- readable the answer says so instead of printing a command that would not work.
+local function stop_command(holder)
+  local unit = tostring(holder.unit or '')
+  if unit ~= '' then return 'systemctl --user stop ' .. unit end
+  if holder.pid then return 'kill ' .. tostring(holder.pid) .. '  # pid ' .. tostring(holder.pid) .. ' (' .. (holder.command ~= '' and holder.command or 'unknown command') .. ')' end
+  return '(this process could not be named)'
+end
+
+local function describe_holders(holders)
+  local parts = {}
+  for _, holder in ipairs(holders) do
+    parts[#parts + 1] = string.format('pid %s (%s)', tostring(holder.pid), holder.command ~= '' and holder.command or 'unknown command')
+  end
+  return table.concat(parts, ', ')
+end
+
 function M.restore(dir, opts)
   opts = opts or {}
   local stamp = tostring(opts.stamp or (os.date('!%Y%m%dT%H%M%SZ') .. '-' .. host.uuid()))
@@ -479,39 +568,127 @@ function M.restore(dir, opts)
     end
     plan[#plan + 1] = { source = source, copy = copy, sha256 = store.sha256 }
   end
+  -- ---- THE HOLDER CHECK, before anything of the node's is touched ----------------------------------
+  -- A store a live process has open cannot be replaced under it: the node keeps serving its own pages and
+  -- the -wal that belongs to the old file. Refused by name, with the process and the ONE command that
+  -- stops it - never a restore that reports ok while the node answers from somewhere else.
+  local held = {}
+  for _, item in ipairs(plan) do
+    local holders, why = process_holders(item.source)
+    if not holders then
+      return { ok = false, error = 'restore_holder_check_unavailable', detail = item.source .. ': ' .. tostring(why) .. '; nothing was changed' }
+    end
+    for _, holder in ipairs(holders) do held[#held + 1] = { source = item.source, holder = holder } end
+  end
+  if #held > 0 then
+    local lines, commands = {}, {}
+    for _, entry in ipairs(held) do
+      lines[#lines + 1] = string.format('%s is held by pid %s (%s)', entry.source, tostring(entry.holder.pid),
+        entry.holder.command ~= '' and entry.holder.command or 'unknown command')
+      -- The unit (the service that owns the process) AND the pid: a process can sit in a unit this
+      -- restore should not stop on its own (the caller own unit), and a reader told only the unit
+      -- would stop more than the holder. Both facts, so the choice is the operator.
+      commands[#commands + 1] = stop_command(entry.holder)
+      commands[#commands + 1] = "kill " .. tostring(entry.holder.pid)
+    end
+    local seen, unique = {}, {}
+    for _, command in ipairs(commands) do if not seen[command] then seen[command] = true; unique[#unique + 1] = command end end
+    return { ok = false, error = 'restore_store_held',
+      detail = table.concat(lines, '; ') .. '. Stop it first, then restore again: ' .. table.concat(unique, ' && '),
+      held = held, stop = unique }
+  end
   if opts.dry_run then return { ok = true, dry_run = true, dir = dir, would_restore = plan } end
   local function quote(path) return "'" .. tostring(path):gsub("'", "'\\''") .. "'" end
-  local function move(from, to)
-    local ran, raw = pcall(host.exec, 'cp -p ' .. quote(from) .. ' ' .. quote(to), '', 120)
+  -- A command's real verdict: exit 0, or the reason it was not. Every move in this function goes through
+  -- it, so no step can fail silently and no report can claim a file was kept that was not.
+  local function run(command, seconds)
+    local ran, raw = pcall(host.exec, command, '', seconds or 120)
     if not ran then return false, tostring(raw) end
     local answer = type(raw) == 'string' and (select(2, pcall(json.decode, raw))) or raw
-    if type(answer) == 'table' and (tonumber(answer.code) or 0) ~= 0 then return false, tostring(answer.stderr or answer.code) end
-    return true
+    if type(answer) ~= 'table' then return false, tostring(raw) end
+    local code = tonumber(answer.code) or 0
+    if code ~= 0 then
+      local why = tostring(answer.stderr or ''):gsub('%s+$', ''):sub(1, 200)
+      if why == '' then why = 'exit ' .. tostring(code) end
+      return false, why
+    end
+    return true, answer
   end
   local restored = {}
   for _, item in ipairs(plan) do
+    local dir_of_source = item.source:match('^(.*)/[^/]+$') or '.'
     local aside = item.source .. '.pre-restore-' .. stamp
-    local staged = item.source .. '.restoring-' .. stamp
-    local ok_stage, stage_why = move(item.copy, staged)
+    local staged = dir_of_source .. '/.' .. basename(item.source) .. '.restoring-' .. stamp
+    -- 1. The verified copy is written BESIDE its destination, not over it: a failure here leaves the
+    --    store exactly as it was, and the last step can then be a rename.
+    local ok_stage, stage_why = run('cp -p ' .. quote(item.copy) .. ' ' .. quote(staged))
     if not ok_stage then
-      return { ok = false, error = 'restore_stage_failed', detail = item.source .. ': the checked copy could not be staged (' .. tostring(stage_why) .. '); the current file is untouched' }
+      return { ok = false, error = 'restore_stage_failed', detail = item.source .. ': the checked copy could not be staged (' .. tostring(stage_why) .. '); the current file is untouched', restored = restored }
     end
+    -- The staged bytes are the manifest's bytes: verified again HERE, because the copy was checked at
+    -- plan time and nothing this function has done since may be assumed.
+    local staged_sha = nil
+    if host.file_sha256 then local ok, value = pcall(host.file_sha256, staged); if ok then staged_sha = value end end
+    if type(staged_sha) ~= 'string' or staged_sha ~= item.sha256 then
+      pcall(run, 'rm -f ' .. quote(staged), 60)
+      return { ok = false, error = 'restore_stage_changed', detail = item.source .. ': the staged copy does not hash to the manifest (recorded ' .. tostring(item.sha256) .. ', staged ' .. tostring(staged_sha) .. '); the current file is untouched', restored = restored }
+    end
+    -- 2. The current file is moved aside by RENAME (atomic within its directory), and the move's result is
+    --    checked: `previous` is set only when this really happened, so a report can never print a way back
+    --    that does not exist.
     local had_current = false
     if host.path_kind then local ok, value = pcall(host.path_kind, item.source); had_current = ok and value == 'file' end
-    if had_current then move(item.source, aside) end
-    local ok_place, place_why = move(staged, item.source)
-    pcall(host.exec, 'rm -f ' .. quote(staged), '', 60)
-    if not ok_place then
-      return { ok = false, error = 'restore_place_failed', detail = item.source .. ': the copy was verified and staged but could not be put in place (' .. tostring(place_why) .. '); the previous file is at ' .. aside, restored = restored }
+    if had_current then
+      local ok_aside, aside_why = run('mv -f ' .. quote(item.source) .. ' ' .. quote(aside))
+      if not ok_aside then
+        pcall(run, 'rm -f ' .. quote(staged), 60)
+        return { ok = false, error = 'restore_aside_failed', detail = item.source .. ': the current file could not be moved aside (' .. tostring(aside_why) .. '); the store is untouched and the staged copy was removed', restored = restored }
+      end
+      if host.path_kind then
+        local ok, value = pcall(host.path_kind, aside)
+        if not ok or value ~= 'file' then
+          return { ok = false, error = 'restore_aside_unverified', detail = item.source .. ': the move aside reported success but ' .. aside .. ' is not a file (' .. tostring(value) .. '); the store is not where it was and needs an operator', restored = restored }
+        end
+      end
     end
-    -- A store THIS process has open cannot be made to read the bytes just written: the connection keeps
-    -- its own pages, so the node would go on serving the old ledger while the file on disk is the
-    -- snapshot. That is a fact about SQLite, not a failure - so it is REPORTED (reopen_required) instead
-    -- of being claimed as done: the operator restarts the node, or the store is read again by a process
-    -- that opens it after this one.
+    -- 3. The store takes its place by RENAME: the swap is atomic, and a half-written ledger cannot be read
+    --    by a node that opens it between the two steps.
+    local ok_place, place_why = run('mv -f ' .. quote(staged) .. ' ' .. quote(item.source))
+    if not ok_place then
+      local rolled_back = false
+      if had_current then
+        local ok_back = run('mv -f ' .. quote(aside) .. ' ' .. quote(item.source))
+        rolled_back = ok_back and true or false
+      end
+      pcall(run, 'rm -f ' .. quote(staged), 60)
+      return { ok = false, error = 'restore_place_failed',
+        detail = item.source .. ': the staged copy could not be renamed into place (' .. tostring(place_why) .. '); '
+          .. (had_current and (rolled_back and ('the previous file was put back from ' .. aside) or ('the previous file is at ' .. aside .. ' and could NOT be put back'))
+            or 'there was no previous file'),
+        restored = restored }
+    end
+    -- 4. The journal files that belonged to the OLD file go: a -wal that survives the swap describes pages
+    --    of a database that is no longer there, and SQLite would replay it into the restored one. Removed
+    --    or refused by name - never left behind silently.
+    local journal_notes = {}
+    for _, suffix in ipairs({ '-wal', '-shm' }) do
+      local path = item.source .. suffix
+      local kind = 'missing'
+      if host.path_kind then local ok, value = pcall(host.path_kind, path); if ok then kind = tostring(value) end end
+      if kind == 'file' then
+        local ok_rm, rm_why = run('rm -f ' .. quote(path), 60)
+        if ok_rm then
+          journal_notes[#journal_notes + 1] = 'removed the stale ' .. suffix
+        else
+          return { ok = false, error = 'restore_journal_removal_failed',
+            detail = item.source .. ': the restored store is in place but the old ' .. suffix .. ' could not be removed (' .. tostring(rm_why) .. '); SQLite would replay it into the new file, so this store must be repaired by hand',
+            restored = restored }
+        end
+      end
+    end
     local is_live = (live ~= '' and item.source == live)
     restored[#restored + 1] = { source = item.source, copy = item.copy, previous = had_current and aside or nil,
-      sha256 = item.sha256, live = is_live }
+      sha256 = item.sha256, live = is_live, journal = journal_notes }
   end
   local reopens = {}
   for _, item in ipairs(restored) do if item.live then reopens[#reopens + 1] = item.source end end
