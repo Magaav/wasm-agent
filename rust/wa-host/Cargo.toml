@@ -43,3 +43,13 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 [build-dependencies]
 # Nothing but `std`: the embedded Lua tree is read from the checkout, and the code-mode assets moved
 # with `quickjs.rs` to `wa-capabilities/build.rs`.
+
+# Whose certificates are trusted: the same answer every other client in this process uses, read from
+# SSL_CERT_FILE / SSL_CERT_DIR by wa-tls.
+[dependencies.wa-tls]
+path = "../wa-tls"
+
+# The scratch HTTPS server the relay-hop tests handshake against.
+[dev-dependencies.wa-tls]
+path = "../wa-tls"
+features = ["scratch"]

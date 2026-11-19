@@ -2313,6 +2313,7 @@ dependencies = [
  "wa-mesh",
  "wa-rendezvous",
  "wa-sqlite",
+ "wa-tls",
 ]
 
 [[package]]
@@ -2342,6 +2343,7 @@ dependencies = [
  "anyhow",
  "ring",
  "rusqlite",
+ "rustls",
  "serde_json",
  "tokio",
  "tungstenite",
@@ -2359,6 +2361,7 @@ dependencies = [
  "wa-sqlite",
  "wa-state",
  "wa-stt-remote",
+ "wa-tls",
  "wa-vault",
  "wasmtime",
  "wasmtime-wasi",

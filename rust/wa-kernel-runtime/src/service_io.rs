@@ -24,6 +24,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
+use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
 /// A wake-up edge shared by a host thread (the producer) and the guest task (the consumer):
@@ -238,6 +239,78 @@ impl Inbound {
     }
 }
 
+/// A websocket connection, made the way tungstenite's own connect would make it.
+///
+/// Two paths on purpose. When the machine names a bundle, the TLS step uses exactly those anchors
+/// (the situation measured 19/11: a sandbox whose CA is only in its own bundle could not reach a
+/// wss:// endpoint at all). When it names none, tungstenite's own connect runs unchanged, with its
+/// own compiled-in roots and its redirect handling - the behaviour every deployment has today.
+fn connect_ws(
+    request: tungstenite::http::Request<()>,
+) -> Result<(Socket, tungstenite::http::Response<Option<Vec<u8>>>), String> {
+    let Some(connector) = ws_connector()? else {
+        return tungstenite::connect(request).map_err(|error| error.to_string());
+    };
+    let uri = request.uri().clone();
+    let encrypted = uri.scheme_str() == Some("wss");
+    let host = uri
+        .host()
+        .ok_or_else(|| "ws_handshake: the url names no host".to_string())?
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_string();
+    let port = uri.port_u16().unwrap_or(if encrypted { 443 } else { 80 });
+    let mut last: Option<std::io::Error> = None;
+    let mut stream = None;
+    for address in (host.as_str(), port)
+        .to_socket_addrs()
+        .map_err(|error| format!("ws_handshake: {error}"))?
+    {
+        match TcpStream::connect_timeout(&address, Duration::from_secs(10)) {
+            Ok(connected) => {
+                stream = Some(connected);
+                break;
+            }
+            Err(error) => last = Some(error),
+        }
+    }
+    let stream = match stream {
+        Some(stream) => stream,
+        None => {
+            return Err(match last {
+                Some(error) => format!("ws_handshake: {error}"),
+                None => "ws_handshake: the host resolved to no address".to_string(),
+            })
+        }
+    };
+    let _ = stream.set_nodelay(true);
+    // tungstenite does the TLS wrapping and the upgrade from here, with the connector above: the
+    // handshake is its own, only the anchors are the machine's.
+    tungstenite::client_tls_with_config(request, stream, None, Some(connector))
+        .map_err(|error| match error {
+            tungstenite::HandshakeError::Failure(error) => error.to_string(),
+            tungstenite::HandshakeError::Interrupted(_) => "ws_handshake: interrupted".to_string(),
+        })
+}
+
+/// The anchors as tungstenite wants them (a rustls root store), or none when the machine names no
+/// bundle - in which case its own compiled-in set stays in force.
+fn ws_connector() -> Result<Option<tungstenite::Connector>, String> {
+    let Some(certs) = wa_tls::anchors().map_err(|error| error.to_string())? else {
+        return Ok(None);
+    };
+    let mut roots = rustls::RootCertStore::empty();
+    for cert in certs {
+        roots
+            .add(rustls::pki_types::CertificateDer::from(cert.der().to_vec()))
+            .map_err(|error| format!("ssl_cert_anchor_invalid: {error}"))?;
+    }
+    let config = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    Ok(Some(tungstenite::Connector::Rustls(Arc::new(config))))
+}
+
 pub struct WsConn {
     /// Frames the guest sent that the socket has not taken yet, bounded: `send` closes rather than
     /// growing this for a socket that cannot keep up.
@@ -257,7 +330,7 @@ impl WsConn {
         if let Some(origin) = origin {
             request.headers_mut().insert("Origin", origin.parse().map_err(|_| "invalid origin".to_string())?);
         }
-        let (mut socket, _response) = tungstenite::connect(request).map_err(|e| e.to_string())?;
+        let (mut socket, _response) = connect_ws(request)?;
         let timeout = Some(Duration::from_millis(20));
         match socket.get_mut() {
             tungstenite::stream::MaybeTlsStream::Plain(s) => s.set_read_timeout(timeout).map_err(|e| e.to_string())?,
@@ -510,8 +583,14 @@ fn exchange(url: String, method: String, headers: Vec<(String, String)>, body: V
         builder = builder.header(k.as_str(), v.as_str());
     }
     let request = builder.body(body).map_err(|e| e.to_string())?;
+    // The guest's exchange trusts the machine's anchors, not Mozilla's compiled-in list: a component
+    // (a provider adapter, an MCP client) reaching an https endpoint on a host with its own CA must
+    // work, and a bundle named by SSL_CERT_FILE / SSL_CERT_DIR that cannot be read is a named refusal
+    // here rather than a silent fall back.
+    let anchors = wa_tls::tls_config().map_err(|error| error.to_string())?;
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .http_status_as_error(false)
+        .tls_config(anchors)
         .timeout_global(Some(Duration::from_secs(120)))
         .build()
         .into();
@@ -701,5 +780,87 @@ mod tests {
         assert_eq!(conn.next(), CLOSED, "the guest reads the close, not a silent drop");
         let drained: Vec<Vec<u8>> = rx.try_iter().collect();
         assert_eq!(drained.len(), WS_OUTBOUND_FRAMES, "exactly the bound was accepted");
+    }
+}
+
+/// The guest's own TLS paths, measured at the handshake.
+///
+/// exchange() is what both HTTP contracts call (the 0.1 poll and the 0.2 await), and WsConn::open is
+/// what a component's websocket calls. Both are driven here against a real rustls server on a private
+/// CA, which is the situation measured 19/11: a host whose CA is only in its own bundle.
+#[cfg(test)]
+mod tls_anchor_tests {
+    use super::*;
+    use wa_tls::scratch::{self, Env, Server};
+
+    fn get(url: &str) -> Result<HttpOutcome, String> {
+        exchange(url.to_string(), "GET".to_string(), Vec::new(), Vec::new())
+    }
+
+    #[test]
+    fn a_guest_exchange_refuses_a_private_ca_that_no_bundle_names() {
+        let _env = Env::clear();
+        let server = Server::start();
+        let error = get(&server.url("/health")).expect_err("a private CA is not in the compiled-in bundle");
+        let text = error.to_lowercase();
+        assert!(text.contains("certificate"), "the refusal must be the certificate step: {error}");
+        assert!(!text.contains("timed out"), "a refused handshake is not a timeout: {error}");
+    }
+
+    #[test]
+    fn a_guest_exchange_reaches_a_private_ca_named_by_ssl_cert_file() {
+        let _env = Env::set(&[(wa_tls::CERT_FILE, &scratch::cert_file())]);
+        let server = Server::start();
+        let outcome = get(&server.url("/health")).expect("the CA named by SSL_CERT_FILE");
+        assert_eq!(outcome.status, 200);
+        assert_eq!(outcome.body, b"ok");
+    }
+
+    #[test]
+    fn a_guest_exchange_reaches_a_private_ca_listed_in_ssl_cert_dir() {
+        let dir = scratch::TempDir::new("guest-http");
+        dir.copy_fixture("ca.pem", "ca.pem");
+        let _env = Env::set(&[(wa_tls::CERT_DIR, dir.path())]);
+        let server = Server::start();
+        let outcome = get(&server.url("/health")).expect("the CA in the directory SSL_CERT_DIR names");
+        assert_eq!(outcome.status, 200);
+    }
+
+    #[test]
+    fn a_broken_bundle_refuses_the_exchange_with_the_bundle_in_the_message() {
+        let _env = Env::set_text(wa_tls::CERT_FILE, "/nonexistent/wa-kernel-runtime/typo.pem");
+        let error = get("https://example.invalid/").expect_err("a named source that cannot be read");
+        assert!(error.contains("SSL_CERT_FILE"), "{error}");
+        assert!(error.contains("typo.pem"), "{error}");
+    }
+
+    /// The websocket path proves the TLS *step*: the scratch server answers HTTP, not an upgrade, so
+    /// a connection that gets past the handshake fails at the upgrade instead. What this test is
+    /// about is which of those two failures happens.
+    #[test]
+    fn a_websocket_gets_past_tls_only_when_the_machine_names_the_ca() {
+        let server = Server::start();
+        {
+            let _env = Env::clear();
+            let error = match WsConn::open(&server.ws_url("/ws"), None) {
+                Ok(_) => panic!("a private CA, and no bundle names it: the handshake must not succeed"),
+                Err(error) => error,
+            };
+            assert!(
+                error.to_lowercase().contains("certificate"),
+                "without a bundle the refusal is the certificate step: {error}"
+            );
+        }
+        {
+            let _env = Env::set(&[(wa_tls::CERT_FILE, &scratch::cert_file())]);
+            let error = match WsConn::open(&server.ws_url("/ws"), None) {
+                Ok(_) => panic!("the scratch server answers HTTP, so no upgrade can complete"),
+                Err(error) => error,
+            };
+            assert!(
+                !error.to_lowercase().contains("certificate"),
+                "with the bundle the handshake must succeed, so this is the upgrade's refusal: {error}"
+            );
+        }
     }
 }

@@ -99,6 +99,12 @@ impl Server {
     pub fn url(&self, path: &str) -> String {
         format!("{}{path}", self.base)
     }
+
+    /// The same server as a websocket URL: a websocket client parses only ws:// and wss://, and the
+    /// handshake and the certificate are the same ones.
+    pub fn ws_url(&self, path: &str) -> String {
+        format!("wss://{}{path}", &self.base["https://".len()..])
+    }
 }
 
 impl Drop for Server {

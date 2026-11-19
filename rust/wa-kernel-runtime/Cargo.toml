@@ -69,3 +69,21 @@ wasmtime-wasi-io = { version = "50", default-features = false }
 tokio = { version = "1", features = ["rt", "time", "net"] }
 # Host-side websocket for service components (service_io.rs).
 tungstenite = { version = "0.30", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
+
+# Whose certificates are trusted: every TLS path in the runtime reads the machine's answer from
+# SSL_CERT_FILE / SSL_CERT_DIR through this crate, so the guest's own exchanges and its websockets
+# agree with the host's.
+[dependencies.wa-tls]
+path = "../wa-tls"
+
+# Only for the websocket connector: tungstenite takes a rustls ClientConfig, and the anchors are a
+# RootCertStore. Same crate and provider ureq already uses, so no second TLS stack.
+[dependencies.rustls]
+version = "0.23"
+default-features = false
+features = ["ring", "std", "logging"]
+
+# The scratch HTTPS server the TLS tests handshake against.
+[dev-dependencies.wa-tls]
+path = "../wa-tls"
+features = ["scratch"]
