@@ -279,7 +279,14 @@ wa_release_verify_binary() {
     [ -n "$candidate" ] && [ -x "$candidate" ] || continue
     # "Has one" is answered by the binary itself: a build that predates the verb says so in its own words,
     # and an unknown command is not a verifier.
-    if wa_release_binary_cli "$candidate" release verify --help 2>/dev/null | grep -q 'wa release verify'; then
+    # THE OUTPUT IS CAPTURED, THEN MATCHED (measured 19/11: `cmd | grep -q` under \`set -o pipefail\` fails
+    # about 0.15% of calls - grep exits at the first match, the writer dies of SIGPIPE, and the pipeline
+    # reports failure - so a candidate that DOES answer was skipped, and on the rotation fixture the row
+    # then reported 'no installed wa binary here answers' while the binary under test was answering. A
+    # measured 2-in-5 failure of `binary alone on fixture rotation` in the fast path, from this line.)
+    local help_text
+    help_text="$(wa_release_binary_cli "$candidate" release verify --help 2>/dev/null)"
+    if grep -q 'wa release verify' <<< "$help_text"; then
       binary="$candidate"
       break
     fi
