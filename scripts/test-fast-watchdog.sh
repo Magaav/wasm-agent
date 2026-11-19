@@ -224,6 +224,27 @@ if [ -s "$hang_child" ]; then
   kill -0 "$child" 2>/dev/null && fail "the hung row's child (pid $child) outlived the runner's exec path: the watchdog did not own the process group"
 fi
 
+
+# A COMMAND THAT EXITS 124 ITSELF IS NOT A HANG (item 8 of the node-ops round). The watchdog answers 124
+# for its own deadline, and a `timeout` inside the command answers 124 too; a runner that read the NUMBER
+# alone would call a real assertion failure a hang. The distinction the runner reads is the watchdog's own
+# line, so a command exiting 124 by itself must come back 124 with NO watchdog line - and that is what is
+# asserted here, on the same exec path a Lua row takes.
+cat > "$WORK/own124" <<'OWN124'
+#!/bin/sh
+# A command whose own exit is 124: no deadline was reached, so nothing may be reported as hung.
+echo 'assertion failed: this command decided to answer 124'
+exit 124
+OWN124
+chmod +x "$WORK/own124"
+set +e
+out="$(env WA_FAST_ROW_SECONDS=30 bash "$WORK/drive.sh" "$ROOT" "$WORK/own124" "$WORK/row-fixture.lua" "$WORK/run-e" 2>&1)"
+code=$?
+set -e
+[ "$code" = 124 ] || fail "a command that exits 124 by itself came back as $code: $out"
+case "$out" in
+  *'watchdog: '*) fail "a command that exits 124 by itself was reported as a watchdog HANG: $out" ;;
+esac
 # (b) A REAL row, when this machine has a node to run one: the row prints what its node sees, and the
 # assertions are on that print. No binary means this half is SKIPPED by name and the run says so - the
 # call above is already proven, and a skip is never reported as a pass.
@@ -296,5 +317,5 @@ printf 'watchdog: %s produced no verdict within 3s: killed the group\n' 'row' > 
 
 grep -q '^watchdog: ' "$out" || fail 'a watchdog line was not recognised'
 
-printf 'test-fast-watchdog: ok (hung row named and its group killed, exits passed through, refusals named, and a row really runs through the runner exec path)\n'
+printf 'test-fast-watchdog: ok (hung row named and its group killed, exits passed through, refusals named, a command own 124 is NOT a hang, and a row really runs through the runner exec path)\n'
 exit 0
