@@ -332,3 +332,12 @@ for the codes item 8 added).
   `wa-capabilities`'s `subagents::tests::health_shape...` - all pass standalone; `row-at-sha` classifies
   `test-release-sign.lua` `still_passing` (base exit 0, change exit 0), so the tree is not the cause.
 
+* **A third measured race, pre-existing and landed:** `scripts/lib/release-signing.sh:282` asked a candidate
+  binary with `wa ... --help | grep -q` under `pipefail`, so ~0.15% of calls skipped a binary that answered
+  and the row said 'no installed wa binary here answers'. Measured: `binary alone on fixture rotation` failed
+  2 of 5 runs in the fast path; after capturing the help text and matching a here-string (`03a50b3b`), 4 of
+  4 pass. The same shape exists in other scripts this round did not touch; the five files whose behaviour
+  this mission's items rest on (`fast.sh`, `scripts/lib/fast-rows.sh`, `scripts/lib/fast-environment.sh`,
+  `scripts/lib/release-signing.sh`, `scripts/test-fast-rows.sh`) are converted, and the rest are named here
+  as the same class rather than claimed fixed.
+
