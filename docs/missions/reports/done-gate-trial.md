@@ -17,6 +17,7 @@ Base: origin/main (ac7717e0). Worktree: this tree. Commits are local only; nothi
 | 2 | afa91ecc | the verbatim sentence is in the code-mode guidance, once |
 | 3 | b18fd19a | `wa turns --gate [--since 24h] [--json]` |
 | 4 | b18fd19a | the tests: the line is absent from the reader stream, the event is written, the counter is right |
+| J | fce803eb | the <turn> what-hurt bullet asks for HARNESS friction only, pinned verbatim |
 
 ### Item 1 - 872795e8
 - `lua/core/done_gate.lua`: `M.record_uncaptured` no longer calls `ctx.emit`; the `done_gates` row
@@ -29,6 +30,15 @@ Base: origin/main (ac7717e0). Worktree: this tree. Commits are local only; nothi
   a script's inner call count the same.
 - `docs/DONE-GATE.md`: the "work-shaped request with no gate" bullet now says the fact is the counted event,
   not a status line.
+
+### Item J - fce803eb (round 2, Victor 19/11)
+- `lua/core/agent.lua`: ONE line replaced in `s.turn` (the <turn> contract). The model reports
+  what wa did to its reasoning; its own mistakes and the project's own failures (tests, scripts,
+  fixtures) are not wa friction. Principle 0, no classifier: the prompt asks for the right thing,
+  nothing filters it afterwards.
+- `scripts/test-batching-guidance.lua` (a fast-path row, which already reads
+  `agent.system_prompt`): pins the bullet VERBATIM, pins the retired wording as gone, pins that the
+  rule appears exactly once, and pins that it survives a smaller tool surface.
 
 ### Item 2 - afa91ecc
 - `lua/core/codemode_policy.lua`: one line appended to `GUIDANCE_LINES`, verbatim:
@@ -125,6 +135,11 @@ All three ran with a scratch `WASM_AGENT_HOME` under `$TMPDIR` and with the fast
    "the run journal holds %d gate event(s); the capture rate is unmeasured, not 0%"
 5. Machine form keys (operator-facing): available, since, events, changed, called, percent, sessions,
    threshold, side, reason.
+6. The <turn> what-hurt bullet (model-facing, item J, verbatim):
+   "- **what hurt** - only what wa did to your reasoning (its tools, instructions, results or missing facts
+   it should have given) and what would have removed it; your own mistakes and the project's own
+   problems (its tests, scripts, fixtures) are not wa friction - leave them out;"
+   (one line in the source; shown wrapped here)
 
 ## Not done / unknown
 
