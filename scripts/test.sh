@@ -1114,6 +1114,11 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-orchestration-mode.lua" "$BIN" --db
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-observability.lua" "$BIN" --db "$DB.observability" | grep 'observability ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-remote-call-shape.lua" "$BIN" --db "$DB.remote-call-shape" | grep 'remote call shape ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-remote-refusals.lua" "$BIN" --db "$DB.remote-refusals" | grep 'remote refusals ok'
+# A remote call is never killed for waiting (change/remote-pending, item 1): on this node the peer half IS
+# this process (wa_peer_dispatch, the seam test-session-isolation.lua also reaches) and the caller half is
+# the real pending executor over a relay stand-in, so adoption, wait(op), cancel(op) and the
+# exactly-once append are measured without a second machine and without the real fleet.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-remote-pending.lua" "$BIN" --db "$DB.remote-pending" | grep 'remote pending ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-run-counts.lua" "$BIN" --db "$DB.run-counts" | grep 'run counts ok'
 # The turn note (#33): the <turn> block kept and stripped from the answer, the day roll-up `wa turns
 # --day` answers, the split keeping every byte on both sides of the block, the stored note drawn as
