@@ -1638,6 +1638,49 @@ eq(tree_plan.steps.publish.action, "skip", "and publishes none")
 eq(land.build_plan({ id = "case31c", journal = { repo = tree_root } }, lua_paths, nil, nil).steps.artifacts.kind and
   land.build_plan({ id = "case31c", journal = { repo = tree_root } }, lua_paths, nil, nil).steps.ship.action,
   "skip", "no ring named: the configured ring decides, and it is all tree nodes")
+-- ------------------------------------------- case 32: a release-mode ring node, signed through a coordinator
+-- (review r1 must 3). The e2e above uses SOLO_RING and signer=local, so no case had ever driven a ring
+-- entry whose mode is release - the one mode that exists for a node with no checkout - nor a signer that
+-- is a NAMED NODE rather than this machine. Both are asserted from the journal and from what the stub node
+-- was actually asked: a plan that claims the mode and a deploy that sends tree would read the same in the
+-- journal otherwise.
+setup_fixture()
+land.candidates = function() return {} end
+behaviour.gh_authed, behaviour.gh_present, behaviour.release_present = true, true, false
+routed_calls, deploy_requests = {}, {}
+local mixed_ring = { { node = "work", mode = "tree" }, { node = "nextcloud", mode = "release" } }
+local release_code = land.run({ run = "case32", signer = "laptop", account = "laptop", ring = mixed_ring,
+  branches = { "change/one" }, checks = standard_checks() })
+eq(release_code, 0, "a round with a release-mode ring node and a node signer lands")
+local release_journal = journal_of("case32")
+eq(release_journal.result, "done", "the journal says done")
+-- The deploy asked the release node for release, not for the default mode: the mode travels to the node.
+local asked_modes = {}
+-- Read from the JOURNAL's own deploy rows: what the round recorded it asked of each node. The stub's
+-- call list is not used, because a later setup_fixture in this file clears it.
+for _, row in ipairs(release_journal.deploy or {}) do asked_modes[tostring(row.node)] = tostring(row.mode) end
+eq(asked_modes["nextcloud"], "release", "the release-mode node was asked for a release install")
+eq(asked_modes["work"], "tree", "and the tree node was asked for a tree deploy")
+ok(sign_calls > 0, "the sign step ran on the coordinator node, where the vault is", tostring(sign_calls))
+local main_there = false
+for _, call in ipairs(routed_calls) do
+  if call.node == "laptop" and call.kind == "main" then main_there = true end
+end
+ok(main_there, "and main was fast-forwarded there too")
+contains(tostring(((release_journal.steps or {}).sign or {}).detail or ""), "signed on laptop",
+  "the journal says the release was signed on the coordinator node")
+ok(release_journal.artifacts and release_journal.artifacts.key_id ~= nil,
+  "and the release carries the key it was signed with", tostring(release_journal.artifacts and release_journal.artifacts.key_id))
+-- A release-mode node is NEVER silently deployed as a tree: an unknown mode is refused by name.
+setup_fixture()
+deploy_requests = {}
+local bad_ring = { { node = "nextcloud", mode = "relase" } }
+local bad_code = land.run({ run = "case32b", signer = "local", ring = bad_ring, branches = { "change/one" },
+  checks = standard_checks() })
+eq(bad_code, 1, "a ring naming an unknown mode stops the round")
+eq(step_of("case32b", "deploy").state, "failed", "at the deploy")
+contains(tostring(step_of("case32b", "deploy").detail or ""), "mode_unknown",
+  "and the node refuses it by name rather than deploying the default")
 -- ---------------------------------------------------------------- case 29 (end to end): one command, no hand
 -- steps. A fixture land - scratch incoming repository, fake gh, scratch vault - runs from collect to report
 -- with nothing done by hand: every effect is either done by the machine or skipped WITH A REASON, no step

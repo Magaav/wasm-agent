@@ -2304,6 +2304,24 @@ impl.deploy = function(run, options)
     return false, { error = "remote_update_unavailable", observed = "lua/core/remote_update.lua could not be loaded" }
   end
   local ring = M.ring(options)
+  -- AN UNKNOWN RING MODE IS REFUSED HERE, BY NAME, BEFORE ANY NODE IS ASKED (review r1 must 3, and the
+  -- allow-list rule): a typo would otherwise reach the node, and a node that answers the default deploy to
+  -- "relase" would move a release-installed machine as a tree. The four modes are the ones the node's own
+  -- admit() accepts, plus rollback, which this ring never asks for - so a ring can never name a mode this
+  -- coordinator and that node disagree about.
+  local RING_MODES = { tree = true, binary = true, release = true }
+  for _, entry in ipairs(ring or {}) do
+    local mode_ = tostring((type(entry) == "table" and entry.mode) or "tree")
+    if not RING_MODES[mode_] then
+      local allowed = {}
+      for name in pairs(RING_MODES) do allowed[#allowed + 1] = name end
+      table.sort(allowed)
+      return false, { error = "mode_unknown",
+        observed = "the ring names node " .. tostring(entry.node or "?") .. " with mode " .. mode_ .. ", and this coordinator sends only " .. table.concat(allowed, ", "),
+        detail = "node " .. tostring(entry.node or "?") .. ": mode_unknown (the ring names an install mode this landing does not send)",
+        next = "fix the ring: --ring name:tree,name:binary,name:release" }
+    end
+  end
   local sha = run.journal.main_sha or run.journal.tree_commit
   local deadline = tonumber(options.deploy_timeout or (host.getenv and host.getenv("WA_LAND_DEPLOY_TIMEOUT")) or 900) or 900
   local poll = tonumber(options.deploy_poll or 5) or 5
