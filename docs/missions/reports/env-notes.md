@@ -28,7 +28,8 @@ loader, no second prompt section. `AGENTS.windows.md` remains unimplemented and 
 | `232f3e6d` | r2 item 1: the test asserts the binary embeds both notes; nowhere-on-disk is strict |
 | `a439eff9` | r2 item 2: this table names every commit, and the 48-check run |
 | `393b5108` | r2 follow-up: the land-signing fixture creates both notes, so the record stops exiting 5 |
-| bcf3bfc7 | the table update that names bcf3bfc7 |
+| `864810f3` | r2 item 2 (cont.): the report's commit table names `a439eff9` and `393b5108` |
+| the commit that last edits this table | a commit cannot contain its own hash; `git log --oneline` names it, and every earlier commit on the branch is listed above |
 
 ## Review r1 items, and what each fix does
 
