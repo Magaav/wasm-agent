@@ -68,7 +68,8 @@ node, which this invocation does not provide. Not changed by this branch.
 One harness run passed `WA_MCP_SCRIPT_DIR=$checkout/scripts`, and the suites wrote their runtime stubs
 **into the checkout**, overwriting 8 real `scripts/*.mjs` files. `git checkout --` restored them, the
 untracked `scripts/bin`, `scripts/node-fixture` and `scripts/mcp-shared-fixture.mjs` were removed, and the
-tree is back to the intended 11 changed files + 1 new file. Every run since uses a scratch directory only.
+tree is back to the intended files: git show --name-only --format="" b9e6786a lists 13 (12 changed + the
+new fixtures/mcp-refused-names.json). Every run since uses a scratch directory only.
 
 ## Texts to approve (verbatim)
 
@@ -110,3 +111,65 @@ Victor approves these; the approved ones stay verbatim.
   for those bytes. That is the trade the mission asked for and docs/VAULT.md now says so.
 - `scripts/test-secret-guard.lua` could not be run (pre-existing, above); I did not make it pass.
 - Nothing was pushed; the branch is local.
+
+## Round 8 addendum - three gaps found by re-measuring (18/11, this session)
+
+The round-8 work was already committed (b9e6786a) when this session picked it up. It re-ran every claim
+instead of trusting the report, and found three things the report did not say:
+
+1. **The Rust half was in no gate row.** fixtures/mcp-refused-names.json states that both sides' tests
+   read it, and they do - but scripts/test.sh had only the LUA vault row. The 20 vault_approval_tests
+   (the allow-list, the --native voucher, the re-hash at launch) ran only by hand. Two rows added, one
+   per module, and run as the gate runs them (release, offline, WA_CODEMODE_ALLOW_EMPTY=1):
+   vault_approval_tests 20 passed, classify_magic_tests 3 passed.
+   git diff --stat 44229140..HEAD -- scripts/test.sh -> 5 insertions, 0 deletions.
+2. **The spawned interpreter's allow-list arm had no test on either side.** The existing Rust test asserts
+   interpreter_not_covered, which fires one branch LATER. That arm is the first thing a shimmed host
+   meets, and measurement on this node says why: "which node" is
+   /home/victor/.local/share/mise/shims/node -> /usr/bin/mise, whose realpath is not node, so a
+   connector is refused with "its interpreter (/usr/bin/mise) cannot run a vault connector: ..." until
+   WA_NODE names a real node (measured: WA_NODE=/usr/bin/node -> 0 problems; unset -> 1). Both sides
+   now test it: 2 Lua checks (git diff --numstat -> 20 added, 0 removed) and a Rust test (20 added, 0
+   removed). Each was proved by mutation: disabling the arm fails exactly those checks (2 of 130 Lua; the
+   Rust test fails on the mutation and passes again when restored).
+3. **host::classify_magic had no unit test.** Every judgment in the rule rests on those four bytes. Three
+   tests now cover the three families (ELF; all six Mach-O/fat magics; MZ), a shebang and non-ASCII
+   (script/binary), and a path answered by what is there now (directory -> unreadable, absent ->
+   missing). git diff --numstat host.rs -> 53 added by the tests, 63 by file_magic itself.
+
+Also found and fixed: two Lua rules from the brief were implemented with **no Lua test** - an ARGUMENT that
+resolves to an interpreter or a wrapper (finding 3), and a code flag compared before "=" and through a short
+cluster (finding 4). Only the Rust unit test pinned the flag rule, so a Lua regression passed every gate.
+7 checks added, each proved to bite: disabling the "=" split fails 2, disabling the cluster split fails 2,
+stubbing argument_refusal fails 2.
+
+One operator-facing string was missing from Texts to approve and is now there:
+"its interpreter ({real}) cannot run a vault connector: {refusal}".
+
+### What this session verified, and what it did not
+
+- cargo test -p wa-capabilities --lib: **327 passed, 0 failed** (was 323 before these additions).
+- The two new gate rows, run as test.sh runs them: **20 passed**, **3 passed**.
+- test-mcp-vault-approval.lua with the checkout's Lua: **130 checks** (was 121).
+- test-mcp-request-shape.lua **11 checks**, test-mcp-share.lua **44 checks**, test-mcp.lua **48
+  checks**, test-mcp-command.lua **132 checks** - each in its own scratch HOME/WASM_AGENT_HOME,
+  with WA_MCP_SCRIPT_DIR pointed at a COPY of scripts/ (pointing it at the checkout once overwrote
+  real files, see the round-8 body).
+- test-secret-guard.lua fails with codemode_not_enabled. This was re-measured, not assumed: the
+  script is byte-identical on the base, and the detached base worktree at 44229140 fails the same way
+  with the same binary. Pre-existing, needs a codemode-enabled node.
+- Full scripts/test.sh was **not** run end to end (it builds release artifacts and components); the
+  rows this branch touches were run individually, as above. Nothing was pushed.
+
+### Premises from the brief that were wrong or stale
+
+- The round-8 body said "11 changed files + 1 new file" (12), while its own commit lists 13. Corrected
+  above to the measured number; against the real base
+  (44229140) it is 14 now (scripts/test.sh added). Measured with git diff --stat 44229140..HEAD.
+- origin/main has moved 15 commits ahead of the base (e4e40405 vs 44229140). A merge-tree dry run
+  (git merge-tree --write-tree HEAD origin/main) reports **0 conflicts**, so the branch still merges
+  cleanly, but a plain git diff --stat origin/main..HEAD shows other missions' work as deletions here -
+  it is not this branch's diff.
+- The brief says tests belong in a scratch HOME; the Rust tests write fixtures under
+  std::env::temp_dir(), not a WASM_AGENT_HOME, which is the existing pattern of that suite and is
+  outside any live node's state.
