@@ -1075,6 +1075,24 @@ impl Caller {
     }
 }
 
+/// Split the node's operations into the caller's and a COUNT of everybody else's.
+///
+/// ONLY UNSETTLED WORK COUNTS (session isolation, item 3 round 4). A settled operation is not running
+/// anywhere, and counting it made `node: N ops elsewhere` a lifetime total that never went down. The
+/// sentence says "ops", so the count is operations and not sessions either: four unsettled operations in
+/// one other session are four, which is exactly what a per-session progress file could not say (it counted
+/// one file per session). One rule, used by `list` and by `health_scope`, pinned by
+/// `a_settled_operation_is_not_counted_elsewhere`.
+pub(crate) fn split_elsewhere(caller: &Caller, items: &[Value]) -> (Vec<Value>, usize) {
+    let mut mine = Vec::new();
+    let mut elsewhere = 0usize;
+    for state in items {
+        if state["settled"] == true { continue; }
+        if caller.owns(state) { mine.push(state.clone()) } else { elsewhere += 1 }
+    }
+    (mine, elsewhere)
+}
+
 /// `Some(state)` when the caller may act on `id`, `Some` from `snapshot` only if it owns it. `None`
 /// means "not yours" and the caller answers with [Caller::refusal].
 pub(crate) fn owned(caller: &Caller, id: &str) -> Result<Option<Value>, String> {
@@ -1215,13 +1233,8 @@ pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<V
         // with every operation on the node, which is how one session's build showed up as another's
         // (session isolation, finding 2).
         "list" => {
-            let mut mine = Vec::new();
-            let mut elsewhere = 0usize;
-            if let Some(items) = manager().list().as_array() {
-                for state in items.clone() {
-                    if caller.owns(&state) { mine.push(state) } else { elsewhere += 1 }
-                }
-            }
+            let items = manager().list().as_array().cloned().unwrap_or_default();
+            let (mine, elsewhere) = split_elsewhere(&caller, &items);
             let count = mine.len();
             let note = if elsewhere == 0 { String::new() } else {
                 format!("{elsewhere} other operation(s) on this node belong to other sessions; an explicit node scope (scope:\"node\", operator only) is the only way to see them")
@@ -1394,16 +1407,24 @@ pub fn health_scope(session: &str) -> Value {
     // is /health, the sentinel's "is anything overdue?" question, not a tool call. A sessionless TOOL caller
     // is not node-wide (item 7, round 2) - which is why the operation tool does not construct this.
     let caller = Caller { session: session.to_string(), node: session.is_empty(), owner: String::new() };
-    let mut mine = Vec::new();
-    let mut elsewhere = 0usize;
-    if let Some(items) = manager().list().as_array() {
-        for state in items {
-            if state["settled"] == true { continue }
-            if caller.owns(state) { mine.push(health_row(state)) } else { elsewhere += 1 }
-        }
-    }
+    // The same rule as `list`: only unsettled operations are elsewhere, and one rule serves both.
+    let items = manager().list().as_array().cloned().unwrap_or_default();
+    let (ops, elsewhere) = split_elsewhere(&caller, &items);
+    let mine: Vec<Value> = ops.iter().map(health_row).collect();
     json!({"session": session, "operations": mine, "operations_elsewhere": elsewhere,
         "operations_scope": if session.is_empty() { "node" } else { "session" }})
+}
+
+/// The count the progress row draws: the OTHER sessions' unsettled operations, for `session`.
+///
+/// The editor's row cannot reach this manager itself (wa-term is a leaf that knows nothing of the
+/// runtime), so the host asks here and hands the number to `wa_term::tool_progress::current`
+/// (session isolation, item 3 round 4). A settled operation is not counted, and one session holding four
+/// unsettled operations is counted as four.
+pub fn elsewhere_count(session: &str) -> usize {
+    let caller = Caller { session: session.to_string(), node: session.is_empty(), owner: String::new() };
+    let items = manager().list().as_array().cloned().unwrap_or_default();
+    split_elsewhere(&caller, &items).1
 }
 
 /// What a deadline can honestly say.
@@ -1439,6 +1460,48 @@ fn deadline_note(seconds: u64, state: &Value) -> String {
         None => format!(
             "the command did not finish within {seconds}s; its operation was terminated ({account})."
         ),
+    }
+}
+
+#[cfg(test)]
+mod elsewhere_count_tests {
+    use super::{split_elsewhere, Caller};
+    use serde_json::json;
+
+    /// Item 3 (round 4): "elsewhere" counts the OTHER sessions' UNSETTLED OPERATIONS.
+    ///
+    /// It used to count live progress files - one per session - so four unsettled operations in one
+    /// other session were announced as "node: 1 op elsewhere", and a settled operation went on being
+    /// counted for as long as its file survived. A settled operation is running nowhere.
+    #[test]
+    fn a_settled_operation_is_not_counted_elsewhere() {
+        let caller = Caller { session: "session-a".into(), node: false, owner: String::new() };
+        let items = vec![
+            json!({"operation_id":"op-1","session":"session-b","settled":false}),
+            json!({"operation_id":"op-2","session":"session-b","settled":false}),
+            json!({"operation_id":"op-3","session":"session-b","settled":false}),
+            json!({"operation_id":"op-4","session":"session-b","settled":false}),
+            json!({"operation_id":"op-5","session":"session-b","settled":true}),
+            json!({"operation_id":"op-6","session":"session-a","settled":false}),
+        ];
+        let (mine, elsewhere) = split_elsewhere(&caller, &items);
+        assert_eq!(elsewhere, 4, "four unsettled operations of ONE other session are four");
+        assert_eq!(mine.len(), 1, "and the caller's own unsettled operation is its own");
+        assert_eq!(mine[0]["operation_id"], json!("op-6"));
+    }
+
+    /// A node-wide caller owns everything, and a settled row is still not running anywhere: the count
+    /// stays a count of WORK, not of the caller's reach.
+    #[test]
+    fn a_node_wide_caller_still_counts_only_unsettled_work_elsewhere() {
+        let caller = Caller { session: "".into(), node: true, owner: String::new() };
+        let items = vec![
+            json!({"operation_id":"op-1","session":"session-b","settled":false}),
+            json!({"operation_id":"op-2","session":"session-b","settled":true}),
+        ];
+        let (mine, elsewhere) = split_elsewhere(&caller, &items);
+        assert_eq!(mine.len(), 1, "a node-wide caller owns every unsettled row");
+        assert_eq!(elsewhere, 0, "and nothing unsettled is elsewhere to it");
     }
 }
 

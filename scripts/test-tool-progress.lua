@@ -194,10 +194,13 @@ publish("session-b", { state = "running", tool = "bash", started_at = now - 190,
 publish("session-c", { state = "running", tool = "bash", started_at = now - 900, at = now, last_output_at = now - 1,
   detail = { kind = "text", text = "the other session's line" } })
 ok(tp.status({ now = now, session = session }) ~= nil, "my own row is still mine")
--- The aggregate is counted from the files' own age, so it is asked with a real clock: the fixtures
--- above are written at this machine's own time.
+-- THE COUNT IS THE OPERATION MANAGER'S NOW (session isolation, item 3 round 4). These two live files
+-- belong to other sessions, and they used to BE the count - which is how four unsettled operations in
+-- one session read as one. This host has an operation manager, so it answers; the files must not add to
+-- that answer, and no operation was started here, so its answer is zero.
 local clock = os.time()
-eq((tp.elsewhere({ session = session, now = clock })), 2, "two other sessions are running")
+eq((tp.elsewhere({ session = session, now = clock })), 0,
+  "two other sessions' live FILES are not two ops: the operation manager is the count")
 eq(tp.elsewhere_text(2), "node: 2 ops elsewhere", "the aggregate is a count, with no name and no text")
 eq(tp.elsewhere_text(1), "node: 1 op elsewhere", "and it reads as one op when it is one")
 local theirs = tp.status({ now = now, session = "session-d" })
@@ -205,11 +208,11 @@ ok(theirs == nil, "a session with no row of its own draws nothing of another's")
 -- The one thing a session with no row of its own may be told: how many others are running. Nothing
 -- else about them is readable - the module only ever opens the reader's own file.
 local elsewhere = tp.elsewhere({ session = "session-d", now = clock })
-ok(elsewhere >= 2, "and it is told only the count: " .. tostring(elsewhere))
+ok(elsewhere == 0, "and it is told only the count, which is the manager's: " .. tostring(elsewhere))
 ok(tp.path({ session = "session-d" }) ~= path, "and its file is its own")
 -- A settled call removes its own file: nobody else's row goes with it.
 os.remove(tp.path({ session = "session-b" }))
-eq(tp.elsewhere({ session = session, now = clock }), 1, "a finished call stops being counted")
+eq(tp.elsewhere({ session = session, now = clock }), 0, "removing a live file does not change the operation count")
 publish(session, { state = "running", tool = "bash", started_at = now - 190, at = now - 20, last_output_at = now - 190 })
 ok(tp.status({ now = now, session = session }) == nil, "a file that stopped moving is a dead node, not a running call")
 publish(session, { state = "done", at = now })
@@ -272,6 +275,31 @@ local wide = tp.status({ now = clock.now, limit = 30 }) or {}
 ok(wide.text and not wide.text:find("\27", 1, true), "no escape sequence in the sentence: " .. tostring(wide.text))
 tp.finish()
 eq(view:session_content(), nil, "the call ends: the row stays the update's, empty")
+
+-- FOUR UNSETTLED OPERATIONS IN ONE OTHER SESSION ARE FOUR (session isolation, item 3 round 4).
+-- The count used to be one per live file, so this exact case read as "1 op elsewhere" - a session running
+-- a build, a test, a deploy and a shell was announced as one op. Real operations, real manager, and the
+-- reader is a different session, so every one of them is "elsewhere" to it.
+local held = {}
+for index = 1, 4 do
+  local shell = tostring(dofile('lua/core/platform.lua').shell() or '')
+  local null_device = shell:find('cmd', 1, true) and 'NUL' or '/dev/null'
+  local command = shell:find('cmd', 1, true) and ('ping -n 8 127.0.0.1 >' .. null_device)
+    or ('sleep 8 >' .. null_device .. ' 2>&1')
+  local ok_started, raw = pcall(host.operation, 'start', dofile('lua/vendor/json.lua').encode({
+    command = command, timeout_seconds = 60, session = 'session-elsewhere-ops' }))
+  local started = ok_started and dofile('lua/vendor/json.lua').decode(raw) or nil
+  if type(started) == 'table' and type(started.operation_id) == 'string' then
+    held[#held + 1] = started.operation_id
+  end
+end
+eq(#held, 4, 'four operations were started in one other session')
+eq(tp.elsewhere({ session = session, now = os.time() }), 4,
+  'and the reader is told FOUR ops elsewhere, not one per session')
+for _, operation_id in ipairs(held) do
+  pcall(host.operation, 'cancel', dofile('lua/vendor/json.lua').encode({
+    id = operation_id, session = 'session-elsewhere-ops' }))
+end
 
 print(string.format("%d checks, %d failed", checks, failed))
 if failed > 0 then os.exit(1) end

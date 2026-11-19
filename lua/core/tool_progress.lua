@@ -359,6 +359,26 @@ function M.reset_live() memo.at, memo.path, memo.facts = nil, nil, nil end
 -- of the per-session keying.
 function M.elsewhere(options)
   local o = options or {}
+  -- THE COUNT IS THE OPERATION MANAGER'S, NOT THIS DIRECTORY'S (session isolation, item 3 round 4).
+  --
+  -- It used to be "how many files younger than FRESH are in this directory", which is a count of
+  -- SESSIONS with a live row, not of work: four unsettled operations in one other session read as ONE,
+  -- and a session whose row file was written by a call that then went quiet kept counting. The sentence
+  -- says "ops", so it counts operations - and only the unsettled ones, which is the runtime's own
+  -- `operations_elsewhere` answer (the count of live operations this caller does not own).
+  --
+  -- A node that cannot be asked answers nil, never zero: "no aggregate" draws no row, while a 0 would
+  -- claim the other sessions are idle.
+  if type(host.operation) == 'function' then
+    local ok, raw = pcall(host.operation, 'list', json.encode({ session = tostring(o.session or '') }))
+    if ok and type(raw) == 'string' then
+      local decoded, value = pcall(json.decode, raw)
+      if decoded and type(value) == 'table' and value.operations_elsewhere ~= nil then
+        return tonumber(value.operations_elsewhere) or 0
+      end
+    end
+    return nil
+  end
   local mine = M.path({ session = o.session, dir = o.dir, path = o.path })
   local dir = o.dir
   if type(o.path) == 'string' and o.path ~= "" then dir = o.path:match("^(.*)[/\\][^/\\]*$") end

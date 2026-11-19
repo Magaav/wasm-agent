@@ -75,8 +75,8 @@ const REFRESH_MS: u128 = 250;
 
 /// What this reader last saw: **its own** session's file (re-read only when its mtime moved) and how
 /// many other sessions have a live file. Both are re-derived at most once a quarter second.
-struct Cache { checked: Option<Instant>, mtime: Option<SystemTime>, facts: Option<Value>, elsewhere: usize }
-static CACHE: Mutex<Cache> = Mutex::new(Cache { checked: None, mtime: None, facts: None, elsewhere: 0 });
+struct Cache { checked: Option<Instant>, mtime: Option<SystemTime>, facts: Option<Value> }
+static CACHE: Mutex<Cache> = Mutex::new(Cache { checked: None, mtime: None, facts: None });
 
 fn now_epoch() -> f64 {
     SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
@@ -111,8 +111,13 @@ fn count_elsewhere(dir: &std::path::Path, mine: Option<&std::path::Path>) -> usi
 /// drawing it for another session was the leak this keying exists to close
 /// (`wa_tool_progress::progress_dir`). When this session has no row of its own but other sessions are
 /// running, the row is the dim aggregate `node: N ops elsewhere` - a count, never a name, never a line.
-pub fn current(width: usize, session: &str) -> String {
+/// `elsewhere` is the operation manager's count of the OTHER sessions' unsettled operations
+/// (`operations_elsewhere`), passed in because this crate cannot reach the manager: the row says "ops",
+/// and this module used to count live per-session FILES instead, so four unsettled operations in one
+/// other session read as one (session isolation, item 3 round 4).
+pub fn current(width: usize, session: &str, elsewhere: usize) -> String {
     let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut elsewhere = elsewhere;
     if cache.checked.is_none_or(|t| t.elapsed().as_millis() >= REFRESH_MS) {
         cache.checked = Some(Instant::now());
         let mine = wa_tool_progress::progress_path(session);
@@ -127,15 +132,15 @@ pub fn current(width: usize, session: &str) -> String {
                 .and_then(|path| std::fs::read_to_string(path).ok())
                 .and_then(|text| serde_json::from_str(&text).ok());
         }
-        cache.elsewhere = count_elsewhere(&wa_tool_progress::progress_dir(), mine.as_deref());
     }
     if let Some(facts) = cache.facts.as_ref() {
         if let Some(row) = line(facts, now_epoch(), width) {
             return row;
         }
     }
-    if cache.elsewhere > 0 && width > 0 {
-        let text = crate::terminal_editor::clip_cells(&wa_tool_progress::elsewhere(cache.elsewhere), width);
+    if elsewhere == 0 { return String::new() }
+    if width > 0 {
+        let text = crate::terminal_editor::clip_cells(&wa_tool_progress::elsewhere(elsewhere), width);
         if std::env::var_os("NO_COLOR").is_some() {
             return text;
         }
