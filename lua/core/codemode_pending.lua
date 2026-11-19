@@ -604,18 +604,16 @@ function M.retained(op, scope)
   return value, nil
 end
 
--- Item #37: a pending call always answers its handle in PLAIN fields - operation_id and the two log
--- paths - not only inside `progress`. A script that must record where the work's output will be cannot
--- be made to reach through a nested table that a running op may not have filled yet, and "which file do
--- I read when this settles" is the first question a detached call raises. `op` stays: it is the name
--- every existing script and `wait(op)` already use.
+-- Item #37: a pending call always answers its handle in PLAIN fields - `operation_id`,
+-- `stdout_path` and `stderr_path` - not only inside `progress`. A script that must record where the
+-- work's output will be cannot be made to reach through a nested table that a running op may not have
+-- filled yet, and "which file do I read when this settles" is the first question a detached call
+-- raises: stdout for the answer, stderr for why it failed, and both are the operation record's own
+-- (absent is nil, never a guess). `op` stays beside `operation_id`: it is the name every existing
+-- script and `wait(op)` already use.
 local function handle(record, waited_s, state)
   local out = { state = "pending", op = record.op, operation_id = record.op, tool = record.tool,
     waited_s = waited_s, progress = record.progress }
-  -- Item #37: a pending call answers its handle in PLAIN fields too - operation id and the log paths -
-  -- so a script that records where the output will be does not reach through a nested table, and the
-  -- first question a detached call raises ("which file do I read?") has an answer at hand.
-  -- The paths are the operation record's own; absent is nil, never a guess.
   local source = type(state) == "table" and state or (type(record.progress) == "table" and record.progress or nil)
   if source then
     out.stdout_path = source.stdout_path

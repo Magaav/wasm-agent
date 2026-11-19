@@ -145,9 +145,12 @@ deploy, a download, a remote call, a long `bash`, an outbound message. The opera
 never told "still running" with nothing it can do about it.
 
 * Any `tools.<name>(args)` still running after its wait answers
-  `{state:"pending", op, tool, waited_s, progress}` - one shape, whatever the tool. A call that finishes
-  inside its wait answers exactly what it always answered; a script that names no `wait_s` and whose call
-  finishes in time sees no change at all.
+  `{state:"pending", op, operation_id, tool, waited_s, stdout_path, stderr_path, progress}` -
+  one shape, whatever the tool. The handle names its log files as plain fields, because "which file do
+  I read when this settles" is the first question a detached call raises: `stdout_path` for the
+  answer, `stderr_path` for why it failed, absent when the executor has no files (never a guess). A
+  call that finishes inside its wait answers exactly what it always answered; a script that names no
+  `wait_s` and whose call finishes in time sees no change at all.
 * `wait_s` is a property of the call's *wait*, taken out of the arguments before the tool's own schema
   sees them: default 60 s, 0..300 s, and effectively `min(wait_s, 300, the script's remaining time minus
   a margin)`. A wait never outlives the script that started it; a `wait_s` that is not a number is
