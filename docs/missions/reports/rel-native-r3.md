@@ -170,3 +170,29 @@ own scratch home, clean environment; every one fails identically on both:
 * Base comparisons that need "no switch" were made only for explicit modes, for the reason in "Premises".
 * `WASM_AGENT_RAW_CODE=bash` now means "off" without `WA_AB_ARM=bash`; an operator habit of using bash alone
   changes meaning, deliberately, and is named in item 6.
+
+## Measured after my six items: a regression from `c4b0d4af` (another session's commit)
+
+While this round was being closed, THREE commits with the subject prefix `rel r3` were made in this same
+worktree by another session (`c4b0d4af`, `d26d1652`, `d28a4ae7`). My six items end at `97ba66c8`; the worktree
+is clean and I did not rewrite or revert any of their work.
+
+The full fast path at the tree head (`scratch/fast-final.log`) shows 10 failed rows: the 7 named above as
+pre-existing, and THREE that PASS on my `3f47f63c` (verified with a worktree of that commit) and fail after
+`c4b0d4af`:
+
+* `scripts/test-observability.lua` (:20 "rebuild keeps exact persisted tool view")
+* `scripts/test-resume-tool-registry.lua` (:130 "a run with zero dispatchable tools refuses by name")
+* `scripts/test-codemode-model-boundary.lua` (:194 `attempt to index a nil value (field 'shown')`)
+
+Measured cause, one branch of `agent.build_context`: a frozen prefix record written BEFORE `raw_mode` existed
+falls into `mode_source='legacy'` and is given `raw_code.LEGACY_THREAD_MODE` (`only`). For a thread frozen in
+`codemode` that is the wrong door: `prompt_cache.enforce` reports `codemode/generic/guidelines/tools` as
+changed, every declared tool is recorded as REMOVED, the request carries an appended session-update note, and
+the row that reads the LAST message of the built context finds the note instead of the tool row. The same
+fallback turns a codemode thread's surface into the fence-only one.
+
+The fix belongs to that session (my `84824f03` recorded the mode at the freeze and read it back; a record
+without the field must keep the mode its prefix was built in - for a `codemode` thread that is `codemode`,
+not `only`). I did not edit another session's commits mid-round; the measurement and the row names are here
+so the finding cannot be lost.
