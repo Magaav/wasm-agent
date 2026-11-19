@@ -864,8 +864,10 @@ pub(crate) fn path_facts_value(path: &str) -> serde_json::Value {
     }
 }
 
+#[no_mangle]
 /// host.file_magic(path) -> one JSON string: {path, magic, size?, error?}.
 ///
+/// A JSON string the caller decodes with lua/vendor/json.lua, never a Lua table to index directly.
 /// A file's KIND from its leading bytes, which no name can fake: `elf`, `macho`, `pe`, `script` (a
 /// shebang), `text`, `binary`, `empty`, `missing` or `unreadable`.
 ///
@@ -875,7 +877,6 @@ pub(crate) fn path_facts_value(path: &str) -> serde_json::Value {
 /// name?". A NAME is not a program: a copy of python called `node`, or a `#!/bin/sh` wrapper called
 /// `bash`, is exactly what a list of names cannot refuse. Only the first bytes are read, so a
 /// hundred-megabyte interpreter costs four bytes here.
-#[no_mangle]
 pub extern "C-unwind" fn file_magic(l: *mut LuaState) -> c_int {
     let path = arg_string(l, 1).unwrap_or_default();
     push_json(l, &file_magic_value(&path));
@@ -3290,6 +3291,7 @@ pub fn build_label() -> &'static str {
 
 /// host.build_identity() -> JSON text of `{label, commit, dirty, known}` for the running binary.
 ///
+/// One JSON string the caller decodes with lua/vendor/json.lua; it is a string, not a table.
 /// One reader for every surface that names the build: the welcome box, `wa --version` and the update
 /// banner's installed side all go through `lua/core/build_identity.lua`, which reads this. The commit
 /// is the full id (the short form is the label's job) so a pin can be compared against it.
@@ -3306,6 +3308,8 @@ pub extern "C-unwind" fn build_identity(l: *mut LuaState) -> c_int {
 }
 
 /// host.runtime_info() -> JSON text of `{version, binary_sha256, build_source_commit, build_source_tree,
+/// build_wave_generation, process_id, boot_id, os, arch, binary_path, run_origin} - one JSON string the
+/// caller decodes with lua/vendor/json.lua, never a Lua table.
 pub extern "C-unwind" fn runtime_info(l: *mut LuaState) -> c_int {
     static IDENTITY: OnceLock<Value> = OnceLock::new();
     let identity = IDENTITY.get_or_init(|| {
