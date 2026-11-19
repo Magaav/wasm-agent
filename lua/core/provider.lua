@@ -1091,6 +1091,60 @@ function M.is_transient(problem)
   return false
 end
 
+-- The failures a replay cannot repair: the request itself, the credential, the model or the content
+-- was refused. Allow-listed by status and by text, because the brief's rule is "unknown is not
+-- final" - a failure this file does not recognise must be retried a bounded number of times and
+-- then named, never treated as terminal on the strength of not matching anything.
+local FINAL_STATUS = { ["400"]=true, ["401"]=true, ["403"]=true, ["404"]=true, ["405"]=true,
+  ["413"]=true, ["415"]=true, ["422"]=true }
+local FINAL_TEXT = { "invalid api key", "invalid_api_key", "incorrect api key", "unauthorized",
+  "permission denied", "forbidden", "authentication failed", "unauthenticated",
+  "model not found", "unknown model", "model_does_not_exist", "no such model",
+  "does not support this protocol", "content policy", "content_policy", "safety system",
+  "context_overflow", "invalid_request", "bad request" }
+
+function M.is_final(problem)
+  local text = tostring(problem or ""):lower()
+  -- A dead link is never final: the provider has not judged anything yet.
+  if M.is_link_down(text) then return false end
+  local status = text:match("provider_http_(%d+)")
+  if status and FINAL_STATUS[status] then return true end
+  for _, pattern in ipairs(FINAL_TEXT) do
+    if text:find(pattern, 1, true) then return true end
+  end
+  return false
+end
+
+-- A provider failure that matches NO known class. It still says "provider", so it is not an internal
+-- guard or a cancellation; the agent retries it a bounded number of times (M.unknown_retries) and
+-- then fails by name, instead of dying on the first attempt as an unnamed provider_error.
+function M.is_unknown_failure(problem)
+  local text = tostring(problem or ""):lower()
+  if text == "" then return false end
+  if not (text:find("provider_error:", 1, true) or text:find("provider_http_", 1, true)) then return false end
+  if M.is_final(text) or M.is_link_down(text) or M.is_connection_lost(text) then return false end
+  if M.is_rate_limited(text) or M.is_response_timeout(text) or M.is_transient(text) then return false end
+  return true
+end
+
+-- Bounded on purpose: an unclassified failure may already have been billed upstream, and retrying it
+-- forever would turn a bug into a loop. Five, then the run says so by name.
+function M.unknown_retries()
+  local off = env("WASM_AGENT_PROVIDER_RETRIES")
+  if off ~= nil and trim(off) == "0" then return 0 end
+  local raw = env("WASM_AGENT_PROVIDER_UNKNOWN_RETRIES")
+  if raw == nil or trim(raw) == "" then return 5 end
+  local count = tonumber(raw)
+  if not count then return 5 end
+  return math.max(0, math.min(5, math.floor(count)))
+end
+
+-- 1, 2, 4, 8, 16 s, jittered: the same shape as a lost link, without its patience.
+function M.unknown_backoff_ms(attempt)
+  local seconds = math.min(30, 2 ^ (math.max(1, tonumber(attempt) or 1) - 1))
+  return math.floor(seconds * 1000 * (0.75 + math.random() * 0.5))
+end
+
 -- How many times a transient failure is retried, with exponential backoff (2, 4, 8, 16 s, jittered).
 function M.transient_retries()
   local count = tonumber(env("WASM_AGENT_PROVIDER_RETRIES") or "")

@@ -2454,7 +2454,14 @@ function M:run_body(text, images)
     -- 8497eecc-6084-4ffe-a65f-d04c550522bb, a `finish_reason=stop` reply with no text and no tool
     -- call ended the run with `empty_reply` on the first attempt and never asked again.
     local function retryable(value)
-      if not ok then return provider.is_transient(tostring(value)) end
+      if not ok then
+        -- A lost link is retryable by definition (nothing was sent); an unclassified provider failure
+        -- is retried a bounded number of times; everything else keeps the opt-in transient policy.
+        return provider.is_connection_lost(tostring(value))
+          or provider.is_rate_limited(tostring(value))
+          or provider.is_unknown_failure(tostring(value))
+          or provider.is_transient(tostring(value))
+      end
       if type(value) ~= "table" then return false end
       -- An interrupted stream (`stream_complete=false`) is the lost-stream case below, which has
       -- its own patient budget; it must not also consume this short empty-reply budget.
@@ -2477,6 +2484,10 @@ function M:run_body(text, images)
     -- The ambiguous failures keep the opt-in budget above; a terminal quota refusal is excluded by
     -- `is_rate_limited` and keeps its landed outcome.
     local rate_limited = (not ok) and provider.is_rate_limited(tostring(result))
+    -- A provider failure that matches no known class is NOT final: it takes a bounded budget and then
+    -- fails by NAME, because "not in my tables" is not a judgement about the request (brief item 3).
+    local unknown_failure = (not ok) and not connection_lost and not rate_limited
+      and provider.is_unknown_failure(tostring(result))
     -- An empty stop (a reply with no text, no reasoning and no tool call) is its own bucket: it is
     -- not an ambiguous transport failure, it is the turn failing to produce anything at all, and it
     -- is default-on with a short budget so a hiccup costs a second and not a run.
@@ -2488,6 +2499,7 @@ function M:run_body(text, images)
     local transient_limit = connection_lost
         and (link_unbounded and math.huge or provider.connection_retries())
       or rate_limited and provider.rate_limit_retries()
+      or unknown_failure and provider.unknown_retries()
       or empty_reply and provider.empty_reply_retries()
       or provider.transient_retries()
     local transient_attempt, waited_ms = 0, 0
@@ -2500,6 +2512,7 @@ function M:run_body(text, images)
       local retry_after = (not ok) and provider.retry_after_ms(result) or nil
       local wait_ms = connection_lost and provider.connection_backoff_ms(transient_attempt)
         or rate_limited and provider.rate_limit_backoff_ms(transient_attempt, retry_after)
+        or unknown_failure and provider.unknown_backoff_ms(transient_attempt)
         or empty_reply and provider.empty_reply_backoff_ms(transient_attempt)
         or math.floor((2 ^ transient_attempt) * 1000 * (0.75 + math.random() * 0.5))
       if wait_budget_ms and waited_ms + wait_ms > wait_budget_ms then break end
@@ -2565,6 +2578,15 @@ function M:run_body(text, images)
         end
       end
       if not ok and provider.is_rate_limited(tostring(result)) then rate_limited = true end
+      -- A later attempt that fails differently (or stops matching any class) keeps the unknown
+      -- budget it was given, so a failure never becomes MORE final by changing its wording.
+      if not ok and not connection_lost and not rate_limited
+          and provider.is_unknown_failure(tostring(result)) then
+        if not unknown_failure then
+          unknown_failure = true
+          transient_limit = math.max(transient_limit, provider.unknown_retries())
+        end
+      end
       -- The bucket follows the reply, not only the first attempt's outcome: a transient failure
       -- that is answered with an empty stop still gets the empty-reply budget instead of dying on
       -- the opt-in transient one (which defaults to 0).
