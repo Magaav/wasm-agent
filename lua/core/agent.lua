@@ -260,7 +260,7 @@ local function generic_sections(role, declared, available)
   -- estimate is required because it is the difference between spending steps and spending context.
   s.turn = table.concat({
     "End every answer with a `<turn>` block, after the work itself and never inside it:",
-    "- **what hurt** - what in this turn damaged your reasoning (a missing fact, a wrong assumption, a stale instruction, a tool that lied or a step that had to be redone), and what would have removed it;",
+    "- **what hurt** - only what wa did to your reasoning (its tools, instructions, results or missing facts it should have given) and what would have removed it; your own mistakes and the project's own problems (its tests, scripts, fixtures) are not wa friction - leave them out;",
     "- **what it buys** - say which, with a number: fewer steps to the same result, or only better context (the same steps in fewer tokens, clearer state). Never claim one when it is the other;",
     "- **focus** - exactly ONE point: the highest-value harness optimisation this turn exposed. One point per answer, only when there is something to increment; no list, no filler, no restating the task.",
     "If nothing hurt your reasoning and nothing should be incremented, say so in one line and stop.",
