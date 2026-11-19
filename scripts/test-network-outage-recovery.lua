@@ -80,6 +80,19 @@ check(provider.is_final('provider_http_403: forbidden'), 'a permission refusal i
 check(provider.is_final('provider_http_400: bad request'), 'a bad request is final')
 check(provider.is_final('provider_error: model not found'), 'an unknown model is final')
 check(not provider.is_final('provider_http_503: unavailable'), 'a busy upstream is not final')
+-- Precedence: the STATUS the server chose outranks any word in the body. An auth refusal whose body
+-- mentions a connection problem is still auth, and must fail at once rather than wait for a link that
+-- is not the problem. Measured shape: a gateway that answers 401 with the upstream's own error text.
+check(provider.is_final('provider_http_401: {"error":"connection refused by auth service"}'),
+  'a 401 stays final even when its body mentions a connection')
+check(not provider.is_connection_lost('provider_http_401: {"error":"connection refused by auth service"}'),
+  'and it is not read as a lost link')
+-- A 429 is the provider itself answering "slow down": a link word in its body must not turn that into
+-- an unbounded wait for a link that is fine.
+check(provider.is_rate_limited('provider_http_429: {"error":"connection refused upstream slot"}'),
+  'a 429 keeps its refusal policy even when its body mentions a connection')
+check(not provider.is_rate_limited(VAULT_502_DNS),
+  'while the vault 502 with the same words is still the link case')
 
 -- 2. The policy: unbounded by default, 1 s doubling to a 30 s cap, bounded only on request.
 check(provider.link_wait_is_unbounded(), 'the link wait has no total cap by default')

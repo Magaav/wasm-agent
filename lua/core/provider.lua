@@ -1105,10 +1105,13 @@ local FINAL_TEXT = { "invalid api key", "invalid_api_key", "incorrect api key", 
 
 function M.is_final(problem)
   local text = tostring(problem or ""):lower()
-  -- A dead link is never final: the provider has not judged anything yet.
-  if M.is_link_down(text) then return false end
+  -- The STATUS the server chose is the strongest signal there is, so it is read before any word in
+  -- the body: a 401 whose body happens to mention "connection refused" is still an auth refusal, and
+  -- retrying it would wait forever for a verdict that already arrived.
   local status = text:match("provider_http_(%d+)")
   if status and FINAL_STATUS[status] then return true end
+  -- A dead link is never final: the provider has not judged anything yet.
+  if M.is_link_down(text) then return false end
   for _, pattern in ipairs(FINAL_TEXT) do
     if text:find(pattern, 1, true) then return true end
   end
@@ -1166,9 +1169,11 @@ function M.is_rate_limited(problem)
   local text = tostring(problem or ""):lower()
   local status = text:match("provider_http_(%d+)")
   if not status or not TRANSIENT_STATUS[status] then return false end
-  -- A refusal that names a dead link is not an answer about the provider's health: the request never
-  -- reached it, so the short refusal budget would give up while the link is still down.
-  if M.is_link_down(text) then return false end
+  -- A 5xx that names a dead link is not an answer about the provider's health: the request never
+  -- reached it, so the short refusal budget would give up while the link is still down. Only 5xx is
+  -- downgraded - a 429 means the provider itself answered, and a word in that body must not turn a
+  -- deliberate "slow down" into an unbounded wait for a link that is fine.
+  if status:sub(1, 1) == "5" and M.is_link_down(text) then return false end
   for _, pattern in ipairs(RATE_LIMIT_TERMINAL) do
     if text:find(pattern, 1, true) then return false end
   end
@@ -1274,6 +1279,9 @@ end
 
 function M.is_connection_lost(problem)
   local text = tostring(problem or ""):lower()
+  -- A final STATUS outranks any word in the body here too: a 401 that mentions a refused connection is
+  -- an auth refusal, and waiting for a link that is not the problem would never end.
+  if M.is_final(text) then return false end
   if M.is_link_down(text) then return true end
   for _, pattern in ipairs(CONNECTION_TEXT) do
     if text:find(pattern, 1, true) then return true end
