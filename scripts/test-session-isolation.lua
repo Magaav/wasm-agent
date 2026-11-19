@@ -657,5 +657,31 @@ end
 ok(launch_line ~= '' and not launch_line:find('control=', 1, true),
   'the read-MCP session launch claims no reserved slot: ' .. launch_line:sub(1, 120))
 
+-- ---- item 6 round 4: /health takes the session from the CREDENTIAL, not the query ---------
+--
+-- The route used to answer `?session_id=<anything>` with that session's operations, so the query string
+-- was an identity. `wa_health_scope` decides from the request's own credential: a session it may see, its
+-- own owner's work, or - with no credential at all - the node supervisor's view the sentinel polls.
+local users_lib = dofile('lua/core/users.lua')
+local credential = users_lib.login('master') or ''
+ok(credential ~= '', 'a credential was minted for this test')
+local function scope_of(caller_credential, requested)
+  return decode(wa_health_scope(caller_credential, requested)) or {}
+end
+-- The sentinel's poll: no credential, no session named, the whole node.
+local sentinel_scope = scope_of('', '')
+eq(sentinel_scope.node_wide, true, 'with no credential at all the answer is the node supervisor\'s view')
+-- An authenticated caller naming NO session gets its OWN view, never the node's.
+local own_scope = scope_of(credential, '')
+eq(own_scope.node_wide, false, 'an authenticated caller with no session named is not node-wide')
+ok(tostring(own_scope.owner or '') ~= '', 'and is scoped to its own owner')
+-- A session the credential may see is answered; one it may not is REFUSED BY NAME, never served empty.
+local visible = scope_of(credential, 'iso-session-a')
+eq(visible.session, 'iso-session-a', 'the credential may read a conversation it owns')
+local unknown = scope_of(credential, 'no-such-conversation')
+eq(unknown.refused, 'health_unknown_session', 'an id that names nothing is refused by name')
+local bogus = scope_of('not-a-real-credential', '')
+eq(bogus.refused, 'health_credential_unresolved', 'a credential that does not resolve is nobody, and refused')
+
 print(string.format("%d checks, %d failed", checks, failed))
 if failed > 0 then os.exit(1) end

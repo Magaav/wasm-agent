@@ -1416,10 +1416,18 @@ pub fn health() -> Value {
 /// (session isolation, finding 9). The aggregate is a count: no id, no owner, no session of anybody
 /// else's.
 pub fn health_scope(session: &str) -> Value {
-    // No conversation named IS the node supervisor's own view here, and that is the one place it is: this
-    // is /health, the sentinel's "is anything overdue?" question, not a tool call. A sessionless TOOL caller
-    // is not node-wide (item 7, round 2) - which is why the operation tool does not construct this.
-    let caller = Caller { session: session.to_string(), node: session.is_empty(), owner: String::new() };
+    health_scope_for(session, true, "")
+}
+
+/// The same answer, for the caller the ROUTE decided this request is (session isolation, item 6 round 4).
+///
+/// `node_wide` is not read from the query string any more: `lua/core/server.lua`'s
+/// `wa_health_scope` resolves the request's credential and says which view it may have. A caller with no
+/// credential at all is the node supervisor's own view - the sentinel's "is anything overdue?" question -
+/// and an authenticated caller with no conversation named sees the work under its own owner, never the
+/// node's.
+pub fn health_scope_for(session: &str, node_wide: bool, owner: &str) -> Value {
+    let caller = Caller { session: session.to_string(), node: node_wide, owner: owner.to_string() };
     // The same rule as `list`: only unsettled operations are elsewhere, and one rule serves both.
     let items = manager().list().as_array().cloned().unwrap_or_default();
     let (ops, elsewhere) = split_elsewhere(&caller, &items);

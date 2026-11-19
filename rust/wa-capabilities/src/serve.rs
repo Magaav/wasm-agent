@@ -1112,7 +1112,11 @@ fn core_health() -> serde_json::Value {
     }
 }
 
-fn health_body(session: &str) -> Vec<u8> {
+fn health_body(session: &str) -> Vec<u8> { health_body_for(session, session.is_empty(), "") }
+
+/// The body for the view the caller is entitled to (session isolation, item 6 round 4). `node_wide` and
+/// `owner` come from the CREDENTIAL, decided in Lua; the query string is a wish, not an identity.
+fn health_body_for(session: &str, node_wide: bool, owner: &str) -> Vec<u8> {
     // The aggregate answers one question: *can this node do work?* Work happens on node-thread 0 - runs and
     // every route that changes something - so the aggregate is node-thread 0's age, and a wedged run node-thread is
     // still reported as the node being stalled even while a read node-thread answers reads. Which lane is wedged
@@ -1123,7 +1127,7 @@ fn health_body(session: &str) -> Vec<u8> {
     // asked node-wide, because a wedged operation is the node's problem whoever owns it.
     let operations = crate::operations::health();
     let operation_overdue = operations.as_array().is_some_and(|items|items.iter().any(|s|s["overdue"]==true));
-    let scope = crate::operations::health_scope(session);
+    let scope = crate::operations::health_scope_for(session, node_wide, owner);
     let operations = scope["operations"].clone();
     let age_ms = live_node_thread_ids().into_iter().map(node_thread_age_ms).max().unwrap_or(0);
     let stalled = age_ms >= stall_seconds() * 1000 || operation_overdue;
@@ -3406,8 +3410,15 @@ fn ui_file(ui: &std::path::Path, relative: &str) -> Option<std::path::PathBuf> {
 fn static_reply(ui: &std::path::Path, request: &Request) -> Option<Reply> {
     let (route, _query) = split_path(&request.path);
     if route == "/health" {
-        let session = query_value(&_query, "session_id");
-        return Some((200, "application/json", health_body(session.as_str())));
+        // THE SENTINEL'S POLL, and only that: no credential and no session named is the node supervisor's
+        // own question ("is anything overdue?"), which needs no interpreter. A request that names a
+        // session, or carries a credential, is a CALLER's question and goes to the agent thread, where the
+        // credential is resolved - the query string is not an identity (session isolation, item 6 round 4).
+        let asked = query_value(&_query, "session_id");
+        if asked.is_empty() && header_of(&request.node_headers, "x-wa-session").is_empty() {
+            return Some((200, "application/json", health_body("")));
+        }
+        return None;
     }
     if route == "/version" {
         return Some((200, "application/json", version_body(ui).into_bytes()));
@@ -3576,7 +3587,28 @@ fn dispatch(
 
     let reply = match route.as_str() {
         "/version" => (200, "application/json", version_body(ui).into_bytes()),
-        "/health" => (200, "application/json", health_body(&query_value(&query, "session_id"))),
+        "/health" => {
+            // WHOSE TELEMETRY, DECIDED BY THE CREDENTIAL (session isolation, item 6 round 4). The query
+            // string used to be the identity, so any caller could read any session's operations by
+            // naming it. `wa_health_scope` resolves the request's own credential and answers which view
+            // this request may have: a session it may see, its own owner's work, or - with no credential
+            // at all - the node supervisor's view the sentinel polls.
+            let asked = query_value(&query, "session_id");
+            let decided = call("wa_health_scope", &[session, asked.as_str()]);
+            let parsed: serde_json::Value = serde_json::from_str(&decided)
+                .unwrap_or_else(|_| serde_json::json!({"refused":"health_scope_unreadable"}));
+            if let Some(refused) = parsed["refused"].as_str() {
+                // A refusal is named, never served as an empty view: "nothing is running" and "you may
+                // not see it" are different answers.
+                (403, "application/json", format!(
+                    "{{\"error\":\"{}\",\"note\":\"{}\"}}",
+                    json_escape(refused), json_escape(parsed["note"].as_str().unwrap_or(""))).into_bytes())
+            } else {
+                let scope_session = parsed["session"].as_str().unwrap_or("");
+                (200, "application/json", health_body_for(scope_session,
+                    parsed["node_wide"] == true, parsed["owner"].as_str().unwrap_or("")))
+            }
+        }
         "/models" => (200, "application/json", call("wa_model", &[node.as_str(), session, &query_value(&query,"session_id")]).into_bytes()),
         "/observability/events" => (200,"application/json",call("wa_observability_events",&[&query_value(&query,"id"),&query_value(&query,"cursor"),&query_value(&query,"since"),session,node.as_str()]).into_bytes()),
         "/me" => (200, "application/json", call("wa_me", &[session]).into_bytes()),

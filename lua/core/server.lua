@@ -391,6 +391,42 @@ local function tool_names(role)
   return names
 end
 
+-- WHOSE TELEMETRY THIS IS, decided from the CREDENTIAL (session isolation, item 6 round 4).
+--
+-- /health used to take the conversation from `?session_id=`, so any caller could ask for any session's
+-- operations and be answered: the query string is not an identity. It now takes the credential the request
+-- already carries (x-wa-session) and answers with a DECISION:
+--
+--   * a requested session is shown only when the credential may see it (its owner, or a master);
+--   * with no session named, an authenticated caller gets its OWN view (the work started under its own
+--     owner that named no conversation), never the node's;
+--   * with no credential at all the answer is the node supervisor's own view, which is the sentinel's
+--     route (it polls /health and asks "is anything overdue?" node-wide);
+--   * a credential that does not resolve is nobody, and nobody is refused by name - unknown is not yes.
+function wa_health_scope(credential, requested)
+  local users_lib = dofile('lua/core/users.lua')
+  credential, requested = tostring(credential or ''), tostring(requested or '')
+  local user = credential ~= '' and users_lib.resolve(credential) or nil
+  if credential ~= '' and not user then
+    return json.encode({ node_wide = false, owner = '', refused = 'health_credential_unresolved',
+      note = 'this credential does not resolve, so /health cannot say whose work this is; log in again' })
+  end
+  if requested ~= '' then
+    local record = memory.session_owner(requested)
+    if not record then
+      return json.encode({ node_wide = false, owner = '', refused = 'health_unknown_session', session = requested,
+        note = 'no conversation on this node has that id, so there is no work of its to report' })
+    end
+    if not user or (record.user_id ~= user.id and not users_lib.is_master(user.role)) then
+      return json.encode({ node_wide = false, owner = '', refused = 'health_session_forbidden', session = requested,
+        note = 'that conversation is not yours to read; ask with a credential that owns it' })
+    end
+    return json.encode({ session = requested, node_wide = false, owner = '' })
+  end
+  if not user then return json.encode({ session = '', node_wide = true, owner = '' }) end
+  return json.encode({ session = '', node_wide = false, owner = tostring(user.id or '') })
+end
+
 function wa_me(session)
   local user = users.current(session)
   -- What this caller may actually do here, which on a guest node is the guest tier even though
