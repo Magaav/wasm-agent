@@ -245,3 +245,60 @@ read from `/nonexistent/install/dir/.wasm-agent/build.env` and the backtick comm
 13. `backup periodic: <n> store(s) in <dir> (<m> old removed)` / `backup periodic: interval_not_elapsed`
 14. `fast: <name> SKIPPED (<ms>ms): <reason>` (was `fast: <name> ok` for the same row)
 15. `wa build-env` now reads `<home>/.wasm-agent/build.env` from the user home, not `WA_INSTALL_DIR`
+
+## Round 3 (19/11, review 11:00) — the four MUST defects, and what each proof actually shows
+
+Round 3 rebased onto `ac7717e0` (76 commits behind). The base was measured BEFORE any edit: a full
+`scripts/fast.sh` in a separate worktree of `ac7717e0` was green (`295 checks, 0 failed`,
+`/tmp/node-ops-base`), so anything red on this branch was this branch's. The rebase itself replayed 24
+commits without conflict; the 76 landed commits had moved the prompt tool index, the refusal map and the
+cue table under this branch's `build` tool, and those three rows went red for that reason alone
+(`e0846874` regenerates the cue, the docs and the refusal map; `e091a765` regenerates the map once more
+for the codes item 8 added).
+
+| item | commit | what it now does | proof |
+|---|---|---|---|
+| 1 rollback never leaves a node down | `d4686b10` | the serving unit is DETECTED before anything is stopped (`wa_node_unit` → `UNIT_BEFORE`), the SAME unit is stopped and restarted, and a sentinel that is running but not detected is recorded as the unit to restart | `scripts/test-rollback-verify.sh` case 5: a fake supervisor whose unit is `active` at the start and INVISIBLE once stopped (`MainPID` 0 — exactly the 19/11 shape). It fails on the old order (`stop` then `wa_node_units` → empty → `rollback_unverified`, node down) and passes now: the marker shows `stop <unit>` and `restart <unit>` with the same name, and a NEW serving pid executes the restored file |
+| 2 `rollback ok` only when both halves match | `d4686b10` | `BINARY_VERIFIED` and `LUA_VERIFIED` are set only by the identity checks; the last line is `rollback ok (...)` when both are set and `rollback_unverified: ... binary_not_read_by_this_run / lua_tree_not_compared / no_previous_lua_tree_was_kept ...` otherwise | same test, case 6: a `--no-restart` rollback with no previous tree ends `rollback_unverified` naming BOTH unproven halves; a `--no-restart` rollback that DID restore a tree names the binary half and does not claim the tree was missing |
+| 3 Lua real-home guards compare the user home | `94048cad` | `scripts/lib/scratch-home.lua` is the one rule (the same four refusals as `scripts/lib/scratch-home.sh`), and all four rows call it | `scripts/test-scratch-home-lua.sh` (wired in `scripts/fast.sh:761` and `scripts/test.sh:890`): the real `$HOME`, the real store, anything inside it, anything above it, an empty home and a relative one are refused; a scratch home is accepted |
+| 4 `build_source_dirty` emitted and read | `053af091` | `host.runtime_info` carries `build_source_dirty` from the binary's own build stamp (`BUILD_DIRTY`, set by `rust/wa-host/build.rs`); `lua/core/build_status.lua` reads it and can answer `edited` | `scripts/test-build-status.lua` calls the REAL `host.runtime_info` (not a synthetic table), asserts the field is `true|false|unknown`, and asserts this process — a build of this tree at this commit with uncommitted edits — is graded `edited`. Observed output: `runtime_info names build_source_dirty=true, and this process is graded edited` |
+| 5 `wa test` builds no shell from `%q` | `cb397b87` | `--at` is validated as hex BEFORE any shell exists (`row_at_sha_bad_commit`), and the command is built with single-quote escaping instead of Lua's `%q` | `scripts/test-row-at-sha.sh`: `wa test --at '$(touch …)'` exits 2 with `row_at_sha_bad_commit` and the file the substitution would have created does not exist |
+| 6 restore moves the sidecars with the previous file | `31e6e01f` | the old `-wal`/`-shm` are MOVED to `<source>.pre-restore-<stamp><suffix>` before the restored file lands (never `rm -f`, never after the swap); a journal that reappears is refused by name | `scripts/test-backup-restore.lua`: the `-wal` is gone from beside the store, the kept copy holds the old bytes, and the report names the move |
+| 7 row-at-sha: one ledger per side | `be2563ea` | the base side runs under `$scratch/base/home-<row>` and the change side under `$scratch/change/home-<row>`; both are printed as `base_home=`/`change_home=` | `scripts/test-row-at-sha.sh` refuses equal homes or one inside the other, and requires each under its own side root |
+| 8 LOW: sourced libraries, the record in every entry point, 124 | `94048cad`, `68c0b4a1` | `scripts/lib/row-at-sha.sh` sets `-uo pipefail` only when it IS the program; `deploy.sh`, `mission.sh` and `wa land` run `wa_build_env_audit` and refuse an unknown key by name; a quoted value in the record is unquoted | `scripts/test-build-env.sh` (unknown key stops fast.sh), the deploy/mission/land source assertions in the same test, and `scripts/test-fast-watchdog.sh`, which now proves a command that exits 124 ITSELF comes back 124 with NO watchdog line — the runner reads the watchdog's own line, never the number |
+
+### Mis-measured premises in the brief (re-measured here)
+
+* Item 1 is real and worse than stated: the stop happens BEFORE the detection, so on a sentinel-supervised
+  node the unit it stopped is invisible to `wa_node_units` (`MainPID` 0) and the script refuses without
+  restarting. `scripts/rollback-node.sh:96-99` (base) → `d4686b10`.
+* Item 3's premise was right about the wrong side, but the deeper fact is that the guards could not fail
+  AT ALL: `rust/wa-host/src/main.rs:278` sets `HOME` from `WASM_AGENT_HOME` before any Lua runs, so inside a
+  node `HOME == WASM_AGENT_HOME` by construction. The launcher now records `WA_HOME_BEFORE_OVERRIDE`
+  (`94048cad`) and the guard reads that. Without it a guard comparing `HOME` compares a home with itself.
+* Item 4's report line said a dirty build at the same commit reads `edited`; the binary did not expose the
+  fact, so `build_status` could never produce that verdict from a real build. `053af091` makes it real and
+  the row proves it end to end.
+* Item 8's "base side uses the change tree's watchdog lib" is not the code's shape: `wa_row_at_sha_run`
+  resolves the watchdog from `$root`, and `ac7717e0` has no `scripts/lib/fast-watchdog.sh` at all (the
+  branch adds it), so the base side runs without one and the row's log SAYS so. Kept as is, measured.
+
+### The full fast path, quoted
+
+`HOME=$SCRATCH TMPDIR=$SCRATCH CARGO_TARGET_DIR=/home/victor/wasm-agent/target/m-node-ops WA_FAST_JOBS=4 bash scripts/fast.sh`
+— run in a scratch home outside the operator store, on this node (avell).
+16. `rollback-node: the node is served by %s; it is stopped for the swap and the same unit is restarted after it`
+17. `rollback-node: the unit %s did not stop; the swap is still safe, the restart below is not`
+18. `rollback-node: the unit %s was stopped for the swap and --no-restart was given; start it when you mean to, then check it with: readlink -f /proc/<pid>/exe` (was `the supervisor was stopped …`)
+19. `rollback-node: rollback ok (binary and Lua tree both verified: serving pid %s executes %s, and lua-core is %s)`
+20. `rollback-node: rollback_unverified: the pair WAS restored and these are the parts this run could NOT prove: %s`
+21. `binary_not_read_by_this_run (no serving pid was proven to execute %s); ` / `lua_tree_not_compared; ` / `no_previous_lua_tree_was_kept (the tree beside this binary is whatever the last install put there, and this run did not compare it); ` / `there is no systemd user session here, so no unit was restarted and no serving pid was read` / `--no-restart was given, so no unit was restarted and no serving pid was read`
+22. `wa test: refused(row_at_sha_bad_commit): --at %s is not a commit sha (hex digits only); nothing was run`
+23. `moved the stale %s aside to %s` (restore journal note, `%s` = `-wal`/`-shm`)
+24. `refused(restore_journal_move_failed)` / `refused(restore_journal_reappeared)` (restore refusals; the detail names the journal and the previous store)
+25. `pre-commit`/entry-point refusal: `refused(build_env_key_unknown): the build record names a setting no build reads (the refusal above names it); remove that line or add it to WA_BUILD_ENV_KEYS with the face that consumes it` (deploy.sh)
+26. `the build record names a setting no build reads; remove that line, or add it to WA_BUILD_ENV_KEYS with the face that consumes it` (mission.sh)
+27. `refused(build_env_key_unknown): the build record names a setting no build reads` (wa land, per gate shell)
+28. `host.runtime_info` field `build_source_dirty` (model-facing: the build tool's answer now names it)
+29. `REFUSED %s: WASM_AGENT_HOME is the real %s; its store would BE %s - a row given the user home writes the operator node` / `… is the real store %s; a row must never act on it` / `… is inside the operator store %s` / `… contains the operator store %s; a home above the store is the same store` / `… is not an absolute path, so where it points depends on the caller cwd` (scripts/lib/scratch-home.lua, all four rows)
+30. `node` env marker `WA_HOME_BEFORE_OVERRIDE` (set by `wa` when `WASM_AGENT_HOME` replaces `HOME`; read by the Lua guard)
