@@ -341,3 +341,26 @@ for the codes item 8 added).
   `scripts/lib/release-signing.sh`, `scripts/test-fast-rows.sh`) are converted, and the rest are named here
   as the same class rather than claimed fixed.
 
+
+### The full fast path, measured (this tree, this node)
+
+```
+$ TMPDIR=$B HOME=$B/home CARGO_TARGET_DIR=/home/victor/wasm-agent/target/m-node-ops \
+    WA_FAST_JOBS=4 bash scripts/fast.sh
+fast: binary /home/victor/wasm-agent/target/m-node-ops/release/wa (build 26a09757…, tree 26a09757…, fresh: built from this tree)
+…
+fast result ok (312 checks, 0 failed, 0 skipped)
+fast path ok (312 checks, 0 skipped, 690s)
+```
+
+- `HOME=$B/home` and `TMPDIR=$B` are a scratch home OUTSIDE the operator store (`scripts/lib/scratch-home.sh`
+  refuses anything else), and `$B` is under `/tmp` because `scripts/test-session-isolation.lua` requires a
+  home whose path names `scratch`, `tmp` or `temp`.
+- Base for comparison: a separate worktree of `ac7717e0` (`/tmp/node-ops-base`, no stash) ran the same
+  command green at **295 checks, 0 failed, 269s** BEFORE any edit of this round, which is what makes the
+  six red rows the rebase produced this branch's, not the base's.
+- The run before this one (same tree, before the last two fixes) was `1 of 312 failed`
+  (`publish-artifacts`, the SIGPIPE race) and the one before that `3 of 312` (load); every remaining failure
+  in this round was traced to a measured cause and fixed there, or classified `pre_existing` by `row-at-sha`
+  (`scripts/test-harness-evaluator-replay.lua`: base exit 1, change exit 1).
+
