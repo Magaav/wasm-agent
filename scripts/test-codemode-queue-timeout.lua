@@ -34,6 +34,27 @@ for index = 1, 6 do
   check(type(started.operation_id) == 'string', 'slot ' .. index .. ' was taken: ' .. json.encode(started):sub(1, 160))
   running[#running + 1] = started.operation_id
 end
+-- The six workloads must be OBSERVABLY holding their slots before the ninth call can queue. `start`
+-- answers its receipt BEFORE the supervisor takes a slot: Slot::acquire runs in the spawned thread,
+-- after admission is recorded (rust/wa-operation/src/lib.rs, `one admission path`). So a returned
+-- receipt is not a taken slot, and the six starts above can still be seconds from running. Measured
+-- 19/11 on the merged tree: with the slots unwitnessed this row was `accepted` (running) instead of
+-- queued and failed inside the loaded fast run, while passing alone and 8-way in parallel.
+local function slots_held()
+  local held = 0
+  for _, id in ipairs(running) do
+    local state = dispatch('operation', { action = 'status', id = id })
+    if type(state) == 'table' and tostring(state.state) == 'running' then held = held + 1 end
+  end
+  return held
+end
+local waited_ms = 0
+while slots_held() < #running and waited_ms < 20000 do
+  if host.sleep then host.sleep(50) end
+  waited_ms = waited_ms + 50
+end
+check(slots_held() == #running, 'the six workloads hold their slots before the ninth asks for one ('
+  .. slots_held() .. ' of ' .. #running .. ' running after ' .. waited_ms .. ' ms)')
 local sid_b = memory.start_session('', 'queued op times out two', { user_id = 'master', id = 'iso-queue-timeout-b' })
 local ctx_b = { session_id = sid_b, user_id = 'master' }
 local function dispatch_b(name, args, raw) return tools.dispatch(memory, name, args, 'master', ctx_b, raw) end
