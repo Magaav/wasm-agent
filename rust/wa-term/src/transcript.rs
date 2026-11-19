@@ -1636,6 +1636,7 @@ mod tests {
         let started = std::time::Instant::now();
         let narrow = t.view(60, 40);
         let resized = started.elapsed();
+        println!("repaint: 240 messages, first view {warm:?}, after a resize {resized:?}");
         assert!(!first.is_empty() && !narrow.is_empty(), "both views drew");
         // Generous next to the 150 ms debounce, and tight enough to catch a per-message re-layout
         // that re-wraps the whole chat more than once.

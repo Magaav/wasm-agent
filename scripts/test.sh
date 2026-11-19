@@ -271,6 +271,11 @@ gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-te
 # The live region (TUI polish 2, items 1-3): every row it draws is one SCREEN row at 60/80/120/200
 # columns - a 300-column code line included - and twenty ticks of the running call move nothing.
 gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-term --test live_region
+# The transcript is the chat itself: item G's repaint-from-state (a chat resized 120 -> 60 -> 120 is
+# the view a session at that width shows, and a 240-message chat repaints inside the 150 ms debounce),
+# and item I's phase-0 rule (a fence card written into a still-open line is glued unless the line is
+# closed first, and the copy marker then points one row early).
+gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-term transcript::tests
 # The graph is a capability the agent navigates its own code with, so its extractor and
 # incremental reindex are part of the contract, not a side project.
 gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-graph

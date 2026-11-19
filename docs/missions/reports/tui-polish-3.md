@@ -184,3 +184,206 @@ caused by this mission:
   `footer_draw` hands `colour_ball` the row text and the host clips by CELLS with escapes counting
   zero - existing behaviour this commit does not change - but I did not run a terminal capture.
 
+---
+
+# tui-polish-3, round 2 - the run row says when, the bubble wraps at spaces, a band paints with EL
+
+Base: origin/main `ac7717e0`, rebased before any edit (`git rebase origin/main` answered "up to date").
+Every claim below names the commit that implements it. Round 1's two commits (`8bc48e37`,
+`419ec9b4`) are untouched by this round.
+
+| item | what Victor asked for | commit |
+| --- | --- | --- |
+| A | a SIGMA on both session totals | `8c63b62a` |
+| B | a finished run appends ` · 🄬HH:MM`; a failed one keeps the row without it | `3cf4bf22` |
+| C | the turn block stays in the answer, no dim row | round 1 `419ec9b4` (verified, nothing to change) |
+| D | wrap at the last space, not mid-word - one wrapper | `c094a20d` |
+| E | the bubble takes its width at render time | `54525ab6` |
+| F | backgrounds paint with EL, never pad spaces | `54525ab6` |
+| G | a resize repaints the whole chat from state, debounced | `4c0259ba` |
+| H | the run row is THIS RUN only; totals live in the footer | `b4cf075e` |
+| I | the fence card is in step (phase 0 first) | `68444949` |
+
+## A - a SIGMA on both totals (`8c63b62a`)
+
+`M.session_summary` now writes the sigma before the down arrow as well:
+```text
+before: 👐1 Σ↑9.5k ↓851 🪟0.5%/1.0M 🆼42.99%
+after : 👐1 Σ↑9.5k Σ↓851 🪟0.5%/1.0M 🆼42.99%
+```
+The two arrows were already TEXT and already glued to their number; the sigma says the pair are the
+session's two SUMS, which is what the footer means. Test: the composed row is compared whole, and two
+further checks count the sigmas (exactly 2) and prove every arrow on the row carries one - so a bare
+arrow anywhere fails (`scripts/test-cli-view.lua`).
+
+## B - a finished run says WHEN (`3cf4bf22`)
+
+`M.run_numbers` takes a third argument, `finish`, and appends ` · 🄬 HH:MM` only when
+`finish.ok`. `M.finish_time` is the one place the hour is formatted (`os.date("%H:%M", epoch)` - the
+reader's own zone, measured on this node: local 07:23 against UTC 10:23). `METHODS:answered` hands
+`{ ok = true, at = self.now() }`; `METHODS:failed` hands `{ ok = false }`.
+
+```text
+in flight: 🍺 3·3s Δ↑0 ↑9.5k ↓851 🔛 0:25
+finished : 🍺 3 Δ↑0 ↑9.5k ↓851 🔛 0:25 · 🄬 07:20
+failed   : 🍺 3 Δ↑0 ↑9.5k ↓851 🔛 0:25
+```
+Tests: both rows are rendered and asserted (the finished row is the bare row plus the stamp, the stamp
+follows the elapsed clock, the local hour is not the UTC hour, a missing clock prints nothing), and the
+WIRING is asserted separately on the two paths, so what each caller says is checked and not only how
+the row is drawn.
+
+## C - the turn block (`419ec9b4`, verified)
+
+`turn_journal.split` parses and returns the text unchanged, `M.turn_note_line` and
+`METHODS:turn_notes_flush` are gone. Re-measured this round: `grep -n 'turn_note_line|turn_notes_flush'`
+over `lua/` answers nothing. **No change was needed and none was made.**
+
+## D - one wrapper, breaking at spaces (`c094a20d`)
+
+`codemode_block.wrap` used to cut at the exact cell. It now walks the text one CHARACTER at a time
+(with its byte width, so a multi-byte character is never split), takes the last space that fits on the
+row, and breaks there - swallowing the space, because the space IS the break. It goes inside a word
+only when that word alone is wider than the row (a URL).
+
+```text
+60 cols, before: [preciso que a anotacao na linha aqui seja quebrada nas pal] [avras e nao ...]
+60 cols, after : [preciso que a anotacao na linha aqui seja quebrada nas] [palavras e nao no meio dela]
+```
+Every wrapped prose component already went through this one function (the bubble in
+`METHODS:accepted`, the code band in `codemode_block.rows`), so the rule and the fix are one place.
+Tests: long Portuguese text at 60/80/120 - every row is a slice of the original, every break falls on
+a space, every row fits - plus the long-word case and the single-row case. The committed code-mode
+snapshot changed in exactly four lines, all of them a break moving from mid-token to a space.
+
+## E - the bubble takes its width at render time (`54525ab6`)
+
+`METHODS:accepted` calls `self:refresh_limit()` before it wraps, the same read every other framed
+component makes (round 1's resize wiring). **A scrollback row that is already printed cannot be
+reflowed** - the terminal owns those characters - so there is no full-screen redraw in this path; the
+repaint on resize is item G's, and it redraws from state rather than reflowing bytes.
+
+## F - a background paints with EL, not with spaces (`54525ab6`)
+
+What was wrong: a band padded its rows to the screen with SPACES, and padding is characters, so a
+narrower terminal re-wraps them - which is the ragged block in Victor's 11:20 screenshot.
+
+* The code band (`codemode_block.rows`) and the user-message bubble (`METHODS:accepted`) now set the
+  background colour, print the text, and emit EL (`ESC[K`), which erases in the CURRENT background
+  and stops at the screen edge whatever the width is. No row carries trailing blanks at all.
+* The band keeps its colour open after the EL on purpose: the host draws a code block's copy icon on
+  that right-hand cell and it must wear the band, not the terminal default. `icon_at_band_end`
+  (`rust/wa-term/src/transcript.rs`) places it by column on a row that ends with EL, because there is
+  no blank cell left to take - so the affordance survived the padding it used to sit in.
+* The native input box (`rust/wa-term/src/terminal_editor.rs`) never padded: it draws each row with
+  `ESC[2K` first and then the row's own text, and its box is a border of `─` characters, not a
+  background. Measured by reading `render` and its border tests; nothing to change there.
+* The notices (`METHODS:session_draw`) have no background role at all - the notice is a coloured
+  FOREGROUND on the terminal's own background - so there is no pad to remove. Measured, not assumed:
+  `grep 'string.rep(" ", ' lua/core/cli_view.lua` answers nothing.
+
+Tests: the emitted bytes of a bubble row end with `ESC[K` and hold no pad space before it; the band's
+rows carry no pad before the erase and end on their last character; and the committed code-mode
+snapshot's band rows lost their trailing blanks (110 changed lines, every one of them a pad).
+
+## G - a resize repaints the whole chat from state (`4c0259ba`)
+
+The host already re-lays-out its frame on a size change, and the transcript is drawn from its own
+block state, so what was missing was the terminal hygiene and the guarantee:
+
+* `resize_console` sets `repaint_after = now + 150 ms`; `repaint_if_due`, called from the idle reader
+  loop, clears the screen AND the scrollback (`ESC[2J ESC[3J ESC[H`) once the burst has been quiet for
+  the debounce, then draws the whole transcript again at the new width. Old bubbles, code blocks and
+  boxes come back correctly sized in both directions. EL (item F) is what holds the picture together
+  inside the 150 ms interval.
+* Cost, measured on this node (`cargo test --release -p wa-term a_long_session -- --nocapture`, 240
+  messages): first view at 120 columns **2.06 ms**, the same chat re-wrapped at 60 columns **575 µs**.
+  The draw wraps only what is on screen; nothing re-lays-out per message.
+
+Test: a 12-message chat rendered at 120, shrunk to 60 and widened back to 120 is compared against a
+FRESH transcript built from the same writes at each width, and the two widths are asserted to differ so
+the comparison is not vacuous.
+
+## H - the run row is this run only (`b4cf075e`)
+
+```text
+before: 🍺 2·5s Δ12.3k ↑4.6M ↓310 🔛 1:51      (delta, then the SESSION input total)
+after : 🍺 2·5s Δ↑12.3k ↓310 🔛 1:51            (what THIS run sent and received)
+```
+The session's two sums are the footer's (item A) and no number is printed on both rows. Three older
+assertions that pinned the old pair were REWRITTEN, not deleted: the editor's running row, the later
+run's row, and the first-step row. The item H test additionally asserts the OLD pair is absent, so a
+regression to the old shape fails on its own words and not only on a count.
+
+## I - the fence card is in step (`68444949`)
+
+**Phase 0 first.** `markdown.lua:636-675` builds the rows correctly - so I reproduced one level below
+it, in a Rust test that dumps what the host actually stores and draws for these exact inputs
+(`a_card_written_into_an_open_line_is_glued_unless_the_line_is_closed_first`). The cause:
+
+* The prose before a fence is written with NO final newline, so its line stays OPEN (the next delta
+  continues it).
+* `Transcript::write` appends a write's first segment to an open last line - so the card's top border
+  was GLUED onto the paragraph: `⏺ Para:┌─`.
+* The copy marker counts lines OF THAT WRITE (`copyable`), so with the first line swallowed by the
+  prose every later marker pointed one row early - which is the icon where the title row should be,
+  the empty bar, and the code line without its bar in Victor's screenshot.
+
+The fix is in `METHODS:markdown`: the line is closed BEFORE the marker is handed over, so the card
+starts its own row and the marker counts the card's own rows.
+
+Tests (all in the gate): the Rust rule above (glued without the fix, and with it the prose keeps its
+row, the title is its own row, the code bar sits directly under it, the copy icon is on the TITLE row);
+and a Lua render test over the three shapes Victor named - untagged one line, tagged css three lines,
+and a fence that opens the answer - at 60/80/120 columns, asserting the card has a top, one bar per
+code line and a bottom, the bar directly under the title, the paragraph above and NOT glued to the
+border, and the copy marker landing on the title row.
+
+## Where the tests are wired
+
+| suite | wired at |
+| --- | --- |
+| `scripts/test-cli-view.lua` (A, B, D, F, I render tests) | `scripts/test.sh:1741` and `:1747` (reserve fixture) |
+| `scripts/test-cli-resize.lua` (F's pad-free band, then reflow) | `scripts/test.sh:1758` |
+| `scripts/test-codemode-blocks.lua` (the committed band snapshot) | run by the gate's code-mode block section |
+| `rust/wa-term` `transcript::tests` (G's repaint and budget, I's phase-0 rule) | **added this round** at `scripts/test.sh:278` |
+
+What I ran, this node: `test-cli-view` 573 ok, `test-cli-resize` 73 ok, `test-codemode-blocks`
+40 ok, `test-markdown` 102 ok, `cargo test --release -p wa-term` 164 ok, `-p wa-capabilities` 340 ok.
+The binary is rebuilt from this tree's Lua and Rust (`WA_CODEMODE_ALLOW_EMPTY=1 cargo build --release -p
+wa-host`), and the Lua suites run with `WASM_AGENT_LUA_ROOT` pointed at the worktree.
+
+## Pre-existing failures
+
+Round 1 named two, measured on a base worktree: `scripts/test-context-usage.lua` ("
+no actual summary, and no attempted request, at threshold equality") and
+`scripts/test-prompt-layers.lua` ("read is native main-loop bootstrap"). This round did not run those
+two suites and did not touch either file, so their state is UNCHANGED and UNVERIFIED here - they are
+not claimed fixed and not claimed broken.
+
+Two suites I tried are unrunnable on this node for reasons that are not this round's:
+`test-codemode-presentation` refuses ("actual native helper available") and `test-codemode-friction`
+refuses (`codemode_not_enabled`): both need code-mode assets this build was made without
+(`WA_CODEMODE_ALLOW_EMPTY=1`). Named, not skipped silently.
+
+## Texts to approve (new or changed, verbatim)
+
+1. The run row while a run is in flight (changed by H):
+   `🍺 2·5s Δ↑12.3k ↓310 🔛 1:51`
+2. The row a FINISHED run leaves, with the local finish hour (new, B+H):
+   `🍺 2 Δ↑12.3k ↓310 🔛 0:25 · 🄬 18:47`
+3. The row a FAILED run leaves (unchanged, deliberately without the check):
+   `🍺 2·5s Δ↑12.3k ↓310 🔛 1:51`
+4. The session footer (changed by A):
+   `👐1 Σ↑9.5k Σ↓851 🪟0.5%/1.0M 🆼42.99%`
+
+## What I did NOT do
+
+* I did not run the whole `scripts/test.sh` gate (a cold gate compiles the workspace and runs the fleet
+  proofs). I ran the five suites above plus the two Rust crates, and wired the new Rust tests into the
+  gate so a gate run includes them.
+* I did not push, tag or land anything. Nine commits are local on `change/tui-polish-3`.
+* I did not capture a live terminal frame of the items I touched: the render assertions read the bytes
+  the view emits and the rows the host draws, not a photograph of a terminal.
+* I did not reproduce item F's shrink in a real pty. The property is asserted on the emitted bytes and
+  on the stored rows; a pty capture would be a second, stronger witness and is not here.
