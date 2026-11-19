@@ -260,6 +260,10 @@ read from `/nonexistent/install/dir/.wasm-agent/build.env` and the backtick comm
 28. `host.runtime_info` field `build_source_dirty` (model-facing: the build tool's answer now names it)
 29. `REFUSED %s: WASM_AGENT_HOME is the real %s; its store would BE %s - a row given the user home writes the operator node` / `… is the real store %s; a row must never act on it` / `… is inside the operator store %s` / `… contains the operator store %s; a home above the store is the same store` / `… is not an absolute path, so where it points depends on the caller cwd` (scripts/lib/scratch-home.lua, all four rows)
 30. `node` env marker `WA_HOME_BEFORE_OVERRIDE` (set by `wa` when `WASM_AGENT_HOME` replaces `HOME`; read by the Lua guard)
+31. `nodes probe bound ok: <n> unreachable peers probed in <ops> operation(s) from <gens> process generation(s), pids.peak <p> (bound <P>), memory.peak <m> MB (bound <M> MB)`
+32. `FAIL test-nodes-probe-bound: <n> process generations started probe children (bound <b>); <n> supervised operations for <n> peers (bound <b>); pids.peak <n> (bound <b>); memory.peak <n> MB (bound <b> MB); - the probe fan-out is growing again (19/11: 1,653 processes and 23 GB)`
+33. `SKIP test-nodes-probe-bound: <reason>` (no `systemd-run`, no cgroup `pids.peak`/`memory.peak`, no node, no python3, no `wa` binary)
+34. `REFUSED test-nodes-probe-bound: <reason>` (no scratch home, no stub port, no counters printed)
 
 ## Round 3 (19/11, review 11:00) — the four MUST defects, and what each proof actually shows
 
@@ -309,11 +313,33 @@ The orchestrator's first task was to find which command took this node from 6 GB
   as a probe child, so the next M.list() fans out again`; on this tree it passes.
 
 **What this does NOT claim.** No run of this tree reproduced the 23 GB: the fix makes the growth structural
-impossible and the row proves the fan-out is gone, rather than replaying the collapse. Two things are named
-and NOT fixed: (a) the fast path asserts no MEMORY CEILING — a row that grows is caught by the operator, not
-by the suite, so the 6 GB cap the orchestrator names is still a rule and not a check; (b) a probe child
-OUTLIVED the run that started it (`out.log:70425` lists them after the run ended), so a supervised child
-whose parent dies is still not cancelled by anyone but the parent.
+impossible and the row proves the fan-out is gone, rather than replaying the collapse.
+
+**The ceiling is a check now, not a rule (commit `3fd1d1d9`).** The orchestrator asked for a bound, and a
+bound on the CODE ("does it ask to fan out?") is not a bound on the MACHINE. `scripts/test-nodes-probe-bound.sh`
+runs six unreachable peers against a stub rendezvous inside a memory-accounted systemd user scope and reads
+the scope's own cgroup counters afterwards: `pids.peak` (the most processes alive at any moment),
+`memory.peak` (the most bytes charged to them), and the operation records, whose `owner_process_id` says how
+many process GENERATIONS started probing. Measured on this node, both sides in the same shape:
+
+| tree | generations | operations | pids.peak | memory.peak |
+|---|---|---|---|---|
+| this tree | 1 | 6 | 18-20 | 134-135 MB |
+| `c31f9ab6^` (pre-fix `lua/core/nodes.lua`) | 17-22 | 100-129 | 77-82 | 1,214-1,297 MB |
+
+The bounds sit between the two (1 generation, 6 operations, 40 pids, 512 MB), so the row is not one that can
+only pass; on the old tree it is RED with
+`FAIL test-nodes-probe-bound: 17 process generations started probe children (bound 1); 100 supervised
+operations for 6 peers (bound 6); pids.peak 82 (bound 40); memory.peak 1214 MB (bound 512 MB)`.
+Wired in `scripts/fast.sh:781` and `scripts/test.sh:914`. A machine with no cgroup v2 counters (macOS,
+Windows, no user session) prints `SKIP test-nodes-probe-bound: <the reason>` - a named skip, never a
+silent pass - and the row also FAILS when the roster it probed does not name the six peers, so a green bound
+cannot mean "the stub was never reached". `WA_PROBE_BOUND_LUA_ROOT` is what points the run at another
+`lua/` tree; that is how the red half was produced, and an ordinary run never sets it.
+
+**Still named and NOT fixed:** a probe child OUTLIVED the run that started it (`out.log:70425` lists them
+after the run ended), so a supervised child whose parent dies is still not cancelled by anyone but the parent.
+The new row bounds ONE run's fan-out; it does not reclaim an orphan.
 
 ### Mis-measured premises in the brief (re-measured here)
 
