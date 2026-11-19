@@ -98,3 +98,38 @@ Two more measured fixes came out of this round:
 The E3 arm's known hole is visible in the smoke history: on its first attempt it wrote bare prose
 before its tags and was refused by name, which is exactly the rule it was given; a second attempt
 acted and finished.
+
+## The matrix: 90 rows, complete
+
+runs.jsonl holds 6 arms x 5 tasks x 3 runs = 90 rows, interleaved, one fresh scratch home and
+session per run. Every row carries all the fields the protocol names; no row has an error, a criterion
+crash or an empty session. 75 runs exited 0 and 15 exited 1 (the tag arms' named failure, below).
+
+### One criterion was wrong and the rows were re-scored, not re-run
+
+The T3 criterion required a ranking formatted as "1." at the start of a line. Models that ranked with
+a markdown header ("## 1. ...") or bold ("**1. ...**") were scored as unranked although their answers
+did rank three repositories - a defect in my checker, not in the model. It was found by reading one
+stored answer, not by guessing.
+
+The rows were re-scored from the answers already stored in each run's own memory.db, never
+re-generated: success_before_regrade keeps the original score beside the new one, and regraded says
+which rows moved and why. 10 T3 rows changed, all from 0 to 1, each with three distinct repository
+URLs and a numbered header or a bold number. The pattern was checked against two real answers
+before the re-score was trusted.
+
+No other task's criterion reads formatting, so no other row was touched.
+
+### Raw per-arm totals (not a verdict)
+
+| arm | success | executed | rounds | input tok | output tok | silent | premature |
+|---|---|---|---|---|---|---|---|
+| A fence | 14/15 | 52 | 100 | 139994 | 58475 | 0 | 3 |
+| B run | 15/15 | 67 | 126 | 297419 | 68132 | 0 | 1 |
+| C codemode | 15/15 | 49 | 97 | 164244 | 52383 | 0 | 3 |
+| D bash | 15/15 | 82 | 118 | 178512 | 60054 | 0 | 2 |
+| E2 tags | 10/15 | 62 | 98 | 225221 | 44779 | 0 | 5 |
+| E3 tags | 9/15 | 87 | 118 | 469024 | 55594 | 0 | 8 |
+
+These are sums over the 15 runs of each arm. The verdict is the orchestrator's to build from the raw
+rows; nothing here decides it.
