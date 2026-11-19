@@ -440,6 +440,28 @@ local changed7, called7 = count_gate_call(done_gate, s7)
 local changed8, called8 = count_gate_call(done_gate, s8)
 ok(changed7 == 1 and called7 == 0, string.format('the unchecked turn counts once and not as a call: %d/%d', called7, changed7))
 ok(changed8 == 1 and called8 == 1, string.format('the checked turn counts once and as a call: %d/%d', called8, changed8))
+-- Review r1, fix 2: a RE-ENTERED run is ONE turn. This run records a failing check, is re-entered
+-- with the failing output, and only then passes - the shape that used to write a second event at the
+-- second candidate answer. The counter must still see one state-changing turn, not two, and the latch
+-- name is asserted from the module so a rename cannot make this pass silently.
+local s9 = session("reentered")
+drop("s9.txt")
+requests = {}
+answers = {
+  calls({ { "done_criteria", { action = "capture", checks = {
+    { command = present("s9.txt"), why = "the artifact exists" } } } } }),
+  final("Phase 1 is done."),
+  calls({ { "write", { path = missing("s9.txt"), content = "ok" } } }),
+  final("Done, and the check passes."),
+}
+local reply9 = run(s9, "Fix the s9 path and prove it")
+ok(reply9 == "Done, and the check passes.", "the re-entered run answers: " .. tostring(reply9))
+local events9 = gate_events(s9)
+ok(#events9 == 1, "a run that re-entered once still writes ONE counted event: " .. #events9)
+ok(events9[1] and events9[1].called_done_criteria == true, "and it says the run captured its checks")
+local changed9, called9 = count_gate_call(done_gate, s9)
+ok(changed9 == 1 and called9 == 1, string.format("so the re-entered run counts once: %d/%d", called9, changed9))
+
 local stats = dofile('lua/core/turnfeed.lua').gate_stats({})
 ok(stats.changed >= 2 and stats.called >= 1, string.format('the counter sees both turns: %d changed, %d called',
   stats.changed, stats.called))

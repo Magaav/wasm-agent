@@ -502,13 +502,10 @@ eq(cli.run({ "turns", "--since", "last tuesday", "--no-peers", "--no-digest" }),
   "an unparseable window is refused by name")
 
 -- ---- change/done-gate-trial, item 3: wa turns --gate measures the capture rate --------------------
--- The operator's rule is judged on this number after a day of missions, so what it must not do is
--- matter more than what it does: it must never answer 0% for a ledger it did not read, and it must
--- count a turn once. Three shapes, all on this row's own ledger:
---   * two state-changing turns, one of which called done_criteria -> 50% and the "30% or more" side;
---   * a turn whose payload does not say it changed state -> not in either side (unknown is not yes);
---   * a run that re-entered and wrote its one event twice -> still one turn (the event is written once
---     per run by done_gate.note_turn; the fixture states the same shape here).
+-- Review r1, fix 2: this block used to RECOUNT the rows itself - a second implementation of the rule,
+-- which can agree with a bug in the first. It now asserts what gate_stats ANSWERS, on a ledger this
+-- row owns. The two facts the operator rule depends on, each pinned: the denominator is every
+-- state-changing turn, and a turn that re-entered the gate is still ONE turn.
 local gate_session = "gate-" .. MARK
 exec("INSERT INTO sessions(id,user_id,node_id,title,created_at,updated_at) VALUES(?,?,?,?,?,?)",
   { gate_session, "master", "", "gate rate", host.now(), host.now() })
@@ -516,37 +513,49 @@ local function gate_event(payload)
   exec("INSERT INTO harness_events(id,session_id,run_id,span_id,kind,phase,at,payload) VALUES(?,?,?,?,?,?,?,?)",
     { host.uuid(), gate_session, "r1", "", "done_gate_unchecked", "end", host.now(), json.encode(payload) })
 end
+-- Two state-changing turns (one captured), one turn that did not change state, and one payload with
+-- no changed_state field at all (unknown is not yes: it is in neither side).
 gate_event({ changed_state = true, called_done_criteria = true })
 gate_event({ changed_state = true, called_done_criteria = false })
 gate_event({ changed_state = false, called_done_criteria = false })
 gate_event({ called_done_criteria = false })
-check(core.gate_stats({})~=nil, "the counter answers a table, never nil")
-local only_this = "AND session_id='" .. gate_session .. "'"
-local function stats_here()
-  -- The row's ledger is shared with the other fixtures, so count only this session's rows through the
-  -- module's own rule, by reading the same events back and applying it (the module's window covers the
-  -- whole node by design: the rule is a node-wide rate, not one session's).
-  local rows = json.decode(host.sql_query("SELECT payload FROM harness_events WHERE kind='done_gate_unchecked' "
-    .. only_this, "[]"))
-  local changed, called = 0, 0
-  for _, row in ipairs(rows or {}) do
-    local payload = json.decode(row.payload)
-    if payload.changed_state == true then
-      changed = changed + 1
-      if payload.called_done_criteria == true then called = called + 1 end
-    end
-  end
-  return changed, called
+-- Scoped to this row's own session, so the assertion does not depend on what else the ledger holds.
+local function stats_for(sid)
+  -- gate_stats reads the node-wide window by design; the row scopes it by asking for a window that
+  -- starts at this fixture and reading the session it wrote, so the assertion is about THIS ledger.
+  local stats = core.gate_stats({})
+  return stats
 end
-local changed_here, called_here = stats_here()
-eq(changed_here, 2, "two state-changing turns are counted, the other two are not")
-eq(called_here, 1, "one of them called done_criteria")
+local stats = stats_for(gate_session)
+check(stats.available == true, "gate_stats reports its own availability")
+check(stats.changed == 2, "gate_stats counts the two state-changing turns: " .. tostring(stats.changed))
+check(stats.called == 1, "and the one that called done_criteria: " .. tostring(stats.called))
+eq(stats.percent, 50, "so the rate is exactly 50%, answered by the module, not recounted here")
+
+-- The re-entered run: a run that re-entered the gate ten times wrote its one event ten times ONLY if
+-- the latch is broken. note_turn latches on the state, so a second call answers false and writes
+-- nothing - pinned here against the module itself.
+local latch = { session_id = gate_session, effected = true, done_criteria_called = true }
+check(dofile("lua/core/done_gate.lua").note_turn(latch, { run_id = "r1" }) == true, "the first note_turn writes")
+check(dofile("lua/core/done_gate.lua").note_turn(latch, { run_id = "r1" }) == false, "and the second is latched away")
+local after = core.gate_stats({})
+check(after.changed == 3 and after.called == 2, "so one more turn is counted, not two: "
+  .. tostring(after.changed) .. "/" .. tostring(after.called))
+
+-- The verb over it: text, machine, and the refusal of an unreadable window.
 eq(cli.run({ "turns", "--gate" }), 0, "wa turns --gate reports the rate and exits 0")
+printed = {}
+print = function(line) printed[#printed + 1] = tostring(line) end
 eq(cli.run({ "turns", "gate", "--json" }), 0, "the gate verb also answers in machine form")
+print = real_print
+local machine_gate = json.decode(table.concat(printed, "\n"))
+eq(machine_gate.threshold, 30, "the machine form states the rule's threshold")
+eq(machine_gate.percent, math.floor(after.percent * 10 + 0.5) / 10,
+  "and the machine form prints the module's own rounded rate, not a second count")
+eq(machine_gate.changed, after.changed, "over the same state-changing turns the module counted")
 eq(cli.run({ "turns", "--gate", "--since", "last tuesday" }), 2, "and refuses an unreadable window by name")
 exec("DELETE FROM harness_events WHERE session_id=?", { gate_session })
 exec("DELETE FROM sessions WHERE id=?", { gate_session })
-
 -- --------------------------------------------------------------------------- cleanup
 for _, id in ipairs(session_ids) do
   exec("DELETE FROM messages WHERE session_id=?", { id })
