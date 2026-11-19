@@ -1384,6 +1384,10 @@ const RESERVED_LANES: usize = 64;
 fn is_priority_lane(path: &str) -> bool {
     path == "/relay/poll"
         || path == "/relay/respond"
+        // /register is the node's heartbeat. Without it the registry forgets the node, so it is a lane
+        // that must never starve - and the binding tick returns before its poll when it fails, which is
+        // the 19/11 deadlock in miniature (review MUST 3).
+        || path == "/register"
         || path.starts_with("/bindings/")
         || path == "/lookup"
         || path == "/health"
@@ -1473,10 +1477,13 @@ mod relay_tests {
     /// The lanes that must never starve, and the ones that may be shed to protect them.
     #[test]
     fn the_priority_lanes_are_the_ones_that_let_an_answer_happen() {
-        for path in ["/relay/poll", "/relay/respond", "/bindings/status", "/lookup", "/health", "/service"] {
+        for path in ["/relay/poll", "/relay/respond", "/bindings/status", "/lookup", "/health", "/service", "/register"] {
             assert!(is_priority_lane(path), "{path} must never be shed before the hard cap");
         }
-        for path in ["/relay/send", "/nodes", "/register", "/"] {
+        // /register is the heartbeat: shedding it detaches the node, which is the storm again.
+        assert!(is_priority_lane("/register"), "a heartbeat is never shed first");
+        // The paths that wait for an answer are the ones that may give way.
+        for path in ["/relay/send", "/nodes", "/"] {
             assert!(!is_priority_lane(path), "{path} may be shed to keep the reserved lanes open");
         }
     }

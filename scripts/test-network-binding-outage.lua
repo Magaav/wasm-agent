@@ -110,4 +110,53 @@ ok(binding.authorize(first.node_id, first.public_key) == nil, 'an expired bindin
 mode.up = true
 clock = clock - 86400
 
+-- ---- MUST 3: the TICK keeps polling when /register fails --------------------------------------
+-- The defect: binding.tick returned before its /relay/poll when the register call failed, WITHOUT
+-- advancing the heartbeat, so every 2 s it retried only the register and never polled - the node
+-- stopped being reachable, the calls waiting for it could not be answered, and the queue never
+-- drained. That is the 19/11 deadlock in miniature.
+mode.up = true
+mode.vouched = {first}
+mode.binding_state = 'accepted'
+binding.admission_cache_clear()
+-- Establish a good authority observation first (a healthy tick).
+host.http = function(method, url)
+  if not mode.up then return json.encode({status = 503, body = ''}) end
+  if tostring(url):match('/service$') then
+    return json.encode({status = 200, body = json.encode({protocol = 1, binding_protocol = 1,
+      enrollment_ready = true, operators = mode.vouched})})
+  end
+  if tostring(url):find('/bindings/request?', 1, true) then
+    return json.encode({status = 200, body = json.encode({ok = true, binding = {digest = state.digest,
+      request = request, state = mode.binding_state, revision = 2}})})
+  end
+  if tostring(url):find('/register', 1, true) then
+    if mode.register_fails then return json.encode({status = 500, body = '{"error":"nope"}'}) end
+    return json.encode({status = 200, body = json.encode({ok = true})})
+  end
+  if tostring(url):find('/relay/poll', 1, true) then
+    POLLS = POLLS + 1
+    return json.encode({status = 200, body = '{}'})
+  end
+  return json.encode({status = 200, body = json.encode({})})
+end
+POLLS = 0
+host.now = function() return clock end
+binding.tick()
+ok(POLLS >= 1, 'a healthy tick polls the relay')
+-- Now the register fails. The poll must STILL happen, and the failure must be named.
+mode.register_fails = true
+local before = POLLS
+clock = clock + 120          -- past the heartbeat interval, so the register is attempted again
+local tick = binding.tick()
+ok(POLLS > before, 'a FAILED /register still polls the relay (the 19/11 deadlock): polls ' .. before .. ' -> ' .. POLLS)
+ok(tick.state == 'attached', 'and the node reports itself attached, not stuck on the register')
+ok(binding.last_registration_failure ~= nil, 'while the register failure is recorded, not swallowed')
+-- A poll that fails is still named as a poll failure, not as a register one.
+mode.register_fails = false
+mode.up = false
+clock = clock + 120
+local down = binding.tick()
+ok(down.error ~= nil, 'an unreachable registry is named on the tick, never silently attached')
+
 print('network binding outage ok (' .. checks .. ' checks)')
