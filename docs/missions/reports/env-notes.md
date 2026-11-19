@@ -98,7 +98,7 @@ installed one with this worktree's tree, scratch `WASM_AGENT_HOME` per run:
 | `scripts/test-prompt-tool-names.lua` | `prompt tool names ok (286 checks, 0 skipped)` |
 | `bash scripts/sync-prompt-docs.sh --check` | `sync-prompt-docs: ok (4 blocks current)` |
 | `scripts/fast.sh`, narrowed to these rows (`WA_FAST_ROWS`, 5 of 250 Lua rows) | `fast path ok (52 checks, 0 skipped, 184s)`, rc 0 - `pass` for `environment-notes`, `project-instructions`, `prompt-tool-names`, `land-signing`, `build-info` |
-| `scripts/test-build-info.sh` against a binary built at `864810f3`, the last commit that touches shipped code | `test-build-info: 24 checks, 0 failed` |
+| `scripts/test-build-info.sh` at HEAD `79fbc2a2` | `test-build-info: 24 checks, 0 failed` |
 | `scripts/test-land-signing.sh` | `land signing ok (46 checks)` |
 | `cargo build --release` (`WA_CODEMODE_ALLOW_EMPTY=1`) | `Finished release profile`, rc 0 |
 | embedded delivery from `/tmp` | `note embedded:AGENTS.omarchy.md`, both keys present |
@@ -123,6 +123,20 @@ failed two rows, neither in a Lua file this mission edited:
 
 Both are why the fast path was run rather than only the Lua test: the Lua test passed on a binary that
 `build-info` would have refused, and the staging change broke a row that never mentions this feature.
+
+**A pre-existing bug this run exposed, not fixed here.** `rust/wa-host/build.rs` re-runs on
+`.git/HEAD`, `.git/index` and the ref file under `<root>/.git/`. In a **worktree** `.git` is a *file*
+(`gitdir: /home/victor/wasm-agent/checkout/.git/worktrees/wt34`), so those paths do not exist, cargo
+never re-runs the script, and a rebuilt binary kept reporting `c7a8d5a9` after HEAD had moved - which made
+`build-info` fail on a correct tree. It is not this mission's to change; I worked around it by touching
+`rust/wa-host/build.rs` (mtime only, tree stayed clean) and the identity re-stamped to `79fbc2a2`. Worth
+a separate fix: resolve the real git dir (or read `git rev-parse --git-path HEAD`) instead of assuming
+`.git/` is a directory.
+
+**One run failed for an environment reason, said plainly.** An early attempt printed `lua error: disk I/O
+error`; `/tmp` was at 80% (13G of 16G, held by other missions' scratch, which I did not delete). Re-run
+after clearing only my own scratch: `environment notes ok (48 checks, 0 skipped)`. The remaining `/tmp`
+pressure is not mine to reclaim.
 
 **Not verified:** no desktop file was touched, so the Omarchy note's advice is sourced from the installed
 system's own skill and `hyprctl` (0.56.2), not from applying it; and `test-prefix-stability.lua` needs
