@@ -111,6 +111,34 @@ if b.capabilities_reason ~= 'remote_unreachable' then
   refuse('peer-b answered ' .. tostring(b.capabilities_reason) .. ', not its own remote_unreachable')
 end
 
+-- (5) A LOOKUP DOES NOT FAN OUT, AND A PROBE CHILD NEVER PROBES AGAIN (19/11: this module took the
+-- whole node down - a 'wa nodes probe <id>' child ran M.probe -> M.find -> M.list with no exclusion,
+-- so every child started one child per peer and the tree grew until the machine ran out of memory: 23 GB
+-- and 1653 processes from one command). The stub above counts every host.operation start, so both
+-- halves are measured here, not argued:
+--   * M.find asks the roster and starts ZERO children (it used to start one per peer);
+--   * a process that IS a probe child (M.probe sets it) starts ZERO children on a later M.list() - the
+--     child's own state, not a table handed in by the test.
+starts = 0
+events = {}
+local found = nodes.find('peer-a')
+if starts ~= 0 then
+  refuse('M.find started ' .. starts .. ' probe child(ren): that is the recursion that took the node down')
+end
+nodes.probe('peer-a')
+if starts ~= 0 then
+  refuse('M.probe started ' .. starts .. ' probe child(ren): a probe child that probes again is a fork tree')
+end
+if not nodes._in_probe_child then
+  refuse('M.probe did not mark the process as a probe child, so the next M.list() fans out again')
+end
+starts = 0
+events = {}
+nodes.list({ peers = { { node_id = 'peer-a' }, { node_id = 'peer-b' }, { node_id = 'peer-c' } } })
+if starts ~= 0 then
+  refuse('an M.list() inside a probe child started ' .. starts .. ' children: the recursion is back')
+end
+
 print('nodes probe parallel ok: 3 peers started 3 children before the first await, each answer matched by node_id, '
   .. 'and a child that never settles is named probe_timeout instead of answering []')
 os.exit(0)

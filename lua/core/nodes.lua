@@ -400,7 +400,9 @@ function M.list(opts)
   -- supervised PROCESSES: one "wa nodes probe <node_id>" per peer, ALL started before any is awaited, and
   -- read back together. A cached view asks nobody, and a view with no live probe keeps its old shape.
   local live_probes = {}
-  if not opts.cached and opts.live_capabilities ~= false then
+  -- THREE WAYS TO NOT PROBE: a cached view, a caller that said so, and a process that IS a probe child
+  -- (M.probe sets _in_probe_child). The third is the one whose absence took the node down.
+  if not opts.cached and opts.live_capabilities ~= false and not M._in_probe_child then
     -- opts.peers is the roster, for a caller that has one already (a test drives the fan-out with a
     -- stubbed host, and a real caller passes nothing and gets the rendezvous' answer as before).
     local peers = type(opts.peers) == "table" and opts.peers or fetch_peers(false, opts.cached)
@@ -459,7 +461,7 @@ end
 
 function M.find(selector)
   if not selector or selector == "" then return nil end
-  for _, node in ipairs(M.list()) do
+  for _, node in ipairs(M.list({ live_capabilities = false })) do
     if node.name == selector or node.node_id == selector or node.id == selector then
       return node
     end
@@ -985,6 +987,9 @@ end
 -- blocking request - and the only concurrency a node has is supervised PROCESSES. M.list therefore starts
 -- one of these per peer at once, so N unreachable peers cost one timeout instead of N.
 function M.probe(selector)
+  -- A PROBE CHILD NEVER PROBES AGAIN: it is already the answer, and a child that fanned out forked a
+  -- tree of children (the 19/11 run that took the node down).
+  M._in_probe_child = true
   local node = M.find(selector)
   if not node then return { error = "node_unknown", node = tostring(selector or "") } end
   if node.local_node then return { node_id = node.node_id, local_node = true } end
