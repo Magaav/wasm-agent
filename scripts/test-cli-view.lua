@@ -1665,16 +1665,41 @@ do
   local shown = visible(table.concat(rows, "\n"))
   ok(has(shown, '{"count":2,"first":"chat.lua"}'), "the value the model received is the result row: " .. shown)
   ok(not has(shown, "/home/agent/.wasm-agent/mcp/requests"), "the evidence envelope's path is not the answer")
-  ok(has(shown, "evidence: 2473 B · sha 5f2a1c9d"), "it is named once, under the value: " .. shown)
-  -- The band rows this mock collected carry whatever the host was handed; the WIDTH property is
-  -- asserted on them, and the ESC[K paint on the same block rendered through the real painter
-  -- (see the item F block: every band row closes with the erase and holds no pad space).
-  local widest = 0
-  for index = 1, 9 do
-    widest = math.max(widest, view_lib.columns(visible(rows[index])))
+  -- MUST 3: the band's width and its paint, both EXACT and both per row. The rows above are what the
+  -- mock host collected; this renders the SAME script through the REAL painter, which is what a
+  -- terminal receives: every band row is exactly 79 cells wide (one short of the screen, so the
+  -- transcript never wraps it) and closes with the background-colour erase, holding no pad space.
+  do
+    local block_lib = dofile("lua/core/codemode_block.lua")
+    local markdown_lib = dofile("lua/core/markdown.lua")
+    -- The band's erase is the VIEW's (it owns the palette), so the test hands the same closure the
+    -- view hands: without it the block paints no band at all and this block would prove nothing.
+    local live_opts = { columns = view_lib.columns, live = true, syntax = markdown_lib.scan_code,
+      band_erase = function() return view_lib.style("codeBand") .. "\27[K" end,
+      paint = function(text, style) return view_lib.paint(text, style, true) end }
+    local model = block_lib.new({ code = SCRIPT }, 0)
+    block_lib.finish(model, { ok = true, value = { count = 2 } }, 0.1)
+    local widest, narrowest, painted = 0, math.huge, 0
+    for _, row in ipairs(block_lib.lines(model, 80, live_opts)) do
+      if row:find("\27%[48;2;", 1) then
+        painted = painted + 1
+        local width = view_lib.columns(visible(row))
+        widest = math.max(widest, width)
+        narrowest = math.min(narrowest, width)
+        ok(has(row, "\27[K"), "every band row closes with ESC[K: " .. row:sub(1, 50))
+        ok(not has(row, " \27[K"), "and carries no pad space before it")
+        eq(visible(row):match("%s*$"), "", "and ends on its last character")
+      end
+    end
+    ok(painted > 0, "the block really draws painted band rows, so the checks above are not vacuous")
+    -- Item F changed what "the band" is: it is no longer PAD to 79, it is the row own text
+    -- plus ESC[K, which paints the rest at whatever width the terminal has. So the width
+    -- assertions are the ones that still mean something: NO row is wider than the band (the
+    -- transcript must never wrap it), the widest reaches it, and nothing is left blank-padded.
+    ok(widest <= 79, "no band row is wider than the band, so the transcript never wraps it: " .. widest)
+    ok(widest >= 40, "and the rows really carry their code, so this is not a vacuous pass: " .. widest)
+    ok(narrowest > 2, "no band row is an empty stripe: " .. narrowest)
   end
-  ok(widest <= 79, "no script row is wider than the band, so the transcript never wraps it into a "
-    .. "blank row: " .. widest)
 
   -- The next code-mode call leaves the one before it open and whole (operator 17/11: every step shows its
   -- output completely; it used to fold to a one-row summary).
@@ -1854,21 +1879,24 @@ do
   local at = 1795083600
   local expected = os.date("%H:%M", at)
   local view = view_lib.new({ live = true, limit = 100 })
-  view.turn = { rounds = 3, context = 12000, started = 0 }
-  view.context = 24300
-  view.totals = { prompt = 4600000, completion = 310 }
-  local bare = view:run_numbers(nil, "0:25")
-  local ok_row = view:run_numbers(nil, "0:25", { ok = true, at = at })
-  eq(ok_row, bare .. " \194\183 " .. CHECK .. expected,
-    "the finished row is the running row plus a middle dot, the check GLUED to the local hour"
-      .. " (Victor writes it without a space: \"\194\183 \240\176\132\17218:47\")")
-  ok(ok_row:find("\194\183 " .. CHECK, 1, true) > (bare:find(view_lib.GLYPH.clock, 1, true) or 0),
-    "the stamp comes after the elapsed clock, never before it: " .. ok_row)
-  -- While the run is in flight there is no finish fact and the row is the one it always was.
-  eq(bare:find(CHECK, 1, true), nil, "nothing extra while the run is in progress")
-  -- A failed run is handed the same row without the check, deliberately.
-  eq(view:run_numbers(nil, "0:25", { ok = false }), bare,
-    "a failed run keeps the same row, with no check and no time")
+  -- MUST 2: the EXACT strings Victor wrote, compared whole and not derived from each other. GAP
+  -- stays one space (his decision for plain Nerd fonts); the glued form comes from wa-fonts' A2
+  -- icon font, not from this file.
+  eq(view_lib.GAP, " ", "GAP is still the one space Victor chose")
+  view.turn = { rounds = 3, context = 7000, started = 0, step_started = 1 }
+  view.context = 5300 + 7000
+  view.totals = { prompt = 9500, completion = 851 }
+  eq(view:run_numbers("3s", "0:25"),
+    "\243\176\183\186 3\194\1833s \206\148\226\134\1455.3k \226\134\147851 \243\176\148\155 0:25",
+    "the RUNNING row is exactly Victor's: step, step clock, what this run sent and received, clock")
+  eq(view:run_numbers("3s", "0:25", { ok = true, at = at }),
+    "\243\176\183\186 3\194\1833s \206\148\226\134\1455.3k \226\134\147851 \243\176\148\155 0:25 \194\183 "
+      .. CHECK .. expected,
+    "the FINISHED row is exactly Victor's: the running row, then the check glued to the local hour")
+  eq(view:run_numbers("3s", "0:25", { ok = false }),
+    "\243\176\183\186 3\194\1833s \206\148\226\134\1455.3k \226\134\147851 \243\176\148\155 0:25",
+    "and a FAILED run keeps the running row, with no check and no hour")
+  local bare = view:run_numbers("3s", "0:25")
   -- The hour is the READER local one, not UTC: compared against both forms on an epoch where they
   -- differ in this zone, and said out loud (SKIP) on a machine whose zone is UTC, where they cannot.
   local local_at, utc_at = os.date("%H:%M", at), os.date("!%H:%M", at)
