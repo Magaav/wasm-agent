@@ -166,6 +166,10 @@ local function tool_ref(name, declared, available)
   if available[name] and declared.tool_call then return 'tool_call(name="' .. name .. '")' end
   -- Code mode declares `codemode` alone (envelope.lua); every other tool is called inside the script.
   if available[name] and declared.codemode then return "`tools." .. name .. "()`" end
+  -- Native mode declares `run` alone, and the same sentence is true inside its script (rel r1 R2/R3):
+  -- a prompt section that names recall or remember must not vanish because the door is a tool call now.
+  -- The reference names the tool as it is reached inside the script.
+  if available[name] and declared.run then return "`tools." .. name .. "()`" end
 end
 
 local GENERIC_ORDER = { "identity", "law", "work", "habits", "style", "language", "time", "memory", "turn" }
@@ -545,6 +549,13 @@ local function guidelines_for(tool_list, envelope_mode, raw_first)
   -- Code mode declares `codemode` alone; the core tools are still there, called as tools.<name> inside
   -- the script, so the guidelines that depend on them (shell search, file operations) still apply.
   if have.codemode then
+    for _, name in ipairs(dofile("lua/core/envelope.lua").core_names()) do have[name] = true end
+  end
+  -- Native mode declares `run` alone and the SAME sentence is true inside its script (rel r1 R2/R3):
+  -- every core tool is reached as tools.<name>. Without this the guidelines that depend on the shell
+  -- (search, file operations) silently disappeared from a native node's prompt, which is the defect
+  -- test-skill-discovery and test-fleetops measured.
+  if have.run then
     for _, name in ipairs(dofile("lua/core/envelope.lua").core_names()) do have[name] = true end
   end
   local list, seen = {}, {}

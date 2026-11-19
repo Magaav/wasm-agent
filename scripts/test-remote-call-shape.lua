@@ -149,10 +149,12 @@ host.http_stream=function(_,_,_,body)
   return json.encode({status=200,content='done',stream_complete=true,finish_reason='stop',
     usage={prompt_tokens=10,completion_tokens=5,total_tokens=15},tool_calls={}})
 end
+-- rel r1 R2: the surface this run is about is pinned BEFORE the run, not after it. An unset
+-- switch now resolves from the provider, so the CodeAct surface has to be asked for explicitly.
+raw_surface='only'
 local codeact_sid=memory.start_session('','codeact-shape',{user_id='master',node_id='',title='codeact-shape'})
 local codeact_ok,codeact_reply=pcall(function() return agent.new(codeact_sid,function() end,'master','master',''):run('read it') end)
 host.http_stream=previous_stream
-raw_surface='codemode'
 check(codeact_ok,'the default-surface run completed: '..tostring(codeact_reply))
 local codeact_declared=codeact_sent[1] and #((codeact_sent[1].tools) or {}) or -1
 check(codeact_declared==0,'the run declared no tool at all ('..codeact_declared..'), so it ran on the CodeAct surface')

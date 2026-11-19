@@ -4,7 +4,8 @@
 -- (lua/core/raw_code.lua, M.DEFAULT), so the row names the surface it is written against.
 -- The row names its surface: codemode for the cases below, nil (the node's default, CodeAct) for the
 -- variant at the end. A pin covering the whole file left the default surface untested (18/11, item 3).
-local raw_surface='codemode'
+local raw_surface='codemode'  -- rel r1 R2: the first section tests the CODEMODE surface; the CodeAct
+-- variant at the end pins 'only' for itself, because an unset switch now resolves from the provider.
 do local real=host.getenv; host.getenv=function(k) if k=='WASM_AGENT_RAW_CODE' then return raw_surface end return real(k) end end
 local json=dofile('lua/vendor/json.lua')
 local memory=dofile('lua/core/memory.lua');memory.setup()
@@ -89,7 +90,8 @@ check(all.matches>10 and all.skills[1] and all.has_more,'complete visible catalo
 -- which is exactly what this guideline is about (lua/core/agent.lua, guidelines_for). So the row runs
 -- the real agent loop with a stubbed provider - no network, no paid call - and reads the system
 -- message the provider was actually given.
-raw_surface=nil
+raw_surface='only'  -- rel r1 R2: this variant is the CodeAct surface; an unset switch now
+-- resolves from the provider, so the surface it is about is asked for by name.
 local tick=string.char(96)
 local previous_getenv=host.getenv
 host.getenv=function(k)
