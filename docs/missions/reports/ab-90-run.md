@@ -71,3 +71,30 @@ That is model variance, not a harness defect; it is recorded rather than hidden.
 
 The earlier E2/E3 rows in `ab/runs.jsonl` were produced by the broken mode and are deleted; A-D rows
 stand (their arms were never affected).
+
+## Second smoke, after the tag-history and implicit-close fixes
+
+All six measured on t4, executed steps read from the node's journal:
+
+| arm | success | final shape | executed | rounds | calls | rc |
+|---|---|---|---|---|---|---|
+| A fence | 1 | 1 | 3 | 4 | 3 | 0 |
+| B run | 1 | 1 | 4 | 5 | 4 | 0 |
+| C codemode | 1 | 1 | 4 | 5 | 4 | 0 |
+| D bash | 1 | 1 | 4 | 5 | 4 | 0 |
+| E2 tags | 1 | 1 | 4 | 7 | 4 | 0 |
+| E3 tags | 1 | 1 | 3 | 6 | 3 | 0 |
+
+Two more measured fixes came out of this round:
+
+1. The t4 criterion crashed on one model's TOP5 format (a trailing parenthesis) and took the whole
+   row with it. It now reads the value beside the name, strips the punctuation, and answers a
+   readable failure instead of an exception that loses the row.
+2. A hyphenated product id (balanca-digital) must not be split on its hyphen, so the name is what
+   remains after the trailing number is removed. My first attempt split on the separator and reported
+   a real product as missing - the criterion was right and my parser was wrong, which is why the
+   expected values were checked against the fixture before trusting either.
+
+The E3 arm's known hole is visible in the smoke history: on its first attempt it wrote bare prose
+before its tags and was refused by name, which is exactly the rule it was given; a second attempt
+acted and finished.

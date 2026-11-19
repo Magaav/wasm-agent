@@ -68,7 +68,7 @@ local function trim(text) return (tostring(text or ""):gsub("^%s+", ""):gsub("%s
 -- an excerpt of the message is what tells "never closed" from "text outside the tags".
 local function invalid(reason, excerpt)
   local shown = tostring(excerpt or ""):gsub("^%s+", ""):gsub("%s+$", "")
-  if #shown > 500 then shown = shown:sub(1, 500) .. "..." end
+  if #shown > 4000 then shown = shown:sub(1, 4000) .. "..." end
   return { shape = "invalid_message_shape", reason = reason, excerpt = shown ~= "" and shown or nil }
 end
 

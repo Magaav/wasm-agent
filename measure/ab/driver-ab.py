@@ -96,13 +96,29 @@ def criterion(task, cwd, answer, journal):
             ok_total = abs(float(total[0]) - float(expected['total'])) <= 0.01
         except ValueError:
             return False, 'TOTAL is not a number'
-        pairs = dict()
+        # The criterion is about the VALUES, not the markup around them: the model may write
+        # `name:123.45`, `name=123.45)` or `| name | 123.45 |`. A number is read wherever it sits
+        # beside the product name, and a pair that cannot be read is a failure with its cause -
+        # never a crash that loses the row (measured: one unreadable pair killed the whole smoke).
+        pairs = {}
         for item in top5[0].split('|'):
-            if ':' in item:
-                name, value = item.rsplit(':', 1)
-                pairs[name.strip()] = value.strip()
+            numbers = re.findall(r'-?\d+(?:\.\d+)?', item)
+            if not numbers:
+                continue
+            # The name is what is LEFT once the trailing number is removed. Splitting on a
+            # separator would cut a hyphenated product name in half (balanca-digital became
+            # balanca), and that is a real product id in this fixture.
+            trimmed = item.strip().rstrip(' )].,;')
+            name = re.sub(r'\s*-?\s*' + re.escape(numbers[-1]) + r'\s*$', '', trimmed).strip()
+            name = name.strip(' `*_()[]|=:-,')  # type: ignore[assignment]
+            if name:
+                pairs[name] = numbers[-1]
         want = [(n, v) for n, v in expected['top5'][:5]]
-        ok_top = all(k in pairs and abs(float(pairs[k]) - float(v)) <= 0.01 for k, v in want)
+        try:
+            ok_top = all(k in pairs and abs(float(pairs[k]) - float(v)) <= 0.01 for k, v in want)
+        except (TypeError, ValueError):
+            return False, 'TOP5 pair could not be read as a number'
+
         return ok_total and ok_top, f'total_ok={ok_total} top5_ok={ok_top}'
     if task == 't5':
         expected = (AB / 'wt' / 'measure' / 'ab' / 'fixtures' / 't5' / 'app.expected.js').read_text()
@@ -227,7 +243,12 @@ def run_one(arm, value, task, run):
                 # The progress text; the finish is still missing, so the shape is not final.
                 answer = msgs[-1]
     answer = re.sub(r'<turn>.*?</turn>', '', answer, flags=re.S).strip()
-    ok, note = criterion(task, cwd, answer, facts)
+    # A criterion that cannot read an answer is a failure with its cause, never an exception: a
+    # crash loses the row and the evidence with it.
+    try:
+        ok, note = criterion(task, cwd, answer, facts)
+    except Exception as exc:
+        ok, note = False, 'criterion error: ' + str(exc)[:160]
     executed = facts.get('executed', 0)
     # A silent death is the run ENDING (rc 0) without a final answer shape while the task is not
     # done - not "zero native tool calls", which called every text arm a death (ab-fix.md).
