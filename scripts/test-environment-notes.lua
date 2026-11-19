@@ -109,8 +109,16 @@ ok(note("master", override, { ["AGENTS.omarchy.md"] = "CWD\n", [config_dir .. "/
 local from_config = note("master", override, { [config_dir .. "/AGENTS.omarchy.md"] = "CONFIG\n" }, true)
 ok(from_config and from_config.path == config_dir .. "/AGENTS.omarchy.md" and from_config.text == "CONFIG\n",
   "the config directory is the last place it is looked for")
+-- Nowhere on disk is not nil any more: since delivery, the binary's own copy is the last candidate.
+-- What must never happen is an EMPTY instruction, so this asserts the fall-through and its text.
 local absent = note("master", override, {}, true)
-ok(absent == nil, "a note that is nowhere is nil rather than an empty instruction")
+ok(absent and absent.path == "embedded:AGENTS.omarchy.md" and absent.text ~= "",
+  "nowhere on disk falls through to the embedded copy, never an empty instruction")
+local no_embedded = EMBEDDED and EMBEDDED["AGENTS.omarchy.md"]
+if EMBEDDED then EMBEDDED["AGENTS.omarchy.md"] = nil end
+local truly_absent = note("master", override, {}, true)
+if EMBEDDED then EMBEDDED["AGENTS.omarchy.md"] = no_embedded end
+ok(truly_absent == nil, "with no file and no embedded copy the answer is nil, not an empty instruction")
 
 -- A guest never receives an operator note about the operator's machine.
 for _, role in ipairs({ "guest" }) do
@@ -149,6 +157,13 @@ ok(frame.project:find("ENV_KEEP", 1, true) < frame.project:find("PROJECT_KEEP", 
 local real_embedded = EMBEDDED
 local saved_embedded = { sandbox = real_embedded and real_embedded["AGENTS.sandbox.md"],
                          omarchy = real_embedded and real_embedded["AGENTS.omarchy.md"] }
+-- The gate runs this worktree's own binary with a scratch home (scripts/test.sh), so this asserts the
+-- delivery itself: the binary was built from a tree whose build.rs embeds both notes. Without it, the
+-- fixture below could pass while the shipped binary carries neither.
+ok(type(saved_embedded.sandbox) == "string" and saved_embedded.sandbox ~= "",
+  "the binary under test embeds AGENTS.sandbox.md (rust/wa-host/build.rs)")
+ok(type(saved_embedded.omarchy) == "string" and saved_embedded.omarchy ~= "",
+  "the binary under test embeds AGENTS.omarchy.md (rust/wa-host/build.rs)")
 EMBEDDED = EMBEDDED or {}
 EMBEDDED["AGENTS.sandbox.md"] = "EMBEDDED_SANDBOX\n"
 EMBEDDED["AGENTS.omarchy.md"] = "EMBEDDED_OMARCHY\n"
@@ -161,9 +176,11 @@ ok(file_beats_embedded and file_beats_embedded.text == "ON_DISK\n", "a file on d
 EMBEDDED["AGENTS.sandbox.md"] = saved_embedded.sandbox
 EMBEDDED["AGENTS.omarchy.md"] = saved_embedded.omarchy
 if EMBEDDED ~= real_embedded then EMBEDDED = real_embedded end
-local nothing_anywhere = agent.environment_note("master", { env = { WASM_AGENT_SANDBOX = "1" }, read = fs({}), config_dir = config_dir })
-ok(nothing_anywhere == nil or nothing_anywhere.path == "embedded:AGENTS.sandbox.md",
-  "a note that is nowhere and not embedded is nil, never an empty instruction")
+-- Strict on purpose: with the real EMBEDDED table restored and nothing on disk, the note must come from
+-- the binary. "nil or embedded" accepted both answers and so checked nothing.
+local nothing_on_disk = agent.environment_note("master", { env = { WASM_AGENT_SANDBOX = "1" }, read = fs({}), config_dir = config_dir })
+ok(nothing_on_disk and nothing_on_disk.path == "embedded:AGENTS.sandbox.md" and nothing_on_disk.text ~= "",
+  "with nothing on disk the note is the binary's own copy, never nil and never an empty instruction")
 
 -- 2. The two lists that ship it, asserted where they live, because a runtime check cannot see this
 --    worktree's build.rs from an installed binary. One embed (rust/wa-host/build.rs) and one stage
