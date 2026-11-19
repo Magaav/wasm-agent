@@ -467,6 +467,32 @@ function M.wrap(text, limit, o)
   return rows
 end
 
+-- A LINE OF CODE THAT DOES NOT FIT, WRAPPED WITH A MARK WHERE IT BREAKS.
+--
+-- A 300-column line at 80 columns used to come out as four band rows with nothing joining them: the
+-- reader saw a token cut in half with a row of fresh code under it and could not tell a wrap from a
+-- new statement (round 3, item 3). Every piece but the last now ends with `↪` IN ITS LAST CELL - at
+-- the wrap point, which is where the line continues - so four rows read as one line broken three times.
+--
+-- The row COUNT is the wrap: one piece is one screen row, and the mark is paid for out of the width
+-- rather than added to it, so a marked row is never wider than the band and the transcript never wraps
+-- it again (which is what drew a blank band row under every code line before 17/11).
+--
+-- A line that fits is returned as it is, unmarked and one row: wrapping at `limit - 1` first would turn
+-- a line of exactly `limit` cells into two rows that both fit on one.
+function M.wrap_marked(text, limit, o, mark)
+  o = M.opts(o)
+  mark = mark or "\226\134\170"
+  limit = math.max(8, tonumber(limit) or 80)
+  local whole = M.wrap(text, limit, o)
+  if #whole <= 1 then return whole end
+  local room = math.max(1, limit - o.columns(mark))
+  local pieces = M.wrap(text, room, o)
+  if #pieces <= 1 then return pieces end
+  for index = 1, #pieces - 1 do pieces[index] = pieces[index] .. mark end
+  return pieces
+end
+
 -- The call rows as the transcript draws them: one row per call (or per fan-out), the ✓/✗/⏳ mark in
 -- its own colour. This is the row a running block rewrites in place as each call settles
 -- (`host.transcript_rewrite`), so it is built by one function and nothing else.
@@ -500,8 +526,9 @@ function M.rows(model, width, options)
   local pieces = {}
   for _, line in ipairs(code) do
     -- Wrapped, never clipped, and BEFORE it is highlighted: cutting a string that already carries
-    -- escape sequences would cut one in half, and a cut token paints the rest of the block.
-    for _, piece in ipairs(M.wrap(line, band, o)) do pieces[#pieces + 1] = piece end
+    -- escape sequences would cut one in half, and a cut token paints the rest of the block. A line
+    -- that continues onto the next band row says so at the break (`M.wrap_marked`).
+    for _, piece in ipairs(M.wrap_marked(line, band, o)) do pieces[#pieces + 1] = piece end
   end
   for _, shown in ipairs(pieces) do
     -- The band is padded by display columns (not bytes) to one column short of the screen, so it is a
