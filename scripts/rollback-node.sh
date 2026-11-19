@@ -108,15 +108,28 @@ done
 # THE LUA TREE THAT MATCHES THE BINARY. A deploy keeps the tree it replaces in lua-core.prev (and, for a
 # release install, .prev/lua-core); a binary rolled back without its tree runs the code it shipped. The
 # swap is a rename in both directions, so an interrupted rollback leaves one of the two trees whole.
-LUA_RESTORED="none"
+LUA_RESTORED=""
+LUA_WANT=""
 LUA_PREV=""
 for candidate in "$FROM/lua-core" "$INSTALL/lua-core.prev" "$FROM/lua-core.prev"; do
   [ -d "$candidate" ] && { LUA_PREV="$candidate"; break; }
 done
+LUA_ASIDE=""
 if [ -n "$LUA_PREV" ]; then
-  rm -rf "$INSTALL/lua-core.rolling"
-  { [ ! -d "$INSTALL/lua-core" ] || mv "$INSTALL/lua-core" "$INSTALL/lua-core.rolling"; }     && mv "$LUA_PREV" "$INSTALL/lua-core"     || fail "rollback_lua_failed: the Lua tree at $LUA_PREV could not be put in place of $INSTALL/lua-core; the binaries are restored and the Lua tree is at $INSTALL/lua-core.rolling (move it back by hand)" 4
-  rm -rf "$INSTALL/lua-core.rolling"
+  # The tree being replaced is KEPT ASIDE, never deleted (item 5 of the node-ops round): a rollback that
+  # removed it left an operator who rolled back to a broken pair with nothing to roll FORWARD to. The
+  # aside directory is named with the stamp, so two rollbacks in a row cannot overwrite each other.
+  # The identity of the tree being restored is read BEFORE any move: after the swap its path is gone
+  # (its bytes ARE the live tree), and an identity read from a moved-away path is a fact about nothing.
+  LUA_WANT="$(wa_lua_tree_identity "$LUA_PREV")"
+  LUA_ASIDE="$INSTALL/lua-core.rolled-back-$(date -u +%Y%m%dT%H%M%SZ)"
+  if [ -d "$INSTALL/lua-core" ]; then
+    mv "$INSTALL/lua-core" "$LUA_ASIDE" || fail "rollback_lua_failed: the Lua tree now at $INSTALL/lua-core could not be moved aside to $LUA_ASIDE; the binaries are restored and the tree is untouched" 4
+  fi
+  if ! mv "$LUA_PREV" "$INSTALL/lua-core"; then
+    [ ! -d "$LUA_ASIDE" ] || mv "$LUA_ASIDE" "$INSTALL/lua-core" 2>/dev/null || true
+    fail "rollback_lua_failed: the Lua tree at $LUA_PREV could not be put in place of $INSTALL/lua-core; the binaries are restored and the previous tree is $LUA_PREV" 4
+  fi
   LUA_RESTORED="$LUA_PREV"
   say "restored the matching Lua tree from $LUA_PREV into $INSTALL/lua-core"
 else
@@ -173,45 +186,77 @@ case "$restored_commit" in
 esac
 say "restored: $VERSION"
 
-# IS THE NODE RUNNING THE BYTES THIS SCRIPT JUST PUT BACK?
+# THE LUA TREE, as an IDENTITY and not as a directory (item 5 of the node-ops round). The manifest a
+# deploy writes into <install>/lua-core names the commit and the digest of the inputs, so "which tree is
+# installed" is a question with an answer. It is asked HERE and not inside the restart branch: a
+# --no-restart rollback swaps the tree too, and a tree that cannot name itself is a refusal, never a
+# silence - unknown is not yes.
+if [ -n "$LUA_RESTORED" ]; then
+  want="${LUA_WANT:-}"
+  want_commit="${want%%|*}"; want_inputs="${want#*|}"
+  [ "$want_inputs" = "$want" ] && want_inputs=""
+  have="$(wa_lua_tree_identity "$INSTALL/lua-core")"
+  have_commit="${have%%|*}"; have_inputs="${have#*|}"
+  [ "$have_inputs" = "$have" ] && have_inputs=""
+  if [ -z "$want_commit" ] || [ -z "$want_inputs" ] || [ -z "$want" ]; then
+    fail "rollback_lua_unverified: the Lua tree was put back from $LUA_RESTORED, but that tree's manifest.txt names no source_commit/lua_inputs, so which tree was restored cannot be proven. The binary is verified; the tree is not." 5
+  fi
+  if [ "$have_commit" != "$want_commit" ] || [ "$have_inputs" != "$want_inputs" ]; then
+    fail "rollback_lua_not_effective: $INSTALL/lua-core names ${have_commit:-no commit}/${have_inputs:-no digest}, not the restored ${want_commit}/${want_inputs}. The binary is the restored one and the tree beside it is NOT, so this is not a rollback." 5
+  fi
+  say "the Lua tree is the restored one (source_commit ${want_commit} / lua_inputs ${want_inputs})"
+else
+  say 'the Lua tree was not part of this rollback (no previous tree was kept), so only the binary is proven'
+fi
+
+
+# THE RESTART, AND THE TWO FACTS THAT MAKE IT A ROLLBACK.
 #
-# `rollback ok` used to be printed after `systemctl start` returned, and a start that failed still
-# printed it: measured 19/11, the service was dead and the operator read a success line. So the answer
-# is not the start command's exit, it is the running process. Two independent facts are required:
-#   1. the process the supervisor reports is alive, and
-#   2. /proc/<pid>/exe resolves to the file restored here - compared by st_dev and st_ino, because a
-#      path is a name and the question is which bytes are executing.
-# Where a check cannot be made (no /proc, no pid reported, an unreadable link) this script says it
-# cannot and refuses the success claim: unknown is not yes.
+# `rollback ok` used to be printed after `systemctl start` returned, and a start that failed still printed
+# it: measured 19/11 the service was dead and the operator read a success line. Item 5 of the node-ops round
+# added three more defects, each measured on this node:
+#   * the unit was ASSUMED to be wa-sentinel.service, while the node here runs wa-serve.service - the check
+#     answered 'unverified' on a node that was serving, so it could not fail honestly;
+#   * START was asked of a unit that was already active, which is a no-op: the old binary kept serving and
+#     the script then compared /proc/<pid>/exe of the process it never restarted;
+#   * only the binary was compared, so a rollback that put the binary back and left the NEW Lua tree beside
+#     it printed ok - the node answered with code its binary never shipped.
+# So: the unit is DETECTED (wa_node_unit), the verb is RESTART, the pid read is the one that SERVES
+# (wa_serving_pid: the child, when a sentinel supervises), and BOTH the binary and the Lua tree must match
+# before this script says ok. Everything it cannot prove it refuses by name.
 if [ "$RESTART" = 1 ]; then
-  if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
-    systemctl --user start wa-sentinel.service 2>/dev/null \
-      || say 'the sentinel service did not start; the pair is restored but nothing is running it'
-    # Give the service a bounded moment to exec the binary before the link is read: a start that returns
-    # before the child execs would otherwise be read as 'mismatch' for a node that is fine.
+  if ! command -v systemctl >/dev/null 2>&1 || ! systemctl --user show-environment >/dev/null 2>&1; then
+    say 'no systemd user session here; start the node yourself (the pair is restored), then check it with: readlink -f /proc/<pid>/exe (it must be this install wa)'
+  else
+    UNIT="$(wa_node_unit)"
+    if [ -z "$UNIT" ]; then
+      fail "rollback_unverified: no running systemd unit was found whose process serves this node (wa_node_units saw none), so there is nothing to restart and nothing to read. The pair IS restored. Start the node by hand ($INSTALL/wa serve ...), then check /proc/<pid>/exe against $INSTALL/wa." 5
+    fi
+    say "restarting $UNIT (detected: its process serves this node)"
+    systemctl --user restart "$UNIT" 2>/dev/null \
+      || say "the restart of $UNIT failed; the pair is restored and nothing is running it"
+    # A bounded wait for the SERVING process to exist: a restart returns before the child execs.
     pid=""
     for _ in 1 2 3 4 5 6 7 8 9 10; do
-      pid="$(wa_supervised_pid)"
-      [ -n "$pid" ] && [ "$pid" != 0 ] && [ -e "/proc/$pid/exe" ] && break
+      pid="$(wa_serving_pid)"
+      [ -n "$pid" ] && [ -e "/proc/$pid/exe" ] && break
       sleep 1
     done
     verdict="$(wa_running_binary_verdict "$pid" "$INSTALL/wa")"
     case "$verdict" in
-      ok*)
-        say "the node (pid $pid) is running the restored binary: $(printf '%s' "$verdict" | cut -d' ' -f2-)"
-        ;;
+      ok*) say "the node ($UNIT, serving pid $pid) runs the restored binary: $(printf '%s' "$verdict" | cut -d' ' -f2-)" ;;
       mismatch*)
-        fail "rollback_not_effective: the pair was restored and the node was started, but the running process is NOT the restored binary ($verdict). This is not a rollback: the node is still executing the bytes this script meant to replace. Stop it and install a matching pair, or start the restored binary by hand: $INSTALL/wa" 5
-        ;;
+        fail "rollback_not_effective: $UNIT was restarted, but the process serving this node is NOT the restored binary ($verdict). This is not a rollback: the node still executes the bytes this script meant to replace. Stop $UNIT and install a matching pair, or start the restored binary by hand: $INSTALL/wa" 5 ;;
       *)
-        fail "rollback_unverified: the pair was restored and a start was asked for, but this script cannot prove which binary is running (${verdict#unknown }). Unknown is not yes: check it yourself with 'systemctl --user show wa-sentinel.service -p MainPID --value' and read /proc/<pid>/exe before believing this node is rolled back." 5
-        ;;
+        fail "rollback_unverified: $UNIT was restarted, but this script cannot prove which binary serves (${verdict#unknown }). Unknown is not yes: read /proc/$pid/exe yourself before believing this node is rolled back." 5 ;;
     esac
-  else
-    say 'no systemd user session here; start the node yourself (the pair is restored), then check it with: readlink -f /proc/<pid>/exe (it must be this install'"'"'s wa)'
   fi
 elif [ "$STOPPED" = 1 ]; then
-  say 'the sentinel was stopped for the swap and --no-restart was given; start it when you mean to, then check it with: readlink -f /proc/<pid>/exe'
+  say 'the supervisor was stopped for the swap and --no-restart was given; start it when you mean to, then check it with: readlink -f /proc/<pid>/exe'
 fi
-say "rollback ok${LUA_RESTORED:+ (binary and Lua tree)}"
+if [ -n "$LUA_RESTORED" ]; then
+  say "rollback ok (binary and Lua tree both verified)"
+else
+  say "rollback ok (binary verified; no previous Lua tree was kept, so the tree is not part of this answer)"
+fi
 exit 0
