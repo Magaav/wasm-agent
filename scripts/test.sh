@@ -950,6 +950,8 @@ gate_run bash scripts/test-rollback-verify.sh | grep 'test-rollback-verify: ok'
 gate_run bash scripts/test-build-env.sh | grep 'test-build-env: ok'
 # The build relation and the allow-list environment (scripts/test-build-status.lua under this wrapper).
 gate_run bash scripts/test-build-status.sh | grep 'build status ok'
+# A row at a base commit and at the change, as one supervised comparison (scripts/test-row-at-sha.sh).
+gate_run bash scripts/test-row-at-sha.sh | grep 'test-row-at-sha: ok'
 gate_run bash scripts/test-watchdog-upgrade.sh | grep 'test-watchdog-upgrade: ok'
 # Context budget is per model (provider.budget), and it is NOT the same thing as
 # provider.limits, which fetches the account's rate limits for the UI. Confusing
