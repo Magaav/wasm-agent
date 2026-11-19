@@ -1188,19 +1188,43 @@ local function adopt_bash(args, caller, author)
   -- call silently kept a slot and made the next short command fail with the same refusal (measured: one
   -- adopted command, a second refused, and every later call refused with open=2).
   local function stop_started(why)
+    -- OBSERVED, NEVER ASSUMED (review r3, small item): the peer's cancel is a REQUEST - it sets the flag
+    -- and answers a snapshot that still says running - so answering stopped=true unobserved would be the
+    -- same lie MUST 1 removed from the caller's cancel. Bounded: five calls with a doubling backoff.
     toolslib.dispatch(memory, "operation", { action = "cancel", id = id }, "master", ctx)
+    local pause = 200
+    local seen = "running"
+    for _ = 1, 5 do
+      local state = toolslib.dispatch(memory, "operation", { action = "status", id = id }, "master", ctx)
+      if type(state) == "table" then
+        seen = tostring(state.state or "running")
+        if state.settled == true or seen == "cancelled" or state.cancelled == true then
+          why.stopped = true
+          why.state = seen
+          return why
+        end
+      end
+      if host.sleep then host.sleep(pause) end
+      pause = math.min(pause * 2, 800)
+    end
+    -- It would not stop: say so, name what was seen, and let the caller act on the id.
+    why.stopped = false
+    why.cancel_requested = true
+    why.state = seen
+    why.note = tostring(why.note or "") .. " The stop was REQUESTED but not observed: the operation may "
+      .. "still be running as " .. id .. " - check it, then cancel it by that id."
     return why
   end
   if open == nil then
     return stop_started({ error = "remote_adopted_unknown", effect = "none", detail = list_problem,
-      operation_id = id, stopped = true,
+      operation_id = id,
       note = "the command outlived the hold but this node could not read which of your operations are "
         .. "running there, so it did not adopt the handle: the command was stopped (operation " .. id
         .. ") rather than left running unsupervised. Nothing is re-run by this answer." })
   end
   if open >= MAX_ADOPTED_OPEN then
     return stop_started({ error = "remote_adopted_limit", effect = "none", open = open,
-      limit = MAX_ADOPTED_OPEN, operation_id = id, stopped = true,
+      limit = MAX_ADOPTED_OPEN, operation_id = id,
       note = "the command outlived the hold and this node already runs " .. tostring(open) .. " of your "
         .. "adopted commands (the limit is " .. tostring(MAX_ADOPTED_OPEN) .. "). The new command was "
         .. "STOPPED, not left running: collect or cancel one of your handles, then send it again. A short "
