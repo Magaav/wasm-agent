@@ -891,39 +891,118 @@ pub(crate) fn file_magic_value(path: &str) -> serde_json::Value {
     };
     if metadata.is_dir() { return json!({"path": path, "magic": "unreadable", "size": metadata.len()}); }
     if metadata.len() == 0 { return json!({"path": path, "magic": "empty", "size": 0}); }
-    let mut head = [0u8; 4];
-    let read = match std::fs::File::open(path) {
-        Ok(mut file) => match file.read(&mut head) {
-            Ok(count) => count,
+    // Round 9: a bounded HEAD, not four bytes. A PE's magic is not at its start - it is at the offset
+    // e_lfanew names - so four bytes cannot tell an MZ-only file from a real PE, and that difference is
+    // exactly what the allow-list needs. Still never the whole file: a hundred-megabyte interpreter costs
+    // these MAGIC_HEAD_BYTES and no more.
+    let mut head = Vec::with_capacity(MAGIC_HEAD_BYTES.min(metadata.len() as usize));
+    match std::fs::File::open(path) {
+        Ok(file) => match file.take(MAGIC_HEAD_BYTES as u64).read_to_end(&mut head) {
+            Ok(_) => {}
             Err(error) => return json!({"path": path, "magic": "unreadable",
                 "error": format!("{:?}", error.kind())}),
         },
         Err(error) => return json!({"path": path, "magic": "unreadable",
             "error": format!("{:?}", error.kind())}),
     };
-    let magic = classify_magic(&head[..read]);
+    let magic = classify_magic(&head);
     json!({"path": path, "magic": magic, "size": metadata.len()})
 }
 
-/// The three executable families, plus the ones that are not one: a shebang, plain text, anything else.
-///
-/// ELF is compared as bytes; Mach-O and its universal (fat) header are four magic numbers in either byte
-/// order; PE starts with `MZ`. A shebang is the shape this exists to catch - a file NAMED `node` that is
-/// really a shell script running something else.
+/// How many leading bytes the kind is decided from: a bounded head, never the whole file. Large enough
+/// for a PE's e_lfanew (typically 0x80-0x100) and for a universal binary's arch table.
+pub(crate) const MAGIC_HEAD_BYTES: usize = 4096;
+
+/// The most architectures a universal (fat) Mach-O header may name. It is also what separates 0xcafebabe
+/// the FAT BINARY from 0xcafebabe the JAVA CLASS: a class file follows it with minor+MAJOR version, and no
+/// Java class has a major below 45, while a fat header names one to a few architectures.
+const FAT_MAX_ARCH: u32 = 15;
+
+/// This HOST's own executable format: the only one a "native binary" may be. An ELF on macOS is a foreign
+/// binary, and foreign is not native - the allow-list admits what this node can actually run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HostFormat { Elf, MachO, Pe, Unknown }
+
+pub(crate) fn host_format() -> HostFormat {
+    if cfg!(target_os = "linux") || cfg!(target_os = "android") { HostFormat::Elf }
+    else if cfg!(target_os = "macos") || cfg!(target_os = "ios") { HostFormat::MachO }
+    else if cfg!(target_os = "windows") { HostFormat::Pe }
+    // A host this build was not written for: no format is native there (unknown is not yes).
+    else { HostFormat::Unknown }
+}
+
+fn native_if(is_host: bool, family: &'static str) -> &'static str {
+    if is_host { family } else { "foreign" }
+}
+
+/// The host's own kind of each leading-byte shape: `elf`, `macho`, `pe` only for THIS host's format, and
+/// `foreign` for another platform's executable. Also `script` (a shebang), `text`, `binary`, `empty`,
+/// `missing` or `unreadable`.
 pub(crate) fn classify_magic(head: &[u8]) -> &'static str {
-    if head.starts_with(b"\x7fELF") { return "elf"; }
+    classify_magic_on(head, host_format())
+}
+
+/// The classifier with the HOST named, so every case is testable on any machine: an ELF is `elf` on
+/// Linux and `foreign` on macOS or Windows, and the same holds for the other two.
+pub(crate) fn classify_magic_on(head: &[u8], host: HostFormat) -> &'static str {
+    if head.starts_with(b"\x7fELF") { return native_if(host == HostFormat::Elf, "elf"); }
     if head.len() >= 4 {
         let magic = u32::from_be_bytes([head[0], head[1], head[2], head[3]]);
-        if matches!(magic, 0xfeed_face | 0xfeed_facf | 0xcefa_edfe | 0xcffa_edfe | 0xcafe_babe | 0xbeba_feca) {
-            return "macho";
+        match magic {
+            // The thin Mach-O headers: 32/64-bit, each in both byte orders.
+            0xfeed_face | 0xfeed_facf | 0xcefa_edfe | 0xcffa_edfe => {
+                return native_if(host == HostFormat::MachO, "macho");
+            }
+            // The universal (fat) header, big-endian and its byte-swapped twin. Its count is what tells it
+            // apart from a Java class, which starts with the same four bytes.
+            0xcafe_babe => {
+                return match fat_arch_count(head, false) {
+                    Some(_) => native_if(host == HostFormat::MachO, "macho"),
+                    None => "binary",
+                };
+            }
+            0xbeba_feca => {
+                return match fat_arch_count(head, true) {
+                    Some(_) => native_if(host == HostFormat::MachO, "macho"),
+                    None => "binary",
+                };
+            }
+            _ => {}
         }
     }
-    if head.starts_with(b"MZ") { return "pe"; }
+    // PE: "MZ" alone is not an executable - the COFF header starts at e_lfanew (offset 0x3c) and begins
+    // with "PE\0\0". A file whose e_lfanew is out of range, or does not point at "PE\0\0", is a DOS stub
+    // or a decoy, never a native binary.
+    if head.starts_with(b"MZ") {
+        return if pe_header_at(head).is_some() { native_if(host == HostFormat::Pe, "pe") } else { "binary" };
+    }
     if head.starts_with(b"#!") { return "script"; }
     if head.iter().all(|byte| *byte == 0x09 || *byte == 0x0a || *byte == 0x0d || (0x20..0x7f).contains(byte)) {
         return "text";
     }
     "binary"
+}
+
+/// The architecture count of a universal header, or None when the header is not one: a count of 0 or more
+/// than FAT_MAX_ARCH, or a table that does not fit in the bytes read, is not a fat binary (and a Java
+/// class, whose next four bytes are a version, is never read as one).
+fn fat_arch_count(head: &[u8], little_endian: bool) -> Option<u32> {
+    if head.len() < 8 { return None; }
+    let raw = [head[4], head[5], head[6], head[7]];
+    let count = if little_endian { u32::from_le_bytes(raw) } else { u32::from_be_bytes(raw) };
+    if count == 0 || count > FAT_MAX_ARCH { return None; }
+    // Each entry is 20 bytes: a header whose table is not even present is not a universal binary.
+    if head.len() < 8 + 20 * count as usize { return None; }
+    Some(count)
+}
+
+/// The offset a PE's COFF header is at, when these bytes really hold one.
+fn pe_header_at(head: &[u8]) -> Option<usize> {
+    if head.len() < 0x40 { return None; }
+    let offset = u32::from_le_bytes([head[0x3c], head[0x3d], head[0x3e], head[0x3f]]) as usize;
+    if offset < 0x40 || offset + 4 > head.len() { return None; }
+    if &head[offset..offset + 4] != b"PE\0\0" { return None; }
+    Some(offset)
 }
 
 /// host.file_sha256(path) -> hex, or nil plus a named reason.
@@ -6010,7 +6089,98 @@ mod image_and_token_tests {
 /// "script" about the shell wrapper. It had no unit test of its own (found 18/11).
 #[cfg(test)]
 mod classify_magic_tests {
-    use super::{classify_magic, file_magic_value};
+    use super::{classify_magic, classify_magic_on, file_magic_value, HostFormat};
+
+    /// A PE stub whose e_lfanew points at a real "PE\0\0" header.
+    fn pe() -> Vec<u8> {
+        let offset = 0x80usize;
+        let mut bytes = vec![0u8; offset + 4];
+        bytes[..2].copy_from_slice(b"MZ");
+        bytes[0x3c..0x40].copy_from_slice(&(offset as u32).to_le_bytes());
+        bytes[offset..offset + 4].copy_from_slice(b"PE\0\0");
+        bytes
+    }
+
+    /// A universal (fat) Mach-O header naming `count` architectures.
+    fn fat(magic: [u8; 4], count: u32) -> Vec<u8> {
+        let mut bytes = vec![0u8; 8 + 20 * count as usize];
+        bytes[..4].copy_from_slice(&magic);
+        if magic == [0xbe, 0xba, 0xfe, 0xca] {
+            bytes[4..8].copy_from_slice(&count.to_le_bytes());
+        } else {
+            bytes[4..8].copy_from_slice(&count.to_be_bytes());
+        }
+        bytes
+    }
+
+    /// Item 2 of round 9: a native binary is THIS HOST's executable format and nothing else. The same
+    /// leading bytes are a native binary on one platform and a foreign file on another, and the allow-list
+    /// admits only what this node can run.
+    #[test]
+    fn only_the_hosts_own_executable_format_is_native() {
+        let elf = b"\x7fELF\x02\x01\x01\x00".to_vec();
+        let macho = vec![0xcf, 0xfa, 0xed, 0xfe, 0x07, 0x00, 0x00, 0x01];
+        let win = pe();
+        for (bytes, name) in [(&elf, "elf"), (&macho, "macho"), (&win, "pe")] {
+            for host in [HostFormat::Elf, HostFormat::MachO, HostFormat::Pe] {
+                let expected = match host {
+                    HostFormat::Elf if name == "elf" => "elf",
+                    HostFormat::MachO if name == "macho" => "macho",
+                    HostFormat::Pe if name == "pe" => "pe",
+                    _ => "foreign",
+                };
+                assert_eq!(classify_magic_on(bytes, host), expected, "{name} on {host:?}");
+            }
+            // A host this build was not written for has no native format at all: unknown is not yes.
+            assert_eq!(classify_magic_on(bytes, HostFormat::Unknown), "foreign", "{name} elsewhere");
+        }
+        // And the plain entry point answers for THIS host, so a Linux node running the suite sees its own.
+        assert_eq!(classify_magic(&elf), "elf");
+        assert_eq!(classify_magic(&macho), "foreign");
+    }
+
+    /// Item 2: "MZ" alone is not a PE. The COFF header lives at e_lfanew and begins with "PE\0\0"; a DOS
+    /// stub, a decoy, or a pointer past the head is a binary, never a native binary.
+    #[test]
+    fn a_dos_stub_without_a_pe_header_is_not_a_native_binary() {
+        let real = pe();
+        assert_eq!(classify_magic_on(&real, HostFormat::Pe), "pe");
+        // Just "MZ": no room for e_lfanew at all.
+        assert_eq!(classify_magic_on(b"MZ\x90\x00", HostFormat::Pe), "binary");
+        // "MZ" and a zero e_lfanew: the header would sit inside the DOS header itself.
+        let mut zero = vec![0u8; 0x80];
+        zero[..2].copy_from_slice(b"MZ");
+        assert_eq!(classify_magic_on(&zero, HostFormat::Pe), "binary");
+        // e_lfanew that points at something other than "PE\0\0", and one that points past the head.
+        let mut stub = real.clone();
+        stub[0x80..0x84].copy_from_slice(b"NE\0\0");
+        assert_eq!(classify_magic_on(&stub, HostFormat::Pe), "binary");
+        let mut past = real.clone();
+        past[0x3c..0x40].copy_from_slice(&(0xffff_ffffu32).to_le_bytes());
+        assert_eq!(classify_magic_on(&past, HostFormat::Pe), "binary");
+    }
+
+    /// Item 2: 0xcafebabe is the universal Mach-O header AND the Java class magic. The architecture count
+    /// tells them apart: a Java class has a major version (>= 45), never one architecture.
+    #[test]
+    fn a_java_class_is_not_a_universal_macho() {
+        // A real Java class header: cafebabe, minor 0, major 52 (Java 8).
+        let class = vec![0xca, 0xfe, 0xba, 0xbe, 0x00, 0x00, 0x00, 0x34];
+        assert_eq!(classify_magic_on(&class, HostFormat::MachO), "binary");
+        assert_eq!(classify_magic_on(&class, HostFormat::Elf), "binary");
+        // A universal binary naming two architectures is one - on macOS.
+        let universal = fat([0xca, 0xfe, 0xba, 0xbe], 2);
+        assert_eq!(classify_magic_on(&universal, HostFormat::MachO), "macho");
+        assert_eq!(classify_magic_on(&universal, HostFormat::Elf), "foreign");
+        // Its byte-swapped twin too, and a count of zero or too many is neither.
+        assert_eq!(classify_magic_on(&fat([0xbe, 0xba, 0xfe, 0xca], 1), HostFormat::MachO), "macho");
+        assert_eq!(classify_magic_on(&fat([0xca, 0xfe, 0xba, 0xbe], 0), HostFormat::MachO), "binary");
+        assert_eq!(classify_magic_on(&fat([0xca, 0xfe, 0xba, 0xbe], 16), HostFormat::MachO), "binary");
+        // A count whose architecture table is not present is not a universal binary either.
+        let mut truncated = fat([0xca, 0xfe, 0xba, 0xbe], 2);
+        truncated.truncate(8);
+        assert_eq!(classify_magic_on(&truncated, HostFormat::MachO), "binary");
+    }
 
     /// A scratch directory of this test's own: the Rust suite runs in parallel and a shared path would let
     /// one test's fixture answer another's question.
@@ -6024,13 +6194,17 @@ mod classify_magic_tests {
 
     #[test]
     fn the_three_executable_families_are_read_from_their_own_bytes() {
-        assert_eq!(classify_magic(b"\x7fELF\x02\x01\x01\x00"), "elf");
-        // Mach-O, its 64-bit and universal (fat) headers, in both byte orders.
+        // Each family is asserted ON ITS OWN HOST, because a format is native only there (round 9).
+        assert_eq!(classify_magic_on(b"\x7fELF\x02\x01\x01\x00", HostFormat::Elf), "elf");
+        // Mach-O: its 32/64-bit headers in both byte orders, and the universal header with a real table.
         for header in [[0xfeu8, 0xed, 0xfa, 0xce], [0xfe, 0xed, 0xfa, 0xcf], [0xce, 0xfa, 0xed, 0xfe],
-                       [0xcf, 0xfa, 0xed, 0xfe], [0xca, 0xfe, 0xba, 0xbe], [0xbe, 0xba, 0xfe, 0xca]] {
-            assert_eq!(classify_magic(&header), "macho", "{header:?}");
+                       [0xcf, 0xfa, 0xed, 0xfe]] {
+            assert_eq!(classify_magic_on(&header, HostFormat::MachO), "macho", "{header:?}");
         }
-        assert_eq!(classify_magic(b"MZ\x90\x00"), "pe");
+        for magic in [[0xcau8, 0xfe, 0xba, 0xbe], [0xbe, 0xba, 0xfe, 0xca]] {
+            assert_eq!(classify_magic_on(&fat(magic, 1), HostFormat::MachO), "macho", "{magic:?}");
+        }
+        assert_eq!(classify_magic_on(&pe(), HostFormat::Pe), "pe");
     }
 
     #[test]
@@ -6046,7 +6220,8 @@ mod classify_magic_tests {
     #[test]
     fn a_path_is_answered_by_what_is_there_now() {
         let elf = scratch("elf", b"\x7fELF\x02\x01\x01\x00");
-        assert_eq!(file_magic_value(&elf.to_string_lossy())["magic"], "elf");
+        assert_eq!(file_magic_value(&elf.to_string_lossy())["magic"], classify_magic(b"\x7fELF\x02\x01\x01\x00"),
+            "the path answer is this host's answer for its bytes");
         let script = scratch("node", b"#!/bin/sh\nexit 0\n");
         assert_eq!(file_magic_value(&script.to_string_lossy())["magic"], "script");
         let empty = scratch("empty", b"");
