@@ -119,6 +119,16 @@ case "$verb_out" in *row_at_sha_row_required*) ;; *) fail "wa test with no row d
 verb test --at "$sha" "$row" --bogus
 [ "$verb_code" = 2 ] || fail "wa test with an unknown option exited $verb_code, not 2: $verb_out"
 case "$verb_out" in *row_at_sha_unknown_option*) ;; *) fail "wa test with an unknown option did not name it: $verb_out" ;; esac
+# THE COMMIT IS VALIDATED BEFORE A SHELL EXISTS (item 5 of the node-ops round). A --at that is not hex is
+# refused by name, and the proof that nothing ran is the file a command substitution would have created.
+# A caller's argument reaching a shell is the class of defect, so the assertion is the EFFECT: the file
+# does not exist afterwards, and the refusal names it.
+pwn_marker="$SCRATCH/pwned-by-at"
+rm -f "$pwn_marker"
+verb test --at "$(printf '%s' '$(touch ')""$pwn_marker')' scripts/test-row-at-sha.sh
+[ "$verb_code" = 2 ] || fail "wa test with a --at that runs a command exited $verb_code, not 2: $verb_out"
+case "$verb_out" in *row_at_sha_bad_commit*) ;; *) fail "wa test did not refuse a non-hex --at by name: $verb_out" ;; esac
+[ ! -e "$pwn_marker" ] || fail "wa test EXECUTED the --at argument's command substitution: $pwn_marker exists"
 # A refusal the WORKER answers (a row absent at that commit) reaches the caller with the worker's own code
 # and text: a refusal is not a comparison that failed.
 if [ -n "$base_sha" ]; then
@@ -127,4 +137,4 @@ if [ -n "$base_sha" ]; then
   case "$verb_out" in *row_at_sha_row_absent_at_base*) ;; *) fail "wa test did not pass the worker's absent-at-base refusal through: $verb_out" ;; esac
 fi
 
-echo 'test-row-at-sha: ok (four classes and the skip convention, a real comparison with no worktree left behind, every refusal named, and the wa test verb run for real)'
+echo 'test-row-at-sha: ok (four classes and the skip convention, a real comparison with no worktree left behind, every refusal named, the wa test verb run for real, and a --at that is a command substitution refused before any shell runs - proved by the file it would have created not existing)'

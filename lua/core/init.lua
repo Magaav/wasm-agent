@@ -481,6 +481,17 @@ elseif command == "test" then
     print("wa test: refused(row_at_sha_row_required): name the row -- wa test --at <sha> <row>")
     os.exit(2)
   end
+  -- THE COMMIT IS VALIDATED BEFORE ANY SHELL EXISTS (item 5 of the node-ops round). The comparison is a
+  -- bash command this verb builds, and the commit arrives from a caller's hand. A value that is not a
+  -- commit cannot be compared, so it is refused here by name: nothing is quoted, nothing is executed, and
+  -- a caller who meant `--at latest` learns that from the refusal instead of from bash's own complaint.
+  -- The rule is an ALLOW-LIST (hex only), not a block-list of characters somebody remembered.
+  local at_text = tostring(at or "")
+  if not at_text:match("^%x+$") then
+    local shown = at_text:gsub("[^%w%._/-]", "?")
+    print("wa test: refused(row_at_sha_bad_commit): --at " .. shown .. " is not a commit sha (hex digits only); nothing was run")
+    os.exit(2)
+  end
   local root = host.getenv("WASM_AGENT_LUA_ROOT") or "."
   repo = repo or root
   local lib = root .. "/scripts/lib/row-at-sha.sh"
@@ -491,8 +502,16 @@ elseif command == "test" then
   -- The worker's own fields are read back rather than re-derived: it prints class=, base_code=,
   -- change_code= and binary=, and this verb prints the same facts (as JSON with --json, which is the
   -- shape a harness reads).
-  local command = "bash " .. ("%q"):format(root .. "/scripts/row-at-sha.sh") .. " " .. ("%q"):format(tostring(at))
-    .. " " .. ("%q"):format(tostring(row)) .. " " .. ("%q"):format(tostring(repo))
+  -- SINGLE QUOTES, NOT %q (item 5). `string.format("%q", x)` is Lua's own escaping: it writes `\"`
+  -- quoting, `\n` and `\ddd` escapes, and a shell does not read any of them the way Lua wrote them - a
+  -- repository path with a backslash or a quote arrived at bash as another string. A value wrapped in
+  -- single quotes and with every internal ' closed-escaped-reopened is what `sh` parses back to exactly
+  -- these bytes, on every shell this node runs.
+  local function shq(value)
+    return "'" .. tostring(value):gsub("'", "'\\''") .. "'"
+  end
+  local command = "bash " .. shq(root .. "/scripts/row-at-sha.sh") .. " " .. shq(at_text)
+    .. " " .. shq(tostring(row)) .. " " .. shq(tostring(repo))
   local ran, raw = pcall(host.exec, command, repo, 3600)
   local answer = type(raw) == "string" and (select(2, pcall(json.decode, raw))) or raw
   if not ran or type(answer) ~= "table" then
