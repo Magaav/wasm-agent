@@ -422,7 +422,7 @@ fn accepted_output_before_initialization_is_pending_not_a_launch_failure() {
     let index = m.index().unwrap();
     let state = json!({"state":"accepted","settled":false,"timing":timing_payload()});
     let entry = Arc::new(Entry {owned_child:Mutex::new(None),index,
-        cancel:AtomicBool::new(false),demote:AtomicBool::new(false),state:Mutex::new(state),
+        cancel:AtomicBool::new(false),demote:AtomicBool::new(false),control:false,state:Mutex::new(state),
         settled:Condvar::new(),started:Instant::now(),deadline_ms:AtomicU64::new(300000)});
     m.entries.lock().unwrap().insert(id.into(),entry.clone());
     for stream in ["stdout","stderr"] {

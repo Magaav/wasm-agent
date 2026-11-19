@@ -327,7 +327,10 @@ end
 --
 -- Round 1 administered a per-session share of 6 of 8 and nothing else: two sessions at four each filled
 -- all eight while neither was over its share, and then "cancel the runaway" was refused for want of a
--- slot. The reserve is two slots a CONTROL start may take and a workload may not.
+-- slot. The reserve is two slots a CONTROL start may take and a workload may not - and after the
+-- round-3 rebase it lives in the node's QUEUE (harness-next-a's Slot), not in an admission refusal:
+-- a workload that finds only the reserve left is admitted and WAITS, it is not turned away, and the
+-- operation records queue_limit=6 and queue_reserve=2 while it waits.
 local long_command = shell:find("cmd", 1, true) and ("ping -n 40 127.0.0.1 >" .. null_device)
   or ("sleep 30 >" .. null_device .. " 2>&1")
 -- Nothing of this test's own is left running: the count below is about what THIS section starts.
@@ -335,24 +338,47 @@ tools.dispatch(memory, "operation", { action = "cancel", id = id }, "master", ct
 local ctx_c = { session_id = "iso-session-c", user_id = "master" }
 local ctx_d = { session_id = "iso-session-d", user_id = "master" }
 local held_c = {}
-for _ = 1, 4 do
+for _ = 1, 7 do
   local answer = tools.dispatch(memory, "operation", { action = "start", command = long_command, timeout_seconds = 120 }, "master", ctx_c) or {}
-  if answer.operation_id then held_c[#held_c + 1] = answer.operation_id else break end
+  if answer.operation_id then held_c[#held_c + 1] = answer.operation_id
+  else
+    ok(tostring(answer.error or ""):find("operation_capacity_shared", 1, true) ~= nil,
+      "the seventh start by one session is refused by its share: " .. tostring(answer.error))
+    break
+  end
 end
-eq(#held_c, 4, "one session starts its four operations")
+eq(#held_c, 6, "one session takes its whole share - six of the node's eight slots: " .. #held_c)
+-- A second session is NOT refused: its start is admitted and waits behind the reserve.
 local held_d = {}
-for _ = 1, 4 do
+for _ = 1, 2 do
   local answer = tools.dispatch(memory, "operation", { action = "start", command = long_command, timeout_seconds = 120 }, "master", ctx_d) or {}
-  if answer.operation_id then held_d[#held_d + 1] = answer.operation_id
-  else ok(tostring(answer.error or ""):find("operation_capacity_control_reserved", 1, true) ~= nil,
-      "a second session cannot fill the node either: " .. tostring(answer.error)) break end
+  if answer.operation_id then held_d[#held_d + 1] = answer.operation_id else break end
 end
-eq(#held_d, 2, "so two sessions at four each no longer fill all eight: " .. #held_d)
+eq(#held_d, 2, "a second session's starts are admitted, not refused: " .. #held_d)
+local queued_d = nil
+for _ = 1, 60 do
+  local status = tools.dispatch(memory, "operation", { action = "status", id = held_d[1] }, "master", ctx_d) or {}
+  if status.state == "queued" then queued_d = status break end
+  if status.state == "running" or status.settled == true then break end
+  host.sleep(50)
+end
+ok(queued_d ~= nil and tonumber(queued_d.queue_limit) == 6,
+  "and they WAIT for a workload slot instead of filling the node: " .. json.encode(queued_d or {}):sub(1, 300))
+ok(queued_d ~= nil and tonumber(queued_d.queue_reserve) == 2,
+  "behind the two slots no workload may take: " .. json.encode(queued_d or {}):sub(1, 300))
 -- A CONTROL start (the node's own short read) is admitted into the reserve...
-local control_start = decode(host.operation("start", json.encode({ command = long_command, timeout_seconds = 120,
+local control_start = decode(host.operation("start", json.encode({ command = "echo control", timeout_seconds = 60,
   owner = "mcp-read-session", control = true }))) or {}
 ok(type(control_start.operation_id) == 'string',
   "a control start is admitted while every workload slot is full: " .. json.encode(control_start):sub(1, 200))
+local control_ran = nil
+for _ = 1, 40 do
+  local status = decode(host.operation("status", json.encode({ id = control_start.operation_id, owner = "mcp-read-session" }))) or {}
+  if status.state == "running" or status.settled == true then control_ran = status break end
+  host.sleep(50)
+end
+ok(control_ran ~= nil, "and it RUNS while the workloads wait: "
+  .. json.encode(control_ran or {}):sub(1, 300))
 -- ...and a workload still is not, and a MODEL cannot mark itself as control.
 local after_control = tools.dispatch(memory, "operation", { action = "start", command = long_command, timeout_seconds = 120, control = true }, "master", ctx_c) or {}
 eq(after_control.operation_id, nil, "a model-supplied control flag does not make a workload a control call")

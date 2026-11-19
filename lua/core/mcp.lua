@@ -976,7 +976,7 @@ function M.invoke(input,ctx)
  -- node-wide any more, so the caller that STARTS the operation must name the same owner when it observes
  -- it. 'mcp-control' is also this read's cap key, so its share is counted instead of bypassed.
  local op_owner=ctx.session_id or 'mcp-control'
- local start=decode(host.operation('start',json.encode({program=node_program(),args={client,'--request-file',request},cwd=ctx.cwd or platform.cwd(),timeout_seconds=math.min(86400,timeout+3),owner=op_owner,control=input.action~='call'})))
+ local start=decode(host.operation('start',json.encode({program=node_program(),args={client,'--request-file',request},cwd=ctx.cwd or platform.cwd(),timeout_seconds=math.min(86400,timeout+3),owner=op_owner,control=input.action~='call',vault_env=vault_env,vault_approval=input.vault_approval})))
  if not start or start.error or not start.operation_id then return fail('mcp_operation_not_started',{detail=start,tool_call_issued=false,outcome='not_submitted',request=request}) end
  local id=start.operation_id
  local settled=decode(host.operation('await',json.encode({id=id,wait_for='settled',owner=op_owner})))

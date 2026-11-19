@@ -714,7 +714,11 @@ if command -v node >/dev/null 2>&1; then
   # The front door (scripts/install.sh): the platform matrix, which channel each OS gets, the exact
   # arguments the core is handed, the installer pin, and install -> re-run -> update -> rollback against
   # file: fixtures. No network, no systemd, no built binary - seconds.
-  check install-front-door bash scripts/test-install.sh
+  # Both halves of the tool-environment rule (session isolation, finding 5 round 2): a secret is withheld by
+# shape, and the node policy hands a NAME over. One script, two invocations - which is why it is a .sh
+# check here and its .lua half is declared not-a-row in scripts/fast-path.exclude.
+WA_BIN="$bin" check tool-env-allow bash scripts/test-tool-env-allow.sh
+check install-front-door bash scripts/test-install.sh
   # The canonical runtime binding is decided in PREFLIGHT, before anything is built, and a refusal names
   # every worktree that is on branch main (measured 18/11: a deploy refused after ~4 minutes of build with
   # "exactly one canonical main checkout is required" and named neither path the operator had to choose

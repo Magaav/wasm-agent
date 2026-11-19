@@ -138,7 +138,7 @@ function M.invoke(input,ctx,directory)
  -- ONE OWNER NAME FOR THIS READ SESSION (session isolation, item 7 round 2): a sessionless caller is not
  -- node-wide any more, so every later observe of this operation names the same owner that started it.
  local slot_owner=ctx.session_id or 'mcp-read-session'
- local start=decode(host.operation('start',json.encode({program=M.node_program(),args={directory..'/mcp-session.mjs','--seed-file',seed_file},cwd=ctx.cwd or platform.cwd(),timeout_seconds=3600,owner=slot_owner,control=true})))
+ local start=decode(host.operation('start',json.encode({program=M.node_program(),args={directory..'/mcp-session.mjs','--seed-file',seed_file},cwd=ctx.cwd or platform.cwd(),timeout_seconds=3600,owner=slot_owner,control=true,vault_env=vault_env,vault_approval=vault_approval})))
   if not start or start.error or not start.operation_id then return failure('mcp_session_not_started',{detail=start}) end
   slot={operation_id=start.operation_id,seed_file=seed_file,ready_file=ready_file,token=seed.token,owner=slot_owner};pool[key]=slot
   for _=1,math.min(36000,20+math.ceil((input.server.timeout_seconds or 30)*10)) do

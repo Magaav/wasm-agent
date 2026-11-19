@@ -45,6 +45,7 @@ scripts/test-subagent-selection.lua  # lua error: /t/lua/core/orchestrator.lua:1
 scripts/test-subagents-integration.lua  # lua error: [string "scripts/test-subagents-integration.lua"]:14: coding-child source repos
 scripts/test-subagents-profiles.lua  # lua error: [string "scripts/test-subagents-profiles.lua"]:10: policy_fixture_requires_isol
 scripts/test-vault-keys.lua  # lua error: [string "scripts/test-vault-keys.lua"]:16: the test runs against its own store 
+scripts/test-tool-env-allow.lua  # half of a two-invocation test: scripts/test-tool-env-allow.sh runs this script twice (withheld, then granted by a policy) and is a check of this fast path; run alone it has no policy and no second mode
 scripts/test-vault-login.lua  # lua error: [string "scripts/test-vault-login.lua"]:37: attempt to call a nil value (field 
 scripts/test-wave-autoflush.lua  # lua error: [string "scripts/test-wave-autoflush.lua"]:19: assertion failed!
 scripts/test-wave-autoflush-restart.lua  # lua error: [string "scripts/test-wave-autoflush-restart.lua"]:4: assertion failed!
