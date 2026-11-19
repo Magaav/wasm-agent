@@ -20,11 +20,21 @@ M.ARMS = {
   e3 = "e3",
 }
 
--- The arm this process is running, from the switch the node already reads. An unknown value is not an
--- arm: it answers nil and the reason, so a typo is refused rather than measured as arm A.
+-- The arm this process is running. OFF unless its own switch names one (review MUST 3).
+--
+-- It used to read WASM_AGENT_RAW_CODE and answer "fence" when that was unset, so EVERY node was
+-- silently running an A/B arm: the arm''s allow-list filtered the tool list, and a subagent's
+-- declared tools changed against base for a reason nobody had asked for. WASM_AGENT_RAW_CODE already
+-- means something else (which transport the fence path offers), so sharing it made the two
+-- indistinguishable. WA_AB_ARM is the arm switch and nothing else touches it.
+--
+-- An unset switch is not an arm: it answers nil with the reason "off", and every caller treats nil as
+-- "no filter". An unknown value is refused by name, so a typo cannot be measured as arm A.
+M.SWITCH = "WA_AB_ARM"
+
 function M.current()
-  local raw = tostring(host.getenv("WASM_AGENT_RAW_CODE") or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
-  if raw == "" then return "fence", "default" end
+  local raw = tostring(host.getenv(M.SWITCH) or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
+  if raw == "" then return nil, "off" end
   for arm, value in pairs(M.ARMS) do
     if value == raw then return arm, "switch" end
   end

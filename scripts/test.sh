@@ -1672,6 +1672,9 @@ WA_SCRIPT=scripts/test-arm-tag.lua "$BIN" --db "$DB" | grep "arm tag ok"
 # The batching instruction (batch-spec.md): the same sentence in all three places the model can
 # read it, verbatim, pinned per place because three modules build those texts.
 WA_SCRIPT=scripts/test-batching-instruction.lua "$BIN" --db "$DB" | grep "batching instruction ok"
+# The A/B arms are off unless their own switch names one (review MUST 3): an unset switch must
+# leave a subagent's declared tools exactly what the policy says, with no arm filter.
+WA_SCRIPT=scripts/test-ab-arms.lua "$BIN" --db "$DB" | grep "ab arms ok"
 
 # Test the shipping registry, including missing/stale/invalid negative controls.
 ( export WA_EMBEDDED_SOURCE_ROOT="$WASM_AGENT_LUA_ROOT"; unset WASM_AGENT_LUA_ROOT
