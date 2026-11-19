@@ -2943,3 +2943,72 @@ mod adoption_survives_the_relay_deadline {
             "the adopted command must have run exactly once, marker was {text:?}");
     }
 }
+
+/// Verification r3 (small): a relayed await RETURNS AT wait_ms, it does not hold until settlement.
+///
+/// The branch used to ignore wait_ms entirely and return only when the operation settled, so a relayed
+/// await held the relay connection and a peer slot until the relay deadline (~35 s). This measures the
+/// bound itself: a command that outlives the wait answers at the caller own wait_ms, unsettled, and the
+/// SAME call again later answers its result. Isolation: manager() roots its records under HOME, a
+/// OnceLock, so this refuses to run outside a scratch/temp HOME.
+#[cfg(test)]
+mod await_returns_at_its_own_wait {
+    use super::*;
+    use crate::host::shell_config;
+
+    fn scratch_home_or_refuse() -> std::path::PathBuf {
+        let home = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default());
+        let text = home.to_string_lossy().to_string();
+        let scratch = text.contains("tmp") || text.contains("temp") || text.contains("scratch")
+            || text.contains("TMP");
+        let real = text.ends_with("/.wasm-agent");
+        assert!(scratch && !real,
+            "refusing to run: this test starts real operations, so HOME must be a scratch or temp \
+             directory and never the node own ~/.wasm-agent (got {text})");
+        home
+    }
+
+    #[test]
+    fn a_relayed_await_answers_at_wait_ms_and_never_holds_the_relay() {
+        let _home = scratch_home_or_refuse();
+        let shell = shell_config();
+        let session = "relay:await-test".to_string();
+        let started = super::control("start", &serde_json::json!({
+            "command": "sleep 4; echo waited", "cwd": "", "timeout_seconds": 60,
+            "session": session, "background": true,
+        }), &shell).expect("start");
+        let id = started["operation_id"].as_str().expect("id").to_string();
+
+        // The caller asked for 700 ms and the command runs 4 s: the answer must be the STATE, at about
+        // 700 ms, not the command result at about 4 s.
+        let began = std::time::Instant::now();
+        let first = super::control("await", &serde_json::json!({
+            "id": id, "wait_ms": 700, "session": session,
+        }), &shell).expect("await");
+        let took = began.elapsed();
+        assert!(took >= std::time::Duration::from_millis(600),
+            "the wait really waited its own budget, took {took:?}");
+        assert!(took < std::time::Duration::from_millis(3000),
+            "and it did NOT hold until the command settled (4 s), took {took:?}");
+        assert_eq!(first["settled"], serde_json::json!(false),
+            "an unsettled command answers its state, never a false completion: {first}");
+
+        // wait_ms is clamped to the tool documented maximum (10 s): a caller naming an hour is answered
+        // inside 10 s, not held until the relay gives up.
+        let began2 = std::time::Instant::now();
+        let _ = super::control("await", &serde_json::json!({
+            "id": id, "wait_ms": 3_600_000, "session": session,
+        }), &shell).expect("await");
+        assert!(began2.elapsed() < std::time::Duration::from_millis(12_000),
+            "a huge wait_ms is clamped to 10 s, took {:?}", began2.elapsed());
+
+        // The work is still there and still runs: the await did not cancel or re-run it.
+        let settled = super::control("wait", &serde_json::json!({
+            "id": id, "wait_ms": 10000, "session": session,
+        }), &shell).expect("wait");
+        assert_eq!(settled["settled"], serde_json::json!(true), "and it settles on its own: {settled}");
+        let out = settled["stdout"].as_str().unwrap_or("");
+        assert_eq!(out.matches("waited").count(), 1,
+            "the command ran exactly once, stdout was {out:?}");
+    }
+}

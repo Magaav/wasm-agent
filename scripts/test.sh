@@ -257,6 +257,9 @@ gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-ca
 # a scratch HOME - manager() roots its records there once per process. HOME=$GATE_HOME is that home; the
 # test itself refuses to run when HOME is not a scratch/temp directory or is the node's own ~/.wasm-agent.
 gate_run env HOME="$GATE_HOME" cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-capabilities adoption_survives_the_relay_deadline
+# A relayed await answers at the caller wait_ms instead of holding the relay and a peer slot until the
+# operation settles (verification r3). It starts real operations, so it needs the gate scratch HOME.
+gate_run env HOME="$GATE_HOME" cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-capabilities await_returns_at_its_own_wait
 # The line boundaries `host.http_sse` hands over are tested against real recorded SSE bodies (under
 # `tests/fixtures/subscription/`, kept as generic SSE recordings): a reader that re-frames or drops a
 # line fails here. Every filter above names its own module, so this one is named explicitly.
