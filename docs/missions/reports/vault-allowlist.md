@@ -102,8 +102,16 @@ Victor approves these; the approved ones stay verbatim.
 
 **CLI (`/mcp <key> on --native`)**
 
-- `--native takes the ABSOLUTE path of a native binary this connector runs: a bare name is resolved through PATH, which this digest cannot name`
-- `usage: /mcp <key> on --native <absolute path of the binary>`
+- `  --native takes the ABSOLUTE path of a native binary this connector runs: a bare name is resolved through PATH, which the approval does not trust` (`mcp_vault_native_needs_absolute_path`; round 9: re-quoted verbatim from `lua/core/mcp_cli.lua`, which said "which the approval does not trust" while this report said "which this digest cannot name")
+- `  usage: /mcp <key> on --native <absolute path of the binary>` (`mcp_vault_native_usage`)
+- `mcp_vault_native_unreadable`: the refusal when `--native` names a program that cannot be read, so nothing is approved (`lua/core/mcp.lua`, both `on` and `enable`). Round 9: it was in no list here.
+
+**The one string that changed name (an orchestrator decision).** `vault_approval_interpreter_unfollowed:<program>`
+no longer exists. Round 8 replaced the by-name interpreter list with one allow-list judgement emitted as
+`vault_approval_program_not_allowed:<program>` (and `_program_wrapper`, `_program_not_native`,
+`_program_native_not_executable`, `_argument_not_allowed` beside it), and `docs/MCP.md:177` still named the
+old one. The replacement - and this report's line for it - was approved as an orchestrator decision:
+Victor delegated the approval of this round's text (19/11), so no further sign-off was asked.
 
 ## What remains, explicitly
 

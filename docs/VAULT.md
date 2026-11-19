@@ -527,7 +527,7 @@ answers is "what IS this file", not "what is it called":
 | --- | --- |
 | `node`, `nodejs`, `sh`, `bash` or `dash` (the basename of the realpath, symlinks resolved), and the file's leading bytes are ELF, Mach-O or PE | **allowed** - the two families this digest can follow (JavaScript through its imports, POSIX shell through `source`/`.`/`exec` of paths) |
 | a native binary the operator explicitly vouched for with `/mcp <id> on --native <absolute path>` | **allowed** - recorded in the approval with its sha256; its own loads are outside the digest (below) |
-| anything else | **refused**, whatever its name - `vault_approval_program_not_allowed:<program>` |
+| anything else | **refused**, whatever its name - the KERNEL's string is `vault_approval_program_not_allowed:<program>` (round 9: `vault_approval_interpreter_unfollowed` no longer exists; the console's own refusal is prose in its `problems` list, which `docs/MCP.md` quotes) |
 
 That last row is the whole point, so it is worth saying plainly: **every other program is refused**.
 `python`, `perl`, `ruby`, `R`/`Rscript`, `php`, `java`, any interpreter, a **copy** of one under another
@@ -618,7 +618,10 @@ Three places check it, and any one of them refuses:
   `vault_approval_argument_unresolved:<value>`, `vault_approval_argument_not_covered:<path>`,
   `vault_approval_argument_ambiguous:<value>`, `vault_approval_file_not_found:<value>`,
   `vault_approval_inline_code:<flag>`, `vault_approval_program_not_allowed:<program>`,
-  `vault_approval_program_not_native:<program>`, `vault_approval_native_unreadable:<path>`,
+  `vault_approval_program_not_native:<program>`, `vault_approval_program_wrapper:<program>`,
+  `vault_approval_program_missing:<program>`,
+  `vault_approval_program_native_not_executable:<program>`,
+  `vault_approval_argument_not_allowed:<value>`, `vault_approval_native_unreadable:<path>`,
   `vault_approval_native_changed:<path>`, `vault_approval_native_not_covered:<path>`,
   `vault_approval_interpreter_not_covered:<path>` or `vault_approval_mismatch`, and after the spawn it
   hashes those same files again (`vault_approval_changed_since_check:<path>`, which kills the operation - the
