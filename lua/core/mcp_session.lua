@@ -131,14 +131,21 @@ function M.invoke(input,ctx,directory)
   if not host.write_file(seed_file,json.encode(seed)) then return failure('mcp_seed_not_written') end
   -- The runtime is the one mcp.lua resolves (it sets M.node_program); never a guess at `node` on PATH.
   if not M.node_program then return failure('mcp_node_runtime_unresolved') end
-  -- A read session is a READ: a CONTROL start, admitted into the two slots no workload may hold (session
- -- isolation, finding 7 round 2). It names no session on purpose (a read is not a conversation's work), so
- -- its share is counted against its OWNER - 'mcp-read-session' for a sessionless caller - instead of
- -- against nobody, which is how these starts used to bypass the share entirely.
+  -- A READ SESSION IS A WORKLOAD, NOT A CONTROL CALL (session isolation, item 4 round 4).
+ --
+ -- Round 3 marked this start `control=true`, and it lives for 3600 s: the two reserved slots exist so the
+ -- node can still ask a SHORT question while every workload slot is busy, so a connector's read session
+ -- parked in one of them for an hour left the "cancel the runaway" path with nothing to run in. It is an
+ -- ordinary workload now - its own owner, its own share, the workload ceiling - and `CONTROL_MAX_SECONDS`
+ -- in the runtime refuses any long start that asks for the reserve.
+ --
+ -- It names no session on purpose (a read is not a conversation's work), so its share is counted against
+ -- its OWNER - 'mcp-read-session' for a sessionless caller - instead of against nobody, which is how these
+ -- starts used to bypass the share entirely.
  -- ONE OWNER NAME FOR THIS READ SESSION (session isolation, item 7 round 2): a sessionless caller is not
  -- node-wide any more, so every later observe of this operation names the same owner that started it.
  local slot_owner=ctx.session_id or 'mcp-read-session'
- local start=decode(host.operation('start',json.encode({program=M.node_program(),args={directory..'/mcp-session.mjs','--seed-file',seed_file},cwd=ctx.cwd or platform.cwd(),timeout_seconds=3600,owner=slot_owner,control=true,vault_env=vault_env,vault_approval=vault_approval})))
+ local start=decode(host.operation('start',json.encode({program=M.node_program(),args={directory..'/mcp-session.mjs','--seed-file',seed_file},cwd=ctx.cwd or platform.cwd(),timeout_seconds=3600,owner=slot_owner,vault_env=vault_env,vault_approval=vault_approval})))
   if not start or start.error or not start.operation_id then return failure('mcp_session_not_started',{detail=start}) end
   slot={operation_id=start.operation_id,seed_file=seed_file,ready_file=ready_file,token=seed.token,owner=slot_owner};pool[key]=slot
   for _=1,math.min(36000,20+math.ceil((input.server.timeout_seconds or 30)*10)) do

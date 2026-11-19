@@ -625,5 +625,37 @@ if type(watch_run.operation_id) == 'string' then
   host.sql_exec('DELETE FROM meta WHERE key=?', json.encode({ 'session.run.v1:' .. watch_session }))
 end
 
+-- ---- item 4 round 4: only SHORT control calls take the reserved slots -------------------
+--
+-- The two reserved slots keep the node able to ask a short question while every workload slot is busy.
+-- Round 3 marked the read-MCP session `control=true` and it lives 3600 s, so one connector could park the
+-- whole reserve for an hour. The rule now has a bound, and a long start that asks is DEMOTED AND TOLD.
+local short_control = decode(host.operation('start', json.encode({ command = 'echo short', timeout_seconds = 60,
+  owner = 'iso-control-short', control = true }))) or {}
+ok(type(short_control.operation_id) == 'string', 'a short control start is admitted: ' .. tostring(short_control.error))
+ok(short_control.control_refused == nil, 'and no reserve was refused from it')
+local long_control = decode(host.operation('start', json.encode({ command = 'echo long', timeout_seconds = 3600,
+  owner = 'iso-control-long', control = true }))) or {}
+ok(type(long_control.operation_id) == 'string', 'a 3600 s start is admitted: ' .. tostring(long_control.error))
+ok(tostring(long_control.control_refused or ''):find('reserved slots', 1, true) ~= nil,
+  'but it is TOLD it is a workload, not a control call: ' .. tostring(long_control.control_refused))
+for _, started in ipairs({ short_control, long_control }) do
+  if type(started.operation_id) == 'string' then
+    pcall(host.operation, 'cancel', json.encode({ id = started.operation_id,
+      owner = started == short_control and 'iso-control-short' or 'iso-control-long' }))
+  end
+end
+-- The read-MCP session no longer asks for the reserve at all: it is a workload with its own share.
+local lua_root = tostring(host.getenv('WASM_AGENT_LUA_ROOT') or '')
+local session_source = lua_root ~= '' and (host.read_file(lua_root .. '/lua/core/mcp_session.lua') or '') or ''
+-- The LAUNCH LINE, not the prose: it must carry no `control=` field at all. (The comment above it
+-- explains the old rule and names the field, which is why this reads the line, not the file.)
+local launch_line = ''
+for line in tostring(session_source):gmatch('[^\n]+') do
+  if line:find("host.operation('start'", 1, true) then launch_line = line end
+end
+ok(launch_line ~= '' and not launch_line:find('control=', 1, true),
+  'the read-MCP session launch claims no reserved slot: ' .. launch_line:sub(1, 120))
+
 print(string.format("%d checks, %d failed", checks, failed))
 if failed > 0 then os.exit(1) end

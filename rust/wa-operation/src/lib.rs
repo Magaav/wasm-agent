@@ -144,6 +144,16 @@ const PER_SESSION_MAX: usize = MAX_ACTIVE - CONTROL_RESERVE;
 /// The slots a workload may never take and a control call may: the node's own status/list/cancel and its
 /// short reads are admitted into these two while every other start is refused.
 const CONTROL_RESERVE: usize = 2;
+
+/// How long a start may run and still be a CONTROL call.
+///
+/// The reserve exists so the node can still ask a short question while every workload slot is busy; it is
+/// not a parking space for long work (session isolation, item 4 round 4). A read-MCP session holds its
+/// process for up to 3600 s, and the first version of the reserve marked it `control=true` - so a
+/// connector's read session could occupy the whole reserve for an hour, and the "cancel the runaway"
+/// path had nothing left to run in. A start past this bound is a WORKLOAD whatever it asks for, with its
+/// own share and its own cap.
+pub const CONTROL_MAX_SECONDS: u64 = 60;
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 #[derive(Clone)]
 pub struct Spec {

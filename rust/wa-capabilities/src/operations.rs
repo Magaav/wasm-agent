@@ -1183,10 +1183,18 @@ pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<V
             // read (the first hole of this round, docs/VAULT.md).
             seal_request(&mut launch, args.get("vault_approval").unwrap_or(&Value::Null), vault_launch)?;
             let mut admitted = launch_context(launch, &args["_launch_cwd"]);
-            // A CONTROL start (the node's own short read) is the only kind admitted into the two slots
-            // no workload may hold (item 7, round 2). lua/core/tools.lua clears this key on a model
-            // call, so it comes from the node's read paths only.
-            admitted.control = args["control"] == true;
+            // A CONTROL start (the node's own SHORT read) is the only kind admitted into the two slots
+            // no workload may hold (item 7, round 2). lua/core/tools.lua clears this key on a model call,
+            // so it comes from the node's read paths only.
+            //
+            // AND SHORT IS PART OF THE RULE (session isolation, item 4 round 4): the reserve is what keeps
+            // the node able to ask a question while every workload slot is busy, so a start that runs for
+            // longer than CONTROL_MAX_SECONDS cannot hold one - a read-MCP session (3600 s) parked two
+            // reserved slots for an hour in round 3. A long start that asks for the reserve is demoted to
+            // a workload and TOLD, because a silently changed admission is a misleading result.
+            let asked_control = args["control"] == true;
+            let control_refused = reserve_refused(asked_control, seconds);
+            admitted.control = asked_control && !control_refused;
             // The session that asked owns what it started, even when the launch context did not carry it
             // (`launch_cwd` does; a caller that passes its own provenance may not).
             if admitted.session.is_empty() {
@@ -1223,6 +1231,11 @@ pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<V
             if let Some(path) = staged_script.as_ref() {
                 receipt["staged_script"] = json!(path.to_string_lossy());
                 receipt["staged_script_note"] = json!("the command was too long for the Windows command line and ran from this staged file; $0 is the file path, the script is not removed while the operation may still read it");
+            }
+            if control_refused {
+                receipt["control_refused"] = json!(format!(
+                    "a start of {seconds}s is a workload, not a control call: the two reserved slots are kept for short calls (status, list, cancel, short reads, at most {}s)",
+                    wa_operation::CONTROL_MAX_SECONDS));
             }
             for key in ["cwd", "cwd_requested", "cwd_source", "effective_cwd", "cwd_substitution", "cwd_note"] {
                 if let Some(value) = state.get(key) { receipt[key] = value.clone(); }
@@ -1415,6 +1428,16 @@ pub fn health_scope(session: &str) -> Value {
         "operations_scope": if session.is_empty() { "node" } else { "session" }})
 }
 
+/// Is a start that ASKED for the reserved control slots refused them, because it is not short?
+///
+/// The reserve keeps the node able to ask a short question while every workload slot is busy, so a start
+/// that lives longer than `wa_operation::CONTROL_MAX_SECONDS` is a workload however it asks (session
+/// isolation, item 4 round 4). One rule, one function, pinned by
+/// `a_long_start_cannot_take_the_reserved_control_slots`.
+pub(crate) fn reserve_refused(asked_control: bool, seconds: u64) -> bool {
+    asked_control && seconds > wa_operation::CONTROL_MAX_SECONDS
+}
+
 /// The count the progress row draws: the OTHER sessions' unsettled operations, for `session`.
 ///
 /// The editor's row cannot reach this manager itself (wa-term is a leaf that knows nothing of the
@@ -1488,6 +1511,21 @@ mod elsewhere_count_tests {
         assert_eq!(elsewhere, 4, "four unsettled operations of ONE other session are four");
         assert_eq!(mine.len(), 1, "and the caller's own unsettled operation is its own");
         assert_eq!(mine[0]["operation_id"], json!("op-6"));
+    }
+
+    /// Item 4 (round 4): only SHORT control calls may take the reserved slots.
+    ///
+    /// Round 3 marked the read-MCP session `control=true` and it lives 3600 s, so it could hold both
+    /// reserved slots for an hour and the "cancel the runaway" path had nothing left to run in. A long
+    /// start is a workload, whatever it asks for.
+    #[test]
+    fn a_long_start_cannot_take_the_reserved_control_slots() {
+        use super::reserve_refused;
+        assert!(reserve_refused(false, 3600) == false, "a workload takes no reserve anyway");
+        assert!(reserve_refused(true, 5) == false, "a short control call keeps the reserve");
+        assert!(reserve_refused(true, wa_operation::CONTROL_MAX_SECONDS) == false, "the bound itself is short");
+        assert!(reserve_refused(true, wa_operation::CONTROL_MAX_SECONDS + 1), "one second past it is a workload");
+        assert!(reserve_refused(true, 3600), "the read-MCP session's 3600 s start is a workload");
     }
 
     /// A node-wide caller owns everything, and a settled row is still not running anywhere: the count
