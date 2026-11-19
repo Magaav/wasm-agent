@@ -525,14 +525,12 @@ gate_event({ called_done_criteria = false })
 local legacy_stats = core.gate_stats({})
 check(legacy_stats.changed >= 2, "rows written under the old event name are still counted")
 
--- Scoped to this row's own session, so the assertion does not depend on what else the ledger holds.
-local function stats_for(sid)
-  -- gate_stats reads the node-wide window by design; the row scopes it by asking for a window that
-  -- starts at this fixture and reading the session it wrote, so the assertion is about THIS ledger.
-  local stats = core.gate_stats({})
-  return stats
-end
-local stats = stats_for(gate_session)
+-- Review r2, item 2 nit: the old helper took a session id and ignored it - a scoped-looking call that
+-- was a node-wide read. gate_stats IS node-wide by design (the rate is the node release's rate), so the
+-- helper is gone and the two facts it was pretending to scope are asserted separately: the module's own
+-- availability, and the fixture's contribution to the counts (2 changed, 1 captured, 50% when this
+-- fixture is the only stamped build in the window).
+local stats = core.gate_stats({})
 check(stats.available == true, "gate_stats reports its own availability")
 check(stats.changed == 2, "gate_stats counts the two state-changing turns: " .. tostring(stats.changed))
 check(stats.called == 1, "and the one that called done_criteria: " .. tostring(stats.called))
@@ -575,6 +573,26 @@ check(built.skipped_unknown_build >= 1, "a turn with no build stamp is excluded,
 eq(built.changed, 2, "and neither exclusion changes the selected build's own count")
 local unstamped = core.gate_stats({ build = "ffffffffffff" })
 eq(unstamped.changed, 0, "a build with no turn answers zero, not another build's turns")
+
+-- Review r2, item 2: an UNREADABLE ledger is unknown, not empty and not 0%. The comment said so and the
+-- code did not (gate_stats always answered available = true), which is the one shape of this metric that
+-- could delete a gate on no evidence. Both halves are pinned here, with the failure injected: a raise,
+-- and the decoded error table the store answers with when SQLite refuses.
+local real_query = host.sql_query
+host.sql_query = function() error("fixture: database is locked") end
+local broken = core.gate_stats({})
+eq(broken.available, nil, "an unreadable ledger answers available = nil, not true")
+eq(broken.percent, nil, "and no percentage")
+check(type(broken.reason) == "string" and broken.reason:find("ledger_unreadable", 1, true) ~= nil,
+  "with a named reason: " .. tostring(broken.reason))
+eq(cli.run({ "turns", "--gate" }), 2, "and wa turns --gate refuses instead of printing a count")
+host.sql_query = function() return json.encode({ error = "database is locked" }) end
+local refused = core.gate_stats({})
+eq(refused.available, nil, "a decoded ledger error is unknown too")
+check(tostring(refused.reason):find("database is locked", 1, true) ~= nil, "and the reason carries the store's words")
+host.sql_query = real_query
+local healed = core.gate_stats({})
+eq(healed.available, true, "and a readable ledger is available again")
 
 -- The verb over it: text, machine, and the refusal of an unreadable window.
 eq(cli.run({ "turns", "--gate" }), 0, "wa turns --gate reports the rate and exits 0")

@@ -329,6 +329,20 @@ local function exec(statement, params)
   return true, raw
 end
 
+-- Review r2, item 2 (change/done-gate-trial): `query` above answers {} for every failure, so a caller
+-- cannot tell an EMPTY ledger from an UNREADABLE one - which is exactly the distinction the capture rate
+-- turns on ("unknown is not yes"). This one answers nil and a named reason instead of an empty table, and
+-- it reads a ledger error the way every other store in this repo does: a decoded table carrying error.
+local function query_checked(statement, params)
+  local ok, raw = pcall(host.sql_query, statement, json.encode(params or {}))
+  if not ok then return nil, "ledger_unreadable: " .. tostring(raw) end
+  if type(raw) ~= "string" then return nil, "ledger_unreadable: no answer from sql_query" end
+  local decoded_ok, value = pcall(json.decode, raw)
+  if not decoded_ok or type(value) ~= "table" then return nil, "ledger_unreadable: undecodable answer" end
+  if value.error then return nil, "ledger_unreadable: " .. tostring(value.error) end
+  return value
+end
+
 -- "24h", "7d", "90m", "2w", or an ISO date "2026-11-01". Seconds since the epoch, or nil for "all".
 function M.parse_since(text, now)
   now = now or host.now()
@@ -359,8 +373,11 @@ end
 --     lua/core/done_gate.lua (M.note_turn), so a run that
 --     re-entered the gate ten times contributes ONE turn to each side;
 --   * a turn is counted from its event, so it is counted once even if two rows carry its session;
---   * an absent ledger is UNKNOWN, never 0% - a rule that deletes a gate on an unmeasured zero deletes
---     it on no evidence at all. That is why this answers available, reason and percent = nil;
+--   * an UNREADABLE ledger is UNKNOWN, never 0% - a rule that deletes a gate on an unmeasured zero
+--     deletes it on no evidence at all. The code agrees with this sentence (review r2, item 2): the read
+--     goes through query_checked, and a failure answers available = nil, percent = nil and a named
+--     reason, while an empty but readable ledger answers available = true, changed = 0. `wa turns --gate`
+--     refuses the first and reports the second as "no state-changing turn yet";
 --   * the events predate this change: a turn whose event has no changed_state field is not
 --     state-changing, and is left out of both sides rather than guessed at.
 --
@@ -375,7 +392,14 @@ function M.gate_stats(opts)
   -- reader asks for both names, so a window that straddles the rename is measured, not truncated.
   local where = "kind IN ('done_gate_turn','done_gate_unchecked')"
   if since then where = where .. " AND at>=?"; params[#params + 1] = since end
-  local rows = query("SELECT payload, session_id, at FROM harness_events WHERE " .. where .. " ORDER BY at", params)
+  local rows, read_reason = query_checked(
+    "SELECT payload, session_id, at FROM harness_events WHERE " .. where .. " ORDER BY at", params)
+  if not rows then
+    -- Review r2, item 2: a ledger that cannot be read is UNKNOWN. It is not an empty ledger and it is
+    -- not 0% - a rule that deletes a gate on an unmeasured zero would delete it on no evidence at all.
+    return { available = nil, reason = read_reason, events = 0, changed = 0, called = 0,
+      percent = nil, sessions = 0, since = since, build = opts.build }
+  end
   local changed, called = 0, 0
   local sessions = {}
   -- Review r1, fix 5: the operator's window is "a day of missions on the RELEASE that carries this

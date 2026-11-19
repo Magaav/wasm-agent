@@ -225,6 +225,17 @@ local function gate_report(args)
   local stats = core.gate_stats({ since = since, build = build })
   local window = since_text and since_text ~= '' and since_text or 'all time'
   if build and build ~= '' then window = window .. ', build ' .. tostring(build) end
+  -- Review r2, item 2: a ledger that cannot be read is UNKNOWN, and an unmeasured rate is not 0%. The
+  -- module says so with available = nil; this refuses by name instead of printing a count it does not have.
+  if stats.available == nil then
+    if has(args, '--json') then
+      print(json.encode({ available = false, since = window, events = 0, changed = 0, called = 0,
+        percent = nil, reason = stats.reason or 'ledger_unreadable' }))
+      return 2
+    end
+    return refused('the ledger could not be read, so the rate is unmeasured: '
+      .. tostring(stats.reason or 'ledger_unreadable'))
+  end
   if stats.changed == 0 then
     -- Unknown is not zero: no event is not the same as a measured 0%, and the rule deletes a gate on
     -- evidence, so this says which fact is missing rather than printing a number.
