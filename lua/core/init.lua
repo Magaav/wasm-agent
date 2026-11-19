@@ -301,9 +301,21 @@ elseif command == "build-env" then
   -- ONE reader exists (scripts/lib/build-requirements.sh); this prints what it says, and a key no
   -- build reads is a refusal by name with the one line that fixes it - the same verdict
   -- scripts/fast.sh and scripts/deploy.sh take, so an operator sees the answer before a build does.
-  local root = host.getenv("WA_INSTALL_DIR") or (host.getenv("WASM_AGENT_HOME") or host.getenv("HOME") or "")
-  local ran, raw = pcall(host.exec, "bash " .. (host.getenv("WASM_AGENT_LUA_ROOT") or ".")
-    .. "/scripts/lib/build-requirements.sh record " .. ("%q"):format(root), "", 60)
+  --
+  -- TWO MEASURED BUGS, both fixed here (item 10 of the node-ops round):
+  --   * the root came from WA_INSTALL_DIR, which is where the BINARY is installed, not the user home the
+  --     record hangs off (<home>/.wasm-agent/build.env). lua/core/paths.lua is the one place that answers
+  --     the home; a second derivation here disagreed with every other reader.
+  --   * the argument was quoted with Lua's %q, which is Lua syntax, not shell syntax: measured,
+  --     ("%q"):format("/tmp/a$HOME `id` b") printed "/tmp/a$HOME `id` b" with double quotes, so
+  --     the shell EXPANDED $HOME and RAN id. A path with a space, a $ or a backtick was not passed
+  --     through, it was executed. shell_quote below is the POSIX single-quote form (the one
+  --     lua/core/harness_evaluator.lua already uses for the same reason).
+  local paths = dofile("lua/core/paths.lua")
+  local root = paths.home() or host.getenv("WASM_AGENT_HOME") or host.getenv("HOME") or ""
+  local function shell_quote(text) return "'" .. tostring(text or ""):gsub("'", "'\\''") .. "'" end
+  local script = (host.getenv("WASM_AGENT_LUA_ROOT") or ".") .. "/scripts/lib/build-requirements.sh"
+  local ran, raw = pcall(host.exec, "bash " .. shell_quote(script) .. " record " .. shell_quote(root), "", 60)
   local answer = type(raw) == "string" and (select(2, pcall(json.decode, raw))) or raw
   local code = type(answer) == "table" and (tonumber(answer.code) or 0) or 0
   print(type(answer) == "table" and (answer.stdout or "") or tostring(raw))

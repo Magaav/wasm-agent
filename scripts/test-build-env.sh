@@ -132,4 +132,31 @@ grep -q 'wa_build_env' scripts/deploy.sh || fail 'scripts/deploy.sh does not cal
 grep -q 'wa_build_env' scripts/mission.sh || fail 'scripts/mission.sh does not read the build record, so a mission builds with a different toolchain than deploy.sh'
 grep -q 'build-requirements.sh' lua/core/land.lua || fail 'lua/core/land.lua does not read the build record, so wa land builds with a different toolchain'
 
+
+# (5) `wa build-env` QUOTES its argument, and reads the record from the USER HOME (item 10 of the
+# node-ops round). Two measured bugs, each with its own negative:
+#   * the argument was quoted with Lua's %q - Lua syntax, not shell syntax - so a home containing
+#     $HOME or a backtick was EXPANDED AND EXECUTED by the shell instead of being read;
+#   * the root came from WA_INSTALL_DIR (where the binary lives) instead of the home the record hangs
+#     off, so the verb looked in a directory no other reader uses.
+hostile="$SCRATCH/a \$HOME \`id\` b"
+mkdir -p "$hostile/.wasm-agent" || fail "cannot create the hostile home $hostile"
+printf 'WA_BUILD_PATH=%s/tools\n' "$SCRATCH" > "$hostile/.wasm-agent/build.env"
+nodebin="$(command -v wa || true)"
+[ -n "$nodebin" ] || fail 'no wa on PATH, so the build-env verb cannot be exercised'
+set +e
+verb_out="$(WASM_AGENT_HOME="$hostile" WASM_AGENT_LUA_ROOT="$ROOT" WASM_AGENT_MANAGED=0 \
+  WA_INSTALL_DIR=/nonexistent/install/dir \
+  "$nodebin" --db "$SCRATCH/verb.db" build-env 2>&1)"
+verb_code=$?
+set -e
+[ "$verb_code" = 0 ] || fail "wa build-env on a hostile home exited $verb_code, not 0: $verb_out"
+# The record it read is the one under the HOME, not one under WA_INSTALL_DIR.
+case "$verb_out" in *"$hostile/.wasm-agent/build.env"*) ;; *) fail "wa build-env did not read the record under the home ($hostile): $verb_out" ;; esac
+case "$verb_out" in *'/nonexistent/install/dir'*) fail "wa build-env read the record from WA_INSTALL_DIR, which no other reader uses: $verb_out" ;; esac
+# The backtick was not executed: `id` prints uid= when run.
+case "$verb_out" in *'uid='*) fail "wa build-env EXECUTED a backtick command from the home path: $verb_out" ;; esac
+# And the $ was not expanded to the real home.
+case "$verb_out" in *"$HOME/.wasm-agent"*) fail "wa build-env EXPANDED \$HOME inside the path instead of passing it through: $verb_out" ;; esac
+
 echo 'test-build-env: ok (absent is not a refusal, an unread key is named with its remedy and stops fast.sh, allowed keys reach PATH, the record is data and never sourced, every audited key is APPLIED, and a missing entry is refused by name with its fix)'
