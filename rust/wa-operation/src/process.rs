@@ -44,6 +44,9 @@ impl Process {
         if !spec.cwd.is_empty() {
             command.current_dir(&spec.cwd);
         }
+        // The node's own provider/admin secrets never reach a tool child (see `crate::DENY_ENV`). Removed
+        // BEFORE `spec.env` is applied, so a tool that was explicitly granted a name still gets it.
+        crate::scrub_inherited_env(&mut command);
         for (k, v) in &spec.env {
             command.env(k, v);
         }

@@ -131,12 +131,26 @@ function M.invoke(input,ctx,directory)
   if not host.write_file(seed_file,json.encode(seed)) then return failure('mcp_seed_not_written') end
   -- The runtime is the one mcp.lua resolves (it sets M.node_program); never a guess at `node` on PATH.
   if not M.node_program then return failure('mcp_node_runtime_unresolved') end
-  local start=decode(host.operation('start',json.encode({program=M.node_program(),args={directory..'/mcp-session.mjs','--seed-file',seed_file},cwd=ctx.cwd or platform.cwd(),timeout_seconds=3600,owner=ctx.session_id or 'mcp-read-session',vault_env=vault_env,vault_approval=vault_approval})))
+  -- A READ SESSION IS A WORKLOAD, NOT A CONTROL CALL (session isolation, item 4 round 4).
+ --
+ -- Round 3 marked this start `control=true`, and it lives for 3600 s: the two reserved slots exist so the
+ -- node can still ask a SHORT question while every workload slot is busy, so a connector's read session
+ -- parked in one of them for an hour left the "cancel the runaway" path with nothing to run in. It is an
+ -- ordinary workload now - its own owner, its own share, the workload ceiling - and `CONTROL_MAX_SECONDS`
+ -- in the runtime refuses any long start that asks for the reserve.
+ --
+ -- It names no session on purpose (a read is not a conversation's work), so its share is counted against
+ -- its OWNER - 'mcp-read-session' for a sessionless caller - instead of against nobody, which is how these
+ -- starts used to bypass the share entirely.
+ -- ONE OWNER NAME FOR THIS READ SESSION (session isolation, item 7 round 2): a sessionless caller is not
+ -- node-wide any more, so every later observe of this operation names the same owner that started it.
+ local slot_owner=ctx.session_id or 'mcp-read-session'
+ local start=decode(host.operation('start',json.encode({program=M.node_program(),args={directory..'/mcp-session.mjs','--seed-file',seed_file},cwd=ctx.cwd or platform.cwd(),timeout_seconds=3600,owner=slot_owner,vault_env=vault_env,vault_approval=vault_approval})))
   if not start or start.error or not start.operation_id then return failure('mcp_session_not_started',{detail=start}) end
-  slot={operation_id=start.operation_id,seed_file=seed_file,ready_file=ready_file,token=seed.token};pool[key]=slot
+  slot={operation_id=start.operation_id,seed_file=seed_file,ready_file=ready_file,token=seed.token,owner=slot_owner};pool[key]=slot
   for _=1,math.min(36000,20+math.ceil((input.server.timeout_seconds or 30)*10)) do
    local raw=host.read_file(ready_file);if raw then slot.ready=decode(raw);break end
-   local state=decode(host.operation('wait',json.encode({id=slot.operation_id,wait_ms=100})))
+   local state=decode(host.operation('wait',json.encode({id=slot.operation_id,wait_ms=100,owner=slot.owner})))
    if state and (state.settled or state.error) then return failure('mcp_session_startup_failed',{operation_id=slot.operation_id,detail=state}) end
   end
   if not slot.ready or slot.ready.token~=slot.token or not tostring(slot.ready.url):match('^http://127%.0%.0%.1:%d+$') then return failure('mcp_session_not_ready',{operation_id=slot.operation_id}) end
@@ -148,7 +162,7 @@ function M.invoke(input,ctx,directory)
  end
  if not slot.ready then return failure('mcp_session_not_ready',{operation_id=slot.operation_id}) end
  -- A clean idle shutdown may start a fresh read session; an uncertain one never does.
- local state=decode(host.operation('status',json.encode({id=slot.operation_id})))
+ local state=decode(host.operation('status',json.encode({id=slot.operation_id,owner=slot.owner})))
  if state and state.settled==true and state.ok==true then pool[key]=nil;return M.invoke(input,ctx,directory) end
  if not state or state.error or state.settled then return failure('mcp_session_unavailable',{operation_id=slot.operation_id,detail=state}) end
  if type(slot.ready.metadata)~='table' or type(slot.ready.metadata.schema_hash)~='string' then return failure('mcp_session_metadata_unverified',{operation_id=slot.operation_id}) end
@@ -189,8 +203,8 @@ end
 function M.close()
  local results={}
  for key,slot in pairs(pool)do
-  local cancelled=decode(host.operation('cancel',json.encode({id=slot.operation_id})))
-  local settled=decode(host.operation('await',json.encode({id=slot.operation_id,wait_for='settled'})))
+  local cancelled=decode(host.operation('cancel',json.encode({id=slot.operation_id,owner=slot.owner})))
+  local settled=decode(host.operation('await',json.encode({id=slot.operation_id,wait_for='settled',owner=slot.owner})))
   results[#results+1]={operation_id=slot.operation_id,cancel=cancelled,settled=settled,unknown_request=slot.unknown}
   if settled and settled.settled and not slot.unknown then pool[key]=nil end
  end

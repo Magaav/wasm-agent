@@ -52,6 +52,10 @@ local codemode_block = dofile("lua/core/codemode_block.lua")
 -- core owns rather than keeping state of its own, registers every view it creates so a swap can point it
 -- at the new methods, and ticks the watcher at each frame it begins: a save is visible on the next one.
 local reload = dofile("lua/core/reload.lua")
+-- The window the node actually compacts on (lua/core/model_window.lua): the context ball's COLOUR
+-- is read from the thing that compacts, never from a second copy of the arithmetic. Loaded here so
+-- the view asks one function (`threshold_percent`) instead of guessing a threshold (Victor, 19/11).
+local windowlib = dofile("lua/core/model_window.lua")
 
 local M = {}
 
@@ -212,6 +216,29 @@ local function clip(text, limit)
 end
 M.clip = clip
 
+-- A horizontal rule that is as wide as the terminal WHEN IT IS DRAWN, not when it was composed.
+--
+-- A rule is the one component that is nothing but its width, so a measured-once width leaves it wrong
+-- for the rest of the session: the welcome box's top line sat at the old width after a maximise, and
+-- wider than the window after a shrink, which wraps it into a second row and moves everything below it
+-- (Victor, 18/11). So the view writes a MARKER and the renderer that knows the current width expands
+-- it: `rust/wa-term/src/transcript.rs` at draw time for the native editor, and `M.expand_rules` here
+-- for the plain layout, where the write itself is the only moment there is.
+--
+-- `r` is one marker. Nothing else in this module emits a bare , so the expansion cannot touch
+-- text a tool printed.
+local RULE_MARK = "r"
+M.RULE = RULE_MARK
+
+-- `text` with every rule marker drawn as `n` rule characters - the plain layout's expansion, where a
+-- line is written once and a rule is therefore fixed at the width of that write.
+function M.expand_rules(text, limit)
+  text = tostring(text or "")
+  if not text:find(RULE_MARK, 1, true) then return text end
+  local width = math.max(1, tonumber(limit) or 80)
+  return (text:gsub("\1r\1", function() return string.rep("\226\148\128", width) end))
+end
+
 -- The same fit without collapsing runs of whitespace: a code row's indentation is part of what it
 -- says, and `clip` is a prose rule (`a  b` -> `a b`). Everything else about it is the same count.
 local function fit(text, limit)
@@ -265,13 +292,24 @@ end
 -- two functions that actually lay these rows out - `M.columns` (the count `clip` and the status line
 -- use) and `wa-term`'s `cell_width_of` for the box the row sits in - because a glyph two cells
 -- wide moves every number after it.
+-- ONE space between an icon and the value it labels, and ONE place that says so (Victor, 19/11:
+-- in the non-Mono Nerd Font a glyph is drawn WIDER than its cell and touches the character after it).
+-- The DELTA, UP, DOWN and SIGMA marks are TEXT, not icons: they stay glued to their number.
+local GAP = " "
+M.GAP = GAP
+
 local GLYPH = {
-  -- The context ball: five Material Design circles, one per band of the model's window.
-  ballEmpty = "\243\176\157\166",         -- U+F0766
-  ballStarted = "\243\176\170\159",       -- U+F0A9F
-  ballHalf = "\243\176\170\161",          -- U+F0AA1
-  ballThreeQuarters = "\243\176\170\163", -- U+F0AA3
-  ballFull = "\243\176\170\165",          -- U+F0AA5
+  -- The context ball: NINE Material Design circles, eighths of the window - the 8 slices wired up
+  -- (Victor, 19/11). ballEmpty is the floor below 3%; the rest are the nearest eighth from there.
+  ballEmpty = "\243\176\157\166",          -- U+F0766
+  ballEighth = "\243\176\170\158",         -- U+F0A9E
+  ballQuarter = "\243\176\170\159",        -- U+F0A9F
+  ballThreeEighths = "\243\176\170\160",   -- U+F0AA0
+  ballHalf = "\243\176\170\161",           -- U+F0AA1
+  ballFiveEighths = "\243\176\170\162",    -- U+F0AA2
+  ballThreeQuarters = "\243\176\170\163",  -- U+F0AA3
+  ballSevenEighths = "\243\176\170\164",   -- U+F0AA4
+  ballFull = "\243\176\170\165",           -- U+F0AA5
   steps = "\243\176\183\186",             -- U+F0DFA, the run's steps
   clock = "\243\176\148\155",             -- U+F051B, the run's elapsed clock
   turns = "\243\176\145\144",             -- U+F0450, the session's turns
@@ -283,13 +321,89 @@ M.GLYPH = GLYPH
 -- floor - 3% is the second ball, 50% the third, 75% the fourth, 100% the full one. A context measured
 -- past its window (it happens across a compaction boundary) is the full ball, and a percentage nobody
 -- measured is the empty one - the same ball 0% wears, because "nothing measured" is not "nearly full".
+-- The eighths, in order: the ball for round(fraction * 8), clamped to 1..8.
+local BALLS = { GLYPH.ballEighth, GLYPH.ballQuarter, GLYPH.ballThreeEighths, GLYPH.ballHalf,
+  GLYPH.ballFiveEighths, GLYPH.ballThreeQuarters, GLYPH.ballSevenEighths, GLYPH.ballFull }
+
+-- The ball for a context percentage: the nearest eighth, with an empty floor below 3%.
+--
+-- The floor is there because "nothing measured" is not "nearly full": a context with no reading at all
+-- (0%) and one just starting (2.9%) both wear the empty ball. From 3% - the first eighth's floor - the
+-- ball is the nearest eighth of the window, so the 8 slices are wired up.
 function M.context_ball(percent)
   local p = tonumber(percent) or 0
   if p < 3 then return GLYPH.ballEmpty end
-  if p < 50 then return GLYPH.ballStarted end
-  if p < 75 then return GLYPH.ballHalf end
-  if p < 100 then return GLYPH.ballThreeQuarters end
-  return GLYPH.ballFull
+  local k = math.floor(p / 100 * 8 + 0.5)     -- half UP: a boundary belongs to the higher eighth
+  if k < 1 then k = 1 end
+  if k > 8 then k = 8 end
+  return BALLS[k]
+end
+
+-- How full the window is, as the word a colour is chosen from: normal, warning, alert.
+--
+-- The threshold is the node's REAL one, read from the code that compacts (model_window.policy, through
+-- model_window.threshold_percent) and never guessed here: normal below it by 15 points, warning from
+-- there, alert at or above it. With no window to measure against everything is normal - a colour is a
+-- claim about the window, and there is no window to make it about.
+function M.context_level(percent, threshold)
+  local p = tonumber(percent)
+  local t = tonumber(threshold) or 0
+  if not p or t <= 0 then return "normal" end
+  if p >= t then return "alert" end
+  if p >= t - 15 then return "warning" end
+  return "normal"
+end
+-- The colour the ball wears, from the same level: the window's own signal, not decoration.
+--
+-- normal is the row's own success green (a context with room), warning the yellow from threshold-15,
+-- alert the alarm red at the compaction trigger. Nothing measured is normal: a colour is a claim
+-- about the window, and an unmeasured window makes none.
+function M.ball_role(level)
+  if level == "alert" then return "error" end
+  if level == "warning" then return "warning" end
+  return "success"
+end
+
+-- The reserve the COMPACTOR will actually use for a model, or nil when this host cannot say.
+--
+-- `provider.budget(model).reserve` is the one number `agent.maybe_compact` spends, and it is not
+-- `model_window.policy`'s: it honours WASM_AGENT_COMPACT_RESERVE and the per-model `reserve` in
+-- WASM_AGENT_MODEL_LIMITS, and it caps the result at a quarter of the window. The ball used to ask
+-- model_window for the threshold with NO reserve, so a node that had set either escape hatch was
+-- coloured against a trigger the compactor never uses - the ball said "alert" at 90% while the
+-- compactor waited for 87% (round 3, item 4).
+--
+-- Loaded once, on the first row that needs it: a dofile per frame is a disk read on the footer's
+-- path (the reason windowlib above is loaded once). `false` means "cannot say", never "no reserve".
+local providerlib
+local function compactor_budget(model)
+  if providerlib == nil then
+    local ok, loaded = pcall(dofile, "lua/core/provider.lua")
+    providerlib = (ok and type(loaded) == "table") and loaded or false
+  end
+  if not providerlib or type(providerlib.budget) ~= "function" then return nil end
+  local ok, budget = pcall(providerlib.budget, model)
+  return ok and type(budget) == "table" and budget or nil
+end
+
+-- The percentage of the window at which THIS node compacts, from the code that compacts
+-- (model_window.threshold_percent), WITH the reserve the compactor will use. nil when the window is
+-- unknown, which colours nothing.
+--
+-- `model` is optional (a caller with no model gets the policy's default reserve, which is what a
+-- fresh node uses); every view passes its own, so the ball and the compactor agree.
+function M.compaction_threshold(budget, model)
+  if not windowlib or not windowlib.threshold_percent then return nil end
+  local context = tonumber(budget) or 0
+  if context <= 0 then return nil end
+  -- A reserve from ANOTHER window is not this window's. provider.budget resolves the same model, so a
+  -- mismatch means the caller's window and the compactor's came from different models, and then the
+  -- policy's own reserve is the only honest answer.
+  local reserve
+  local resolved = compactor_budget(model)
+  if resolved and tonumber(resolved.context) == context then reserve = tonumber(resolved.reserve) end
+  local ok, threshold = pcall(windowlib.threshold_percent, context, reserve)
+  return ok and tonumber(threshold) or nil
 end
 
 -- The footer's session numbers: `󰑐runs Σ↑in ↓out 󰪟ctx%/window 󰆼cache-hit%`. `Σ↑` is every
@@ -299,16 +413,62 @@ end
 -- the one `M.context_ball` chose, so the band and the percentage beside it cannot disagree.
 function M.session_summary(t)
   t = t or {}
-  local parts = { GLYPH.turns .. (t.runs or 0),
+  local parts = { GLYPH.turns .. GAP .. (t.runs or 0),
     "\206\163\226\134\145" .. M.tokens(t.prompt) .. " \226\134\147" .. M.tokens(t.completion) }
+  -- The percentage this row was built from, returned beside the text: it chose the glyph, and the
+  -- colour must come from the SAME number rather than one measured again at draw time.
+  local used
   if (tonumber(t.budget) or 0) > 0 then
     local percent = 100 * (tonumber(t.context) or 0) / t.budget
-    parts[#parts + 1] = M.context_ball(percent) .. string.format("%.1f%%/%s", percent, M.tokens(t.budget))
+    used = percent
+    -- The percentage stays printed after the ball, one space apart (Victor, 19/11).
+    parts[#parts + 1] = M.context_ball(percent) .. GAP
+      .. string.format("%.1f%%/%s", percent, M.tokens(t.budget))
   end
   if (tonumber(t.prompt) or 0) > 0 then
-    parts[#parts + 1] = GLYPH.cache .. string.format("%.2f%%", 100 * (t.cached or 0) / t.prompt)
+    parts[#parts + 1] = GLYPH.cache .. GAP .. string.format("%.2f%%", 100 * (t.cached or 0) / t.prompt)
   end
-  return table.concat(parts, " ")
+  return table.concat(parts, " "), used
+end
+
+-- The session bar with its CONTEXT BALL in the colour of its level, and the rest of the row left in
+-- the secondary gray it was drawn in: the role opens at the glyph, closes after it, and the dim
+-- colour is re-opened so one glyph's warning does not bleed into the percentage beside it
+-- (Victor, 19/11: the percentage stays printed after the ball).
+--
+-- Colour is a rendering decision, so `live` is honoured exactly like every other paint here: a
+-- captured transcript gets the same characters, uncoloured. A window nobody measured (budget 0) or
+-- a bar with no ball in it is returned untouched.
+-- The ball a row ACTUALLY DREW, and where: the first of the nine that the text carries, or nil.
+--
+-- Why not recompute it from the percentage: the footer's glyph and the glyph this function would
+-- choose are two separate arithmetics over the same number, and the moment they disagree - a row
+-- built from a stale summary, a percentage rounded elsewhere, a row clipped before the ball - the
+-- search finds nothing and the ball is drawn UNCOLOURED, silently. Reading the glyph off the text
+-- is the only way the colour and the character cannot disagree (round 3, item 4).
+function M.ball_in(text)
+  local row = tostring(text or "")
+  for _, glyph in ipairs(BALLS) do
+    local at = row:find(glyph, 1, true)
+    if at then return glyph, at end
+  end
+  local at = row:find(GLYPH.ballEmpty, 1, true)
+  if at then return GLYPH.ballEmpty, at end
+  return nil, nil
+end
+
+function M.colour_ball(text, context, budget, live, model, percent)
+  text = tostring(text or "")
+  local window = tonumber(budget) or 0
+  if not live or window <= 0 then return text end
+  -- The percentage behind the level: the caller that composed the row hands over the one it used, so
+  -- the colour and the glyph are the same reading. A caller holding only a row measures it here.
+  percent = tonumber(percent) or (100 * (tonumber(context) or 0) / window)
+  local ball, at = M.ball_in(text)
+  if not ball then return text end
+  local level = M.context_level(percent, M.compaction_threshold(window, model))
+  local painted = paint(ball, M.ball_role(level), true) .. (STYLE.dim or "")
+  return text:sub(1, at - 1) .. painted .. text:sub(at + #ball)
 end
 
 -- How long a step took: milliseconds below a second, seconds above it. The unit is
@@ -744,6 +904,12 @@ end
 -- The console's width, asked the same way; nil when there is no console or it will not answer. The
 -- welcome box is drawn before the screen exists, and a box laid out for a guessed width wraps on
 -- every row of a narrower terminal.
+--
+-- ASKED AGAIN, PER FRAME. This used to be read exactly once - in `chat.lua`, before the banner - and
+-- every component then drew at that width for the life of the process: maximising the terminal left
+-- the welcome rule, the code-mode box and the footer at the old width, hugging the left of a window
+-- twice their size, and shrinking it left them wider than the window, which wraps (Victor, 18/11).
+-- `METHODS:refresh_limit` is the per-frame read; this stays the one place that asks the console.
 function M.terminal_columns()
   if not (host and host.terminal_size) then return nil end
   local ok, raw = pcall(host.terminal_size)
@@ -775,6 +941,10 @@ end
 -- it shows, `bottom` is that row when it does not (nothing is reserved that is not drawn), and
 -- `content` is kept for the fallback, where the line sits on the region's own last row.
 M.EDITOR_ROWS = 3
+-- The narrowest layout this view will draw: below it a framed component is all border and no text, so
+-- a terminal that reports 12 columns is drawn as if it had 24 and the terminal wraps it. The floor is
+-- named once because every component clips to it (METHODS:refresh_limit).
+M.MIN_COLUMNS = 24
 local function screen_rows(rows, editor)
   rows = tonumber(rows)
   if not rows or rows < (editor and 10 or 4) then return nil end
@@ -845,6 +1015,33 @@ M.__methods = METHODS
 
 -- `opts`: out (write text), live (nil = decide), now (clock), limit (columns),
 -- title (terminal title), workspace/branch/budget (the banner and the footer).
+-- **The terminal's width, read again.** Every framed component lays itself out from `self.limit`,
+-- and that value used to be measured once - before the banner, in `chat.lua` - and never looked at
+-- again. So maximising the terminal stretched the input rule and the footer (the host redraws those
+-- from its own size) while the welcome rule, the welcome box, the code-mode box and the status bar's
+-- right-hand parts stayed at the old width; shrinking it left them wider than the window, where they
+-- wrap and bounce (Victor, 18/11). This is the read that makes every one of them follow.
+--
+-- `opts.columns` is the probe (a test has no console); absent, it is M.terminal_columns. The value is
+-- clamped the way every other width in this module is, and a console that will not answer keeps the
+-- width the view already had - an unanswerable console is not a narrow one.
+function METHODS:refresh_limit()
+  local probe = self.columns_probe or M.terminal_columns
+  local ok, columns = pcall(probe)
+  if not ok then return self.limit end
+  columns = tonumber(columns)
+  if not columns or columns <= 0 then return self.limit end
+  self.limit = math.max(M.MIN_COLUMNS, math.floor(columns))
+  return self.limit
+end
+
+-- A rule as wide as the terminal is NOW: the marker a component writes, expanded for the plain
+-- layout. One function, so the welcome box and anything else that draws a rule cannot disagree
+-- about what "the width" is.
+function METHODS:rule()
+  return M.expand_rules(M.RULE, self.limit)
+end
+
 function M.new(opts)
   opts = opts or {}
   -- `opts.live == false` must mean plain: `x = opts.live or default` would silently
@@ -865,6 +1062,8 @@ function M.new(opts)
   local sync = opts.sync
   if sync == nil then sync = (getenv("WASM_AGENT_CLI_SYNC") or "") ~= "off" end
   local view = {
+    -- The width probe: a test passes its own, a live view asks the console (METHODS:refresh_limit).
+    columns_probe = opts.columns,
     out = opts.out or function(text)
       if host and host.terminal_write then
         assert(host.terminal_write(text), "terminal write failed")
@@ -1063,10 +1262,16 @@ end
 function METHODS:status_template()
   local boxed = self.screen and self.screen.footer
   if self.screen and not self.turn and self.last_summary then
-    -- Boxed, the numbers live in the footer under the box and the status row is empty between runs.
+    -- Boxed, the numbers live in the footer under the box and the status row is EMPTY between runs.
+    -- Nothing about the rest of the node goes here: the `node: N ops elsewhere` aggregate is
+    -- change/session-isolation's, it is drawn there and nowhere else (this view has no reader of it,
+    -- and a row composed from a module another branch owns drifts the moment either side changes).
     if boxed then return "", nil end
     return paint(clip(self.last_summary, self.limit), "dim", self.live), nil
   end
+  -- Nothing of this session's is running and there is no run to describe: the row is empty. Never a
+  -- named row, and never a count either - another session's tool, its clock and its output are not
+  -- ours to draw (session isolation, finding 1), and this branch draws nothing about other sessions.
   local phase = self.pending and (self.pending.raw and "Running your script"
     or M.phase((M.target(self.pending.name, self.pending.arguments)))) or self.phase
   local started = self.screen and self.turn and self.turn.started
@@ -1319,8 +1524,12 @@ function METHODS:session_content()
   if self.session_notice and self.session_notice ~= "" then
     return { text = self.session_notice, kind = "notice" }
   end
-  -- No third claimant: a tool call's progress is not a session notice, and this row is not where a
-  -- tool speaks (Victor, 2026-11-10).
+  -- The one thing this row says about OTHER sessions: a count. A running call's progress is still not a
+  -- session notice (Victor, 2026-11-10) - its own row lives inside its own block in the transcript - but
+  -- "the node is busy" is not another session's tool and not a line of its output: it is a number, drawn
+  -- dim, with no name and no text (session isolation, finding 1).
+  local elsewhere = self:elsewhere_row()
+  if elsewhere then return { text = elsewhere, kind = "progress" } end
   return nil
 end
 
@@ -1338,11 +1547,31 @@ function M.emphasise(text, words)
   return text
 end
 
+-- How many other sessions are running a call right now, as the one aggregate line - or nil. Read at most
+-- once a quarter second (the host publishes at most four times a second), because this row is asked on
+-- every frame.
+function METHODS:elsewhere_row()
+  if self.console or not self.live then return nil end
+  local module = self.tool_progress
+  if not module then
+    local ok, loaded = pcall(dofile, 'lua/core/tool_progress.lua')
+    if not ok or type(loaded) ~= 'table' then return nil end
+    module = loaded; self.tool_progress = module
+  end
+  if not module.elsewhere then return nil end
+  local ms = math.floor(self:now() * 1000)
+  if self.elsewhere_at and (ms - self.elsewhere_at) < 250 then return self.elsewhere_text end
+  local ok, count = pcall(module.elsewhere, { session = self.session_id, now = self.now() })
+  self.elsewhere_at = ms
+  self.elsewhere_text = (ok and (tonumber(count) or 0) > 0) and module.elsewhere_text(count) or nil
+  return self.elsewhere_text
+end
+
 -- The colour of each kind of line: the notice is the warning yellow, a loader (a build) is the
 -- border accent, and a result is success or error. A tool call has no kind here at all - its line
 -- lives in its own block in the transcript.
 local SESSION_ROLES = { building = "borderAccent", installed = "success", failed = "error",
-  notice = "warning" }
+  notice = "warning", progress = "dim" }
 function M.session_role(kind)
   return SESSION_ROLES[tostring(kind or "")] or "warning"
 end
@@ -1500,11 +1729,16 @@ function METHODS:footer_draw()
   local hint = (self.last_summary and self.last_summary ~= "") and self.last_summary
     or "/ for commands \194\183 /login to sign in \194\183 ctrl+c twice to quit"
   -- The editor owns that row (the slash menu uses it), so it is handed the text, not drawn on.
+  -- The ball wears its level's colour in BOTH drawers: the native editor's row is clipped by CELLS
+  -- with escapes counting zero (`visible_cells`, rust/wa-term/src/terminal_editor.rs), so a coloured
+  -- row is measured like a plain one and cannot wrap the row under the box (Victor, 19/11).
+  local shown = M.colour_ball(clip(hint, math.max(10, self.limit - 1)), self.context, self.budget,
+    self.live, self.model, self.summary_percent)
   if self.editor and self.stdout and host and host.editor_footer then
-    pcall(host.editor_footer, clip(hint, math.max(10, self.limit - 1)), self.model or "")
+    pcall(host.editor_footer, shown, self.model or "")
   else
     self:control(CURSOR_SAVE .. "\27[" .. self.screen.footer .. ";1H\27[2K"
-      .. paint(clip(hint, math.max(10, self.limit - 1)), "dim", self.live) .. CURSOR_RESTORE)
+      .. paint(shown, "dim", self.live) .. CURSOR_RESTORE)
   end
   -- After the footer, never before: the host's footer write redraws the whole bottom of the screen,
   -- so a line drawn first would be erased by it. The wake row first, so the session line above it is
@@ -1518,7 +1752,7 @@ end
 function METHODS:live_footer()
   if not (self.screen and self.screen.footer) then return end
   local totals = self.totals or {}
-  self.last_summary = M.session_summary({ runs = self.runs, tools = self.session_tools or 0,
+  self.last_summary, self.summary_percent = M.session_summary({ runs = self.runs, tools = self.session_tools or 0,
     prompt = totals.prompt, completion = totals.completion, cached = totals.cached,
     context = self.context, budget = self.budget })
   -- The self-wake fact has a row of its own, directly above the session status bar: it used to be
@@ -1547,10 +1781,10 @@ function METHODS:run_numbers(step_clock, run_clock)
   local run, base, totals = self.turn or {}, (self.turn and self.turn.baseline) or {}, self.totals or {}
   local input = math.max(0, (self.context or 0) - (run.context or 0))
   local output = math.max(0, (totals.completion or 0) - (base.completion or 0))
-  return GLYPH.steps .. math.max(1, run.rounds or 0) .. (step_clock and ("\194\183" .. step_clock) or "")
+  return GLYPH.steps .. GAP .. math.max(1, run.rounds or 0) .. (step_clock and ("\194\183" .. step_clock) or "")
     .. " \206\148" .. M.tokens(input) .. " \226\134\145" .. M.tokens(totals.prompt)
     .. " \226\134\147" .. M.tokens(output)
-    .. " " .. GLYPH.clock .. run_clock
+    .. " " .. GLYPH.clock .. GAP .. run_clock
 end
 
 -- Called on every event: a new frame, and a repaint. In the plain rendering the line is
@@ -1653,12 +1887,9 @@ end
 function METHODS:screen_on()
   if not self.live then return nil end
   if (self.getenv("WASM_AGENT_CLI_FRAME") or "") == "off" then return nil end
-  if self.stdout and host.terminal_size then
-    local ok, raw = pcall(host.terminal_size)
-    local parsed
-    if ok and type(raw) == "string" and pcall(function() parsed = json.decode(raw) end)
-      and parsed.columns and parsed.columns > 0 then self.limit = parsed.columns end
-  end
+  -- The width, through the one function that reads and clamps it, so this path takes the same floor
+  -- (M.MIN_COLUMNS) and honours the same probe (columns_probe, a test's console) as every frame.
+  if self.stdout then self:refresh_limit() end
   local screen = screen_rows(self.rows and self.rows(), self.editor)
   -- A console that cannot report a height keeps whatever screen it already had: the caller falls
   -- back to the prompt at the cursor, which is on the input row anyway.
@@ -2028,6 +2259,7 @@ function METHODS:run_started()
 end
 
 function METHODS:run_finished()
+  self:turn_notes_flush()
   self:commentary_flush()
   self:progress("finish")
   self:clear()
@@ -2113,10 +2345,13 @@ end
 function METHODS:tool_line()
   local module = self.tool_progress
   if not module then return nil end
-  local ok, value = pcall(module.status, { now = self.now(), limit = self.limit })
+  -- The reader's own session: the live row is that session's file and no other's (session isolation,
+  -- finding 1).
+  local ok, value = pcall(module.status, { now = self.now(), limit = self.limit, session = self.session_id })
   if not ok or type(value) ~= 'table' or type(value.text) ~= 'string' or value.text == "" then return nil end
   return value
 end
+
 
 -- The live line of the call in flight, written inside its own transcript block: `""` takes it away.
 -- Nothing here can repaint it while the call runs (a foreground `bash` blocks this interpreter inside
@@ -2310,6 +2545,37 @@ local function bulletize(text, mark)
 end
 M.bulletize = bulletize
 
+-- The stored <turn> block, as ONE line under the answer it was stripped from (#33, item 4). The
+-- block is evidence the fleet keeps, not something the reader asked for, so it must not compete with
+-- the answer: one dim row, its own line, and the whole block behind `host.transcript_expand` where
+-- the host can fold and open a row. Pure, so the shape is asserted without a terminal.
+function M.turn_note_line(note, width, options)
+  local o = options or {}
+  width = math.max(20, tonumber(width) or 80)
+  local value = type(note) == "table" and note or {}
+  local said = tostring(value.text or value.focus or value.hurt or "")
+  said = said:gsub("%s+", " ")
+  local block = tostring(value.block or "")
+  local full = block
+  if full == "" then
+    local parts = {}
+    for _, key in ipairs({ "hurt", "buys", "focus" }) do
+      local text = tostring(value[key] or "")
+      if text ~= "" then parts[#parts + 1] = key .. ": " .. text end
+    end
+    full = table.concat(parts, "\n")
+  end
+  local lead = "\226\151\140 turn \194\183 "
+  local room = math.max(8, width - columns(lead) - 14)
+  local shown = clip(said, room)
+  if shown == "" then shown = "(kept in the run journal)" end
+  local row = lead .. shown
+  local rest = columns(said) - columns(shown)
+  if rest > 0 and o.expandable then row = row .. " \226\128\166 +" .. rest .. " chars" end
+  local expand = (o.expandable and full ~= "") and full or nil
+  return { row = row, expand = expand, text = said, block = block }
+end
+
 -- The answer, then the numbers for the run that produced it. A reply that already
 -- streamed (a peer or a window run reaching this printer) is not printed twice.
 function METHODS:answered(reply)
@@ -2499,7 +2765,20 @@ function METHODS:event(event)
     elseif text ~= "" then
       -- Compaction, recovery, a guard, a storage failure: not a phase, and worth a line
       -- of its own - these are exactly the events that used to be invisible here.
+      --
+      -- Item 8: a notice is never GLUED onto other text. A done-gate notice arrives at a
+      -- turn end, while the candidate answer is still a partial line held in the stream
+      -- buffer (say_buf): drawn where it arrived, the notice came out ABOVE the sentence it
+      -- was interrupting and with that sentence reordered after it (measured 19/11: the
+      -- answer row held "and more" while the notice and the rest of the sentence followed).
+      -- So the text the notice interrupted is written first, as it stands, and the notice
+      -- then takes a row of its own - after the text, never inside it.
+      local saying = self.flow_kind == "say"
+      self:flow_end()
       self:line(paint("! " .. M.clip(text, self.limit), "yellow", self.live))
+      -- The answer the notice interrupted is not over: the rest of it continues on the next
+      -- row, as the same paragraph rather than a new one (no blank line, no second gap).
+      if saying then self.flow_kind, self.flow_held = "say", 0 end
     end
   elseif kind == "round" then
     local previous = self.round
@@ -2675,9 +2954,35 @@ function METHODS:event(event)
     -- Thinking, as it arrives: `✻ ` and the thought in gray on the same line, no title (operator 17/11).
     self.reasoning_streamed = true
     if (host.getenv("WASM_AGENT_CLI_THINKING") or ""):lower() ~= "off" then self:flow("think", event.text) end
+  elseif kind == "turn_note" then
+    -- The stored <turn> block (#33, item 4). It arrives while the run is still on its last step - the
+    -- split happens where the answer is composed - so it is HELD here and drawn by the run's own end,
+    -- under the answer it belongs under and before the run's numbers. Drawing it where it arrived would
+    -- put the evidence above the answer, which reads as a promise about something not yet written.
+    self.turn_notes = self.turn_notes or {}
+    self.turn_notes[#self.turn_notes + 1] = event
   elseif kind == "error" then
     self:clear()
     self:line(paint("! " .. tostring(event.error or "error"), "red", self.live))
+  end
+end
+
+-- One dim row per held note, under the answer. In the transcript the host folds it and opens the whole
+-- block on a click; in a captured log it is the row, and nothing is hidden behind it that a reader
+-- could not have had - `/turns` prints the same note from the journal.
+function METHODS:turn_notes_flush()
+  local notes = self.turn_notes
+  self.turn_notes = nil
+  if not notes then return end
+  local expandable = self:transcript() and host and type(host.transcript_expand) == "function" or false
+  for _, note in ipairs(notes) do
+    local line = M.turn_note_line(note, self.limit, { expandable = expandable })
+    if line.expand and expandable then
+      -- The marker reaches the host immediately before the write that draws the row: the host marks
+      -- lines of the NEXT write, as every other fold in this file does.
+      pcall(host.transcript_expand, json.encode({ { at = 0, text = line.expand } }))
+    end
+    self:line(paint(line.row, "dim", self.live))
   end
 end
 
@@ -2775,7 +3080,10 @@ function M.banner(opts)
   local function fact(label, value)
     if value and value ~= "" then return paint(fit(label .. ": " .. value), "muted", live) end
   end
-  local divider = paint(string.rep("\226\148\128", limit), "border", live)
+  -- The rule, expanded from the marker at the width this banner is drawn at (M.expand_rules): no
+  -- component here spells the rule character itself, so a width fixed at composition time cannot hide
+  -- in the banner (round 4, item 1).
+  local divider = paint(M.expand_rules(M.RULE, limit), "border", live)
   local lines = { divider,
     paint(STAR, "accent", live) .. " Welcome to " .. paint("wasm-agent", "bold", live) .. "!"
       .. ((opts.version and opts.version ~= "") and paint(" v" .. opts.version, "muted", live) or ""),
@@ -2814,6 +3122,12 @@ for _, name in ipairs(FRAMED) do
   -- the one line a change or a refusal produces is drawn AFTER it, through the writer this view already
   -- had - a failure's line therefore never lands in the middle of the frame it interrupted.
   METHODS[name] = function(self, ...)
+    -- THE FRAME BOUNDARY IS WHERE THE WIDTH IS READ (round 4, item 1). refresh_limit existed and was
+    -- called by nothing but its own test, so every component still laid itself out from the width the
+    -- view was built with: maximising the terminal left the welcome rule, the code-mode box and the
+    -- status bar at the old width (Victor, 18/11). Each framed call is a render, so each reads the
+    -- console first and the bytes it writes are laid out for the terminal that exists now.
+    self:refresh_limit()
     local notices = reload.tick(self.now())
     local results = table.pack(self:with_frame(inner, ...))
     for _, notice in ipairs(notices) do

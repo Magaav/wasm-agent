@@ -48,9 +48,9 @@ local fixture = {
   vault = { 'FIXTURE_TOKEN', 'SECOND_ONE' },
 }
 local text = mcp.vault_approval_text(fixture)
-ok(has(text, 'mcp-vault-approval/v3\nprogram /usr/bin/node\n'), 'the canonical text names its version and program')
+ok(has(text, 'mcp-vault-approval/v4\nprogram /usr/bin/node\n'), 'the canonical text names its version and program')
 ok(has(text, '\narg a%20b\n'), 'a space inside an argument is escaped, not a separator: ' .. text)
-eq(host.sha256(text), 'f45cc25f36c7315cbccfc17c5c1e37b5a9e99f02dff27911130bf5e80b5b8aec',
+eq(host.sha256(text), '0d7f15fd975c32c4d5875437dfc193931fbc01972a83f55d1b01c736c6e8ee0b',
   'the digest the Rust side pins for the same fixture')
 -- v2 added two fields to that digest - the directory the launch runs in and the plain (non-vault)
 -- environment it asks for, sorted by name so a caller's table order cannot change it - and v3 (round 6)
@@ -75,7 +75,7 @@ ok(not has(mcp.vault_approval_text({ program = '/bin/sh', args = { 'a\nb' }, fil
 -- writes into the node's install or into this checkout.
 local real_getenv = host.getenv
 local dir = paths.data() .. '/mcp/vault-approval-' .. tostring(host.uuid()):sub(1, 8)
-local node_override = dir .. '/node-fixture'
+local node_override = dir .. '/bin/node'
 host.getenv = function(name)
   if name == 'WA_MCP_SCRIPT_DIR' then return dir end
   if name == 'WA_NODE' then return node_override end
@@ -92,7 +92,24 @@ for _, name in ipairs(mcp.RUNTIME) do
 end
 local connector = dir .. '/connector.mjs'
 assert(host.write_file(connector, 'export const run = 1;\n'), 'the connector script')
-assert(host.write_file(dir .. '/node-fixture', '#!/bin/sh\nexit 0\n'), 'the interpreter fixture')
+-- Round 8: the allow-list is judged by what a file IS, so a fixture interpreter has to be a real NATIVE
+-- binary. The platform's own /usr/bin/env is ELF, is copied once per scratch home, and its bytes are the
+-- bytes a digest names - a shell script called node-fixture is exactly what the allow-list refuses.
+local native_source = os.getenv('WA_NATIVE_FIXTURE')
+if not native_source or native_source == '' then
+  for _, candidate in ipairs({ '/usr/bin/env', '/bin/env', '/usr/bin/true', '/bin/true' }) do
+    if host.file_magic and json.decode(host.file_magic(candidate)).magic == 'elf' then native_source = candidate break end
+  end
+end
+assert(native_source, 'a native binary to copy for the interpreter fixtures')
+local function native_copy(path)
+  local parent = path:match('^(.*)/[^/]+$')
+  if parent and host.path_kind(parent) ~= 'dir' then host.exec('mkdir -p ' .. parent, nil, 20) end
+  local done = host.exec('cp ' .. native_source .. ' ' .. path, nil, 20)
+  assert(host.path_kind(path) == 'file', 'a native fixture at ' .. path .. ': ' .. tostring(done))
+  return path
+end
+assert(native_copy(dir .. '/bin/node'), 'the interpreter fixture is a native binary called node')
 eq(mcp.script_dir(), dir, 'the script directory this test owns is the runtime the node resolves')
 
 local definition = { id = 'vault-fixture', name = 'Vault fixture', transport = 'stdio',
@@ -186,7 +203,7 @@ local function covers(manifest, path)
   for _, file in ipairs(manifest.files or {}) do if file.path == path then return true end end
   return false
 end
-local function manifest_of(candidate) return mcp.vault_manifest(candidate, mcp.script_dir()) end
+local function manifest_of(candidate, vouched) return mcp.vault_manifest(candidate, mcp.script_dir(), vouched) end
 local function problems_text(manifest) return table.concat(manifest.problems or {}, ' | ') end
 
 -- An import is followed: the module beside the script is hashed too.
@@ -197,13 +214,30 @@ local closed = manifest_of(definition)
 eq(#closed.problems, 0, 'a self-contained connector is covered: ' .. problems_text(closed))
 ok(covers(closed, connector) and covers(closed, lib), 'the module it imports is in the digest, not only the entry script')
 
--- An extensionless program is code too: "node conn" runs it whatever it is called, and its shebang says
--- which scanner follows it.
+-- Round 8 INVERTS the old answer here. An extensionless program that is a SHEBANG used to be followed
+-- by its shebang; now it is refused whatever it is called, because the allow-list is about what the
+-- file IS. A copy of python called `conn` is the case a list of names never caught.
 local bare = dir .. '/bare-conn'
-assert(host.write_file(bare, '#!/usr/bin/env node\nimport { value } from "./lib/extra.mjs";\n'), 'an extensionless program')
-local bare_manifest = manifest_of({ program = bare, args = { '--mode', 'stdio' }, vault_env = definition.vault_env })
-eq(#bare_manifest.problems, 0, 'an extensionless program is hashed and followed: ' .. problems_text(bare_manifest))
-ok(covers(bare_manifest, bare) and covers(bare_manifest, lib), 'the shebang program and its import are both covered')
+assert(host.write_file(bare, '#!/usr/bin/env node\nimport { value } from "./lib/extra.mjs";\n'), 'an extensionless script')
+local bare_manifest = manifest_of({ program = bare, args = { '--mode', 'stdio' }, cwd = dir, vault_env = definition.vault_env })
+ok(has(problems_text(bare_manifest), 'not node or a POSIX shell'),
+  'a script named as a program is refused, whatever its shebang: ' .. problems_text(bare_manifest))
+-- A copy of the platform's node under another name is refused too: the allow-list is the realpath's
+-- BASENAME, so `python3` under any name stays an interpreter and `node` under any other name is not
+-- node. The native binary the operator vouches for is the one exception, and it is tested below.
+local renamed = native_copy(dir .. '/node-copy')
+local renamed_manifest = manifest_of({ program = renamed, args = { connector }, cwd = dir, vault_env = definition.vault_env })
+ok(has(problems_text(renamed_manifest), 'not node or a POSIX shell'),
+  'a native binary under another name is refused without --native: ' .. problems_text(renamed_manifest))
+-- The operator's own voucher (--native) is the one way a native binary outside the two families is
+-- approved, and it is recorded with its sha256 in the digest.
+local vouched = mcp.native_voucher(renamed)
+assert(type(vouched) == 'table' and vouched.path and vouched.sha256, 'a voucher is built from the file on disk')
+local vouched_manifest = manifest_of({ program = renamed, args = { connector }, cwd = dir, vault_env = definition.vault_env }, vouched)
+eq(#vouched_manifest.problems, 0, 'a native binary the operator vouched for is approved: ' .. problems_text(vouched_manifest))
+ok(covers(vouched_manifest, renamed), 'and its bytes are in the digest like any approved file')
+ok(has(mcp.vault_approval_text(vouched_manifest), 'native ' .. vouched.path .. ' ' .. vouched.sha256),
+  'the canonical text carries the voucher, so replacing the binary voids the approval')
 
 -- Each of these is refused BY NAME: a digest over an incomplete file list reads as an approval.
 local function refuses(tweak, needle, label)
@@ -266,7 +300,7 @@ eq(put.error, 'mcp_vault_env_requires_operator', 'a model still cannot write a v
 -- Each of these reads M.vault_manifest directly - the one function the approval, the gate and the
 -- operator's probe all go through - so a regression is a problem in the digest, not a wording change.
 local platform_module = dofile('lua/core/platform.lua')
-local function manifest_of(def) return mcp.vault_manifest(def, mcp.script_dir()) end
+local function manifest_of(def, vouched) return mcp.vault_manifest(def, mcp.script_dir(), vouched) end
 local function problems_text(manifest) return table.concat(manifest.problems or {}, ' | ') end
 local function covered_by(manifest)
   local map = {}
@@ -277,15 +311,13 @@ end
 -- 1. The INTERPRETER (finding 1). The process the vault values are put in is the interpreter the launch
 -- SPAWNS - node_program(), i.e. WA_NODE and then the provisioned copy - and it used to be neither hashed
 -- nor out of the agent's reach. A file this user owns is a file the digest names.
-local user_node = dir .. '/node-fixture'
-assert(host.write_file(user_node, '#!/bin/sh\nexit 0\n'), 'the interpreter fixture')
+local user_node = dir .. '/bin/node'
 node_override = user_node
 local with_interpreter = manifest_of(definition)
 ok(covered_by(with_interpreter)[user_node] == true,
   'the interpreter the launch spawns is a file the digest names: ' .. problems_text(with_interpreter))
 -- Another interpreter is another digest: WA_NODE pointing somewhere else is not the approved launch.
-local other_node = dir .. '/node-other'
-assert(host.write_file(other_node, '#!/bin/sh\nexit 0\n'))
+local other_node = native_copy(dir .. '/bin2/node')
 node_override = other_node
 local other_digest = manifest_of(definition).sha256
 node_override = user_node
@@ -304,6 +336,26 @@ local missing_interpreter = manifest_of(definition)
 ok(has(problems_text(missing_interpreter), 'interpreter cannot be read'),
   'an interpreter that is not there is refused: ' .. problems_text(missing_interpreter))
 node_override = user_node
+-- Round 8: the same allow-list judges the process the values are put IN. WA_NODE is the one thing a
+-- connector cannot choose but the node can, and on a real node it is often a shim (this host's
+-- `which node` is mise's shim, whose realpath is /usr/bin/mise, not node). That is REFUSED, and it was
+-- untested: the arm that fires first on any mise/asdf/nvm-shimmed host had no row (found 18/11).
+local shimmed = native_copy(dir .. '/bin2/python3')
+node_override = shimmed
+local shimmed_manifest = manifest_of(definition)
+ok(has(problems_text(shimmed_manifest), 'cannot run a vault connector'),
+  'an interpreter the launch spawns is refused by the allow-list, not only unhashed: '
+   .. problems_text(shimmed_manifest))
+-- And a copy of node that is only a shell script is refused the same way: the name is not the program.
+local fake_node = dir .. '/bin3/node'
+assert(host.write_file(fake_node, '#!/bin/sh\nexit 0\n'), 'a shell script called node')
+node_override = fake_node
+local fake_interpreter = manifest_of(definition)
+ok(has(problems_text(fake_interpreter), 'cannot run a vault connector'),
+  'a spawned interpreter under an allowed name is still judged by what it IS: '
+   .. problems_text(fake_interpreter))
+node_override = user_node
+
 -- 3. ARGUMENTS (finding 2): program /usr/bin/node, args {server}, cwd <conn> ran ./server.js unhashed.
 local conn_dir = dir .. '/conn'
 local server_js = conn_dir .. '/server.js'
@@ -410,8 +462,8 @@ for _, interpreter in ipairs({ '/usr/bin/python3', '/usr/bin/python3.11', '/usr/
     '/usr/bin/perl', '/usr/bin/perl5.36', '/usr/bin/ruby3.2', '/usr/bin/php8.2', '/usr/bin/lua5.4',
     '/usr/bin/deno', '/usr/bin/bun', '/usr/bin/java', '/usr/bin/pwsh' }) do
   local manifest = manifest_of(interpreter_definition(interpreter))
-  ok(has(problems_text(manifest), 'an interpreter this digest cannot follow'),
-    interpreter .. ' is refused as a program: ' .. problems_text(manifest))
+  ok(has(problems_text(manifest), 'not node or a POSIX shell'),
+    interpreter .. ' is refused as a program (the allow-list): ' .. problems_text(manifest))
 end
 -- The two families the digest DOES follow stay approvable: node, and the POSIX shells.
 eq(#(manifest_of(interpreter_definition('/usr/bin/node')).problems or {}), 0,
@@ -431,6 +483,63 @@ eq(#(manifest_of(interpreter_definition('/usr/bin/node', { '-r', lib, connector 
   'node -r is a file the digest hashes: '
    .. problems_text(manifest_of(interpreter_definition('/usr/bin/node', { '-r', lib, connector }))))
 
+-- round 8, findings 3 and 4: the Lua side implements BOTH rules and asserted NEITHER. Rust's unit
+-- tests pinned the flag rule (an_inline_flag_is_matched_before_its_value_and_through_a_cluster) and the
+-- argument refusal, so a Lua regression here passed every gate this branch runs (found 18/11).
+-- 3a. An ARGUMENT that resolves to an interpreter is refused, even when the program itself is allowed.
+local arg_python = dir .. '/python3'
+assert(host.write_file(arg_python, '#!/bin/sh\nexit 0\n'), 'an interpreter an argument names')
+ok(has(problems_text(manifest_of(interpreter_definition('/usr/bin/node', { arg_python }))),
+    'resolves to an interpreter'),
+  'an argument that IS an interpreter is refused: '
+   .. problems_text(manifest_of(interpreter_definition('/usr/bin/node', { arg_python }))))
+-- 3b. And the same for a wrapper: the file the approval names would not be the file that runs.
+local arg_env = dir .. '/env'
+assert(host.write_file(arg_env, '#!/bin/sh\nexit 0\n'), 'a wrapper an argument names')
+ok(has(problems_text(manifest_of(interpreter_definition('/usr/bin/node', { arg_env }))),
+    'resolves to a wrapper'),
+  'an argument that IS a wrapper is refused: '
+   .. problems_text(manifest_of(interpreter_definition('/usr/bin/node', { arg_env }))))
+-- 4a. A code flag is matched BEFORE its '=': --eval=code is inline code, not an option whose value is text.
+for _, flag in ipairs({ '--eval=process.exit(0)', '--print=1' }) do
+  ok(has(problems_text(manifest_of(interpreter_definition('/usr/bin/node', { flag }))), 'inline code'),
+    flag .. ' is inline code, matched before its =: '
+     .. problems_text(manifest_of(interpreter_definition('/usr/bin/node', { flag }))))
+end
+-- 4b. A short cluster is split, so -pe cannot smuggle -p and -e past a whole-string comparison.
+ok(has(problems_text(manifest_of(interpreter_definition('/usr/bin/node', { '-pe', '1' }))), 'inline code'),
+  'a short cluster is split (-pe is -p and -e): '
+   .. problems_text(manifest_of(interpreter_definition('/usr/bin/node', { '-pe', '1' }))))
+ok(has(problems_text(manifest_of(interpreter_definition('/bin/sh', { '-ec', 'echo hi' }))), 'inline code'),
+  'and the same cluster on a shell (-ec is -e and -c): '
+   .. problems_text(manifest_of(interpreter_definition('/bin/sh', { '-ec', 'echo hi' }))))
+-- 4d. Round 9, item 4: the FAMILY is decided from the program's REALPATH, as the kernel decides it.
+-- A symlink named `node` that points at bash is the SHELL family: `-c` is then inline shell code, which
+-- the js family's flag list (-e, --eval, -p, --print) would not have named at all. Both sides follow the
+-- link now; before this round Lua judged the name it was called by.
+if host.path_facts and host.exec then
+  local link = dir .. '/bin/node-to-bash'
+  local made = host.exec('ln -sf /bin/sh ' .. link, nil, 20)
+  if host.path_kind(link) == 'file' then
+    assert(host.exec('ln -sf /bin/bash ' .. link, nil, 20))
+    local via_link = manifest_of(interpreter_definition(link, { connector, '-c', 'echo hi' }))
+    ok(has(problems_text(via_link), 'inline code'),
+      'a symlink named node that points at bash is the shell family (-c is inline code): '
+       .. problems_text(via_link))
+    -- The SAME link under a js flag is not a js flag: -p means nothing to a shell, and the family
+    -- decided the answer both times.
+    local js_flag = manifest_of(interpreter_definition(link, { connector, '-p', '1' }))
+    ok(not has(problems_text(js_flag), 'inline code'),
+      'and -p, the js family\'s flag, is not code for the shell it really is: ' .. problems_text(js_flag))
+  else
+    print('skip: this host cannot make a symlink (' .. tostring(made) .. ')')
+  end
+end
+-- 4c. A LONG option is never split: --preserve-symlinks begins with -p and is not -p.
+ok(not has(problems_text(manifest_of(interpreter_definition('/usr/bin/node',
+    { connector, '--preserve-symlinks' }))), 'inline code'),
+  'a long option is one flag and is not split into short ones')
+
 -- 3. require('vm') and runInThisContext are eval's twins: a compiled script is a string, not a file.
 local vm_import = dir .. '/vm-import.mjs'
 assert(host.write_file(vm_import, "import vm from 'node:vm';\nvm.runInThisContext('1');\n"))
@@ -440,10 +549,76 @@ local vm_require = dir .. '/vm-require.mjs'
 assert(host.write_file(vm_require, "const vm = require('vm');\nvm.runInThisContext('1');\n"))
 ok(has(problems_text(manifest_of(interpreter_definition('/usr/bin/node', { vm_require }))), 'vm'),
   'require(vm) is refused too')
+-- Round 8's finding 6: the module bound to another NAME. `const engine = require('vm')` and
+-- `engine.Script(code)` runs a string, and a detector that only spelled `vm.Script` saw nothing.
+local vm_alias = dir .. '/vm-alias.mjs'
+assert(host.write_file(vm_alias,
+  "const engine = require('node:vm');\nconst s = new engine.Script(process.env.FIXTURE_TOKEN);\n"))
+local alias_manifest = manifest_of(interpreter_definition('/usr/bin/node', { vm_alias }))
+ok(has(problems_text(alias_manifest), 'vm'),
+  'a vm module bound to another name is refused through .Script: ' .. problems_text(alias_manifest))
+-- The alias rule itself, where nothing else can fire: the module arrives as a PARAMETER, so the file has no
+-- literal `require('vm')` to match, and only the receiver rule (`x.Script(`) sees it.
+local vm_parameter = dir .. '/vm-parameter.mjs'
+assert(host.write_file(vm_parameter,
+  'export const go = (engine, code) => new engine.Script(code);\n'))
+local parameter_manifest = manifest_of(interpreter_definition('/usr/bin/node', { vm_parameter }))
+ok(has(problems_text(parameter_manifest), 'whatever name the module was bound'),
+  'a vm module received under any name is refused through .Script: ' .. problems_text(parameter_manifest))
+local vm_compile = dir .. '/vm-compile.mjs'
+assert(host.write_file(vm_compile,
+  "import * as v from 'node:vm';\nconst f = v.compileFunction('return 1');\n"))
+ok(has(problems_text(manifest_of(interpreter_definition('/usr/bin/node', { vm_compile }))), 'vm'),
+  'a namespace import used through .compileFunction is refused')
+local vm_runin = dir .. '/vm-runin.mjs'
+assert(host.write_file(vm_runin, "const box = require('vm');\nbox.runInNewContext('1');\n"))
+ok(has(problems_text(manifest_of(interpreter_definition('/usr/bin/node', { vm_runin }))), 'vm'),
+  'an aliased module used through .runInNewContext is refused')
 local vm_context = dir .. '/vm-context.mjs'
 assert(host.write_file(vm_context, 'export const go = (code) => runInThisContext(code);\n'))
 ok(has(problems_text(manifest_of(interpreter_definition('/usr/bin/node', { vm_context }))), 'vm'),
   'runInThisContext is refused even without the module name in the file')
+
+-- Round 9, item 3: the three spellings the quote class and the receiver rule did not cover.
+-- (a) A TEMPLATE literal: require(`vm`) is require('vm') with the one quote the class lacked.
+local vm_template = dir .. '/vm-template.mjs'
+local backtick = string.char(96)
+assert(host.write_file(vm_template,
+  'const engine = require(' .. backtick .. 'vm' .. backtick .. ');\nexport const go = (c) => engine.Script(c);\n'))
+local template_manifest = manifest_of(interpreter_definition('/usr/bin/node', { vm_template }))
+local template_text = problems_text(template_manifest)
+-- The receiver rule alone would catch the .Script call; this asserts the TEMPLATE specifier is named as such,
+-- so a future edit that drops the backtick from VM_QUOTE fails here and not silently.
+ok(has(template_text, 'template literal'),
+  'require(`vm`) in a template literal is refused as such: ' .. template_text)
+local vm_template_import = dir .. '/vm-template-import.mjs'
+assert(host.write_file(vm_template_import,
+  'const m = await import(' .. backtick .. 'node:vm' .. backtick .. ');\nexport default m;\n'))
+ok(has(problems_text(manifest_of(interpreter_definition('/usr/bin/node', { vm_template_import }))), 'template literal'),
+  'import(`node:vm`) in a template literal is refused too')
+-- (b) process.getBuiltinModule: the module by HANDLE, with no require and no import in the file...
+local vm_builtin = dir .. '/vm-builtin.mjs'
+assert(host.write_file(vm_builtin,
+  "const engine = process.getBuiltinModule('node:vm');\nexport const go = (c) => engine.Script(c);\n"))
+local builtin_manifest = manifest_of(interpreter_definition('/usr/bin/node', { vm_builtin }))
+ok(has(problems_text(builtin_manifest), 'getBuiltinModule'),
+  'process.getBuiltinModule(\'node:vm\') is refused by the call: ' .. problems_text(builtin_manifest))
+-- (c) ... and the DESTRUCTURING form, whose calls are bare names (`Script(c)`) that the receiver rule
+-- (x.Script() needs a dot) never matches: the refusal has to come from the getBuiltinModule call itself.
+local vm_destructured = dir .. '/vm-destructured.mjs'
+assert(host.write_file(vm_destructured,
+  "const { Script, compileFunction } = process.getBuiltinModule('vm');\nexport const go = (c) => new Script(c);\n"))
+local destructured_manifest = manifest_of(interpreter_definition('/usr/bin/node', { vm_destructured }))
+ok(has(problems_text(destructured_manifest), 'getBuiltinModule'),
+  'the destructuring form is refused by the getBuiltinModule call: ' .. problems_text(destructured_manifest))
+-- Neither new rule refuses an ordinary connector: a plain require of fs and a template literal in a test
+-- are not code this digest cannot name.
+local plain = dir .. '/plain-template.mjs'
+assert(host.write_file(plain,
+  "import { readFile } from 'node:fs/promises';\nexport const name = (x) => " .. backtick .. 'file:${x}' .. backtick .. ';\n'))
+eq(#manifest_of(interpreter_definition('/usr/bin/node', { plain })).problems, 0,
+  'a template literal and an ordinary import are not refused: '
+   .. problems_text(manifest_of(interpreter_definition('/usr/bin/node', { plain }))))
 
 -- 4. The interpreter is resolved with the PATH the CHILD gets, not the one host.getenv answers: the
 -- kernel resolves a bare program name against the process PATH (host.executable_on_path) while
@@ -451,10 +626,8 @@ ok(has(problems_text(manifest_of(interpreter_definition('/usr/bin/node', { vm_co
 -- reads, so the approval is refused instead.
 ok(type(host.executable_on_path) == 'function',
   'the host can resolve a bare name the way the launch does (host.executable_on_path)')
-local child_node = dir .. '/child-bin/node'
-local decoy_node = dir .. '/decoy-bin/node'
-assert(host.write_file(child_node, '#!/bin/sh\nexit 0\n'), 'the interpreter on the child PATH')
-assert(host.write_file(decoy_node, '#!/bin/sh\nexit 0\n'), 'the interpreter on the config PATH')
+local child_node = native_copy(dir .. '/child-bin/node')
+local decoy_node = native_copy(dir .. '/decoy-bin/node')
 local active_getenv = host.getenv
 local real_on_path = host.executable_on_path
 host.getenv = function(name)
@@ -481,6 +654,124 @@ host.getenv = active_getenv
 
 host.getenv = real_getenv
 host.operation = real_operation
+
+-- ---- 8. round 8: ONE table of refused names, and ONE case rule ------------------------------
+-- Lua and Rust each keep a list, and they drifted: the Rust list matched `Rscript` only by accident
+-- while Lua lowercased first (finding 5). Both now read fixtures/mcp-refused-names.json at test time and
+-- both compare case-insensitively, so a name added to one side and not the other fails here.
+local table_path = (host.getenv('WASM_AGENT_LUA_ROOT') or '.') .. '/fixtures/mcp-refused-names.json'
+local raw_table = host.read_file(table_path)
+ok(type(raw_table) == 'string', 'the shared refusal table is readable: ' .. table_path)
+local shared = raw_table and json.decode(raw_table) or {}
+local function same_names(ours, theirs, label)
+  local mine, wanted = {}, {}
+  for _, name in ipairs(ours or {}) do mine[#mine + 1] = tostring(name):lower() end
+  for _, name in ipairs(theirs or {}) do wanted[#wanted + 1] = tostring(name):lower() end
+  table.sort(mine); table.sort(wanted)
+  eq(table.concat(mine, ','), table.concat(wanted, ','), label)
+end
+same_names(mcp.ALLOWED_PROGRAMS, shared.allowed_programs, 'the allow-list is the shared table')
+same_names(mcp.REFUSED_INTERPRETERS, shared.refused_interpreters, 'the interpreter list is the shared table')
+same_names(mcp.REFUSED_WRAPPERS, shared.refused_wrappers, 'the wrapper list is the shared table')
+-- Case does not decide it on either side: `Rscript` is `rscript`, whatever the file on disk is called.
+for _, name in ipairs({ '/usr/bin/Rscript', '/usr/bin/PYTHON3', '/usr/bin/Perl5.36' }) do
+  local manifest = manifest_of(interpreter_definition(name))
+  ok(has(problems_text(manifest), 'not node or a POSIX shell'),
+    name .. ' is refused whatever its case: ' .. problems_text(manifest))
+end
+-- And every wrapper in the table is refused as a PROGRAM, by its realpath's basename.
+for _, wrapper in ipairs(mcp.REFUSED_WRAPPERS) do
+  if host.path_kind('/usr/bin/' .. wrapper) == 'file' then
+    local manifest = manifest_of(interpreter_definition('/usr/bin/' .. wrapper))
+    ok(has(problems_text(manifest), 'which is a wrapper'),
+      '/usr/bin/' .. wrapper .. ' is refused as a wrapper: ' .. problems_text(manifest))
+  end
+end
+
+-- ---- 9. round 9, item 6: the CLI's own `/mcp <key> on --native <path>` ----------------------
+-- The console's parser is where an operator's voucher enters the system, and it had no test at all: a
+-- relative path, a missing path and the passthrough to mcp_command.toggle were all unproven. Driven
+-- through mcp_cli.run with print captured, on a connector this test seeds itself.
+local cli = dofile('lua/core/mcp_cli.lua')
+local function printed(argument)
+  local lines = {}
+  -- The console hands `run` the line WITHOUT its '/mcp ' prefix (lua/core/chat.lua: `line:sub(5)`), which
+  -- is how the real command reaches it - passing the prefix made every line read key='/mcp'.
+  local body = tostring(argument):gsub('^/mcp%s+', '')
+  local answer = cli.run(body, { ctx = { role = 'master', operator = true, session_id = 'op' },
+    print = function(line) lines[#lines + 1] = tostring(line) end })
+  return answer, table.concat(lines, '\n')
+end
+-- The connector the CLI turns on: a vault entry, probed, and a native binary the operator vouches for.
+-- The SPAWNED interpreter is this test's own native copy (WA_NODE, as the sections above set it): on this
+-- host 'which node' is mise's shim, whose realpath the allow-list refuses by name, and the subject here
+-- is the CLI's voucher, not the shim.
+-- The earlier sections redirect WA_NODE through a getenv STUB that is restored by now (host.getenv is
+-- the host's real reader here), so this section stubs it again for its own duration.
+local cli_getenv = host.getenv
+host.getenv = function(name)
+  if name == 'WA_NODE' then return dir .. '/bin/node' end
+  return cli_getenv(name)
+end
+local cli_binary = native_copy(dir .. '/cli-bin/native-node')
+local cli_definition = { id = 'vault-cli', name = 'CLI fixture', transport = 'stdio',
+  program = cli_binary, args = { '--mode', 'stdio' }, cwd = dir, tools = { echo = 'write' },
+  vault_env = { FIXTURE_TOKEN = 'fixture_token' }, timeout_seconds = 5 }
+local function seed_cli(row_value)
+  local store = { schema = 1, revision = 1, servers = { ['vault-cli'] = row_value } }
+  assert(json.decode(host.sql_exec('INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)',
+    json.encode({ 'mcp.extensions.v1', json.encode(store) }))).ok, 'the CLI registry row is written')
+end
+local function cli_row()
+  local rows = json.decode(host.sql_query('SELECT value FROM meta WHERE key=?', json.encode({ 'mcp.extensions.v1' })))
+  return json.decode(rows[1].value).servers['vault-cli']
+end
+local cli_probe = { ok = true, schema_hash = 'cli-hash',
+  tools = { { name = 'echo', description = 'echo', input_schema_json = '{"type":"object"}' } } }
+seed_cli({ definition = cli_definition, enabled = false, vault_approved = false, revision = 1, probe = cli_probe })
+
+-- (a) A RELATIVE path is refused by name, and nothing is enabled or approved.
+local answer, text = printed('/mcp vault-cli on --native cli-bin/native-node')
+eq(answer.error, 'mcp_vault_native_needs_absolute_path', 'a relative --native path is refused: ' .. text)
+ok(has(text, 'ABSOLUTE path of a native binary'), 'and the sentence says what to give instead: ' .. text)
+eq(cli_row().enabled, false, 'nothing was enabled by the refused line')
+eq(cli_row().vault_approved, false, 'and no approval was recorded')
+
+-- (b) `--native` with NOTHING after it is a usage error, not an approval of nothing.
+answer, text = printed('/mcp vault-cli on --native')
+eq(answer.error, 'mcp_vault_native_usage', 'a bare --native is a usage error: ' .. text)
+ok(has(text, 'usage: /mcp <key> on --native'), 'and the usage line is printed: ' .. text)
+
+-- (c) An ABSOLUTE path that is NOT THERE is refused by the console's gate: the path resolves, so the
+-- parser passes it, and it is mcp.lua that refuses to approve a program it cannot read.
+local missing = dir .. '/cli-bin/not-there-at-all'
+ok(host.path_kind(missing) ~= 'file', 'the missing fixture really is missing')
+answer, text = printed('/mcp vault-cli on --native ' .. missing)
+eq(answer.error, 'mcp_vault_native_unreadable', 'an absolute path that is not there is refused by name: ' .. text)
+eq(cli_row().vault_approved, false, 'and still nothing is approved')
+
+-- (c2) An UNKNOWN argument is refused by name, not ignored: 'on --token abc' must not enable anything
+-- (the old anchored match answered a generic unknown_connector; now the rest of the line is judged).
+answer, text = printed('/mcp vault-cli on --token abc')
+eq(answer.error, 'mcp_usage', 'an unknown argument to on is refused: ' .. text)
+eq(cli_row().enabled, false, 'and nothing was enabled by it')
+answer, text = printed('/mcp vault-cli off extra')
+eq(answer.error, 'mcp_usage', 'an extra word after off is refused too: ' .. text)
+
+-- (d) The voucher is PASSED THROUGH to mcp_command.toggle: an absolute path of a native binary the
+-- connector runs is approved, and the row records the voucher's realpath and sha256.
+answer, text = printed('/mcp vault-cli on --native ' .. cli_binary)
+ok(answer.ok == true, 'the operator turns it on with --native: ' .. text)
+local approved_row = cli_row()
+eq(approved_row.vault_approved, true, 'the row records the approval')
+ok(type(approved_row.vault_approval) == 'table' and type(approved_row.vault_approval.native) == 'table',
+  'and the voucher travelled from the CLI into the approval: ' .. json.encode(approved_row.vault_approval and approved_row.vault_approval.native))
+eq(approved_row.vault_approval and approved_row.vault_approval.native.path,
+  mcp.native_voucher(cli_binary).path, 'the voucher names the binary\'s realpath')
+eq(approved_row.vault_approval and approved_row.vault_approval.native.sha256,
+  mcp.native_voucher(cli_binary).sha256, 'and the bytes on disk, as the manifest recorded them')
+-- Back to the host's own reader, so nothing after this section inherits the stub.
+host.getenv = cli_getenv
 
 if failed > 0 then print(string.format('mcp vault approval: %d failed of %d checks', failed, checks)) os.exit(1) end
 print(string.format('mcp vault approval ok (%d checks)', checks))

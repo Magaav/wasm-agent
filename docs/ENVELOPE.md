@@ -150,7 +150,7 @@ runs on the client too, while `bash` runs on this node.
 | `route_task` | `route` `task` `reason?` | Record whether this turn is done here or delegated (orchestration mode) |
 | `forget` | `id` | Delete a stored fact by id |
 | `bash` | `command` `cwd?` `timeout_seconds?` | Run a shell command on this machine |
-| `operation` | `action` `command?` `cwd?` `id?` `limit?` `offset?` `stream?` `timeout_seconds?` `wait_for?` `wait_ms?` | Run or collect a supervised long command |
+| `operation` | `action` `command?` `cwd?` `id?` `limit?` `offset?` `scope?` `stream?` `timeout_seconds?` `wait_for?` `wait_ms?` | Run or collect a supervised long command |
 | `read` | `path` `column?` `limit?` `offset?` `version?` | Read a file (text or image), paged |
 | `write` | `content` `path` | Create or overwrite a file |
 | `edit` | `path` `edits?` `range_edits?` | Replace a versioned range returned by read |

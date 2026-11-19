@@ -53,21 +53,57 @@ local function getenv(name)
   return ok and type(value) == 'string' and value or nil
 end
 
--- `<data>/tool-progress.json`, resolved the way the Rust side resolves it: `WASM_AGENT_DATA`, else
--- `WASM_AGENT_HOME/.wasm-agent`, else the host's data directory. `WA_TOOL_PROGRESS` points a test (or
--- an operator) at a fixture and never at this machine's node.
-function M.path(options)
+-- The directory the live rows live in - ONE FILE PER SESSION - resolved the way the Rust side
+-- resolves it: `WASM_AGENT_DATA`, else `WASM_AGENT_HOME/.wasm-agent`, else the host's data directory.
+-- `WA_TOOL_PROGRESS` points a test (or an operator) at a fixture directory and never at this machine's
+-- node.
+--
+-- It used to be one file for the whole node, with no owner: every session's reader drew whatever had
+-- been written last - and the row carries the last line of the caller's stdout, so that was a content
+-- leak, not only a wrong label (session isolation, finding 1). The file is now named after the session
+-- that owns the call (`M.key`), a reader opens only its own, and the others are one dim count.
+function M.dir(options)
   local o = options or {}
-  local configured = o.path or getenv("WA_TOOL_PROGRESS")
+  local configured = o.dir or getenv("WA_TOOL_PROGRESS")
   if type(configured) == 'string' and configured ~= "" then return (configured:gsub("\\", "/")) end
   local data = getenv("WASM_AGENT_DATA")
-  if data and data ~= "" then return (data:gsub("\\", "/")) .. "/tool-progress.json" end
+  if data and data ~= "" then return (data:gsub("\\", "/")) .. "/tool-progress" end
   local home = getenv("WASM_AGENT_HOME")
-  if home and home ~= "" then return (home:gsub("\\", "/")) .. "/.wasm-agent/tool-progress.json" end
+  if home and home ~= "" then return (home:gsub("\\", "/")) .. "/.wasm-agent/tool-progress" end
   local ok, paths = pcall(dofile, 'lua/core/paths.lua')
   local dir = ok and type(paths) == 'table' and paths.data and paths.data() or nil
-  if not dir then return "tool-progress.json" end
-  return (tostring(dir):gsub("\\", "/")) .. "/tool-progress.json"
+  if not dir then return "tool-progress" end
+  return (tostring(dir):gsub("\\", "/")) .. "/tool-progress"
+end
+
+-- The file name for an owner (a session id): every byte outside `A-Za-z0-9._-` percent-encoded, so two
+-- sessions cannot collide onto one file. `wa_tool_progress::owner_key` computes the same key - the host
+-- writes the file and this reads it, so the two must agree, and `scripts/test-tool-progress.lua` pins
+-- both against one table. `nil` for an empty owner (a call nobody can claim is drawn by nobody) and for
+-- a key too long for a file name, which is refused rather than truncated onto another owner's name.
+function M.key(owner)
+  if type(owner) ~= 'string' or owner == "" then return nil end
+  local key = owner:gsub("[^%w%._%-]", function(character) return string.format("%%%02X", string.byte(character)) end)
+  if #key > 120 then return nil end
+  return key
+end
+
+-- `<dir>/<key>.json` for an owner, or nil when it has no usable key. `options.session` is the reader's
+-- own session; `options.path` names a fixture file outright (a test, never a node).
+function M.path(options)
+  local o = options or {}
+  if type(o.path) == 'string' and o.path ~= "" then return (o.path:gsub("\\", "/")) end
+  local key = M.key(o.session)
+  if not key then return nil end
+  return M.dir(o) .. "/" .. key .. ".json"
+end
+
+-- The one line a reader draws for work that is NOT its own: a count, and nothing else - no tool name, no
+-- session id, no line of anybody's output. `wa_tool_progress::elsewhere`'s wording, to the letter.
+function M.elsewhere_text(count)
+  count = tonumber(count) or 0
+  if count == 1 then return "node: 1 op elsewhere" end
+  return "node: " .. count .. " ops elsewhere"
 end
 
 -- `125` -> `2m05s`, `45` -> `45s`, `3720` -> `1h02m`: `elapsed` in wa-tool-progress, to the second.
@@ -296,7 +332,10 @@ function M.active() return current end
 local memo = { at = nil, path = nil, facts = nil }
 function M.live(options)
   local o = options or {}
-  local path = o.path or M.path(o)
+  -- Only THIS session's file. With no session of my own there is no row of mine to draw: a call
+  -- nobody can claim is drawn by nobody (M.key), exactly as the Rust reader decides it.
+  local path = o.path or M.path({ session = o.session, dir = o.dir })
+  if not path then return nil end
   local now = tonumber(o.now) or (host and host.now and host.now() or os.time())
   local ms = math.floor(now * 1000)
   if not o.refresh and memo.path == path and memo.at and (ms - memo.at) < 250 then return memo.facts end
@@ -312,6 +351,56 @@ end
 
 function M.reset_live() memo.at, memo.path, memo.facts = nil, nil, nil end
 
+-- How many OTHER sessions have a live row right now: a count, and nothing else.
+--
+-- Counted by age alone. A settled call removes its own file, so a file younger than M.FRESH is a call
+-- still running; one left by a process that died mid-call stops counting when it goes stale. Nothing is
+-- read out of another session's file - no tool name, no line of its output - which is the whole point
+-- of the per-session keying.
+function M.elsewhere(options)
+  local o = options or {}
+  -- THE COUNT IS THE OPERATION MANAGER'S, NOT THIS DIRECTORY'S (session isolation, item 3 round 4).
+  --
+  -- It used to be "how many files younger than FRESH are in this directory", which is a count of
+  -- SESSIONS with a live row, not of work: four unsettled operations in one other session read as ONE,
+  -- and a session whose row file was written by a call that then went quiet kept counting. The sentence
+  -- says "ops", so it counts operations - and only the unsettled ones, which is the runtime's own
+  -- `operations_elsewhere` answer (the count of live operations this caller does not own).
+  --
+  -- A node that cannot be asked answers nil, never zero: "no aggregate" draws no row, while a 0 would
+  -- claim the other sessions are idle.
+  if type(host.operation) == 'function' then
+    local ok, raw = pcall(host.operation, 'list', json.encode({ session = tostring(o.session or '') }))
+    if ok and type(raw) == 'string' then
+      local decoded, value = pcall(json.decode, raw)
+      if decoded and type(value) == 'table' and value.operations_elsewhere ~= nil then
+        return tonumber(value.operations_elsewhere) or 0
+      end
+    end
+    return nil
+  end
+  local mine = M.path({ session = o.session, dir = o.dir, path = o.path })
+  local dir = o.dir
+  if type(o.path) == 'string' and o.path ~= "" then dir = o.path:match("^(.*)[/\\][^/\\]*$") end
+  dir = dir or M.dir(o)
+  if not (host and host.list_dir) then return 0 end
+  local ok, raw = pcall(host.list_dir, dir)
+  if not ok or type(raw) ~= 'string' or raw == "" then return 0 end
+  local decoded, listing = pcall(json.decode, raw)
+  if not decoded or type(listing) ~= 'table' or type(listing.entries) ~= 'table' then return 0 end
+  local now = tonumber(o.now) or (host and host.now and host.now() or os.time())
+  local count = 0
+  for _, entry in ipairs(listing.entries) do
+    local name = type(entry) == 'table' and tostring(entry.name or "") or ""
+    local mine_name = mine and mine:match("[^/\\]+$") or nil
+    if name:sub(-5) == ".json" and name ~= mine_name then
+      local age = now - (tonumber(entry.modified) or 0)
+      if age >= 0 and age <= M.FRESH then count = count + 1 end
+    end
+  end
+  return count
+end
+
 -- The row for the call in flight, from the live file when it has something fresher than this
 -- process's own tail, else from that tail. `nil` while the call is too young, and `nil` when nothing
 -- is running.
@@ -319,7 +408,7 @@ function M.reset_live() memo.at, memo.path, memo.facts = nil, nil, nil end
 function M.status(options)
   local o = options or {}
   local now = tonumber(o.now) or (host and host.now and host.now() or os.time())
-  local facts = M.live({ path = o.path, refresh = o.refresh, now = now })
+  local facts = M.live({ path = o.path, dir = o.dir, session = o.session, refresh = o.refresh, now = now })
   local detail, tool, started, last_output = nil, nil, nil, nil
   if type(facts) == 'table' and facts.state == "running" then
     local at = tonumber(facts.at)

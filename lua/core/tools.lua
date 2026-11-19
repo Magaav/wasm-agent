@@ -435,8 +435,13 @@ M.admin = {
     id = { type = "string" }, command = { type = "string" }, cwd = { type = "string" },
     timeout_seconds = { type = "integer", minimum = 1, maximum = 86400 },
     stream = { type = "string", enum = {"stdout", "stderr"} }, offset = { type = "integer", minimum = 0 },
+    -- The ceiling is codemode_pending.STDOUT_PAGE_BYTES (24 KiB, the Rust page). It is written out
+    -- because a schema table is a literal; scripts/test-turn-signal.lua asserts the two agree, so
+    -- the copy cannot drift silently (item 4).
     limit = { type = "integer", minimum = 1, maximum = 24576 }, wait_ms = { type = "integer", minimum = 0, maximum = 10000 },
-    wait_for = { type = "string", enum = {"command", "settled"}, description = "await only: foreground adoption defaults to command completion; settled waits for the complete owned process tree." }
+    wait_for = { type = "string", enum = {"command", "settled"}, description = "await only: foreground adoption defaults to command completion; settled waits for the complete owned process tree." },
+    scope = { type = "string", enum = { "node" },
+      description = "Only for an operator surface or a session the operator has marked mastermind: scope=\"node\" reaches every session's operations on this node, and is written to the audit journal. A model call in an ordinary session is refused (scope_node_forbidden) and does not get it; read your own operations without a scope." }
   }, {"action"}),
   schema("read", "Read text with line/byte continuation, or a PNG/JPEG/WebP/GIF (up to 4 MB) as an image. Ask for the range you need and follow next_offset/next_column with `version` until eof. A whole-line page returns `selection` and `edit_lines`, the receipt edit's range_edits form takes.", {
     path = { type = "string" },
@@ -1162,9 +1167,12 @@ end
 
 local function launch_cwd(memory, ctx, requested)
   local workspace = memory and ctx.session_id and memory.session_workspace and memory.session_workspace(ctx.session_id)
+  -- `session` is not a launch detail: it is WHOSE work this is. The operation record carries it, so the
+  -- shell an agent starts belongs to the session that asked and to no other (session isolation,
+  -- findings 1 and 2). An empty value stays empty - a call nobody names is nobody's.
   return {requested=requested or "", source=(requested and requested~="") and "explicit" or
     ((session_cwd(memory,ctx) or "")~="" and "session_workspace" or "node"),
-    required=workspace and workspace.required == true or false}
+    required=workspace and workspace.required == true or false, session=(ctx and ctx.session_id) or ""}
 end
 
 local function run(command, timeout_seconds, cwd, provenance)
@@ -1546,6 +1554,18 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
   end
   if name == "operation" then
     if not is_master(role) then return {error="forbidden_for_role:" .. role} end
+    -- WHOSE operation this is, and whether this caller may reach past its own (session isolation,
+    -- finding 2; lua/core/session_scope.lua). The owner has always been stamped here and never
+    -- compared, so `list` answered with every operation on the node and `status`/`read`/`wait`/
+    -- `cancel` answered for any id - and the ids are guessable (`op-<micros>-<pid>-<n>`). The
+    -- session travels with every action so the runtime can refuse a call it does not own, and
+    -- `scope:"node"` - the operator's alone, audited - is the one way to act beyond it.
+    local grant, refusal = dofile('lua/core/session_scope.lua').grant(memory, args, ctx, role, user_id, name)
+    if refusal then return refusal end
+    -- A CONTROL start is the node's own short read and is the only kind admitted into the two slots no
+    -- workload may hold (finding 7). It is a property of the read path, never of the model's arguments:
+    -- dropped here, so no tool call can claim the reserve (item 7, round 2).
+    args.control = nil
     args.owner = ctx.session_id or user_id
     -- A vault entry reaches a child only through the kernel's own MCP launch (lua/core/mcp.lua), never a
     -- tool call: a model that could name an entry here could start a program that prints it. The
@@ -1553,6 +1573,8 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     -- record, not a field a caller supplies.
     args.vault_env = nil
     args.vault_approval = nil
+    args.session = grant.session or ""
+    args.node_scope = grant.node == true
     if args.action == "start" then
       -- An explicit start is backgrounded by definition - the caller gets a receipt and moves on - so
       -- it runs at low CPU priority unless a caller that DOES wait for a while says otherwise
@@ -1576,7 +1598,45 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     if args.action == "await" then args.tool = "operation" end
     local ok, raw = pcall(host.operation, args.action or "status", json.encode(args))
     if not ok then return {error=tostring(raw)} end
-    return json.decode(raw)
+    local answer = json.decode(raw)
+    -- Item #43: list and await answer IDS AND STATE by default; an output BODY is returned only when it
+    -- was asked for, and then bounded. A run that lists four operations should not pay for four logs,
+    -- and the one number a caller needs to decide what to do next (is it settled? how many bytes? where
+    -- is the log?) is in the record either way.
+    local action = tostring(args.action or "")
+    if (action == "list" or action == "await" or action == "wait") and type(answer) == "table" then
+      local wanted = args.output == true or args.include_output == true
+      local cap = math.max(1024, math.min(tonumber(args.max_bytes) or 4096, 65536))
+      local records = answer
+      local single = answer.operation_id ~= nil or answer.state ~= nil
+      if single then records = { answer } end
+      if type(records) == "table" then
+        for _, record in ipairs(records) do
+          if type(record) == "table" then
+            local had = false
+            for _, key in ipairs({ "stdout", "stderr" }) do
+              local value = record[key]
+              if type(value) == "string" and value ~= "" then
+                had = true
+                if not wanted then
+                  record[key .. "_omitted"] = #value
+                  record[key] = nil
+                elseif #value > cap then
+                  record[key] = value:sub(1, cap)
+                  record[key .. "_truncated"] = #value
+                end
+              end
+            end
+            if had and not wanted then
+              record.output_omitted = true
+              record.output_hint = "add output=true (max_bytes=" .. cap
+                .. ") to this call, or read one stream: operation action=\"read\" id=... stream=stdout"
+            end
+          end
+        end
+      end
+    end
+    return answer
   end
   if name == "node_update" then
     -- Distance update (lua/core/remote_update.lua, docs/REMOTE-UPDATE.md). Master only, and the peer
@@ -1680,6 +1740,17 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     return memory.memories(guest_scope or args.scope, args.limit or 50)
   elseif name == "forget" then
     if not args.id or args.id == "" then return { error = "id_required" } end
+    -- Deleting is reading's sibling: an id is not an authorization (session isolation, finding 10). The
+    -- scope the fact lives in decides, and a guest may only delete what it could have read - its own
+    -- `user:<id>`. An id that names no live row answers the same way a wrong one does.
+    -- NOT a collapsed conditional: "a and f() or true" is true whenever f() returns false, so the
+    -- refusal could never fire - the one line this whole finding rested on (item 1, round 2).
+    local allowed, why = true, nil
+    if memory.may_delete then allowed, why = memory.may_delete(args.id, guest_scope) end
+    if not allowed then
+      return { error = why or "forget_forbidden_scope", effect = "none", id = args.id,
+        note = "this memory is not in a scope you may delete from; a scoped caller deletes only its own facts" }
+    end
     return { id = args.id, forgotten = memory.forget(args.id) and true or false }
   elseif name == 'codemode' then
     if not is_master(role) then return {error='forbidden_for_role:'..role} end
@@ -2045,7 +2116,12 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
       local ok, recalled = pcall(function() return dofile('lua/core/lessons.lua').ensure() end)
       if ok and type(recalled) == 'table' then lessons = recalled end
     end
-    local view = fleetview.view({ lessons = lessons })
+    -- WHOSE VIEW THIS IS (session isolation, item 1 round 4): the caller's own memory module, role and
+    -- session go in. The module's node-scope grant needs a store to write its audit line to and a role to
+    -- check; a hard-coded 'master' with no store was neither audited nor refused, so the read answered as
+    -- a sessionless caller and showed a fraction of the node's work as if it were all of it.
+    local view = fleetview.view({ lessons = lessons, memory = memory, role = role,
+      user_id = user_id, session = ctx.session_id })
     return view
   elseif name == "lessons" then
     local store = dofile('lua/core/lessons.lua')
@@ -2255,10 +2331,13 @@ function M.await_parallel_bash(operation_id, role, ctx)
     end
     state.error = state.error or "run_cancelled"
   end
+  -- The same page the pending module reads at, from one pair of constants (item 4): a direct bash
+  -- answer and a handle over the same operation must clip at the same byte.
+  local pages = dofile("lua/core/codemode_pending.lua")
   local stdout = M.dispatch(nil, "operation", { action = "read", id = operation_id,
-    stream = "stdout", offset = 0, limit = 24576 }, role, ctx, nil, true)
+    stream = "stdout", offset = 0, limit = pages.STDOUT_PAGE_BYTES }, role, ctx, nil, true)
   local stderr = M.dispatch(nil, "operation", { action = "read", id = operation_id,
-    stream = "stderr", offset = 0, limit = 8192 }, role, ctx, nil, true)
+    stream = "stderr", offset = 0, limit = pages.STDERR_PAGE_BYTES }, role, ctx, nil, true)
   local code = tonumber(state.process_exit_code) or -1
   return { operation_id = operation_id, code = code, ok = code == 0,
     stdout = type(stdout) == "table" and stdout.content or "",
@@ -2268,9 +2347,9 @@ function M.await_parallel_bash(operation_id, role, ctx)
     stderr_bytes = type(stderr) == "table" and stderr.available_bytes or nil,
     stdout_path = state.stdout_path, stderr_path = state.stderr_path,
     stderr_truncated = type(stderr) == "table" and
-      (tonumber(stderr.available_bytes) or 0) > 8192 or false,
+      (tonumber(stderr.available_bytes) or 0) > pages.STDERR_PAGE_BYTES or false,
     stdout_truncated = type(stdout) == "table" and
-      (tonumber(stdout.available_bytes) or 0) > 24576 or false,
+      (tonumber(stdout.available_bytes) or 0) > pages.STDOUT_PAGE_BYTES or false,
     error = state.error, timing = state.timing, parallel = true }
 end
 

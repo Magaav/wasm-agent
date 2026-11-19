@@ -807,7 +807,7 @@ impl Editor {
             else { frame.push_str(if index == 0 { PROMPT } else { "  " }); }
             if self.chars.is_empty() && index == 0 {
                 let placeholder = if self.bash { BASH_PLACEHOLDER } else { PLACEHOLDER };
-                let hint: String = placeholder.chars().take(self.width.saturating_sub(BOX_CHROME)).collect();
+                let hint: String = clip_cells(placeholder, self.width.saturating_sub(BOX_CHROME));
                 frame.push_str(&format!("{HINT}{hint}{RESET}"));
             } else if let Some((a, b)) = self.selection() {
                 // The selection, drawn in reverse video over the characters it covers on this row.
@@ -828,13 +828,16 @@ impl Editor {
         frame.push_str(&format!("\x1b[{};1H\x1b[2K{border}{}{RESET}", bottom, "\u{2500}".repeat(self.width)));
         // The footer under the box - hints or the last run's numbers on the left, the model on the
         // right - and the slash menu above the input, opening upward toward the chat.
-        let right: String = self.footer_right.chars().take(self.width / 2).collect();
-        let right_width: usize = right.chars().map(cell_width).sum();
+        // By CELLS, never by characters: this row carries Nerd Font icons and the footer's own
+        // number runs, and a row one cell too wide WRAPS - which moves the box and the chat above it
+        // (Victor, 19/11: the bounce is the row under the box changing height).
+        let right: String = clip_cells(&self.footer_right, self.width / 2);
+        let right_width: usize = visible_cells(&right);
         let room = self.width.saturating_sub(right_width + if right.is_empty() { 0 } else { 1 });
         let bash_hint = BASH_FOOTER.to_string();
         let (color, text) = if !self.notice.is_empty() { (NOTICE, &self.notice) }
             else if self.bash { (BASH, &bash_hint) } else { (HINT, &self.footer) };
-        let footer: String = text.chars().take(room).collect();
+        let footer: String = clip_cells(text, room);
         frame.push_str(&format!("\x1b[{};1H\x1b[2K{color}{footer}{RESET}", self.footer_row()));
         if !right.is_empty() {
             frame.push_str(&format!("\x1b[{};{}H{MODEL}{right}{RESET}", self.footer_row(), self.width - right_width + 1));
@@ -847,7 +850,7 @@ impl Editor {
                 let command = &self.commands[index];
                 let name = format!("{:<name_width$}", command.name);
                 let room = self.width.saturating_sub(name.chars().count() + 1);
-                let hint: String = command.hint.chars().take(room).collect();
+                let hint: String = clip_cells(&command.hint, room);
                 let color = if first + offset == selected { SELECTED } else { RESET };
                 frame.push_str(&format!("\x1b[{};1H\x1b[2K{color}{name}{RESET}{HINT}{hint}{RESET}", top - menu + offset));
             }
@@ -1099,7 +1102,7 @@ impl Panel {
                 let digits = self.options.len().to_string().len();
                 let head = fit(&format!("{mark} {:>digits$}. {:<label_width$}", index + 1, label));
                 let room = w.saturating_sub(head.chars().map(cell_width).sum());
-                let tail: String = hint.chars().take(room).collect();
+                let tail: String = clip_cells(hint, room);
                 rows.push(if index == self.selected { format!("{SELECTED}{head}{tail}{RESET}") }
                     else { format!("{head}{HINT}{tail}{RESET}") });
             }
@@ -1131,20 +1134,59 @@ const PANEL: &str = "\x1b[38;2;177;185;249m";
 
 pub fn cell_width_of(ch: char) -> usize { cell_width(ch) }
 
-/// `text` cut to `room` terminal cells, ending in `…` when it was cut.
+/// The terminal cells `text` takes on screen: every character's width, escape sequences
+/// counting none. The one measure of what "fits" means, beside the clip that enforces it.
+pub fn visible_cells(text: &str) -> usize {
+    let mut total = 0usize;
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                for c in chars.by_ref() { if ('@'..='~').contains(&c) { break; } }
+            }
+            continue;
+        }
+        total += cell_width(ch);
+    }
+    total
+}
+
 pub fn clip_cells(text: &str, room: usize) -> String {
-    let total: usize = text.chars().map(cell_width).sum();
+    let total = visible_cells(text);
     if total <= room { return text.to_string(); }
     let mut out = String::new(); let mut used = 0;
-    for ch in text.chars() {
+    let mut open_colour = false;
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            open_colour = true;
+            out.push(ch);
+            if chars.peek() == Some(&'[') {
+                out.push(chars.next().unwrap());
+                for c in chars.by_ref() { out.push(c); if ('@'..='~').contains(&c) { break; } }
+            }
+            continue;
+        }
         let width = cell_width(ch);
         if used + width + 1 > room { break; }
         out.push(ch); used += width;
     }
-    if room > 0 { out.push('\u{2026}'); }
+    if room > 0 {
+        out.push('\u{2026}');
+        // The row was cut while a colour was open: close it AFTER the ellipsis, or the terminal paints
+        // the mark - and whatever is drawn beside it - in a colour the row no longer claims.
+        if open_colour { out.push_str(RESET); }
+    }
     out
 }
 
+/// `text` cut to `room` terminal cells, ending in `…` when it was cut.
+///
+/// An escape sequence takes ZERO cells and is never cut in half: the footer can carry colour now
+/// (the context ball's level, lua/core/cli_view.lua), and counting its bytes as characters would
+/// clip a row that fits the terminal, while cutting inside one would print the rest as text
+/// (Victor, 19/11: a status row measures what the terminal draws).
 // UTF-8 is not a terminal column count. Keep CJK and emoji inside the viewport;
 // combining marks share their preceding cell. A full grapheme engine would also
 // handle ZWJ sequences, but this covers the common terminal width contract.
@@ -1553,13 +1595,35 @@ mod tests {
     /// every one of these, and draws it in ONE cell: a character measured two here moves every number
     /// after it, and a character the font does NOT have (the `\u{25d1}` and `\u{25f7}` these replaced) is
     /// drawn from a fallback face at another size, which is the defect this test keeps out.
+    /// The footer can carry colour now (the context ball's level), so "fits" must be measured on what
+    /// the terminal draws: an escape sequence takes no cells and is never cut in half (Victor, 19/11).
+    #[test]
+    fn a_coloured_row_is_measured_and_clipped_by_its_visible_cells() {
+        let red = "\x1b[38;2;255;107;128m";
+        let row = format!("{red}\u{f0aa5}\x1b[0m\x1b[38;2;119;119;119m 93.8%/1.0M");
+        assert_eq!(visible_cells(&row), 12, "the escapes take no cells: {row:?}");
+        let kept = clip_cells(&row, 40);
+        assert_eq!(kept, row, "a row inside 40 cells is returned WHOLE, colour and all");
+        assert_eq!(visible_cells(&clip_cells(&row, 6)), 6, "cut to 6 cells, ellipsis included");
+        let cut = clip_cells(&row, 6);
+        assert!(cut.starts_with(red), "the colour that opened the row is kept: {cut:?}");
+        assert!(cut.contains('\u{2026}'), "and the cut is marked: {cut:?}");
+        // THE RESET COMES AFTER THE MARK. A cut that leaves the colour open paints the ellipsis - and
+        // whatever the terminal draws beside it - in a colour the row no longer claims.
+        assert!(cut.ends_with("\u{2026}\x1b[0m"), "and the colour is closed after the mark: {cut:?}");
+    }
+
     #[test]
     fn the_status_bar_glyphs_are_one_cell_each() {
         let glyphs = [
-            ("\u{f0766}", "the context ball, 0% to 3%"),
-            ("\u{f0a9f}", "the context ball, 3% to 50%"),
-            ("\u{f0aa1}", "the context ball, 50% to 75%"),
-            ("\u{f0aa3}", "the context ball, 75% to 100%"),
+            ("\u{f0766}", "the context ball, empty (below 3%)"),
+            ("\u{f0a9e}", "the context ball, one eighth"),
+            ("\u{f0a9f}", "the context ball, a quarter"),
+            ("\u{f0aa0}", "the context ball, three eighths"),
+            ("\u{f0aa1}", "the context ball, half"),
+            ("\u{f0aa2}", "the context ball, five eighths"),
+            ("\u{f0aa3}", "the context ball, three quarters"),
+            ("\u{f0aa4}", "the context ball, seven eighths"),
             ("\u{f0aa5}", "the full context ball, 100% and past the window"),
             ("\u{f0dfa}", "the run's steps"),
             ("\u{f051b}", "the run's elapsed clock"),

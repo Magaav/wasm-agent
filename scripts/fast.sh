@@ -714,7 +714,13 @@ if command -v node >/dev/null 2>&1; then
   # The front door (scripts/install.sh): the platform matrix, which channel each OS gets, the exact
   # arguments the core is handed, the installer pin, and install -> re-run -> update -> rollback against
   # file: fixtures. No network, no systemd, no built binary - seconds.
-  check install-front-door bash scripts/test-install.sh
+  # Both halves of the tool-environment rule (session isolation, finding 5 round 2): a secret is withheld by
+# shape, and the node policy hands a NAME over. One script, two invocations - which is why it is a .sh
+# check here and its .lua half is declared not-a-row in scripts/fast-path.exclude.
+# The session-isolation suite holds the canaries its own environment sections withhold
+WA_BIN="$bin" check session-isolation bash scripts/test-session-isolation.sh
+WA_BIN="$bin" check tool-env-allow bash scripts/test-tool-env-allow.sh
+check install-front-door bash scripts/test-install.sh
   # The canonical runtime binding is decided in PREFLIGHT, before anything is built, and a refusal names
   # every worktree that is on branch main (measured 18/11: a deploy refused after ~4 minutes of build with
   # "exactly one canonical main checkout is required" and named neither path the operator had to choose
@@ -759,6 +765,10 @@ check publish-artifacts bash scripts/test-publish-artifacts.sh
 WA_BIN="$bin" check install-record bash scripts/test-install-record.sh
 check install-guards bash scripts/test-install-guards.sh
 WA_BIN="$bin" check node-pins bash scripts/test-node-pins.sh
+# One composer for the build name (rust/wa-host/src/build_info.rs): a fleet-wide pin ledger marks
+# the node a record NAMES, and a cleared record releases it in either line order. Driven through
+# `wa --version`, because the composer runs before any Lua.
+WA_BIN="$bin" check pin-label bash scripts/test-pin-label.sh
 check publish-shared-commit bash scripts/test-publish-shared-commit.sh
 check bootstrap-gate bash scripts/test-bootstrap-gate.sh
 WA_BIN="$bin" check build-info bash scripts/test-build-info.sh

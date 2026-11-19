@@ -824,17 +824,17 @@ editor_view:event({ type = "usage", total = session_total, prompt = 27200 })
 local running = table.concat(editor_out)
 -- Victor, 18/11: the delta AND the session's input total, right after it ("only delta is not
 -- enough"). 27.2k was added; 120.4k is what the session has sent in total.
-ok(has(running, "\243\176\183\1866\194\183") and not has(running, "\226\154\146\239\184\143")
+ok(has(running, "\243\176\183\186 6\194\183") and not has(running, "\226\154\146\239\184\143")
   and has(running, "\206\14827.2k \226\134\145120.4k \226\134\1471.0k"),
   "the status line shows the step, the run's tools, what it added to the context, the session's"
     .. " input total and its output")
 editor_view:answered("## Done")
 local summary = editor_view.last_summary
-ok(summary and has(summary, "\243\176\145\1441 ") and has(summary, "\243\176\134\18875.20%"),
-  "completion leaves the session's numbers: runs, and the cache hit rate")
+ok(summary and has(summary, "\243\176\145\144 1 ") and has(summary, "\243\176\134\188 75.20%"),
+  "completion leaves the session's numbers: runs and the cache hit rate, each one space from its icon")
 local idle_mark = #editor_out + 1
 editor_view:prompt()
-ok(has(since(editor_out, idle_mark), "\243\176\145\1441 ") and has(since(editor_out, idle_mark), "\27[12;1H"),
+ok(has(since(editor_out, idle_mark), "\243\176\145\144 1 ") and has(since(editor_out, idle_mark), "\27[12;1H"),
   "the session summary stays in the footer while idle")
 local before_submit = #editor_out
 editor_view:submitted()
@@ -1559,7 +1559,13 @@ do
   -- Eight script lines, the one longer than the band WRAPPED onto a second row (never clipped with …).
   eq(#first.lines, 9, "all eight script lines, the long one wrapped, no fold and no heading")
   ok(not has(visible(table.concat(first.lines, "\n")), "\226\128\166"), "nothing is elided with …")
-  ok(has((visible(first.lines[4]):gsub("^  ", ""):gsub("%s+$", "")) .. (visible(first.lines[5]):gsub("^  ", ""):gsub("%s+$", "")),
+  -- The continuation mark sits BETWEEN the two rows (round 3, item 3), so the join is made from the
+  -- rows with that mark taken out - and the mark is asserted separately, because a mark that vanished
+  -- would pass the join just as well.
+  local first_row = visible(first.lines[4]):gsub("^  ", ""):gsub("%s+$", "")
+  local second_row = visible(first.lines[5]):gsub("^  ", ""):gsub("%s+$", "")
+  ok(first_row:sub(-3) == "\226\134\170", "the row above the break ends with the continuation mark: " .. first_row)
+  ok(has((first_row:gsub("\226\134\170", "")) .. second_row,
     "const out = await Promise.all(hits.map(p => tools.bash({command: 'wc -l ' + p})));"),
     "the wrapped line is whole across its two rows")
   ok(has(visible(first.lines[9]), "return {count: hits.length"), "the last one is drawn too: " .. visible(first.lines[9]))
@@ -1762,7 +1768,7 @@ do
   view.context = 24300
   view.totals = { prompt = 4600000, completion = 310 }
   eq(view:run_numbers("5s", "1:51"),
-    "\243\176\183\1862\194\1835s \206\14812.3k \226\134\1454.6M \226\134\147310 \243\176\148\1551:51",
+    "\243\176\183\186 2\194\1835s \206\14812.3k \226\134\1454.6M \226\134\147310 \243\176\148\155 1:51",
     "the run line: steps, the delta added, the input total, output, clock")
   -- A run that has added nothing yet still says both numbers: nothing added, the total it sent.
   local fresh = view_lib.new({ live = true, limit = 100 })
@@ -1785,9 +1791,13 @@ do
   -- neighbour is a failure and not a substitution.
   local chosen = {
     { "ballEmpty", "\243\176\157\166", "U+F0766" },
-    { "ballStarted", "\243\176\170\159", "U+F0A9F" },
+    { "ballEighth", "\243\176\170\158", "U+F0A9E" },
+    { "ballQuarter", "\243\176\170\159", "U+F0A9F" },
+    { "ballThreeEighths", "\243\176\170\160", "U+F0AA0" },
     { "ballHalf", "\243\176\170\161", "U+F0AA1" },
+    { "ballFiveEighths", "\243\176\170\162", "U+F0AA2" },
     { "ballThreeQuarters", "\243\176\170\163", "U+F0AA3" },
+    { "ballSevenEighths", "\243\176\170\164", "U+F0AA4" },
     { "ballFull", "\243\176\170\165", "U+F0AA5" },
     { "steps", "\243\176\183\186", "U+F0DFA" },
     { "clock", "\243\176\148\155", "U+F051B" },
@@ -1805,12 +1815,19 @@ do
 
   -- Every band edge, from both sides: the floor belongs to the higher band (3% is the second ball) and
   -- the number just under it to the lower one - 0, 2.9, 3, 49.9, 50, 74.9, 75, 99.9, 100.
+  -- EVERY eighth, from both sides (Victor, 19/11: "i like the 8 slices, wire them up better").
+  -- The floor belongs to the higher band (3% is the first eighth), and the number just under it to the
+  -- lower one; 93.75 is the full ball, and nothing below 3% is anything but empty.
   local edges = {
-    { 0, "\243\176\157\166", "0%" }, { 2.9, "\243\176\157\166", "2.9%" },
-    { 3, "\243\176\170\159", "3%" }, { 49.9, "\243\176\170\159", "49.9%" },
-    { 50, "\243\176\170\161", "50%" }, { 74.9, "\243\176\170\161", "74.9%" },
-    { 75, "\243\176\170\163", "75%" }, { 99.9, "\243\176\170\163", "99.9%" },
-    { 100, "\243\176\170\165", "100%" },
+    { 0, "\243\176\157\166", "0%" }, { 2.99, "\243\176\157\166", "2.99%" },
+    { 3, "\243\176\170\158", "3%" }, { 18.74, "\243\176\170\158", "18.74%" },
+    { 18.75, "\243\176\170\159", "18.75%" }, { 31.24, "\243\176\170\159", "31.24%" },
+    { 31.25, "\243\176\170\160", "31.25%" }, { 43.74, "\243\176\170\160", "43.74%" },
+    { 43.75, "\243\176\170\161", "43.75%" }, { 56.24, "\243\176\170\161", "56.24%" },
+    { 56.25, "\243\176\170\162", "56.25%" }, { 68.74, "\243\176\170\162", "68.74%" },
+    { 68.75, "\243\176\170\163", "68.75%" }, { 81.24, "\243\176\170\163", "81.24%" },
+    { 81.25, "\243\176\170\164", "81.25%" }, { 93.74, "\243\176\170\164", "93.74%" },
+    { 93.75, "\243\176\170\165", "93.75%" }, { 100, "\243\176\170\165", "100%" },
   }
   -- A base tree has no ball function at all: reading it as a table of answers reports a failed check
   -- for every band instead of dying in the middle of the list.
@@ -1849,22 +1866,183 @@ do
   ok(rendered_view.screen ~= nil, "the boxed layout is up, so the status row exists")
   local raw = last_row_write(table.concat(rendered), rendered_view.screen and rendered_view.screen.status) or ""
   local bar = visible(raw)
-  ok(has(bar, "\243\176\183\1862"), "the run-status row draws the step pair with the chosen glyph: " .. bar)
-  ok(has(bar, " \243\176\148\155"), "and the elapsed clock with its own: " .. bar)
+  ok(has(bar, "\243\176\183\186 2"), "the run-status row draws the step pair with the chosen glyph, one space from its count: " .. bar)
+  ok(has(bar, " \243\176\148\155 "), "and the elapsed clock with its own, one space from its time: " .. bar)
   -- Round 3's decision stands: delta (what the run added) and the session's input total, together.
   local delta, up, down = bar:find("\206\148", 1, true), bar:find("\226\134\145", 1, true), bar:find("\226\134\147", 1, true)
   ok(delta and up and down and delta < up and up < down,
     "delta, then the input total, then the output, in that order: " .. bar)
   -- The GRAY is a rendering decision, so it is asserted on the bytes (`visible` removes exactly that): the
   -- secondary role opens at the step glyph, so the count wears the same gray as the numbers beside it.
-  ok(has(raw, view_lib.style("muted") .. "\243\176\183\1862"),
+  ok(has(raw, view_lib.style("muted") .. "\243\176\183\186 2"),
     "the step count and its glyph are drawn in the secondary gray: " .. raw)
   ok(not has(bar, "\240\159\145\163") and not has(bar, "\226\151\183"),
     "neither of the two replaced glyphs is on the row any more: " .. bar)
+  -- ONE space between every icon and its value (Victor, 19/11): turns, the context ball and the
+  -- cache icon. The DELTA/UP/DOWN/SIGMA marks are TEXT and stay glued to their number.
   eq(rendered_view.last_summary,
-    "\243\176\145\1443 \206\163\226\134\145120.4k \226\134\1471.0k "
-      .. "\243\176\170\15912.2%/200.0k \243\176\134\18875.20%",
-    "the session bar: turns, tokens, the context ball for 12.2%, and the cache-hit rate")
+    "\243\176\145\144 3 \206\163\226\134\145120.4k \226\134\1471.0k "
+      .. "\243\176\170\158 12.2%/200.0k \243\176\134\188 75.20%",
+    "the session bar: turns, tokens, the context ball for 12.2%, and the cache-hit rate, each icon one space from its value")
+
+  -- Every icon this CLI draws on a status row, followed by exactly one space - measured on the two
+  -- rendered strings rather than on the pieces, so a caller that concatenates without the separator fails.
+  do
+    local icons = {
+      { view_lib.GLYPH.steps, "steps" }, { view_lib.GLYPH.clock, "clock" },
+      { view_lib.GLYPH.turns, "turns" }, { view_lib.GLYPH.cache, "cache" },
+      { view_lib.GLYPH.ballEmpty, "ballEmpty" }, { view_lib.GLYPH.ballEighth, "ballEighth" },
+      { view_lib.GLYPH.ballQuarter, "ballQuarter" }, { view_lib.GLYPH.ballThreeEighths, "ballThreeEighths" },
+      { view_lib.GLYPH.ballHalf, "ballHalf" }, { view_lib.GLYPH.ballFiveEighths, "ballFiveEighths" },
+      { view_lib.GLYPH.ballThreeQuarters, "ballThreeQuarters" },
+      { view_lib.GLYPH.ballSevenEighths, "ballSevenEighths" }, { view_lib.GLYPH.ballFull, "ballFull" },
+    }
+    local rows = { rendered_view.last_summary, bar }
+    local seen = 0
+    for _, row in ipairs(rows) do
+      for _, icon in ipairs(icons) do
+        local at = 1
+        while true do
+          local found = row:find(icon[1], at, true)
+          if not found then break end
+          local after = row:sub(found + #icon[1], found + #icon[1])
+          eq(after, " ", icon[2] .. " is followed by exactly one space in: " .. row)
+          seen = seen + 1
+          at = found + #icon[1]
+        end
+      end
+    end
+    ok(seen >= 4, "both rows were really measured (" .. seen .. " icon occurrences)")
+  end
+
+  -- The context ball's COLOUR is chosen from the node's own compaction threshold, read from the code
+  -- that compacts and never guessed here (Victor, 19/11): normal below it by 15 points, warning from
+  -- there, alert at or above it.
+  do
+    local level_of = view_lib.context_level or function() return nil end
+    eq(level_of(89.9, 90), "warning", "just under the threshold is a warning")
+    eq(level_of(90, 90), "alert", "at the threshold is an alert")
+    eq(level_of(75, 90), "warning", "the 15-point line is the warning floor, and it is inclusive")
+    eq(level_of(74.9, 90), "normal", "half a point below it is normal")
+    eq(level_of(74.8, 90), "normal", "below it is normal")
+    eq(level_of(0, 90), "normal", "an empty context is normal")
+    eq(level_of(50, 0), "normal", "no window means no claim: everything is normal")
+    eq(level_of(nil, 90), "normal", "a percentage nobody measured is normal")
+  end
+end
+
+-- The ball's COLOUR is a rendering decision read from the node's own compaction threshold, so it is
+-- asserted the way a reader meets it: through the one function that paints, at every level, and on
+-- the RENDERED footer row (Victor, 19/11).
+do
+  local paint_ball = view_lib.colour_ball or function(text) return text end
+  local ball = view_lib.context_ball(50)
+  -- (a) no colour without `live`: a captured transcript gets the same characters.
+  eq(paint_ball("x " .. ball .. " 50.0%/200.0k", 100000, 200000, false),
+    "x " .. ball .. " 50.0%/200.0k", "a plain rendering is untouched by the level's colour")
+  -- (b) no window measured: no colour, because there is no window to make a claim about.
+  eq(paint_ball("x " .. ball .. " 0.0%/0", 0, 0, true), "x " .. ball .. " 0.0%/0",
+    "an unmeasured window colours nothing")
+  -- (c) a row with no ball (a budget of 0 leaves it out): returned as it came.
+  eq(paint_ball("plain row", 5, 0, true), "plain row", "a row with no ball is not touched")
+  -- (d) the level's role really opens at the glyph and closes after it, so the percentage beside it
+  -- keeps the row's gray - one glyph's warning never bleeds into its number.
+  local painted = paint_ball(ball .. " 50.0%/200.0k", 100000, 200000, true)
+  ok(has(painted, view_lib.style("success") .. ball .. "\27[0m"),
+    "a comfortable context paints the ball in the normal role: " .. painted)
+  eq(visible(painted), ball .. " 50.0%/200.0k", "and the visible characters are unchanged")
+  -- (e) every level, from the node's own threshold: 90% of the window compacts, so 74 is normal,
+  -- 76 is a warning and 90 an alert.
+  local at = function(percent, window)
+    -- The ball of THAT percentage: the glyph and the colour are chosen from the same number, so the
+    -- colour is read off the glyph the row actually drew rather than the one 50% would draw.
+    local glyph = view_lib.context_ball(percent)
+    local row = paint_ball(glyph .. " " .. percent .. "%", window * percent / 100, window, true)
+    if has(row, view_lib.style("error") .. glyph) then return "alert" end
+    if has(row, view_lib.style("warning") .. glyph) then return "warning" end
+    if has(row, view_lib.style("success") .. glyph) then return "normal" end
+    return "none"
+  end
+  local threshold = view_lib.compaction_threshold(100000)
+  ok(type(threshold) == "number" and threshold > 0 and threshold <= 100,
+    "the node's own compaction threshold is a percentage: " .. tostring(threshold))
+  eq(at(0, 100000), "normal", "an empty context is normal")
+  eq(at(math.floor(threshold) - 20, 100000), "normal", "20 points under the trigger is normal")
+  eq(at(math.ceil(threshold - 14), 100000), "warning", "inside 15 points of it is a warning")
+  eq(at(math.ceil(threshold), 100000), "alert", "at the trigger it is an alert")
+  eq(at(100, 100000), "alert", "a full window is an alert")
+end
+
+
+-- ROUND 3, ITEM 4. Two mismatches the footer could hide, each asserted through the one function that
+-- paints, because a colour nobody can see go wrong is a colour nobody can trust.
+--
+-- (a) THE BALL THAT WAS DRAWN. `colour_ball` used to compute its own glyph from the percentage and
+-- then SEARCH for it. A row whose glyph came from anywhere else - a stale summary, another rounding,
+-- a clip that removed the glyph - found nothing and came out uncoloured, silently. It now colours the
+-- first ball the text actually carries, whatever percentage it was told.
+do
+  local paint_ball = view_lib.colour_ball
+  local drawn = view_lib.context_ball(50)
+  local other = view_lib.context_ball(96)      -- a glyph 50% would never choose
+  ok(other ~= drawn, "the two glyphs are different, so the check is not vacuous")
+  local row = paint_ball(other .. " 50.0%/200.0k", 100000, 200000, true)
+  ok(has(row, view_lib.style("success") .. other),
+    "the glyph the row DREW is the one coloured, not the one the percentage implies: " .. row)
+  ok(not has(row, view_lib.style("error") .. other),
+    "and it is coloured by the LEVEL (50% is normal), not by the glyph's own fill: " .. row)
+  -- A row with no ball at all is still returned untouched - nothing to colour is not an error.
+  eq(paint_ball("no ball here 12.0%/200.0k", 24000, 200000, true), "no ball here 12.0%/200.0k",
+    "a row carrying no ball is returned exactly as it came")
+  -- The empty ball IS a ball: a nearly empty window is coloured too, so the floor is not a hole.
+  local empty = view_lib.context_ball(1)
+  ok(has(paint_ball(empty .. " 1.0%/200.0k", 2000, 200000, true), view_lib.style("success") .. empty),
+    "the empty ball is a ball and is coloured")
+end
+
+-- (b) THE SAME RESERVE THE COMPACTOR USES. `threshold_percent` was called with model_window's DEFAULT
+-- reserve, so a node that set a per-model reserve (or WASM_AGENT_COMPACT_RESERVE) was coloured against
+-- a trigger `maybe_compact` never uses: the ball said alert where the compactor had not started.
+--
+-- BOTH SIDES COME FROM THE COMPACTOR: the window and the reserve are `provider.budget(model)`'s, the
+-- same call `agent.maybe_compact` makes. A window written here by hand would compare two different
+-- models and could pass for the wrong reason.
+--
+-- The fixture is a MODEL LIMITS entry, which is the only way a scratch home has a window at all, so it
+-- is `scripts/test.sh` that sets it (the second invocation of this file). Without it there is nothing
+-- to measure and the check SAYS SO rather than passing on an empty node - unknown is not yes.
+do
+  local raw = host.getenv and host.getenv("WASM_AGENT_MODEL_LIMITS") or ""
+  if raw == "" then
+    print("SKIP reserve agreement: no WASM_AGENT_MODEL_LIMITS fixture (test.sh runs this file again with one)")
+  else
+    local provider = dofile("lua/core/provider.lua")
+    local windowlib = dofile("lua/core/model_window.lua")
+    local budget = provider.budget("test-model")
+    local window = tonumber(budget.context) or 0
+    ok(window > 0, "the compactor resolves the fixture's window (" .. window .. ")")
+    if window > 0 then
+      local used = view_lib.compaction_threshold(window, "test-model")
+      local expected = 100 * (window - tonumber(budget.reserve)) / window
+      ok(used and math.abs(used - expected) < 0.01,
+        "the threshold is the compactor's own: " .. tostring(used) .. " wanted " .. string.format("%.2f", expected))
+      -- The fixture's reserve is NOT the policy default, so the two answers differ and this check can
+      -- fail: a test whose two sides are equal proves nothing about which one was read.
+      local policy_only = 100 * (window - windowlib.policy(window)) / window
+      ok(math.abs(expected - policy_only) > 0.01,
+        "the fixture makes the compactor's reserve differ from the policy's ("
+        .. string.format("%.2f", expected) .. " vs " .. string.format("%.2f", policy_only) .. ")")
+      ok(used and math.abs(used - policy_only) > 0.01,
+        "the ball is NOT coloured by the policy default: " .. tostring(used))
+      -- A window the compactor was never asked about gets the POLICY reserve, never one from another
+      -- window, and is still a percentage (or nil), never a guess.
+      local other = view_lib.compaction_threshold(window * 3, "test-model")
+      local bigger = window * 3
+      local policy_bigger = 100 * (bigger - windowlib.policy(bigger)) / bigger
+      ok(other and math.abs(other - policy_bigger) < 0.01,
+        "a window the compactor did not resolve gets the policy reserve: " .. tostring(other))
+    end
+  end
 end
 
 if failed > 0 then

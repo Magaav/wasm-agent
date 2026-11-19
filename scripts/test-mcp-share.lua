@@ -42,8 +42,24 @@ local NEWLINE = string.char(10)
 for _, name in ipairs(mcp.RUNTIME) do
   assert(host.write_file(dir .. '/' .. name, '// runtime stub: ' .. name), 'a runtime stub: ' .. name)
 end
-local node_fixture = dir .. '/node-fixture'
-assert(host.write_file(node_fixture, '#!/bin/sh' .. NEWLINE .. 'exit 0' .. NEWLINE), 'the interpreter fixture')
+-- Round 8: a vault connector's program is judged by what the file IS, so the fixture interpreter is a
+-- real NATIVE binary named node (the platform's own, copied into this scratch home), not a shell script.
+local function native_copy(path)
+  local source = host.getenv('WA_NATIVE_FIXTURE')
+  if not source or source == '' then
+    for _, candidate in ipairs({ '/usr/bin/env', '/bin/env', '/usr/bin/true', '/bin/true' }) do
+      local raw = host.file_magic and host.file_magic(candidate)
+      if raw and (json.decode(raw).magic or '') == 'elf' then source = candidate break end
+    end
+  end
+  assert(source, 'a native binary to copy for the interpreter fixture')
+  local parent = path:match('^(.*)/[^/]+$')
+  if parent and host.path_kind(parent) ~= 'dir' then host.exec('mkdir -p ' .. parent, nil, 20) end
+  host.exec('cp ' .. source .. ' ' .. path, nil, 20)
+  assert(host.path_kind(path) == 'file', 'a native fixture at ' .. path)
+  return path
+end
+local node_fixture = native_copy(dir .. '/bin/node')
 
 -- 1. paths move from the sender's home to this one, inside JSON strings too.
 local moved = federation._moved({ args = { '/home/agent/x/a.mjs', '{"token_file":"/home/agent/k.key"}' }, n = 1 }, '/home/agent', '/home/victor')

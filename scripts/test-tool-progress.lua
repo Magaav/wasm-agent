@@ -153,30 +153,82 @@ ok(named:find("<redacted>", 1, true) ~= nil, "and the row says so: " .. named)
 tp.finish()
 ok(tp.status({ now = 5 }) == nil, "a finished call has no row")
 
--- ---- the live file the host writes ------------------------------------------------
+-- ---- the live files the host writes: ONE PER SESSION ------------------------------
 
-local path = tp.path()
-ok(type(path) == 'string' and path:sub(-18) == "tool-progress.json", "the file has the host's name: " .. tostring(path))
-local function publish(facts)
-  local wrote, problem = pcall(host.write_file, path, dofile('lua/vendor/json.lua').encode(facts))
+-- The file's name is the session's key, and this implementation must compute exactly the key the host
+-- computes (`wa_tool_progress::owner_key`): the host writes the file and this reads it. The same table
+-- is pinned on the Rust side, so the two cannot drift.
+local keys = {
+  ["3f9a1c2e-0b7d-4e51-9a3c-1d2b3c4d5e6f"] = "3f9a1c2e-0b7d-4e51-9a3c-1d2b3c4d5e6f",
+  ["worker:7"] = "worker%3A7",
+  ["peer/work"] = "peer%2Fwork",
+  ["a b"] = "a%20b",
+}
+for session, key in pairs(keys) do eq(tp.key(session), key, "the session's key is the host's: " .. session) end
+eq(tp.key(""), nil, "an empty session is nobody's row")
+ok(tp.key("s-1") ~= tp.key("s-2"), "two sessions, two files")
+eq(tp.key(("s"):rep(121)), nil, "a key too long for a file name is refused, not truncated onto another")
+
+local session = "session-a"
+local path = tp.path({ session = session })
+ok(type(path) == 'string' and path:sub(-5) == ".json" and path:find("tool-progress/", 1, true) ~= nil,
+  "the row's file is this session's own: " .. tostring(path))
+local function publish(owner, facts)
+  local target = tp.path({ session = owner })
+  local wrote, problem = pcall(host.write_file, target, dofile('lua/vendor/json.lua').encode(facts))
   ok(wrote, "the fixture was written: " .. tostring(problem))
   tp.reset_live()
 end
 local now = 1000
-publish({ state = "running", tool = "bash", started_at = now - 190, at = now, last_output_at = now - 1,
+publish(session, { state = "running", tool = "bash", started_at = now - 190, at = now, last_output_at = now - 1,
   detail = { kind = "bar", label = "building serde_json", done = 143, total = 412, percent = false } })
-local from_file = tp.status({ now = now })
+local from_file = tp.status({ now = now, session = session })
 eq(from_file and from_file.text, "\u{27F3} bash \u{00B7} 3m10s " .. tp.bar(143 / 412) .. " 143/412 building serde_json",
   "the host's tail is the row, with no call in this process")
 ok(tp.active() == nil, "and it is the file that answered, not a local call")
-publish({ state = "running", tool = "bash", started_at = now - 190, at = now - 20, last_output_at = now - 190 })
-ok(tp.status({ now = now }) == nil, "a file that stopped moving is a dead node, not a running call")
-publish({ state = "done", at = now })
-ok(tp.status({ now = now }) == nil, "a finished call's file says nothing")
-publish({ state = "running", tool = "bash", started_at = now - 1, at = now, last_output_at = now })
-ok(tp.status({ now = now }) == nil, "and a call under two seconds has no row either")
-publish({ state = "running", tool = "bash", started_at = now - 400, at = now, last_output_at = now - 400 })
-eq((tp.status({ now = now }) or {}).text, "\u{27F3} bash \u{00B7} 6m40s \u{00B7} no output for 6m40s",
+-- Session isolation, finding 1: another session's live row is NOT this session's row - not its tool
+-- name, not its clock, and above all not the last line of its output - and the only thing said about it
+-- is a count.
+publish("session-b", { state = "running", tool = "bash", started_at = now - 190, at = now, last_output_at = now - 1,
+  detail = { kind = "text", text = "cat ~/.wasm-agent/env" } })
+publish("session-c", { state = "running", tool = "bash", started_at = now - 900, at = now, last_output_at = now - 1,
+  detail = { kind = "text", text = "the other session's line" } })
+ok(tp.status({ now = now, session = session }) ~= nil, "my own row is still mine")
+-- THE COUNT IS THE OPERATION MANAGER'S NOW (session isolation, item 3 round 4). These two live files
+-- belong to other sessions, and they used to BE the count - which is how four unsettled operations in
+-- one session read as one. This host has an operation manager, so it answers; the files must not add to
+-- that answer, and no operation was started here, so its answer is zero.
+local clock = os.time()
+eq((tp.elsewhere({ session = session, now = clock })), 0,
+  "two other sessions' live FILES are not two ops: the operation manager is the count")
+eq(tp.elsewhere_text(2), "node: 2 ops elsewhere", "the aggregate is a count, with no name and no text")
+eq(tp.elsewhere_text(1), "node: 1 op elsewhere", "and it reads as one op when it is one")
+local theirs = tp.status({ now = now, session = "session-d" })
+ok(theirs == nil, "a session with no row of its own draws nothing of another's")
+-- The one thing a session with no row of its own may be told: how many others are running. Nothing
+-- else about them is readable - the module only ever opens the reader's own file.
+local elsewhere = tp.elsewhere({ session = "session-d", now = clock })
+ok(elsewhere == 0, "and it is told only the count, which is the manager's: " .. tostring(elsewhere))
+ok(tp.path({ session = "session-d" }) ~= path, "and its file is its own")
+-- A settled call removes its own file: nobody else's row goes with it.
+-- Remove through the HOST, not os.remove: the Lua sandbox strips os.remove/io.open (and, with
+-- change/vault-one, dofile/require/debug too), so a row that reaches for os.remove passes here and
+-- fails on the branch that lands next. The removal is ASSERTED, not fired and hoped for: a port that
+-- silently stopped deleting would still pass the count check below, because the count comes from the
+-- operation manager and was already 0.
+local removed_path = tp.path({ session = "session-b" })
+local removed_ok, removed_raw = pcall(host.exec, "rm -f '" .. removed_path .. "'", "", 30, "{}")
+ok(removed_ok, "the live file was removed through the host: " .. tostring(removed_raw))
+eq(host.path_kind(removed_path), "missing", "and it is really gone from the disk")
+eq(tp.elsewhere({ session = session, now = clock }), 0, "removing a live file does not change the operation count")
+publish(session, { state = "running", tool = "bash", started_at = now - 190, at = now - 20, last_output_at = now - 190 })
+ok(tp.status({ now = now, session = session }) == nil, "a file that stopped moving is a dead node, not a running call")
+publish(session, { state = "done", at = now })
+ok(tp.status({ now = now, session = session }) == nil, "a finished call's file says nothing")
+publish(session, { state = "running", tool = "bash", started_at = now - 1, at = now, last_output_at = now })
+ok(tp.status({ now = now, session = session }) == nil, "and a call under two seconds has no row either")
+publish(session, { state = "running", tool = "bash", started_at = now - 400, at = now, last_output_at = now - 400 })
+eq((tp.status({ now = now, session = session }) or {}).text, "\u{27F3} bash \u{00B7} 6m40s \u{00B7} no output for 6m40s",
   "the stall rule applies to the host's file too")
 
 -- ---- the session-status-content row is the update's, never a tool's -----------------
@@ -231,6 +283,31 @@ local wide = tp.status({ now = clock.now, limit = 30 }) or {}
 ok(wide.text and not wide.text:find("\27", 1, true), "no escape sequence in the sentence: " .. tostring(wide.text))
 tp.finish()
 eq(view:session_content(), nil, "the call ends: the row stays the update's, empty")
+
+-- FOUR UNSETTLED OPERATIONS IN ONE OTHER SESSION ARE FOUR (session isolation, item 3 round 4).
+-- The count used to be one per live file, so this exact case read as "1 op elsewhere" - a session running
+-- a build, a test, a deploy and a shell was announced as one op. Real operations, real manager, and the
+-- reader is a different session, so every one of them is "elsewhere" to it.
+local held = {}
+for index = 1, 4 do
+  local shell = tostring(dofile('lua/core/platform.lua').shell() or '')
+  local null_device = shell:find('cmd', 1, true) and 'NUL' or '/dev/null'
+  local command = shell:find('cmd', 1, true) and ('ping -n 8 127.0.0.1 >' .. null_device)
+    or ('sleep 8 >' .. null_device .. ' 2>&1')
+  local ok_started, raw = pcall(host.operation, 'start', dofile('lua/vendor/json.lua').encode({
+    command = command, timeout_seconds = 60, session = 'session-elsewhere-ops' }))
+  local started = ok_started and dofile('lua/vendor/json.lua').decode(raw) or nil
+  if type(started) == 'table' and type(started.operation_id) == 'string' then
+    held[#held + 1] = started.operation_id
+  end
+end
+eq(#held, 4, 'four operations were started in one other session')
+eq(tp.elsewhere({ session = session, now = os.time() }), 4,
+  'and the reader is told FOUR ops elsewhere, not one per session')
+for _, operation_id in ipairs(held) do
+  pcall(host.operation, 'cancel', dofile('lua/vendor/json.lua').encode({
+    id = operation_id, session = 'session-elsewhere-ops' }))
+end
 
 print(string.format("%d checks, %d failed", checks, failed))
 if failed > 0 then os.exit(1) end

@@ -516,6 +516,55 @@ relative `conn.mjs`, an extensionless program and every imported module were nev
 * the node's MCP runtime (`M.RUNTIME` in `lua/core/mcp.lua`), which is what actually speaks MCP for a
   custom connector.
 
+### The allow-list: what a vault connector may RUN (round 8)
+
+Rounds 6-7 refused interpreters by NAME, and every review found another name or another wrapper: `python3`,
+`python3.11`, `pypy`, a copy of python called `py`, `env node conn.mjs`, `timeout 30 node conn.mjs`, a
+`#!/bin/sh` file called `node`. A name is not a program. So the rule is an ALLOW-LIST, and the question it
+answers is "what IS this file", not "what is it called":
+
+| the program's REALPATH is | the answer |
+| --- | --- |
+| `node`, `nodejs`, `sh`, `bash` or `dash` (the basename of the realpath, symlinks resolved), and the file's leading bytes are ELF, Mach-O or PE | **allowed** - the two families this digest can follow (JavaScript through its imports, POSIX shell through `source`/`.`/`exec` of paths) |
+| a native binary the operator explicitly vouched for with `/mcp <id> on --native <absolute path>` | **allowed** - recorded in the approval with its sha256; its own loads are outside the digest (below) |
+| anything else | **refused**, whatever its name - the KERNEL's string is `vault_approval_program_not_allowed:<program>` (round 9: `vault_approval_interpreter_unfollowed` no longer exists; the console's own refusal is prose in its `problems` list, which `docs/MCP.md` quotes) |
+
+That last row is the whole point, so it is worth saying plainly: **every other program is refused**.
+`python`, `perl`, `ruby`, `R`/`Rscript`, `php`, `java`, any interpreter, a **copy** of one under another
+name, and a file under an allowed name that is not a native executable (a shebang, plain text, a small
+script - `vault_approval_program_not_native:<program>`) - an interpreter in disguise. Symlinks are resolved
+first (`host.path_facts`), so a link does not hide the file it points at, and the kernel asks the same
+question from the bytes on disk.
+
+**Wrappers** are refused as the program, by realpath basename as well: `env`, `nice`, `ionice`, `timeout`,
+`setsid`, `stdbuf`, `xargs`, `sudo`, `doas`, `nohup`, `chrt`, `taskset`, `unshare`, `firejail`, `bwrap`,
+`flock`, `time`. Each RUNS the program after it, so the file the approval names would not be the file that
+runs; `sh -c 'env ...'` is already refused as inline code. An **argument that resolves to an interpreter or
+a wrapper** (realpath) is refused too: `node ./bin/python3 script.py` runs python from a file the digest
+would otherwise name.
+
+One table is the source of both implementations - `fixtures/mcp-refused-names.json` (the allow-list, the
+interpreter names and the wrapper names) - and both sides compare a name case-insensitively, as Lua did and
+Rust did not: `Rscript` is refused as `rscript`. Each side's test asserts its own lists against that file.
+
+Inline code is compared **before the `=`** and **inside a short cluster**: `--eval=...`, `--print=...`,
+`-pe` (which is `-p` and `-e`) and `-ec` (which is `-e` and `-c`) are all refused by their own flag. A long
+option is never split, because `--print` is one flag and not `--p`, `--r`, `--i`, `--n`, `--t`.
+
+**`--native` is the operator's own voucher, and it is the one exception.** At the operator's terminal:
+
+```
+/mcp <id> probe
+/mcp <id> on --native /absolute/path/to/binary
+```
+
+It records a line `native <realpath> <sha256>` in the approval, so the voucher covers THOSE bytes: replacing
+the binary voids the approval (`vault_approval_native_changed:<path>`), and so does a launch that does not
+carry it (`vault_approval_native_unreadable`, `vault_approval_native_not_covered`). **The digest cannot see
+what a native binary loads.** Its own imports, `dlopen`s and child processes happen inside a program whose
+bytes are hashed once - a compiled connector is trusted as a whole, by the operator who named it, and not
+one file at a time the way a script is. Vouch for a binary you would run yourself, and only that one.
+
 A connector whose code cannot be closed is REFUSED rather than approved with a digest that only looks
 complete (`mcp_vault_code_not_covered`, whose `problems` list names each reason):
 
@@ -524,7 +573,9 @@ complete (`mcp_vault_code_not_covered`, whose `problems` list names each reason)
   connector launches;
 * inline code (`node -e`, `sh -c`, `eval`, `new Function`, `require('vm')` and `runInThisContext`), a
   shell command substitution, and an `exec` of a value: no digest of files can name a string that is
-  evaluated;
+  evaluated. The `vm` module is caught when it is imported or required under ANY name and used through
+  `.Script`, `.compileFunction` or `.runIn*`, not only when the literal `vm.Script` is spelled: binding it
+  to a name first was the round-7 gap;
 * a script that starts a process itself (`child_process`) or loads an addon by handle
   (`process.dlopen`). The node's OWN MCP runtime is exempt from this one rule and from no other: it is the
   harness that spawns the connector, its bytes are in the digest, and the request seal below is what checks
@@ -536,22 +587,14 @@ complete (`mcp_vault_code_not_covered`, whose `problems` list names each reason)
   cache or a registry;
 * an import of a bare package (`import x from 'left-pad'`, i.e. `node_modules`) or an import whose name is
   computed (`import(name)`): the digest can name neither;
-* a PROGRAM that IS an interpreter this digest cannot follow: `python`, `python2`, `python3`, `pypy`,
-  `pypy3`, `perl`, `ruby`, `php`, `lua`, `luajit`, `tclsh`, `expect`, `deno`, `bun`, `qjs`,
-  `quickjs`, `ts-node`, `tsx`, `java`, `jjs`, `pwsh`, `powershell`, `julia`, `elixir`,
-  `escript`, `erl`, `rscript`, `groovy`, `scala`, `kotlin`, `swift`, `dotnet`, `mono` - the same list
-  as `UNFOLLOWED_INTERPRETERS` in `lua/core/mcp.lua` and `rust/wa-capabilities/src/operations.rs`, matched
-  with or without a version (`python3.11`, `perl5.36`, `ruby3.2`, `php8.2`). Each of them loads a
-  module or a package from a search path - a python package, a ruby gem, a perl module, a lua rock - that
-  is not a file this approval can name, so the program itself is refused
-  (`vault_approval_interpreter_unfollowed:<program>`) rather than approved on whatever script it names.
-  JavaScript (`node`, `nodejs` - followed through its imports) and POSIX shell (`sh`, `bash`, `dash`,
-  `zsh`, `ksh` - followed through `source`/`.`/`exec` of paths) are the two it can follow. `bun` and
-  `deno` are not among them: a remote URL or a lockfile's tree is not a file the digest names;
+* a PROGRAM that is not on the allow-list above: every program outside it is refused, whatever its
+  name, rather than named in a list of interpreters that a wrapper or a copy always got around;
 * an option that makes an interpreter run code this digest cannot name - `-c`, `-e`, `-E`, `-m`, `-p`,
   `-r`, `--eval`, `--print`, `--command`, `-command`, `-encodedcommand`, `--module`, `--require` - when the
-  program is one this digest cannot classify (`vault_approval_inline_code:<flag>`). For the two families it
-  does follow its own list decides: `node -r file` names a FILE and is hashed, `sh -c` is inline code;
+  program is one this digest cannot classify (`vault_approval_inline_code:<flag>`). The flag is compared
+  before its `=`, and a short cluster is split, so `--eval=code`, `--print=1`, `-pe` and `-ec` are each
+  refused by their own flag; a long option is never split. For the two families it does follow its own list
+  decides: `node -r file` names a FILE and is hashed, `sh -c` is inline code;
 
 So a connector that names a vault entry names an ABSOLUTE program, absolute paths, or paths its own named
 cwd resolves - and the interpreter the node spawns is either the platform's own or a file this digest
@@ -574,7 +617,12 @@ Three places check it, and any one of them refuses:
   `vault_approval_package_runner:<path>`, `vault_approval_path_not_absolute:<path>`,
   `vault_approval_argument_unresolved:<value>`, `vault_approval_argument_not_covered:<path>`,
   `vault_approval_argument_ambiguous:<value>`, `vault_approval_file_not_found:<value>`,
-  `vault_approval_inline_code:<flag>`, `vault_approval_interpreter_unfollowed:<program>`,
+  `vault_approval_inline_code:<flag>`, `vault_approval_program_not_allowed:<program>`,
+  `vault_approval_program_not_native:<program>`, `vault_approval_program_wrapper:<program>`,
+  `vault_approval_program_missing:<program>`,
+  `vault_approval_program_native_not_executable:<program>`,
+  `vault_approval_argument_not_allowed:<value>`, `vault_approval_native_unreadable:<path>`,
+  `vault_approval_native_changed:<path>`, `vault_approval_native_not_covered:<path>`,
   `vault_approval_interpreter_not_covered:<path>` or `vault_approval_mismatch`, and after the spawn it
   hashes those same files again (`vault_approval_changed_since_check:<path>`, which kills the operation - the
   value had already been put in the child's environment at launch, so the refusal says to treat it as
@@ -599,7 +647,9 @@ then killed with whatever it already did. The window is milliseconds and it is n
 interpreter is trusted by OWNERSHIP (root-owned, not group/other-writable), never hashed, so a package
 manager that replaces it sits outside the digest. On Windows there is no uid to read, so the prefix list
 alone decides what is the platform's. A binary is hashed and never parsed: what a compiled program does at
-run time is not priced here. And the approval can still be forged by a hand that can write `memory.db` -
+run time is not priced here - and a native binary the operator vouched for with `--native` is outside it
+for the same reason, which is why the voucher is the operator's own act and names the sha256 it vouches
+for. And the approval can still be forged by a hand that can write `memory.db` -
 the residual hole the last section states.
 
 **The request the child reads is sealed (19/11).** `lua/core/mcp.lua` writes the whole launch to

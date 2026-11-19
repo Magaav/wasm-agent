@@ -263,8 +263,13 @@ function M.run(argv)
   end
 
   local settings = provider.settings()
+  -- WHY there is no model, when there is none. "local mode (no model configured)" was true and useless:
+  -- it named no cause, so a reader could not tell a node with no provider at all from a shell that simply
+  -- did not inherit the node's environment - which is the ordinary case, because `wa serve` reads the
+  -- node's env file and a shell does not (Victor, 18/11).
+  local why = (not provider.configured()) and provider.why_unconfigured() or ""
   local mode = provider.configured() and (settings.model .. " @ " .. settings.base_url)
-    or "local mode (no model configured)"
+    or ("none - " .. why)
   -- Where this chat is, for the banner and the footer. `host.paths()` is the only
   -- supported way to ask for the home directory (AGENTS.md): the environment lies on
   -- Windows, and it does not answer for the working directory at all - that is
@@ -284,6 +289,7 @@ function M.run(argv)
   -- interactive run keeps.
   local view_live = nil
   if scripted then view_live = false end
+  local build_identity = reload.require("lua/core/build_identity.lua")
   local view = cli_view.new({
     -- A scripted run has no reader: the plain view, whatever the terminal looks like.
     live = view_live,
@@ -396,8 +402,14 @@ function M.run(argv)
     view:screen_on()
     print(cli_view.banner({
       live = view.live,
-      limit = (view.live and cli_view.terminal_columns()) or view.limit,
-      version = "0.1.0",
+      -- The width the terminal has NOW, read through the view, whose own frames refresh it. The
+      -- one-time cli_view.terminal_columns() that stood here was measured before the box existed and
+      -- never again, which is the resize bug (Victor, 18/11).
+      limit = view.live and view:refresh_limit() or view.limit,
+      -- The build's OWN name, from the one function that composes it (lua/core/build_identity.lua):
+      -- a release's tag, the commit (with +dirty), a pinned node's pin, or "unknown build". It was the
+      -- literal 0.1.0 here, so every node claimed the crate's version whatever it was running.
+      version = build_identity.label(),
       model = mode .. (reasoning ~= "" and ("  \194\183  reasoning " .. reasoning) or ""),
       database = host.getenv("WASM_AGENT_DB") or "~/.wasm-agent/memory.db",
       session = agent.session_id,
@@ -578,6 +590,8 @@ function M.run(argv)
     -- and the id is still there to resume the thread or steer a later run of it.
     io.stderr:write(string.format("wa: session %s %s\n", tostring(agent.session_id),
       ran_ok and "ok" or "failed"))
+    -- A thread that was busy, and the one this run started instead, said out loud (finding 6).
+    if agent.session_note then io.stderr:write("wa: " .. tostring(agent.session_note) .. "\n") end
     agent:close()
     input:stop()
     view:screen_off()
@@ -796,6 +810,27 @@ function M.run(argv)
       reload.require('lua/core/binding_cli.lua').run('demote',line:sub(9),read_line,ui.print)
     elseif line == "/revoke" or line:sub(1, 8) == "/revoke " then
       reload.require('lua/core/binding_cli.lua').run('revoke',line:sub(9),read_line,ui.print)
+    elseif line == "/turns" or line:sub(1, 7) == "/turns " then
+      -- #33: this session's own friction notes, newest last, from the run journal. One line per note
+      -- (the focus, or what hurt when no focus was named) and the three fields on request. A reader who
+      -- wants the grouping across sessions has `wa turns --day` for that; this is the session's own.
+      local asked = tonumber((line:match("^/turns%s+(%d+)") or "")) or 5
+      local journal = reload.require("lua/core/turn_journal.lua")
+      local notes = journal.recent({ session_id = agent.session_id, limit = math.max(1, math.min(asked, 50)) })
+      if #notes == 0 then
+        ui.say("no <turn> note recorded in this session yet")
+      else
+        for _, note in ipairs(notes) do
+          local clock = dofile("lua/core/platform.lua").local_clock(tonumber(note.at) or 0)
+          local when = tostring(clock.local_iso or ""):sub(12, 16)
+          local focus = tostring(note.focus or "")
+          local hurt = tostring(note.hurts or "")
+          ui.say(string.format("  %s  %s", when, focus ~= "" and focus or hurt))
+          if hurt ~= "" and focus ~= "" then ui.say("        hurt: " .. hurt) end
+          local buys = tostring(note.buys or "")
+          if buys ~= "" then ui.say("        buys: " .. buys) end
+        end
+      end
     elseif line == "/session" then
       ui.say(agent.session_id)
     elseif line == "/wakes" or line == "/wake" or line:sub(1, 6) == "/wake " then

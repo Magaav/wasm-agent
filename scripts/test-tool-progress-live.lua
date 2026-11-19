@@ -42,8 +42,11 @@ local null_device = shell:find("cmd", 1, true) and "NUL" or "/dev/null"
 local command = shell:find("cmd", 1, true) and ("ping -n 8 127.0.0.1 >" .. null_device)
   or ("sleep 6 >" .. null_device .. " 2>&1")
 
+-- One session's call: the row it publishes belongs to that session and to no other (session isolation,
+-- finding 1), so the test names itself as the session it is.
+local session = "test-tool-progress-live"
 local started = decode(host.operation("start", json.encode({
-  command = command, timeout_seconds = 60, owner = "test-tool-progress" })))
+  command = command, timeout_seconds = 60, owner = "test-tool-progress", session = session })))
 ok(type(started) == 'table' and type(started.operation_id) == 'string', "the operation started")
 if type(started) ~= 'table' or type(started.operation_id) ~= 'string' then
   print(string.format("%d checks, %d failed", checks, failed))
@@ -51,13 +54,14 @@ if type(started) ~= 'table' or type(started.operation_id) ~= 'string' then
 end
 local id = started.operation_id
 
-local state = decode(host.operation("status", json.encode({ id = id }))) or {}
+local state = decode(host.operation("status", json.encode({ id = id, session = session }))) or {}
 local stdout_path = tostring(state.stdout_path or "")
 ok(stdout_path ~= "", "the operation names its own stdout file: " .. stdout_path)
 
--- The row's own file, resolved the way the host resolves it.
-local live = tp.path()
-ok(type(live) == 'string' and live:sub(-18) == "tool-progress.json", "the row's file: " .. tostring(live))
+-- The row's own file, resolved the way the host resolves it: this session's file, not the node's.
+local live = tp.path({ session = session })
+ok(type(live) == 'string' and live:sub(-5) == ".json" and live:find("tool-progress/", 1, true) ~= nil,
+  "the row's file is this session's own: " .. tostring(live))
 
 -- Write a line the way a compiler would: appended to the operation's stdout.
 local function append(text)
@@ -69,9 +73,9 @@ end
 
 -- A command under two seconds has no row: the status line is enough.
 append("   Compiling serde_json v1.0.0\n")
-local early = decode(host.operation("wait", json.encode({ id = id, wait_ms = 200, tool = "bash" }))) or {}
+local early = decode(host.operation("wait", json.encode({ id = id, wait_ms = 200, tool = "bash", session = session }))) or {}
 ok(early.settled ~= true, "the operation is still running")
-eq(tp.status({ now = host.now() }), nil, "under two seconds: no row, whatever the output says")
+eq(tp.status({ now = host.now(), session = session }), nil, "under two seconds: no row, whatever the output says")
 
 -- Now let it get old enough to say something, and feed it a compiler's progress line.
 local observed = {}
@@ -79,17 +83,22 @@ for step = 1, 8 do
   host.sleep(400)
   if step == 2 then append("    Building [=============>         ] 143/412: serde_json, syn, proc-macro2\n") end
   if step == 4 then append("    Building [================>     ] 301/412: syn, proc-macro2, quote\n") end
-  local waited = decode(host.operation("wait", json.encode({ id = id, wait_ms = 400, tool = "bash" })))
+  local waited = decode(host.operation("wait", json.encode({ id = id, wait_ms = 400, tool = "bash", session = session })))
   ok(type(waited) == 'table', "the wait answered")
-  local row = tp.status({ now = host.now() })
+  local row = tp.status({ now = host.now(), session = session })
+  -- Another session draws nothing of it: the row carries this call's own last line.
+  if step == 3 then
+    eq(tp.status({ now = host.now(), session = "another-session" }), nil,
+      "and another session draws none of it")
+  end
   if row and row.text then observed[#observed + 1] = row.text end
 end
 
 -- An older binary has no publish path at all (the feature is host-side), and this test would then
 -- fail on a node that simply has not been upgraded yet. That is a SKIP with its reason, never a pass:
 -- `scripts/test-tool-progress.lua` still pins the wording and the dialects on any binary.
-if #observed == 0 and tp.live({ refresh = true }) == nil then
-  host.operation("cancel", json.encode({ id = id }))
+if #observed == 0 and tp.live({ refresh = true, session = session }) == nil then
+  host.operation("cancel", json.encode({ id = id, session = session }))
   print("SKIPPED: this host never published " .. tostring(live) ..
     " - the binary predates the long-call row (docs/TOOL-PROGRESS.md)")
   os.exit(0)
@@ -108,12 +117,12 @@ if observed[1] and observed[#observed] then
 end
 ok(not joined:find("\n\n", 1, true), "one row per observation, never a wrapped one")
 
--- The call ends: the row goes with it, and the file says so.
-host.operation("cancel", json.encode({ id = id }))
-local after = tp.status({ now = host.now() })
+-- The call ends: the row goes with it, and this session's file goes with it - nobody else's is touched.
+host.operation("cancel", json.encode({ id = id, session = session }))
+local after = tp.status({ now = host.now(), session = session })
 eq(after, nil, "a cancelled call has no row")
-local facts = tp.live({ refresh = true })
-ok(facts == nil or facts.state == "done", "and the published file says it is over")
+local facts = tp.live({ refresh = true, session = session })
+ok(facts == nil or facts.state == "done", "and the published file is gone (or says it is over)")
 
 print(string.format("%d checks, %d failed", checks, failed))
 if failed > 0 then os.exit(1) end

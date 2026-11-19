@@ -1,0 +1,433 @@
+-- The turn note's own store (mission change/turn-signal, #33: the operator's "ensure models output
+-- their friction so we can focus and nail it").
+--
+-- The model ends every answer with a `<turn>` block - what hurt the reasoning, what removing it would
+-- buy, and the one harness point to focus on. The block is the fleet's best evidence about its own
+-- harness, and it must stay: what changes is where it lands.
+--
+-- Two facts decide the shape of this module:
+--   1. the block is KEPT, every turn, and the harness REMOVES it from the visible answer. It therefore
+--      never competes with an exact output format an operator asked for (`TOOLS_OK`, a JSON body, a
+--      number): the answer is the answer, and the friction rides beside it.
+--   2. it is STORED in the run journal with the run's own facts (session, mission, build, mode and the
+--      three fields), so a reader can ask "what hurt, on which build, in which mode" without parsing
+--      a transcript - and `wa turns --day` can print a day's themes and counts for docs/evolution.
+--
+-- The transcript keeps the block: lua/core/turnfeed.lua reads it from the message content and its
+-- grouping is measured against that corpus. This module adds the journal row and answers the visible
+-- text; it never rewrites the ledger.
+local json = dofile("lua/vendor/json.lua")
+local M = {}
+
+M.SCHEMA_VERSION = 1
+M.MAX_FIELD = 4000
+
+-- The three fields, in the order the envelope asks for them. Kept here so the store, the reader and a
+-- test name the same three things.
+M.FIELDS = { "hurt", "buys", "focus" }
+
+local deps = {}
+local function dep(name)
+  if not deps[name] then deps[name] = dofile("lua/core/" .. name .. ".lua") end
+  return deps[name]
+end
+
+local function trim(text)
+  return (tostring(text or ""):gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+-- Where the block starts, or nil. The tag has to OPEN A LINE: a message that mentions `<turn>` in a
+-- sentence ("every session ends with a `<turn>` note") is talking about the section, not writing one.
+-- (The same rule lua/core/turnfeed.lua measured on the real ledger; duplicated here rather than reached
+-- for, because this module runs on every answer and must not load the grouping engine to do it.)
+local function block_start(content)
+  local from = 1
+  while true do
+    local at = content:find("<turn>", from, true)
+    if not at then return nil end
+    local line_start = (content:sub(1, at - 1):match(".*()\n") or 0) + 1
+    if content:sub(line_start, at - 1):match("^%s*$") then return at end
+    from = at + 1
+  end
+end
+
+-- The note's own parse, by heading. Deliberately simpler than turnfeed's grouping: this answers the
+-- three fields of one note, never whether two notes are about the same thing.
+local HEADINGS = {
+  { key = "hurt", label = "what hurt" },
+  { key = "buys", label = "what it buys" },
+  { key = "focus", label = "focus" },
+}
+local function heading(line)
+  local bare = trim(line)
+  for _ = 1, 3 do
+    local stripped = bare:gsub("^[%-%*%+•–—]%s*", ""):gsub("^#+%s*", ""):gsub("^%d+[%.)]%s*", "")
+    if stripped == bare then break end
+    bare = stripped
+  end
+  local lower = bare:lower()
+  for _, entry in ipairs(HEADINGS) do
+    if lower:sub(1, #entry.label) == entry.label then
+      local rest = bare:sub(#entry.label + 1)
+      if rest == "" or rest:match("^[%*_%s]") or rest:match("^[—%-–:]") then
+        local tail = rest
+        for _ = 1, 4 do
+          local stripped = tail:gsub("^[%*_%s]+", ""):gsub("^[—%-–:]+", "")
+          if stripped == tail then break end
+          tail = stripped
+        end
+        return entry.key, trim(tail)
+      end
+    end
+  end
+  return nil
+end
+
+-- Split one answer into the text a reader sees and the note it carried.
+--   { visible = <answer without the block>, note = {hurt,buys,focus} | nil, block = <the raw block> }
+--
+-- Item 3 (review 19/11): the split keeps EVERY byte of answer text, before and after the block. The
+-- first version cut the answer at the opening tag and dropped everything after the closing one, so
+-- an answer of "<turn>..</turn>\n\n42" lost its 42 and a postscript after the block vanished - the
+-- exact text the operator asked for, deleted to hide a note. The rule now:
+--   * a CLOSED block is removed whole, wherever it sits, and the text on both sides is kept as it
+--     was (blank lines the removal leaves behind are collapsed, so an answer that was only the block
+--     reads as empty rather than as leftover whitespace);
+--   * an UNCLOSED <turn> is NOT stripped: a model that ran out of output wrote text, not a section,
+--     and guessing where that text ends is how an answer gets truncated. It stays in the visible
+--     answer and carries no note.
+-- Several blocks: every closed one is removed and its fields are collected in order.
+-- The whitespace a removed block leaves at its cut, and nothing else.
+--
+-- Item 1 (review 19/11): the cleanup is the SEAM's. An answer with no closed block is returned byte
+-- for byte - its indentation (the leading spaces ARE the code), its trailing spaces, its markdown hard
+-- breaks (two trailing spaces) and its blank first or last line all survive, because nothing was cut.
+-- Only a removal can leave whitespace behind, and only at that cut: the spaces the cut stranded on the
+-- last line before it go, and the newlines from both sides become one blank line between two pieces of
+-- text and no line at all against the start or the end of the answer. Nothing away from a cut is
+-- touched, so "code  \n\n<turn>..</turn>\n\n42" keeps its trailing spaces and its blank lines.
+local function seam(left, right)
+  local left_body, left_newlines = left:match("^(.-)(\n*)$")
+  local right_newlines, right_body = right:match("^(\n*)(.*)$")
+  left_body = left_body:gsub("[ \t]+$", "")
+  local between = 0
+  if left_body ~= "" and right_body ~= "" then
+    between = (#(left_newlines .. right_newlines) >= 2) and 2 or #(left_newlines .. right_newlines)
+  end
+  return left_body .. string.rep("\n", between) .. right_body
+end
+
+-- Fenced code regions: a line opening a fence of three or more backticks or tildes closes at a line
+-- with at least as many of the same character. A <turn> inside one is CODE the answer is showing - an
+-- example, a quoted format - not the answer's own note, so it is never stripped (item 4).
+local function fence_spans(text)
+  local spans, open_at, open_char, open_len = {}, nil, nil, 0
+  local pos = 1
+  for line in (text .. "\n"):gmatch("([^\n]*)\n") do
+    local start = pos
+    pos = pos + #line + 1
+    local ticks = line:match("^%s*([`~]+)")
+    if ticks and #ticks >= 3 then
+      local char = ticks:sub(1, 1)
+      if not open_at then
+        open_at, open_char, open_len = start, char, #ticks
+      elseif char == open_char and #ticks >= open_len then
+        spans[#spans + 1] = { from = open_at, to = start + #line }
+        open_at = nil
+      end
+    end
+  end
+  if open_at then spans[#spans + 1] = { from = open_at, to = #text + 1 } end
+  return spans
+end
+
+local function in_spans(spans, at)
+  for _, span in ipairs(spans) do
+    if at >= span.from and at < span.to then return true end
+  end
+  return false
+end
+
+function M.split(content)
+  local text = type(content) == "string" and content or ""
+  local visible, blocks, fields = {}, {}, { hurt = {}, buys = {}, focus = {} }
+  local order = {}
+  local spans = fence_spans(text)
+  local cursor, search = 1, 1
+  while true do
+    local found = block_start(text:sub(search))
+    if not found then break end
+    local start = search + found - 1
+    if in_spans(spans, start) then
+      -- Inside a fence: code the answer is showing, never a note. Step past the tag and keep looking.
+      search = start + 6
+    else
+      local body_at = start + 6
+      local stop = text:find("</turn>", body_at, true)
+      if not stop or in_spans(spans, stop) then break end -- unclosed: the rest is answer text
+      local inner = text:sub(body_at, stop - 1)
+      visible[#visible + 1] = text:sub(cursor, start - 1)
+      blocks[#blocks + 1] = text:sub(start, stop + 6)
+      local current = nil
+      for line in (inner .. "\n"):gmatch("([^\n]*)\n") do
+        local key, first = heading(line)
+        if key then
+          current = key
+          if fields[key][1] == nil then order[#order + 1] = key end
+          if first and first ~= "" then fields[key][#fields[key] + 1] = first end
+        elseif current and trim(line) ~= "" then
+          fields[current][#fields[current] + 1] = trim(line)
+        end
+      end
+      cursor = stop + 7
+      search = cursor
+    end
+  end
+  -- Everything after the last block is answer text, and it goes back exactly as it was.
+  visible[#visible + 1] = text:sub(cursor)
+  local joined = visible[1] or ""
+  for index = 2, #visible do joined = seam(joined, visible[index]) end
+  local block = #blocks > 0 and table.concat(blocks, "\n") or nil
+  local note = nil
+  if block then
+    if #order == 0 then
+      -- One line and no headings - the shape the section itself asks for when nothing hurt.
+      local flat = trim(block:gsub("<[^>]->", " "))
+      if flat ~= "" then fields.hurt[1] = flat end
+    end
+    note = {
+      hurt = trim(table.concat(fields.hurt, " ")),
+      buys = trim(table.concat(fields.buys, " ")),
+      focus = trim(table.concat(fields.focus, " ")),
+    }
+    if note.hurt == "" and note.buys == "" and note.focus == "" then note = nil end
+    for _, key in ipairs(M.FIELDS) do
+      if note and #note[key] > M.MAX_FIELD then note[key] = note[key]:sub(1, M.MAX_FIELD) end
+    end
+  end
+  return { visible = joined, note = note, block = block }
+end
+
+-- ---------------------------------------------------------------- the journal row
+
+local ready = false
+local SCHEMA = {
+  [[CREATE TABLE IF NOT EXISTS turn_notes (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    run_id TEXT NOT NULL DEFAULT '',
+    message_id TEXT NOT NULL DEFAULT '',
+    mission TEXT NOT NULL DEFAULT '',
+    build TEXT NOT NULL DEFAULT '',
+    mode TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL DEFAULT '',
+    hurts TEXT NOT NULL DEFAULT '',
+    buys TEXT NOT NULL DEFAULT '',
+    focus TEXT NOT NULL DEFAULT '',
+    block TEXT NOT NULL DEFAULT '',
+    at REAL NOT NULL
+  )]],
+  [[CREATE INDEX IF NOT EXISTS turn_notes_at_idx ON turn_notes(at)]],
+  [[CREATE INDEX IF NOT EXISTS turn_notes_session_idx ON turn_notes(session_id, at)]],
+}
+
+local function sql(method, statement, params)
+  local raw = host[method](statement, json.encode(params or {}))
+  local value = raw
+  if type(raw) == "string" then
+    local ok, decoded = pcall(json.decode, raw)
+    if not ok then error("turn_journal_store: unreadable answer") end
+    value = decoded
+  end
+  if type(value) ~= "table" then error("turn_journal_store: no answer from " .. method) end
+  if value.error then error(tostring(value.error)) end
+  return value
+end
+
+function M.setup()
+  if ready then return true end
+  for _, statement in ipairs(SCHEMA) do sql("sql_exec", statement, {}) end
+  ready = true
+  return true
+end
+
+-- The build this run is a run OF: the SOURCE COMMIT the binary was built from, and never the crate
+-- version. Item 2 (review 19/11): the first version read `version` too, and `version` is the same
+-- "0.1.0" for every build of this repo - so every row claimed a known build that identified nothing,
+-- which is worse than empty. The sources are an allow-list, in order:
+--   1. `host.build_identity()`, when the host offers one: its own answer about the binary it is
+--      running (a string, or a table naming `build_source_commit`);
+--   2. `host.runtime_info().build_source_commit` - the commit the release build embedded
+--      (rust/wa-capabilities/src/host.rs, `WA_BUILD_SOURCE_COMMIT`).
+-- Nothing else: `commit`, `build` and `version` are not the build's source commit, and a guess here
+-- would be recorded as a fact. An empty answer means UNKNOWN and is stored empty (a reader prints
+-- `(unknown build)`); it is never filled from HEAD, because this process cannot know which tree the
+-- RUNNING binary came from. `h` is injectable so a test drives the rule without a node.
+M.BUILD_KEYS = { "build_source_commit" }
+M.MAX_BUILD = 200
+
+local function identity_commit(value)
+  if type(value) == "string" then
+    local text = trim(value)
+    return text ~= "" and text:sub(1, M.MAX_BUILD) or nil
+  end
+  if type(value) == "table" then
+    for _, key in ipairs(M.BUILD_KEYS) do
+      local text = value[key]
+      if type(text) == "string" and trim(text) ~= "" then return trim(text):sub(1, M.MAX_BUILD) end
+    end
+  end
+  return nil
+end
+
+function M.build_of(h)
+  h = h or rawget(_G, "host") or {}
+  if type(h.build_identity) == "function" then
+    local ok, value = pcall(h.build_identity)
+    if ok then
+      local commit = identity_commit(value)
+      if commit then return commit end
+    end
+  end
+  local ok, raw = pcall(function() return h.runtime_info and h.runtime_info() or nil end)
+  if not ok then return "" end
+  local info = raw
+  if type(raw) == "string" then
+    local decoded_ok, decoded = pcall(json.decode, raw)
+    info = decoded_ok and decoded or nil
+  end
+  return identity_commit(info) or ""
+end
+
+-- The mode the run worked in: code mode's own spelling (`only`, `first`, `codemode`...) because that
+-- is the switch every friction note about the harness is really about.
+function M.mode_of()
+  local ok, mode = pcall(function() return dep("raw_code").mode() end)
+  if not ok then return "" end
+  return type(mode) == "string" and mode or ""
+end
+
+-- The mission, when the session has one: its objective or its title, first line only, bounded. Empty
+-- when the session is a plain conversation - a note about a chat is not a note about a mission.
+function M.mission_of(session_id)
+  local ok, session = pcall(function() return dep("memory").session(session_id) end)
+  if not ok or type(session) ~= "table" then return "" end
+  local text = tostring(session.objective or "")
+  if text == "" or text == "subagent" then text = tostring(session.title or "") end
+  return (trim(text:match("^[^\n]*") or "")):sub(1, 200)
+end
+
+-- Record one note. Answers the row id, or nil and a named reason: a journal write that failed is
+-- reported, never silently dropped, and never fails the answer it is about.
+function M.record(note, ctx)
+  ctx = ctx or {}
+  if type(note) ~= "table" then return nil, "turn_note_missing" end
+  local ok, id = pcall(function()
+    M.setup()
+    local row_id = host.uuid()
+    sql("sql_exec", [[INSERT INTO turn_notes(id,session_id,run_id,message_id,mission,build,mode,model,
+        hurts,buys,focus,block,at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)]], {
+      row_id, tostring(ctx.session_id or ""), tostring(ctx.run_id or ""), tostring(ctx.message_id or ""),
+      tostring(ctx.mission or ""), tostring(ctx.build or ""), tostring(ctx.mode or ""),
+      tostring(ctx.model or ""), tostring(note.hurt or ""), tostring(note.buys or ""),
+      tostring(note.focus or ""), tostring(ctx.block or ""), host.now(),
+    })
+    return row_id
+  end)
+  if not ok then return nil, "turn_journal_store: " .. tostring(id) end
+  return id
+end
+
+-- Recent notes, newest last. `day` is a `YYYY-MM-DD` in this node's own zone; without one, the last
+-- `limit` notes.
+function M.recent(opts)
+  opts = opts or {}
+  M.setup()
+  local limit = math.max(1, math.min(tonumber(opts.limit) or 20, 500))
+  local rows
+  if opts.day and opts.day ~= "" then
+    local from, to = M.day_bounds(opts.day)
+    if not from then return {} end
+    -- The NEWEST `limit` notes of the day, still answered oldest-first (item 4): a capped page takes
+    -- the newest, because a day report is about what hurt most recently, and the reader is told how
+    -- many it did not see. Taking the oldest meant a busy day's 500-note page was the morning.
+    rows = sql("sql_query", "SELECT * FROM turn_notes WHERE at>=? AND at<? ORDER BY at DESC LIMIT ?",
+      { from, to, limit })
+    local ascending = {}
+    for index = #rows, 1, -1 do ascending[#ascending + 1] = rows[index] end
+    rows = ascending
+  elseif opts.session_id and opts.session_id ~= "" then
+    rows = sql("sql_query", "SELECT * FROM turn_notes WHERE session_id=? ORDER BY at DESC LIMIT ?",
+      { tostring(opts.session_id), limit })
+    local reversed = {}
+    for index = #rows, 1, -1 do reversed[#reversed + 1] = rows[index] end
+    rows = reversed
+  else
+    rows = sql("sql_query", "SELECT * FROM turn_notes ORDER BY at DESC LIMIT ?", { limit })
+    local reversed = {}
+    for index = #rows, 1, -1 do reversed[#reversed + 1] = rows[index] end
+    rows = reversed
+  end
+  for _, row in ipairs(rows) do row.at = tonumber(row.at) or 0 end
+  return rows
+end
+
+-- The node's OWN local date, as YYYY-MM-DD, from the same clock day_bounds uses (item 4: the test
+-- and the report must agree on which day "today" is; the guest's os.date is UTC, so a test that asked
+-- it would disagree with the bounds for part of every day).
+function M.local_day(epoch)
+  local stamp = tonumber(epoch) or host.now()
+  local ok, clock = pcall(function() return dep("platform").local_clock(stamp) end)
+  if ok and type(clock) == "table" and type(clock.local_iso) == "string" then
+    local day = clock.local_iso:match("^(%d%d%d%d%-%d%d%-%d%d)")
+    if day then return day end
+  end
+  return os.date("!%Y-%m-%d", math.floor(stamp))
+end
+
+-- How many notes a day holds, exactly. `recent` answers a bounded page, so a report that only counted
+-- the page could not tell one day's 500 notes from its 5000 (item 4).
+function M.count_day(day)
+  local from, to = M.day_bounds(day)
+  if not from then return nil end
+  M.setup()
+  local rows = sql("sql_query", "SELECT COUNT(*) AS n FROM turn_notes WHERE at>=? AND at<?", { from, to })
+  local row = type(rows) == "table" and rows[1] or nil
+  return tonumber(type(row) == "table" and row.n or nil) or 0
+end
+
+-- Days since 1970-01-01 for a civil date, by arithmetic (Howard Hinnant's civil_from_days inverse).
+-- Used instead of os.time: os.time reads a table in the PROCESS's zone, so a native node on -03 and a
+-- guest on UTC would put the same "day" at two different instants. A day boundary must not depend on
+-- which interpreter is asking.
+local function days_from_civil(y, m, d)
+  y = m <= 2 and y - 1 or y
+  local era = math.floor(y / 400)
+  local yoe = y - era * 400
+  local mp = (m + 9) % 12
+  local doy = math.floor((153 * mp + 2) / 5) + d - 1
+  local doe = yoe * 365 + math.floor(yoe / 4) - math.floor(yoe / 100) + doy
+  return era * 146097 + doe - 719468
+end
+
+-- The half-open bounds of one local day, as epoch seconds. Refuses a malformed day by name: a reader
+-- who typed a date must not silently get "the last N notes" instead.
+function M.day_bounds(day)
+  local y, m, d = tostring(day or ""):match("^(%d%d%d%d)%-(%d%d)%-(%d%d)$")
+  if not y then return nil, "turn_day_must_be_YYYY-MM-DD" end
+  y, m, d = tonumber(y), tonumber(m), tonumber(d)
+  if m < 1 or m > 12 or d < 1 or d > 31 then return nil, "turn_day_must_be_YYYY-MM-DD" end
+  local utc_midnight = days_from_civil(y, m, d) * 86400
+  -- The node's own zone, asked the way every other clock in this harness asks it, for the middle of
+  -- the day in question: the offset of that instant, so a DST change is a different answer.
+  local offset_minutes = 0
+  local ok, clock = pcall(function() return dep("platform").local_clock(utc_midnight + 43200) end)
+  if ok and type(clock) == "table" and tonumber(clock.utc_offset_minutes) then
+    offset_minutes = tonumber(clock.utc_offset_minutes)
+  end
+  -- Local midnight = UTC midnight minus the offset (the offset says local = UTC + offset).
+  local from = utc_midnight - offset_minutes * 60
+  return from, from + 86400
+end
+
+return M

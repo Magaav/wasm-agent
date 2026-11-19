@@ -763,6 +763,7 @@ fabric_call          writes files
 fabric_deliver       read-only
 fabric_pending       read-only
 features             read-only
+file_magic           read-only
 file_sha256          read-only
 getenv               read-only
 graph_caps           read-only
@@ -822,6 +823,7 @@ read_image_base64    read-only
 relay                network
 resource             writes files
 run_cancelled        read-only
+build_identity       read-only
 runtime_info         read-only
 service              runs a process
 selfloop             writes files

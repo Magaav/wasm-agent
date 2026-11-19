@@ -42,6 +42,10 @@ host.operation=function(action,args)
   if action=='relevant' then
     local request=json.decode(args);observed_cwd=request.cwd
     check(request.limit==1,'release asks for one unresolved blocker')
+    -- THE FENCE ASKS AS THE SESSION WHOSE TREE IT IS (session isolation, item 8 round 2). A sessionless
+    -- query is not node-wide any more, so a fence that named no session would be answered by the
+    -- conservative rule and would not be about this tree at all.
+    check(request.session==id,'release asks as the session whose worktree it is: '..tostring(request.session))
     return json.encode({ok=true,operations={{operation_id='op-fixture-unresolved'}}})
   end
   return original_operation(action,args)

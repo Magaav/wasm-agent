@@ -201,8 +201,14 @@ function wa_admission(session, node, body)
   -- No thread: the run resumes the newest open conversation for (user, node), exactly as `agent_for`
   -- will. Returning the real id is what lets the scheduler enforce affinity; without it the key would be
   -- empty and two unnamed runs could write one transcript.
-  local chosen = memory.ensure_session(user.id, node, "chat")
-  return json.encode({ ok = true, user = users.public(user), role = role, conversation = chosen, remote = false })
+  -- ADMISSION IS A RUN-SHAPED QUESTION (item 6, round 2). Every request here is one run, and inside one
+  -- `wa serve` they all share one pid: the lease is minted per admission so a conversation another run is
+  -- already serving is answered as busy - a new thread - instead of being handed to this one as well.
+  local chosen, thread_note = memory.ensure_session(user.id, node, "chat", { lease = "admission:" .. host.uuid() })
+  -- A run with no thread id never resumes a conversation a live process is serving: it starts its own and
+  -- says which one was busy (session isolation, finding 6).
+  return json.encode({ ok = true, user = users.public(user), role = role, conversation = chosen, remote = false,
+    thread_note = thread_note })
 end
 
 -- Identity only, for a control route that is owner-scoped but must not be admitted as a run and must
@@ -275,8 +281,30 @@ local function run_control(command, arg, session, word)
   end
   return table.concat(lines, "\n")
 end
+-- /mastermind: the OPERATOR's mark on ONE conversation (session isolation, item 7 round 2).
+--
+-- The node scope belongs to the operator's surfaces, and an agent conversation is not one - unless the
+-- operator says so. This is that word: a human typing /mastermind in the node's own UI, which a model turn
+-- cannot type (a served control is answered before the prompt reaches the agent, see wa_reply), and which
+-- is journalled with who set it. It is the only way a conversation gets the scope by being a model's.
+function wa_mastermind_control(argument, session, thread)
+  local user, problem = users.resolve(session)
+  if not user then return "mastermind: " .. tostring(problem or "invalid_session") end
+  if not users.is_master(user.role) then return "mastermind: only the operator may mark a conversation" end
+  local target = tostring(thread or "")
+  if target == "" then
+    return "mastermind: name the conversation: send this from the conversation you mean (its thread), not from a nameless run"
+  end
+  if not memory.session(target) then return "mastermind: no such conversation " .. target end
+  local on = tostring(argument or ""):gsub("%s+$", "") ~= "off"
+  local value = memory.set_session_mastermind(target, on, user.id)
+  if value == nil then return "mastermind: the mark was not recorded" end
+  return "mastermind: conversation " .. target ..
+    (value and " may hold the node scope (audited)" or " may not hold the node scope (audited)")
+end
+
 -- Returns the control's own text for a message that is one, and nil for ordinary conversation.
-function wa_served_control(text, session)
+function wa_served_control(text, session, thread)
   session = session or "default"
   local line = tostring(text or ""):gsub("^%s+", ""):gsub("%s+$", "")
   if line == "" then return nil end
@@ -298,13 +326,14 @@ function wa_served_control(text, session)
   if first == "demote" then return run_control("demote", rest, session, nil) end
   if first == "revoke" then return run_control("revoke", rest, session, nil) end
   if first == "nodes" and rest:match("^pending") then return run_control("nodes", "pending", session, nil) end
+  if first == "mastermind" then return wa_mastermind_control(rest, session, thread) end
   return nil
 end
 
 function wa_reply(text, session, node)
   local prompt, images, problem, thread, resume_seq = parse_run_body(text)
   if problem then return json.encode({ error = redact.text(problem) }) end
-  local control = wa_served_control(prompt, session)
+  local control = wa_served_control(prompt, session, thread)
   if control then return json.encode({ reply = control, local_control = true }) end
   if remote_target(node) then
     if resume_seq ~= nil then return json.encode({ error = "resume_requires_local_node" }) end
@@ -329,7 +358,7 @@ function wa_reply_stream(text, session, node)
     emit({ type = "error", error = redact.text(problem) })
     return ""
   end
-  local control = wa_served_control(prompt, session)
+  local control = wa_served_control(prompt, session, thread)
   if control then emit({ type = "reply", text = control }); return "" end
   if remote_target(node) then
     if resume_seq ~= nil then
@@ -360,6 +389,42 @@ local function tool_names(role)
   local names = {}
   for _, schema in ipairs(toolslib.all(role)) do names[#names + 1] = schema["function"].name end
   return names
+end
+
+-- WHOSE TELEMETRY THIS IS, decided from the CREDENTIAL (session isolation, item 6 round 4).
+--
+-- /health used to take the conversation from `?session_id=`, so any caller could ask for any session's
+-- operations and be answered: the query string is not an identity. It now takes the credential the request
+-- already carries (x-wa-session) and answers with a DECISION:
+--
+--   * a requested session is shown only when the credential may see it (its owner, or a master);
+--   * with no session named, an authenticated caller gets its OWN view (the work started under its own
+--     owner that named no conversation), never the node's;
+--   * with no credential at all the answer is the node supervisor's own view, which is the sentinel's
+--     route (it polls /health and asks "is anything overdue?" node-wide);
+--   * a credential that does not resolve is nobody, and nobody is refused by name - unknown is not yes.
+function wa_health_scope(credential, requested)
+  local users_lib = dofile('lua/core/users.lua')
+  credential, requested = tostring(credential or ''), tostring(requested or '')
+  local user = credential ~= '' and users_lib.resolve(credential) or nil
+  if credential ~= '' and not user then
+    return json.encode({ node_wide = false, owner = '', refused = 'health_credential_unresolved',
+      note = 'this credential does not resolve, so /health cannot say whose work this is; log in again' })
+  end
+  if requested ~= '' then
+    local record = memory.session_owner(requested)
+    if not record then
+      return json.encode({ node_wide = false, owner = '', refused = 'health_unknown_session', session = requested,
+        note = 'no conversation on this node has that id, so there is no work of its to report' })
+    end
+    if not user or (record.user_id ~= user.id and not users_lib.is_master(user.role)) then
+      return json.encode({ node_wide = false, owner = '', refused = 'health_session_forbidden', session = requested,
+        note = 'that conversation is not yours to read; ask with a credential that owns it' })
+    end
+    return json.encode({ session = requested, node_wide = false, owner = '' })
+  end
+  if not user then return json.encode({ session = '', node_wide = true, owner = '' }) end
+  return json.encode({ session = '', node_wide = false, owner = tostring(user.id or '') })
 end
 
 function wa_me(session)
@@ -582,7 +647,7 @@ function wa_jobs(body, session)
   return host.jobs(action, json.encode(args))
 end
 
-function wa_operation(body, session)
+function wa_operation(body, session, routing)
   local user = require_master(session)
   if not user then return json.encode({error="forbidden"}) end
   local ok, args = pcall(json.decode, body or "{}")
@@ -590,6 +655,21 @@ function wa_operation(body, session)
   -- Starting arbitrary work is a tool capability, not an engine read/control endpoint.
   if args.action == "start" then return json.encode({error="start_requires_tool"}) end
   if args.action == "await" then return json.encode({error="await_requires_tool; use bounded wait on the control route"}) end
+  -- This route reads ONE session's operations - the conversation the caller names in `session_id` - and
+  -- the node's only when it explicitly asks for the node scope, which is the operator's, is audited, and
+  -- is what a fleet view uses (session isolation, findings 2 and 9). Without that it answered with every
+  -- operation on the node, and the ids are guessable.
+  -- THE SESSION COMES FROM THE AUTHENTICATED REQUEST, NEVER FROM THE BODY (item 7, round 2). The body
+  -- used to name any session_id it liked, so this route was the way around the ownership check the tool
+  -- side had just gained. routing is what the listener resolved for this request; a body that names its
+  -- own session_id is ignored, not honoured.
+  local session_id = type(routing) == "string" and routing or ""
+  args.session_id = nil
+  local grant, refusal = dofile('lua/core/session_scope.lua').grant(memory, args,
+    { session_id = session_id, surface = "window" }, user.role, user.id, "operation")
+  if refusal then return json.encode(refusal) end
+  args.session = grant.session or ""
+  args.node_scope = grant.node == true
   args.owner = user.id
   -- A vault entry reaches a child only from the kernel's own MCP launch, never through this route -
   -- and neither does the approval that accompanies it (docs/VAULT.md).
@@ -977,6 +1057,32 @@ local function node_capability(capability, args, caller)
       placement=args.placement,
     })
   end
+  return wa_peer_dispatch(capability, args, caller, author)
+end
+
+-- A peer acts in ITS OWN peer-session scope (session isolation, finding 3).
+--
+-- This dispatch used to carry no session at all: so every operation, memory write and workspace a peer
+-- asked for on this node was recorded with no session, and - once surfaces are owned by a session -
+-- belonged to nobody in particular. The peer's scope is derived from the VERIFIED caller, never from the
+-- request: a peer that names a session_id here cannot adopt another conversation on this node, which is
+-- exactly the leak the finding measured. One thread per peer is by design and stays so.
+--
+-- It is a NAMED function so it can be tested at all (item 11, round 2): a peer call needs a signed
+-- caller on the mesh, and nothing on this node fabricates one, so the branch nothing exercised was the
+-- branch everything rests on. Called with a caller table (node_id, role) it is the same code a verified
+-- peer reaches; `from` and the signature are checked by `wa_verify_peer` above it, never here.
+function wa_peer_dispatch(capability, args, caller, author)
+  args = args or {}
+  caller = caller or {}
+  local peer_session = "peer:" .. tostring(caller.node_id or "unknown")
+  -- Node scope over the mesh is not ours to give: it is this node's policy's (a grant that names the peer),
+  -- and no such grant surface exists yet - so a peer asking for one is refused by name rather than served,
+  -- which is the honest answer while the grant does not exist.
+  if type(args) == "table" and args.scope == "node" then
+    return { error = "peer_node_scope_not_granted", effect = "none", caller = tostring(caller.node_id or ""),
+      note = "a node-wide scope over the mesh needs this node's explicit grant to that peer; none is configured, so the request is refused rather than served" }
+  end
   -- The caller's role, not a hard-coded one: `verify_peer` proved it is a master, and passing
   -- the proof through means a future caller that is not a master cannot inherit these tools by
   -- accident - it would have to be granted, not merely un-refused.
@@ -984,6 +1090,7 @@ local function node_capability(capability, args, caller)
     user_id = author,
     node_id = nodeslib.node_name(),
     peer_call = true,
+    session_id = peer_session,
   })
 end
 
@@ -1757,8 +1864,12 @@ function wa_model(node, session, chat_session)
   end
   local settings = provider.settings()
   local user=users.current(session)
-  local record=chat_session and chat_session~="" and memory.session(chat_session) or memory.latest_session(user.id,node or "")
-  local observation={available=false,scope="unavailable on this node"}
+  -- The status is the NAMED conversation's and nobody else's (session isolation, finding 9). It used to
+  -- fall back to the user's newest session, so a window that named no conversation was shown another
+  -- session's telemetry - and every session here is the operator's own user, which is exactly why the
+  -- fallback looked harmless. No session named: the answer says so.
+  local record=chat_session and chat_session~="" and memory.session(chat_session) or nil
+  local observation={available=false,scope=record and "unavailable on this node" or "no session"}
   if require_master(session) and record then observation=telemetry.snapshot(record.id) end
   local budget=provider.budget(settings.model)
   local providers = {}

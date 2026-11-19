@@ -511,7 +511,17 @@ local function settle_call(s,call)
      value,success=script_value(value,success)
      -- The shape the SCRIPT saw, recorded once per change (lua/core/return_shapes.lua never raises).
      if success and connector_name(call.tool) then return_shapes.learn(call.tool,current['function'].parameters,value) end
-     s.calls[#s.calls+1]={id=call.id,name=call.tool,ok=success,evidence=reference,status=call_status(value),why=call_why(value)}
+     -- Item 4 (round 3): a bash/shell call the DIRECT path would call a read (git status, rg, ls) is
+     -- marked here by the same function agent.lua uses for a direct bash call, so the done gate does not
+     -- count an explanation as an effect just because it ran inside a script. Only the one bit is
+     -- recorded, never the command text, and the field appears only when it is true, so every other
+     -- call record keeps the shape it had.
+     local read_only = nil
+     if call.tool == "bash" or call.tool == "shell" then
+       local command = type(params) == "table" and tostring(params.command or "") or ""
+       read_only = command ~= "" and dofile("lua/core/orchestration_mode.lua").read_only_command(command) or nil
+     end
+     s.calls[#s.calls+1]={id=call.id,name=call.tool,ok=success,evidence=reference,status=call_status(value),why=call_why(value),read_only=read_only}
      telemetry.finish(span,{ok=success,name=call.tool,nested=true,codemode_call=call.id,result_bytes=#encoded,result_hash=host.sha256(encoded)})
     end
    end
@@ -934,7 +944,15 @@ local function run_script(memory,args,role,ctx,catalog,current_catalog,dispatch,
  -- (lua/core/codemode_harness.lua). A copy, so the decorated source never becomes the tool's args.
  local source=args.code
  local workspace=memory.session_workspace and memory.session_workspace(ctx.session_id) or nil
- local scope=host.sha256(json.encode({session=ctx.session_id,user=ctx.user_id,role=role,workspace=workspace,profile=ctx.subagent and ctx.subagent.allowed or nil}))
+ -- The scope key this script's variables and pending handles live under. It carried the session
+ -- straight from ctx.session_id, and a nil session simply vanished from the encoded table - so EVERY
+ -- sessionless call shared one store and one pending index, and one caller's vars and handles were
+ -- another's (session isolation, finding 10). A call with no session now gets its own key: it can neither
+ -- read nor collide with anybody else's, and its own state does not survive the call, which is the honest
+ -- answer for a caller that cannot be named.
+ local session_key=type(ctx.session_id)=='string' and ctx.session_id~='' and ctx.session_id
+   or ('no-session:'..tostring(host.uuid and host.uuid() or '')..':'..tostring(host.now and host.now() or 0))
+ local scope=host.sha256(json.encode({session=session_key,user=ctx.user_id,role=role,workspace=workspace,profile=ctx.subagent and ctx.subagent.allowed or nil}))
  args={code=harness.decorate(args.code,session_vars(memory,scope)),timeout_ms=args.timeout_ms}
  -- One handle table for this script, on either loop: a call that outlives its wait answers
  -- {state:"pending", op} and wait(op)/cancel(op) answer it. A wait is bounded by its own wait_s and by

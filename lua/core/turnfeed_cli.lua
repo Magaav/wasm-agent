@@ -20,6 +20,7 @@ local USAGE = [==[
 wa turns - the model's own harness complaints, grouped into a queue
 
   wa turns [--since 24h] [--top N] [--json] [--no-peers] [--no-digest] [--nodes a,b]
+  wa turns --day YYYY-MM-DD [--top N] [--json]   one day's themes and counts, from the run journal
   wa turns digest [--since 24h]
   wa turns fixed <cluster> --sha <commit> [--note TEXT]
   wa turns unfixed <cluster>
@@ -69,7 +70,7 @@ local function refused(message)
 end
 
 local VALUED = { ["--since"] = true, ["--top"] = true, ["--nodes"] = true, ["--sha"] = true,
-  ["--note"] = true }
+  ["--note"] = true, ["--day"] = true, ["--limit"] = true }
 
 -- One collection, shared by every verb that reports: the local notes plus every peer that answered.
 local function collect(args)
@@ -207,8 +208,112 @@ local function unfixed(args)
   return 0
 end
 
+-- One day's notes from the RUN JOURNAL (#33), as themes and counts: what the models said hurt the
+-- harness on that day, grouped by the words they used, plus the build/mode they said it on. This is
+-- the roll-up docs/evolution is written from, and it reads the journal rather than the transcripts so
+-- it answers even for a session whose rows were compacted.
+local function day_report(args)
+  local day = flag(args, "--day")
+  local journal = dofile("lua/core/turn_journal.lua")
+  local from, problem = journal.day_bounds(day)
+  if not from then return refused(problem or "turn_day_must_be_YYYY-MM-DD") end
+  local limit = tonumber(flag(args, "--limit") or "") or 500
+  local notes = journal.recent({ day = day, limit = limit })
+  if #notes == 0 then
+    print(string.format("wa turns --day %s: no note in the run journal for that day", day))
+    return 0
+  end
+  -- Item 4: a bounded page is not the whole day. Asking the store for the exact count is what lets
+  -- the report SAY it stopped, instead of presenting 500 of 5000 notes as the day's themes.
+  local total = journal.count_day(day) or #notes
+  local stopped = total > #notes
+  -- The themes: the words the notes used, counted once per note, with the words that are the shape of
+  -- prose removed. Not a clustering engine - the grouping lives in lua/core/turnfeed.lua - this is the
+  -- day's vocabulary so a reader can see what the day was about before opening a mission.
+  local STOP = {}
+  -- gmatch, not a bare string: a generic for needs an iterator function, and passing the word list
+  -- itself raised "attempt to call a string value" on the first run of this verb (found 19/11 while
+  -- checking item 2 - the report had never been executed, only written).
+  for word in ([[the a an and or but if then than that this these those it its is are was were be been
+    being of to in on at for with from by as not no nor so such only also just very more most less least
+    i we you they he she them us our your my me his her their there here what which who whom whose when
+    where why how all any both each few many some own same too can will would should could may might must
+    do does did doing done have has had having one two three first next last step steps turn turns round
+    rounds token tokens context line lines code block blocks file files wasm agent harness]]):gmatch("%S+") do STOP[word] = true end
+  local themes, order = {}, {}
+  local by_build, by_mode, by_session = {}, {}, {}
+  for _, row in ipairs(notes) do
+    local text = tostring(row.hurts or "") .. " " .. tostring(row.focus or "")
+    local seen = {}
+    for word in text:lower():gmatch("[%a][%w_%-%./]+") do
+      local key = word:gsub("[%.,;:]+$", "")
+      if #key >= 4 and not STOP[key] and not seen[key] then
+        seen[key] = true
+        if not themes[key] then themes[key] = 0; order[#order + 1] = key end
+        themes[key] = themes[key] + 1
+      end
+    end
+    local build = tostring(row.build or "")
+    by_build[build ~= "" and build or "(unknown build)"] = (by_build[build ~= "" and build or "(unknown build)"] or 0) + 1
+    local mode = tostring(row.mode or "")
+    by_mode[mode ~= "" and mode or "(no code mode)"] = (by_mode[mode ~= "" and mode or "(no code mode)"] or 0) + 1
+    by_session[tostring(row.session_id or "")] = true
+  end
+  local ranked = {}
+  for _, key in ipairs(order) do ranked[#ranked + 1] = { word = key, count = themes[key] } end
+  table.sort(ranked, function(a, b)
+    if a.count ~= b.count then return a.count > b.count end
+    return a.word < b.word
+  end)
+  local sessions = 0
+  for _ in pairs(by_session) do sessions = sessions + 1 end
+  local function counts(map)
+    local list = {}
+    for key, value in pairs(map) do list[#list + 1] = { key = key, count = value } end
+    table.sort(list, function(a, b) if a.count ~= b.count then return a.count > b.count end return a.key < b.key end)
+    return list
+  end
+  -- has(), not flag(): flag() answers the argument AFTER the name, so a trailing --json read as nil
+  -- and the text report was printed instead (found 19/11 while checking item 2).
+  if has(args, "--json") then
+    print(json.encode({ day = day, notes = #notes, total = total, truncated = stopped or nil,
+      sessions = sessions, themes = ranked, builds = counts(by_build), modes = counts(by_mode) }))
+    return 0
+  end
+  local lines = {}
+  lines[#lines + 1] = string.format("wa turns --day %s: %d note(s) from %d session(s)", day, #notes, sessions)
+  if stopped then
+    lines[#lines + 1] = string.format(
+      "read the newest %d of %d note(s) that day (--limit raises the page, up to 500)", #notes, total)
+  end
+  if #ranked == 0 then
+    -- Item 4: a day whose notes carry no countable word is a day, not a crash. The old loop indexed
+    -- ranked[1] and failed with "attempt to index a nil value" on a note of only stop words.
+    lines[#lines + 1] = "themes: none (no word in these notes survived the stop list)"
+  else
+    local top = math.max(1, math.min(tonumber(flag(args, "--top") or "") or 15, #ranked))
+    lines[#lines + 1] = "themes (a word counted once per note):"
+    for index = 1, top do
+      lines[#lines + 1] = string.format("  %3d  %s", ranked[index].count, ranked[index].word)
+    end
+  end
+  lines[#lines + 1] = "builds:"
+  for _, entry in ipairs(counts(by_build)) do lines[#lines + 1] = string.format("  %3d  %s", entry.count, entry.key) end
+  lines[#lines + 1] = "modes:"
+  for _, entry in ipairs(counts(by_mode)) do lines[#lines + 1] = string.format("  %3d  %s", entry.count, entry.key) end
+  print(table.concat(lines, "\n"))
+  return 0
+end
+
 function M.run(args)
   local verb = args[2]
+  -- --day is a verb in disguise, and it has to be answered before the "no verb" branch below: that
+  -- branch takes every leading -- to the all-time report, which is how "wa turns --day 2026-11-18"
+  -- used to print the whole ledger and never the day (review 19/11, item 2).
+  if has(args, "--day") or verb == "day" then
+    if has(args, "--help") or has(args, "-h") then print(USAGE); return 0 end
+    return day_report(args)
+  end
   if verb == nil or verb:sub(1, 2) == "--" then
     if has(args, "--help") or has(args, "-h") then print(USAGE); return 0 end
     return report(args)

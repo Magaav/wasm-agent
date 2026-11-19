@@ -125,6 +125,7 @@ pub const REGISTRY: &[Capability] = &[
     plain!("uuid", ReadOnly, crate::host::uuid, "A fresh random UUID"),
     plain!("sha256", ReadOnly, crate::host::sha256, "SHA-256 of a string, as hex"),
     plain!("runtime_info", ReadOnly, crate::host::runtime_info, "Build and runtime identity of this binary"),
+    plain!("build_identity", ReadOnly, crate::host::build_identity, "The one name for this build: its commit (short), whether the tree was dirty, and the full id"),
     plain!("system_resources", ReadOnly, crate::host::system_resources, "CPU, memory and disk facts for this machine"),
     plain!("node_identity", ReadOnly, crate::host::node_identity, "This node's identity and network role"),
     plain!("mesh_call", Network, wa_mesh::host_call::mesh_call, "Call a peer directly by hierarchy, when WA_MESH=1; the roster, grants and direct transport of docs/MESH.md"),
@@ -141,6 +142,10 @@ pub const REGISTRY: &[Capability] = &[
     // (docs/VAULT.md, the vault approval).
     plain!("path_facts", ReadOnly, crate::host::path_facts, "A path's realpath, kind, size and (on unix) owner and mode bits, as JSON"),
     plain!("file_sha256", ReadOnly, crate::host::file_sha256, "SHA-256 of a file's bytes, read in chunks; nil plus a named reason when it cannot be read"),
+    // What a file IS, from its leading bytes: the vault approval (round 8) allows node or a POSIX shell
+    // by REALPATH and by this answer, so a copy of python called `node`, or a shell script named `bash`,
+    // is refused whatever its name says.
+    plain!("file_magic", ReadOnly, crate::host::file_magic, "A file's kind from its leading bytes: elf, macho or pe only for THIS host's own format, foreign for another platform's executable, plus script, text, binary, empty, missing, as JSON"),
     plain!("list_dir", ReadOnly, crate::host::list_dir, "List one directory's entries"),
     plain!("grep", ReadOnly, crate::host::grep, "Literal substring search over a directory or file with bounded, counted results"),
     // ---- the code graph ----------------------------------------------------------------------

@@ -36,8 +36,25 @@ end
 local dir = paths.data() .. '/request-shape-' .. tostring(host.uuid()):sub(1, 8)
 for _, name in ipairs(mcp.RUNTIME) do assert(host.write_file(dir .. '/' .. name, '// runtime stub: ' .. name .. '\n')) end
 local real_getenv = host.getenv
-local node_fixture = dir .. '/node-fixture'
-assert(host.write_file(node_fixture, '#!/bin/sh\nexit 0\n'), 'the interpreter fixture')
+-- Round 8: the allow-list judges a program by what the file IS, so a fixture interpreter has to be a
+-- real NATIVE binary named node. The platform's own /usr/bin/env is ELF and is copied once per scratch
+-- home: a shell script called node-fixture is exactly what the allow-list refuses.
+local function native_copy(path)
+  local source = host.getenv('WA_NATIVE_FIXTURE')
+  if not source or source == '' then
+    for _, candidate in ipairs({ '/usr/bin/env', '/bin/env', '/usr/bin/true', '/bin/true' }) do
+      local facts = host.file_magic and host.file_magic(candidate)
+      if facts and (dofile('lua/vendor/json.lua').decode(facts).magic or '') == 'elf' then source = candidate break end
+    end
+  end
+  assert(source, 'a native binary to copy for the interpreter fixture')
+  local parent = path:match('^(.*)/[^/]+$')
+  if parent and host.path_kind(parent) ~= 'dir' then host.exec('mkdir -p ' .. parent, nil, 20) end
+  host.exec('cp ' .. source .. ' ' .. path, nil, 20)
+  assert(host.path_kind(path) == 'file', 'a native fixture at ' .. path)
+  return path
+end
+local node_fixture = native_copy(dir .. '/bin/node')
 host.getenv = function(name)
   if name == 'WA_MCP_SCRIPT_DIR' then return dir end
   if name == 'WA_NODE' then return node_fixture end

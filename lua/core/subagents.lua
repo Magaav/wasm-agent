@@ -667,13 +667,13 @@ function M.control(args, ctx)
 
   if action == 'lookup_session' then
     return json.decode(host.subagent('lookup_session', json.encode({
-      owner_user=ctx.user_id, conversation_id=tostring(args.conversation_id or '') })))
+      owner_user=ctx.user_id, session=ctx.session_id, conversation_id=tostring(args.conversation_id or '') })))
   end
 
   if action=='steer_session' or (action=='steering_status' and not args.id and not args.subagent_id) then
     if ctx.remote then return {error='explicit_child_target_required'} end
     if action=='steer_session' then
-      local target=json.decode(host.subagent('lookup_session',json.encode({owner_user=ctx.user_id,conversation_id=tostring(args.session_id or '')})))
+      local target=json.decode(host.subagent('lookup_session',json.encode({owner_user=ctx.user_id,session=ctx.session_id,conversation_id=tostring(args.session_id or '')})))
       if target.found and target.task and target.task.profile=='orchestration-worker' then
         return {error='worker_followup_requires_report',effect='none',next='Use message after its terminal report, not session steering.'}
       end
@@ -682,7 +682,7 @@ function M.control(args, ctx)
   end
   if action == "session" or action == "message" or action=='steer' or action=='steering_status' then
     local receipt = json.decode(host.subagent("status", json.encode({
-      owner_user = ctx.user_id, id = tostring(args.id or args.subagent_id or "") })))
+      owner_user = ctx.user_id, session = ctx.session_id, id = tostring(args.id or args.subagent_id or "") })))
     -- An owned task view carries its terminal failure in `error`. It is still
     -- inspectable/continuable; native lookup refusals have no task/session identity.
     if not receipt or (receipt.error and not (receipt.subagent_id and receipt.session_id)) then
@@ -706,7 +706,7 @@ function M.control(args, ctx)
         local guard=dofile('lua/core/wave_autoflush.lua').admission_guard({session_id=receipt.parent_session_id,user_id=ctx.user_id,role=ctx.role})
         if guard then return guard end
         return json.decode(host.subagent("continue", json.encode({
-          owner_user = ctx.user_id, id = receipt.subagent_id, run_origin=ctx.run_origin, text = tostring(args.text or ""),
+          owner_user = ctx.user_id, session = ctx.session_id, id = receipt.subagent_id, run_origin=ctx.run_origin, text = tostring(args.text or ""),
           new_id = host.uuid(), idempotency_key = tostring(args.idempotency_key) })))
       end)
       if result.error ~= "session_tail_changed" then
@@ -732,7 +732,7 @@ function M.control(args, ctx)
     -- a retry safe rather than a possible second child.
     local key = tostring(args.idempotency_key or "")
     if key == "" then return { error = "idempotency_key_required", not_started = true } end
-    local answer = json.decode(host.subagent("resolve", json.encode({ owner_user = ctx.user_id, idempotency_key = key })))
+    local answer = json.decode(host.subagent("resolve", json.encode({ owner_user = ctx.user_id, session = ctx.session_id, idempotency_key = key })))
     if type(answer) ~= "table" or answer.error then
       return { error = "resolve_unavailable", not_started = true, idempotency_key = key,
         detail = tostring(type(answer) == "table" and answer.error or "the runtime did not answer") }
@@ -780,7 +780,10 @@ function M.control(args, ctx)
     return { profiles = listed, errors = errors or {} }
   end
 
-  local call = { owner_user = ctx.user_id }
+  -- WHICH SESSION is asking. Every session on this node carries the operator's credential, so the user
+  -- cannot tell one session's children from another's: the session tree decides who may read, message,
+  -- steer or cancel a child (session isolation, finding 4).
+  local call = { owner_user = ctx.user_id, session = ctx.session_id }
   -- `subagent_id`/`timeout_ms` are the agreed acceptance aliases for the same
   -- fields; a caller may use either name.
   local target = args.id or args.subagent_id
@@ -793,7 +796,7 @@ function M.control(args, ctx)
   end
   if action == "await" then call.wait_ms = tonumber(args.wait_ms) or tonumber(args.timeout_ms) or 60000 end
   if action == "list" then
-    return json.decode(host.subagent("list", json.encode({ owner_user = ctx.user_id })))
+    return json.decode(host.subagent("list", json.encode({ owner_user = ctx.user_id, session = ctx.session_id })))
   end
   local result = json.decode(host.subagent(action, json.encode(call)))
   if type(result) ~= "table" then return { error = "subagent_runtime_error" } end

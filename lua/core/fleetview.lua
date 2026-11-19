@@ -31,6 +31,52 @@ M.MAX_OPERATIONS = 25
 M.MAX_INCIDENTS = 5
 M.DISK_DEGRADED_PERCENT = 90
 
+-- FLEET VIEW IS AN OPERATOR SURFACE, and it says so (session isolation, item 7 round 2).
+--
+-- A fleet view answers about EVERY node's work, which is one node's whole operation set on this one: the
+-- node scope. Round 1 gave that scope to the operator ROLE, and every session carries that credential, so
+-- the only thing between a model's tool call and every other session's operations was its own restraint.
+-- A node whose Fleet View is called by a non-operator is refused inside session_scope.grant.
+--
+-- THE ONE DELIBERATE EXCEPTION, said out loud (item 4, round 5). The `surface = 'fleetview'` passed
+-- below is a name THIS FILE sets - the tool's schema has no `surface` field, so no model argument can
+-- carry it - and it is the reason the Fleet View TOOL, which is a model tool call, is granted the node
+-- scope at all: it is the operator's read-only window on every session's work. That makes it an AUDITED
+-- exception rather than a hole, and the audit is enforced twice: grant() writes the line, and
+-- NODE_OPERATIONS below refuses outright when there is no journal to write it to.
+local NODE_OPERATIONS = function(opts)
+  opts = opts or {}
+  if type(host.operation) ~= 'function' then return nil, 'operation_manager_unavailable' end
+  -- NO JOURNAL, NO NODE-WIDE READ (item 4, round 5). session_scope.audit returns early when it has no
+  -- store, so a Fleet View that arrived with a nil memory would read every session's operations and leave
+  -- no line an operator could find - the same unaudited node read round 4 removed, reachable again by a
+  -- caller that simply forgot the store. Unknown is not yes: refuse by NAME, and say what is missing.
+  if type(opts.memory) ~= 'table' or type(opts.memory.journal) ~= 'function' then
+    return nil, 'fleetview_requires_a_journal'
+  end
+  -- THE REAL MEMORY MODULE AND THE CALLER'S OWN ROLE (session isolation, item 1 round 4).
+  --
+  -- Round 3 passed `nil` here, and session_scope.audit returns early without a store - so a node-wide
+  -- read of every session's work left NO line an operator could find, while the comment said it was
+  -- audited. It also hard-coded the role 'master', so any caller that reached this answered as the
+  -- operator: the role is now the caller's, and grant() refuses one that is not.
+  local grant = dofile('lua/core/session_scope.lua').grant(opts.memory, { scope = 'node' },
+    { surface = 'fleetview', session_id = tostring(opts.session or '') },
+    opts.role, tostring(opts.user_id or ''), 'fleetview')
+  if type(grant) ~= 'table' or grant.node ~= true then return nil, 'node_scope_not_granted' end
+  -- decode/try are declared further down this file; a local is only visible after its declaration, so
+  -- this asks the host the same way they do instead of reaching for a name that is not in scope yet.
+  -- THE GRANTED SCOPE TRAVELS WITH THE READ. Without it the runtime answers as a SESSSIONLESS caller,
+  -- which is not a node-wide caller (item 7 round 2) and sees only the rows that named no owner: the view
+  -- would print a fraction of the node's work as "the node's operations".
+  local ok, raw = pcall(host.operation, 'list', json.encode({ limit = M.MAX_OPERATIONS * 4,
+    session = tostring(grant.session or ''), node_scope = grant.node == true }))
+  if not ok or type(raw) ~= 'string' then return nil, 'operation_list_unreadable' end
+  local decoded, value = pcall(json.decode, raw)
+  if not decoded or type(value) ~= 'table' then return nil, 'operation_list_unreadable' end
+  return value
+end
+
 -- The fields every node record answers (or names as missing). The test asserts this exact list, so a
 -- field cannot be dropped from the answer by accident.
 -- 'pins' is deliberately NOT in this list. A field every node record answers is a fact about THAT node; a
@@ -250,6 +296,13 @@ function M.node(observation, opts)
   end
   if type(observation.operations) ~= 'table' then
     missing[#missing + 1] = 'operations'
+    -- AND WHY IT IS MISSING, when the reader knows (item 4, round 5). The observation carried
+    -- `operations_refused` and this function dropped it, so a guest's row named the absent field and
+    -- nothing else: "no operations" and "you may not see them" read the same, which is the exact failure
+    -- the Fleet View's own header promises never to make.
+    if type(observation.operations_refused) == 'string' then
+      row.operations_refused = observation.operations_refused
+    end
   else
     row.operations = operations
     if #operations > M.MAX_OPERATIONS then
@@ -404,11 +457,15 @@ function M.local_observation(opts)
   if ok and type(services) == 'table' and not services.error then
     observation.components = services.services or {}
   end
-  if type(host.operation) == 'function' then
-    local operations = decode((try(host.operation, 'status', '{}')) or nil)
-    if type(operations) == 'table' then
-      observation.operations = operations.operations or operations.list or (operations[1] and operations) or {}
-    end
+  -- The grant travels with the call (item 1 round 4). A refusal is NOT "no operations": the field stays
+  -- absent and its reason is named, so a caller that could not be given the node scope reads a gap with a
+  -- cause rather than a short list that looks like the whole node.
+  local operations, operations_problem = NODE_OPERATIONS(opts)
+  if type(operations) == 'table' then
+    observation.operations = operations.operations or operations.list or (operations[1] and operations) or {}
+    if operations.error then observation.health_reason = observation.health_reason or tostring(operations.error) end
+  else
+    observation.operations_refused = operations_problem or 'node_scope_not_granted'
   end
   -- The pins this coordinator holds (lua/core/pins.lua): where nodes are held and which pins are overdue,
   -- read from the one store that decides those things. A store that cannot be read is named in the node's
@@ -443,12 +500,16 @@ function M.telemetry_incidents(opts)
   opts = opts or {}
   local out = {}
   if type(host.operation) == 'function' then
-    local operations = decode((try(host.operation, 'status', '{}')) or nil) or {}
+    local operations = NODE_OPERATIONS(opts) or {}
     for _, entry in ipairs(type(operations) == 'table' and (operations.operations or operations.list or {}) or {}) do
       local state = tostring(type(entry) == 'table' and entry.state or '')
       if state == 'failed' or state == 'unknown' or state == 'cancelled' then
-        out[#out + 1] = { id = tostring(entry.id or ''), source = 'telemetry', at = tonumber(entry.finished_at or entry.started_at),
-          kind = 'operation_' .. state, summary = 'operation ' .. tostring(entry.id or '?') .. ' settled as ' .. state }
+        -- THE OPERATION'S ID IS `operation_id` (item 1, round 5). This read `entry.id`, and an operation
+        -- row has never carried one: every real failure was announced as "operation ? settled as failed",
+        -- an incident nobody could look up. `id` stays as the fallback for a caller that shapes its own row.
+        local id = tostring(entry.operation_id or entry.id or '?')
+        out[#out + 1] = { id = id, source = 'telemetry', at = tonumber(entry.finished_at or entry.started_at),
+          kind = 'operation_' .. state, summary = 'operation ' .. id .. ' settled as ' .. state }
       end
     end
   end
@@ -486,5 +547,9 @@ function M.view(opts)
   view.sources = { nodes = 'registry', ['local'] = 'runtime_info', incidents = 'telemetry+lessons' }
   return view
 end
+
+-- The node-operations read, exported so a test drives THIS function with the node's real operation
+-- manager rather than a stand-in (item 1 round 4): a stub would have passed the round-3 version too.
+M.node_operations = NODE_OPERATIONS
 
 return M

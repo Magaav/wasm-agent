@@ -90,6 +90,10 @@ M.RUNTIME={'mcp-client.mjs','mcp-client-core.mjs','mcp-server-core.mjs','mcp-ses
 -- each side's test pins the same fixture digest (scripts/test-mcp-vault-approval.lua). Every field is
 -- percent-escaped, so a newline, a space or a tab inside an argument cannot forge a line of it.
 --
+-- v4 (round 8) is the ALLOW-LIST: what a connector may run is decided by the program's realpath and by
+-- what the file IS (a native executable), not by a list of interpreter names - plus the native voucher an
+-- operator records with /mcp <id> on --native, whose line the canonical text carries so that replacing the
+-- binary voids the approval like any other approved file.
 -- v2 added the cwd and the plain (non-vault) environment, and replaced "every absolute argument with a
 -- script extension" with the CLOSURE of the code the connector can load. v3 (round 6) closes the rest of
 -- that closure: the INTERPRETER the launch actually spawns (node_program, not the definition's program),
@@ -99,7 +103,7 @@ M.RUNTIME={'mcp-client.mjs','mcp-client-core.mjs','mcp-server-core.mjs','mcp-ses
 -- looks complete. Round 7 finishes that judgement: node's own resolution order for a name, with an
 -- ambiguous one refused rather than resolved; a program that IS an interpreter the digest cannot follow;
 -- vm next to eval; and the interpreter resolved with the PATH the child gets, not the Lua process's.
-M.APPROVAL_FORM='mcp-vault-approval/v3'
+M.APPROVAL_FORM='mcp-vault-approval/v4'
 -- Bounds: an approval is re-read before every call, and a connector that needs more than this is one
 -- whose coverage cannot be proven cheaply, so it is refused by name instead.
 M.MAX_FILES=2048
@@ -124,6 +128,12 @@ function M.vault_approval_text(manifest)
  end
  for _,arg in ipairs(manifest.args or {})do lines[#lines+1]='arg '..approval_field(arg) end
  for _,file in ipairs(manifest.files or {})do lines[#lines+1]='file '..approval_field(file.path)..' '..tostring(file.sha256 or ''):lower() end
+ -- The operator's own voucher for a native binary (/mcp <id> on --native): one line, only when one was
+ -- recorded, so a connector approved without one hashes to the text it always did.
+ local native=manifest.native
+ if type(native)=='table' and tostring(native.path or '')~='' then
+  lines[#lines+1]='native '..approval_field(tostring(native.path))..' '..tostring(native.sha256 or ''):lower()
+ end
  for _,name in ipairs(manifest.vault or {})do lines[#lines+1]='vault '..approval_field(name) end
  return table.concat(lines,'\n')..'\n'
 end
@@ -409,55 +419,164 @@ local function ambiguous_argument(value,found)
  return 'an argument names more than one file node could run ('..value..' -> '..table.concat(found,', ')
   ..'), so the digest cannot say which one it covers'
 end
--- The interpreter family, from the program's own name: the flags that mean "run this string" differ.
--- Two families are FOLLOWED, because what they load is files this digest can name: JavaScript (node,
--- nodejs) through its imports, and POSIX shell (sh, bash, dash, zsh, ksh) through source, . and exec of a
--- path. Round 7: bun, deno, qjs and quickjs were in the JavaScript family, so `bun -e` looked followed -
--- their module systems are not the one this digest follows (a remote URL, a lockfile's tree, a compiled
--- blob), and a python3, perl or ruby program was refused only by whatever script it happened to name.
-local INTERPRETERS={node='js',nodejs='js',sh='sh',bash='sh',dash='sh',zsh='sh',ksh='sh'}
--- Interpreters whose module system this digest cannot follow: each loads a module or a package from a
--- search path (a python package, a ruby gem, a perl module, a lua rock) that is not a file an approval
--- names. The same list is in rust/wa-capabilities/src/operations.rs, and docs/VAULT.md names it.
-local UNFOLLOWED_INTERPRETERS={'python','python2','python3','pypy','pypy3','perl','ruby','php','lua',
+-- ---- the allow-list: what a vault connector may RUN, judged by what the file IS (round 8) ---------
+--
+-- Rounds 6-7 refused interpreters by NAME, and each review found another name, another wrapper or another
+-- copy under a different name. A name is not a program: python3, python3.11, pypy, a copy of python called
+-- `py`, `env node conn.mjs` and `timeout 30 node conn.mjs` all run code this digest cannot follow, and
+-- none of them is refused by a list that names only the first. So the rule is inverted: the program's
+-- REALPATH (symlinks resolved, `host.path_facts`) must be one of the two families this digest CAN follow,
+-- and the file must be a NATIVE executable (ELF, Mach-O or PE) rather than a script wearing that name.
+-- Everything else is refused, whatever its name. The one exception is a native binary the OPERATOR
+-- vouched for at approval time (`/mcp <id> on --native`, recorded with its sha256 in the approval):
+-- the digest cannot see what a native binary loads, and docs/VAULT.md says exactly that.
+M.ALLOWED_PROGRAMS={'node','nodejs','sh','bash','dash'}
+local ALLOWED_PROGRAMS={}
+for _,name in ipairs(M.ALLOWED_PROGRAMS)do ALLOWED_PROGRAMS[name]=true end
+-- Interpreters whose module system this digest cannot follow. Not the rule any more (the allow-list is),
+-- but an ARGUMENT that resolves to one of these is refused too: `node ./bin/python3 script.py` runs python
+-- from a file the digest would otherwise name. The list is identical in
+-- rust/wa-capabilities/src/operations.rs, compared case-insensitively on both sides and pinned by ONE
+-- shared table, fixtures/mcp-refused-names.json, which both sides' tests read.
+M.REFUSED_INTERPRETERS={'python','python2','python3','pypy','pypy3','perl','ruby','php','lua',
  'luajit','tclsh','expect','deno','bun','qjs','quickjs','ts-node','tsx','java','jjs','pwsh','powershell',
  'julia','elixir','escript','erl','rscript','groovy','scala','kotlin','swift','dotnet','mono'}
+-- Wrappers: each one RUNS the program that follows it, so the file this approval names is not the file
+-- that runs. `sh -c 'env ...'` is already refused as inline code; this is `program=/usr/bin/env`, and an
+-- argument that resolves to one of them.
+M.REFUSED_WRAPPERS={'env','nice','ionice','timeout','setsid','stdbuf','xargs','sudo','doas','nohup',
+ 'chrt','taskset','unshare','firejail','bwrap','flock','time'}
+local REFUSED_INTERPRETERS,REFUSED_WRAPPERS={},{}
+for _,name in ipairs(M.REFUSED_INTERPRETERS)do REFUSED_INTERPRETERS[name]=true end
+for _,name in ipairs(M.REFUSED_WRAPPERS)do REFUSED_WRAPPERS[name]=true end
 -- A versioned name is the same interpreter (python3.11, perl5.36, ruby3.2, php8.2).
-local function unfollowed_interpreter(program)
- local name=basename(tostring(program or '')):lower():gsub('%.exe$','')
- if INTERPRETERS[name] then return nil end
- local stem=name:gsub('[%d%.]+$','')
- for _,known in ipairs(UNFOLLOWED_INTERPRETERS)do
-  if known==stem or known==name then return known end
- end
+local function stem_of(name)return (tostring(name or ''):gsub('[%d%.]+$','')) end
+local function refused_interpreter_or_wrapper(name)
+ local clean=tostring(name or ''):lower():gsub('%.exe$','')
+ local stem=stem_of(clean)
+ if REFUSED_WRAPPERS[clean] then return 'wrapper',clean end
+ if REFUSED_INTERPRETERS[clean] or REFUSED_INTERPRETERS[stem] then return 'interpreter',clean end
+ if REFUSED_WRAPPERS[stem] then return 'wrapper',clean end
  return nil
 end
-local INLINE_FLAGS={js={['-e']=true,['--eval']=true,['-p']=true,['--print']=true},
- sh={['-c']=true,['--command']=true}}
+-- What a file IS, from its leading bytes: elf, macho or pe (this HOST's own format only; another
+-- platform's executable answers `foreign`), script, text, binary, empty or missing. A shebang named
+-- `node` is an interpreter in disguise, so the name alone is never the answer, and neither is a format
+-- this node cannot run.
+local function file_magic(path)
+ if type(host.file_magic)~='function' then return nil end
+ local facts=decode(host.file_magic(tostring(path or '')))
+ return facts and tostring(facts.magic or '') or nil
+end
+local function native_executable(path)
+ local magic=file_magic(path)
+ if magic=='elf' or magic=='macho' or magic=='pe' then return true end
+ return false,magic
+end
+-- The one judgement about a PROGRAM, made in the console and again in the kernel from the bytes on disk.
+-- `vouched` is the `--native` record the approval carries ({path=realpath,sha256=...}) or nil.
+local function program_refusal(program,vouched)
+ local name=basename(program):lower():gsub('%.exe$','')
+ if PACKAGE_RUNNERS[name] then
+  return 'its program is a package runner ('..name..'), whose code comes from a cache or a registry rather than from files this approval can name'
+ end
+ if not absolute_path(program) then
+  return 'its program is not an absolute path ('..program..'): a bare name is resolved through PATH, which this digest does not name'
+ end
+ local facts=path_facts(program)
+ local real=tostring((facts and facts.path) or program)
+ local real_name=basename(real):lower():gsub('%.exe$','')
+ -- The NAME first, then existence: `/usr/bin/python3` is an interpreter whether or not this host installed
+ -- it at that exact path, and that is the sentence the operator has to act on. A name is never a program.
+ local kind,clean=refused_interpreter_or_wrapper(real_name)
+ if kind=='wrapper' then
+  return 'its program resolves to '..real..', which is a wrapper ('..clean..') that runs another program: the file this approval names is not the file that runs'
+ end
+ if kind=='interpreter' then
+  return 'its program resolves to '..real..', which is not node or a POSIX shell: it is an interpreter ('
+   ..clean..') whose modules and packages this digest cannot follow'
+ end
+ if not facts or facts.kind~='file' then
+  return 'its program cannot be read ('..program..')'
+ end
+ -- A native binary the operator vouched for at approval time. The voucher is about a FILE, so it names
+ -- these bytes; and what it vouches for has to BE a native executable, because a script under the
+ -- voucher is the same interpreter in disguise the allow-list exists to refuse. It is checked AFTER the
+ -- interpreter and wrapper families, so --native cannot approve /usr/bin/python3 or /usr/bin/env.
+ if vouched and type(vouched)=='table' and tostring(vouched.path or '')==real then
+  local native,magic=native_executable(real)
+  if native then return nil end
+  return 'its program resolves to '..real..', which the operator vouched for with --native but which is not a native executable ('
+   ..tostring(magic or 'unknown')..'): --native approves a native binary, never a script'
+ end
+ if ALLOWED_PROGRAMS[real_name] then
+  local native,magic=native_executable(real)
+  if native then return nil end
+  return 'its program resolves to '..real..', which is named '..real_name..' but is not a native executable ('
+   ..tostring(magic or 'unknown')..'): a script or a plain text file under an allowed name is an interpreter in disguise'
+ end
+ return 'its program resolves to '..real..', which is not node or a POSIX shell (sh, bash, dash): a vault connector may run only those two families, judged by the program\'s realpath, or a native binary the operator vouches for with --native'
+end
+-- An ARGUMENT that resolves to an interpreter or a wrapper is refused the same way: the digest can name
+-- the file, but not what running it runs.
+local function argument_refusal(value,target)
+ local facts=path_facts(target)
+ local real=facts and facts.kind=='file' and tostring(facts.path or target) or target
+ local kind,clean=refused_interpreter_or_wrapper(basename(real))
+ if not kind then return nil end
+ return 'an argument resolves to '..(kind=='wrapper' and 'a wrapper' or 'an interpreter')..' ('..tostring(value)
+  ..' -> '..real..', '..clean..'), and a digest of files cannot say what it would run'
+end
+-- The family a program belongs to, for the flags that mean "run this string": decided from the REALPATH,
+-- so a symlink or another name cannot choose another family's rules.
+local INTERPRETERS={node='js',nodejs='js',sh='sh',bash='sh',dash='sh',zsh='sh',ksh='sh'}
+local function interpreter_family(program)
+ -- Round 9: the REALPATH, as the kernel decides it (operations.rs, interpreter_family). A symlink named
+ -- `node` that points at bash is the shell family, and one that points at python is refused by name;
+ -- judging the name it was called by let a link choose the rules that applied to it. path_facts falls
+ -- back to the path itself when the file is not there, which is the kernel's real_path fallback too.
+ local facts=path_facts(program)
+ local real=facts and tostring(facts.path or '') or ''
+ if real=='' then real=tostring(program or '') end
+ local name=basename(real):lower():gsub('%.exe$','')
+ if INTERPRETERS[name] then return INTERPRETERS[name] end
+ if SCRIPT_EXT[(name:match('%.([%w]+)$') or ''):lower()] then return 'script' end
+ if refused_interpreter_or_wrapper(name) then return 'other' end
+ return 'unknown'
+end
 -- Options that make an INTERPRETER run code this digest cannot name: a string it evaluates, or a module it
 -- loads from its own search path. For a program the digest follows, the family's own list decides (node -r
--- is a file, below); for one it cannot classify, every one of these is code ("refuse unknown interpreters
--- with code options", round 7).
-local CODE_FLAGS={['-c']=true,['-e']=true,['-E']=true,['-m']=true,['-p']=true,['-r']=true,
- ['--eval']=true,['--print']=true,['--command']=true,['-command']=true,['-encodedcommand']=true,
- ['--module']=true,['--require']=true}
+-- is a file, below); for one it cannot classify, every one of these is code.
+local INLINE_FLAGS={js={['-e']=true,['--eval']=true,['-p']=true,['--print']=true},
+ sh={['-c']=true,['--command']=true}}
 -- Options that name a FILE rather than a value: their argument is hashed, or refused.
 local PATH_OPTIONS={['--require']=true,['-r']=true,['--import']=true,['--loader']=true,
  ['--experimental-loader']=true,['--env-file']=true,['--config']=true}
-local function interpreter_family(program)
- local name=basename(tostring(program or '')):lower():gsub('%.exe$','')
- if INTERPRETERS[name] then return INTERPRETERS[name] end
- if SCRIPT_EXT[(name:match('%.([%w]+)$') or ''):lower()] then return 'script' end
- if unfollowed_interpreter(name) then return 'other' end
- return 'unknown'
-end
+local CODE_FLAGS={['-c']=true,['-e']=true,['-E']=true,['-m']=true,['-p']=true,['-r']=true,
+ ['--eval']=true,['--print']=true,['--command']=true,['-command']=true,['-encodedcommand']=true,
+ ['--module']=true,['--require']=true}
+-- Round 8: the flag is compared BEFORE an '=' (`--eval=code`), and a short cluster is split
+-- (`-pe` is `-p` and `-e`), so one argument cannot smuggle two flags past a list that compares whole
+-- strings. A long option is never split: `--print` is one flag, not `--p`, `--r`, `--i`, `--n`, `--t`.
 local function inline_flag(program,value)
+ local text=tostring(value or '')
+ local head=text:match('^([^=]*)=?') or text
  local flags=INLINE_FLAGS[interpreter_family(program)] or CODE_FLAGS
- return flags[value]==true
+ local function code(flag)return flags[flag]==true end
+ if code(head) then return head end
+ if head:match('^%-[^-]') then
+  for index=2,#head do
+   local short='-'..head:sub(index,index)
+   if code(short) then return short..' (in '..head..')' end
+  end
+ end
+ return nil
 end
 -- What a digest of FILES cannot follow: a string it would evaluate, a process it would start, a module
 -- whose name is chosen while it runs. Refused by name, in the connector's own code.
 local QUOTE_CLASS='['..string.char(39)..string.char(34)..']'
+-- Round 9: the same class PLUS the backtick, for the module specifiers a template literal carries.
+local VM_QUOTE='['..string.char(39)..string.char(34)..string.char(96)..']'
 local function refused_construct(kind,content,path)
  if kind=='js' then
   if content:find('child_process',1,true) and not RUNTIME_NAME[basename(path)] then
@@ -477,8 +596,38 @@ local function refused_construct(kind,content,path)
    or content:find('from%s*'..QUOTE_CLASS..'vm'..QUOTE_CLASS)
    or content:find('%f[%w]runInThisContext%s*%(') or content:find('%f[%w]runInNewContext%s*%(')
    or content:find('%f[%w]runInContext%s*%(') or content:find('vm%.Script%s*%(')
-   or content:find('vm%.compileFunction%s*%(') then
+   or content:find('vm%.compileFunction%s*%(')
+   or content:find('import%s*%(%s*'..QUOTE_CLASS..'node:vm'..QUOTE_CLASS)
+   or content:find('import%s*%(%s*'..QUOTE_CLASS..'vm'..QUOTE_CLASS) then
    return 'it evaluates a string as code (vm: runInThisContext, vm.Script), whose source no digest of files names'
+  end
+  -- Round 9: a TEMPLATE literal is a string literal too. require(`vm`) and import(`node:vm`) are the same
+  -- module the quote class above (single and double) sees, spelled with the one quote it did not include.
+  if content:find('require%s*%(%s*'..VM_QUOTE..'node:vm'..VM_QUOTE)
+   or content:find('require%s*%(%s*'..VM_QUOTE..'vm'..VM_QUOTE)
+   or content:find('import%s*%(%s*'..VM_QUOTE..'node:vm'..VM_QUOTE)
+   or content:find('import%s*%(%s*'..VM_QUOTE..'vm'..VM_QUOTE)
+   or content:find('from%s*'..VM_QUOTE..'node:vm'..VM_QUOTE)
+   or content:find('from%s*'..VM_QUOTE..'vm'..VM_QUOTE) then
+   return 'it evaluates a string as code (vm: require/import in a template literal), whose source no digest of files names'
+  end
+  -- Round 9: `process.getBuiltinModule('vm')` reaches the same module with NO require and NO import, so
+  -- neither of the checks above can see it - and the DESTRUCTURING form
+  -- (`{Script, compileFunction} = process.getBuiltinModule('vm')`) then calls bare names the receiver rule
+  -- (`x.Script(`) never matches. Any builtin by handle is the same hole (child_process, fs, vm), so the
+  -- CALL is refused whatever module it names: a connector that needs a builtin imports it by name.
+  if content:find('process%s*%.%s*getBuiltinModule%s*%(') then
+   return 'it reaches a builtin module by handle (process.getBuiltinModule), whose code no digest of files names'
+  end
+  -- Round 8: the module bound to ANOTHER name. Requiring node:vm into a variable called v and calling
+  -- v.Script(code) is the same string a check for the literal name vm cannot see, so these methods are
+  -- matched on ANY receiver: Script, compileFunction and runIn* are the module's own, and a name that is
+  -- not vm is not an exemption. Refusing a connector that spells them differently costs an approval.
+  if content:find('%f[%w_][%w_]+%.Script%s*%(') or content:find('%f[%w_][%w_]+%.compileFunction%s*%(')
+   or content:find('%f[%w_][%w_]+%.runInThisContext%s*%(')
+   or content:find('%f[%w_][%w_]+%.runInNewContext%s*%(')
+   or content:find('%f[%w_][%w_]+%.runInContext%s*%(') then
+   return 'it evaluates a string as code (vm: Script, compileFunction or runIn*, under whatever name the module was bound), whose source no digest of files names'
   end
   if content:find('new%s+Function%s*%(') then return 'it builds a function from a string (new Function)' end
  elseif kind=='sh' then
@@ -499,7 +648,7 @@ end
 -- The manifest an approval records, and the one a launch is checked against: the paths in a stable order,
 -- each file's sha256 as it is NOW, the arguments in order, the vault names sorted, and the reasons
 -- coverage could not be proven (`problems`, empty when it could).
-function M.vault_manifest(definition,directory)
+function M.vault_manifest(definition,directory,vouched)
  local list=type(definition)=='table' and definition or {}
  local files,seen,problems,queue={}, {}, {}, {}
  local total=0
@@ -515,7 +664,11 @@ function M.vault_manifest(definition,directory)
   local size=tonumber(facts.size) or 0
   -- A program or an interpreter is a BINARY: its bytes are hashed and never parsed, because there is no
   -- module system to follow inside one, and host.file_sha256 reads it in chunks rather than loading it.
-  if size>M.MAX_FILE_BYTES then
+  -- Round 8: BINARY is decided by the file's leading bytes, not by its size. A 68 KB ELF is not text, and
+  -- `host.read_file` refuses it - so the size test alone refused every native program the allow-list is
+  -- built around (`a file it runs cannot be read`). A shebang or plain text is still parsed below.
+  local magic=file_magic(path)
+  if size>M.MAX_FILE_BYTES or magic=='elf' or magic=='macho' or magic=='pe' or magic=='binary' then
    if size>M.MAX_BINARY_BYTES or #files>=M.MAX_FILES then
     problems[#problems+1]='its code is larger than an approval can cover ('..path..')'
     return
@@ -552,22 +705,23 @@ function M.vault_manifest(definition,directory)
  if type(directory)=='string' and directory~='' then
   for _,name in ipairs(M.RUNTIME)do add(directory..'/'..name) end
  end
- -- The program: the interpreter is the platform's, its own code is the connector's.
+ -- The program, judged by what it IS rather than by its name (round 8): node or a POSIX shell, by
+ -- realpath and a native executable, or a native binary the operator vouched for at approval time.
  local program=tostring(list.program or '')
- local name=basename(program):lower()
+ local program_real
  if program=='' then
   problems[#problems+1]='it names no program'
- elseif PACKAGE_RUNNERS[name] then
-  problems[#problems+1]='its program is a package runner ('..name..'), whose code comes from a cache or a registry rather than from files this approval can name'
- elseif not absolute_path(program) then
-  problems[#problems+1]='its program is not an absolute path ('..program..'): a bare name is resolved through PATH, which this digest does not name'
- elseif unfollowed_interpreter(program) then
-  -- Round 7: the program itself is an interpreter whose module system this digest cannot follow, so a
-  -- python3 connector was approved on whatever .py file it named - and `python3 -c` on nothing at all.
-  problems[#problems+1]='its program is an interpreter this digest cannot follow ('
-   ..unfollowed_interpreter(program)..'), whose modules and packages this approval cannot name'
- elseif not platform_owned(program) then
-  add(program)
+ else
+  local refusal=program_refusal(program,vouched)
+  if refusal then problems[#problems+1]=refusal
+  else
+   local facts=path_facts(program)
+   program_real=tostring((facts and facts.path) or program)
+   -- A platform-owned node is not the connector's code (a package manager replaces it, never the agent);
+   -- a binary the operator vouched for is hashed like any file the digest names.
+   local vouched_here=type(vouched)=='table' and tostring(vouched.path or '')==program_real
+   if not platform_owned(program) or vouched_here then add(program_real) end
+  end
  end
  -- The interpreter the launch SPAWNS is node_program(), not the definition's program, and it is the
  -- process the vault values are put in. Its realpath is covered by the digest, or the connector cannot be
@@ -575,14 +729,22 @@ function M.vault_manifest(definition,directory)
  local interpreter=interpreter_path()
  if not interpreter then
   problems[#problems+1]='its interpreter cannot be found ('..tostring(node_program())..'), so no file this digest could hash runs it'
- elseif platform_owned(interpreter) then
-  -- The platform's own interpreter: a package manager replaces it, never the agent, so its bytes are not
-  -- this connector's to hash on every call.
  else
   local facts=path_facts(interpreter)
   if not facts or facts.kind~='file' then
    problems[#problems+1]='its interpreter cannot be read ('..interpreter..')'
-  else add(tostring(facts.path or interpreter)) end
+  else
+   local real=tostring(facts.path or interpreter)
+   -- Round 8: the process the vault value is put in is subject to the same allow-list as the connector's
+   -- own program. WA_NODE may name a python, a wrapper, or a copy of node that is only a shell script.
+   local refusal=program_refusal(real,nil)
+   if refusal then
+    problems[#problems+1]='its interpreter ('..real..') cannot run a vault connector: '..refusal
+   elseif platform_owned(interpreter) then
+    -- The platform's own interpreter: a package manager replaces it, never the agent, so its bytes are not
+    -- this connector's to hash on every call.
+   else add(real) end
+  end
  end
  -- The arguments. Every one of them is a file the launch may read until it is proved otherwise: node
  -- takes the script first, then whatever that script is told, and a bare word (server) is a file beside
@@ -600,13 +762,17 @@ function M.vault_manifest(definition,directory)
    pending_option=name or value
    if name and PATH_OPTIONS[name] then
     local target,ambiguous=resolve_argument(cwd_value,inline)
-    if target then add(target)
+    local refusal=target and argument_refusal(inline,target)
+    if refusal then problems[#problems+1]=refusal
+    elseif target then add(target)
     elseif ambiguous then problems[#problems+1]=ambiguous_argument(inline,ambiguous)
     else problems[#problems+1]='an argument names a file that cannot be found ('..inline..' after '..name..')' end
    end
   else
    local target,ambiguous=resolve_argument(cwd_value,value)
-   if target then add(target)
+   local refusal=target and argument_refusal(value,target)
+   if refusal then problems[#problems+1]=refusal
+   elseif target then add(target)
    elseif ambiguous then problems[#problems+1]=ambiguous_argument(value,ambiguous)
    elseif pending_option~='' and not PATH_OPTIONS[pending_option] then
     -- The value of an option (--mode stdio): node reads it as a value, not as a file.
@@ -655,6 +821,9 @@ function M.vault_manifest(definition,directory)
  table.sort(names)
  local manifest={form=M.APPROVAL_FORM,program=program,cwd=tostring(list.cwd or ''),env=env,args=args,
   files=files,vault=names,problems=problems}
+ if type(vouched)=='table' and tostring(vouched.path or '')~='' then
+  manifest.native={path=tostring(vouched.path),sha256=tostring(vouched.sha256 or ''):lower()}
+ end
  manifest.sha256=host.sha256(M.vault_approval_text(manifest))
  return manifest
 end
@@ -676,6 +845,20 @@ function M.script_dir()
  local override=host.getenv('WA_MCP_SCRIPT_DIR');if override and override~='' then return override end
  return nil
 end
+-- The operator's `--native` voucher, built ONCE and passed to every manifest: the program's realpath and
+-- the sha256 of the bytes on disk right now. A native binary's own loads are outside this digest, which
+-- is why the operator has to say so by name and docs/VAULT.md says it.
+function M.native_voucher(program)
+ local text=tostring(program or '')
+ if text=='' then return nil end
+ local facts=path_facts(text)
+ if not facts or facts.kind~='file' then return nil end
+ local real=tostring(facts.path or text)
+ local sha256=host.file_sha256 and host.file_sha256(real)
+ if type(sha256)~='string' or sha256=='' then return nil end
+ return {path=real,sha256=sha256:lower()}
+end
+
 -- The failure a missing runtime must produce: the code callers already check, plus what was searched and the
 -- one-line fix. Losing that detail is what made the original report look like a permission refusal.
 function M.scripts_missing()
@@ -777,7 +960,9 @@ local function vault_gate(row, ctx, id)
   return fail(VAULT_APPROVAL_MISSING,{id=id,outcome='not_submitted',tool_call_issued=false,
    note='this connector\'s approval predates the digest that says what it covers, so nothing was launched and no value was read.'..approve_again(id)})
  end
- local now=M.vault_manifest(row.definition,M.script_dir())
+ -- The voucher is the approval's own record, so a connector approved with --native is measured against
+ -- the same text it was approved on; a binary whose bytes changed is a mismatch, not a silent launch.
+ local now=M.vault_manifest(row.definition,M.script_dir(),type(approved.native)=='table' and approved.native or nil)
  local uncovered=coverage_refusal(id,now);if uncovered then return uncovered end
  if now.sha256~=approved.sha256 then
   return fail(VAULT_APPROVAL_STALE,{id=id,outcome='not_submitted',tool_call_issued=false,approved=approved.sha256,now=now.sha256,
@@ -969,12 +1154,19 @@ function M.invoke(input,ctx)
  if vault_env and not input.vault_approval then input.vault_approval=M.vault_manifest(input.server,M.script_dir()) end
  if not host.write_file(request,json.encode(input))then return fail('mcp_request_not_written',{tool_call_issued=false,outcome='not_submitted'}) end
  local timeout=input.server.timeout_seconds or 30
- local start=decode(host.operation('start',json.encode({program=node_program(),args={client,'--request-file',request},cwd=ctx.cwd or platform.cwd(),timeout_seconds=math.min(86400,timeout+3),owner=ctx.session_id or 'mcp-control',vault_env=vault_env,vault_approval=input.vault_approval})))
+ -- A READ is a CONTROL start (session isolation, finding 7 round 2): the node's own short question, admitted
+ -- into the two slots no workload may hold, so a session holding its whole share cannot stop a connector
+ -- read. A connector CALL is not: it does the connector's work and takes an ordinary slot.
+ -- ONE OWNER NAME FOR THIS WHOLE CALL (session isolation, item 7 round 2): a sessionless caller is not
+ -- node-wide any more, so the caller that STARTS the operation must name the same owner when it observes
+ -- it. 'mcp-control' is also this read's cap key, so its share is counted instead of bypassed.
+ local op_owner=ctx.session_id or 'mcp-control'
+ local start=decode(host.operation('start',json.encode({program=node_program(),args={client,'--request-file',request},cwd=ctx.cwd or platform.cwd(),timeout_seconds=math.min(86400,timeout+3),owner=op_owner,control=input.action~='call',vault_env=vault_env,vault_approval=input.vault_approval})))
  if not start or start.error or not start.operation_id then return fail('mcp_operation_not_started',{detail=start,tool_call_issued=false,outcome='not_submitted',request=request}) end
  local id=start.operation_id
- local settled=decode(host.operation('await',json.encode({id=id,wait_for='settled'})))
+ local settled=decode(host.operation('await',json.encode({id=id,wait_for='settled',owner=op_owner})))
  if not settled or settled.error or not settled.settled then
-  pcall(host.operation,'cancel',json.encode({id=id}));return fail('mcp_operation_unsettled',{operation_id=id,request=request,tool_call_issued=input.action=='call',outcome=input.action=='call' and 'unknown' or 'not_submitted'})
+  pcall(host.operation,'cancel',json.encode({id=id,owner=op_owner}));return fail('mcp_operation_unsettled',{operation_id=id,request=request,tool_call_issued=input.action=='call',outcome=input.action=='call' and 'unknown' or 'not_submitted'})
  end
  local raw=settled.stdout_path and host.read_file(settled.stdout_path);local answer=decode(raw)
  if answer and (settled.ok==false or settled.error or settled.code and settled.code~=0) then
@@ -1086,7 +1278,11 @@ function M.control(args,ctx)
   if action=='enable' then
    local gate=vault_gate(row,ctx,args.id);if gate then return gate end
    if ctx.operator and M.names_vault(row.definition) then
-    approval=M.vault_manifest(row.definition,M.script_dir())
+    -- The operator's own voucher for a native binary: --native names the program they vouch for, recorded
+    -- with its sha256 so replacing the bytes voids the approval.
+    local voucher=args.native and M.native_voucher(args.native)
+    if args.native and not voucher then return fail('mcp_vault_native_unreadable',{id=args.id,note='--native names a program that cannot be read, so nothing is approved: '..tostring(args.native)}) end
+    approval=M.vault_manifest(row.definition,M.script_dir(),voucher)
     local uncovered=coverage_refusal(args.id,approval);if uncovered then return uncovered end
    end
   end
@@ -1104,7 +1300,7 @@ function M.control(args,ctx)
     -- approves (M.vault_manifest), so a script or an argument changed later voids it.
     if ctx.operator and M.names_vault(row.definition) then
      current.servers[args.id].vault_approved=true
-     current.servers[args.id].vault_approval=approval or M.vault_manifest(current.servers[args.id].definition,M.script_dir())
+     current.servers[args.id].vault_approval=approval or M.vault_manifest(current.servers[args.id].definition,M.script_dir(),args.native and M.native_voucher(args.native))
     end
    end
    return {ok=true,id=args.id,enabled=action=='enable',vault_approved=current.servers[args.id].vault_approved==true or nil}
@@ -1117,7 +1313,9 @@ function M.control(args,ctx)
   -- nothing is probed, and no digest is recorded, for a connector whose code cannot be closed.
   local approval
   if ctx.operator and M.names_vault(row.definition) then
-   approval=M.vault_manifest(row.definition,M.script_dir())
+   local voucher=args.native and M.native_voucher(args.native)
+   if args.native and not voucher then return fail('mcp_vault_native_unreadable',{id=args.id,note='--native names a program that cannot be read, so nothing is approved: '..tostring(args.native)}) end
+   approval=M.vault_manifest(row.definition,M.script_dir(),voucher)
    local uncovered=coverage_refusal(args.id,approval);if uncovered then return uncovered end
   end
   local answer=M.invoke({action='probe',server=row.definition,vault_approval=approval},ctx)

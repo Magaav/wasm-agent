@@ -153,7 +153,9 @@ What cannot be covered is REFUSED by name (`mcp_vault_code_not_covered`, whose `
 never hashed and left open: an argument that may name a file and cannot be resolved (a file that is not
 there at approval time can be there at launch), a name MORE than one file answers to (which one runs would
 be node's priority, not the approval's), inline code (`node -e`, `sh -c`, `eval`, `new Function`,
-`require('vm')`/`runInThisContext`), a shell command substitution, an `exec` of a value, a connector's own
+`require('vm')`/`import('node:vm')` in any quote including a template literal,
+`process.getBuiltinModule('vm')` in either its call or its destructuring form,
+`runInThisContext`), a shell command substitution, an `exec` of a value, a connector's own
 `child_process` / `Worker` / `process.dlopen`, a package runner (`npx`, `uvx`...), an import of a
 bare package or by a computed name, and a PROGRAM that is an interpreter this digest cannot follow
 (`python*`, `perl`, `ruby`, `php`, `lua`, `deno`, `bun`, `java`...; `docs/VAULT.md` has the list). The node's own MCP runtime is
@@ -174,7 +176,12 @@ Three checks use the digest, and either of the first two refuses:
   `vault_approval_package_runner:<path>`, `vault_approval_path_not_absolute:<path>`,
   `vault_approval_argument_unresolved:<value>`, `vault_approval_argument_not_covered:<path>`,
   `vault_approval_argument_ambiguous:<value>`, `vault_approval_file_not_found:<value>`,
-  `vault_approval_inline_code:<flag>`, `vault_approval_interpreter_unfollowed:<program>`,
+  `vault_approval_inline_code:<flag>`, `vault_approval_program_not_allowed:<program>`,
+  `vault_approval_program_not_native:<program>`, `vault_approval_program_wrapper:<program>`,
+  `vault_approval_program_missing:<program>`,
+  `vault_approval_program_native_not_executable:<program>`, `vault_approval_argument_not_allowed:<value>`,
+  `vault_approval_native_unreadable:<path>`, `vault_approval_native_changed:<path>`,
+  `vault_approval_native_not_covered:<path>`,
   `vault_approval_interpreter_not_covered:<path>` or `vault_approval_mismatch`. Nothing is
   launched and no value is read. The same files are hashed AGAIN once the launch has started
   (`vault_approval_changed_since_check:<path>`): an operation whose bytes changed in between is killed

@@ -312,7 +312,16 @@ check(parallel_a.ok and parallel_a.stdout:find('parallel%-a')
 local op=tools.dispatch(memory,'operation',{action='start',command='echo fixture',timeout_seconds=10},'master',{session_id=sid})
 check(op.operation_id~=nil,'operation launched')
 r=tools.dispatch(memory,'operation',{action='await',id=op.operation_id},'master',{session_id=sid})
-check(r.settled and r.ok and r.stdout:find('fixture',1,true),'await returns settled evidence without model polling')
+check(r.settled and r.ok,'await returns settled evidence without model polling')
+-- Turn-signal #43: an await answers IDS AND STATE by default and hands over a BODY only when it was
+-- asked for, so a caller listing four settled operations does not pay for four logs. Both halves are
+-- pinned: the default omits the body AND says how many bytes it withheld, and output=true returns it.
+check(r.stdout==nil and r.output_omitted==true and tonumber(r.stdout_omitted or 0)>0
+  and tostring(r.output_hint):find('output=true',1,true)~=nil,
+  'the default await omits the body and says so: '..json.encode({omitted=r.output_omitted,bytes=r.stdout_omitted,hint=r.output_hint}))
+local asked=tools.dispatch(memory,'operation',{action='await',id=op.operation_id,output=true,max_bytes=4096},'master',{session_id=sid})
+check(asked.settled and asked.ok and type(asked.stdout)=='string' and asked.stdout:find('fixture',1,true),
+  'and hands the body over when the caller asks for it: '..json.encode({settled=asked.settled,stdout=asked.stdout}))
 check(tools.dispatch(memory,'operation',{action='await',id=op.operation_id},'guest').error~=nil,'await respects role gate')
 local unicode=tools.dispatch(memory,'operation',{action='start',command="printf '\\303\\251'",timeout_seconds=10},'master')
 assert(tools.dispatch(memory,'operation',{action='await',id=unicode.operation_id},'master').ok)
