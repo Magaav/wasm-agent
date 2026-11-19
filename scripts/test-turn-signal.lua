@@ -107,6 +107,40 @@ local one_line = journal.split("TOOLS_OK\n\n<turn>\nnothing hurt, nothing to inc
 eq(one_line.visible, "TOOLS_OK", "#33: an exact output format survives the note")
 ok(one_line.note and one_line.note.hurt:find("nothing hurt", 1, true), "#33: a one-line note is a note")
 
+-- Item 2 (review 19/11): the build is the SOURCE COMMIT the binary was built from, never the crate
+-- version. version is "0.1.0" for every build of this repo, so recording it claimed a known build
+-- that identified nothing.
+eq(journal.build_of({ version = "0.1.0" }), "",
+  "#2: a host that only knows its version records an UNKNOWN build, never 0.1.0")
+eq(journal.build_of({ version = "0.1.0", commit = "deadbeef", build = "v9" }), "",
+  "#2: commit/build are not the build's source commit either - they are not guessed at")
+eq(journal.build_of({ runtime_info = function() return '{"version":"0.1.0","build_source_commit":"c0ffee12"}' end }),
+  "c0ffee12", "#2: runtime_info's build_source_commit is the build")
+eq(journal.build_of({ runtime_info = function() return { build_source_commit = "t4ble" } end }), "t4ble",
+  "#2: a table answer is read the same way")
+eq(journal.build_of({ build_identity = function() return { build_source_commit = "b1d" } end,
+  runtime_info = function() return '{"build_source_commit":"other"}' end }), "b1d",
+  "#2: host.build_identity() is asked first, when the host has one")
+eq(journal.build_of({ build_identity = function() return "5tr1ng" end }), "5tr1ng",
+  "#2: build_identity may answer the commit directly")
+eq(journal.build_of({ build_identity = function() return { build_source_commit = "" } end,
+  runtime_info = function() return '{"build_source_commit":"fallback"}' end }), "fallback",
+  "#2: an empty build_identity falls through to runtime_info, never short-circuits to nothing")
+eq(journal.build_of({ build_identity = function() error("no identity here") end,
+  runtime_info = function() return '{"build_source_commit":"kept"}' end }), "kept",
+  "#2: a build_identity that raises does not lose the build")
+eq(journal.build_of({}), "", "#2: a host that says nothing yields empty")
+eq(journal.build_of({ runtime_info = function() return "not json" end }), "",
+  "#2: an unreadable answer is UNKNOWN, never a guess")
+local long = journal.build_of({ build_identity = function() return string.rep("a", 500) end })
+eq(#long, journal.MAX_BUILD, "#2: a recorded build is bounded")
+-- and the row stores exactly that
+local unknown_id = journal.record(plain.note or split.note, { session_id = session_id,
+  build = journal.build_of({ version = "0.1.0" }) })
+local unknown_rows = journal.recent({ session_id = session_id, limit = 1 })
+ok(unknown_id ~= nil and unknown_rows[1] and unknown_rows[1].build == "",
+  "#2: a row on a host that knows only its version reads as an unknown build")
+
 -- the journal row: session, mission, build, mode and the three fields
 local session_id = memory.start_session("", "turn-signal", { user_id = "master", node_id = "",
   title = "turn signal" })

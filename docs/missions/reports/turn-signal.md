@@ -171,7 +171,15 @@ as pre-existing in `scripts/fast.sh`; nothing here loosens or deletes an asserti
 ## Not done, and unknown
 
 * **#48's "declared vs on-demand stated once"** - not added; see above. No code change claimed.
-* The journal's `build` field is `host.runtime_info()`'s own value when the node answers one, else
-  empty, so a row can read `(unknown build)`. Recorded, not guessed.
+* The journal's `build` field is one of exactly two things, in this order: `host.build_identity()`
+  when the host offers one, else `host.runtime_info().build_source_commit` - the commit the release
+  binary embedded (`WA_BUILD_SOURCE_COMMIT`, rust/wa-capabilities/src/host.rs). Nothing else is
+  read. An empty answer is stored as empty and a reader prints `(unknown build)`; the field is never
+  filled from HEAD, from `commit`/`build`, or from the crate `version`, which is `0.1.0` for every
+  build of this repo. Round 2's version of this field DID read `version` first, so a row could read
+  `0.1.0` - a known-looking build that identified nothing; item 2 (round 3) removed that key and the
+  checks pin it. There is no `host.build_identity()` in this tree today (measured: `rg -n
+  build_identity` finds none), so on this node the field is `runtime_info().build_source_commit` or
+  empty.
 * The Rust/engine half of #43 beyond `tools.lua` was not re-measured: the tool boundary above is
   what the checks drive.

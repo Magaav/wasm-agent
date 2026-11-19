@@ -212,17 +212,52 @@ function M.setup()
   return true
 end
 
--- The build this run is a run OF: the release's own commit when the node can say, else empty. Read
--- once per note, and never guessed - an unknown build is empty, not "the node's HEAD".
-function M.build_of()
-  local ok, raw = pcall(function() return host.runtime_info and host.runtime_info() or nil end)
-  if not ok or type(raw) ~= "string" then return "" end
-  local decoded_ok, info = pcall(json.decode, raw)
-  if not decoded_ok or type(info) ~= "table" then return "" end
-  for _, key in ipairs({ "build", "build_commit", "commit", "version" }) do
-    if type(info[key]) == "string" and info[key] ~= "" then return info[key] end
+-- The build this run is a run OF: the SOURCE COMMIT the binary was built from, and never the crate
+-- version. Item 2 (review 19/11): the first version read `version` too, and `version` is the same
+-- "0.1.0" for every build of this repo - so every row claimed a known build that identified nothing,
+-- which is worse than empty. The sources are an allow-list, in order:
+--   1. `host.build_identity()`, when the host offers one: its own answer about the binary it is
+--      running (a string, or a table naming `build_source_commit`);
+--   2. `host.runtime_info().build_source_commit` - the commit the release build embedded
+--      (rust/wa-capabilities/src/host.rs, `WA_BUILD_SOURCE_COMMIT`).
+-- Nothing else: `commit`, `build` and `version` are not the build's source commit, and a guess here
+-- would be recorded as a fact. An empty answer means UNKNOWN and is stored empty (a reader prints
+-- `(unknown build)`); it is never filled from HEAD, because this process cannot know which tree the
+-- RUNNING binary came from. `h` is injectable so a test drives the rule without a node.
+M.BUILD_KEYS = { "build_source_commit" }
+M.MAX_BUILD = 200
+
+local function identity_commit(value)
+  if type(value) == "string" then
+    local text = trim(value)
+    return text ~= "" and text:sub(1, M.MAX_BUILD) or nil
   end
-  return ""
+  if type(value) == "table" then
+    for _, key in ipairs(M.BUILD_KEYS) do
+      local text = value[key]
+      if type(text) == "string" and trim(text) ~= "" then return trim(text):sub(1, M.MAX_BUILD) end
+    end
+  end
+  return nil
+end
+
+function M.build_of(h)
+  h = h or rawget(_G, "host") or {}
+  if type(h.build_identity) == "function" then
+    local ok, value = pcall(h.build_identity)
+    if ok then
+      local commit = identity_commit(value)
+      if commit then return commit end
+    end
+  end
+  local ok, raw = pcall(function() return h.runtime_info and h.runtime_info() or nil end)
+  if not ok then return "" end
+  local info = raw
+  if type(raw) == "string" then
+    local decoded_ok, decoded = pcall(json.decode, raw)
+    info = decoded_ok and decoded or nil
+  end
+  return identity_commit(info) or ""
 end
 
 -- The mode the run worked in: code mode's own spelling (`only`, `first`, `codemode`...) because that
