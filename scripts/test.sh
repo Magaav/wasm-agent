@@ -260,6 +260,16 @@ gate_run node scripts/test-parallel-finish.mjs
 # The execution and automation contracts have native, model-free adversarial tests.
 gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-operation -p wa-jobs
 gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-capabilities file_search::tests
+# A remote call is never killed for waiting (change/remote-pending, review r1 MUST 3): the relay stamps the
+# caller's deadline and the node installs it as this run's cancel flag; the FOREGROUND bash cancels its own
+# operation when it flips, and the adopted operation must survive it and run exactly once. This drives the
+# real flag (host::set_run_cancel_probe + serve::test_set_run_cancel) against real operations, so it needs
+# a scratch HOME - manager() roots its records there once per process. HOME=$GATE_HOME is that home; the
+# test itself refuses to run when HOME is not a scratch/temp directory or is the node's own ~/.wasm-agent.
+gate_run env HOME="$GATE_HOME" cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-capabilities adoption_survives_the_relay_deadline
+# A relayed await answers at the caller wait_ms instead of holding the relay and a peer slot until the
+# operation settles (verification r3). It starts real operations, so it needs the gate scratch HOME.
+gate_run env HOME="$GATE_HOME" cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-capabilities await_returns_at_its_own_wait
 # The line boundaries `host.http_sse` hands over are tested against real recorded SSE bodies (under
 # `tests/fixtures/subscription/`, kept as generic SSE recordings): a reader that re-frames or drops a
 # line fails here. Every filter above names its own module, so this one is named explicitly.
@@ -1124,6 +1134,11 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-orchestration-mode.lua" "$BIN" --db
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-observability.lua" "$BIN" --db "$DB.observability" | grep 'observability ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-remote-call-shape.lua" "$BIN" --db "$DB.remote-call-shape" | grep 'remote call shape ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-remote-refusals.lua" "$BIN" --db "$DB.remote-refusals" | grep 'remote refusals ok'
+# A remote call is never killed for waiting (change/remote-pending, item 1): on this node the peer half IS
+# this process (wa_peer_dispatch, the seam test-session-isolation.lua also reaches) and the caller half is
+# the real pending executor over a relay stand-in, so adoption, wait(op), cancel(op) and the
+# exactly-once append are measured without a second machine and without the real fleet.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-remote-pending.lua" "$BIN" --db "$DB.remote-pending" | grep 'remote pending ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-run-counts.lua" "$BIN" --db "$DB.run-counts" | grep 'run counts ok'
 # The turn note (#33): the <turn> block kept and stripped from the answer, the day roll-up `wa turns
 # --day` answers, the split keeping every byte on both sides of the block, the stored note drawn as

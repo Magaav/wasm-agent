@@ -929,6 +929,329 @@ end
 
 -- Capabilities a peer may invoke, in addition to the normal tools. `caller` is the peer that
 -- asked: its master is the author of whatever this does.
+
+-- A relayed bash is ADOPTED, not killed (change/remote-pending, item 1).
+--
+-- The relay holds a queued call about SEND_WAIT (45 s, rust/wa-rendezvous/src/rendezvous.rs) and tells
+-- this node to finish ANSWER_MARGIN_MS earlier; until now that bound was a kill. install_relay_context
+-- (rust/wa-capabilities/src/serve.rs) turns the caller's deadline into this run's cancel flag, and the
+-- foreground bash path cancels its own operation when that flag flips
+-- (rust/wa-capabilities/src/operations.rs). The command died mid-run and the caller could not tell
+-- whether it had.
+--
+-- Now a peer call that NAMED a budget (nodes.lua stamps it in the SIGNED body, never a header) is
+-- started as a managed operation here - detached by construction, with its own slot and its own cancel
+-- flag - and this node watches it for the budget minus a margin. Settled, it answers the command's own
+-- result, exactly as the synchronous path would have. Still running, it answers
+-- {state:"pending", op, node, tool, waited_s}: the operation keeps running here, the caller resumes it
+-- with wait(op) (short relayed operation await slices, so no call holds the relay open) or stops it
+-- with cancel(op). Nothing is re-run, and a command that appends a line appends it once.
+local ADOPT_MARGIN_MS = 4000
+
+local function adopt_session(caller)
+  return "peer:" .. tostring(caller.node_id or "unknown")
+end
+
+-- The settled command's answer, read from the operation itself: the same fields the synchronous bash
+-- answers (stdout, stderr, the byte counts, code/ok), so a call that fitted in the budget reads exactly
+-- as it did before adoption existed.
+local function adopted_result(id, author, caller)
+  local ctx = { user_id = author, node_id = nodeslib.node_name(), peer_call = true,
+    session_id = adopt_session(caller) }
+  local state = toolslib.dispatch(memory, "operation", { action = "status", id = id }, "master", ctx)
+  local out = type(state) == "table" and state or {}
+  for _, stream in ipairs({ "stdout", "stderr" }) do
+    local page = toolslib.dispatch(memory, "operation",
+      { action = "read", id = id, stream = stream, offset = 0, limit = stream == "stdout" and 24576 or 8192 },
+      "master", ctx)
+    if type(page) == "table" and type(page.content) == "string" then
+      out[stream] = page.content
+      out[stream .. "_bytes"] = tonumber(page.available_bytes) or #page.content
+    end
+  end
+  out.operation_id = id
+  out.adopted = true
+  if out.code == nil then out.code = tonumber(out.process_exit_code) or tonumber(out.command_code) or -1 end
+  if out.ok == nil then out.ok = out.code == 0 end
+  return out
+end
+
+-- How many operations ONE peer may have ADOPTED AND STILL RUNNING on this node (review r1, MUST 2).
+--
+-- Everything a peer asks for is recorded under ONE peer session ("peer:<node_id>", wa_peer_dispatch), and
+-- that session's share of the node's work is PER_SESSION_MAX = 6 of MAX_ACTIVE = 8 (rust/wa-operation).
+-- Before this bound, six adopted commands held every workload slot of that share for up to their own
+-- timeout each (300 s by default, up to 86400 s), so a seventh call from the peer was refused
+-- operation_capacity_shared and the peer's OWN work queued behind work it had already been told was
+-- pending. Two is small on purpose: it leaves the share for the peer's short calls and for the
+-- await/cancel round trips this change needs, and the refusal below says which handle to collect.
+local MAX_ADOPTED_OPEN = 2
+
+-- The longest one ADOPTED command may run, whatever its caller asked for (review r1, MUST 2).
+--
+-- The caller's own timeout_seconds may be up to 86400 s, and a caller that walked away left that work
+-- holding one of the peer session's six slots for a day. An adopted command therefore gets a bounded
+-- ceiling (15 minutes), and the pending answer says so in timeout_seconds instead of the number the
+-- caller asked for - a silently shortened bound is a misleading result, so it travels with the handle.
+local MAX_ADOPTED_SECONDS = 900
+
+-- How long past its ceiling an adopted command may still be running before the next adoption reaps it.
+-- The grace is the supervisor's own settle time, not a second opinion about the bound.
+local ADOPTED_GRACE_SECONDS = 60
+
+-- Both numbers are readable from the environment, the same discipline M.full_wait_ms uses in
+-- lua/core/codemode_pending.lua: a test holds the rule with one-second values instead of waiting fifteen
+-- minutes, and production reads the constants above. A value that is not a positive whole number is
+-- ignored, never guessed.
+local function env_seconds(name, fallback)
+  local raw = (host.getenv and host.getenv(name)) or nil
+  local value = tonumber(raw)
+  if value and value >= 1 then return math.floor(value) end
+  return fallback
+end
+function wa_adopted_ceiling_seconds() return env_seconds("WASM_AGENT_REMOTE_ADOPTED_SECONDS", MAX_ADOPTED_SECONDS) end
+function wa_adopted_grace_seconds() return env_seconds("WASM_AGENT_REMOTE_ADOPTED_GRACE_SECONDS", ADOPTED_GRACE_SECONDS) end
+
+-- When each adopted operation started, per peer session (review r1, MUST 2).
+--
+-- The operation LIST cannot answer "how old is this": measured here, a row's elapsed_ms read 29 ms for a
+-- command that had been running 1.2 s - it is the supervisor's last snapshot, not a clock. Reaping on it
+-- would either never fire or fire on the wrong command. So this node records the start it observed, in
+-- its own data dir, keyed by the peer session that owns the work:
+--   <data>/remote-adopted/<peer session slug>.json  ->  { ops: { <op id>: <epoch seconds> } }
+-- Only adopted ids appear here, so nothing else on the node can be reaped by this rule, and a file that
+-- cannot be read or written is not permission to skip the bound: the caller is refused by name instead.
+local function adopted_index_path(caller)
+  local paths = dofile("lua/core/paths.lua")
+  local session = adopt_session(caller):gsub("[^%w%._-]", "_")
+  return paths.data() .. "/remote-adopted/" .. session .. ".json"
+end
+
+local function adopted_index_read(caller)
+  local path = adopted_index_path(caller)
+  local raw = host.read_file(path)
+  if type(raw) ~= "string" or raw == "" then return {} , nil end
+  local ok, decoded = pcall(json.decode, raw)
+  if not ok or type(decoded) ~= "table" or type(decoded.ops) ~= "table" then
+    return nil, "adopted_index_unreadable"
+  end
+  return decoded.ops, nil
+end
+
+local function adopted_index_write(caller, ops)
+  local path = adopted_index_path(caller)
+  return host.write_file(path, json.encode({ ops = ops or {} })) and true or false
+end
+
+-- The operations this caller already has running on that node, counted where they really are: the peer's
+-- own list, in the peer session that owns them (never a local guess about what the peer holds).
+local function adopted_open(caller, author)
+  local ctx = { user_id = author, node_id = nodeslib.node_name(), peer_call = true,
+    session_id = adopt_session(caller) }
+  local index, index_problem = adopted_index_read(caller)
+  if index == nil then return nil, tostring(index_problem) end
+  local page = toolslib.dispatch(memory, "operation", { action = "list", limit = 50 }, "master", ctx)
+  local rows = type(page) == "table" and (page.operations or page.items) or nil
+  if type(rows) ~= "table" then return nil, "list_unreadable" end
+  local running = {}
+  for _, row in ipairs(rows) do
+    if type(row) == "table" and row.settled ~= true and tostring(row.state or "") ~= "cancelled" then
+      running[tostring(row.operation_id or "")] = true
+    end
+  end
+  local open, reaped, kept = 0, {}, {}
+  local now = tonumber(host.now and host.now() or 0) or 0
+  local ceiling = wa_adopted_ceiling_seconds() + wa_adopted_grace_seconds()
+  -- THE COUNT IS THE ADOPTED SET, AND NOTHING ELSE (verification r2, MUST 1). It used to walk the peer's
+  -- LIST of running operations, so a call's OWN freshly-started command was counted against it and the
+  -- limit fired at one adoption instead of two (measured: one adopted command, count 2, and every later
+  -- call refused). Only ids this node recorded HERE - because they outlived the hold - are counted, and
+  -- only they can be reaped. Anything else running in the peer session is not this rule's business.
+  for id, started in pairs(index) do
+    if running[id] then
+      if now - started > ceiling then
+        -- The stop is OBSERVED, never assumed: the peer's cancel sets a flag and answers a snapshot that
+        -- still says running (rust/wa-operation, "pub fn cancel" -> self.snapshot(id)). Bounded, and
+        -- spaced with a doubling backoff, so this is a handful of calls and never a tight loop (MUST 2).
+        toolslib.dispatch(memory, "operation", { action = "cancel", id = id }, "master", ctx)
+        local stopped = false
+        local pause = 200
+        local deadline = (tonumber(host.monotonic_ms and host.monotonic_ms() or 0) or 0) + 2000
+        repeat
+          local state = toolslib.dispatch(memory, "operation", { action = "status", id = id }, "master", ctx)
+          if type(state) == "table" then
+            local name = tostring(state.state or "")
+            if state.cancelled == true or name == "cancelled" or state.settled == true then stopped = true end
+          end
+          if not stopped then
+            if host.sleep then host.sleep(pause) end
+            pause = math.min(pause * 2, 800)
+          end
+        until stopped or (tonumber(host.monotonic_ms and host.monotonic_ms() or 0) or 0) >= deadline
+        if stopped then
+          reaped[#reaped + 1] = id
+        else
+          open = open + 1
+          kept[id] = started
+        end
+      else
+        open = open + 1
+        kept[id] = started
+      end
+    end
+  end
+  adopted_index_write(caller, kept)
+  return open, nil, reaped
+end
+
+local function adopt_bash(args, caller, author)
+  local budget = math.max(1000, math.floor(tonumber(args.budget_ms) or 0))
+  local command = type(args.command) == "string" and args.command or ""
+  if command == "" then return { error = "command_required", effect = "none" } end
+  -- budget_ms is the caller's word about how long IT may wait, never a field of the operation tool:
+  -- the command is started with what the caller asked for and nothing invented.
+  -- The ceiling this node gives an adopted command, whatever the caller asked for, and the number the
+  -- handle reports back: see MAX_ADOPTED_SECONDS.
+  local asked_seconds = tonumber(args.timeout_seconds)
+  local seconds = wa_adopted_ceiling_seconds()
+  if asked_seconds and asked_seconds > 0 and asked_seconds < seconds then
+    seconds = math.floor(asked_seconds)
+  end
+  -- REAPING RUNS BEFORE THE START (verification r2, MUST 2). Housekeeping about PREVIOUS adopted work
+  -- must not depend on this call being adopted itself: a short command that fits the hold never reaches
+  -- the pending boundary, and when the reap lived there a caller could leave overdue work running for as
+  -- long as it only sent short commands. It reads and writes only this peer session's own record.
+  local _, reap_problem, reaped = adopted_open(caller, author)
+  if reap_problem ~= nil then
+    return { error = "remote_adopted_unknown", effect = "none", detail = reap_problem,
+      note = "this node could not read which of your adopted commands are still running there, so it did "
+        .. "not start new work while it cannot account for the old; nothing was started" }
+  end
+  reaped = reaped or {}
+  local started = wa_peer_dispatch("operation", { action = "start", command = command, cwd = args.cwd,
+    timeout_seconds = seconds, background = true }, caller, author)
+  local id = type(started) == "table" and tostring(started.operation_id or "") or ""
+  if id == "" then
+    -- The start was refused (path guard, a bad timeout, capacity): answer it as it is. A refusal is
+    -- never permission to run the command another way, and a handle that cannot settle is not invented.
+    return started
+  end
+  local ctx = { user_id = author, node_id = nodeslib.node_name(), peer_call = true,
+    session_id = adopt_session(caller) }
+  -- AT LEAST ONE WAIT, ALWAYS (verification r2, MUST 1). With a small budget the old ceiling was 0, so
+  -- the loop never ran and a command that had ALREADY FINISHED was reported pending - a short call turned
+  -- into a handle for work that was over. The floor is one slice of at most a second, or the whole budget
+  -- when it is smaller.
+  local waited = 0
+  local ceiling = math.max(0, budget - ADOPT_MARGIN_MS)
+  local limit = math.max(math.min(1000, budget), ceiling)
+  while waited < limit do
+    local step = math.min(1000, limit - waited)
+    local state = toolslib.dispatch(memory, "operation",
+      { action = "await", id = id, wait_ms = step, tool = "operation" }, "master", ctx)
+    waited = waited + step
+    if type(state) ~= "table" then break end
+    if state.settled == true or tostring(state.state or "") == "settled" then
+      -- A command that fitted the budget answers its own result, and the reap this call performed (if any)
+      -- still travels with it: the fact belongs to the CALL, not to the shape of its answer.
+      -- A command that fitted the budget answers its own result, and the reap this call performed (if
+      -- any) still travels with it: the fact belongs to the CALL, not to the shape of its answer.
+      local settled_answer = adopted_result(id, author, caller)
+      if #reaped > 0 then
+        settled_answer.reaped = reaped
+        settled_answer.reaped_note = "an earlier adopted command of yours outlived the ceiling this node "
+          .. "gave it and was stopped on this call: " .. table.concat(reaped, ", ")
+      end
+      return settled_answer
+    end
+    if state.error ~= nil then break end
+  end
+  -- THE LAST WORD IS A STATUS READ, never an assumption: a command that settled while this call looked
+  -- (or before it asked) answers its own result, exactly as the synchronous path did. Only a command that
+  -- is STILL RUNNING is adopted below.
+  local final = toolslib.dispatch(memory, "operation", { action = "status", id = id }, "master", ctx)
+  if type(final) == "table" and (final.settled == true or tostring(final.state or "") == "settled") then
+    local final_answer = adopted_result(id, author, caller)
+    if #reaped > 0 then
+      final_answer.reaped = reaped
+      final_answer.reaped_note = "an earlier adopted command of yours outlived the ceiling this node gave "
+        .. "it and was stopped on this call: " .. table.concat(reaped, ", ")
+    end
+    return final_answer
+  end
+  -- ADOPTION HAPPENS HERE, AND ONLY HERE (review r2, MUST 1): a command that answered its own result above
+  -- never reaches this line, so a short call is never adopted, holds no adopted slot and can never be
+  -- refused by the adopted limit. The limit and the record apply to the call that OUTLIVED the hold.
+  local open, list_problem = adopted_open(caller, author)
+  -- A REFUSAL MUST NOT LEAVE WORK RUNNING (verification r2, MUST 1). The command has already started by
+  -- the time these two refusals can fire, so each of them STOPS what it refuses - otherwise a refused
+  -- call silently kept a slot and made the next short command fail with the same refusal (measured: one
+  -- adopted command, a second refused, and every later call refused with open=2).
+  local function stop_started(why)
+    -- OBSERVED, NEVER ASSUMED (review r3, small item): the peer's cancel is a REQUEST - it sets the flag
+    -- and answers a snapshot that still says running - so answering stopped=true unobserved would be the
+    -- same lie MUST 1 removed from the caller's cancel. Bounded: five calls with a doubling backoff.
+    toolslib.dispatch(memory, "operation", { action = "cancel", id = id }, "master", ctx)
+    local pause = 200
+    local seen = "running"
+    for _ = 1, 5 do
+      local state = toolslib.dispatch(memory, "operation", { action = "status", id = id }, "master", ctx)
+      if type(state) == "table" then
+        seen = tostring(state.state or "running")
+        if state.settled == true or seen == "cancelled" or state.cancelled == true then
+          why.stopped = true
+          why.state = seen
+          return why
+        end
+      end
+      if host.sleep then host.sleep(pause) end
+      pause = math.min(pause * 2, 800)
+    end
+    -- It would not stop: say so, name what was seen, and let the caller act on the id.
+    why.stopped = false
+    why.cancel_requested = true
+    why.state = seen
+    why.note = tostring(why.note or "") .. " The stop was REQUESTED but not observed: the operation may "
+      .. "still be running as " .. id .. " - check it, then cancel it by that id."
+    return why
+  end
+  if open == nil then
+    return stop_started({ error = "remote_adopted_unknown", effect = "none", detail = list_problem,
+      operation_id = id,
+      note = "the command outlived the hold but this node could not read which of your operations are "
+        .. "running there, so it did not adopt the handle: the command was stopped (operation " .. id
+        .. ") rather than left running unsupervised. Nothing is re-run by this answer." })
+  end
+  if open >= MAX_ADOPTED_OPEN then
+    return stop_started({ error = "remote_adopted_limit", effect = "none", open = open,
+      limit = MAX_ADOPTED_OPEN, operation_id = id,
+      note = "the command outlived the hold and this node already runs " .. tostring(open) .. " of your "
+        .. "adopted commands (the limit is " .. tostring(MAX_ADOPTED_OPEN) .. "). The new command was "
+        .. "STOPPED, not left running: collect or cancel one of your handles, then send it again. A short "
+        .. "command is never adopted and is never refused by this limit." })
+  end
+  local adoption_index = adopted_index_read(caller) or {}
+  adoption_index[id] = tonumber(host.now and host.now() or 0) or 0
+  adopted_index_write(caller, adoption_index)
+  local answer = { state = "pending", op = id, operation_id = id, node = nodeslib.node_name(), tool = "bash",
+    waited_s = math.floor(waited / 1000), adopted = true, timeout_seconds = seconds,
+    -- Inside a script this handle is resumed with wait(op); a model that called `remote` directly has no
+    -- wait(), so the note names the call it CAN make (review r1, SHOULD "outside code mode"), with the
+    -- real slice the operation tool accepts - never a parameter that does not exist.
+    note = "the command outlived the relay hold and is still running on that node as operation "
+      .. id .. ". In a script, wait(op) resumes it and cancel(op) stops it; outside code mode, call "
+      .. 'tools.remote({node:"' .. nodeslib.node_name() .. '", capability:"operation", action:"wait", id:"'
+      .. id .. '", wait_ms:' .. tostring(nodeslib.OPERATION_AWAIT_MAX_MS) .. "}) to read its state "
+      .. "without holding the relay open, or "
+      .. 'action:"cancel" with the same id to stop it. Nothing was re-run.' }
+  if #reaped > 0 then
+    answer.reaped = reaped
+    answer.reaped_note = "an earlier adopted command of yours outlived the ceiling this node gave it and "
+      .. "was stopped on this call: " .. table.concat(reaped, ", ")
+  end
+  return answer
+end
+
 local function node_capability(capability, args, caller)
   args = args or {}
   local author = nodeslib.author_of(caller)
@@ -1082,6 +1405,15 @@ function wa_peer_dispatch(capability, args, caller, author)
   if type(args) == "table" and args.scope == "node" then
     return { error = "peer_node_scope_not_granted", effect = "none", caller = tostring(caller.node_id or ""),
       note = "a node-wide scope over the mesh needs this node's explicit grant to that peer; none is configured, so the request is refused rather than served" }
+  end
+  -- A peer that named a budget asked for its work to be ADOPTED rather than killed
+  -- (change/remote-pending, item 1). The budget travels in the signed body, so it is the caller's own
+  -- word and nothing on the path can raise it. Only bash needs it: operation start answers a receipt
+  -- at once, and a batch is read-only on the wire. This sits in THIS function - the one seam both the
+  -- relay's own dispatch (node_capability's fallthrough) and a test can reach - so what is checked is
+  -- what runs.
+  if capability == "bash" and type(args) == "table" and tonumber(args.budget_ms) then
+    return adopt_bash(args, caller, author)
   end
   -- The caller's role, not a hard-coded one: `verify_peer` proved it is a master, and passing
   -- the proof through means a future caller that is not a master cannot inherit these tools by
