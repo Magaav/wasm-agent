@@ -3,11 +3,8 @@
 wa is built for the agent that sits in it - any model. Every harness change is judged against these. A fix that only works for
 one model, or that guesses what the model meant, is not done.
 
-0. **The simplest change that works wins; measure it before building more** (Victor 19/11). Try the one-line fix first - a
-   sentence of guidance, one generic continue, a default - measure it, and build machinery only for what it does not fix.
-   "Works" is judged by the task's own bar - fidelity, correctness, scale, where the requirement is heading - measured; simplicity
-   chooses among solutions that meet the bar and never lowers it (a complex requirement, e.g. photoreal rendering, gets the
-   complexity it truly needs and not one part more).
+0. **The simplest change that works wins; measure it before building more.** When you fix something, try the one-line
+   fix first - a sentence of guidance, one retry, a default - measure it, and build more only for what it does not fix.
 1. **No silent loss.** Every action the model sends is run, or the model is told exactly why not and what to do next (a named,
    counted notice). A turn never ends "answered" on an unexecuted action or a plan, and never fails without saying why.
 2. **Model-agnostic action.** One CodeAct protocol with two transports - a fenced `run` block in the answer, or a native
