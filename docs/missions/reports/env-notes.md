@@ -29,6 +29,8 @@ loader, no second prompt section. `AGENTS.windows.md` remains unimplemented and 
 | `a439eff9` | r2 item 2: this table names every commit, and the 48-check run |
 | `393b5108` | r2 follow-up: the land-signing fixture creates both notes, so the record stops exiting 5 |
 | `864810f3` | r2 item 2 (cont.): the report's commit table names `a439eff9` and `393b5108` |
+| `c7a8d5a9` | r2 item 2 fix: the table had carried a hash an amend invalidated |
+| `a16249af` | r2: the fast-path run and the two rows it caught are recorded |
 | the commit that last edits this table | a commit cannot contain its own hash; `git log --oneline` names it, and every earlier commit on the branch is listed above |
 
 ## Review r1 items, and what each fix does
