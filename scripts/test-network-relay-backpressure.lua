@@ -107,4 +107,62 @@ check(nodes.slots_held(NODE_ID) == 0, 'every slot is released when the call give
 -- No wait is zero: a zero wait is the tight retry that filled the cap.
 for _, ms in ipairs(slept) do check(ms > 0, 'no wait is zero, got ' .. tostring(ms)) end
 
+-- ---- MUST 2: the slot is released on EVERY path ------------------------------------------------
+-- The leak: 'if not relay_headers then return {error="no_identity"} end' returned PAST the release,
+-- and a body that is not JSON raised inside the loop. Four leaks and the caller could never call that
+-- node again (peer_busy_caller forever), with nothing sent and nothing run.
+local PEER_ID = string.rep('12', 16)
+local leak_peer = { node_id = PEER_ID, name = 'box2', endpoints = {}, public_key = 'x', relay_attached = true }
+
+local function relay_answers(answer)
+  host.http = function(method, url)
+    if tostring(url):find('/nodes', 1, true) then
+      return json.encode({ status = 200, body = json.encode({ nodes = { leak_peer } }) })
+    end
+    if tostring(url):find('/relay/send', 1, true) then return answer() end
+    return json.encode({ status = 200, body = '{}' })
+  end
+end
+
+-- (a) No identity: the signed headers cannot be built. This used to leak.
+local real_signed = nodes.signed_headers
+nodes.signed_headers = function() return nil, 'no_identity' end
+relay_answers(function() return json.encode({ status = 200, body = '{}' }) end)
+local no_id = nodes.request(leak_peer, '/node/call', '{}', {})
+check(no_id.error == 'no_identity', 'a missing identity is a named failure')
+check(nodes.slots_held(PEER_ID) == 0, 'and it releases the slot it took (the leak this fixes)')
+nodes.signed_headers = real_signed
+
+-- (b) A 200 whose body is not JSON (an HTML error page through a proxy): raises in rxi, never leaks.
+relay_answers(function() return json.encode({ status = 200, body = '<html>oops</html>' }) end)
+local html_ok, html_result = pcall(nodes.request, leak_peer, '/node/call', '{}', {})
+check(html_ok, 'a non-JSON 200 does not raise out of the caller: ' .. tostring(html_result))
+check(nodes.slots_held(PEER_ID) == 0, 'and releases its slot')
+
+-- (c) A 503 whose body is not JSON.
+relay_answers(function() return json.encode({ status = 503, body = 'not json at all' }) end)
+local b503_ok, b503 = pcall(nodes.request, leak_peer, '/node/call', '{}', {})
+check(b503_ok, 'a non-JSON 503 does not raise: ' .. tostring(b503))
+check(nodes.slots_held(PEER_ID) == 0, 'and releases its slot')
+
+-- (d) An empty body, and a body that is JSON but not an object.
+relay_answers(function() return json.encode({ status = 200, body = '' }) end)
+check(pcall(nodes.request, leak_peer, '/node/call', '{}', {}) ~= false, 'an empty 200 body is handled')
+check(nodes.slots_held(PEER_ID) == 0, 'and releases its slot')
+relay_answers(function() return json.encode({ status = 200, body = 'null' }) end)
+check(pcall(nodes.request, leak_peer, '/node/call', '{}', {}) ~= false, 'a null body is handled')
+check(nodes.slots_held(PEER_ID) == 0, 'and releases its slot')
+
+-- (e) The slot is reusable afterwards: the leak's own symptom cannot happen.
+for _ = 1, nodes.RELAY_MAX_IN_FLIGHT do
+  check(nodes.acquire_slot(PEER_ID) == true, 'every slot is available again after the failures')
+end
+for _ = 1, nodes.RELAY_MAX_IN_FLIGHT do nodes.release_slot(PEER_ID) end
+
+-- (f) The decoded body is still trusted when it IS valid: the guard is not a blanket refusal.
+relay_answers(function() return json.encode({ status = 200, body = json.encode({ ok = false, error = 'node_busy' }) }) end)
+local busy = nodes.request(leak_peer, '/node/call', '{}', {})
+check(type(busy) == 'table' and busy.error ~= nil, 'a valid JSON refusal still reaches the caller')
+check(nodes.slots_held(PEER_ID) == 0, 'and releases its slot')
+
 print('network relay backpressure ok (' .. checks .. ' checks)')

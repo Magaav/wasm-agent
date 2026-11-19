@@ -530,6 +530,19 @@ function M.mesh_attempt(node, capability, args, body, headers)
   } }
 end
 
+-- A transport answer is bytes until proven otherwise. These bodies cross a plain-HTTP hop and a proxy,
+-- so a 200 or a 503 can carry an HTML error page, an empty body, or a truncated frame; rxi's json.decode
+-- RAISES on all of those, and an uncaught raise inside a caller's slot accounting leaked the slot for
+-- good (four leaked slots = peer_busy_caller forever, with nothing sent and nothing run). Everything
+-- that reads a transport body goes through here, and a body that is not JSON is a named failure.
+local function decode_body(text)
+  if type(text) ~= "string" or text == "" then return nil end
+  local ok, value = pcall(json.decode, text)
+  if not ok or type(value) ~= "table" then return nil end
+  return value
+end
+M.decode_body = decode_body
+
 -- Send a request to a node: directly when it advertises a routable endpoint,
 -- otherwise through the relay. `headers` are forwarded to the target.
 function M.request(node, path, body, inner_headers)
@@ -538,7 +551,7 @@ function M.request(node, path, body, inner_headers)
   local endpoint = M.endpoint(node)
   local direct = nil
   if endpoint then
-    local response = json.decode(host.http("POST", endpoint:gsub("/+$", "") .. path,
+    local response = decode_body(host.http("POST", endpoint:gsub("/+$", "") .. path,
       json.encode(headers), body or ""))
     if response and tonumber(response.status) == 200 then response.transport = "direct"; return response end
     direct = response
@@ -570,21 +583,24 @@ function M.request(node, path, body, inner_headers)
           .. "sent and nothing ran. Wait for one to answer, then retry.", M.RELAY_MAX_IN_FLIGHT,
           tostring(node.name or node.node_id)) }
     end
+    -- EVERY exit from the relay loop goes through here - the answered path, the named refusal below,
+    -- and the no-identity refusal that used to return past the release. A slot that is not given back
+    -- is a caller that can never call that node again in this process.
     local function finish(value)
       M.release_slot(node.node_id)
       return value
     end
     for attempt = 1, M.RELAY_ATTEMPTS do
       local relay_headers = M.signed_headers("relay-send")
-      if not relay_headers then return { error = "no_identity" } end
+      if not relay_headers then return finish({ error = "no_identity", node = node.name, retryable = false }) end
       local envelope = json.encode({
         rid = rid, to = node.node_id, method = "POST", path = path,
         headers = headers, body = body or "",
       })
-      local response = json.decode(host.http("POST", relay:gsub("/+$", "") .. "/relay/send",
+      local response = decode_body(host.http("POST", relay:gsub("/+$", "") .. "/relay/send",
         json.encode(relay_headers), envelope))
       if response and tonumber(response.status) == 200 then
-        local decoded = json.decode(response.body)
+        local decoded = decode_body(response.body)
         if decoded and decoded.ok then
           -- `late` is the relay's word that the answer arrived after the deadline this caller was
           -- given: a result, but not a fresh one, and the caller is told so rather than guessing.
@@ -601,7 +617,7 @@ function M.request(node, path, body, inner_headers)
         -- the node was not attached, which is a reason to wait, not to fail. A `node_busy` answer is
         -- different: the target was reached and refused before starting, so the same rid may be sent
         -- again and nothing has run twice.
-        local decoded = json.decode(response.body)
+        local decoded = decode_body(response.body)
         last_error = (decoded and decoded.error == "node_busy") and "node_busy" or "node_not_attached"
         -- The rendezvous is over ITS cap (19/11: too_many_connections to everyone). Back off with
         -- jitter and honour Retry-After when the relay names one; never a tight retry, because a
@@ -618,7 +634,7 @@ function M.request(node, path, body, inner_headers)
         -- The relay held the request and the node did not answer: either it
         -- never attached (retry when it is back) or it is busy and the action
         -- may still be running - which is exactly why the retry reuses the id.
-        local decoded = json.decode(response.body)
+        local decoded = decode_body(response.body)
         last_error = (decoded and decoded.error) or "node_no_answer"
         if decoded and decoded.retry_after_ms then
           host.sleep(tonumber(decoded.retry_after_ms) / 1000)
