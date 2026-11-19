@@ -2191,7 +2191,7 @@ function M:run_body(text, images)
     self.emit({ type = "status", text = "turn refused: no_dispatchable_tools" })
     self.emit({ type = "reply", text = reply, message_id = message_id })
     telemetry.event(self.session_id, self.run_id, "", "step", "refused",
-      { reason = "no_dispatchable_tools", tools = 0, mode = raw_code.mode() or "codemode" })
+      { reason = "no_dispatchable_tools", tools = 0, mode = raw_code.mode_of(self.codemode_policy) or "codemode" })
     -- The turn did not run, so the caller must be able to see that from the outside (#53): the reply is
     -- still returned (an interactive reader sees why, and the thread is not crashed), and the flag is
     -- what `wa chat --once` turns into a non-zero exit (chat.turn_ok).
@@ -2849,7 +2849,9 @@ function M:run_body(text, images)
     -- redaction, projection, the cut/limit refusal - treats it as that call. Off: nothing is read.
     -- Read whenever the MODE is on, not only when code mode happens to be ready: a run block the node
     -- cannot run is answered by name (codemode_not_enabled), never left in the text as the answer.
-    local raw_channel = raw_code.mode() ~= nil
+    -- The THREAD mode, not the node (rel review r3, item 1): this runs on every model call, and the
+    -- recorded decision is what the prefix and the whole transcript were written for.
+    local raw_channel = raw_code.mode_of(self.codemode_policy) ~= nil
     local raw_run = raw_channel
       and raw_code.take(result, raw_code.stop_sequences(self.codemode_policy) ~= nil, self.codemode_policy) or nil
     if raw_run and raw_run.restored_fence then
