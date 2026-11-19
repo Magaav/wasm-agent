@@ -294,6 +294,10 @@ local function graph_snapshot(source, copy)
     locked = "graph_store", pages = answer.pages }, nil
 end
 
+-- Assigned below (write_manifest): M.run writes the manifest as it goes, so every snapshot this
+-- module takes is restorable and not only the periodic one.
+local write_manifest
+
 function M.run(label)
   local stamp = os.date("!%Y%m%dT%H%M%SZ") .. '-' .. host.uuid() .. (label and label ~= "" and ("-" .. label:gsub("[^%w_-]", "")) or "")
   local dir = paths.config() .. "/backups/" .. stamp
@@ -319,7 +323,10 @@ function M.run(label)
       end
     end
     M.prune()
-    return { ok = true, dir = dir, stores = results, skipped = skipped }
+    -- The manifest is written for EVERY snapshot this module takes, not only the periodic one: a
+    -- pre-update snapshot nobody can name is the same unusable directory the restore refuses.
+    local manifest = write_manifest(dir, label, stamp, results, skipped)
+    return { ok = true, dir = dir, stores = results, skipped = skipped, manifest = manifest }
   end)
 end
 
@@ -330,6 +337,244 @@ end
 -- function keeps saying what it does: nothing.
 function M.prune()
   return { skipped = 'retention_is_the_reclaim_pass' }
+end
+
+-- ---- the manifest: what a snapshot holds, and which source each copy came from ------------------------
+-- A snapshot without a manifest is a directory of files called '3-memory.db': a reader can check those
+-- bytes, but nothing says which store each one belongs to, so a restore would have to guess a
+-- destination. Unknown is not yes, and a guess is how one store's copy overwrites another's ledger. So
+-- every snapshot this module takes writes manifest.json as it is taken, and 'wa restore --from' reads
+-- THAT file: a directory without one, or a copy whose bytes no longer match it, is refused by name.
+local MANIFEST = 'manifest.json'
+
+-- Is 'path' the directory 'root' or somewhere under it?
+local function inside(path, root)
+  path, root = tostring(path or ''), tostring(root or ''):gsub('/+$', '')
+  if root == '' or path == '' then return false end
+  return path == root or path:sub(1, #root + 1) == root .. '/'
+end
+
+local function basename(path)
+  local _, name = tostring(path or ''):gsub('\\', '/'):match('^(.*)/([^/]+)$')
+  return name or tostring(path or '')
+end
+
+-- The manifest of one snapshot directory: its table, or nil plus the named reason it cannot be used.
+function M.manifest(dir)
+  local ok, text = pcall(host.read_file, tostring(dir or ''):gsub('/+$', '') .. '/' .. MANIFEST)
+  if not ok or type(text) ~= 'string' then return nil, 'restore_manifest_missing' end
+  local decoded, value = pcall(json.decode, text)
+  if not decoded or type(value) ~= 'table' or type(value.stores) ~= 'table' or #value.stores == 0 then
+    return nil, 'restore_manifest_unreadable'
+  end
+  return value
+end
+
+-- Every snapshot under <config>/backups that carries a manifest, newest first. A directory without one is
+-- listed with manifest=false and its reason: it is visible, not silently skipped, and restore refuses it.
+function M.list()
+  local root = paths.config() .. '/backups'
+  local ok, raw = pcall(host.list_dir, root)
+  if not ok then return {} end
+  local value = type(raw) == 'string' and json.decode(raw) or raw
+  local entries = (type(value) == 'table' and value.entries) or value or {}
+  local out = {}
+  for _, entry in ipairs(entries) do
+    if entry.kind == 'dir' then
+      local dir = root .. '/' .. tostring(entry.name)
+      local manifest, why = M.manifest(dir)
+      out[#out + 1] = { dir = dir, name = tostring(entry.name), label = manifest and manifest.label or nil,
+        stamp = manifest and manifest.stamp or nil, taken_utc = manifest and manifest.taken_utc or nil,
+        stores = manifest and #manifest.stores or 0, manifest = manifest ~= nil, reason = why }
+    end
+  end
+  table.sort(out, function(a, b)
+    local as, bs = tostring(a.stamp or ''), tostring(b.stamp or '')
+    if as ~= bs then if as == '' then return false elseif bs == '' then return true end return as > bs end
+    return a.name > b.name
+  end)
+  return out
+end
+
+-- Write the manifest for one snapshot, after its copies exist: every store with the bytes it has now.
+-- A copy whose hash cannot be read is recorded as sha256='unknown' rather than left out, and restore
+-- refuses it - a snapshot that does not know what it holds cannot be put back.
+write_manifest = function(dir, label, stamp, results, skipped)
+  local stores, steps = {}, {}
+  for _, record in ipairs(results or {}) do
+    local sha = nil
+    if host.file_sha256 then
+      local ok, value = pcall(host.file_sha256, record.copy)
+      if ok and type(value) == 'string' and value ~= '' then sha = value end
+    end
+    stores[#stores + 1] = { source = record.source, copy = basename(record.copy), check = record.check,
+      attempts = record.attempts, sha256 = sha or 'unknown', locked = record.locked }
+  end
+  for _, record in ipairs(skipped or {}) do
+    steps[#steps + 1] = { source = record.source, reason = record.reason }
+  end
+  local identity = ''
+  if host.node_identity then
+    local ok, value = pcall(host.node_identity)
+    if ok and type(value) == 'table' then identity = tostring(value.node_id or '') end
+  end
+  local manifest = { version = 1, label = tostring(label or ''), stamp = stamp,
+    taken_utc = os.date('!%Y-%m-%dT%H:%M:%SZ'), node_id = identity, stores = stores, skipped = steps }
+  assert(host.write_file(dir .. '/' .. MANIFEST, json.encode(manifest)), 'backup_manifest_write_failed')
+  return manifest
+end
+
+-- Put one snapshot back: every store to the source path its manifest names.
+--
+-- The order of the checks is the point, and each refusal names the one thing that is wrong:
+--   1. the directory must hold a readable manifest (unknown is not yes);
+--   2. every copy must still hash to what the manifest recorded and pass integrity_check - a torn or
+--      edited backup is refused BEFORE anything of the node's is touched;
+--   3. every destination must be inside this node's own data/config directories or be the live ledger,
+--      so a hand-edited manifest cannot write outside the node;
+--   4. only then is the current file moved aside (.pre-restore-<stamp>) and the copy put in place, so a
+--      failure halfway leaves the old file recoverable rather than gone.
+function M.restore(dir, opts)
+  opts = opts or {}
+  local stamp = tostring(opts.stamp or (os.date('!%Y%m%dT%H%M%SZ') .. '-' .. host.uuid()))
+  dir = tostring(dir or ''):gsub('/+$', '')
+  if dir == '' then return { ok = false, error = 'restore_dir_required' } end
+  local manifest, why = M.manifest(dir)
+  if not manifest then
+    return { ok = false, error = why, detail = dir .. ' holds no usable ' .. MANIFEST .. ': a snapshot this cannot name is not restored, and nothing was changed' }
+  end
+  local data, config = paths.data(), paths.config()
+  local live = main_db()
+  local plan = {}
+  for _, store in ipairs(manifest.stores) do
+    local source, copy = tostring(store.source or ''), dir .. '/' .. tostring(store.copy or '')
+    if source == '' or store.copy == nil then
+      return { ok = false, error = 'restore_manifest_incomplete', detail = 'a store row names no source or no copy; nothing was changed' }
+    end
+    local kind = 'unknown'
+    if host.path_kind then
+      local ok, value = pcall(host.path_kind, copy)
+      if ok then kind = tostring(value) end
+    end
+    if kind == 'missing' then
+      return { ok = false, error = 'restore_copy_missing', detail = copy .. ' is named by the manifest and is not there; nothing was changed' }
+    end
+    if kind ~= 'file' then
+      return { ok = false, error = 'restore_copy_unreadable', detail = copy .. ' could not be read as a file (' .. kind .. '); nothing was changed' }
+    end
+    if store.sha256 == nil or store.sha256 == 'unknown' then
+      return { ok = false, error = 'restore_copy_unhashed', detail = copy .. ' has no recorded sha256, so its bytes cannot be shown to be the ones this snapshot took; nothing was changed' }
+    end
+    local current = nil
+    if host.file_sha256 then local ok, value = pcall(host.file_sha256, copy); if ok then current = value end end
+    if type(current) ~= 'string' or current ~= store.sha256 then
+      return { ok = false, error = 'restore_copy_changed', detail = copy .. ' no longer hashes to the manifest (recorded ' .. tostring(store.sha256) .. ', now ' .. tostring(current) .. '); a copy that changed is not this snapshot, and nothing was changed' }
+    end
+    local ok_check, verdict = pcall(check_store, copy, 'integrity_check', false)
+    if not ok_check or verdict ~= 'ok' then
+      return { ok = false, error = 'restore_copy_unverified', detail = copy .. ' does not pass integrity_check (' .. tostring(verdict) .. '); nothing was changed' }
+    end
+    if not (inside(source, data) or inside(source, config) or (live ~= '' and source == live)) then
+      return { ok = false, error = 'restore_source_outside_node', detail = source .. ' is not under ' .. data .. ' or ' .. config .. ' (nor the ledger this process opened), so this manifest would write outside the node; nothing was changed' }
+    end
+    plan[#plan + 1] = { source = source, copy = copy, sha256 = store.sha256 }
+  end
+  if opts.dry_run then return { ok = true, dry_run = true, dir = dir, would_restore = plan } end
+  local function quote(path) return "'" .. tostring(path):gsub("'", "'\\''") .. "'" end
+  local function move(from, to)
+    local ran, raw = pcall(host.exec, 'cp -p ' .. quote(from) .. ' ' .. quote(to), '', 120)
+    if not ran then return false, tostring(raw) end
+    local answer = type(raw) == 'string' and (select(2, pcall(json.decode, raw))) or raw
+    if type(answer) == 'table' and (tonumber(answer.code) or 0) ~= 0 then return false, tostring(answer.stderr or answer.code) end
+    return true
+  end
+  local restored = {}
+  for _, item in ipairs(plan) do
+    local aside = item.source .. '.pre-restore-' .. stamp
+    local staged = item.source .. '.restoring-' .. stamp
+    local ok_stage, stage_why = move(item.copy, staged)
+    if not ok_stage then
+      return { ok = false, error = 'restore_stage_failed', detail = item.source .. ': the checked copy could not be staged (' .. tostring(stage_why) .. '); the current file is untouched' }
+    end
+    local had_current = false
+    if host.path_kind then local ok, value = pcall(host.path_kind, item.source); had_current = ok and value == 'file' end
+    if had_current then move(item.source, aside) end
+    local ok_place, place_why = move(staged, item.source)
+    pcall(host.exec, 'rm -f ' .. quote(staged), '', 60)
+    if not ok_place then
+      return { ok = false, error = 'restore_place_failed', detail = item.source .. ': the copy was verified and staged but could not be put in place (' .. tostring(place_why) .. '); the previous file is at ' .. aside, restored = restored }
+    end
+    -- A store THIS process has open cannot be made to read the bytes just written: the connection keeps
+    -- its own pages, so the node would go on serving the old ledger while the file on disk is the
+    -- snapshot. That is a fact about SQLite, not a failure - so it is REPORTED (reopen_required) instead
+    -- of being claimed as done: the operator restarts the node, or the store is read again by a process
+    -- that opens it after this one.
+    local is_live = (live ~= '' and item.source == live)
+    restored[#restored + 1] = { source = item.source, copy = item.copy, previous = had_current and aside or nil,
+      sha256 = item.sha256, live = is_live }
+  end
+  local reopens = {}
+  for _, item in ipairs(restored) do if item.live then reopens[#reopens + 1] = item.source end end
+  return { ok = true, dir = dir, restored = restored, stamp = stamp, label = manifest.label,
+    reopen_required = #reopens > 0, reopen = reopens }
+end
+
+-- Retention for the snapshots THIS module takes periodically, and only those.
+--
+-- M.prune above keeps saying that pre-update snapshots belong to the reclaim pass, and that rule is not
+-- changed here: two owners of one rule is the defect that let 48 snapshots accumulate. What is new is a
+-- periodic snapshot nobody asked for, and an unbounded set of those is the same defect pointing the
+-- other way - so the newest WA_BACKUP_KEEP (default 7) 'periodic' snapshots are kept and older ones are
+-- removed, each removal printed. A snapshot with a pending rollback is not 'periodic', so it is not in
+-- this list at all and is never touched.
+local function prune_periodic(keep)
+  keep = tonumber(keep) or 7
+  local removed, kept = 0, 0
+  for _, snapshot in ipairs(M.list()) do
+    if snapshot.label == 'periodic' then
+      kept = kept + 1
+      if kept > keep then
+        local ok, raw = pcall(host.exec, "rm -rf '" .. tostring(snapshot.dir):gsub("'", "'\\''") .. "'", '', 120)
+        local answer = type(raw) == 'string' and (select(2, pcall(json.decode, raw))) or raw
+        if ok and not (type(answer) == 'table' and (tonumber(answer.code) or 0) ~= 0) then removed = removed + 1
+        else print('backup: could not remove the old periodic snapshot ' .. snapshot.dir) end
+      end
+    end
+  end
+  return { removed = removed, kept = math.min(kept, keep) }
+end
+
+-- The periodic snapshot, at most one per WA_BACKUP_INTERVAL_S (default 24 h).
+--
+-- Called from the node's housekeeping tick (lua/core/server.lua), so it is cheap by default: one read of
+-- the memo file while the interval has not passed. The memo is a FILE, not a process variable, because a
+-- node restarts and a restart must not reset the day.
+function M.tick(opts)
+  opts = opts or {}
+  local interval = tonumber(host.getenv('WA_BACKUP_INTERVAL_S') or '') or tonumber(opts.interval_s or '') or 86400
+  local memo = paths.config() .. '/backups/.last-periodic'
+  local now = os.date('!%Y%m%dT%H%M%SZ')
+  -- The memo holds EPOCH SECONDS, not the printable stamp: the stamps are for a reader, and arithmetic on
+  -- "20261119T031729Z" is not arithmetic (measured by this item's own test: the second tick took a second
+  -- snapshot because tonumber(stamp) was nil and nil < interval is never true).
+  local now_s = os.time()
+  if interval > 0 then
+    local ok, last = pcall(host.read_file, memo)
+    local last_s = ok and type(last) == 'string' and tonumber(last:match('^(%d+)%s*$') or '') or nil
+    if last_s ~= nil then
+      local elapsed = now_s - last_s
+      if elapsed >= 0 and elapsed < interval then
+        return { ok = true, skipped = 'interval_not_elapsed', elapsed_s = elapsed, interval_s = interval }
+      end
+    end
+  end
+  local ok, result = pcall(M.run, 'periodic')
+  if not ok then return { ok = false, error = 'periodic_backup_failed', detail = tostring(result) } end
+  local manifest = write_manifest(result.dir, 'periodic', now, result.stores, result.skipped)
+  pcall(host.write_file, memo, tostring(now_s))
+  local pruned = prune_periodic(tonumber(host.getenv('WA_BACKUP_KEEP') or ''))
+  return { ok = true, dir = result.dir, stores = #manifest.stores, skipped = #manifest.skipped,
+    kept = pruned.kept, removed = pruned.removed }
 end
 
 return M

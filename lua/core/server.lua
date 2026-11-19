@@ -2108,6 +2108,19 @@ function wa_sync_tick()
   -- interpreter was started to run one test script, not a node: it must not read or write the real
   -- node's state (every `scripts/test-*.lua` runs that way).
   if host.getenv("WA_SCRIPT") == nil then pcall(update_banner.tick) end
+  -- The periodic backup (item 1 of the node-ops round): at most one snapshot per WA_BACKUP_INTERVAL_S,
+  -- taken here because this is the one place a node already does recurring work with nobody waiting. It
+  -- is cheap while the interval has not passed (one read of a memo file), it never refuses the tick, and
+  -- a failure is one printed line - a backup is a safety net, not a thing a live node stops for.
+  if host.getenv("WA_SCRIPT") == nil then
+    local ok, backed = pcall(function() return dofile("lua/core/backup.lua").tick() end)
+    if ok and type(backed) == "table" and backed.ok and backed.dir then
+      host.log("backup: periodic snapshot " .. tostring(backed.dir) .. " (" .. tostring(backed.stores) .. " store(s), "
+        .. tostring(backed.removed or 0) .. " old one(s) removed)")
+    elseif not ok or (type(backed) == "table" and backed.ok == false) then
+      host.log("backup: periodic snapshot failed: " .. tostring(ok and backed.detail or backed))
+    end
+  end
   if enrollment.managed() then return json.encode({error='managed_sync_disabled'}) end
   local configured = host.getenv("WASM_AGENT_SYNC_TO") or ""
   if configured == "" then return json.encode({ ok = true, peers = 0, pushed = 0 }) end

@@ -296,6 +296,13 @@ elseif command == "stt" then
   local result = dofile("lua/core/stt.lua").cli({ table.unpack(args, 2) })
   print(json.encode(result))
   if result and result.ok == false then os.exit(1) end
+elseif command == "backup" or command == "restore" then
+  -- The snapshot an operator can take and put back with one command (item 1 of the node-ops round):
+  -- 'wa backup' snapshots every store with its manifest, 'wa backup list' names them, and
+  -- 'wa restore --from DIR' puts one back after re-checking every copy's bytes. The module owns both
+  -- (lua/core/backup_cli.lua, lua/core/backup.lua); this is the dispatch only.
+  local code = dofile("lua/core/backup_cli.lua").run(command, { table.unpack(args, 2) })
+  if code and code ~= 0 then os.exit(code) end
 elseif command == "paths" then
   -- What an operator runs first when the agent says "no model configured": where
   -- this node keeps its files, and which file the host actually reads for the
