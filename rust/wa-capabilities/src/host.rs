@@ -106,7 +106,6 @@ pub extern "C-unwind" fn getenv(l: *mut LuaState) -> c_int {
 /// child ran another named no file at all (round 7). A name with a separator is not a name to resolve,
 /// and a name that is not there is nil rather than a guess.
 #[no_mangle]
-    /// host.executable_on_path(name) -> the file a bare name resolves to on the PATH a child inherits
 pub extern "C-unwind" fn executable_on_path(l: *mut LuaState) -> c_int {
     let name = arg_string(l, 1).unwrap_or_default();
     let name = if cfg!(windows) && !name.ends_with(".exe") { format!("{name}.exe") } else { name };
@@ -863,6 +862,68 @@ pub(crate) fn path_facts_value(path: &str) -> serde_json::Value {
         Err(error) => json!({"path": path, "kind": "missing", "unix": cfg!(unix),
             "error": format!("{:?}", error.kind())}),
     }
+}
+
+/// host.file_magic(path) -> one JSON string: {path, magic, size?, error?}.
+///
+/// A file's KIND from its leading bytes, which no name can fake: `elf`, `macho`, `pe`, `script` (a
+/// shebang), `text`, `binary`, `empty`, `missing` or `unreadable`.
+///
+/// Why this is a capability and not a read: `host.read_file` answers UTF-8 text and refuses everything
+/// else, so Lua could not look at a binary's leading bytes at all - and the vault approval (round 8) has
+/// to answer "is this program really the native node it is named after, or a shell script wearing that
+/// name?". A NAME is not a program: a copy of python called `node`, or a `#!/bin/sh` wrapper called
+/// `bash`, is exactly what a list of names cannot refuse. Only the first bytes are read, so a
+/// hundred-megabyte interpreter costs four bytes here.
+#[no_mangle]
+pub extern "C-unwind" fn file_magic(l: *mut LuaState) -> c_int {
+    let path = arg_string(l, 1).unwrap_or_default();
+    push_json(l, &file_magic_value(&path));
+    1
+}
+
+pub(crate) fn file_magic_value(path: &str) -> serde_json::Value {
+    use std::io::Read;
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) => return json!({"path": path, "magic": "missing",
+            "error": format!("{:?}", error.kind())}),
+    };
+    if metadata.is_dir() { return json!({"path": path, "magic": "unreadable", "size": metadata.len()}); }
+    if metadata.len() == 0 { return json!({"path": path, "magic": "empty", "size": 0}); }
+    let mut head = [0u8; 4];
+    let read = match std::fs::File::open(path) {
+        Ok(mut file) => match file.read(&mut head) {
+            Ok(count) => count,
+            Err(error) => return json!({"path": path, "magic": "unreadable",
+                "error": format!("{:?}", error.kind())}),
+        },
+        Err(error) => return json!({"path": path, "magic": "unreadable",
+            "error": format!("{:?}", error.kind())}),
+    };
+    let magic = classify_magic(&head[..read]);
+    json!({"path": path, "magic": magic, "size": metadata.len()})
+}
+
+/// The three executable families, plus the ones that are not one: a shebang, plain text, anything else.
+///
+/// ELF is compared as bytes; Mach-O and its universal (fat) header are four magic numbers in either byte
+/// order; PE starts with `MZ`. A shebang is the shape this exists to catch - a file NAMED `node` that is
+/// really a shell script running something else.
+pub(crate) fn classify_magic(head: &[u8]) -> &'static str {
+    if head.starts_with(b"\x7fELF") { return "elf"; }
+    if head.len() >= 4 {
+        let magic = u32::from_be_bytes([head[0], head[1], head[2], head[3]]);
+        if matches!(magic, 0xfeed_face | 0xfeed_facf | 0xcefa_edfe | 0xcffa_edfe | 0xcafe_babe | 0xbeba_feca) {
+            return "macho";
+        }
+    }
+    if head.starts_with(b"MZ") { return "pe"; }
+    if head.starts_with(b"#!") { return "script"; }
+    if head.iter().all(|byte| *byte == 0x09 || *byte == 0x0a || *byte == 0x0d || (0x20..0x7f).contains(byte)) {
+        return "text";
+    }
+    "binary"
 }
 
 /// host.file_sha256(path) -> hex, or nil plus a named reason.

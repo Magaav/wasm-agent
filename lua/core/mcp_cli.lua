@@ -139,7 +139,29 @@ function M.run(argument, opts)
 
   if verb == 'on' or verb == 'off' or verb == 'enable' or verb == 'disable' then
     local enable = verb == 'on' or verb == 'enable'
-    local answer = command.toggle(ctx, key, enable, {})
+    -- `/mcp <key> on --native <program>`: the operator vouches for a native binary the digest cannot see
+    -- inside, recorded with its sha256 in the approval (docs/VAULT.md). It must name a path: a bare word
+    -- is resolved through PATH, which is the thing the approval exists not to trust.
+    local native
+    if enable then
+      local explicit = rest:match('^%S+%s+%S+%s+%-%-native%s+(.+)$')
+      if explicit then
+        native = explicit:gsub('^%s+', ''):gsub('%s+$', '')
+        local absolute = native:sub(1, 1) == '/' or native:match('^%a:/') ~= nil
+        if native == '' then
+          absolute = false
+        end
+        if not absolute then
+          emit('  --native takes the ABSOLUTE path of a native binary this connector runs: a bare name is '
+            .. 'resolved through PATH, which the approval does not trust')
+          return { ok = false, error = 'mcp_vault_native_needs_absolute_path' }
+        end
+      elseif rest:match('%-%-native') then
+        emit('  usage: /mcp <key> on --native <absolute path of the binary>')
+        return { ok = false, error = 'mcp_vault_native_usage' }
+      end
+    end
+    local answer = command.toggle(ctx, key, enable, { native = native })
     if not answer.ok then
       emit('  ' .. tostring(answer.connector or key) .. ' not changed: ' .. refusal(answer))
       return answer

@@ -48,9 +48,9 @@ local fixture = {
   vault = { 'FIXTURE_TOKEN', 'SECOND_ONE' },
 }
 local text = mcp.vault_approval_text(fixture)
-ok(has(text, 'mcp-vault-approval/v3\nprogram /usr/bin/node\n'), 'the canonical text names its version and program')
+ok(has(text, 'mcp-vault-approval/v4\nprogram /usr/bin/node\n'), 'the canonical text names its version and program')
 ok(has(text, '\narg a%20b\n'), 'a space inside an argument is escaped, not a separator: ' .. text)
-eq(host.sha256(text), 'f45cc25f36c7315cbccfc17c5c1e37b5a9e99f02dff27911130bf5e80b5b8aec',
+eq(host.sha256(text), '0d7f15fd975c32c4d5875437dfc193931fbc01972a83f55d1b01c736c6e8ee0b',
   'the digest the Rust side pins for the same fixture')
 -- v2 added two fields to that digest - the directory the launch runs in and the plain (non-vault)
 -- environment it asks for, sorted by name so a caller's table order cannot change it - and v3 (round 6)
@@ -75,7 +75,7 @@ ok(not has(mcp.vault_approval_text({ program = '/bin/sh', args = { 'a\nb' }, fil
 -- writes into the node's install or into this checkout.
 local real_getenv = host.getenv
 local dir = paths.data() .. '/mcp/vault-approval-' .. tostring(host.uuid()):sub(1, 8)
-local node_override = dir .. '/node-fixture'
+local node_override = dir .. '/bin/node'
 host.getenv = function(name)
   if name == 'WA_MCP_SCRIPT_DIR' then return dir end
   if name == 'WA_NODE' then return node_override end
@@ -92,7 +92,24 @@ for _, name in ipairs(mcp.RUNTIME) do
 end
 local connector = dir .. '/connector.mjs'
 assert(host.write_file(connector, 'export const run = 1;\n'), 'the connector script')
-assert(host.write_file(dir .. '/node-fixture', '#!/bin/sh\nexit 0\n'), 'the interpreter fixture')
+-- Round 8: the allow-list is judged by what a file IS, so a fixture interpreter has to be a real NATIVE
+-- binary. The platform's own /usr/bin/env is ELF, is copied once per scratch home, and its bytes are the
+-- bytes a digest names - a shell script called node-fixture is exactly what the allow-list refuses.
+local native_source = os.getenv('WA_NATIVE_FIXTURE')
+if not native_source or native_source == '' then
+  for _, candidate in ipairs({ '/usr/bin/env', '/bin/env', '/usr/bin/true', '/bin/true' }) do
+    if host.file_magic and json.decode(host.file_magic(candidate)).magic == 'elf' then native_source = candidate break end
+  end
+end
+assert(native_source, 'a native binary to copy for the interpreter fixtures')
+local function native_copy(path)
+  local parent = path:match('^(.*)/[^/]+$')
+  if parent and host.path_kind(parent) ~= 'dir' then host.exec('mkdir -p ' .. parent, nil, 20) end
+  local done = host.exec('cp ' .. native_source .. ' ' .. path, nil, 20)
+  assert(host.path_kind(path) == 'file', 'a native fixture at ' .. path .. ': ' .. tostring(done))
+  return path
+end
+assert(native_copy(dir .. '/bin/node'), 'the interpreter fixture is a native binary called node')
 eq(mcp.script_dir(), dir, 'the script directory this test owns is the runtime the node resolves')
 
 local definition = { id = 'vault-fixture', name = 'Vault fixture', transport = 'stdio',
@@ -186,7 +203,7 @@ local function covers(manifest, path)
   for _, file in ipairs(manifest.files or {}) do if file.path == path then return true end end
   return false
 end
-local function manifest_of(candidate) return mcp.vault_manifest(candidate, mcp.script_dir()) end
+local function manifest_of(candidate, vouched) return mcp.vault_manifest(candidate, mcp.script_dir(), vouched) end
 local function problems_text(manifest) return table.concat(manifest.problems or {}, ' | ') end
 
 -- An import is followed: the module beside the script is hashed too.
@@ -197,13 +214,30 @@ local closed = manifest_of(definition)
 eq(#closed.problems, 0, 'a self-contained connector is covered: ' .. problems_text(closed))
 ok(covers(closed, connector) and covers(closed, lib), 'the module it imports is in the digest, not only the entry script')
 
--- An extensionless program is code too: "node conn" runs it whatever it is called, and its shebang says
--- which scanner follows it.
+-- Round 8 INVERTS the old answer here. An extensionless program that is a SHEBANG used to be followed
+-- by its shebang; now it is refused whatever it is called, because the allow-list is about what the
+-- file IS. A copy of python called `conn` is the case a list of names never caught.
 local bare = dir .. '/bare-conn'
-assert(host.write_file(bare, '#!/usr/bin/env node\nimport { value } from "./lib/extra.mjs";\n'), 'an extensionless program')
-local bare_manifest = manifest_of({ program = bare, args = { '--mode', 'stdio' }, vault_env = definition.vault_env })
-eq(#bare_manifest.problems, 0, 'an extensionless program is hashed and followed: ' .. problems_text(bare_manifest))
-ok(covers(bare_manifest, bare) and covers(bare_manifest, lib), 'the shebang program and its import are both covered')
+assert(host.write_file(bare, '#!/usr/bin/env node\nimport { value } from "./lib/extra.mjs";\n'), 'an extensionless script')
+local bare_manifest = manifest_of({ program = bare, args = { '--mode', 'stdio' }, cwd = dir, vault_env = definition.vault_env })
+ok(has(problems_text(bare_manifest), 'not node or a POSIX shell'),
+  'a script named as a program is refused, whatever its shebang: ' .. problems_text(bare_manifest))
+-- A copy of the platform's node under another name is refused too: the allow-list is the realpath's
+-- BASENAME, so `python3` under any name stays an interpreter and `node` under any other name is not
+-- node. The native binary the operator vouches for is the one exception, and it is tested below.
+local renamed = native_copy(dir .. '/node-copy')
+local renamed_manifest = manifest_of({ program = renamed, args = { connector }, cwd = dir, vault_env = definition.vault_env })
+ok(has(problems_text(renamed_manifest), 'not node or a POSIX shell'),
+  'a native binary under another name is refused without --native: ' .. problems_text(renamed_manifest))
+-- The operator's own voucher (--native) is the one way a native binary outside the two families is
+-- approved, and it is recorded with its sha256 in the digest.
+local vouched = mcp.native_voucher(renamed)
+assert(type(vouched) == 'table' and vouched.path and vouched.sha256, 'a voucher is built from the file on disk')
+local vouched_manifest = manifest_of({ program = renamed, args = { connector }, cwd = dir, vault_env = definition.vault_env }, vouched)
+eq(#vouched_manifest.problems, 0, 'a native binary the operator vouched for is approved: ' .. problems_text(vouched_manifest))
+ok(covers(vouched_manifest, renamed), 'and its bytes are in the digest like any approved file')
+ok(has(mcp.vault_approval_text(vouched_manifest), 'native ' .. vouched.path .. ' ' .. vouched.sha256),
+  'the canonical text carries the voucher, so replacing the binary voids the approval')
 
 -- Each of these is refused BY NAME: a digest over an incomplete file list reads as an approval.
 local function refuses(tweak, needle, label)
@@ -266,7 +300,7 @@ eq(put.error, 'mcp_vault_env_requires_operator', 'a model still cannot write a v
 -- Each of these reads M.vault_manifest directly - the one function the approval, the gate and the
 -- operator's probe all go through - so a regression is a problem in the digest, not a wording change.
 local platform_module = dofile('lua/core/platform.lua')
-local function manifest_of(def) return mcp.vault_manifest(def, mcp.script_dir()) end
+local function manifest_of(def, vouched) return mcp.vault_manifest(def, mcp.script_dir(), vouched) end
 local function problems_text(manifest) return table.concat(manifest.problems or {}, ' | ') end
 local function covered_by(manifest)
   local map = {}
@@ -277,15 +311,13 @@ end
 -- 1. The INTERPRETER (finding 1). The process the vault values are put in is the interpreter the launch
 -- SPAWNS - node_program(), i.e. WA_NODE and then the provisioned copy - and it used to be neither hashed
 -- nor out of the agent's reach. A file this user owns is a file the digest names.
-local user_node = dir .. '/node-fixture'
-assert(host.write_file(user_node, '#!/bin/sh\nexit 0\n'), 'the interpreter fixture')
+local user_node = dir .. '/bin/node'
 node_override = user_node
 local with_interpreter = manifest_of(definition)
 ok(covered_by(with_interpreter)[user_node] == true,
   'the interpreter the launch spawns is a file the digest names: ' .. problems_text(with_interpreter))
 -- Another interpreter is another digest: WA_NODE pointing somewhere else is not the approved launch.
-local other_node = dir .. '/node-other'
-assert(host.write_file(other_node, '#!/bin/sh\nexit 0\n'))
+local other_node = native_copy(dir .. '/bin2/node')
 node_override = other_node
 local other_digest = manifest_of(definition).sha256
 node_override = user_node
@@ -410,8 +442,8 @@ for _, interpreter in ipairs({ '/usr/bin/python3', '/usr/bin/python3.11', '/usr/
     '/usr/bin/perl', '/usr/bin/perl5.36', '/usr/bin/ruby3.2', '/usr/bin/php8.2', '/usr/bin/lua5.4',
     '/usr/bin/deno', '/usr/bin/bun', '/usr/bin/java', '/usr/bin/pwsh' }) do
   local manifest = manifest_of(interpreter_definition(interpreter))
-  ok(has(problems_text(manifest), 'an interpreter this digest cannot follow'),
-    interpreter .. ' is refused as a program: ' .. problems_text(manifest))
+  ok(has(problems_text(manifest), 'not node or a POSIX shell'),
+    interpreter .. ' is refused as a program (the allow-list): ' .. problems_text(manifest))
 end
 -- The two families the digest DOES follow stay approvable: node, and the POSIX shells.
 eq(#(manifest_of(interpreter_definition('/usr/bin/node')).problems or {}), 0,
@@ -440,6 +472,31 @@ local vm_require = dir .. '/vm-require.mjs'
 assert(host.write_file(vm_require, "const vm = require('vm');\nvm.runInThisContext('1');\n"))
 ok(has(problems_text(manifest_of(interpreter_definition('/usr/bin/node', { vm_require }))), 'vm'),
   'require(vm) is refused too')
+-- Round 8's finding 6: the module bound to another NAME. `const engine = require('vm')` and
+-- `engine.Script(code)` runs a string, and a detector that only spelled `vm.Script` saw nothing.
+local vm_alias = dir .. '/vm-alias.mjs'
+assert(host.write_file(vm_alias,
+  "const engine = require('node:vm');\nconst s = new engine.Script(process.env.FIXTURE_TOKEN);\n"))
+local alias_manifest = manifest_of(interpreter_definition('/usr/bin/node', { vm_alias }))
+ok(has(problems_text(alias_manifest), 'vm'),
+  'a vm module bound to another name is refused through .Script: ' .. problems_text(alias_manifest))
+-- The alias rule itself, where nothing else can fire: the module arrives as a PARAMETER, so the file has no
+-- literal `require('vm')` to match, and only the receiver rule (`x.Script(`) sees it.
+local vm_parameter = dir .. '/vm-parameter.mjs'
+assert(host.write_file(vm_parameter,
+  'export const go = (engine, code) => new engine.Script(code);\n'))
+local parameter_manifest = manifest_of(interpreter_definition('/usr/bin/node', { vm_parameter }))
+ok(has(problems_text(parameter_manifest), 'whatever name the module was bound'),
+  'a vm module received under any name is refused through .Script: ' .. problems_text(parameter_manifest))
+local vm_compile = dir .. '/vm-compile.mjs'
+assert(host.write_file(vm_compile,
+  "import * as v from 'node:vm';\nconst f = v.compileFunction('return 1');\n"))
+ok(has(problems_text(manifest_of(interpreter_definition('/usr/bin/node', { vm_compile }))), 'vm'),
+  'a namespace import used through .compileFunction is refused')
+local vm_runin = dir .. '/vm-runin.mjs'
+assert(host.write_file(vm_runin, "const box = require('vm');\nbox.runInNewContext('1');\n"))
+ok(has(problems_text(manifest_of(interpreter_definition('/usr/bin/node', { vm_runin }))), 'vm'),
+  'an aliased module used through .runInNewContext is refused')
 local vm_context = dir .. '/vm-context.mjs'
 assert(host.write_file(vm_context, 'export const go = (code) => runInThisContext(code);\n'))
 ok(has(problems_text(manifest_of(interpreter_definition('/usr/bin/node', { vm_context }))), 'vm'),
@@ -451,10 +508,8 @@ ok(has(problems_text(manifest_of(interpreter_definition('/usr/bin/node', { vm_co
 -- reads, so the approval is refused instead.
 ok(type(host.executable_on_path) == 'function',
   'the host can resolve a bare name the way the launch does (host.executable_on_path)')
-local child_node = dir .. '/child-bin/node'
-local decoy_node = dir .. '/decoy-bin/node'
-assert(host.write_file(child_node, '#!/bin/sh\nexit 0\n'), 'the interpreter on the child PATH')
-assert(host.write_file(decoy_node, '#!/bin/sh\nexit 0\n'), 'the interpreter on the config PATH')
+local child_node = native_copy(dir .. '/child-bin/node')
+local decoy_node = native_copy(dir .. '/decoy-bin/node')
 local active_getenv = host.getenv
 local real_on_path = host.executable_on_path
 host.getenv = function(name)
@@ -481,6 +536,39 @@ host.getenv = active_getenv
 
 host.getenv = real_getenv
 host.operation = real_operation
+
+-- ---- 8. round 8: ONE table of refused names, and ONE case rule ------------------------------
+-- Lua and Rust each keep a list, and they drifted: the Rust list matched `Rscript` only by accident
+-- while Lua lowercased first (finding 5). Both now read fixtures/mcp-refused-names.json at test time and
+-- both compare case-insensitively, so a name added to one side and not the other fails here.
+local table_path = (host.getenv('WASM_AGENT_LUA_ROOT') or '.') .. '/fixtures/mcp-refused-names.json'
+local raw_table = host.read_file(table_path)
+ok(type(raw_table) == 'string', 'the shared refusal table is readable: ' .. table_path)
+local shared = raw_table and json.decode(raw_table) or {}
+local function same_names(ours, theirs, label)
+  local mine, wanted = {}, {}
+  for _, name in ipairs(ours or {}) do mine[#mine + 1] = tostring(name):lower() end
+  for _, name in ipairs(theirs or {}) do wanted[#wanted + 1] = tostring(name):lower() end
+  table.sort(mine); table.sort(wanted)
+  eq(table.concat(mine, ','), table.concat(wanted, ','), label)
+end
+same_names(mcp.ALLOWED_PROGRAMS, shared.allowed_programs, 'the allow-list is the shared table')
+same_names(mcp.REFUSED_INTERPRETERS, shared.refused_interpreters, 'the interpreter list is the shared table')
+same_names(mcp.REFUSED_WRAPPERS, shared.refused_wrappers, 'the wrapper list is the shared table')
+-- Case does not decide it on either side: `Rscript` is `rscript`, whatever the file on disk is called.
+for _, name in ipairs({ '/usr/bin/Rscript', '/usr/bin/PYTHON3', '/usr/bin/Perl5.36' }) do
+  local manifest = manifest_of(interpreter_definition(name))
+  ok(has(problems_text(manifest), 'not node or a POSIX shell'),
+    name .. ' is refused whatever its case: ' .. problems_text(manifest))
+end
+-- And every wrapper in the table is refused as a PROGRAM, by its realpath's basename.
+for _, wrapper in ipairs(mcp.REFUSED_WRAPPERS) do
+  if host.path_kind('/usr/bin/' .. wrapper) == 'file' then
+    local manifest = manifest_of(interpreter_definition('/usr/bin/' .. wrapper))
+    ok(has(problems_text(manifest), 'which is a wrapper'),
+      '/usr/bin/' .. wrapper .. ' is refused as a wrapper: ' .. problems_text(manifest))
+  end
+end
 
 if failed > 0 then print(string.format('mcp vault approval: %d failed of %d checks', failed, checks)) os.exit(1) end
 print(string.format('mcp vault approval ok (%d checks)', checks))
