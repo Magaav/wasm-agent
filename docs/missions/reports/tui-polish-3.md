@@ -486,3 +486,94 @@ The gate now also runs `-p wa-capabilities repaint_tests` (item G's debounce, ad
 * The full `scripts/test.sh` gate was not run; the suites above and the two Rust crates were.
 * Round 1's two pre-existing failures were neither re-run nor touched, so their state is UNCHANGED and
   UNVERIFIED here.
+
+---
+
+# Round 3, the verification review - FIX
+
+## MUST 1 - the fence, reproduced through the real path BEFORE the fix
+
+The review was right: round 2 fixed a state the real stream does not produce. `markdown.render` was
+never wrong - what broke Victor's card was the HOST re-wrapping a card row it had to draw narrower
+(a focused block draws at width-2, `transcript.rs:441`), which sent the row to the PROSE wrapper and
+broke it at the space after the bar.
+
+**Phase 0, measured before any fix** (Rust, `wrap_rows`, the card row
+`│ :host ::slotted(colmeio-offline-banner){display:contents`):
+
+```text
+==== card at 59   (fits: no break)
+   [│ :host ::slotted(colmeio-offline-banner){display:contents] w=58
+==== card at 40   <-- the screenshot's shape
+   [│ :host] w=7
+   [  ::slotted(colmeio-offline-banner){disp] w=40      <-- bar orphaned, space dropped
+   [  lay:contents] w=14
+==== card at 30
+   [│ :host] w=7
+   [  ::slotted(colmeio-offline-ba] w=30
+   [  nner){display:contents] w=24
+```
+
+That is the copy-icon row, the empty `│` row, the code line without its bar, and the bottom.
+
+**The fix (commit `40218ba9`)**
+
+* **a. Host.** The renderer marks a card row (`\1f\1`, `markdown.lua:680`); `wrap_rows` strips the
+  marker, cuts the row by CELLS, and keeps the bar and its one space on every row, marking a
+  continuation `│↪` exactly as the renderer's own wrap does. A blockquote opens with the same bar and
+  has no marker, so it keeps the prose rule and still hangs - the special case that caught it in round
+  2 is gone.
+* **b. Resize.** The cut happens at DRAW time from the stored row, so shrinking re-cuts and widening
+  restores it; the renderer's 2-column slack is KEPT, with its reason measured: without it a focused
+  block would re-cut a card the moment it took focus (the card mid-word is what a reader would see).
+* **c. Tests that fail on the old code.** `a_marked_card_row_is_cut_by_cells_and_keeps_its_bar`
+  (asserts every row starts with `│`, none is the bar alone, the continuation is marked, every row
+  fits - at 59/40/30/20) and `a_marked_card_row_survives_a_shrink_and_a_widening` (80 -> 70 -> 60 ->
+  70 -> 80 through `view`). **Verified they fail without the fix**: with only the card branch removed,
+  `cargo test a_marked_card_row` reports `FAILED`; with it, `ok`.
+
+Fixed shape after the fix:
+
+```text
+==== card at 40
+   [│ :host ::slotted(colmeio-offline-banner] w=40
+   [│↪){display:contents] w=20
+```
+
+## MUST 2 - the run rows, as the exact strings Victor wrote
+
+`GAP` stays `" "` (his decision for plain Nerd fonts; the glued form comes from wa-fonts' A2 icon
+font). The test compares FULL strings, not one derived from the other:
+
+```text
+running : 󰷺 3·3s Δ↑5.3k ↓851 󰔛 0:25
+finished: 󰷺 3·3s Δ↑5.3k ↓851 󰔛 0:25 · 󰄬HH:MM
+failed  : 󰷺 3·3s Δ↑5.3k ↓851 󰔛 0:25
+```
+
+## MUST 3 - the assertions, exact
+
+The band is asserted row by row on a render through the REAL painter: every painted band row closes
+with `ESC[K`, carries no pad space before it, ends on its last character, and none is wider than the
+band. The `eq(widest, 79)` of the padded era is gone ON PURPOSE and is replaced by the property that
+still holds after item F: the band is no longer pad-to-79, it is its text plus EL - so a test that
+demanded 79 would be asserting the very padding item F removed. What is asserted instead is stronger
+in the direction that matters: no row exceeds the band, none is an empty stripe, and the rows really
+carry their code.
+
+## Where the tests are
+
+| suite | test | wired |
+| --- | --- | --- |
+| `rust/wa-term` `transcript::tests` | the card cut, the card across a resize, item G repaint, the quote rule | `scripts/test.sh:278` |
+| `scripts/test-cli-view.lua` | the exact run rows, item I render, the band row by row | `scripts/test.sh:1741`, `:1747` |
+
+What I ran: `test-cli-view` **597 ok**, `wa-term` **168 ok** (`cargo test --release -p wa-term`), and
+the failing direction of the card test proved by removing the branch and watching it fail.
+
+## Still not verified
+
+* No pty capture of a full `wa chat` answer: this node has no provider stub that emits a fence without
+  a network call. The witness is the real code path - `wrap_rows` on the exact row the renderer emits,
+  and `view()` across a resize - not a photograph.
+* The full `scripts/test.sh` gate was not run.

@@ -1724,6 +1724,12 @@ mod tests {
         assert!(rows[title].contains('\u{29c9}'), "the copy icon is on the TITLE row: {:?}", rows[title]);
     }
 
+    /// Item G: a resize is a REPAINT FROM STATE, not a reflow of printed bytes.
+    ///
+    /// The chat is drawn into a scroll region from the blocks this crate owns, so what a changed
+    /// width must produce is exactly what a session opened at that width would show - in both
+    /// directions. The comparison is against a FRESH transcript built from the same writes, so a
+    /// stale row, a lost block or a half-reflowed one all fail it.
     #[test]
     fn a_resize_repaints_the_whole_chat_at_the_new_width_in_both_directions() {
         let writes: Vec<String> = (0..12)
