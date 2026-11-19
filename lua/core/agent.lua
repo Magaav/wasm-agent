@@ -3534,7 +3534,11 @@ function M:run_body(text, images)
   -- The diff goes with the reply: the topic belongs to this bubble, and the reader should
   -- not need a second request to learn what the message touched.
   self.emit({ type = "reply", text = answer, changes = changes, message_id = message_id })
-  return reply
+  -- Item 5 (review 19/11): the RUN's own outcome is the stripped answer too. `run_body`'s return is
+  -- what a parent reads - a subagent's report, a `task` result, a remote answer - so returning `reply`
+  -- here put the note back into every child's answer, on the one path the reader never sees it fail.
+  -- The transcript row above still keeps `reply` whole: the block is evidence exactly once.
+  return answer
 end
 
 -- Deterministic fallback when no model provider is configured.
