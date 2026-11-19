@@ -25,6 +25,12 @@ target/
 !.env.example
 *.pem
 *.key
+# The one exception, and it names the directory: the SSL_CERT_FILE / SSL_CERT_DIR tests run against a
+# real TLS handshake, so they need a certificate and its key on disk. This material is public test
+# material - a self-signed CA valid until 2126 with nothing behind it - and it is reproduced by
+# rust/wa-tls/fixtures/scratch-tls/generate.sh. Anywhere else, *.pem and *.key stay ignored.
+!rust/wa-tls/fixtures/scratch-tls/*.pem
+!rust/wa-tls/fixtures/scratch-tls/*.key
 *.p12
 *.pfx
 *.jks
