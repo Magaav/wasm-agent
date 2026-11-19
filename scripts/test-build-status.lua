@@ -104,4 +104,30 @@ end
 assert(not fast:find('env -u WASM_AGENT_VAULT_URL', 1, true),
   'scripts/fast.sh still clears by an explicit block-list, so a variable nobody listed still reaches a row')
 
+
+-- ITEM 4 OF THE NODE-OPS ROUND, THROUGH THE REAL host.runtime_info (not a synthetic table): the
+-- document a MODEL can reach must carry the fact that makes 'edited' possible. A binary built from a
+-- dirty work tree embeds code this checkout does not have, so the same commit is not the same bytes;
+-- before this field existed, build_status graded such a binary 'fresh' at the tree HEAD, and the
+-- report said 'edited' about a comparison that could never produce it.
+local raw = host.runtime_info and host.runtime_info()
+assert(type(raw) == 'string', 'host.runtime_info answered no JSON string')
+local decoded, runtime = pcall(json.decode, raw)
+assert(decoded and type(runtime) == 'table', 'host.runtime_info did not decode: ' .. tostring(raw):sub(1, 120))
+assert(runtime.build_source_commit ~= nil, 'host.runtime_info names no build_source_commit')
+local dirty = runtime.build_source_dirty
+assert(dirty ~= nil,
+  'host.runtime_info carries no build_source_dirty, so build_status cannot tell a dirty build from this tree (item 4)')
+assert(dirty == 'true' or dirty == 'false' or dirty == 'unknown',
+  'build_source_dirty is ' .. tostring(dirty) .. ', not true/false/unknown')
+-- And the relation the module reports for THIS process must be consistent with that field: a binary
+-- that says it was built dirty cannot be 'fresh' at its own commit.
+local live = build.status()
+assert(live.binary and live.binary.built_dirty == dirty, 'build_status read ' .. tostring(live.binary and live.binary.built_dirty)
+  .. ' where runtime_info says ' .. tostring(dirty) .. ': the module and the document disagree')
+if dirty == 'true' and live.binary.commit and live.tree.head and live.binary.commit == live.tree.head then
+  assert(live.relation == 'edited', 'a binary built from a DIRTY tree at the tree commit was graded ' .. tostring(live.relation)
+    .. ', and ' .. tostring(live.why))
+end
+print('build status: runtime_info names build_source_dirty=' .. tostring(dirty) .. ', and this process is graded ' .. tostring(live.relation))
 print('build status ok: relation ' .. status.relation .. ' with its reason, the tool agrees, and the runner clears WASM_AGENT_* by allow-list')
