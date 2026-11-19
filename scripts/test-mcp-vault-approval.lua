@@ -688,5 +688,90 @@ for _, wrapper in ipairs(mcp.REFUSED_WRAPPERS) do
   end
 end
 
+-- ---- 9. round 9, item 6: the CLI's own `/mcp <key> on --native <path>` ----------------------
+-- The console's parser is where an operator's voucher enters the system, and it had no test at all: a
+-- relative path, a missing path and the passthrough to mcp_command.toggle were all unproven. Driven
+-- through mcp_cli.run with print captured, on a connector this test seeds itself.
+local cli = dofile('lua/core/mcp_cli.lua')
+local function printed(argument)
+  local lines = {}
+  -- The console hands `run` the line WITHOUT its '/mcp ' prefix (lua/core/chat.lua: `line:sub(5)`), which
+  -- is how the real command reaches it - passing the prefix made every line read key='/mcp'.
+  local body = tostring(argument):gsub('^/mcp%s+', '')
+  local answer = cli.run(body, { ctx = { role = 'master', operator = true, session_id = 'op' },
+    print = function(line) lines[#lines + 1] = tostring(line) end })
+  return answer, table.concat(lines, '\n')
+end
+-- The connector the CLI turns on: a vault entry, probed, and a native binary the operator vouches for.
+-- The SPAWNED interpreter is this test's own native copy (WA_NODE, as the sections above set it): on this
+-- host 'which node' is mise's shim, whose realpath the allow-list refuses by name, and the subject here
+-- is the CLI's voucher, not the shim.
+-- The earlier sections redirect WA_NODE through a getenv STUB that is restored by now (host.getenv is
+-- the host's real reader here), so this section stubs it again for its own duration.
+local cli_getenv = host.getenv
+host.getenv = function(name)
+  if name == 'WA_NODE' then return dir .. '/bin/node' end
+  return cli_getenv(name)
+end
+local cli_binary = native_copy(dir .. '/cli-bin/native-node')
+local cli_definition = { id = 'vault-cli', name = 'CLI fixture', transport = 'stdio',
+  program = cli_binary, args = { '--mode', 'stdio' }, cwd = dir, tools = { echo = 'write' },
+  vault_env = { FIXTURE_TOKEN = 'fixture_token' }, timeout_seconds = 5 }
+local function seed_cli(row_value)
+  local store = { schema = 1, revision = 1, servers = { ['vault-cli'] = row_value } }
+  assert(json.decode(host.sql_exec('INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)',
+    json.encode({ 'mcp.extensions.v1', json.encode(store) }))).ok, 'the CLI registry row is written')
+end
+local function cli_row()
+  local rows = json.decode(host.sql_query('SELECT value FROM meta WHERE key=?', json.encode({ 'mcp.extensions.v1' })))
+  return json.decode(rows[1].value).servers['vault-cli']
+end
+local cli_probe = { ok = true, schema_hash = 'cli-hash',
+  tools = { { name = 'echo', description = 'echo', input_schema_json = '{"type":"object"}' } } }
+seed_cli({ definition = cli_definition, enabled = false, vault_approved = false, revision = 1, probe = cli_probe })
+
+-- (a) A RELATIVE path is refused by name, and nothing is enabled or approved.
+local answer, text = printed('/mcp vault-cli on --native cli-bin/native-node')
+eq(answer.error, 'mcp_vault_native_needs_absolute_path', 'a relative --native path is refused: ' .. text)
+ok(has(text, 'ABSOLUTE path of a native binary'), 'and the sentence says what to give instead: ' .. text)
+eq(cli_row().enabled, false, 'nothing was enabled by the refused line')
+eq(cli_row().vault_approved, false, 'and no approval was recorded')
+
+-- (b) `--native` with NOTHING after it is a usage error, not an approval of nothing.
+answer, text = printed('/mcp vault-cli on --native')
+eq(answer.error, 'mcp_vault_native_usage', 'a bare --native is a usage error: ' .. text)
+ok(has(text, 'usage: /mcp <key> on --native'), 'and the usage line is printed: ' .. text)
+
+-- (c) An ABSOLUTE path that is NOT THERE is refused by the console's gate: the path resolves, so the
+-- parser passes it, and it is mcp.lua that refuses to approve a program it cannot read.
+local missing = dir .. '/cli-bin/not-there-at-all'
+ok(host.path_kind(missing) ~= 'file', 'the missing fixture really is missing')
+answer, text = printed('/mcp vault-cli on --native ' .. missing)
+eq(answer.error, 'mcp_vault_native_unreadable', 'an absolute path that is not there is refused by name: ' .. text)
+eq(cli_row().vault_approved, false, 'and still nothing is approved')
+
+-- (c2) An UNKNOWN argument is refused by name, not ignored: 'on --token abc' must not enable anything
+-- (the old anchored match answered a generic unknown_connector; now the rest of the line is judged).
+answer, text = printed('/mcp vault-cli on --token abc')
+eq(answer.error, 'mcp_usage', 'an unknown argument to on is refused: ' .. text)
+eq(cli_row().enabled, false, 'and nothing was enabled by it')
+answer, text = printed('/mcp vault-cli off extra')
+eq(answer.error, 'mcp_usage', 'an extra word after off is refused too: ' .. text)
+
+-- (d) The voucher is PASSED THROUGH to mcp_command.toggle: an absolute path of a native binary the
+-- connector runs is approved, and the row records the voucher's realpath and sha256.
+answer, text = printed('/mcp vault-cli on --native ' .. cli_binary)
+ok(answer.ok == true, 'the operator turns it on with --native: ' .. text)
+local approved_row = cli_row()
+eq(approved_row.vault_approved, true, 'the row records the approval')
+ok(type(approved_row.vault_approval) == 'table' and type(approved_row.vault_approval.native) == 'table',
+  'and the voucher travelled from the CLI into the approval: ' .. json.encode(approved_row.vault_approval and approved_row.vault_approval.native))
+eq(approved_row.vault_approval and approved_row.vault_approval.native.path,
+  mcp.native_voucher(cli_binary).path, 'the voucher names the binary\'s realpath')
+eq(approved_row.vault_approval and approved_row.vault_approval.native.sha256,
+  mcp.native_voucher(cli_binary).sha256, 'and the bytes on disk, as the manifest recorded them')
+-- Back to the host's own reader, so nothing after this section inherits the stub.
+host.getenv = cli_getenv
+
 if failed > 0 then print(string.format('mcp vault approval: %d failed of %d checks', failed, checks)) os.exit(1) end
 print(string.format('mcp vault approval ok (%d checks)', checks))

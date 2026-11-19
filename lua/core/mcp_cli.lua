@@ -108,7 +108,13 @@ function M.run(argument, opts)
     end
   end
 
-  local key, verb = rest:match('^(%S+)%s*(%S*)$')
+  -- Round 9: the FIRST two words, not the whole line. `^(%S+)%s*(%S*)$` is anchored at the end, so it
+  -- failed on every line with a third word - which is `/mcp <key> on --native <path>` itself: key and verb
+  -- came back nil and the command answered 'unknown_connector' instead of reading the voucher. Found by
+  -- the CLI test of this round (scripts/test-mcp-vault-approval.lua, section 9); nothing else reaches the
+  -- on/probe branches with four words.
+  local key, verb = rest:match('^(%S+)%s+(%S+)')
+  if not key then key, verb = rest:match('^(%S+)'), '' end
   verb = tostring(verb or '')
   -- `/mcp <key>`: the connector, as a balloon whose root is its page.
   if verb == '' then
@@ -139,6 +145,10 @@ function M.run(argument, opts)
 
   if verb == 'on' or verb == 'off' or verb == 'enable' or verb == 'disable' then
     local enable = verb == 'on' or verb == 'enable'
+    -- Round 9: what follows the verb. The old anchored match refused every such line with a generic
+    -- 'unknown_connector'; now that key and verb are the first two words, the REST has to be judged here -
+    -- an unknown argument is refused by name rather than silently ignored (unknown is not yes).
+    local tail = rest:match('^%S+%s+%S+%s*(.*)$') or ''
     -- `/mcp <key> on --native <program>`: the operator vouches for a native binary the digest cannot see
     -- inside, recorded with its sha256 in the approval (docs/VAULT.md). It must name a path: a bare word
     -- is resolved through PATH, which is the thing the approval exists not to trust.
@@ -159,7 +169,13 @@ function M.run(argument, opts)
       elseif rest:match('%-%-native') then
         emit('  usage: /mcp <key> on --native <absolute path of the binary>')
         return { ok = false, error = 'mcp_vault_native_usage' }
+      elseif tail ~= '' then
+        emit('  usage: /mcp <key> on [--native <absolute path of the binary>]')
+        return { ok = false, error = 'mcp_usage' }
       end
+    elseif tail ~= '' then
+      emit('  usage: /mcp <key> off')
+      return { ok = false, error = 'mcp_usage' }
     end
     local answer = command.toggle(ctx, key, enable, { native = native })
     if not answer.ok then
