@@ -172,6 +172,12 @@ P="$(ls "$STAGE"/wasm-agent-artifacts.*/PUBLISH.sh 2>/dev/null | head -1)"
 ok
 [ -f "$P" ] || fail "PUBLISH.sh was not written into the staged release"
 contains "$(cat "$P")" "gh release create node-$SHORT" "PUBLISH.sh carries the gh release create line"
+# IT NEVER MAKES THE NODE RELEASE GITHUB LATEST (item 28). `gh release create` marks a new release as the
+# repository Latest unless told otherwise, so the newest node-<sha12> artifact row - a byte-for-byte build
+# keyed by commit, not a product release - took the badge a human is meant to find, and /releases/latest
+# answered a tag whose notes are a triple list. This file is the command that actually RUNS (the account
+# node executes PUBLISH.sh), so the flag is asserted here and not only on the line printed to a human.
+contains "$(cat "$P")" "--latest=false" "and PUBLISH.sh never makes a node release GitHub Latest"
 contains "$(cat "$P")" "wa-$TRIPLE-$SHORT" "PUBLISH.sh names the relative payload path"
 contains "$(cat "$P")" "--target $COMMIT" "PUBLISH.sh pins the release target to the source commit"
 absent "$(cat "$P")" "$WORK" "PUBLISH.sh has no absolute build path from this machine"
