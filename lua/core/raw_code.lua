@@ -177,6 +177,50 @@ end
 -- Fenced blocks, CommonMark-style: an opening fence of 3+ backticks or 3+ tildes (indented at most three
 -- no backtick in its info string) closes at a line of at least as many backticks and nothing else.
 -- A fence inside another block is that block's text. An unclosed block runs to the end.
+-- Which CodeAct transport this node offers, and the guidance that goes with it (docs/AGENT-SEAT.md,
+-- principles 2 and 7). The choice comes from the model PROFILE the conformance suite stored, never from
+-- a model name: a profile is a measurement, and a name is a guess.
+--
+-- With no profile the default is conservative and says so once: a model that can call tools is offered
+-- the run tool (a native call needs no fence closed), and one that cannot is offered the block.
+M.TRANSPORT_NOTICE_SHOWN = false
+
+-- `supports_tools` is whether this turn can declare tools at all - what the model can actually call.
+-- Returns the transport ("tool_call" or "block"), where the choice came from, and the one-line notice
+-- when it came from the default rather than from a measurement.
+function M.transport_for(model, supports_tools)
+  local ok, profile_lib = pcall(dofile, "lua/core/model_profile.lua")
+  if ok and type(profile_lib) == "table" then
+    local profile = profile_lib.read(model)
+    if type(profile) == "table" then
+      local conform_ok, conform = pcall(dofile, "lua/core/conform.lua")
+      if conform_ok and type(conform) == "table" then
+        local decision = conform.decide(profile)
+        if decision and decision.transport then
+          return decision.transport, "profile", nil
+        end
+      end
+    end
+  end
+  local transport = supports_tools and "tool_call" or "block"
+  local notice = string.format(
+    "conform: no profile for %s, using the conservative %s transport; run `wa conform %s` to measure it",
+    tostring(model or "this model"), transport, tostring(model or "this model"))
+  return transport, "default", notice
+end
+
+-- The guidance sentence that matches a transport. A model offered the run tool is told about the run
+-- tool; one offered the block is told about the block. Saying both is what made a measured model answer
+-- a choice it did not have (the 17/11 offer, M.take).
+function M.guidance_for(transport)
+  if transport == "tool_call" then
+    return "Work in code: call the run tool with `code` - it runs as one script in which every tool is "
+      .. "`tools.<name>(args)`, and its result comes back to you. Use `raw` to carry a file body or a "
+      .. "patch exactly. A message with no tool call is your answer."
+  end
+  return M.FIRST_GUIDANCE
+end
+
 function M.parse(text)
   local blocks, lines, open = {}, lines_of(tostring(text or "")), nil
   for index, line in ipairs(lines) do

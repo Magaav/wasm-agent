@@ -1151,7 +1151,16 @@ function M:build_context()
     -- `only` already opened with the run-block sentence; appending "you may also run a script" under it
     -- offers a choice the node does not have, and the model reads the offer (17/11: DeepSeek answered
     -- the offer with its own <|DSML|> call syntax instead of a block).
-    if raw_code.active(self.codemode_policy) and not raw_first and not raw_only then block=block..'\n'..raw_code.GUIDANCE end
+    -- The transport and its guidance come from the model PROFILE (principle 7); with no profile the
+    -- conservative default is used and says so in one line instead of guessing a result. The model is
+    -- never asked to choose between two transports: the sentence it gets names one.
+    local transport, transport_source, transport_notice = raw_code.transport_for(self.model, #tool_list > 0)
+    self.codeact_transport = transport
+    if raw_code.active(self.codemode_policy) and not raw_first and not raw_only then block=block..'\n'..raw_code.guidance_for(transport) end
+    if transport_source == 'default' and not raw_code.TRANSPORT_NOTICE_SHOWN and transport_notice then
+      raw_code.TRANSPORT_NOTICE_SHOWN = true
+      block=block..'\n'..transport_notice
+    end
     first=first..'\n\n'..block
     parts=parts or {};parts.codemode=host.sha256(block)
   end

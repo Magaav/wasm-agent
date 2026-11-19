@@ -420,6 +420,36 @@ elseif command == "eval" then
   local code = dofile("lua/core/harness_evaluator_cli.lua").run(args)
   if code and code ~= 0 then os.exit(code) end
 
+elseif command == "conform" then
+  -- The conformance suite (lua/core/conform.lua, docs/AGENT-SEAT.md principle 7): ~10 recorded-shape
+  -- tasks run LIVE against one model, and the rates it measured are stored as that model's profile.
+  -- Needs a scratch home of its own (WASM_AGENT_HOME), so a measurement never writes into the node
+  -- it is measuring; the refusal below says so rather than measuring the wrong thing.
+  local model = args[2]
+  if model == nil or model == "" then
+    print("wa conform <model>   run the conformance suite against a model and store its profile")
+    os.exit(1)
+  end
+  local home = host.getenv("WASM_AGENT_HOME") or ""
+  if home == "" then
+    print("conform needs its own scratch home: set WASM_AGENT_HOME to a scratch directory (never the node's own)")
+    os.exit(1)
+  end
+  local provider = dofile("lua/core/provider.lua")
+  local conform = dofile("lua/core/conform.lua")
+  local profile = conform.run(model, function(m, messages, tools, stream, opts)
+    return provider.complete_with(m, messages, tools, stream, opts)
+  end, function(line) print(line) end)
+  local stored, why = conform.store(model, profile)
+  print(string.format("conform %s: %d/%d (%s) transport=%s", model, profile.passed, profile.total,
+    string.format("%.0f%%", profile.rate * 100), tostring(profile.transport)))
+  if not stored then
+    print("conform: the profile was measured but not stored: " .. tostring(why))
+    os.exit(1)
+  end
+  local path = dofile("lua/core/model_profile.lua").path(model)
+  print("conform: profile stored at " .. tostring(path))
+
 elseif command == "turns" then
   -- The turn feed (lua/core/turnfeed_cli.lua, docs/TURNS.md): the model's own `<turn>` notes, read out
   -- of this node's ledger and every peer that answers, grouped into a ranked queue with a brief per
@@ -440,6 +470,7 @@ elseif command == "help" then
   print("    eval capture|list|run|report|verdict|reviewer  freeze real tasks, replay isolated, review a branch, read metrics")
   print("    whatsapp archive list|cut|restore|unload|push|expire [YYYY-MM]  the index's monthly archives")
   print("    turns [--since 24h] [--top N] [--json]  the model's own <turn> complaints, grouped and ranked")
+  print("    conform <model>  run the conformance suite against a model and store its profile")
   print("    turns fixed <cluster> --sha <commit>     mark a cluster fixed; the report then says if it is still hurting")
   print("    resume [--list] [--session <id>] [prompt]   see and continue an unfinished thread")
   print("    chat [--continue|-c|--resume <id>] [--once|-p] [prompt]  one thread; --once exits after its turn(s)")

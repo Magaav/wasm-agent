@@ -1663,6 +1663,9 @@ WA_SCRIPT=scripts/test-adapters.lua "$BIN" --db "$DB" | grep "adapters ok"
 # The two CodeAct transports (docs/AGENT-SEAT.md, principle 2): a fenced run block and a native run
 # call are one pathway, and raw blocks travel byte for byte.
 WA_SCRIPT=scripts/test-codeact-transports.lua "$BIN" --db "$DB" | grep "codeact transports ok"
+# The model profile and the transport it decides (docs/AGENT-SEAT.md, principle 7): a measurement is
+# read, a missing one is named, and the guidance never offers two transports.
+WA_SCRIPT=scripts/test-conform-profile.lua "$BIN" --db "$DB" | grep "conform profile ok"
 
 # Test the shipping registry, including missing/stale/invalid negative controls.
 ( export WA_EMBEDDED_SOURCE_ROOT="$WASM_AGENT_LUA_ROOT"; unset WASM_AGENT_LUA_ROOT
