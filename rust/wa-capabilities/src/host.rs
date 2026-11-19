@@ -6004,3 +6004,56 @@ mod image_and_token_tests {
         assert_eq!(state.pasted_images[1].0, "image/gif");
     }
 }
+
+/// Round 8: the allow-list is decided by these bytes, so the four-byte classifier is the foundation it
+/// stands on - a copy of python called "node" is refused because THIS says "elf" about the real node and
+/// "script" about the shell wrapper. It had no unit test of its own (found 18/11).
+#[cfg(test)]
+mod classify_magic_tests {
+    use super::{classify_magic, file_magic_value};
+
+    /// A scratch directory of this test's own: the Rust suite runs in parallel and a shared path would let
+    /// one test's fixture answer another's question.
+    fn scratch(name: &str, body: &[u8]) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("wa-file-magic-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let path = dir.join(name);
+        std::fs::write(&path, body).expect("a fixture");
+        path
+    }
+
+    #[test]
+    fn the_three_executable_families_are_read_from_their_own_bytes() {
+        assert_eq!(classify_magic(b"\x7fELF\x02\x01\x01\x00"), "elf");
+        // Mach-O, its 64-bit and universal (fat) headers, in both byte orders.
+        for header in [[0xfeu8, 0xed, 0xfa, 0xce], [0xfe, 0xed, 0xfa, 0xcf], [0xce, 0xfa, 0xed, 0xfe],
+                       [0xcf, 0xfa, 0xed, 0xfe], [0xca, 0xfe, 0xba, 0xbe], [0xbe, 0xba, 0xfe, 0xca]] {
+            assert_eq!(classify_magic(&header), "macho", "{header:?}");
+        }
+        assert_eq!(classify_magic(b"MZ\x90\x00"), "pe");
+    }
+
+    #[test]
+    fn a_shebang_is_the_shape_this_exists_to_catch() {
+        // A file NAMED node that is really a shell script running something else.
+        assert_eq!(classify_magic(b"#!/bin/sh\n"), "script");
+        assert_eq!(classify_magic(b"#!/usr/bin/env python3\n"), "script");
+        assert_eq!(classify_magic(b"export const run = 1;\n"), "text");
+        // Not ASCII: not text, and not a family the allow-list admits.
+        assert_eq!(classify_magic(&[0x00, 0xff, 0x10, 0x80]), "binary");
+    }
+
+    #[test]
+    fn a_path_is_answered_by_what_is_there_now() {
+        let elf = scratch("elf", b"\x7fELF\x02\x01\x01\x00");
+        assert_eq!(file_magic_value(&elf.to_string_lossy())["magic"], "elf");
+        let script = scratch("node", b"#!/bin/sh\nexit 0\n");
+        assert_eq!(file_magic_value(&script.to_string_lossy())["magic"], "script");
+        let empty = scratch("empty", b"");
+        assert_eq!(file_magic_value(&empty.to_string_lossy())["magic"], "empty");
+        // A directory and a path that is not there are each named, never guessed as executable.
+        let dir = elf.parent().expect("a parent");
+        assert_eq!(file_magic_value(&dir.to_string_lossy())["magic"], "unreadable");
+        assert_eq!(file_magic_value("/nonexistent/wa-file-magic/nope")["magic"], "missing");
+    }
+}

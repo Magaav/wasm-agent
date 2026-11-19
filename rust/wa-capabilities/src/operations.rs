@@ -1994,6 +1994,31 @@ mod vault_approval_tests {
         let _ = std::fs::remove_file(&owned);
     }
 
+    /// Round 8: the spawned interpreter is judged by the same ALLOW-LIST as the connector's own program,
+    /// and that arm had no test on either side - the test above asserts interpreter_not_covered, which
+    /// fires one step LATER. On a host where "which node" is a mise/asdf/nvm shim the realpath is not
+    /// node (measured here: /home/victor/.local/share/mise/shims/node -> /usr/bin/mise), so this arm is
+    /// the first thing such a host hits.
+    #[test]
+    fn the_interpreter_the_launch_spawns_is_held_to_the_allow_list() {
+        // A native binary whose REALPATH is an interpreter: it is native, it is in the digest, and it is
+        // still refused, because what it IS (python3) is not one of the two families.
+        let interpreter = native_copy("python3");
+        let approved = approval("/usr/bin/node", "", &[], &[], &[&interpreter], &["TOKEN"]);
+        let refused = approval_problem(&approved, &spec(&interpreter.to_string_lossy(), &[])).unwrap_err();
+        assert!(refused.starts_with("vault_approval_program_not_allowed:"), "{refused}");
+        // And a copy NAMED node that is only a shell script: the name is not the program, so it is
+        // refused one branch later (not_native) than a name outside the allow-list.
+        let fake_dir = std::env::temp_dir()
+            .join(format!("wa-vault-approval-{}/fake-node", std::process::id()));
+        std::fs::create_dir_all(&fake_dir).expect("scratch dir");
+        let fake = fake_dir.join("node");
+        std::fs::write(&fake, "#!/bin/sh\nexit 0\n").expect("a shell script called node");
+        let vouched = approval("/usr/bin/node", "", &[], &[], &[&fake], &["TOKEN"]);
+        let refused = approval_problem(&vouched, &spec(&fake.to_string_lossy(), &[])).unwrap_err();
+        assert!(refused.starts_with("vault_approval_program_not_native:"), "{refused}");
+    }
+
     /// Finding 5: Lua and Rust keep lists of refused names, and they drifted - the Rust list matched
     /// "Rscript" only by accident while Lua lowercased first. ONE table (fixtures/mcp-refused-names.json)
     /// is the source of both, and both compare case-insensitively.

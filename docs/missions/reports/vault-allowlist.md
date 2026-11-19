@@ -97,6 +97,7 @@ Victor approves these; the approved ones stay verbatim.
 - `an argument resolves to a wrapper ({value} -> {real}, {clean}), and a digest of files cannot say what it would run`
 - `an argument resolves to an interpreter ({value} -> {real}, {clean}), and a digest of files cannot say what it would run`
 - `it evaluates a string as code (vm: Script, compileFunction or runIn*, under whatever name the module was bound), whose source no digest of files names`
+- `its interpreter ({real}) cannot run a vault connector: {refusal}` - the spawned interpreter (WA_NODE, then the provisioned copy) is judged by the same allow-list, and its refusal follows the colon verbatim (round 8 addendum; measured 18/11: on this host 'which node' is mise's shim, realpath /usr/bin/mise, so this is the FIRST refusal a shimmed host meets)
 
 **CLI (`/mcp <key> on --native`)**
 
