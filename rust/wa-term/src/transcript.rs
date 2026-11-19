@@ -801,6 +801,11 @@ pub fn expand_rule(line: &str, width: usize) -> String {
 
 pub fn wrap_rows(line: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
+    // Item I: a CARD row is code, not prose. It begins with the border bar (U+2502) and the renderer
+    // already wrapped it to its own width, so a host that must wrap it again - a focused block draws
+    // in two columns narrower, and that is the state Victor's screenshot was taken in - has to cut it
+    // by CELLS and keep the bar on every row. Breaking it at a space (the prose rule) is what orphaned
+    // the bar on a row of its own and left the code hanging bare underneath.
     // The printable characters, each with the escape sequences just before it; `esc` = after the last.
     let (mut cells, mut esc): (Vec<(String, char, usize)>, String) = (Vec::new(), String::new());
     let mut chars = line.chars().peekable();
@@ -817,6 +822,40 @@ pub fn wrap_rows(line: &str, width: usize) -> Vec<String> {
     }
     let total: usize = cells.iter().map(|c| c.2).sum();
     if total <= width { return vec![line.to_string()]; }
+    // A card row: the bar, then its code. Cut by cells, and every row keeps the bar.
+    let bar_cells = cells.first().filter(|c| c.1 == '\u{2502}').map(|_| {
+        let mut n = 1usize;
+        while n < cells.len() && cells[n].1 == ' ' { n += 1; }
+        (n, cells[..n].iter().map(|c| c.2).sum::<usize>())
+    });
+    if let Some((head, head_cells)) = bar_cells {
+        let room = width.saturating_sub(head_cells).max(1);
+        let mut rows: Vec<String> = Vec::new();
+        let mut row = String::new();
+        let mut cols = 0usize;
+        let mut first = true;
+        for (prefix, ch, w) in cells.iter() {
+            if first {
+                row.push_str(prefix);
+                row.push(*ch);
+                cols += *w;
+                if *ch == ' ' { continue }
+                first = false;
+                continue;
+            }
+            if cols + *w > width && cols > head_cells {
+                rows.push(std::mem::take(&mut row));
+                for (p, c, _) in &cells[..head] { row.push_str(p); row.push(*c); }
+                cols = head_cells;
+            }
+            let _ = room;
+            row.push_str(prefix);
+            row.push(*ch);
+            cols += *w;
+        }
+        rows.push(row);
+        return rows;
+    }
     // A row that is too wide only because of trailing spaces (a padded band: the code-mode block pads its
     // rows to the screen) is cut at the width, never wrapped: the wrap was a whole blank band row under
     // every code line, and under every row when a focus border took two columns (operator 17/11).
@@ -1570,6 +1609,57 @@ mod tests {
     /// segment to that line, so the card top border used to land at the end of the paragraph - and
     /// every copy marker after it pointed one row early, which is the out-of-step card Victor
     /// photographed on 19/11. The view now closes the line first; this pins the host rule it relies on.
+    /// PHASE 0 for item I, through the real draw path: the rows the Lua renderer emits for the
+    /// screenshot answer, marked copyable, drawn in a transcript area one column narrower than the
+    /// screen (the scrollbar takes it). This dumps what the reader actually gets.
+    /// Item I, phase 0 satisfied: THE ROWS VICTOR PHOTOGRAPHED (19/11) - the copy icon where the
+    /// title row should be, an empty bar row, the code line WITHOUT its bar, then the bottom - are
+    /// what the generic prose wrapper made of a card row it had to re-wrap, and this pins the fix.
+    ///
+    /// A focused block draws its rows in two columns less than the transcript area (the border takes
+    /// them), so a card row the renderer wrapped to the full width has to be drawn narrower - the one
+    /// state a real reader reaches. A card row is CODE: the bar stays on every row and the cut is by
+    /// cells. Measured before the fix: at 57 columns the row came out as the bar alone, then the code
+    /// hanging bare under it, which is the screenshot.
+    #[test]
+    fn a_card_row_that_must_be_drawn_narrower_keeps_its_bar_on_every_row() {
+        // What lua/core/markdown.lua really emits at a 59-column area (one screenshot code line):
+        let rows = [
+            "The fix (one rule, public/components/core.js):".to_string(),
+            "".to_string(),
+            "\u{250c}\u{2500}".to_string(),
+            "\u{2502} :host ::slotted(colmeio-offline-banner){display:contents".to_string(),
+            "\u{2502}\u{21aa}}".to_string(),
+            "\u{2514}\u{2500}".to_string(),
+        ];
+        for width in [59usize, 58, 57, 56, 40, 30] {
+            for wrapped in wrap_rows(&rows[3], width) {
+                let plain = crate::selection::plain(&wrapped);
+                assert!(plain.starts_with('\u{2502}'),
+                    "at {width} columns every card row keeps its bar: {plain:?}");
+                assert!(visible(&wrapped) <= width, "and fits: {plain:?}");
+            }
+        }
+        // No character of the code is lost or invented by the cut (the space rule would drop one).
+        let source = "\u{2502} :host ::slotted(colmeio-offline-banner){display:contents";
+        // Every row repeats the bar (that is what keeps the card readable), so the CODE is the text
+        // after it: dropping each row's bar-and-space must give the source back character for
+        // character - the prose rule would have dropped the space at the break, or a whole word.
+        let mut body = String::new();
+        for row in wrap_rows(source, 20) {
+            let plain = crate::selection::plain(&row);
+            let code = plain.strip_prefix("\u{2502} ").unwrap_or_else(|| {
+                plain.strip_prefix('\u{2502}').unwrap_or(&plain)
+            });
+            body.push_str(code);
+        }
+        assert_eq!(body, source.trim_start_matches("\u{2502} "),
+            "cutting a card row by cells keeps every character of the code");
+
+        // A row that fits is untouched.
+        assert_eq!(wrap_rows(source, 80).len(), 1, "a card row that fits is one row");
+    }
+
     #[test]
     fn a_card_written_into_an_open_line_is_glued_unless_the_line_is_closed_first() {
         let card = "\u{250c}\u{2500}\n\u{2502} body { color: red }\n\u{2514}\u{2500}\n\n";
