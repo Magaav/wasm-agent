@@ -1766,6 +1766,17 @@ function M:run(text, images)
     known=boundary~=nil,partial=false,pending=false,compactions=0}
   return self:run_body(text,images)
   end)
+  -- Review r1, fix 1 (change/done-gate-trial): the run has ENDED here, on every path - an answer, an
+  -- abort, an error, a guard stop. This is the one place the counted record is written, so the state it
+  -- names is the state the run left behind: a Stop-hook continuation that changed something after the
+  -- first candidate answer is counted as the change it was, and a run that ended with no candidate at
+  -- all is counted instead of vanishing. done_gate.note_turn latches, so a re-entered run is ONE turn.
+  if self.gate and not self.gate.disabled then
+    pcall(function()
+      self.gate.effected = (self.gate.effects or 0) > 0 or not changeset.empty(self.changes)
+      done_gate.note_turn(self.gate, { run_id = self.run_id })
+    end)
+  end
   provider.unpin()
   self.reserve_summary=nil
   self.on_call_start=nil
@@ -2217,6 +2228,11 @@ function M:run_body(text, images)
     disabled = (self.subagent and true or false)
       or (self.role ~= "master" and self.role ~= "admin") })
   gate.effects = 0
+  -- Review r1, fix 1 (change/done-gate-trial): the ONE counted record of this run is written at the END
+  -- of the run, not at the first candidate answer. Recording at turn end froze the answer of a moment
+  -- that a Stop-hook continuation could still change, and a run that ended with no candidate at all
+  -- (abort, error, progress-guard stop) recorded nothing. The gate is kept on the run for that one write.
+  self.gate = gate
   local function gate_changes()
     local summary = changeset.summary(self.changes)
     if not summary then return "", {} end
@@ -2234,9 +2250,6 @@ function M:run_body(text, images)
     if gate.disabled then return nil, { action = "disabled" } end
     gate.called_tools = (self.run_counts.tool_calls or 0) > 0
     gate.effected = (gate.effects or 0) > 0 or not changeset.empty(self.changes)
-    -- Item 1 (change/done-gate-trial): the one counted record of this turn's gate outcome, written once
-    -- per run whichever branch below the turn ends on (done_gate.note_turn latches on the state).
-    done_gate.note_turn(gate, { run_id = self.run_id })
     local changes_digest, changed_files = gate_changes()
     local evidence = table.concat({
       "The working agent's candidate answer to this turn:", "", tostring(candidate or ""), "",
