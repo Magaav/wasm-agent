@@ -109,6 +109,13 @@ check(recovery.decide(st("unfinished", "an unanswered question"), nil, now), "a 
 check(recovery.decide(st("failed", "provider_incomplete_stream: partial response preserved"), nil, now),
   "a run whose cuts outlasted the budget is re-driven on restart")
 check(not recovery.decide(st("failed", "finish_reason=length"), nil, now), "a landed failure is not")
+-- ...and a failure that already said it is a WALL is never re-driven: the agent appends this sentence
+-- when one unchanged failure repeats to its ceiling, and re-driving that would be the hot loop the
+-- recovery net must not create.
+local wall = "run_failed: provider_error - the provider call failed: provider_http_500: broken " ..
+  "[the same failure repeated 10 times unchanged; it is not a transient wait any more]"
+check(not recovery.decide(st("failed", wall), nil, now),
+  "a failure that repeated unchanged is not re-driven")
 -- 19/11 12:17 UTC: the run that died in the outage recorded this exact tail and NOTHING resumed it.
 -- The agent no longer ends a run on a transient link failure, so this is the safety net for a run that
 -- already died that way (an older binary, a kill during the outage): a launcher must be able to

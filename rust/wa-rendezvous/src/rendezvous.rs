@@ -374,7 +374,14 @@ fn handle(db_path: &str, stream: &mut TcpStream, relay: &Arc<Mutex<RelayState>>,
     };
     // The lane is known now, so the reservation can be applied to it. Under load a relayed call is
     // shed before it takes a connection a poll or a binding check would have used (RESERVED_LANES).
-    if shed_for_lane_at(open, is_priority_lane(&path), cap) {
+    //
+    // The count is read HERE, not carried from accept: a long poll occupies its slot for up to 25 s,
+    // so the number at accept time is stale by the time the lane is known, and a decision made on a
+    // stale count lets a burst of ordinary requests through the reservation exactly when it matters.
+    // `open` is kept as the caller's view for the log line only.
+    let live = OPEN.load(std::sync::atomic::Ordering::SeqCst);
+    let _ = open;
+    if shed_for_lane_at(live, is_priority_lane(&path), cap) {
         let body = json!({"error":"too_many_connections","retryable":true,
             "retry_after_ms":SHED_RETRY_AFTER_S * 1000,
             "hint":"the registry is serving its reserved lanes first; nothing ran, wait and retry"}).to_string();

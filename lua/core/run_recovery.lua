@@ -48,6 +48,13 @@ function M.decide(state, last_user, now, opts)
   local recoverable = state.state == "unfinished"
   if state.state == "failed" then
     local detail = tostring(state.detail or ""):lower()
+    -- ...unless the failure itself says it is a WALL and not a wait. The agent marks the one shape
+    -- that must not be re-driven: an unchanged failure that repeated to its ceiling (a 500 answering
+    -- the same bytes every time). Re-driving THAT is the hot loop this net must not create, so it is
+    -- refused by name, before the transient patterns are even looked at.
+    if detail:find("the same failure repeated", 1, true) then
+      return nil, "the tail repeated one failure unchanged: re-driving it would repeat a wall"
+    end
     for _, needle in ipairs(RECOVERABLE_FAILURE) do
       if detail:find(needle, 1, true) then recoverable = true break end
     end

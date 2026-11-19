@@ -859,6 +859,12 @@ M.RELAY_DEADLINE_SECONDS = 60
 -- relayed calls/min were then logged as "attached but no answer within the caller's wait (45 s)" and
 -- abandoned. A caller that only waits for its own answer will happily put another call on a node that
 -- is already behind, so the queue never drains: every new call keeps one more slot busy.
+--
+-- WHICH callers, from the 19/11 evidence: the two nodes on the home link, **avell** and the **laptop**
+-- (work's container). Their calls to **openclaw** ran at the highest rate the relay logged (~250/min),
+-- with work as the other target. That is why the cap is per TARGET node and shared by every caller on
+-- the calling node: it is those two machines answering each other, not a fleet-wide storm, and each of
+-- them must bound its own share.
 M.RELAY_MAX_IN_FLIGHT = 4
 
 -- Per-node in-flight counters, shared by EVERY caller on this node.
