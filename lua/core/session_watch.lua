@@ -237,6 +237,8 @@ function M.start(args, ctx)
     program = program,
     cwd = cwd,
     prompt_sha256 = host.sha256(prompt),
+    -- The owner the launch wrote, kept with the run so every later observe names the same one (item 2).
+    owner = 'session:' .. id,
     started_at = host.now(),
     started_by = ctx.user_id,
   })
@@ -316,12 +318,22 @@ local function message_event(row)
   return base
 end
 
+-- THE OWNER THIS START WROTE IS THE OWNER EVERY OBSERVE MUST NAME (session isolation, item 2 round 4).
+--
+-- `M.start` launches with `owner = 'session:' .. id`, and the runtime decides ownership by exactly that
+-- field for a caller that is not a session (item 7 round 2). `status` and the read here used to send only
+-- the id, so the manager answered `operation_not_yours` - which this function reported as nil, and the
+-- watcher then said `unknown` about a run it had started and could see. A session's own run has to be
+-- visible to the session that started it.
+local function run_owner(session_id) return 'session:' .. tostring(session_id or '') end
+
 -- Is the run this node started still supervised? Answered by the operation manager, which is the one
 -- witness that outlives the call that started it *within this process*: after a restart it does not
 -- know the id any more, and that is reported as `unknown` rather than as a run that finished.
-local function operation_state(record)
+local function operation_state(record, session_id)
   if type(record) ~= 'table' or tostring(record.operation_id or '') == '' then return nil end
-  local ok, raw = pcall(host.operation, 'status', json.encode({ id = record.operation_id }))
+  local ok, raw = pcall(host.operation, 'status', json.encode({
+    id = record.operation_id, owner = tostring(record.owner or run_owner(session_id)) }))
   if not ok then return nil end
   local state = decode(raw)
   if not state or state.error then return nil end
@@ -379,7 +391,7 @@ end
 local function tail_state(session_id)
   local state = memory.session_state(session_id) or {}
   local record = remembered_run(session_id)
-  local operation = operation_state(record)
+  local operation = operation_state(record, session_id)
   local steering = run_in_flight(session_id)
   local wake = waiting_on(session_id)
   local run = last_run(session_id)

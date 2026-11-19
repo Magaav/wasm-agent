@@ -591,5 +591,39 @@ for _, operation_id in ipairs(fv_ids) do
   end
 end
 
+-- ---- item 2 round 4: session_watch observes the run it started, as its owner ----------------
+--
+-- `M.start` launches the run with owner = 'session:<id>'. The runtime decides ownership by exactly that
+-- field for a caller that is not a session, so `status` and the read that followed had to name it. They
+-- named only the id, the manager answered `operation_not_yours`, and `operation_state` turned that into
+-- nil: the watcher said `unknown` about a run it had started and could see. Driven against the REAL
+-- operation manager, not a stub.
+local watch_lib = dofile('lua/core/session_watch.lua')
+ok(type(watch_lib.watch) == 'function', 'session_watch is loadable for the ownership test')
+local watch_session = 'iso-session-watch'
+if not memory.session(watch_session) then
+  memory.start_session('', 'isolation', { id = watch_session, user_id = 'master', node_id = '' })
+end
+local watch_run = decode(host.operation('start', json.encode({ command = command, timeout_seconds = 60,
+  owner = 'session:' .. watch_session }))) or {}
+ok(type(watch_run.operation_id) == 'string', 'a run owned by session:<id> was started: ' .. tostring(watch_run.error))
+if type(watch_run.operation_id) == 'string' then
+  host.sql_exec('INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+    json.encode({ 'session.run.v1:' .. watch_session, json.encode({ operation_id = watch_run.operation_id,
+      owner = 'session:' .. watch_session, program = 'test', cwd = '', started_at = host.now() }) }))
+  local nameless = decode(host.operation('status', json.encode({ id = watch_run.operation_id })))
+  ok(nameless ~= nil and nameless.error == 'operation_not_yours',
+    'the same id with no owner is refused by name (what round 3 sent): ' .. tostring(nameless and nameless.error))
+  local watched = watch_lib.watch({ session_id = watch_session, after = 0, wait_ms = 0 },
+    { user_id = 'master', role = 'master' }) or {}
+  local state = type(watched.state) == 'table' and watched.state or {}
+  eq(state.state, 'running', 'the watcher sees the run it started as running, not unknown')
+  eq(state.witness, 'operation', 'and names the operation manager as its witness')
+  ok(type(state.operation) == 'table' and state.operation.id == watch_run.operation_id,
+    'and reports the operation id it is watching')
+  decode(host.operation('cancel', json.encode({ id = watch_run.operation_id, owner = 'session:' .. watch_session })))
+  host.sql_exec('DELETE FROM meta WHERE key=?', json.encode({ 'session.run.v1:' .. watch_session }))
+end
+
 print(string.format("%d checks, %d failed", checks, failed))
 if failed > 0 then os.exit(1) end
