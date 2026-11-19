@@ -282,6 +282,39 @@ for the codes item 8 added).
 | 7 row-at-sha: one ledger per side | `be2563ea` | the base side runs under `$scratch/base/home-<row>` and the change side under `$scratch/change/home-<row>`; both are printed as `base_home=`/`change_home=` | `scripts/test-row-at-sha.sh` refuses equal homes or one inside the other, and requires each under its own side root |
 | 8 LOW: sourced libraries, the record in every entry point, 124 | `94048cad`, `68c0b4a1` | `scripts/lib/row-at-sha.sh` sets `-uo pipefail` only when it IS the program; `deploy.sh`, `mission.sh` and `wa land` run `wa_build_env_audit` and refuse an unknown key by name; a quoted value in the record is unquoted | `scripts/test-build-env.sh` (unknown key stops fast.sh), the deploy/mission/land source assertions in the same test, and `scripts/test-fast-watchdog.sh`, which now proves a command that exits 124 ITSELF comes back 124 with NO watchdog line — the runner reads the watchdog's own line, never the number |
 
+### The 19/11 out-of-memory kill: what grew, and the fix (`c31f9ab6`)
+
+The orchestrator's first task was to find which command took this node from 6 GB to 23 GB RAM + 7.5 GB swap
+(16 h CPU in 1.5 h) and killed `wa-serve`. It was a fork TREE, not one fat process.
+
+* **The kernel agrees, and says the killed process was small.** `journalctl -k` at 17:56:52:
+  `oom-kill:constraint=CONSTRAINT_MEMCG ... oom_memcg=.../mission-node-ops.service` and
+  `Killed process 2643685 (wa) ... anon-rss:45792kB` — 45 MB of anonymous RSS, in this mission's own
+  cgroup. A 45 MB member of a MEMCG OOM is a crowd of identical processes, not a leak in one.
+* **The crowd is in the surviving log.** The earlier session listed them (`out.log:70425-70432`):
+  `wa --db <scratch>/t.db nodes probe bbbbb...` children, still appearing after the run that started them
+  had ended, 1,653 of them by count. 1,653 × ~14 MB ≈ 22 GB, which is the reported 23 GB.
+* **Cause: a probe child probed again.** `wa nodes probe <id>` runs `M.probe` → `M.find` → `M.list`, and
+  `M.list` starts one `wa nodes probe` child per peer (`a1109623`, item 10a of this mission). Every
+  child therefore started its own children: a tree, bounded only by memory. This is why the base has no
+  `M.probe` at all — `git show ac7717e0:lua/core/nodes.lua` contains `M.find` and no `M.probe` — so the
+  recursion is this branch's own regression, not a pre-existing one.
+* **Fix (`c31f9ab6`): a probe child cannot fan out.** `M.probe` marks its process (`M._in_probe_child`);
+  `M.list` starts no children when the mark is set; `M.find` asks the roster with
+  `live_capabilities = false` — a lookup never needs a live probe.
+* **Proof.** `scripts/test-nodes-probe-parallel.lua` case (5) counts every `host.operation` start through
+  its stub: `M.find` starts 0 children, `M.probe` starts 0, the marker is set, and a later `M.list()`
+  inside the probe child starts 0. Run against the parent commit (`6e9f8562`, a temporary worktree of
+  `c31f9ab6^`) it is RED with exactly `REFUSED test-nodes-probe-parallel: M.probe did not mark the process
+  as a probe child, so the next M.list() fans out again`; on this tree it passes.
+
+**What this does NOT claim.** No run of this tree reproduced the 23 GB: the fix makes the growth structural
+impossible and the row proves the fan-out is gone, rather than replaying the collapse. Two things are named
+and NOT fixed: (a) the fast path asserts no MEMORY CEILING — a row that grows is caught by the operator, not
+by the suite, so the 6 GB cap the orchestrator names is still a rule and not a check; (b) a probe child
+OUTLIVED the run that started it (`out.log:70425` lists them after the run ended), so a supervised child
+whose parent dies is still not cancelled by anyone but the parent.
+
 ### Mis-measured premises in the brief (re-measured here)
 
 * Item 1 is real and worse than stated: the stop happens BEFORE the detection, so on a sentinel-supervised
