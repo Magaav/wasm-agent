@@ -418,6 +418,86 @@ function M.agents_md(role)
   return nil, nil
 end
 
+-- Environment notes: `AGENTS.<environment>.md`, for what is true of THIS machine and not of the
+-- project - an Omarchy desktop, a sandboxed container. Resolved exactly like the role file (the
+-- environment's own override, the working directory, then the config directory), so there is one
+-- loader and not two.
+--
+-- The *code* decides which note applies, from the environment; a note never decides for itself,
+-- because two checks that can disagree are two answers. That is also why the detection is an
+-- allow-list of two named environments and not a scan of the tree for `AGENTS.*.md`: a file dropped
+-- there would otherwise become a detection path. Sandbox is tested first and then wins outright: a
+-- sandboxed node is a container on somebody else's machine, and telling it about the desktop it
+-- cannot see is the defect the pair exists to prevent.
+--
+-- `probe` answers "file", "dir", "missing", or "unknown". The reason is the host's own:
+-- `read_file` answers nil plus a named reason, and a directory is not a "missing" file. Anything
+-- else - a permission error, no `read_file` at all - is "unknown", which never counts as yes.
+local function probe(path, read)
+  local text, reason = read(path)
+  if text and text ~= "" then return "file" end
+  if reason == "read_file_is_a_directory:" .. path then return "dir" end
+  if reason == "read_file_missing:" .. path then return "missing" end
+  return "unknown"
+end
+
+-- The conditions, parameterised so the test drives them with fixture envs and a fixture filesystem:
+-- a test that needs the real host cannot prove which note is chosen, it can only observe this host.
+local function sandboxed(env, read)
+  if (env.WASM_AGENT_SANDBOX or "") == "1" then return true end
+  return probe("/.dockerenv", read) == "file"
+end
+
+local function on_omarchy(env, read)
+  if (env.OMARCHY_PATH or "") ~= "" then return true end
+  return probe("/usr/share/omarchy", read) == "dir"
+end
+
+-- Which environment note applies, and its text: one function, because the two questions are one
+-- answer - "sandbox wins when both apply" is a property of the choice, not a separate step a caller
+-- could skip.
+--
+-- `opts` exists for the test, and only for the test: `env`, `read` and `config_dir` inject what the
+-- host would otherwise answer. A detection that can only be exercised on the machine it runs on is a
+-- detection nobody has tested.
+function M.environment_note(role, opts)
+  if (role or "master") == "guest" then return nil end
+  opts = opts or {}
+  local env = opts.env
+  if not env then
+    env = {}
+    if host.getenv then
+      env.WASM_AGENT_SANDBOX = host.getenv("WASM_AGENT_SANDBOX") or ""
+      env.OMARCHY_PATH = host.getenv("OMARCHY_PATH") or ""
+      env.WASM_AGENT_AGENTS_MD_SANDBOX = host.getenv("WASM_AGENT_AGENTS_MD_SANDBOX") or ""
+      env.WASM_AGENT_AGENTS_MD_OMARCHY = host.getenv("WASM_AGENT_AGENTS_MD_OMARCHY") or ""
+    end
+  end
+  local read = opts.read
+  if not read then
+    read = host.read_file and function(path) return host.read_file(path) end or function() return nil, "no_read_file" end
+  end
+  local kind
+  if sandboxed(env, read) then kind = "sandbox" elseif on_omarchy(env, read) then kind = "omarchy" end
+  if not kind then return nil end
+  local name = "AGENTS." .. kind .. ".md"
+  local candidates = {}
+  local configured = env["WASM_AGENT_AGENTS_MD_" .. kind:upper()] or ""
+  if configured ~= "" then candidates[#candidates + 1] = configured end
+  candidates[#candidates + 1] = name
+  local config_dir = opts.config_dir
+  if not config_dir then
+    local ok, dir = pcall(function() return dofile("lua/core/paths.lua").config() end)
+    config_dir = ok and dir or nil
+  end
+  if config_dir and config_dir ~= "" then candidates[#candidates + 1] = config_dir .. "/" .. name end
+  for _, path in ipairs(candidates) do
+    local text = read(path)
+    if text and text ~= "" then return { path = path, text = text } end
+  end
+  return nil
+end
+
 -- The directory a session works in: its own worktree when it has one, else the node's cwd.
 function M.workdir(session_id)
   local ok, worktree = pcall(memory.session_worktree, session_id)
@@ -446,7 +526,17 @@ end
 -- last). They follow the work, not the install: a session on another repo gets that repo's file.
 -- WASM_AGENT_AGENTS_MD names one explicit file instead. A guest gets AGENTS.guest.md only and never
 -- an operator file (see agents_md).
+--
+-- The environment note (see environment_note) rides the same frames, and its place is a contract in
+-- both directions: the user's own <config>/AGENTS.md is first, and the nearest project file is last.
+-- So the note sits directly after the global file and before the project chain - it governs where
+-- every one of them is read, and a project rule that contradicts it still wins by being read later.
 function M.project_instructions(role, workdir)
+  local note = M.environment_note(role)
+  local function with_environment(files, after)
+    if note then table.insert(files, (after or 0) + 1, note) end
+    return files
+  end
   if (role or "master") == "guest" then
     local text, path = M.agents_md("guest")
     return text and { { path = path, text = text } } or {}
@@ -454,7 +544,7 @@ function M.project_instructions(role, workdir)
   local configured = host.getenv(agents_env(role))
   if configured and configured ~= "" then
     local text = host.read_file and host.read_file(configured)
-    return (text and text ~= "") and { { path = configured, text = text } } or {}
+    return (text and text ~= "") and with_environment({ { path = configured, text = text } }, 1) or {}
   end
   local files, seen = {}, {}
   local function read(path)
@@ -469,13 +559,14 @@ function M.project_instructions(role, workdir)
     chain[#chain + 1] = dir
     dir = parent_dir(dir)
   end
+  -- <config>/AGENTS.md is the user's own file, injected as is, and first. Installers no longer seed it
+  -- with the repo's file; scripts/lib/seeded-agents-md.sh retires a copy an older installer left.
+  if global then files[#files + 1] = global end
+  with_environment(files, #files)
   for i = #chain, 1, -1 do
     local file = read(join(chain[i], "AGENTS.md"))
     if file then files[#files + 1] = file end
   end
-  -- <config>/AGENTS.md is the user's own file, injected as is. Installers no longer seed it with the
-  -- repo's file; scripts/lib/seeded-agents-md.sh retires a copy an older installer left behind.
-  if global then table.insert(files, 1, global) end
   return files
 end
 

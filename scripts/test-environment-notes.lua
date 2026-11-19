@@ -1,0 +1,150 @@
+-- Environment notes: which of \`AGENTS.<environment>.md\` a node is given, and that exactly one applies.
+--
+-- Hermetic by construction: every case injects the environment (a table), the filesystem (a reader
+-- over a table) and the config directory (this test's own scratch dir). Nothing here reads the real
+-- host, so the result does not depend on the machine the gate runs on - which is the point, because a
+-- detection that can only be observed where it runs has not been tested. The scratch dir is created
+-- under TMPDIR and the test refuses to run if it is not under it.
+local memory = dofile("lua/core/memory.lua"); memory.setup()
+local agent = dofile("lua/core/agent.lua")
+
+local checks = 0
+local function ok(value, label) checks = checks + 1; if not value then error(label, 2) end end
+local function sh(command) return host.exec(command, "", 30) end
+
+local tmp_base = (host.getenv("TMPDIR") or "/tmp"):gsub("/+$", "") .. "/wa-env-notes-"
+local config_dir = tmp_base .. host.uuid()
+ok(config_dir:sub(1, #tmp_base) == tmp_base, "the scratch config dir is under TMPDIR, never the real ~/.wasm-agent")
+ok(config_dir ~= dofile("lua/core/paths.lua").config(), "the scratch config dir is not this node's config dir")
+sh("mkdir -p '" .. config_dir .. "'")
+ok(host.read_file(config_dir) == nil, "a directory is not readable as a file, so the fixture reader is the only source")
+
+-- A reader over a table: a value is a file, \`DIR\` is a directory, absent is missing.
+local DIR = {}
+local function fs(files)
+  return function(path)
+    local value = files[path]
+    if value == DIR then return nil, "read_file_is_a_directory:" .. path end
+    if type(value) == "string" then return value end
+    return nil, "read_file_missing:" .. path
+  end
+end
+
+local both_notes = {
+  ["AGENTS.sandbox.md"] = "SANDBOX_CWD\n",
+  ["AGENTS.omarchy.md"] = "OMARCHY_CWD\n",
+  [config_dir .. "/AGENTS.sandbox.md"] = "SANDBOX_CONFIG\n",
+  [config_dir .. "/AGENTS.omarchy.md"] = "OMARCHY_CONFIG\n",
+}
+-- The note bodies are always present unless a case says otherwise: a probe file on its own tests the
+-- detection, and a detection that selects a note that does not exist is a separate case below.
+local function merged(files)
+  local out = {}
+  for path, value in pairs(both_notes) do out[path] = value end
+  for path, value in pairs(files or {}) do out[path] = value end
+  return out
+end
+local function note(role, env, files, exact)
+  return agent.environment_note(role, { env = env, read = fs(exact and files or merged(files)), config_dir = config_dir })
+end
+
+-- Detection path 1: WASM_AGENT_SANDBOX=1.
+local by_env = note("master", { WASM_AGENT_SANDBOX = "1" })
+ok(by_env and by_env.path:match("AGENTS%.sandbox%.md$"), "WASM_AGENT_SANDBOX=1 selects AGENTS.sandbox.md")
+ok(by_env.text == "SANDBOX_CWD\n", "the nearest sandbox note is the one read")
+
+-- Detection path 2: /.dockerenv, when the variable is absent.
+local by_file = note("master", {}, { ["/.dockerenv"] = "x" })
+ok(by_file and by_file.path:match("AGENTS%.sandbox%.md$"), "/.dockerenv selects AGENTS.sandbox.md with no variable")
+ok(note("master", { WASM_AGENT_SANDBOX = "0" }, { ["/.dockerenv"] = "x" }).path:match("AGENTS%.sandbox%.md$"),
+  "a value other than 1 does not select it by itself, and the file still can")
+
+-- Detection path 3: OMARCHY_PATH.
+local om_env = note("master", { OMARCHY_PATH = "/usr/share/omarchy" })
+ok(om_env and om_env.path:match("AGENTS%.omarchy%.md$"), "OMARCHY_PATH selects AGENTS.omarchy.md")
+
+-- Detection path 4: /usr/share/omarchy existing as a directory, with no variable.
+local om_dir = note("master", {}, { ["/usr/share/omarchy"] = DIR })
+ok(om_dir and om_dir.path:match("AGENTS%.omarchy%.md$"), "an /usr/share/omarchy directory selects AGENTS.omarchy.md")
+
+-- A directory is not a missing file: treating the two alike would answer no where the machine says yes.
+ok(note("master", {}, { ["/usr/share/omarchy"] = "not a directory" }) == nil,
+  "a plain file at /usr/share/omarchy is not the Omarchy install")
+
+-- Neither matches: no note at all.
+ok(note("master", {}, {}) == nil, "no environment matches, so there is no note")
+local read = fs({})
+local none = agent.environment_note("master", { env = {}, read = read, config_dir = config_dir })
+ok(none == nil, "an empty environment picks nothing")
+
+-- Sandbox wins when both apply, in either detection order.
+local function sandbox_wins(env, files)
+  local chosen = note("master", env, files)
+  ok(chosen and chosen.path:match("AGENTS%.sandbox%.md$"), "sandbox wins over Omarchy when both apply")
+end
+sandbox_wins({ WASM_AGENT_SANDBOX = "1", OMARCHY_PATH = "/usr/share/omarchy" }, both_notes)
+sandbox_wins({ WASM_AGENT_SANDBOX = "1" }, { ["/.dockerenv"] = "x", ["/usr/share/omarchy"] = DIR })
+sandbox_wins({}, { ["/.dockerenv"] = "x", ["/usr/share/omarchy"] = DIR })
+
+-- An unreadable probe is unknown, and unknown is never yes.
+local unknown = function() return nil, "read_file_unreadable:permission denied" end
+ok(agent.environment_note("master", { env = {}, read = unknown, config_dir = config_dir }) == nil,
+  "a probe that cannot tell selects no note")
+
+-- Resolution order matches the role file: the environment's own override, then the working
+-- directory, then the config directory.
+local override = { OMARCHY_PATH = "x", WASM_AGENT_AGENTS_MD_OMARCHY = "/override.md" }
+local files = { ["/override.md"] = "OVERRIDE\n", ["AGENTS.omarchy.md"] = "CWD\n", [config_dir .. "/AGENTS.omarchy.md"] = "CONFIG\n" }
+ok(note("master", override, files).text == "OVERRIDE\n", "an explicit override is read first")
+override.WASM_AGENT_AGENTS_MD_OMARCHY = ""
+ok(note("master", override, { ["AGENTS.omarchy.md"] = "CWD\n", [config_dir .. "/AGENTS.omarchy.md"] = "CONFIG\n" }, true).text == "CWD\n",
+  "the working directory comes before the config directory")
+local from_config = note("master", override, { [config_dir .. "/AGENTS.omarchy.md"] = "CONFIG\n" }, true)
+ok(from_config and from_config.path == config_dir .. "/AGENTS.omarchy.md" and from_config.text == "CONFIG\n",
+  "the config directory is the last place it is looked for")
+local absent = note("master", override, {}, true)
+ok(absent == nil, "a note that is nowhere is nil rather than an empty instruction")
+
+-- A guest never receives an operator note about the operator's machine.
+for _, role in ipairs({ "guest" }) do
+  ok(agent.environment_note(role, { env = { WASM_AGENT_SANDBOX = "1" }, read = fs(both_notes), config_dir = config_dir }) == nil,
+    "a guest gets no environment note")
+end
+
+-- The note rides the project frames in the one place both ordering contracts allow: the user's own
+-- <config>/AGENTS.md is first and the nearest project file is last, so the note sits between them.
+assert(host.write_file(config_dir .. "/AGENTS.md", "# Project rules\nPROJECT_KEEP\n"))
+local saved = agent.environment_note
+agent.environment_note = function(role) return role == "guest" and nil or { path = "ENV_NOTE.md", text = "ENV_KEEP" } end
+local master_files = agent.project_instructions("master", config_dir)
+agent.environment_note = saved
+local note_at, project_at
+for i, file in ipairs(master_files) do
+  if file.path == "ENV_NOTE.md" then note_at = i end
+  if file.text:find("PROJECT_KEEP", 1, true) then project_at = i end
+end
+ok(note_at == 1, "the environment note is the first frame when there is no global file")
+ok(project_at and project_at > note_at, "the project's own nearest file is read after the environment note")
+ok(master_files[#master_files].path ~= "ENV_NOTE.md", "the environment note never displaces the nearest project file")
+local frame = agent.system_sections("master", master_files, master_files[#master_files].path, {}, "full")
+ok(frame.project:find("<project_instructions", 1, true) and frame.project:find("ENV_KEEP", 1, true),
+  "the environment note is rendered inside the project instructions frame")
+ok(frame.project:find("ENV_KEEP", 1, true) < frame.project:find("PROJECT_KEEP", 1, true),
+  "the environment note is rendered before the nearest project file")
+
+-- The two notes ship in the repository, and the Omarchy one stays short: it points at the skill
+-- instead of copying it, so a line budget is the mechanism that keeps it that way.
+local sandbox_note = host.read_file("AGENTS.sandbox.md")
+local omarchy_note = host.read_file("AGENTS.omarchy.md")
+ok(type(sandbox_note) == "string" and sandbox_note ~= "", "AGENTS.sandbox.md ships")
+ok(type(omarchy_note) == "string" and omarchy_note ~= "", "AGENTS.omarchy.md ships")
+local lines = 0
+for _ in omarchy_note:gmatch("[^\r\n]+") do lines = lines + 1 end
+ok(lines <= 40, "AGENTS.omarchy.md stays at or under 40 lines, got " .. lines)
+ok(omarchy_note:find("skill", 1, true) and omarchy_note:find("omarchy", 1, true),
+  "the Omarchy note points at the omarchy skill rather than restating it")
+ok(sandbox_note:find("findmnt", 1, true) and sandbox_note:find("container", 1, true),
+  "the sandbox note names how to list mounts and says it is a container")
+
+sh("rm -rf '" .. config_dir .. "'")
+print("environment notes ok (" .. checks .. " checks, 0 skipped)")
