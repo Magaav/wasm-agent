@@ -2477,6 +2477,7 @@ dependencies = [
  "wa-host-support",
  "wa-operation",
  "wa-sqlite",
+ "wa-tls",
 ]
 
 [[package]]

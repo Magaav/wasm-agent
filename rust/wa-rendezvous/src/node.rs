@@ -272,10 +272,18 @@ pub fn spawn_heartbeat(url: String) {
             .to_string();
             let path = if registered { "heartbeat" } else { "register" };
             let target = format!("{}/{}", url.trim_end_matches('/'), path);
-            let agent: ureq::Agent = ureq::Agent::config_builder()
-                .http_status_as_error(false)
-                .build()
-                .into();
+            // Registration and heartbeats trust the machine's anchors (SSL_CERT_FILE /
+            // SSL_CERT_DIR, read by wa-tls): a rendezvous behind a private CA must be reachable, and
+            // a bundle named there that cannot be read is said out loud once a minute rather than
+            // silently ignored for an hour of unanswered heartbeats.
+            let agent: ureq::Agent = match rendezvous_agent() {
+                Ok(agent) => agent,
+                Err(error) => {
+                    eprintln!("[rendezvous] {path} not sent: {error}");
+                    std::thread::sleep(Duration::from_secs(60));
+                    continue;
+                }
+            };
             match agent
                 .post(&target)
                 .header("Content-Type", "application/json")
@@ -293,6 +301,16 @@ pub fn spawn_heartbeat(url: String) {
             std::thread::sleep(Duration::from_secs(60));
         }
     });
+}
+
+/// The agent one registration or heartbeat uses: this machine's anchors, bounded by nothing else.
+fn rendezvous_agent() -> Result<ureq::Agent, String> {
+    let anchors = wa_tls::tls_config().map_err(|error| format!("tls_anchors_unavailable:{error}"))?;
+    Ok(ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .tls_config(anchors)
+        .build()
+        .into())
 }
 
 /// Milliseconds since the epoch, on one clock for every log line in this crate.

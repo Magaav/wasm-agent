@@ -238,6 +238,14 @@ impl Env {
         Env::set(&[])
     }
 
+    /// Also hold one more variable for the length of this guard, restored when it drops: the same
+    /// lock, so a test that needs its own node key (or any other variable the code under test reads)
+    /// cannot see another test's value.
+    pub fn also(&mut self, name: &'static str, value: &Path) {
+        self.saved.push((name, std::env::var_os(name)));
+        std::env::set_var(name, value);
+    }
+
     /// One variable set to a value that is not a path at all - the misconfiguration the loader must
     /// name instead of excusing.
     pub fn set_text(name: &'static str, value: &str) -> Env {
