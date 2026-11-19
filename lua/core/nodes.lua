@@ -340,6 +340,26 @@ function M.list(opts)
       peer.id = peer.node_id
       peer.kind = "peer"
       peer.local_node = false
+      -- What the peer ACCEPTS, from the peer (item 7 of the node-ops round). The rendezvous stores no
+      -- capabilities at all, so a list built from it answered [] for every peer - including one that
+      -- accepts bash - and a reader had to guess. Three states, and the field always says which:
+      --   capabilities = {...}   the peer answered; these are the names it admits for this caller.
+      --   capabilities = nil     the peer could not be asked (offline, no binding, an older build):
+      --                          capabilities_reason names why, and `opts.cached` means nobody asked.
+      -- A cached display (opts.cached, taken inside somebody else's turn) never pays a network round
+      -- trip: it shows what is already known and says it did not ask.
+      if opts.cached then
+        local known = caps_cache[tostring(peer.node_id or "")]
+        peer.capabilities = known and known.capabilities or nil
+        peer.capabilities_reason = known and known.capabilities and "cached" or "not_asked_cached_view"
+      elseif opts.live_capabilities == false then
+        peer.capabilities = nil
+        peer.capabilities_reason = "not_asked"
+      else
+        local capabilities, why = M.peer_capabilities(peer)
+        peer.capabilities = capabilities
+        peer.capabilities_reason = capabilities and "asked" or tostring(why or "unknown")
+      end
       out[#out + 1] = peer
     end
   end
@@ -801,6 +821,76 @@ local function lookup_record(node_id)
 end
 
 local function short_id(id) return tostring(id or ""):sub(1, 12) end
+
+-- What a peer accepts RIGHT NOW, as the peer itself answers it (lua/core/server.lua, capability
+-- "capabilities"). Item 7 of the node-ops round: M.list gave every peer whatever the rendezvous had
+-- stored, which carried no capabilities at all, so tools.nodes reported [] for a peer that accepts bash
+-- - a reader concludes the peer can do nothing, and the field was simply never filled.
+--
+-- The cost rule: a peer that has already answered is not asked again for NODE_CAPS_TTL seconds, and a
+-- peer that could not be asked is not asked again for NODE_CAPS_RETRY - but it says SO, by name, in
+-- capabilities_reason. An empty list with no reason would be the same lie in a quieter shape, so this
+-- never answers [] without saying why.
+local NODE_CAPS_TTL = 120
+local NODE_CAPS_RETRY = 60
+local caps_cache = {} -- node_id -> { at, capabilities, reason }
+
+-- A read-only signed call to one peer, without the mesh first (this is a discovery read and must not
+-- change routing state for real calls) and without a refusal's retry policy.
+local function ask_capabilities(node)
+  local id = tostring(node.node_id or "")
+  local cache_entry = caps_cache[id]
+  local now = host.now()
+  if cache_entry then
+    local ttl = (cache_entry.capabilities and #cache_entry.capabilities > 0) and NODE_CAPS_TTL or NODE_CAPS_RETRY
+    if (now - cache_entry.at) < ttl then return cache_entry.capabilities, cache_entry.reason end
+  end
+  local body = json.encode({ from_node_id = (M.identity() or {}).node_id, to_node_id = node.node_id,
+    request_id = host.uuid(), capability = "capabilities", args = {} })
+  local headers, problem = M.signed_headers("call", body)
+  if not headers then
+    caps_cache[id] = { at = now, reason = tostring(problem) }
+    return nil, tostring(problem)
+  end
+  local response = M.request(node, "/node/call", body, headers)
+  if not response then
+    caps_cache[id] = { at = now, reason = "remote_unreachable" }
+    return nil, "remote_unreachable"
+  end
+  if response.error or response.status ~= 200 then
+    local why = tostring(response.error or ("http_" .. tostring(response.status)))
+    caps_cache[id] = { at = now, reason = why }
+    return nil, why
+  end
+  local ok_decode, envelope = pcall(json.decode, tostring(response.body or ""))
+  if not ok_decode or type(envelope) ~= "table" then
+    caps_cache[id] = { at = now, reason = "answer_unreadable" }
+    return nil, "answer_unreadable"
+  end
+  -- A verified reply carries the peer's own bytes as a string under `reply` (signed_reply in
+  -- lua/core/server.lua); anything else is not the shape this asks for.
+  local answer = envelope
+  if type(envelope.reply) == "string" then
+    local ok_reply, decoded = pcall(json.decode, envelope.reply)
+    if ok_reply and type(decoded) == "table" then answer = decoded end
+  end
+  if type(answer.capabilities) ~= "table" then
+    local why = tostring(answer.error or "capabilities_absent")
+    caps_cache[id] = { at = now, reason = why }
+    return nil, why
+  end
+  local list = {}
+  for _, name in ipairs(answer.capabilities) do
+    if type(name) == "string" then list[#list + 1] = name end
+  end
+  caps_cache[id] = { at = now, capabilities = list }
+  return list, nil
+end
+
+function M.peer_capabilities(node, opts)
+  if type(node) ~= "table" or node.local_node then return nil, "not_a_peer" end
+  return ask_capabilities(node)
+end
 
 function M.operator_status(node, opts)
   if type(node) ~= "table" or node.local_node then return nil end

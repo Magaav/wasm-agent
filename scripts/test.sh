@@ -939,6 +939,9 @@ gate_run bash scripts/test-fast-watchdog.sh | grep 'test-fast-watchdog: ok'
 # Backup and restore: the manifest, the restore, and the five refusals that write nothing
 # (scripts/test-backup-restore.lua runs under this wrapper with its own scratch home).
 gate_run bash scripts/test-backup-restore.sh | grep 'backup restore ok'
+# What a peer accepts, answered by the peer from its own gate, with a named reason when it cannot be
+# asked (scripts/test-nodes-capabilities.lua under this wrapper).
+gate_run bash scripts/test-nodes-capabilities.sh | grep 'nodes capabilities ok'
 gate_run bash scripts/test-watchdog-upgrade.sh | grep 'test-watchdog-upgrade: ok'
 # Context budget is per model (provider.budget), and it is NOT the same thing as
 # provider.limits, which fetches the account's rate limits for the UI. Confusing
