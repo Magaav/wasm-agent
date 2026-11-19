@@ -91,11 +91,31 @@ to=$(sed -n 's/^commit=//p' "$FROM/installed.txt" 2>/dev/null | head -1 | tr -d 
 [ -n "$REASON" ] || REASON="operator rollback"
 say "restoring ${to:-the previous pair} from $FROM (replacing ${was:-the installed one}); reason: $REASON"
 
-# Stop the supervisor first: it would otherwise restart the node from the binary this is replacing.
-STOPPED=0
+# WHICH UNIT RUNS THE NODE - DETECTED BEFORE ANYTHING IS STOPPED (item 1 of the node-ops round).
+#
+# MEASURED 19/11: this stopped wa-sentinel.service and only THEN asked wa_node_units which unit serves.
+# wa_node_units lists a unit whose MainPID != 0, so the supervisor it had just stopped was invisible,
+# UNIT came back empty, and the script failed 'rollback_unverified' WITHOUT restarting anything: the node
+# stayed down with its binary already replaced. On this node (wa-serve.service serving, wa-sentinel.service
+# inactive) the stop was a no-op and the restart path worked, which is why the defect needed a
+# sentinel-supervised node to show itself.
+#
+# So the serving unit is recorded FIRST, and the SAME unit is stopped and restarted afterwards. When
+# nothing is detected but a supervisor is running, the supervisor is what gets stopped (it would restart
+# the node from the binary being replaced) and it is recorded for the restart as well.
+UNIT_BEFORE=""
+STOPPED_UNIT=""
+if [ "$RESTART" = 1 ] && command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
+  UNIT_BEFORE="$(wa_node_unit)"
+fi
 if [ "$RESTART" = 1 ] && command -v systemctl >/dev/null 2>&1; then
-  if systemctl --user is-active -q wa-sentinel.service 2>/dev/null; then
-    systemctl --user stop wa-sentinel.service && STOPPED=1 || say 'the sentinel service did not stop; the swap is still safe, the restart below is not'
+  if [ -n "$UNIT_BEFORE" ]; then
+    say "the node is served by ${UNIT_BEFORE}; it is stopped for the swap and the same unit is restarted after it"
+    systemctl --user stop "$UNIT_BEFORE" && STOPPED_UNIT="$UNIT_BEFORE" \
+      || say "the unit $UNIT_BEFORE did not stop; the swap is still safe, the restart below is not"
+  elif systemctl --user is-active -q wa-sentinel.service 2>/dev/null; then
+    systemctl --user stop wa-sentinel.service && STOPPED_UNIT=wa-sentinel.service \
+      || say 'the sentinel service did not stop; the swap is still safe, the restart below is not'
   fi
 fi
 
@@ -109,6 +129,8 @@ done
 # release install, .prev/lua-core); a binary rolled back without its tree runs the code it shipped. The
 # swap is a rename in both directions, so an interrupted rollback leaves one of the two trees whole.
 LUA_RESTORED=""
+LUA_VERIFIED=""
+BINARY_VERIFIED=""
 LUA_WANT=""
 LUA_PREV=""
 for candidate in "$FROM/lua-core" "$INSTALL/lua-core.prev" "$FROM/lua-core.prev"; do
@@ -205,6 +227,7 @@ if [ -n "$LUA_RESTORED" ]; then
     fail "rollback_lua_not_effective: $INSTALL/lua-core names ${have_commit:-no commit}/${have_inputs:-no digest}, not the restored ${want_commit}/${want_inputs}. The binary is the restored one and the tree beside it is NOT, so this is not a rollback." 5
   fi
   say "the Lua tree is the restored one (source_commit ${want_commit} / lua_inputs ${want_inputs})"
+  LUA_VERIFIED="source_commit ${want_commit} / lua_inputs ${want_inputs}"
 else
   say 'the Lua tree was not part of this rollback (no previous tree was kept), so only the binary is proven'
 fi
@@ -224,11 +247,18 @@ fi
 # So: the unit is DETECTED (wa_node_unit), the verb is RESTART, the pid read is the one that SERVES
 # (wa_serving_pid: the child, when a sentinel supervises), and BOTH the binary and the Lua tree must match
 # before this script says ok. Everything it cannot prove it refuses by name.
+REASON_TAIL=""
 if [ "$RESTART" = 1 ]; then
   if ! command -v systemctl >/dev/null 2>&1 || ! systemctl --user show-environment >/dev/null 2>&1; then
     say 'no systemd user session here; start the node yourself (the pair is restored), then check it with: readlink -f /proc/<pid>/exe (it must be this install wa)'
+    REASON_TAIL="there is no systemd user session here, so no unit was restarted and no serving pid was read"
   else
-    UNIT="$(wa_node_unit)"
+    # EXACTLY THE UNIT THAT WAS STOPPED (item 1): the serving unit recorded before the swap, then the one
+    # stopped, then - only for a node that had nothing to stop - whatever serves now.
+    UNIT="${UNIT_BEFORE:-${STOPPED_UNIT:-$(wa_node_unit)}}"
+    if [ -z "$UNIT" ]; then
+      UNIT="$(wa_node_unit)"
+    fi
     if [ -z "$UNIT" ]; then
       fail "rollback_unverified: no running systemd unit was found whose process serves this node (wa_node_units saw none), so there is nothing to restart and nothing to read. The pair IS restored. Start the node by hand ($INSTALL/wa serve ...), then check /proc/<pid>/exe against $INSTALL/wa." 5
     fi
@@ -244,19 +274,40 @@ if [ "$RESTART" = 1 ]; then
     done
     verdict="$(wa_running_binary_verdict "$pid" "$INSTALL/wa")"
     case "$verdict" in
-      ok*) say "the node ($UNIT, serving pid $pid) runs the restored binary: $(printf '%s' "$verdict" | cut -d' ' -f2-)" ;;
+      ok*) BINARY_VERIFIED="$pid"; say "the node ($UNIT, serving pid $pid) runs the restored binary: $(printf '%s' "$verdict" | cut -d' ' -f2-)" ;;
+      
       mismatch*)
         fail "rollback_not_effective: $UNIT was restarted, but the process serving this node is NOT the restored binary ($verdict). This is not a rollback: the node still executes the bytes this script meant to replace. Stop $UNIT and install a matching pair, or start the restored binary by hand: $INSTALL/wa" 5 ;;
       *)
         fail "rollback_unverified: $UNIT was restarted, but this script cannot prove which binary serves (${verdict#unknown }). Unknown is not yes: read /proc/$pid/exe yourself before believing this node is rolled back." 5 ;;
     esac
   fi
-elif [ "$STOPPED" = 1 ]; then
-  say 'the supervisor was stopped for the swap and --no-restart was given; start it when you mean to, then check it with: readlink -f /proc/<pid>/exe'
+elif [ -n "$STOPPED_UNIT" ]; then
+  say "the unit $STOPPED_UNIT was stopped for the swap and --no-restart was given; start it when you mean to, then check it with: readlink -f /proc/<pid>/exe"
+  REASON_TAIL="--no-restart was given, so no unit was restarted and no serving pid was read"
 fi
-if [ -n "$LUA_RESTORED" ]; then
-  say "rollback ok (binary and Lua tree both verified)"
+
+# THE LAST LINE IS ONE CLAIM, AND IT NEEDS BOTH HALVES (item 2 of the node-ops round, report text 10).
+#
+# MEASURED 19/11: with no systemd session, with --no-restart, and on an install that kept no previous
+# Lua tree, this script still ended 'rollback ok (binary verified; ...)' - a success line for a rollback
+# whose tree it never compared and whose node it never restarted. The operator reads the last line, so
+# the last line says exactly what was proven: 'rollback ok' only when the serving process executes the
+# restored binary AND the tree beside it is the restored tree, both by identity; otherwise
+# 'rollback_unverified' with every unproven half named.
+if [ -n "$BINARY_VERIFIED" ] && [ -n "$LUA_VERIFIED" ]; then
+  say "rollback ok (binary and Lua tree both verified: serving pid $BINARY_VERIFIED executes $INSTALL/wa, and lua-core is $LUA_VERIFIED)"
 else
-  say "rollback ok (binary verified; no previous Lua tree was kept, so the tree is not part of this answer)"
+  unproven=""
+  if [ -z "$BINARY_VERIFIED" ]; then
+    unproven="${unproven}binary_not_read_by_this_run (no serving pid was proven to execute $INSTALL/wa); "
+  fi
+  if [ -n "$LUA_RESTORED" ] && [ -z "$LUA_VERIFIED" ]; then
+    unproven="${unproven}lua_tree_not_compared; "
+  fi
+  if [ -z "$LUA_RESTORED" ]; then
+    unproven="${unproven}no_previous_lua_tree_was_kept (the tree beside this binary is whatever the last install put there, and this run did not compare it); "
+  fi
+  say "rollback_unverified: the pair WAS restored and these are the parts this run could NOT prove: ${unproven}${REASON_TAIL:-}"
 fi
 exit 0

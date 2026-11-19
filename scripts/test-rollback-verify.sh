@@ -283,8 +283,115 @@ grep -q 'rollback_unverified' "$SCRATCH/restart-none.log" \
   || { echo 'test-rollback-verify: a rollback with no unit did not refuse by name'; exit 1; }
 grep -q 'start' "$fake_marker" 2>/dev/null || { echo 'test-rollback-verify: the fake supervisor never recorded a restart, so this case proved nothing'; exit 1; }
 
+
+# 5. THE SENTINEL-SUPERVISED NODE (item 1 of the node-ops round). MEASURED 19/11: the script stopped
+#    wa-sentinel.service and THEN asked which unit serves; wa_node_units lists only a unit whose MainPID
+#    is non-zero, so the unit it had just stopped was invisible, UNIT came back empty and the rollback
+#    failed WITHOUT restarting anything - the node stayed down with its binary already replaced.
+#    Here the serving unit is ACTIVE at the start and INVISIBLE once stopped (exactly what a stopped
+#    sentinel looks like): the unit must be recorded BEFORE the stop and that same unit restarted.
+#    The fake supervisor answers is-active and hides its pid after 'stop' until 'restart' brings it back.
+printf 'active\n' > "$SCRATCH/unit-active"
+cat > "$fakebin/systemctl" <<'FAKESENTINEL'
+#!/bin/sh
+# A supervisor whose unit is only visible while it is running: the shape that turned a stopped node
+# into 'rollback_unverified' on 19/11.
+FAKE_SCRATCH=$FAKE_SCRATCH
+FAKE_INSTALL=$FAKE_INSTALL
+FAKE_MARKER=$FAKE_MARKER
+FAKE_UNIT=$FAKE_UNIT
+case "$1" in
+  --user)
+    shift
+    case "$1" in
+      show-environment) exit 0 ;;
+      list-units) printf '  %s loaded active running fake node\n' "$FAKE_UNIT"; exit 0 ;;
+      is-active)
+        shift; shift
+        [ -f "$FAKE_SCRATCH/unit-active" ] && exit 0
+        exit 3 ;;
+      show)
+        [ -f "$FAKE_SCRATCH/unit-active" ] || { printf '0\n'; exit 0; }
+        pid="$(cat "$FAKE_SCRATCH/serve.pid" 2>/dev/null)"
+        [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null || pid=0
+        printf '%s\n' "$pid"; exit 0 ;;
+      stop)
+        rm -f "$FAKE_SCRATCH/unit-active"
+        old="$(cat "$FAKE_SCRATCH/serve.pid" 2>/dev/null)"
+        [ -z "$old" ] || kill "$old" 2>/dev/null
+        printf 'stop %s\n' "${2:-}" >> "$FAKE_MARKER"
+        exit 0 ;;
+      restart)
+        old="$(cat "$FAKE_SCRATCH/serve.pid" 2>/dev/null)"
+        [ -z "$old" ] || kill "$old" 2>/dev/null
+        sleep 0.2
+        bash -c 'exec -a "wa serve" "$0" 60' "$FAKE_INSTALL/wa" >/dev/null 2>&1 &
+        printf '%s' "$!" > "$FAKE_SCRATCH/serve.pid"
+        printf 'active\n' > "$FAKE_SCRATCH/unit-active"
+        printf 'restart %s\n' "${2:-}" >> "$FAKE_MARKER"
+        exit 0 ;;
+    esac ;;
+esac
+echo "fake systemctl: unsupported call: $*" >&2
+exit 1
+FAKESENTINEL
+chmod +x "$fakebin/systemctl"
+rm -f "$fake_marker"
+[ -f "$SCRATCH/serve.pid" ] && kill "$(cat "$SCRATCH/serve.pid")" 2>/dev/null; rm -f "$SCRATCH/serve.pid"
+# The node is serving before the rollback, under the unit the supervisor names.
+FAKE_SCRATCH="$SCRATCH" bash -c 'exec -a "wa serve" "$0" 60' "$fake_install/wa" >/dev/null 2>&1 &
+sentinel_serve=$!
+pids+=("$sentinel_serve")
+printf '%s' "$sentinel_serve" > "$SCRATCH/serve.pid"
+sleep 0.3
+FAKE_UNIT=wa-fixture.service FAKE_SCRATCH="$SCRATCH" FAKE_INSTALL="$fake_install" FAKE_MARKER="$fake_marker" PATH="$fakebin:$PATH" \
+  WA_INSTALL_RECORD_LIB="$ROOT/scripts/lib/install-record.sh" WA_ROLLBACK_VERIFY_LIB="$ROOT/scripts/lib/rollback-verify.sh" \
+  bash scripts/rollback-node.sh --install "$fake_install" --from "$fake_install/rollback" --reason fixture \
+  > "$SCRATCH/restart-sentinel.log" 2>&1
+code=$?
+new_sentinel_serve="$(cat "$SCRATCH/serve.pid" 2>/dev/null || true)"
+[ -n "$new_sentinel_serve" ] && pids+=("$new_sentinel_serve")
+# A node left down under a success-or-failure line is the defect; a node brought back under the SAME unit
+# is the fix. Both halves are asserted: it really restarted, and it named the unit it had stopped.
+# THE UNIT IS WHATEVER THE SUPERVISOR REPORTS (wa_node_units looks at wa-serve.service first, then
+# wa-sentinel.service, then list-units), and the ONE fact this case is about is that the unit STOPPED is
+# the unit RESTARTED. Read both names out of the marker and require them to be the same, non-empty name.
+stopped_unit="$(sed -n 's/^stop //p' "$fake_marker" 2>/dev/null | head -1)"
+restarted_unit="$(sed -n 's/^restart //p' "$fake_marker" 2>/dev/null | head -1)"
+[ -n "$stopped_unit" ] \
+  || { echo 'test-rollback-verify: the serving unit was never stopped, so the sentinel case proved nothing'; exit 1; }
+[ "$stopped_unit" = "$restarted_unit" ] \
+  || { echo "test-rollback-verify: the unit stopped ($stopped_unit) is NOT the unit restarted (${restarted_unit:-none}) - a node left down (the 19/11 defect)"; tail -4 "$SCRATCH/restart-sentinel.log"; exit 1; }
+[ "$code" = 0 ] || { echo "test-rollback-verify: a rollback over an ACTIVE sentinel-supervised node failed (exit $code):"; tail -5 "$SCRATCH/restart-sentinel.log"; exit 1; }
+case "$new_sentinel_serve" in
+  ''|"$sentinel_serve") echo "test-rollback-verify: the sentinel-supervised node did not come back on a new pid (old $sentinel_serve, new ${new_sentinel_serve:-none})"; exit 1 ;;
+esac
+[ "$(readlink -f "/proc/$new_sentinel_serve/exe" 2>/dev/null)" = "$(readlink -f "$fake_install/wa")" ] \
+  || { echo 'test-rollback-verify: the node the supervisor restarted does not execute the restored file'; exit 1; }
+
+# 6. THE LAST LINE SAYS WHAT WAS PROVEN (item 2, report text 10). A run under --no-restart never read a
+#    serving pid, and an install that kept no previous tree never compared a tree: neither may end
+#    'rollback ok'. The line must be rollback_unverified and must NAME each unproven half.
+last_without="$(tail -1 "$SCRATCH/without-prev.log")"
+case "$last_without" in
+  *rollback_unverified:*) ;;
+  *) echo "test-rollback-verify: a --no-restart rollback with no previous tree ended '${last_without}', which reads as a verified rollback"; exit 1 ;;
+esac
+case "$last_without" in
+  *binary_not_read_by_this_run*no_previous_lua_tree_was_kept*) ;;
+  *) echo "test-rollback-verify: the unverified line does not name both unproven halves: $last_without"; exit 1 ;;
+esac
+last_prev="$(tail -1 "$SCRATCH/with-prev.log")"
+case "$last_prev" in
+  *rollback_unverified:*binary_not_read_by_this_run*) ;;
+  *) echo "test-rollback-verify: a --no-restart rollback with a matched tree ended '${last_prev}', which claims the binary was verified when no pid was read"; exit 1 ;;
+esac
+case "$last_prev" in
+  *no_previous_lua_tree_was_kept*) echo "test-rollback-verify: a rollback that DID restore a tree was reported as having kept none: $last_prev"; exit 1 ;;
+esac
+
 # The fake supervisor started the restored node in a subshell of its own; its pid is in serve.pid and it
 # is reaped here, so this test leaves no process behind (a supervised operation refuses a run whose shell
 # has a background descendant, measured while writing this case).
 [ -f "$SCRATCH/serve.pid" ] && pids+=("$(cat "$SCRATCH/serve.pid" 2>/dev/null)")
-echo 'test-rollback-verify: ok (a live pid is identified by inode, mismatch and unknown are never ok, the Lua tree moves with the binary, the replaced tree is kept aside, a tree that cannot name itself is refused, and the restart path is exercised with a fake serve and a fake supervisor)'
+echo 'test-rollback-verify: ok (a live pid is identified by inode, mismatch and unknown are never ok, the Lua tree moves with the binary, the replaced tree is kept aside, a tree that cannot name itself is refused, the restart path is exercised with a fake serve and a fake supervisor, a sentinel-supervised node is stopped and restarted as the SAME unit, and the last line says rollback ok only when the binary and the Lua tree were both verified)'
