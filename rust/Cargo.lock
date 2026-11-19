@@ -2535,6 +2535,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "wa-tls"
+version = "0.1.0"
+dependencies = [
+ "rustls",
+ "ureq",
+]
+
+[[package]]
 name = "wa-tool-progress"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,22 @@
+[package]
+name = "wa-tls"
+version = "0.1.0"
+edition = "2021"
+description = "The certificate authorities wa trusts, read from SSL_CERT_FILE / SSL_CERT_DIR with OpenSSL's semantics, so a machine with its own CA bundle can be reached without a rebuild"
+
+[features]
+# scratch: the self-signed HTTPS server and the environment guard the SSL_CERT_FILE /
+# SSL_CERT_DIR tests need. A test server is not linked into a shipped binary: only a test binary
+# enables it (every dependant does so from its own [dev-dependencies]).
+default = []
+scratch = []
+
+[dependencies]
+# The one HTTP client in this project, so the one anchor set: ureq::tls::RootCerts is what an
+# agent reads, and this crate answers in that type instead of inventing a second one.
+ureq = "3"
+
+[dev-dependencies]
+# The scratch server's side of the handshake. Already in the build through ureq, with the same
+# provider (ring), so this adds no second TLS stack and no second crypto backend.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging"] }
