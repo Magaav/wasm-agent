@@ -1681,6 +1681,9 @@ WASM_AGENT_RAW_CODE=native WA_SCRIPT=scripts/test-leak-net.lua "$BIN" --db "$DB"
 # Every explicit mode builds a prompt and tool list byte-identical to a27490af (rel r1 R1):
 # the golden hashes come FROM a27490af, not from this build.
 WA_SCRIPT=scripts/test-mode-parity.lua "$BIN" --db "$DB" | grep "mode parity ok"
+# R2: no switch + a tool-calling provider = the native mode; every other provider keeps the
+# block default; an explicit switch always wins.
+WA_SCRIPT=scripts/test-default-mode.lua "$BIN" --db "$DB" | grep "default mode ok"
 
 # Test the shipping registry, including missing/stale/invalid negative controls.
 ( export WA_EMBEDDED_SOURCE_ROOT="$WASM_AGENT_LUA_ROOT"; unset WASM_AGENT_LUA_ROOT
