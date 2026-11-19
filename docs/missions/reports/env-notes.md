@@ -1,109 +1,109 @@
-# change/env-notes - environment notes picked like AGENTS.windows.md
+# change/env-notes - environment notes (`AGENTS.omarchy.md`, `AGENTS.sandbox.md`)
 
-Branch `change/env-notes`, base `origin/main` (ac7717e0). Two commits, both local, not pushed.
+Branch `change/env-notes`, base `origin/main` (ac7717e0). Local commits, not pushed.
 
-## What the brief asked for, and what the code says
+## The brief's premise was stale, and I measured it before writing code
 
-The brief's premise: "read how `agent.lua M.agents_md(role)` picks `AGENTS.windows.md`, and reuse that ONE
-mechanism (no second loader)." **Measured, that is false.** `M.agents_md` (lua/core/agent.lua) picks by
-role only - `AGENTS.guest.md` for guests, otherwise `AGENTS.md`, then `<config>/AGENTS.md` - and nothing
-in `lua/`, `verify/` or `scripts/` loads `AGENTS.windows.md`. The file says so itself, under "## Status":
-"This file is **not injected yet**. `agent.agents_md` was extended to append it on Windows and that change
-broke the gating test ... so it was reverted." `ARCHITECTURE.md:17` states the intended scope
-(`AGENTS.<platform>.md`, "only on that platform") as a rule, not as shipped behaviour.
+The brief: "read how `agent.lua M.agents_md(role)` picks `AGENTS.windows.md`, and reuse that ONE
+mechanism (no second loader)." **That mechanism does not exist.** `M.agents_md` picks by *role* only -
+`AGENTS.guest.md` for guests, else `AGENTS.md`, then `<config>/AGENTS.md` - and
+`rg 'AGENTS.windows' lua/ scripts/ verify/` answers **zero hits** on this branch and on base.
+`AGENTS.windows.md` says so itself under "## Status": it was reverted when it broke the gating test.
 
-So there was no platform mechanism to reuse. What I reused is the one thing that *is* the loader
-mechanism: the candidate-list resolution order of `M.agents_md`/`M.role_instructions` - environment
-override, then the working directory, then `<config>` - and the frames that `M.project_instructions`
-already returns. There is no second loader and no second prompt section: the note `table.insert`s into the
-existing project frames.
+What I reused is the loader that does exist: the candidate order of `M.agents_md`/`M.role_instructions`
+(override -> working directory -> `<config>`) and the frames `M.project_instructions` returns. One
+loader, no second prompt section. `AGENTS.windows.md` remains unimplemented and unchanged.
 
-I did **not** implement `AGENTS.windows.md` injection (out of scope, and it is the platform item the repo
-already tracks as unfinished). The Windows path is unchanged: `rg 'AGENTS.windows' lua/ scripts/ verify/`
-answers **zero hits** on this branch, and it answered zero on base too (the references are in
-`ARCHITECTURE.md`, `AGENTS.windows.md` itself and the benchmark fixtures, none of which load it).
+## Commits
 
-## What changed
+| commit | item |
+|---|---|
+| `85048da8` | item 1: the two notes, `M.environment_note`, hermetic test, gate wiring |
+| `12891c26` | item 2: `WASM_AGENT_SANDBOX` in `deploy/env.example`/`deploy/README.md`; scope in ARCHITECTURE, LAYERED-PROMPT, MEMORY |
+| `2e315203` | item 3: this report (first version) |
+| `70ab6cb2` | r1 MUST 1: delivery - embed, stage, dev-sync pack, `EMBEDDED` runtime fallback |
+| `ea17f6b9` | r1 MUST 2: an empty read is a file (docker's 0-byte `/.dockerenv`) |
+| (next) | r1 SHOULD: titles, podman marker, roster clause, xdph wording |
 
-### 85048da8 - item 1: the two notes, the detector, the test, the gate
+## Review r1 items, and what each fix does
 
-- `AGENTS.omarchy.md` (18 lines, budget 40): this is Omarchy (Arch, Hyprland, foot/alacritty); use the
-  `omarchy` CLI / `omarchy-*` commands; load the `omarchy` skill before editing anything under
-  `~/.config/` (found via `~/.agents/skills`, which Omarchy symlinks - measured here:
-  `~/.agents/skills/omarchy -> /usr/share/omarchy/default/agents/skills/omarchy`); never hand-edit
-  `/usr/share/omarchy` or `~/.local/share/omarchy`; Hyprland 0.56+ dispatchers are Lua
-  (`hl.dsp.window.close()`, `hyprctl dispatch 'hl.dsp...'`) and the old words fail with "expected a
-  dispatcher" (measured: `hyprctl dispatch thisisnotadispatcher` -> `error: ... hl.dsp.window.close()`,
-  Hyprland 0.56.2); apply with `hyprctl reload` + `hyprctl configerrors`, restart only the `hyprsunset`
-  process, never the session.
-- `AGENTS.sandbox.md` (18 lines): a SANDBOXED node in a container on another machine; HOME is not the
-  user's desktop; host desktop/terminal/fonts/system are out of reach; host files only where mounted
-  (name `findmnt` / `/proc/mounts`); hand desktop tasks to a node that runs on the host, by name from the
-  fleet roster; sandbox wins over Omarchy.
-- `lua/core/agent.lua`: `M.environment_note(role, opts)` - one function, because the choice and its
-  precedence are one answer. Detection is an **allow-list of two named environments**, never a scan for
-  `AGENTS.*.md` (a dropped file must not become a detection path). Order: `WASM_AGENT_SANDBOX=1` or
-  `/.dockerenv` -> sandbox; else `OMARCHY_PATH` set or `/usr/share/omarchy` **a directory** -> omarchy;
-  else nothing. `probe` distinguishes "file", "dir", "missing" and **"unknown"**, and unknown is never
-  yes (a permission error selects no note). A guest gets none. Resolution mirrors the role file:
-  `WASM_AGENT_AGENTS_MD_<KIND>`, then the working directory, then `<config>`.
-- Placement, which cost one iteration: the note goes **after `<config>/AGENTS.md` and before the project
-  chain**. Both of those positions are already pinned by tests - "global file comes first"
-  (`scripts/test-project-instructions.lua:52`) and "nearest file is last" (:26) - and I first put the note
-  first, which broke the former. The documented order ("nearest, most specific last") then still lets a
-  project rule contradicting the note win by being read later.
-- `scripts/test-environment-notes.lua`: 31 checks, hermetic - every case injects `env` (a table),
-  `read` (a reader over a table) and `config_dir` (its own scratch dir under TMPDIR), and refuses to run
-  if that dir is this node's real `~/.wasm-agent`. Covers all four detection paths (`WASM_AGENT_SANDBOX`,
-  `/.dockerenv`, `OMARCHY_PATH`, `/usr/share/omarchy` as a dir), sandbox-beats-Omarchy in three
-  combinations, neither-matches -> no note, unknown -> no note, a plain file at `/usr/share/omarchy` not
-  counting, resolution order, a missing note being nil not "", the guest exclusion, the frame placement and
-  rendering, and that both files ship with the Omarchy one inside its line budget and pointing at the
-  skill.
-- `scripts/test.sh`: wired next to `test-project-instructions` (line 1164), same `WA_SCRIPT`/`grep`
-  shape. The fast path (`scripts/fast.sh`) does not carry the prompt Lua rows at all today
-  (`test-project-instructions` is not there either), so the gate is where it runs.
+**MUST 1 - the notes never reached a deployed node.** Confirmed: `rust/wa-host/build.rs:22` embedded only
+`AGENTS.orchestrator.md` and `AGENTS.subagents.md`, `scripts/lib/lua-tree.sh:30` staged only those two, and
+no installer seeds `<config>`. Fixed in three places, because a note reaches a node by any of them:
 
-### 12891c26 - item 2: documentation
+- `rust/wa-host/build.rs` embeds both notes, so a binary carries them (the same path the role files use).
+- `scripts/lib/lua-tree.sh` stages both, so a Lua-only deploy ships them in `lua-core/`; `scripts/test.sh`
+  now asks `wa_lua_tree_files` itself (not a copy of its list) whether both are in that set.
+- `scripts/dev-sync.sh` packs both for a dev node.
+- `agent.environment_note` falls back to `EMBEDDED[name]` when neither the working directory nor
+  `<config>` has the file, and reports the path as `embedded:AGENTS.<kind>.md`.
 
-- `deploy/env.example`: `WASM_AGENT_SANDBOX=1` documented where the container is composed (compose
-  `environment:` or image `ENV`), with the explicit "set it, do not lean on `/.dockerenv`" reason.
-- `deploy/README.md`: a "A node in a container (sandbox)" section - what the variable buys and why.
-- `ARCHITECTURE.md`: the scope table gains "one environment".
-- `docs/LAYERED-PROMPT.md`: `<project>` now names the environment note's position in the frame order.
-- `docs/MEMORY.md`: the role-scoping table gains the environment scope and its two overrides.
+**Proven with a real binary, not inferred.** `cargo build --release` for this worktree succeeded with
+`WA_CODEMODE_ALLOW_EMPTY=1` (a gate build; the prepared asset directory in the canonical checkout is
+incomplete - `quickjs.wasm` is missing - so `WA_CODEMODE_BUILD_ASSETS` refuses). Run from `/tmp`, where no
+note exists on disk, with a scratch home:
+
+```
+cwd	/tmp
+embedded_omarchy	true
+embedded_sandbox	true
+note	embedded:AGENTS.omarchy.md
+1	embedded:AGENTS.omarchy.md	1604
+```
+
+That is the delivery the review said was missing: the note arrives from the binary, in a directory that
+has none of it.
+
+**MUST 2 - the `/.dockerenv` fallback was dead.** Confirmed: `read_text_file` returns `Ok("")` for a 0-byte
+file, my probe treated `text == ""` as "unknown", and docker creates `/.dockerenv` empty. `probe` now
+answers "file" for any non-nil read (`if text ~= nil`), and the test's fixture is `""` as docker actually
+writes it - the old fixture used `"x"`, which is exactly why the bug was invisible. Podman writes
+`/run/.containerenv` instead, so that is a second probe; both are accepted, and the test covers each and
+their absence.
+
+**MUST 3 - report.** This file. The commit count above is complete, and the verification section covers
+delivery to a node.
+
+**SHOULD, all three texts.**
+
+- Sandbox title is now "# Sandboxed node (inside a container, not on the host desktop)" - the work
+  container is on Victor's own machine, so "somebody else's machine" was wrong.
+- The fleet-roster clause is **dropped, not proven**: `tools.nodes()` on this node returns
+  `name`, `role`, `capabilities`, `online`, binding fields - no field says which machine a node sits on.
+  The note now says the roster gives names, roles and capabilities, not placement, and asks the user
+  which node runs on the host. The test asserts the clause is absent.
+- The `xdph.conf` line no longer claims `omarchy restart hyprsunset` restarts it: `hyprsunset.conf`
+  applies on `omarchy restart hyprsunset`, and `xdph.conf` only when the screen-sharing portal restarts
+  (next login). The same line was wrong in the other direction too and is now split.
+- The sandbox note names both markers only because the detector now accepts both (MUST 2).
 
 ## Verification (what I ran, and what it said)
 
-Against the installed node binary (`/home/victor/.local/bin/wa`) with this worktree's Lua tree via
-`WA_SCRIPT`/`WASM_AGENT_LUA_ROOT`, scratch `WASM_AGENT_HOME` per run:
+Real binary built from these commits (`/home/victor/wasm-agent/target/m-env-notes/release/wa`) and the
+installed one with this worktree's tree, scratch `WASM_AGENT_HOME` per run:
 
-| test | result |
+| check | result |
 |---|---|
-| `scripts/test-environment-notes.lua` | `environment notes ok (31 checks, 0 skipped)` |
+| `scripts/test-environment-notes.lua` | `environment notes ok (45 checks, 0 skipped)` |
 | `scripts/test-project-instructions.lua` | `project instructions ok (9 checks, 0 skipped)` |
 | `scripts/test-prompt-tool-names.lua` | `prompt tool names ok (286 checks, 0 skipped)` |
-| gating block (master/guest files, guest exclusion) | `gating ok` |
 | `bash scripts/sync-prompt-docs.sh --check` | `sync-prompt-docs: ok (4 blocks current)` |
+| `cargo build --release` (`WA_CODEMODE_ALLOW_EMPTY=1`) | `Finished release profile`, rc 0 |
+| embedded delivery from `/tmp` | `note embedded:AGENTS.omarchy.md`, both keys present |
+| `wa_lua_tree_files` includes both notes | yes (staged set printed) |
 | `luac -p lua/core/agent.lua` | ok |
 
-**Pre-existing failures, confirmed on the base (`origin/main`, separate worktree):**
-`scripts/test-prompt-layers.lua` fails at line 5 (`read is native main-loop bootstrap` - its bootstrap
-schema expectation no longer matches the catalog) and `scripts/test-evaluation-feedback.lua` at line 6
-(`relay boundary preserve original evidence`). Both fail identically on base, so neither is mine.
-`scripts/test-prefix-stability.lua` needs `WASM_AGENT_AGENTS_MD` pointed at a scratch file (its own
-header says so) and was not run; that is a harness prerequisite, not a result.
+**Pre-existing failures, confirmed on base in a separate worktree:** `scripts/test-prompt-layers.lua:5`
+(`read is native main-loop bootstrap`) and `scripts/test-evaluation-feedback.lua:6` (`relay boundary
+preserve original evidence`). Neither is mine.
 
-**Not verified, and saying so:** the release build of the whole node. `cargo build --release` for this
-worktree refused in the `wa-capabilities` build script ("code-mode assets required: set
-`WA_CODEMODE_BUILD_ASSETS` ... or `WA_CODEMODE_ALLOW_EMPTY=1`"), so the Lua was exercised through an
-existing binary with the tree on disk, not through an artifact built from these commits. No desktop change
-was performed (no `~/.config` file touched), so the Omarchy note's advice is sourced from measuring the
-installed system's own docs and `hyprctl`, not from applying it.
+**Not verified:** no desktop file was touched, so the Omarchy note's advice is sourced from the installed
+system's own skill and `hyprctl` (0.56.2), not from applying it; and `test-prefix-stability.lua` needs
+`WASM_AGENT_AGENTS_MD` pointed at a scratch file (its own header says so), so it was not run.
 
 ## Texts to approve (verbatim, model- and operator-facing)
 
-1. `AGENTS.omarchy.md` (new file, 18 lines) - full text:
+1. `AGENTS.omarchy.md` (new file, 19 lines):
 
 ```markdown
 # Omarchy (this node runs on the user's own desktop)
@@ -121,45 +121,49 @@ of a container or a headless host, which is why it is here and not in `AGENTS.md
 - Hyprland 0.56+ takes dispatchers as Lua: a binding is `o.bind(..., hl.dsp.window.close())` and a
   script is `hyprctl dispatch 'hl.dsp...'`. The pre-0.56 dispatcher words (closewindow, workspace,
   exec) fail with "expected a dispatcher"; that error is the old syntax, not a missing feature.
-- Apply and verify with `hyprctl reload` then `hyprctl configerrors`. `hyprsunset.conf` and
-  `xdph.conf` are read by other processes, so those restart with `omarchy restart hyprsunset`; never
-  restart the session or the compositor to make a config change take.
+- Apply and verify with `hyprctl reload` then `hyprctl configerrors`. The two `.conf` files are read
+  by other processes, so `hyprctl` neither applies nor validates them: `hyprsunset.conf` takes effect
+  on `omarchy restart hyprsunset`, and `xdph.conf` only when the screen-sharing portal restarts (at
+  the next login). Never restart the session or the compositor to make a config change take.
 ```
 
-2. `AGENTS.sandbox.md` (new file, 18 lines) - full text:
+2. `AGENTS.sandbox.md` (new file, 19 lines):
 
 ```markdown
-# Sandboxed node (a container on somebody else's machine)
+# Sandboxed node (inside a container, not on the host desktop)
 
 This node is a SANDBOX: it runs in a container and its HOME is that container's, not the user's
-desktop. `WASM_AGENT_SANDBOX=1` is set in the container's environment (or `/.dockerenv` exists), and
-this file wins over `AGENTS.omarchy.md` when both would apply.
+desktop. `WASM_AGENT_SANDBOX=1` is set in the container's environment (or the container's own marker,
+`/.dockerenv` or `/run/.containerenv`, exists), and this file wins over `AGENTS.omarchy.md` when both
+would apply.
 
 - The host's desktop, window manager, terminal, fonts, themes, night light and system packages are
   outside your reach. A change here is a change to the container: it is lost with it and it is not
   what the user sees. Say so plainly instead of attempting it.
 - Host files are reachable only where they are mounted. List the mounts (`findmnt`, or read
   `/proc/mounts`) before claiming a path exists: an unmounted path is not "missing", it is not there.
-- For work on the host's desktop - Hyprland, themes, fonts, a terminal profile, a host service - hand
-  the task to a node that runs on the host: the fleet roster lists this deployment's nodes and names
-  the one on the machine itself. If it lists none, tell the user which task a sandbox cannot do
-  rather than half-doing it.
+- For work on the host's desktop - Hyprland, themes, fonts, a terminal profile, a host service - say
+  that a sandbox cannot do it and ask which node runs on the host (the fleet roster gives names, roles
+  and capabilities, not which machine a node sits on). Hand it there if the user names one; never
+  present a container change as a host change.
 - Do not install system packages, touch the user's dotfiles, or restart a desktop service from here.
 - Never present a sandbox result as a host result: what you verified is what you ran here, and the
   answer says which node that was.
 ```
-3. Prompt comment in `docs/LAYERED-PROMPT.md`: "The environment note is `AGENTS.<environment>.md`, for
-   what is true of this machine and not of the project: `AGENTS.sandbox.md` when `WASM_AGENT_SANDBOX=1`
-   or `/.dockerenv` exists, else `AGENTS.omarchy.md` when `OMARCHY_PATH` is set or `/usr/share/omarchy`
-   is a directory (`agent.environment_note`). Sandbox wins when both apply, and neither is injected when
-   neither matches."
+
+3. `docs/LAYERED-PROMPT.md`, the `<project>` paragraph (corrected with MUST 2, since it named only
+   `/.dockerenv` while the detector also accepts podman's marker): "The environment note is
+   `AGENTS.<environment>.md`, for what is true of this machine and not of the project:
+   `AGENTS.sandbox.md` when `WASM_AGENT_SANDBOX=1` or a container marker exists (`/.dockerenv`,
+   docker's, or `/run/.containerenv`, podman's), else `AGENTS.omarchy.md` when `OMARCHY_PATH` is set or
+   `/usr/share/omarchy` is a directory (`agent.environment_note`). Sandbox wins when both apply..."
+
 4. `deploy/env.example`: "This node runs in a container, not on the user's desktop: set it in the
    container's environment ... Set it explicitly rather than relying on /.dockerenv, which some runtimes
    (podman's default, a chroot) do not create."
 
 ## Still open
 
-- `AGENTS.windows.md` injection remains unimplemented (unchanged by this branch); its own Status section
-  is the accurate description and `ARCHITECTURE.md` now distinguishes "platform" from "environment".
-- The two pre-existing failures above are untouched and not fixed here.
-- Nothing pushed; both commits are local.
+- `AGENTS.windows.md` injection is still unimplemented (unchanged by this branch).
+- The two pre-existing test failures are untouched.
+- Nothing pushed.
