@@ -109,7 +109,11 @@ function M.run(model, complete, say, prepare)
     else
       local checked, why = task.check(record, raw_code)
       result.passed = checked == true
-      result.why = result.passed and nil or tostring(why or "the check did not pass")
+      if result.passed then
+        result.why = nil
+      else
+        result.why = tostring(why or "the check did not pass")
+      end
     end
     if not result.passed and type(record) == "table" then
       -- What the record actually held, so a failure is a measurement and not a mystery.
