@@ -97,7 +97,7 @@ the stand-in carries answers, it does not hold connections or flip a flag at a w
 behaviour those two produce was *read* in the code (`serve.rs:2651`, `operations.rs:1163/1537`,
 `rendezvous.rs:700-716`) and is the premise of the adoption, not an assertion of the suite.
 
-### Item 5 - the adopted op belongs to the calling peer session
+### Item 5 - the adopted op belongs to the calling NODE
 
 No new mechanism was needed: `wa_peer_dispatch` already derives `"peer:" .. caller.node_id` from the
 verified caller (never from the request) and dispatches with it, so the operation is recorded under that

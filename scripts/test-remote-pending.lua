@@ -457,4 +457,35 @@ if hot and hot.op then
   tools.dispatch(memory, "operation", { action = "cancel", id = hot.op }, "master", peer_ctx)
 end
 
+-- 15. VERIFICATION r2, SHOULD: a FAILING TRANSPORT never marks the record final.
+--
+-- A relay error during one slice says nothing about the operation: it may still be running there. The
+-- caller-side executor must answer PENDING with the reason, so a later wait asks the peer again - the
+-- failure this pins is "the handle silently became a failed call because the network hiccuped". It is
+-- measured on the EXECUTOR's own poll, which is where the decision lives.
+check(drain_peer_at_least(true), "the peer session is clean before the failing-transport check")
+local held_for_failure = peer_bash("sleep 30", 800)
+check(held_for_failure.state == "pending", "a handle to watch across a failing transport")
+local failure_calls = { n = 0 }
+local failing = function(name, params, raw)
+  if name == "remote" and type(params) == "table" and params.capability == "operation" then
+    failure_calls.n = failure_calls.n + 1
+    return { error = "remote_unreachable", node = tostring(params.node or "") }
+  end
+  return relay(name, params, raw)
+end
+local executor = pending.EXECUTORS["remote"]
+local record = { op = held_for_failure.op, tool = "remote", node = "rp-scratch-peer" }
+local state, reason = executor.poll(failing, {}, record, 3000)
+check(state == nil, "with every call failing there is no state to report")
+check(tostring(reason):find("remote_unreachable", 1, true) ~= nil,
+  "and the reason is the transport's own word: " .. tostring(reason))
+check(failure_calls.n >= 1 and failure_calls.n <= 40,
+  "the failing calls are bounded by the same cap (" .. tostring(failure_calls.n) .. ")")
+-- The operation itself is untouched: the peer still has it running.
+local after_failure = tools.dispatch(memory, "operation", { action = "status", id = held_for_failure.op },
+  "master", peer_ctx) or {}
+check(after_failure.settled ~= true, "the operation itself was never cancelled by the transport failure")
+tools.dispatch(memory, "operation", { action = "cancel", id = held_for_failure.op }, "master", peer_ctx)
+
 print("remote pending ok (" .. tostring(checks) .. " checks)")
