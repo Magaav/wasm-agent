@@ -437,9 +437,13 @@ elseif command == "conform" then
   end
   local provider = dofile("lua/core/provider.lua")
   local conform = dofile("lua/core/conform.lua")
+  local memory = dofile('lua/core/memory.lua'); memory.setup()
+  local sid = memory.start_session('', 'conform ' .. model, { user_id = 'master' })
+  local ctx = { session_id = sid, user_id = 'master', role = 'master' }
+  dofile('lua/core/codemode_policy.lua').pin(memory, 'master', ctx)
   local profile = conform.run(model, function(m, messages, tools, stream, opts)
     return provider.complete_with(m, messages, tools, stream, opts)
-  end, function(line) print(line) end)
+  end, function(line) print(line) end, function() return conform.harness(memory, 'master', ctx) end)
   local stored, why = conform.store(model, profile)
   print(string.format("conform %s: %d/%d (%s) transport=%s", model, profile.passed, profile.total,
     string.format("%.0f%%", profile.rate * 100), tostring(profile.transport)))
