@@ -277,14 +277,25 @@ assert(host.path_kind(fixture_held .. '-wal') == 'file', 'the stale-wal fixture 
 local freed = backup.restore(held_snapshot.dir, { stamp = 'freed' })
 assert(freed.ok, 'with the holder gone the restore was still refused: ' .. tostring(freed.error) .. ': ' .. tostring(freed.detail))
 assert(host.path_kind(fixture_held .. '-wal') == 'missing',
-  'the stale -wal of the old store survived the restore: SQLite would replay it into the restored file')
-local journal_reported = false
+  'the stale -wal of the old store survived beside the restored file: SQLite would replay it into the restored one')
+-- IT IS MOVED, NOT DELETED (item 6 of the node-ops round). A -wal holds committed pages that are not in
+-- the database file yet, so it is part of the OLD store: deleting it threw away the only copy of the state
+-- an operator returns to, at the moment a wrong restore is most likely. The proof is the file, beside the
+-- previous store and under the same stamp.
+local journal_note = nil
 for _, item in ipairs(freed.restored) do
   if item.source == fixture_held then
-    for _, note in ipairs(item.journal or {}) do if note:find('removed the stale -wal', 1, true) then journal_reported = true end end
+    for _, note in ipairs(item.journal or {}) do
+      if note:find('moved the stale -wal aside', 1, true) then journal_note = note end
+    end
   end
 end
-assert(journal_reported, 'the restore removed the stale -wal but did not report it: ' .. json.encode(freed.restored))
+assert(journal_note, 'the restore moved the stale -wal but did not report it: ' .. json.encode(freed.restored))
+local journal_aside = fixture_held .. '.pre-restore-freed-wal'
+assert(host.path_kind(journal_aside) == 'file',
+  'the stale -wal was not kept beside the previous file: ' .. journal_aside .. ' is not there, so the way back to the old store is half a store')
+assert(host.read_file(journal_aside) == 'stale journal of the old store',
+  'the kept -wal does not hold the old journal bytes')
 
 -- (10) The report of what was kept is TRUE, not printed. A store the restore created where no file existed
 -- has no previous file, and the report says so instead of naming a path that does not exist.
@@ -297,4 +308,4 @@ if created_entry.previous then
   assert(host.path_kind(created_entry.previous) == 'file',
     'the restore reports a previous file that is not there: ' .. tostring(created_entry.previous))
 end
-print('backup restore ok: manifest ' .. #manifest.stores .. ' store(s), restore put them back, 7 refusals named, a held store refused with its pid, the stale journal removed, nothing written by any refusal')
+print('backup restore ok: manifest ' .. #manifest.stores .. ' store(s), restore put them back, 7 refusals named, a held store refused with its pid, the stale journal MOVED beside the previous file (not deleted), nothing written by any refusal')

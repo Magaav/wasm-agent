@@ -651,6 +651,37 @@ function M.restore(dir, opts)
         end
       end
     end
+    -- 2b. THE SIDECARS TRAVEL WITH THE FILE THEY BELONG TO (item 6 of the node-ops round).
+    -- MEASURED: this step used to `rm -f` the old -wal/-shm AFTER the restored file was in place. Those
+    -- two files are part of the OLD database - a -wal holds committed pages not yet checkpointed into it -
+    -- so deleting them threw away the only copy of the previous state at the exact moment an operator is
+    -- most likely to need it: a restore that turns out to be wrong. And the removal came after the swap,
+    -- so a failure there left the store restored with a journal of another file still beside it.
+    -- They are MOVED, beside the previous file and under the same stamp, BEFORE the restored bytes land:
+    -- the way back is <source>.pre-restore-<stamp> plus its sidecars - a whole store, not half of one.
+    local journal_notes = {}
+    for _, suffix in ipairs({ '-wal', '-shm' }) do
+      local path = item.source .. suffix
+      local kind = 'missing'
+      if host.path_kind then local ok, value = pcall(host.path_kind, path); if ok then kind = tostring(value) end end
+      if kind == 'file' then
+        local ok_move, move_why = run('mv -f ' .. quote(path) .. ' ' .. quote(aside .. suffix))
+        if not ok_move then
+          local back = false
+          if had_current then
+            local ok_back = run('mv -f ' .. quote(aside) .. ' ' .. quote(item.source))
+            back = ok_back and true or false
+          end
+          pcall(run, 'rm -f ' .. quote(staged), 60)
+          return { ok = false, error = 'restore_journal_move_failed',
+            detail = item.source .. ': the old ' .. suffix .. ' could not be moved beside the previous file (' .. tostring(move_why) .. '); '
+              .. (had_current and (back and ('the previous file was put back from ' .. aside) or ('the previous file is at ' .. aside .. ' and could NOT be put back'))
+                 or 'there was no previous file'),
+            restored = restored }
+        end
+        journal_notes[#journal_notes + 1] = 'moved the stale ' .. suffix .. ' aside to ' .. aside .. suffix
+      end
+    end
     -- 3. The store takes its place by RENAME: the swap is atomic, and a half-written ledger cannot be read
     --    by a node that opens it between the two steps.
     local ok_place, place_why = run('mv -f ' .. quote(staged) .. ' ' .. quote(item.source))
@@ -667,23 +698,18 @@ function M.restore(dir, opts)
             or 'there was no previous file'),
         restored = restored }
     end
-    -- 4. The journal files that belonged to the OLD file go: a -wal that survives the swap describes pages
-    --    of a database that is no longer there, and SQLite would replay it into the restored one. Removed
-    --    or refused by name - never left behind silently.
-    local journal_notes = {}
+    -- 4. NOTHING OF THE OLD FILE MAY BE LEFT BESIDE THE RESTORED ONE. The sidecars were moved above; if one
+    --    is here now, something recreated it while the swap ran, and replaying it into the restored file is
+    --    the corruption this step exists to prevent. Refused by name - never deleted: that file is evidence,
+    --    and the previous store it belongs to goes with it.
     for _, suffix in ipairs({ '-wal', '-shm' }) do
       local path = item.source .. suffix
       local kind = 'missing'
       if host.path_kind then local ok, value = pcall(host.path_kind, path); if ok then kind = tostring(value) end end
-      if kind == 'file' then
-        local ok_rm, rm_why = run('rm -f ' .. quote(path), 60)
-        if ok_rm then
-          journal_notes[#journal_notes + 1] = 'removed the stale ' .. suffix
-        else
-          return { ok = false, error = 'restore_journal_removal_failed',
-            detail = item.source .. ': the restored store is in place but the old ' .. suffix .. ' could not be removed (' .. tostring(rm_why) .. '); SQLite would replay it into the new file, so this store must be repaired by hand',
-            restored = restored }
-        end
+      if kind ~= 'missing' then
+        return { ok = false, error = 'restore_journal_reappeared',
+          detail = item.source .. ': the restored store is in place but a ' .. suffix .. ' is beside it after the old one was moved aside (' .. path .. '); SQLite would replay it into the new file, so this store must be repaired by hand',
+          restored = restored }
       end
     end
     local is_live = (live ~= '' and item.source == live)
