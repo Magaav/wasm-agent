@@ -45,6 +45,14 @@ fn an_operation_that_recorded_no_directory_is_relevant_only_to_its_session() {
     let stranger = ids(index.relevant("/work/tree", "", 16, "session-c", false).unwrap());
     assert!(!stranger.contains(&"op-ano".to_string()) && !stranger.contains(&"op-bno".to_string()),
         "another session is not blocked by a row it did not run: {stranger:?}");
+    // A LEGACY, OWNERLESS row names nobody, and it stays a blocker for a SESSION caller too (item 7,
+    // round 4). round 2 skipped it for a session because the session could not name it - which made the
+    // release fence's own sentence ("unknown legacy attribution remains a blocker, never a cleanup
+    // exemption") false. Unknown is not somebody else's: it is unknown.
+    index.record(&json!({"operation_id":"op-legacy","state":"accepted","settled":false})).unwrap();
+    let with_legacy = ids(index.relevant("/work/tree", "", 16, "session-a", false).unwrap());
+    assert!(with_legacy.contains(&"op-legacy".to_string()),
+        "an ownerless legacy row still blocks a session's release: {with_legacy:?}");
     let _ = fs::remove_dir_all(&root);
 }
 

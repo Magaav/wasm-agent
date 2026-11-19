@@ -50,7 +50,12 @@ pub const DENY_ENV: &[&str] = &[
 /// variable ("*_API_KEY", "*_TOKEN"), and a session could read a model's own key by printing "env" in a
 /// bash child. The shape is the rule; DENY_ENV only names what the shape cannot reach (a "*_KEY" that is
 /// not an API key) and what must stay listed for a reader and for the report.
-pub const DENY_ENV_SUFFIXES: &[&str] = &["_API_KEY", "_TOKEN", "_SECRET", "_PASSWORD"];
+pub const DENY_ENV_SUFFIXES: &[&str] = &[
+    "_API_KEY", "_TOKEN", "_SECRET", "_PASSWORD",
+    // The two AWS/GCP spellings that carry a credential and end in neither "key" nor "token" (item 7):
+    // `AWS_SECRET_ACCESS_KEY` ends in "_ACCESS_KEY", and a `*_PRIVATE_KEY` is a signing key by name.
+    "_SECRET_ACCESS_KEY", "_PRIVATE_KEY",
+];
 
 /// The node's own re-grant: the names its policy lists under "tool_env_allow" in policy.json.
 ///

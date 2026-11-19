@@ -127,7 +127,15 @@ impl Index {
             if recorded_cwd.is_empty() && !node_wide && !session.is_empty() {
                 let owned = serde_json::from_str::<Value>(&state).ok()
                     .and_then(|value| value["session"].as_str().map(str::to_string));
-                if owned.as_deref() != Some(session) { continue; }
+                // ONLY A ROW THAT NAMES ANOTHER SESSION IS SKIPPED (item 7, round 4). A legacy or
+                // ownerless row names NOBODY, and `lua/core/workspaces.lua`'s release fence says exactly
+                // that about it: "unknown legacy attribution remains a blocker, never a cleanup
+                // exemption". Round 2's version skipped those for a session caller too, so the comment
+                // and this rule disagreed and the safe default was the one that lost. An empty session is
+                // not somebody else's: it is unknown, and unknown is not yes.
+                if let Some(owner) = owned.as_deref().filter(|owner| !owner.is_empty()) {
+                    if owner != session { continue; }
+                }
             }
             let risk=db.query_row("SELECT args FROM risk_quarantine WHERE id=? AND expected=?",params![id,state],|r|r.get::<_,String>(0)).optional().map_err(error)?;
             if let Some(raw)=risk {

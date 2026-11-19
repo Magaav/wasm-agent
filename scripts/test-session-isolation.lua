@@ -27,8 +27,12 @@
 do
   local home = tostring(host.getenv("WASM_AGENT_HOME") or "")
   local trimmed = home:gsub("[/\\]+$", "")
+  -- `tmp`/`scratch` are the words a scratch directory carries on any platform, and macOS's own
+  -- `$TMPDIR` (`/var/folders/…/T/`) carries NEITHER - a `mktemp -d` scratch there was refused by this
+  -- guard (item 7). The node's own home is still excluded by name just below.
   local scratch = trimmed:find("scratch", 1, true) ~= nil or trimmed:find("tmp", 1, true) ~= nil
     or trimmed:find("temp", 1, true) ~= nil or trimmed:find("TMP", 1, true) ~= nil
+    or trimmed:match("^/var/folders/") ~= nil
   local real_node = trimmed:match("[/\\]%.wasm%-agent$") ~= nil
   if home == "" or not scratch or real_node then
     print("refusing to run: WASM_AGENT_HOME must be a scratch or temp directory, and never the node's own ~/.wasm-agent (got "
