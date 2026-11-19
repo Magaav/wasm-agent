@@ -183,3 +183,122 @@ as pre-existing in `scripts/fast.sh`; nothing here loosens or deletes an asserti
   empty.
 * The Rust/engine half of #43 beyond `tools.lua` was not re-measured: the tool boundary above is
   what the checks drive.
+
+---
+
+## Round 3 (review 19/11 03:40) - what changed, measured
+
+Base: origin/main `e4e40405`. The branch was rebased onto it before any work; the rebase resolved one
+conflict in `lua/core/raw_code.lua` (base landed the thinking-block verdict functions where this branch
+had `M.unrun`; both were kept, then commit "item 1: drop #22/#51" removed `M.unrun` as it was meant to).
+
+Four commits, each item committed as it finished:
+
+| commit | item | `git diff --stat` |
+|---|---|---|
+| `87b8b523` | 1 | `lua/core/turn_journal.lua | 27 +++-`, `scripts/test-turn-signal.lua | 26 +++` - 2 files, 48 insertions(+), 5 deletions(-) |
+| `7c680cb6` | 2 | `docs/missions/reports/turn-signal.md | 12 ++-`, `lua/core/turn_journal.lua | 55 ++++---`, `scripts/test-turn-signal.lua | 34 ++++` - 3 files, 89 insertions(+), 12 deletions(-) |
+| `1e5352b0` | 3 | `scripts/lib/test-home-guard.lua | 84` (new), `scripts/test-turn-signal.lua | 76 +++-`, `scripts/test.sh | 13 ++-` - 3 files, 166 insertions(+), 7 deletions(-) |
+| `7ddcf978` | 4 | 8 files, 255 insertions(+), 51 deletions(-) |
+
+### Item 1 - the cleanup is the seam's (MUST)
+
+`M.split` no longer runs one blanket gsub over the whole answer. It cuts at each closed `<turn>` and
+joins the pieces through `seam(left, right)`: the spaces a cut stranded on the last line before it go,
+and the newlines from both sides become one blank line between two pieces of text and no line at all
+against the start or the end of the answer. An answer with no closed block never reaches that code, so
+it comes back byte for byte. Tests in `scripts/test-turn-signal.lua` (run by the `turn-signal` row of
+`scripts/test.sh`): indented code, trailing spaces, a markdown hard break, leading whitespace with a
+blank first line, blank lines inside the answer, trailing blank lines and spaces - each asserted equal to
+its own input - plus four seam cases (the cut collapses to one blank line; a leading block leaves no
+blank line; a trailing block leaves none; a block-only answer reads as empty).
+
+### Item 2 - the build is a commit, never 0.1.0 (MUST)
+
+Round 2's `M.build_of` read `{build, build_commit, commit, version}`, and `version` is
+`CARGO_PKG_VERSION` - `0.1.0` for every build of this repo, so every row claimed a known build that
+identified nothing. It now reads exactly two things, in order: `host.build_identity()` when the host has
+one (a string, or a table naming `build_source_commit`), else
+`host.runtime_info().build_source_commit` - the release binary's embedded `WA_BUILD_SOURCE_COMMIT`
+(`rust/wa-capabilities/src/host.rs`). Nothing else is read; an unreadable answer is empty = unknown,
+which a reader prints as `(unknown build)`; bounded to `M.MAX_BUILD = 200`; `h` is injectable so the
+eleven checks drive the rule with no node. Measured here: no `host.build_identity()` exists in this tree
+(`rg -n build_identity` finds none), so on this node the field is `runtime_info()`'s commit or empty.
+
+### Item 3 - the home guard refuses (MUST)
+
+The old guard compared `WASM_AGENT_HOME` with `HOME .. "/.wasm-agent"`, and that can never fire: the host
+resolves `HOME` FROM `WASM_AGENT_HOME` (`rust/wa-host-support/src/paths.rs`), so the process sees
+`HOME == WASM_AGENT_HOME` and the right-hand side is `<home>/.wasm-agent`, never `<home>`. Measured with a
+probe script on this node.
+
+The rule now lives once in `scripts/lib/test-home-guard.lua` and in the same shape inline in
+`scripts/test.sh`'s row:
+
+* allow-list - the home must sit under `GATE_ROOT`, else `TMPDIR`, on a separator boundary (`/tmp/wa-10`
+  is not under `/tmp/wa-1`). Anything else refuses without further inspection.
+* the node's own markers - `<home>/.wasm-agent/node.key` or `<home>/.wasm-agent/memory.db` present means
+  this is (or sits inside) a live node home. Measured here: `TMPDIR` IS `<state>/tmp`, so the allow-list
+  alone would wave a home inside the state root through; the markers are what catch it.
+* existence is asked with `host.canonical_path` which answers a path when it exists and nil when it does
+  not, without reading it. Both probes are injectable, so the test needs no filesystem and no secret.
+
+Measured end to end against the real script: a home outside the scratch root refuses; under the scratch
+root with `node.key` refuses; under it with `memory.db` refuses; a clean scratch home runs (145 checks,
+0 failed).
+### Item 4 - the day report, the page, the fence (LOW)
+
+* no crash on a day with no themes - confirmed first: the theme loop indexed `ranked[1]` and raised
+  "attempt to index a nil value" when every word was a stop word. The report now prints
+  `themes: none (no word in these notes survived the stop list)`.
+* the page says it stopped - `M.count_day` counts the day exactly (`SELECT COUNT(*)`), the report compares
+  that with the page it holds, and a capped day says so in the words quoted below. `--json` carries
+  `total` and `truncated`. `M.recent`'s day query now takes the NEWEST N (`ORDER BY at DESC LIMIT ?`) and
+  reverses to oldest-first, so a capped page is the recent part of the day rather than the morning.
+* an inner bash call is judged like a direct one - measured: `M.script_effect` used
+  `tools.has_effect(name, nil)`, so a read-only `bash` inside a script counted as an effect while the
+  direct path used `read_only_command`. One function now, `M.command_effect(name, args)`, is called by the
+  direct path AND by the codemode record site (`lua/core/codemode.lua`), which stores a single `read_only`
+  bit on the call record (never the command text, and only when true). `M.script_effect` honours it for
+  `bash`/`shell` and treats the bit on any other name as unknown = an effect.
+* one page size - `M.STDOUT_PAGE_BYTES = 24 * 1024` and `M.STDERR_PAGE_BYTES = 8 * 1024` in
+  `codemode_pending.lua`; the handle and `tools.lua`'s adopted-tree result both read them. The Rust page
+  (`rust/wa-capabilities/src/operations.rs`, `24 * 1024`) and the operation schema's literal `24576` are
+  pinned to the same byte by a check (a schema table cannot call a function, so that one copy is asserted
+  rather than shared). The handle also reports `stdout_bytes` from `available_bytes`, the stream's real
+  size, so `stdout_truncated` describes the whole output and not the page.
+* the handle fields are documented - `docs/CODEMODE.md` now names `log_path`, `output_bytes`, `settled` and
+  `state_name` beside `stdout_path`/`stderr_path`, and says what each is copied from (the local `handle` in
+  `codemode_pending.lua`; a field the executor did not answer is absent, never guessed).
+* one clock - the test took "today" from `os.date("%Y-%m-%d")`, the guest's UTC, while the bounds came
+  from `platform.local_clock`. `M.local_day(epoch)` asks the clock `day_bounds` asks; the test uses it and
+  asserts the two agree.
+* a `<turn>` inside a code fence is code - confirmed first: the block WAS stripped and the fence emptied.
+  `M.split` now finds fenced regions (three or more backticks or tildes, closing on the same character),
+  and never treats a tag inside one as the answer's note; a real block after a fence is still the note.
+
+### Texts to approve (round 3, verbatim)
+
+Operator-facing, from the day report (captured by running it on a seeded day):
+
+    read the newest 2 of 4 note(s) that day (--limit raises the page, up to 500)
+    themes: none (no word in these notes survived the stop list)
+
+Model-facing: none added this round. Item 4 changed how an existing call is judged, not what the model is
+told: no notice, refusal or tool description changed.
+
+### Not done, and unknown (round 3)
+
+* `host.build_identity()` does not exist in this tree, so item 2's first source is a rule the host may one
+  day satisfy rather than a path measured alive here. Said as much above.
+* The inner-call `read_only` bit is recorded by the Lua codemode loop. A call that never reaches that
+  record site (a refusal, a schema rejection) carries no bit and is judged unknown = an effect, which is
+  the safe direction and is asserted.
+* Pre-existing failures, measured on base `e4e40405` in a SEPARATE worktree (`git worktree add`, never
+  stash) and unchanged by this round: `test-done-gate.lua` (20 failed, 58 checks - same count and same
+  first failures on base), `test-raw-code.lua` ("switch on: the guidance sentence is in the system
+  prompt"), `test-codemode-default.lua` (`DEFAULT_POSITIVE`) and `test-codemode-pending.lua` (this node has
+  no embedded code-mode assets). None is touched by this round's diff.
+
+* The 24 KiB number is still a literal inside the operation tool's JSON schema. It is asserted equal to
+  `codemode_pending.STDOUT_PAGE_BYTES` by a check rather than shared, because a schema table is data.
