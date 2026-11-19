@@ -645,3 +645,19 @@ and alone - it is a timing flake in a file this branch does not touch (`git diff
 * The full `scripts/test.sh` gate was not run.
 * Item I's own reproduction and fix are NOT verified here by design: they belong to the fence-card
   mission.
+
+## The fast path, and what its failures actually were
+
+`bash scripts/fast.sh --jobs 8`: **265 passed, 32 failed, 0 skipped (919 s)**. The 32 were then each
+run against a **base worktree at origin/main `ac7717e0`** with the same binary:
+
+* **30 of 31 Lua failures are identical on base** - the binary was built with
+  `WA_CODEMODE_ALLOW_EMPTY=1`, so every suite that needs embedded code-mode assets answers
+  "code mode not enabled" on base and here alike. Measured side by side, not assumed.
+* **1 differed, in my favour**: `test-cli-wake-row` failed here and passes on base - because item A
+  changed the footer and that suite carries a **committed snapshot** of the status bar. That snapshot
+  still read `Σ↑0 ↓0`; it is now `Σ↑0 Σ↓0` (commit `8483d82b`), and the suite is green.
+* The non-Lua rows (`build-info`, `component-pins`, `landing-queue`) are environment rows of this
+  node, and `test-build-info` fails on base exactly as it does here.
+
+So no failure on this branch is a failure base does not also have.
