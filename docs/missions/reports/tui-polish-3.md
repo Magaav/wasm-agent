@@ -577,3 +577,71 @@ the failing direction of the card test proved by removing the branch and watchin
   a network call. The witness is the real code path - `wrap_rows` on the exact row the renderer emits,
   and `view()` across a resize - not a photograph.
 * The full `scripts/test.sh` gate was not run.
+
+---
+
+# Round 4: item I is split out of this mission
+
+Item I (the fence card) is **not** in this mission any more. It is its own mission, **fence-card**,
+where the reproduction and the fix belong; this branch carries A-H and the MUST 2/3 work only.
+
+## What was done, and how
+
+Six `git revert` commits (history is never rewritten): `40218ba9`, `ea1d8680`, `53b6c52d`,
+`68449949` and the item-I parts of the two commits that mixed it with item G. Where a revert took
+item G with it, item G was restored by hand in the same commit: the deterministic
+`a_long_session_repaints_one_screenful_and_remeasures_nothing`, the pure `repaint_is_due` /
+`REPAINT_CLEAR` helpers with their `repaint_tests`, and both gate lines.
+
+**Fences now behave exactly as on the base**, and that is measured, not assumed:
+`lua/core/markdown.lua` has **0 changed lines against origin/main** (`git diff origin/main -- lua/core/markdown.lua`),
+and the renderer emits base rows for the two shapes the review names:
+
+```text
+w78  [┌─ css] [│ a] [│ b] [│ c] [└─]
+w58  [┌─] [│ body { color: red }] [└─]
+```
+
+The host's `wrap_rows` is back to its base body: no ``fence mark``, no card branch. What remains in
+`transcript.rs` is item G's repaint test and item F's `icon_at_band_end`.
+
+## The width assertion, explained
+
+MUST 3 asked for `eq(widest, 79)`. That assertion **cannot** hold after item F, and demanding it
+would demand the bug back: before F a band row was its code PADDED with spaces to 79 columns, so its
+width was 79 by construction. F replaced that padding with EL (`ESC[K`), which paints the rest of the
+row at whatever width the terminal has, with no characters. A padded-to-79 row is exactly what F
+removed - it is the thing that re-wrapped on a resize in Victor's 11:20 screenshot.
+
+So the assertion moved to the properties that still mean something, and the orchestrator accepts them
+(`widest <= 79` / `>= 40`): no band row is wider than the band (the transcript must never wrap it),
+the rows really carry their code (not a vacuous pass), no row is an empty stripe, and every painted
+row closes with `ESC[K` and holds no pad space before it.
+
+## A-H, with commits
+
+| item | commit |
+| --- | --- |
+| A - a SIGMA on both session totals | `8c63b62a` |
+| B - a finished run appends ` · 🄬HH:MM` | `3cf4bf22`, `b4ecfb3d` |
+| C - the turn block stays in the answer | round 1 `419ec9b4` (verified, unchanged) |
+| D - wrap at the last space; code cut by cells | `c094a20d`, `a7d51d52` |
+| E - the bubble takes its width at render time | `54525ab6` |
+| F - backgrounds paint with EL, never pad spaces | `54525ab6` |
+| G - a resize repaints from state, debounced | `4c0259ba`, `b94e3ca7` (deterministic test, gate wiring) |
+| H - the run row is THIS RUN only | `b4cf075e` |
+| I - **moved to its own mission, fence-card** | - |
+
+## What I ran
+
+`test-cli-view` **546 ok** (was 597 with item I's block), `test-cli-resize` 73 ok,
+`test-codemode-blocks` 40 ok, `test-markdown` 102 ok. Rust: `wa-term` 163 ok,
+`wa-capabilities` 343 ok. One `wa-capabilities` subagent test failed once and passed on the rerun
+and alone - it is a timing flake in a file this branch does not touch (`git diff --stat` names only
+`host.rs` there), not a regression of this work.
+
+## Still not verified
+
+* The full `scripts/test.sh` gate was not run.
+* Item I's own reproduction and fix are NOT verified here by design: they belong to the fence-card
+  mission.
