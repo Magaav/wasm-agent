@@ -85,6 +85,17 @@ ok(not done_gate.work_shaped('Why does the build fail?'), 'why ... ? is a questi
 ok(not done_gate.work_shaped('What did the smoke test skip?'), 'what ... ? is a question')
 ok(not done_gate.work_shaped('[self-wake] scheduled wake: look again'), 'a harness turn is not an operator request')
 
+-- ---- item 2: the one sentence the model is given about the capture ---------------------------
+-- change/done-gate-trial (19/11): ONE sentence, verbatim, asks for the acceptance checks BEFORE the
+-- first effect. Pinned as written - the operator chose the words, and a paraphrase here is a different
+-- instruction to the model - and pinned once, because a guidance list that says it three times is noise
+-- the model learns to skip.
+local policy = dofile('lua/core/codemode_policy.lua')
+local sentence = [[When a request asks for a change, record its acceptance checks with `done_criteria` before the first effect.]]
+ok(policy.guidance:find(sentence, 1, true) ~= nil, 'the capture sentence is in the code-mode guidance, verbatim')
+ok(select(2, policy.guidance:gsub('record its acceptance checks', '')) == 1, 'and it is said once, not repeated into noise')
+ok(policy.guidance:find('done_criteria') ~= nil, 'and it names the tool the model has to call')
+
 -- ---- A. the store and the tool -----------------------------------------------------------------
 local a = session('store')
 local request = 'Fix the flaky landing queue and prove the fix'
