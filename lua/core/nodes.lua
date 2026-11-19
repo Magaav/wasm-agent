@@ -232,6 +232,14 @@ function M.set_name(name)
   return name
 end
 
+local function decode_body(text)
+  if type(text) ~= "string" or text == "" then return nil end
+  local ok, value = pcall(json.decode, text)
+  if not ok or type(value) ~= "table" then return nil end
+  return value
+end
+M.decode_body = decode_body
+
 local function fetch_peers(fresh, cached_only)
   local url = M.rendezvous_url()
   if url == "" then return {} end
@@ -544,13 +552,6 @@ end
 -- RAISES on all of those, and an uncaught raise inside a caller's slot accounting leaked the slot for
 -- good (four leaked slots = peer_busy_caller forever, with nothing sent and nothing run). Everything
 -- that reads a transport body goes through here, and a body that is not JSON is a named failure.
-local function decode_body(text)
-  if type(text) ~= "string" or text == "" then return nil end
-  local ok, value = pcall(json.decode, text)
-  if not ok or type(value) ~= "table" then return nil end
-  return value
-end
-M.decode_body = decode_body
 
 -- Send a request to a node: directly when it advertises a routable endpoint,
 -- otherwise through the relay. `headers` are forwarded to the target.
@@ -880,81 +881,37 @@ local SLOT_TTL_SECONDS = 120
 -- The fallback for a host with no data directory (a fixture): the cap still applies in-process.
 local relay_in_flight = {}
 
--- The slots live DIRECTLY in the node's data directory, which already exists. A subdirectory would
--- need a mkdir the host does not offer (write_file does not create parents), and a slot file that
--- silently fails to be written makes the cap read zero forever - measured on the first version of
--- this, which stopped binding anything. The prefix keeps them apart from every other file there.
-local function slot_dir()
-  local ok, paths = pcall(dofile, "lua/core/paths.lua")
-  if not ok or not paths then return nil end
-  return paths.data()
-end
-
--- ONE file per peer holds the count and the second it was last written: <count>:<epoch>.
--- A file per held slot would need a delete primitive this host does not have (write_file overwrites,
--- nothing removes), so the counter is a single overwritable file and a lost read-modify-write costs one
--- extra relayed call, never a wedge. A crashed holder is handled at file granularity: a count older
--- than the TTL is a count nobody is holding.
-local function slot_file(node_id)
-  local dir = slot_dir()
-  if not dir then return nil end
-  return dir .. "/relay-slot-" .. tostring(node_id) .. ".count"
-end
-
-local function slot_read(node_id)
-  local path = slot_file(node_id)
-  if not path or type(host.read_file) ~= "function" then return nil end
-  local ok, text = pcall(host.read_file, path)
-  if not ok or type(text) ~= "string" then return 0 end
-  local count, stamp = tostring(text):match("^%s*(%d+)%s*:%s*(%d+)")
-  count, stamp = tonumber(count), tonumber(stamp)
-  if not count then return 0 end
-  local now = tonumber(host.now()) or 0
-  if stamp and now - stamp > SLOT_TTL_SECONDS then return 0 end
-  return count
-end
-
-local function slot_write(node_id, count)
-  local path = slot_file(node_id)
-  if not path then return false end
-  local now = tonumber(host.now()) or 0
-  local ok = pcall(host.write_file, path, string.format("%d:%d", count, now))
-  return ok
-end
+-- Per-node in-flight counters, THIS INTERPRETER ONLY.
+--
+-- A node-wide counter (one file per peer under paths.data(), so every caller process shares it) was
+-- written here and is DELIBERATELY NOT KEPT: review r4 moved the per-peer call cap to the
+-- fabric-transport mission, where the relay and the caller path are redesigned, and testing it against
+-- today's transport would be work on the wrong base. What remains is the local cap, which is still
+-- what stops one interpreter from putting unbounded calls on a peer, and it is honest about its
+-- scope: it does not bind another process.
+--
+-- The file-based version also carried a real defect worth remembering: it formatted host.now() with %d,
+-- and this host answers a FLOAT, so the first call raised "number has no integer representation" (a
+-- fast-path row caught it). A counter that needs a clock should floor it.
+local relay_in_flight = {}
 
 function M.acquire_slot(node_id)
   node_id = tostring(node_id or "")
-  local held = slot_read(node_id)
-  if held == nil then
-    -- No data directory (a fixture): the cap still applies, in this interpreter.
-    held = relay_in_flight[node_id] or 0
-    if held >= M.RELAY_MAX_IN_FLIGHT then return nil, "peer_busy_caller" end
-    relay_in_flight[node_id] = held + 1
-    return true
-  end
+  local held = relay_in_flight[node_id] or 0
   if held >= M.RELAY_MAX_IN_FLIGHT then return nil, "peer_busy_caller" end
-  if not slot_write(node_id, held + 1) then return nil, "peer_slot_unavailable" end
+  relay_in_flight[node_id] = held + 1
   return true
 end
 
 function M.release_slot(node_id)
   node_id = tostring(node_id or "")
-  local held = slot_read(node_id)
-  if held == nil then
-    held = relay_in_flight[node_id] or 0
-    if held <= 1 then relay_in_flight[node_id] = nil else relay_in_flight[node_id] = held - 1 end
-    return true
-  end
-  -- Never negative: an extra release is a no-op, not a debt.
-  slot_write(node_id, math.max(0, held - 1))
+  local held = relay_in_flight[node_id] or 0
+  if held <= 1 then relay_in_flight[node_id] = nil else relay_in_flight[node_id] = held - 1 end
   return true
 end
 
 function M.slots_held(node_id)
-  node_id = tostring(node_id or "")
-  local held = slot_read(node_id)
-  if held == nil then return relay_in_flight[node_id] or 0 end
-  return held
+  return relay_in_flight[tostring(node_id or "")] or 0
 end
 
 -- Never a tight retry on an overloaded relay. The wait doubles per attempt, is capped, and is always

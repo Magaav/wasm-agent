@@ -31,12 +31,24 @@ local function check(value, label) assert(value, label); checks = checks + 1 end
 
 local clock = 1792000000
 host.now = function() return clock end
+-- BOTH knobs, and the mesh flag cleared, exactly as the other network rows do: under the fast path
+-- WASM_AGENT_RELAY is empty and WA_MESH is unset, while a developer's shell has them set. A row that
+-- only overrides the rendezvous reads whatever the runner happens to export, and it passed on this
+-- machine and failed in the fast path for exactly that reason.
 host.getenv = (function(native)
   return function(key)
-    if key == 'WASM_AGENT_RENDEZVOUS' then return 'http://127.0.0.1:1' end
+    if key == 'WASM_AGENT_RENDEZVOUS' or key == 'WASM_AGENT_RELAY' then return 'http://127.0.0.1:1' end
+    if key == 'WA_MESH' or key == 'WA_MESH_COMPONENT' then return nil end
     return native(key)
   end
 end)(host.getenv)
+host.mesh_call = function(ask)
+  local decoded_ok, question = pcall(json.decode, ask)
+  if decoded_ok and type(question) == 'table' and question.gate then
+    return json.encode({enabled = false})
+  end
+  return json.encode({error = 'mesh_disabled_for_test'})
+end
 
 local identity = json.decode(host.node_identity())
 local PEER = { node_id = string.rep('ab', 16), name = 'box', endpoints = {},
