@@ -249,7 +249,7 @@ local function fetch_peers(fresh, cached_only)
   local peers, read_ok = {}, false
   pcall(function()
     local headers = json.encode(M.signed_headers("nodes") or {})
-    local response = json.decode(host.http("GET", url:gsub("/+$", "") .. "/nodes", headers, ""))
+    local response = decode_body(host.http("GET", url:gsub("/+$", "") .. "/nodes", headers, ""))
     if response and tonumber(response.status) == 200 then
       local ok, payload = pcall(json.decode, response.body)
       if ok and type(payload) == "table" and type(payload.nodes) == "table" then
@@ -367,7 +367,7 @@ local function lookup_node(node_id)
   if url == "" or not tostring(node_id):match("^%x+$") then return nil end
   local ok, node = pcall(function()
     local headers = json.encode(M.signed_headers("lookup") or {})
-    local response = json.decode(host.http("GET", url:gsub("/+$", "") .. "/lookup?node_id=" .. node_id, headers, ""))
+    local response = decode_body(host.http("GET", url:gsub("/+$", "") .. "/lookup?node_id=" .. node_id, headers, ""))
     return response and tonumber(response.status) == 200 and json.decode(response.body) or nil
   end)
   return ok and type(node) == "table" and node or nil
@@ -788,7 +788,7 @@ local function lookup_record(node_id)
   if not tostring(node_id):match("^%x+$") then return nil, "bad_node_id" end
   local ok, response = pcall(function()
     local headers = json.encode(M.signed_headers("lookup") or {})
-    return json.decode(host.http("GET", url:gsub("/+$", "") .. "/lookup?node_id=" .. node_id, headers, ""))
+    return decode_body(host.http("GET", url:gsub("/+$", "") .. "/lookup?node_id=" .. node_id, headers, ""))
   end)
   if not ok or type(response) ~= "table" then return nil, "lookup_failed" end
   if tonumber(response.status) ~= 200 then

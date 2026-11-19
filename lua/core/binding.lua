@@ -784,7 +784,16 @@ function M.tick()
       observed={relation='unreadable',gained={},lost={},cached=true,cached_age_s=now-cached.at}
       M.last_authority_outage={at=now,reason=tostring(auth_error or auth_detail)}
       outage_error=tostring(auth_error or 'binding_service_unavailable')
+    elseif unreachable_detail(auth_detail) then
+      -- The link is still the reason, but the remembered authority has AGED OUT. Returning here is the
+      -- same trap one step later: the node stops polling and stays unreachable until someone restarts
+      -- it. So it keeps polling, and says by name that it is doing so on an expired cache - a reader
+      -- must be able to tell this from a healthy attach.
+      observed={relation='unreadable',gained={},lost={},cached=false,expired=true}
+      M.last_authority_outage={at=now,reason=tostring(auth_error or auth_detail)}
+      outage_error='binding_authority_cache_expired'
     else
+      -- The registry ANSWERED against this node: that is a verdict, and it stops the tick.
       observe_detached(s.request.node_id,'authority_lost:'..tostring(auth_error or auth_detail))
       return failure(auth_error,auth_detail)
     end
@@ -814,6 +823,13 @@ function M.tick()
     local ts=math.floor(host.now());local i=identity();local sig=decode(host.sign('v2|'..i.node_id..'|'..ts..'|'..name..'|[]'))
     local r,e=http(s.service,'POST','/register',nil,{node_id=i.node_id,public_key=i.public_key,name=name,role=s.network_role,endpoints={},ts=ts,signature=sig.signature})
     if not r then
+      -- A register that keeps failing must not be retried every 2 s for the length of an outage: a fleet
+      -- coming back at once is what filled the rendezvous' cap on 19/11. The next attempt waits a
+      -- jittered, doubling interval, capped at 30 s, while the POLL below keeps its own 2 s rhythm.
+      local failures=(M.registration_failures or 0)+1
+      M.registration_failures=failures
+      local wait=math.min(30,2^(math.min(failures,5)-1))
+      M.last_heartbeat=host.now()-60+wait+math.random()
       -- MUST 3: this used to `return` before the /relay/poll below, WITHOUT advancing the heartbeat -
       -- so every 2 s it retried only the register and never polled the relay, which is the 19/11
       -- deadlock in miniature: the node cannot be reached, so the calls waiting for it cannot be
@@ -823,6 +839,7 @@ function M.tick()
     else
       M.last_heartbeat=host.now()
       M.last_registration_failure = nil
+      M.registration_failures=0
     end
   end
   local response,why=http(s.service,'GET','/relay/poll?node_id='..s.request.node_id,'relay-poll')
