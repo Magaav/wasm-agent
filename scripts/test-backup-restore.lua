@@ -248,13 +248,21 @@ sql('DETACH DATABASE hf')
 local held_snapshot = backup.run('test-holder')
 assert(held_snapshot.ok, 'the holder fixture snapshot failed: ' .. json.encode(held_snapshot))
 local holder_pid_file = data .. '/holder.pid'
+-- THE HOLDER HOLDS FOR LONGER THAN THIS ROW TAKES (measured 19/11: a FIXED host.sleep(1) was not enough
+-- on a loaded machine - the pid file did not exist yet, and the row failed with 'the holder fixture
+-- recorded no pid' while the holder was starting normally. The wait is now a bound with a poll, and the
+-- holder itself holds for 90s so the scan under load cannot outlive it.)
 local holder_start = host.exec("setsid sh -c 'echo $$ > " .. holder_pid_file .. "; exec 3<" .. fixture_held
-  .. "; sleep 20' >/dev/null 2>&1 </dev/null & echo started", '', 30)
+  .. "; sleep 90' >/dev/null 2>&1 </dev/null & echo started", '', 30)
 local holder_start_answer = type(holder_start) == 'string' and (select(2, pcall(json.decode, holder_start))) or holder_start
 assert(type(holder_start_answer) == 'table' and tonumber(holder_start_answer.code) == 0,
   'the holder fixture could not be started: ' .. tostring(holder_start))
-host.sleep(1)
-local holder_pid = (host.read_file(holder_pid_file) or ''):gsub('%s+', '')
+local holder_pid = ''
+for _ = 1, 100 do
+  holder_pid = (host.read_file(holder_pid_file) or ''):gsub('%s+', '')
+  if holder_pid ~= '' then break end
+  host.sleep(0.1)
+end
 assert(holder_pid ~= '', 'the holder fixture recorded no pid, so this check cannot be made')
 local held_bytes = host.file_sha256(fixture_held)
 local refused_held = backup.restore(held_snapshot.dir, { stamp = 'held' })

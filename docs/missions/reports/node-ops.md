@@ -324,3 +324,11 @@ for the codes item 8 added).
   `pre_existing` (`base exit 1, change exit 1`), and `scripts/test-changeset.lua` is `still_passing`
   (`base exit 0, change exit 0`) - its fast-path failure is `/tmp` pressure, not this branch.
 
+* **Two failures were load, made visible by the suite's own parallelism, and each was fixed at its cause:**
+  `scripts/test-backup-restore.lua` waited a FIXED `host.sleep(1)` for the holder's pid file (on a loaded
+  machine the file did not exist yet and the row failed with 'the holder fixture recorded no pid'); it now
+  polls with a bound and its holder holds 90s. Verified with three concurrent runs: all green (`0f7bd05a`).
+  The three single-row failures of the 1,146s run - `test-release-sign.lua`, `test-backup-restore.lua` and
+  `wa-capabilities`'s `subagents::tests::health_shape...` - all pass standalone; `row-at-sha` classifies
+  `test-release-sign.lua` `still_passing` (base exit 0, change exit 0), so the tree is not the cause.
+
