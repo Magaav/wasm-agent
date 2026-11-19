@@ -28,6 +28,9 @@ local run_failure = dofile("lua/core/run_failure.lua")
 -- A tool result is a fact the harness produces (18/11, session 100c54ab): the detector that keeps a
 -- message imitating one from becoming the answer.
 local fake_answer = dofile("lua/core/fake_answer.lua")
+-- The turn note (#33): kept on every turn, stripped from the visible answer into the run journal
+-- (lua/core/turn_journal.lua, docs/TURNS.md).
+local turn_journal = dofile("lua/core/turn_journal.lua")
 -- WASM_AGENT_RAW_CODE (default off): a ```js run block in the reply becomes a codemode call.
 local raw_code = dofile("lua/core/pure.lua")("lua/core/raw_code.lua")
 local finish_contract = dofile("lua/core/pure.lua")("lua/core/finish_contract.lua")
@@ -261,6 +264,7 @@ local function generic_sections(role, declared, available)
     "- **what it buys** - say which, with a number: fewer steps to the same result, or only better context (the same steps in fewer tokens, clearer state). Never claim one when it is the other;",
     "- **focus** - exactly ONE point: the highest-value harness optimisation this turn exposed. One point per answer, only when there is something to increment; no list, no filler, no restating the task.",
     "If nothing hurt your reasoning and nothing should be incremented, say so in one line and stop.",
+    "The harness removes this block from the answer it shows, and stores it in the run journal (session, mission, build, mode and the three fields); it never competes with an exact output format a request asks for, so an answer that must be only a number, a JSON body or one word still carries the block after it.",
   }, "\n")
   return s
 end
@@ -2691,19 +2695,53 @@ function M:run_body(text, images)
           arrived_name = tostring(first_refused.arrived or "") })
     end
     -- A step whose only action the harness never turned into a call is not an answer (18/11: a run block
-    -- the parser did not see ended the turn with `0 tools` and rc 0). The turn fails by name, so a
-    -- scripted `wa chat --once` returns non-zero instead of reporting a silent success.
+    -- the parser did not see ended the turn with 0 tools and rc 0). Item #22/#51: the FIRST such step
+    -- gets ONE automatic continue with a named notice - the model is told exactly what was wrong with
+    -- its block and asked for it again - because a cut reply or a mis-tagged fence is a hiccup, not an
+    -- answer. A SECOND one in the same run fails the turn by name, so a node can never exit rc=0 with
+    -- the action unexecuted. Both outcomes are counted in the journal.
     if raw_channel and #calls == 0 then
       local missed = raw_code.unexecuted(result.content or "", self.codemode_policy)
+      local unrun = nil
+      if not missed then unrun = raw_code.unrun(result.content or "", self.codemode_policy) end
+      local problem = nil
       if missed then
-        local reason = "run_block_not_executed: " .. missed.reason
-        local span = trace[#trace]
-        if type(span) == "table" and span.kind == "model_call" then span.ok = false; span.error = reason end
-        record_turn(self, { role = "assistant", content = result.content or "", ok = false, debug = self.debug })
-        self.pending_failure = { trace = trace, round = round, attempts = transient_attempt + 1 }
-        telemetry.event(self.session_id, self.run_id, "", "step", "end", { outcome = "run_block_not_executed" })
-        self.emit({ type = "status", text = reason })
-        error(reason)
+        problem = { code = "run_block_not_executed", reason = missed.reason }
+      elseif unrun then
+        problem = { code = unrun.code, reason = unrun.notice }
+      end
+      if problem then
+        self.auto_continues = (self.auto_continues or 0) + 1
+        local continues = self.auto_continues
+        telemetry.event(self.session_id, self.run_id, "", "run_block",
+          continues == 1 and "continue" or "failed",
+          { round = round, code = problem.code, attempts = continues })
+        if continues > 1 then
+          local reason = "run_block_not_executed: " .. problem.reason
+          local span = trace[#trace]
+          if type(span) == "table" and span.kind == "model_call" then span.ok = false; span.error = reason end
+          record_turn(self, { role = "assistant", content = result.content or "", ok = false, debug = self.debug })
+          self.pending_failure = { trace = trace, round = round, attempts = transient_attempt + 1 }
+          telemetry.event(self.session_id, self.run_id, "", "step", "end",
+            { outcome = "run_block_not_executed" })
+          self.emit({ type = "status", text = reason })
+          error(reason)
+        end
+        -- The step's own row is recorded here, exactly as the answer path would record it: the model
+        -- must see in its context the text it wrote, or the continue repeats the same block blind.
+        record_turn(self, { id = assistant_id, role = "assistant", content = result.content or "",
+          tool_calls = calls, debug = self.debug, reasoning = result.reasoning or "",
+          phase = result.final_phase or "", reasoning_items = result.reasoning_items })
+        -- The notice is a durable row, marked as the harness speaking so it is never read as the
+        -- operator's words (the same phase rule the done gate and the fake-result notice use).
+        local notice = "[harness] run_block_not_executed: " .. problem.reason
+          .. "\n\nThis is not a new user request: send the same action again, correctly, and finish the task."
+        record_turn(self, { role = "user", content = notice, phase = "run_block" })
+        messages[#messages + 1] = { role = "user", content = notice }
+        self.emit({ type = "status", text = "the action did not run (" .. problem.code .. "); continuing once" })
+        -- The loop's own end label: no local's scope is entered, and the next round rebuilds the
+        -- context with the step and the notice in it.
+        goto next_round
       end
     end
     local assistant = { role = "assistant", content = result.content or "" }
@@ -2903,6 +2941,23 @@ function M:run_body(text, images)
       -- it had nothing to say instead of like it had failed. Explicit output
       -- limits do not eliminate this failure; detect it even with Pi-style caps.
       if provider.visible_text(reply) == "" then
+        ::after_reasoning_only::
+        -- Item #22/#51: a turn that ends with reasoning only is a hiccup, not an answer. ONE automatic
+        -- continue says what the harness saw (it reasoned and stopped without writing anything), counted
+        -- in the journal; a second one falls through to the named failure below.
+        local reasoned = #tostring(result.reasoning or "") > 0
+        if reasoned and (self.auto_continues or 0) == 0 then
+          self.auto_continues = 1
+          local notice = "[harness] reasoning_only: your step ended with reasoning and no answer and no "
+            .. "tool call, so nothing was written."
+            .. "\n\nThis is not a new user request: answer the request now, or send the action as one "
+            .. string.rep(string.char(96), 3) .. "js run block."
+          record_turn(self, { role = "user", content = notice, phase = "reasoning_only" })
+          messages[#messages + 1] = { role = "user", content = notice }
+          telemetry.event(self.session_id, self.run_id, "", "reasoning_only", "continue", { round = round })
+          self.emit({ type = "status", text = "the step ended with reasoning only; continuing once" })
+          goto after_reasoning_only
+        end
         local reason = provider.empty_reply_reason(result)
         -- One rule for the end of a step, and it is the same rule in every mode: never end a turn on an
         -- unexecuted action or on a plan, and never end it because the model wrote in the wrong field. The
@@ -3316,6 +3371,22 @@ function M:run_body(text, images)
         if function_.name == "bash" or function_.name == "shell" then
           local command = type(args) == "table" and tostring(args.command or "") or ""
           effect = command ~= "" and not dofile("lua/core/orchestration_mode.lua").read_only_command(command)
+        elseif function_.name == "codemode" then
+          -- Item #34: a script is a script. What it CHANGED is what its own calls did, so a script that
+          -- only read (`return await tools.ls({path:"."})`, a `git status`) is not an effect and does not
+          -- arm the done gate; one that wrote, started an operation or sent anything is. An answer whose
+          -- calls cannot be read is not silently a read: unknown counts as an effect.
+          local calls = type(output) == "table" and output.calls or nil
+          if type(calls) ~= "table" or #calls == 0 then
+            -- A script that called nothing changed nothing, unless its own result is unreadable.
+            effect = not (type(output) == "table" and output.ok == true)
+          else
+            effect = false
+            for _, inner in ipairs(calls) do
+              local name = type(inner) == "table" and tostring(inner.name or "") or ""
+              if name == "" or tools.has_effect(name, nil) then effect = true break end
+            end
+          end
         end
         if effect then gate.effects = gate.effects + 1 end
       end
@@ -3456,6 +3527,28 @@ function M:run_body(text, images)
   -- name the message *before* the record exists: the UI's topic carries the id it will ask
   -- about, and append_turn uses the same one so the topic and the ledger agree.
   local message_id = reply_message_id or host.uuid()
+  -- The turn note (#33, operator 19/11: ensure models output their friction so we can focus and nail
+  -- it). The block is KEPT - it is the fleet own evidence about its harness - and REMOVED from the
+  -- text the reader and the caller see, so it never competes with an exact output format an operator
+  -- asked for (a number, a JSON body, one word). The transcript row keeps it whole: lua/core/turnfeed.lua
+  -- groups the notes from the ledger, and a stripped row would erase the corpus that queue is ranked on.
+  local stripped, journal_note = nil, nil
+  pcall(function()
+    stripped = turn_journal.split(reply)
+    if stripped and stripped.note then
+      journal_note = turn_journal.record(stripped.note, {
+        session_id = self.session_id, run_id = self.run_id, message_id = message_id,
+        mission = turn_journal.mission_of(self.session_id), build = turn_journal.build_of(),
+        mode = turn_journal.mode_of(), model = tostring(self.model or ""), block = stripped.block,
+      })
+      if journal_note then
+        self.emit({ type = "turn_note", message_id = message_id, note_id = journal_note,
+          text = stripped.note.focus ~= "" and stripped.note.focus or stripped.note.hurt })
+      end
+    end
+  end)
+  -- The visible answer, and the one the run reports as its outcome: the block is part of neither.
+  local answer = stripped and stripped.visible or reply
   record_turn(self, {
     id = message_id,ok=completed,
     role = "assistant", content = reply, reasoning=reply_reasoning, phase=reply_phase,
@@ -3486,12 +3579,12 @@ function M:run_body(text, images)
     local answer_id = tostring(self.run_id) .. ":answer"
     pcall(self.emit, { type = "final_answer", session_id = self.session_id,
       run_id = self.run_id, message_id = message_id, answer_id = answer_id,
-      text_len = #tostring(reply or ""), at = math.floor(host.now() * 1000) })
+      text_len = #tostring(answer or ""), at = math.floor(host.now() * 1000) })
   end
 
   -- The diff goes with the reply: the topic belongs to this bubble, and the reader should
   -- not need a second request to learn what the message touched.
-  self.emit({ type = "reply", text = reply, changes = changes, message_id = message_id })
+  self.emit({ type = "reply", text = answer, changes = changes, message_id = message_id })
   return reply
 end
 

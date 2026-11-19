@@ -796,6 +796,27 @@ function M.run(argv)
       reload.require('lua/core/binding_cli.lua').run('demote',line:sub(9),read_line,ui.print)
     elseif line == "/revoke" or line:sub(1, 8) == "/revoke " then
       reload.require('lua/core/binding_cli.lua').run('revoke',line:sub(9),read_line,ui.print)
+    elseif line == "/turns" or line:sub(1, 7) == "/turns " then
+      -- #33: this session's own friction notes, newest last, from the run journal. One line per note
+      -- (the focus, or what hurt when no focus was named) and the three fields on request. A reader who
+      -- wants the grouping across sessions has `wa turns --day` for that; this is the session's own.
+      local asked = tonumber((line:match("^/turns%s+(%d+)") or "")) or 5
+      local journal = reload.require("lua/core/turn_journal.lua")
+      local notes = journal.recent({ session_id = agent.session_id, limit = math.max(1, math.min(asked, 50)) })
+      if #notes == 0 then
+        ui.say("no <turn> note recorded in this session yet")
+      else
+        for _, note in ipairs(notes) do
+          local clock = dofile("lua/core/platform.lua").local_clock(tonumber(note.at) or 0)
+          local when = tostring(clock.local_iso or ""):sub(12, 16)
+          local focus = tostring(note.focus or "")
+          local hurt = tostring(note.hurts or "")
+          ui.say(string.format("  %s  %s", when, focus ~= "" and focus or hurt))
+          if hurt ~= "" and focus ~= "" then ui.say("        hurt: " .. hurt) end
+          local buys = tostring(note.buys or "")
+          if buys ~= "" then ui.say("        buys: " .. buys) end
+        end
+      end
     elseif line == "/session" then
       ui.say(agent.session_id)
     elseif line == "/wakes" or line == "/wake" or line:sub(1, 6) == "/wake " then

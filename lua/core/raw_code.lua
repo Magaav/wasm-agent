@@ -379,6 +379,52 @@ function M.reasoning_only_failure()
   return "reasoning_only: the step reasoned and returned no answer and no action, and the harness asked "
     .. "for an answer once already; nothing ran, so the turn is failed rather than finished without it"
 end
+-- The misses item #22/#51 names, each answered with ONE named notice so the run can be continued
+-- instead of ended: an answer cut inside a run block, and an answer whose only content is a block
+-- tagged js and not js run. Answers { code, notice } or nil.
+--
+-- Deliberately narrow: a plain js sample in an answer where code mode is off is TEXT (nothing could run
+-- it), and prose around the block makes it an explanation, not a miss.
+function M.unrun(text, policy)
+  text = tostring(text or "")
+  local blocks, lines = M.parse(text)
+  -- 1. a run block the reply ended inside: the parser reports it as a block with no closing fence.
+  for _, block in ipairs(blocks) do
+    if block.run and not block.close then
+      return { code = "run_block_cut",
+        notice = "your response was cut inside a run block, so nothing ran: send the whole script again in "
+          .. "one " .. string.rep(string.char(96), 3) .. "js run block that ends with a "
+          .. string.rep(string.char(96), 3) .. " line" }
+    end
+  end
+  -- 2. the answer's only content is a block tagged js (or javascript) and not js run. Gated on code mode
+  -- being able to run ANY script (M.active), not on only-mode: in first mode an untagged js block is not
+  -- retagged, so a message that is nothing but that block had its action written and nothing ran - the
+  -- miss this exists for. With code mode off nothing could run it, so the block is just text.
+  if not M.active(policy) or #blocks == 0 then return nil end
+  local cursor, outside = 1, {}
+  for _, block in ipairs(blocks) do
+    local open = lines[block.open]
+    if open and open.start >= cursor then outside[#outside + 1] = text:sub(cursor, open.start - 1) end
+    cursor = block.close and (lines[block.close].finish + 1) or #text + 1
+  end
+  if cursor <= #text then outside[#outside + 1] = text:sub(cursor) end
+  local prose = table.concat(outside, ""):gsub("%s+", "")
+  local tagged = false
+  for _, block in ipairs(blocks) do
+    if block.run then return nil end -- a run block is the action; the caller runs it
+    local line = lines[block.open]
+    local info = line and (line.text:match("^[ \t]*[`~]+(.*)$") or "") or ""
+    local tag = tostring(info):lower():gsub("%s+$", "")
+    if tag == "js" or tag == "javascript" then tagged = true end
+  end
+  if tagged and prose == "" then
+    return { code = "run_block_tagged_js",
+      notice = "your block was tagged js, not js run, so nothing ran: write the fence line as "
+        .. string.rep(string.char(96), 3) .. "js run (the tag is what makes it an action)" }
+  end
+  return nil
+end
 
 -- A tool call the model wrote as TEXT, in its own training format, because the request declared no tool
 -- for it (`first`/`only` hide codemode). Measured 17/11 on work (sessions b08de0ed, 02d9236e): DeepSeek

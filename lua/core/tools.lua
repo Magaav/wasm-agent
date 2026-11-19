@@ -1576,7 +1576,45 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     if args.action == "await" then args.tool = "operation" end
     local ok, raw = pcall(host.operation, args.action or "status", json.encode(args))
     if not ok then return {error=tostring(raw)} end
-    return json.decode(raw)
+    local answer = json.decode(raw)
+    -- Item #43: list and await answer IDS AND STATE by default; an output BODY is returned only when it
+    -- was asked for, and then bounded. A run that lists four operations should not pay for four logs,
+    -- and the one number a caller needs to decide what to do next (is it settled? how many bytes? where
+    -- is the log?) is in the record either way.
+    local action = tostring(args.action or "")
+    if (action == "list" or action == "await" or action == "wait") and type(answer) == "table" then
+      local wanted = args.output == true or args.include_output == true
+      local cap = math.max(1024, math.min(tonumber(args.max_bytes) or 4096, 65536))
+      local records = answer
+      local single = answer.operation_id ~= nil or answer.state ~= nil
+      if single then records = { answer } end
+      if type(records) == "table" then
+        for _, record in ipairs(records) do
+          if type(record) == "table" then
+            local had = false
+            for _, key in ipairs({ "stdout", "stderr" }) do
+              local value = record[key]
+              if type(value) == "string" and value ~= "" then
+                had = true
+                if not wanted then
+                  record[key .. "_omitted"] = #value
+                  record[key] = nil
+                elseif #value > cap then
+                  record[key] = value:sub(1, cap)
+                  record[key .. "_truncated"] = #value
+                end
+              end
+            end
+            if had and not wanted then
+              record.output_omitted = true
+              record.output_hint = "add output=true (max_bytes=" .. cap
+                .. ") to this call, or read one stream: operation action=\"read\" id=... stream=stdout"
+            end
+          end
+        end
+      end
+    end
+    return answer
   end
   if name == "node_update" then
     -- Distance update (lua/core/remote_update.lua, docs/REMOTE-UPDATE.md). Master only, and the peer

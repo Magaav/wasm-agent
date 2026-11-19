@@ -604,9 +604,28 @@ function M.retained(op, scope)
   return value, nil
 end
 
-local function handle(record, waited_s)
-  return { state = "pending", op = record.op, tool = record.tool,
+-- Item #37: a pending call always answers its handle in PLAIN fields - operation_id and the two log
+-- paths - not only inside `progress`. A script that must record where the work's output will be cannot
+-- be made to reach through a nested table that a running op may not have filled yet, and "which file do
+-- I read when this settles" is the first question a detached call raises. `op` stays: it is the name
+-- every existing script and `wait(op)` already use.
+local function handle(record, waited_s, state)
+  local out = { state = "pending", op = record.op, operation_id = record.op, tool = record.tool,
     waited_s = waited_s, progress = record.progress }
+  -- Item #37: a pending call answers its handle in PLAIN fields too - operation id and the log paths -
+  -- so a script that records where the output will be does not reach through a nested table, and the
+  -- first question a detached call raises ("which file do I read?") has an answer at hand.
+  -- The paths are the operation record's own; absent is nil, never a guess.
+  local source = type(state) == "table" and state or (type(record.progress) == "table" and record.progress or nil)
+  if source then
+    out.stdout_path = source.stdout_path
+    out.stderr_path = source.stderr_path
+    out.log_path = source.stdout_path
+    out.output_bytes = source.output_bytes
+    out.settled = source.settled
+    out.state_name = source.state
+  end
+  return out
 end
 
 -- ---------------------------------------------------------------------------- the call itself
@@ -650,8 +669,10 @@ function M.invoke(dispatch, opts, name, params, raw, wait_s)
     record.state = "unknown"
     record.error = tostring(reason)
     M.save(scope, index)
-    return { state = "pending", op = record.op, tool = name, waited_s = 0,
-      progress = { state = "unknown", reason = tostring(reason) } }
+    local out = handle(record, 0, nil)
+    out.progress = { state = "unknown", reason = tostring(reason) }
+    out.reason = tostring(reason)
+    return out
   end
   if state.settled == true then
     local result = settle(executor, dispatch, opts, scope, index, record, state)
@@ -662,7 +683,7 @@ function M.invoke(dispatch, opts, name, params, raw, wait_s)
   record.progress = executor_progress(executor, dispatch, opts, record, state)
   record.reason = reason
   M.save(scope, index)
-  return handle(record, math.floor(budget / 1000))
+  return handle(record, math.floor(budget / 1000), state)
 end
 
 -- ---------------------------------------------------------------------------- background(scope)
