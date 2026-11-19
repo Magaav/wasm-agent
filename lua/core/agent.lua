@@ -2444,7 +2444,11 @@ function M:run_body(text, images)
     call_opts.stop = raw_code.stop_sequences(self.codemode_policy)
     -- WASM_AGENT_RAW_CODE=first: the request renders raw-channel calls as the text the model wrote
     -- (raw_code.render_history, applied in provider.complete_with); the stored rows are unchanged.
-    call_opts.raw_history = raw_code.first(self.codemode_policy) or nil
+    -- The tagged arms render their history as tags too (a <codeact> plus a <result>), so a replay
+    -- never shows the model a tool-call pair its own prompt forbids.
+    local history_arm = dofile('lua/core/ab_arms.lua').current()
+    call_opts.raw_history = (raw_code.first(self.codemode_policy)
+      or history_arm == 'e2' or history_arm == 'e3') or nil
     local ok, result = pcall(provider.complete_with, self.model, messages, tool_list, self.stream, call_opts)
     -- No response headers means no model output reached this process, hence no returned tool call
     -- could have run. Retry only that phase, with a strict operator-controlled bound. The upstream
@@ -2770,10 +2774,12 @@ function M:run_body(text, images)
       local arm_name = dofile('lua/core/ab_arms.lua').current()
       self.finish_continues = (self.finish_continues or 0) + 1
       if self.finish_continues > 1 then
-        error('arm_tag_continue: ' .. tags.FAILURE .. ' (' .. tostring(raw_run.reason) .. ')')
+        error('arm_tag_continue: ' .. tags.FAILURE .. ' (' .. tostring(raw_run.reason)
+          .. (raw_run.excerpt and (' | saw: ' .. tostring(raw_run.excerpt)) or '') .. ')')
       end
       messages[#messages + 1] = { role = 'user', content = tags.continue_for(arm_name) }
-      self.emit({ type = 'status', text = tags.FAILURE .. ': ' .. tostring(raw_run.reason) })
+      self.emit({ type = 'status', text = tags.FAILURE .. ': ' .. tostring(raw_run.reason)
+        .. (raw_run.excerpt and (' | saw: ' .. tostring(raw_run.excerpt)) or '') })
       goto next_round
     end
     local calls, call_repairs = provider.repair_calls(result.tool_calls or {}, tool_list,

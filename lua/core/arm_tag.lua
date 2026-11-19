@@ -64,7 +64,13 @@ end
 
 local function trim(text) return (tostring(text or ""):gsub("^%s+", ""):gsub("%s+$", "")) end
 
-local function invalid(reason) return { shape = "invalid_message_shape", reason = reason } end
+-- The refusal names the bytes that broke the shape, so a failure is a diagnosis and not a mystery:
+-- an excerpt of the message is what tells "never closed" from "text outside the tags".
+local function invalid(reason, excerpt)
+  local shown = tostring(excerpt or ""):gsub("^%s+", ""):gsub("%s+$", "")
+  if #shown > 500 then shown = shown:sub(1, 500) .. "..." end
+  return { shape = "invalid_message_shape", reason = reason, excerpt = shown ~= "" and shown or nil }
+end
 
 function M.parse(text, arm)
   local raw = tostring(text or "")
@@ -72,6 +78,14 @@ function M.parse(text, arm)
   -- A model-written <result> is never read as one: only the harness writes it.
   if raw:find("<result>", 1, true) or raw:find("</result>", 1, true) then
     return invalid("a <result> is written by the harness, not by the model")
+  end
+  -- The <turn> retrospective is the harness's own requirement, present in every assistant message
+  -- (lua/core/turnfeed.lua), so it is not "text outside the tags": it is a section this node asks for
+  -- and it never starts a step. It is cut before the shape is judged, and nothing inside it runs.
+  local turns = spans(raw, "<turn>", "</turn>")
+  for _, turn in ipairs(turns) do
+    if not turn.close then return invalid("a <turn> note was never closed", raw) end
+    raw = raw:sub(1, turn.open - 1) .. raw:sub(turn.close + 1)
   end
   local messages = spans(raw, "<message>", "</message>")
   local finals = spans(raw, "<final_message>", "</final_message>")
@@ -86,13 +100,13 @@ function M.parse(text, arm)
   end
   -- An unclosed tag never acts, and it is named before anything else is judged.
   for _, r in ipairs(messages) do
-    if not r.close then return invalid("a tag was never closed") end
+    if not r.close then return invalid("a tag was never closed", raw) end
   end
   for _, r in ipairs(finals) do
-    if not r.close then return invalid("a <final_message> was never closed") end
+    if not r.close then return invalid("a <final_message> was never closed", raw) end
   end
   for _, r in ipairs(live) do
-    if not r.close then return invalid("the <codeact> block was never closed") end
+    if not r.close then return invalid("the <codeact> block was never closed", raw) end
   end
   -- Everything the tags do not account for is text outside them: an error in both arms.
   local stripped = raw
@@ -105,11 +119,11 @@ function M.parse(text, arm)
     stripped = stripped:sub(1, r.open - 1) .. stripped:sub(r.close + 1)
   end
   if trim(stripped) ~= "" then
-    return invalid("text outside the tags (fences, tool-call markup or prose)")
+    return invalid("text outside the tags (fences, tool-call markup or prose)", raw)
   end
   -- <final_message> together with an action is neither shape.
   if #finals > 0 and #live > 0 then
-    return invalid("<final_message> and <codeact> together")
+    return invalid("<final_message> and <codeact> together", raw)
   end
   if #finals > 1 then return invalid("more than one <final_message>") end
   if arm == "e2" and #finals > 0 then
@@ -126,7 +140,7 @@ function M.parse(text, arm)
   -- No action: the turn may end only in this arm's finish shape.
   if arm == "e3" then
     if #finals == 1 then return { shape = "finish", final_message = finals[1].inner } end
-    return invalid("<message> alone does not end a turn in this arm")
+    return invalid("<message> alone does not end a turn in this arm", raw)
   end
   if #messages == 1 then return { shape = "finish", final_message = messages[1].inner } end
   return invalid("neither shape: no <message> and no <codeact>")

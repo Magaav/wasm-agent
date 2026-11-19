@@ -96,6 +96,10 @@ function M.mode()
   -- "off" everywhere downstream — a mode the parser does not know silently restores the default (17/11:
   -- `only` was set, `mode()` said nil, codemode was declared again and the model kept sending JSON calls).
   if value == "only" then return "only" end
+  -- The tagged arms of the A/B (next-round.md, 19/11 ~17:10). They are modes here for the one
+  -- reason every other mode is: the parser below must know them, or an unknown value returns nil
+  -- and nil means "off" - which is exactly how E2/E3 ended in one round with the block never read.
+  if value == "e2" or value == "e3" then return value end
   return nil
 end
 
@@ -111,7 +115,11 @@ function M.first(policy)
 end
 
 function M.stop_sequences(policy)
-  if M.active(policy) and M.mode() == "stop" then return { M.STOP } end
+  local mode = M.mode()
+  -- The tagged arms stop at their own closer (next-round.md 19/11 ~15:50): the harness supplies the
+  -- end of the block, so anything the model writes after it is cut rather than read as an action.
+  if (mode == "e2" or mode == "e3") and M.active(policy) then return { "</codeact>" } end
+  if M.active(policy) and mode == "stop" then return { M.STOP } end
   return nil
 end
 
@@ -661,6 +669,18 @@ function M.take(result, stop_sent, policy)
   local arm = dofile("lua/core/ab_arms.lua").current()
   if arm == "e2" or arm == "e3" then
     local tags = dofile("lua/core/arm_tag.lua")
+    -- The provider's stop sequence removes the closing tag it stopped at, so a reply that DID close its
+    -- block arrives here without the closer. `stop_sent` is the proof it was written: put it back, the
+    -- same way the fence path restores a fence its stop sequence ate, so a closed block is not called
+    -- unterminated.
+    -- Only an OPEN block needs its closer put back. A reply that finished without acting (a
+    -- <message> alone) has no block at all, and appending a closer to it manufactured an orphan
+    -- closer that the parser then refused as text outside the tags (measured: round 4 of the E2 smoke).
+    local opened = content:find("<codeact>", 1, true)
+    local closed = content:find("</codeact>", 1, true)
+    if stop_sent and opened and (not closed or closed < opened) then
+      content = content .. "</codeact>"
+    end
     local parsed = tags.parse(content, arm)
     if parsed.shape == "act" then
       local code = { code = parsed.code }
@@ -690,7 +710,7 @@ function M.take(result, stop_sent, policy)
       return nil
     end
     -- Neither shape: nothing runs, and the reason is named so the loop can continue once.
-    return { invalid_message_shape = true, reason = parsed.reason }
+    return { invalid_message_shape = true, reason = parsed.reason, excerpt = parsed.excerpt }
   end
   -- Call markup in the text, and no real tool call: in `first`/`only` the model had nothing declared to
   -- call with, so its own format leaked into the text. A run block, if any, still wins below.
@@ -826,8 +846,68 @@ end
 -- assistant message, as the provider requires); the raw result becomes a user message `M.OBSERVATION`
 -- .. <the tool message content, byte for byte>. Pure: the caller's list and messages are not changed,
 -- and a list with no raw call comes back as is. Idempotent: a rendered list has no raw call left.
+-- The tagged arms render their own history (next-round.md 19/11 ~15:50): the model's action was a
+-- <codeact> block and the harness answered <result>...</result>, so a replay that showed a tool-call
+-- pair would teach the model a shape its prompt forbids - and it then echoed <result> itself, which
+-- the parser correctly refused. Byte for byte what the arm was told it would see.
+function M.render_tag_history(messages)
+  if type(messages) ~= "table" then return messages end
+  local out, index = {}, 1
+  while index <= #messages do
+    local message = messages[index]
+    local raws = {}
+    if message.role == "assistant" and type(message.tool_calls) == "table" then
+      for _, call in ipairs(message.tool_calls) do
+        if M.is_raw(call.id) then raws[#raws + 1] = call end
+      end
+    end
+    if #raws == 0 then
+      out[#out + 1] = message
+      index = index + 1
+    else
+      local wanted = {}
+      for _, call in ipairs(raws) do wanted[call.id] = true end
+      local rendered = {}
+      for key, value in pairs(message) do rendered[key] = value end
+      -- The replay must be a shape the prompt ALLOWS. The stored content is the action's own
+      -- <message> text, so it is wrapped back in its tags: a bare line followed by <codeact> taught
+      -- the model to write text outside the tags, and the parser then refused it (measured: round 2
+      -- failed with "text outside the tags" after a correct round 1).
+      local said = type(message.content) == "string" and message.content or ""
+      local text = said ~= "" and ("<message>" .. said .. "</message>") or ""
+      for _, call in ipairs(raws) do
+        local code = ""
+        local ok, decoded = pcall(json.decode, (call["function"] or {}).arguments or "{}")
+        if ok and type(decoded) == "table" then code = tostring(decoded.code or "") end
+        text = text .. (text ~= "" and "\n" or "") .. "<codeact>\n" .. code .. "\n</codeact>"
+      end
+      rendered.content = text
+      rendered.tool_calls = nil
+      out[#out + 1] = rendered
+      index = index + 1
+      local results = {}
+      while index <= #messages and messages[index].role == "tool" do
+        local result = messages[index]
+        if wanted[result.tool_call_id] then
+          local content = type(result.content) == "string" and result.content or tostring(result.content or "")
+          results[#results + 1] = content
+        else
+          out[#out + 1] = result
+        end
+        index = index + 1
+      end
+      if #results > 0 then
+        out[#out + 1] = { role = "user", content = "<result>\n" .. table.concat(results, "\n") .. "\n</result>" }
+      end
+    end
+  end
+  return out
+end
+
 function M.render_history(messages)
   if type(messages) ~= "table" then return messages end
+  local arm = dofile("lua/core/ab_arms.lua").current()
+  if arm == "e2" or arm == "e3" then return M.render_tag_history(messages) end
   local any = false
   for _, message in ipairs(messages) do
     if message.role == "assistant" and type(message.tool_calls) == "table" then
