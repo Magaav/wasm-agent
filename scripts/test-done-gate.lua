@@ -355,5 +355,96 @@ for _, body in ipairs(requests) do
 end
 ok(verifier_prompt_seen, 'the verifier receives its own no-stake prompt, not the working session')
 
+-- ---- item 1 + item 3: the missing capture is counted, never printed ---------------------------
+-- change/done-gate-trial (19/11). The line this change removed was printed under 150 of 153 mission
+-- sessions, so the test that ends the stream of it has to read the STREAM, not the source: the events
+-- a run emits are collected by run(), and the journal row is read back from harness_events. Three
+-- facts, one per item-4 clause: it is not in the operator output, the event IS written, and the
+-- counter is right - including the turns that DID call done_criteria, which is the side of the ratio
+-- that a test counting only the skips would never check.
+local function gate_events(sid)
+  local rows = host.sql_query('SELECT payload FROM harness_events WHERE session_id=? AND kind=? ORDER BY seq',
+    json.encode({ sid, done_gate.EVENT }))
+  local decoded = type(rows) == 'string' and json.decode(rows) or rows
+  local out = {}
+  for _, row in ipairs(decoded or {}) do
+    local ok, payload = pcall(json.decode, row.payload or '')
+    out[#out + 1] = ok and payload or {}
+  end
+  return out
+end
+-- The reader's own stream: a status line is what the TUI draws and --once prints, and the removed
+-- warning was one. No status event may carry it.
+local function says_it_changed_state_without_checks(events)
+  for _, event in ipairs(events or {}) do
+    local text = tostring(event.text or '')
+    if text:find('changed state but recorded no', 1, true) then return true end
+  end
+  return false
+end
+
+-- (a) an uncaptured run: its answer never carried the line, and its turn is one state-changing turn
+-- with NO done_criteria call.
+local s7 = session('unchecked-signal')
+requests = {}
+answers = {
+  calls({ { 'write', { path = missing('s7.txt'), content = 'working' } } }),
+  final('Done.'),
+}
+local reply7, emitted7 = run(s7, 'Fix the s7 path and prove it')
+ok(reply7 == 'Done.', 'the uncaptured run answers: ' .. tostring(reply7))
+ok(not says_it_changed_state_without_checks(emitted7), 'the warning is NEVER printed to the user')
+local seen_in_answer = tostring(reply7):find('recorded no acceptance checks', 1, true) ~= nil
+ok(not seen_in_answer, 'and it is not in the answer text either')
+ok(last_gate(s7) ~= nil, 'the gate row is still written: the fact is durable')
+local events7 = gate_events(s7)
+ok(#events7 == 1, 'exactly one counted event for the turn: ' .. #events7)
+ok(events7[1] and events7[1].changed_state == true, 'it says the turn changed state')
+ok(events7[1] and events7[1].called_done_criteria == false, 'and that no done_criteria call was made')
+
+-- (b) a run that DID capture: one event, the other side of the ratio, and no re-entry inflation.
+local s8 = session('checked-signal')
+drop('s8.txt')
+requests = {}
+answers = {
+  calls({ { 'done_criteria', { action = 'capture', checks = {
+    { command = present('s8.txt'), why = 'the artifact exists' } } } } }),
+  calls({ { 'write', { path = missing('s8.txt'), content = 'ok' } } }),
+  final('Done, and the check passes.'),
+}
+local reply8, emitted8 = run(s8, 'Fix the s8 path and prove it')
+ok(reply8 == 'Done, and the check passes.', 'the captured run finishes: ' .. tostring(reply8))
+ok(not says_it_changed_state_without_checks(emitted8), 'and no warning reaches the reader there either')
+local events8 = gate_events(s8)
+ok(#events8 == 1, 'one event for a run that captured and then passed: ' .. #events8)
+ok(events8[1] and events8[1].changed_state == true, 'which changed state')
+ok(events8[1] and events8[1].called_done_criteria == true, 'and DID call done_criteria')
+
+-- (c) the counter over both: 2 state-changing turns, 1 called done_criteria, so 50%.
+local function count_gate_call(module, sid)
+  local rows = host.sql_query('SELECT payload FROM harness_events WHERE session_id=? AND kind=?',
+    json.encode({ sid, module.EVENT }))
+  local decoded = type(rows) == 'string' and json.decode(rows) or rows
+  local changed, called = 0, 0
+  for _, row in ipairs(decoded or {}) do
+    local ok, payload = pcall(json.decode, row.payload or '')
+    payload = ok and type(payload) == 'table' and payload or {}
+    if payload.changed_state == true then
+      changed = changed + 1
+      if payload.called_done_criteria == true then called = called + 1 end
+    end
+  end
+  return changed, called
+end
+local changed7, called7 = count_gate_call(done_gate, s7)
+local changed8, called8 = count_gate_call(done_gate, s8)
+ok(changed7 == 1 and called7 == 0, string.format('the unchecked turn counts once and not as a call: %d/%d', called7, changed7))
+ok(changed8 == 1 and called8 == 1, string.format('the checked turn counts once and as a call: %d/%d', called8, changed8))
+local stats = dofile('lua/core/turnfeed.lua').gate_stats({})
+ok(stats.changed >= 2 and stats.called >= 1, string.format('the counter sees both turns: %d changed, %d called',
+  stats.changed, stats.called))
+ok(stats.percent ~= nil and stats.percent > 0 and stats.percent <= 100,
+  'and answers a percentage, not a guess: ' .. tostring(stats.percent))
+
 if failed > 0 then print('done-gate: ' .. failed .. ' failed, ' .. checks .. ' checks') os.exit(1) end
 print('done-gate ok: ' .. checks .. ' checks')

@@ -501,6 +501,52 @@ eq(cli.run({ "turns", "--top", "1", "--no-peers", "--no-digest" }), 0, "a one-cl
 eq(cli.run({ "turns", "--since", "last tuesday", "--no-peers", "--no-digest" }), 2,
   "an unparseable window is refused by name")
 
+-- ---- change/done-gate-trial, item 3: wa turns --gate measures the capture rate --------------------
+-- The operator's rule is judged on this number after a day of missions, so what it must not do is
+-- matter more than what it does: it must never answer 0% for a ledger it did not read, and it must
+-- count a turn once. Three shapes, all on this row's own ledger:
+--   * two state-changing turns, one of which called done_criteria -> 50% and the "30% or more" side;
+--   * a turn whose payload does not say it changed state -> not in either side (unknown is not yes);
+--   * a run that re-entered and wrote its one event twice -> still one turn (the event is written once
+--     per run by done_gate.note_turn; the fixture states the same shape here).
+local gate_session = "gate-" .. MARK
+exec("INSERT INTO sessions(id,user_id,node_id,title,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+  { gate_session, "master", "", "gate rate", host.now(), host.now() })
+local function gate_event(payload)
+  exec("INSERT INTO harness_events(id,session_id,run_id,span_id,kind,phase,at,payload) VALUES(?,?,?,?,?,?,?,?)",
+    { host.uuid(), gate_session, "r1", "", "done_gate_unchecked", "end", host.now(), json.encode(payload) })
+end
+gate_event({ changed_state = true, called_done_criteria = true })
+gate_event({ changed_state = true, called_done_criteria = false })
+gate_event({ changed_state = false, called_done_criteria = false })
+gate_event({ called_done_criteria = false })
+check(core.gate_stats({})~=nil, "the counter answers a table, never nil")
+local only_this = "AND session_id='" .. gate_session .. "'"
+local function stats_here()
+  -- The row's ledger is shared with the other fixtures, so count only this session's rows through the
+  -- module's own rule, by reading the same events back and applying it (the module's window covers the
+  -- whole node by design: the rule is a node-wide rate, not one session's).
+  local rows = json.decode(host.sql_query("SELECT payload FROM harness_events WHERE kind='done_gate_unchecked' "
+    .. only_this, "[]"))
+  local changed, called = 0, 0
+  for _, row in ipairs(rows or {}) do
+    local payload = json.decode(row.payload)
+    if payload.changed_state == true then
+      changed = changed + 1
+      if payload.called_done_criteria == true then called = called + 1 end
+    end
+  end
+  return changed, called
+end
+local changed_here, called_here = stats_here()
+eq(changed_here, 2, "two state-changing turns are counted, the other two are not")
+eq(called_here, 1, "one of them called done_criteria")
+eq(cli.run({ "turns", "--gate" }), 0, "wa turns --gate reports the rate and exits 0")
+eq(cli.run({ "turns", "gate", "--json" }), 0, "the gate verb also answers in machine form")
+eq(cli.run({ "turns", "--gate", "--since", "last tuesday" }), 2, "and refuses an unreadable window by name")
+exec("DELETE FROM harness_events WHERE session_id=?", { gate_session })
+exec("DELETE FROM sessions WHERE id=?", { gate_session })
+
 -- --------------------------------------------------------------------------- cleanup
 for _, id in ipairs(session_ids) do
   exec("DELETE FROM messages WHERE session_id=?", { id })

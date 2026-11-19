@@ -347,6 +347,50 @@ function M.parse_since(text, now)
   return nil, "invalid_since"
 end
 
+-- ---- change/done-gate-trial, item 3: the capture rate the decision rule is judged by ----------------
+--
+-- The operator's rule (19/11): after a day of missions on the release that carries this change, if fewer
+-- than 30% of STATE-CHANGING turns called done_criteria the gate is deleted; at 30% or more, kept and
+-- reduced to what is used. So the number has to be the real one:
+--
+--   * the denominator is every state-changing turn, not only the ones that skipped the capture. Counting
+--     only the skips would report 0% by construction and answer the rule with a tautology;
+--   * done_gate_unchecked is written once per run by lua/core/done_gate.lua (M.note_turn), so a run that
+--     re-entered the gate ten times contributes ONE turn to each side;
+--   * a turn is counted from its event, so it is counted once even if two rows carry its session;
+--   * an absent ledger is UNKNOWN, never 0% - a rule that deletes a gate on an unmeasured zero deletes
+--     it on no evidence at all. That is why this answers available, reason and percent = nil;
+--   * the events predate this change: a turn whose event has no changed_state field is not
+--     state-changing, and is left out of both sides rather than guessed at.
+--
+-- since is the same window syntax as the rest of the reader (24h, 7d, or an ISO date), so the rule can
+-- be read over exactly the day it names.
+function M.gate_stats(opts)
+  opts = opts or {}
+  local since = opts.since
+  local params = {}
+  local where = "kind='done_gate_unchecked'"
+  if since then where = where .. " AND at>=?"; params[#params + 1] = since end
+  local rows = query("SELECT payload, session_id, at FROM harness_events WHERE " .. where .. " ORDER BY at", params)
+  local changed, called = 0, 0
+  local sessions = {}
+  for _, row in ipairs(rows) do
+    local ok, payload = pcall(json.decode, row.payload or '')
+    payload = ok and type(payload) == 'table' and payload or {}
+    -- unknown is not yes: a payload that does not say the turn changed state is not counted as one.
+    if payload.changed_state == true then
+      changed = changed + 1
+      if payload.called_done_criteria == true then called = called + 1 end
+      sessions[tostring(row.session_id or '')] = true
+    end
+  end
+  local session_count = 0
+  for _ in pairs(sessions) do session_count = session_count + 1 end
+  local percent = changed > 0 and (called * 100 / changed) or nil
+  return { available = true, events = #rows, changed = changed, called = called,
+    percent = percent, sessions = session_count, since = since }
+end
+
 local function previous_user_seq(session_id, seq)
   local rows = query("SELECT MAX(seq) AS seq FROM messages WHERE session_id=? AND role='user' AND seq<?",
     { session_id, seq })
