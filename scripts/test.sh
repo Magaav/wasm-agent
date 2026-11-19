@@ -933,6 +933,9 @@ gate_run bash scripts/test-upgrade-idle.sh | grep 'upgrade idle-wait ok'
 # then a scratch install upgraded THROUGH the flag - including the assertion that the default path does not
 # touch the watchdog at all. The fake kernel is `wa-watchdog selftest-kernel`; no real node is involved.
 gate_run bash scripts/test-watchdog.sh | grep 'test-watchdog: ok'
+# The fast path own per-row watchdog: a hung row names itself and takes every child it forked with it
+# (scripts/lib/fast-watchdog.sh; measured 18/11 on avell - a fixture child outlived its row).
+gate_run bash scripts/test-fast-watchdog.sh | grep 'test-fast-watchdog: ok'
 gate_run bash scripts/test-watchdog-upgrade.sh | grep 'test-watchdog-upgrade: ok'
 # Context budget is per model (provider.budget), and it is NOT the same thing as
 # provider.limits, which fetches the account's rate limits for the UI. Confusing
