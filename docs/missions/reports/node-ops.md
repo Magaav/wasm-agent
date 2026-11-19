@@ -302,3 +302,25 @@ for the codes item 8 added).
 28. `host.runtime_info` field `build_source_dirty` (model-facing: the build tool's answer now names it)
 29. `REFUSED %s: WASM_AGENT_HOME is the real %s; its store would BE %s - a row given the user home writes the operator node` / `… is the real store %s; a row must never act on it` / `… is inside the operator store %s` / `… contains the operator store %s; a home above the store is the same store` / `… is not an absolute path, so where it points depends on the caller cwd` (scripts/lib/scratch-home.lua, all four rows)
 30. `node` env marker `WA_HOME_BEFORE_OVERRIDE` (set by `wa` when `WASM_AGENT_HOME` replaces `HOME`; read by the Lua guard)
+
+### Round 3, measured while proving the items (they changed the code, not just the text)
+
+* **The holder scan was the restore's real defect.** `wa restore` answered in 130-155s and the row's own
+  20-second holder had expired before the scan reached it, so a correct refusal read as `restore_store_held`
+  never firing and the row was killed by its 120s watchdog. Measured on this node: the nested
+  `for d in /proc/[0-9]*; do for f in "$d"/fd/*; readlink` loop takes **11.5s** (1,647 processes, 10,744
+  descriptors) while ONE `ls -l /proc/[0-9]*/fd/*` pass takes **126ms**. `77c5b9ec` replaces the scan with
+  the one-pass form: the same row now runs in **7s** and passes, holder refusal included.
+* **The four scratch-home rows needed the run's own binary.** They resolve `WA_BIN`, then the tree release,
+  then PATH; on this node PATH holds `~/.local/bin/wa` (another commit's build), which rewrites `HOME` from
+  `WASM_AGENT_HOME` WITHOUT recording the home it replaced - so under the fast path the guard saw no marker
+  and refused a correct scratch home. `dc40fff2` exports `WA_BIN="$bin"` from `scripts/fast.sh`, so a shell
+  row spawns THIS tree's node. Measured after the fix: all four wrappers exit 0 under the runner's own
+  environment.
+* **`scripts/test-session-isolation.lua` has its own guard** (`:38`): it requires the home path to name
+  `scratch`, `tmp` or `temp`. A scratch root under `~/wasm-agent` is refused by that rule and not by the
+  tree - the full run below uses `TMPDIR=/tmp/...` for that reason.
+* `scripts/test-harness-evaluator-replay.lua` is a **pre-existing** failure: `row-at-sha` classifies it
+  `pre_existing` (`base exit 1, change exit 1`), and `scripts/test-changeset.lua` is `still_passing`
+  (`base exit 0, change exit 0`) - its fast-path failure is `/tmp` pressure, not this branch.
+
