@@ -84,10 +84,29 @@ end
 -- unset the run block is the only way to act (`only`). The JSON `codemode` tool call is the opt-out:
 -- WASM_AGENT_RAW_CODE=codemode (or off / 0 / false / no).
 M.DEFAULT = "only"
+
+-- The DEFAULT mode when the operator set no switch (rel review r1, R2).
+--
+-- The A/B measured arm B (native) as the arm that acts; a normal node on a provider that takes tool
+-- calls should run that arm without anyone exporting a variable. The decision is the PROVIDER's row
+-- (model_profile.builtin_transport) - never a model name - and an explicit WASM_AGENT_RAW_CODE always
+-- wins, so an operator can still pin any mode the parser knows.
+function M.default_mode()
+  local ok, lib = pcall(dofile, "lua/core/model_profile.lua")
+  if not ok or type(lib) ~= "table" or type(lib.builtin_transport) ~= "function" then return M.DEFAULT end
+  local provider_ok, provider_lib = pcall(dofile, "lua/core/provider.lua")
+  if not provider_ok then return M.DEFAULT end
+  local settings_ok, settings = pcall(provider_lib.settings)
+  if not settings_ok or type(settings) ~= "table" then return M.DEFAULT end
+  -- A provider whose row says it takes native tool calls gets the native arm; anyone else keeps the
+  -- long-standing block default. A provider with no row is not guessed onto either.
+  if lib.builtin_transport(settings.provider) == lib.TOOL_CALL then return "native" end
+  return M.DEFAULT
+end
 local OFF = { codemode = true, off = true, ["0"] = true, ["false"] = true, no = true }
 function M.mode()
   local value = tostring(host.getenv("WASM_AGENT_RAW_CODE") or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
-  if value == "" then return M.DEFAULT end
+  if value == "" then return M.default_mode() end
   if OFF[value] then return nil end
   if value == "1" or value == "on" or value == "true" then return "on" end
   if value == "stop" then return "stop" end

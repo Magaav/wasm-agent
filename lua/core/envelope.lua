@@ -67,7 +67,13 @@ function M.bootstrap(catalog,ctx)
    -- the control-plane tools a script cannot run (session_worktree...); every other tool - and discovery,
    -- via searchTools - lives inside the script. A direct call to an undeclared tool still runs; a connector
    -- called directly runs as its one-line script (lua/core/tools.lua, codemode_policy.one_line).
-   if name=='codemode' or (CONTROL_PLANE[name] and core[name]) or (orchestration and ORCHESTRATION_FIRST_CLASS[name]) then out[#out+1]=item end
+   -- Native mode is arm B (rel review r1, R3): the ONE door is `run`, and `codemode` is not
+   -- declared beside it. Every other mode keeps a27490af's surface byte for byte (R1/R5), which
+   -- is why this reads the mode rather than a transport decision.
+   local native_mode = dofile('lua/core/raw_code.lua').mode() == 'native'
+   if native_mode then
+    if name=='run' or (CONTROL_PLANE[name] and core[name]) or (orchestration and ORCHESTRATION_FIRST_CLASS[name]) then out[#out+1]=item end
+   elseif name=='codemode' or (CONTROL_PLANE[name] and core[name]) or (orchestration and ORCHESTRATION_FIRST_CLASS[name]) then out[#out+1]=item end
   elseif core[name] or name=='codemode' or (orchestration and ORCHESTRATION_FIRST_CLASS[name]) then out[#out+1]=item end end;return out
 end
 function M.schemas(catalog,ctx)return M.mode(ctx)=='progressive' and M.bootstrap(catalog,ctx) or catalog end
