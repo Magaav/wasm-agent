@@ -217,4 +217,89 @@ else
   print('seam\tmcp.component_call\t0\t0\t0\t0\t0\t0\t0\tSKIP:no host.component_mcp capability in this binary')
 end
 
+
+-- ---- 7b. node <-> wa-vault: the /status read the credential lane makes, over loopback HTTP.
+-- The client path is lua/core/vault.lua:47 (host.http GET, JSON headers, JSON envelope, JSON body),
+-- so this row counts BOTH JSON layers. Runs only when the caller points a stub vault at us.
+local vault_url = host.getenv('WASM_AGENT_VAULT_URL') or ''
+if vault_url ~= '' then
+  local headers = json.encode({ Accept = 'application/json' })
+  local envelope = tostring(host.http('GET', vault_url .. '/status', headers, ''))
+  local env_value = json.decode(envelope) or {}
+  local body = tostring(env_value.body or '')
+  seam('vault.status', function()
+    local raw = host.http('GET', vault_url .. '/status', headers, '')
+    return #headers, #tostring(raw)
+  end, function()
+    json.decode(headers)
+    local value = json.decode(envelope) or {}
+    json.decode(tostring(value.body or '{}'))
+  end)
+  dump('vault.status', 'out', envelope)
+else
+  print('seam\tvault.status\t0\t0\t0\t0\t0\t0\t0\tSKIP:WASM_AGENT_VAULT_URL is not set (no vault to measure)')
+end
+
+-- ---- 8. one context build: the reads a turn does to assemble its prompt
+-- The fallback turn in scripts/bench-core-calls.lua loops, so its counts are the loop's, not one
+-- turn's. This measures the thing a turn does once per model call: build_context over a session
+-- with history, with every capability call and every session_messages read counted.
+local agent = dofile('lua/core/agent.lua')
+local counted, counted_bytes, session_reads, session_bytes = {}, {}, 0, 0
+local originals = {}
+local function counting(on)
+  if on then
+    for name, value in pairs(host) do
+      if type(value) == 'function' and not originals[name] then
+        originals[name] = value
+        host[name] = function(...)
+          counted[name] = (counted[name] or 0) + 1
+          local result = value(...)
+          if type(result) == 'string' then counted_bytes[name] = (counted_bytes[name] or 0) + #result end
+          return result
+        end
+      end
+    end
+  else
+    for name, value in pairs(originals) do host[name] = value end
+  end
+end
+local real_session_messages = memory.session_messages
+memory.session_messages = function(...)
+  local rows_out = real_session_messages(...)
+  if counting_on then
+    session_reads = session_reads + 1
+    for _, row in ipairs(rows_out or {}) do
+      for _, value in pairs(row) do
+        if type(value) == 'string' then session_bytes = session_bytes + #value end
+      end
+    end
+  end
+  return rows_out
+end
+counting_on = true
+local turn = agent.new(session, function() end, 'master', 'master', '')
+local t0 = os.clock()
+counting(true)
+local ok, err = pcall(turn.build_context, turn)
+counting(false)
+counting_on = false
+local elapsed = (os.clock() - t0) * 1e6
+local calls, bytes = 0, 0
+for name, n in pairs(counted) do
+  calls = calls + n
+  bytes = bytes + (counted_bytes[name] or 0)
+end
+if not ok then
+  print('turn' .. '\t' .. 'context_build\tFAIL:' .. tostring(err):gsub('[\t\n]', ' '))
+else
+  print(string.format('turn\tcontext_build\t1\t%.0f\t%.0f\t%.0f\t%d\t%d\t0\tok calls=%d reads=%d read_bytes=%d',
+    elapsed, elapsed, elapsed, bytes, session_bytes, calls, session_reads, session_bytes))
+  local names = {}
+  for name in pairs(counted) do names[#names + 1] = name end
+  table.sort(names, function(a, b) if counted[a] == counted[b] then return a < b end return counted[a] > counted[b] end)
+  for _, name in ipairs(names) do
+    print(string.format('turn	context_build.%s	%d	0	0	0	0	%d	0	ok', name, counted[name], counted_bytes[name] or 0))
+  end
+end
 print(string.format('# iterations=%d rows=%d', N, #rows))
