@@ -148,6 +148,25 @@ All three ran with a scratch `WASM_AGENT_HOME` under `$TMPDIR` and with the fast
   `done_gate_unchecked` rows: the rate over the last 24h before the release is unmeasured, and
   `wa turns --gate` says so instead of printing 0%.
 
+### Item J measurement (before/after share of notes naming a harness cause)
+
+Attempted, and what the journal actually shows:
+
+- 2026-11-19: 8 notes, from 8 sessions, every one stamped with build ac7717e0 - the BASE, which does
+  not carry item J;
+- 2026-11-18: no note at all, so a 24h-before window is those same 8 notes;
+- the AFTER side does not exist yet: it needs sessions run on a release that carries fce803eb.
+
+So the before/after share cannot be computed here, and I did not fake it by judging 8 notes by eye with
+a rule invented afterwards. The supported surface (wa turns --day --json) prints themes and counts,
+not a per-note classification, and the per-note hurt text is in the ledger the node's guard refuses to
+an agent tool. The operator can take both sides in one command each, once an after-build has run:
+
+    wa turns --day <YYYY-MM-DD> --json
+
+filtered by the build field: notes on a build without item J are the BEFORE side, notes on a build
+carrying fce803eb are the AFTER side.
+
 ## What I could not measure, and why
 
 The rate on THIS node's real history is unmeasured by me. Reading the operator's ledger from an agent
