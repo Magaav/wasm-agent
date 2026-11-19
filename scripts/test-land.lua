@@ -1598,6 +1598,20 @@ for row in pairs(planner_set) do if not fast_set[row] then only_planner = only_p
 for row in pairs(fast_set) do if not planner_set[row] then only_fast = only_fast + 1 end end
 eq(only_planner, 0, "every row the planner would request is a row the runner executes")
 eq(only_fast, 0, "and every row the runner executes is one the planner knows")
+-- ---------------------------------------------------------------- case 30: the pins move in a compiled round
+-- A compiled round that ALSO moves components.lock builds the components bundle inside the `artifacts` step,
+-- before any node takes the lock (item 28): building it afterwards describes a lock the fleet already reads,
+-- and a node that takes both would take the new pins with the old bundle. On the base commit
+-- `also_components` does not exist at all, so nothing marks such a round. The classifier and the row
+-- inventory are the REAL ones - this asks the tree the row runs from, not a fixture.
+local pinned_plan = land.build_plan({ id = "case30", journal = { repo = tree_root } },
+  { "components.lock", "rust/Cargo.toml" })
+eq(pinned_plan.category, "compiled", "a compiled change that also moves the pins is a compiled round")
+contains(tostring(pinned_plan.steps.artifacts.also_components or ""), "components.lock",
+  "and its artifacts step says the components bundle is built with the node release")
+local plain_plan = land.build_plan({ id = "case30b", journal = { repo = tree_root } }, { "rust/Cargo.toml" })
+eq(plain_plan.category, "compiled", "a compiled change that moves no pin is still compiled")
+eq(plain_plan.steps.artifacts.also_components, nil, "and it builds no components bundle")
 -- ---------------------------------------------------------------- case 29 (end to end): one command, no hand
 -- steps. A fixture land - scratch incoming repository, fake gh, scratch vault - runs from collect to report
 -- with nothing done by hand: every effect is either done by the machine or skipped WITH A REASON, no step
