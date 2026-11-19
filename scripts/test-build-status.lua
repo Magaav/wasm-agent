@@ -59,6 +59,24 @@ for _, case in ipairs(cases) do
   assert(type(why) == 'string' and why ~= '', case.name .. ' gave no reason')
 end
 
+-- Item 7 of the node-ops round: the two facts a commit comparison cannot see, driven as data.
+-- A binary that records ITSELF as built from a dirty tree at this commit is 'edited', never 'fresh':
+-- it embeds edits the clean tree does not have.
+local dirty_cases = {
+  { name = 'dirty-build-same-commit', tree = { head = 'a', tree = 't1', clean = true },
+    binary = { commit = 'a', built_tree = 't1', built_dirty = 'true' }, want = 'edited' },
+  { name = 'dirty-build-flag-true', tree = { head = 'a', tree = 't1', clean = true },
+    binary = { commit = 'a', built_tree = 't1', built_dirty = true }, want = 'edited' },
+  { name = 'clean-build-same-commit-and-tree', tree = { head = 'a', tree = 't1', clean = true },
+    binary = { commit = 'a', built_tree = 't1', built_dirty = 'false' }, want = 'fresh' },
+  { name = 'same-commit-different-tree', tree = { head = 'a', tree = 't2', clean = true },
+    binary = { commit = 'a', built_tree = 't1', built_dirty = 'false' }, want = 'stale' },
+}
+for _, case in ipairs(dirty_cases) do
+  local got, why = build.relation(case.tree, case.binary)
+  assert(got == case.want, case.name .. ' produced ' .. tostring(got) .. ', expected ' .. case.want .. ' (' .. tostring(why) .. ')')
+  assert(type(why) == 'string' and why ~= '', case.name .. ' gave no reason')
+end
 -- The tool answers the same facts, so a model can reach them.
 local toolslib = dofile('lua/core/tools.lua')
 local answer = toolslib.dispatch(memory, 'build', {}, 'admin', { user_id = 'fixture' })
