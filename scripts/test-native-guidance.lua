@@ -102,7 +102,8 @@ for _, envelope in ipairs({ 'progressive', 'full' }) do
   -- (codemode_policy.eligible), so it is the one that acts through a run tool at all. A profile with
   -- no code mode gets no guidance of either kind, which the control below pins.
   local child = build('native', envelope, true)
-  eq(child.tools, 'bash,codemode,edit,read,run,write', envelope .. ': the subagent keeps its profile tools')
+  -- Item 3 narrows a native child that can run code to the one door, exactly as it narrows a master.
+  eq(child.tools, 'run', envelope .. ': a native child declares the run tool alone')
   eq(count(child.system, 'Work in code'), 1, envelope .. ': the child gets one guidance sentence too')
   has(child.system, TOOL_CALL, envelope .. ': the child gets the run-tool sentence')
   for _, forbidden in ipairs(FORBIDDEN) do
@@ -156,5 +157,26 @@ local honoured = with('on', 'progressive', function()
 end)
 eq(honoured.transport, 'block', 'on: the measured block transport is still what the profile decides')
 has(honoured.system, 'end your message with one', 'on: and the fence guidance is what that node is sent')
+
+
+-- ---------------------------------------------------------------- item 3: the full envelope
+-- The full envelope (a child, an older session, WASM_AGENT_ENVELOPE_MODE=full) declares the WHOLE
+-- surface - except on a native node, where the one door is the run tool plus the control-plane tools a
+-- script cannot run. Without this a native node was offered every tool beside the run tool, the offer
+-- the 17/11 measurement already answered.
+local function tool_count(text)
+  local n = 0
+  for _ in tostring(text):gmatch('[^,]+') do n = n + 1 end
+  return n
+end
+local full_master = build('native', 'full', false)
+eq(full_master.tools, 'run', 'native + full envelope: a master declares the run tool alone')
+
+-- The explicit modes keep the full envelope exactly as a27490af built it (golden-pinned in
+-- scripts/test-prompt-golden.lua; the counts here say the narrowing never leaked into them).
+local full_codemode = build('codemode', 'full', false)
+ok(tool_count(full_codemode.tools) > 40, 'codemode + full envelope keeps the whole surface (' .. tool_count(full_codemode.tools) .. ' tools)')
+local full_off = build('off', 'full', false)
+ok(tool_count(full_off.tools) > 40, 'off + full envelope keeps the whole surface (' .. tool_count(full_off.tools) .. ' tools)')
 
 print('native guidance ok (' .. checks .. ' checks)')

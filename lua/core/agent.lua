@@ -783,6 +783,12 @@ M.system_prompt = system_prompt
 -- improvised the call as text markup instead of emitting a tool call, and the
 -- run ended having done nothing. Prefer the set; derive one from the list for a
 -- caller that only has the list.
+-- The declared list a child runs with. In native mode a child that can act through a script declares
+-- the SAME one door a native master does (rel review r2, item 3): `run` plus the control-plane tools,
+-- never every tool beside it. Two guards keep this from taking a child's only way to act: the narrowing
+-- applies only where code mode is really enabled for this child (codemode_policy.eligible says which
+-- profiles may use it) and only when the profile allows `run` at all, so a read-only profile keeps the
+-- tools it has.
 function M.subagent_tool_list(subagent, role,ctx)
   subagent = subagent or {}
   local allowed = subagent.allowed
@@ -794,7 +800,21 @@ function M.subagent_tool_list(subagent, role,ctx)
     -- An explicitly empty profile means reasoning-only, never the role default.
     if next(allowed) == nil then return {} end
   end
-  return tools.all_for(allowed, role,ctx,memory)
+  local list=tools.all_for(allowed, role,ctx,memory)
+  if allowed.run then
+    local ok,raw_lib=pcall(dofile,'lua/core/raw_code.lua')
+    if ok and raw_lib.mode()=='native' then
+      local ctx_ok,policy_ok=pcall(function()
+        local probe_ctx={session_id=ctx and ctx.session_id,user_id=ctx and ctx.user_id,role=role,subagent=subagent}
+        return dofile('lua/core/codemode_policy.lua').pin(memory,role,probe_ctx).enabled
+      end)
+      if ctx_ok and policy_ok then
+        local ok_env,envelope=pcall(dofile,'lua/core/envelope.lua')
+        if ok_env then list=envelope.native_surface(list,envelope.core_names(),false) end
+      end
+    end
+  end
+  return list
 end
 
 -- The lean prompt a subagent runs with: the mandatory boundary rules, the
