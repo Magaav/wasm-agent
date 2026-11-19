@@ -929,6 +929,87 @@ end
 
 -- Capabilities a peer may invoke, in addition to the normal tools. `caller` is the peer that
 -- asked: its master is the author of whatever this does.
+
+-- A relayed bash is ADOPTED, not killed (change/remote-pending, item 1).
+--
+-- The relay holds a queued call about SEND_WAIT (45 s, rust/wa-rendezvous/src/rendezvous.rs) and tells
+-- this node to finish ANSWER_MARGIN_MS earlier; until now that bound was a kill. install_relay_context
+-- (rust/wa-capabilities/src/serve.rs) turns the caller's deadline into this run's cancel flag, and the
+-- foreground bash path cancels its own operation when that flag flips
+-- (rust/wa-capabilities/src/operations.rs). The command died mid-run and the caller could not tell
+-- whether it had.
+--
+-- Now a peer call that NAMED a budget (nodes.lua stamps it in the SIGNED body, never a header) is
+-- started as a managed operation here - detached by construction, with its own slot and its own cancel
+-- flag - and this node watches it for the budget minus a margin. Settled, it answers the command's own
+-- result, exactly as the synchronous path would have. Still running, it answers
+-- {state:"pending", op, node, tool, waited_s}: the operation keeps running here, the caller resumes it
+-- with wait(op) (short relayed operation await slices, so no call holds the relay open) or stops it
+-- with cancel(op). Nothing is re-run, and a command that appends a line appends it once.
+local ADOPT_MARGIN_MS = 4000
+
+local function adopt_session(caller)
+  return "peer:" .. tostring(caller.node_id or "unknown")
+end
+
+-- The settled command's answer, read from the operation itself: the same fields the synchronous bash
+-- answers (stdout, stderr, the byte counts, code/ok), so a call that fitted in the budget reads exactly
+-- as it did before adoption existed.
+local function adopted_result(id, author, caller)
+  local ctx = { user_id = author, node_id = nodeslib.node_name(), peer_call = true,
+    session_id = adopt_session(caller) }
+  local state = toolslib.dispatch(memory, "operation", { action = "status", id = id }, "master", ctx)
+  local out = type(state) == "table" and state or {}
+  for _, stream in ipairs({ "stdout", "stderr" }) do
+    local page = toolslib.dispatch(memory, "operation",
+      { action = "read", id = id, stream = stream, offset = 0, limit = stream == "stdout" and 24576 or 8192 },
+      "master", ctx)
+    if type(page) == "table" and type(page.content) == "string" then
+      out[stream] = page.content
+      out[stream .. "_bytes"] = tonumber(page.available_bytes) or #page.content
+    end
+  end
+  out.operation_id = id
+  out.adopted = true
+  if out.code == nil then out.code = tonumber(out.process_exit_code) or tonumber(out.command_code) or -1 end
+  if out.ok == nil then out.ok = out.code == 0 end
+  return out
+end
+
+local function adopt_bash(args, caller, author)
+  local budget = math.max(1000, math.floor(tonumber(args.budget_ms) or 0))
+  local command = type(args.command) == "string" and args.command or ""
+  if command == "" then return { error = "command_required", effect = "none" } end
+  -- budget_ms is the caller's word about how long IT may wait, never a field of the operation tool:
+  -- the command is started with what the caller asked for and nothing invented.
+  local started = wa_peer_dispatch("operation", { action = "start", command = command, cwd = args.cwd,
+    timeout_seconds = args.timeout_seconds, background = true }, caller, author)
+  local id = type(started) == "table" and tostring(started.operation_id or "") or ""
+  if id == "" then
+    -- The start was refused (path guard, a bad timeout, capacity): answer it as it is. A refusal is
+    -- never permission to run the command another way, and a handle that cannot settle is not invented.
+    return started
+  end
+  local ctx = { user_id = author, node_id = nodeslib.node_name(), peer_call = true,
+    session_id = adopt_session(caller) }
+  local waited, ceiling = 0, math.max(0, budget - ADOPT_MARGIN_MS)
+  while waited < ceiling do
+    local step = math.min(1000, ceiling - waited)
+    local state = toolslib.dispatch(memory, "operation",
+      { action = "await", id = id, wait_ms = step, tool = "operation" }, "master", ctx)
+    waited = waited + step
+    if type(state) ~= "table" then break end
+    if state.settled == true or tostring(state.state or "") == "settled" then
+      return adopted_result(id, author, caller)
+    end
+    if state.error ~= nil then break end
+  end
+  return { state = "pending", op = id, operation_id = id, node = nodeslib.node_name(), tool = "bash",
+    waited_s = math.floor(waited / 1000), adopted = true,
+    note = "the command outlived the relay hold and is still running on that node as operation "
+      .. id .. "; wait(op) resumes it, cancel(op) stops it, and nothing was re-run" }
+end
+
 local function node_capability(capability, args, caller)
   args = args or {}
   local author = nodeslib.author_of(caller)
@@ -1082,6 +1163,15 @@ function wa_peer_dispatch(capability, args, caller, author)
   if type(args) == "table" and args.scope == "node" then
     return { error = "peer_node_scope_not_granted", effect = "none", caller = tostring(caller.node_id or ""),
       note = "a node-wide scope over the mesh needs this node's explicit grant to that peer; none is configured, so the request is refused rather than served" }
+  end
+  -- A peer that named a budget asked for its work to be ADOPTED rather than killed
+  -- (change/remote-pending, item 1). The budget travels in the signed body, so it is the caller's own
+  -- word and nothing on the path can raise it. Only bash needs it: operation start answers a receipt
+  -- at once, and a batch is read-only on the wire. This sits in THIS function - the one seam both the
+  -- relay's own dispatch (node_capability's fallthrough) and a test can reach - so what is checked is
+  -- what runs.
+  if capability == "bash" and type(args) == "table" and tonumber(args.budget_ms) then
+    return adopt_bash(args, caller, author)
   end
   -- The caller's role, not a hard-coded one: `verify_peer` proved it is a master, and passing
   -- the proof through means a future caller that is not a master cannot inherit these tools by
