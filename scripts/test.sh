@@ -956,6 +956,8 @@ gate_run bash scripts/test-row-at-sha.sh | grep 'test-row-at-sha: ok'
 # A green row that printed SKIP is a SKIP, not a pass (item 10 of the node-ops round): the shipped
 # check() is read out of fast.sh and run, so a drift between the two fails here.
 gate_run bash scripts/test-fast-skip-count.sh | grep 'test-fast-skip-count: ok'
+# Peers probe at once, through supervised children (item 10 of the node-ops round).
+gate_run bash scripts/test-nodes-probe-parallel.sh | grep 'nodes probe parallel ok'
 gate_run bash scripts/test-watchdog-upgrade.sh | grep 'test-watchdog-upgrade: ok'
 # Context budget is per model (provider.budget), and it is NOT the same thing as
 # provider.limits, which fetches the account's rate limits for the UI. Confusing

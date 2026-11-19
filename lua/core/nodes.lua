@@ -304,6 +304,65 @@ function M.invalidate()
   operator_cache = {}
 end
 
+-- Probe peers AT ONCE, through one supervised child process each, and answer { <node_id> = {capabilities, reason} }.
+--
+-- WHY PROCESSES: host.http is one blocking call, so a loop over peers is a sum of their timeouts. The only
+-- concurrency this node has is supervised operations (host.operation), and a child "wa nodes probe <id>" is
+-- the same probe with its own process, its own cache and its own deadline. The children are started
+-- together, awaited together, and a child that cannot start is left out of the answer so the caller falls
+-- back to the in-process probe and says the same named reason as before.
+--
+-- PROBE_DEADLINE_S bounds the whole fan-out, so a hundred unreachable peers cost one deadline, not a hundred.
+local PROBE_DEADLINE_S = 20
+local function probe_peers(peers, opts)
+  opts = opts or {}
+  if type(host.operation) ~= "function" then return {} end
+  local runtime = json.decode(host.runtime_info and host.runtime_info() or "") or {}
+  local program = tostring(runtime.binary_path or "")
+  if program == "" then return {} end
+  local launched = {}
+  for _, peer in ipairs(peers or {}) do
+    local id = tostring(peer.node_id or "")
+    if id ~= "" then
+      local argv = { "nodes", "probe", id }
+      local db = host.getenv("WASM_AGENT_DB")
+      if db and db ~= "" then argv = { "--db", db, "nodes", "probe", id } end
+      local ok, receipt = pcall(host.operation, "start", json.encode({ program = program, args = argv,
+        timeout_seconds = tonumber(opts.deadline_s or PROBE_DEADLINE_S), kind = "command",
+        owner = "nodes-probe" }))
+      local answer = ok and (json.decode(receipt) or {}) or {}
+      if answer.operation_id then launched[#launched + 1] = { id = id, operation_id = answer.operation_id } end
+    end
+  end
+  local out = {}
+  for _, entry in ipairs(launched) do
+    local settled, state = pcall(host.operation, "await", json.encode({ id = entry.operation_id,
+      wait_s = tonumber(opts.deadline_s or PROBE_DEADLINE_S) }))
+    local snapshot = settled and (json.decode(state) or {}) or {}
+    if snapshot.settled ~= true then
+      pcall(host.operation, "cancel", json.encode({ id = entry.operation_id }))
+      out[entry.id] = { capabilities = nil, reason = "probe_timeout" }
+    else
+      local read_ok, chunk = pcall(host.operation, "read", json.encode({ id = entry.operation_id,
+        stream = "stdout", offset = 0, limit = 65536 }))
+      local text = read_ok and (json.decode(chunk) or {}) or {}
+      local body = tostring(text.content or text.data or "")
+      local decoded = nil
+      for line in body:gmatch("[^\r\n]+") do
+        local one = json.decode(line)
+        if type(one) == "table" and (one.capabilities ~= nil or one.reason ~= nil or one.error ~= nil) then decoded = one end
+      end
+      if decoded then
+        out[entry.id] = { capabilities = type(decoded.capabilities) == "table" and decoded.capabilities or nil,
+          reason = decoded.reason or decoded.error or (decoded.capabilities and "asked" or "unknown") }
+      else
+        out[entry.id] = { capabilities = nil, reason = "probe_unreadable" }
+      end
+    end
+  end
+  return out
+end
+
 -- Local host node + every other peer the rendezvous knows about.
 --
 -- `opts.cached` reads the roster this process already has and never asks the rendezvous (see
@@ -335,7 +394,24 @@ function M.list(opts)
       } or { "read", "ls", "grep", "spell_save", "spell_run", "spell_get" },
     },
   }
-  for _, peer in ipairs(fetch_peers(false, opts.cached)) do
+  -- THE FAN-OUT (item 10 of the node-ops round). Measured before: a peer that could not be reached held
+  -- the whole list for its own deadline, one peer after another - four unreachable peers meant four
+  -- timeouts before a display drew anything. host.http is one blocking call, so the concurrency comes from
+  -- supervised PROCESSES: one "wa nodes probe <node_id>" per peer, ALL started before any is awaited, and
+  -- read back together. A cached view asks nobody, and a view with no live probe keeps its old shape.
+  local live_probes = {}
+  if not opts.cached and opts.live_capabilities ~= false then
+    -- opts.peers is the roster, for a caller that has one already (a test drives the fan-out with a
+    -- stubbed host, and a real caller passes nothing and gets the rendezvous' answer as before).
+    local peers = type(opts.peers) == "table" and opts.peers or fetch_peers(false, opts.cached)
+    local candidates = {}
+    for _, peer in ipairs(peers) do
+      if peer.node_id ~= identity.node_id then candidates[#candidates + 1] = peer end
+    end
+    if #candidates > 0 then live_probes = probe_peers(candidates, opts) end
+  end
+  local roster = type(opts.peers) == "table" and opts.peers or fetch_peers(false, opts.cached)
+  for _, peer in ipairs(roster) do
     if peer.node_id ~= identity.node_id then
       peer.id = peer.node_id
       peer.kind = "peer"
@@ -356,9 +432,19 @@ function M.list(opts)
         peer.capabilities = nil
         peer.capabilities_reason = "not_asked"
       else
-        local capabilities, why = M.peer_capabilities(peer)
-        peer.capabilities = capabilities
-        peer.capabilities_reason = capabilities and "asked" or tostring(why or "unknown")
+        -- Answered from the ONE fan-out below, never asked here: asking inside this loop is the serial
+        -- sum of every peer's timeout, which is what item 10 of the node-ops round removed.
+        local answer = live_probes[tostring(peer.node_id or "")]
+        if answer then
+          peer.capabilities = answer.capabilities
+          peer.capabilities_reason = answer.reason
+        else
+          -- No child could be started for this peer (no runtime_info, no operation host): the probe
+          -- still happens, in this process, and says the same named reason it always did.
+          local capabilities, why = M.peer_capabilities(peer)
+          peer.capabilities = capabilities
+          peer.capabilities_reason = capabilities and "asked" or tostring(why or "unknown")
+        end
       end
       out[#out + 1] = peer
     end
@@ -890,6 +976,20 @@ end
 function M.peer_capabilities(node, opts)
   if type(node) ~= "table" or node.local_node then return nil, "not_a_peer" end
   return ask_capabilities(node)
+end
+
+-- ONE peer's accepted capabilities, as a child process asks them (item 10 of the node-ops round).
+--
+-- This is the half a `wa nodes probe <node_id>` child runs: read the roster, find that peer, ask it, and
+-- print ONE JSON line. It exists because the host has no concurrent HTTP primitive - host.http is one
+-- blocking request - and the only concurrency a node has is supervised PROCESSES. M.list therefore starts
+-- one of these per peer at once, so N unreachable peers cost one timeout instead of N.
+function M.probe(selector)
+  local node = M.find(selector)
+  if not node then return { error = "node_unknown", node = tostring(selector or "") } end
+  if node.local_node then return { node_id = node.node_id, local_node = true } end
+  local capabilities, why = ask_capabilities(node)
+  return { node_id = node.node_id, capabilities = capabilities, reason = capabilities and "asked" or tostring(why or "unknown") }
 end
 
 function M.operator_status(node, opts)

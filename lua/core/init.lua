@@ -282,6 +282,12 @@ elseif command == "nodes" then
   if args[2]=='pending' then
     local result=dofile('lua/core/binding_cli.lua').run('nodes','pending')
     if result.error or result.ok==false then os.exit(1) end
+  elseif args[2]=='probe' then
+    -- ONE peer's accepted capabilities, printed as one JSON line (item 10 of the node-ops round). This is
+    -- the child half of the parallel list: M.list starts one per peer at once, because the only
+    -- concurrency a node has is supervised processes (host.http blocks). It is not a model-facing verb.
+    local nodes = dofile("lua/core/nodes.lua")
+    print(json.encode(nodes.probe(args[3])))
   else
     local nodes = dofile("lua/core/nodes.lua")
     print(json.encode({ node_id = (nodes.identity() or {}).node_id, nodes = nodes.list() }))
