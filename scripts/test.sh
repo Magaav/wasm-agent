@@ -1243,6 +1243,11 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-secret-guard.lua" WASM_AGENT_HOME="
   "$BIN" --db "$MCP_VAULT_HOME/guard.db" | grep 'secret guard ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-mcp-request-shape.lua" WASM_AGENT_HOME="$MCP_VAULT_HOME" \
   "$BIN" --db "$MCP_VAULT_HOME/shape.db" | grep 'mcp request shape ok'
+# The Rust half of the same contract (round 8): the allow-list, the --native voucher and the file-kind
+# classifier were only ever run by hand, so 483 lines of the kernel's judgement were in NO gate row - the
+# Lua row above proves the console's answer, never the bytes the launch is judged by. Both modules named.
+gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-capabilities vault_approval_tests
+gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-capabilities classify_magic_tests
 # A peer's share writes scripts, so the row makes its own scratch script directory under that home:
 # pointed at the checkout, it wrote mcp-shared-fixture.mjs into scripts/ and approved a file it did not
 # own (measured 20/11, which is why it was not a gate row before).

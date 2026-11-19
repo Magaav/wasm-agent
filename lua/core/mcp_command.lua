@@ -412,7 +412,10 @@ function M.toggle(ctx, key, enable, opts)
       return { ok = false, error = 'mcp_registry_unreadable', detail = view.registry_error }
     end
     local answer = mcp_module().control({ action = action, id = entry.id,
-      expected_revision = tonumber(opts.expected_revision) or view.revision }, ctx)
+      expected_revision = tonumber(opts.expected_revision) or view.revision,
+      -- The operator's voucher for a native binary (`/mcp <key> on --native <path>`): passed through
+      -- to the control call, which records its sha256 in the approval (docs/VAULT.md).
+      native = type(opts) == 'table' and opts.native or nil }, ctx)
     if not answer.ok then
       audit(ctx, action, { connector = entry.key, where = 'this node', ok = false, error = answer.error,
         revision = answer.revision })

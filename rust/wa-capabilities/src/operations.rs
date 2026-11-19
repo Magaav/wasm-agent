@@ -78,10 +78,10 @@ fn approval_field(text: &str) -> String {
 /// against a digest it could never match: v2 added the launch's directory and its plain (non-vault)
 /// environment, and v3 adds the interpreter the launch spawns and the arguments resolved from its own
 /// directory; the file list is the CLOSURE of the code the connector loads.
-const APPROVAL_FORM: &str = "mcp-vault-approval/v3";
+const APPROVAL_FORM: &str = "mcp-vault-approval/v4";
 
 fn approval_text(program: &str, cwd: &str, env: &[(String, String)], args: &[String],
-                 files: &[(String, String)], vault: &[String]) -> String {
+                 files: &[(String, String)], vault: &[String], native: Option<(&str, &str)>) -> String {
     let mut text = format!("{APPROVAL_FORM}\n");
     text.push_str(&format!("program {}\n", approval_field(program)));
     text.push_str(&format!("cwd {}\n", approval_field(cwd)));
@@ -93,6 +93,11 @@ fn approval_text(program: &str, cwd: &str, env: &[(String, String)], args: &[Str
     }
     for arg in args { text.push_str(&format!("arg {}\n", approval_field(arg))); }
     for (path, sha) in files { text.push_str(&format!("file {} {}\n", approval_field(path), sha.to_lowercase())); }
+    // The operator's own voucher for a native binary (/mcp <id> on --native): one line, only when one was
+    // recorded, so a connector approved without one hashes to the text it always did.
+    if let Some((path, sha)) = native {
+        text.push_str(&format!("native {} {}\n", approval_field(path), sha.to_lowercase()));
+    }
     for name in vault { text.push_str(&format!("vault {}\n", approval_field(name))); }
     text
 }
@@ -283,34 +288,133 @@ fn ambiguous_refusal(value: &str, found: &[String]) -> String {
     format!("vault_approval_argument_ambiguous:{value}: more than one file answers to this name ({}), so which one this launch runs is node's own choice rather than the approval's, and nothing was launched and no value was read. Name the file it must run by its absolute path: /mcp <id> probe, then /mcp <id> on", found.join(", "))
 }
 
-/// The interpreter family, from the program's own name: the flags that mean "run this string" differ.
-///
-/// Round 7: bun, deno, qjs and quickjs were in the JavaScript family, so `bun -e` looked followed - their
-/// module systems are not the one this digest follows (a remote URL, a lockfile's tree, a compiled blob).
-fn interpreter_family(program: &str) -> &'static str {
-    let name = basename(program);
-    match name.trim_end_matches(".exe") {
-        "node" | "nodejs" => "js",
-        "sh" | "bash" | "dash" | "zsh" | "ksh" => "sh",
-        other if unfollowed_interpreter(other).is_some() => "other",
-        _ => "unknown",
-    }
-}
+// ---- the allow-list: what a vault connector may RUN, judged by what the file IS (round 8) --------
+//
+// Rounds 6-7 refused interpreters by NAME and each review found another name, another wrapper or another
+// copy under a different name. A name is not a program: python3, python3.11, pypy, a copy of python called
+// `py`, `env node conn.mjs` and `timeout 30 node conn.mjs` all run code this digest cannot follow, and none
+// of them is refused by a list that names only the first. So the rule is inverted: the program's REALPATH
+// (symlinks resolved) must be one of the two families this digest CAN follow, and the file must be a NATIVE
+// executable (ELF, Mach-O or PE) rather than a script wearing that name. Everything else is refused.
+// The one exception is a native binary the OPERATOR vouched for at approval time (`/mcp <id> on --native`,
+// recorded with its sha256 in the approval): the digest cannot see what a native binary loads.
+
+/// The programs a vault connector may run: node, and the POSIX shells the digest follows. Judged by the
+/// program's realpath, never by the path the definition happened to spell.
+const ALLOWED_PROGRAMS: [&str; 5] = ["node", "nodejs", "sh", "bash", "dash"];
 
 /// Interpreters whose module system this digest cannot follow: each loads a module or a package from a
 /// search path (a python package, a ruby gem, a perl module, a lua rock) that is not a file an approval
-/// names. The same list is in lua/core/mcp.lua, and docs/VAULT.md names it.
-const UNFOLLOWED_INTERPRETERS: [&str; 33] = ["python", "python2", "python3", "pypy", "pypy3", "perl",
-    "ruby", "php", "lua", "luajit", "tclsh", "expect", "deno", "bun", "qjs", "quickjs", "ts-node", "tsx",
-    "java", "jjs", "pwsh", "powershell", "julia", "elixir", "escript", "erl", "rscript", "groovy",
-    "scala", "kotlin", "swift", "dotnet", "mono"];
+/// names. NOT the rule any more (the allow-list is), but an ARGUMENT that resolves to one of these is
+/// refused too: `node ./bin/python3 script.py` runs python from a file the digest would otherwise name.
+/// The same list is in lua/core/mcp.lua, compared case-insensitively on both sides and pinned by ONE
+/// shared table in scripts/test-mcp-vault-approval.lua.
+pub(crate) const REFUSED_INTERPRETERS: [&str; 33] = ["python", "python2", "python3", "pypy", "pypy3",
+    "perl", "ruby", "php", "lua", "luajit", "tclsh", "expect", "deno", "bun", "qjs", "quickjs",
+    "ts-node", "tsx", "java", "jjs", "pwsh", "powershell", "julia", "elixir", "escript", "erl",
+    "rscript", "groovy", "scala", "kotlin", "swift", "dotnet", "mono"];
 
-/// The interpreter a program name is, when the digest cannot follow what it loads. A versioned name is the
-/// same interpreter (python3.11, perl5.36, ruby3.2, php8.2), which is why the trailing digits and dots are
-/// not part of the answer.
-fn unfollowed_interpreter(name: &str) -> Option<&'static str> {
-    let stem = name.trim_end_matches(|character: char| character.is_ascii_digit() || character == '.');
-    UNFOLLOWED_INTERPRETERS.iter().find(|known| **known == stem || **known == name).copied()
+/// Wrappers: each one RUNS the program that follows it, so the file an approval names is not the file that
+/// runs. `sh -c 'env ...'` is already refused as inline code; this is `program=/usr/bin/env`, and an
+/// argument that resolves to one of them.
+pub(crate) const REFUSED_WRAPPERS: [&str; 17] = ["env", "nice", "ionice", "timeout", "setsid", "stdbuf",
+    "xargs", "sudo", "doas", "nohup", "chrt", "taskset", "unshare", "firejail", "bwrap", "flock", "time"];
+
+/// A versioned name is the same interpreter (python3.11, perl5.36, ruby3.2, php8.2).
+fn stem_of(name: &str) -> &str {
+    name.trim_end_matches(|character: char| character.is_ascii_digit() || character == '.')
+}
+
+/// Interpreter or wrapper, from a name: the kind, and the name that matched. Compared case-insensitively,
+/// because a Rust list matched `Rscript` only by accident while the Lua list lowercased (round 8's
+/// finding 5: one shared table, one case rule).
+pub(crate) fn refused_interpreter_or_wrapper(name: &str) -> Option<(&'static str, &'static str)> {
+    let clean = name.trim_end_matches(".exe").to_ascii_lowercase();
+    let stem = stem_of(&clean).to_string();
+    if let Some(known) = REFUSED_WRAPPERS.iter().find(|known| **known == clean || **known == stem) {
+        return Some(("wrapper", known));
+    }
+    if let Some(known) = REFUSED_INTERPRETERS.iter().find(|known| **known == clean || **known == stem) {
+        return Some(("interpreter", known));
+    }
+    None
+}
+
+/// A file's kind from its leading bytes, or None when the host cannot say. A name is never the answer: a
+/// copy of python called `node`, or a `#!/bin/sh` wrapper called `bash`, is exactly what a list of names
+/// cannot refuse.
+fn file_magic(path: &str) -> Option<String> {
+    let value = crate::host::file_magic_value(path);
+    value["magic"].as_str().map(str::to_string)
+}
+
+fn native_executable(path: &str) -> bool {
+    matches!(file_magic(path).as_deref(), Some("elf") | Some("macho") | Some("pe"))
+}
+
+/// The operator's own voucher for a native binary (`/mcp <id> on --native`): {path, sha256}, recorded in
+/// the approval. Its bytes are in the digest like any other approved file, so replacing the binary voids
+/// the approval.
+fn native_voucher(approval: &Value) -> Option<(String, String)> {
+    let native = approval.get("native")?;
+    let path = native["path"].as_str().unwrap_or_default();
+    if path.is_empty() { return None; }
+    Some((real_path(path), native["sha256"].as_str().unwrap_or_default().to_lowercase()))
+}
+
+/// The one judgement about a PROGRAM, made in the console and again here from the bytes on disk.
+/// `vouched` is the realpath the approval's `--native` record names, or None.
+pub(crate) fn program_refusal(program: &str, vouched: Option<&str>) -> Option<String> {
+    let name = basename(program).trim_end_matches(".exe").to_string();
+    if PACKAGE_RUNNERS.contains(&name.as_str()) {
+        return Some(format!("vault_approval_package_runner:{program}: this connector's program is a package runner ({name}), whose code comes from a cache or a registry rather than from files an approval can name, so nothing was launched and no value was read. Give it its own absolute program at the operator's terminal: /mcp <id> probe, then /mcp <id> on"));
+    }
+    if !is_absolute_path(program) {
+        return Some(format!("vault_approval_program_not_absolute:{program}: this connector's program is a bare name, which is resolved through PATH rather than named by the digest, so nothing was launched and no value was read. Name the absolute path of its interpreter or binary: /mcp <id> probe, then /mcp <id> on"));
+    }
+    // The name of what the path RESOLVES to, so a symlink or another name cannot choose another answer.
+    // real_path falls back to the path itself when the file is not there, which is why an interpreter is
+    // named as one before existence is asked: `/usr/bin/python3` is an interpreter whether or not this
+    // host installed it at that path, and that is the sentence the operator has to act on.
+    let real = real_path(program);
+    let real_name = basename(&real).trim_end_matches(".exe").to_string();
+    // The two families are refused BEFORE the voucher is looked at: --native vouches for a NATIVE BINARY
+    // the allow-list has no opinion about, not for python3 or env. A wrapper is refused even when vouched
+    // for (a voucher checked first turned /usr/bin/env into an approved program).
+    if let Some((kind, matched)) = refused_interpreter_or_wrapper(&real_name) {
+        if kind == "wrapper" {
+            return Some(format!("vault_approval_program_wrapper:{program}: this connector's program resolves to {real}, which is a wrapper ({matched}) that runs another program, so the file the approval names is not the file that runs, and nothing was launched and no value was read. Run the connector under node or a POSIX shell: /mcp <id> probe, then /mcp <id> on"));
+        }
+        if kind == "interpreter" {
+            return Some(format!("vault_approval_program_not_allowed:{program}: this connector's program resolves to {real}, which is an interpreter ({matched}) whose modules and packages this digest cannot follow, so nothing was launched and no value was read. A vault connector runs node or a POSIX shell, judged by the program's realpath, or a native binary the operator vouches for with /mcp <id> on --native: /mcp <id> probe, then /mcp <id> on"));
+        }
+    }
+    if vouched == Some(real.as_str()) {
+        // The voucher is about a FILE, and about a NATIVE EXECUTABLE: a script under the voucher is the
+        // same interpreter in disguise the allow-list exists to refuse.
+        if native_executable(&real) { return None; }
+        return Some(format!("vault_approval_program_native_not_executable:{program}: this connector's program resolves to {real}, which the operator vouched for with --native but which is not a native executable: --native approves a native binary, never a script, so nothing was launched and no value was read. Name the real interpreter: /mcp <id> probe, then /mcp <id> on"));
+    }
+    // A path that is not a file is not a coverage problem: saying `not_covered` for a program that is
+    // simply absent sent the operator to approve a file that does not exist (the Lua side says "cannot
+    // be read" for the same fact).
+    if !std::path::Path::new(program).exists() {
+        return Some(format!("vault_approval_program_missing:{program}: this connector's program is not a file on this node, so nothing was launched and no value was read. Name the absolute path of its interpreter or binary: /mcp <id> probe, then /mcp <id> on"));
+    }
+    if ALLOWED_PROGRAMS.contains(&real_name.as_str()) {
+        if native_executable(&real) { return None; }
+        return Some(format!("vault_approval_program_not_native:{program}: this connector's program resolves to {real}, which is named {real_name} but is not a native executable: a script or a plain file under an allowed name is an interpreter in disguise, so nothing was launched and no value was read. Name the real interpreter, or record a native binary at the operator's terminal with /mcp <id> on --native: /mcp <id> probe, then /mcp <id> on"));
+    }
+    Some(format!("vault_approval_program_not_allowed:{program}: this connector's program resolves to {real}, which is not node or a POSIX shell (sh, bash, dash), so nothing was launched and no value was read. A vault connector runs node or a POSIX shell, judged by the program's realpath, or a native binary the operator vouches for with /mcp <id> on --native: /mcp <id> probe, then /mcp <id> on"))
+}
+
+/// An ARGUMENT that resolves to an interpreter or a wrapper is refused the same way: the digest can name
+/// the file, but not what running it runs.
+fn argument_refusal(value: &str, target: &str) -> Option<String> {
+    let real = real_path(target);
+    let name = basename(&real).trim_end_matches(".exe").to_string();
+    let (kind, _) = refused_interpreter_or_wrapper(&name)?;
+    Some(format!("vault_approval_argument_not_allowed:{value}: this connector's argument resolves to {real}, which is a {kind} whose code this digest cannot name, so nothing was launched and no value was read. Name a script file instead: /mcp <id> probe, then /mcp <id> on"))
 }
 
 /// An option that names a FILE rather than a value.
@@ -319,18 +423,46 @@ fn path_option(name: &str) -> bool {
         | "--env-file" | "--config")
 }
 
-/// Options that make an INTERPRETER run code this digest cannot name: a string it evaluates, or a module
-/// it loads from its own search path. For a program the digest follows, the family's own list decides (a
-/// node `-r` is a file, below); for one it cannot classify, every one of these is code.
+/// A flag that makes an interpreter run a STRING, matched before an '=' and through a short cluster.
+fn code_flag(flags: &[&str], value: &str) -> Option<String> {
+    // Round 8: the flag is compared BEFORE an '=', and a short cluster is split (-pe is -p and -e), so
+    // one argument cannot smuggle two flags past a list that compares whole strings. A long option is
+    // never split: --print is one flag, not --p, --r, --i, --n, --t.
+    let head = value.split('=').next().unwrap_or(value);
+    if flags.contains(&head) { return Some(head.to_string()); }
+    let bytes = head.as_bytes();
+    if bytes.len() > 2 && bytes[0] == b'-' && bytes[1] != b'-' {
+        for index in 1..bytes.len() {
+            let short = format!("-{}", bytes[index] as char);
+            if flags.contains(&short.as_str()) { return Some(format!("{short} (in {head})")); }
+        }
+    }
+    None
+}
+
+const JS_INLINE_FLAGS: [&str; 4] = ["-e", "--eval", "-p", "--print"];
+const SH_INLINE_FLAGS: [&str; 2] = ["-c", "--command"];
 const CODE_FLAGS: [&str; 13] = ["-c", "-e", "-E", "-m", "-p", "-r", "--eval", "--print", "--command",
     "-command", "-encodedcommand", "--module", "--require"];
 
+/// The family a program belongs to, for the flags that mean \"run this string\": decided from the REALPATH,
+/// so a symlink or another name cannot choose another family's rules.
+fn interpreter_family(program: &str) -> &'static str {
+    let name = basename(&real_path(program)).trim_end_matches(".exe").to_string();
+    match name.as_str() {
+        "node" | "nodejs" => "js",
+        "sh" | "bash" | "dash" | "zsh" | "ksh" => "sh",
+        other if refused_interpreter_or_wrapper(other).is_some() => "other",
+        _ => "unknown",
+    }
+}
+
 /// A flag that makes the interpreter run a STRING: the one shape no digest of files can name.
-fn inline_flag(program: &str, value: &str) -> bool {
+fn inline_flag(program: &str, value: &str) -> Option<String> {
     match interpreter_family(program) {
-        "js" => matches!(value, "-e" | "--eval" | "-p" | "--print"),
-        "sh" => matches!(value, "-c" | "--command"),
-        _ => CODE_FLAGS.contains(&value),
+        "js" => code_flag(&JS_INLINE_FLAGS, value),
+        "sh" => code_flag(&SH_INLINE_FLAGS, value),
+        _ => code_flag(&CODE_FLAGS, value),
     }
 }
 
@@ -342,8 +474,10 @@ fn argument_problem(cwd: &str, program: &str, args: &[String], covered: &[String
     let mut pending = String::new();
     for value in args {
         let option = value.starts_with('-') && value.len() > 1;
-        if option && inline_flag(program, value) {
-            return Err(format!("vault_approval_inline_code:{value}: this connector runs inline code ({value}), which no digest of files can name, so nothing was launched and no value was read. Give it a script file: /mcp <id> probe, then /mcp <id> on"));
+        if option {
+            if let Some(flag) = inline_flag(program, value) {
+                return Err(format!("vault_approval_inline_code:{flag}: this connector runs inline code ({value}), which no digest of files can name, so nothing was launched and no value was read. Give it a script file: /mcp <id> probe, then /mcp <id> on"));
+            }
         }
         if option {
             let (name, inline) = match value.split_once('=') {
@@ -367,6 +501,7 @@ fn argument_problem(cwd: &str, program: &str, args: &[String], covered: &[String
         }
         match resolve_argument(cwd, value) {
             Resolved::One(target) => {
+                if let Some(problem) = argument_refusal(value, &target) { return Err(problem); }
                 if !covered.iter().any(|path| real_path(path) == real_path(&target)) {
                     return Err(format!("vault_approval_argument_not_covered:{target}: this connector runs a file the approval does not name, so nothing was launched and no value was read. Approve it again at the operator's terminal: /mcp <id> probe, then /mcp <id> on"));
                 }
@@ -397,20 +532,11 @@ fn looks_like_path(value: &str) -> bool {
         .is_some_and(|ext| SCRIPT_EXTENSIONS.iter().any(|known| ext.eq_ignore_ascii_case(known)))
 }
 
-/// Why a program cannot be covered, or None when it can: a bare name is resolved through PATH, which the
-/// digest does not name, and a package runner's code comes from a cache or a registry.
+/// Why a program cannot be covered, or None when it can: the ALLOW-LIST of round 8, judged by the
+/// program's realpath and by what the file IS, with no voucher (the console's own question, before an
+/// operator has recorded one).
 fn program_shape_problem(program: &str) -> Option<String> {
-    let name = basename(program);
-    if PACKAGE_RUNNERS.contains(&name.as_str()) {
-        return Some(format!("vault_approval_package_runner:{program}: this connector's program is a package runner ({name}), whose code comes from a cache or a registry rather than from files an approval can name, so nothing was launched and no value was read. Give it its own absolute program at the operator's terminal: /mcp <id> probe, then /mcp <id> on"));
-    }
-    if !is_absolute_path(program) {
-        return Some(format!("vault_approval_program_not_absolute:{program}: this connector's program is a bare name, which is resolved through PATH rather than named by the digest, so nothing was launched and no value was read. Name the absolute path of its interpreter or binary: /mcp <id> probe, then /mcp <id> on"));
-    }
-    if let Some(interpreter) = unfollowed_interpreter(name.trim_end_matches(".exe")) {
-        return Some(format!("vault_approval_interpreter_unfollowed:{program}: this connector's program is an interpreter ({interpreter}) whose modules and packages this digest cannot follow, so nothing was launched and no value was read. Run it under node or a POSIX shell, or name the connector's own program at the operator's terminal: /mcp <id> probe, then /mcp <id> on"));
-    }
-    None
+    program_refusal(program, None)
 }
 
 /// Nothing is launched and no value is read unless the launch matches the approval the operator gave.
@@ -444,16 +570,36 @@ fn approval_problem(approval: &Value, launch: &Spec) -> Result<VerifiedFiles, St
         .map(|list| list.iter().filter_map(|value| value.as_str().map(str::to_string)).collect())
         .unwrap_or_default();
     vault.sort();
+    // Round 9: the voucher is read BEFORE the files, because the console puts the vouched binary in that
+    // list (lua/core/mcp.lua, M.vault_manifest). Reading it after the loop answered `vault_approval_
+    // unreadable` - "a script this connector was approved with" - for a native binary that is gone, and
+    // left `vault_approval_native_unreadable` reachable only by an approval the console never writes.
+    let voucher = native_voucher(approval);
+    let vouched_path = voucher.as_ref().map(|(path, _)| real_path(path));
     let mut files: Vec<(String, String)> = Vec::new();
     for entry in approval["files"].as_array().map(Vec::as_slice).unwrap_or_default() {
         let path = entry.as_str().unwrap_or_default();
         if path.is_empty() {
             return Err("vault_approval_required: this connector carries an approval with no script list, so no value was read. Approve it again at the operator's terminal: /mcp <id> probe, then /mcp <id> on".into());
         }
-        let Ok(bytes) = std::fs::read(path) else {
+        // Round 9: the vouched BINARY is hashed by STREAM (crate::host::file_digest), never read whole.
+        // A native interpreter is up to half a gigabyte, and reading it into memory to hash it is an
+        // allocation an approval check must not make; the scripts are small and stay as they were.
+        let vouched_here = vouched_path.as_deref() == Some(real_path(path).as_str());
+        let digest = if vouched_here {
+            match crate::host::file_digest(path) {
+                Ok(digest) => Some(digest),
+                Err(reason) => {
+                    return Err(format!("vault_approval_native_unreadable:{path}: the native binary this connector was approved on cannot be read now ({reason}), so nothing was launched and no value was read. Approve it again at the operator's terminal: /mcp <id> on --native"));
+                }
+            }
+        } else {
+            std::fs::read(path).ok().map(|bytes| sha256_hex(&bytes))
+        };
+        let Some(digest) = digest else {
             return Err(format!("vault_approval_unreadable:{path}: a script this connector was approved with cannot be read now, so nothing was launched and no value was read. Approve it again at the operator's terminal: /mcp <id> probe, then /mcp <id> on"));
         };
-        files.push((path.to_string(), sha256_hex(&bytes)));
+        files.push((path.to_string(), digest));
     }
     files.sort_by(|left, right| left.0.cmp(&right.0));
     // The digest is only worth something if it covers what is being STARTED: every script on this
@@ -465,23 +611,44 @@ fn approval_problem(approval: &Value, launch: &Spec) -> Result<VerifiedFiles, St
         }
     }
     // ... and the same for the connector's own command: a relative path is resolved from its cwd, and a
-    // program outside the platform's roots is its own code.
-    if let Some(problem) = program_shape_problem(&program) { return Err(problem); }
+    // program outside the platform's roots is its own code. Round 8: the operator's own voucher for a
+    // native binary is read here, and it has to name the bytes that are there NOW - replacing the binary
+    // is a `vault_approval_mismatch`, not a launch.
+    if let Some((path, sha)) = voucher.as_ref() {
+        // Streaming, for the same reason as the file list: this is a native binary, not a script.
+        let Ok(digest) = crate::host::file_digest(path) else {
+            return Err(format!("vault_approval_native_unreadable:{path}: the native binary this connector was approved on cannot be read now, so nothing was launched and no value was read. Approve it again at the operator's terminal: /mcp <id> on --native"));
+        };
+        if !digest.eq_ignore_ascii_case(sha) {
+            return Err(format!("vault_approval_native_changed:{path}: the native binary this connector was approved on is not the bytes the operator vouched for, so nothing was launched and no value was read. A native binary's own loads are outside this digest; approve it again with /mcp <id> on --native"));
+        }
+        if !files.iter().any(|(known, _)| real_path(known) == real_path(path)) {
+            return Err(format!("vault_approval_native_not_covered:{path}: the native binary this connector was approved on is not in the files the approval names, so nothing was launched and no value was read. Approve it again at the operator's terminal: /mcp <id> on --native"));
+        }
+    }
+    let vouched = voucher.as_ref().map(|(path, _)| path.as_str());
+    if let Some(problem) = program_refusal(&program, vouched) { return Err(problem); }
     // Every argument, resolved the way node resolves it: the file a bare word names is a file this
     // launch runs, and an inline string is a file no digest can name (argument_problem).
     let covered: Vec<String> = files.iter().map(|(path, _)| path.clone()).collect();
     argument_problem(&cwd, &program, &args, &covered)?;
-    if !platform_owned(&program) && !files.iter().any(|(path, _)| path == &program) {
+    let program_vouched = vouched == Some(real_path(&program).as_str());
+    if !platform_owned(&program) && !program_vouched && !files.iter().any(|(path, _)| path == &program) {
         return Err(format!("vault_approval_program_not_covered:{program}: this connector's own program is not a file the approval names, so nothing was launched and no value was read. Approve it again at the operator's terminal: /mcp <id> probe, then /mcp <id> on"));
     }
     // The interpreter the launch SPAWNS is the process the values are put in, and it is not always the
     // definition's program (node_program in lua/core/mcp.lua): it must be the platform's own or a file
     // this approval names. WA_NODE may name anything, and <data>/node belongs to the agent's user.
     let spawned = real_path(&launch.program);
+    // The spawned interpreter is subject to the same allow-list as the connector's own program: WA_NODE
+    // may name a python, a wrapper, or a copy of node that is only a shell script.
+    if let Some(problem) = program_refusal(&spawned, None) { return Err(problem); }
     if !platform_owned(&spawned) && !files.iter().any(|(path, _)| real_path(path) == spawned) {
         return Err(format!("vault_approval_interpreter_not_covered:{spawned}: the interpreter this launch puts the value in is neither the platform's own nor a file the approval names, so nothing was launched and no value was read. Name it at the operator's terminal: /mcp <id> probe, then /mcp <id> on"));
     }
-    let digest = sha256_hex(approval_text(&program, &cwd, &env, &args, &files, &vault).as_bytes());
+    let native_line = voucher.as_ref().map(|(path, sha)| (real_path(path), sha.clone()));
+    let digest = sha256_hex(approval_text(&program, &cwd, &env, &args, &files, &vault,
+        native_line.as_ref().map(|(path, sha)| (path.as_str(), sha.as_str()))).as_bytes());
     if !digest.eq_ignore_ascii_case(&expected) {
         return Err(format!("vault_approval_mismatch: this connector's program, arguments or scripts changed after the operator approved it, so nothing was launched and no value was read (approved {expected}, now {digest}). Approve it again at the operator's terminal: /mcp <id> probe, then /mcp <id> on"));
     }
@@ -577,7 +744,12 @@ fn request_server_problem(bytes: &[u8], approval: &Value) -> Result<(), String> 
     if observed != expected {
         return Err("vault_request_environment_mismatch: the request this launch reads hands the connector an environment the operator did not approve, so nothing was launched and no value was read. Approve the connector again at the operator's terminal: /mcp <id> probe, then /mcp <id> on".into());
     }
-    if let Some(problem) = program_shape_problem(program) { return Err(problem); }
+    // Round 9: the operator's voucher is part of the SAME judgement here as in approval_problem. Without
+    // it a vouched native binary passed the approval and was refused by this check, so `/mcp <id> on
+    // --native` could not work end to end (the review's first item).
+    let voucher = native_voucher(approval);
+    let vouched = voucher.as_ref().map(|(path, _)| path.as_str());
+    if let Some(problem) = program_refusal(program, vouched) { return Err(problem); }
     let files = string_list(approval.get("files"));
     // The same resolution the console applies when it records the approval, in this request's own words:
     // the file a bare argument names is a file this request runs (a bare word is a file beside the
@@ -586,7 +758,8 @@ fn request_server_problem(bytes: &[u8], approval: &Value) -> Result<(), String> 
         return Err(problem.replacen("vault_approval_", "vault_request_", 1)
             .replace("this connector", "this request"));
     }
-    if !platform_owned(program) && !files.iter().any(|path| path == program) {
+    let program_vouched = vouched == Some(real_path(program).as_str());
+    if !platform_owned(program) && !program_vouched && !files.iter().any(|path| path == program) {
         return Err(format!("vault_request_program_not_covered:{program}: this request's program is not a file the approval names, so nothing was launched and no value was read. Approve the connector again at the operator's terminal: /mcp <id> probe, then /mcp <id> on"));
     }
     Ok(())
@@ -1864,6 +2037,65 @@ mod vault_approval_tests {
         path
     }
 
+    /// A NATIVE binary copied under a chosen name, for fixtures that must pass the allow-list: a shell
+    /// script is refused as a program now, so a fixture program has to be a real ELF/Mach-O/PE file.
+    fn native_copy(name: &str) -> std::path::PathBuf {
+        let source = ["/usr/bin/env", "/bin/env", "/usr/bin/true", "/bin/true"]
+            .into_iter()
+            .find(|candidate| {
+                super::file_magic(candidate).as_deref() == Some("elf")
+                    || super::file_magic(candidate).as_deref() == Some("macho")
+            })
+            .expect("a native binary to copy for the fixtures");
+        let dir = std::env::temp_dir().join(format!("wa-vault-approval-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let path = dir.join(name);
+        std::fs::copy(source, &path).expect("a native fixture");
+        path
+    }
+
+    /// An approval that ALSO carries the operator's --native voucher for a program outside the two
+    /// families: the one shape in which a native binary runs a vault connector (round 8).
+    fn approval_native(program: &std::path::Path, files: &[&std::path::Path], vault: &[&str]) -> Value {
+        let mut document = approval(&program.to_string_lossy(), "", &[], &[], files, vault);
+        let real = super::real_path(&program.to_string_lossy());
+        let sha = sha256_hex(&std::fs::read(program).expect("the vouched binary"));
+        // The console SORTS the file list before hashing it (lua/core/mcp.lua, M.vault_manifest:
+        // `table.sort(files, ...)`), and approval_problem sorts it too - so a helper that handed the list
+        // in the order it was written built a digest the kernel would never reproduce. One file hid it.
+        let mut listed: Vec<(String, String)> = files.iter().map(|path| (path.to_string_lossy().to_string(),
+            sha256_hex(&std::fs::read(path).expect("a covered file")))).collect();
+        listed.sort_by(|left, right| left.0.cmp(&right.0));
+        document["files"] = json!(listed.iter().map(|(path, _)| path.clone()).collect::<Vec<_>>());
+        let text = approval_text(&document["program"].as_str().unwrap_or_default().to_string(), "", &[],
+            &[], &listed,
+            &vault.iter().map(|entry| entry.to_string()).collect::<Vec<_>>(),
+            Some((real.as_str(), sha.as_str())));
+        document["sha256"] = json!(sha256_hex(text.as_bytes()));
+        document["native"] = json!({"path": real, "sha256": sha});
+        document
+    }
+
+    /// A NATIVE binary in this user's own directory, under a name the allow-list accepts (round 8: a
+    /// program is judged by its REALPATH's basename and by its leading bytes, so a `#!/bin/sh` fixture
+    /// called `node` is exactly what the allow-list refuses). Copied from the platform's own, and given a
+    /// subdirectory so two tests running at once cannot collide on one file.
+    fn scratch_native(name: &str) -> std::path::PathBuf {
+        let source = ["/usr/bin/env", "/bin/env", "/usr/bin/true", "/bin/true"].iter()
+            .find(|candidate| std::fs::metadata(candidate).is_ok())
+            .copied().expect("a native binary on this host to copy");
+        // One directory PER CALL: these tests run in parallel, and a copy removed by the test that
+        // finished first was a copy the next one still needed (`program_not_native` on a real ELF).
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SERIAL: AtomicU64 = AtomicU64::new(0);
+        let serial = SERIAL.fetch_add(1, Ordering::SeqCst);
+        let path = std::env::temp_dir()
+            .join(format!("wa-vault-approval-{}/native-{serial}", std::process::id())).join(name);
+        std::fs::create_dir_all(path.parent().expect("a parent")).expect("scratch dir");
+        std::fs::copy(source, &path).expect("a native copy");
+        path
+    }
+
     fn spec(program: &str, args: &[String]) -> wa_operation::Spec {
         wa_operation::Spec::command(program.to_string(), args.to_vec())
     }
@@ -1878,7 +2110,7 @@ mod vault_approval_tests {
         }).collect();
         let env: Vec<(String, String)> = env.iter().map(|(name, reference)| (name.to_string(), reference.to_string())).collect();
         let vault: Vec<String> = vault.iter().map(|entry| entry.to_string()).collect();
-        let digest = sha256_hex(approval_text(program, cwd, &env, args, &list, &vault).as_bytes());
+        let digest = sha256_hex(approval_text(program, cwd, &env, args, &list, &vault, None).as_bytes());
         json!({"form": APPROVAL_FORM, "sha256": digest, "program": program, "cwd": cwd,
             "env": env.iter().map(|(name, reference)| json!({"name": name, "ref": reference})).collect::<Vec<_>>(),
             "args": args,
@@ -1910,12 +2142,13 @@ mod vault_approval_tests {
             &[("/home/agent/scripts/fixture.mjs".into(), "aa".repeat(32)),
               ("/home/agent/scripts/lib/other.mjs".into(), "bb".repeat(32))],
             &["FIXTURE_TOKEN".into(), "SECOND_ONE".into()],
+            None,
         );
-        assert!(text.starts_with("mcp-vault-approval/v3\nprogram /usr/bin/node\ncwd /home/agent/work%20tree\n"), "{text}");
+        assert!(text.starts_with("mcp-vault-approval/v4\nprogram /usr/bin/node\ncwd /home/agent/work%20tree\n"), "{text}");
         assert!(text.contains("\nenv LANG=LC_ALL\nenv MAIL_USER=MAIL_USER\narg "), "the plain environment is sorted by name: {text}");
         assert!(text.contains("\narg a%20b\n"), "a space is escaped, not a separator: {text}");
         assert_eq!(sha256_hex(text.as_bytes()),
-            "f45cc25f36c7315cbccfc17c5c1e37b5a9e99f02dff27911130bf5e80b5b8aec",
+            "0d7f15fd975c32c4d5875437dfc193931fbc01972a83f55d1b01c736c6e8ee0b",
             "the digest the Lua side pins for the same fixture");
     }
 
@@ -2005,7 +2238,10 @@ mod vault_approval_tests {
     // must be a file the digest names, or the launch reads no value.
     #[test]
     fn a_program_the_platform_does_not_own_must_be_in_the_digest() {
-        let binary = scratch("home-conn", "#!/bin/sh\necho value\n");
+        // Round 8 judges the program BEFORE its coverage: a file that is not node or a POSIX shell is
+        // refused by the allow-list, whatever the digest says about it. A user-owned node is the shape
+        // that reaches the coverage rule - allowed as a program, and still a file this launch runs.
+        let binary = scratch_native("node");
         let program = binary.to_string_lossy().to_string();
         let unlisted = approval("/usr/bin/node", "", &[], &[], &[], &["TOKEN"]);
         let mut named = unlisted.clone();
@@ -2016,7 +2252,16 @@ mod vault_approval_tests {
         let covered = approval(&program, "", &[], &[], &[&binary], &["TOKEN"]);
         assert!(approval_problem(&covered, &spec(&program, &[])).is_ok(),
             "{:?}", approval_problem(&covered, &spec(&program, &[])));
+        // A shell script OUTSIDE both families is refused earlier, by the allow-list: it is the same
+        // launch as a python or a copy of node under another name.
+        let script = scratch("home-conn", "#!/bin/sh\necho value\n");
+        let scripted = script.to_string_lossy().to_string();
+        let mut smuggled = unlisted.clone();
+        smuggled["program"] = json!(scripted);
+        let refused = approval_problem(&smuggled, &spec(&scripted, &[])).unwrap_err();
+        assert!(refused.starts_with("vault_approval_program_not_allowed:"), "{refused}");
         let _ = std::fs::remove_file(&binary);
+        let _ = std::fs::remove_file(&script);
     }
 
     #[test]
@@ -2089,15 +2334,29 @@ mod vault_approval_tests {
         relative["args"] = json!(["conn.mjs"]);
         assert!(request_server_problem(&request("/usr/bin/node", &["conn.mjs"], None), &relative)
             .unwrap_err().starts_with("vault_request_path_not_absolute:"));
-        let binary = scratch("request-conn", "#!/bin/sh\necho value\n");
+        // A program outside the platform's roots the approval does not name. It is a native node, so
+        // the refusal is the COVERAGE one: a file in neither family is refused earlier, by the allow-list
+        // (round 8), which is asserted straight after.
+        let binary = scratch_native("node");
         let program = binary.to_string_lossy().to_string();
         let mut outside = approved.clone();
         outside["program"] = json!(program);
         outside["args"] = json!([]);
         assert!(request_server_problem(&request(&program, &[], None), &outside).unwrap_err()
             .starts_with("vault_request_program_not_covered:"));
+        let script = scratch("request-conn", "#!/bin/sh\necho value\n");
+        let scripted = script.to_string_lossy().to_string();
+        let mut family = approved.clone();
+        family["program"] = json!(scripted);
+        family["args"] = json!([]);
+        // The request-side check answers with the approval's own words for a PROGRAM (the console and the
+        // kernel share one judgement, program_shape_problem), and with `vault_request_` for the arguments
+        // it re-resolves against this request's own words.
+        assert!(request_server_problem(&request(&scripted, &[], None), &family).unwrap_err()
+            .starts_with("vault_approval_program_not_allowed:"));
         let _ = std::fs::remove_file(&client);
         let _ = std::fs::remove_file(&binary);
+        let _ = std::fs::remove_file(&script);
     }
 
     // The seal half: the child is told the sha256 of the exact bytes the kernel checked, so a rewrite
@@ -2128,7 +2387,7 @@ mod vault_approval_tests {
         let mut bare = spec("/usr/bin/node", &[]);
         assert!(seal_request(&mut bare, &approval, true).unwrap_err().starts_with("vault_request_unnamed:"));
         assert!(seal_request(&mut bare, &approval, false).is_ok(), "a plain launch needs no request file");
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_file(&path);
     }
 
     // ---- round 6: the interpreter, the arguments, the ownership of a platform root, the recheck ----
@@ -2142,7 +2401,10 @@ mod vault_approval_tests {
     /// owns it.
     #[test]
     fn the_interpreter_the_launch_spawns_is_the_platforms_own_or_in_the_digest() {
-        let owned = scratch("user-owned-node", "#!/bin/sh\nexit 0\n");
+        // Round 8: this fixture is a REAL native node, because the allow-list judges the spawned
+        // interpreter by what the file IS - a shell script called `node` is refused by it, one step
+        // before the coverage rule this test is about.
+        let owned = scratch_native("node");
         let ours = super::real_path(&owned.to_string_lossy());
         // A file this user owns is never the platform's, and a platform prefix cannot make it so.
         assert!(!super::owned_by_root(&ours), "a file this user owns is not root-owned: {ours}");
@@ -2165,6 +2427,140 @@ mod vault_approval_tests {
         assert!(approval_problem(&covered, &spec(&ours, &[])).is_ok(),
             "{:?}", approval_problem(&covered, &spec(&ours, &[])));
         let _ = std::fs::remove_file(&owned);
+    }
+
+    /// Round 8: the spawned interpreter is judged by the same ALLOW-LIST as the connector's own program,
+    /// and that arm had no test on either side - the test above asserts interpreter_not_covered, which
+    /// fires one step LATER. On a host where "which node" is a mise/asdf/nvm shim the realpath is not
+    /// node (measured here: /home/victor/.local/share/mise/shims/node -> /usr/bin/mise), so this arm is
+    /// the first thing such a host hits.
+    #[test]
+    fn the_interpreter_the_launch_spawns_is_held_to_the_allow_list() {
+        // A native binary whose REALPATH is an interpreter: it is native, it is in the digest, and it is
+        // still refused, because what it IS (python3) is not one of the two families.
+        let interpreter = native_copy("python3");
+        let approved = approval("/usr/bin/node", "", &[], &[], &[&interpreter], &["TOKEN"]);
+        let refused = approval_problem(&approved, &spec(&interpreter.to_string_lossy(), &[])).unwrap_err();
+        assert!(refused.starts_with("vault_approval_program_not_allowed:"), "{refused}");
+        // And a copy NAMED node that is only a shell script: the name is not the program, so it is
+        // refused one branch later (not_native) than a name outside the allow-list.
+        // Round 9: NOT `fake-node` in the shared directory. The round-6 test beside this one writes a FILE
+        // of that name through `scratch` (a shell script called node), and a directory and a file cannot
+        // share the path: whichever ran second failed with `AlreadyExists`, one suite run in three. The
+        // directory is its own subtree, so both tests keep their fixture.
+        let fake_dir = std::env::temp_dir()
+            .join(format!("wa-vault-approval-{}/fake-node-tree", std::process::id()));
+        std::fs::create_dir_all(&fake_dir).expect("scratch dir");
+        let fake = fake_dir.join("node");
+        std::fs::write(&fake, "#!/bin/sh\nexit 0\n").expect("a shell script called node");
+        let vouched = approval("/usr/bin/node", "", &[], &[], &[&fake], &["TOKEN"]);
+        let refused = approval_problem(&vouched, &spec(&fake.to_string_lossy(), &[])).unwrap_err();
+        assert!(refused.starts_with("vault_approval_program_not_native:"), "{refused}");
+    }
+
+    /// Finding 5: Lua and Rust keep lists of refused names, and they drifted - the Rust list matched
+    /// "Rscript" only by accident while Lua lowercased first. ONE table (fixtures/mcp-refused-names.json)
+    /// is the source of both, and both compare case-insensitively.
+    #[test]
+    fn the_refused_name_lists_are_the_shared_table_and_case_insensitive() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/mcp-refused-names.json");
+        let table: Value = serde_json::from_slice(&std::fs::read(&path).expect("the shared table"))
+            .expect("the shared table is JSON");
+        let listed = |key: &str| -> Vec<String> {
+            table[key].as_array().expect(key).iter()
+                .map(|entry| entry.as_str().expect("a name").to_string()).collect()
+        };
+        let mut rust_interpreters: Vec<String> =
+            super::REFUSED_INTERPRETERS.iter().map(|name| name.to_string()).collect();
+        let mut rust_wrappers: Vec<String> =
+            super::REFUSED_WRAPPERS.iter().map(|name| name.to_string()).collect();
+        let mut rust_allowed: Vec<String> =
+            super::ALLOWED_PROGRAMS.iter().map(|name| name.to_string()).collect();
+        let mut wanted_interpreters = listed("refused_interpreters");
+        let mut wanted_wrappers = listed("refused_wrappers");
+        let mut wanted_allowed = listed("allowed_programs");
+        rust_interpreters.sort();
+        wanted_interpreters.sort();
+        rust_wrappers.sort();
+        wanted_wrappers.sort();
+        rust_allowed.sort();
+        wanted_allowed.sort();
+        assert_eq!(rust_interpreters, wanted_interpreters, "the interpreter list is the shared table");
+        assert_eq!(rust_wrappers, wanted_wrappers, "the wrapper list is the shared table");
+        assert_eq!(rust_allowed, wanted_allowed, "the allow-list is the shared table");
+        // Case-insensitive on BOTH sides: "Rscript" (as macOS spells it) is the same name as "rscript".
+        for spelling in ["Rscript", "RSCRIPT", "rscript"] {
+            let found = super::refused_interpreter_or_wrapper(spelling)
+                .unwrap_or_else(|| panic!("{spelling} is a refused interpreter"));
+            assert_eq!(found.0, "interpreter", "{spelling}");
+        }
+        for spelling in ["Env", "TIMEOUT", "timeout"] {
+            let found = super::refused_interpreter_or_wrapper(spelling)
+                .unwrap_or_else(|| panic!("{spelling} is a refused wrapper"));
+            assert_eq!(found.0, "wrapper", "{spelling}");
+        }
+        // A versioned name is the same interpreter, and the allowed families are not in either list.
+        assert_eq!(super::refused_interpreter_or_wrapper("python3.11").map(|found| found.0), Some("interpreter"));
+        assert!(super::refused_interpreter_or_wrapper("node").is_none());
+        assert!(super::refused_interpreter_or_wrapper("bash").is_none());
+    }
+
+    /// Round 8: the allow-list, judged by REALPATH and by what the file IS, and the voucher that is the
+    /// one way a native binary outside the two families runs a vault connector.
+    #[test]
+    fn an_interpreter_or_a_wrapper_is_refused_whatever_its_name_or_voucher() {
+        // Every refused family, under a versioned name and with its own argument list: refused as a
+        // PROGRAM, whether or not the operator recorded a --native voucher for it.
+        for program in ["/usr/bin/python3.11", "/usr/bin/perl5.36", "/usr/bin/env", "/usr/bin/timeout",
+                        "/usr/bin/nohup", "/usr/bin/xargs"] {
+            let refused = super::program_refusal(program, None)
+                .unwrap_or_else(|| panic!("{program} is refused"));
+            assert!(refused.starts_with("vault_approval_program_not_allowed:")
+                || refused.starts_with("vault_approval_program_wrapper:"), "{program}: {refused}");
+            let vouched = super::program_refusal(program, Some(program));
+            assert!(vouched.is_some(), "--native must not approve {program}");
+        }
+        // A native binary under another name is NOT allowed without a voucher (its basename is not one
+        // of the two families), and IS allowed with one - and then the bytes are in the digest.
+        let copy = scratch("native-copy", "#!/bin/sh
+exit 0
+");
+        let copied = super::real_path(&copy.to_string_lossy());
+        let refused = super::program_refusal(&copied, None).expect("a name outside the two families");
+        assert!(refused.starts_with("vault_approval_program_not_allowed:"), "{refused}");
+        // The voucher covers a NATIVE executable only: this fixture is a script, so even vouched for it
+        // is refused by name rather than approved on a name the operator trusted.
+        let vouched = super::program_refusal(&copied, Some(copied.as_str())).expect("a script is not native");
+        assert!(vouched.starts_with("vault_approval_program_native_not_executable:"), "{vouched}");
+        // A script wearing an ALLOWED name is refused too: /bin/sh copied to ./node is not node.
+        let fake = scratch("fake-node", "#!/bin/sh
+exit 0
+");
+        let fake_path = super::real_path(&fake.to_string_lossy());
+        let refused = super::program_refusal(&fake_path, None).unwrap_or_default();
+        assert!(refused.starts_with("vault_approval_program_native_not_executable:")
+            || refused.starts_with("vault_approval_program_not_allowed:"), "{refused}");
+        let _ = std::fs::remove_file(&copy);
+        let _ = std::fs::remove_file(&fake);
+    }
+
+    /// Round 8, finding 4: the flag is compared BEFORE an '=', and a short cluster is split, so
+    /// "--eval=code" and "-pe" are the inline code a whole-string comparison let through.
+    #[test]
+    fn an_inline_flag_is_matched_before_its_value_and_through_a_cluster() {
+        let inline = |program: &str, value: &str| super::inline_flag(program, value);
+        assert_eq!(inline("/usr/bin/node", "--eval=process.exit(0)").as_deref(), Some("--eval"));
+        assert_eq!(inline("/usr/bin/node", "--print=1").as_deref(), Some("--print"));
+        assert_eq!(inline("/usr/bin/node", "-pe").as_deref(), Some("-p (in -pe)"));
+        assert_eq!(inline("/bin/sh", "-ec").as_deref(), Some("-c (in -ec)"));
+        // A long option is never split: --print is one flag, not --p, --r, --i, --n, --t. The run of
+        // letters after the dash is not a cluster of short flags.
+        assert_eq!(inline("/usr/bin/python3", "--require").as_deref(), Some("--require"));
+        assert_eq!(inline("/usr/bin/python3", "--require=x").as_deref(), Some("--require"));
+        assert_eq!(inline("/usr/bin/python3", "--nosuchflag"), None);
+        assert_eq!(inline("/usr/bin/node", "--mode"), None);
+        assert_eq!(inline("/usr/bin/node", "/abs/script.mjs"), None);
     }
 
     /// Finding 2: program /usr/bin/node, args ["server"], cwd /home/u/conn runs ./server.js, and
@@ -2202,7 +2598,7 @@ mod vault_approval_tests {
         let ok = approval("/usr/bin/node", &cwd, &[], &option_value, &[&script], &["TOKEN"]);
         assert!(approval_problem(&ok, &spec("/usr/bin/node", &option_value)).is_ok(),
             "{:?}", approval_problem(&ok, &spec("/usr/bin/node", &option_value)));
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_file(&script);
     }
 
     // ---- round 7: node's own order, the ambiguity, the interpreters the digest cannot follow ----
@@ -2261,7 +2657,7 @@ mod vault_approval_tests {
         let covered = approval("/usr/bin/node", &cwd, &[], &folder, &[&index], &["TOKEN"]);
         assert!(approval_problem(&covered, &spec("/usr/bin/node", &folder)).is_ok(),
             "{:?}", approval_problem(&covered, &spec("/usr/bin/node", &folder)));
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&package_dir);
     }
 
     /// Finding 2: the interpreter families covered only JavaScript and shell, so python3 -c, perl -e,
@@ -2273,20 +2669,42 @@ mod vault_approval_tests {
         for program in ["/usr/bin/python3", "/usr/bin/python3.11", "/usr/bin/perl", "/usr/bin/ruby3.2",
                         "/usr/local/bin/deno", "/opt/bun", "/usr/bin/php8.2", "/usr/bin/lua5.4"] {
             let refused = super::program_shape_problem(program).expect("an unfollowed interpreter");
-            assert!(refused.starts_with("vault_approval_interpreter_unfollowed:"), "{program}: {refused}");
+            assert!(refused.starts_with("vault_approval_program_not_allowed:"), "{program}: {refused}");
             assert!(refused.contains("/mcp <id> probe"), "the way to approve it again is in it: {refused}");
         }
         // The two families the digest DOES follow stay approvable as programs.
         assert!(super::program_shape_problem("/usr/bin/node").is_none());
         assert!(super::program_shape_problem("/bin/sh").is_none());
-        // A code option given to a program the digest cannot classify is code, not a value.
-        let runner = scratch("runner", "#!/bin/sh
-exit 0
-").to_string_lossy().to_string();
+        // A code option given to a program the digest cannot classify is still code, not a value, and
+        // round 8 decides that from the FAMILY: a program outside node and the shells has no family of
+        // its own, so every one of CODE_FLAGS is code. A native binary is the only such program the
+        // allow-list lets through (as the operator's --native voucher), and it is judged here.
+        let runner_path = scratch_native("runner");
+        let runner = runner_path.to_string_lossy().to_string();
         let inline = vec!["-c".to_string(), "print(1)".to_string()];
+        assert_eq!(super::interpreter_family(&runner), "unknown", "no family: every code flag is code");
+        assert_eq!(super::inline_flag(&runner, "-c").as_deref(), Some("-c"), "a code flag, no family");
+        assert_eq!(super::inline_flag(&runner, "-m").as_deref(), Some("-m"), "and so is -m");
+        // Unvouched, the allow-list answers first: a native binary outside the two families needs the
+        // operator's own voucher before its command line is even read.
         let coded = approval(&runner, "", &[], &inline, &[], &["TOKEN"]);
         let refused = approval_problem(&coded, &spec(&runner, &inline)).unwrap_err();
+        assert!(refused.starts_with("vault_approval_program_not_allowed:"), "{refused}");
+        // Vouched for, the program passes the allow-list - and its inline code is STILL refused, because
+        // a native binary's own loads are outside the digest and a string it evaluates is outside it too.
+        let digest = sha256_hex(&std::fs::read(&runner_path).expect("the vouched binary"));
+        let vouched = json!({"form": APPROVAL_FORM, "sha256": "00".repeat(32), "program": runner,
+            "cwd": "", "env": [], "args": inline, "files": [runner.clone()], "vault": ["TOKEN"],
+            "native": {"path": runner, "sha256": digest}});
+        let refused = approval_problem(&vouched, &spec(&runner, &inline)).unwrap_err();
         assert!(refused.starts_with("vault_approval_inline_code:-c:"), "{refused}");
+        // A shell script outside both families never reaches the flag rule: the allow-list refuses the
+        // program itself, which is the point of an allow-list rather than a list of code flags.
+        let scripted = scratch("runner-script", "#!/bin/sh\nexit 0\n");
+        let scripted = scripted.to_string_lossy().to_string();
+        let coded = approval(&scripted, "", &[], &inline, &[], &["TOKEN"]);
+        let refused = approval_problem(&coded, &spec(&scripted, &inline)).unwrap_err();
+        assert!(refused.starts_with("vault_approval_program_not_allowed:"), "{refused}");
         // What node's own family names as a file stays a file (--require/-r), not inline code.
         let loads = scratch("loads.mjs", "export const load = 1;
 ");
@@ -2330,5 +2748,97 @@ exit 0
         // Not reading it is not passing it: a file that vanished is a mismatch too.
         std::fs::remove_file(&script).expect("remove");
         assert!(super::recheck_after_spawn(&verified).is_some(), "a file that cannot be read is a mismatch");
+    }
+
+    /// Item 1 of round 9: `--native` works END TO END. The kernel has two judgements about a program -
+    /// approval_problem (the launch) and request_server_problem (the command the child spawns from the
+    /// request file) - and only the first read the operator's voucher. A vouched ELF therefore passed the
+    /// approval and was refused one step later, by the request check, so `/mcp <id> on --native` could
+    /// never launch: the review's first item, and the reason both now take the same `program_refusal`
+    /// judgement with the same voucher.
+    #[test]
+    fn a_vouched_native_binary_passes_the_approval_and_the_request_check() {
+        let binary = scratch_native("vouched-node");
+        let path = binary.to_string_lossy().to_string();
+        // The launch as the console really builds it (lua/core/mcp.lua: `program=node_program()`): the
+        // kernel spawns the interpreter, which spawns the connector's program from the request file. The
+        // connector's program here is a native binary outside the two families, vouched for.
+        // Host-independent (item 6): the spawned interpreter is a FIXTURE binary named node, not
+        // /usr/bin/node, so this test says the same thing on a host that keeps node somewhere else - or
+        // nowhere. A real ELF named `node` passes the allow-list by its name and its bytes.
+        let runtime = scratch_native("node");
+        let runtime_path = runtime.to_string_lossy().to_string();
+        let client = scratch("native-client.mjs", "export const c = 1;\n");
+        let request_path = scratch("native-request.json", "{}");
+        let launch = spec(&runtime_path, &[client.to_string_lossy().to_string(),
+            "--request-file".into(), request_path.to_string_lossy().to_string()]);
+        let approved = approval_native(&binary, &[&binary, &client, &runtime], &["TOKEN"]);
+        assert!(approval_problem(&approved, &launch).is_ok(),
+            "a vouched native binary is a program the allow-list admits: {:?}",
+            approval_problem(&approved, &launch));
+        // The same command as the child reads it from the request file. This is the half that was missing.
+        let sealed = request(&path, &[], None);
+        assert!(request_server_problem(&sealed, &approved).is_ok(),
+            "the request check carries the same voucher: {:?}",
+            request_server_problem(&sealed, &approved));
+        // The voucher admits a FILE, not the family: another native binary, unvouched, is refused by the
+        // same allow-list it was refused by before this round.
+        let other = scratch_native("unvouched-node");
+        let other_path = other.to_string_lossy().to_string();
+        let mut unvouched = approved.clone();
+        unvouched["program"] = json!(other_path);
+        unvouched["args"] = json!([]);
+        let refused = request_server_problem(&request(&other_path, &[], None), &unvouched).unwrap_err();
+        assert!(refused.starts_with("vault_approval_program_not_allowed:"), "{refused}");
+        // And WITHOUT the voucher the same approval is refused one step earlier, on the launch side: this
+        // is what `--native` buys, and what its absence costs.
+        let plain = approval(&path, "", &[], &[], &[&binary, &client, &runtime], &["TOKEN"]);
+        let refused = approval_problem(&plain, &launch).unwrap_err();
+        assert!(refused.starts_with("vault_approval_program_not_allowed:"), "{refused}");
+        let _ = std::fs::remove_file(&runtime);
+        let _ = std::fs::remove_file(&binary);
+        let _ = std::fs::remove_file(&other);
+        let _ = std::fs::remove_file(&client);
+        let _ = std::fs::remove_file(&request_path);
+    }
+
+    /// Item 1: each of the three native refusals is reached by a test of its own, from an approval the
+    /// console really writes (the binary IS one of the files it names) - and each of them fires BEFORE a
+    /// spawn, so a changed binary never runs.
+    #[test]
+    fn a_native_binary_that_changed_or_vanished_or_was_not_named_is_refused() {
+        // Changed after the approval: the bytes on disk are not the bytes the operator vouched for.
+        // Host-independent: a fixture interpreter named node stands in for the platform's.
+        let runtime = scratch_native("node");
+        let runtime_path = runtime.to_string_lossy().to_string();
+        let binary = scratch_native("changed-node");
+        let approved = approval_native(&binary, &[&binary, &runtime], &["TOKEN"]);
+        let path = binary.to_string_lossy().to_string();
+        use std::io::Write as _;
+        std::fs::OpenOptions::new().append(true).open(&binary).expect("open")
+            .write_all(b"\0").expect("append a byte");
+        let refused = approval_problem(&approved, &spec(&runtime_path, &[])).unwrap_err();
+        assert!(refused.starts_with("vault_approval_native_changed:"), "{refused}");
+        assert!(refused.contains(&path), "the refusal names the binary: {refused}");
+
+        // Gone after the approval: the console lists the vouched binary among the files, so this is the
+        // read that fails first - and it says NATIVE, not "a script this connector was approved with".
+        let vanished = scratch_native("vanished-node");
+        let approved = approval_native(&vanished, &[&vanished, &runtime], &["TOKEN"]);
+        let path = vanished.to_string_lossy().to_string();
+        std::fs::remove_file(&vanished).expect("remove the vouched binary");
+        let refused = approval_problem(&approved, &spec(&runtime_path, &[])).unwrap_err();
+        assert!(refused.starts_with("vault_approval_native_unreadable:"), "{refused}");
+        assert!(!refused.contains("a script this connector was approved with"),
+            "a native binary that vanished is not reported as a script: {refused}");
+
+        // A voucher for a file the approval does not name: the digest covers a file list, and a voucher
+        // outside it would approve a binary nothing hashed.
+        let outside = scratch_native("outside-node");
+        let approved = approval_native(&outside, &[&runtime], &["TOKEN"]);
+        let refused = approval_problem(&approved, &spec(&runtime_path, &[])).unwrap_err();
+        assert!(refused.starts_with("vault_approval_native_not_covered:"), "{refused}");
+        let _ = std::fs::remove_file(&outside);
+        let _ = std::fs::remove_file(&runtime);
     }
 }

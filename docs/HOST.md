@@ -763,6 +763,7 @@ fabric_call          writes files
 fabric_deliver       read-only
 fabric_pending       read-only
 features             read-only
+file_magic           read-only
 file_sha256          read-only
 getenv               read-only
 graph_caps           read-only
