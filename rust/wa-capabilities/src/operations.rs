@@ -1056,8 +1056,16 @@ impl Caller {
                 // The runtime's own foreground identity counts only for a row that named NO session: a
                 // bash a session started is promoted with owner worker:<n> AND its session, and it is that
                 // session's row, not the node tooling's.
+                // A `worker:<n>` row belongs to the caller only when <n> is the node thread the
+                // caller is RUNNING ON (item 2, round 5). Round 2/4 matched any `worker:*`: one
+                // sessionless script owned every thread's foreground shell, on a node where several
+                // scripts run at once. The identity is the caller's own and no caller can choose it,
+                // so this is narrower, not wider - measured against the four rows that depend on it
+                // (test-exec-timeout, test-bash-long-command, test-workspace-cwd, this mission's row).
+                let own_thread = format!("worker:{}", crate::serve::node_thread_id());
                 return runtime_owner.is_empty()
-                    || (runtime_owner.starts_with("worker:") && owner.is_empty());
+                    || (runtime_owner.starts_with("worker:") && owner.is_empty()
+                        && runtime_owner == own_thread);
             }
             return runtime_owner == self.owner;
         }
@@ -1602,6 +1610,30 @@ mod elsewhere_count_tests {
         let (mine, _) = split_elsewhere(&caller, &items);
         assert_eq!(mine[0]["operation_id"], json!("op-failed"));
         assert!(mine[0].get("id").is_none(), "the row has no bare `id` field to read instead");
+    }
+
+    /// ITEM 2 (round 5): a sessionless, ownerless caller owns a `worker:<n>` row ONLY when <n> is
+    /// the node thread it is itself running on.
+    ///
+    /// Rounds 2-4 matched `worker:*`, so ONE sessionless script owned EVERY thread's foreground
+    /// shell on a node where several scripts run at once. Narrowing it to the caller's own thread
+    /// keeps the row usable - the same caller must cancel and read back what host.exec adopted -
+    /// without handing it a sibling thread's work. Measured: the rows that depend on it run green
+    /// (test-exec-timeout 39 checks, test-bash-long-command 10, this mission's row 132).
+    #[test]
+    fn a_sessionless_caller_owns_only_its_own_threads_worker_row() {
+        let own = format!("worker:{}", crate::serve::node_thread_id());
+        let caller = Caller { session: String::new(), node: false, owner: String::new() };
+        let mine = json!({"operation_id":"op-own","owner":own,"session":"","settled":false});
+        assert!(caller.owns(&mine), "the caller's own thread's row is its own: {own}");
+        let sibling = json!({"operation_id":"op-sibling","owner":"worker:424242","session":"","settled":false});
+        assert!(!caller.owns(&sibling), "another node thread's row is NOT owned by an ownerless caller");
+        let named = json!({"operation_id":"op-read-mcp","owner":"mcp-read-session","session":"","settled":false});
+        assert!(!caller.owns(&named), "and neither is a row another NAMED owner started");
+        let empty = json!({"operation_id":"op-none","owner":"","session":"","settled":false});
+        assert!(caller.owns(&empty), "a row nobody named is the node tooling's own");
+        let a_session = json!({"operation_id":"op-sess","owner":own,"session":"session-a","settled":false});
+        assert!(!caller.owns(&a_session), "a session's row is that session's, whatever thread adopted it");
     }
 }
 
