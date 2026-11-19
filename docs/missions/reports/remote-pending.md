@@ -400,3 +400,54 @@ Not run: the whole scripts/test.sh gate.
 One build lesson worth recording: lua/ is embedded in the wa binary, and cargo build -p wa-capabilities
 does NOT rebuild the binary's Lua. Two probes ran against stale Lua and produced false behaviour readings until
 touch lua/core/*.lua forced the rebuild - every run after that touches the Lua files first.
+
+
+## Verification r3 (independent) - one item left, and the small ones
+
+The review is review-latest.md (r3): one MUST-sized item plus three small ones. All four premises were
+re-measured first.
+
+### Item 1 - the wait paused nothing (fixed in c3639781)
+
+Measured: the r2 "minimum charge" lowered the budget but never WAITED, so a peer answering at once without
+settling (an overdue supervisor, an interrupted await, an old peer) still received up to
+min(40, budget/250) relayed awaits back to back. The charge made the loop end sooner; it did not make it
+stop being a burst.
+
+Now codemode_pending.lua PAUSES between calls: whole milliseconds, a doubling backoff (200 -> 400 -> ...
+capped at 2 s), bounded by what is left of the caller own budget. And an
+operation_supervisor_overdue answer STOPS the wait on the first call and is named, because that answer
+means the peer supervisor has stopped making progress - asking again is the hot loop itself.
+
+Tests: section 14 asserts TIME, not only a count - at least 200 ms of wall time per call after the first,
+and an average well above a burst; section 14b answers operation_supervisor_overdue and asserts the wait
+stops after exactly ONE call and names the reason.
+
+### Small 1 - the test helper slept 0 ms (fixed in c3639781)
+
+scripts/test-remote-pending.lua's drain helper called host.sleep(0.3), which is 0 ms; it now sleeps 300.
+
+### Small 2 - the await bound is measured (fixed in 0304ce87)
+
+A new Rust test drives the real control("await") path and measures the BOUND: with a 4 s command and
+wait_ms 700 the answer arrives at about 700 ms, unsettled; a wait_ms of an hour is clamped and answered
+inside 10 s; and the command still settles later and ran exactly once. Wired into scripts/test.sh beside
+the adoption row (both with HOME=$GATE_HOME).
+
+### Small 3 - stopped=true only when observed (fixed in fac93c52)
+
+A refused adoption used to report stopped=true for a cancel it merely requested - the same lie MUST 1
+removed from the caller cancel, since the peer cancel is a request whose snapshot still says running. It
+now observes the stop (five calls, doubling backoff) and otherwise answers stopped=false with
+cancel_requested=true, the state seen, and the id to act on.
+
+## Re-run after r3
+
+* scripts/test-remote-pending.lua -> remote pending ok (83 checks)
+* scripts/test-codemode-pending.lua -> 92 checks; real sandbox
+* scripts/test-session-isolation.lua -> 141 checks, 0 failed
+* scripts/test-remote-call-shape.lua -> 88 checks, 0 skipped
+* cargo test -p wa-capabilities adoption_survives_the_relay_deadline -> 1 passed
+* cargo test -p wa-capabilities await_returns_at_its_own_wait -> 1 passed
+
+Not run: the whole scripts/test.sh gate.
