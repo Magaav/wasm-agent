@@ -2781,8 +2781,8 @@ function M:run_body(text, images)
 
     -- ONE rule for the end of a turn, used for every shape that ends a step without an action
     -- (docs/missions/reports/thinking-block.md, round 2): a run block in the thinking, reasoning with no
-    -- answer, tool-call markup as text, a stale node-shutdown notice, a compaction summary, a plan, or the
-    -- wrong language. The model is told ONCE, by name, which one it was; a second consecutive one fails
+    -- answer, tool-call markup as text, a stale node-shutdown notice, a compaction summary, or a plan with
+    -- nothing run. The model is told ONCE, by name, which one it was; a second consecutive one fails
     -- the run by name, so a scripted run returns non-zero instead of reporting a finished turn with
     -- nothing run. Nothing is executed from any of them: the reasoning is the model's thinking and the
     -- other shapes are text, so neither is this node's action channel. A step that ran a tool resets the
@@ -2946,15 +2946,19 @@ function M:run_body(text, images)
         error(reason)
       end
       -- The rest of the same rule: an ANSWER-shaped ending that is not an answer. Tool-call markup written
-      -- as text, a stale node-shutdown notice, a context-compaction summary, a plan instead of an action,
-      -- or an answer in the wrong language (lua/core/finish_contract.lua names which). Nothing executes
-      -- here either: the shape is named, the model is told once where the action or the answer belongs,
-      -- and the turn continues instead of ending.
-      local wrong = finish_contract.inspect({ text = reply, user_text = self.last_user_text })
+      -- as text, a stale node-shutdown notice, a context-compaction summary, or a plan with nothing run
+      -- (lua/core/finish_contract.lua names which). Nothing executes here either: the shape is named, the
+      -- model is told once where the action or the answer belongs, and the turn continues instead of ending.
+      -- The answer's LANGUAGE is deliberately not one of these shapes (round 3, item 3): the envelope tells
+      -- the model which language to answer in (M:system_prompt, s.language), and a detector on top of it
+      -- fired on real answers without ever fixing one.
+      -- "actions" is this RUN's tool-call count (round 3, item 2): a plan is only a plan when nothing ran,
+      -- and a step that ran a tool and closes with "Done. I'll stop here." has answered the request.
+      local wrong = finish_contract.inspect({ text = reply, actions = (self.run_counts or {}).tool_calls or 0 })
       if wrong then
         -- The text is NOT recorded as this session's answer: markup is not a result, a shutdown warning is
-        -- not this session's evidence, and a summary in the wrong language is not the answer the user
-        -- asked for. Only the notice is recorded, which is what the next step and a resume read.
+        -- not this session's evidence, and a compaction summary is not the answer the user asked for.
+        -- Only the notice is recorded, which is what the next step and a resume read.
         reply = ""
         finish_continue(wrong.shape, wrong.notice, wrong.failure)
         goto next_round

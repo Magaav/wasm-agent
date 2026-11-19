@@ -168,8 +168,15 @@ eq(finish_contract.CONTINUES, 1, 'one continue for every shape, not a loop')
 eq((finish_contract.markup('done <ds_tool>{"command":"ls"}</ds_tool>') or {}).shape, 'markup', 'ds_tool markup')
 eq((finish_contract.markup('Let me do these in parallel.}}</parameter>') or {}).shape, 'markup', 'leftover close tag')
 eq((finish_contract.markup('DSML is a format name.')), nil, 'prose about a format is an answer')
-eq((finish_contract.markup('The detector names <ds_tool> as one marker.') or {}).shape, 'markup',
-  'the marker itself is found once, wherever it is written')
+-- Round 3, item 4: the operator's flip, and the two negatives that go with it. A marker NAMED in inline
+-- code is prose, not a call the model meant to make - this assertion was the other way round in round 2.
+eq(finish_contract.markup('The detector names `' .. '<ds_tool>' .. '` as one marker.'), nil,
+  'round 3: a marker inside inline code is prose (round 2 asserted the opposite)')
+eq(finish_contract.markup('Prose that mentions `<tool_call>` and `</parameter>` inside backticks is a note '
+  .. 'about the format, not a call.'), nil,
+  'round 3: <tool_call>/</parameter> named inside backticks is an answer')
+eq((finish_contract.markup('A bare `' .. 'x` and then <ds_tool>{}') or {}).shape, 'markup',
+  'round 3: a bare marker OUTSIDE the backticks is still a call the model wrote')
 eq(finish_contract.markup('Example:\n' .. TICK .. 'text\n<ds_tool>{}</ds_tool>\n' .. TICK), nil,
   'a marker inside a fenced sample is prose, not a call the model meant to make')
 has(finish_contract.markup('x <ds_tool>{}').notice, 'your message contains tool-call markup as text, so nothing ran; act with a js run block in your answer',
@@ -199,16 +206,21 @@ eq(finish_contract.plan('One.\nTwo.\nThree.\nLet me now run the whole gate.'), n
   'a long answer that happens to end on "let me" is a report, not a plan')
 eq(finish_contract.plan('Running the gate.\n' .. TICK .. 'js run\nreturn 1;\n' .. TICK), nil,
   'a reply with a run block is an action shape, never a plan')
+-- Round 3, item 2: the two false positives the operator measured, each as a negative test.
+eq(finish_contract.plan('The fix is pushed. Let me know.'), nil,
+  'round 3: "let me know" is addressed to the USER, so it is an answer')
+eq(finish_contract.plan('Done. I\'ll stop here.', 3), nil,
+  'round 3: after a tool ran this run, a closing sentence is the answer to the request')
+eq((finish_contract.plan('Done. I\'ll stop here.', 0) or {}).shape, 'plan',
+  'round 3: the same sentence with NOTHING run in this run is still a plan')
 
--- ------------------------------------------------------------------ 5. the wrong language
-local ASKED = 'Please read the gate and tell me whether the suite still passes on this node.'
-local PORTUGUESE = 'O portao esta verde e a suite passa. Eu li o arquivo e conferi cada chamada, e nao ha '
-  .. 'nada pendente no relatorio. A mudanca esta no lugar certo e os testes cobrem o caso novo, com uma '
-  .. 'verificacao para cada forma que termina o turno sem acao.'
-eq((finish_contract.language(PORTUGUESE, ASKED) or {}).shape, 'language', 'a Portuguese answer to an English request')
-eq(finish_contract.language('The gate is green and every check passes on this node, with one test per shape '
-  .. 'that ends a turn without an action and a recorded response for each of them.', ASKED), nil,
-  'the same answer in the user\'s language is fine')
+-- ------------------------------------------------------------------ 5. round 3, item 3: the language detector
+-- REMOVED (operator 19/11): it fired on real answers and never fixed one. What remains is the envelope
+-- sentence that asks for the answer in the user's language, so that sentence is asserted here.
+eq(finish_contract.language, nil, 'the language detector is removed from the module, not disabled')
+has(agentlib.system_prompt('master', nil, nil, {}, 'full'),
+  "Reply in the language of the user's latest message",
+  'round 3: the envelope still asks for the answer in the user\'s language')
 
 -- A session of its own for every one of these: the file's own turn() reuses the newest open session for
 -- its user (memory.ensure_session), which is right for one thread of a report and wrong for counting the
@@ -380,22 +392,12 @@ checks = checks + 1
 if not user_plan_ok then error('a plan for the USER ends the turn: ' .. tostring(user_plan_reply)) end
 has(tostring(user_plan_reply), 'Next step for you', 'that answer is the answer')
 
--- 10. the wrong language: one continue, then the answer in the user\'s language ends the turn.
-scripted({ { content = PORTUGUESE }, { content = 'The gate is green and every check passes on this node.' } })
-agent, session_id = fresh('wrong language')
-local language_ok, language_error = pcall(agent.run, agent, ASKED)
-checks = checks + 1
-if not language_ok then error('a wrong-language answer must not end the turn: ' .. tostring(language_error)) end
-seen = shapes_of(session_id)
-has(seen[1] or '', 'is in Portuguese', 'the notice names the language it read')
-has(seen[1] or '', 'in English', 'the notice names the language asked for')
-
-scripted({ { content = PORTUGUESE }, { content = PORTUGUESE } })
-agent, session_id = fresh('wrong language twice')
-local language_twice, language_twice_error = pcall(agent.run, agent, ASKED)
-checks = checks + 1
-if language_twice then error('a second wrong-language answer must fail the run') end
-has(language_twice_error, 'language_drift', 'the language run fails by name')
+-- 11. #53: a run the harness refused before it could run exits non-zero. The rule lives in one place
+--     (chat.turn_ok), so the scripted CLI and the test read the same answer.
+eq(chat.turn_ok(true, { turn_refused = 'no_dispatchable_tools: ...' }), false,
+  'a refused run is not a finished turn: the caller exits non-zero')
+eq(chat.turn_ok(true, {}), true, 'a run that answered is a finished turn')
+eq(chat.turn_ok(false, {}), false, 'a run that raised failed')
 
 -- 12. round 3, item 1: the streak is per RUN. An agent object is reused across turns, and a counter that
 --     survived its run failed the next turn's FIRST offence as if it were the second. The counter is reset
@@ -408,11 +410,21 @@ checks = checks + 1
 if not streak_ok then error('a stale streak must not fail this run\'s first offence: ' .. tostring(streak_reply)) end
 has(tostring(streak_reply), 'The suite passes', 'the run continued once and then answered')
 
--- 11. #53: a run the harness refused before it could run exits non-zero. The rule lives in one place
---     (chat.turn_ok), so the scripted CLI and the test read the same answer.
-eq(chat.turn_ok(true, { turn_refused = 'no_dispatchable_tools: ...' }), false,
-  'a refused run is not a finished turn: the caller exits non-zero')
-eq(chat.turn_ok(true, {}), true, 'a run that answered is a finished turn')
-eq(chat.turn_ok(false, {}), false, 'a run that raised failed')
+-- 13. round 3, item 2: the operator's two negative tests, through the real loop. "Done. I'll stop here."
+--     AFTER a tool ran is the answer to the request - no notice, no failure.
+scripted({ { content = TICK .. 'js run\nreturn 1;\n' .. TICK }, { content = 'Done. I\'ll stop here.' } })
+agent, session_id = fresh('done after a tool ran')
+local done_ok, done_reply = pcall(agent.run, agent, 'check the tree')
+checks = checks + 1
+if not done_ok then error('a closing sentence after a tool ran must end the turn: ' .. tostring(done_reply)) end
+local done_seen, done_tools = shapes_of(session_id)
+eq(#done_seen, 0, 'round 3: nothing was flagged after an action had run')
+eq(done_tools >= 1, true, 'the run block did run (nothing is claimed without it)')
+has(tostring(done_reply), 'Done.', 'that closing sentence is the answer')
+--     And the same sentence with NOTHING run is still a plan: one continue, then the run fails by name.
+scripted({ { content = 'Done. I\'ll stop here.' }, { content = 'Done. I\'ll stop here.' } })
+agent, session_id = fresh('done with no action')
+local _, done_plan_error = pcall(agent.run, agent, 'check the tree')
+has(done_plan_error, 'plan_only', 'round 3: with nothing run it is still a plan, and the second one fails')
 
 print(string.format('thinking block ok (%d checks)', checks))

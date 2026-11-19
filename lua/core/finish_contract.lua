@@ -23,10 +23,10 @@
 --   compaction  the step answered with a context-compaction summary, so the turn ended on a summary
 --               instead of continuing the task (edit-transport 01:01: the model's own <analysis> +
 --               <summary>; the harness's own checkpoint template is the same shape).
---   plan        a first-person intent at the end, no executed action, no result. Conservative: a short
---               answer whose LAST sentence asks this agent to do something ("Let me ..."), never one that
---               tells the USER a next step.
---   language    the answer is in a language other than the user's last message.
+--   plan        a first-person intent at the end of a run that executed NOTHING at all (round 3, item 2:
+--               a run that ran a tool has an action, and its closing sentence is the answer to the
+--               request). Conservative: a short answer whose LAST sentence asks this agent to do
+--               something ("Let me ..."), never one that addresses the user ("Let me know", "your").
 --
 -- Precedence is the order of the list: the first shape that matches names the continue, because one
 -- sentence is the fix and a model given three at once follows none of them.
@@ -45,13 +45,25 @@ local function trim(text) return (tostring(text or ""):gsub("^%s+", ""):gsub("%s
 -- ---------------------------------------------------------------- 1. markup written as text
 -- The markers themselves belong to the raw channel (it is the module that reads a model's own tool
 -- markup), so the list and the scan live there: raw_code.markup_in_text().
+-- An inline-code span (`marker`) is how a message NAMES a marker instead of writing one: an answer about
+-- this very detector does it, and so does a note about a call format. Round 3, item 4: the spans come out
+-- before the scan, exactly as a fenced sample is skipped below, because a marker inside backticks was the
+-- false positive the operator measured on real answers.
+local function without_inline_code(text)
+  -- Double-backtick spans first, so a span that contains one backtick is taken whole: the order is what
+  -- makes ``a `quoted` marker`` one span instead of three.
+  local rest = tostring(text or ""):gsub("``(.-)``", " ")
+  rest = rest:gsub("`[^`\n]-`", " ")
+  return rest
+end
+
 function M.markup(text)
   local raw = tostring(text or "")
   -- A fenced block is a SAMPLE the model wrote, and the raw channel has already looked there for an
   -- action: an answer that quotes a call format inside a fence (a report about this very detector does)
   -- is prose, and failing it would be the false positive this list must not have.
   if raw:find(TICK, 1, true) or raw:find("~~~", 1, true) then return nil end
-  local found = dofile("lua/core/raw_code.lua").markup_in_text(raw)
+  local found = dofile("lua/core/raw_code.lua").markup_in_text(without_inline_code(raw))
   if not found then return nil end
   return {
     shape = "markup",
@@ -155,11 +167,13 @@ end
 
 -- ------------------------------------------------------------- 4. a plan instead of an action
 -- Conservative by construction (operator: "a final answer telling the USER a next step is fine"):
+--   * the run must have executed NOTHING at all: after a tool ran, a closing "Done. I'll stop here." is
+--     the answer to the request, not a plan (round 3, item 2 - the false positive this rule fired on);
 --   * a fenced block anywhere means the reply is an action shape, not a plan (raw_code owns those);
 --   * the LAST sentence must be first-person intent, and the answer must be short (<= 3 sentences): a
 --     long report that happens to end on "let me" is a report;
---   * a last sentence that addresses the user ("you", "your") is a next step for the USER, which is a
---     legitimate final answer, and never a plan of this agent's.
+--   * a last sentence that addresses the user ("you", "your", "let me know") is a next step for the
+--     USER, which is a legitimate final answer, and never a plan of this agent's.
 local INTENT = {
   "let me", "let's ", "i'll ", "i will ", "i am going to ", "i'm going to ", "i need to ", "i should ",
   "next, i ", "next i ", "now i ", "then i ", "first, i ", "first i'll ",
@@ -186,14 +200,20 @@ local function begins_with_intent(sentence)
   end
   return false
 end
-function M.plan(text)
+function M.plan(text, actions)
   local raw = tostring(text or "")
   if trim(raw) == "" then return nil end
+  -- Nothing may have run in this run. "actions" is the run's own count of tool calls (agent.lua,
+  -- self.run_counts.tool_calls), so a step that acted and then closes with "Done. I'll stop here." is an
+  -- answer, never a plan: that closing sentence is what the operator's request was answered with.
+  if (tonumber(actions) or 0) > 0 then return nil end
   if raw:find(TICK, 1, true) or raw:find("~~~", 1, true) then return nil end
   local list = sentences(raw)
   if #list == 0 or #list > 3 then return nil end
   local last = list[#list]:lower()
   if last:find(" you", 1, true) or last:find("your", 1, true) then return nil end
+  -- "Let me know" asks the USER for the next step: it is addressed to them, not a plan of this agent's.
+  if last:find("let me know", 1, true) then return nil end
   if not begins_with_intent(list[#list]) then return nil end
   return {
     shape = "plan",
@@ -205,104 +225,16 @@ function M.plan(text)
   }
 end
 
--- ------------------------------------------------------------------ 5. the wrong language
--- Measured need: the envelope tells the model to answer in the user's language (agent.lua), and nothing at
--- the end of the turn checks it. Two signals, both cheap and both blind to content:
---   * the SCRIPT (Latin, Cyrillic, CJK, Hangul, Arabic, Greek, Hebrew) - a CJK answer to a Latin message
---     is drift with no ambiguity;
---   * for two Latin-script languages, a FUNCTION-WORD profile (English, Portuguese - the two this project
---     writes in). It counts words, never letters, so code, paths and quoted text carry no weight.
-local SCRIPT_PATTERNS = {
-  { name = "CJK", pattern = "[\227-\233][\128-\191][\128-\191]" },
-  { name = "Hangul", pattern = "[\234-\237][\128-\191][\128-\191]" },
-  { name = "Cyrillic", pattern = "[\208-\209][\128-\191]" },
-  { name = "Arabic", pattern = "[\216-\219][\128-\191]" },
-  { name = "Greek", pattern = "[\206-\207][\128-\191]" },
-  { name = "Hebrew", pattern = "[\215][\128-\191]" },
-}
-local function count_pattern(text, pattern)
-  local total = 0
-  for _ in text:gmatch(pattern) do total = total + 1 end
-  return total
-end
-local function script_of(text)
-  local letters = count_pattern(text, "%a")
-  local best, best_count = "Latin", letters
-  for _, entry in ipairs(SCRIPT_PATTERNS) do
-    local found = count_pattern(text, entry.pattern)
-    if found > best_count then best, best_count = entry.name, found end
-  end
-  return best, best_count, letters
-end
-local PROFILES = {
-  English = { "the", "of", "and", "to", "is", "it", "you", "that", "this", "with", "for", "are", "was",
-    "not", "have", "be", "on", "as", "at", "will" },
-  Portuguese = { "que", "n\195\163o", "para", "com", "uma", "um", "do", "da", "dos", "das", "em", "no",
-    "os", "as", "se", "por", "mais", "como", "mas", "isso", "ele", "n\195\179s", "voc\195\170" },
-}
-local function profile_of(text)
-  local lowered = " " .. text:lower() .. " "
-  local best, best_count, second = nil, 0, 0
-  for name, words in pairs(PROFILES) do
-    local found = 0
-    for _, word in ipairs(words) do
-      local at = 1
-      while true do
-        local start_at, finish_at = lowered:find("%f[%w]" .. word .. "%f[%W]", at)
-        if not start_at then break end
-        found = found + 1
-        at = finish_at + 1
-      end
-    end
-    if found > best_count then second = best_count; best, best_count = name, found
-    elseif found > second then second = found end
-  end
-  -- Two of the words, and twice the runner-up: anything fainter is "unknown", and unknown is not drift.
-  if best and best_count >= 2 and best_count >= 2 * second then return best end
-  return nil
-end
-local function word_count(text) return count_pattern(text, "%a+") end
-
-function M.language(answer, user_text)
-  local said = tostring(answer or "")
-  local asked = tostring(user_text or "")
-  if word_count(said) < 40 or word_count(asked) < 8 then return nil end
-  local said_script, said_letters = script_of(said)
-  local asked_script = script_of(asked)
-  local said_name, asked_name
-  if said_letters == 0 then return nil end
-  if said_script ~= asked_script then
-    said_name, asked_name = said_script, asked_script
-  elseif said_script == "Latin" then
-    local said_profile, asked_profile = profile_of(said), profile_of(asked)
-    if not (said_profile and asked_profile) or said_profile == asked_profile then return nil end
-    said_name, asked_name = said_profile, asked_profile
-  else
-    return nil
-  end
-  return {
-    shape = "language",
-    language = said_name,
-    expected = asked_name,
-    notice = "[Harness notice] The user's last message is in " .. asked_name .. " and this answer is in "
-      .. said_name .. ", so it is not the final answer: nothing was recorded as one. Write the same "
-      .. "answer again in " .. asked_name .. ".",
-    failure = "language_drift: the answer was written in " .. said_name .. " and the user's last message "
-      .. "is in " .. asked_name .. ", and the harness asked for the user's language once already; the turn "
-      .. "is failed rather than finished in the wrong language",
-  }
-end
-
 -- The one entry point the loop calls. `input` is what the loop knows and nothing else:
 --   text       the step's answer text (result.content, already through the raw channel)
---   user_text  the request this run answers (agent.last_user_text)
+--   actions    tool calls this RUN executed (self.run_counts.tool_calls): zero means nothing ran, which
+--              is the only state in which a closing "Let me ..." can be a plan instead of an answer
 -- Returns nil (the text can be an answer) or {shape, notice, failure, ...} - the first shape that matches.
 function M.inspect(input)
   if type(input) ~= "table" then return nil end
   local text = tostring(input.text or "")
   if trim(text) == "" then return nil end
-  local found = M.markup(text) or M.shutdown(text) or M.compaction(text) or M.plan(text)
-    or M.language(text, input.user_text)
+  local found = M.markup(text) or M.shutdown(text) or M.compaction(text) or M.plan(text, input.actions)
   return found or nil
 end
 
