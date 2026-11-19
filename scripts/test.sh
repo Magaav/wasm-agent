@@ -1702,6 +1702,12 @@ WA_SCRIPT=scripts/test-markdown.lua "$BIN" --db "$DB.markdown" | grep "markdown 
 # captured transcript is free of escape sequences - so it is asserted without a model:
 # the view is handed the events agent.lua emits, with a clock the test controls.
 WA_SCRIPT=scripts/test-cli-view.lua "$BIN" --db "$DB.view" | grep "cli view ok"
+# The SAME view suite again, with a model window the compactor resolves (a scratch home has none): the
+# context ball must be coloured against the reserve `maybe_compact` will spend, not the policy default.
+# WASM_AGENT_MODEL_LIMITS is that fixture - the only way a fresh home has a window at all - and the
+# reserve differs from the policy one on purpose, so the two answers cannot agree by accident.
+WASM_AGENT_MODEL_LIMITS='{"test-model":{"context":200000,"reserve":40000}}' \
+  WA_SCRIPT=scripts/test-cli-view.lua "$BIN" --db "$DB.view-reserve" | grep "cli view ok"
 
 # The build OWN identity (item 4 of the TUI polish): a release install, a dev build, a dirty build and
 # a pinned node each get their own name, and no binary that cannot name its commit invents a version -

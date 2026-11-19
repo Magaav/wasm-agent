@@ -364,11 +364,45 @@ function M.ball_role(level)
   return "success"
 end
 
+-- The reserve the COMPACTOR will actually use for a model, or nil when this host cannot say.
+--
+-- `provider.budget(model).reserve` is the one number `agent.maybe_compact` spends, and it is not
+-- `model_window.policy`'s: it honours WASM_AGENT_COMPACT_RESERVE and the per-model `reserve` in
+-- WASM_AGENT_MODEL_LIMITS, and it caps the result at a quarter of the window. The ball used to ask
+-- model_window for the threshold with NO reserve, so a node that had set either escape hatch was
+-- coloured against a trigger the compactor never uses - the ball said "alert" at 90% while the
+-- compactor waited for 87% (round 3, item 4).
+--
+-- Loaded once, on the first row that needs it: a dofile per frame is a disk read on the footer's
+-- path (the reason windowlib above is loaded once). `false` means "cannot say", never "no reserve".
+local providerlib
+local function compactor_budget(model)
+  if providerlib == nil then
+    local ok, loaded = pcall(dofile, "lua/core/provider.lua")
+    providerlib = (ok and type(loaded) == "table") and loaded or false
+  end
+  if not providerlib or type(providerlib.budget) ~= "function" then return nil end
+  local ok, budget = pcall(providerlib.budget, model)
+  return ok and type(budget) == "table" and budget or nil
+end
+
 -- The percentage of the window at which THIS node compacts, from the code that compacts
--- (model_window.threshold_percent). nil when the window is unknown, which colours nothing.
-function M.compaction_threshold(budget)
+-- (model_window.threshold_percent), WITH the reserve the compactor will use. nil when the window is
+-- unknown, which colours nothing.
+--
+-- `model` is optional (a caller with no model gets the policy's default reserve, which is what a
+-- fresh node uses); every view passes its own, so the ball and the compactor agree.
+function M.compaction_threshold(budget, model)
   if not windowlib or not windowlib.threshold_percent then return nil end
-  local ok, threshold = pcall(windowlib.threshold_percent, budget)
+  local context = tonumber(budget) or 0
+  if context <= 0 then return nil end
+  -- A reserve from ANOTHER window is not this window's. provider.budget resolves the same model, so a
+  -- mismatch means the caller's window and the compactor's came from different models, and then the
+  -- policy's own reserve is the only honest answer.
+  local reserve
+  local resolved = compactor_budget(model)
+  if resolved and tonumber(resolved.context) == context then reserve = tonumber(resolved.reserve) end
+  local ok, threshold = pcall(windowlib.threshold_percent, context, reserve)
   return ok and tonumber(threshold) or nil
 end
 
@@ -401,15 +435,32 @@ end
 -- Colour is a rendering decision, so `live` is honoured exactly like every other paint here: a
 -- captured transcript gets the same characters, uncoloured. A window nobody measured (budget 0) or
 -- a bar with no ball in it is returned untouched.
-function M.colour_ball(text, context, budget, live)
+-- The ball a row ACTUALLY DREW, and where: the first of the nine that the text carries, or nil.
+--
+-- Why not recompute it from the percentage: the footer's glyph and the glyph this function would
+-- choose are two separate arithmetics over the same number, and the moment they disagree - a row
+-- built from a stale summary, a percentage rounded elsewhere, a row clipped before the ball - the
+-- search finds nothing and the ball is drawn UNCOLOURED, silently. Reading the glyph off the text
+-- is the only way the colour and the character cannot disagree (round 3, item 4).
+function M.ball_in(text)
+  local row = tostring(text or "")
+  for _, glyph in ipairs(BALLS) do
+    local at = row:find(glyph, 1, true)
+    if at then return glyph, at end
+  end
+  local at = row:find(GLYPH.ballEmpty, 1, true)
+  if at then return GLYPH.ballEmpty, at end
+  return nil, nil
+end
+
+function M.colour_ball(text, context, budget, live, model)
   text = tostring(text or "")
   local window = tonumber(budget) or 0
   if not live or window <= 0 then return text end
   local percent = 100 * (tonumber(context) or 0) / window
-  local ball = M.context_ball(percent)
-  local at = text:find(ball, 1, true)
-  if not at then return text end
-  local level = M.context_level(percent, M.compaction_threshold(window))
+  local ball, at = M.ball_in(text)
+  if not ball then return text end
+  local level = M.context_level(percent, M.compaction_threshold(window, model))
   local painted = paint(ball, M.ball_role(level), true) .. (STYLE.dim or "")
   return text:sub(1, at - 1) .. painted .. text:sub(at + #ball)
 end
@@ -1652,7 +1703,7 @@ function METHODS:footer_draw()
   -- with escapes counting zero (`visible_cells`, rust/wa-term/src/terminal_editor.rs), so a coloured
   -- row is measured like a plain one and cannot wrap the row under the box (Victor, 19/11).
   local shown = M.colour_ball(clip(hint, math.max(10, self.limit - 1)), self.context, self.budget,
-    self.live)
+    self.live, self.model)
   if self.editor and self.stdout and host and host.editor_footer then
     pcall(host.editor_footer, shown, self.model or "")
   else

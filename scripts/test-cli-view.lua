@@ -1559,7 +1559,13 @@ do
   -- Eight script lines, the one longer than the band WRAPPED onto a second row (never clipped with …).
   eq(#first.lines, 9, "all eight script lines, the long one wrapped, no fold and no heading")
   ok(not has(visible(table.concat(first.lines, "\n")), "\226\128\166"), "nothing is elided with …")
-  ok(has((visible(first.lines[4]):gsub("^  ", ""):gsub("%s+$", "")) .. (visible(first.lines[5]):gsub("^  ", ""):gsub("%s+$", "")),
+  -- The continuation mark sits BETWEEN the two rows (round 3, item 3), so the join is made from the
+  -- rows with that mark taken out - and the mark is asserted separately, because a mark that vanished
+  -- would pass the join just as well.
+  local first_row = visible(first.lines[4]):gsub("^  ", ""):gsub("%s+$", "")
+  local second_row = visible(first.lines[5]):gsub("^  ", ""):gsub("%s+$", "")
+  ok(first_row:sub(-3) == "\226\134\170", "the row above the break ends with the continuation mark: " .. first_row)
+  ok(has((first_row:gsub("\226\134\170", "")) .. second_row,
     "const out = await Promise.all(hits.map(p => tools.bash({command: 'wc -l ' + p})));"),
     "the wrapped line is whole across its two rows")
   ok(has(visible(first.lines[9]), "return {count: hits.length"), "the last one is drawn too: " .. visible(first.lines[9]))
@@ -1965,6 +1971,78 @@ do
   eq(at(math.ceil(threshold - 14), 100000), "warning", "inside 15 points of it is a warning")
   eq(at(math.ceil(threshold), 100000), "alert", "at the trigger it is an alert")
   eq(at(100, 100000), "alert", "a full window is an alert")
+end
+
+
+-- ROUND 3, ITEM 4. Two mismatches the footer could hide, each asserted through the one function that
+-- paints, because a colour nobody can see go wrong is a colour nobody can trust.
+--
+-- (a) THE BALL THAT WAS DRAWN. `colour_ball` used to compute its own glyph from the percentage and
+-- then SEARCH for it. A row whose glyph came from anywhere else - a stale summary, another rounding,
+-- a clip that removed the glyph - found nothing and came out uncoloured, silently. It now colours the
+-- first ball the text actually carries, whatever percentage it was told.
+do
+  local paint_ball = view_lib.colour_ball
+  local drawn = view_lib.context_ball(50)
+  local other = view_lib.context_ball(96)      -- a glyph 50% would never choose
+  ok(other ~= drawn, "the two glyphs are different, so the check is not vacuous")
+  local row = paint_ball(other .. " 50.0%/200.0k", 100000, 200000, true)
+  ok(has(row, view_lib.style("success") .. other),
+    "the glyph the row DREW is the one coloured, not the one the percentage implies: " .. row)
+  ok(not has(row, view_lib.style("error") .. other),
+    "and it is coloured by the LEVEL (50% is normal), not by the glyph's own fill: " .. row)
+  -- A row with no ball at all is still returned untouched - nothing to colour is not an error.
+  eq(paint_ball("no ball here 12.0%/200.0k", 24000, 200000, true), "no ball here 12.0%/200.0k",
+    "a row carrying no ball is returned exactly as it came")
+  -- The empty ball IS a ball: a nearly empty window is coloured too, so the floor is not a hole.
+  local empty = view_lib.context_ball(1)
+  ok(has(paint_ball(empty .. " 1.0%/200.0k", 2000, 200000, true), view_lib.style("success") .. empty),
+    "the empty ball is a ball and is coloured")
+end
+
+-- (b) THE SAME RESERVE THE COMPACTOR USES. `threshold_percent` was called with model_window's DEFAULT
+-- reserve, so a node that set a per-model reserve (or WASM_AGENT_COMPACT_RESERVE) was coloured against
+-- a trigger `maybe_compact` never uses: the ball said alert where the compactor had not started.
+--
+-- BOTH SIDES COME FROM THE COMPACTOR: the window and the reserve are `provider.budget(model)`'s, the
+-- same call `agent.maybe_compact` makes. A window written here by hand would compare two different
+-- models and could pass for the wrong reason.
+--
+-- The fixture is a MODEL LIMITS entry, which is the only way a scratch home has a window at all, so it
+-- is `scripts/test.sh` that sets it (the second invocation of this file). Without it there is nothing
+-- to measure and the check SAYS SO rather than passing on an empty node - unknown is not yes.
+do
+  local raw = host.getenv and host.getenv("WASM_AGENT_MODEL_LIMITS") or ""
+  if raw == "" then
+    print("SKIP reserve agreement: no WASM_AGENT_MODEL_LIMITS fixture (test.sh runs this file again with one)")
+  else
+    local provider = dofile("lua/core/provider.lua")
+    local windowlib = dofile("lua/core/model_window.lua")
+    local budget = provider.budget("test-model")
+    local window = tonumber(budget.context) or 0
+    ok(window > 0, "the compactor resolves the fixture's window (" .. window .. ")")
+    if window > 0 then
+      local used = view_lib.compaction_threshold(window, "test-model")
+      local expected = 100 * (window - tonumber(budget.reserve)) / window
+      ok(used and math.abs(used - expected) < 0.01,
+        "the threshold is the compactor's own: " .. tostring(used) .. " wanted " .. string.format("%.2f", expected))
+      -- The fixture's reserve is NOT the policy default, so the two answers differ and this check can
+      -- fail: a test whose two sides are equal proves nothing about which one was read.
+      local policy_only = 100 * (window - windowlib.policy(window)) / window
+      ok(math.abs(expected - policy_only) > 0.01,
+        "the fixture makes the compactor's reserve differ from the policy's ("
+        .. string.format("%.2f", expected) .. " vs " .. string.format("%.2f", policy_only) .. ")")
+      ok(used and math.abs(used - policy_only) > 0.01,
+        "the ball is NOT coloured by the policy default: " .. tostring(used))
+      -- A window the compactor was never asked about gets the POLICY reserve, never one from another
+      -- window, and is still a percentage (or nil), never a guess.
+      local other = view_lib.compaction_threshold(window * 3, "test-model")
+      local bigger = window * 3
+      local policy_bigger = 100 * (bigger - windowlib.policy(bigger)) / bigger
+      ok(other and math.abs(other - policy_bigger) < 0.01,
+        "a window the compactor did not resolve gets the policy reserve: " .. tostring(other))
+    end
+  end
 end
 
 if failed > 0 then
