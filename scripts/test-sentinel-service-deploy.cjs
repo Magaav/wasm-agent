@@ -2,6 +2,13 @@
 // This proves refusal ordering, not a real binary replacement or live SCM lifecycle.
 const fs=require('node:fs'),path=require('node:path'),os=require('node:os'),assert=require('node:assert/strict'),{spawnSync}=require('node:child_process');
 const source=fs.readFileSync(path.join(__dirname,'deploy.sh'),'utf8');
+// The swap block installs from SENTINEL_SOURCE, which deploy.sh resolves from NEW_SENTINEL a few lines
+// above it (936880f9). Slicing only the swap block left the fixture with an unset variable under
+// set -u, so the block died before its copy and the pinned journal read [stop] where the real run
+// writes [stop,copy,start]. Carry the real provenance line, and refuse if deploy.sh stops resolving
+// it, so this fixture cannot silently drift from the script it pins.
+const provenance=source.split('\n').find(line=>line.startsWith('SENTINEL_SOURCE="')&&line.includes(':-'));
+assert(provenance,'deploy.sh no longer resolves SENTINEL_SOURCE from NEW_SENTINEL above the swap block');
 const start=source.indexOf('          # A Windows SCM stop is authoritative');
 const end=source.indexOf('          ;;',start);
 assert(start>=0 && end>start);const swap=source.slice(start,end);
@@ -13,7 +20,7 @@ const sentinel=path.join(root,'wa-sentinel.exe'),wrapper=path.join(root,'check.s
 fs.writeFileSync(sentinel,'#!/usr/bin/env bash\necho "$1" >> "$JOURNAL"\n[ "$FAIL_AT" != "$1" ]\n');
 fs.chmodSync(sentinel,0o755);
 fs.writeFileSync(wrapper,'#!/usr/bin/env bash\nset -eu\nfail(){ echo "REFUSED: $*" >&2;exit 3; }\nsleep(){ :; }\ncp(){ echo copy >> "$JOURNAL";[ "$FAIL_AT" != copy ]; }\n'+
-  'SENTINEL_NAME=wa-sentinel.exe\nNEW_SENTINEL=fixture-only\nSENTINEL_SWAP_STARTED=0\n'+swap+'\nSENTINEL_WATCH_PID=4242\n'+ready+'echo verified\n');
+  'SENTINEL_NAME=wa-sentinel.exe\nNEW_SENTINEL=fixture-only\nSENTINEL_SWAP_STARTED=0\n'+provenance+'\n'+swap+'\nSENTINEL_WATCH_PID=4242\n'+ready+'echo verified\n');
 const bash=process.platform==='win32'?'C:/Program Files/Git/bin/bash.exe':'bash';
 let checks=0;function check(value,why){assert(value,why);checks++;}
 for(const [failure,expected] of [['',['stop','copy','start']],['stop',['stop']],['copy',['stop','copy']],['start',['stop','copy','start']]]) {
