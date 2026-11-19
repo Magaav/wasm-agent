@@ -289,7 +289,7 @@ function M.run(argv)
   -- interactive run keeps.
   local view_live = nil
   if scripted then view_live = false end
-    local build_identity = reload.require("lua/core/build_identity.lua")
+  local build_identity = reload.require("lua/core/build_identity.lua")
   local view = cli_view.new({
     -- A scripted run has no reader: the plain view, whatever the terminal looks like.
     live = view_live,
@@ -402,7 +402,10 @@ function M.run(argv)
     view:screen_on()
     print(cli_view.banner({
       live = view.live,
-      limit = (view.live and cli_view.terminal_columns()) or view.limit,
+      -- The width the terminal has NOW, read through the view, whose own frames refresh it. The
+      -- one-time cli_view.terminal_columns() that stood here was measured before the box existed and
+      -- never again, which is the resize bug (Victor, 18/11).
+      limit = view.live and view:refresh_limit() or view.limit,
       -- The build's OWN name, from the one function that composes it (lua/core/build_identity.lua):
       -- a release's tag, the commit (with +dirty), a pinned node's pin, or "unknown build". It was the
       -- literal 0.1.0 here, so every node claimed the crate's version whatever it was running.

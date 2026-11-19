@@ -1857,12 +1857,9 @@ end
 function METHODS:screen_on()
   if not self.live then return nil end
   if (self.getenv("WASM_AGENT_CLI_FRAME") or "") == "off" then return nil end
-  if self.stdout and host.terminal_size then
-    local ok, raw = pcall(host.terminal_size)
-    local parsed
-    if ok and type(raw) == "string" and pcall(function() parsed = json.decode(raw) end)
-      and parsed.columns and parsed.columns > 0 then self.limit = parsed.columns end
-  end
+  -- The width, through the one function that reads and clamps it, so this path takes the same floor
+  -- (M.MIN_COLUMNS) and honours the same probe (columns_probe, a test's console) as every frame.
+  if self.stdout then self:refresh_limit() end
   local screen = screen_rows(self.rows and self.rows(), self.editor)
   -- A console that cannot report a height keeps whatever screen it already had: the caller falls
   -- back to the prompt at the cursor, which is on the input row anyway.
@@ -2980,7 +2977,10 @@ function M.banner(opts)
   local function fact(label, value)
     if value and value ~= "" then return paint(fit(label .. ": " .. value), "muted", live) end
   end
-  local divider = paint(string.rep("\226\148\128", limit), "border", live)
+  -- The rule, expanded from the marker at the width this banner is drawn at (M.expand_rules): no
+  -- component here spells the rule character itself, so a width fixed at composition time cannot hide
+  -- in the banner (round 4, item 1).
+  local divider = paint(M.expand_rules(M.RULE, limit), "border", live)
   local lines = { divider,
     paint(STAR, "accent", live) .. " Welcome to " .. paint("wasm-agent", "bold", live) .. "!"
       .. ((opts.version and opts.version ~= "") and paint(" v" .. opts.version, "muted", live) or ""),
@@ -3019,6 +3019,12 @@ for _, name in ipairs(FRAMED) do
   -- the one line a change or a refusal produces is drawn AFTER it, through the writer this view already
   -- had - a failure's line therefore never lands in the middle of the frame it interrupted.
   METHODS[name] = function(self, ...)
+    -- THE FRAME BOUNDARY IS WHERE THE WIDTH IS READ (round 4, item 1). refresh_limit existed and was
+    -- called by nothing but its own test, so every component still laid itself out from the width the
+    -- view was built with: maximising the terminal left the welcome rule, the code-mode box and the
+    -- status bar at the old width (Victor, 18/11). Each framed call is a render, so each reads the
+    -- console first and the bytes it writes are laid out for the terminal that exists now.
+    self:refresh_limit()
     local notices = reload.tick(self.now())
     local results = table.pack(self:with_frame(inner, ...))
     for _, notice in ipairs(notices) do

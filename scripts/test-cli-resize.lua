@@ -97,6 +97,70 @@ view.columns_probe = function() return 4 end
 view:refresh_limit()
 ok(view.limit == cli_view.MIN_COLUMNS, "a 4-column terminal is drawn at the floor, not at 4")
 
+-- ---- THE REAL VIEW PATH (round 4, item 1) --------------------------------------------
+--
+-- Everything above drives refresh_limit() by hand, which is exactly what production did NOT do:
+-- the function was committed and called by nothing, so the width a component drew with was still
+-- the one the view was built with. This section never calls refresh_limit itself. It renders
+-- through the framed methods the chat's event loop calls, changes the columns the console reports,
+-- and renders again - so it fails on any tree where the frame boundary does not read the console.
+-- The console this section drives: a number the test moves between renders, exactly as a resize does.
+local framed_width = 100
+-- What reached the console, in the order it went out; render() empties it per call.
+local captured = {}
+local framed = cli_view.new({ out = function(text) captured[#captured + 1] = text end,
+  live = false, now = function() return 1000 end,
+  columns = function() return framed_width end, limit = framed_width })
+
+-- One paragraph long enough to wrap, so the rows it draws are a function of the width and not of the
+-- text: a body narrower than the terminal is drawn at its own width whatever the limit is.
+local BODY = table.concat({ "the components must follow a terminal resize, so this sentence is long",
+  "enough that a narrow terminal wraps it into several rows and a wide one does not" }, " ")
+
+-- Render through the FRAME path and return the rows that reached the console.
+local function render()
+  captured = {}
+  framed:line("a line")
+  framed:topic_block("heading", "accent", BODY, "text")
+  framed:warn("a warning")
+  local rows = {}
+  for _, chunk in ipairs(captured) do
+    for line in (tostring(chunk) .. "\n"):gmatch("([^\n]*)\n") do rows[#rows + 1] = line end
+  end
+  return rows
+end
+
+for _, width in ipairs({ 100, 40, 160 }) do
+  framed_width = width
+  local rows = render()
+  -- The frame boundary read the console: the view's own width followed, with no refresh_limit call.
+  ok(framed.limit == width, "a framed render reads the console: the view is at " .. width
+    .. " (got " .. tostring(framed.limit) .. ")")
+  ok(#rows > 1, "the real view path drew something at " .. width .. " (" .. #rows .. " rows)")
+  local widest, widest_row = 0, ""
+  for _, row in ipairs(rows) do
+    local cells = width_of(row)
+    if cells > widest then widest, widest_row = cells, row end
+  end
+  ok(widest <= width, "every framed row fits the terminal it was drawn in at " .. width
+    .. " (widest " .. widest .. ": " .. widest_row:sub(1, 60) .. ")")
+end
+
+-- The width follows DOWN as well as up, and the wrap does too: the same paragraph is more rows at 40
+-- than at 160. A cached width cannot pass both.
+framed_width = 160
+local wide_rows = #render()
+framed_width = 40
+local narrow_rows = #render()
+ok(narrow_rows > wide_rows, "a narrow terminal wraps the same text into more rows (" .. narrow_rows
+  .. " at 40 vs " .. wide_rows .. " at 160)")
+
+-- The rule a component draws is the width the terminal has NOW, through the view's own method.
+framed_width = 120
+render()
+ok(width_of(framed:rule()) == 120, "the view's rule is the terminal's width after a framed render ("
+  .. width_of(framed:rule()) .. ")")
+
 if failed == 0 then print("resize ok (" .. checks .. " checks)") else print("FAILED " .. failed .. "/" .. checks) end
 os.exit(failed == 0 and 0 or 1)
 
