@@ -1197,7 +1197,16 @@ function M:build_context()
     -- The transport and its guidance come from the model PROFILE (principle 7); with no profile the
     -- conservative default is used and says so in one line instead of guessing a result. The model is
     -- never asked to choose between two transports: the sentence it gets names one.
-    local transport, transport_source, transport_notice = raw_code.transport_for(self.model, #tool_list > 0)
+    -- In native mode the transport IS the mode (rel review r2, item 2): it is not measured, so no
+    -- profile is read - a conform profile whose rates favour the fenced block can never bring the fence
+    -- text back to a node that has no fence channel - and no "no profile yet" notice is owed. Every
+    -- other mode keeps asking the profile, exactly as a27490af does.
+    local transport, transport_source, transport_notice
+    if native_mode then
+      transport, transport_source = 'tool_call', 'native'
+    else
+      transport, transport_source, transport_notice = raw_code.transport_for(self.model, #tool_list > 0)
+    end
     self.codeact_transport = transport
     -- The native guidance is already the first line of the block above: appending it again would be
     -- two sources for one door, which is the defect this item fixes.

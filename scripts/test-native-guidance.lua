@@ -123,4 +123,38 @@ local block_node = build('codemode', 'progressive', false)
 has(block_node.system, 'one `codemode` call runs JavaScript', 'the codemode node keeps its own guidance')
 has(block_node.system, 'Calling a tool directly also works', 'and its direct-call shortcut')
 
+
+-- ---------------------------------------------------------------- item 2: the mode decides the door
+-- A measured profile whose rates favour the fenced block (acts_in_answer over uses_run_tool) is the
+-- exact input that used to bring the fence guidance back to a native node. The node has no fence
+-- channel, so in native mode the transport must come from the MODE and never from the measurement.
+local profile = dofile('lua/core/model_profile.lua')
+local stored, store_error = profile.write('rel-r2-block-profile',
+  { model = 'rel-r2-block-profile', rates = { uses_run_tool = 0, acts_in_answer = 1 }, tasks = {} })
+ok(stored == true, 'the block-favouring profile is stored: ' .. tostring(store_error))
+
+local result = with('native', 'progressive', function()
+  local sid = memory.start_session('', 'native profile probe', { user_id = 'master', title = 'native profile' })
+  local bot = agent.new(sid, function() end, 'master', 'master', '')
+  bot.model = 'rel-r2-block-profile'
+  local messages = bot:build_context()
+  return { system = tostring(messages[1].content), transport = bot.codeact_transport }
+end)
+eq(result.transport, 'tool_call', 'a native node records the tool-call transport whatever the profile says')
+eq(count(result.system, 'Work in code'), 1, 'and still has exactly one guidance sentence')
+has(result.system, TOOL_CALL, 'the run-tool sentence is the one it gets')
+has_not(result.system, 'end your message with one', 'the fence sentence never comes back in native mode')
+
+-- The control: the SAME profile in a mode that honours the measurement gets the fence guidance, so
+-- the assertion above measures the native mode and not a profile that stopped being read everywhere.
+local honoured = with('on', 'progressive', function()
+  local sid = memory.start_session('', 'on profile probe', { user_id = 'master', title = 'on profile' })
+  local bot = agent.new(sid, function() end, 'master', 'master', '')
+  bot.model = 'rel-r2-block-profile'
+  local messages = bot:build_context()
+  return { system = tostring(messages[1].content), transport = bot.codeact_transport }
+end)
+eq(honoured.transport, 'block', 'on: the measured block transport is still what the profile decides')
+has(honoured.system, 'end your message with one', 'on: and the fence guidance is what that node is sent')
+
 print('native guidance ok (' .. checks .. ' checks)')
