@@ -100,6 +100,23 @@ eq(row.buys, split.note.buys, "#33: what it buys is stored")
 eq(row.focus, split.note.focus, "#33: focus is stored")
 ok(row.block:find("<turn>", 1, true) == 1, "#33: the block rides with its row as the evidence")
 
+-- item 4 (/turns): the session's recent notes come back newest LAST and bounded, through the same
+-- call the /turns arm makes - so a listing that silently dropped the newest, or ignored its count,
+-- fails here rather than in a reader's terminal.
+for index = 1, 6 do
+  journal.record({ hurt = "hurt " .. index, buys = "", focus = "focus " .. index },
+    { session_id = session_id, run_id = "run-" .. index, block = "<turn>\nx\n</turn>" })
+end
+local listed = journal.recent({ session_id = session_id, limit = 5 })
+eq(#listed, 5, "item 4: /turns asks for N and gets N")
+-- Seven rows exist by now (the #33 note and focus 1..6), so the newest five are focus 2..6: the two
+-- oldest are the ones a bounded listing drops, and the newest is always in it.
+eq(listed[1].focus, "focus 2", "item 4: a bounded listing starts at the oldest of the newest N")
+eq(listed[5].focus, "focus 6", "item 4: and ends at the newest note")
+local clock = dofile("lua/core/platform.lua").local_clock(tonumber(listed[5].at) or 0)
+ok(tostring(clock.local_iso or ""):match("^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d") ~= nil,
+  "item 4: the row has a time the listing can print")
+
 -- the day roll-up: the bounds of one local day, and a note inside it
 local today = os.date("%Y-%m-%d")
 local from, to = journal.day_bounds(today)
