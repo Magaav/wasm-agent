@@ -26,7 +26,7 @@ reproducible with a ZERO-second cut, which no product bug explains and no proxy 
 instrument that is the least reliable part of a test proves nothing, and I stopped pouring rounds into
 it rather than claim a green I had not measured.
 
-What is in the gate is `scripts/test-network-storm.lua` (70 checks), against the REAL modules:
+What is in the gate is `scripts/test-network-outage-tick.lua` (74 checks), against the REAL modules:
 
 * `lua/core/binding.lua M.tick` - the actual poll/attach loop the transport runs, with real native
   binding state;
@@ -50,11 +50,19 @@ process. That gap is the limit of this row.
   its 2 s rhythm - a fleet returning at once is what filled the cap on 19/11.
 * **Transport bodies decode safely** (`af57d840`): the three raw `json.decode` calls on roster/lookup
   replies go through `decode_body`.
-* **The per-peer slot counter is node-wide** (`374a60bc`): one file per peer under `paths.data()`,
-  TTL 120 s. It is a single overwritable file and not one-file-per-slot because **this host has no
-  delete primitive** - `write_file` overwrites and nothing removes, so a file per slot could never be
-  released. A lost read-modify-write costs one extra relayed call, never a wedge.
+* **The per-peer counter: MOVED, not done here** (`0be976a7` drops it). Review r4 moved the per-peer
+  call cap to the **fabric-transport** mission, where the relay and the caller path are redesigned;
+  testing it against today's transport would be work on the wrong base. What remains in `nodes.lua` is
+  the per-INTERPRETER cap and it is honest about that scope: it stops one interpreter from putting
+  unbounded calls on a peer, and it does not bind another process.
+  The node-wide version was written and then discarded, and it carried a real defect worth recording:
+  it formatted `host.now()` with `%d`, and this host answers a FLOAT, so the first call raised
+  "number has no integer representation" - a fast-path row caught it.
 * **Report numbering** (`883a6853`): items 1-4 and 5-8 as the brief splits them.
+* **The register-backoff comment matches the code** (`0a441a35`): the ceiling is 16 s, because the
+  exponent caps at five FAILURES, not at 30 seconds.
+* **The outage row asserts what its header promises** (`74012053`): the register backoff is asserted
+  (growing, with a 16 s ceiling), so the sentence is no longer an unkept promise.
 * **Dedupe** (`af57d840` report update): the duplicate lines are gone from this file.
 
 ## The product bug this round found
@@ -70,14 +78,31 @@ transport word for a dropped link).
 
 | Row | Checks | Wired in |
 |---|---|---|
-| `test-network-storm.lua` | 70 | `scripts/test.sh` |
+| `test-network-outage-tick.lua` | 74 | `scripts/test.sh` |
 | `test-network-outage-recovery.lua` | 34 | `scripts/test.sh` |
 | `test-network-roster-offline.lua` | 24 | `scripts/test.sh` |
 | `test-network-relay-backpressure.lua` | 393 | `scripts/test.sh` |
 | `test-network-binding-outage.lua` | 19 | `scripts/test.sh` |
 | `test-provider-rate-limit-recovery.lua` | 41 | already in the gate |
 
-Each creates its own scratch `WASM_AGENT_HOME` and refuses a real home. All pass under the fast path's
-own environment.
+Each creates its own scratch `WASM_AGENT_HOME` and refuses a real home.
+
+**The fast path, run on this tree at `0be976a7`, quoting its own verdict line:**
+
+```
+fast result ok (301 checks, 0 failed, 0 skipped)
+fast path ok (301 checks, 0 skipped, 202s)
+```
+
+It found three failures first, and two of them were MINE - the third round of "the gate caught what my
+own runs did not":
+
+* `test-network-roster-offline.lua` failed at "a live read lists the peer": my `decode_body` was
+  DEFINED below its first use, so the call was a nil function swallowed by the surrounding `pcall` and
+  the roster read silently returned nothing. Fixed by moving the definition above `fetch_peers`.
+* `test-refusal-contract.lua` failed on a stale registry after my new codes. Regenerated.
+* `test-remote-refusals.lua` failed on `bad argument #3 to 'format' (number has no integer
+  representation)`: the file-based slot counter formatted `host.now()` - a FLOAT on this host - with
+  `%d`. That is the counter review r4 moved to fabric-transport, and it is now dropped.
 
 **Pre-existing failure, named:** `scripts/test-remote-refusals.lua:108` fails on `ac7717e0` too.
