@@ -71,6 +71,14 @@ Worktree `/home/victor/Work/missions/rel-native/wt`. One commit per review item:
 * `scripts/lib/prompt-golden.lua` (normalizer: scratch home -> <HOME>, node cwd -> <CWD>, the one conform notice
   line removed), `scripts/lib/prompt-golden-cases.lua` (cases), `scripts/generate-prompt-goldens.lua` (the
   recorder), `fixtures/prompt-golden/*.json` (13 files).
+* WHAT THE PROMPT DEPENDS ON, found by running the row the way the fast path does: the system prompt is a
+  function of the host, and two host inputs are read from the PROCESS, not from the tree - the cwd-based
+  AGENTS.md walk and the skills walk (lua/core/skills.lua scans the cwd and its parents up to the repo root).
+  A recording made from the mission directory carried NO skills block and a different instruction path, and
+  the row then failed under scripts/fast.sh, which runs every row from the tree root (scripts/fast.sh:58).
+  Fixed in `97ba66c8`: both scripts pin the instruction files by path and REFUSE from any cwd other than
+  the tree root (a named refusal, verified), and the normalizer replaces the tree path, the cwd and the
+  session-workdir attribute. So a golden describes one node shape, recorded and checked the same way.
 * The goldens were RECORDED BY RUNNING THE GENERATOR ON a27490af - a separate worktree
   (`git worktree add base-a27490af a27490af`), the same binary, its own scratch home. The test compares
   `agent:build_context()`'s own system prompt and `bot.tool_list`, never a block rebuilt from parts.
@@ -122,8 +130,10 @@ No other model-facing string was added or changed by this round.
   environment: native guidance 43, prompt golden 73, markup pairs 39, raw mode small rules 16, mode parity 15,
   default mode 13, conform profile 18, thinking block 101, prompt cache 195, envelope 98, ab arms 8, leak net 7,
   raw native 23.
-* Fast path under `flock /home/victor/Work/missions/.suite.lock`, log
-  `/home/victor/Work/missions/rel-native/scratch/fast-84824f03.log`.
+* Fast path under `flock /home/victor/Work/missions/.suite.lock`. Its log:
+  `/home/victor/Work/missions/rel-native/scratch/fast-final.log` (an earlier run,
+  `scratch/fast-run4.log`, is what found the item-4 cwd defect; `fast-run2/3` stopped at the binary check
+  because `cargo` is no longer on this machine - see "Not done").
 
 ## Pre-existing failures (reproduced on a27490af, not caused here)
 
@@ -139,10 +149,24 @@ own scratch home, clean environment; every one fails identically on both:
   (`scripts/fast-path.exclude`), not named by `scripts/test.sh`.
 * `scripts/test-codemode-native.lua` (:24 "opt-in adds one tool, direct tools retained") - EXCLUDED from the
   fast path, not named by `scripts/test.sh`.
+* `scripts/test-context-growth.lua` (:15 "new run uses 850k baseline rather than inheriting old growth") - a
+  fast-path row.
+* `scripts/test-run-counts.lua` (:15 "summary adds spend through actual callbacks without overwriting task
+  context") - a fast-path row.
+* `scripts/test-refusal-contract.lua` (:24 "`lua/core/refusal_codes.lua` is stale") - a fast-path row, and it
+  fails because the REFUSAL CODE TABLE is stale, which no change of mine touches.
+* `node scripts/test-onebuild.mjs` and `bash scripts/test-install-guards.sh` (72 checks, 6 failed) - run by hand
+  on a27490af with the same result.
 
 ## Not done / unknown
 
 * The full gate (`scripts/test.sh`, ~50 min) was NOT run end to end; the fast path was.
+* `cargo` DISAPPEARED from this machine during the session (it built the binary at 18:02 and is absent from
+  PATH, `/home/victor/.cargo` and the mise shims afterwards), so the final fast path was told
+  `WA_BIN=/home/victor/wasm-agent/target/m-rel-native/release/wa` explicitly. That binary is honest for THIS
+  branch: `git diff --stat 826f172b..HEAD -- rust wit` is EMPTY (the binary's stamp is 826f172b), and every
+  change this round is Lua, which `WASM_AGENT_LUA_ROOT` loads from the tree. What was NOT verified is a
+  release build of this exact tree - named here rather than claimed.
 * Base comparisons that need "no switch" were made only for explicit modes, for the reason in "Premises".
 * `WASM_AGENT_RAW_CODE=bash` now means "off" without `WA_AB_ARM=bash`; an operator habit of using bash alone
   changes meaning, deliberately, and is named in item 6.
