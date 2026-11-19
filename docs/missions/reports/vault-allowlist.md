@@ -181,3 +181,111 @@ One operator-facing string was missing from Texts to approve and is now there:
 - The brief says tests belong in a scratch HOME; the Rust tests write fixtures under
   std::env::temp_dir(), not a WASM_AGENT_HOME, which is the existing pattern of that suite and is
   outside any live node's state.
+
+## Round 9 - `--native` end to end, a host-only classifier, a CLI that reads it (19/11, review 03:25)
+
+Rebased onto origin/main `e4e40405` first: `git rebase origin/main` replayed 5 commits with 0 conflicts
+(the rebased round-8 tip is `afeff8e7`). Then six items, one commit each. Each figure below is
+`git diff --stat <commit>~1 <commit>`.
+
+### What changed, per item
+
+1. **`--native` works end to end.** The kernel has two judgements about a program and only the FIRST read
+the operator's voucher: `approval_problem` took it, while `request_server_problem` - the command the child
+spawns from the request file - answered from `program_shape_problem(program)`, which has no voucher. A
+vouched ELF therefore passed the approval and was refused one step later, so `/mcp <id> on --native` could
+never launch. Both now call `program_refusal(program, vouched)` with `native_voucher(approval)`, and the
+request-side coverage check accepts a vouched program by the same test. The voucher is also read BEFORE the
+approval's file list, because the console puts the vouched binary IN that list: a vanished binary was
+reported as "a script this connector was approved with", and `vault_approval_native_unreadable` was
+reachable only by an approval the console never writes. Two tests: a vouched ELF passes both checks, and
+`_changed` / `_unreadable` / `_not_covered` are each reached by changing, removing or un-naming the bytes,
+refused before any spawn.
+   `rust/wa-capabilities/src/operations.rs | 102 ++++++++++-` - 1 file changed, 99 insertions(+), 3 deletions(-)
+2. **Only the HOST's executable format is native.** `classify_magic` answered elf/macho/pe from four bytes
+on any host, so an ELF was a "native binary" on macOS, `MZ` alone was a PE, and 0xcafebabe made every Java
+class a universal Mach-O. Now: a bounded 4096-byte head (`MAGIC_HEAD_BYTES`, never the whole file),
+`HostFormat` from `cfg!` with `classify_magic_on(head, host)` so every case is testable on any machine,
+`foreign` for another platform's executable, a PE only when e_lfanew points at "PE\0\0", and a fat Mach-O
+only when its architecture count is 1..15 with the table present (a Java class names a major version >= 45).
+Three tests added; the two existing ones re-pointed at the explicit host.
+   `rust/wa-capabilities/src/host.rs | 217 ++++++++++++++++++++---` - 1 file changed, 196 insertions(+), 21 deletions(-)
+3. **`vm` by handle, and in a template literal.** Rounds 7-8 caught `require('vm')`, `import 'node:vm'`,
+`runIn*`, and any `x.Script(`. Three spellings still passed: require/import with a BACKTICK, and
+`process.getBuiltinModule('vm')` - whose destructuring form (`{Script} = ...getBuiltinModule('vm')`) then
+calls bare names the receiver rule needs a dot to see. Each is now refused by name with its own sentence,
+with a negative check that an ordinary import and a template literal in a connector are NOT refused.
+4. **The family comes from the realpath.** Lua's `interpreter_family` judged the name the program was
+CALLED by; Rust judged the realpath. A symlink named `node` pointing at bash now takes the shell family
+(`-c` is inline code), proved by a symlink test that also shows `-p` is not a shell flag.
+   `lua/core/mcp.lua | 29 ++`, `scripts/test-mcp-vault-approval.lua | 63 +++++` - 2 files changed, 91 insertions(+), 1 deletion(-)
+5. **The docs name the strings that exist.** `docs/MCP.md:177` still named
+`vault_approval_interpreter_unfollowed`, which round 8 removed; it now lists the allow-list refusals the
+kernel emits and the vm-by-handle rules. `docs/VAULT.md` gains the same missing kernel strings. This
+report's CLI line did NOT match `mcp_cli.lua` ("which this digest cannot name" against "which the approval
+does not trust") and is now quoted verbatim; `mcp_vault_native_unreadable` is listed. The one string that
+changed NAME is recorded as an orchestrator decision, in the round-8 text section above.
+   3 files changed, 24 insertions(+), 6 deletions(-)
+6. **The CLI's own `/mcp <key> on --native <path>`, and a real bug it found.** The parser had no test. It
+has one now: a relative path (`mcp_vault_native_needs_absolute_path`), a bare `--native`
+(`mcp_vault_native_usage`), an absolute path that is not there (`mcp_vault_native_unreadable`), an unknown
+argument (`mcp_usage`), and the passing case, where the row records the voucher's realpath AND sha256 - so
+the voucher is proved to travel through `mcp_command.toggle` into `mcp.control`. Host-independent Rust
+tests: the spawned interpreter is a fixture binary named `node`, not `/usr/bin/node`. The vouched binary is
+hashed by STREAM (`crate::host::file_digest`, 512 MB bound) instead of `std::fs::read`, so a half-gigabyte
+interpreter is never read into memory to be checked.
+   `lua/core/mcp_cli.lua | 18 ++`, `rust/wa-capabilities/src/operations.rs | 62 ++++---`,
+   `scripts/test-mcp-vault-approval.lua | 85 +++++` - 3 files changed, 147 insertions(+), 18 deletions(-)
+
+### A bug in the shipping CLI, found by item 6's test
+
+`lua/core/mcp_cli.lua` split its line with `rest:match('^(%S+)%s*(%S*)$')` - anchored at the END, so any
+line with a third word gave key=nil and the command answered `unknown_connector`. That is exactly
+`/mcp <key> on --native <path>`: the voucher was unreachable from the console. It now takes the first two
+words, and the REST of the line is judged explicitly (`mcp_usage` for anything that is not the `--native
+<path>` form), so an unknown argument is refused by name instead of ignored - unknown is not yes.
+
+### Test isolation: a pre-existing race in the Rust suite, exposed and fixed
+
+Three tests in `vault_approval_tests` called `std::fs::remove_dir_all` on the module's SHARED per-process
+scratch root while other tests were still writing in it; one suite run in six failed in an unrelated test
+with `create_dir_all: AlreadyExists`. Each now removes only its own file or subtree, and a directory one
+test made (`fake-node`) no longer collides with a file another writes under the same name (renamed
+`fake-node-tree`). Six consecutive runs of the module were green after the first fix, and four more
+after the rename: ten in all, none failed.
+   `3 files changed, 13 insertions(+), 7 deletions(-)`
+
+Total against the rebased round-8 tip (`git diff --stat afeff8e7..HEAD`, this report included): see the
+line quoted at the end of this section.
+
+### Verified here (avell, 16 cores), at HEAD
+
+- `cargo test --release --offline -p wa-capabilities --lib`: **332 passed, 0 failed**.
+- `cargo build --release --offline -p wa-host --bin wa`: finished (one pre-existing warning).
+- `scripts/test-mcp-vault-approval.lua`: **mcp vault approval ok (154 checks)** - 121 before round 9.
+- `scripts/test-mcp-command.lua`: ok (132 checks). `scripts/test-mcp-request-shape.lua`: ok (11 checks).
+- Each Lua row ran in its own scratch `WASM_AGENT_HOME`; the vault suite refuses to write when that is a
+  real node's directory.
+- The Rust module was run 10 times: the only failure seen was the isolation race above, gone after the fix.
+- **Not run this round:** the full `scripts/test.sh` end to end, `test-mcp-share.lua`, and
+  `test-secret-guard.lua` (round 8 measured it failing with `codemode_not_enabled` on the base and the
+  branch alike). Nothing was pushed.
+
+### Texts to approve (verbatim) - round 9 additions, continuing the round-8 list
+
+1. `it evaluates a string as code (vm: require/import in a template literal), whose source no digest of files names` (Lua, `refused_construct`)
+2. `it reaches a builtin module by handle (process.getBuiltinModule), whose code no digest of files names` (Lua, `refused_construct`)
+3. `  usage: /mcp <key> on [--native <absolute path of the binary>]` (`mcp_usage`)
+4. `  usage: /mcp <key> off` (`mcp_usage`)
+5. `vault_approval_native_unreadable:{path}: the native binary this connector was approved on cannot be read now ({reason}), so nothing was launched and no value was read. Approve it again at the operator's terminal: /mcp <id> on --native` - the `({reason})` is new: the file list now streams the hash, so it can say why.
+6. The tool description of `host.file_magic`: `A file's kind from its leading bytes: elf, macho or pe only for THIS host's own format, foreign for another platform's executable, plus script, text, binary, empty, missing, as JSON`
+7. The new magic value `foreign` itself, which every `magic = ...` sentence above can now carry.
+
+### Premises from the round-9 brief, re-measured
+
+- `request_server_problem` was at `operations.rs:688`, not 727: 727 was the `program_shape_problem` call it
+  used. The finding is unchanged; only the line number moved.
+- `docs/MCP.md:177` was exactly the stale line the brief named.
+- The report's CLI string really did not match `mcp_cli.lua`; both are quoted verbatim above now.
+- `mcp_vault_native_unreadable` was missing from every list in this report, as the brief said.
+- Nothing was stashed this round; the shared stash was never touched.
