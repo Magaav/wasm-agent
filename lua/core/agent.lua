@@ -857,6 +857,26 @@ local function install_stream_forwarder(agent)
   end)
 end
 
+-- Item #34, the rule itself: what a code-mode result CHANGED, judged by the calls it recorded. A
+-- script that only read (`return await tools.ls({path:"."})`, a `git status`) is not an effect and
+-- does not arm the done gate; one that wrote, started an operation or sent anything is. An answer
+-- whose calls cannot be read is not silently a read: unknown counts as an effect, because a gate
+-- that opens on a result nobody could read is the failure this item exists to close. It is one
+-- exported function so `scripts/test-turn-signal.lua` drives THIS rule, not a copy of it.
+function M.script_effect(output)
+  if type(output) ~= "table" then return true end
+  local calls = output.calls
+  if type(calls) ~= "table" or #calls == 0 then
+    -- A script that called nothing changed nothing, unless its own result is unreadable.
+    return not (output.ok == true)
+  end
+  for _, inner in ipairs(calls) do
+    local name = type(inner) == "table" and tostring(inner.name or "") or ""
+    if name == "" or tools.has_effect(name, nil) then return true end
+  end
+  return false
+end
+
 function M.new(session_id, on_event, role, user, node, opts)
   role = role or "master"
   user = user or "master"
@@ -3321,21 +3341,9 @@ function M:run_body(text, images)
           local command = type(args) == "table" and tostring(args.command or "") or ""
           effect = command ~= "" and not dofile("lua/core/orchestration_mode.lua").read_only_command(command)
         elseif function_.name == "codemode" then
-          -- Item #34: a script is a script. What it CHANGED is what its own calls did, so a script that
-          -- only read (`return await tools.ls({path:"."})`, a `git status`) is not an effect and does not
-          -- arm the done gate; one that wrote, started an operation or sent anything is. An answer whose
-          -- calls cannot be read is not silently a read: unknown counts as an effect.
-          local calls = type(output) == "table" and output.calls or nil
-          if type(calls) ~= "table" or #calls == 0 then
-            -- A script that called nothing changed nothing, unless its own result is unreadable.
-            effect = not (type(output) == "table" and output.ok == true)
-          else
-            effect = false
-            for _, inner in ipairs(calls) do
-              local name = type(inner) == "table" and tostring(inner.name or "") or ""
-              if name == "" or tools.has_effect(name, nil) then effect = true break end
-            end
-          end
+          -- Item #34: a script is a script. What it CHANGED is what its own calls did - the rule is
+          -- `M.script_effect`, one function, so the gate and the test that pins it read the same code.
+          effect = M.script_effect(output)
         end
         if effect then gate.effects = gate.effects + 1 end
       end

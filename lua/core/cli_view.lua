@@ -2531,7 +2531,20 @@ function METHODS:event(event)
     elseif text ~= "" then
       -- Compaction, recovery, a guard, a storage failure: not a phase, and worth a line
       -- of its own - these are exactly the events that used to be invisible here.
+      --
+      -- Item 8: a notice is never GLUED onto other text. A done-gate notice arrives at a
+      -- turn end, while the candidate answer is still a partial line held in the stream
+      -- buffer (say_buf): drawn where it arrived, the notice came out ABOVE the sentence it
+      -- was interrupting and with that sentence reordered after it (measured 19/11: the
+      -- answer row held "and more" while the notice and the rest of the sentence followed).
+      -- So the text the notice interrupted is written first, as it stands, and the notice
+      -- then takes a row of its own - after the text, never inside it.
+      local saying = self.flow_kind == "say"
+      self:flow_end()
       self:line(paint("! " .. M.clip(text, self.limit), "yellow", self.live))
+      -- The answer the notice interrupted is not over: the rest of it continues on the next
+      -- row, as the same paragraph rather than a new one (no blank line, no second gap).
+      if saying then self.flow_kind, self.flow_held = "say", 0 end
     end
   elseif kind == "round" then
     local previous = self.round

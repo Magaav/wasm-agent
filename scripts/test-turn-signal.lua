@@ -155,51 +155,96 @@ eq(bad_code, 2, "#2: a malformed day is refused with a non-zero exit")
 ok(bad_out:find("turn_day_must_be_YYYY-MM-DD", 1, true) ~= nil,
   "#2: and the refusal names the format")
 
--- ---- #34: a script's effect is what its calls did ---------------------------------------------
+-- ---- #34: the done gate, through the rule agent.lua itself applies -----------------------------
+-- `M.script_effect` is the function the dispatch loop calls at the codemode boundary, so these
+-- drive the gate's own code. A local copy of the rule is how a test keeps passing while the loop
+-- does something else, which is the defect this section replaces.
+local agent_lib = dofile("lua/core/agent.lua")
 local tools_lib = dofile("lua/core/tools.lua")
-local function script_effect(output)
-  -- the rule agent.lua applies to a codemode result
-  if type(output) ~= "table" then return true end
-  local calls = output.calls
-  if type(calls) ~= "table" or #calls == 0 then return not (output.ok == true) end
-  for _, inner in ipairs(calls) do
-    local name = type(inner) == "table" and tostring(inner.name or "") or ""
-    if name == "" or tools_lib.has_effect(name, nil) then return true end
-  end
-  return false
+ok(type(agent_lib.script_effect) == "function", "#34: agent.lua exposes the rule its loop applies")
+if type(agent_lib.script_effect) == "function" then
+  ok(agent_lib.script_effect({ ok = true, calls = { { name = "ls" }, { name = "grep" }, { name = "read" } } }) == false,
+    "#34: a script that only read is not an effect")
+  ok(agent_lib.script_effect({ ok = true, calls = { { name = "ls" }, { name = "write" } } }) == true,
+    "#34: a script that wrote is an effect")
+  ok(agent_lib.script_effect({ ok = true, calls = {} }) == false,
+    "#34: a script that called nothing changed nothing")
+  ok(agent_lib.script_effect({ ok = false, error = "codemode_close_failed" }) == true,
+    "#34: an unreadable answer is unknown, and unknown is an effect")
+  ok(agent_lib.script_effect(nil) == true, "#34: no result at all is unknown too, never a read")
+  -- The one fact that ties the rule to the loop: the loop asks THIS function.
+  ok((host.read_file("lua/core/agent.lua") or ""):find("effect = M.script_effect(output)", 1, true) ~= nil,
+    "#34: the codemode branch of the dispatch loop answers with that function")
 end
-ok(script_effect({ ok = true, calls = { { name = "ls" }, { name = "grep" }, { name = "read" } } }) == false,
-  "#34: a script that only read is not an effect")
-ok(script_effect({ ok = true, calls = { { name = "ls" }, { name = "write" } } }) == true,
-  "#34: a script that wrote is an effect")
-ok(script_effect({ ok = true, calls = {} }) == false, "#34: a script that called nothing changed nothing")
-ok(script_effect({ ok = false, error = "codemode_close_failed" }) == true,
-  "#34: an unreadable answer is unknown, and unknown is an effect")
 
--- ---- #37: a pending handle answers plain fields ----------------------------------------------
-local pending_source = host.read_file("lua/core/codemode_pending.lua") or ""
-ok(pending_source:find("operation_id = record.op", 1, true) ~= nil,
-  "#37: a pending handle carries operation_id as a plain field")
-ok(pending_source:find("out.stdout_path", 1, true) ~= nil,
-  "#37: and the log paths beside it")
-ok(pending_source:find("function M.wait", 1, true) ~= nil, "#37: wait(op) is the resume path")
+-- ---- #37: a pending call, through the real invoke path -----------------------------------------
+-- `codemode_pending.invoke` is what a script's call goes through; with wait_s 0 a call that cannot
+-- finish answers the handle the script actually receives. The work is cancelled before this block
+-- ends, so the test leaves nothing running on the node.
+local pending_lib = dofile("lua/core/codemode_pending.lua")
+local ctx = { session_id = session_id, user_id = "master", run_id = "run-pending" }
+local function dispatch_here(name, params, raw)
+  return tools_lib.dispatch(memory, name, params, "master", ctx)
+end
+local pending_answer = pending_lib.invoke(dispatch_here,
+  { scope = session_id, session_id = session_id, ctx = ctx, background = true },
+  "bash", { command = "sleep 30" }, nil, 0)
+ok(type(pending_answer) == "table" and pending_answer.state == "pending",
+  "#37: a call nobody waited for answers a pending handle")
+if type(pending_answer) == "table" and pending_answer.state == "pending" then
+  ok(type(pending_answer.operation_id) == "string" and pending_answer.operation_id ~= "",
+    "#37: the handle carries operation_id as a plain field")
+  ok(type(pending_answer.stdout_path) == "string" and pending_answer.stdout_path:find("stdout", 1, true) ~= nil,
+    "#37: and stdout_path, the file the answer will be in")
+  ok(type(pending_answer.stderr_path) == "string" and pending_answer.stderr_path:find("stderr", 1, true) ~= nil,
+    "#37: and stderr_path, the file the failure will be in")
+  ok(pending_answer.op == pending_answer.operation_id,
+    "#37: op stays beside operation_id for every script and wait(op) already written")
+  ok(type(pending_answer.progress) == "table",
+    "#37: with progress beside the plain fields, never instead of them")
+  local stopped = pending_lib.cancel(dispatch_here,
+    { scope = session_id, session_id = session_id, ctx = ctx }, pending_answer.op)
+  ok(type(stopped) == "table", "#37: the call is cancelled, so this test leaves nothing running")
+end
 
--- ---- #43: list/await answer ids and state by default -----------------------------------------
--- The rule above is the one agent.lua applies; this asserts the dispatcher really carries it, so a
--- change that drops the branch fails here rather than passing against a copy of itself.
-ok(agent_source:find('elseif function_.name == "codemode" then', 1, true) ~= nil,
-  "#34: the dispatcher classifies a script's effect from its own calls")
-ok(agent_source:find("unknown is an effect", 1, true) ~= nil
-  or agent_source:find("unknown counts as an effect", 1, true) ~= nil,
-  "#34: and an unreadable answer is treated as unknown, never as a read")
-local operation_source = host.read_file("lua/core/tools.lua") or ""
-ok(operation_source:find("output_omitted", 1, true) ~= nil,
-  "#43: a list/await answer drops the body by default and says how much it dropped")
-ok(operation_source:find('args.output == true', 1, true) ~= nil,
-  "#43: and returns it when the caller asks")
-ok(operation_source:find('record[key .. "_truncated"]', 1, true) ~= nil,
-  "#43: with a byte cap when the body is large")
-
+-- ---- #43: list/await answer ids and state, and a body only when asked --------------------------
+-- The real `operation` tool, through the real dispatcher: no source text, no copy of the rule.
+local started = tools_lib.dispatch(memory, "operation",
+  { action = "start", command = "echo item-43-body" }, "master", ctx)
+ok(type(started) == "table" and type(started.operation_id) == "string",
+  "#43: a real operation starts and answers its id")
+local op_id = type(started) == "table" and started.operation_id or nil
+if op_id then
+  local settled = tools_lib.dispatch(memory, "operation",
+    { action = "await", id = op_id, wait_s = 30 }, "master", ctx)
+  ok(type(settled) == "table" and settled.operation_id == op_id, "#43: an await answers the id it was asked about")
+  ok(type(settled) == "table" and settled.stdout == nil,
+    "#43: and NOT the output body by default")
+  eq(type(settled) == "table" and settled.stdout_omitted, #"item-43-body\n",
+    "#43: while saying how many bytes it dropped")
+  ok(type(settled) == "table" and settled.state ~= nil, "#43: with the state beside it")
+  local with_body = tools_lib.dispatch(memory, "operation",
+    { action = "await", id = op_id, wait_s = 30, output = true }, "master", ctx)
+  ok(type(with_body) == "table" and type(with_body.stdout) == "string"
+    and with_body.stdout:find("item-43-body", 1, true) ~= nil,
+    "#43: output=true returns the body")
+end
+-- A body larger than the floor: max_bytes below 1 KiB is still 1 KiB, and the record says how
+-- much was cut. The bytes are the operation's own (3000 x's, no newline).
+local big = tools_lib.dispatch(memory, "operation",
+  { action = "start", command = "head -c 3000 /dev/zero | tr \"\\0\" x" }, "master", ctx)
+local big_id = type(big) == "table" and big.operation_id or nil
+if big_id then
+  local full = tools_lib.dispatch(memory, "operation",
+    { action = "await", id = big_id, wait_s = 30, output = true, max_bytes = 8192 }, "master", ctx)
+  ok(type(full) == "table" and type(full.stdout) == "string" and #full.stdout == 3000,
+    "#43: a body under the cap is returned whole")
+  local cut = tools_lib.dispatch(memory, "operation",
+    { action = "await", id = big_id, wait_s = 30, output = true, max_bytes = 4 }, "master", ctx)
+  ok(type(cut) == "table" and type(cut.stdout) == "string" and #cut.stdout == 1024,
+    "#43: a body over the cap is cut to the 1 KiB floor")
+  eq(type(cut) == "table" and cut.stdout_truncated, 3000, "#43: and the record says how large it was")
+end
 -- ---- item 4: the stored block is ONE dim line under the answer, expandable ---------------------
 -- The view is the real module, driven by the same events the agent emits, with a captured writer: no
 -- terminal, no transcript host. What is asserted is what the reader sees and where - the block never
@@ -241,6 +286,33 @@ view2:event({ type = "turn_note", text = "the tool schema's name rule." })
 view2:failed("provider_timeout")
 local drawn2 = rec2.text()
 ok(drawn2:find("turn", 1, true) ~= nil, "item 4: a run that failed still shows the note it stored")
+
+-- ---- item 8: the done-gate notice is its own row, never glued onto other text ---------------
+-- Measured on the view before the fix: a notice arriving while the answer was still a partial
+-- line came out ABOVE that line, which was then reordered after it - the reader saw the gate
+-- answer first and its own notice inside the sentence. What is asserted is the row order.
+local rec8 = view_recorder()
+local view8 = cli_view.new({ out = rec8.out, live = false, now = function() return 5 end, limit = 80 })
+view8:run_started()
+view8:event({ type = "delta", text = "The answer is 42" })
+view8:event({ type = "status", text = "done gate: 1 recorded check(s) still failing - continuing" })
+view8:event({ type = "delta", text = " and more" })
+-- The run's end, because the tail of a streamed answer is written there (answered) - the
+-- order being asserted is the one the reader ends up with.
+view8:answered("")
+local drawn8 = rec8.text()
+local before = drawn8:find("The answer is 42", 1, true)
+local notice = drawn8:find("done gate: 1 recorded check(s)", 1, true)
+local after = drawn8:find("and more", 1, true)
+ok(before ~= nil, "item 8: the interrupted text is written, not swallowed")
+ok(notice ~= nil, "item 8: the notice is written")
+ok(before and notice and before < notice, "item 8: the text comes first, the notice after it")
+ok(notice and after and notice < after, "item 8: and the rest of the text follows the notice")
+ok(drawn8:find("42done gate", 1, true) == nil and drawn8:find("and more! done gate", 1, true) == nil,
+  "item 8: the notice is never glued onto the words it interrupted")
+local notice_row = drawn8:match("([^\n]*)done gate: 1 recorded check")
+ok(notice_row ~= nil and notice_row:gsub("^%s+", ""):sub(1, 2) == "! ",
+  "item 8: the notice has a row of its own, opening with its own mark")
 
 print(string.format("turn-signal: %d checks, %d failed", checks, failed))
 if failed > 0 then os.exit(1) end
