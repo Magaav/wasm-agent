@@ -327,23 +327,24 @@ local function drain_peer_at_least(from_index)
   return false
 end
 
-with_env("WASM_AGENT_REMOTE_ADOPTED_SECONDS", "1", function()
-  with_env("WASM_AGENT_REMOTE_ADOPTED_GRACE_SECONDS", "1", function()
-    check(wa_adopted_ceiling_seconds() == 1 and wa_adopted_grace_seconds() == 1,
+-- The ceiling: a bound this node gives an adopted command, read from the environment so a test can hold
+-- it in seconds. (A 1 s ceiling ends a command BEFORE it can ever be adopted - measured - so the bound
+-- that is really exercised here is the production one; reaping is measured below.)
+with_env("WASM_AGENT_REMOTE_ADOPTED_SECONDS", "7", function()
+  with_env("WASM_AGENT_REMOTE_ADOPTED_GRACE_SECONDS", "2", function()
+    check(wa_adopted_ceiling_seconds() == 7 and wa_adopted_grace_seconds() == 2,
       "the ceiling and grace are readable, so the rule can be held in seconds")
-    check(drain_peer_at_least(true), "the peer session is empty before the ceiling is measured")
-    local bounded = peer_bash("sleep 30", 800)
-    check(bounded.state == "pending", "an adopted command starts under the short ceiling")
-    check(bounded.timeout_seconds == 1, "and the handle reports the ceiling it was given ("
-      .. tostring(bounded.timeout_seconds) .. "), not its caller's number")
-    if host.sleep then host.sleep(2600) end
-    local state = tools.dispatch(memory, "operation", { action = "status", id = bounded.op },
-      "master", peer_ctx) or {}
-    check(state.settled == true, "the ceiling ends the adopted command by itself, so its slot returns: "
-      .. json.encode(state):sub(1, 200))
   end)
 end)
-
+check(wa_adopted_ceiling_seconds() == 900 and wa_adopted_grace_seconds() == 60,
+  "and with no variable set the production bound is 900 s + 60 s grace")
+check(drain_peer_at_least(true), "the peer session is empty before the ceiling is measured")
+local ceiling_handle = peer_bash("sleep 5", 800)
+check(ceiling_handle.state == "pending", "a command is adopted under the real ceiling: "
+  .. json.encode(ceiling_handle):sub(1, 200))
+check(ceiling_handle.timeout_seconds == 900,
+  "and the handle reports the ceiling it was really given: " .. tostring(ceiling_handle.timeout_seconds))
+tools.dispatch(memory, "operation", { action = "cancel", id = ceiling_handle.op }, "master", peer_ctx)
 -- The REAP, against the record it really uses.
 --
 -- The command has to be started under the REAL ceiling (900 s) - a command started under the 1 s ceiling
@@ -378,5 +379,82 @@ with_env("WASM_AGENT_REMOTE_ADOPTED_SECONDS", "1", function()
     check(not still_running, "the reaped command is no longer running")
   end)
 end)
+
+
+-- 12. VERIFICATION r2, MUST 1: a short call is never refused by the adopted limit.
+--
+-- The limit used to be consulted BEFORE the command started and counted every open operation in the peer
+-- session, so two adopted long commands refused a plain short command. Now only a call that OUTLIVED the
+-- hold is adopted, the limit counts adopted ops alone, and a short call creates no operation at all.
+check(drain_peer_at_least(true), "the peer session is clean before the short-call check")
+local long_a = peer_bash("sleep 60", 800)
+local long_b = peer_bash("sleep 60", 800)
+check(long_a.state == "pending" and long_b.state == "pending",
+  "two long commands are adopted: " .. json.encode({ long_a.state, long_b.state }))
+local short = peer_bash("echo still-short", 800)
+check(short.state ~= "pending", "a short command is NOT adopted while two are held: "
+  .. json.encode(short):sub(1, 240))
+check(short.error == nil, "and it is not refused by the adopted limit: " .. tostring(short.error))
+check(tostring(short.stdout or ""):find("still-short", 1, true) ~= nil,
+  "it answered its own output, which means it really ran")
+for _, one in ipairs({ long_a, long_b }) do
+  tools.dispatch(memory, "operation", { action = "cancel", id = one.op }, "master", peer_ctx)
+end
+
+-- 13. VERIFICATION r2, MUST 2: the cancel observation is a handful of calls, not a spin.
+--
+-- host.sleep takes whole MILLISECONDS; the old window called it with 0.2, which is 0 ms, and sent
+-- back-to-back status calls for three seconds. This counts them.
+local count_ctx = { user_id = "master", node_id = "rp-scratch-peer", peer_call = true,
+  session_id = "peer:rp-scratch-peer" }
+local status_calls = { n = 0 }
+local counting = function(name, params, raw)
+  if name == "remote" and type(params) == "table" and params.capability == "operation"
+    and tostring(params.action or "") == "status" then
+    status_calls.n = status_calls.n + 1
+  end
+  return relay(name, params, raw)
+end
+local spin_raw = json.encode({ node = "rp-scratch-peer", capability = "bash",
+  command = "sleep 60", wait_s = 0 })
+local spin = pending.invoke(counting, { scope = scope }, "remote",
+  { node = "rp-scratch-peer", capability = "bash", command = "sleep 60" }, spin_raw, 0)
+check(spin.state == "pending", "a handle to cancel for the call count")
+status_calls.n = 0
+local began = host.monotonic_ms and host.monotonic_ms() or 0
+local spin_cancel = pending.cancel(counting, { scope = scope }, spin.op)
+local spent = (host.monotonic_ms and host.monotonic_ms() or 0) - began
+check(spin_cancel.cancelled == true, "the cancel still stops it: " .. json.encode(spin_cancel):sub(1, 160))
+check(status_calls.n <= 5, "the observation made at most 5 status calls (made "
+  .. tostring(status_calls.n) .. ")")
+check(spent <= 3200, "and it took a bounded time (" .. tostring(spent) .. " ms)")
+
+-- 14. VERIFICATION r2, MUST 3: no hot retry. A peer that answers instantly WITHOUT settling (here: a
+-- status-shaped answer that never settles) must not let the caller spin - every call costs at least the
+-- minimum charge, and a wait is capped in calls.
+local instant = { n = 0 }
+local instant_relay = function(name, params, raw)
+  if name == "remote" and type(params) == "table" and params.capability == "operation" then
+    instant.n = instant.n + 1
+    return { operation_id = tostring(params.id or "op"), settled = false, state = "running" }
+  end
+  return relay(name, params, raw)
+end
+local hot_raw = json.encode({ node = "rp-scratch-peer", capability = "bash",
+  command = "sleep 60", wait_s = 0 })
+local hot = pending.invoke(relay, { scope = scope }, "remote",
+  { node = "rp-scratch-peer", capability = "bash", command = "sleep 60" }, hot_raw, 0)
+if hot and hot.op then
+  instant.n = 0
+  local hot_began = host.monotonic_ms and host.monotonic_ms() or 0
+  pending.wait(instant_relay, { scope = scope }, hot.op, { wait_s = 5 })
+  local hot_spent = (host.monotonic_ms and host.monotonic_ms() or 0) - hot_began
+  check(instant.n <= 40, "a peer answering instantly without settling is capped in calls (made "
+    .. tostring(instant.n) .. ")")
+  check(instant.n < 40 or hot_spent >= 250 * 39,
+    "and each call was charged at least the minimum, so the loop cannot be hot ("
+    .. tostring(instant.n) .. " calls in " .. tostring(hot_spent) .. " ms)")
+  tools.dispatch(memory, "operation", { action = "cancel", id = hot.op }, "master", peer_ctx)
+end
 
 print("remote pending ok (" .. tostring(checks) .. " checks)")
