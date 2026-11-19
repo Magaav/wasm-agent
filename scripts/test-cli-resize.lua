@@ -46,7 +46,15 @@ local function components(view)
   out["status row"] = { view:status_text(false) }
   out["footer"] = { cli_view.footer({ rounds = 3, tools = 5, prompt = 1200, completion = 340, cached = 900 },
     { context = 45000, budget = 128000 }) }
-  out["elsewhere row"] = { "node: 2 ops elsewhere" }
+  -- The between-runs summary row, which this view DOES draw (status_template's dim line). It stood
+  -- for a "node: 2 ops elsewhere" aggregate until round 3: that row belongs to
+  -- change/session-isolation, and this tree draws nothing about other sessions, so a fixture of it
+  -- here would size text nothing puts on a screen.
+  local between = cli_view.new({ out = function() end, live = false, now = function() return 1000 end,
+    columns = function() return 80 end, limit = 80 })
+  between.screen = { footer = true }
+  between.last_summary = "bash 9483 12s 9483 a long line of the node's own output so the row is wide"
+  out["summary row"] = { between:status_text(false) }
   return out
 end
 

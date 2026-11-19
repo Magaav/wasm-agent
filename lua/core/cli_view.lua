@@ -1205,18 +1205,16 @@ end
 function METHODS:status_template()
   local boxed = self.screen and self.screen.footer
   if self.screen and not self.turn and self.last_summary then
-    -- Boxed, the numbers live in the footer under the box and the status row is empty between runs -
-    -- unless the NODE is busy with somebody else's call, and then this row says so (and only that).
-    if boxed then return self:elsewhere_text() or "", nil end
+    -- Boxed, the numbers live in the footer under the box and the status row is EMPTY between runs.
+    -- Nothing about the rest of the node goes here: the `node: N ops elsewhere` aggregate is
+    -- change/session-isolation's, it is drawn there and nowhere else (this view has no reader of it,
+    -- and a row composed from a module another branch owns drifts the moment either side changes).
+    if boxed then return "", nil end
     return paint(clip(self.last_summary, self.limit), "dim", self.live), nil
   end
-  -- Nothing of this session's is running and there is no run to describe: the row is the aggregate, or
-  -- empty. Never a named row - another session's tool, its clock and its output are not ours to draw
-  -- (session isolation, finding 1; METHODS:elsewhere_text).
-  if not self.turn and not self.pending then
-    local elsewhere = self:elsewhere_text()
-    if elsewhere then return elsewhere, nil end
-  end
+  -- Nothing of this session's is running and there is no run to describe: the row is empty. Never a
+  -- named row, and never a count either - another session's tool, its clock and its output are not
+  -- ours to draw (session isolation, finding 1), and this branch draws nothing about other sessions.
   local phase = self.pending and (self.pending.raw and "Running your script"
     or M.phase((M.target(self.pending.name, self.pending.arguments)))) or self.phase
   local started = self.screen and self.turn and self.turn.started
@@ -2273,57 +2271,6 @@ function METHODS:tool_line()
   return value
 end
 
--- The progress module, loaded once per view: both readers below need it (`tool_line`,
--- `elsewhere_text`), and `dofile` on every frame is a disk read on the status row's path.
-function METHODS:progress_module()
-  local module = self.tool_progress
-  if module then return module end
-  local ok, loaded = pcall(dofile, 'lua/core/tool_progress.lua')
-  if not ok or type(loaded) ~= 'table' then return nil end
-  self.tool_progress = loaded
-  return loaded
-end
-
--- How long the aggregate is believed. The row is redrawn on every event and on every spinner frame,
--- and reading it is a directory listing; a second is far finer than a count of other sessions' calls
--- can move, and it keeps the status row off the disk (the reason RESTART_NOTICE_TTL exists below).
-local ELSEWHERE_TTL = 1
-
--- **Other sessions' work on this node, as a count and nothing else**: `node: 2 ops elsewhere`.
---
--- The long-call row used to be node-wide: every session drew whichever call had written the one file
--- last, with that caller's own last line of output in it - a content leak, not only a wrong label
--- (session isolation, finding 1). The fix has two halves. The backend keys the file by the session
--- that owns the call, so a reader opens only its own (`lua/core/tool_progress.lua`'s `M.path`); this
--- is the other half, the only thing a reader may still say about the rest of the node. A COUNT, drawn
--- dim, never a tool name, never a session id and never a line of anybody's output.
---
--- The wording and the arithmetic are `lua/core/tool_progress.lua`'s (`elsewhere_text`, `elsewhere`),
--- the twin of `wa_tool_progress::elsewhere`; this function only decides *when* to ask. A module older
--- than that branch has no `elsewhere`, and the answer is then silence - this view never invents a
--- count it cannot read, so the capability is checked rather than assumed. `nil` means "nothing to
--- say", which is not the same answer as the empty string.
-function METHODS:elsewhere_text()
-  if not self.live then return nil end
-  local now = self.now()
-  if self.elsewhere_at and (now - self.elsewhere_at) < ELSEWHERE_TTL then return self.elsewhere_shown end
-  local module = self:progress_module()
-  local shown = nil
-  if module and type(module.elsewhere) == "function" then
-    local ok, count = pcall(module.elsewhere, { now = now, session = self.session_id })
-    count = ok and tonumber(count) or 0
-    if count > 0 then
-      local text = (type(module.elsewhere_text) == "function" and module.elsewhere_text(count))
-        or ("node: " .. count .. (count == 1 and " op elsewhere" or " ops elsewhere"))
-      -- Painted only when the line it joins has room for it: a coloured line clipped by width loses
-      -- its reset and bleeds into the row beside it (`status_template`'s rule, same reason).
-      local plain = tostring(text)
-      shown = paint(plain, "dim", self.live and (visible_columns(plain) + 10 <= self.limit) or false)
-    end
-  end
-  self.elsewhere_at, self.elsewhere_shown = now, shown
-  return shown
-end
 
 -- The live line of the call in flight, written inside its own transcript block: `""` takes it away.
 -- Nothing here can repaint it while the call runs (a foreground `bash` blocks this interpreter inside

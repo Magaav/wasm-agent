@@ -1710,9 +1710,11 @@ WA_SCRIPT=scripts/test-build-identity.lua "$BIN" --db "$DB.identity" | grep "bui
 # left the welcome rule and the code-mode box at the old size, and wider than a shrunk window (Victor,
 # 18/11, "the components do not follow a terminal resize").
 WA_SCRIPT=scripts/test-cli-resize.lua "$BIN" --db "$DB.resize" | grep "resize ok"
-# The node-wide aggregate (a count and never a named row) and the welcome line reason when there is
-# no model - the sentence that replaced "local mode (no model configured)".
-WA_SCRIPT=scripts/test-cli-welcome.lua "$BIN" --db "$DB.welcome" | grep "welcome and elsewhere ok"
+# The view draws NOTHING about other sessions - a progress module that answers elsewhere() must not
+# reach the row (the aggregate is change/session-isolation's; round 3 removed this tree's reader) - and
+# the welcome line reason when there is no model, the sentence that replaced "local mode (no model
+# configured)".
+WA_SCRIPT=scripts/test-cli-welcome.lua "$BIN" --db "$DB.welcome" | grep "welcome reason and no elsewhere row ok"
 # /keybindings prints the table the console dispatches on (rust/wa-term/src/keymap.rs): the rows come
 # from host.keybindings, the module names no key itself, /help points at it, and the REPL, the mid-run
 # view and the node's route exist. The other direction - that every row is dispatched and nothing else
