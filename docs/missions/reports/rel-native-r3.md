@@ -127,10 +127,18 @@ No other model-facing string was added or changed by this round.
 
 ## Pre-existing failures (reproduced on a27490af, not caused here)
 
-`scripts/test-raw-code.lua` (:45), `scripts/test-raw-first.lua` (:46), `scripts/test-context-usage.lua` (:23) and
-`scripts/test-prompt-layers.lua` (:5, "read is native main-loop bootstrap")
-fail the same way on a27490af with the same binary and a scratch home. They are not rows of `scripts/test.sh` or of
-the fast path (grepped).
+Each was run TWICE, once with `WASM_AGENT_LUA_ROOT` pointing at a27490af and once at this tree, same binary,
+own scratch home, clean environment; every one fails identically on both:
+
+* `scripts/test-raw-code.lua` (:45 "switch on: the guidance sentence is in the system prompt") - a fast-path row
+  (not in `scripts/fast-path.exclude`) and not named by `scripts/test.sh`.
+* `scripts/test-raw-first.lua` (:46 "1: the optional sentence, not the first guidance") - a fast-path row, not
+  named by `scripts/test.sh`.
+* `scripts/test-context-usage.lua` (:23) - a fast-path row, not named by `scripts/test.sh`.
+* `scripts/test-prompt-layers.lua` (:5 "read is native main-loop bootstrap") - EXCLUDED from the fast path
+  (`scripts/fast-path.exclude`), not named by `scripts/test.sh`.
+* `scripts/test-codemode-native.lua` (:24 "opt-in adds one tool, direct tools retained") - EXCLUDED from the
+  fast path, not named by `scripts/test.sh`.
 
 ## Not done / unknown
 
