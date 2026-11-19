@@ -1198,6 +1198,29 @@ function M.rate_limit_retries()
   return math.max(0, math.min(8, math.floor(count)))
 end
 
+-- Whether an UNCHANGED repetition of THIS failure is a wall rather than a queue.
+--
+-- Only two shapes qualify, and the distinction is what keeps the run's own promise ("no limit while it
+-- stays transient") true:
+--
+--   * a provider_http_500 that keeps answering the same bytes - a request or deployment that will never
+--     succeed, where waiting is a hot loop;
+--   * a failure that matched NO class at all, where repeating it proves nothing.
+--
+-- A LOST LINK is deliberately excluded even though its text is identical every time: "connection
+-- refused" repeated for two minutes is exactly what an outage looks like, and bounding it would kill
+-- the run during the outage this whole change exists to survive. The busy statuses (503/504/408/425/
+-- 429/529) are excluded for the same reason: the provider is telling us to wait, and a fixed body does
+-- not turn that into a wall.
+function M.repeats_are_a_wall(problem)
+  local text = tostring(problem or ""):lower()
+  if M.is_link_down(text) then return false end
+  local status = text:match("provider_http_(%d+)")
+  if status then return status == "500" end
+  -- No status at all: the unknown bucket, which is already bounded by its own count.
+  return not M.is_transient(text) and not M.is_connection_lost(text)
+end
+
 -- How many times the SAME failure text may repeat before the run stops calling it transient. A 500
 -- that returns byte-identical answers is a wall, not a queue, and the run says so by NAME instead of
 -- waiting for a change that is not coming. It is a ceiling on repetition, not a total cap on the

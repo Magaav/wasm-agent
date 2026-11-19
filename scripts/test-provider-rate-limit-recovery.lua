@@ -154,4 +154,54 @@ check(tostring(wall_problem):find('provider_http_500',1,true)~=nil,
   "while keeping the provider's own words")
 overrides.WASM_AGENT_PROVIDER_IDENTICAL_REPEATS=nil
 
+-- (c) The ceiling must NOT apply where repetition is the outage itself. A link answering the same
+-- "connection refused" for minutes, and a 503 with a fixed body, both repeat identically - that is what
+-- an outage looks like - and bounding them would kill the very run this change exists to save.
+overrides.WASM_AGENT_PROVIDER_IDENTICAL_REPEATS='3'
+check(not provider.repeats_are_a_wall('provider_error: connection refused'),
+  'an identical LOST LINK is not a wall: it repeats exactly this way for as long as the outage lasts')
+check(not provider.repeats_are_a_wall('lua/core/provider.lua:1405: provider_http_503: {"error":"busy"}'),
+  'an identical 503 is not a wall: the provider is asking us to wait')
+for _, status in ipairs({'504','408','425','429','529'}) do
+  check(not provider.repeats_are_a_wall('provider_http_'..status..': waiting'),
+    'an identical '..status..' is not a wall')
+end
+check(provider.repeats_are_a_wall('provider_http_500: {"error":"broken deployment"}'),
+  'an identical 500 IS a wall')
+check(not provider.repeats_are_a_wall('provider_http_502: {"error":{"code":"vault_upstream_unreachable"}}'),
+  'an identical vault 502 is the link, not a wall')
+
+-- The link case end to end: twelve identical "connection refused" failures, far past the ceiling of 3,
+-- and the turn still finishes when the link returns.
+overrides.WASM_AGENT_PROVIDER_CONNECT_RETRIES='20'
+overrides.WASM_AGENT_PROVIDER_CONNECT_WAIT_SECONDS='600'
+overrides.WASM_AGENT_PROVIDER_RATE_LIMIT_DELAY_MS='0'
+overrides.WASM_AGENT_PROVIDER_CONNECT_DELAY_MS='0'
+host.sleep=function() end
+local refused_sid=session('provider-identical-link')
+local refused_bot=agentlib.new(refused_sid,function() end,'master','master','')
+local refused_calls=0
+provider.complete_with=function()
+  refused_calls=refused_calls+1
+  if refused_calls<=12 then error('lua/core/provider.lua:1208: provider_error: connection refused') end
+  return {content='answered after the outage',tool_calls={},finish_reason='stop',usage=usage}
+end
+local refused_reply=refused_bot:run('survive an identical-failure outage')
+check(refused_reply=='answered after the outage',
+  'twelve IDENTICAL link failures do not end the run, got '..refused_calls..' calls')
+check(refused_calls==13,'all thirteen attempts were made: the ceiling never applied to the link')
+
+-- ...and the same for a fixed-body 503.
+local busy_sid=session('provider-identical-busy')
+local busy_bot=agentlib.new(busy_sid,function() end,'master','master','')
+local busy_calls=0
+provider.complete_with=function()
+  busy_calls=busy_calls+1
+  if busy_calls<=12 then error('provider_http_503: {"error":"busy"}') end
+  return {content='answered after the busy spell',tool_calls={},finish_reason='stop',usage=usage}
+end
+check(busy_bot:run('survive an identical 503')=='answered after the busy spell',
+  'twelve IDENTICAL 503s do not end the run, got '..busy_calls..' calls')
+overrides.WASM_AGENT_PROVIDER_IDENTICAL_REPEATS=nil
+
 print('provider rate-limit recovery ok ('..checks..' checks)')

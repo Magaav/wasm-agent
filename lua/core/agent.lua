@@ -2504,8 +2504,13 @@ function M:run_body(text, images)
       or provider.transient_retries()
     -- A transient class that waits without a total cap (brief item 1) still must not spin on a wall: a
     -- failure whose TEXT repeats unchanged is bounded by its own ceiling and then named. Only the
-    -- unbounded classes carry this, because a bounded bucket already stops itself.
-    local identical_limit = (transient_limit == math.huge) and provider.identical_repeat_ceiling() or nil
+    -- unbounded classes carry this, because a bounded bucket already stops itself - and only when
+    -- repeating THIS failure really is a wall (a 500, or no class at all). A lost link or a busy
+    -- status repeats identically for as long as the outage lasts, and bounding those would kill the
+    -- very run this change exists to save (review MUST 1).
+    local repeats_are_a_wall = (not ok) and provider.repeats_are_a_wall(tostring(result)) or false
+    local identical_limit = (transient_limit == math.huge and repeats_are_a_wall)
+      and provider.identical_repeat_ceiling() or nil
     local identical_text, identical_count = nil, 0
     local transient_attempt, waited_ms = 0, 0
     local wait_budget_ms = (connection_lost and not link_unbounded)
@@ -2528,6 +2533,11 @@ function M:run_body(text, images)
       -- a new body, a link that came back and failed differently - resets the count, because that is
       -- a different situation and the class is still transient.
       local failure_text = (not ok) and redact.text(tostring(result)) or nil
+      -- A later attempt that turns into a wall acquires the ceiling it did not start with.
+      if not identical_limit and transient_limit == math.huge and (not ok)
+          and provider.repeats_are_a_wall(tostring(result)) then
+        identical_limit = provider.identical_repeat_ceiling()
+      end
       if identical_limit then
         if failure_text and failure_text == identical_text then
           identical_count = identical_count + 1
