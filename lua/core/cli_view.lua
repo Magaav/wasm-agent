@@ -414,15 +414,18 @@ function M.compaction_threshold(budget, model)
   return ok and tonumber(threshold) or nil
 end
 
--- The footer's session numbers: `󰑐runs Σ↑in ↓out 󰪟ctx%/window 󰆼cache-hit%`. `Σ↑` is every
+-- The footer's session numbers: `󰑐runs Σ↑in Σ↓out 󰪟ctx%/window 󰆼cache-hit%`. `Σ↑` is every
 -- request's input summed (each step resends the context), so it is marked apart from the run line's
 -- `Δ` - what one run ADDED to the context (operator 17/11: "why do these differ?"). No tool count:
 -- with code mode one script makes many calls, so the number said nothing (operator 17/11). The ball is
 -- the one `M.context_ball` chose, so the band and the percentage beside it cannot disagree.
 function M.session_summary(t)
   t = t or {}
+  -- BOTH totals wear the SIGMA (Victor, 19/11 ~10:50: the row reads
+  -- `1 Σ↑9.5k Σ↓851`): they are the session's two SUMS, and the arrow alone read as the last
+  -- call's input and output. The arrow says the direction, the sigma says it is a total.
   local parts = { GLYPH.turns .. GAP .. (t.runs or 0),
-    "\206\163\226\134\145" .. M.tokens(t.prompt) .. " \226\134\147" .. M.tokens(t.completion) }
+    "\206\163\226\134\145" .. M.tokens(t.prompt) .. " \206\163\226\134\147" .. M.tokens(t.completion) }
   -- The percentage this row was built from, returned beside the text: it chose the glyph, and the
   -- colour must come from the SAME number rather than one measured again at draw time.
   local used

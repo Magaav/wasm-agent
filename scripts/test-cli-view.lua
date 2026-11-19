@@ -1881,9 +1881,26 @@ do
   -- ONE space between every icon and its value (Victor, 19/11): turns, the context ball and the
   -- cache icon. The DELTA/UP/DOWN/SIGMA marks are TEXT and stay glued to their number.
   eq(rendered_view.last_summary,
-    "\243\176\145\144 3 \206\163\226\134\145120.4k \226\134\1471.0k "
+    "\243\176\145\144 3 \206\163\226\134\145120.4k \206\163\226\134\1471.0k "
       .. "\243\176\170\158 12.2%/200.0k \243\176\134\188 75.20%",
     "the session bar: turns, tokens, the context ball for 12.2%, and the cache-hit rate, each icon one space from its value")
+
+  -- A2 (Victor, 19/11 ~10:50): BOTH totals wear the SIGMA. The arrow alone read as the last call's
+  -- input and output; the pair the reader sees is the session's two SUMS. Asserted on the composed row
+  -- and counted, so a row that grew a sigma and kept the bare arrow fails.
+  do
+    local row = rendered_view.last_summary
+    local _, sigmas = row:gsub("\206\163", "")
+    eq(sigmas, 2, "one SIGMA on the input total and one on the output total: " .. row)
+    ok(row:find("\206\163\226\134\145", 1, true) and row:find("\206\163\226\134\147", 1, true),
+      "the SIGMA sits directly before each arrow, glued to it like every other mark: " .. row)
+    -- Every arrow on the row is preceded by its SIGMA: the count of "SIGMA+arrow" equals the count of
+    -- arrows, so a bare arrow anywhere fails - and it is counted on the composed row, not on a piece.
+    local _, arrows = row:gsub("\226\134", "")
+    local _, paired = row:gsub("\206\163\226\134", "")
+    ok(arrows > 0 and paired == arrows,
+      "every arrow on the row carries its SIGMA (" .. paired .. " of " .. arrows .. "): " .. row)
+  end
 
   -- Every icon this CLI draws on a status row, followed by exactly one space - measured on the two
   -- rendered strings rather than on the pieces, so a caller that concatenates without the separator fails.
