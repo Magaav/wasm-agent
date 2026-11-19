@@ -31,6 +31,10 @@ loader, no second prompt section. `AGENTS.windows.md` remains unimplemented and 
 | `864810f3` | r2 item 2 (cont.): the report's commit table names `a439eff9` and `393b5108` |
 | `c7a8d5a9` | r2 item 2 fix: the table had carried a hash an amend invalidated |
 | `a16249af` | r2: the fast-path run and the two rows it caught are recorded |
+| `adbd463b` | r2: the table also carries `c7a8d5a9` and `a16249af` |
+| `79fbc2a2` | r2: the verification table names the commit the `build-info` binary was built at |
+| `0d1c51fc` | r2: the report records the worktree git-dir bug and the disk-pressure run |
+| `0115b04c` | r2: `build-info` is claimed at the commit the binary was re-stamped at |
 | the commit that last edits this table | a commit cannot contain its own hash; `git log --oneline` names it, and every earlier commit on the branch is listed above |
 
 ## Review r1 items, and what each fix does
