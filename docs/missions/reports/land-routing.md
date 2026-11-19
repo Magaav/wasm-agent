@@ -53,17 +53,18 @@ reach the `--from` rows, the `--latest=false` witness lives in `scripts/test-pub
 path, line 757 of fast.sh), which asserts the command that **runs** on the account node; it is red on the
 base (the flag is absent) and green here.
 
-Full fast path result (`HOME=<scratch> CARGO_TARGET_DIR=/home/victor/wasm-agent/target/m-land-routing bash scripts/fast.sh`,log `fast-full.log`): **FAILED (295 checks, 2 failed, 0 skipped, 230s)**, Lua rows 247/249. The two
-failures are load-sensitive rows this branch does not touch:
+Full fast path on this branch: **ok (295 checks, 0 failed, 0 skipped, 208s)** - `fast-head2.log`, exit 0.
+Full fast path on a base worktree (`git worktree add ../basenb origin/main`): **ok (295 checks, 0 failed,
+0 skipped, 246s)** - `fast-base.log`, exit 0. Both with a scratch HOME.
 
-- `scripts/test-release-sign.lua` - `2 of 5 checks failed` under the parallel run; **passes standalone on
-  this head AND on the base worktree** (`release signing ok (4 checks)` on both).
-- `scripts/test-codemode-queue-timeout.lua` - the queued-vs-running timing assertion; a slot-timing row
-  (commit 46078941, on the base) that also passes standalone.
+A first head run reported 2 failures (`test-release-sign.lua`, `test-codemode-queue-timeout.lua`). Both are
+timing-sensitive rows, both **passed standalone on head and on the base**, and neither is a file this
+branch changed (`git diff --name-only origin/main..HEAD`). That run overlapped another mission running its
+own `scripts/fast.sh` on this machine; the clean re-run above is 295/295. The failures are recorded rather
+than hidden, and they did not reproduce.
 
-Neither file appears in `git diff --name-only origin/main..HEAD`. The full fast path is therefore green
-except for two timing rows that fail under load and pass alone, in files this branch never changed. A red
-fast path is reported as red, not as a pass.
+`scripts/test-node-binaries.sh` is a separate, pre-existing red - proven on a base worktree - and it is not
+a fast-path row (it is a `test.sh` gate row).
 
 ## SHOULD items — not done, with the reason
 
