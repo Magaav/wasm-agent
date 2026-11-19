@@ -546,6 +546,15 @@ enter() { # source_env + export + cd, in this shell
     export RUSTUP_HOME="$TOOLCHAIN/rustup" CARGO_HOME="$TOOLCHAIN/cargo"
     export PATH="$TOOLCHAIN/cargo/bin:$PATH"
   fi
+  # THE SAME BUILD RECORD EVERY OTHER ENTRY POINT READS (item 6 of the node-ops round). A mission that
+  # ignored <home>/.wasm-agent/build.env built with a different zig, wasi-sdk or target policy than
+  # deploy.sh and fast.sh on the same node - two answers to one question. An entry that names a directory
+  # that is not there is refused by name here, with the one line that fixes it.
+  local record_lib="$WT/scripts/lib/build-requirements.sh"
+  if [ -f "$record_lib" ]; then
+    . "$record_lib"
+    wa_build_env || die "the build record names a directory that is not there; the refusal above names it and the one line that fixes it"
+  fi
   export CARGO_TARGET_DIR="$TARGET"
   [ -d "$WT" ] || die "no worktree at $WT (cleaned? not staged?)"
   cd "$WT" || die "cannot cd $WT"

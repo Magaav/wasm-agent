@@ -1643,10 +1643,31 @@ impl.gate = function(run, options)
   local decorator = M.weight()
   run.journal.gate_weight = decorator ~= "" and decorator or "none (no weight could be applied)"
   local rows = {}
+  -- THE NODE BUILD RECORD, READ BY THIS GATE THE WAY EVERY OTHER ENTRY POINT READS IT (item 6 of the
+  -- node-ops round). `wa land` runs `cargo test` and `bash scripts/fast.sh` here, so it has the same
+  -- question about zig, the wasi-sdk and the target policy that deploy.sh and fast.sh ask - and before
+  -- this it answered it from its own ambient environment, which is two answers to one question. One
+  -- reader (scripts/lib/build-requirements.sh) is applied to every gate command in the same shell, and a
+  -- record naming a directory that is not there refuses the GATE by name instead of failing a check.
+  local record_prefix = ""
+  do
+    local reader = slashes(tree) .. "/scripts/lib/build-requirements.sh"
+    local probe = M.exec("test -f " .. quote(reader) .. " && echo present || echo absent", "", 30)
+    if tostring(probe.stdout or ""):find("present", 1, true) then
+      local applied = M.exec("bash -c " .. quote(". " .. quote(reader) .. " || exit 3; wa_build_env"), slashes(tree), 120)
+      if (applied.code or 1) ~= 0 then
+        return false, { error = "build_env_incomplete", detail = "the build record names a directory that is not there: "
+          .. tostring(applied.stderr or applied.stdout or ""):gsub("%s+$", "") .. " (refused before a gate ran)" }
+      end
+      -- The prefix is applied INSIDE the shell that runs each check: the exported names and the appended
+      -- PATH of the record, so a cargo or bash check sees exactly what deploy.sh/fast.sh see.
+      record_prefix = ". " .. quote(reader) .. " >/dev/null 2>&1; wa_build_env >/dev/null 2>&1 || { echo refused(build_env_incomplete): the build record names a directory that is not there >&2; exit 2; }; "
+    end
+  end
   for _, check in ipairs(checks) do
     -- The fast check ALWAYS gets the assignment (M.gate_command): the round's file, or an empty value so a
     -- WA_FAST_ROWS inherited from the environment cannot narrow a run that wrote none.
-    local command = M.gate_command(check, rows_file)
+    local command = record_prefix .. M.gate_command(check, rows_file)
     command = (decorator ~= "" and (decorator .. " " .. quote(command))) or command
     local cwd = check.cwd and (slashes(tree) .. "/" .. check.cwd) or slashes(tree)
     evidence(command_line(check.name, command))

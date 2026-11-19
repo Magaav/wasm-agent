@@ -360,7 +360,9 @@ SOURCE_ROOT="$ROOT"
 [ -f "$ROOT/scripts/setup-hooks.sh" ] && bash "$ROOT/scripts/setup-hooks.sh" "$ROOT" || true
 # From here a failure is drawn as a failed build: the rules below (clean, current, not a downgrade, the
 # port, the toolchain) are the build's preflight, and each phase after it says how long it took.
-command -v wa_build_env >/dev/null 2>&1 && wa_build_env
+if command -v wa_build_env >/dev/null 2>&1 && ! wa_build_env; then
+  fail "refused(build_env_incomplete): the build record names a directory that is not there (the refusal above names it and the one line that fixes it)"
+fi
 if command -v wa_status_begin >/dev/null 2>&1; then
   wa_status_begin "$ROOT" "$(git rev-parse HEAD 2>/dev/null)"
   wa_phase preflight
