@@ -1696,6 +1696,20 @@ WA_SCRIPT=scripts/test-markdown.lua "$BIN" --db "$DB.markdown" | grep "markdown 
 # captured transcript is free of escape sequences - so it is asserted without a model:
 # the view is handed the events agent.lua emits, with a clock the test controls.
 WA_SCRIPT=scripts/test-cli-view.lua "$BIN" --db "$DB.view" | grep "cli view ok"
+
+# The build OWN identity (item 4 of the TUI polish): a release install, a dev build, a dirty build and
+# a pinned node each get their own name, and no binary that cannot name its commit invents a version -
+# the welcome box printed the literal 0.1.0 on every node until this. The one function supplies the
+# banner, wa --version, /health and the update banner, so a divergence is this test.
+WA_SCRIPT=scripts/test-build-identity.lua "$BIN" --db "$DB.identity" | grep "build identity ok"
+# A terminal resize, in every component that draws a rule, a box or a right-aligned part: each is
+# rendered at 80, 200 and back at 60 and must fit the terminal it is drawn in - a width measured once
+# left the welcome rule and the code-mode box at the old size, and wider than a shrunk window (Victor,
+# 18/11, "the components do not follow a terminal resize").
+WA_SCRIPT=scripts/test-cli-resize.lua "$BIN" --db "$DB.resize" | grep "resize ok"
+# The node-wide aggregate (a count and never a named row) and the welcome line reason when there is
+# no model - the sentence that replaced "local mode (no model configured)".
+WA_SCRIPT=scripts/test-cli-welcome.lua "$BIN" --db "$DB.welcome" | grep "welcome and elsewhere ok"
 # /keybindings prints the table the console dispatches on (rust/wa-term/src/keymap.rs): the rows come
 # from host.keybindings, the module names no key itself, /help points at it, and the REPL, the mid-run
 # view and the node's route exist. The other direction - that every row is dispatched and nothing else

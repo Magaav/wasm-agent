@@ -822,6 +822,7 @@ read_image_base64    read-only
 relay                network
 resource             writes files
 run_cancelled        read-only
+build_identity       read-only
 runtime_info         read-only
 service              runs a process
 selfloop             writes files

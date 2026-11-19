@@ -362,8 +362,18 @@ fn main() {
         }
         return;
     }
+    // One name for these bytes, stated once, before any surface can ask for it: the welcome box, the
+    // update banner and /health read it back through host.build_identity(), and --version prints the
+    // same string here. It is the commit (with +dirty), or the release the node was installed from, or
+    // the pin it is held at - never the crate's version number, which was the same 0.1.0 on every node
+    // whatever it had been built from (Victor, 18/11).
+    let install_dir = std::env::var("WA_INSTALL_DIR").ok().filter(|dir| !dir.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::Path::new(&home).join(".local/bin"));
+    let identity = build_info::install_label(&std::path::Path::new(&home).join(".wasm-agent"), &install_dir);
+    wa_capabilities::host::set_build_identity(&identity, build_info::COMMIT, build_info::DIRTY);
     if args.iter().any(|arg| arg == "--version" || arg == "-v") {
-        println!("wasm-agent {}", env!("CARGO_PKG_VERSION"));
+        println!("wasm-agent {identity}");
         return;
     }
     // Every node and node-thread gets rg, including service launches with a sparse PATH. Installation

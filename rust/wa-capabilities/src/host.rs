@@ -3119,6 +3119,58 @@ pub extern "C-unwind" fn monotonic_ms(l: *mut LuaState) -> c_int {
 /// **One string, not a table.** Read-only facts about the running binary; it changes nothing.
 ///
 /// build_wave_generation, process_id, boot_id, os, arch, binary_path}`.
+/// The build's own name for these bytes, set once at boot by the binary that compiles it in
+/// (`wa-host`'s `build_info::label`) and read from here by the interpreter and by `/health`.
+///
+/// WHY A COPY RATHER THAN A DEPENDENCY: only the binary has the compiled-in identity, and this crate
+/// cannot see `wa-host` (it depends on `wa-capabilities`, not the other way round). Making it a
+/// dependency to read one string would invert the layering for a fact that is known before the
+/// interpreter starts. So the binary states it once, at the top of `main` - before any path, event
+/// or `--version` can be asked - and every reader in this process reads this copy. An empty slot
+/// means nobody set it (a library test binary, a component host): the reader then says
+/// `unknown build` rather than inventing a version, which is the rule the whole identity follows.
+static BUILD_LABEL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+/// The full commit and the tree's dirtiness, beside the label: a pin is recorded against a full id, and
+/// the label is deliberately short. Same first-writer-wins rule.
+static BUILD_COMMIT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+static BUILD_DIRTY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// State the whole identity once (see `set_build_label`): the label the box and `--version` print,
+/// the full commit a pin is compared against, and whether the tree was dirty when it was built.
+pub fn set_build_identity(label: &str, commit: &str, dirty: &str) {
+    let _ = BUILD_LABEL.set(label.to_string());
+    let _ = BUILD_COMMIT.set(commit.to_string());
+    let _ = BUILD_DIRTY.set(dirty.to_string());
+}
+
+/// State this process's build identity. First writer wins: two binaries cannot share a process, and a
+/// second call would be a caller trying to rename bytes it did not build.
+pub fn set_build_label(label: &str) {
+    let _ = BUILD_LABEL.set(label.to_string());
+}
+
+/// The name for these bytes: what `set_build_label` recorded, or `unknown build` when nothing did.
+pub fn build_label() -> &'static str {
+    BUILD_LABEL.get().map(String::as_str).filter(|label| !label.is_empty()).unwrap_or("unknown build")
+}
+
+/// host.build_identity() -> JSON text of `{label, commit, dirty, known}` for the running binary.
+///
+/// One reader for every surface that names the build: the welcome box, `wa --version` and the update
+/// banner's installed side all go through `lua/core/build_identity.lua`, which reads this. The commit
+/// is the full id (the short form is the label's job) so a pin can be compared against it.
+pub extern "C-unwind" fn build_identity(l: *mut LuaState) -> c_int {
+    let commit = BUILD_COMMIT.get().map(String::as_str).unwrap_or("");
+    let dirty = BUILD_DIRTY.get().map(String::as_str).unwrap_or("unknown");
+    push_json(l, &json!({
+        "label": build_label(),
+        "known": build_label() != "unknown build",
+        "commit": if commit.is_empty() { "unknown" } else { commit },
+        "dirty": dirty,
+    }));
+    1
+}
+
 /// host.runtime_info() -> JSON text of `{version, binary_sha256, build_source_commit, build_source_tree,
 pub extern "C-unwind" fn runtime_info(l: *mut LuaState) -> c_int {
     static IDENTITY: OnceLock<Value> = OnceLock::new();

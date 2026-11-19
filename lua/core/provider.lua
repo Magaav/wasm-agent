@@ -128,6 +128,50 @@ function M.configured()
   return settings.base_url ~= "" and settings.api_key ~= "" and settings.model ~= ""
 end
 
+-- **WHY there is no model**, in the one line the welcome box has room for (Victor, 18/11).
+--
+-- The box said "local mode (no model configured)", which is true and useless: it names no cause, so a
+-- reader cannot tell a node that has no provider at all from a shell that simply does not carry the one
+-- the node is running. The second is the ordinary case, and which one it is, is measured rather than
+-- guessed.
+--
+-- Three causes, most specific first, each naming what was actually observed:
+--
+--   model-less  the operator declared this node has no model at all (docs/MODEL-LESS.md). That is not a
+--               missing key, and saying it were would send the reader looking for one.
+--   vault       `WASM_AGENT_VAULT_URL` is set but the vault answered nothing: the provider is reached
+--               through it, so its silence IS the cause, named with its address.
+--   shell       no key and no vault here, while the node itself runs a provider. The default sentence,
+--               which names the mechanism and the one command that fixes it.
+--
+-- A case this function cannot establish falls through to shell, whose sentence is true of every
+-- unconfigured process: it has no provider of its own. No cause is ever invented.
+function M.why_unconfigured(options)
+  local less, source = M.model_less()
+  if less then
+    return "this node is declared model-less (" .. tostring(source) .. ", docs/MODEL-LESS.md), so no turn can run here"
+  end
+  local settings = M.settings()
+  if settings.model_error then
+    return "the model " .. tostring(settings.model_error) .. " is not served by this route; pick one with /model"
+  end
+  -- The vault, ASKED rather than assumed. A vault URL in the environment is a route to a service that may
+  -- not be up, and "the vault did not answer" is a claim about the world: measured on this machine (18/11)
+  -- the URL was set AND the vault was listening, so a branch that fired on the variable alone would have
+  -- named a cause that was not true. So the vault is asked its own status, and only a vault that really
+  -- does not answer is named.
+  local vault_url = (options or {}).vault_url or env("WASM_AGENT_VAULT_URL")
+  if vault_url and vault_url ~= "" then
+    local state, problem = vault.status("opencode-go")
+    if not state then
+      return "the vault at " .. tostring(vault_url) .. " did not answer ("
+        .. tostring(type(problem) == "table" and problem.code or "unreachable")
+        .. "), and the provider is reached through it; check wa-vault, or /login"
+    end
+  end
+  return "this shell has no provider env; the node's wa-serve has one: run inside it with `wa chat` via the node, or /login"
+end
+
 -- A **model-less node** (docs/MODEL-LESS.md): the operator has declared that this node has no model
 -- at all. It still hosts the fabric, the services, the connectors and the work other nodes hand it;
 -- what it must never do is start an agent turn it cannot serve.

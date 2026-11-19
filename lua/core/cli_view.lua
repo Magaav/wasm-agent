@@ -212,6 +212,29 @@ local function clip(text, limit)
 end
 M.clip = clip
 
+-- A horizontal rule that is as wide as the terminal WHEN IT IS DRAWN, not when it was composed.
+--
+-- A rule is the one component that is nothing but its width, so a measured-once width leaves it wrong
+-- for the rest of the session: the welcome box's top line sat at the old width after a maximise, and
+-- wider than the window after a shrink, which wraps it into a second row and moves everything below it
+-- (Victor, 18/11). So the view writes a MARKER and the renderer that knows the current width expands
+-- it: `rust/wa-term/src/transcript.rs` at draw time for the native editor, and `M.expand_rules` here
+-- for the plain layout, where the write itself is the only moment there is.
+--
+-- `r` is one marker. Nothing else in this module emits a bare , so the expansion cannot touch
+-- text a tool printed.
+local RULE_MARK = "r"
+M.RULE = RULE_MARK
+
+-- `text` with every rule marker drawn as `n` rule characters - the plain layout's expansion, where a
+-- line is written once and a rule is therefore fixed at the width of that write.
+function M.expand_rules(text, limit)
+  text = tostring(text or "")
+  if not text:find(RULE_MARK, 1, true) then return text end
+  local width = math.max(1, tonumber(limit) or 80)
+  return (text:gsub("\1r\1", function() return string.rep("\226\148\128", width) end))
+end
+
 -- The same fit without collapsing runs of whitespace: a code row's indentation is part of what it
 -- says, and `clip` is a prose rule (`a  b` -> `a b`). Everything else about it is the same count.
 local function fit(text, limit)
@@ -744,6 +767,12 @@ end
 -- The console's width, asked the same way; nil when there is no console or it will not answer. The
 -- welcome box is drawn before the screen exists, and a box laid out for a guessed width wraps on
 -- every row of a narrower terminal.
+--
+-- ASKED AGAIN, PER FRAME. This used to be read exactly once - in `chat.lua`, before the banner - and
+-- every component then drew at that width for the life of the process: maximising the terminal left
+-- the welcome rule, the code-mode box and the footer at the old width, hugging the left of a window
+-- twice their size, and shrinking it left them wider than the window, which wraps (Victor, 18/11).
+-- `METHODS:refresh_limit` is the per-frame read; this stays the one place that asks the console.
 function M.terminal_columns()
   if not (host and host.terminal_size) then return nil end
   local ok, raw = pcall(host.terminal_size)
@@ -775,6 +804,10 @@ end
 -- it shows, `bottom` is that row when it does not (nothing is reserved that is not drawn), and
 -- `content` is kept for the fallback, where the line sits on the region's own last row.
 M.EDITOR_ROWS = 3
+-- The narrowest layout this view will draw: below it a framed component is all border and no text, so
+-- a terminal that reports 12 columns is drawn as if it had 24 and the terminal wraps it. The floor is
+-- named once because every component clips to it (METHODS:refresh_limit).
+M.MIN_COLUMNS = 24
 local function screen_rows(rows, editor)
   rows = tonumber(rows)
   if not rows or rows < (editor and 10 or 4) then return nil end
@@ -845,6 +878,33 @@ M.__methods = METHODS
 
 -- `opts`: out (write text), live (nil = decide), now (clock), limit (columns),
 -- title (terminal title), workspace/branch/budget (the banner and the footer).
+-- **The terminal's width, read again.** Every framed component lays itself out from `self.limit`,
+-- and that value used to be measured once - before the banner, in `chat.lua` - and never looked at
+-- again. So maximising the terminal stretched the input rule and the footer (the host redraws those
+-- from its own size) while the welcome rule, the welcome box, the code-mode box and the status bar's
+-- right-hand parts stayed at the old width; shrinking it left them wider than the window, where they
+-- wrap and bounce (Victor, 18/11). This is the read that makes every one of them follow.
+--
+-- `opts.columns` is the probe (a test has no console); absent, it is M.terminal_columns. The value is
+-- clamped the way every other width in this module is, and a console that will not answer keeps the
+-- width the view already had - an unanswerable console is not a narrow one.
+function METHODS:refresh_limit()
+  local probe = self.columns_probe or M.terminal_columns
+  local ok, columns = pcall(probe)
+  if not ok then return self.limit end
+  columns = tonumber(columns)
+  if not columns or columns <= 0 then return self.limit end
+  self.limit = math.max(M.MIN_COLUMNS, math.floor(columns))
+  return self.limit
+end
+
+-- A rule as wide as the terminal is NOW: the marker a component writes, expanded for the plain
+-- layout. One function, so the welcome box and anything else that draws a rule cannot disagree
+-- about what "the width" is.
+function METHODS:rule()
+  return M.expand_rules(M.RULE, self.limit)
+end
+
 function M.new(opts)
   opts = opts or {}
   -- `opts.live == false` must mean plain: `x = opts.live or default` would silently
@@ -865,6 +925,8 @@ function M.new(opts)
   local sync = opts.sync
   if sync == nil then sync = (getenv("WASM_AGENT_CLI_SYNC") or "") ~= "off" end
   local view = {
+    -- The width probe: a test passes its own, a live view asks the console (METHODS:refresh_limit).
+    columns_probe = opts.columns,
     out = opts.out or function(text)
       if host and host.terminal_write then
         assert(host.terminal_write(text), "terminal write failed")
@@ -1063,9 +1125,17 @@ end
 function METHODS:status_template()
   local boxed = self.screen and self.screen.footer
   if self.screen and not self.turn and self.last_summary then
-    -- Boxed, the numbers live in the footer under the box and the status row is empty between runs.
-    if boxed then return "", nil end
+    -- Boxed, the numbers live in the footer under the box and the status row is empty between runs -
+    -- unless the NODE is busy with somebody else's call, and then this row says so (and only that).
+    if boxed then return self:elsewhere_text() or "", nil end
     return paint(clip(self.last_summary, self.limit), "dim", self.live), nil
+  end
+  -- Nothing of this session's is running and there is no run to describe: the row is the aggregate, or
+  -- empty. Never a named row - another session's tool, its clock and its output are not ours to draw
+  -- (session isolation, finding 1; METHODS:elsewhere_text).
+  if not self.turn and not self.pending then
+    local elsewhere = self:elsewhere_text()
+    if elsewhere then return elsewhere, nil end
   end
   local phase = self.pending and (self.pending.raw and "Running your script"
     or M.phase((M.target(self.pending.name, self.pending.arguments)))) or self.phase
@@ -2116,6 +2186,58 @@ function METHODS:tool_line()
   local ok, value = pcall(module.status, { now = self.now(), limit = self.limit })
   if not ok or type(value) ~= 'table' or type(value.text) ~= 'string' or value.text == "" then return nil end
   return value
+end
+
+-- The progress module, loaded once per view: both readers below need it (`tool_line`,
+-- `elsewhere_text`), and `dofile` on every frame is a disk read on the status row's path.
+function METHODS:progress_module()
+  local module = self.tool_progress
+  if module then return module end
+  local ok, loaded = pcall(dofile, 'lua/core/tool_progress.lua')
+  if not ok or type(loaded) ~= 'table' then return nil end
+  self.tool_progress = loaded
+  return loaded
+end
+
+-- How long the aggregate is believed. The row is redrawn on every event and on every spinner frame,
+-- and reading it is a directory listing; a second is far finer than a count of other sessions' calls
+-- can move, and it keeps the status row off the disk (the reason RESTART_NOTICE_TTL exists below).
+local ELSEWHERE_TTL = 1
+
+-- **Other sessions' work on this node, as a count and nothing else**: `node: 2 ops elsewhere`.
+--
+-- The long-call row used to be node-wide: every session drew whichever call had written the one file
+-- last, with that caller's own last line of output in it - a content leak, not only a wrong label
+-- (session isolation, finding 1). The fix has two halves. The backend keys the file by the session
+-- that owns the call, so a reader opens only its own (`lua/core/tool_progress.lua`'s `M.path`); this
+-- is the other half, the only thing a reader may still say about the rest of the node. A COUNT, drawn
+-- dim, never a tool name, never a session id and never a line of anybody's output.
+--
+-- The wording and the arithmetic are `lua/core/tool_progress.lua`'s (`elsewhere_text`, `elsewhere`),
+-- the twin of `wa_tool_progress::elsewhere`; this function only decides *when* to ask. A module older
+-- than that branch has no `elsewhere`, and the answer is then silence - this view never invents a
+-- count it cannot read, so the capability is checked rather than assumed. `nil` means "nothing to
+-- say", which is not the same answer as the empty string.
+function METHODS:elsewhere_text()
+  if not self.live then return nil end
+  local now = self.now()
+  if self.elsewhere_at and (now - self.elsewhere_at) < ELSEWHERE_TTL then return self.elsewhere_shown end
+  local module = self:progress_module()
+  local shown = nil
+  if module and type(module.elsewhere) == "function" then
+    local ok, count = pcall(module.elsewhere, { now = now, session = self.session_id })
+    count = ok and tonumber(count) or 0
+    if count > 0 then
+      local text = (type(module.elsewhere_text) == "function" and module.elsewhere_text(count))
+        or ("node: " .. count .. (count == 1 and " op elsewhere" or " ops elsewhere"))
+      -- Painted only when the line it joins has room for it: a coloured line clipped by width loses
+      -- its reset and bleeds into the row beside it (`status_template`'s rule, same reason).
+      local plain = tostring(text)
+      shown = paint(plain, "dim", self.live and (visible_columns(plain) + 10 <= self.limit) or false)
+    end
+  end
+  self.elsewhere_at, self.elsewhere_shown = now, shown
+  return shown
 end
 
 -- The live line of the call in flight, written inside its own transcript block: `""` takes it away.

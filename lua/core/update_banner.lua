@@ -695,6 +695,29 @@ function M.check(options)
   local tree = o.tree
   if tree == nil then tree = update.runtime_tree(install) end
   local record = o.record or update.installed_record(install)
+  -- THE RUNNING BUILD FILLS WHAT THE RECORD CANNOT SAY, so "Update available (<sha>)" compares the same
+  -- identity the welcome box and `wa --version` print (Victor, 18/11). Two records are incomplete in
+  -- practice: one written before scripts/lib/install-record.sh took `commit=` from the binary (a
+  -- rollback restores exactly such a binary), and one whose `binary_release=` was never written on a
+  -- tree install. The banner then used to answer `unknown_installed_commit` - "cannot tell" - while the
+  -- running process could name its own commit all along. It still never guesses: an identity the binary
+  -- cannot establish leaves the record exactly as it was, and the answer stays `unknown`.
+  local build = o.build
+  if build == nil then
+    local ok, module = pcall(dofile, "lua/core/build_identity.lua")
+    build = (ok and type(module) == "table") and module.identity() or nil
+  end
+  if type(build) == "table" and build.known then
+    local named = trim(record.commit or "")
+    local full = trim(build.commit or "")
+    if (named == "" or named == "unknown") and #full >= 7 and not full:find("[^0-9a-f]") then
+      -- A copy: the record belongs to the caller (a test fixture, the reader table).
+      local filled = {}
+      for key, value in pairs(record) do filled[key] = value end
+      filled.commit = full
+      record = filled
+    end
+  end
   local identity = M.identity(record)
   local repo = o.repo or M.repo(tree)
   local target = M.target(o)

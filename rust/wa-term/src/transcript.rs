@@ -441,7 +441,10 @@ impl Transcript {
         let inner = if focused { width.saturating_sub(2).max(1) } else { width.max(1) };
         let mut rows: Vec<String> = Vec::new();
         let mut copies: Vec<(usize, String)> = Vec::new();
-        for (line_index, line) in block.lines.iter().enumerate() {
+        for (line_index, raw) in block.lines.iter().enumerate() {
+            // A rule is drawn at THIS frame's width, never at the width it was written at
+            // (expand_rule): a transcript outlives a resize, and what is drawn inside it does not.
+            let line = &expand_rule(raw, inner);
             let content = block.copies.get(&line_index);
             let start = rows.len();
             if let Some(full) = block.expands.get(&line_index) {
@@ -487,7 +490,7 @@ impl Transcript {
             // No summary was ever handed to this block (it was pinned when its successor started): its
             // own heading is the row it keeps - `⏺ Code · bash … 1.2s` says what it was and how it
             // went, which is what the collapsed state is for.
-            if let Some(head) = block.lines.first() { return (vec![head.clone()], Vec::new()) }
+            if let Some(head) = block.lines.first() { return (vec![expand_rule(head, inner)], Vec::new()) }
         }
         // Folded: the topic's title row, then its first FOLDED_ROWS rows of content - blank rows
         // skipped, so three rows are three lines of text - then how much is hidden.
@@ -772,6 +775,22 @@ pub fn visible(text: &str) -> usize {
 /// Prose arrives unwrapped (markdown.lua `reflow`) and is wrapped here at draw time, so a resize
 /// reflows it (29/10): rows break at a space when there is one, and continuation rows hang under
 /// the text after the line's indent and marker (`  • `, `1. `, `│ `, `⏺ `), as Lua's layout did.
+/// The rule marker the Lua view writes instead of a measured rule: `\1r\1` (lua/core/cli_view.lua
+/// `M.RULE`). A rule is nothing but its width, so a width measured where the text was composed is a
+/// rule of the size the chat had when it was written - the welcome box's top line stayed at the old
+/// width after a maximise and was wider than the window after a shrink, where it wraps and moves
+/// everything under it (Victor, 18/11). Expanding it here, at the width the frame is drawn at, is what
+/// makes it follow the terminal.
+///
+/// One marker is one whole row of `width` rule characters. Nothing else in the protocol emits a bare
+/// \1, so this cannot touch text a tool printed.
+pub fn expand_rule(line: &str, width: usize) -> String {
+    const MARK: &str = "\u{1}r\u{1}";
+    if !line.contains(MARK) { return line.to_string(); }
+    let rule: String = std::iter::repeat('\u{2500}').take(width.max(1)).collect();
+    line.replace(MARK, &rule)
+}
+
 pub fn wrap_rows(line: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
     // The printable characters, each with the escape sequences just before it; `esc` = after the last.
@@ -1483,6 +1502,23 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert!(rows[1].starts_with("\x1b[31m"), "{rows:?}");
     }
+    /// The welcome rule follows the window (Victor, 18/11: maximising left it at the old width, and
+    /// shrinking left it wider than the window, where it wraps). The marker is drawn at the width of
+    /// the frame, so one transcript viewed at three widths has three rules - never a stored one.
+    #[test]
+    fn a_rule_is_drawn_at_the_width_of_the_frame_and_never_at_the_width_it_was_written() {
+        let mut chat = Transcript::default();
+        chat.write("\u{1}r\u{1}\n");
+        for width in [80usize, 200, 60] {
+            let rows = chat.view(width, 10);
+            let rule = rows.iter().find(|row| visible(row) > 0).expect("the rule is a row");
+            assert_eq!(visible(rule), width, "the rule is exactly {width} columns");
+            assert!(visible(rule) <= width, "and never wider than the terminal, which would wrap it");
+        }
+        // No marker ever reaches the screen, whatever the width.
+        for row in chat.view(120, 10) { assert!(!row.contains('\u{1}'), "no marker is drawn: {row:?}"); }
+    }
+
     #[test]
     fn widening_reflows_a_wrapped_paragraph_to_fewer_rows() {
         // One logical line (markdown.lua `reflow`), drawn at 30 then at 80 columns (29/10).
