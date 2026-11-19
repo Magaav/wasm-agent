@@ -3,10 +3,15 @@
 --
 -- What a golden pins: the FULL system prompt build_context builds (not a block rebuilt from its parts)
 -- and the declared tool list, for one node shape. Two kinds of host data are normalised, because they
--- describe the machine and not the prompt: this run's scratch home and the node's working directory.
--- One line is normalised away and named: the "conform: no profile for ..." notice, which a27490af put
--- INSIDE the prompt and this branch moved to the operator log (commit 568ed30c, review MUST 4). The
--- test asserts that line is absent from the built prompt, so the removal cannot hide its return.
+-- describe the machine and not the prompt: this run scratch home and the node working directory.
+--
+-- NOTHING ELSE is normalised away (rel review r3, item 2). The "conform: no profile for ..." notice is
+-- KEPT where a27490af put it: inside the prompt. Measured, not assumed - a27490af appends it to the
+-- prompt block (a27490af:lua/core/agent.lua:1190) and shows it ONCE per process
+-- (raw_code.TRANSPORT_NOTICE_SHOWN), so in a recording run it lands in the FIRST case built and in no
+-- other. The goldens therefore carry that one line in `progressive-only`, and the test compares the
+-- bytes EXACTLY, naming that case. This branch moved the line to the operator log (commit 568ed30c), so
+-- its built prompt has none; the test asserts that difference by name and by count instead of hiding it.
 local json = dofile('lua/vendor/json.lua')
 local M = {}
 
@@ -37,25 +42,46 @@ function M.host_strings()
 end
 
 -- Everything a golden stores, from one build: { system = <text>, tools = <array> }.
+--
+-- The host facts are normalised, and ONLY host facts: this run home, the tree the recorder ran in, the
+-- working directory and the session workdir attribute. The conform notice is NOT normalised away (rel
+-- review r3, item 2): it is kept where a27490af put it, inside the prompt, so the bytes compare exactly.
 function M.normalize(build)
   local host_strings = M.host_strings()
   local system = tostring(build.system or '')
   -- Order matters: the TREE path may sit under the working directory (a base worktree does), so it is
-  -- replaced first - otherwise the recorder's own checkout name ends up inside the golden.
+  -- replaced first - otherwise the recorder own checkout name ends up inside the golden.
   if host_strings.home ~= '' then system = system:gsub(escape(host_strings.home), '<HOME>') end
   if host_strings.tree ~= '' then system = system:gsub(escape(host_strings.tree), '<TREE>') end
   if host_strings.cwd ~= '' then system = system:gsub(escape(host_strings.cwd), '<CWD>') end
   -- The session workdir is the PROCESS working directory when the session owns no worktree - a host
   -- fact that differs between the recorder (a base worktree) and the checker (whatever cwd the harness
-  -- uses, e.g. the repository root of the fast path). The attribute is normalised, nothing else.
+  -- uses). The attribute is normalised, nothing else.
   system = system:gsub('<workdir path="[^"]*"', '<workdir path="<WORKDIR>"')
-  local kept, removed = {}, 0
-  for line in (system .. '\n'):gmatch('(.-)\n') do
-    if line:match(M.NOTICE_PATTERN) then removed = removed + 1 else kept[#kept + 1] = line end
-  end
   local tools = {}
   for _, item in ipairs(build.tools or {}) do tools[#tools + 1] = item end
-  return { system = table.concat(kept, '\n'), tools = tools, notice_lines_removed = removed }
+  return { system = system, tools = tools }
+end
+
+-- The conform notice lines a prompt carries, in order. Used by the TEST to say where a27490af had one
+-- and this branch has none - never to remove one from a golden.
+function M.notice_lines(text)
+  local found = {}
+  for line in (tostring(text or '') .. '\n'):gmatch('(.-)\n') do
+    if line:match(M.NOTICE_PATTERN) then found[#found + 1] = line end
+  end
+  return found
+end
+
+-- A prompt with its conform notice lines taken out. The test uses it for the ONE named case whose base
+-- bytes carry the notice (progressive-only): it compares the rest exactly and says the line is the
+-- difference, against this branch having none anywhere.
+function M.without_notices(text)
+  local kept = {}
+  for line in (tostring(text or '') .. '\n'):gmatch('(.-)\n') do
+    if not line:match(M.NOTICE_PATTERN) then kept[#kept + 1] = line end
+  end
+  return table.concat(kept, '\n')
 end
 
 -- The exact bytes a golden file holds: one JSON object, keys in a fixed order, sorted tool order kept

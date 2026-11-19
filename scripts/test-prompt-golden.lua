@@ -5,9 +5,10 @@
 --   * the bytes compared are agent:build_context's own, the same call a first request makes, so a
 --     section, guideline or tool ordering that changed anywhere in the stack shows up here.
 --
--- The one named exception: upstream put the "conform: no profile for ..." notice INSIDE the prompt;
--- commit 568ed30c moved it to the operator log (review MUST 4), so the helper drops exactly that line
--- and this test asserts the built prompt carries none of it.
+-- The one named difference (rel review r3, item 2): upstream put the "conform: no profile for ..."
+-- notice INSIDE the prompt, once per process, so a27490af's first recorded case carries it; commit
+-- 568ed30c moved it to the operator log, so this branch's prompts carry none. The golden KEEPS base's
+-- line and this test compares it exactly, naming the case - nothing is stripped silently.
 if not host then error('this test runs under the node (WA_SCRIPT), not plain Lua') end
 local guard = dofile('scripts/lib/test-home-guard.lua')
 local reason = guard.reason({ home = os.getenv('WASM_AGENT_HOME') or '',
@@ -91,6 +92,10 @@ local function build(env, subagent)
   return value
 end
 
+-- The ONE case whose a27490af bytes carry the conform notice (measured: the first case a recording
+-- process builds, because raw_code.TRANSPORT_NOTICE_SHOWN shows it once per process).
+local NOTICE_CASE = 'progressive-only'
+
 -- ---------------------------------------------------------------- the goldens, every explicit mode
 for _, case in ipairs(cases) do
   local path = ROOT .. '/' .. case.name .. '.json'
@@ -99,10 +104,21 @@ for _, case in ipairs(cases) do
   local want = json.decode(body)
   local built = build({ WASM_AGENT_RAW_CODE = case.mode, WASM_AGENT_ENVELOPE_MODE = case.envelope }, case.subagent)
   local got = golden.normalize(built)
-  -- The notice upstream printed in the prompt is gone from the BUILT bytes, not only from the golden:
-  -- if it ever returns, this fires instead of being silently normalised away.
-  eq(got.notice_lines_removed, 0, case.name .. ': the built prompt carries no conform notice line')
-  eq(got.system, want.system, case.name .. ': the full built system prompt matches a27490af')
+  -- Nothing is normalised away (rel review r3, item 2): the bytes compare EXACTLY, and the one case
+  -- where a27490af differs is named rather than hidden. Measured on the real tree, not assumed: a27490af
+  -- appends the conform notice to the prompt for the FIRST case it builds in a process
+  -- (raw_code.TRANSPORT_NOTICE_SHOWN shows it once), which in this case list is progressive-only.
+  local base_notices = #golden.notice_lines(want.system)
+  local built_notices = #golden.notice_lines(got.system)
+  eq(built_notices, 0, case.name .. ': this branch puts no conform notice line in the prompt')
+  if case.name == NOTICE_CASE then
+    eq(base_notices, 1, NOTICE_CASE .. ': a27490af carried the conform notice in this prompt (the one case)')
+    eq(golden.without_notices(got.system), golden.without_notices(want.system),
+      NOTICE_CASE .. ': and every other byte of that prompt matches a27490af')
+  else
+    eq(base_notices, 0, case.name .. ': a27490af carried no conform notice in this prompt')
+    eq(got.system, want.system, case.name .. ': the full built system prompt matches a27490af')
+  end
   eq(json.encode(got.tools), json.encode(want.tools), case.name .. ': the declared tool list matches a27490af')
 end
 
