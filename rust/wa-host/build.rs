@@ -19,7 +19,15 @@ fn main() {
 fn generate_embedded() {
     let root = std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap())
         .join("../..").canonicalize().expect("repository root");
-    let mut paths = vec![root.join("AGENTS.orchestrator.md"), root.join("AGENTS.subagents.md")];
+    // The environment notes ship with the binary like the role files: a node in a container or on a
+    // desktop reads them from `EMBEDDED` (agent.environment_note), and a note left out of this list is
+    // only reachable from a checkout - which is every node except the ones that need it.
+    let mut paths = vec![
+        root.join("AGENTS.orchestrator.md"),
+        root.join("AGENTS.subagents.md"),
+        root.join("AGENTS.omarchy.md"),
+        root.join("AGENTS.sandbox.md"),
+    ];
     fn collect(dir: &std::path::Path, paths: &mut Vec<std::path::PathBuf>) {
         println!("cargo:rerun-if-changed={}", dir.display());
         for entry in std::fs::read_dir(dir).expect("Lua directory") {

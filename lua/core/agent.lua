@@ -495,6 +495,12 @@ function M.environment_note(role, opts)
     local text = read(path)
     if text and text ~= "" then return { path = path, text = text } end
   end
+  -- The copy the binary carries, like the role files. Without this a deployed node reads nothing: the
+  -- note is not beside the binary and not in <config>, so a note that shipped in the repo reached only
+  -- whoever happened to work in the checkout (review r1, MUST 1).
+  if EMBEDDED and type(EMBEDDED[name]) == "string" and EMBEDDED[name] ~= "" then
+    return { path = "embedded:" .. name, text = EMBEDDED[name] }
+  end
   return nil
 end
 

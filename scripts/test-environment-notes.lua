@@ -132,10 +132,50 @@ ok(frame.project:find("<project_instructions", 1, true) and frame.project:find("
 ok(frame.project:find("ENV_KEEP", 1, true) < frame.project:find("PROJECT_KEEP", 1, true),
   "the environment note is rendered before the nearest project file")
 
+-- Delivery, which is what makes the note reach a node at all (review r1, MUST 1). A note that is only
+-- in the checkout is read by whoever works in the checkout and by nobody else: the deployed node runs
+-- from <install>/lua-core or from the binary's own copy, and its config directory holds neither.
+--
+-- 1. The runtime path: when neither the working directory nor <config> has it, the copy the binary
+--    carries is used. Driven through a fixture EMBEDDED so this test does not depend on what the
+--    installed binary happens to carry.
+local real_embedded = EMBEDDED
+local saved_embedded = { sandbox = real_embedded and real_embedded["AGENTS.sandbox.md"],
+                         omarchy = real_embedded and real_embedded["AGENTS.omarchy.md"] }
+EMBEDDED = EMBEDDED or {}
+EMBEDDED["AGENTS.sandbox.md"] = "EMBEDDED_SANDBOX\n"
+EMBEDDED["AGENTS.omarchy.md"] = "EMBEDDED_OMARCHY\n"
+local from_embedded = agent.environment_note("master", { env = { WASM_AGENT_SANDBOX = "1" }, read = fs({}), config_dir = config_dir })
+ok(from_embedded and from_embedded.path == "embedded:AGENTS.sandbox.md" and from_embedded.text == "EMBEDDED_SANDBOX\n",
+  "with no file on disk the note comes from the binary's own copy")
+local file_beats_embedded = agent.environment_note("master",
+  { env = { OMARCHY_PATH = "x" }, read = fs({ [config_dir .. "/AGENTS.omarchy.md"] = "ON_DISK\n" }), config_dir = config_dir })
+ok(file_beats_embedded and file_beats_embedded.text == "ON_DISK\n", "a file on disk beats the embedded copy")
+EMBEDDED["AGENTS.sandbox.md"] = saved_embedded.sandbox
+EMBEDDED["AGENTS.omarchy.md"] = saved_embedded.omarchy
+if EMBEDDED ~= real_embedded then EMBEDDED = real_embedded end
+local nothing_anywhere = agent.environment_note("master", { env = { WASM_AGENT_SANDBOX = "1" }, read = fs({}), config_dir = config_dir })
+ok(nothing_anywhere == nil or nothing_anywhere.path == "embedded:AGENTS.sandbox.md",
+  "a note that is nowhere and not embedded is nil, never an empty instruction")
+
+-- 2. The two lists that ship it, asserted where they live, because a runtime check cannot see this
+--    worktree's build.rs from an installed binary. One embed (rust/wa-host/build.rs) and one stage
+--    (scripts/lib/lua-tree.sh); a note missing from either ships to nobody.
+local lua_root = (host.getenv("WASM_AGENT_LUA_ROOT") or ""):gsub("/+$", "")
+ok(lua_root ~= "", "the test runs with a Lua root, so the shipping lists can be read")
+local build_rs = host.read_file(lua_root .. "/rust/wa-host/build.rs")
+local tree_sh = host.read_file(lua_root .. "/scripts/lib/lua-tree.sh")
+ok(type(build_rs) == "string" and build_rs ~= "", "rust/wa-host/build.rs is readable")
+ok(type(tree_sh) == "string" and tree_sh ~= "", "scripts/lib/lua-tree.sh is readable")
+for _, name in ipairs({ "AGENTS.omarchy.md", "AGENTS.sandbox.md" }) do
+  ok(build_rs:find(name, 1, true) ~= nil, "the binary embeds " .. name .. " (rust/wa-host/build.rs)")
+  ok(tree_sh:find(name, 1, true) ~= nil, "the deployed Lua tree stages " .. name .. " (scripts/lib/lua-tree.sh)")
+end
+
 -- The two notes ship in the repository, and the Omarchy one stays short: it points at the skill
 -- instead of copying it, so a line budget is the mechanism that keeps it that way.
-local sandbox_note = host.read_file("AGENTS.sandbox.md")
-local omarchy_note = host.read_file("AGENTS.omarchy.md")
+local sandbox_note = host.read_file(lua_root .. "/AGENTS.sandbox.md")
+local omarchy_note = host.read_file(lua_root .. "/AGENTS.omarchy.md")
 ok(type(sandbox_note) == "string" and sandbox_note ~= "", "AGENTS.sandbox.md ships")
 ok(type(omarchy_note) == "string" and omarchy_note ~= "", "AGENTS.omarchy.md ships")
 local lines = 0
