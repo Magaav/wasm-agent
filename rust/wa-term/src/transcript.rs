@@ -464,7 +464,11 @@ impl Transcript {
                 // cell of the first row instead (no blank cell = the code fills the row: no icon).
                 let mut wrapped = wrap_rows(line, inner);
                 if let Some(first) = wrapped.first_mut() {
-                    if let Some((with_icon, col)) = icon_at_right(first) {
+                    let placed = icon_at_right(first)
+                        // A band row paints its rest with EL and carries no blank cell to put the
+                        // icon in (item F): the icon still goes onto the band, at its right end.
+                        .or_else(|| icon_at_band_end(first, inner));
+                    if let Some((with_icon, col)) = placed {
                         *first = with_icon;
                         copies.push((start, format!("{RIGHT_TAG}{}\u{1}{}", col + usize::from(focused), content.expect("checked"))));
                     }
@@ -983,6 +987,17 @@ fn icon_at_right(row: &str) -> Option<(String, usize)> {
     out.push(COPY_ICON);
     out.extend(chars[at + 1..].iter());
     Some((out, n))
+}
+
+/// The copy icon at the right end of a BAND row: a row that ends with the background-colour erase
+/// (ESC[K) has no blank cell for icon_at_right to take, because the band paints its rest with no
+/// characters at all (item F). The icon is placed by column instead, on the row's own line, with the
+/// band's colour still open, so it wears the band and not the terminal default.
+fn icon_at_band_end(row: &str, width: usize) -> Option<(String, usize)> {
+    if width < 2 || !row.ends_with("\u{1b}[K") { return None }
+    // One column short of the width, so the icon sits at the band's right edge with a cell to spare.
+    let column = width.saturating_sub(1).max(1);
+    Some((format!("{row}\u{1b}[{column}G{COPY_ICON}"), width))
 }
 
 #[cfg(test)]

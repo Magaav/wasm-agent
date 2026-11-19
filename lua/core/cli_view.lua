@@ -2040,6 +2040,10 @@ function METHODS:accepted(text)
   text = tostring(text or "")
   if text == "" or not self.screen then return end
   self:clear() -- the host ticker must not write while this line is committed
+  -- The width this bubble wraps at is the terminal as it is NOW, not as it was when the view was
+  -- made: a window maximised or split before the reader sends a line must wrap that line at the
+  -- new width (item E, the same read every other framed component makes).
+  if self.stdout then self:refresh_limit() end
   -- `❯ what you typed`, greyed, the way Claude Code keeps your message in the transcript.
   -- White on a grey bar the width of the screen, the way the message stands out from the replies.
   local shown, first = {}, true
@@ -2052,7 +2056,11 @@ function METHODS:accepted(text)
     for _, piece in ipairs(pieces) do
       local body = (first and PROMPT or "  ") .. piece
       if self.live then
-        body = "\27[38;2;255;255;255m\27[48;2;68;68;68m" .. body .. string.rep(" ", math.max(0, self.limit - 1 - columns(body))) .. RESET
+        -- The grey goes to the end of the ROW by EL (ESC[K), not by a run of spaces: padding is
+        -- characters, so a narrow terminal re-wraps them and a resize turns a painted row into
+        -- ragged fragments (Victor, 19/11 11:20). The erase takes the row background colour, so
+        -- the band stays solid and the line holds no trailing blanks at all (item F).
+        body = "\27[38;2;255;255;255m\27[48;2;68;68;68m" .. body .. "\27[K" .. RESET
       end
       shown[#shown + 1] = body
       first = false
@@ -2440,6 +2448,9 @@ function METHODS:codemode_opts()
     paint = paint,
     clip = fit,
     columns = columns,
+    -- The code band's rest-of-row: the band colour, then EL, so a painted row holds no trailing
+    -- spaces for a narrow terminal to re-wrap (item F).
+    band_erase = function() return STYLE.codeBand .. "\27[K" end,
     summarise = function(name, args) return M.call_line(name, args, 32) end,
     elapsed = function(ms) return M.elapsed(ms) end,
     encode = function(value) return json.encode(value) end,

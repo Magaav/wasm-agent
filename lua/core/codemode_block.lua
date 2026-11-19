@@ -162,6 +162,10 @@ function M.opts(options)
     -- The script row's highlighter (`markdown.scan_code`): a row is dim text whose own tokens carry
     -- their syntax colour, which is what "dim + syntax-highlighted" means on a terminal.
     syntax = o.syntax,
+    -- The erase that paints the rest of a band ROW: the caller owns the palette, so it hands one
+    -- closure that sets the band colour and then EL. A caller with no palette gets nothing, and the
+    -- row is exactly its text.
+    band_erase = o.band_erase or function() return "" end,
     elapsed = o.elapsed or function(ms)
       local value = tonumber(ms) or 0
       if value < 1000 then return string.format("%dms", math.floor(value)) end
@@ -184,6 +188,9 @@ function M.head_text(model, o)
   return table.concat(parts, ", ")
 end
 
+-- The background-colour erase: paint the rest of the ROW in the colour in force, with no
+-- characters. A row that ends in spaces is a row a narrow terminal re-wraps.
+local BAND_ERASE = "\27[K"
 local MARK_OK, MARK_NO, MARK_WAIT = "\226\156\147", "\226\156\151", "\226\143\179"  -- ✓ ✗ ⏳
 M.MARK_OK, M.MARK_NO, M.MARK_WAIT = MARK_OK, MARK_NO, MARK_WAIT
 
@@ -566,7 +573,6 @@ function M.rows(model, width, options)
   for _, shown in ipairs(pieces) do
     -- The band is padded by display columns (not bytes) to one column short of the screen, so it is a
     -- band and the transcript never wraps it into an empty second row.
-    local pad = string.rep(" ", math.max(0, band - o.columns(shown)))
     if o.live and o.syntax then
       -- The band is re-applied around every token: `paint` ends each piece with a reset, so a band
       -- painted once around the row would stop at the first coloured token. Padding to the full width
@@ -576,10 +582,17 @@ function M.rows(model, width, options)
         if piece == "" then return end
         parts[#parts + 1] = o.paint(piece, { "codeBand", style or "mdCodeBlock" })
       end)
-      parts[#parts + 1] = o.paint(pad, "codeBand")
+      -- The rest of the ROW is painted by EL (ESC[K) in the band colour, never by a run of spaces
+      -- (item F, Victor 19/11 11:20). Padding is characters: a narrow terminal re-wraps them, so on a
+      -- resize a painted block came apart into ragged fragments. EL erases with the CURRENT
+      -- background, so the row is solid and carries no trailing blanks at all. The band stays active
+      -- after the erase on purpose - the host draws a code block's copy icon on that right-hand cell,
+      -- and it must wear the band, not the terminal default - and the transcript resets the row when
+      -- it draws it.
+      parts[#parts + 1] = o.band_erase()
       rows[#rows + 1] = table.concat(parts)
     else
-      rows[#rows + 1] = shown .. pad
+      rows[#rows + 1] = shown
     end
   end
   if code_hidden > 0 then

@@ -34,7 +34,7 @@ end
 -- what happened when this view moved from six literal colours to pi's roles. The colour
 -- assertions below name the role instead of the escape, so they still say which colour.
 local function visible(text)
-  return (tostring(text):gsub("\27%[[%d;]*m", ""):gsub("\27%]2;[^\7]*\7", ""))
+  return (tostring(text):gsub("\27%[[%d;]*m", ""):gsub("\27%[K", ""):gsub("\27%]2;[^\7]*\7", ""))
 end
 
 -- ---- what a call is ------------------------------------------------------------
@@ -782,7 +782,12 @@ screen_view:accepted("two\nlines")
 local turn_rows = visible(since(screen_out, mark))
 ok(has(turn_rows, "\226\157\175 two") and has(turn_rows, "  lines"), "a second line sits under the first one's text")
 local bar = since(screen_out, mark):match("\27%[48;2;68;68;68m([^\27]*)") or ""
-ok(view_lib.columns(bar) == screen_view.limit - 1, "the grey bar counts `❯` as one cell, not three bytes, and leaves the scrollbar its column: " .. view_lib.columns(bar))
+  local band = since(screen_out, mark)
+  ok(band:find("\27%[48;2;68;68;68m", 1) ~= nil, "the accepted line is painted on a grey band")
+  -- ITEM F: the band ends with the background-colour erase, so it paints to the edge of the screen
+  -- at ANY width and carries no pad space a narrow terminal could re-wrap.
+  ok(band:find("\27%[K", 1) ~= nil, "and the row closes with ESC[K instead of a run of spaces")
+  ok(not band:find("\27%[48;2;68;68;68m[^\27]* \27%[K"), "with no pad space before the erase")
 -- A long line is wrapped, never clipped with … (operator 17/11: what the reader sent is shown in full).
 do
   local long_mark = #screen_out
@@ -1654,8 +1659,12 @@ do
     widest = math.max(widest, view_lib.columns(visible(rows[index])))
     narrowest = math.min(narrowest, view_lib.columns(visible(rows[index])))
   end
-  eq(widest, 79, "every script row is one column short of the screen, so the transcript never wraps it into a blank row")
-  eq(narrowest, 79, "and every row is padded to that width (a band, padded by columns)")
+  ok(widest <= 79, "no script row is wider than the band, so the transcript never wraps it into "
+    .. "a blank row: " .. widest)
+  -- ITEM F: the band was PADDED to that width with spaces, which is what a narrow terminal
+  -- re-wrapped on a resize. It is painted by ESC[K now, so the row ends on its last code cell.
+  ok(narrowest <= 79, "no row is wider than the band: " .. narrowest)
+  ok(has(first.lines[1], "\27[K"), "and every band row closes with the background-colour erase")
   local block = {}
   for index = 1, 9 do block[#block + 1] = visible(rows[index]) end
   ok(not has(table.concat(block, "\n"), "CodeAct"), "and no script row grew a title")
