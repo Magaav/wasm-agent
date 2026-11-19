@@ -387,6 +387,17 @@ local function unreachable_detail(detail)
   local text = tostring(detail or ''):lower()
   if text == '' then return true end
   if text:find('binding_service_unavailable', 1, true) then return true end
+  -- The native transport's words for a socket that died mid-read, and this module's own wrapper for a
+  -- call that returned nothing at all (binding_http_nil). Measured by tests/storm.rs: during a 60 s cut
+  -- the tick answered binding_approval_unavailable/binding_http_nil:io: Peer disconnected, which matched
+  -- NOTHING here, so the node stopped polling for the rest of the outage and never re-attached.
+  if text:find('peer disconnected', 1, true) then return true end
+  if text:find('binding_http_nil', 1, true) then return true end
+  if text:find('connection closed', 1, true) then return true end
+  if text:find('unexpected eof', 1, true) then return true end
+  if text:find('broken pipe', 1, true) then return true end
+  if text:find('connection aborted', 1, true) then return true end
+  if text:find('os error 10053', 1, true) then return true end
   if text:find('binding_http_5', 1, true) then return true end
   if text:find('binding_http_unreadable', 1, true) then return true end
   if text:find('binding_reply_invalid', 1, true) then return true end

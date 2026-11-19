@@ -35,10 +35,25 @@ fn key_path() -> PathBuf {
     PathBuf::from(home()).join(".wasm-agent").join("node.key")
 }
 
+/// Cloneable because a node's identity is a VALUE: a test (and the serve lane's config) hands the same
+/// identity to several places. The signing key itself is not Clone, so the clone re-derives it from the
+/// same pkcs8 bytes - the same key, never a new one.
 pub struct Identity {
     pub node_id: String,
     pub public_key: String,
     key: Ed25519KeyPair,
+    pkcs8: Vec<u8>,
+}
+
+impl Clone for Identity {
+    fn clone(&self) -> Identity {
+        Identity {
+            node_id: self.node_id.clone(),
+            public_key: self.public_key.clone(),
+            key: Ed25519KeyPair::from_pkcs8(&self.pkcs8).expect("the key derived from these bytes"),
+            pkcs8: self.pkcs8.clone(),
+        }
+    }
 }
 
 impl Identity {
@@ -72,7 +87,7 @@ impl Identity {
         let public_key = hex(key.public_key().as_ref());
         let digest = ring::digest::digest(&ring::digest::SHA256, key.public_key().as_ref());
         let node_id = hex(digest.as_ref())[..32].to_string();
-        Ok(Identity { node_id, public_key, key })
+        Ok(Identity { node_id, public_key, key, pkcs8 })
     }
 
     pub fn sign(&self, message: &str) -> String {

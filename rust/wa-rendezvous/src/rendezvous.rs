@@ -287,9 +287,18 @@ pub fn run(bind: &str, port: u16, db_path: &str) {
     // is public behind Caddy: an unbounded thread (and SQLite connection) per socket is a way to exhaust
     // the host. Each relay long poll holds one, so the cap leaves room for many nodes.
     let cap = max_connections();
+    // The peak open count, for a test (or an operator) that needs the number rather than a suspicion.
+    // Written only when asked, so the production listener does no extra I/O.
+    let peak_file = std::env::var("WA_RENDEZVOUS_PEAK_FILE").ok().filter(|p| !p.is_empty());
     for stream in listener.incoming() {
         let Ok(mut stream) = stream else { continue };
-        if OPEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= cap {
+        let now_open = OPEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        if let Some(path) = &peak_file {
+            static PEAK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let seen = PEAK.fetch_max(now_open, std::sync::atomic::Ordering::SeqCst).max(now_open);
+            let _ = std::fs::write(path, format!("{} {}\n", seen, cap));
+        }
+        if now_open > cap {
             OPEN.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
             // Shed with a hint. The old body was a bare 503, which every caller retried at once -
             // measured 19/11, the cap stayed full for half an hour because of exactly that.

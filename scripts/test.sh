@@ -1270,6 +1270,12 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-network-relay-backpressure.lua" "$B
 # refuse at once), and a caller never admitted before is refused as before - a new binding can never be
 # created against an unreachable registry.
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-network-binding-outage.lua" "$BIN" --db "$DB.network-binding-outage" | grep 'network binding outage ok'
+# The 19/11 storm itself: the relay is DOWN for 60 s and the node must KEEP TICKING through it (a tick
+# that returns early is the deadlock - the node cannot answer, so the queue never drains), then be
+# attached again with no restart, and a real caller must get a verified answer. REAL binding ticks
+# (lua/core/binding.lua M.tick) and a REAL caller (lua/core/nodes.lua remote_call) against a relay the
+# row owns; the multi-process version was abandoned because the instrument, not the fleet, failed.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-network-storm.lua" "$BIN" --db "$DB.network-storm" | grep 'network storm ok'
 # A route must refuse a model it cannot serve before the first provider request - and only that.
 # A child with `gpt-6-luna` on the opencode-go route failed in 0.67s with zero tool calls on the
 # edge's `Model does not support this protocol`, and 26 child runs of `deepseek-v4.1-flash` died
