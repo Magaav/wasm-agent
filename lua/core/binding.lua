@@ -364,6 +364,42 @@ function M.profile(include_inactive)
   end
   return s
 end
+-- Cached admissions, so a rendezvous OUTAGE does not turn an already-bound operator into a stranger.
+--
+-- Measured 19/11 ~12:17 UTC, home network down: the work node answered no relayed call for the length
+-- of the drop, because every call ran M.authorize, which asks the registry twice (the operator list
+-- and the binding status), and an unreadable registry refused by returning nil. The node could not
+-- answer the very calls whose answers would have let the fleet drain - the second half of the storm.
+--
+-- The rule, and it is an allow-list: a POSITIVE decision (this exact node_id+public_key, vouched for
+-- by the registry, with an accepted binding) is remembered with the time it was made. When a later
+-- check cannot REACH the registry - a transport failure, never a refusal - the remembered decision
+-- stands until it expires. Anything the registry actually answers still wins: revoked, removed,
+-- expired or unknown refuses at once. A caller with no remembered decision is refused as before, so
+-- this can never admit a NEW binding while the registry is unreachable.
+M.ADMISSION_CACHE_SECONDS = tonumber(host.getenv('WASM_AGENT_BINDING_CACHE_SECONDS') or '') or 600
+local admitted = {}
+
+local function admission_key(id, key) return tostring(id) .. '\0' .. tostring(key) end
+
+-- True when a failure is the LINK, not the registry's judgement. Only these use the cache.
+local function unreachable_detail(detail)
+  local text = tostring(detail or ''):lower()
+  if text == '' then return true end
+  if text:find('binding_service_unavailable', 1, true) then return true end
+  if text:find('binding_http_5', 1, true) then return true end
+  if text:find('binding_http_unreadable', 1, true) then return true end
+  if text:find('binding_reply_invalid', 1, true) then return true end
+  if text:find('timeout', 1, true) or text:find('timed out', 1, true) then return true end
+  if text:find('connection refused', 1, true) or text:find('connection reset', 1, true) then return true end
+  if text:find('network is unreachable', 1, true) or text:find('no route to host', 1, true) then return true end
+  if text:find('name resolution', 1, true) or text:find('dns', 1, true) then return true end
+  return false
+end
+
+function M.admission_cache_size() return (function() local n=0; for _ in pairs(admitted) do n=n+1 end; return n end)() end
+function M.admission_cache_clear() admitted = {}; return true end
+
 function M.authorize(id,key)
   -- The roster first: when the fleet said yes, the pins of a binding made before the fleet existed
   -- are not the authority any more. This is the one place a relayed call is admitted.
@@ -374,14 +410,43 @@ function M.authorize(id,key)
   local s=M.profile();if not s then return nil end
   local pinned=false;for _,p in ipairs(s.operators) do if p.node_id==id and p.public_key==key then pinned=true end end
   if not pinned then return nil end
+  local remember=admitted[admission_key(id,key)]
+  local now=tonumber(host.now()) or 0
   -- Admission is per caller: the service must still vouch for this exact (node_id, public_key) pair.
   -- A removed operator is refused; whether some other pinned operator was also removed is not this
   -- caller's business and must not stop the node from answering the ones still vouched for.
-  local service=M.inspect(s.service);if not service.ok then return nil end
+  local service,service_problem=M.inspect(s.service)
+  if not service.ok then
+    -- The registry could not be READ. For a caller this node already admitted, that is not a verdict:
+    -- an outage must not turn an operator into a stranger (see ADMISSION_CACHE_SECONDS).
+    local detail=service.detail or service.error or service_problem
+    if remember and unreachable_detail(detail) and (now - remember.at) <= M.ADMISSION_CACHE_SECONDS then
+      remember.used=remember.used+1
+      return {node_id=id,public_key=key,role='master',name=id,cached=true,cached_age_s=now-remember.at}
+    end
+    return nil
+  end
   local vouched=false
   for _,p in ipairs(service.operators or {}) do if p.node_id==id and p.public_key==key then vouched=true end end
-  if not vouched then return nil end
-  local v=request_status(s);if not valid_reply(s,v) or v.binding.state~='accepted' or v.binding.request.expires_at<=host.now() then return nil end
+  if not vouched then
+    -- The registry ANSWERED and does not vouch for this pair: the cache must not stand in its way.
+    admitted[admission_key(id,key)]=nil
+    return nil
+  end
+  local v,status_problem=request_status(s)
+  if not valid_reply(s,v) then
+    if remember and unreachable_detail(status_problem) and (now - remember.at) <= M.ADMISSION_CACHE_SECONDS then
+      remember.used=remember.used+1
+      return {node_id=id,public_key=key,role='master',name=id,cached=true,cached_age_s=now-remember.at}
+    end
+    return nil
+  end
+  if v.binding.state~='accepted' or v.binding.request.expires_at<=now then
+    -- A real answer about this binding: revoked or expired drops the remembered decision.
+    admitted[admission_key(id,key)]=nil
+    return nil
+  end
+  admitted[admission_key(id,key)]={at=now,used=0}
   return {node_id=id,public_key=key,role='master',name=id}
 end
 function M.unbind()

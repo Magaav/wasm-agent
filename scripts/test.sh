@@ -211,6 +211,14 @@ gate_run cargo build --release --offline --manifest-path rust/Cargo.toml >"$ACTU
 # test each time (04/11: 1 in 5 runs). The whole suite is ~26 s; it runs once (the release-profile rerun
 # of the same tests further down was removed: same assertions, a second compile, a second chance to race).
 gate_run cargo test --offline --manifest-path rust/wa-sentinel/Cargo.toml -- --test-threads=1
+# The rendezvous sheds FAIRLY (19/11 12:20-12:45 UTC: 503 too_many_connections to everyone, the fleet did
+# not converge for half an hour). Relayed calls may no longer take the connections that polls and binding
+# checks need: a reservation is held back for those lanes, one caller and one target are each capped, and
+# every shed answer carries Retry-After in the header and retry_after_ms in the body. The unit tests hold
+# the policy; the convergence test reproduces the storm on a REAL socket at a cap of 16, asserts a
+# priority lane is served while ordinary traffic is shed, and that traffic converges within 60 s once the
+# storm clears (measured 252 ms). Hermetic: a temp db, no node keys, no live fleet.
+gate_run cargo test --offline --manifest-path rust/Cargo.toml -p wa-rendezvous
 if [ "${OS:-}" = "Windows_NT" ]; then
 gate_run cargo build --offline --manifest-path rust/wa-sentinel/Cargo.toml
 # ABSOLUTE, from `--absolute-git-dir`: `--git-path` prints `.git/<name>` relative to the cwd, and these
