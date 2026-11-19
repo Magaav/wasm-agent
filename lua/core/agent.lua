@@ -2533,10 +2533,16 @@ function M:run_body(text, images)
       -- a new body, a link that came back and failed differently - resets the count, because that is
       -- a different situation and the class is still transient.
       local failure_text = (not ok) and redact.text(tostring(result)) or nil
-      -- A later attempt that turns into a wall acquires the ceiling it did not start with.
-      if not identical_limit and transient_limit == math.huge and (not ok)
-          and provider.repeats_are_a_wall(tostring(result)) then
-        identical_limit = provider.identical_repeat_ceiling()
+      -- The wall is re-evaluated on EVERY failure, not armed once and carried. A 500 followed by ten
+      -- identical "connection refused" is a wall and then an OUTAGE: leaving the ceiling armed would
+      -- kill the run during the outage while the row still said "no limit" (review r3, item 1).
+      if transient_limit == math.huge and (not ok) then
+        if provider.repeats_are_a_wall(tostring(result)) then
+          identical_limit = identical_limit or provider.identical_repeat_ceiling()
+        else
+          -- Not a wall any more: the count and the ceiling both clear, so the next wall starts fresh.
+          identical_limit, identical_text, identical_count = nil, nil, 0
+        end
       end
       if identical_limit then
         if failure_text and failure_text == identical_text then

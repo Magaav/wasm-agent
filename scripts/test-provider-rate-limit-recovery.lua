@@ -204,4 +204,38 @@ check(busy_bot:run('survive an identical 503')=='answered after the busy spell',
   'twelve IDENTICAL 503s do not end the run, got '..busy_calls..' calls')
 overrides.WASM_AGENT_PROVIDER_IDENTICAL_REPEATS=nil
 
+-- (d) A wall must not stay armed: one 500 followed by twelve IDENTICAL link failures is a wall and
+-- then an OUTAGE, and the outlet is what must win. Measured by review r3: the ceiling was armed by the
+-- 500 and never cleared, so the link failures killed the run while the row said "no limit".
+overrides.WASM_AGENT_PROVIDER_IDENTICAL_REPEATS='3'
+overrides.WASM_AGENT_PROVIDER_CONNECT_RETRIES='20'
+overrides.WASM_AGENT_PROVIDER_CONNECT_WAIT_SECONDS='600'
+overrides.WASM_AGENT_PROVIDER_CONNECT_DELAY_MS='0'
+local mixed_sid=session('provider-500-then-link')
+local mixed_bot=agentlib.new(mixed_sid,function() end,'master','master','')
+local mixed_calls=0
+provider.complete_with=function()
+  mixed_calls=mixed_calls+1
+  if mixed_calls==1 then error('provider_http_500: {"error":"broken deployment"}') end
+  if mixed_calls<=13 then error('provider_error: connection refused') end
+  return {content='answered after the mixed outage',tool_calls={},finish_reason='stop',usage=usage}
+end
+local mixed_reply=mixed_bot:run('a 500 and then an outage')
+check(mixed_reply=='answered after the mixed outage',
+  'one 500 followed by twelve IDENTICAL link failures still waits the outage out, got '..mixed_calls..' calls')
+check(mixed_calls==14,'every attempt was made: the 500 did not leave its ceiling armed')
+
+-- ...and a pure wall still stops: ten identical 500s fail by name.
+overrides.WASM_AGENT_PROVIDER_IDENTICAL_REPEATS='10'
+local wall_only_sid=session('provider-500-only')
+local wall_only_bot=agentlib.new(wall_only_sid,function() end,'master','master','')
+local wall_only=0
+provider.complete_with=function() wall_only=wall_only+1; error('provider_http_500: {"error":"broken deployment"}') end
+local wall_ok,wall_problem=pcall(wall_only_bot.run,wall_only_bot,'a pure wall')
+check(not wall_ok,'ten identical 500s end the run')
+check(wall_only==10,'at the ceiling of ten, got '..wall_only)
+check(tostring(wall_problem):find('the same failure repeated',1,true)~=nil,
+  'and the failure is NAMED: '..tostring(wall_problem))
+overrides.WASM_AGENT_PROVIDER_IDENTICAL_REPEATS=nil
+
 print('provider rate-limit recovery ok ('..checks..' checks)')
