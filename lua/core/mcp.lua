@@ -459,8 +459,10 @@ local function refused_interpreter_or_wrapper(name)
  if REFUSED_WRAPPERS[stem] then return 'wrapper',clean end
  return nil
 end
--- What a file IS, from its leading bytes: elf, macho, pe, script, text, empty or missing. A shebang named
--- `node` is an interpreter in disguise, so the name alone is never the answer.
+-- What a file IS, from its leading bytes: elf, macho or pe (this HOST's own format only; another
+-- platform's executable answers `foreign`), script, text, binary, empty or missing. A shebang named
+-- `node` is an interpreter in disguise, so the name alone is never the answer, and neither is a format
+-- this node cannot run.
 local function file_magic(path)
  if type(host.file_magic)~='function' then return nil end
  local facts=decode(host.file_magic(tostring(path or '')))

@@ -144,7 +144,7 @@ pub const REGISTRY: &[Capability] = &[
     // What a file IS, from its leading bytes: the vault approval (round 8) allows node or a POSIX shell
     // by REALPATH and by this answer, so a copy of python called `node`, or a shell script named `bash`,
     // is refused whatever its name says.
-    plain!("file_magic", ReadOnly, crate::host::file_magic, "A file's kind from its leading bytes (elf, macho, pe, script, text, empty, missing), as JSON"),
+    plain!("file_magic", ReadOnly, crate::host::file_magic, "A file's kind from its leading bytes: elf, macho or pe only for THIS host's own format, foreign for another platform's executable, plus script, text, binary, empty, missing, as JSON"),
     plain!("list_dir", ReadOnly, crate::host::list_dir, "List one directory's entries"),
     plain!("grep", ReadOnly, crate::host::grep, "Literal substring search over a directory or file with bounded, counted results"),
     // ---- the code graph ----------------------------------------------------------------------

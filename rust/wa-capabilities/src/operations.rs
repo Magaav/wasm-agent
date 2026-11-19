@@ -1984,7 +1984,7 @@ mod vault_approval_tests {
         let mut bare = spec("/usr/bin/node", &[]);
         assert!(seal_request(&mut bare, &approval, true).unwrap_err().starts_with("vault_request_unnamed:"));
         assert!(seal_request(&mut bare, &approval, false).is_ok(), "a plain launch needs no request file");
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_file(&path);
     }
 
     // ---- round 6: the interpreter, the arguments, the ownership of a platform root, the recheck ----
@@ -2041,8 +2041,12 @@ mod vault_approval_tests {
         assert!(refused.starts_with("vault_approval_program_not_allowed:"), "{refused}");
         // And a copy NAMED node that is only a shell script: the name is not the program, so it is
         // refused one branch later (not_native) than a name outside the allow-list.
+        // Round 9: NOT `fake-node` in the shared directory. The round-6 test beside this one writes a FILE
+        // of that name through `scratch` (a shell script called node), and a directory and a file cannot
+        // share the path: whichever ran second failed with `AlreadyExists`, one suite run in three. The
+        // directory is its own subtree, so both tests keep their fixture.
         let fake_dir = std::env::temp_dir()
-            .join(format!("wa-vault-approval-{}/fake-node", std::process::id()));
+            .join(format!("wa-vault-approval-{}/fake-node-tree", std::process::id()));
         std::fs::create_dir_all(&fake_dir).expect("scratch dir");
         let fake = fake_dir.join("node");
         std::fs::write(&fake, "#!/bin/sh\nexit 0\n").expect("a shell script called node");
@@ -2191,7 +2195,7 @@ exit 0
         let ok = approval("/usr/bin/node", &cwd, &[], &option_value, &[&script], &["TOKEN"]);
         assert!(approval_problem(&ok, &spec("/usr/bin/node", &option_value)).is_ok(),
             "{:?}", approval_problem(&ok, &spec("/usr/bin/node", &option_value)));
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_file(&script);
     }
 
     // ---- round 7: node's own order, the ambiguity, the interpreters the digest cannot follow ----
@@ -2250,7 +2254,7 @@ exit 0
         let covered = approval("/usr/bin/node", &cwd, &[], &folder, &[&index], &["TOKEN"]);
         assert!(approval_problem(&covered, &spec("/usr/bin/node", &folder)).is_ok(),
             "{:?}", approval_problem(&covered, &spec("/usr/bin/node", &folder)));
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&package_dir);
     }
 
     /// Finding 2: the interpreter families covered only JavaScript and shell, so python3 -c, perl -e,
