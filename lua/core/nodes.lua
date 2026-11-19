@@ -258,6 +258,10 @@ local function fetch_peers(fresh, cached_only)
       end
     end
   end)
+  -- Whether the last roster read could reach the registry, so a caller can tell "no such peer" from
+  -- "I could not ask". Without it a COLD cache during an outage answered unknown_node for every name,
+  -- which reads as "that node never existed" when the truth is "the rendezvous was unreachable".
+  M.roster_last_read = read_ok and {ok = true, at = now} or {ok = false, at = now, error = "roster_unavailable"}
   if not read_ok then
     -- A roster read that FAILED is not a roster that is empty. Measured 19/11 ~12:17 UTC, home
     -- network down: 38 relay detaches, and when the laptop had internet again `wa nodes` listed only
@@ -332,6 +336,11 @@ function M.list(opts)
     end
   end
   return out
+end
+
+-- True when the roster could NOT be read: a caller must then answer "unreachable", not "unknown".
+function M.roster_unreadable()
+  return M.roster_last_read ~= nil and M.roster_last_read.ok == false
 end
 
 function M.find(selector)
@@ -852,27 +861,94 @@ M.RELAY_DEADLINE_SECONDS = 60
 -- is already behind, so the queue never drains: every new call keeps one more slot busy.
 M.RELAY_MAX_IN_FLIGHT = 4
 
--- Per-node in-flight counters, this process only. The host cannot see another node's calls and does
--- not need to: the cap that matters is what THIS node asks of a peer.
+-- Per-node in-flight counters, shared by EVERY caller on this node.
+--
+-- The cap used to live in one Lua table, which is one interpreter: the serve lane builds a fresh one
+-- per admitted call and "wa call" is its own process, so four concurrent callers each saw an empty
+-- table and the cap never bound anything that mattered. The count therefore lives in the node's own
+-- data directory - one file per held slot, named for the peer and the second it was taken. A holder
+-- stamps its file with that second, so a process that dies leaves a file that EXPIRES and a crash
+-- cannot fill the cap for good.
+local SLOT_TTL_SECONDS = 120
+
+-- The fallback for a host with no data directory (a fixture): the cap still applies in-process.
 local relay_in_flight = {}
+
+-- The slots live DIRECTLY in the node's data directory, which already exists. A subdirectory would
+-- need a mkdir the host does not offer (write_file does not create parents), and a slot file that
+-- silently fails to be written makes the cap read zero forever - measured on the first version of
+-- this, which stopped binding anything. The prefix keeps them apart from every other file there.
+local function slot_dir()
+  local ok, paths = pcall(dofile, "lua/core/paths.lua")
+  if not ok or not paths then return nil end
+  return paths.data()
+end
+
+-- ONE file per peer holds the count and the second it was last written: <count>:<epoch>.
+-- A file per held slot would need a delete primitive this host does not have (write_file overwrites,
+-- nothing removes), so the counter is a single overwritable file and a lost read-modify-write costs one
+-- extra relayed call, never a wedge. A crashed holder is handled at file granularity: a count older
+-- than the TTL is a count nobody is holding.
+local function slot_file(node_id)
+  local dir = slot_dir()
+  if not dir then return nil end
+  return dir .. "/relay-slot-" .. tostring(node_id) .. ".count"
+end
+
+local function slot_read(node_id)
+  local path = slot_file(node_id)
+  if not path or type(host.read_file) ~= "function" then return nil end
+  local ok, text = pcall(host.read_file, path)
+  if not ok or type(text) ~= "string" then return 0 end
+  local count, stamp = tostring(text):match("^%s*(%d+)%s*:%s*(%d+)")
+  count, stamp = tonumber(count), tonumber(stamp)
+  if not count then return 0 end
+  local now = tonumber(host.now()) or 0
+  if stamp and now - stamp > SLOT_TTL_SECONDS then return 0 end
+  return count
+end
+
+local function slot_write(node_id, count)
+  local path = slot_file(node_id)
+  if not path then return false end
+  local now = tonumber(host.now()) or 0
+  local ok = pcall(host.write_file, path, string.format("%d:%d", count, now))
+  return ok
+end
 
 function M.acquire_slot(node_id)
   node_id = tostring(node_id or "")
-  local held = relay_in_flight[node_id] or 0
+  local held = slot_read(node_id)
+  if held == nil then
+    -- No data directory (a fixture): the cap still applies, in this interpreter.
+    held = relay_in_flight[node_id] or 0
+    if held >= M.RELAY_MAX_IN_FLIGHT then return nil, "peer_busy_caller" end
+    relay_in_flight[node_id] = held + 1
+    return true
+  end
   if held >= M.RELAY_MAX_IN_FLIGHT then return nil, "peer_busy_caller" end
-  relay_in_flight[node_id] = held + 1
+  if not slot_write(node_id, held + 1) then return nil, "peer_slot_unavailable" end
   return true
 end
 
 function M.release_slot(node_id)
   node_id = tostring(node_id or "")
-  local held = relay_in_flight[node_id] or 0
-  if held <= 1 then relay_in_flight[node_id] = nil else relay_in_flight[node_id] = held - 1 end
+  local held = slot_read(node_id)
+  if held == nil then
+    held = relay_in_flight[node_id] or 0
+    if held <= 1 then relay_in_flight[node_id] = nil else relay_in_flight[node_id] = held - 1 end
+    return true
+  end
+  -- Never negative: an extra release is a no-op, not a debt.
+  slot_write(node_id, math.max(0, held - 1))
   return true
 end
 
 function M.slots_held(node_id)
-  return relay_in_flight[tostring(node_id or "")] or 0
+  node_id = tostring(node_id or "")
+  local held = slot_read(node_id)
+  if held == nil then return relay_in_flight[node_id] or 0 end
+  return held
 end
 
 -- Never a tight retry on an overloaded relay. The wait doubles per attempt, is capped, and is always
@@ -944,7 +1020,18 @@ end
 -- Call a capability on a peer: direct when possible, else through the relay.
 function M.remote_call(selector, capability, args)
   local node = M.find(selector)
-  if not node then return { error = "unknown_node:" .. tostring(selector) } end
+  if not node then
+    -- A COLD roster during an outage is not "no such node": it is "the rendezvous could not be
+    -- asked". Answering unknown_node here is what made a network blip look like a deleted peer.
+    if M.roster_unreadable() then
+      return { error = "roster_unavailable:" .. tostring(selector), node = tostring(selector),
+        connector = "roster_unavailable", retryable = true,
+        message = string.format("the roster could not be read, so %s cannot be looked up right now: "
+          .. "nothing was sent and nothing ran. This is not a missing node - retry once the "
+          .. "rendezvous answers.", tostring(selector)) }
+    end
+    return { error = "unknown_node:" .. tostring(selector) }
+  end
   -- Known but offline, and with no endpoint to try directly: say so by name. A call that still has a
   -- direct endpoint is attempted below, because a stale roster mark is not proof the peer is gone.
   if node.online == false and not M.endpoint(node) then return M.peer_offline(node) end

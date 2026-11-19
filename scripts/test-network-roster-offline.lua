@@ -95,10 +95,17 @@ check(refused.retryable == true, 'an offline peer is worth retrying, unlike a no
 check((refused.message or ''):find('never removed from the roster', 1, true) ~= nil,
   'and the sentence says the peer was not deleted')
 
--- 5. A name the roster never knew is still unknown_node: the fix must not turn typos into offline peers.
+-- 5. A name the roster never knew answers by what the REGISTRY said, and the two cases differ:
+--    while the reserve could not be read the answer is roster_unavailable (never a deletion), and once
+--    it is readable a name it omits is unknown_node - which must not have become an "offline" peer.
+local blind = nodes.remote_call('no-such-node', 'bash', { command = 'true' })
+check(tostring(blind.error):find('^roster_unavailable:no%-such%-node', 1) ~= nil,
+  'with the roster unreadable, an unseen name is roster_unavailable, got ' .. tostring(blind.error))
+mode = 'up'
+clock = clock + 60
 local typo = nodes.remote_call('no-such-node', 'bash', { command = 'true' })
 check(tostring(typo.error):find('^unknown_node:no%-such%-node', 1) ~= nil,
-  'a peer never seen is still unknown_node, got ' .. tostring(typo.error))
+  'with the roster readable, a name it omits is still unknown_node, got ' .. tostring(typo.error))
 
 -- 6. A read that SUCCEEDS may remove a peer: that is the rendezvous' answer, not our guess.
 mode = 'up'
@@ -117,5 +124,34 @@ clock = clock + 60
 local back = find('box')
 check(back ~= nil and back.online ~= false, 'the peer is re-learned after the link returns, with no restart')
 check(reads > 0, 'the roster was actually read from the rendezvous')
+
+-- ---- SHOULD: a COLD cache during an outage is not "no such node" ------------------------------
+-- A node that just started, with the registry unreachable, has no peers to keep. The answer must still
+-- be "the roster could not be read", never unknown_node: one reads as a network problem, the other as
+-- a deletion.
+nodes.invalidate()
+mode = 'down'
+clock = clock + 60
+-- The stubs above were replaced by the later sections of this row, so the mode-aware one is put back:
+-- the cold cache must be measured against a registry that really cannot be read.
+host.http = function()
+  if mode == 'up' then
+    return json.encode({ status = 200, body = json.encode({ nodes = {
+      { node_id = string.rep('ab', 16), name = 'box', endpoints = {},
+        public_key = identity.public_key, relay_attached = true, last_seen = clock } } }) })
+  end
+  return json.encode({ status = 503, body = '' })
+end
+local cold = nodes.remote_call('box', 'bash', { command = 'true' })
+check(tostring(cold.error):find('^roster_unavailable:box', 1) ~= nil,
+  'a cold roster during an outage answers roster_unavailable, not unknown_node, got ' .. tostring(cold.error))
+check(cold.retryable == true, 'and it says the call is worth retrying')
+check(nodes.roster_unreadable(), 'the module reports the roster as unreadable')
+-- Once the registry answers, a name it never knew is unknown_node again.
+mode = 'up'
+clock = clock + 60
+local known = nodes.remote_call('never-registered', 'bash', { command = 'true' })
+check(tostring(known.error):find('^unknown_node:', 1) ~= nil,
+  'a readable roster that omits the name still answers unknown_node, got ' .. tostring(known.error))
 
 print('network roster offline ok (' .. checks .. ' checks)')

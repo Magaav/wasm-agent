@@ -2549,7 +2549,11 @@ function M:run_body(text, images)
         end
         return "provider"
       end)() or "provider"
-      if connection_lost and not link_down_since then link_down_since = host.now() end
+      -- Only a REAL lost link (a failure that named the network), not the incomplete-stream member
+      -- of the same bucket: a stream cut that is retried a second later is not "the network came
+      -- back", and saying so would be a false report of an outage that may not even exist.
+      local link_failure = (not ok) and provider.is_link_down(tostring(result))
+      if link_failure and not link_down_since then link_down_since = host.now() end
       -- The counters, as words: an uncapped class has no fraction to show, and printing one would be a
       -- lie (and a number the formatter cannot represent). One string, so every branch agrees.
       local uncapped = (transient_limit == math.huge)
@@ -2626,7 +2630,9 @@ function M:run_body(text, images)
     -- The link came back: ONE line saying how long it was out, and the run continues from the same
     -- step (the request was retried, never re-executed - it produced no answer, so no tool call it
     -- might have carried can have run).
-    if ok and link_down_since then
+    -- ...and only when it was out for a measurable while: a link that "came back" in the same second
+    -- as the first attempt never left, and a line claiming an outage would be noise.
+    if ok and link_down_since and (host.now() - link_down_since) >= 1 then
       local seconds = math.max(0, math.floor(host.now() - link_down_since))
       self.emit({ type = "status", text = string.format("network back after %dm%02ds",
         math.floor(seconds / 60), seconds % 60) })
