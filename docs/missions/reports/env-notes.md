@@ -26,7 +26,9 @@ loader, no second prompt section. `AGENTS.windows.md` remains unimplemented and 
 | `5e97d0d5` | r1 SHOULD: titles, podman marker, roster clause, xdph wording |
 | `bb73e1ee` | r1 MUST 3: this report, and LAYERED-PROMPT naming podman's marker |
 | `232f3e6d` | r2 item 1: the test asserts the binary embeds both notes; nowhere-on-disk is strict |
-| (this commit) | r2 item 2: this table names every commit |
+| `a439eff9` | r2 item 2: this table names every commit, and the 48-check run |
+| `393b5108` | r2 follow-up: the land-signing fixture creates both notes, so the record stops exiting 5 |
+| bcf3bfc7 | the table update that names bcf3bfc7 |
 
 ## Review r1 items, and what each fix does
 
