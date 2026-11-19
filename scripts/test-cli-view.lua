@@ -824,17 +824,17 @@ editor_view:event({ type = "usage", total = session_total, prompt = 27200 })
 local running = table.concat(editor_out)
 -- Victor, 18/11: the delta AND the session's input total, right after it ("only delta is not
 -- enough"). 27.2k was added; 120.4k is what the session has sent in total.
-ok(has(running, "\243\176\183\1866\194\183") and not has(running, "\226\154\146\239\184\143")
+ok(has(running, "\243\176\183\186 6\194\183") and not has(running, "\226\154\146\239\184\143")
   and has(running, "\206\14827.2k \226\134\145120.4k \226\134\1471.0k"),
   "the status line shows the step, the run's tools, what it added to the context, the session's"
     .. " input total and its output")
 editor_view:answered("## Done")
 local summary = editor_view.last_summary
-ok(summary and has(summary, "\243\176\145\1441 ") and has(summary, "\243\176\134\18875.20%"),
-  "completion leaves the session's numbers: runs, and the cache hit rate")
+ok(summary and has(summary, "\243\176\145\144 1 ") and has(summary, "\243\176\134\188 75.20%"),
+  "completion leaves the session's numbers: runs and the cache hit rate, each one space from its icon")
 local idle_mark = #editor_out + 1
 editor_view:prompt()
-ok(has(since(editor_out, idle_mark), "\243\176\145\1441 ") and has(since(editor_out, idle_mark), "\27[12;1H"),
+ok(has(since(editor_out, idle_mark), "\243\176\145\144 1 ") and has(since(editor_out, idle_mark), "\27[12;1H"),
   "the session summary stays in the footer while idle")
 local before_submit = #editor_out
 editor_view:submitted()
@@ -1762,7 +1762,7 @@ do
   view.context = 24300
   view.totals = { prompt = 4600000, completion = 310 }
   eq(view:run_numbers("5s", "1:51"),
-    "\243\176\183\1862\194\1835s \206\14812.3k \226\134\1454.6M \226\134\147310 \243\176\148\1551:51",
+    "\243\176\183\186 2\194\1835s \206\14812.3k \226\134\1454.6M \226\134\147310 \243\176\148\155 1:51",
     "the run line: steps, the delta added, the input total, output, clock")
   -- A run that has added nothing yet still says both numbers: nothing added, the total it sent.
   local fresh = view_lib.new({ live = true, limit = 100 })
@@ -1785,9 +1785,13 @@ do
   -- neighbour is a failure and not a substitution.
   local chosen = {
     { "ballEmpty", "\243\176\157\166", "U+F0766" },
-    { "ballStarted", "\243\176\170\159", "U+F0A9F" },
+    { "ballEighth", "\243\176\170\158", "U+F0A9E" },
+    { "ballQuarter", "\243\176\170\159", "U+F0A9F" },
+    { "ballThreeEighths", "\243\176\170\160", "U+F0AA0" },
     { "ballHalf", "\243\176\170\161", "U+F0AA1" },
+    { "ballFiveEighths", "\243\176\170\162", "U+F0AA2" },
     { "ballThreeQuarters", "\243\176\170\163", "U+F0AA3" },
+    { "ballSevenEighths", "\243\176\170\164", "U+F0AA4" },
     { "ballFull", "\243\176\170\165", "U+F0AA5" },
     { "steps", "\243\176\183\186", "U+F0DFA" },
     { "clock", "\243\176\148\155", "U+F051B" },
@@ -1805,12 +1809,19 @@ do
 
   -- Every band edge, from both sides: the floor belongs to the higher band (3% is the second ball) and
   -- the number just under it to the lower one - 0, 2.9, 3, 49.9, 50, 74.9, 75, 99.9, 100.
+  -- EVERY eighth, from both sides (Victor, 19/11: "i like the 8 slices, wire them up better").
+  -- The floor belongs to the higher band (3% is the first eighth), and the number just under it to the
+  -- lower one; 93.75 is the full ball, and nothing below 3% is anything but empty.
   local edges = {
-    { 0, "\243\176\157\166", "0%" }, { 2.9, "\243\176\157\166", "2.9%" },
-    { 3, "\243\176\170\159", "3%" }, { 49.9, "\243\176\170\159", "49.9%" },
-    { 50, "\243\176\170\161", "50%" }, { 74.9, "\243\176\170\161", "74.9%" },
-    { 75, "\243\176\170\163", "75%" }, { 99.9, "\243\176\170\163", "99.9%" },
-    { 100, "\243\176\170\165", "100%" },
+    { 0, "\243\176\157\166", "0%" }, { 2.99, "\243\176\157\166", "2.99%" },
+    { 3, "\243\176\170\158", "3%" }, { 18.74, "\243\176\170\158", "18.74%" },
+    { 18.75, "\243\176\170\159", "18.75%" }, { 31.24, "\243\176\170\159", "31.24%" },
+    { 31.25, "\243\176\170\160", "31.25%" }, { 43.74, "\243\176\170\160", "43.74%" },
+    { 43.75, "\243\176\170\161", "43.75%" }, { 56.24, "\243\176\170\161", "56.24%" },
+    { 56.25, "\243\176\170\162", "56.25%" }, { 68.74, "\243\176\170\162", "68.74%" },
+    { 68.75, "\243\176\170\163", "68.75%" }, { 81.24, "\243\176\170\163", "81.24%" },
+    { 81.25, "\243\176\170\164", "81.25%" }, { 93.74, "\243\176\170\164", "93.74%" },
+    { 93.75, "\243\176\170\165", "93.75%" }, { 100, "\243\176\170\165", "100%" },
   }
   -- A base tree has no ball function at all: reading it as a table of answers reports a failed check
   -- for every band instead of dying in the middle of the list.
@@ -1849,22 +1860,69 @@ do
   ok(rendered_view.screen ~= nil, "the boxed layout is up, so the status row exists")
   local raw = last_row_write(table.concat(rendered), rendered_view.screen and rendered_view.screen.status) or ""
   local bar = visible(raw)
-  ok(has(bar, "\243\176\183\1862"), "the run-status row draws the step pair with the chosen glyph: " .. bar)
-  ok(has(bar, " \243\176\148\155"), "and the elapsed clock with its own: " .. bar)
+  ok(has(bar, "\243\176\183\186 2"), "the run-status row draws the step pair with the chosen glyph, one space from its count: " .. bar)
+  ok(has(bar, " \243\176\148\155 "), "and the elapsed clock with its own, one space from its time: " .. bar)
   -- Round 3's decision stands: delta (what the run added) and the session's input total, together.
   local delta, up, down = bar:find("\206\148", 1, true), bar:find("\226\134\145", 1, true), bar:find("\226\134\147", 1, true)
   ok(delta and up and down and delta < up and up < down,
     "delta, then the input total, then the output, in that order: " .. bar)
   -- The GRAY is a rendering decision, so it is asserted on the bytes (`visible` removes exactly that): the
   -- secondary role opens at the step glyph, so the count wears the same gray as the numbers beside it.
-  ok(has(raw, view_lib.style("muted") .. "\243\176\183\1862"),
+  ok(has(raw, view_lib.style("muted") .. "\243\176\183\186 2"),
     "the step count and its glyph are drawn in the secondary gray: " .. raw)
   ok(not has(bar, "\240\159\145\163") and not has(bar, "\226\151\183"),
     "neither of the two replaced glyphs is on the row any more: " .. bar)
+  -- ONE space between every icon and its value (Victor, 19/11): turns, the context ball and the
+  -- cache icon. The DELTA/UP/DOWN/SIGMA marks are TEXT and stay glued to their number.
   eq(rendered_view.last_summary,
-    "\243\176\145\1443 \206\163\226\134\145120.4k \226\134\1471.0k "
-      .. "\243\176\170\15912.2%/200.0k \243\176\134\18875.20%",
-    "the session bar: turns, tokens, the context ball for 12.2%, and the cache-hit rate")
+    "\243\176\145\144 3 \206\163\226\134\145120.4k \226\134\1471.0k "
+      .. "\243\176\170\158 12.2%/200.0k \243\176\134\188 75.20%",
+    "the session bar: turns, tokens, the context ball for 12.2%, and the cache-hit rate, each icon one space from its value")
+
+  -- Every icon this CLI draws on a status row, followed by exactly one space - measured on the two
+  -- rendered strings rather than on the pieces, so a caller that concatenates without the separator fails.
+  do
+    local icons = {
+      { view_lib.GLYPH.steps, "steps" }, { view_lib.GLYPH.clock, "clock" },
+      { view_lib.GLYPH.turns, "turns" }, { view_lib.GLYPH.cache, "cache" },
+      { view_lib.GLYPH.ballEmpty, "ballEmpty" }, { view_lib.GLYPH.ballEighth, "ballEighth" },
+      { view_lib.GLYPH.ballQuarter, "ballQuarter" }, { view_lib.GLYPH.ballThreeEighths, "ballThreeEighths" },
+      { view_lib.GLYPH.ballHalf, "ballHalf" }, { view_lib.GLYPH.ballFiveEighths, "ballFiveEighths" },
+      { view_lib.GLYPH.ballThreeQuarters, "ballThreeQuarters" },
+      { view_lib.GLYPH.ballSevenEighths, "ballSevenEighths" }, { view_lib.GLYPH.ballFull, "ballFull" },
+    }
+    local rows = { rendered_view.last_summary, bar }
+    local seen = 0
+    for _, row in ipairs(rows) do
+      for _, icon in ipairs(icons) do
+        local at = 1
+        while true do
+          local found = row:find(icon[1], at, true)
+          if not found then break end
+          local after = row:sub(found + #icon[1], found + #icon[1])
+          eq(after, " ", icon[2] .. " is followed by exactly one space in: " .. row)
+          seen = seen + 1
+          at = found + #icon[1]
+        end
+      end
+    end
+    ok(seen >= 4, "both rows were really measured (" .. seen .. " icon occurrences)")
+  end
+
+  -- The context ball's COLOUR is chosen from the node's own compaction threshold, read from the code
+  -- that compacts and never guessed here (Victor, 19/11): normal below it by 15 points, warning from
+  -- there, alert at or above it.
+  do
+    local level_of = view_lib.context_level or function() return nil end
+    eq(level_of(89.9, 90), "warning", "just under the threshold is a warning")
+    eq(level_of(90, 90), "alert", "at the threshold is an alert")
+    eq(level_of(75, 90), "warning", "the 15-point line is the warning floor, and it is inclusive")
+    eq(level_of(74.9, 90), "normal", "half a point below it is normal")
+    eq(level_of(74.8, 90), "normal", "below it is normal")
+    eq(level_of(0, 90), "normal", "an empty context is normal")
+    eq(level_of(50, 0), "normal", "no window means no claim: everything is normal")
+    eq(level_of(nil, 90), "normal", "a percentage nobody measured is normal")
+  end
 end
 
 if failed > 0 then

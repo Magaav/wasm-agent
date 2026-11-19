@@ -244,6 +244,23 @@ function M.policy(context)
   return reserve, keep
 end
 
+-- The percentage of the window at which compaction TRIGGERS, as a number a status row can colour
+-- against. It is the same arithmetic maybe_compact (lua/core/agent.lua) uses, kept here beside
+-- policy() so a reader of the context ball cannot drift from the thing that compacts: the trigger is
+-- the window minus the reserve, capped by WASM_AGENT_CONTEXT_BUDGET when that escape hatch is set.
+--
+-- nil when the window is unknown (0): a caller must treat that as unknown and colour nothing, rather
+-- than divide by a window nobody measured.
+function M.threshold_percent(context, reserve)
+  local limit = tonumber(context) or 0
+  if limit <= 0 then return nil end
+  if not tonumber(reserve) then local r = M.policy(limit); reserve = r end
+  local budget = tonumber(host.getenv and host.getenv("WASM_AGENT_CONTEXT_BUDGET") or "") or 0
+  local trigger = math.min(limit - (tonumber(reserve) or 0), budget > 0 and budget or math.huge)
+  if trigger <= 0 then return nil end
+  return math.max(0, math.min(100, 100 * trigger / limit))
+end
+
 -- Force a refetch, for the UI's refresh button and for tests. Returns the model count the
 -- catalogue was found to carry, or nil when nothing could be fetched - so a caller can
 -- tell "refreshed and empty" from "could not refresh".

@@ -288,13 +288,24 @@ end
 -- two functions that actually lay these rows out - `M.columns` (the count `clip` and the status line
 -- use) and `wa-term`'s `cell_width_of` for the box the row sits in - because a glyph two cells
 -- wide moves every number after it.
+-- ONE space between an icon and the value it labels, and ONE place that says so (Victor, 19/11:
+-- in the non-Mono Nerd Font a glyph is drawn WIDER than its cell and touches the character after it).
+-- The DELTA, UP, DOWN and SIGMA marks are TEXT, not icons: they stay glued to their number.
+local GAP = " "
+M.GAP = GAP
+
 local GLYPH = {
-  -- The context ball: five Material Design circles, one per band of the model's window.
-  ballEmpty = "\243\176\157\166",         -- U+F0766
-  ballStarted = "\243\176\170\159",       -- U+F0A9F
-  ballHalf = "\243\176\170\161",          -- U+F0AA1
-  ballThreeQuarters = "\243\176\170\163", -- U+F0AA3
-  ballFull = "\243\176\170\165",          -- U+F0AA5
+  -- The context ball: NINE Material Design circles, eighths of the window - the 8 slices wired up
+  -- (Victor, 19/11). ballEmpty is the floor below 3%; the rest are the nearest eighth from there.
+  ballEmpty = "\243\176\157\166",          -- U+F0766
+  ballEighth = "\243\176\170\158",         -- U+F0A9E
+  ballQuarter = "\243\176\170\159",        -- U+F0A9F
+  ballThreeEighths = "\243\176\170\160",   -- U+F0AA0
+  ballHalf = "\243\176\170\161",           -- U+F0AA1
+  ballFiveEighths = "\243\176\170\162",    -- U+F0AA2
+  ballThreeQuarters = "\243\176\170\163",  -- U+F0AA3
+  ballSevenEighths = "\243\176\170\164",   -- U+F0AA4
+  ballFull = "\243\176\170\165",           -- U+F0AA5
   steps = "\243\176\183\186",             -- U+F0DFA, the run's steps
   clock = "\243\176\148\155",             -- U+F051B, the run's elapsed clock
   turns = "\243\176\145\144",             -- U+F0450, the session's turns
@@ -306,13 +317,37 @@ M.GLYPH = GLYPH
 -- floor - 3% is the second ball, 50% the third, 75% the fourth, 100% the full one. A context measured
 -- past its window (it happens across a compaction boundary) is the full ball, and a percentage nobody
 -- measured is the empty one - the same ball 0% wears, because "nothing measured" is not "nearly full".
+-- The eighths, in order: the ball for round(fraction * 8), clamped to 1..8.
+local BALLS = { GLYPH.ballEighth, GLYPH.ballQuarter, GLYPH.ballThreeEighths, GLYPH.ballHalf,
+  GLYPH.ballFiveEighths, GLYPH.ballThreeQuarters, GLYPH.ballSevenEighths, GLYPH.ballFull }
+
+-- The ball for a context percentage: the nearest eighth, with an empty floor below 3%.
+--
+-- The floor is there because "nothing measured" is not "nearly full": a context with no reading at all
+-- (0%) and one just starting (2.9%) both wear the empty ball. From 3% - the first eighth's floor - the
+-- ball is the nearest eighth of the window, so the 8 slices are wired up.
 function M.context_ball(percent)
   local p = tonumber(percent) or 0
   if p < 3 then return GLYPH.ballEmpty end
-  if p < 50 then return GLYPH.ballStarted end
-  if p < 75 then return GLYPH.ballHalf end
-  if p < 100 then return GLYPH.ballThreeQuarters end
-  return GLYPH.ballFull
+  local k = math.floor(p / 100 * 8 + 0.5)     -- half UP: a boundary belongs to the higher eighth
+  if k < 1 then k = 1 end
+  if k > 8 then k = 8 end
+  return BALLS[k]
+end
+
+-- How full the window is, as the word a colour is chosen from: normal, warning, alert.
+--
+-- The threshold is the node's REAL one, read from the code that compacts (model_window.policy, through
+-- model_window.threshold_percent) and never guessed here: normal below it by 15 points, warning from
+-- there, alert at or above it. With no window to measure against everything is normal - a colour is a
+-- claim about the window, and there is no window to make it about.
+function M.context_level(percent, threshold)
+  local p = tonumber(percent)
+  local t = tonumber(threshold) or 0
+  if not p or t <= 0 then return "normal" end
+  if p >= t then return "alert" end
+  if p >= t - 15 then return "warning" end
+  return "normal"
 end
 
 -- The footer's session numbers: `󰑐runs Σ↑in ↓out 󰪟ctx%/window 󰆼cache-hit%`. `Σ↑` is every
@@ -322,14 +357,16 @@ end
 -- the one `M.context_ball` chose, so the band and the percentage beside it cannot disagree.
 function M.session_summary(t)
   t = t or {}
-  local parts = { GLYPH.turns .. (t.runs or 0),
+  local parts = { GLYPH.turns .. GAP .. (t.runs or 0),
     "\206\163\226\134\145" .. M.tokens(t.prompt) .. " \226\134\147" .. M.tokens(t.completion) }
   if (tonumber(t.budget) or 0) > 0 then
     local percent = 100 * (tonumber(t.context) or 0) / t.budget
-    parts[#parts + 1] = M.context_ball(percent) .. string.format("%.1f%%/%s", percent, M.tokens(t.budget))
+    -- The percentage stays printed after the ball, one space apart (Victor, 19/11).
+    parts[#parts + 1] = M.context_ball(percent) .. GAP
+      .. string.format("%.1f%%/%s", percent, M.tokens(t.budget))
   end
   if (tonumber(t.prompt) or 0) > 0 then
-    parts[#parts + 1] = GLYPH.cache .. string.format("%.2f%%", 100 * (t.cached or 0) / t.prompt)
+    parts[#parts + 1] = GLYPH.cache .. GAP .. string.format("%.2f%%", 100 * (t.cached or 0) / t.prompt)
   end
   return table.concat(parts, " ")
 end
@@ -1617,10 +1654,10 @@ function METHODS:run_numbers(step_clock, run_clock)
   local run, base, totals = self.turn or {}, (self.turn and self.turn.baseline) or {}, self.totals or {}
   local input = math.max(0, (self.context or 0) - (run.context or 0))
   local output = math.max(0, (totals.completion or 0) - (base.completion or 0))
-  return GLYPH.steps .. math.max(1, run.rounds or 0) .. (step_clock and ("\194\183" .. step_clock) or "")
+  return GLYPH.steps .. GAP .. math.max(1, run.rounds or 0) .. (step_clock and ("\194\183" .. step_clock) or "")
     .. " \206\148" .. M.tokens(input) .. " \226\134\145" .. M.tokens(totals.prompt)
     .. " \226\134\147" .. M.tokens(output)
-    .. " " .. GLYPH.clock .. run_clock
+    .. " " .. GLYPH.clock .. GAP .. run_clock
 end
 
 -- Called on every event: a new frame, and a repaint. In the plain rendering the line is
