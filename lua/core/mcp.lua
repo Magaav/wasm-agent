@@ -969,12 +969,19 @@ function M.invoke(input,ctx)
  if vault_env and not input.vault_approval then input.vault_approval=M.vault_manifest(input.server,M.script_dir()) end
  if not host.write_file(request,json.encode(input))then return fail('mcp_request_not_written',{tool_call_issued=false,outcome='not_submitted'}) end
  local timeout=input.server.timeout_seconds or 30
- local start=decode(host.operation('start',json.encode({program=node_program(),args={client,'--request-file',request},cwd=ctx.cwd or platform.cwd(),timeout_seconds=math.min(86400,timeout+3),owner=ctx.session_id or 'mcp-control',vault_env=vault_env,vault_approval=input.vault_approval})))
+ -- A READ is a CONTROL start (session isolation, finding 7 round 2): the node's own short question, admitted
+ -- into the two slots no workload may hold, so a session holding its whole share cannot stop a connector
+ -- read. A connector CALL is not: it does the connector's work and takes an ordinary slot.
+ -- ONE OWNER NAME FOR THIS WHOLE CALL (session isolation, item 7 round 2): a sessionless caller is not
+ -- node-wide any more, so the caller that STARTS the operation must name the same owner when it observes
+ -- it. 'mcp-control' is also this read's cap key, so its share is counted instead of bypassed.
+ local op_owner=ctx.session_id or 'mcp-control'
+ local start=decode(host.operation('start',json.encode({program=node_program(),args={client,'--request-file',request},cwd=ctx.cwd or platform.cwd(),timeout_seconds=math.min(86400,timeout+3),owner=op_owner,control=input.action~='call',vault_env=vault_env,vault_approval=input.vault_approval})))
  if not start or start.error or not start.operation_id then return fail('mcp_operation_not_started',{detail=start,tool_call_issued=false,outcome='not_submitted',request=request}) end
  local id=start.operation_id
- local settled=decode(host.operation('await',json.encode({id=id,wait_for='settled'})))
+ local settled=decode(host.operation('await',json.encode({id=id,wait_for='settled',owner=op_owner})))
  if not settled or settled.error or not settled.settled then
-  pcall(host.operation,'cancel',json.encode({id=id}));return fail('mcp_operation_unsettled',{operation_id=id,request=request,tool_call_issued=input.action=='call',outcome=input.action=='call' and 'unknown' or 'not_submitted'})
+  pcall(host.operation,'cancel',json.encode({id=id,owner=op_owner}));return fail('mcp_operation_unsettled',{operation_id=id,request=request,tool_call_issued=input.action=='call',outcome=input.action=='call' and 'unknown' or 'not_submitted'})
  end
  local raw=settled.stdout_path and host.read_file(settled.stdout_path);local answer=decode(raw)
  if answer and (settled.ok==false or settled.error or settled.code and settled.code~=0) then

@@ -9,7 +9,9 @@ assert(spec.cwd and spec.cwd~='','external executor cwd required')
 spec.owner='wave:'..wave..':operation:'..id
 local accepted=json.decode(host.operation('start',json.encode(spec)))
 if not accepted.operation_id then print(json.encode({ok=false,error=accepted.error,operation_id=id,settled=false}));return end
-local result=json.decode(host.operation('await',json.encode({id=accepted.operation_id,wait_for='settled'})))
+-- The same owner that started it observes it: a sessionless caller is not node-wide any more (session
+-- isolation, item 7 round 2), and this driver's owner is the wave's own name, never a session's.
+local result=json.decode(host.operation('await',json.encode({id=accepted.operation_id,wait_for='settled',owner=spec.owner})))
 print(json.encode({ok=result.ok==true,settled=result.settled==true,cleanup=result.cleanup,
   operation_id=id,native_operation_id=accepted.operation_id,owner=spec.owner,
   owner_boot=result.owner_boot,cwd=result.effective_cwd,code=result.code,error=result.error}))

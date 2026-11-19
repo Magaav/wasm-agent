@@ -578,6 +578,8 @@ function M.run(argv)
     -- and the id is still there to resume the thread or steer a later run of it.
     io.stderr:write(string.format("wa: session %s %s\n", tostring(agent.session_id),
       ran_ok and "ok" or "failed"))
+    -- A thread that was busy, and the one this run started instead, said out loud (finding 6).
+    if agent.session_note then io.stderr:write("wa: " .. tostring(agent.session_note) .. "\n") end
     agent:close()
     input:stop()
     view:screen_off()

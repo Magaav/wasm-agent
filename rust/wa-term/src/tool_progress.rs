@@ -67,14 +67,14 @@ pub fn line(facts: &Value, now: f64, width: usize) -> Option<String> {
     Some(format!("{colour}{text}{RESET}"))
 }
 
-/// How often the live file is stat-ed. The host publishes at most four times a second
-/// (`wa_capabilities::tool_progress::INTERVAL_MS`), so a quarter-second check is as fresh as the file
-/// can be, and it is one `stat` per tick - cheaper than the build loader's, which it shares the tick
-/// with.
+/// How often the live directory is looked at. The host publishes at most four times a second
+/// (`wa_capabilities::tool_progress::INTERVAL_MS`), so a quarter-second check is as fresh as the files
+/// can be, and it is one `read_dir` per tick - cheaper than the build loader's, which it shares the
+/// tick with.
 const REFRESH_MS: u128 = 250;
 
-/// The live file as last read, re-read at most once a quarter second and only when its mtime moved -
-/// the same cheapness as the build loader, because both are asked on the same tick.
+/// What this reader last saw: **its own** session's file (re-read only when its mtime moved) and how
+/// many other sessions have a live file. Both are re-derived at most once a quarter second.
 struct Cache { checked: Option<Instant>, mtime: Option<SystemTime>, facts: Option<Value> }
 static CACHE: Mutex<Cache> = Mutex::new(Cache { checked: None, mtime: None, facts: None });
 
@@ -82,36 +82,91 @@ fn now_epoch() -> f64 {
     SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
 }
 
-/// The row to show now at `width` ("" = none), read from the live file.
-pub fn current(width: usize) -> String {
+/// How many sessions other than this one have a live file. Counted by freshness alone: a settled call
+/// removes its file, so a file younger than `wa_tool_progress::FRESH` is a call still running. Nothing
+/// is read out of those files - no tool, no session id, no line of output - which is the whole reason
+/// the keying is per session.
+fn count_elsewhere(dir: &std::path::Path, mine: Option<&std::path::Path>) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
+    let now = SystemTime::now();
+    entries
+        .flatten()
+        .filter(|entry| {
+            let path = entry.path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("json") { return false; }
+            if mine.is_some_and(|mine| mine == path) { return false; }
+            entry
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .ok()
+                .and_then(|mtime| now.duration_since(mtime).ok())
+                .is_some_and(|age| age.as_secs_f64() <= FRESH)
+        })
+        .count()
+}
+
+/// The row to show now at `width` ("" = none) for **this** session.
+///
+/// Only the caller's own session's file is opened: the row carries that session's call's last line, and
+/// drawing it for another session was the leak this keying exists to close
+/// (`wa_tool_progress::progress_dir`). When this session has no row of its own but other sessions are
+/// running, the row is the dim aggregate `node: N ops elsewhere` - a count, never a name, never a line.
+/// `elsewhere` is the operation manager's count of the OTHER sessions' unsettled operations
+/// (`operations_elsewhere`), passed in because this crate cannot reach the manager: the row says "ops",
+/// and this module used to count live per-session FILES instead, so four unsettled operations in one
+/// other session read as one (session isolation, item 3 round 4).
+pub fn current(width: usize, session: &str, elsewhere: usize) -> String {
     let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut elsewhere = elsewhere;
     if cache.checked.is_none_or(|t| t.elapsed().as_millis() >= REFRESH_MS) {
         cache.checked = Some(Instant::now());
-        let path = wa_tool_progress::data_path();
-        let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        let mine = wa_tool_progress::progress_path(session);
+        let mtime = mine
+            .as_ref()
+            .and_then(|path| std::fs::metadata(path).and_then(|meta| meta.modified()).ok());
         if mtime != cache.mtime {
             cache.mtime = mtime;
-            cache.facts = mtime.and_then(|_| std::fs::read_to_string(&path).ok())
+            cache.facts = mine
+                .as_ref()
+                .filter(|_| mtime.is_some())
+                .and_then(|path| std::fs::read_to_string(path).ok())
                 .and_then(|text| serde_json::from_str(&text).ok());
         }
     }
-    let Some(facts) = cache.facts.as_ref() else { return String::new() };
-    line(facts, now_epoch(), width).unwrap_or_default()
+    if let Some(facts) = cache.facts.as_ref() {
+        if let Some(row) = line(facts, now_epoch(), width) {
+            return row;
+        }
+    }
+    if elsewhere == 0 { return String::new() }
+    if width > 0 {
+        let text = crate::terminal_editor::clip_cells(&wa_tool_progress::elsewhere(elsewhere), width);
+        if std::env::var_os("NO_COLOR").is_some() {
+            return text;
+        }
+        return format!("{DIM}{text}{RESET}");
+    }
+    String::new()
 }
 
-/// Write the facts the row is drawn from, atomically, so a reader never sees half a file.
-pub fn publish(facts: &Value) -> std::io::Result<()> {
-    let path = wa_tool_progress::data_path();
+/// Write one session's facts, atomically, so a reader never sees half a file.
+pub fn publish(owner: &str, facts: &Value) -> std::io::Result<()> {
+    let Some(path) = wa_tool_progress::progress_path(owner) else {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "tool_progress_owner_required"));
+    };
     if let Some(dir) = path.parent() { std::fs::create_dir_all(dir)?; }
     let temporary = path.with_extension("json.tmp");
     std::fs::write(&temporary, serde_json::to_vec(facts)?)?;
     std::fs::rename(&temporary, &path)
 }
 
-/// Mark the call over: the file says `done`, which every renderer reads as "no row". A failed write is
-/// not worth failing a run over - a stale file is bounded by `FRESH` anyway.
-pub fn finish() {
-    let _ = publish(&serde_json::json!({"state":"done","at":now_epoch()}));
+/// Mark that session's call over: **its** file is removed, so neither its own reader nor the aggregate
+/// sees a row for a call that ended - and no other session's row is touched. A failed removal is not
+/// worth failing a run over: the aggregate also stops counting a file older than `FRESH`.
+pub fn finish(owner: &str) {
+    if let Some(path) = wa_tool_progress::progress_path(owner) {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 /// The detail a row would draw, for a caller that wants the facts without the text (tests, and the
@@ -190,6 +245,34 @@ mod tests {
         let facts = running(0.0, 100.0, 100.0, json!({"kind":"text","text":"compiling x"}));
         let plain = crate::selection::plain(&line(&facts, 100.0, 80).unwrap());
         assert!(!plain.contains('\u{1b}'));
+    }
+
+    #[test]
+    fn the_reader_counts_other_sessions_and_needs_no_word_of_them() {
+        // The aggregate is a count of live files, never a read of one: a file younger than `FRESH` is
+        // a call still running (a settled call removes its own), and the reader's own file is not
+        // counted as "elsewhere".
+        let dir = std::env::temp_dir().join(format!("wa-term-progress-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mine = dir.join("mine.json");
+        let other = dir.join("other.json");
+        std::fs::write(&mine, "{\"state\":\"running\"}").unwrap();
+        std::fs::write(&other, "{\"state\":\"running\"}").unwrap();
+        // A half-written file is not a row either: the publisher renames, so a `.tmp` is never counted.
+        std::fs::write(dir.join("half.json.tmp"), "{}").unwrap();
+        assert_eq!(count_elsewhere(&dir, Some(&mine)), 1, "the other session is counted, mine is not");
+        assert_eq!(count_elsewhere(&dir, None), 2, "with no session of my own, every live file is elsewhere");
+        std::fs::remove_file(&other).unwrap();
+        assert_eq!(count_elsewhere(&dir, Some(&mine)), 0, "a finished call removes its file");
+        // A process that died mid-call leaves one behind; age bounds it, exactly as it bounds its row.
+        let stale = dir.join("stale.json");
+        std::fs::write(&stale, "{\"state\":\"running\"}").unwrap();
+        let old = SystemTime::now() - std::time::Duration::from_secs((FRESH as u64) + 5);
+        std::fs::File::options().write(true).open(&stale).unwrap().set_modified(old).unwrap();
+        assert_eq!(count_elsewhere(&dir, Some(&mine)), 0, "a stale file is not a running call");
+        assert_eq!(wa_tool_progress::elsewhere(2), "node: 2 ops elsewhere");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

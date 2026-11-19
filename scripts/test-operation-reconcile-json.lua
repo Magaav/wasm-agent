@@ -9,7 +9,9 @@ if mode=='owner' then
   local launch=json.decode(host.operation('start',json.encode({
     command='printf raw-json-fixture',cwd=root,timeout_seconds=10,owner='private-json-owner'})))
   assert(launch.operation_id,'native launch failed')
-  local settled=json.decode(host.operation('await',json.encode({id=launch.operation_id,wait_for='settled'})))
+  -- The same owner that started it observes it: a sessionless caller owns its own owner's work and no
+  -- more (session isolation, item 7 round 2).
+  local settled=json.decode(host.operation('await',json.encode({id=launch.operation_id,wait_for='settled',owner='private-json-owner'})))
   assert(settled.settled==true and settled.ok==true,'private fixture did not settle')
   local file=paths.data()..'/operations/'..launch.operation_id..'/state.json'
   local raw=assert(host.read_file(file))
@@ -33,7 +35,12 @@ local function request()
     effect_evidence='printf only; original state/output retained, no replay'}
 end
 local function reconcile(args)
-  return json.decode(host.operation('reconcile',json.encode(args)))
+  -- The node's own reconciler process: settling an operation nobody is left to answer for needs the node
+  -- scope, for a sessionless caller too (session isolation, item 7 round 2). This process IS that caller;
+  -- the scope is not a session's claim and it does not come from the tool arguments.
+  local request=args
+  request.node_scope=true
+  return json.decode(host.operation('reconcile',json.encode(request)))
 end
 check(raw:find('"error":null',1,true)~=nil,'native state includes explicit null')
 check(decoded.error==nil,'ordinary decoder keeps existing nil behavior')

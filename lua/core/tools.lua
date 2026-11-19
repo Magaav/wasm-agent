@@ -436,7 +436,9 @@ M.admin = {
     timeout_seconds = { type = "integer", minimum = 1, maximum = 86400 },
     stream = { type = "string", enum = {"stdout", "stderr"} }, offset = { type = "integer", minimum = 0 },
     limit = { type = "integer", minimum = 1, maximum = 24576 }, wait_ms = { type = "integer", minimum = 0, maximum = 10000 },
-    wait_for = { type = "string", enum = {"command", "settled"}, description = "await only: foreground adoption defaults to command completion; settled waits for the complete owned process tree." }
+    wait_for = { type = "string", enum = {"command", "settled"}, description = "await only: foreground adoption defaults to command completion; settled waits for the complete owned process tree." },
+    scope = { type = "string", enum = { "node" },
+      description = "Only for an operator surface or a session the operator has marked mastermind: scope=\"node\" reaches every session's operations on this node, and is written to the audit journal. A model call in an ordinary session is refused (scope_node_forbidden) and does not get it; read your own operations without a scope." }
   }, {"action"}),
   schema("read", "Read text with line/byte continuation, or a PNG/JPEG/WebP/GIF (up to 4 MB) as an image. Ask for the range you need and follow next_offset/next_column with `version` until eof. A whole-line page returns `selection` and `edit_lines`, the receipt edit's range_edits form takes.", {
     path = { type = "string" },
@@ -1162,9 +1164,12 @@ end
 
 local function launch_cwd(memory, ctx, requested)
   local workspace = memory and ctx.session_id and memory.session_workspace and memory.session_workspace(ctx.session_id)
+  -- `session` is not a launch detail: it is WHOSE work this is. The operation record carries it, so the
+  -- shell an agent starts belongs to the session that asked and to no other (session isolation,
+  -- findings 1 and 2). An empty value stays empty - a call nobody names is nobody's.
   return {requested=requested or "", source=(requested and requested~="") and "explicit" or
     ((session_cwd(memory,ctx) or "")~="" and "session_workspace" or "node"),
-    required=workspace and workspace.required == true or false}
+    required=workspace and workspace.required == true or false, session=(ctx and ctx.session_id) or ""}
 end
 
 local function run(command, timeout_seconds, cwd, provenance)
@@ -1546,6 +1551,18 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
   end
   if name == "operation" then
     if not is_master(role) then return {error="forbidden_for_role:" .. role} end
+    -- WHOSE operation this is, and whether this caller may reach past its own (session isolation,
+    -- finding 2; lua/core/session_scope.lua). The owner has always been stamped here and never
+    -- compared, so `list` answered with every operation on the node and `status`/`read`/`wait`/
+    -- `cancel` answered for any id - and the ids are guessable (`op-<micros>-<pid>-<n>`). The
+    -- session travels with every action so the runtime can refuse a call it does not own, and
+    -- `scope:"node"` - the operator's alone, audited - is the one way to act beyond it.
+    local grant, refusal = dofile('lua/core/session_scope.lua').grant(memory, args, ctx, role, user_id, name)
+    if refusal then return refusal end
+    -- A CONTROL start is the node's own short read and is the only kind admitted into the two slots no
+    -- workload may hold (finding 7). It is a property of the read path, never of the model's arguments:
+    -- dropped here, so no tool call can claim the reserve (item 7, round 2).
+    args.control = nil
     args.owner = ctx.session_id or user_id
     -- A vault entry reaches a child only through the kernel's own MCP launch (lua/core/mcp.lua), never a
     -- tool call: a model that could name an entry here could start a program that prints it. The
@@ -1553,6 +1570,8 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     -- record, not a field a caller supplies.
     args.vault_env = nil
     args.vault_approval = nil
+    args.session = grant.session or ""
+    args.node_scope = grant.node == true
     if args.action == "start" then
       -- An explicit start is backgrounded by definition - the caller gets a receipt and moves on - so
       -- it runs at low CPU priority unless a caller that DOES wait for a while says otherwise
@@ -1680,6 +1699,17 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     return memory.memories(guest_scope or args.scope, args.limit or 50)
   elseif name == "forget" then
     if not args.id or args.id == "" then return { error = "id_required" } end
+    -- Deleting is reading's sibling: an id is not an authorization (session isolation, finding 10). The
+    -- scope the fact lives in decides, and a guest may only delete what it could have read - its own
+    -- `user:<id>`. An id that names no live row answers the same way a wrong one does.
+    -- NOT a collapsed conditional: "a and f() or true" is true whenever f() returns false, so the
+    -- refusal could never fire - the one line this whole finding rested on (item 1, round 2).
+    local allowed, why = true, nil
+    if memory.may_delete then allowed, why = memory.may_delete(args.id, guest_scope) end
+    if not allowed then
+      return { error = why or "forget_forbidden_scope", effect = "none", id = args.id,
+        note = "this memory is not in a scope you may delete from; a scoped caller deletes only its own facts" }
+    end
     return { id = args.id, forgotten = memory.forget(args.id) and true or false }
   elseif name == 'codemode' then
     if not is_master(role) then return {error='forbidden_for_role:'..role} end
@@ -2045,7 +2075,12 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
       local ok, recalled = pcall(function() return dofile('lua/core/lessons.lua').ensure() end)
       if ok and type(recalled) == 'table' then lessons = recalled end
     end
-    local view = fleetview.view({ lessons = lessons })
+    -- WHOSE VIEW THIS IS (session isolation, item 1 round 4): the caller's own memory module, role and
+    -- session go in. The module's node-scope grant needs a store to write its audit line to and a role to
+    -- check; a hard-coded 'master' with no store was neither audited nor refused, so the read answered as
+    -- a sessionless caller and showed a fraction of the node's work as if it were all of it.
+    local view = fleetview.view({ lessons = lessons, memory = memory, role = role,
+      user_id = user_id, session = ctx.session_id })
     return view
   elseif name == "lessons" then
     local store = dofile('lua/core/lessons.lua')

@@ -873,16 +873,29 @@ function M.new(session_id, on_event, role, user, node, opts)
       session = memory.session(session_id)
     end
   end
+  local session_note
+  -- THIS RUN'S OWN NAME, not this process's pid (finding 6, round 2). Every run inside one `wa serve`
+  -- shares a pid, so a presence row has to say which RUN holds the conversation: this uuid is that name,
+  -- minted per agent (one per run's interpreter) and written to the row this run takes below.
+  local lease = opts.lease or host.uuid()
   if not session then
-    session_id = memory.ensure_session(user, node, "chat")
+    -- A busy thread is never resumed under another live run: the second return says which conversation was
+    -- busy and which one this run started instead (session isolation, finding 6).
+    local started_session, note = memory.ensure_session(user, node, "chat", { lease = lease })
+    session_id = started_session
     session = memory.session(session_id)
+    session_note = note
   end
   -- This process is now serving the session, and says so where a reader can see it: a row that a
   -- restart, a wake or another `wa chat` closed is not evidence that nobody is here. A child is not
   -- the session's owner, so it does not claim presence.
-  if not opts.subagent then pcall(memory.presence_begin, session_id, { role = role }) end
+  if not opts.subagent then pcall(memory.presence_begin, session_id, { role = role, lease = lease }) end
   local agent = setmetatable({
     session_id = session_id,
+    -- Why this run is in the thread it is in, when it is not the newest open one: the newest was being
+    -- served by a live process, so this run started its own and says so (finding 6). Nil is the ordinary
+    -- case and must stay nil, so no caller learns to expect a sentence.
+    session_note = session_note,
     role = role,
     user = user,
     node = node,

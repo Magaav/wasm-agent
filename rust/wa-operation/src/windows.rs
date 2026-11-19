@@ -177,6 +177,8 @@ impl Process {
         let mut command = wide(&line);
         let cwd = wide(&spec.cwd);
         let mut env: std::collections::BTreeMap<String, (String, String)> = std::env::vars()
+            // The node's own provider/admin secrets never reach a tool child (crate::DENY_ENV).
+            .filter(|(k, _)| !crate::denied_env(k))
             .map(|(k, v)| (k.to_uppercase(), (k, v)))
             .collect();
         for (k, v) in &spec.env {

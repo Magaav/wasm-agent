@@ -103,7 +103,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 /// An absolute path whose extension says it is a script: the launch's own arguments the approval must
-/// cover. An extension is a name and this is the only thing it is used as - the digest is over BYTES.
+    // `\` and `"` escape to two units, so a quote-heavy command reaches the bound sooner.
 fn is_script_path(value: &str) -> bool {
     const SCRIPTS: [&str; 11] = ["mjs", "cjs", "js", "lua", "sh", "bash", "py", "rb", "pl", "ps1", "bat"];
     let bytes = value.as_bytes();
@@ -641,9 +641,23 @@ fn command_result(manager: &Manager, id: &str, mut state: Value) -> Value {
     ));
     state
 }
+/// The names this node's policy re-grants to tool children: "tool_env_allow": ["GH_TOKEN", ...] in the
+/// grant policy file (wa_features::policy_path). Read here, once, because this is where the one manager
+/// every tool child crosses is built; the deny list itself lives in wa-operation.
+fn tool_env_allow() -> Vec<String> {
+    let path = wa_features::policy_path();
+    let Ok(raw) = std::fs::read_to_string(&path) else { return Vec::new() };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else { return Vec::new() };
+    value["tool_env_allow"].as_array().map(|items| items.iter()
+        .filter_map(|item| item.as_str().map(str::to_string)).collect()).unwrap_or_default()
+}
+
 pub fn manager() -> &'static Manager {
     static MANAGER: OnceLock<Manager> = OnceLock::new();
     MANAGER.get_or_init(|| {
+        // A name the operator lists is handed to tool children again; every other name the deny rule
+        // matches stays withheld (session isolation, finding 5 round 2).
+        wa_operation::set_env_allow(tool_env_allow());
         let home = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()));
         Manager::new(home.join(".wasm-agent/operations"))
             // A shell whose recorded directory is gone starts in the agent home, and says so in
@@ -871,6 +885,13 @@ fn launch_context(mut spec: Spec, context: &Value) -> Spec {
     spec.cwd_requested = context["requested"].as_str().map(String::from);
     spec.cwd_source = context["source"].as_str().map(String::from);
     spec.require_cwd = context["required"] == true;
+    // WHOSE work this is (session isolation, finding 2). The session that asked travels with the
+    // request (`lua/core/tools.lua`'s `launch_cwd`), so the record says which conversation owns the
+    // operation and another session's `status`/`read`/`wait`/`cancel` can be refused by it. Empty is
+    // left empty - an operation nobody names is nobody's, rather than everybody's.
+    if spec.session.is_empty() {
+        spec.session = context["session"].as_str().unwrap_or("").to_string();
+    }
     spec
 }
 /// One tick of a long call's row (`docs/TOOL-PROGRESS.md`): the tail of the operation's two output
@@ -883,9 +904,13 @@ fn launch_context(mut spec: Spec, context: &Value) -> Spec {
 fn progress_tick(state: &Value, tool: &str) {
     let Some(id) = state["operation_id"].as_str() else { return };
     let Some(stdout) = state["stdout_path"].as_str() else { return };
+    // Whose call this is: the session that asked for the operation, recorded on it. The row is published
+    // to that session's own file, so another session's reader can neither draw it nor read its output
+    // (session isolation, finding 1). No session, no row: a call nobody can name is nobody's.
+    let Some(owner) = state["session"].as_str().filter(|session| !session.is_empty()) else { return };
     let stderr = state["stderr_path"].as_str().unwrap_or("");
     let elapsed = state["elapsed_ms"].as_u64().unwrap_or(0) as f64 / 1000.0;
-    crate::tool_progress::tick(id, tool, crate::tool_progress::now_epoch() - elapsed, stdout, stderr);
+    crate::tool_progress::tick(id, tool, crate::tool_progress::now_epoch() - elapsed, stdout, stderr, owner);
 }
 
 pub fn foreground(
@@ -982,8 +1007,122 @@ pub fn foreground(
         crate::serve::beat();
     }
 }
+/// Who is asking, and how far they may reach.
+///
+/// An operation's `owner` has been recorded since the runtime existed and was never compared with the
+/// caller: `list` answered with every operation on the node, and `status`, `read`, `wait`, `await` and
+/// `cancel` answered for any id - and the ids are guessable (`op-<micros>-<pid>-<n>`), so "you cannot
+/// find it" was not a boundary either (session isolation, finding 2). Lua decides *who* the session is
+/// and whether it holds a node scope (`lua/core/session_scope.lua`); this decides what the runtime does
+/// with that answer, which is the half that must not be skippable by a caller that forgets.
+pub(crate) struct Caller { session: String, node: bool, owner: String }
+
+impl Caller {
+    pub(crate) fn from(args: &Value) -> Self {
+        Self {
+            session: args["session"].as_str().unwrap_or("").to_string(),
+            node: args["node_scope"] == true,
+            // The runtime owner this caller started work under (lua/core/tools.lua stamps
+            // ctx.session_id or the user id; a node tool names its own). It is the cap key and the
+            // ownership key for a caller that is not a session (item 7, round 2).
+            owner: args["owner"].as_str().unwrap_or("").to_string(),
+        }
+    }
+    /// The node's own supervisor (the sentinel's node-wide reads) names no session and no node scope:
+    /// it is the one caller that is not a session at all.
+    pub(crate) fn node_wide(&self) -> bool { self.node }
+    /// An operation is the caller's when the caller IS a session and the operation recorded that same
+    /// session. An operation whose session is empty (or that only recorded the runtime's `owner`) belongs
+    /// to nobody the caller can claim: unknown is not yes.
+    pub(crate) fn owns(&self, state: &Value) -> bool {
+        if self.node { return true; }
+        let owner = state["session"].as_str().unwrap_or("");
+        // A session may act on what it recorded, and on nothing else - and a session can never claim an
+        // operation that recorded no session at all.
+        if self.session.is_empty() {
+            // A SESSIONLESS CALLER IS NOT A NODE-WIDE CALLER (item 7, round 2). Round 1 answered "every
+            // operation that recorded no session is mine", which is the same "everything on the node"
+            // answer this finding removed, only spelled with an empty session. The honest rule is the
+            // runtime OWNER: a sessionless caller owns the work started under its own owner (worker:N, a
+            // read-MCP session, a user id) and nothing else. A caller that names no owner at all owns the
+            // rows that also name none - which is the node's own supervisor and nothing wider.
+            let runtime_owner = state["owner"].as_str().unwrap_or("");
+            if self.owner.is_empty() {
+                // A caller that names NO owner is this process's own tooling (a script, host.exec, the
+                // sentinel). It owns the rows nobody named: an empty owner, and the runtime's own
+                // foreground identity (worker:<n>), which no caller can choose and no session can be. It
+                // still does not own a row a session named, nor one another NAMED owner started (a
+                // read-MCP session, a user id, a worker of another process).
+                // The runtime's own foreground identity counts only for a row that named NO session: a
+                // bash a session started is promoted with owner worker:<n> AND its session, and it is that
+                // session's row, not the node tooling's.
+                // A `worker:<n>` row belongs to the caller only when <n> is the node thread the
+                // caller is RUNNING ON (item 2, round 5). Round 2/4 matched any `worker:*`: one
+                // sessionless script owned every thread's foreground shell, on a node where several
+                // scripts run at once. The identity is the caller's own and no caller can choose it,
+                // so this is narrower, not wider - measured against the four rows that depend on it
+                // (test-exec-timeout, test-bash-long-command, test-workspace-cwd, this mission's row).
+                let own_thread = format!("worker:{}", crate::serve::node_thread_id());
+                return runtime_owner.is_empty()
+                    || (runtime_owner.starts_with("worker:") && owner.is_empty()
+                        && runtime_owner == own_thread);
+            }
+            return runtime_owner == self.owner;
+        }
+        owner == self.session
+    }
+    /// The refusal, named: what it is, whose it is, and the one way to reach it.
+    pub(crate) fn refusal(&self, id: &str) -> Value {
+        json!({
+            "operation_id": id,
+            "error": "operation_not_yours",
+            "effect": "none",
+            "not_your_operation": true,
+            "note": format!("operation {id} is not your operation: another session owns it. Only an explicit node scope (scope:\"node\", operator only) may read or act on it."),
+        })
+    }
+}
+
+/// Split the node's operations into the caller's and a COUNT of everybody else's.
+///
+/// ONLY UNSETTLED WORK COUNTS (session isolation, item 3 round 4). A settled operation is not running
+/// anywhere, and counting it made `node: N ops elsewhere` a lifetime total that never went down. The
+/// sentence says "ops", so the count is operations and not sessions either: four unsettled operations in
+/// one other session are four, which is exactly what a per-session progress file could not say (it counted
+/// one file per session). One rule, used by `list` and by `health_scope`, pinned by
+/// `a_settled_operation_is_not_counted_elsewhere`.
+///
+/// SETTLEMENT NARROWS THE COUNT, NOT THE CALLER'S OWN LIST (item 1, round 5). Round 4 skipped every
+/// settled row before it asked whose it was, so the caller's own FAILED operation vanished from its own
+/// `list` the moment it settled - and a failure is the one row a caller must be able to read
+/// back. Ownership decides what is mine; `settled` decides only whether it counts as running
+/// elsewhere.
+pub(crate) fn split_elsewhere(caller: &Caller, items: &[Value]) -> (Vec<Value>, usize) {
+    let mut mine = Vec::new();
+    let mut elsewhere = 0usize;
+    for state in items {
+        if caller.owns(state) {
+            // MINE IS OWNERSHIP'S ANSWER, SETTLED OR NOT (item 1, round 5): a caller reads back what it
+            // ran, and its own failed operation is the row it most needs.
+            mine.push(state.clone());
+        } else if state["settled"] != true {
+            // ELSEWHERE IS A COUNT OF WORK, so a settled row is not counted: it is running nowhere.
+            elsewhere += 1;
+        }
+    }
+    (mine, elsewhere)
+}
+
+/// `Some(state)` when the caller may act on `id`, `Some` from `snapshot` only if it owns it. `None`
+/// means "not yours" and the caller answers with [Caller::refusal].
+pub(crate) fn owned(caller: &Caller, id: &str) -> Result<Option<Value>, String> {
+    let state = manager().snapshot(id).map_err(|e| e.to_string())?;
+    Ok(if caller.owns(&state) { Some(state) } else { None })
+}
+
 pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<Value, String> {
     let id = args["id"].as_str().unwrap_or("");
+    let caller = Caller::from(args);
     let result = match action {
         "start" => {
             if args.get("replay_of").is_some(){return Err("operation_replay_forbidden: inspect original and make a separately authorized decision".into());}
@@ -1063,8 +1202,26 @@ pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<V
             // command line: check it against the same approval and seal the exact bytes the child must
             // read (the first hole of this round, docs/VAULT.md).
             seal_request(&mut launch, args.get("vault_approval").unwrap_or(&Value::Null), vault_launch)?;
+            let mut admitted = launch_context(launch, &args["_launch_cwd"]);
+            // A CONTROL start (the node's own SHORT read) is the only kind admitted into the two slots
+            // no workload may hold (item 7, round 2). lua/core/tools.lua clears this key on a model call,
+            // so it comes from the node's read paths only.
+            //
+            // AND SHORT IS PART OF THE RULE (session isolation, item 4 round 4): the reserve is what keeps
+            // the node able to ask a question while every workload slot is busy, so a start that runs for
+            // longer than CONTROL_MAX_SECONDS cannot hold one - a read-MCP session (3600 s) parked two
+            // reserved slots for an hour in round 3. A long start that asks for the reserve is demoted to
+            // a workload and TOLD, because a silently changed admission is a misleading result.
+            let asked_control = args["control"] == true;
+            let control_refused = reserve_refused(asked_control, seconds);
+            admitted.control = asked_control && !control_refused;
+            // The session that asked owns what it started, even when the launch context did not carry it
+            // (`launch_cwd` does; a caller that passes its own provenance may not).
+            if admitted.session.is_empty() {
+                admitted.session = args["session"].as_str().unwrap_or("").to_string();
+            }
             let id = manager()
-                .start(launch_context(launch, &args["_launch_cwd"]))
+                .start(admitted)
                 .map_err(|e| e.to_string())?;
             // The files were hashed BEFORE this spawn and the child opens them after it: a rewrite that
             // lands in that window is caught by neither hash alone. The same bytes are hashed again now,
@@ -1095,19 +1252,65 @@ pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<V
                 receipt["staged_script"] = json!(path.to_string_lossy());
                 receipt["staged_script_note"] = json!("the command was too long for the Windows command line and ran from this staged file; $0 is the file path, the script is not removed while the operation may still read it");
             }
+            if control_refused {
+                receipt["control_refused"] = json!(format!(
+                    "a start of {seconds}s is a workload, not a control call: the two reserved slots are kept for short calls (status, list, cancel, short reads, at most {}s)",
+                    wa_operation::CONTROL_MAX_SECONDS));
+            }
             for key in ["cwd", "cwd_requested", "cwd_source", "effective_cwd", "cwd_substitution", "cwd_note"] {
                 if let Some(value) = state.get(key) { receipt[key] = value.clone(); }
             }
             return Ok(receipt);
         }
-        "list" => return Ok(manager().list()),
-        "relevant" => manager().relevant(
-            args["cwd"].as_str().unwrap_or(""),
-            args["after"].as_str().unwrap_or(""),
-            args["limit"].as_u64().unwrap_or(64).min(256) as usize,
-        ),
+        // Every operation this session owns, and a count of the ones it does not. It used to answer
+        // with every operation on the node, which is how one session's build showed up as another's
+        // (session isolation, finding 2).
+        "list" => {
+            let items = manager().list().as_array().cloned().unwrap_or_default();
+            let (mine, elsewhere) = split_elsewhere(&caller, &items);
+            let count = mine.len();
+            let note = if elsewhere == 0 { String::new() } else {
+                format!("{elsewhere} other operation(s) on this node belong to other sessions; an explicit node scope (scope:\"node\", operator only) is the only way to see them")
+            };
+            return Ok(json!({"ok":true,"operations":mine,"operations_count":count,
+                "operations_elsewhere":elsewhere,"node_scope":caller.node_wide(),"note":note}));
+        }
+        // Relevance is a question about a *path*; `"*"` is the question about the whole node, so it is
+        // the operator's alone (session isolation, findings 2 and 8).
+        "relevant" => {
+            let cwd = args["cwd"].as_str().unwrap_or("");
+            // `"*"` is the whole node, so it is the node scope's question and nobody else's - not a
+            // session's, and not a sessionless caller's either: a caller that is not a session is not
+            // node-wide (item 7, round 2). The release path asks about ONE path and needs no scope.
+            if cwd == "*" && !caller.node_wide() {
+                return Ok(json!({"ok":false,"error":"relevant_node_scope_required","effect":"none",
+                    "note":"relevant with cwd:\"*\" asks about every path on the node: it needs an explicit node scope (scope:\"node\", operator only)"}));
+            }
+            manager().relevant(cwd, args["after"].as_str().unwrap_or(""), args["limit"].as_u64().unwrap_or(64).min(256) as usize,
+                    caller.session.as_str(), caller.node_wide())
+                .map(|mut answer| {
+                    // The session travels into relevance so an operation that recorded no directory is
+                    // relevant only to the session that ran it (session isolation, finding 8).
+                    answer["session"] = json!(caller.session);
+                    answer
+                })
+        }
         "index" => manager().import_index(args["evidence"].as_str().unwrap_or("")),
-        "reconcile" => manager().reconcile(args),
+        "reconcile" => {
+            // A reconciliation settles an operation whose owning PROCESS is gone - there is no session
+            // left to compare against, and the caller is deciding about effects it did not run. That is
+            // the operator's action, so it needs the explicit node scope, which is audited in Lua
+            // (session isolation, finding 2).
+            // NOT EVEN A SESSIONLESS CALLER reconciles without the scope (item 7, round 2): settling an
+            // operation nobody is left to answer for is the operator's act, and the node's own reconciler
+            // process holds the scope on its own behalf (it passes node_scope itself, and the audit line
+            // names the tool). What the empty session bought was a path around the decision.
+            if !caller.node_wide() {
+                return Ok(json!({"ok":false,"error":"reconcile_node_scope_required","effect":"none",
+                    "note":"reconciling settles an operation whose owner process is gone, so the request names no live session: it needs an explicit node scope (scope:\"node\", operator only)"}));
+            }
+            manager().reconcile(args)
+        }
         "quarantine_retire" => {
             if crate::serve::in_turn() || std::env::var("WASM_AGENT_IN_TURN").as_deref()==Ok("1") || std::env::var("WA_QUARANTINE_EXECUTOR").as_deref()!=Ok("1") {return Err("quarantine_requires_explicit_external_executor".into());}
             manager().quarantine_retire(args)
@@ -1118,12 +1321,21 @@ pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<V
         },
         "allocation_safety" => manager().allocation_safety(args),
         "identity" => manager().identity(),
-        "status" => manager().snapshot(id),
+        // Owned by the session that started it, or refused by name (session isolation, finding 2).
+        "status" => match owned(&caller, id)? {
+            Some(state) => Ok(state),
+            None => Ok(caller.refusal(id)),
+        },
         // Nobody is waiting for this operation any more: lower its CPU priority now that the fact is
         // known (18/11 round 3, item 5). The answer is the operation's state, with the priority it now
         // runs at; a failure to renice is recorded on that state, never turned into a failed call.
-        "background" => manager().background(id),
+        // The same ownership rule as every other action: another session's operation is refused by name.
+        "background" => match owned(&caller, id)? {
+            Some(_) => manager().background(id),
+            None => Ok(caller.refusal(id)),
+        },
         "await" => {
+            if owned(&caller, id)?.is_none() { return Ok(caller.refusal(id)); }
             // Foreground bash can complete while its adopted descendants remain supervised.
             // Default to the command boundary for those operations; explicit operation start
             // and wait_for=settled retain full process-tree settlement semantics.
@@ -1163,6 +1375,7 @@ pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<V
             }
         }
         "cancel" => {
+            if owned(&caller, id)?.is_none() { return Ok(caller.refusal(id)); }
             let stopped = manager().cancel(id);
             // A cancelled call is over: its row goes with it.
             crate::tool_progress::finish(id);
@@ -1172,6 +1385,7 @@ pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<V
         // `operation` tool's own loop, the window's `/operation` read): refresh the row while it
         // waits, so a long call that the model is watching says what it is doing.
         "wait" => {
+            if owned(&caller, id)?.is_none() { return Ok(caller.refusal(id)); }
             let budget = Duration::from_millis(args["wait_ms"].as_u64().unwrap_or(1000).min(10000));
             let started = std::time::Instant::now();
             loop {
@@ -1183,19 +1397,88 @@ pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<V
                 if started.elapsed() >= budget { return Ok(state); }
             }
         }
-        "read" => manager().read(
-            id,
-            args["stream"].as_str().unwrap_or("stdout"),
-            args["offset"].as_u64().unwrap_or(0),
-            args["limit"].as_u64().unwrap_or(8192) as usize,
-        ),
+        // An operation's output IS its content: reading another session's stdout is the leak this whole
+        // check exists to close, so the read is refused before a byte of the file is opened.
+        "read" => match owned(&caller, id)? {
+            Some(_) => manager().read(
+                id,
+                args["stream"].as_str().unwrap_or("stdout"),
+                args["offset"].as_u64().unwrap_or(0),
+                args["limit"].as_u64().unwrap_or(8192) as usize,
+            ),
+            None => Ok(caller.refusal(id)),
+        },
         _ => return Err("unknown_operation_action".into()),
     };
     result.map_err(|e| e.to_string())
 }
+/// One operation as a viewer may see it: the numbers, never the output. `session` is the conversation
+/// that owns it, so a viewer can tell its own work from the node's without reading anybody's tail.
+fn health_row(state: &Value) -> Value {
+    json!({"operation_id":state["operation_id"],"owner":state["owner"],"session":state["session"],
+        "state":state["state"],"elapsed_ms":state["elapsed_ms"],"timeout_ms":state["timeout_ms"],
+        "cleanup_budget_ms":state["cleanup_budget_ms"],"overdue":state["overdue"],
+        "output_bytes":state["output_bytes"]})
+}
+
+/// The node's own view: every unsettled operation. This is the supervisor's question ("is anything
+/// overdue?") and it names no viewer, so it stays node-wide - the sentinel reads it, and the id/owner
+/// it carries is a fact about this node, not about a session's work.
 pub fn health() -> Value {
     let entries = manager().list();
-    json!(entries.as_array().unwrap().iter().filter(|s|s["settled"]!=true).map(|s|json!({"operation_id":s["operation_id"],"owner":s["owner"],"state":s["state"],"elapsed_ms":s["elapsed_ms"],"timeout_ms":s["timeout_ms"],"cleanup_budget_ms":s["cleanup_budget_ms"],"overdue":s["overdue"],"output_bytes":s["output_bytes"]})).collect::<Vec<_>>())
+    json!(entries.as_array().unwrap().iter().filter(|s|s["settled"]!=true).map(health_row).collect::<Vec<_>>())
+}
+
+/// One session's view: the operations IT owns, and how many others are running.
+///
+/// `/health` answered with every operation on the node and no owner filter, so a window drew another
+/// session's operation as its own - and, with one row per node (finding 1), the tail of its output too
+/// (session isolation, finding 9). The aggregate is a count: no id, no owner, no session of anybody
+/// else's.
+pub fn health_scope(session: &str) -> Value {
+    health_scope_for(session, true, "")
+}
+
+/// The same answer, for the caller the ROUTE decided this request is (session isolation, item 6 round 4).
+///
+/// `node_wide` is not read from the query string any more: `lua/core/server.lua`'s
+/// `wa_health_scope` resolves the request's credential and says which view it may have. A caller with no
+/// credential at all is the node supervisor's own view - the sentinel's "is anything overdue?" question -
+/// and an authenticated caller with no conversation named sees the work under its own owner, never the
+/// node's.
+pub fn health_scope_for(session: &str, node_wide: bool, owner: &str) -> Value {
+    let caller = Caller { session: session.to_string(), node: node_wide, owner: owner.to_string() };
+    // The same rule as `list`: only unsettled operations are elsewhere, and one rule serves both.
+    let items = manager().list().as_array().cloned().unwrap_or_default();
+    let (ops, elsewhere) = split_elsewhere(&caller, &items);
+    // /health IS A NOW-VIEW: the caller's own operations THAT ARE RUNNING. `list` keeps a settled
+    // row so a caller can read back what it ran (item 1, round 5); a health page that listed finished
+    // work would answer "what is this node doing" with its history.
+    let mine: Vec<Value> = ops.iter().filter(|s| s["settled"] != true).map(health_row).collect();
+    json!({"session": session, "operations": mine, "operations_elsewhere": elsewhere,
+        "operations_scope": if session.is_empty() { "node" } else { "session" }})
+}
+
+/// Is a start that ASKED for the reserved control slots refused them, because it is not short?
+///
+/// The reserve keeps the node able to ask a short question while every workload slot is busy, so a start
+/// that lives longer than `wa_operation::CONTROL_MAX_SECONDS` is a workload however it asks (session
+/// isolation, item 4 round 4). One rule, one function, pinned by
+/// `a_long_start_cannot_take_the_reserved_control_slots`.
+pub(crate) fn reserve_refused(asked_control: bool, seconds: u64) -> bool {
+    asked_control && seconds > wa_operation::CONTROL_MAX_SECONDS
+}
+
+/// The count the progress row draws: the OTHER sessions' unsettled operations, for `session`.
+///
+/// The editor's row cannot reach this manager itself (wa-term is a leaf that knows nothing of the
+/// runtime), so the host asks here and hands the number to `wa_term::tool_progress::current`
+/// (session isolation, item 3 round 4). A settled operation is not counted, and one session holding four
+/// unsettled operations is counted as four.
+pub fn elsewhere_count(session: &str) -> usize {
+    let caller = Caller { session: session.to_string(), node: session.is_empty(), owner: String::new() };
+    let items = manager().list().as_array().cloned().unwrap_or_default();
+    split_elsewhere(&caller, &items).1
 }
 
 /// What a deadline can honestly say.
@@ -1231,6 +1514,126 @@ fn deadline_note(seconds: u64, state: &Value) -> String {
         None => format!(
             "the command did not finish within {seconds}s; its operation was terminated ({account})."
         ),
+    }
+}
+
+#[cfg(test)]
+mod elsewhere_count_tests {
+    use super::{split_elsewhere, Caller};
+    use serde_json::json;
+
+    /// Item 3 (round 4): "elsewhere" counts the OTHER sessions' UNSETTLED OPERATIONS.
+    ///
+    /// It used to count live progress files - one per session - so four unsettled operations in one
+    /// other session were announced as "node: 1 op elsewhere", and a settled operation went on being
+    /// counted for as long as its file survived. A settled operation is running nowhere.
+    #[test]
+    fn a_settled_operation_is_not_counted_elsewhere() {
+        let caller = Caller { session: "session-a".into(), node: false, owner: String::new() };
+        let items = vec![
+            json!({"operation_id":"op-1","session":"session-b","settled":false}),
+            json!({"operation_id":"op-2","session":"session-b","settled":false}),
+            json!({"operation_id":"op-3","session":"session-b","settled":false}),
+            json!({"operation_id":"op-4","session":"session-b","settled":false}),
+            json!({"operation_id":"op-5","session":"session-b","settled":true}),
+            json!({"operation_id":"op-6","session":"session-a","settled":false}),
+        ];
+        let (mine, elsewhere) = split_elsewhere(&caller, &items);
+        assert_eq!(elsewhere, 4, "four unsettled operations of ONE other session are four");
+        assert_eq!(mine.len(), 1, "and the caller's own unsettled operation is its own");
+        assert_eq!(mine[0]["operation_id"], json!("op-6"));
+    }
+
+    /// Item 4 (round 4): only SHORT control calls may take the reserved slots.
+    ///
+    /// Round 3 marked the read-MCP session `control=true` and it lives 3600 s, so it could hold both
+    /// reserved slots for an hour and the "cancel the runaway" path had nothing left to run in. A long
+    /// start is a workload, whatever it asks for.
+    #[test]
+    fn a_long_start_cannot_take_the_reserved_control_slots() {
+        use super::reserve_refused;
+        assert!(reserve_refused(false, 3600) == false, "a workload takes no reserve anyway");
+        assert!(reserve_refused(true, 5) == false, "a short control call keeps the reserve");
+        assert!(reserve_refused(true, wa_operation::CONTROL_MAX_SECONDS) == false, "the bound itself is short");
+        assert!(reserve_refused(true, wa_operation::CONTROL_MAX_SECONDS + 1), "one second past it is a workload");
+        assert!(reserve_refused(true, 3600), "the read-MCP session's 3600 s start is a workload");
+    }
+
+    /// A node-wide caller owns everything, and a settled row is still not running anywhere: the count
+    /// stays a count of WORK, not of the caller's reach.
+    ///
+    /// Item 1 (round 5) moved the settled filter from the WHOLE answer to the count alone, so this row
+    /// now owns BOTH: it reads back the one it ran - settled rows included - and still counts zero
+    /// elsewhere, because a settled operation is running nowhere.
+    #[test]
+    fn a_node_wide_caller_still_counts_only_unsettled_work_elsewhere() {
+        let caller = Caller { session: "".into(), node: true, owner: String::new() };
+        let items = vec![
+            json!({"operation_id":"op-1","session":"session-b","settled":false}),
+            json!({"operation_id":"op-2","session":"session-b","settled":true}),
+        ];
+        let (mine, elsewhere) = split_elsewhere(&caller, &items);
+        assert_eq!(mine.len(), 2, "a node-wide caller owns every row, settled or not");
+        let ids: Vec<&str> = mine.iter().filter_map(|s| s["operation_id"].as_str()).collect();
+        assert!(ids.contains(&"op-1") && ids.contains(&"op-2"), "both ids are listed: {ids:?}");
+        assert_eq!(elsewhere, 0, "and nothing is elsewhere to it");
+    }
+
+    /// ITEM 1 (round 5): a caller's OWN SETTLED OPERATION STAYS IN ITS OWN LIST.
+    ///
+    /// Round 4's `split_elsewhere` skipped every settled row before it asked whose it was, so a session
+    /// that ran a command which FAILED could not read the failure back: it vanished from `list` the
+    /// instant it settled. The count is the only thing settlement narrows.
+    #[test]
+    fn the_callers_own_failed_operation_stays_in_its_list() {
+        let caller = Caller { session: "session-a".into(), node: false, owner: String::new() };
+        let items = vec![
+            json!({"operation_id":"op-failed","session":"session-a","state":"failed","settled":true}),
+            json!({"operation_id":"op-theirs-settled","session":"session-b","state":"failed","settled":true}),
+            json!({"operation_id":"op-theirs-live","session":"session-b","state":"running","settled":false}),
+        ];
+        let (mine, elsewhere) = split_elsewhere(&caller, &items);
+        assert_eq!(mine.len(), 1, "exactly the caller's own row is its list");
+        assert_eq!(mine[0]["operation_id"], json!("op-failed"));
+        assert_eq!(mine[0]["state"], json!("failed"), "and it still says how it failed");
+        assert_eq!(elsewhere, 1, "another session's SETTLED row is not counted as running");
+    }
+
+    /// The Fleet View's incident line needs an id, and a settled operation row carries
+    /// `operation_id` - never `id`. The incident read `entry.id`, so a real failure was announced as
+    /// "operation ? settled as failed" (item 1, round 5).
+    #[test]
+    fn a_settled_operation_row_names_its_id_as_operation_id() {
+        let caller = Caller { session: "session-a".into(), node: false, owner: String::new() };
+        let items = vec![json!({"operation_id":"op-failed","session":"session-a","state":"failed",
+            "settled":true,"finished_at":1750000000000u64})];
+        let (mine, _) = split_elsewhere(&caller, &items);
+        assert_eq!(mine[0]["operation_id"], json!("op-failed"));
+        assert!(mine[0].get("id").is_none(), "the row has no bare `id` field to read instead");
+    }
+
+    /// ITEM 2 (round 5): a sessionless, ownerless caller owns a `worker:<n>` row ONLY when <n> is
+    /// the node thread it is itself running on.
+    ///
+    /// Rounds 2-4 matched `worker:*`, so ONE sessionless script owned EVERY thread's foreground
+    /// shell on a node where several scripts run at once. Narrowing it to the caller's own thread
+    /// keeps the row usable - the same caller must cancel and read back what host.exec adopted -
+    /// without handing it a sibling thread's work. Measured: the rows that depend on it run green
+    /// (test-exec-timeout 39 checks, test-bash-long-command 10, this mission's row 132).
+    #[test]
+    fn a_sessionless_caller_owns_only_its_own_threads_worker_row() {
+        let own = format!("worker:{}", crate::serve::node_thread_id());
+        let caller = Caller { session: String::new(), node: false, owner: String::new() };
+        let mine = json!({"operation_id":"op-own","owner":own,"session":"","settled":false});
+        assert!(caller.owns(&mine), "the caller's own thread's row is its own: {own}");
+        let sibling = json!({"operation_id":"op-sibling","owner":"worker:424242","session":"","settled":false});
+        assert!(!caller.owns(&sibling), "another node thread's row is NOT owned by an ownerless caller");
+        let named = json!({"operation_id":"op-read-mcp","owner":"mcp-read-session","session":"","settled":false});
+        assert!(!caller.owns(&named), "and neither is a row another NAMED owner started");
+        let empty = json!({"operation_id":"op-none","owner":"","session":"","settled":false});
+        assert!(caller.owns(&empty), "a row nobody named is the node tooling's own");
+        let a_session = json!({"operation_id":"op-sess","owner":own,"session":"session-a","settled":false});
+        assert!(!caller.owns(&a_session), "a session's row is that session's, whatever thread adopted it");
     }
 }
 
@@ -1344,7 +1747,7 @@ mod command_launch_tests {
         assert!(error.contains("shell_command_too_long"), "{error}");
     }
 
-    // `\` and `"` escape to two units, so a quote-heavy command reaches the bound sooner.
+    // `` and `"` escape to two units, so a quote-heavy command reaches the bound sooner.
     #[test]
     fn counts_quoting_overhead_towards_the_bound() {
         let command = "\"".repeat(WINDOWS_INLINE_COMMAND_BUDGET / 2 + 10);

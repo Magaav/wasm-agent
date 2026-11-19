@@ -213,6 +213,38 @@ pub fn remaining_budget() -> Option<Duration> {
 }
 
 /// A task as the runtime knows it. The public JSON form is `Task::view`.
+/// May a caller act on this child?
+///
+/// A child belongs to the SESSION TREE that started it (session isolation, finding 4). Every session on
+/// this node carries the operator's credential, so `owner_user` cannot tell one session's children from
+/// another's - it filters by user, and every session is the same user. The task record already carries
+/// `parent_session_id`; this walks it, so a session controls its own descendants (its children, and a
+/// grandchild a child started) and nothing else.
+///
+/// A caller that names no session keeps the user scope: a script, the node's control routes and the peer
+/// capability's own path are not sessions, and filtering them by a session they do not have would make the
+/// node unable to see its own children - an isolation that protects nobody and breaks the tooling.
+fn in_session_tree(tasks: &std::collections::HashMap<String, Task>, task: &Task, owner: &str, session: &str) -> bool {
+    if task.owner_user != owner { return false; }
+    if session.is_empty() { return true; }
+    let mut cursor = task.parent_session_id.clone();
+    // Bounded: a malformed chain (a cycle a bug wrote, a very deep tree) answers "no" instead of looping.
+    for _ in 0..64 {
+        if cursor.is_empty() { return false; }
+        if cursor == session { return true; }
+        // THE KEY IS THE CHILD ID, NOT THE SESSION ID. This used to climb with tasks.get(&cursor), where
+        // cursor is a SESSION id and the map is keyed by SUBAGENT id: the first step off a child never
+        // resolved, so a session could reach its own child and never a grandchild - the exact case the
+        // finding is about (item 4, round 2). The parent of this chain is the task whose own CHILD SESSION
+        // is the cursor.
+        match tasks.values().find(|parent| parent.session_id == cursor && parent.owner_user == owner) {
+            Some(parent) => cursor = parent.parent_session_id.clone(),
+            None => return false,
+        }
+    }
+    false
+}
+
 struct Task {
     id: String,
     spec: Value,
@@ -660,10 +692,10 @@ impl Manager {
         Ok(receipt)
     }
 
-    fn find(&self, id: &str, owner: &str) -> Result<Value, String> {
+    fn find(&self, id: &str, owner: &str, session: &str) -> Result<Value, String> {
         let tasks = self.inner.tasks.lock().map_err(|_| "subagent_state_poisoned".to_string())?;
         let task = tasks.get(id).ok_or("unknown_subagent")?;
-        if owner != task.owner_user {
+        if !in_session_tree(&tasks, task, owner, session) {
             return Err("forbidden_subagent".into());
         }
         Ok(task.view(true))
@@ -675,7 +707,7 @@ impl Manager {
         let text = args["text"].as_str().filter(|s| !s.trim().is_empty()).ok_or("text_required")?;
         let tasks = self.inner.tasks.lock().map_err(|_| "subagent_state_poisoned")?;
         let mut task = tasks.get(id).ok_or("unknown_subagent")?;
-        if task.owner_user != owner { return Err("forbidden_subagent".into()); }
+        if !in_session_tree(&tasks, task, owner, args["session"].as_str().unwrap_or_default()) { return Err("forbidden_subagent".into()); }
         // Follow the chain so messages from different windows serialize.
         while let Some(next) = tasks.values().find(|item| item.spec["after_id"].as_str() == Some(task.id.as_str())) {
             task = next;
@@ -695,11 +727,11 @@ impl Manager {
         self.start(&spec)
     }
 
-    fn list(&self, owner: &str) -> Value {
+    fn list(&self, owner: &str, session: &str) -> Value {
         let tasks = self.inner.tasks.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut items: Vec<Value> = tasks
             .values()
-            .filter(|task| task.owner_user == owner)
+            .filter(|task| in_session_tree(&tasks, task, owner, session))
             .map(|task| task.discovery_view())
             .collect();
         items.sort_by(|a, b| {
@@ -708,13 +740,13 @@ impl Manager {
         json!({ "subagents": items, "count": items.len() })
     }
 
-    fn lookup_session(&self, owner: &str, session: &str) -> Result<Value, String> {
+    fn lookup_session(&self, owner: &str, caller: &str, session: &str) -> Result<Value, String> {
         if session.is_empty() { return Err("conversation_id_required".into()); }
         let tasks = self.inner.tasks.lock().map_err(|_| "subagent_state_poisoned")?;
         // Owner filtering happens before selection: a foreign session is indistinguishable
         // from an absent one. Select the chain tail, including queued continuations.
         let owned: Vec<&Task> = tasks.values()
-            .filter(|task| task.owner_user == owner && task.session_id == session).collect();
+            .filter(|task| in_session_tree(&tasks, task, owner, caller) && task.session_id == session).collect();
         let latest = owned.iter().filter(|task| !owned.iter().any(|next|
             next.spec["after_id"].as_str() == Some(task.id.as_str())))
             .max_by(|a,b| a.created_at.partial_cmp(&b.created_at)
@@ -725,13 +757,13 @@ impl Manager {
         })
     }
 
-    fn await_task(&self, id: &str, owner: &str, wait_ms: u64) -> Result<Value, String> {
+    fn await_task(&self, id: &str, owner: &str, session: &str, wait_ms: u64) -> Result<Value, String> {
         let started = Instant::now();
         let limit = Duration::from_millis(wait_ms.min(600_000));
         let mut tasks = self.inner.tasks.lock().map_err(|_| "subagent_state_poisoned".to_string())?;
         loop {
             let task = tasks.get(id).ok_or("unknown_subagent")?;
-            if owner != task.owner_user {
+            if !in_session_tree(&tasks, task, owner, session) {
                 return Err("forbidden_subagent".into());
             }
             if task.settled {
@@ -776,10 +808,16 @@ impl Manager {
         }
     }
 
-    fn cancel(&self, id: &str, owner: &str) -> Result<Value, String> {
+    fn cancel(&self, id: &str, owner: &str, session: &str) -> Result<Value, String> {
         let mut tasks = self.inner.tasks.lock().map_err(|_| "subagent_state_poisoned".to_string())?;
+        // The check reads the map, the mutation takes it: a borrow of both at once is what made this
+        // filter impossible to extend when the session scope was added.
+        let allowed = {
+            let task = tasks.get(id).ok_or("unknown_subagent")?;
+            in_session_tree(&tasks, task, owner, session)
+        };
         let task = tasks.get_mut(id).ok_or("unknown_subagent")?;
-        if owner != task.owner_user {
+        if !allowed {
             return Err("forbidden_subagent".into());
         }
         if task.settled {
@@ -1098,6 +1136,7 @@ pub fn set_runner(runner: Runner) {
 /// caller-derived owner, never an owner the model supplied.
 pub fn control(action: &str, args: &Value) -> Result<Value, String> {
     let manager = manager();
+    let session = args["session"].as_str().unwrap_or_default();
     match action {
         "start" => manager.start(args),
         "continue" => manager.continue_session(args),
@@ -1106,14 +1145,14 @@ pub fn control(action: &str, args: &Value) -> Result<Value, String> {
         "status" | "result" => {
             let id = args["id"].as_str().unwrap_or_default();
             let owner = args["owner_user"].as_str().unwrap_or_default();
-            let mut value=manager.find(id, owner)?;
+            let mut value=manager.find(id, owner, session)?;
             if action=="status" { value.as_object_mut().unwrap().remove("result"); }
             Ok(value)
         }
         "events" => {
             let id=args["id"].as_str().unwrap_or_default();
             let owner=args["owner_user"].as_str().unwrap_or_default();
-            let task=manager.find(id,owner)?;
+            let task=manager.find(id,owner,session)?;
             for key in ["session_id", "attempt_id", "node_id", "event_node_id", "event_epoch"] {
                 if let Some(expected)=args.get(key) {
                     if expected != &task[key] { return Err(format!("native_event_identity_mismatch:{key}")); }
@@ -1134,21 +1173,22 @@ pub fn control(action: &str, args: &Value) -> Result<Value, String> {
         }
         "lookup_session" => manager.lookup_session(
             args["owner_user"].as_str().unwrap_or_default(),
+            session,
             args["conversation_id"].as_str().unwrap_or_default()),
         "list" => {
             let owner = args["owner_user"].as_str().unwrap_or_default();
-            Ok(manager.list(owner))
+            Ok(manager.list(owner, session))
         }
         "await" => {
             let id = args["id"].as_str().unwrap_or_default();
             let owner = args["owner_user"].as_str().unwrap_or_default();
             let wait = args["wait_ms"].as_u64().unwrap_or(60_000);
-            manager.await_task(id, owner, wait)
+            manager.await_task(id, owner, session, wait)
         }
         "cancel" => {
             let id = args["id"].as_str().unwrap_or_default();
             let owner = args["owner_user"].as_str().unwrap_or_default();
-            manager.cancel(id, owner)
+            manager.cancel(id, owner, session)
         }
         "resolve" => {
             let owner = args["owner_user"].as_str().unwrap_or_default();
@@ -1292,6 +1332,79 @@ mod tests {
     }
 
     #[test]
+    fn a_child_belongs_to_the_session_that_started_it() {
+        // Every session on this node carries the operator's credential, so `owner_user` cannot tell one
+        // session's children from another's: the parent SESSION does (session isolation, finding 4). This
+        // is the pair that used to be invisible - same user, two conversations.
+        let manager = Arc::new(Manager::with_root(temp_root("session-tree"), 4, 8));
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let wait = gate.clone();
+        let _ = manager.runner.set(Arc::new(move |_| {
+            let mut open = wait.0.lock().unwrap();
+            while !*open { open = wait.1.wait(open).unwrap(); }
+            Ok(json!({"state":"completed"}))
+        }));
+        let mut request = spec("child-a", "alice", "");
+        request["parent_session_id"] = json!("session-a");
+        let started = manager.start(&request).expect("the child starts");
+        let id = started["subagent_id"].as_str().unwrap_or("child-a").to_string();
+        // The session that started it reads, lists and cancels it.
+        assert!(manager.find(&id, "alice", "session-a").is_ok(), "the parent session owns its child");
+        assert_eq!(manager.list("alice", "session-a")["count"], json!(1));
+        // Another session of the SAME user does not - that is exactly the leak: both are the operator.
+        assert!(manager.find(&id, "alice", "session-b").is_err(), "another session cannot read it");
+        assert_eq!(manager.list("alice", "session-b")["count"], json!(0), "nor list it");
+        assert!(manager.cancel(&id, "alice", "session-b").is_err(), "nor cancel it");
+        // A caller that names no session keeps the user scope: a script and the node's control routes are
+        // not sessions, and refusing them would break the node's own tooling without protecting anybody.
+        assert!(manager.find(&id, "alice", "").is_ok());
+        // A different user is refused on both counts.
+        assert!(manager.find(&id, "mallory", "session-a").is_err());
+        *gate.0.lock().unwrap() = true;
+        gate.1.notify_all();
+    }
+
+    #[test]
+    fn a_grandchild_is_reachable_from_the_session_at_the_root() {
+        // THREE LEVELS, the shape the finding is about: the orchestrator starts a child, the child starts a
+        // grandchild. The map is keyed by SUBAGENT id and the chain carries SESSION ids, so the climb has
+        // to find the parent task BY ITS CHILD SESSION. The round-1 code looked a session id up in the map
+        // of child ids, failed on the first step off a child, and left every grandchild unreachable while
+        // its own one-level test still passed (item 4, round 2).
+        let manager = Arc::new(Manager::with_root(temp_root("session-tree-three"), 4, 8));
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let wait = gate.clone();
+        let _ = manager.runner.set(Arc::new(move |_| {
+            let mut open = wait.0.lock().unwrap();
+            while !*open { open = wait.1.wait(open).unwrap(); }
+            Ok(json!({"state":"completed"}))
+        }));
+        let mut child = spec("root-child", "alice", "");
+        child["parent_session_id"] = json!("session-root");
+        let child = manager.start(&child).expect("the child starts");
+        let child_id = child["subagent_id"].as_str().unwrap().to_string();
+        let child_session = child["session_id"].as_str().unwrap().to_string();
+        let mut grandchild = spec("root-grandchild", "alice", "");
+        grandchild["parent_session_id"] = json!(child_session);
+        let grandchild_id = manager.start(&grandchild).expect("the grandchild starts")["subagent_id"]
+            .as_str().unwrap().to_string();
+        // The orchestrator sees both of them: its own child, and the child's child.
+        assert_eq!(manager.list("alice", "session-root")["count"], json!(2), "the root session lists its subtree");
+        assert!(manager.find(&child_id, "alice", "session-root").is_ok());
+        assert!(manager.find(&grandchild_id, "alice", "session-root").is_ok(), "the root reaches its grandchild");
+        assert!(manager.await_task(&grandchild_id, "alice", "session-root", 1).is_ok(), "and awaits it");
+        assert!(manager.cancel(&grandchild_id, "alice", "session-root").is_ok(), "and cancels it");
+        // The child itself reaches its own child, and nothing above it.
+        assert!(manager.find(&grandchild_id, "alice", &child_session).is_ok());
+        assert!(manager.find(&child_id, "alice", &child_session).is_err(), "a child cannot reach its parent");
+        // A sibling session of the same user sees neither.
+        assert_eq!(manager.list("alice", "session-sibling")["count"], json!(0));
+        assert!(manager.find(&grandchild_id, "alice", "session-sibling").is_err());
+        *gate.0.lock().unwrap() = true;
+        gate.1.notify_all();
+    }
+
+    #[test]
     fn placement_limit_reserves_capacity_atomically() {
         let manager = Arc::new(Manager::with_root(temp_root("placement-limit"), 4, 8));
         let gate = Arc::new((Mutex::new(false), Condvar::new()));
@@ -1326,25 +1439,25 @@ mod tests {
         original["reasoning"] = json!("low");
         original["provider"] = json!("approved-provider");
         manager.start(&original).unwrap();
-        manager.await_task("original", "alice", 5000).unwrap();
+        manager.await_task("original", "alice", "", 5000).unwrap();
         let mut request = json!({"id":"original","owner_user":"mallory","new_id":"continued",
             "text":"new instruction","idempotency_key":"continuation"});
         assert_eq!(manager.continue_session(&request).unwrap_err(), "forbidden_subagent");
         request["owner_user"] = json!("alice");
         let receipt = manager.continue_session(&request).unwrap();
         assert_eq!(receipt["session_id"], original["session_id"]);
-        manager.await_task("continued", "alice", 5000).unwrap();
+        manager.await_task("continued", "alice", "", 5000).unwrap();
         let record: Value = serde_json::from_str(&std::fs::read_to_string(manager.inner.root.join("continued/record.json")).unwrap()).unwrap();
         assert_eq!(record["spec"]["allowed_tools"], json!(["read"]));
         assert_eq!(record["spec"]["model"], "approved-model");
         assert_eq!(record["spec"]["reasoning"], "low");
         assert_eq!(record["spec"]["provider"], "approved-provider");
-        let lookup = manager.lookup_session("alice", original["session_id"].as_str().unwrap()).unwrap();
+        let lookup = manager.lookup_session("alice", "", original["session_id"].as_str().unwrap()).unwrap();
         assert_eq!(lookup["task"]["subagent_id"], "continued");
         assert_eq!(lookup["task"]["freshness"], "native_snapshot");
-        assert_eq!(manager.lookup_session("mallory", original["session_id"].as_str().unwrap()).unwrap(), json!({"found":false}));
-        assert!(manager.lookup_session("alice", "").is_err());
-        for task in manager.list("alice")["subagents"].as_array().unwrap() {
+        assert_eq!(manager.lookup_session("mallory", "", original["session_id"].as_str().unwrap()).unwrap(), json!({"found":false}));
+        assert!(manager.lookup_session("alice", "", "").is_err());
+        for task in manager.list("alice", "")["subagents"].as_array().unwrap() {
             for key in ["prompt", "result", "preview", "accounting", "completion", "instructions", "context"] {
                 assert!(task.get(key).is_none(), "discovery leaked {key}");
             }
@@ -1367,7 +1480,7 @@ mod tests {
         manager.continue_session(&json!({"id":"lookup-original","owner_user":"alice",
             "new_id":"lookup-tail","text":"private fixture","idempotency_key":"lookup-next"})).unwrap();
         let session = original["session_id"].as_str().unwrap();
-        let active = manager.lookup_session("alice", session).unwrap();
+        let active = manager.lookup_session("alice", "", session).unwrap();
         // Release even if a later assertion fails, so the private runner cannot hang.
         *gate.0.lock().unwrap() = true;
         gate.1.notify_all();
@@ -1377,17 +1490,17 @@ mod tests {
         assert_eq!(active["task"]["after_id"], "lookup-original");
         assert_eq!(active["task"]["settled"], false);
         assert!(active.get("subagents").is_none());
-        assert_eq!(manager.lookup_session("alice", "missing-child-session").unwrap(), json!({"found":false}));
-        assert_eq!(manager.lookup_session("mallory", session).unwrap(), json!({"found":false}));
-        assert_eq!(manager.lookup_session("alice", "").unwrap_err(), "conversation_id_required");
-        manager.await_task("lookup-tail", "alice", 5000).unwrap();
-        let settled = manager.lookup_session("alice", session).unwrap();
+        assert_eq!(manager.lookup_session("alice", "", "missing-child-session").unwrap(), json!({"found":false}));
+        assert_eq!(manager.lookup_session("mallory", "", session).unwrap(), json!({"found":false}));
+        assert_eq!(manager.lookup_session("alice", "", "").unwrap_err(), "conversation_id_required");
+        manager.await_task("lookup-tail", "alice", "", 5000).unwrap();
+        let settled = manager.lookup_session("alice", "", session).unwrap();
         assert_eq!(settled["task"]["subagent_id"], "lookup-tail");
         assert_eq!(settled["task"]["settled"], true);
         // A recorded exact attempt is historical access, never silently retargeted.
-        assert_eq!(manager.find("lookup-original", "alice").unwrap()["subagent_id"], "lookup-original");
-        assert!(manager.find("lookup-original", "mallory").is_err());
-        assert!(manager.find(session, "alice").is_err());
+        assert_eq!(manager.find("lookup-original", "alice", "").unwrap()["subagent_id"], "lookup-original");
+        assert!(manager.find("lookup-original", "mallory", "").is_err());
+        assert!(manager.find(session, "alice", "").is_err());
     }
 
     /// A child session has one writer. The chain that serialized follow-ups lived
@@ -1417,7 +1530,7 @@ mod tests {
         let mut initial = spec("initial-child", "alice", "");
         initial["session_id"] = json!("child-session-shared");
         first.start(&initial).expect("start");
-        first.await_task("initial-child", "alice", 5_000).expect("await");
+        first.await_task("initial-child", "alice", "", 5_000).expect("await");
 
         // The second boot reads the durable records once, before any follow-up
         // exists; its map can never learn about one admitted later by the first.
@@ -1448,7 +1561,7 @@ mod tests {
                 "idempotency_key": "second-key"}))
             .unwrap_err();
         assert_eq!(refusal, "session_tail_unobserved:follow-up");
-        assert!(second.find("second-writer", "alice").is_err(), "a refused writer is not admitted");
+        assert!(second.find("second-writer", "alice", "").is_err(), "a refused writer is not admitted");
         assert!(
             std::fs::read_to_string(root.join("second-writer/record.json")).is_err(),
             "a refused writer must not write over the live task's record"
@@ -1471,7 +1584,7 @@ mod tests {
             cond.notify_all();
         }
         for id in ["follow-up", "queued-behind"] {
-            let settled = first.await_task(id, "alice", 5_000).expect("await");
+            let settled = first.await_task(id, "alice", "", 5_000).expect("await");
             assert_eq!(settled["state"], "completed");
         }
     }
@@ -1502,13 +1615,13 @@ mod tests {
         while started.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(5));
         }
-        assert_eq!(manager.find(id, "alice").expect("status")["state"], "running");
+        assert_eq!(manager.find(id, "alice", "").expect("status")["state"], "running");
         {
             let (lock, cond) = &*gate;
             *lock.lock().unwrap() = true;
             cond.notify_all();
         }
-        let settled = manager.await_task(id, "alice", 5_000).expect("await");
+        let settled = manager.await_task(id, "alice", "", 5_000).expect("await");
         assert_eq!(settled["state"], "completed");
         assert_eq!(settled["result"]["reply"], "child done");
         let record = std::fs::read_to_string(manager.inner.root.join(format!("{id}/record.json"))).expect("record");
@@ -1562,7 +1675,7 @@ mod tests {
         }
         // A child that reported nothing still settles normally, and its receipt says
         // usage is unavailable instead of showing a measured zero.
-        let silent = manager.await_task("silent-child", "leo", 5_000).expect("await");
+        let silent = manager.await_task("silent-child", "leo", "", 5_000).expect("await");
         assert_eq!(silent["state"], "completed");
         assert_eq!(silent["error"], Value::Null);
         assert_eq!(silent["result"]["reply"], "quiet");
@@ -1574,7 +1687,7 @@ mod tests {
         // A measured run carries the provider, the model that served it and the
         // provider's own totals, with the cache split out.
         manager.start(&spec("measured-child", "leo", "")).expect("start");
-        let measured = manager.await_task("measured-child", "leo", 5_000).expect("await");
+        let measured = manager.await_task("measured-child", "leo", "", 5_000).expect("await");
         assert_eq!(measured["accounting"]["provider"], "opencode-go");
         assert_eq!(measured["accounting"]["model"], "measured-model");
         let usage = &measured["accounting"]["usage"];
@@ -1589,7 +1702,7 @@ mod tests {
         // A provider reporting a real zero is a measurement, not an unknown: the
         // two are told apart by `available`, so `0` is never read as "missing".
         manager.start(&spec("zero-child", "leo", "")).expect("start");
-        let zero = manager.await_task("zero-child", "leo", 5_000).expect("await");
+        let zero = manager.await_task("zero-child", "leo", "", 5_000).expect("await");
         assert_eq!(zero["accounting"]["usage"]["available"], true);
         assert_eq!(zero["accounting"]["usage"]["prompt"], 0);
 
@@ -1599,7 +1712,7 @@ mod tests {
         assert!(record.contains("\"accounting\""), "the record must keep the accounting: {record}");
         let recovered = Manager::with_root(root, 2, 6);
         recovered.recover();
-        let reread = recovered.find("measured-child", "leo").expect("recovered status");
+        let reread = recovered.find("measured-child", "leo", "").expect("recovered status");
         assert_eq!(reread["accounting"]["model"], "measured-model");
         assert_eq!(reread["accounting"]["usage"]["prompt"], 120);
     }
@@ -1632,18 +1745,18 @@ mod tests {
         let manager = Manager::with_root(temp_root("owner"), 2, 6);
         let _ = manager.runner.set(Arc::new(|_receipt: &str| Ok(json!({"state": "completed", "result": {}}))));
         manager.start(&spec("owner-child", "dave", "")).expect("start");
-        assert_eq!(manager.find("owner-child", "erin").unwrap_err(), "forbidden_subagent");
-        assert_eq!(manager.cancel("owner-child", "erin").unwrap_err(), "forbidden_subagent");
-        assert_eq!(manager.await_task("owner-child", "erin", 10).unwrap_err(), "forbidden_subagent");
+        assert_eq!(manager.find("owner-child", "erin", "").unwrap_err(), "forbidden_subagent");
+        assert_eq!(manager.cancel("owner-child", "erin", "").unwrap_err(), "forbidden_subagent");
+        assert_eq!(manager.await_task("owner-child", "erin", "", 10).unwrap_err(), "forbidden_subagent");
     }
 
     fn wait_for_state(manager: &Manager, id: &str, owner: &str, wanted: &str) {
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline {
-            if manager.find(id, owner).expect("status")["state"] == wanted { return; }
+            if manager.find(id, owner, "").expect("status")["state"] == wanted { return; }
             std::thread::sleep(Duration::from_millis(5));
         }
-        panic!("child {id} did not reach {wanted}: {}", manager.find(id, owner).expect("status"));
+        panic!("child {id} did not reach {wanted}: {}", manager.find(id, owner, "").expect("status"));
     }
 
     /// A wait that reaches its bound is a visible deferred receipt, not a failure and not a
@@ -1677,7 +1790,7 @@ mod tests {
             }
             worst
         });
-        let view = manager.await_task("deferred-child", "alice", 900).expect("await");
+        let view = manager.await_task("deferred-child", "alice", "", 900).expect("await");
         let worst = sampler.join().unwrap();
         assert_eq!(view["settled"], false);
         assert_eq!(view["deferred"], true);
@@ -1687,13 +1800,13 @@ mod tests {
         assert_eq!(view["subagent_id"], "deferred-child");
         assert!(worst < 700, "the await must keep the node-thread beating; worst age {worst}ms");
         assert_eq!(calls.load(Ordering::SeqCst), 1, "a deferred wait must not start the child again");
-        assert_eq!(manager.list("alice")["count"], 1, "a deferred wait must not create another child");
+        assert_eq!(manager.list("alice", "")["count"], 1, "a deferred wait must not create another child");
         {
             let (lock, cond) = &*gate;
             *lock.lock().unwrap() = true;
             cond.notify_all();
         }
-        let settled = manager.await_task("deferred-child", "alice", 5_000).expect("settle");
+        let settled = manager.await_task("deferred-child", "alice", "", 5_000).expect("settle");
         assert_eq!(settled["state"], "completed");
         assert_eq!(settled["result"]["reply"], "late-child");
         assert_eq!(calls.load(Ordering::SeqCst), 1, "collection must not start another child");
@@ -1725,7 +1838,7 @@ mod tests {
         crate::host::set_run_cancel_probe(crate::serve::run_cancel_requested);
         crate::serve::test_set_run_cancel(Some(Arc::new(AtomicBool::new(true))));
         let started = Instant::now();
-        let view = manager.await_task("cancel-wait", "alice", 10_000).expect("await");
+        let view = manager.await_task("cancel-wait", "alice", "", 10_000).expect("await");
         let elapsed = started.elapsed();
         crate::serve::test_set_run_cancel(None);
         assert!(elapsed < Duration::from_secs(2), "a cancelled wait must answer promptly, took {elapsed:?}");
@@ -1734,7 +1847,7 @@ mod tests {
         assert_eq!(view["settled"], false);
         assert_eq!(view["deferred"], true);
         assert_eq!(view["subagent_id"], "cancel-wait");
-        assert_eq!(manager.find("cancel-wait", "alice").expect("status")["state"], "running",
+        assert_eq!(manager.find("cancel-wait", "alice", "").expect("status")["state"], "running",
             "a parent cancellation is not the child's cancellation");
         assert_eq!(calls.load(Ordering::SeqCst), 1, "an interrupted wait must not start the child again");
         {
@@ -1742,7 +1855,7 @@ mod tests {
             *lock.lock().unwrap() = true;
             cond.notify_all();
         }
-        let settled = manager.await_task("cancel-wait", "alice", 5_000).expect("settle");
+        let settled = manager.await_task("cancel-wait", "alice", "", 5_000).expect("settle");
         assert_eq!(settled["state"], "completed");
         assert_eq!(settled["result"]["reply"], "still-here");
     }
@@ -1800,7 +1913,7 @@ mod tests {
         // Recovery must mark a record from a foreign boot unknown, not replay it.
         let manager = Manager::with_root(root, 2, 6);
         manager.recover();
-        let view = manager.find("stale-child", "grace").expect("status");
+        let view = manager.find("stale-child", "grace", "").expect("status");
         assert_eq!(view["state"], "unknown");
         assert_eq!(view["settled"], true);
     }
@@ -1823,17 +1936,17 @@ mod tests {
         });
         manager.start(&spec("cancel-child", "heidi", "")).expect("start");
         let deadline = Instant::now() + Duration::from_secs(5);
-        while manager.find("cancel-child", "heidi").unwrap()["state"] == "accepted" && Instant::now() < deadline {
+        while manager.find("cancel-child", "heidi", "").unwrap()["state"] == "accepted" && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(5));
         }
-        let before = manager.cancel("cancel-child", "heidi").expect("cancel");
+        let before = manager.cancel("cancel-child", "heidi", "").expect("cancel");
         assert_eq!(before["state"], "running");
         {
             let (lock, cond) = &*gate;
             *lock.lock().unwrap() = true;
             cond.notify_all();
         }
-        let settled = manager.await_task("cancel-child", "heidi", 5_000).expect("await");
+        let settled = manager.await_task("cancel-child", "heidi", "", 5_000).expect("await");
         assert_eq!(settled["state"], "cancelled");
     }
 
@@ -1944,7 +2057,7 @@ mod tests {
         manager.start(&spec("health-1", "kate", "")).expect("start");
         manager.start(&spec("health-2", "kate", "")).expect("queued start");
         let deadline = Instant::now() + Duration::from_secs(3);
-        while manager.find("health-1", "kate").unwrap()["state"] != "running" && Instant::now() < deadline {
+        while manager.find("health-1", "kate", "").unwrap()["state"] != "running" && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(5));
         }
         let before = manager.summary();
@@ -1953,7 +2066,7 @@ mod tests {
         assert_eq!(before["active"], 2);
         // A requested cancellation is not a settlement: the task is active until
         // the execution actually stops.
-        manager.cancel("health-1", "kate").expect("cancel");
+        manager.cancel("health-1", "kate", "").expect("cancel");
         let during = manager.summary();
         assert_eq!(during["active"], 2, "a cancelling task is still active: {during}");
         {
@@ -1961,7 +2074,7 @@ mod tests {
             *lock.lock().unwrap() = true;
             cond.notify_all();
         }
-        manager.await_task("health-1", "kate", 3_000).expect("await");
+        manager.await_task("health-1", "kate", "", 3_000).expect("await");
     }
 
     #[test]
