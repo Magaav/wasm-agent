@@ -2028,6 +2028,7 @@ function METHODS:run_started()
 end
 
 function METHODS:run_finished()
+  self:turn_notes_flush()
   self:commentary_flush()
   self:progress("finish")
   self:clear()
@@ -2309,6 +2310,37 @@ local function bulletize(text, mark)
   return lead .. codes .. mark .. " " .. rest
 end
 M.bulletize = bulletize
+
+-- The stored <turn> block, as ONE line under the answer it was stripped from (#33, item 4). The
+-- block is evidence the fleet keeps, not something the reader asked for, so it must not compete with
+-- the answer: one dim row, its own line, and the whole block behind `host.transcript_expand` where
+-- the host can fold and open a row. Pure, so the shape is asserted without a terminal.
+function M.turn_note_line(note, width, options)
+  local o = options or {}
+  width = math.max(20, tonumber(width) or 80)
+  local value = type(note) == "table" and note or {}
+  local said = tostring(value.text or value.focus or value.hurt or "")
+  said = said:gsub("%s+", " ")
+  local block = tostring(value.block or "")
+  local full = block
+  if full == "" then
+    local parts = {}
+    for _, key in ipairs({ "hurt", "buys", "focus" }) do
+      local text = tostring(value[key] or "")
+      if text ~= "" then parts[#parts + 1] = key .. ": " .. text end
+    end
+    full = table.concat(parts, "\n")
+  end
+  local lead = "\226\151\140 turn \194\183 "
+  local room = math.max(8, width - columns(lead) - 14)
+  local shown = clip(said, room)
+  if shown == "" then shown = "(kept in the run journal)" end
+  local row = lead .. shown
+  local rest = columns(said) - columns(shown)
+  if rest > 0 and o.expandable then row = row .. " \226\128\166 +" .. rest .. " chars" end
+  local expand = (o.expandable and full ~= "") and full or nil
+  return { row = row, expand = expand, text = said, block = block }
+end
 
 -- The answer, then the numbers for the run that produced it. A reply that already
 -- streamed (a peer or a window run reaching this printer) is not printed twice.
@@ -2675,9 +2707,35 @@ function METHODS:event(event)
     -- Thinking, as it arrives: `✻ ` and the thought in gray on the same line, no title (operator 17/11).
     self.reasoning_streamed = true
     if (host.getenv("WASM_AGENT_CLI_THINKING") or ""):lower() ~= "off" then self:flow("think", event.text) end
+  elseif kind == "turn_note" then
+    -- The stored <turn> block (#33, item 4). It arrives while the run is still on its last step - the
+    -- split happens where the answer is composed - so it is HELD here and drawn by the run's own end,
+    -- under the answer it belongs under and before the run's numbers. Drawing it where it arrived would
+    -- put the evidence above the answer, which reads as a promise about something not yet written.
+    self.turn_notes = self.turn_notes or {}
+    self.turn_notes[#self.turn_notes + 1] = event
   elseif kind == "error" then
     self:clear()
     self:line(paint("! " .. tostring(event.error or "error"), "red", self.live))
+  end
+end
+
+-- One dim row per held note, under the answer. In the transcript the host folds it and opens the whole
+-- block on a click; in a captured log it is the row, and nothing is hidden behind it that a reader
+-- could not have had - `/turns` prints the same note from the journal.
+function METHODS:turn_notes_flush()
+  local notes = self.turn_notes
+  self.turn_notes = nil
+  if not notes then return end
+  local expandable = self:transcript() and host and type(host.transcript_expand) == "function" or false
+  for _, note in ipairs(notes) do
+    local line = M.turn_note_line(note, self.limit, { expandable = expandable })
+    if line.expand and expandable then
+      -- The marker reaches the host immediately before the write that draws the row: the host marks
+      -- lines of the NEXT write, as every other fold in this file does.
+      pcall(host.transcript_expand, json.encode({ { at = 0, text = line.expand } }))
+    end
+    self:line(paint(line.row, "dim", self.live))
   end
 end
 

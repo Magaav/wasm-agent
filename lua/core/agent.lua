@@ -3491,8 +3491,13 @@ function M:run_body(text, images)
         mode = turn_journal.mode_of(), model = tostring(self.model or ""), block = stripped.block,
       })
       if journal_note then
+        -- The fields travel with the event, not only the one-line summary: the reader's row is one dim
+        -- line under the answer and the whole block is what its fold opens (item 4), and a consumer that
+        -- had to re-read the journal to expand a row would make the row depend on a second read.
         self.emit({ type = "turn_note", message_id = message_id, note_id = journal_note,
-          text = stripped.note.focus ~= "" and stripped.note.focus or stripped.note.hurt })
+          text = stripped.note.focus ~= "" and stripped.note.focus or stripped.note.hurt,
+          hurt = stripped.note.hurt, buys = stripped.note.buys, focus = stripped.note.focus,
+          block = stripped.block })
       end
     end
   end)
