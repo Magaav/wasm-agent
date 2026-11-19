@@ -1,4 +1,12 @@
 if not host then error('node only') end
+-- This test sets its own mode: the leak net is armed on the NATIVE transports, and a gate row must
+-- not depend on the environment its caller happened to export (measured: without this the same row
+-- failed in the gate loop and passed when run by hand, which is the worst kind of test).
+local real_getenv = host.getenv
+host.getenv = function(key)
+  if key == 'WASM_AGENT_RAW_CODE' then return 'native' end
+  return real_getenv(key)
+end
 local raw = dofile('lua/core/raw_code.lua')
 local checks = 0
 local function ok(v, label) checks = checks + 1; if not v then error(label, 0) end end
