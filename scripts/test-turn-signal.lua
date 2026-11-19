@@ -102,31 +102,54 @@ local answer = table.concat({
   "</turn>",
 }, "\n")
 local split = journal.split(answer)
-eq(split.visible, "42", "#33: the visible answer is the answer alone, never the note")
+eq(split.visible, answer, "added: the visible answer IS the answer, block and all")
 ok(split.note ~= nil, "#33: the note is parsed")
 eq(split.note.hurt, "the run block tag was not read, so a step was redone.", "#33: what hurt is kept")
 eq(split.note.focus, "the run-block parser's tag rule.", "#33: focus is kept")
 ok(split.block ~= nil and split.block:find("<turn>", 1, true) == 1, "#33: the block itself is kept whole")
 
 -- Item 3 (review 19/11): every byte of answer text survives, before AND after the block.
+-- ITEM ADDED (Victor, 19/11 09:15): THE BLOCK STAYS IN THE ANSWER.
+--
+-- Why these replaced the strip-era assertions. change/turn-signal removed the <turn> block from the
+-- visible answer so it could not compete with an exact output format; Victor called that
+-- over-engineering for a temporary signal - "once we mature the harness we just remove it" - and
+-- asked for the strip to be undone. What must hold now:
+--   * split().visible is the text it was handed, BYTE FOR BYTE, with the block still in it;
+--   * the note is still parsed, and still journaled with its run's own facts;
+--   * an answer that is only a block is that block, not an empty string.
+-- The parse rules that were never about stripping - a tag that opens a line, a fence, an unclosed tag
+-- - are asserted exactly as before: they decide whether there is a NOTE, not whether there is text.
+local kept = journal.split(answer)
+eq(kept.visible, answer, "added: the answer keeps its block, byte for byte")
+ok(kept.visible:find("<turn>", 1, true) ~= nil, "added: and the block is really still in it")
+eq(kept.note.hurt, split.note.hurt, "added: the note is parsed exactly as before")
+eq(kept.block, split.block, "added: and the block is still returned as evidence")
+local only_block = journal.split("<turn>\n- **focus** - x\n</turn>")
+eq(only_block.visible, "<turn>\n- **focus** - x\n</turn>",
+  "added: an answer that was only the block is still the block")
+ok(only_block.note ~= nil and only_block.note.focus == "x", "added: and it is still a note")
 local tail_after = journal.split("<turn>\n- **focus** - the parser\n</turn>\n\n42")
-eq(tail_after.visible, "42", "#3: the text after a leading block is still the answer")
-ok(tail_after.note ~= nil, "#3: and the block is still the note")
+eq(tail_after.visible, "<turn>\n- **focus** - the parser\n</turn>\n\n42",
+  "added: a leading block stays, and so does the text after it")
+ok(tail_after.note ~= nil, "added: and the block is still the note")
 local ps = journal.split("Answer\n<turn>\n- **focus** - the parser\n</turn>\nP.S.")
-eq(ps.visible, "Answer\n\nP.S.", "#3: a postscript after the block is kept")
+eq(ps.visible, "Answer\n<turn>\n- **focus** - the parser\n</turn>\nP.S.",
+  "added: a postscript after the block stays, and so does the block")
 local unclosed = journal.split("Answer\n<turn>\n- **focus** - the parser")
 eq(unclosed.visible, "Answer\n<turn>\n- **focus** - the parser",
-  "#3: an unclosed <turn> is not stripped - it is text")
-ok(unclosed.note == nil, "#3: and it carries no note")
+  "added: an unclosed <turn> is text, and it is returned unchanged")
+ok(unclosed.note == nil, "added: and it carries no note")
 local two = journal.split("<turn>\n- **focus** - a\n</turn>\nmid\n<turn>\n- **focus** - b\n</turn>\ntail")
-eq(two.visible, "mid\n\ntail", "#3: two blocks are both removed, the text between them kept")
+eq(two.visible, "<turn>\n- **focus** - a\n</turn>\nmid\n<turn>\n- **focus** - b\n</turn>\ntail",
+  "added: two blocks stay, and the text between them stays")
 ok(two.note and two.note.focus:find("a", 1, true) and two.note.focus:find("b", 1, true),
-  "#3: and both notes are collected")
+  "added: and both notes are collected")
 local number_only = journal.split("42")
-eq(number_only.visible, "42", "#3: an answer with no tag is untouched, byte for byte")
+eq(number_only.visible, "42", "added: an answer with no tag is unchanged")
 
--- Item 1 (review 19/11): an answer with no closed <turn> block never passes through the seam
--- cleanup, so it comes back BYTE FOR BYTE. Each check is one shape the old blanket gsub destroyed.
+-- The shapes the old seam cleanup could have mangled: each now comes back byte for byte for the
+-- simplest possible reason - nothing is cut at all.
 local untouched = {
   { name = "indented code (the leading spaces ARE the code)", text = "    local x = 1\n        return x" },
   { name = "trailing spaces", text = "a line with trailing spaces   \nnext line  " },
@@ -137,33 +160,23 @@ local untouched = {
 }
 for _, case in ipairs(untouched) do
   local got = journal.split(case.text)
-  eq(got.visible, case.text, "#1: an answer without a block keeps " .. case.name)
-  ok(got.note == nil and got.block == nil, "#1: and " .. case.name .. " carries no note")
+  eq(got.visible, case.text, "added: an answer without a block keeps " .. case.name)
+  ok(got.note == nil and got.block == nil, "added: and " .. case.name .. " carries no note")
 end
 
--- The cleanup runs only at the cut a removed block makes, and nowhere else.
-local seam = journal.split("code   \n\n\n\n<turn>\n- **focus** - x\n</turn>\n\n\n\n42")
-eq(seam.visible, "code\n\n42", "#1: the cut collapses to one blank line; nothing away from it is touched")
-local lead = journal.split("<turn>\n- **focus** - x\n</turn>\n\n42")
-eq(lead.visible, "42", "#1: a block at the start leaves no leading blank line")
-local trail = journal.split("Answer  \n\n<turn>\n- **focus** - x\n</turn>")
-eq(trail.visible, "Answer", "#1: a block at the end leaves no trailing blank line")
-local only = journal.split("<turn>\n- **focus** - x\n</turn>")
-eq(only.visible, "", "#1: an answer that was only the block reads as empty, not as whitespace")
-
 local plain = journal.split("just an answer, no note")
-eq(plain.visible, "just an answer, no note", "#33: an answer without a note is unchanged")
-ok(plain.note == nil, "#33: and carries no note")
+eq(plain.visible, "just an answer, no note", "added: an answer without a note is unchanged")
+ok(plain.note == nil, "added: and carries no note")
 
 local mention = journal.split("The harness asks for a <turn> block at the end of every answer.")
-ok(mention.note == nil, "#33: a sentence that MENTIONS the tag is not a note")
+ok(mention.note == nil, "added: a sentence that MENTIONS the tag is not a note")
 eq(mention.visible, "The harness asks for a <turn> block at the end of every answer.",
-  "#33: and such a sentence is not stripped from the answer")
+  "added: and such a sentence is returned unchanged")
 
 local one_line = journal.split("TOOLS_OK\n\n<turn>\nnothing hurt, nothing to increment\n</turn>")
-eq(one_line.visible, "TOOLS_OK", "#33: an exact output format survives the note")
-ok(one_line.note and one_line.note.hurt:find("nothing hurt", 1, true), "#33: a one-line note is a note")
-
+eq(one_line.visible, "TOOLS_OK\n\n<turn>\nnothing hurt, nothing to increment\n</turn>",
+  "added: an exact output format keeps its block, right where the model put it")
+ok(one_line.note and one_line.note.hurt:find("nothing hurt", 1, true), "added: a one-line note is a note")
 -- Item 2 (review 19/11): the build is the SOURCE COMMIT the binary was built from, never the crate
 -- version. version is "0.1.0" for every build of this repo, so recording it claimed a known build
 -- that identified nothing.
@@ -260,8 +273,8 @@ local function source_of(path)
   return host.read_file(lua_root .. "/" .. path) or host.read_file(path) or ""
 end
 local agent_source = source_of("lua/core/agent.lua")
-ok(agent_source:find("The harness removes this block from the answer it shows", 1, true) ~= nil,
-  "#33: the envelope states that the harness removes the block")
+ok(agent_source:find("The block stays in your answer exactly where you write it", 1, true) ~= nil,
+  "added: the envelope tells the model its block is NOT removed from the answer")
 
 -- ---- #2: wa turns --day answers the day it was asked for ---------------------------------------
 -- The real dispatcher, not a copy of its rule: M.run is what "wa turns" calls, and the defect this
@@ -286,6 +299,89 @@ local bad_out, bad_code = captured(function() return cli.run({ "wa", "turns", "-
 eq(bad_code, 2, "#2: a malformed day is refused with a non-zero exit")
 ok(bad_out:find("turn_day_must_be_YYYY-MM-DD", 1, true) ~= nil,
   "#2: and the refusal names the format")
+
+-- ---- ADDED (Victor, 19/11 09:15): the answer keeps the block, and the journal row exists ---------
+-- The whole point of undoing the strip, asserted through the REAL agent loop with a stubbed provider
+-- (no network, no paid call) - the same fixture shape scripts/test-raw-code-answer.lua uses.
+--
+-- Two halves, and both have to hold together:
+--   1. what the run ANSWERS contains the <turn> block VERBATIM - same bytes, same place, block and
+--      all, so an operator reading the answer never has to learn that a section was cut from it;
+--   2. the run JOURNAL still has the row, with the session, the mission, the build, the mode and the
+--      three parsed fields - so the turns report keeps working on evidence nobody sees in the answer.
+-- A test of only the first half would pass while the journal stopped recording; only the second while
+-- the strip quietly came back.
+local answer_json = json
+local answer_real_getenv = host.getenv
+local answer_overrides = { WASM_AGENT_PROVIDER = "opencode-go", WASM_AGENT_LLM_API_KEY = "answer-fixture",
+  WASM_AGENT_LLM_MODEL = "deepseek-v4.1-flash", WASM_AGENT_PI_MODELS_STORE = "missing-test-store",
+  WASM_AGENT_CONTEXT_BUDGET = "0", WASM_AGENT_MAX_TOOL_ROUNDS = "2" }
+local answer_real_http = host.http
+host.getenv = function(k)
+  if answer_overrides[k] ~= nil then return answer_overrides[k] end
+  return answer_real_getenv(k)
+end
+host.http = function() error("network forbidden in the turn-signal answer fixture") end
+
+-- The answer the model "gives": a number, then the block. The number is what an operator asked for;
+-- the block is the friction, and it is the LAST thing in the message, exactly as the envelope asks.
+local BLOCK = table.concat({ "<turn>",
+  "- **what hurt** - the run block tag was not read, so a step was redone.",
+  "- **what it buys** - 2 fewer steps: the block runs the first time.",
+  "- **focus** - the run-block parser's tag rule.", "</turn>" }, "\n")
+local REPLY = "42\n\n" .. BLOCK
+host.http_stream = function()
+  return answer_json.encode({ status = 200, content = REPLY, stream_complete = true, finish_reason = "stop",
+    usage = { prompt_tokens = 100, completion_tokens = 20, total_tokens = 120 }, tool_calls = {} })
+end
+
+local answer_memory = dofile("lua/core/memory.lua")
+answer_memory.setup()
+local answer_agent = dofile("lua/core/agent.lua")
+local answer_session = answer_memory.start_session("", "turn-answer", { user_id = "master",
+  node_id = "", title = "the answer keeps its block" })
+local answer_events, answer_reply, answer_ok = {}, nil, false
+answer_ok, answer_reply = pcall(function()
+  return answer_agent.new(answer_session, function(event) answer_events[#answer_events + 1] = event end,
+    "master", "master", ""):run("compute it")
+end)
+host.getenv = answer_real_getenv
+host.http = answer_real_http
+
+ok(answer_ok, "added: the run with a <turn> block answers instead of failing: "
+  .. tostring(answer_reply):sub(1, 240))
+-- (1) THE ANSWER, VERBATIM. Not "contains the words" - the block's exact bytes, in order, in the
+-- answer the run returned, and the operator's 42 still in front of it.
+if answer_ok then
+  local reply_text = tostring(answer_reply or "")
+  eq(reply_text:find(BLOCK, 1, true), 5,
+    "added: the answer carries the whole block verbatim, right after the 42 and its blank line")
+  ok(reply_text:sub(1, 2) == "42", "added: and the operator's own answer is still first: "
+    .. reply_text:sub(1, 40))
+  eq(reply_text, REPLY, "added: the answer the run reports is the reply it was given, byte for byte")
+  ok(reply_text:find("\n\n<turn>", 1, true) == 3, "added: the blank line before the block survives")
+  -- The event still carries the parsed fields, for a consumer that wants them without the journal.
+  local saw_note = false
+  for _, event in ipairs(answer_events) do
+    if event.type == "turn_note" then
+      saw_note = true
+      eq(event.focus, "the run-block parser's tag rule.", "added: the note event carries focus")
+    end
+  end
+  ok(saw_note, "added: the note event is still emitted, so its fields travel with the run")
+end
+
+-- (2) THE JOURNAL ROW, read back through the session filter the turns report itself uses.
+local answer_rows = journal.recent({ session_id = answer_session, limit = 5 })
+eq(#answer_rows, 1, "added: exactly one journal row for the one note in the answer")
+if #answer_rows == 1 then
+  local got = answer_rows[1]
+  eq(got.session_id, answer_session, "added: the journal row names its session")
+  eq(got.focus, "the run-block parser's tag rule.", "added: and the focus, parsed out of the block")
+  eq(got.hurts, "the run block tag was not read, so a step was redone.", "added: and what hurt")
+  eq(got.buys, "2 fewer steps: the block runs the first time.", "added: and what it buys")
+  ok(got.block:find("<turn>", 1, true) == 1, "added: the journal row keeps the block itself as evidence")
+end
 
 -- ---- #34: the done gate, through the rule agent.lua itself applies -----------------------------
 -- `M.script_effect` is the function the dispatch loop calls at the codemode boundary, so these
@@ -377,47 +473,14 @@ if big_id then
     "#43: a body over the cap is cut to the 1 KiB floor")
   eq(type(cut) == "table" and cut.stdout_truncated, 3000, "#43: and the record says how large it was")
 end
--- ---- item 4: the stored block is ONE dim line under the answer, expandable ---------------------
 -- The view is the real module, driven by the same events the agent emits, with a captured writer: no
--- terminal, no transcript host. What is asserted is what the reader sees and where - the block never
--- competes with the answer, and the row still says which note it is.
-local cli_view = dofile("lua/core/cli_view.lua")
-local function view_recorder()
+-- terminal, no transcript host. Used by the row-order checks below.
+local view_recorder = function()
   local written = {}
   return { out = function(text) written[#written + 1] = tostring(text) end,
     text = function() return table.concat(written) end }
 end
-local rec = view_recorder()
-local view = cli_view.new({ out = rec.out, live = false, now = function() return 5 end, limit = 80 })
-view:run_started()
-view:event({ type = "turn_note", note_id = "note-1", text = "the parser's tag rule.",
-  hurt = "the run block tag was not read.", buys = "a smaller envelope.",
-  focus = "the parser's tag rule.", block = "<turn>\n- **focus** - the parser's tag rule.\n</turn>" })
-view:answered("42")
-local drawn = rec.text()
-ok(drawn:find("42", 1, true) ~= nil, "item 4: the answer is still the answer")
-ok(drawn:find("turn", 1, true) ~= nil and drawn:find("the parser's tag rule.", 1, true) ~= nil,
-  "item 4: the stored note is one line under the answer")
-ok(drawn:find("<turn>", 1, true) == nil, "item 4: the raw block is not pasted into the transcript")
-ok(drawn:find("42", 1, true) < drawn:find("turn ", 1, true), "item 4: the note comes after the answer, never above it")
--- The row is built by a pure function, so its shape is asserted without a terminal at all: an empty
--- note still says something exists, and the block is what the fold opens.
-local line = cli_view.turn_note_line({ text = "the parser's tag rule.", block = "<turn>\nx\n</turn>" }, 80,
-  { expandable = true })
-ok(line.row:find("turn", 1, true) ~= nil, "item 4: the row names the note")
-ok(line.expand ~= nil and line.expand:find("<turn>", 1, true) == 1, "item 4: the fold opens the whole block")
-local empty = cli_view.turn_note_line({}, 80, {})
-ok(empty.row ~= "" and empty.expand == nil, "item 4: a note with no field still draws a row, and nothing to open")
-local folded = cli_view.turn_note_line({ text = string.rep("word ", 60) }, 60, { expandable = true })
-ok(folded.row:find("chars", 1, true) ~= nil, "item 4: a long note is folded to one row with its size")
--- A note that arrives on a failed run is the same row: the evidence exists either way.
-local rec2 = view_recorder()
-local view2 = cli_view.new({ out = rec2.out, live = false, now = function() return 5 end, limit = 80 })
-view2:run_started()
-view2:event({ type = "turn_note", text = "the tool schema's name rule." })
-view2:failed("provider_timeout")
-local drawn2 = rec2.text()
-ok(drawn2:find("turn", 1, true) ~= nil, "item 4: a run that failed still shows the note it stored")
+local cli_view = dofile("lua/core/cli_view.lua")
 
 -- ---- item 8: the done-gate notice is its own row, never glued onto other text ---------------
 -- Measured on the view before the fix: a notice arriving while the answer was still a partial
@@ -510,8 +573,11 @@ ok(fenced.block == nil, "item 4: a <turn> inside a fence is not stripped as a no
 eq(fenced.visible, shown, "item 4: and the answer it was shown in is unchanged")
 local after_fence = journal.split(fence .. "\n<turn>code</turn>\n" .. fence
   .. "\n<turn>\n- **focus** - real\n</turn>\n42")
-eq(after_fence.visible, fence .. "\n<turn>code</turn>\n" .. fence .. "\n\n42",
-  "item 4: the fenced one stays, the real one after it is still the note")
+eq(after_fence.visible, fence .. "\n<turn>code</turn>\n" .. fence
+  .. "\n<turn>\n- **focus** - real\n</turn>\n42",
+  "added: the fenced one stays AND the real one after it stays; only the note is taken")
+ok(after_fence.note ~= nil and after_fence.note.focus == "real",
+  "added: and the real block after the fence is still the note")
 ok(after_fence.note and after_fence.note.focus:find("real", 1, true) ~= nil,
   "item 4: and the real block is the note")
 print(string.format("turn-signal: %d checks, %d failed", checks, failed))

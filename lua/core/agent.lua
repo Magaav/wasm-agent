@@ -28,7 +28,7 @@ local run_failure = dofile("lua/core/run_failure.lua")
 -- A tool result is a fact the harness produces (18/11, session 100c54ab): the detector that keeps a
 -- message imitating one from becoming the answer.
 local fake_answer = dofile("lua/core/fake_answer.lua")
--- The turn note (#33): kept on every turn, stripped from the visible answer into the run journal
+-- The turn note (#33): kept on every turn, parsed into the run journal and LEFT IN THE ANSWER
 -- (lua/core/turn_journal.lua, docs/TURNS.md).
 local turn_journal = dofile("lua/core/turn_journal.lua")
 -- WASM_AGENT_RAW_CODE (default off): a ```js run block in the reply becomes a codemode call.
@@ -264,7 +264,7 @@ local function generic_sections(role, declared, available)
     "- **what it buys** - say which, with a number: fewer steps to the same result, or only better context (the same steps in fewer tokens, clearer state). Never claim one when it is the other;",
     "- **focus** - exactly ONE point: the highest-value harness optimisation this turn exposed. One point per answer, only when there is something to increment; no list, no filler, no restating the task.",
     "If nothing hurt your reasoning and nothing should be incremented, say so in one line and stop.",
-    "The harness removes this block from the answer it shows, and stores it in the run journal (session, mission, build, mode and the three fields); it never competes with an exact output format a request asks for, so an answer that must be only a number, a JSON body or one word still carries the block after it.",
+    "The block stays in your answer exactly where you write it - it is not removed from what the reader sees - and it is also stored in the run journal (session, mission, build, mode and the three fields) so the fleet can read the friction without parsing a transcript.",
   }, "\n")
   return s
 end
@@ -3762,32 +3762,36 @@ function M:run_body(text, images)
   -- about, and append_turn uses the same one so the topic and the ledger agree.
   local message_id = reply_message_id or host.uuid()
   -- The turn note (#33, operator 19/11: ensure models output their friction so we can focus and nail
-  -- it). The block is KEPT - it is the fleet own evidence about its harness - and REMOVED from the
-  -- text the reader and the caller see, so it never competes with an exact output format an operator
-  -- asked for (a number, a JSON body, one word). The transcript row keeps it whole: lua/core/turnfeed.lua
-  -- groups the notes from the ledger, and a stripped row would erase the corpus that queue is ranked on.
-  local stripped, journal_note = nil, nil
+  -- it). The block is KEPT - it is the fleet own evidence about its harness - and it STAYS IN THE
+  -- ANSWER (Victor, 19/11 09:15): removing it from what the reader sees was over-engineering for a
+  -- temporary signal, "once we mature the harness we just remove it". Nothing is cut from the reply
+  -- any more, so the answer the reader gets, the answer a parent reads and the answer the ledger
+  -- keeps are one and the same text. What the split still does is PARSE the note out of it, into the
+  -- run journal, where the three fields and the block ride with the run's own facts. The event is
+  -- still emitted for a consumer that wants the fields, but the view no longer draws a row for it:
+  -- the block is already in the answer, right where the model wrote it.
+  local parsed, journal_note = nil, nil
   pcall(function()
-    stripped = turn_journal.split(reply)
-    if stripped and stripped.note then
-      journal_note = turn_journal.record(stripped.note, {
+    parsed = turn_journal.split(reply)
+    if parsed and parsed.note then
+      journal_note = turn_journal.record(parsed.note, {
         session_id = self.session_id, run_id = self.run_id, message_id = message_id,
         mission = turn_journal.mission_of(self.session_id), build = turn_journal.build_of(),
-        mode = turn_journal.mode_of(), model = tostring(self.model or ""), block = stripped.block,
+        mode = turn_journal.mode_of(), model = tostring(self.model or ""), block = parsed.block,
       })
       if journal_note then
-        -- The fields travel with the event, not only the one-line summary: the reader's row is one dim
-        -- line under the answer and the whole block is what its fold opens (item 4), and a consumer that
-        -- had to re-read the journal to expand a row would make the row depend on a second read.
+        -- The fields travel with the event so a consumer never has to re-read the journal to learn
+        -- them. The visible answer does NOT depend on this succeeding: it is the reply either way.
         self.emit({ type = "turn_note", message_id = message_id, note_id = journal_note,
-          text = stripped.note.focus ~= "" and stripped.note.focus or stripped.note.hurt,
-          hurt = stripped.note.hurt, buys = stripped.note.buys, focus = stripped.note.focus,
-          block = stripped.block })
+          text = parsed.note.focus ~= "" and parsed.note.focus or parsed.note.hurt,
+          hurt = parsed.note.hurt, buys = parsed.note.buys, focus = parsed.note.focus,
+          block = parsed.block })
       end
     end
   end)
-  -- The visible answer, and the one the run reports as its outcome: the block is part of neither.
-  local answer = stripped and stripped.visible or reply
+  -- The visible answer, and the one the run reports as its outcome: it is the reply, whole. The note
+  -- is kept in the journal beside it, never cut out of it (Victor, 19/11 09:15).
+  local answer = reply
   record_turn(self, {
     id = message_id,ok=completed,
     role = "assistant", content = reply, reasoning=reply_reasoning, phase=reply_phase,

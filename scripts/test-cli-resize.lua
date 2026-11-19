@@ -15,6 +15,7 @@
 -- (`METHODS:refresh_limit`).
 local cli_view = dofile("lua/core/cli_view.lua")
 local codemode_block = dofile("lua/core/codemode_block.lua")
+local markdown = dofile("lua/core/markdown.lua")
 
 local failed, checks = 0, 0
 local function ok(condition, label)
@@ -27,6 +28,43 @@ local function visible(text)
   return (tostring(text):gsub("\27%[[%d;]*m", ""):gsub("\27%]2;[^\7]*\7", ""))
 end
 local function width_of(text) return cli_view.columns(visible(text)) end
+
+-- ---- ITEM F: a painted row carries no padding for a shrink to re-wrap ---------------------------
+--
+-- The finding (Victor, 19/11 11:20): shrinking the terminal broke already-printed backgrounded blocks
+-- into ragged lines. The cause was that a band painted its rest with SPACES, and padding is
+-- characters - so a narrower terminal wraps them into rows of their own. The rows now end with EL
+-- (ESC[K), which erases in the row's background colour and stops at the screen edge, whatever the
+-- width is. This asserts the property twice: no painted row carries trailing pad spaces, and the
+-- printed text of a row is never wider than the terminal it was drawn for.
+do
+  local band_rows = {}
+  local model = codemode_block.new({ code = "const a = await tools.ls({path: 'lua/core'});" }, 0)
+  codemode_block.finish(model, { ok = true, value = 1 }, 0.1)
+  -- LIVE and syntax-highlighted, which is what puts the block on its band: a plain (captured) render
+  -- carries no colour at all and could not show what a backgrounded block does on a resize.
+  local opts = { columns = cli_view.columns, live = true, syntax = markdown.scan_code,
+    paint = function(text, style) return cli_view.paint(text, style, true) end }
+  for _, row in ipairs(codemode_block.lines(model, 120, opts)) do band_rows[#band_rows + 1] = row end
+  local painted = 0
+  for _, row in ipairs(band_rows) do
+    if row:find("\27%[48;2;", 1) then painted = painted + 1 end
+    ok(not row:find("%s+\27%[K"), "a painted row carries no pad space before the erase: " .. row:sub(1, 60))
+    ok(not row:find("\27%[K%s"), "and nothing but the reset follows the erase")
+    local text = visible((row:gsub("\27%[K", "")))
+    ok(text:match("%s*$") == "", "the row ends on its last character, so a narrow terminal has nothing to wrap: [" .. text:sub(-12) .. "]")
+  end
+  ok(painted > 0, "the block really draws painted rows, so the checks above are not vacuous")
+  -- No row is wider than the terminal it was drawn for, so reflowing one at 60 cannot split it.
+  local too_wide = 0
+  for _, row in ipairs(band_rows) do
+    if width_of(row:gsub("\27%[K", "")) > 120 then too_wide = too_wide + 1 end
+  end
+  ok(too_wide == 0, "and no row is wider than the width it was drawn for, so reflowing it at 60 cannot split it")
+end
+
+
+
 
 -- Every component this mission names, as the rows it draws at the width the view has NOW. Each is a
 -- function of the view, so the same list is re-rendered after every resize.

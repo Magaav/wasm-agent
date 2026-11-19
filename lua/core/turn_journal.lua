@@ -6,16 +6,15 @@
 -- harness, and it must stay: what changes is where it lands.
 --
 -- Two facts decide the shape of this module:
---   1. the block is KEPT, every turn, and the harness REMOVES it from the visible answer. It therefore
---      never competes with an exact output format an operator asked for (`TOOLS_OK`, a JSON body, a
---      number): the answer is the answer, and the friction rides beside it.
+--   1. the block is KEPT, every turn, AND IT STAYS IN THE ANSWER (Victor, 19/11 09:15: removing it from
+--      what the reader sees was over-engineering for a temporary signal - "once we mature the harness
+--      we just remove it"). Nothing is cut from the reply any more: `M.split` parses, it does not
+--      strip, and the transcript and the answer are the same bytes.
 --   2. it is STORED in the run journal with the run's own facts (session, mission, build, mode and the
 --      three fields), so a reader can ask "what hurt, on which build, in which mode" without parsing
 --      a transcript - and `wa turns --day` can print a day's themes and counts for docs/evolution.
 --
--- The transcript keeps the block: lua/core/turnfeed.lua reads it from the message content and its
--- grouping is measured against that corpus. This module adds the journal row and answers the visible
--- text; it never rewrites the ledger.
+-- This module adds the journal row and answers the note it parsed; it never rewrites the ledger.
 local json = dofile("lua/vendor/json.lua")
 local M = {}
 
@@ -83,39 +82,23 @@ local function heading(line)
   return nil
 end
 
--- Split one answer into the text a reader sees and the note it carried.
---   { visible = <answer without the block>, note = {hurt,buys,focus} | nil, block = <the raw block> }
+-- Split one answer into the note it carried, LEAVING THE ANSWER INTACT.
+--   { visible = <the answer, byte for byte, block included>, note = {hurt,buys,focus} | nil,
+--     block = <the raw block> }
 --
--- Item 3 (review 19/11): the split keeps EVERY byte of answer text, before and after the block. The
--- first version cut the answer at the opening tag and dropped everything after the closing one, so
--- an answer of "<turn>..</turn>\n\n42" lost its 42 and a postscript after the block vanished - the
--- exact text the operator asked for, deleted to hide a note. The rule now:
---   * a CLOSED block is removed whole, wherever it sits, and the text on both sides is kept as it
---     was (blank lines the removal leaves behind are collapsed, so an answer that was only the block
---     reads as empty rather than as leftover whitespace);
---   * an UNCLOSED <turn> is NOT stripped: a model that ran out of output wrote text, not a section,
---     and guessing where that text ends is how an answer gets truncated. It stays in the visible
---     answer and carries no note.
--- Several blocks: every closed one is removed and its fields are collected in order.
--- The whitespace a removed block leaves at its cut, and nothing else.
+-- `visible` keeps its name because every caller asks for it by that name, but it is no longer "the
+-- answer with the note removed": it is the text this function was handed, unchanged (Victor, 19/11
+-- 09:15). The block stays where the model wrote it, so an answer that was only the block is that
+-- block, and text before or after it is never cut, collapsed or re-spaced.
 --
--- Item 1 (review 19/11): the cleanup is the SEAM's. An answer with no closed block is returned byte
--- for byte - its indentation (the leading spaces ARE the code), its trailing spaces, its markdown hard
--- breaks (two trailing spaces) and its blank first or last line all survive, because nothing was cut.
--- Only a removal can leave whitespace behind, and only at that cut: the spaces the cut stranded on the
--- last line before it go, and the newlines from both sides become one blank line between two pieces of
--- text and no line at all against the start or the end of the answer. Nothing away from a cut is
--- touched, so "code  \n\n<turn>..</turn>\n\n42" keeps its trailing spaces and its blank lines.
-local function seam(left, right)
-  local left_body, left_newlines = left:match("^(.-)(\n*)$")
-  local right_newlines, right_body = right:match("^(\n*)(.*)$")
-  left_body = left_body:gsub("[ \t]+$", "")
-  local between = 0
-  if left_body ~= "" and right_body ~= "" then
-    between = (#(left_newlines .. right_newlines) >= 2) and 2 or #(left_newlines .. right_newlines)
-  end
-  return left_body .. string.rep("\n", between) .. right_body
-end
+-- What this function still does is PARSE, and the parse has to be careful:
+--   * a block only counts when its tag OPENS A LINE - a sentence that mentions `<turn>` is talking
+--     about the section, not writing one;
+--   * a block inside a fenced code region is CODE the answer is showing (an example, a quoted
+--     format), never the answer's own note;
+--   * an UNCLOSED `<turn>` carries no note, because guessing where that text ends is how an answer
+--     gets truncated.
+-- Several closed blocks contribute their fields in order.
 
 -- Fenced code regions: a line opening a fence of three or more backticks or tildes closes at a line
 -- with at least as many of the same character. A <turn> inside one is CODE the answer is showing - an
@@ -150,10 +133,10 @@ end
 
 function M.split(content)
   local text = type(content) == "string" and content or ""
-  local visible, blocks, fields = {}, {}, { hurt = {}, buys = {}, focus = {} }
+  local blocks, fields = {}, { hurt = {}, buys = {}, focus = {} }
   local order = {}
   local spans = fence_spans(text)
-  local cursor, search = 1, 1
+  local search = 1
   while true do
     local found = block_start(text:sub(search))
     if not found then break end
@@ -166,7 +149,6 @@ function M.split(content)
       local stop = text:find("</turn>", body_at, true)
       if not stop or in_spans(spans, stop) then break end -- unclosed: the rest is answer text
       local inner = text:sub(body_at, stop - 1)
-      visible[#visible + 1] = text:sub(cursor, start - 1)
       blocks[#blocks + 1] = text:sub(start, stop + 6)
       local current = nil
       for line in (inner .. "\n"):gmatch("([^\n]*)\n") do
@@ -179,14 +161,9 @@ function M.split(content)
           fields[current][#fields[current] + 1] = trim(line)
         end
       end
-      cursor = stop + 7
-      search = cursor
+      search = stop + 7
     end
   end
-  -- Everything after the last block is answer text, and it goes back exactly as it was.
-  visible[#visible + 1] = text:sub(cursor)
-  local joined = visible[1] or ""
-  for index = 2, #visible do joined = seam(joined, visible[index]) end
   local block = #blocks > 0 and table.concat(blocks, "\n") or nil
   local note = nil
   if block then
@@ -205,7 +182,8 @@ function M.split(content)
       if note and #note[key] > M.MAX_FIELD then note[key] = note[key]:sub(1, M.MAX_FIELD) end
     end
   end
-  return { visible = joined, note = note, block = block }
+  -- The answer is the answer: visible is the text this function was handed, byte for byte.
+  return { visible = text, note = note, block = block }
 end
 
 -- ---------------------------------------------------------------- the journal row

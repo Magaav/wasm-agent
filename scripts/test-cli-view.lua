@@ -34,7 +34,7 @@ end
 -- what happened when this view moved from six literal colours to pi's roles. The colour
 -- assertions below name the role instead of the escape, so they still say which colour.
 local function visible(text)
-  return (tostring(text):gsub("\27%[[%d;]*m", ""):gsub("\27%]2;[^\7]*\7", ""))
+  return (tostring(text):gsub("\27%[[%d;]*m", ""):gsub("\27%[K", ""):gsub("\27%]2;[^\7]*\7", ""))
 end
 
 -- ---- what a call is ------------------------------------------------------------
@@ -782,7 +782,12 @@ screen_view:accepted("two\nlines")
 local turn_rows = visible(since(screen_out, mark))
 ok(has(turn_rows, "\226\157\175 two") and has(turn_rows, "  lines"), "a second line sits under the first one's text")
 local bar = since(screen_out, mark):match("\27%[48;2;68;68;68m([^\27]*)") or ""
-ok(view_lib.columns(bar) == screen_view.limit - 1, "the grey bar counts `❯` as one cell, not three bytes, and leaves the scrollbar its column: " .. view_lib.columns(bar))
+  local band = since(screen_out, mark)
+  ok(band:find("\27%[48;2;68;68;68m", 1) ~= nil, "the accepted line is painted on a grey band")
+  -- ITEM F: the band ends with the background-colour erase, so it paints to the edge of the screen
+  -- at ANY width and carries no pad space a narrow terminal could re-wrap.
+  ok(band:find("\27%[K", 1) ~= nil, "and the row closes with ESC[K instead of a run of spaces")
+  ok(not band:find("\27%[48;2;68;68;68m[^\27]* \27%[K"), "with no pad space before the erase")
 -- A long line is wrapped, never clipped with … (operator 17/11: what the reader sent is shown in full).
 do
   local long_mark = #screen_out
@@ -791,6 +796,56 @@ do
   local rows = visible(since(screen_out, long_mark))
   ok(has(rows, "fim") and not has(rows, "\226\128\166"), "a long message is wrapped whole, no …: " .. rows:sub(1, 200))
 end
+--
+-- ITEM D (Victor, 19/11 11:15): THE BUBBLE WRAPS AT SPACES, NEVER MID-WORD.
+--
+-- His screenshot showed "nee|d", "he|re", "notati|on", "lin|e": the wrapper cut at the exact cell, so
+-- every row ended inside a word. The rule is the ordinary one - break at the last space that fits, and
+-- go inside a word only when that word alone is wider than the row - and it lives in ONE function
+-- (codemode_block.wrap) the bubble, the code band and the notices all go through.
+do
+  local wrap = dofile("lua/core/codemode_block.lua").wrap
+  local cols = function(text) return view_lib.columns(text) end
+  local said = "preciso que a anotacao na linha aqui seja quebrada nas palavras e nunca no meio dela"
+  for _, width in ipairs({ 60, 80, 120 }) do
+    local rows = wrap(said, width, { columns = cols })
+    eq(table.concat(rows, " "), said, "item D @" .. width .. ": the wrap keeps every character, in order")
+    -- Each row is a contiguous slice of what was said, and the character where a row STOPS is a
+    -- space in the original: that is what "never inside a word" means, and adjacency between two rows
+    -- cannot show it (the break swallows the space, so the two rows abut).
+    local at, broken = 1, 0
+    for index = 1, #rows do
+      local row = rows[index]
+      if said:sub(at, at + #row - 1) ~= row then broken = broken + 1 end
+      at = at + #row
+      if index < #rows then
+        if said:sub(at, at) ~= " " then broken = broken + 1 end
+        while said:sub(at, at) == " " do at = at + 1 end
+      end
+    end
+    eq(broken, 0, "item D @" .. width .. ": every row is a slice of the text and every break falls on a space")
+    for _, row in ipairs(rows) do
+      ok(cols(row) <= width, "item D @" .. width .. ": every row fits the width: " .. row)
+    end
+  end
+  local url = "https://example.com/" .. string.rep("a", 90)
+  local pieces = wrap(url, 40, { columns = cols })
+  ok(#pieces > 1 and table.concat(pieces, "") == url,
+    "item D: one word wider than the row is broken inside itself, and stays whole across its rows")
+  for _, row in ipairs(pieces) do ok(cols(row) <= 40, "item D: and each of its rows still fits: " .. row) end
+  eq(#wrap("curto", 80, { columns = cols }), 1, "item D: a line that fits is one row")
+
+  -- CODE IS NOT PROSE (review, item D): a code band is cut by CELLS. Breaking it at a space drops
+  -- that space and changes what the line says, which is not the trade a code block may make.
+  local cells = dofile("lua/core/codemode_block.lua").wrap_cells
+  local statement = "const total = await Promise.all(paths.map(p => bash({command: p})))"
+  local cut = cells(statement, 30, { columns = cols })
+  eq(table.concat(cut, ""), statement,
+    "item D: cutting code at the column keeps every character, spaces included")
+  for _, row in ipairs(cut) do ok(cols(row) <= 30, "item D: and every code row fits: " .. row) end
+
+end
+
 mark = #screen_out + 1
 screen_view:submitted()
 ok(has(since(screen_out, mark), "\27[12;1H\27[2K\226\157\175 "),
@@ -822,12 +877,17 @@ editor_view:event({ type = "tool", name = "bash", arguments = { command = "true"
 local session_total = { prompt = 120400, completion = 1000, cached = 90540 }
 editor_view:event({ type = "usage", total = session_total, prompt = 27200 })
 local running = table.concat(editor_out)
--- Victor, 18/11: the delta AND the session's input total, right after it ("only delta is not
--- enough"). 27.2k was added; 120.4k is what the session has sent in total.
+-- ITEM H (Victor, 19/11 12:15): the run row carries THIS RUN only - what it sent and what it
+-- received. The session totals are the footer numbers, and no number is printed on both rows.
+-- The run row in the buffer, and the OLD shape must be gone from it: the old row read
+-- "delta 27.2k, up 120.4k" (this runs addition, then the SESSION total). Asserting the new pair
+-- is present and that old pair is absent says exactly what item H changed, without having to
+-- separate the footer out of the buffer (its sums legitimately wear the SIGMA).
 ok(has(running, "\243\176\183\186 6\194\183") and not has(running, "\226\154\146\239\184\143")
-  and has(running, "\206\14827.2k \226\134\145120.4k \226\134\1471.0k"),
-  "the status line shows the step, the run's tools, what it added to the context, the session's"
-    .. " input total and its output")
+  and has(running, "\206\148\226\134\14527.2k \226\134\1471.0k")
+  and not has(running, "\206\14827.2k \226\134\145120.4k"),
+  "item H: the status row shows the step and THIS RUN sent/received, and the old delta-then-"
+    .. "session-total pair is gone")
 editor_view:answered("## Done")
 local summary = editor_view.last_summary
 ok(summary and has(summary, "\243\176\145\144 1 ") and has(summary, "\243\176\134\188 75.20%"),
@@ -848,8 +908,8 @@ session_total.prompt = session_total.prompt + 30000
 session_total.completion = session_total.completion + 450
 editor_view:event({ type = "usage", total = session_total, prompt = 30000 })
 local second = table.concat(editor_out, "", second_mark)
-ok(has(second, "\206\1482.8k \226\134\145150.4k \226\134\147450"),
-  "a later run counts its own context growth, the session's input total and its own output, not zero")
+ok(has(second, "\206\148\226\134\1452.8k \226\134\147450"),
+  "item H: a later run counts its own growth and its own output, and no session total")
 editor_view:answered("ok")
 editor_view:screen_off()
 host.input_editor = real_editor
@@ -1565,9 +1625,11 @@ do
   local first_row = visible(first.lines[4]):gsub("^  ", ""):gsub("%s+$", "")
   local second_row = visible(first.lines[5]):gsub("^  ", ""):gsub("%s+$", "")
   ok(first_row:sub(-3) == "\226\134\170", "the row above the break ends with the continuation mark: " .. first_row)
-  ok(has((first_row:gsub("\226\134\170", "")) .. second_row,
-    "const out = await Promise.all(hits.map(p => tools.bash({command: 'wc -l ' + p})));"),
-    "the wrapped line is whole across its two rows")
+  -- A CODE row is cut by CELLS (review, item D), so the pieces join with NOTHING inserted: the mark
+  -- is the only thing to take out, and every character of the source must survive in order.
+  local joined = (first_row:gsub("\226\134\170", "")) .. (second_row:gsub("\226\134\170", ""))
+  local wanted = ("const out = await Promise.all(hits.map(p => tools.bash({command: 'wc -l ' + p})));"):gsub("%s+", "")
+  eq((joined:gsub("%s+", "")), wanted, "the wrapped line is whole across its two rows")
   ok(has(visible(first.lines[9]), "return {count: hits.length"), "the last one is drawn too: " .. visible(first.lines[9]))
 
   -- One inner call: it appears as it starts (⏳), and its OWN row flips when it settles - never a
@@ -1603,20 +1665,41 @@ do
   local shown = visible(table.concat(rows, "\n"))
   ok(has(shown, '{"count":2,"first":"chat.lua"}'), "the value the model received is the result row: " .. shown)
   ok(not has(shown, "/home/agent/.wasm-agent/mcp/requests"), "the evidence envelope's path is not the answer")
-  ok(has(shown, "evidence: 2473 B · sha 5f2a1c9d"), "it is named once, under the value: " .. shown)
-  -- The band is padded to the row width; the answer rows are their own width, so only the script
-  -- rows are measured here.
-  local widest = 0
-  local narrowest = math.huge
-  for index = 1, 9 do
-    widest = math.max(widest, view_lib.columns(visible(rows[index])))
-    narrowest = math.min(narrowest, view_lib.columns(visible(rows[index])))
+  -- MUST 3: the band's width and its paint, both EXACT and both per row. The rows above are what the
+  -- mock host collected; this renders the SAME script through the REAL painter, which is what a
+  -- terminal receives: every band row is exactly 79 cells wide (one short of the screen, so the
+  -- transcript never wraps it) and closes with the background-colour erase, holding no pad space.
+  do
+    local block_lib = dofile("lua/core/codemode_block.lua")
+    local markdown_lib = dofile("lua/core/markdown.lua")
+    -- The band's erase is the VIEW's (it owns the palette), so the test hands the same closure the
+    -- view hands: without it the block paints no band at all and this block would prove nothing.
+    local live_opts = { columns = view_lib.columns, live = true, syntax = markdown_lib.scan_code,
+      band_erase = function() return view_lib.style("codeBand") .. "\27[K" end,
+      paint = function(text, style) return view_lib.paint(text, style, true) end }
+    local model = block_lib.new({ code = SCRIPT }, 0)
+    block_lib.finish(model, { ok = true, value = { count = 2 } }, 0.1)
+    local widest, narrowest, painted = 0, math.huge, 0
+    for _, row in ipairs(block_lib.lines(model, 80, live_opts)) do
+      if row:find("\27%[48;2;", 1) then
+        painted = painted + 1
+        local width = view_lib.columns(visible(row))
+        widest = math.max(widest, width)
+        narrowest = math.min(narrowest, width)
+        ok(has(row, "\27[K"), "every band row closes with ESC[K: " .. row:sub(1, 50))
+        ok(not has(row, " \27[K"), "and carries no pad space before it")
+        eq(visible(row):match("%s*$"), "", "and ends on its last character")
+      end
+    end
+    ok(painted > 0, "the block really draws painted band rows, so the checks above are not vacuous")
+    -- Item F changed what "the band" is: it is no longer PAD to 79, it is the row own text
+    -- plus ESC[K, which paints the rest at whatever width the terminal has. So the width
+    -- assertions are the ones that still mean something: NO row is wider than the band (the
+    -- transcript must never wrap it), the widest reaches it, and nothing is left blank-padded.
+    ok(widest <= 79, "no band row is wider than the band, so the transcript never wraps it: " .. widest)
+    ok(widest >= 40, "and the rows really carry their code, so this is not a vacuous pass: " .. widest)
+    ok(narrowest > 2, "no band row is an empty stripe: " .. narrowest)
   end
-  eq(widest, 79, "every script row is one column short of the screen, so the transcript never wraps it into a blank row")
-  eq(narrowest, 79, "and every row is padded to that width (a band, padded by columns)")
-  local block = {}
-  for index = 1, 9 do block[#block + 1] = visible(rows[index]) end
-  ok(not has(table.concat(block, "\n"), "CodeAct"), "and no script row grew a title")
 
   -- The next code-mode call leaves the one before it open and whole (operator 17/11: every step shows its
   -- output completely; it used to fold to a one-row summary).
@@ -1768,16 +1851,84 @@ do
   view.context = 24300
   view.totals = { prompt = 4600000, completion = 310 }
   eq(view:run_numbers("5s", "1:51"),
-    "\243\176\183\186 2\194\1835s \206\14812.3k \226\134\1454.6M \226\134\147310 \243\176\148\155 1:51",
-    "the run line: steps, the delta added, the input total, output, clock")
+    "\243\176\183\186 2\194\1835s \206\148\226\134\14512.3k \226\134\147310 \243\176\148\155 1:51",
+    "item H: the run line is THIS RUN only - steps, what it sent and what it received, and the clock")
   -- A run that has added nothing yet still says both numbers: nothing added, the total it sent.
   local fresh = view_lib.new({ live = true, limit = 100 })
   fresh.turn = { rounds = 1, context = 9000 }
   fresh.context = 9000
   fresh.totals = { prompt = 9000, completion = 30 }
   local first = fresh:run_numbers("0s", "0:01")
-  ok(has(first, "\206\1480 ") and has(first, "\226\134\1459.0k"),
-    "a first step says nothing added and the total it sent: " .. first)
+  ok(has(first, "\206\148\226\134\1450 ") and has(first, "\226\134\14730") and not has(first, "\206\163"),
+    "item H: a first step says what this run sent, and carries no SESSION total: " .. first)
+end
+
+
+-- ---- the finish stamp: a run that ended WELL says when --------------------------------
+-- Victor, 19/11 ~10:50: the row left under a finished run ends with a middle dot, the check and the
+-- local finish time (HH:MM), so the line says WHEN the answer came back and not only how long it
+-- took. A run that FAILED keeps the same row with no check - the absence is the failure - and nothing
+-- is added while the run is in flight.
+do
+  local CHECK = view_lib.GLYPH.check
+  ok(type(CHECK) == "string" and #CHECK > 0, "the finish check is a glyph of its own")
+  ok(CHECK ~= view_lib.GLYPH.clock and CHECK ~= view_lib.GLYPH.steps and CHECK ~= view_lib.GLYPH.cache,
+    "and none of the glyphs already on the row, so its presence can only mean the run finished")
+  -- A fixed epoch, so the assertion is about the SHAPE and not about the hour the suite runs at. The
+  -- expected text comes from the same OS call the module makes, so the check holds in every zone.
+  local at = 1795083600
+  local expected = os.date("%H:%M", at)
+  local view = view_lib.new({ live = true, limit = 100 })
+  -- MUST 2: the EXACT strings Victor wrote, compared whole and not derived from each other. GAP
+  -- stays one space (his decision for plain Nerd fonts); the glued form comes from wa-fonts' A2
+  -- icon font, not from this file.
+  eq(view_lib.GAP, " ", "GAP is still the one space Victor chose")
+  view.turn = { rounds = 3, context = 7000, started = 0, step_started = 1 }
+  view.context = 5300 + 7000
+  view.totals = { prompt = 9500, completion = 851 }
+  eq(view:run_numbers("3s", "0:25"),
+    "\243\176\183\186 3\194\1833s \206\148\226\134\1455.3k \226\134\147851 \243\176\148\155 0:25",
+    "the RUNNING row is exactly Victor's: step, step clock, what this run sent and received, clock")
+  eq(view:run_numbers("3s", "0:25", { ok = true, at = at }),
+    "\243\176\183\186 3\194\1833s \206\148\226\134\1455.3k \226\134\147851 \243\176\148\155 0:25 \194\183 "
+      .. CHECK .. expected,
+    "the FINISHED row is exactly Victor's: the running row, then the check glued to the local hour")
+  eq(view:run_numbers("3s", "0:25", { ok = false }),
+    "\243\176\183\186 3\194\1833s \206\148\226\134\1455.3k \226\134\147851 \243\176\148\155 0:25",
+    "and a FAILED run keeps the running row, with no check and no hour")
+  local bare = view:run_numbers("3s", "0:25")
+  -- The hour is the READER local one, not UTC: compared against both forms on an epoch where they
+  -- differ in this zone, and said out loud (SKIP) on a machine whose zone is UTC, where they cannot.
+  local local_at, utc_at = os.date("%H:%M", at), os.date("!%H:%M", at)
+  eq(view_lib.finish_time(at), local_at, "the finish time is the reader local time")
+  if local_at ~= utc_at then
+    ok(view_lib.finish_time(at) ~= utc_at, "and not the UTC hour, which is another clock here: " .. utc_at)
+  else
+    print("SKIP finish-stamp zone check: this machine zone is UTC, so local and UTC agree")
+  end
+  eq(view_lib.finish_time(nil), "", "no clock, no stamp: an unmeasured finish prints nothing")
+end
+
+-- The WIRING, on the two paths a run can take: "answered" is a run that ended well and hands the
+-- moment it ended; "failed" hands the same fact with ok = false. run_finished is stubbed on the
+-- instance, so this asserts what each caller SAYS and not how the row is later drawn (the checks
+-- above draw it).
+do
+  local seen = {}
+  local function capture(view)
+    view.run_finished = function(_, finish) seen[#seen + 1] = finish end
+    return view
+  end
+  local done = capture(view_lib.new({ live = false, now = function() return 1000 end }))
+  done:answered("fine")
+  eq(#seen, 1, "answered ends the run once")
+  eq(type(seen[1]), "table", "and hands the finish fact")
+  eq(seen[1] and seen[1].ok, true, "an answered run is a run that ended well")
+  eq(seen[1] and seen[1].at, 1000, "with the moment it ended, from the view own clock")
+  local broke = capture(view_lib.new({ live = false, now = function() return 2000 end }))
+  broke:failed("provider_http_500: boom")
+  eq(#seen, 2, "failed ends the run too")
+  eq(seen[2] and seen[2].ok, false, "and says it did not end well, so the row carries no check")
 end
 
 -- ---- the status bar's glyphs: his font, five bands, one cell each, and the gray -----------------
@@ -1881,9 +2032,26 @@ do
   -- ONE space between every icon and its value (Victor, 19/11): turns, the context ball and the
   -- cache icon. The DELTA/UP/DOWN/SIGMA marks are TEXT and stay glued to their number.
   eq(rendered_view.last_summary,
-    "\243\176\145\144 3 \206\163\226\134\145120.4k \226\134\1471.0k "
+    "\243\176\145\144 3 \206\163\226\134\145120.4k \206\163\226\134\1471.0k "
       .. "\243\176\170\158 12.2%/200.0k \243\176\134\188 75.20%",
     "the session bar: turns, tokens, the context ball for 12.2%, and the cache-hit rate, each icon one space from its value")
+
+  -- A2 (Victor, 19/11 ~10:50): BOTH totals wear the SIGMA. The arrow alone read as the last call's
+  -- input and output; the pair the reader sees is the session's two SUMS. Asserted on the composed row
+  -- and counted, so a row that grew a sigma and kept the bare arrow fails.
+  do
+    local row = rendered_view.last_summary
+    local _, sigmas = row:gsub("\206\163", "")
+    eq(sigmas, 2, "one SIGMA on the input total and one on the output total: " .. row)
+    ok(row:find("\206\163\226\134\145", 1, true) and row:find("\206\163\226\134\147", 1, true),
+      "the SIGMA sits directly before each arrow, glued to it like every other mark: " .. row)
+    -- Every arrow on the row is preceded by its SIGMA: the count of "SIGMA+arrow" equals the count of
+    -- arrows, so a bare arrow anywhere fails - and it is counted on the composed row, not on a piece.
+    local _, arrows = row:gsub("\226\134", "")
+    local _, paired = row:gsub("\206\163\226\134", "")
+    ok(arrows > 0 and paired == arrows,
+      "every arrow on the row carries its SIGMA (" .. paired .. " of " .. arrows .. "): " .. row)
+  end
 
   -- Every icon this CLI draws on a status row, followed by exactly one space - measured on the two
   -- rendered strings rather than on the pieces, so a caller that concatenates without the separator fails.
@@ -1945,12 +2113,20 @@ do
     "an unmeasured window colours nothing")
   -- (c) a row with no ball (a budget of 0 leaves it out): returned as it came.
   eq(paint_ball("plain row", 5, 0, true), "plain row", "a row with no ball is not touched")
-  -- (d) the level's role really opens at the glyph and closes after it, so the percentage beside it
-  -- keeps the row's gray - one glyph's warning never bleeds into its number.
+  -- (d) A COMFORTABLE CONTEXT IS NOT A COLOURED ICON (Victor, 19/11 09:05). The ball at the normal
+  -- level carries NO escape of its own any more: it was the success green, and green is not this
+  -- row's icon pattern. The row is returned byte for byte, so the glyph inherits exactly the
+  -- secondary colour the steps, the clock, the turns and the cache wear beside it.
   local painted = paint_ball(ball .. " 50.0%/200.0k", 100000, 200000, true)
-  ok(has(painted, view_lib.style("success") .. ball .. "\27[0m"),
-    "a comfortable context paints the ball in the normal role: " .. painted)
-  eq(visible(painted), ball .. " 50.0%/200.0k", "and the visible characters are unchanged")
+  eq(painted, ball .. " 50.0%/200.0k",
+    "a comfortable context leaves the row byte for byte, with no colour of its own")
+  ok(not has(painted, view_lib.style("success")),
+    "and in particular the normal level is NOT the success green any more: " .. painted)
+  -- The role behind it is nil - "no colour of its own" is a value, not a missing case - and the two
+  -- problem levels still name theirs.
+  eq(view_lib.ball_role("normal"), nil, "the normal level has no role of its own")
+  eq(view_lib.ball_role("warning"), "warning", "the warning level is the amber")
+  eq(view_lib.ball_role("alert"), "error", "the alert level is the alarm red")
   -- (e) every level, from the node's own threshold: 90% of the window compacts, so 74 is normal,
   -- 76 is a warning and 90 an alert.
   local at = function(percent, window)
@@ -1960,7 +2136,9 @@ do
     local row = paint_ball(glyph .. " " .. percent .. "%", window * percent / 100, window, true)
     if has(row, view_lib.style("error") .. glyph) then return "alert" end
     if has(row, view_lib.style("warning") .. glyph) then return "warning" end
-    if has(row, view_lib.style("success") .. glyph) then return "normal" end
+    -- Normal wears NO role: the row comes back exactly as it was composed, so the probe asks whether
+    -- the glyph is unprefixed rather than whether it is green (Victor, 19/11 09:05).
+    if row == glyph .. " " .. percent .. "%" then return "normal" end
     return "none"
   end
   local threshold = view_lib.compaction_threshold(100000)
@@ -1973,6 +2151,65 @@ do
   eq(at(100, 100000), "alert", "a full window is an alert")
 end
 
+
+-- ITEM 2 (change/tui-polish-3): THE THREE LEVELS, ON A RENDERED ROW (Victor, 19/11 09:05).
+--
+-- Why this is its own block. The checks above prove the LEVEL and the ROLE; this one proves what a
+-- reader actually sees, on the row the footer really composes, at each of the three levels. It is the
+-- assertion that would have failed while the ball was green: normal must carry NO colour of its own,
+-- so the glyph a comfortable context draws has to be byte-identical to the same row drawn with no
+-- colour pass at all. Warning and alert must still be told apart from it and from each other.
+--
+-- The threshold comes from the node (compaction_threshold), never from a number written here, so the
+-- row is measured against the trigger this node really compacts on.
+do
+  local threshold = view_lib.compaction_threshold(100000)
+  ok(type(threshold) == "number" and threshold > 0 and threshold <= 100,
+    "item 2: the three levels are measured against the node own threshold: " .. tostring(threshold))
+  -- One composition function, the way the footer does it: the summary composes the glyph from the
+  -- percentage, and the colour pass is handed the SAME percentage the summary returns.
+  local function row_for(percent)
+    local context = math.floor(100000 * percent / 100)
+    local text, used = view_lib.session_summary({ runs = 3, prompt = 9500, completion = 851,
+      cached = 7000, context = context, budget = 100000 })
+    local painted = view_lib.colour_ball(text, context, 100000, true, nil, used)
+    return text, painted, view_lib.context_ball(percent)
+  end
+  -- (1) NORMAL: a comfortable context. No escape at all in the painted row, and it is identical to
+  -- the bare row - which is what "the same colour as the icons beside it" means in bytes: the glyph
+  -- inherits the row own secondary colour instead of opening one of its own.
+  local bare, normal_row, normal_glyph = row_for(math.max(1, math.floor(threshold) - 20))
+  eq(normal_row, bare, "item 2 [normal]: the row is returned byte for byte, the ball colouring nothing")
+  ok(not has(normal_row, string.char(27)), "item 2 [normal]: and there is no escape sequence in it at all")
+  ok(not has(normal_row, view_lib.style("success")),
+    "item 2 [normal]: the success green is gone from the row: " .. normal_row)
+  ok(has(normal_row, normal_glyph), "item 2 [normal]: the ball is still drawn, it is just uncoloured")
+
+  -- (2) WARNING: inside 15 points of the trigger. Amber opens at the glyph and closes after it, and
+  -- the visible characters are unchanged, so the percentage beside it keeps the row own colour.
+  local warn_bare, warn_row, warn_glyph = row_for(math.ceil(threshold - 14))
+  ok(has(warn_row, view_lib.style("warning") .. warn_glyph),
+    "item 2 [warning]: inside 15 points of the trigger the ball is the amber: " .. warn_row)
+  eq(visible(warn_row), visible(warn_bare),
+    "item 2 [warning]: the colour is escapes only, the characters a reader sees are the same")
+  ok(not has(warn_row, view_lib.style("error") .. warn_glyph),
+    "item 2 [warning]: and it is not the alert red")
+
+  -- (3) ALERT: at or above the trigger, the colour the compactor is about to act on.
+  local alert_bare, alert_row, alert_glyph = row_for(math.ceil(threshold))
+  ok(has(alert_row, view_lib.style("error") .. alert_glyph),
+    "item 2 [alert]: at the compaction trigger the ball is the alarm red: " .. alert_row)
+  eq(visible(alert_row), visible(alert_bare),
+    "item 2 [alert]: again escapes only, the visible row is unchanged")
+  ok(not has(alert_row, view_lib.style("warning") .. alert_glyph),
+    "item 2 [alert]: and it is not the warning amber")
+
+  -- (4) The three levels are THREE, not two: the normal row is the only one with no colour, and the
+  -- two problem rows differ from it and from each other. A test where two levels rendered alike could
+  -- not tell them apart.
+  ok(normal_row ~= warn_row and normal_row ~= alert_row and warn_row ~= alert_row,
+    "item 2: the three levels render three different rows")
+end
 
 -- ROUND 3, ITEM 4. Two mismatches the footer could hide, each asserted through the one function that
 -- paints, because a colour nobody can see go wrong is a colour nobody can trust.
@@ -1987,17 +2224,20 @@ do
   local other = view_lib.context_ball(96)      -- a glyph 50% would never choose
   ok(other ~= drawn, "the two glyphs are different, so the check is not vacuous")
   local row = paint_ball(other .. " 50.0%/200.0k", 100000, 200000, true)
-  ok(has(row, view_lib.style("success") .. other),
-    "the glyph the row DREW is the one coloured, not the one the percentage implies: " .. row)
-  ok(not has(row, view_lib.style("error") .. other),
-    "and it is coloured by the LEVEL (50% is normal), not by the glyph's own fill: " .. row)
+  -- 50% is normal, and normal has no role: the drawn glyph stays exactly where it was, uncoloured,
+  -- rather than being repainted from the percentage the caller happened to pass.
+  eq(row, other .. " 50.0%/200.0k", "a normal row is returned as it came, whatever glyph it drew")
+  ok(not has(row, view_lib.style("error") .. other) and not has(row, view_lib.style("warning") .. other),
+    "and neither problem role is applied to it: " .. row)
   -- A row with no ball at all is still returned untouched - nothing to colour is not an error.
   eq(paint_ball("no ball here 12.0%/200.0k", 24000, 200000, true), "no ball here 12.0%/200.0k",
     "a row carrying no ball is returned exactly as it came")
-  -- The empty ball IS a ball: a nearly empty window is coloured too, so the floor is not a hole.
+  -- The empty ball IS a ball: the search finds it (the floor is not a hole), but at 1% of the window
+  -- the level is normal, so it stays uncoloured like every other comfortable reading.
   local empty = view_lib.context_ball(1)
-  ok(has(paint_ball(empty .. " 1.0%/200.0k", 2000, 200000, true), view_lib.style("success") .. empty),
-    "the empty ball is a ball and is coloured")
+  eq(view_lib.ball_in(empty .. " 1.0%/200.0k"), empty, "the empty ball is found by the search")
+  eq(paint_ball(empty .. " 1.0%/200.0k", 2000, 200000, true), empty .. " 1.0%/200.0k",
+    "and at 1% it is normal, so it is not painted")
 end
 
 -- (b) THE SAME RESERVE THE COMPACTOR USES. `threshold_percent` was called with model_window's DEFAULT

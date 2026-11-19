@@ -275,6 +275,18 @@ function M.step_clock(seconds)
   if s < 60 then return s .. "s" end
   return string.format("%dm%02ds", math.floor(s / 60), s % 60)
 end
+-- The wall clock a finished run leaves behind: HH:MM in the READER'S zone, 24 h.
+--
+-- Deliberately the reader's zone and not UTC: every other timestamp in the ledger is UTC because a
+-- fleet compares them, and this one is not a fact about the fleet - it is "when did that answer come
+-- back", which the person reading it asks in the clock on their own wall. The epoch is passed in,
+-- so a test clock decides the moment and not the wall the suite happens to run on.
+function M.finish_time(epoch)
+  local at = tonumber(epoch)
+  if not at then return "" end
+  return os.date("%H:%M", math.floor(at))
+end
+
 function M.run_clock(seconds)
   local s = math.max(0, math.floor(tonumber(seconds) or 0))
   if s < 3600 then return string.format("%d:%02d", math.floor(s / 60), s % 60) end
@@ -314,6 +326,10 @@ local GLYPH = {
   clock = "\243\176\148\155",             -- U+F051B, the run's elapsed clock
   turns = "\243\176\145\144",             -- U+F0450, the session's turns
   cache = "\243\176\134\188",             -- U+F01BC, the cache-hit rate
+  -- The finish stamp (Victor, 19/11 ~10:50): a run that ended well leaves the time it ended,
+  -- not only how long it took. Material Design's check - the one glyph in this set that means
+  -- "this finished".
+  check = "\243\176\132\172",           -- U+F012C, the finish stamp check
 }
 M.GLYPH = GLYPH
 
@@ -355,13 +371,21 @@ function M.context_level(percent, threshold)
 end
 -- The colour the ball wears, from the same level: the window's own signal, not decoration.
 --
--- normal is the row's own success green (a context with room), warning the yellow from threshold-15,
--- alert the alarm red at the compaction trigger. Nothing measured is normal: a colour is a claim
--- about the window, and an unmeasured window makes none.
+-- NORMAL IS NO COLOUR OF ITS OWN (Victor, 19/11 09:05). A ball with room is a fact in the row like
+-- the step count, the clock, the turn count and the cache rate beside it, so it wears exactly what
+-- those wear - the row's own secondary colour, whatever role that row happens to paint (the run row
+-- says "muted", the session bar under the box says "dim"). Returning nil says that: the caller paints
+-- nothing and the glyph inherits its neighbours, so the ball cannot be the one shade that disagrees
+-- with the four icons it sits between.
+--
+-- It was the success green, and green is not this row's icon pattern: on a status row a colour MEANS
+-- something, so it may only appear when the window is a problem. warning is the amber from
+-- threshold-15, alert the alarm red at the compaction trigger. Nothing measured is normal: a colour is
+-- a claim about the window, and an unmeasured window makes none.
 function M.ball_role(level)
   if level == "alert" then return "error" end
   if level == "warning" then return "warning" end
-  return "success"
+  return nil
 end
 
 -- The reserve the COMPACTOR will actually use for a model, or nil when this host cannot say.
@@ -406,15 +430,18 @@ function M.compaction_threshold(budget, model)
   return ok and tonumber(threshold) or nil
 end
 
--- The footer's session numbers: `󰑐runs Σ↑in ↓out 󰪟ctx%/window 󰆼cache-hit%`. `Σ↑` is every
+-- The footer's session numbers: `󰑐runs Σ↑in Σ↓out 󰪟ctx%/window 󰆼cache-hit%`. `Σ↑` is every
 -- request's input summed (each step resends the context), so it is marked apart from the run line's
 -- `Δ` - what one run ADDED to the context (operator 17/11: "why do these differ?"). No tool count:
 -- with code mode one script makes many calls, so the number said nothing (operator 17/11). The ball is
 -- the one `M.context_ball` chose, so the band and the percentage beside it cannot disagree.
 function M.session_summary(t)
   t = t or {}
+  -- BOTH totals wear the SIGMA (Victor, 19/11 ~10:50: the row reads
+  -- `1 Σ↑9.5k Σ↓851`): they are the session's two SUMS, and the arrow alone read as the last
+  -- call's input and output. The arrow says the direction, the sigma says it is a total.
   local parts = { GLYPH.turns .. GAP .. (t.runs or 0),
-    "\206\163\226\134\145" .. M.tokens(t.prompt) .. " \226\134\147" .. M.tokens(t.completion) }
+    "\206\163\226\134\145" .. M.tokens(t.prompt) .. " \206\163\226\134\147" .. M.tokens(t.completion) }
   -- The percentage this row was built from, returned beside the text: it chose the glyph, and the
   -- colour must come from the SAME number rather than one measured again at draw time.
   local used
@@ -467,7 +494,11 @@ function M.colour_ball(text, context, budget, live, model, percent)
   local ball, at = M.ball_in(text)
   if not ball then return text end
   local level = M.context_level(percent, M.compaction_threshold(window, model))
-  local painted = paint(ball, M.ball_role(level), true) .. (STYLE.dim or "")
+  local role = M.ball_role(level)
+  -- A level with no role of its own (normal) leaves the row byte for byte as it came: the glyph then
+  -- wears the row's own secondary colour, exactly like the steps, clock, turn and cache icons.
+  if not role then return text end
+  local painted = paint(ball, role, true) .. (STYLE.dim or "")
   return text:sub(1, at - 1) .. painted .. text:sub(at + #ball)
 end
 
@@ -1768,23 +1799,25 @@ end
 
 -- `󰷺steps·step-time Δadded ↑in ↓out 󰔛run-time` for the current run.
 --
--- TWO input numbers, deliberately (Victor, 18/11: "only delta is not enough"). `Δ` is what the run
--- ADDED to the context - the last call's prompt against the one the run started on, not the sum of
--- every call's prompt, which re-counts the whole context each step. `↑` is the session's input-token
--- TOTAL, right after it: every step resends the context, so it is the number that says what the session
--- has cost, and it is the same total the footer prints as `Σ↑`. They are different facts and both are
--- wanted; one without the other was wrong in both directions.
---
--- The two clocks are passed in (tokens for the host's ticker, or the stopped values once the run has
--- ended). With no step clock (the line left under a finished run) the step count stands alone: `󰷺8`.
-function METHODS:run_numbers(step_clock, run_clock)
+-- THIS RUN ONLY (Victor, 19/11 12:15, item H). The row carries the run's own additions - the
+-- SIGMA-UP of what this run sent and the down arrow of what it received - and NO session total:
+-- the session's two sums live in the footer (SIGMA-UP and SIGMA-DOWN), and a number printed on
+-- both rows makes a reader compare two things that are not the same thing.
+function METHODS:run_numbers(step_clock, run_clock, finish)
   local run, base, totals = self.turn or {}, (self.turn and self.turn.baseline) or {}, self.totals or {}
   local input = math.max(0, (self.context or 0) - (run.context or 0))
   local output = math.max(0, (totals.completion or 0) - (base.completion or 0))
-  return GLYPH.steps .. GAP .. math.max(1, run.rounds or 0) .. (step_clock and ("\194\183" .. step_clock) or "")
-    .. " \206\148" .. M.tokens(input) .. " \226\134\145" .. M.tokens(totals.prompt)
+  local row = GLYPH.steps .. GAP .. math.max(1, run.rounds or 0) .. (step_clock and ("\194\183" .. step_clock) or "")
+    .. " \206\148\226\134\145" .. M.tokens(input)
     .. " \226\134\147" .. M.tokens(output)
     .. " " .. GLYPH.clock .. GAP .. run_clock
+  if finish and finish.ok then
+    -- The check wears the same one space every other icon here does, and the stamp is set off by a
+    -- middle dot: "0:25 \194\183 18:47" reads as a duration followed by a moment.
+    local at = M.finish_time(finish.at)
+    if at ~= "" then row = row .. " \194\183 " .. GLYPH.check .. at end
+  end
+  return row
 end
 
 -- Called on every event: a new frame, and a repaint. In the plain rendering the line is
@@ -1995,6 +2028,10 @@ function METHODS:accepted(text)
   text = tostring(text or "")
   if text == "" or not self.screen then return end
   self:clear() -- the host ticker must not write while this line is committed
+  -- The width this bubble wraps at is the terminal as it is NOW, not as it was when the view was
+  -- made: a window maximised or split before the reader sends a line must wrap that line at the
+  -- new width (item E, the same read every other framed component makes).
+  if self.stdout then self:refresh_limit() end
   -- `❯ what you typed`, greyed, the way Claude Code keeps your message in the transcript.
   -- White on a grey bar the width of the screen, the way the message stands out from the replies.
   local shown, first = {}, true
@@ -2007,7 +2044,11 @@ function METHODS:accepted(text)
     for _, piece in ipairs(pieces) do
       local body = (first and PROMPT or "  ") .. piece
       if self.live then
-        body = "\27[38;2;255;255;255m\27[48;2;68;68;68m" .. body .. string.rep(" ", math.max(0, self.limit - 1 - columns(body))) .. RESET
+        -- The grey goes to the end of the ROW by EL (ESC[K), not by a run of spaces: padding is
+        -- characters, so a narrow terminal re-wraps them and a resize turns a painted row into
+        -- ragged fragments (Victor, 19/11 11:20). The erase takes the row background colour, so
+        -- the band stays solid and the line holds no trailing blanks at all (item F).
+        body = "\27[38;2;255;255;255m\27[48;2;68;68;68m" .. body .. "\27[K" .. RESET
       end
       shown[#shown + 1] = body
       first = false
@@ -2258,8 +2299,7 @@ function METHODS:run_started()
   self:paint(true)
 end
 
-function METHODS:run_finished()
-  self:turn_notes_flush()
+function METHODS:run_finished(finish)
   self:commentary_flush()
   self:progress("finish")
   self:clear()
@@ -2286,7 +2326,11 @@ function METHODS:run_finished()
     local now = self.now()
     self:topic(false)
     if self.tail_nl == 0 then self:write("\n") end
-    self:write(paint(self:run_numbers(nil, M.run_clock(now - self.turn.started)), "dim", self.live) .. "\n\n")
+    -- The STEP clock stays on the finished row too, as Victor wrote it: the last step own
+    -- duration is what the reader is looking at, and dropping it on finish made the row change
+    -- shape at the moment it stopped.
+    local step = M.step_clock(now - (self.turn.step_started or self.turn.started))
+    self:write(paint(self:run_numbers(step, M.run_clock(now - self.turn.started), finish), "dim", self.live) .. "\n\n")
   end
   if self.screen and self.screen.footer then
     local totals = self.totals or {}
@@ -2396,6 +2440,9 @@ function METHODS:codemode_opts()
     paint = paint,
     clip = fit,
     columns = columns,
+    -- The code band's rest-of-row: the band colour, then EL, so a painted row holds no trailing
+    -- spaces for a narrow terminal to re-wrap (item F).
+    band_erase = function() return STYLE.codeBand .. "\27[K" end,
     summarise = function(name, args) return M.call_line(name, args, 32) end,
     elapsed = function(ms) return M.elapsed(ms) end,
     encode = function(value) return json.encode(value) end,
@@ -2545,37 +2592,6 @@ local function bulletize(text, mark)
 end
 M.bulletize = bulletize
 
--- The stored <turn> block, as ONE line under the answer it was stripped from (#33, item 4). The
--- block is evidence the fleet keeps, not something the reader asked for, so it must not compete with
--- the answer: one dim row, its own line, and the whole block behind `host.transcript_expand` where
--- the host can fold and open a row. Pure, so the shape is asserted without a terminal.
-function M.turn_note_line(note, width, options)
-  local o = options or {}
-  width = math.max(20, tonumber(width) or 80)
-  local value = type(note) == "table" and note or {}
-  local said = tostring(value.text or value.focus or value.hurt or "")
-  said = said:gsub("%s+", " ")
-  local block = tostring(value.block or "")
-  local full = block
-  if full == "" then
-    local parts = {}
-    for _, key in ipairs({ "hurt", "buys", "focus" }) do
-      local text = tostring(value[key] or "")
-      if text ~= "" then parts[#parts + 1] = key .. ": " .. text end
-    end
-    full = table.concat(parts, "\n")
-  end
-  local lead = "\226\151\140 turn \194\183 "
-  local room = math.max(8, width - columns(lead) - 14)
-  local shown = clip(said, room)
-  if shown == "" then shown = "(kept in the run journal)" end
-  local row = lead .. shown
-  local rest = columns(said) - columns(shown)
-  if rest > 0 and o.expandable then row = row .. " \226\128\166 +" .. rest .. " chars" end
-  local expand = (o.expandable and full ~= "") and full or nil
-  return { row = row, expand = expand, text = said, block = block }
-end
-
 -- The answer, then the numbers for the run that produced it. A reply that already
 -- streamed (a peer or a window run reaching this printer) is not printed twice.
 function METHODS:answered(reply)
@@ -2605,7 +2621,10 @@ function METHODS:answered(reply)
     if text:sub(-1) ~= "\n" then text = text .. "\n" end
     self:write(text .. "\n")
   end
-  self:run_finished()
+  -- The run ended WELL, so the row it leaves behind carries the check and the time it ended (item
+  -- B). The moment is taken here, once, and not inside run_numbers, which is also called every
+  -- frame while the run is in flight and has no end to name.
+  self:run_finished({ ok = true, at = self.now() })
 end
 
 function METHODS:failed(problem, opts)
@@ -2624,7 +2643,9 @@ function METHODS:failed(problem, opts)
     return
   end
   self:line(paint(DOT .. " Error: " .. tostring(problem or "error"), "red", self.live))
-  self:run_finished()
+  -- A failed run keeps the same row WITHOUT the check: the absence is the failure, and a second
+  -- shape for it would be a second row to read (item B).
+  self:run_finished({ ok = false })
 end
 
 -- A bug in this renderer must not kill the run it is describing: the transcript belongs
@@ -2954,35 +2975,9 @@ function METHODS:event(event)
     -- Thinking, as it arrives: `✻ ` and the thought in gray on the same line, no title (operator 17/11).
     self.reasoning_streamed = true
     if (host.getenv("WASM_AGENT_CLI_THINKING") or ""):lower() ~= "off" then self:flow("think", event.text) end
-  elseif kind == "turn_note" then
-    -- The stored <turn> block (#33, item 4). It arrives while the run is still on its last step - the
-    -- split happens where the answer is composed - so it is HELD here and drawn by the run's own end,
-    -- under the answer it belongs under and before the run's numbers. Drawing it where it arrived would
-    -- put the evidence above the answer, which reads as a promise about something not yet written.
-    self.turn_notes = self.turn_notes or {}
-    self.turn_notes[#self.turn_notes + 1] = event
   elseif kind == "error" then
     self:clear()
     self:line(paint("! " .. tostring(event.error or "error"), "red", self.live))
-  end
-end
-
--- One dim row per held note, under the answer. In the transcript the host folds it and opens the whole
--- block on a click; in a captured log it is the row, and nothing is hidden behind it that a reader
--- could not have had - `/turns` prints the same note from the journal.
-function METHODS:turn_notes_flush()
-  local notes = self.turn_notes
-  self.turn_notes = nil
-  if not notes then return end
-  local expandable = self:transcript() and host and type(host.transcript_expand) == "function" or false
-  for _, note in ipairs(notes) do
-    local line = M.turn_note_line(note, self.limit, { expandable = expandable })
-    if line.expand and expandable then
-      -- The marker reaches the host immediately before the write that draws the row: the host marks
-      -- lines of the NEXT write, as every other fold in this file does.
-      pcall(host.transcript_expand, json.encode({ { at = 0, text = line.expand } }))
-    end
-    self:line(paint(line.row, "dim", self.live))
   end
 end
 
