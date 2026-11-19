@@ -98,7 +98,7 @@ installed one with this worktree's tree, scratch `WASM_AGENT_HOME` per run:
 | `scripts/test-prompt-tool-names.lua` | `prompt tool names ok (286 checks, 0 skipped)` |
 | `bash scripts/sync-prompt-docs.sh --check` | `sync-prompt-docs: ok (4 blocks current)` |
 | `scripts/fast.sh`, narrowed to these rows (`WA_FAST_ROWS`, 5 of 250 Lua rows) | `fast path ok (52 checks, 0 skipped, 184s)`, rc 0 - `pass` for `environment-notes`, `project-instructions`, `prompt-tool-names`, `land-signing`, `build-info` |
-| `scripts/test-build-info.sh` against the binary at this tip | `test-build-info: 24 checks, 0 failed` |
+| `scripts/test-build-info.sh` against a binary built at `864810f3`, the last commit that touches shipped code | `test-build-info: 24 checks, 0 failed` |
 | `scripts/test-land-signing.sh` | `land signing ok (46 checks)` |
 | `cargo build --release` (`WA_CODEMODE_ALLOW_EMPTY=1`) | `Finished release profile`, rc 0 |
 | embedded delivery from `/tmp` | `note embedded:AGENTS.omarchy.md`, both keys present |
