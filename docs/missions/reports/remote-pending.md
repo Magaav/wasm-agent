@@ -220,11 +220,34 @@ local guess) and refuses past `MAX_ADOPTED_OPEN = 2` with `remote_adopted_limit`
 adopting work it cannot account for. Test: section 10 - two adopted commands run, the third is refused by
 name with nothing started, and the two are cancelled after.
 
-**NOT closed, and said plainly**: the review also asked that *unawaited* adopted handles be reaped once
-their caller stops polling. That is not implemented. The bound above is the mitigation (a peer can hold at
-most 2 slots, and its own calls keep the rest), and the peer's own `timeout_seconds` still ends the work;
-nothing reaps an adopted handle earlier than that. Implementing it needs a rule for "the caller stopped
-polling" that does not punish a caller between two steps, and that rule is not in this change.
+**The second half - reaping - is now closed** (`d43437a1`), after measuring two things the first cut
+got wrong:
+
+1. A list row's `elapsed_ms` is the supervisor's LAST SNAPSHOT, not a clock: measured 29 ms for a command
+   that had been running 1.2 s, so reaping on it would never fire. This node therefore records the start
+   time IT observed, per peer session, in `<data>/remote-adopted/<peer session>.json`, and reaps on that.
+   Only ids in that file can be reaped - work started by anything else in the peer session is not this
+   rule's to stop.
+2. The peer's `cancel` is a REQUEST: it sets the flag and answers a snapshot that still says `running`
+   (rust/wa-operation, `pub fn cancel` -> `self.snapshot(id)`). So the reap OBSERVES the stop, bounded
+   at 2 s, exactly as MUST 1 makes a caller's cancel observe it.
+
+The ceiling is `MAX_ADOPTED_SECONDS = 900` whatever the caller asked for (up to 86400 s), and the pending
+answer reports the number it was really given in `timeout_seconds` rather than the caller's. Both bounds
+read from the environment (`WASM_AGENT_REMOTE_ADOPTED_SECONDS`, `..._GRACE_SECONDS`) the way
+`M.full_wait_ms` does, so a test holds the rule in seconds; production reads the constants.
+
+Tests (scripts/test-remote-pending.lua sections 10 and 11): two adopted commands run and the third is
+refused by name with nothing started; a command under a 1 s ceiling settles BY ITSELF, so its slot returns
+without anyone polling (measured: the supervisor's own deadline ends it); and a record of a command started
+under the real 900 s ceiling, aged past a lowered ceiling, is reaped by name on the next adoption, with the
+reaped id named in `reaped` on the answer. The test says in its own comment that the overdue-supervisor
+case is made deterministic by ageing the record instead of pretended to have happened.
+
+**One measured surprise worth recording**: `host.sleep` takes MILLISECONDS (rust/wa-capabilities, "Block
+this interpreter for a bounded number of milliseconds"). The first cut of these tests called
+`host.sleep(2.2)` and waited 2.2 ms, then reported the rule broken; the cancel-observation window in
+lua/core/codemode_pending.lua had the same bug (`host.sleep(0.2)`). Both are fixed (200 ms and 2200 ms).
 
 ### MUST 3 - the real failure is now tested (fixed in `4ed3163c`)
 
@@ -286,7 +309,7 @@ Measured, and now said: the adopted operation belongs to the calling **node**, r
 
 ## Re-run after the review (all on this node, scratch HOME under /home because /tmp hit its 16 G quota)
 
-* `scripts/test-remote-pending.lua` -> `remote pending ok (49 checks)`
+* `scripts/test-remote-pending.lua` -> `remote pending ok (61 checks)`
 * `scripts/test-codemode-pending.lua` -> `codemode pending handles ok (92 checks; real sandbox)`
 * `scripts/test-session-isolation.lua` -> `141 checks, 0 failed`
 * `scripts/test-remote-call-shape.lua` -> `remote call shape ok (88 checks, 0 skipped)` (twice)
