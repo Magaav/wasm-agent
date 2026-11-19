@@ -1,4 +1,10 @@
 if not host then error('this test runs under the node (WA_SCRIPT), not plain Lua') end
+local home_guard = dofile("scripts/lib/test-home-guard.lua")
+local test_home = os.getenv("WASM_AGENT_HOME") or ""
+local scratch_root = os.getenv("GATE_ROOT") or os.getenv("TMPDIR") or ""
+local guard_reason = home_guard.reason({ home = test_home, scratch = scratch_root })
+if guard_reason then error("this test writes a ledger: it refuses to run (" .. guard_reason .. ")") end
+
 -- The model profile and the transport it decides (docs/AGENT-SEAT.md, principle 7). A measurement is
 -- read; a missing measurement is named and does not become a silent pass.
 local profile = dofile('lua/core/model_profile.lua')

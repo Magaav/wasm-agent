@@ -7,6 +7,12 @@
 --
 --   WA_SCRIPT=scripts/test-adapters.lua wa ...   prints "adapters ok"
 if not host then error("this test runs under the node (WA_SCRIPT), not plain Lua") end
+local home_guard = dofile("scripts/lib/test-home-guard.lua")
+local test_home = os.getenv("WASM_AGENT_HOME") or ""
+local scratch_root = os.getenv("GATE_ROOT") or os.getenv("TMPDIR") or ""
+local guard_reason = home_guard.reason({ home = test_home, scratch = scratch_root })
+if guard_reason then error("this test writes a ledger: it refuses to run (" .. guard_reason .. ")") end
+
 
 local json = dofile("lua/vendor/json.lua")
 local normalize = dofile("lua/core/adapters/normalize.lua")

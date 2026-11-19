@@ -2,6 +2,12 @@
 -- a native run({code, raw?}) tool call are ONE pathway. Each becomes the same codemode call, and the
 -- results come back the same way. Nothing here calls a provider: the dispatch is the node's own.
 if not host then error('this test runs under the node (WA_SCRIPT), not plain Lua') end
+local home_guard = dofile("scripts/lib/test-home-guard.lua")
+local test_home = os.getenv("WASM_AGENT_HOME") or ""
+local scratch_root = os.getenv("GATE_ROOT") or os.getenv("TMPDIR") or ""
+local guard_reason = home_guard.reason({ home = test_home, scratch = scratch_root })
+if guard_reason then error("this test writes a ledger: it refuses to run (" .. guard_reason .. ")") end
+
 
 local json = dofile('lua/vendor/json.lua')
 local memory = dofile('lua/core/memory.lua')
