@@ -88,7 +88,8 @@ local function drain_peer()
       end
     end
     if open == 0 then return true end
-    if host.sleep then host.sleep(0.3) end
+    -- host.sleep takes whole MILLISECONDS; 0.3 was 0 ms.
+    if host.sleep then host.sleep(300) end
   end
   return false
 end
@@ -451,10 +452,48 @@ if hot and hot.op then
   local hot_spent = (host.monotonic_ms and host.monotonic_ms() or 0) - hot_began
   check(instant.n <= 40, "a peer answering instantly without settling is capped in calls (made "
     .. tostring(instant.n) .. ")")
-  check(instant.n < 40 or hot_spent >= 250 * 39,
-    "and each call was charged at least the minimum, so the loop cannot be hot ("
-    .. tostring(instant.n) .. " calls in " .. tostring(hot_spent) .. " ms)")
+  -- TIME PER CALL (review r3, item 1): the charge alone lowered the budget but never waited, so N calls
+  -- were a burst. Every call after the first is now followed by a real pause of at least
+  -- REMOTE_MIN_PAUSE_MS (200 ms), so the wall time must be at least (calls - 1) * 200 ms. A count-only
+  -- assertion passes on a hot loop; this one cannot.
+  check(instant.n >= 2, "the loop really made more than one call (made " .. tostring(instant.n) .. ")")
+  check(hot_spent >= (instant.n - 1) * 200,
+    "each call was followed by a real pause, so the loop cannot be a burst ("
+    .. tostring(instant.n) .. " calls in " .. tostring(hot_spent) .. " ms, floor "
+    .. tostring((instant.n - 1) * 200) .. " ms)")
+  local per_call = hot_spent / math.max(1, instant.n)
+  check(per_call >= 100, "and the average time per call is well above a burst ("
+    .. string.format("%.0f", per_call) .. " ms per call)")
   tools.dispatch(memory, "operation", { action = "cancel", id = hot.op }, "master", peer_ctx)
+end
+
+-- 14b. VERIFICATION r3, item 1: operation_supervisor_overdue STOPS the wait at once, by name.
+--
+-- An overdue supervisor has stopped making progress on that operation, so another await is exactly the hot
+-- retry this change exists to remove. The wait must stop on the first such answer and carry its name.
+local overdue_calls = { n = 0 }
+local overdue_relay = function(name, params, raw)
+  if name == "remote" and type(params) == "table" and params.capability == "operation" then
+    overdue_calls.n = overdue_calls.n + 1
+    return { operation_id = tostring(params.id or ""), settled = false, state = "running",
+      error = "operation_supervisor_overdue" }
+  end
+  return relay(name, params, raw)
+end
+local overdue_raw = json.encode({ node = "rp-scratch-peer", capability = "bash",
+  command = "sleep 60", wait_s = 0 })
+local overdue_handle = pending.invoke(relay, { scope = scope }, "remote",
+  { node = "rp-scratch-peer", capability = "bash", command = "sleep 60" }, overdue_raw, 0)
+if overdue_handle and overdue_handle.op then
+  overdue_calls.n = 0
+  local overdue_entry = pending.wait(overdue_relay, { scope = scope }, overdue_handle.op, { wait_s = 30 })
+  check(overdue_calls.n == 1, "an overdue answer stops the wait at the FIRST call (made "
+    .. tostring(overdue_calls.n) .. ")")
+  check(type(overdue_entry) == "table" and overdue_entry.state == "pending",
+    "and the handle stays pending, never failed: " .. json.encode(overdue_entry or {}):sub(1, 200))
+  check(tostring(overdue_entry and overdue_entry.reason or ""):find("operation_supervisor_overdue", 1, true) ~= nil,
+    "and it names the reason: " .. tostring(overdue_entry and overdue_entry.reason))
+  tools.dispatch(memory, "operation", { action = "cancel", id = overdue_handle.op }, "master", peer_ctx)
 end
 
 -- 15. VERIFICATION r2, SHOULD: a FAILING TRANSPORT never marks the record final.

@@ -575,12 +575,25 @@ do
       -- A wait is only asked for when there is a wait to spend: a POLL (wait_s:0, or a batch sibling
       -- that settled early) asks the peer for its STATUS instead of an await with no budget, because a
       -- zero-length await is not a glance - it is a call whose stop condition the peer decides.
-      -- A CALL CAP and a MINIMUM CHARGE (review r2, MUST 3). A peer that answers at once without settling
-      -- used to be charged only its real elapsed time - nearly zero - so the loop went straight round
-      -- again: a hot retry holding the relay and the peer's slot. Every call now costs at least
-      -- REMOTE_MIN_CHARGE_MS of the budget, and a wait spends at most REMOTE_MAX_CALLS of them.
+      -- A CAP, A MINIMUM CHARGE **AND A PAUSE** (review r2 MUST 3, review r3 item 1).
+      --
+      -- The charge alone lowered the budget but never waited: a peer that answers AT ONCE without
+      -- settling (an overdue supervisor, an interrupted await, an old peer) still got up to
+      -- min(40, budget/250) relayed awaits back to back - the burst this fix removes. Two things change:
+      --
+      --   * every call is followed by a real pause before the next one, whole milliseconds with a
+      --     doubling backoff (200 -> 400 -> ... capped at 2 s), so N calls cost N pauses of wall time and
+      --     can never be a burst;
+      --   * operation_supervisor_overdue STOPS the wait at once and is named, because that answer means
+      --     the peer's own supervisor has stopped making progress: asking it again is the hot loop.
+      --
+      -- host.sleep takes whole MILLISECONDS (rust/wa-capabilities: "Block this interpreter for a bounded
+      -- number of milliseconds"), so a fractional value would be 0 ms and this pause would not exist.
       local REMOTE_MAX_CALLS = 40
       local REMOTE_MIN_CHARGE_MS = 250
+      local REMOTE_MIN_PAUSE_MS = 200
+      local REMOTE_MAX_PAUSE_MS = 2000
+      local pause = REMOTE_MIN_PAUSE_MS
       local calls = 0
       while left > 0 and calls < REMOTE_MAX_CALLS do
         calls = calls + 1
@@ -603,10 +616,23 @@ do
         end
         last = answer
         if answer.settled == true then return answer, nil end
+        if tostring(answer.error or "") == "operation_supervisor_overdue" then
+          -- STOP, and say why: the peer's supervisor has stopped making progress on this operation, so
+          -- another await would be the hot retry this loop exists to avoid. The handle stays resumable.
+          return answer, "operation_supervisor_overdue"
+        end
         if answer.error ~= nil and tostring(answer.error) ~= "await_interrupted" then
           -- The peer answered with an error that is not the harness interrupting its own wait: still not
           -- a settled command. Carry the word, keep the handle alive.
           reason = tostring(answer.error)
+        end
+        -- THE PAUSE: after every call that did not settle, before the next one. Bounded by what is left
+        -- of the caller's own budget, so a pause never overshoots the wait it belongs to.
+        if left > 0 and calls < REMOTE_MAX_CALLS then
+          local wait = math.min(pause, left)
+          if host.sleep then host.sleep(wait) end
+          left = math.max(0, left - wait)
+          pause = math.min(pause * 2, REMOTE_MAX_PAUSE_MS)
         end
       end
       if last == nil then
