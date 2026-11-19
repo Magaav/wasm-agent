@@ -790,6 +790,7 @@ local CUES = {
   spell_forget = "Delete a saved spell",
   spell_export = "Export a spell for the sentinel to run",
   remote = "Run a capability on another node",
+  build = "What this node is running against the tree: binary path, sha256 and build commit, and the verdict between them (fresh, stale, edited, unknown)",
   nodes = "List this node and its peers",
   fleetview = "One read-only view of the whole fleet: liveness, version, health, disk, components, work, incidents",
   lessons = "Recall or add what this fleet learned the hard way (symptom, cause, fix, rule)",

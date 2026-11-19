@@ -88,6 +88,7 @@ Built-in tools not declared at bootstrap, as the progressive prompt lists them (
 - `spell_forget`: Delete a saved spell
 - `spell_export`: Export a spell for the sentinel to run
 - `remote`: Run a capability on another node
+- `build`: What this node is running against the tree: binary path, sha256 and build commit, and the verdict between them (fresh, stale, edited, unknown)
 - `nodes`: List this node and its peers
 - `session_debug`: Set a session's recording mode (debug or default)
 - `session_fixture`: Export a session as a reproducible fixture
@@ -168,6 +169,7 @@ runs on the client too, while `bash` runs on this node.
 | `spell_forget` | `name` | Delete a saved spell |
 | `spell_export` | `name` `binary?` `params?` `path?` | Export a spell for the sentinel to run |
 | `remote` | `capability` `node` `args?` `calls?` `command?` `path?` | Run a capability on another node |
+| `build` | - | What this node is running against the tree: binary path, sha256 and build commit, and the verdict between them (fresh, stale, edited, unknown) |
 | `nodes` | - | List this node and its peers |
 | `session_debug` | `mode` `session_id?` | Set a session's recording mode (debug or default) |
 | `session_fixture` | `session_id?` | Export a session as a reproducible fixture |
