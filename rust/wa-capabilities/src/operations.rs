@@ -103,7 +103,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 /// An absolute path whose extension says it is a script: the launch's own arguments the approval must
-/// cover. An extension is a name and this is the only thing it is used as - the digest is over BYTES.
+    // `\` and `"` escape to two units, so a quote-heavy command reaches the bound sooner.
 fn is_script_path(value: &str) -> bool {
     const SCRIPTS: [&str; 11] = ["mjs", "cjs", "js", "lua", "sh", "bash", "py", "rb", "pl", "ps1", "bat"];
     let bytes = value.as_bytes();
@@ -1083,12 +1083,24 @@ impl Caller {
 /// one other session are four, which is exactly what a per-session progress file could not say (it counted
 /// one file per session). One rule, used by `list` and by `health_scope`, pinned by
 /// `a_settled_operation_is_not_counted_elsewhere`.
+///
+/// SETTLEMENT NARROWS THE COUNT, NOT THE CALLER'S OWN LIST (item 1, round 5). Round 4 skipped every
+/// settled row before it asked whose it was, so the caller's own FAILED operation vanished from its own
+/// `list` the moment it settled - and a failure is the one row a caller must be able to read
+/// back. Ownership decides what is mine; `settled` decides only whether it counts as running
+/// elsewhere.
 pub(crate) fn split_elsewhere(caller: &Caller, items: &[Value]) -> (Vec<Value>, usize) {
     let mut mine = Vec::new();
     let mut elsewhere = 0usize;
     for state in items {
-        if state["settled"] == true { continue; }
-        if caller.owns(state) { mine.push(state.clone()) } else { elsewhere += 1 }
+        if caller.owns(state) {
+            // MINE IS OWNERSHIP'S ANSWER, SETTLED OR NOT (item 1, round 5): a caller reads back what it
+            // ran, and its own failed operation is the row it most needs.
+            mine.push(state.clone());
+        } else if state["settled"] != true {
+            // ELSEWHERE IS A COUNT OF WORK, so a settled row is not counted: it is running nowhere.
+            elsewhere += 1;
+        }
     }
     (mine, elsewhere)
 }
@@ -1431,7 +1443,10 @@ pub fn health_scope_for(session: &str, node_wide: bool, owner: &str) -> Value {
     // The same rule as `list`: only unsettled operations are elsewhere, and one rule serves both.
     let items = manager().list().as_array().cloned().unwrap_or_default();
     let (ops, elsewhere) = split_elsewhere(&caller, &items);
-    let mine: Vec<Value> = ops.iter().map(health_row).collect();
+    // /health IS A NOW-VIEW: the caller's own operations THAT ARE RUNNING. `list` keeps a settled
+    // row so a caller can read back what it ran (item 1, round 5); a health page that listed finished
+    // work would answer "what is this node doing" with its history.
+    let mine: Vec<Value> = ops.iter().filter(|s| s["settled"] != true).map(health_row).collect();
     json!({"session": session, "operations": mine, "operations_elsewhere": elsewhere,
         "operations_scope": if session.is_empty() { "node" } else { "session" }})
 }
@@ -1538,6 +1553,10 @@ mod elsewhere_count_tests {
 
     /// A node-wide caller owns everything, and a settled row is still not running anywhere: the count
     /// stays a count of WORK, not of the caller's reach.
+    ///
+    /// Item 1 (round 5) moved the settled filter from the WHOLE answer to the count alone, so this row
+    /// now owns BOTH: it reads back the one it ran - settled rows included - and still counts zero
+    /// elsewhere, because a settled operation is running nowhere.
     #[test]
     fn a_node_wide_caller_still_counts_only_unsettled_work_elsewhere() {
         let caller = Caller { session: "".into(), node: true, owner: String::new() };
@@ -1546,8 +1565,43 @@ mod elsewhere_count_tests {
             json!({"operation_id":"op-2","session":"session-b","settled":true}),
         ];
         let (mine, elsewhere) = split_elsewhere(&caller, &items);
-        assert_eq!(mine.len(), 1, "a node-wide caller owns every unsettled row");
-        assert_eq!(elsewhere, 0, "and nothing unsettled is elsewhere to it");
+        assert_eq!(mine.len(), 2, "a node-wide caller owns every row, settled or not");
+        let ids: Vec<&str> = mine.iter().filter_map(|s| s["operation_id"].as_str()).collect();
+        assert!(ids.contains(&"op-1") && ids.contains(&"op-2"), "both ids are listed: {ids:?}");
+        assert_eq!(elsewhere, 0, "and nothing is elsewhere to it");
+    }
+
+    /// ITEM 1 (round 5): a caller's OWN SETTLED OPERATION STAYS IN ITS OWN LIST.
+    ///
+    /// Round 4's `split_elsewhere` skipped every settled row before it asked whose it was, so a session
+    /// that ran a command which FAILED could not read the failure back: it vanished from `list` the
+    /// instant it settled. The count is the only thing settlement narrows.
+    #[test]
+    fn the_callers_own_failed_operation_stays_in_its_list() {
+        let caller = Caller { session: "session-a".into(), node: false, owner: String::new() };
+        let items = vec![
+            json!({"operation_id":"op-failed","session":"session-a","state":"failed","settled":true}),
+            json!({"operation_id":"op-theirs-settled","session":"session-b","state":"failed","settled":true}),
+            json!({"operation_id":"op-theirs-live","session":"session-b","state":"running","settled":false}),
+        ];
+        let (mine, elsewhere) = split_elsewhere(&caller, &items);
+        assert_eq!(mine.len(), 1, "exactly the caller's own row is its list");
+        assert_eq!(mine[0]["operation_id"], json!("op-failed"));
+        assert_eq!(mine[0]["state"], json!("failed"), "and it still says how it failed");
+        assert_eq!(elsewhere, 1, "another session's SETTLED row is not counted as running");
+    }
+
+    /// The Fleet View's incident line needs an id, and a settled operation row carries
+    /// `operation_id` - never `id`. The incident read `entry.id`, so a real failure was announced as
+    /// "operation ? settled as failed" (item 1, round 5).
+    #[test]
+    fn a_settled_operation_row_names_its_id_as_operation_id() {
+        let caller = Caller { session: "session-a".into(), node: false, owner: String::new() };
+        let items = vec![json!({"operation_id":"op-failed","session":"session-a","state":"failed",
+            "settled":true,"finished_at":1750000000000u64})];
+        let (mine, _) = split_elsewhere(&caller, &items);
+        assert_eq!(mine[0]["operation_id"], json!("op-failed"));
+        assert!(mine[0].get("id").is_none(), "the row has no bare `id` field to read instead");
     }
 }
 
@@ -1661,7 +1715,7 @@ mod command_launch_tests {
         assert!(error.contains("shell_command_too_long"), "{error}");
     }
 
-    // `\` and `"` escape to two units, so a quote-heavy command reaches the bound sooner.
+    // `` and `"` escape to two units, so a quote-heavy command reaches the bound sooner.
     #[test]
     fn counts_quoting_overhead_towards_the_bound() {
         let command = "\"".repeat(WINDOWS_INLINE_COMMAND_BUDGET / 2 + 10);

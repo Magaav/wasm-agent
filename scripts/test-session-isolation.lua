@@ -116,6 +116,45 @@ ok(listed(mine, id), "A's own operation is in A's list")
 local theirs = tools.dispatch(memory, "operation", { action = "list" }, "master", ctx_b)
 ok(not listed(theirs, id), "B's list does not contain A's operation")
 
+-- ITEM 1 (round 5): A's OWN FAILED OPERATION STAYS IN A's LIST.
+--
+-- `split_elsewhere` skipped every settled row before it asked whose it was, so a caller's own failed
+-- operation vanished from its own `list` the instant it settled - the one row a caller most needs to
+-- read back. Settlement narrows the COUNT (a settled operation is running nowhere), never the list.
+local broken = tools.dispatch(memory, "operation", { action = "start", command = "exit 3",
+  timeout_seconds = 60, background = false }, "master", ctx_a) or {}
+ok(type(broken.operation_id) == 'string', "A starts an operation whose command fails")
+if type(broken.operation_id) == 'string' then
+  local settled_failure = tools.dispatch(memory, "operation",
+    { action = "wait", id = broken.operation_id, wait_ms = 30000 }, "master", ctx_a) or {}
+  eq(settled_failure.state, "failed", "the command really failed, and the record says so")
+  ok(settled_failure.settled == true, "and the operation is settled: the row is history, not work")
+  local after = tools.dispatch(memory, "operation", { action = "list" }, "master", ctx_a) or {}
+  ok(listed(after, broken.operation_id), "A's own settled FAILED operation is still in A's list")
+  local row
+  for _, entry in ipairs(after.operations or {}) do
+    if type(entry) == 'table' and entry.operation_id == broken.operation_id then row = entry end
+  end
+  eq(type(row) == 'table' and row.state, "failed", "and the row still says how it ended")
+  -- Settlement narrows the COUNT only: B is told nothing is running elsewhere because of A's history.
+  local b_after = tools.dispatch(memory, "operation", { action = "list" }, "master", ctx_b) or {}
+  ok(not listed(b_after, broken.operation_id), "B still cannot see it: it is A's, settled or not")
+  -- The Fleet View announces it as an incident - WITH ITS OWN ID. The incident read `entry.id`, and an
+  -- operation row has never carried one: a real failure was printed as "operation ? settled as failed".
+  local fleet = dofile('lua/core/fleetview.lua')
+  local incidents = fleet.telemetry_incidents({ memory = memory, role = 'master', user_id = 'master',
+    session = 'iso-session-a' })
+  local announced
+  for _, incident in ipairs(type(incidents) == 'table' and incidents or {}) do
+    if type(incident) == 'table' and incident.kind == 'operation_failed' then announced = incident end
+  end
+  ok(type(announced) == 'table', "Fleet View telemetry reports the failed operation as an incident")
+  eq(type(announced) == 'table' and announced.id, broken.operation_id,
+    "the incident names the operation's own id, not a placeholder")
+  ok(type(announced) == 'table' and tostring(announced.summary):find(broken.operation_id, 1, true) ~= nil,
+    "and so does its sentence")
+end
+
 -- Every id-carrying action refuses another session's operation, by name.
 local actions = { { "status", {} }, { "read", { stream = "stdout", limit = 64 } }, { "wait", { wait_ms = 1 } },
   { "await", { wait_for = "command" } }, { "cancel", {} } }

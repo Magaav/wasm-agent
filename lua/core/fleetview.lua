@@ -484,8 +484,12 @@ function M.telemetry_incidents(opts)
     for _, entry in ipairs(type(operations) == 'table' and (operations.operations or operations.list or {}) or {}) do
       local state = tostring(type(entry) == 'table' and entry.state or '')
       if state == 'failed' or state == 'unknown' or state == 'cancelled' then
-        out[#out + 1] = { id = tostring(entry.id or ''), source = 'telemetry', at = tonumber(entry.finished_at or entry.started_at),
-          kind = 'operation_' .. state, summary = 'operation ' .. tostring(entry.id or '?') .. ' settled as ' .. state }
+        -- THE OPERATION'S ID IS `operation_id` (item 1, round 5). This read `entry.id`, and an operation
+        -- row has never carried one: every real failure was announced as "operation ? settled as failed",
+        -- an incident nobody could look up. `id` stays as the fallback for a caller that shapes its own row.
+        local id = tostring(entry.operation_id or entry.id or '?')
+        out[#out + 1] = { id = id, source = 'telemetry', at = tonumber(entry.finished_at or entry.started_at),
+          kind = 'operation_' .. state, summary = 'operation ' .. id .. ' settled as ' .. state }
       end
     end
   end
