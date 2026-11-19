@@ -19,14 +19,24 @@ local tools = dofile('lua/core/tools.lua')
 local agent = dofile('lua/core/agent.lua')
 local cases = dofile('scripts/lib/prompt-golden-cases.lua')
 
-local OUT = os.getenv('WA_GOLDEN_OUT') or ((host.getenv('WASM_AGENT_LUA_ROOT') or '.') .. '/fixtures/prompt-golden')
+-- Record from the tree root, and only from there: the prompt depends on the process cwd through the
+-- skills walk, so a recording made anywhere else describes a different node (scripts/test-prompt-golden.lua
+-- refuses the same way).
+local TREE = host.getenv('WASM_AGENT_LUA_ROOT') or '.'
+local CWD = dofile('lua/core/platform.lua').cwd()
+if CWD ~= TREE then
+  error('run this from the tree root (cwd=' .. tostring(CWD) .. ', tree=' .. tostring(TREE) .. ')', 0)
+end
+local OUT = os.getenv('WA_GOLDEN_OUT') or (TREE .. '/fixtures/prompt-golden')
 local real = host.getenv
 local written, refused = 0, {}
 
 local function run_case(case)
+  local instructions = golden.instruction_env()
   local function env(k)
     if k == 'WASM_AGENT_RAW_CODE' then return case.mode end
     if k == 'WASM_AGENT_ENVELOPE_MODE' then return case.envelope end
+    if instructions[k] ~= nil then return instructions[k] end
     return real(k)
   end
   host.getenv = env

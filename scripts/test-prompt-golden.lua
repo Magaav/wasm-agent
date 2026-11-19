@@ -51,17 +51,27 @@ end
 
 -- Fixtures live under the TREE this script runs from (WASM_AGENT_LUA_ROOT), never under the process
 -- cwd: the same rule scripts/test-mcp-vault-approval.lua follows.
-local ROOT = (host.getenv('WASM_AGENT_LUA_ROOT') or '.') .. '/fixtures/prompt-golden'
+-- The prompt depends on the PROCESS cwd through the skills walk (lua/core/skills.lua scans the tree and
+-- its parents up to the repo root), so a golden is only meaningful for ONE cwd: the tree root, which is
+-- where scripts/fast.sh runs its rows. Anywhere else this refuses BY NAME rather than comparing a
+-- different node shape (found the hard way: a recording made from the mission directory carried no
+-- skills block at all, and the row then failed on a prompt that was right).
+local TREE = host.getenv('WASM_AGENT_LUA_ROOT') or '.'
+local CWD = dofile('lua/core/platform.lua').cwd()
+ok(CWD == TREE, 'this test must run from the tree root (cwd=' .. tostring(CWD) .. ', tree=' .. tostring(TREE) .. ')')
+local ROOT = TREE .. '/fixtures/prompt-golden'
 local real = host.getenv
 
 -- One build, exactly as the first request makes it.
 -- '' (an empty string) in env means UNSET for that key: the arm-B rows must not inherit a switch the
 -- caller happened to export, or a gate run with WASM_AGENT_RAW_CODE=only would assert the wrong node
 -- (measured: this test failed that way when the runner exported only).
+local INSTRUCTIONS = golden.instruction_env()
 local function build(env, subagent)
   host.getenv = function(k)
     if env[k] == '' then return nil end
     if env[k] ~= nil then return env[k] end
+    if INSTRUCTIONS[k] ~= nil then return INSTRUCTIONS[k] end
     return real(k)
   end
   local okc, value = pcall(function()

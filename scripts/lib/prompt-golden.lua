@@ -16,17 +16,39 @@ local function escape(text)
   return (tostring(text):gsub('([%^%$%(%)%%%.%[%]%*%+%-%?])', '%%%1'))
 end
 
+-- The instruction files, named EXPLICITLY so a build never depends on the process cwd (found the hard
+-- way: the fast path runs every row from the repository root, my probe ran from the mission directory,
+-- and the same tree built two different prompts because AGENTS.orchestrator.md was found in one and not
+-- the other). Both the recorder and the test set these, so the goldens and the check see one shape.
+function M.instruction_env()
+  local root = host.getenv('WASM_AGENT_LUA_ROOT') or '.'
+  return {
+    WASM_AGENT_AGENTS_MD = root .. '/AGENTS.md',
+    WASM_AGENT_AGENTS_MD_ORCHESTRATOR = root .. '/AGENTS.orchestrator.md',
+    WASM_AGENT_AGENTS_MD_SUBAGENTS = root .. '/AGENTS.subagents.md',
+  }
+end
+
 -- The host strings of THIS run: the scratch home and the working directory.
 function M.host_strings()
-  return { home = os.getenv('WASM_AGENT_HOME') or '', cwd = dofile('lua/core/platform.lua').cwd() or '' }
+  return { home = os.getenv('WASM_AGENT_HOME') or '',
+    tree = host.getenv('WASM_AGENT_LUA_ROOT') or '',
+    cwd = dofile('lua/core/platform.lua').cwd() or '' }
 end
 
 -- Everything a golden stores, from one build: { system = <text>, tools = <array> }.
 function M.normalize(build)
   local host_strings = M.host_strings()
   local system = tostring(build.system or '')
+  -- Order matters: the TREE path may sit under the working directory (a base worktree does), so it is
+  -- replaced first - otherwise the recorder's own checkout name ends up inside the golden.
   if host_strings.home ~= '' then system = system:gsub(escape(host_strings.home), '<HOME>') end
+  if host_strings.tree ~= '' then system = system:gsub(escape(host_strings.tree), '<TREE>') end
   if host_strings.cwd ~= '' then system = system:gsub(escape(host_strings.cwd), '<CWD>') end
+  -- The session workdir is the PROCESS working directory when the session owns no worktree - a host
+  -- fact that differs between the recorder (a base worktree) and the checker (whatever cwd the harness
+  -- uses, e.g. the repository root of the fast path). The attribute is normalised, nothing else.
+  system = system:gsub('<workdir path="[^"]*"', '<workdir path="<WORKDIR>"')
   local kept, removed = {}, 0
   for line in (system .. '\n'):gmatch('(.-)\n') do
     if line:match(M.NOTICE_PATTERN) then removed = removed + 1 else kept[#kept + 1] = line end
