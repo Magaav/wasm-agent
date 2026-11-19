@@ -51,6 +51,23 @@ eq(split.note.hurt, "the run block tag was not read, so a step was redone.", "#3
 eq(split.note.focus, "the run-block parser's tag rule.", "#33: focus is kept")
 ok(split.block ~= nil and split.block:find("<turn>", 1, true) == 1, "#33: the block itself is kept whole")
 
+-- Item 3 (review 19/11): every byte of answer text survives, before AND after the block.
+local tail_after = journal.split("<turn>\n- **focus** - the parser\n</turn>\n\n42")
+eq(tail_after.visible, "42", "#3: the text after a leading block is still the answer")
+ok(tail_after.note ~= nil, "#3: and the block is still the note")
+local ps = journal.split("Answer\n<turn>\n- **focus** - the parser\n</turn>\nP.S.")
+eq(ps.visible, "Answer\n\nP.S.", "#3: a postscript after the block is kept")
+local unclosed = journal.split("Answer\n<turn>\n- **focus** - the parser")
+eq(unclosed.visible, "Answer\n<turn>\n- **focus** - the parser",
+  "#3: an unclosed <turn> is not stripped - it is text")
+ok(unclosed.note == nil, "#3: and it carries no note")
+local two = journal.split("<turn>\n- **focus** - a\n</turn>\nmid\n<turn>\n- **focus** - b\n</turn>\ntail")
+eq(two.visible, "mid\n\ntail", "#3: two blocks are both removed, the text between them kept")
+ok(two.note and two.note.focus:find("a", 1, true) and two.note.focus:find("b", 1, true),
+  "#3: and both notes are collected")
+local number_only = journal.split("42")
+eq(number_only.visible, "42", "#3: an answer with no tag is untouched, byte for byte")
+
 local plain = journal.split("just an answer, no note")
 eq(plain.visible, "just an answer, no note", "#33: an answer without a note is unchanged")
 ok(plain.note == nil, "#33: and carries no note")

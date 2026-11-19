@@ -84,50 +84,72 @@ local function heading(line)
 end
 
 -- Split one answer into the text a reader sees and the note it carried.
---   `{ visible = <answer without the block>, note = {hurt,buys,focus} | nil, block = <the raw block> }`
--- An unclosed block still counts as a note (a model that ran out of output budget wrote one), but the
--- visible text is never guessed at: the block starts at its opening tag and the answer before it is
--- kept whole.
+--   { visible = <answer without the block>, note = {hurt,buys,focus} | nil, block = <the raw block> }
+--
+-- Item 3 (review 19/11): the split keeps EVERY byte of answer text, before and after the block. The
+-- first version cut the answer at the opening tag and dropped everything after the closing one, so
+-- an answer of "<turn>..</turn>\n\n42" lost its 42 and a postscript after the block vanished - the
+-- exact text the operator asked for, deleted to hide a note. The rule now:
+--   * a CLOSED block is removed whole, wherever it sits, and the text on both sides is kept as it
+--     was (blank lines the removal leaves behind are collapsed, so an answer that was only the block
+--     reads as empty rather than as leftover whitespace);
+--   * an UNCLOSED <turn> is NOT stripped: a model that ran out of output wrote text, not a section,
+--     and guessing where that text ends is how an answer gets truncated. It stays in the visible
+--     answer and carries no note.
+-- Several blocks: every closed one is removed and its fields are collected in order.
 function M.split(content)
   local text = type(content) == "string" and content or ""
-  local start = block_start(text)
-  if not start then return { visible = text, note = nil, block = nil } end
-  local body = text:sub(start + 6)
-  local stop = body:find("</turn>", 1, true)
-  local block = stop and (text:sub(start, start + 6 + stop + 6)) or text:sub(start)
-  local visible = text:sub(1, start - 1)
-  local inner = stop and body:sub(1, stop - 1) or body
-  local parts = { hurt = {}, buys = {}, focus = {} }
-  local order, current = {}, nil
-  for line in (inner .. "\n"):gmatch("([^\n]*)\n") do
-    local key, first = heading(line)
-    if key then
-      current = key
-      if parts[key][1] == nil then order[#order + 1] = key end
-      if first and first ~= "" then parts[key][#parts[key] + 1] = first end
-    elseif current and trim(line) ~= "" then
-      parts[current][#parts[current] + 1] = trim(line)
+  local visible, blocks, fields = {}, {}, { hurt = {}, buys = {}, focus = {} }
+  local order = {}
+  local cursor = 1
+  while true do
+    local start = block_start(text:sub(cursor))
+    if not start then break end
+    start = cursor + start - 1
+    local body_at = start + 6
+    local stop = text:find("</turn>", body_at, true)
+    if not stop then break end -- unclosed: the rest is answer text, never a note
+    local inner = text:sub(body_at, stop - 1)
+    visible[#visible + 1] = text:sub(cursor, start - 1)
+    blocks[#blocks + 1] = text:sub(start, stop + 6)
+    local current = nil
+    for line in (inner .. "\n"):gmatch("([^\n]*)\n") do
+      local key, first = heading(line)
+      if key then
+        current = key
+        if fields[key][1] == nil then order[#order + 1] = key end
+        if first and first ~= "" then fields[key][#fields[key] + 1] = first end
+      elseif current and trim(line) ~= "" then
+        fields[current][#fields[current] + 1] = trim(line)
+      end
+    end
+    cursor = stop + 7
+  end
+  visible[#visible + 1] = text:sub(cursor)
+  local joined = table.concat(visible, "")
+  local block = #blocks > 0 and table.concat(blocks, "\n") or nil
+  local note = nil
+  if block then
+    if #order == 0 then
+      -- One line and no headings - the shape the section itself asks for when nothing hurt.
+      local flat = trim(block:gsub("<[^>]->", " "))
+      if flat ~= "" then fields.hurt[1] = flat end
+    end
+    note = {
+      hurt = trim(table.concat(fields.hurt, " ")),
+      buys = trim(table.concat(fields.buys, " ")),
+      focus = trim(table.concat(fields.focus, " ")),
+    }
+    if note.hurt == "" and note.buys == "" and note.focus == "" then note = nil end
+    for _, key in ipairs(M.FIELDS) do
+      if note and #note[key] > M.MAX_FIELD then note[key] = note[key]:sub(1, M.MAX_FIELD) end
     end
   end
-  local note = {
-    hurt = trim(table.concat(parts.hurt, " ")),
-    buys = trim(table.concat(parts.buys, " ")),
-    focus = trim(table.concat(parts.focus, " ")),
-  }
-  if #order == 0 then
-    -- One line and no headings - the shape the section itself asks for when nothing hurt. It is a
-    -- note only when the block is closed: an opening tag alone with no labels is a mention.
-    local flat = trim(inner:gsub("<[^>]->", " "))
-    if not stop or flat == "" then note = nil else note.hurt = flat end
-  end
-  if note and note.hurt == "" and note.buys == "" and note.focus == "" then note = nil end
-  for _, key in ipairs(M.FIELDS) do
-    if note and #note[key] > M.MAX_FIELD then note[key] = note[key]:sub(1, M.MAX_FIELD) end
-  end
-  -- A blank line the block left behind is not answer text: trailing whitespace is removed so an
-  -- answer that was only the block reads as an empty answer, not as one space.
-  visible = visible:gsub("%s+$", "")
-  return { visible = visible, note = note, block = block }
+  -- The blank lines a removed block leaves are the block's whitespace, not the answer's: a run of
+  -- blank lines collapses to one, and the ends are trimmed. The answer's own bytes, before and
+  -- after the block, are otherwise untouched.
+  joined = joined:gsub("[ \t]+\n", "\n"):gsub("\n\n\n+", "\n\n"):gsub("^%s+", ""):gsub("%s+$", "")
+  return { visible = joined, note = note, block = block }
 end
 
 -- ---------------------------------------------------------------- the journal row
