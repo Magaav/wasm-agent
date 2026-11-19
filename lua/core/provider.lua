@@ -17,6 +17,12 @@ local state = dofile("lua/core/state.lua")
 -- reads of one small file; it *acts* only when `WA_MODEL_GATEWAY=1`, which is what keeps the native path
 -- below byte-for-byte what it was (`scripts/test-model-gateway.lua` asserts it).
 local gateway = dofile("lua/core/model_gateway.lua")
+-- The adapter seam (docs/AGENT-SEAT.md, principles 2 and 3): every provider answer becomes one
+-- normalized message (lua/core/adapters/normalize.lua) and the core reads only that. The splitting
+-- that used to live below - the reasoning spellings, the think block inside content - is the
+-- adapter layer's, so a provider quirk is fixed in its own adapter and never in the loop.
+local adapters = dofile("lua/core/adapters/init.lua")
+local normalize = dofile("lua/core/adapters/normalize.lua")
 
 local function env(name) return host.getenv(name) end
 local function trim(value) return (value or ""):gsub("^%s+", ""):gsub("%s+$", "") end
@@ -1440,20 +1446,26 @@ function M.complete_with(model, messages, tools, stream, opts)
   if response.status ~= 200 then
     error(http_problem(response.status, response.body, response.retry_after_ms))
   end
+  -- One normalized message (docs/AGENT-SEAT.md, principles 2 and 3): the provider's own shape is
+  -- folded by its adapter, and what the loop reads below is the record. A provider quirk is fixed in
+  -- lua/core/adapters/, not here.
+  local adapter, adapter_problem = adapters.for_transport(provider.transport)
+  if not adapter then error(adapter_problem) end
   local payload = json.decode(response.body)
-  local message = payload.choices[1].message
-  local phase = message.phase or ""
+  local record, record_problem = adapter.from_payload(payload)
+  if not record then error(record_problem) end
   return {
-    content = phase == "commentary" and "" or message.content or "",
-    commentary = phase == "commentary" and (message.content or "") or "",
-    final_phase = phase == "final_answer" and phase or "",
-    reasoning = M.reasoning_of(message),
-    finish_reason = payload.choices[1].finish_reason,
-    tool_calls = message.tool_calls or {},
-    usage = payload.usage,
-    model = payload.model or body.model,
-    serving_response_model = payload.model,
-    request_id = payload.id,
+    content = record.answer_text,
+    commentary = record.commentary or "",
+    final_phase = "",
+    reasoning = record.reasoning,
+    finish_reason = record.finish_reason,
+    tool_calls = record.tool_calls,
+    usage = record.usage,
+    normalized = record,
+    model = record.model or body.model,
+    serving_response_model = record.model,
+    request_id = record.request_id,
   }
   end)
   if not ok then
@@ -1483,38 +1495,15 @@ function M.complete_with(model, messages, tools, stream, opts)
   return result
 end
 
--- The three spellings an OpenAI-compatible endpoint uses for a reasoning model's
--- thinking. pi reads all three and takes the first non-empty one for the same
--- reason: it is one piece of information under different names.
-local REASONING_FIELDS = { "reasoning_content", "reasoning", "reasoning_text" }
-
 function M.reasoning_of(message)
-  if type(message) ~= "table" then return "" end
-  for _, field in ipairs(REASONING_FIELDS) do
-    local value = message[field]
-    if type(value) == "string" and value ~= "" then return value end
-  end
-  return ""
+  return normalize.reasoning_of(message)
 end
 
 -- What a reader would see. A reply that is only reasoning, or only whitespace, is
 -- not an answer - and some endpoints put the thinking inside content as a <think>
 -- block, so those are removed here the way the UI removes them.
 function M.visible_text(text)
-  local out = tostring(text or "")
-  local last = nil
-  local from = 1
-  while true do
-    local _, closing = string.find(out, "</think>", from, true)
-    if not closing then break end
-    last = closing
-    from = closing + 1
-  end
-  if last then out = out:sub(last + 1) end
-  local opening = string.find(out, "<think", 1, true)
-  if opening then out = out:sub(1, opening - 1) end
-  out = out:gsub("</?think[^>]*>", "")
-  return (out:gsub("^%s+", ""):gsub("%s+$", ""))
+  return normalize.visible_text(text)
 end
 
 -- A tool call the model got wrong, made safe before it reaches the provider (11/11).

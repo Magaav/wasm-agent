@@ -1,0 +1,20 @@
+{
+  "provider": "openai-compatible",
+  "recorded_at": "2026-11-19",
+  "shape": "SSE data payloads, in arrival order, verbatim from the provider",
+  "expect": {
+    "answer_text": "3",
+    "reasoning": "They ask 1+2.",
+    "tool_calls": 0,
+    "finish_reason": "stop",
+    "cut": false
+  },
+  "payloads": [
+    "{\"id\":\"a1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"reasoning_content\":\"They ask \"}}]}",
+    "{\"id\":\"a1\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"1+2.\"}}]}",
+    "{\"id\":\"a1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"3\"}}]}",
+    "{\"id\":\"a1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}",
+    "{\"id\":\"a1\",\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":7,\"total_tokens\":19,\"completion_tokens_details\":{\"reasoning_tokens\":5},\"prompt_tokens_details\":{\"cached_tokens\":8}}}",
+    "[DONE]"
+  ]
+}

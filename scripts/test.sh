@@ -1657,6 +1657,9 @@ WA_SCRIPT="$DB.node-name.lua" "$BIN" --db "$DB" | grep "node name ok"
 rm -f "$DB.node-name.lua"
 WA_SCRIPT=scripts/test-empty-reply.lua "$BIN" --db "$DB" | grep "empty reply ok"
 WA_SCRIPT=scripts/test-thinking-block.lua "$BIN" --db "$DB" | grep "thinking block ok"
+# The adapter contract (docs/AGENT-SEAT.md, principles 2 and 3): a recorded provider stream becomes one
+# normalized message. Two providers' own shapes are replayed; no live call is made.
+WA_SCRIPT=scripts/test-adapters.lua "$BIN" --db "$DB" | grep "adapters ok"
 
 # Test the shipping registry, including missing/stale/invalid negative controls.
 ( export WA_EMBEDDED_SOURCE_ROOT="$WASM_AGENT_LUA_ROOT"; unset WASM_AGENT_LUA_ROOT
