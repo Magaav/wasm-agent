@@ -40,6 +40,14 @@ local memory = dofile('lua/core/memory.lua')
 memory.setup()
 local agent = dofile('lua/core/agent.lua')
 local provider = dofile('lua/core/provider.lua')
+-- The premise this script was written on - hide WASM_AGENT_LLM_API_KEY/BASE_URL/MODEL and the turn
+-- takes the local fallback - stopped being true: the shipped list carries a default route (opencode-go
+-- with its own base_url and model), so configured() answered true with no environment at all and the
+-- counting run refused instead of counting (re-measured 19/11). Pin the empty settings instead: the
+-- same intent (no model call), and now the premise holds. The pin is the module's own switch, not a
+-- second copy of how it decides.
+provider._pinned = { provider = provider.active(), settings = {
+  provider = 'none', label = 'none', base_url = '', api_key = '', model = '' } }
 -- The check runs with the stub still installed: a route this stub cannot hide would be a route the
 -- turn would call, and the counting run must make no model call at all.
 if provider.configured() then
