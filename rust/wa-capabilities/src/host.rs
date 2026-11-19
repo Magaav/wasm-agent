@@ -6440,9 +6440,11 @@ mod tls_anchor_tests {
         assert!(error.contains("SSL_CERT_FILE"), "{error}");
         assert!(error.contains("typo.pem"), "{error}");
         // The same refusal from the config every capability builds its agent from, not only from the
-        // one function a test happened to call.
+        // one function a test happened to call. agent() itself is deliberately not asserted on: it
+        // remembers the one agent it built, so in a test process another test may have built it
+        // already, and the anchors it was built with are the ones wa-tls gave at that moment.
         assert!(build_config(10).is_err());
         assert!(build_config_with(10, 5).is_err());
-        assert!(agent_for_call().is_err());
+        assert!(agent_for_stream(5).is_err());
     }
 }
