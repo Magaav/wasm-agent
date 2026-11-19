@@ -1261,6 +1261,13 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-network-roster-offline.lua" "$BIN" 
 # Now: at most RELAY_MAX_IN_FLIGHT per node (refused by name BEFORE anything is sent), and a growing,
 # capped, jittered wait that honours Retry-After - never a tight retry.
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-network-relay-backpressure.lua" "$BIN" --db "$DB.network-relay-backpressure" | grep 'network relay backpressure ok'
+# A rendezvous OUTAGE must not turn an already-bound operator into a stranger (19/11: the work node
+# answered no relayed call for the length of the drop, because every call's admission asked the registry
+# twice and "unknown" refused). A POSITIVE admission is remembered with its time and stands through a
+# LINK failure inside a window; anything the registry ANSWERS still wins (revoked, removed, expired
+# refuse at once), and a caller never admitted before is refused as before - a new binding can never be
+# created against an unreachable registry.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-network-binding-outage.lua" "$BIN" --db "$DB.network-binding-outage" | grep 'network binding outage ok'
 # A route must refuse a model it cannot serve before the first provider request - and only that.
 # A child with `gpt-6-luna` on the opencode-go route failed in 0.67s with zero tool calls on the
 # edge's `Model does not support this protocol`, and 26 child runs of `deepseek-v4.1-flash` died
