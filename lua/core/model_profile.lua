@@ -36,6 +36,24 @@ function M.path(model)
   return state.path("models/" .. name .. ".json")
 end
 
+-- The built-in default transport, by PROVIDER (review MUST 1).
+--
+-- A provider is an adapter family: every model behind it speaks one wire protocol and one action
+-- channel. Keying this by provider id - not by a model name - keeps the core free of model branches
+-- (the rule the reviewer enforces): a new model on this provider inherits the default, and a new
+-- provider refuses until someone writes a row here or a measured profile replaces it.
+M.DEFAULT_TRANSPORTS = {
+  -- The fleet's provider: an OpenAI-compatible endpoint whose models take native tool calls, and
+  -- whose local edge refuses a request with no session (so the tool-call transport is what actually
+  -- works there). Measured by the conformance suite on 19/11: the model acts through run() calls.
+  ["opencode-go"] = M.TOOL_CALL,
+}
+
+-- The transport this provider uses when no measured profile exists, or nil when nobody decided.
+function M.builtin_transport(provider_id)
+  return M.DEFAULT_TRANSPORTS[tostring(provider_id or "")]
+end
+
 function M.read(model)
   local name = M.safe_name(model)
   if not name then return nil, "no_profile" end

@@ -48,7 +48,7 @@ M.GUIDANCE = "You may also run a script by ending your message with one ```js ru
 
 -- Model-facing (operator-reviewed, verbatim). With `first` it opens the code-mode guidance in place of
 -- the codemode-call sentence (lua/core/codemode_policy.lua, `guidance_for`).
-M.FIRST_GUIDANCE = "Work in code: end your message with one ```js run block (nothing after its closing fence: the result replaces it); it runs as one script in which every tool is `tools.<name>(args)`, and what it returns comes back to you. A message without a run block is your answer."
+M.FIRST_GUIDANCE = "Work in code: end your message with one ```js run block (nothing after its closing fence: the result replaces it); it runs as one script in which every tool is `tools.<name>(args)`, and what it returns comes back to you. A message without a run block is your answer. "
 
 -- With `first`, the marker a raw-channel result is sent back under (a user message, no tool pairing).
 M.OBSERVATION = "Observation:\n"
@@ -66,8 +66,31 @@ M.ONLY_GENERIC = { bash = true, read = true, write = true, edit = true, ls = tru
 -- the channel to be able to run one: a node whose code mode is off declared NOTHING and then refused to
 -- start the turn (no_dispatchable_tools, 18/11) while its ordinary tools were there all along.
 function M.only(policy)
-  if policy ~= nil then return M.active(policy) and M.mode() == "only" end
-  return M.mode() == "only"
+  -- `only` empties the declared surface because the run block is the one way to act. On a node whose
+  -- transport is a NATIVE CALL that reasoning is inverted: emptying the surface would remove the very
+  -- tool the model is told to call (review MUST 1). So `only` yields to a tool_call transport, and the
+  -- transport is read from the same decision the guidance comes from - profile first, then the named
+  -- provider default - never from a model name.
+  local function native_transport()
+    local ok, lib = pcall(dofile, "lua/core/model_profile.lua")
+    if not ok or type(lib) ~= "table" then return false end
+    local provider_ok, provider_lib = pcall(dofile, "lua/core/provider.lua")
+    if not provider_ok then return false end
+    local settings_ok, settings = pcall(provider_lib.settings)
+    if not settings_ok or type(settings) ~= "table" then return false end
+    local profile = lib.read(settings.model)
+    if type(profile) == "table" then
+      local conform_ok, conform = pcall(dofile, "lua/core/conform.lua")
+      if conform_ok and type(conform) == "table" then
+        local decision = conform.decide(profile)
+        if decision and decision.transport then return decision.transport == lib.TOOL_CALL end
+      end
+    end
+    return lib.builtin_transport and lib.builtin_transport(settings.provider) == lib.TOOL_CALL
+  end
+  local active = policy == nil and M.mode() == "only" or (M.active(policy) and M.mode() == "only")
+  if not active then return false end
+  return not native_transport()
 end
 
 function M.without_generic(list)
@@ -100,6 +123,12 @@ function M.mode()
   -- reason every other mode is: the parser below must know them, or an unknown value returns nil
   -- and nil means "off" - which is exactly how E2/E3 ended in one round with the block never read.
   if value == "e2" or value == "e3" then return value end
+  -- The native transports (review MUST 6). They are modes here for one reason only: mode() is what
+  -- tells the loop whether the raw channel is on at all, and a native turn still needs the LEAK
+  -- SAFETY NET (below) - a model that writes <bash>{}<bash> as plain text instead of calling the run
+  -- tool must earn ONE named continue, never a silent ending. An unknown value returns nil, and nil
+  -- means off, so these two have to be named or the net never runs.
+  if value == "native" or value == "bash" then return value end
   return nil
 end
 
@@ -209,6 +238,15 @@ function M.transport_for(model, supports_tools)
         end
       end
     end
+  end
+  -- A NAMED DEFAULT before the conservative fallback (review MUST 1): the provider decides, because
+  -- every model behind it speaks one action channel. Keyed by provider id, never by model name.
+  local provider_ok, provider_lib = pcall(dofile, "lua/core/provider.lua")
+  if ok and type(profile_lib) == "table" and provider_ok then
+    local settings_ok, settings = pcall(provider_lib.settings)
+    local builtin = settings_ok and type(settings) == "table"
+      and profile_lib.builtin_transport and profile_lib.builtin_transport(settings.provider)
+    if builtin and supports_tools then return builtin, "builtin", nil end
   end
   local transport = supports_tools and "tool_call" or "block"
   local notice = string.format(
@@ -722,6 +760,17 @@ function M.take(result, stop_sent, policy)
   end
   -- Call markup in the text, and no real tool call: in `first`/`only` the model had nothing declared to
   -- call with, so its own format leaked into the text. A run block, if any, still wins below.
+  -- The LEAK SAFETY NET for the native transports (review MUST 6). In native/bash mode the action is
+  -- a tool call; a model that instead writes its trained call format as TEXT (<bash>, <invoke>,
+  -- <tool_call>, DeepSeek's DSML bar) has done nothing, and the harness used to accept that text as
+  -- the answer. The reader names it so the loop can ask once, by name; a second one fails the run.
+  local mode_now = M.mode()
+  if (mode_now == "native" or mode_now == "bash") and #(result.tool_calls or {}) == 0 then
+    local leaked = M.markup_in_text(content)
+    if leaked then
+      return { leaked_markup = true, marker = leaked.marker, bytes = #content }
+    end
+  end
   local native = (#(result.tool_calls or {}) == 0) and M.native_calls(content) or nil
   if native and not has_fence(content:sub(1, native.start - 1)) then
     return take_native(result, native)

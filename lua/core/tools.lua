@@ -825,11 +825,15 @@ function M.catalog(role)
     },{'route','task'})
     for _, item in ipairs(M.admin) do list[#list + 1] = item end
     if host.quickjs then
-      -- The native transport of the same action (docs/AGENT-SEAT.md, principle 2): the run tool is the
-      -- fenced js run block as a tool call, so a model that prefers tool calls acts the same way and its
-      -- results come back through the same pathway.
-      local run_tool=dofile('lua/core/raw_code.lua').run_tool_schema()
-      list[#list+1]=schema(run_tool.name,run_tool.description,run_tool.schema.properties,run_tool.schema.required)
+      -- The native transport of the same action (docs/AGENT-SEAT.md, principle 2). Declared only when
+      -- the RUN TRANSPORT is the one this node offers (review MUST 5): in codemode/off mode the action
+      -- channel is the codemode call, and a run tool beside it is a second door into the same sandbox
+      -- that base never had - arm C measured against base must see base's surface, not this one's.
+      local raw_lib = dofile('lua/core/raw_code.lua')
+      if raw_lib.transport_for(nil, true) == 'tool_call' then
+        local run_tool=raw_lib.run_tool_schema()
+        list[#list+1]=schema(run_tool.name,run_tool.description,run_tool.schema.properties,run_tool.schema.required)
+      end
       list[#list+1]=schema('codemode','JavaScript sandbox that calls approved native tools: await tools.<name>(args), text(value), return. Preferred for multi-step programmatic work. Connector tools (MCP servers such as mail and WhatsApp, peers) are callable only here; peers are read with tools.remote. searchTools("text"|"*") finds tools (searchTools("select:a,b") adds their schemas). Await every call; effectful calls run serially. A call still running after wait_s (default 60) returns {state:"pending", op}; wait(op | [ops]) resumes it and batches with other calls. No filesystem, network or Node APIs. '..dofile('lua/core/raw_code.lua').BATCHING:gsub('run%(code%)','codemode')..'',{code={type='string'},timeout_ms={type='integer',minimum=1,maximum=300000}},{'code'})
     end
     for _, item in ipairs(mcp.schemas()) do list[#list+1]=item end

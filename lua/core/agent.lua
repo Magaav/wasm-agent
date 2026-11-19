@@ -1185,9 +1185,15 @@ function M:build_context()
     local transport, transport_source, transport_notice = raw_code.transport_for(self.model, #tool_list > 0)
     self.codeact_transport = transport
     if raw_code.active(self.codemode_policy) and not raw_first and not raw_only then block=block..'\n'..raw_code.guidance_for(transport) end
+    -- The no-profile-yet line is a note to the OPERATOR, not a sentence for the model (review MUST
+    -- 4). Putting it in the block changed the prompt prefix - the frozen bytes the cache depends on -
+    -- against base for every node that had not run wa conform. It is journalled once per process and
+    -- the prefix stays byte-identical to base.
     if transport_source == 'default' and not raw_code.TRANSPORT_NOTICE_SHOWN and transport_notice then
       raw_code.TRANSPORT_NOTICE_SHOWN = true
-      block=block..'\n'..transport_notice
+      pcall(host.log, transport_notice)
+      telemetry.event(self.session_id, self.run_id, '', 'transport', 'default', {
+        model = tostring(self.model), transport = tostring(transport), notice = transport_notice })
     end
     -- An A/B arm may carry its own guidance instead (arm D's shell sentence, arm E2/E3's tags).
     if ab_arm then
@@ -2780,6 +2786,24 @@ function M:run_body(text, images)
       messages[#messages + 1] = { role = 'user', content = tags.continue_for(arm_name) }
       self.emit({ type = 'status', text = tags.FAILURE .. ': ' .. tostring(raw_run.reason)
         .. (raw_run.excerpt and (' | saw: ' .. tostring(raw_run.excerpt)) or '') })
+      goto next_round
+    end
+    -- The native transports' leak safety net (review MUST 6). The action was a tool call; the model
+    -- wrote its trained call format as TEXT instead, so nothing ran. One named continue asks for the
+    -- call; a second consecutive leak fails the run BY NAME rather than ending it silently, which is
+    -- the failure this net exists for.
+    if raw_run and raw_run.leaked_markup then
+      self.finish_continues = (self.finish_continues or 0) + 1
+      local marker = tostring(raw_run.marker)
+      local notice = '[Harness notice] Your message carried ' .. marker .. ' tool-call markup as text, so nothing ran. '
+        .. 'Act by calling the run tool with the script in its code argument; a message with no tool call is your answer.'
+      if self.finish_continues > 1 then
+        error('native_markup_continue: tool_call_markup_as_text (' .. marker .. ')')
+      end
+      messages[#messages + 1] = { role = 'user', content = notice }
+      self.emit({ type = 'status', text = 'tool_call_markup_as_text: ' .. marker })
+      telemetry.event(self.session_id, self.run_id, '', 'step', 'leaked_markup', {
+        marker = marker, attempt = self.finish_continues, bytes = raw_run.bytes })
       goto next_round
     end
     local calls, call_repairs = provider.repair_calls(result.tool_calls or {}, tool_list,

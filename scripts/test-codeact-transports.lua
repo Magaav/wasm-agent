@@ -81,10 +81,16 @@ local declared = false
 for _, item in ipairs(tools.envelope('master', ctx)) do
   if item['function'] and item['function'].name == 'run' then declared = true end
 end
-if raw_mode.only and raw_mode.only(ctx.codemode_policy) then
-  eq(declared, false, 'in the default only mode nothing is declared: the run block is the one way to act')
+-- Review MUST 1 and 5: the run tool is declared exactly when the transport this node actually
+-- offers is a native call. `only` yields to that transport, because emptying the surface would
+-- remove the very tool the model is told to call.
+local transport = raw_mode.transport_for(nil, true)
+local in_only = raw_mode.only(ctx.codemode_policy)
+if transport == 'tool_call' then
+  eq(in_only, false, 'only yields when the transport is a native call')
+  eq(declared, true, 'and the run tool is the declared action channel')
 else
-  eq(declared, true, 'outside only mode the run tool is declared to the model')
+  eq(declared, false, 'a block transport declares no run tool')
 end
 -- Two rows of this table are the whole of principle 2: one action, two transports.
 local by_block = { content = '```js run\nreturn 1\n```', tool_calls = {}, finish_reason = 'stop' }
