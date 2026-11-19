@@ -299,6 +299,9 @@ expect_status 0 "$?" "bundling prebuilt artifacts"
 cmp -s "$WORK/published/graph.wasm" "$artifacts/graph.wasm" || fail "the bundle carries another module"
 cmp -s "$WORK/published/components.lock" "$pub_repo/components.lock" || fail "the bundle carries another lock"
 contains "$out" "gh release create $tag -R " "the exact publish command names the tag and the repo"
+# A BUNDLE PUBLISHED AFTER A NODE RELEASE MUST NOT TAKE THE BADGE EITHER (item 28): the tag is
+# components-<sha256(components.lock)>, so /releases/latest would answer a lock digest.
+contains "$out" "--latest=false" "and the bundle's command never takes GitHub's Latest"
 contains "$out" "$WORK/published/graph.wasm" "the publish command uploads the module"
 contains "$out" "gh release upload $tag -R " "the re-publish command names the tag"
 contains "$out" "publish-components ok: $tag" "the bundle is reported as published-ready"

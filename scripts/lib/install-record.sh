@@ -229,6 +229,23 @@ wa_ancestry_fetch_missing() {
 }
 
 
+# wa_manifest_source_commit <manifest> -> the source_commit= a signed release manifest names, or nothing.
+#
+# A candidate that cannot name its own build (older than wa --build-info) still arrives beside the manifest
+# that pins its bytes, and that manifest's source_commit= is the signed statement of which commit it is. It
+# answers 'which commit is this candidate' and nothing about what RUNS: the running commit is still asked of
+# the running binary. Non-empty only for a 40-hex id, so a truncated or garbled manifest answers nothing.
+wa_manifest_source_commit() {
+  local manifest="${1:-}" value
+  [ -n "$manifest" ] && [ -f "$manifest" ] || return 1
+  value="$(sed -n 's/^source_commit=//p' "$manifest" 2>/dev/null | head -1 | tr -d '[:space:]')"
+  case "$value" in
+    '') return 1 ;;
+  esac
+  printf '%s' "$value" | grep -Eq '^[0-9a-f]{40}$' || return 1
+  printf '%s' "$value"
+}
+
 # ---- what is running here, and is the record evidence? --------------------------------------------
 
 # wa_running_identity <install-dir>
@@ -399,6 +416,14 @@ wa_ancestry_verdict() {
     if [ -n "$target" ] && ! git -C "$repository" cat-file -e "$target^{commit}" 2>/dev/null; then
       WA_ANCESTRY_WHY="the target commit $target is not in $repository, and neither source says anything about it"
       return 2
+    fi
+    # 0. A SHALLOW CHECKOUT IS ASKED TO DEEPEN FIRST. 'This clone cannot see it' is not 'nobody has it':
+    #    one bounded fetch (--unshallow, then the commit itself) is cheaper than a refusal an operator has
+    #    to work around, and it is the function every install path already uses (item 29). Only when the
+    #    fetch still leaves the commit missing does the ignorance below become the answer.
+    if ! git -C "$repository" cat-file -e "$running^{commit}" 2>/dev/null &&
+       [ "$(git -C "$repository" rev-parse --is-shallow-repository 2>/dev/null)" = true ]; then
+      wa_ancestry_fetch_missing "$repository" "$running" || true
     fi
     if ! git -C "$repository" cat-file -e "$running^{commit}" 2>/dev/null; then
       # THE RUNNING COMMIT IS NOT IN THIS HISTORY. This is the 18/11 case, and it used to answer "cannot

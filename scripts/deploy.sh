@@ -1909,6 +1909,16 @@ if [ -f "$ROLLBACK_SRC" ]; then
 else
   note "no scripts/rollback-node.sh to ship; --rollback will refuse on this node by name"
 fi
+# The release install, beside the binary for the same reason: a node installed FROM a release has no
+# checkout to run it from, and `wa update <node> --release` runs THIS copy through its own Sentinel
+# (item 28). Without it the one mode that exists for a treeless node would refuse on that node by name.
+RELEASE_INSTALL_SRC="$ROOT/scripts/release-install.sh"
+[ -f "$RELEASE_INSTALL_SRC" ] || RELEASE_INSTALL_SRC="$(dirname "$0")/release-install.sh"
+if [ -f "$RELEASE_INSTALL_SRC" ]; then
+  ship_file "$RELEASE_INSTALL_SRC" "$INSTALL_DIR/scripts/release-install.sh" "release-install.sh beside the binary"
+else
+  note "no scripts/release-install.sh to ship; --release will refuse on this node by name"
+fi
 
 # Replacing an executable file does not replace the already-running process.
 # Even when the copy succeeds on Windows, a watcher can keep executing the old
