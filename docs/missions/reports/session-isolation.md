@@ -381,3 +381,155 @@ Deleting (finding 10):
     cd rust && WA_CODEMODE_ALLOW_EMPTY=1 \
       CARGO_TARGET_DIR=/home/victor/wasm-agent/target/m-session-isolation \
       cargo test -p wa-operation -p wa-term -p wa-tool-progress --lib
+
+# Round 4 (review 19/11 02:20)
+
+Base of this round: `5f7a7931` (round 3). Every item below is a separate local commit; nothing was pushed.
+Test runner: `/home/victor/Work/missions/session-isolation/run-lua-test.sh <scratch> <script>` (scratch
+`HOME`/`WASM_AGENT_HOME`, its own `--db`, the real operation manager).
+
+## Item 1 - the Fleet View's node-scope read (MUST)
+
+**Was** (`lua/core/fleetview.lua:41-52`): `session_scope.grant(nil, ...)` - the memory module was `nil`, so
+`session_scope.audit` returned early and a node-wide read left NO journal line - and the role was the
+hard-coded `'master'`, so any caller was answered as the operator. The `host.operation('list', ...)` that
+followed carried **no** `node_scope`, and a sessionless list is not a node-wide list (item 7 round 2): the
+view printed the rows that named no owner as "the node's operations".
+
+**Now**: `NODE_OPERATIONS(opts)` takes the caller's real `memory`, `role`, `user_id` and `session`; the grant
+is asked with them (so it is audited, and a non-operator is refused), and the granted scope travels to the
+runtime as `node_scope = grant.node` with the same session. A refusal is named on the node row
+(`operations_refused`), never served as an empty list. `lua/core/tools.lua` passes `memory/role/user_id/
+ctx.session_id`, and `fleetview.node_operations` is exported so the test drives THIS function.
+
+**Test**: `scripts/test-session-isolation.lua`, section "item 1 round 4" (two sessions start one operation
+each through `tools.dispatch`; the reader's answer contains BOTH; a `guest` caller gets `nil` +
+`node_scope_not_granted`; the fleetview audit rows are counted before/after the read and must grow).
+Measured both ways: **5 FAILs** on the round-3 code (the two expressions reverted in place), 0 with the fix.
+**Wiring**: this script is the one in the fast path - `scripts/fast.sh:721`
+`WA_BIN="$bin" check session-isolation bash scripts/test-session-isolation.sh` - so every item tested there
+(1, 2, 4, 6, 7) runs on every fast check. The two OTHER scripts changed this round are NOT in `fast.sh`
+(pre-existing): `scripts/test-tool-progress.lua` (item 3) and `scripts/test-thread-selection.lua`, run by
+hand with the runner above; `scripts/test.sh` does not name them either. Wiring them is not done here and is
+said rather than implied.
+
+**Strings**: `node_scope_not_granted` (reason on `operations_refused`), `operation_manager_unavailable`,
+`operation_list_unreadable`.
+
+## Item 2 - session_watch observes its own run (MUST)
+
+**Was** (`lua/core/session_watch.lua:221-226, 324`): `M.start` launches with `owner = 'session:' .. id`, but
+`operation_state` called `host.operation('status', {id=...})` with NO owner. The runtime decides ownership by
+`owner` for a caller that is not a session, so it answered `operation_not_yours`, `operation_state`
+returned nil, and the watcher said `unknown` about a run it had started - `witness='none'`.
+
+**Now**: `run_owner(session_id)` is the one spelling (`session:<id>`), the launch records that owner in the
+durable run record, and `operation_state(record, session_id)` sends `owner` on the `status` call.
+
+**Test**: same script, section "item 2 round 4": a real operation started with `owner='session:<id>'`; the
+same id **without** the owner is refused by name (`operation_not_yours`, which is what round 3 sent); the
+watcher then reports `state=running`, `witness=operation` and the operation id. Measured both ways: **3 FAILs**
+on the round-3 line, 0 with the fix.
+
+## Item 3 - "node: N ops elsewhere" counts operations (MUST)
+
+**Was**: `tool_progress.elsewhere` (`lua/core/tool_progress.lua:360`) and `wa_term::tool_progress::
+count_elsewhere` counted **live per-session progress FILES**, i.e. sessions with a row - four unsettled
+operations in one session read as `node: 1 op elsewhere`.
+
+**Now**: the count is the runtime's own `operations_elsewhere`, and `split_elsewhere` (one rule, used by
+`list` and `health_scope`) counts **UNSETTLED** operations the caller does not own: 4 in one session = 4, a
+settled one = 0. Lua: `M.elsewhere` asks `host.operation('list', ...)` and returns `nil` (not 0) when the
+node cannot answer. Rust: `wa_term::tool_progress::current(width, session, elsewhere)` takes the number;
+`operations::elsewhere_count` supplies it from `host.rs`.
+
+**Test**: `scripts/test-tool-progress.lua` starts FOUR real operations in one other session and asserts
+`tp.elsewhere(...) == 4`; the file fixtures now assert 0 (files are not the count). Rust:
+`operations::elsewhere_count_tests::a_settled_operation_is_not_counted_elsewhere` and
+`a_node_wide_caller_still_counts_only_unsettled_work_elsewhere`.
+
+**Strings**: unchanged (`node: 1 op elsewhere` / `node: N ops elsewhere`).
+
+## Item 4 - only short control calls take the reserved slots (MUST)
+
+**Was**: `lua/core/mcp_session.lua:141` started the read-MCP session with `control=true` and
+`timeout_seconds=3600`: a workload of one hour parked in the two slots kept for control calls.
+
+**Now**: that start no longer claims the reserve (it is a workload with its own owner and share), and the
+runtime enforces the rule so no other caller can either: `wa_operation::CONTROL_MAX_SECONDS = 60` and
+`operations::reserve_refused(asked_control, seconds)` demote a longer start to a workload **and say so**
+(`control_refused` on the receipt). Renamed string: `operation_capacity_control_reserved` ->
+`queue_reserve_note` (round 3), unchanged here.
+
+**Test**: `operations::elsewhere_count_tests::a_long_start_cannot_take_the_reserved_control_slots` (measured
+failing when `reserve_refused` is stubbed to false), and the Lua section "item 4 round 4": a 60 s control start
+is admitted with no refusal, a 3600 s one carries `control_refused`, and the read-MCP launch line carries no
+`control=` field.
+
+## Item 6 - /health takes its session from the credential (MUST)
+
+**Was** (`rust/wa-capabilities/src/serve.rs:3409, 3579`): both `/health` routes answered
+`health_body(query_value(query,"session_id"))` - the query string WAS the identity, so any caller could read
+any session's operations.
+
+**Now**: `lua/core/server.lua` `wa_health_scope(credential, requested)` decides from `x-wa-session`: a
+session only when the credential owns it (or is master), otherwise the caller's OWN owner's work, no
+credential = the node supervisor's view (the sentinel's unchanged route), and a credential that does not
+resolve or a session that names nothing is **refused by name** (403), never served as an empty view. The
+accept-thread route answers only the credential-less sentinel poll; everything else goes to the agent thread
+where the credential is resolved.
+
+**Test**: same script, section "item 6 round 4": no credential -> `node_wide=true`; authenticated with no
+session -> not node-wide, own owner; own conversation visible; unknown id ->
+`health_unknown_session`; bogus credential -> `health_credential_unresolved`.
+
+**Strings**: `health_credential_unresolved`, `health_unknown_session`, `health_session_forbidden` and their
+`note` sentences (`/health` section of "Texts to approve" below).
+
+## Item 7 - the LOW items
+
+* `wa_admission` now **mints the presence claim with the lease**: `memory.ensure_session` is a wrapper over
+  `ensure_session_choose` that calls `presence_begin(chosen, {lease})`, so two unnamed admissions can no
+  longer both see "nobody is in it" and share one thread. Test: "item 7 round 4" (two leases, two threads,
+  `thread_busy`; the same lease keeps its thread).
+* `workspaces.lua:731` vs `index.rs`: they now agree - an **ownerless legacy row still blocks release**
+  for a session caller (`index.rs` skips only a row that names ANOTHER session). Test:
+  `wa-operation`'s `an_operation_that_recorded_no_directory_is_relevant_only_to_its_session` gained the
+  `op-legacy` assertion (measured failing against the round-3 rule).
+* Test guard accepts macOS scratch: `^/var/folders/` added to `scripts/test-session-isolation.lua`'s refusal.
+* `ENV_ALLOW`: it is a process-wide `OnceLock` filled when the manager is built, so a policy edit needs a
+  node restart - **documented** in `docs/OPERATIONS.md` rather than silently promised otherwise.
+* `DENY_ENV_SUFFIXES` gained `_SECRET_ACCESS_KEY` and `_PRIVATE_KEY` (allow-list still wins); documented.
+
+## Item 8 - rebase-ready (not done unless asked)
+
+`rust/wa-operation/src/lib.rs`'s `Spec` fields collide additively with `change/vault-one`; nothing was
+resolved here. When asked: keep both field sets, no assertion touched.
+
+## Deployment (for the release)
+
+`openclaw`'s `policy.json` must list `GH_TOKEN` under `tool_env_allow` before this ships there - and the
+policy edit only takes effect on the next start of that node (documented above, item 7).
+
+## Texts to approve (round 4 additions)
+
+    node_scope_not_granted
+    operation_manager_unavailable
+    operation_list_unreadable
+    a start of <n>s is a workload, not a control call: the two reserved slots are kept for short calls
+      (status, list, cancel, short reads, at most 60s)
+    health_credential_unresolved
+    this credential does not resolve, so /health cannot say whose work this is; log in again
+    health_unknown_session
+    no conversation on this node has that id, so there is no work of its to report
+    health_session_forbidden
+    that conversation is not yours to read; ask with a credential that owns it
+
+## Tests, this round
+
+    run-lua-test.sh scratch/iso13 scripts/test-session-isolation.lua   ->  136 checks, 0 failed
+    run-lua-test.sh scratch/tp5   scripts/test-tool-progress.lua       ->   97 checks, 0 failed
+    run-lua-test.sh scratch/th1   scripts/test-thread-selection.lua    ->  thread selection ok (0 skipped)
+    cargo test -p wa-operation --lib                                   ->   45 passed, 1 ignored
+    cargo test -p wa-term -p wa-capabilities -p wa-tool-progress --lib ->  green (17 / 325 / ...)
+
