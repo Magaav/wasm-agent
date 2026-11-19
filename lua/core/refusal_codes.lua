@@ -305,6 +305,7 @@ return {
   ['reason_too_long']='remote_update.lua',
   ['reconcile_failed']='orchestrator.lua',
   ['refresh_budget_spent']='federation.lua',
+  ['relay_busy']='nodes.lua',
   ['relay_refused']='nodes.lua',
   ['relay_request_timeout']='binding.lua',
   ['relay_request_unreadable']='binding.lua',
