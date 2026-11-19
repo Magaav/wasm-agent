@@ -68,6 +68,32 @@ ok(two.note and two.note.focus:find("a", 1, true) and two.note.focus:find("b", 1
 local number_only = journal.split("42")
 eq(number_only.visible, "42", "#3: an answer with no tag is untouched, byte for byte")
 
+-- Item 1 (review 19/11): an answer with no closed <turn> block never passes through the seam
+-- cleanup, so it comes back BYTE FOR BYTE. Each check is one shape the old blanket gsub destroyed.
+local untouched = {
+  { name = "indented code (the leading spaces ARE the code)", text = "    local x = 1\n        return x" },
+  { name = "trailing spaces", text = "a line with trailing spaces   \nnext line  " },
+  { name = "a markdown hard break (two trailing spaces)", text = "first line  \nsecond line, same paragraph" },
+  { name = "leading whitespace and a blank first line", text = "\n    indented start\nplain" },
+  { name = "blank lines inside the answer", text = "para\n\n\n\npara" },
+  { name = "trailing blank lines and spaces", text = "answer\n\n  \n" },
+}
+for _, case in ipairs(untouched) do
+  local got = journal.split(case.text)
+  eq(got.visible, case.text, "#1: an answer without a block keeps " .. case.name)
+  ok(got.note == nil and got.block == nil, "#1: and " .. case.name .. " carries no note")
+end
+
+-- The cleanup runs only at the cut a removed block makes, and nowhere else.
+local seam = journal.split("code   \n\n\n\n<turn>\n- **focus** - x\n</turn>\n\n\n\n42")
+eq(seam.visible, "code\n\n42", "#1: the cut collapses to one blank line; nothing away from it is touched")
+local lead = journal.split("<turn>\n- **focus** - x\n</turn>\n\n42")
+eq(lead.visible, "42", "#1: a block at the start leaves no leading blank line")
+local trail = journal.split("Answer  \n\n<turn>\n- **focus** - x\n</turn>")
+eq(trail.visible, "Answer", "#1: a block at the end leaves no trailing blank line")
+local only = journal.split("<turn>\n- **focus** - x\n</turn>")
+eq(only.visible, "", "#1: an answer that was only the block reads as empty, not as whitespace")
+
 local plain = journal.split("just an answer, no note")
 eq(plain.visible, "just an answer, no note", "#33: an answer without a note is unchanged")
 ok(plain.note == nil, "#33: and carries no note")

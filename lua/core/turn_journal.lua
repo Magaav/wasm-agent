@@ -97,6 +97,26 @@ end
 --     and guessing where that text ends is how an answer gets truncated. It stays in the visible
 --     answer and carries no note.
 -- Several blocks: every closed one is removed and its fields are collected in order.
+-- The whitespace a removed block leaves at its cut, and nothing else.
+--
+-- Item 1 (review 19/11): the cleanup is the SEAM's. An answer with no closed block is returned byte
+-- for byte - its indentation (the leading spaces ARE the code), its trailing spaces, its markdown hard
+-- breaks (two trailing spaces) and its blank first or last line all survive, because nothing was cut.
+-- Only a removal can leave whitespace behind, and only at that cut: the spaces the cut stranded on the
+-- last line before it go, and the newlines from both sides become one blank line between two pieces of
+-- text and no line at all against the start or the end of the answer. Nothing away from a cut is
+-- touched, so "code  \n\n<turn>..</turn>\n\n42" keeps its trailing spaces and its blank lines.
+local function seam(left, right)
+  local left_body, left_newlines = left:match("^(.-)(\n*)$")
+  local right_newlines, right_body = right:match("^(\n*)(.*)$")
+  left_body = left_body:gsub("[ \t]+$", "")
+  local between = 0
+  if left_body ~= "" and right_body ~= "" then
+    between = (#(left_newlines .. right_newlines) >= 2) and 2 or #(left_newlines .. right_newlines)
+  end
+  return left_body .. string.rep("\n", between) .. right_body
+end
+
 function M.split(content)
   local text = type(content) == "string" and content or ""
   local visible, blocks, fields = {}, {}, { hurt = {}, buys = {}, focus = {} }
@@ -126,7 +146,8 @@ function M.split(content)
     cursor = stop + 7
   end
   visible[#visible + 1] = text:sub(cursor)
-  local joined = table.concat(visible, "")
+  local joined = visible[1] or ""
+  for index = 2, #visible do joined = seam(joined, visible[index]) end
   local block = #blocks > 0 and table.concat(blocks, "\n") or nil
   local note = nil
   if block then
@@ -145,10 +166,6 @@ function M.split(content)
       if note and #note[key] > M.MAX_FIELD then note[key] = note[key]:sub(1, M.MAX_FIELD) end
     end
   end
-  -- The blank lines a removed block leaves are the block's whitespace, not the answer's: a run of
-  -- blank lines collapses to one, and the ends are trimmed. The answer's own bytes, before and
-  -- after the block, are otherwise untouched.
-  joined = joined:gsub("[ \t]+\n", "\n"):gsub("\n\n\n+", "\n\n"):gsub("^%s+", ""):gsub("%s+$", "")
   return { visible = joined, note = note, block = block }
 end
 
