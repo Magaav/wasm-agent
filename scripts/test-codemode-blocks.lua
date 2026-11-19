@@ -283,6 +283,51 @@ do
   end
 end
 
+
+-- A code line longer than the band wraps with a VISIBLE MARK at the break (round 3, item 3).
+--
+-- At 80 columns a 300-column line came out as several band rows with nothing joining them, so a reader
+-- could not tell a wrap from a new statement. The mark is `\u21aa`, it sits in the last cell of every
+-- piece but the last (which is the wrap point), and it is paid for out of the band's width - so the row
+-- COUNT is the wrap and no marked row is wider than the band.
+local block2 = dofile('lua/core/codemode_block.lua')
+local o80 = opts()
+local LONG = string.rep("abcdefghij", 30)  -- 300 columns of one line
+local pieces = block2.wrap_marked(LONG, 79, o80)
+check(#pieces > 1, "a 300-column line at 79 columns wraps (" .. #pieces .. " rows)")
+local joined = 0
+for index, piece in ipairs(pieces) do
+  local cells = markdown.columns(piece)
+  check(cells <= 79, "row " .. index .. " is no wider than the band (" .. cells .. ")")
+  if index < #pieces then
+    check(piece:sub(-3) == "\226\134\170", "row " .. index .. " ends with the continuation mark at the break")
+    joined = joined + (cells - markdown.columns("\226\134\170"))
+  else
+    check(piece:sub(-3) ~= "\226\134\170", "the last row carries no mark: the line ends there")
+    joined = joined + cells
+  end
+end
+check(joined == markdown.columns(LONG), "the marks cost cells, not characters: the rows add up to the line ("
+  .. joined .. " of " .. markdown.columns(LONG) .. ")")
+check(table.concat(pieces, ""):gsub("\226\134\170", "") == LONG,
+  "and nothing was dropped: the rows minus their marks are the line")
+-- A line that FITS is one row and carries no mark: the mark must not turn a fitting line into two.
+local fits = string.rep("x", 60)
+local one = block2.wrap_marked(fits, 79, o80)
+check(#one == 1 and one[1] == fits, "a line that fits is one unmarked row")
+local exactly = string.rep("y", 79)
+local edge = block2.wrap_marked(exactly, 79, o80)
+check(#edge == 1 and edge[1] == exactly, "a line of exactly the band width is one unmarked row")
+-- The block's own rows use it: the script rows of a block with a long line carry the mark, and the
+-- count the transcript will draw is the number of rows this returns.
+local long_model = { args = { code = "const a = " .. LONG .. ";" }, calls = {}, state = "done" }
+local drawn = block2.rows(long_model, 80, o80)
+local marked = 0
+for _, row in ipairs(drawn) do
+  if row:find("\226\134\170", 1, true) then marked = marked + 1 end
+end
+check(marked >= 1, "M.rows marks the wrapped rows of a long code line (" .. marked .. " marked)")
+
 if failed > 0 then
   print(string.format('codemode blocks: %d failed of %d checks', failed, checks))
   os.exit(1)

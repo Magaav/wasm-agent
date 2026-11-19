@@ -1265,6 +1265,9 @@ fn health_body_for(session: &str, node_wide: bool, owner: &str) -> Vec<u8> {
         // Versioned execution surface: a client that sees schema 1 may rely on the fields below
         // (`subagents`, `runs`, `run_ids`, `current`, `queue`, `node_threads`) existing. A client that does
         // not see it must fall back to the legacy fields explicitly.
+        // The one name for these bytes (wa-host's build_info, stated at boot), so a watcher, the window
+        // and wa --version read the same identity instead of three guesses at a version.
+        "build": crate::host::build_label(),
         "execution_schema": 1,
         "ok": !stalled && !journal_failed,
         // A node whose run journal refused a write refuses runs too; say so where a watcher looks.

@@ -21,8 +21,8 @@ await tools.web_read({url: 'https://example.com'});
   ✗ web_read · web_http_429
 
 ### promise.all of 10 mixed @ 80x24
-const out = await Promise.all(paths.map(p => tools.bash({command: 'wc -l ' + p}
-)));                                                                           
+const out = await Promise.all(paths.map(p => tools.bash({command: 'wc -l ' + p↪
+})));                                                                          
 return out.length;                                                             
   bash ×10 ✓9 ✗1
 ⎿ 10

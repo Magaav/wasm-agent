@@ -268,6 +268,9 @@ gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-ca
 # The native editor is the only side that can edit input while Lua is blocked. Its
 # parser, history, multiline viewport and submit/clear behavior are not Lua tests.
 gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-term terminal_editor::tests
+# The live region (TUI polish 2, items 1-3): every row it draws is one SCREEN row at 60/80/120/200
+# columns - a 300-column code line included - and twenty ticks of the running call move nothing.
+gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-term --test live_region
 # The graph is a capability the agent navigates its own code with, so its extractor and
 # incremental reindex are part of the contract, not a side project.
 gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-graph
@@ -459,6 +462,17 @@ WA_BIN="$BIN" gate_run bash scripts/test-install-record.sh            # installe
 gate_run bash scripts/test-install-guards.sh                          # every installer refuses an unprovable identity
 gate_run bash scripts/test-deploy-ancestry.sh                         # a deploy never silently goes backwards
 WA_BIN="$BIN" gate_run bash scripts/test-node-pins.sh                 # a rollback is a record, and it gates the next move
+# One name for the build, composed in Rust: the pin ledger is fleet-wide, so a record for ANOTHER node
+# must not mark this one "(pinned)", and a cleared record releases it whatever the line order.
+# 77 is the repository's skip code: a run with no binary present must be a COUNTED skip, not a pass.
+pin_label=0
+WA_BIN="$BIN" gate_run bash scripts/test-pin-label.sh || pin_label=$?
+if [ "$pin_label" = "77" ]; then
+  echo "SKIP: the pin composer proof (no wa binary built)"
+  SKIPPED=$((SKIPPED + 1))
+else
+  [ "$pin_label" = "0" ] || exit "$pin_label"
+fi
 gate_run bash scripts/test-publish-shared-commit.sh                   # a published commit is one the remote can see
 gate_run bash scripts/test-bootstrap-gate.sh                          # the release-install path honours its override
 WA_BIN="$BIN" gate_run bash scripts/test-build-info.sh                # the bytes answer for themselves (--build-info)
@@ -1696,6 +1710,28 @@ WA_SCRIPT=scripts/test-markdown.lua "$BIN" --db "$DB.markdown" | grep "markdown 
 # captured transcript is free of escape sequences - so it is asserted without a model:
 # the view is handed the events agent.lua emits, with a clock the test controls.
 WA_SCRIPT=scripts/test-cli-view.lua "$BIN" --db "$DB.view" | grep "cli view ok"
+# The SAME view suite again, with a model window the compactor resolves (a scratch home has none): the
+# context ball must be coloured against the reserve `maybe_compact` will spend, not the policy default.
+# WASM_AGENT_MODEL_LIMITS is that fixture - the only way a fresh home has a window at all - and the
+# reserve differs from the policy one on purpose, so the two answers cannot agree by accident.
+WASM_AGENT_MODEL_LIMITS='{"test-model":{"context":200000,"reserve":40000}}' \
+  WA_SCRIPT=scripts/test-cli-view.lua "$BIN" --db "$DB.view-reserve" | grep "cli view ok"
+
+# The build OWN identity (item 4 of the TUI polish): a release install, a dev build, a dirty build and
+# a pinned node each get their own name, and no binary that cannot name its commit invents a version -
+# the welcome box printed the literal 0.1.0 on every node until this. The one function supplies the
+# banner, wa --version, /health and the update banner, so a divergence is this test.
+WA_SCRIPT=scripts/test-build-identity.lua "$BIN" --db "$DB.identity" | grep "build identity ok"
+# A terminal resize, in every component that draws a rule, a box or a right-aligned part: each is
+# rendered at 80, 200 and back at 60 and must fit the terminal it is drawn in - a width measured once
+# left the welcome rule and the code-mode box at the old size, and wider than a shrunk window (Victor,
+# 18/11, "the components do not follow a terminal resize").
+WA_SCRIPT=scripts/test-cli-resize.lua "$BIN" --db "$DB.resize" | grep "resize ok"
+# The view draws NOTHING about other sessions - a progress module that answers elsewhere() must not
+# reach the row (the aggregate is change/session-isolation's; round 3 removed this tree's reader) - and
+# the welcome line reason when there is no model, the sentence that replaced "local mode (no model
+# configured)".
+WA_SCRIPT=scripts/test-cli-welcome.lua "$BIN" --db "$DB.welcome" | grep "welcome reason and no elsewhere row ok"
 # /keybindings prints the table the console dispatches on (rust/wa-term/src/keymap.rs): the rows come
 # from host.keybindings, the module names no key itself, /help points at it, and the REPL, the mid-run
 # view and the node's route exist. The other direction - that every row is dispatched and nothing else
