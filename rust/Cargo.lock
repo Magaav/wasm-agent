@@ -2172,6 +2172,7 @@ dependencies = [
  "wa-rendezvous",
  "wa-sqlite",
  "wa-term",
+ "wa-tls",
  "wa-tool-progress",
  "wa-vault",
  "wa-whatsapp-archive",

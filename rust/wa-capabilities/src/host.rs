@@ -377,7 +377,7 @@ fn http_timeouts() -> (u64, u64, u64) {
     (connect, read, respond)
 }
 
-fn build_config(read: u64) -> ureq::config::Config {
+fn build_config(read: u64) -> Result<ureq::config::Config, String> {
     let (_, _, respond) = http_timeouts();
     build_config_with(read, respond)
 }
@@ -388,24 +388,31 @@ fn build_config(read: u64) -> ureq::config::Config {
 /// then says nothing used to hold the run for the global response timeout, three times over, before
 /// anything was reported (measured 10/11: 12 minutes, session a073ee85). `first_response_seconds`
 /// lets that call bound itself in tens of seconds and name the outcome (`provider_stalled`).
-fn build_config_with(read: u64, respond: u64) -> ureq::config::Config {
+fn build_config_with(read: u64, respond: u64) -> Result<ureq::config::Config, String> {
     let (connect, _, _) = http_timeouts();
-    ureq::Agent::config_builder()
+    // Whose certificates are trusted is the machine's answer, not this call's. wa-tls reads
+    // SSL_CERT_FILE / SSL_CERT_DIR the way OpenSSL does; a bundle named there that cannot be read is
+    // a refusal with that bundle in the message, never a quiet fall back to Mozilla's roots.
+    let anchors = wa_tls::tls_config().map_err(|error| error.to_string())?;
+    Ok(ureq::Agent::config_builder()
         .http_status_as_error(false)
+        .tls_config(anchors)
         .timeout_connect(Some(std::time::Duration::from_secs(connect)))
         .timeout_recv_response(Some(std::time::Duration::from_secs(respond)))
         .timeout_recv_body(Some(std::time::Duration::from_secs(read)))
-        .build()
+        .build())
 }
 
-fn agent() -> ureq::Agent {
+fn agent() -> Result<ureq::Agent, String> {
     static HTTP_AGENT: OnceLock<ureq::Agent> = OnceLock::new();
-    HTTP_AGENT
-        .get_or_init(|| {
-            let (_, read, _) = http_timeouts();
-            build_config(read).into()
-        })
-        .clone()
+    if let Some(agent) = HTTP_AGENT.get() {
+        return Ok(agent.clone());
+    }
+    let (_, read, _) = http_timeouts();
+    let agent: ureq::Agent = build_config(read)?.into();
+    // Only an agent that was built is remembered: an environment that cannot answer about trust is
+    // re-read on the next call instead of being cached as a failure for the life of the process.
+    Ok(HTTP_AGENT.get_or_init(|| agent).clone())
 }
 
 /// The agent to use for one provider call.
@@ -416,7 +423,7 @@ fn agent() -> ureq::Agent {
 /// transport (`http_transport`): the socket is registered with the task, so a
 /// cancel from another thread wakes a silent read immediately, and the body
 /// budget still bounds a provider that never speaks at all.
-fn agent_for_call() -> ureq::Agent {
+fn agent_for_call() -> Result<ureq::Agent, String> {
     if !crate::subagents::in_task() {
         return agent();
     }
@@ -425,23 +432,23 @@ fn agent_for_call() -> ureq::Agent {
         Some(remaining) => remaining.as_secs().clamp(1, read.max(1)),
         None => read,
     };
-    crate::http_transport::agent(build_config(body))
+    Ok(crate::http_transport::agent(build_config(body)?))
 }
 
 /// The agent for one provider stream, with the caller's own deadline on the wait for a response
 /// and on the silence between body reads. A child still runs under its shutdown-aware transport.
-fn agent_for_stream(first_response_seconds: u64) -> ureq::Agent {
+fn agent_for_stream(first_response_seconds: u64) -> Result<ureq::Agent, String> {
     let (_, read, respond) = http_timeouts();
     let read = read.min(first_response_seconds.max(1));
     let respond = respond.min(first_response_seconds.max(1));
     if !crate::subagents::in_task() {
-        return build_config_with(read, respond).into();
+        return Ok(build_config_with(read, respond)?.into());
     }
     let body = match crate::subagents::remaining_budget() {
         Some(remaining) => remaining.as_secs().clamp(1, read.max(1)),
         None => read,
     };
-    crate::http_transport::agent(build_config_with(body, respond))
+    Ok(crate::http_transport::agent(build_config_with(body, respond)?))
 }
 
 /// Unified cancellation for the Lua loop: true when the current run or the
@@ -1858,14 +1865,14 @@ pub extern "C-unwind" fn http(l: *mut LuaState) -> c_int {
     let outcome = (|| -> Result<Value, String> {
         let response = match method.as_str() {
             "GET" => {
-                let mut request = agent_for_call().get(&url);
+                let mut request = agent_for_call()?.get(&url);
                 for (key, value) in &headers {
                     request = request.header(key, value);
                 }
                 request.call().map_err(|e| e.to_string())?
             }
             "POST" => {
-                let mut request = agent_for_call().post(&url);
+                let mut request = agent_for_call()?.post(&url);
                 for (key, value) in &headers {
                     request = request.header(key, value);
                 }
@@ -2491,8 +2498,17 @@ pub extern "C-unwind" fn http_sse(l: *mut LuaState) -> c_int {
     let (_, read, _) = http_timeouts();
     let total = std::time::Duration::from_secs(seconds as u64);
     let total = crate::subagents::remaining_budget().map(|remaining| total.min(remaining)).unwrap_or(total);
+    let config = match build_config(read) {
+        Ok(config) => config,
+        // No answer about trust, so no request: the shape every other refusal here takes.
+        Err(error) => {
+            crate::subagents::clear_active_socket();
+            push_json(l, &json!({"error": error, "termination": "request_failed"}));
+            return 1;
+        }
+    };
     let (stream_agent, stream_control) = crate::http_transport::stream_agent(
-        build_config(read), std::time::Duration::from_secs(read), total);
+        config, std::time::Duration::from_secs(read), total);
     let mut request = stream_agent.post(&url);
     for (key, value) in &headers {
         request = request.header(key, value);
@@ -2618,7 +2634,7 @@ pub extern "C-unwind" fn relay(l: *mut LuaState) -> c_int {
     let body = arg_string(l, 3).unwrap_or_default();
     let headers = parse_headers(&headers_json);
     let outcome = (|| -> Result<Value, String> {
-        let mut request = agent().post(&url);
+        let mut request = agent()?.post(&url);
         for (key, value) in &headers {
             request = request.header(key, value);
         }
@@ -2944,7 +2960,7 @@ fn stream_completion(method: &str, url: &str, headers: &[(String, String)], body
         crate::subagents::clear_active_socket();
         return Err("run_cancelled".into());
     }
-    let agent = if first_response_seconds > 0 { agent_for_stream(first_response_seconds) } else { agent_for_call() };
+    let agent = if first_response_seconds > 0 { agent_for_stream(first_response_seconds)? } else { agent_for_call()? };
     let mut request = agent.post(url);
     for (key, value) in headers {
         request = request.header(key, value);
@@ -6357,5 +6373,76 @@ mod classify_magic_tests {
         let dir = elf.parent().expect("a parent");
         assert_eq!(file_magic_value(&dir.to_string_lossy())["magic"], "unreadable");
         assert_eq!(file_magic_value("/nonexistent/wa-file-magic/nope")["magic"], "missing");
+    }
+}
+
+/// The provider path's anchors, measured at the handshake.
+///
+/// `host.http`, `host.http_sse` and the streaming completion all build their agent here
+/// (`build_config_with` -> `agent_for_call`/`agent_for_stream`, and the same config through the
+/// shutdown-aware transport in `http_transport`), so these tests drive those functions themselves
+/// rather than restating their settings. The server is a real rustls handshake against a private CA
+/// (`wa_tls::scratch`), which is the situation 19/11 hit: a sandbox whose CA is only in its own
+/// bundle, and a provider call that cannot reach it.
+#[cfg(test)]
+mod tls_anchor_tests {
+    use super::*;
+    use wa_tls::scratch::{self, Env, Server};
+
+    /// The two agents a provider call can get: the plain one and, for a child, the shutdown-aware
+    /// transport. Both are built from the same config, and both must answer the same way.
+    fn agents() -> Vec<ureq::Agent> {
+        vec![
+            agent_for_stream(5).expect("the anchors this environment names"),
+            crate::http_transport::agent(build_config(10).expect("the anchors this environment names")),
+        ]
+    }
+
+    #[test]
+    fn a_provider_call_refuses_a_private_ca_that_no_bundle_names() {
+        let _env = Env::clear();
+        let server = Server::start();
+        for agent in agents() {
+            let error = agent
+                .get(&server.url("/v1/messages"))
+                .call()
+                .expect_err("a private CA is not in the compiled-in bundle");
+            // Measured on ureq 3.4: the refusal arrives as an io error of kind InvalidData carrying
+            // rustls's InvalidCertificate(UnknownIssuer) - the certificate step, not a timeout.
+            match &error {
+                ureq::Error::Io(io) => assert!(
+                    format!("{io:?}").contains("InvalidCertificate") || io.kind() == std::io::ErrorKind::InvalidData,
+                    "the refusal must be the certificate step: {io:?}"
+                ),
+                other => panic!("a refused handshake is ureq's io error carrying the TLS refusal, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_provider_call_reaches_a_private_ca_named_by_ssl_cert_file() {
+        let _env = Env::set(&[(wa_tls::CERT_FILE, &scratch::cert_file())]);
+        let server = Server::start();
+        for agent in agents() {
+            let mut response = agent
+                .get(&server.url("/v1/messages"))
+                .call()
+                .unwrap_or_else(|error| panic!("the CA named by SSL_CERT_FILE should be trusted: {error}"));
+            assert_eq!(response.status().as_u16(), 200);
+            assert_eq!(response.body_mut().read_to_string().unwrap(), "ok");
+        }
+    }
+
+    #[test]
+    fn a_broken_bundle_refuses_the_call_with_the_bundle_in_the_message() {
+        let _env = Env::set_text(wa_tls::CERT_FILE, "/nonexistent/wa-capabilities/typo.pem");
+        let error = agent_for_stream(5).expect_err("a named source that cannot be read is not a fall back");
+        assert!(error.contains("SSL_CERT_FILE"), "{error}");
+        assert!(error.contains("typo.pem"), "{error}");
+        // The same refusal from the config every capability builds its agent from, not only from the
+        // one function a test happened to call.
+        assert!(build_config(10).is_err());
+        assert!(build_config_with(10, 5).is_err());
+        assert!(agent_for_call().is_err());
     }
 }

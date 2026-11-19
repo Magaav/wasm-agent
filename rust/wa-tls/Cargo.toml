@@ -9,14 +9,17 @@ description = "The certificate authorities wa trusts, read from SSL_CERT_FILE / 
 # SSL_CERT_DIR tests need. A test server is not linked into a shipped binary: only a test binary
 # enables it (every dependant does so from its own [dev-dependencies]).
 default = []
-scratch = []
+scratch = ["dep:rustls"]
 
 [dependencies]
-# The one HTTP client in this project, so the one anchor set: ureq::tls::RootCerts is what an
-# agent reads, and this crate answers in that type instead of inventing a second one.
+# The one HTTP client in this project, so the one anchor set: ureq::tls::RootCerts is what an agent
+# reads, and this crate answers in that type instead of inventing a second one.
 ureq = "3"
+# The scratch server's side of the handshake, and only that: it is already in the build through ureq,
+# with the same provider (ring), so enabling the scratch feature adds no second TLS stack and no
+# second crypto backend.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging"], optional = true }
 
 [dev-dependencies]
-# The scratch server's side of the handshake. Already in the build through ureq, with the same
-# provider (ring), so this adds no second TLS stack and no second crypto backend.
+# The same, for this crate's own tests, which compile the scratch module without the feature.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging"] }
