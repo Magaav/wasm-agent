@@ -87,6 +87,27 @@ function M.parse(text, arm)
     if not turn.close then return invalid("a <turn> note was never closed", raw) end
     raw = raw:sub(1, turn.open - 1) .. raw:sub(turn.close + 1)
   end
+  -- A <message> the model left open because its <codeact> follows is CLOSED at that action instead of
+  -- failing the step (measured: an action written after an opening message that never got its closing
+  -- tag). The action it wrote is the step; refusing it over a tag the harness can infer would lose
+  -- work the model actually did.
+  while true do
+    local open_at = raw:find("<message>", 1, true)
+    local changed = false
+    while open_at do
+      local close_at = raw:find("</message>", open_at + 9, true)
+      local code_at = raw:find("<codeact>", open_at + 9, true)
+      -- Only when the message was never closed at all. A <codeact> BEFORE an existing </message> is a
+      -- quoted example inside the message (its own rule, and it never runs), not a missing closer.
+      if code_at and not close_at then
+        raw = raw:sub(1, code_at - 1) .. "</message>" .. raw:sub(code_at)
+        changed = true
+        break
+      end
+      open_at = raw:find("<message>", open_at + 9, true)
+    end
+    if not changed then break end
+  end
   local messages = spans(raw, "<message>", "</message>")
   local finals = spans(raw, "<final_message>", "</final_message>")
   local codes = spans(raw, "<codeact>", "</codeact>")

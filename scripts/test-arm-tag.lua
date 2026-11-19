@@ -49,6 +49,14 @@ eq(acts("<message>for example <codeact>bad()</codeact></message><codeact>return 
 eq((invalid_reason("<message>an example: <codeact>bad()</codeact></message>", "e3")),
   "<message> alone does not end a turn in this arm", "a quoted block alone is not an act")
 
+-- Rule: a <message> left open because its <codeact> follows is closed at that action (measured: the
+-- model wrote the action and omitted the closing tag). The step is not lost over a tag.
+eq(acts("<message>I will check the tooling.\n\n<codeact>return 5</codeact>", "e3"), "return 5",
+
+  "an open message is closed at its action")
+eq(acts("<message>a<codeact>return 6</codeact>", "e2"), "return 6",
+  "the same in E2")
+
 -- Rule: a second <codeact> in one message is cut; the first is the step and the rest are named.
 local two = tag.parse("<codeact>return 1</codeact><codeact>return 2</codeact>", "e3")
 eq(two.shape, "act", "two blocks still act")
