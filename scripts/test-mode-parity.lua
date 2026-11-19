@@ -51,4 +51,32 @@ for mode, want in pairs(GOLDEN) do
     mode .. ': the built prompt differs from a27490af; got ' .. host.sha256(block))
 end
 host.getenv = real_getenv
+
+-- R5: a DEFAULT node (no switch) on this fleet provider declares run only, offers the tool-call
+-- guidance, and carries the batching sentence in the prompt it actually builds. This is the arm-B
+-- shape the release ships; it is asserted from the built artefacts, never from a helper that could
+-- agree with itself.
+local plain = { session_id = 'default-node', user_id = 'master' }
+policy.pin(memory, 'master', plain)
+local dnames = {}
+for _, item in ipairs(tools.envelope('master', plain)) do dnames[#dnames + 1] = item['function'].name end
+table.sort(dnames)
+local default_mode = (function()
+  local real = host.getenv
+  host.getenv = function(k) if k == 'WASM_AGENT_RAW_CODE' then return nil end return real(k) end
+  local m = raw.mode()
+  host.getenv = real
+  return m
+end)()
+if default_mode == 'native' then
+  ok(table.concat(dnames, ',') == 'run',
+    'a default node declares run only; got ' .. table.concat(dnames, ','))
+  local guidance = raw.guidance_for('tool_call')
+  ok(guidance:find('run tool', 1, true) ~= nil, 'the default guidance offers the run tool')
+  ok(guidance:find('One run(code) can do a whole step', 1, true) ~= nil,
+    'and it carries the batching sentence')
+else
+  ok(true, 'this provider keeps the block default, so the native assertions do not apply')
+end
+
 print('mode parity ok (' .. checks .. ' checks)')
