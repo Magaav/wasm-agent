@@ -255,11 +255,14 @@ test made (`fake-node`) no longer collides with a file another writes under the 
 after the rename: ten in all, none failed.
    `3 files changed, 13 insertions(+), 7 deletions(-)`
 
-Total against the rebased round-8 tip, `git diff --stat afeff8e7..HEAD`, this report included:
+Total of the six items' CODE against the rebased round-8 tip, `git diff --stat afeff8e7..7ede8e32`
+(the last code commit, so the figure does not move as this report is edited):
 
 ```
- 9 files changed, 667 insertions(+), 45 deletions(-)
+ 8 files changed, 546 insertions(+), 38 deletions(-)
 ```
+
+This report adds roughly 120 lines on top of that, and its own size is not in the number above.
 
 ### Verified here (avell, 16 cores), at HEAD
 
