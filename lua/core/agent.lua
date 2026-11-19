@@ -1835,6 +1835,10 @@ function M:run_body(text, images)
   -- survived its run failed a model for imitations it had already answered for, on evidence that only
   -- existed in the previous turn.
   self.fake_answer_repeats = 0
+  -- The end-of-turn streak is per run for the same reason, and it is reset HERE rather than only where a
+  -- tool ran or an answer landed: a counter that survived its run failed the next turn's FIRST offence
+  -- as if it were the second (round 3, item 1). One run, one streak.
+  self.finish_continues = 0
   self:note_interruption()
   self.emit({ type = "status", text = "thinking" })
   -- A full disk fails in the middle of a turn (SQLITE_FULL, a torn write). Say so before it does, but do

@@ -397,6 +397,17 @@ checks = checks + 1
 if language_twice then error('a second wrong-language answer must fail the run') end
 has(language_twice_error, 'language_drift', 'the language run fails by name')
 
+-- 12. round 3, item 1: the streak is per RUN. An agent object is reused across turns, and a counter that
+--     survived its run failed the next turn's FIRST offence as if it were the second. The counter is reset
+--     where the run starts (lua/core/agent.lua, next to fake_answer_repeats), so a stale value does nothing.
+agent, session_id = fresh('streak is per run')
+agent.finish_continues = 7 -- a stale streak, as an earlier turn of this same agent would leave it
+scripted({ { content = 'Let me read the gate and then run the suite.' }, { content = 'The suite passes.' } })
+local streak_ok, streak_reply = pcall(agent.run, agent, 'check the gate')
+checks = checks + 1
+if not streak_ok then error('a stale streak must not fail this run\'s first offence: ' .. tostring(streak_reply)) end
+has(tostring(streak_reply), 'The suite passes', 'the run continued once and then answered')
+
 -- 11. #53: a run the harness refused before it could run exits non-zero. The rule lives in one place
 --     (chat.turn_ok), so the scripted CLI and the test read the same answer.
 eq(chat.turn_ok(true, { turn_refused = 'no_dispatchable_tools: ...' }), false,
