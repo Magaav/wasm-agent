@@ -158,4 +158,20 @@ check(type(cancelled) == "table" and cancelled.cancelled ~= false,
 check(lines_of(marker) == 2, "each adopted command appended exactly ONE line (got "
   .. tostring(lines_of(marker)) .. ")")
 
+-- 6. Item 3: the relay-deadline note is no longer the whole story. A model that reads only "the call
+-- stopped waiting" re-issues the same long call for ever, so the sentence now names the pending answer
+-- and the two calls that route back to the peer. Pinned here as well as in
+-- scripts/test-remote-call-shape.lua, which needs the selfloop component this node does not have
+-- (measured: it aborts at its line 158 on the BASE worktree too - a pre-existing refusal, not this
+-- change, and the report says so).
+local nodes_lib = dofile("lua/core/nodes.lua")
+local note = nodes_lib.relay_deadline_note({ name = "rp-scratch-peer" }, "relay_timeout")
+local function has(text, needle) return tostring(text):find(needle, 1, true) ~= nil end
+check(has(note, "ADOPTED"), "the note says a long relayed bash is adopted, not killed")
+check(has(note, 'state:"pending", op, node'), "and names the handle shape it answers")
+check(has(note, "wait(op)") and has(note, "cancel(op)"), "and the calls that route back to that node")
+check(nodes_lib.RELAY_PEER_BUDGET_MS > 0
+  and nodes_lib.RELAY_PEER_BUDGET_MS < nodes_lib.RELAY_DEADLINE_SECONDS * 1000,
+  "the budget a peer adopts by is inside the relay hold")
+
 print("remote pending ok (" .. tostring(checks) .. " checks)")

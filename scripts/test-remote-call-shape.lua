@@ -232,4 +232,16 @@ check(not has(timed_out.fix,'wait_s'),'and no wait_s in the fix either')
 check(nodes.RELAY_AWAIT_SLICE_MS==10000 and nodes.OPERATION_AWAIT_MAX_MS==10000,
   'the slice is the measured 10 s maximum of wait_ms, taken as min(10 s, the relay cap)')
 
+-- Item 3 (change/remote-pending): the relay-deadline note is no longer the whole story - a relayed bash
+-- that outlives the hold is ADOPTED on the peer and answers a handle. The note and the fix must say so,
+-- because a model that reads only "the call stopped waiting" re-issues the same long call for ever.
+check(has(deadline_note,'ADOPTED'),'the note says a long relayed bash is adopted, not killed')
+check(has(deadline_note,'{state:"pending", op, node}'),'and names the handle shape it answers')
+check(has(deadline_note,'wait(op)') and has(deadline_note,'cancel(op)'),
+  'and the two calls that route back to that node')
+check(has(timed_out.fix,'wait(op)') and has(timed_out.fix,'cancel(op)'),
+  'the fix names them too, so the next step is not a re-issue')
+check(nodes.RELAY_PEER_BUDGET_MS>0 and nodes.RELAY_PEER_BUDGET_MS<nodes.RELAY_DEADLINE_SECONDS*1000,
+  'the budget a peer adopts by is inside the relay hold ('..nodes.RELAY_PEER_BUDGET_MS..' ms)')
+
 print('remote call shape ok ('..checks..' checks, 0 skipped)')

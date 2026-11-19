@@ -808,8 +808,11 @@ function M.relay_deadline_note(node, reason)
   local why = (reason and reason ~= "") and (" (last reason: " .. tostring(reason) .. ")") or ""
   return string.format(
     "%s did not answer a relayed call within %d s (%d attempts; the relay holds a queued call about %d s "
-      .. "each), so this call stopped waiting%s. Nothing here says the action did not run: read that node's "
-      .. "state before re-issuing it. Work that needs longer is started ON that node and awaited there: "
+      .. "each), so this call stopped waiting%s. A relayed bash that outlives that hold is ADOPTED, not "
+      .. 'killed: it answers {state:"pending", op, node} and stays running there as a managed operation, '
+      .. "and wait(op) or cancel(op) route back to that node. This answer is the other case - the peer "
+      .. "never took the call - so nothing here says the action did not run: read that node's state before "
+      .. "re-issuing it. Work that needs longer is started ON that node and awaited there: "
       .. 'tools.remote({node:"%s", capability:"operation", action:"start", command:"<the command>"}) returns '
       .. 'its id, and tools.remote({node:"%s", capability:"operation", action:"await", id:"<id>", '
       .. 'wait_ms:%d}): await in slices of %d s until it settles.',
@@ -872,7 +875,9 @@ function M.remote_call(selector, capability, args)
         fix = string.format('Start the work on that node and await it there: '
           .. 'tools.remote({node:"%s", capability:"operation", action:"start", command:"<the command>"}) '
           .. 'then tools.remote({node:"%s", capability:"operation", action:"await", id:"<id>", '
-          .. 'wait_ms:%d}): await in slices of %d s until it settles.', name, name,
+          .. 'wait_ms:%d}): await in slices of %d s until it settles. A bash that outlives the hold is '
+          .. 'adopted on its own and answers {state:"pending", op, node}: resume it with wait(op) or stop '
+          .. 'it with cancel(op).', name, name,
           M.RELAY_AWAIT_SLICE_MS, M.RELAY_AWAIT_SLICE_MS / 1000),
         input = tostring(capability or "the remote call") }
     end
