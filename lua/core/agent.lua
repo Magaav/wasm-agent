@@ -260,7 +260,7 @@ local function generic_sections(role, declared, available)
   -- estimate is required because it is the difference between spending steps and spending context.
   s.turn = table.concat({
     "End every answer with a `<turn>` block, after the work itself and never inside it:",
-    "- **what hurt** - what in this turn damaged your reasoning (a missing fact, a wrong assumption, a stale instruction, a tool that lied or a step that had to be redone), and what would have removed it;",
+    "- **what hurt** - only what wa did to your reasoning (its tools, instructions, results or missing facts it should have given) and what would have removed it; your own mistakes and the project's own problems (its tests, scripts, fixtures) are not wa friction - leave them out;",
     "- **what it buys** - say which, with a number: fewer steps to the same result, or only better context (the same steps in fewer tokens, clearer state). Never claim one when it is the other;",
     "- **focus** - exactly ONE point: the highest-value harness optimisation this turn exposed. One point per answer, only when there is something to increment; no list, no filler, no restating the task.",
     "If nothing hurt your reasoning and nothing should be incremented, say so in one line and stop.",
@@ -1788,6 +1788,22 @@ function M:run(text, images)
   self.last_user_text=tostring(text or "")
   self.turn_refused=nil
   self.pending_failure=nil
+  -- Review r2, item 1 (change/done-gate-trial): this run's gate is created at the START of the run, so
+  -- the counted record written at the end always has THIS run's gate. It used to be created inside
+  -- run_body, past the first provider call: a run that threw before that point left the PREVIOUS run's
+  -- latched gate on self, and the end-of-run write was then either skipped (the old gate had already
+  -- latched) or attributed to the wrong turn. Assigning here replaces any stale gate on every path,
+  -- before anything that can throw.
+  self.gate = done_gate.new({ session_id = self.session_id, owner = self.user, request = text,
+    disabled = (self.subagent and true or false)
+      or (self.role ~= "master" and self.role ~= "admin") })
+  self.gate.effects = 0
+  -- Review r2, item 1 (change/done-gate-trial): this run's gate is created at the START of the run, so
+  -- the counted record written at the end always has THIS run's gate. It used to be created inside
+  -- run_body, past the first provider call: a run that threw before that point left the PREVIOUS run's
+  -- latched gate on self, and the end-of-run write was then either skipped (the old gate had already
+  -- latched) or attributed to the wrong turn. Assigning here replaces any stale gate on every path,
+  -- before anything that can throw.
   self.run_origin=(json.decode(host.runtime_info()) or {}).run_origin
   local resource_ctx={session_id=self.session_id,user_id=self.user,run_id=self.run_id,subagent=self.subagent}
   local claimed=resources.begin(resource_ctx)
@@ -1871,6 +1887,17 @@ function M:run(text, images)
     known=boundary~=nil,partial=false,pending=false,compactions=0}
   return self:run_body(text,images)
   end)
+  -- Review r1, fix 1 (change/done-gate-trial): the run has ENDED here, on every path - an answer, an
+  -- abort, an error, a guard stop. This is the one place the counted record is written, so the state it
+  -- names is the state the run left behind: a Stop-hook continuation that changed something after the
+  -- first candidate answer is counted as the change it was, and a run that ended with no candidate at
+  -- all is counted instead of vanishing. done_gate.note_turn latches, so a re-entered run is ONE turn.
+  if self.gate and not self.gate.disabled then
+    pcall(function()
+      self.gate.effected = (self.gate.effects or 0) > 0 or not changeset.empty(self.changes)
+      done_gate.note_turn(self.gate, { run_id = self.run_id })
+    end)
+  end
   provider.unpin()
   self.reserve_summary=nil
   self.on_call_start=nil
@@ -2318,10 +2345,14 @@ function M:run_body(text, images)
   -- a natural break point; a passing gate, a measured impossibility, operator input or a stall (the
   -- same failing output N times with no state change) ends it. No round is counted and nothing here
   -- asks the model to try harder: the message it sends is the machine's own output.
-  local gate = done_gate.new({ session_id = self.session_id, owner = self.user, request = text,
-    disabled = (self.subagent and true or false)
-      or (self.role ~= "master" and self.role ~= "admin") })
-  gate.effects = 0
+  -- Review r2, item 1: this run's gate was created at the START of the run (M:run), so a run that throws
+  -- before this line still has its own gate when the counted record is written at the end. Read it; never
+  -- build a second one here.
+  -- Review r1, fix 1 (change/done-gate-trial): the ONE counted record of this run is written at the END
+  -- of the run, not at the first candidate answer. Recording at turn end froze the answer of a moment
+  -- that a Stop-hook continuation could still change, and a run that ended with no candidate at all
+  -- (abort, error, progress-guard stop) recorded nothing. The gate is kept on the run for that one write.
+  local gate = self.gate
   local function gate_changes()
     local summary = changeset.summary(self.changes)
     if not summary then return "", {} end
@@ -3290,6 +3321,10 @@ function M:run_body(text, images)
 
     local dispatch_ctx = { session_id = self.session_id, user_id = self.user, node_id = self.node,
       run_id = self.run_id, subagent = self.subagent, run_origin=self.run_origin, changes = self.changes, codemode_policy=self.codemode_policy,
+      -- Item 1 (change/done-gate-trial): the gate state this run's tool calls may mark, so a
+      -- done_criteria call is counted from the door every call goes through (tools.dispatch), whether
+      -- the model called it directly or from inside a script.
+      gate = gate,
       model_call = true, reviewed_paths = self.reviewed_paths,
       commit_audits = self.commit_audits, audit_step = self.audit_step,
       model = self.model, reasoning = (provider.reasoning(self.model) or {}).selected,

@@ -572,6 +572,10 @@ function M.new(opts)
     stall_limit = tonumber(opts.stall_limit) or M.stall_limit(),
     disabled = opts.disabled == true,
     called_tools = false,
+    -- Item 1 (change/done-gate-trial): did THIS run call done_criteria at all? Read by the journal
+    -- event the unchecked record writes, so the counting question and its answer name the same fact.
+    done_criteria_called = false,
+    gate_counted = false,
     fingerprint = nil,
     state_digest = nil,
     repeats = 0,
@@ -625,8 +629,9 @@ end
 -- A work-shaped request with no gate: the run changed the world and recorded nothing to test it
 -- against. This is NOT re-entered - the harness cannot invent the criterion, and an extra round of
 -- "record your checks" is a turn spent on paperwork nobody asked for. It is recorded instead: a gate
--- row whose status says `uncaptured`, a status line the reader sees, and a telemetry event, so a run
--- that skipped the capture is a visible fact rather than a silent one. `docs/DONE-GATE.md` says so.
+-- row whose status says `uncaptured`, so a run that skipped the capture stays a durable fact. Since
+-- change/done-gate-trial (19/11) it no longer prints a line into the operator answer: the same
+-- fact is the counted event M.note_turn writes, which is what `wa turns --gate` reads.
 function M.record_uncaptured(state, ctx)
   M.setup()
   local detail = "the run changed state and recorded no acceptance checks for this request"
@@ -638,11 +643,42 @@ function M.record_uncaptured(state, ctx)
     VALUES(?,?,?,?,?,'uncaptured','no_checks_recorded',?,?,?,?)]],
     { gate_id, state.session_id, state.owner, tostring(request):sub(1, 20000), seq or null(), detail:sub(1, 4000),
       now, now, now })
-  if type(ctx.emit) == "function" then
-    pcall(ctx.emit, { type = "status", text = "done gate: this request changed state but recorded no "
-      .. "acceptance checks; recorded (done_criteria {action=\"status\"})" })
-  end
+  -- Item 1 (change/done-gate-trial, 19/11): the missing capture is no longer a line in the operator's
+  -- answer. The line this replaces was printed under 150 of 153 mission sessions, and a warning the
+  -- reader cannot act on only teaches them to ignore the stream. The counted event that carries the
+  -- same fact is written once per state-changing turn by M.note_turn (below), whichever ending it had.
   return gate_id
+end
+
+-- Item 1 + item 3 (change/done-gate-trial): ONE counted event per state-changing turn, and the place
+-- the count is meant to be read from. The operator's decision rule asks "of the turns that changed
+-- state, how many called done_criteria", so the denominator is every state-changing turn - not only
+-- the ones that skipped the capture. Written once per run (state.gate_counted), by whichever path the
+-- turn ends on, so a run that re-enters the gate does not inflate either side of the ratio.
+--
+-- The payload carries no request text, no answer and no tool output: the session, the two booleans and
+-- the gate id when there was one. A measurement must never be a second copy of the transcript.
+-- Review r1, fix 3 (change/done-gate-trial): the event is written for EVERY state-changing turn, so its
+-- old name (done_gate_unchecked) described only the minority that skipped the capture. The name is now
+-- done_gate_turn; the old rows still count, and the reader knows both names (M.EVENT_LEGACY).
+M.EVENT = "done_gate_turn"
+M.EVENT_LEGACY = "done_gate_unchecked"
+function M.note_turn(state, ctx)
+  if state.gate_counted then return false end
+  state.gate_counted = true
+  pcall(function()
+    dep("telemetry").event(tostring(state.session_id or ""), tostring((ctx or {}).run_id or ""), "",
+      M.EVENT, "end", {
+        changed_state = state.effected == true,
+        called_done_criteria = state.done_criteria_called == true,
+        -- Review r1, fix 5: WHICH BUILD the turn ran on, as the source commit the binary embedded. The
+        -- operator's window is "a day of missions on the release that carries this change", and a
+        -- window measured without a build stamp is every build mixed together. Empty is UNKNOWN and
+        -- stays empty (turn_journal's own rule); it is never filled from HEAD.
+        build = dep("turn_journal").build_of(),
+      })
+  end)
+  return true
 end
 
 -- One named, durable record of a loop that will not move, plus one wake. The record goes through
