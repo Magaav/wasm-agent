@@ -215,9 +215,11 @@ gate_run cargo test --offline --manifest-path rust/wa-sentinel/Cargo.toml -- --t
 # not converge for half an hour). Relayed calls may no longer take the connections that polls and binding
 # checks need: a reservation is held back for those lanes, one caller and one target are each capped, and
 # every shed answer carries Retry-After in the header and retry_after_ms in the body. The unit tests hold
-# the policy; the convergence test reproduces the storm on a REAL socket at a cap of 16, asserts a
-# priority lane is served while ordinary traffic is shed, and that traffic converges within 60 s once the
-# storm clears (measured 252 ms). Hermetic: a temp db, no node keys, no live fleet.
+# the policy. tests/storm.rs reproduces the WHOLE event with four scratch nodes that have real ed25519
+# keys, 300 held sockets past the base cap, and a proxy the test owns so the link can be CUT for 60 s:
+# every node must answer a real relayed call after the restore (measured: 252 ms after the link came
+# back, peak 301 connections), and ordinary traffic converges (this test FAILS on the base registry with
+# 503 too_many_connections). Hermetic: a temp db, scratch keys, no live fleet.
 gate_run cargo test --offline --manifest-path rust/Cargo.toml -p wa-rendezvous
 if [ "${OS:-}" = "Windows_NT" ]; then
 gate_run cargo build --offline --manifest-path rust/wa-sentinel/Cargo.toml
