@@ -383,6 +383,35 @@ local function says_it_changed_state_without_checks(events)
   return false
 end
 
+-- Review r2, item 1: a run that THROWS EARLY is still recorded, and recorded as its OWN turn.
+-- The gate used to be built inside run_body, past the first provider call. A run that failed before that
+-- line left the PREVIOUS run's latched gate on the agent, so this turn wrote nothing at all - a silent
+-- hole in exactly the measurement the operator rule depends on. The gate is now created at run start,
+-- so the end-of-run write always has this run's own (unlatched) gate.
+local s1 = session("early-throw")
+requests = {}
+answers = {
+  calls({ { "write", { path = missing("throw-a.txt"), content = "working" } } }),
+  final("Done."),
+}
+local reply1 = run(s1, "Fix the throw-a path and prove it")
+ok(reply1 == "Done.", "the first run answers: " .. tostring(reply1))
+local first_events = gate_events(s1)
+ok(#first_events == 1, "the first run writes its one event: " .. #first_events)
+-- The second run throws before it can do anything at all.
+local emitted2 = {}
+local bot2 = agent.new(s1, function(event) emitted2[#emitted2 + 1] = event end, "master", "master", "")
+bot2.run_body = function() error("fixture: the run threw before its first effect") end
+local called2 = pcall(function() return bot2:run("Do the second thing and prove it") end)
+ok(called2 == false, "the second run fails, as the fixture made it")
+local both = gate_events(s1)
+ok(#both == 2, "and it is STILL recorded as its own turn: " .. #both .. " event(s) for 2 runs")
+ok(both[2] and both[2].changed_state == false, "the thrown run changed nothing, and says so")
+ok(both[2] and both[2].called_done_criteria == false, "and it called no done_criteria")
+-- One run, one event: a third call on the latched second gate writes nothing more.
+ok(done_gate.note_turn(bot2.gate, { run_id = "again" }) == false, "the recorded run stays a single turn")
+ok(#gate_events(s1) == 2, "and the ledger still holds exactly two")
+
 -- (a) an uncaptured run: its answer never carried the line, and its turn is one state-changing turn
 -- with NO done_criteria call.
 local s7 = session('unchecked-signal')

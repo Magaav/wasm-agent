@@ -1683,6 +1683,22 @@ function M:run(text, images)
   self.last_user_text=tostring(text or "")
   self.turn_refused=nil
   self.pending_failure=nil
+  -- Review r2, item 1 (change/done-gate-trial): this run's gate is created at the START of the run, so
+  -- the counted record written at the end always has THIS run's gate. It used to be created inside
+  -- run_body, past the first provider call: a run that threw before that point left the PREVIOUS run's
+  -- latched gate on self, and the end-of-run write was then either skipped (the old gate had already
+  -- latched) or attributed to the wrong turn. Assigning here replaces any stale gate on every path,
+  -- before anything that can throw.
+  self.gate = done_gate.new({ session_id = self.session_id, owner = self.user, request = text,
+    disabled = (self.subagent and true or false)
+      or (self.role ~= "master" and self.role ~= "admin") })
+  self.gate.effects = 0
+  -- Review r2, item 1 (change/done-gate-trial): this run's gate is created at the START of the run, so
+  -- the counted record written at the end always has THIS run's gate. It used to be created inside
+  -- run_body, past the first provider call: a run that threw before that point left the PREVIOUS run's
+  -- latched gate on self, and the end-of-run write was then either skipped (the old gate had already
+  -- latched) or attributed to the wrong turn. Assigning here replaces any stale gate on every path,
+  -- before anything that can throw.
   self.run_origin=(json.decode(host.runtime_info()) or {}).run_origin
   local resource_ctx={session_id=self.session_id,user_id=self.user,run_id=self.run_id,subagent=self.subagent}
   local claimed=resources.begin(resource_ctx)
@@ -2224,15 +2240,14 @@ function M:run_body(text, images)
   -- a natural break point; a passing gate, a measured impossibility, operator input or a stall (the
   -- same failing output N times with no state change) ends it. No round is counted and nothing here
   -- asks the model to try harder: the message it sends is the machine's own output.
-  local gate = done_gate.new({ session_id = self.session_id, owner = self.user, request = text,
-    disabled = (self.subagent and true or false)
-      or (self.role ~= "master" and self.role ~= "admin") })
-  gate.effects = 0
+  -- Review r2, item 1: this run's gate was created at the START of the run (M:run), so a run that throws
+  -- before this line still has its own gate when the counted record is written at the end. Read it; never
+  -- build a second one here.
   -- Review r1, fix 1 (change/done-gate-trial): the ONE counted record of this run is written at the END
   -- of the run, not at the first candidate answer. Recording at turn end froze the answer of a moment
   -- that a Stop-hook continuation could still change, and a run that ended with no candidate at all
   -- (abort, error, progress-guard stop) recorded nothing. The gate is kept on the run for that one write.
-  self.gate = gate
+  local gate = self.gate
   local function gate_changes()
     local summary = changeset.summary(self.changes)
     if not summary then return "", {} end
