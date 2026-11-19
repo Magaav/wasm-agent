@@ -3902,20 +3902,59 @@ fn resize_console(state: &mut ConsoleInput, columns: usize, rows: usize) {
 /// owns those characters), so the only way an old bubble or code block comes back correctly sized in
 /// both directions is to draw it again. The draw is the same layout_frame a frame uses, which wraps
 /// only what is on screen - the cost is one screenful, not one session.
+/// Whether a debounced repaint is due at `now`: PURE, so the debounce is a decision a test can make
+/// without a terminal and without waiting a tenth of a second for it.
+fn repaint_is_due(due: Option<std::time::Instant>, now: std::time::Instant) -> bool {
+    due.is_some_and(|at| now >= at)
+}
+
+/// The bytes a debounced repaint starts with: hide the cursor, clear the screen (2J) and the
+/// SCROLLBACK (3J), home the cursor.
+const REPAINT_CLEAR: &str = "\x1b[?25l\x1b[2J\x1b[3J\x1b[H";
+
 fn repaint_if_due() {
     let (lock, _) = console_input();
     let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
     let Some(due) = state.repaint_after else { return };
-    if std::time::Instant::now() < due { return }
+    if !repaint_is_due(Some(due), std::time::Instant::now()) { return }
     state.repaint_after = None;
     if state.editor.as_ref().is_none_or(|editor| editor.row == 0) { return }
-    // The screen and the scrollback, then home: a resize leaves rows of the old width above the
-    // region, and they would stay there as fragments under a repainted chat.
-    let mut frame = String::from("\x1b[?25l\x1b[2J\x1b[3J\x1b[H");
+    let mut frame = String::from(REPAINT_CLEAR);
     state.transcript.dirty = true;
     let rest = layout_frame(&mut state);
     frame.push_str(&rest);
     let _ = wa_term::terminal_editor::write(&frame);
+}
+
+#[cfg(test)]
+mod repaint_tests {
+    use super::*;
+
+    /// Item G: the debounce itself - NOT due at the moment of the resize nor 149 ms later, due at
+    /// 150 ms and after. A drag of the window edge arrives as dozens of resizes and must paint once.
+    #[test]
+    fn the_repaint_is_due_only_after_the_debounce() {
+        let now = std::time::Instant::now();
+        let due = now + std::time::Duration::from_millis(150);
+        assert!(!repaint_is_due(Some(due), now), "not due at the moment of the resize");
+        assert!(!repaint_is_due(Some(due), now + std::time::Duration::from_millis(149)));
+        assert!(repaint_is_due(Some(due), now + std::time::Duration::from_millis(150)));
+        assert!(repaint_is_due(Some(due), now + std::time::Duration::from_secs(2)));
+    }
+
+    /// Nothing scheduled is nothing to repaint: an idle chat does not clear its own screen.
+    #[test]
+    fn an_idle_chat_is_never_due() {
+        assert!(!repaint_is_due(None, std::time::Instant::now()));
+    }
+
+    /// The clear covers what a resize leaves behind: the screen, AND the scrollback.
+    #[test]
+    fn the_repaint_clears_the_screen_and_the_scrollback() {
+        assert!(REPAINT_CLEAR.contains("\x1b[2J"), "the screen is cleared");
+        assert!(REPAINT_CLEAR.contains("\x1b[3J"), "and the scrollback with it");
+        assert!(REPAINT_CLEAR.ends_with("\x1b[H"), "and the cursor goes home");
+    }
 }
 
 /// One read of what the terminal sent - a keystroke, or a whole escape sequence or paste at once.

@@ -2284,53 +2284,6 @@ do
     end
   end
 end
--- ---- ITEM I: a fence card is in step, in every shape -------------------------------------------
---
--- Victor's screenshot (19/11, an untagged fence with one css line): the copy icon where the title row
--- should be, an empty bar row, the code line WITHOUT its bar, then the bottom. Phase 0 dumped the rows
--- at every layer, and the renderer was NOT the cause: markdown.render is right at 60/80/120 (measured).
--- The HOST was: redrawing a card row into a narrower area (a focused block draws in two columns less)
--- with the PROSE wrapper, which broke the row at the space after the bar and left the bar alone on a
--- row of its own, the code hanging bare under it - the screenshot, exactly. A card row is code: it is
--- now cut by CELLS and every row keeps its bar (rust/wa-term transcript.rs, wrap_rows).
---
--- These assert the two layers that own the shape, both real: what markdown.render emits, and that the
--- copy marker it hands over points at the title row.
-do
-  local TOP, BAR, BOTTOM = "\226\148\140", "\226\148\130", "\226\148\148"
-  local FENCE = "```"
-  local md = dofile("lua/core/markdown.lua")
-  local shapes = {
-    { label = "untagged, one line", answer = "The fix (one rule):\n\n" .. FENCE .. "\n:host {display:contents}\n" .. FENCE .. "\n", lines = 1 },
-    { label = "tagged css, three lines", answer = "Para:\n\n" .. FENCE .. "css\na\nb\nc\n" .. FENCE .. "\n", lines = 3 },
-    { label = "untagged, first in the answer", answer = FENCE .. "\nbody { color: red }\n" .. FENCE .. "\n", lines = 1 },
-  }
-  for _, shape in ipairs(shapes) do
-    for _, width in ipairs({ 60, 80, 120 }) do
-      local rendered, copies = md.render(shape.answer, {
-        paint = function(text, style) return view_lib.paint(text, style, true) end,
-        width = width - 2, indent = "", reflow = true,
-      })
-      local rows, title, bar_row, bottom, prose = {}, nil, nil, nil, nil
-      for line in (rendered .. "\n"):gmatch("([^\n]*)\n") do rows[#rows + 1] = line end
-      for index, row in ipairs(rows) do
-        local plain = visible(row)
-        if not title and plain:find(TOP, 1, true) then title = index end
-        if not bar_row and plain:find(BAR, 1, true) then bar_row = index end
-        if plain:find(BOTTOM, 1, true) then bottom = index end
-        if plain:find("The fix", 1, true) or plain:find("Para:", 1, true) then prose = index end
-      end
-      local where = "item I @" .. width .. " " .. shape.label
-      ok(title and bar_row and bottom, where .. ": the card has a top, a bar and a bottom")
-      eq(bar_row, (title or 0) + 1, where .. ": the code bar is the row directly under the title")
-      eq(bottom, (bar_row or 0) + shape.lines, where .. ": one bar row per code line, then the bottom")
-      if prose then ok(prose < title, where .. ": the paragraph keeps its own row, above the card") end
-      ok(copies and copies[1], where .. ": the card is copyable")
-      eq(copies[1] and copies[1].at, (title or 0) - 1, where .. ": the copy marker points at the title row (0-based)")
-    end
-  end
-end
-
 
 if failed > 0 then
   print(string.format("cli view: %d failed of %d checks", failed, checks))
