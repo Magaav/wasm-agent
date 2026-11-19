@@ -151,6 +151,13 @@ never told "still running" with nothing it can do about it.
   answer, `stderr_path` for why it failed, absent when the executor has no files (never a guess). A
   call that finishes inside its wait answers exactly what it always answered; a script that names no
   `wait_s` and whose call finishes in time sees no change at all.
+  The rest of the handle, field by field (`lua/core/codemode_pending.lua`, the local `handle`): `log_path` is
+  `stdout_path` under the name a reader looks for first, so either spelling works; `output_bytes` is
+  how many bytes the stream holds so far, which is what a later `operation read` pages through;
+  `state_name` is the executor's own state word (`running`, `settled`) kept when `state` is already
+  this handle's word; and `settled` is true the moment the work ended, even if the handle was formed
+  before the result could be read. None of these is a guess: each is copied from the executor's own
+  record, and a field the executor did not answer is simply absent.
 * `wait_s` is a property of the call's *wait*, taken out of the arguments before the tool's own schema
   sees them: default 60 s, 0..300 s, and effectively `min(wait_s, 300, the script's remaining time minus
   a margin)`. A wait never outlives the script that started it; a `wait_s` that is not a number is

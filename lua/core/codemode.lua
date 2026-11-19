@@ -511,7 +511,17 @@ local function settle_call(s,call)
      value,success=script_value(value,success)
      -- The shape the SCRIPT saw, recorded once per change (lua/core/return_shapes.lua never raises).
      if success and connector_name(call.tool) then return_shapes.learn(call.tool,current['function'].parameters,value) end
-     s.calls[#s.calls+1]={id=call.id,name=call.tool,ok=success,evidence=reference,status=call_status(value),why=call_why(value)}
+     -- Item 4 (round 3): a bash/shell call the DIRECT path would call a read (git status, rg, ls) is
+     -- marked here by the same function agent.lua uses for a direct bash call, so the done gate does not
+     -- count an explanation as an effect just because it ran inside a script. Only the one bit is
+     -- recorded, never the command text, and the field appears only when it is true, so every other
+     -- call record keeps the shape it had.
+     local read_only = nil
+     if call.tool == "bash" or call.tool == "shell" then
+       local command = type(params) == "table" and tostring(params.command or "") or ""
+       read_only = command ~= "" and dofile("lua/core/orchestration_mode.lua").read_only_command(command) or nil
+     end
+     s.calls[#s.calls+1]={id=call.id,name=call.tool,ok=success,evidence=reference,status=call_status(value),why=call_why(value),read_only=read_only}
      telemetry.finish(span,{ok=success,name=call.tool,nested=true,codemode_call=call.id,result_bytes=#encoded,result_hash=host.sha256(encoded)})
     end
    end

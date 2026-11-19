@@ -435,6 +435,9 @@ M.admin = {
     id = { type = "string" }, command = { type = "string" }, cwd = { type = "string" },
     timeout_seconds = { type = "integer", minimum = 1, maximum = 86400 },
     stream = { type = "string", enum = {"stdout", "stderr"} }, offset = { type = "integer", minimum = 0 },
+    -- The ceiling is codemode_pending.STDOUT_PAGE_BYTES (24 KiB, the Rust page). It is written out
+    -- because a schema table is a literal; scripts/test-turn-signal.lua asserts the two agree, so
+    -- the copy cannot drift silently (item 4).
     limit = { type = "integer", minimum = 1, maximum = 24576 }, wait_ms = { type = "integer", minimum = 0, maximum = 10000 },
     wait_for = { type = "string", enum = {"command", "settled"}, description = "await only: foreground adoption defaults to command completion; settled waits for the complete owned process tree." }
   }, {"action"}),
@@ -2293,10 +2296,13 @@ function M.await_parallel_bash(operation_id, role, ctx)
     end
     state.error = state.error or "run_cancelled"
   end
+  -- The same page the pending module reads at, from one pair of constants (item 4): a direct bash
+  -- answer and a handle over the same operation must clip at the same byte.
+  local pages = dofile("lua/core/codemode_pending.lua")
   local stdout = M.dispatch(nil, "operation", { action = "read", id = operation_id,
-    stream = "stdout", offset = 0, limit = 24576 }, role, ctx, nil, true)
+    stream = "stdout", offset = 0, limit = pages.STDOUT_PAGE_BYTES }, role, ctx, nil, true)
   local stderr = M.dispatch(nil, "operation", { action = "read", id = operation_id,
-    stream = "stderr", offset = 0, limit = 8192 }, role, ctx, nil, true)
+    stream = "stderr", offset = 0, limit = pages.STDERR_PAGE_BYTES }, role, ctx, nil, true)
   local code = tonumber(state.process_exit_code) or -1
   return { operation_id = operation_id, code = code, ok = code == 0,
     stdout = type(stdout) == "table" and stdout.content or "",
@@ -2306,9 +2312,9 @@ function M.await_parallel_bash(operation_id, role, ctx)
     stderr_bytes = type(stderr) == "table" and stderr.available_bytes or nil,
     stdout_path = state.stdout_path, stderr_path = state.stderr_path,
     stderr_truncated = type(stderr) == "table" and
-      (tonumber(stderr.available_bytes) or 0) > 8192 or false,
+      (tonumber(stderr.available_bytes) or 0) > pages.STDERR_PAGE_BYTES or false,
     stdout_truncated = type(stdout) == "table" and
-      (tonumber(stdout.available_bytes) or 0) > 24576 or false,
+      (tonumber(stdout.available_bytes) or 0) > pages.STDOUT_PAGE_BYTES or false,
     error = state.error, timing = state.timing, parallel = true }
 end
 

@@ -117,34 +117,73 @@ local function seam(left, right)
   return left_body .. string.rep("\n", between) .. right_body
 end
 
+-- Fenced code regions: a line opening a fence of three or more backticks or tildes closes at a line
+-- with at least as many of the same character. A <turn> inside one is CODE the answer is showing - an
+-- example, a quoted format - not the answer's own note, so it is never stripped (item 4).
+local function fence_spans(text)
+  local spans, open_at, open_char, open_len = {}, nil, nil, 0
+  local pos = 1
+  for line in (text .. "\n"):gmatch("([^\n]*)\n") do
+    local start = pos
+    pos = pos + #line + 1
+    local ticks = line:match("^%s*([`~]+)")
+    if ticks and #ticks >= 3 then
+      local char = ticks:sub(1, 1)
+      if not open_at then
+        open_at, open_char, open_len = start, char, #ticks
+      elseif char == open_char and #ticks >= open_len then
+        spans[#spans + 1] = { from = open_at, to = start + #line }
+        open_at = nil
+      end
+    end
+  end
+  if open_at then spans[#spans + 1] = { from = open_at, to = #text + 1 } end
+  return spans
+end
+
+local function in_spans(spans, at)
+  for _, span in ipairs(spans) do
+    if at >= span.from and at < span.to then return true end
+  end
+  return false
+end
+
 function M.split(content)
   local text = type(content) == "string" and content or ""
   local visible, blocks, fields = {}, {}, { hurt = {}, buys = {}, focus = {} }
   local order = {}
-  local cursor = 1
+  local spans = fence_spans(text)
+  local cursor, search = 1, 1
   while true do
-    local start = block_start(text:sub(cursor))
-    if not start then break end
-    start = cursor + start - 1
-    local body_at = start + 6
-    local stop = text:find("</turn>", body_at, true)
-    if not stop then break end -- unclosed: the rest is answer text, never a note
-    local inner = text:sub(body_at, stop - 1)
-    visible[#visible + 1] = text:sub(cursor, start - 1)
-    blocks[#blocks + 1] = text:sub(start, stop + 6)
-    local current = nil
-    for line in (inner .. "\n"):gmatch("([^\n]*)\n") do
-      local key, first = heading(line)
-      if key then
-        current = key
-        if fields[key][1] == nil then order[#order + 1] = key end
-        if first and first ~= "" then fields[key][#fields[key] + 1] = first end
-      elseif current and trim(line) ~= "" then
-        fields[current][#fields[current] + 1] = trim(line)
+    local found = block_start(text:sub(search))
+    if not found then break end
+    local start = search + found - 1
+    if in_spans(spans, start) then
+      -- Inside a fence: code the answer is showing, never a note. Step past the tag and keep looking.
+      search = start + 6
+    else
+      local body_at = start + 6
+      local stop = text:find("</turn>", body_at, true)
+      if not stop or in_spans(spans, stop) then break end -- unclosed: the rest is answer text
+      local inner = text:sub(body_at, stop - 1)
+      visible[#visible + 1] = text:sub(cursor, start - 1)
+      blocks[#blocks + 1] = text:sub(start, stop + 6)
+      local current = nil
+      for line in (inner .. "\n"):gmatch("([^\n]*)\n") do
+        local key, first = heading(line)
+        if key then
+          current = key
+          if fields[key][1] == nil then order[#order + 1] = key end
+          if first and first ~= "" then fields[key][#fields[key] + 1] = first end
+        elseif current and trim(line) ~= "" then
+          fields[current][#fields[current] + 1] = trim(line)
+        end
       end
+      cursor = stop + 7
+      search = cursor
     end
-    cursor = stop + 7
   end
+  -- Everything after the last block is answer text, and it goes back exactly as it was.
   visible[#visible + 1] = text:sub(cursor)
   local joined = visible[1] or ""
   for index = 2, #visible do joined = seam(joined, visible[index]) end
@@ -309,8 +348,14 @@ function M.recent(opts)
   if opts.day and opts.day ~= "" then
     local from, to = M.day_bounds(opts.day)
     if not from then return {} end
-    rows = sql("sql_query", "SELECT * FROM turn_notes WHERE at>=? AND at<? ORDER BY at ASC LIMIT ?",
+    -- The NEWEST `limit` notes of the day, still answered oldest-first (item 4): a capped page takes
+    -- the newest, because a day report is about what hurt most recently, and the reader is told how
+    -- many it did not see. Taking the oldest meant a busy day's 500-note page was the morning.
+    rows = sql("sql_query", "SELECT * FROM turn_notes WHERE at>=? AND at<? ORDER BY at DESC LIMIT ?",
       { from, to, limit })
+    local ascending = {}
+    for index = #rows, 1, -1 do ascending[#ascending + 1] = rows[index] end
+    rows = ascending
   elseif opts.session_id and opts.session_id ~= "" then
     rows = sql("sql_query", "SELECT * FROM turn_notes WHERE session_id=? ORDER BY at DESC LIMIT ?",
       { tostring(opts.session_id), limit })
@@ -325,6 +370,30 @@ function M.recent(opts)
   end
   for _, row in ipairs(rows) do row.at = tonumber(row.at) or 0 end
   return rows
+end
+
+-- The node's OWN local date, as YYYY-MM-DD, from the same clock day_bounds uses (item 4: the test
+-- and the report must agree on which day "today" is; the guest's os.date is UTC, so a test that asked
+-- it would disagree with the bounds for part of every day).
+function M.local_day(epoch)
+  local stamp = tonumber(epoch) or host.now()
+  local ok, clock = pcall(function() return dep("platform").local_clock(stamp) end)
+  if ok and type(clock) == "table" and type(clock.local_iso) == "string" then
+    local day = clock.local_iso:match("^(%d%d%d%d%-%d%d%-%d%d)")
+    if day then return day end
+  end
+  return os.date("!%Y-%m-%d", math.floor(stamp))
+end
+
+-- How many notes a day holds, exactly. `recent` answers a bounded page, so a report that only counted
+-- the page could not tell one day's 500 notes from its 5000 (item 4).
+function M.count_day(day)
+  local from, to = M.day_bounds(day)
+  if not from then return nil end
+  M.setup()
+  local rows = sql("sql_query", "SELECT COUNT(*) AS n FROM turn_notes WHERE at>=? AND at<?", { from, to })
+  local row = type(rows) == "table" and rows[1] or nil
+  return tonumber(type(row) == "table" and row.n or nil) or 0
 end
 
 -- Days since 1970-01-01 for a civil date, by arithmetic (Howard Hinnant's civil_from_days inverse).

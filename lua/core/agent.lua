@@ -863,6 +863,14 @@ end
 -- whose calls cannot be read is not silently a read: unknown counts as an effect, because a gate
 -- that opens on a result nobody could read is the failure this item exists to close. It is one
 -- exported function so `scripts/test-turn-signal.lua` drives THIS rule, not a copy of it.
+-- Item 4 (round 3): ONE rule for "did this bash command change anything", used by the direct path
+-- and by a script's inner bash call. Unknown is not yes: a call with no readable command is an effect.
+function M.command_effect(name, args)
+  if name ~= "bash" and name ~= "shell" then return tools.has_effect(name, args) end
+  local command = type(args) == "table" and tostring(args.command or "") or ""
+  return command ~= "" and not dofile("lua/core/orchestration_mode.lua").read_only_command(command)
+end
+
 function M.script_effect(output)
   if type(output) ~= "table" then return true end
   local calls = output.calls
@@ -872,7 +880,15 @@ function M.script_effect(output)
   end
   for _, inner in ipairs(calls) do
     local name = type(inner) == "table" and tostring(inner.name or "") or ""
-    if name == "" or tools.has_effect(name, nil) then return true end
+    if name == "" then return true end
+    if type(inner) == "table" and inner.read_only == true then
+      -- The call record's own verdict, computed at the boundary with M.command_effect - the same
+      -- function the direct path uses. Only bash/shell can carry it; any other name with the bit set
+      -- is a record this rule does not understand, and unknown is an effect.
+      if name ~= "bash" and name ~= "shell" then return true end
+    elseif tools.has_effect(name, nil) then
+      return true
+    end
   end
   return false
 end
@@ -3336,11 +3352,8 @@ function M:run_body(text, images)
       -- tool, or a bash command an operator could have asked for as a read (`git status`, `rg`, `ls`), is
       -- not one - that distinction is what keeps an explanation request ungated.
       if ok_tool and not gate.disabled then
-        local effect = tools.has_effect(function_.name, args)
-        if function_.name == "bash" or function_.name == "shell" then
-          local command = type(args) == "table" and tostring(args.command or "") or ""
-          effect = command ~= "" and not dofile("lua/core/orchestration_mode.lua").read_only_command(command)
-        elseif function_.name == "codemode" then
+        local effect = M.command_effect(function_.name, args)
+        if function_.name == "codemode" then
           -- Item #34: a script is a script. What it CHANGED is what its own calls did - the rule is
           -- `M.script_effect`, one function, so the gate and the test that pins it read the same code.
           effect = M.script_effect(output)

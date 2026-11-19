@@ -191,13 +191,6 @@ eq(journal.build_of({ runtime_info = function() return "not json" end }), "",
   "#2: an unreadable answer is UNKNOWN, never a guess")
 local long = journal.build_of({ build_identity = function() return string.rep("a", 500) end })
 eq(#long, journal.MAX_BUILD, "#2: a recorded build is bounded")
--- and the row stores exactly that
-local unknown_id = journal.record(plain.note or split.note, { session_id = session_id,
-  build = journal.build_of({ version = "0.1.0" }) })
-local unknown_rows = journal.recent({ session_id = session_id, limit = 1 })
-ok(unknown_id ~= nil and unknown_rows[1] and unknown_rows[1].build == "",
-  "#2: a row on a host that knows only its version reads as an unknown build")
-
 -- the journal row: session, mission, build, mode and the three fields
 local session_id = memory.start_session("", "turn-signal", { user_id = "master", node_id = "",
   title = "turn signal" })
@@ -205,6 +198,17 @@ local note_id, note_error = journal.record(split.note, { session_id = session_id
   message_id = "msg-1", mission = "make the note cost nothing", build = "abc123", mode = "only",
   model = "deepseek", block = split.block })
 ok(note_id ~= nil, "#33: the note is journaled: " .. tostring(note_error))
+-- Item 2: the row a host with only a version writes. Recorded AFTER session_id exists, read back
+-- THROUGH a session filter, and in a session of its own so the row count asserted below stays
+-- exactly the one note this section is about (the first version named an undeclared local, which
+-- inserted a row with an empty session and then read whatever was newest).
+local unknown_session = memory.start_session("", "turn-signal-build", { user_id = "master",
+  node_id = "", title = "turn signal build" })
+local unknown_id = journal.record(plain.note or split.note, { session_id = unknown_session,
+  build = journal.build_of({ version = "0.1.0" }) })
+local unknown_rows = journal.recent({ session_id = unknown_session, limit = 5 })
+ok(unknown_id ~= nil and #unknown_rows == 1 and unknown_rows[1].build == "",
+  "#2: a row on a host that knows only its version reads as an unknown build")
 local rows = journal.recent({ session_id = session_id, limit = 10 })
 eq(#rows, 1, "#33: one row for one note")
 local row = rows[1]
@@ -235,7 +239,11 @@ ok(tostring(clock.local_iso or ""):match("^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d") ~= n
   "item 4: the row has a time the listing can print")
 
 -- the day roll-up: the bounds of one local day, and a note inside it
-local today = os.date("%Y-%m-%d")
+-- The day bounds and "today" come from the SAME clock (item 4): the guest's own os.date is UTC,
+-- so os.date("%Y-%m-%d") disagrees with day_bounds for part of every day. local_day asks the
+-- clock day_bounds asks.
+local today = journal.local_day()
+eq(today, journal.local_day(host.now()), "item 4: today is one answer from one clock")
 local from, to = journal.day_bounds(today)
 ok(from ~= nil and to == from + 86400, "#33: a day is a half-open 24h window")
 ok(row.at >= from and row.at < to, "#33: today's note falls inside today's window")
@@ -438,5 +446,73 @@ local notice_row = drawn8:match("([^\n]*)done gate: 1 recorded check")
 ok(notice_row ~= nil and notice_row:gsub("^%s+", ""):sub(1, 2) == "! ",
   "item 8: the notice has a row of its own, opening with its own mark")
 
+-- ---- item 4 (review 19/11): the day report and the page it reads -------------------------
+-- A row on a day of its own, with an explicit `at`, so a day can be tested without waiting for
+-- one. It writes through the same statement M.record writes (and the same JSON params).
+local function seed_on(day, offset_s, hurt, focus)
+  local from = journal.day_bounds(day)
+  if not from then error("seed_on needs a real day: " .. tostring(day)) end
+  journal.setup()
+  local id = host.uuid()
+  host.sql_exec([[INSERT INTO turn_notes(id,session_id,run_id,message_id,mission,build,mode,model,
+      hurts,buys,focus,block,at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)]],
+    json.encode({ id, "seed", "seed-run", "", "", "", "", "", hurt or "", "", focus or "", "",
+      from + offset_s }))
+  return id
+end
+-- (a) a day whose notes carry no countable word is a day, not a crash.
+seed_on("2020-01-01", 3600, "the a an and it is", "of to in on at")
+local quiet_day, quiet_code, quiet_err = captured(function()
+  return cli.run({ "wa", "turns", "--day", "2020-01-01" }) end)
+eq(quiet_code, 0, "item 4: a day with no themes answers, it does not crash: " .. tostring(quiet_err))
+ok(quiet_day:find("themes: none", 1, true) ~= nil,
+  "item 4: and says so rather than printing an empty theme list")
+-- (b) a bounded page says it stopped, and how much it did not read.
+for index = 1, 3 do seed_on("2020-01-02", index * 60, "trailing " .. index, "") end
+local capped, capped_code = captured(function()
+  return cli.run({ "wa", "turns", "--day", "2020-01-02", "--limit", "2" }) end)
+eq(capped_code, 0, "item 4: a capped day report still answers")
+ok(capped:find("read the newest 2 of 3 note(s)", 1, true) ~= nil,
+  "item 4: the report says how many notes it did not read: " .. capped:gsub("\n", " | "):sub(1, 160))
+local capped_json = captured(function()
+  return cli.run({ "wa", "turns", "--day", "2020-01-02", "--limit", "2", "--json" }) end)
+local capped_ok, capped_body = pcall(json.decode, capped_json)
+ok(capped_ok and capped_body.total == 3 and capped_body.notes == 2 and capped_body.truncated == true,
+  "item 4: --json carries the day's real total and says the page was truncated")
+-- (c) an inner bash call is judged by the SAME rule as a direct one.
+ok(agent_lib.script_effect({ ok = true, calls = { { name = "bash", read_only = true } } }) == false,
+  "item 4: a read-only bash inside a script is not an effect, like the direct path")
+ok(agent_lib.script_effect({ ok = true, calls = { { name = "bash" } } }) == true,
+  "item 4: a bash call with no verdict is an effect - unknown is not yes")
+ok(agent_lib.script_effect({ ok = true, calls = { { name = "write", read_only = true } } }) == true,
+  "item 4: the read-only bit only speaks for bash/shell; any other name with it is unknown")
+ok(agent_lib.command_effect("bash", { command = "git status" }) == false,
+  "item 4: the direct path calls git status a read")
+ok(agent_lib.command_effect("bash", { command = "rm -rf /tmp/x" }) == true,
+  "item 4: and rm an effect")
+-- (d) one page size: 24 KiB, the number the Rust page reads at, in the module and the schema.
+local pages_lib = dofile("lua/core/codemode_pending.lua")
+eq(pages_lib.STDOUT_PAGE_BYTES, 24 * 1024, "item 4: the stdout page is the Rust page (24 KiB)")
+eq(pages_lib.STDERR_PAGE_BYTES, 8 * 1024, "item 4: and stderr 8 KiB")
+ok(source_of("lua/core/tools.lua"):find("maximum = " .. pages_lib.STDOUT_PAGE_BYTES, 1, true) ~= nil,
+  "item 4: the operation schema ceiling is that same byte")
+-- (e) the handle fields the view reads are documented, not only emitted.
+local codemode_doc = source_of("docs/CODEMODE.md")
+for _, field in ipairs({ "log_path", "output_bytes", "settled", "state_name", "stdout_path", "stderr_path" }) do
+  ok(codemode_doc:find("`" .. field .. "`", 1, true) ~= nil,
+    "item 4: CODEMODE.md names the handle field " .. field)
+end
+-- (g) a <turn> inside a code fence is code being shown, never the answer's note.
+local fence = string.rep(string.char(96), 3)
+local shown = "Example:\n\n" .. fence .. "\n<turn>\n- **focus** - x\n</turn>\n" .. fence .. "\n\ndone"
+local fenced = journal.split(shown)
+ok(fenced.block == nil, "item 4: a <turn> inside a fence is not stripped as a note")
+eq(fenced.visible, shown, "item 4: and the answer it was shown in is unchanged")
+local after_fence = journal.split(fence .. "\n<turn>code</turn>\n" .. fence
+  .. "\n<turn>\n- **focus** - real\n</turn>\n42")
+eq(after_fence.visible, fence .. "\n<turn>code</turn>\n" .. fence .. "\n\n42",
+  "item 4: the fenced one stays, the real one after it is still the note")
+ok(after_fence.note and after_fence.note.focus:find("real", 1, true) ~= nil,
+  "item 4: and the real block is the note")
 print(string.format("turn-signal: %d checks, %d failed", checks, failed))
 if failed > 0 then os.exit(1) end

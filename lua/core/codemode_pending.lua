@@ -64,6 +64,13 @@ M.MAX_BATCH = 20
 -- Bytes of an operation's output kept in `progress`, and how many handles `pending()` lists.
 M.PROGRESS_BYTES = 400
 M.MAX_LIST = 50
+-- The page a settled operation's stdout/stderr is read at. One pair of numbers, the same ones
+-- rust/wa-capabilities/src/operations.rs reads with (24 * 1024 / 8 * 1024), because a handle and a
+-- direct bash answer must clip at the same byte and report the same `stdout_bytes`: two copies of
+-- "24 KB" drifting apart is how a result reads complete on one path and truncated on the other
+-- (item 4). tools.lua's operation schema and its adopted-tree result read these too.
+M.STDOUT_PAGE_BYTES = 24 * 1024
+M.STDERR_PAGE_BYTES = 8 * 1024
 -- Records kept per scope once they are closed: a settled handle is kept so `results.get(op)` can
 -- re-read it, but the index cannot grow without bound in a long session.
 M.KEEP_CLOSED = 256
@@ -288,17 +295,19 @@ local function operation_result(dispatch, op, state)
   for key, value in pairs(type(state) == "table" and state or {}) do out[key] = value end
   out.operation_id = out.operation_id or op
   local stdout = operation_call(dispatch, "read", { action = "read", id = op, stream = "stdout",
-    offset = 0, limit = 24576 })
+    offset = 0, limit = M.STDOUT_PAGE_BYTES })
   if type(stdout) == "table" and type(stdout.content) == "string" then
     out.stdout = stdout.content
-    out.stdout_truncated = (tonumber(stdout.available_bytes) or 0) > 24576
+    -- available_bytes is the stream's real size, so the count is the whole output's, not the page's.
+    out.stdout_bytes = tonumber(stdout.available_bytes) or #out.stdout
+    out.stdout_truncated = out.stdout_bytes > M.STDOUT_PAGE_BYTES
   end
   local stderr = operation_call(dispatch, "read", { action = "read", id = op, stream = "stderr",
-    offset = 0, limit = 8192 })
+    offset = 0, limit = M.STDERR_PAGE_BYTES })
   if type(stderr) == "table" and type(stderr.content) == "string" then
     out.stderr = stderr.content
-    out.stderr_bytes = tonumber(stderr.available_bytes) or 0
-    out.stderr_truncated = out.stderr_bytes > 8192
+    out.stderr_bytes = tonumber(stderr.available_bytes) or #out.stderr
+    out.stderr_truncated = out.stderr_bytes > M.STDERR_PAGE_BYTES
   end
   if out.code == nil then out.code = tonumber(out.process_exit_code) or tonumber(out.command_code) or -1 end
   if out.ok == nil then out.ok = out.code == 0 end

@@ -223,6 +223,10 @@ local function day_report(args)
     print(string.format("wa turns --day %s: no note in the run journal for that day", day))
     return 0
   end
+  -- Item 4: a bounded page is not the whole day. Asking the store for the exact count is what lets
+  -- the report SAY it stopped, instead of presenting 500 of 5000 notes as the day's themes.
+  local total = journal.count_day(day) or #notes
+  local stopped = total > #notes
   -- The themes: the words the notes used, counted once per note, with the words that are the shape of
   -- prose removed. Not a clustering engine - the grouping lives in lua/core/turnfeed.lua - this is the
   -- day's vocabulary so a reader can see what the day was about before opening a mission.
@@ -272,16 +276,26 @@ local function day_report(args)
   -- has(), not flag(): flag() answers the argument AFTER the name, so a trailing --json read as nil
   -- and the text report was printed instead (found 19/11 while checking item 2).
   if has(args, "--json") then
-    print(json.encode({ day = day, notes = #notes, sessions = sessions, themes = ranked,
-      builds = counts(by_build), modes = counts(by_mode) }))
+    print(json.encode({ day = day, notes = #notes, total = total, truncated = stopped or nil,
+      sessions = sessions, themes = ranked, builds = counts(by_build), modes = counts(by_mode) }))
     return 0
   end
   local lines = {}
   lines[#lines + 1] = string.format("wa turns --day %s: %d note(s) from %d session(s)", day, #notes, sessions)
-  local top = math.max(1, math.min(tonumber(flag(args, "--top") or "") or 15, #ranked))
-  lines[#lines + 1] = "themes (a word counted once per note):"
-  for index = 1, top do
-    lines[#lines + 1] = string.format("  %3d  %s", ranked[index].count, ranked[index].word)
+  if stopped then
+    lines[#lines + 1] = string.format(
+      "read the newest %d of %d note(s) that day (--limit raises the page, up to 500)", #notes, total)
+  end
+  if #ranked == 0 then
+    -- Item 4: a day whose notes carry no countable word is a day, not a crash. The old loop indexed
+    -- ranked[1] and failed with "attempt to index a nil value" on a note of only stop words.
+    lines[#lines + 1] = "themes: none (no word in these notes survived the stop list)"
+  else
+    local top = math.max(1, math.min(tonumber(flag(args, "--top") or "") or 15, #ranked))
+    lines[#lines + 1] = "themes (a word counted once per note):"
+    for index = 1, top do
+      lines[#lines + 1] = string.format("  %3d  %s", ranked[index].count, ranked[index].word)
+    end
   end
   lines[#lines + 1] = "builds:"
   for _, entry in ipairs(counts(by_build)) do lines[#lines + 1] = string.format("  %3d  %s", entry.count, entry.key) end
