@@ -296,6 +296,18 @@ elseif command == "stt" then
   local result = dofile("lua/core/stt.lua").cli({ table.unpack(args, 2) })
   print(json.encode(result))
   if result and result.ok == false then os.exit(1) end
+elseif command == "build-env" then
+  -- The node build record, readable and checkable without a build (item 3 of the node-ops round).
+  -- ONE reader exists (scripts/lib/build-requirements.sh); this prints what it says, and a key no
+  -- build reads is a refusal by name with the one line that fixes it - the same verdict
+  -- scripts/fast.sh and scripts/deploy.sh take, so an operator sees the answer before a build does.
+  local root = host.getenv("WA_INSTALL_DIR") or (host.getenv("WASM_AGENT_HOME") or host.getenv("HOME") or "")
+  local ran, raw = pcall(host.exec, "bash " .. (host.getenv("WASM_AGENT_LUA_ROOT") or ".")
+    .. "/scripts/lib/build-requirements.sh record " .. ("%q"):format(root), "", 60)
+  local answer = type(raw) == "string" and (select(2, pcall(json.decode, raw))) or raw
+  local code = type(answer) == "table" and (tonumber(answer.code) or 0) or 0
+  print(type(answer) == "table" and (answer.stdout or "") or tostring(raw))
+  if code ~= 0 then os.exit(code) end
 elseif command == "backup" or command == "restore" then
   -- The snapshot an operator can take and put back with one command (item 1 of the node-ops round):
   -- 'wa backup' snapshots every store with its manifest, 'wa backup list' names them, and
