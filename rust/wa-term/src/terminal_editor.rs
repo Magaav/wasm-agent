@@ -1606,10 +1606,14 @@ mod tests {
     #[test]
     fn the_status_bar_glyphs_are_one_cell_each() {
         let glyphs = [
-            ("\u{f0766}", "the context ball, 0% to 3%"),
-            ("\u{f0a9f}", "the context ball, 3% to 50%"),
-            ("\u{f0aa1}", "the context ball, 50% to 75%"),
-            ("\u{f0aa3}", "the context ball, 75% to 100%"),
+            ("\u{f0766}", "the context ball, empty (below 3%)"),
+            ("\u{f0a9e}", "the context ball, one eighth"),
+            ("\u{f0a9f}", "the context ball, a quarter"),
+            ("\u{f0aa0}", "the context ball, three eighths"),
+            ("\u{f0aa1}", "the context ball, half"),
+            ("\u{f0aa2}", "the context ball, five eighths"),
+            ("\u{f0aa3}", "the context ball, three quarters"),
+            ("\u{f0aa4}", "the context ball, seven eighths"),
             ("\u{f0aa5}", "the full context ball, 100% and past the window"),
             ("\u{f0dfa}", "the run's steps"),
             ("\u{f051b}", "the run's elapsed clock"),

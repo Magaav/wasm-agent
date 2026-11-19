@@ -193,7 +193,7 @@ Tests (`rust/wa-term/tests/live_region.rs`, wired into `scripts/test.sh` right a
 3. `twenty_ticks_move_nothing_and_draw_the_same_rows_every_frame` - through the VT emulator: the same row
    addresses at the same positions every frame, and the screen keeps its height.
 4. `a_resize_rewraps_the_same_live_line_without_moving_the_rest` - 60 -> 120 -> 200 -> 80 -> 60.
-Plus `a_coloured_row_is_measured_and_clipped_by_its_visible_cells` (1564 cells for a coloured ball row, a
+Plus `a_coloured_row_is_measured_and_clipped_by_its_visible_cells` (12 cells for a coloured ball row, a
 row inside the room returned whole, a cut one ending in the mark) and the clip tests in
 `terminal_editor::tests`.
 
@@ -228,7 +228,7 @@ empty scan cannot pass).
 
 - Nine glyphs in `GLYPH` (U+F0766 empty floor, then U+F0A9E..U+F0AA5, all verified present in
   `/usr/share/fonts/TTF/JetBrainsMonoNerdFont-Regular.ttf` by the 18/11 test that measures each at one
-  cell, and by `the_status_bar_glyphs_are_one_cell_each` in this tree for the four it listed).
+  cell, and by `the_status_bar_glyphs_are_one_cell_each` in this tree, now covering all nine.
 - ONE mapping, `M.context_ball(percent)`: below 3% the empty ball, otherwise `round(p*8)` clamped to 1..8.
   No second copy anywhere: `rg 'ballFull|context_ball|F0AA' rust/ lua/ ui/` finds only `cli_view.lua`.
 - Colour: `M.context_level(percent, threshold)` - normal below threshold-15, warning from there, alert at
