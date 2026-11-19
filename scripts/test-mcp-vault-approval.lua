@@ -336,6 +336,26 @@ local missing_interpreter = manifest_of(definition)
 ok(has(problems_text(missing_interpreter), 'interpreter cannot be read'),
   'an interpreter that is not there is refused: ' .. problems_text(missing_interpreter))
 node_override = user_node
+-- Round 8: the same allow-list judges the process the values are put IN. WA_NODE is the one thing a
+-- connector cannot choose but the node can, and on a real node it is often a shim (this host's
+-- `which node` is mise's shim, whose realpath is /usr/bin/mise, not node). That is REFUSED, and it was
+-- untested: the arm that fires first on any mise/asdf/nvm-shimmed host had no row (found 18/11).
+local shimmed = native_copy(dir .. '/bin2/python3')
+node_override = shimmed
+local shimmed_manifest = manifest_of(definition)
+ok(has(problems_text(shimmed_manifest), 'cannot run a vault connector'),
+  'an interpreter the launch spawns is refused by the allow-list, not only unhashed: '
+   .. problems_text(shimmed_manifest))
+-- And a copy of node that is only a shell script is refused the same way: the name is not the program.
+local fake_node = dir .. '/bin3/node'
+assert(host.write_file(fake_node, '#!/bin/sh\nexit 0\n'), 'a shell script called node')
+node_override = fake_node
+local fake_interpreter = manifest_of(definition)
+ok(has(problems_text(fake_interpreter), 'cannot run a vault connector'),
+  'a spawned interpreter under an allowed name is still judged by what it IS: '
+   .. problems_text(fake_interpreter))
+node_override = user_node
+
 -- 3. ARGUMENTS (finding 2): program /usr/bin/node, args {server}, cwd <conn> ran ./server.js unhashed.
 local conn_dir = dir .. '/conn'
 local server_js = conn_dir .. '/server.js'
