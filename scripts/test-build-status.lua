@@ -68,8 +68,15 @@ assert(answer.relation == status.relation, 'the tool and the module disagree: ' 
 -- The runner's clearing is an allow-list, read out of its own source: this is a source assertion on
 -- purpose and it says so. A block-list cannot pass it, and a block-list is what let a fixture reach the
 -- operator's vault.
-local fast = host.read_file((host.getenv('WASM_AGENT_LUA_ROOT') or '.') .. '/scripts/fast.sh')
+local root = host.getenv('WASM_AGENT_LUA_ROOT') or '.'
+local fast = host.read_file(root .. '/scripts/fast.sh')
 assert(type(fast) == 'string', 'scripts/fast.sh could not be read')
+-- The row exec (and with it the clearing) lives in scripts/lib/fast-row-exec.sh since item 1 of the
+-- node-ops round, so the assertion reads BOTH files as one source: the rule is unchanged, the place
+-- moved, and an assertion that stopped looking would pass by finding nothing.
+local row_exec = host.read_file(root .. '/scripts/lib/fast-row-exec.sh')
+assert(type(row_exec) == 'string', 'scripts/lib/fast-row-exec.sh could not be read')
+fast = fast .. '\n' .. row_exec
 assert(fast:find('cleared_flags', 1, true), 'scripts/fast.sh computes no cleared set, so what a row inherits is still a hand-kept list')
 assert(fast:find('WASM_AGENT_[A-Za-z0-9_]*', 1, false), 'scripts/fast.sh does not scan the WASM_AGENT_* namespace')
 assert(fast:find('grep -vx', 1, true), 'scripts/fast.sh does not exclude the runner-set names by exact match, so an allow-list is not what it applies')

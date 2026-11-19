@@ -33,10 +33,12 @@ cleanup() {
 }
 trap cleanup EXIT
 # The rule this whole round keeps: a test that writes state proves it is not writing the operator's.
-case "$(CDPATH= cd -- "$SCRATCH/home" && pwd)" in
-  "$(CDPATH= cd -- "${HOME:-/nonexistent}" && pwd)"/.wasm-agent)
-    echo 'test-rollback-verify: refused(real_node_home): the scratch home is the operator'"'"'s own' >&2; exit 2 ;;
-esac
+# The scratch home is compared against the RIGHT side (item 4 of the node-ops round):
+# WASM_AGENT_HOME is the USER home (rust/wa-host-support/src/paths.rs:12), and the node store
+# hangs off it as <home>/.wasm-agent. The guard refuses the real $HOME, the real store, anything
+# inside it and anything above it - the measurements are in scripts/lib/scratch-home.sh.
+. "$ROOT/scripts/lib/scratch-home.sh"
+wa_scratch_home_guard "$SCRATCH/home" || exit 2
 command -v stat >/dev/null 2>&1 || { echo 'SKIP test-rollback-verify: stat is not on PATH'; exit 0; }
 [ -d /proc ] || { echo 'SKIP test-rollback-verify: this system has no /proc, so the identity question cannot be asked here'; exit 0; }
 . scripts/lib/rollback-verify.sh

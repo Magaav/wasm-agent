@@ -26,10 +26,12 @@ rm -rf "$SCRATCH"; mkdir -p "$SCRATCH/home/.wasm-agent" "$SCRATCH/tools" || exit
 cleanup() { local s=$?; set +e; rm -rf "$SCRATCH"; exit $s; }
 trap cleanup EXIT
 # This test writes only under its own scratch root, and says so in the checkable way.
-case "$(CDPATH= cd -- "$SCRATCH/home/.wasm-agent" && pwd)" in
-  "$(CDPATH= cd -- "${HOME:-/nonexistent}" && pwd)"/.wasm-agent)
-    echo 'test-build-env: refused(real_node_home): the scratch home is the operator'"'"'s own' >&2; exit 2 ;;
-esac
+# The scratch home is compared against the RIGHT side (item 4 of the node-ops round):
+# WASM_AGENT_HOME is the USER home (rust/wa-host-support/src/paths.rs:12), and the node store
+# hangs off it as <home>/.wasm-agent. The guard refuses the real $HOME, the real store, anything
+# inside it and anything above it - the measurements are in scripts/lib/scratch-home.sh.
+. "$ROOT/scripts/lib/scratch-home.sh"
+wa_scratch_home_guard "$SCRATCH/home" || exit 2
 fail() { echo "test-build-env: $*" >&2; exit 1; }
 
 . scripts/lib/build-requirements.sh

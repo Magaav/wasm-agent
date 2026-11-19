@@ -19,15 +19,21 @@ cd "$ROOT" || exit 2
 
 fail() { printf 'test-fast-watchdog: %s\n' "$*" >&2; exit 1; }
 
-WORK="$(mktemp -d "${TMPDIR:-/tmp}/wa-fast-watchdog-test-XXXXXX")" || exit 2
-# This test writes only under WORK, and it says so in the one way that can be checked: its own HOME and
-# the node's home both point inside it, and a real ~/.wasm-agent is never read or written.
-export HOME="$WORK/home" WASM_AGENT_HOME="$WORK/home/.wasm-agent"
+# A scratch root OUTSIDE the operator store: this node sets TMPDIR inside ~/.wasm-agent (item 4 of the
+# node-ops round, measured 19/11), so a plain mktemp -d would put this test's fixtures in the real node.
+. "$ROOT/scripts/lib/scratch-home.sh"
+scratch_root="$(wa_scratch_root wa-fast-watchdog-test)" || exit 2
+WORK="$(mktemp -d "$scratch_root/wa-fast-watchdog-test-XXXXXX")" || exit 2
+# This test writes only under WORK, and it says so in the one way that can be checked.
+# WASM_AGENT_HOME IS THE USER HOME (rust/wa-host-support/src/paths.rs:12), not the node's state
+# directory: this used to hand over "$WORK/home/.wasm-agent", which made the node write
+# "$WORK/home/.wasm-agent/.wasm-agent" - a store root one level too deep. The guard is the shared rule,
+# and it refuses the real home, the real store and anything inside or above either.
+# The guard runs BEFORE HOME is replaced below: it compares against the operator's real home, and after
+# the export that home would be this scratch one.
+wa_scratch_home_guard "$WORK/home" || exit 2
+export HOME="$WORK/home" WASM_AGENT_HOME="$WORK/home"
 mkdir -p "$WASM_AGENT_HOME" || fail 'cannot create the scratch home'
-case "$(CDPATH= cd -- "$WASM_AGENT_HOME" && pwd)" in
-  "$WORK"/*) ;;
-  *) fail "refused(real_node_home): the scratch home resolved outside $WORK, so this test would act on a real node's state" ;;
-esac
 pids=()
 cleanup() {
   # Nothing this test started may outlive it, including a child the assertion already killed.

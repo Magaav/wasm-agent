@@ -20,11 +20,12 @@ mkdir -p "$SCRATCH/home" || exit 2
 cleanup() { rm -rf "$SCRATCH"; }
 trap cleanup EXIT
 home="$SCRATCH/home"
-case "$(CDPATH= cd -- "$home" && pwd)" in
-  "$(CDPATH= cd -- "${HOME:-/nonexistent}" && pwd)"/.wasm-agent)
-    echo 'test-nodes-capabilities: refused(real_node_home): the scratch home resolved to the operator'"'"'s own ~/.wasm-agent' >&2
-    exit 2 ;;
-esac
+# The scratch home is compared against the RIGHT side (item 4 of the node-ops round):
+# WASM_AGENT_HOME is the USER home (rust/wa-host-support/src/paths.rs:12), and the node store
+# hangs off it as <home>/.wasm-agent. The guard refuses the real $HOME, the real store, anything
+# inside it and anything above it - the measurements are in scripts/lib/scratch-home.sh.
+. "$ROOT/scripts/lib/scratch-home.sh"
+wa_scratch_home_guard "$home" || exit 2
 out="$(WASM_AGENT_HOME="$home" WASM_AGENT_LUA_ROOT="$ROOT" WA_SCRIPT=scripts/test-nodes-capabilities.lua \
   "$BIN" --db "$SCRATCH/ledger.db" 2>&1)"
 code=$?
