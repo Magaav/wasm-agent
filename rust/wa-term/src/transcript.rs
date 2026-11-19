@@ -1563,6 +1563,42 @@ mod tests {
     /// width must produce is exactly what a session opened at that width would show - in both
     /// directions. The comparison is against a FRESH transcript built from the same writes, so a
     /// stale row, a lost block or a half-reflowed one all fail it.
+    /// Item I, phase 0: a fence card written into a line that is still OPEN.
+    ///
+    /// The streamed shape: prose arrives without its final newline (the line stays open so the next
+    /// delta continues it), and the card arrives in its own write. Write appends an open line first
+    /// segment to that line, so the card top border used to land at the end of the paragraph - and
+    /// every copy marker after it pointed one row early, which is the out-of-step card Victor
+    /// photographed on 19/11. The view now closes the line first; this pins the host rule it relies on.
+    #[test]
+    fn a_card_written_into_an_open_line_is_glued_unless_the_line_is_closed_first() {
+        let card = "\u{250c}\u{2500}\n\u{2502} body { color: red }\n\u{2514}\u{2500}\n\n";
+        // (a) into an open line: the border is glued to the paragraph, which is the defect.
+        let mut glued = plain(Transcript::default());
+        glued.write("\u{23fa} Para:");
+        glued.copyable(&[(2, "body".to_string())]);
+        glued.write(card);
+        let glued_rows: Vec<String> = glued.view(60, 10).iter().map(|r| crate::selection::plain(r)).collect();
+        assert!(glued_rows.iter().any(|r| r.contains("Para:\u{250c}")),
+            "an open line takes the border: {glued_rows:?}");
+        // (b) with the line closed first - what the view does now - the card keeps its own rows and
+        // the copy marker points at the title row of the write.
+        let mut fixed = plain(Transcript::default());
+        fixed.write("\u{23fa} Para:");
+        fixed.write("\n");
+        fixed.copyable(&[(0, "body".to_string())]);
+        fixed.write(card);
+        let rows: Vec<String> = fixed.view(60, 10).iter().map(|r| crate::selection::plain(r)).collect();
+        let prose = rows.iter().position(|r| r.contains("\u{23fa} Para:")).expect("the prose keeps its row");
+        assert!(prose < rows.iter().position(|r| r.contains("\u{250c}\u{2500}")).unwrap_or(usize::MAX),
+            "and it is ABOVE the card: {rows:?}");
+        let title = rows.iter().position(|r| r.contains("\u{250c}\u{2500}")).expect("a title row");
+        assert!(!rows[title].contains("Para:"), "and the title row is its own: {:?}", rows[title]);
+        let code = rows.iter().position(|r| r.contains("body { color: red }")).expect("a code row");
+        assert_eq!(code, title + 1, "the code row is directly under the title: {rows:?}");
+        assert!(rows[title].contains('\u{29c9}'), "the copy icon is on the TITLE row: {:?}", rows[title]);
+    }
+
     #[test]
     fn a_resize_repaints_the_whole_chat_at_the_new_width_in_both_directions() {
         let writes: Vec<String> = (0..12)

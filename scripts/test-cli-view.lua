@@ -2254,6 +2254,88 @@ do
   end
 end
 
+-- ---- ITEM I: a fence card is in step, in every shape -------------------------------------------
+--
+-- Victor's screenshot (19/11, an untagged fence with one css line): the copy icon sat where the
+-- title row should be, an empty bar row followed, the code line was drawn without its bar, then the
+-- bottom border. Phase 0 put the cause one level BELOW markdown.render, which builds the rows
+-- correctly: the prose before a fence is written with NO final newline (the line stays open so the
+-- next delta continues it), and the card was written into that open line - so the top border was
+-- glued to the paragraph and the copy marker, which counts lines OF THAT WRITE, pointed one row
+-- early. METHODS:markdown now closes the line BEFORE the marker. This asserts the shape a reader
+-- sees, over both fence kinds, both lengths and three widths.
+do
+  local TOP, BAR, BOTTOM = "\226\148\140", "\226\148\130", "\226\148\148"
+  local function rows_of(answer, width)
+    local out, pending, open_line, marks = {}, nil, false, {}
+    local function write(text)
+      if pending then marks[#marks + 1] = { at = pending, line = #out + (open_line and 0 or 1) } pending = nil end
+      local closed = text:sub(-1) == "\n"
+      local body = closed and text:sub(1, -2) or text
+      local index = 0
+      for segment in (body .. "\n"):gmatch("([^\n]*)\n") do
+        index = index + 1
+        if index == 1 and open_line then out[#out] = out[#out] .. segment else out[#out + 1] = segment end
+      end
+      open_line = not closed
+    end
+    local view = view_lib.new({ live = true, limit = width, out = function() end,
+      columns = function() return width end, stdout = true })
+    view.editor, view.editor_ready = true, true
+    view.screen = view_lib.screen_rows(24, true)
+    view.transcript = function() return true end
+    local saved = { host.transcript_write, host.transcript_copy, host.transcript_block }
+    host.transcript_block = function() end
+    host.transcript_write = write
+    host.transcript_copy = function(json) pending = json end
+    -- The STREAMED shape: the answer's first line lands with no trailing newline (so its line stays
+    -- open), and the rest of the answer follows.
+    -- The STREAMED shape: the answer first line lands with no trailing newline (so its line stays
+    -- open) and the rest follows. An answer that OPENS with a fence is a different shape: the view
+    -- holds a fence back until it is complete, so none of it is streamed ahead.
+    local head = answer:match("^[^\n]*")
+    if not head:find(string.char(96), 1, true) then
+      write(head)
+      answer = answer:sub(#head + 1):gsub("^\n", "")
+    end
+    view:answered(answer)
+    host.transcript_write, host.transcript_copy, host.transcript_block = saved[1], saved[2], saved[3]
+    return out, marks
+  end
+  local shapes = {
+    { label = "untagged, one line", answer = "Para:\n\n```\nbody { color: red }\n```\n" },
+    { label = "tagged css, three lines", answer = "Para:\n\n```css\na\nb\nc\n```\n" },
+    { label = "untagged, first in the answer", answer = "```\nbody { color: red }\n```\n" },
+  }
+  for _, shape in ipairs(shapes) do
+    for _, width in ipairs({ 60, 80, 120 }) do
+      local rows, marks = rows_of(shape.answer, width)
+      local title, bar_row, bottom, prose
+      for index, row in ipairs(rows) do
+        local plain = visible(row)
+        if not title and plain:find(TOP, 1, true) then title = index end
+        if not bar_row and plain:find(BAR, 1, true) then bar_row = index end
+        if plain:find(BOTTOM, 1, true) then bottom = index end
+        if plain:find("Para:", 1, true) then prose = index end
+      end
+      local where = "item I @" .. width .. " " .. shape.label
+      ok(title and bar_row and bottom, where .. ": the card has a top, a bar and a bottom")
+      eq(bar_row, (title or 0) + 1, where .. ": the code bar is the row directly under the title")
+      local code_lines = shape.label:find("three") and 3 or 1
+      eq(bottom, (bar_row or 0) + code_lines, where .. ": one bar row per code line, then the bottom")
+      if prose then
+        ok(prose < title, where .. ": the paragraph keeps its own row, above the card")
+        ok(not visible(rows[prose]):find(TOP, 1, true), where .. ": and the border is not glued onto it")
+      end
+      ok(#marks >= 1, where .. ": the card is copyable")
+      local marker = marks[1]
+      local pointed = marker and (marker.line + (json.decode(marker.at)[1].at or 0))
+      eq(pointed, title, where .. ": the copy icon lands on the title row")
+    end
+  end
+end
+
+
 if failed > 0 then
   print(string.format("cli view: %d failed of %d checks", failed, checks))
   os.exit(1)

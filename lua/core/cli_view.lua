@@ -2540,6 +2540,16 @@ end
 -- marks lines of the NEXT write, so a marker that met another write would land on the wrong row.
 function METHODS:markdown(text, options)
   local rendered, copies = markdown.render(text, options)
+  -- ITEM I: a fence card starts its own line. The prose before it is written WITHOUT its final
+  -- newline (the line stays open, so the next delta continues it) - so a card written into that
+  -- open line was glued onto the paragraph (the border landed at the end of the sentence) and the
+  -- copy marker, which counts lines of THAT write, then pointed at the prose row: the icon sat
+  -- where the title row should be. The newline is written BEFORE the marker, so the marker
+  -- counts the card own rows.
+  local first_visible = rendered:gsub("\27%[[%d;]*m", "")
+  if (self.tail_nl or 0) == 0 and first_visible:sub(1, #"\226\148\140") == "\226\148\140" then
+    self:write("\n")
+  end
   if rendered ~= "" and copies and #copies > 0 and self:transcript() and host.transcript_copy then
     pcall(host.transcript_copy, json.encode(copies))
   end
