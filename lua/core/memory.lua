@@ -689,7 +689,25 @@ end
 -- the same reason, from the other side: it belongs to the master that asked for it, and a bare
 -- `wa chat` on this node asking for "the newest open thread" must not silently adopt work it did not
 -- request. It is still an ordinary session - `wa chat --session <id>` reaches it by name.
+-- THE CLAIM IS MINTED WITH THE LEASE (session isolation, item 7 round 4).
+--
+-- `ensure_session` minted a lease per admission and then wrote NO presence row for the thread it chose,
+-- so the next unnamed admission in the same process saw no claim at all, took the same "nobody is in it"
+-- branch, and resumed the same conversation - two unnamed requests sharing one thread, which is exactly
+-- what finding 6 measured. The wrapper takes the claim before answering, so the row exists from the moment
+-- the lease does.
 function M.ensure_session(user_id, node_id, title, opts)
+  opts = opts or {}
+  local chosen, note = M.ensure_session_choose(user_id, node_id, title, opts)
+  if type(chosen) == 'string' and chosen ~= "" then
+    local lease = tostring(opts.lease or "")
+    -- Only a caller that HAS a lease claims one: an unnamed agent path keeps the pid+boot rule it had.
+    if lease ~= "" then pcall(M.presence_begin, chosen, { lease = lease, role = tostring(opts.role or "run") }) end
+  end
+  return chosen, note
+end
+
+function M.ensure_session_choose(user_id, node_id, title, opts)
   opts = opts or {}
   user_id = user_id or "master"
   node_id = node_id or ""

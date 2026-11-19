@@ -687,5 +687,25 @@ eq(unknown.refused, 'health_unknown_session', 'an id that names nothing is refus
 local bogus = scope_of('not-a-real-credential', '')
 eq(bogus.refused, 'health_credential_unresolved', 'a credential that does not resolve is nobody, and refused')
 
+-- ---- item 7 round 4: admission mints the claim with the lease ------------------------------
+--
+-- `ensure_session` minted a lease per admission and wrote NO presence row, so the next unnamed admission
+-- in this process saw no claim, took the "nobody is in it" branch and resumed the same conversation. Two
+-- unnamed requests shared one thread. The claim now exists from the moment the lease does.
+local first_lease = 'admission:iso-lease-1'
+local second_lease = 'admission:iso-lease-2'
+local first_thread = memory.ensure_session('master', 'iso-node-admit', 'chat', { lease = first_lease })
+ok(type(first_thread) == 'string' and first_thread ~= '', 'the first unnamed admission got a thread')
+local claim = memory.presence_live(first_thread, 900)
+ok(type(claim) == 'table' and tostring(claim.lease or '') == first_lease,
+  'and the claim it minted names that lease: ' .. tostring(claim and claim.lease))
+local second_thread, second_note = memory.ensure_session('master', 'iso-node-admit', 'chat', { lease = second_lease })
+ok(second_thread ~= first_thread, 'a second unnamed admission does NOT share that thread: '
+  .. tostring(second_thread) .. ' vs ' .. tostring(first_thread))
+ok(tostring(second_note or ''):find('thread_busy', 1, true) ~= nil,
+  'and says which one was busy: ' .. tostring(second_note))
+local again = memory.ensure_session('master', 'iso-node-admit', 'chat', { lease = second_lease })
+eq(again, second_thread, 'the same lease keeps its own thread (a second turn is not a second writer)')
+
 print(string.format("%d checks, %d failed", checks, failed))
 if failed > 0 then os.exit(1) end
