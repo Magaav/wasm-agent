@@ -448,6 +448,18 @@ was written at until it is redrawn by the editor - a plain-layout line is immuta
 log). What follows a resize is the LIVE surface: every framed render, the banner, the status row, the
 footer, the code-mode block and the session line.
 
+Three `string.rep(<rule>, n)` sites remain in `lua/`, and none of them is a stale terminal width -
+listed so the reader can check rather than trust:
+
+* `cli_view.lua:239` - inside `M.expand_rules`, the expansion itself, at the width it is handed (that
+  is the marker being drawn, not a competing way to draw a rule).
+* `cli_view.lua:2971` - `<rule><rule><rule> continued here <rule><rule><rule>`: three characters of
+  decoration on either side of a word, not a width.
+* `markdown.lua:538/680` - a markdown table's border and a source `---` rule. Both take `width` as
+  a PARAMETER at render time (the caller reads `self.limit` inside the framed method, after the
+  refresh), and the `---` one is deliberately capped at 40 columns: a 200-column horizontal rule in the
+  middle of prose is a wall, not an answer. A bounded content rule is not a stale layout width.
+
 ## 4.2 This report - the round-3 and round-4 sections, and round 1 corrected
 
 One commit, this one. It adds round 3 above (four items, `15545e25`, `f8fc5ac7`, `4bf6c91c`,
