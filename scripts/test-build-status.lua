@@ -17,11 +17,14 @@
 local json = dofile('lua/vendor/json.lua')
 local paths = dofile('lua/core/paths.lua')
 local function refuse(why) print('REFUSED test-build-status: ' .. why); os.exit(2) end
-local function norm(v) return (tostring(v or ''):gsub('\\', '/'):gsub('/+$', '')):lower() end
+-- THE SCRATCH-HOME RULE, FROM ONE PLACE (item 3 of the node-ops round): scripts/lib/scratch-home.lua
+-- carries the same four refusals the shell guard makes. This row used to compare WASM_AGENT_HOME
+-- with $HOME/.wasm-agent - the wrong side - so WASM_AGENT_HOME=$HOME passed it and the row acted on
+-- the operator store.
+local why_home = dofile('scripts/lib/scratch-home.lua').guard('test-build-status')
+if why_home then refuse(why_home) end
 local home = host.getenv('WASM_AGENT_HOME') or ''
-local operator = (host.getenv('HOME') or host.getenv('USERPROFILE') or '') .. '/.wasm-agent'
-if home == '' then refuse('WASM_AGENT_HOME is not set, so this test cannot prove it is not the real node home') end
-if norm(home) == norm(operator) then refuse('WASM_AGENT_HOME is the real ' .. operator) end
+local function norm(v) return (tostring(v or ''):gsub('\\', '/'):gsub('/+$', '')):lower() end
 if norm(paths.data()):sub(1, #norm(home)) ~= norm(home) then refuse('the data directory is outside the scratch home') end
 pcall(host.exec, 'mkdir -p ' .. ("'%s'"):format(paths.data()), '', 60)
 local memory = dofile('lua/core/memory.lua')

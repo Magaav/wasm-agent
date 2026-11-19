@@ -553,6 +553,12 @@ enter() { # source_env + export + cd, in this shell
   local record_lib="$WT/scripts/lib/build-requirements.sh"
   if [ -f "$record_lib" ]; then
     . "$record_lib"
+    # THE AUDIT TOO (item 8 of the node-ops round): a key nothing reads is refused by name here exactly as
+    # scripts/fast.sh and scripts/deploy.sh refuse it, so one record has one answer on this node.
+    if ! audit_note="$(wa_build_env_audit 2>&1)"; then
+      printf '%s\n' "$audit_note" >&2
+      die "the build record names a setting no build reads; remove that line, or add it to WA_BUILD_ENV_KEYS with the face that consumes it"
+    fi
     wa_build_env || die "the build record names a directory that is not there; the refusal above names it and the one line that fixes it"
   fi
   export CARGO_TARGET_DIR="$TARGET"

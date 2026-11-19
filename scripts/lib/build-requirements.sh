@@ -103,6 +103,12 @@ wa_build_env() { # reads build.env: EXPORTS every key it audits, puts tool direc
       known=0
       for entry in $WA_BUILD_ENV_KEYS; do [ "$entry" = "$key" ] && known=1 && break; done
       [ "$known" = 1 ] || continue
+      # A QUOTED VALUE IS UNQUOTED (item 8 of the node-ops round): an operator who writes
+      # WASI_SDK_PATH='/opt/wasi-sdk' in the record meant that directory, and a shell that exported the
+      # quotes as part of the value named a path that does not exist - the audit then refused a record
+      # that was in fact correct. One pair of matching single or double quotes is removed; anything else
+      # is handed over exactly as written, because a path may legitimately contain a quote.
+      value="$(printf '%s' "$value" | sed -e "s/^'\(.*\)'$/\1/" -e 's/^"\(.*\)"$/\1/')"
       # A key that is there and EMPTY is reported by the audit and applied as empty, never silently kept
       # from the ambient environment: 'I set it' and 'it is set' would then differ with nothing saying so.
       export "$key=$value"

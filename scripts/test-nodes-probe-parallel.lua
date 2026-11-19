@@ -18,11 +18,12 @@
 local json = dofile('lua/vendor/json.lua')
 
 local function refuse(why) print('REFUSED test-nodes-probe-parallel: ' .. why); os.exit(2) end
-local home = host.getenv('WASM_AGENT_HOME') or ''
-if home == '' then refuse('WASM_AGENT_HOME is not set, so this test cannot prove it is not the real node home') end
-if (host.getenv('HOME') or '') .. '/.wasm-agent' == home then
-  refuse('WASM_AGENT_HOME is the real store; this test must not decide anything about the operator node')
-end
+-- THE SCRATCH-HOME RULE, FROM ONE PLACE (item 3 of the node-ops round): the four refusals the shell
+-- guard makes, against the RIGHT side - WASM_AGENT_HOME is the USER home, and the store hangs off it as
+-- <home>/.wasm-agent. This row used to refuse only the store path itself, so WASM_AGENT_HOME=$HOME passed.
+local why_home = dofile('scripts/lib/scratch-home.lua').guard('test-nodes-probe-parallel')
+if why_home then refuse(why_home) end
+
 
 local real_host = host
 local events = {}

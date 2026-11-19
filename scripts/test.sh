@@ -937,6 +937,7 @@ gate_run bash scripts/test-watchdog.sh | grep 'test-watchdog: ok'
 # (scripts/lib/fast-watchdog.sh; measured 18/11 on avell - a fixture child outlived its row).
 gate_run bash scripts/test-fast-watchdog.sh | grep 'test-fast-watchdog: ok'
 gate_run bash scripts/test-scratch-home.sh | grep 'test-scratch-home: ok'
+gate_run bash scripts/test-scratch-home-lua.sh | grep 'test-scratch-home-lua: ok'
 # Backup and restore: the manifest, the restore, and the five refusals that write nothing
 # (scripts/test-backup-restore.lua runs under this wrapper with its own scratch home).
 gate_run bash scripts/test-backup-restore.sh | grep 'backup restore ok'

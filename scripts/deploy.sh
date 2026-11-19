@@ -360,8 +360,19 @@ SOURCE_ROOT="$ROOT"
 [ -f "$ROOT/scripts/setup-hooks.sh" ] && bash "$ROOT/scripts/setup-hooks.sh" "$ROOT" || true
 # From here a failure is drawn as a failed build: the rules below (clean, current, not a downgrade, the
 # port, the toolchain) are the build's preflight, and each phase after it says how long it took.
-if command -v wa_build_env >/dev/null 2>&1 && ! wa_build_env; then
-  fail "refused(build_env_incomplete): the build record names a directory that is not there (the refusal above names it and the one line that fixes it)"
+if command -v wa_build_env >/dev/null 2>&1; then
+  # THE SAME AUDIT fast.sh RUNS (item 8 of the node-ops round). wa_build_env APPLIES a record; the audit
+  # is what says a key nothing reads. Without it here, a deploy silently ignored WA_BUILT_PATH or any
+  # other misspelling while fast.sh on the same node refused it by name - one record, two answers.
+  if command -v wa_build_env_audit >/dev/null 2>&1; then
+    if ! build_env_note="$(wa_build_env_audit 2>&1)"; then
+      printf '%s\n' "$build_env_note" >&2
+      fail "refused(build_env_key_unknown): the build record names a setting no build reads (the refusal above names it); remove that line or add it to WA_BUILD_ENV_KEYS with the face that consumes it"
+    fi
+  fi
+  if ! wa_build_env; then
+    fail "refused(build_env_incomplete): the build record names a directory that is not there (the refusal above names it and the one line that fixes it)"
+  fi
 fi
 if command -v wa_status_begin >/dev/null 2>&1; then
   wa_status_begin "$ROOT" "$(git rev-parse HEAD 2>/dev/null)"

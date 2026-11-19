@@ -24,15 +24,17 @@ local paths = dofile('lua/core/paths.lua')
 
 local function refuse(why) print('REFUSED test-backup-restore: ' .. why); os.exit(2) end
 
--- (2) The scratch-home rule, checked rather than trusted. WASM_AGENT_HOME must be set and must not be
--- the operator's own ~/.wasm-agent; the ledger this process opened must be inside it too, because that
--- is what a restore would overwrite.
+-- (2) The scratch-home rule, checked rather than trusted, and checked against the RIGHT side (item 3 of
+-- the node-ops round). WASM_AGENT_HOME is the USER home and the store hangs off it as <home>/.wasm-agent.
+-- This row used to compare it with $HOME/.wasm-agent, so WASM_AGENT_HOME=$HOME passed the guard and the
+-- restore ran against the operator's real store. The rule now lives in scripts/lib/scratch-home.lua, with
+-- the same four refusals the shell guard makes, so the two languages cannot disagree again.
+local scratch = dofile('scripts/lib/scratch-home.lua')
+local why_home = scratch.guard('test-backup-restore')
+if why_home then refuse(why_home) end
 local home = host.getenv('WASM_AGENT_HOME') or ''
-local operator = (host.getenv('HOME') or host.getenv('USERPROFILE') or '') .. '/.wasm-agent'
-local function norm(value) return (tostring(value or ''):gsub('\\\\', '/'):gsub('/+$', '')):lower() end
-if home == '' then refuse('WASM_AGENT_HOME is not set, so this test cannot prove it is not the real node home') end
-if norm(home) == norm(operator) then refuse('WASM_AGENT_HOME is the real ' .. operator .. '; a restore must never run against it') end
 local data = paths.data()
+local function norm(value) return (tostring(value or ''):gsub('\\', '/'):gsub('/+$', '')):lower() end
 if norm(data):sub(1, #norm(home)) ~= norm(home) then refuse('the data directory ' .. data .. ' is outside the scratch home ' .. home) end
 
 -- The scratch data directory exists before anything is attached to it: a fixture store beside the ledger

@@ -14,7 +14,12 @@
 # not a build of the base commit. The row's LUA comes from the commit under test (WASM_AGENT_LUA_ROOT), so a
 # row that exercises Lua is covered; a row that needs a binary built at the base commit is not, and the
 # answer says `binary_not_rebuilt` for that case instead of claiming the base was tested.
-set -uo pipefail
+# A SOURCED LIBRARY NEVER CHANGES ITS CALLER SHELL OPTIONS (item 8 of the node-ops round). This file is
+# both a script and a library (scripts/test-row-at-sha.sh sources it for the classifier), and a
+# file-scope set -uo pipefail ran in the CALLER too: a test that sourced it silently acquired -u and
+# pipefail, so an unset variable or a harmless `cmd | head` became a failure three lines away from here.
+# The options are set only when this file IS the program; the functions are written to work either way.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then set -uo pipefail; fi
 
 # 0/0 still_passing, fail/fail pre_existing, 0/fail new_failure, fail/0 fixed.
 # A nonzero code is a failure; 77 is the row's own SKIP (the harness convention), and a skip is never a pass.
