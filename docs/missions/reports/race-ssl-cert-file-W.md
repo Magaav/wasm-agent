@@ -90,10 +90,30 @@ rendezvous test goes to that scratch directory via `WASM_AGENT_NODE_KEY`).
 
 ## Runs
 
+All heavy runs under `flock -w ... /tmp/wa-suite.lock`, one at a time.
+
 | run | result |
 | --- | --- |
-| `cargo test -p wa-tls -p wa-rendezvous -p wa-host -p wa-kernel-runtime -p wa-capabilities` (under `flock`) | 343 + 32 + 4 + 184 + 19 + 16 passed, 0 failed |
-| `bash scripts/fast.sh` (under `flock`) | see below |
+| `cargo test -p wa-tls -p wa-rendezvous -p wa-host -p wa-kernel-runtime -p wa-capabilities` | 343 (wa-capabilities) + 32 (wa-rendezvous) + 4 (wa-host) + 184 (wa-kernel-runtime) + 19 (wa-tls) passed, **0 failed** |
+| `bash scripts/fast.sh` | **ok: 307 checks, 0 failed, 0 skipped, 184s** |
+| `bash scripts/fast.sh` on the first attempt | 1 of 307 failed: `rust wa-graph` - **pre-existing and environmental**, see below |
+
+### The one failure, and why it is not this change
+
+`wa-graph`'s `coordinator::tests::deep_unicode_cache_paths_preserve_sqlite_locking_and_read_only_snapshots`
+failed with `SqliteFailure(CannotOpen, extended 14)` on a path under this session's `TMPDIR`
+(`/home/victor/Work/missions/race-ssl-cert-file-W/home/.wasm-agent/tmp/...`). Measured on the **base commit**
+in its own worktree (`git worktree add /tmp/wa-base-race-W ac7717e0`, never a stash):
+
+| tree | TMPDIR | result |
+| --- | --- | --- |
+| base ac7717e0 | this session's (deep) | **fails**, same panic, same path |
+| base ac7717e0 | `/tmp/wa-shallow-tmp` | **passes** |
+| this branch | `/tmp/wa-shallow-tmp` | **passes** |
+
+So the row is about the depth of the runner's temp directory, not about TLS; it is named here and the
+rest of the fast path is green with a shallow `TMPDIR`. Nothing in `wa-graph` was touched by this
+branch (`git diff --stat ac7717e0..HEAD -- rust/wa-graph` is empty).
 
 ## The one gap this change does not close, measured
 
