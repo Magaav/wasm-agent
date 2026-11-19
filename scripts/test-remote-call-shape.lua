@@ -211,5 +211,25 @@ check(has(timed_out.message,'within 60 s') and has(timed_out.fix,'action:"start"
   'and the model gets the cap and the start call in message and fix')
 check(timed_out.deadline_seconds==60 and timed_out.attempts==3,'the numbers travel with the answer')
 check(timed_out.retryable==true,'it is still marked retryable: the action may not have run')
+-- Round 3, item 5: the note and the fix must name the operation tool's REAL parameter (wait_ms) and a wait
+-- under the relay cap. Round 2 said `wait_s:300`, which is not a parameter of any tool and which the relay
+-- would cut at 60 s. Both numbers are read from the code here, never written twice in this file.
+local operation_schema
+for _,s in ipairs(tools.all('master'))do if s['function'].name=='operation' then operation_schema=s['function'] end end
+check(operation_schema and operation_schema.parameters.properties.wait_ms,'the operation tool really takes wait_ms')
+local wait_max=operation_schema.parameters.properties.wait_ms.maximum
+check(wait_max==nodes.OPERATION_AWAIT_MAX_MS,'the pinned maximum is the schema own ('..tostring(wait_max)..' ms)')
+check(operation_schema.parameters.properties.wait_s==nil,'and there is no wait_s parameter to name')
+check(nodes.RELAY_AWAIT_SLICE_MS<nodes.RELAY_DEADLINE_SECONDS*1000,
+  'the slice is under the relay cap ('..nodes.RELAY_AWAIT_SLICE_MS..' ms < '..(nodes.RELAY_DEADLINE_SECONDS*1000)..' ms)')
+check(nodes.RELAY_AWAIT_SLICE_MS<=wait_max,'and no larger than the parameter maximum')
+check(has(deadline_note,'wait_ms:'..nodes.RELAY_AWAIT_SLICE_MS),'the note names wait_ms with the real value')
+check(has(deadline_note,'await in slices of 10 s until it settles'),'the note says how long a slice is')
+check(not has(deadline_note,'wait_s'),'and never names a parameter that does not exist')
+check(has(timed_out.fix,'wait_ms:'..nodes.RELAY_AWAIT_SLICE_MS),'the fix field carries the same parameter')
+check(has(timed_out.fix,'await in slices of 10 s until it settles'),'and the same slices')
+check(not has(timed_out.fix,'wait_s'),'and no wait_s in the fix either')
+check(nodes.RELAY_AWAIT_SLICE_MS==10000 and nodes.OPERATION_AWAIT_MAX_MS==10000,
+  'the slice is the measured 10 s maximum of wait_ms, taken as min(10 s, the relay cap)')
 
 print('remote call shape ok ('..checks..' checks, 0 skipped)')

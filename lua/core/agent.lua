@@ -3352,8 +3352,10 @@ function M:run_body(text, images)
       local nav = navigation_outcome(function_.name, args, output)
       if nav then nav.trial_phase=patch_audit.PHASE end
       local cancelled = projected and tool_output.cancelled(output)
-      -- Where the raw batch stopped: the first run block of this message that failed, by its position.
-      if raw_entry and not ok_tool then raw_failed_at = raw_entry.index end
+      -- Where the raw batch stopped: the FIRST run block of this message that failed, by its position. It
+      -- is the earliest failure that stopped the batch, so a later failure must not move the mark forward
+      -- and hide the block that actually broke (round 3, item 7).
+      if raw_entry and not ok_tool then raw_failed_at = raw_failed_at or raw_entry.index end
       -- The progress guard's facts about this call: did a real effect succeed, and what did it
       -- answer (a digest - the same bytes again is checkable without keeping them twice).
       if ok_tool and not cancelled and tools.has_effect(function_.name, args) then round_effects = round_effects + 1 end

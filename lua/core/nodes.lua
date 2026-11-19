@@ -588,7 +588,9 @@ function M.request(node, path, body, inner_headers)
           reason = M.relay_code(response.body) or "unrecognized", rid = rid }
       end
       if (host.now() - started) > DEADLINE then break end
-      if attempt < 3 then host.sleep(750 * attempt) end
+      -- The count comes from the ONE constant the loop above iterates (not a second literal 3), so a
+      -- change to RELAY_ATTEMPTS cannot leave this backoff on the old count (round 3, item 7).
+      if attempt < M.RELAY_ATTEMPTS then host.sleep(750 * attempt) end
     end
     -- Say that it is retryable, and which reason it kept hitting: "could not
     -- reach the node" and "the node is busy" call for different next steps. The cap itself travels with
@@ -777,6 +779,14 @@ M.RELAY_ATTEMPT_HOLD_SECONDS = 20
 M.RELAY_ATTEMPTS = 3
 M.RELAY_DEADLINE_SECONDS = 60
 
+-- The `operation` tool awaits with `wait_ms`, whose MAXIMUM is 10 s (lua/core/tools.lua, the "operation"
+-- schema) - there is no `wait_s` parameter at all, and the 300 s this note used to name does not exist.
+-- A slice must also stay under the relay cap above, or the call that waits is itself cut off by the relay:
+-- one number, the smaller of the two sources, and scripts/test-remote-call-shape.lua checks it against
+-- both (the schema's maximum and this cap).
+M.OPERATION_AWAIT_MAX_MS = 10000
+M.RELAY_AWAIT_SLICE_MS = math.min(M.OPERATION_AWAIT_MAX_MS, M.RELAY_DEADLINE_SECONDS * 1000)
+
 -- The reasons the relay deadline produces. Any of them means the same thing to the caller: the answer did
 -- not arrive in time, and the action may or may not have run on that node.
 M.RELAY_DEADLINE_REASONS = { relay_timeout = true, node_no_answer = true, node_not_attached = true,
@@ -793,8 +803,9 @@ function M.relay_deadline_note(node, reason)
       .. "state before re-issuing it. Work that needs longer is started ON that node and awaited there: "
       .. 'tools.remote({node:"%s", capability:"operation", action:"start", command:"<the command>"}) returns '
       .. 'its id, and tools.remote({node:"%s", capability:"operation", action:"await", id:"<id>", '
-      .. 'wait_s:300}) waits for it.',
-    name, M.RELAY_DEADLINE_SECONDS, M.RELAY_ATTEMPTS, M.RELAY_ATTEMPT_HOLD_SECONDS, why, name, name)
+      .. 'wait_ms:%d}): await in slices of %d s until it settles.',
+    name, M.RELAY_DEADLINE_SECONDS, M.RELAY_ATTEMPTS, M.RELAY_ATTEMPT_HOLD_SECONDS, why, name, name,
+    M.RELAY_AWAIT_SLICE_MS, M.RELAY_AWAIT_SLICE_MS / 1000)
 end
 
 -- Call a capability on a peer: direct when possible, else through the relay.
@@ -840,7 +851,8 @@ function M.remote_call(selector, capability, args)
         fix = string.format('Start the work on that node and await it there: '
           .. 'tools.remote({node:"%s", capability:"operation", action:"start", command:"<the command>"}) '
           .. 'then tools.remote({node:"%s", capability:"operation", action:"await", id:"<id>", '
-          .. 'wait_s:300}).', name, name),
+          .. 'wait_ms:%d}): await in slices of %d s until it settles.', name, name,
+          M.RELAY_AWAIT_SLICE_MS, M.RELAY_AWAIT_SLICE_MS / 1000),
         input = tostring(capability or "the remote call") }
     end
     return { error = "remote_error", detail = detail, node = node.name,

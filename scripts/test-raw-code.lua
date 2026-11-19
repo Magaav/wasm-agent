@@ -155,6 +155,11 @@ for _,row in ipairs(boom.rows) do if row.role=='tool' then result_rows[#result_r
 check(#result_rows==3,'every call of the step has a result, in order ('..#result_rows..' rows)')
 check(result_rows[3]:find('run_block_not_run',1,true) and result_rows[3]:find('run block 3 of 3',1,true),
   'the block after the failure says it did not run and why: '..result_rows[3]:sub(1,220))
+-- Round 3, item 7: the mark is the block that FAILED, and the earliest one - `raw_failed_at =
+-- raw_failed_at or raw_entry.index` in lua/core/agent.lua. Here only block 2 fails, so this pins the wiring;
+-- the `or` itself is defensive (the batch stops at the first failure, so nothing later can move the mark).
+check(result_rows[3]:find('run block 2 failed first',1,true),
+  'the skipped block names the block that failed, not its own number: '..result_rows[3]:sub(1,260))
 check(boom.reply=='after','the turn went on after the failed batch: '..tostring(boom.reply))
 
 print(json.encode({ok=true,checks=checks,paid_calls=0}))
