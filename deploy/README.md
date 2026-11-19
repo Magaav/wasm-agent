@@ -78,6 +78,23 @@ The desktop shell (`rust/wa-window`) is cross-built on Linux
 SSH tunnel (`8799` UI, `8800` client bridge) and launches the window. It talks to
 `127.0.0.1` on the client, so the same launcher works against any node.
 
+## A node in a container (sandbox)
+
+A node can run in a container on another machine - a work VM, a CI box, a sandbox somebody else
+owns. Set `WASM_AGENT_SANDBOX=1` in that container's environment (compose `environment:` list or the
+image's `ENV`; fallback is the presence of `/.dockerenv`). Nothing else changes: the node serves,
+attaches to the relay and uses its own `WASM_AGENT_HOME`, which is the container's.
+
+The variable is not bookkeeping. It is how the node knows to inject `AGENTS.sandbox.md`
+(`agent.environment_note`), which tells the model three things it would otherwise get wrong: the
+desktop it is asked about is not reachable from here, host files exist only where they are mounted
+(`findmnt`, `/proc/mounts`), and a desktop task belongs on a node that runs on the host - found by
+name in the fleet roster. Sandbox also wins over `AGENTS.omarchy.md`, so a container on an Omarchy
+host is not told about the host's Hyprland.
+
+Set it explicitly rather than leaning on `/.dockerenv`: podman's default and a plain chroot create
+no such file, and a node that believes it is on a desktop will try to change one.
+
 ## GitHub access
 
 Each machine holds its **own** deploy key on the repo (Settings → Deploy keys,
