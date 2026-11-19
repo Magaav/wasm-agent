@@ -30,6 +30,7 @@ local run_failure = dofile("lua/core/run_failure.lua")
 local fake_answer = dofile("lua/core/fake_answer.lua")
 -- WASM_AGENT_RAW_CODE (default off): a ```js run block in the reply becomes a codemode call.
 local raw_code = dofile("lua/core/pure.lua")("lua/core/raw_code.lua")
+local finish_contract = dofile("lua/core/pure.lua")("lua/core/finish_contract.lua")
 
 -- One place that tells a hook what it is being told about. Ids, names, lengths and bounded views
 -- only: a hook never receives the transcript, a credential or a whole tool result unless the node
@@ -1627,6 +1628,7 @@ function M:run(text, images)
   -- The run's own request, kept for the failure path: a wake this harness scheduled starts with a
   -- known mark, and a run that fails while answering one must not schedule another.
   self.last_user_text=tostring(text or "")
+  self.turn_refused=nil
   self.pending_failure=nil
   self.run_origin=(json.decode(host.runtime_info()) or {}).run_origin
   local resource_ctx={session_id=self.session_id,user_id=self.user,run_id=self.run_id,subagent=self.subagent}
@@ -1833,6 +1835,10 @@ function M:run_body(text, images)
   -- survived its run failed a model for imitations it had already answered for, on evidence that only
   -- existed in the previous turn.
   self.fake_answer_repeats = 0
+  -- The end-of-turn streak is per run for the same reason, and it is reset HERE rather than only where a
+  -- tool ran or an answer landed: a counter that survived its run failed the next turn's FIRST offence
+  -- as if it were the second (round 3, item 1). One run, one streak.
+  self.finish_continues = 0
   self:note_interruption()
   self.emit({ type = "status", text = "thinking" })
   -- A full disk fails in the middle of a turn (SQLITE_FULL, a torn write). Say so before it does, but do
@@ -1972,22 +1978,35 @@ function M:run_body(text, images)
   -- With WASM_AGENT_RAW_CODE=first an empty declared list still dispatches: a run block runs as codemode.
   if not self.subagent and #tool_list == 0 and not raw_code.first(self.codemode_policy) then
     local reason
+    -- #53 (19/11): a resume that cannot run says WHY in terms of the mode this process was started in,
+    -- because "no tools" and "the wrong raw-code mode for this thread" call for different repairs.
+    local mode = raw_code.mode() or "codemode"
     if self.prefix and self.prefix.frozen then
       reason = "this session's prompt prefix was frozen with an empty tool list "
         .. "(lua/core/prompt_cache.lua), so every run of this thread resolves no tools"
+      if mode == "codemode" then
+        reason = reason .. ", and this process runs WASM_AGENT_RAW_CODE=codemode, whose only action "
+          .. "channel is a declared tool: a raw-code mode set now (`first` or `only`) cannot resume "
+          .. "this thread either, because the frozen prefix is what the request is built from"
+      end
     else
       reason = "this node's catalogue resolved no tools for role " .. tostring(self.role)
     end
     local reply = "no_dispatchable_tools: " .. reason .. ". A run that cannot call a tool is not "
       .. "started, because its every request would be answered plugin_not_found. Start a new session "
       .. "(`wa chat`) so the prefix is built from this node's catalogue; if the catalogue itself is "
-      .. "empty, `wa capabilities --json` names what this node actually registered."
+      .. "empty, `wa capabilities --json` names what this node actually registered. This run is "
+      .. "refused by name and exits non-zero rather than reporting a finished turn."
     local message_id = host.uuid()
     record_turn(self, { id = message_id, role = "assistant", content = reply, debug = self.debug, ok = false })
     self.emit({ type = "status", text = "turn refused: no_dispatchable_tools" })
     self.emit({ type = "reply", text = reply, message_id = message_id })
     telemetry.event(self.session_id, self.run_id, "", "step", "refused",
-      { reason = "no_dispatchable_tools", tools = 0 })
+      { reason = "no_dispatchable_tools", tools = 0, mode = raw_code.mode() or "codemode" })
+    -- The turn did not run, so the caller must be able to see that from the outside (#53): the reply is
+    -- still returned (an interactive reader sees why, and the thread is not crashed), and the flag is
+    -- what `wa chat --once` turns into a non-zero exit (chat.turn_ok).
+    self.turn_refused = reply
     return reply
   end
   -- Fingerprint of the *stable* prefix (system + AGENTS.md + tool schemas).
@@ -2760,6 +2779,44 @@ function M:run_body(text, images)
     if #calls > 0 then assistant.tool_calls = calls end
     messages[#messages + 1] = assistant
 
+    -- ONE rule for the end of a turn, used for every shape that ends a step without an action
+    -- (docs/missions/reports/thinking-block.md, round 2): a run block in the thinking, reasoning with no
+    -- answer, tool-call markup as text, a stale node-shutdown notice, a compaction summary, or a plan with
+    -- nothing run. The model is told ONCE, by name, which one it was; a second consecutive one fails
+    -- the run by name, so a scripted run returns non-zero instead of reporting a finished turn with
+    -- nothing run. Nothing is executed from any of them: the reasoning is the model's thinking and the
+    -- other shapes are text, so neither is this node's action channel. A step that ran a tool resets the
+    -- streak, because it did act (below).
+    local function finish_continue(shape, notice, failure_name)
+      self.finish_continues = (self.finish_continues or 0) + 1
+      if self.finish_continues > finish_contract.CONTINUES then
+        local span = trace[#trace]
+        if type(span) == "table" and span.kind == "model_call" then
+          span.ok = false
+          span.error = failure_name
+          span.finish_reason = result.finish_reason
+          span.reasoning_chars = #(result.reasoning or "")
+          span.reasoning_shape = shape
+        end
+        record_turn(self, { role = "assistant", content = "", ok = false,
+          reasoning = result.reasoning or "", debug = self.debug })
+        self.pending_failure = { trace = trace, round = round, attempts = transient_attempt + 1 }
+        telemetry.event(self.session_id, self.run_id, "", "step", "end",
+          { outcome = "finish_contract", shape = shape })
+        self.emit({ type = "status", text = failure_name })
+        error(failure_name, 0)
+      end
+      -- A durable row, so a reader who opens this session later sees why the step continued past its own
+      -- ending, and a resume rebuilds the same context from the ledger.
+      record_turn(self, { role = "user", content = notice, phase = "finish_contract" })
+      messages[#messages + 1] = { role = "user", content = notice }
+      self.emit({ type = "status", text = "the step ended without an answer (" .. shape
+        .. "): asked once for it in the answer; nothing was run" })
+      telemetry.event(self.session_id, self.run_id, "", "finish_contract", "continue",
+        { shape = shape, attempt = self.finish_continues })
+      return true
+    end
+
     if #calls == 0 then
       -- A tool result is a fact the harness produces, never text a model writes (18/11, session
       -- 100c54ab: three times in one session the turn's *answer* was markup imitating one). A message
@@ -2847,6 +2904,23 @@ function M:run_body(text, images)
       -- limits do not eliminate this failure; detect it even with Pi-style caps.
       if provider.visible_text(reply) == "" then
         local reason = provider.empty_reply_reason(result)
+        -- One rule for the end of a step, and it is the same rule in every mode: never end a turn on an
+        -- unexecuted action or on a plan, and never end it because the model wrote in the wrong field. The
+        -- model is told once, by name, where the action belongs; a second consecutive ending like this
+        -- fails the run by name, so a scripted run returns non-zero instead of reporting a finished turn
+        -- with nothing run. Nothing is ever executed from the reasoning: it is the model's thinking, not
+        -- this node's action channel (docs/missions/reports/thinking-block.md, PHASE 0 verdict).
+        --
+        -- Only a step that REASONED reaches this rule. A reply with no text, no reasoning and no tool call
+        -- is the empty stop provider.is_empty_reply retries, and that path keeps exactly the behaviour it
+        -- had (scripts/test-empty-reply.lua): the retry budget stays the retry budget.
+        local found = (result.reasoning or "") ~= "" and raw_code.in_thinking(result.reasoning or "") or nil
+        local shape = found and found.shape or "reasoning_only"
+        if (result.reasoning or "") ~= "" then
+          finish_continue(shape, found and raw_code.thinking_notice(found) or raw_code.reasoning_only_notice(),
+            found and raw_code.thinking_failure(found) or raw_code.reasoning_only_failure())
+          goto next_round
+        end
         -- Say how hard we tried. Without this the reader sees the same sentence whether the turn
         -- gave up immediately or asked the provider twice more, and the second case is a different
         -- diagnosis (the provider keeps returning nothing, not that it hiccupped once).
@@ -2871,6 +2945,25 @@ function M:run_body(text, images)
         telemetry.event(self.session_id,self.run_id,"","step","end",{outcome="empty_reply"})
         error(reason)
       end
+      -- The rest of the same rule: an ANSWER-shaped ending that is not an answer. Tool-call markup written
+      -- as text, a stale node-shutdown notice, a context-compaction summary, or a plan with nothing run
+      -- (lua/core/finish_contract.lua names which). Nothing executes here either: the shape is named, the
+      -- model is told once where the action or the answer belongs, and the turn continues instead of ending.
+      -- The answer's LANGUAGE is deliberately not one of these shapes (round 3, item 3): the envelope tells
+      -- the model which language to answer in (M:system_prompt, s.language), and a detector on top of it
+      -- fired on real answers without ever fixing one.
+      -- "actions" is this RUN's tool-call count (round 3, item 2): a plan is only a plan when nothing ran,
+      -- and a step that ran a tool and closes with "Done. I'll stop here." has answered the request.
+      local wrong = finish_contract.inspect({ text = reply, actions = (self.run_counts or {}).tool_calls or 0 })
+      if wrong then
+        -- The text is NOT recorded as this session's answer: markup is not a result, a shutdown warning is
+        -- not this session's evidence, and a compaction summary is not the answer the user asked for.
+        -- Only the notice is recorded, which is what the next step and a resume read.
+        reply = ""
+        finish_continue(wrong.shape, wrong.notice, wrong.failure)
+        goto next_round
+      end
+      self.finish_continues = 0
       local audit
       if patch_audit.enabled() and not self.subagent then
         if shell_used then
@@ -3052,6 +3145,8 @@ function M:run_body(text, images)
     -- The batching treatment was retired (04/11): every run now carries the default guidance, so
     -- telemetry keeps naming it `control`, the label scripts/lib/token-audit.cjs groups by.
     local batching_mode = "control"
+    -- The position of the first run block of this message that failed (#D, below).
+    local raw_failed_at = nil
 
     for tool_index, call in ipairs(calls) do
       local function_ = call["function"] or {}
@@ -3059,7 +3154,10 @@ function M:run_body(text, images)
       -- tool error that names the fault and hands its own arguments back (11/11, gate.log 50f2c555).
       local call_repair = call_repairs[call.id]
       -- A run block the harness refused (unterminated, empty) is answered with that refusal; it never runs.
-      local raw_refusal = raw_run and raw_run.id == call.id and raw_run.refusal or nil
+      -- One entry per block the message formed (#D): a message with several run blocks forms several calls,
+      -- and each result is about its own block.
+      local raw_entry = raw_run and raw_run.calls and raw_run.calls[call.id] or nil
+      local raw_refusal = raw_entry and raw_entry.refusal or nil
       -- A call whose name was recovered from its arguments is a call, not a fault: it runs below
       -- under that name and its result carries the one-line note. Only a call nothing identifies is
       -- refused (`provider.repair_calls`).
@@ -3110,8 +3208,20 @@ function M:run_body(text, images)
       -- Was the tool actually reached? A call the harness refused before dispatch (a repair, a fence,
       -- a steering veto) did not run, so it does not end the imitation streak below.
       local dispatched = false
+      -- #D: the run blocks of one message run in order and the batch stops at the first one that fails.
+      -- The protocol needs a result for every call id, so a later block is ANSWERED, not dropped, and the
+      -- answer says plainly that it did not run and why - running it on top of a failure is worse than
+      -- not running it at all.
+      local raw_skipped = raw_failed_at and raw_code.is_raw(call.id) or nil
       local handled, output = pcall(function() if name_error then return name_error end
         if raw_refusal then return raw_refusal end
+        if raw_skipped then
+          return { error = "run_block_not_run", effect = "none",
+            note = string.format("run block %s of %s did not run: run block %s failed first, and the run "
+              .. "blocks of one message stop at the first error.",
+              tostring(raw_entry and raw_entry.index or "?"),
+              tostring(raw_entry and raw_entry.blocks or "?"), tostring(raw_failed_at)) }
+        end
         if argument_error then return argument_error end
         if parallel_op then
           -- The batch was launched, so this call really ran: it ends the imitation streak like any
@@ -3233,8 +3343,8 @@ function M:run_body(text, images)
       end
       -- What the harness had to say about a run block (several blocks, text dropped after it) rides
       -- with its result, like hook context: the projected view itself is the codemode one.
-      if projected and raw_run and raw_run.id == call.id then
-        local note = raw_code.note(raw_run)
+      if projected and raw_entry then
+        local note = raw_code.note(raw_entry)
         if note then content = content .. "\n\n" .. note end
       end
       -- What a navigation call answered (action, found, count): a wrong answer must not be
@@ -3242,6 +3352,10 @@ function M:run_body(text, images)
       local nav = navigation_outcome(function_.name, args, output)
       if nav then nav.trial_phase=patch_audit.PHASE end
       local cancelled = projected and tool_output.cancelled(output)
+      -- Where the raw batch stopped: the FIRST run block of this message that failed, by its position. It
+      -- is the earliest failure that stopped the batch, so a later failure must not move the mark forward
+      -- and hide the block that actually broke (round 3, item 7).
+      if raw_entry and not ok_tool then raw_failed_at = raw_failed_at or raw_entry.index end
       -- The progress guard's facts about this call: did a real effect succeed, and what did it
       -- answer (a digest - the same bytes again is checkable without keeping them twice).
       if ok_tool and not cancelled and tools.has_effect(function_.name, args) then round_effects = round_effects + 1 end
@@ -3268,6 +3382,10 @@ function M:run_body(text, images)
       }
     end
     materialize_tool_images(messages)
+    -- An action ran, so the end-of-turn streak is over: it counts consecutive steps that ended WITHOUT
+    -- one, and a model that acted has done what the last notice asked (the same reason the fake-answer
+    -- streak ends on a real call).
+    if #calls > 0 then self.finish_continues = 0 end
 
     -- The progress guard (lua/core/progress_guard.lua): named facts, never a round count. A round
     -- that answered has already left the loop above, so this only sees rounds that asked for tools.

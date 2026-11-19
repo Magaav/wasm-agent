@@ -15,7 +15,8 @@
 --
 -- Rules (operator design, 15/11):
 --   - only a block whose info string is `js run` (or `javascript run`) runs; any other code block is text;
---   - one run block per message; with several, the LAST runs and the result says so;
+--   - every run block runs, in order (19/11, #D): with several, each one runs and each result says which
+--     block it answers ("run block 2 of 3"); the batch stops at the first block that fails;
 --   - text after the run block is dropped from the step (the script's result replaces it);
 --   - a run block the reply ended inside (stream cut, no closing fence) never runs: it is answered with
 --     a refusal, and an empty run block is refused too;
@@ -126,10 +127,29 @@ local function lines_of(text)
   return out
 end
 
-local function is_run(info)
-  local lang, rest = tostring(info):lower():match("^%s*(%a+)%s+(.-)%s*$")
-  return (lang == "js" or lang == "javascript") and rest == "run"
+-- The fence tag, read the way a model writes it. The tag is the language "js" (or "javascript", any
+-- case) followed by the word "run", and three other spellings mean the same thing (#51/C):
+--   the tag followed by code on the same fence line - that code is line 1 of the script;
+--   any run of spaces or tabs between the language and the word run;
+--   "javascript" instead of "js", and the tag in any letter case.
+-- Measured 19/11 (mission logs, docs/missions/reports/thinking-block.md): a model wrote its tag and its
+-- first statement on one fence line, this parser read the whole message as prose, and the step ended with
+-- its action as text. Returns the code that shared the fence line ("" when the line held only the tag),
+-- or nil when the fence is not a run block at all.
+local function run_tag(info)
+  local text = tostring(info or ""):gsub("^%s+", ""):gsub("%s+$", "")
+  local lang, rest = text:match("^(%a+)%s+(.*)$")
+  if not lang then return nil end
+  lang = lang:lower()
+  if lang ~= "js" and lang ~= "javascript" then return nil end
+  rest = rest:gsub("^%s+", "")
+  if rest == "run" then return "" end
+  local inline = rest:match("^run%s+(.-)%s*$")
+  if inline and inline ~= "" then return inline end
+  return nil
 end
+
+local function is_run(info) return run_tag(info) ~= nil end
 
 -- An opening fence: 3+ backticks or 3+ tildes, indented at most three spaces, info string free of its own
 -- fence character. CommonMark reads both and a model writes both: measured on HEAD (18/11) a `~~~js run
@@ -170,7 +190,7 @@ function M.parse(text)
     else
       local char, ticks, info = fence(line.text, true)
       if char then
-        open = { open = index, char = char, ticks = ticks, run = is_run(info) }
+        open = { open = index, char = char, ticks = ticks, info = info, inline = run_tag(info), run = is_run(info) }
       end
     end
   end
@@ -251,7 +271,7 @@ function M.unexecuted(text, policy)
         local char = mark:sub(1, 1)
         local tag = tostring(info or ''):lower():gsub('%s+$', '')
         local intended = mark == string.rep(char, #mark) and #mark >= 3
-          and (tag == 'js run' or tag == 'javascript run' or (only and (tag == 'js' or tag == 'javascript')))
+          and (run_tag(tag) ~= nil or (only and (tag == 'js' or tag == 'javascript')))
         local column = intended and #indent > 3 and list_content_column(lines, index) or nil
         if intended and not (column and #indent >= column) then
           local why = #indent > 3
@@ -265,6 +285,99 @@ function M.unexecuted(text, policy)
     end
   end
   return nil
+end
+
+-- PHASE 0 verdict (evidence and verdict: docs/missions/reports/thinking-block.md). The run block arrives
+-- in the provider's REASONING field, not in its content, and the first version of the harness read only
+-- the answer, so the turn failed "reasoning is not an answer" with the action it was built to run never
+-- run. Nothing below executes the thinking: the reasoning is the model's own, and a script found there is
+-- never this node's action channel. What this decides is the SENTENCE - which shape of "wrote it in the
+-- wrong field" the model wrote - so the one continue it is given names the one thing to change.
+--
+-- Only the LAST block matters, and only when it ENDS the thinking (nothing but whitespace after it). A
+-- block the thinking went on from is the model reasoning ABOUT code - a sketch it then rejected - and
+-- naming that as the lost action would be a wrong diagnosis.
+--   run        a complete js run block ends the thinking: the action, in the wrong field;
+--   cut_run    the thinking ended inside a js run block, so those bytes are not the script it meant;
+--   plain_js   the thinking ends with a js or javascript block never tagged run: a sample by this
+--              node's own rule (the header of this file), so a tag to add rather than a script to send;
+--   nil        no block, or a last block that is none of these: the step reasoned and stopped (#22).
+M.IN_THINKING_SHAPES = { run = true, cut_run = true, plain_js = true }
+local PLAIN_JS = { js = true, javascript = true }
+local TICK = string.rep(string.char(96), 3)
+
+function M.in_thinking(reasoning)
+  local text = tostring(reasoning or "")
+  if not has_fence(text) then return nil end
+  local blocks, lines = M.parse(text)
+  local last = blocks[#blocks]
+  if not last then return nil end
+  local closed = last.close ~= nil
+  -- Nothing but whitespace after the block. An unclosed block already runs to the end of the text.
+  local last_line = lines[last.close or #lines]
+  if text:sub(last_line.finish + 1):find("%S") then return nil end
+  local code_lines = {}
+  for index = last.open + 1, closed and last.close - 1 or #lines do
+    code_lines[#code_lines + 1] = lines[index].text
+  end
+  if closed and last.inline and last.inline ~= "" then table.insert(code_lines, 1, last.inline) end
+  local tag = tostring(last.info or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
+  local found = { line = last.open, bytes = #table.concat(code_lines, "\n"), closed = closed }
+  if last.run then
+    found.shape = closed and "run" or "cut_run"
+  elseif PLAIN_JS[tag] then
+    found.shape = "plain_js"
+  else
+    return nil
+  end
+  return found
+end
+
+-- How many times in a row the harness asks for the action in the answer before the turn fails by name.
+-- One: the measured failure is a model writing in the wrong field, and naming it once is a diagnosis; a
+-- second consecutive one is a model that cannot follow it, and the run must not end rc=0 with nothing run.
+M.THINKING_CONTINUES = 1
+
+-- Model-facing (operator-reviewed; verbatim in the report). One sentence naming the one thing to change,
+-- then where to write it. Never "retry": the model did the work, in the wrong field.
+function M.thinking_notice(found)
+  local shape = type(found) == "table" and tostring(found.shape) or ""
+  local reason
+  if shape == "cut_run" then
+    reason = "your " .. TICK .. "js run block was in your thinking, not in your answer, and it was cut off "
+      .. "before its closing " .. TICK .. " line, so nothing ran"
+  elseif shape == "plain_js" then
+    reason = "the " .. TICK .. "js block you wrote was in your thinking, not in your answer, and it was "
+      .. "tagged js rather than js run, so nothing ran"
+  else
+    reason = "the run block you wrote was in your thinking, not in your answer, so nothing ran"
+  end
+  return "[Harness notice] This message had no answer: " .. reason
+    .. ". Write it in your ANSWER, as one " .. TICK .. "js run block that ends with a " .. TICK .. " line."
+end
+
+-- Model-facing. The step reasoned and stopped with nothing to run (#22).
+function M.reasoning_only_notice()
+  return "[Harness notice] This message had no answer: you reasoned and then stopped, so nothing ran. "
+    .. "Write your next step in your ANSWER: the script as one " .. TICK .. "js run block, or the answer "
+    .. "itself and why."
+end
+
+-- The name the run fails with when the block is still only in the thinking after the harness asked for it
+-- once. Never rc=0 with the action unexecuted.
+function M.thinking_failure(found)
+  local shape = type(found) == "table" and tostring(found.shape) or ""
+  local what = shape == "cut_run" and "a " .. TICK .. "js run block that was never closed"
+    or shape == "plain_js" and "a " .. TICK .. "js block that is not tagged js run"
+    or "a run block"
+  return "run_block_in_thinking: " .. what .. " is in the model's reasoning, not in its answer, and the "
+    .. "harness asked for it in the answer once already; nothing ran, so the turn is failed rather than "
+    .. "finished without its action"
+end
+
+function M.reasoning_only_failure()
+  return "reasoning_only: the step reasoned and returned no answer and no action, and the harness asked "
+    .. "for an answer once already; nothing ran, so the turn is failed rather than finished without it"
 end
 
 -- A tool call the model wrote as TEXT, in its own training format, because the request declared no tool
@@ -367,6 +480,35 @@ function M.native_calls(text)
   return nil
 end
 
+-- Tool-call markup written as TEXT: the leftover, when a call could not be read from it.
+--
+-- The formats this module can RUN are read first (M.native_calls, above) and become calls. What this names
+-- is the rest: the model wrote its own call format into the answer and no call was formed from it, so
+-- nothing ran and the step is not an answer. Measured 19/11: `<ds_tool>{"command":...}</ds_tool>` in the
+-- answer at land-routing 00:59 (the run ended there, 19 rounds, no action) and a leftover
+-- `}}</parameter>` at thinking-block 00:41 (the run ended on "Let me do these in parallel.}}</parameter>").
+--
+-- An allow-list, not a block-list (the formats this project has actually seen a model write): a marker that
+-- is not here is prose, and prose is an answer. The list is deliberately short, because a false positive
+-- costs the model a step.
+M.MARKUP_MARKERS = {
+  "<ds_tool>", "</ds_tool>", "<ds_safety>", "</ds_safety>", "<ds_invoke>", "</ds_invoke>",
+  "</parameter>", "<tool_call>", "</tool_call>", "<function_call>", "<function_calls>",
+  "<antml:invoke", "</antml:invoke>", "</invoke>", "<|python_tag|>",
+}
+
+-- Returns { marker = <what was found> } or nil. Pure: no host, no state.
+function M.markup_in_text(text)
+  local raw = tostring(text or "")
+  if raw == "" then return nil end
+  for _, found in ipairs(M.MARKUP_MARKERS) do
+    if raw:find(found, 1, true) then return { marker = found } end
+  end
+  -- DeepSeek's token bar written with either character (the two spellings M.native_calls normalises).
+  if raw:find("\239\189\156", 1, true) or raw:find("|DSML|", 1, true) then return { marker = "<|DSML|>" } end
+  return nil
+end
+
 -- The native-markup path of `take`: the calls run as raw-channel codemode calls; the text before the
 -- markup stays as the step's thought.
 local function take_native(result, found)
@@ -374,15 +516,20 @@ local function take_native(result, found)
   local incomplete = result.stream_complete == false or result.finish_reason == "length"
   local calls = {}
   for _, call in ipairs(result.tool_calls or {}) do calls[#calls + 1] = call end
-  local first
+  local first, made = nil, {}
   local items = found.calls
   if #items == 0 then items = { { name = "", code = "" } } end
   for _, item in ipairs(items) do
     local id = "call_raw_" .. (host.uuid():gsub("-", ""))
     first = first or { id = id, blocks = #items, bytes = #item.code, notes = {}, native = found.format }
+    made[#made + 1] = id
     calls[#calls + 1] = { id = id, type = "function", ["function"] = { name = "codemode", arguments = json.encode({ code = item.code }) } }
   end
   result.tool_calls = calls
+  -- The lookup the loop uses, one entry per call this path formed (#D): the note is about the markup as
+  -- a whole, so every call formed from it carries it. A call the MODEL sent keeps its own id and no entry.
+  first.calls = {}
+  for _, id in ipairs(made) do first.calls[id] = first end
   if incomplete then first.incomplete = true return first end
   if found.unparsed then
     first.refusal = refusal("raw_code_markup",
@@ -432,47 +579,74 @@ function M.take(result, stop_sent, policy)
     end
     return nil
   end
-  local run = runs[#runs]
-  local code_lines = {}
-  for index = run.open + 1, run.close and run.close - 1 or #lines do code_lines[#code_lines + 1] = lines[index].text end
-  local code = table.concat(code_lines, "\n")
-  local id = "call_raw_" .. (host.uuid():gsub("-", ""))
-  local calls = {}
+  -- Every run block runs, in order (#D, 19/11). A message that carries three blocks asked for three
+  -- actions; running only the last one dropped two of them silently, and the model then re-issued work it
+  -- had already written. The calls are formed in the order the model wrote them, so the tool loop
+  -- dispatches them in that order, and each result comes back labelled "run block 2 of 3" (M.note). The
+  -- loop stops that batch at the first block that fails and answers every later one "did not run"
+  -- (lua/core/agent.lua, the raw batch): running on top of a failure is worse than not running.
+  local calls, entries, order = {}, {}, {}
   for _, call in ipairs(result.tool_calls or {}) do calls[#calls + 1] = call end
-  calls[#calls + 1] = { id = id, type = "function", ["function"] = { name = "codemode", arguments = json.encode({ code = code }) } }
+  local first
+  for index, run in ipairs(runs) do
+    local code_lines = {}
+    -- Code that shared the fence line is line 1 (#51/C): a fence tagged "js run" with a statement after it
+    -- on the same line is a run block, and the script it asks for starts with what the model wrote there.
+    if run.inline and run.inline ~= "" then code_lines[1] = run.inline end
+    for line_index = run.open + 1, run.close and run.close - 1 or #lines do
+      code_lines[#code_lines + 1] = lines[line_index].text
+    end
+    local code = table.concat(code_lines, "\n")
+    local id = "call_raw_" .. (host.uuid():gsub("-", ""))
+    calls[#calls + 1] = { id = id, type = "function", ["function"] = { name = "codemode",
+      arguments = json.encode({ code = code }) } }
+    local entry = { id = id, index = index, blocks = #runs, bytes = #code, notes = {} }
+    first = first or entry
+    entries[id] = entry
+    order[#order + 1] = entry
+    if incomplete then
+      entry.incomplete = true
+    elseif not run.close and not stopped then
+      entry.refusal = refusal("raw_code_unterminated",
+        "the ```js run block was never closed (the reply ended inside it), so none of it ran",
+        "send the whole script again in one ```js run block that ends with a ``` line"
+          .. (M.mode() == "first" and "" or ", or as a codemode call"))
+    elseif not code:find("%S") then
+      entry.refusal = refusal("raw_code_empty",
+        "empty run block: the ```js run block had no code, so nothing ran",
+        "put the script between the ```js run line and its closing ``` line")
+    end
+    -- Which block this result answers, whenever there is more than one: the labels are the order the
+    -- results arrive in, so a model reading two results knows which script each one belongs to.
+    if #runs > 1 then entry.notes[#entry.notes + 1] = string.format("run block %d of %d", index, #runs) end
+  end
   result.tool_calls = calls
-  local taken = { id = id, blocks = #runs, bytes = #code, notes = {} }
-  if incomplete then taken.incomplete = true return taken end
-  if not run.close and not stopped then
-    taken.refusal = refusal("raw_code_unterminated",
-      "the ```js run block was never closed (the reply ended inside it), so none of it ran",
-      "send the whole script again in one ```js run block that ends with a ``` line"
-        .. (M.mode() == "first" and "" or ", or as a codemode call"))
-  elseif not code:find("%S") then
-    taken.refusal = refusal("raw_code_empty",
-      "empty run block: the ```js run block had no code, so nothing ran",
-      "put the script between the ```js run line and its closing ``` line")
-  end
-  local after = run.close and content:sub(lines[run.close].finish + 1) or ""
-  if #runs > 1 then
-    taken.notes[#taken.notes + 1] = string.format("your message had %d ```js run blocks; only the last one ran", #runs)
-  end
+  if incomplete then return first end
+  -- Only text AFTER the last block is dropped: the blocks before it are actions, and prose between two
+  -- blocks is the model's own comment on them. Each result replaces its own block's text.
+  local last_run = runs[#runs]
+  local after = last_run.close and content:sub(lines[last_run.close].finish + 1) or ""
   if after:find("%S") then
-    taken.notes[#taken.notes + 1] = string.format(
-      "the %d byte(s) you wrote after the run block were dropped; this result replaces them", #after)
+    local entry = order[#order]
+    entry.notes[#entry.notes + 1] = string.format(
+      "the %d byte(s) you wrote after the last run block were dropped; this result replaces them", #after)
   end
-  result.content = (content:sub(1, lines[run.open].start - 1):gsub("%s+$", ""))
+  result.content = (content:sub(1, lines[runs[1].open].start - 1):gsub("%s+$", ""))
   if result.finish_reason == "stop" or result.finish_reason == nil then
     result.raw_finish_reason = result.finish_reason
     result.finish_reason = "tool_calls"
   end
-  return taken
+  -- The lookup the loop uses: one entry per call it formed, keyed by the call id.
+  first.calls = entries
+  return first
 end
 
--- The line the result carries for the model when the harness had something to say about the block.
-function M.note(taken)
-  if type(taken) ~= "table" or #(taken.notes or {}) == 0 then return nil end
-  return "[raw code] " .. table.concat(taken.notes, "; ") .. "."
+-- The line a result carries for the model when the harness had something to say about its block.
+-- `entry` is one block's entry (M.take returns them keyed by call id): with several blocks in one
+-- message the first note is the label ("run block 2 of 3"), so a result says which script it answers.
+function M.note(entry)
+  if type(entry) ~= "table" or #(entry.notes or {}) == 0 then return nil end
+  return "[raw code] " .. table.concat(entry.notes, "; ") .. "."
 end
 
 function M.is_raw(id)

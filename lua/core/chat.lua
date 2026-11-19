@@ -525,7 +525,7 @@ function M.run(argv)
     end
     if wake_if_due then wake_if_due() end
     -- The turn's status, for the caller that exits with it (`wa chat --once`, or any scripted run).
-    return ok
+    return M.turn_ok(ok, agent)
   end
 
   local ran_ok = true
@@ -1071,5 +1071,15 @@ end
 -- The seam `scripts/test-cli-notice.lua` drives: "start a chat with an update available" without
 -- memory, a provider, a binding or a terminal (#106).
 M.start_notice = start_notice
+
+-- What a turn's status IS, for the one caller that exits with it. A run that raised failed (ok=false), and
+-- a run the harness REFUSED before it could run (`agent.turn_refused`, e.g. no_dispatchable_tools on a
+-- resumed thread, #53) failed too: it recorded no answer and ran nothing, so reporting it as a finished
+-- turn with exit 0 is the silent success this exists to remove. Exported so the rule has one home and a
+-- test can read it without a process.
+function M.turn_ok(ok, agent)
+  if not ok then return false end
+  return not (type(agent) == "table" and agent.turn_refused ~= nil)
+end
 
 return M
