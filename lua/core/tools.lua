@@ -2075,7 +2075,12 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
       local ok, recalled = pcall(function() return dofile('lua/core/lessons.lua').ensure() end)
       if ok and type(recalled) == 'table' then lessons = recalled end
     end
-    local view = fleetview.view({ lessons = lessons })
+    -- WHOSE VIEW THIS IS (session isolation, item 1 round 4): the caller's own memory module, role and
+    -- session go in. The module's node-scope grant needs a store to write its audit line to and a role to
+    -- check; a hard-coded 'master' with no store was neither audited nor refused, so the read answered as
+    -- a sessionless caller and showed a fraction of the node's work as if it were all of it.
+    local view = fleetview.view({ lessons = lessons, memory = memory, role = role,
+      user_id = user_id, session = ctx.session_id })
     return view
   elseif name == "lessons" then
     local store = dofile('lua/core/lessons.lua')

@@ -539,5 +539,57 @@ local peer_scope = wa_peer_dispatch("bash", { command = "echo hi", scope = "node
   { node_id = "iso-peer-node", role = "master" }, "master") or {}
 eq(peer_scope.error, "peer_node_scope_not_granted", "a peer asking for the node scope is refused by name")
 
+-- ---- item 1 round 4: the Fleet View's read is node-scoped AND audited -------------------------
+--
+-- Round 3 asked the node scope with a hard-coded role and a NIL memory module, then read `operations list`
+-- with no node scope at all. Both failures were silent: session_scope.audit returns early without a store,
+-- so a node-wide read left no line; and a sessionless list is not a node-wide list (item 7 round 2) - it
+-- answers with the rows that named no owner, so the view printed a fraction of the node's work as the
+-- node's. This drives the real reader against the real operation manager: a stub passed the round-3 code.
+local fleetview = dofile('lua/core/fleetview.lua')
+ok(type(fleetview.node_operations) == 'function', 'the Fleet View exposes its node-operations read')
+local fv_ids = {}
+for _, who in ipairs({ ctx_a, ctx_b }) do
+  local started_one = tools.dispatch(memory, 'operation', { action = 'start', command = command, timeout_seconds = 60 },
+    'master', who) or {}
+  if type(started_one.operation_id) == 'string' then fv_ids[#fv_ids + 1] = started_one.operation_id end
+end
+ok(#fv_ids == 2, 'two sessions each started one operation for the Fleet View to see')
+local function fleet_lists(operations, operation_id)
+  for _, entry in ipairs(type(operations) == 'table' and (operations.operations or operations.list or {}) or {}) do
+    if type(entry) == 'table' and entry.operation_id == operation_id then return true end
+  end
+  return false
+end
+-- Counted BEFORE the read and after it: an audit row from an earlier section of this script would let a
+-- version that writes nothing pass this check (measured - the round-3 code passed it).
+local function fleet_audit_rows()
+  local count = 0
+  for _, row in ipairs(memory.journal_since(0, 4000)) do
+    if row.kind == 'session_scope' and tostring(row.payload and row.payload.surface or '') == 'fleetview' then
+      count = count + 1
+    end
+  end
+  return count
+end
+local fv_audit_before = fleet_audit_rows()
+local seen, fv_refusal = fleetview.node_operations({ memory = memory, role = 'master', user_id = 'master', session = '' })
+ok(type(seen) == 'table', 'the Fleet View reads the node operations: ' .. tostring(fv_refusal))
+for index, operation_id in ipairs(fv_ids) do
+  ok(fleet_lists(seen, operation_id), 'and it contains session ' .. (index == 1 and 'A' or 'B')
+    .. ' operation, not only the caller\'s')
+end
+local refused, why_refused = fleetview.node_operations({ memory = memory, role = 'guest', user_id = 'master', session = '' })
+ok(refused == nil, 'a non-operator caller gets no node operations at all')
+eq(why_refused, 'node_scope_not_granted', 'and the reason is the grant, named')
+local fv_audit_after = fleet_audit_rows()
+ok(fv_audit_after > fv_audit_before, 'the Fleet View node-scope read wrote its own audit line with its '
+  .. 'surface (' .. fv_audit_before .. ' -> ' .. fv_audit_after .. ')')
+for _, operation_id in ipairs(fv_ids) do
+  for _, who in ipairs({ ctx_a, ctx_b }) do
+    tools.dispatch(memory, 'operation', { action = 'cancel', id = operation_id }, 'master', who)
+  end
+end
+
 print(string.format("%d checks, %d failed", checks, failed))
 if failed > 0 then os.exit(1) end
