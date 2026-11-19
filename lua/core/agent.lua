@@ -2481,12 +2481,20 @@ function M:run_body(text, images)
     -- not an ambiguous transport failure, it is the turn failing to produce anything at all, and it
     -- is default-on with a short budget so a hiccup costs a second and not a run.
     local empty_reply = provider.is_empty_reply(result)
-    local transient_limit = connection_lost and provider.connection_retries()
+    -- A lost link is waited for until it returns (provider.link_wait_is_unbounded), because a cap
+    -- only converts a real outage into a dead run: measured 19/11, a 2-minute drop ended the run and
+    -- nothing resumed it. An operator who wants a bound sets CONNECT_RETRIES/_WAIT_SECONDS by name.
+    local link_unbounded = (connection_lost and provider.link_wait_is_unbounded()) and true or false
+    local transient_limit = connection_lost
+        and (link_unbounded and math.huge or provider.connection_retries())
       or rate_limited and provider.rate_limit_retries()
       or empty_reply and provider.empty_reply_retries()
       or provider.transient_retries()
     local transient_attempt, waited_ms = 0, 0
-    local wait_budget_ms = connection_lost and (provider.connection_wait_seconds() * 1000) or nil
+    local wait_budget_ms = (connection_lost and not link_unbounded)
+      and (provider.connection_wait_seconds() * 1000) or nil
+    -- When the link went down, so the recovery line can say how long it was out (one line, once).
+    local link_down_since = nil
     while transient_attempt < transient_limit and retryable(result) do
       transient_attempt = transient_attempt + 1
       local retry_after = (not ok) and provider.retry_after_ms(result) or nil
@@ -2498,9 +2506,23 @@ function M:run_body(text, images)
       waited_ms = waited_ms + wait_ms
       local reason = ok and (result.stream_complete == false and "incomplete_stream" or "empty_reply")
         or redact.text(tostring(result)):sub(1, 80)
+      -- The waiting row: what is wrong, with which provider, and when the next attempt comes. It
+      -- names the operator's only lever when the wait is unbounded, so a reader can stop it on purpose.
+      local provider_name = connection_lost and (function()
+        local got, active = pcall(provider.active)
+        if got and type(active) == "table" then
+          return tostring(active.id or active.name or "provider")
+        end
+        return "provider"
+      end)() or "provider"
+      if connection_lost and not link_down_since then link_down_since = host.now() end
       self.emit({ type = "status", text = connection_lost
-        and string.format("network appears down (%s) - retrying in %ds (%d/%d); waiting up to %ds for the link",
-          reason, math.floor(wait_ms / 1000), transient_attempt, transient_limit, provider.connection_wait_seconds())
+        and (link_unbounded
+          and string.format("waiting for the network · %s unreachable · retry in %ds (%d, no limit; the link is waited for until it returns, Esc stops the run)",
+            provider_name, math.max(1, math.floor(wait_ms / 1000 + 0.5)), transient_attempt)
+          or string.format("waiting for the network · %s unreachable · retry in %ds (%d/%d); waiting up to %ds for the link",
+            provider_name, math.max(1, math.floor(wait_ms / 1000 + 0.5)), transient_attempt, transient_limit,
+            provider.connection_wait_seconds()))
         or rate_limited and string.format("provider refused the request (%s) - retrying in %ds (%d/%d)%s",
           reason, math.floor(wait_ms / 1000), transient_attempt, transient_limit,
           retry_after and " as the provider asked" or "")
@@ -2510,7 +2532,9 @@ function M:run_body(text, images)
         or string.format("provider unavailable (%s) - retrying in %ds (%d/%d)",
           reason, math.floor(wait_ms / 1000), transient_attempt, transient_limit) })
       telemetry.event(self.session_id,self.run_id,"","provider_retry","attempt",{
-        reason=reason,attempt=transient_attempt,limit=transient_limit,wait_ms=wait_ms,
+        -- A JSON body cannot carry inf: an unbounded wait says so by name, not as a number.
+        reason=reason,attempt=transient_attempt,limit=(transient_limit == math.huge) and "none" or transient_limit,
+        wait_ms=wait_ms,
         connection_lost=connection_lost and true or false,
         rate_limited=rate_limited and true or false,empty_reply=empty_reply and true or false,
         retry_after_ms=retry_after,
@@ -2526,12 +2550,18 @@ function M:run_body(text, images)
       if stop then ok, result = false, stop break end
       call_opts.attempt = (call_opts.attempt or 1) + 1
       ok, result = pcall(provider.complete_with, self.model, messages, tool_list, self.stream, call_opts)
-      -- A later attempt that also reports a dead link keeps the patient policy (and the budget).
+      -- A later attempt that also reports a dead link keeps the patient policy (and the budget):
+      -- bounded when the operator asked for a bound, unbounded otherwise - the same rule as the
+      -- first failure, so a link that drops a second time does not silently acquire a cap.
       if not ok and provider.is_connection_lost(tostring(result)) then
         if not connection_lost then
           connection_lost = true
-          transient_limit = math.max(transient_limit, provider.connection_retries())
-          wait_budget_ms = provider.connection_wait_seconds() * 1000
+          link_unbounded = provider.link_wait_is_unbounded() and true or false
+          transient_limit = link_unbounded and math.huge
+            or math.max(transient_limit, provider.connection_retries())
+          wait_budget_ms = link_unbounded and nil
+            or provider.connection_wait_seconds() * 1000
+          if not link_down_since then link_down_since = host.now() end
         end
       end
       if not ok and provider.is_rate_limited(tostring(result)) then rate_limited = true end
@@ -2543,6 +2573,16 @@ function M:run_body(text, images)
         empty_reply = true
         transient_limit = provider.empty_reply_retries()
       end
+    end
+    -- The link came back: ONE line saying how long it was out, and the run continues from the same
+    -- step (the request was retried, never re-executed - it produced no answer, so no tool call it
+    -- might have carried can have run).
+    if ok and link_down_since then
+      local seconds = math.max(0, math.floor(host.now() - link_down_since))
+      self.emit({ type = "status", text = string.format("network back after %dm%02ds",
+        math.floor(seconds / 60), seconds % 60) })
+      telemetry.event(self.session_id,self.run_id,"","provider_retry","recovered",{after_s=seconds})
+      link_down_since = nil
     end
     -- A provider 400/413 on a request at/near the window is a context overflow even when
     -- the body says nothing - this deployment answers a too-large request with a bare

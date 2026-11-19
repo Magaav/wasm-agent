@@ -1112,6 +1112,9 @@ function M.is_rate_limited(problem)
   local text = tostring(problem or ""):lower()
   local status = text:match("provider_http_(%d+)")
   if not status or not TRANSIENT_STATUS[status] then return false end
+  -- A refusal that names a dead link is not an answer about the provider's health: the request never
+  -- reached it, so the short refusal budget would give up while the link is still down.
+  if M.is_link_down(text) then return false end
   for _, pattern in ipairs(RATE_LIMIT_TERMINAL) do
     if text:find(pattern, 1, true) then return false end
   end
@@ -1183,8 +1186,41 @@ local CONNECTION_TEXT = { "peer disconnected", "connection reset", "connection r
   -- smaller, explicit pre-response budget above.
   "timeout: connect", "connect: timeout" }
 
+-- A REFUSAL whose body names a dead link, not a provider answer: the local vault could not reach the
+-- provider's upstream. Measured 19/11 12:17 UTC with the home internet down - the vault answered
+--   provider_http_502: {"error":{"code":"vault_upstream_unreachable","message":"wa-vault could not
+--   reach the opencode-go upstream (gaierror)"}}
+-- (reproduced here against the real vault/wa_vault.py with a closed port and with an unresolvable
+-- host: 502 in 0.00 s, both bodies). 502 is a transient STATUS, so is_rate_limited claimed it: three
+-- short tries 2/4/8 s and then run_failed: provider_http_502 vault_upstream_unreachable (gaierror).
+-- The status is a lie about who failed: the provider never saw the request, so nothing was served, no
+-- inference was billed and no tool call can have run. That makes it a lost LINK with the patient
+-- policy, not an HTTP refusal with the short one.
+--
+-- Allow-listed evidence, matched as substrings against the reported text. A TLS HANDSHAKE failure is
+-- a link event (the peer never spoke); a certificate-VERIFY failure is deliberately absent - that is
+-- a trust or configuration refusal, and waiting cannot repair it.
+local LINK_EVIDENCE = { "vault_upstream_unreachable", "gaierror", "temporary failure in name resolution",
+  "name or service not known", "nodename nor servname provided", "no address associated with hostname",
+  "failed to lookup address", "dns error", "connection refused", "connection reset",
+  "network is unreachable", "network unreachable", "no route to host", "connect: timeout",
+  "timeout: connect", "tls handshake", "handshake failure", "connection aborted",
+  "connection was aborted", "os error 10053", "peer disconnected", "unexpected eof" }
+
+-- True when the failure text carries evidence that the LINK, not the provider's health, failed. Read
+-- by is_rate_limited (so the short refusal budget does not claim it) and by is_connection_lost (so
+-- the patient, operator-stoppable policy does).
+function M.is_link_down(problem)
+  local text = tostring(problem or ""):lower()
+  for _, pattern in ipairs(LINK_EVIDENCE) do
+    if text:find(pattern, 1, true) then return true end
+  end
+  return false
+end
+
 function M.is_connection_lost(problem)
   local text = tostring(problem or ""):lower()
+  if M.is_link_down(text) then return true end
   for _, pattern in ipairs(CONNECTION_TEXT) do
     if text:find(pattern, 1, true) then return true end
   end
@@ -1282,10 +1318,28 @@ function M.connection_wait_seconds()
   return math.max(0, math.min(86400, math.floor(seconds)))
 end
 
--- 2, 4, 8, 16, then 30 s, jittered: quick when the link is a blip, patient when it is not.
+-- 1, 2, 4, 8, 16, then 30 s, jittered: quick when the link is a blip, patient when it is not.
+-- The first wait is one second because the common case - a Wi-Fi or uplink blip - is over before a
+-- two-second sleep would finish; the 30 s cap bounds the load a long outage puts on the route
+-- without ever turning the wait into a fail.
 function M.connection_backoff_ms(attempt)
-  local seconds = math.min(30, 2 ^ math.max(1, tonumber(attempt) or 1))
+  local seconds = math.min(30, 2 ^ (math.max(1, tonumber(attempt) or 1) - 1))
   return math.floor(seconds * 1000 * (0.75 + math.random() * 0.5))
+end
+
+-- A lost link is not a budget: while the failure is still the network, waiting is the only correct
+-- action, and a cap merely converts an outage into a dead run - exactly what the 19/11 incident did
+-- after a 2-minute drop. So the link wait is UNBOUNDED by default and bounded only when the operator
+-- asks for a bound by name (WASM_AGENT_PROVIDER_CONNECT_RETRIES or WASM_AGENT_PROVIDER_CONNECT_WAIT_SECONDS),
+-- which also keeps every existing bounded test and off-switch working. The operator still stops a
+-- waiting run with Esc / Ctrl-C or the run's cancel verb, checked between wait slices by the agent
+-- loop. The policy is re-read on every failure, so a link that returns and drops again waits again.
+function M.link_wait_is_unbounded()
+  local retries = env("WASM_AGENT_PROVIDER_CONNECT_RETRIES")
+  if retries ~= nil and trim(retries) ~= "" then return false end
+  local seconds = env("WASM_AGENT_PROVIDER_CONNECT_WAIT_SECONDS")
+  if seconds ~= nil and trim(seconds) ~= "" then return false end
+  return true
 end
 
 -- A stream cut AFTER visible text (or a partial tool call) is not a lost stream: re-sending the same
