@@ -1588,6 +1588,21 @@ mod tests {
     /// every one of these, and draws it in ONE cell: a character measured two here moves every number
     /// after it, and a character the font does NOT have (the `\u{25d1}` and `\u{25f7}` these replaced) is
     /// drawn from a fallback face at another size, which is the defect this test keeps out.
+    /// The footer can carry colour now (the context ball's level), so "fits" must be measured on what
+    /// the terminal draws: an escape sequence takes no cells and is never cut in half (Victor, 19/11).
+    #[test]
+    fn a_coloured_row_is_measured_and_clipped_by_its_visible_cells() {
+        let red = "\x1b[38;2;255;107;128m";
+        let row = format!("{red}\u{f0aa5}\x1b[0m\x1b[38;2;119;119;119m 93.8%/1.0M");
+        assert_eq!(visible_cells(&row), 12, "the escapes take no cells: {row:?}");
+        let kept = clip_cells(&row, 40);
+        assert_eq!(kept, row, "a row inside 40 cells is returned WHOLE, colour and all");
+        assert_eq!(visible_cells(&clip_cells(&row, 6)), 6, "cut to 6 cells, ellipsis included");
+        let cut = clip_cells(&row, 6);
+        assert!(cut.starts_with(red), "the colour that opened the row is kept: {cut:?}");
+        assert!(cut.ends_with('\u{2026}'), "and the cut is marked: {cut:?}");
+    }
+
     #[test]
     fn the_status_bar_glyphs_are_one_cell_each() {
         let glyphs = [
