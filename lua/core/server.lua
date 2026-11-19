@@ -1169,8 +1169,9 @@ local function adopt_bash(args, caller, author)
     -- real slice the operation tool accepts - never a parameter that does not exist.
     note = "the command outlived the relay hold and is still running on that node as operation "
       .. id .. ". In a script, wait(op) resumes it and cancel(op) stops it; outside code mode, call "
-      .. 'tools.remote({node:"' .. nodeslib.node_name() .. '", capability:"operation", action:"await", id:"'
-      .. id .. '", wait_ms:' .. tostring(nodeslib.OPERATION_AWAIT_MAX_MS) .. "}) to collect it, or "
+      .. 'tools.remote({node:"' .. nodeslib.node_name() .. '", capability:"operation", action:"wait", id:"'
+      .. id .. '", wait_ms:' .. tostring(nodeslib.OPERATION_AWAIT_MAX_MS) .. "}) to read its state "
+      .. "without holding the relay open, or "
       .. 'action:"cancel" with the same id to stop it. Nothing was re-run.' }
   if #reaped > 0 then
     answer.reaped = reaped

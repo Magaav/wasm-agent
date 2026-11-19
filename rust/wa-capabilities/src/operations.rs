@@ -1517,9 +1517,19 @@ pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<V
                 return Err("invalid_wait_for:expected_command_or_settled".into());
             }
             let tool = args["tool"].as_str().filter(|name| !name.is_empty()).unwrap_or("operation");
+            // THE WAIT IS HONOURED, and it is BOUNDED (verification r2, MUST 3).
+            //
+            // This loop used to ignore wait_ms entirely: it returned only when the operation settled, so a
+            // relayed await held the relay connection and a peer slot until the RELAY deadline (~35 s) and
+            // then reported a timeout - the held-slot pattern of the 19/11 storm. wait_ms is the caller's
+            // own bound, clamped to the operation tool's documented maximum (10 s) and defaulting to 1 s;
+            // past it the answer is the state as it stands, which is exactly what action "wait" answers.
+            let budget = Duration::from_millis(args["wait_ms"].as_u64().unwrap_or(1000).min(10_000));
+            let started = std::time::Instant::now();
             loop {
+                let left = budget.saturating_sub(started.elapsed());
                 let state = manager()
-                    .wait(id, Duration::from_millis(250))
+                    .wait(id, left.min(Duration::from_millis(250)))
                     .map_err(|e| e.to_string())?;
                 progress_tick(&state, tool);
                 if state["settled"] == true {
@@ -1543,6 +1553,11 @@ pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<V
                     return Ok(json!({"operation_id":id,"ok":false,"settled":false,
                         "error":"operation_supervisor_overdue","outcome":"unknown",
                         "note":"No replay or inferred success. Inspect or explicitly cancel/recover."}));
+                }
+                if started.elapsed() >= budget {
+                    // The caller's own wait is over: answer the state as it stands. A caller that wants to
+                    // keep watching asks again, and no call holds a relay connection while it waits.
+                    return Ok(state);
                 }
                 crate::serve::beat();
             }

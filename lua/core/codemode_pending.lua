@@ -575,7 +575,15 @@ do
       -- A wait is only asked for when there is a wait to spend: a POLL (wait_s:0, or a batch sibling
       -- that settled early) asks the peer for its STATUS instead of an await with no budget, because a
       -- zero-length await is not a glance - it is a call whose stop condition the peer decides.
-      while left > 0 do
+      -- A CALL CAP and a MINIMUM CHARGE (review r2, MUST 3). A peer that answers at once without settling
+      -- used to be charged only its real elapsed time - nearly zero - so the loop went straight round
+      -- again: a hot retry holding the relay and the peer's slot. Every call now costs at least
+      -- REMOTE_MIN_CHARGE_MS of the budget, and a wait spends at most REMOTE_MAX_CALLS of them.
+      local REMOTE_MAX_CALLS = 40
+      local REMOTE_MIN_CHARGE_MS = 250
+      local calls = 0
+      while left > 0 and calls < REMOTE_MAX_CALLS do
+        calls = calls + 1
         if cancelled() then return last, "run_cancelled" end
         local slice = math.min(left, REMOTE_SLICE_MS)
         local before = elapsed_ms()
@@ -584,7 +592,7 @@ do
         -- Decrement by the time the call ACTUALLY spent, not by the slice asked for (review r1, SHOULD 2):
         -- a peer that answered at once used to be charged the whole slice, so a budget bought fewer
         -- round trips than it paid for.
-        left = math.max(0, left - math.max(0, elapsed_ms() - before))
+        left = math.max(0, left - math.max(REMOTE_MIN_CHARGE_MS, elapsed_ms() - before))
         if not answer then
           -- AN UNREACHABLE PEER IS NOT A FAILED COMMAND (review r1, SHOULD 3). A transport error during
           -- one slice says nothing about the operation: it may still be running there, and marking the
