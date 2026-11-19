@@ -192,7 +192,7 @@ pub(crate) fn which_on_path(name: &str) -> Option<String> {
 /// command" and the model, which cannot see the difference, tried variants of the
 /// same idea until its budget was gone. That was mistaken for the model being bad
 /// at tool calls; it was answering in the wrong language.
-fn shell_config() -> &'static (String, String) {
+pub(crate) fn shell_config() -> &'static (String, String) {
     static SHELL: OnceLock<(String, String)> = OnceLock::new();
     SHELL.get_or_init(|| {
         // An explicit choice wins: pi has `shellPath` for the same reason.

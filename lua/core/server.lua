@@ -976,10 +976,53 @@ local function adopted_result(id, author, caller)
   return out
 end
 
+-- How many operations ONE peer may have ADOPTED AND STILL RUNNING on this node (review r1, MUST 2).
+--
+-- Everything a peer asks for is recorded under ONE peer session ("peer:<node_id>", wa_peer_dispatch), and
+-- that session's share of the node's work is PER_SESSION_MAX = 6 of MAX_ACTIVE = 8 (rust/wa-operation).
+-- Before this bound, six adopted commands held every workload slot of that share for up to their own
+-- timeout each (300 s by default, up to 86400 s), so a seventh call from the peer was refused
+-- operation_capacity_shared and the peer's OWN work queued behind work it had already been told was
+-- pending. Two is small on purpose: it leaves the share for the peer's short calls and for the
+-- await/cancel round trips this change needs, and the refusal below says which handle to collect.
+local MAX_ADOPTED_OPEN = 2
+
+-- The operations this caller already has running on that node, counted where they really are: the peer's
+-- own list, in the peer session that owns them (never a local guess about what the peer holds).
+local function adopted_open(caller, author)
+  local ctx = { user_id = author, node_id = nodeslib.node_name(), peer_call = true,
+    session_id = adopt_session(caller) }
+  local page = toolslib.dispatch(memory, "operation", { action = "list", limit = 50 }, "master", ctx)
+  local rows = type(page) == "table" and (page.operations or page.items) or nil
+  if type(rows) ~= "table" then return nil, "list_unreadable" end
+  local open = 0
+  for _, row in ipairs(rows) do
+    if type(row) == "table" and row.settled ~= true and tostring(row.state or "") ~= "cancelled" then
+      open = open + 1
+    end
+  end
+  return open, nil
+end
+
 local function adopt_bash(args, caller, author)
   local budget = math.max(1000, math.floor(tonumber(args.budget_ms) or 0))
   local command = type(args.command) == "string" and args.command or ""
   if command == "" then return { error = "command_required", effect = "none" } end
+  local open, list_problem = adopted_open(caller, author)
+  -- An unreadable list is not permission: unknown is not yes. Refuse by name rather than adopt work whose
+  -- slot this node cannot account for.
+  if open == nil then
+    return { error = "remote_adopted_unknown", effect = "none", detail = list_problem,
+      note = "this node could not read which of your operations are still running there, and it will not "
+        .. "adopt more work while it cannot count the slots that work would hold; nothing was started" }
+  end
+  if open >= MAX_ADOPTED_OPEN then
+    return { error = "remote_adopted_limit", effect = "none", open = open, limit = MAX_ADOPTED_OPEN,
+      note = "this node already runs " .. tostring(open) .. " of your adopted commands (the limit is "
+        .. tostring(MAX_ADOPTED_OPEN) .. ", so a resolved reason and the peer's own short calls keep a "
+        .. "slot). Nothing was started: wait(op) a handle you already have, or cancel(op) it, then send "
+        .. "the new command." }
+  end
   -- budget_ms is the caller's word about how long IT may wait, never a field of the operation tool:
   -- the command is started with what the caller asked for and nothing invented.
   local started = wa_peer_dispatch("operation", { action = "start", command = command, cwd = args.cwd,
@@ -1006,8 +1049,14 @@ local function adopt_bash(args, caller, author)
   end
   return { state = "pending", op = id, operation_id = id, node = nodeslib.node_name(), tool = "bash",
     waited_s = math.floor(waited / 1000), adopted = true,
+    -- Inside a script this handle is resumed with wait(op); a model that called `remote` directly has no
+    -- wait(), so the note names the call it CAN make (review r1, SHOULD "outside code mode"), with the
+    -- real slice the operation tool accepts - never a parameter that does not exist.
     note = "the command outlived the relay hold and is still running on that node as operation "
-      .. id .. "; wait(op) resumes it, cancel(op) stops it, and nothing was re-run" }
+      .. id .. ". In a script, wait(op) resumes it and cancel(op) stops it; outside code mode, call "
+      .. 'tools.remote({node:"' .. nodeslib.node_name() .. '", capability:"operation", action:"await", id:"'
+      .. id .. '", wait_ms:' .. tostring(nodeslib.OPERATION_AWAIT_MAX_MS) .. "}) to collect it, or "
+      .. 'action:"cancel" with the same id to stop it. Nothing was re-run.' }
 end
 
 local function node_capability(capability, args, caller)

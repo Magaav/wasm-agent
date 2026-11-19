@@ -2842,3 +2842,85 @@ exit 0
         let _ = std::fs::remove_file(&runtime);
     }
 }
+
+/// MUST 3 (review r1): the relay's deadline must not kill ADOPTED work.
+///
+/// The relay stamps the caller's deadline and the node installs it as this run's cancel flag
+/// (serve::install_relay_context). The FOREGROUND `bash` path observes that flag and cancels its own
+/// operation (operations.rs, "A cancelled run or child cancels its operation too"); the adoption path
+/// this mission added is `control("start")`, which is detached and must survive it.
+///
+/// This drives the REAL flag through the production seam (host::set_run_cancel_probe +
+/// serve::test_set_run_cancel, the same pair subagents' cancel test uses) and asserts three things:
+/// the flag is live in this process (foreground IS cancelled by it - the old bug), the adopted start is
+/// NOT cancelled by it, and the command's marker holds exactly ONE line, so nothing was re-run.
+///
+/// Isolation: `manager()` roots its records under $HOME, which is a OnceLock - so this test REFUSES to
+/// run unless HOME is a scratch/temp directory, and scripts/test.sh runs it with HOME=$GATE_HOME.
+#[cfg(test)]
+mod adoption_survives_the_relay_deadline {
+    use super::*;
+    use crate::host::shell_config;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    fn scratch_home_or_refuse() -> std::path::PathBuf {
+        let home = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default());
+        let text = home.to_string_lossy().to_string();
+        let scratch = text.contains("tmp") || text.contains("temp") || text.contains("scratch")
+            || text.contains("TMP");
+        let real = text.ends_with("/.wasm-agent");
+        assert!(scratch && !real,
+            "refusing to run: this test starts real operations, so HOME must be a scratch or temp \
+             directory and never the node's own ~/.wasm-agent (got {text}); scripts/test.sh runs it \
+             with HOME=$GATE_HOME");
+        home
+    }
+
+    #[test]
+    fn an_adopted_operation_survives_the_relay_deadline_and_runs_once() {
+        let home = scratch_home_or_refuse();
+        let marker = home.join("adoption-marker.txt");
+        std::fs::write(&marker, "").expect("marker");
+        let marker_text = marker.to_string_lossy().to_string();
+        let shell = shell_config();
+        let session = "relay:review-test".to_string();
+
+        // The production serve layer registers this probe before a turn; here the test registers it and
+        // flips the same thread-local flag the probe reads, so the REAL host check is what runs.
+        crate::host::set_run_cancel_probe(crate::serve::run_cancel_requested);
+        let flag = Arc::new(AtomicBool::new(true));
+        crate::serve::test_set_run_cancel(Some(flag.clone()));
+
+        // 1. The flag is LIVE in this process: the foreground path cancels its own operation (the bug this
+        // mission exists for). A test that did not prove this could pass while flipping nothing.
+        let foreground = super::foreground(&shell.0, &shell.1, "sleep 5", "", 30, &serde_json::json!({}));
+        assert!(foreground.is_err() || foreground.as_ref().map(|v| v["error"] == "run_cancelled"
+                || v["ok"] == false).unwrap_or(false),
+            "with the run cancelled, the foreground shell must be stopped, not reported done: {:?}",
+            foreground.as_ref().map(|v| v["error"].clone()));
+
+        // 2. Adoption: the same flag is still set, and this start must NOT be cancelled by it.
+        let started = super::control("start", &serde_json::json!({
+            "command": format!("printf 'run\\n' >> '{marker_text}'; sleep 3; echo adopted-done"),
+            "cwd": "", "timeout_seconds": 60, "session": session, "background": true,
+        }), &shell).expect("adopted start");
+        let id = started["operation_id"].as_str().expect("operation id").to_string();
+
+        // 3. It settles on its own, with the command's own result - not by the deadline.
+        let settled = super::control("wait", &serde_json::json!({
+            "id": id, "wait_ms": 20000, "session": session,
+        }), &shell).expect("wait");
+        crate::serve::test_set_run_cancel(None);
+        assert_eq!(settled["settled"], serde_json::json!(true),
+            "the adopted operation must settle by finishing, not by the run's cancel: {settled}");
+        assert_ne!(settled["error"], serde_json::json!("cancelled"),
+            "the adopted operation was CANCELLED by the relay deadline: {settled}");
+        assert_eq!(flag.load(Ordering::SeqCst), true, "the flag stayed set the whole time");
+
+        // 4. Exactly once: the marker holds ONE line, so the command was never re-run.
+        let text = std::fs::read_to_string(&marker).expect("marker read");
+        assert_eq!(text.matches("run").count(), 1,
+            "the adopted command must have run exactly once, marker was {text:?}");
+    }
+}

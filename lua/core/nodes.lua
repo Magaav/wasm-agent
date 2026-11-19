@@ -810,9 +810,10 @@ function M.relay_deadline_note(node, reason)
     "%s did not answer a relayed call within %d s (%d attempts; the relay holds a queued call about %d s "
       .. "each), so this call stopped waiting%s. A relayed bash that outlives that hold is ADOPTED, not "
       .. 'killed: it answers {state:"pending", op, node} and stays running there as a managed operation, '
-      .. "and wait(op) or cancel(op) route back to that node. This answer is the other case - the peer "
-      .. "never took the call - so nothing here says the action did not run: read that node's state before "
-      .. "re-issuing it. Work that needs longer is started ON that node and awaited there: "
+      .. "and wait(op) or cancel(op) route back to that node. This answer is a different case: the relay "
+      .. "never delivered the call's answer, and the peer may still have adopted it late - check "
+      .. "operation list on that node before re-issuing it, because nothing here says the action did not "
+      .. "run. Work that needs longer is started ON that node and awaited there: "
       .. 'tools.remote({node:"%s", capability:"operation", action:"start", command:"<the command>"}) returns '
       .. 'its id, and tools.remote({node:"%s", capability:"operation", action:"await", id:"<id>", '
       .. 'wait_ms:%d}): await in slices of %d s until it settles.',

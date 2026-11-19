@@ -219,4 +219,49 @@ check(executor.applies({ node = "rp-scratch-peer", capability = "bash", command 
 check(executor.applies({ capability = "bash", command = "sleep 1" }) == false,
   "a local bash with no node is not the remote executor's business")
 
+-- 9. Review r1 MUST 1: a cancel only claims the stop it OBSERVED. The peer's cancel answer carries the
+-- operation_id even when it refused or the call had already finished, so "an answer with an id" is not a
+-- stop; an earlier version read that as cancelled:true and left the command running.
+local done_first = peer_bash("echo done-already", 9000)
+check(done_first.state ~= "pending", "a fast command finishes inside its budget")
+local stale_op = "op-0-0-0"
+local finish_later = peer_bash("sleep 3", 1000)
+check(finish_later.state == "pending", "a slow command is adopted before the cancel-honesty checks")
+local finish_await = peer_await(finish_later.op, 20)
+check(finish_await.settled == true, "and it is allowed to finish")
+local cancel_raw2 = json.encode({ node = "rp-scratch-peer", capability = "bash",
+  command = "sleep 300", wait_s = 0 })
+local honesty = pending.invoke(relay, { scope = scope }, "remote",
+  { node = "rp-scratch-peer", capability = "bash", command = "sleep 300" }, cancel_raw2, 0)
+check(honesty.state == "pending", "a fresh handle for the honesty checks")
+local real_cancel = pending.cancel(relay, { scope = scope }, honesty.op)
+check(real_cancel.cancelled == true, "a stop the peer confirmed is cancelled:true")
+-- The same handle again: it is settled/cancelled now, so this cancel must NOT claim a second stop.
+local second = pending.cancel(relay, { scope = scope }, honesty.op)
+check(second.cancelled == false, "a second cancel does not claim a stop it did not observe: "
+  .. json.encode(second):sub(1, 200))
+check(second.error ~= nil, "and it names the reason: " .. tostring(second.error))
+-- A refusal with a known-looking id is not a stop either: cancel an id the peer does not own.
+local bogus = pending.cancel(relay, { scope = scope }, stale_op)
+check(bogus.cancelled == false or bogus.error == "unknown_op",
+  "an unknown id is never reported as cancelled: " .. json.encode(bogus):sub(1, 160))
+
+-- 10. Review r1 MUST 2: one peer may not hold this node's whole slot share with adopted work. Everything a
+-- peer asks for lands in ONE peer session whose share is PER_SESSION_MAX = 6 of 8; before the bound, six
+-- long adopted commands blocked the peer's own short calls. The bound is small and the refusal is named.
+local held = {}
+for index = 1, 2 do
+  local one = peer_bash("sleep 30", 800)
+  check(one.state == "pending", "adopted op " .. index .. " is running")
+  held[#held + 1] = one
+end
+local over = peer_bash("sleep 30", 800)
+check(over.error == "remote_adopted_limit", "the third long adopted command is refused by name: "
+  .. json.encode(over):sub(1, 200))
+check(over.open == 2 and over.limit == 2, "the refusal names what is open and the limit")
+check(over.effect == "none", "and nothing was started")
+for _, one in ipairs(held) do
+  tools.dispatch(memory, "operation", { action = "cancel", id = one.op }, "master", peer_ctx)
+end
+
 print("remote pending ok (" .. tostring(checks) .. " checks)")
