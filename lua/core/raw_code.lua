@@ -126,10 +126,29 @@ local function lines_of(text)
   return out
 end
 
-local function is_run(info)
-  local lang, rest = tostring(info):lower():match("^%s*(%a+)%s+(.-)%s*$")
-  return (lang == "js" or lang == "javascript") and rest == "run"
+-- The fence tag, read the way a model writes it. The tag is the language "js" (or "javascript", any
+-- case) followed by the word "run", and three other spellings mean the same thing (#51/C):
+--   the tag followed by code on the same fence line - that code is line 1 of the script;
+--   any run of spaces or tabs between the language and the word run;
+--   "javascript" instead of "js", and the tag in any letter case.
+-- Measured 19/11 (mission logs, docs/missions/reports/thinking-block.md): a model wrote its tag and its
+-- first statement on one fence line, this parser read the whole message as prose, and the step ended with
+-- its action as text. Returns the code that shared the fence line ("" when the line held only the tag),
+-- or nil when the fence is not a run block at all.
+local function run_tag(info)
+  local text = tostring(info or ""):gsub("^%s+", ""):gsub("%s+$", "")
+  local lang, rest = text:match("^(%a+)%s+(.*)$")
+  if not lang then return nil end
+  lang = lang:lower()
+  if lang ~= "js" and lang ~= "javascript" then return nil end
+  rest = rest:gsub("^%s+", "")
+  if rest == "run" then return "" end
+  local inline = rest:match("^run%s+(.-)%s*$")
+  if inline and inline ~= "" then return inline end
+  return nil
 end
+
+local function is_run(info) return run_tag(info) ~= nil end
 
 -- An opening fence: 3+ backticks or 3+ tildes, indented at most three spaces, info string free of its own
 -- fence character. CommonMark reads both and a model writes both: measured on HEAD (18/11) a `~~~js run
@@ -170,7 +189,7 @@ function M.parse(text)
     else
       local char, ticks, info = fence(line.text, true)
       if char then
-        open = { open = index, char = char, ticks = ticks, run = is_run(info) }
+        open = { open = index, char = char, ticks = ticks, info = info, inline = run_tag(info), run = is_run(info) }
       end
     end
   end
@@ -251,7 +270,7 @@ function M.unexecuted(text, policy)
         local char = mark:sub(1, 1)
         local tag = tostring(info or ''):lower():gsub('%s+$', '')
         local intended = mark == string.rep(char, #mark) and #mark >= 3
-          and (tag == 'js run' or tag == 'javascript run' or (only and (tag == 'js' or tag == 'javascript')))
+          and (run_tag(tag) ~= nil or (only and (tag == 'js' or tag == 'javascript')))
         local column = intended and #indent > 3 and list_content_column(lines, index) or nil
         if intended and not (column and #indent >= column) then
           local why = #indent > 3
@@ -265,6 +284,99 @@ function M.unexecuted(text, policy)
     end
   end
   return nil
+end
+
+-- PHASE 0 verdict (evidence and verdict: docs/missions/reports/thinking-block.md). The run block arrives
+-- in the provider's REASONING field, not in its content, and the first version of the harness read only
+-- the answer, so the turn failed "reasoning is not an answer" with the action it was built to run never
+-- run. Nothing below executes the thinking: the reasoning is the model's own, and a script found there is
+-- never this node's action channel. What this decides is the SENTENCE - which shape of "wrote it in the
+-- wrong field" the model wrote - so the one continue it is given names the one thing to change.
+--
+-- Only the LAST block matters, and only when it ENDS the thinking (nothing but whitespace after it). A
+-- block the thinking went on from is the model reasoning ABOUT code - a sketch it then rejected - and
+-- naming that as the lost action would be a wrong diagnosis.
+--   run        a complete js run block ends the thinking: the action, in the wrong field;
+--   cut_run    the thinking ended inside a js run block, so those bytes are not the script it meant;
+--   plain_js   the thinking ends with a js or javascript block never tagged run: a sample by this
+--              node's own rule (the header of this file), so a tag to add rather than a script to send;
+--   nil        no block, or a last block that is none of these: the step reasoned and stopped (#22).
+M.IN_THINKING_SHAPES = { run = true, cut_run = true, plain_js = true }
+local PLAIN_JS = { js = true, javascript = true }
+local TICK = string.rep(string.char(96), 3)
+
+function M.in_thinking(reasoning)
+  local text = tostring(reasoning or "")
+  if not has_fence(text) then return nil end
+  local blocks, lines = M.parse(text)
+  local last = blocks[#blocks]
+  if not last then return nil end
+  local closed = last.close ~= nil
+  -- Nothing but whitespace after the block. An unclosed block already runs to the end of the text.
+  local last_line = lines[last.close or #lines]
+  if text:sub(last_line.finish + 1):find("%S") then return nil end
+  local code_lines = {}
+  for index = last.open + 1, closed and last.close - 1 or #lines do
+    code_lines[#code_lines + 1] = lines[index].text
+  end
+  if closed and last.inline and last.inline ~= "" then table.insert(code_lines, 1, last.inline) end
+  local tag = tostring(last.info or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
+  local found = { line = last.open, bytes = #table.concat(code_lines, "\n"), closed = closed }
+  if last.run then
+    found.shape = closed and "run" or "cut_run"
+  elseif PLAIN_JS[tag] then
+    found.shape = "plain_js"
+  else
+    return nil
+  end
+  return found
+end
+
+-- How many times in a row the harness asks for the action in the answer before the turn fails by name.
+-- One: the measured failure is a model writing in the wrong field, and naming it once is a diagnosis; a
+-- second consecutive one is a model that cannot follow it, and the run must not end rc=0 with nothing run.
+M.THINKING_CONTINUES = 1
+
+-- Model-facing (operator-reviewed; verbatim in the report). One sentence naming the one thing to change,
+-- then where to write it. Never "retry": the model did the work, in the wrong field.
+function M.thinking_notice(found)
+  local shape = type(found) == "table" and tostring(found.shape) or ""
+  local reason
+  if shape == "cut_run" then
+    reason = "your " .. TICK .. "js run block was in your thinking, not in your answer, and it was cut off "
+      .. "before its closing " .. TICK .. " line, so nothing ran"
+  elseif shape == "plain_js" then
+    reason = "the " .. TICK .. "js block you wrote was in your thinking, not in your answer, and it was "
+      .. "tagged js rather than js run, so nothing ran"
+  else
+    reason = "the run block you wrote was in your thinking, not in your answer, so nothing ran"
+  end
+  return "[Harness notice] This message had no answer: " .. reason
+    .. ". Write it in your ANSWER, as one " .. TICK .. "js run block that ends with a " .. TICK .. " line."
+end
+
+-- Model-facing. The step reasoned and stopped with nothing to run (#22).
+function M.reasoning_only_notice()
+  return "[Harness notice] This message had no answer: you reasoned and then stopped, so nothing ran. "
+    .. "Write your next step in your ANSWER: the script as one " .. TICK .. "js run block, or the answer "
+    .. "itself and why."
+end
+
+-- The name the run fails with when the block is still only in the thinking after the harness asked for it
+-- once. Never rc=0 with the action unexecuted.
+function M.thinking_failure(found)
+  local shape = type(found) == "table" and tostring(found.shape) or ""
+  local what = shape == "cut_run" and "a " .. TICK .. "js run block that was never closed"
+    or shape == "plain_js" and "a " .. TICK .. "js block that is not tagged js run"
+    or "a run block"
+  return "run_block_in_thinking: " .. what .. " is in the model's reasoning, not in its answer, and the "
+    .. "harness asked for it in the answer once already; nothing ran, so the turn is failed rather than "
+    .. "finished without its action"
+end
+
+function M.reasoning_only_failure()
+  return "reasoning_only: the step reasoned and returned no answer and no action, and the harness asked "
+    .. "for an answer once already; nothing ran, so the turn is failed rather than finished without it"
 end
 
 -- A tool call the model wrote as TEXT, in its own training format, because the request declared no tool
@@ -434,6 +546,9 @@ function M.take(result, stop_sent, policy)
   end
   local run = runs[#runs]
   local code_lines = {}
+  -- Code that shared the fence line is line 1 (#51/C): a fence tagged "js run" with a statement after it
+  -- on the same line is a run block, and the script it asks for starts with what the model wrote there.
+  if run.inline and run.inline ~= "" then code_lines[1] = run.inline end
   for index = run.open + 1, run.close and run.close - 1 or #lines do code_lines[#code_lines + 1] = lines[index].text end
   local code = table.concat(code_lines, "\n")
   local id = "call_raw_" .. (host.uuid():gsub("-", ""))

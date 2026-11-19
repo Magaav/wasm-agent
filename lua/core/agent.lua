@@ -2847,6 +2847,50 @@ function M:run_body(text, images)
       -- limits do not eliminate this failure; detect it even with Pi-style caps.
       if provider.visible_text(reply) == "" then
         local reason = provider.empty_reply_reason(result)
+        -- One rule for the end of a step, and it is the same rule in every mode: never end a turn on an
+        -- unexecuted action or on a plan, and never end it because the model wrote in the wrong field. The
+        -- model is told once, by name, where the action belongs; a second consecutive ending like this
+        -- fails the run by name, so a scripted run returns non-zero instead of reporting a finished turn
+        -- with nothing run. Nothing is ever executed from the reasoning: it is the model's thinking, not
+        -- this node's action channel (docs/missions/reports/thinking-block.md, PHASE 0 verdict).
+        --
+        -- Only a step that REASONED reaches this rule. A reply with no text, no reasoning and no tool call
+        -- is the empty stop provider.is_empty_reply retries, and that path keeps exactly the behaviour it
+        -- had (scripts/test-empty-reply.lua): the retry budget stays the retry budget.
+        local found = (result.reasoning or "") ~= "" and raw_code.in_thinking(result.reasoning or "") or nil
+        local shape = found and found.shape or "reasoning_only"
+        local continue_here = (result.reasoning or "") ~= ""
+        if continue_here then
+          self.finish_continues = (self.finish_continues or 0) + 1
+          if self.finish_continues > raw_code.THINKING_CONTINUES then
+            local named = found and raw_code.thinking_failure(found) or raw_code.reasoning_only_failure()
+            local span = trace[#trace]
+            if type(span) == "table" and span.kind == "model_call" then
+              span.ok = false
+              span.error = named
+              span.finish_reason = result.finish_reason
+              span.reasoning_chars = #(result.reasoning or "")
+              span.reasoning_shape = shape
+            end
+            record_turn(self, { role = "assistant", content = "", ok = false,
+              reasoning = result.reasoning or "", debug = self.debug })
+            self.pending_failure = { trace = trace, round = round, attempts = transient_attempt + 1 }
+            telemetry.event(self.session_id, self.run_id, "", "step", "end",
+              { outcome = "finish_contract", shape = shape })
+            self.emit({ type = "status", text = named })
+            error(named, 0)
+          end
+          -- A durable row, so a reader who opens this session later sees why the step continued past its own
+          -- empty answer, and a resume rebuilds the same context from the ledger.
+          local notice = found and raw_code.thinking_notice(found) or raw_code.reasoning_only_notice()
+          record_turn(self, { role = "user", content = notice, phase = "finish_contract" })
+          messages[#messages + 1] = { role = "user", content = notice }
+          self.emit({ type = "status", text = "the step ended without an answer (" .. shape
+            .. "): asked once for it in the answer; nothing was run" })
+          telemetry.event(self.session_id, self.run_id, "", "finish_contract", "continue",
+            { shape = shape, attempt = self.finish_continues })
+          goto next_round
+        end
         -- Say how hard we tried. Without this the reader sees the same sentence whether the turn
         -- gave up immediately or asked the provider twice more, and the second case is a different
         -- diagnosis (the provider keeps returning nothing, not that it hiccupped once).
@@ -2871,6 +2915,7 @@ function M:run_body(text, images)
         telemetry.event(self.session_id,self.run_id,"","step","end",{outcome="empty_reply"})
         error(reason)
       end
+      self.finish_continues = 0
       local audit
       if patch_audit.enabled() and not self.subagent then
         if shell_used then
