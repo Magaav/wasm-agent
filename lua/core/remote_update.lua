@@ -408,6 +408,21 @@ local function request_binary(record)
   return request_run(record, 'binary', body, 'binary install')
 end
 
+-- The release-installed node (item 28): no tree, so the published release is fetched and installed by
+-- scripts/release-install.sh, which runs scripts/upgrade.sh as a NEIGHBOUR process and verifies the result
+-- from the kernel (/proc/<pid>/exe) and from the binary itself (--build-info). It is a separate mode from
+-- `binary` on purpose: `binary` deploys a tree and takes a published binary INSTEAD of building it, and a
+-- node installed from a release has no tree to deploy at all.
+local function request_release(record)
+  local install = slashes(record.server.install or '')
+  if install == '' then return nil, { error = 'no_install_dir', observed = 'this node reported no install directory' } end
+  local script = install .. '/scripts/release-install.sh'
+  local body = {
+    'exec bash ' .. quote(script) .. ' ' .. quote(record.target_commit),
+  }
+  return request_run(record, 'release', body, 'release install')
+end
+
 -- The rollback: the pair the last install replaced, put back by the copy the install shipped beside it.
 -- Deliberately independent of the tree and of a release feed: the node this is about may be the reason it
 -- is needed.
@@ -474,10 +489,11 @@ function M.admit(args, caller)
   -- silently perform the default install.
   local mode = trim(args.mode)
   local rollback = args.rollback == true or args.rollback == 'true' or mode == 'rollback'
-  if mode ~= '' and mode ~= 'tree' and mode ~= 'binary' and mode ~= 'rollback' then
-    return { error = 'mode_unknown', effect = 'none', mode = mode, allowed = { 'tree', 'binary', 'rollback', 'rendezvous' } }
+  if mode ~= '' and mode ~= 'tree' and mode ~= 'binary' and mode ~= 'release' and mode ~= 'rollback' then
+    return { error = 'mode_unknown', effect = 'none', mode = mode, allowed = { 'tree', 'binary', 'release', 'rollback', 'rendezvous' } }
   end
-  local kind = rollback and 'rollback' or (rendezvous and 'rendezvous' or (mode == 'binary' and 'binary' or 'node'))
+  local kind = rollback and 'rollback' or (rendezvous and 'rendezvous'
+    or (mode == 'release' and 'release' or (mode == 'binary' and 'binary' or 'node')))
   local reason = trim(args.reason)
   if #reason > 400 then return { error = 'reason_too_long', effect = 'none', limit = 400 } end
   -- A FORCE IS A REASON OR IT IS NOTHING. The coordinator sends force_note when it moves a pinned node with
@@ -494,7 +510,10 @@ function M.admit(args, caller)
   -- A rollback is the one action that must work on a node whose tree is behind or broken (the install
   -- shipped scripts/rollback-node.sh beside the binary for exactly that), so it does not require a tree and
   -- never moves one.
-  if not facts.tree and not rollback then
+  -- A RELEASE-INSTALLED NODE HAS NO TREE AT ALL (item 28). `release` mode is the one path for it: the
+  -- published release is fetched and scripts/upgrade.sh installs it as a neighbour process, so the tree it
+  -- does not have is not a reason to refuse.
+  if not facts.tree and not rollback and kind ~= 'release' then
     return { error = 'no_runtime_tree', effect = 'none',
       observed = 'this node has no runtime-worktree.txt and does not run from a checkout, so there is no tree to move to a commit' }
   end
@@ -579,7 +598,15 @@ function M.admit(args, caller)
       next = 'ask again with {action="status", id="' .. record.id .. '"}; the record lands in ' .. M.dir(),
     }
   end
-  local prepared, refusal = prepare_tree(facts.tree, commit)
+  -- A RELEASE INSTALL MOVES NO TREE: there is nothing to fast-forward, and the commit is the one the
+  -- signed manifest names and release-install.sh verifies. installed_contains is asked of the install
+  -- record afterwards, exactly as it is after a tree deploy.
+  local prepared, refusal = nil, nil
+  if kind == 'release' then
+    prepared = { commit = commit, tree = facts.tree }
+  else
+    prepared, refusal = prepare_tree(facts.tree, commit)
+  end
   if not prepared then
     refusal.effect = 'none'
     refusal.capability = M.CAPABILITY
@@ -599,6 +626,7 @@ function M.admit(args, caller)
   local done, error = nil, nil
   if kind == 'rendezvous' then done, error = request_rendezvous(record)
   elseif kind == 'binary' then done, error = request_binary(record)
+  elseif kind == 'release' then done, error = request_release(record)
   else done, error = request_node(record) end
   if not done then
     error.effect = 'none'
@@ -636,7 +664,10 @@ function M.admit(args, caller)
     requester = record.requester.name ~= '' and record.requester.name or record.requester.node_id,
     requested_at = record.requested_at,
     message = 'queued: this node\'s own Sentinel will perform the ' ..
-      (kind == 'rendezvous' and 'rendezvous deploy' or (kind == 'binary' and 'binary-only install (published release, no build here)' or 'deploy')) ..
+      (kind == 'rendezvous' and 'rendezvous deploy'
+        or (kind == 'binary' and 'binary-only install (published release, no build here)'
+        or (kind == 'release' and 'release install (the published release, fetched and proved as a neighbour process)'
+        or 'deploy'))) ..
       ' under its existing rules. This is not installed yet.',
     next = 'ask again with {action="status", id="' .. record.id .. '"}; the record lands in ' .. M.dir(),
   }
@@ -1132,6 +1163,7 @@ function M.cli(argv)
     if flag == '--json' then as_json = true; index = index + 1
     elseif flag == '--rendezvous' then options.rendezvous = true; index = index + 1
     elseif flag == '--binary' then options.mode = 'binary'; index = index + 1
+    elseif flag == '--release' then options.mode = 'release'; index = index + 1
     elseif flag == '--tree' then options.mode = 'tree'; index = index + 1
     elseif flag == '--rollback' then options.rollback = true; index = index + 1
     elseif flag == '--force' then options.force = true; index = index + 1
@@ -1159,7 +1191,7 @@ function M.cli(argv)
       options[key] = value
       index = index + 2
     elseif flag == '--help' or flag == '-h' then
-      print('wa update <node> [--commit <sha>] [--binary|--tree] [--rendezvous] [--reason <text>] [--session <id>] [--json]')
+      print('wa update <node> [--commit <sha>] [--binary|--tree|--release] [--rendezvous] [--reason <text>] [--session <id>] [--json]')
       print('wa update <node> --status [--id <record>] [--json]')
       print('wa update <node> --rollback   put back the pair that node\'s last install replaced, and PIN it there')
       print('wa update <node> --to <sha>   move it to that commit on purpose, and PIN it there')
@@ -1171,6 +1203,7 @@ function M.cli(argv)
       print('  --force          do the move anyway. A pinned node and a known downgrade both refuse without it')
       print('wa update                 update this node (the local deploy request)')
       print('  --binary   install the published release only (a node with no toolchain; never builds there)')
+      print('  --release  a node installed FROM a release (no tree): fetch the published release and install it as a neighbour process')
       print('  --tree     the default: the node\'s own Sentinel deploys its tree (build or published binary)')
       return 0
     else

@@ -524,6 +524,75 @@ end
 ok(forced_command ~= "", "and the force reaches the installer's own command line", tostring(#forced_deploy))
 ok(forced_command:find("--reason", 1, true) ~= nil, "with its reason beside it", forced_command)
 
+-- ---- 7h. item 28: a node installed FROM a release takes the release mode ------------------------
+-- A node installed from a release has no tree at all, so prepare_tree refuses it before anything is
+-- attempted (no_runtime_tree) and the only remaining path was a hand-run upgrade.sh on the machine.
+-- `release` is that procedure as one mode: fetch the signed release, install it with scripts/upgrade.sh as
+-- a NEIGHBOUR process, then prove the result from the kernel (/proc/<pid>/exe) and from the binary itself
+-- (--build-info). The fixture's tree is taken away below, which is exactly the state of such a node.
+local real_tree = tree
+local saved_runtime = host.read_file(install .. "/runtime-worktree.txt")
+
+-- Without the mode the same fixture is refused by name, which is the behaviour item 28 replaces.
+-- The tree is removed from the FACTS, not only from the record: M.runtime_tree falls back to the working
+-- directory when runtime-worktree.txt is gone (a checkout IS a tree), and the suite runs inside one. A
+-- release-installed node has neither, so that is what this stubs.
+local real_facts = remote.facts
+remote.facts = function()
+  local facts = real_facts()
+  facts.tree, facts.tree_source = nil, nil
+  facts.candidate, facts.candidate_bytes = nil, nil
+  return facts
+end
+issued = {}
+local treeless = remote.serve({ action = "request", commit = TARGET, reason = "treeless binary request" }, MASTER)
+ok(treeless.error == "no_runtime_tree", "a node with no tree is refused for an ordinary deploy",
+  tostring(treeless.error))
+ok(#issued_matching("request deploy") == 0, "and nothing was queued for it")
+
+-- The release mode uses the same run door as the rendezvous, so this node must name the directory its
+-- sentinel may execute from (section 7 restored the real environment, which names none).
+scripts_env = scripts_dir
+host.getenv = function(name)
+  if name == "WA_SENTINEL_SCRIPTS" then return scripts_env end
+  return os.getenv(name)
+end
+issued, log_lines = {}, {}
+local release_answer = remote.serve({ action = "request", mode = "release", commit = TARGET,
+  reason = "release mode" }, MASTER)
+ok(release_answer.ok == true, "the release mode is admitted on a node with no tree",
+  tostring(release_answer.error or release_answer.status))
+ok(release_answer.kind == "release", "and the node records it as a release install, not a deploy",
+  tostring(release_answer.kind))
+ok(#issued_matching("request deploy") == 0, "no tree deploy was asked for")
+local release_runs = issued_matching("request run")
+ok(#release_runs == 1, "exactly one run request was written", tostring(#release_runs))
+local release_wrapper_path = release_runs[1] and release_runs[1]:match("%-%-script '([^']+)'")
+ok(release_wrapper_path ~= nil and release_wrapper_path:find((scripts_dir:gsub("\\", "/")), 1, true) == 1,
+  "the script is inside a directory WA_SENTINEL_SCRIPTS names", release_wrapper_path)
+local release_wrapper = release_wrapper_path and host.read_file(release_wrapper_path) or ""
+ok(release_wrapper ~= "", "the run names a wrapper inside WA_SENTINEL_SCRIPTS")
+ok(release_wrapper:find("scripts/release%-install%.sh") ~= nil,
+  "and it runs the supported script, not a composed shell", release_wrapper)
+ok(release_wrapper:find(TARGET, 1, true) ~= nil, "with the commit to install")
+
+-- The mode is refused by name when it is misspelled, so a typo cannot perform the default deploy.
+issued = {}
+local typo = remote.serve({ action = "request", mode = "relase", commit = TARGET }, MASTER)
+ok(typo.error == "mode_unknown", "a misspelled mode is refused by name", tostring(typo.error))
+ok(#issued_matching("request deploy") == 0 and #issued_matching("request run") == 0,
+  "and nothing was asked of the node")
+
+-- And the CLI has the flag, so an operator can reach it.
+ok(remote.cli({ "update", "peer", "--release", "--help" }) == 0, "wa update --release is a known option")
+
+-- put the tree and the environment back for the rows that follow
+host.getenv = real_host.getenv
+remote.facts = real_facts
+put(install .. "/runtime-worktree.txt", real_tree .. "\n")
+remote.facts_options = { install = install, sentinel_dir = sentinel_dir }
+ok(saved_runtime ~= nil, "the fixture tree record was restored after the treeless case")
+
 -- ---- 8. `wa update` with no node still means this node -----------------------------------------
 ok(remote.cli({ "update", "--check" }) == nil, "`wa update --check` is not the remote form")
 ok(remote.cli({ "update" }) == nil, "`wa update` is not the remote form")
