@@ -13,13 +13,58 @@ Base: origin/main (ac7717e0). Worktree: this tree. Commits are local only; nothi
 
 | item | commit | what the diff does |
 | --- | --- | --- |
-| 1 | 872795e8 | the unchecked-capture line is no longer emitted; one counted event `done_gate_unchecked` per state-changing turn |
+| 1 | 872795e8 | the unchecked-capture line is no longer emitted; one counted event per state-changing turn (now `done_gate_turn`, r1 fix 3) |
 | 2 | afa91ecc | the verbatim sentence is in the code-mode guidance, once |
 | 3 | b18fd19a | `wa turns --gate [--since 24h] [--json]` |
 | 4 | b18fd19a | the tests: the line is absent from the reader stream, the event is written, the counter is right |
 | J | fce803eb | the <turn> what-hurt bullet asks for HARNESS friction only, pinned verbatim |
 
-### Item 1 - 872795e8
+## Review r1 (LAND + four measurement fixes), each with its commit
+
+| fix | commit | what changed |
+| --- | --- | --- |
+| 1 | 3f135e28 | the counted turn is written ONCE, at run end, on every path (answer, abort, error, guard stop) |
+| 2 | c679b7c4 | the tests assert what gate_stats ANSWERS, plus a re-entered run counting once |
+| 3 | e951ce73 | the event is done_gate_turn; the old name done_gate_unchecked is still read |
+| 4 | 4a835810 | the root REPORT.md is deleted; the report lives here only |
+| 5 | 19f3360a | the event carries the build stamp; wa turns --gate takes --build SHA12 |
+
+### Why fix 1 mattered (3f135e28)
+The event was written at the FIRST candidate answer, then latched. A Stop-hook continuation that changed
+something after it, and a run that ended with no candidate at all (abort, an error, a progress-guard
+stop), were both counted wrong: the first as "no change", the second as nothing. The write moved to the end
+of M:run - right after the pcall that wraps run_body, the one point reached on every path - where it re-measures
+gate.effected from the run's own effect count and changed files, then calls note_turn, which still
+latches, so a re-entered run is ONE turn. A run whose gate is disabled (a subagent, a guest) writes
+nothing, because it has no capture rule to measure.
+
+### Fix 2 (c679b7c4)
+The old test recounted the rows itself: a second implementation of the rule, which can agree with a bug in
+the first. It now asserts gate_stats's own answers on a ledger the row owns - 2 state-changing turns, 1
+captured, exactly 50% - and the verb is compared against the module re-read at that point, not a stale
+snapshot. A new case in scripts/test-done-gate.lua runs a real RE-ENTERED run (capture, fail, continue,
+pass) and asserts ONE event and a count of 1/1, because the second candidate answer used to write a
+second event.
+
+### Fix 3 (e951ce73)
+The event is written for EVERY state-changing turn, so done_gate_unchecked named only the minority that
+skipped the capture. It is now done_gate_turn, with M.EVENT_LEGACY held beside it, and the reader asks for
+BOTH names in one statement. The turn-feed fixture writes its rows under the OLD name on purpose, so the
+legacy read fails the moment it stops working.
+
+### Fix 4 (4a835810)
+The root REPORT.md is deleted (git rm); this file is the report. It was a duplicate, and rule 5 of the
+mission rules says reports live here.
+
+### Fix 5 (19f3360a)
+The payload now carries build: the source commit the binary embedded, from
+turn_journal.build_of(), empty when unknown and never filled from HEAD. wa turns --gate takes
+--build SHA12 and compares it as a PREFIX of the long sha the payload holds. Unknown is not yes: a
+turn whose event carries no build is EXCLUDED when a build is asked for, and the answer reports
+skipped_unknown_build and mismatched_build rather than quietly counting them. A build that matches
+nothing answers changed = 0, which the verb prints as unmeasured, never as 0%.
+
+
 - `lua/core/done_gate.lua`: `M.record_uncaptured` no longer calls `ctx.emit`; the `done_gates` row
   (status `uncaptured`, close code `no_checks_recorded`) is unchanged. New `M.EVENT = "done_gate_unchecked"` and
   `M.note_turn(state, ctx)` write ONE telemetry event per run (latched on `state.gate_counted`), payload
