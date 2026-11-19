@@ -431,6 +431,87 @@ elseif command == "whatsapp" then
   -- whose model is unreachable must still be able to find out what was archived and push it off.
   local code = dofile("lua/core/whatsapp_archive_cli.lua").run({ table.unpack(args, 2) })
   if code and code ~= 0 then os.exit(code) end
+elseif command == "test" then
+  -- `wa test --at <sha> <row>`: one fast row at a base commit and at this tree (item 5/8, #46).
+  --
+  -- The worker is scripts/lib/row-at-sha.sh, and the script form is scripts/row-at-sha.sh: one
+  -- implementation with three faces. The whole comparison runs as ONE supervised operation, so a row that
+  -- hangs has its process group killed and named instead of holding the node; the worker clears the
+  -- WASM_AGENT_*/WA_MESH* allow-list for each side, exactly as scripts/fast.sh does.
+  --
+  --   wa test --at <sha> <row> [--repo DIR] [--json]
+  --
+  -- Exit: 0 a verdict was produced, 1 the row passed at the base and fails here, 2 refused/no comparison.
+  local at, row, repo, as_json = nil, nil, nil, false
+  local i = 2
+  while i <= #args do
+    local arg = tostring(args[i] or "")
+    if arg == "--at" then at = args[i + 1]; i = i + 2
+    elseif arg == "--repo" then repo = args[i + 1]; i = i + 2
+    elseif arg == "--json" then as_json = true; i = i + 1
+    elseif arg:sub(1, 1) == "-" then
+      print("wa test: refused(row_at_sha_unknown_option): " .. arg .. " (usage: wa test --at <sha> <row> [--repo DIR] [--json])")
+      os.exit(2)
+    else row = arg; i = i + 1
+    end
+  end
+  if not at then
+    print("wa test: refused(row_at_sha_commit_required): name the base commit -- wa test --at <sha> <row>")
+    os.exit(2)
+  end
+  if not row then
+    print("wa test: refused(row_at_sha_row_required): name the row -- wa test --at <sha> <row>")
+    os.exit(2)
+  end
+  local root = host.getenv("WASM_AGENT_LUA_ROOT") or "."
+  repo = repo or root
+  local lib = root .. "/scripts/lib/row-at-sha.sh"
+  if host.path_kind and host.path_kind(lib) ~= "file" then
+    print("wa test: refused(row_at_sha_lib_missing): " .. lib .. " is not there, so there is no comparison to run")
+    os.exit(2)
+  end
+  -- The worker's own fields are read back rather than re-derived: it prints class=, base_code=,
+  -- change_code= and binary=, and this verb prints the same facts (as JSON with --json, which is the
+  -- shape a harness reads).
+  local command = "bash " .. ("%q"):format(root .. "/scripts/row-at-sha.sh") .. " " .. ("%q"):format(tostring(at))
+    .. " " .. ("%q"):format(tostring(row)) .. " " .. ("%q"):format(tostring(repo))
+  local ran, raw = pcall(host.exec, command, repo, 3600)
+  local answer = type(raw) == "string" and (select(2, pcall(json.decode, raw))) or raw
+  if not ran or type(answer) ~= "table" then
+    print("wa test: refused(row_at_sha_run_failed): the comparison could not run: " .. tostring(raw):sub(1, 200))
+    os.exit(2)
+  end
+  local stdout = tostring(answer.stdout or "")
+  local stderr = tostring(answer.stderr or "")
+  local fields = {}
+  for line in stdout:gmatch("[^\r\n]+") do
+    local key, value = line:match("^([a-z_]+)=(.*)$")
+    if key then fields[key] = value end
+  end
+  -- The worker's REFUSAL is the answer when it produced no verdict: it names what was wrong (a sha that is
+  -- not a sha, a row that does not exist, a row absent at the base) and its own exit code is passed through
+  -- rather than being reported as a missing class= line - a refusal is not a comparison that failed.
+  if fields.class == nil and (tonumber(answer.code) or 0) ~= 0 then
+    if as_json then
+      print(json.encode({ ok = false, error = "row_at_sha_refused", exit = tonumber(answer.code),
+        detail = (stderr ~= "" and stderr or stdout):gsub("%s+$", ""), at = tostring(at), row = tostring(row) }))
+    else
+      io.stderr:write(stderr ~= "" and stderr or stdout)
+    end
+    os.exit(tonumber(answer.code) or 2)
+  end
+  if stderr ~= "" and not as_json then io.stderr:write(stderr) end
+  if as_json then
+    print(json.encode({ ok = (tonumber(answer.code) or 1) == 0, class = fields.class,
+      base_code = tonumber(fields.base_code), change_code = tonumber(fields.change_code),
+      binary = fields.binary, at = tostring(at), row = tostring(row), exit = tonumber(answer.code) }))
+  else
+    io.write(stdout)
+    if fields.class == nil then
+      print("wa test: refused(row_at_sha_no_verdict): the worker produced no class= line, so nothing was compared")
+    end
+  end
+  os.exit(tonumber(answer.code) or 2)
 elseif command == "eval" then
   -- The harness evaluator (lua/core/harness_evaluator_cli.lua, docs/HARNESS-EVALUATOR.md): freeze a real
   -- task, replay it against a candidate binary in an isolated home, and print metrics. It gathers

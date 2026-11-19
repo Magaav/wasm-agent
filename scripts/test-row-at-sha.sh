@@ -37,6 +37,10 @@ check 0 77 skipped 'a skip on the change side is not a pass'
 check 77 0 skipped 'a skip on the base side is not a pass'
 check 77 77 skipped 'a skip on both sides is not evidence'
 check 1 77 skipped 'a skip where the base failed is not a pass'
+# item 8 of the node-ops round, stated as its own case: a base that SKIPPED the row never ran it, so a
+# failure here is NEW (this change is not exonerated), never pre_existing.
+check 77 1 new_failure 'a skip at the base and a failure here is a new failure, not pre_existing'
+check 77 2 new_failure 'any nonzero change code behind a base skip is a new failure'
 for class in still_passing pre_existing new_failure fixed skipped; do
   [ -n "$(wa_row_at_sha_meaning "$class")" ] || fail "the class $class has no meaning for a reader"
 done
@@ -85,4 +89,42 @@ else
   refusal row_at_sha_row_absent_at_base "$base_sha" scripts/test-row-at-sha.sh
 fi
 
-echo 'test-row-at-sha: ok (four classes and the skip convention, a real comparison with no worktree left behind, every refusal named)'
+# (4) THE NODE VERB, wa test --at <sha> <row> (item 8 of the node-ops round). The same comparison behind one
+# command, in its own scratch home (never the operator store). It RUNS a real row and asserts the row's
+# answer; the refusals are the verb's own, not the worker's class= line.
+nodebin="$(command -v wa || true)"
+[ -n "$nodebin" ] || fail 'no wa on PATH, so the node verb cannot be exercised'
+verb_home="$SCRATCH/home-verb"
+mkdir -p "$verb_home/.wasm-agent" || fail "cannot create the verb scratch home $verb_home"
+verb() { # <wa args...> -> $verb_out, $verb_code
+  set +e
+  verb_out="$(WASM_AGENT_HOME="$verb_home" WASM_AGENT_LUA_ROOT="$ROOT" WASM_AGENT_MANAGED=0 \
+    "$nodebin" --db "$verb_home/.wasm-agent/ledger.db" "$@" 2>&1)"
+  verb_code=$?
+  set -e
+}
+verb test --at "$sha" "$row"
+[ "$verb_code" = 0 ] || fail "wa test exited $verb_code, not 0, for a row that passes on both sides: $verb_out"
+case "$verb_out" in *"class=still_passing"*) ;; *) fail "wa test did not print class=still_passing: $verb_out" ;; esac
+case "$verb_out" in *"base_code=0"*) ;; *) fail "wa test did not print base_code=0: $verb_out" ;; esac
+case "$verb_out" in *"change_code=0"*) ;; *) fail "wa test did not print change_code=0: $verb_out" ;; esac
+verb test --at "$sha" "$row" --json
+case "$verb_out" in *'"class":"still_passing"'*) ;; *) fail "wa test --json did not answer the class as JSON: $verb_out" ;; esac
+verb test "$row"
+[ "$verb_code" = 2 ] || fail "wa test with no --at exited $verb_code, not 2: $verb_out"
+case "$verb_out" in *row_at_sha_commit_required*) ;; *) fail "wa test with no --at did not name the missing commit: $verb_out" ;; esac
+verb test --at "$sha"
+[ "$verb_code" = 2 ] || fail "wa test with no row exited $verb_code, not 2: $verb_out"
+case "$verb_out" in *row_at_sha_row_required*) ;; *) fail "wa test with no row did not name the missing row: $verb_out" ;; esac
+verb test --at "$sha" "$row" --bogus
+[ "$verb_code" = 2 ] || fail "wa test with an unknown option exited $verb_code, not 2: $verb_out"
+case "$verb_out" in *row_at_sha_unknown_option*) ;; *) fail "wa test with an unknown option did not name it: $verb_out" ;; esac
+# A refusal the WORKER answers (a row absent at that commit) reaches the caller with the worker's own code
+# and text: a refusal is not a comparison that failed.
+if [ -n "$base_sha" ]; then
+  verb test --at "$base_sha" scripts/test-row-at-sha.sh
+  [ "$verb_code" = 2 ] || fail "wa test on a row absent at the base exited $verb_code, not 2: $verb_out"
+  case "$verb_out" in *row_at_sha_row_absent_at_base*) ;; *) fail "wa test did not pass the worker's absent-at-base refusal through: $verb_out" ;; esac
+fi
+
+echo 'test-row-at-sha: ok (four classes and the skip convention, a real comparison with no worktree left behind, every refusal named, and the wa test verb run for real)'

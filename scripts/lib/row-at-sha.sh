@@ -133,16 +133,23 @@ wa_row_at_sha() { # <sha> <row> [repo-root]
   # and restored by every return path (and the script form restores an empty one, which is no trap).
   local caller_trap
   caller_trap="$(trap -p EXIT)"
-  restore_caller_trap() {
+  # CLEANING UP AND RESTORING THE CALLER ARE ONE STEP, NOT TWO (item 8 of the node-ops round). Measured:
+  # restoring the caller's trap on its own REMOVED this function's cleanup trap and never ran it, so every
+  # completed comparison left its base worktree and scratch directory behind - the leak item 6 fixed,
+  # reintroduced by the fix that was meant to keep a sourced caller's trap. finish_row_at_sha runs the
+  # cleanup FIRST, then puts the caller's trap back, then answers the exit code.
+  finish_row_at_sha() { # <exit-code> -> returns it
+    local code=$1
+    cleanup_row_at_sha
     if [ -n "$caller_trap" ]; then eval "$caller_trap"; else trap - EXIT; fi
+    return "$code"
   }
   trap cleanup_row_at_sha EXIT
   if ! git -C "$repo" worktree add --detach "$base_tree" "$sha" > "$scratch/worktree.log" 2>&1; then
     printf 'refused(row_at_sha_worktree_failed): could not check out %s beside %s: %s\n' "$sha" "$repo" "$(tail -1 "$scratch/worktree.log")" >&2
-    restore_caller_trap
-    return 2
+    finish_row_at_sha 2; return 2
   fi
-  [ -f "$base_tree/$row" ] || { printf 'refused(row_at_sha_row_absent_at_base): %s does not exist at %s, so there is nothing to run there\n' "$row" "$sha" >&2; restore_caller_trap; return 2; }
+  [ -f "$base_tree/$row" ] || { printf 'refused(row_at_sha_row_absent_at_base): %s does not exist at %s, so there is nothing to run there\n' "$row" "$sha" >&2; finish_row_at_sha 2; return 2; }
   printf 'row_at_sha: base %s and change %s, row %s\n' "$(printf '%s' "$sha" | cut -c1-12)" "$repo" "$row"
   base_code="$(wa_row_at_sha_run "$bin" "$base_tree" "$row" "$scratch/home")"
   change_code="$(wa_row_at_sha_run "$bin" "$repo" "$row" "$scratch/home")"
@@ -156,8 +163,8 @@ wa_row_at_sha() { # <sha> <row> [repo-root]
   #   0  a verdict was produced (any class, including still_passing and fixed)
   #   1  the row passes at the base and FAILS here: the change broke it
   #   2  refused, nothing was compared
-  restore_caller_trap
-  case "$class" in new_failure) return 1 ;; *) return 0 ;; esac
+  if [ "$class" = new_failure ]; then finish_row_at_sha 1; return 1; fi
+  finish_row_at_sha 0; return 0
 }
 
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
