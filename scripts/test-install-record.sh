@@ -105,9 +105,23 @@ SHALLOW="$WORK/shallow"
 if git clone -q --depth 1 "file://$REPO" "$SHALLOW" 2>/dev/null; then
   SHEAD="$(git -C "$SHALLOW" rev-parse HEAD)"
   same "the fixture is really shallow" "$(git -C "$SHALLOW" rev-parse --is-shallow-repository)" "true"
+  # IT IS DEEPENED FIRST (item 29): one bounded fetch can turn this clone's ignorance into the answer the full
+  # history gives, and an answer is worth more than a refusal about ignorance. Here the running commit is on no
+  # branch of the history even after deepening, so the verdict is 1 - the SAME answer the full-history case
+  # above gives - where it used to be 2. Both refuse; this one also says why.
   wa_ancestry_verdict "$SHALLOW" "$SHEAD" "$ABSENT"
-  same "a shallow clone missing the running commit -> 2 (unknown, which the callers refuse)" "$?" "2"
-  shows "and it says why, and what to do" "$WA_ANCESTRY_WHY" "shallow"
+  same "a shallow clone is deepened, and a running commit the history does not carry -> 1 (refuse, as the full history does)" "$?" "1"
+  same "and the clone is no longer shallow" "$(git -C "$SHALLOW" rev-parse --is-shallow-repository)" "false"
+  # AND WHEN THE DEEPENING CANNOT HAPPEN, THE ANSWER IS STILL UNKNOWN, NOT YES AND NOT NO: a clone whose remote
+  # is gone cannot be deepened, and its blindness is not evidence either way (the callers refuse on 2).
+  BLIND="$WORK/blind"
+  if git clone -q --depth 1 "file://$REPO" "$BLIND" 2>/dev/null; then
+    git -C "$BLIND" remote remove origin 2>/dev/null || true
+    BLIND_ABSENT=1111222233334444555566667777888899990000
+    wa_ancestry_verdict "$BLIND" "$(git -C "$BLIND" rev-parse HEAD)" "$BLIND_ABSENT"
+    same "a shallow clone that cannot be deepened -> 2 (unknown, which the callers refuse)" "$?" "2"
+    shows "and it says why, and what to do" "$WA_ANCESTRY_WHY" "shallow"
+  fi
 
   # ...AND THE RUNNING BINARY CAN SETTLE IT WITHOUT A CHECKOUT: if the running build reports that it already
   # contains the target, the target cannot contain the running build. That answer turns the unknown into a
@@ -330,5 +344,26 @@ same "...and one that does not answers 1" "$?" "1"
 wa_contains "$WORK/no-such-binary" "$(printf 'a%.0s' 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40)"
 same "no binary at all is 'cannot tell' (2)" "$?" "2"
 
+
+# ---- item 29: a shallow checkout is deepened before it is believed, and the signed manifest answers
+# WHEN A CANDIDATE CANNOT NAME ITSELF. The shallow verdict above must not be the answer while one bounded
+# fetch can settle it: --depth 1 clone, ask about the OLD commit, and the clone deepens itself.
+if [ -d "$SHALLOW" ]; then
+  git -C "$SHALLOW" remote set-url origin "file://$REPO" 2>/dev/null || true
+  OLD="$(git -C "$REPO" rev-list --max-parents=0 HEAD | head -1)"
+  wa_ancestry_verdict "$SHALLOW" "$SHEAD" "$OLD"
+  same "a shallow clone is deepened and answers from the history instead of from its ignorance" "$?" "0"
+  same "and the clone is no longer shallow" "$(git -C "$SHALLOW" rev-parse --is-shallow-repository)" "false"
+fi
+
+# A MANIFEST IS THE SIGNED ANSWER FOR A CANDIDATE THAT CANNOT REPORT ITS OWN BUILD - and only for one.
+MF="$WORK/node-deadbeefdead.manifest"
+printf 'schema=wasm-agent-node-binaries/1\nsource_commit=%s\n' "$(printf 'c%.0s' 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40)" > "$MF"
+same "a manifest's source_commit is read" "$(wa_manifest_source_commit "$MF")" "$(printf 'c%.0s' 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40)"
+printf 'schema=wasm-agent-node-binaries/1\nsource_commit=not-a-commit\n' > "$WORK/bad.manifest"
+wa_manifest_source_commit "$WORK/bad.manifest" >/dev/null 2>&1
+same "a manifest naming something that is not a commit answers nothing" "$?" "1"
+wa_manifest_source_commit "$WORK/absent.manifest" >/dev/null 2>&1
+same "and a missing manifest answers nothing" "$?" "1"
 printf 'test-install-record: %s checks, %s failed\n' "$checks" "$failed"
 [ "$failed" = 0 ] || exit 1

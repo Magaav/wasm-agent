@@ -421,6 +421,7 @@ function M.plan_steps(category)
   elseif category == "components" then
     steps.artifacts = run("components bundle only (scripts/publish-components.sh): build, verify against components.lock, print the repin line")
     steps.artifacts.kind = "components"
+
     steps.sign = skip("the component bundle is not covered by the release-signing key: scripts/publish-components.sh prints its own gh line")
     steps.ship = skip("no node release to ship: the bundle is fetched by the tag components-<lock sha12>")
     steps.publish = skip("publishing the bundle needs a credential host: the exact gh line is in the artifacts evidence and the report")
@@ -881,21 +882,28 @@ function M.gate_checks(run, options)
   end)(), " ")
 end
 
+-- Every journal under the run root, NEWEST FIRST, as paths. `find` takes the directory QUOTED and matches the
+-- name itself, which is the only form that works: `ls -1dt '<dir>'/*/journal.json` cannot expand a glob the
+-- shell never sees, so the listing came back empty and every reader of it saw no run at all - the estimate
+-- fell back to the default table and a bare `wa land --resume` answered "nothing to resume" with runs sitting
+-- in the directory (measured 19/11; scripts/test-land.lua case 24). One listing, so no two readers disagree.
+local function journals_by_newest(limit)
+  local listing = M.exec("find " .. quote(M.root()) .. " -maxdepth 2 -name journal.json -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -" .. tostring(limit or 20), "", 60)
+  local paths = {}
+  for line in tostring(listing.stdout or ""):gmatch("[^\r\n]+") do
+    local path = line:match("^%S+%s+(.+)$")
+    if path then paths[#paths + 1] = trim(path) end
+  end
+  return paths
+end
+
 -- The finished runs in the journal: what an estimate is made from. Only a run whose result is `done` is used -
 -- a stopped round's step times are the part that worked, not what a round costs.
 function M.land_runs(limit)
   local runs = {}
-  -- `find`, not `ls <dir>/*/journal.json`: the glob has to be expanded by the shell, and quoting a path that
-  -- contains a wildcard (the right thing to do with a path a user named) stops `ls` from doing it - measured
-  -- here, the estimate silently fell back to the default table because the listing was empty. `find` takes
-  -- the directory quoted and matches the name itself.
-  local listing = M.exec("find " .. quote(M.root()) .. " -maxdepth 2 -name journal.json -printf '%T@ %p\\n' 2>/dev/null | sort -rn | head -" .. tostring(limit or 20), "", 60)
-  for line in tostring(listing.stdout or ""):gmatch("[^\r\n]+") do
-    local path = line:match("^%S+%s+(.+)$")
-    if path then
-      local journal = json_file(trim(path))
-      if journal and journal.run and journal.result == "done" then runs[#runs + 1] = journal end
-    end
+  for _, path in ipairs(journals_by_newest(limit)) do
+    local journal = json_file(path)
+    if journal and journal.run and journal.result == "done" then runs[#runs + 1] = journal end
   end
   return runs
 end
@@ -1000,8 +1008,18 @@ function M.build_plan(run, paths, notes)
   end
   table.sort(names)
   local estimate = M.estimate(classified.category)
+  local steps = M.plan_steps(classified.category)
+  -- A COMPILED ROUND THAT ALSO MOVES components.lock BUILDS THE BUNDLE IN THE SAME STEP, BEFORE THE DEPLOY
+  -- (item 28): a bundle built after the deploy describes a lock the fleet already reads, and the node that takes
+  -- both would take the new lock with the old bundle. A flag rather than a step, because the step that must do
+  -- it is `artifacts`, which is ordered before `deploy` already.
+  for _, path in ipairs(paths) do
+    if trim(path) == "components.lock" and classified.category == "compiled" then
+      steps.artifacts.also_components = "this round changes components.lock, so the components bundle is built and verified here with the node release, before any node takes either"
+    end
+  end
   return { category = classified.category, files = #paths, counts = classified.counts or {},
-    classifier = classified.classifier, why = classified.why, steps = M.plan_steps(classified.category),
+    classifier = classified.classifier, why = classified.why, steps = steps,
     checks = names, rows = rows, not_rows = not_rows, rows_why = rows_why, full = full,
     unknown_paths = unknown and tostring(unknown[1]) or nil,
     expected_seconds = estimate.seconds,
@@ -1378,10 +1396,24 @@ impl.merge = function(run, options)
     local listing = git(run, repo, "for-each-ref " .. quote("--format=%(refname:short)") ..
       " " .. quote("refs/heads/land*/final"))
     local highest = 0
-    for name in tostring(listing.stdout or ""):gmatch("[^\r\n]+") do
-      local number = trim(name):match("^land(%d+)/final$")
+    local function claim(name)
+      local number = trim(name):match("land(%d+)/final$")
       if number then highest = math.max(highest, tonumber(number)) end
     end
+    for name in tostring(listing.stdout or ""):gmatch("[^\r\n]+") do claim(name) end
+    -- THE INCOMING REPOSITORY'S OWN LAND BRANCHES COUNT TOO. A previous landing, from another checkout or
+    -- another node, leaves `land<N>/final` on the incoming remote; taking that number again would push the
+    -- new round on top of a ref somebody else's landing already reads, and the push step reads a remote ref
+    -- back expecting its own commit. So the free number is asked of the remote as well, and a remote that
+    -- cannot answer is a refusal by name - a number nobody proved free is not a number to push onto.
+    local remote = git(run, repo, "ls-remote --heads " .. quote(M.incoming()) .. " " .. quote("refs/heads/land*/final"), 300)
+    if (remote.code or 1) ~= 0 then
+      return false, { error = "land_branch_unknown",
+        observed = "cannot list the landing branches of " .. M.incoming() .. ": " ..
+          first_line(tostring(remote.stderr ~= "" and remote.stderr or remote.stdout)),
+        next = "check the incoming remote (" .. M.incoming() .. ") is reachable, then `wa land --resume`" }
+    end
+    for line in tostring(remote.stdout or ""):gmatch("[^\r\n]+") do claim(line) end
     local number = highest + 1
     tree = (run.tree_dir or (M.run_dir(run.id) .. "/tree"))
     local branch = "land" .. number .. "/final"
@@ -1642,6 +1674,33 @@ end
 
 -- main: fast-forward the source of truth. Only the node holding the GitHub credential can do this, and the
 -- refusal says so with the exact command instead of pretending the landing is done.
+-- Run one shell command ON a named node and answer its exit and streams: the fabric's own remote call,
+-- capability `bash`, which is the door `wa update <node>` uses too. A node that answers nothing is a
+-- refusal by name, never a pass.
+function M.node_bash(node, command)
+  local ok, reply = pcall(M.call(), tostring(node), "bash", { command = command })
+  if not ok or type(reply) ~= "table" then
+    return nil, { error = "node_unreachable", detail = "no answer from " .. tostring(node),
+      observed = tostring(reply or "the call produced nothing") }
+  end
+  if reply.error then
+    return nil, { error = "node_refused", detail = "node " .. tostring(node) .. " refused the command",
+      observed = tostring(reply.error) .. ((reply.note and (" - " .. tostring(reply.note))) or "") }
+  end
+  return reply
+end
+
+-- The URL a remote name stands for, resolved in the landed tree: a node that is asked to fetch or push
+-- needs an address it can resolve itself, and `origin` is a name only this checkout knows.
+local function remote_url(run, tree, remote)
+  local result = git(run, tree, "remote get-url " .. quote(remote), 120)
+  if (result.code or 1) == 0 then
+    local url = trim(result.stdout)
+    if url ~= "" then return url end
+  end
+  return nil
+end
+
 impl.main = function(run, options)
   local evidence = sink(run, "main")
   local tree, sha = run.tree, run.journal.tree_commit
@@ -1662,9 +1721,46 @@ impl.main = function(run, options)
       observed = origin .. "/main is " .. current:sub(1, 12) .. " and the landed tip " .. sha:sub(1, 12) .. " does not contain it",
       next = "rebase onto " .. origin .. "/main and land again; this never force-pushes" }
   end
-  local result = git(run, tree, "push " .. quote(origin) .. " " .. quote(sha .. ":refs/heads/main"), 1800)
-  evidence(command_line("main", "git push " .. origin .. " " .. sha .. ":refs/heads/main"))
-  evidence((result.stdout or "") .. (result.stderr or ""))
+  -- WHO FAST-FORWARDS MAIN. Only the node holding the GitHub credential can, and this machine must not be
+  -- given one - so `--account <node>` does the push THERE, from a throwaway clone of the incoming repository
+  -- the landed tip was already pushed to: the node needs no checkout of the landing, only the address it
+  -- already has. Without --account the push is tried here, exactly as before.
+  local account = trim(options.account)
+  local routed = account ~= "" and account ~= "local" and account ~= "this"
+  local result, readback
+  if routed then
+    local incoming_url = remote_url(run, tree, M.incoming()) or M.incoming()
+    local origin_url = remote_url(run, tree, origin) or origin
+    local script = table.concat({
+      'set -e',
+      'd=$(mktemp -d)',
+      "trap 'rm -rf \"$d\"' EXIT",
+      'git -C "$d" init -q .',
+      'git -C "$d" fetch -q ' .. quote(incoming_url) .. ' ' .. quote(sha),
+      'git -C "$d" push ' .. quote(origin_url) .. ' ' .. quote(sha .. ":refs/heads/main"),
+      'git -C "$d" ls-remote ' .. quote(origin_url) .. ' ' .. quote("refs/heads/main"),
+    }, '\n')
+    evidence(command_line("main on " .. account, script))
+    local reply, problem = M.node_bash(account, script)
+    if not reply then
+      return false, { error = problem.error, detail = problem.detail,
+        observed = problem.observed,
+        next = "check the node is reachable (wa nodes), or land with the credential on this machine" }
+    end
+    evidence((reply.stdout or "") .. (reply.stderr or ""))
+    result = { code = reply.code, stdout = reply.stdout, stderr = reply.stderr }
+    -- The read-back that matters is the ACCOUNT's own answer, not this machine's memory of the remote:
+    -- a push that left this machine and a main that moved somewhere else would otherwise look the same.
+    for line in tostring(reply.stdout or ""):gmatch("[^\r\n]+") do
+      local tip = line:match("^(%x+)%s+refs/heads/main$")
+      if tip then readback = tip end
+    end
+    run.journal.main_account = account
+  else
+    result = git(run, tree, "push " .. quote(origin) .. " " .. quote(sha .. ":refs/heads/main"), 1800)
+    evidence(command_line("main", "git push " .. origin .. " " .. sha .. ":refs/heads/main"))
+    evidence((result.stdout or "") .. (result.stderr or ""))
+  end
   if (result.code or 1) ~= 0 then
     local text = tostring(result.stderr or "") .. tostring(result.stdout or "")
     local credential = text:lower():find("permission") or text:lower():find("denied")
@@ -1672,10 +1768,10 @@ impl.main = function(run, options)
     return false, { error = credential and "main_push_needs_credentials" or "main_push_failed",
       detail = "the landed tip could not be fast-forwarded onto " .. origin .. "/main",
       observed = first_line(text ~= "" and text or "git push answered nothing"),
-      next = "run on the node that holds the Magaav credential: git -C <its checkout> push " .. origin .. " " ..
-        sha .. ":refs/heads/main   (this node has no GitHub credential and must not be given one)" }
+      next = "name the node that holds the Magaav credential: wa land --account <node> --resume   " ..
+        "(this node has no GitHub credential and must not be given one)" }
   end
-  local readback = remote_tip(tree, origin, "refs/heads/main")
+  readback = readback or remote_tip(tree, origin, "refs/heads/main")
   if readback ~= sha then
     return false, { error = "main_not_readback",
       observed = origin .. "/main is " .. tostring(readback or "absent") .. ", pushed " .. sha }
@@ -1712,6 +1808,16 @@ impl.artifacts = function(run, options)
     and run.journal.plan.steps.artifacts.kind) or "node-release"
   if kind == "lua-tree" then return impl.artifacts_lua_tree(run, options, evidence, tree, sha, dir) end
   if kind == "components" then return impl.artifacts_components(run, options, evidence, tree, sha, dir) end
+  -- A COMPILED ROUND THAT ALSO MOVES components.lock BUILDS THE BUNDLE HERE, with the node release and before
+  -- any node takes either (item 28): the same publisher the components path uses, verified against the lock the
+  -- fleet will read, so there is one build path and the deploy cannot see a new lock with an old bundle.
+  local also = run.journal.plan and run.journal.plan.steps and run.journal.plan.steps.artifacts
+    and run.journal.plan.steps.artifacts.also_components
+  if also then
+    local bundle_ok, bundle = impl.artifacts_components(run, options, evidence, tree, sha, dir .. "/components")
+    if not bundle_ok then return false, bundle end
+    run.journal.artifacts.components = { dir = dir .. "/components", detail = tostring(bundle and bundle.detail or "") }
+  end
   local command = "WA_RELEASE_SIGN_DEFER=1 bash scripts/publish-node-binaries.sh --commit " .. quote(sha) ..
     " --out " .. quote(dir)
   evidence(command_line("build release", command))
@@ -2003,6 +2109,15 @@ end
 
 -- publish: the release itself. The credential is the only thing this step can be missing: the signature is
 -- already made and verified (the `sign` step) and the ref already exists (the `ship` step).
+-- publish: the release itself. The credential is the only thing this step can be missing: the signature is
+-- already made and verified (`sign`) and the ref already exists (`ship`).
+--
+-- Two things this step learned (19/11, items 26 and 27):
+--   * A BINARY IS NOT A CREDENTIAL. `command -v gh` says a program exists; a signed-out gh fails afterwards,
+--     and the journal has already said done. So the check is `gh auth status` - where the publish runs.
+--   * `--account <node>` CREATES THE RELEASE THERE, as that node's own account: the ref is fetched from the
+--     incoming repository the node can already reach, and PUBLISH.sh runs from that extract with its assets
+--     beside it. No token and no checkout of the landing is needed on this machine.
 impl.publish = function(run, options)
   local evidence = sink(run, "publish")
   local tree, sha = run.tree, run.journal.tree_commit
@@ -2016,14 +2131,36 @@ impl.publish = function(run, options)
       observed = "the journal records no verified signature for this release",
       next = "the sign step runs before this one and refuses to continue unsigned; nothing is published here" }
   end
-  local gh = M.exec("command -v gh >/dev/null 2>&1 && echo yes || echo no", "", 60)
   local tag = "node-" .. sha:sub(1, 12)
-  if trim(gh.stdout) ~= "yes" then
-    return false, { error = "publish_needs_credentials", detail = "the release `" .. tag .. "` was not published",
-      observed = "no `gh` on this machine, so the release cannot be created here",
-      next = "publish from the machine that holds the token: git fetch " .. M.incoming() .. " refs/heads/" ..
-        artifacts.ref .. ":refs/heads/" .. artifacts.ref .. " && git worktree add /tmp/" .. tag .. " " ..
-        artifacts.ref .. " && bash /tmp/" .. tag .. "/PUBLISH.sh" }
+  local start = run.journal.start or {}
+  local account = trim(options.account or start.account)
+  local routed = account ~= "" and account ~= "local" and account ~= "this"
+  -- THE CHECK IS `gh auth status`, NOT `command -v gh`: the question is whether a token works HERE, and a
+  -- binary that is installed and signed out answers it the same way a missing one does. Where the publish is
+  -- routed, the question is asked ON THE ACCOUNT NODE, because that is whose token creates the release.
+  local gh_command = "command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1 && echo yes || echo no"
+  local gh_answer
+  if routed then
+    local reply, problem = M.node_bash(account, gh_command)
+    if not reply then
+      return false, { error = "publish_needs_credentials", detail = "the release " .. tag .. " was not published",
+        observed = problem.detail .. ": " .. problem.observed,
+        next = "check that node is reachable and signed in (`wa nodes`, then `gh auth status` there), then `wa land --resume`" }
+    end
+    gh_answer = tostring(reply.stdout or "")
+    evidence("gh auth status on " .. account .. ": " .. trim(gh_answer) .. "\n")
+  else
+    local here = M.exec(gh_command, "", 60) or {}
+    gh_answer = tostring(here.stdout or "")
+  end
+  if trim(gh_answer) ~= "yes" then
+    return false, { error = "publish_needs_credentials", detail = "the release " .. tag .. " was not published",
+      observed = routed and ("`gh` on " .. account .. " is missing or not signed in")
+        or "no `gh` here, or a `gh` this machine is not signed in to, so the release cannot be created here",
+      next = routed and ("sign in on " .. account .. " (`gh auth login` there), then `wa land --resume`")
+        or ("name the node that holds the token: `wa land --account <node> --resume`; or publish by hand: " ..
+          "git fetch " .. M.incoming() .. " refs/heads/" .. artifacts.ref .. ":refs/heads/" .. artifacts.ref ..
+          " && git worktree add /tmp/" .. tag .. " " .. artifacts.ref .. " && bash /tmp/" .. tag .. "/PUBLISH.sh") }
   end
   -- The artifacts commit is fetched again here rather than trusted from the ship step: on a resume that step
   -- is `done` and its FETCH_HEAD died with the process that made it.
@@ -2043,21 +2180,73 @@ impl.publish = function(run, options)
   if (extract.code or 1) ~= 0 then
     return false, { error = "publish_extract_failed", observed = first_line(extract.stderr ~= "" and extract.stderr or extract.stdout) }
   end
-  local existing = M.exec("gh release view " .. quote(tag) .. " >/dev/null 2>&1 && echo present || echo absent", "", 120)
-  if trim(existing.stdout) == "present" then
+  -- Whether the release already exists is asked WHERE IT WOULD BE CREATED: a release on the account's GitHub
+  -- account is not visible from a machine that is signed out, and the answer decides whether to publish.
+  local function release_state()
+    if routed then
+      local reply = M.node_bash(account, "gh release view " .. quote(tag) .. " >/dev/null 2>&1 && echo present || echo absent")
+      return trim(tostring((reply or {}).stdout or ""))
+    end
+    return trim(tostring((M.exec("gh release view " .. quote(tag) .. " >/dev/null 2>&1 && echo present || echo absent", "", 120) or {}).stdout or ""))
+  end
+  if release_state() == "present" then
     evidence("release " .. tag .. " already exists; not published again\n")
     run.journal.publish = { tag = tag, state = "already_present", signed = true, key_id = artifacts.key_id }
     return true, { detail = "release " .. tag .. " already published (not repeated)" }
   end
-  local published = M.exec("bash " .. quote(scratch .. "/PUBLISH.sh"), scratch, 1800)
-  evidence(command_line("publish", "bash " .. scratch .. "/PUBLISH.sh"))
-  evidence((published.stdout or "") .. (published.stderr or ""))
+  local published
+  if routed then
+    -- The files travel as content (base64, one file per command): PUBLISH.sh runs the release script THIS
+    -- round shipped, with the assets beside it, under the account node's own token.
+    local script_text = read(scratch .. "/PUBLISH.sh")
+    if not script_text then
+      return false, { error = "publish_no_script", observed = "the extract carries no PUBLISH.sh" }
+    end
+    local names, seen = { "PUBLISH.sh" }, { ["PUBLISH.sh"] = true }
+    for word in tostring(script_text):gmatch("%S+") do
+      local bare = tostring(word):gsub("^%./", "")
+      if not seen[bare] and (bare:match("^wa%-") or bare:match("^SHA256SUMS") or bare:match("%.manifest$")) then
+        seen[bare] = true
+        names[#names + 1] = bare
+      end
+    end
+    local script = { "set -e", "d=$(mktemp -d)", [[trap 'rm -rf "$d"' EXIT]], [[cd "$d"]] }
+    for _, name in ipairs(names) do
+      if not read(scratch .. "/" .. name) then
+        return false, { error = "publish_asset_missing",
+          observed = scratch .. "/" .. name .. " is named by PUBLISH.sh but is not in the extract",
+          next = "the shipped ref is incomplete: inspect " .. M.incoming() .. " refs/heads/" .. artifacts.ref }
+      end
+      local b64 = M.exec("base64 -w 0 < " .. quote(scratch .. "/" .. name), "", 120) or {}
+      if (b64.code or 1) ~= 0 then
+        return false, { error = "publish_asset_unreadable", observed = "cannot read " .. scratch .. "/" .. name }
+      end
+      script[#script + 1] = "printf %s " .. quote(trim(tostring(b64.stdout or ""))) .. " | base64 -d > " .. quote(name)
+    end
+    script[#script + 1] = "bash ./PUBLISH.sh"
+    evidence(command_line("publish on " .. account, "bash PUBLISH.sh (" .. tostring(#names) .. " file(s) sent)"))
+    local reply, problem = M.node_bash(account, table.concat(script, "\n"))
+    if not reply then
+      return false, { error = "publish_failed", observed = problem.detail .. ": " .. problem.observed,
+        next = "check that node is reachable and signed in, then `wa land --resume`" }
+    end
+    evidence((reply.stdout or "") .. (reply.stderr or ""))
+    published = { code = reply.code, stdout = reply.stdout, stderr = reply.stderr }
+  else
+    published = M.exec("bash " .. quote(scratch .. "/PUBLISH.sh"), scratch, 1800)
+    evidence(command_line("publish", "bash " .. scratch .. "/PUBLISH.sh"))
+    evidence((published.stdout or "") .. (published.stderr or ""))
+  end
   if (published.code or 1) ~= 0 then
-    return false, { error = "publish_failed", observed = first_line(published.stderr ~= "" and published.stderr or published.stdout),
+    local text = tostring(published.stderr ~= "" and published.stderr or published.stdout)
+    return false, { error = "publish_failed",
+      observed = first_line(text ~= "" and text or "the publisher answered nothing"),
       next = "the publisher's own words are in " .. M.evidence_path(run.id, "publish") }
   end
-  run.journal.publish = { tag = tag, state = "published", signed = true, key_id = artifacts.key_id }
-  return true, { detail = "release " .. tag .. " published (signed, key " .. tostring(artifacts.key_id) .. ")" }
+  run.journal.publish = { tag = tag, state = "published", signed = true, key_id = artifacts.key_id,
+    account = routed and account or nil }
+  return true, { detail = "release " .. tag .. " published (signed, key " .. tostring(artifacts.key_id) .. ")" ..
+    (routed and (", on " .. account) or "") }
 end
 
 -- the ring, as configured: `--ring name:mode,...`, else `<config>/land/ring.json`, else M.RING.
@@ -2095,9 +2284,45 @@ impl.deploy = function(run, options)
   -- One node: ask it to update itself, then read its own record until it settles or the deadline passes.
   -- "Queued" is not installed - the row carries the peer's state and the record id an operator (or
   -- `wa update <node> --status`) reads next.
+  -- A NODE WITH AN OPERATOR PIN IS NEVER MOVED BY A RING SILENTLY. The node's own gate refuses it anyway
+  -- (lua/core/remote_update.lua, lua/core/update.lua), but the coordinator knowing FIRST is what turns a
+  -- half-deployed wave into one named refusal with the way out on it - and it is what keeps `--account`/ring
+  -- order from being the only thing that decided. Unknown is not free: a pin store this module cannot read
+  -- refuses the deploy by name instead of assuming the node is unpinned.
+  local function pin_refusal(node)
+    local loaded, pins = pcall(dofile, "lua/core/pins.lua")
+    if not loaded or type(pins) ~= "table" or type(pins.active) ~= "function" then
+      return { error = "pin_state_unknown",
+        detail = "node " .. node .. " was not deployed: the pin store (lua/core/pins.lua) could not be read, so whether an operator pinned it is unknown",
+        next = "check the tree this landing runs from; nothing was asked of " .. node }
+    end
+    local node_id = ""
+    local ok_find, found = pcall(function() return dofile("lua/core/nodes.lua").find(node) end)
+    if ok_find and type(found) == "table" then node_id = tostring(found.node_id or "") end
+    local pinned = pins.active(node, node_id)
+    if not pinned then return nil end
+    local summary = ""
+    if type(pins.summary_line) == "function" then summary = tostring(pins.summary_line(pinned) or "") end
+    local hatch = ""
+    if type(pins.escape_hatch) == "function" then hatch = tostring(pins.escape_hatch(node, pinned) or "") end
+    return { error = "node_pinned",
+      detail = "node " .. node .. " carries an active operator pin, so this ring did not deploy it" ..
+        (summary ~= "" and (": " .. summary) or ""),
+      observed = "pin " .. tostring(pinned.id or "?") .. (pinned.reason and (" - " .. tostring(pinned.reason)) or ""),
+      next = hatch ~= "" and hatch or ("release the pin deliberately (`wa update " .. node .. " --unpin --reason <text>`), then `wa land --resume`") }
+  end
   local function ask(node, mode_, why)
     local row = { node = node, mode = mode_, commit = sha, started_at = now() }
     evidence(string.format("deploy %s (%s) -> %s\n", node, mode_, tostring(sha)))
+    if not options.rollback then
+      local pinned = pin_refusal(node)
+      if pinned then
+        row.state, row.detail, row.seconds = "refused", pinned.detail, 0
+        evidence(json.encode(row) .. "\n")
+        row.failure = { error = pinned.error, detail = pinned.detail, observed = pinned.observed, next = pinned.next }
+        return row
+      end
+    end
     local reply = remote_update.request(M.call(), node, request_for(node, mode_, why))
     row.state = tostring(reply and (reply.state or reply.status or reply.error) or "no_answer")
     row.record = reply and tostring(reply.record or "") or ""
@@ -2438,15 +2663,12 @@ local function open_run(options)
            tree = journal.tree, land_branch = journal.land_branch }
 end
 
--- The newest run that is not finished: what `--resume` continues.
+-- The newest run that is not finished: what `--resume` continues. A stopped run is a run to continue, and so
+-- is one that never got as far as a result.
 local function newest_unfinished()
-  local listing = M.exec("ls -1dt " .. quote(M.root() .. "/*/journal.json") .. " 2>/dev/null | head -20", "", 60)
-  for path in tostring(listing.stdout or ""):gmatch("[^\r\n]+") do
-    local journal = json_file(trim(path))
-    if journal and journal.run and journal.result ~= "done" and journal.result ~= "stopped" then
-      return tostring(journal.run)
-    end
-    if journal and journal.run and journal.result == "stopped" then return tostring(journal.run) end
+  for _, path in ipairs(journals_by_newest(20)) do
+    local journal = json_file(path)
+    if journal and journal.run and journal.result ~= "done" then return tostring(journal.run) end
   end
   return nil
 end
@@ -2494,6 +2716,52 @@ function M.run_step(run, name, options)
   return passed
 end
 
+-- THE START OPTIONS ARE PART OF THE RUN, not of the invocation that happened to begin it. A resume is the
+-- same round continued (often on another day, by another operator, after a stop), so a ring, `--full`,
+-- `--no-deploy`, `--account` or `--signer` given at the start has to still hold at the resume - measured
+-- 18/11: a resumed round silently took the DEFAULT ring and deployed a node the operator had excluded, and
+-- a `--full` start came back narrowed because the flag was not in the journal at all.
+--
+-- A flag given ON the resume wins: it is the more recent instruction. Everything not given falls back to the
+-- journal. `ring` is stored RESOLVED (node and mode), because the answer to `--ring` is what the round uses.
+local START_KEYS = { "full", "no_deploy", "account", "signer", "canary", "session" }
+
+local function remember_start(run, options)
+  local start = run.journal.start or {}
+  for _, key in ipairs(START_KEYS) do
+    local value = options[key]
+    if value ~= nil and value ~= "" then start[key] = value end
+  end
+  if options.ring and #options.ring > 0 then
+    local rows = {}
+    for _, entry in ipairs(options.ring) do rows[#rows + 1] = { node = tostring(entry.node), mode = tostring(entry.mode or "tree") } end
+    start.ring = rows
+  end
+  if options.branches and #options.branches > 0 then start.branches = options.branches end
+  run.journal.start = start
+  save(run)
+  return start
+end
+
+local function apply_start(run, options)
+  local start = run.journal.start
+  if type(start) ~= "table" then return options end
+  for _, key in ipairs(START_KEYS) do
+    if options[key] == nil and start[key] ~= nil then options[key] = start[key] end
+  end
+  if (not options.ring or #options.ring == 0) and type(start.ring) == "table" and #start.ring > 0 then
+    local rows = {}
+    for _, entry in ipairs(start.ring) do
+      if type(entry) == "table" and entry.node then rows[#rows + 1] = { node = tostring(entry.node), mode = tostring(entry.mode or "tree") } end
+    end
+    if #rows > 0 then options.ring = rows end
+  end
+  if (not options.branches or #options.branches == 0) and type(start.branches) == "table" and #start.branches > 0 then
+    options.branches = start.branches
+  end
+  return options
+end
+
 function M.run(options)
   options = type(options) == "table" and options or {}
   if options.resume and not options.run then
@@ -2506,11 +2774,18 @@ function M.run(options)
   local run = open_run(options)
   if run.fresh and not options.run then
     run.journal.branches = {}
+  else
+    -- A resume continues the SAME round: the options it started with come back unless this invocation names
+    -- its own (see remember_start/apply_start).
+    options = apply_start(run, options)
   end
+  -- A DRY RUN WRITES NOTHING, so the start options are recorded only after this return: a plan that wrote a
+  -- journal entry would change the thing it says it does not touch.
+  if options.dry_run then return M.dry_run(run, options) end
+  remember_start(run, options)
   if options.run and not run.fresh then
     print("land: resuming run " .. run.id .. " (journal " .. M.journal_path(run.id) .. ")")
   end
-  if options.dry_run then return M.dry_run(run, options) end
   run.journal.result = "in_progress"
   save(run)
   local stopped = nil
@@ -2564,6 +2839,11 @@ function M.run(options)
   run.journal.result = "done"
   run.journal.stopped_at = nil
   save(run)
+  -- THE SUMMARY IS REWRITTEN WITH THE FINAL RESULT. report is the last step, so it rendered the journal one
+  -- line before result became done: the file a human opens said in_progress while the journal beside it
+  -- said done (measured, case29 of this round). The report is the journal as a document, and it must agree
+  -- with the journal it documents.
+  write(M.report_path(run.id), M.report_text(run.journal))
   print(string.format("land: done (run %s, landed %s)", run.id, tostring(run.journal.tree_commit or ""):sub(1, 12)))
   return 0
 end
@@ -2709,6 +2989,182 @@ function M.ready_mark(branch, sha, brief)
   return true, replaced and "recorded (replaced the line)" or "recorded"
 end
 
+-- ---------------------------------------------------------------- marking a step done out of band
+--
+-- Some steps are done by a hand that is not this machine: the vault host signs while the operator watches, a
+-- release is created from a laptop that holds the token. The journal is the run's state, so that work has to
+-- reach it - and NOT by editing journal.json, which turns a record of what happened into a claim about it.
+-- `wa land mark <step> --evidence <file>` reads the evidence, RE-VERIFIES the effect with the same checks the
+-- step itself would pass, and only then records the step as done, with `marked` and the evidence path on it.
+-- A verification that cannot tell is a refusal by name: unknown is not yes.
+M.MARKABLE = { "push", "main", "sign", "ship", "publish" }
+
+local function mark_verdict(run, step, options)
+  local id = run.id
+  local sha = tostring(run.journal.tree_commit or "")
+  local tree = run.tree or run.journal.tree
+  if sha == "" then
+    return false, { error = "mark_without_commit", detail = "run " .. id .. " has no landed tip in its journal",
+      next = "a step can only be marked after the merge wrote the tip: run `wa land --resume` first" }
+  end
+  if step == "push" then
+    local tip = tree and remote_tip(tree, M.incoming(), "refs/heads/" .. tostring(run.journal.land_branch or "")) or nil
+    if tip ~= sha then
+      return false, { error = "mark_not_verified",
+        detail = "the incoming repository does not carry this run's tip on its landing branch",
+        observed = M.incoming() .. " " .. tostring(run.journal.land_branch or "?") .. " is " .. tostring(tip or "absent") .. ", the landed tip is " .. sha,
+        next = "nothing was marked: a push is verified against the remote, never against a file" }
+    end
+    return true, { detail = M.incoming() .. " " .. tostring(run.journal.land_branch) .. " = " .. sha:sub(1, 12) .. " (verified)" }
+  end
+  if step == "main" then
+    local tip = tree and remote_tip(tree, M.origin(), "refs/heads/main") or nil
+    if tip ~= sha then
+      return false, { error = "mark_not_verified",
+        detail = "the source of truth is not at this run's tip",
+        observed = M.origin() .. "/main is " .. tostring(tip or "absent") .. ", the landed tip is " .. sha,
+        next = "nothing was marked: main is read back from the remote" }
+    end
+    return true, { detail = M.origin() .. " main = " .. sha:sub(1, 12) .. " (verified)" }
+  end
+  local artifacts = run.journal.artifacts or {}
+  if step == "sign" then
+    local dir = tostring(artifacts.dir or run.journal.release_dir or "")
+    if dir == "" or not read(dir .. "/SHA256SUMS") then
+      return false, { error = "mark_not_verified", detail = "there is no release set with SHA256SUMS to verify a signature against",
+        observed = "looked for " .. (dir ~= "" and (dir .. "/SHA256SUMS") or "a release directory") .. " in the journal",
+        next = "the signature is verified against the release set the artifacts step built; run the sign step" }
+    end
+    if not read(dir .. "/SHA256SUMS.sig") then
+      return false, { error = "mark_not_verified", detail = "the release set carries no signature",
+        observed = dir .. "/SHA256SUMS.sig does not exist",
+        next = "sign it where the vault is, put SHA256SUMS.sig beside the sums, then mark again" }
+    end
+    local verify = M.exec(". scripts/lib/release-signing.sh && wa_release_verify_sums " .. quote(dir), slashes(tree or "."), 300)
+    if (verify.code or 1) ~= 0 then
+      return false, { error = "release_key_not_trusted",
+        detail = "the signature beside the sums does not verify against the keys this tree trusts",
+        observed = first_line(tostring(verify.stderr ~= "" and verify.stderr or verify.stdout)),
+        next = "nothing was marked: a signature no node can verify is not a release" }
+    end
+    artifacts.dir = dir
+    artifacts.signed = true
+    artifacts.signer = trim(options.signer) ~= "" and trim(options.signer) or "out_of_band"
+    artifacts.key_id = tostring(read(dir .. "/SHA256SUMS.sig") or ""):match("key%s+(%S+)")
+    run.journal.artifacts = artifacts
+    return true, { detail = "signed out of band (key " .. tostring(artifacts.key_id) .. "), verified here" }
+  end
+  if step == "ship" or step == "publish" then
+    local short = sha:sub(1, 12)
+    if step == "ship" then
+      local ref = tostring(artifacts.ref or ("artifacts/node-" .. short))
+      local tip = tree and remote_tip(tree, M.incoming(), "refs/heads/" .. ref) or nil
+      if not tip then
+        return false, { error = "mark_not_verified", detail = "the incoming repository carries no " .. ref,
+          observed = "git ls-remote " .. M.incoming() .. " refs/heads/" .. ref .. " answered nothing",
+          next = "ship the set first (scripts/publish-artifacts-branch.sh), then mark" }
+      end
+      local fetched = git(run, tree, "fetch --quiet " .. quote(M.incoming()) .. " " .. quote("refs/heads/" .. ref), 600)
+      local sig = M.exec("git -C " .. quote(slashes(tree)) .. " cat-file -e " .. quote("FETCH_HEAD:SHA256SUMS.sig") .. " && echo yes || echo no", slashes(tree), 120)
+      if (fetched.code or 1) ~= 0 or trim(tostring(sig.stdout or "")) ~= "yes" then
+        return false, { error = "mark_not_verified", detail = ref .. " does not carry a signature",
+          observed = "fetched " .. ref .. ": " .. trim(tostring(sig.stdout or "")) .. " for SHA256SUMS.sig",
+          next = "a shipped ref without SHA256SUMS.sig is not this round's release" }
+      end
+      artifacts.ref = ref
+      artifacts.artifacts_commit = tip
+      run.journal.artifacts = artifacts
+      return true, { detail = ref .. " " .. tostring(tip):sub(1, 12) .. " carries the signed sums (verified)" }
+    end
+    local tag = "node-" .. short
+    local account = trim(options.account or (run.journal.start or {}).account)
+    local routed = account ~= "" and account ~= "local" and account ~= "this"
+    local command = "gh release view " .. quote(tag) .. " >/dev/null 2>&1 && echo present || echo absent"
+    local answer
+    if routed then
+      local reply, problem = M.node_bash(account, command)
+      if not reply then
+        return false, { error = "mark_not_verified", detail = "cannot read the releases of " .. account,
+          observed = problem.detail .. ": " .. problem.observed, next = "check the node is reachable, then mark again" }
+      end
+      answer = tostring(reply.stdout or "")
+    else
+      answer = tostring((M.exec(command, "", 120) or {}).stdout or "")
+    end
+    if trim(answer) ~= "present" then
+      return false, { error = "mark_not_verified", detail = "the release " .. tag .. " is not there",
+        observed = (routed and ("asked " .. account)) or "asked this machine" .. ": " .. trim(answer),
+        next = "publish it first (bash PUBLISH.sh from the shipped ref), then mark" }
+    end
+    artifacts.signed = artifacts.signed or true
+    run.journal.artifacts = artifacts
+    run.journal.publish = { tag = tag, state = "published", signed = true, key_id = artifacts.key_id,
+      account = routed and account or nil }
+    return true, { detail = "release " .. tag .. " is published" .. (routed and (" (on " .. account .. ")") or "") .. " (verified)" }
+  end
+  return false, { error = "mark_unsupported", detail = step .. " cannot be marked: this verb only records an effect it can verify",
+    observed = "markable steps: " .. table.concat(M.MARKABLE, ", "),
+    next = "run the step instead: wa land --resume" }
+end
+
+-- <run id> <step> <evidence file> <options>: verify, then record. The evidence file must exist and be
+-- readable - a mark with no evidence is the hand-edited journal this verb replaces - and the journal is
+-- written only after the verification answered yes.
+function M.mark(id, step, evidence_path, options)
+  options = type(options) == "table" and options or {}
+  step = trim(step)
+  local journal = json_file(M.journal_path(id))
+  if not journal then
+    return false, { error = "mark_no_run", detail = "no journal for run " .. tostring(id),
+      observed = M.journal_path(id) .. " does not exist", next = "`wa land status` lists the runs" }
+  end
+  local markable = false
+  for _, name in ipairs(M.MARKABLE) do if name == step then markable = true break end end
+  if not markable then
+    return false, { error = "mark_unsupported", detail = tostring(step) .. " cannot be marked",
+      observed = "markable steps: " .. table.concat(M.MARKABLE, ", "),
+      next = "run the step instead: wa land --resume" }
+  end
+  if evidence_path == nil or trim(evidence_path) == "" then
+    return false, { error = "mark_evidence_required", detail = "a mark without evidence is a claim, not a record",
+      next = "name the output of the command that did it: wa land mark " .. step .. " --evidence <file>" }
+  end
+  if not read(evidence_path) then
+    return false, { error = "mark_evidence_missing", detail = "the evidence file cannot be read",
+      observed = tostring(evidence_path), next = "write what the command printed to a file and name it" }
+  end
+  local step_row = (journal.steps or {})[step]
+  if step_row and (step_row.state == "done" or step_row.state == "skipped") then
+    return false, { error = "mark_already_settled", detail = "run " .. id .. "'s " .. step .. " is already " .. tostring(step_row.state),
+      next = "nothing to mark: `wa land status --run " .. id .. "` shows the run" }
+  end
+  local start = journal.start or {}
+  local merged = {}
+  for key, value in pairs(start) do merged[key] = value end
+  for key, value in pairs(options) do merged[key] = value end
+  local run = { id = tostring(id), journal = journal, tree = journal.tree, land_branch = journal.land_branch }
+  local ok, result = mark_verdict(run, step, merged)
+  if not ok then return false, result end
+  journal.steps = journal.steps or {}
+  local row = journal.steps[step] or { name = step }
+  row.state = "done"
+  row.detail = tostring((result and result.detail) or "marked")
+  row.marked = true
+  row.mark_evidence = tostring(evidence_path)
+  row.marked_at = now()
+  journal.steps[step] = row
+  journal.updated_at = now()
+  if step == "push" then journal.pushed_sha = journal.tree_commit end
+  if step == "main" then journal.main_sha = journal.tree_commit end
+  if not write(M.journal_path(id), json.encode(journal)) then
+    return false, { error = "mark_unwritable", detail = "the journal could not be written", observed = M.journal_path(id) }
+  end
+  local note = M.run_dir(id) .. "/evidence/" .. step .. ".log"
+  local previous = read(note) or ""
+  write(note, previous .. "\n$ [marked out of band] evidence " .. tostring(evidence_path) .. "\n" .. tostring(result.detail) .. "\n")
+  return true, { detail = tostring(result.detail), journal = M.journal_path(id) }
+end
+
 -- ---------------------------------------------------------------- the CLI
 
 local function split(value)
@@ -2754,6 +3210,39 @@ function M.cli(argv)
       local ok, answer = M.ready_mark(branch, sha, brief)
       print("wa land ready: " .. tostring(answer) .. (ok and (" - " .. branch .. " " .. sha) or ""))
       return ok and 0 or 1
+    elseif flag == "mark" then
+      -- `wa land mark <step> --evidence <file> [--run <id>] [--account <node>]`: the verb that records an
+      -- effect done out of band, AFTER re-verifying it. It is the only supported way to move a step to done
+      -- outside the step itself; a hand-edited journal is exactly what it replaces.
+      local step = argv[index + 1]
+      if type(step) ~= "string" or step == "" or step:sub(1, 2) == "--" then
+        print("wa land mark needs a step: wa land mark <" .. table.concat(M.MARKABLE, "|") .. "> --evidence <file> [--run <id>]")
+        return 2
+      end
+      local mark_options = {}
+      for scan = index + 2, #argv do
+        local word = tostring(argv[scan])
+        if word == "--evidence" then mark_options.evidence = argv[scan + 1]
+        elseif word == "--run" then mark_options.run = argv[scan + 1]
+        elseif word == "--account" then mark_options.account = argv[scan + 1]
+        elseif word == "--signer" then mark_options.signer = argv[scan + 1]
+        end
+      end
+      local id = mark_options.run
+      if id == nil or id == "" then id = newest_unfinished() end
+      if id == nil then
+        print("wa land mark: no run to mark: name one with --run <id>, or `wa land status`")
+        return 1
+      end
+      local marked, answer = M.mark(id, step, mark_options.evidence, mark_options)
+      if marked then
+        print("wa land mark: " .. tostring(answer.detail) .. " (run " .. tostring(id) .. ", step " .. tostring(step) .. ")")
+        return 0
+      end
+      print("wa land mark: refused (" .. tostring(answer.error) .. "): " .. tostring(answer.detail or ""))
+      if answer.observed then print("wa land mark: observed: " .. tostring(answer.observed)) end
+      if answer.next then print("wa land mark: next: " .. tostring(answer.next)) end
+      return 1
     elseif flag == "--branches" then
       local value = read_value(flag); if not value then return 2 end
       options.branches = split(value); index = index + 2
@@ -2796,6 +3285,7 @@ function M.cli(argv)
     elseif flag == "--help" or flag == "-h" then
       print("wa land --ready | --branches a,b [--dry-run] [--no-deploy] [--full] [--resume] [--run <id>]")
       print("wa land --rollback                 put every node's kept pair back (reverse ring order)")
+      print("wa land mark <step> --evidence <file> [--run <id>]   record a step done out of band, after re-verifying it")
       print("wa land status [--run <id>]        the journal, read-only")
       print("wa land ready <branch> <sha> [--brief <file>]   record a READY line for a finished branch")
       print("  --repo <dir> --incoming <remote> --origin <remote> --ring node:mode,... --json")
