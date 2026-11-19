@@ -75,6 +75,14 @@ refusal() { # <want-fragment> <args...>
 refusal row_at_sha_bad_commit 'HEAD~1' "$row"
 refusal row_at_sha_row_required "$sha"
 refusal row_at_sha_row_missing "$sha" scripts/test-does-not-exist.lua
-refusal row_at_sha_row_absent_at_base "$sha" scripts/lib/row-at-sha.sh
+# A row that exists HERE and not at the base: this branch own scripts/test-row-at-sha.sh, run against
+# the commit this branch started from. Using HEAD as the base would find the file present and prove
+# nothing (measured: the refusal never fired because the row existed at both ends).
+base_sha=$(git merge-base HEAD origin/main 2>/dev/null || git rev-parse HEAD~1)
+if git cat-file -e "$base_sha:scripts/test-row-at-sha.sh" 2>/dev/null; then
+  echo NOTE: the absent-at-base case cannot be made here: the row already exists at $base_sha
+else
+  refusal row_at_sha_row_absent_at_base "$base_sha" scripts/test-row-at-sha.sh
+fi
 
 echo 'test-row-at-sha: ok (four classes and the skip convention, a real comparison with no worktree left behind, every refusal named)'
