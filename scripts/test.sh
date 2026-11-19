@@ -1241,6 +1241,12 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-provider-connection-abort-recovery.
 # at once by name on auth, stops on cancellation, and gives an unclassified provider failure a bounded
 # five retries before naming it. Hermetic: the provider is replaced; no network, no inference.
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-network-outage-recovery.lua" "$BIN" --db "$DB.provider-network-outage" | grep 'network outage recovery ok'
+# A peer that is merely unreachable stays in the roster (19/11: after the link returned, 'wa nodes'
+# listed only itself and every 'wa call <peer>' answered unknown_node:<peer>). A failed roster read
+# used to REPLACE the cache with the empty table it had started from, so an outage erased the fleet
+# until a restart. The fix keeps every known peer, marked offline with its last-seen stamp, and a call
+# to one answers peer_offline:<name> (last seen ...). A successful read may still remove a peer.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-network-roster-offline.lua" "$BIN" --db "$DB.network-roster-offline" | grep 'network roster offline ok'
 # A route must refuse a model it cannot serve before the first provider request - and only that.
 # A child with `gpt-6-luna` on the opencode-go route failed in 0.67s with zero tool calls on the
 # edge's `Model does not support this protocol`, and 26 child runs of `deepseek-v4.1-flash` died

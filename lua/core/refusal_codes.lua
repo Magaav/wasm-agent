@@ -279,6 +279,7 @@ return {
   ['path_required']='capture_view.lua, file_tools.lua, tools.lua',
   ['pattern_required']='tools.lua',
   ['peer_answer_unreadable']='federation.lua',
+  ['peer_offline:']='nodes.lua',
   ['pin_node_required']='pins.lua',
   ['pin_not_clearable']='remote_update.lua',
   ['pin_not_written']='pins.lua',

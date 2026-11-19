@@ -246,7 +246,7 @@ local function fetch_peers(fresh, cached_only)
   -- with this node alone, which is true and cheap; a network read here would put the rendezvous'
   -- latency inside somebody else's turn.
   if cached_only then return cache or {} end
-  local peers = {}
+  local peers, read_ok = {}, false
   pcall(function()
     local headers = json.encode(M.signed_headers("nodes") or {})
     local response = json.decode(host.http("GET", url:gsub("/+$", "") .. "/nodes", headers, ""))
@@ -254,9 +254,31 @@ local function fetch_peers(fresh, cached_only)
       local ok, payload = pcall(json.decode, response.body)
       if ok and type(payload) == "table" and type(payload.nodes) == "table" then
         peers = payload.nodes
+        read_ok = true
       end
     end
   end)
+  if not read_ok then
+    -- A roster read that FAILED is not a roster that is empty. Measured 19/11 ~12:17 UTC, home
+    -- network down: 38 relay detaches, and when the laptop had internet again `wa nodes` listed only
+    -- itself - every peer had been replaced by the empty answer of a failed read, so every
+    -- `wa call <peer>` was unknown_node:<peer> until a restart. A peer that is merely unreachable
+    -- stays KNOWN and is marked offline, with when it was last seen; only a read that succeeded may
+    -- remove one from the roster.
+    local kept = {}
+    for _, peer in ipairs(cache or {}) do
+      local copy = {}
+      for key, value in pairs(peer) do copy[key] = value end
+      copy.online = false
+      copy.last_seen = peer.last_seen or cache_at
+      copy.roster_stale = true
+      kept[#kept + 1] = copy
+    end
+    -- The cache is served with a short TTL, so a link that is still down is retried, and a link that
+    -- came back is re-read. The peers themselves are never dropped by a failed read.
+    cache, cache_at = kept, now - CACHE_TTL + 1
+    return kept
+  end
   cache, cache_at = peers, now
   return peers
 end
@@ -808,10 +830,32 @@ function M.relay_deadline_note(node, reason)
     M.RELAY_AWAIT_SLICE_MS, M.RELAY_AWAIT_SLICE_MS / 1000)
 end
 
+-- A peer the roster already KNOWS but marks offline (a failed roster read kept it, see fetch_peers).
+-- The answer names it and when it was last seen, instead of the unknown_node that made a network blip
+-- look like a deleted node (19/11: after the link returned, every call to a peer was unknown_node).
+function M.peer_offline(node)
+  local name = tostring((node and (node.name or node.node_id)) or "the peer")
+  local seen = node and tonumber(node.last_seen)
+  local when = "unknown"
+  if seen then
+    local ok, formatted = pcall(os.date, "!%Y-%m-%dT%H:%M:%SZ", math.floor(seen))
+    when = ok and formatted or ("unix " .. tostring(math.floor(seen)))
+  end
+  return { error = "peer_offline:" .. name .. " (last seen " .. when .. ")", node = name,
+    connector = "peer_offline", online = false, last_seen = seen,
+    message = string.format("%s is in the roster but unreachable right now (last seen %s): nothing was "
+      .. "sent, so nothing ran. Check the link and the node, then retry - a peer that is merely "
+      .. "unreachable is never removed from the roster.", name, when),
+    retryable = true }
+end
+
 -- Call a capability on a peer: direct when possible, else through the relay.
 function M.remote_call(selector, capability, args)
   local node = M.find(selector)
   if not node then return { error = "unknown_node:" .. tostring(selector) } end
+  -- Known but offline, and with no endpoint to try directly: say so by name. A call that still has a
+  -- direct endpoint is attempted below, because a stale roster mark is not proof the peer is gone.
+  if node.online == false and not M.endpoint(node) then return M.peer_offline(node) end
   local ts = math.floor(host.now())
   -- The body is built before it is signed, and the signature travels in the headers rather than
   -- inside the body: what was signed is the body as it is sent, so the receiver can hash the
@@ -831,7 +875,12 @@ function M.remote_call(selector, capability, args)
   local mesh = M.mesh_enabled() and M.mesh_attempt(node, capability, args, body, headers) or nil
   if mesh and mesh.refused then return mesh.refused end
   local response = (mesh and mesh.response) or M.request(node, "/node/call", body, headers)
-  if not response then return { error = "remote_unreachable", node = node.name } end
+  if not response then
+    -- The transport could not reach a peer the roster already marks offline: name it, do not pretend
+    -- it never existed.
+    if node.online == false then return M.peer_offline(node) end
+    return { error = "remote_unreachable", node = node.name }
+  end
   if response.error == "relay_refused" then
     local refusal = M.refusal("relay", response.reason, response.relay_status, node)
     refusal.rid = response.rid
