@@ -527,10 +527,13 @@ end
 -- A batch is read-only on the wire and an operation start answers a receipt at once, so neither is
 -- turned into work nobody can collect.
 do
-  -- One slice is a bounded relayed wait: short enough that the peer answers inside the relay's hold
-  -- (nodes.lua RELAY_PEER_BUDGET_MS), long enough that a minute of waiting is a handful of round
-  -- trips rather than sixty.
-  local REMOTE_SLICE_MS = 15000
+  -- One slice is a bounded relayed wait (review r1, SHOULD 2). It must stay under BOTH bounds: the
+  -- operation tool's own wait_ms maximum (nodes.OPERATION_AWAIT_MAX_MS, 10 s - a larger number is refused
+  -- by the peer's schema, so the 15 s this used to name was a slice no call could ask for) and the
+  -- relay's hold (nodes.RELAY_PEER_BUDGET_MS). The smaller of the two, in one place, so a change to
+  -- either number cannot leave a slice the peer will not accept.
+  local nodes_lib = dofile("lua/core/nodes.lua")
+  local REMOTE_SLICE_MS = math.min(nodes_lib.OPERATION_AWAIT_MAX_MS, nodes_lib.RELAY_PEER_BUDGET_MS)
 
   -- One relayed operation call: the peer's own operation tool, reached through the same remote call
   -- everything else uses, so the peer keeps its own admission, its own session and its own answer.
@@ -568,18 +571,35 @@ do
     poll = function(dispatch, opts, record, ms)
       local left = math.max(0, math.floor(tonumber(ms) or 0))
       local last, reason = nil, "still_running"
+      local function elapsed_ms() return tonumber(host.monotonic_ms and host.monotonic_ms() or 0) or 0 end
       -- A wait is only asked for when there is a wait to spend: a POLL (wait_s:0, or a batch sibling
       -- that settled early) asks the peer for its STATUS instead of an await with no budget, because a
       -- zero-length await is not a glance - it is a call whose stop condition the peer decides.
       while left > 0 do
         if cancelled() then return last, "run_cancelled" end
         local slice = math.min(left, REMOTE_SLICE_MS)
+        local before = elapsed_ms()
         local answer, why = remote_operation(dispatch, record,
           { action = "await", id = record.op, wait_ms = slice, output = true, max_bytes = 24576, tool = "operation" })
-        if not answer then return last, why end
+        -- Decrement by the time the call ACTUALLY spent, not by the slice asked for (review r1, SHOULD 2):
+        -- a peer that answered at once used to be charged the whole slice, so a budget bought fewer
+        -- round trips than it paid for.
+        left = math.max(0, left - math.max(0, elapsed_ms() - before))
+        if not answer then
+          -- AN UNREACHABLE PEER IS NOT A FAILED COMMAND (review r1, SHOULD 3). A transport error during
+          -- one slice says nothing about the operation: it may still be running there, and marking the
+          -- local record final would hide work nobody stopped. Report it as PENDING with the reason; the
+          -- next wait(op) - or the caller's own next step - asks the peer again.
+          if last ~= nil and last.settled == true then return last, nil end
+          return last, tostring(why)
+        end
         last = answer
         if answer.settled == true then return answer, nil end
-        left = left - slice
+        if answer.error ~= nil and tostring(answer.error) ~= "await_interrupted" then
+          -- The peer answered with an error that is not the harness interrupting its own wait: still not
+          -- a settled command. Carry the word, keep the handle alive.
+          reason = tostring(answer.error)
+        end
       end
       if last == nil then
         local state, why = remote_operation(dispatch, record, { action = "status", id = record.op })
@@ -611,13 +631,62 @@ do
       return entry
     end,
     cancel = function(dispatch, opts, record)
+      -- UNKNOWN IS NOT YES (review r1, MUST 1). The peer's cancel answer has four shapes and only one of
+      -- them is a stop it observed: cancelled:true. A refusal and an already-settled operation both come
+      -- back carrying the operation_id (operations.rs: the caller's own refusal, and "finished"), so an
+      -- answer with an id is NOT proof of a stop - the earlier "answer.cancelled ~= false" read a refusal
+      -- as a success and left the command running while the script had been told it was dead.
       local answer, why = remote_operation(dispatch, record, { action = "cancel", id = record.op })
       if not answer then
         return { op = record.op, tool = "remote", node = record.node, cancelled = false,
           error = "not_cancellable", why = tostring(why) }
       end
-      return { op = record.op, tool = "remote", node = record.node,
-        cancelled = answer.cancelled ~= false, state = "cancelled" }
+      if answer.error ~= nil then
+        -- "finished" is news (the outcome is retained: wait(op) re-reads it), never a cancel.
+        return { op = record.op, tool = "remote", node = record.node, cancelled = false,
+          error = tostring(answer.error), state = answer.state,
+          note = answer.note or (tostring(answer.error) == "finished"
+            and "the call had finished first; wait(op) re-reads its retained result, and nothing was re-run"
+            or nil) }
+      end
+      if answer.cancelled == true then
+        return { op = record.op, tool = "remote", node = record.node, cancelled = true,
+          state = "cancelled" }
+      end
+      -- The peer's cancel is a REQUEST: it sets the flag and answers the operation's own snapshot
+      -- (rust/wa-operation/src/lib.rs "pub fn cancel" -> self.snapshot(id)), so the snapshot still says
+      -- "running" for as long as the supervisor takes to notice. That is not a failure and not a success:
+      -- watch it, briefly and by observation, and answer what was SEEN.
+      local clock = function() return tonumber(host.monotonic_ms and host.monotonic_ms() or 0) or 0 end
+      local stop_by = clock() + 3000
+      local state = answer
+      repeat
+        local observed, why_state = remote_operation(dispatch, record, { action = "status", id = record.op })
+        if not observed then
+          return { op = record.op, tool = "remote", node = record.node, cancelled = false,
+            cancel_requested = true, error = "cancel_not_confirmed", state = state.state,
+            why = tostring(why_state),
+            note = "the stop was requested and the peer could not be asked again; the operation may still "
+              .. "be running - check status on that node" }
+        end
+        state = observed
+        local name = tostring(observed.state or "")
+        if observed.cancelled == true or name == "cancelled" then
+          return { op = record.op, tool = "remote", node = record.node, cancelled = true,
+            state = "cancelled" }
+        end
+        if observed.settled == true then
+          -- It settled without being cancelled: the call had finished first, and its outcome is retained.
+          return { op = record.op, tool = "remote", node = record.node, cancelled = false,
+            error = "finished", state = name,
+            note = "the call had finished first; wait(op) re-reads its retained result, and nothing was re-run" }
+        end
+        if host.sleep then host.sleep(0.2) end
+      until clock() >= stop_by
+      return { op = record.op, tool = "remote", node = record.node, cancelled = false,
+        cancel_requested = true, error = "cancel_not_confirmed", state = tostring(state.state or "running"),
+        note = "the stop was requested and the operation had not settled when this answer was formed; it "
+          .. "may still be running - check status on that node, then cancel again" }
     end,
   }
 end
