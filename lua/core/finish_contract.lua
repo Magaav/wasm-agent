@@ -70,9 +70,14 @@ function M.markup(text)
     marker = found.marker,
     -- The operator's sentence, verbatim and undivided: the marker is named AFTER it, so the one thing
     -- the model must read is one clause.
+    -- The sentence names the action channel THIS node offers (rel review r1, R4): telling a native node
+    -- to write a fenced block names the tool it does not have. The shape is the same; the instruction
+    -- is the one the mode actually honours.
     notice = "[Harness notice] This message had no action: your message contains tool-call markup as "
-      .. "text, so nothing ran; act with a js run block in your answer. The markup was " .. found.marker
-      .. ", and no call could be read from it. One " .. TICK .. "js run block that ends your message.",
+      .. "text, so nothing ran. The markup was " .. found.marker .. ", and no call could be read from "
+      .. "it. " .. (dofile("lua/core/raw_code.lua").mode() == "native"
+        and "Act by calling the run tool with the script in its `code` argument."
+        or ("Act with one " .. TICK .. "js run block in your answer.")),
     failure = "tool_call_markup_as_text: the message carried " .. found.marker .. " tool-call markup as "
       .. "text and nothing ran; the harness asked for a js run block in the answer once already, so the "
       .. "turn is failed rather than finished without its action",

@@ -773,7 +773,14 @@ function M.take(result, stop_sent, policy)
   -- the answer. The reader names it so the loop can ask once, by name; a second one fails the run.
   local mode_now = M.mode()
   if (mode_now == "native" or mode_now == "bash") and #(result.tool_calls or {}) == 0 then
-    local leaked = M.markup_in_text(content)
+    -- Skip code before scanning (rel review r1, R4): a fenced sample or an inline mention of a tag is
+    -- the model TALKING about a call shape, and failing that answer would be the false positive this
+    -- net must not have. Only bare markup in the prose is a leak.
+    local prose = tostring(content or ""):gsub("```.-```", " ")
+    -- Inline code is stripped LINE BY LINE: a span never crosses a line, so no escape sequence has to
+    -- survive three layers of quoting to say so (it did not, twice).
+    prose = prose:gsub("[^\n]+", function(line) return (line:gsub("`[^`]-`", " ")) end)
+    local leaked = M.markup_in_text(prose)
     if leaked then
       return { leaked_markup = true, marker = leaked.marker, bytes = #content }
     end
