@@ -726,6 +726,24 @@ end
 -- Called from the node's housekeeping tick (lua/core/server.lua), so it is cheap by default: one read of
 -- the memo file while the interval has not passed. The memo is a FILE, not a process variable, because a
 -- node restarts and a restart must not reset the day.
+-- Is a periodic snapshot DUE, without taking one (item 10 of the node-ops round)?
+--
+-- The sync tick asks this before it launches anything. It is one read of the memo file and no SQLite at
+-- all, so a tick that is not due costs nothing and starts no process: measured, the alternative - starting
+-- a background operation on every tick and letting it decide - pays a process per tick to learn 'not yet'.
+function M.due(opts)
+  opts = opts or {}
+  local interval = tonumber(host.getenv('WA_BACKUP_INTERVAL_S') or '') or tonumber(opts.interval_s or '') or 86400
+  if interval <= 0 then return true, nil end
+  local memo = paths.config() .. '/backups/.last-periodic'
+  local ok, last = pcall(host.read_file, memo)
+  local last_s = ok and type(last) == 'string' and tonumber(last:match('^(%d+)%s*$') or '') or nil
+  if last_s == nil then return true, nil end
+  local elapsed = os.time() - last_s
+  if elapsed >= 0 and elapsed < interval then return false, { elapsed_s = elapsed, interval_s = interval } end
+  return true, nil
+end
+
 function M.tick(opts)
   opts = opts or {}
   local interval = tonumber(host.getenv('WA_BACKUP_INTERVAL_S') or '') or tonumber(opts.interval_s or '') or 86400
@@ -747,7 +765,11 @@ function M.tick(opts)
   end
   local ok, result = pcall(M.run, 'periodic')
   if not ok then return { ok = false, error = 'periodic_backup_failed', detail = tostring(result) } end
-  local manifest = write_manifest(result.dir, 'periodic', now, result.stores, result.skipped)
+  -- THE MANIFEST IS WRITTEN ONCE, BY M.run (item 10 of the node-ops round). Measured 19/11: M.run called
+  -- write_manifest, and this function called it AGAIN over the same directory - two writers of one file,
+  -- and the second one re-hashed every copy for a record that already existed. The result M.run returns
+  -- carries its manifest; this reads that one.
+  local manifest = result.manifest or { stores = {}, skipped = {} }
   pcall(host.write_file, memo, tostring(now_s))
   local pruned = prune_periodic(tonumber(host.getenv('WA_BACKUP_KEEP') or ''))
   return { ok = true, dir = result.dir, stores = #manifest.stores, skipped = #manifest.skipped,

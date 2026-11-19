@@ -49,6 +49,10 @@ end
 -- The entry point. `verb` is 'backup' or 'restore'; the rest is the command line after it.
 function M.run(verb, args)
   local backup = dofile('lua/core/backup.lua')
+  -- `wa backup periodic` is the periodic job, not a restore of a snapshot named 'periodic' (item 10 of
+  -- the node-ops round). Measured before this line: the backup verb read the bare word as --from and the
+  -- job answered 'restore_manifest_missing: periodic holds no usable manifest.json'.
+  if verb == 'backup' and tostring(args[1] or '') == 'periodic' then return M.run('periodic', {}) end
   if verb == 'backup' then
     local opts, why = parse(args)
     if not opts then say('wa backup: ' .. why); return 2 end
@@ -64,6 +68,18 @@ function M.run(verb, args)
     say(string.format('backup: %d store(s) snapshotted and checked in %s', #result.stores, result.dir))
     for _, skipped in ipairs(result.skipped or {}) do say('backup: ' .. skipped.line) end
     say('backup: restore it with: wa restore --from ' .. result.dir)
+    return 0
+  end
+  if verb == 'periodic' then
+    -- The body of the background periodic snapshot (item 10 of the node-ops round). The sync tick no
+    -- longer takes the snapshot inside the tick: it asks backup.due() and, when it is due, starts THIS
+    -- as a supervised operation (wa backup periodic), so a slow VACUUM of a large ledger cannot hold
+    -- the node's sync loop and a failure lands in the operation log instead of in a tick nobody reads.
+    local ok, result = pcall(backup.tick)
+    if not ok then say('wa backup periodic: refused(backup_failed): ' .. tostring(result)); return 1 end
+    if result.skipped then say('backup periodic: ' .. tostring(result.skipped)); return 0 end
+    if result.ok == false then say('wa backup periodic: refused(' .. tostring(result.error) .. '): ' .. tostring(result.detail)); return 1 end
+    say(string.format('backup periodic: %d store(s) in %s (%d old removed)', result.stores or 0, tostring(result.dir), result.removed or 0))
     return 0
   end
   if verb == 'restore' then
@@ -104,7 +120,7 @@ function M.run(verb, args)
     end
     return 0
   end
-  say('unknown verb: ' .. tostring(verb) .. ' (backup | restore)')
+  say('unknown verb: ' .. tostring(verb) .. ' (backup | restore | periodic)')
   return 2
 end
 

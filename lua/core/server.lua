@@ -2152,16 +2152,37 @@ function wa_sync_tick()
   -- node's state (every `scripts/test-*.lua` runs that way).
   if host.getenv("WA_SCRIPT") == nil then pcall(update_banner.tick) end
   -- The periodic backup (item 1 of the node-ops round): at most one snapshot per WA_BACKUP_INTERVAL_S,
-  -- taken here because this is the one place a node already does recurring work with nobody waiting. It
-  -- is cheap while the interval has not passed (one read of a memo file), it never refuses the tick, and
-  -- a failure is one printed line - a backup is a safety net, not a thing a live node stops for.
+  -- due-checked here because this is the one place a node already does recurring work with nobody
+  -- waiting - and TAKEN in a supervised operation, not here (item 10 of the round).
   if host.getenv("WA_SCRIPT") == nil then
-    local ok, backed = pcall(function() return dofile("lua/core/backup.lua").tick() end)
-    if ok and type(backed) == "table" and backed.ok and backed.dir then
-      host.log("backup: periodic snapshot " .. tostring(backed.dir) .. " (" .. tostring(backed.stores) .. " store(s), "
-        .. tostring(backed.removed or 0) .. " old one(s) removed)")
-    elseif not ok or (type(backed) == "table" and backed.ok == false) then
-      host.log("backup: periodic snapshot failed: " .. tostring(ok and backed.detail or backed))
+    -- OFF THE TICK (item 10 of the node-ops round). This used to call backup.tick() HERE, inside the sync
+    -- loop: a VACUUM INTO of a large ledger held the node's sync tick for its whole duration, and a
+    -- failure could only be printed. The tick now asks backup.due() - one read of a memo file, no SQLite -
+    -- and when a snapshot is due it starts `wa backup periodic` as a SUPERVISED OPERATION, so the work
+    -- outlives this call, cannot block the loop, and its outcome is in the operation record instead of a
+    -- log line nobody reads. A launch that cannot start is one printed line: a backup is a safety net,
+    -- not a thing a live node stops for.
+    local backup_mod = dofile("lua/core/backup.lua")
+    local due, why_not = backup_mod.due()
+    if due then
+      local runtime = json.decode(host.runtime_info and host.runtime_info() or '') or {}
+      local program = tostring(runtime.binary_path or '')
+      if program == '' then
+        host.log("backup: periodic snapshot due but this node cannot name its own binary (runtime_info)")
+      else
+        local argv = { "backup", "periodic" }
+        local db = host.getenv("WASM_AGENT_DB")
+        if db and db ~= '' then argv = { "--db", db, "backup", "periodic" } end
+        local launched, receipt = pcall(host.operation, "start", json.encode({
+          program = program, args = argv, timeout_seconds = 3600,
+          kind = "command", owner = "backup-periodic", background = true }))
+        local answer = launched and (json.decode(receipt) or {}) or {}
+        if answer.operation_id then
+          host.log("backup: periodic snapshot started as operation " .. tostring(answer.operation_id))
+        else
+          host.log("backup: periodic snapshot could not start: " .. tostring(answer.error or receipt))
+        end
+      end
     end
   end
   if enrollment.managed() then return json.encode({error='managed_sync_disabled'}) end

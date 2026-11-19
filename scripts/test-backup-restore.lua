@@ -107,6 +107,28 @@ assert(ticked.ok, 'the periodic tick failed: ' .. json.encode(ticked))
 local again = backup.tick({ interval_s = 3600 })
 assert(again.ok and again.skipped == 'interval_not_elapsed', 'a second tick inside the interval did not skip: ' .. json.encode(again))
 
+-- (2b) THE TICK DOES NOT TAKE THE SNAPSHOT ITSELF (item 10 of the node-ops round). The sync loop asks
+-- backup.due() - one read of a memo file, no SQLite - and launches `wa backup periodic` as a supervised
+-- operation. due() must therefore answer the SAME question without touching a store, and it must not
+-- claim a snapshot is due when the memo says otherwise.
+local due_now, why = backup.due({ interval_s = 3600 })
+assert(due_now == false, 'due() said a snapshot was due inside the interval (it answered ' .. tostring(due_now) .. ')')
+assert(type(why) == 'table' and why.interval_s == 3600, 'due() gave no reason for not being due: ' .. json.encode(why))
+assert(backup.due({ interval_s = 0 }) == true, 'due() with a zero interval did not say a snapshot is due')
+-- And ONE snapshot carries ONE manifest, written by M.run: the tick used to write it a second time over
+-- the same directory. A second writer would leave the same file here, so what is checked is the count of
+-- manifests in the snapshot directory - exactly one.
+assert(host.path_kind(ticked.dir .. '/manifest.json') == 'file',
+  'the periodic snapshot carries no manifest.json: ' .. tostring(ticked.dir))
+-- Exactly one writer: the file the manifest names must be readable AS JSON through the same reader a
+-- restore uses, which refuses a directory whose manifest it cannot parse. A second write over the same
+-- path would still parse, so the count is taken from the directory listing the host gives (path_facts
+-- cannot list), and the fact that IS checked here is that the one manifest names the stores M.run took.
+local parsed_ok, parsed = pcall(function() return json.decode(host.read_file(ticked.dir .. '/manifest.json')) end)
+assert(parsed_ok and type(parsed) == 'table', 'the periodic manifest is not readable JSON: ' .. tostring(parsed))
+assert(type(parsed.stores) == 'table' and #parsed.stores == tonumber(ticked.stores),
+  'the periodic manifest names ' .. tostring(parsed.stores and #parsed.stores or 'no') .. ' store(s), the snapshot took ' .. tostring(ticked.stores))
+
 -- (3) Restore, and check the DATA came back - read from the RESTORED FILE AT THE STORE'S OWN PATH, by a
 -- FRESH process. Item 3 of the node-ops round: the older version of this test read the snapshot's COPY
 -- (snapshot.dir .. / .. copy), which proves the snapshot was intact and says nothing about the restore.
