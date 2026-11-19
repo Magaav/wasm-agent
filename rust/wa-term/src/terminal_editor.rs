@@ -832,7 +832,7 @@ impl Editor {
         // number runs, and a row one cell too wide WRAPS - which moves the box and the chat above it
         // (Victor, 19/11: the bounce is the row under the box changing height).
         let right: String = clip_cells(&self.footer_right, self.width / 2);
-        let right_width: usize = right.chars().map(cell_width).sum();
+        let right_width: usize = visible_cells(&right);
         let room = self.width.saturating_sub(right_width + if right.is_empty() { 0 } else { 1 });
         let bash_hint = BASH_FOOTER.to_string();
         let (color, text) = if !self.notice.is_empty() { (NOTICE, &self.notice) }
@@ -1134,12 +1134,38 @@ const PANEL: &str = "\x1b[38;2;177;185;249m";
 
 pub fn cell_width_of(ch: char) -> usize { cell_width(ch) }
 
-/// `text` cut to `room` terminal cells, ending in `…` when it was cut.
+/// The terminal cells `text` takes on screen: every character's width, escape sequences
+/// counting none. The one measure of what "fits" means, beside the clip that enforces it.
+pub fn visible_cells(text: &str) -> usize {
+    let mut total = 0usize;
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                for c in chars.by_ref() { if ('@'..='~').contains(&c) { break; } }
+            }
+            continue;
+        }
+        total += cell_width(ch);
+    }
+    total
+}
+
 pub fn clip_cells(text: &str, room: usize) -> String {
-    let total: usize = text.chars().map(cell_width).sum();
+    let total = visible_cells(text);
     if total <= room { return text.to_string(); }
     let mut out = String::new(); let mut used = 0;
-    for ch in text.chars() {
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            out.push(ch);
+            if chars.peek() == Some(&'[') {
+                out.push(chars.next().unwrap());
+                for c in chars.by_ref() { out.push(c); if ('@'..='~').contains(&c) { break; } }
+            }
+            continue;
+        }
         let width = cell_width(ch);
         if used + width + 1 > room { break; }
         out.push(ch); used += width;
@@ -1148,6 +1174,12 @@ pub fn clip_cells(text: &str, room: usize) -> String {
     out
 }
 
+/// `text` cut to `room` terminal cells, ending in `…` when it was cut.
+///
+/// An escape sequence takes ZERO cells and is never cut in half: the footer can carry colour now
+/// (the context ball's level, lua/core/cli_view.lua), and counting its bytes as characters would
+/// clip a row that fits the terminal, while cutting inside one would print the rest as text
+/// (Victor, 19/11: a status row measures what the terminal draws).
 // UTF-8 is not a terminal column count. Keep CJK and emoji inside the viewport;
 // combining marks share their preceding cell. A full grapheme engine would also
 // handle ZWJ sequences, but this covers the common terminal width contract.

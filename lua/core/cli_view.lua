@@ -52,6 +52,10 @@ local codemode_block = dofile("lua/core/codemode_block.lua")
 -- core owns rather than keeping state of its own, registers every view it creates so a swap can point it
 -- at the new methods, and ticks the watcher at each frame it begins: a save is visible on the next one.
 local reload = dofile("lua/core/reload.lua")
+-- The window the node actually compacts on (lua/core/model_window.lua): the context ball's COLOUR
+-- is read from the thing that compacts, never from a second copy of the arithmetic. Loaded here so
+-- the view asks one function (`threshold_percent`) instead of guessing a threshold (Victor, 19/11).
+local windowlib = dofile("lua/core/model_window.lua")
 
 local M = {}
 
@@ -349,6 +353,24 @@ function M.context_level(percent, threshold)
   if p >= t - 15 then return "warning" end
   return "normal"
 end
+-- The colour the ball wears, from the same level: the window's own signal, not decoration.
+--
+-- normal is the row's own success green (a context with room), warning the yellow from threshold-15,
+-- alert the alarm red at the compaction trigger. Nothing measured is normal: a colour is a claim
+-- about the window, and an unmeasured window makes none.
+function M.ball_role(level)
+  if level == "alert" then return "error" end
+  if level == "warning" then return "warning" end
+  return "success"
+end
+
+-- The percentage of the window at which THIS node compacts, from the code that compacts
+-- (model_window.threshold_percent). nil when the window is unknown, which colours nothing.
+function M.compaction_threshold(budget)
+  if not windowlib or not windowlib.threshold_percent then return nil end
+  local ok, threshold = pcall(windowlib.threshold_percent, budget)
+  return ok and tonumber(threshold) or nil
+end
 
 -- The footer's session numbers: `󰑐runs Σ↑in ↓out 󰪟ctx%/window 󰆼cache-hit%`. `Σ↑` is every
 -- request's input summed (each step resends the context), so it is marked apart from the run line's
@@ -369,6 +391,27 @@ function M.session_summary(t)
     parts[#parts + 1] = GLYPH.cache .. GAP .. string.format("%.2f%%", 100 * (t.cached or 0) / t.prompt)
   end
   return table.concat(parts, " ")
+end
+
+-- The session bar with its CONTEXT BALL in the colour of its level, and the rest of the row left in
+-- the secondary gray it was drawn in: the role opens at the glyph, closes after it, and the dim
+-- colour is re-opened so one glyph's warning does not bleed into the percentage beside it
+-- (Victor, 19/11: the percentage stays printed after the ball).
+--
+-- Colour is a rendering decision, so `live` is honoured exactly like every other paint here: a
+-- captured transcript gets the same characters, uncoloured. A window nobody measured (budget 0) or
+-- a bar with no ball in it is returned untouched.
+function M.colour_ball(text, context, budget, live)
+  text = tostring(text or "")
+  local window = tonumber(budget) or 0
+  if not live or window <= 0 then return text end
+  local percent = 100 * (tonumber(context) or 0) / window
+  local ball = M.context_ball(percent)
+  local at = text:find(ball, 1, true)
+  if not at then return text end
+  local level = M.context_level(percent, M.compaction_threshold(window))
+  local painted = paint(ball, M.ball_role(level), true) .. (STYLE.dim or "")
+  return text:sub(1, at - 1) .. painted .. text:sub(at + #ball)
 end
 
 -- How long a step took: milliseconds below a second, seconds above it. The unit is
@@ -1607,11 +1650,16 @@ function METHODS:footer_draw()
   local hint = (self.last_summary and self.last_summary ~= "") and self.last_summary
     or "/ for commands \194\183 /login to sign in \194\183 ctrl+c twice to quit"
   -- The editor owns that row (the slash menu uses it), so it is handed the text, not drawn on.
+  -- The ball wears its level's colour in BOTH drawers: the native editor's row is clipped by CELLS
+  -- with escapes counting zero (`visible_cells`, rust/wa-term/src/terminal_editor.rs), so a coloured
+  -- row is measured like a plain one and cannot wrap the row under the box (Victor, 19/11).
+  local shown = M.colour_ball(clip(hint, math.max(10, self.limit - 1)), self.context, self.budget,
+    self.live)
   if self.editor and self.stdout and host and host.editor_footer then
-    pcall(host.editor_footer, clip(hint, math.max(10, self.limit - 1)), self.model or "")
+    pcall(host.editor_footer, shown, self.model or "")
   else
     self:control(CURSOR_SAVE .. "\27[" .. self.screen.footer .. ";1H\27[2K"
-      .. paint(clip(hint, math.max(10, self.limit - 1)), "dim", self.live) .. CURSOR_RESTORE)
+      .. paint(shown, "dim", self.live) .. CURSOR_RESTORE)
   end
   -- After the footer, never before: the host's footer write redraws the whole bottom of the screen,
   -- so a line drawn first would be erased by it. The wake row first, so the session line above it is

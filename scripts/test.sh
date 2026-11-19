@@ -268,6 +268,9 @@ gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-ca
 # The native editor is the only side that can edit input while Lua is blocked. Its
 # parser, history, multiline viewport and submit/clear behavior are not Lua tests.
 gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-term terminal_editor::tests
+# The live region (TUI polish 2, items 1-3): every row it draws is one SCREEN row at 60/80/120/200
+# columns - a 300-column code line included - and twenty ticks of the running call move nothing.
+gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-term --test live_region
 # The graph is a capability the agent navigates its own code with, so its extractor and
 # incremental reindex are part of the contract, not a side project.
 gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-graph

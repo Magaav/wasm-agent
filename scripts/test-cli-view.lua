@@ -1925,6 +1925,48 @@ do
   end
 end
 
+-- The ball's COLOUR is a rendering decision read from the node's own compaction threshold, so it is
+-- asserted the way a reader meets it: through the one function that paints, at every level, and on
+-- the RENDERED footer row (Victor, 19/11).
+do
+  local paint_ball = view_lib.colour_ball or function(text) return text end
+  local ball = view_lib.context_ball(50)
+  -- (a) no colour without `live`: a captured transcript gets the same characters.
+  eq(paint_ball("x " .. ball .. " 50.0%/200.0k", 100000, 200000, false),
+    "x " .. ball .. " 50.0%/200.0k", "a plain rendering is untouched by the level's colour")
+  -- (b) no window measured: no colour, because there is no window to make a claim about.
+  eq(paint_ball("x " .. ball .. " 0.0%/0", 0, 0, true), "x " .. ball .. " 0.0%/0",
+    "an unmeasured window colours nothing")
+  -- (c) a row with no ball (a budget of 0 leaves it out): returned as it came.
+  eq(paint_ball("plain row", 5, 0, true), "plain row", "a row with no ball is not touched")
+  -- (d) the level's role really opens at the glyph and closes after it, so the percentage beside it
+  -- keeps the row's gray - one glyph's warning never bleeds into its number.
+  local painted = paint_ball(ball .. " 50.0%/200.0k", 100000, 200000, true)
+  ok(has(painted, view_lib.style("success") .. ball .. "\27[0m"),
+    "a comfortable context paints the ball in the normal role: " .. painted)
+  eq(visible(painted), ball .. " 50.0%/200.0k", "and the visible characters are unchanged")
+  -- (e) every level, from the node's own threshold: 90% of the window compacts, so 74 is normal,
+  -- 76 is a warning and 90 an alert.
+  local at = function(percent, window)
+    -- The ball of THAT percentage: the glyph and the colour are chosen from the same number, so the
+    -- colour is read off the glyph the row actually drew rather than the one 50% would draw.
+    local glyph = view_lib.context_ball(percent)
+    local row = paint_ball(glyph .. " " .. percent .. "%", window * percent / 100, window, true)
+    if has(row, view_lib.style("error") .. glyph) then return "alert" end
+    if has(row, view_lib.style("warning") .. glyph) then return "warning" end
+    if has(row, view_lib.style("success") .. glyph) then return "normal" end
+    return "none"
+  end
+  local threshold = view_lib.compaction_threshold(100000)
+  ok(type(threshold) == "number" and threshold > 0 and threshold <= 100,
+    "the node's own compaction threshold is a percentage: " .. tostring(threshold))
+  eq(at(0, 100000), "normal", "an empty context is normal")
+  eq(at(math.floor(threshold) - 20, 100000), "normal", "20 points under the trigger is normal")
+  eq(at(math.ceil(threshold - 14), 100000), "warning", "inside 15 points of it is a warning")
+  eq(at(math.ceil(threshold), 100000), "alert", "at the trigger it is an alert")
+  eq(at(100, 100000), "alert", "a full window is an alert")
+end
+
 if failed > 0 then
   print(string.format("cli view: %d failed of %d checks", failed, checks))
   os.exit(1)
