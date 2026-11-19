@@ -18,7 +18,10 @@ local TICK = string.rep(string.char(96), 3)
 
 -- a. a fenced sample is prose: the scan runs on the text OUTSIDE fences
 local fenced = 'Here is the shape I would use:\n' .. TICK .. 'bash\n<bash>{"command":"ls"}</bash>\n' .. TICK .. '\nThat is all.'
-ok(raw.markup_in_text(fenced) ~= nil, 'the raw scan does see the marker (the skip is applied by take)')
+-- The pair scan is native-only (rel r2, item 5) and this file runs in the native transport, so the
+-- scan is asked with the mode that names the pair. The assertion is unchanged: the SCAN sees the
+-- marker inside a fence, and the fence skip is take's job, not the scanner's.
+ok(raw.markup_in_text(fenced, 'native') ~= nil, 'the raw scan does see the marker (the skip is applied by take)')
 local result_fenced = { content = fenced, tool_calls = {}, finish_reason = 'stop' }
 local memory = dofile('lua/core/memory.lua'); memory.setup()
 local sid = memory.start_session('', 'r4', { user_id = 'master' })

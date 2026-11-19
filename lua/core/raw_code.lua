@@ -583,19 +583,39 @@ M.MARKUP_MARKERS = {
 -- every answer the loop reads, so a sentence that merely MENTIONS a tag - "use <bash> to run it" -
 -- must stay an answer. A pair that opens and closes is a call the model meant; a lone word in prose
 -- is not. The list stays an allow-list: a shape not named here is prose.
-M.MARKUP_PAIRS = {
+--
+-- ONLY the native transport's own pair (<run>) is in the always-on list (rel review r2, item 5). The
+-- <bash>/<invoke> pairs are a model's trained call format for a transport this node only has in native
+-- mode: in every other mode a27490af did not name them, so naming them there would turn an answer that
+-- discusses that format into a continue and change what those modes accept. `M.markup_in_text(text,
+-- 'native')` adds them; every other caller sees exactly a27490af's list.
+-- The pair scan existed in no mode before this branch: it is native only, so the always-on list is
+-- empty and the native one holds all three shapes. (`<invoke ...>...</invoke>` is ALSO caught without
+-- this list, because a27490af already names the bare `</invoke>` in M.MARKUP_MARKERS above - which is
+-- why the pair changes nothing there and is kept only for the native spelling that has no closer in
+-- the base list.)
+M.MARKUP_PAIRS = {}
+
+-- The pairs a native node adds, on top of the always-on list above.
+M.NATIVE_MARKUP_PAIRS = {
   { "<bash>", "</bash>" },
   { "<run>", "</run>" },
   { "<invoke ", "</invoke>" },
 }
 
-function M.markup_in_text(text)
+function M.markup_in_text(text,mode)
   local raw = tostring(text or "")
   if raw == "" then return nil end
+  local pairs_to_scan=M.MARKUP_PAIRS
+  if mode=='native' then
+    pairs_to_scan={}
+    for _,pair in ipairs(M.MARKUP_PAIRS) do pairs_to_scan[#pairs_to_scan+1]=pair end
+    for _,pair in ipairs(M.NATIVE_MARKUP_PAIRS) do pairs_to_scan[#pairs_to_scan+1]=pair end
+  end
   for _, found in ipairs(M.MARKUP_MARKERS) do
     if raw:find(found, 1, true) then return { marker = found } end
   end
-  for _, pair in ipairs(M.MARKUP_PAIRS) do
+  for _, pair in ipairs(pairs_to_scan) do
     local opens = raw:find(pair[1], 1, true)
     if opens and raw:find(pair[2], opens + #pair[1], true) then
       return { marker = pair[1]:gsub(" $", "") }
@@ -780,7 +800,9 @@ function M.take(result, stop_sent, policy)
     -- Inline code is stripped LINE BY LINE: a span never crosses a line, so no escape sequence has to
     -- survive three layers of quoting to say so (it did not, twice).
     prose = prose:gsub("[^\n]+", function(line) return (line:gsub("`[^`]-`", " ")) end)
-    local leaked = M.markup_in_text(prose)
+    -- The native pairs (<bash>, <invoke>) are scanned WHERE the loop can actually see them: here, with
+    -- the mode that names them (rel review r2, item 5).
+    local leaked = M.markup_in_text(prose, mode_now)
     if leaked then
       return { leaked_markup = true, marker = leaked.marker, bytes = #content }
     end

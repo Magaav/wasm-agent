@@ -63,7 +63,11 @@ function M.markup(text)
   -- action: an answer that quotes a call format inside a fence (a report about this very detector does)
   -- is prose, and failing it would be the false positive this list must not have.
   if raw:find(TICK, 1, true) or raw:find("~~~", 1, true) then return nil end
-  local found = dofile("lua/core/raw_code.lua").markup_in_text(without_inline_code(raw))
+  -- The scan is mode-aware (rel review r2, item 5): the <bash>/<invoke> pairs are the native
+  -- transport's own formats, so only a native node names them. Every other mode sees a27490af's list.
+  local raw_lib = dofile("lua/core/raw_code.lua")
+  local mode = raw_lib.mode()
+  local found = raw_lib.markup_in_text(without_inline_code(raw), mode)
   if not found then return nil end
   return {
     shape = "markup",

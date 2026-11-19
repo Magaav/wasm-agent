@@ -1687,6 +1687,9 @@ WA_SCRIPT=scripts/test-native-guidance.lua "$BIN" --db "$DB" | grep "native guid
 WA_SCRIPT=scripts/test-prompt-golden.lua "$BIN" --db "$DB" | grep "prompt golden ok"
 # Every explicit mode builds a prompt and tool list byte-identical to a27490af (rel r1 R1):
 # the golden hashes come FROM a27490af, not from this build.
+# The leak net's <bash>/<run> pairs apply only in native mode (rel r2 item 5): every other mode sees
+# exactly a27490af's marker list, so an answer that writes one of those shapes stays an answer.
+WA_SCRIPT=scripts/test-markup-pairs.lua "$BIN" --db "$DB" | grep "markup pairs ok"
 WA_SCRIPT=scripts/test-mode-parity.lua "$BIN" --db "$DB" | grep "mode parity ok"
 # R2: no switch + a tool-calling provider = the native mode; every other provider keeps the
 # block default; an explicit switch always wins.
