@@ -444,26 +444,59 @@ end
 -- `…` (operator 17/11: "each step shows its output completely"). A row that is exactly as wide as the
 -- transcript is wrapped AGAIN by it, which is what drew a blank band row under every code line - the
 -- caller leaves one column free.
+-- THE one wrapper: every component that breaks a long piece of text into rows calls this.
+--
+-- It breaks at the last SPACE that fits, and inside a word only when that word alone is wider than
+-- the row (a URL, a hash, a schema). It used to cut at the exact cell, which is what Victor's
+-- screenshot of 19/11 11:15 shows in his own message bubbles: “nee|d”, “he|re”, “notati|on”,
+-- “lin|e” - a reader's sentence chopped mid-word at the margin, on every row.
+--
+-- Cells, not bytes, are what the limit counts, and it walks the string one CHARACTER at a time with
+-- its byte width, so a multi-byte character is never split.
 function M.wrap(text, limit, o)
   o = M.opts(o)
   local value = tostring(text or "")
   limit = math.max(8, tonumber(limit) or 80)
   if o.columns(value) <= limit then return { value } end
-  local rows, start, used, index = {}, 1, 0, 1
+  -- One entry per character, with its byte range and its width: the rows are cut between entries,
+  -- never inside one.
+  local chars, index = {}, 1
   while index <= #value do
     local byte = value:byte(index)
     local size = (byte >= 240 and 4) or (byte >= 224 and 3) or (byte >= 192 and 2) or 1
-    -- a combining mark / variation selector rides with the character before it
     local piece = value:sub(index, index + size - 1)
-    local cells = o.columns(piece)
-    if used + cells > limit and index > start then
-      rows[#rows + 1] = value:sub(start, index - 1)
-      start, used = index, 0
-    end
-    used = used + cells
+    chars[#chars + 1] = { start = index, size = size, cells = o.columns(piece), space = piece == " " }
     index = index + size
   end
-  if start <= #value then rows[#rows + 1] = value:sub(start) end
+  local function text_of(from, to)
+    if to < from then return "" end
+    return value:sub(chars[from].start, chars[to].start + chars[to].size - 1)
+  end
+  local rows, first = {}, 1
+  while first <= #chars do
+    -- How far this row reaches: every character that fits, and where the last space in it was.
+    local used, last_fit, last_space = 0, first - 1, nil
+    local cursor = first
+    while cursor <= #chars do
+      local cells = chars[cursor].cells
+      if used + cells > limit and cursor > first then break end
+      used = used + cells
+      if chars[cursor].space then last_space = cursor end
+      last_fit = cursor
+      cursor = cursor + 1
+    end
+    local stop, next_first = last_fit, last_fit + 1
+    if cursor <= #chars and last_space and last_space > first then
+      -- Break AT the space and swallow it: the next row starts on the word that follows, and the
+      -- space itself is the break, never a leading blank in the row below.
+      stop = last_space - 1
+      next_first = last_space + 1
+      while next_first <= #chars and chars[next_first].space do next_first = next_first + 1 end
+    end
+    if stop < first then stop = first end
+    rows[#rows + 1] = text_of(first, stop)
+    first = next_first
+  end
   return rows
 end
 

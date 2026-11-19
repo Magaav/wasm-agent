@@ -791,6 +791,46 @@ do
   local rows = visible(since(screen_out, long_mark))
   ok(has(rows, "fim") and not has(rows, "\226\128\166"), "a long message is wrapped whole, no …: " .. rows:sub(1, 200))
 end
+--
+-- ITEM D (Victor, 19/11 11:15): THE BUBBLE WRAPS AT SPACES, NEVER MID-WORD.
+--
+-- His screenshot showed "nee|d", "he|re", "notati|on", "lin|e": the wrapper cut at the exact cell, so
+-- every row ended inside a word. The rule is the ordinary one - break at the last space that fits, and
+-- go inside a word only when that word alone is wider than the row - and it lives in ONE function
+-- (codemode_block.wrap) the bubble, the code band and the notices all go through.
+do
+  local wrap = dofile("lua/core/codemode_block.lua").wrap
+  local cols = function(text) return view_lib.columns(text) end
+  local said = "preciso que a anotacao na linha aqui seja quebrada nas palavras e nunca no meio dela"
+  for _, width in ipairs({ 60, 80, 120 }) do
+    local rows = wrap(said, width, { columns = cols })
+    eq(table.concat(rows, " "), said, "item D @" .. width .. ": the wrap keeps every character, in order")
+    -- Each row is a contiguous slice of what was said, and the character where a row STOPS is a
+    -- space in the original: that is what "never inside a word" means, and adjacency between two rows
+    -- cannot show it (the break swallows the space, so the two rows abut).
+    local at, broken = 1, 0
+    for index = 1, #rows do
+      local row = rows[index]
+      if said:sub(at, at + #row - 1) ~= row then broken = broken + 1 end
+      at = at + #row
+      if index < #rows then
+        if said:sub(at, at) ~= " " then broken = broken + 1 end
+        while said:sub(at, at) == " " do at = at + 1 end
+      end
+    end
+    eq(broken, 0, "item D @" .. width .. ": every row is a slice of the text and every break falls on a space")
+    for _, row in ipairs(rows) do
+      ok(cols(row) <= width, "item D @" .. width .. ": every row fits the width: " .. row)
+    end
+  end
+  local url = "https://example.com/" .. string.rep("a", 90)
+  local pieces = wrap(url, 40, { columns = cols })
+  ok(#pieces > 1 and table.concat(pieces, "") == url,
+    "item D: one word wider than the row is broken inside itself, and stays whole across its rows")
+  for _, row in ipairs(pieces) do ok(cols(row) <= 40, "item D: and each of its rows still fits: " .. row) end
+  eq(#wrap("curto", 80, { columns = cols }), 1, "item D: a line that fits is one row")
+end
+
 mark = #screen_out + 1
 screen_view:submitted()
 ok(has(since(screen_out, mark), "\27[12;1H\27[2K\226\157\175 "),
@@ -1565,9 +1605,11 @@ do
   local first_row = visible(first.lines[4]):gsub("^  ", ""):gsub("%s+$", "")
   local second_row = visible(first.lines[5]):gsub("^  ", ""):gsub("%s+$", "")
   ok(first_row:sub(-3) == "\226\134\170", "the row above the break ends with the continuation mark: " .. first_row)
-  ok(has((first_row:gsub("\226\134\170", "")) .. second_row,
-    "const out = await Promise.all(hits.map(p => tools.bash({command: 'wc -l ' + p})));"),
-    "the wrapped line is whole across its two rows")
+  -- A word wrap breaks AT a space and swallows it (that is what the break is), so the join puts one
+  -- back: what must survive across the two rows is every non-space character, in order.
+  local joined = ((first_row:gsub("\226\134\170", "")) .. " " .. second_row):gsub("%s+", " ")
+  local wanted = ("const out = await Promise.all(hits.map(p => tools.bash({command: 'wc -l ' + p})));"):gsub("%s+", " ")
+  eq(joined, wanted, "the wrapped line is whole across its two rows")
   ok(has(visible(first.lines[9]), "return {count: hits.length"), "the last one is drawn too: " .. visible(first.lines[9]))
 
   -- One inner call: it appears as it starts (⏳), and its OWN row flips when it settles - never a
