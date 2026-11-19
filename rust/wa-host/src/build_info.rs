@@ -75,6 +75,16 @@ pub fn label() -> String {
 /// A record that cannot be read changes nothing - the bytes' label stands, which is the answer that is
 /// always true. The pin is shown as `<short> (pinned)`, so nobody has to know what a pin is to see
 /// that this node is being held somewhere on purpose.
+/// The short form of an id: the first eight CHARACTERS.
+///
+/// A pin's commit is text somebody wrote - a hand edit, a script, a non-ASCII paste - and slicing a
+/// str by BYTES panics the moment the cut lands inside a character. label() can slice for short
+/// because the commit it shortens is hex it read itself; this one cannot. Eight chars of a 40-char
+/// hex id is the same string as eight bytes, and anything else is cut where a reader can see it.
+pub fn short_id(id: &str) -> String {
+    id.chars().take(8).collect()
+}
+
 pub fn install_label(state: &std::path::Path, install: &std::path::Path, node_name: &str, node_id: &str) -> String {
     let base = label();
     let field = |path: &std::path::Path, key: &str| -> Option<String> {
@@ -321,6 +331,18 @@ commit=4444444444444444
 ";
         assert_eq!(active_pin_for(again, "work", "").as_deref(), Some("4444444444444444"),
             "and re-applying it is a pin again");
+    }
+
+    /// A pin's id is cut by CHARACTERS, not bytes: a hand-edited or non-ASCII id used to panic the
+    /// binary that reads it, which is the worst possible place for a panic (the label is composed
+    /// before any Lua runs, on the rollback path).
+    #[test]
+    fn a_non_ascii_pin_id_is_shortened_without_panicking() {
+        assert_eq!(short_id("0123456789abcdef"), "01234567");
+        // Eight BYTES falls inside a character here: a byte slice would panic on the boundary.
+        let wide = "\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}";
+        assert_eq!(short_id(wide).chars().count(), 8, "eight CHARACTERS, not eight bytes");
+        assert_eq!(short_id(""), "");
     }
 
     /// A record that names no commit, or one that says unknown, is not a pin a reader may show.

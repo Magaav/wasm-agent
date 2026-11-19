@@ -52,23 +52,21 @@ eq(identity.identity({ native = { label = "unknown build", commit = "unknown", d
 eq(identity.identity({ native = { label = "unknown build", known = false } }).source, "unknown",
   "and its source says unknown rather than build")
 
--- It no longer reads an install record of its own: `record` is not an input any more, and the path it
--- used to open (`~/.wasm-agent/installed.txt`) is not one this module may reintroduce.
-local source = host.read_file("lua/core/build_identity.lua") or ""
-ok(source ~= "", "the module's source is readable, so these two checks are not vacuous")
-local text_reads_record, mentions = false, 0
-for line in source:gmatch("[^\n]+") do
-  if not line:match("^%s*%-%-") then
-    if line:find("installed.txt", 1, true) then text_reads_record = true end
-    if line:find("pins.lua", 1, true) then text_reads_record = true end
-  end
-  if line:find("installed.txt", 1, true) then mentions = mentions + 1 end
-end
-ok(not text_reads_record,
-  "no CODE line in the module reads installed.txt or the pin ledger: the Rust composer owns both")
-ok(source:find("NEVER WRITES", 1, true) ~= nil and mentions == 1,
-  "and the one mention of installed.txt is the comment saying the installer never writes it there ("
-  .. mentions .. ")")
+-- IT DOES NOT COMPOSE A NAME OF ITS OWN. The composer is Rust, so the module must pass the binary's
+-- answer through - whatever the native fields say, the label is the binary's, never assembled here. An
+-- assertion on the module's SOURCE would pass on any edit that moves a comment, so this is behaviour:
+-- a label the composer could not have produced still comes back unchanged, and a known=false answer
+-- still reports unknown even when a label is present, because a binary that says it does not know is
+-- not a binary whose label may be trusted.
+eq(identity.identity({ native = { label = "not-a-commit-shape", known = true } }).label,
+  "not-a-commit-shape", "the module hands the binary's label through, it does not reshape it")
+-- A binary that says it does not know is reported as NOT known, and classified unknown. Its label is
+-- still handed through unchanged - it is the composer's answer, and this module never rewrites one - so
+-- the fact is carried by known/source rather than by a string this module would have invented.
+local unsure = identity.identity({ native = { label = "e5ba9089", known = false } })
+eq(unsure.known, false, "a binary that says it does not know is reported as not known")
+eq(unsure.source, "unknown", "and it is classified unknown, not as a build")
+eq(unsure.label, "e5ba9089", "while the binary's own label is still handed through, never rewritten")
 
 -- The crate's version is never the identity: this is the exact string the old banner printed.
 for _, case in ipairs({
@@ -78,7 +76,14 @@ for _, case in ipairs({
   local label = identity.identity(case).label
   ok(label ~= "0.1.0" and not label:find("0.1.0", 1, true),
     "the crate version is never the label: " .. tostring(label))
+  -- And the crate version itself is never INVENTED: the field fell back to the literal 0.1.0, which is
+  -- the same invented number one field over. A binary that states no version reports "".
+  local crate = identity.identity(case).crate_version
+  ok(crate ~= "0.1.0", "the crate version is never invented: " .. tostring(crate))
 end
+-- The version a binary DOES state is passed through, so the check above is not vacuous.
+eq(identity.identity({ native = { label = "e5ba9089", known = true, version = "0.2.1" } }).crate_version,
+  "0.2.1", "a stated crate version is carried")
 
 -- The welcome box prints it, through the one function: the call site passes the label, and the banner
 -- only paints what it is given (so the assertion is about the sentence a reader sees).

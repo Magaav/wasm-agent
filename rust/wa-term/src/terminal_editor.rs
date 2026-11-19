@@ -1156,9 +1156,11 @@ pub fn clip_cells(text: &str, room: usize) -> String {
     let total = visible_cells(text);
     if total <= room { return text.to_string(); }
     let mut out = String::new(); let mut used = 0;
+    let mut open_colour = false;
     let mut chars = text.chars().peekable();
     while let Some(ch) = chars.next() {
         if ch == '\x1b' {
+            open_colour = true;
             out.push(ch);
             if chars.peek() == Some(&'[') {
                 out.push(chars.next().unwrap());
@@ -1170,7 +1172,12 @@ pub fn clip_cells(text: &str, room: usize) -> String {
         if used + width + 1 > room { break; }
         out.push(ch); used += width;
     }
-    if room > 0 { out.push('\u{2026}'); }
+    if room > 0 {
+        out.push('\u{2026}');
+        // The row was cut while a colour was open: close it AFTER the ellipsis, or the terminal paints
+        // the mark - and whatever is drawn beside it - in a colour the row no longer claims.
+        if open_colour { out.push_str(RESET); }
+    }
     out
 }
 
@@ -1600,7 +1607,10 @@ mod tests {
         assert_eq!(visible_cells(&clip_cells(&row, 6)), 6, "cut to 6 cells, ellipsis included");
         let cut = clip_cells(&row, 6);
         assert!(cut.starts_with(red), "the colour that opened the row is kept: {cut:?}");
-        assert!(cut.ends_with('\u{2026}'), "and the cut is marked: {cut:?}");
+        assert!(cut.contains('\u{2026}'), "and the cut is marked: {cut:?}");
+        // THE RESET COMES AFTER THE MARK. A cut that leaves the colour open paints the ellipsis - and
+        // whatever the terminal draws beside it - in a colour the row no longer claims.
+        assert!(cut.ends_with("\u{2026}\x1b[0m"), "and the colour is closed after the mark: {cut:?}");
     }
 
     #[test]

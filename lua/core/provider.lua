@@ -160,9 +160,18 @@ function M.why_unconfigured(options)
   -- the URL was set AND the vault was listening, so a branch that fired on the variable alone would have
   -- named a cause that was not true. So the vault is asked its own status, and only a vault that really
   -- does not answer is named.
+  -- WHICH ROUTE. The route the vault is asked about used to be the literal opencode-go, so a node
+  -- vaulting anything else was told about a route it does not use. It is the route this process would
+  -- actually reach the provider by - the configured provider id - and when none is known there is no
+  -- route to ask about and this cause cannot be established, so it is not claimed.
   local vault_url = (options or {}).vault_url or env("WASM_AGENT_VAULT_URL")
-  if vault_url and vault_url ~= "" then
-    local state, problem = vault.status("opencode-go")
+  local route = (options or {}).provider_id or M.settings().provider
+  if vault_url and vault_url ~= "" and route and route ~= "" then
+    -- ASKED AT MOST ONCE PER PROCESS, and bounded when it is asked: the host's own http carries a
+    -- connect and a response timeout, so this cannot wedge a welcome box the way a bare dial can, and
+    -- the answer is memoised so a second call costs nothing. A vault that does not answer is still a
+    -- claim about the world and is named as one; the sentence says which code it got.
+    local state, problem = M.vault_status_cached(route)
     if not state then
       return "the vault at " .. tostring(vault_url) .. " did not answer ("
         .. tostring(type(problem) == "table" and problem.code or "unreachable")
@@ -170,6 +179,22 @@ function M.why_unconfigured(options)
     end
   end
   return "this shell has no provider env; the node's wa-serve has one: run inside it with `wa chat` via the node, or /login"
+end
+
+-- The vault's status for a route, asked at most once per process and remembered either way.
+--
+-- why_unconfigured runs on the path to the welcome box, so a node whose vault is down must not dial it
+-- on every line that asks why there is no model. The answer is a fact about a service, not about this
+-- process, so it is kept for the life of the process and no longer: a vault that comes up is seen by
+-- the next run, which is the behaviour a reader expects from restarting the chat.
+function M.vault_status_cached(provider_id)
+  M._vault_status = M._vault_status or {}
+  local key = tostring(provider_id or "")
+  local cached = M._vault_status[key]
+  if cached then return cached.state, cached.problem end
+  local state, problem = vault.status(key)
+  M._vault_status[key] = { state = state, problem = problem }
+  return state, problem
 end
 
 -- A **model-less node** (docs/MODEL-LESS.md): the operator has declared that this node has no model

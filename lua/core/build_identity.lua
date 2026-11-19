@@ -78,8 +78,10 @@ function M.identity(opts)
     dirty = trim((native or {}).dirty) ~= "" and trim((native or {}).dirty) or "unknown",
     known = known and true or false,
     source = classify(label, known),
-    -- The crate's version, for the scripts that want a number. Never the label.
-    crate_version = trim((native or {}).version) ~= "" and trim((native or {}).version) or "0.1.0",
+    -- The crate's version, for a script that wants a number, or "" when the binary did not state one.
+    -- It used to fall back to the literal 0.1.0 - the invented version this module exists to stop - so a
+    -- binary that predates the capability made every caller read the crate's number as the node's.
+    crate_version = trim((native or {}).version),
   }
   if o.native == nil then M._cached = identity end
   return identity

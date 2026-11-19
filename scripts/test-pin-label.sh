@@ -19,7 +19,9 @@ WABIN="${WA_BIN:-$TARGET_DIR/debug/wa}"
 [ -x "$WABIN" ] || WABIN="$TARGET_DIR/release/wa"
 if [ ! -x "$WABIN" ]; then
   echo "SKIP test-pin-label: no binary at $WABIN (build it: cd rust && cargo build -p wa-host)"
-  exit 0
+  # 77, not 0: a skip is not a pass, and a caller that cannot tell them apart reports a composer it
+  # never ran as verified. scripts/test.sh turns this into a counted skip.
+  exit 77
 fi
 checks=0; failed=0
 ok()   { checks=$((checks + 1)); printf '  ok   %s\n' "$*"; }

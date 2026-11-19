@@ -415,8 +415,12 @@ function M.session_summary(t)
   t = t or {}
   local parts = { GLYPH.turns .. GAP .. (t.runs or 0),
     "\206\163\226\134\145" .. M.tokens(t.prompt) .. " \226\134\147" .. M.tokens(t.completion) }
+  -- The percentage this row was built from, returned beside the text: it chose the glyph, and the
+  -- colour must come from the SAME number rather than one measured again at draw time.
+  local used
   if (tonumber(t.budget) or 0) > 0 then
     local percent = 100 * (tonumber(t.context) or 0) / t.budget
+    used = percent
     -- The percentage stays printed after the ball, one space apart (Victor, 19/11).
     parts[#parts + 1] = M.context_ball(percent) .. GAP
       .. string.format("%.1f%%/%s", percent, M.tokens(t.budget))
@@ -424,7 +428,7 @@ function M.session_summary(t)
   if (tonumber(t.prompt) or 0) > 0 then
     parts[#parts + 1] = GLYPH.cache .. GAP .. string.format("%.2f%%", 100 * (t.cached or 0) / t.prompt)
   end
-  return table.concat(parts, " ")
+  return table.concat(parts, " "), used
 end
 
 -- The session bar with its CONTEXT BALL in the colour of its level, and the rest of the row left in
@@ -453,11 +457,13 @@ function M.ball_in(text)
   return nil, nil
 end
 
-function M.colour_ball(text, context, budget, live, model)
+function M.colour_ball(text, context, budget, live, model, percent)
   text = tostring(text or "")
   local window = tonumber(budget) or 0
   if not live or window <= 0 then return text end
-  local percent = 100 * (tonumber(context) or 0) / window
+  -- The percentage behind the level: the caller that composed the row hands over the one it used, so
+  -- the colour and the glyph are the same reading. A caller holding only a row measures it here.
+  percent = tonumber(percent) or (100 * (tonumber(context) or 0) / window)
   local ball, at = M.ball_in(text)
   if not ball then return text end
   local level = M.context_level(percent, M.compaction_threshold(window, model))
@@ -1703,7 +1709,7 @@ function METHODS:footer_draw()
   -- with escapes counting zero (`visible_cells`, rust/wa-term/src/terminal_editor.rs), so a coloured
   -- row is measured like a plain one and cannot wrap the row under the box (Victor, 19/11).
   local shown = M.colour_ball(clip(hint, math.max(10, self.limit - 1)), self.context, self.budget,
-    self.live, self.model)
+    self.live, self.model, self.summary_percent)
   if self.editor and self.stdout and host and host.editor_footer then
     pcall(host.editor_footer, shown, self.model or "")
   else
@@ -1722,7 +1728,7 @@ end
 function METHODS:live_footer()
   if not (self.screen and self.screen.footer) then return end
   local totals = self.totals or {}
-  self.last_summary = M.session_summary({ runs = self.runs, tools = self.session_tools or 0,
+  self.last_summary, self.summary_percent = M.session_summary({ runs = self.runs, tools = self.session_tools or 0,
     prompt = totals.prompt, completion = totals.completion, cached = totals.cached,
     context = self.context, budget = self.budget })
   -- The self-wake fact has a row of its own, directly above the session status bar: it used to be

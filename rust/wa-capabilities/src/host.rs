@@ -3135,7 +3135,7 @@ static BUILD_LABEL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 static BUILD_COMMIT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 static BUILD_DIRTY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
-/// State the whole identity once (see `set_build_label`): the label the box and `--version` print,
+/// State the whole identity once: the label the box and --version print,
 /// the full commit a pin is compared against, and whether the tree was dirty when it was built.
 pub fn set_build_identity(label: &str, commit: &str, dirty: &str) {
     let _ = BUILD_LABEL.set(label.to_string());
@@ -3143,13 +3143,7 @@ pub fn set_build_identity(label: &str, commit: &str, dirty: &str) {
     let _ = BUILD_DIRTY.set(dirty.to_string());
 }
 
-/// State this process's build identity. First writer wins: two binaries cannot share a process, and a
-/// second call would be a caller trying to rename bytes it did not build.
-pub fn set_build_label(label: &str) {
-    let _ = BUILD_LABEL.set(label.to_string());
-}
-
-/// The name for these bytes: what `set_build_label` recorded, or `unknown build` when nothing did.
+/// The name for these bytes: what set_build_identity recorded, or "unknown build" when nothing did.
 pub fn build_label() -> &'static str {
     BUILD_LABEL.get().map(String::as_str).filter(|label| !label.is_empty()).unwrap_or("unknown build")
 }
