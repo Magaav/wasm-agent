@@ -1800,7 +1800,7 @@ end
 -- `󰷺steps·step-time Δadded ↑in ↓out 󰔛run-time` for the current run.
 --
 -- THIS RUN ONLY (Victor, 19/11 12:15, item H). The row carries the run's own additions - the
--- DELTA-UP of what this run sent and the down arrow of what it received - and NO session total:
+-- SIGMA-UP of what this run sent and the down arrow of what it received - and NO session total:
 -- the session's two sums live in the footer (SIGMA-UP and SIGMA-DOWN), and a number printed on
 -- both rows makes a reader compare two things that are not the same thing.
 function METHODS:run_numbers(step_clock, run_clock, finish)

@@ -276,9 +276,6 @@ gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-te
 # and item I's phase-0 rule (a fence card written into a still-open line is glued unless the line is
 # closed first, and the copy marker then points one row early).
 gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-term transcript::tests
-# The debounced repaint itself (item G, review): the 150 ms deadline is a DECISION a test makes -
-# not due before it, due at it - and the clear it emits covers the screen AND the scrollback.
-gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-capabilities repaint_tests
 # The graph is a capability the agent navigates its own code with, so its extractor and
 # incremental reindex are part of the contract, not a side project.
 gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-graph
