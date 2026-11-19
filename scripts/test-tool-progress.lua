@@ -211,7 +211,15 @@ local elsewhere = tp.elsewhere({ session = "session-d", now = clock })
 ok(elsewhere == 0, "and it is told only the count, which is the manager's: " .. tostring(elsewhere))
 ok(tp.path({ session = "session-d" }) ~= path, "and its file is its own")
 -- A settled call removes its own file: nobody else's row goes with it.
-os.remove(tp.path({ session = "session-b" }))
+-- Remove through the HOST, not os.remove: the Lua sandbox strips os.remove/io.open (and, with
+-- change/vault-one, dofile/require/debug too), so a row that reaches for os.remove passes here and
+-- fails on the branch that lands next. The removal is ASSERTED, not fired and hoped for: a port that
+-- silently stopped deleting would still pass the count check below, because the count comes from the
+-- operation manager and was already 0.
+local removed_path = tp.path({ session = "session-b" })
+local removed_ok, removed_raw = pcall(host.exec, "rm -f '" .. removed_path .. "'", "", 30, "{}")
+ok(removed_ok, "the live file was removed through the host: " .. tostring(removed_raw))
+eq(host.path_kind(removed_path), "missing", "and it is really gone from the disk")
 eq(tp.elsewhere({ session = session, now = clock }), 0, "removing a live file does not change the operation count")
 publish(session, { state = "running", tool = "bash", started_at = now - 190, at = now - 20, last_output_at = now - 190 })
 ok(tp.status({ now = now, session = session }) == nil, "a file that stopped moving is a dead node, not a running call")
