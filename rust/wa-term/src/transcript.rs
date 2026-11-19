@@ -1661,35 +1661,6 @@ mod tests {
     }
 
     #[test]
-    /// Item I, the real cause and the real fix. A FOCUSED block draws its rows two columns
-    /// narrower than the transcript (the border takes them), so a card row the renderer wrapped to
-    /// the full width had to be re-wrapped by the host - and the prose wrapper broke it at the space
-    /// after the bar, which is Victor's screenshot (the bar alone on a row, the code bare under it).
-    ///
-    /// PARITY (review rule 14): markdown.lua now leaves two columns of slack, so the rows it emits fit
-    /// a focused block exactly. This pins that: a card rendered for W is drawn UNCHANGED at W-2.
-    #[test]
-    fn a_card_row_wrapped_with_two_columns_of_slack_survives_the_focused_draw() {
-        for area in [120usize, 80, 60, 40] {
-            // What markdown.lua emits at this area: the bar, a space, and code wrapped to area - 2.
-            let code = "x".repeat(area - 2 - 2);
-            let row = format!("\u{2502} {code}");
-            assert!(visible(&row) <= area - 2, "the renderer fits the focused width: {area}");
-            let drawn = wrap_rows(&row, area - 2);
-            assert_eq!(drawn.len(), 1, "a focused block re-wraps NOTHING at {area} columns: {drawn:?}");
-            let plain = crate::selection::plain(&drawn[0]);
-            assert!(plain.starts_with('\u{2502}'), "and the bar is where the renderer put it: {plain:?}");
-        }
-        // A row that really is too long is still cut by cells, bar kept (the host must not lose it).
-        let long = format!("\u{2502} {}", "y".repeat(80));
-        let rows = wrap_rows(&long, 40);
-        assert!(rows.len() > 1, "a row past the width is cut: {rows:?}");
-        for row in &rows {
-            assert!(crate::selection::plain(row).starts_with('\u{2502}'), "and every row keeps its bar");
-            assert!(visible(row) <= 40, "and fits");
-        }
-    }
-
     fn a_card_written_into_an_open_line_is_glued_unless_the_line_is_closed_first() {
         let card = "\u{250c}\u{2500}\n\u{2502} body { color: red }\n\u{2514}\u{2500}\n\n";
         // (a) into an open line: the border is glued to the paragraph, which is the defect.

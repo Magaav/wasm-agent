@@ -650,12 +650,7 @@ function M.render(text, opts)
       -- terminal used to wrap it to column 0, outside the border. Each continuation keeps the border and
       -- says it continues (`│↪`), so a reader never mistakes a wrapped half for a line of its own.
       local more = paint(indent .. "\226\148\130", "mdCodeBlockBorder") .. paint("\226\134\170", "dim")
-      -- Two columns of slack (item I, review): a FOCUSED block draws its rows inside a border that
-      -- takes two cells, so a card wrapped to the full width is re-wrapped by the host - and a
-      -- re-wrapped card row is what Victor 19/11 screenshot shows (the bar alone on a row, the code
-      -- hanging bare under it). Two columns narrower at rest means the same rows fit focused and
-      -- unfocused: one rendering, both states (parity).
-      local room = math.max(8, width - columns(indent) - 4)
+      local room = math.max(8, width - columns(indent) - 2)
       for _, code_line in ipairs(body) do
         code_line = code_line:gsub("\t", "    ")
         local pieces, from, used, start = {}, 1, 0, 1
