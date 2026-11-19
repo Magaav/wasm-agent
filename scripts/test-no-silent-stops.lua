@@ -132,6 +132,35 @@ eq(progress_guard.observe(capped, { signature = "a", results = "r1", effects = 1
 has(progress_guard.observe(capped, { signature = "b", results = "r2", effects = 1, changes = "c" }),
   "runaway_guard", "an operator's ceiling is honoured when it is set")
 
+
+-- A wait on supervised work that is still running is progress, not a loop (19/11, rel-native:
+-- three identical awaits behind a suite lock were killed as guard_repeated_calls).
+ok(progress_guard.waiting('operation', { action = 'await' }, { state = 'running', settled = false })
+  , 'an await whose operation is still running is a live wait')
+ok(progress_guard.waiting('operation', { action = 'wait' }, { state = 'accepted', settled = false })
+  , 'a wait on an accepted operation is a live wait')
+ok(not progress_guard.waiting('operation', { action = 'await' }, { state = 'completed', settled = true })
+  , 'a settled operation is not a live wait: the same bytes again is a repeat')
+ok(not progress_guard.waiting('operation', { action = 'await' }, {})
+  , 'an answer with no state is unknown, never treated as waiting')
+ok(not progress_guard.waiting('operation', { action = 'status' }, { state = 'running', settled = false })
+  , 'only a wait is exempt: status is a plain read')
+ok(not progress_guard.waiting('bash', { action = 'await' }, { state = 'running', settled = false })
+  , 'only the operation tool waits')
+local live = progress_guard.new({ repeat_limit = 3, idle_rounds = 12, ceiling = 0 })
+for i = 1, 10 do
+  eq(progress_guard.observe(live, { signature = 'operation(await)', results = 'same-digest',
+    effects = 0, changes = 'c1', waiting = true }), nil,
+    'await ' .. i .. ' of a running operation is waiting, not a loop')
+end
+local settledWait = progress_guard.new({ repeat_limit = 3, idle_rounds = 12, ceiling = 0 })
+eq(progress_guard.observe(settledWait, { signature = 'operation(await)', results = 'r', effects = 0,
+  changes = 'c', waiting = false }), nil, 'a settled await is a retry')
+eq(progress_guard.observe(settledWait, { signature = 'operation(await)', results = 'r', effects = 0,
+  changes = 'c', waiting = false }), nil, 'still a retry')
+has(progress_guard.observe(settledWait, { signature = 'operation(await)', results = 'r', effects = 0,
+  changes = 'c', waiting = false }), 'guard_repeated_calls',
+  'a settled operation awaited three times is still a loop')
 -- --------------------------------------------------------------- a failed provider call
 local function turn(title, user)
   local session_id = memory.ensure_session(user, "local", title)

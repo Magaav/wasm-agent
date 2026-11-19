@@ -2360,6 +2360,9 @@ function M:run_body(text, images)
     -- below is the only place that knows them.
     local round_effects = 0
     local round_results = {}
+    -- The round's live wait, if it made one: a repeated `operation` await whose answer says the work is
+    -- still running is an observation, not a loop (progress_guard.M.waiting).
+    local round_waiting = false
     -- One loop round is one decision step, not necessarily one provider request:
     -- response-timeout retries and overflow recovery below can send multiple
     -- model-call attempts in this step. `round` is the legacy UI event/index;
@@ -3413,6 +3416,8 @@ function M:run_body(text, images)
       -- The progress guard's facts about this call: did a real effect succeed, and what did it
       -- answer (a digest - the same bytes again is checkable without keeping them twice).
       if ok_tool and not cancelled and tools.has_effect(function_.name, args) then round_effects = round_effects + 1 end
+      if not round_waiting and ok_tool and not cancelled
+        and progress_guard.waiting(function_.name, args, output) then round_waiting = true end
       round_results[#round_results + 1] = tostring(function_.name) .. ":" .. host.sha256(tostring(content))
       telemetry.finish(tool_span,{name=function_.name,ok=ok_tool,cancelled=cancelled or nil,
         outcome=cancelled and 'cancelled_before_execution' or nil,code=type(output)=="table" and output.code or nil,
@@ -3449,6 +3454,7 @@ function M:run_body(text, images)
       results = #round_results > 0 and host.sha256(table.concat(round_results, "\n")) or nil,
       effects = round_effects,
       changes = changes_digest,
+      waiting = round_waiting,
       label = #calls > 0 and (tostring((calls[1]["function"] or {}).name or "?")
         .. "(" .. tostring((calls[1]["function"] or {}).arguments or ""):gsub("%s+", " "):sub(1, 120) .. ")"
         .. (#calls > 1 and (" +" .. (#calls - 1) .. " more") or "")) or nil,

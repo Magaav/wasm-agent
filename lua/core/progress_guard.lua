@@ -62,6 +62,26 @@ function M.fingerprint(calls)
   return table.concat(parts, "\n")
 end
 
+-- A wait on supervised work. `operation` action await/wait asks the operation manager the same
+-- question again, and the answer it gets back is a new observation every time the operation is still
+-- running: elapsed_ms moved, the state and its queue depth moved with it. Measured 19/11 on
+-- rel-native: three identical awaits behind a suite lock were killed as guard_repeated_calls while
+-- the build they waited on was still running (docs/missions/guard-wait.md). The operation's own
+-- timeout bounds the wait; a round count is exactly the budget this module refuses to be.
+--
+-- A wait on a SETTLED operation is not this: it hands back the same bytes again, so it is still a
+-- repeat and still stops. And an answer with no state field is not evidence of waiting - unknown is
+-- not yes - so it is judged like any other repeat.
+local WAIT_ACTIONS = { await = true, wait = true }
+local LIVE_STATES = { accepted = true, queued = true, running = true, draining = true }
+
+function M.waiting(name, args, answer)
+  if name ~= "operation" or type(args) ~= "table" then return false end
+  if not WAIT_ACTIONS[tostring(args.action or "")] then return false end
+  if type(answer) ~= "table" or answer.settled == true then return false end
+  return LIVE_STATES[tostring(answer.state or "")] == true
+end
+
 function M.new(opts)
   opts = opts or {}
   return {
@@ -84,6 +104,7 @@ end
 --   effects    how many effectful calls ran successfully
 --   changes    a digest of the run's changed files (nil when the run changes none)
 --   label      a short, human name for the repeated call ("read AGENTS.md"), for the reason text
+--   waiting    the round waited on supervised work that is still running (M.waiting): progress
 -- Returns nil to continue, or a named reason string to stop. The reason is the durable code, so a
 -- reader can grep it and M.classify can name it.
 function M.observe(state, obs)
@@ -104,6 +125,13 @@ function M.observe(state, obs)
     state.last_call = signature ~= "" and signature or nil
   end
   if changed then state.idle = 0 else state.idle = state.idle + 1 end
+
+  -- A round that waited on work which is still running learned something, even though it asked the
+  -- same question: it is progress, so its repeat streak ends here and its idle count resets.
+  if obs.waiting then
+    state.repeats = math.min(state.repeats, 1)
+    state.idle = 0
+  end
 
   if signature ~= "" and state.repeats >= state.repeat_limit then
     state.stopped = string.format("guard_repeated_calls: the same call was made %d rounds in a row "
