@@ -433,9 +433,13 @@ end
 -- `probe` answers "file", "dir", "missing", or "unknown". The reason is the host's own:
 -- `read_file` answers nil plus a named reason, and a directory is not a "missing" file. Anything
 -- else - a permission error, no `read_file` at all - is "unknown", which never counts as yes.
+--
+-- An EMPTY read is a file, not an absence: `/.dockerenv` is what docker creates and it is 0 bytes, so
+-- `read_file` answers "" with no error. Reading that as "not there" made the fallback dead code - the
+-- node only ever detected a sandbox by the variable, and a container without it looked like a desktop.
 local function probe(path, read)
   local text, reason = read(path)
-  if text and text ~= "" then return "file" end
+  if text ~= nil then return "file" end
   if reason == "read_file_is_a_directory:" .. path then return "dir" end
   if reason == "read_file_missing:" .. path then return "missing" end
   return "unknown"

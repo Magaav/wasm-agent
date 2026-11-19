@@ -53,11 +53,18 @@ local by_env = note("master", { WASM_AGENT_SANDBOX = "1" })
 ok(by_env and by_env.path:match("AGENTS%.sandbox%.md$"), "WASM_AGENT_SANDBOX=1 selects AGENTS.sandbox.md")
 ok(by_env.text == "SANDBOX_CWD\n", "the nearest sandbox note is the one read")
 
--- Detection path 2: /.dockerenv, when the variable is absent.
-local by_file = note("master", {}, { ["/.dockerenv"] = "x" })
-ok(by_file and by_file.path:match("AGENTS%.sandbox%.md$"), "/.dockerenv selects AGENTS.sandbox.md with no variable")
-ok(note("master", { WASM_AGENT_SANDBOX = "0" }, { ["/.dockerenv"] = "x" }).path:match("AGENTS%.sandbox%.md$"),
+-- Detection path 2: /.dockerenv, when the variable is absent. Docker creates it EMPTY, so the fixture
+-- is "" and not "x": with "x" this case passed while the real file did not (review r1, MUST 2).
+local by_file = note("master", {}, { ["/.dockerenv"] = "" })
+ok(by_file and by_file.path:match("AGENTS%.sandbox%.md$"), "an empty /.dockerenv selects AGENTS.sandbox.md with no variable")
+ok(note("master", { WASM_AGENT_SANDBOX = "0" }, { ["/.dockerenv"] = "" }).path:match("AGENTS%.sandbox%.md$"),
   "a value other than 1 does not select it by itself, and the file still can")
+
+-- Podman writes /run/.containerenv instead of /.dockerenv, also empty.
+local by_podman = note("master", {}, { ["/run/.containerenv"] = "" })
+ok(by_podman and by_podman.path:match("AGENTS%.sandbox%.md$"), "/run/.containerenv selects AGENTS.sandbox.md")
+ok(note("master", {}, { ["/.dockerenv"] = nil, ["/run/.containerenv"] = nil }) == nil,
+  "neither container marker and no variable is not a sandbox")
 
 -- Detection path 3: OMARCHY_PATH.
 local om_env = note("master", { OMARCHY_PATH = "/usr/share/omarchy" })
