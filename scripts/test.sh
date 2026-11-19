@@ -1247,6 +1247,12 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-network-outage-recovery.lua" "$BIN"
 # until a restart. The fix keeps every known peer, marked offline with its last-seen stamp, and a call
 # to one answers peer_offline:<name> (last seen ...). A successful read may still remove a peer.
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-network-roster-offline.lua" "$BIN" --db "$DB.network-roster-offline" | grep 'network roster offline ok'
+# The caller's half of the relay storm (19/11 12:20-12:45 UTC: 503 too_many_connections to everyone
+# while ~470 connections kept arriving and ~600 relayed calls/min were abandoned). A caller held as
+# many relayed calls against one node as it liked and retried an over-cap relay with no jittered wait.
+# Now: at most RELAY_MAX_IN_FLIGHT per node (refused by name BEFORE anything is sent), and a growing,
+# capped, jittered wait that honours Retry-After - never a tight retry.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-network-relay-backpressure.lua" "$BIN" --db "$DB.network-relay-backpressure" | grep 'network relay backpressure ok'
 # A route must refuse a model it cannot serve before the first provider request - and only that.
 # A child with `gpt-6-luna` on the opencode-go route failed in 0.67s with zero tool calls on the
 # edge's `Model does not support this protocol`, and 26 child runs of `deepseek-v4.1-flash` died

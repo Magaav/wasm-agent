@@ -561,6 +561,19 @@ function M.request(node, path, body, inner_headers)
     -- The three numbers live in ONE place (M.RELAY_*), because the model-facing error names the cap it
     -- hit and a number written twice drifts (19/11, item E).
     local DEADLINE, started = M.RELAY_DEADLINE_SECONDS, host.now()
+    -- One caller holds at most M.RELAY_MAX_IN_FLIGHT relayed calls to this node (see the constant).
+    -- Refused BEFORE anything is sent, so a full queue costs the peer nothing.
+    local slot, slot_problem = M.acquire_slot(node.node_id)
+    if not slot then
+      return { error = slot_problem, node = node.name, node_id = node.node_id, retryable = true,
+        message = string.format("this node already holds %d relayed calls to %s (its cap): nothing was "
+          .. "sent and nothing ran. Wait for one to answer, then retry.", M.RELAY_MAX_IN_FLIGHT,
+          tostring(node.name or node.node_id)) }
+    end
+    local function finish(value)
+      M.release_slot(node.node_id)
+      return value
+    end
     for attempt = 1, M.RELAY_ATTEMPTS do
       local relay_headers = M.signed_headers("relay-send")
       if not relay_headers then return { error = "no_identity" } end
@@ -575,13 +588,13 @@ function M.request(node, path, body, inner_headers)
         if decoded and decoded.ok then
           -- `late` is the relay's word that the answer arrived after the deadline this caller was
           -- given: a result, but not a fresh one, and the caller is told so rather than guessing.
-          return { status = decoded.status, body = decoded.body, rid = rid, transport = "relay",
-            late = decoded.late == true }
+          return finish({ status = decoded.status, body = decoded.body, rid = rid, transport = "relay",
+            late = decoded.late == true })
         end
         -- relay_timeout is retryable too: the relay keeps the result for two
         -- minutes and the id is stable, so a retry re-fetches it.
         if not (decoded and decoded.error == "relay_timeout") then
-          return { error = (decoded and decoded.error) or "relay_error" }
+          return finish({ error = (decoded and decoded.error) or "relay_error" })
         end
       elseif response and tonumber(response.status) == 503 then
         -- Retired by the relay (it holds now), kept for an older rendezvous:
@@ -590,6 +603,17 @@ function M.request(node, path, body, inner_headers)
         -- again and nothing has run twice.
         local decoded = json.decode(response.body)
         last_error = (decoded and decoded.error == "node_busy") and "node_busy" or "node_not_attached"
+        -- The rendezvous is over ITS cap (19/11: too_many_connections to everyone). Back off with
+        -- jitter and honour Retry-After when the relay names one; never a tight retry, because a
+        -- fleet coming back at once is what filled the cap in the first place.
+        local reason = M.relay_code(response.body)
+        if reason == "too_many_connections" or reason == "relay_busy" then
+          last_error = "relay_busy"
+          local hint = nil
+          local got, body = pcall(json.decode, response.body)
+          if got and type(body) == "table" then hint = body.retry_after_ms or body.retry_after end
+          host.sleep(M.relay_backoff_ms(attempt, hint) / 1000)
+        end
       elseif response and tonumber(response.status) == 504 then
         -- The relay held the request and the node did not answer: either it
         -- never attached (retry when it is back) or it is busy and the action
@@ -606,19 +630,20 @@ function M.request(node, path, body, inner_headers)
         -- The relay itself refused (401/403/404/400/409/413): retrying the same request cannot
         -- change that answer, and reporting it as `relay_timeout` hid the reason.
         local status = tonumber(response.status)
-        return { error = "relay_refused", relay_status = status,
-          reason = M.relay_code(response.body) or "unrecognized", rid = rid }
+        return finish({ error = "relay_refused", relay_status = status,
+          reason = M.relay_code(response.body) or "unrecognized", rid = rid })
       end
       if (host.now() - started) > DEADLINE then break end
       -- The count comes from the ONE constant the loop above iterates (not a second literal 3), so a
       -- change to RELAY_ATTEMPTS cannot leave this backoff on the old count (round 3, item 7).
-      if attempt < M.RELAY_ATTEMPTS then host.sleep(750 * attempt) end
+      -- Jittered: 750 ms doubling, capped at 8 s, never the same instant for every caller.
+      if attempt < M.RELAY_ATTEMPTS then host.sleep(M.relay_backoff_ms(attempt) / 1000) end
     end
     -- Say that it is retryable, and which reason it kept hitting: "could not
     -- reach the node" and "the node is busy" call for different next steps. The cap itself travels with
     -- the answer, so the sentence the model reads is built from what this loop enforced.
-    return { error = last_error or "relay_timeout", rid = rid, retryable = true,
-      deadline_seconds = DEADLINE, attempts = M.RELAY_ATTEMPTS }
+    return finish({ error = last_error or "relay_timeout", rid = rid, retryable = true,
+      deadline_seconds = DEADLINE, attempts = M.RELAY_ATTEMPTS })
   end
   return { error = "no_route" }
 end
@@ -800,6 +825,57 @@ end
 M.RELAY_ATTEMPT_HOLD_SECONDS = 20
 M.RELAY_ATTEMPTS = 3
 M.RELAY_DEADLINE_SECONDS = 60
+
+-- How many relayed calls ONE caller may hold against ONE node at a time, and the backoff it uses when
+-- the relay says it is over its own cap.
+--
+-- Measured 19/11 12:20-12:45 UTC: the rendezvous (MAX_CONNECTIONS=256) answered 503
+-- too_many_connections to everyone while ~470 TCP connections from the home IP kept coming; ~600
+-- relayed calls/min were then logged as "attached but no answer within the caller's wait (45 s)" and
+-- abandoned. A caller that only waits for its own answer will happily put another call on a node that
+-- is already behind, so the queue never drains: every new call keeps one more slot busy.
+M.RELAY_MAX_IN_FLIGHT = 4
+
+-- Per-node in-flight counters, this process only. The host cannot see another node's calls and does
+-- not need to: the cap that matters is what THIS node asks of a peer.
+local relay_in_flight = {}
+
+function M.acquire_slot(node_id)
+  node_id = tostring(node_id or "")
+  local held = relay_in_flight[node_id] or 0
+  if held >= M.RELAY_MAX_IN_FLIGHT then return nil, "peer_busy_caller" end
+  relay_in_flight[node_id] = held + 1
+  return true
+end
+
+function M.release_slot(node_id)
+  node_id = tostring(node_id or "")
+  local held = relay_in_flight[node_id] or 0
+  if held <= 1 then relay_in_flight[node_id] = nil else relay_in_flight[node_id] = held - 1 end
+  return true
+end
+
+function M.slots_held(node_id)
+  return relay_in_flight[tostring(node_id or "")] or 0
+end
+
+-- Never a tight retry on an overloaded relay. The wait doubles per attempt, is capped, and is always
+-- jittered so a fleet that was cut off does not come back in lockstep - the storm's own second half.
+-- A Retry-After hint (seconds, or the milliseconds this tree already uses) wins over the computed
+-- wait, because the server is telling us the earliest time it can serve us again.
+function M.relay_backoff_ms(attempt, retry_after)
+  local hint = tonumber(retry_after)
+  if hint then
+    if hint < 1000 then hint = hint * 1000 end
+    return math.min(30000, math.floor(hint))
+  end
+  local base = 750 * 2 ^ math.max(0, (tonumber(attempt) or 1) - 1)
+  -- The cap is on the WAIT, so it is applied after the jitter: capping first and then multiplying by
+  -- up to 1.5 would let a caller wait 12 s under an 8 s cap, and the comment would be a lie.
+  local capped = math.min(8000, base)
+  local jittered = math.floor(capped * (0.5 + math.random()))
+  return math.max(1, math.min(8000, jittered))
+end
 
 -- The `operation` tool awaits with `wait_ms`, whose MAXIMUM is 10 s (lua/core/tools.lua, the "operation"
 -- schema) - there is no `wait_s` parameter at all, and the 300 s this note used to name does not exist.
