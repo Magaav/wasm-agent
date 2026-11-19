@@ -270,6 +270,18 @@ gate_run env HOME="$GATE_HOME" cargo test --release --offline --manifest-path ru
 # A relayed await answers at the caller wait_ms instead of holding the relay and a peer slot until the
 # operation settles (verification r3). It starts real operations, so it needs the gate scratch HOME.
 gate_run env HOME="$GATE_HOME" cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-capabilities await_returns_at_its_own_wait
+# The certificate authorities every outbound TLS connection trusts (rust/wa-tls): SSL_CERT_FILE and
+# SSL_CERT_DIR are read the way OpenSSL reads them, and each client path answers a scratch HTTPS
+# server presenting a certificate from a private CA. Without the variables the handshake is refused
+# as the certificate step (never as a timeout, never by falling back to the compiled-in roots); with
+# them it completes. The paths are the provider call and the release fetch (wa-capabilities), the
+# mesh relay hop (wa-host), the guest's own exchange and its websocket (wa-kernel-runtime) and the
+# relay answer (wa-rendezvous). Each row names its own module because the filters above name theirs.
+gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-tls
+gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-capabilities tls_anchor_tests
+gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host tls_anchor_tests
+gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-kernel-runtime tls_anchor_tests
+gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-rendezvous tls_anchor_tests
 # The line boundaries `host.http_sse` hands over are tested against real recorded SSE bodies (under
 # `tests/fixtures/subscription/`, kept as generic SSE recordings): a reader that re-frames or drops a
 # line fails here. Every filter above names its own module, so this one is named explicitly.
