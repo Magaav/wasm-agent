@@ -867,12 +867,17 @@ editor_view:event({ type = "tool", name = "bash", arguments = { command = "true"
 local session_total = { prompt = 120400, completion = 1000, cached = 90540 }
 editor_view:event({ type = "usage", total = session_total, prompt = 27200 })
 local running = table.concat(editor_out)
--- Victor, 18/11: the delta AND the session's input total, right after it ("only delta is not
--- enough"). 27.2k was added; 120.4k is what the session has sent in total.
+-- ITEM H (Victor, 19/11 12:15): the run row carries THIS RUN only - what it sent and what it
+-- received. The session totals are the footer numbers, and no number is printed on both rows.
+-- The run row in the buffer, and the OLD shape must be gone from it: the old row read
+-- "delta 27.2k, up 120.4k" (this runs addition, then the SESSION total). Asserting the new pair
+-- is present and that old pair is absent says exactly what item H changed, without having to
+-- separate the footer out of the buffer (its sums legitimately wear the SIGMA).
 ok(has(running, "\243\176\183\186 6\194\183") and not has(running, "\226\154\146\239\184\143")
-  and has(running, "\206\14827.2k \226\134\145120.4k \226\134\1471.0k"),
-  "the status line shows the step, the run's tools, what it added to the context, the session's"
-    .. " input total and its output")
+  and has(running, "\206\148\226\134\14527.2k \226\134\1471.0k")
+  and not has(running, "\206\14827.2k \226\134\145120.4k"),
+  "item H: the status row shows the step and THIS RUN sent/received, and the old delta-then-"
+    .. "session-total pair is gone")
 editor_view:answered("## Done")
 local summary = editor_view.last_summary
 ok(summary and has(summary, "\243\176\145\144 1 ") and has(summary, "\243\176\134\188 75.20%"),
@@ -893,8 +898,8 @@ session_total.prompt = session_total.prompt + 30000
 session_total.completion = session_total.completion + 450
 editor_view:event({ type = "usage", total = session_total, prompt = 30000 })
 local second = table.concat(editor_out, "", second_mark)
-ok(has(second, "\206\1482.8k \226\134\145150.4k \226\134\147450"),
-  "a later run counts its own context growth, the session's input total and its own output, not zero")
+ok(has(second, "\206\148\226\134\1452.8k \226\134\147450"),
+  "item H: a later run counts its own growth and its own output, and no session total")
 editor_view:answered("ok")
 editor_view:screen_off()
 host.input_editor = real_editor
@@ -1819,16 +1824,16 @@ do
   view.context = 24300
   view.totals = { prompt = 4600000, completion = 310 }
   eq(view:run_numbers("5s", "1:51"),
-    "\243\176\183\186 2\194\1835s \206\14812.3k \226\134\1454.6M \226\134\147310 \243\176\148\155 1:51",
-    "the run line: steps, the delta added, the input total, output, clock")
+    "\243\176\183\186 2\194\1835s \206\148\226\134\14512.3k \226\134\147310 \243\176\148\155 1:51",
+    "item H: the run line is THIS RUN only - steps, what it sent and what it received, and the clock")
   -- A run that has added nothing yet still says both numbers: nothing added, the total it sent.
   local fresh = view_lib.new({ live = true, limit = 100 })
   fresh.turn = { rounds = 1, context = 9000 }
   fresh.context = 9000
   fresh.totals = { prompt = 9000, completion = 30 }
   local first = fresh:run_numbers("0s", "0:01")
-  ok(has(first, "\206\1480 ") and has(first, "\226\134\1459.0k"),
-    "a first step says nothing added and the total it sent: " .. first)
+  ok(has(first, "\206\148\226\134\1450 ") and has(first, "\226\134\14730") and not has(first, "\206\163"),
+    "item H: a first step says what this run sent, and carries no SESSION total: " .. first)
 end
 
 

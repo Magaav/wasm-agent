@@ -1799,28 +1799,16 @@ end
 
 -- `󰷺steps·step-time Δadded ↑in ↓out 󰔛run-time` for the current run.
 --
--- TWO input numbers, deliberately (Victor, 18/11: "only delta is not enough"). `Δ` is what the run
--- ADDED to the context - the last call's prompt against the one the run started on, not the sum of
--- every call's prompt, which re-counts the whole context each step. `↑` is the session's input-token
--- TOTAL, right after it: every step resends the context, so it is the number that says what the session
--- has cost, and it is the same total the footer prints as `Σ↑`. They are different facts and both are
--- wanted; one without the other was wrong in both directions.
---
--- The two clocks are passed in (tokens for the host's ticker, or the stopped values once the run has
--- ended). With no step clock (the line left under a finished run) the step count stands alone: `󰷺8`.
---
--- `finish` is the run's END, and only a run that ended well is handed one (Victor, 19/11 ~10:50):
--- the row left under a finished run carries a middle dot, Material Design's check and the LOCAL time
--- it finished, so the line says when the answer came back and not only how long it took. Nothing
--- extra while the run is in flight (no argument), and a run that FAILED keeps this same row WITHOUT
--- the check: the absence of the check is the failure, and a second shape for it would be a second
--- row to read.
+-- THIS RUN ONLY (Victor, 19/11 12:15, item H). The row carries the run's own additions - the
+-- SIGMA-UP of what this run sent and the down arrow of what it received - and NO session total:
+-- the session's two sums live in the footer (SIGMA-UP and SIGMA-DOWN), and a number printed on
+-- both rows makes a reader compare two things that are not the same thing.
 function METHODS:run_numbers(step_clock, run_clock, finish)
   local run, base, totals = self.turn or {}, (self.turn and self.turn.baseline) or {}, self.totals or {}
   local input = math.max(0, (self.context or 0) - (run.context or 0))
   local output = math.max(0, (totals.completion or 0) - (base.completion or 0))
   local row = GLYPH.steps .. GAP .. math.max(1, run.rounds or 0) .. (step_clock and ("\194\183" .. step_clock) or "")
-    .. " \206\148" .. M.tokens(input) .. " \226\134\145" .. M.tokens(totals.prompt)
+    .. " \206\148\226\134\145" .. M.tokens(input)
     .. " \226\134\147" .. M.tokens(output)
     .. " " .. GLYPH.clock .. GAP .. run_clock
   if finish and finish.ok then
