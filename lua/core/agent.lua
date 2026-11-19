@@ -2590,7 +2590,14 @@ function M:run_body(text, images)
     -- 8497eecc-6084-4ffe-a65f-d04c550522bb, a `finish_reason=stop` reply with no text and no tool
     -- call ended the run with `empty_reply` on the first attempt and never asked again.
     local function retryable(value)
-      if not ok then return provider.is_transient(tostring(value)) end
+      if not ok then
+        -- A lost link is retryable by definition (nothing was sent); an unclassified provider failure
+        -- is retried a bounded number of times; everything else keeps the opt-in transient policy.
+        return provider.is_connection_lost(tostring(value))
+          or provider.is_rate_limited(tostring(value))
+          or provider.is_unknown_failure(tostring(value))
+          or provider.is_transient(tostring(value))
+      end
       if type(value) ~= "table" then return false end
       -- An interrupted stream (`stream_complete=false`) is the lost-stream case below, which has
       -- its own patient budget; it must not also consume this short empty-reply budget.
@@ -2613,40 +2620,117 @@ function M:run_body(text, images)
     -- The ambiguous failures keep the opt-in budget above; a terminal quota refusal is excluded by
     -- `is_rate_limited` and keeps its landed outcome.
     local rate_limited = (not ok) and provider.is_rate_limited(tostring(result))
+    -- A provider failure that matches no known class is NOT final: it takes a bounded budget and then
+    -- fails by NAME, because "not in my tables" is not a judgement about the request (brief item 3).
+    local unknown_failure = (not ok) and not connection_lost and not rate_limited
+      and provider.is_unknown_failure(tostring(result))
     -- An empty stop (a reply with no text, no reasoning and no tool call) is its own bucket: it is
     -- not an ambiguous transport failure, it is the turn failing to produce anything at all, and it
     -- is default-on with a short budget so a hiccup costs a second and not a run.
     local empty_reply = provider.is_empty_reply(result)
-    local transient_limit = connection_lost and provider.connection_retries()
+    -- A lost link is waited for until it returns (provider.link_wait_is_unbounded), because a cap
+    -- only converts a real outage into a dead run: measured 19/11, a 2-minute drop ended the run and
+    -- nothing resumed it. An operator who wants a bound sets CONNECT_RETRIES/_WAIT_SECONDS by name.
+    local link_unbounded = (connection_lost and provider.link_wait_is_unbounded()) and true or false
+    local transient_limit = connection_lost
+        and (link_unbounded and math.huge or provider.connection_retries())
       or rate_limited and provider.rate_limit_retries()
+      or unknown_failure and provider.unknown_retries()
       or empty_reply and provider.empty_reply_retries()
       or provider.transient_retries()
+    -- A transient class that waits without a total cap (brief item 1) still must not spin on a wall: a
+    -- failure whose TEXT repeats unchanged is bounded by its own ceiling and then named. Only the
+    -- unbounded classes carry this, because a bounded bucket already stops itself - and only when
+    -- repeating THIS failure really is a wall (a 500, or no class at all). A lost link or a busy
+    -- status repeats identically for as long as the outage lasts, and bounding those would kill the
+    -- very run this change exists to save (review MUST 1).
+    local repeats_are_a_wall = (not ok) and provider.repeats_are_a_wall(tostring(result)) or false
+    local identical_limit = (transient_limit == math.huge and repeats_are_a_wall)
+      and provider.identical_repeat_ceiling() or nil
+    local identical_text, identical_count = nil, 0
     local transient_attempt, waited_ms = 0, 0
-    local wait_budget_ms = connection_lost and (provider.connection_wait_seconds() * 1000) or nil
+    local wait_budget_ms = (connection_lost and not link_unbounded)
+      and (provider.connection_wait_seconds() * 1000) or nil
+    -- When the link went down, so the recovery line can say how long it was out (one line, once).
+    local link_down_since = nil
     while transient_attempt < transient_limit and retryable(result) do
       transient_attempt = transient_attempt + 1
       local retry_after = (not ok) and provider.retry_after_ms(result) or nil
       local wait_ms = connection_lost and provider.connection_backoff_ms(transient_attempt)
         or rate_limited and provider.rate_limit_backoff_ms(transient_attempt, retry_after)
+        or unknown_failure and provider.unknown_backoff_ms(transient_attempt)
         or empty_reply and provider.empty_reply_backoff_ms(transient_attempt)
         or math.floor((2 ^ transient_attempt) * 1000 * (0.75 + math.random() * 0.5))
       if wait_budget_ms and waited_ms + wait_ms > wait_budget_ms then break end
       waited_ms = waited_ms + wait_ms
       local reason = ok and (result.stream_complete == false and "incomplete_stream" or "empty_reply")
         or redact.text(tostring(result)):sub(1, 80)
+      -- The identical-repeat ceiling: the same failure text, unchanged, counted. A different text -
+      -- a new body, a link that came back and failed differently - resets the count, because that is
+      -- a different situation and the class is still transient.
+      local failure_text = (not ok) and redact.text(tostring(result)) or nil
+      -- The wall is re-evaluated on EVERY failure, not armed once and carried. A 500 followed by ten
+      -- identical "connection refused" is a wall and then an OUTAGE: leaving the ceiling armed would
+      -- kill the run during the outage while the row still said "no limit" (review r3, item 1).
+      if transient_limit == math.huge and (not ok) then
+        if provider.repeats_are_a_wall(tostring(result)) then
+          identical_limit = identical_limit or provider.identical_repeat_ceiling()
+        else
+          -- Not a wall any more: the count and the ceiling both clear, so the next wall starts fresh.
+          identical_limit, identical_text, identical_count = nil, nil, 0
+        end
+      end
+      if identical_limit then
+        if failure_text and failure_text == identical_text then
+          identical_count = identical_count + 1
+        else
+          identical_text, identical_count = failure_text, 1
+        end
+        if identical_count >= identical_limit then
+          ok, result = false, tostring(result) .. string.format(
+            " [the same failure repeated %d times unchanged; it is not a transient wait any more]", identical_count)
+          break
+        end
+      end
+      -- The waiting row: what is wrong, with which provider, and when the next attempt comes. It
+      -- names the operator's only lever when the wait is unbounded, so a reader can stop it on purpose.
+      local provider_name = connection_lost and (function()
+        local got, active = pcall(provider.active)
+        if got and type(active) == "table" then
+          return tostring(active.id or active.name or "provider")
+        end
+        return "provider"
+      end)() or "provider"
+      -- Only a REAL lost link (a failure that named the network), not the incomplete-stream member
+      -- of the same bucket: a stream cut that is retried a second later is not "the network came
+      -- back", and saying so would be a false report of an outage that may not even exist.
+      local link_failure = (not ok) and provider.is_link_down(tostring(result))
+      if link_failure and not link_down_since then link_down_since = host.now() end
+      -- The counters, as words: an uncapped class has no fraction to show, and printing one would be a
+      -- lie (and a number the formatter cannot represent). One string, so every branch agrees.
+      local uncapped = (transient_limit == math.huge)
+      local counted = uncapped
+        and string.format("%d, no limit - it waits until the wait stops helping, Esc stops the run)", transient_attempt)
+        or string.format("%d/%d)", transient_attempt, transient_limit)
       self.emit({ type = "status", text = connection_lost
-        and string.format("network appears down (%s) - retrying in %ds (%d/%d); waiting up to %ds for the link",
-          reason, math.floor(wait_ms / 1000), transient_attempt, transient_limit, provider.connection_wait_seconds())
-        or rate_limited and string.format("provider refused the request (%s) - retrying in %ds (%d/%d)%s",
-          reason, math.floor(wait_ms / 1000), transient_attempt, transient_limit,
+        and (link_unbounded
+          and string.format("waiting for the network · %s unreachable · retry in %ds (%s",
+            provider_name, math.max(1, math.floor(wait_ms / 1000 + 0.5)), counted)
+          or string.format("waiting for the network · %s unreachable · retry in %ds (%s; waiting up to %ds for the link",
+            provider_name, math.max(1, math.floor(wait_ms / 1000 + 0.5)), counted,
+            provider.connection_wait_seconds()))
+        or rate_limited and string.format("provider refused the request (%s) - retrying in %ds (%s%s",
+          reason, math.floor(wait_ms / 1000), counted,
           retry_after and " as the provider asked" or "")
         or empty_reply and string.format(
-          "the provider returned an empty message (%s) - asking again in %dms (%d/%d)",
-          reason, wait_ms, transient_attempt, transient_limit)
-        or string.format("provider unavailable (%s) - retrying in %ds (%d/%d)",
-          reason, math.floor(wait_ms / 1000), transient_attempt, transient_limit) })
+          "the provider returned an empty message (%s) - asking again in %dms (%s",
+          reason, wait_ms, counted)
+        or string.format("provider unavailable (%s) - retrying in %ds (%s",
+          reason, math.floor(wait_ms / 1000), counted) })
       telemetry.event(self.session_id,self.run_id,"","provider_retry","attempt",{
-        reason=reason,attempt=transient_attempt,limit=transient_limit,wait_ms=wait_ms,
+        -- A JSON body cannot carry inf: an unbounded wait says so by name, not as a number.
+        reason=reason,attempt=transient_attempt,limit=(transient_limit == math.huge) and "none" or transient_limit,
+        wait_ms=wait_ms,
         connection_lost=connection_lost and true or false,
         rate_limited=rate_limited and true or false,empty_reply=empty_reply and true or false,
         retry_after_ms=retry_after,
@@ -2662,15 +2746,30 @@ function M:run_body(text, images)
       if stop then ok, result = false, stop break end
       call_opts.attempt = (call_opts.attempt or 1) + 1
       ok, result = pcall(provider.complete_with, self.model, messages, tool_list, self.stream, call_opts)
-      -- A later attempt that also reports a dead link keeps the patient policy (and the budget).
+      -- A later attempt that also reports a dead link keeps the patient policy (and the budget):
+      -- bounded when the operator asked for a bound, unbounded otherwise - the same rule as the
+      -- first failure, so a link that drops a second time does not silently acquire a cap.
       if not ok and provider.is_connection_lost(tostring(result)) then
         if not connection_lost then
           connection_lost = true
-          transient_limit = math.max(transient_limit, provider.connection_retries())
-          wait_budget_ms = provider.connection_wait_seconds() * 1000
+          link_unbounded = provider.link_wait_is_unbounded() and true or false
+          transient_limit = link_unbounded and math.huge
+            or math.max(transient_limit, provider.connection_retries())
+          wait_budget_ms = link_unbounded and nil
+            or provider.connection_wait_seconds() * 1000
+          if not link_down_since then link_down_since = host.now() end
         end
       end
       if not ok and provider.is_rate_limited(tostring(result)) then rate_limited = true end
+      -- A later attempt that fails differently (or stops matching any class) keeps the unknown
+      -- budget it was given, so a failure never becomes MORE final by changing its wording.
+      if not ok and not connection_lost and not rate_limited
+          and provider.is_unknown_failure(tostring(result)) then
+        if not unknown_failure then
+          unknown_failure = true
+          transient_limit = math.max(transient_limit, provider.unknown_retries())
+        end
+      end
       -- The bucket follows the reply, not only the first attempt's outcome: a transient failure
       -- that is answered with an empty stop still gets the empty-reply budget instead of dying on
       -- the opt-in transient one (which defaults to 0).
@@ -2679,6 +2778,18 @@ function M:run_body(text, images)
         empty_reply = true
         transient_limit = provider.empty_reply_retries()
       end
+    end
+    -- The link came back: ONE line saying how long it was out, and the run continues from the same
+    -- step (the request was retried, never re-executed - it produced no answer, so no tool call it
+    -- might have carried can have run).
+    -- ...and only when it was out for a measurable while: a link that "came back" in the same second
+    -- as the first attempt never left, and a line claiming an outage would be noise.
+    if ok and link_down_since and (host.now() - link_down_since) >= 1 then
+      local seconds = math.max(0, math.floor(host.now() - link_down_since))
+      self.emit({ type = "status", text = string.format("network back after %dm%02ds",
+        math.floor(seconds / 60), seconds % 60) })
+      telemetry.event(self.session_id,self.run_id,"","provider_retry","recovered",{after_s=seconds})
+      link_down_since = nil
     end
     -- A provider 400/413 on a request at/near the window is a context overflow even when
     -- the body says nothing - this deployment answers a too-large request with a bare

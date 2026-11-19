@@ -286,20 +286,37 @@ pub fn run(bind: &str, port: u16, db_path: &str) {
     // One thread per connection: long polls must not block the registry. Bounded, because this listener
     // is public behind Caddy: an unbounded thread (and SQLite connection) per socket is a way to exhaust
     // the host. Each relay long poll holds one, so the cap leaves room for many nodes.
-    static OPEN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    const MAX_CONNECTIONS: usize = 256;
+    let cap = max_connections();
+    // The peak open count, for a test (or an operator) that needs the number rather than a suspicion.
+    // Written only when asked, so the production listener does no extra I/O.
+    let peak_file = std::env::var("WA_RENDEZVOUS_PEAK_FILE").ok().filter(|p| !p.is_empty());
     for stream in listener.incoming() {
         let Ok(mut stream) = stream else { continue };
-        if OPEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= MAX_CONNECTIONS {
+        let now_open = OPEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        if let Some(path) = &peak_file {
+            static PEAK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let seen = PEAK.fetch_max(now_open, std::sync::atomic::Ordering::SeqCst).max(now_open);
+            let _ = std::fs::write(path, format!("{} {}\n", seen, cap));
+        }
+        if now_open > cap {
             OPEN.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-            let _ = respond(&mut stream, 503, "{\"error\":\"too_many_connections\"}");
+            // Shed with a hint. The old body was a bare 503, which every caller retried at once -
+            // measured 19/11, the cap stayed full for half an hour because of exactly that.
+            let body = json!({"error":"too_many_connections","retryable":true,
+                "retry_after_ms":SHED_RETRY_AFTER_S * 1000,
+                "hint":"the registry is at its connection cap; nothing ran, wait and retry"}).to_string();
+            let _ = respond_retry(&mut stream, 503, &body, SHED_RETRY_AFTER_S);
             continue;
         }
+        // The lane the request belongs to is not known until its head is read, so the reservation is
+        // made on the first line - which handle() reads immediately. A request over the non-reserved
+        // part of the cap is shed here, before it can take a slot from a poll that needs one.
         let db = db_path.to_string();
         let relay = relay.clone();
+        let open_now = OPEN.load(std::sync::atomic::Ordering::SeqCst);
         std::thread::spawn(move || {
             let _ = stream.set_write_timeout(Some(Duration::from_secs(15)));
-            if let Err(error) = handle(&db, &mut stream, &relay) {
+            if let Err(error) = handle(&db, &mut stream, &relay, open_now, cap) {
                 eprintln!("[rendezvous] connection: {error}");
             }
             OPEN.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
@@ -307,7 +324,7 @@ pub fn run(bind: &str, port: u16, db_path: &str) {
     }
 }
 
-fn handle(db_path: &str, stream: &mut TcpStream, relay: &Arc<Mutex<RelayState>>) -> std::io::Result<()> {
+fn handle(db_path: &str, stream: &mut TcpStream, relay: &Arc<Mutex<RelayState>>, open: usize, cap: usize) -> std::io::Result<()> {
     // One connection per request, so it needs the shared policy or every concurrent registration
     // races the lock with no wait at all (`rust/wa-sqlite`).
     let connection = match wa_sqlite::open(db_path) {
@@ -364,6 +381,21 @@ fn handle(db_path: &str, stream: &mut TcpStream, relay: &Arc<Mutex<RelayState>>)
         Some((path, query)) => (path.to_string(), query.to_string()),
         None => (target.clone(), String::new()),
     };
+    // The lane is known now, so the reservation can be applied to it. Under load a relayed call is
+    // shed before it takes a connection a poll or a binding check would have used (RESERVED_LANES).
+    //
+    // The count is read HERE, not carried from accept: a long poll occupies its slot for up to 25 s,
+    // so the number at accept time is stale by the time the lane is known, and a decision made on a
+    // stale count lets a burst of ordinary requests through the reservation exactly when it matters.
+    // `open` is kept as the caller's view for the log line only.
+    let live = OPEN.load(std::sync::atomic::Ordering::SeqCst);
+    let _ = open;
+    if shed_for_lane_at(live, is_priority_lane(&path), cap) {
+        let body = json!({"error":"too_many_connections","retryable":true,
+            "retry_after_ms":SHED_RETRY_AFTER_S * 1000,
+            "hint":"the registry is serving its reserved lanes first; nothing ran, wait and retry"}).to_string();
+        return respond_retry(stream, 503, &body, SHED_RETRY_AFTER_S);
+    }
     let payload: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
     let header = |name: &str| {
         headers
@@ -671,6 +703,22 @@ fn handle(db_path: &str, stream: &mut TcpStream, relay: &Arc<Mutex<RelayState>>)
         let mut lines: Vec<String> = Vec::new();
         let (hold, deadline_ms) = {
             let mut state = relay.lock().unwrap();
+            // Fair shedding BEFORE anything is queued: a caller at its per-caller limit, or a target
+            // whose queue is already longer than it can drain. One caller cannot fill the registry
+            // for everyone, and a node that is behind is not given still more work to abandon.
+            // Calls this caller has issued and whose answer it is still waiting for: the ones that
+            // actually hold the registry, counted from the ids in flight, not from a global total.
+            let caller_in_flight = state.waiting.keys()
+                .filter(|rid| state.owners.get(*rid).map(|owner| owner.0 == from).unwrap_or(false))
+                .count();
+            let queued_for_target = state.queue.get(&to).map(|q| q.len()).unwrap_or(0);
+            if let Some(reason) = lane_refusal(caller_in_flight, queued_for_target) {
+                let body = json!({"error":reason,"to":to,"rid":id,"retryable":true,
+                    "retry_after_ms":SHED_RETRY_AFTER_S * 1000,
+                    "hint":"nothing was queued; the same rid may be sent again after the wait"}).to_string();
+                drop(state);
+                return respond_retry(stream, 503, &body, SHED_RETRY_AFTER_S);
+            }
             state.results.retain(|_, stored| stored.at.elapsed() < Duration::from_secs(120));
             state.issued.retain(|_, at| at.elapsed() < Duration::from_secs(120));
             let live: std::collections::HashSet<String> = state.issued.keys().chain(state.results.keys()).cloned().collect();
@@ -1312,9 +1360,160 @@ fn respond(stream: &mut TcpStream, status: u16, body: &str) -> std::io::Result<(
     stream.flush()
 }
 
+/// A refusal that TELLS the caller when to come back.
+///
+/// Measured 19/11 12:20-12:45 UTC: while the registry was at its connection cap it answered 503
+/// too_many_connections to everyone and every caller retried at once, so the cap stayed full and the
+/// fleet never converged. A 503 with no hint is an invitation to retry immediately. The hint travels
+/// twice on purpose: as the Retry-After header (what an HTTP client honours without parsing a body)
+/// and as retry_after_ms in the body (what this tree's own caller reads).
+fn respond_retry(stream: &mut TcpStream, status: u16, body: &str, retry_after_s: u64) -> std::io::Result<()> {
+    let head = format!(
+        "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+         Cache-Control: no-store\r\nRetry-After: {retry_after_s}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(head.as_bytes())?;
+    stream.write_all(body.as_bytes())?;
+    stream.flush()
+}
+
+/// Open connections to this listener, across every lane.
+static OPEN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// The listener's hard cap. One thread (and one SQLite connection) per socket, on a public port.
+/// Read from the environment so a test can reproduce the 19/11 storm with a cap of 16 instead of
+/// opening 256 sockets: the policy under test is the shed and the reservation, not the number.
+fn max_connections() -> usize {
+    std::env::var("WA_RENDEZVOUS_MAX_CONNECTIONS").ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| (2..=65536).contains(value))
+        .unwrap_or(256)
+}
+const MAX_CONNECTIONS: usize = 256;
+/// Slots held back for the lanes a node MUST be able to use even while callers are storming it: its
+/// relay poll (without it the node is detached, so it cannot answer anything and the queue never
+/// drains) and its binding check (without it the node refuses every call). This is the reservation
+/// that breaks the 19/11 deadlock: relayed calls may never occupy the whole cap.
+const RESERVED_LANES: usize = 64;
+
+/// Whether a request belongs to a lane that must never starve.
+fn is_priority_lane(path: &str) -> bool {
+    path == "/relay/poll"
+        || path == "/relay/respond"
+        // /register is the node's heartbeat. Without it the registry forgets the node, so it is a lane
+        // that must never starve - and the binding tick returns before its poll when it fails, which is
+        // the 19/11 deadlock in miniature (review MUST 3).
+        || path == "/register"
+        || path.starts_with("/bindings/")
+        || path == "/lookup"
+        || path == "/health"
+        || path == "/service"
+}
+
+/// The load-shed decision for a request already counted in OPEN, pure so it is testable without
+/// sockets. A priority lane is never shed before the hard cap. Anything else is shed once the
+/// non-reserved part of the cap is gone - so under a storm the calls waiting for an answer lose the
+/// connection, and the polls that would let those answers happen keep theirs.
+/// The slots held back at a given cap: RESERVED_LANES at 256, and a quarter of anything smaller, so a
+/// test at a cap of 16 reserves 4 and still exercises both halves of the decision. At least one slot
+/// and at most cap-1 are reserved, so ordinary traffic always has somewhere to go.
+fn reserved_lanes_at(cap: usize) -> usize {
+    if cap <= 2 {
+        return 1;
+    }
+    let scaled = if cap >= MAX_CONNECTIONS { RESERVED_LANES } else { cap / 4 };
+    scaled.max(1).min(cap - 1)
+}
+
+/// The same decision at an explicit cap, so a test can hold the policy at 16 instead of 256.
+fn shed_for_lane_at(open: usize, priority: bool, cap: usize) -> bool {
+    if priority {
+        return open > cap;
+    }
+    // saturating: ordinary traffic is never shed at open == 0, whatever the cap.
+    let free = cap.saturating_sub(reserved_lanes_at(cap));
+    open > free
+}
+
+/// How long a shed caller is told to wait before trying the same lane again.
+const SHED_RETRY_AFTER_S: u64 = 2;
+/// Relayed calls ONE caller may hold in flight against this registry. A caller that pipelines more is
+/// the storm's generator, not its victim: every extra call holds a slot a poll or a binding needs.
+const MAX_IN_FLIGHT_PER_CALLER: usize = 8;
+/// Relayed calls that may sit queued for ONE target node. Past this the node cannot drain the queue
+/// inside the answer window, so queueing more only guarantees an abandoned call.
+const MAX_QUEUED_PER_TARGET: usize = 32;
+
+/// The shed decision, pure so it can be tested without a socket or a clock.
+///
+/// Returns the named reason when the lane is full. Nothing has been queued at the moment this answers,
+/// so the caller may send the same rid again - the hint says how long to wait first.
+fn lane_refusal(caller_in_flight: usize, queued_for_target: usize) -> Option<&'static str> {
+    if caller_in_flight >= MAX_IN_FLIGHT_PER_CALLER {
+        return Some("relay_busy");
+    }
+    if queued_for_target >= MAX_QUEUED_PER_TARGET {
+        return Some("relay_busy");
+    }
+    None
+}
+
 #[cfg(test)]
 mod relay_tests {
     use super::*;
+
+    /// 19/11: under the storm the registry answered 503 to everyone and never recovered, because the
+    /// waiting calls held every slot the polls needed to answer them. The reservation is what breaks
+    /// that cycle, and these numbers are the contract.
+    #[test]
+    fn polls_and_binding_keep_their_slots_while_relayed_calls_are_shed() {
+        let cap = MAX_CONNECTIONS;
+        // Below the non-reserved part of the cap, nothing is shed at all.
+        assert!(!shed_for_lane_at(0, false, cap) && !shed_for_lane_at(0, true, cap));
+        assert!(!shed_for_lane_at(cap - RESERVED_LANES, false, cap), "the last free non-reserved slot is usable");
+        // One past it, an ordinary request is shed...
+        assert!(shed_for_lane_at(cap - RESERVED_LANES + 1, false, cap),
+            "an ordinary connection is shed before it can take a reserved slot");
+        // ...while a poll or a binding check still gets through, right up to the hard cap.
+        assert!(!shed_for_lane_at(cap - RESERVED_LANES + 1, true, cap), "a poll is never shed first");
+        assert!(!shed_for_lane_at(cap, true, cap), "the reserved lanes may use the whole cap");
+        assert!(shed_for_lane_at(cap + 1, true, cap), "the hard cap still applies to everyone");
+        assert!(RESERVED_LANES < cap, "the reservation must leave room for ordinary traffic");
+        // The same policy at a test-sized cap of 16: a quarter is reserved, so ordinary traffic stops
+        // at 12 while polls keep going to 16, and nothing is shed at zero.
+        assert_eq!(reserved_lanes_at(16), 4);
+        assert!(!shed_for_lane_at(0, false, 16) && !shed_for_lane_at(12, false, 16));
+        assert!(shed_for_lane_at(13, false, 16), "at a cap of 16, call 13 is the one that gives way");
+        assert!(!shed_for_lane_at(13, true, 16), "while a poll at the same open count is served");
+        assert!(shed_for_lane_at(17, true, 16), "the hard cap still applies to a poll");
+        // A cap smaller than the old fixed reservation stays sane instead of reserving everything.
+        assert!(!shed_for_lane_at(1, false, 2) && reserved_lanes_at(2) == 1);
+    }
+
+    /// The lanes that must never starve, and the ones that may be shed to protect them.
+    #[test]
+    fn the_priority_lanes_are_the_ones_that_let_an_answer_happen() {
+        for path in ["/relay/poll", "/relay/respond", "/bindings/status", "/lookup", "/health", "/service", "/register"] {
+            assert!(is_priority_lane(path), "{path} must never be shed before the hard cap");
+        }
+        // /register is the heartbeat: shedding it detaches the node, which is the storm again.
+        assert!(is_priority_lane("/register"), "a heartbeat is never shed first");
+        // The paths that wait for an answer are the ones that may give way.
+        for path in ["/relay/send", "/nodes", "/"] {
+            assert!(!is_priority_lane(path), "{path} may be shed to keep the reserved lanes open");
+        }
+    }
+
+    /// Per-caller and per-target limits, before anything is queued.
+    #[test]
+    fn one_caller_and_one_target_cannot_fill_the_registry() {
+        assert_eq!(lane_refusal(0, 0), None);
+        assert_eq!(lane_refusal(MAX_IN_FLIGHT_PER_CALLER - 1, MAX_QUEUED_PER_TARGET - 1), None);
+        assert_eq!(lane_refusal(MAX_IN_FLIGHT_PER_CALLER, 0), Some("relay_busy"),
+            "a caller at its own limit is shed even with an empty target queue");
+        assert_eq!(lane_refusal(0, MAX_QUEUED_PER_TARGET), Some("relay_busy"),
+            "a target whose queue is full is not given more work to abandon");
+    }
 
     /// The bound is the wait the caller was given, less the time the answer needs to reach it.
     #[test]

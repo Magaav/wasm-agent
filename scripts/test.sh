@@ -211,6 +211,16 @@ gate_run cargo build --release --offline --manifest-path rust/Cargo.toml >"$ACTU
 # test each time (04/11: 1 in 5 runs). The whole suite is ~26 s; it runs once (the release-profile rerun
 # of the same tests further down was removed: same assertions, a second compile, a second chance to race).
 gate_run cargo test --offline --manifest-path rust/wa-sentinel/Cargo.toml -- --test-threads=1
+# The rendezvous sheds FAIRLY (19/11 12:20-12:45 UTC: 503 too_many_connections to everyone, the fleet did
+# not converge for half an hour). Relayed calls may no longer take the connections that polls and binding
+# checks need: a reservation is held back for those lanes, one caller and one target are each capped, and
+# every shed answer carries Retry-After in the header and retry_after_ms in the body. The unit tests hold
+# the policy. tests/storm.rs reproduces the WHOLE event with four scratch nodes that have real ed25519
+# keys, 300 held sockets past the base cap, and a proxy the test owns so the link can be CUT for 60 s:
+# every node must answer a real relayed call after the restore (measured: 252 ms after the link came
+# back, peak 301 connections), and ordinary traffic converges (this test FAILS on the base registry with
+# 503 too_many_connections). Hermetic: a temp db, scratch keys, no live fleet.
+gate_run cargo test --offline --manifest-path rust/Cargo.toml -p wa-rendezvous
 if [ "${OS:-}" = "Windows_NT" ]; then
 gate_run cargo build --offline --manifest-path rust/wa-sentinel/Cargo.toml
 # ABSOLUTE, from `--absolute-git-dir`: `--git-path` prints `.git/<name>` relative to the cwd, and these
@@ -1244,6 +1254,43 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-provider-rate-limit-recovery.lua" "
 # `provider_error: io: An established connection was aborted ... (os error 10053)` because
 # neither spelling was in the connection bucket; only a manual Continue resumed the run.
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-provider-connection-abort-recovery.lua" "$BIN" --db "$DB.provider-connection-abort" | grep 'provider connection abort recovery ok'
+# A two-minute outage in the middle of a run must not end it (19/11 12:17 UTC, home internet down: the
+# run stopped with 'provider refused the request' x3 and 'run_failed: provider_http_502
+# vault_upstream_unreachable (gaierror)', and nothing resumed when the link came back). The vault's own
+# 502 was claimed by the short refusal bucket because 502 is a transient STATUS, so a dead LINK was
+# treated as a provider answer. This row drives the bytes the real vault/wa_vault.py sends (measured in
+# PHASE 0 against a closed port and an unresolvable host) through a real turn: the run waits visibly,
+# survives the outage, finishes with the right answer, never re-runs a tool call it already made, fails
+# at once by name on auth, stops on cancellation, and gives an unclassified provider failure a bounded
+# five retries before naming it. Hermetic: the provider is replaced; no network, no inference.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-network-outage-recovery.lua" "$BIN" --db "$DB.provider-network-outage" | grep 'network outage recovery ok'
+# A peer that is merely unreachable stays in the roster (19/11: after the link returned, 'wa nodes'
+# listed only itself and every 'wa call <peer>' answered unknown_node:<peer>). A failed roster read
+# used to REPLACE the cache with the empty table it had started from, so an outage erased the fleet
+# until a restart. The fix keeps every known peer, marked offline with its last-seen stamp, and a call
+# to one answers peer_offline:<name> (last seen ...). A successful read may still remove a peer.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-network-roster-offline.lua" "$BIN" --db "$DB.network-roster-offline" | grep 'network roster offline ok'
+# The caller's half of the relay storm (19/11 12:20-12:45 UTC: 503 too_many_connections to everyone
+# while ~470 connections kept arriving and ~600 relayed calls/min were abandoned). A caller held as
+# many relayed calls against one node as it liked and retried an over-cap relay with no jittered wait.
+# Now: at most RELAY_MAX_IN_FLIGHT per node (refused by name BEFORE anything is sent), and a growing,
+# capped, jittered wait that honours Retry-After - never a tight retry.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-network-relay-backpressure.lua" "$BIN" --db "$DB.network-relay-backpressure" | grep 'network relay backpressure ok'
+# A rendezvous OUTAGE must not turn an already-bound operator into a stranger (19/11: the work node
+# answered no relayed call for the length of the drop, because every call's admission asked the registry
+# twice and "unknown" refused). A POSITIVE admission is remembered with its time and stands through a
+# LINK failure inside a window; anything the registry ANSWERS still wins (revoked, removed, expired
+# refuse at once), and a caller never admitted before is refused as before - a new binding can never be
+# created against an unreachable registry.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-network-binding-outage.lua" "$BIN" --db "$DB.network-binding-outage" | grep 'network binding outage ok'
+# The NODE's half of a relay outage, at UNIT level - not an end-to-end storm, and it no longer claims
+# to be one. It drives the REAL binding tick (lua/core/binding.lua M.tick) and the REAL caller
+# (lua/core/nodes.lua remote_call) against a relay the row owns: through a 60 s outage the node KEEPS
+# TRYING to poll on every second (attempts are counted, not successes: before the fix a failed
+# /register returned before the poll, the 19/11 deadlock), it re-attaches with no restart, and a caller
+# then holds the node's verified answer. The END-TO-END storm - real nodes, a real cut, and the relay
+# redesign it needs - moved to the fabric-transport mission.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-network-outage-tick.lua" "$BIN" --db "$DB.network-outage-tick" | grep 'network outage tick ok'
 # A route must refuse a model it cannot serve before the first provider request - and only that.
 # A child with `gpt-6-luna` on the opencode-go route failed in 0.67s with zero tool calls on the
 # edge's `Model does not support this protocol`, and 26 child runs of `deepseek-v4.1-flash` died

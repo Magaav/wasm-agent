@@ -364,6 +364,58 @@ function M.profile(include_inactive)
   end
   return s
 end
+-- Cached admissions, so a rendezvous OUTAGE does not turn an already-bound operator into a stranger.
+--
+-- Measured 19/11 ~12:17 UTC, home network down: the work node answered no relayed call for the length
+-- of the drop, because every call ran M.authorize, which asks the registry twice (the operator list
+-- and the binding status), and an unreadable registry refused by returning nil. The node could not
+-- answer the very calls whose answers would have let the fleet drain - the second half of the storm.
+--
+-- The rule, and it is an allow-list: a POSITIVE decision (this exact node_id+public_key, vouched for
+-- by the registry, with an accepted binding) is remembered with the time it was made. When a later
+-- check cannot REACH the registry - a transport failure, never a refusal - the remembered decision
+-- stands until it expires. Anything the registry actually answers still wins: revoked, removed,
+-- expired or unknown refuses at once. A caller with no remembered decision is refused as before, so
+-- this can never admit a NEW binding while the registry is unreachable.
+M.ADMISSION_CACHE_SECONDS = tonumber(host.getenv('WASM_AGENT_BINDING_CACHE_SECONDS') or '') or 600
+local admitted = {}
+
+local function admission_key(id, key) return tostring(id) .. '\0' .. tostring(key) end
+
+-- True when a failure is the LINK, not the registry's judgement. Only these use the cache.
+local function unreachable_detail(detail)
+  local text = tostring(detail or ''):lower()
+  if text == '' then return true end
+  if text:find('binding_service_unavailable', 1, true) then return true end
+  -- The native transport's words for a socket that died mid-read, and this module's own wrapper for a
+  -- call that returned nothing at all (binding_http_nil). Measured by tests/storm.rs: during a 60 s cut
+  -- the tick answered binding_approval_unavailable/binding_http_nil:io: Peer disconnected, which matched
+  -- NOTHING here, so the node stopped polling for the rest of the outage and never re-attached.
+  if text:find('peer disconnected', 1, true) then return true end
+  if text:find('binding_http_nil', 1, true) then return true end
+  if text:find('connection closed', 1, true) then return true end
+  if text:find('unexpected eof', 1, true) then return true end
+  if text:find('broken pipe', 1, true) then return true end
+  if text:find('connection aborted', 1, true) then return true end
+  if text:find('os error 10053', 1, true) then return true end
+  if text:find('binding_http_5', 1, true) then return true end
+  -- NO ANSWER AT ALL: the transport returns status 0 when the socket died or never connected, and
+  -- this module renders it as binding_http_0:. A dropped link is spelled that way too, and it must
+  -- take the same path as "peer disconnected" (measured by the outage row: the tick returned before
+  -- its poll on every second of a 60 s outage because of this one missing case).
+  if text:find('binding_http_0', 1, true) then return true end
+  if text:find('binding_http_unreadable', 1, true) then return true end
+  if text:find('binding_reply_invalid', 1, true) then return true end
+  if text:find('timeout', 1, true) or text:find('timed out', 1, true) then return true end
+  if text:find('connection refused', 1, true) or text:find('connection reset', 1, true) then return true end
+  if text:find('network is unreachable', 1, true) or text:find('no route to host', 1, true) then return true end
+  if text:find('name resolution', 1, true) or text:find('dns', 1, true) then return true end
+  return false
+end
+
+function M.admission_cache_size() return (function() local n=0; for _ in pairs(admitted) do n=n+1 end; return n end)() end
+function M.admission_cache_clear() admitted = {}; return true end
+
 function M.authorize(id,key)
   -- The roster first: when the fleet said yes, the pins of a binding made before the fleet existed
   -- are not the authority any more. This is the one place a relayed call is admitted.
@@ -374,14 +426,43 @@ function M.authorize(id,key)
   local s=M.profile();if not s then return nil end
   local pinned=false;for _,p in ipairs(s.operators) do if p.node_id==id and p.public_key==key then pinned=true end end
   if not pinned then return nil end
+  local remember=admitted[admission_key(id,key)]
+  local now=tonumber(host.now()) or 0
   -- Admission is per caller: the service must still vouch for this exact (node_id, public_key) pair.
   -- A removed operator is refused; whether some other pinned operator was also removed is not this
   -- caller's business and must not stop the node from answering the ones still vouched for.
-  local service=M.inspect(s.service);if not service.ok then return nil end
+  local service,service_problem=M.inspect(s.service)
+  if not service.ok then
+    -- The registry could not be READ. For a caller this node already admitted, that is not a verdict:
+    -- an outage must not turn an operator into a stranger (see ADMISSION_CACHE_SECONDS).
+    local detail=service.detail or service.error or service_problem
+    if remember and unreachable_detail(detail) and (now - remember.at) <= M.ADMISSION_CACHE_SECONDS then
+      remember.used=remember.used+1
+      return {node_id=id,public_key=key,role='master',name=id,cached=true,cached_age_s=now-remember.at}
+    end
+    return nil
+  end
   local vouched=false
   for _,p in ipairs(service.operators or {}) do if p.node_id==id and p.public_key==key then vouched=true end end
-  if not vouched then return nil end
-  local v=request_status(s);if not valid_reply(s,v) or v.binding.state~='accepted' or v.binding.request.expires_at<=host.now() then return nil end
+  if not vouched then
+    -- The registry ANSWERED and does not vouch for this pair: the cache must not stand in its way.
+    admitted[admission_key(id,key)]=nil
+    return nil
+  end
+  local v,status_problem=request_status(s)
+  if not valid_reply(s,v) then
+    if remember and unreachable_detail(status_problem) and (now - remember.at) <= M.ADMISSION_CACHE_SECONDS then
+      remember.used=remember.used+1
+      return {node_id=id,public_key=key,role='master',name=id,cached=true,cached_age_s=now-remember.at}
+    end
+    return nil
+  end
+  if v.binding.state~='accepted' or v.binding.request.expires_at<=now then
+    -- A real answer about this binding: revoked or expired drops the remembered decision.
+    admitted[admission_key(id,key)]=nil
+    return nil
+  end
+  admitted[admission_key(id,key)]={at=now,used=0}
   return {node_id=id,public_key=key,role='master',name=id}
 end
 function M.unbind()
@@ -691,14 +772,51 @@ function M.tick()
   -- (the roster, else the pins). An operator list that gained a name used to stop this tick and detain
   -- a healthy node; it is now reported on the result and the node keeps answering its operators.
   local observed,auth_error,auth_detail=authority(s)
+  -- Named, never silent: set when the tick kept polling through an unreadable registry.
+  local outage_error=nil
   if not observed then
-    observe_detached(s.request.node_id,'authority_lost:'..tostring(auth_error or auth_detail))
-    return failure(auth_error,auth_detail)
+    -- Item 7: the TICK path needs the same cached authority M.authorize already has. A registry that
+    -- could not be READ is not a verdict, and a tick that returns here is a node that stops polling -
+    -- it goes unreachable itself, which is the 19/11 deadlock. So a good observation is remembered and
+    -- stands through a LINK failure inside its window; a registry that ANSWERS still wins, and stops
+    -- the tick exactly as before ('an unreadable service is named unavailable, not an authority change').
+    local cached=M.last_authority
+    local now=tonumber(host.now()) or 0
+    if cached and unreachable_detail(auth_detail) and (now-cached.at)<=M.ADMISSION_CACHE_SECONDS then
+      -- The registry could not be READ, inside the window of a good observation: the tick still POLLS
+      -- (below), so this node stays reachable - but the answer keeps naming the outage, because a
+      -- reader must still be able to tell a healthy attach from one made during an outage.
+      observed={relation='unreadable',gained={},lost={},cached=true,cached_age_s=now-cached.at}
+      M.last_authority_outage={at=now,reason=tostring(auth_error or auth_detail)}
+      outage_error=tostring(auth_error or 'binding_service_unavailable')
+    elseif unreachable_detail(auth_detail) then
+      -- The link is still the reason, but the remembered authority has AGED OUT. Returning here is the
+      -- same trap one step later: the node stops polling and stays unreachable until someone restarts
+      -- it. So it keeps polling, and says by name that it is doing so on an expired cache - a reader
+      -- must be able to tell this from a healthy attach.
+      observed={relation='unreadable',gained={},lost={},cached=false,expired=true}
+      M.last_authority_outage={at=now,reason=tostring(auth_error or auth_detail)}
+      outage_error='binding_authority_cache_expired'
+    else
+      -- The registry ANSWERED against this node: that is a verdict, and it stops the tick.
+      observe_detached(s.request.node_id,'authority_lost:'..tostring(auth_error or auth_detail))
+      return failure(auth_error,auth_detail)
+    end
+  else
+    M.last_authority={at=tonumber(host.now()) or 0,relation=observed.relation}
   end
   local v,err=request_status(s)
   if not valid_reply(s,v) or v.binding.state~='accepted' then
-    observe_detached(s.request.node_id,'binding_approval_unavailable:'..tostring(err or (v and v.binding and v.binding.state)))
-    return failure('binding_approval_unavailable',err)
+    local status_detail=tostring(err or (v and v.binding and v.binding.state))
+    local cached_ok=M.last_authority
+      and (tonumber(host.now()) or 0)-M.last_authority.at<=M.ADMISSION_CACHE_SECONDS
+    if not (cached_ok and unreachable_detail(status_detail)) then
+      observe_detached(s.request.node_id,'binding_approval_unavailable:'..status_detail)
+      return failure('binding_approval_unavailable',err)
+    end
+    -- The status check could not REACH the registry either, inside the same window: keep polling.
+    M.last_authority_outage={at=host.now(),reason='binding_approval_unavailable:'..status_detail}
+    outage_error=outage_error or 'binding_approval_unavailable'
   end
   if not M.last_heartbeat or host.now()-M.last_heartbeat>=60 then
     -- Same v2 announcement as node.rs: the signature covers the name and the (empty) endpoint list.
@@ -710,9 +828,25 @@ function M.tick()
     local ts=math.floor(host.now());local i=identity();local sig=decode(host.sign('v2|'..i.node_id..'|'..ts..'|'..name..'|[]'))
     local r,e=http(s.service,'POST','/register',nil,{node_id=i.node_id,public_key=i.public_key,name=name,role=s.network_role,endpoints={},ts=ts,signature=sig.signature})
     if not r then
+      -- A register that keeps failing must not be retried every 2 s for the length of an outage: a fleet
+      -- coming back at once is what filled the rendezvous' cap on 19/11. The next attempt waits a
+      -- jittered interval that doubles from 1 s to a 16 s ceiling (2^4: the exponent is capped at five
+      -- FAILURES, not at a number of seconds), while the POLL below keeps its own 2 s rhythm.
+      local failures=(M.registration_failures or 0)+1
+      M.registration_failures=failures
+      local wait=math.min(30,2^(math.min(failures,5)-1))
+      M.last_heartbeat=host.now()-60+wait+math.random()
+      -- MUST 3: this used to `return` before the /relay/poll below, WITHOUT advancing the heartbeat -
+      -- so every 2 s it retried only the register and never polled the relay, which is the 19/11
+      -- deadlock in miniature: the node cannot be reached, so the calls waiting for it cannot be
+      -- answered, so the queue never drains. A register failure is reported and the poll still runs.
       observe_detached(s.request.node_id,'binding_registration_failed:'..tostring(e))
-      return failure('binding_registration_failed',e)
-    end;M.last_heartbeat=host.now()
+      M.last_registration_failure = {at=host.now(),reason=tostring(e)}
+    else
+      M.last_heartbeat=host.now()
+      M.last_registration_failure = nil
+      M.registration_failures=0
+    end
   end
   local response,why=http(s.service,'GET','/relay/poll?node_id='..s.request.node_id,'relay-poll')
   if not response then
@@ -720,8 +854,19 @@ function M.tick()
     return failure('binding_relay_unavailable',why)
   end
   observe_attached(s.request.node_id)
+  -- During an outage there IS no authority observation to report, and saying "same" would be a lie:
+  -- the view says the authority was unreadable and names why, so a reader can tell a healthy attach
+  -- from a node that is attached while the registry is unreachable.
+  local outage=M.last_authority_outage
   local view={state='attached',registered=true,attached=true,node_id=s.request.node_id,
-    authority=observed.relation,authority_gained=observed.gained,authority_lost=observed.lost}
+    authority=observed and observed.relation or 'unreadable',
+    authority_gained=observed and observed.gained or {},
+    authority_lost=observed and observed.lost or {},
+    authority_note=(not observed) and ('the registry could not be read ('..tostring(outage and outage.reason or 'unavailable')
+      ..'); this node kept polling and serving its operators') or nil}
+  -- An outage is reported by its own name, and the poll above still happened: the node is reachable
+  -- and the reader knows the registry was not.
+  if outage_error then view.error=outage_error end
   if response.request then
     -- Hand it to the runtime, never run it here (see the note on M.tick).
     view.dispatch={service=s.service,node_id=s.request.node_id,request=response.request}

@@ -96,10 +96,16 @@ check(bot:run('keep trying while the link is down')=='recovered answer',
 check(calls==2,'one abort produces exactly one replay')
 local status
 for _,event in ipairs(events) do
-  if event.type=='status' and tostring(event.text):find('network appears down',1,true) then status=event.text end
+  if event.type=='status' and tostring(event.text):find('waiting for the network',1,true) then status=event.text end
 end
-check(status and status:find('(1/1)',1,true) and status:find('waiting up to 30s',1,true),
-  'the wait is visible: cause and attempt/limit plus the link budget')
+-- The waiting row names the cause, the provider, and when the next attempt comes (19/11 brief,
+-- item 2: 'waiting for the network · <provider> unreachable · retry in 8s'). All three are asserted,
+-- so a row that drops one of them - the provider, or the counters a reader uses to tell a first
+-- wait from a tenth - fails here rather than looking fine.
+check(status and status:find('opencode-go',1,true) and status:find('unreachable',1,true)
+    and status:find('retry in',1,true) and status:find('(1/1)',1,true)
+    and status:find('waiting up to 30s',1,true),
+  'the wait is visible: cause, provider, attempt/limit and the link budget: ' .. tostring(status))
 local ledger=telemetry.events(sid)
 local retry
 for _,row in ipairs(ledger.events or {}) do
