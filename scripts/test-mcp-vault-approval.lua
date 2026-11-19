@@ -463,6 +463,41 @@ eq(#(manifest_of(interpreter_definition('/usr/bin/node', { '-r', lib, connector 
   'node -r is a file the digest hashes: '
    .. problems_text(manifest_of(interpreter_definition('/usr/bin/node', { '-r', lib, connector }))))
 
+-- round 8, findings 3 and 4: the Lua side implements BOTH rules and asserted NEITHER. Rust's unit
+-- tests pinned the flag rule (an_inline_flag_is_matched_before_its_value_and_through_a_cluster) and the
+-- argument refusal, so a Lua regression here passed every gate this branch runs (found 18/11).
+-- 3a. An ARGUMENT that resolves to an interpreter is refused, even when the program itself is allowed.
+local arg_python = dir .. '/python3'
+assert(host.write_file(arg_python, '#!/bin/sh\nexit 0\n'), 'an interpreter an argument names')
+ok(has(problems_text(manifest_of(interpreter_definition('/usr/bin/node', { arg_python }))),
+    'resolves to an interpreter'),
+  'an argument that IS an interpreter is refused: '
+   .. problems_text(manifest_of(interpreter_definition('/usr/bin/node', { arg_python }))))
+-- 3b. And the same for a wrapper: the file the approval names would not be the file that runs.
+local arg_env = dir .. '/env'
+assert(host.write_file(arg_env, '#!/bin/sh\nexit 0\n'), 'a wrapper an argument names')
+ok(has(problems_text(manifest_of(interpreter_definition('/usr/bin/node', { arg_env }))),
+    'resolves to a wrapper'),
+  'an argument that IS a wrapper is refused: '
+   .. problems_text(manifest_of(interpreter_definition('/usr/bin/node', { arg_env }))))
+-- 4a. A code flag is matched BEFORE its '=': --eval=code is inline code, not an option whose value is text.
+for _, flag in ipairs({ '--eval=process.exit(0)', '--print=1' }) do
+  ok(has(problems_text(manifest_of(interpreter_definition('/usr/bin/node', { flag }))), 'inline code'),
+    flag .. ' is inline code, matched before its =: '
+     .. problems_text(manifest_of(interpreter_definition('/usr/bin/node', { flag }))))
+end
+-- 4b. A short cluster is split, so -pe cannot smuggle -p and -e past a whole-string comparison.
+ok(has(problems_text(manifest_of(interpreter_definition('/usr/bin/node', { '-pe', '1' }))), 'inline code'),
+  'a short cluster is split (-pe is -p and -e): '
+   .. problems_text(manifest_of(interpreter_definition('/usr/bin/node', { '-pe', '1' }))))
+ok(has(problems_text(manifest_of(interpreter_definition('/bin/sh', { '-ec', 'echo hi' }))), 'inline code'),
+  'and the same cluster on a shell (-ec is -e and -c): '
+   .. problems_text(manifest_of(interpreter_definition('/bin/sh', { '-ec', 'echo hi' }))))
+-- 4c. A LONG option is never split: --preserve-symlinks begins with -p and is not -p.
+ok(not has(problems_text(manifest_of(interpreter_definition('/usr/bin/node',
+    { connector, '--preserve-symlinks' }))), 'inline code'),
+  'a long option is one flag and is not split into short ones')
+
 -- 3. require('vm') and runInThisContext are eval's twins: a compiled script is a string, not a file.
 local vm_import = dir .. '/vm-import.mjs'
 assert(host.write_file(vm_import, "import vm from 'node:vm';\nvm.runInThisContext('1');\n"))
