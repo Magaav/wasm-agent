@@ -570,6 +570,12 @@ fn approval_problem(approval: &Value, launch: &Spec) -> Result<VerifiedFiles, St
         .map(|list| list.iter().filter_map(|value| value.as_str().map(str::to_string)).collect())
         .unwrap_or_default();
     vault.sort();
+    // Round 9: the voucher is read BEFORE the files, because the console puts the vouched binary in that
+    // list (lua/core/mcp.lua, M.vault_manifest). Reading it after the loop answered `vault_approval_
+    // unreadable` - "a script this connector was approved with" - for a native binary that is gone, and
+    // left `vault_approval_native_unreadable` reachable only by an approval the console never writes.
+    let voucher = native_voucher(approval);
+    let vouched_path = voucher.as_ref().map(|(path, _)| real_path(path));
     let mut files: Vec<(String, String)> = Vec::new();
     for entry in approval["files"].as_array().map(Vec::as_slice).unwrap_or_default() {
         let path = entry.as_str().unwrap_or_default();
@@ -577,6 +583,9 @@ fn approval_problem(approval: &Value, launch: &Spec) -> Result<VerifiedFiles, St
             return Err("vault_approval_required: this connector carries an approval with no script list, so no value was read. Approve it again at the operator's terminal: /mcp <id> probe, then /mcp <id> on".into());
         }
         let Ok(bytes) = std::fs::read(path) else {
+            if vouched_path.as_deref() == Some(real_path(path).as_str()) {
+                return Err(format!("vault_approval_native_unreadable:{path}: the native binary this connector was approved on cannot be read now, so nothing was launched and no value was read. Approve it again at the operator's terminal: /mcp <id> on --native"));
+            }
             return Err(format!("vault_approval_unreadable:{path}: a script this connector was approved with cannot be read now, so nothing was launched and no value was read. Approve it again at the operator's terminal: /mcp <id> probe, then /mcp <id> on"));
         };
         files.push((path.to_string(), sha256_hex(&bytes)));
@@ -594,7 +603,6 @@ fn approval_problem(approval: &Value, launch: &Spec) -> Result<VerifiedFiles, St
     // program outside the platform's roots is its own code. Round 8: the operator's own voucher for a
     // native binary is read here, and it has to name the bytes that are there NOW - replacing the binary
     // is a `vault_approval_mismatch`, not a launch.
-    let voucher = native_voucher(approval);
     if let Some((path, sha)) = voucher.as_ref() {
         let Ok(bytes) = std::fs::read(path) else {
             return Err(format!("vault_approval_native_unreadable:{path}: the native binary this connector was approved on cannot be read now, so nothing was launched and no value was read. Approve it again at the operator's terminal: /mcp <id> on --native"));
@@ -724,7 +732,12 @@ fn request_server_problem(bytes: &[u8], approval: &Value) -> Result<(), String> 
     if observed != expected {
         return Err("vault_request_environment_mismatch: the request this launch reads hands the connector an environment the operator did not approve, so nothing was launched and no value was read. Approve the connector again at the operator's terminal: /mcp <id> probe, then /mcp <id> on".into());
     }
-    if let Some(problem) = program_shape_problem(program) { return Err(problem); }
+    // Round 9: the operator's voucher is part of the SAME judgement here as in approval_problem. Without
+    // it a vouched native binary passed the approval and was refused by this check, so `/mcp <id> on
+    // --native` could not work end to end (the review's first item).
+    let voucher = native_voucher(approval);
+    let vouched = voucher.as_ref().map(|(path, _)| path.as_str());
+    if let Some(problem) = program_refusal(program, vouched) { return Err(problem); }
     let files = string_list(approval.get("files"));
     // The same resolution the console applies when it records the approval, in this request's own words:
     // the file a bare argument names is a file this request runs (a bare word is a file beside the
@@ -733,7 +746,8 @@ fn request_server_problem(bytes: &[u8], approval: &Value) -> Result<(), String> 
         return Err(problem.replacen("vault_approval_", "vault_request_", 1)
             .replace("this connector", "this request"));
     }
-    if !platform_owned(program) && !files.iter().any(|path| path == program) {
+    let program_vouched = vouched == Some(real_path(program).as_str());
+    if !platform_owned(program) && !program_vouched && !files.iter().any(|path| path == program) {
         return Err(format!("vault_request_program_not_covered:{program}: this request's program is not a file the approval names, so nothing was launched and no value was read. Approve the connector again at the operator's terminal: /mcp <id> probe, then /mcp <id> on"));
     }
     Ok(())
@@ -2309,5 +2323,87 @@ exit 0
         // Not reading it is not passing it: a file that vanished is a mismatch too.
         std::fs::remove_file(&script).expect("remove");
         assert!(super::recheck_after_spawn(&verified).is_some(), "a file that cannot be read is a mismatch");
+    }
+
+    /// Item 1 of round 9: `--native` works END TO END. The kernel has two judgements about a program -
+    /// approval_problem (the launch) and request_server_problem (the command the child spawns from the
+    /// request file) - and only the first read the operator's voucher. A vouched ELF therefore passed the
+    /// approval and was refused one step later, by the request check, so `/mcp <id> on --native` could
+    /// never launch: the review's first item, and the reason both now take the same `program_refusal`
+    /// judgement with the same voucher.
+    #[test]
+    fn a_vouched_native_binary_passes_the_approval_and_the_request_check() {
+        let binary = scratch_native("vouched-node");
+        let path = binary.to_string_lossy().to_string();
+        // The launch as the console really builds it (lua/core/mcp.lua: `program=node_program()`): the
+        // kernel spawns the interpreter, which spawns the connector's program from the request file. The
+        // connector's program here is a native binary outside the two families, vouched for.
+        let client = scratch("native-client.mjs", "export const c = 1;\n");
+        let request_path = scratch("native-request.json", "{}");
+        let launch = spec("/usr/bin/node", &[client.to_string_lossy().to_string(),
+            "--request-file".into(), request_path.to_string_lossy().to_string()]);
+        let approved = approval_native(&binary, &[&binary, &client], &["TOKEN"]);
+        assert!(approval_problem(&approved, &launch).is_ok(),
+            "a vouched native binary is a program the allow-list admits: {:?}",
+            approval_problem(&approved, &launch));
+        // The same command as the child reads it from the request file. This is the half that was missing.
+        let sealed = request(&path, &[], None);
+        assert!(request_server_problem(&sealed, &approved).is_ok(),
+            "the request check carries the same voucher: {:?}",
+            request_server_problem(&sealed, &approved));
+        // The voucher admits a FILE, not the family: another native binary, unvouched, is refused by the
+        // same allow-list it was refused by before this round.
+        let other = scratch_native("unvouched-node");
+        let other_path = other.to_string_lossy().to_string();
+        let mut unvouched = approved.clone();
+        unvouched["program"] = json!(other_path);
+        unvouched["args"] = json!([]);
+        let refused = request_server_problem(&request(&other_path, &[], None), &unvouched).unwrap_err();
+        assert!(refused.starts_with("vault_approval_program_not_allowed:"), "{refused}");
+        // And WITHOUT the voucher the same approval is refused one step earlier, on the launch side: this
+        // is what `--native` buys, and what its absence costs.
+        let plain = approval(&path, "", &[], &[], &[&binary, &client], &["TOKEN"]);
+        let refused = approval_problem(&plain, &launch).unwrap_err();
+        assert!(refused.starts_with("vault_approval_program_not_allowed:"), "{refused}");
+        let _ = std::fs::remove_file(&binary);
+        let _ = std::fs::remove_file(&other);
+        let _ = std::fs::remove_file(&client);
+        let _ = std::fs::remove_file(&request_path);
+    }
+
+    /// Item 1: each of the three native refusals is reached by a test of its own, from an approval the
+    /// console really writes (the binary IS one of the files it names) - and each of them fires BEFORE a
+    /// spawn, so a changed binary never runs.
+    #[test]
+    fn a_native_binary_that_changed_or_vanished_or_was_not_named_is_refused() {
+        // Changed after the approval: the bytes on disk are not the bytes the operator vouched for.
+        let binary = scratch_native("changed-node");
+        let approved = approval_native(&binary, &[&binary], &["TOKEN"]);
+        let path = binary.to_string_lossy().to_string();
+        use std::io::Write as _;
+        std::fs::OpenOptions::new().append(true).open(&binary).expect("open")
+            .write_all(b"\0").expect("append a byte");
+        let refused = approval_problem(&approved, &spec("/usr/bin/node", &[])).unwrap_err();
+        assert!(refused.starts_with("vault_approval_native_changed:"), "{refused}");
+        assert!(refused.contains(&path), "the refusal names the binary: {refused}");
+
+        // Gone after the approval: the console lists the vouched binary among the files, so this is the
+        // read that fails first - and it says NATIVE, not "a script this connector was approved with".
+        let vanished = scratch_native("vanished-node");
+        let approved = approval_native(&vanished, &[&vanished], &["TOKEN"]);
+        let path = vanished.to_string_lossy().to_string();
+        std::fs::remove_file(&vanished).expect("remove the vouched binary");
+        let refused = approval_problem(&approved, &spec("/usr/bin/node", &[])).unwrap_err();
+        assert!(refused.starts_with("vault_approval_native_unreadable:"), "{refused}");
+        assert!(!refused.contains("a script this connector was approved with"),
+            "a native binary that vanished is not reported as a script: {refused}");
+
+        // A voucher for a file the approval does not name: the digest covers a file list, and a voucher
+        // outside it would approve a binary nothing hashed.
+        let outside = scratch_native("outside-node");
+        let approved = approval_native(&outside, &[], &["TOKEN"]);
+        let refused = approval_problem(&approved, &spec("/usr/bin/node", &[])).unwrap_err();
+        assert!(refused.starts_with("vault_approval_native_not_covered:"), "{refused}");
+        let _ = std::fs::remove_file(&outside);
     }
 }
