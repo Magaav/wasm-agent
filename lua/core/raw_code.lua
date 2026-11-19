@@ -585,14 +585,34 @@ M.MARKUP_MARKERS = {
   "<ds_tool>", "</ds_tool>", "<ds_safety>", "</ds_safety>", "<ds_invoke>", "</ds_invoke>",
   "</parameter>", "<tool_call>", "</tool_call>", "<function_call>", "<function_calls>",
   "<antml:invoke", "</antml:invoke>", "</invoke>", "<|python_tag|>",
+
 }
 
 -- Returns { marker = <what was found> } or nil. Pure: no host, no state.
+-- The shapes the review named in MUST 6 that this list did not carry: a model writing its trained
+-- call format as text (<bash>...</bash>, <run>...</run>, <invoke name=...>...</invoke>).
+--
+-- They are checked as PAIRS, not as bare openers, and that is deliberate: this detector runs on
+-- every answer the loop reads, so a sentence that merely MENTIONS a tag - "use <bash> to run it" -
+-- must stay an answer. A pair that opens and closes is a call the model meant; a lone word in prose
+-- is not. The list stays an allow-list: a shape not named here is prose.
+M.MARKUP_PAIRS = {
+  { "<bash>", "</bash>" },
+  { "<run>", "</run>" },
+  { "<invoke ", "</invoke>" },
+}
+
 function M.markup_in_text(text)
   local raw = tostring(text or "")
   if raw == "" then return nil end
   for _, found in ipairs(M.MARKUP_MARKERS) do
     if raw:find(found, 1, true) then return { marker = found } end
+  end
+  for _, pair in ipairs(M.MARKUP_PAIRS) do
+    local opens = raw:find(pair[1], 1, true)
+    if opens and raw:find(pair[2], opens + #pair[1], true) then
+      return { marker = pair[1]:gsub(" $", "") }
+    end
   end
   -- DeepSeek's token bar written with either character (the two spellings M.native_calls normalises).
   if raw:find("\239\189\156", 1, true) or raw:find("|DSML|", 1, true) then return { marker = "<|DSML|>" } end
