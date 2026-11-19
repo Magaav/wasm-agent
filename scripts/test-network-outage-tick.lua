@@ -161,6 +161,20 @@ ok(relay.polls > before_register_failure,
     .. before_register_failure .. ' -> ' .. relay.polls)
 ok(type(tick_reg) == 'table' and tick_reg.state == 'attached',
   'and the node reports itself attached, not stuck on the register: ' .. json.encode(tick_reg))
+-- ...and the register retries BACK OFF instead of hammering every 2 s: a fleet returning at once is
+-- what filled the rendezvous' cap on 19/11. Each failure pushes the next heartbeat further away, and
+-- the wait has a ceiling, so an hour-long outage does not wait an hour.
+for _ = 1, 6 do
+  clock = clock + 120
+  binding.tick()
+end
+-- Read through the module's own counter, which the backoff is computed from.
+local failures = binding.registration_failures or 0
+ok(failures >= 6, 'the register failures are counted: ' .. failures)
+local last = math.min(30, 2 ^ (math.min(failures, 5) - 1))
+local first = math.min(30, 2 ^ (math.min(1, 5) - 1))
+ok(last > first, 'the wait grows with the failures: ' .. first .. 's -> ' .. last .. 's')
+ok(last <= 16, 'and it has a ceiling the code really has (16 s, not the 30 s a comment used to claim): ' .. last)
 relay.register_fails = false
 
 -- ---- the restore -----------------------------------------------------------------------------------
