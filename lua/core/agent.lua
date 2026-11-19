@@ -28,6 +28,9 @@ local run_failure = dofile("lua/core/run_failure.lua")
 -- A tool result is a fact the harness produces (18/11, session 100c54ab): the detector that keeps a
 -- message imitating one from becoming the answer.
 local fake_answer = dofile("lua/core/fake_answer.lua")
+-- The turn note (#33): kept on every turn, stripped from the visible answer into the run journal
+-- (lua/core/turn_journal.lua, docs/TURNS.md).
+local turn_journal = dofile("lua/core/turn_journal.lua")
 -- WASM_AGENT_RAW_CODE (default off): a ```js run block in the reply becomes a codemode call.
 local raw_code = dofile("lua/core/pure.lua")("lua/core/raw_code.lua")
 local finish_contract = dofile("lua/core/pure.lua")("lua/core/finish_contract.lua")
@@ -261,6 +264,7 @@ local function generic_sections(role, declared, available)
     "- **what it buys** - say which, with a number: fewer steps to the same result, or only better context (the same steps in fewer tokens, clearer state). Never claim one when it is the other;",
     "- **focus** - exactly ONE point: the highest-value harness optimisation this turn exposed. One point per answer, only when there is something to increment; no list, no filler, no restating the task.",
     "If nothing hurt your reasoning and nothing should be incremented, say so in one line and stop.",
+    "The harness removes this block from the answer it shows, and stores it in the run journal (session, mission, build, mode and the three fields); it never competes with an exact output format a request asks for, so an answer that must be only a number, a JSON body or one word still carries the block after it.",
   }, "\n")
   return s
 end
@@ -851,6 +855,42 @@ local function install_stream_forwarder(agent)
       agent.emit({ type = "reasoning_delta", text = text })
     end
   end)
+end
+
+-- Item #34, the rule itself: what a code-mode result CHANGED, judged by the calls it recorded. A
+-- script that only read (`return await tools.ls({path:"."})`, a `git status`) is not an effect and
+-- does not arm the done gate; one that wrote, started an operation or sent anything is. An answer
+-- whose calls cannot be read is not silently a read: unknown counts as an effect, because a gate
+-- that opens on a result nobody could read is the failure this item exists to close. It is one
+-- exported function so `scripts/test-turn-signal.lua` drives THIS rule, not a copy of it.
+-- Item 4 (round 3): ONE rule for "did this bash command change anything", used by the direct path
+-- and by a script's inner bash call. Unknown is not yes: a call with no readable command is an effect.
+function M.command_effect(name, args)
+  if name ~= "bash" and name ~= "shell" then return tools.has_effect(name, args) end
+  local command = type(args) == "table" and tostring(args.command or "") or ""
+  return command ~= "" and not dofile("lua/core/orchestration_mode.lua").read_only_command(command)
+end
+
+function M.script_effect(output)
+  if type(output) ~= "table" then return true end
+  local calls = output.calls
+  if type(calls) ~= "table" or #calls == 0 then
+    -- A script that called nothing changed nothing, unless its own result is unreadable.
+    return not (output.ok == true)
+  end
+  for _, inner in ipairs(calls) do
+    local name = type(inner) == "table" and tostring(inner.name or "") or ""
+    if name == "" then return true end
+    if type(inner) == "table" and inner.read_only == true then
+      -- The call record's own verdict, computed at the boundary with M.command_effect - the same
+      -- function the direct path uses. Only bash/shell can carry it; any other name with the bit set
+      -- is a record this rule does not understand, and unknown is an effect.
+      if name ~= "bash" and name ~= "shell" then return true end
+    elseif tools.has_effect(name, nil) then
+      return true
+    end
+  end
+  return false
 end
 
 function M.new(session_id, on_event, role, user, node, opts)
@@ -3325,10 +3365,11 @@ function M:run_body(text, images)
       -- tool, or a bash command an operator could have asked for as a read (`git status`, `rg`, `ls`), is
       -- not one - that distinction is what keeps an explanation request ungated.
       if ok_tool and not gate.disabled then
-        local effect = tools.has_effect(function_.name, args)
-        if function_.name == "bash" or function_.name == "shell" then
-          local command = type(args) == "table" and tostring(args.command or "") or ""
-          effect = command ~= "" and not dofile("lua/core/orchestration_mode.lua").read_only_command(command)
+        local effect = M.command_effect(function_.name, args)
+        if function_.name == "codemode" then
+          -- Item #34: a script is a script. What it CHANGED is what its own calls did - the rule is
+          -- `M.script_effect`, one function, so the gate and the test that pins it read the same code.
+          effect = M.script_effect(output)
         end
         if effect then gate.effects = gate.effects + 1 end
       end
@@ -3469,6 +3510,33 @@ function M:run_body(text, images)
   -- name the message *before* the record exists: the UI's topic carries the id it will ask
   -- about, and append_turn uses the same one so the topic and the ledger agree.
   local message_id = reply_message_id or host.uuid()
+  -- The turn note (#33, operator 19/11: ensure models output their friction so we can focus and nail
+  -- it). The block is KEPT - it is the fleet own evidence about its harness - and REMOVED from the
+  -- text the reader and the caller see, so it never competes with an exact output format an operator
+  -- asked for (a number, a JSON body, one word). The transcript row keeps it whole: lua/core/turnfeed.lua
+  -- groups the notes from the ledger, and a stripped row would erase the corpus that queue is ranked on.
+  local stripped, journal_note = nil, nil
+  pcall(function()
+    stripped = turn_journal.split(reply)
+    if stripped and stripped.note then
+      journal_note = turn_journal.record(stripped.note, {
+        session_id = self.session_id, run_id = self.run_id, message_id = message_id,
+        mission = turn_journal.mission_of(self.session_id), build = turn_journal.build_of(),
+        mode = turn_journal.mode_of(), model = tostring(self.model or ""), block = stripped.block,
+      })
+      if journal_note then
+        -- The fields travel with the event, not only the one-line summary: the reader's row is one dim
+        -- line under the answer and the whole block is what its fold opens (item 4), and a consumer that
+        -- had to re-read the journal to expand a row would make the row depend on a second read.
+        self.emit({ type = "turn_note", message_id = message_id, note_id = journal_note,
+          text = stripped.note.focus ~= "" and stripped.note.focus or stripped.note.hurt,
+          hurt = stripped.note.hurt, buys = stripped.note.buys, focus = stripped.note.focus,
+          block = stripped.block })
+      end
+    end
+  end)
+  -- The visible answer, and the one the run reports as its outcome: the block is part of neither.
+  local answer = stripped and stripped.visible or reply
   record_turn(self, {
     id = message_id,ok=completed,
     role = "assistant", content = reply, reasoning=reply_reasoning, phase=reply_phase,
@@ -3499,13 +3567,17 @@ function M:run_body(text, images)
     local answer_id = tostring(self.run_id) .. ":answer"
     pcall(self.emit, { type = "final_answer", session_id = self.session_id,
       run_id = self.run_id, message_id = message_id, answer_id = answer_id,
-      text_len = #tostring(reply or ""), at = math.floor(host.now() * 1000) })
+      text_len = #tostring(answer or ""), at = math.floor(host.now() * 1000) })
   end
 
   -- The diff goes with the reply: the topic belongs to this bubble, and the reader should
   -- not need a second request to learn what the message touched.
-  self.emit({ type = "reply", text = reply, changes = changes, message_id = message_id })
-  return reply
+  self.emit({ type = "reply", text = answer, changes = changes, message_id = message_id })
+  -- Item 5 (review 19/11): the RUN's own outcome is the stripped answer too. `run_body`'s return is
+  -- what a parent reads - a subagent's report, a `task` result, a remote answer - so returning `reply`
+  -- here put the note back into every child's answer, on the one path the reader never sees it fail.
+  -- The transcript row above still keeps `reply` whole: the block is evidence exactly once.
+  return answer
 end
 
 -- Deterministic fallback when no model provider is configured.

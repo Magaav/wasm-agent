@@ -46,6 +46,7 @@ M.modes = {
 M.commands = {
   { name = "/session", usage = "/session", hint = "print the session id (resume with wa --resume <id>)" },
   { name = "/status", usage = "/status", hint = "this session's id, the model, and each provider's usage and limits" },
+  { name = "/turns", usage = "/turns [N]", hint = "the last N <turn> notes of this session (#33): what hurt, what it buys, what to focus on" },
   { name = "/wakes", usage = "/wakes", hint = "list this session's pending self-wakes (next due, cadence, last error)" },
   { name = "/wake", usage = "/wake cancel <id>", hint = "cancel one pending self-wake" },
   { name = "/vault", usage = "/vault <name> <value>", hint = "store a key as <name>.key: the agent uses it by name, never sees it" },

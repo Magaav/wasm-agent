@@ -1115,6 +1115,30 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-observability.lua" "$BIN" --db "$DB
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-remote-call-shape.lua" "$BIN" --db "$DB.remote-call-shape" | grep 'remote call shape ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-remote-refusals.lua" "$BIN" --db "$DB.remote-refusals" | grep 'remote refusals ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-run-counts.lua" "$BIN" --db "$DB.run-counts" | grep 'run counts ok'
+# The turn note (#33): the <turn> block kept and stripped from the answer, the day roll-up `wa turns
+# --day` answers, the split keeping every byte on both sides of the block, the stored note drawn as
+# one row under the answer, and the handles a detached call answers (#37) plus the operation
+# list/await shape (#43). Its own scratch home, so a row that journals a note and starts an
+# operation writes neither into the gate home nor into the operator's.
+# The home this row writes into must be provably scratch (item 3, review 19/11). The old line
+# compared the path with "$HOME/.wasm-agent", a comparison that can never fire: the host resolves HOME
+# FROM WASM_AGENT_HOME, so $HOME is the scratch home and the right-hand side is <home>/.wasm-agent.
+# Same rule as scripts/lib/test-home-guard.lua: the home must sit under GATE_ROOT (else TMPDIR), and
+# it must not carry a live node's own markers; a row that cannot tell refuses.
+TURN_SIGNAL_HOME="$(mktemp -d "${GATE_ROOT:-${TMPDIR:-/tmp}}/wa-turn-signal-$$-XXXXXX")"
+case "$TURN_SIGNAL_HOME" in
+  "${GATE_ROOT:-${TMPDIR:-/tmp}}"/*) : ;;
+  *) echo "FAIL: turn-signal row got a home outside its scratch root: $TURN_SIGNAL_HOME" >&2; exit 1 ;;
+esac
+for _marker in node.key memory.db; do
+  if [ -e "$TURN_SIGNAL_HOME/.wasm-agent/$_marker" ]; then
+    echo "FAIL: turn-signal row home carries a live node's $_marker: $TURN_SIGNAL_HOME" >&2; exit 1
+  fi
+done
+WASM_AGENT_HOME="$TURN_SIGNAL_HOME" \
+  WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-turn-signal.lua" \
+  "$BIN" --db "$TURN_SIGNAL_HOME/db.sqlite" | grep "turn-signal:"
+rm -rf "$TURN_SIGNAL_HOME"
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-context-growth.lua" "$BIN" --db "$DB.context-growth" | grep 'context growth ok'
 # Idle /compact after a main run settles. The cached agent keeps that run's id as the run's
 # identity; treating it as liveness answered node_busy forever after the first chat and is why

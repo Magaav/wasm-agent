@@ -435,6 +435,9 @@ M.admin = {
     id = { type = "string" }, command = { type = "string" }, cwd = { type = "string" },
     timeout_seconds = { type = "integer", minimum = 1, maximum = 86400 },
     stream = { type = "string", enum = {"stdout", "stderr"} }, offset = { type = "integer", minimum = 0 },
+    -- The ceiling is codemode_pending.STDOUT_PAGE_BYTES (24 KiB, the Rust page). It is written out
+    -- because a schema table is a literal; scripts/test-turn-signal.lua asserts the two agree, so
+    -- the copy cannot drift silently (item 4).
     limit = { type = "integer", minimum = 1, maximum = 24576 }, wait_ms = { type = "integer", minimum = 0, maximum = 10000 },
     wait_for = { type = "string", enum = {"command", "settled"}, description = "await only: foreground adoption defaults to command completion; settled waits for the complete owned process tree." },
     scope = { type = "string", enum = { "node" },
@@ -1595,7 +1598,45 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     if args.action == "await" then args.tool = "operation" end
     local ok, raw = pcall(host.operation, args.action or "status", json.encode(args))
     if not ok then return {error=tostring(raw)} end
-    return json.decode(raw)
+    local answer = json.decode(raw)
+    -- Item #43: list and await answer IDS AND STATE by default; an output BODY is returned only when it
+    -- was asked for, and then bounded. A run that lists four operations should not pay for four logs,
+    -- and the one number a caller needs to decide what to do next (is it settled? how many bytes? where
+    -- is the log?) is in the record either way.
+    local action = tostring(args.action or "")
+    if (action == "list" or action == "await" or action == "wait") and type(answer) == "table" then
+      local wanted = args.output == true or args.include_output == true
+      local cap = math.max(1024, math.min(tonumber(args.max_bytes) or 4096, 65536))
+      local records = answer
+      local single = answer.operation_id ~= nil or answer.state ~= nil
+      if single then records = { answer } end
+      if type(records) == "table" then
+        for _, record in ipairs(records) do
+          if type(record) == "table" then
+            local had = false
+            for _, key in ipairs({ "stdout", "stderr" }) do
+              local value = record[key]
+              if type(value) == "string" and value ~= "" then
+                had = true
+                if not wanted then
+                  record[key .. "_omitted"] = #value
+                  record[key] = nil
+                elseif #value > cap then
+                  record[key] = value:sub(1, cap)
+                  record[key .. "_truncated"] = #value
+                end
+              end
+            end
+            if had and not wanted then
+              record.output_omitted = true
+              record.output_hint = "add output=true (max_bytes=" .. cap
+                .. ") to this call, or read one stream: operation action=\"read\" id=... stream=stdout"
+            end
+          end
+        end
+      end
+    end
+    return answer
   end
   if name == "node_update" then
     -- Distance update (lua/core/remote_update.lua, docs/REMOTE-UPDATE.md). Master only, and the peer
@@ -2290,10 +2331,13 @@ function M.await_parallel_bash(operation_id, role, ctx)
     end
     state.error = state.error or "run_cancelled"
   end
+  -- The same page the pending module reads at, from one pair of constants (item 4): a direct bash
+  -- answer and a handle over the same operation must clip at the same byte.
+  local pages = dofile("lua/core/codemode_pending.lua")
   local stdout = M.dispatch(nil, "operation", { action = "read", id = operation_id,
-    stream = "stdout", offset = 0, limit = 24576 }, role, ctx, nil, true)
+    stream = "stdout", offset = 0, limit = pages.STDOUT_PAGE_BYTES }, role, ctx, nil, true)
   local stderr = M.dispatch(nil, "operation", { action = "read", id = operation_id,
-    stream = "stderr", offset = 0, limit = 8192 }, role, ctx, nil, true)
+    stream = "stderr", offset = 0, limit = pages.STDERR_PAGE_BYTES }, role, ctx, nil, true)
   local code = tonumber(state.process_exit_code) or -1
   return { operation_id = operation_id, code = code, ok = code == 0,
     stdout = type(stdout) == "table" and stdout.content or "",
@@ -2303,9 +2347,9 @@ function M.await_parallel_bash(operation_id, role, ctx)
     stderr_bytes = type(stderr) == "table" and stderr.available_bytes or nil,
     stdout_path = state.stdout_path, stderr_path = state.stderr_path,
     stderr_truncated = type(stderr) == "table" and
-      (tonumber(stderr.available_bytes) or 0) > 8192 or false,
+      (tonumber(stderr.available_bytes) or 0) > pages.STDERR_PAGE_BYTES or false,
     stdout_truncated = type(stdout) == "table" and
-      (tonumber(stdout.available_bytes) or 0) > 24576 or false,
+      (tonumber(stdout.available_bytes) or 0) > pages.STDOUT_PAGE_BYTES or false,
     error = state.error, timing = state.timing, parallel = true }
 end
 
