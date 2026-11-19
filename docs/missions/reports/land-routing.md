@@ -53,7 +53,17 @@ reach the `--from` rows, the `--latest=false` witness lives in `scripts/test-pub
 path, line 757 of fast.sh), which asserts the command that **runs** on the account node; it is red on the
 base (the flag is absent) and green here.
 
-Full fast path result: recorded below from `scripts/fast.sh`.
+Full fast path result (`HOME=<scratch> CARGO_TARGET_DIR=/home/victor/wasm-agent/target/m-land-routing bash scripts/fast.sh`,log `fast-full.log`): **FAILED (295 checks, 2 failed, 0 skipped, 230s)**, Lua rows 247/249. The two
+failures are load-sensitive rows this branch does not touch:
+
+- `scripts/test-release-sign.lua` - `2 of 5 checks failed` under the parallel run; **passes standalone on
+  this head AND on the base worktree** (`release signing ok (4 checks)` on both).
+- `scripts/test-codemode-queue-timeout.lua` - the queued-vs-running timing assertion; a slot-timing row
+  (commit 46078941, on the base) that also passes standalone.
+
+Neither file appears in `git diff --name-only origin/main..HEAD`. The full fast path is therefore green
+except for two timing rows that fail under load and pass alone, in files this branch never changed. A red
+fast path is reported as red, not as a pass.
 
 ## SHOULD items — not done, with the reason
 
