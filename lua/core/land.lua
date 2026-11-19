@@ -981,7 +981,17 @@ end
 -- A non-empty `notes` (M.changed_paths could not read a diff) proves no narrowing: the plan is the FULL path,
 -- with every check and no rows file, and `unknown_paths` carries the failure so the printed plan says so instead
 -- of claiming a file count it does not have.
-function M.build_plan(run, paths, notes)
+-- The ring entry that can only take a NODE RELEASE (item 28 release mode), or nil when every node in the
+-- ring installs a tree. A release-installed node has no checkout, so nothing a Lua-only round builds - a
+-- Lua-tree record, and a deploy that keeps the installed binary - reaches it.
+local function ring_release_node(ring)
+  for _, entry in ipairs(ring or {}) do
+    if type(entry) == "table" and tostring(entry.mode or "") == "release" then return tostring(entry.node or "?") end
+  end
+  return nil
+end
+
+function M.build_plan(run, paths, notes, ring)
   local unknown = (notes and #notes > 0) and notes or nil
   local classified = unknown and { category = "compiled", counts = {}, files = {}, classifier = "unreadable",
     why = table.concat(unknown, "; ") } or M.classify(run, paths)
@@ -1009,6 +1019,26 @@ function M.build_plan(run, paths, notes)
   table.sort(names)
   local estimate = M.estimate(classified.category)
   local steps = M.plan_steps(classified.category)
+  -- A LUA-ONLY ROUND MUST STILL SHIP A NODE RELEASE WHEN A RING NODE INSTALLS FROM ONE (review r1 #61).
+  -- The lua-tree path is right for every node that deploys a tree and wrong for the one that cannot: a
+  -- release-installed node has no checkout to deploy, so a round that skipped artifacts/ship/publish left it
+  -- on its old binary with nothing to install. The ring is asked here, not assumed, and the plan names the
+  -- node that forced the release. A caller that names no ring gets the configured one - the same ring the
+  -- deploy will walk - so the two cannot disagree.
+  if classified.category == "lua-scripts-only" then
+    local release_node = ring_release_node(ring or M.ring({}))
+    if release_node then
+      local function forced(why) return { action = "run", why = why } end
+      steps.artifacts = forced("node release: the ring includes " .. release_node ..
+        " in release mode, a node with no checkout, so this round builds the node release the tree travels in")
+      steps.artifacts.kind = "node-release"
+      steps.sign = forced("signs the node release SHA256SUMS (the vault host, as always)")
+      steps.ship = forced("ships the node release the release-mode node installs")
+      steps.publish = forced("publishes the node release " .. release_node .. " fetches")
+      steps.deploy = forced("the ring, in order: tree nodes take the Lua tree, " .. release_node ..
+        " takes the published release (" .. release_node .. ":release)")
+    end
+  end
   -- A COMPILED ROUND THAT ALSO MOVES components.lock BUILDS THE BUNDLE IN THE SAME STEP, BEFORE THE DEPLOY
   -- (item 28): a bundle built after the deploy describes a lock the fleet already reads, and the node that takes
   -- both would take the new lock with the old bundle. A flag rather than a step, because the step that must do
@@ -1037,7 +1067,7 @@ impl.plan = function(run, options)
     return false, { error = "plan_no_changes", observed = "the collected branches introduce no path this tree does not already have",
       next = "nothing to land: check the branches with `git -C " .. tostring(repo) .. " log --oneline <base>..<tip>`" }
   end
-  local plan = M.build_plan(run, paths, path_notes)
+  local plan = M.build_plan(run, paths, path_notes, M.ring(options))
   run.journal.plan = plan
   -- The plan, printed BEFORE any step that changes anything, and kept in the journal so a later reader (or
   -- the report) knows which path this round took and why.
@@ -1078,7 +1108,7 @@ function M.plan_preview(options, run)
   if #paths == 0 and #path_notes == 0 then
     return nil, { "the named branches introduce no path this tree does not already have" }
   end
-  return M.build_plan(shell, paths, path_notes), notes
+  return M.build_plan(shell, paths, path_notes, M.ring(options)), notes
 end
 
 -- The plan as text: what changed, which path, which steps run or are skipped and why, and what it should cost.

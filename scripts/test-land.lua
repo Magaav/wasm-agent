@@ -1612,6 +1612,32 @@ contains(tostring(pinned_plan.steps.artifacts.also_components or ""), "component
 local plain_plan = land.build_plan({ id = "case30b", journal = { repo = tree_root } }, { "rust/Cargo.toml" })
 eq(plain_plan.category, "compiled", "a compiled change that moves no pin is still compiled")
 eq(plain_plan.steps.artifacts.also_components, nil, "and it builds no components bundle")
+-- ------------------------------------------------ case 31: a Lua-only round still ships a release for a
+-- release-installed node (review r1 #61). A node installed FROM a release has no checkout, so a round that
+-- skipped artifacts/ship/publish left it on its old binary with nothing to install - while the plan said
+-- "done". The plan reads the RING, not a constant: the same paths plan differently when a node in the ring
+-- installs a tree instead.
+local lua_paths = { "lua/core/land.lua" }
+local release_ring = { { node = "nextcloud", mode = "release" } }
+local release_plan = land.build_plan({ id = "case31", journal = { repo = tree_root } }, lua_paths, nil, release_ring)
+eq(release_plan.category, "lua-scripts-only", "a Lua-only change is still a Lua-only round")
+eq(release_plan.steps.artifacts.kind, "node-release",
+  "and its artifacts step builds a NODE RELEASE: the ring has a node that cannot deploy a tree")
+eq(release_plan.steps.artifacts.action, "run", "the artifacts step runs")
+eq(release_plan.steps.ship.action, "run", "the release is shipped")
+eq(release_plan.steps.publish.action, "run", "and published")
+contains(tostring(release_plan.steps.artifacts.why or ""), "nextcloud",
+  "the plan names the node that forced it")
+contains(tostring(release_plan.steps.deploy.why or ""), "nextcloud:release",
+  "and the deploy says which node takes the release")
+local tree_ring = { { node = "work", mode = "tree" } }
+local tree_plan = land.build_plan({ id = "case31b", journal = { repo = tree_root } }, lua_paths, nil, tree_ring)
+eq(tree_plan.steps.artifacts.kind, "lua-tree", "a ring of tree nodes keeps the Lua-tree record")
+eq(tree_plan.steps.ship.action, "skip", "and ships no node release")
+eq(tree_plan.steps.publish.action, "skip", "and publishes none")
+eq(land.build_plan({ id = "case31c", journal = { repo = tree_root } }, lua_paths, nil, nil).steps.artifacts.kind and
+  land.build_plan({ id = "case31c", journal = { repo = tree_root } }, lua_paths, nil, nil).steps.ship.action,
+  "skip", "no ring named: the configured ring decides, and it is all tree nodes")
 -- ---------------------------------------------------------------- case 29 (end to end): one command, no hand
 -- steps. A fixture land - scratch incoming repository, fake gh, scratch vault - runs from collect to report
 -- with nothing done by hand: every effect is either done by the machine or skipped WITH A REASON, no step
