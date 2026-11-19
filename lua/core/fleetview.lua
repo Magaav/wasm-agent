@@ -36,11 +36,24 @@ M.DISK_DEGRADED_PERCENT = 90
 -- A fleet view answers about EVERY node's work, which is one node's whole operation set on this one: the
 -- node scope. Round 1 gave that scope to the operator ROLE, and every session carries that credential, so
 -- the only thing between a model's tool call and every other session's operations was its own restraint.
--- The surface name below is what a tool call cannot set; the role check and the audit line still run
--- inside session_scope.grant, and a node whose Fleet View is called by a non-operator is refused there.
+-- A node whose Fleet View is called by a non-operator is refused inside session_scope.grant.
+--
+-- THE ONE DELIBERATE EXCEPTION, said out loud (item 4, round 5). The `surface = 'fleetview'` passed
+-- below is a name THIS FILE sets - the tool's schema has no `surface` field, so no model argument can
+-- carry it - and it is the reason the Fleet View TOOL, which is a model tool call, is granted the node
+-- scope at all: it is the operator's read-only window on every session's work. That makes it an AUDITED
+-- exception rather than a hole, and the audit is enforced twice: grant() writes the line, and
+-- NODE_OPERATIONS below refuses outright when there is no journal to write it to.
 local NODE_OPERATIONS = function(opts)
   opts = opts or {}
   if type(host.operation) ~= 'function' then return nil, 'operation_manager_unavailable' end
+  -- NO JOURNAL, NO NODE-WIDE READ (item 4, round 5). session_scope.audit returns early when it has no
+  -- store, so a Fleet View that arrived with a nil memory would read every session's operations and leave
+  -- no line an operator could find - the same unaudited node read round 4 removed, reachable again by a
+  -- caller that simply forgot the store. Unknown is not yes: refuse by NAME, and say what is missing.
+  if type(opts.memory) ~= 'table' or type(opts.memory.journal) ~= 'function' then
+    return nil, 'fleetview_requires_a_journal'
+  end
   -- THE REAL MEMORY MODULE AND THE CALLER'S OWN ROLE (session isolation, item 1 round 4).
   --
   -- Round 3 passed `nil` here, and session_scope.audit returns early without a store - so a node-wide
@@ -283,6 +296,13 @@ function M.node(observation, opts)
   end
   if type(observation.operations) ~= 'table' then
     missing[#missing + 1] = 'operations'
+    -- AND WHY IT IS MISSING, when the reader knows (item 4, round 5). The observation carried
+    -- `operations_refused` and this function dropped it, so a guest's row named the absent field and
+    -- nothing else: "no operations" and "you may not see them" read the same, which is the exact failure
+    -- the Fleet View's own header promises never to make.
+    if type(observation.operations_refused) == 'string' then
+      row.operations_refused = observation.operations_refused
+    end
   else
     row.operations = operations
     if #operations > M.MAX_OPERATIONS then

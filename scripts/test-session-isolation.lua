@@ -634,6 +634,36 @@ for _, operation_id in ipairs(fv_ids) do
   end
 end
 
+-- ITEM 4 (round 5): NO JOURNAL, NO NODE-WIDE READ.
+--
+-- session_scope.audit returns early without a store, so a Fleet View called with a nil memory read every
+-- session's operations and left no line an operator could find. Unknown is not yes: it is refused by name.
+local no_journal, no_journal_why = fleetview.node_operations({ role = 'master', user_id = 'master', session = '' })
+ok(no_journal == nil, 'a Fleet View with no journal gets no node operations')
+eq(no_journal_why, 'fleetview_requires_a_journal', 'and the refusal names the missing journal')
+-- A memory that is present but cannot journal is the same refusal: the name of the door matters, not its type.
+local no_write = { journal = true }
+local typed, typed_why = fleetview.node_operations({ memory = no_write, role = 'master', user_id = 'master',
+  session = '' })
+ok(typed == nil, 'a memory whose journal is not callable is refused too')
+eq(typed_why, 'fleetview_requires_a_journal', 'and it is the same named refusal')
+-- The TOOLS.LUA WIRING (item 4, round 5): the tool call is what an operator actually makes, so the refusal
+-- and the grant are driven through the dispatcher, not only through the module. A guest is refused inside
+-- the view (the field is absent, the reason is named); the operator's own call still reads.
+local guest_view = tools.dispatch(memory, 'fleetview', {}, 'guest', ctx_a) or {}
+ok(type(guest_view) == 'table' and guest_view.read_only == true, 'a guest may call the Fleet View tool')
+local local_node
+for _, node in ipairs(guest_view.nodes or {}) do if node.local_node == true then local_node = node end end
+ok(type(local_node) == 'table', 'and the node row is there')
+ok(local_node ~= nil and local_node.operations == nil, 'but a guest is shown no node operations')
+eq(type(local_node) == 'table' and local_node.operations_refused, 'node_scope_not_granted',
+  'and the gap carries its reason, named')
+local master_view = tools.dispatch(memory, 'fleetview', {}, 'master', ctx_a) or {}
+local master_node
+for _, node in ipairs(master_view.nodes or {}) do if node.local_node == true then master_node = node end end
+ok(type(master_node) == 'table' and type(master_node.operations) == 'table',
+  'the operator reads the node operations through the same tool')
+
 -- ---- item 2 round 4: session_watch observes the run it started, as its owner ----------------
 --
 -- `M.start` launches the run with owner = 'session:<id>'. The runtime decides ownership by exactly that
