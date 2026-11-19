@@ -202,7 +202,7 @@ Every claim below names the commit that implements it. Round 1's two commits (`8
 | F | backgrounds paint with EL, never pad spaces | `54525ab6` |
 | G | a resize repaints the whole chat from state, debounced | `4c0259ba` |
 | H | the run row is THIS RUN only; totals live in the footer | `b4cf075e` |
-| I | the fence card is in step (phase 0 first) | `68444949` |
+| I | the fence card is in step (phase 0 first) | `68449949` |
 
 ## A - a SIGMA on both totals (`8c63b62a`)
 
@@ -315,7 +315,7 @@ assertions that pinned the old pair were REWRITTEN, not deleted: the editor's ru
 run's row, and the first-step row. The item H test additionally asserts the OLD pair is absent, so a
 regression to the old shape fails on its own words and not only on a count.
 
-## I - the fence card is in step (`68444949`)
+## I - the fence card is in step (`68449949`)
 
 **Phase 0 first.** `markdown.lua:636-675` builds the rows correctly - so I reproduced one level below
 it, in a Rust test that dumps what the host actually stores and draws for these exact inputs
@@ -387,3 +387,102 @@ refuses (`codemode_not_enabled`): both need code-mode assets this build was made
   the view emits and the rows the host draws, not a photograph of a terminal.
 * I did not reproduce item F's shrink in a real pty. The property is asserted on the emitted bytes and
   on the stored rows; a pty capture would be a second, stronger witness and is not here.
+
+---
+
+# Round 2, the independent review - FIX
+
+Every MUST and SHOULD, one commit each, tests in the gate. The review found item I had fixed a state the
+real stream never produces, and it was right: my Lua test reached its guard only because it wrote
+`"Para:"` straight into the fake host, bypassing `view:write` (`tail_nl` nil), and the Rust test
+reproduced `Para:┌─`, which is NOT Victor's screenshot.
+
+## The real cause, found by dumping each layer (phase 0)
+
+`markdown.render` is RIGHT at 60/80/120 - measured, the rows are
+`┌─` / `│ :host ...` / `│↪}` / `└─`, and the copy marker points at `at = 2`, the title row. So the
+renderer was not the cause, and neither was the open-line guard I added in `68449949`.
+
+The host was. A **focused** block draws its rows two columns narrower than the transcript
+(`inner = width - 2` in `rows_with_copies`, the border taking them), so a card row the renderer had
+wrapped to the full width no longer fitted and the generic PROSE wrapper re-wrapped it - at the space
+after the bar. Measured (Rust, before the fix): at 57 columns
+
+```text
+⧉ ┌─
+│ :host
+  ::slotted(colmeio-offline-banner){display:contents      <-- the bar orphaned, code bare
+│↪}
+└─
+```
+
+which is the screenshot: the bar alone on a row, the code hanging under it.
+
+## The fix, at the layer that owns the width (commit `ea1d8680`)
+
+markdown.lua leaves **two columns of slack** for a fenced card (`width - columns(indent) - 4`), so the
+rows it emits fit a focused block exactly and nothing is re-wrapped. PARITY (review rule 14): one
+rendering, both states. The host's prose rule is untouched - a quoted line still hangs under its bar,
+which is why the width belongs to the renderer and not to a special case in the wrapper (a branch on
+the bar caught blockquotes too, and `narrowing_rewraps_a_list_item_with_a_hanging_indent` failed until
+I removed it).
+
+The guard from `68449949` is REVERTED: it was not the cause, and it added a stray blank row when a card
+was the first output.
+
+Tests: `a_card_wrapped_with_two_columns_of_slack_fits_the_focused_draw` (a card row wrapped for W is
+drawn unchanged at W-2, at 120/80/60/40) and the host rule it depends on, plus the quote test that
+says the prose rule is untouched.
+
+## The other items
+
+| # | item | commit |
+| --- | --- | --- |
+| MUST 1 | item I: the card width belongs to the renderer; the open-line guard reverted | `f2bfb72c`, `ea1d8680` |
+| MUST 2 | the finished run row keeps `·3s` and glues the check to the hour | `b4ecfb3d` |
+| MUST 3 | the band assertions are row by row and stronger | `ffbb36d1` |
+| MUST 4 | this report cites the real hash, `68449949` | here |
+| SHOULD | code bands cut by cells again, word wrap is prose only | `a7d51d52` |
+| SHOULD | `repaint_if_due` tested directly: the 150 ms deadline and the clear | `53b6c52d` |
+| SHOULD | the wall-clock budget replaced by a deterministic one | `53b6c52d` |
+| SHOULD | the doc comments restored (item G's, and the test doc above its `#[test]`) | `53b6c52d`, `ea1d8680` |
+
+**MUST 2, the row Victor wrote**, rendered from the real function:
+
+```text
+finished: 󰷺 3·3s Δ↑5.3k ↓851 󰔛 0:25 · 󰄬07:20
+failed  : 󰷺 3·3s Δ↑5.3k ↓851 󰔛 0:25
+running : 󰷺 3·3s Δ↑5.3k ↓851 󰔛 0:25
+```
+
+**MUST 3**, the band property per row: every band row closes with `ESC[K`, carries no pad space before
+it, ends on its last character, and the widest is exactly 79 at the width the band was drawn for. That
+is the old `eq(widest, 79)` made STRONGER, not weaker: it proves the paint as well as the width.
+
+**SHOULD, the debounce**, as a decision rather than a stopwatch: `repaint_is_due` is not due at the
+moment of the resize nor 149 ms later, is due exactly at 150 ms and later, an idle chat is never due,
+and `REPAINT_CLEAR` really is `ESC[?25l ESC[2J ESC[3J ESC[H` - the screen AND the scrollback.
+
+**SHOULD, the cost**, deterministic: a 240-message chat and a 12-message chat both draw 40 rows, and a
+frame at an unchanged width re-measures nothing (the count cache is keyed on the width). The measured
+numbers stay in the report above (2.06 ms first view, 575 µs after a resize) as a measurement, not as
+an assertion that can flake on a busy node.
+
+## What I ran
+
+Lua: `test-cli-view` 568 ok, `test-cli-resize` 73 ok, `test-codemode-blocks` 40 ok, `test-markdown`
+102 ok. Rust: `wa-term` 165 ok, `wa-capabilities` 340 ok. The binary was rebuilt from this tree
+(`WA_CODEMODE_ALLOW_EMPTY=1 cargo build --release -p wa-host`) and the Lua suites run with
+`WASM_AGENT_LUA_ROOT` pointed at the worktree.
+
+The gate now also runs `-p wa-capabilities repaint_tests` (item G's debounce, added at
+`scripts/test.sh`) beside the `transcript::tests` line added in round 2.
+
+## What is still NOT verified
+
+* I could not drive a full `wa chat` answer through a pty: this node has no model stub that makes a
+  provider answer a fence without a network call, so the witness is the two layers that own the shape
+  (the renderer's rows and the host's draw), dumped through the real code, not a photographed terminal.
+* The full `scripts/test.sh` gate was not run; the suites above and the two Rust crates were.
+* Round 1's two pre-existing failures were neither re-run nor touched, so their state is UNCHANGED and
+  UNVERIFIED here.
