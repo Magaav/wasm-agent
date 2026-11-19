@@ -337,6 +337,15 @@ for the codes item 8 added).
   as the same class rather than claimed fixed.
 
 
+* **The restore's stop sentence (item 8's report requirement), quoted from `lua/core/backup.lua:521-526`:**
+  `stop_command` answers the ONE command that stops the process holding a store -
+  `systemctl --user stop <unit>` when `/proc/<pid>/cgroup` puts the holder in a systemd unit,
+  `kill <pid>  # pid <pid> (<command>)` when it does not, and `(this process could not be named)` when
+  neither is readable. It is never a guessed command, and the refusal names the holder
+  (`pid <pid> (<command>)`, `describe_holders`) so the operator knows what they are stopping. The sentence
+  was already in place at `ac7717e0` (round 2); round 3 changed the scan that FEEDS it - one `ls -l` pass
+  instead of a nested readlink loop - which is what made the holder findable within the row's lifetime
+  (`77c5b9ec`).
 ### The full fast path, measured (this tree, this node)
 
 ```
