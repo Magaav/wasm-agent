@@ -1180,27 +1180,45 @@ function M.is_rate_limited(problem)
   return true
 end
 
--- Default three, like pi's `retry.maxRetries`. `WASM_AGENT_PROVIDER_RETRIES` still acts as the
--- operator off-switch for every provider retry when it is set; the explicit knob wins when both are.
+-- UNBOUNDED by default. The brief (item 1) is explicit: a transient error never ends a run, and the
+-- operator stops it - "no total cap while it stays transient". Rate limits and 5xx are the ordinary
+-- shape of a busy upstream, and a 3-try cap (2, 4, 8 s) ended runs that a 30-second wait would have
+-- finished. An operator who wants a bound sets WASM_AGENT_PROVIDER_RATE_LIMIT_RETRIES (or the general
+-- WASM_AGENT_PROVIDER_RETRIES off-switch) by name - which is also what every bounded test does.
+--
+-- The bounded case is the IDENTICAL repeat: a 500 that answers the same bytes every time is not a busy
+-- upstream, it is a request or a deployment that will never succeed, and waiting forever would be a hot
+-- loop. `M.identical_repeat_ceiling` bounds THAT, by name, without capping the class.
 function M.rate_limit_retries()
   local raw = env("WASM_AGENT_PROVIDER_RATE_LIMIT_RETRIES")
   if raw == nil or trim(raw) == "" then raw = env("WASM_AGENT_PROVIDER_RETRIES") end
-  if raw == nil or trim(raw) == "" then return 3 end
+  if raw == nil or trim(raw) == "" then return math.huge end
   local count = tonumber(raw)
-  if not count then return 3 end
+  if not count then return math.huge end
   return math.max(0, math.min(8, math.floor(count)))
 end
 
--- 2 s, 4 s, 8 s, ... capped at a minute - the same shape as pi's agent retry.
+-- How many times the SAME failure text may repeat before the run stops calling it transient. A 500
+-- that returns byte-identical answers is a wall, not a queue, and the run says so by NAME instead of
+-- waiting for a change that is not coming. It is a ceiling on repetition, not a total cap on the
+-- class: a link that fails and returns, or a 503 whose body changes, keeps waiting.
+function M.identical_repeat_ceiling()
+  local raw = tonumber(env("WASM_AGENT_PROVIDER_IDENTICAL_REPEATS") or "")
+  if not raw then return 10 end
+  return math.max(2, math.min(100, math.floor(raw)))
+end
+
+-- 1 s, 2 s, 4 s, ... capped at 30 s - the same shape the brief asks for (1 s doubling to a 30 s cap,
+-- jittered), so every transient class waits the same way.
 function M.rate_limit_delay_ms()
   local ms = tonumber(env("WASM_AGENT_PROVIDER_RATE_LIMIT_DELAY_MS") or "")
-  if not ms then return 2000 end
+  if not ms then return 1000 end
   return math.max(0, math.min(60000, math.floor(ms)))
 end
 
 function M.rate_limit_max_delay_ms()
   local ms = tonumber(env("WASM_AGENT_PROVIDER_RATE_LIMIT_MAX_DELAY_MS") or "")
-  if not ms then return 60000 end
+  if not ms then return 30000 end
   return math.max(0, math.min(600000, math.floor(ms)))
 end
 

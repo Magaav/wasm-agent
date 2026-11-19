@@ -2502,6 +2502,11 @@ function M:run_body(text, images)
       or unknown_failure and provider.unknown_retries()
       or empty_reply and provider.empty_reply_retries()
       or provider.transient_retries()
+    -- A transient class that waits without a total cap (brief item 1) still must not spin on a wall: a
+    -- failure whose TEXT repeats unchanged is bounded by its own ceiling and then named. Only the
+    -- unbounded classes carry this, because a bounded bucket already stops itself.
+    local identical_limit = (transient_limit == math.huge) and provider.identical_repeat_ceiling() or nil
+    local identical_text, identical_count = nil, 0
     local transient_attempt, waited_ms = 0, 0
     local wait_budget_ms = (connection_lost and not link_unbounded)
       and (provider.connection_wait_seconds() * 1000) or nil
@@ -2519,6 +2524,22 @@ function M:run_body(text, images)
       waited_ms = waited_ms + wait_ms
       local reason = ok and (result.stream_complete == false and "incomplete_stream" or "empty_reply")
         or redact.text(tostring(result)):sub(1, 80)
+      -- The identical-repeat ceiling: the same failure text, unchanged, counted. A different text -
+      -- a new body, a link that came back and failed differently - resets the count, because that is
+      -- a different situation and the class is still transient.
+      local failure_text = (not ok) and redact.text(tostring(result)) or nil
+      if identical_limit then
+        if failure_text and failure_text == identical_text then
+          identical_count = identical_count + 1
+        else
+          identical_text, identical_count = failure_text, 1
+        end
+        if identical_count >= identical_limit then
+          ok, result = false, tostring(result) .. string.format(
+            " [the same failure repeated %d times unchanged; it is not a transient wait any more]", identical_count)
+          break
+        end
+      end
       -- The waiting row: what is wrong, with which provider, and when the next attempt comes. It
       -- names the operator's only lever when the wait is unbounded, so a reader can stop it on purpose.
       local provider_name = connection_lost and (function()
@@ -2529,21 +2550,27 @@ function M:run_body(text, images)
         return "provider"
       end)() or "provider"
       if connection_lost and not link_down_since then link_down_since = host.now() end
+      -- The counters, as words: an uncapped class has no fraction to show, and printing one would be a
+      -- lie (and a number the formatter cannot represent). One string, so every branch agrees.
+      local uncapped = (transient_limit == math.huge)
+      local counted = uncapped
+        and string.format("%d, no limit - it waits until the wait stops helping, Esc stops the run)", transient_attempt)
+        or string.format("%d/%d)", transient_attempt, transient_limit)
       self.emit({ type = "status", text = connection_lost
         and (link_unbounded
-          and string.format("waiting for the network · %s unreachable · retry in %ds (%d, no limit; the link is waited for until it returns, Esc stops the run)",
-            provider_name, math.max(1, math.floor(wait_ms / 1000 + 0.5)), transient_attempt)
-          or string.format("waiting for the network · %s unreachable · retry in %ds (%d/%d); waiting up to %ds for the link",
-            provider_name, math.max(1, math.floor(wait_ms / 1000 + 0.5)), transient_attempt, transient_limit,
+          and string.format("waiting for the network · %s unreachable · retry in %ds (%s",
+            provider_name, math.max(1, math.floor(wait_ms / 1000 + 0.5)), counted)
+          or string.format("waiting for the network · %s unreachable · retry in %ds (%s; waiting up to %ds for the link",
+            provider_name, math.max(1, math.floor(wait_ms / 1000 + 0.5)), counted,
             provider.connection_wait_seconds()))
-        or rate_limited and string.format("provider refused the request (%s) - retrying in %ds (%d/%d)%s",
-          reason, math.floor(wait_ms / 1000), transient_attempt, transient_limit,
+        or rate_limited and string.format("provider refused the request (%s) - retrying in %ds (%s%s",
+          reason, math.floor(wait_ms / 1000), counted,
           retry_after and " as the provider asked" or "")
         or empty_reply and string.format(
-          "the provider returned an empty message (%s) - asking again in %dms (%d/%d)",
-          reason, wait_ms, transient_attempt, transient_limit)
-        or string.format("provider unavailable (%s) - retrying in %ds (%d/%d)",
-          reason, math.floor(wait_ms / 1000), transient_attempt, transient_limit) })
+          "the provider returned an empty message (%s) - asking again in %dms (%s",
+          reason, wait_ms, counted)
+        or string.format("provider unavailable (%s) - retrying in %ds (%s",
+          reason, math.floor(wait_ms / 1000), counted) })
       telemetry.event(self.session_id,self.run_id,"","provider_retry","attempt",{
         -- A JSON body cannot carry inf: an unbounded wait says so by name, not as a number.
         reason=reason,attempt=transient_attempt,limit=(transient_limit == math.huge) and "none" or transient_limit,
