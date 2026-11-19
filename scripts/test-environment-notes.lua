@@ -192,6 +192,10 @@ ok(omarchy_note:find("skill", 1, true) and omarchy_note:find("omarchy", 1, true)
   "the Omarchy note points at the omarchy skill rather than restating it")
 ok(sandbox_note:find("findmnt", 1, true) and sandbox_note:find("container", 1, true),
   "the sandbox note names how to list mounts and says it is a container")
+ok(sandbox_note:find("/.dockerenv", 1, true) and sandbox_note:find("/run/.containerenv", 1, true),
+  "the sandbox note names both container markers the detector accepts")
+ok(not sandbox_note:find("fleet roster names the one", 1, true),
+  "the sandbox note claims no host-identifying field the roster does not carry")
 
 sh("rm -rf '" .. config_dir .. "'")
 print("environment notes ok (" .. checks .. " checks, 0 skipped)")

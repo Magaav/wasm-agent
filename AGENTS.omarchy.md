@@ -13,6 +13,7 @@ of a container or a headless host, which is why it is here and not in `AGENTS.md
 - Hyprland 0.56+ takes dispatchers as Lua: a binding is `o.bind(..., hl.dsp.window.close())` and a
   script is `hyprctl dispatch 'hl.dsp...'`. The pre-0.56 dispatcher words (closewindow, workspace,
   exec) fail with "expected a dispatcher"; that error is the old syntax, not a missing feature.
-- Apply and verify with `hyprctl reload` then `hyprctl configerrors`. `hyprsunset.conf` and
-  `xdph.conf` are read by other processes, so those restart with `omarchy restart hyprsunset`; never
-  restart the session or the compositor to make a config change take.
+- Apply and verify with `hyprctl reload` then `hyprctl configerrors`. The two `.conf` files are read
+  by other processes, so `hyprctl` neither applies nor validates them: `hyprsunset.conf` takes effect
+  on `omarchy restart hyprsunset`, and `xdph.conf` only when the screen-sharing portal restarts (at
+  the next login). Never restart the session or the compositor to make a config change take.

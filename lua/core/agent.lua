@@ -447,9 +447,13 @@ end
 
 -- The conditions, parameterised so the test drives them with fixture envs and a fixture filesystem:
 -- a test that needs the real host cannot prove which note is chosen, it can only observe this host.
+-- Two markers, because the two runtimes write different files and neither is guaranteed: docker
+-- creates `/.dockerenv`, podman `/run/.containerenv` (and a chroot neither, which is why
+-- deploy/env.example tells an operator to set the variable explicitly).
 local function sandboxed(env, read)
   if (env.WASM_AGENT_SANDBOX or "") == "1" then return true end
-  return probe("/.dockerenv", read) == "file"
+  if probe("/.dockerenv", read) == "file" then return true end
+  return probe("/run/.containerenv", read) == "file"
 end
 
 local function on_omarchy(env, read)
