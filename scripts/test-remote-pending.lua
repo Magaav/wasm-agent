@@ -73,6 +73,26 @@ local function peer_bash(command, budget_ms)
     peer_caller, "master")
 end
 
+-- A section that asserts about the ADOPTION LIMIT or the REAPING rule must start from a clean peer
+-- session: every earlier section leaves handles behind, and a limit is only measured against an empty
+-- share. This cancels what is open and waits for the peer's own list to agree - a test helper, never a
+-- property of the code under test.
+local function drain_peer()
+  for _ = 1, 20 do
+    local page = tools.dispatch(memory, "operation", { action = "list" }, "master", peer_ctx) or {}
+    local open = 0
+    for _, row in ipairs(page.operations or {}) do
+      if type(row) == "table" and row.settled ~= true and tostring(row.state or "") ~= "cancelled" then
+        open = open + 1
+        tools.dispatch(memory, "operation", { action = "cancel", id = row.operation_id }, "master", peer_ctx)
+      end
+    end
+    if open == 0 then return true end
+    if host.sleep then host.sleep(0.3) end
+  end
+  return false
+end
+
 local function peer_await(id, steps)
   local last = nil
   for _ = 1, steps or 30 do
@@ -249,6 +269,7 @@ check(bogus.cancelled == false or bogus.error == "unknown_op",
 -- 10. Review r1 MUST 2: one peer may not hold this node's whole slot share with adopted work. Everything a
 -- peer asks for lands in ONE peer session whose share is PER_SESSION_MAX = 6 of 8; before the bound, six
 -- long adopted commands blocked the peer's own short calls. The bound is small and the refusal is named.
+check(drain_peer(), "the peer session is empty before the limit is measured")
 local held = {}
 for index = 1, 2 do
   local one = peer_bash("sleep 30", 800)
@@ -263,5 +284,99 @@ check(over.effect == "none", "and nothing was started")
 for _, one in ipairs(held) do
   tools.dispatch(memory, "operation", { action = "cancel", id = one.op }, "master", peer_ctx)
 end
+
+
+
+-- 11. Review r1 MUST 2, the second half: capacity for a caller that walked away.
+--
+-- Two mechanisms, and this measures both:
+--
+--   * the CEILING: an adopted command is started with a bounded timeout_seconds whatever its caller asked
+--     for, and the handle reports that number. Measured here: with a 1 s ceiling the operation settles by
+--     ITSELF (state failed, the supervisor's own deadline), so the slot comes back without anyone polling;
+--   * the REAP: a supervisor that is overdue (asleep, wedged) can still leave work running past the
+--     ceiling. The next adoption notices it and stops it by name. That case is not reproducible on demand,
+--     so the recorded start time is aged in the index this node writes - the rule is measured against the
+--     record it really uses, and the test says so rather than pretending an overdue supervisor happened.
+-- Run a body with one environment variable answered by this test instead of the node (the pending module
+-- reads its bounds the same way, so a rule can be held in seconds instead of minutes).
+local function with_env(name, value, body)
+  local real = host.getenv
+  host.getenv = function(key)
+    if key == name then return value end
+    return real(key)
+  end
+  local ok, problem = pcall(body)
+  host.getenv = real
+  assert(ok, problem)
+end
+
+local function drain_peer_at_least(from_index)
+  for _ = 1, 20 do
+    local page = tools.dispatch(memory, "operation", { action = "list" }, "master", peer_ctx) or {}
+    local open = 0
+    for _, row in ipairs(page.operations or {}) do
+      if type(row) == "table" and row.settled ~= true and tostring(row.state or "") ~= "cancelled" then
+        open = open + 1
+        tools.dispatch(memory, "operation", { action = "cancel", id = row.operation_id }, "master", peer_ctx)
+      end
+    end
+    if open == 0 then return true end
+    if host.sleep then host.sleep(300) end
+  end
+  return false
+end
+
+with_env("WASM_AGENT_REMOTE_ADOPTED_SECONDS", "1", function()
+  with_env("WASM_AGENT_REMOTE_ADOPTED_GRACE_SECONDS", "1", function()
+    check(wa_adopted_ceiling_seconds() == 1 and wa_adopted_grace_seconds() == 1,
+      "the ceiling and grace are readable, so the rule can be held in seconds")
+    check(drain_peer_at_least(true), "the peer session is empty before the ceiling is measured")
+    local bounded = peer_bash("sleep 30", 800)
+    check(bounded.state == "pending", "an adopted command starts under the short ceiling")
+    check(bounded.timeout_seconds == 1, "and the handle reports the ceiling it was given ("
+      .. tostring(bounded.timeout_seconds) .. "), not its caller's number")
+    if host.sleep then host.sleep(2600) end
+    local state = tools.dispatch(memory, "operation", { action = "status", id = bounded.op },
+      "master", peer_ctx) or {}
+    check(state.settled == true, "the ceiling ends the adopted command by itself, so its slot returns: "
+      .. json.encode(state):sub(1, 200))
+  end)
+end)
+
+-- The REAP, against the record it really uses.
+--
+-- The command has to be started under the REAL ceiling (900 s) - a command started under the 1 s ceiling
+-- settles by itself and there is nothing to reap - and the ceiling is then lowered for the check, which is
+-- exactly the position a node is in when its supervisor stops noticing: work admitted under an earlier,
+-- longer bound. The recorded start time is aged for the same reason, instead of waiting the real bound.
+check(drain_peer_at_least(true), "the peer session is empty before the reap is measured")
+local stale = peer_bash("sleep 60", 800)
+check(stale.state == "pending", "a command is adopted for the reap")
+check(stale.timeout_seconds == 900, "under the real 900 s ceiling: " .. tostring(stale.timeout_seconds))
+with_env("WASM_AGENT_REMOTE_ADOPTED_SECONDS", "1", function()
+  with_env("WASM_AGENT_REMOTE_ADOPTED_GRACE_SECONDS", "1", function()
+    -- Age the start time this node recorded: 100 s old, far past the 1 s ceiling + 1 s grace this scope
+    -- now enforces. The rule reads its own record, so ageing that record is the overdue-supervisor case.
+    local paths_lib = dofile("lua/core/paths.lua")
+    local index_path = paths_lib.data() .. "/remote-adopted/peer_rp-scratch-peer.json"
+    local raw = host.read_file(index_path)
+    local decoded = raw and json.decode(raw) or { ops = {} }
+    decoded.ops = decoded.ops or {}
+    decoded.ops[stale.op] = (tonumber(host.now() or 0) or 0) - 100
+    check(host.write_file(index_path, json.encode(decoded)), "the recorded start time is aged for the test")
+    local next_one = peer_bash("echo after-reap", 800)
+    local reaped = type(next_one.reaped) == "table" and #next_one.reaped > 0
+    check(reaped, "the next adoption reaps the overdue command by name: "
+      .. json.encode(next_one):sub(1, 260))
+    local rows = tools.dispatch(memory, "operation", { action = "list" }, "master", peer_ctx) or {}
+    local still_running = false
+    for _, row in ipairs(rows.operations or {}) do
+      if tostring(row.operation_id or "") == stale.op and row.settled ~= true
+        and tostring(row.state or "") ~= "cancelled" then still_running = true end
+    end
+    check(not still_running, "the reaped command is no longer running")
+  end)
+end)
 
 print("remote pending ok (" .. tostring(checks) .. " checks)")
