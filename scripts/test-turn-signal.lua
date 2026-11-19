@@ -97,6 +97,30 @@ local agent_source = host.read_file("lua/core/agent.lua") or ""
 ok(agent_source:find("The harness removes this block from the answer it shows", 1, true) ~= nil,
   "#33: the envelope states that the harness removes the block")
 
+-- ---- #2: wa turns --day answers the day it was asked for ---------------------------------------
+-- The real dispatcher, not a copy of its rule: M.run is what "wa turns" calls, and the defect this
+-- pins was that a leading --day went to the all-time report and the day was silently ignored.
+local cli = dofile("lua/core/turnfeed_cli.lua")
+local function captured(fn)
+  local printed, real = {}, print
+  print = function(line) printed[#printed + 1] = tostring(line) end
+  local ok, value = pcall(fn)
+  print = real
+  return table.concat(printed, "\n"), ok and value or nil, ok and nil or value
+end
+local day_out, day_code = captured(function() return cli.run({ "wa", "turns", "--day", today }) end)
+eq(day_code, 0, "#2: wa turns --day exits 0 for a day it can answer")
+ok(day_out:find("wa turns --day " .. today, 1, true) ~= nil,
+  "#2: and answers THAT day, not the all-time report: " .. day_out:gsub("\n", " | "):sub(1, 160))
+local json_out = captured(function() return cli.run({ "wa", "turns", "--day", today, "--json" }) end)
+local decoded_ok, decoded = pcall(json.decode, json_out)
+ok(decoded_ok and type(decoded) == "table" and decoded.day == today,
+  "#2: --json answers a JSON object for the same day, even as the last flag")
+local bad_out, bad_code = captured(function() return cli.run({ "wa", "turns", "--day", "18/11/2026" }) end)
+eq(bad_code, 2, "#2: a malformed day is refused with a non-zero exit")
+ok(bad_out:find("turn_day_must_be_YYYY-MM-DD", 1, true) ~= nil,
+  "#2: and the refusal names the format")
+
 -- ---- #34: a script's effect is what its calls did ---------------------------------------------
 local tools_lib = dofile("lua/core/tools.lua")
 local function script_effect(output)

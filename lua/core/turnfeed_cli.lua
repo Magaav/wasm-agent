@@ -70,7 +70,7 @@ local function refused(message)
 end
 
 local VALUED = { ["--since"] = true, ["--top"] = true, ["--nodes"] = true, ["--sha"] = true,
-  ["--note"] = true }
+  ["--note"] = true, ["--day"] = true, ["--limit"] = true }
 
 -- One collection, shared by every verb that reports: the local notes plus every peer that answered.
 local function collect(args)
@@ -227,12 +227,15 @@ local function day_report(args)
   -- prose removed. Not a clustering engine - the grouping lives in lua/core/turnfeed.lua - this is the
   -- day's vocabulary so a reader can see what the day was about before opening a mission.
   local STOP = {}
+  -- gmatch, not a bare string: a generic for needs an iterator function, and passing the word list
+  -- itself raised "attempt to call a string value" on the first run of this verb (found 19/11 while
+  -- checking item 2 - the report had never been executed, only written).
   for word in ([[the a an and or but if then than that this these those it its is are was were be been
     being of to in on at for with from by as not no nor so such only also just very more most less least
     i we you they he she them us our your my me his her their there here what which who whom whose when
     where why how all any both each few many some own same too can will would should could may might must
     do does did doing done have has had having one two three first next last step steps turn turns round
-    rounds token tokens context line lines code block blocks file files wasm agent harness]]) do STOP[word] = true end
+    rounds token tokens context line lines code block blocks file files wasm agent harness]]):gmatch("%S+") do STOP[word] = true end
   local themes, order = {}, {}
   local by_build, by_mode, by_session = {}, {}, {}
   for _, row in ipairs(notes) do
@@ -266,7 +269,9 @@ local function day_report(args)
     table.sort(list, function(a, b) if a.count ~= b.count then return a.count > b.count end return a.key < b.key end)
     return list
   end
-  if flag(args, "--json") then
+  -- has(), not flag(): flag() answers the argument AFTER the name, so a trailing --json read as nil
+  -- and the text report was printed instead (found 19/11 while checking item 2).
+  if has(args, "--json") then
     print(json.encode({ day = day, notes = #notes, sessions = sessions, themes = ranked,
       builds = counts(by_build), modes = counts(by_mode) }))
     return 0
@@ -288,6 +293,13 @@ end
 
 function M.run(args)
   local verb = args[2]
+  -- --day is a verb in disguise, and it has to be answered before the "no verb" branch below: that
+  -- branch takes every leading -- to the all-time report, which is how "wa turns --day 2026-11-18"
+  -- used to print the whole ledger and never the day (review 19/11, item 2).
+  if has(args, "--day") or verb == "day" then
+    if has(args, "--help") or has(args, "-h") then print(USAGE); return 0 end
+    return day_report(args)
+  end
   if verb == nil or verb:sub(1, 2) == "--" then
     if has(args, "--help") or has(args, "-h") then print(USAGE); return 0 end
     return report(args)
@@ -297,7 +309,6 @@ function M.run(args)
   if verb == "fixed" then return fixed(args) end
   if verb == "unfixed" then return unfixed(args) end
   if verb == "markers" then return markers_list() end
-  if verb == "day" or has(args, "--day") then return day_report(args) end
   return refused("unknown verb '" .. tostring(verb) .. "': turns [--since ...] | digest | fixed | unfixed | markers")
 end
 
