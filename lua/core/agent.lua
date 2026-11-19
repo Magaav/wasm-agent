@@ -2073,7 +2073,11 @@ function M:run_body(text, images)
   -- tools is the shape that failed in gate.log, and a blanket refusal also refused the tool-less child
   -- `scripts/test-provider-connection-abort-recovery.lua` runs (self-review, on this branch).
   -- With WASM_AGENT_RAW_CODE=first an empty declared list still dispatches: a run block runs as codemode.
-  if not self.subagent and #tool_list == 0 and not raw_code.first(self.codemode_policy) then
+  -- An arm with a text action channel (E2/E3) dispatches like `first`: an empty declared list is
+  -- not a dead end there, because a <codeact> block is the way to act.
+  local ab_tag_arm = dofile('lua/core/ab_arms.lua').current()
+  local tag_channel = (ab_tag_arm == 'e2' or ab_tag_arm == 'e3')
+  if not self.subagent and #tool_list == 0 and not raw_code.first(self.codemode_policy) and not tag_channel then
     local reason
     -- #53 (19/11): a resume that cannot run says WHY in terms of the mode this process was started in,
     -- because "no tools" and "the wrong raw-code mode for this thread" call for different repairs.
