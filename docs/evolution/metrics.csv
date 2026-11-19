@@ -1,0 +1,2 @@
+date,main_commit,landings,gate_checks,nodes_on_main,worker_mode,mission_runs,rounds_total,rounds_per_run,input_tokens_M,output_tokens_M,cache_pct,median_review_rounds_to_land,land_stops,harness_items_opened,harness_items_landed,incidents
+2026-11-18,44229140,2,294,5/5,codemode,66,8435,128,1356,6.84,98.2,5,13,51,13,2
