@@ -24,7 +24,7 @@ Every claim below names the commit that implements it. `git show <sha>` is the c
 | 10c a green row that printed SKIP is not a pass | `73ebf9b2` | `scripts/test-fast-skip-count.sh` | `fast.sh` check row, `test.sh` |
 | 10d `wa build-env` quotes like a shell and reads the user home | `0266a557` | `scripts/test-build-env.sh` | `fast.sh` check row, `test.sh` |
 
-All TEN suites run together on this branch (measured 19/11 02:33, one supervised operation, every line is that row own verdict):
+All TEN suites run together on this branch (measured 19/11 02:33, one supervised operation, every line is that row's own verdict):
 
 ```
 test-fast-watchdog.sh         ok
