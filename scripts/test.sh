@@ -1669,6 +1669,9 @@ WA_SCRIPT=scripts/test-conform-profile.lua "$BIN" --db "$DB" | grep "conform pro
 # The A/B arms as one build (next-round.md 19/11 ~17:30): the tagged transports and their single-source
 # rules, one row per rule, through the real parser.
 WA_SCRIPT=scripts/test-arm-tag.lua "$BIN" --db "$DB" | grep "arm tag ok"
+# The batching instruction (batch-spec.md): the same sentence in all three places the model can
+# read it, verbatim, pinned per place because three modules build those texts.
+WA_SCRIPT=scripts/test-batching-instruction.lua "$BIN" --db "$DB" | grep "batching instruction ok"
 
 # Test the shipping registry, including missing/stale/invalid negative controls.
 ( export WA_EMBEDDED_SOURCE_ROOT="$WASM_AGENT_LUA_ROOT"; unset WASM_AGENT_LUA_ROOT

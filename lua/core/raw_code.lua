@@ -224,9 +224,9 @@ function M.guidance_for(transport)
   if transport == "tool_call" then
     return "Work in code: call the run tool with `code` - it runs as one script in which every tool is "
       .. "`tools.<name>(args)`, and its result comes back to you. Use `raw` to carry a file body or a "
-      .. "patch exactly. A message with no tool call is your answer."
+      .. "patch exactly. A message with no tool call is your answer. " .. M.BATCHING
   end
-  return M.FIRST_GUIDANCE
+  return M.FIRST_GUIDANCE .. " " .. M.BATCHING
 end
 
 function M.parse(text)
@@ -572,13 +572,21 @@ end
 -- escaped *inside* the code (principle 4). One JSON encode is lossless and reversible; hand-quoting
 -- is not. The names are identifiers the script reads, so only identifier-shaped names are accepted:
 -- a name that is not one would silently become a different variable.
+-- The batching instruction (batch-spec.md, 19/11): measured evidence was 1.0 tool calls per round
+-- in EVERY run of the task A/B, so the model was doing one small call at a time. The sentence is
+-- the same text in all three places the model can read it, and a test pins it in each (the three
+-- descriptions are built by different modules, so a copy that drifts is a real defect).
+M.BATCHING = "One run(code) can do a whole step: read, search, edit and check in the same script, "
+  .. "with Promise.all for the parts that do not depend on each other, and return only what you "
+  .. "need to decide the next step. Prefer one script per step over many small calls."
+
 local RAW_PREFIX = "__raw"
 
 function M.run_tool_schema()
   return { name = "run", description = "Run one script, the same way a fenced js run block does: "
     .. "code is the script, and every tool inside it is tools.<name>(args). Use raw to carry file "
     .. "bodies or patches exactly, as an object keyed by the variable name the script should read "
-    .. "(each value reaches the script byte for byte, never escaped into the code).",
+    .. "(each value reaches the script byte for byte, never escaped into the code). " .. M.BATCHING,
     schema = { type = "object", properties = {
       code = { type = "string" },
       raw = { type = "object", additionalProperties = { type = "string" } },
