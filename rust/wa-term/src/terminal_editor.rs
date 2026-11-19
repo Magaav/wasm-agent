@@ -807,7 +807,7 @@ impl Editor {
             else { frame.push_str(if index == 0 { PROMPT } else { "  " }); }
             if self.chars.is_empty() && index == 0 {
                 let placeholder = if self.bash { BASH_PLACEHOLDER } else { PLACEHOLDER };
-                let hint: String = placeholder.chars().take(self.width.saturating_sub(BOX_CHROME)).collect();
+                let hint: String = clip_cells(placeholder, self.width.saturating_sub(BOX_CHROME));
                 frame.push_str(&format!("{HINT}{hint}{RESET}"));
             } else if let Some((a, b)) = self.selection() {
                 // The selection, drawn in reverse video over the characters it covers on this row.
@@ -1102,7 +1102,7 @@ impl Panel {
                 let digits = self.options.len().to_string().len();
                 let head = fit(&format!("{mark} {:>digits$}. {:<label_width$}", index + 1, label));
                 let room = w.saturating_sub(head.chars().map(cell_width).sum());
-                let tail: String = hint.chars().take(room).collect();
+                let tail: String = clip_cells(hint, room);
                 rows.push(if index == self.selected { format!("{SELECTED}{head}{tail}{RESET}") }
                     else { format!("{head}{HINT}{tail}{RESET}") });
             }
