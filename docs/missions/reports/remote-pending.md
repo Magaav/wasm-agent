@@ -316,5 +316,10 @@ Measured, and now said: the adopted operation belongs to the calling **node**, r
 * `cargo test -p wa-capabilities adoption_survives_the_relay_deadline` with `HOME` = a scratch dir of the
   gate's own shape -> `1 passed; 0 failed`
 
-Still not run: the whole `scripts/test.sh` gate, and no Rust suite beyond the one named above.
+The whole wa-capabilities lib suite, with the new test in it and HOME set to a gate-shaped scratch dir:
+`cargo test --release --offline -p wa-capabilities --lib -- --test-threads=4` -> `341 passed; 0 failed`.
+That is the check that matters for interference: `manager()` is a process-wide OnceLock rooted at HOME, so a
+test that starts real operations could disturb every other test in the same binary. It does not.
+
+Still not run: the whole `scripts/test.sh` gate.
 
