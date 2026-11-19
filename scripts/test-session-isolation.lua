@@ -179,6 +179,20 @@ end
 
 -- The canaries are exported by `run-lua-test.sh` (scripts/test-session-isolation.sh in CI): the node
 -- itself holds them, and `env` inside a bash child is how a model would read them.
+-- The canaries are the SUBJECT of this section: a runner that exports none of them has nothing to test
+-- here, so it is a named SKIP and never a pass. scripts/test-session-isolation.sh exports them, and the
+-- fast path runs that wrapper.
+local function canaries_ready(names, control)
+  if host.getenv(control) == nil then return false end
+  for _, name in ipairs(names) do if host.getenv(name) == nil then return false end end
+  return true
+end
+local finding5_ready = canaries_ready({ "OPENAI_API_KEY", "WASM_AGENT_LLM_API_KEY", "WA_VAULT_ADMIN_TOKEN", "GH_TOKEN" },
+  "WA_TEST_CANARY_VISIBLE")
+if not finding5_ready then
+  print("SKIP finding 5: this runner exported no canaries to withhold (scripts/test-session-isolation.sh does)")
+end
+if finding5_ready then
 local probe = tools.dispatch(memory, "bash", { command = "env" }, "master", ctx_a) or {}
 local environment = tostring(probe.stdout or "")
 ok(environment ~= "", "the bash child ran and printed its environment: " .. tostring(probe.error))
@@ -189,6 +203,7 @@ end
 -- passing because `env` printed nothing.
 ok(environment:find("WA_TEST_CANARY_VISIBLE=", 1, true) ~= nil,
   "and the rest of the environment still reaches it (the control) ")
+end
 
 -- ---- finding 6: a thread a live process is serving is never resumed -----------------------
 
@@ -473,6 +488,12 @@ local route_node = decode(wa_operation(json.encode({ action = "list", scope = "n
 ok(type(route_node.operations) == 'table', "the window's own surface asks for the node scope and is answered")
 
 -- ---- item 9: the deny rule is a shape, and the record says what was withheld ----------------
+local item9_ready = canaries_ready({ "ISOLATION_TEST_TOKEN", "ISOLATION_TEST_SECRET", "ISOLATION_TEST_PASSWORD",
+  "ANTHROPIC_AUTH_TOKEN", "GH_TOKEN" }, "ISOLATION_TEST_PLAIN")
+if not item9_ready then
+  print("SKIP item 9: this runner exported no canaries to withhold (scripts/test-session-isolation.sh does)")
+end
+if item9_ready then
 local env_probe = tools.dispatch(memory, "bash", { command = "env" }, "master", ctx_a) or {}
 local env_text = tostring(env_probe.stdout or "")
 for _, name in ipairs({ "ISOLATION_TEST_TOKEN", "ISOLATION_TEST_SECRET", "ISOLATION_TEST_PASSWORD", "ANTHROPIC_AUTH_TOKEN" }) do
@@ -493,6 +514,7 @@ if type(withheld_probe.operation_id) == 'string' then
   ok(tostring(state9.env_withheld_note or ""):find("tool_env_allow", 1, true) ~= nil,
     "and says where to allow it: " .. tostring(state9.env_withheld_note))
   tools.dispatch(memory, "operation", { action = "cancel", id = withheld_probe.operation_id }, "master", ctx_a)
+end
 end
 
 -- ---- item 11: the peer path ------------------------------------------------------------------

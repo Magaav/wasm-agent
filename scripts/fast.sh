@@ -717,6 +717,8 @@ if command -v node >/dev/null 2>&1; then
   # Both halves of the tool-environment rule (session isolation, finding 5 round 2): a secret is withheld by
 # shape, and the node policy hands a NAME over. One script, two invocations - which is why it is a .sh
 # check here and its .lua half is declared not-a-row in scripts/fast-path.exclude.
+# The session-isolation suite holds the canaries its own environment sections withhold
+WA_BIN="$bin" check session-isolation bash scripts/test-session-isolation.sh
 WA_BIN="$bin" check tool-env-allow bash scripts/test-tool-env-allow.sh
 check install-front-door bash scripts/test-install.sh
   # The canonical runtime binding is decided in PREFLIGHT, before anything is built, and a refusal names
