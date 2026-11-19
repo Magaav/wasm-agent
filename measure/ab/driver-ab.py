@@ -132,7 +132,7 @@ def read_rows(home):
         con.row_factory = sqlite3.Row
         tables = {r[0] for r in con.execute("select name from sqlite_master where type='table'")}
         if 'messages' in tables:
-            for row in con.execute('select session_id, role, content, tool_calls, phase from messages order by seq'):
+            for row in con.execute('select session_id, role, content, tool_calls, phase, seq from messages order by seq'):
                 facts['session'] = row['session_id'] or facts['session']
                 if row['role'] == 'assistant':
                     calls = []
@@ -144,15 +144,19 @@ def read_rows(home):
                         fn = (call or {}).get('function') or {}
                         facts['tool_calls'] += 1
                         facts['tool_names'].append(fn.get('name') or '')
-                    # The turn's answer is its last assistant message that carried no tool call.
-                    if not calls and (row['content'] or '').strip():
-                        facts['answer'] = row['content']
+                    # The turn's answer, per transport (ab-fix.md): a text arm ends in its own
+                    # finish shape, and the tags are stripped before the criterion reads it.
+                    content = row['content'] or ''
+                    if not calls and content.strip():
+                        facts['answer'] = content
+                        facts['answer_seq'] = row['seq']
                 if row['role'] == 'tool':
+                    facts['executed'] = facts.get('executed', 0) + 1
                     text = row['content'] or ''
                     if text.lstrip().startswith('{') or '"error"' in text[:200]:
                         facts['failed_calls'] += 1
         if 'harness_events' in tables:
-            for row in con.execute("select kind, phase, payload from harness_events where kind='model_call' and phase='end'"):
+            for row in con.execute("select payload from harness_events where kind='model_call' and phase='end'"):
                 facts['rounds'] += 1
                 try:
                     data = json.loads(row['payload'] or '{}')
@@ -201,14 +205,43 @@ def run_one(arm, value, task, run):
     )
     wall = round(time.time() - started, 1)
     facts = read_rows(home)
-    ok, note = criterion(task, cwd, facts.get('answer', ''), facts)
+    answer = facts.get('answer', '')
+    # A text arm's answer is its finish SHAPE, and its tags are stripped before grading
+    # (ab-fix.md): the criterion reads what the model said, not the markup it said it in.
+    # A native arm finishes when its last assistant message carried no tool call - that IS its final
+    # answer shape. The text arms finish in their own tags, judged below.
+    final_shape = bool(answer.strip())
+    if value in ('e2', 'e3'):
+        finish = re.search(r'<final_message>(.*?)</final_message>', answer, re.S) if value == 'e3' else None
+        if finish:
+            final_shape = True
+            answer = finish.group(1)
+        else:
+            # E2 finishes with a <message> that carries no <codeact>; E3 only with <final_message>.
+            blocks = re.findall(r'<codeact>(.*?)</codeact>', answer, re.S)
+            msgs = re.findall(r'<message>(.*?)</message>', answer, re.S)
+            if value == 'e2' and msgs and not blocks:
+                final_shape = True
+                answer = msgs[-1]
+            elif msgs and blocks:
+                # The progress text; the finish is still missing, so the shape is not final.
+                answer = msgs[-1]
+    answer = re.sub(r'<turn>.*?</turn>', '', answer, flags=re.S).strip()
+    ok, note = criterion(task, cwd, answer, facts)
+    executed = facts.get('executed', 0)
+    # A silent death is the run ENDING (rc 0) without a final answer shape while the task is not
+    # done - not "zero native tool calls", which called every text arm a death (ab-fix.md).
+    silent = bool(proc.returncode == 0 and not ok and not final_shape)
+    premature = bool(not ok and answer.strip())
     row = {
         'arm': arm, 'task': task, 'run': run,
         'success': 1 if ok else 0, 'grade': note,
-        'silent_death': int(facts['tool_calls'] == 0 and not ok),
-        'premature_ending': int(not ok and bool(facts.get('answer'))),
+        'silent_death': int(silent),
+        'premature_ending': int(premature),
         'continues': facts['continues'],
         'rounds': facts['rounds'], 'tool_calls': facts['tool_calls'],
+        'executed_steps': executed, 'final_shape': int(final_shape),
+        'answer_chars': len(answer),
         'input_tokens': facts['in_tokens'], 'output_tokens': facts['out_tokens'],
         # A cache READ is a share of the prompt the provider served from cache, so it is measured
         # against input+cache_read: dividing by input alone made a fully cached prompt report 369%.
