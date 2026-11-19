@@ -483,6 +483,22 @@ async function fanout(fabric, args, options = {}) {
   // Only the targets are the fabric's capacity; the caller's own CPU is reported beside it, not
   // counted as capacity the fan-out reached.
   const busy = fabric.targets.map((target) => (cpu.nodes[target.name] || {cores_mean: 0}).cores_mean);
+  // Convergence, for the storm: when the last call answered, when the last failure happened, and how
+  // long after the rendezvous came back the first call succeeded again.
+  let convergence = null;
+  if (cut) {
+    const after = results.filter((result) => result.at >= (cut.resumed || 0));
+    const okAfter = after.filter((result) => result.ok);
+    const failures = results.filter((result) => !result.ok);
+    convergence = {
+      successes_after_resume: okAfter.length,
+      first_success_after_resume_ms: okAfter.length ? Math.min(...okAfter.map((result) => result.at - cut.resumed)) : null,
+      last_failure_at_ms: failures.length ? Math.max(...failures.map((result) => result.at)) : null,
+      last_call_at_ms: Math.max(...results.map((result) => result.at)),
+      converged_ms: okAfter.length && failures.length
+        ? Math.max(0, Math.max(...failures.map((result) => result.at)) - cut.resumed) : null,
+    };
+  }
   const cores_busy = Number(busy.reduce((sum, value) => sum + value, 0).toFixed(2));
   return {
     jobs: args.jobs, targets: fabric.targets.length, burn_ms: args.burn_ms, wall_s,
@@ -493,6 +509,7 @@ async function fanout(fabric, args, options = {}) {
     cpu: Object.assign({cores_busy_mean: cores_busy, cores_total: os.cpus().length,
       utilisation_pct: Number((100 * cores_busy / os.cpus().length).toFixed(1))}, cpu),
     cut,
+    convergence,
     logs: {
       rendezvous: logCounts(fabric.registry.log, {
         attach: /\[relay\] attach /g, detach: /\[relay\] detach /g, abandon: /\[relay\] abandon /g,

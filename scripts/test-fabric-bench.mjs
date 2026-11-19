@@ -60,11 +60,17 @@ ok(!fs.existsSync(report.root), 'a passing run removes its scratch tree');
 const reals = [process.env.HOME, path.join(os.homedir(), '.wasm-agent')].filter(Boolean);
 const real = reals[0];
 if (real && fs.existsSync(real)) {
+  // The base has to exist, or mkdtemp would be what fails and the guard would never be reached -
+  // the test would then be passing on the wrong refusal.
+  const inside = path.join(real, 'wa-fabric-bench-should-refuse');
+  fs.mkdirSync(inside, {recursive: true});
   const refused = spawnSync(process.execPath, [BENCH, '--binary', binary, '--smoke'], {
-    env: Object.assign({}, env, {WA_FABRIC_BENCH_TMP: path.join(real, 'wa-fabric-bench-should-refuse')}),
+    env: Object.assign({}, env, {WA_FABRIC_BENCH_TMP: inside}),
     encoding: 'utf8', timeout: 120000});
-  ok(refused.status !== 0 && /refusing to use a real node home/.test((refused.stdout || '') + (refused.stderr || '')),
-    'the isolation guard refuses a scratch root inside the real node home');
+  fs.rmSync(inside, {recursive: true, force: true});
+  const said = (refused.stdout || '') + (refused.stderr || '');
+  ok(refused.status !== 0 && /refusing to use a real node home/.test(said),
+    'the isolation guard refuses a scratch root inside the real node home (' + said.split('\n')[0].slice(0, 160) + ')');
 } else {
   console.log('SKIP test-fabric-bench: no real HOME to point the guard at');
 }
