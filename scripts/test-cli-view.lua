@@ -1780,6 +1780,70 @@ do
     "a first step says nothing added and the total it sent: " .. first)
 end
 
+
+-- ---- the finish stamp: a run that ended WELL says when --------------------------------
+-- Victor, 19/11 ~10:50: the row left under a finished run ends with a middle dot, the check and the
+-- local finish time (HH:MM), so the line says WHEN the answer came back and not only how long it
+-- took. A run that FAILED keeps the same row with no check - the absence is the failure - and nothing
+-- is added while the run is in flight.
+do
+  local CHECK = view_lib.GLYPH.check
+  ok(type(CHECK) == "string" and #CHECK > 0, "the finish check is a glyph of its own")
+  ok(CHECK ~= view_lib.GLYPH.clock and CHECK ~= view_lib.GLYPH.steps and CHECK ~= view_lib.GLYPH.cache,
+    "and none of the glyphs already on the row, so its presence can only mean the run finished")
+  -- A fixed epoch, so the assertion is about the SHAPE and not about the hour the suite runs at. The
+  -- expected text comes from the same OS call the module makes, so the check holds in every zone.
+  local at = 1795083600
+  local expected = os.date("%H:%M", at)
+  local view = view_lib.new({ live = true, limit = 100 })
+  view.turn = { rounds = 3, context = 12000, started = 0 }
+  view.context = 24300
+  view.totals = { prompt = 4600000, completion = 310 }
+  local bare = view:run_numbers(nil, "0:25")
+  local ok_row = view:run_numbers(nil, "0:25", { ok = true, at = at })
+  eq(ok_row, bare .. " \194\183 " .. CHECK .. " " .. expected,
+    "a finished run row ends with the check and the local finish time, one space after each icon")
+  ok(ok_row:find("\194\183 " .. CHECK, 1, true) > (bare:find(view_lib.GLYPH.clock, 1, true) or 0),
+    "the stamp comes after the elapsed clock, never before it: " .. ok_row)
+  -- While the run is in flight there is no finish fact and the row is the one it always was.
+  eq(bare:find(CHECK, 1, true), nil, "nothing extra while the run is in progress")
+  -- A failed run is handed the same row without the check, deliberately.
+  eq(view:run_numbers(nil, "0:25", { ok = false }), bare,
+    "a failed run keeps the same row, with no check and no time")
+  -- The hour is the READER local one, not UTC: compared against both forms on an epoch where they
+  -- differ in this zone, and said out loud (SKIP) on a machine whose zone is UTC, where they cannot.
+  local local_at, utc_at = os.date("%H:%M", at), os.date("!%H:%M", at)
+  eq(view_lib.finish_time(at), local_at, "the finish time is the reader local time")
+  if local_at ~= utc_at then
+    ok(view_lib.finish_time(at) ~= utc_at, "and not the UTC hour, which is another clock here: " .. utc_at)
+  else
+    print("SKIP finish-stamp zone check: this machine zone is UTC, so local and UTC agree")
+  end
+  eq(view_lib.finish_time(nil), "", "no clock, no stamp: an unmeasured finish prints nothing")
+end
+
+-- The WIRING, on the two paths a run can take: "answered" is a run that ended well and hands the
+-- moment it ended; "failed" hands the same fact with ok = false. run_finished is stubbed on the
+-- instance, so this asserts what each caller SAYS and not how the row is later drawn (the checks
+-- above draw it).
+do
+  local seen = {}
+  local function capture(view)
+    view.run_finished = function(_, finish) seen[#seen + 1] = finish end
+    return view
+  end
+  local done = capture(view_lib.new({ live = false, now = function() return 1000 end }))
+  done:answered("fine")
+  eq(#seen, 1, "answered ends the run once")
+  eq(type(seen[1]), "table", "and hands the finish fact")
+  eq(seen[1] and seen[1].ok, true, "an answered run is a run that ended well")
+  eq(seen[1] and seen[1].at, 1000, "with the moment it ended, from the view own clock")
+  local broke = capture(view_lib.new({ live = false, now = function() return 2000 end }))
+  broke:failed("provider_http_500: boom")
+  eq(#seen, 2, "failed ends the run too")
+  eq(seen[2] and seen[2].ok, false, "and says it did not end well, so the row carries no check")
+end
+
 -- ---- the status bar's glyphs: his font, five bands, one cell each, and the gray -----------------
 -- Victor, 18/11 (round 4), measured in his own terminal (JetBrainsMono Nerd Font): U+25D1 (`◑`) and
 -- U+25F7 (`◷`) are NOT in that font, so the terminal falls back to another face and draws them at

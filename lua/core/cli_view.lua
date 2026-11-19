@@ -275,6 +275,18 @@ function M.step_clock(seconds)
   if s < 60 then return s .. "s" end
   return string.format("%dm%02ds", math.floor(s / 60), s % 60)
 end
+-- The wall clock a finished run leaves behind: HH:MM in the READER'S zone, 24 h.
+--
+-- Deliberately the reader's zone and not UTC: every other timestamp in the ledger is UTC because a
+-- fleet compares them, and this one is not a fact about the fleet - it is "when did that answer come
+-- back", which the person reading it asks in the clock on their own wall. The epoch is passed in,
+-- so a test clock decides the moment and not the wall the suite happens to run on.
+function M.finish_time(epoch)
+  local at = tonumber(epoch)
+  if not at then return "" end
+  return os.date("%H:%M", math.floor(at))
+end
+
 function M.run_clock(seconds)
   local s = math.max(0, math.floor(tonumber(seconds) or 0))
   if s < 3600 then return string.format("%d:%02d", math.floor(s / 60), s % 60) end
@@ -314,6 +326,10 @@ local GLYPH = {
   clock = "\243\176\148\155",             -- U+F051B, the run's elapsed clock
   turns = "\243\176\145\144",             -- U+F0450, the session's turns
   cache = "\243\176\134\188",             -- U+F01BC, the cache-hit rate
+  -- The finish stamp (Victor, 19/11 ~10:50): a run that ended well leaves the time it ended,
+  -- not only how long it took. Material Design's check - the one glyph in this set that means
+  -- "this finished".
+  check = "\243\176\132\172",           -- U+F012C, the finish stamp check
 }
 M.GLYPH = GLYPH
 
@@ -1792,14 +1808,28 @@ end
 --
 -- The two clocks are passed in (tokens for the host's ticker, or the stopped values once the run has
 -- ended). With no step clock (the line left under a finished run) the step count stands alone: `󰷺8`.
-function METHODS:run_numbers(step_clock, run_clock)
+--
+-- `finish` is the run's END, and only a run that ended well is handed one (Victor, 19/11 ~10:50):
+-- the row left under a finished run carries a middle dot, Material Design's check and the LOCAL time
+-- it finished, so the line says when the answer came back and not only how long it took. Nothing
+-- extra while the run is in flight (no argument), and a run that FAILED keeps this same row WITHOUT
+-- the check: the absence of the check is the failure, and a second shape for it would be a second
+-- row to read.
+function METHODS:run_numbers(step_clock, run_clock, finish)
   local run, base, totals = self.turn or {}, (self.turn and self.turn.baseline) or {}, self.totals or {}
   local input = math.max(0, (self.context or 0) - (run.context or 0))
   local output = math.max(0, (totals.completion or 0) - (base.completion or 0))
-  return GLYPH.steps .. GAP .. math.max(1, run.rounds or 0) .. (step_clock and ("\194\183" .. step_clock) or "")
+  local row = GLYPH.steps .. GAP .. math.max(1, run.rounds or 0) .. (step_clock and ("\194\183" .. step_clock) or "")
     .. " \206\148" .. M.tokens(input) .. " \226\134\145" .. M.tokens(totals.prompt)
     .. " \226\134\147" .. M.tokens(output)
     .. " " .. GLYPH.clock .. GAP .. run_clock
+  if finish and finish.ok then
+    -- The check wears the same one space every other icon here does, and the stamp is set off by a
+    -- middle dot: "0:25 \194\183 18:47" reads as a duration followed by a moment.
+    local at = M.finish_time(finish.at)
+    if at ~= "" then row = row .. " \194\183 " .. GLYPH.check .. GAP .. at end
+  end
+  return row
 end
 
 -- Called on every event: a new frame, and a repaint. In the plain rendering the line is
@@ -2273,7 +2303,7 @@ function METHODS:run_started()
   self:paint(true)
 end
 
-function METHODS:run_finished()
+function METHODS:run_finished(finish)
   self:commentary_flush()
   self:progress("finish")
   self:clear()
@@ -2300,7 +2330,7 @@ function METHODS:run_finished()
     local now = self.now()
     self:topic(false)
     if self.tail_nl == 0 then self:write("\n") end
-    self:write(paint(self:run_numbers(nil, M.run_clock(now - self.turn.started)), "dim", self.live) .. "\n\n")
+    self:write(paint(self:run_numbers(nil, M.run_clock(now - self.turn.started), finish), "dim", self.live) .. "\n\n")
   end
   if self.screen and self.screen.footer then
     local totals = self.totals or {}
@@ -2588,7 +2618,10 @@ function METHODS:answered(reply)
     if text:sub(-1) ~= "\n" then text = text .. "\n" end
     self:write(text .. "\n")
   end
-  self:run_finished()
+  -- The run ended WELL, so the row it leaves behind carries the check and the time it ended (item
+  -- B). The moment is taken here, once, and not inside run_numbers, which is also called every
+  -- frame while the run is in flight and has no end to name.
+  self:run_finished({ ok = true, at = self.now() })
 end
 
 function METHODS:failed(problem, opts)
@@ -2607,7 +2640,9 @@ function METHODS:failed(problem, opts)
     return
   end
   self:line(paint(DOT .. " Error: " .. tostring(problem or "error"), "red", self.live))
-  self:run_finished()
+  -- A failed run keeps the same row WITHOUT the check: the absence is the failure, and a second
+  -- shape for it would be a second row to read (item B).
+  self:run_finished({ ok = false })
 end
 
 -- A bug in this renderer must not kill the run it is describing: the transcript belongs
