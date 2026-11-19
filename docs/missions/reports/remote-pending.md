@@ -191,3 +191,107 @@ aa8e6d4f item 4   the two kinds not adopted, pinned by name
 * No Rust test suite was run and no Rust file changed.
 * `scripts/test.sh` as a whole was not run.
 
+
+
+## Review r1 (independent) - what changed, and which commit
+
+The review is `review-latest.md` (11 lines, MUST 1-3 plus five SHOULDs). Each premise was re-measured
+before a line changed; the file:line in the review were correct.
+
+### MUST 1 - cancel lied (fixed in `5ac7b171`)
+
+Measured: the peer's cancel answer carries the operation id even for a refusal and for an already-settled
+call, and the old line read `answer.cancelled ~= false`, so a refusal and a no-op both answered
+`cancelled:true`. Now `lua/core/codemode_pending.lua` answers a stop only when the peer's own snapshot
+says so: `answer.cancelled == true`, or a status read that shows `cancelled`/state `cancelled` within a
+3 s observed window; `finished` is answered as `finished` (the result is retained, nothing was re-run);
+anything else is `cancel_not_confirmed` with the state seen. Test: `scripts/test-remote-pending.lua`
+section 9 - a confirmed stop is `cancelled:true`, the SAME handle cancelled twice is `cancelled:false`
+with a reason, and an unknown id is never reported cancelled.
+
+### MUST 2 - capacity (fixed in `4ed3163c`; one gap named below)
+
+Measured: every peer call lands in ONE session (`peer:<node_id>`, `wa_peer_dispatch`), whose share is
+`PER_SESSION_MAX = 6` of `MAX_ACTIVE = 8` (`rust/wa-operation/src/lib.rs:135,147`), so six adopted
+commands held that whole share for up to 300 s each. Now `lua/core/server.lua` counts the caller's own
+unsettled operations through the peer's own `operation list` (in the peer session that owns them, never a
+local guess) and refuses past `MAX_ADOPTED_OPEN = 2` with `remote_adopted_limit` (naming `open` and
+`limit`, `effect:"none"`); an unreadable list refuses by name (`remote_adopted_unknown`) rather than
+adopting work it cannot account for. Test: section 10 - two adopted commands run, the third is refused by
+name with nothing started, and the two are cancelled after.
+
+**NOT closed, and said plainly**: the review also asked that *unawaited* adopted handles be reaped once
+their caller stops polling. That is not implemented. The bound above is the mitigation (a peer can hold at
+most 2 slots, and its own calls keep the rest), and the peer's own `timeout_seconds` still ends the work;
+nothing reaps an adopted handle earlier than that. Implementing it needs a rule for "the caller stopped
+polling" that does not punish a caller between two steps, and that rule is not in this change.
+
+### MUST 3 - the real failure is now tested (fixed in `4ed3163c`)
+
+`rust/wa-capabilities/src/operations.rs`, module `adoption_survives_the_relay_deadline`: with
+`host::set_run_cancel_probe` + `serve::test_set_run_cancel` (the pair subagents' cancel test uses) the
+flag is set for real, and the test asserts (a) the foreground `bash` IS cancelled by it - proof the flag
+is live, so the test cannot pass while flipping nothing - (b) an adopted `control("start")` is not
+cancelled and settles by finishing, and (c) the command's marker holds exactly ONE line. Gate row:
+`scripts/test.sh`, `gate_run env HOME="$GATE_HOME" cargo test ... -p wa-capabilities
+adoption_survives_the_relay_deadline` (`6143b263`). It refuses to run unless HOME is a scratch/temp
+directory and never the node's own `~/.wasm-agent`; measured here, the gate's `GATE_HOME` resolves under
+`~/.wasm-agent/tmp` (this environment's `TMPDIR`), which is the gate's own scratch area and passes. The
+review's "90 s command" shape is covered by the 3 s adopted command in the Rust test plus the 5-6 s
+commands in `scripts/test-remote-pending.lua`; a literal 90 s run is not in either, deliberately, so the
+suite stays inside a normal gate.
+
+### SHOULD - slice (fixed in `5ac7b171`)
+
+`REMOTE_SLICE_MS` was 15 s, above the operation tool's own `wait_ms` maximum (10 s), so it asked for a
+number the peer's schema refuses. It is now
+`min(nodes.OPERATION_AWAIT_MAX_MS, nodes.RELAY_PEER_BUDGET_MS)` computed in one place, and `left` is
+decremented by the time actually waited (`host.monotonic_ms`), not by the slice requested.
+
+### SHOULD - a transient relay error (fixed in `5ac7b171`)
+
+A transport error during one slice no longer marks anything final: the poll answers pending with the
+reason and the handle stays resumable. Test: section 9/10 exercise the same executor against a relay that
+refuses an unknown id and against a peer that has already settled the op; the "stays pending" behaviour is
+pinned by the existing suite's unreachable-executor row (`scripts/test-codemode-pending.lua`, item 11)
+plus the reason the new poll returns.
+
+### SHOULD - the note outside code mode (fixed in `4ed3163c`)
+
+The pending note now names the call a model can make when it has no `wait()`:
+`tools.remote({node:"<this node>", capability:"operation", action:"await", id:"<id>", wait_ms:10000})`, or
+`action:"cancel"` with the same id - the real parameter, read from `OPERATION_AWAIT_MAX_MS`.
+
+### SHOULD - the relay-timeout text (fixed in `4ed3163c`)
+
+`M.relay_deadline_note` no longer says the peer never took the call. It says the relay never delivered
+the answer and the peer **may still have adopted it late**, and to check `operation list` on that node
+before re-issuing.
+
+### SHOULD - the shape test (fixed in `6143b263`)
+
+Measured on a separate worktree at the base commit with the same binary: the CodeAct row at
+`scripts/test-remote-call-shape.lua:158` fails there too ("the run declared no tool at all (63)"), after
+`selfloop: publish served natively: component_missing`. It is therefore PRE-EXISTING and not this
+change's, but the row sat AFTER that abort, so the five checks item 3 added never ran. The relay-deadline
+section (with them) now runs before the CodeAct row, no assertion was changed or removed, and the suite
+passes end to end: `remote call shape ok (88 checks, 0 skipped)`, twice.
+
+### SHOULD - report the ownership rule (fixed here)
+
+Measured, and now said: the adopted operation belongs to the calling **node**, recorded under
+`peer:<node_id>`. Any session on that node that holds the peer session can await or cancel it by id
+(that is what `test-session-isolation.lua`'s peer rows and section 7 of
+`scripts/test-remote-pending.lua` measure); a LOCAL session, and another peer, cannot see or reach it.
+
+## Re-run after the review (all on this node, scratch HOME under /home because /tmp hit its 16 G quota)
+
+* `scripts/test-remote-pending.lua` -> `remote pending ok (49 checks)`
+* `scripts/test-codemode-pending.lua` -> `codemode pending handles ok (92 checks; real sandbox)`
+* `scripts/test-session-isolation.lua` -> `141 checks, 0 failed`
+* `scripts/test-remote-call-shape.lua` -> `remote call shape ok (88 checks, 0 skipped)` (twice)
+* `cargo test -p wa-capabilities adoption_survives_the_relay_deadline` with `HOME` = a scratch dir of the
+  gate's own shape -> `1 passed; 0 failed`
+
+Still not run: the whole `scripts/test.sh` gate, and no Rust suite beyond the one named above.
+
