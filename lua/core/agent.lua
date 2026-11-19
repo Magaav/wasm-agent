@@ -803,7 +803,9 @@ function M.subagent_tool_list(subagent, role,ctx)
   local list=tools.all_for(allowed, role,ctx,memory)
   if allowed.run then
     local ok,raw_lib=pcall(dofile,'lua/core/raw_code.lua')
-    if ok and raw_lib.mode()=='native' then
+    -- The child's OWN recorded mode (rel review r3, item 1): a child of a native thread is native, and
+    -- the node switch is not consulted for a decision the parent already made.
+    if ok and raw_lib.child_mode(subagent,ctx and ctx.codemode_policy)=='native' then
       local ctx_ok,policy_ok=pcall(function()
         local probe_ctx={session_id=ctx and ctx.session_id,user_id=ctx and ctx.user_id,role=role,subagent=subagent}
         return dofile('lua/core/codemode_policy.lua').pin(memory,role,probe_ctx).enabled
@@ -1131,18 +1133,35 @@ function M:build_context()
   local agents, agents_path, tool_list, catalog, workdir
   local code_ctx={session_id=self.session_id,user_id=self.user,role=self.role,subagent=self.subagent,codemode_policy=self.codemode_policy}
   self.codemode_policy=dofile('lua/core/codemode_policy.lua').pin(memory,self.role,code_ctx)
-  -- Which raw-code mode THIS THREAD acts in (rel review r2, item 6). A thread that has a frozen prefix
-  -- keeps the mode it was started in - the prefix and every answer since were written for that door -
-  -- and a thread without one takes the switch and records it with the prefix it is about to freeze.
+  -- Which raw-code mode THIS THREAD acts in, decided ONCE and recorded (rel review r3, item 1).
+  --
+  -- Three cases, in this order, and no cache anywhere:
+  --   * a child takes its PARENT's recorded mode (self.subagent.raw_mode, carried with the admission
+  --     receipt): a child is the parent's code door, so the node's switch cannot move it mid-flight;
+  --   * a thread with a frozen prefix keeps the mode it was started in - the prefix, the declared tools
+  --     and every answer since were written for that door;
+  --   * a record written BEFORE this field existed has no raw_mode and keeps `only`
+  --     (raw_code.LEGACY_THREAD_MODE): that is the mode its frozen prefix was built in;
+  --   * only a thread with no record at all asks the node (raw_code.mode()), and records the answer with
+  --     the prefix it is about to freeze.
   local raw_code_lib=dofile('lua/core/raw_code.lua')
-  local frozen_record=select(1,dofile('lua/core/prompt_cache.lua').read({
-    session_id=self.session_id,user_id=self.user,role=self.role}))
-  if frozen_record and type(frozen_record.raw_mode)=='string' then
-    self.codemode_policy.raw_mode=frozen_record.raw_mode
-    self.mode_source='frozen'
+  local frozen_record
+  if self.subagent and type(self.subagent.raw_mode)=='string' then
+    self.codemode_policy.raw_mode=self.subagent.raw_mode
+    self.mode_source='parent'
   else
-    self.codemode_policy.raw_mode=raw_code_lib.mode()
-    self.mode_source='switch'
+    frozen_record=select(1,dofile('lua/core/prompt_cache.lua').read({
+      session_id=self.session_id,user_id=self.user,role=self.role}))
+    if frozen_record and type(frozen_record.raw_mode)=='string' then
+      self.codemode_policy.raw_mode=frozen_record.raw_mode
+      self.mode_source='record'
+    elseif frozen_record then
+      self.codemode_policy.raw_mode=raw_code_lib.LEGACY_THREAD_MODE
+      self.mode_source='legacy'
+    else
+      self.codemode_policy.raw_mode=raw_code_lib.mode()
+      self.mode_source='switch'
+    end
   end
   if self.subagent then
     -- A child deliberately does NOT read the operator instruction file: those
@@ -1984,7 +2003,11 @@ function M:run_body(text, images)
   -- honoured. The pin already degrades to ordinary tools; the notice is what stops "code mode is broken"
   -- from looking exactly like "the agent ignored me" (2026-10-22: seven queued turns failed silently).
   local codemode=dofile('lua/core/codemode_policy.lua')
+  -- The mode is the THREAD's, recorded at build_context (rel review r3, item 1): pinning the policy
+  -- afresh per run must not hand a mid-session switch to a thread that already froze its door.
+  local recorded_mode=self.codemode_policy and self.codemode_policy.raw_mode
   self.codemode_policy=codemode.pin(memory,self.role,{session_id=self.session_id,user_id=self.user,role=self.role,subagent=self.subagent})
+  if type(recorded_mode)=='string' then self.codemode_policy.raw_mode=recorded_mode end
   if self.codemode_policy.unavailable then
     self.emit({ type = 'status', text = 'code mode unavailable ('..tostring(self.codemode_policy.unavailable):sub(1,160)..') - this run uses ordinary tools' })
   end
@@ -2146,7 +2169,7 @@ function M:run_body(text, images)
     local reason
     -- #53 (19/11): a resume that cannot run says WHY in terms of the mode this process was started in,
     -- because "no tools" and "the wrong raw-code mode for this thread" call for different repairs.
-    local mode = raw_code.mode() or "codemode"
+    local mode = raw_code.mode_of(self.codemode_policy) or "codemode"
     if self.prefix and self.prefix.frozen then
       reason = "this session's prompt prefix was frozen with an empty tool list "
         .. "(lua/core/prompt_cache.lua), so every run of this thread resolves no tools"
@@ -3672,7 +3695,7 @@ function M:run_body(text, images)
       journal_note = turn_journal.record(stripped.note, {
         session_id = self.session_id, run_id = self.run_id, message_id = message_id,
         mission = turn_journal.mission_of(self.session_id), build = turn_journal.build_of(),
-        mode = turn_journal.mode_of(), model = tostring(self.model or ""), block = stripped.block,
+        mode = raw_code.mode_of(self.codemode_policy) or turn_journal.mode_of(), model = tostring(self.model or ""), block = stripped.block,
       })
       if journal_note then
         -- The fields travel with the event, not only the one-line summary: the reader's row is one dim

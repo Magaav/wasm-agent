@@ -105,13 +105,12 @@ function M.default_mode()
 end
 local OFF = { codemode = true, off = true, ["0"] = true, ["false"] = true, no = true }
 
--- The answer is cached for the PROCESS (rel review r2, item 6). default_mode() reads the model profile
--- and the provider settings, and every mode() reader called it again - 26 call sites, some per tool
--- call - so one turn could load and decode the same two modules dozens of times. The switch and the
--- provider row do not change inside a process; a caller that changes one asks for it, and
--- M.reset_mode_cache() is what that path calls (and what a test switching modes calls).
-local MODE_CACHE = nil
-function M.reset_mode_cache() MODE_CACHE = nil end
+-- NO PROCESS CACHE (rel review r3, item 1). An earlier round cached this answer for the process and
+-- had a provider switch invalidate it; a cache is the wrong shape for a decision that belongs to a
+-- THREAD. The mode is decided ONCE, when a thread starts, and recorded with the frozen prefix
+-- (lua/core/prompt_cache.lua, raw_mode); every later read of that thread is M.mode_of(policy) and
+-- never this function. What remains here is the node's CURRENT answer, asked only when a NEW thread
+-- starts - so a switch mid-process is visible to the next thread and to nothing else.
 
 -- The mode THIS THREAD was started in, when the caller has a policy to carry it. A session freezes its
 -- prompt prefix on its first turn and the mode is part of what it froze (lua/core/prompt_cache.lua,
@@ -122,12 +121,26 @@ function M.mode_of(policy)
   return M.mode()
 end
 
+-- The mode a thread whose record predates raw_mode acts in: `only`. Such a thread froze its prompt and
+-- its tool list when `only` was the default (a27490af's M.DEFAULT), and that is what its transcript,
+-- its declared surface and every answer since were written for. Reading the node's CURRENT mode for it
+-- would hand an old thread a door its frozen prefix does not describe, so the record decides, and the
+-- absence of the field means only (rel review r3, item 1).
+M.LEGACY_THREAD_MODE = "only"
+
+-- The mode a child acts in: its PARENT's recorded one (rel review r3, item 1). A child that shares a
+-- parent's code door must not switch doors because the node's default moved between admission and
+-- execution; the parent's mode travels with the admission spec and the durable receipt
+-- (lua/core/subagents.lua, receipt.raw_mode), and the child reads it here.
+function M.child_mode(subagent, policy)
+  if type(subagent) == "table" and type(subagent.raw_mode) == "string" then return subagent.raw_mode end
+  return M.mode_of(policy)
+end
+
 function M.mode()
   local value = tostring(host.getenv("WASM_AGENT_RAW_CODE") or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
   if value == "" then
-    if MODE_CACHE then return MODE_CACHE end
-    MODE_CACHE = M.default_mode()
-    return MODE_CACHE
+    return M.default_mode()
   end
   if OFF[value] then return nil end
   if value == "1" or value == "on" or value == "true" then return "on" end

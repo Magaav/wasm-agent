@@ -492,9 +492,12 @@ function M.start(args, ctx)
 
   local initial_text = prompt
   if context ~= "" then initial_text = initial_text .. "\n\nContext:\n" .. context end
+  -- The parent's recorded raw-code mode (rel review r3, item 1): the estimate must see the same door
+  -- the child will act in, and the value travels with the spec below.
+  local parent_mode = dofile('lua/core/raw_code.lua').mode_of(ctx.codemode_policy)
   local estimated = agentlib.subagent_initial_tokens({
     id = profile.id, allowed = profile.allowed, allowed_tools = profile.allowed_tools,
-    instructions = profile.instructions, limits = limits,
+    instructions = profile.instructions, limits = limits, raw_mode = parent_mode,
   }, ctx.role, initial_text)
   if limits.max_tokens and estimated >= limits.max_tokens then
     return { error = "subagent_token_budget: initial prompt exceeds max_tokens before admission",
@@ -589,6 +592,10 @@ function M.start(args, ctx)
     timeout_seconds = limits.timeout_seconds,
     idempotency_key = idempotency,
     resources = profile.resources,
+    -- The parent's recorded raw-code mode (rel review r3, item 1). It rides the durable spec, so the
+    -- child reads the door its parent froze rather than whatever the node's switch says when the
+    -- child's own interpreter starts.
+    raw_mode = parent_mode,
     admission_limit = ctx.placement and ctx.placement.max_tasks,
   }
   local receipt = memory.transaction(function()
@@ -910,6 +917,8 @@ function wa_subagent_run(receipt_json)
   end, child_role, tostring(receipt.owner_user or "master"), tostring(receipt.node_id or ""), {
     subagent = {
       id = profile.id, run_id = receipt.subagent_id, allowed = allowed, allowed_tools = profile.allowed_tools,
+      -- The parent's recorded mode, read off the receipt (rel review r3, item 1).
+      raw_mode = (type(receipt.raw_mode) == 'string' and receipt.raw_mode) or nil,
       instructions = profile.instructions, limits = limits,
       model = profile.model, reasoning = profile.reasoning,
       resources = profile.resources,
