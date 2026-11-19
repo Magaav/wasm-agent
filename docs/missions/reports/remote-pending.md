@@ -323,3 +323,80 @@ test that starts real operations could disturb every other test in the same bina
 
 Still not run: the whole `scripts/test.sh` gate.
 
+
+## Verification r2 (independent) - the held-slot and hot-retry patterns
+
+The review is review-latest.md (r2): two of three MUSTs recreated the pattern that deadlocked the relay - a
+call holding a slot while it waits, and a loop that spins. Every premise was re-measured before a line
+changed, and all three were correct as written.
+
+### MUST 1 - short calls were blocked (fixed in 6f1a2302)
+
+Measured: nodes.lua put budget_ms on EVERY relayed bash, so every remote bash went through adopt_bash; the
+limit was consulted BEFORE the command started and counted every unsettled operation in the peer session.
+Two adopted sleep-600 commands refused a plain short command, and - worse - a REFUSED call left its own
+started operation running, so the count grew on every refusal (measured: one adoption, open=2, then every
+later call refused).
+
+Now: a relayed bash runs the ordinary foreground path first and answers its own result when it fits the
+hold; only the call that OUTLIVED the hold is adopted, at the pending boundary, where the limit is also
+consulted and the adoption recorded. The limit counts ONLY ids in this node's own adopted record, so a short
+command creates no operation and is invisible to it. A refusal now STOPS what it started (it cancels the
+operation it just launched) instead of leaving it running, and reaping runs BEFORE every call rather than
+only on adoption, so overdue work cannot survive by the caller only sending short commands.
+
+Two more measured defects fixed in the same item: with a small budget the wait ceiling was 0, so the loop
+never ran and a command that had ALREADY finished was reported pending (now at least one wait, plus a final
+status read before adopting); and a 1 s adopted ceiling ends a command before it can ever be adopted, which
+is why the test measures the production bound and the env override separately.
+
+Test: scripts/test-remote-pending.lua section 12 - two adopted long commands run, and a short echo
+still-short answers its own stdout while they are held.
+
+### MUST 2 - the cancel check was a tight loop (fixed in 89b7cce7)
+
+Measured: host.sleep(0.2) is 0.2 MILLISECONDS (the host parses whole ms), so the observation window sent
+back-to-back relayed status calls for three seconds. Now: whole-millisecond sleeps, a doubling backoff
+(200 -> 400 -> 800 ms), and a hard 5-call cap; the answer carries how many calls it made.
+
+Test: section 13 counts the status calls (at most 5) and the wall time (at most 3.2 s).
+
+### MUST 3 - a remote await held the relay (fixed in bfdd1ea9)
+
+Measured: the await branch in operations.rs ignored wait_ms and returned only on settlement, so a relayed
+await held the connection and a peer slot until the relay deadline (~35 s) and then reported a timeout. Now
+await takes wait_ms (default 1 s, clamped to the tool's documented 10 s maximum) and answers the state as it
+stands when it expires - the same word action wait answers. The handle's note points a model outside code
+mode at action wait, never at the holding call.
+
+Second half: a peer that answered instantly without settling was charged only its real elapsed time, so
+the caller's loop went straight round again. Every call now costs at least REMOTE_MIN_CHARGE_MS (250 ms) of
+the budget under a REMOTE_MAX_CALLS (40) cap.
+
+Test: section 14 - a peer that never settles is capped in calls and charged the minimum.
+
+### SHOULDs
+
+* The failing-transport row (dd3080d5) measures the caller's own poll: every call failing answers
+  nil + remote_unreachable (never a final state), bounded by the same cap, and the peer's operation is still
+  running afterwards.
+* The adoption test now enters through install_relay_context - the real relay path - instead of the
+  test-only cancel seam (650af3ba).
+* "a resolved reason" is gone: the text was replaced with the MUST 1 rewrite. The adopted op's owner is
+  stated as the calling NODE (the report heading said "peer session"; corrected).
+* The note for a direct caller names action wait with the real wait_ms (MUST 3).
+
+## Re-run after r2 (scratch HOME under /home; /tmp is at its 16 G quota on this box)
+
+* scripts/test-remote-pending.lua -> remote pending ok (78 checks)
+* scripts/test-codemode-pending.lua -> 92 checks; real sandbox
+* scripts/test-session-isolation.lua -> 141 checks, 0 failed
+* scripts/test-remote-call-shape.lua -> 88 checks, 0 skipped
+* cargo test -p wa-capabilities adoption_survives_the_relay_deadline with a gate-shaped HOME ->
+  1 passed; 0 failed
+
+Not run: the whole scripts/test.sh gate.
+
+One build lesson worth recording: lua/ is embedded in the wa binary, and cargo build -p wa-capabilities
+does NOT rebuild the binary's Lua. Two probes ran against stale Lua and produced false behaviour readings until
+touch lua/core/*.lua forced the rebuild - every run after that touches the Lua files first.
