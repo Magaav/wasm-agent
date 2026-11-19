@@ -1186,7 +1186,11 @@ function M:build_context()
     -- The routing rule plus the node's connector index, from the full catalogue: the prompt's own
     -- tool list leaves connectors out, so this hint is how an empty context finds them.
     local code_catalog=self.subagent and tool_list or tools.all(self.role,code_ctx,memory)
-    local block=dofile('lua/core/codemode_policy.lua').prompt(code_catalog,{raw_first=raw_first,raw_only=raw_only})
+    -- Native mode (arm B) has ONE guidance source (rel review r2, item 1): the run-tool sentence with
+    -- the batching instruction inside it. The codemode sentences are not sent beside it, because they
+    -- name a call and a direct-call shortcut this node does not offer.
+    local native_mode = raw_code.mode() == 'native'
+    local block=dofile('lua/core/codemode_policy.lua').prompt(code_catalog,{raw_first=raw_first,raw_only=raw_only,native=native_mode})
     -- `only` already opened with the run-block sentence; appending "you may also run a script" under it
     -- offers a choice the node does not have, and the model reads the offer (17/11: DeepSeek answered
     -- the offer with its own <|DSML|> call syntax instead of a block).
@@ -1195,7 +1199,9 @@ function M:build_context()
     -- never asked to choose between two transports: the sentence it gets names one.
     local transport, transport_source, transport_notice = raw_code.transport_for(self.model, #tool_list > 0)
     self.codeact_transport = transport
-    if raw_code.active(self.codemode_policy) and not raw_first and not raw_only then block=block..'\n'..raw_code.guidance_for(transport) end
+    -- The native guidance is already the first line of the block above: appending it again would be
+    -- two sources for one door, which is the defect this item fixes.
+    if not native_mode and raw_code.active(self.codemode_policy) and not raw_first and not raw_only then block=block..'\n'..raw_code.guidance_for(transport) end
     -- The no-profile-yet line is a note to the OPERATOR, not a sentence for the model (review MUST
     -- 4). Putting it in the block changed the prompt prefix - the frozen bytes the cache depends on -
     -- against base for every node that had not run wa conform. It is journalled once per process and
