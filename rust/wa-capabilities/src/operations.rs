@@ -2903,9 +2903,13 @@ mod adoption_survives_the_relay_deadline {
 
         // The production serve layer registers this probe before a turn; here the test registers it and
         // flips the same thread-local flag the probe reads, so the REAL host check is what runs.
+        // THE REAL RELAY ENTRY POINT, not a seam beside it (verification r2, SHOULD): this is the exact
+        // call the serve layer makes for a relayed request (serve.rs, install_relay_context with the
+        // job's cancel flag and deadline). Using it here means the test would still hold if the test-only
+        // seam it used to call were removed.
         crate::host::set_run_cancel_probe(crate::serve::run_cancel_requested);
         let flag = Arc::new(AtomicBool::new(true));
-        crate::serve::test_set_run_cancel(Some(flag.clone()));
+        crate::serve::install_relay_context(Some(flag.clone()), None, "relay:review-test".into());
 
         // 1. The flag is LIVE in this process: the foreground path cancels its own operation (the bug this
         // mission exists for). A test that did not prove this could pass while flipping nothing.
@@ -2926,7 +2930,7 @@ mod adoption_survives_the_relay_deadline {
         let settled = super::control("wait", &serde_json::json!({
             "id": id, "wait_ms": 20000, "session": session,
         }), &shell).expect("wait");
-        crate::serve::test_set_run_cancel(None);
+        crate::serve::install_relay_context(None, None, String::new());
         assert_eq!(settled["settled"], serde_json::json!(true),
             "the adopted operation must settle by finishing, not by the run's cancel: {settled}");
         assert_ne!(settled["error"], serde_json::json!("cancelled"),
