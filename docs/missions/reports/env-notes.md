@@ -95,6 +95,9 @@ installed one with this worktree's tree, scratch `WASM_AGENT_HOME` per run:
 | `scripts/test-project-instructions.lua` | `project instructions ok (9 checks, 0 skipped)` |
 | `scripts/test-prompt-tool-names.lua` | `prompt tool names ok (286 checks, 0 skipped)` |
 | `bash scripts/sync-prompt-docs.sh --check` | `sync-prompt-docs: ok (4 blocks current)` |
+| `scripts/fast.sh`, narrowed to these rows (`WA_FAST_ROWS`, 5 of 250 Lua rows) | `fast path ok (52 checks, 0 skipped, 184s)`, rc 0 - `pass` for `environment-notes`, `project-instructions`, `prompt-tool-names`, `land-signing`, `build-info` |
+| `scripts/test-build-info.sh` against the binary at this tip | `test-build-info: 24 checks, 0 failed` |
+| `scripts/test-land-signing.sh` | `land signing ok (46 checks)` |
 | `cargo build --release` (`WA_CODEMODE_ALLOW_EMPTY=1`) | `Finished release profile`, rc 0 |
 | embedded delivery from `/tmp` | `note embedded:AGENTS.omarchy.md`, both keys present |
 | `wa_lua_tree_files` includes both notes | yes (staged set printed) |
@@ -103,6 +106,21 @@ installed one with this worktree's tree, scratch `WASM_AGENT_HOME` per run:
 **Pre-existing failures, confirmed on base in a separate worktree:** `scripts/test-prompt-layers.lua:5`
 (`read is native main-loop bootstrap`) and `scripts/test-evaluation-feedback.lua:6` (`relay boundary
 preserve original evidence`). Neither is mine.
+
+**What the fast path caught, and why it is in this branch.** The first narrowed run (before the fixture fix)
+failed two rows, neither in a Lua file this mission edited:
+
+- `land-signing` - `the Lua tree record is written: expected status 0, got 5`. That one *was* mine:
+  `scripts/lib/lua-tree.sh` now lists the two notes, and the land-signing fixture created only
+  `AGENTS.orchestrator.md`/`AGENTS.subagents.md`, so the record step refused a shipped path that was
+  missing. Fixed by creating both notes in the fixture (`393b5108`), which is the fixture mirroring the
+  tree it exists to describe.
+- `build-info` - `commit is this checkout's HEAD`. Not a code failure: the binary had been built before
+  the later commits, and this row compares the binary's recorded commit with HEAD. Rebuilt at the tip;
+  `24 checks, 0 failed`.
+
+Both are why the fast path was run rather than only the Lua test: the Lua test passed on a binary that
+`build-info` would have refused, and the staging change broke a row that never mentions this feature.
 
 **Not verified:** no desktop file was touched, so the Omarchy note's advice is sourced from the installed
 system's own skill and `hyprctl` (0.56.2), not from applying it; and `test-prefix-stability.lua` needs
