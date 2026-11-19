@@ -19,6 +19,33 @@ Base: origin/main (ac7717e0). Worktree: this tree. Commits are local only; nothi
 | 4 | b18fd19a | the tests: the line is absent from the reader stream, the event is written, the counter is right |
 | J | fce803eb | the <turn> what-hurt bullet asks for HARNESS friction only, pinned verbatim |
 
+## Review r2 (verification: LAND after two items)
+
+| item | commit | what changed |
+| --- | --- | --- |
+| 1 | affed947 | this run's gate is created at RUN START, so a run that throws early is recorded once |
+| 2 | c3610994 | an unreadable ledger answers available = nil and the verb refuses it; the comment matches |
+
+### Item 1 (affed947)
+The gate used to be built inside run_body, past the first provider call. A run that threw before that
+line left the PREVIOUS run's latched gate on the agent, so the end-of-run record was skipped (the old
+gate had latched) - a silent hole in exactly the measurement the 30% rule reads. The gate is now created
+in M:run before anything that can throw, and run_body reads self.gate instead of building a second one.
+`scripts/test-done-gate.lua` runs one good turn, then a run whose run_body raises: the ledger holds TWO events,
+the thrown one says changed_state = false, and a further note_turn on it writes nothing (one run, one turn).
+Falsified: moving the gate back inside run_body produced "1 event(s) for 2 runs" plus a nil-gate raise -
+the reviewed defect, reproduced.
+
+### Item 2 (c3610994)
+gate_stats always answered available = true, while its own comment said an absent ledger answers unknown.
+The read now goes through query_checked, which tells an EMPTY ledger (available = true, changed = 0) from
+an UNREADABLE one (available = nil, percent = nil, a named ledger_unreadable reason), and the CLI
+refuses the latter with exit 2 instead of printing a count it does not have. The comment was rewritten to
+describe what the code does. Nit: the stats_for(sid) helper ignored its argument and was a node-wide read
+wearing a scoped name; it is gone, and the test asserts the module's own answers directly.
+`scripts/test-turnfeed.lua` injects both failure shapes (a raise and a decoded error table) and pins the
+refusal; falsified by restoring the permissive read, which answered available = true on an unreadable ledger.
+
 ## Review r1 (LAND + four measurement fixes), each with its commit
 
 | fix | commit | what changed |
