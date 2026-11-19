@@ -75,7 +75,7 @@ pub fn label() -> String {
 /// A record that cannot be read changes nothing - the bytes' label stands, which is the answer that is
 /// always true. The pin is shown as `<short> (pinned)`, so nobody has to know what a pin is to see
 /// that this node is being held somewhere on purpose.
-pub fn install_label(state: &std::path::Path, install: &std::path::Path) -> String {
+pub fn install_label(state: &std::path::Path, install: &std::path::Path, node_name: &str, node_id: &str) -> String {
     let base = label();
     let field = |path: &std::path::Path, key: &str| -> Option<String> {
         let text = std::fs::read_to_string(path).ok()?;
@@ -89,27 +89,74 @@ pub fn install_label(state: &std::path::Path, install: &std::path::Path) -> Stri
     // on Linux, or whatever WA_INSTALL_DIR names.
     let released = field(&install.join("installed.txt"), "binary_release")
         .or_else(|| field(&install.join("installed.txt"), "release"));
-    // The pin store is one record per block of key=value lines; a later record for a node supersedes
-    // an earlier one, and only state=active is a pin in force (lua/core/pins.lua's rule, and
-    // scripts/lib/node-pins.sh reads the same file the same way).
-    // The pin store is <config>/pins.txt, and lua/core/paths.lua puts config at ~/.wasm-agent.
-    let pinned = std::fs::read_to_string(state.join("pins.txt")).ok().and_then(|text| {
-        let mut active: Option<String> = None;
-        for line in text.lines() {
-            let Some((key, value)) = line.trim().split_once('=') else { continue };
-            match key.trim() {
-                "commit" => active = Some(value.trim().to_string()),
-                "state" => { if value.trim() != "active" { active = None; } }
-                _ => {}
-            }
-        }
-        active.filter(|commit| !commit.is_empty() && commit != "unknown")
-    });
-    match (released, pinned) {
+    let pin = std::fs::read_to_string(state.join("pins.txt")).ok()
+        .and_then(|text| active_pin_for(&text, node_name, node_id));
+    match (released, pin) {
         (_, Some(commit)) => format!("{} (pinned)", &commit[..commit.len().min(8)]),
         (Some(release), None) => release,
         (None, None) => base,
     }
+}
+
+/// The pin in force for THIS node, from the ledger's text - or None.
+///
+/// The rule is lua/core/pins.lua's, restated in one place because two languages read the same file:
+///
+///   * a record is a block of key=value lines, separated by blank lines, and a block may start at an
+///     "id=" line without a blank line before it;
+///   * the LAST record that names this node and states a state decides - an earlier one is superseded,
+///     so a cleared pin does not keep a node labelled "(pinned)";
+///   * a record names this node when its node= or node_id= equals this node's name or its id (the
+///     ledger spells one and a request may carry the other).
+///
+/// IT PARSE THE BLOCK, NOT THE LINE ORDER. The previous reader walked the file line by line and kept
+/// whatever commit= it saw, resetting on state= - so a commit= written ABOVE a state=cleared was
+/// still taken as the active pin (the reset came too late), and a pin for ANOTHER node marked this one
+/// "(pinned)". Both are one test each below.
+fn active_pin_for(text: &str, node_name: &str, node_id: &str) -> Option<String> {
+    let mut latest: Option<std::collections::BTreeMap<String, String>> = None;
+    let mut current: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    let mut flush = |record: &mut std::collections::BTreeMap<String, String>| {
+        if record.is_empty() { return; }
+        let names_this = {
+            let want_name = node_name.trim();
+            let want_id = node_id.trim();
+            let have_node = record.get("node").map(|value| value.trim()).unwrap_or("");
+            let have_id = record.get("node_id").map(|value| value.trim()).unwrap_or("");
+            let mut named = false;
+            if !want_name.is_empty() && (have_node == want_name || have_id == want_name) { named = true; }
+            if !want_id.is_empty() && (have_id == want_id || have_node == want_id) { named = true; }
+            named
+        };
+        if names_this && record.get("state").map(|value| !value.trim().is_empty()).unwrap_or(false) {
+            let taken = std::mem::take(record);
+            latest = Some(taken);
+        } else {
+            record.clear();
+        }
+    };
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            flush(&mut current);
+            continue;
+        }
+        // A new record can start without a blank line in front of it (the writer puts one, a hand
+        // edit may not): an "id=" line after an id already seen begins the next block.
+        if let Some((key, value)) = line.split_once('=') {
+            let key = key.trim();
+            if key == "id" && current.contains_key("id") { flush(&mut current); }
+            current.insert(key.to_string(), value.trim().to_string());
+        }
+    }
+    flush(&mut current);
+    let record = latest?;
+    // The LAST record naming this node decides, and it must SAY active: a state=cleared record is a
+    // supersession, which is why it is the latest one found and still releases nothing.
+    if record.get("state").map(|value| value.trim()) != Some("active") { return None; }
+    let commit = record.get("commit").map(|value| value.trim()).unwrap_or("");
+    if commit.is_empty() || commit == "unknown" { return None; }
+    Some(commit.to_string())
 }
 
 /// The verdict of "does this build contain that commit".
@@ -193,6 +240,99 @@ mod tests {
         assert_eq!(contains(""), Contains::Unknown("no_commit_named"));
         assert_eq!(contains("abc"), Contains::Unknown("commit_too_short"));
         assert_eq!(contains("zzzzzzzz"), Contains::Unknown("commit_not_hex"));
+    }
+
+    /// A pin for ANOTHER node does not mark this one "(pinned)" - the ledger is fleet-wide, and the
+    /// reader used to take whatever commit= it saw last, whoever the record named.
+    #[test]
+    fn a_pin_for_another_node_is_not_this_node_pin() {
+        let ledger = "schema=wasm-agent-pins/1
+id=aaaa
+node=work
+node_id=deadbeef
+kind=pin
+state=active
+commit=1111111111111111
+reason=held
+
+";
+        assert_eq!(active_pin_for(ledger, "avell", "cafebabe"), None,
+            "a pin naming another node must not label this one");
+        assert_eq!(active_pin_for(ledger, "work", "").as_deref(), Some("1111111111111111"),
+            "and the node it does name is the one marked");
+        assert_eq!(active_pin_for(ledger, "", "deadbeef").as_deref(), Some("1111111111111111"),
+            "a request that carries only the id still finds it");
+    }
+
+    /// State BEFORE commit is the order the Lua writer emits, and commit BEFORE state is what a hand
+    /// edit may look like: a cleared record must not pin either way.
+    #[test]
+    fn a_cleared_record_pins_nothing_whatever_the_line_order() {
+        let state_first = "id=aaaa
+node=work
+state=cleared
+commit=1111111111111111
+
+";
+        assert_eq!(active_pin_for(state_first, "work", ""), None, "state=cleared before commit= clears");
+        let commit_first = "id=aaaa
+node=work
+commit=1111111111111111
+state=cleared
+
+";
+        assert_eq!(active_pin_for(commit_first, "work", ""), None, "state=cleared after commit= clears too");
+        let active_first = "id=aaaa
+node=work
+commit=2222222222222222
+state=active
+
+";
+        assert_eq!(active_pin_for(active_first, "work", "").as_deref(), Some("2222222222222222"),
+            "an active record in either order is a pin");
+    }
+
+    /// The LAST record naming the node decides: a pin that was cleared and re-applied is active, and
+    /// one that was re-applied and then cleared is not.
+    #[test]
+    fn the_last_record_for_this_node_wins() {
+        let ledger = "id=a
+node=work
+state=active
+commit=3333333333333333
+
+id=b
+node=work
+state=cleared
+commit=3333333333333333
+
+";
+        assert_eq!(active_pin_for(ledger, "work", ""), None, "the later clear supersedes the earlier pin");
+        let again = "id=a
+node=work
+state=cleared
+commit=3333333333333333
+
+id=b
+node=work
+state=active
+commit=4444444444444444
+
+";
+        assert_eq!(active_pin_for(again, "work", "").as_deref(), Some("4444444444444444"),
+            "and re-applying it is a pin again");
+    }
+
+    /// A record that names no commit, or one that says unknown, is not a pin a reader may show.
+    #[test]
+    fn an_unknown_commit_is_not_a_pin() {
+        let unknown = "id=a
+node=work
+state=active
+commit=unknown
+
+";
+        assert_eq!(active_pin_for(unknown, "work", ""), None);
     }
 
     /// The question this command exists for: whether a candidate build contains the commit a node runs.

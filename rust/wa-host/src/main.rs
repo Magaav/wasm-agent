@@ -370,7 +370,14 @@ fn main() {
     let install_dir = std::env::var("WA_INSTALL_DIR").ok().filter(|dir| !dir.is_empty())
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::Path::new(&home).join(".local/bin"));
-    let identity = build_info::install_label(&std::path::Path::new(&home).join(".wasm-agent"), &install_dir);
+    // The pin ledger holds records for the WHOLE fleet, so the composer is told which node is
+    // reading it: a pin for another node must not mark these bytes "(pinned)". The name is the one
+    // this node announces (wa-rendezvous resolves it, so a guest is not named after its directory),
+    // and the id only when a key already exists - a --version run is a read and must not mint one.
+    let state_dir = std::path::Path::new(&home).join(".wasm-agent");
+    let node_name = node::local_name(&state_dir.to_string_lossy());
+    let node_id = node::existing_node_id().unwrap_or_default();
+    let identity = build_info::install_label(&state_dir, &install_dir, &node_name, &node_id);
     wa_capabilities::host::set_build_identity(&identity, build_info::COMMIT, build_info::DIRTY);
     if args.iter().any(|arg| arg == "--version" || arg == "-v") {
         println!("wasm-agent {identity}");

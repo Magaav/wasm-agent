@@ -155,6 +155,30 @@ fn worktree_name() -> Option<String> {
     }
 }
 
+/// This node's own name, resolved exactly as it announces itself - someone-set first, then the
+/// worktree of a master, then the environment, then "host".
+///
+/// Exposed for the one caller that needs the same answer outside the heartbeat: the build label's pin
+/// filter (rust/wa-host/src/build_info.rs), which must ask whether a pin names THIS node and would
+/// otherwise have to re-implement a resolution that is a security boundary on a guest node.
+pub fn local_name(config: &str) -> String {
+    let role = announced_role(config);
+    announced_name(config, &role)
+}
+
+/// This node's id, but ONLY if it already has one.
+///
+/// Identity::load generates and writes a key when the file is missing, which is right for a node
+/// starting up and wrong for a caller that is merely composing a label during wa --version: a
+/// read-only question must not mint an identity. So the key file is checked first and nothing is
+/// written here.
+pub fn existing_node_id() -> Option<String> {
+    if !key_path().exists() {
+        return None;
+    }
+    Identity::load().ok().map(|identity| identity.node_id)
+}
+
 pub fn verify(public_key_hex: &str, message: &str, signature_hex: &str) -> bool {
     let (Some(public), Some(signature)) = (unhex(public_key_hex), unhex(signature_hex)) else {
         return false;

@@ -759,6 +759,10 @@ check publish-artifacts bash scripts/test-publish-artifacts.sh
 WA_BIN="$bin" check install-record bash scripts/test-install-record.sh
 check install-guards bash scripts/test-install-guards.sh
 WA_BIN="$bin" check node-pins bash scripts/test-node-pins.sh
+# One composer for the build name (rust/wa-host/src/build_info.rs): a fleet-wide pin ledger marks
+# the node a record NAMES, and a cleared record releases it in either line order. Driven through
+# `wa --version`, because the composer runs before any Lua.
+WA_BIN="$bin" check pin-label bash scripts/test-pin-label.sh
 check publish-shared-commit bash scripts/test-publish-shared-commit.sh
 check bootstrap-gate bash scripts/test-bootstrap-gate.sh
 WA_BIN="$bin" check build-info bash scripts/test-build-info.sh

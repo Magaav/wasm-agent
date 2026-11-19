@@ -462,6 +462,9 @@ WA_BIN="$BIN" gate_run bash scripts/test-install-record.sh            # installe
 gate_run bash scripts/test-install-guards.sh                          # every installer refuses an unprovable identity
 gate_run bash scripts/test-deploy-ancestry.sh                         # a deploy never silently goes backwards
 WA_BIN="$BIN" gate_run bash scripts/test-node-pins.sh                 # a rollback is a record, and it gates the next move
+# One name for the build, composed in Rust: the pin ledger is fleet-wide, so a record for ANOTHER node
+# must not mark this one "(pinned)", and a cleared record releases it whatever the line order.
+WA_BIN="$BIN" gate_run bash scripts/test-pin-label.sh                   # the label marks the node a pin names
 gate_run bash scripts/test-publish-shared-commit.sh                   # a published commit is one the remote can see
 gate_run bash scripts/test-bootstrap-gate.sh                          # the release-install path honours its override
 WA_BIN="$BIN" gate_run bash scripts/test-build-info.sh                # the bytes answer for themselves (--build-info)
