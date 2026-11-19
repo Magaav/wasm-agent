@@ -246,11 +246,7 @@ function M.guidance_for(opts)
  if not (type(opts)=='table' and (opts.raw_first or only)) then return M.guidance end
  local lines={}
  for i,line in ipairs(GUIDANCE_LINES) do lines[i]=line end
- local raw_lib=dofile('lua/core/raw_code.lua')
- -- The batching sentence rides the SAME line a default node already reads (review MUST 2): putting
- -- it on a helper the default path never calls left the built prompt without it, which is exactly the
- -- defect the review measured. The check is on the built prompt, not on the helper.
- lines[1]=raw_lib.FIRST_GUIDANCE..' '..raw_lib.BATCHING..' Put `await` before a call whose result you use; a call you return is awaited for you.'
+ lines[1]=dofile('lua/core/raw_code.lua').FIRST_GUIDANCE..' Put `await` before a call whose result you use; a call you return is awaited for you.'
  lines[2]='Find tools with await searchTools("text"); await searchTools("select:a,b") gives their schemas.'
  return table.concat(lines,'\n')
 end

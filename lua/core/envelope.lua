@@ -67,18 +67,7 @@ function M.bootstrap(catalog,ctx)
    -- the control-plane tools a script cannot run (session_worktree...); every other tool - and discovery,
    -- via searchTools - lives inside the script. A direct call to an undeclared tool still runs; a connector
    -- called directly runs as its one-line script (lua/core/tools.lua, codemode_policy.one_line).
-   -- The action channel of THIS node must be in the starter set, or the model is offered a step
-   -- it cannot take: with the native transport the channel is `run`, exactly as `codemode` is the
-   -- channel when code mode is on (review MUST 1 + 5). Keyed by the transport decision, not by a
-   -- model name.
-   local native_transport = dofile('lua/core/raw_code.lua').transport_for(nil,true)=='tool_call'
-   local native_channel = name=='run' and native_transport
-   -- ONE DOOR (review MUST 1): when the native transport is the action channel, `codemode` is not
-   -- declared beside it - two doors into one sandbox is the choice the single-door design removes.
-   -- The codemode tool still exists in the catalogue (searchTools reaches it); it is simply not the
-   -- shape this node asks for.
-   local codemode_here = name=='codemode' and not native_transport
-   if native_channel or codemode_here or (CONTROL_PLANE[name] and core[name]) or (orchestration and ORCHESTRATION_FIRST_CLASS[name]) then out[#out+1]=item end
+   if name=='codemode' or (CONTROL_PLANE[name] and core[name]) or (orchestration and ORCHESTRATION_FIRST_CLASS[name]) then out[#out+1]=item end
   elseif core[name] or name=='codemode' or (orchestration and ORCHESTRATION_FIRST_CLASS[name]) then out[#out+1]=item end end;return out
 end
 function M.schemas(catalog,ctx)return M.mode(ctx)=='progressive' and M.bootstrap(catalog,ctx) or catalog end

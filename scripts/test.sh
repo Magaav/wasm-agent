@@ -1678,6 +1678,9 @@ WA_SCRIPT=scripts/test-ab-arms.lua "$BIN" --db "$DB" | grep "ab arms ok"
 # The native transports keep the leak safety net (review MUST 6): a call shape written as TEXT
 # gets one named continue, and prose that merely mentions a tag is still an answer.
 WASM_AGENT_RAW_CODE=native WA_SCRIPT=scripts/test-leak-net.lua "$BIN" --db "$DB" | grep "leak net ok"
+# Every explicit mode builds a prompt and tool list byte-identical to a27490af (rel r1 R1):
+# the golden hashes come FROM a27490af, not from this build.
+WA_SCRIPT=scripts/test-mode-parity.lua "$BIN" --db "$DB" | grep "mode parity ok"
 
 # Test the shipping registry, including missing/stale/invalid negative controls.
 ( export WA_EMBEDDED_SOURCE_ROOT="$WASM_AGENT_LUA_ROOT"; unset WASM_AGENT_LUA_ROOT

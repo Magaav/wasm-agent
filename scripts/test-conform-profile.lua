@@ -32,30 +32,15 @@ local none, reason = profile.read('never-measured-model')
 eq(none, nil, 'an unmeasured model has no profile')
 eq(reason, 'no_profile', 'and that is said by name')
 
--- With no profile the PROVIDER decides, and says so (review MUST 1). This node's provider is
--- opencode-go, which carries a named default, so the source is 'builtin' and no notice is needed:
--- the choice is a decision, not a guess. A provider with no row falls back to the conservative
--- tool_call/block default and DOES carry the notice - both halves are asserted, so neither can
--- silently become the other.
-local transport, source = raw.transport_for('never-measured-model', true)
+-- The conservative default names its source and gives one notice line.
+local transport, source, notice = raw.transport_for('never-measured-model', true)
 eq(transport, 'tool_call', 'a model that can call tools is offered the run tool')
-local builtin = profile.builtin_transport('opencode-go')
-if builtin then
-  eq(builtin, 'tool_call', 'this fleet provider carries a named tool_call default')
-  eq(source, 'builtin', 'and with no profile the choice comes from that default')
-else
-  eq(source, 'default', 'without a named default the choice is the conservative one')
-end
--- a provider nobody wrote a row for is unknown, not quietly tool_call with a decision behind it
-eq(profile.builtin_transport('provider-nobody-decided'), nil, 'an unwritten provider has no default')
+eq(source, 'default', 'with no profile the choice is the default')
+has(notice, 'wa conform', 'the notice suggests the measurement')
+has(notice, 'never-measured-model', 'the notice names the model')
 local unable, unable_source = raw.transport_for('never-measured-model', false)
 eq(unable, 'block', 'a model that cannot call tools is offered the block')
-eq(unable_source, 'default', 'that too is the conservative default')
--- and the conservative path is the only one that writes the notice
-local _, dsource, dnotice = raw.transport_for('never-measured-model', false)
-if dsource == 'default' then
-  has(dnotice, 'wa conform', 'the conservative default suggests the measurement')
-end
+eq(unable_source, 'default', 'that too is the default')
 
 -- A measured profile drives the choice, and says so.
 local measured = { model = 'm1', rates = { uses_run_tool = 1, acts_in_answer = 0 }, tasks = {} }
