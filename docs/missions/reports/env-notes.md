@@ -98,7 +98,7 @@ installed one with this worktree's tree, scratch `WASM_AGENT_HOME` per run:
 | `scripts/test-prompt-tool-names.lua` | `prompt tool names ok (286 checks, 0 skipped)` |
 | `bash scripts/sync-prompt-docs.sh --check` | `sync-prompt-docs: ok (4 blocks current)` |
 | `scripts/fast.sh`, narrowed to these rows (`WA_FAST_ROWS`, 5 of 250 Lua rows) | `fast path ok (52 checks, 0 skipped, 184s)`, rc 0 - `pass` for `environment-notes`, `project-instructions`, `prompt-tool-names`, `land-signing`, `build-info` |
-| `scripts/test-build-info.sh` at HEAD `79fbc2a2` | `test-build-info: 24 checks, 0 failed` |
+| `scripts/test-build-info.sh`, binary re-stamped at `79fbc2a2` | `test-build-info: 24 checks, 0 failed` |
 | `scripts/test-land-signing.sh` | `land signing ok (46 checks)` |
 | `cargo build --release` (`WA_CODEMODE_ALLOW_EMPTY=1`) | `Finished release profile`, rc 0 |
 | embedded delivery from `/tmp` | `note embedded:AGENTS.omarchy.md`, both keys present |
@@ -131,7 +131,9 @@ never re-runs the script, and a rebuilt binary kept reporting `c7a8d5a9` after H
 `build-info` fail on a correct tree. It is not this mission's to change; I worked around it by touching
 `rust/wa-host/build.rs` (mtime only, tree stayed clean) and the identity re-stamped to `79fbc2a2`. Worth
 a separate fix: resolve the real git dir (or read `git rev-parse --git-path HEAD`) instead of assuming
-`.git/` is a directory.
+`.git/` is a directory. The consequence for this table: `build-info` passes on the binary re-stamped at
+`79fbc2a2`, and any commit after it - including this report's own - moves HEAD past that binary. That is
+the bug, not a result, so the row is claimed at `79fbc2a2` and nowhere later.
 
 **One run failed for an environment reason, said plainly.** An early attempt printed `lua error: disk I/O
 error`; `/tmp` was at 80% (13G of 16G, held by other missions' scratch, which I did not delete). Re-run
