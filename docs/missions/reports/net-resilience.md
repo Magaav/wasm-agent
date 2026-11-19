@@ -71,17 +71,20 @@ LIVE open count.
 expired) still refuses at once, and a caller never admitted before is refused. The binding TICK uses
 the same cached authority, keeps polling when `/register` fails, and still names the outage.
 
-**Item 8 - a test that reproduces the storm and asserts the fleet converges.**
-`4e4fee17`. `rust/wa-rendezvous/tests/storm.rs`: four scratch nodes with real ed25519 keys, 300 held
-sockets past the base cap, and a proxy the test owns that CUTS the link for 60 s; every node must then
-answer a REAL signed relayed call (measured 252 ms after the restore, peak 301 connections), and
-ordinary traffic converges. **It fails on the base registry** with `503 too_many_connections`.
+**Item 8 - a test that reproduces the storm and asserts the fleet converges: NOT PROVEN HERE.**
+The end-to-end storm MOVED to the **fabric-transport** mission, where the relay is redesigned; testing
+today's relay storm end to end would be work on the wrong base. What was attempted, and why it is
+gone: `rust/wa-rendezvous/tests/storm.rs` (four keyed nodes, 300 held sockets, a proxy that cut the
+link) failed identically with a ZERO-second cut, which no product bug explains - the instrument was the
+least reliable part, so it proved nothing and was deleted. The end-to-end storm is an OPEN claim.
+
+What IS landed here is the node's half, at unit level: `scripts/test-network-outage-tick.lua`
+(71 checks). Through a 60 s relay outage the REAL `binding.tick` keeps TRYING to poll on every second
+(the 19/11 deadlock - a failed `/register` used to return before the poll), re-attaches with no
+restart, and a REAL `nodes.remote_call` then holds the node's verified answer.
 
 MUST 3 (item 6/7's deadlock) was additionally proved with a direct probe: on the base a failing
 `/register` gives `POLLS=0` and no tick state; here it gives `POLLS=1` and `state=attached`.
-
-MUST 3 was additionally proved with a direct probe: on the base, a failing `/register` gives
-`POLLS=0` and no tick state; here it gives `POLLS=1` and `state=attached`.
 
 ## Texts to approve (verbatim)
 
@@ -102,25 +105,26 @@ MUST 3 was additionally proved with a direct probe: on the base, a failing `/reg
 | `test-network-roster-offline.lua` | new, 24 checks | `scripts/test.sh` |
 | `test-network-relay-backpressure.lua` | new, 393 checks | `scripts/test.sh` |
 | `test-network-binding-outage.lua` | new, 19 checks | `scripts/test.sh` |
-| `test-provider-rate-limit-recovery.lua` | 29 checks (MUST 1) | already in the gate |
+| `test-provider-rate-limit-recovery.lua` | 46 checks (MUST 1, r3 item 1) | already in the gate |
 | `test-stream-cut-recovery.lua` | 33 assertions | already in the gate |
-| `rust/wa-rendezvous/tests/storm.rs` + unit tests | new | `gate_run cargo test -p wa-rendezvous` |
+| `test-network-outage-tick.lua` | new, 71 checks | `scripts/test.sh` |
+| `wa-rendezvous` unit tests | new | `gate_run cargo test -p wa-rendezvous` |
 
 Every new Lua row creates its own scratch `WASM_AGENT_HOME` and refuses a real home. All four also pass
 under the fast path's own environment, so none is in `scripts/fast-path.exclude`.
 
 **Proved on the base, not assumed:** `test-network-roster-offline` fails at "a FAILED roster read does
-not erase the peers it already knew"; the MUST 3 probe gives `POLLS=0` there; `storm.rs` fails with
-`503 too_many_connections`.
+not erase the peers it already knew"; the MUST 3 probe gives `POLLS=0` there; and the outage row's
+own deadlock assertion fails on the base with `polls 0 -> 0`.
 
 **Pre-existing failure, named:** `scripts/test-remote-refusals.lua` fails at line 108 on `ac7717e0`
 too. It is not this change's and was not fixed here.
 
 ## What is NOT proved, and what I did not do
 
-- `storm.rs` drives the registry over real sockets with real signatures and a real cut, but the four
-  "nodes" are threads in one process rather than four OS processes: the registry's fairness and
-  recovery are proved; process-level scheduling is not.
+- **The end-to-end storm is NOT proved here.** It moved to fabric-transport; the Rust attempt that
+  stood in for it was deleted for being an unreliable instrument (see Item 8). Only the node's half -
+  real tick, real caller, unit level - is landed.
 - No live fleet was called at any point (no `wa call`, `tools.remote`, `land` or deploy), per rule 13.
 - I did not run the whole 311-row gate; I ran the rows that touch what changed plus a wider sweep of
   20 neighbours, all green.
