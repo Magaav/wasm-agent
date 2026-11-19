@@ -1,19 +1,16 @@
--- The storm, at the level the code under test lives: REAL binding ticks, REAL callers, a 60 s outage.
+-- The NODE's half of a relay outage, at unit level: it keeps trying to poll, backs off its register,
+-- re-attaches with no restart, and a real caller gets a verified answer once the relay is back.
 --
--- Attempted first as a multi-process Rust test (three wa processes + a TCP proxy that cut the link).
--- It was abandoned after measurement: the harness, not the fleet, was what failed. Even with a ZERO
--- second cut the node stopped being reached, which no proxy bug explains and no product bug does
--- either - an unreliable instrument proves nothing. The same claims are made here, against the real
--- modules and a relay the test owns.
+-- WHAT THIS IS NOT: an end-to-end storm. Earlier rounds shipped a row named "storm" here and it was
+-- not one - no separate OS processes, no separate registry, no real cut in the transport. Review r3
+-- (item 2) asked for the name to match the proof, so it does: this row drives the REAL
+-- lua/core/binding.lua M.tick and the REAL lua/core/nodes.lua remote_call against a relay the test
+-- owns, and that is exactly what it claims. The end-to-end storm (real nodes, real cut, redesign of
+-- the relay) MOVED to the fabric-transport mission, where the relay is rebuilt.
 --
--- What IS real here: lua/core/binding.lua M.tick (the actual poll/attach loop the transport runs),
--- lua/core/nodes.lua remote_call (the actual caller), the real native binding state, and the real
--- JSON wire shapes. What is NOT: separate OS processes and a separate registry process. That gap is
--- named in docs/missions/reports/net-resilience.md rather than implied away.
---
--- The storm: the relay is DOWN for 60 s. During it, every node's tick must KEEP TRYING (a tick that
--- returns early is the 19/11 deadlock: the node cannot answer, so the queue never drains). After it,
--- every node must be attached again WITHOUT a restart and a caller must get an answer.
+-- The outage: the relay answers nothing for 60 s. The assertions are that the node KEEPS TRYING to
+-- poll on every second of it (before the fix a failed /register returned before the poll: the 19/11
+-- deadlock), that it re-attaches without a restart, and that a caller then gets the node's own answer.
 local json = dofile('lua/vendor/json.lua')
 
 -- ---- the scratch-home guard ----------------------------------------------------------------
@@ -78,8 +75,13 @@ ok(json.decode(host.binding_state('cas', json.encode({state = state}))).ok, 'pri
 -- ---- the relay the test owns --------------------------------------------------------------------
 -- down = true is the CUT: every call answers the way a dropped link does (no answer at all), which is
 -- what the transport reports as "io: Peer disconnected".
-local relay = {down = false, polls = 0, sends = 0}
+local relay = {down = false, polls = 0, poll_attempts = 0, sends = 0}
 host.http = function(method, url, headers, body)
+  -- The ATTEMPT is counted first: during the outage every call still LEAVES the node, and that
+  -- is the property this row proves. Counting only the answered ones made the during-cut
+  -- assertion vacuous - it measured the stub's own short-circuit (review r3, item 2).
+  local target = tostring(url)
+  if target:find('/relay/poll', 1, true) then relay.poll_attempts = relay.poll_attempts + 1 end
   if relay.down then return json.encode({status = 0, body = ''}) end
   url = tostring(url)
   if url:match('/service$') then
@@ -122,6 +124,13 @@ end
 -- ---- the 60 s outage -----------------------------------------------------------------------------
 -- A tick loop like the transport's: poll, and keep polling. Before the fix a failed /register (or an
 -- unreadable authority) returned BEFORE the poll, so the node went silent for the whole outage.
+-- ONE healthy tick first, which is the real situation: the node was attached when the relay went
+-- away, so it has an observation to fall back on. A node that never reached the registry at all is
+-- not attached and has nothing to keep polling FOR - and the assertion below would be measuring that
+-- different case (review r3, item 2: count attempts, but count them for the right scenario).
+local healthy = binding.tick()
+ok(healthy.state == 'attached', 'the node is attached before the outage: ' .. json.encode(healthy))
+
 local ATTEMPTS = 60
 local ran = 0
 relay.down = true
@@ -133,7 +142,9 @@ for _ = 1, ATTEMPTS do
   ok(type(tick) == 'table' or tick == nil, 'the tick ran on second ' .. ran .. ' of the outage')
 end
 ok(ran == ATTEMPTS, 'the tick ran on every second of the outage, not once')
-ok(relay.polls == 0, 'and no poll reached the relay while it was down: ' .. relay.polls)
+ok(relay.poll_attempts >= ATTEMPTS,
+  'the node TRIED to poll on every second of the outage, not once: attempts '
+    .. relay.poll_attempts .. ' over ' .. ATTEMPTS .. ' seconds')
 
 -- ---- the deadlock itself: /register fails, the poll lane still answers ------------------------------
 -- 19/11: the tick returned BEFORE its /relay/poll when /register failed, and did not advance the
@@ -180,4 +191,4 @@ ok(type(answer) == 'table' and answer.ok == true
 ok(nodes.slots_held(id.node_id) == 0,
   'no slot is left held after the outage and the call, got ' .. tostring(nodes.slots_held(id.node_id)))
 
-print('network storm ok (' .. checks .. ' checks)')
+print('network outage tick ok (' .. checks .. ' checks)')

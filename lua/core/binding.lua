@@ -399,6 +399,11 @@ local function unreachable_detail(detail)
   if text:find('connection aborted', 1, true) then return true end
   if text:find('os error 10053', 1, true) then return true end
   if text:find('binding_http_5', 1, true) then return true end
+  -- NO ANSWER AT ALL: the transport returns status 0 when the socket died or never connected, and
+  -- this module renders it as binding_http_0:. A dropped link is spelled that way too, and it must
+  -- take the same path as "peer disconnected" (measured by the outage row: the tick returned before
+  -- its poll on every second of a 60 s outage because of this one missing case).
+  if text:find('binding_http_0', 1, true) then return true end
   if text:find('binding_http_unreadable', 1, true) then return true end
   if text:find('binding_reply_invalid', 1, true) then return true end
   if text:find('timeout', 1, true) or text:find('timed out', 1, true) then return true end
