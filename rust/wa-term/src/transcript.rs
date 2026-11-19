@@ -1557,6 +1557,56 @@ mod tests {
         for row in chat.view(120, 10) { assert!(!row.contains('\u{1}'), "no marker is drawn: {row:?}"); }
     }
 
+    /// Item G: a resize is a REPAINT FROM STATE, not a reflow of printed bytes.
+    ///
+    /// The chat is drawn into a scroll region from the blocks this crate owns, so what a changed
+    /// width must produce is exactly what a session opened at that width would show - in both
+    /// directions. The comparison is against a FRESH transcript built from the same writes, so a
+    /// stale row, a lost block or a half-reflowed one all fail it.
+    #[test]
+    fn a_resize_repaints_the_whole_chat_at_the_new_width_in_both_directions() {
+        let writes: Vec<String> = (0..12)
+            .map(|i| format!("message {i}: {}", "uma frase longa com palavras ".repeat(3)))
+            .collect();
+        let build = || {
+            let mut t = plain(Transcript::default());
+            for w in &writes { t.write(w); }
+            t
+        };
+        // 120 -> 60 and back: the same view a session at that width shows.
+        let mut resized = build();
+        let at120 = resized.view(120, 40);
+        let mut fresh120 = build();
+        assert_eq!(at120, fresh120.view(120, 40), "120 columns matches a fresh render");
+        let at60 = resized.view(60, 40);
+        let mut fresh60 = build();
+        assert_eq!(at60, fresh60.view(60, 40), "after a shrink, 60 columns matches a fresh render");
+        let back = resized.view(120, 40);
+        assert_eq!(back, at120, "and widening back restores the 120-column view exactly");
+        assert_ne!(at60, at120, "the two widths really differ, so the comparison is not vacuous");
+    }
+
+    /// Item G's speed budget, measured rather than asserted by hand: a long session (240 messages)
+    /// repaints well inside the debounce window, so the repaint after a resize is not a stall.
+    #[test]
+    fn a_long_session_repaints_fast_enough_to_be_invisible() {
+        let mut t = plain(Transcript::default());
+        for i in 0..240 {
+            t.write(&format!("row {i}: {}", "palavras de uma mensagem longa ".repeat(2)));
+        }
+        let started = std::time::Instant::now();
+        let first = t.view(120, 40);
+        let warm = started.elapsed();
+        let started = std::time::Instant::now();
+        let narrow = t.view(60, 40);
+        let resized = started.elapsed();
+        assert!(!first.is_empty() && !narrow.is_empty(), "both views drew");
+        // Generous next to the 150 ms debounce, and tight enough to catch a per-message re-layout
+        // that re-wraps the whole chat more than once.
+        assert!(warm.as_millis() < 150, "240 messages at 120 columns: {warm:?}");
+        assert!(resized.as_millis() < 150, "the same chat re-wrapped at 60: {resized:?}");
+    }
+
     #[test]
     fn widening_reflows_a_wrapped_paragraph_to_fewer_rows() {
         // One logical line (markdown.lua `reflow`), drawn at 30 then at 80 columns (29/10).

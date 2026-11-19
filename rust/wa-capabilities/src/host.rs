@@ -3490,6 +3490,10 @@ struct ConsoleInput {
     region: usize,
     /// The chat as blocks (wa_term::transcript), drawn into the output region by this process.
     transcript: wa_term::transcript::Transcript,
+    /// When the debounced FULL repaint after a resize is due (item G): a resize sets it to now + the
+    /// debounce, and a later call that finds it passed clears the screen and the scrollback and draws
+    /// the whole transcript again at the new width. Cleared once done.
+    repaint_after: Option<std::time::Instant>,
     /// While the transcript has focus (Up on an empty draft), its key decoder.
     nav: Option<wa_term::transcript::NavDecoder>,
     /// A mouse report split across two reads: its start, waiting for the rest (wa_term::selection).
@@ -3873,6 +3877,10 @@ fn resize_console(state: &mut ConsoleInput, columns: usize, rows: usize) {
     let Some(editor) = state.editor.as_mut() else { return };
     if editor.row == rows - 1 && editor.width == columns { return; }
     let old_rows = editor.row + 1;
+    // Item G: a resize is answered by ONE repaint from state, 150 ms after the last event of the
+    // burst (dragging a window edge arrives as dozens of resizes). Until then the rows keep their
+    // own paints, which is what holds the picture together in the interval.
+    state.repaint_after = Some(std::time::Instant::now() + std::time::Duration::from_millis(150));
     let mut frame = String::from("\x1b[?25l");
     for row in (state.region + 1).max(1)..=old_rows.min(rows) { frame.push_str(&format!("\x1b[{row};1H\x1b[2K")); }
     editor.row = rows - 1;
@@ -3883,6 +3891,30 @@ fn resize_console(state: &mut ConsoleInput, columns: usize, rows: usize) {
     frame.push_str(&format!("\x1b[1;{}r", want.max(1)));
     state.region = want.max(1);
     frame.push_str(&layout_frame(state));
+    let _ = wa_term::terminal_editor::write(&frame);
+}
+
+/// The debounced full repaint after a resize (item G): once the burst has been quiet for the
+/// debounce, the screen AND the scrollback are cleared and the whole transcript is drawn again from
+/// the block state this process owns, at the width the terminal has now.
+///
+/// From STATE and not from the bytes already printed: a printed row cannot be reflowed (the terminal
+/// owns those characters), so the only way an old bubble or code block comes back correctly sized in
+/// both directions is to draw it again. The draw is the same layout_frame a frame uses, which wraps
+/// only what is on screen - the cost is one screenful, not one session.
+fn repaint_if_due() {
+    let (lock, _) = console_input();
+    let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(due) = state.repaint_after else { return };
+    if std::time::Instant::now() < due { return }
+    state.repaint_after = None;
+    if state.editor.as_ref().is_none_or(|editor| editor.row == 0) { return }
+    // The screen and the scrollback, then home: a resize leaves rows of the old width above the
+    // region, and they would stay there as fragments under a repainted chat.
+    let mut frame = String::from("\x1b[?25l\x1b[2J\x1b[3J\x1b[H");
+    state.transcript.dirty = true;
+    let rest = layout_frame(&mut state);
+    frame.push_str(&rest);
     let _ = wa_term::terminal_editor::write(&frame);
 }
 
@@ -3929,6 +3961,7 @@ fn console_reader() {
                 if state.stop { state.running = false; wake.notify_all(); return; }
                 drop(state);
                 let _ = refresh_editor_size();
+                repaint_if_due();
             }
             let mut chunk = [0u8; 512];
             let read = read_chunk(&mut handle, &mut chunk);
