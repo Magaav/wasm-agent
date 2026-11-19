@@ -1945,12 +1945,20 @@ do
     "an unmeasured window colours nothing")
   -- (c) a row with no ball (a budget of 0 leaves it out): returned as it came.
   eq(paint_ball("plain row", 5, 0, true), "plain row", "a row with no ball is not touched")
-  -- (d) the level's role really opens at the glyph and closes after it, so the percentage beside it
-  -- keeps the row's gray - one glyph's warning never bleeds into its number.
+  -- (d) A COMFORTABLE CONTEXT IS NOT A COLOURED ICON (Victor, 19/11 09:05). The ball at the normal
+  -- level carries NO escape of its own any more: it was the success green, and green is not this
+  -- row's icon pattern. The row is returned byte for byte, so the glyph inherits exactly the
+  -- secondary colour the steps, the clock, the turns and the cache wear beside it.
   local painted = paint_ball(ball .. " 50.0%/200.0k", 100000, 200000, true)
-  ok(has(painted, view_lib.style("success") .. ball .. "\27[0m"),
-    "a comfortable context paints the ball in the normal role: " .. painted)
-  eq(visible(painted), ball .. " 50.0%/200.0k", "and the visible characters are unchanged")
+  eq(painted, ball .. " 50.0%/200.0k",
+    "a comfortable context leaves the row byte for byte, with no colour of its own")
+  ok(not has(painted, view_lib.style("success")),
+    "and in particular the normal level is NOT the success green any more: " .. painted)
+  -- The role behind it is nil - "no colour of its own" is a value, not a missing case - and the two
+  -- problem levels still name theirs.
+  eq(view_lib.ball_role("normal"), nil, "the normal level has no role of its own")
+  eq(view_lib.ball_role("warning"), "warning", "the warning level is the amber")
+  eq(view_lib.ball_role("alert"), "error", "the alert level is the alarm red")
   -- (e) every level, from the node's own threshold: 90% of the window compacts, so 74 is normal,
   -- 76 is a warning and 90 an alert.
   local at = function(percent, window)
@@ -1960,7 +1968,9 @@ do
     local row = paint_ball(glyph .. " " .. percent .. "%", window * percent / 100, window, true)
     if has(row, view_lib.style("error") .. glyph) then return "alert" end
     if has(row, view_lib.style("warning") .. glyph) then return "warning" end
-    if has(row, view_lib.style("success") .. glyph) then return "normal" end
+    -- Normal wears NO role: the row comes back exactly as it was composed, so the probe asks whether
+    -- the glyph is unprefixed rather than whether it is green (Victor, 19/11 09:05).
+    if row == glyph .. " " .. percent .. "%" then return "normal" end
     return "none"
   end
   local threshold = view_lib.compaction_threshold(100000)
@@ -1973,6 +1983,65 @@ do
   eq(at(100, 100000), "alert", "a full window is an alert")
 end
 
+
+-- ITEM 2 (change/tui-polish-3): THE THREE LEVELS, ON A RENDERED ROW (Victor, 19/11 09:05).
+--
+-- Why this is its own block. The checks above prove the LEVEL and the ROLE; this one proves what a
+-- reader actually sees, on the row the footer really composes, at each of the three levels. It is the
+-- assertion that would have failed while the ball was green: normal must carry NO colour of its own,
+-- so the glyph a comfortable context draws has to be byte-identical to the same row drawn with no
+-- colour pass at all. Warning and alert must still be told apart from it and from each other.
+--
+-- The threshold comes from the node (compaction_threshold), never from a number written here, so the
+-- row is measured against the trigger this node really compacts on.
+do
+  local threshold = view_lib.compaction_threshold(100000)
+  ok(type(threshold) == "number" and threshold > 0 and threshold <= 100,
+    "item 2: the three levels are measured against the node own threshold: " .. tostring(threshold))
+  -- One composition function, the way the footer does it: the summary composes the glyph from the
+  -- percentage, and the colour pass is handed the SAME percentage the summary returns.
+  local function row_for(percent)
+    local context = math.floor(100000 * percent / 100)
+    local text, used = view_lib.session_summary({ runs = 3, prompt = 9500, completion = 851,
+      cached = 7000, context = context, budget = 100000 })
+    local painted = view_lib.colour_ball(text, context, 100000, true, nil, used)
+    return text, painted, view_lib.context_ball(percent)
+  end
+  -- (1) NORMAL: a comfortable context. No escape at all in the painted row, and it is identical to
+  -- the bare row - which is what "the same colour as the icons beside it" means in bytes: the glyph
+  -- inherits the row own secondary colour instead of opening one of its own.
+  local bare, normal_row, normal_glyph = row_for(math.max(1, math.floor(threshold) - 20))
+  eq(normal_row, bare, "item 2 [normal]: the row is returned byte for byte, the ball colouring nothing")
+  ok(not has(normal_row, string.char(27)), "item 2 [normal]: and there is no escape sequence in it at all")
+  ok(not has(normal_row, view_lib.style("success")),
+    "item 2 [normal]: the success green is gone from the row: " .. normal_row)
+  ok(has(normal_row, normal_glyph), "item 2 [normal]: the ball is still drawn, it is just uncoloured")
+
+  -- (2) WARNING: inside 15 points of the trigger. Amber opens at the glyph and closes after it, and
+  -- the visible characters are unchanged, so the percentage beside it keeps the row own colour.
+  local warn_bare, warn_row, warn_glyph = row_for(math.ceil(threshold - 14))
+  ok(has(warn_row, view_lib.style("warning") .. warn_glyph),
+    "item 2 [warning]: inside 15 points of the trigger the ball is the amber: " .. warn_row)
+  eq(visible(warn_row), visible(warn_bare),
+    "item 2 [warning]: the colour is escapes only, the characters a reader sees are the same")
+  ok(not has(warn_row, view_lib.style("error") .. warn_glyph),
+    "item 2 [warning]: and it is not the alert red")
+
+  -- (3) ALERT: at or above the trigger, the colour the compactor is about to act on.
+  local alert_bare, alert_row, alert_glyph = row_for(math.ceil(threshold))
+  ok(has(alert_row, view_lib.style("error") .. alert_glyph),
+    "item 2 [alert]: at the compaction trigger the ball is the alarm red: " .. alert_row)
+  eq(visible(alert_row), visible(alert_bare),
+    "item 2 [alert]: again escapes only, the visible row is unchanged")
+  ok(not has(alert_row, view_lib.style("warning") .. alert_glyph),
+    "item 2 [alert]: and it is not the warning amber")
+
+  -- (4) The three levels are THREE, not two: the normal row is the only one with no colour, and the
+  -- two problem rows differ from it and from each other. A test where two levels rendered alike could
+  -- not tell them apart.
+  ok(normal_row ~= warn_row and normal_row ~= alert_row and warn_row ~= alert_row,
+    "item 2: the three levels render three different rows")
+end
 
 -- ROUND 3, ITEM 4. Two mismatches the footer could hide, each asserted through the one function that
 -- paints, because a colour nobody can see go wrong is a colour nobody can trust.
@@ -1987,17 +2056,20 @@ do
   local other = view_lib.context_ball(96)      -- a glyph 50% would never choose
   ok(other ~= drawn, "the two glyphs are different, so the check is not vacuous")
   local row = paint_ball(other .. " 50.0%/200.0k", 100000, 200000, true)
-  ok(has(row, view_lib.style("success") .. other),
-    "the glyph the row DREW is the one coloured, not the one the percentage implies: " .. row)
-  ok(not has(row, view_lib.style("error") .. other),
-    "and it is coloured by the LEVEL (50% is normal), not by the glyph's own fill: " .. row)
+  -- 50% is normal, and normal has no role: the drawn glyph stays exactly where it was, uncoloured,
+  -- rather than being repainted from the percentage the caller happened to pass.
+  eq(row, other .. " 50.0%/200.0k", "a normal row is returned as it came, whatever glyph it drew")
+  ok(not has(row, view_lib.style("error") .. other) and not has(row, view_lib.style("warning") .. other),
+    "and neither problem role is applied to it: " .. row)
   -- A row with no ball at all is still returned untouched - nothing to colour is not an error.
   eq(paint_ball("no ball here 12.0%/200.0k", 24000, 200000, true), "no ball here 12.0%/200.0k",
     "a row carrying no ball is returned exactly as it came")
-  -- The empty ball IS a ball: a nearly empty window is coloured too, so the floor is not a hole.
+  -- The empty ball IS a ball: the search finds it (the floor is not a hole), but at 1% of the window
+  -- the level is normal, so it stays uncoloured like every other comfortable reading.
   local empty = view_lib.context_ball(1)
-  ok(has(paint_ball(empty .. " 1.0%/200.0k", 2000, 200000, true), view_lib.style("success") .. empty),
-    "the empty ball is a ball and is coloured")
+  eq(view_lib.ball_in(empty .. " 1.0%/200.0k"), empty, "the empty ball is found by the search")
+  eq(paint_ball(empty .. " 1.0%/200.0k", 2000, 200000, true), empty .. " 1.0%/200.0k",
+    "and at 1% it is normal, so it is not painted")
 end
 
 -- (b) THE SAME RESERVE THE COMPACTOR USES. `threshold_percent` was called with model_window's DEFAULT

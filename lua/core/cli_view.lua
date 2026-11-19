@@ -355,13 +355,21 @@ function M.context_level(percent, threshold)
 end
 -- The colour the ball wears, from the same level: the window's own signal, not decoration.
 --
--- normal is the row's own success green (a context with room), warning the yellow from threshold-15,
--- alert the alarm red at the compaction trigger. Nothing measured is normal: a colour is a claim
--- about the window, and an unmeasured window makes none.
+-- NORMAL IS NO COLOUR OF ITS OWN (Victor, 19/11 09:05). A ball with room is a fact in the row like
+-- the step count, the clock, the turn count and the cache rate beside it, so it wears exactly what
+-- those wear - the row's own secondary colour, whatever role that row happens to paint (the run row
+-- says "muted", the session bar under the box says "dim"). Returning nil says that: the caller paints
+-- nothing and the glyph inherits its neighbours, so the ball cannot be the one shade that disagrees
+-- with the four icons it sits between.
+--
+-- It was the success green, and green is not this row's icon pattern: on a status row a colour MEANS
+-- something, so it may only appear when the window is a problem. warning is the amber from
+-- threshold-15, alert the alarm red at the compaction trigger. Nothing measured is normal: a colour is
+-- a claim about the window, and an unmeasured window makes none.
 function M.ball_role(level)
   if level == "alert" then return "error" end
   if level == "warning" then return "warning" end
-  return "success"
+  return nil
 end
 
 -- The reserve the COMPACTOR will actually use for a model, or nil when this host cannot say.
@@ -467,7 +475,11 @@ function M.colour_ball(text, context, budget, live, model, percent)
   local ball, at = M.ball_in(text)
   if not ball then return text end
   local level = M.context_level(percent, M.compaction_threshold(window, model))
-  local painted = paint(ball, M.ball_role(level), true) .. (STYLE.dim or "")
+  local role = M.ball_role(level)
+  -- A level with no role of its own (normal) leaves the row byte for byte as it came: the glyph then
+  -- wears the row's own secondary colour, exactly like the steps, clock, turn and cache icons.
+  if not role then return text end
+  local painted = paint(ball, role, true) .. (STYLE.dim or "")
   return text:sub(1, at - 1) .. painted .. text:sub(at + #ball)
 end
 
