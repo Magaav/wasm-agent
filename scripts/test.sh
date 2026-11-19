@@ -942,6 +942,9 @@ gate_run bash scripts/test-backup-restore.sh | grep 'backup restore ok'
 # What a peer accepts, answered by the peer from its own gate, with a named reason when it cannot be
 # asked (scripts/test-nodes-capabilities.lua under this wrapper).
 gate_run bash scripts/test-nodes-capabilities.sh | grep 'nodes capabilities ok'
+# The rollback identity check: a live pid is the restored bytes, mismatch and unknown are refused, and
+# the Lua tree moves with the binary (scripts/test-rollback-verify.sh).
+gate_run bash scripts/test-rollback-verify.sh | grep 'test-rollback-verify: ok'
 gate_run bash scripts/test-watchdog-upgrade.sh | grep 'test-watchdog-upgrade: ok'
 # Context budget is per model (provider.budget), and it is NOT the same thing as
 # provider.limits, which fetches the account's rate limits for the UI. Confusing
