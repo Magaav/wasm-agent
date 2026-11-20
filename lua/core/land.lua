@@ -313,6 +313,7 @@ M.DEFAULT_CHECKS = {
   -- instead keep its tests green (scripts/test-discriminates.sh). Exit 3 means this machine could not run
   -- some test: a refusal, never a pass, and the gate treats it as a named failure rather than a verdict.
   { name = "discrimination", command = "bash scripts/test-discriminates.sh origin/main", timeout = 900,
+    per_test_seconds = 180,
     detail = "every test the branch adds or changes fails on the code before the change" },
   { name = "prompt-docs", command = "bash scripts/sync-prompt-docs.sh --check", timeout = 600,
     detail = "the generated prompt documents are in sync with the code" },
@@ -1627,7 +1628,18 @@ impl.gate = function(run, options)
     local cwd = check.cwd and (slashes(tree) .. "/" .. check.cwd) or slashes(tree)
     evidence(command_line(check.name, command))
     local started = now()
-    local result = M.exec(command, cwd, check.timeout or 1800)
+    -- A serial per-test budget needs a total that grows with the tests it will run, or a round that
+    -- touches twenty of them times out on the twenty-first and reads as a failure of the change. The
+    -- count is the round's own changed test paths; anything else keeps the check's declared timeout.
+    local budget = check.timeout or 1800
+    if check.per_test_seconds and run.journal and run.journal.plan then
+      local touched = 0
+      for _, path in ipairs(run.journal.plan.files or {}) do
+        if tostring(path):match("^tests?/") or tostring(path):match("test%-") then touched = touched + 1 end
+      end
+      budget = math.max(budget, 300 + check.per_test_seconds * touched)
+    end
+    local result = M.exec(command, cwd, budget)
     local seconds = now() - started
     evidence((result.stdout or "") .. (result.stderr or ""))
     local tests = passed_tests((result.stdout or "") .. (result.stderr or ""))
