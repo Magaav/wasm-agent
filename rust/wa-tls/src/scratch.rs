@@ -54,12 +54,14 @@ pub struct Server {
 }
 
 /// What the server does once the TLS handshake and the request head are read.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum Answer {
     /// HTTP/1.1 200 OK with the body ok.
     Http,
     /// The RFC 6455 upgrade, then every frame echoed back with its own opcode.
     Echo,
+    /// A 302 whose Location is this URL, so a client's redirect handling can be exercised.
+    Redirect(String),
 }
 
 impl Server {
@@ -118,6 +120,12 @@ impl Server {
         Server { base: format!("http://127.0.0.1:{port}"), stop, worker: Some(worker) }
     }
 
+    /// A websocket server that answers every upgrade with a 302 to another one: the redirect a
+    /// websocket client must follow, and the behaviour that must not disappear on the anchors path.
+    pub fn start_websocket_redirect(to: String) -> Server {
+        Server::start_with("server.pem", "server.key", Answer::Redirect(to))
+    }
+
     fn start_with(certificate: &str, key: &str, answer: Answer) -> Server {
         let config = Arc::new(server_config(certificate, key));
         let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback port for the scratch server");
@@ -128,7 +136,7 @@ impl Server {
         let worker = std::thread::spawn(move || {
             while !flag.load(Ordering::SeqCst) {
                 match listener.accept() {
-                    Ok((stream, _)) => serve(stream, &config, answer),
+                    Ok((stream, _)) => serve(stream, &config, &answer),
                     // Nothing waiting: sleep a moment rather than spin, and re-check the flag.
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         std::thread::sleep(Duration::from_millis(5))
@@ -251,7 +259,7 @@ fn serve_plain_websocket(stream: std::net::TcpStream) {
     serve_websocket(&mut socket, &head);
 }
 
-fn serve(stream: std::net::TcpStream, config: &Arc<ServerConfig>, answer: Answer) {
+fn serve(stream: std::net::TcpStream, config: &Arc<ServerConfig>, answer: &Answer) {
     let _ = stream.set_nonblocking(false);
     let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
@@ -262,11 +270,18 @@ fn serve(stream: std::net::TcpStream, config: &Arc<ServerConfig>, answer: Answer
     let Ok(head) = read_head(&mut tls) else {
         return;
     };
-    if let Answer::Echo = answer {
-        if header(&String::from_utf8_lossy(&head), "sec-websocket-key").is_some() {
+    match answer {
+        Answer::Echo if header(&String::from_utf8_lossy(&head), "sec-websocket-key").is_some() => {
             serve_websocket(&mut tls, &head);
             return;
         }
+        Answer::Redirect(to) => {
+            let reply = format!("HTTP/1.1 302 Found\r\nLocation: {to}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            let _ = tls.write_all(reply.as_bytes());
+            let _ = tls.flush();
+            return;
+        }
+        _ => {}
     }
     // Drain what the request announced before answering: a client still writing its body must not
     // meet a reset, which would look like a TLS failure and be reported as one.

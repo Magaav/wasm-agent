@@ -245,29 +245,78 @@ impl Inbound {
 /// (the situation measured 19/11: a sandbox whose CA is only in its own bundle could not reach a
 /// wss:// endpoint at all). When it names none, tungstenite's own connect runs unchanged, with its
 /// own compiled-in roots and its redirect handling - the behaviour every deployment has today.
+///
+/// The anchors path keeps tungstenite's redirect rule too (three hops, the count connect uses): a
+/// client that follows a redirect without a bundle must not stop following it with one. A hop that
+/// names a plain ws:// URL is refused rather than followed: dropping from TLS to cleartext because a
+/// remote said so is not a redirect this client takes.
 fn connect_ws(
     request: tungstenite::http::Request<()>,
 ) -> Result<(Socket, tungstenite::http::Response<Option<Vec<u8>>>), String> {
+    const REDIRECTS: u8 = 3;
     // A plain ws:// connection hands nothing to TLS, so the machine's bundle is not consulted and a
     // bundle it cannot read must not refuse the upgrade (review r1, item 7).
-    let encrypted = request.uri().scheme_str() == Some("wss");
-    let connector = if encrypted { ws_connector()? } else { None };
-    let Some(connector) = connector else {
+    if request.uri().scheme_str() != Some("wss") {
         return tungstenite::connect(request).map_err(|error| error.to_string());
-    };
+    }
+    if ws_connector()?.is_none() {
+        return tungstenite::connect(request).map_err(|error| error.to_string());
+    }
+    let (parts, _) = request.into_parts();
+    let mut uri = parts.uri.clone();
+    for attempt in 0..=REDIRECTS {
+        let mut builder = tungstenite::http::Request::builder()
+            .uri(uri.clone())
+            .method(parts.method.clone())
+            .version(parts.version);
+        *builder.headers_mut().expect("a request builder") = parts.headers.clone();
+        let hop = builder.body(()).map_err(|error| format!("ws_handshake: {error}"))?;
+        // A fresh connector per hop: tungstenite's Connector is not Clone, and re-reading the anchors
+        // is what wa-tls caches anyway. Every hop trusts the same set, which is the point.
+        let Some(connector) = ws_connector()? else {
+            return Err("ws_handshake: the anchors stopped being readable between hops".to_string());
+        };
+        match connect_ws_once(hop, connector) {
+            Err(tungstenite::Error::Http(response))
+                if response.status().is_redirection() && attempt < REDIRECTS =>
+            {
+                let Some(location) = response.headers().get("Location") else {
+                    return Err("ws_handshake: a redirect with no Location".to_string());
+                };
+                let next: tungstenite::http::Uri = location
+                    .to_str()
+                    .map_err(|_| "ws_handshake: a Location that is not text".to_string())?
+                    .parse()
+                    .map_err(|_| "ws_handshake: a Location that is not a URL".to_string())?;
+                if next.scheme_str() != Some("wss") {
+                    return Err(format!("ws_handshake: refused a redirect off TLS to {next}"));
+                }
+                uri = next;
+            }
+            other => return other.map_err(|error| error.to_string()),
+        }
+    }
+    unreachable!("the loop returns on the last attempt")
+}
+
+/// One websocket attempt on the anchors path: dial, wrap with the machine's anchors, upgrade.
+fn connect_ws_once(
+    request: tungstenite::http::Request<()>,
+    connector: tungstenite::Connector,
+) -> Result<(Socket, tungstenite::http::Response<Option<Vec<u8>>>), tungstenite::Error> {
     let uri = request.uri().clone();
     let host = uri
         .host()
-        .ok_or_else(|| "ws_handshake: the url names no host".to_string())?
+        .ok_or(tungstenite::Error::Url(tungstenite::error::UrlError::NoHostName))?
         .trim_start_matches('[')
         .trim_end_matches(']')
         .to_string();
-    let port = uri.port_u16().unwrap_or(if encrypted { 443 } else { 80 });
+    let port = uri.port_u16().unwrap_or(443);
     let mut last: Option<std::io::Error> = None;
     let mut stream = None;
     for address in (host.as_str(), port)
         .to_socket_addrs()
-        .map_err(|error| format!("ws_handshake: {error}"))?
+        .map_err(tungstenite::Error::Io)?
     {
         match TcpStream::connect_timeout(&address, Duration::from_secs(10)) {
             Ok(connected) => {
@@ -280,20 +329,22 @@ fn connect_ws(
     let stream = match stream {
         Some(stream) => stream,
         None => {
-            return Err(match last {
-                Some(error) => format!("ws_handshake: {error}"),
-                None => "ws_handshake: the host resolved to no address".to_string(),
-            })
+            return Err(tungstenite::Error::Io(last.unwrap_or_else(|| {
+                std::io::Error::other("ws_handshake: the host resolved to no address")
+            })))
         }
     };
     let _ = stream.set_nodelay(true);
     // tungstenite does the TLS wrapping and the upgrade from here, with the connector above: the
     // handshake is its own, only the anchors are the machine's.
-    tungstenite::client_tls_with_config(request, stream, None, Some(connector))
-        .map_err(|error| match error {
-            tungstenite::HandshakeError::Failure(error) => error.to_string(),
-            tungstenite::HandshakeError::Interrupted(_) => "ws_handshake: interrupted".to_string(),
-        })
+    tungstenite::client_tls_with_config(request, stream, None, Some(connector)).map_err(
+        |error| match error {
+            tungstenite::HandshakeError::Failure(error) => error,
+            tungstenite::HandshakeError::Interrupted(_) => {
+                tungstenite::Error::Io(std::io::Error::other("ws_handshake: interrupted"))
+            }
+        },
+    )
 }
 
 /// The anchors as tungstenite wants them (a rustls root store), or none when the machine names no
@@ -837,6 +888,50 @@ mod tls_anchor_tests {
         let error = get("https://example.invalid/").expect_err("a named source that cannot be read");
         assert!(error.contains("SSL_CERT_FILE"), "{error}");
         assert!(error.contains("typo.pem"), "{error}");
+    }
+
+    /// A redirect is behaviour tungstenite's own connect has, and the anchors path keeps it (review r1,
+    /// SHOULD 1): a machine that names a bundle must not lose a hop it would have followed without one.
+    #[test]
+    fn a_websocket_follows_a_redirect_and_echoes_on_the_anchors_path() {
+        let target = Server::start_websocket();
+        let redirect = Server::start_websocket_redirect(target.ws_url("/ws"));
+        let _env = Env::set(&[(wa_tls::CERT_FILE, &scratch::cert_file())]);
+        let mut conn = WsConn::open(&redirect.ws_url("/ws"), None)
+            .expect("the 302 is followed to the second private-CA server");
+        assert_eq!(conn.send(b"ping".to_vec()), 0, "the frame is queued");
+        let mut echoed = None;
+        for _ in 0..300 {
+            let state = conn.next();
+            if state > 0 {
+                echoed = conn.take();
+                break;
+            }
+            if state == CLOSED {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            echoed.as_deref(),
+            Some(&b"ping"[..]),
+            "the frame came back through the redirected connection"
+        );
+    }
+
+    /// A redirect that would drop TLS is refused, not followed: tungstenite's own path downgrades
+    /// here, and this client will not (review r1, SHOULD 1 - the one place the two paths differ on
+    /// purpose, and it is the stricter one).
+    #[test]
+    fn a_websocket_refuses_a_redirect_off_tls() {
+        let plain = Server::start_plain_websocket();
+        let redirect = Server::start_websocket_redirect(plain.ws_url("/ws"));
+        let _env = Env::set(&[(wa_tls::CERT_FILE, &scratch::cert_file())]);
+        let error = match WsConn::open(&redirect.ws_url("/ws"), None) {
+            Ok(_) => panic!("a redirect to a plain ws:// URL must not be followed"),
+            Err(error) => error,
+        };
+        assert!(error.contains("refused a redirect off TLS"), "{error}");
     }
 
     /// The scheme decides whether a bundle is consulted at all: a plain exchange and a plain ws://
