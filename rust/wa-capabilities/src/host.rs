@@ -720,7 +720,8 @@ pub extern "C-unwind" fn sql_query(l: *mut LuaState) -> c_int {
 ///
 /// The same statement, the same authorizer and the same values as `host.sql_query` - answered as a
 /// Lua table instead of JSON text. One table per row, column name to value: a SQLite INTEGER as a
-/// Lua integer, a REAL as a float, TEXT as a string, a BLOB as the "<N bytes>" placeholder
+/// Lua integer, a REAL as a float (a non-finite REAL - SQLite can hold +-Inf - as NULL, which is what
+/// the JSON path's `null` decodes to), TEXT as a string, a BLOB as the "<N bytes>" placeholder
 /// `sql_query` answers, and NULL as an ABSENT key (which is what decoding a JSON null into a Lua
 /// table has always produced, since a table cannot hold nil).
 ///
@@ -747,7 +748,16 @@ pub extern "C-unwind" fn sql_rows(l: *mut LuaState) -> c_int {
                             // A NULL column is an absent key, exactly as the JSON path leaves it.
                             Cell::Null => lua_pushnil(l),
                             Cell::Integer(n) => lua_pushinteger(l, *n),
-                            Cell::Real(f) => lua_pushnumber(l, *f),
+                            // SQLite can hold +-Inf; serde_json turns a non-finite f64 into `null`, and a
+                            // null decodes to an ABSENT key. The typed answer has to agree with the JSON one,
+                            // so a non-finite REAL is NULL here too (review r2).
+                            Cell::Real(f) => {
+                                if f.is_finite() {
+                                    lua_pushnumber(l, *f);
+                                } else {
+                                    lua_pushnil(l);
+                                }
+                            }
                             Cell::Text(text) => {
                                 lua_pushlstring(l, text.as_ptr() as *const c_char, text.len());
                             }

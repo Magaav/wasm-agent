@@ -232,7 +232,8 @@ authorizer, same values, and only the shape they cross the ABI in differs. The t
 table of rows, column name to value:
 
 - a SQLite INTEGER arrives as a Lua integer and a REAL as a float - the number *type* is part of the
-  contract, because `5` and `5.0` compare equal but concatenate differently;
+  contract, because `5` and `5.0` compare equal but concatenate differently - and a NON-FINITE REAL
+  (SQLite can hold +-Inf) arrives as NULL, which is what the JSON path's `null` decodes to;
 - TEXT as a string, and a BLOB as the `<N bytes>` placeholder `sql_query` has always answered
   (never the bytes themselves);
 - NULL as an ABSENT key, which is exactly what decoding a JSON `null` into a table gives today;
