@@ -6,7 +6,9 @@ local json=dofile('lua/vendor/json.lua')
 local real_getenv=host.getenv
 local overrides={WASM_AGENT_RENDEZVOUS='https://rv.test',WASM_AGENT_RELAY='https://rv.test'}
 host.getenv=function(k) if overrides[k]~=nil then return overrides[k] or nil end return real_getenv(k) end
-host.sleep=function() end
+-- Recorded, not ignored: the retry waits are part of what a caller promises (wa/relay-retry-after-jitter).
+local sleeps={}
+host.sleep=function(seconds) sleeps[#sleeps+1]=(tonumber(seconds) or 0)*1000 end
 local nodes=dofile('lua/core/nodes.lua')
 -- One module instance for this script and tools.lua, so the stubs below are the ones it sees.
 local original_dofile=dofile
@@ -188,4 +190,41 @@ check(r.error=='relay_refused' and r.reason=='binding_not_accepted' and has(r.hi
 relay_script={}
 r=tools.dispatch(memory,'remote',{node='signer',capability='bash',command='id'},'master',ctx)
 check(r.ok==true and r.content=='signed-result' and r.error==nil and r.next==nil,'signed success through the tool is unchanged')
+
+-- 5. The 504 Retry-After hint (wa/relay-retry-after-jitter): the relay's 504 carries a fixed
+-- retry_after_ms (rendezvous.rs: 750), and a caller that obeys it to the millisecond puts every caller
+-- back on the wire at the same instant. The wait is never SHORTER than the hint (the server's earliest
+-- time), never longer than the cap, and spread upward so the retries do not land together.
+local lo,hi=1e9,0
+for _=1,40 do
+  -- relay_backoff_ms reads a hint under 1000 as SECONDS (its documented rule), so 2 is two seconds.
+  local ms=nodes.relay_backoff_ms(1,2)
+  if ms<lo then lo=ms end
+  if ms>hi then hi=ms end
+  check(ms>=2000 and ms<=3000,'a hint is a floor: the wait stays in [hint, 1.5 x hint]')
+end
+check(hi>lo,'the wait above a hint is spread, not the same millisecond for every caller')
+check(nodes.relay_backoff_ms(1,0.8)>=800 and nodes.relay_backoff_ms(1,0.8)<=1200,
+  'a sub-second hint (the 504 way of saying milliseconds) keeps its own band')
+check(nodes.relay_backoff_ms(1,600000)==30000,'a hint of ten minutes is capped at 30 s, not slept in full')
+-- Five calls that all get the same 800 ms hint. On the old path every one of them slept exactly 800 -
+-- one herd - so the SPREAD is what separates the two trees; a single draw cannot tell them apart.
+local draws={}
+for _=1,5 do
+  sleeps={}
+  relay_script={{status=504,body={error='node_no_answer',retry_after_ms=800}}}
+  r=nodes.remote_call('signer','bash',{command='true'})
+  check(r.ok==true and #sleeps==2,'a 504 that names retry_after_ms waits for the hint, then for the loop backoff')
+  check(sleeps[1]>=800 and sleeps[1]<=1200,'the 504 hint is obeyed as a floor, never below it')
+  draws[#draws+1]=sleeps[1]
+end
+local dmin,dmax=math.min(table.unpack(draws)),math.max(table.unpack(draws))
+check(dmin>=800,'no 504 retry ever waits less than the hint it was given')
+check(dmax>dmin,'five callers given the same 800 ms hint do not all wake on the same millisecond')
+sleeps={}
+relay_script={{status=504,body={error='node_not_attached',retry_after_ms=600000}}}
+r=nodes.remote_call('signer','bash',{command='true'})
+check(#sleeps==2 and sleeps[1]==30000,
+  'a 504 hint longer than the cap is cut to 30 s, so the caller cannot outwait its own deadline')
+relay_script={}
 print('remote refusals ok ('..checks..' checks, 0 skipped)')

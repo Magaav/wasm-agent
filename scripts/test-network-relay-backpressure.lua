@@ -78,9 +78,13 @@ for attempt = 1, 8 do
   last_cap = math.max(last_cap, high)
 end
 check(last_cap <= 8000, 'no attempt waits longer than the 8 s cap')
--- A Retry-After in seconds is honoured, and one in milliseconds is not multiplied twice.
-check(nodes.relay_backoff_ms(1, 2) == 2000, 'a Retry-After of 2 seconds is 2000 ms')
-check(nodes.relay_backoff_ms(1, 1500) == 1500, 'a Retry-After already in ms is taken as it is')
+-- A Retry-After in seconds is honoured, and one in milliseconds is not multiplied twice. Since
+-- wa/relay-retry-after-jitter the hint is a FLOOR spread upward: never earlier than the hint, never
+-- later than 1.5x it (one policy for the 503 and 504 hints).
+local two_s = nodes.relay_backoff_ms(1, 2)
+check(two_s >= 2000 and two_s <= 3000, 'a Retry-After of 2 seconds waits 2000-3000 ms, got ' .. tostring(two_s))
+local ms_hint = nodes.relay_backoff_ms(1, 1500)
+check(ms_hint >= 1500 and ms_hint <= 2250, 'a Retry-After already in ms waits 1500-2250 ms, got ' .. tostring(ms_hint))
 check(nodes.relay_backoff_ms(1, 600) <= 30000, 'a large hint is still capped')
 
 -- 3. An over-cap relay produces WAITS, not a tight loop, and says why it failed.
