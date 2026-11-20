@@ -936,6 +936,7 @@ gate_run bash scripts/test-watchdog.sh | grep 'test-watchdog: ok'
 # The fast path own per-row watchdog: a hung row names itself and takes every child it forked with it
 # (scripts/lib/fast-watchdog.sh; measured 18/11 on avell - a fixture child outlived its row).
 gate_run bash scripts/test-fast-watchdog.sh | grep 'test-fast-watchdog: ok'
+gate_run bash scripts/test-fast-watchdog-reap.sh | grep 'test-fast-watchdog-reap: ok'
 gate_run bash scripts/test-scratch-home.sh | grep 'test-scratch-home: ok'
 gate_run bash scripts/test-scratch-home-lua.sh | grep 'test-scratch-home-lua: ok'
 # Backup and restore: the manifest, the restore, and the five refusals that write nothing

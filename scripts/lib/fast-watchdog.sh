@@ -55,6 +55,26 @@ wa_fast_watchdog() { # <seconds> <label> -- <command...>
   fi
   wait "$pid"
   code=$?
+  # A ROW THAT EXITS NORMALLY STILL OWNS ITS PROCESS GROUP (item 0, the 19/11 OOM - growth C).
+  #
+  # The kill above only ran when the row HUNG. A row that finished left every background child it had
+  # forked running, and the next row started more: measured on this node at --jobs 2, the suite reached
+  # 1,234 live "wa" processes and ~31 GB of RSS at row 45, and the sampler named their parent
+  # ("bash -c run_lua ... scripts/test-session-vars.lua") as a row that had already reported ok. Each
+  # such row alone peaked at 63 MB; the crowd was the sum of what nobody reclaimed.
+  #
+  # So the group is swept after a normal exit too. It is not a second timeout: the row is already gone.
+  # Anything still in its group is a child the row forgot, killed the same way a hang's children are,
+  # with one line saying so - a survivor is never silent.
+  local leftovers
+  leftovers=$(pgrep -g "$pid" 2>/dev/null | wc -l | tr -d "[:space:]")
+  if [ "$leftovers" -gt 0 ] 2>/dev/null; then
+    kill -TERM -- "-$pid" 2>/dev/null
+    sleep "${WA_FAST_WATCHDOG_REAP_GRACE:-1}"
+    kill -KILL -- "-$pid" 2>/dev/null
+    printf "watchdog: %s exited %s but left %s process(es) in its group %s: killed them (a child the row forked and did not wait for)\n" \
+      "$label" "$code" "$leftovers" "$pid"
+  fi
   return "$code"
 }
 
