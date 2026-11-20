@@ -71,6 +71,21 @@ is_test_path() {
   return 1
 }
 
+changed_count=$(git diff --name-only "$MERGE_BASE" "$HEAD_SHA" | grep -c . || true)
+test_count=$(git diff --name-only "$MERGE_BASE" "$HEAD_SHA" | while IFS= read -r p; do
+  [ -n "$p" ] || continue
+  is_test_path "$p" && printf '%s\n' "$p"
+done | grep -c . || true)
+
+if [ "$changed_count" = 0 ]; then
+  say "HEAD $HEAD_SHA changes nothing against $BASE ($MERGE_BASE): nothing to discriminate"
+  exit 0
+fi
+if [ "$test_count" = 0 ]; then
+  say "the branch changes $changed_count path(s) and adds or changes no test: nothing to discriminate"
+  exit 0
+fi
+
 # --- a declared refactor is exempt, and must keep every existing test green ---------------------------
 REFACTOR_REASON=$(git diff "$MERGE_BASE" "$HEAD_SHA" -- docs/missions/reports/ 2>/dev/null \
   | sed -n 's/^+Refactor-only: *//p' | head -1)
@@ -122,6 +137,28 @@ while IFS= read -r t; do
     *) refuse "unexpected diff status for $t: $status" ;;
   esac
 done < <(git diff --name-only "$MERGE_BASE" "$HEAD_SHA")
+
+# The files this branch ADDS. A test for brand-new code cannot discriminate: the base has no behaviour
+# to distinguish from, so even a perfectly specific test dies on a missing module there. That case is
+# recognised mechanically - the test must NAME a path this branch adds - and reported as not-applicable
+# with the subject named, never silently passed.
+git diff --name-only --diff-filter=A "$MERGE_BASE" "$HEAD_SHA" | while IFS= read -r p; do
+  [ -n "$p" ] || continue
+  is_test_path "$p" && continue
+  printf '%s\n' "$p"
+done > "$WORKROOT/added.list"
+
+# The added path this test names, if any. A test that names none has an old subject and must discriminate.
+new_subject_of() {
+  local t=$1 f
+  [ -s "$WORKROOT/added.list" ] || return 1
+  [ -f "$WORKTREE/$t" ] || return 1
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    if grep -qF -- "$f" "$WORKTREE/$t" 2>/dev/null; then printf '%s' "$f"; return 0; fi
+  done < "$WORKROOT/added.list"
+  return 1
+}
 
 # --- running one test on the base code ---------------------------------------------------------------
 ROWS=$WORKROOT/rows.tsv
@@ -214,7 +251,12 @@ run_one() { # <path> -> one row: verdict, path, reason
     record environment "$path" "the base run skipped: $(grep -m1 '^SKIP ' "$out" | cut -c6-120)"
     return
   fi
+  subject=$(new_subject_of "$path")
   if [ "$code" = 0 ]; then
+    if [ -n "$subject" ]; then
+      record new-subject "$path" "it tests $subject, which this branch adds: the base has no behaviour to discriminate against"
+      return
+    fi
     record passed "$path" "it passed on the reverted code"
     return
   fi
@@ -223,6 +265,10 @@ run_one() { # <path> -> one row: verdict, path, reason
     return
   fi
   if printf '%s' "$last" | grep -Eq "$LOAD_RE"; then
+    if [ -n "$subject" ]; then
+      record new-subject "$path" "it tests $subject, which this branch adds: the base has no behaviour to discriminate against"
+      return
+    fi
     record load-error "$path" "it died before its assertions on the old code: $(printf '%s' "$last" | grep -Eo "$LOAD_RE" | head -1)"
     return
   fi
@@ -271,7 +317,7 @@ done < "$WORKROOT/deleted.list"
 VERDICTS=$WORKROOT/verdicts.tsv
 if [ -n "$REFACTOR_REASON" ]; then
   awk -F'	' 'BEGIN{OFS="	"} {
-    if ($1=="passed"||$1=="skipped"||$1=="not-applicable") {print "green",$2,"it stays green on the refactored code"}
+    if ($1=="passed"||$1=="skipped"||$1=="not-applicable"||$1=="new-subject") {print "green",$2,"it stays green on the refactored code"}
     else if ($1=="deleted") {print "not-applicable",$2,$3}
     else if ($1=="environment") {print "environment",$2,$3}
     else {print "does-not",$2,("a refactor must keep every test green, and this one " ($1=="asserted"?"failed an assertion":"did not pass") ": " $3)}
@@ -282,7 +328,7 @@ else
     else if ($1=="passed") {print "does-not",$2,"it passed on the reverted code, so it would not have caught this change"}
     else if ($1=="load-error") {print "does-not",$2,$3}
     else if ($1=="unclassified") {print "unclassified",$2,$3}
-    else if ($1=="deleted"||$1=="not-applicable") {print "not-applicable",$2,$3}
+    else if ($1=="deleted"||$1=="not-applicable"||$1=="new-subject") {print "not-applicable",$2,$3}
     else {print $1,$2,$3}
   }' "$ROWS" > "$VERDICTS"
 fi
