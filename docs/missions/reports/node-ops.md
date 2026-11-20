@@ -433,6 +433,22 @@ registered worktree). `/tmp` went from 3.6 GB to 8.4 GB free. An interrupted run
 the next start: each run writes its pid inside its work dir and the next start removes any sibling whose
 pid is gone (proven: `wa-fast-DEAD` reclaimed, `wa-fast-LIVE` kept).
 
+**The merged tree, measured (`07fb5328`).** `scripts/fast.sh --jobs 2` under the suite lock, in an 8 G scope:
+
+```
+fast: lua 261/261 passed (58 excluded: scripts/fast-path.exclude)
+fast: rust wa-host ok (4s)
+fast: rust wa-capabilities ok (9s)
+fast result ok (323 checks, 0 failed, 0 skipped)
+fast path ok (323 checks, 0 skipped, 652s)
+```
+
+Peak of the whole run, from the scope own cgroup: **2,029 MB, pids.peak 70** - against 23 GB and 1,653
+processes on 19/11, with `git merge-base --is-ancestor origin/main HEAD` true (39bbf2b6 is in). Log:
+`~/Work/missions/node-ops/logs/fastpath-merged4.log`. The 261 Lua rows are 7 more than before the merge
+(254), all passing. A 2 G scope is too small for the cargo build inside the run (OOM-killed, measured), and
+so is 8 G at `--jobs 4`; the shape that passes is `--jobs 2` in 8 G.
+
 **Item 5 - merged `origin/main` `39bbf2b6` (`dc2e9eaf`).** One real conflict, in
 `lua/core/refusal_codes.lua`, resolved by regenerating the map with its own generator
 (`scripts/gen-refusal-codes.lua --write`: 574 codes from 96 modules, `--check` clean), so both sides
