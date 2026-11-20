@@ -302,7 +302,7 @@ M.DEFAULT_CHECKS = {
   { name = "codemode-component", command = "bash scripts/test-codemode-component.sh", timeout = 1800,
     detail = "the code-mode seam: the same scripts through the native loop and through the component" },
   { name = "cargo-codemode",
-    command = "cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-capabilities codemode",
+    command = "bash scripts/gate-cargo-codemode.sh",
     timeout = 1800, min_tests = 1, detail = "the code-mode Rust tests (wa-capabilities: the seam and quickjs)" },
   { name = "cargo-wa-whatsapp", command = "cargo test --lib --offline", cwd = "rust/components/wa-whatsapp",
     timeout = 1200, min_tests = 1, detail = "the wa-whatsapp component's own crate" },
@@ -375,7 +375,7 @@ M.GATE_ALWAYS = { "fast", "prompt-docs" }
 -- the checks that are NOT inside the fast path are listed here.
 M.GATE_TRIGGERS = {
   ["codemode-component"] = { "^lua/core/codemode", "^rust/components/codemode", "^rust/wa%-capabilities/src/codemode", "^scripts/codemode", "^scripts/build%-codemode" },
-  ["cargo-codemode"] = { "^lua/core/codemode", "^rust/components/codemode", "^rust/wa%-capabilities/src/codemode", "^scripts/codemode", "^wit/model/codemode" },
+  ["cargo-codemode"] = { "^lua/core/codemode", "^scripts/gate%-cargo%-codemode", "^rust/components/codemode", "^rust/wa%-capabilities/src/codemode", "^scripts/codemode", "^wit/model/codemode" },
   ["cargo-wa-whatsapp"] = { "^rust/components/wa%-whatsapp", "^rust/wa%-whatsapp%-outbox", "^rust/wa%-whatsapp%-index", "^wit/whatsapp" },
 }
 
