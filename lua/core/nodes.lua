@@ -637,7 +637,16 @@ function M.request(node, path, body, inner_headers)
           last_error = "relay_busy"
           local hint = nil
           local got, body = pcall(json.decode, response.body)
-          if got and type(body) == "table" then hint = body.retry_after_ms or body.retry_after end
+          if got and type(body) == "table" then
+            if body.retry_after_ms ~= nil then
+              -- The field NAMES milliseconds and relay_backoff_ms reads anything under 1000 as SECONDS,
+              -- so it is handed over as seconds - clamped FIRST: 1,000,000 ms / 1000 = 1000 would be read
+              -- back as 1000 MILLISECONDS, i.e. a ten-minute hint turned into a one-second wait.
+              hint = math.min(30000, tonumber(body.retry_after_ms) or 0) / 1000
+            else
+              hint = body.retry_after
+            end
+          end
           host.sleep(M.relay_backoff_ms(attempt, hint) / 1000)
         end
       elseif response and tonumber(response.status) == 504 then
@@ -652,8 +661,10 @@ function M.request(node, path, body, inner_headers)
         -- 750 ms (rendezvous.rs), so every caller that missed its wait woke together.
         if decoded and decoded.retry_after_ms then
           -- The hint is MILLISECONDS here and relay_backoff_ms reads anything under 1000 as SECONDS
-          -- (its documented rule), so it is handed over as seconds: 750 ms -> 0.75 -> 750 ms.
-          host.sleep(M.relay_backoff_ms(attempt, tonumber(decoded.retry_after_ms) / 1000) / 1000)
+          -- (its documented rule), so it is handed over as seconds: 750 ms -> 0.75 -> 750 ms. Clamped
+          -- first, so a hint past the cap is the cap and never round-trips into the other unit.
+          local hint_ms = math.min(30000, tonumber(decoded.retry_after_ms) or 0)
+          host.sleep(M.relay_backoff_ms(attempt, hint_ms / 1000) / 1000)
         end
       elseif response and tonumber(response.status) == 409 and M.relay_code(response.body) == "request_in_flight" then
         -- The same rid is still running at the target: waiting re-collects it.

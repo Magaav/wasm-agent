@@ -136,6 +136,12 @@ What 590ba6d0 changes (lua/core/nodes.lua):
   [hint, 1.5 x hint], capped at 30 s: never earlier than the server's earliest time, never in lockstep,
   never past the caller's own deadline.
 
+One policy now covers both hint sites, and that has a second, visible effect: the **503** shed answers
+(@@too_many_connections@@ / @@relay_busy@@, @@rendezvous.rs:1439@@ names a 2 s hint) also go through
+@@relay_backoff_ms@@, so a caller shed by the relay now waits **2000-3000 ms** where it used to wait
+exactly 2000. It is never below the hint the server named, which is the property that matters: the relay
+still gets at least the time it asked for, and the callers it shed no longer come back together.
+
 Proved both ways (the rule that a test must fail without the change):
 
 | run | result |

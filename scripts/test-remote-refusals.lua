@@ -207,11 +207,20 @@ check(hi>lo,'the wait above a hint is spread, not the same millisecond for every
 check(nodes.relay_backoff_ms(1,0.8)>=800 and nodes.relay_backoff_ms(1,0.8)<=1200,
   'a sub-second hint (the 504 way of saying milliseconds) keeps its own band')
 check(nodes.relay_backoff_ms(1,600000)==30000,'a hint of ten minutes is capped at 30 s, not slept in full')
-sleeps={}
-relay_script={{status=504,body={error='node_no_answer',retry_after_ms=800}}}
-r=nodes.remote_call('signer','bash',{command='true'})
-check(r.ok==true and #sleeps==2,'a 504 that names retry_after_ms waits for the hint, then for the loop backoff')
-check(sleeps[1]>=800 and sleeps[1]<=1200,'the 504 hint is obeyed as a floor and spread, not to the millisecond')
+-- Five calls that all get the same 800 ms hint. On the old path every one of them slept exactly 800 -
+-- one herd - so the SPREAD is what separates the two trees; a single draw cannot tell them apart.
+local draws={}
+for _=1,5 do
+  sleeps={}
+  relay_script={{status=504,body={error='node_no_answer',retry_after_ms=800}}}
+  r=nodes.remote_call('signer','bash',{command='true'})
+  check(r.ok==true and #sleeps==2,'a 504 that names retry_after_ms waits for the hint, then for the loop backoff')
+  check(sleeps[1]>=800 and sleeps[1]<=1200,'the 504 hint is obeyed as a floor, never below it')
+  draws[#draws+1]=sleeps[1]
+end
+local dmin,dmax=math.min(table.unpack(draws)),math.max(table.unpack(draws))
+check(dmin>=800,'no 504 retry ever waits less than the hint it was given')
+check(dmax>dmin,'five callers given the same 800 ms hint do not all wake on the same millisecond')
 sleeps={}
 relay_script={{status=504,body={error='node_not_attached',retry_after_ms=600000}}}
 r=nodes.remote_call('signer','bash',{command='true'})
