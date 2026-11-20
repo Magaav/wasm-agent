@@ -374,7 +374,13 @@ local function probe_lease_read(path, now)
       if type(row) == "table" then
         local at = tonumber(row.at or 0) or 0
         local peer = tostring(row.peer or "")
-        if peer ~= "" and (now - at) < PROBE_DEADLINE_S then live[#live + 1] = { at = at, peer = peer } end
+        if peer ~= "" and (now - at) < PROBE_DEADLINE_S then
+          -- KEEP THE WHOLE ENTRY: result (the answer the holder published), op (its operation id, awaitable
+          -- only by the caller that owns it) and owner (which caller that is). Dropping them here is what
+          -- would force a joiner back to awaiting an id it does not own (review item 1).
+          live[#live + 1] = { at = at, peer = peer, op = tostring(row.op or ""),
+            owner = tostring(row.owner or ""), result = type(row.result) == "table" and row.result or nil }
+        end
       end
     end
   end
@@ -432,9 +438,6 @@ local function probe_peers(peers, opts)
   local program = tostring(runtime.binary_path or "")
   if program == "" then return {} end
   local inflight, now, alive = probe_inflight()
-  -- THE SHARED LEDGER ON DISK (growth E). Every state in this node - including the fresh one each
-  -- codemode run gets - reads and writes this list, so one row with ninety-two sandboxed scripts cannot
-  -- start ninety-two sets of children.
   local lease_path = probe_lease_file()
   local lease, lease_why = nil, nil
   if lease_path then
@@ -443,98 +446,155 @@ local function probe_peers(peers, opts)
   else
     lease_why = "probe_lease_no_data_dir"
   end
-  -- THE CROSS-PROCESS COUNT. When the host can answer, it is the authority on how many probe children this
-  -- ledger has alive; when it cannot, the per-process registry below still bounds this process.
-  -- MEASURED: host.operation(list) answers only THIS process ("operations":[] from a child that has
-  -- siblings running), so it can never be the authority - it is a floor, not the answer. Taking it
-  -- INSTEAD of the local count was a regression: an empty list read as "0 alive" and disabled the cap.
-  -- The bound is therefore max(local, shared), and the reason it could not be read is still named.
+  -- host.operation(list) answers only THIS process (measured), so it is a floor, never the authority.
   local shared, why_shared = probe_children_alive(now)
-  -- The reason the ledger could not be counted is PROCESS-WIDE, like every other fact here: a caller that
-  -- wants to know why the bound fell back reads it from _G, because out is keyed by peer id and a reader
-  -- that has no peer in common still needs the answer.
   _G.WA_PROBE_SHARED_BOUND = why_shared or nil
   if shared and shared > alive then alive = shared end
   local launched, at_capacity = {}, {}
   local lease_join, lease_add = {}, {}
   if lease then
-    for _, entry in ipairs(lease) do lease_join[entry.peer] = true end
+    for _, entry in ipairs(lease) do lease_join[entry.peer] = entry end
     alive = math.max(alive, #lease)
+  end
+  -- THE RESULT A LEASEHOLDER PUBLISHES (review item 1). A joiner must never await the holder id: that
+  -- id belongs to ANOTHER caller, and the host refuses an await from a session that does not own it
+  -- (rust/wa-capabilities/src/operations.rs, owned()). Measured shape of the defect: a joiner recorded
+  -- "lease:<peer>", the await was refused, the code cancelled it and answered probe_timeout - 20 s of
+  -- waiting for an answer that was already on disk. The lease now carries the holder ANSWER, written
+  -- when the child settles, and a joiner reads it instead of awaiting anything.
+  local published = {}
+  if lease then
+    for _, entry in ipairs(lease) do
+      if type(entry.result) == "table" then published[entry.peer] = entry.result end
+    end
   end
   for _, peer in ipairs(peers or {}) do
     local id = tostring(peer.node_id or "")
     if id ~= "" then
       local running = inflight[id]
-      if type(running) == "table" and (now - tonumber(running.at or 0)) < PROBE_DEADLINE_S then
-        -- JOIN the child this process already has for this peer: one live child per peer per deadline.
+      local joined = lease_join[id]
+      if published[id] then
+        launched[#launched + 1] = { id = id, joined = true, from_lease = true, result = published[id] }
+      elseif type(joined) == "table" and joined.result ~= nil then
+        launched[#launched + 1] = { id = id, joined = true, from_lease = true, result = joined.result }
+      elseif type(joined) == "table" and joined.owner == tostring((M.identity() or {}).node_id or "") then
+        -- The lease is OURS: this process (or a state in it) owns the child, so awaiting its real id is
+        -- allowed and is the honest way to get the answer. Only an owned child may be awaited.
+        launched[#launched + 1] = { id = id, operation_id = joined.op, joined = true, owned = true }
+      elseif type(joined) == "table" then
+        -- Another caller owns the child and has not published yet: WAIT ON THE LEASE FILE, never on its
+        -- operation id. The holder writes the result when the child settles.
+        launched[#launched + 1] = { id = id, wait_lease = true, joined = true }
+      elseif type(running) == "table" and (now - tonumber(running.at or 0)) < PROBE_DEADLINE_S then
         launched[#launched + 1] = { id = id, operation_id = running.op, joined = true }
-      elseif lease_join[id] then
-        -- JOIN the child ANOTHER state in this node already has for this peer (the lease on disk). It is
-        -- alive and it will answer; starting a second one is exactly the duplication growth E measured.
-        launched[#launched + 1] = { id = id, operation_id = "lease:" .. id, joined = true, from_lease = true }
       elseif alive >= PROBE_MAX_CHILDREN then
-        -- Over the cap this process starts NOTHING for this peer and says so by name. It must not fall
-        -- through to the in-process ask: that ask is a blocking http call per peer, so the cap would
-        -- trade a memory blow-up for a serial sum of timeouts, which is the defect item 10a removed.
         at_capacity[#at_capacity + 1] = id
       else
-      local argv = { "nodes", "probe", id }
-      local db = host.getenv("WASM_AGENT_DB")
-      if db and db ~= "" then argv = { "--db", db, "nodes", "probe", id } end
-      local ok, receipt = pcall(host.operation, "start", json.encode({ program = program, args = argv,
-        timeout_seconds = tonumber(opts.deadline_s or PROBE_DEADLINE_S), kind = "command",
-        owner = "nodes-probe" }))
-      local answer = ok and (json.decode(receipt) or {}) or {}
-      if answer.operation_id then
-        launched[#launched + 1] = { id = id, operation_id = answer.operation_id }
-        inflight[id] = { op = answer.operation_id, at = now }
-        lease_add[#lease_add + 1] = { at = now, peer = id }
-        alive = alive + 1
-      end
+        local argv = { "nodes", "probe", id }
+        local db = host.getenv("WASM_AGENT_DB")
+        if db and db ~= "" then argv = { "--db", db, "nodes", "probe", id } end
+        local ok, receipt = pcall(host.operation, "start", json.encode({ program = program, args = argv,
+          timeout_seconds = tonumber(opts.deadline_s or PROBE_DEADLINE_S), kind = "command",
+          owner = "nodes-probe" }))
+        local answer = ok and (json.decode(receipt) or {}) or {}
+        if answer.operation_id then
+          launched[#launched + 1] = { id = id, operation_id = answer.operation_id }
+          inflight[id] = { op = answer.operation_id, at = now }
+          lease_add[#lease_add + 1] = { at = now, peer = id, op = answer.operation_id,
+            owner = tostring((M.identity() or {}).node_id or "") }
+          alive = alive + 1
+        end
       end
     end
   end
-  -- WRITE THE LEASE BACK: what this state started, plus what it found still live. A write that fails is
-  -- named; the per-process table above still bounded this call.
-  if lease_path and #lease_add > 0 then
-    local merged = {}
-    for _, entry in ipairs(lease or {}) do merged[#merged + 1] = entry end
-    for _, entry in ipairs(lease_add) do merged[#merged + 1] = entry end
-    if not probe_lease_write(lease_path, merged) then lease_why = "probe_lease_unwritable" end
-  end
-  _G.WA_PROBE_LEASE_BOUND = lease_why or nil
   local out = {}
   for _, id in ipairs(at_capacity) do
     out[id] = { capabilities = nil, reason = "probe_capacity" }
   end
-  -- A half that could not be counted is named too: a reader told only probe_capacity would not know
-  -- whether the bound was enforced by the ledger or by this process alone.
   if why_shared then out.__shared_bound = why_shared end
+  -- Collect the answers this call is entitled to get, and publish every one of them for the next caller.
+  local settled_results = {}
   for _, entry in ipairs(launched) do
-    local settled, state = pcall(host.operation, "await", json.encode({ id = entry.operation_id,
-      wait_s = tonumber(opts.deadline_s or PROBE_DEADLINE_S) }))
-    local snapshot = settled and (json.decode(state) or {}) or {}
-    if snapshot.settled ~= true then
-      pcall(host.operation, "cancel", json.encode({ id = entry.operation_id }))
-      out[entry.id] = { capabilities = nil, reason = "probe_timeout" }
-    else
-      local read_ok, chunk = pcall(host.operation, "read", json.encode({ id = entry.operation_id,
-        stream = "stdout", offset = 0, limit = 65536 }))
-      local text = read_ok and (json.decode(chunk) or {}) or {}
-      local body = tostring(text.content or text.data or "")
-      local decoded = nil
-      for line in body:gmatch("[^\r\n]+") do
-        local one = json.decode(line)
-        if type(one) == "table" and (one.capabilities ~= nil or one.reason ~= nil or one.error ~= nil) then decoded = one end
+    if entry.wait_lease then
+      -- WAIT ON THE FILE: the owner publishes there. Polling the lease is the only cross-caller wait that
+      -- needs no permission from the host, and it stops the moment the answer arrives or the deadline does.
+      local waited_ms = 0
+      local limit_ms = tonumber(opts.deadline_s or PROBE_DEADLINE_S) * 1000
+      while waited_ms < limit_ms do
+        local again = probe_lease_read(lease_path, now)
+        local found = nil
+        for _, row in ipairs(again) do
+          if row.peer == entry.id and type(row.result) == "table" then found = row.result end
+        end
+        if found then
+          out[entry.id] = found
+          settled_results[entry.id] = found
+          break
+        end
+        if host.sleep then pcall(host.sleep, 100) else break end
+        waited_ms = waited_ms + 100
       end
-      if decoded then
-        out[entry.id] = { capabilities = type(decoded.capabilities) == "table" and decoded.capabilities or nil,
-          reason = decoded.reason or decoded.error or (decoded.capabilities and "asked" or "unknown") }
+      if out[entry.id] == nil then out[entry.id] = { capabilities = nil, reason = "probe_leaseholder_pending" } end
+    elseif entry.result then
+      out[entry.id] = entry.result
+      settled_results[entry.id] = entry.result
+    else
+      local settled, state = pcall(host.operation, "await", json.encode({ id = entry.operation_id,
+        wait_s = tonumber(opts.deadline_s or PROBE_DEADLINE_S) }))
+      local snapshot = settled and (json.decode(state) or {}) or {}
+      if type(snapshot) == "table" and snapshot.error and not entry.owned then
+        -- The host refused this id (not ours). Never cancel someone else operation, and never call that
+        -- a timeout: the leaseholder still owns it and will publish.
+        out[entry.id] = { capabilities = nil, reason = "probe_leaseholder_pending" }
+      elseif snapshot.settled ~= true then
+        pcall(host.operation, "cancel", json.encode({ id = entry.operation_id }))
+        out[entry.id] = { capabilities = nil, reason = "probe_timeout" }
       else
-        out[entry.id] = { capabilities = nil, reason = "probe_unreadable" }
+        local read_ok, chunk = pcall(host.operation, "read", json.encode({ id = entry.operation_id,
+          stream = "stdout", offset = 0, limit = 65536 }))
+        local text = read_ok and (json.decode(chunk) or {}) or {}
+        local body = tostring(text.content or text.data or "")
+        local decoded = nil
+        for line in body:gmatch("[^\r\n]+") do
+          local one = json.decode(line)
+          if type(one) == "table" and (one.capabilities ~= nil or one.reason ~= nil or one.error ~= nil) then decoded = one end
+        end
+        if decoded then
+          local answer = { capabilities = type(decoded.capabilities) == "table" and decoded.capabilities or nil,
+            reason = decoded.reason or decoded.error or (decoded.capabilities and "asked" or "unknown") }
+          out[entry.id] = answer
+          settled_results[entry.id] = answer
+        else
+          out[entry.id] = { capabilities = nil, reason = "probe_unreadable" }
+        end
       end
     end
   end
+  -- PUBLISH WHAT WAS LEARNED (and keep every other live lease). This is what makes a joiner cheap.
+  if lease_path and (next(settled_results) ~= nil or #lease_add > 0) then
+    local merged, seen = {}, {}
+    for _, entry in ipairs(lease or {}) do
+      if not seen[entry.peer] then
+        seen[entry.peer] = true
+        merged[#merged + 1] = entry
+      end
+    end
+    for _, entry in ipairs(lease_add) do
+      if not seen[entry.peer] then
+        seen[entry.peer] = true
+        merged[#merged + 1] = entry
+      end
+    end
+    for peer_id, result in pairs(settled_results) do
+      local found = false
+      for _, entry in ipairs(merged) do
+        if entry.peer == peer_id then entry.result = result; entry.at = now; found = true end
+      end
+      if not found then merged[#merged + 1] = { at = now, peer = peer_id, result = result } end
+    end
+    if not probe_lease_write(lease_path, merged) then lease_why = "probe_lease_unwritable" end
+  end
+  _G.WA_PROBE_LEASE_BOUND = lease_why or nil
   return out
 end
 

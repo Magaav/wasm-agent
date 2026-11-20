@@ -27,17 +27,28 @@ for i = 1, 80 do peers[i] = { node_id = string.rep(string.char(97 + (i % 6)), 32
 -- A counted host.operation. Only "start" is a child; await/read/cancel are the bookkeeping around it and
 -- are counted separately so the numbers below name exactly one thing each.
 local starts, awaits, reads = 0, 0, 0
+-- THE STUB REFUSES AN ID THIS CALLER DOES NOT OWN, like the real host does (rust/wa-capabilities/src/
+-- operations.rs, owned()): an await for somebody else operation answers {error=...}, never a settled state.
+-- A stub that answers every id hides exactly the defect review item 1 names.
+local owned = {}
+local function owned_await(req)
+  return owned[tostring(req.id or "")] == true
+end
 host.operation = function(action, request)
   local req = json.decode(request or "") or {}
   if action == "start" then
     starts = starts + 1
+    owned["fixture-" .. starts] = true
     return json.encode({ operation_id = "fixture-" .. starts })
   elseif action == "await" then
     awaits = awaits + 1
+    if not owned_await(req) then return json.encode({ error = "operation_not_owned", id = req.id }) end
     return json.encode({ settled = true, state = "completed", operation_id = req.id })
   elseif action == "read" then
     reads = reads + 1
-    return json.encode({ content = json.encode({ node_id = "fixture", capabilities = { "bash" }, reason = "asked" }) })
+    -- A probe child prints ONE JSON line with its answer. The stub answers like one, because the joiner
+    -- reads that answer out of the lease: a read that returned nothing would publish nothing.
+    return json.encode({ content = json.encode({ node_id = "fixture", capabilities = { "bash" }, reason = "asked" }) .. "\n" })
   end
   return json.encode({ cancelled = true })
 end
@@ -142,9 +153,17 @@ assert(_G.WA_PROBE_SHARED_BOUND == "operation_list_unavailable",
 --    sandboxed scripts starts ninety-two sets of children - the 554 processes measured at row 37.
 host.operation = function(action, request)
   local req = json.decode(request or "") or {}
-  if action == "start" then starts = starts + 1; return json.encode({ operation_id = "fixture-" .. starts }) end
-  if action == "await" then return json.encode({ settled = true }) end
-  if action == "read" then return json.encode({ content = "" }) end
+  if action == "start" then
+    starts = starts + 1; owned["fixture-" .. starts] = true
+    return json.encode({ operation_id = "fixture-" .. starts })
+  end
+  if action == "await" then
+    if not owned[tostring(req.id or "")] then return json.encode({ error = "operation_not_owned", id = req.id }) end
+    return json.encode({ settled = true })
+  end
+  if action == "read" then
+    return json.encode({ content = json.encode({ node_id = "fixture", capabilities = { "bash" }, reason = "asked" }) .. "\n" })
+  end
   return json.encode({})
 end
 cold()
@@ -157,9 +176,25 @@ assert(first_set > 0, "the first call in a cold state started no child, so the l
 reset()
 _G.WA_IN_PROBE_INFLIGHT = nil
 local D = dofile("lua/core/nodes.lua")
-D.list({ peers = peers, live_capabilities = true })
+local joined = D.list({ peers = peers, live_capabilities = true })
 assert(starts == 0, "a fresh Lua state started " .. starts .. " MORE children for peers a previous state had"
   .. " already leased (" .. first_set .. " then " .. starts .. ") - that is the 554-process fan-out")
+-- AND IT MUST GET THE ANSWER (review item 1). A joiner that starts nothing but answers probe_timeout or
+-- probe_leaseholder_pending has traded a fork storm for a 20-second wait on every peer: the lease carries
+-- the holder RESULT precisely so a joiner reads it instead of awaiting an id it does not own.
+local answered, pending = 0, 0
+for _, row in ipairs(joined) do
+  if row.local_node then
+    -- the host itself; not a peer we ask
+  elseif type(row.capabilities) == "table" and #row.capabilities > 0 then
+    answered = answered + 1
+  elseif row.capabilities_reason == "probe_timeout" or row.capabilities_reason == "probe_leaseholder_pending" then
+    pending = pending + 1
+  end
+end
+assert(answered > 0, "a fresh state that JOINED a leased child got no answer at all (" .. pending
+  .. " peers reported a wait, 0 answered) - that is the refused-await defect item 1 names")
+assert(pending == 0, pending .. " joined peers were left waiting for an answer that was already published")
 local why = "the ledger is asked (" .. asked .. " list call(s)) and a host that cannot answer says why"
 
 print("nodes probe instances ok: two real instances (" .. unmasked .. " children when unmarked), the marked one "
