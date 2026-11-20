@@ -812,6 +812,17 @@ check fast-reclaim-race bash scripts/test-fast-reclaim-race.sh
 # The rule those guards rest on, judged: WASM_AGENT_HOME is the USER home, so the operator home, its
 # store, anything inside it and anything above it are refused (item 4 of the node-ops round).
 check scratch-home bash scripts/test-scratch-home.sh
+# A probe child never probes again, across module instances and across a fresh Lua state: two real
+# dofiles, the unmarked one fans out, the marked one starts nothing, and a joiner gets the ANSWER
+# (test-nodes-probe-instances.lua; the 19/11 recursion and the 554-process crowd).
+check nodes-probe-instances bash scripts/test-nodes-probe-instances.sh
+# The same fan-out measured by the KERNEL: six unreachable peers inside a memory-accounted scope, with
+# pids.peak, memory.peak and the process generations bounded (test-nodes-probe-bound.sh).
+check nodes-probe-bound bash scripts/test-nodes-probe-bound.sh
+# A REAL node probes a stub peer over HTTP and gets its capabilities back - asked, not
+# probe_leaseholder_pending - which is the only row that can see an ownerless await
+# (test-nodes-probe-real.sh).
+check nodes-probe-real bash scripts/test-nodes-probe-real.sh
 # lua_run hands every row fast.sh's WA_FAST_CLEARED unchanged and clears the vault/node variables (test-fast-row-cleared.sh).
 check fast-row-cleared bash scripts/test-fast-row-cleared.sh
 # ROWS THIS BRANCH CANNOT RUN ARE NOT WIRED HERE (review r2, A1). Eleven `check` lines named scripts that

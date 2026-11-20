@@ -966,6 +966,9 @@ gate_run bash scripts/test-nodes-probe-instances.sh | grep 'nodes probe instance
 # The same fan-out bounded by the kernel's own counters (pids.peak/memory.peak in a memory-accounted
 # systemd scope): a probe child that fans out again fails here (19/11: 1,653 processes, 23 GB).
 gate_run bash scripts/test-nodes-probe-bound.sh | grep 'nodes probe bound ok'
+# A REAL node probes a stub peer over HTTP: the only row that can see an ownerless await or a wait_s the
+# host ignores, because every other probe row stubs the host (test-nodes-probe-real.sh).
+gate_run bash scripts/test-nodes-probe-real.sh | grep 'test-nodes-probe-real: ok'
 gate_run bash scripts/test-watchdog-upgrade.sh | grep 'test-watchdog-upgrade: ok'
 # Context budget is per model (provider.budget), and it is NOT the same thing as
 # provider.limits, which fetches the account's rate limits for the UI. Confusing
