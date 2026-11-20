@@ -392,12 +392,16 @@ local function probe_peers(peers, opts)
   local inflight, now, alive = probe_inflight()
   -- THE CROSS-PROCESS COUNT. When the host can answer, it is the authority on how many probe children this
   -- ledger has alive; when it cannot, the per-process registry below still bounds this process.
+  -- MEASURED: host.operation(list) answers only THIS process ("operations":[] from a child that has
+  -- siblings running), so it can never be the authority - it is a floor, not the answer. Taking it
+  -- INSTEAD of the local count was a regression: an empty list read as "0 alive" and disabled the cap.
+  -- The bound is therefore max(local, shared), and the reason it could not be read is still named.
   local shared, why_shared = probe_children_alive(now)
   -- The reason the ledger could not be counted is PROCESS-WIDE, like every other fact here: a caller that
   -- wants to know why the bound fell back reads it from _G, because out is keyed by peer id and a reader
   -- that has no peer in common still needs the answer.
   _G.WA_PROBE_SHARED_BOUND = why_shared or nil
-  if shared then alive = shared end
+  if shared and shared > alive then alive = shared end
   local launched, at_capacity = {}, {}
   for _, peer in ipairs(peers or {}) do
     local id = tostring(peer.node_id or "")
