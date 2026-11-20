@@ -170,6 +170,28 @@ The pre-existing red recorded above (scripts/test-refusal-contract.lua) does not
 branch regenerated lua/core/refusal_codes.lua, which is what that row checks, so the row is green
 here while the base 39bbf2b6 still fails its --check.
 
+## Review r1 fast path (two runs, both recorded)
+
+`run 1` - op `op-1795176791418985-702867-118`, log `/home/victor/Work/missions/read-truncation/fast-r2.log`, tree
+`48a8c6fb`:
+
+    FAIL lua scripts/test-codemode-queue-timeout.lua (exit 1): lua error: ...:21: and the handle says it is queued, not running
+    fast: lua 256/257 passed (58 excluded: scripts/fast-path.exclude)
+    fast path FAILED (1 of 303 checks, 0 skipped, 195s)
+
+`run 2` - op `op-1795178031406681-702867-130`, log `/home/victor/Work/missions/read-truncation/fast-r3.log`, same tree:
+
+    fast result ok (303 checks, 0 failed, 0 skipped)
+    fast path ok (303 checks, 0 skipped, 250s)
+    FAST_EXIT=0
+
+The run-1 failure is `not this branch`: `scripts/test-codemode-queue-timeout.lua` fills the node's workload
+slots and asserts that the call behind them is still QUEUED - a timing assertion that races against
+the other seven rows of a parallel fast path. Run alone it passed 3/3 in this worktree and 3/3 in a
+base worktree at `39bbf2b6` (the same `wa`, each with its own scratch home), and it passed in
+full run 2 with nothing changed. No file of this branch is imported by that row; its subject is the
+operation queue, not reads.
+
 ## Texts to approve (model- or operator-facing strings)
 
 1. `read` schema description (`lua/core/tools.lua:446`), new sentences:
