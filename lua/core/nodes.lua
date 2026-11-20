@@ -646,8 +646,14 @@ function M.request(node, path, body, inner_headers)
         -- may still be running - which is exactly why the retry reuses the id.
         local decoded = decode_body(response.body)
         last_error = (decoded and decoded.error) or "node_no_answer"
+        -- One policy for every retry wait: the relay's hint goes through relay_backoff_ms like the 503
+        -- hints do, so it is never shorter than the hint, never longer than the cap, and never the same
+        -- instant for every caller. Before this it slept the hint raw - and the 504's hint is a fixed
+        -- 750 ms (rendezvous.rs), so every caller that missed its wait woke together.
         if decoded and decoded.retry_after_ms then
-          host.sleep(tonumber(decoded.retry_after_ms) / 1000)
+          -- The hint is MILLISECONDS here and relay_backoff_ms reads anything under 1000 as SECONDS
+          -- (its documented rule), so it is handed over as seconds: 750 ms -> 0.75 -> 750 ms.
+          host.sleep(M.relay_backoff_ms(attempt, tonumber(decoded.retry_after_ms) / 1000) / 1000)
         end
       elseif response and tonumber(response.status) == 409 and M.relay_code(response.body) == "request_in_flight" then
         -- The same rid is still running at the target: waiting re-collects it.
@@ -916,13 +922,21 @@ end
 
 -- Never a tight retry on an overloaded relay. The wait doubles per attempt, is capped, and is always
 -- jittered so a fleet that was cut off does not come back in lockstep - the storm's own second half.
--- A Retry-After hint (seconds, or the milliseconds this tree already uses) wins over the computed
--- wait, because the server is telling us the earliest time it can serve us again.
+--
+-- A Retry-After hint (seconds, or the milliseconds this tree already uses) is the server telling us the
+-- EARLIEST time it can serve us again, so the wait is never shorter than the hint. It used to be obeyed
+-- to the millisecond, which put every caller that hit the same hint back on the wire at the same instant -
+-- the herd this function exists to break. The wait is therefore spread UPWARD over [hint, 1.5 x hint].
+-- The cap is not decoration either: a hint of ten minutes blocked the caller for ten minutes, past its own
+-- M.RELAY_DEADLINE_SECONDS, so it waited for an answer it had already given up on.
 function M.relay_backoff_ms(attempt, retry_after)
   local hint = tonumber(retry_after)
   if hint then
     if hint < 1000 then hint = hint * 1000 end
-    return math.min(30000, math.floor(hint))
+    local floor = math.max(1, math.min(30000, math.floor(hint)))
+    local spread = math.min(30000, math.floor(floor * 1.5))
+    local jittered = math.floor(floor + math.random() * (spread - floor))
+    return math.max(floor, math.min(30000, jittered))
   end
   local base = 750 * 2 ^ math.max(0, (tonumber(attempt) or 1) - 1)
   -- The cap is on the WAIT, so it is applied after the jitter: capping first and then multiplying by
