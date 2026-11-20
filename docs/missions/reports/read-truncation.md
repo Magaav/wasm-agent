@@ -95,6 +95,29 @@ evicted page, a restarted node, or a scope with no record means no refusal, neve
 The fence is a guard against a partial view that is still in hand, not an audit of everything a
 session ever read.
 
+## Review r1 (independent): FIX, one MUST and five SHOULD, each its own commit
+
+| review item | commit | what changed |
+|---|---|---|
+| MUST 1 | `8911ab42` | `record_page` ran inside `envelope()`, which the shrink loop re-runs, so pages never served were recorded and a JSON-escaped overflow recorded a whole-file page first, turning the fence off. Now recorded once after the loop, from the returned page; a refused read records nothing. |
+| SHOULD 2 | `81b11053` | coverage must be end to end (`covered_pages`); two served pages with an unserved gap no longer let a spanning anchor through. |
+| SHOULD 1 + 5 | `505ea66d` | `range{}` only on a truncated page; a zero-byte page says "no bytes returned" and omits `last_byte`/`last_line`. |
+| SHOULD 3 | `59e98bc3` | the fence's edges pinned: partial-then-full clears, never-read file, another session, file changed on disk, write after a partial read. |
+| SHOULD 4 | `7a76d04d` | the report states where the record lives, its hard cap, and that it fails open. |
+
+`SHOULD 1 cost, measured` on a 17 B / 3-line whole-file read, JSON bytes: base `39bbf2b6` =
+863 B, review-r1 branch tip before the fix = 981 B, now = 912 B. The +15% the review measured is
++5.7% over the base, and what remains is exactly the two fields the brief asks for (`file_size`,
+`bytes_read`); `range{}` no longer appears on a whole-file page.
+
+Every one of these tests fails before its commit (each was run against the preceding commit in this
+worktree, not against the base `39bbf2b6`, which is what the round's per-item rule asks):
+
+`8911ab42` before: "and an anchor past the returned page is refused, not applied: nil"
+`81b11053` before: "an anchor spanning the unserved gap is refused, not applied: nil"
+`505ea66d` before: "a whole-file page carries no range{}: true" and "returned bytes 18-17 of 17"
+`59e98bc3` before: `p1.truncated` and `p.truncated` do not exist on the preceding commits
+
 ## Tests (rule 16: each fails on the base)
 
 `scripts/test-read-truncation.lua` - 68 checks after review r1, wired **into the fast path by
