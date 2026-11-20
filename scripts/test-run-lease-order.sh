@@ -15,6 +15,13 @@
 #
 # Scratch node only, no network, no model.
 set -u
+# python3 edits the scratch COPY of agent.lua that carries the base order. Without it this control
+# cannot build its negative case, so it says so and exits 77 - the gate's own skip code - rather than
+# passing vacuously.
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "SKIP test-run-lease-order: no python3 to build the scratch base-order copy"
+  exit 77
+fi
 WT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$WT" || exit 1
 SCRATCH_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/wa-lease-control.XXXXXX") || exit 1
