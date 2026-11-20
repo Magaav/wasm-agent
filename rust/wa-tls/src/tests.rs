@@ -280,3 +280,27 @@ fn a_plain_url_is_answered_without_reading_the_bundle() {
     assert!(!is_tls("http://127.0.0.1:8799/health"));
     assert!(!is_tls("not a url"));
 }
+
+/// The fixtures hold certificates and the two keys the scratch server presents - never a CA private
+/// key. A CA key can mint a certificate for any name, and this repository does not carry one: the
+/// script that produces the material keeps both in a temp directory and deletes them (review r1,
+/// item 6). The check is on the file names because that is what a reviewer sees.
+#[test]
+fn the_repository_holds_no_ca_private_key() {
+    let fixtures = scratch::fixtures();
+    let mut server_keys = 0;
+    for entry in std::fs::read_dir(&fixtures).expect("the fixture directory") {
+        let path = entry.expect("a fixture entry").path();
+        let name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default().to_string();
+        if !name.ends_with(".key") {
+            continue;
+        }
+        assert!(
+            !name.to_ascii_lowercase().contains("ca"),
+            "{}: a CA private key must not be in this repository - generate.sh keeps it in a temp directory",
+            path.display()
+        );
+        server_keys += 1;
+    }
+    assert_eq!(server_keys, 2, "the two server keys the scratch servers present are here");
+}
