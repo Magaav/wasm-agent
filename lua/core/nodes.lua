@@ -343,6 +343,48 @@ local PROBE_MAX_CHILDREN = 64
 -- The rule: if this ledger already has PROBE_MAX_CHILDREN live children owned by nodes-probe, start
 -- none and say probe_capacity by name. A peer whose child is already running is joined, not duplicated.
 local PROBE_OWNER = "nodes-probe"
+
+-- THE REGISTRY THAT ACTUALLY BOUNDS IT IS A FILE, NOT A TABLE (item 0, growth E, measured).
+--
+-- Both guards above are per Lua STATE, and a codemode run gets a FRESH one: measured on this node, one
+-- row ran 92 sandboxed scripts and each of them saw an empty registry, so one row alone started 552 probe
+-- children (~92 per peer). The only thing every state in this node shares is the disk.
+--
+-- So a lease is a small JSON file in the node's OWN data directory: a list of {at, peer}. A run reads it,
+-- drops entries older than PROBE_DEADLINE_S (that child is gone), and either JOINS the entry for its peer,
+-- writes one more, or - when the list is already PROBE_MAX_CHILDREN long - starts nothing and says
+-- probe_capacity by name. The file is small, it is written at most once per peer per deadline, and a write
+-- that fails degrades to the per-process table above with the reason named (never to an unbounded tree).
+local function probe_lease_file()
+  local ok, paths = pcall(dofile, "lua/core/paths.lua")
+  if not ok or type(paths) ~= "table" or type(paths.data) ~= "function" then return nil end
+  local dir = paths.data()
+  if type(dir) ~= "string" or dir == "" then return nil end
+  return dir .. "/nodes-probe-inflight.json"
+end
+
+local function probe_lease_read(path, now)
+  local ok, raw = pcall(host.read_file, path)
+  if not ok or type(raw) ~= "string" or raw == "" then return {} end
+  local decoded = json.decode(raw)
+  local rows = type(decoded) == "table" and (decoded.peers or decoded) or {}
+  local live = {}
+  if type(rows) == "table" then
+    for _, row in ipairs(rows) do
+      if type(row) == "table" then
+        local at = tonumber(row.at or 0) or 0
+        local peer = tostring(row.peer or "")
+        if peer ~= "" and (now - at) < PROBE_DEADLINE_S then live[#live + 1] = { at = at, peer = peer } end
+      end
+    end
+  end
+  return live
+end
+
+local function probe_lease_write(path, live)
+  local ok = pcall(host.write_file, path, json.encode({ peers = live }))
+  return ok
+end
 local function probe_children_alive(now)
   if type(host.operation) ~= "function" then return nil, "no_operation_host" end
   local ok, raw = pcall(host.operation, "list", json.encode({}))
@@ -390,6 +432,17 @@ local function probe_peers(peers, opts)
   local program = tostring(runtime.binary_path or "")
   if program == "" then return {} end
   local inflight, now, alive = probe_inflight()
+  -- THE SHARED LEDGER ON DISK (growth E). Every state in this node - including the fresh one each
+  -- codemode run gets - reads and writes this list, so one row with ninety-two sandboxed scripts cannot
+  -- start ninety-two sets of children.
+  local lease_path = probe_lease_file()
+  local lease, lease_why = nil, nil
+  if lease_path then
+    local ok, live = pcall(probe_lease_read, lease_path, now)
+    if ok and type(live) == "table" then lease = live else lease_why = "probe_lease_unreadable" end
+  else
+    lease_why = "probe_lease_no_data_dir"
+  end
   -- THE CROSS-PROCESS COUNT. When the host can answer, it is the authority on how many probe children this
   -- ledger has alive; when it cannot, the per-process registry below still bounds this process.
   -- MEASURED: host.operation(list) answers only THIS process ("operations":[] from a child that has
@@ -403,6 +456,11 @@ local function probe_peers(peers, opts)
   _G.WA_PROBE_SHARED_BOUND = why_shared or nil
   if shared and shared > alive then alive = shared end
   local launched, at_capacity = {}, {}
+  local lease_join, lease_add = {}, {}
+  if lease then
+    for _, entry in ipairs(lease) do lease_join[entry.peer] = true end
+    alive = math.max(alive, #lease)
+  end
   for _, peer in ipairs(peers or {}) do
     local id = tostring(peer.node_id or "")
     if id ~= "" then
@@ -410,6 +468,10 @@ local function probe_peers(peers, opts)
       if type(running) == "table" and (now - tonumber(running.at or 0)) < PROBE_DEADLINE_S then
         -- JOIN the child this process already has for this peer: one live child per peer per deadline.
         launched[#launched + 1] = { id = id, operation_id = running.op, joined = true }
+      elseif lease_join[id] then
+        -- JOIN the child ANOTHER state in this node already has for this peer (the lease on disk). It is
+        -- alive and it will answer; starting a second one is exactly the duplication growth E measured.
+        launched[#launched + 1] = { id = id, operation_id = "lease:" .. id, joined = true, from_lease = true }
       elseif alive >= PROBE_MAX_CHILDREN then
         -- Over the cap this process starts NOTHING for this peer and says so by name. It must not fall
         -- through to the in-process ask: that ask is a blocking http call per peer, so the cap would
@@ -426,11 +488,21 @@ local function probe_peers(peers, opts)
       if answer.operation_id then
         launched[#launched + 1] = { id = id, operation_id = answer.operation_id }
         inflight[id] = { op = answer.operation_id, at = now }
+        lease_add[#lease_add + 1] = { at = now, peer = id }
         alive = alive + 1
       end
       end
     end
   end
+  -- WRITE THE LEASE BACK: what this state started, plus what it found still live. A write that fails is
+  -- named; the per-process table above still bounded this call.
+  if lease_path and #lease_add > 0 then
+    local merged = {}
+    for _, entry in ipairs(lease or {}) do merged[#merged + 1] = entry end
+    for _, entry in ipairs(lease_add) do merged[#merged + 1] = entry end
+    if not probe_lease_write(lease_path, merged) then lease_why = "probe_lease_unwritable" end
+  end
+  _G.WA_PROBE_LEASE_BOUND = lease_why or nil
   local out = {}
   for _, id in ipairs(at_capacity) do
     out[id] = { capabilities = nil, reason = "probe_capacity" }

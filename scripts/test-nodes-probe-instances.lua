@@ -45,7 +45,17 @@ end
 -- here made the second call look like a cold process (measured while writing this row: "6 then 6").
 -- cold() is a process that has started nothing yet.
 local function reset() starts, awaits, reads = 0, 0, 0 end
-local function cold() reset(); _G.WA_PROBE_INFLIGHT = nil end
+local function cold()
+  reset()
+  _G.WA_PROBE_INFLIGHT = nil
+  -- The lease on disk is the bound that survives a fresh Lua state (growth E), so a COLD process is one
+  -- with no lease either: leave it in place and the cases below would join children an earlier case started.
+  local ok, paths = pcall(dofile, "lua/core/paths.lua")
+  if ok and type(paths) == "table" and type(paths.data) == "function" then
+    -- There is no host.delete_file (measured: nil); an EMPTY lease is how a lease is cleared.
+    pcall(host.write_file, paths.data() .. "/nodes-probe-inflight.json", json.encode({ peers = {} }))
+  end
+end
 
 -- 1. UNMARKED: an instance fans out, so the row can tell a guard from a wall that always says no.
 _G.WA_IN_PROBE_CHILD = nil
@@ -127,6 +137,29 @@ cold()
 B.list({ peers = peers, live_capabilities = true })
 assert(_G.WA_PROBE_SHARED_BOUND == "operation_list_unavailable",
   "a host that cannot list operations left the shared bound unnamed (saw " .. tostring(_G.WA_PROBE_SHARED_BOUND) .. ")")
+-- 8. THE LEASE SURVIVES A FRESH LUA STATE (growth E). A codemode run gets a brand-new state, so both
+--    _G tables are empty in it. The lease on disk is what it must find, or one row with ninety-two
+--    sandboxed scripts starts ninety-two sets of children - the 554 processes measured at row 37.
+host.operation = function(action, request)
+  local req = json.decode(request or "") or {}
+  if action == "start" then starts = starts + 1; return json.encode({ operation_id = "fixture-" .. starts }) end
+  if action == "await" then return json.encode({ settled = true }) end
+  if action == "read" then return json.encode({ content = "" }) end
+  return json.encode({})
+end
+cold()
+_G.WA_IN_PROBE_CHILD = nil
+A._in_probe_child = nil
+B.list({ peers = peers, live_capabilities = true })
+local first_set = starts
+assert(first_set > 0, "the first call in a cold state started no child, so the lease below proves nothing")
+-- THE FRESH STATE: every in-memory fact forgotten, the disk untouched.
+reset()
+_G.WA_IN_PROBE_INFLIGHT = nil
+local D = dofile("lua/core/nodes.lua")
+D.list({ peers = peers, live_capabilities = true })
+assert(starts == 0, "a fresh Lua state started " .. starts .. " MORE children for peers a previous state had"
+  .. " already leased (" .. first_set .. " then " .. starts .. ") - that is the 554-process fan-out")
 local why = "the ledger is asked (" .. asked .. " list call(s)) and a host that cannot answer says why"
 
 print("nodes probe instances ok: two real instances (" .. unmasked .. " children when unmarked), the marked one "
