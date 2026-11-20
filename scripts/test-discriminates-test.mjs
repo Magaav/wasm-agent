@@ -193,6 +193,28 @@ try {
     ok(/refused/.test(r.stdout + r.stderr), 'and the refusal is named');
   }
 
+  // MUST 1 (r2): a round that judges NOTHING - every row a named non-judgment - must not block a landing.
+  // Two shapes: a rust/ change whose only tests are Lua (all unrevertable), and a branch that only
+  // DELETES a test (not-applicable). Both exited 3 and blocked every landing of that shape.
+  fresh('change/rust-only-lua');
+  write('rust/thing.rs', 'fn main() {}\n');
+  // A LUA row: only Lua rows are unrevertable under a rust/ change, which is the shape that blocked.
+  write('scripts/test-lua-only.lua', 'assert(true, "a lua row")\n');
+  commit('rust plus a lua test');
+  {
+    const r = run('main');
+    ok(r.status === 0, 'MUST 1: all rows unrevertable exits 0, never 3: got ' + r.status);
+    ok(/nothing was judged/.test(r.stdout), 'MUST 1: and it says nothing was judged, not that it passed');
+  }
+  fresh('change/delete-only');
+  git('rm', '-q', 'scripts/test-existing.sh');
+  commit('delete a test only');
+  {
+    const r = run('main');
+    ok(r.status === 0, 'MUST 1: a delete-only test change exits 0, got ' + r.status);
+    ok(/nothing was judged/.test(r.stdout), 'MUST 1: and it names the non-judgment');
+  }
+
   // The real home is never the fixture.
   ok(env.WASM_AGENT_HOME === home && home !== os.homedir(), 'this check runs against a scratch home');
 } finally {

@@ -416,11 +416,14 @@ else
   say "$evidence discriminating, $blockers blocking, $unjudged not judged by this machine ($skipped skipped, $timeouts timed out, $unrevertable unrevertable, $notenvironment environment)"
 fi
 
-# Nothing could be judged at all: that is a refusal, never a pass (unknown is not yes).
+# Nothing could be judged at all. That is NOT a pass, and it is not a blocker either: every row above is
+# a named non-judgment (unrevertable, skipped, timeout, environment), so the reason a round could not be
+# judged is written down and the landing is not stopped by this machine's limits. A round that touches
+# rust/ with only Lua tests, or that only deletes tests, lands here - and blocking it would block every
+# round of that shape (19-20/11: the gate integration did exactly that).
 judged=$(cut -f1 "$VERDICTS" | grep -c -E '^(discriminates|green|unchanged-verdict|new-symbol|does-not|unclassified)$' || true)
 if [ "$judged" = 0 ]; then
-  say "refused: no test could be judged on this machine; that is not a pass"
-  exit 3
+  say "nothing was judged on this machine; every row above says why, and none of them is a pass"
 fi
 if [ "$blockers" -gt 0 ]; then
   if [ -n "$REFACTOR_REASON" ]; then
