@@ -113,8 +113,18 @@ ok(seen, "the resumed run lists the operation its session left running")
 
 -- And it can AWAIT it by id. The result survives the detach: the answer is the operation's own state,
 -- with its own bytes, not an "owner not attached" and not a lost id.
-local awaited = tools.dispatch(memory, "operation", { action = "await", id = id, wait_for = "settled" },
-  "master", ctx2)
+-- The await is BOUNDED by wait_ms (default 1 s, max 10 s; merged from origin/main, which stopped a
+-- relayed await holding a relay slot for ~35 s). This operation sleeps 4 s, so one bounded await can
+-- answer "still running" - that is the documented behaviour, not a failure. Ask again until it settles,
+-- with a bound so a never-settling operation still fails this test instead of hanging it.
+local awaited = nil
+local await_deadline = host.now() + 30
+while host.now() < await_deadline do
+  awaited = tools.dispatch(memory, "operation",
+    { action = "await", id = id, wait_for = "settled", wait_ms = 5000 }, "master", ctx2)
+  if type(awaited) == 'table' and awaited.settled ~= false then break end
+  host.sleep(0.1)
+end
 ok(type(awaited) == 'table', "await answered a record")
 eq(type(awaited) == 'table' and awaited.operation_id, id, "the answer is that operation")
 ok(type(awaited) == 'table' and awaited.error ~= "operation_not_yours",
