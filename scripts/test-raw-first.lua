@@ -42,6 +42,11 @@ tools.dispatch=function(m,name,args,role,ctx)
   if name=='codemode' then dispatched[#dispatched+1]=args.code end
   return real_dispatch(m,name,args,role,ctx)
 end
+local function guidance_in(text)
+  local tool = text:find(raw_code.guidance_for('tool_call'), 1, true) ~= nil
+  local block = text:find(raw_code.guidance_for('block'), 1, true) ~= nil
+  return tool, block
+end
 local checks=0
 local function check(v,label) assert(v,label);checks=checks+1 end
 
@@ -143,7 +148,10 @@ check(first.ok and first.reply=='42 it is','first: the run finished after the ru
 local system=first.requests[1].messages[1].content
 check(not has(declared(first.requests[1]),'codemode'),'first: codemode is not declared to the provider ('..table.concat(declared(first.requests[1]),',')..')')
 check(system:find(raw_code.FIRST_GUIDANCE,1,true),'first: the system prompt carries the run-block guidance verbatim')
-check(not system:find(raw_code.GUIDANCE,1,true),'first: the optional-extra sentence of `1` is not added')
+-- rel r5: main's M.GUIDANCE was replaced by one sentence per transport; 'first' must carry neither.
+local first_tool, first_block = guidance_in(system)
+check(not first_tool and not first_block,
+  'first: no transport sentence is added')
 check(not system:find(OLD_LINE1,1,true) and not system:find(OLD_DIRECT,1,true) and not system:find(OLD_SCRIPT,1,true),
   'first: no sentence tells the model to make a codemode call or a direct call')
 check(not system:find('also callable directly',1,true),'first: the deferred-tools line does not advertise direct calls')
@@ -244,7 +252,12 @@ check(raw_code.render_history(plain_list)==plain_list,'render_history returns a 
 -- 8. `1` keeps today's surface: codemode declared, tool rendering, the optional sentence -------------------
 local on=run('1',{{content='Let me compute.\n```js run\nreturn 6*7;\n```'},{content='42 it is'}})
 check(has(declared(on.requests[1]),'codemode'),'1: codemode stays declared')
-check(on.requests[1].messages[1].content:find(raw_code.GUIDANCE,1,true) and not on.requests[1].messages[1].content:find(raw_code.FIRST_GUIDANCE,1,true),'1: the optional sentence, not the first guidance')
+-- rel r5: this branch has ONE guidance source per transport (raw_code.guidance_for), so the
+-- assertion is stricter than main's: exactly one transport sentence and never the first-guidance one.
+local on_tool, on_block = guidance_in(on.requests[1].messages[1].content)
+check((on_tool or on_block) and not (on_tool and on_block)
+  and not on.requests[1].messages[1].content:find(raw_code.FIRST_GUIDANCE,1,true),
+  '1: exactly one transport sentence, and not the first guidance')
 check(not no_raw_pairing(on.requests[2]),'1: the raw call still goes back as a tool call/result pair')
 local off=run('codemode',{{content='plain'}})
 check(has(declared(off.requests[1]),'codemode') and not json.encode(off.requests[1]):find('js run',1,true),'off: codemode declared, no run-block wording')
