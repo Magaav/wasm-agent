@@ -1781,17 +1781,37 @@ function M:run(text, images)
   emit_counts(self)
   local inbox_ok,inbox_error=pcall(steering.finish,self.user,self.session_id,self.steering_run_id,ok and 'settled' or 'failed')
   if not inbox_ok then ok,result=false,'steering_settlement_failed: '..tostring(inbox_error) end
-  -- A run that did not answer says so by name, once - the durable row, the event stream, the bus
-  -- fact and, when a rerun can plausibly finish it, one wake (lua/core/run_failure.lua). Done
-  -- *before* the claim is released, so a session is never free with no record of why it stopped.
-  if not ok then
+  -- THE RUN LEASE IS RELEASED BEFORE THE FAILURE IS SIGNALLED (items 2 and 3, review 19/11).
+  -- Measured on avell (which runs the BASE binary): the guard stopped the turn at 22:53:0xZ and the
+  -- `--resume` at 22:53:18Z was refused `run_resource_refused resource_busy`, while a launch at
+  -- 22:54:33Z passed. The release was already unconditional, but it sat AFTER run_failure.handle -
+  -- which publishes to the durable bus and schedules a wake, real work that took over a minute here.
+  -- For that whole window the session was still claimed by a run that had already ended, so the next
+  -- turn of the same session was refused.
+  --
+  -- The order is what matters: mark uncertainty, release, THEN announce. A session free with no record
+  -- for a moment is recoverable (the record and the wake still land); a session that cannot be resumed
+  -- for a minute is not.
+  local marked=not ok and resources.uncertain(resource_ctx) or {ok=true}
+  if marked.ok~=true then
+    -- Its own line, before the release. A failed uncertainty mark used to be heard only when the
+    -- release failed too; what is lost here is the durable note, not the claim.
+    self.emit({type="error",error="resource_uncertain_failed: "..json.encode(marked)})
+    pcall(telemetry.event,self.session_id,self.run_id,"","run","uncertain_failed",{error=json.encode(marked)})
+  end
+  local released=resources.finish(resource_ctx)
+  if not released.ok then
+    released.uncertain=marked.ok~=true and marked or nil
+    self.emit({type="error",error="resource_release_failed: "..json.encode(released)})
+    ok,result=false,"resource_release_failed: "..json.encode(released)
+  end
+  -- Now the record, the event, the bus fact and (when a rerun can finish it) the one wake.
+  if (not ok) and self.failure==nil then
     local failure=self.pending_failure or {}
     local ending=run_failure.handle(tostring(result), {
       session_id=self.session_id,user_id=self.user,run_id=self.run_id,
       trace=failure.trace,round=failure.round,attempts=failure.attempts,
       debug=self.debug,subagent=self.subagent and true or false,
-      -- A wake answers a promise the session made itself; when the reader interrupts it, the one line that
-      -- says so names it (`lua/core/run_failure.lua`, `cli_view.failed`).
       self_wake=self.self_wake and true or false,
       last_user=self.last_user_text,
       record=function(turn) return record_turn(self, turn) end,
@@ -1800,29 +1820,7 @@ function M:run(text, images)
     })
     self.failure=ending.info
   end
-  -- Releasing the claim is unconditional on every exit path: a run that ended holds nothing, so
-  -- the next `wa resume` never needs the process killed. Uncertainty is not a lock - the host
-  -- records it in the claim's history and deletes the claim (rust/wa-capabilities/src/resources.rs).
-  -- The release happens on EVERY path, and marking uncertainty can never stand in for it: a failed run
-  -- whose uncertainty write failed kept `session:<id>` claimed, so the next `--resume` was answered
-  -- run_resource_refused (18/11). Both facts are reported; neither cancels the other.
-  local marked=not ok and resources.uncertain(resource_ctx) or {ok=true}
-  if marked.ok~=true then
-    -- Its own line, before the release. The release is unconditional, so a failed uncertainty mark used
-    -- to be heard only when the release failed too: with a successful "finish" the claim went, and the fact
-    -- that nobody recorded WHY the run was uncertain went with it, silently - the comment above said "both
-    -- facts are reported" and one of them was not (review of 18/11, item 5). What is lost here is the
-    -- durable note, not the claim; say exactly that, and let the release happen: it is the next line and it
-    -- runs on every path.
-    self.emit({type="error",error="resource_uncertain_failed: "..json.encode(marked)})
-    telemetry.event(self.session_id,self.run_id,"","run","uncertain_failed",{error=json.encode(marked)})
-  end
-  local released=resources.finish(resource_ctx)
-  if not released.ok then
-    released.uncertain=marked.ok~=true and marked or nil
-    self.emit({type="error",error="resource_release_failed: "..json.encode(released)})
-    ok,result=false,"resource_release_failed: "..json.encode(released)
-  end
+
   telemetry.finish(span,{ok=ok,error=not ok and tostring(result) or nil})
   if not ok then error(result, 0) end
   return result
