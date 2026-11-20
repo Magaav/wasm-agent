@@ -2,7 +2,10 @@
 
 Branch `wa/seam-audit-report` (split from `change/race-seam-audit-W` by review r1). Phase 1 of the
 brief: inventory + measurement, **no production code** - this branch carries the report and the
-benchmarks that produced it; the one migration the audit recommends is in `wa/sql-rows`.
+benchmarks that produced it; the one migration the audit recommends is in `wa/sql-rows`. The only file
+it adds under `rust/` is `wa-host-support/examples/json-cost.rs`, a dev example no shipped artifact
+compiles (examples are their own cargo target); every runtime crate is byte-identical to
+`origin/main`.
 
 Every number below was measured in this worktree, on this node (avell, 16 cores, linux x86_64), in a
 scratch `WASM_AGENT_HOME` and a scratch ledger, with the tree's own `wa` binary. Nothing here touched a
