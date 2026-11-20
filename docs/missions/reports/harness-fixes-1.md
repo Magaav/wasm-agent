@@ -1,25 +1,78 @@
-# harness-fixes-1 — six items, each with the commit that answers it, and what the review corrected
+# harness-fixes-1 — six items, what review r2 corrected, and the commits that answer each
 
-Base: `ac7717e0` (origin/main). Branch `change/harness-fixes-1`, never pushed. Built and verified on
-this node (avell) only.
+Base `ac7717e0`, merged forward to `origin/main` `39bbf2b6`. Built and verified on this node (avell)
+only. Nothing pushed.
 
-**Read the corrections section first if you read anything.** My first round got items 1–3 wrong: item 1
-missed the measured call shape, and items 2–3 were called "already fixed at base" on the strength of a
-test that passes on base — which proves the test was weak, not that the node was fixed, because avell
-**runs the base binary**. Round 2 (the review) re-measured all three from the rel-native transcript and
-fixed them.
+**Read this first.** Two rounds of review corrected me twice, and both corrections are recorded here
+rather than smoothed over:
 
-## Commits
+* **Round 1** — my report claimed items 2 and 3 were "already fixed at base" because a test passed on a
+  base worktree. That reasoning was wrong: avell **runs the base binary**, so both incidents happened
+  ON BASE. A test that passes there proves the test is weak, not that the node is fixed.
+* **Round 2** — my first fixes for items 1–3 still missed the measured shapes: the guard killed a
+  `codemode` call (not `operation`), the nested record says `status: 202` (a number, not a state
+  string), and a clock-only change in the pending answer was being counted as progress.
 
-| item | commit | what it does |
-| --- | --- | --- |
-| 6 | `35029ffe` | deploy swap fixture carries the provenance line its block installs from |
-| 1 | `d1d4d0f7` | a wait is recognised by its ANSWER; a repeat needs no new observation |
-| 5 | `e3844211` | an unknown field on `operation start` is refused by name |
-| 4 | `ab9eab4c` | a worktree failure names git's verdict, its exit code and the command |
-| — | `ad2ee462` | the end-to-end turn/operation proof (a regression guard; see the correction) |
-| 2 | `d5a98f03` | the run lease is released BEFORE the failure is signalled |
-| 3 | `15e7de31` | a second process reattaches to its session's live operations |
+## Branch A — ships now (`change/harness-fixes-1a`, in its own worktree)
+
+Three commits, reviewed OK, cherry-picked from `origin/main` (`39bbf2b6`) into a separate worktree. The
+main branch was not touched to build it.
+
+| commit | item |
+| --- | --- |
+| `12762a72` | item 6 — the deploy swap fixture carries the provenance line its block installs from |
+| `5f0d1ada` | item 5 — an unknown field on `operation start` is refused by name |
+| `5727436e` | item 4 — a worktree failure names git's verdict, its exit code and the command |
+
+**Branch head: `5727436e`.** Verified there: `node scripts/test-sentinel-service-deploy.cjs` → 17 checks,
+exit 0; `start_field_tests` → 3 passed; `scripts/test-land.lua` case 12b drives a failing worktree and
+the `merge` step carries git's words with `exit 128` and the command. Fast path on that branch:
+`fast path FAILED (1 of 49)` when first run, and the one red row was **not** these commits — it was
+`rust wa-capabilities`, whose two operation tests refuse a non-scratch HOME. Re-run with a scratch
+`HOME`: **348 passed, 0 failed**. That same defect is fixed on the main branch below.
+
+## Branch B — `change/harness-fixes-1`, merged with `origin/main`
+
+| commit | what it fixes |
+| --- | --- |
+| `69e4c829` | r2 item 1 — a reused served agent records EVERY failed turn, not only the first |
+| `cd0e02a7` | r2 item 2 — a wait on a foreign operation sleeps instead of spinning at 100% CPU |
+| `a2944fe6` | r2 item 4 — a dead owner's case has ONE named outcome per situation, cross-process |
+| `28dacda5` | r2 item 3 — release before announce, proved by a second PROCESS |
+| `b849c4f3` | r2 items 5 and 6 — the measured rel-native shape through the real loop; the clock is not progress |
+| `678e738b` | r2 item 3 — the lease-order control is wired into the gate |
+| `0af952d8` | merge `origin/main` (`39bbf2b6`); one conflict in `agent.lua` |
+| `9acc5518` | a Rust row in the fast path gets its own scratch HOME |
+
+The merge conflict was one hunk in `lua/core/agent.lua`: my `self.failure=nil` (r2 item 1) against
+`origin/main`'s `self.gate` assignment (done-gate-trial r2 item 1). Both are kept — they are independent
+per-run resets. Note `origin/main` carried that comment block **twice**; the duplicate was collapsed
+rather than merged in. `Manager::wait`'s foreign poll composes with the bounded `wait_ms` await loop the
+merge brought in: the loop bounds the total, `wait()` supplies the 100 ms sleep for an operation this
+process does not own.
+
+## Fast path, after the merge
+
+`fast path ok (55 checks, 0 skipped, 206s)` at `9acc5518`, ledger
+`/home/victor/wasm-agent/checkout/.git/worktrees/wt48/wa-fast-result.json`. Rows of interest, all `pass`:
+`rust wa-capabilities` (10s), `rust wa-operation` (3s), `scripts/test-no-silent-stops.lua`,
+`scripts/test-rel-native-replay.lua`, `scripts/test-run-lease-order.lua`,
+`scripts/test-two-failures-reused-agent.lua`, `scripts/test-operation-survives-turn.lua`,
+`scripts/test-land.lua`.
+
+Run under the suite lock (`flock /tmp/wa-suite-hf1.lock`), never beside another suite.
+
+### Two rows were red and neither was a regression I introduced
+
+* **`rust wa-capabilities`** — measured at `origin/main` in a separate worktree: the same two tests fail
+  with `refusing to run: this test starts real operations, so HOME must be a scratch or temp directory
+  ... (got /home/victor)`. `scripts/test.sh` runs Rust rows with `HOME=$GATE_HOME`; `scripts/fast.sh`
+  gave them none. Fixed in `9acc5518` — each Rust row gets `$work/home.XXXXXX`, with `CARGO_HOME`
+  untouched so `--offline` still resolves. Before the fix the row failed; after it: `fast: rust
+  wa-capabilities ok (10s)`.
+* **`deadline_covers_both_streams_without_serial_graces`** — passed **5/5** alone in my tree and **5/5**
+  at base (`39bbf2b6`). It is a load-sensitive timing row (its own comment records the same flake on
+  04/11); it went green in the confirming run. Not attributed to this change.
 ## Items and commits
 
 ### Item 6 — `scripts/test-sentinel-service-deploy.cjs` red on main — `35029ffe`
