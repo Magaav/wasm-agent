@@ -123,13 +123,23 @@ local rows = json.decode(host.sql_query('SELECT value FROM meta WHERE key=?', js
 ok(type(rows) == 'table' and rows[1], 'the frozen record is in the store')
 local value = json.decode(rows[1].value)
 ok(value.raw_mode ~= nil, 'the record written by this branch DOES carry raw_mode (the fixture drops it)')
+-- A PRE-RELEASE record: it has no raw_mode field at all, which is what the absence now means.
 value.raw_mode = nil
 host.sql_exec('INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)', json.encode({ key, json.encode(value) }))
 local legacy_read = pcache.read({ session_id = sid_l, user_id = 'master', role = 'master' })
-ok(type(legacy_read) == 'table' and legacy_read.raw_mode == nil, 'the legacy record reads back with NO raw_mode')
+ok(type(legacy_read) == 'table' and legacy_read.raw_mode == nil,
+  'the legacy record reads back with NO raw_mode')
 local legacy_thread = with({ WASM_AGENT_RAW_CODE = 'native' }, function() return bot(sid_l) end)
 eq(legacy_thread.mode_source, 'legacy', 'a thread without a recorded mode is named legacy')
 eq(legacy_thread.codemode_policy.raw_mode, 'only', 'and it keeps only - the mode its prefix was built in')
+
+-- A thread that DECIDED no raw channel keeps that decision (the switch's own word, `off`): it must not
+-- start asking the node again, and it must not read as legacy either.
+local sid_off = with({ WASM_AGENT_RAW_CODE = 'codemode' }, function() return bot(thread('decided no channel')).session_id end)
+local off_thread = with({ WASM_AGENT_RAW_CODE = 'native' }, function() return bot(sid_off) end)
+eq(off_thread.mode_source, 'record', 'a decided record is read, never re-measured')
+eq(off_thread.codemode_policy.raw_mode, raw.NO_CHANNEL, 'and it carries the word for no raw channel')
+eq(raw.mode_of(off_thread.codemode_policy), nil, 'which mode_of answers as no channel at all')
 
 -- ---------------------------------------------------------------- 4. a child takes the PARENT's mode
 eq(raw.child_mode({ raw_mode = 'native' }, nil), 'native', 'child_mode answers the recorded parent mode')

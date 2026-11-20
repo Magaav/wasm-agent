@@ -116,8 +116,26 @@ local OFF = { codemode = true, off = true, ["0"] = true, ["false"] = true, no = 
 -- prompt prefix on its first turn and the mode is part of what it froze (lua/core/prompt_cache.lua,
 -- raw_mode): a thread that started in only keeps only when the node's default later moves to native,
 -- because its whole transcript was written for that door.
+-- The policy field that says the mode was decided for this thread (nil is then a real answer).
+function M.decide(policy, mode)
+  if type(policy) ~= "table" then return policy end
+  policy.raw_mode = (type(mode) == "string") and mode or M.NO_CHANNEL
+  policy.raw_decided = true
+  return policy
+end
+
+-- The word a DECIDED "no raw channel" is recorded as. It is the switch's own word for it, so a reader
+-- that compares strings needs no second field (rel review r3, item 1).
+M.NO_CHANNEL = "off"
+
 function M.mode_of(policy)
-  if type(policy) == "table" and type(policy.raw_mode) == "string" then return policy.raw_mode end
+  if type(policy) == "table" then
+    if type(policy.raw_mode) == "string" then
+      if policy.raw_mode == M.NO_CHANNEL then return nil end
+      return policy.raw_mode
+    end
+    if policy.raw_decided == true then return nil end
+  end
   return M.mode()
 end
 

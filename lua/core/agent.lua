@@ -1146,23 +1146,30 @@ function M:build_context()
   --     the prefix it is about to freeze.
   local raw_code_lib=dofile('lua/core/raw_code.lua')
   local frozen_record
-  if self.subagent and type(self.subagent.raw_mode)=='string' then
-    self.codemode_policy.raw_mode=self.subagent.raw_mode
+  -- A string is a decision on its own; a nil needs the marker (rel review r3, item 1).
+  if self.subagent and (type(self.subagent.raw_mode)=='string' or self.subagent.raw_decided) then
+    raw_code_lib.decide(self.codemode_policy, self.subagent.raw_mode)
     self.mode_source='parent'
   else
     frozen_record=select(1,dofile('lua/core/prompt_cache.lua').read({
       session_id=self.session_id,user_id=self.user,role=self.role}))
-    if frozen_record and type(frozen_record.raw_mode)=='string' then
-      self.codemode_policy.raw_mode=frozen_record.raw_mode
+    if frozen_record and (type(frozen_record.raw_mode)=='string' or frozen_record.raw_decided) then
+      -- The record DECIDED (a string names a channel, a decided nil names none): never ask again.
+      raw_code_lib.decide(self.codemode_policy, frozen_record.raw_mode)
       self.mode_source='record'
     elseif frozen_record then
-      self.codemode_policy.raw_mode=raw_code_lib.LEGACY_THREAD_MODE
+      -- Written before the field existed: that thread prefix was built in only.
+      raw_code_lib.decide(self.codemode_policy, raw_code_lib.LEGACY_THREAD_MODE)
       self.mode_source='legacy'
     else
-      self.codemode_policy.raw_mode=raw_code_lib.mode()
+      raw_code_lib.decide(self.codemode_policy, raw_code_lib.mode())
       self.mode_source='switch'
     end
   end
+  -- The decision in its own field: run_body pins the codemode policy afresh PER RUN (it sets
+  -- self.codemode_policy=nil first), so the recorded mode has to live somewhere the run does not clear
+  -- (rel review r3, item 1).
+  self.raw_decision={mode=dofile('lua/core/raw_code.lua').mode_of(self.codemode_policy), decided=true}
   if self.subagent then
     -- A child deliberately does NOT read the operator instruction file: those
     -- rules name internal paths and the deploy shape, and a child is exactly the
@@ -1290,7 +1297,8 @@ function M:build_context()
   local cache_ctx={session_id=self.session_id,user_id=self.user,role=self.role}
   local frozen, prefix_report=prompt_cache.enforce(cache_ctx,{
     system=first, tools=tool_list, parts=parts, orchestration=orchestration_enabled,
-    facts=facts, catalog=catalog or tool_list, raw_mode=self.codemode_policy.raw_mode})
+    facts=facts, catalog=catalog or tool_list,
+    raw_mode=self.raw_decision.mode, raw_decided=self.raw_decision.decided})
   if frozen then first, tool_list = frozen.system, frozen.tools end
   if prefix_report and (prefix_report.corrupt or prefix_report.store_error) then
     self.emit({type='status',text='prompt prefix record '
@@ -2005,9 +2013,9 @@ function M:run_body(text, images)
   local codemode=dofile('lua/core/codemode_policy.lua')
   -- The mode is the THREAD's, recorded at build_context (rel review r3, item 1): pinning the policy
   -- afresh per run must not hand a mid-session switch to a thread that already froze its door.
-  local recorded_mode=self.codemode_policy and self.codemode_policy.raw_mode
+  local recorded=self.raw_decision
   self.codemode_policy=codemode.pin(memory,self.role,{session_id=self.session_id,user_id=self.user,role=self.role,subagent=self.subagent})
-  if type(recorded_mode)=='string' then self.codemode_policy.raw_mode=recorded_mode end
+  if recorded and recorded.decided then dofile('lua/core/raw_code.lua').decide(self.codemode_policy, recorded.mode) end
   if self.codemode_policy.unavailable then
     self.emit({ type = 'status', text = 'code mode unavailable ('..tostring(self.codemode_policy.unavailable):sub(1,160)..') - this run uses ordinary tools' })
   end
