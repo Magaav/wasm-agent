@@ -403,13 +403,17 @@ fi
 
 counts=$(cut -f1 "$VERDICTS" | sort | uniq -c | awk '{printf "%s=%s ", $2, $1}')
 blockers=$(cut -f1 "$VERDICTS" | grep -c -E '^(does-not|unclassified)$')
-unjudged=$(cut -f1 "$VERDICTS" | grep -c -E '^(environment|skipped|timeout|unrevertable)$')
+skipped=$(cut -f1 "$VERDICTS" | grep -c '^skipped$')
+timeouts=$(cut -f1 "$VERDICTS" | grep -c '^timeout$')
+unrevertable=$(cut -f1 "$VERDICTS" | grep -c '^unrevertable$')
+unjudged=$(( skipped + timeouts + unrevertable ))
+notenvironment=$(cut -f1 "$VERDICTS" | grep -c '^environment$')
 evidence=$(cut -f1 "$VERDICTS" | grep -c -E '^(discriminates|green)$')
 say "rows: $counts"
 if [ -n "$REFACTOR_REASON" ]; then
-  say "$evidence test(s) still green on the base code, $blockers blocking, $unjudged not judged by this machine"
+  say "$evidence test(s) still green on the base code, $blockers blocking, $unjudged not judged by this machine ($skipped skipped, $timeouts timed out, $unrevertable unrevertable, $notenvironment environment)"
 else
-  say "$evidence discriminating, $blockers blocking, $unjudged not judged by this machine"
+  say "$evidence discriminating, $blockers blocking, $unjudged not judged by this machine ($skipped skipped, $timeouts timed out, $unrevertable unrevertable, $notenvironment environment)"
 fi
 
 # Nothing could be judged at all: that is a refusal, never a pass (unknown is not yes).
