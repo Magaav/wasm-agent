@@ -908,10 +908,18 @@ enum Edge { Open, Body, Close }
 fn card_edge(cells: &[(String, char, usize)]) -> Option<Edge> {
     let lead = cells.iter().position(|c| c.1 != ' ' && c.1 != COPY_ICON)?;
     if !cells[lead].0.contains(CARD_BORDER) { return None; }
+    // A TABLE wears the same border role and must not be read as a card: its rules carry a column
+    // divider or a closing corner a card never has, and its body rows END in a border bar of their own
+    // (one per column plus the closing one) where a card row has only the one it opens with. Cut by
+    // cells, a table row would take the continuation mark into its closing bar and lose a column.
+    let table_rule = cells.iter().any(|c| matches!(c.1, '\u{252c}' | '\u{253c}' | '\u{2534}' | '\u{2510}' | '\u{2518}' | '\u{2524}'));
+    let bars: Vec<usize> = cells.iter().enumerate().filter(|(_, c)| c.1 == '\u{2502}').map(|(i, _)| i).collect();
+    let last_visible = cells.iter().rposition(|c| c.1 != ' ');
+    let table_body = bars.len() >= 2 && last_visible == bars.last().copied();
     match cells[lead].1 {
-        '\u{250c}' => Some(Edge::Open),
-        '\u{2502}' => Some(Edge::Body),
-        '\u{2514}' => Some(Edge::Close),
+        '\u{250c}' if !table_rule => Some(Edge::Open),
+        '\u{2514}' if !table_rule => Some(Edge::Close),
+        '\u{2502}' if !table_body => Some(Edge::Body),
         _ => None,
     }
 }
@@ -1855,6 +1863,66 @@ mod tests {
         assert_eq!(after.rows(trailing, 24), wrap_rows(trailing, 24), "the frame closed with the card");
     }
 
+
+
+    /// The rows `lua/core/markdown.lua` writes for a TABLE: the same `mdCodeBlockBorder` role as a card,
+    /// but a rule carries a column divider and a body row ends in its own border bar.
+    fn table_rows(wide: bool) -> Vec<String> {
+        let border = CARD_BORDER;
+        let cell = "a table cell with quite a lot of words in it to make the table wide";
+        let row = |a: &str, b: &str| format!("{border}\u{2502}{RESET} {a} {border}\u{2502}{RESET} {b} {border}\u{2502}{RESET}");
+        let width = |text: &str| text.chars().count() + 2;
+        let rule = |left: &str, mid: &str, right: &str| {
+            let a = if wide { width(cell) } else { 10 };
+            let b = if wide { width("another value") } else { 15 };
+            format!("{border}{left}{}{mid}{}{right}{RESET}", "\u{2500}".repeat(a), "\u{2500}".repeat(b))
+        };
+        let (a, b) = if wide { (cell, "another value") } else { ("head one", "head two") };
+        vec![
+            rule("\u{250c}", "\u{252c}", "\u{2510}"),
+            row(a, b),
+            rule("\u{251c}", "\u{253c}", "\u{2524}"),
+            row("a value", "another value"),
+            rule("\u{2514}", "\u{2534}", "\u{2518}"),
+        ]
+    }
+
+    #[test]
+    fn a_table_is_not_a_card_and_keeps_the_prose_rule_byte_for_byte() {
+        // A table is painted with the card's own border role and opens with a bar row, so a check that
+        // only looked at the glyph and the colour would cut it by cells - losing its closing bar and a
+        // column. Every row of a table must come out of the card wrapper exactly as prose made it.
+        let mut cards = CardWrap::default();
+        for wide in [false, true] {
+            for width in [120usize, 60, 40] {
+                for line in table_rows(wide) {
+                    let from_card = cards.rows(&line, width);
+                    let from_prose = wrap_rows(&line, width);
+                    assert_eq!(from_card, from_prose,
+                        "table row wrapped as prose at {width}, wide={wide}: {line:?}");
+                    assert!(!from_card.iter().any(|r| r.contains("\u{21aa}")),
+                        "a table row is never given a card continuation mark at {width}: {from_card:?}");
+                    // Its own bars survive: a cut table row that ate its closing bar would be shorter.
+                    let before = crate::selection::plain(&line).matches('\u{2502}').count();
+                    let after: usize = from_card.iter().map(|r| crate::selection::plain(r).matches('\u{2502}').count()).sum();
+                    assert_eq!(after, before, "every table bar survives at {width}: {from_card:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_card_after_a_table_is_still_a_card() {
+        // The frame state must come out of the table clean: a table's closing rule looks like nothing
+        // the card logic knows, so the next fence still opens and closes on its own rows.
+        let mut cards = CardWrap::default();
+        for line in table_rows(false) { cards.rows(&line, 40); }
+        let code = "for f in a b c; do echo one rather long line of shell here to push past the border; done";
+        let rows: Vec<String> = card_rows(&[code], false).iter().flat_map(|l| cards.rows(l, 40)).collect();
+        let plain: Vec<String> = rows.iter().map(|r| crate::selection::plain(r)).collect();
+        assert!(plain.iter().any(|r| r.contains("\u{2502}\u{21aa}")), "the card still cuts: {plain:?}");
+        assert!(!plain.iter().any(|r| r.trim_end() == "\u{2502}"), "no empty bar: {plain:?}");
+    }
 
     #[test]
     fn a_focused_card_is_cut_two_columns_narrower_and_keeps_its_bar() {
