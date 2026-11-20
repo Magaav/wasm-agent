@@ -70,7 +70,14 @@ fn inherit_ca_bundle(env: &mut Vec<(String, String)>, lookup: &dyn Fn(&str) -> O
         return;
     }
     if let Some(bundle) = lookup(FILE).filter(|value| !value.is_empty()) {
-        env.push((NODE.to_string(), bundle));
+        // Only a bundle the child can actually read is forwarded (review r2, MUST 1): Node answers an
+        // unreadable NODE_EXTRA_CA_CERTS with a warning and then quietly uses its default roots, so
+        // forwarding it would hide the broken machine setting. The refusal is named on stderr instead.
+        if std::fs::File::open(&bundle).is_ok() {
+            env.push((NODE.to_string(), bundle));
+        } else {
+            eprintln!("wa-operation: ssl_cert_file_unreadable: SSL_CERT_FILE={bundle} cannot be read, so it is not forwarded as {NODE}");
+        }
     }
 }
 
@@ -89,9 +96,17 @@ mod ca_bundle_tests {
 
     #[test]
     fn ssl_cert_file_becomes_the_childs_node_bundle() {
+        let bundle = wa_tls::scratch::cert_file().display().to_string();
         let mut env = Vec::new();
-        inherit_ca_bundle(&mut env, &lookup(&[("SSL_CERT_FILE", "/etc/sandbox/ca.pem")]));
-        assert_eq!(env, vec![("NODE_EXTRA_CA_CERTS".to_string(), "/etc/sandbox/ca.pem".to_string())]);
+        inherit_ca_bundle(&mut env, &lookup(&[("SSL_CERT_FILE", &bundle)]));
+        assert_eq!(env, vec![("NODE_EXTRA_CA_CERTS".to_string(), bundle)]);
+    }
+
+    #[test]
+    fn an_unreadable_bundle_is_not_forwarded() {
+        let mut env = Vec::new();
+        inherit_ca_bundle(&mut env, &lookup(&[("SSL_CERT_FILE", "/nonexistent/wa-ssl-cert-file/x.pem")]));
+        assert_eq!(env, Vec::<(String, String)>::new(), "Node would ignore it and fall back silently");
     }
 
     #[test]
