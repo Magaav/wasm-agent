@@ -890,7 +890,7 @@ impl CardWrap {
     /// corner stays one row and moves the frame; everything else is the prose rule, byte for byte.
     pub fn rows(&mut self, line: &str, width: usize) -> Vec<String> {
         let (cells, _) = cells_of(line);
-        match card_edge(&cells) {
+        match card_edge(&cells, self.open) {
             Some(Edge::Open) => { self.open = true; wrap_rows(line, width) }
             Some(Edge::Close) => { self.open = false; wrap_rows(line, width) }
             Some(Edge::Body) if self.open => wrap_card(&cells, width),
@@ -915,7 +915,7 @@ fn border_before(cells: &[(String, char, usize)], at: usize) -> bool {
     cells[..=at.min(cells.len() - 1)].iter().any(|c| c.0.contains(CARD_BORDER))
 }
 
-fn card_edge(cells: &[(String, char, usize)]) -> Option<Edge> {
+fn card_edge(cells: &[(String, char, usize)], in_frame: bool) -> Option<Edge> {
     let lead = cells.iter().position(|c| c.1 != ' ' && c.1 != COPY_ICON)?;
     if !border_before(cells, lead) { return None; }
     // A TABLE wears the same border role and must not be read as a card: its rules carry a column
@@ -925,7 +925,10 @@ fn card_edge(cells: &[(String, char, usize)]) -> Option<Edge> {
     let table_rule = cells.iter().any(|c| matches!(c.1, '\u{252c}' | '\u{253c}' | '\u{2534}' | '\u{2510}' | '\u{2518}' | '\u{2524}'));
     let bars: Vec<usize> = cells.iter().enumerate().filter(|(_, c)| c.1 == '\u{2502}').map(|(i, _)| i).collect();
     let last_visible = cells.iter().rposition(|c| c.1 != ' ');
-    let table_body = bars.len() >= 2 && last_visible == bars.last().copied();
+    // Inside a frame that is already OPEN there is no table to protect: markdown.lua never nests one,
+    // so a code line that merely READS like a table row (`│ a │`) is card code and is cut - the review
+    // caught it being wrapped as prose instead.
+    let table_body = !in_frame && bars.len() >= 2 && last_visible == bars.last().copied();
     match cells[lead].1 {
         // The OPENING must be exact: a card's is `┌─` and nothing else, or `┌─ <lang>` with the lang from
         // the set markdown.lua accepts (fence_of: letters, digits and `+ - _ # .`). A compiler diagnostic is
@@ -1966,20 +1969,19 @@ mod tests {
 
     #[test]
     fn a_table_looking_code_line_inside_a_real_card_is_still_card_code() {
-        // A code line may be anything, including something that reads like a table row (`│ a │ b │`).
-        // The table check exists to keep a TABLE out of a card frame; inside a frame that is already open
-        // there is no table to protect, and the row must be cut like any other card code.
-        let code = "│ a │ b │ and a good deal of text after it so the row has to be cut at forty";
+        // A code line may be anything, including something that reads like a table row. The table check
+        // exists to keep a TABLE out of a card frame; inside a frame that is already OPEN there is no table
+        // to protect (markdown.lua never nests one), so the row must be cut like any other card code.
+        let code = "│ a long line of text that must be cut by cells and ends with a bar │";
         let mut cards = CardWrap::default();
-        for line in card_rows(&[code], false) {
-            let rows = cards.rows(&line, 40);
-            let plain: Vec<String> = rows.iter().map(|r| crate::selection::plain(r)).collect();
-            let shown = plain.join("\n");
-            if line.contains('a') && line.contains('b') && plain.iter().any(|r| r.contains("and a good deal")) {
-                assert!(plain.iter().any(|r| r.contains("│↪")), "the table-looking card line is cut: {shown}");
-            }
-        }
+        let rows = card_rows(&[code], false).iter().flat_map(|line| cards.rows(line, 40)).collect::<Vec<String>>();
+        let plain: Vec<String> = rows.iter().map(|r| crate::selection::plain(r)).collect();
+        let shown = plain.join("\n");
+        assert!(plain.iter().any(|r| r.contains("│↪")),
+            "a table-looking code line inside an open card is cut like card code: {shown}");
+        assert!(!plain.iter().any(|r| r.trim_end() == "│"), "and no row is only a bar: {shown}");
     }
+
     #[test]
     fn a_table_is_not_a_card_and_keeps_the_prose_rule_byte_for_byte() {
         // A table is painted with the card's own border role and opens with a bar row, so a check that
