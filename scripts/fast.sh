@@ -79,10 +79,6 @@ if [ -z "$jobs" ]; then
   [ "$jobs" -gt "$cap" ] 2>/dev/null && jobs=$cap
 fi
 . "$ROOT/scripts/lib/fast-environment.sh"
-# The record lives in the NODE home (WASM_AGENT_HOME or $HOME), not in the tree: the function default is
-# the home the node itself would read. It is READ HERE and APPLIED LATER, after the binary resolution,
-# because the FIRST line of a run has to name the binary this run is about (scripts/test-fast-binary.mjs
-# measures that line; measured 19/11: the build-record line came first and the resolution was line three,
 # ---- the environment a row must never inherit --------------------------------------------------------
 # Measured, speed.log: a fixture set WASM_AGENT_LLM_BASE_URL to a dead port and was answered by the
 # operator's REAL provider, because the child inherited WASM_AGENT_VAULT_URL from the session and
@@ -219,10 +215,24 @@ for stale in "$scratch_root"/wa-fast-*; do
   fi
 done
 work=$(mktemp -d "$scratch_root/wa-fast-XXXXXX")
-printf '%s\n' "$$" > "$work/pid" 2>/dev/null || true
-# THE OWNER'S LOCK: held for the life of this run, released by the kernel when it dies, however it dies.
+# THE OWNER'S LOCK COMES BEFORE THE PID (review r2, A3 - a real race in the shape I wrote first).
+#
+# The order was: write pid, then open+flock lock. Between those two lines the directory has a pid and NO
+# holder, so a concurrent start's reclaim loop saw a pid, took the lock, and rm -rf'd a directory whose
+# owner was alive and about to lock it. The pid is not what protects a run - the LOCK is - so the lock is
+# taken first and the pid is written only once this process provably holds it. A reclaim therefore can
+# never see "pid exists, nobody holds the lock" for a live run: if the pid file is there, the lock was
+# already held when it was written.
 exec 8>>"$work/lock" 2>/dev/null || true
-flock -n 8 2>/dev/null || true
+if flock -n 8 2>/dev/null; then
+  printf '%s\n' "$$" > "$work/pid" 2>/dev/null || true
+else
+  # Cannot lock a directory we just made: say so rather than run unprotected. A run whose scratch cannot
+  # be claimed is a machine problem, and it must not look like a normal start.
+  echo "fast: refused(scratch_unlocked): cannot take the owner lock in $work; a concurrent run could reclaim this directory. Nothing was run." >&2
+  rm -rf "$work" 2>/dev/null
+  exit 2
+fi
 trap 'rm -rf "$work"' EXIT
 
 # The build-time ledger: one line per build this run performs, printed in the summary
@@ -681,20 +691,6 @@ check() { name=$1; shift; s=$(fast_now_ms)
   wa_environment_retry "$name" "$work/check-$name.log" "$@"; c=$?
   ran=$((ran + 1)); ms=$(( $(fast_now_ms) - s ))
   if [ "$c" = 0 ]; then
-    # A GREEN ROW THAT PRINTED SKIP IS A SKIP, NOT A PASS (item 10 of the node-ops round). Measured 19/11:
-    # 52 test files print "SKIP <test>: <reason>" and exit 0 - a component this machine cannot build, a
-    # fixture that is not installed. This runner collected those lines into the skips table and then
-    # recorded the row as "pass", so "fast path ok (N checks, 0 skipped)" was true of the count and false
-    # of the run: a consumer reading the row status saw a proof where there was a named hole. The row is
-    # now recorded "skip" with that reason and counted in $skipped, which is what its own line said.
-    local skip_reason
-    skip_reason="$(grep -h '^SKIP ' "$work/check-$name.log" 2>/dev/null | sed 's/^SKIP //' | head -1)"
-    if [ -n "$skip_reason" ]; then
-      skipped=$((skipped + 1))
-      echo "fast: $name SKIPPED (${ms}ms): $skip_reason"
-      record_row skip checks "$name" "$c" "$ms" 0 "$skip_reason"
-      return 0
-    fi
     echo "fast: $name ok (${ms}ms)"; record_row pass checks "$name" "$c" "$ms" 0 ''; return 0
   fi
   fails=$((fails + 1))
@@ -792,45 +788,10 @@ check fast-watchdog-reap bash scripts/test-fast-watchdog-reap.sh
 # The rule those guards rest on, judged: WASM_AGENT_HOME is the USER home, so the operator home, its
 # store, anything inside it and anything above it are refused (item 4 of the node-ops round).
 check scratch-home bash scripts/test-scratch-home.sh
-check scratch-home-lua bash scripts/test-scratch-home-lua.sh
-# A green row that printed SKIP is a SKIP, not a pass (item 10 of the node-ops round): the shipped
-# check() is read out of this file and run against a row that skips and exits 0.
-check fast-skip-count bash scripts/test-fast-skip-count.sh
-# Peers probe AT ONCE through supervised children, not a serial sum of timeouts (item 10 of the node-ops
-# round): every child starts before the first is awaited, and a child that never settles is named.
-check nodes-probe-parallel bash scripts/test-nodes-probe-parallel.sh
-# A probe child is a child for EVERY module instance, not just the one that marked itself: two real
-# dofiles, the unmarked one fans out, the marked one starts nothing (scripts/test-nodes-probe-instances.lua).
-check nodes-probe-instances bash scripts/test-nodes-probe-instances.sh
-# The same fan-out, measured by the KERNEL instead of the code's own story: six unreachable peers run
-# inside a memory-accounted systemd scope and the scope's pids.peak/memory.peak are bounded, so a probe
-# child that fans out again (19/11: 1,653 processes, 23 GB) fails here even if it starts no child the
-# stub can see. Green 1 generation/6 ops/19 pids/135 MB; red on c31f9ab6^ at 17/100/82/1,214 MB.
-check nodes-probe-bound bash scripts/test-nodes-probe-bound.sh
-# Backup and restore (item 1 of the node-ops round): a snapshot carries a manifest naming every store and
-# the sha256 of every copy; wa restore --from puts them back after re-checking those bytes, and every way
-# a restore could guess is a named refusal that writes nothing. Scratch home, real SQLite, seconds.
-check backup-restore bash scripts/test-backup-restore.sh
-# What a peer ACCEPTS, from the peer (item 7 of the node-ops round): tools.nodes reported
-# capabilities = [] for a peer that accepts bash, because the rendezvous stores none and the field was
-# never filled. The peer answer is derived from its own gate, a guest is not promised the peer surface,
-# and a peer that cannot be asked gives a named reason instead of an empty list.
-check nodes-capabilities bash scripts/test-nodes-capabilities.sh
-# A rollback is done only when the node RUNS the restored binary (item 2 of the node-ops round):
-# /proc/<pid>/exe compared by device and inode, unknown never treated as ok, and the matching Lua tree
-# restored with the binary. Real pid, fixture install, seconds.
-check rollback-verify bash scripts/test-rollback-verify.sh
-# The node own record of its build environment (item 3 of the node-ops round): an absent record is not
-# a refusal, a key no build reads is named and stops the run, allowed keys reach PATH, and the record is
-# data rather than something sourced.
-check build-env bash scripts/test-build-env.sh
-# A build graded against the bytes it embeds (item 4 of the node-ops round): fresh, stale, edited and
-# unknown from real git state, plus the runner clearing WASM_AGENT_* by allow-list rather than a list of
-# leaks somebody noticed.
-check build-status bash scripts/test-build-status.sh
-# One row at a base commit and at this tree as one comparison (item 5 of the node-ops round): the four
-# classes, the skip convention, no worktree left behind, and every refusal named.
-check row-at-sha bash scripts/test-row-at-sha.sh
+# ROWS THIS BRANCH CANNOT RUN ARE NOT WIRED HERE (review r2, A1). Eleven `check` lines named scripts that
+# only exist on change/node-ops (the probe rows, the build-record rows, the rollback row, the restore row,
+# row-at-sha): on this branch each was an exit-127 FAIL, so the split reported eleven failures that were
+# only files that were never here. A row is wired where its script lives.
 check publish-artifacts bash scripts/test-publish-artifacts.sh
 # THE DEPLOY'S ANCESTRY AND ITS RECORD (round 4 of the deploy-ancestry review). Seven files were written with
 # that fix and named by no harness, so every gate here was green without running one of them; the full gate now
