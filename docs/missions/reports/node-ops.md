@@ -328,6 +328,36 @@ Row: `scripts/test-nodes-probe-instances.lua`, wired in `scripts/fast.sh:776` (r
 `nodes-probe-parallel`) and `scripts/test.sh:912`. Both red halves ran in their own detached worktrees
 (`/tmp/base-a` at `48ca92de^`, `/tmp/base-b` at `48ca92de`), never with `git stash`.
 
+### Growths C, D and E: the crowd was four bugs, not one (`81d0f69f`, `a5f7d649`, `6d2fd5ff`, `42714e6c`)
+
+After A and B the suite still died at 4 G, 6 G, 8 G and 12 G scopes, in a crowd the 1 s sampler caught twice:
+**1,234 `wa` processes / ~31 GB at row 45**, and later **554 `nodes probe` children at row 37, about 92 per
+peer**. Each one is a different defect:
+
+**C - a finished row kept its children (`81d0f69f`).** `scripts/lib/fast-watchdog.sh` killed a row's process
+group only when the row HUNG (`return 124`). A row that exited 0 left every background child it had forked
+running, and the next row added more. The sampler named the parent of one survivor: a `run_lua` child of
+`scripts/test-session-vars.lua` - a row that had already printed ok. Each such row alone peaked at 63 MB;
+the crowd was the sum of what nobody reclaimed. The watchdog now sweeps the group after a normal exit too,
+and prints how many it killed.
+
+**D - the bound was asked of the wrong thing (`a5f7d649`).** `host.operation("list")` reads only THIS
+process (measured: a child with six siblings running answers `"operations":[]`), so it can never be the
+authority; taking it instead of the local count was a regression that read an empty list as zero alive and
+disabled the cap. The bound is `max(local, shared)` and the reason it could not be read is named.
+
+**E - the lease had to be on DISK (`6d2fd5ff`), and the runner had to build outside the store (`42714e6c`).
+The first is the real bound: a codemode run gets a FRESH Lua state, so both the marker and the in-flight
+registry were empty in each of the ninety-two sandboxed runs one row made. The lease is
+`<data>/nodes-probe-inflight.json`. The second is why four rows still failed after that: `fast.sh:221` built
+its work dir under `${TMPDIR:-/tmp}`, and this node's `TMPDIR` is INSIDE the operator store, so the four
+rows that check their home refused it - correctly - and they were the only thing between this tree and a
+green run.
+
+Each of these was measured before it was fixed, and each fix has a row that is RED on the commit before it:
+`scripts/test-fast-watchdog-reap.sh` (rc=1 on the base: the sweep never spoke), and case 8 of
+`scripts/test-nodes-probe-instances.lua` (a FRESH Lua state must join what a previous state leased).
+
 **Still named and NOT fixed:** a probe child OUTLIVED the run that started it (`out.log:70425` lists them
 after the run ended), so a supervised child whose parent dies is still cancelled by nobody but its parent.
 The in-flight registry bounds one process's live children; it does not reclaim an orphan of a dead parent.
