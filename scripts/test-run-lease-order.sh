@@ -3,26 +3,30 @@
 # behaviour (announce the failure, THEN release the lease) and requires the Lua test to FAIL. A test that
 # passes both ways proves nothing, so this is what makes "release before announce" a measured fact.
 #
-#   1. the row passes with the tree as it is;
-#   2. reverted to the base order, the row FAILS (by EXIT CODE, not by the word it prints - a failing row
-#      still prints its "ok ... N checks, M failed" line, which is how a grep-based control would lie);
-#   3. the file is restored byte for byte and the row passes again.
+# IT NEVER WRITES THE TREE (review r2, item 4). The earlier version patched lua/core/agent.lua in place
+# and restored it afterwards; a run interrupted between those two steps left the checkout modified, which
+# is how a control script becomes the incident. This copies the Lua root to a scratch directory, patches
+# the COPY, and points WASM_AGENT_LUA_ROOT at it. Nothing outside ${TMPDIR:-/tmp} is ever written.
 #
-# Scratch node only, no network, no model: the whole thing is seconds.
+#   1. the row passes against this tree;
+#   2. against a scratch copy with the base order, the row FAILS (by EXIT CODE - a failing row still
+#      prints its "ok ... N failed" line, which a grep-based control would read as a pass);
+#   3. the row passes again against this tree.
+#
+# Scratch node only, no network, no model.
 set -u
 WT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$WT" || exit 1
-BACKUP=$(mktemp -t wa-agent-order.XXXXXX)
-cp lua/core/agent.lua "$BACKUP" || exit 1
-restore() { cp "$BACKUP" lua/core/agent.lua; rm -f "$BACKUP"; }
-trap restore EXIT
+SCRATCH_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/wa-lease-control.XXXXXX") || exit 1
+trap 'rm -rf "$SCRATCH_ROOT"' EXIT
 
-# Run the row in its own scratch node. Answers the row's OWN exit status.
+# Run the row against a given Lua root. Answers the row's OWN exit status.
 run_row() {
-  local scratch out code
-  scratch=$(mktemp -d "${TMPDIR:-/tmp}/wa-lease-order.XXXXXX") || return 99
+  local root=$1 scratch out code
+  scratch=$(mktemp -d "${TMPDIR:-/tmp}/wa-lease-node.XXXXXX") || return 99
   mkdir -p "$scratch/home"
-  out=$(WASM_AGENT_HOME="$scratch/home" WASM_AGENT_LUA_ROOT="$WT" \
+  out=$(WASM_AGENT_HOME="$scratch/home" WASM_AGENT_LUA_ROOT="$root" \
+    LEASE_PROBE_BIN="${WA_BIN:-wa}" \
     WA_SCRIPT=scripts/test-run-lease-order.lua timeout 300 "${WA_BIN:-wa}" --db "$scratch/x.db" 2>&1)
   code=$?
   rm -rf "$scratch"
@@ -30,18 +34,21 @@ run_row() {
   return $code
 }
 
-echo "lease-order: the row as the tree is"
-if ! run_row | tail -3; then
-  echo "lease-order: the row FAILED on the tree as it is - fix the row before trusting this control" >&2
+echo "lease-order: the row against this tree"
+if ! run_row "$WT" | tail -2; then
+  echo "lease-order: the row FAILED on this tree - fix it before trusting this control" >&2
   exit 1
 fi
-if ! run_row >/dev/null; then
-  echo "lease-order: the row FAILED on the tree as it is - fix the row before trusting this control" >&2
+if ! run_row "$WT" >/dev/null; then
+  echo "lease-order: the row FAILED on this tree - fix it before trusting this control" >&2
   exit 1
 fi
 
-echo "lease-order: reverting to the base order (announce, then release)"
-python3 - "$WT/lua/core/agent.lua" <<'PY' || exit 1
+echo "lease-order: building a scratch Lua root with the base order (announce, then release)"
+COPY="$SCRATCH_ROOT/tree"
+mkdir -p "$COPY"
+cp -a "$WT/lua" "$COPY/lua" || exit 1
+python3 - "$COPY/lua/core/agent.lua" <<'PY' || exit 1
 import sys
 p = sys.argv[1]
 t = open(p).read()
@@ -72,17 +79,15 @@ t = t[:a] + base + t[b:]
 open(p, 'w').write(t)
 PY
 
-run_row | grep -E '^FAIL|^ok lease-order' | tail -3
-if run_row >/dev/null; then
+run_row "$COPY" | grep -E '^FAIL|^ok lease-order' | tail -3
+if run_row "$COPY" >/dev/null; then
   echo "lease-order: the row PASSED with the base order - it does not discriminate, so it proves nothing" >&2
   exit 1
 fi
 echo "lease-order: the row fails with the base order, as it must"
 
-restore
-trap - EXIT
-if ! run_row >/dev/null; then
-  echo "lease-order: the row failed after restoring the tree - the restore is broken" >&2
+if ! run_row "$WT" >/dev/null; then
+  echo "lease-order: the row failed on the real tree - something outside this control changed it" >&2
   exit 1
 fi
-echo "lease-order ok: release-before-announce is measured, not assumed"
+echo "lease-order ok: release-before-announce is measured, and this script never writes the tree"
