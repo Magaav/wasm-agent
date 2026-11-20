@@ -80,12 +80,29 @@ local WAIT_STATES = { pending = true, running = true, queued = true, accepted = 
 -- One record that says supervised work is still running. `pending` is codemode's own documented meaning
 -- for a call that outlived its wait (`{state:"pending", op}`), so it needs an id to count; a live
 -- operation state carries its id or its own clock.
+-- The fields that say a record is a WAIT rather than a finished answer. A codemode pending answer is
+-- the MEASURED shape (rel-native out.log ~16590-16610): the script returned `{state:"pending",
+-- log:"..."}`, which names no op and no operation_id, so a predicate demanding those missed the very
+-- call the guard killed. `log`, `bytes`, `output_bytes`, `progress`, `promoted` and `shell_exited` are
+-- the facts a running call reports; any of them beside a live state is evidence of supervised work.
+local WAIT_EVIDENCE = { op = true, operation_id = true, elapsed_ms = true, name = true,
+  log = true, bytes = true, output_bytes = true, progress = true, promoted = true,
+  shell_exited = true, waiting_for = true }
+
 local function live_wait(record)
   if type(record) ~= "table" or record.settled == true then return false end
-  local state = tostring(record.state or record.status or "")
+  -- 202 IS THE DOCUMENTED "accepted, still running or queued" (lua/core/status.lua:296,309-313), and it
+  -- is the shape a nested call ACTUALLY reports: the measured codemode answer carries
+  -- {name:"operation", ok:true, status:202}, a NUMBER, not a state string. A predicate that only read
+  -- state strings missed the very call the guard killed.
+  if tonumber(record.status) == 202 or tonumber(record.code) == 202 then return true end
+  local state = tostring(type(record.state) == "string" and record.state
+    or (type(record.status) == "string" and record.status) or "")
   if not WAIT_STATES[state] then return false end
-  return record.op ~= nil or record.operation_id ~= nil or record.elapsed_ms ~= nil
-    or (state == "pending" and record.name ~= nil)
+  for field in pairs(WAIT_EVIDENCE) do
+    if record[field] ~= nil then return true end
+  end
+  return false
 end
 
 --- Does this answer carry evidence of supervised work still running? Reads the answer itself, then the
@@ -104,6 +121,28 @@ function M.waiting(answer)
   end
   return false
 end
+-- The clock-shaped facts a tool answer carries. They move every second the work runs, so a digest over
+-- them changes with no work done - which is what made a `wait_ms:0` poll look like progress forever
+-- (review r2, item 6). `elapsed_ms`, `remaining_ms`, `ms` and a `log` line that is mostly a timer are
+-- removed before the digest is taken; every other field is kept, so real output still shows up.
+local CLOCK_FIELDS = { elapsed_ms = true, remaining_ms = true, ms = true, took_ms = true,
+  last_output_elapsed_ms = true, output_idle_ms = true, post_exit_last_output_elapsed_ms = true,
+  accepted_record_ms = true, deadline_ms = true }
+
+--- A digest of what an answer SAYS, with the clock fields removed. Two answers that differ only by a
+--- passing second answer the same string, so a poll that learned nothing is visible as a repeat.
+function M.stable(answer)
+  local function strip(value, depth)
+    if type(value) ~= "table" or depth > 6 then return value end
+    local copy = {}
+    for key, item in pairs(value) do
+      if not CLOCK_FIELDS[tostring(key)] then copy[key] = strip(item, depth + 1) end
+    end
+    return copy
+  end
+  return strip(answer, 0)
+end
+
 function M.new(opts)
   opts = opts or {}
   return {
@@ -135,11 +174,18 @@ function M.observe(state, obs)
   obs = obs or {}
   state.round = state.round + 1
 
+  -- A CHANGE CAUSED ONLY BY A CLOCK IS NOT PROGRESS (review r2, item 6). The measured pending answer
+  -- carries `log` text that is mostly elapsed time (`"0\n48:06\n15:04"`); a digest over it changes
+  -- every round even when the operation did nothing at all, which would make a `wait_ms:0` poll look
+  -- like work forever. So the round reports a digest with the clock fields REMOVED (obs.results_stable,
+  -- built by M.stable), and `changed` compares that when it is present. A real byte of output still
+  -- changes it; a second passing does not.
+  local results_digest = obs.results_stable ~= nil and obs.results_stable or obs.results
   local changed = (obs.effects or 0) > 0
     or (obs.changes ~= nil and obs.changes ~= state.changes)
-    or (obs.results ~= nil and obs.results ~= state.last_results)
+    or (results_digest ~= nil and results_digest ~= state.last_results)
   state.changes = obs.changes ~= nil and obs.changes or state.changes
-  state.last_results = obs.results
+  state.last_results = results_digest
 
   -- A repeat is the same decision with NO NEW OBSERVATION - the module's own contract, which this line
   -- did not honour: it counted every identical call whatever the round had learned. Measured 19/11 on

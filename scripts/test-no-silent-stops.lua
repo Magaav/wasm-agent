@@ -195,6 +195,49 @@ eq(progress_guard.observe(settledWait, { signature = 'operation(await)', results
 has(progress_guard.observe(settledWait, { signature = 'operation(await)', results = 'r', effects = 0,
   changes = 'c', waiting = false }), 'guard_repeated_calls',
   'a settled operation awaited three times is still a loop')
+
+-- Review r2, item 6: a digest change caused ONLY by a clock is not "changed", and 10 wait_ms:0 polls of
+-- a running operation still trip the guard. The real op answer shape is used verbatim.
+ok(not progress_guard.waiting({ state = 'pending' }),
+  'a bare pending with no operation evidence is unknown, not a live wait')
+ok(progress_guard.waiting({ name = 'operation', ok = true, status = 202 }),
+  'status 202 (the documented accepted/running/queued) is a live wait')
+ok(progress_guard.waiting({ state = 'pending', op = 'op-1', log = '0\\n42:50\\n' }),
+  'a pending answer carrying a log is a live wait')
+ok(progress_guard.waiting({ state = 'running', operation_id = 'op-1', elapsed_ms = 5000 }),
+  'a running operation record is a live wait')
+
+-- THE CLOCK IS NOT PROGRESS. Two answers that differ only by elapsed time say the same thing.
+local a1 = { state = 'pending', settled = false, op = 'op-1', elapsed_ms = 1000, remaining_ms = 899000,
+  log = '0\\n42:50\\n' }
+local a2 = { state = 'pending', settled = false, op = 'op-1', elapsed_ms = 2000, remaining_ms = 898000,
+  log = '0\\n42:50\\n' }
+eq(host.sha256(json.encode(progress_guard.stable(a1))), host.sha256(json.encode(progress_guard.stable(a2))),
+  'a digest with the clock fields removed is IDENTICAL for two answers that differ only by elapsed time')
+
+local clock = progress_guard.new({ repeat_limit = 3, idle_rounds = 50, ceiling = 0 })
+local same_stable = host.sha256(json.encode(progress_guard.stable(a1)))
+for i = 1, 10 do
+  local answer = { signature = 'codemode(poll)', results = 'identical-bytes', results_stable = same_stable,
+    effects = 0, changes = 'c', waiting = true, wait_spent_ms = 0, wait_budget_ms = 0 }
+  if i >= 3 then break end
+  eq(progress_guard.observe(clock, answer), nil, 'poll ' .. i .. ' of a running operation is a retry')
+end
+has(progress_guard.observe(clock, { signature = 'codemode(poll)', results = 'identical-bytes',
+  results_stable = same_stable, effects = 0, changes = 'c', waiting = true,
+  wait_spent_ms = 0, wait_budget_ms = 0 }),
+  'guard_repeated_calls',
+  'ten wait_ms:0 polls whose stable digest never changes still trip the guard')
+
+-- A REAL new byte of output is progress, even at once.
+local moved = progress_guard.new({ repeat_limit = 3, idle_rounds = 50, ceiling = 0 })
+for i = 1, 8 do
+  eq(progress_guard.observe(moved, { signature = 'codemode(poll)', results = 'd' .. i,
+    results_stable = 'stable-' .. i, effects = 0, changes = 'c', waiting = true,
+    wait_spent_ms = 0, wait_budget_ms = 0 }), nil,
+    'poll ' .. i .. ' that answered a NEW byte is progress')
+end
+
 -- --------------------------------------------------------------- a failed provider call
 local function turn(title, user)
   local session_id = memory.ensure_session(user, "local", title)

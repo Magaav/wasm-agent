@@ -2364,6 +2364,8 @@ function M:run_body(text, images)
     -- below is the only place that knows them.
     local round_effects = 0
     local round_results = {}
+    -- The clock-free view of the same answers, for the progress guard (see results_stable).
+    local round_stable = {}
     -- The round's waits, if EVERY call in it was one: a repeated await whose ANSWER says the work is still
     -- running is an observation, not a loop (progress_guard.M.waiting). Read from the answer, because the
     -- measured 19/11 call was codemode() with an await INSIDE it, never the operation tool by name.
@@ -3445,6 +3447,8 @@ function M:run_body(text, images)
           math.floor((host.now() - tool_started) * 1000))
       end
       round_results[#round_results + 1] = tostring(function_.name) .. ":" .. host.sha256(tostring(content))
+      round_stable[#round_stable + 1] = tostring(function_.name) .. ":"
+        .. host.sha256(json.encode(progress_guard.stable(output)))
       telemetry.finish(tool_span,{name=function_.name,ok=ok_tool,cancelled=cancelled or nil,
         outcome=cancelled and 'cancelled_before_execution' or nil,code=type(output)=="table" and output.code or nil,
         tool_group_id=assistant_id,tool_group_size=#calls,tool_group_index=tool_index,
@@ -3478,6 +3482,10 @@ function M:run_body(text, images)
     guard_stop = progress_guard.observe(guard, {
       signature = progress_guard.fingerprint(calls),
       results = #round_results > 0 and host.sha256(table.concat(round_results, "\n")) or nil,
+      -- The same facts with the CLOCK fields removed: a pending answer whose `log` is mostly a timer
+      -- changes every second without doing any work, so the guard must not read that as progress
+      -- (review r2, item 6). Real output still appears in both digests.
+      results_stable = #round_stable > 0 and host.sha256(table.concat(round_stable, "\n")) or nil,
       effects = round_effects,
       changes = changes_digest,
       waiting = round_waiting and round_wait_calls > 0,
