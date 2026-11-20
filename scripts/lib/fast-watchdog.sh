@@ -47,7 +47,14 @@ wa_fast_watchdog() { # <seconds> <label> -- <command...>
     kill -TERM -- "-$pid" 2>/dev/null
     sleep "$grace"
     # Anything still standing in the group after the grace: KILL, and say how many there were.
-    kill -KILL -- "-$pid" 2>/dev/null
+    #
+    # ASK AGAIN FIRST (review SHOULD). After a one-second grace the pgid may belong to somebody else: the
+    # group emptied and the number was reused, and a blind kill -KILL -- "-$pid" would then signal an
+    # unrelated process. pgrep -g is the question "is anybody still IN THIS GROUP", so it is asked before
+    # each KILL, and an empty answer means there is nothing to kill.
+    if [ "$(pgrep -g "$pid" 2>/dev/null | wc -l | tr -d '[:space:]')" -gt 0 ] 2>/dev/null; then
+      kill -KILL -- "-$pid" 2>/dev/null
+    fi
     wait "$pid" 2>/dev/null
     printf 'watchdog: %s produced no verdict within %ss (process group %s, %s process(es)): killed the group with TERM, then KILL after %ss\n' \
       "$label" "$seconds" "$pid" "${children:-0}" "$grace"
@@ -71,7 +78,11 @@ wa_fast_watchdog() { # <seconds> <label> -- <command...>
   if [ "$leftovers" -gt 0 ] 2>/dev/null; then
     kill -TERM -- "-$pid" 2>/dev/null
     sleep "${WA_FAST_WATCHDOG_REAP_GRACE:-1}"
-    kill -KILL -- "-$pid" 2>/dev/null
+    # ASK AGAIN (review SHOULD): the grace may have emptied the group and freed the pgid for reuse. A KILL
+    # to a reused group signals an innocent process; membership is re-checked before every signal.
+    if [ "$(pgrep -g "$pid" 2>/dev/null | wc -l | tr -d '[:space:]')" -gt 0 ] 2>/dev/null; then
+      kill -KILL -- "-$pid" 2>/dev/null
+    fi
     printf "watchdog: %s exited %s but left %s process(es) in its group %s: killed them (a child the row forked and did not wait for)\n" \
       "$label" "$code" "$leftovers" "$pid"
   fi
