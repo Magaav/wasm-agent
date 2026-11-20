@@ -1524,9 +1524,27 @@ end
 -- absent - `scripts/fast.sh` narrows on `[ -n "${WA_FAST_ROWS:-}" ]` - so a WA_FAST_ROWS inherited from the
 -- environment would narrow a round that wrote no file: a `--full` run would execute less than it said, obeying
 -- somebody else's plan. Every other check runs untouched.
-function M.gate_command(check, rows_file)
-  if check.name ~= "fast" then return check.command end
-  return "WA_FAST_ROWS=" .. (rows_file and quote(rows_file) or "") .. " " .. check.command
+function M.gate_command(check, rows_file, run)
+  if check.name == "fast" then
+    return "WA_FAST_ROWS=" .. (rows_file and quote(rows_file) or "") .. " " .. check.command
+  end
+  -- The discrimination check is the only one whose VERDICT depends on which round it is judging: a
+  -- Refactor-only declaration must be refused in a round of several branches, and the base is whichever
+  -- main this round merged into (incoming/main may contain origin/main). Without these the check judged
+  -- the wrong base and never saw the round at all (review r2, MUST 2 and 3).
+  if check.name == "discrimination" and run and run.journal then
+    local names = {}
+    for _, branch in ipairs(run.journal.branches or {}) do
+      local name = tostring(branch.name or branch.sha or "")
+      if name ~= "" then names[#names + 1] = name end
+    end
+    local command = check.command
+    if #names > 0 then command = command .. " --branches " .. quote(table.concat(names, ",")) end
+    local base = run.journal.base
+    if base and tostring(base) ~= "" then command = command .. " " .. tostring(base) end
+    return command
+  end
+  return check.command
 end
 
 -- <run> <options> -> path, failed, notes: the WA_FAST_ROWS file this round narrows `scripts/fast.sh` with, or
@@ -1623,7 +1641,7 @@ impl.gate = function(run, options)
   for _, check in ipairs(checks) do
     -- The fast check ALWAYS gets the assignment (M.gate_command): the round's file, or an empty value so a
     -- WA_FAST_ROWS inherited from the environment cannot narrow a run that wrote none.
-    local command = M.gate_command(check, rows_file)
+    local command = M.gate_command(check, rows_file, run)
     command = (decorator ~= "" and (decorator .. " " .. quote(command))) or command
     local cwd = check.cwd and (slashes(tree) .. "/" .. check.cwd) or slashes(tree)
     evidence(command_line(check.name, command))
@@ -1667,7 +1685,7 @@ impl.gate = function(run, options)
       -- Alone, once. No other check runs beside it, so "it passes alone" is a statement about load.
       local retry_started = now()
       evidence(command_line(check.name .. " (alone, after a failure)", command))
-      local retry = M.exec(command, cwd, check.timeout or 1800)
+      local retry = M.exec(command, cwd, budget)
       local retry_tests = passed_tests((retry.stdout or "") .. (retry.stderr or ""))
       evidence((retry.stdout or "") .. (retry.stderr or ""))
       row.retry = { ok = (retry.code or 1) == 0, code = retry.code, seconds = now() - retry_started, tests = retry_tests }

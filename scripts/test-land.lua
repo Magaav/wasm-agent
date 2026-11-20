@@ -1291,6 +1291,22 @@ must("git -C " .. repo .. " checkout -q " .. rows_ref, "restore the fixture chec
 -- narrows only on a NON-EMPTY WA_FAST_ROWS ([ -n "$WA_FAST_ROWS" ]), so one inherited from the environment
 -- would narrow a --full run that wrote no rows file - a run executing less than it said, obeying somebody
 -- else's plan.
+-- Review r2, MUST 2 and 3: the gate must hand the discrimination check the ROUND it is judging. Without
+-- --branches a Refactor-only line never gets refused in a multi-branch round, and without the round's
+-- base the check re-judges tests against origin/main when this round merged incoming/main instead.
+do
+  local command = land.gate_command({ name = "discrimination", command = "bash scripts/test-discriminates.sh origin/main" },
+    nil, { journal = { base = "deadbeefcafe", branches = { { name = "change/a" }, { name = "change/b" } } } })
+  contains(command, "--branches", "MUST 2: the gate names the round's branches: " .. tostring(command))
+  contains(command, "'change/a,change/b'", "MUST 2: both branch names travel: " .. tostring(command))
+  contains(command, "deadbeefcafe", "MUST 3: the round's base travels, not a hard-coded origin/main: " .. tostring(command))
+  local single = land.gate_command({ name = "discrimination", command = "bash scripts/test-discriminates.sh origin/main" },
+    nil, { journal = { base = "cafe", branches = { { name = "change/one" } } } })
+  contains(single, "change/one", "a single-branch round still names its branch: " .. tostring(single))
+  eq(land.gate_command({ name = "prompt-docs", command = "bash scripts/sync-prompt-docs.sh --check" },
+    nil, { journal = { base = "cafe", branches = {} } }), "bash scripts/sync-prompt-docs.sh --check",
+    "and no other check is touched by the round fields")
+end
 eq(land.gate_command({ name = "fast", command = "bash scripts/fast.sh" }, nil),
   "WA_FAST_ROWS= bash scripts/fast.sh", "no rows file means an EMPTY WA_FAST_ROWS, not an absent one")
 eq(land.gate_command({ name = "fast", command = "bash scripts/fast.sh" }, "/tmp/rows.txt"),
