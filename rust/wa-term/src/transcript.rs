@@ -31,6 +31,10 @@ const EXPAND_TAG: &str = "\u{1}expand:";
 const RIGHT_TAG: &str = "\u{1}right:";
 /// The right-end copy icon.
 const COPY_ICON: char = '\u{29c9}';
+/// The colour `lua/core/markdown.lua` paints a fenced code card's border with (`mdCodeBlockBorder`,
+/// `777777`). A quote's bar wears the same colour (`mdQuoteBorder`), so the colour alone does not make
+/// a row a card row: a card is the rows BETWEEN its open corner and its close corner.
+const CARD_BORDER: &str = "\x1b[38;2;119;119;119m";
 
 #[derive(Default, Clone)]
 pub struct Block { pub lines: Vec<String>, open: bool, pub topic: bool, pub expanded: bool,
@@ -441,6 +445,9 @@ impl Transcript {
         let inner = if focused { width.saturating_sub(2).max(1) } else { width.max(1) };
         let mut rows: Vec<String> = Vec::new();
         let mut copies: Vec<(usize, String)> = Vec::new();
+        // A card's rows are cut, not wrapped as prose (`CardWrap`): the frame state follows the
+        // block's lines in order, which is the only way a row can be known to be a card's.
+        let mut cards = CardWrap::default();
         for (line_index, raw) in block.lines.iter().enumerate() {
             // A rule is drawn at THIS frame's width, never at the width it was written at
             // (expand_rule): a transcript outlives a resize, and what is drawn inside it does not.
@@ -453,7 +460,7 @@ impl Transcript {
                 } else if self.expand_hover == Some((index, line_index)) {
                     rows.extend(wrap_rows(&format!("{BRIGHT}{}{RESET}", crate::selection::plain(line)), inner));
                 } else {
-                    rows.extend(wrap_rows(line, inner));
+                    rows.extend(cards.rows(line, inner));
                 }
                 // Every row it now covers answers the click, so a reader can fold it from anywhere.
                 for at in start..rows.len() { copies.push((at, format!("{EXPAND_TAG}{index}:{line_index}"))); }
@@ -482,12 +489,15 @@ impl Transcript {
                 // The affordance is part of the row, so the wrap and the click agree about where it
                 // ends: the icon takes its columns from the text and the header wraps two columns
                 // narrower, which is what a reader sees either way.
-                rows.extend(wrap_rows(&format!("{COPY_PREFIX}{line}"), inner));
+                // Through `cards` too: a fence's OPENING row carries the copy icon, so it is the
+                // row that opens the card frame - wrapped as prose, the rows under it would never
+                // be known to be a card's.
+                rows.extend(cards.rows(&format!("{COPY_PREFIX}{line}"), inner));
                 copies.push((start, content.expect("checked").clone()));
             } else if is_live {
                 rows.push(clip_row(line, inner));
             } else {
-                rows.extend(wrap_rows(line, inner));
+                rows.extend(cards.rows(line, inner));
             }
         }
         while block.topic && rows.last().is_some_and(|r| visible(r) == 0) { rows.pop(); }
@@ -864,6 +874,112 @@ pub fn wrap_rows(line: &str, width: usize) -> Vec<String> {
     rows
 }
 
+/// A fenced code card being wrapped, row by row: `\u{250c}` opens it, `\u{2514}` closes it, and the
+/// `\u{2502}` rows between them are CUT by cells with the bar repeated on every continuation
+/// (`\u{2502}\u{21aa}`) - never broken at a space like prose.
+///
+/// Why the stream and not the row alone: a quote row and a card body row open with the SAME cells
+/// (`\u{2502} ` painted `777777`), so a row cannot say what it is. Only the frame can, and the frame is
+/// the open/close corner rows `lua/core/markdown.lua` writes around every fence. Prose therefore wraps
+/// exactly as it did: no prose row is ever inside a frame.
+#[derive(Default)]
+pub struct CardWrap { open: bool }
+
+impl CardWrap {
+    /// The screen rows of one line of a block. Card body rows are cut (`wrap_card`); an open or close
+    /// corner stays one row and moves the frame; everything else is the prose rule, byte for byte.
+    pub fn rows(&mut self, line: &str, width: usize) -> Vec<String> {
+        let (cells, _) = cells_of(line);
+        match card_edge(&cells) {
+            Some(Edge::Open) => { self.open = true; wrap_rows(line, width) }
+            Some(Edge::Close) => { self.open = false; wrap_rows(line, width) }
+            Some(Edge::Body) if self.open => wrap_card(&cells, width),
+            _ => wrap_rows(line, width),
+        }
+    }
+}
+
+/// What a line's leading glyph says about the card it belongs to.
+#[derive(PartialEq)]
+enum Edge { Open, Body, Close }
+
+/// Which edge of a card `cells` opens - `None` when its first glyph past any indent and the copy icon
+/// is not one of the card's own, or is not painted in the card's border colour.
+fn card_edge(cells: &[(String, char, usize)]) -> Option<Edge> {
+    let lead = cells.iter().position(|c| c.1 != ' ' && c.1 != COPY_ICON)?;
+    if !cells[lead].0.contains(CARD_BORDER) { return None; }
+    match cells[lead].1 {
+        '\u{250c}' => Some(Edge::Open),
+        '\u{2502}' => Some(Edge::Body),
+        '\u{2514}' => Some(Edge::Close),
+        _ => None,
+    }
+}
+
+/// One printable character and the escapes just before it, with its width: the parse `wrap_rows` does.
+fn cells_of(line: &str) -> (Vec<(String, char, usize)>, String) {
+    let (mut cells, mut esc): (Vec<(String, char, usize)>, String) = (Vec::new(), String::new());
+    let mut chars = line.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            esc.push(ch);
+            if chars.peek() == Some(&'[') {
+                esc.push(chars.next().unwrap());
+                for c in chars.by_ref() { esc.push(c); if ('@'..='~').contains(&c) { break; } }
+            }
+            continue;
+        }
+        cells.push((std::mem::take(&mut esc), ch, cell_width_of(ch)));
+    }
+    (cells, esc)
+}
+
+/// A card BODY row cut to `width` cells: its border is repeated on every continuation
+/// (`\u{2502}\u{21aa}`) and the row is cut by CELLS, never at a space. Breaking at a space is what broke
+/// Victor's card (19/11): the space after the bar is a space, so the prose rule kept the bar alone on
+/// one row and drew the code on the next without it.
+///
+/// The colour active where the row was cut is closed with `RESET` and reopened after the bar, so no row
+/// paints outside its own cells; the bar's own colour is set from `CARD_BORDER`, so a `RESET` never
+/// leaves a continuation in the terminal's default colour.
+fn wrap_card(cells: &[(String, char, usize)], width: usize) -> Vec<String> {
+    // The prefix is the indent, the bar and the blank after it; the code starts where the view put it.
+    let bar = cells.iter().position(|c| c.1 == '\u{2502}').unwrap_or(0);
+    let mut start = bar + 1;
+    if cells.get(start).is_some_and(|c| c.1 == ' ') { start += 1; }
+    let mut rows: Vec<String> = Vec::new();
+    let mut row = String::new();
+    let mut sgr = String::new();
+    let mut cols = 0usize;
+    for cell in &cells[..start.min(cells.len())] {
+        row.push_str(&cell.0); row.push(cell.1); cols += cell.2;
+    }
+    let mut i = start.min(cells.len());
+    // `fresh`: this row already carries the continuation bar, so a cell too wide for what is left of it
+    // still goes on it - a cell cannot be split, and a loop that refused it would spin forever.
+    let mut fresh = false;
+    while i < cells.len() {
+        let w = cells[i].2;
+        if !fresh && cols + w > width && i > start {
+            row.push_str(RESET);
+            rows.push(std::mem::take(&mut row));
+            row.push_str(CARD_BORDER); row.push('\u{2502}'); row.push('\u{21aa}'); row.push_str(RESET);
+            row.push_str(&sgr);
+            cols = 2;
+            fresh = true;
+            continue;
+        }
+        row.push_str(&cells[i].0);
+        row.push(cells[i].1);
+        track(&cells[i].0, &mut sgr);
+        cols += w;
+        fresh = false;
+        i += 1;
+    }
+    row.push_str(RESET);
+    rows.push(row);
+    rows
+}
 /// `line` cut to ONE screen row of at most `width` cells, escapes kept whole and a continuation
 /// mark where it was cut: the rule for every STATUS row, and the reason it is a clip.
 ///

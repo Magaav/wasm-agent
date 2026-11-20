@@ -18,7 +18,7 @@
 //! is re-wrapped when it changes, when the width changes, or when a fold moves - nothing else.
 use crate::scroll::bar::Bar;
 use crate::scroll::settings::Scrollbar;
-use crate::transcript::{visible, wrap_rows};
+use crate::transcript::{visible, wrap_rows, CardWrap};
 
 /// A row cut or padded to exactly the bar's width: `bar::fit`, kept here because that is where the
 /// rows and the bar are put together (and what `transcript` imports).
@@ -338,7 +338,10 @@ fn fold_rows(kind: Kind, tools_collapsed: bool, thinking_collapsed: bool) -> Opt
 /// A block's wrapped rows, folded to `fold` rows plus a count of what is hidden. Blank rows at the
 /// end are dropped first, so a folded block spends its rows on text: three rows are three lines.
 fn wrap_block(block: &Block, width: usize, fold: Option<usize>) -> Vec<String> {
-    let mut rows: Vec<String> = block.lines.iter().flat_map(|line| wrap_rows(line, width)).collect();
+    // A card's rows are cut, not wrapped as prose (`CardWrap`), and the frame state follows the
+    // block's lines in order.
+    let mut cards = CardWrap::default();
+    let mut rows: Vec<String> = block.lines.iter().flat_map(|line| cards.rows(line, width)).collect();
     let Some(preview) = fold else { return rows };
     while rows.last().is_some_and(|row| visible(row) == 0) { rows.pop(); }
     if rows.len() <= preview { return rows; }
