@@ -1368,7 +1368,7 @@ local gate_commands = {}
 -- Only the gate's own checks are answered here (they are held to their command); everything else - the row
 -- inventory the rows file is proved with, the git calls - still runs for real.
 local function is_gate_check(command)
-  for _, marker in ipairs({ "scripts/fast.sh", "scripts/test-codemode-component.sh", "cargo test", "sync-prompt-docs" }) do
+  for _, marker in ipairs({ "scripts/fast.sh", "scripts/test-codemode-component.sh", "scripts/gate-cargo-codemode.sh", "cargo test", "sync-prompt-docs" }) do
     if command:find(marker, 1, true) then return true end
   end
   return false
