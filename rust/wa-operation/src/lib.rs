@@ -129,6 +129,8 @@ const CLEANUP_MS: u64 = 1000;
 /// past this many tracked operations the answer is a named refusal BEFORE anything is created - so work
 /// is never half-admitted, and 16 code-mode handles per session, each starting a few operations, fit
 /// with room for the node's own shells.
+const MAX_TRACKED: usize = 128;
+
 /// How long a wait sleeps before it polls an operation this process does not own (review r2, item 2).
 ///
 /// An operation in this process has a condvar and is woken the instant it settles; one that is not has
@@ -138,7 +140,6 @@ const CLEANUP_MS: u64 = 1000;
 pub const FOREIGN_POLL_MIN: Duration = Duration::from_millis(100);
 pub const FOREIGN_POLL_MAX: Duration = Duration::from_millis(1000);
 
-const MAX_TRACKED: usize = 128;
 pub const COMMAND_OUTPUT_IDLE_MS: u64 = 100;
 const VIEW_BYTES: usize = 24 * 1024;
 const MAX_ACTIVE: usize = 8;
@@ -1128,7 +1129,13 @@ impl Manager {
         // wait, on a node that was already busy. The poll is now the wait: sleep the budget (bounded,
         // whole milliseconds, never zero) and answer one snapshot. 4 polls a second instead of millions,
         // and the caller's own deadline still bounds the total.
-        let nap = budget.min(FOREIGN_POLL_MAX).max(FOREIGN_POLL_MIN);
+        // SNAPSHOT FIRST, SLEEP ONLY IF THE WORK HAS NOT SETTLED (review r3, B2): a foreign operation
+        // that finished while nobody looked answers at once instead of paying the poll interval.
+        let state = self.snapshot(id)?;
+        if state["settled"] == true { return Ok(state); }
+        // WHOLE MILLISECONDS: Duration cannot be fractional, and a caller's sub-millisecond budget
+        // must not truncate to a zero sleep - which would be the spin this exists to stop.
+        let nap = Duration::from_millis(budget.min(FOREIGN_POLL_MAX).max(FOREIGN_POLL_MIN).as_millis() as u64);
         std::thread::sleep(nap);
         self.snapshot(id)
     }

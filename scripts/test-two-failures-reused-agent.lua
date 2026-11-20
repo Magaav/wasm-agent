@@ -23,6 +23,13 @@ do
 end
 
 local checks, failed = 0, 0
+local function eq(got, want, label)
+  checks = checks + 1
+  if got ~= want then
+    failed = failed + 1
+    print(string.format("FAIL two-failures: %s (got %s, want %s)", label, tostring(got), tostring(want)))
+  end
+end
 local function ok(condition, label)
   checks = checks + 1
   if not condition then
@@ -73,14 +80,15 @@ agent.stream = true
 local first_ran = pcall(agent.run, agent, "the first turn the provider will not answer")
 local after_first = failure_rows()
 ok(not first_ran, "the first turn fails")
-ok(after_first >= 1, "the first failed turn wrote its durable failure row (" .. after_first .. ")")
+-- EXACT counts (review r3, B1): one failed turn is ONE row. `>= 1` would pass a run that wrote
+-- three, which is a different defect.
+eq(after_first, 1, "the first failed turn wrote exactly one durable failure row")
 
 local second_ran = pcall(agent.run, agent, "the second turn the provider will not answer")
 local after_second = failure_rows()
 ok(not second_ran, "the second turn fails too")
-ok(after_second > after_first,
-  "the SAME agent's second failed turn wrote its own failure row too (" .. after_first .. " -> "
-    .. after_second .. "); a reused served session must never go silent")
+eq(after_second, 2,
+  "the SAME agent's second failed turn left TWO rows, not one: a reused served session must never go silent")
 
 host.sleep = real_sleep
 host.getenv = real_getenv

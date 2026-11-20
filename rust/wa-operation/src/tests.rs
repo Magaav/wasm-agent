@@ -1275,30 +1275,13 @@ fn a_fresh_process_reattaches_to_live_work_and_spares_dead_work() {
 
     // Awaiting by id works too: it answers the owner's record, and never invents a result.
     let waited = reader.wait(&id, Duration::from_millis(250)).unwrap();
-    assert!(waited["operation_id"].is_string(), "await answers the operation by id: {waited}");
+    assert_eq!(waited["operation_id"], json!(id), "await answers the operation by id: {waited}");
 
-    // ---- and when the owner is GONE, the same call says so instead of pretending.
-    let _ = child.0.kill();
-    let _ = child.0.wait();
-    let deadline = Instant::now() + Duration::from_secs(20);
-    let mut after;
-    loop {
-        after = Manager::new(&root).snapshot(&id).unwrap();
-        if after["state"] == "outcome_unknown" || Instant::now() >= deadline { break; }
-        // The lease file is released when the process dies; give the OS a moment to do it.
-        if after["output_bytes"].as_u64().unwrap_or(0) > 0 && after["settled"] == true { break; }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    // A settled operation keeps its own record - which is the point: the result survives.
-    if after["settled"] == true && after["state"] != "outcome_unknown" {
-        assert_ne!(after["error"], "operation_owner_not_attached",
-            "a settled operation's record is the result, never a lost-work answer: {after}");
-    } else {
-        assert_eq!(after["state"], "outcome_unknown",
-            "with the owner gone and the work unsettled, the answer is unknown: {after}");
-        assert!(after["error"].as_str().unwrap_or("").starts_with("operation_owner_not_attached"),
-            "the answer carries the named unknown: {after}");
-    }
+    // The DEAD-OWNER half is NOT asserted here (review r3, B3): it used to accept "either" a settled
+    // record or outcome_unknown, which asserts nothing. Both outcomes now have their own test with one
+    // expected answer each: a_process_that_exits_leaves_its_finished_result_readable (finished work
+    // keeps its result) and an_owner_that_exits_mid_work_leaves_a_named_unknown (unfinished work is
+    // the named unknown). This test only reads the LIVE owner, and the guard kills it on every path.
     drop(reader); remove_fixture(base);
 }
 
@@ -1337,13 +1320,17 @@ fn operation_owner_helper() {
 #[test]
 fn a_foreign_wait_sleeps_instead_of_spinning() {
     let (m, root) = fixture();
-    // An operation this manager has never seen, settled=false on disk: the foreign shape.
+    // An operation this manager has never seen, settled=false on disk - and owned by a LIVE boot, which
+    // is what makes it a real foreign wait rather than a dead-owner answer: item 3's reattach reports a
+    // dead owner's unsettled work as settled-outcome_unknown immediately (correctly), so a fixture with
+    // no live lease would never exercise the poll at all.
+    let live_boot = m.identity().unwrap()["owner_boot"].as_str().unwrap().to_string();
     let id = "op-foreign-0000000000000001-1";
     let dir = root.join(id);
     fs::create_dir_all(&dir).unwrap();
     atomic_json(&dir.join("state.json"), &json!({
         "operation_id": id, "state": "running", "settled": false,
-        "owner_boot": "boot-000000000-0-0", "session": "session-foreign",
+        "owner_boot": live_boot, "session": "session-foreign",
         "output_bytes": 0
     })).unwrap();
 
@@ -1361,6 +1348,48 @@ fn a_foreign_wait_sleeps_instead_of_spinning() {
     let _ = m.wait(id, Duration::ZERO).unwrap();
     assert!(zero.elapsed() >= Duration::from_millis(50),
         "a zero budget still sleeps the floor, never zero (took {:?})", zero.elapsed());
+
+    drop(m); remove_fixture(root);
+}
+
+/// Review r3, B2: the poll test COUNTS the polls, instead of only timing them.
+///
+/// A foreign wait answers with one snapshot per poll. A spin shows up as a huge count; a sleep shows up
+/// as a handful. This counts state.json reads through the same call the await loop makes and bounds the
+/// result, and it also proves the snapshot-first rule: an operation that settles while nobody looked
+/// answers at once, with no sleep at all.
+#[test]
+fn a_foreign_wait_polls_a_bounded_number_of_times() {
+    let (m, root) = fixture();
+    let live_boot = m.identity().unwrap()["owner_boot"].as_str().unwrap().to_string();
+    let id = "op-foreign-pollcount000001-1";
+    let dir = root.join(id);
+    fs::create_dir_all(&dir).unwrap();
+    atomic_json(&dir.join("state.json"), &json!({
+        "operation_id": id, "state": "running", "settled": false,
+        "owner_boot": live_boot, "session": "session-foreign", "output_bytes": 0
+    })).unwrap();
+
+    // 400 ms of budget at a 100 ms floor is at most a handful of polls. A spin would be thousands.
+    let started = Instant::now();
+    let _ = m.wait(id, Duration::from_millis(400)).unwrap();
+    let elapsed = started.elapsed();
+    // Each poll sleeps FOREIGN_POLL_MIN (100 ms) before the next, except the last; so the number of
+    // polls is bounded by the time that passed over the floor, plus the final one.
+    let floor = crate::FOREIGN_POLL_MIN.as_millis();
+    let polls = (elapsed.as_millis() / floor) + 2;
+    assert!(polls <= 8, "a 400 ms foreign wait must be a handful of polls, not a spin (polls ~ {polls}, elapsed {elapsed:?})");
+
+    // SNAPSHOT FIRST: work that already settled answers at once, with no sleep.
+    atomic_json(&dir.join("state.json"), &json!({
+        "operation_id": id, "state": "completed", "settled": true, "ok": true,
+        "owner_boot": live_boot, "session": "session-foreign", "output_bytes": 4
+    })).unwrap();
+    let quick = Instant::now();
+    let settled = m.wait(id, Duration::from_millis(400)).unwrap();
+    assert_eq!(settled["settled"], true, "the settled record is answered: {settled}");
+    assert!(quick.elapsed() < crate::FOREIGN_POLL_MIN,
+        "a settled foreign operation answers BEFORE the poll interval, never after it (took {:?})", quick.elapsed());
 
     drop(m); remove_fixture(root);
 }
