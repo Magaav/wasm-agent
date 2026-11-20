@@ -1373,3 +1373,105 @@ fn the_foreign_poll_budget_is_bounded() {
     assert!(crate::FOREIGN_POLL_MAX <= Duration::from_secs(1), "the ceiling stays responsive");
     assert!(crate::FOREIGN_POLL_MIN <= crate::FOREIGN_POLL_MAX, "the floor is at most the ceiling");
 }
+
+/// The owner process for `a_process_that_exits_leaves_its_result_readable` (review r2, item 4): it starts
+/// a supervised operation whose command FINISHES on its own, publishes the id, and exits. The operation's
+
+/// The owner process for `a_process_that_exits_leaves_its_finished_result_readable` (review r2, item 4):
+/// starts an operation whose command FINISHES, waits for it to settle, then exits. The result is then on
+/// disk and the owner is gone - which is exactly the case a resumed session must be able to read.
+#[test]
+#[ignore = "helper process only; starts an operation, lets it finish, and exits"]
+fn operation_owner_then_exit_helper() {
+    let root = PathBuf::from(std::env::var("WA_OPERATION_OWNER_ROOT").unwrap());
+    let command = std::env::var("WA_OPERATION_OWNER_COMMAND").unwrap();
+    let m = Manager::new(&root);
+    let mut spec = shell(&command);
+    spec.session = "session-owner-exit".into();
+    let id = m.start(spec).unwrap();
+    // Let the work FINISH while the owner is still alive: the child is in the owner's process group, so
+    // an owner that exits first would kill it and there would be no result to read (that is the other,
+    // separately pinned case).
+    let _ = m.wait(&id, Duration::from_secs(30));
+    atomic_json(&root.join("helper-exit-operation-id.json"), &json!({"operation_id": id})).unwrap();
+    std::process::exit(0);
+}
+
+
+/// Review r2, item 4: the DEAD OWNER case has ONE named outcome per situation, and a real result survives.
+///
+/// The old version of this suite accepted "either" the settled record or outcome_unknown, which asserts
+/// nothing. The rule is decided, and both halves are pinned separately:
+///
+///   * the work FINISHED before the owner exited -> the operation's OWN RESULT (stdout, exit code,
+///     settled) is readable by a fresh process. Anything else loses the output of finished work;
+///   * the owner exited MID-WORK -> `outcome_unknown`, because the child lives in the owner's process
+///     group and dies with it, so no result exists to invent. Answering "completed" there would be a
+///     fabricated result (unknown is not yes).
+#[test]
+fn a_process_that_exits_leaves_its_finished_result_readable() {
+    let base = std::env::temp_dir().join(format!(
+        "wa-owner-exit-{}-{}", std::process::id(),
+        crate::SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+    let _ = fs::remove_dir_all(&base);
+    fs::create_dir_all(&base).unwrap();
+
+    // A starts it, lets it finish, and exits.
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--ignored", "--exact", "tests::operation_owner_then_exit_helper", "--nocapture"])
+        .env("WA_OPERATION_OWNER_ROOT", &base)
+        .env("WA_OPERATION_OWNER_COMMAND", "echo exited-owner-result")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success(), "the owner process must run and exit cleanly: {status}");
+
+    let text = fs::read_to_string(base.join("helper-exit-operation-id.json"))
+        .expect("the owner published an operation id");
+    let id = serde_json::from_str::<Value>(&text).unwrap()["operation_id"]
+        .as_str().expect("operation id").to_string();
+
+    // B: a fresh manager in this process. The owner is GONE, the work is FINISHED.
+    let reader = Manager::new(&base);
+    let state = reader.snapshot(&id).unwrap();
+    assert_ne!(state["error"], "operation_owner_not_attached",
+        "the work finished before the owner exited - its record is the result, not a lost-work answer: {state}");
+    assert_eq!(state["state"], "completed", "the operation's own state: {state}");
+    assert_eq!(state["settled"], true, "and it is settled: {state}");
+    assert_eq!(state["ok"], true, "and it succeeded: {state}");
+    let page = reader.read(&id, "stdout", 0, 4096).unwrap();
+    assert!(page["content"].as_str().unwrap_or("").contains("exited-owner-result"),
+        "the finished work's own stdout is readable after its owner exited: {page}");
+    drop(reader); remove_fixture(base);
+}
+
+/// The other half, pinned so neither case can drift into "either": an owner that exits MID-WORK leaves
+/// no result, and the answer is the named unknown - never a fabricated completion.
+#[test]
+fn an_owner_that_exits_mid_work_leaves_a_named_unknown() {
+    let base = std::env::temp_dir().join(format!(
+        "wa-owner-dead-{}-{}", std::process::id(),
+        crate::SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+    let _ = fs::remove_dir_all(&base);
+    fs::create_dir_all(&base).unwrap();
+    // The owner's shape, written directly: an accepted, unsettled row whose owner boot has no live lease.
+    let id = "op-deadowner-000000000000-1";
+    let dir = base.join(id);
+    fs::create_dir_all(&dir).unwrap();
+    atomic_json(&dir.join("state.json"), &json!({
+        "operation_id": id, "state": "accepted", "settled": false, "ok": false,
+        "owner_boot": "boot-000000000-0-0", "session": "session-dead",
+        "output_bytes": 0, "stdout_path": dir.join("stdout").to_string_lossy(),
+        "stderr_path": dir.join("stderr").to_string_lossy()
+    })).unwrap();
+    let reader = Manager::new(&base);
+    let state = reader.snapshot(id).unwrap();
+    assert_eq!(state["state"], "outcome_unknown",
+        "work whose owner died unfinished has no result to report: {state}");
+    assert_eq!(state["settled"], true, "and it is not left looking live: {state}");
+    assert!(state["error"].as_str().unwrap_or("").starts_with("operation_owner_not_attached"),
+        "the answer names why: {state}");
+    drop(reader); remove_fixture(base);
+}
+
