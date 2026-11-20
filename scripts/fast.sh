@@ -98,6 +98,15 @@ export WA_FAST_CLEARED
 # The parallel rows run in `bash -c` workers, so the classifier they use has to travel with them.
 export WA_FAST_ENVIRONMENT_SIGNATURES
 export -f wa_environment_reason wa_environment_kind last_line_of 2>/dev/null || true
+# The per-row watchdog (scripts/lib/fast-watchdog.sh): a row gets its OWN PROCESS GROUP, so a deadline
+# that passes kills every child it forked, not just the one process timeout knows about, and the hung row
+# is NAMED instead of reporting a bare exit 124 that reads exactly like a failed assertion.
+. "$ROOT/scripts/lib/fast-watchdog.sh"
+export -f wa_fast_watchdog wa_watchdog_hung 2>/dev/null || true
+# The exec of one Lua row, in the only order that works (scripts/lib/fast-row-exec.sh): the watchdog
+# OUTERMOST - env cannot exec a shell function, which is exit 127 on every row.
+. "$ROOT/scripts/lib/fast-row-exec.sh"
+export -f wa_fast_row_exec 2>/dev/null || true
 
 # ---- the binary -------------------------------------------------------------------------------------
 # Which `wa` the rows run is a fact about the verdicts, not a detail: see scripts/lib/fast-binary.sh for
@@ -173,7 +182,57 @@ fast_now_ms() {
 }
 export -f fast_now_ms
 started=$(date +%s)
-work=$(mktemp -d "${TMPDIR:-/tmp}/wa-fast-XXXXXX")
+# THE RUN'S OWN SCRATCH ROOT MUST BE OUTSIDE THE OPERATOR STORE (item 0, measured on this node).
+#
+# This node sets TMPDIR=/home/<user>/.wasm-agent/tmp (measured 19/11), so a plain mktemp under TMPDIR made
+# every row's home a directory INSIDE the operator's own store, and the four rows that check their home with
+# scripts/lib/scratch-home.sh refused it - correctly, and by name:
+#   REFUSED test-backup-restore: WASM_AGENT_HOME (.../tmp/wa-fast-XXXX/h.YYY) is inside the operator store
+# They were the only 4 failures in a 254-row run whose cause was the RUNNER, not the rows.
+. scripts/lib/scratch-home.sh
+if ! scratch_root=$(wa_scratch_root wa-fast); then
+  echo "fast: no scratch root outside the operator store; set WA_TEST_ROOT=<a directory outside it>" >&2
+  exit 2
+fi
+# AN INTERRUPTED RUN CLEANS ITS SCRATCH ON THE NEXT START (review item 4). The trap below only runs when
+# THIS process exits; a run that was OOM-killed or cancelled left its work dir behind, and this session
+# own leftovers were 1.4 GB of them.
+#
+# A LIVE RUN IS NEVER RECLAIMED (review SHOULD, and it is a real race). The first shape asked
+# "kill -0 <pid>", and kill -0 is not the same question: a pid in ANOTHER PID NAMESPACE answers EPERM,
+# which this code read as "gone" - it would have deleted the work dir of a run that was still working.
+# Nor can a pid be trusted on its own: pids are reused. So the owner holds an EXCLUSIVE flock on
+# <workdir>/lock for its whole life, and a start reclaims a directory only when it can TAKE that lock
+# (flock -n). A running owner holds it, so the lock cannot be taken; a killed owner's lock is released by
+# the kernel, so the next start takes it and removes the directory. No pid, no EPERM, no reuse window.
+for stale in "$scratch_root"/wa-fast-*; do
+  [ -d "$stale" ] || continue
+  [ -f "$stale/pid" ] || continue
+  # -n: do not wait. Success means NOBODY holds it, and the fd stays open only for this test.
+  if ( exec 9>>"$stale/lock" 2>/dev/null && flock -n 9 ) 2>/dev/null; then
+    stale_pid=$(cat "$stale/pid" 2>/dev/null)
+    rm -rf "$stale" 2>/dev/null && echo "fast: reclaimed $stale (pid ${stale_pid:-unknown} released its lock: an interrupted run)"
+  fi
+done
+work=$(mktemp -d "$scratch_root/wa-fast-XXXXXX")
+# THE OWNER'S LOCK COMES BEFORE THE PID (review r2, A3 - a real race in the shape I wrote first).
+#
+# The order was: write pid, then open+flock lock. Between those two lines the directory has a pid and NO
+# holder, so a concurrent start's reclaim loop saw a pid, took the lock, and rm -rf'd a directory whose
+# owner was alive and about to lock it. The pid is not what protects a run - the LOCK is - so the lock is
+# taken first and the pid is written only once this process provably holds it. A reclaim therefore can
+# never see "pid exists, nobody holds the lock" for a live run: if the pid file is there, the lock was
+# already held when it was written.
+exec 8>>"$work/lock" 2>/dev/null || true
+if flock -n 8 2>/dev/null; then
+  printf '%s\n' "$$" > "$work/pid" 2>/dev/null || true
+else
+  # Cannot lock a directory we just made: say so rather than run unprotected. A run whose scratch cannot
+  # be claimed is a machine problem, and it must not look like a normal start.
+  echo "fast: refused(scratch_unlocked): cannot take the owner lock in $work; a concurrent run could reclaim this directory. Nothing was run." >&2
+  rm -rf "$work" 2>/dev/null
+  exit 2
+fi
 trap 'rm -rf "$work"' EXIT
 
 # The build-time ledger: one line per build this run performs, printed in the summary
@@ -364,82 +423,24 @@ if [ -n "$timings" ] && [ -s "$timings" ]; then
   awk -F'\t' 'NR==FNR{ms[$3]=$2; next} {print (($0 in ms)?ms[$0]:999999) "\t" $0}' "$timings" "$work/lua.list" | sort -rn | cut -f2 > "$work/lua.sorted" \
     && mv "$work/lua.sorted" "$work/lua.list"
 fi
+# THE BINARY THE ROWS SPAWN IS THE ONE THIS RUN RESOLVED (item 3 of the node-ops round). A shell row that
+# needs a `wa` of its own resolves WA_BIN, then the tree's release path, then PATH - and on this node PATH
+# holds ~/.local/bin/wa, another commit build. MEASURED: the four scratch-home rows under the fast path
+# ran that older binary, which rewrites HOME from WASM_AGENT_HOME without recording the home it replaced,
+# so their guards refused a correct scratch home. WA_BIN is exported here so a row's node is THIS tree.
+export WA_BIN="$bin"
+# THE ROW SCRATCH ROOT, EXPORTED (item 0, measured). scripts/lib/test-home-guard.lua is an
+# allow-list: a row home must sit under GATE_ROOT (else TMPDIR). This node TMPDIR is INSIDE the
+# operator store, so without this a ledger-writing row refused to run ("this test writes a ledger:
+# it refuses to run") - one row of 114 here, and the same cause would refuse all of them on a
+# machine whose TMPDIR is the real home. Both names point at THIS run work dir, which the run has
+# just proved is outside the operator store and outside the tree under test.
+mkdir -p "$work/tmp" 2>/dev/null || true
+export TMPDIR="$work/tmp" GATE_ROOT="$work"
 export FAST_BIN="$bin" FAST_ROOT="$(native "$ROOT")" FAST_WORK="$work" NAMED_SKIPS="$named_skips"
 mkdir -p "$FAST_WORK/logs"
-# One definition of "run this test hermetically", used by the parallel batch AND by the serial retry,
-# so the retry measures exactly what the first attempt measured. WA_COMPONENTS_DIR is inside the row's own
-# home (see "the components the Lua rows need" above): a component the test installs lands there, and a
-# test that never installs one sees an empty directory rather than an unset variable.
-lua_run() { # <script> <home>
-  local home_native components name upper base env_file
-  home_native=$( (command -v cygpath >/dev/null && cygpath -w "$2") || echo "$2")
-  components=$( (command -v cygpath >/dev/null && cygpath -w "$2/.wasm-agent/components") || echo "$2/.wasm-agent/components")
-  mkdir -p "$2/.wasm-agent/components" 2>/dev/null || true
-  # The component this row's own text names, if the runner built it: installed (pinned, with its manifest)
-  # into the row's own directory AND handed to the host through the development override the suites read.
-  # Both halves are needed and neither is a guess - `WA_<NAME>_COMPONENT_WASM` is the variable the suite's
-  # skip message used to print, so the file says which one it needs.
-  local -a overrides=()
-  if [ -n "${FAST_COMPONENT_SOURCE:-}" ]; then
-    for name in $FAST_COMPONENT_NAMES; do
-      [ -f "$FAST_COMPONENT_SOURCE/$name.wasm" ] || continue
-      upper=$(printf '%s' "$name" | tr '[:lower:]-' '[:upper:]_')
-      grep -q "WA_${upper}_COMPONENT_WASM" "$1" 2>/dev/null || continue
-      cp "$FAST_COMPONENT_SOURCE/$name.json" "$FAST_COMPONENT_SOURCE/$name.wasm" \
-         "$FAST_COMPONENT_SOURCE/$name.wasm.sha256" "$2/.wasm-agent/components/" 2>/dev/null || continue
-      overrides+=("WA_${upper}_COMPONENT_WASM=$( (command -v cygpath >/dev/null && cygpath -w "$2/.wasm-agent/components/$name.wasm") || echo "$2/.wasm-agent/components/$name.wasm")")
-      overrides+=("WA_${upper}_COMPONENT=1")
-    done
-  fi
-  # Every variable this row is given, on ONE line each, for the probe row that checks they arrived
-  # (`scripts/test-fast-row-environment.lua`): a variable the runner sets and the row never sees is the
-  # failure this table exists to catch, and it is caught from inside the row, not from here.
-  base=$(basename "$1")
-  env_file=$(native "$FAST_WORK/env/$base.env")
-  mkdir -p "$FAST_WORK/env" 2>/dev/null || true
-  {
-    printf 'WASM_AGENT_LUA_ROOT=%s\n' "$FAST_ROOT"
-    printf 'WASM_AGENT_HOME=%s\n' "$home_native"
-    printf 'WA_COMPONENTS_DIR=%s\n' "$components"
-    printf 'WA_FAST_COMPONENT_SOURCE=%s\n' "${FAST_COMPONENT_SOURCE:-}"
-    printf 'WASM_AGENT_RENDEZVOUS=\n'
-    printf 'WASM_AGENT_RELAY=\n'
-    printf 'WASM_AGENT_MANAGED=0\n'
-    printf 'WA_SCRIPT=%s\n' "$1"
-    for name in "${overrides[@]}"; do printf '%s\n' "$name"; done
-    printf 'WA_FAST_CLEARED=%s\n' "$WA_FAST_CLEARED"
-    printf 'WA_FAST_ROW_ENV=%s\n' "$env_file"
-    # The binary this run is about, for a row that has to run it as a program of its own rather than as the
-    # node it is already inside (`scripts/test-release-sign.lua` asks it to verify the same six releases the
-    # shell verifier is judged by). Native path, like every other path handed to a row.
-    printf 'WA_FAST_BIN=%s\n' "$FAST_BIN"
-  } > "$env_file" 2>/dev/null || true
-  # A row is hermetic, and that has to be enforced here rather than trusted in each test: this node's
-  # ambient environment exports the operator's real vault (`WASM_AGENT_VAULT_URL=http://192.168.1.27:8765`,
-  # `WASM_AGENT_VAULT_DIR=...`), and a row that merely *pins the provider* reaches it. The chain was
-  # measured 11/12 on this machine with host.http wrapped: `agent.lua` -> `provider.pin`
-  # (`lua/core/provider.lua`) -> `vault.base` -> `vault.status` (`lua/core/vault.lua`, a GET
-  # `<url>/status`) - a real HTTP request inside a row whose own header promises "no node, no network".
-  # Three rows failed because of it and went green with these variables removed and nothing else
-  # changed: test-vault-routing (1 of 6), test-context-usage (line 23: "no actual summary, and no
-  # attempted request, at threshold equality") and test-done-gate (20 of 58). A row that needs a vault
-  # sets its own (`scripts/test-vault-routing.lua` points WASM_AGENT_VAULT_URL at a stub it starts).
-  # The whole credential lane goes, not just the URL: the per-route override and the local store are two
-  # more ways for a test to read the machine it happens to run on.
-  # And the node's own identity and mode (17/11 on avell: a run started THROUGH a node inherits that node's
-  # WASM_AGENT_DB - its real ledger -, WASM_AGENT_IN_TURN, WASM_AGENT_RAW_CODE and WA_MESH; eight rows failed
-  # there and passed everywhere else). A row that tests one of these sets it itself.
-  env -u WASM_AGENT_VAULT_URL -u WASM_AGENT_VAULT_DIR -u WASM_AGENT_VAULT_KEYSTORE \
-    -u WASM_AGENT_VAULT_PASSPHRASE -u WASM_AGENT_VAULT_OPERATOR_URL -u WASM_AGENT_OPENCODE_GO_VAULT_URL \
-    -u WASM_AGENT_DB -u WASM_AGENT_IN_TURN -u WASM_AGENT_RAW_CODE -u WASM_AGENT_PROVENANCE \
-    -u WA_MESH -u WA_MESH_COMPONENT \
-    "${overrides[@]}" \
-    WASM_AGENT_LUA_ROOT="$FAST_ROOT" WASM_AGENT_HOME="$home_native" \
-    WA_COMPONENTS_DIR="$components" WA_FAST_COMPONENT_SOURCE="$FAST_COMPONENT_SOURCE" \
-    WA_FAST_ROW_ENV="$env_file" WA_FAST_CLEARED="$WA_FAST_CLEARED" WA_FAST_BIN="$FAST_BIN" \
-    WASM_AGENT_RENDEZVOUS= WASM_AGENT_RELAY= WASM_AGENT_MANAGED=0 WA_SCRIPT="$1" \
-    timeout 120 "$FAST_BIN" --db "$2/t.db"
-}
+# The definition of "run this test hermetically" lives in scripts/lib/fast-row-exec.sh, so the
+# watchdog test can RUN it instead of grepping for it.
 run_lua() { # <script> -> one TSV row: exit, ms, script, verdict line, verdict kind
   f=$1; s=$(fast_now_ms); code=0; kind=ok
   # A scratch home that cannot be made is the machine (the same signature the classifier reads in a
@@ -472,17 +473,20 @@ run_lua() { # <script> -> one TSV row: exit, ms, script, verdict line, verdict k
   fi
   if [ "$c" != 0 ]; then
     kind=$(wa_environment_kind "$c" "$last")
+    # A hang is only a hang when the watchdog said so in its own line: an exit 124 on its own is also
+    # what a fixture that calls timeout returns, and calling that a hang would be a guess.
+    if grep -q '^watchdog: ' "$out" 2>/dev/null; then kind=hung; last=$(grep '^watchdog: ' "$out" | tail -1); fi
     cp "$out" "$FAST_WORK/logs/$(basename "$f").log" 2>/dev/null || true
   fi
   ms=$(( $(fast_now_ms) - s ))
   if [ "$c" = 0 ]; then
     record_row pass lua "$f" "$c" "$ms" 0 ''
   else
-    record_row fail lua "$f" "$c" "$ms" "$([ "$kind" = environment ] && echo 1 || echo 0)" "$(first_error_of "$out")"
+    record_row fail lua "$f" "$c" "$ms" "$( { [ "$kind" = environment ] || [ "$kind" = hung ]; } && echo 1 || echo 0)" "$(first_error_of "$out")"
   fi
   printf '%s\t%s\t%s\t%s\t%s\n' "$c" "$ms" "$f" "$(printf '%s' "$last" | tr '\t' ' ' | cut -c1-160)" "$kind"
 }
-export -f lua_run run_lua native
+export -f lua_run run_lua native wa_fast_row_exec wa_fast_watchdog
 xargs -P "$jobs" -I{} bash -c 'run_lua "$1"' _ {} < "$work/lua.list" > "$work/lua.tsv"
 # The rows the machine could not run: retried once, one at a time, AFTER the batch, so the retry is
 # genuinely alone on the machine. A row that passes then is a pass (reported as one); a row that still
@@ -512,9 +516,14 @@ lua_total=$(wc -l < "$work/lua.list"); lua_fail=$(awk -F'\t' '$1!=0' "$work/lua.
 envleft=$(awk -F'\t' '$1!=0 && $5=="environment"' "$work/lua.tsv" | wc -l)
 [ -n "$timings" ] && cp "$work/lua.tsv" "$timings" 2>/dev/null || true
 ran=$((ran + lua_total)); fails=$((fails + lua_fail));
-awk -F'\t' '$1!=0{ if ($5=="environment") printf "FAIL lua %s (exit %s, environment): %s\n",$3,$1,$4; else printf "FAIL lua %s (exit %s): %s\n",$3,$1,$4 }' "$work/lua.tsv"
+awk -F'\t' '$1!=0{ if ($5=="hung") printf "FAIL lua %s (hung): %s\n",$3,$4; else if ($5=="environment") printf "FAIL lua %s (exit %s, environment): %s\n",$3,$1,$4; else printf "FAIL lua %s (exit %s): %s\n",$3,$1,$4 }' "$work/lua.tsv"
 echo "fast: lua $((lua_total - lua_fail))/$lua_total passed ($(wa_fast_row_skips | grep -c . ) excluded: scripts/fast-path.exclude)"
 [ "$envleft" -gt 0 ] && echo "fast: $envleft of them never ran: the machine ran out of processes (fork/spawn), see scripts/lib/fast-environment.sh"
+# A hung row is neither a pass nor a verdict on the code, and it is counted apart from both: its process
+# group was killed (scripts/lib/fast-watchdog.sh), so the run that follows it is not measuring a tree that
+# leaked a writer, a lock or a pipe into it.
+hungleft=$(awk -F'\t' '$1!=0 && $5=="hung"' "$work/lua.tsv" | wc -l)
+[ "$hungleft" -gt 0 ] && echo "fast: $hungleft row(s) HUNG and were killed with their whole process group: the line names the row, the seconds and the group (see scripts/lib/fast-watchdog.sh)"
 # A component this runner PROMISED cannot be missing in the row that asked for it. The row names the
 # artifact in its own text (`WA_<NAME>_COMPONENT_WASM`), `lua_run` installs that artifact in the row's own
 # directory and hands the host the override - so a row that reports the component missing is the runner
@@ -611,10 +620,23 @@ else
   # quota leak behind `keystore_keyring_unavailable`, and a wrapped root read with the wrong cipher behind
   # `sealed_blob_version_unknown`).
   for crate in wa-sqlite wa-host wa-host-support wa-governance wa-term wa-rendezvous wa-kernel-runtime wa-capabilities wa-operation wa-jobs wa-graph wa-sentinel wa-whatsapp-outbox wa-whatsapp-index wa-mesh wa-stt-remote wa-model-gateway wa-tool-progress wa-model-router wa-fleetview wa-keystore wa-tls; do
-    if [ "$all_rust" = 1 ] || printf '%s\n' "$changed" | grep -q "^rust/$crate/"; then crates="$crates $crate"; fi
+    # A HERE-STRING, NOT A PIPE (measured 19/11: under \`set -o pipefail\`, \`printf | grep -q\` fails about 0.15% of the
+    # time - grep exits at the first match and printf dies of SIGPIPE - and here that silently DROPS a crate from the
+    # run, so the fast path tested less than it said. Measured: 3 false failures in 2000 calls.)
+    if [ "$all_rust" = 1 ] || grep -q "^rust/$crate/" <<< "$changed"; then crates="$crates $crate"; fi
   done
-  printf '%s\n' "$changed" | grep -qE '^rust/(Cargo\.(toml|lock))$' && [ "$all_rust" = 0 ] && crates=" wa-sqlite wa-host wa-host-support wa-governance wa-term wa-rendezvous wa-kernel-runtime wa-capabilities wa-operation wa-jobs wa-graph wa-mesh wa-tls"
+  grep -qE '^rust/(Cargo\.(toml|lock))$' <<< "$changed" && [ "$all_rust" = 0 ] && crates=" wa-sqlite wa-host wa-host-support wa-governance wa-term wa-rendezvous wa-kernel-runtime wa-capabilities wa-operation wa-jobs wa-graph wa-mesh wa-tls"
   if [ -z "$crates" ]; then echo "fast: rust - no crate touched"; fi
+  # THE ROWS' CARGO TESTS GET A SCRATCH HOME (review item 5, measured on the merged tree).
+  #
+  # Three Rust tests in wa-capabilities (adoption_survives_the_relay_deadline, await_returns_at_its_own_wait)
+  # start REAL operations, so main made them refuse unless HOME looks like a scratch or temp directory -
+  # its own comment says "scripts/test.sh runs it with HOME=$GATE_HOME". This runner never did: it passed
+  # the ambient HOME (/home/victor), the two tests refused by name, and the merged tree went red with
+  # "1 of 323 checks" that had nothing to do with the code. Measured both ways: with HOME=$scratch they
+  # are 45 passed, 0 failed.
+  rust_home="$work/rust-home"
+  mkdir -p "$rust_home" 2>/dev/null || rust_home="$work"
   for crate in $crates; do
     # THE BUILD, measured as the build the tests themselves need - never a second one. 'cargo test
     # --no-run' in the tests' own profile compiles exactly what the row below runs, and the row then
@@ -626,11 +648,11 @@ else
     bstart=$(fast_now_ms); build_rc=0
     # The exit code is KEPT, not discarded: a build that failed compiled nothing, and the note must say
     # so rather than print the warm row's sentence under a red one (scripts/lib/build-times.sh).
-    CARGO_TARGET_DIR="${fast_build_target:-$ROOT/rust/target}" cargo test --no-run --offline $test_args > "$work/build-$crate.log" 2>&1 || build_rc=$?
+    HOME="$rust_home" CARGO_TARGET_DIR="${fast_build_target:-$ROOT/rust/target}" cargo test --no-run --offline $test_args > "$work/build-$crate.log" 2>&1 || build_rc=$?
     wa_build_time_record crate "$crate" "$(( $(fast_now_ms) - bstart ))" "$(wa_build_time_note "$work/build-$crate.log" "$build_rc")"
     s=$(date +%s)
     if [ "$crate" = wa-sentinel ]; then
-      CARGO_TARGET_DIR="${fast_build_target:-$ROOT/rust/target}" cargo test --offline --manifest-path rust/wa-sentinel/Cargo.toml -- --test-threads=1 > "$work/rust-$crate.log" 2>&1
+      HOME="$rust_home" CARGO_TARGET_DIR="${fast_build_target:-$ROOT/rust/target}" cargo test --offline --manifest-path rust/wa-sentinel/Cargo.toml -- --test-threads=1 > "$work/rust-$crate.log" 2>&1
     elif [ "$crate" = wa-capabilities ]; then
       # wa-capabilities holds the streaming timeout tests (http_transport's phase budgets: 250 ms for
       # response headers, 500 ms of body silence) next to the agent-core pool's heavy ones. Those
@@ -638,12 +660,12 @@ else
       # of the crate first (the pool's engines, compiles and wasm instances cannot starve them), then
       # the streaming tests alone. Neither run skips anything - the split is the isolation, not a
       # filter on what is proved (docs/KERNEL.md, "A2.3").
-      CARGO_TARGET_DIR="${fast_build_target:-$ROOT/rust/target}" cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-capabilities \
+      HOME="$rust_home" CARGO_TARGET_DIR="${fast_build_target:-$ROOT/rust/target}" cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-capabilities \
         -- --skip http_transport::streaming_timeout_tests > "$work/rust-$crate.log" 2>&1 \
-      && CARGO_TARGET_DIR="${fast_build_target:-$ROOT/rust/target}" cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-capabilities \
+      && HOME="$rust_home" CARGO_TARGET_DIR="${fast_build_target:-$ROOT/rust/target}" cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-capabilities \
         -- http_transport::streaming_timeout_tests >> "$work/rust-$crate.log" 2>&1
     else
-      CARGO_TARGET_DIR="${fast_build_target:-$ROOT/rust/target}" cargo test --release --offline --manifest-path rust/Cargo.toml -p "$crate" > "$work/rust-$crate.log" 2>&1
+      HOME="$rust_home" CARGO_TARGET_DIR="${fast_build_target:-$ROOT/rust/target}" cargo test --release --offline --manifest-path rust/Cargo.toml -p "$crate" > "$work/rust-$crate.log" 2>&1
     fi
     c=$?; ran=$((ran + 1)); ms=$(( ($(date +%s) - s) * 1000 ))
     if [ "$c" = 0 ]; then echo "fast: rust $crate ok ($(( $(date +%s) - s ))s)"; record_row pass rust "rust $crate" "$c" "$ms" 0 ''
@@ -672,7 +694,9 @@ fi
 check() { name=$1; shift; s=$(fast_now_ms)
   wa_environment_retry "$name" "$work/check-$name.log" "$@"; c=$?
   ran=$((ran + 1)); ms=$(( $(fast_now_ms) - s ))
-  if [ "$c" = 0 ]; then echo "fast: $name ok (${ms}ms)"; record_row pass checks "$name" "$c" "$ms" 0 ''; return 0; fi
+  if [ "$c" = 0 ]; then
+    echo "fast: $name ok (${ms}ms)"; record_row pass checks "$name" "$c" "$ms" 0 ''; return 0
+  fi
   fails=$((fails + 1))
   case "$WA_FAST_RETRY" in environment) envfails=$((envfails + 1)); echo "FAIL $name (exit $c, environment): $(last_line_of "$work/check-$name.log")"
       record_row fail checks "$name" "$c" "$ms" 1 "$(first_error_of "$work/check-$name.log")" ;;
@@ -763,6 +787,22 @@ fi
 # The deploy's retirement rule: a shipped script main deleted must not survive in the install (measured
 # 2026-11-11: the removed Node WhatsApp bridge stayed installed beside the new set).
 check deploy-prune bash scripts/test-deploy-prune.sh
+# The per-row watchdog (item 6 of the node-ops round): a hung row is NAMED and its whole process group
+# dies with it. Measured 18/11 on avell: a row whose fixture forked a long sleep child outlived the row
+# every time, because the bare timeout ends only the process it was given. Seconds, scratch home, no node.
+check fast-watchdog bash scripts/test-fast-watchdog.sh
+# A row that exits 0 still owns its process group: the children it forked are reclaimed and the sweep
+# says how many, so the accumulation that reached 1,234 processes cannot build up (test-fast-watchdog-reap.sh).
+check fast-watchdog-reap bash scripts/test-fast-watchdog-reap.sh
+# The rule those guards rest on, judged: WASM_AGENT_HOME is the USER home, so the operator home, its
+# store, anything inside it and anything above it are refused (item 4 of the node-ops round).
+check scratch-home bash scripts/test-scratch-home.sh
+# lua_run hands every row fast.sh's WA_FAST_CLEARED unchanged and clears the vault/node variables (test-fast-row-cleared.sh).
+check fast-row-cleared bash scripts/test-fast-row-cleared.sh
+# ROWS THIS BRANCH CANNOT RUN ARE NOT WIRED HERE (review r2, A1). Eleven `check` lines named scripts that
+# only exist on change/node-ops (the probe rows, the build-record rows, the rollback row, the restore row,
+# row-at-sha): on this branch each was an exit-127 FAIL, so the split reported eleven failures that were
+# only files that were never here. A row is wired where its script lives.
 check publish-artifacts bash scripts/test-publish-artifacts.sh
 # THE DEPLOY'S ANCESTRY AND ITS RECORD (round 4 of the deploy-ancestry review). Seven files were written with
 # that fix and named by no harness, so every gate here was green without running one of them; the full gate now
