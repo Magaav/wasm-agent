@@ -6,8 +6,9 @@
 #   bash scripts/bench-seams.sh [--iterations N] [--json]
 #
 # Local only, and hermetic: a temp WASM_AGENT_HOME, a scratch ledger inside it, an empty
-# rendezvous/relay, no node, no network, no model, no 'wa serve'. The one process it starts is the
-# tree's own binary.
+# rendezvous/relay, no node, no network, no model, no 'wa serve'. It starts exactly two processes, both
+# from this tree: the tree's own `wa` for the seam rows, and (for the serde half only)
+# `cargo run --release -p wa-host-support --example json-cost` - a dev example, never a shipped binary.
 #
 # A SEAM THAT CANNOT BE MEASURED HERE IS A SKIP WITH ITS REASON, never a zero in the table: the MCP
 # row needs a configured server, and the codemode row is scripts/bench-codemode.sh's (it needs the
