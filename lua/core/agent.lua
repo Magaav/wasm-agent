@@ -1131,11 +1131,14 @@ end
 function M:build_context()
   local session = memory.session(self.session_id) or {}
   local agents, agents_path, tool_list, catalog, workdir
-  local code_ctx={session_id=self.session_id,user_id=self.user,role=self.role,subagent=self.subagent,codemode_policy=self.codemode_policy}
-  self.codemode_policy=dofile('lua/core/codemode_policy.lua').pin(memory,self.role,code_ctx)
-  -- Which raw-code mode THIS THREAD acts in, decided ONCE and recorded (rel review r3, item 1).
+  -- THE MODE IS DECIDED FIRST (review r4, item 1). Everything below reads it: the pinned codemode
+  -- policy, which code_ctx carries, and every tool list that depends on the door (envelope.schemas,
+  -- subagent_tool_list). Built the other way round, code_ctx held a policy pinned BEFORE the decision, so
+  -- a resume after a restart - or any thread on a node whose mode differs from the thread's - resolved its
+  -- tools from the NODE's mode. prompt_cache.enforce then saw the tool list changed and delivered
+  -- "removed: ..." to the model as a session update.
   --
-  -- Three cases, in this order, and no cache anywhere:
+  -- Four cases, in this order, and no cache anywhere:
   --   * a child takes its PARENT's recorded mode (self.subagent.raw_mode, carried with the admission
   --     receipt): a child is the parent's code door, so the node's switch cannot move it mid-flight;
   --   * a thread with a frozen prefix keeps the mode it was started in - the prefix, the declared tools
@@ -1148,28 +1151,36 @@ function M:build_context()
   local frozen_record
   -- A string is a decision on its own; a nil needs the marker (rel review r3, item 1).
   if self.subagent and (type(self.subagent.raw_mode)=='string' or self.subagent.raw_decided) then
-    raw_code_lib.decide(self.codemode_policy, self.subagent.raw_mode)
+    self.raw_decided_mode=self.subagent.raw_mode
+    self.raw_decided_flag=true
     self.mode_source='parent'
   else
     frozen_record=select(1,dofile('lua/core/prompt_cache.lua').read({
       session_id=self.session_id,user_id=self.user,role=self.role}))
     if frozen_record and (type(frozen_record.raw_mode)=='string' or frozen_record.raw_decided) then
       -- The record DECIDED (a string names a channel, a decided nil names none): never ask again.
-      raw_code_lib.decide(self.codemode_policy, frozen_record.raw_mode)
+      self.raw_decided_mode=frozen_record.raw_mode
+      self.raw_decided_flag=true
       self.mode_source='record'
     elseif frozen_record then
-      -- Written before the field existed: that thread prefix was built in only.
-      raw_code_lib.decide(self.codemode_policy, raw_code_lib.LEGACY_THREAD_MODE)
+      -- Written before the field existed: that thread's prefix was built in only.
+      self.raw_decided_mode=raw_code_lib.LEGACY_THREAD_MODE
+      self.raw_decided_flag=true
       self.mode_source='legacy'
     else
-      raw_code_lib.decide(self.codemode_policy, raw_code_lib.mode())
+      self.raw_decided_mode=raw_code_lib.mode()
+      self.raw_decided_flag=true
       self.mode_source='switch'
     end
   end
   -- The decision in its own field: run_body pins the codemode policy afresh PER RUN (it sets
-  -- self.codemode_policy=nil first), so the recorded mode has to live somewhere the run does not clear
-  -- (rel review r3, item 1).
-  self.raw_decision={mode=dofile('lua/core/raw_code.lua').mode_of(self.codemode_policy), decided=true}
+  -- self.codemode_policy=nil first), so the recorded mode has to live somewhere the run does not clear.
+  self.raw_decision={mode=self.raw_decided_mode, decided=self.raw_decided_flag}
+  -- The policy is pinned WITH the decision already on it, so code_ctx carries the mode into everything
+  -- that reads mode_of(ctx.codemode_policy) while the prompt and the tools are built.
+  local code_ctx={session_id=self.session_id,user_id=self.user,role=self.role,subagent=self.subagent}
+  self.codemode_policy=dofile('lua/core/codemode_policy.lua').pin(memory,self.role,code_ctx)
+  raw_code_lib.decide(self.codemode_policy, self.raw_decided_mode)
   if self.subagent then
     -- A child deliberately does NOT read the operator instruction file: those
     -- rules name internal paths and the deploy shape, and a child is exactly the

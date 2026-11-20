@@ -129,6 +129,7 @@ host.sql_exec('INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)', json.encode(
 local legacy_read = pcache.read({ session_id = sid_l, user_id = 'master', role = 'master' })
 ok(type(legacy_read) == 'table' and legacy_read.raw_mode == nil,
   'the legacy record reads back with NO raw_mode')
+-- A legacy record keeps only, whatever the switch says: that is the mode its prefix was built in.
 local legacy_thread = with({ WASM_AGENT_RAW_CODE = 'native' }, function() return bot(sid_l) end)
 eq(legacy_thread.mode_source, 'legacy', 'a thread without a recorded mode is named legacy')
 eq(legacy_thread.codemode_policy.raw_mode, 'only', 'and it keeps only - the mode its prefix was built in')

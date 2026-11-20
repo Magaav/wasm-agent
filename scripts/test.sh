@@ -1698,6 +1698,11 @@ WA_SCRIPT=scripts/test-default-mode.lua "$BIN" --db "$DB" | grep "default mode o
 # drops it, RAW_CODE=bash keeps its old meaning without the A/B arm, and a thread keeps the mode its
 # prefix was frozen in.
 WA_SCRIPT=scripts/test-raw-mode-small.lua "$BIN" --db "$DB" | grep "raw mode small rules ok"
+# Review r4 item 1: the mode is DECIDED AND PINNED before the tool context is built, so a resume after a
+# restart (or any thread whose node mode differs) resolves the tools the thread recorded, the frozen
+# prefix reports no change, and no "removed: ..." session-update note reaches the model. Review r4 item 2:
+# a record written before the field existed honours an EXPLICIT switch and keeps only when it is unset.
+WA_SCRIPT=scripts/test-mode-decided-first.lua "$BIN" --db "$DB" | grep "mode decided first ok"
 
 # Test the shipping registry, including missing/stale/invalid negative controls.
 ( export WA_EMBEDDED_SOURCE_ROOT="$WASM_AGENT_LUA_ROOT"; unset WASM_AGENT_LUA_ROOT

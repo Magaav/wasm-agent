@@ -23,7 +23,7 @@ operator log (568ed30c), so its prompts carry none; scripts/test-prompt-golden.l
 exactly and names that single difference.
 
 The arm-B rows do not skip: scripts/test-prompt-golden.lua also asserts a default node (no switch) is
-arm B - prog​ressive and full envelope, master and child - and its build() gives the scratch provider a
+arm B - progressive and full envelope, master and child - and its build() gives the scratch provider a
 tool_call row through the same seam the node reads.
 
 Checked by scripts/test-prompt-golden.lua (wired in scripts/test.sh, "prompt golden ok").

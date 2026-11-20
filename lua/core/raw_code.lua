@@ -151,15 +151,29 @@ M.LEGACY_THREAD_MODE = "only"
 -- execution; the parent's mode travels with the admission spec and the durable receipt
 -- (lua/core/subagents.lua, receipt.raw_mode), and the child reads it here.
 function M.child_mode(subagent, policy)
-  if type(subagent) == "table" and type(subagent.raw_mode) == "string" then return subagent.raw_mode end
+  if type(subagent) == "table" then
+    if type(subagent.raw_mode) == "string" then
+      if subagent.raw_mode == M.NO_CHANNEL then return nil end
+      return subagent.raw_mode
+    end
+    -- A parent that DECIDED no raw channel hands that decision down (review r4 SHOULD): a child may not
+    -- re-open a door its parent closed, and it may not read the absence as legacy either.
+    if subagent.raw_decided == true then return nil end
+  end
   return M.mode_of(policy)
 end
 
+-- The NODE's answer for a thread that has no record: the explicit switch when it is set, otherwise the
+-- provider row (M.default_mode).
 function M.mode()
   local value = tostring(host.getenv("WASM_AGENT_RAW_CODE") or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
   if value == "" then
     return M.default_mode()
   end
+  return M.parse_switch(value)
+end
+
+function M.parse_switch(value)
   if OFF[value] then return nil end
   if value == "1" or value == "on" or value == "true" then return "on" end
   if value == "stop" then return "stop" end
