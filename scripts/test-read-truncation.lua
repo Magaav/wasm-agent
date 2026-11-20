@@ -186,4 +186,39 @@ check(tostring(shrunk.outside):find('edit_anchor_outside_read_page', 1, true) ~=
   'by its own name: ' .. tostring(shrunk.outside):sub(1, 300))
 check(host.read_file(dense) == table.concat(dense_lines, '\n') .. '\n', 'the refused edit wrote nothing')
 
+-- 10. review r1 SHOULD 2: an anchor whose two ends each sit inside a served page but which spans an
+-- UNSERVED gap between them used to be applied. Coverage is now required from end to end.
+-- Two fixtures: the first edit below really lands, and an applied edit changes the version, so the
+-- spanning case gets a file of its own.
+local gap = root .. '/gap.txt'
+local gap_lines = {}
+for i = 1, 300 do gap_lines[i] = string.format('gap %03d %s', i, string.rep('g', 40)) end
+assert(host.write_file(gap, table.concat(gap_lines, '\n') .. '\n'), 'fixture gap.txt')
+local span = root .. '/span.txt'
+assert(host.write_file(span, table.concat(gap_lines, '\n') .. '\n'), 'fixture span.txt')
+local spanning = value(run('const a = await tools.read({path:' .. json.encode(gap) .. ', offset:5, limit:1});\n'
+  .. 'const b = await tools.read({path:' .. json.encode(gap) .. ', offset:200, limit:1});\n'
+  .. 'const e = await tools.edit({path:a.path, edits:[{old_text:"gap 005 ", new_text:"GAP 005 "}]});\n'
+  .. 'return {first:{first_line:a.range.first_line, last_line:a.range.last_line},'
+  .. ' second:{first_line:b.range.first_line, last_line:b.range.last_line}, inside:e.ok===true};'))
+check(spanning.first.last_line == 5 and spanning.second.first_line == 200,
+  'the two served pages are disjoint: ' .. json.encode({spanning.first, spanning.second}))
+check(spanning.inside == true, 'an anchor wholly inside one served page still edits: ' .. json.encode(spanning.inside))
+-- The anchor that spans the unserved gap: its first line is served, its last line is served, and the
+-- bytes between them were never returned by any read.
+local cross = {}
+for i = 5, 200 do cross[#cross + 1] = gap_lines[i] end
+local wide = value(run('const d = ' .. json.encode(table.concat(cross, '\n')) .. ';\n'
+  .. 'await tools.read({path:' .. json.encode(span) .. ', offset:5, limit:1});\n'
+  .. 'await tools.read({path:' .. json.encode(span) .. ', offset:200, limit:1});\n'
+  .. 'let said = null;\n'
+  .. 'try { await tools.edit({path:' .. json.encode(span) .. ', edits:[{old_text:d, new_text:"X"}]}); }\n'
+  .. 'catch (e) { said = String(e && e.message || e); }\n'
+  .. 'return {said:said};'))
+check(wide.said ~= nil, 'an anchor spanning the unserved gap is refused, not applied: '
+  .. tostring(wide.said):sub(1, 300))
+check(tostring(wide.said):find('edit_anchor_outside_read_page', 1, true) ~= nil,
+  'by its own name: ' .. tostring(wide.said):sub(1, 300))
+check(host.read_file(span) == table.concat(gap_lines, '\n') .. '\n', 'and it wrote nothing')
+
 print('read truncation ok (' .. checks .. ' checks)')

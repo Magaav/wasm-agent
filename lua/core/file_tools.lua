@@ -176,6 +176,31 @@ local function within_pages(page,version,byte)
   end
   return false
 end
+-- True when EVERY byte from a to b is covered by the union of the served ranges; nil when this
+-- session has no page for the file at this version. Checking only the two ends let an anchor whose
+-- first byte sat in one served page and whose last byte sat in another pass with a gap of bytes the
+-- caller never saw in between (review r1 SHOULD 2). The ranges are merged on the fly in byte order,
+-- so overlapping or adjacent served pages count as one cover.
+local function covered_pages(page,version,a,b)
+  if not page or page.version~=version then return nil end
+  if page.whole then return true end
+  if #page.ranges==0 then return nil end
+  local sorted={}
+  for i,r in ipairs(page.ranges) do sorted[i]=r end
+  table.sort(sorted,function(x,y) return x.first_byte<y.first_byte end)
+  local at=a
+  for _,r in ipairs(sorted) do
+    if r.last_byte<at then
+      -- an earlier range, already behind the cursor
+    elseif r.first_byte>at then
+      return false
+    else
+      if r.last_byte>=b then return true end
+      at=r.last_byte+1
+    end
+  end
+  return false
+end
 -- Nil scope (a direct module call, a batch that carries no session) records nothing and is never
 -- fenced: the fence is about a page the session was served, and there is no session here.
 function M.read(args,store_image,view_bytes,scope)
@@ -591,13 +616,15 @@ function M.edit(args,record,prepare_only,scope)
   if scope then
     local page=M.pages_for(scope,args.path)
     for _,r in ipairs(ranges) do
-      if within_pages(page,hash,r.a)==false or within_pages(page,hash,r.b)==false then
+      if covered_pages(page,hash,r.a,r.b)==false then
         return {error='edit_anchor_outside_read_page',path=args.path,edit=r.index,
           anchor_byte=r.a,anchor_line=line_of(text,r.a),
+          anchor_last_byte=r.b,anchor_last_line=line_of(text,r.b),
           pages=page and page.ranges or nil,
-          note='this session read only part of this file: the anchor is outside every byte range read '
-            ..'returned. Read the page that holds it (read with offset/column, or truncation.next) and '
-            ..'quote the bytes from that page; a whole-file read of the same version clears this.'}
+          note='this session read only part of this file: some of the bytes the anchor covers were '
+            ..'never returned by a read. Read the page that holds it (read with offset/column, or '
+            ..'truncation.next) and quote the bytes from that page; a whole-file read of the same '
+            ..'version clears this.'}
       end
     end
   end
