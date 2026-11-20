@@ -147,6 +147,19 @@ const ENV = {
   LINES: '40',
 };
 
+// ---- can this machine run the test at all ------------------------------------------------------
+// The screen is read back from a real pty, and tmux is the pty this test knows how to drive. A machine
+// without it is not a machine that failed: it is one that cannot answer, so the test SKIPS BY NAME and
+// exits 0 (the fast path prints the row as a skip and counts it as a skip, never a pass).
+const HAVE_TMUX = spawnSync('tmux', ['-V'], {encoding: 'utf8'}).status === 0;
+if (!HAVE_TMUX) {
+  console.log('SKIP test-fence-card-pty: no tmux on PATH, and this test reads a real pty through it ' +
+    '(install tmux; a browser-less or container node has none)');
+  server.close();
+  fs.rmSync(WORK, {recursive: true, force: true});
+  process.exit(0);
+}
+
 const SOCKET = 'wa-fence-card-' + process.pid;
 const SESSION = 'fence';
 const tmux = args => spawnSync('tmux', ['-L', SOCKET, ...args], {encoding: 'utf8'});
