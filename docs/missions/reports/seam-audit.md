@@ -147,12 +147,12 @@ connector's payloads are MCP's (row 7); `wit/seams/seams.wit` already declares `
 
 ## The gate, and what it said
 
-Run on this node under `flock /home/victor/Work/missions/.suite.lock` (the node's one suite lock -
-other missions were running suites on the same 16 cores), with the tree's own binary stamped
-`c5a6c3c7, dirty=false` (`wa --build-info`) for this branch, `c1852222` for the report branch.
+Run on this node under `flock -o /home/victor/Work/missions/.suite.lock` (the node's one suite lock -
+other missions were running suites on the same 16 cores), with the tree's own binary at
+`da19722a`, whose `wa --build-info` answered `commit=da19722a... dirty=false` when it was built.
 
-**`scripts/fast.sh --jobs 4`: 305 checks, 2 failed, 0 skipped (285 s).** Both failures are the
-environment's, and both are proven rather than asserted:
+**`scripts/fast.sh --jobs 4` at the final head: 305 checks, 2 failed, 0 skipped (282 s).** Both
+failures are the environment's, and both are proven rather than asserted:
 
 1. `scripts/test-refusal-contract.lua:24: lua/core/refusal_codes.lua is stale` - **pre-existing on
    `origin/main`**: `git archive origin/main | tar -x -C /tmp/base-main`, then
@@ -168,14 +168,17 @@ environment's, and both are proven rather than asserted:
    does not own the environment those two tests demand.
 
 **The parity test this branch adds is in the fast path and passed there**: `sql rows ok (11 checks, 0
-skipped)` - both when run alone (`WA_SCRIPT=scripts/test-sql-rows.lua`) and as a fast-path row.
+skipped)` - both when run alone (`WA_SCRIPT=scripts/test-sql-rows.lua`) and as a fast-path row, at
+the final head, after the r2 probes and the non-finite REAL fix.
 
 **`scripts/test.sh` (the full gate): stops at `scripts/test-sentinel-service-deploy.cjs:23`** -
 `Expected ['stop','copy','start'], actual ['stop']` - **pre-existing on `origin/main`**: the same
 script run in the pristine base tree fails with the same assertion, and the gate invokes it
 unconditionally (`scripts/test.sh:243`) on linux, where it is a Windows-deploy proof. The gate exits at
 its first failure, so the rows after it did not run - on this branch, on the report branch, or on main.
-The rust rows before it passed (134 + 18 + 0, all ok).
+The rust rows before it passed (134 + 18 + 0, all ok). That run was at `c5a6c3c7`, before this r2
+round's fixes; it was **not** re-run after them, so the full gate's verdict for the final head is
+unknown beyond the build and the fast path above - said here rather than implied.
 
 ## Text this branch adds to operator/model-facing surfaces
 
