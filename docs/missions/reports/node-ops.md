@@ -286,60 +286,51 @@ for the codes item 8 added).
 | 7 row-at-sha: one ledger per side | `be2563ea` | the base side runs under `$scratch/base/home-<row>` and the change side under `$scratch/change/home-<row>`; both are printed as `base_home=`/`change_home=` | `scripts/test-row-at-sha.sh` refuses equal homes or one inside the other, and requires each under its own side root |
 | 8 LOW: sourced libraries, the record in every entry point, 124 | `94048cad`, `68c0b4a1` | `scripts/lib/row-at-sha.sh` sets `-uo pipefail` only when it IS the program; `deploy.sh`, `mission.sh` and `wa land` run `wa_build_env_audit` and refuse an unknown key by name; a quoted value in the record is unquoted | `scripts/test-build-env.sh` (unknown key stops fast.sh), the deploy/mission/land source assertions in the same test, and `scripts/test-fast-watchdog.sh`, which now proves a command that exits 124 ITSELF comes back 124 with NO watchdog line — the runner reads the watchdog's own line, never the number |
 
-### The 19/11 out-of-memory kill: what grew, and the fix (`c31f9ab6`)
+### The 19/11 out-of-memory kill: TWO growths, both measured, both fixed (`48ca92de`, `b656b328`, `10fc1747`)
 
-The orchestrator's first task was to find which command took this node from 6 GB to 23 GB RAM + 7.5 GB swap
-(16 h CPU in 1.5 h) and killed `wa-serve`. It was a fork TREE, not one fat process.
+The node went from 6 GB to 23 GB RAM + 7.5 GB swap and `wa-serve` was killed. The kernel recorded the
+victim as `Killed process 2643685 (wa) ... anon-rss:45792kB` inside this mission's own cgroup: a 45 MB
+member of a MEMCG OOM is a crowd of identical processes, not a leak in one.
 
-* **The kernel agrees, and says the killed process was small.** `journalctl -k` at 17:56:52:
-  `oom-kill:constraint=CONSTRAINT_MEMCG ... oom_memcg=.../mission-node-ops.service` and
-  `Killed process 2643685 (wa) ... anon-rss:45792kB` — 45 MB of anonymous RSS, in this mission's own
-  cgroup. A 45 MB member of a MEMCG OOM is a crowd of identical processes, not a leak in one.
-* **The crowd is in the surviving log.** The earlier session listed them (`out.log:70425-70432`):
-  `wa --db <scratch>/t.db nodes probe bbbbb...` children, still appearing after the run that started them
-  had ended, 1,653 of them by count. 1,653 × ~14 MB ≈ 22 GB, which is the reported 23 GB.
-* **Cause: a probe child probed again.** `wa nodes probe <id>` runs `M.probe` → `M.find` → `M.list`, and
-  `M.list` starts one `wa nodes probe` child per peer (`a1109623`, item 10a of this mission). Every
-  child therefore started its own children: a tree, bounded only by memory. This is why the base has no
-  `M.probe` at all — `git show ac7717e0:lua/core/nodes.lua` contains `M.find` and no `M.probe` — so the
-  recursion is this branch's own regression, not a pre-existing one.
-* **Fix (`c31f9ab6`): a probe child cannot fan out.** `M.probe` marks its process (`M._in_probe_child`);
-  `M.list` starts no children when the mark is set; `M.find` asks the roster with
-  `live_capabilities = false` — a lookup never needs a live probe.
-* **Proof.** `scripts/test-nodes-probe-parallel.lua` case (5) counts every `host.operation` start through
-  its stub: `M.find` starts 0 children, `M.probe` starts 0, the marker is set, and a later `M.list()`
-  inside the probe child starts 0. Run against the parent commit (`6e9f8562`, a temporary worktree of
-  `c31f9ab6^`) it is RED with exactly `REFUSED test-nodes-probe-parallel: M.probe did not mark the process
-  as a probe child, so the next M.list() fans out again`; on this tree it passes.
+**This section replaces round 3's claim that `c31f9ab6` fixed it. Measured here, it did not.** A run of
+this tree at `b903117b` - the commit the round-3 report describes as fixed - still died at a 6 GB scope
+cap with `Terminated xargs -P ...` in the middle of the Lua rows, and the sampler caught what the code's
+own story called impossible: **338 `wa ... nodes probe` processes in one second**, their parent chain a
+probe child starting probe children. Two separate growths fed it.
 
-**What this does NOT claim.** No run of this tree reproduced the 23 GB: the fix makes the growth structural
-impossible and the row proves the fan-out is gone, rather than replaying the collapse.
+**Growth A - the mark lived on ONE module instance (`48ca92de`).** `lua/core/nodes.lua` is `dofile`d
+by fifteen callers (`init`, `server`, `tools`, `subagents`, `fleet`, `federation`, ...), and every
+`dofile` builds its own `M` table. The guard was `M._in_probe_child`, so `M.probe` marked only the
+instance it ran in and the other fourteen in the same process still fanned out; each child repeated that, so
+the tree was unbounded. The mark is `_G.WA_IN_PROBE_CHILD` now, which every instance shares. Sampled shape,
+1 s resolution, before the fix: `nodes probe aaaa` -> `nodes probe bbbb`, 49 children at t=4 s, 378 at t=5 s.
 
-**The ceiling is a check now, not a rule (commit `3fd1d1d9`).** The orchestrator asked for a bound, and a
-bound on the CODE ("does it ask to fan out?") is not a bound on the MACHINE. `scripts/test-nodes-probe-bound.sh`
-runs six unreachable peers against a stub rendezvous inside a memory-accounted systemd user scope and reads
-the scope's own cgroup counters afterwards: `pids.peak` (the most processes alive at any moment),
-`memory.peak` (the most bytes charged to them), and the operation records, whose `owner_process_id` says how
-many process GENERATIONS started probing. Measured on this node, both sides in the same shape:
+**Growth B - children accumulated across calls (`b656b328`).** A child lives up to `PROBE_DEADLINE_S`
+(20 s) and every `M.list()` started a fresh one per peer with no memory of the call before it. Measured on
+`scripts/test-remote-refusals.lua`: **125 live `wa nodes probe` processes for a 6-peer roster**.
+`probe_peers` now keeps a process-wide in-flight registry (`_G.WA_PROBE_INFLIGHT`, process-wide for the
+same dofile reason), joins a child already running for that peer, and caps the process at 64 live children.
 
-| tree | generations | operations | pids.peak | memory.peak |
-|---|---|---|---|---|
-| this tree | 1 | 6 | 18-20 | 134-135 MB |
-| `c31f9ab6^` (pre-fix `lua/core/nodes.lua`) | 17-22 | 100-129 | 77-82 | 1,214-1,297 MB |
+**Over the cap the peer is NAMED, never silently unanswered (`10fc1747`).** The reason is
+`probe_capacity`. It does not fall through to the in-process ask, because that ask is one blocking
+`host.http` per peer - the serial sum of timeouts item 10a removed - so falling through would trade a
+memory blow-up for a latency one.
 
-The bounds sit between the two (1 generation, 6 operations, 40 pids, 512 MB), so the row is not one that can
-only pass; on the old tree it is RED with
-`FAIL test-nodes-probe-bound: 17 process generations started probe children (bound 1); 100 supervised
-operations for 6 peers (bound 6); pids.peak 82 (bound 40); memory.peak 1214 MB (bound 512 MB)`.
-Wired in `scripts/fast.sh:781` and `scripts/test.sh:914`. A machine with no cgroup v2 counters (macOS,
-Windows, no user session) prints `SKIP test-nodes-probe-bound: <the reason>` - a named skip, never a
-silent pass - and the row also FAILS when the roster it probed does not name the six peers, so a green bound
-cannot mean "the stub was never reached". `WA_PROBE_BOUND_LUA_ROOT` is what points the run at another
-`lua/` tree; that is how the red half was produced, and an ordinary run never sets it.
+| what the row asserts | this tree | red on |
+|---|---|---|
+| an unmarked instance fans out (so the row can fail) | 6 children | - |
+| a probe-marked instance starts nothing | 0 | `48ca92de^`: `80 probe children of 80 (the 19/11 recursion)` |
+| an instance loaded AFTER the mark starts nothing | 0 | `48ca92de^` (same run) |
+| a repeated `list()` starts nothing | 6 then 0 | `48ca92de`: `80 MORE children ... 80 then 80 (the accumulation)` |
+| 500 peers are capped | 64 | `48ca92de`: unbounded |
+
+Row: `scripts/test-nodes-probe-instances.lua`, wired in `scripts/fast.sh:776` (right after
+`nodes-probe-parallel`) and `scripts/test.sh:912`. Both red halves ran in their own detached worktrees
+(`/tmp/base-a` at `48ca92de^`, `/tmp/base-b` at `48ca92de`), never with `git stash`.
 
 **Still named and NOT fixed:** a probe child OUTLIVED the run that started it (`out.log:70425` lists them
-after the run ended), so a supervised child whose parent dies is still not cancelled by anyone but the parent.
-The new row bounds ONE run's fan-out; it does not reclaim an orphan.
+after the run ended), so a supervised child whose parent dies is still cancelled by nobody but its parent.
+The in-flight registry bounds one process's live children; it does not reclaim an orphan of a dead parent.
 
 ### Mis-measured premises in the brief (re-measured here)
 
