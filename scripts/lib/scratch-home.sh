@@ -91,21 +91,51 @@ wa_scratch_root() { # <prefix> -> prints a directory a test may create its own u
   # A ROOT MUST ALSO HAVE ROOM (item 0, measured): /tmp on this node is a 16 G tmpfs that was 79% full,
   # so moving every row home there made rows die with a Rust panic (exit 101) from a failed write.
   local min_mb="${WA_SCRATCH_MIN_FREE_MB:-4096}" free_mb
-  for candidate in "${WA_TEST_ROOT:-}" "$(dirname -- "$repo_root")/.wa-scratch" "$(dirname -- "$(dirname -- "$repo_root")")/.wa-scratch" "${TMPDIR:-}" /tmp; do
+  # A LAND TREE OR A LANE IS INSIDE THE STORE (review r2, A4). When this runs from
+  # ~/.wasm-agent/land/<id>/tree or ~/.wasm-agent/worktrees/<n>, the repository's own parent IS the
+  # operator store, so the two repo-relative candidates are inside it and TMPDIR is inside it too. The
+  # home-relative candidate is the one that still exists there: it is beside the store, not in it.
+  for candidate in "${WA_TEST_ROOT:-}" "$(dirname -- "$repo_root")/.wa-scratch" "$(dirname -- "$(dirname -- "$repo_root")")/.wa-scratch" "${HOME:-/nonexistent}/.wa-scratch" "${TMPDIR:-}" /tmp; do
     [ -n "$candidate" ] || continue
-    # A candidate that does not exist yet is MADE (one directory, owned by this user): the point of the
-    # search is to find a place that is not the operator store and not inside the tree under test.
+    case "$candidate" in /*) ;; *) continue ;; esac
+    # A ROOT GIVEN BY THE CALLER IS HELD TO THE SAME RULE AS A HOME (review r2 SHOULD): / and any
+    # ancestor of the home are refused here too. wa_test_workdir refused them; wa_scratch_root did not,
+    # so WA_TEST_ROOT=/ would have been returned as a root and the first test to use it would have made
+    # /<name>.XXXXXX at the filesystem root.
+    case "$candidate" in /|/) continue ;; esac
+    # CHECK BEFORE MAKING ANYTHING (review r2, A4). This loop used to mkdir -p every candidate and then
+    # refuse it, so a run from a land tree CREATED ~/.wasm-agent/land/<id>/.wa-scratch inside the
+    # operator store and then refused every root it had just polluted. The path is resolved first - from
+    # the candidate when it exists, from its nearest existing parent when it does not - and the store,
+    # home, repository and space rules are asked BEFORE a directory is made.
+    if [ -d "$candidate" ]; then
+      resolved="$(CDPATH= cd -- "$candidate" 2>/dev/null && pwd -P)" || continue
+    else
+      local parent base
+      parent="$(dirname -- "$candidate")"
+      base="$(basename -- "$candidate")"
+      while [ ! -d "$parent" ] && [ "$parent" != "/" ] && [ "$parent" != "." ]; do
+        base="$(basename -- "$parent")/$base"
+        parent="$(dirname -- "$parent")"
+      done
+      local parent_resolved
+      parent_resolved="$(CDPATH= cd -- "$parent" 2>/dev/null && pwd -P)" || continue
+      resolved="$parent_resolved/$base"
+    fi
+    case "$resolved/" in "$real_store"/*) continue ;; esac
+    # NOT the home itself (its store IS the operator store), but a directory BESIDE it is fine:
+    # the rule is about the store, not about the whole home - and on this node the only filesystem
+    # with room is /home, so refusing every path under it refuses every usable root (measured).
+    [ "$resolved" = "$real_home" ] && continue
+    case "$resolved/" in "$repo_root"/*) continue ;; esac
+    [ "$resolved" = "$repo_root" ] && continue
+    # Nothing is made until the path has passed every refusal above.
     [ -d "$candidate" ] || mkdir -p "$candidate" 2>/dev/null || continue
     resolved="$(CDPATH= cd -- "$candidate" 2>/dev/null && pwd -P)" || continue
     [ -w "$resolved" ] || continue
     # df -Pm is POSIX; a machine without it keeps the old behaviour rather than refusing every root.
     free_mb=$(df -Pm "$resolved" 2>/dev/null | awk 'NR==2{print $4}')
     case "$free_mb" in ''|*[!0-9]*) : ;; *) [ "$free_mb" -lt "$min_mb" ] && continue ;; esac
-    case "$resolved/" in "$real_store"/*) continue ;; esac
-    # NOT the home itself (its store IS the operator store), but a directory BESIDE it is fine:
-    # the rule is about the store, not about the whole home - and on this node the only filesystem
-    # with room is /home, so refusing every path under it refuses every usable root (measured).
-    [ "$resolved" = "$real_home" ] && continue
     # AND IT MUST BE OUTSIDE THIS REPOSITORY: rows test their own tree, and a scratch home INSIDE it
     # makes the path-guard rows see a protected path (measured: the root resolved to wt/scripts and six
     # rows failed with secret_path_denied on a home they had just been given).
