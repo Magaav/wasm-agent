@@ -180,7 +180,7 @@ SHOULD not taken, and why:
 
 `test-discriminates.sh --repo <worktree of 05ef1ccb> 05ef1ccb^` -> **exit 0**, 3 rows, `discriminates=3`,
 `0 blocking`: `test-batching-guidance.lua`, `test-done-gate.lua` and `test-turnfeed.lua` all fail ON AN
-ASSERTION on the old code. The two false positives of the first submission (`does-not ... attempt to call a
+ASSERTION on the old code - their own `error(...)` messages, whose text says `lua error: [string ...]` because that is how the native runtime prefixes a raised error. The two false positives of the first submission (`does-not ... attempt to call a
 nil value`) are gone.
 
 ### What a conversion looks like when it CANNOT discriminate

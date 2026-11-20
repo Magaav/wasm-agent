@@ -82,23 +82,6 @@ is_test_path() {
   return 1
 }
 
-# <target> <other-test> <tree> -> 0 when <other-test> looks like it RUNS <target>: the mention sits on a
-# line that also names a runner. A bare mention in a comment ("see test-x.lua") is a reference, not a
-# subject, and must not turn a real test into not-applicable.
-looks_executed_by() {
-  local target=$1 other=$2 tree=$3 line
-  while IFS= read -r line; do
-    case $line in
-      *"$target"*)
-        case $line in
-          *" wa "*|wa\ *|*bash\ *|*"bash "*|*node\ *|*"node "*|*sh\ *|*"sh "*|*dofile*|*require*|*execFile*|*spawnSync*|*spawn\ *|*"python3 "*|*"timeout "*|*WA_SCRIPT*)
-            return 0 ;;
-        esac
-        ;;
-    esac
-  done < "$tree/$other"
-  return 1
-}
 
 changed_count=$(git diff --name-only "$MERGE_BASE" "$HEAD_SHA" | grep -c . || true)
 test_count=$(git diff --name-only "$MERGE_BASE" "$HEAD_SHA" | while IFS= read -r p; do
@@ -159,7 +142,6 @@ git -C "$REPO" worktree add --detach --quiet "$WORKTREE" "$MERGE_BASE" 2>"$WORKR
 # change and reverted with them, so the test that runs it is judged against the old code. The test's own
 # path is never a subject, and a second test named in the same runner line is another row, not a subject.
 : > "$WORKROOT/tests.list"
-: > "$WORKROOT/subjects.list"
 : > "$WORKROOT/deleted.list"
 ALL_TESTS=$WORKROOT/all-tests.list
 git diff --name-only "$MERGE_BASE" "$HEAD_SHA" | while IFS= read -r q; do
@@ -269,11 +251,13 @@ run_one() { # <path> <added|modified>
         env -u WASM_AGENT_DB -u WASM_AGENT_IN_TURN -u WA_MESH \
           HOME="$home" WASM_AGENT_HOME="$home" WASM_AGENT_LUA_ROOT="$WORKTREE" \
           WASM_AGENT_RENDEZVOUS= WASM_AGENT_RELAY= WASM_AGENT_MANAGED=0 \
+          WA_BIN="$LUA_BIN" WA_FAST_BIN="$LUA_BIN" PATH="$home/bin:$PATH" \
           timeout "$TEST_TIMEOUT" bash "$path" ;;
       node)
         env -u WASM_AGENT_DB -u WASM_AGENT_IN_TURN -u WA_MESH \
           HOME="$home" WASM_AGENT_HOME="$home" WASM_AGENT_LUA_ROOT="$WORKTREE" \
           WASM_AGENT_RENDEZVOUS= WASM_AGENT_RELAY= WASM_AGENT_MANAGED=0 \
+          WA_BIN="$LUA_BIN" WA_FAST_BIN="$LUA_BIN" \
           timeout "$TEST_TIMEOUT" node "$path" ;;
       python3|pwsh)
         HOME="$home" WASM_AGENT_HOME="$home" timeout "$TEST_TIMEOUT" "$runner" "$path" ;;
@@ -284,7 +268,7 @@ run_one() { # <path> <added|modified>
 
   # A timeout is the machine's answer, not the branch's: a named verdict, never a failure.
   if [ "$code" = 124 ] || [ "$code" = 137 ]; then
-    record timeout "$path" "it did not finish in \${TEST_TIMEOUT}s on this machine"
+    record timeout "$path" "it did not finish in the per-test timeout on this machine"
     return
   fi
   # A skip is a hole the test itself names, never a pass and never a failure of the change.
