@@ -1739,6 +1739,52 @@ WA_SCRIPT="$DB.node-name.lua" "$BIN" --db "$DB" | grep "node name ok"
 rm -f "$DB.node-name.lua"
 WA_SCRIPT=scripts/test-empty-reply.lua "$BIN" --db "$DB" | grep "empty reply ok"
 WA_SCRIPT=scripts/test-thinking-block.lua "$BIN" --db "$DB" | grep "thinking block ok"
+# The adapter contract (docs/AGENT-SEAT.md, principles 2 and 3): a recorded provider stream becomes one
+# normalized message. Two providers' own shapes are replayed; no live call is made.
+WA_SCRIPT=scripts/test-adapters.lua "$BIN" --db "$DB" | grep "adapters ok"
+# The two CodeAct transports (docs/AGENT-SEAT.md, principle 2): a fenced run block and a native run
+# call are one pathway, and raw blocks travel byte for byte.
+WA_SCRIPT=scripts/test-codeact-transports.lua "$BIN" --db "$DB" | grep "codeact transports ok"
+# The model profile and the transport it decides (docs/AGENT-SEAT.md, principle 7): a measurement is
+# read, a missing one is named, and the guidance never offers two transports.
+WA_SCRIPT=scripts/test-conform-profile.lua "$BIN" --db "$DB" | grep "conform profile ok"
+# The A/B arms as one build (next-round.md 19/11 ~17:30): the tagged transports and their single-source
+# rules, one row per rule, through the real parser.
+WA_SCRIPT=scripts/test-arm-tag.lua "$BIN" --db "$DB" | grep "arm tag ok"
+# The batching instruction (batch-spec.md): the same sentence in all three places the model can
+# read it, verbatim, pinned per place because three modules build those texts.
+WA_SCRIPT=scripts/test-batching-instruction.lua "$BIN" --db "$DB" | grep "batching instruction ok"
+# The A/B arms are off unless their own switch names one (review MUST 3): an unset switch must
+# leave a subagent's declared tools exactly what the policy says, with no arm filter.
+WA_SCRIPT=scripts/test-ab-arms.lua "$BIN" --db "$DB" | grep "ab arms ok"
+# The native transports keep the leak safety net (review MUST 6): a call shape written as TEXT
+# gets one named continue, and prose that merely mentions a tag is still an answer.
+WASM_AGENT_RAW_CODE=native WA_SCRIPT=scripts/test-leak-net.lua "$BIN" --db "$DB" | grep "leak net ok"
+# A native node has ONE source of native guidance (rel r2 item 1): the run-tool sentence plus the
+# batching sentence, never the codemode guidance, asserted on the prompt build_context really builds.
+WA_SCRIPT=scripts/test-native-guidance.lua "$BIN" --db "$DB" | grep "native guidance ok"
+# The FULL built system prompt and declared tool list for every explicit mode, checked against goldens
+# RECORDED ON a27490af (rel r2 item 4), plus the arm-B shape of a default node (progressive and full,
+# master and child). Regenerate the goldens only by running scripts/generate-prompt-goldens.lua there.
+WA_SCRIPT=scripts/test-prompt-golden.lua "$BIN" --db "$DB" | grep "prompt golden ok"
+# Every explicit mode builds a prompt and tool list byte-identical to a27490af (rel r1 R1):
+# the golden hashes come FROM a27490af, not from this build.
+# The leak net's <bash>/<run> pairs apply only in native mode (rel r2 item 5): every other mode sees
+# exactly a27490af's marker list, so an answer that writes one of those shapes stays an answer.
+WA_SCRIPT=scripts/test-markup-pairs.lua "$BIN" --db "$DB" | grep "markup pairs ok"
+WA_SCRIPT=scripts/test-mode-parity.lua "$BIN" --db "$DB" | grep "mode parity ok"
+# R2: no switch + a tool-calling provider = the native mode; every other provider keeps the
+# block default; an explicit switch always wins.
+WA_SCRIPT=scripts/test-default-mode.lua "$BIN" --db "$DB" | grep "default mode ok"
+# The three small raw-mode rules (rel r2 item 6): the mode is cached per process and a provider switch
+# drops it, RAW_CODE=bash keeps its old meaning without the A/B arm, and a thread keeps the mode its
+# prefix was frozen in.
+WA_SCRIPT=scripts/test-raw-mode-small.lua "$BIN" --db "$DB" | grep "raw mode small rules ok"
+# Review r4 item 1: the mode is DECIDED AND PINNED before the tool context is built, so a resume after a
+# restart (or any thread whose node mode differs) resolves the tools the thread recorded, the frozen
+# prefix reports no change, and no "removed: ..." session-update note reaches the model. Review r4 item 2:
+# a record written before the field existed honours an EXPLICIT switch and keeps only when it is unset.
+WA_SCRIPT=scripts/test-mode-decided-first.lua "$BIN" --db "$DB" | grep "mode decided first ok"
 
 # Test the shipping registry, including missing/stale/invalid negative controls.
 ( export WA_EMBEDDED_SOURCE_ROOT="$WASM_AGENT_LUA_ROOT"; unset WASM_AGENT_LUA_ROOT

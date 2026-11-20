@@ -114,8 +114,13 @@ end
 -- --------------------------------------------------------------- 2. a run with zero tools refuses
 -- The freeze path, exactly as a first turn that resolved nothing would have written it.
 local bricked_id = session("frozen with no tools")
+-- The fixture is the record a BAD FIRST TURN writes in THIS build: it freezes the empty list together
+-- with the raw-code mode the turn started in (rel review r3, item 1 - the mode is decided once and
+-- recorded). A record with NEITHER field is a pre-release thread, and that thread keeps only, which is
+-- a different case and is covered by scripts/test-raw-mode-small.lua.
 local frozen = prompt_cache.enforce({ session_id = bricked_id, user_id = "master", role = "master" },
-  { system = "a prompt frozen by a turn that resolved no tools", tools = {} })
+  { system = "a prompt frozen by a turn that resolved no tools", tools = {},
+    raw_mode = dofile("lua/core/raw_code.lua").mode(), raw_decided = true })
 check(type(frozen) == "table" and type(frozen.tools) == "table" and #frozen.tools == 0,
   "the frozen prefix holds an empty tool list (the record this row is about)")
 

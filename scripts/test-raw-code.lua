@@ -41,6 +41,11 @@ tools.dispatch=function(m,name,args,role,ctx)
   if name=='codemode' then dispatched[#dispatched+1]=args.code end
   return real_dispatch(m,name,args,role,ctx)
 end
+local function guidance_in(text)
+  local tool = text:find(raw_code.guidance_for('tool_call'), 1, true) ~= nil
+  local block = text:find(raw_code.guidance_for('block'), 1, true) ~= nil
+  return tool, block
+end
 local checks=0
 local function check(v,label) assert(v,label);checks=checks+1 end
 
@@ -69,7 +74,11 @@ local function keys(t) local out={} for k in pairs(t or {}) do out[#out+1]=tostr
 -- 1. switch on: a run block is a codemode call ---------------------------------------------------------
 local on=run('1',{{content='Let me compute.\n```js run\nreturn 6*7;\n```'},{content='42 it is'}})
 check(on.ok and on.reply=='42 it is','the run finished after the run block: '..tostring(on.reply))
-check(on.requests[1].messages[1].content:find(raw_code.GUIDANCE,1,true),'switch on: the guidance sentence is in the system prompt')
+-- rel r5: this branch has ONE guidance source per transport (raw_code.guidance_for), so this
+-- assertion is stricter than main's: exactly one transport sentence, never both and never none.
+local tool_line, block_line = guidance_in(on.requests[1].messages[1].content)
+check((tool_line or block_line) and not (tool_line and block_line),
+  'switch on: exactly one guidance sentence, the one its transport needs')
 check(on.requests[1].stop==nil,'WASM_AGENT_RAW_CODE=1 sends no stop sequence (detection only)')
 check(#on.dispatched==1 and on.dispatched[1]=='return 6*7;','the block ran once, as codemode, with exactly its code')
 local call=on.assistant and on.assistant.tool_calls[1]

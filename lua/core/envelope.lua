@@ -67,10 +67,60 @@ function M.bootstrap(catalog,ctx)
    -- the control-plane tools a script cannot run (session_worktree...); every other tool - and discovery,
    -- via searchTools - lives inside the script. A direct call to an undeclared tool still runs; a connector
    -- called directly runs as its one-line script (lua/core/tools.lua, codemode_policy.one_line).
-   if name=='codemode' or (CONTROL_PLANE[name] and core[name]) or (orchestration and ORCHESTRATION_FIRST_CLASS[name]) then out[#out+1]=item end
+   -- Native mode is arm B (rel review r1, R3): the ONE door is `run`, and `codemode` is not
+   -- declared beside it. Every other mode keeps a27490af's surface byte for byte (R1/R5), which
+   -- is why this reads the mode rather than a transport decision.
+   local native_mode = dofile('lua/core/raw_code.lua').mode_of(ctx and ctx.codemode_policy) == 'native'
+   if native_mode then
+    -- Through the one helper below: the progressive surface and the full one are the same list.
+    for _,kept in ipairs(M.native_surface({item},core,orchestration)) do out[#out+1]=kept end
+   elseif name=='codemode' or (CONTROL_PLANE[name] and core[name]) or (orchestration and ORCHESTRATION_FIRST_CLASS[name]) then out[#out+1]=item end
   elseif core[name] or name=='codemode' or (orchestration and ORCHESTRATION_FIRST_CLASS[name]) then out[#out+1]=item end end;return out
 end
-function M.schemas(catalog,ctx)return M.mode(ctx)=='progressive' and M.bootstrap(catalog,ctx) or catalog end
+-- The full envelope (a subagent, an older session, WASM_AGENT_ENVELOPE_MODE=full) declares the whole
+-- surface - except in native mode, where the ONE door is `run` (rel review r2, item 3). A native node
+-- with every tool declared beside the run tool is the offer the 17/11 measurement already answered: the
+-- model calls the short path and the run tool stays unused. The surface is the SAME one the progressive
+-- envelope keeps - `run`, the control-plane tools a script cannot run, and the orchestration pair - read
+-- from the one function that decides it, so the two envelopes cannot drift.
+-- Every EXPLICIT mode keeps the full envelope byte-identical to a27490af: this narrows a `native` node
+-- only (the default on a tool-calling provider), never `only`/`first`/`codemode`/`off`/`on`/`stop`.
+-- The surface a `native` node declares: `run` and the control-plane tools a script cannot run (plus the
+-- orchestration pair when that mode is on). One function, because two envelopes and the subagent path
+-- must not carry three copies of the same allow-list (rel review r2, item 3).
+function M.native_surface(catalog,core,orchestration)
+ -- `core` is the bootstrap SET (name -> true). With none, `core_names()` names them and the set is built
+ -- here: an array indexed by a tool name answers nil, which is how the first version of this dropped
+ -- `session_worktree` (found by running it, not by reading it).
+ local keep=core
+ if type(keep)~='table' then
+  keep={}
+  for _,name in ipairs(M.core_names()) do keep[name]=true end
+ end
+ local out={}
+ for _,item in ipairs(catalog or {}) do
+  local name=(item['function'] or {}).name
+  if name=='run' or (CONTROL_PLANE[name] and keep[name])
+    or (orchestration and ORCHESTRATION_FIRST_CLASS[name]) then out[#out+1]=item end
+ end
+ return out
+end
+function M.schemas(catalog,ctx)
+ if M.mode(ctx)=='progressive' then return M.bootstrap(catalog,ctx) end
+ -- A native node declares the same one door in the full envelope (rel review r2, item 3). Read from
+ -- the same function the progressive envelope reads, so the two cannot drift.
+ if dofile('lua/core/raw_code.lua').mode_of(ctx and ctx.codemode_policy)=='native' then
+  local code_mode=dofile('lua/core/codemode_policy.lua').enforced(ctx)
+  if not code_mode then return catalog end
+  local orchestration=false
+  if ctx and not ctx.subagent then
+   local ok,mode=pcall(dofile,'lua/core/orchestration_mode.lua')
+   if ok then local probed,on=pcall(mode.mode_on,ctx);orchestration=probed and on==true end
+  end
+  return M.native_surface(catalog,M.core_names(),orchestration)
+ end
+ return catalog
+end
 local function eligible(catalog,ctx)
  local out={};for _,item in ipairs(catalog)do local name=item['function'].name
   if name~='tool_search' and name~='tool_call' and (not ctx.subagent or (ctx.subagent.allowed or {})[name]) then out[name]=item end

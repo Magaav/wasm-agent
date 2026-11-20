@@ -91,7 +91,9 @@ for _, schema in ipairs(original_dofile('lua/core/tools.lua').all('master') or {
 end
 local BT = string.char(96)
 local reachable = {
-  { spelling = "tools.bash(",           door = function() return declared.codemode == true and available.bash == true end },
+  -- rel r1 R2: a native session declares `run` alone, and inside that script every tool IS
+  -- `tools.<name>`, so the spelling is reachable there for the same reason it is in codemode.
+  { spelling = "tools.bash(",           door = function() return (declared.codemode == true or declared.run == true) and available.bash == true end },
   { spelling = 'tool_call(name="bash")', door = function() return declared.tool_call == true and available.bash == true end },
   { spelling = BT .. "bash" .. BT,       door = function() return declared.bash == true end },
 }

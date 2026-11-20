@@ -1,0 +1,24 @@
+{
+  "provider": "anthropic-messages",
+  "recorded_at": "2026-11-19",
+  "shape": "SSE data payloads of the Messages API, verbatim",
+  "expect": {
+    "answer_text": "The answer is 3.",
+    "reasoning": "One plus two is three.",
+    "tool_calls": 0,
+    "finish_reason": "stop",
+    "cut": false
+  },
+  "payloads": [
+    "{\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"claude-x\",\"usage\":{\"input_tokens\":10,\"cache_read_input_tokens\":4}}}",
+    "{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}",
+    "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"One plus two \"}}",
+    "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"is three.\"}}",
+    "{\"type\":\"content_block_stop\",\"index\":0}",
+    "{\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"The answer\"}}",
+    "{\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\" is 3.\"}}",
+    "{\"type\":\"content_block_stop\",\"index\":1}",
+    "{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":9}}",
+    "{\"type\":\"message_stop\"}"
+  ]
+}

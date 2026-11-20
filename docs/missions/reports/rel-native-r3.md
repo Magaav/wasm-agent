@@ -1,0 +1,403 @@
+# rel-native round 3 - native as the DEFAULT (review r2: FIX)
+
+Branch `change/rel-native`, base `rel/codeact-agnostic` = `826f172b`, golden base `a27490af`.
+Worktree `/home/victor/Work/missions/rel-native/wt`. One commit per review item:
+
+| item | commit | what it does |
+|---|---|---|
+| 1 | `7f2cb3f4` | a native node gets ONE source of native guidance |
+| 2 | `b7d99bd7` | in native mode the guidance is ALWAYS guidance_for("tool_call") |
+| 3 | `78620697` | the full envelope declares the run tool alone on a native node |
+| 4 | `d2c8b64b` | goldens of the FULL built prompt + declared tools, recorded on a27490af; a default node asserted arm B |
+| 5 | `bfc383df` | the <bash>/<run> pair scan is native only |
+| 6 | `84824f03` | mode cached per process; RAW_CODE=bash keeps its old meaning; a thread keeps its frozen mode |
+
+## Premises re-measured (brief facts that were wrong or imprecise)
+
+* "a27490af is the base every explicit mode is byte-identical to" - TRUE for the prompt bytes except one named
+  line: on a27490af the `conform: no profile for <model> ...` notice was APPENDED TO THE PROMPT
+  (`a27490af:lua/core/agent.lua:1186-1190`, `block=block..'\n'..transport_notice`). This branch moved it to the
+  operator log in `568ed30c` (before round 3, review MUST 4). So "byte-identical to a27490af" holds only after
+  dropping that one line; the golden helper drops it BY EXACT PATTERN and the test asserts the built prompt
+  carries none of it (`notice_lines_removed == 0`).
+* "the 8 tests that went green only because the default flipped" - measured, not taken from the brief: I ran
+  every test naming the raw channel twice, once with WASM_AGENT_RAW_CODE unset and once pinned to only. Only
+  THREE differ (`test-ab-arms`, `test-leak-net`, `test-mode-parity`), and each of the three sets its own
+  surface deliberately. The five others the brief listed (remote-call-shape, skill-discovery,
+  orchestration-mode, raw-native, model-facing-texts) read the same verdict in both runs because earlier
+  commits of this branch had already pinned them (`71d1c149`, `1aa43da1`, `11622231`).
+* "envelope.lua:34" - line 34 is a header comment; the full-envelope decision is `M.schemas` (line 79 in this
+  branch) and the progressive surface `M.bootstrap`. Both now read one function, `M.native_surface`
+  (`78620697`).
+* "agent.lua ~1189-1197 / :1196" - exact: the codemode block was appended at 1186-1189 and the transport
+  sentence at 1196-1198. Fixed in `7f2cb3f4` and `b7d99bd7`.
+* "raw_code.lua:586-603" - exact in this branch: `M.MARKUP_MARKERS` at 570, the pair table at 586-591,
+  `M.markup_in_text` at 592. Fixed in `bfc383df`.
+* base's own A/B arm contaminates any base comparison: `a27490af:lua/core/ab_arms.lua:25-32` answers "fence"
+  whenever `WASM_AGENT_RAW_CODE` is UNSET, and that arm filters the declared list with an empty allow-list. That
+  is why a27490af built an EMPTY subagent list in my first measurement; `1468bc53` (already in this branch) made
+  the arm read its own `WA_AB_ARM`. I therefore cite base results for EXPLICIT modes only.
+
+## Item 1 - one source of native guidance (`7f2cb3f4`)
+
+* `codemode_policy.prompt(catalog,{native=true})`: the first line is `raw_code.guidance_for("tool_call")`
+  (run-tool sentence + batching), and the codemode sentences are not sent with it. The connector and peer
+  INDEXES stay: they are facts a script needs, not a second guidance.
+* `agent.build_context` no longer appends the native guidance a second time; every other mode appends exactly
+  as before. Measured on the built prompt: "Work in code" appears ONCE and the codemode sentence ZERO times,
+  for a native master in BOTH envelopes and for a child.
+* Test: `scripts/test-native-guidance.lua`, wired in `scripts/test.sh` ("native guidance ok").
+
+## Item 2 - the mode decides the transport (`b7d99bd7`)
+
+* In native mode `build_context` sets the transport to tool_call with source "native" and never calls
+  `transport_for`, so a stored profile whose rates favour the block (the test stores exactly that profile:
+  `uses_run_tool = 0, acts_in_answer = 1`) cannot bring the fence sentence back. The same profile in on mode
+  still decides block - the control proves the profile is read where it is honoured.
+* Test: the "item 2" block of `scripts/test-native-guidance.lua`.
+
+## Item 3 - the full envelope on a native node (`78620697`)
+
+* `envelope.lua`: one helper `M.native_surface` = run + the control-plane tools the progressive envelope
+  keeps (+ the orchestration pair when that mode is on). `M.bootstrap` (progressive) and `M.schemas` (full)
+  both read it, so the two envelopes cannot drift.
+* `agent.subagent_tool_list`: a child whose profile allows run AND for whom code mode is really enabled
+  declares the same one door. A child without code mode (explore) keeps every tool it was given - asserted,
+  so this can never take a child's only way to act.
+* Explicit only/first/codemode/off/on/stop keep a27490af's surface: golden-pinned below.
+
+## Item 4 - goldens from the REAL build (`d2c8b64b`)
+
+* `scripts/lib/prompt-golden.lua` (normalizer: scratch home -> <HOME>, node cwd -> <CWD>, the one conform notice
+  line removed), `scripts/lib/prompt-golden-cases.lua` (cases), `scripts/generate-prompt-goldens.lua` (the
+  recorder), `fixtures/prompt-golden/*.json` (13 files).
+* WHAT THE PROMPT DEPENDS ON, found by running the row the way the fast path does: the system prompt is a
+  function of the host, and two host inputs are read from the PROCESS, not from the tree - the cwd-based
+  AGENTS.md walk and the skills walk (lua/core/skills.lua scans the cwd and its parents up to the repo root).
+  A recording made from the mission directory carried NO skills block and a different instruction path, and
+  the row then failed under scripts/fast.sh, which runs every row from the tree root (scripts/fast.sh:58).
+  Fixed in `97ba66c8`: both scripts pin the instruction files by path and REFUSE from any cwd other than
+  the tree root (a named refusal, verified), and the normalizer replaces the tree path, the cwd and the
+  session-workdir attribute. So a golden describes one node shape, recorded and checked the same way.
+* The goldens were RECORDED BY RUNNING THE GENERATOR ON a27490af - a separate worktree
+  (`git worktree add base-a27490af a27490af`), the same binary, its own scratch home. The test compares
+  `agent:build_context()`'s own system prompt and `bot.tool_list`, never a block rebuilt from parts.
+* `scripts/test-prompt-golden.lua` (wired in `scripts/test.sh`, "prompt golden ok", 73 checks): every explicit
+  mode in both envelopes against its golden, and a DEFAULT node (no switch) - progressive AND full, master AND
+  child - asserted arm B: run alone, the run-tool guidance, the batching sentence, no codemode guidance. Where
+  the provider row does not say tool_call the arm-B rows print a named "did not apply" instead of passing.
+* The 8-tests premise: see "Premises" - measured as three.
+
+## Item 5 - the pair scan is native only (`bfc383df`)
+
+* `raw_code.MARKUP_PAIRS` is now EMPTY and `M.NATIVE_MARKUP_PAIRS` holds <bash>/<run>/<invoke ...>; the scan takes
+  the mode (`markup_in_text(text, mode)`). Both callers pass it: the leak net (with the thread's mode) and
+  `finish_contract.markup` (with the caller's policy, else the switch).
+* <invoke ...>...</invoke> was ALREADY caught in every mode by a27490af's bare </invoke> marker, so the pair
+  adds only the opener-must-close rule there; the test pins the measured behaviour rather than a guess.
+* Test `scripts/test-markup-pairs.lua` (wired in `scripts/test.sh`, "markup pairs ok", 39 checks). Its first
+  version printed 8: a table with a nil hole made `ipairs` stop at once, so the mode loops never ran - found by
+  reading the count, fixed by listing the modes without a nil entry.
+
+## Item 6 - the small rules (`84824f03`)
+
+* `raw_code.mode()` caches the DEFAULT for the process (`MODE_CACHE`, `M.reset_mode_cache()`); a provider
+  switch drops it by name (`provider.set_provider`, `lua/core/provider.lua:290`).
+* `WASM_AGENT_RAW_CODE=bash` returns nil unless `WA_AB_ARM` names the bash arm - a27490af's meaning for an
+  unknown value, kept; the A/B arm is the only thing that ever meant arm D.
+* A thread keeps the mode its prefix was frozen in: `prompt_cache` records `raw_mode` with the record,
+  `build_context` reads it back (`policy.raw_mode`, `self.mode_source = frozen|switch`), and every mode reader
+  goes through `raw_code.mode_of(policy)`. The record is written once and never rewritten.
+* Test `scripts/test-raw-mode-small.lua` (wired in `scripts/test.sh`, "raw mode small rules ok", 16 checks).
+
+## Texts to approve (verbatim, model- or operator-facing)
+
+1. (item 1, model-facing, MOVED not new) "Work in code: call the run tool with `code` - it runs as one script in
+   which every tool is `tools.<name>(args)`, and its result comes back to you. Use `raw` to carry a file body or a
+   patch exactly. A message with no tool call is your answer." followed by the batching sentence
+   (`raw_code.guidance_for("tool_call")`, unchanged text, now the ONLY guidance a native node gets).
+2. (item 6, model-facing, unchanged text, narrower reach) the markup notice on a native node:
+   "[Harness notice] This message had no action: ... Act by calling the run tool with the script in its
+   `code` argument."
+
+No other model-facing string was added or changed by this round.
+
+## How it was verified
+
+* The tree's own binary: `cargo build --release --offline` through `scripts/lib/build-target.sh` with the prepared
+  code-mode assets (`pi-1.2.0-quickjs-3.6.2`), 2m21s, exit 0.
+* Focused rows, each in its own scratch home under `GATE_ROOT` (the guard refuses the live home) with a clean
+  environment: native guidance 43, prompt golden 73, markup pairs 39, raw mode small rules 16, mode parity 15,
+  default mode 13, conform profile 18, thinking block 101, prompt cache 195, envelope 98, ab arms 8, leak net 7,
+  raw native 23.
+* Fast path under `flock /home/victor/Work/missions/.suite.lock`. Its log:
+  `/home/victor/Work/missions/rel-native/scratch/fast-final.log` (an earlier run,
+  `scratch/fast-run4.log`, is what found the item-4 cwd defect; `fast-run2/3` stopped at the binary check
+  because `cargo` is no longer on this machine - see "Not done").
+
+## Pre-existing failures (reproduced on a27490af, not caused here)
+
+Each was run TWICE, once with `WASM_AGENT_LUA_ROOT` pointing at a27490af and once at this tree, same binary,
+own scratch home, clean environment; every one fails identically on both:
+
+* `scripts/test-raw-code.lua` (:45 "switch on: the guidance sentence is in the system prompt") - a fast-path row
+  (not in `scripts/fast-path.exclude`) and not named by `scripts/test.sh`.
+* `scripts/test-raw-first.lua` (:46 "1: the optional sentence, not the first guidance") - a fast-path row, not
+  named by `scripts/test.sh`.
+* `scripts/test-context-usage.lua` (:23) - a fast-path row, not named by `scripts/test.sh`.
+* `scripts/test-prompt-layers.lua` (:5 "read is native main-loop bootstrap") - EXCLUDED from the fast path
+  (`scripts/fast-path.exclude`), not named by `scripts/test.sh`.
+* `scripts/test-codemode-native.lua` (:24 "opt-in adds one tool, direct tools retained") - EXCLUDED from the
+  fast path, not named by `scripts/test.sh`.
+* `scripts/test-context-growth.lua` (:15 "new run uses 850k baseline rather than inheriting old growth") - a
+  fast-path row.
+* `scripts/test-run-counts.lua` (:15 "summary adds spend through actual callbacks without overwriting task
+  context") - a fast-path row.
+* `scripts/test-refusal-contract.lua` (:24 "`lua/core/refusal_codes.lua` is stale") - a fast-path row, and it
+  fails because the REFUSAL CODE TABLE is stale, which no change of mine touches.
+* `node scripts/test-onebuild.mjs` and `bash scripts/test-install-guards.sh` (72 checks, 6 failed) - run by hand
+  on a27490af with the same result.
+
+## Not done / unknown
+
+* The full gate (`scripts/test.sh`, ~50 min) was NOT run end to end; the fast path was.
+* `cargo` DISAPPEARED from this machine during the session (it built the binary at 18:02 and is absent from
+  PATH, `/home/victor/.cargo` and the mise shims afterwards), so the final fast path was told
+  `WA_BIN=/home/victor/wasm-agent/target/m-rel-native/release/wa` explicitly. That binary is honest for THIS
+  branch: `git diff --stat 826f172b..HEAD -- rust wit` is EMPTY (the binary's stamp is 826f172b), and every
+  change this round is Lua, which `WASM_AGENT_LUA_ROOT` loads from the tree. What was NOT verified is a
+  release build of this exact tree - named here rather than claimed.
+* Base comparisons that need "no switch" were made only for explicit modes, for the reason in "Premises".
+* `WASM_AGENT_RAW_CODE=bash` now means "off" without `WA_AB_ARM=bash`; an operator habit of using bash alone
+  changes meaning, deliberately, and is named in item 6.
+
+## Measured after my six items: a regression from `c4b0d4af` (another session's commit)
+
+While this round was being closed, THREE commits with the subject prefix `rel r3` were made in this same
+worktree by another session (`c4b0d4af`, `d26d1652`, `d28a4ae7`). My six items end at `97ba66c8`; the worktree
+is clean and I did not rewrite or revert any of their work.
+
+The full fast path at the tree head (`scratch/fast-final.log`) shows 10 failed rows: the 7 named above as
+pre-existing, and THREE that PASS on my `3f47f63c` (verified with a worktree of that commit) and fail after
+`c4b0d4af`:
+
+* `scripts/test-observability.lua` (:20 "rebuild keeps exact persisted tool view")
+* `scripts/test-resume-tool-registry.lua` (:130 "a run with zero dispatchable tools refuses by name")
+* `scripts/test-codemode-model-boundary.lua` (:194 `attempt to index a nil value (field 'shown')`)
+
+Measured cause, one branch of `agent.build_context`: a frozen prefix record written BEFORE `raw_mode` existed
+falls into `mode_source='legacy'` and is given `raw_code.LEGACY_THREAD_MODE` (`only`). For a thread frozen in
+`codemode` that is the wrong door: `prompt_cache.enforce` reports `codemode/generic/guidelines/tools` as
+changed, every declared tool is recorded as REMOVED, the request carries an appended session-update note, and
+the row that reads the LAST message of the built context finds the note instead of the tool row. The same
+fallback turns a codemode thread's surface into the fence-only one.
+
+The fix belongs to that session (my `84824f03` recorded the mode at the freeze and read it back; a record
+without the field must keep the mode its prefix was built in - for a `codemode` thread that is `codemode`,
+not `only`). I did not edit another session's commits mid-round; the measurement and the row names are here
+so the finding cannot be lost.
+
+## Review r3 (FIX, small) - the recorded decision, the goldens from real base
+
+| item | commit | what the diff does |
+|---|---|---|
+| 1 | c4b0d4af | MODE_CACHE and reset_mode_cache are DELETED (raw_code.lua, provider.lua): the mode is decided in build_context and recorded; a new thread asks the node, an existing thread reads its record |
+| 1 | 96fd2878 | the two per-call readers (the empty-list refusal telemetry, agent.lua:2194, and the raw-channel check, agent.lua:2852) use mode_of(policy) instead of the uncached node answer |
+| 1 | 25244454 | ONE field carries the decision: a mode string names the channel, the word off (raw_code.NO_CHANNEL) names the decision to have NONE, an absent field is a pre-release thread that keeps only; prompt_cache.notes() carries raw_mode when it rewrites the row for a session-update note |
+| 2 | d26d1652 | the goldens are re-recorded on a real a27490af worktree with NOTHING stripped; fixtures/prompt-golden/README.md names the commit and the exact command; the test compares exactly and names the one case that differs |
+| 2 | d28a4ae7 | the arm-B rows cannot skip: a stubbed provider row was MEASURED not to reach raw_code (it dofiles its own copy), so the node row is asserted tool_call by name |
+
+### The four rules of item 1, each with its test
+
+* provider switch mid-process: a NEW thread gets the new mode, an EXISTING thread keeps its own
+  (scripts/test-raw-mode-small.lua, "a NEW thread started after the move gets the NEW mode" /
+  "an existing thread reads its record, not the node").
+* a legacy record (no raw_mode field): "a thread without a recorded mode is named legacy", it keeps only,
+  and it never asks the node again.
+* a child of a native thread is native: "a child reads its parent, never the node switch", and it declares
+  the run tool alone; a child whose parent recorded no mode still asks the node.
+* no cache: a read with no switch measures the node EVERY time. THE PROBE MATTERS: the first version of this
+  check stubbed raw.default_mode in the TEST's copy and was measured to be vacuous - raw_code dofiles its own
+  copy, so a stub in the caller proves nothing. The check now counts host.read_file calls made BY raw.mode()
+  (measured: 38 reads per call with no switch, 0 for a recorded policy).
+* Test count: scripts/test-raw-mode-small.lua 34 checks (was 16).
+
+### Item 2 - the goldens, and the premise that was wrong
+
+The review said "the base has no such line, so the comparison is exact". MEASURED, that is false:
+
+* a27490af appends the conform notice to the prompt block (a27490af:lua/core/agent.lua:1185-1190,
+  block=block..'\n'..transport_notice) and shows it ONCE per process (raw_code.TRANSPORT_NOTICE_SHOWN).
+* a recording run therefore writes it into exactly ONE golden - progressive-only, the first case built.
+  Measured on the base worktree with a counter over all 13 cases: progressive-only 1, the other 12 zero.
+* The golden keeps that line verbatim. scripts/test-prompt-golden.lua compares the built prompt byte for
+  byte, asserts this branch carries no notice line in ANY case, and for progressive-only asserts base
+  carried exactly one and every other byte matches. Nothing is stripped silently any more.
+* The recording command, and that it must run from the base worktree root, are in
+  fixtures/prompt-golden/README.md. The base worktree was left clean (git status --short empty).
+
+### Item 3 - the bash arm (arm D)
+
+No change, as the review says: WASM_AGENT_RAW_CODE=bash still means "no raw channel" unless WA_AB_ARM names
+the bash arm (kept from 84824f03, still asserted in scripts/test-raw-mode-small.lua), and its <bash>/<run>
+pair scan is an EXPERIMENT switch that is not shipped as a supported mode.
+
+### Correction to the earlier note in this report
+
+The paragraph above ("the fix belongs to that session") was written before I measured further: the legacy
+fallback IS this branch's, introduced by 84824f03, and it is FIXED in 25244454. test-observability,
+test-resume-tool-registry and test-codemode-model-boundary all pass at the head of this round (each run on
+its own scratch home); the cause was exactly as measured above, and the fix is an explicit encoding rather
+than a guess: a record that DECIDED no channel writes the word off, so an absent field can only mean a
+pre-release thread. A second boolean field was tried first and dropped, because prompt_cache.notes() rebuilds
+the row from a whitelist and dropped it - measured, not assumed.
+
+### Fast path
+
+flock /home/victor/Work/missions/.suite.lock bash scripts/fast.sh
+log: /home/victor/Work/missions/rel-native/scratch/fast-r3b.log (the first run, fast-r3.log, is the one that
+found the two regressions above). Verdict at the head: 308 checks, 5 failed, 0 skipped. All five are the
+pre-existing rows this report already names, each reproduced on a27490af with the same binary:
+test-raw-first, test-run-counts, test-context-growth, test-raw-code, test-refusal-contract.
+
+### Texts to approve (continuing the list)
+
+3. (item 1, model-facing, UNCHANGED text, narrower reach) the empty-list refusal: "no_dispatchable_tools: this
+   session's prompt prefix was frozen with an empty tool list (lua/core/prompt_cache.lua), so every run of this
+   thread resolves no tools..." - unchanged; the mode it reports now comes from the thread's record.
+4. (item 1, NEW, not model-facing) raw_code.NO_CHANNEL = "off", the recorded spelling of "this thread decided
+   to have no raw channel". It is the switch's own word, so it is already in the operator's vocabulary.
+
+## Review r4 (FIX, two small MUSTs)
+
+| item | commit | what the diff does |
+|---|---|---|
+| 1 | 1a26b1ce | the mode is DECIDED AND PINNED before the tool context exists: build_context decides first, pins the policy WITH the decision on it, and only then builds code_ctx |
+| 2 | 07da65d7 | a record written before raw_mode existed honours an EXPLICIT WASM_AGENT_RAW_CODE switch (the mode a27490af froze it in) and keeps only when the switch is unset |
+| SHOULD | 057b30aa | raw_code.child_mode honours raw_decided: a parent that decided no raw channel hands that decision down |
+
+### Item 1 - the defect, measured
+
+agent.lua built code_ctx from self.codemode_policy BEFORE the policy was pinned and before the thread's
+mode was decided, so the policy the tool builders read carried no mode. envelope.lua:73,112 and
+M.subagent_tool_list (:806) read mode_of(ctx.codemode_policy), which fell through to the NODE's current
+mode, so a resumed thread (or any thread whose node mode differs) resolved a different tool list than the
+one it froze. prompt_cache.enforce then reported the prefix changed and compose() put
+"[session update] ... removed: ..." in front of the model.
+
+The fix decides first, pins the policy with the decision already on it, and builds code_ctx last.
+The zero-width character the review named in fixtures/prompt-golden/README.md:26 is gone (verified: no
+U+200B/U+200C/U+200D/U+FEFF remains in that file).
+
+### Item 2 - a pre-release thread honours the switch
+
+raw_code.explicit() is split out of mode() (M.parse_switch, M.UNSET), so the two questions are asked
+separately: "what did the operator ask for" and "what does the node answer when they asked nothing".
+A record with no raw_mode now takes the explicit switch when it is set, and only otherwise. That is what
+a27490af froze such a thread in, since a27490af's M.DEFAULT was only and the switch is what the operator
+set.
+
+### Tests (each wired in scripts/test.sh, "mode decided first ok")
+
+scripts/test-mode-decided-first.lua, 58 checks: a RECORDED thread is resumed under every other node mode
+(native, first, only, off, on, stop) and must resolve the SAME tools, report changed=false, and add no
+note; the same for a legacy record, per explicit mode (native/first/only/codemode/stop) with the no-switch
+case asserting only; a pristine legacy record resumed twice under its own switch keeps its tools, its
+prefix and owes no note; and child_mode's three answers (recorded mode, the word off, a decided nil).
+
+### The 5 fast-path reds, proven on a27490af
+
+Log: scratch/reds-a27490af.log (one run per row, own scratch home, cleaned environment). Every one fails
+identically on a27490af with the same binary:
+test-raw-first :46, test-run-counts :15, test-context-growth :15, test-raw-code :45,
+test-refusal-contract :24.
+
+### Texts to approve (continuing the list)
+
+No new model-facing or operator-facing sentence. The refusal text named in item 3 above is unchanged.
+
+### Fast path
+
+flock /home/victor/Work/missions/.suite.lock bash scripts/fast.sh
+log: /home/victor/Work/missions/rel-native/scratch/fast-r4.log
+
+## Review r5 (small FIX + merge release 2b, 39bbf2b6)
+
+| item | commit | what the diff does |
+|---|---|---|
+| 2 | 80d83d29 | a pre-release record reads an explicit switch through a27490af's OWN vocabulary (raw_code.legacy_switch + A27490AF_WORDS) |
+| 3 | 1bf58f5d | the missing case: legacy record frozen in only, no switch, resumed on a node defaulting native - same tools, changed=false, 0 notes |
+| 4 | d04ce829 | merge origin/main 39bbf2b6: agent.lua keeps BOTH halves; test-remote-call-shape keeps main's version with the raw_surface=only pin re-applied |
+| 4 | 15b9db85 | the goldens and the parity hashes re-baselined on the merged tree |
+| 5 | 018b5b3e | telemetry.normalize reads BOTH usage vocabularies (the accounting regression the merge exposed) |
+| 6 | a4507342 | test-raw-first and test-raw-code assert this branch's one-guidance-per-transport contract instead of main's M.GUIDANCE |
+
+### Item 1 - run evidence
+
+Both rows are already IN the fast path: grepping scripts/fast-path.exclude for test-mode-decided-first and
+test-prompt-golden returns 0 (an unexcluded test-*.lua is a fast-path row), and both are wired in
+scripts/test.sh. Run under the suite lock, log scratch/r5-evidence.log:
+
+    mode decided first ok (65 checks)
+    prompt golden ok (118 checks)
+
+### Item 2 - the words a27490af knew
+
+Measured on the base tree (base-a27490af:lua/core/raw_code.lua:88-104): mode() knew only on/1/true, stop,
+first, only, e2, e3, plus OFF={codemode,off,0,false,no}; EVERY other value returned nil and nil means no raw
+channel. So a pre-release thread whose switch says native was frozen in a27490af's off. raw_code.legacy_switch
+applies that vocabulary; scripts/test-raw-mode-small.lua asserts native -> off and first -> first.
+
+### Item 3 - the missing case
+
+scripts/test-mode-decided-first.lua freezes a thread in only with no switch, drops raw_mode (a pre-release
+record's shape), and resumes it with no switch while the node's own answer is native (asserted in the same
+case). It asserts the same declared tools, report.changed == false, and zero session-update notes. No stub:
+measured in review r3 that a stubbed default_mode in the test never reaches raw_code, which dofiles its own copy.
+
+### Item 4 - the merge, and the goldens
+
+Resolved exactly as asked: agent.lua keeps
+mode = raw_code.mode_of(self.codemode_policy) or turn_journal.mode_of(), ..., block = parsed.block, and
+scripts/test-remote-call-shape.lua takes main's rewrite with this branch's raw_surface='only' pin re-applied.
+
+39bbf2b6 rewrites the turn-block texts and adds the done_criteria sentence, and this branch ADDS the run tool
+(measured: tools.all differs from main by exactly run), so NO upstream commit can reproduce this tree's bytes.
+The goldens under fixtures/prompt-golden/ are therefore 39bbf2b6's OWN recording (generated by running
+scripts/generate-prompt-goldens.lua in a worktree of that commit), never a recording of this tree - a golden
+this tree recorded would agree with itself and catch nothing. scripts/lib/prompt-golden.lua gained
+M.DIFFERENT / M.upstream_view: an ALLOW-LIST of the four line shapes this branch changes by design (the tool
+count in the capability hint, the run schema row, the native guidance sentence, the block guidance it
+replaces), applied to BOTH sides, so any other difference still fails. The tool list compares schemas with run
+and the codemode description named as the only permitted differences.
+
+### The five reds: only ONE is pre-existing on 39bbf2b6
+
+The review said five reds stay named as pre-existing. MEASURED on a worktree of 39bbf2b6 with the same
+binary (own scratch home, clean environment): test-raw-first 47 checks ok, test-run-counts 36 ok,
+test-context-growth 31 ok, test-raw-code 41 ok - all four PASS. Only test-refusal-contract fails there
+(:24, lua/core/refusal_codes.lua is stale).
+
+The four were regressions on the merged tree, and both causes were found and fixed:
+
+* 018b5b3e - the adapter seam emits usage as input_tokens/output_tokens, while telemetry.normalize read only
+  prompt_tokens/completion_tokens, so every adapter usage normalized to {known=false} and a summary call added
+  no spend. Measured before the fix: normalized {known:false}; after: {known:true,prompt:10,output:2,total:12},
+  exactly what main produces. test-run-counts and test-context-growth go green.
+* a4507342 - test-raw-first and test-raw-code asserted main's M.GUIDANCE, the sentence this branch deliberately
+  replaced with one per transport. They now assert the stronger contract: exactly one transport sentence,
+  never both, and mode first carries neither. No assertion was loosened.
+
+### Texts to approve (continuing the list)
+
+5. (not model-facing) telemetry.normalize now accepts the adapter record's counter names as well as the
+   provider payload's: input_tokens/output_tokens/cache_read_tokens/cache_write_tokens/reasoning_tokens.
+
+### Fast path
+
+flock /home/victor/Work/missions/.suite.lock bash scripts/fast.sh
+log: /home/victor/Work/missions/rel-native/scratch/fast-r5b.log
+
+Verdict on the merged tree after both fixes: 316 checks, 1 failed, 0 skipped. The single failure is
+test-refusal-contract (:24, refusal_codes.lua is stale), which fails identically on a worktree of 39bbf2b6
+itself - the only genuinely pre-existing red of the five the review named.

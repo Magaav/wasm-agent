@@ -66,7 +66,7 @@ M.ONLY_GENERIC = { bash = true, read = true, write = true, edit = true, ls = tru
 -- the channel to be able to run one: a node whose code mode is off declared NOTHING and then refused to
 -- start the turn (no_dispatchable_tools, 18/11) while its ordinary tools were there all along.
 function M.only(policy)
-  if policy ~= nil then return M.active(policy) and M.mode() == "only" end
+  if policy ~= nil then return M.active(policy) and M.mode_of(policy) == "only" end
   return M.mode() == "only"
 end
 
@@ -84,10 +84,121 @@ end
 -- unset the run block is the only way to act (`only`). The JSON `codemode` tool call is the opt-out:
 -- WASM_AGENT_RAW_CODE=codemode (or off / 0 / false / no).
 M.DEFAULT = "only"
+
+-- The DEFAULT mode when the operator set no switch (rel review r1, R2).
+--
+-- The A/B measured arm B (native) as the arm that acts; a normal node on a provider that takes tool
+-- calls should run that arm without anyone exporting a variable. The decision is the PROVIDER's row
+-- (model_profile.builtin_transport) - never a model name - and an explicit WASM_AGENT_RAW_CODE always
+-- wins, so an operator can still pin any mode the parser knows.
+function M.default_mode()
+  local ok, lib = pcall(dofile, "lua/core/model_profile.lua")
+  if not ok or type(lib) ~= "table" or type(lib.builtin_transport) ~= "function" then return M.DEFAULT end
+  local provider_ok, provider_lib = pcall(dofile, "lua/core/provider.lua")
+  if not provider_ok then return M.DEFAULT end
+  local settings_ok, settings = pcall(provider_lib.settings)
+  if not settings_ok or type(settings) ~= "table" then return M.DEFAULT end
+  -- A provider whose row says it takes native tool calls gets the native arm; anyone else keeps the
+  -- long-standing block default. A provider with no row is not guessed onto either.
+  if lib.builtin_transport(settings.provider) == lib.TOOL_CALL then return "native" end
+  return M.DEFAULT
+end
 local OFF = { codemode = true, off = true, ["0"] = true, ["false"] = true, no = true }
+
+-- NO PROCESS CACHE (rel review r3, item 1). An earlier round cached this answer for the process and
+-- had a provider switch invalidate it; a cache is the wrong shape for a decision that belongs to a
+-- THREAD. The mode is decided ONCE, when a thread starts, and recorded with the frozen prefix
+-- (lua/core/prompt_cache.lua, raw_mode); every later read of that thread is M.mode_of(policy) and
+-- never this function. What remains here is the node's CURRENT answer, asked only when a NEW thread
+-- starts - so a switch mid-process is visible to the next thread and to nothing else.
+
+-- The mode THIS THREAD was started in, when the caller has a policy to carry it. A session freezes its
+-- prompt prefix on its first turn and the mode is part of what it froze (lua/core/prompt_cache.lua,
+-- raw_mode): a thread that started in only keeps only when the node's default later moves to native,
+-- because its whole transcript was written for that door.
+-- The policy field that says the mode was decided for this thread (nil is then a real answer).
+function M.decide(policy, mode)
+  if type(policy) ~= "table" then return policy end
+  policy.raw_mode = (type(mode) == "string") and mode or M.NO_CHANNEL
+  policy.raw_decided = true
+  return policy
+end
+
+-- The word a DECIDED "no raw channel" is recorded as. It is the switch's own word for it, so a reader
+-- that compares strings needs no second field (rel review r3, item 1).
+M.NO_CHANNEL = "off"
+
+function M.mode_of(policy)
+  if type(policy) == "table" then
+    if type(policy.raw_mode) == "string" then
+      if policy.raw_mode == M.NO_CHANNEL then return nil end
+      return policy.raw_mode
+    end
+    if policy.raw_decided == true then return nil end
+  end
+  return M.mode()
+end
+
+-- The mode a thread whose record predates raw_mode acts in: `only`. Such a thread froze its prompt and
+-- its tool list when `only` was the default (a27490af's M.DEFAULT), and that is what its transcript,
+-- its declared surface and every answer since were written for. Reading the node's CURRENT mode for it
+-- would hand an old thread a door its frozen prefix does not describe, so the record decides, and the
+-- absence of the field means only (rel review r3, item 1).
+M.LEGACY_THREAD_MODE = "only"
+
+-- The mode a child acts in: its PARENT's recorded one (rel review r3, item 1). A child that shares a
+-- parent's code door must not switch doors because the node's default moved between admission and
+-- execution; the parent's mode travels with the admission spec and the durable receipt
+-- (lua/core/subagents.lua, receipt.raw_mode), and the child reads it here.
+function M.child_mode(subagent, policy)
+  if type(subagent) == "table" then
+    if type(subagent.raw_mode) == "string" then
+      if subagent.raw_mode == M.NO_CHANNEL then return nil end
+      return subagent.raw_mode
+    end
+    -- A parent that DECIDED no raw channel hands that decision down (review r4 SHOULD): a child may not
+    -- re-open a door its parent closed, and it may not read the absence as legacy either.
+    if subagent.raw_decided == true then return nil end
+  end
+  return M.mode_of(policy)
+end
+
+-- The EXPLICIT switch, parsed, or the string "unset" when the operator set none. Item 2 of review r4
+-- needs the two apart: a pre-release thread honours an explicit switch, and falls back to its frozen
+-- mode only when nobody said anything.
+M.UNSET = "unset"
+
+function M.explicit()
+  local value = tostring(host.getenv("WASM_AGENT_RAW_CODE") or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
+  if value == "" then return M.UNSET end
+  return M.parse_switch(value)
+end
+
+-- The NODE's answer for a thread that has no record: the explicit switch when it is set, otherwise the
+-- provider row (M.default_mode).
+-- a27490af's OWN vocabulary, for a record that predates the mode field (review r5, item 2). That tree
+-- knew only these words (a27490af:lua/core/raw_code.lua:88-104): every other value - native and bash
+-- included - returned nil, and nil means "no raw channel". A pre-release thread was frozen by THAT
+-- parser, so its explicit switch must be read by it too, or "native" would hand an old thread a door
+-- its transcript never had.
+local A27490AF_WORDS = { on = "on", ["1"] = "on", ["true"] = "on", stop = "stop",
+  first = "first", only = "only", e2 = "e2", e3 = "e3" }
+
+function M.legacy_switch(value)
+  if value == M.UNSET then return M.UNSET end
+  if OFF[value] then return nil end
+  return A27490AF_WORDS[value]   -- anything a27490af did not know is nil: no raw channel
+end
+
 function M.mode()
   local value = tostring(host.getenv("WASM_AGENT_RAW_CODE") or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
-  if value == "" then return M.DEFAULT end
+  if value == "" then
+    return M.default_mode()
+  end
+  return M.parse_switch(value)
+end
+
+function M.parse_switch(value)
   if OFF[value] then return nil end
   if value == "1" or value == "on" or value == "true" then return "on" end
   if value == "stop" then return "stop" end
@@ -96,22 +207,45 @@ function M.mode()
   -- "off" everywhere downstream — a mode the parser does not know silently restores the default (17/11:
   -- `only` was set, `mode()` said nil, codemode was declared again and the model kept sending JSON calls).
   if value == "only" then return "only" end
+  -- The tagged arms of the A/B (next-round.md, 19/11 ~17:10). They are modes here for the one
+  -- reason every other mode is: the parser below must know them, or an unknown value returns nil
+  -- and nil means "off" - which is exactly how E2/E3 ended in one round with the block never read.
+  if value == "e2" or value == "e3" then return value end
+  -- The native transports (review MUST 6). They are modes here for one reason only: mode() is what
+  -- tells the loop whether the raw channel is on at all, and a native turn still needs the LEAK
+  -- SAFETY NET (below) - a model that writes <bash>{}<bash> as plain text instead of calling the run
+  -- tool must earn ONE named continue, never a silent ending. An unknown value returns nil, and nil
+  -- means off, so these two have to be named or the net never runs.
+  -- native is this branch's own transport. bash is NOT: a27490af did not know that value, so
+  -- WASM_AGENT_RAW_CODE=bash meant "off" there (an unknown value returns nil, and nil closes the raw
+  -- channel). It keeps that meaning here unless the A/B switch names the bash arm, which is the only
+  -- thing that ever meant arm D (rel review r2, item 6).
+  if value == "native" then return value end
+  if value == "bash" then
+    local arms_ok, arms = pcall(dofile, "lua/core/ab_arms.lua")
+    if arms_ok and type(arms) == "table" and arms.current and arms.current() == "bash" then return "bash" end
+    return nil
+  end
   return nil
 end
 
 -- Active only where a codemode call could have run: the switch is on and code mode is enabled.
 function M.active(policy)
-  return M.mode() ~= nil and type(policy) == "table" and policy.enabled == true
+  return M.mode_of(policy) ~= nil and type(policy) == "table" and policy.enabled == true
 end
 
 -- Raw first: the run block is the way of working, codemode is not declared, history renders as text.
 function M.first(policy)
-  local mode = M.mode()
+  local mode = M.mode_of(policy)
   return M.active(policy) and (mode == "first" or mode == "only")
 end
 
 function M.stop_sequences(policy)
-  if M.active(policy) and M.mode() == "stop" then return { M.STOP } end
+  local mode = M.mode_of(policy)
+  -- The tagged arms stop at their own closer (next-round.md 19/11 ~15:50): the harness supplies the
+  -- end of the block, so anything the model writes after it is cut rather than read as an action.
+  if (mode == "e2" or mode == "e3") and M.active(policy) then return { "</codeact>" } end
+  if M.active(policy) and mode == "stop" then return { M.STOP } end
   return nil
 end
 
@@ -177,6 +311,50 @@ end
 -- Fenced blocks, CommonMark-style: an opening fence of 3+ backticks or 3+ tildes (indented at most three
 -- no backtick in its info string) closes at a line of at least as many backticks and nothing else.
 -- A fence inside another block is that block's text. An unclosed block runs to the end.
+-- Which CodeAct transport this node offers, and the guidance that goes with it (docs/AGENT-SEAT.md,
+-- principles 2 and 7). The choice comes from the model PROFILE the conformance suite stored, never from
+-- a model name: a profile is a measurement, and a name is a guess.
+--
+-- With no profile the default is conservative and says so once: a model that can call tools is offered
+-- the run tool (a native call needs no fence closed), and one that cannot is offered the block.
+M.TRANSPORT_NOTICE_SHOWN = false
+
+-- `supports_tools` is whether this turn can declare tools at all - what the model can actually call.
+-- Returns the transport ("tool_call" or "block"), where the choice came from, and the one-line notice
+-- when it came from the default rather than from a measurement.
+function M.transport_for(model, supports_tools)
+  local ok, profile_lib = pcall(dofile, "lua/core/model_profile.lua")
+  if ok and type(profile_lib) == "table" then
+    local profile = profile_lib.read(model)
+    if type(profile) == "table" then
+      local conform_ok, conform = pcall(dofile, "lua/core/conform.lua")
+      if conform_ok and type(conform) == "table" then
+        local decision = conform.decide(profile)
+        if decision and decision.transport then
+          return decision.transport, "profile", nil
+        end
+      end
+    end
+  end
+  local transport = supports_tools and "tool_call" or "block"
+  local notice = string.format(
+    "conform: no profile for %s, using the conservative %s transport; run `wa conform %s` to measure it",
+    tostring(model or "this model"), transport, tostring(model or "this model"))
+  return transport, "default", notice
+end
+
+-- The guidance sentence that matches a transport. A model offered the run tool is told about the run
+-- tool; one offered the block is told about the block. Saying both is what made a measured model answer
+-- a choice it did not have (the 17/11 offer, M.take).
+function M.guidance_for(transport)
+  if transport == "tool_call" then
+    return "Work in code: call the run tool with `code` - it runs as one script in which every tool is "
+      .. "`tools.<name>(args)`, and its result comes back to you. Use `raw` to carry a file body or a "
+      .. "patch exactly. A message with no tool call is your answer. " .. M.BATCHING
+  end
+  return M.FIRST_GUIDANCE .. " " .. M.BATCHING
+end
+
 function M.parse(text)
   local blocks, lines, open = {}, lines_of(tostring(text or "")), nil
   for index, line in ipairs(lines) do
@@ -495,18 +673,129 @@ M.MARKUP_MARKERS = {
   "<ds_tool>", "</ds_tool>", "<ds_safety>", "</ds_safety>", "<ds_invoke>", "</ds_invoke>",
   "</parameter>", "<tool_call>", "</tool_call>", "<function_call>", "<function_calls>",
   "<antml:invoke", "</antml:invoke>", "</invoke>", "<|python_tag|>",
+
 }
 
 -- Returns { marker = <what was found> } or nil. Pure: no host, no state.
-function M.markup_in_text(text)
+-- The shapes the review named in MUST 6 that this list did not carry: a model writing its trained
+-- call format as text (<bash>...</bash>, <run>...</run>, <invoke name=...>...</invoke>).
+--
+-- They are checked as PAIRS, not as bare openers, and that is deliberate: this detector runs on
+-- every answer the loop reads, so a sentence that merely MENTIONS a tag - "use <bash> to run it" -
+-- must stay an answer. A pair that opens and closes is a call the model meant; a lone word in prose
+-- is not. The list stays an allow-list: a shape not named here is prose.
+--
+-- ONLY the native transport's own pair (<run>) is in the always-on list (rel review r2, item 5). The
+-- <bash>/<invoke> pairs are a model's trained call format for a transport this node only has in native
+-- mode: in every other mode a27490af did not name them, so naming them there would turn an answer that
+-- discusses that format into a continue and change what those modes accept. `M.markup_in_text(text,
+-- 'native')` adds them; every other caller sees exactly a27490af's list.
+-- The pair scan existed in no mode before this branch: it is native only, so the always-on list is
+-- empty and the native one holds all three shapes. (`<invoke ...>...</invoke>` is ALSO caught without
+-- this list, because a27490af already names the bare `</invoke>` in M.MARKUP_MARKERS above - which is
+-- why the pair changes nothing there and is kept only for the native spelling that has no closer in
+-- the base list.)
+M.MARKUP_PAIRS = {}
+
+-- The pairs a native node adds, on top of the always-on list above.
+M.NATIVE_MARKUP_PAIRS = {
+  { "<bash>", "</bash>" },
+  { "<run>", "</run>" },
+  { "<invoke ", "</invoke>" },
+}
+
+function M.markup_in_text(text,mode)
   local raw = tostring(text or "")
   if raw == "" then return nil end
+  local pairs_to_scan=M.MARKUP_PAIRS
+  if mode=='native' then
+    pairs_to_scan={}
+    for _,pair in ipairs(M.MARKUP_PAIRS) do pairs_to_scan[#pairs_to_scan+1]=pair end
+    for _,pair in ipairs(M.NATIVE_MARKUP_PAIRS) do pairs_to_scan[#pairs_to_scan+1]=pair end
+  end
   for _, found in ipairs(M.MARKUP_MARKERS) do
     if raw:find(found, 1, true) then return { marker = found } end
+  end
+  for _, pair in ipairs(pairs_to_scan) do
+    local opens = raw:find(pair[1], 1, true)
+    if opens and raw:find(pair[2], opens + #pair[1], true) then
+      return { marker = pair[1]:gsub(" $", "") }
+    end
   end
   -- DeepSeek's token bar written with either character (the two spellings M.native_calls normalises).
   if raw:find("\239\189\156", 1, true) or raw:find("|DSML|", 1, true) then return { marker = "<|DSML|>" } end
   return nil
+end
+
+-- The SECOND transport (docs/AGENT-SEAT.md, principle 2): a native tool call run({code, raw?}).
+--
+-- A fenced run block and a run call are the same action, so this adds no pathway: it turns the
+-- arguments into the call M.take forms for a block, and that call dispatches as codemode. What the
+-- model chooses is only the transport; the results come back the same way.
+--
+-- raw carries named raw blocks - a file body, a patch - as an object, and every value is emitted as
+-- a JSON string literal, so the bytes reach the script exactly as the model wrote them and are never
+-- escaped *inside* the code (principle 4). One JSON encode is lossless and reversible; hand-quoting
+-- is not. The names are identifiers the script reads, so only identifier-shaped names are accepted:
+-- a name that is not one would silently become a different variable.
+-- The batching instruction (batch-spec.md, 19/11): measured evidence was 1.0 tool calls per round
+-- in EVERY run of the task A/B, so the model was doing one small call at a time. The sentence is
+-- the same text in all three places the model can read it, and a test pins it in each (the three
+-- descriptions are built by different modules, so a copy that drifts is a real defect).
+M.BATCHING = "One run(code) can do a whole step: read, search, edit and check in the same script, "
+  .. "with Promise.all for the parts that do not depend on each other, and return only what you "
+  .. "need to decide the next step. Prefer one script per step over many small calls."
+
+local RAW_PREFIX = "__raw"
+
+function M.run_tool_schema()
+  return { name = "run", description = "Run one script, the same way a fenced js run block does: "
+    .. "code is the script, and every tool inside it is tools.<name>(args). Use raw to carry file "
+    .. "bodies or patches exactly, as an object keyed by the variable name the script should read "
+    .. "(each value reaches the script byte for byte, never escaped into the code). " .. M.BATCHING,
+    schema = { type = "object", properties = {
+      code = { type = "string" },
+      raw = { type = "object", additionalProperties = { type = "string" } },
+    }, required = { "code" } } }
+end
+
+-- The run call as the codemode call it stands for, or nil and a model-facing refusal. Pure: no
+-- host, no state - the caller dispatches what this returns.
+function M.native_run(args)
+  local args_type = type(args)
+  if args_type == "string" then
+    local ok, decoded = pcall(json.decode, args)
+    args = ok and type(decoded) == "table" and decoded or { code = args }
+  elseif args_type ~= "table" then
+    args = {}
+  end
+  local code = args.code
+  if type(code) ~= "string" or not code:find("%S") then
+    return nil, { error = "run_needs_code", effect = "none",
+      note = "the run call needs code: the script is the string it runs, exactly as a fenced run block is" }
+  end
+  local raw = args.raw
+  if raw == nil then return { code = code } end
+  if type(raw) ~= "table" then
+    return nil, { error = "run_raw_not_object", effect = "none",
+      note = "raw is an object of name -> text (one entry per raw block); it is not a string" }
+  end
+  local names = {}
+  for name in pairs(raw) do names[#names + 1] = name end
+  table.sort(names)
+  for _, name in ipairs(names) do
+    if type(name) ~= "string" or not name:match("^[%a_][%w_]*$") then
+      return nil, { error = "run_raw_name", effect = "none",
+        note = "a raw block name must be an identifier the script can read (letters, digits, _), "
+          .. "because that name is the variable the bytes arrive in" }
+    end
+    if type(raw[name]) ~= "string" then
+      return nil, { error = "run_raw_not_text", effect = "none", name = name,
+        note = "raw block " .. name .. " is not text; raw blocks carry file bodies and patches, not values" }
+    end
+  end
+  local literal = json.encode(raw)
+  return { code = "const " .. RAW_PREFIX .. " = " .. literal .. ";\n" .. code, raw_blocks = names }
 end
 
 -- The native-markup path of `take`: the calls run as raw-channel codemode calls; the text before the
@@ -548,8 +837,77 @@ end
 
 function M.take(result, stop_sent, policy)
   local content = result.content or ""
+  -- The tagged arms (E2/E3) are a different transport for the same action, so they enter through this
+  -- same door and form the same codemode call. Their parser answers either an act (with its code), a
+  -- named finish, or invalid_message_shape with the reason.
+  local arm = dofile("lua/core/ab_arms.lua").current()
+  if arm == "e2" or arm == "e3" then
+    local tags = dofile("lua/core/arm_tag.lua")
+    -- The provider's stop sequence removes the closing tag it stopped at, so a reply that DID close its
+    -- block arrives here without the closer. `stop_sent` is the proof it was written: put it back, the
+    -- same way the fence path restores a fence its stop sequence ate, so a closed block is not called
+    -- unterminated.
+    -- Only an OPEN block needs its closer put back. A reply that finished without acting (a
+    -- <message> alone) has no block at all, and appending a closer to it manufactured an orphan
+    -- closer that the parser then refused as text outside the tags (measured: round 4 of the E2 smoke).
+    local opened = content:find("<codeact>", 1, true)
+    local closed = content:find("</codeact>", 1, true)
+    if stop_sent and opened and (not closed or closed < opened) then
+      content = content .. "</codeact>"
+    end
+    local parsed = tags.parse(content, arm)
+    if parsed.shape == "act" then
+      local code = { code = parsed.code }
+      local id = "call_raw_" .. (host.uuid():gsub("-", ""))
+      local calls = {}
+      for _, call in ipairs(result.tool_calls or {}) do calls[#calls + 1] = call end
+      calls[#calls + 1] = { id = id, type = "function", ["function"] = { name = "codemode", arguments = json.encode(code) } }
+      result.tool_calls = calls
+      local entry = { id = id, index = 1, blocks = 1, bytes = #parsed.code, notes = {} }
+      if parsed.message and parsed.message ~= "" then
+        entry.notes[#entry.notes + 1] = "progress: " .. parsed.message
+      end
+      if parsed.dropped then
+        entry.notes[#entry.notes + 1] = parsed.dropped_reason
+      end
+      result.content = (parsed.message or "")
+      if result.finish_reason == "stop" or result.finish_reason == nil then
+        result.raw_finish_reason = result.finish_reason
+        result.finish_reason = "tool_calls"
+      end
+      entry.calls = { [id] = entry }
+      return entry
+    end
+    if parsed.shape == "finish" then
+      result.content = parsed.final_message or ""
+      result.arm_final = true
+      return nil
+    end
+    -- Neither shape: nothing runs, and the reason is named so the loop can continue once.
+    return { invalid_message_shape = true, reason = parsed.reason, excerpt = parsed.excerpt }
+  end
   -- Call markup in the text, and no real tool call: in `first`/`only` the model had nothing declared to
   -- call with, so its own format leaked into the text. A run block, if any, still wins below.
+  -- The LEAK SAFETY NET for the native transports (review MUST 6). In native/bash mode the action is
+  -- a tool call; a model that instead writes its trained call format as TEXT (<bash>, <invoke>,
+  -- <tool_call>, DeepSeek's DSML bar) has done nothing, and the harness used to accept that text as
+  -- the answer. The reader names it so the loop can ask once, by name; a second one fails the run.
+  local mode_now = M.mode_of(policy)
+  if (mode_now == "native" or mode_now == "bash") and #(result.tool_calls or {}) == 0 then
+    -- Skip code before scanning (rel review r1, R4): a fenced sample or an inline mention of a tag is
+    -- the model TALKING about a call shape, and failing that answer would be the false positive this
+    -- net must not have. Only bare markup in the prose is a leak.
+    local prose = tostring(content or ""):gsub("```.-```", " ")
+    -- Inline code is stripped LINE BY LINE: a span never crosses a line, so no escape sequence has to
+    -- survive three layers of quoting to say so (it did not, twice).
+    prose = prose:gsub("[^\n]+", function(line) return (line:gsub("`[^`]-`", " ")) end)
+    -- The native pairs (<bash>, <invoke>) are scanned WHERE the loop can actually see them: here, with
+    -- the mode that names them (rel review r2, item 5).
+    local leaked = M.markup_in_text(prose, mode_now)
+    if leaked then
+      return { leaked_markup = true, marker = leaked.marker, bytes = #content }
+    end
+  end
   local native = (#(result.tool_calls or {}) == 0) and M.native_calls(content) or nil
   if native and not has_fence(content:sub(1, native.start - 1)) then
     return take_native(result, native)
@@ -682,8 +1040,68 @@ end
 -- assistant message, as the provider requires); the raw result becomes a user message `M.OBSERVATION`
 -- .. <the tool message content, byte for byte>. Pure: the caller's list and messages are not changed,
 -- and a list with no raw call comes back as is. Idempotent: a rendered list has no raw call left.
+-- The tagged arms render their own history (next-round.md 19/11 ~15:50): the model's action was a
+-- <codeact> block and the harness answered <result>...</result>, so a replay that showed a tool-call
+-- pair would teach the model a shape its prompt forbids - and it then echoed <result> itself, which
+-- the parser correctly refused. Byte for byte what the arm was told it would see.
+function M.render_tag_history(messages)
+  if type(messages) ~= "table" then return messages end
+  local out, index = {}, 1
+  while index <= #messages do
+    local message = messages[index]
+    local raws = {}
+    if message.role == "assistant" and type(message.tool_calls) == "table" then
+      for _, call in ipairs(message.tool_calls) do
+        if M.is_raw(call.id) then raws[#raws + 1] = call end
+      end
+    end
+    if #raws == 0 then
+      out[#out + 1] = message
+      index = index + 1
+    else
+      local wanted = {}
+      for _, call in ipairs(raws) do wanted[call.id] = true end
+      local rendered = {}
+      for key, value in pairs(message) do rendered[key] = value end
+      -- The replay must be a shape the prompt ALLOWS. The stored content is the action's own
+      -- <message> text, so it is wrapped back in its tags: a bare line followed by <codeact> taught
+      -- the model to write text outside the tags, and the parser then refused it (measured: round 2
+      -- failed with "text outside the tags" after a correct round 1).
+      local said = type(message.content) == "string" and message.content or ""
+      local text = said ~= "" and ("<message>" .. said .. "</message>") or ""
+      for _, call in ipairs(raws) do
+        local code = ""
+        local ok, decoded = pcall(json.decode, (call["function"] or {}).arguments or "{}")
+        if ok and type(decoded) == "table" then code = tostring(decoded.code or "") end
+        text = text .. (text ~= "" and "\n" or "") .. "<codeact>\n" .. code .. "\n</codeact>"
+      end
+      rendered.content = text
+      rendered.tool_calls = nil
+      out[#out + 1] = rendered
+      index = index + 1
+      local results = {}
+      while index <= #messages and messages[index].role == "tool" do
+        local result = messages[index]
+        if wanted[result.tool_call_id] then
+          local content = type(result.content) == "string" and result.content or tostring(result.content or "")
+          results[#results + 1] = content
+        else
+          out[#out + 1] = result
+        end
+        index = index + 1
+      end
+      if #results > 0 then
+        out[#out + 1] = { role = "user", content = "<result>\n" .. table.concat(results, "\n") .. "\n</result>" }
+      end
+    end
+  end
+  return out
+end
+
 function M.render_history(messages)
   if type(messages) ~= "table" then return messages end
+  local arm = dofile("lua/core/ab_arms.lua").current()
+  if arm == "e2" or arm == "e3" then return M.render_tag_history(messages) end
   local any = false
   for _, message in ipairs(messages) do
     if message.role == "assistant" and type(message.tool_calls) == "table" then

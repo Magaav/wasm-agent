@@ -201,7 +201,10 @@ check(nodes.RELAY_PEER_BUDGET_MS>0 and nodes.RELAY_PEER_BUDGET_MS<nodes.RELAY_DE
 -- bare tool lines lacks - the red this row fixed was a live session, not a property of the declared-tool
 -- surface. A prompt assembled by hand is not that surface: this runs the real loop with a stubbed
 -- provider and reads the system message it was given.
-raw_surface=nil
+-- rel r1 R2: the surface this run is about is pinned BEFORE the run, not after it (re-applied onto
+-- main's version, review r5 item 4). An unset switch now resolves from the provider, so the CodeAct
+-- surface has to be asked for explicitly - 'nil' here would run the node's own mode, not CodeAct.
+raw_surface='only'
 local codeact_sent={}
 local previous_stream=host.http_stream
 host.http_stream=function(_,_,_,body)
@@ -212,7 +215,6 @@ end
 local codeact_sid=memory.start_session('','codeact-shape',{user_id='master',node_id='',title='codeact-shape'})
 local codeact_ok,codeact_reply=pcall(function() return agent.new(codeact_sid,function() end,'master','master',''):run('read it') end)
 host.http_stream=previous_stream
-raw_surface='codemode'
 check(codeact_ok,'the default-surface run completed: '..tostring(codeact_reply))
 local codeact_declared=codeact_sent[1] and #((codeact_sent[1].tools) or {}) or -1
 check(codeact_declared==0,'the run declared no tool at all ('..codeact_declared..'), so it ran on the CodeAct surface')
