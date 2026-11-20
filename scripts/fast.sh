@@ -732,6 +732,11 @@ check install-front-door bash scripts/test-install.sh
   # must be steerable with `wa steer` instead of killed (docs/SCRIPTED-RUNS.md). It drives the real
   # binary, because the failure it covers is a process that never exits: a Lua-only test cannot see it.
   WA_BIN="$bin" check cli-scripted node scripts/test-cli-scripted.mjs
+  # A fenced code card keeps its border when the screen is narrower than the width it was rendered at
+  # (a focused block is boxed two columns in; a resize redraws at the new width). It drives the REAL
+  # binary in a private tmux pty and REFUSES to run unless its fixture served the request, so a run
+  # that reached any other endpoint fails instead of passing.
+  WA_BIN="$bin" check fence-card-pty node scripts/test-fence-card-pty.mjs
   # The cutover exporter (docs/WHATSAPP-CUTOVER.md): a synthetic whatsmeow store in, the wacore
   # device record out, plus the guard rails around a live state directory. Seconds, no phone.
   check whatsapp-adopt node --test scripts/test-whatsapp-adopt.mjs

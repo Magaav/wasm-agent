@@ -164,7 +164,25 @@ function stripScrollbar(row) {
 const barRow = row => new RegExp('^\\s*' + BAR).test(stripScrollbar(row));
 // The screenshot row: a bar with nothing after it.
 const emptyBar = rows => rows.filter(row => new RegExp('^\\s*' + BAR + '\\s*$').test(stripScrollbar(row)));
-// A card code line drawn WITHOUT its bar - the defect this whole test exists for.
+// A card code line drawn WITHOUT its bar - the defect this whole test exists for. The framing
+// is what makes it checkable at every width and with every phrasing: every screen row BETWEEN
+// a card open corner and its close corner must open with the bar. A row that does not is a
+// card row the host re-wrapped as prose, whatever words it happens to carry.
+const OPEN = /^\s*\u250c/;
+const CLOSE = /^\s*\u2514/;
+function cardInteriorOrphans(rows) {
+  const found = [];
+  let open = false;
+  for (const row of rows) {
+    const text = stripScrollbar(row);
+    if (OPEN.test(text)) { open = true; continue; }
+    if (CLOSE.test(text)) { open = false; continue; }
+    if (!open || text.trim() === '') continue;
+    if (!barRow(text)) found.push(row);
+  }
+  return found;
+}
+// The named lines, as a second net: a check that stopped finding the frame cannot pass as clean.
 const orphans = (rows, pattern) => rows.filter(row => pattern.test(stripScrollbar(row)) && !barRow(row));
 
 try {
@@ -204,10 +222,18 @@ try {
     const shown = screen.filter(row => stripScrollbar(row).trim() !== '').join('\n');
     check('at ' + columns + ' columns no row is an empty bar', emptyBar(screen).length === 0, shown);
     check('at ' + columns + ' columns the card is still drawn', screen.some(barRow), shown);
-    const lost = orphans(screen, /(push past the border|much longer body|alpha|gamma)/);
-    check('at ' + columns + ' columns no card code row lost its bar', lost.length === 0,
+    const lost = cardInteriorOrphans(screen);
+    check('at ' + columns + ' columns every row inside a card keeps its bar', lost.length === 0,
       'orphans: ' + JSON.stringify(lost) + '\n' + shown);
+    const named = orphans(screen, /(push past the border|much longer body|alpha|gamma)/);
+    check('at ' + columns + ' columns no card code line is drawn outside its card', named.length === 0,
+      'outside: ' + JSON.stringify(named) + '\n' + shown);
   }
+  // A focused block is boxed two columns in, which is the width that broke the card - but a fence
+  // lands in the ANSWER block and only a tool call or a thought is a topic, so nothing in this
+  // answer can be focused. That path is covered by the Rust test
+  // a_focused_card_is_cut_two_columns_narrower, which boxes the same card at width-2 through the
+  // real rows_with_copies.
   console.log('\n---- the screen at 120 columns ----\n' + capture());
 } catch (error) {
   failed += 1;

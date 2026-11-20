@@ -1855,6 +1855,45 @@ mod tests {
         assert_eq!(after.rows(trailing, 24), wrap_rows(trailing, 24), "the frame closed with the card");
     }
 
+
+    #[test]
+    fn a_focused_card_is_cut_two_columns_narrower_and_keeps_its_bar() {
+        // The focused width is the one that broke the screenshot card: a focused topic is boxed, so
+        // its rows wrap at width - 2 (transcript.rs rows_with_copies). A card in a TOOL block is
+        // inside that box, so this drives the real view rather than CardWrap alone.
+        let mut t = Transcript::default();
+        t.block(true);
+        t.write("\u{23fa} Bash(cat notes.txt)\n");
+        let border = CARD_BORDER;
+        let code = "for f in a b c; do echo \"one rather long line of shell here to push past the border\"; done";
+        t.copyable(&[(1, code.to_string())]);
+        t.write(&format!("{COPY_PREFIX}{border}\u{250c}\u{2500} bash{RESET}\n"));
+        t.write(&format!("{border}\u{2502} {RESET}\x1b[38;2;212;212;212m{code}{RESET}\n"));
+        t.write(&format!("{border}\u{2514}\u{2500}{RESET}\n"));
+        assert!(t.focus_prev(), "the call is a topic");
+        t.set_expanded(true);
+        let width = 60usize;
+        let view = t.view(width, 20);
+        let plain: Vec<String> = view.iter().map(|r| crate::selection::plain(r)).collect();
+        let shown = plain.join("\n");
+        // The focus box is drawn, and every card row inside it keeps the bar: the box eats two
+        // columns, so the card wraps at width - 2 and its continuations still open with bar + mark.
+        assert!(plain.iter().any(|r| r.starts_with('\u{250c}')), "the focus frame is drawn: {shown}");
+        let inside = plain.iter().filter(|r| r.starts_with("\u{2502}")).count();
+        assert!(inside >= 2, "card rows are inside the box: {shown}");
+        assert!(plain.iter().any(|r| r.contains("\u{2502}\u{21aa}")), "a card row continued: {shown}");
+        // Every row inside the card frame keeps a bar, at the boxed width.
+        let mut open = false;
+        let mut orphans: Vec<String> = Vec::new();
+        for text in &plain {
+            let body = text.trim_start_matches('\u{2502}').trim_start();
+            if body.starts_with('\u{250c}') { open = true; continue; }
+            if body.starts_with('\u{2514}') { open = false; continue; }
+            if open && !text.contains('\u{2502}') && !text.trim().is_empty() { orphans.push(text.clone()); }
+        }
+        assert!(orphans.is_empty(), "every row inside the card keeps its bar: {orphans:?}\n{shown}");
+    }
+
     // ---- the live line a running tool call owns (docs/TOOL-PROGRESS.md) ----------------------
     // Victor, 2026-11-10: a call's progress is a row in that call's OWN block, under its heading,
     // rewritten while the call runs - not a line on the session-status-content row below the box.
