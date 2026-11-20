@@ -34,6 +34,19 @@ local owned = {}
 local function owned_await(req)
   return owned[tostring(req.id or "")] == true
 end
+-- THE STUB MIRRORS THE REAL HOST (review r2, B tests; operations.rs Caller::owns, :1219-1241).
+--
+-- Two rules it must enforce, because the code under test is exactly the code that got them wrong:
+--   1. an await/read/cancel for an operation this caller does not own is REFUSED by name. The host
+--      decides ownership by the OWNER the caller names (a sessionless caller owns the rows started under
+--      its own owner), so an ownerless call is refused even for a child this very test started - which is
+--      what every probe did before MUST 1.
+--   2. it honours wait_ms and IGNORES wait_s (the host reads wait_ms, default 1 s, cap 10 s). A stub that
+--      settled at once for any argument hid MUST 2: the old code sent wait_s and was answered in 1 s.
+local REQUIRED_OWNER = "nodes-probe"
+local function refuses(req, owner_of)
+  return tostring(req.owner or "") ~= REQUIRED_OWNER or owner_of[tostring(req.id or "")] == nil
+end
 host.operation = function(action, request)
   local req = json.decode(request or "") or {}
   if action == "start" then
@@ -42,7 +55,11 @@ host.operation = function(action, request)
     return json.encode({ operation_id = "fixture-" .. starts })
   elseif action == "await" then
     awaits = awaits + 1
-    if not owned_await(req) then return json.encode({ error = "operation_not_owned", id = req.id }) end
+    if refuses(req, owned) then return json.encode({ error = "operation_not_owned", id = req.id }) end
+    if (tonumber(req.wait_ms) or 0) <= 0 then
+      -- fewer than one millisecond is not a wait the host can honour; it answers unsettled.
+      return json.encode({ settled = false, state = "running", operation_id = req.id })
+    end
     return json.encode({ settled = true, state = "completed", operation_id = req.id })
   elseif action == "read" then
     reads = reads + 1
@@ -63,8 +80,24 @@ local function cold()
   -- with no lease either: leave it in place and the cases below would join children an earlier case started.
   local ok, paths = pcall(dofile, "lua/core/paths.lua")
   if ok and type(paths) == "table" and type(paths.data) == "function" then
-    -- There is no host.delete_file (measured: nil); an EMPTY lease is how a lease is cleared.
+    -- CLEAR THE WHOLE LEASE DIRECTORY (review r2, B/MUST 4): the lease is one file PER PROCESS in
+    -- <data>/nodes-probe-inflight, and each file that names a peer this row is about must go, or a later
+    -- case joins children an earlier one left behind and "the first call started no child".
+    -- There is no host.delete_file (measured: nil), so each file is OVERWRITTEN with an empty peer list;
+    -- a file for a process that is gone drops out by its own deadline.
+    -- BOTH SHAPES: the directory (this tree) and the legacy single file (the base this row must be red
+    -- on). Clearing only the new one made the base fail for the WRONG reason - a stale lease from an
+    -- earlier case, not the ownerless await - which is a red that proves nothing.
     pcall(host.write_file, paths.data() .. "/nodes-probe-inflight.json", json.encode({ peers = {} }))
+    local dir = paths.data() .. "/nodes-probe-inflight"
+    local listed = host.list_dir and host.list_dir(dir) or nil
+    if type(listed) == "string" then listed = json.decode(listed) end
+    for _, item in ipairs(type(listed) == "table" and (listed.entries or {}) or {}) do
+      local name = tostring(type(item) == "table" and item.name or "")
+      if name:match("%.json$") then
+        pcall(host.write_file, dir .. "/" .. name, json.encode({ peers = {} }))
+      end
+    end
   end
 end
 
@@ -195,6 +228,36 @@ end
 assert(answered > 0, "a fresh state that JOINED a leased child got no answer at all (" .. pending
   .. " peers reported a wait, 0 answered) - that is the refused-await defect item 1 names")
 assert(pending == 0, pending .. " joined peers were left waiting for an answer that was already published")
+-- 9. THE REQUEST ITSELF (review r2, B/MUST 1 and MUST 2). Every other case can pass while the wire is
+--    wrong, and it did: the row was green on a tree that sent no owner and a wait_s the host ignores.
+local seen = {}
+host.operation = function(action, request)
+  local req = json.decode(request or "") or {}
+  if action == "start" then
+    starts = starts + 1
+    owned["fixture-" .. starts] = true
+    return json.encode({ operation_id = "fixture-" .. starts })
+  elseif action == "await" then
+    seen[#seen + 1] = { owner = req.owner, wait_ms = req.wait_ms, wait_s = req.wait_s }
+    return json.encode({ settled = true, state = "completed", operation_id = req.id })
+  elseif action == "read" then
+    return json.encode({ content = json.encode({ node_id = "fixture", capabilities = { "bash" }, reason = "asked" }) .. "\n" })
+  end
+  return json.encode({ cancelled = true })
+end
+cold()
+_G.WA_IN_PROBE_CHILD = nil
+A._in_probe_child = nil
+B.list({ peers = peers, live_capabilities = true })
+assert(#seen > 0, "no await reached the stub, so the request shape below proves nothing")
+for _, one in ipairs(seen) do
+  assert(one.owner == "nodes-probe", "an await carried owner=" .. tostring(one.owner)
+    .. "; the host refuses an ownerless caller, so every peer would answer probe_leaseholder_pending")
+  assert(tonumber(one.wait_ms) and tonumber(one.wait_ms) > 0, "an await carried no wait_ms; the host reads wait_ms only")
+  assert(one.wait_s == nil, "an await still carried wait_s=" .. tostring(one.wait_s)
+    .. "; the host ignores it, so the deadline was a 1 s look followed by a cancel")
+  assert(tonumber(one.wait_ms) <= 10000, "an await asked for " .. tostring(one.wait_ms) .. " ms; the host caps it at 10 s")
+end
 local why = "the ledger is asked (" .. asked .. " list call(s)) and a host that cannot answer says why"
 
 print("nodes probe instances ok: two real instances (" .. unmasked .. " children when unmarked), the marked one "
