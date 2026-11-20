@@ -99,7 +99,7 @@ local ran,result=pcall(handle.run,handle,'wait for that build')
 local stopped_by_guard=tostring(result):find('guard_repeated_calls',1,true)~=nil
 pcall(tools.dispatch,memory,'operation',{action='cancel',id=op},'master',ctx)
 
-ok(rounds>=3 and rounds<12,'the hot loop was stopped near the repeat limit (ran '..rounds..')')
+ok(rounds==3,'the hot loop was stopped at the repeat limit, round 3 (ran '..rounds..')')
 ok(stopped_by_guard,
   'a wait_s:0 poll still trips guard_repeated_calls (ended with: '..tostring(result):sub(1,200)..')')
 
