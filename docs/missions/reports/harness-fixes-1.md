@@ -1,11 +1,25 @@
-# harness-fixes-1 — six items, measured at base, each with the commit that answers it
+# harness-fixes-1 — six items, each with the commit that answers it, and what the review corrected
 
-Base: `ac7717e0` (origin/main). Branch `change/harness-fixes-1`, five commits, never pushed.
-Verified on this node (avell) only. Fast path green in this tree: `fast path ok (51 checks, 0 skipped, 356s)`,
-result ledger `/home/victor/wasm-agent/checkout/.git/worktrees/wt48/wa-fast-result.json` (env root
-`…/harness-fixes-1/wt`, commit `ad2ee462`), with both new/changed Lua rows recorded `pass`:
-`scripts/test-operation-survives-turn.lua` 5721 ms and `scripts/test-no-silent-stops.lua` 2089 ms.
+Base: `ac7717e0` (origin/main). Branch `change/harness-fixes-1`, never pushed. Built and verified on
+this node (avell) only.
 
+**Read the corrections section first if you read anything.** My first round got items 1–3 wrong: item 1
+missed the measured call shape, and items 2–3 were called "already fixed at base" on the strength of a
+test that passes on base — which proves the test was weak, not that the node was fixed, because avell
+**runs the base binary**. Round 2 (the review) re-measured all three from the rel-native transcript and
+fixed them.
+
+## Commits
+
+| item | commit | what it does |
+| --- | --- | --- |
+| 6 | `35029ffe` | deploy swap fixture carries the provenance line its block installs from |
+| 1 | `d1d4d0f7` | a wait is recognised by its ANSWER; a repeat needs no new observation |
+| 5 | `e3844211` | an unknown field on `operation start` is refused by name |
+| 4 | `ab9eab4c` | a worktree failure names git's verdict, its exit code and the command |
+| — | `ad2ee462` | the end-to-end turn/operation proof (a regression guard; see the correction) |
+| 2 | `d5a98f03` | the run lease is released BEFORE the failure is signalled |
+| 3 | `15e7de31` | a second process reattaches to its session's live operations |
 ## Items and commits
 
 ### Item 6 — `scripts/test-sentinel-service-deploy.cjs` red on main — `35029ffe`
@@ -76,44 +90,56 @@ git's stderr with exit 128, a host refusal with no streams, an unreadable host a
 empty stderr, and a failure with **neither** stream — each asserting a non-empty `observed` naming the
 verdict, the code and the command. The row passes in the fast path (`25866 ms`).
 
-### Items 2 and 3 — already released at base — `ad2ee462`
+### Items 2 and 3 — both were REAL, and my first report got this wrong — `d5a98f03`, `15e7de31`
 
-**Both premises were stale; re-measured at base in a separate worktree (`/tmp/base-hf1` at `ac7717e0`), never
-`git stash`:**
+**Correction.** My first report claimed both were already fixed at base on the strength of
+`ad2ee462`'s end-to-end test, which passed on a base worktree. That reasoning was wrong, and the
+review named why: **avell runs the base binary**, so both incidents happened ON BASE. A test that
+passes there proves the test is weak, not that the node is fixed. The earlier `ad2ee462` claim is
+withdrawn; the test it added is kept as a regression guard, labelled as such.
 
-* Item 2 (a failed turn keeps the session lease → `resource_busy` on resume): **already fixed at base**.
-  `lua/core/agent.lua:1820` releases the run claim on every exit path (the 18/11 item-5 fix). An operation
-  the turn started keeps running and does **not** hold the lease: the lease is the run's admission
-  (`session:<id>` released by `finish`), not the operation's.
-* Item 3 (result lost when the starting session detaches): the **loss** does not happen while the node
-  process lives — the registry is process-global, so after a resume the same session lists the operation,
-  awaits it by id and reads its stdout. `operation_owner_not_attached` is reserved for the genuinely
-  unknowable case (a fresh `Manager` reading `state.json` for work whose owner process is gone) and
-  correctly says unknown rather than inventing a result. `rust/wa-operation/src/tests.rs:613`
-  (`cursor_read_and_restart_do_not_reexecute`) pins that shape: a fresh `Manager` reading a
-  `{"state":"running","settled":false}` row answers `outcome_unknown`. Note the error STRING itself
-  (`operation_owner_not_attached`, `rust/wa-operation/src/lib.rs:934`) has **no direct assertion** at base —
-  only the `outcome_unknown` state is pinned. I did not add one; that is a real gap, named rather than hidden.
-  This change does not touch that path.
+**Item 2 (`d5a98f03`) — the run lease was released AFTER the failure was signalled.** The release was
+unconditional but sat after `run_failure.handle`, which records the failure, publishes it on the
+durable bus and schedules a wake: over a minute on that node. For that window the session was still
+claimed by a run that had already ended, which is exactly the 22:53:18Z refusal and the 22:54:33Z
+success. Fixed by ordering: mark uncertainty, release, then record and announce.
 
-What `ad2ee462` adds is the missing end-to-end proof: `scripts/test-operation-survives-turn.lua`, 16 checks
-through the real host and the real operation manager (never a fake) — run 1 claims the lease and starts a
-supervised operation that outlives it; the turn ends while it still runs; the next run of the same session
-is admitted (no `resource_busy`); the operation records the **session**; the resumed run lists it, awaits
-it by id and reads its own stdout marker; another session is still refused `operation_not_yours`; and the
-measured shape itself — a turn that **fails on a stalled provider** after starting a long operation leaves
-the session free.
+Proved by `scripts/test-run-lease-order.lua` (4 checks), which hooks `host.resource` — the one
+process-wide seam; hooking a module cannot work here because `rawequal(dofile(x), dofile(x))` is
+**false** in this node, so every load is a fresh table (measured). At the release it reads the
+session's durable rows: release-first means no `run_failed` row exists yet, and the row must appear
+afterwards so a never-recorded failure cannot pass. `scripts/test-run-lease-order.sh` is the negative
+control: it reverts the order, requires the row to fail **by exit code**, and restores the file. Note
+the control's own first version was wrong — it grepped for the row's `ok ...` line, which a failing row
+still prints; the exit code is the only honest judge.
 
-Honest limit: **this test passes at base too**, so it is a regression guard, not a fix. It fails if either
-the release or the ownership regresses. Reported as measured, not as work done.
+**Item 3 (`15e7de31`) — a new process declared every operation it did not remember `outcome_unknown`.**
+`snapshot()`'s disk fallback never checked whether the owner was alive, so a resumed turn could not
+await its session's live work or read its final result. It now reads the owner's lease file (held with
+`BEGIN EXCLUSIVE` for the process's life): settled → its own record is the result; lease still held →
+`reattached: true` with the owner's state and readable streams; lease free → the old
+`operation_owner_not_attached`. Anything undecidable answers dead — unknown is not yes.
 
+Proved across a real process boundary by `a_fresh_process_reattaches_to_live_work_and_spares_dead_work`
+with `operation_owner_helper`: a fresh `Manager` in another process sees `reattached`, reads the
+operation's own stdout (`reattach-marker`), awaits it by id, and answers differently once the owner is
+killed. Reverting only the `snapshot` branch to base makes that test fail (`left: true, right: false`).
+
+### On `scripts/test.sh:233` — it is NOT Windows-only
+
+The review asked me to confirm whether the sentinel row sits in a Windows-only section. Measured: it
+does **not**. The Windows block opens at line 214 (`if [ "${OS:-}" = "Windows_NT" ]`) and closes with
+`fi` at line 231; `gate_run node scripts/test-sentinel-service-deploy.cjs` is line **233**, outside it,
+so the gate runs that row on Linux too. Item 6's fix is therefore exercised by the gate on this
+machine — it was genuinely red here, and it is genuinely green here now (`17 checks`, exit 0).
 ## Brief premises that were wrong
 
 | Brief said | Measured |
 | --- | --- |
 | item 6 is a code bug in the deploy swap | the code is right; the **test fixture** was stale after `936880f9` |
-| items 2 and 3 are open defects | both already fixed at base; only the end-to-end proof was missing |
+| items 2 and 3 are open defects | **true** — my first report wrongly called them fixed; see the correction above |
 | `test-no-silent-stops.lua` is a gated row | it is a fast-path row by default; **not** referenced in `scripts/test.sh` |
+| (review) `test.sh:233` may be Windows-only | it is **not**: the Windows block ends at line 231, and the row is line 233 |
 
 ## Pre-existing failures (not mine)
 
