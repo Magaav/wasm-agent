@@ -80,8 +80,11 @@ fn dependency_lookup_names_are_literal_and_repeated_callers_keep_provenance(){
 #[test]
 fn deep_unicode_cache_paths_preserve_sqlite_locking_and_read_only_snapshots(){
  let f=Fixture::new("long-cache");f.write("a.lua","function exact() end\n");
- let mut dir=f.root.parent().unwrap().join("long-cache");for _ in 0..4{dir=dir.join("segment-".repeat(12));}
- let db=dir.join("graph-λ.db");assert!(db.to_string_lossy().len()>400);
+ // Deep enough to cross 400 bytes (the property under test) and no deeper: SQLite refuses a path past its
+ // 512-byte SQLITE_MAX_PATHNAME, so a FIXED depth failed whenever the temp dir itself was long (gate 20/11,
+ // land65: TMPDIR under the run's scratch root added ~13 bytes and the fixed four segments reached ~510).
+ let mut dir=f.root.parent().unwrap().join("long-cache");while dir.join("graph-λ.db").to_string_lossy().len()<=400{dir=dir.join("segment-".repeat(4));}
+ let db=dir.join("graph-λ.db");assert!(db.to_string_lossy().len()>400);assert!(db.to_string_lossy().len()<=440,"the fixture stays inside SQLite's path limit");
  let mut writer=Store::open(&db).unwrap();writer.index(&f.root,false).unwrap();
  let reader=Store::open_readonly(&db).unwrap();reader.begin_read().unwrap();assert!(!reader.query("exact",10).unwrap().is_empty());
  assert!(reader.conn.execute("DELETE FROM nodes",[]).is_err(),"long-path support must not grant write flags");

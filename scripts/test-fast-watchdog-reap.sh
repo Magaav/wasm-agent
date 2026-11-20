@@ -15,7 +15,9 @@ ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 cd "$ROOT" || exit 2
 # THIS TEST OWNS ITS DIRECTORY AND NEVER DELETES THE ROOT IT WAS GIVEN (review item 2).
 . scripts/lib/scratch-home.sh
-WA_ROOT="${WA_TEST_ROOT:-$(dirname "$ROOT")}"
+# The shared scratch root, never the repo's parent: a land tree lives INSIDE the operator store
+# (~/.wasm-agent/land/<id>/tree), and its parent is refused as the real node (gate 20/11, land65).
+WA_ROOT="${WA_TEST_ROOT:-$(wa_scratch_root wa-fast-watchdog-reap)}" || exit 2
 SCRATCH="$(wa_test_workdir "$WA_ROOT" test-fast-watchdog-reap)" || exit 2
 mkdir -p "$SCRATCH/home" || exit 2
 cleanup() { local s=$?; rm -rf "$SCRATCH"; exit $s; }
