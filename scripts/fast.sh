@@ -617,14 +617,22 @@ else
   # reason, on any machine whose HOME is the operator's. The gate runs them with HOME=$GATE_HOME; this
   # runner gave Rust rows no home at all. Each row now gets a scratch HOME of its own, and CARGO_HOME and
   # the target dir still point where they did, so `--offline` keeps resolving the same registry cache.
+  # CARGO_HOME and RUSTUP_HOME are captured from the REAL environment before HOME changes, so --offline
+  # keeps resolving the same registry and toolchain (review r3: the earlier comment claimed this and the
+  # code did not do it).
+  real_cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+  real_rustup_home="${RUSTUP_HOME:-$HOME/.rustup}"
   rust_home=''
   if command -v mktemp >/dev/null 2>&1; then rust_home=$(mktemp -d "$work/home.XXXXXX" 2>/dev/null || true); fi
   if [ -z "$rust_home" ]; then
-    echo "SKIP: the Rust rows need a scratch HOME (mktemp failed); a row that starts real operations refuses the operator's own"
+    # A SKIP that is recorded, never a silent success. The old line ran `return 0 2>/dev/null || exit 0`
+    # at top level: the whole fast path ended with success and every later row was skipped unannounced
+    # (review r3, B-fast).
+    echo "SKIP: the Rust rows need a scratch HOME and mktemp failed"
+    record_row skip rust 'rust rows' 0 0 0 'mktemp failed: the Rust rows need a scratch HOME and the operator own is refused'
     SKIPPED=$((SKIPPED + 1))
-    return 0 2>/dev/null || exit 0
   fi
-  for crate in $crates; do
+  for crate in $( [ -n "$rust_home" ] && printf '%s' "$crates" ); do
     # THE BUILD, measured as the build the tests themselves need - never a second one. 'cargo test
     # --no-run' in the tests' own profile compiles exactly what the row below runs, and the row then
     # reuses that compile, so the number the module claim rests on is the cost of the crate's test build
@@ -635,11 +643,11 @@ else
     bstart=$(fast_now_ms); build_rc=0
     # The exit code is KEPT, not discarded: a build that failed compiled nothing, and the note must say
     # so rather than print the warm row's sentence under a red one (scripts/lib/build-times.sh).
-    HOME="$rust_home" CARGO_TARGET_DIR="${fast_build_target:-$ROOT/rust/target}" cargo test --no-run --offline $test_args > "$work/build-$crate.log" 2>&1 || build_rc=$?
+    HOME="$rust_home" CARGO_HOME="$real_cargo_home" RUSTUP_HOME="$real_rustup_home" CARGO_TARGET_DIR="${fast_build_target:-$ROOT/rust/target}" cargo test --no-run --offline $test_args > "$work/build-$crate.log" 2>&1 || build_rc=$?
     wa_build_time_record crate "$crate" "$(( $(fast_now_ms) - bstart ))" "$(wa_build_time_note "$work/build-$crate.log" "$build_rc")"
     s=$(date +%s)
     if [ "$crate" = wa-sentinel ]; then
-      HOME="$rust_home" CARGO_TARGET_DIR="${fast_build_target:-$ROOT/rust/target}" cargo test --offline --manifest-path rust/wa-sentinel/Cargo.toml -- --test-threads=1 > "$work/rust-$crate.log" 2>&1
+      HOME="$rust_home" CARGO_HOME="$real_cargo_home" RUSTUP_HOME="$real_rustup_home" CARGO_TARGET_DIR="${fast_build_target:-$ROOT/rust/target}" cargo test --offline --manifest-path rust/wa-sentinel/Cargo.toml -- --test-threads=1 > "$work/rust-$crate.log" 2>&1
     elif [ "$crate" = wa-capabilities ]; then
       # wa-capabilities holds the streaming timeout tests (http_transport's phase budgets: 250 ms for
       # response headers, 500 ms of body silence) next to the agent-core pool's heavy ones. Those
@@ -647,12 +655,12 @@ else
       # of the crate first (the pool's engines, compiles and wasm instances cannot starve them), then
       # the streaming tests alone. Neither run skips anything - the split is the isolation, not a
       # filter on what is proved (docs/KERNEL.md, "A2.3").
-      HOME="$rust_home" CARGO_TARGET_DIR="${fast_build_target:-$ROOT/rust/target}" cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-capabilities \
+      HOME="$rust_home" CARGO_HOME="$real_cargo_home" RUSTUP_HOME="$real_rustup_home" CARGO_TARGET_DIR="${fast_build_target:-$ROOT/rust/target}" cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-capabilities \
         -- --skip http_transport::streaming_timeout_tests > "$work/rust-$crate.log" 2>&1 \
-      && HOME="$rust_home" CARGO_TARGET_DIR="${fast_build_target:-$ROOT/rust/target}" cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-capabilities \
+      && HOME="$rust_home" CARGO_HOME="$real_cargo_home" RUSTUP_HOME="$real_rustup_home" CARGO_TARGET_DIR="${fast_build_target:-$ROOT/rust/target}" cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-capabilities \
         -- http_transport::streaming_timeout_tests >> "$work/rust-$crate.log" 2>&1
     else
-      HOME="$rust_home" CARGO_TARGET_DIR="${fast_build_target:-$ROOT/rust/target}" cargo test --release --offline --manifest-path rust/Cargo.toml -p "$crate" > "$work/rust-$crate.log" 2>&1
+      HOME="$rust_home" CARGO_HOME="$real_cargo_home" RUSTUP_HOME="$real_rustup_home" CARGO_TARGET_DIR="${fast_build_target:-$ROOT/rust/target}" cargo test --release --offline --manifest-path rust/Cargo.toml -p "$crate" > "$work/rust-$crate.log" 2>&1
     fi
     c=$?; ran=$((ran + 1)); ms=$(( ($(date +%s) - s) * 1000 ))
     if [ "$c" = 0 ]; then echo "fast: rust $crate ok ($(( $(date +%s) - s ))s)"; record_row pass rust "rust $crate" "$c" "$ms" 0 ''
