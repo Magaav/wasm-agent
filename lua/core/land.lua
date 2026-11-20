@@ -328,6 +328,16 @@ M.DEFAULT_CHECKS = {
     timeout = 1800, min_tests = 1, detail = "the code-mode Rust tests (wa-capabilities: the seam and quickjs)" },
   { name = "cargo-wa-whatsapp", command = "cargo test --lib --offline", cwd = "rust/components/wa-whatsapp",
     timeout = 1200, min_tests = 1, detail = "the wa-whatsapp component's own crate" },
+  -- Does each test this branch adds or changes actually fail on the code the branch had before its
+  -- non-test changes? A test that still passes there would not have caught the bug it was written for,
+  -- and it blocks the landing BY NAME (19-20/11: three of ten hidden tests did not discriminate, and
+  -- every review of that round carried a test MUST). A branch declared refactor-only is exempt and must
+  -- instead keep its tests green (scripts/test-discriminates.sh). A row this machine could not judge
+  -- (unrevertable, timeout, skipped, environment) is named and does NOT block: exit 0 unless a row is a
+  -- named blocker (1) or the script could not answer at all (76) - review r2 MUST 1.
+  { name = "discrimination", command = "bash scripts/test-discriminates.sh origin/main", timeout = 900,
+    per_test_seconds = 180,
+    detail = "every test the branch adds or changes fails on the code before the change" },
   { name = "prompt-docs", command = "bash scripts/sync-prompt-docs.sh --check", timeout = 600,
     detail = "the generated prompt documents are in sync with the code" },
 }
@@ -391,7 +401,7 @@ M.ESTIMATE_BY_CATEGORY = {
 -- The gate's always-on checks: a plan may never drop these, whatever the paths say, because they are what
 -- makes a green run mean anything (the generated prompt documents, the landing queue's own evidence, the
 -- binary the rows run, the machine-vs-code classifier, and the fast path's result file).
-M.GATE_ALWAYS = { "fast", "prompt-docs" }
+M.GATE_ALWAYS = { "fast", "prompt-docs", "discrimination" }
 -- Checks a plan may ADD when a path touches their subject, with the paths that trigger them. The Rust
 -- crates are already narrowed by `scripts/fast.sh` itself (it tests the crates a change touches), so only
 -- the checks that are NOT inside the fast path are listed here.
@@ -885,6 +895,11 @@ function M.gate_checks(run, options)
   local plan = run.journal.plan
   if not plan or plan.full then return M.DEFAULT_CHECKS, "every check (no narrower set was proved)" end
   local wanted = {}
+  -- The always-on set is a floor, not a suggestion: a plan written before a check existed (or by an
+  -- older tree) must not run less than the gate promises. fast and prompt-docs were already here;
+  -- discrimination joins them because a test that cannot fail on the old code is the failure this
+  -- gate exists to catch, whatever paths the plan happens to name.
+  for _, name in ipairs(M.GATE_ALWAYS) do wanted[name] = true end
   for _, name in ipairs(plan.checks or {}) do wanted[name] = true end
   local list = {}
   for _, check in ipairs(M.DEFAULT_CHECKS) do if wanted[check.name] then list[#list + 1] = check end end
@@ -1547,9 +1562,27 @@ end
 -- absent - `scripts/fast.sh` narrows on `[ -n "${WA_FAST_ROWS:-}" ]` - so a WA_FAST_ROWS inherited from the
 -- environment would narrow a round that wrote no file: a `--full` run would execute less than it said, obeying
 -- somebody else's plan. Every other check runs untouched.
-function M.gate_command(check, rows_file)
-  if check.name ~= "fast" then return check.command end
-  return "WA_FAST_ROWS=" .. (rows_file and quote(rows_file) or "") .. " " .. check.command
+function M.gate_command(check, rows_file, run)
+  if check.name == "fast" then
+    return "WA_FAST_ROWS=" .. (rows_file and quote(rows_file) or "") .. " " .. check.command
+  end
+  -- The discrimination check is the only one whose VERDICT depends on which round it is judging: a
+  -- Refactor-only declaration must be refused in a round of several branches, and the base is whichever
+  -- main this round merged into (incoming/main may contain origin/main). Without these the check judged
+  -- the wrong base and never saw the round at all (review r2, MUST 2 and 3).
+  if check.name == "discrimination" and run and run.journal then
+    local names = {}
+    for _, branch in ipairs(run.journal.branches or {}) do
+      local name = tostring(branch.name or branch.sha or "")
+      if name ~= "" then names[#names + 1] = name end
+    end
+    local command = check.command
+    if #names > 0 then command = command .. " --branches " .. quote(table.concat(names, ",")) end
+    local base = run.journal.base
+    if base and tostring(base) ~= "" then command = command .. " " .. tostring(base) end
+    return command
+  end
+  return check.command
 end
 
 -- <run> <options> -> path, failed, notes: the WA_FAST_ROWS file this round narrows `scripts/fast.sh` with, or
@@ -1646,12 +1679,23 @@ impl.gate = function(run, options)
   for _, check in ipairs(checks) do
     -- The fast check ALWAYS gets the assignment (M.gate_command): the round's file, or an empty value so a
     -- WA_FAST_ROWS inherited from the environment cannot narrow a run that wrote none.
-    local command = M.gate_command(check, rows_file)
+    local command = M.gate_command(check, rows_file, run)
     command = (decorator ~= "" and (decorator .. " " .. quote(command))) or command
     local cwd = check.cwd and (slashes(tree) .. "/" .. check.cwd) or slashes(tree)
     evidence(command_line(check.name, command))
     local started = now()
-    local result = M.exec(command, cwd, check.timeout or 1800)
+    -- A serial per-test budget needs a total that grows with the tests it will run, or a round that
+    -- touches twenty of them times out on the twenty-first and reads as a failure of the change. The
+    -- count is the round's own changed test paths; anything else keeps the check's declared timeout.
+    local budget = check.timeout or 1800
+    if check.per_test_seconds and run.journal and run.journal.plan then
+      local touched = 0
+      for _, path in ipairs(run.journal.plan.files or {}) do
+        if tostring(path):match("^tests?/") or tostring(path):match("test%-") then touched = touched + 1 end
+      end
+      budget = math.max(budget, 300 + check.per_test_seconds * touched)
+    end
+    local result = M.exec(command, cwd, budget)
     local seconds = now() - started
     evidence((result.stdout or "") .. (result.stderr or ""))
     local tests = passed_tests((result.stdout or "") .. (result.stderr or ""))
@@ -1679,7 +1723,7 @@ impl.gate = function(run, options)
       -- Alone, once. No other check runs beside it, so "it passes alone" is a statement about load.
       local retry_started = now()
       evidence(command_line(check.name .. " (alone, after a failure)", command))
-      local retry = M.exec(command, cwd, check.timeout or 1800)
+      local retry = M.exec(command, cwd, budget)
       local retry_tests = passed_tests((retry.stdout or "") .. (retry.stderr or ""))
       evidence((retry.stdout or "") .. (retry.stderr or ""))
       row.retry = { ok = (retry.code or 1) == 0, code = retry.code, seconds = now() - retry_started, tests = retry_tests }

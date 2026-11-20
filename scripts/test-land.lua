@@ -1349,6 +1349,22 @@ must("git -C " .. repo .. " checkout -q " .. rows_ref, "restore the fixture chec
 -- narrows only on a NON-EMPTY WA_FAST_ROWS ([ -n "$WA_FAST_ROWS" ]), so one inherited from the environment
 -- would narrow a --full run that wrote no rows file - a run executing less than it said, obeying somebody
 -- else's plan.
+-- Review r2, MUST 2 and 3: the gate must hand the discrimination check the ROUND it is judging. Without
+-- --branches a Refactor-only line never gets refused in a multi-branch round, and without the round's
+-- base the check re-judges tests against origin/main when this round merged incoming/main instead.
+do
+  local command = land.gate_command({ name = "discrimination", command = "bash scripts/test-discriminates.sh origin/main" },
+    nil, { journal = { base = "deadbeefcafe", branches = { { name = "change/a" }, { name = "change/b" } } } })
+  contains(command, "--branches", "MUST 2: the gate names the round's branches: " .. tostring(command))
+  contains(command, "'change/a,change/b'", "MUST 2: both branch names travel: " .. tostring(command))
+  contains(command, "deadbeefcafe", "MUST 3: the round's base travels, not a hard-coded origin/main: " .. tostring(command))
+  local single = land.gate_command({ name = "discrimination", command = "bash scripts/test-discriminates.sh origin/main" },
+    nil, { journal = { base = "cafe", branches = { { name = "change/one" } } } })
+  contains(single, "change/one", "a single-branch round still names its branch: " .. tostring(single))
+  eq(land.gate_command({ name = "prompt-docs", command = "bash scripts/sync-prompt-docs.sh --check" },
+    nil, { journal = { base = "cafe", branches = {} } }), "bash scripts/sync-prompt-docs.sh --check",
+    "and no other check is touched by the round fields")
+end
 eq(land.gate_command({ name = "fast", command = "bash scripts/fast.sh" }, nil),
   "WA_FAST_ROWS= bash scripts/fast.sh", "no rows file means an EMPTY WA_FAST_ROWS, not an absent one")
 eq(land.gate_command({ name = "fast", command = "bash scripts/fast.sh" }, "/tmp/rows.txt"),
@@ -1368,7 +1384,7 @@ local gate_commands = {}
 -- Only the gate's own checks are answered here (they are held to their command); everything else - the row
 -- inventory the rows file is proved with, the git calls - still runs for real.
 local function is_gate_check(command)
-  for _, marker in ipairs({ "scripts/fast.sh", "scripts/test-codemode-component.sh", "scripts/gate-cargo-codemode.sh", "cargo test", "sync-prompt-docs" }) do
+  for _, marker in ipairs({ "scripts/fast.sh", "scripts/test-codemode-component.sh", "scripts/gate-cargo-codemode.sh", "cargo test", "sync-prompt-docs", "test-discriminates.sh" }) do
     if command:find(marker, 1, true) then return true end
   end
   return false
@@ -1383,6 +1399,8 @@ land.weight_decorator = ""
 eq(land.impl.gate(added_run, {}), true, "a narrowed gate runs")
 eq(gate_commands[1], "WA_FAST_ROWS='" .. land.run_dir("rows-added") .. "/gate-rows.txt' bash scripts/fast.sh",
   "the narrowed gate runs the fast check with the round's rows file (got " .. tostring(gate_commands[1]) .. ")")
+contains(table.concat(gate_commands, "\n"), "scripts/test-discriminates.sh",
+  "the gate runs the discrimination check: a branch whose new test does not discriminate cannot land")
 gate_commands = {}
 eq(land.impl.gate(added_run, { full = true }), true, "a --full gate runs")
 eq(gate_commands[1], "WA_FAST_ROWS= bash scripts/fast.sh",
