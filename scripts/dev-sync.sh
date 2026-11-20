@@ -30,7 +30,7 @@ done
 LABEL="$(git -C "$ROOT" rev-parse --short=12 HEAD 2>/dev/null || echo tree)"
 [ -z "$(git -C "$ROOT" status --porcelain -- lua 2>/dev/null)" ] || LABEL="$LABEL-dirty"
 pack() { tar -C "$ROOT" -cf - lua scripts/lib scripts/lua-swap.sh scripts/replay-events.lua fixtures/events-codeact-turn.json \
-  AGENTS.orchestrator.md AGENTS.subagents.md 2>/dev/null; }
+  AGENTS.orchestrator.md AGENTS.subagents.md AGENTS.omarchy.md AGENTS.sandbox.md 2>/dev/null; }
 case $MODE in
   docker)
     name=${TARGET%%:*}; dir=${TARGET#*:}; [ "$dir" = "$TARGET" ] && dir='$HOME/wa-dev'

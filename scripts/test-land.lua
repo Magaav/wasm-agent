@@ -410,7 +410,8 @@ end
 -- does - the token is never printed by the code under test, and this is the only place it exists.
 local real_exec = land.exec
 local observed = { pushes = 0, main_pushes = 0, publish = 0, signs = 0, ships = 0, builds = 0 }
-local behaviour = { publish_fails = false, release_present = false, omit_sums = false }
+local behaviour = { publish_fails = false, release_present = false, omit_sums = false,
+  gh_authed = true, gh_present = true }
 
 local function with_vault(command)
   if vault_env == "" then return command end
@@ -418,7 +419,14 @@ local function with_vault(command)
 end
 
 land.exec = function(command, cwd, timeout)
-  if command:match("^command %-v gh") then return { code = 0, stdout = "yes\n", stderr = "" } end
+  -- `gh auth status` is part of the check (item 26): a gh that exists and is not signed in is not a
+  -- credential, so the route answers for both halves of the question.
+  if command:match("^command %-v gh") then
+    local binary = behaviour.gh_present ~= false
+    local authed = behaviour.gh_authed ~= false
+    local yes = binary and authed
+    return { code = yes and 0 or 1, stdout = yes and "yes\n" or "no\n", stderr = "" }
+  end
   if command:match("^gh release view") then
     return { code = 0, stdout = (behaviour.release_present and "present\n" or "absent\n"), stderr = "" }
   end
@@ -446,10 +454,37 @@ local deploy_requests = {}
 local fleet = { failing_node = nil, recovered = false, sign_node = "laptop", sign_null = false }
 local sign_calls = 0
 
+local routed_calls = {}
 local function remote_call(selector, capability, args)
   args = type(args) == "table" and args or {}
   if capability == "bash" then
     local command = tostring(args.command or "")
+    -- THE ROUTED WORK (item 26): main and the release are done ON a named node, by that node's own
+    -- account. Recorded here so a case can prove WHERE the work ran, and answered the way that node
+    -- would answer it.
+    local kind = nil
+    if command:find("gh auth status", 1, true) then kind = "gh auth"
+    elseif command:find("refs/heads/main", 1, true) and command:find("push ", 1, true) then kind = "main"
+    elseif command:find("PUBLISH.sh", 1, true) then kind = "publish"
+    elseif command:find("gh release view", 1, true) then kind = "release view" end
+    if kind then routed_calls[#routed_calls + 1] = { node = selector, kind = kind, command = command } end
+    if kind == "gh auth" then
+      local yes = behaviour.gh_present ~= false and behaviour.gh_authed ~= false
+      return { code = yes and 0 or 1, stdout = yes and "yes\n" or "no\n", stderr = "" }
+    end
+    if kind == "release view" then
+      return { code = 0, stdout = (behaviour.release_present and "present\n" or "absent\n"), stderr = "" }
+    end
+    if kind == "publish" then
+      if behaviour.publish_fails then
+        return { code = 1, stdout = "", stderr = "publish_failed: fake gh refused (no token)\n" }
+      end
+      return { code = 0, stdout = "fake gh: release created\n", stderr = "" }
+    end
+    if kind == "main" then
+      local code, out, err = shell(command, repo)
+      return { code = code, stdout = out, stderr = err }
+    end
     if command:find("printenv") then
       -- The signer probe: only a node that sets a vault operator URL answers with one.
       if selector == fleet.sign_node and not fleet.sign_null then
@@ -491,8 +526,14 @@ land.root_dir = journal_root
 land.repo_dir = repo
 land.incoming_remote = "oc-in"
 land.origin_remote = "origin"
+land.SIGNER_VARS = {}        -- see above: the ambient vault is not this row's
 land.remote_call = remote_call
 land.weight_decorator = ""          -- exercised in its own check below; the rows run unweighted and fast
+-- NO AMBIENT VAULT. The signer question is asked of the process environment first, and a NODE that runs this
+-- row exports WASM_AGENT_VAULT_OPERATOR_URL for its own vault: the row then signed "locally" against a vault
+-- it does not own, and every case that names a signer node failed on that machine and nowhere else
+-- (measured 19/11 on avell). The row's own vault is the scratch one above, so the ambient names are cleared
+-- HERE - the module reads this table (M.SIGNER_VARS) and nothing else decides who signs.
 land.sleep = function() end         -- the deploy poll must not cost the suite five seconds a lap
 -- The reviewer's binary: the landing starts `wa eval reviewer` as a process of its own, so the seam is WHERE that
 -- process comes from, and everything else about the review (the door, `--json`, the join) stays real code.
@@ -1455,6 +1496,281 @@ contains(report_text, "total | 2m30s", "it states the total in the same units as
 contains(report_text, "journal average", "and the journal's average to compare with")
 contains(report_text, "deploy order: canary work -> parallel mail+nextcloud -> account openclaw",
   "the report names the deploy's waves")
+
+local function cases_19_11()
+  -- THE 19/11 CASES LIVE IN THEIR OWN FUNCTION. Lua allows 200 locals per function and this row was
+  -- already at the limit; the cases share the outer fixtures as upvalues and add no register to the
+  -- function that runs the whole row.
+-- ---------------------------------------------------------------- case 24: a bare --resume finds the run
+-- `wa land --resume` with no run named continues the newest unfinished run. It did not: the listing was
+-- `ls -1dt '<root>'/*/journal.json`, and a glob inside quotes is never expanded, so the answer was always
+-- "nothing to resume" with a stopped run sitting in the directory (item 24).
+setup_fixture()
+land.candidates = function() return {} end
+write_file(fixture .. "/land-gate/gate-red.sh", "#!/usr/bin/env bash\nexit 1\n")
+must("chmod +x " .. fixture .. "/land-gate/gate-red.sh", "the red gate runs")
+local red_checks = function()
+  return { { name = "fast", command = "bash " .. fixture .. "/land-gate/gate-red.sh", timeout = 60 } }
+end
+local stopped_code = land.run({ run = "case24", signer = "local", ring = SOLO_RING, branches = { "change/one" }, checks = red_checks() })
+eq(stopped_code, 1, "the red gate stops the round")
+eq(journal_of("case24").result, "stopped", "and the run is recorded stopped")
+local resumed_code = land.run({ resume = true, checks = standard_checks() })
+eq(resumed_code, 0, "a bare --resume continues the stopped run and finishes it")
+eq(journal_of("case24").result, "done", "the run it continued is the one on disk")
+contains(step_of("case24", "gate").detail or "", "passed", "the gate of the continued run is the green one")
+
+-- ---------------------------------------------------------------- case 25: the landing branch is free
+-- A landing leaves `land<N>/final` on the incoming repository. A second landing that picks the same N pushes
+-- on top of another round's ref, and the push step reads that ref back expecting its own commit (item 25).
+setup_fixture()
+must("git -C " .. repo .. " push -q oc-in main:refs/heads/land7/final", "another round already used land7")
+local number_code = land.run({ run = "case25", signer = "local", ring = SOLO_RING, branches = { "change/one" }, checks = standard_checks() })
+eq(number_code, 0, "a round lands while land7/final is on the incoming remote")
+eq(journal_of("case25").land_branch, "land8/final", "the number is taken from the remote too, never reused")
+
+-- ---------------------------------------------------------------- case 26: main and publish on a named node
+-- The GitHub credential is on ONE node; --account names it, and the push and the release are done there
+-- (`gh auth status` is what proves the credential, not `command -v gh`).
+setup_fixture()
+land.candidates = function() return {} end
+routed_calls = {}
+behaviour.gh_authed = true
+behaviour.gh_present = true
+local account_code = land.run({ run = "case26", signer = "local", ring = SOLO_RING, account = "laptop", branches = { "change/one" }, checks = standard_checks() })
+eq(account_code, 0, "a round with --account lands")
+local account_journal = journal_of("case26")
+eq(account_journal.main_account, "laptop", "main was fast-forwarded on the named node")
+eq(must("git -C " .. repo .. " ls-remote origin refs/heads/main"), account_journal.tree_commit .. "\trefs/heads/main",
+  "and the source of truth is at the landed tip")
+local main_on_node, publish_on_node = false, false
+for _, call in ipairs(routed_calls) do
+  if call.node == "laptop" and call.kind == "main" then main_on_node = true end
+  if call.node == "laptop" and call.kind == "publish" then publish_on_node = true end
+end
+ok(main_on_node, "the main push ran on laptop, not here")
+ok(publish_on_node, "the release was created on laptop")
+eq(account_journal.publish.account, "laptop", "the journal names the account that published")
+-- A `gh` that exists but is not signed in is not a credential.
+setup_fixture()
+routed_calls = {}
+behaviour.gh_authed = false
+local noauth_code = land.run({ run = "case26b", signer = "local", ring = SOLO_RING, account = "laptop", branches = { "change/one" }, checks = standard_checks() })
+eq(noauth_code, 1, "a signed-out gh stops the publish")
+eq(step_of("case26b", "publish").error, "publish_needs_credentials", "the refusal is named")
+contains(step_of("case26b", "publish").observed or "", "laptop", "and it names the node whose gh is not signed in")
+local published_anyway = false
+for _, call in ipairs(routed_calls) do if call.kind == "publish" then published_anyway = true end end
+ok(not published_anyway, "nothing was published by a node that is not signed in")
+behaviour.gh_authed = true
+
+-- ---------------------------------------------------------------- case 27: mark a step done out of band
+-- A release created by hand must reach the journal by a VERB that re-verifies it, not by editing
+-- journal.json. `wa land mark <step> --evidence <file>`: no evidence, no mark; a claim the world does not
+-- support, no mark; a verified claim, a mark with `marked` and the evidence path on the step (item 27).
+setup_fixture()
+behaviour.release_present = true
+local quiet_exec = land.exec
+land.exec = function(command, cwd, timeout)
+  if command:match("^command %-v gh") then return { code = 0, stdout = "no\n", stderr = "" } end
+  return quiet_exec(command, cwd, timeout)
+end
+local blocked_code = land.run({ run = "case27", signer = "local", ring = SOLO_RING, branches = { "change/one" }, checks = standard_checks() })
+eq(blocked_code, 1, "the round stops where gh is missing")
+eq(step_of("case27", "publish").state, "failed", "at the publish step")
+local evidence_path = fixture .. "/publish-evidence.txt"
+write_file(evidence_path, "release node-... created by hand on the account node\n")
+local no_evidence_ok, no_evidence = land.mark("case27", "publish", nil, {})
+eq(no_evidence_ok, false, "a mark with no evidence is refused")
+eq(no_evidence.error, "mark_evidence_required", "by name")
+local missing_ok, missing_answer = land.mark("case27", "publish", fixture .. "/absent.txt", {})
+eq(missing_ok, false, "a mark naming a file that does not exist is refused")
+eq(missing_answer.error, "mark_evidence_missing", "by name")
+-- The world does not support the claim yet: the release is not there.
+behaviour.release_present = false
+local false_ok, false_answer = land.mark("case27", "publish", evidence_path, {})
+eq(false_ok, false, "a mark the world contradicts is refused")
+eq(false_answer.error, "mark_not_verified", "and the refusal says the claim could not be verified")
+eq(step_of("case27", "publish").state, "failed", "the step is untouched by a refused mark")
+-- Now it is there, and the mark records it - with the evidence path and the flag.
+behaviour.release_present = true
+local mark_ok, mark_answer = land.mark("case27", "publish", evidence_path, {})
+ok(mark_ok, "a verified mark is recorded: " .. tostring(mark_answer and (mark_answer.error or mark_answer.detail) or ""))
+local marked_step = step_of("case27", "publish")
+eq(marked_step.state, "done", "the step is done in the journal")
+eq(marked_step.marked, true, "and it says it was marked")
+eq(marked_step.mark_evidence, evidence_path, "naming the file that proves it")
+local marked_journal = journal_of("case27")
+eq(marked_journal.publish and marked_journal.publish.tag, "node-" .. tostring(marked_journal.tree_commit):sub(1, 12),
+  "the publish record the step would have written is written")
+local again_ok, again = land.mark("case27", "publish", evidence_path, {})
+eq(again_ok, false, "marking a finished step again is refused")
+eq(again.error, "mark_already_settled", "by name")
+land.exec = quiet_exec
+
+-- ---------------------------------------------------------------- case 28: the start options are the run's
+-- A resume is the same round continued, so the ring and --no-deploy it started with still hold: measured
+-- 18/11, a resumed round took the DEFAULT ring and deployed a node the operator had left out (item 28).
+setup_fixture()
+deploy_requests = {}
+write_file(fixture .. "/land-gate/gate-red.sh", "#!/usr/bin/env bash\nexit 1\n")
+must("chmod +x " .. fixture .. "/land-gate/gate-red.sh", "the red gate runs")
+local one_node_ring = { { node = "work", mode = "tree" } }
+eq(land.run({ run = "case28", signer = "local", ring = one_node_ring, no_deploy = false, full = true,
+  branches = { "change/one" }, checks = red_checks() }), 1, "the round stops at the red gate")
+local started = journal_of("case28").start
+ok(type(started) == "table", "the journal stores the start options")
+eq(started.full, true, "--full is one of them")
+eq(started.ring and started.ring[1] and started.ring[1].node, "work", "and the ring, resolved")
+deploy_requests = {}
+eq(land.run({ resume = true, checks = standard_checks() }), 0, "the resume finishes the round")
+local rang = {}
+for _, request in ipairs(deploy_requests) do rang[request.node] = true end
+ok(rang["work"], "the resumed round deployed the canary")
+ok(not rang["openclaw"] and not rang["mail"] and not rang["nextcloud"],
+  "and only the ring it started with - not the default ring of four nodes")
+-- A node an operator pinned is never moved by a ring silently.
+setup_fixture()
+deploy_requests = {}
+local pins = dofile("lua/core/pins.lua")
+pins.set({ node = "work", kind = "operator", state = "active", reason = "operator test pin" })
+local pinned_code = land.run({ run = "case28b", signer = "local", ring = one_node_ring, branches = { "change/one" }, checks = standard_checks() })
+eq(pinned_code, 1, "a ring that would move a pinned node stops")
+eq(step_of("case28b", "deploy").error, "node_pinned", "the refusal is the pin, by name")
+contains(step_of("case28b", "deploy").detail or "", "active operator pin", "and it says the node is pinned")
+local asked_pinned = false
+for _, request in ipairs(deploy_requests) do if request.node == "work" then asked_pinned = true end end
+ok(not asked_pinned, "nothing was asked of the pinned node")
+pins.clear("work", { kind = "released", reason = "test done" })
+
+-- ---------------------------------------------------------------- case 18: one row inventory
+-- The planner and scripts/fast.sh ask the SAME function for the rows a narrowed run may execute; a planner
+-- with its own idea of runnable asks for a row the runner refuses, which is a round gated on zero tests.
+local inventory = land.row_inventory(tree_root)
+local fast_rows = must("bash -c '. ./scripts/lib/fast-rows.sh && wa_fast_row_candidates'", "the runner's rows", tree_root)
+local fast_set, planner_set = {}, {}
+for row in tostring(fast_rows):gmatch("[^\r\n]+") do fast_set[row] = true end
+for _, row in ipairs(inventory.list or {}) do planner_set[row] = true end
+local only_planner, only_fast = 0, 0
+for row in pairs(planner_set) do if not fast_set[row] then only_planner = only_planner + 1 end end
+for row in pairs(fast_set) do if not planner_set[row] then only_fast = only_fast + 1 end end
+eq(only_planner, 0, "every row the planner would request is a row the runner executes")
+eq(only_fast, 0, "and every row the runner executes is one the planner knows")
+-- ---------------------------------------------------------------- case 30: the pins move in a compiled round
+-- A compiled round that ALSO moves components.lock builds the components bundle inside the `artifacts` step,
+-- before any node takes the lock (item 28): building it afterwards describes a lock the fleet already reads,
+-- and a node that takes both would take the new pins with the old bundle. On the base commit
+-- `also_components` does not exist at all, so nothing marks such a round. The classifier and the row
+-- inventory are the REAL ones - this asks the tree the row runs from, not a fixture.
+local pinned_plan = land.build_plan({ id = "case30", journal = { repo = tree_root } },
+  { "components.lock", "rust/Cargo.toml" })
+eq(pinned_plan.category, "compiled", "a compiled change that also moves the pins is a compiled round")
+contains(tostring(pinned_plan.steps.artifacts.also_components or ""), "components.lock",
+  "and its artifacts step says the components bundle is built with the node release")
+local plain_plan = land.build_plan({ id = "case30b", journal = { repo = tree_root } }, { "rust/Cargo.toml" })
+eq(plain_plan.category, "compiled", "a compiled change that moves no pin is still compiled")
+eq(plain_plan.steps.artifacts.also_components, nil, "and it builds no components bundle")
+-- ------------------------------------------------ case 31: a Lua-only round still ships a release for a
+-- release-installed node (review r1 #61). A node installed FROM a release has no checkout, so a round that
+-- skipped artifacts/ship/publish left it on its old binary with nothing to install - while the plan said
+-- "done". The plan reads the RING, not a constant: the same paths plan differently when a node in the ring
+-- installs a tree instead.
+local lua_paths = { "lua/core/land.lua" }
+local release_ring = { { node = "nextcloud", mode = "release" } }
+local release_plan = land.build_plan({ id = "case31", journal = { repo = tree_root } }, lua_paths, nil, release_ring)
+eq(release_plan.category, "lua-scripts-only", "a Lua-only change is still a Lua-only round")
+eq(release_plan.steps.artifacts.kind, "node-release",
+  "and its artifacts step builds a NODE RELEASE: the ring has a node that cannot deploy a tree")
+eq(release_plan.steps.artifacts.action, "run", "the artifacts step runs")
+eq(release_plan.steps.ship.action, "run", "the release is shipped")
+eq(release_plan.steps.publish.action, "run", "and published")
+contains(tostring(release_plan.steps.artifacts.why or ""), "nextcloud",
+  "the plan names the node that forced it")
+contains(tostring(release_plan.steps.deploy.why or ""), "nextcloud:release",
+  "and the deploy says which node takes the release")
+local tree_ring = { { node = "work", mode = "tree" } }
+local tree_plan = land.build_plan({ id = "case31b", journal = { repo = tree_root } }, lua_paths, nil, tree_ring)
+eq(tree_plan.steps.artifacts.kind, "lua-tree", "a ring of tree nodes keeps the Lua-tree record")
+eq(tree_plan.steps.ship.action, "skip", "and ships no node release")
+eq(tree_plan.steps.publish.action, "skip", "and publishes none")
+eq(land.build_plan({ id = "case31c", journal = { repo = tree_root } }, lua_paths, nil, nil).steps.artifacts.kind and
+  land.build_plan({ id = "case31c", journal = { repo = tree_root } }, lua_paths, nil, nil).steps.ship.action,
+  "skip", "no ring named: the configured ring decides, and it is all tree nodes")
+-- ------------------------------------------- case 32: a release-mode ring node, signed through a coordinator
+-- (review r1 must 3). The e2e above uses SOLO_RING and signer=local, so no case had ever driven a ring
+-- entry whose mode is release - the one mode that exists for a node with no checkout - nor a signer that
+-- is a NAMED NODE rather than this machine. Both are asserted from the journal and from what the stub node
+-- was actually asked: a plan that claims the mode and a deploy that sends tree would read the same in the
+-- journal otherwise.
+setup_fixture()
+land.candidates = function() return {} end
+behaviour.gh_authed, behaviour.gh_present, behaviour.release_present = true, true, false
+routed_calls, deploy_requests = {}, {}
+local mixed_ring = { { node = "work", mode = "tree" }, { node = "nextcloud", mode = "release" } }
+local release_code = land.run({ run = "case32", signer = "laptop", account = "laptop", ring = mixed_ring,
+  branches = { "change/one" }, checks = standard_checks() })
+eq(release_code, 0, "a round with a release-mode ring node and a node signer lands")
+local release_journal = journal_of("case32")
+eq(release_journal.result, "done", "the journal says done")
+-- The deploy asked the release node for release, not for the default mode: the mode travels to the node.
+local asked_modes = {}
+-- Read from the JOURNAL's own deploy rows: what the round recorded it asked of each node. The stub's
+-- call list is not used, because a later setup_fixture in this file clears it.
+for _, row in ipairs(release_journal.deploy or {}) do asked_modes[tostring(row.node)] = tostring(row.mode) end
+eq(asked_modes["nextcloud"], "release", "the release-mode node was asked for a release install")
+eq(asked_modes["work"], "tree", "and the tree node was asked for a tree deploy")
+ok(sign_calls > 0, "the sign step ran on the coordinator node, where the vault is", tostring(sign_calls))
+local main_there = false
+for _, call in ipairs(routed_calls) do
+  if call.node == "laptop" and call.kind == "main" then main_there = true end
+end
+ok(main_there, "and main was fast-forwarded there too")
+contains(tostring(((release_journal.steps or {}).sign or {}).detail or ""), "signed on laptop",
+  "the journal says the release was signed on the coordinator node")
+ok(release_journal.artifacts and release_journal.artifacts.key_id ~= nil,
+  "and the release carries the key it was signed with", tostring(release_journal.artifacts and release_journal.artifacts.key_id))
+-- A release-mode node is NEVER silently deployed as a tree: an unknown mode is refused by name.
+setup_fixture()
+deploy_requests = {}
+local bad_ring = { { node = "nextcloud", mode = "relase" } }
+local bad_code = land.run({ run = "case32b", signer = "local", ring = bad_ring, branches = { "change/one" },
+  checks = standard_checks() })
+eq(bad_code, 1, "a ring naming an unknown mode stops the round")
+eq(step_of("case32b", "deploy").state, "failed", "at the deploy")
+contains(tostring(step_of("case32b", "deploy").detail or ""), "mode_unknown",
+  "and the node refuses it by name rather than deploying the default")
+-- ---------------------------------------------------------------- case 29 (end to end): one command, no hand
+-- steps. A fixture land - scratch incoming repository, fake gh, scratch vault - runs from collect to report
+-- with nothing done by hand: every effect is either done by the machine or skipped WITH A REASON, no step
+-- carries `marked` (nothing needed an out-of-band verb), and the report it wrote says done (the mission's
+-- done-when).
+setup_fixture()
+land.candidates = function() return {} end
+behaviour.gh_authed, behaviour.gh_present, behaviour.release_present = true, true, false
+routed_calls = {}
+local e2e_code = land.run({ run = "case29", signer = "local", account = "laptop", ring = SOLO_RING,
+  branches = { "change/one", "change/two" }, checks = standard_checks() })
+eq(e2e_code, 0, "a fixture land runs collect -> report and answers zero")
+local e2e = journal_of("case29")
+eq(e2e.result, "done", "the journal says done")
+for _, name in ipairs(land.STEPS) do
+  local state = (e2e.steps or {})[name] and e2e.steps[name].state or "pending"
+  ok(state == "done" or state == "skipped",
+    "step " .. name .. " is done or skipped with a reason (it is " .. tostring(state) .. ")")
+  if state == "skipped" then
+    contains(tostring(e2e.steps[name].detail or ""), "skipped", "the skip of " .. name .. " says why")
+  end
+  ok(not (e2e.steps or {})[name] or e2e.steps[name].marked ~= true,
+    "no step of an unattended round was marked out of band (" .. name .. ")")
+end
+local e2e_report = read_file(land.report_path("case29")) or ""
+contains(e2e_report, "result: **done**", "the report says the round is done")
+contains(e2e_report, "## steps", "and carries the step table")
+ok(e2e.main_account == "laptop", "main was fast-forwarded by the account node, not by hand")
+eq(e2e.publish and e2e.publish.account, "laptop", "and the release was created by that node")
+end
+
+cases_19_11()
 
 -- ---------------------------------------------------------------- case 17: the CLI
 

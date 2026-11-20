@@ -1538,9 +1538,19 @@ pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<V
                 return Err("invalid_wait_for:expected_command_or_settled".into());
             }
             let tool = args["tool"].as_str().filter(|name| !name.is_empty()).unwrap_or("operation");
+            // THE WAIT IS HONOURED, and it is BOUNDED (verification r2, MUST 3).
+            //
+            // This loop used to ignore wait_ms entirely: it returned only when the operation settled, so a
+            // relayed await held the relay connection and a peer slot until the RELAY deadline (~35 s) and
+            // then reported a timeout - the held-slot pattern of the 19/11 storm. wait_ms is the caller's
+            // own bound, clamped to the operation tool's documented maximum (10 s) and defaulting to 1 s;
+            // past it the answer is the state as it stands, which is exactly what action "wait" answers.
+            let budget = Duration::from_millis(args["wait_ms"].as_u64().unwrap_or(1000).min(10_000));
+            let started = std::time::Instant::now();
             loop {
+                let left = budget.saturating_sub(started.elapsed());
                 let state = manager()
-                    .wait(id, Duration::from_millis(250))
+                    .wait(id, left.min(Duration::from_millis(250)))
                     .map_err(|e| e.to_string())?;
                 progress_tick(&state, tool);
                 if state["settled"] == true {
@@ -1564,6 +1574,11 @@ pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<V
                     return Ok(json!({"operation_id":id,"ok":false,"settled":false,
                         "error":"operation_supervisor_overdue","outcome":"unknown",
                         "note":"No replay or inferred success. Inspect or explicitly cancel/recover."}));
+                }
+                if started.elapsed() >= budget {
+                    // The caller's own wait is over: answer the state as it stands. A caller that wants to
+                    // keep watching asks again, and no call holds a relay connection while it waits.
+                    return Ok(state);
                 }
                 crate::serve::beat();
             }
@@ -2900,5 +2915,160 @@ exit 0
         assert!(refused.starts_with("vault_approval_native_not_covered:"), "{refused}");
         let _ = std::fs::remove_file(&outside);
         let _ = std::fs::remove_file(&runtime);
+    }
+}
+
+/// MUST 3 (review r1): the relay's deadline must not kill ADOPTED work.
+///
+/// The relay stamps the caller's deadline and the node installs it as this run's cancel flag
+/// (serve::install_relay_context). The FOREGROUND `bash` path observes that flag and cancels its own
+/// operation (operations.rs, "A cancelled run or child cancels its operation too"); the adoption path
+/// this mission added is `control("start")`, which is detached and must survive it.
+///
+/// This drives the REAL flag through the production seam (host::set_run_cancel_probe +
+/// serve::test_set_run_cancel, the same pair subagents' cancel test uses) and asserts three things:
+/// the flag is live in this process (foreground IS cancelled by it - the old bug), the adopted start is
+/// NOT cancelled by it, and the command's marker holds exactly ONE line, so nothing was re-run.
+///
+/// Isolation: `manager()` roots its records under $HOME, which is a OnceLock - so this test REFUSES to
+/// run unless HOME is a scratch/temp directory, and scripts/test.sh runs it with HOME=$GATE_HOME.
+#[cfg(test)]
+mod adoption_survives_the_relay_deadline {
+    use super::*;
+    use crate::host::shell_config;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    fn scratch_home_or_refuse() -> std::path::PathBuf {
+        let home = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default());
+        let text = home.to_string_lossy().to_string();
+        let scratch = text.contains("tmp") || text.contains("temp") || text.contains("scratch")
+            || text.contains("TMP");
+        let real = text.ends_with("/.wasm-agent");
+        assert!(scratch && !real,
+            "refusing to run: this test starts real operations, so HOME must be a scratch or temp \
+             directory and never the node's own ~/.wasm-agent (got {text}); scripts/test.sh runs it \
+             with HOME=$GATE_HOME");
+        home
+    }
+
+    #[test]
+    fn an_adopted_operation_survives_the_relay_deadline_and_runs_once() {
+        let home = scratch_home_or_refuse();
+        let marker = home.join("adoption-marker.txt");
+        std::fs::write(&marker, "").expect("marker");
+        let marker_text = marker.to_string_lossy().to_string();
+        let shell = shell_config();
+        let session = "relay:review-test".to_string();
+
+        // The production serve layer registers this probe before a turn; here the test registers it and
+        // flips the same thread-local flag the probe reads, so the REAL host check is what runs.
+        // THE REAL RELAY ENTRY POINT, not a seam beside it (verification r2, SHOULD): this is the exact
+        // call the serve layer makes for a relayed request (serve.rs, install_relay_context with the
+        // job's cancel flag and deadline). Using it here means the test would still hold if the test-only
+        // seam it used to call were removed.
+        crate::host::set_run_cancel_probe(crate::serve::run_cancel_requested);
+        let flag = Arc::new(AtomicBool::new(true));
+        crate::serve::install_relay_context(Some(flag.clone()), None, "relay:review-test".into());
+
+        // 1. The flag is LIVE in this process: the foreground path cancels its own operation (the bug this
+        // mission exists for). A test that did not prove this could pass while flipping nothing.
+        let foreground = super::foreground(&shell.0, &shell.1, "sleep 5", "", 30, &serde_json::json!({}));
+        assert!(foreground.is_err() || foreground.as_ref().map(|v| v["error"] == "run_cancelled"
+                || v["ok"] == false).unwrap_or(false),
+            "with the run cancelled, the foreground shell must be stopped, not reported done: {:?}",
+            foreground.as_ref().map(|v| v["error"].clone()));
+
+        // 2. Adoption: the same flag is still set, and this start must NOT be cancelled by it.
+        let started = super::control("start", &serde_json::json!({
+            "command": format!("printf 'run\\n' >> '{marker_text}'; sleep 3; echo adopted-done"),
+            "cwd": "", "timeout_seconds": 60, "session": session, "background": true,
+        }), &shell).expect("adopted start");
+        let id = started["operation_id"].as_str().expect("operation id").to_string();
+
+        // 3. It settles on its own, with the command's own result - not by the deadline.
+        let settled = super::control("wait", &serde_json::json!({
+            "id": id, "wait_ms": 20000, "session": session,
+        }), &shell).expect("wait");
+        crate::serve::install_relay_context(None, None, String::new());
+        assert_eq!(settled["settled"], serde_json::json!(true),
+            "the adopted operation must settle by finishing, not by the run's cancel: {settled}");
+        assert_ne!(settled["error"], serde_json::json!("cancelled"),
+            "the adopted operation was CANCELLED by the relay deadline: {settled}");
+        assert_eq!(flag.load(Ordering::SeqCst), true, "the flag stayed set the whole time");
+
+        // 4. Exactly once: the marker holds ONE line, so the command was never re-run.
+        let text = std::fs::read_to_string(&marker).expect("marker read");
+        assert_eq!(text.matches("run").count(), 1,
+            "the adopted command must have run exactly once, marker was {text:?}");
+    }
+}
+
+/// Verification r3 (small): a relayed await RETURNS AT wait_ms, it does not hold until settlement.
+///
+/// The branch used to ignore wait_ms entirely and return only when the operation settled, so a relayed
+/// await held the relay connection and a peer slot until the relay deadline (~35 s). This measures the
+/// bound itself: a command that outlives the wait answers at the caller own wait_ms, unsettled, and the
+/// SAME call again later answers its result. Isolation: manager() roots its records under HOME, a
+/// OnceLock, so this refuses to run outside a scratch/temp HOME.
+#[cfg(test)]
+mod await_returns_at_its_own_wait {
+    use super::*;
+    use crate::host::shell_config;
+
+    fn scratch_home_or_refuse() -> std::path::PathBuf {
+        let home = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default());
+        let text = home.to_string_lossy().to_string();
+        let scratch = text.contains("tmp") || text.contains("temp") || text.contains("scratch")
+            || text.contains("TMP");
+        let real = text.ends_with("/.wasm-agent");
+        assert!(scratch && !real,
+            "refusing to run: this test starts real operations, so HOME must be a scratch or temp \
+             directory and never the node own ~/.wasm-agent (got {text})");
+        home
+    }
+
+    #[test]
+    fn a_relayed_await_answers_at_wait_ms_and_never_holds_the_relay() {
+        let _home = scratch_home_or_refuse();
+        let shell = shell_config();
+        let session = "relay:await-test".to_string();
+        let started = super::control("start", &serde_json::json!({
+            "command": "sleep 4; echo waited", "cwd": "", "timeout_seconds": 60,
+            "session": session, "background": true,
+        }), &shell).expect("start");
+        let id = started["operation_id"].as_str().expect("id").to_string();
+
+        // The caller asked for 700 ms and the command runs 4 s: the answer must be the STATE, at about
+        // 700 ms, not the command result at about 4 s.
+        let began = std::time::Instant::now();
+        let first = super::control("await", &serde_json::json!({
+            "id": id, "wait_ms": 700, "session": session,
+        }), &shell).expect("await");
+        let took = began.elapsed();
+        assert!(took >= std::time::Duration::from_millis(600),
+            "the wait really waited its own budget, took {took:?}");
+        assert!(took < std::time::Duration::from_millis(3000),
+            "and it did NOT hold until the command settled (4 s), took {took:?}");
+        assert_eq!(first["settled"], serde_json::json!(false),
+            "an unsettled command answers its state, never a false completion: {first}");
+
+        // wait_ms is clamped to the tool documented maximum (10 s): a caller naming an hour is answered
+        // inside 10 s, not held until the relay gives up.
+        let began2 = std::time::Instant::now();
+        let _ = super::control("await", &serde_json::json!({
+            "id": id, "wait_ms": 3_600_000, "session": session,
+        }), &shell).expect("await");
+        assert!(began2.elapsed() < std::time::Duration::from_millis(12_000),
+            "a huge wait_ms is clamped to 10 s, took {:?}", began2.elapsed());
+
+        // The work is still there and still runs: the await did not cancel or re-run it.
+        let settled = super::control("wait", &serde_json::json!({
+            "id": id, "wait_ms": 10000, "session": session,
+        }), &shell).expect("wait");
+        assert_eq!(settled["settled"], serde_json::json!(true), "and it settles on its own: {settled}");
+        let out = settled["stdout"].as_str().unwrap_or("");
+        assert_eq!(out.matches("waited").count(), 1,
+            "the command ran exactly once, stdout was {out:?}");
     }
 }

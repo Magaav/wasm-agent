@@ -1692,6 +1692,11 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
   -- operator's business, and the gate can run commands.
   if name == "done_criteria" then
     if not is_master(role) then return { error = "forbidden_for_role:" .. tostring(role) } end
+    -- Item 1 (change/done-gate-trial): the call is counted on the RUN that made it, at the one door
+    -- every path goes through - a direct call and a script's inner call share this dispatcher, so the
+    -- count cannot depend on which shape the model chose. The mark is a boolean on the gate state the
+    -- run already carries (agent.lua puts it on the dispatch ctx); the tool body never reads it.
+    if type(ctx) == "table" and type(ctx.gate) == "table" then ctx.gate.done_criteria_called = true end
     return dofile("lua/core/done_gate.lua").tool(args, ctx)
   end
 

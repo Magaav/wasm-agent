@@ -197,10 +197,22 @@ and they are the whole difference between "can be resumed" and "cannot":
   knob every call has; the connector's `{id}`/`{ids}` resume stays as a hidden alias for a call made
   outside a script, and the answer's `resume` field names it there.
 
+**A remote call is never killed for waiting.** A relayed `bash` that outlives the relay's hold is
+*adopted*, not stopped: the peer starts it as a managed operation on itself and answers
+`{state:"pending", op, node, ...}` inside the relay's own deadline. The handle names the peer's operation
+id and the node it lives on, and `wait(op)`/`cancel(op)`/`pending()` route back to that node through
+short relayed `operation await` calls - the relay never carries a long wait, so no call depends on
+holding a connection open. A command that fits its budget answers its own result, exactly as before. The
+call is either still running (a handle), finished (a result) or cancelled by name; a resume never re-runs
+it, so a command that appends a line appends it once. The budget travels in the signed body
+(`nodes.lua RELAY_PEER_BUDGET_MS`), so a peer adopts by the caller's own number and nothing on the path
+can raise it. `scripts/test-remote-pending.lua` pins the adoption, the resume, the cancel and the
+exactly-once append.
+
 **The limitation, named.** Work that runs *inside* this interpreter cannot be moved off it, so a call
-becomes pending only where the node has an executor. Today that is `bash`, `operation` and the WhatsApp
-send. A `remote`/peer call has **no** executor: it is answered synchronously and cannot be resumed, and
-so is every other tool without one - it is never turned into a handle that cannot settle.
+becomes pending only where the node has an executor. Today that is `bash`, `operation`, the WhatsApp
+send and a relayed `bash`. Every other tool without one is answered synchronously and cannot be
+resumed - it is never turned into a handle that cannot settle.
 `scripts/test-codemode-pending.lua` asserts all of the above on both loops,
 `scripts/test-codemode-component.sh` runs that same suite through the component and compares the check
 counts, and `scripts/test-host-return-docs.lua` keeps the `host.*` encodings honest.

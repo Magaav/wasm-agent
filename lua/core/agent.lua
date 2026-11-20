@@ -28,7 +28,7 @@ local run_failure = dofile("lua/core/run_failure.lua")
 -- A tool result is a fact the harness produces (18/11, session 100c54ab): the detector that keeps a
 -- message imitating one from becoming the answer.
 local fake_answer = dofile("lua/core/fake_answer.lua")
--- The turn note (#33): kept on every turn, stripped from the visible answer into the run journal
+-- The turn note (#33): kept on every turn, parsed into the run journal and LEFT IN THE ANSWER
 -- (lua/core/turn_journal.lua, docs/TURNS.md).
 local turn_journal = dofile("lua/core/turn_journal.lua")
 -- WASM_AGENT_RAW_CODE (default off): a ```js run block in the reply becomes a codemode call.
@@ -260,11 +260,11 @@ local function generic_sections(role, declared, available)
   -- estimate is required because it is the difference between spending steps and spending context.
   s.turn = table.concat({
     "End every answer with a `<turn>` block, after the work itself and never inside it:",
-    "- **what hurt** - what in this turn damaged your reasoning (a missing fact, a wrong assumption, a stale instruction, a tool that lied or a step that had to be redone), and what would have removed it;",
+    "- **what hurt** - only what wa did to your reasoning (its tools, instructions, results or missing facts it should have given) and what would have removed it; your own mistakes and the project's own problems (its tests, scripts, fixtures) are not wa friction - leave them out;",
     "- **what it buys** - say which, with a number: fewer steps to the same result, or only better context (the same steps in fewer tokens, clearer state). Never claim one when it is the other;",
     "- **focus** - exactly ONE point: the highest-value harness optimisation this turn exposed. One point per answer, only when there is something to increment; no list, no filler, no restating the task.",
     "If nothing hurt your reasoning and nothing should be incremented, say so in one line and stop.",
-    "The harness removes this block from the answer it shows, and stores it in the run journal (session, mission, build, mode and the three fields); it never competes with an exact output format a request asks for, so an answer that must be only a number, a JSON body or one word still carries the block after it.",
+    "The block stays in your answer exactly where you write it - it is not removed from what the reader sees - and it is also stored in the run journal (session, mission, build, mode and the three fields) so the fleet can read the friction without parsing a transcript.",
   }, "\n")
   return s
 end
@@ -418,6 +418,100 @@ function M.agents_md(role)
   return nil, nil
 end
 
+-- Environment notes: `AGENTS.<environment>.md`, for what is true of THIS machine and not of the
+-- project - an Omarchy desktop, a sandboxed container. Resolved exactly like the role file (the
+-- environment's own override, the working directory, then the config directory), so there is one
+-- loader and not two.
+--
+-- The *code* decides which note applies, from the environment; a note never decides for itself,
+-- because two checks that can disagree are two answers. That is also why the detection is an
+-- allow-list of two named environments and not a scan of the tree for `AGENTS.*.md`: a file dropped
+-- there would otherwise become a detection path. Sandbox is tested first and then wins outright: a
+-- sandboxed node is a container on somebody else's machine, and telling it about the desktop it
+-- cannot see is the defect the pair exists to prevent.
+--
+-- `probe` answers "file", "dir", "missing", or "unknown". The reason is the host's own:
+-- `read_file` answers nil plus a named reason, and a directory is not a "missing" file. Anything
+-- else - a permission error, no `read_file` at all - is "unknown", which never counts as yes.
+--
+-- An EMPTY read is a file, not an absence: `/.dockerenv` is what docker creates and it is 0 bytes, so
+-- `read_file` answers "" with no error. Reading that as "not there" made the fallback dead code - the
+-- node only ever detected a sandbox by the variable, and a container without it looked like a desktop.
+local function probe(path, read)
+  local text, reason = read(path)
+  if text ~= nil then return "file" end
+  if reason == "read_file_is_a_directory:" .. path then return "dir" end
+  if reason == "read_file_missing:" .. path then return "missing" end
+  return "unknown"
+end
+
+-- The conditions, parameterised so the test drives them with fixture envs and a fixture filesystem:
+-- a test that needs the real host cannot prove which note is chosen, it can only observe this host.
+-- Two markers, because the two runtimes write different files and neither is guaranteed: docker
+-- creates `/.dockerenv`, podman `/run/.containerenv` (and a chroot neither, which is why
+-- deploy/env.example tells an operator to set the variable explicitly).
+local function sandboxed(env, read)
+  if (env.WASM_AGENT_SANDBOX or "") == "1" then return true end
+  if probe("/.dockerenv", read) == "file" then return true end
+  return probe("/run/.containerenv", read) == "file"
+end
+
+local function on_omarchy(env, read)
+  if (env.OMARCHY_PATH or "") ~= "" then return true end
+  return probe("/usr/share/omarchy", read) == "dir"
+end
+
+-- Which environment note applies, and its text: one function, because the two questions are one
+-- answer - "sandbox wins when both apply" is a property of the choice, not a separate step a caller
+-- could skip.
+--
+-- `opts` exists for the test, and only for the test: `env`, `read` and `config_dir` inject what the
+-- host would otherwise answer. A detection that can only be exercised on the machine it runs on is a
+-- detection nobody has tested.
+function M.environment_note(role, opts)
+  if (role or "master") == "guest" then return nil end
+  opts = opts or {}
+  local env = opts.env
+  if not env then
+    env = {}
+    if host.getenv then
+      env.WASM_AGENT_SANDBOX = host.getenv("WASM_AGENT_SANDBOX") or ""
+      env.OMARCHY_PATH = host.getenv("OMARCHY_PATH") or ""
+      env.WASM_AGENT_AGENTS_MD_SANDBOX = host.getenv("WASM_AGENT_AGENTS_MD_SANDBOX") or ""
+      env.WASM_AGENT_AGENTS_MD_OMARCHY = host.getenv("WASM_AGENT_AGENTS_MD_OMARCHY") or ""
+    end
+  end
+  local read = opts.read
+  if not read then
+    read = host.read_file and function(path) return host.read_file(path) end or function() return nil, "no_read_file" end
+  end
+  local kind
+  if sandboxed(env, read) then kind = "sandbox" elseif on_omarchy(env, read) then kind = "omarchy" end
+  if not kind then return nil end
+  local name = "AGENTS." .. kind .. ".md"
+  local candidates = {}
+  local configured = env["WASM_AGENT_AGENTS_MD_" .. kind:upper()] or ""
+  if configured ~= "" then candidates[#candidates + 1] = configured end
+  candidates[#candidates + 1] = name
+  local config_dir = opts.config_dir
+  if not config_dir then
+    local ok, dir = pcall(function() return dofile("lua/core/paths.lua").config() end)
+    config_dir = ok and dir or nil
+  end
+  if config_dir and config_dir ~= "" then candidates[#candidates + 1] = config_dir .. "/" .. name end
+  for _, path in ipairs(candidates) do
+    local text = read(path)
+    if text and text ~= "" then return { path = path, text = text } end
+  end
+  -- The copy the binary carries, like the role files. Without this a deployed node reads nothing: the
+  -- note is not beside the binary and not in <config>, so a note that shipped in the repo reached only
+  -- whoever happened to work in the checkout (review r1, MUST 1).
+  if EMBEDDED and type(EMBEDDED[name]) == "string" and EMBEDDED[name] ~= "" then
+    return { path = "embedded:" .. name, text = EMBEDDED[name] }
+  end
+  return nil
+end
+
 -- The directory a session works in: its own worktree when it has one, else the node's cwd.
 function M.workdir(session_id)
   local ok, worktree = pcall(memory.session_worktree, session_id)
@@ -446,7 +540,17 @@ end
 -- last). They follow the work, not the install: a session on another repo gets that repo's file.
 -- WASM_AGENT_AGENTS_MD names one explicit file instead. A guest gets AGENTS.guest.md only and never
 -- an operator file (see agents_md).
+--
+-- The environment note (see environment_note) rides the same frames, and its place is a contract in
+-- both directions: the user's own <config>/AGENTS.md is first, and the nearest project file is last.
+-- So the note sits directly after the global file and before the project chain - it governs where
+-- every one of them is read, and a project rule that contradicts it still wins by being read later.
 function M.project_instructions(role, workdir)
+  local note = M.environment_note(role)
+  local function with_environment(files, after)
+    if note then table.insert(files, (after or 0) + 1, note) end
+    return files
+  end
   if (role or "master") == "guest" then
     local text, path = M.agents_md("guest")
     return text and { { path = path, text = text } } or {}
@@ -454,7 +558,7 @@ function M.project_instructions(role, workdir)
   local configured = host.getenv(agents_env(role))
   if configured and configured ~= "" then
     local text = host.read_file and host.read_file(configured)
-    return (text and text ~= "") and { { path = configured, text = text } } or {}
+    return (text and text ~= "") and with_environment({ { path = configured, text = text } }, 1) or {}
   end
   local files, seen = {}, {}
   local function read(path)
@@ -469,13 +573,14 @@ function M.project_instructions(role, workdir)
     chain[#chain + 1] = dir
     dir = parent_dir(dir)
   end
+  -- <config>/AGENTS.md is the user's own file, injected as is, and first. Installers no longer seed it
+  -- with the repo's file; scripts/lib/seeded-agents-md.sh retires a copy an older installer left.
+  if global then files[#files + 1] = global end
+  with_environment(files, #files)
   for i = #chain, 1, -1 do
     local file = read(join(chain[i], "AGENTS.md"))
     if file then files[#files + 1] = file end
   end
-  -- <config>/AGENTS.md is the user's own file, injected as is. Installers no longer seed it with the
-  -- repo's file; scripts/lib/seeded-agents-md.sh retires a copy an older installer left behind.
-  if global then table.insert(files, 1, global) end
   return files
 end
 
@@ -1689,6 +1794,16 @@ function M:run(text, images)
   -- all: the session failed silently from then on, which is the exact class of stop this mission
   -- exists to remove. Cleared per run, so two failed turns leave two rows.
   self.failure=nil
+  -- Review r2, item 1 (change/done-gate-trial): this run's gate is created at the START of the run, so
+  -- the counted record written at the end always has THIS run's gate. It used to be created inside
+  -- run_body, past the first provider call: a run that threw before that point left the PREVIOUS run's
+  -- latched gate on self, and the end-of-run write was then either skipped (the old gate had already
+  -- latched) or attributed to the wrong turn. Assigning here replaces any stale gate on every path,
+  -- before anything that can throw.
+  self.gate = done_gate.new({ session_id = self.session_id, owner = self.user, request = text,
+    disabled = (self.subagent and true or false)
+      or (self.role ~= "master" and self.role ~= "admin") })
+  self.gate.effects = 0
   self.run_origin=(json.decode(host.runtime_info()) or {}).run_origin
   local resource_ctx={session_id=self.session_id,user_id=self.user,run_id=self.run_id,subagent=self.subagent}
   local claimed=resources.begin(resource_ctx)
@@ -1772,6 +1887,17 @@ function M:run(text, images)
     known=boundary~=nil,partial=false,pending=false,compactions=0}
   return self:run_body(text,images)
   end)
+  -- Review r1, fix 1 (change/done-gate-trial): the run has ENDED here, on every path - an answer, an
+  -- abort, an error, a guard stop. This is the one place the counted record is written, so the state it
+  -- names is the state the run left behind: a Stop-hook continuation that changed something after the
+  -- first candidate answer is counted as the change it was, and a run that ended with no candidate at
+  -- all is counted instead of vanishing. done_gate.note_turn latches, so a re-entered run is ONE turn.
+  if self.gate and not self.gate.disabled then
+    pcall(function()
+      self.gate.effected = (self.gate.effects or 0) > 0 or not changeset.empty(self.changes)
+      done_gate.note_turn(self.gate, { run_id = self.run_id })
+    end)
+  end
   provider.unpin()
   self.reserve_summary=nil
   self.on_call_start=nil
@@ -2217,10 +2343,14 @@ function M:run_body(text, images)
   -- a natural break point; a passing gate, a measured impossibility, operator input or a stall (the
   -- same failing output N times with no state change) ends it. No round is counted and nothing here
   -- asks the model to try harder: the message it sends is the machine's own output.
-  local gate = done_gate.new({ session_id = self.session_id, owner = self.user, request = text,
-    disabled = (self.subagent and true or false)
-      or (self.role ~= "master" and self.role ~= "admin") })
-  gate.effects = 0
+  -- Review r2, item 1: this run's gate was created at the START of the run (M:run), so a run that throws
+  -- before this line still has its own gate when the counted record is written at the end. Read it; never
+  -- build a second one here.
+  -- Review r1, fix 1 (change/done-gate-trial): the ONE counted record of this run is written at the END
+  -- of the run, not at the first candidate answer. Recording at turn end froze the answer of a moment
+  -- that a Stop-hook continuation could still change, and a run that ended with no candidate at all
+  -- (abort, error, progress-guard stop) recorded nothing. The gate is kept on the run for that one write.
+  local gate = self.gate
   local function gate_changes()
     local summary = changeset.summary(self.changes)
     if not summary then return "", {} end
@@ -2469,7 +2599,14 @@ function M:run_body(text, images)
     -- 8497eecc-6084-4ffe-a65f-d04c550522bb, a `finish_reason=stop` reply with no text and no tool
     -- call ended the run with `empty_reply` on the first attempt and never asked again.
     local function retryable(value)
-      if not ok then return provider.is_transient(tostring(value)) end
+      if not ok then
+        -- A lost link is retryable by definition (nothing was sent); an unclassified provider failure
+        -- is retried a bounded number of times; everything else keeps the opt-in transient policy.
+        return provider.is_connection_lost(tostring(value))
+          or provider.is_rate_limited(tostring(value))
+          or provider.is_unknown_failure(tostring(value))
+          or provider.is_transient(tostring(value))
+      end
       if type(value) ~= "table" then return false end
       -- An interrupted stream (`stream_complete=false`) is the lost-stream case below, which has
       -- its own patient budget; it must not also consume this short empty-reply budget.
@@ -2492,40 +2629,117 @@ function M:run_body(text, images)
     -- The ambiguous failures keep the opt-in budget above; a terminal quota refusal is excluded by
     -- `is_rate_limited` and keeps its landed outcome.
     local rate_limited = (not ok) and provider.is_rate_limited(tostring(result))
+    -- A provider failure that matches no known class is NOT final: it takes a bounded budget and then
+    -- fails by NAME, because "not in my tables" is not a judgement about the request (brief item 3).
+    local unknown_failure = (not ok) and not connection_lost and not rate_limited
+      and provider.is_unknown_failure(tostring(result))
     -- An empty stop (a reply with no text, no reasoning and no tool call) is its own bucket: it is
     -- not an ambiguous transport failure, it is the turn failing to produce anything at all, and it
     -- is default-on with a short budget so a hiccup costs a second and not a run.
     local empty_reply = provider.is_empty_reply(result)
-    local transient_limit = connection_lost and provider.connection_retries()
+    -- A lost link is waited for until it returns (provider.link_wait_is_unbounded), because a cap
+    -- only converts a real outage into a dead run: measured 19/11, a 2-minute drop ended the run and
+    -- nothing resumed it. An operator who wants a bound sets CONNECT_RETRIES/_WAIT_SECONDS by name.
+    local link_unbounded = (connection_lost and provider.link_wait_is_unbounded()) and true or false
+    local transient_limit = connection_lost
+        and (link_unbounded and math.huge or provider.connection_retries())
       or rate_limited and provider.rate_limit_retries()
+      or unknown_failure and provider.unknown_retries()
       or empty_reply and provider.empty_reply_retries()
       or provider.transient_retries()
+    -- A transient class that waits without a total cap (brief item 1) still must not spin on a wall: a
+    -- failure whose TEXT repeats unchanged is bounded by its own ceiling and then named. Only the
+    -- unbounded classes carry this, because a bounded bucket already stops itself - and only when
+    -- repeating THIS failure really is a wall (a 500, or no class at all). A lost link or a busy
+    -- status repeats identically for as long as the outage lasts, and bounding those would kill the
+    -- very run this change exists to save (review MUST 1).
+    local repeats_are_a_wall = (not ok) and provider.repeats_are_a_wall(tostring(result)) or false
+    local identical_limit = (transient_limit == math.huge and repeats_are_a_wall)
+      and provider.identical_repeat_ceiling() or nil
+    local identical_text, identical_count = nil, 0
     local transient_attempt, waited_ms = 0, 0
-    local wait_budget_ms = connection_lost and (provider.connection_wait_seconds() * 1000) or nil
+    local wait_budget_ms = (connection_lost and not link_unbounded)
+      and (provider.connection_wait_seconds() * 1000) or nil
+    -- When the link went down, so the recovery line can say how long it was out (one line, once).
+    local link_down_since = nil
     while transient_attempt < transient_limit and retryable(result) do
       transient_attempt = transient_attempt + 1
       local retry_after = (not ok) and provider.retry_after_ms(result) or nil
       local wait_ms = connection_lost and provider.connection_backoff_ms(transient_attempt)
         or rate_limited and provider.rate_limit_backoff_ms(transient_attempt, retry_after)
+        or unknown_failure and provider.unknown_backoff_ms(transient_attempt)
         or empty_reply and provider.empty_reply_backoff_ms(transient_attempt)
         or math.floor((2 ^ transient_attempt) * 1000 * (0.75 + math.random() * 0.5))
       if wait_budget_ms and waited_ms + wait_ms > wait_budget_ms then break end
       waited_ms = waited_ms + wait_ms
       local reason = ok and (result.stream_complete == false and "incomplete_stream" or "empty_reply")
         or redact.text(tostring(result)):sub(1, 80)
+      -- The identical-repeat ceiling: the same failure text, unchanged, counted. A different text -
+      -- a new body, a link that came back and failed differently - resets the count, because that is
+      -- a different situation and the class is still transient.
+      local failure_text = (not ok) and redact.text(tostring(result)) or nil
+      -- The wall is re-evaluated on EVERY failure, not armed once and carried. A 500 followed by ten
+      -- identical "connection refused" is a wall and then an OUTAGE: leaving the ceiling armed would
+      -- kill the run during the outage while the row still said "no limit" (review r3, item 1).
+      if transient_limit == math.huge and (not ok) then
+        if provider.repeats_are_a_wall(tostring(result)) then
+          identical_limit = identical_limit or provider.identical_repeat_ceiling()
+        else
+          -- Not a wall any more: the count and the ceiling both clear, so the next wall starts fresh.
+          identical_limit, identical_text, identical_count = nil, nil, 0
+        end
+      end
+      if identical_limit then
+        if failure_text and failure_text == identical_text then
+          identical_count = identical_count + 1
+        else
+          identical_text, identical_count = failure_text, 1
+        end
+        if identical_count >= identical_limit then
+          ok, result = false, tostring(result) .. string.format(
+            " [the same failure repeated %d times unchanged; it is not a transient wait any more]", identical_count)
+          break
+        end
+      end
+      -- The waiting row: what is wrong, with which provider, and when the next attempt comes. It
+      -- names the operator's only lever when the wait is unbounded, so a reader can stop it on purpose.
+      local provider_name = connection_lost and (function()
+        local got, active = pcall(provider.active)
+        if got and type(active) == "table" then
+          return tostring(active.id or active.name or "provider")
+        end
+        return "provider"
+      end)() or "provider"
+      -- Only a REAL lost link (a failure that named the network), not the incomplete-stream member
+      -- of the same bucket: a stream cut that is retried a second later is not "the network came
+      -- back", and saying so would be a false report of an outage that may not even exist.
+      local link_failure = (not ok) and provider.is_link_down(tostring(result))
+      if link_failure and not link_down_since then link_down_since = host.now() end
+      -- The counters, as words: an uncapped class has no fraction to show, and printing one would be a
+      -- lie (and a number the formatter cannot represent). One string, so every branch agrees.
+      local uncapped = (transient_limit == math.huge)
+      local counted = uncapped
+        and string.format("%d, no limit - it waits until the wait stops helping, Esc stops the run)", transient_attempt)
+        or string.format("%d/%d)", transient_attempt, transient_limit)
       self.emit({ type = "status", text = connection_lost
-        and string.format("network appears down (%s) - retrying in %ds (%d/%d); waiting up to %ds for the link",
-          reason, math.floor(wait_ms / 1000), transient_attempt, transient_limit, provider.connection_wait_seconds())
-        or rate_limited and string.format("provider refused the request (%s) - retrying in %ds (%d/%d)%s",
-          reason, math.floor(wait_ms / 1000), transient_attempt, transient_limit,
+        and (link_unbounded
+          and string.format("waiting for the network · %s unreachable · retry in %ds (%s",
+            provider_name, math.max(1, math.floor(wait_ms / 1000 + 0.5)), counted)
+          or string.format("waiting for the network · %s unreachable · retry in %ds (%s; waiting up to %ds for the link",
+            provider_name, math.max(1, math.floor(wait_ms / 1000 + 0.5)), counted,
+            provider.connection_wait_seconds()))
+        or rate_limited and string.format("provider refused the request (%s) - retrying in %ds (%s%s",
+          reason, math.floor(wait_ms / 1000), counted,
           retry_after and " as the provider asked" or "")
         or empty_reply and string.format(
-          "the provider returned an empty message (%s) - asking again in %dms (%d/%d)",
-          reason, wait_ms, transient_attempt, transient_limit)
-        or string.format("provider unavailable (%s) - retrying in %ds (%d/%d)",
-          reason, math.floor(wait_ms / 1000), transient_attempt, transient_limit) })
+          "the provider returned an empty message (%s) - asking again in %dms (%s",
+          reason, wait_ms, counted)
+        or string.format("provider unavailable (%s) - retrying in %ds (%s",
+          reason, math.floor(wait_ms / 1000), counted) })
       telemetry.event(self.session_id,self.run_id,"","provider_retry","attempt",{
-        reason=reason,attempt=transient_attempt,limit=transient_limit,wait_ms=wait_ms,
+        -- A JSON body cannot carry inf: an unbounded wait says so by name, not as a number.
+        reason=reason,attempt=transient_attempt,limit=(transient_limit == math.huge) and "none" or transient_limit,
+        wait_ms=wait_ms,
         connection_lost=connection_lost and true or false,
         rate_limited=rate_limited and true or false,empty_reply=empty_reply and true or false,
         retry_after_ms=retry_after,
@@ -2541,15 +2755,30 @@ function M:run_body(text, images)
       if stop then ok, result = false, stop break end
       call_opts.attempt = (call_opts.attempt or 1) + 1
       ok, result = pcall(provider.complete_with, self.model, messages, tool_list, self.stream, call_opts)
-      -- A later attempt that also reports a dead link keeps the patient policy (and the budget).
+      -- A later attempt that also reports a dead link keeps the patient policy (and the budget):
+      -- bounded when the operator asked for a bound, unbounded otherwise - the same rule as the
+      -- first failure, so a link that drops a second time does not silently acquire a cap.
       if not ok and provider.is_connection_lost(tostring(result)) then
         if not connection_lost then
           connection_lost = true
-          transient_limit = math.max(transient_limit, provider.connection_retries())
-          wait_budget_ms = provider.connection_wait_seconds() * 1000
+          link_unbounded = provider.link_wait_is_unbounded() and true or false
+          transient_limit = link_unbounded and math.huge
+            or math.max(transient_limit, provider.connection_retries())
+          wait_budget_ms = link_unbounded and nil
+            or provider.connection_wait_seconds() * 1000
+          if not link_down_since then link_down_since = host.now() end
         end
       end
       if not ok and provider.is_rate_limited(tostring(result)) then rate_limited = true end
+      -- A later attempt that fails differently (or stops matching any class) keeps the unknown
+      -- budget it was given, so a failure never becomes MORE final by changing its wording.
+      if not ok and not connection_lost and not rate_limited
+          and provider.is_unknown_failure(tostring(result)) then
+        if not unknown_failure then
+          unknown_failure = true
+          transient_limit = math.max(transient_limit, provider.unknown_retries())
+        end
+      end
       -- The bucket follows the reply, not only the first attempt's outcome: a transient failure
       -- that is answered with an empty stop still gets the empty-reply budget instead of dying on
       -- the opt-in transient one (which defaults to 0).
@@ -2558,6 +2787,18 @@ function M:run_body(text, images)
         empty_reply = true
         transient_limit = provider.empty_reply_retries()
       end
+    end
+    -- The link came back: ONE line saying how long it was out, and the run continues from the same
+    -- step (the request was retried, never re-executed - it produced no answer, so no tool call it
+    -- might have carried can have run).
+    -- ...and only when it was out for a measurable while: a link that "came back" in the same second
+    -- as the first attempt never left, and a line claiming an outage would be noise.
+    if ok and link_down_since and (host.now() - link_down_since) >= 1 then
+      local seconds = math.max(0, math.floor(host.now() - link_down_since))
+      self.emit({ type = "status", text = string.format("network back after %dm%02ds",
+        math.floor(seconds / 60), seconds % 60) })
+      telemetry.event(self.session_id,self.run_id,"","provider_retry","recovered",{after_s=seconds})
+      link_down_since = nil
     end
     -- A provider 400/413 on a request at/near the window is a context overflow even when
     -- the body says nothing - this deployment answers a too-large request with a bare
@@ -3200,6 +3441,10 @@ function M:run_body(text, images)
 
     local dispatch_ctx = { session_id = self.session_id, user_id = self.user, node_id = self.node,
       run_id = self.run_id, subagent = self.subagent, run_origin=self.run_origin, changes = self.changes, codemode_policy=self.codemode_policy,
+      -- Item 1 (change/done-gate-trial): the gate state this run's tool calls may mark, so a
+      -- done_criteria call is counted from the door every call goes through (tools.dispatch), whether
+      -- the model called it directly or from inside a script.
+      gate = gate,
       model_call = true, reviewed_paths = self.reviewed_paths,
       commit_audits = self.commit_audits, audit_step = self.audit_step,
       model = self.model, reasoning = (provider.reasoning(self.model) or {}).selected,
@@ -3553,32 +3798,36 @@ function M:run_body(text, images)
   -- about, and append_turn uses the same one so the topic and the ledger agree.
   local message_id = reply_message_id or host.uuid()
   -- The turn note (#33, operator 19/11: ensure models output their friction so we can focus and nail
-  -- it). The block is KEPT - it is the fleet own evidence about its harness - and REMOVED from the
-  -- text the reader and the caller see, so it never competes with an exact output format an operator
-  -- asked for (a number, a JSON body, one word). The transcript row keeps it whole: lua/core/turnfeed.lua
-  -- groups the notes from the ledger, and a stripped row would erase the corpus that queue is ranked on.
-  local stripped, journal_note = nil, nil
+  -- it). The block is KEPT - it is the fleet own evidence about its harness - and it STAYS IN THE
+  -- ANSWER (Victor, 19/11 09:15): removing it from what the reader sees was over-engineering for a
+  -- temporary signal, "once we mature the harness we just remove it". Nothing is cut from the reply
+  -- any more, so the answer the reader gets, the answer a parent reads and the answer the ledger
+  -- keeps are one and the same text. What the split still does is PARSE the note out of it, into the
+  -- run journal, where the three fields and the block ride with the run's own facts. The event is
+  -- still emitted for a consumer that wants the fields, but the view no longer draws a row for it:
+  -- the block is already in the answer, right where the model wrote it.
+  local parsed, journal_note = nil, nil
   pcall(function()
-    stripped = turn_journal.split(reply)
-    if stripped and stripped.note then
-      journal_note = turn_journal.record(stripped.note, {
+    parsed = turn_journal.split(reply)
+    if parsed and parsed.note then
+      journal_note = turn_journal.record(parsed.note, {
         session_id = self.session_id, run_id = self.run_id, message_id = message_id,
         mission = turn_journal.mission_of(self.session_id), build = turn_journal.build_of(),
-        mode = turn_journal.mode_of(), model = tostring(self.model or ""), block = stripped.block,
+        mode = turn_journal.mode_of(), model = tostring(self.model or ""), block = parsed.block,
       })
       if journal_note then
-        -- The fields travel with the event, not only the one-line summary: the reader's row is one dim
-        -- line under the answer and the whole block is what its fold opens (item 4), and a consumer that
-        -- had to re-read the journal to expand a row would make the row depend on a second read.
+        -- The fields travel with the event so a consumer never has to re-read the journal to learn
+        -- them. The visible answer does NOT depend on this succeeding: it is the reply either way.
         self.emit({ type = "turn_note", message_id = message_id, note_id = journal_note,
-          text = stripped.note.focus ~= "" and stripped.note.focus or stripped.note.hurt,
-          hurt = stripped.note.hurt, buys = stripped.note.buys, focus = stripped.note.focus,
-          block = stripped.block })
+          text = parsed.note.focus ~= "" and parsed.note.focus or parsed.note.hurt,
+          hurt = parsed.note.hurt, buys = parsed.note.buys, focus = parsed.note.focus,
+          block = parsed.block })
       end
     end
   end)
-  -- The visible answer, and the one the run reports as its outcome: the block is part of neither.
-  local answer = stripped and stripped.visible or reply
+  -- The visible answer, and the one the run reports as its outcome: it is the reply, whole. The note
+  -- is kept in the journal beside it, never cut out of it (Victor, 19/11 09:15).
+  local answer = reply
   record_turn(self, {
     id = message_id,ok=completed,
     role = "assistant", content = reply, reasoning=reply_reasoning, phase=reply_phase,

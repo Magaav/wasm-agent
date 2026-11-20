@@ -136,54 +136,6 @@ check(progressive:find(agent.PREAMBLE_GUIDELINE,1,true),'preamble guideline in t
 check(progressive:find('tool_call(name="remote", arguments={"node":',1,true),'flat remote shape in the progressive tools section')
 check(not agent.system_prompt('master',nil,nil,{},'full'):find(agent.PREAMBLE_GUIDELINE,1,true),'no tools, no preamble rule')
 
--- The DEFAULT surface, through a real run (review of 18/11, row 2's CodeAct variant): CodeAct declares
--- nothing and the run block is the only way to act, so the step-preamble rule is exactly what a run of
--- bare tool lines lacks - the red this row fixed was a live session, not a property of the declared-tool
--- surface. A prompt assembled by hand is not that surface: this runs the real loop with a stubbed
--- provider and reads the system message it was given.
-raw_surface=nil
-local codeact_sent={}
-local previous_stream=host.http_stream
-host.http_stream=function(_,_,_,body)
-  codeact_sent[#codeact_sent+1]=json.decode(body)
-  return json.encode({status=200,content='done',stream_complete=true,finish_reason='stop',
-    usage={prompt_tokens=10,completion_tokens=5,total_tokens=15},tool_calls={}})
-end
-local codeact_sid=memory.start_session('','codeact-shape',{user_id='master',node_id='',title='codeact-shape'})
-local codeact_ok,codeact_reply=pcall(function() return agent.new(codeact_sid,function() end,'master','master',''):run('read it') end)
-host.http_stream=previous_stream
-raw_surface='codemode'
-check(codeact_ok,'the default-surface run completed: '..tostring(codeact_reply))
-local codeact_declared=codeact_sent[1] and #((codeact_sent[1].tools) or {}) or -1
-check(codeact_declared==0,'the run declared no tool at all ('..codeact_declared..'), so it ran on the CodeAct surface')
-local codeact_system=''
-for _,message in ipairs((codeact_sent[1] or {}).messages or {}) do if message.role=='system' then codeact_system=message.content end end
-check(codeact_system:find(agent.PREAMBLE_GUIDELINE,1,true)~=nil,'preamble guideline on the DEFAULT CodeAct surface')
--- 8. Agent loop: OpenAI-chat-style content + tool_calls is stored and emitted as commentary, and a
--- truncated call runs once completed.
-local step,sent=0,{}
-host.http_stream=function(_,_,_,body)
-  step=step+1;sent[step]=json.decode(body)
-  if step==1 then return json.encode({status=200,content='Reading the note to confirm the fixture.',stream_complete=true,
-    finish_reason='tool_calls',usage={prompt_tokens=10,completion_tokens=5,total_tokens=15},
-    tool_calls={{id='trunc',type='function',['function']={name='read',arguments='{"path":'..json.encode(file)}}}}) end
-  return json.encode({status=200,content='done',stream_complete=true,finish_reason='stop',usage={prompt_tokens=10,completion_tokens=5,total_tokens=15},tool_calls={}})
-end
-local run=memory.start_session('','commentary',{user_id='master',node_id='',title='commentary'})
-local events={}
-check(agent.new(run,function(e)events[#events+1]=e end,'master','master',''):run('read it')=='done','loop finished')
-local step_row,tool_row
-for _,row in ipairs(memory.session_messages(run,{all=true}))do
-  if row.role=='assistant' and row.phase=='commentary' then step_row=row end
-  if row.role=='tool' then tool_row=row end
-end
-check(step_row and step_row.content=='Reading the note to confirm the fixture.','chat-style preamble stored as commentary content')
-local phased=false;for _,e in ipairs(events)do if e.type=='step_phase' and e.phase=='commentary' and e.text==step_row.content then phased=true end end
-check(phased,'preamble emitted live as commentary')
-local replayed=false;for _,m in ipairs(sent[2].messages)do if m.role=='assistant' and m.content=='Reading the note to confirm the fixture.' then replayed=true end end
-check(replayed,'preamble replayed to the provider, not dropped')
-local out=json.decode(tool_row.content)
-check(out.content=='remote-ok\n' and out.normalized:find('appended }',1,true),'truncated call ran once completed, and says so')
 -- The relay's deadline (item E, 19/11): before this, a relayed call that ran out of time answered
 -- "relay_timeout" and nothing else, so the model's next step was the same long call again. The sentence
 -- now names the cap the loop enforces and the exact call that starts the work ON that node.
@@ -232,4 +184,64 @@ check(not has(timed_out.fix,'wait_s'),'and no wait_s in the fix either')
 check(nodes.RELAY_AWAIT_SLICE_MS==10000 and nodes.OPERATION_AWAIT_MAX_MS==10000,
   'the slice is the measured 10 s maximum of wait_ms, taken as min(10 s, the relay cap)')
 
+-- Item 3 (change/remote-pending): the relay-deadline note is no longer the whole story - a relayed bash
+-- that outlives the hold is ADOPTED on the peer and answers a handle. The note and the fix must say so,
+-- because a model that reads only "the call stopped waiting" re-issues the same long call for ever.
+check(has(deadline_note,'ADOPTED'),'the note says a long relayed bash is adopted, not killed')
+check(has(deadline_note,'{state:"pending", op, node}'),'and names the handle shape it answers')
+check(has(deadline_note,'wait(op)') and has(deadline_note,'cancel(op)'),
+  'and the two calls that route back to that node')
+check(has(timed_out.fix,'wait(op)') and has(timed_out.fix,'cancel(op)'),
+  'the fix names them too, so the next step is not a re-issue')
+check(nodes.RELAY_PEER_BUDGET_MS>0 and nodes.RELAY_PEER_BUDGET_MS<nodes.RELAY_DEADLINE_SECONDS*1000,
+  'the budget a peer adopts by is inside the relay hold ('..nodes.RELAY_PEER_BUDGET_MS..' ms)')
+
+-- The DEFAULT surface, through a real run (review of 18/11, row 2's CodeAct variant): CodeAct declares
+-- nothing and the run block is the only way to act, so the step-preamble rule is exactly what a run of
+-- bare tool lines lacks - the red this row fixed was a live session, not a property of the declared-tool
+-- surface. A prompt assembled by hand is not that surface: this runs the real loop with a stubbed
+-- provider and reads the system message it was given.
+raw_surface=nil
+local codeact_sent={}
+local previous_stream=host.http_stream
+host.http_stream=function(_,_,_,body)
+  codeact_sent[#codeact_sent+1]=json.decode(body)
+  return json.encode({status=200,content='done',stream_complete=true,finish_reason='stop',
+    usage={prompt_tokens=10,completion_tokens=5,total_tokens=15},tool_calls={}})
+end
+local codeact_sid=memory.start_session('','codeact-shape',{user_id='master',node_id='',title='codeact-shape'})
+local codeact_ok,codeact_reply=pcall(function() return agent.new(codeact_sid,function() end,'master','master',''):run('read it') end)
+host.http_stream=previous_stream
+raw_surface='codemode'
+check(codeact_ok,'the default-surface run completed: '..tostring(codeact_reply))
+local codeact_declared=codeact_sent[1] and #((codeact_sent[1].tools) or {}) or -1
+check(codeact_declared==0,'the run declared no tool at all ('..codeact_declared..'), so it ran on the CodeAct surface')
+local codeact_system=''
+for _,message in ipairs((codeact_sent[1] or {}).messages or {}) do if message.role=='system' then codeact_system=message.content end end
+check(codeact_system:find(agent.PREAMBLE_GUIDELINE,1,true)~=nil,'preamble guideline on the DEFAULT CodeAct surface')
+-- 8. Agent loop: OpenAI-chat-style content + tool_calls is stored and emitted as commentary, and a
+-- truncated call runs once completed.
+local step,sent=0,{}
+host.http_stream=function(_,_,_,body)
+  step=step+1;sent[step]=json.decode(body)
+  if step==1 then return json.encode({status=200,content='Reading the note to confirm the fixture.',stream_complete=true,
+    finish_reason='tool_calls',usage={prompt_tokens=10,completion_tokens=5,total_tokens=15},
+    tool_calls={{id='trunc',type='function',['function']={name='read',arguments='{"path":'..json.encode(file)}}}}) end
+  return json.encode({status=200,content='done',stream_complete=true,finish_reason='stop',usage={prompt_tokens=10,completion_tokens=5,total_tokens=15},tool_calls={}})
+end
+local run=memory.start_session('','commentary',{user_id='master',node_id='',title='commentary'})
+local events={}
+check(agent.new(run,function(e)events[#events+1]=e end,'master','master',''):run('read it')=='done','loop finished')
+local step_row,tool_row
+for _,row in ipairs(memory.session_messages(run,{all=true}))do
+  if row.role=='assistant' and row.phase=='commentary' then step_row=row end
+  if row.role=='tool' then tool_row=row end
+end
+check(step_row and step_row.content=='Reading the note to confirm the fixture.','chat-style preamble stored as commentary content')
+local phased=false;for _,e in ipairs(events)do if e.type=='step_phase' and e.phase=='commentary' and e.text==step_row.content then phased=true end end
+check(phased,'preamble emitted live as commentary')
+local replayed=false;for _,m in ipairs(sent[2].messages)do if m.role=='assistant' and m.content=='Reading the note to confirm the fixture.' then replayed=true end end
+check(replayed,'preamble replayed to the provider, not dropped')
+local out=json.decode(tool_row.content)
+check(out.content=='remote-ok\n' and out.normalized:find('appended }',1,true),'truncated call ran once completed, and says so')
 print('remote call shape ok ('..checks..' checks, 0 skipped)')

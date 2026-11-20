@@ -43,9 +43,19 @@ not a new incremental provider protocol.
   session lands and deploys, a child's report does not) lives in `<law>`, not here, so it is stated
   once for every mode.
 - `<project>`: pi-style project instructions, one `<project_instructions path="...">` frame per
-  file: `<config>/AGENTS.md`, then every `AGENTS.md` from the filesystem root down to the
-  session's workdir (its worktree when it has one), nearest last. `WASM_AGENT_AGENTS_MD` names one
-  explicit file instead. Guests get `AGENTS.guest.md` only and never fall back to operator files.
+  file: `<config>/AGENTS.md`, then the environment note, then every `AGENTS.md` from the filesystem
+  root down to the session's workdir (its worktree when it has one), nearest last.
+  `WASM_AGENT_AGENTS_MD` names one explicit file instead. Guests get `AGENTS.guest.md` only and never
+  fall back to operator files.
+  The environment note is `AGENTS.<environment>.md`, for what is true of this machine and not of the
+  project: `AGENTS.sandbox.md` when `WASM_AGENT_SANDBOX=1` or a container marker exists
+  (`/.dockerenv`, docker's, or `/run/.containerenv`, podman's), else `AGENTS.omarchy.md` when
+  `OMARCHY_PATH` is set or `/usr/share/omarchy` is a directory
+  (`agent.environment_note`). Sandbox wins when both apply, and neither is injected when neither
+  matches. It is resolved like a role file - `WASM_AGENT_AGENTS_MD_SANDBOX` /
+  `WASM_AGENT_AGENTS_MD_OMARCHY`, the working directory, then `<config>` - and a guest gets none.
+  It sits after `<config>/AGENTS.md` and before the project chain, so neither of those two ordering
+  contracts moves.
 - `<session>`: environment, `<role name="..."/>`, `<workdir path="..."/>` (the session worktree
   when one is bound) and the vault key names for a master.
 

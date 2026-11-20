@@ -211,6 +211,16 @@ gate_run cargo build --release --offline --manifest-path rust/Cargo.toml >"$ACTU
 # test each time (04/11: 1 in 5 runs). The whole suite is ~26 s; it runs once (the release-profile rerun
 # of the same tests further down was removed: same assertions, a second compile, a second chance to race).
 gate_run cargo test --offline --manifest-path rust/wa-sentinel/Cargo.toml -- --test-threads=1
+# The rendezvous sheds FAIRLY (19/11 12:20-12:45 UTC: 503 too_many_connections to everyone, the fleet did
+# not converge for half an hour). Relayed calls may no longer take the connections that polls and binding
+# checks need: a reservation is held back for those lanes, one caller and one target are each capped, and
+# every shed answer carries Retry-After in the header and retry_after_ms in the body. The unit tests hold
+# the policy. tests/storm.rs reproduces the WHOLE event with four scratch nodes that have real ed25519
+# keys, 300 held sockets past the base cap, and a proxy the test owns so the link can be CUT for 60 s:
+# every node must answer a real relayed call after the restore (measured: 252 ms after the link came
+# back, peak 301 connections), and ordinary traffic converges (this test FAILS on the base registry with
+# 503 too_many_connections). Hermetic: a temp db, scratch keys, no live fleet.
+gate_run cargo test --offline --manifest-path rust/Cargo.toml -p wa-rendezvous
 if [ "${OS:-}" = "Windows_NT" ]; then
 gate_run cargo build --offline --manifest-path rust/wa-sentinel/Cargo.toml
 # ABSOLUTE, from `--absolute-git-dir`: `--git-path` prints `.git/<name>` relative to the cwd, and these
@@ -250,6 +260,16 @@ gate_run node scripts/test-parallel-finish.mjs
 # The execution and automation contracts have native, model-free adversarial tests.
 gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-operation -p wa-jobs
 gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-capabilities file_search::tests
+# A remote call is never killed for waiting (change/remote-pending, review r1 MUST 3): the relay stamps the
+# caller's deadline and the node installs it as this run's cancel flag; the FOREGROUND bash cancels its own
+# operation when it flips, and the adopted operation must survive it and run exactly once. This drives the
+# real flag (host::set_run_cancel_probe + serve::test_set_run_cancel) against real operations, so it needs
+# a scratch HOME - manager() roots its records there once per process. HOME=$GATE_HOME is that home; the
+# test itself refuses to run when HOME is not a scratch/temp directory or is the node's own ~/.wasm-agent.
+gate_run env HOME="$GATE_HOME" cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-capabilities adoption_survives_the_relay_deadline
+# A relayed await answers at the caller wait_ms instead of holding the relay and a peer slot until the
+# operation settles (verification r3). It starts real operations, so it needs the gate scratch HOME.
+gate_run env HOME="$GATE_HOME" cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-capabilities await_returns_at_its_own_wait
 # The line boundaries `host.http_sse` hands over are tested against real recorded SSE bodies (under
 # `tests/fixtures/subscription/`, kept as generic SSE recordings): a reader that re-frames or drops a
 # line fails here. Every filter above names its own module, so this one is named explicitly.
@@ -271,6 +291,13 @@ gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-te
 # The live region (TUI polish 2, items 1-3): every row it draws is one SCREEN row at 60/80/120/200
 # columns - a 300-column code line included - and twenty ticks of the running call move nothing.
 gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-term --test live_region
+# The transcript is the chat itself: item G's repaint-from-state - a chat resized 120 -> 60 -> 120
+# is the view a session at that width shows, and a long session draws one screenful and re-measures
+# nothing at an unchanged width.
+gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-term transcript::tests
+# The debounced repaint itself: the 150 ms deadline is a DECISION a test makes - not due before it,
+# due at it - and the clear it emits covers the screen AND the scrollback.
+gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-capabilities repaint_tests
 # The graph is a capability the agent navigates its own code with, so its extractor and
 # incremental reindex are part of the contract, not a side project.
 gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-graph
@@ -1125,6 +1152,11 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-orchestration-mode.lua" "$BIN" --db
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-observability.lua" "$BIN" --db "$DB.observability" | grep 'observability ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-remote-call-shape.lua" "$BIN" --db "$DB.remote-call-shape" | grep 'remote call shape ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-remote-refusals.lua" "$BIN" --db "$DB.remote-refusals" | grep 'remote refusals ok'
+# A remote call is never killed for waiting (change/remote-pending, item 1): on this node the peer half IS
+# this process (wa_peer_dispatch, the seam test-session-isolation.lua also reaches) and the caller half is
+# the real pending executor over a relay stand-in, so adoption, wait(op), cancel(op) and the
+# exactly-once append are measured without a second machine and without the real fleet.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-remote-pending.lua" "$BIN" --db "$DB.remote-pending" | grep 'remote pending ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-run-counts.lua" "$BIN" --db "$DB.run-counts" | grep 'run counts ok'
 # The turn note (#33): the <turn> block kept and stripped from the answer, the day roll-up `wa turns
 # --day` answers, the split keeping every byte on both sides of the block, the stored note drawn as
@@ -1168,6 +1200,19 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-tool-cues.lua" "$BIN" --db "$DB.too
 # undeclared permitted tool; the generated prompt docs match the code (scripts/sync-prompt-docs.lua).
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-prompt-tool-names.lua" "$BIN" --db "$DB.prompt-tool-names" | grep 'prompt tool names ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-project-instructions.lua" "$BIN" --db "$DB.project-instructions" | grep 'project instructions ok'
+# Environment notes: `AGENTS.<environment>.md` for what is true of this machine (an Omarchy
+# desktop, a sandboxed container), chosen by one detector, with sandbox winning when both apply and
+# neither note when neither matches. Fixture env and fixture filesystem, so the gate answers the same
+# on every host - a detection only observable where it runs is a detection nobody has tested.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-environment-notes.lua" "$BIN" --db "$DB.environment-notes" | grep 'environment notes ok'
+# ...and the two notes are in the set the deploy actually stages, asked of the function that answers
+# it (scripts/lib/lua-tree.sh) rather than of a copy of its list. A note that is embedded but not
+# staged, or staged but not embedded, reaches some nodes and not others.
+LUA_TREE_LIST="$(bash -c '. "$1/scripts/lib/lua-tree.sh" && wa_lua_tree_files "$1"' _ "$WASM_AGENT_LUA_ROOT")" \
+  || { echo "the Lua tree file list could not be produced"; exit 1; }
+for note in AGENTS.omarchy.md AGENTS.sandbox.md; do
+  printf '%s\n' "$LUA_TREE_LIST" | grep -qx "$note" || { echo "the deployed Lua tree does not stage $note"; exit 1; }
+done
 (cd "$WASM_AGENT_LUA_ROOT" && WA_SCRIPT=scripts/sync-prompt-docs.lua "$BIN" --db "$DB.prompt-docs") | grep 'sync-prompt-docs: ok'
 # Candidate batching is opt-in; exact evidence/order and response-group telemetry stay visible.
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-batching-guidance.lua" "$BIN" --db "$DB.batching-guidance" | grep 'batching guidance ok'
@@ -1242,6 +1287,43 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-provider-rate-limit-recovery.lua" "
 # `provider_error: io: An established connection was aborted ... (os error 10053)` because
 # neither spelling was in the connection bucket; only a manual Continue resumed the run.
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-provider-connection-abort-recovery.lua" "$BIN" --db "$DB.provider-connection-abort" | grep 'provider connection abort recovery ok'
+# A two-minute outage in the middle of a run must not end it (19/11 12:17 UTC, home internet down: the
+# run stopped with 'provider refused the request' x3 and 'run_failed: provider_http_502
+# vault_upstream_unreachable (gaierror)', and nothing resumed when the link came back). The vault's own
+# 502 was claimed by the short refusal bucket because 502 is a transient STATUS, so a dead LINK was
+# treated as a provider answer. This row drives the bytes the real vault/wa_vault.py sends (measured in
+# PHASE 0 against a closed port and an unresolvable host) through a real turn: the run waits visibly,
+# survives the outage, finishes with the right answer, never re-runs a tool call it already made, fails
+# at once by name on auth, stops on cancellation, and gives an unclassified provider failure a bounded
+# five retries before naming it. Hermetic: the provider is replaced; no network, no inference.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-network-outage-recovery.lua" "$BIN" --db "$DB.provider-network-outage" | grep 'network outage recovery ok'
+# A peer that is merely unreachable stays in the roster (19/11: after the link returned, 'wa nodes'
+# listed only itself and every 'wa call <peer>' answered unknown_node:<peer>). A failed roster read
+# used to REPLACE the cache with the empty table it had started from, so an outage erased the fleet
+# until a restart. The fix keeps every known peer, marked offline with its last-seen stamp, and a call
+# to one answers peer_offline:<name> (last seen ...). A successful read may still remove a peer.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-network-roster-offline.lua" "$BIN" --db "$DB.network-roster-offline" | grep 'network roster offline ok'
+# The caller's half of the relay storm (19/11 12:20-12:45 UTC: 503 too_many_connections to everyone
+# while ~470 connections kept arriving and ~600 relayed calls/min were abandoned). A caller held as
+# many relayed calls against one node as it liked and retried an over-cap relay with no jittered wait.
+# Now: at most RELAY_MAX_IN_FLIGHT per node (refused by name BEFORE anything is sent), and a growing,
+# capped, jittered wait that honours Retry-After - never a tight retry.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-network-relay-backpressure.lua" "$BIN" --db "$DB.network-relay-backpressure" | grep 'network relay backpressure ok'
+# A rendezvous OUTAGE must not turn an already-bound operator into a stranger (19/11: the work node
+# answered no relayed call for the length of the drop, because every call's admission asked the registry
+# twice and "unknown" refused). A POSITIVE admission is remembered with its time and stands through a
+# LINK failure inside a window; anything the registry ANSWERS still wins (revoked, removed, expired
+# refuse at once), and a caller never admitted before is refused as before - a new binding can never be
+# created against an unreachable registry.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-network-binding-outage.lua" "$BIN" --db "$DB.network-binding-outage" | grep 'network binding outage ok'
+# The NODE's half of a relay outage, at UNIT level - not an end-to-end storm, and it no longer claims
+# to be one. It drives the REAL binding tick (lua/core/binding.lua M.tick) and the REAL caller
+# (lua/core/nodes.lua remote_call) against a relay the row owns: through a 60 s outage the node KEEPS
+# TRYING to poll on every second (attempts are counted, not successes: before the fix a failed
+# /register returned before the poll, the 19/11 deadlock), it re-attaches with no restart, and a caller
+# then holds the node's verified answer. The END-TO-END storm - real nodes, a real cut, and the relay
+# redesign it needs - moved to the fabric-transport mission.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-network-outage-tick.lua" "$BIN" --db "$DB.network-outage-tick" | grep 'network outage tick ok'
 # A route must refuse a model it cannot serve before the first provider request - and only that.
 # A child with `gpt-6-luna` on the opencode-go route failed in 0.67s with zero tool calls on the
 # edge's `Model does not support this protocol`, and 26 child runs of `deepseek-v4.1-flash` died

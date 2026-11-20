@@ -172,6 +172,27 @@ if SOURCE_INFO="$(wa_build_info "$NEW" 2>/dev/null)"; then
   SOURCE_COMMIT="$(wa_build_field "$SOURCE_INFO" commit)"
   case "$SOURCE_COMMIT" in unknown|'') SOURCE_COMMIT="" ;; esac
 fi
+# A CANDIDATE THAT CANNOT NAME ITSELF IS ASKED OF ITS MANIFEST (item 29). A release install arrives with the
+# signed manifest that pins its bytes, and that manifest's source_commit= is the signed statement of which
+# commit the bytes are: refusing the move because an OLD build lacks --build-info, while the signed answer sits
+# beside it, refuses the one case the manifest exists for. The value is not taken on trust either - it is held
+# against the payload hashes the manifest pins below (`wa_node_manifest_value`), so a manifest that names one
+# commit and carries another's bytes still refuses.
+if [ -z "$SOURCE_COMMIT" ]; then
+  CANDIDATE_MANIFEST="${WA_CANDIDATE_MANIFEST:-}"
+  if [ -z "$CANDIDATE_MANIFEST" ]; then
+    short_of_candidate="$(basename "$NEW" | grep -oE "[0-9a-f]{12}" | tail -1)"
+    short_of_source="$(wa_build_field "${SOURCE_INFO:-}" commit | cut -c1-12)"
+    for candidate_manifest in "$(dirname "$NEW")/node-$short_of_candidate.manifest" "$(dirname "$NEW")/node-$short_of_source.manifest"; do
+      [ -n "$candidate_manifest" ] || continue
+      [ -f "$candidate_manifest" ] && { CANDIDATE_MANIFEST="$candidate_manifest"; break; }
+    done
+  fi
+  if manifest_commit="$(wa_manifest_source_commit "${CANDIDATE_MANIFEST:-}" 2>/dev/null)" && [ -n "$manifest_commit" ]; then
+    SOURCE_COMMIT="$manifest_commit"
+    say "the candidate cannot report its own build; its signed manifest names source_commit=$SOURCE_COMMIT"
+  fi
+fi
 if [ -z "$SOURCE_COMMIT" ]; then
   say "the candidate $(basename "$NEW") cannot name its own commit (wa --build-info answered nothing: a build older than the flag), so what is being installed cannot be compared with what is running"
 fi

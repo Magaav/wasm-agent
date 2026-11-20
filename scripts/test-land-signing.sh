@@ -113,6 +113,10 @@ printf 'return {}\n' > "$fixture/lua/core/agent.lua"
 printf '{}\n' > "$fixture/lua/vendor/json.lua"
 printf '# orchestrator\n' > "$fixture/AGENTS.orchestrator.md"
 printf '# subagents\n' > "$fixture/AGENTS.subagents.md"
+# The environment notes are in the shipped Lua tree too (scripts/lib/lua-tree.sh), so a fixture without
+# them tests a tree nobody deploys: the record step then exits 5, "a shipped path is missing".
+printf '# omarchy\n' > "$fixture/AGENTS.omarchy.md"
+printf '# sandbox\n' > "$fixture/AGENTS.sandbox.md"
 "$WORK/bin/sign-fixture" --keys "$fixture/config/release-keys.txt" > "$WORK/key-id"
 # THE FIXTURE HAS A REAL REMOTE, WITH THE COMMIT ON A BRANCH IT PUSHED. The publisher asks the remote itself
 # (`git ls-remote --heads origin`, scripts/lib/shared-commit.sh) whether the commit it is being asked to publish

@@ -28,7 +28,16 @@ end
 
 -- A failed tail is a landed outcome, except where the failure is the transport's and not the turn's:
 -- a stream the provider cut, or a link that dropped. Those are what a restart should finish.
-local RECOVERABLE_FAILURE = { "provider_incomplete_stream", "connection", "network appears down", "timed out" }
+--
+-- 19/11: the run that died in the outage recorded
+--   run_failed: provider_error - ... provider_http_502 vault_upstream_unreachable (gaierror)
+-- and NOTHING resumed it, because that text matched none of the four patterns below. The agent no
+-- longer ends a run on a transient link failure (that is the fix, not this table), and this stays the
+-- SAFETY NET for a run that already died that way - an older binary, a kill during the outage, a
+-- failure recorded before the fix landed: a launcher that sees it can continue the thread.
+local RECOVERABLE_FAILURE = { "provider_incomplete_stream", "connection", "network appears down",
+  "waiting for the network", "timed out", "vault_upstream_unreachable", "provider_http_5",
+  "provider_unreachable", "network is unreachable", "peer_disconnected" }
 
 -- Pure on its inputs: `state` is memory.session_state, `last_user` the newest user row (or nil).
 -- Returns the reason to recover, or nil and why not.
@@ -39,6 +48,13 @@ function M.decide(state, last_user, now, opts)
   local recoverable = state.state == "unfinished"
   if state.state == "failed" then
     local detail = tostring(state.detail or ""):lower()
+    -- ...unless the failure itself says it is a WALL and not a wait. The agent marks the one shape
+    -- that must not be re-driven: an unchanged failure that repeated to its ceiling (a 500 answering
+    -- the same bytes every time). Re-driving THAT is the hot loop this net must not create, so it is
+    -- refused by name, before the transient patterns are even looked at.
+    if detail:find("the same failure repeated", 1, true) then
+      return nil, "the tail repeated one failure unchanged: re-driving it would repeat a wall"
+    end
     for _, needle in ipairs(RECOVERABLE_FAILURE) do
       if detail:find(needle, 1, true) then recoverable = true break end
     end

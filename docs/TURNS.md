@@ -7,6 +7,14 @@ buried in an evidence envelope, `json_number_invalid` from a no-argument call, n
 resumed turn re-deriving work that was already in flight. Until now they were found by a human reading
 transcripts by chance.
 
+**The block stays in the answer.** It used to be cut out of what the reader sees and kept only in the
+ledger; that was over-engineering for a temporary signal (Victor, 19/11 09:15: "once we mature the
+harness we just remove it"). `turn_journal.split` therefore PARSES the note and returns the
+answer unchanged - `visible` is the text it was handed, byte for byte - so the answer a
+reader gets, the answer a parent reads and the answer the ledger keeps are one text. The run journal
+still records the row (session, mission, build, mode, the three fields and the block), which is what
+the readers below work from.
+
 `wa turns` is the reader. It parses the notes out of the ledger on this node and, over the mesh, on every
 peer that answers; groups the ones that describe the same problem; ranks the groups by frequency x cost x
 recency; and prints a brief per group: **problem**, **evidence**, **acceptance**.

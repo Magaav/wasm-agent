@@ -514,6 +514,226 @@ do
   }
 end
 
+-- The peer family (change/remote-pending, item 1): a remote bash is ADOPTED, not killed.
+--
+-- The call itself is dispatched first, exactly as it always was, and it now comes back as either the
+-- command's own result (it fitted in the peer's budget) or {state:"pending", op, node, ...}: the peer
+-- started a managed operation on ITSELF and kept it running. From here on the handle is the peer's
+-- operation id plus the node it lives on, and every wait and cancel is a SHORT relayed
+-- operation call to that node - never one long relay connection (item 2). The effect already ran
+-- once, on the peer, and no path here dispatches it again.
+--
+-- Only bash is adopted: it is the one effectful capability whose work can outlive the relay's hold.
+-- A batch is read-only on the wire and an operation start answers a receipt at once, so neither is
+-- turned into work nobody can collect.
+do
+  -- One slice is a bounded relayed wait (review r1, SHOULD 2). It must stay under BOTH bounds: the
+  -- operation tool's own wait_ms maximum (nodes.OPERATION_AWAIT_MAX_MS, 10 s - a larger number is refused
+  -- by the peer's schema, so the 15 s this used to name was a slice no call could ask for) and the
+  -- relay's hold (nodes.RELAY_PEER_BUDGET_MS). The smaller of the two, in one place, so a change to
+  -- either number cannot leave a slice the peer will not accept.
+  local nodes_lib = dofile("lua/core/nodes.lua")
+  local REMOTE_SLICE_MS = math.min(nodes_lib.OPERATION_AWAIT_MAX_MS, nodes_lib.RELAY_PEER_BUDGET_MS)
+
+  -- One relayed operation call: the peer's own operation tool, reached through the same remote call
+  -- everything else uses, so the peer keeps its own admission, its own session and its own answer.
+  local function remote_operation(dispatch, record, args)
+    local params = { node = record.node, capability = "operation" }
+    for key, value in pairs(args) do params[key] = value end
+    local ok, answer = pcall(dispatch, "remote", params, json.encode(params))
+    if not ok then return nil, tostring(answer) end
+    if type(answer) ~= "table" then return nil, "remote_operation_malformed" end
+    if answer.error and answer.operation_id == nil then return nil, tostring(answer.error) end
+    return answer, nil
+  end
+
+  M.EXECUTORS["remote"] = {
+    kind = "remote",
+    applies = function(params)
+      if type(params) ~= "table" then return false end
+      if params.capability ~= "bash" then return false end
+      return params.node ~= nil and params.node ~= ""
+    end,
+    start = function(dispatch, opts, params, raw)
+      local ok, result = pcall(dispatch, "remote", params, raw)
+      if not ok then
+        return { result = { error = tostring(result), effect = "unknown", replay_allowed = false } }
+      end
+      if type(result) ~= "table" then return { result = result } end
+      if result.state == "pending" and type(result.op) == "string" and result.op ~= "" then
+        -- The peer adopted it: the handle is its operation id, and the node is what routes every later
+        -- wait and cancel back to the machine the work is actually on.
+        return { op = result.op, node = tostring(result.node or params.node) }
+      end
+      -- A refusal, a settled command, an unreachable peer: an answer, never a second attempt.
+      return { result = result }
+    end,
+    poll = function(dispatch, opts, record, ms)
+      local left = math.max(0, math.floor(tonumber(ms) or 0))
+      local last, reason = nil, "still_running"
+      local function elapsed_ms() return tonumber(host.monotonic_ms and host.monotonic_ms() or 0) or 0 end
+      -- A wait is only asked for when there is a wait to spend: a POLL (wait_s:0, or a batch sibling
+      -- that settled early) asks the peer for its STATUS instead of an await with no budget, because a
+      -- zero-length await is not a glance - it is a call whose stop condition the peer decides.
+      -- A CAP, A MINIMUM CHARGE **AND A PAUSE** (review r2 MUST 3, review r3 item 1).
+      --
+      -- The charge alone lowered the budget but never waited: a peer that answers AT ONCE without
+      -- settling (an overdue supervisor, an interrupted await, an old peer) still got up to
+      -- min(40, budget/250) relayed awaits back to back - the burst this fix removes. Two things change:
+      --
+      --   * every call is followed by a real pause before the next one, whole milliseconds with a
+      --     doubling backoff (200 -> 400 -> ... capped at 2 s), so N calls cost N pauses of wall time and
+      --     can never be a burst;
+      --   * operation_supervisor_overdue STOPS the wait at once and is named, because that answer means
+      --     the peer's own supervisor has stopped making progress: asking it again is the hot loop.
+      --
+      -- host.sleep takes whole MILLISECONDS (rust/wa-capabilities: "Block this interpreter for a bounded
+      -- number of milliseconds"), so a fractional value would be 0 ms and this pause would not exist.
+      local REMOTE_MAX_CALLS = 40
+      local REMOTE_MIN_CHARGE_MS = 250
+      local REMOTE_MIN_PAUSE_MS = 200
+      local REMOTE_MAX_PAUSE_MS = 2000
+      local pause = REMOTE_MIN_PAUSE_MS
+      local calls = 0
+      while left > 0 and calls < REMOTE_MAX_CALLS do
+        calls = calls + 1
+        if cancelled() then return last, "run_cancelled" end
+        local slice = math.min(left, REMOTE_SLICE_MS)
+        local before = elapsed_ms()
+        local answer, why = remote_operation(dispatch, record,
+          { action = "await", id = record.op, wait_ms = slice, output = true, max_bytes = 24576, tool = "operation" })
+        -- Decrement by the time the call ACTUALLY spent, not by the slice asked for (review r1, SHOULD 2):
+        -- a peer that answered at once used to be charged the whole slice, so a budget bought fewer
+        -- round trips than it paid for.
+        left = math.max(0, left - math.max(REMOTE_MIN_CHARGE_MS, elapsed_ms() - before))
+        if not answer then
+          -- AN UNREACHABLE PEER IS NOT A FAILED COMMAND (review r1, SHOULD 3). A transport error during
+          -- one slice says nothing about the operation: it may still be running there, and marking the
+          -- local record final would hide work nobody stopped. Report it as PENDING with the reason; the
+          -- next wait(op) - or the caller's own next step - asks the peer again.
+          if last ~= nil and last.settled == true then return last, nil end
+          return last, tostring(why)
+        end
+        last = answer
+        if answer.settled == true then return answer, nil end
+        if tostring(answer.error or "") == "operation_supervisor_overdue" then
+          -- STOP, and say why: the peer's supervisor has stopped making progress on this operation, so
+          -- another await would be the hot retry this loop exists to avoid. The handle stays resumable.
+          return answer, "operation_supervisor_overdue"
+        end
+        if answer.error ~= nil and tostring(answer.error) ~= "await_interrupted" then
+          -- The peer answered with an error that is not the harness interrupting its own wait: still not
+          -- a settled command. Carry the word, keep the handle alive.
+          reason = tostring(answer.error)
+        end
+        -- THE PAUSE: after every call that did not settle, before the next one. Bounded by what is left
+        -- of the caller's own budget, so a pause never overshoots the wait it belongs to.
+        if left > 0 and calls < REMOTE_MAX_CALLS then
+          local wait = math.min(pause, left)
+          if host.sleep then host.sleep(wait) end
+          left = math.max(0, left - wait)
+          pause = math.min(pause * 2, REMOTE_MAX_PAUSE_MS)
+        end
+      end
+      if last == nil then
+        local state, why = remote_operation(dispatch, record, { action = "status", id = record.op })
+        if not state then return nil, why end
+        last = state
+      end
+      return last, reason
+    end,
+    settle = function(dispatch, opts, record, state)
+      local out = {}
+      for key, value in pairs(type(state) == "table" and state or {}) do out[key] = value end
+      out.operation_id = out.operation_id or record.op
+      out.node = record.node
+      out.adopted = true
+      if out.code == nil then out.code = tonumber(out.process_exit_code) or tonumber(out.command_code) or -1 end
+      if out.ok == nil then out.ok = out.code == 0 end
+      return out
+    end,
+    progress = function(dispatch, opts, record, state)
+      state = state or {}
+      local entry = { state = tostring(state.state or "running"), node = record.node,
+        op = record.op }
+      if state.elapsed_ms ~= nil then entry.elapsed_ms = tonumber(state.elapsed_ms) end
+      if state.output_bytes ~= nil then entry.output_bytes = tonumber(state.output_bytes) end
+      if type(state.stdout) == "string" and state.stdout ~= "" then
+        local tail = state.stdout:sub(-M.PROGRESS_BYTES)
+        entry.tail = tail
+      end
+      return entry
+    end,
+    cancel = function(dispatch, opts, record)
+      -- UNKNOWN IS NOT YES (review r1, MUST 1). The peer's cancel answer has four shapes and only one of
+      -- them is a stop it observed: cancelled:true. A refusal and an already-settled operation both come
+      -- back carrying the operation_id (operations.rs: the caller's own refusal, and "finished"), so an
+      -- answer with an id is NOT proof of a stop - the earlier "answer.cancelled ~= false" read a refusal
+      -- as a success and left the command running while the script had been told it was dead.
+      local answer, why = remote_operation(dispatch, record, { action = "cancel", id = record.op })
+      if not answer then
+        return { op = record.op, tool = "remote", node = record.node, cancelled = false,
+          error = "not_cancellable", why = tostring(why) }
+      end
+      if answer.error ~= nil then
+        -- "finished" is news (the outcome is retained: wait(op) re-reads it), never a cancel.
+        return { op = record.op, tool = "remote", node = record.node, cancelled = false,
+          error = tostring(answer.error), state = answer.state,
+          note = answer.note or (tostring(answer.error) == "finished"
+            and "the call had finished first; wait(op) re-reads its retained result, and nothing was re-run"
+            or nil) }
+      end
+      if answer.cancelled == true then
+        return { op = record.op, tool = "remote", node = record.node, cancelled = true,
+          state = "cancelled" }
+      end
+      -- The peer's cancel is a REQUEST: it sets the flag and answers the operation's own snapshot
+      -- (rust/wa-operation/src/lib.rs "pub fn cancel" -> self.snapshot(id)), so the snapshot still says
+      -- "running" for as long as the supervisor takes to notice. That is not a failure and not a success:
+      -- watch it, briefly and by observation, and answer what was SEEN.
+      -- OBSERVED, NOT SPUN (review r2, MUST 2). host.sleep takes whole MILLISECONDS (rust/wa-capabilities:
+      -- "Block this interpreter for a bounded number of milliseconds"), so 0.2 was 0 ms and the old loop
+      -- sent back-to-back relayed status calls for three seconds. Now: whole milliseconds, a doubling
+      -- pause between calls, and a HARD CALL CAP, so the observation is a handful of calls by construction.
+      local clock = function() return tonumber(host.monotonic_ms and host.monotonic_ms() or 0) or 0 end
+      local CALL_CAP = 5
+      local stop_by = clock() + 3000
+      local pause = 200
+      local state = answer
+      local calls = 0
+      while calls < CALL_CAP and clock() < stop_by do
+        calls = calls + 1
+        local observed, why_state = remote_operation(dispatch, record, { action = "status", id = record.op })
+        if not observed then
+          return { op = record.op, tool = "remote", node = record.node, cancelled = false,
+            cancel_requested = true, error = "cancel_not_confirmed", state = state.state,
+            why = tostring(why_state), calls = calls,
+            note = "the stop was requested and the peer could not be asked again; the operation may still "
+              .. "be running - check status on that node" }
+        end
+        state = observed
+        local name = tostring(observed.state or "")
+        if observed.cancelled == true or name == "cancelled" then
+          return { op = record.op, tool = "remote", node = record.node, cancelled = true,
+            state = "cancelled", calls = calls }
+        end
+        if observed.settled == true then
+          return { op = record.op, tool = "remote", node = record.node, cancelled = false,
+            error = "finished", state = name, calls = calls,
+            note = "the call had finished first; wait(op) re-reads its retained result, and nothing was re-run" }
+        end
+        if clock() >= stop_by then break end
+        if host.sleep then host.sleep(pause) end
+        pause = math.min(pause * 2, 800)
+      end
+      return { op = record.op, tool = "remote", node = record.node, cancelled = false,
+        cancel_requested = true, error = "cancel_not_confirmed", state = tostring(state.state or "running"),
+        note = "the stop was requested and the operation had not settled when this answer was formed; it "
+          .. "may still be running - check status on that node, then cancel again" }
+    end,
+  }
+end
+
 local function executor_of(record)
   return M.EXECUTORS[record.tool]
 end
@@ -623,6 +843,9 @@ end
 local function handle(record, waited_s, state)
   local out = { state = "pending", op = record.op, operation_id = record.op, tool = record.tool,
     waited_s = waited_s, progress = record.progress }
+  -- A remote op names the node it lives on: wait(op) and cancel(op) route there, and a caller that
+  -- holds only the handle can always tell WHICH machine is still running its work (item 1).
+  if record.node ~= nil then out.node = record.node end
   local source = type(state) == "table" and state or (type(record.progress) == "table" and record.progress or nil)
   if source then
     out.stdout_path = source.stdout_path
@@ -662,14 +885,15 @@ function M.invoke(dispatch, opts, name, params, raw, wait_s)
     -- The call finished as it always did: a refusal, a guarded command, an immediate answer.
     if started.op and started.register then
       index.ops[started.op] = { op = started.op, tool = name, kind = executor.kind, scope = scope,
-        started_at = started_at, state = "running", reported = false }
+        started_at = started_at, state = "running", reported = false, node = started.node }
       M.save(scope, index)
     end
     return started.result
   end
   local record = { op = started.op, tool = name, kind = executor.kind or "operation", scope = scope,
     started_at = started_at, state = "running", reported = false, id = started.id,
-    session = tostring(opts.session or ""), args = tostring(host.sha256(raw or "{}")) }
+    session = tostring(opts.session or ""), args = tostring(host.sha256(raw or "{}")),
+    node = started.node }
   index.ops[record.op] = record
   local state, reason = executor_poll(executor, dispatch, opts, record, budget)
   if not state then
@@ -757,7 +981,7 @@ function M.list(dispatch, opts)
     end
     ops[#ops + 1] = { op = record.op, tool = record.tool, state = tostring(record.state or "running"),
       kind = record.kind, age_s = math.floor(now - (tonumber(record.started_at) or now)),
-      progress = progress }
+      node = record.node, progress = progress }
   end
   return { ok = true, ops = ops, count = #rows, limit = M.MAX_OPEN, shown = #ops,
     truncated = #rows > #ops }
