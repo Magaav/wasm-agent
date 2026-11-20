@@ -2359,6 +2359,19 @@ gate_run node scripts/test-binding-runtime.cjs "$BIN"
 # that the ordinary request keeps its 24-hour bounds while the explicit intent is refused by name
 # unless an administrator affirms it. A separate file means a failure names which half broke.
 gate_run node scripts/test-binding-permanent.cjs "$BIN"
+# PHASE 0 of change/fabric-transport (docs/missions/reports/fabric-transport.md): the fabric benchmark
+# is what every later phase is measured with, so its own judges run here - a scratch rendezvous and one
+# scratch node on 127.0.0.1, a real relayed call answered, the per-node CPU accounting present, the
+# isolation guard refusing a root inside the real node home, and the scratch tree removed.
+# scripts/bench-fabric-transport.mjs is the harness; this row is its judge.
+# PHASE 0 of change/fabric-transport (docs/missions/reports/fabric-transport.md): the fabric benchmark
+# is what every later phase is measured with, so its own judges run here - a scratch rendezvous and one
+# scratch node on 127.0.0.1, a real relayed call answered, the per-node CPU accounting present, the
+# isolation guard refusing a root inside the real node home, and the scratch tree removed.
+# The bench itself reads /proc, spawns "timeout" and freezes the registry with SIGSTOP: Linux only, and a
+# host that cannot run it says so by name instead of passing.
+if [ "$(uname -s)" = Linux ]; then gate_run node scripts/test-fabric-bench.mjs "$BIN"
+else echo 'SKIP: fabric-transport benchmark judge (needs Linux: /proc, timeout, SIGSTOP)'; SKIPPED=$((SKIPPED + 1)); fi
 gate_run node scripts/test-verify-install.mjs
 gate_run node scripts/test-merge-audit.mjs
 # The boundary the audit's own verify verb answers, run at a wave's two entrypoints: a repository that
