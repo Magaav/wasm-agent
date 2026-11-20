@@ -196,3 +196,74 @@ The fix belongs to that session (my `84824f03` recorded the mode at the freeze a
 without the field must keep the mode its prefix was built in - for a `codemode` thread that is `codemode`,
 not `only`). I did not edit another session's commits mid-round; the measurement and the row names are here
 so the finding cannot be lost.
+
+## Review r3 (FIX, small) - the recorded decision, the goldens from real base
+
+| item | commit | what the diff does |
+|---|---|---|
+| 1 | c4b0d4af | MODE_CACHE and reset_mode_cache are DELETED (raw_code.lua, provider.lua): the mode is decided in build_context and recorded; a new thread asks the node, an existing thread reads its record |
+| 1 | 96fd2878 | the two per-call readers (the empty-list refusal telemetry, agent.lua:2194, and the raw-channel check, agent.lua:2852) use mode_of(policy) instead of the uncached node answer |
+| 1 | 25244454 | ONE field carries the decision: a mode string names the channel, the word off (raw_code.NO_CHANNEL) names the decision to have NONE, an absent field is a pre-release thread that keeps only; prompt_cache.notes() carries raw_mode when it rewrites the row for a session-update note |
+| 2 | d26d1652 | the goldens are re-recorded on a real a27490af worktree with NOTHING stripped; fixtures/prompt-golden/README.md names the commit and the exact command; the test compares exactly and names the one case that differs |
+| 2 | d28a4ae7 | the arm-B rows cannot skip: a stubbed provider row was MEASURED not to reach raw_code (it dofiles its own copy), so the node row is asserted tool_call by name |
+
+### The four rules of item 1, each with its test
+
+* provider switch mid-process: a NEW thread gets the new mode, an EXISTING thread keeps its own
+  (scripts/test-raw-mode-small.lua, "a NEW thread started after the move gets the NEW mode" /
+  "an existing thread reads its record, not the node").
+* a legacy record (no raw_mode field): "a thread without a recorded mode is named legacy", it keeps only,
+  and it never asks the node again.
+* a child of a native thread is native: "a child reads its parent, never the node switch", and it declares
+  the run tool alone; a child whose parent recorded no mode still asks the node.
+* no cache: a read with no switch measures the node EVERY time. THE PROBE MATTERS: the first version of this
+  check stubbed raw.default_mode in the TEST's copy and was measured to be vacuous - raw_code dofiles its own
+  copy, so a stub in the caller proves nothing. The check now counts host.read_file calls made BY raw.mode()
+  (measured: 38 reads per call with no switch, 0 for a recorded policy).
+* Test count: scripts/test-raw-mode-small.lua 34 checks (was 16).
+
+### Item 2 - the goldens, and the premise that was wrong
+
+The review said "the base has no such line, so the comparison is exact". MEASURED, that is false:
+
+* a27490af appends the conform notice to the prompt block (a27490af:lua/core/agent.lua:1185-1190,
+  block=block..'\n'..transport_notice) and shows it ONCE per process (raw_code.TRANSPORT_NOTICE_SHOWN).
+* a recording run therefore writes it into exactly ONE golden - progressive-only, the first case built.
+  Measured on the base worktree with a counter over all 13 cases: progressive-only 1, the other 12 zero.
+* The golden keeps that line verbatim. scripts/test-prompt-golden.lua compares the built prompt byte for
+  byte, asserts this branch carries no notice line in ANY case, and for progressive-only asserts base
+  carried exactly one and every other byte matches. Nothing is stripped silently any more.
+* The recording command, and that it must run from the base worktree root, are in
+  fixtures/prompt-golden/README.md. The base worktree was left clean (git status --short empty).
+
+### Item 3 - the bash arm (arm D)
+
+No change, as the review says: WASM_AGENT_RAW_CODE=bash still means "no raw channel" unless WA_AB_ARM names
+the bash arm (kept from 84824f03, still asserted in scripts/test-raw-mode-small.lua), and its <bash>/<run>
+pair scan is an EXPERIMENT switch that is not shipped as a supported mode.
+
+### Correction to the earlier note in this report
+
+The paragraph above ("the fix belongs to that session") was written before I measured further: the legacy
+fallback IS this branch's, introduced by 84824f03, and it is FIXED in 25244454. test-observability,
+test-resume-tool-registry and test-codemode-model-boundary all pass at the head of this round (each run on
+its own scratch home); the cause was exactly as measured above, and the fix is an explicit encoding rather
+than a guess: a record that DECIDED no channel writes the word off, so an absent field can only mean a
+pre-release thread. A second boolean field was tried first and dropped, because prompt_cache.notes() rebuilds
+the row from a whitelist and dropped it - measured, not assumed.
+
+### Fast path
+
+flock /home/victor/Work/missions/.suite.lock bash scripts/fast.sh
+log: /home/victor/Work/missions/rel-native/scratch/fast-r3b.log (the first run, fast-r3.log, is the one that
+found the two regressions above). Verdict at the head: 308 checks, 5 failed, 0 skipped. All five are the
+pre-existing rows this report already names, each reproduced on a27490af with the same binary:
+test-raw-first, test-run-counts, test-context-growth, test-raw-code, test-refusal-contract.
+
+### Texts to approve (continuing the list)
+
+3. (item 1, model-facing, UNCHANGED text, narrower reach) the empty-list refusal: "no_dispatchable_tools: this
+   session's prompt prefix was frozen with an empty tool list (lua/core/prompt_cache.lua), so every run of this
+   thread resolves no tools..." - unchanged; the mode it reports now comes from the thread's record.
+4. (item 1, NEW, not model-facing) raw_code.NO_CHANNEL = "off", the recorded spelling of "this thread decided
+   to have no raw channel". It is the switch's own word, so it is already in the operator's vocabulary.
