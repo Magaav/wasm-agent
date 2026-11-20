@@ -161,11 +161,28 @@ missions were running suites on 16 cores), with the tree's own binary stamped `c
 ## Text this branch adds to operator/model-facing surfaces
 
 1. `scripts/bench-seams.sh`'s usage line: `usage: bash scripts/bench-seams.sh [--iterations N] [--json]`
-2. `scripts/bench-seams.sh`'s failure line: `FAIL no wa binary (build it, or set WA_BIN)`
+2. `scripts/bench-seams.sh`'s refusal when the tree has no binary - four lines, verbatim:
+
+   ```
+   FAIL no wa binary from this tree (looked at ${CARGO_TARGET_DIR:-<unset>}/release/wa and $ROOT/rust/target/release/wa).
+        Build it:  (in rust/) CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-<dir>} cargo build --release --offline -p wa-host
+        Or name one: WA_BIN=<path> bash scripts/bench-seams.sh
+        A binary from PATH is refused on purpose: a table measured against another tree's code is not this tree's.
+   ```
+
 3. Its serde-skip line: `SKIP the serde half: the example did not run here (see below); the Lua half above stands on its own`
-4. Its run header: `bench: seams (bin=..., iterations=..., home=...)`
-5. `scripts/bench-seams.lua`'s SKIP lines for MCP and for a missing `host.operation`, printed verbatim
-   with their reasons, and the `turn.context_build` header row.
+4. Its run header - both lines, verbatim:
+
+   ```
+   bench: seams (bin=$bin, binary-commit=$stamp, iterations=${iterations:-200}, home=$home)
+   bench: seam rows are os.clock (CPU) on this machine; codemode/mesh/fabric are those benches' own clocks
+   ```
+
+5. `scripts/bench-seams.lua`'s SKIP lines, verbatim, with their reasons: the MCP row
+   (`SKIP:no MCP server configured (invalid_component_name)`), the missing-capability row
+   (`SKIP:no host.operation capability`) and the vault row
+   (`SKIP:no stub vault (pass WA_SEAM_VAULT_URL=<loopback stub>; an inherited WASM_AGENT_VAULT_URL is cleared, never measured)`),
+   plus the `turn.context_build` header row.
 6. `scripts/bench-seams-vault-stub.mjs`'s 404 body: `{"error":{"code":"not_found","message":"bench stub answers /status only"}}`
 7. `rust/wa-host-support/examples/json-cost.rs`'s refusal: `json-cost: no *.json payload in <dir> - a check that measures nothing is not a pass`
 
