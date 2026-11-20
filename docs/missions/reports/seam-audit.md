@@ -62,7 +62,7 @@ One row per seam. "Per turn" means: the crossing count and bytes of one `build_c
 | 6 | provider adapters (stream parsing) | `lua/core/provider.lua:1393` (`host.http_stream`) <-> `rust/wa-capabilities/src/host.rs:2404` (`http_stream`), `:2464` (`http_sse`, one line per callback) | the request, then the aggregated completion (content, tool_calls, usage) | JSON text | sync: the whole model call happens inside the capability (`host.rs:2167` says so) | the interpreter, for the whole model call; `http_sse` gives a line callback for other dialects | 2 `http_stream` per fallback turn | 3,659 B back in that turn | decode rate 17.8 MB/s => bounded ~1.1 ms per 20 KB completion (the only JSON on the path; framing is Rust's) | 2 calls, not isolated per call | a `stream<chunk>` seam would let the turn render as it arrives and drop the aggregate copy | high: `provider.lua` is 1,751 lines and the stream contract is the model's |
 | 7 | MCP connectors | `lua/core/mcp.lua:1053` (`host.component_mcp`), `:1164` (`operation start`), `:1167` (`operation await`) <-> `rust/wa-kernel-runtime/src/components.rs:651`, `rust/components/mcp-whatsapp`, `mcp-echo`, `wit/seams/seams.wit` (`mcp-server.call-tool`) | the request, the component's answer, and an operation handle per call | JSON text + the operation table | sync: `await` blocks with a 250 ms wake | the interpreter, for the connector's whole run (`timeout_seconds` up to 3,600) | 0 without MCP; 3 crossings per MCP tool call | not measured - SKIPPED, no server configured (`invalid_component_name`) | not measured | bounded by row 8 | `call-tool` as a future removes the start/await pair; measured cost of that pair is row 8 | medium (`mcp.lua` 1,485 lines) |
 | 8 | operation table | `lua/core/mcp.lua:1164`, `lua/core/tool_progress.lua:372` (`host.operation`, 26 call sites) <-> `rust/wa-capabilities/src/host.rs:1378`, `rust/wa-capabilities/src/operations.rs` (2,844 lines), `rust/wa-operation` | action + arguments, then the operation's state | JSON text | sync; `await` loops on `manager().wait(id, 250 ms)` (`operations.rs:1521`) | the interpreter, for the operation's life, waking every 250 ms | 0 in a plain turn; 2 per MCP call | 92 B in, 43 B out | 811 us of which 16 us JSON - the cost is the spawn and the wait, not the encoding | start+await 811 / 4,170 us for `sh -c true`; phases bench total p50 84 ms (3 samples, unattributed 1 ms) | an `await` future removes the 4 wakes/s and the blocked interpreter | medium: `control()` is one place |
-| 9 | session journal / memory.db writes | `lua/core/memory.lua:32` (`query`), `:1336` (the insert), `:1424` (`session_messages`: `SELECT *` over a window) <-> `rust/wa-capabilities/src/host.rs:519` (`sql_exec`), `:629` (`sql_query`); the component path's typed shape is `wit/kernel/sql.wit` + `rust/components/memory` | rows | JSON text on the native path; a typed `value` variant on the component path | sync | the interpreter, for the query | 34 `sql_query` + 4 `sql_exec` per context build; 93 + 94 in the fallback turn | 428,682 B of query answers per build; one 50-row read 47,145 B | read 3,437 us p50 of which Lua decode 2,783 us (81%); serde parses the same bytes in 99.9 us; write 162 us of which 29 us JSON | read 3,437 / 4,494 us; write 162 / 258 us; `append_turn` 477 / 950 us | **the measured candidate** (`wa/sql-rows`): answer the same rows as a Lua table, WIT's own `value` shape on the native ABI - the 2,783 us of Lua decoding per 47 KB read and ~24 ms per context build go away; async: none measurable | ~136 lines of Rust + registry + `docs/HOST.md` + a 12-line Lua switch + a 131-line parity test |
+| 9 | session journal / memory.db writes | `lua/core/memory.lua:32` (`query`), `:1336` (the insert), `:1424` (`session_messages`: `SELECT *` over a window) <-> `rust/wa-capabilities/src/host.rs:519` (`sql_exec`), `:629` (`sql_query`); the component path's typed shape is `wit/kernel/sql.wit` + `rust/components/memory` | rows | JSON text on the native path; a typed `value` variant on the component path | sync | the interpreter, for the query | 34 `sql_query` + 4 `sql_exec` per context build; 93 + 94 in the fallback turn | 428,682 B of query answers per build; one 50-row read 47,145 B | read 3,437 us p50 of which Lua decode 2,783 us (81%); serde parses the same bytes in 99.9 us; write 162 us of which 29 us JSON | read 3,437 / 4,494 us; write 162 / 258 us; `append_turn` 477 / 950 us | **MIGRATED on this branch (`253d666c`)**: the rows answer as a Lua table, WIT's own `value` shape on the native ABI, and `memory.query()` - the reader behind **41 `query(` call sites** - takes it: 3,437 -> **552 us p50** per 47 KB read (p99 4,494 -> 1,245), JSON text per context build 428,682 B -> **305 B**; async: none measurable | ~136 lines of Rust + registry + `docs/HOST.md` + a 12-line Lua switch + a 131-line parity test |
 | 10 | TUI <-> core event path | `lua/core/cli_view.lua`, `cli_panel.lua` (`host.transcript_*`) <-> `rust/wa-capabilities/src/host.rs:4368` (`transcript_write`), `rust/wa-term`; the web UI by `rust/wa-capabilities/src/serve.rs:2533` (SSE) | text lines (terminal), JSON events (web) | plain text - no JSON on the terminal path | sync, and it is a write (no poll) | nobody: a write returns | many small writes per turn | 1,110 B per line | no JSON to remove | 3 us p50 / 79 us p99 (a frame redraw when the editor is up) | nothing: the terminal path carries no JSON | 0 |
 | - | `host.bus_publish` (the Lua bus calls reach no capability) | `lua/core/run_failure.lua:227`, `provider.lua:1017`, `update_banner.lua:668` | a fact, as JSON | the calls are guarded (`if host.bus_publish then`) and no Rust code registers that name (`rg bus_publish rust/` is empty) | n/a | n/a | 0 (dead) | 0 | - | - | this is a missing seam, not an expensive one: the durable event path already exists (the journal), the live one does not | small to wire, and it needs a decision first |
 
@@ -72,7 +72,9 @@ One row per seam. "Per turn" means: the crossing count and bytes of one `build_c
    50-row `SELECT *` window, and 2.8 ms of it is the pure-Lua JSON decoder chewing 47 KB. serde
    parses the same bytes in 100 us. Per context build this is 428,682 B of sql answers across 34
    queries, and at the measured decode rate that is ~24 ms of a 117 ms build spent turning typed rows
-   into JSON text and back into a Lua table. `memory.query()` is the reader for **all 45 `query(` call
+   into JSON text and back into a Lua table. **On this branch it is not paid at all**: the same read
+   answers in 552 us p50 and the JSON text a context build pulls back falls from 428,682 B to 305 B
+   (Phase 2 log below). `memory.query()` is the reader for **41 `query(` call
    sites** in `lua/core/memory.lua` - the transcript window, sessions, recall and the counts - so the
    decode is paid on every one of them, not only on the turn's transcript read.
 2. **The rest of the internal seams are microseconds.** The crossing floor is 1 us; a 4 KB tool result
@@ -186,11 +188,75 @@ missions were running suites on 16 cores), with the tree's own binary stamped `c
 6. `scripts/bench-seams-vault-stub.mjs`'s 404 body: `{"error":{"code":"not_found","message":"bench stub answers /status only"}}`
 7. `rust/wa-host-support/examples/json-cost.rs`'s refusal: `json-cost: no *.json payload in <dir> - a check that measures nothing is not a pass`
 
-## Phase 2
+## Phase 2 log
 
-The migration this audit recommends (row 9: typed rows on the native ABI) is **not on this branch**.
-It lives in `wa/sql-rows`, with its own before/after from the same benchmark, its parity test, and the
-correction that `memory.query()` serves all 45 `query(` call sites in `lua/core/memory.lua`, not only
-the turn loop's transcript read. Every seam this audit does NOT migrate is recorded in the table above
-with the number that keeps it where it is.
+### Row 9 - the journal read, migrated (`253d666c`)
 
+**What changed.** `host.sql_rows(sql, params_json)` (`rust/wa-capabilities/src/host.rs`) answers the
+same rows as `host.sql_query` from the same reader (`read_cells`, now shared by both), as a Lua
+table: INTEGER as a Lua integer, REAL as a float, TEXT as a string, BLOB as the `<N bytes>`
+placeholder, NULL as an absent key, and a failure as `nil, error`. `lua/core/memory.lua`'s
+`query()` takes it when the host has it and keeps the JSON path on a host without it, so an older
+binary is unaffected. The record shape is `wit/kernel/sql.wit`'s `value` variant - this is that shape
+on the native ABI, where the alternative is text plus a decoder.
+
+**The claim, corrected (review r2).** `memory.query()` is not only the turn loop's transcript read: it
+is the one reader behind **41 call sites** in `lua/core/memory.lua` - the transcript window
+(`session_messages`), `session`/`sessions`, the recall and search paths, the counts, and the schema
+probes. (A naive `query(` grep counts 45; two of those are `fts_query()`, one is the local
+definition and one is the `host.sql_query` fallback.) Every one of the 41 stops decoding JSON text on
+this branch; the before/after below is the transcript window because that is the largest payload, not
+because it is the only site.
+
+**Parity, on the path real use takes** (rule 14): `scripts/test-sql-rows.lua`, wired the way the tree
+already wires tests - the full gate runs every `tests/*.lua`, and `scripts/fast.sh` runs every
+`scripts/test-*.lua` not in `scripts/fast-path.exclude`, so this file is in the fast path by default
+(it creates its own scratch home and refuses the operator's). It compares:
+
+1. every SQLite type - INTEGER, REAL, TEXT carrying UTF-8, BLOB, NULL - plus empty string and zero,
+   value by value **and** by Lua number type (`5` and `5.0` concatenate differently);
+2. a failing statement: `{error}` from the JSON path, `nil, error` from the typed one, naming the same
+   reason;
+3. bound parameters;
+4. the turn loop's own window over a 20-turn seeded session (`SELECT * ... LIMIT ?`);
+5. the switch itself - with `host.sql_query` made to raise, `memory.session_messages` still returns its
+   20 rows and still decodes `tool_calls`/`trace`, which is only possible through the typed path.
+
+**Before/after, same benchmark, same machine** (`bash scripts/bench-seams.sh --iterations 200`, avell,
+p50/p99 of `os.clock`, the binary named by `--build-info` in the header):
+
+| row | before (`353a3ca2`, `wa/seam-audit-report`) | after (`12944af2`, this branch) |
+| --- | --- | --- |
+| `journal.session_messages` p50 | 3,437 us | **552 us** |
+| `journal.session_messages` p99 | 4,494 us | **1,245 us** |
+| Lua JSON decode of the same 47 KB (measured, now not paid) | 2,783 us | 2,735 us |
+| JSON bytes a context build pulls back | 428,682 B (34 `sql_query` calls) | **305 B** (25 `sql_query`) + 9 typed reads |
+| `turn.context_build` wall, n=1 | 117 ms | 83 ms |
+| the fallback turn's sql crossings | 93 `sql_query` calls, 13,741 B; no typed read | 54 `sql_query` calls, 3,073 B + 39 typed reads |
+
+The `context_build` wall row is a single sample; it is recorded and NOT claimed as the seam's gain.
+The per-read rows are n=200 and are the seam.
+
+**What the evidence does not say.** The rows still cross as rows (the same bytes of data); what stopped
+is the text encoding of them and the Lua decoder that read it back. Async was not added because this
+seam has no second consumer to run while it waits - measured, not assumed.
+
+### Seams that stay, by measurement
+
+| row | why it stays |
+| --- | --- |
+| 3, 4 (node <-> node, rendezvous) | fabric-transport's seams - audited here, migrated there; measured ~0 per single-node turn, and `wit/fabric` is already `async func` + `stream<heartbeat>` |
+| 5 (vault HTTP) | HTTP is the external contract, and the row now measures only the bench's own stub (review r2 MUST 1); the inner encode is 35 us of a 326 us call |
+| 6 (provider stream) | bounded ~1.1 ms of aggregate decode per 20 KB completion against a 1,751-line rewrite |
+| 7 (MCP) | no server on this node to measure (SKIP, named); its shape is row 8's |
+| 8 (`operation await`) | 878 us p50 of which 15 us is JSON: the cost is the spawn, and a future buys concurrency this audit did not measure |
+| 10 (TUI) | the terminal path carries no JSON (3 us per line); the web path's SSE is the browser's contract |
+
+**The three strings this branch adds** (the audit branch's seven are unchanged above):
+
+8. The new capability's description, which `wa capabilities --json`, `/health`, `capabilities()` and
+   `describe(name)` all read: `Run one read query against this interpreter's own SQLite connection; returns the rows as a Lua table, not JSON text`
+9. `docs/HOST.md`'s new section heading `### The rows, as a table or as text` and its four bullets (the
+   INTEGER/REAL number-type rule, the `<N bytes>` blob placeholder, NULL as an absent key, `nil, error`
+   as the failure shape).
+10. The Lua-side refusal reason when a host answers `nil` with no message: `sql_rows_unavailable`.
