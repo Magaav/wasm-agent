@@ -34,6 +34,7 @@ return {
   ['calls_array_required']='routed_calls.lua',
   ['calls_required_1_to_8']='routed_calls.lua',
   ['cancel_accepts_at_most_']='codemode_pending.lua',
+  ['cancel_not_confirmed']='codemode_pending.lua',
   ['cancel_requires_an_op_or_a_list']='codemode_pending.lua',
   ['cancelled']='codemode_pending.lua',
   ['capabilities_unavailable']='codemode.lua',
