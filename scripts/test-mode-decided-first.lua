@@ -143,6 +143,36 @@ eq(again_pristine.tools, settled.tools, 'a legacy record resumed under its own s
 eq(again_pristine.report.changed, false, 'and its frozen prefix did not change')
 eq(note_count(pristine) - resumed, 0, 'and this build owed the model no session-update note')
 
+-- The case review r5 item 3 names: a legacy record frozen in ONLY with NO switch, resumed with no
+-- switch on a node whose provider row defaults to native. Its prefix was built in only, so the resume
+-- must change nothing and owe the model no note.
+--
+-- No stub is needed and none would work: raw_code dofiles its own copy, so a stubbed default_mode in
+-- this file never reaches it (measured in review r3). The fallback is the property under test - with no
+-- switch, a record that predates the mode field keeps only (raw_code.LEGACY_THREAD_MODE) - while the
+-- node's own answer today is native (model_profile: this provider takes tool calls).
+local only_quiet = with({ WASM_AGENT_RAW_CODE = 'only' }, function()
+  local sid = thread('legacy, frozen in only, node goes native')
+  local first = build(sid, 'only')
+  local key = pcache.key({ session_id = sid, user_id = 'master', role = 'master' })
+  local rows = json.decode(host.sql_query('SELECT value FROM meta WHERE key=?', json.encode({ key })))
+  local value = json.decode(rows[1].value)
+  ok(value.raw_mode == 'only', 'the fixture was frozen in only')
+  value.raw_mode = nil
+  host.sql_exec('INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)', json.encode({ key, json.encode(value) }))
+  return { sid = sid, tools = first.tools }
+end)
+-- The node's answer with no switch is native here, and the record still keeps only.
+eq(with({ WASM_AGENT_RAW_CODE = false }, function() return raw_lib.mode() end), 'native',
+  'the node default is native, so the fallback is what this case measures')
+local before_only = note_count(only_quiet.sid)
+local resumed_only = build(only_quiet.sid, false)
+eq(resumed_only.source, 'legacy', 'the record with no mode is legacy')
+eq(resumed_only.mode, 'only', 'and it keeps only, whatever the node now defaults to')
+eq(resumed_only.tools, only_quiet.tools, 'so its declared tools do not move')
+eq(resumed_only.report.changed, false, 'and its frozen prefix did not change')
+eq(note_count(only_quiet.sid) - before_only, 0, 'and it owed the model no session-update note')
+
 -- --------------------------------------------------------------- 3. the decision reaches the TOOL LIST
 -- The mechanism, stated directly: what the envelope and subagent_tool_list read is the mode on the
 -- POLICY they are handed, and build_context must have pinned it BEFORE handing it over. A native node
