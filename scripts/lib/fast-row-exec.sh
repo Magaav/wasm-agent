@@ -93,8 +93,17 @@ lua_run() { # <script> <home>
   # An EMPTY array is empty, never one empty word: '${arr[@]:-}' expands its default when the array is
   # empty, so env was asked to run the empty string - exit 127 on any process with no WASM_AGENT_* to
   # clear. The '+${arr[@]}' form below is empty when the array is, and the plain words when it is not.
-  WA_FAST_CLEARED=$(for one in ${cleared_flags[@]+"${cleared_flags[@]}"}; do [ "$one" = -u ] || printf '%s,' "$one"; done)
-  export WA_FAST_CLEARED
+  # WA_FAST_CLEARED IS FAST.SH'S, NOT OURS (review r3 MUST 1 of the hygiene split, and B's allow-list
+  # needs both facts at once). Two rows disagree on the surface and agree underneath:
+  #   * scripts/lib/fast-row-exec.sh must CLEAR by what this process actually carries - an allow-list,
+  #     because a block-list grows one measurement at a time and lets the next leak through (B,
+  #     test-build-status.lua asserts the scan and the grep -vx that make it an allow-list);
+  #   * WA_FAST_CLEARED, the TABLE the row reads, is fast.sh's own list and must be passed through
+  #     UNCHANGED - recomputing it here made it empty on a clean process and named only the one ambient
+  #     variable otherwise, so the probe row either errored or passed without checking a vault variable
+  #     (test-fast-row-cleared.sh asserts the pass-through).
+  # So: the flags below are computed, the exported table is not.
+
   # THE TABLE IS WRITTEN AFTER THE CLEARED LIST, NOT BEFORE (measured 19/11 on this branch: the table was
   # built above this point, so it recorded the PREVIOUS row's WA_FAST_CLEARED and the probe row read an
   # empty list for the very variables it exists to report). Every value in the table must be final at the
