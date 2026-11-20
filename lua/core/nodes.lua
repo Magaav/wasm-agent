@@ -9,6 +9,10 @@ local platform = dofile("lua/core/platform.lua")
 local enrollment = dofile("lua/core/enrollment.lua")
 local M = {}
 
+-- The environment a probe child is started with (see probe_peers). A child started before this name
+-- existed inherits nothing and is caught by its argv, which carries the same word.
+M.PROBE_CHILD_ENV = "WA_NODES_PROBE_CHILD"
+
 local CACHE_TTL = 15
 local cache, cache_at = nil, 0
 local operator_cache = {} -- node_id -> { at, value }: see M.operator_status
@@ -402,7 +406,13 @@ function M.list(opts)
   local live_probes = {}
   -- THREE WAYS TO NOT PROBE: a cached view, a caller that said so, and a process that IS a probe child
   -- (M.probe sets _in_probe_child). The third is the one whose absence took the node down.
-  if not opts.cached and opts.live_capabilities ~= false and not M._in_probe_child then
+  -- THE MARKER IS PROCESS-WIDE, NOT MODULE-WIDE (item 0, the 19/11 OOM). This file is `dofile`d by
+  -- fifteen callers, and each dofile gets its OWN M table: a flag set on one instance was unset on every
+  -- other, so a second instance inside a probe child fanned out again - recursively, 1,653 processes,
+  -- 23 GB. `_G.WA_IN_PROBE_CHILD` is shared by every instance in the process, and an inherited env var
+  -- carries it into a child before its first line runs.
+  if not opts.cached and opts.live_capabilities ~= false and not M._in_probe_child
+     and not _G.WA_IN_PROBE_CHILD and host.getenv(M.PROBE_CHILD_ENV) ~= '1' then
     -- opts.peers is the roster, for a caller that has one already (a test drives the fan-out with a
     -- stubbed host, and a real caller passes nothing and gets the rendezvous' answer as before).
     local peers = type(opts.peers) == "table" and opts.peers or fetch_peers(false, opts.cached)
@@ -988,7 +998,10 @@ end
 -- one of these per peer at once, so N unreachable peers cost one timeout instead of N.
 function M.probe(selector)
   -- A PROBE CHILD NEVER PROBES AGAIN: it is already the answer, and a child that fanned out forked a
-  -- tree of children (the 19/11 run that took the node down).
+  -- tree of children (the 19/11 run that took the node down). The mark is set on the GLOBAL and on this
+  -- instance: `dofile` gives every caller its own M table, so instance state alone left the other
+  -- fourteen instances free to fan out.
+  _G.WA_IN_PROBE_CHILD = true
   M._in_probe_child = true
   local node = M.find(selector)
   if not node then return { error = "node_unknown", node = tostring(selector or "") } end

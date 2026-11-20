@@ -959,6 +959,9 @@ gate_run bash scripts/test-row-at-sha.sh | grep 'test-row-at-sha: ok'
 gate_run bash scripts/test-fast-skip-count.sh | grep 'test-fast-skip-count: ok'
 # Peers probe at once, through supervised children (item 10 of the node-ops round).
 gate_run bash scripts/test-nodes-probe-parallel.sh | grep 'nodes probe parallel ok'
+# A probe mark is process-wide: two real instances, the unmarked one fans out and the marked one
+# starts nothing (scripts/test-nodes-probe-instances.lua, the 19/11 recursion).
+gate_run bash scripts/test-nodes-probe-instances.sh | grep 'nodes probe instances ok'
 # The same fan-out bounded by the kernel's own counters (pids.peak/memory.peak in a memory-accounted
 # systemd scope): a probe child that fans out again fails here (19/11: 1,653 processes, 23 GB).
 gate_run bash scripts/test-nodes-probe-bound.sh | grep 'nodes probe bound ok'
