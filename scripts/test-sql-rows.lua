@@ -89,6 +89,72 @@ check('parameters cross the same way', function()
   assert(#typed == 1 and typed[1].i == -7, 'the bound row came back')
 end)
 
+-- ---- the shapes that are easy to get wrong, probed one by one (review r2)
+-- Each of these has a way to differ between "typed rows" and "JSON text plus a pure-Lua decoder": a
+-- number a double cannot hold exactly, the two infinities (serde writes null for them), text with a
+-- NUL byte or bytes that are not UTF-8, the empty value of each type, and two columns with one name
+-- where the second is NULL (a JSON object keeps the last one; a Lua table that sets nil drops the key).
+check('integer edges come back exactly on both paths', function()
+  assert(host.sql_exec('DROP TABLE IF EXISTS seam_edges', '[]'))
+  assert(host.sql_exec('CREATE TABLE seam_edges(k TEXT, i INTEGER, r REAL, t TEXT, b BLOB)', '[]'))
+  -- 2^53+1 is the first integer a double cannot represent and math.mininteger is the smallest integer
+  -- SQLite holds. They are written as SQL LITERALS on purpose: see the parameter check below, where
+  -- the argument carrier itself rounds (identically on both paths).
+  assert(host.sql_exec("INSERT INTO seam_edges(k,i) VALUES('big', 9007199254740993)", '[]'))
+  assert(host.sql_exec("INSERT INTO seam_edges(k,i) VALUES('min', -9223372036854775808)", '[]'))
+  local sql = 'SELECT k, i FROM seam_edges ORDER BY rowid'
+  local typed = host.sql_rows(sql, '[]')
+  local decoded = json.decode(host.sql_query(sql, '[]'))
+  compare(decoded, typed, 'integer edges')
+  assert(typed[1].i == 9007199254740993, 'the value above 2^53 is exact, got ' .. tostring(typed[1].i))
+  assert(typed[2].i == math.mininteger, 'the smallest integer is exact, got ' .. tostring(typed[2].i))
+  assert(math.type(typed[1].i) == 'integer' and math.type(typed[2].i) == 'integer', 'both are Lua integers')
+end)
+
+check('an integer above 2^53 in an ARGUMENT is rounded identically on both paths', function()
+  -- The argument carrier is JSON text too, and lua/vendor/json.lua's encoder is %.14g, so a large
+  -- integer is already approximate before either path sees it. Pinned so a future encoder change is
+  -- noticed: this is a property of the carrier, not of the answer shape, and the two paths agree.
+  local approximate = json.encode({ 9007199254740993 })
+  assert(approximate == '[9.007199254741e+15]', 'the argument encoder is %.14g: ' .. approximate)
+  local typed = host.sql_rows('SELECT CAST(?1 AS INTEGER) AS i', approximate)
+  local decoded = json.decode(host.sql_query('SELECT CAST(?1 AS INTEGER) AS i', approximate))
+  compare(decoded, typed, 'big integer as a parameter')
+  assert(typed[1].i ~= 9007199254740993, 'the argument carrier rounds it before SQLite sees it')
+end)
+
+check('a non-finite REAL is an absent key on both paths', function()
+  assert(host.sql_exec("INSERT INTO seam_edges(k,r) VALUES('inf', 9e999)", '[]'))
+  assert(host.sql_exec("INSERT INTO seam_edges(k,r) VALUES('ninf', -9e999)", '[]'))
+  local sql = "SELECT k, r FROM seam_edges WHERE k IN ('inf','ninf') ORDER BY rowid"
+  local typed = host.sql_rows(sql, '[]')
+  local decoded = json.decode(host.sql_query(sql, '[]'))
+  for i = 1, #decoded do
+    assert(decoded[i].r == nil, 'the JSON path answers null, which decodes to an absent key')
+    assert(typed[i].r == nil, 'the typed path answers an absent key too, got ' .. tostring(typed[i].r))
+  end
+  compare(decoded, typed, 'non-finite REAL')
+end)
+
+check('text with a NUL byte, invalid UTF-8 and the empty values agree', function()
+  assert(host.sql_exec("INSERT INTO seam_edges(k,t) VALUES('nul', 'a' || char(0) || 'b')", '[]'))
+  assert(host.sql_exec("INSERT INTO seam_edges(k,t) VALUES('bad', CAST(x'FFFE' AS TEXT))", '[]'))
+  assert(host.sql_exec("INSERT INTO seam_edges(k,t,b) VALUES('empty', '', X'')", '[]'))
+  local sql = "SELECT k, t, b FROM seam_edges WHERE k IN ('nul','bad','empty') ORDER BY rowid"
+  local typed = host.sql_rows(sql, '[]')
+  local decoded = json.decode(host.sql_query(sql, '[]'))
+  compare(decoded, typed, 'text edges')
+  assert(typed[1].t == 'a\0b', 'the NUL byte survived: ' .. string.format('%q', typed[1].t))
+  assert(typed[2].t ~= '', 'invalid UTF-8 arrived as replacement text, not nothing')
+end)
+
+check('duplicate column names with a NULL agree', function()
+  local sql = "SELECT 1 AS x, NULL AS x, 'a' AS y UNION ALL SELECT NULL, 2, 'b'"
+  local typed = host.sql_rows(sql, '[]')
+  local decoded = json.decode(host.sql_query(sql, '[]'))
+  compare(decoded, typed, 'duplicate columns')
+end)
+
 -- ---- the path real use takes: the turn loop's own read, through memory.query
 local session = memory.start_session('local', 'chat',
   { id = 'sql-rows', user_id = 'master', node_id = 'test', title = 'sql rows' })
@@ -126,6 +192,26 @@ check('memory.session_messages takes the typed path and still decodes its column
   assert(tool_row.tool_calls[1].name == 'bash', 'the tool call survived the typed read')
   assert(type(tool_row.trace) == 'table', 'trace is still decoded into a table')
   assert(tool_row.content:find('a turn whose row holds', 1, true), 'the content column arrived')
+end)
+
+-- ---- the last probe: memory.query's own failure text is the same on both paths.
+-- This drops a table, so it runs last. The failure has to name the same cause from the same call
+-- site; a typed answer that turned a statement error into an empty table would be the bug this
+-- catches, and so would a JSON path whose error came out differently after the switch.
+check('memory.query names the same failure on both paths', function()
+  local real_rows = host.sql_rows
+  local function read_failure()
+    local ok, err = pcall(memory.session_messages, 'sql-rows', { limit = 1 })
+    assert(not ok, 'the read must fail once its table is gone')
+    return tostring(err)
+  end
+  assert(host.sql_exec('DROP TABLE messages', '[]'))
+  local typed = read_failure()
+  host.sql_rows = nil
+  local as_json = read_failure()
+  host.sql_rows = real_rows
+  assert(typed == as_json, 'both paths name the same failure:\n  typed: ' .. typed .. '\n  json:  ' .. as_json)
+  assert(typed:find('no such table: messages', 1, true), 'and it names the cause: ' .. typed)
 end)
 
 print('sql rows ok (' .. checks .. ' checks, 0 skipped)')

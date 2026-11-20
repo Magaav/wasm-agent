@@ -167,7 +167,7 @@ environment's, and both are proven rather than asserted:
    --lib`). The crate this branch changes is therefore green; the fast path's row turns red because it
    does not own the environment those two tests demand.
 
-**The parity test this branch adds is in the fast path and passed there**: `sql rows ok (5 checks, 0
+**The parity test this branch adds is in the fast path and passed there**: `sql rows ok (11 checks, 0
 skipped)` - both when run alone (`WA_SCRIPT=scripts/test-sql-rows.lua`) and as a fast-path row.
 
 **`scripts/test.sh` (the full gate): stops at `scripts/test-sentinel-service-deploy.cjs:23`** -
@@ -225,7 +225,7 @@ definition and one is the `host.sql_query` fallback.) Every one of the 41 stops 
 this branch; the before/after below is the transcript window because that is the largest payload, not
 because it is the only site.
 
-**Parity, on the path real use takes** (rule 14): `scripts/test-sql-rows.lua`, wired the way the tree
+**Parity, on the path real use takes** (rule 14): `scripts/test-sql-rows.lua`, **11 checks**, wired the way the tree
 already wires tests - the full gate runs every `tests/*.lua`, and `scripts/fast.sh` runs every
 `scripts/test-*.lua` not in `scripts/fast-path.exclude`, so this file is in the fast path by default
 (it creates its own scratch home and refuses the operator's). It compares:
@@ -237,7 +237,13 @@ already wires tests - the full gate runs every `tests/*.lua`, and `scripts/fast.
 3. bound parameters;
 4. the turn loop's own window over a 20-turn seeded session (`SELECT * ... LIMIT ?`);
 5. the switch itself - with `host.sql_query` made to raise, `memory.session_messages` still returns its
-   20 rows and still decodes `tool_calls`/`trace`, which is only possible through the typed path.
+   20 rows and still decodes `tool_calls`/`trace`, which is only possible through the typed path;
+6. the shapes that are easy to get wrong (review r2): integers at 2^53+1 and math.mininteger come
+   back exact and as Lua integers, the two infinities arrive as an absent key on both paths (serde
+   writes `null`), text with a NUL byte and text that is not UTF-8 agree, the empty string and blob
+   agree, duplicate column names with a NULL agree, an integer above 2^53 in an ARGUMENT is rounded
+   identically on both paths (the carrier is `lua/vendor/json.lua`, whose encoder is `%.14g` - pinned
+   so a change there is noticed), and `memory.query`'s own failure text is the same on both paths.
 
 **Before/after, same benchmark, same machine** (`bash scripts/bench-seams.sh --iterations 200`, avell,
 p50/p99 of `os.clock`, the binary named by `--build-info` in the header):
