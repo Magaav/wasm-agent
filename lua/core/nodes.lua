@@ -343,6 +343,9 @@ local PROBE_MAX_CHILDREN = 64
 -- The rule: if this ledger already has PROBE_MAX_CHILDREN live children owned by nodes-probe, start
 -- none and say probe_capacity by name. A peer whose child is already running is joined, not duplicated.
 local PROBE_OWNER = "nodes-probe"
+-- The host caps one await at 10 s and defaults to 1 s (operations.rs); a slice is what makes a long
+-- deadline a real wait instead of a 1 s look followed by a cancel.
+local PROBE_WAIT_SLICE_MS = 5000
 
 -- THE REGISTRY THAT ACTUALLY BOUNDS IT IS A FILE, NOT A TABLE (item 0, growth E, measured).
 --
@@ -355,41 +358,91 @@ local PROBE_OWNER = "nodes-probe"
 -- writes one more, or - when the list is already PROBE_MAX_CHILDREN long - starts nothing and says
 -- probe_capacity by name. The file is small, it is written at most once per peer per deadline, and a write
 -- that fails degrades to the per-process table above with the reason named (never to an unbounded tree).
-local function probe_lease_file()
+-- THIS PROCESS, BY SOMETHING NO OTHER PROCESS CAN WEAR (review r2, B/MUST 3).
+--
+-- The lease used to record the NODE id as its owner, and that is the same string for every process on
+-- the node: a second state read "owner" and believed the child was its own, so it awaited an id the
+-- host refuses (operation_not_yours) and every peer answered probe_leaseholder_pending. The key must
+-- name the PROCESS. pid alone is not enough either - pids are reused - so it is the pid plus the
+-- kernel's boot id, which is stable for a boot and different after a reboot. Measured: /proc/sys/
+-- kernel/random/boot_id exists on Linux; where it does not, the pid alone is used and the key says so.
+local function probe_process_key()
+  -- The host already reports both halves (measured: runtime_info carries boot_id and process_id), so
+  -- nothing is read from /proc and nothing is invented.
+  local runtime = json.decode(host.runtime_info and host.runtime_info() or "") or {}
+  local pid = tostring(runtime.process_id or "")
+  local boot = tostring(runtime.boot_id or "")
+  if pid == "" then pid = tostring(host.now()) end
+  if boot ~= "" then return "pid:" .. pid .. ":boot:" .. boot end
+  return "pid:" .. pid
+end
+
+-- A DIRECTORY OF ONE FILE PER PROCESS, NOT ONE FILE (review r2, B/MUST 4).
+--
+-- The single lease file was read, merged and written back by every caller: an unlocked
+-- read-modify-write, so two states writing at once lost one of the two entries - and the entry lost was
+-- exactly the child the other one was about to join. The host has no flock, no rename and no O_EXCL
+-- (measured: host.exec, host.read_file, host.list_dir, host.write_file and no locking primitive), so the
+-- fix is to remove the shared write entirely: each process owns <dir>/<process-key>.json and writes ONLY
+-- that file. There is no merge to lose. A reader lists the directory and reads every file, and a file
+-- whose own `at` is past the deadline belongs to a process that is gone.
+local function probe_lease_dir()
   local ok, paths = pcall(dofile, "lua/core/paths.lua")
   if not ok or type(paths) ~= "table" or type(paths.data) ~= "function" then return nil end
   local dir = paths.data()
   if type(dir) ~= "string" or dir == "" then return nil end
-  return dir .. "/nodes-probe-inflight.json"
+  return dir .. "/nodes-probe-inflight"
 end
 
-local function probe_lease_read(path, now)
-  local ok, raw = pcall(host.read_file, path)
-  if not ok or type(raw) ~= "string" or raw == "" then return {} end
+local function probe_lease_file()
+  local dir = probe_lease_dir()
+  if not dir then return nil end
+  local key = probe_process_key():gsub("[^%w]", "_")
+  return dir .. "/" .. key .. ".json"
+end
+
+local function probe_lease_entries(raw, now, live)
   local decoded = json.decode(raw)
   local rows = type(decoded) == "table" and (decoded.peers or decoded) or {}
-  local live = {}
-  if type(rows) == "table" then
-    for _, row in ipairs(rows) do
-      if type(row) == "table" then
-        local at = tonumber(row.at or 0) or 0
-        local peer = tostring(row.peer or "")
-        if peer ~= "" and (now - at) < PROBE_DEADLINE_S then
-          -- KEEP THE WHOLE ENTRY: result (the answer the holder published), op (its operation id, awaitable
-          -- only by the caller that owns it) and owner (which caller that is). Dropping them here is what
-          -- would force a joiner back to awaiting an id it does not own (review item 1).
-          live[#live + 1] = { at = at, peer = peer, op = tostring(row.op or ""),
-            owner = tostring(row.owner or ""), result = type(row.result) == "table" and row.result or nil }
-        end
+  if type(rows) ~= "table" then return end
+  for _, row in ipairs(rows) do
+    if type(row) == "table" then
+      local at = tonumber(row.at or 0) or 0
+      local peer = tostring(row.peer or "")
+      if peer ~= "" and (now - at) < PROBE_DEADLINE_S then
+        -- KEEP THE WHOLE ENTRY: result (the answer the holder published), op (its operation id, awaitable
+        -- only by the caller that owns it) and owner (which caller that is).
+        live[#live + 1] = { at = at, peer = peer, op = tostring(row.op or ""),
+          owner = tostring(row.owner or ""), result = type(row.result) == "table" and row.result or nil }
       end
+    end
+  end
+end
+
+-- READ EVERY PROCESS FILE, not one shared one (review r2, B/MUST 4): each process writes only
+-- <dir>/<its own key>.json, so a reader merges by listing the directory. A file this process cannot read
+-- is skipped, not fatal - another run being killed mid-write must not blind this one.
+local function probe_lease_read(dir, now)
+  if type(dir) ~= "string" or dir == "" then return {} end
+  local live = {}
+  local listed = host.list_dir and host.list_dir(dir) or nil
+  if type(listed) == "string" then listed = json.decode(listed) end
+  for _, item in ipairs(type(listed) == "table" and (listed.entries or {}) or {}) do
+    local name = tostring(type(item) == "table" and item.name or "")
+    if name:match("%.json$") then
+      local ok, raw = pcall(host.read_file, dir .. "/" .. name)
+      if ok and type(raw) == "string" and raw ~= "" then probe_lease_entries(raw, now, live) end
     end
   end
   return live
 end
 
 local function probe_lease_write(path, live)
-  local ok = pcall(host.write_file, path, json.encode({ peers = live }))
-  return ok
+  -- REVIEW r1 MUST 5: this was `local ok = pcall(...); return ok`, which is true whenever the CALL did
+  -- not raise - so probe_lease_unwritable could never fire for a write the host refused. The host
+  -- returns its own success flag; both are required.
+  local ok, wrote = pcall(host.write_file, path, json.encode({ peers = live }))
+  return ok and wrote ~= false and wrote ~= nil
 end
 local function probe_children_alive(now)
   if type(host.operation) ~= "function" then return nil, "no_operation_host" end
@@ -438,10 +491,13 @@ local function probe_peers(peers, opts)
   local program = tostring(runtime.binary_path or "")
   if program == "" then return {} end
   local inflight, now, alive = probe_inflight()
+  -- The lease is a DIRECTORY of one file per process (see probe_lease_dir): lease_path names this
+  -- process own file, lease_dir the directory every state reads.
+  local lease_dir = probe_lease_dir()
   local lease_path = probe_lease_file()
   local lease, lease_why = nil, nil
   if lease_path then
-    local ok, live = pcall(probe_lease_read, lease_path, now)
+    local ok, live = pcall(probe_lease_read, lease_dir, now)
     if ok and type(live) == "table" then lease = live else lease_why = "probe_lease_unreadable" end
   else
     lease_why = "probe_lease_no_data_dir"
@@ -477,7 +533,7 @@ local function probe_peers(peers, opts)
         launched[#launched + 1] = { id = id, joined = true, from_lease = true, result = published[id] }
       elseif type(joined) == "table" and joined.result ~= nil then
         launched[#launched + 1] = { id = id, joined = true, from_lease = true, result = joined.result }
-      elseif type(joined) == "table" and joined.owner == tostring((M.identity() or {}).node_id or "") then
+      elseif type(joined) == "table" and joined.owner == probe_process_key() then
         -- The lease is OURS: this process (or a state in it) owns the child, so awaiting its real id is
         -- allowed and is the honest way to get the answer. Only an owned child may be awaited.
         launched[#launched + 1] = { id = id, operation_id = joined.op, joined = true, owned = true }
@@ -501,8 +557,13 @@ local function probe_peers(peers, opts)
           launched[#launched + 1] = { id = id, operation_id = answer.operation_id }
           inflight[id] = { op = answer.operation_id, at = now }
           lease_add[#lease_add + 1] = { at = now, peer = id, op = answer.operation_id,
-            owner = tostring((M.identity() or {}).node_id or "") }
+            owner = probe_process_key() }
           alive = alive + 1
+          -- WRITTEN RIGHT AFTER START (review r2, B/MUST 4), not after the awaits. The old shape wrote the
+          -- lease only when every await had finished, so a second state starting in the meantime saw no
+          -- entry, started a duplicate child, and the fan-out the lease exists to prevent happened anyway.
+          -- One write per started child, into THIS process own file: there is no merge to lose.
+          if lease_path then probe_lease_write(lease_path, lease_add) end
         end
       end
     end
@@ -514,6 +575,10 @@ local function probe_peers(peers, opts)
   if why_shared then out.__shared_bound = why_shared end
   -- Collect the answers this call is entitled to get, and publish every one of them for the next caller.
   local settled_results = {}
+  -- A NEGATIVE IS PUBLISHED TOO (review r2, B/MUST 6): a joiner that finds no answer spins for the whole
+  -- deadline and then reports its own timeout, which is a second 20 s wait for a fact the first caller
+  -- already learned. probe_timeout and probe_unreadable go into the lease like any other answer.
+  local negative = {}
   for _, entry in ipairs(launched) do
     if entry.wait_lease then
       -- WAIT ON THE FILE: the owner publishes there. Polling the lease is the only cross-caller wait that
@@ -521,7 +586,7 @@ local function probe_peers(peers, opts)
       local waited_ms = 0
       local limit_ms = tonumber(opts.deadline_s or PROBE_DEADLINE_S) * 1000
       while waited_ms < limit_ms do
-        local again = probe_lease_read(lease_path, now)
+        local again = probe_lease_read(lease_dir, now)
         local found = nil
         for _, row in ipairs(again) do
           if row.peer == entry.id and type(row.result) == "table" then found = row.result end
@@ -539,19 +604,35 @@ local function probe_peers(peers, opts)
       out[entry.id] = entry.result
       settled_results[entry.id] = entry.result
     else
-      local settled, state = pcall(host.operation, "await", json.encode({ id = entry.operation_id,
-        wait_s = tonumber(opts.deadline_s or PROBE_DEADLINE_S) }))
-      local snapshot = settled and (json.decode(state) or {}) or {}
+      -- MUST 1 + MUST 2 (review r2). The host decides ownership by the OWNER the caller names
+      -- (operations.rs, Caller::owns: a sessionless caller owns the rows started under its own owner),
+      -- so an await that names no owner is refused even for the child this process started - measured:
+      -- every peer answered probe_leaseholder_pending. And the host reads wait_ms only (cap 10 s,
+      -- default 1 s): wait_s is ignored, so a 20 s deadline was really a 1 s wait followed by a
+      -- cancel. The wait is therefore slices of wait_ms up to the deadline, refreshing `now` each time.
+      local deadline_ms = tonumber(opts.deadline_s or PROBE_DEADLINE_S) * 1000
+      local waited_ms, snapshot = 0, {}
+      while true do
+        local slice = math.min(PROBE_WAIT_SLICE_MS, math.max(1, deadline_ms - waited_ms))
+        local settled, state = pcall(host.operation, "await", json.encode({ id = entry.operation_id,
+          owner = PROBE_OWNER, wait_ms = slice }))
+        snapshot = settled and (json.decode(state) or {}) or {}
+        if type(snapshot) ~= "table" or snapshot.settled == true or snapshot.error then break end
+        waited_ms = waited_ms + slice
+        if waited_ms >= deadline_ms then break end
+        now = host.now()
+      end
       if type(snapshot) == "table" and snapshot.error and not entry.owned then
         -- The host refused this id (not ours). Never cancel someone else operation, and never call that
         -- a timeout: the leaseholder still owns it and will publish.
         out[entry.id] = { capabilities = nil, reason = "probe_leaseholder_pending" }
       elseif snapshot.settled ~= true then
-        pcall(host.operation, "cancel", json.encode({ id = entry.operation_id }))
-        out[entry.id] = { capabilities = nil, reason = "probe_timeout" }
+        pcall(host.operation, "cancel", json.encode({ id = entry.operation_id, owner = PROBE_OWNER }))
+        negative[entry.id] = { capabilities = nil, reason = "probe_timeout" }
+        out[entry.id] = negative[entry.id]
       else
         local read_ok, chunk = pcall(host.operation, "read", json.encode({ id = entry.operation_id,
-          stream = "stdout", offset = 0, limit = 65536 }))
+          stream = "stdout", offset = 0, limit = 65536, owner = PROBE_OWNER }))
         local text = read_ok and (json.decode(chunk) or {}) or {}
         local body = tostring(text.content or text.data or "")
         local decoded = nil
@@ -565,12 +646,14 @@ local function probe_peers(peers, opts)
           out[entry.id] = answer
           settled_results[entry.id] = answer
         else
-          out[entry.id] = { capabilities = nil, reason = "probe_unreadable" }
+          negative[entry.id] = { capabilities = nil, reason = "probe_unreadable" }
+          out[entry.id] = negative[entry.id]
         end
       end
     end
   end
   -- PUBLISH WHAT WAS LEARNED (and keep every other live lease). This is what makes a joiner cheap.
+  for peer_id, value in pairs(negative) do settled_results[peer_id] = value end
   if lease_path and (next(settled_results) ~= nil or #lease_add > 0) then
     local merged, seen = {}, {}
     for _, entry in ipairs(lease or {}) do
