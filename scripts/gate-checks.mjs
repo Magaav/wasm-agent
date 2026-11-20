@@ -32,6 +32,9 @@ export function catalog(repo) {
       available:fs.existsSync(`${repo}/scripts/test-wave-restart.mjs`),resources:{cpu:1,memory_mb:512,exclusive:['fixture-git']},coverage:['scripts/lib/wave-*.mjs','lua/core/wave*.lua'],isolation:'private Git/home/DB and native children; public adapter uses real Orca fixture resources'},
     {id:'wave-public',command:[process.execPath,'scripts/test-wave-public.mjs'],binary:true,verdict:'proof',proof_kind:'wavePublic',minimum:20,
       available:fs.existsSync(`${repo}/scripts/test-wave-public.mjs`),resources:{cpu:1,memory_mb:512,exclusive:['fixture-git']},coverage:['scripts/lib/wave-*.mjs','lua/core/wave*.lua'],isolation:'private Git/home/DB and native children; public adapter uses real Orca fixture resources'},
+    {id:'discrimination',command:[process.execPath,'scripts/test-discriminates-test.mjs'],verdict:'js',
+      available:fs.existsSync(repo + '/scripts/test-discriminates-test.mjs'),resources:{cpu:1,memory_mb:256,exclusive:['fixture-git']},
+      coverage:['scripts/test-discriminates.sh'],isolation:'private Git repository and home; no node, no binary, no network'},
     {id:'full',command:['bash','scripts/test.sh'],verdict:'smoke',
       resources:{cpu:'WA_GATE_JOBS or cargo default',memory_mb:null,exclusive:['production-gate']},coverage:['*'],
       isolation:'full gate owns scratch home; requires production reservation; run finish.mjs gate'}

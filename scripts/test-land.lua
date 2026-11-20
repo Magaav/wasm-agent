@@ -689,6 +689,61 @@ eq(vacuous, 1, "a check that proves nothing is not green")
 eq(step_of("case5", "gate").error, "gate_vacuous", "the refusal is named")
 contains(step_of("case5", "gate").detail, "proved nothing", "the detail says the run proved nothing")
 
+-- ---------------------------------------------------------------- case 5b: a resume keeps what already passed
+-- A resume re-ran EVERY gate check, so one red check made the operator pay again for every green one (the
+-- 15-minute cargo checks included). Now a check that passed on this tree_commit with this command is kept, by
+-- name, and only the red one runs again; a changed command is not the same check and runs again.
+do -- its own block: the file is at the main chunk's 200-local limit
+local function counting_check(name)
+  local path = host.paths().home .. "/land-gate/count-" .. name .. ".sh"
+  write_file(path, string.format([[#!/usr/bin/env bash
+COUNT="%s/land-gate/count-%s.n"
+echo $(( $(cat "$COUNT" 2>/dev/null || echo 0) + 1 )) > "$COUNT"
+MODE="$(cat "%s/land-gate/count-%s.state" 2>/dev/null || echo pass)"
+[ "$MODE" = pass ] && { echo "%s ok"; exit 0; }
+echo "FAIL %s: fake red check"; exit 1
+]], host.paths().home, name, host.paths().home, name, name, name))
+  return path
+end
+local function count_of(name)
+  return tonumber((read_file(host.paths().home .. "/land-gate/count-" .. name .. ".n") or "0"):match("%d+")) or 0
+end
+local function set_count_gate(name, mode)
+  write_file(host.paths().home .. "/land-gate/count-" .. name .. ".state", mode .. "\n")
+end
+local green_path, red_path, stop_path = counting_check("green"), counting_check("later"), counting_check("stopper")
+set_count_gate("green", "pass")
+set_count_gate("later", "fail")
+set_count_gate("stopper", "fail")
+-- `stopper` stays red throughout, so every attempt stops at the gate and nothing is pushed by this case.
+local function keep_checks(extra)
+  return { { name = "green", command = "bash " .. green_path .. (extra or ""), timeout = 120 },
+           { name = "later", command = "bash " .. red_path, timeout = 120 },
+           { name = "stopper", command = "bash " .. stop_path, timeout = 120 } }
+end
+observed.pushes = 0
+eq(land.run({ run = "case5b", ring = SOLO_RING, branches = { "change/one" }, checks = keep_checks() }), 1,
+  "a red second check stops the landing")
+eq(count_of("green"), 1, "the green check ran once")
+eq(count_of("later"), 2, "the red check ran twice (beside, then alone)")
+set_count_gate("later", "pass")
+eq(land.run({ run = "case5b", ring = SOLO_RING, resume = true, checks = keep_checks() }), 1, "the resume stops at stopper")
+eq(count_of("green"), 1, "the resume KEPT the check that passed on this tree - it did not run again")
+eq(count_of("later"), 3, "the resume ran the red check again")
+eq(count_of("stopper"), 2, "and reached the next check")
+local gate5b = journal_of("case5b").gate
+eq(gate5b[1].kept, true, "the kept check is marked kept in the journal")
+eq(gate5b[1].tree_commit, journal_of("case5b").tree_commit, "it is kept for the sha it passed on")
+eq(gate5b[2].kept, nil, "the re-run check is not marked kept")
+contains(read_file(step_of("case5b", "gate").evidence) or "", "green: kept - passed on", "the evidence names the kept check")
+-- a changed command is a different check: it runs again even on the same tree; an unchanged one stays kept
+eq(land.run({ run = "case5b", ring = SOLO_RING, resume = true, checks = keep_checks(" # changed") }), 1, "still stopped")
+eq(count_of("green"), 2, "a changed command is not kept: it runs again")
+eq(count_of("later"), 3, "the check that passed on its first run last time is kept now")
+eq(count_of("stopper"), 4, "the check that failed twice runs again")
+eq(observed.pushes, 0, "no attempt of this case pushed")
+end
+
 -- ---------------------------------------------------------------- case 6: resume after the deploy failed on node 3
 -- A fresh repository: case 2 landed these branches and advanced main, so merging them again here would be a
 -- no-op and the tip would already BE main - the run would have nothing to push and prove nothing.
@@ -1349,6 +1404,22 @@ must("git -C " .. repo .. " checkout -q " .. rows_ref, "restore the fixture chec
 -- narrows only on a NON-EMPTY WA_FAST_ROWS ([ -n "$WA_FAST_ROWS" ]), so one inherited from the environment
 -- would narrow a --full run that wrote no rows file - a run executing less than it said, obeying somebody
 -- else's plan.
+-- Review r2, MUST 2 and 3: the gate must hand the discrimination check the ROUND it is judging. Without
+-- --branches a Refactor-only line never gets refused in a multi-branch round, and without the round's
+-- base the check re-judges tests against origin/main when this round merged incoming/main instead.
+do
+  local command = land.gate_command({ name = "discrimination", command = "bash scripts/test-discriminates.sh origin/main" },
+    nil, { journal = { base = "deadbeefcafe", branches = { { name = "change/a" }, { name = "change/b" } } } })
+  contains(command, "--branches", "MUST 2: the gate names the round's branches: " .. tostring(command))
+  contains(command, "'change/a,change/b'", "MUST 2: both branch names travel: " .. tostring(command))
+  contains(command, "deadbeefcafe", "MUST 3: the round's base travels, not a hard-coded origin/main: " .. tostring(command))
+  local single = land.gate_command({ name = "discrimination", command = "bash scripts/test-discriminates.sh origin/main" },
+    nil, { journal = { base = "cafe", branches = { { name = "change/one" } } } })
+  contains(single, "change/one", "a single-branch round still names its branch: " .. tostring(single))
+  eq(land.gate_command({ name = "prompt-docs", command = "bash scripts/sync-prompt-docs.sh --check" },
+    nil, { journal = { base = "cafe", branches = {} } }), "bash scripts/sync-prompt-docs.sh --check",
+    "and no other check is touched by the round fields")
+end
 eq(land.gate_command({ name = "fast", command = "bash scripts/fast.sh" }, nil),
   "WA_FAST_ROWS= bash scripts/fast.sh", "no rows file means an EMPTY WA_FAST_ROWS, not an absent one")
 eq(land.gate_command({ name = "fast", command = "bash scripts/fast.sh" }, "/tmp/rows.txt"),
@@ -1368,7 +1439,7 @@ local gate_commands = {}
 -- Only the gate's own checks are answered here (they are held to their command); everything else - the row
 -- inventory the rows file is proved with, the git calls - still runs for real.
 local function is_gate_check(command)
-  for _, marker in ipairs({ "scripts/fast.sh", "scripts/test-codemode-component.sh", "scripts/gate-cargo-codemode.sh", "cargo test", "sync-prompt-docs" }) do
+  for _, marker in ipairs({ "scripts/fast.sh", "scripts/test-codemode-component.sh", "scripts/gate-cargo-codemode.sh", "cargo test", "sync-prompt-docs", "test-discriminates.sh" }) do
     if command:find(marker, 1, true) then return true end
   end
   return false
@@ -1383,6 +1454,8 @@ land.weight_decorator = ""
 eq(land.impl.gate(added_run, {}), true, "a narrowed gate runs")
 eq(gate_commands[1], "WA_FAST_ROWS='" .. land.run_dir("rows-added") .. "/gate-rows.txt' bash scripts/fast.sh",
   "the narrowed gate runs the fast check with the round's rows file (got " .. tostring(gate_commands[1]) .. ")")
+contains(table.concat(gate_commands, "\n"), "scripts/test-discriminates.sh",
+  "the gate runs the discrimination check: a branch whose new test does not discriminate cannot land")
 gate_commands = {}
 eq(land.impl.gate(added_run, { full = true }), true, "a --full gate runs")
 eq(gate_commands[1], "WA_FAST_ROWS= bash scripts/fast.sh",

@@ -727,6 +727,11 @@ if command -v node >/dev/null 2>&1; then
   # dirty-canonical refusal, and the upstream-delta classification that decides what is retested.
   # Seconds, self-contained (a fixture repository and a fixture ledger), so it belongs here and not
   # only in the nightly gate.
+  # Does this branch's own test catch this branch's own change? A test that still passes with the
+  # branch's non-test changes reverted would not have caught the bug it was written for, and it is
+  # named here by its path (19-20/11: three of ten hidden tests did not discriminate, and every
+  # review of that round carried a test MUST). Self-contained: a fixture repository, no binary.
+  check discrimination node scripts/test-discriminates-test.mjs
   check landing-queue node scripts/test-landing-queue.mjs
   # The one build root (13/11: 73 build folders, ~196 GB, none ever deleted): one directory every build
   # kind resolves through, one child per tree inside it, a sweep that deletes what older layouts left,

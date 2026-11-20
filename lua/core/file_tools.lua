@@ -129,7 +129,81 @@ local function read_image(args,store_image)
   }
 end
 
-function M.read(args,store_image,view_bytes)
+-- The pages this session was actually GIVEN, per scope and path: the one fact an edit cannot
+-- reconstruct from the file itself. MEASURED 19-20/11: two missions edited a file after a read that
+-- had returned only part of it, so the anchor was taken from a view the model believed was complete.
+-- The file cannot say which bytes the caller saw, so the read records it here.
+--
+-- Bounded, in-process and per scope: a page that is evicted (or a session that outlives the process)
+-- leaves no record, and no record means no restriction - this fence only ever refuses an edit whose
+-- anchor is provably outside the page the same session was served. It never guesses.
+local PAGES,page_order={},{}
+local PAGE_LIMIT=64
+local RANGES_PER_FILE=16
+local function page_key(scope,path) return tostring(scope or '')..'\0'..tostring(path or '') end
+local function record_page(scope,path,version,truncated,first_byte,last_byte,first_line,last_line)
+  if not scope then return end
+  local key=page_key(scope,path)
+  local page=PAGES[key]
+  if not page then
+    page_order[#page_order+1]=key
+    if #page_order>PAGE_LIMIT then
+      local old=table.remove(page_order,1);PAGES[old]=nil
+    end
+    page={version=version,whole=false,ranges={}}
+    PAGES[key]=page
+  end
+  -- A read of newer bytes starts the record over: the page a caller is working from belongs to the
+  -- version it just saw, and ranges of an older version would allow an anchor this file no longer has.
+  if page.version~=version then page.version=version;page.whole=false;page.ranges={} end
+  -- One whole-file read settles it: at this version the caller has seen every byte, so no anchor can
+  -- be outside what it was given. That is why this is an allow-list of pages, not a denylist of ranges.
+  if not truncated then page.whole=true;page.ranges={};return end
+  page.ranges[#page.ranges+1]={first_byte=first_byte,last_byte=last_byte,
+    first_line=first_line,last_line=last_line}
+  while #page.ranges>RANGES_PER_FILE do table.remove(page.ranges,1) end
+end
+function M.pages_for(scope,path) return PAGES[page_key(scope,path)] end
+function M.forget_pages() PAGES,page_order={},{} end
+-- True when every byte the caller was served at this version is one of these ranges; nil when this
+-- session has no record of the file at this version, which is not a refusal (nothing was promised).
+local function within_pages(page,version,byte)
+  if not page or page.version~=version then return nil end
+  if page.whole then return true end
+  if #page.ranges==0 then return nil end
+  for _,r in ipairs(page.ranges) do
+    if byte>=r.first_byte and byte<=r.last_byte then return true end
+  end
+  return false
+end
+-- True when EVERY byte from a to b is covered by the union of the served ranges; nil when this
+-- session has no page for the file at this version. Checking only the two ends let an anchor whose
+-- first byte sat in one served page and whose last byte sat in another pass with a gap of bytes the
+-- caller never saw in between (review r1 SHOULD 2). The ranges are merged on the fly in byte order,
+-- so overlapping or adjacent served pages count as one cover.
+local function covered_pages(page,version,a,b)
+  if not page or page.version~=version then return nil end
+  if page.whole then return true end
+  if #page.ranges==0 then return nil end
+  local sorted={}
+  for i,r in ipairs(page.ranges) do sorted[i]=r end
+  table.sort(sorted,function(x,y) return x.first_byte<y.first_byte end)
+  local at=a
+  for _,r in ipairs(sorted) do
+    if r.last_byte<at then
+      -- an earlier range, already behind the cursor
+    elseif r.first_byte>at then
+      return false
+    else
+      if r.last_byte>=b then return true end
+      at=r.last_byte+1
+    end
+  end
+  return false
+end
+-- Nil scope (a direct module call, a batch that carries no session) records nothing and is never
+-- fenced: the fence is about a page the session was served, and there is no session here.
+function M.read(args,store_image,view_bytes,scope)
   if type(args.path)~='string' or args.path=='' then return {error='path_required'} end
   local line=integer(args.offset,1,2147483647)
   local column=integer(args.column,1,2147483647)
@@ -180,16 +254,71 @@ function M.read(args,store_image,view_bytes)
   local view_budget=math.min(output.MAX_BYTES,tonumber(view_bytes) or output.MAX_BYTES)
   local capacity=view_budget-2048
   local part,next_byte=output.slice(text:sub(1,last),first,capacity)
+  -- envelope() writes the byte range it actually produced here, so the page recorded after the shrink
+  -- loop is the page that is RETURNED (a whole-file page carries no range{} field).
+  local served={}
   local function envelope()
     local next_line=line
     while starts[next_line+1] and starts[next_line+1]<=next_byte do next_line=next_line+1 end
     if next_byte>#text then next_line=total+1 end
     local next_column=next_byte-(starts[next_line] or (#text+1))+1
+    local end_line=#part>0 and (next_column==1 and next_line-1 or next_line) or nil
+    -- What the caller has of the file, and what it does not. Every page names its byte range, the
+    -- file's own size and line count, so "4 KB of 186 KB" is never something the caller has to infer
+    -- from a cursor. MEASURED 19-20/11: two sessions edited a file from a page that looked whole - the
+    -- envelope carried next_offset and total_lines and never the size of the file behind it.
+    -- WHAT A PAGE RETURNS, in three names the caller can compute with: file_size (the file), bytes_read
+    -- (this page) and total_lines. The byte range is spelled out only when the page is NOT the whole
+    -- file - on a whole-file page it would repeat offset/end_offset and cost every small read bytes to
+    -- say "all of it" twice (review r1 SHOULD 1).
+    local page_first_byte=first
+    local page_last_byte=first+#part-1
+    served.first,served.last=page_first_byte,page_last_byte
     local result={path=args.path,content=part,version=hash,offset=line,column=column,
       next_offset=next_line,next_column=next_column,eof=next_byte>#text,range_complete=next_byte>last,
-      total_lines=total,bytes=#text,returned_bytes=#part,
-      end_offset=#part>0 and (next_column==1 and next_line-1 or next_line) or nil,
+      total_lines=total,bytes=#text,file_size=#text,bytes_read=#part,returned_bytes=#part,
+      end_offset=end_line,
       note='Raw text, no synthetic line numbering. Continue with next_offset, next_column and version.'}
+    -- Always a boolean, never an absent field: a caller reading the flag must not have to tell
+    -- "the whole file" from "a node too old to say". Truncated means one thing - this page is not
+    -- the whole file - and says which side is missing, because a page that starts at line 50 and
+    -- runs to eof read "less than the whole file" too.
+    local missing_after=next_byte<=#text
+    local missing_before=first>1
+    result.truncated=missing_before or missing_after
+    if result.truncated then
+      -- A zero-byte page has a start and nothing else: no last_byte/last_line, never a backwards range
+      -- (first_byte 18, last_byte 17) - the same rule truncation{} follows (review r2, SHOULD A).
+      result.range={first_byte=page_first_byte,first_line=line}
+      if #part>0 then result.range.last_byte=page_last_byte; result.range.last_line=end_line end
+      local reason=missing_after and (column==1 and next_byte>last
+        and 'the requested lines ended before the last line of the file'
+        or 'this page reached the per-call byte budget')
+        or 'the read started after the first byte of the file'
+      local ways={}
+      if missing_after then
+        ways[#ways+1]='more follows: call read with truncation.next and follow next_offset until eof'
+      end
+      if missing_before then
+        ways[#ways+1]='earlier lines were not returned: start again at offset 1, column 1'
+      end
+      -- last_byte/last_line are absent when nothing was returned: a page of zero bytes has no last
+      -- byte, and printing "18-17" was a range no caller can use (review r1 SHOULD 5).
+      result.truncation={reason=reason,bytes_read=#part,file_size=#text,
+        first_byte=page_first_byte,first_line=line,lines_in_file=total,
+        missing_before=missing_before,missing_after=missing_after}
+      if #part>0 then
+        result.truncation.last_byte=page_last_byte
+        result.truncation.last_line=end_line
+      end
+      if missing_after then
+        result.truncation.next={path=args.path,offset=next_line,column=next_column,version=hash}
+      end
+      result.how_to_read_rest=(#part>0
+          and ('returned bytes '..page_first_byte..'-'..page_last_byte..' of '..#text)
+          or ('no bytes returned of '..#text..' bytes'))
+        ..' in '..total..' lines; '..table.concat(ways,'; ')..'.'
+    end
     -- A complete whole-line read is also a durable edit address. It is opaque so the model
     -- cannot accidentally trim byte coordinates while retaining the digest for the wider page.
     if column==1 and next_byte>last and #part>0 and line<=total then
@@ -207,6 +336,12 @@ function M.read(args,store_image,view_bytes)
     capacity=math.floor(capacity/2);part,next_byte=output.slice(text:sub(1,last),first,capacity);result=envelope()
   end
   if #json.encode(result)>view_budget or (#part==0 and next_byte<=#text) then return {error='read_envelope_exceeds_budget',version=hash} end
+  -- Record the page that is ACTUALLY RETURNED, once, and only here (review r1 MUST 1). This used to
+  -- run inside envelope(), which the shrink loop above calls again for every smaller capacity, so a
+  -- page the caller never saw was recorded - and the first pass was a whole-file page whenever the
+  -- raw bytes fit but their JSON-escaped form did not, which set whole=true and turned the fence off
+  -- for the rest of the session. A refused read records nothing: there is no page.
+  record_page(scope,args.path,hash,result.truncated,served.first,served.last,line,result.end_offset)
   return result
 end
 -- `old_text` is quoted from memory, and the measured cause of a miss is *not* whitespace: in
@@ -356,7 +491,7 @@ function M.prepare_write(args)
     result={ok=true,path=args.path,previous_version=hash,version=host.sha256(args.content)}}
 end
 
-function M.edit(args,record,prepare_only)
+function M.edit(args,record,prepare_only,scope)
   if type(args.path)~='string' or args.path=='' then return {error='path_required'} end
   local range_form=args.range_edits~=nil
   local legacy_form=args.edits~=nil or args.old_text~=nil or args.new_text~=nil
@@ -492,6 +627,25 @@ function M.edit(args,record,prepare_only)
       -- Overlapping occurrences are ambiguous too (e.g. 'aa' in 'aaa').
       if text:find(item.old_text,a+1,true) then return {error='old_text_ambiguous',edit=i} end
       ranges[#ranges+1]={a=a,b=b,text=item.new_text,index=i,target=text:sub(a,b)}
+    end
+  end
+  -- An anchor taken from a page the caller believes is the whole file, when the page was not the whole
+  -- file, is the failure this fence exists for: the edit is refused BY NAME, with the page's real range
+  -- and the way to see the rest, instead of landing on a partial view. Only a page THIS session was
+  -- served can refuse: no record, no restriction (see page_key above).
+  if scope then
+    local page=M.pages_for(scope,args.path)
+    for _,r in ipairs(ranges) do
+      if covered_pages(page,hash,r.a,r.b)==false then
+        return {error='edit_anchor_outside_read_page',path=args.path,edit=r.index,
+          anchor_byte=r.a,anchor_line=line_of(text,r.a),
+          anchor_last_byte=r.b,anchor_last_line=line_of(text,r.b),
+          pages=page and page.ranges or nil,
+          note='this session read only part of this file: some of the bytes the anchor covers were '
+            ..'never returned by a read. Read the page that holds it (read with offset/column, or '
+            ..'truncation.next) and quote the bytes from that page; a whole-file read of the same '
+            ..'version clears this.'}
+      end
     end
   end
   table.sort(ranges,function(a,b)return a.a<b.a end)

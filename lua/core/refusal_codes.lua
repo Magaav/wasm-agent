@@ -95,6 +95,7 @@ return {
   ['done_gate_too_many_checks']='done_gate.lua',
   ['done_gate_unknown_action']='done_gate.lua',
   ['duplicate_message_id']='session_view.lua',
+  ['edit_anchor_outside_read_page']='file_tools.lua',
   ['edit_applied_but_record_failed']='file_tools.lua',
   ['edits_required_1_to_64']='file_tools.lua',
   ['email_component_absent']='tools.lua',
