@@ -129,6 +129,15 @@ const CLEANUP_MS: u64 = 1000;
 /// past this many tracked operations the answer is a named refusal BEFORE anything is created - so work
 /// is never half-admitted, and 16 code-mode handles per session, each starting a few operations, fit
 /// with room for the node's own shells.
+/// How long a wait sleeps before it polls an operation this process does not own (review r2, item 2).
+///
+/// An operation in this process has a condvar and is woken the instant it settles; one that is not has
+/// only a file to read, so the wait has to be the clock. 100 ms is short enough that a settling
+/// operation is noticed at once by a human reading the transcript and long enough that a long wait is
+/// four syscalls a second instead of a saturated core. The floor keeps a zero budget from spinning.
+pub const FOREIGN_POLL_MIN: Duration = Duration::from_millis(100);
+pub const FOREIGN_POLL_MAX: Duration = Duration::from_millis(1000);
+
 const MAX_TRACKED: usize = 128;
 pub const COMMAND_OUTPUT_IDLE_MS: u64 = 100;
 const VIEW_BYTES: usize = 24 * 1024;
@@ -1110,7 +1119,17 @@ impl Manager {
                 .wait_timeout_while(state, budget, |s| s["settled"] != true)
                 .map_err(error)?;
             drop(state);
+            return self.snapshot(id);
         }
+        // A FOREIGN OPERATION IS POLLED, NOT BUSY-LOOPED (review r2, item 2). An operation that is not in
+        // THIS process's memory has no condvar to wait on, so this used to fall straight through to
+        // snapshot() and answer at once. The await loop in wa-capabilities calls this in a `loop`, so a
+        // foreign operation that never settles became a hot spin: a core burned at 100% for the whole
+        // wait, on a node that was already busy. The poll is now the wait: sleep the budget (bounded,
+        // whole milliseconds, never zero) and answer one snapshot. 4 polls a second instead of millions,
+        // and the caller's own deadline still bounds the total.
+        let nap = budget.min(FOREIGN_POLL_MAX).max(FOREIGN_POLL_MIN);
+        std::thread::sleep(nap);
         self.snapshot(id)
     }
 }

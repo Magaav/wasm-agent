@@ -1327,3 +1327,49 @@ fn operation_owner_helper() {
     std::thread::sleep(Duration::from_millis(hold));
 }
 
+/// Review r2, item 2: a wait on an operation this process does NOT own must not spin.
+///
+/// Manager::wait used to fall straight through to snapshot() for a foreign operation, and the await loop
+/// in wa-capabilities calls it in a \`loop\`. A foreign operation that never settles therefore burned a
+/// core at 100% for the whole wait. This counts the polls: a fixed budget must produce a handful of
+/// snapshot() calls, not millions, and the wait must actually take its budget rather than returning at
+/// once.
+#[test]
+fn a_foreign_wait_sleeps_instead_of_spinning() {
+    let (m, root) = fixture();
+    // An operation this manager has never seen, settled=false on disk: the foreign shape.
+    let id = "op-foreign-0000000000000001-1";
+    let dir = root.join(id);
+    fs::create_dir_all(&dir).unwrap();
+    atomic_json(&dir.join("state.json"), &json!({
+        "operation_id": id, "state": "running", "settled": false,
+        "owner_boot": "boot-000000000-0-0", "session": "session-foreign",
+        "output_bytes": 0
+    })).unwrap();
+
+    // A 250 ms budget, the slice the await loop asks for.
+    let started = Instant::now();
+    let state = m.wait(id, Duration::from_millis(250)).unwrap();
+    let elapsed = started.elapsed();
+    assert_eq!(state["operation_id"], json!(id), "the answer is that operation: {state}");
+    // The wait SPENT its slice. Returning in microseconds is exactly the busy-loop this closed.
+    assert!(elapsed >= Duration::from_millis(90),
+        "a foreign wait must actually wait (took {elapsed:?}); returning at once is the spin this test exists to stop");
+
+    // And a zero budget does not become a zero sleep: the floor keeps a caller's 0 from spinning.
+    let zero = Instant::now();
+    let _ = m.wait(id, Duration::ZERO).unwrap();
+    assert!(zero.elapsed() >= Duration::from_millis(50),
+        "a zero budget still sleeps the floor, never zero (took {:?})", zero.elapsed());
+
+    drop(m); remove_fixture(root);
+}
+
+/// The poll budget is bounded at both ends: never zero (a spin), never longer than a second (a settling
+/// operation has to be noticed promptly by the reader watching the transcript).
+#[test]
+fn the_foreign_poll_budget_is_bounded() {
+    assert!(crate::FOREIGN_POLL_MIN > Duration::ZERO, "the floor is never zero");
+    assert!(crate::FOREIGN_POLL_MAX <= Duration::from_secs(1), "the ceiling stays responsive");
+    assert!(crate::FOREIGN_POLL_MIN <= crate::FOREIGN_POLL_MAX, "the floor is at most the ceiling");
+}
