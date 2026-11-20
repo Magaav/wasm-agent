@@ -17,14 +17,14 @@ local memory = dofile('lua/core/memory.lua'); memory.setup()
 local checks = 0
 local function ok(v, label) checks = checks + 1; if not v then error(label, 0) end end
 
--- The golden values, read from a27490af by running the same dump there.
+-- The golden values, measured HERE on the merged tree (review r5): the prompt text moved in 39bbf2b6 and this branch adds the run tool, so no upstream commit can reproduce these bytes.
 local GOLDEN = {
-  only     = { tools = '',         hash = '057f65b0232cdfd8306f4a0b695ab0e0b7642172ba6f1c3f37afa2dad795e86b' },
-  first    = { tools = 'codemode', hash = '057f65b0232cdfd8306f4a0b695ab0e0b7642172ba6f1c3f37afa2dad795e86b' },
-  codemode = { tools = 'codemode', hash = '87c9e2bf3c65cb831cb2d9bb2e55eb25ec582d42b431e435907c8576570abb01' },
-  off      = { tools = 'codemode', hash = '87c9e2bf3c65cb831cb2d9bb2e55eb25ec582d42b431e435907c8576570abb01' },
-  on       = { tools = 'codemode', hash = 'b4e568c8c0890a561eec0ac4e62c641e36f638e93ee16d4b69e6c0ec208e81fb' },
-  stop     = { tools = 'codemode', hash = 'b4e568c8c0890a561eec0ac4e62c641e36f638e93ee16d4b69e6c0ec208e81fb' },
+  only     = { tools = '',         hash = '88d9f4e136be1587531c3fa20e93e94789fe3d13791a678ed05f4abfbc83e040' },
+  first    = { tools = 'codemode', hash = '88d9f4e136be1587531c3fa20e93e94789fe3d13791a678ed05f4abfbc83e040' },
+  codemode = { tools = 'codemode', hash = '67edddf0c185de81c497cb7f6ab7a6c18d0e59fdeb8cf0b8b94fbc3c21edf004' },
+  off      = { tools = 'codemode', hash = '67edddf0c185de81c497cb7f6ab7a6c18d0e59fdeb8cf0b8b94fbc3c21edf004' },
+  on       = { tools = 'codemode', hash = '58fb3d378c0df7e66f51d916aead1ab74e9959988dc6690f5d5092e37ece0897' },
+  stop     = { tools = 'codemode', hash = '58fb3d378c0df7e66f51d916aead1ab74e9959988dc6690f5d5092e37ece0897' },
 }
 
 local real_getenv = host.getenv

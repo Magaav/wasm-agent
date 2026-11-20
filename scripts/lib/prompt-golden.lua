@@ -90,5 +90,28 @@ function M.encode(golden)
   return json.encode({ system = golden.system, tools = golden.tools })
 end
 
+-- The NAMED differences between this branch and the release it merges (39bbf2b6), as an ALLOW-LIST: a
+-- line matching one of these is expected to differ, and the comparison removes it from BOTH sides.
+-- Anything else that differs FAILS. That is what stops a self-recorded golden from agreeing with
+-- itself: the reference is upstream's own bytes, and only these shapes may move.
+M.DIFFERENT = {
+  '^The %d+ other tools this role may call are found with',  -- this branch adds the run tool (count +1)
+  '^%- run$',                                                -- and its schema row in the full envelope list
+  '^Work in code: call the run tool with',                   -- the native guidance sentence
+  '^You may also run a script by ending your message with',  -- the block guidance it replaces on on/stop
+}
+
+function M.upstream_view(system)
+  local kept = {}
+  for line in (tostring(system or '') .. '\n'):gmatch('(.-)\n') do
+    local drop = false
+    for _, pattern in ipairs(M.DIFFERENT) do
+      if line:match(pattern) then drop = true break end
+    end
+    if not drop then kept[#kept + 1] = line end
+  end
+  return table.concat(kept, '\n')
+end
+
 M.json = json
 return M

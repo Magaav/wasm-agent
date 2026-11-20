@@ -1,4 +1,4 @@
--- The full built system prompt and declared tool list, pinned as goldens RECORDED FROM a27490af
+-- The full built system prompt and declared tool list, pinned as goldens RECORDED FROM 39bbf2b6
 -- (rel review r2, item 4). Two things this catches that a hash of a rebuilt block cannot:
 --   * the goldens were recorded by scripts/generate-prompt-goldens.lua running ON a27490af, so they
 --     describe what that commit really sent - not what this tree believes it sent;
@@ -100,7 +100,7 @@ local NOTICE_CASE = 'progressive-only'
 for _, case in ipairs(cases) do
   local path = ROOT .. '/' .. case.name .. '.json'
   local body = host.read_file(path)
-  ok(type(body) == 'string' and body ~= '', 'the golden exists: ' .. path .. ' (regenerate with scripts/generate-prompt-goldens.lua on a27490af)')
+  ok(type(body) == 'string' and body ~= '', 'the golden exists: ' .. path .. ' (regenerate with scripts/generate-prompt-goldens.lua on 39bbf2b6)')
   local want = json.decode(body)
   local built = build({ WASM_AGENT_RAW_CODE = case.mode, WASM_AGENT_ENVELOPE_MODE = case.envelope }, case.subagent)
   local got = golden.normalize(built)
@@ -111,15 +111,38 @@ for _, case in ipairs(cases) do
   local base_notices = #golden.notice_lines(want.system)
   local built_notices = #golden.notice_lines(got.system)
   eq(built_notices, 0, case.name .. ': this branch puts no conform notice line in the prompt')
-  if case.name == NOTICE_CASE then
-    eq(base_notices, 1, NOTICE_CASE .. ': a27490af carried the conform notice in this prompt (the one case)')
-    eq(golden.without_notices(got.system), golden.without_notices(want.system),
-      NOTICE_CASE .. ': and every other byte of that prompt matches a27490af')
-  else
-    eq(base_notices, 0, case.name .. ': a27490af carried no conform notice in this prompt')
-    eq(got.system, want.system, case.name .. ': the full built system prompt matches a27490af')
+  eq(base_notices, 0, case.name .. ': 39bbf2b6 carries no conform notice in this prompt')
+  -- The reference is 39bbf2b6 OWN bytes, so the comparison cannot agree with itself. The four
+  -- shapes this branch changes BY DESIGN are removed from both sides (prompt-golden.DIFFERENT, an
+  -- allow-list); every other byte must match, and a line outside that list fails by name.
+  eq(golden.upstream_view(got.system), golden.upstream_view(want.system), case.name .. ': the full built system prompt matches 39bbf2b6 outside the named differences')
+  -- The declared tools, against 39bbf2b6 OWN list: this branch ADDS `run` and gives the `codemode`
+  -- description the batching sentence. Those two shapes are named here; every other schema must be
+  -- byte-identical, and a tool that appears or vanishes fails by name.
+  local function by_name(list)
+    local out = {}
+    for _, item in ipairs(list or {}) do out[item['function'].name] = item end
+    return out
   end
-  eq(json.encode(got.tools), json.encode(want.tools), case.name .. ': the declared tool list matches a27490af')
+  local got_tools, want_tools = by_name(got.tools), by_name(want.tools)
+  -- `run` is this branch addition wherever it appears; 39bbf2b6 never declares it.
+  ok(want_tools.run == nil, case.name .. ': 39bbf2b6 does not declare the run tool')
+  got_tools.run = nil
+  -- The codemode description is the one schema field this branch changes on purpose.
+  if got_tools.codemode and want_tools.codemode then
+    local mine, ref = got_tools.codemode['function'], want_tools.codemode['function']
+    local mine_desc, ref_desc = mine.description, ref.description
+    mine.description, ref.description = nil, nil
+    eq(json.encode(mine), json.encode(ref), case.name .. ': the codemode schema matches 39bbf2b6 apart from its description')
+    eq(mine_desc ~= ref_desc, true, case.name .. ': and its description is where this branch batching sentence lives')
+  end
+  local function names_of(list)
+    local out = {}
+    for n in pairs(list) do out[#out + 1] = n end
+    table.sort(out)
+    return table.concat(out, ',')
+  end
+  eq(names_of(got_tools), names_of(want_tools), case.name .. ': the declared tool list matches 39bbf2b6 apart from the run tool this branch adds')
 end
 
 -- ---------------------------------------------------------------- a default node is arm B
