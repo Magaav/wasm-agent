@@ -82,6 +82,59 @@ Run in the base worktree, same command, same result:
   full stop or the bracket".
 * `lua scripts/test-cli-view.lua`: dies at `cli_view.lua:1094` (`in field 'new'`).
 
+## Review r1: the two MUSTs, and what they measured
+
+**MUST 1 - a table is not a card (`03331441`).** `lua/core/markdown.lua` paints a table with the SAME
+`mdCodeBlockBorder` role a card uses, so the frame check caught tables: a body row was cut by cells and
+took `│↪` into its own closing bar. Measured on the renderer, a table's rules carry a column divider or
+a corner the card never has (`┬ ┼ ┴ ┐ ┘ ┤`) and its body rows END in a border bar (one per column
+plus the closing one). `card_edge` now refuses both. Test `a_table_is_not_a_card_and_keeps_the_prose_rule_byte_for_byte`
+(**FAILS on the code without this commit**, measured) wraps every table row at 120/60/40 and requires the
+prose bytes and every bar to survive; a second test proves the frame state comes back clean so the next
+fence is still cut. End to end, the table rows are **byte-identical to the base binary**:
+
+```text
+base rows: ['│ cell one │ cell two │', '│ head a   │ head b   │', '└─', '├──────────┼──────────┤']
+head rows: ['│ cell one │ cell two │', '│ head a   │ head b   │', '└─', '├──────────┼──────────┤']
+```
+
+**MUST 2 - an indented card (`194a13dd`).** The renderer paints the indent and the bar together
+(`paint(indent .. "│ ")`), so the colour lands on an EARLIER cell than the bar and a check of the bar
+cell alone missed every fence nested in a list. `border_before` looks from the row start through the bar,
+and a continuation now repeats the indent (`  │↪`), so the card stays inside its list. Test
+`an_indented_card_is_cut_and_its_indent_repeats_on_every_continuation` (**FAILS without this commit**,
+measured) drives a real indented card at 40 columns.
+
+## Resize: the host CUTS, it does not re-render
+
+The brief hoped a resize would re-render cards at the new width "when the source is available". It is
+not, and this change does not pretend otherwise: the host holds the rendered rows, not the markdown
+source, so a resize **cuts** the existing card rows at the new width (`CardWrap`). The card keeps its
+border and its code; it does not re-flow to different line breaks. Re-rendering would need the fence
+source kept beside the rows - a larger change than this defect justified.
+
+## SHOULD items (`c310b8bb`)
+
+* **The colour is pinned, not hardcoded blindly.** There is no theme channel (Lua paints, Rust receives
+  bytes), so the constant stays - but `the_card_border_colour_is_the_one_the_theme_table_names` reads the
+  role's own value out of `lua/core/cli_view.lua` and fails when the two drift. Proved: pointing the
+  constant at `1;2;3` makes it FAIL.
+* The untagged ONE-LINE card is in the pty answer and checked.
+* The no-op `.max(0)` on a `usize` is gone.
+* The pty test's own frame detector now uses the same table discriminator as the host - it was reporting
+  the table as a broken card, which is how the table defect was confirmed from the other side.
+
+## Cleanup: my probe leftovers, and the calls they made
+
+Three directories, listed before deleting: `~/.wasm-agent/tmp/fc-probe-{11qs2J,axOTUK,zhhYuN}`. They are
+**deleted**; no other directory under `~/.wasm-agent/tmp` was touched (22,400 entries remain).
+
+The live inference those two probes caused, counted from their own ledgers (no secret read):
+**5 assistant messages** (2 + 2 + 1) went through the vault at `127.0.0.1:8810` between 04:36 and 04:38.
+The vault log shows 23 `POST /chat/completions` in those two minutes, but that log is shared with every
+other process using the vault, so **I cannot attribute the rest to myself** - the 5 is what my own
+ledgers prove.
+
 ## A mistake I made, and what it cost
 
 My first two probes started `tmux` **without** `env -i`, so the child inherited the operator's shell
