@@ -265,3 +265,18 @@ fn a_broken_bundle_refuses_the_agent_instead_of_falling_back() {
     .is_err());
     let _ = server;
 }
+
+/// The scheme is the gate: a plain URL consults no anchor, so a bundle the machine cannot read is not
+/// its problem - and a TLS URL still refuses with that bundle named (review r1, item 7).
+#[test]
+fn a_plain_url_is_answered_without_reading_the_bundle() {
+    let _env = Env::set_text(CERT_FILE, "/nonexistent/wa-tls/typo.pem");
+    assert!(tls_config_for("https://example.invalid/").is_err(), "a TLS url still refuses");
+    let plain = tls_config_for("http://127.0.0.1:1/health").expect("a plain url consults no anchor");
+    assert_eq!(anchored(&plain), None, "and it asks for nothing: the compiled-in bundle");
+    assert!(is_tls("wss://relay.example/ws"));
+    assert!(is_tls("https://api.example/v1"));
+    assert!(!is_tls("ws://relay.example/ws"));
+    assert!(!is_tls("http://127.0.0.1:8799/health"));
+    assert!(!is_tls("not a url"));
+}

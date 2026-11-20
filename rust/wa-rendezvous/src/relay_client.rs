@@ -72,17 +72,20 @@ pub fn take_jobs() -> Vec<RelayJob> {
 /// the discard belong to this module, and a fake poster measures them without a relay or a key.
 pub type Poster = Arc<dyn Fn(&str, u16, &str) -> Result<(), String> + Send + Sync>;
 
-fn agent(timeout: Duration) -> Result<ureq::Agent, String> {
+fn agent(url: &str, timeout: Duration) -> Result<ureq::Agent, String> {
     // The relay's anchors are the machine's answer: SSL_CERT_FILE / SSL_CERT_DIR, read by wa-tls. A
     // relay behind a private CA is reachable, and a bundle named there that cannot be read is named
     // here rather than turned into an unexplained TLS failure on every poll.
-    let anchors = wa_tls::tls_config().map_err(|error| format!("tls_anchors_unavailable:{error}"))?;
-    Ok(ureq::Agent::config_builder()
+    let mut builder = ureq::Agent::config_builder()
         .http_status_as_error(false)
-        .tls_config(anchors)
-        .timeout_global(Some(timeout))
-        .build()
-        .into())
+        .timeout_global(Some(timeout));
+    // A plain http:// relay consults no anchor, so a bundle the machine cannot read must not stop it
+    // (review r1, item 7); an https relay still refuses with that bundle named.
+    if wa_tls::is_tls(url) {
+        builder = builder
+            .tls_config(wa_tls::tls_config().map_err(|error| format!("tls_anchors_unavailable:{error}"))?);
+    }
+    Ok(builder.build().into())
 }
 
 fn signed(identity: &Identity, action: &str) -> (String, String, String) {
@@ -102,8 +105,9 @@ fn signed(identity: &Identity, action: &str) -> (String, String, String) {
 pub(crate) fn respond(identity: &Identity, relay_url: &str, id: &str, status: u16, body: &str) -> Result<(), String> {
     let (ts, signature, node_id) = signed(identity, "relay-respond");
     let payload = json!({ "node_id": node_id, "id": id, "status": status, "body": body }).to_string();
-    agent(Duration::from_secs(30))?
-        .post(&format!("{}/relay/respond", relay_url.trim_end_matches('/')))
+    let url = format!("{}/relay/respond", relay_url.trim_end_matches('/'));
+    agent(&url, Duration::from_secs(30))?
+        .post(&url)
         .header("Content-Type", "application/json")
         .header("x-wa-node", &node_id)
         .header("x-wa-pub", &identity.public_key)
@@ -264,7 +268,7 @@ pub fn spawn(relay_url: String) {
                 "{}/relay/poll?node_id={node_id}",
                 relay_url.trim_end_matches('/')
             );
-            let agent = match agent(Duration::from_secs(40)) {
+            let agent = match agent(&url, Duration::from_secs(40)) {
                 Ok(agent) => agent,
                 Err(error) => {
                     if polling.swap(false, Ordering::SeqCst) {
@@ -470,6 +474,17 @@ mod tls_anchor_tests {
         let server = Server::start();
         respond(&identity, server.base(), "job-1", 200, "{}")
             .expect("the CA in the directory SSL_CERT_DIR names");
+    }
+
+    /// A plain http:// relay consults no anchor: the answer still goes out when the machine named a
+    /// bundle it cannot read (review r1, item 7).
+    #[test]
+    fn a_broken_bundle_does_not_refuse_a_plain_relay_answer() {
+        let dir = TempDir::new("relay-answer-plain");
+        let _env = Env::set_text(wa_tls::CERT_FILE, "/nonexistent/wa-rendezvous/typo.pem");
+        let identity = identity(&dir);
+        let server = Server::start_plain();
+        respond(&identity, server.base(), "job-1", 200, "{}").expect("a plain relay answer needs no anchors");
     }
 
     #[test]

@@ -248,11 +248,14 @@ impl Inbound {
 fn connect_ws(
     request: tungstenite::http::Request<()>,
 ) -> Result<(Socket, tungstenite::http::Response<Option<Vec<u8>>>), String> {
-    let Some(connector) = ws_connector()? else {
+    // A plain ws:// connection hands nothing to TLS, so the machine's bundle is not consulted and a
+    // bundle it cannot read must not refuse the upgrade (review r1, item 7).
+    let encrypted = request.uri().scheme_str() == Some("wss");
+    let connector = if encrypted { ws_connector()? } else { None };
+    let Some(connector) = connector else {
         return tungstenite::connect(request).map_err(|error| error.to_string());
     };
     let uri = request.uri().clone();
-    let encrypted = uri.scheme_str() == Some("wss");
     let host = uri
         .host()
         .ok_or_else(|| "ws_handshake: the url names no host".to_string())?
@@ -587,13 +590,15 @@ fn exchange(url: String, method: String, headers: Vec<(String, String)>, body: V
     // (a provider adapter, an MCP client) reaching an https endpoint on a host with its own CA must
     // work, and a bundle named by SSL_CERT_FILE / SSL_CERT_DIR that cannot be read is a named refusal
     // here rather than a silent fall back.
-    let anchors = wa_tls::tls_config().map_err(|error| error.to_string())?;
-    let agent: ureq::Agent = ureq::Agent::config_builder()
+    let mut builder = ureq::Agent::config_builder()
         .http_status_as_error(false)
-        .tls_config(anchors)
-        .timeout_global(Some(Duration::from_secs(120)))
-        .build()
-        .into();
+        .timeout_global(Some(Duration::from_secs(120)));
+    // Only a TLS scheme can consult an anchor, so only a TLS scheme may be refused for one: a broken
+    // bundle must not take a plain http:// exchange down with it (review r1, item 7).
+    if wa_tls::is_tls(&url) {
+        builder = builder.tls_config(wa_tls::tls_config().map_err(|error| error.to_string())?);
+    }
+    let agent: ureq::Agent = builder.build().into();
     let mut response = agent.run(request).map_err(|e| e.to_string())?;
     let status = response.status().as_u16();
     let headers = response
@@ -832,6 +837,39 @@ mod tls_anchor_tests {
         let error = get("https://example.invalid/").expect_err("a named source that cannot be read");
         assert!(error.contains("SSL_CERT_FILE"), "{error}");
         assert!(error.contains("typo.pem"), "{error}");
+    }
+
+    /// The scheme decides whether a bundle is consulted at all: a plain exchange and a plain ws://
+    /// upgrade must both keep working when the machine named one that cannot be read (review r1, item 7).
+    #[test]
+    fn a_broken_bundle_does_not_refuse_a_plain_http_exchange() {
+        let _env = Env::set_text(wa_tls::CERT_FILE, "/nonexistent/wa-kernel-runtime/typo.pem");
+        let server = Server::start_plain();
+        let outcome = get(&server.url("/health")).expect("a plain exchange needs no anchors");
+        assert_eq!(outcome.status, 200);
+        assert_eq!(outcome.body, b"ok");
+    }
+
+    #[test]
+    fn a_broken_bundle_does_not_refuse_a_plain_ws_upgrade() {
+        let _env = Env::set_text(wa_tls::CERT_FILE, "/nonexistent/wa-kernel-runtime/typo.pem");
+        let server = Server::start_plain_websocket();
+        let mut conn = WsConn::open(&server.ws_url("/ws"), None)
+            .expect("a plain ws:// upgrade consults no anchors");
+        assert_eq!(conn.send(b"ping".to_vec()), 0, "the frame is queued");
+        let mut echoed = None;
+        for _ in 0..300 {
+            let state = conn.next();
+            if state > 0 {
+                echoed = conn.take();
+                break;
+            }
+            if state == CLOSED {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(echoed.as_deref(), Some(&b"ping"[..]), "the plain server echoed the frame back");
     }
 
     /// A real upgrade, a frame there and back, only when the machine names the bundle.

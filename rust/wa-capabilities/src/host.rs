@@ -377,9 +377,9 @@ fn http_timeouts() -> (u64, u64, u64) {
     (connect, read, respond)
 }
 
-fn build_config(read: u64) -> Result<ureq::config::Config, String> {
+fn build_config(url: &str, read: u64) -> Result<ureq::config::Config, String> {
     let (_, _, respond) = http_timeouts();
-    build_config_with(read, respond)
+    build_config_with(url, read, respond)
 }
 
 /// The same shape, with the response deadline named by the caller.
@@ -388,31 +388,40 @@ fn build_config(read: u64) -> Result<ureq::config::Config, String> {
 /// then says nothing used to hold the run for the global response timeout, three times over, before
 /// anything was reported (measured 10/11: 12 minutes, session a073ee85). `first_response_seconds`
 /// lets that call bound itself in tens of seconds and name the outcome (`provider_stalled`).
-fn build_config_with(read: u64, respond: u64) -> Result<ureq::config::Config, String> {
+fn build_config_with(url: &str, read: u64, respond: u64) -> Result<ureq::config::Config, String> {
     let (connect, _, _) = http_timeouts();
-    // Whose certificates are trusted is the machine's answer, not this call's. wa-tls reads
-    // SSL_CERT_FILE / SSL_CERT_DIR the way OpenSSL does; a bundle named there that cannot be read is
-    // a refusal with that bundle in the message, never a quiet fall back to Mozilla's roots.
-    let anchors = wa_tls::tls_config().map_err(|error| error.to_string())?;
-    Ok(ureq::Agent::config_builder()
+    // Whose certificates are trusted is the machine's answer, not this call's - for a request that
+    // can consult an anchor at all. wa-tls reads SSL_CERT_FILE / SSL_CERT_DIR the way OpenSSL does; a
+    // bundle named there that cannot be read is a refusal with that bundle in the message, never a
+    // quiet fall back to Mozilla's roots. A plain http:// request never hands anything to TLS, so a
+    // broken bundle must not refuse it (review r1, item 7): the room a loopback provider, a local
+    // relay or an http MCP server needs.
+    let mut builder = ureq::Agent::config_builder()
         .http_status_as_error(false)
-        .tls_config(anchors)
         .timeout_connect(Some(std::time::Duration::from_secs(connect)))
         .timeout_recv_response(Some(std::time::Duration::from_secs(respond)))
-        .timeout_recv_body(Some(std::time::Duration::from_secs(read)))
-        .build())
+        .timeout_recv_body(Some(std::time::Duration::from_secs(read)));
+    if wa_tls::is_tls(url) {
+        builder = builder.tls_config(wa_tls::tls_config().map_err(|error| error.to_string())?);
+    }
+    Ok(builder.build())
 }
 
-fn agent() -> Result<ureq::Agent, String> {
-    static HTTP_AGENT: OnceLock<ureq::Agent> = OnceLock::new();
-    if let Some(agent) = HTTP_AGENT.get() {
+fn agent(url: &str) -> Result<ureq::Agent, String> {
+    // One static per case, and this is not tidiness: an agent built for a plain URL carries no
+    // anchors, and reusing it for a TLS call would silently ignore the machine's bundle. An agent
+    // built for a TLS URL is the only one a handshake may use.
+    static TLS_AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+    static PLAIN_AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+    let cache = if wa_tls::is_tls(url) { &TLS_AGENT } else { &PLAIN_AGENT };
+    if let Some(agent) = cache.get() {
         return Ok(agent.clone());
     }
     let (_, read, _) = http_timeouts();
-    let agent: ureq::Agent = build_config(read)?.into();
+    let agent: ureq::Agent = build_config(url, read)?.into();
     // Only an agent that was built is remembered: an environment that cannot answer about trust is
     // re-read on the next call instead of being cached as a failure for the life of the process.
-    Ok(HTTP_AGENT.get_or_init(|| agent).clone())
+    Ok(cache.get_or_init(|| agent).clone())
 }
 
 /// The agent to use for one provider call.
@@ -423,32 +432,32 @@ fn agent() -> Result<ureq::Agent, String> {
 /// transport (`http_transport`): the socket is registered with the task, so a
 /// cancel from another thread wakes a silent read immediately, and the body
 /// budget still bounds a provider that never speaks at all.
-fn agent_for_call() -> Result<ureq::Agent, String> {
+fn agent_for_call(url: &str) -> Result<ureq::Agent, String> {
     if !crate::subagents::in_task() {
-        return agent();
+        return agent(url);
     }
     let (_, read, _) = http_timeouts();
     let body = match crate::subagents::remaining_budget() {
         Some(remaining) => remaining.as_secs().clamp(1, read.max(1)),
         None => read,
     };
-    Ok(crate::http_transport::agent(build_config(body)?))
+    Ok(crate::http_transport::agent(build_config(url, body)?))
 }
 
 /// The agent for one provider stream, with the caller's own deadline on the wait for a response
 /// and on the silence between body reads. A child still runs under its shutdown-aware transport.
-fn agent_for_stream(first_response_seconds: u64) -> Result<ureq::Agent, String> {
+fn agent_for_stream(url: &str, first_response_seconds: u64) -> Result<ureq::Agent, String> {
     let (_, read, respond) = http_timeouts();
     let read = read.min(first_response_seconds.max(1));
     let respond = respond.min(first_response_seconds.max(1));
     if !crate::subagents::in_task() {
-        return Ok(build_config_with(read, respond)?.into());
+        return Ok(build_config_with(url, read, respond)?.into());
     }
     let body = match crate::subagents::remaining_budget() {
         Some(remaining) => remaining.as_secs().clamp(1, read.max(1)),
         None => read,
     };
-    Ok(crate::http_transport::agent(build_config_with(body, respond)?))
+    Ok(crate::http_transport::agent(build_config_with(url, body, respond)?))
 }
 
 /// Unified cancellation for the Lua loop: true when the current run or the
@@ -1865,14 +1874,14 @@ pub extern "C-unwind" fn http(l: *mut LuaState) -> c_int {
     let outcome = (|| -> Result<Value, String> {
         let response = match method.as_str() {
             "GET" => {
-                let mut request = agent_for_call()?.get(&url);
+                let mut request = agent_for_call(&url)?.get(&url);
                 for (key, value) in &headers {
                     request = request.header(key, value);
                 }
                 request.call().map_err(|e| e.to_string())?
             }
             "POST" => {
-                let mut request = agent_for_call()?.post(&url);
+                let mut request = agent_for_call(&url)?.post(&url);
                 for (key, value) in &headers {
                     request = request.header(key, value);
                 }
@@ -2498,7 +2507,7 @@ pub extern "C-unwind" fn http_sse(l: *mut LuaState) -> c_int {
     let (_, read, _) = http_timeouts();
     let total = std::time::Duration::from_secs(seconds as u64);
     let total = crate::subagents::remaining_budget().map(|remaining| total.min(remaining)).unwrap_or(total);
-    let config = match build_config(read) {
+    let config = match build_config(&url, read) {
         Ok(config) => config,
         // No answer about trust, so no request: the shape every other refusal here takes.
         Err(error) => {
@@ -2634,7 +2643,7 @@ pub extern "C-unwind" fn relay(l: *mut LuaState) -> c_int {
     let body = arg_string(l, 3).unwrap_or_default();
     let headers = parse_headers(&headers_json);
     let outcome = (|| -> Result<Value, String> {
-        let mut request = agent()?.post(&url);
+        let mut request = agent(&url)?.post(&url);
         for (key, value) in &headers {
             request = request.header(key, value);
         }
@@ -2960,7 +2969,7 @@ fn stream_completion(method: &str, url: &str, headers: &[(String, String)], body
         crate::subagents::clear_active_socket();
         return Err("run_cancelled".into());
     }
-    let agent = if first_response_seconds > 0 { agent_for_stream(first_response_seconds)? } else { agent_for_call()? };
+    let agent = if first_response_seconds > 0 { agent_for_stream(url, first_response_seconds)? } else { agent_for_call(url)? };
     let mut request = agent.post(url);
     for (key, value) in headers {
         request = request.header(key, value);
@@ -6391,10 +6400,10 @@ mod tls_anchor_tests {
 
     /// The two agents a provider call can get: the plain one and, for a child, the shutdown-aware
     /// transport. Both are built from the same config, and both must answer the same way.
-    fn agents() -> Vec<ureq::Agent> {
+    fn agents(url: &str) -> Vec<ureq::Agent> {
         vec![
-            agent_for_stream(5).expect("the anchors this environment names"),
-            crate::http_transport::agent(build_config(10).expect("the anchors this environment names")),
+            agent_for_stream(url, 5).expect("the anchors this environment names"),
+            crate::http_transport::agent(build_config(url, 10).expect("the anchors this environment names")),
         ]
     }
 
@@ -6402,7 +6411,7 @@ mod tls_anchor_tests {
     fn a_provider_call_refuses_a_private_ca_that_no_bundle_names() {
         let _env = Env::clear();
         let server = Server::start();
-        for agent in agents() {
+        for agent in agents(&server.url("/v1/messages")) {
             let error = agent
                 .get(&server.url("/v1/messages"))
                 .call()
@@ -6419,11 +6428,27 @@ mod tls_anchor_tests {
         }
     }
 
+    /// A broken bundle names a source wa cannot read, and a plain http:// request never consults one:
+    /// it must still go through (review r1, item 7). Before this, the refusal happened when the agent
+    /// was built, and took the loopback provider, the local relay and an http MCP server with it.
+    #[test]
+    fn a_broken_bundle_does_not_refuse_a_plain_http_request() {
+        let _env = Env::set_text(wa_tls::CERT_FILE, "/nonexistent/wa-capabilities/typo.pem");
+        let server = scratch::Server::start_plain();
+        let mut response = agent_for_stream(&server.url("/v1/messages"), 5)
+            .expect("a plain request needs no anchors")
+            .get(&server.url("/v1/messages"))
+            .call()
+            .expect("the plain server answers");
+        assert_eq!(response.status().as_u16(), 200);
+        assert_eq!(response.body_mut().read_to_string().unwrap(), "ok");
+    }
+
     #[test]
     fn a_provider_call_reaches_a_private_ca_named_by_ssl_cert_file() {
         let _env = Env::set(&[(wa_tls::CERT_FILE, &scratch::cert_file())]);
         let server = Server::start();
-        for agent in agents() {
+        for agent in agents(&server.url("/v1/messages")) {
             let mut response = agent
                 .get(&server.url("/v1/messages"))
                 .call()
@@ -6436,15 +6461,16 @@ mod tls_anchor_tests {
     #[test]
     fn a_broken_bundle_refuses_the_call_with_the_bundle_in_the_message() {
         let _env = Env::set_text(wa_tls::CERT_FILE, "/nonexistent/wa-capabilities/typo.pem");
-        let error = agent_for_stream(5).expect_err("a named source that cannot be read is not a fall back");
+        let error = agent_for_stream("https://example.invalid/", 5)
+            .expect_err("a named source that cannot be read is not a fall back");
         assert!(error.contains("SSL_CERT_FILE"), "{error}");
         assert!(error.contains("typo.pem"), "{error}");
         // The same refusal from the config every capability builds its agent from, not only from the
         // one function a test happened to call. agent() itself is deliberately not asserted on: it
         // remembers the one agent it built, so in a test process another test may have built it
         // already, and the anchors it was built with are the ones wa-tls gave at that moment.
-        assert!(build_config(10).is_err());
-        assert!(build_config_with(10, 5).is_err());
-        assert!(agent_for_stream(5).is_err());
+        assert!(build_config("https://example.invalid/", 10).is_err());
+        assert!(build_config_with("https://example.invalid/", 10, 5).is_err());
+        assert!(agent_for_stream("https://example.invalid/", 5).is_err());
     }
 }

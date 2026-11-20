@@ -68,6 +68,18 @@ impl Server {
         Server::start_with("server.pem", "server.key", Answer::Http)
     }
 
+    /// A plain-HTTP server on the same loopback pattern: the destination of the request that must keep
+    /// working when the machine's CA bundle cannot be read (no handshake, so no anchors).
+    pub fn start_plain() -> Server {
+        Server::plain(false)
+    }
+
+    /// A plain ws:// websocket server: the same upgrade and echo, without TLS. It is what proves a
+    /// broken CA bundle does not refuse a plain websocket upgrade (review r1, item 7).
+    pub fn start_plain_websocket() -> Server {
+        Server::plain(true)
+    }
+
     /// A server whose certificate is signed by [`other_cert_file`].
     pub fn start_other() -> Server {
         Server::start_with("other-server.pem", "other-server.key", Answer::Http)
@@ -78,6 +90,32 @@ impl Server {
     /// that uses this, which is the point of it.
     pub fn start_websocket() -> Server {
         Server::start_with("server.pem", "server.key", Answer::Echo)
+    }
+
+    fn plain(websocket: bool) -> Server {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback port for the scratch server");
+        listener.set_nonblocking(true).expect("a non-blocking listener");
+        let port = listener.local_addr().expect("the scratch server's address").port();
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&stop);
+        let worker = std::thread::spawn(move || {
+            while !flag.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        if websocket {
+                            serve_plain_websocket(stream)
+                        } else {
+                            serve_plain(stream)
+                        }
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5))
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        Server { base: format!("http://127.0.0.1:{port}"), stop, worker: Some(worker) }
     }
 
     fn start_with(certificate: &str, key: &str, answer: Answer) -> Server {
@@ -119,7 +157,12 @@ impl Server {
     /// The same server as a websocket URL: a websocket client parses only ws:// and wss://, and the
     /// handshake and the certificate are the same ones.
     pub fn ws_url(&self, path: &str) -> String {
-        format!("wss://{}{path}", &self.base["https://".len()..])
+        let (scheme, rest) = match self.base.split_once("://") {
+            Some((scheme, rest)) => (scheme, rest),
+            None => ("http", self.base.as_str()),
+        };
+        let scheme = if scheme == "https" { "wss" } else { "ws" };
+        format!("{scheme}://{rest}{path}")
     }
 }
 
@@ -167,6 +210,47 @@ fn server_config(certificate: &str, key: &str) -> ServerConfig {
         .expect("a server config from the fixture material")
 }
 
+/// The plain-HTTP sibling of serve: the same answer, without a handshake in front of it.
+fn serve_plain(stream: std::net::TcpStream) {
+    use std::io::Read as _;
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
+    let mut socket = stream;
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    while !head.windows(4).any(|window| window == b"\r\n\r\n") {
+        match socket.read(&mut byte) {
+            Ok(1) => head.push(byte[0]),
+            _ => return,
+        }
+        if head.len() > 64 * 1024 {
+            return;
+        }
+    }
+    let _ = socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+    let _ = socket.flush();
+}
+
+/// The plain sibling of a websocket server: the same handshake and echo over a bare TCP stream.
+fn serve_plain_websocket(stream: std::net::TcpStream) {
+    use std::io::Read as _;
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
+    let mut socket = stream;
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    while !head.windows(4).any(|window| window == b"\r\n\r\n") {
+        match socket.read(&mut byte) {
+            Ok(1) => head.push(byte[0]),
+            _ => return,
+        }
+        if head.len() > 64 * 1024 {
+            return;
+        }
+    }
+    serve_websocket(&mut socket, &head);
+}
+
 fn serve(stream: std::net::TcpStream, config: &Arc<ServerConfig>, answer: Answer) {
     let _ = stream.set_nonblocking(false);
     let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
@@ -199,7 +283,7 @@ fn serve(stream: std::net::TcpStream, config: &Arc<ServerConfig>, answer: Answer
 /// Written out rather than delegated to a websocket library: the test question is which TLS anchors
 /// the CLIENT used, so the server job is to be a correct, boring peer - and a peer the test can read
 /// is easier to trust than a second library defaults.
-fn serve_websocket(tls: &mut StreamOwned<ServerConnection, std::net::TcpStream>, head: &[u8]) {
+fn serve_websocket<IO: Read + Write>(tls: &mut IO, head: &[u8]) {
     let text = String::from_utf8_lossy(head).to_string();
     let Some(key) = header(&text, "sec-websocket-key") else {
         return;

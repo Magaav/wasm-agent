@@ -103,6 +103,27 @@ pub fn tls_config() -> Result<TlsConfig, RootsError> {
     value
 }
 
+/// Does this URL ask for a TLS handshake?
+///
+/// Only https and wss do. A plain http or ws request never consults a trust anchor, which is why a
+/// bundle the machine cannot read must not take one down (review r1, item 7).
+pub fn is_tls(url: &str) -> bool {
+    match url.split_once("://") {
+        Some((scheme, _)) => scheme.eq_ignore_ascii_case("https") || scheme.eq_ignore_ascii_case("wss"),
+        None => false,
+    }
+}
+
+/// The anchors for one request: the machine's answer when the URL is TLS, and the compiled-in bundle
+/// (which such a request never consults) when it is not - so a broken bundle cannot refuse a plain
+/// request, and a TLS one still refuses with the bundle named.
+pub fn tls_config_for(url: &str) -> Result<TlsConfig, RootsError> {
+    if !is_tls(url) {
+        return Ok(TlsConfig::builder().root_certs(RootCerts::WebPki).build());
+    }
+    tls_config()
+}
+
 /// The same answer for an environment named explicitly rather than read from the process: the same
 /// rule, the same errors, and no process-wide state - what a caller that holds its own configuration
 /// (and what wa_tls::scratch::Env) uses.

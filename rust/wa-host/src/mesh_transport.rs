@@ -34,15 +34,19 @@ impl wa_mesh::http::Transport for UreqTransport {
         // node behind a private CA, and SSL_CERT_FILE / SSL_CERT_DIR is how that machine says so
         // (19/11: an https relay in a cloud sandbox was unreachable until a bridge was bolted on).
         // A bundle named there that cannot be read is this hop's refusal, not a quiet fall back.
-        let anchors = wa_tls::tls_config().map_err(|error| format!("tls_anchors_unavailable:{error}"))?;
-        let agent: ureq::Agent = ureq::Agent::config_builder()
+        let mut builder = ureq::Agent::config_builder()
             .http_status_as_error(false)
-            .tls_config(anchors)
             .timeout_connect(Some(connect_timeout))
             .timeout_recv_response(Some(io_timeout))
-            .timeout_recv_body(Some(io_timeout))
-            .build()
-            .into();
+            .timeout_recv_body(Some(io_timeout));
+        // Only a TLS relay consults an anchor: a plain http:// hop must keep working when the
+        // machine's bundle cannot be read (review r1, item 7).
+        if wa_tls::is_tls(url) {
+            builder = builder.tls_config(
+                wa_tls::tls_config().map_err(|error| format!("tls_anchors_unavailable:{error}"))?,
+            );
+        }
+        let agent: ureq::Agent = builder.build().into();
         let mut request = agent.post(url);
         for (name, value) in headers {
             request = request.header(name.as_str(), value.as_str());
@@ -122,6 +126,17 @@ mod tls_anchor_tests {
         let server = Server::start();
         let response = post(&server.url("/relay/ask")).expect("the CA in the directory SSL_CERT_DIR names");
         assert_eq!(response.status, 200);
+    }
+
+    /// A plain http:// hop consults no anchor: a bundle the machine cannot read must not stop the
+    /// mesh talking to a cleartext relay (review r1, item 7).
+    #[test]
+    fn a_broken_bundle_does_not_refuse_a_plain_hop() {
+        let _env = Env::set_text(wa_tls::CERT_FILE, "/nonexistent/wa-host/typo.pem");
+        let server = Server::start_plain();
+        let response = post(&server.url("/relay/ask")).expect("a plain hop needs no anchors");
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, b"ok");
     }
 
     #[test]

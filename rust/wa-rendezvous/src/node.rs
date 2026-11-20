@@ -284,7 +284,7 @@ pub fn spawn_heartbeat(url: String) {
             // SSL_CERT_DIR, read by wa-tls): a rendezvous behind a private CA must be reachable, and
             // a bundle named there that cannot be read is said out loud once a minute rather than
             // silently ignored for an hour of unanswered heartbeats.
-            let agent: ureq::Agent = match rendezvous_agent() {
+            let agent: ureq::Agent = match rendezvous_agent(&target) {
                 Ok(agent) => agent,
                 Err(error) => {
                     eprintln!("[rendezvous] {path} not sent: {error}");
@@ -312,13 +312,15 @@ pub fn spawn_heartbeat(url: String) {
 }
 
 /// The agent one registration or heartbeat uses: this machine's anchors, bounded by nothing else.
-fn rendezvous_agent() -> Result<ureq::Agent, String> {
-    let anchors = wa_tls::tls_config().map_err(|error| format!("tls_anchors_unavailable:{error}"))?;
-    Ok(ureq::Agent::config_builder()
-        .http_status_as_error(false)
-        .tls_config(anchors)
-        .build()
-        .into())
+fn rendezvous_agent(url: &str) -> Result<ureq::Agent, String> {
+    let mut builder = ureq::Agent::config_builder().http_status_as_error(false);
+    // A plain http:// rendezvous consults no anchor: a bundle the machine cannot read must not stop a
+    // node registering with one (review r1, item 7).
+    if wa_tls::is_tls(url) {
+        builder = builder
+            .tls_config(wa_tls::tls_config().map_err(|error| format!("tls_anchors_unavailable:{error}"))?);
+    }
+    Ok(builder.build().into())
 }
 
 /// Milliseconds since the epoch, on one clock for every log line in this crate.
