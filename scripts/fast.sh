@@ -794,6 +794,8 @@ check fast-watchdog bash scripts/test-fast-watchdog.sh
 # A row that exits 0 still owns its process group: the children it forked are reclaimed and the sweep
 # says how many, so the accumulation that reached 1,234 processes cannot build up (test-fast-watchdog-reap.sh).
 check fast-watchdog-reap bash scripts/test-fast-watchdog-reap.sh
+# The reclaim of an interrupted run never removes a live run's directory (test-fast-reclaim-race.sh).
+check fast-reclaim-race bash scripts/test-fast-reclaim-race.sh
 # The rule those guards rest on, judged: WASM_AGENT_HOME is the USER home, so the operator home, its
 # store, anything inside it and anything above it are refused (item 4 of the node-ops round).
 check scratch-home bash scripts/test-scratch-home.sh
