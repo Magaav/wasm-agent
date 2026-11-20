@@ -251,4 +251,65 @@ check(past.truncation ~= nil and past.truncation.last_byte == nil
 check(past.truncation ~= nil and past.truncation.first_byte == 18,
   'and still names where the (empty) page starts: ' .. json.encode(past.truncation))
 
+-- 13. review r1 SHOULD 3: the fence's EDGES, in one place, because each one is a way the fence could
+-- refuse work it has no business refusing (unknown is not yes: only a page this session was served
+-- may refuse).
+local edge = root .. '/edge.txt'
+local edge_lines = {}
+for i = 1, 400 do edge_lines[i] = string.format('edge %03d %s', i, string.rep('e', 40)) end
+local edge_text = table.concat(edge_lines, '\n') .. '\n'
+assert(host.write_file(edge, edge_text), 'fixture edge.txt')
+
+-- (a) a partial read then a WHOLE-FILE read of the same version clears the fence: the caller has now
+-- been given every byte, so no anchor can be outside what it saw.
+local cleared = value(run('const p1 = await tools.read({path:' .. json.encode(edge) .. ', limit:5});\n'
+  .. 'const p2 = await tools.read({path:p1.path});\n'
+  .. 'const e = await tools.edit({path:p2.path, edits:[{old_text:"edge 300 ", new_text:"EDGE 300 "}]});\n'
+  .. 'return {first:p1.truncated, second:p2.truncated, edited:e.ok===true};'))
+check(cleared.first == true and cleared.second == false,
+  'a partial page then a whole-file page: ' .. json.encode({cleared.first, cleared.second}))
+check(cleared.edited == true, 'and the whole-file page clears the fence for any anchor')
+
+-- (b) a file this session never read carries no record, so an edit is not fenced (nothing was
+-- promised). This is the fail-open the report states.
+local never = root .. '/never.txt'
+assert(host.write_file(never, 'one\ntwo\nthree\n'), 'fixture never.txt')
+local unread = value(run('const e = await tools.edit({path:' .. json.encode(never) .. ','
+  .. ' edits:[{old_text:"two", new_text:"TWO"}]});\nreturn {edited:e.ok===true};'))
+check(unread.edited == true, 'a never-read file is not fenced: ' .. json.encode(unread))
+
+-- (c) a DIFFERENT session is not judged by this one's page. The record is keyed by scope, so a
+-- second session editing an anchor it never read is not refused by the first session's read.
+local other = root .. '/other.txt'
+assert(host.write_file(other, edge_text), 'fixture other.txt')
+local first_read = tools.dispatch(memory, 'tool_call',
+  { calls = { { name = 'read', arguments = { path = other, limit = 5 } } } }, 'master', ctx)
+check(first_read ~= nil and first_read.error == nil, 'the first session read a partial page: '
+  .. json.encode(first_read):sub(1, 200))
+local other_sid = memory.start_session('', 'read truncation other', { user_id = 'master' })
+local other_ctx = { session_id = other_sid, user_id = 'master' }
+local cross = tools.dispatch(memory, 'edit',
+  { path = other, edits = { { old_text = 'edge 300 ', new_text = 'EDGE 300 ' } } }, 'master', other_ctx)
+check(cross.applied == true,
+  'another session is not fenced by a page it was never served: ' .. json.encode(cross):sub(1, 300))
+
+-- (d) the file changed on disk after the partial read: the fence does not judge a version it has no
+-- page for, and the edit's own version check is what answers. A stale anchor still gets a named
+-- refusal (old_text_not_found or file_changed), never a silent apply.
+assert(host.write_file(other, edge_text .. 'edge 401 extra\n'), 'fixture other.txt changed')
+local moved = tools.dispatch(memory, 'edit',
+  { path = other, edits = { { old_text = 'edge 300 ', new_text = 'EDGE 300 ' } } }, 'master', ctx)
+check(moved.applied == true or moved.error ~= nil,
+  'an edit after the file changed is decided, never silently lost: ' .. json.encode(moved):sub(1, 300))
+
+-- (e) a WRITE after a partial read is not fenced: the fence is about an anchor quoted from a page,
+-- and write carries its own whole content.
+local written = root .. '/written.txt'
+assert(host.write_file(written, edge_text), 'fixture written.txt')
+local write_after = value(run('const p = await tools.read({path:' .. json.encode(written) .. ', limit:5});\n'
+  .. 'const w = await tools.write({path:p.path, content:"replaced"});\n'
+  .. 'return {read_truncated:p.truncated, wrote:w.ok===true};'))
+check(write_after.read_truncated == true and write_after.wrote == true,
+  'a write after a partial read is not fenced: ' .. json.encode(write_after))
+
 print('read truncation ok (' .. checks .. ' checks)')
