@@ -220,7 +220,10 @@ end
 
 -- ---- 7b. node <-> wa-vault: the /status read the credential lane makes, over loopback HTTP.
 -- The client path is lua/core/vault.lua:47 (host.http GET, JSON headers, JSON envelope, JSON body),
--- so this row counts BOTH JSON layers. Runs only when the caller points a stub vault at us.
+-- so this row counts BOTH JSON layers. Runs only against the bench's OWN stub: `scripts/bench-seams.sh`
+-- clears any inherited `WASM_AGENT_VAULT_URL` and passes one only when the caller names
+-- `WA_SEAM_VAULT_URL`, because measuring a real vault is neither hermetic nor the same measurement
+-- twice (review r2: a run with the node's vault exported sent 200+ GET /status calls to it).
 local vault_url = host.getenv('WASM_AGENT_VAULT_URL') or ''
 if vault_url ~= '' then
   local headers = json.encode({ Accept = 'application/json' })
@@ -237,7 +240,7 @@ if vault_url ~= '' then
   end)
   dump('vault.status', 'out', envelope)
 else
-  print('seam\tvault.status\t0\t0\t0\t0\t0\t0\t0\tSKIP:WASM_AGENT_VAULT_URL is not set (no vault to measure)')
+  print('seam\tvault.status\t0\t0\t0\t0\t0\t0\t0\tSKIP:no stub vault (pass WA_SEAM_VAULT_URL=<loopback stub>; an inherited WASM_AGENT_VAULT_URL is cleared, never measured)')
 end
 
 -- ---- 8. one context build: the reads a turn does to assemble its prompt

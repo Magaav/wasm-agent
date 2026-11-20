@@ -55,9 +55,16 @@ mkdir -p "$home/payloads"
 echo "bench: seams (bin=$bin, binary-commit=$stamp, iterations=${iterations:-200}, home=$home)"
 echo "bench: seam rows are os.clock (CPU) on this machine; codemode/mesh/fabric are those benches' own clocks"
 echo
+# THE VAULT ROW MEASURES A STUB OR NOTHING. `WASM_AGENT_VAULT_URL` is exported on a node that runs
+# wa-serve, and inheriting it made this bench send 200+ GET /status calls to the REAL vault on every
+# run (found in review r2). It is cleared here; a caller who wants the row names the bench's own stub
+# with `WA_SEAM_VAULT_URL`, which is the only value that reaches the script.
+vault_env=WASM_AGENT_VAULT_URL=
+if [ -n "${WA_SEAM_VAULT_URL:-}" ]; then vault_env="WASM_AGENT_VAULT_URL=$WA_SEAM_VAULT_URL"; fi
 env WASM_AGENT_LUA_ROOT="$ROOT" \
     WASM_AGENT_HOME="$home" \
     WASM_AGENT_RENDEZVOUS= WASM_AGENT_RELAY= WASM_AGENT_MANAGED=0 \
+    "$vault_env" \
     WA_SCRIPT=scripts/bench-seams.lua \
     WA_SEAM_ITERATIONS="${iterations:-200}" \
     WA_SEAM_PAYLOAD_DIR="$home/payloads" \
