@@ -56,7 +56,11 @@ LUA_ROOT="${WA_PROBE_BOUND_LUA_ROOT:-$ROOT}"
 . "$ROOT/scripts/lib/scratch-home.sh"
 WA_ROOT="${WA_TEST_ROOT:-}"
 if [ -z "$WA_ROOT" ]; then
-  WA_ROOT="$(wa_scratch_root wa-probe-bound 2>/dev/null)" || WA_ROOT=/tmp
+  # NO /tmp FALLBACK (review r2, B). It used to fall back to /tmp, which on this node is a 16 G tmpfs:
+  # the very place the review asked this row to leave. A root the resolver cannot name is a machine this
+  # row cannot measure on, and it says so by name rather than measuring something else.
+  WA_ROOT="$(wa_scratch_root wa-probe-bound 2>/dev/null)" ||
+    refuse "no scratch root outside the operator store (wa_scratch_root refused); set WA_TEST_ROOT to a directory outside it"
 fi
 SCRATCH="$(wa_test_workdir "$WA_ROOT" wa-probe-bound)" || refuse "cannot make a scratch directory under $WA_ROOT"
 mkdir -p "$SCRATCH/home/.wasm-agent" || refuse "cannot create a scratch home under $SCRATCH"
