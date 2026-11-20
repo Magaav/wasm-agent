@@ -11,7 +11,7 @@ bridge was bolted on, while `pi` worked. Re-measured here:
 | premise | what the tree actually shows |
 | --- | --- |
 | "wa uses a TLS client that ignores the CA environment" | true, and the reason is sharper than the brief: the client is `ureq` 3.4.0 (`rust/Cargo.lock:2062`) with `_ring` + `rustls-webpki-roots` and **no** `platform-verifier`, so `ureq::tls::TlsConfig::default()` is `RootCerts::WebPki` - a compiled-in Mozilla bundle. No code named `SSL_CERT_FILE` or `SSL_CERT_DIR` anywhere in the tree (`grep -rn SSL_CERT_FILE` before this change: 0 hits). |
-| "else the system default" | the default is **not** the OS store: it is the compiled-in bundle above. That stays the default here (parity, see below); a machine that names no bundle gets byte-for-byte what it got before. |
+| "else the system default" | the wording was wrong and the code is not: ureq's default is **compiled-in Mozilla roots**, not the OS store (review r1, SHOULD 2 - the report and `wa-tls` now say so). That set stays the default here (parity, see below); a machine that names no bundle gets byte-for-byte what it got before. |
 | "wa-vault upstream" is an HTTPS path | **right, and my first pass measured the wrong half**. `rust/wa-vault` is the Rust key store and has no HTTP client (0 hits) - but the upstream is the **Python** vault, `vault/wa_vault.py`, which reaches providers with `http.client.HTTPSConnection` (`http_request` at line 530, and the proxy handler at 710). Python honours `SSL_CERT_FILE`/`SSL_CERT_DIR` through OpenSSL's default verify paths, so the anchors themselves already worked; what did not is that **OpenSSL silently skips a file it cannot read**, so a misnamed bundle surfaced as `vault_upstream_unreachable` - a verify failure dressed as a network failure. Fixed in review r1 item 2, with a gate row. |
 | "MCP HTTP" is inside wa | **half stale**: the Rust MCP guest components reach HTTP through `host.http` / `wa_http`, which are wired by this change; the live MCP connector is **Node** (`scripts/mcp-client-core.mjs`, spawned from `lua/core/mcp.lua`), and Node ignores both variables. Measured below, and named as the one gap this change does not close. |
 | "release fetch" | true, and it is `rust/wa-capabilities/src/ripgrep.rs` (a GitHub release download), wired here. |
@@ -61,10 +61,10 @@ The websocket takes the machine's anchors **only when it names a bundle**; other
 `tungstenite::connect` runs unchanged (its own bundle, its own redirect handling). That is an
 allow-list switch, and it means the path every deployment uses today is untouched. On the anchors
 path the socket is dialled here (10 s connect, every resolved address tried) and tungstenite still
-performs the TLS wrap and the upgrade (`client_tls_with_config`); what that path does **not** do is
-follow a websocket redirect, which `tungstenite::connect` would. No endpoint wa talks to over `wss`
-answers with a redirect (`web.whatsapp.com` and the mesh guests answer the upgrade directly), and it
-is stated here rather than discovered later.
+performs the TLS wrap and the upgrade (`client_tls_with_config`). It follows a redirect too - three
+hops, the count `tungstenite::connect` uses - so a machine that names a bundle does not lose a hop it
+had without one (review r1, SHOULD 1); the one deliberate difference is that a redirect which would
+leave TLS for a plain `ws://` URL is refused rather than followed, and there is a test for each.
 
 ## Tests, and where they are wired
 
@@ -213,6 +213,8 @@ parses; the tree is clean and every item is its own commit.
 | 5. `wa-tls` in the fast path's crate list | see the commit | the fast path's own `rust wa-tls` row (absent before: a change to `wa-tls` ran no rust row) |
 | 6. no CA private keys in the repository | see the commit | `the_repository_holds_no_ca_private_key` |
 | 7. trust gated on the scheme | ca3760c7 | `a_broken_bundle_does_not_refuse_a_plain_http_request` and its siblings in wa-host, wa-kernel-runtime (http and ws) and wa-rendezvous, plus `a_plain_url_is_answered_without_reading_the_bundle` in wa-tls |
+| SHOULD 1. the websocket keeps its redirect behaviour on the anchors path | 44304239 | `a_websocket_follows_a_redirect_and_echoes_on_the_anchors_path` (two scratch servers: the 302 and its target) and `a_websocket_refuses_a_redirect_off_tls` |
+| SHOULD 2. say compiled-in Mozilla roots, not "system default" | this commit | no test: a wording correction, measured in the premises table above |
 
 ## What I did not do
 
