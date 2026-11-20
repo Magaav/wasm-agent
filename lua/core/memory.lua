@@ -24,7 +24,19 @@ local function check(result)
   return result
 end
 
+-- The typed answer when this host has it: the same rows from the same reader, without the JSON text
+-- the caller then decodes. Measured on avell: 47 KB of rows cost 2.6 ms of pure-Lua decoding per
+-- read, 80% of the whole call (docs/missions/reports/seam-audit.md, row 9). A host without the
+-- capability (an older binary) keeps the JSON path unchanged, and both answer the same rows -
+-- scripts/test-sql-rows.lua proves it on a seeded ledger before the switch is taken.
 local function query(sql, params)
+  if type(host.sql_rows) == 'function' then
+    local rows, failure = host.sql_rows(sql, json.encode(params or {}))
+    -- A `nil, error` answer is raised here with the same level the JSON path used, so a caller's
+    -- message still names its own line.
+    if rows == nil then error(failure or 'sql_rows_unavailable', 2) end
+    return rows
+  end
   return check(decode(host.sql_query(sql, json.encode(params or {}))))
 end
 
