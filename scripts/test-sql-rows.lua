@@ -58,7 +58,6 @@ end
 check('the seeded types answer the same rows', function()
   assert(host.sql_exec('DROP TABLE IF EXISTS seam_types', '[]'))
   assert(host.sql_exec('CREATE TABLE seam_types(id INTEGER PRIMARY KEY, i INTEGER, r REAL, t TEXT, b BLOB, n TEXT)', '[]'))
-  local insert = json.encode({ 'x' })
   assert(host.sql_exec("INSERT INTO seam_types(i,r,t,b,n) VALUES(-7,1.5,'em-dash: \xe2\x80\x94 and check: \xe2\x9c\x93',X'DEADBEEF',NULL)", '[]'))
   assert(host.sql_exec("INSERT INTO seam_types(i,r,t,b,n) VALUES(42,-0.25,'',X'', 'not null')", '[]'))
   local sql = 'SELECT id, i, r, t, b, n FROM seam_types ORDER BY id'
