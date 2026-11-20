@@ -94,7 +94,8 @@ cold()
 local many = {}
 for i = 1, 500 do many[i] = { node_id = string.format("%064x", i), name = "big" .. i } end
 local capped = B.list({ peers = many, live_capabilities = true })
-assert(starts <= 64, "500 peers started " .. starts .. " children at once; the process cap is 64")
+local capped_starts = starts
+assert(capped_starts <= 64, "500 peers started " .. capped_starts .. " children at once; the process cap is 64")
 -- A peer that is over the cap is NAMED, never silently answered as if it had been asked.
 local named = 0
 for _, row in ipairs(capped) do
@@ -130,5 +131,5 @@ local why = "the ledger is asked (" .. asked .. " list call(s)) and a host that 
 
 print("nodes probe instances ok: two real instances (" .. unmasked .. " children when unmarked), the marked one "
   .. "starts none, an instance loaded after the mark starts none, a repeated call starts none ("
-  .. first .. " then 0, no accumulation), 500 peers are capped at " .. starts
+  .. first .. " then 0, no accumulation), 500 peers are capped at " .. capped_starts
   .. ", and the child environment is named (" .. A.PROBE_CHILD_ENV .. "; " .. why)
