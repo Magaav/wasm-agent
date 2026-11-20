@@ -1,6 +1,6 @@
 # change/race-ssl-cert-file-W - honour SSL_CERT_FILE / SSL_CERT_DIR for every HTTPS wa makes
 
-Branch `change/race-ssl-cert-file-W`, base `origin/main` (ac7717e0), worktree
+Branch `change/race-ssl-cert-file-W`, **rebased onto `origin/main` 39bbf2b6** (review r1), worktree
 `/home/victor/Work/missions/race-ssl-cert-file-W/wt`. Built and tested on avell only.
 
 ## The problem, measured again before any code
@@ -102,7 +102,8 @@ All heavy runs under `flock -w ... /tmp/wa-suite.lock`, one at a time.
 | run | result |
 | --- | --- |
 | `cargo test -p wa-tls -p wa-rendezvous -p wa-host -p wa-kernel-runtime -p wa-capabilities` | 343 (wa-capabilities) + 32 (wa-rendezvous) + 4 (wa-host) + 184 (wa-kernel-runtime) + 19 (wa-tls) passed, **0 failed** |
-| `bash scripts/fast.sh` | **ok: 307 checks, 0 failed, 0 skipped, 184s** |
+| `bash scripts/fast.sh` (before the review, base ac7717e0) | **ok: 307 checks, 0 failed, 0 skipped, 184s** |
+| `bash scripts/fast.sh` (after review r1, on origin/main 39bbf2b6) | 315 checks, **2 failed** - both pre-existing on 39bbf2b6, see "The two rows that are red on origin/main" |
 | `bash scripts/fast.sh` on the first attempt | 1 of 307 failed: `rust wa-graph` - **pre-existing and environmental**, see below |
 
 ### The one failure, and why it is not this change
@@ -215,6 +216,24 @@ parses; the tree is clean and every item is its own commit.
 | 7. trust gated on the scheme | ca3760c7 | `a_broken_bundle_does_not_refuse_a_plain_http_request` and its siblings in wa-host, wa-kernel-runtime (http and ws) and wa-rendezvous, plus `a_plain_url_is_answered_without_reading_the_bundle` in wa-tls |
 | SHOULD 1. the websocket keeps its redirect behaviour on the anchors path | 44304239 | `a_websocket_follows_a_redirect_and_echoes_on_the_anchors_path` (two scratch servers: the 302 and its target) and `a_websocket_refuses_a_redirect_off_tls` |
 | SHOULD 2. say compiled-in Mozilla roots, not "system default" | this commit | no test: a wording correction, measured in the premises table above |
+
+## The rebase, and the two rows that are red on origin/main
+
+Rebased 18 commits onto `origin/main` 39bbf2b6 (review r1). One conflict, in `scripts/test.sh` where
+origin/main had added its own rows at the same line: both sides kept, upstream first, no assertion
+touched, `bash -n` clean. The rest applied without conflict; `git diff <pre-rebase> HEAD` shows only
+origin/main's own changes.
+
+After the rebase, `scripts/fast.sh` is 315 checks with **2 failed**, and neither is this branch's:
+
+| row | measurement |
+| --- | --- |
+| `lua scripts/test-refusal-contract.lua` | fails identically on **origin/main in its own worktree**: `lua/core/refusal_codes.lua is stale: run lua5.4 scripts/gen-refusal-codes.lua --write` (`scripts/test-refusal-contract.lua:24`) |
+| `rust wa-capabilities` - `adoption_survives_the_relay_deadline` and `await_returns_at_its_own_wait` | both **refuse** on origin/main in its own worktree, with the ambient HOME: `refusing to run: this test starts real operations, so HOME must be a scratch or temp directory ... scripts/test.sh runs it with HOME=$GATE_HOME`. The gate rows use `HOME="$GATE_HOME"`; the fast path's rust row does not, so the fast path runs them with the session home and they refuse - correctly. With `HOME` set to a scratch directory they pass (measured: 1 passed each). |
+
+Everything this branch touches is green in that same run: `wa-tls`, `wa-operation`, `wa-host`,
+`wa-kernel-runtime`, `wa-rendezvous`, `wa-capabilities` (342 of 344 - the two above), and
+`python scripts/test-vault.py` at 116 checks, 0 failed.
 
 ## What I did not do
 
