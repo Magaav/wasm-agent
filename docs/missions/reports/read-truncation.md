@@ -73,13 +73,32 @@ way on. Allow-list, not a block-list (rule 7):
 * a **newer read** starts the record over, so an old page cannot allow an anchor this file no
   longer has.
 
+The anchor must be covered **end to end**, not just at its two ends (`covered_pages`, review r1
+SHOULD 2): two served pages with an unserved gap between them used to let a spanning anchor through.
+
+Review r1 MUST 1, fixed in `8911ab42`: `record_page` first ran inside `envelope()`, which the
+shrink loop calls again for every smaller capacity, so pages the caller never saw were recorded -
+and a file whose raw bytes fit but whose JSON-escaped form does not recorded a whole-file page
+first and turned the fence off. The record now happens once, after the loop, from the range the
+returned page actually carries; a refused read records nothing.
+
 The scope is passed by `tools.dispatch` (`ctx.session_id`) for both `read` and `edit`. A direct
 module call with no scope records nothing and is never fenced, which is what keeps the batch
 (`tool_call.calls`) path unchanged.
 
+**Where the record lives, and what that costs** (review r1 SHOULD 4): the page table is an
+in-process table in `lua/core/file_tools.lua`, so it belongs to one `tools.lua` instance and is
+**shared by every session in that instance** - not per session in storage. It is bounded hard: 64
+files (least recently recorded evicted first) x 16 ranges per file, and the eviction order is
+global, so one busy session can evict another's page. Every one of those limits **fails open**: an
+evicted page, a restarted node, or a scope with no record means no refusal, never a wrong refusal.
+The fence is a guard against a partial view that is still in hand, not an audit of everything a
+session ever read.
+
 ## Tests (rule 16: each fails on the base)
 
-`scripts/test-read-truncation.lua` - 39 checks, wired **into the fast path by default**: it is not
+`scripts/test-read-truncation.lua` - 68 checks after review r1, wired **into the fast path by
+default**: it is not
 listed in `scripts/fast-path.exclude`, so `scripts/fast.sh` runs it as a `scripts/test-*.lua` row
 with its own scratch `WASM_AGENT_HOME`. Every read and edit goes through a **real code-mode run
 block** (`tools.dispatch(memory,'codemode',...)`), the path real use takes (rule 14), so the new
