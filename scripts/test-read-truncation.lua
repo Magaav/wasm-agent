@@ -162,4 +162,28 @@ local whole_ok = value(run('const p = await tools.read({path:' .. json.encode(sm
 check(whole_ok.truncated == false and whole_ok.edited == true,
   'a whole-file read leaves every anchor legal: ' .. json.encode(whole_ok))
 
+-- 9. review r1 MUST 1: the page recorded is the page RETURNED, not a pass of the shrink loop. A file
+-- whose raw bytes fit but whose JSON-escaped form does not (control characters cost 6 bytes each in
+-- JSON) used to record a whole-file page first and turn the fence off for the rest of the session.
+local dense = root .. '/dense.txt'
+local dense_lines = {}
+for i = 1, 1500 do dense_lines[i] = string.rep('\1', 24) .. string.format('#%05d#', i) end
+assert(host.write_file(dense, table.concat(dense_lines, '\n') .. '\n'), 'fixture dense.txt')
+local shrunk = value(run('const p = await tools.read({path:' .. json.encode(dense) .. '});\n'
+  .. 'let outside = null;\n'
+  .. 'try { await tools.edit({path:p.path, edits:[{old_text:"#01499#", new_text:"#X#999#"}]}); }\n'
+  .. 'catch (e) { outside = String(e && e.message || e); }\n'
+  .. 'return {truncated:p.truncated, bytes_read:p.bytes_read, file_size:p.file_size,'
+  .. ' last_line:p.range.last_line, outside:outside};'))
+check(shrunk.truncated == true,
+  'the escaped page is partial although the raw bytes fit: ' .. json.encode(shrunk.truncated))
+check(shrunk.bytes_read < shrunk.file_size,
+  'and it says so in bytes: ' .. tostring(shrunk.bytes_read) .. '/' .. tostring(shrunk.file_size))
+check(shrunk.last_line < 1500, 'the returned page ends before the last line: ' .. tostring(shrunk.last_line))
+check(shrunk.outside ~= nil,
+  'and an anchor past the returned page is refused, not applied: ' .. tostring(shrunk.outside):sub(1, 300))
+check(tostring(shrunk.outside):find('edit_anchor_outside_read_page', 1, true) ~= nil,
+  'by its own name: ' .. tostring(shrunk.outside):sub(1, 300))
+check(host.read_file(dense) == table.concat(dense_lines, '\n') .. '\n', 'the refused edit wrote nothing')
+
 print('read truncation ok (' .. checks .. ' checks)')

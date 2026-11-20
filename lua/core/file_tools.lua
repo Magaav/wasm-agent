@@ -273,7 +273,6 @@ function M.read(args,store_image,view_bytes,scope)
       result.how_to_read_rest='returned bytes '..first..'-'..(first+#part-1)..' of '..#text
         ..' in '..total..' lines; '..table.concat(ways,'; ')..'.'
     end
-    record_page(scope,args.path,hash,result.truncated,first,first+#part-1,line,end_line)
     -- A complete whole-line read is also a durable edit address. It is opaque so the model
     -- cannot accidentally trim byte coordinates while retaining the digest for the wider page.
     if column==1 and next_byte>last and #part>0 and line<=total then
@@ -291,6 +290,13 @@ function M.read(args,store_image,view_bytes,scope)
     capacity=math.floor(capacity/2);part,next_byte=output.slice(text:sub(1,last),first,capacity);result=envelope()
   end
   if #json.encode(result)>view_budget or (#part==0 and next_byte<=#text) then return {error='read_envelope_exceeds_budget',version=hash} end
+  -- Record the page that is ACTUALLY RETURNED, once, and only here (review r1 MUST 1). This used to
+  -- run inside envelope(), which the shrink loop above calls again for every smaller capacity, so a
+  -- page the caller never saw was recorded - and the first pass was a whole-file page whenever the
+  -- raw bytes fit but their JSON-escaped form did not, which set whole=true and turned the fence off
+  -- for the rest of the session. A refused read records nothing: there is no page.
+  record_page(scope,args.path,hash,result.truncated,result.range.first_byte,result.range.last_byte,
+    line,result.end_offset)
   return result
 end
 -- `old_text` is quoted from memory, and the measured cause of a miss is *not* whitespace: in
