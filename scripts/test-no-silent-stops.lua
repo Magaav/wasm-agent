@@ -159,24 +159,51 @@ ok(not progress_guard.waiting(nil), 'a nil answer is not a live wait')
 ok(not progress_guard.waiting({ state = 'failed', op = 'op-1' }), 'a failed operation is not waiting')
 ok(not progress_guard.waiting({ ok = true, value = 42 }), 'a plain result is not a wait')
 
--- A repeated wait whose ANSWER MOVED is progress (the measured case: elapsed and log bytes moving).
+-- A repeated wait whose ANSWER MOVED is progress. The exemption reads `say` (what the call SAID, with
+-- clocks stripped and evidence followed), never a raw digest and never the effect count.
 local live = progress_guard.new({ repeat_limit = 3, idle_rounds = 12, ceiling = 0 })
 for i = 1, 10 do
   eq(progress_guard.observe(live, { signature = 'codemode(await)', results = 'digest-' .. i,
-    effects = 0, changes = 'c1', waiting = true }), nil,
+    say = 'output_bytes=' .. (i * 7) .. ' state=running',
+    effects = 0, changes = 'c1', waiting = true, wait_spent_ms = 20, wait_budget_ms = 0 }), nil,
     'await ' .. i .. ' that answered something new is waiting, not a loop')
 end
 
--- THE HOT LOOP: wait_ms:0 answers at once with the same bytes. Ten of those are ten identical
--- decisions with no new observation, and the guard must still stop them (review item 2).
+-- THE HOT LOOP, review r3 B6. A wait_s:0 poll of a running operation with no output: the guard MUST
+-- stop it, exactly as on main. Three things made the branch never stop: effects counted a codemode
+-- await as an effect, the digest drifted on clocks, and the budget was always 0.
 local hot = progress_guard.new({ repeat_limit = 3, idle_rounds = 50, ceiling = 0 })
-eq(progress_guard.observe(hot, { signature = 'codemode(poll)', results = 'same', effects = 0,
-  changes = 'c', waiting = true, wait_spent_ms = 0, wait_budget_ms = 0 }), nil, 'the first poll is a retry')
-eq(progress_guard.observe(hot, { signature = 'codemode(poll)', results = 'same', effects = 0,
-  changes = 'c', waiting = true, wait_spent_ms = 0, wait_budget_ms = 0 }), nil, 'the second is still a retry')
-has(progress_guard.observe(hot, { signature = 'codemode(poll)', results = 'same', effects = 0,
-  changes = 'c', waiting = true, wait_spent_ms = 0, wait_budget_ms = 0 }),
-  'guard_repeated_calls', 'ten identical immediate answers still trip the guard (a hot loop, not a wait)')
+local say_same = 'operation_id=op-1\noutput_bytes=0\nstate=pending'
+-- EFFECTS DO NOT EXEMPT A WAIT: effects=1 with an unchanged say is still a repeat.
+eq(progress_guard.observe(hot, { signature = 'codemode(poll)', results = 'same', say = say_same,
+  effects = 1, changes = 'c', waiting = true, wait_spent_ms = 20, wait_budget_ms = 0 }), nil,
+  'poll 1, with an effect, is a retry')
+eq(progress_guard.observe(hot, { signature = 'codemode(poll)', results = 'same', say = say_same,
+  effects = 1, changes = 'c', waiting = true, wait_spent_ms = 20, wait_budget_ms = 0 }), nil,
+  'poll 2, with an effect, is still a retry')
+has(progress_guard.observe(hot, { signature = 'codemode(poll)', results = 'same', say = say_same,
+  effects = 1, changes = 'c', waiting = true, wait_spent_ms = 20, wait_budget_ms = 0 }),
+  'guard_repeated_calls',
+  'ten wait_s:0 polls of a running operation DO trip the guard, effects or not')
+
+-- A LONG WAIT THAT ANSWERED THE SAME PENDING IS PROGRESS (this mission own kill, out.log step 146-148):
+-- the call blocked five minutes and learned nothing new, which is waiting, not looping.
+local long_wait = progress_guard.new({ repeat_limit = 3, idle_rounds = 50, ceiling = 0 })
+for i = 1, 8 do
+  eq(progress_guard.observe(long_wait, { signature = 'codemode(await)', results = 'same',
+    say = say_same, effects = 1, changes = 'c', waiting = true,
+    wait_spent_ms = 300000, wait_budget_ms = 0 }), nil,
+    'await ' .. i .. ' that blocked 5 minutes on the same pending is waiting, not a loop')
+end
+
+-- A wait whose ANSWER MOVED is progress at once, with no budget and no time spent.
+local moved_say = progress_guard.new({ repeat_limit = 3, idle_rounds = 50, ceiling = 0 })
+for i = 1, 8 do
+  eq(progress_guard.observe(moved_say, { signature = 'codemode(poll)', results = 'r',
+    say = 'output_bytes=' .. (i * 10) .. '\nstate=running', effects = 1, changes = 'c',
+    waiting = true, wait_spent_ms = 20, wait_budget_ms = 0 }), nil,
+    'poll ' .. i .. ' that answered NEW output bytes is progress')
+end
 
 -- A wait that SPENT its budget is progress even with an identical answer: it cost real time.
 local spent = progress_guard.new({ repeat_limit = 3, idle_rounds = 50, ceiling = 0 })
@@ -215,28 +242,30 @@ local a2 = { state = 'pending', settled = false, op = 'op-1', elapsed_ms = 2000,
 eq(host.sha256(json.encode(progress_guard.stable(a1))), host.sha256(json.encode(progress_guard.stable(a2))),
   'a digest with the clock fields removed is IDENTICAL for two answers that differ only by elapsed time')
 
-local clock = progress_guard.new({ repeat_limit = 3, idle_rounds = 50, ceiling = 0 })
-local same_stable = host.sha256(json.encode(progress_guard.stable(a1)))
-for i = 1, 10 do
-  local answer = { signature = 'codemode(poll)', results = 'identical-bytes', results_stable = same_stable,
-    effects = 0, changes = 'c', waiting = true, wait_spent_ms = 0, wait_budget_ms = 0 }
-  if i >= 3 then break end
-  eq(progress_guard.observe(clock, answer), nil, 'poll ' .. i .. ' of a running operation is a retry')
-end
-has(progress_guard.observe(clock, { signature = 'codemode(poll)', results = 'identical-bytes',
-  results_stable = same_stable, effects = 0, changes = 'c', waiting = true,
-  wait_spent_ms = 0, wait_budget_ms = 0 }),
-  'guard_repeated_calls',
-  'ten wait_ms:0 polls whose stable digest never changes still trip the guard')
+-- Review r3 B6: the clock must not move the digest. M.said digests only operation-PROGRESS facts,
+-- so two answers whose clocks and bookkeeping differ produce the SAME string.
+local raw_a = { operation_id = 'op-1', state = 'running', settled = false, output_bytes = 0,
+  elapsed_ms = 1000, timing = { total_ms = 5, execution_ms = 3 }, calls = {} }
+local raw_b = { operation_id = 'op-1', state = 'running', settled = false, output_bytes = 0,
+  elapsed_ms = 9999, timing = { total_ms = 77, execution_ms = 71 }, calls = {} }
+eq(progress_guard.said(raw_a, nil), progress_guard.said(raw_b, nil),
+  'two answers differing only by clocks SAY the same thing')
+has(progress_guard.said(raw_a, nil), 'state=running', 'and what they say is the progress fact')
+local raw_c = { operation_id = 'op-1', state = 'running', settled = false, output_bytes = 512 }
+ok(progress_guard.said(raw_a, nil) ~= progress_guard.said(raw_c, nil),
+  'a real new output byte DOES change what it says')
 
--- A REAL new byte of output is progress, even at once.
-local moved = progress_guard.new({ repeat_limit = 3, idle_rounds = 50, ceiling = 0 })
-for i = 1, 8 do
-  eq(progress_guard.observe(moved, { signature = 'codemode(poll)', results = 'd' .. i,
-    results_stable = 'stable-' .. i, effects = 0, changes = 'c', waiting = true,
-    wait_spent_ms = 0, wait_budget_ms = 0 }), nil,
-    'poll ' .. i .. ' that answered a NEW byte is progress')
-end
+-- A nested call's real state lives behind its evidence pointer, so a digest that ignores it would never
+-- see progress. The reader is followed, and its clocks are removed like any other.
+local outer = { calls = { { id = 1, name = 'operation', ok = true, status = 202,
+  evidence = { bytes = 64, path = '/tmp/raw.json', sha256 = 'aa' } } } }
+local function reader(fields) return function() return fields end end
+eq(progress_guard.said(outer, reader('{"state":"pending","output_bytes":0,"elapsed_ms":1000}')),
+  progress_guard.said(outer, reader('{"state":"pending","output_bytes":0,"elapsed_ms":9999}')),
+  'the evidence pointer is followed, and its clocks are removed too')
+ok(progress_guard.said(outer, reader('{"state":"pending","output_bytes":0,"elapsed_ms":1000}'))
+  ~= progress_guard.said(outer, reader('{"state":"pending","output_bytes":4096,"elapsed_ms":1000}')),
+  'and its real output bytes do change the digest')
 
 -- --------------------------------------------------------------- a failed provider call
 local function turn(title, user)

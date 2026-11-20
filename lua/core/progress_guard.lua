@@ -125,9 +125,16 @@ end
 -- them changes with no work done - which is what made a `wait_ms:0` poll look like progress forever
 -- (review r2, item 6). `elapsed_ms`, `remaining_ms`, `ms` and a `log` line that is mostly a timer are
 -- removed before the digest is taken; every other field is kept, so real output still shows up.
-local CLOCK_FIELDS = { elapsed_ms = true, remaining_ms = true, ms = true, took_ms = true,
-  last_output_elapsed_ms = true, output_idle_ms = true, post_exit_last_output_elapsed_ms = true,
-  accepted_record_ms = true, deadline_ms = true }
+-- A CLOCK FIELD IS RECOGNISED BY ITS SHAPE, not by a list that is always one field behind.
+-- Review r3, B6: the list missed the whole `timing` block (execution_ms, total_ms, setup_ms,
+-- spawn_ms, measured_ms, ...), so the digest of a running operation moved every round with no work
+-- done and a wait_s:0 poll looked like progress forever. Every fact this module compares is either an
+-- answer or a clock, and every clock on this node ends in _ms or is named below.
+local CLOCK_NAMES = { ms = true, elapsed = true, remaining = true, timing = true, waited = true }
+local function clock_field(key)
+  local name = tostring(key)
+  return CLOCK_NAMES[name] == true or name:sub(-3) == '_ms'
+end
 
 --- A digest of what an answer SAYS, with the clock fields removed. Two answers that differ only by a
 --- passing second answer the same string, so a poll that learned nothing is visible as a repeat.
@@ -136,11 +143,56 @@ function M.stable(answer)
     if type(value) ~= "table" or depth > 6 then return value end
     local copy = {}
     for key, item in pairs(value) do
-      if not CLOCK_FIELDS[tostring(key)] then copy[key] = strip(item, depth + 1) end
+      if not clock_field(key) then copy[key] = strip(item, depth + 1) end
     end
     return copy
   end
   return strip(answer, 0)
+end
+
+-- WHAT THE WAIT ITSELF LEARNED: the operation-progress fields of an answer, and nothing else.
+--
+-- Review r3, B6. Three attempts to digest a whole answer failed for one reason: a codemode answer is
+-- mostly bookkeeping - arguments, evidence pointers, timing, attempts - and every part of it can move
+-- while the operation does nothing. Clock-stripping fixed one field at a time and the digest still
+-- drifted, so a wait_s:0 poll looked like progress forever.
+--
+-- The fix is to digest only the facts that mean WORK ADVANCED: the operation's state, whether it
+-- settled, how many output bytes it has, whether it was promoted, and whether it exited. Those are the
+-- fields the node itself uses to say a pending call is making progress (codemode_pending's own
+-- PROGRESS_FIELDS). The evidence pointers are FOLLOWED, because that is where a nested call's real
+-- state lives, and the fields are COLLECTED from every record in the answer.
+local PROGRESS_FIELDS = { state = true, status = true, settled = true, ok = true,
+  output_bytes = true, bytes_written = true, promoted = true, shell_exited = true,
+  output_streams_closed = true, operation_id = true, op = true }
+
+local function collect(value, into, read, seen, depth)
+  if type(value) ~= 'table' or depth > 6 then return into end
+  for key, item in pairs(value) do
+    local name = tostring(key)
+    if PROGRESS_FIELDS[name] and type(item) ~= 'table' then
+      into[#into + 1] = name .. '=' .. tostring(item)
+    elseif type(item) == 'table' then
+      if type(item.path) == 'string' and type(read) == 'function' and not seen[item.path] then
+        -- An evidence pointer: the raw answer behind it is what the call actually said.
+        seen[item.path] = true
+        local ok, raw = pcall(read, item.path)
+        if ok and type(raw) == 'string' and raw ~= '' then
+          local parsed_ok, parsed = pcall(dofile('lua/vendor/json.lua').decode, raw)
+          if parsed_ok and type(parsed) == 'table' then collect(parsed, into, read, seen, depth + 1) end
+        end
+      end
+      collect(item, into, read, seen, depth + 1)
+    end
+  end
+  return into
+end
+
+--- What a wait learned: the operation-progress facts of an answer, in a stable order.
+function M.said(answer, read)
+  local into = collect(answer, {}, read, {}, 0)
+  table.sort(into)
+  return table.concat(into, '\n')
 end
 
 function M.new(opts)
@@ -153,6 +205,7 @@ function M.new(opts)
     last_call = nil,
     repeats = 0,
     last_results = nil,
+    last_say = nil,
     idle = 0,
     changes = opts.changes,
     stopped = nil,
@@ -168,6 +221,8 @@ end
 --   waiting    every call this round was a wait on work still running (M.waiting)
 --   wait_spent_ms / wait_budget_ms  what the wait actually cost, against what it asked for, so a
 --              wait that SPENT time is progress and a `wait_ms:0` poll that spent none is not
+--   say        a digest of what the calls SAID, clocks stripped and evidence pointers followed
+--              (M.said); a wait is progress only when this MOVES - effects never exempt a wait
 -- Returns nil to continue, or a named reason string to stop. The reason is the durable code, so a
 -- reader can grep it and M.classify can name it.
 function M.observe(state, obs)
@@ -214,10 +269,19 @@ function M.observe(state, obs)
   -- observation - a hot loop, not a wait. So a live wait is exempt when its answer MOVED or when it
   -- spent the budget it asked for; a poll that spent nothing stays a repeat, and a wait that spent
   -- real time is progress even when its answer is byte-identical.
-  local waited_long = (obs.wait_spent_ms or 0) >= 1000
-    and (obs.wait_budget_ms or 0) > 0
-    and (obs.wait_spent_ms or 0) >= (obs.wait_budget_ms or 0)
-  if obs.waiting == true and (changed or waited_long) then
+  -- A LONG WAIT IS JUDGED BY THE TIME THE CALL SPENT, not by a budget the call may not report.
+  -- codemode_pending strips wait_s before dispatching, so the answer carries no budget at all and a
+  -- budget test could never fire (review r3, B6). The rule is: a wait that spent at least a second, or
+  -- its own full budget when one is known, is progress - so an await that blocked five minutes and
+  -- answered the same pending is progress, while a wait_s:0 poll that returned at once is not.
+  local budget = math.max(1000, obs.wait_budget_ms or 0)
+  local waited_long = (obs.wait_spent_ms or 0) >= budget
+  -- AND NEVER ON EFFECTS. A codemode call that merely awaited counted as an effect, which made
+  -- `changed` true every round; the exemption reads only what the call SAID (obs.say) or how long it
+  -- waited, never the effect count.
+  local said_more = obs.say ~= nil and obs.say ~= state.last_say
+  if obs.say ~= nil then state.last_say = obs.say end
+  if obs.waiting == true and (said_more or waited_long) then
     state.repeats = math.min(state.repeats, 1)
     state.idle = 0
   end

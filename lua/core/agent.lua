@@ -2494,8 +2494,10 @@ function M:run_body(text, images)
     -- below is the only place that knows them.
     local round_effects = 0
     local round_results = {}
-    -- The clock-free view of the same answers, for the progress guard (see results_stable).
+    -- The clock-free view of the same answers, and what they SAID with evidence followed, for the
+    -- progress guard (see results_stable and progress_guard.said).
     local round_stable = {}
+    local round_said = {}
     -- The round's waits, if EVERY call in it was one: a repeated await whose ANSWER says the work is still
     -- running is an observation, not a loop (progress_guard.M.waiting). Read from the answer, because the
     -- measured 19/11 call was codemode() with an await INSIDE it, never the operation tool by name.
@@ -3694,6 +3696,12 @@ function M:run_body(text, images)
       round_results[#round_results + 1] = tostring(function_.name) .. ":" .. host.sha256(tostring(content))
       round_stable[#round_stable + 1] = tostring(function_.name) .. ":"
         .. host.sha256(json.encode(progress_guard.stable(output)))
+      -- What the call SAID, with the clocks stripped AND its evidence pointers followed: a codemode
+      -- answer reports each nested call as {bytes,path,sha256}, and the file behind that pointer is
+      -- the raw answer, which carries elapsed_ms (review r3, B6). Without following it the digest
+      -- moved every round with no work done and a wait_s:0 poll looked like progress forever.
+      round_said[#round_said + 1] = tostring(function_.name) .. ":"
+        .. host.sha256(json.encode(progress_guard.said(output, host.read_file)))
       telemetry.finish(tool_span,{name=function_.name,ok=ok_tool,cancelled=cancelled or nil,
         outcome=cancelled and 'cancelled_before_execution' or nil,code=type(output)=="table" and output.code or nil,
         tool_group_id=assistant_id,tool_group_size=#calls,tool_group_index=tool_index,
@@ -3731,6 +3739,7 @@ function M:run_body(text, images)
       -- changes every second without doing any work, so the guard must not read that as progress
       -- (review r2, item 6). Real output still appears in both digests.
       results_stable = #round_stable > 0 and host.sha256(table.concat(round_stable, "\n")) or nil,
+      say = #round_said > 0 and host.sha256(table.concat(round_said, "\n")) or nil,
       effects = round_effects,
       changes = changes_digest,
       waiting = round_waiting and round_wait_calls > 0,
