@@ -1078,8 +1078,15 @@ function M.request(node, path, body, inner_headers)
         -- may still be running - which is exactly why the retry reuses the id.
         local decoded = decode_body(response.body)
         last_error = (decoded and decoded.error) or "node_no_answer"
+        -- ONE POLICY FOR EVERY RETRY WAIT (main's fix, which the rebase dropped - measured: without it
+        -- this row hangs 6 of 6 under load and main passes 6 of 6, because the relay's hint was slept
+        -- RAW and a hint past the row's 120 s watchdog never returns). The hint goes through
+        -- relay_backoff_ms like the 503 hints do: never shorter than the hint, never longer than the cap,
+        -- and never the same instant for every caller. The hint is MILLISECONDS here and relay_backoff_ms
+        -- reads anything under 1000 as SECONDS, so it is clamped first and handed over as seconds.
         if decoded and decoded.retry_after_ms then
-          host.sleep(tonumber(decoded.retry_after_ms) / 1000)
+          local hint_ms = math.min(30000, tonumber(decoded.retry_after_ms) or 0)
+          host.sleep(M.relay_backoff_ms(attempt, hint_ms / 1000) / 1000)
         end
       elseif response and tonumber(response.status) == 409 and M.relay_code(response.body) == "request_in_flight" then
         -- The same rid is still running at the target: waiting re-collects it.
