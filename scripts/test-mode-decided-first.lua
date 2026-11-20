@@ -18,6 +18,7 @@ if reason then error('this test refuses to run (' .. reason .. ')') end
 local json = dofile('lua/vendor/json.lua')
 local memory = dofile('lua/core/memory.lua'); memory.setup()
 local agent = dofile('lua/core/agent.lua')
+local raw_lib = dofile('lua/core/raw_code.lua')
 local pcache = dofile('lua/core/prompt_cache.lua')
 
 local checks = 0
@@ -106,9 +107,10 @@ local legacy = with({ WASM_AGENT_RAW_CODE = 'codemode' }, function()
   host.sql_exec('INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)', json.encode({ key, json.encode(value) }))
   return { sid = sid, tools = first.tools }
 end)
--- A legacy thread HONOURS an explicit switch (review r4, item 2): that is the mode a27490af froze it
--- in. codemode is the decision to have no raw channel, recorded as off.
-local EXPLICIT = { native = 'native', first = 'first', only = 'only', codemode = 'off', stop = 'stop' }
+-- A legacy thread HONOURS an explicit switch (review r4, item 2), read through a27490af's OWN vocabulary
+-- (review r5, item 2): that tree did not know `native`, so it read it as no raw channel - a pre-release
+-- thread set to native resumes OFF. codemode is recorded as the word off for the same reason.
+local EXPLICIT = { native = 'off', first = 'first', only = 'only', codemode = 'off', stop = 'stop' }
 for _, node_mode in ipairs({ 'native', 'first', 'only', 'codemode', 'stop' }) do
   local again = build(legacy.sid, node_mode)
   eq(again.source, 'legacy', node_mode .. ': a record with no mode is named legacy')
@@ -153,7 +155,6 @@ eq(native_thread.mode, 'native', 'a thread started native records native')
 eq(native_thread.tools, 'run', 'and declares the one door')
 -- A child inherits the DECISION, including the decision to have no raw channel (review r4, SHOULD): a
 -- parent that decided off cannot hand its child a door it closed.
-local raw_lib = dofile('lua/core/raw_code.lua')
 eq(raw_lib.child_mode({ raw_mode = 'native' }, nil), 'native', 'child_mode answers the parent recorded mode')
 eq(raw_lib.child_mode({ raw_mode = raw_lib.NO_CHANNEL }, nil), nil, 'and a parent that decided off hands down off')
 eq(raw_lib.child_mode({ raw_decided = true }, nil), nil, 'and a decided nil is off too, never a legacy fallthrough')

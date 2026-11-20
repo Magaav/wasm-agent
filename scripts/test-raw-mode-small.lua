@@ -132,8 +132,12 @@ ok(type(legacy_read) == 'table' and legacy_read.raw_mode == nil,
 -- A legacy record HONOURS an explicit switch (review r4, item 2): that is the mode a27490af froze it in.
 local legacy_thread = with({ WASM_AGENT_RAW_CODE = 'native' }, function() return bot(sid_l) end)
 eq(legacy_thread.mode_source, 'legacy', 'a thread without a recorded mode is named legacy')
-eq(legacy_thread.codemode_policy.raw_mode, 'native', 'and it honours the EXPLICIT switch')
-eq(raw.mode_of(legacy_thread.codemode_policy), 'native', 'which every mode reader sees')
+-- ...read through a27490af's OWN vocabulary (review r5, item 2): that tree did not know native, so it
+-- read it as no raw channel, and a pre-release thread set to native resumes OFF.
+eq(legacy_thread.codemode_policy.raw_mode, 'off', 'and it honours the EXPLICIT switch as a27490af read it')
+eq(raw.mode_of(legacy_thread.codemode_policy), nil, 'which every mode reader sees as no raw channel')
+eq(with({ WASM_AGENT_RAW_CODE = 'first' }, function() return bot(sid_l) end).codemode_policy.raw_mode, 'first',
+  'a word a27490af knew is honoured as itself')
 -- No switch at all: only, the mode such a record was frozen in.
 local saved_explicit = raw.explicit
 raw.explicit = function() return raw.UNSET end

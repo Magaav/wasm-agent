@@ -176,6 +176,20 @@ end
 
 -- The NODE's answer for a thread that has no record: the explicit switch when it is set, otherwise the
 -- provider row (M.default_mode).
+-- a27490af's OWN vocabulary, for a record that predates the mode field (review r5, item 2). That tree
+-- knew only these words (a27490af:lua/core/raw_code.lua:88-104): every other value - native and bash
+-- included - returned nil, and nil means "no raw channel". A pre-release thread was frozen by THAT
+-- parser, so its explicit switch must be read by it too, or "native" would hand an old thread a door
+-- its transcript never had.
+local A27490AF_WORDS = { on = "on", ["1"] = "on", ["true"] = "on", stop = "stop",
+  first = "first", only = "only", e2 = "e2", e3 = "e3" }
+
+function M.legacy_switch(value)
+  if value == M.UNSET then return M.UNSET end
+  if OFF[value] then return nil end
+  return A27490AF_WORDS[value]   -- anything a27490af did not know is nil: no raw channel
+end
+
 function M.mode()
   local value = tostring(host.getenv("WASM_AGENT_RAW_CODE") or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
   if value == "" then

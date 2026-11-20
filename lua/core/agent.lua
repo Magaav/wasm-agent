@@ -1165,7 +1165,10 @@ function M:build_context()
     elseif frozen_record then
       -- Written before the field existed: it honours an EXPLICIT switch when one is set - that is the
       -- mode a27490af froze it in - and falls back to only when nobody said anything (review r4, item 2).
-      local explicit=raw_code_lib.explicit()
+      -- The switch is read through a27490af's OWN vocabulary (review r5, item 2): that tree did not know
+      -- `native` (or `bash`), so it read them as no raw channel. A pre-release thread set to native
+      -- therefore resumes OFF, which is what its frozen prefix and transcript were built for.
+      local explicit=raw_code_lib.legacy_switch(raw_code_lib.explicit())
       if explicit~=raw_code_lib.UNSET then
         self.raw_decided_mode=explicit
       else
