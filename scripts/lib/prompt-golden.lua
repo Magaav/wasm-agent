@@ -99,6 +99,7 @@ M.DIFFERENT = {
   '^%- run$',                                                -- and its schema row in the full envelope list
   '^Work in code: call the run tool with',                   -- the native guidance sentence
   '^You may also run a script by ending your message with',  -- the block guidance it replaces on on/stop
+  '^%- build: ',                                             -- this branch adds the build tool (its list row)
 }
 
 function M.upstream_view(system)

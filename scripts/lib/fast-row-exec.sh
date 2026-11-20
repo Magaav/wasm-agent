@@ -79,15 +79,22 @@ lua_run() { # <script> <home>
   # And the node's own identity and mode (17/11 on avell: a run started THROUGH a node inherits that node's
   # WASM_AGENT_DB - its real ledger -, WASM_AGENT_IN_TURN, WASM_AGENT_RAW_CODE and WA_MESH; eight rows failed
   # there and passed everywhere else). A row that tests one of these sets it itself.
-  # The list is main's fixed one (review r3 MUST 1): the computed allow-list that stood here was out of
-  # scope for this split and it overwrote WA_FAST_CLEARED - the vault names fast.sh exports for
-  # scripts/test-fast-row-environment.lua - with whatever ambient names it found, so the probe row either
-  # failed (empty list) or passed without checking a single vault variable. WA_FAST_CLEARED is fast.sh's,
-  # and this function passes it through unchanged.
-  cleared_flags=(-u WASM_AGENT_VAULT_URL -u WASM_AGENT_VAULT_DIR -u WASM_AGENT_VAULT_KEYSTORE
-    -u WASM_AGENT_VAULT_PASSPHRASE -u WASM_AGENT_VAULT_OPERATOR_URL -u WASM_AGENT_OPENCODE_GO_VAULT_URL
-    -u WASM_AGENT_DB -u WASM_AGENT_IN_TURN -u WASM_AGENT_RAW_CODE -u WASM_AGENT_PROVENANCE
-    -u WA_MESH -u WA_MESH_COMPONENT)
+  # AN ALLOW-LIST, NOT A BLOCK-LIST (item 4 of the node-ops round, #45). The list that used to be here
+  # was four variables long and grew one measurement at a time; every name NOT on it reached the row.
+  # What a row inherits is therefore computed: EVERY WASM_AGENT_* and WA_MESH* variable in this process
+  # goes, except the five the runner itself sets for the row - a short list a reader can check against
+  # what the row needs, instead of a list of the leaks somebody happened to notice.
+  cleared_flags=()
+  while IFS= read -r entry; do cleared_flags+=(-u "$entry"); done < <(
+    env | sed -n 's/^\(WASM_AGENT_[A-Za-z0-9_]*\)=.*/\1/p; s/^\(WA_MESH[A-Za-z0-9_]*\)=.*/\1/p' |
+      grep -vx -e WASM_AGENT_LUA_ROOT -e WASM_AGENT_HOME -e WASM_AGENT_RENDEZVOUS -e WASM_AGENT_RELAY -e WASM_AGENT_MANAGED)
+  # The names removed travel to the row as WA_FAST_CLEARED, so the contract is checked from inside the
+  # node (scripts/test-fast-row-environment.lua) rather than trusted here.
+  # An EMPTY array is empty, never one empty word: '${arr[@]:-}' expands its default when the array is
+  # empty, so env was asked to run the empty string - exit 127 on any process with no WASM_AGENT_* to
+  # clear. The '+${arr[@]}' form below is empty when the array is, and the plain words when it is not.
+  WA_FAST_CLEARED=$(for one in ${cleared_flags[@]+"${cleared_flags[@]}"}; do [ "$one" = -u ] || printf '%s,' "$one"; done)
+  export WA_FAST_CLEARED
   # THE TABLE IS WRITTEN AFTER THE CLEARED LIST, NOT BEFORE (measured 19/11 on this branch: the table was
   # built above this point, so it recorded the PREVIOUS row's WA_FAST_CLEARED and the probe row read an
   # empty list for the very variables it exists to report). Every value in the table must be final at the
