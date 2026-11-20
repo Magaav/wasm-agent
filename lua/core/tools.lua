@@ -450,7 +450,7 @@ M.admin = {
     limit = { type = "integer", minimum = 1, maximum = 2000 } }, { "path" }),
   schema("write", "Create or overwrite a text file. In a required session workspace, writes are limited to the worktree and its session scratch root; a refusal lists both in allowed_writes.", {
     path = { type = "string" }, content = { type = "string" } }, { "path", "content" }),
-  schema("edit", "Replace text in one file, using exactly one form. `edits` (old_text/new_text) quotes bytes that must occur exactly once; a miss returns the nearest region. `range_edits` copies a read `selection` unchanged with replacement_lines (optional start_line/end_line inside its edit_lines), for text you cannot quote; shell output does not provide an edit receipt. All ranges apply atomically; check the echo of what each replaced.", {
+  schema("edit", "Replace text in one file, using exactly one form. `edits` (old_text/new_text) quotes bytes that must occur exactly once; a miss returns the nearest region. An anchor that lies outside every byte range this session read from that file is refused by name (`edit_anchor_outside_read_page`): read the page that holds it. `range_edits` copies a read `selection` unchanged with replacement_lines (optional start_line/end_line inside its edit_lines), for text you cannot quote; shell output does not provide an edit receipt. All ranges apply atomically; check the echo of what each replaced.", {
     path = { type = "string" },
     edits = { type = "array", minItems = 1, maxItems = 64, items = { type = "object",
       properties = {
@@ -1866,7 +1866,10 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     return result
   elseif name == "read" then
     args.path = resolve_path(memory, ctx, args.path)
-    return file_tools.read(args,function(entry) return memory.store_image(entry) end)
+    -- The scope is what lets a later edit refuse an anchor it can prove came from a partial page
+    -- (file_tools.page_key): the session is the unit that was served the bytes.
+    return file_tools.read(args,function(entry) return memory.store_image(entry) end,nil,
+      ctx and ctx.session_id)
   elseif name == 'capture_inspect' then
     args.path=resolve_path(memory,ctx,args.path)
     return dofile('lua/core/capture_view.lua').inspect(args)
@@ -1897,7 +1900,7 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     args.path = resolve_path(memory, ctx, args.path)
     local result=file_tools.edit(args,ctx.changes and function(path,before,after)
       changeset.record(ctx.changes,path,before,after)
-    end or nil)
+    end or nil,nil,ctx and ctx.session_id)
     if result.applied then result.graph_index=graph_hint(memory,ctx,result.path) end
     return result
   elseif name == "ls" then

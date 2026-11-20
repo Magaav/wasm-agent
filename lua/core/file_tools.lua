@@ -129,7 +129,56 @@ local function read_image(args,store_image)
   }
 end
 
-function M.read(args,store_image,view_bytes)
+-- The pages this session was actually GIVEN, per scope and path: the one fact an edit cannot
+-- reconstruct from the file itself. MEASURED 19-20/11: two missions edited a file after a read that
+-- had returned only part of it, so the anchor was taken from a view the model believed was complete.
+-- The file cannot say which bytes the caller saw, so the read records it here.
+--
+-- Bounded, in-process and per scope: a page that is evicted (or a session that outlives the process)
+-- leaves no record, and no record means no restriction - this fence only ever refuses an edit whose
+-- anchor is provably outside the page the same session was served. It never guesses.
+local PAGES,page_order={},{}
+local PAGE_LIMIT=64
+local RANGES_PER_FILE=16
+local function page_key(scope,path) return tostring(scope or '')..'\0'..tostring(path or '') end
+local function record_page(scope,path,version,truncated,first_byte,last_byte,first_line,last_line)
+  if not scope then return end
+  local key=page_key(scope,path)
+  local page=PAGES[key]
+  if not page then
+    page_order[#page_order+1]=key
+    if #page_order>PAGE_LIMIT then
+      local old=table.remove(page_order,1);PAGES[old]=nil
+    end
+    page={version=version,whole=false,ranges={}}
+    PAGES[key]=page
+  end
+  -- A read of newer bytes starts the record over: the page a caller is working from belongs to the
+  -- version it just saw, and ranges of an older version would allow an anchor this file no longer has.
+  if page.version~=version then page.version=version;page.whole=false;page.ranges={} end
+  -- One whole-file read settles it: at this version the caller has seen every byte, so no anchor can
+  -- be outside what it was given. That is why this is an allow-list of pages, not a denylist of ranges.
+  if not truncated then page.whole=true;page.ranges={};return end
+  page.ranges[#page.ranges+1]={first_byte=first_byte,last_byte=last_byte,
+    first_line=first_line,last_line=last_line}
+  while #page.ranges>RANGES_PER_FILE do table.remove(page.ranges,1) end
+end
+function M.pages_for(scope,path) return PAGES[page_key(scope,path)] end
+function M.forget_pages() PAGES,page_order={},{} end
+-- True when every byte the caller was served at this version is one of these ranges; nil when this
+-- session has no record of the file at this version, which is not a refusal (nothing was promised).
+local function within_pages(page,version,byte)
+  if not page or page.version~=version then return nil end
+  if page.whole then return true end
+  if #page.ranges==0 then return nil end
+  for _,r in ipairs(page.ranges) do
+    if byte>=r.first_byte and byte<=r.last_byte then return true end
+  end
+  return false
+end
+-- Nil scope (a direct module call, a batch that carries no session) records nothing and is never
+-- fenced: the fence is about a page the session was served, and there is no session here.
+function M.read(args,store_image,view_bytes,scope)
   if type(args.path)~='string' or args.path=='' then return {error='path_required'} end
   local line=integer(args.offset,1,2147483647)
   local column=integer(args.column,1,2147483647)
@@ -224,6 +273,7 @@ function M.read(args,store_image,view_bytes)
       result.how_to_read_rest='returned bytes '..first..'-'..(first+#part-1)..' of '..#text
         ..' in '..total..' lines; '..table.concat(ways,'; ')..'.'
     end
+    record_page(scope,args.path,hash,result.truncated,first,first+#part-1,line,end_line)
     -- A complete whole-line read is also a durable edit address. It is opaque so the model
     -- cannot accidentally trim byte coordinates while retaining the digest for the wider page.
     if column==1 and next_byte>last and #part>0 and line<=total then
@@ -390,7 +440,7 @@ function M.prepare_write(args)
     result={ok=true,path=args.path,previous_version=hash,version=host.sha256(args.content)}}
 end
 
-function M.edit(args,record,prepare_only)
+function M.edit(args,record,prepare_only,scope)
   if type(args.path)~='string' or args.path=='' then return {error='path_required'} end
   local range_form=args.range_edits~=nil
   local legacy_form=args.edits~=nil or args.old_text~=nil or args.new_text~=nil
@@ -526,6 +576,23 @@ function M.edit(args,record,prepare_only)
       -- Overlapping occurrences are ambiguous too (e.g. 'aa' in 'aaa').
       if text:find(item.old_text,a+1,true) then return {error='old_text_ambiguous',edit=i} end
       ranges[#ranges+1]={a=a,b=b,text=item.new_text,index=i,target=text:sub(a,b)}
+    end
+  end
+  -- An anchor taken from a page the caller believes is the whole file, when the page was not the whole
+  -- file, is the failure this fence exists for: the edit is refused BY NAME, with the page's real range
+  -- and the way to see the rest, instead of landing on a partial view. Only a page THIS session was
+  -- served can refuse: no record, no restriction (see page_key above).
+  if scope then
+    local page=M.pages_for(scope,args.path)
+    for _,r in ipairs(ranges) do
+      if within_pages(page,hash,r.a)==false or within_pages(page,hash,r.b)==false then
+        return {error='edit_anchor_outside_read_page',path=args.path,edit=r.index,
+          anchor_byte=r.a,anchor_line=line_of(text,r.a),
+          pages=page and page.ranges or nil,
+          note='this session read only part of this file: the anchor is outside every byte range read '
+            ..'returned. Read the page that holds it (read with offset/column, or truncation.next) and '
+            ..'quote the bytes from that page; a whole-file read of the same version clears this.'}
+      end
     end
   end
   table.sort(ranges,function(a,b)return a.a<b.a end)

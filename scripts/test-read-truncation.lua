@@ -116,4 +116,50 @@ check(cut.bytes_read < cut.file_size, 'fewer bytes than the file: ' .. tostring(
 check(cut.range_complete == false and cut.next_column > 1, 'and the cursor points inside the line: '
   .. tostring(cut.next_column))
 
+-- 6. The fence: an anchor quoted from a page the caller was NOT given is refused by name. MEASURED
+-- 19-20/11: two missions edited a file from a partial read; the edit landed on a view.
+local fence = root .. '/fence.txt'
+local fence_lines = {}
+for i = 1, 400 do fence_lines[i] = string.format('fence %03d %s', i, string.rep('f', 40)) end
+assert(host.write_file(fence, table.concat(fence_lines, '\n') .. '\n'), 'fixture fence.txt')
+-- The outside anchor FIRST: an applied edit changes the version, and a page belongs to one version.
+-- A refusal in code mode is a throw, so the run block catches it and returns what it said.
+local fenced = value(run('const p = await tools.read({path:' .. json.encode(fence) .. ', limit:5});\n'
+  .. 'let outside = null;\n'
+  .. 'try { await tools.edit({path:p.path, edits:[{old_text:"fence 300 ", new_text:"FENCE 300 "}]}); }\n'
+  .. 'catch (e) { outside = {message:String(e && e.message || e), code:e && e.code,'
+  .. ' fix:String(e && e.fix || ""), data:e && e.data}; }\n'
+  .. 'return {outside:outside, truncated:p.truncated, page:p.range};'))
+check(fenced.truncated == true, 'the page the fence is judged against was partial: ' .. json.encode(fenced.truncated))
+check(fenced.outside ~= nil, 'an anchor outside the served page is refused, not applied: ' .. json.encode(fenced.outside):sub(1, 400))
+-- A refusal thrown into a script arrives as a sentence whose body is the refusal JSON; parse it so the
+-- test asserts the fields a caller would act on, not the wrapper.
+local said = {}
+local parsed_ok, parsed = pcall(json.decode, tostring(fenced.outside.message))
+if parsed_ok and type(parsed) == 'table' then said = parsed end
+check(said.error == 'edit_anchor_outside_read_page',
+  'and it is refused by its own name: ' .. tostring(fenced.outside.message):sub(1, 300))
+check(said.anchor_line == 300, 'naming the line the anchor really sits on: ' .. tostring(said.anchor_line))
+check(tostring(said.message):find('only part of this file', 1, true) ~= nil,
+  'in words that say the page was partial: ' .. tostring(said.message))
+check(tostring(said.fix):find('read', 1, true) ~= nil, 'with the way on: ' .. tostring(said.fix))
+-- And the file is untouched by the refused edit.
+check(host.read_file(fence) == table.concat(fence_lines, '\n') .. '\n', 'the refused edit wrote nothing')
+
+-- 7. An anchor INSIDE the served page still edits: the fence refuses only what was never served.
+local inside = value(run('const p = await tools.read({path:' .. json.encode(fence) .. ', limit:5});\n'
+  .. 'const e = await tools.edit({path:p.path, edits:[{old_text:"fence 002 ", new_text:"FENCE 002 "}]});\n'
+  .. 'return {edited:e.ok===true};'))
+check(inside.edited == true, 'an anchor from the page that was served still edits: ' .. json.encode(inside))
+
+-- 8. A whole-file read of the same version allows any anchor: the fence never refuses a caller who
+-- was given every byte.
+local small2 = root .. '/small2.txt'
+assert(host.write_file(small2, 'one\ntwo\nthree\n'), 'fixture small2.txt')
+local whole_ok = value(run('const p = await tools.read({path:' .. json.encode(small2) .. '});\n'
+  .. 'const e = await tools.edit({path:p.path, edits:[{old_text:"three", new_text:"THREE"}]});\n'
+  .. 'return {truncated:p.truncated, edited:e.ok===true};'))
+check(whole_ok.truncated == false and whole_ok.edited == true,
+  'a whole-file read leaves every anchor legal: ' .. json.encode(whole_ok))
+
 print('read truncation ok (' .. checks .. ' checks)')
