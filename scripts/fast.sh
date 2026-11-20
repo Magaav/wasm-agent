@@ -630,7 +630,7 @@ else
     # (review r3, B-fast).
     echo "SKIP: the Rust rows need a scratch HOME and mktemp failed"
     record_row skip rust 'rust rows' 0 0 0 'mktemp failed: the Rust rows need a scratch HOME and the operator own is refused'
-    SKIPPED=$((SKIPPED + 1))
+    skipped=$((skipped + 1))
   fi
   for crate in $( [ -n "$rust_home" ] && printf '%s' "$crates" ); do
     # THE BUILD, measured as the build the tests themselves need - never a second one. 'cargo test
@@ -741,6 +741,8 @@ if command -v node >/dev/null 2>&1; then
 # The session-isolation suite holds the canaries its own environment sections withhold
 WA_BIN="$bin" check session-isolation bash scripts/test-session-isolation.sh
 WA_BIN="$bin" check tool-env-allow bash scripts/test-tool-env-allow.sh
+# fast.sh runs under set -u: every incremented counter is initialised (test-fast-counters.sh).
+check fast-counters bash scripts/test-fast-counters.sh
 check install-front-door bash scripts/test-install.sh
   # The canonical runtime binding is decided in PREFLIGHT, before anything is built, and a refusal names
   # every worktree that is on branch main (measured 18/11: a deploy refused after ~4 minutes of build with
