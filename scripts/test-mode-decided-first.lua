@@ -151,6 +151,13 @@ local native_thread = with({ WASM_AGENT_RAW_CODE = 'native' }, function()
 end)
 eq(native_thread.mode, 'native', 'a thread started native records native')
 eq(native_thread.tools, 'run', 'and declares the one door')
+-- A child inherits the DECISION, including the decision to have no raw channel (review r4, SHOULD): a
+-- parent that decided off cannot hand its child a door it closed.
+local raw_lib = dofile('lua/core/raw_code.lua')
+eq(raw_lib.child_mode({ raw_mode = 'native' }, nil), 'native', 'child_mode answers the parent recorded mode')
+eq(raw_lib.child_mode({ raw_mode = raw_lib.NO_CHANNEL }, nil), nil, 'and a parent that decided off hands down off')
+eq(raw_lib.child_mode({ raw_decided = true }, nil), nil, 'and a decided nil is off too, never a legacy fallthrough')
+eq(raw_lib.child_mode({}, { raw_mode = 'first' }), 'first', 'while a parent with no record still falls back to its policy')
 local under_block_node = build(thread('native-shaped thread'), 'only')
 eq(under_block_node.tools, '', 'while a thread started under only declares none (the surface follows the thread, not the node)')
 
