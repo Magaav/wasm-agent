@@ -48,14 +48,21 @@ BIN="${WA_BIN:-$ROOT/rust/target/release/wa}"
 [ -x "$BIN" ] || skip 'no wa binary to run the probe with'
 LUA_ROOT="${WA_PROBE_BOUND_LUA_ROOT:-$ROOT}"
 
-# The scratch root is deliberately NOT $TMPDIR: on this node TMPDIR points INSIDE the operator store
-# (~/.wasm-agent/tmp), and a home under it is exactly what the guard below must refuse. /tmp is outside.
-SCRATCH="${WA_TEST_ROOT:-$(mktemp -d /tmp/wa-probe-bound.XXXXXX)}"
+# OFF THE /tmp TMPFS (review item 3), and in a directory this test OWNS (review item 2). /tmp on this
+# node is a 16 G tmpfs that was 79% full, and a row that fills it fails every other row on the machine;
+# TMPDIR is worse, it points INSIDE the operator store, which the guard below must refuse. The root comes
+# from the same resolver the fast path uses, and an operator WA_TEST_ROOT is never deleted: only the
+# mktemp directory made under it is.
+. "$ROOT/scripts/lib/scratch-home.sh"
+WA_ROOT="${WA_TEST_ROOT:-}"
+if [ -z "$WA_ROOT" ]; then
+  WA_ROOT="$(wa_scratch_root wa-probe-bound 2>/dev/null)" || WA_ROOT=/tmp
+fi
+SCRATCH="$(wa_test_workdir "$WA_ROOT" wa-probe-bound)" || refuse "cannot make a scratch directory under $WA_ROOT"
 mkdir -p "$SCRATCH/home/.wasm-agent" || refuse "cannot create a scratch home under $SCRATCH"
 stub_pid=
 cleanup() { [ -n "$stub_pid" ] && kill "$stub_pid" 2>/dev/null; rm -rf "$SCRATCH"; }
 trap cleanup EXIT
-. "$ROOT/scripts/lib/scratch-home.sh"
 wa_scratch_home_guard "$SCRATCH/home" || exit 2
 
 # The stub rendezvous: GET /nodes answers six peers that will never answer a call. Every POST is HELD so a

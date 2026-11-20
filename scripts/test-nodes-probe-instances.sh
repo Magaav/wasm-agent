@@ -7,15 +7,23 @@
 set -uo pipefail
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 cd "$ROOT" || exit 2
-SCRATCH="${WA_TEST_ROOT:-$(dirname "$ROOT")/.wa-test-nodes-probe-instances-$$}"
-rm -rf "$SCRATCH"; mkdir -p "$SCRATCH/home" || exit 2
+# THIS TEST OWNS ITS DIRECTORY AND NEVER DELETES THE ROOT IT WAS GIVEN (review item 2). The old line
+# was `SCRATCH="${WA_TEST_ROOT:-...}"; rm -rf "$SCRATCH"`, which deletes the ROOT itself when the
+# operator set WA_TEST_ROOT - measured shape 11/11, and the review found it here. wa_test_workdir makes
+# <root>/<name>.XXXXXX and refuses by name a root that is a home or carries .git/.wasm-agent.
+. scripts/lib/scratch-home.sh
+WA_ROOT="${WA_TEST_ROOT:-$(dirname "$ROOT")}"
+SCRATCH="$(wa_test_workdir "$WA_ROOT" test-nodes-probe-instances)" || exit 2
+mkdir -p "$SCRATCH/home" || exit 2
 cleanup() { local s=$?; rm -rf "$SCRATCH"; exit $s; }
 trap cleanup EXIT
-. scripts/lib/scratch-home.sh
 wa_scratch_home_guard "$SCRATCH/home" || exit 2
 BIN="${WA_BIN:-}"
 if [ -z "$BIN" ]; then
-  for c in "$ROOT/rust/target/release/wa" "/home/victor/wasm-agent/target/m-node-ops/release/wa"; do
+  # NO HARDCODED OPERATOR PATH (review item 3): this row was written on avell and named that machine's
+  # build directory, so it silently skipped on every other node. WA_BIN first, then this tree's own build
+  # (CARGO_TARGET_DIR, the variable the brief and the fast path both use), then PATH.
+  for c in "$ROOT/rust/target/release/wa" "${CARGO_TARGET_DIR:-/nonexistent}/release/wa" "$(command -v wa || true)"; do
     [ -x "$c" ] && BIN="$c" && break
   done
 fi
