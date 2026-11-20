@@ -165,13 +165,27 @@ pub fn pooled_engine(limits: &PoolLimits) -> Result<Engine> {
 /// reading a type does not need a second compilation, and the disk cache (`<home>/.wasm-agent/cache/
 /// components`) is keyed by exactly the pin this takes.
 pub(crate) fn compiled(engine: &Engine, sha: &str, bytes: &[u8]) -> Result<Component> {
-    static CACHE: OnceLock<Mutex<HashMap<String, Component>>> = OnceLock::new();
+    // Keyed by the pin AND the engine. A Component only instantiates on the Engine that compiled it, and
+    // this process has more than one (the sync one here, the async one imports.rs inspects with). Keyed
+    // by sha alone, whichever engine compiled a component first won for every caller: after an imports
+    // inspection, the hooks/memory/selfloop/mesh hosts failed with "cross-`Engine` instantiation is not
+    // currently supported" (measured 20/11: wa-kernel-runtime's hooks tests red in 6 of 12 runs on main).
+    static CACHE: OnceLock<Mutex<HashMap<String, Vec<(Engine, Component)>>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Some(found) = cache.lock().map_err(|_| anyhow!("component_cache_poisoned"))?.get(sha) {
-        return Ok(found.clone());
+    if let Some(found) = cache
+        .lock()
+        .map_err(|_| anyhow!("component_cache_poisoned"))?
+        .get(sha)
+        .and_then(|entries| entries.iter().find(|(owner, _)| Engine::same(owner, engine)))
+    {
+        return Ok(found.1.clone());
     }
     let component = disk_cached(engine, sha, bytes)?;
-    cache.lock().map_err(|_| anyhow!("component_cache_poisoned"))?.insert(sha.to_string(), component.clone());
+    let mut cache = cache.lock().map_err(|_| anyhow!("component_cache_poisoned"))?;
+    let entries = cache.entry(sha.to_string()).or_default();
+    if !entries.iter().any(|(owner, _)| Engine::same(owner, engine)) {
+        entries.push((engine.clone(), component.clone()));
+    }
     Ok(component)
 }
 
@@ -685,6 +699,25 @@ pub(crate) static TEST_DIR_LOCK: Mutex<()> = Mutex::new(());
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The in-process cache answers each engine with a component THAT engine compiled: a component
+    /// cached by another engine first must not be handed out (it cannot be instantiated there).
+    #[test]
+    fn the_compile_cache_never_hands_one_engine_another_engines_component() {
+        // An empty component: magic, component version 0x0d, layer 1.
+        let bytes = [0x00, 0x61, 0x73, 0x6d, 0x0d, 0x00, 0x01, 0x00];
+        let sha = "test-two-engines-0123456789abcdef";
+        let mut config = Config::new();
+        config.wasm_component_model(true);
+        let other = Engine::new(&config).expect("other engine");
+        let shared = engine().expect("shared engine");
+        let first = compiled(&other, sha, &bytes).expect("compiled on the other engine");
+        assert!(Engine::same(first.engine(), &other));
+        let second = compiled(&shared, sha, &bytes).expect("compiled on the shared engine");
+        assert!(Engine::same(second.engine(), &shared), "the shared engine got a component another engine compiled");
+        let again = compiled(&other, sha, &bytes).expect("cached for the other engine");
+        assert!(Engine::same(again.engine(), &other));
+    }
 
     #[test]
     fn grants_must_be_declared() {
