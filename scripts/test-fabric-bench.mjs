@@ -50,30 +50,30 @@ ok(report.fanout.latency_ok_ms.n >= 1 && report.fanout.latency_ok_ms.p50 > 0, 'f
 ok(report.fanout.jobs === report.fanout.ok + report.fanout.failed, 'every job is classified as answered or failed');
 const cpu = report.fanout.cpu;
 ok(cpu && Number.isFinite(cpu.unattributed_cpu_seconds), 'cpu: the unattributed bucket is reported, not hidden');
-ok(Math.abs(Object.values(cpu.nodes).reduce((sum, node) => sum + node.cpu_seconds, 0) + 0) >= 0, 'cpu: per-node attribution is present');
+// A sum over an empty object is 0, so the old form passed whatever happened: name the node the smoke
+// run measured and require a finite number of CPU-seconds for it.
+const target = cpu.nodes && cpu.nodes.target1;
+ok(target && Number.isFinite(target.cpu_seconds) && target.cpu_seconds >= 0,
+  'cpu: the target node has an attributed CPU figure (target1.cpu_seconds is a finite number)');
 ok(cpu.sockets && cpu.sockets.peak >= 1, 'relay: the connection count was sampled');
 ok(String(report.root || '').includes(path.join(process.env.WA_FABRIC_BENCH_TMP || '/tmp', 'wa-fabric-bench-')),
   'the scratch tree lives under the scratch base, not a node home');
 ok(!fs.existsSync(report.root), 'a passing run removes its scratch tree');
 
-// The guard: a scratch base inside the real node home must be refused, by name, before anything runs.
-const reals = [process.env.HOME, path.join(os.homedir(), '.wasm-agent')].filter(Boolean);
-const real = reals[0];
-if (real && fs.existsSync(real)) {
-  // The base has to exist, or mkdtemp would be what fails and the guard would never be reached -
-  // the test would then be passing on the wrong refusal.
-  const inside = path.join(real, 'wa-fabric-bench-should-refuse');
-  fs.mkdirSync(inside, {recursive: true});
-  const refused = spawnSync(process.execPath, [BENCH, '--binary', binary, '--smoke'], {
-    env: Object.assign({}, env, {WA_FABRIC_BENCH_TMP: inside}),
-    encoding: 'utf8', timeout: 120000});
-  fs.rmSync(inside, {recursive: true, force: true});
-  const said = (refused.stdout || '') + (refused.stderr || '');
-  ok(refused.status !== 0 && /refusing to use a real node home/.test(said),
-    'the isolation guard refuses a scratch root inside the real node home (' + said.split('\n')[0].slice(0, 160) + ')');
-} else {
-  console.log('SKIP test-fabric-bench: no real HOME to point the guard at');
-}
+// The guard: a scratch base inside the node home must be refused, by name, before anything runs.
+// It runs under a SCRATCH home of its own - the one directory this must never write to is the real
+// node home, and a test that made its refusal case inside it would be the accident it is checking for.
+const realHome = fs.mkdtempSync(path.join(process.env.WA_FABRIC_BENCH_TMP || '/tmp', 'wa-fabric-test-home-'));
+const inside = path.join(realHome, 'wa-fabric-bench-should-refuse');
+fs.mkdirSync(inside, {recursive: true});
+const refused = spawnSync(process.execPath, [BENCH, '--binary', binary, '--smoke'], {
+  env: Object.assign({}, env, {HOME: realHome, WASM_AGENT_HOME: realHome, WA_FABRIC_BENCH_TMP: inside}),
+  encoding: 'utf8', timeout: 120000});
+const said = (refused.stdout || '') + (refused.stderr || '');
+ok(refused.status !== 0 && /refusing to use a real node home/.test(said),
+  'the isolation guard refuses a scratch root inside the node home (' + said.split('\n')[0].slice(0, 160) + ')');
+ok(fs.readdirSync(inside).length === 0, 'the refusal happened before mkdtemp wrote anything inside that home');
+fs.rmSync(realHome, {recursive: true, force: true});
 
 fs.rmSync(root, {recursive: true, force: true});
 console.log('test-fabric-bench: ' + checks + ' checks');

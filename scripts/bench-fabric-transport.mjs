@@ -83,15 +83,25 @@ function scratchEnv(home, extra = {}) {
 
 // The real node's home is the one directory this benchmark must never write to. Both names are
 // checked, because a child resolves WASM_AGENT_HOME first and HOME second (wa-host-support paths).
-function assertScratchHome(home) {
+function realHomeOverlap(candidate) {
   const real = [process.env.HOME, path.join(os.homedir(), '.wasm-agent')].filter(Boolean);
-  for (const candidate of real) {
-    const a = path.resolve(home);
-    const b = path.resolve(candidate);
-    if (a === b || a.startsWith(b + path.sep) || b.startsWith(a + path.sep)) {
-      throw new Error('bench: refusing to use a real node home (' + home + ' overlaps ' + candidate + ')');
-    }
+  for (const other of real) {
+    const a = path.resolve(candidate);
+    const b = path.resolve(other);
+    if (a === b || a.startsWith(b + path.sep) || b.startsWith(a + path.sep)) return other;
   }
+  return '';
+}
+
+// The BASE is checked before mkdtemp: creating the scratch tree first and refusing afterwards would
+// already have written inside the real home, which is the one thing this guard exists to prevent.
+function assertScratchBase(base) {
+  const bad = realHomeOverlap(base);
+  if (bad) throw new Error('bench: refusing to use a real node home (' + base + ' overlaps ' + bad + ')');
+}
+
+function assertScratchHome(home) {
+  assertScratchBase(home);
   if (!home.includes('wa-fabric-bench-')) {
     throw new Error('bench: scratch home must carry the wa-fabric-bench- marker (' + home + ')');
   }
@@ -324,6 +334,7 @@ async function startFabric(args) {
   // The scratch tree lives outside every node home: a session's TMPDIR can point INSIDE one (this
   // agent's does), and a benchmark that wrote there would be exactly the accident the guard refuses.
   const base = process.env.WA_FABRIC_BENCH_TMP || (fs.existsSync('/tmp') ? '/tmp' : os.tmpdir());
+  assertScratchBase(base);
   const root = fs.mkdtempSync(path.join(base, 'wa-fabric-bench-'));
   const service = 'http://127.0.0.1:' + (await freePort());
   const port = Number(service.split(':').pop());
