@@ -267,3 +267,56 @@ test-raw-first, test-run-counts, test-context-growth, test-raw-code, test-refusa
    thread resolves no tools..." - unchanged; the mode it reports now comes from the thread's record.
 4. (item 1, NEW, not model-facing) raw_code.NO_CHANNEL = "off", the recorded spelling of "this thread decided
    to have no raw channel". It is the switch's own word, so it is already in the operator's vocabulary.
+
+## Review r4 (FIX, two small MUSTs)
+
+| item | commit | what the diff does |
+|---|---|---|
+| 1 | 1a26b1ce | the mode is DECIDED AND PINNED before the tool context exists: build_context decides first, pins the policy WITH the decision on it, and only then builds code_ctx |
+| 2 | 07da65d7 | a record written before raw_mode existed honours an EXPLICIT WASM_AGENT_RAW_CODE switch (the mode a27490af froze it in) and keeps only when the switch is unset |
+| SHOULD | 057b30aa | raw_code.child_mode honours raw_decided: a parent that decided no raw channel hands that decision down |
+
+### Item 1 - the defect, measured
+
+agent.lua built code_ctx from self.codemode_policy BEFORE the policy was pinned and before the thread's
+mode was decided, so the policy the tool builders read carried no mode. envelope.lua:73,112 and
+M.subagent_tool_list (:806) read mode_of(ctx.codemode_policy), which fell through to the NODE's current
+mode, so a resumed thread (or any thread whose node mode differs) resolved a different tool list than the
+one it froze. prompt_cache.enforce then reported the prefix changed and compose() put
+"[session update] ... removed: ..." in front of the model.
+
+The fix decides first, pins the policy with the decision already on it, and builds code_ctx last.
+The zero-width character the review named in fixtures/prompt-golden/README.md:26 is gone (verified: no
+U+200B/U+200C/U+200D/U+FEFF remains in that file).
+
+### Item 2 - a pre-release thread honours the switch
+
+raw_code.explicit() is split out of mode() (M.parse_switch, M.UNSET), so the two questions are asked
+separately: "what did the operator ask for" and "what does the node answer when they asked nothing".
+A record with no raw_mode now takes the explicit switch when it is set, and only otherwise. That is what
+a27490af froze such a thread in, since a27490af's M.DEFAULT was only and the switch is what the operator
+set.
+
+### Tests (each wired in scripts/test.sh, "mode decided first ok")
+
+scripts/test-mode-decided-first.lua, 58 checks: a RECORDED thread is resumed under every other node mode
+(native, first, only, off, on, stop) and must resolve the SAME tools, report changed=false, and add no
+note; the same for a legacy record, per explicit mode (native/first/only/codemode/stop) with the no-switch
+case asserting only; a pristine legacy record resumed twice under its own switch keeps its tools, its
+prefix and owes no note; and child_mode's three answers (recorded mode, the word off, a decided nil).
+
+### The 5 fast-path reds, proven on a27490af
+
+Log: scratch/reds-a27490af.log (one run per row, own scratch home, cleaned environment). Every one fails
+identically on a27490af with the same binary:
+test-raw-first :46, test-run-counts :15, test-context-growth :15, test-raw-code :45,
+test-refusal-contract :24.
+
+### Texts to approve (continuing the list)
+
+No new model-facing or operator-facing sentence. The refusal text named in item 3 above is unchanged.
+
+### Fast path
+
+flock /home/victor/Work/missions/.suite.lock bash scripts/fast.sh
+log: /home/victor/Work/missions/rel-native/scratch/fast-r4.log
