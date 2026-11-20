@@ -116,6 +116,54 @@ recovery has to be measured, and on this base a single-caller fan-out has no rec
 * **A 60 s relay outage leaves no recovery inside the next 60 s** for a single-caller fan-out (0 successes
   after the resume, above).
 
+## PHASE 1b: the 504 Retry-After hint (commit 590ba6d0)
+
+This branch is the bench (above) **plus one retry-policy gap** that main 39bbf2b6 still had.
+
+What the gap was, measured: @@nodes.lua@@ on main routes the 503 hints and its own backoff through
+@@M.relay_backoff_ms(attempt, hint)@@ (750 ms doubling, capped 8 s, jittered), but the **504** branch slept
+the relay's @@retry_after_ms@@ **raw** (@@host.sleep(tonumber(decoded.retry_after_ms) / 1000)@@). The relay's
+504 body carries a fixed @@retry_after_ms: 750@@ (@@rendezvous.rs@@, both @@node_no_answer@@ and
+@@node_not_attached@@), so every caller that missed its wait came back on the wire at the same instant —
+the herd the helper exists to break. And nothing bounded it: a hint of ten minutes was slept in full, past
+the caller's own @@M.RELAY_DEADLINE_SECONDS = 60@@.
+
+What 590ba6d0 changes (lua/core/nodes.lua):
+
+* the 504 hint goes through @@relay_backoff_ms@@ like every other wait — the helper's unit rule is
+  "under 1000 means seconds", so the call site hands over @@retry_after_ms / 1000@@ (750 ms -> 0.75 -> 750 ms);
+* @@relay_backoff_ms@@ now treats a hint as a **floor** and spreads the wait **upward** over
+  [hint, 1.5 x hint], capped at 30 s: never earlier than the server's earliest time, never in lockstep,
+  never past the caller's own deadline.
+
+Proved both ways (the rule that a test must fail without the change):
+
+| run | result |
+| --- | --- |
+| new test + **unpatched** tree (@@WASM_AGENT_LUA_ROOT=wt-a@@) | **FAIL** at "the wait above a hint is spread, not the same millisecond for every caller" |
+| new test + patched tree (@@WASM_AGENT_LUA_ROOT=wt-b@@) | **PASS**, 136 checks (main's file has 91) |
+
+Measurements with the PHASE 0 bench, alternating A (main) / B (this change), same host, 4 targets:
+
+| run | fan-out answered / 64 | fan-out p50 | storm answered / 32 | storm late answers |
+| --- | --- | --- | --- | --- |
+| A (main) run 1 | 3 | 2837 ms | — | — |
+| B (this) run 1 | 4 | 2925 ms | — | — |
+| A (main) run 2 | 10 | 4380 ms | 8 | 10 |
+| B (this) run 2 | 9 | 4716 ms | 9 | 0 |
+
+(storm here is a 30 s cut, not 60 s, to keep the round inside the session; the 60 s numbers are in the
+section above.)
+
+**The honest reading: the bench cannot resolve this change, and these runs say so about themselves.**
+Every fan-out run — A and B alike — ends with 52-55 @@remote_error:relay_busy@@, because the wall on this
+base is the relay's per-caller shed gate (8 in flight, @@rendezvous.rs:1442@@), which almost never lets a
+call reach a 504 at all; and the same binary answered 3 in one run and 10 in the next, so the run-to-run
+spread is larger than any difference between the branches. The evidence for this change is the unit and
+integration test above (the sleeps it now records, their floor, their spread, their cap), not a fan-out
+delta. The one number that moved consistently in the storm — 0 late answers with B against 10 with A —
+is reported as an observation, not a result: one run each.
+
 ## Texts to approve
 
 No model-facing string is added or changed: the harness and its judge are operator tools, and no Lua
