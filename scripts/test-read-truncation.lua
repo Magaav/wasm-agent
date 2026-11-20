@@ -221,4 +221,34 @@ check(tostring(wide.said):find('edit_anchor_outside_read_page', 1, true) ~= nil,
   'by its own name: ' .. tostring(wide.said):sub(1, 300))
 check(host.read_file(span) == table.concat(gap_lines, '\n') .. '\n', 'and it wrote nothing')
 
+-- 11. review r1 SHOULD 1: a whole-file page does not repeat what offset/end_offset already say. The
+-- three names the brief asks for stay; the range{} block exists only when the page is partial.
+local lean = value(run('const r = await tools.read({path:' .. json.encode(small) .. '});\n'
+  .. 'return {truncated:r.truncated, has_range:r.range!==undefined&&r.range!==null,'
+  .. ' file_size:r.file_size, bytes:r.bytes, bytes_read:r.bytes_read, returned_bytes:r.returned_bytes,'
+  .. ' offset:r.offset, end_offset:r.end_offset, total_lines:r.total_lines};'))
+check(lean.truncated == false, 'the small file reads whole: ' .. json.encode(lean.truncated))
+check(lean.has_range == false, 'a whole-file page carries no range{}: ' .. json.encode(lean.has_range))
+check(lean.file_size == lean.bytes, 'file_size is still there (bytes kept equal): ' .. json.encode(lean))
+check(lean.bytes_read == lean.returned_bytes, 'bytes_read is still there (returned_bytes kept equal)')
+check(lean.offset == 1 and lean.total_lines == 3, 'and the cursor fields still say the whole thing: '
+  .. json.encode(lean))
+
+-- 12. review r1 SHOULD 5: a page of zero bytes says so, instead of a range whose last byte is before
+-- its first ("returned bytes 18-17 of 17"), and carries no last_byte/last_line it does not have.
+local past = value(run('const r = await tools.read({path:' .. json.encode(small) .. ', offset:4});\n'
+  .. 'return {truncated:r.truncated, bytes_read:r.bytes_read, file_size:r.file_size,'
+  .. ' how:r.how_to_read_rest, truncation:r.truncation};'))
+check(past.bytes_read == 0 and past.file_size == 17,
+  'the line past the last one returns zero bytes: ' .. json.encode({past.bytes_read, past.file_size}))
+check(past.truncated == true, 'and is truncated (earlier lines were not returned)')
+check(tostring(past.how):find('no bytes returned', 1, true) ~= nil,
+  'the sentence says no bytes, not a backwards range: ' .. tostring(past.how))
+check(tostring(past.how):find('18%-17') == nil, 'and never prints a backwards range: ' .. tostring(past.how))
+check(past.truncation ~= nil and past.truncation.last_byte == nil
+  and past.truncation.last_line == nil,
+  'the truncation carries no last_byte/last_line it does not have: ' .. json.encode(past.truncation))
+check(past.truncation ~= nil and past.truncation.first_byte == 18,
+  'and still names where the (empty) page starts: ' .. json.encode(past.truncation))
+
 print('read truncation ok (' .. checks .. ' checks)')

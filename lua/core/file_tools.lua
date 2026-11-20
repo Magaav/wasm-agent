@@ -254,6 +254,9 @@ function M.read(args,store_image,view_bytes,scope)
   local view_budget=math.min(output.MAX_BYTES,tonumber(view_bytes) or output.MAX_BYTES)
   local capacity=view_budget-2048
   local part,next_byte=output.slice(text:sub(1,last),first,capacity)
+  -- envelope() writes the byte range it actually produced here, so the page recorded after the shrink
+  -- loop is the page that is RETURNED (a whole-file page carries no range{} field).
+  local served={}
   local function envelope()
     local next_line=line
     while starts[next_line+1] and starts[next_line+1]<=next_byte do next_line=next_line+1 end
@@ -264,10 +267,16 @@ function M.read(args,store_image,view_bytes,scope)
     -- file's own size and line count, so "4 KB of 186 KB" is never something the caller has to infer
     -- from a cursor. MEASURED 19-20/11: two sessions edited a file from a page that looked whole - the
     -- envelope carried next_offset and total_lines and never the size of the file behind it.
+    -- WHAT A PAGE RETURNS, in three names the caller can compute with: file_size (the file), bytes_read
+    -- (this page) and total_lines. The byte range is spelled out only when the page is NOT the whole
+    -- file - on a whole-file page it would repeat offset/end_offset and cost every small read bytes to
+    -- say "all of it" twice (review r1 SHOULD 1).
+    local page_first_byte=first
+    local page_last_byte=first+#part-1
+    served.first,served.last=page_first_byte,page_last_byte
     local result={path=args.path,content=part,version=hash,offset=line,column=column,
       next_offset=next_line,next_column=next_column,eof=next_byte>#text,range_complete=next_byte>last,
       total_lines=total,bytes=#text,file_size=#text,bytes_read=#part,returned_bytes=#part,
-      range={first_byte=first,last_byte=first+#part-1,first_line=line,last_line=end_line},
       end_offset=end_line,
       note='Raw text, no synthetic line numbering. Continue with next_offset, next_column and version.'}
     -- Always a boolean, never an absent field: a caller reading the flag must not have to tell
@@ -278,6 +287,7 @@ function M.read(args,store_image,view_bytes,scope)
     local missing_before=first>1
     result.truncated=missing_before or missing_after
     if result.truncated then
+      result.range={first_byte=page_first_byte,last_byte=page_last_byte,first_line=line,last_line=end_line}
       local reason=missing_after and (column==1 and next_byte>last
         and 'the requested lines ended before the last line of the file'
         or 'this page reached the per-call byte budget')
@@ -289,13 +299,21 @@ function M.read(args,store_image,view_bytes,scope)
       if missing_before then
         ways[#ways+1]='earlier lines were not returned: start again at offset 1, column 1'
       end
+      -- last_byte/last_line are absent when nothing was returned: a page of zero bytes has no last
+      -- byte, and printing "18-17" was a range no caller can use (review r1 SHOULD 5).
       result.truncation={reason=reason,bytes_read=#part,file_size=#text,
-        first_byte=first,last_byte=first+#part-1,first_line=line,last_line=end_line,
-        lines_in_file=total,missing_before=missing_before,missing_after=missing_after}
+        first_byte=page_first_byte,first_line=line,lines_in_file=total,
+        missing_before=missing_before,missing_after=missing_after}
+      if #part>0 then
+        result.truncation.last_byte=page_last_byte
+        result.truncation.last_line=end_line
+      end
       if missing_after then
         result.truncation.next={path=args.path,offset=next_line,column=next_column,version=hash}
       end
-      result.how_to_read_rest='returned bytes '..first..'-'..(first+#part-1)..' of '..#text
+      result.how_to_read_rest=(#part>0
+          and ('returned bytes '..page_first_byte..'-'..page_last_byte..' of '..#text)
+          or ('no bytes returned of '..#text..' bytes'))
         ..' in '..total..' lines; '..table.concat(ways,'; ')..'.'
     end
     -- A complete whole-line read is also a durable edit address. It is opaque so the model
@@ -320,8 +338,7 @@ function M.read(args,store_image,view_bytes,scope)
   -- page the caller never saw was recorded - and the first pass was a whole-file page whenever the
   -- raw bytes fit but their JSON-escaped form did not, which set whole=true and turned the fence off
   -- for the rest of the session. A refused read records nothing: there is no page.
-  record_page(scope,args.path,hash,result.truncated,result.range.first_byte,result.range.last_byte,
-    line,result.end_offset)
+  record_page(scope,args.path,hash,result.truncated,served.first,served.last,line,result.end_offset)
   return result
 end
 -- `old_text` is quoted from memory, and the measured cause of a miss is *not* whitespace: in
