@@ -140,13 +140,53 @@ ledgers prove.
 My first two probes started `tmux` **without** `env -i`, so the child inherited the operator's shell
 environment including `WASM_AGENT_VAULT_URL`. `lua/core/provider.lua:167` lets the vault win over the
 fixture URL: those two probes ran **real inference through the live vault** (`127.0.0.1:8810`) rather
-than my fixture. Nothing was written to the real ledger (the ledgers went to
-`~/.wasm-agent/tmp/fc-probe-*`, left in place as evidence), and the worktree was clean.
+than my fixture. Nothing was written to the real ledger: the three ledgers went to
+`~/.wasm-agent/tmp/fc-probe-{11qs2J,axOTUK,zhhYuN}`, which were **deleted** in this follow-up (they are
+listed and the calls counted above; see "Cleanup"). The worktree was clean throughout.
 
 The test now makes that impossible to repeat silently: a **private** tmux socket, `env -i` plus an
 explicit allow-list, a scratch root that must be outside `~/.wasm-agent` (this node's `TMPDIR` points
 inside it, so the guard refuses), and a check that **the fixture itself served the run** and that the
 banner names the fixture endpoint - a run that reached any other endpoint fails instead of passing.
+
+## Follow-up round: each new test fails on origin/main and passes here
+
+Measured in a separate worktree of `ef7e0e5d` with ONLY the new tests carried over (`/tmp/fc2-base`):
+
+| item | on `origin/main` (`ef7e0e5d`) | on this branch |
+| --- | --- | --- |
+| 1 `only_the_exact_card_opening_opens_a_frame_a_dim_diagnostic_does_not` | **FAILED** - the dim `┌─ src/main.rs:3:5` opened a frame and the prose under it came out `│↪` instead of wrapped | ok |
+| 2 `a_table_looking_code_line_inside_a_real_card_is_still_card_code` | **FAILED** - `│ a long line ... │` inside a real card was wrapped as prose (`by cells and ends with a bar`) | ok |
+| 3 no tmux on PATH | exit **1**, `fence-card: FAILED - tmux could not start the session: undefined` | exit **0**, `SKIP test-fence-card-pty: no tmux on PATH...` |
+| 4 report only | - | - |
+
+`cargo test -p wa-term`: **173 passed, 0 failed** on the base run of the same tree; **46 transcript tests** here.
+## Fast path under the suite lock (rule 15)
+
+`flock -o ~/Work/missions/.suite.lock bash scripts/fast.sh` on this branch: **332 checks, 292 passed,
+40 failed, 3 named skips, 371s**. My two rows pass:
+
+```text
+fence-card-pty -> pass
+rust wa-term    -> pass
+```
+
+The 40 failures are **pre-existing on `ef7e0e5d`**, not caused by this branch: they are the tests that
+need the embedded code-mode assets this node does not have (`lua/core/tool_output.lua:22: attempt to
+index a nil value (global 'host')`), and the same three sampled rows (`test-status.lua`,
+`test-return-shapes.lua`, `test-envelope.lua`) fail **identically** in a worktree of the base commit.
+The 3 skips are named ones (`test-cli-view.lua` reserve fixture, `test-codemode-blocks.lua`,
+`test-codemode-component.lua` - no embedded code-mode assets).
+## What this does NOT cover
+
+* **`NO_COLOR`, `WASM_AGENT_CLI_VIEW=plain`, and a custom theme.** The card frame is recognised by its
+  STYLED border: `lua/core/markdown.lua` paints the border with the `mdCodeBlockBorder` role, and the host
+  keys on those bytes (`CARD_BORDER`). With colour off nothing is painted, so there is no frame to see and a
+  card falls back to the PROSE rule - the pre-existing behaviour, the same one every non-host consumer gets.
+  A theme that changes `mdCodeBlockBorder` keeps the card cut but must keep `CARD_BORDER` in step;
+  `the_card_border_colour_is_the_one_the_theme_table_names` fails the moment they drift, which is the
+  guard rather than a feature.
+* **Re-rendering on a resize** (above): the host cuts the rows it holds; it does not re-flow the source.
 
 ## Texts to approve
 

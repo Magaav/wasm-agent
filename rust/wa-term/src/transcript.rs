@@ -1967,6 +1967,26 @@ mod tests {
         }
     }
 
+
+    #[test]
+    fn with_colour_off_there_is_no_frame_and_the_card_falls_back_to_prose() {
+        // NO_COLOR / WASM_AGENT_CLI_VIEW=plain: `markdown.lua`\'s paint returns the text unchanged, so the
+        // border carries no colour bytes. The host then cannot see a frame and the card wraps as PROSE -
+        // the pre-existing behaviour, which the report states and this test pins.
+        let code = "for f in a b c; do echo one rather long line of shell here to push past the border; done";
+        let plain_rows = vec![
+            "┌─ bash".to_string(),
+            format!("│ {code}"),
+            "└─".to_string(),
+        ];
+        let mut cards = CardWrap::default();
+        let mut screen: Vec<String> = Vec::new();
+        for line in &plain_rows { screen.extend(cards.rows(line, 60)); }
+        let prose: Vec<String> = plain_rows.iter().flat_map(|l| wrap_rows(l, 60)).collect();
+        assert_eq!(screen, prose, "an unpainted card is prose, exactly: {screen:?}");
+        assert!(!screen.iter().any(|r| r.contains("│↪")), "no card mark without colour: {screen:?}");
+    }
+
     #[test]
     fn a_table_looking_code_line_inside_a_real_card_is_still_card_code() {
         // A code line may be anything, including something that reads like a table row. The table check
