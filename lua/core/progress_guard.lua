@@ -8,9 +8,11 @@
 --
 -- Two facts are enforceable without a budget, and they are the two this module decides on:
 --
---   repeated calls  the same decision, by name and arguments, `repeat_limit` rounds in a row.
---                   Re-issuing one call is not thinking; three identical decisions with no new
---                   observation between them is a loop (a stuck probe, a retry that cannot help).
+--   repeated calls  the same decision, by name and arguments, `repeat_limit` rounds in a row WITH NO
+--                   NEW OBSERVATION. Re-issuing one call is not thinking; three identical decisions
+--                   whose answers never moved is a loop (a stuck probe, a retry that cannot help).
+--                   A call whose answer changes every round - an await on work still running, whose
+--                   elapsed clock and output move - is waiting, not looping (19/11).
 --   no progress     `idle_rounds` rounds in a row that changed nothing: no effectful call
 --                   succeeded, no file changed, and the tool results were byte-identical to the
 --                   round before. Reading twenty files is progress (the answers differ); asking
@@ -62,26 +64,46 @@ function M.fingerprint(calls)
   return table.concat(parts, "\n")
 end
 
--- A wait on supervised work. `operation` action await/wait asks the operation manager the same
--- question again, and the answer it gets back is a new observation every time the operation is still
--- running: elapsed_ms moved, the state and its queue depth moved with it. Measured 19/11 on
--- rel-native: three identical awaits behind a suite lock were killed as guard_repeated_calls while
--- the build they waited on was still running (docs/missions/guard-wait.md). The operation's own
--- timeout bounds the wait; a round count is exactly the budget this module refuses to be.
+-- A wait on supervised work is RECOGNISED BY ITS ANSWER, never by the calling tool's name.
 --
--- A wait on a SETTLED operation is not this: it hands back the same bytes again, so it is still a
--- repeat and still stops. And an answer with no state field is not evidence of waiting - unknown is
--- not yes - so it is judged like any other repeat.
-local WAIT_ACTIONS = { await = true, wait = true }
-local LIVE_STATES = { accepted = true, queued = true, running = true, draining = true }
+-- Measured 19/11 on rel-native (out.log ~16590-16610): the call the guard killed was
+-- `codemode({code: "const a = await tools.operation({action:'await', id:'op-...', wait_s:900})"})`,
+-- repeated three rounds while the operation it waited on was still pending behind another mission's
+-- suite lock. The answer said `{"state":"pending",...}` - and a check that looked for the `operation`
+-- tool by name could not see it, because the call the model made was codemode. The answer is the one
+-- fact both shapes share, so the answer is what this reads.
+--
+-- A wait on SETTLED work is not this: it hands back the same bytes again, so it is still a repeat and
+-- still stops. And an answer with no wait evidence is not evidence of waiting - unknown is not yes.
+local WAIT_STATES = { pending = true, running = true, queued = true, accepted = true, draining = true }
 
-function M.waiting(name, args, answer)
-  if name ~= "operation" or type(args) ~= "table" then return false end
-  if not WAIT_ACTIONS[tostring(args.action or "")] then return false end
-  if type(answer) ~= "table" or answer.settled == true then return false end
-  return LIVE_STATES[tostring(answer.state or "")] == true
+-- One record that says supervised work is still running. `pending` is codemode's own documented meaning
+-- for a call that outlived its wait (`{state:"pending", op}`), so it needs an id to count; a live
+-- operation state carries its id or its own clock.
+local function live_wait(record)
+  if type(record) ~= "table" or record.settled == true then return false end
+  local state = tostring(record.state or record.status or "")
+  if not WAIT_STATES[state] then return false end
+  return record.op ~= nil or record.operation_id ~= nil or record.elapsed_ms ~= nil
+    or (state == "pending" and record.name ~= nil)
 end
 
+--- Does this answer carry evidence of supervised work still running? Reads the answer itself, then the
+--- rest of a script's result (`calls`, `value`), so a nested await and a direct one are the same fact.
+function M.waiting(answer)
+  if type(answer) ~= "table" then return false end
+  if live_wait(answer) then return true end
+  if type(answer.value) == "table" and live_wait(answer.value) then return true end
+  for _, key in ipairs({ "calls", "call", "results" }) do
+    local list = answer[key]
+    if type(list) == "table" then
+      for _, record in pairs(list) do
+        if live_wait(record) then return true end
+      end
+    end
+  end
+  return false
+end
 function M.new(opts)
   opts = opts or {}
   return {
@@ -104,7 +126,9 @@ end
 --   effects    how many effectful calls ran successfully
 --   changes    a digest of the run's changed files (nil when the run changes none)
 --   label      a short, human name for the repeated call ("read AGENTS.md"), for the reason text
---   waiting    the round waited on supervised work that is still running (M.waiting): progress
+--   waiting    every call this round was a wait on work still running (M.waiting)
+--   wait_spent_ms / wait_budget_ms  what the wait actually cost, against what it asked for, so a
+--              wait that SPENT time is progress and a `wait_ms:0` poll that spent none is not
 -- Returns nil to continue, or a named reason string to stop. The reason is the durable code, so a
 -- reader can grep it and M.classify can name it.
 function M.observe(state, obs)
@@ -117,6 +141,16 @@ function M.observe(state, obs)
   state.changes = obs.changes ~= nil and obs.changes or state.changes
   state.last_results = obs.results
 
+  -- A repeat is the same decision with NO NEW OBSERVATION - the module's own contract, which this line
+  -- did not honour: it counted every identical call whatever the round had learned. Measured 19/11 on
+  -- rel-native (out.log ~16590-16610): three `codemode({code: ... await operation ...})` rounds were
+  -- killed as guard_repeated_calls while their answers were plainly moving
+  -- (`log":"0\n42:50\n09:48...` then `48:06\n15:04...` - the operation was spending real time behind
+  -- another mission's suite lock). The blocked build was legitimate work, ended by a counter that
+  -- ignored the evidence in front of it.
+  --
+  -- A round whose results are byte-identical is still a loop: ten `wait_ms:0` calls that answer at once
+  -- with the same bytes are ten identical decisions, which is exactly what this must stop.
   local signature = tostring(obs.signature or "")
   if signature ~= "" and signature == state.last_call then
     state.repeats = state.repeats + 1
@@ -126,9 +160,18 @@ function M.observe(state, obs)
   end
   if changed then state.idle = 0 else state.idle = state.idle + 1 end
 
-  -- A round that waited on work which is still running learned something, even though it asked the
-  -- same question: it is progress, so its repeat streak ends here and its idle count resets.
-  if obs.waiting then
+  -- A round that waited on work still running is progress ONLY when the wait itself learned
+  -- something or actually waited. Measured 19/11 on rel-native: the killed waits each spent a full
+  -- 900 s budget behind another mission's suite lock, and their answers plainly moved
+  -- (log bytes 42:50 -> 48:06). The hole this closes is the other shape: `wait_s:0` / `wait_ms:0`
+  -- answers AT ONCE, so ten identical immediate answers are ten identical decisions with no new
+  -- observation - a hot loop, not a wait. So a live wait is exempt when its answer MOVED or when it
+  -- spent the budget it asked for; a poll that spent nothing stays a repeat, and a wait that spent
+  -- real time is progress even when its answer is byte-identical.
+  local waited_long = (obs.wait_spent_ms or 0) >= 1000
+    and (obs.wait_budget_ms or 0) > 0
+    and (obs.wait_spent_ms or 0) >= (obs.wait_budget_ms or 0)
+  if obs.waiting == true and (changed or waited_long) then
     state.repeats = math.min(state.repeats, 1)
     state.idle = 0
   end

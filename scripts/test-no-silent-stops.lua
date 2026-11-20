@@ -133,26 +133,60 @@ has(progress_guard.observe(capped, { signature = "b", results = "r2", effects = 
   "runaway_guard", "an operator's ceiling is honoured when it is set")
 
 
--- A wait on supervised work that is still running is progress, not a loop (19/11, rel-native:
--- three identical awaits behind a suite lock were killed as guard_repeated_calls).
-ok(progress_guard.waiting('operation', { action = 'await' }, { state = 'running', settled = false })
-  , 'an await whose operation is still running is a live wait')
-ok(progress_guard.waiting('operation', { action = 'wait' }, { state = 'accepted', settled = false })
-  , 'a wait on an accepted operation is a live wait')
-ok(not progress_guard.waiting('operation', { action = 'await' }, { state = 'completed', settled = true })
-  , 'a settled operation is not a live wait: the same bytes again is a repeat')
-ok(not progress_guard.waiting('operation', { action = 'await' }, {})
-  , 'an answer with no state is unknown, never treated as waiting')
-ok(not progress_guard.waiting('operation', { action = 'status' }, { state = 'running', settled = false })
-  , 'only a wait is exempt: status is a plain read')
-ok(not progress_guard.waiting('bash', { action = 'await' }, { state = 'running', settled = false })
-  , 'only the operation tool waits')
+-- A wait on supervised work is recognised by its ANSWER, never by the calling tool's name.
+-- Measured 19/11 on rel-native (out.log ~16590-16610): the call the guard killed was
+-- `codemode({code:"const a = await tools.operation({action:'await', id:'op-...', wait_s:900})"})`,
+-- repeated while the operation ran behind another mission's suite lock. Its answer said `pending`.
+ok(progress_guard.waiting({ state = 'pending', op = 'op-1' }),
+  'a codemode pending answer is a live wait')
+ok(progress_guard.waiting({ state = 'running', operation_id = 'op-1', elapsed_ms = 1200 }),
+  'a running operation record is a live wait')
+ok(progress_guard.waiting({ state = 'queued', operation_id = 'op-1' }),
+  'a queued operation is a live wait')
+ok(progress_guard.waiting({ state = 'accepted', operation_id = 'op-1' }),
+  'an accepted operation is a live wait')
+ok(progress_guard.waiting({ state = 'draining', operation_id = 'op-1' }),
+  'a draining operation is a live wait')
+-- The transcript's own shape: a script result carrying the nested call's record.
+ok(progress_guard.waiting({ ok = true, calls = { { name = 'operation', state = 'pending', op = 'op-1' } } }),
+  'a nested pending call inside a script result is a live wait')
+ok(not progress_guard.waiting({ state = 'completed', settled = true, operation_id = 'op-1' }),
+  'a settled operation is not a live wait: the same bytes again is a repeat')
+ok(not progress_guard.waiting({ state = 'pending' }),
+  'pending with no operation id is unknown, not evidence: never treated as waiting')
+ok(not progress_guard.waiting({}), 'an empty answer is not a live wait')
+ok(not progress_guard.waiting(nil), 'a nil answer is not a live wait')
+ok(not progress_guard.waiting({ state = 'failed', op = 'op-1' }), 'a failed operation is not waiting')
+ok(not progress_guard.waiting({ ok = true, value = 42 }), 'a plain result is not a wait')
+
+-- A repeated wait whose ANSWER MOVED is progress (the measured case: elapsed and log bytes moving).
 local live = progress_guard.new({ repeat_limit = 3, idle_rounds = 12, ceiling = 0 })
 for i = 1, 10 do
-  eq(progress_guard.observe(live, { signature = 'operation(await)', results = 'same-digest',
+  eq(progress_guard.observe(live, { signature = 'codemode(await)', results = 'digest-' .. i,
     effects = 0, changes = 'c1', waiting = true }), nil,
-    'await ' .. i .. ' of a running operation is waiting, not a loop')
+    'await ' .. i .. ' that answered something new is waiting, not a loop')
 end
+
+-- THE HOT LOOP: wait_ms:0 answers at once with the same bytes. Ten of those are ten identical
+-- decisions with no new observation, and the guard must still stop them (review item 2).
+local hot = progress_guard.new({ repeat_limit = 3, idle_rounds = 50, ceiling = 0 })
+eq(progress_guard.observe(hot, { signature = 'codemode(poll)', results = 'same', effects = 0,
+  changes = 'c', waiting = true, wait_spent_ms = 0, wait_budget_ms = 0 }), nil, 'the first poll is a retry')
+eq(progress_guard.observe(hot, { signature = 'codemode(poll)', results = 'same', effects = 0,
+  changes = 'c', waiting = true, wait_spent_ms = 0, wait_budget_ms = 0 }), nil, 'the second is still a retry')
+has(progress_guard.observe(hot, { signature = 'codemode(poll)', results = 'same', effects = 0,
+  changes = 'c', waiting = true, wait_spent_ms = 0, wait_budget_ms = 0 }),
+  'guard_repeated_calls', 'ten identical immediate answers still trip the guard (a hot loop, not a wait)')
+
+-- A wait that SPENT its budget is progress even with an identical answer: it cost real time.
+local spent = progress_guard.new({ repeat_limit = 3, idle_rounds = 50, ceiling = 0 })
+for i = 1, 6 do
+  eq(progress_guard.observe(spent, { signature = 'codemode(await)', results = 'same', effects = 0,
+    changes = 'c', waiting = true, wait_spent_ms = 900000, wait_budget_ms = 900000 }), nil,
+    'await ' .. i .. ' that spent its 900 s budget is waiting, not a loop')
+end
+
+-- An await on a SETTLED operation hands back the same bytes: still a loop.
 local settledWait = progress_guard.new({ repeat_limit = 3, idle_rounds = 12, ceiling = 0 })
 eq(progress_guard.observe(settledWait, { signature = 'operation(await)', results = 'r', effects = 0,
   changes = 'c', waiting = false }), nil, 'a settled await is a retry')

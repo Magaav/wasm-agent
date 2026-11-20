@@ -2360,9 +2360,15 @@ function M:run_body(text, images)
     -- below is the only place that knows them.
     local round_effects = 0
     local round_results = {}
-    -- The round's live wait, if it made one: a repeated `operation` await whose answer says the work is
-    -- still running is an observation, not a loop (progress_guard.M.waiting).
-    local round_waiting = false
+    -- The round's waits, if EVERY call in it was one: a repeated await whose ANSWER says the work is still
+    -- running is an observation, not a loop (progress_guard.M.waiting). Read from the answer, because the
+    -- measured 19/11 call was codemode() with an await INSIDE it, never the operation tool by name.
+    -- Starts true and is settled by the tool loop: a round is a live wait only when it had at least one
+    -- call and EVERY call in it was one. calls is not in scope yet here (lua/core/agent.lua:2724).
+    local round_waiting = true
+    local round_wait_calls = 0
+    local round_wait_budget_ms = 0
+    local round_wait_spent_ms = 0
     -- One loop round is one decision step, not necessarily one provider request:
     -- response-timeout retries and overflow recovery below can send multiple
     -- model-call attempts in this step. `round` is the legacy UI event/index;
@@ -3416,8 +3422,24 @@ function M:run_body(text, images)
       -- The progress guard's facts about this call: did a real effect succeed, and what did it
       -- answer (a digest - the same bytes again is checkable without keeping them twice).
       if ok_tool and not cancelled and tools.has_effect(function_.name, args) then round_effects = round_effects + 1 end
-      if not round_waiting and ok_tool and not cancelled
-        and progress_guard.waiting(function_.name, args, output) then round_waiting = true end
+      -- A round is a live wait only when EVERY call in it is one: real work beside a wait is judged by
+      -- that work, and one non-wait call settles the round.
+      round_wait_calls = round_wait_calls + 1
+      local call_waiting = ok_tool and not cancelled and progress_guard.waiting(output)
+      if not call_waiting then round_waiting = false end
+      if call_waiting then
+        -- What the wait ASKED for and what THIS CALL took, never the round: model latency must not buy an
+        -- exemption. The budget is in ms of wall clock; the answer may name it as wait_ms or as wait_s
+        -- SECONDS (codemode's own spelling), so both convert to ms here.
+        local asked = 0
+        if type(output) == 'table' then
+          if tonumber(output.wait_ms) then asked = tonumber(output.wait_ms)
+          elseif tonumber(output.wait_s) then asked = tonumber(output.wait_s) * 1000 end
+        end
+        round_wait_budget_ms = math.max(round_wait_budget_ms, asked)
+        round_wait_spent_ms = math.max(round_wait_spent_ms,
+          math.floor((host.now() - tool_started) * 1000))
+      end
       round_results[#round_results + 1] = tostring(function_.name) .. ":" .. host.sha256(tostring(content))
       telemetry.finish(tool_span,{name=function_.name,ok=ok_tool,cancelled=cancelled or nil,
         outcome=cancelled and 'cancelled_before_execution' or nil,code=type(output)=="table" and output.code or nil,
@@ -3454,7 +3476,9 @@ function M:run_body(text, images)
       results = #round_results > 0 and host.sha256(table.concat(round_results, "\n")) or nil,
       effects = round_effects,
       changes = changes_digest,
-      waiting = round_waiting,
+      waiting = round_waiting and round_wait_calls > 0,
+      wait_spent_ms = round_wait_spent_ms,
+      wait_budget_ms = round_wait_budget_ms,
       label = #calls > 0 and (tostring((calls[1]["function"] or {}).name or "?")
         .. "(" .. tostring((calls[1]["function"] or {}).arguments or ""):gsub("%s+", " "):sub(1, 120) .. ")"
         .. (#calls > 1 and (" +" .. (#calls - 1) .. " more") or "")) or nil,
