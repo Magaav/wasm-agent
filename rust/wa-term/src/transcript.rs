@@ -905,9 +905,19 @@ enum Edge { Open, Body, Close }
 
 /// Which edge of a card `cells` opens - `None` when its first glyph past any indent and the copy icon
 /// is not one of the card's own, or is not painted in the card's border colour.
+/// Whether the card's border colour is set on any cell up to and including `at`. The escapes ride on
+/// the row's FIRST cell for an unindented card (`paint("\u{2502} ", "mdCodeBlockBorder")` puts them before
+/// the bar) and on a cell of their own for an INDENTED one (`paint(indent .. "\u{2502} ")` puts them
+/// before the indent, so the bar cell itself carries no escape). Both are the same block: a check that
+/// only looked at the bar cell would miss every fence nested in a list.
+fn border_before(cells: &[(String, char, usize)], at: usize) -> bool {
+    if cells.is_empty() { return false; }
+    cells[..=at.min(cells.len() - 1)].iter().any(|c| c.0.contains(CARD_BORDER))
+}
+
 fn card_edge(cells: &[(String, char, usize)]) -> Option<Edge> {
     let lead = cells.iter().position(|c| c.1 != ' ' && c.1 != COPY_ICON)?;
-    if !cells[lead].0.contains(CARD_BORDER) { return None; }
+    if !border_before(cells, lead) { return None; }
     // A TABLE wears the same border role and must not be read as a card: its rules carry a column
     // divider or a closing corner a card never has, and its body rows END in a border bar of their own
     // (one per column plus the closing one) where a card row has only the one it opens with. Cut by
@@ -955,6 +965,11 @@ fn wrap_card(cells: &[(String, char, usize)], width: usize) -> Vec<String> {
     let bar = cells.iter().position(|c| c.1 == '\u{2502}').unwrap_or(0);
     let mut start = bar + 1;
     if cells.get(start).is_some_and(|c| c.1 == ' ') { start += 1; }
+    // The indent as the renderer wrote it (blank cells before the bar; a copy icon in front of a fence
+    // title row is not one). A continuation of an INDENTED card sits at the same column as the row it
+    // continues: the view writes a fence inside a list at its item's indent (markdown.lua `opts.indent`).
+    let indent: String = cells[..bar].iter().filter(|c| c.1 != COPY_ICON).map(|c| c.1).collect();
+    let indent_cols: usize = cells[..bar].iter().filter(|c| c.1 != COPY_ICON).map(|c| c.2).sum();
     let mut rows: Vec<String> = Vec::new();
     let mut row = String::new();
     let mut sgr = String::new();
@@ -971,9 +986,9 @@ fn wrap_card(cells: &[(String, char, usize)], width: usize) -> Vec<String> {
         if !fresh && cols + w > width && i > start {
             row.push_str(RESET);
             rows.push(std::mem::take(&mut row));
-            row.push_str(CARD_BORDER); row.push('\u{2502}'); row.push('\u{21aa}'); row.push_str(RESET);
+            row.push_str(CARD_BORDER); row.push_str(&indent); row.push('\u{2502}'); row.push('\u{21aa}'); row.push_str(RESET);
             row.push_str(&sgr);
-            cols = 2;
+            cols = indent_cols + 2;
             fresh = true;
             continue;
         }
@@ -1909,6 +1924,42 @@ mod tests {
                 }
             }
         }
+    }
+
+
+    #[test]
+    fn an_indented_card_is_cut_and_its_indent_repeats_on_every_continuation() {
+        // A fence nested in a list arrives with the view's indent in front of every row
+        // (markdown.lua `opts.indent`): `  ┌─ js`, `  │ code`, `  └─`. The border colour is set once,
+        // BEFORE that indent, so the bar cell carries no escape of its own - the reason a colour check
+        // that only looked at the bar missed these rows entirely.
+        let indent = "  ";
+        let border = CARD_BORDER;
+        let code = "const x = 1; const yy = 2; const zzz = 3; const wide = 4; const more = 5; const tail = 6;";
+        let rows = vec![
+            format!("{border}{indent}┌─ js{RESET}"),
+            format!("{border}{indent}│ {RESET}\x1b[38;2;212;212;212m{code}{RESET}"),
+            format!("{border}{indent}└─{RESET}"),
+        ];
+        let mut cards = CardWrap::default();
+        let mut screen: Vec<String> = Vec::new();
+        for line in &rows { screen.extend(cards.rows(line, 40)); }
+        let plain: Vec<String> = screen.iter().map(|r| crate::selection::plain(r)).collect();
+        let shown = plain.join("\n");
+        assert!(plain.iter().any(|r| r.contains("│↪")), "the indented card was cut: {shown}");
+        // Every continuation keeps the item's indent, so the card stays inside the list.
+        for row in plain.iter().filter(|r| r.contains("│↪")) {
+            assert!(row.starts_with(indent), "a continuation keeps the indent: {row:?} in {shown}");
+        }
+        // And no row is only a bar, and the code survives whole.
+        assert!(!plain.iter().any(|r| r.trim() == "│"), "no empty bar: {shown}");
+        assert!(!plain.iter().any(|r| !r.starts_with(indent)), "every card row stays indented: {shown}");
+        let rebuilt: String = plain.iter()
+            .map(|r| { let t = r.trim_start_matches(' ').trim_start_matches('│'); t.strip_prefix('↪').unwrap_or(t).trim_start().to_string() })
+            .collect();
+        // A cut falls mid-word when no space comes first, so compare the words, not the bytes.
+        let squash = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+        assert!(squash(&rebuilt).contains(&squash(code)), "the code survives at 40 columns: {shown}");
     }
 
     #[test]
