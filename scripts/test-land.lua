@@ -1310,7 +1310,7 @@ local gate_commands = {}
 -- Only the gate's own checks are answered here (they are held to their command); everything else - the row
 -- inventory the rows file is proved with, the git calls - still runs for real.
 local function is_gate_check(command)
-  for _, marker in ipairs({ "scripts/fast.sh", "scripts/test-codemode-component.sh", "cargo test", "sync-prompt-docs" }) do
+  for _, marker in ipairs({ "scripts/fast.sh", "scripts/test-codemode-component.sh", "cargo test", "sync-prompt-docs", "test-discriminates.sh" }) do
     if command:find(marker, 1, true) then return true end
   end
   return false
@@ -1325,6 +1325,8 @@ land.weight_decorator = ""
 eq(land.impl.gate(added_run, {}), true, "a narrowed gate runs")
 eq(gate_commands[1], "WA_FAST_ROWS='" .. land.run_dir("rows-added") .. "/gate-rows.txt' bash scripts/fast.sh",
   "the narrowed gate runs the fast check with the round's rows file (got " .. tostring(gate_commands[1]) .. ")")
+contains(table.concat(gate_commands, "\n"), "scripts/test-discriminates.sh",
+  "the gate runs the discrimination check: a branch whose new test does not discriminate cannot land")
 gate_commands = {}
 eq(land.impl.gate(added_run, { full = true }), true, "a --full gate runs")
 eq(gate_commands[1], "WA_FAST_ROWS= bash scripts/fast.sh",

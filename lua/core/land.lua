@@ -306,6 +306,14 @@ M.DEFAULT_CHECKS = {
     timeout = 1800, min_tests = 1, detail = "the code-mode Rust tests (wa-capabilities: the seam and quickjs)" },
   { name = "cargo-wa-whatsapp", command = "cargo test --lib --offline", cwd = "rust/components/wa-whatsapp",
     timeout = 1200, min_tests = 1, detail = "the wa-whatsapp component's own crate" },
+  -- Does each test this branch adds or changes actually fail on the code the branch had before its
+  -- non-test changes? A test that still passes there would not have caught the bug it was written for,
+  -- and it blocks the landing BY NAME (19-20/11: three of ten hidden tests did not discriminate, and
+  -- every review of that round carried a test MUST). A branch declared refactor-only is exempt and must
+  -- instead keep its tests green (scripts/test-discriminates.sh). Exit 3 means this machine could not run
+  -- some test: a refusal, never a pass, and the gate treats it as a named failure rather than a verdict.
+  { name = "discrimination", command = "bash scripts/test-discriminates.sh origin/main", timeout = 900,
+    detail = "every test the branch adds or changes fails on the code before the change" },
   { name = "prompt-docs", command = "bash scripts/sync-prompt-docs.sh --check", timeout = 600,
     detail = "the generated prompt documents are in sync with the code" },
 }
@@ -369,7 +377,7 @@ M.ESTIMATE_BY_CATEGORY = {
 -- The gate's always-on checks: a plan may never drop these, whatever the paths say, because they are what
 -- makes a green run mean anything (the generated prompt documents, the landing queue's own evidence, the
 -- binary the rows run, the machine-vs-code classifier, and the fast path's result file).
-M.GATE_ALWAYS = { "fast", "prompt-docs" }
+M.GATE_ALWAYS = { "fast", "prompt-docs", "discrimination" }
 -- Checks a plan may ADD when a path touches their subject, with the paths that trigger them. The Rust
 -- crates are already narrowed by `scripts/fast.sh` itself (it tests the crates a change touches), so only
 -- the checks that are NOT inside the fast path are listed here.
@@ -863,6 +871,11 @@ function M.gate_checks(run, options)
   local plan = run.journal.plan
   if not plan or plan.full then return M.DEFAULT_CHECKS, "every check (no narrower set was proved)" end
   local wanted = {}
+  -- The always-on set is a floor, not a suggestion: a plan written before a check existed (or by an
+  -- older tree) must not run less than the gate promises. fast and prompt-docs were already here;
+  -- discrimination joins them because a test that cannot fail on the old code is the failure this
+  -- gate exists to catch, whatever paths the plan happens to name.
+  for _, name in ipairs(M.GATE_ALWAYS) do wanted[name] = true end
   for _, name in ipairs(plan.checks or {}) do wanted[name] = true end
   local list = {}
   for _, check in ipairs(M.DEFAULT_CHECKS) do if wanted[check.name] then list[#list + 1] = check end end
