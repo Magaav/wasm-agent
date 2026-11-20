@@ -362,6 +362,38 @@ Each of these was measured before it was fixed, and each fix has a row that is R
 after the run ended), so a supervised child whose parent dies is still cancelled by nobody but its parent.
 The in-flight registry bounds one process's live children; it does not reclaim an orphan of a dead parent.
 
+### The full fast path, GREEN, and what it measures (`5b45274f`)
+
+```
+bash scripts/fast.sh --jobs 2      # in a 2G memory scope, under flock ~/Work/missions/.suite.lock
+fast: binary .../release/wa (build 5b45274fc3a5, tree 5b45274fc3a5, fresh: built from this tree)
+fast: lua 254/254 passed (58 excluded: scripts/fast-path.exclude)
+fast result ok (316 checks, 0 failed, 0 skipped)
+fast path ok (316 checks, 0 skipped, 536s)
+```
+
+| what | before item 0 | now |
+|---|---|---|
+| full fast path | OOM-killed at 4, 6, 8 and 12 G scopes; never finished | **ok, 316 checks, 0 failed, 536 s** |
+| peak memory of the whole run (the scope own cgroup) | ~23 GB, 1,653 processes (19/11) | **1,067 MB, pids.peak 65** |
+| `nodes probe` children alive mid-run | 554, ~92 per peer | **0** |
+
+Three causes were fixed and each has a row that is RED on its own base (A: `48ca92de`, B: `b656b328`,
+C: `81d0f69f`, E: `6d2fd5ff`). Two more were defects of the RUNNER rather than the node, measured by
+driving the whole suite from a clean state: the run built its work dir under `${TMPDIR:-/tmp}` on a node
+whose TMPDIR is INSIDE the operator store, and it did not hand the rows a scratch root at all
+(`42714e6c`, `5b45274f`) - between them they failed 4 and then 1 of 254 rows for reasons that had nothing
+to do with the rows.
+
+**What a green run needed that the brief did not name.** The binary must be built WITH the prepared
+code-mode assets: a build made with `WA_CODEMODE_ALLOW_EMPTY=1` (the fast path fails back to it when it
+cannot find the assets) is 72.6 MB against 76.9 MB and 29 rows that exercise code mode fail with "this
+node has no embedded code-mode". The assets live in
+`<git-common-dir>/codemode-assets/pi-1.2.0-quickjs-3.6.2`. And `WA_FAST_ALLOW_STALE_BINARY=1`, which this
+session used to get past a stale stamp, makes `scripts/test-fast-binary.mjs` fail 5 of its 32 checks -
+measured both ways: with the override it answers `action=use`, without it the row is green. A run that
+needs that override is not a clean run, and the row says so.
+
 ### Mis-measured premises in the brief (re-measured here)
 
 * Item 1 is real and worse than stated: the stop happens BEFORE the detection, so on a sentinel-supervised
