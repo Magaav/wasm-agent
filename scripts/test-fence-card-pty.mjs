@@ -159,21 +159,6 @@ function capture() {
 function captureAll() {
   return String(tmux(['capture-pane', '-p', '-S', '-2000', '-t', SESSION]).stdout || '').replace(/\r/g, '');
 }
-// <minimum ms> <quiet ms> <bound ms> -> the capture once it has not changed for `quiet` ms (read no earlier
-// than `minimum`); at the bound it answers the last capture and the checks that follow judge it.
-async function settled(minimum, quiet, bound) {
-  const started = Date.now();
-  await sleep(minimum);
-  let last = capture(), since = Date.now();
-  while (Date.now() - started < bound) {
-    await sleep(150);
-    const now = capture();
-    if (now !== last) { last = now; since = Date.now(); continue; }
-    if (Date.now() - since >= quiet) return now;
-  }
-  return last;
-}
-
 async function waitFor(predicate, label, timeout = 60000) {
   const deadline = Date.now() + timeout;
   for (;;) {
@@ -275,11 +260,8 @@ try {
   for (const columns of [80, 60, 90, 120]) {
     if (columns === 90) tmux(['resize-window', '-t', SESSION, '-x', '100', '-y', '40']);
     tmux(['resize-window', '-t', SESSION, '-x', String(columns), '-y', '40']);
-    // Not a fixed sleep: under the gate's load the redraw after a resize can take longer than 1.4 s, and
-    // a half-redrawn screen read too early failed one of these checks (24 ok, 1 failed beside the other
-    // rows; 25/25 alone). The screen is read once it has held still for 600 ms, never before the 1.4 s
-    // this waited before, and the wait is bounded so a screen that never settles still fails by name.
-    const screen = (await settled(1400, 600, 20000)).split('\n');
+    await sleep(1400);
+    const screen = capture().split('\n');
     const shown = screen.filter(row => stripScrollbar(row).trim() !== '').join('\n');
     check('at ' + columns + ' columns no row is an empty bar', emptyBar(screen).length === 0, shown);
     check('at ' + columns + ' columns the card is still drawn', screen.some(barRow), shown);
