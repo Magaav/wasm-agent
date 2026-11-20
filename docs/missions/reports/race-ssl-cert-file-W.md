@@ -208,14 +208,14 @@ parses; the tree is clean and every item is its own commit.
 | item | commit | test that fails before it |
 | --- | --- | --- |
 | 1. Node MCP: `NODE_EXTRA_CA_CERTS` from `SSL_CERT_FILE` where wa starts children | 5cf5b487 | `wa-operation` `ca_bundle_tests` (four, including a real node child that reaches the scratch CA only with the forwarded variable) |
-| 2. the Python vault checks both variables and names what it cannot read | this commit | `scripts/test-vault.py`: with the base vault 5 of the new checks fail (`vault_ca_unreadable` / `vault_ca_without_certificate`); with it, 116 checks, 0 failed |
+| 2. the Python vault checks both variables and names what it cannot read | 0d2da043 | `scripts/test-vault.py`: with the base vault 5 of the new checks fail (`vault_ca_unreadable` / `vault_ca_without_certificate`); with it, 116 checks, 0 failed |
 | 3. the websocket test completes a real RFC 6455 upgrade and echoes a frame | ec35c33b | `a_websocket_upgrades_and_echoes_when_the_machine_names_the_ca`: the previous test asserted an *error*, so it fails against this one by construction |
 | 4. the CA test seam installs anchors, never `set_var` | f5863195 | `installing_anchors_for_a_test_writes_no_process_environment` |
-| 5. `wa-tls` in the fast path's crate list | see the commit | the fast path's own `rust wa-tls` row (absent before: a change to `wa-tls` ran no rust row) |
-| 6. no CA private keys in the repository | see the commit | `the_repository_holds_no_ca_private_key` |
+| 5. `wa-tls` in the fast path's crate list | 43d00a4e | the fast path's own `rust wa-tls` row (absent before: a change to `wa-tls` ran no rust row) |
+| 6. no CA private keys in the repository | 77f471dc | `the_repository_holds_no_ca_private_key` |
 | 7. trust gated on the scheme | a50b896f | `a_broken_bundle_does_not_refuse_a_plain_http_request` and its siblings in wa-host, wa-kernel-runtime (http and ws) and wa-rendezvous, plus `a_plain_url_is_answered_without_reading_the_bundle` in wa-tls |
 | SHOULD 1. the websocket keeps its redirect behaviour on the anchors path | 46e348b2 | `a_websocket_follows_a_redirect_and_echoes_on_the_anchors_path` (two scratch servers: the 302 and its target) and `a_websocket_refuses_a_redirect_off_tls` |
-| SHOULD 2. say compiled-in Mozilla roots, not "system default" | this commit | no test: a wording correction, measured in the premises table above |
+| SHOULD 2. say compiled-in Mozilla roots, not "system default" | 3ceaa763 | no test: a wording correction, measured in the premises table above |
 
 ## The rebase, and the two rows that are red on origin/main
 
