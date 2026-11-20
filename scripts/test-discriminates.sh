@@ -122,6 +122,18 @@ git -C "$REPO" worktree add --detach --quiet "$WORKTREE" "$MERGE_BASE" 2>"$WORKR
 while IFS= read -r t; do
   [ -n "$t" ] || continue
   is_test_path "$t" || continue
+  # Its own name says test; another changed test naming it says subject. The subject wins, because a
+  # test that travels with the code it tests can never discriminate against that code.
+  named_as_subject=0
+  while IFS= read -r other; do
+    [ -n "$other" ] || continue
+    [ "$other" = "$t" ] && continue
+    if git show "$HEAD_SHA:$other" 2>/dev/null | grep -qF -- "$t"; then named_as_subject=1; break; fi
+  done < <(git diff --name-only "$MERGE_BASE" "$HEAD_SHA" | while IFS= read -r q; do
+    [ -n "$q" ] || continue
+    is_test_path "$q" && printf '%s\n' "$q"
+  done)
+  [ "$named_as_subject" = 1 ] && continue
   status=$(git diff --name-status "$MERGE_BASE" "$HEAD_SHA" -- "$t" | cut -f1)
   case $status in
     D) printf '%s\n' "$t" >> "$WORKROOT/deleted.list" ;;
@@ -142,11 +154,7 @@ done < <(git diff --name-only "$MERGE_BASE" "$HEAD_SHA")
 # to distinguish from, so even a perfectly specific test dies on a missing module there. That case is
 # recognised mechanically - the test must NAME a path this branch adds - and reported as not-applicable
 # with the subject named, never silently passed.
-git diff --name-only --diff-filter=A "$MERGE_BASE" "$HEAD_SHA" | while IFS= read -r p; do
-  [ -n "$p" ] || continue
-  is_test_path "$p" && continue
-  printf '%s\n' "$p"
-done > "$WORKROOT/added.list"
+git diff --name-only --diff-filter=A "$MERGE_BASE" "$HEAD_SHA" | grep . > "$WORKROOT/added.list" 2>/dev/null || : > "$WORKROOT/added.list"
 
 # The added path this test names, if any. A test that names none has an old subject and must discriminate.
 new_subject_of() {
@@ -174,7 +182,7 @@ fi
 
 # A missing symbol, a missing file or a runtime nil is not evidence about the change: the test could
 # not reach its assertions. An assertion that fires IS evidence. Anything else is unclassified.
-LOAD_RE='attempt to call a nil value|attempt to index a nil value|attempt to concatenate a nil|attempt to compare|module .* not found|Cannot find module|ERR_MODULE_NOT_FOUND|ModuleNotFoundError|No such file or directory|command not found|not an executable|error while loading shared libraries|undefined reference|cannot find crate'
+LOAD_RE='attempt to call a nil value|attempt to index a nil value|attempt to concatenate a nil|attempt to compare|module .* not found|Cannot find module|ERR_MODULE_NOT_FOUND|ModuleNotFoundError|No such file or directory|ENOENT|is missing|no such file|command not found|not an executable|error while loading shared libraries|undefined reference|cannot find crate'
 ASSERT_RE='assertion failed|lua error:|FAIL|AssertionError|panicked at|not ok|check failed|assert'
 # The MACHINE, not the tree: a spawn or fork failure, a killed process or an exhausted memory
 # is never evidence about the change.
