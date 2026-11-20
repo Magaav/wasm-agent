@@ -600,16 +600,20 @@ else
   # wa-model-router is the routing-policy modules (`wit/model/router.wit`, docs/MODEL-GATEWAY.md) and
   # wa-fleetview the fleet-view record contract (docs/FLEET-OPS.md); both are leaves with one dependency,
   # so their tests are seconds and there is no reason to leave them out.
+  # wa-tls is the one answer to "whose certificates do we trust" (SSL_CERT_FILE / SSL_CERT_DIR, review
+  # r1 item 5): a change there decides the anchors of every other rust row, and until now the fast path
+  # never ran its own tests at all - the row list is explicit, so a crate left out of it is a crate
+  # whose tests do not run however it changed.
   # wa-keystore is the crate every other vault row depends on and the one whose decisions are invisible
   # from above it: which protection wraps the root key, what a wrapped-root file is read as, and what a
   # kernel-keyring refusal means. Its tests are seconds (a leaf with ring/chacha20/argon2), and until now
   # they ran nowhere in the fast path - which is how two defects in it reached a landing (13/11: the key
   # quota leak behind `keystore_keyring_unavailable`, and a wrapped root read with the wrong cipher behind
   # `sealed_blob_version_unknown`).
-  for crate in wa-sqlite wa-host wa-host-support wa-governance wa-term wa-rendezvous wa-kernel-runtime wa-capabilities wa-operation wa-jobs wa-graph wa-sentinel wa-whatsapp-outbox wa-whatsapp-index wa-mesh wa-stt-remote wa-model-gateway wa-tool-progress wa-model-router wa-fleetview wa-keystore; do
+  for crate in wa-sqlite wa-host wa-host-support wa-governance wa-term wa-rendezvous wa-kernel-runtime wa-capabilities wa-operation wa-jobs wa-graph wa-sentinel wa-whatsapp-outbox wa-whatsapp-index wa-mesh wa-stt-remote wa-model-gateway wa-tool-progress wa-model-router wa-fleetview wa-keystore wa-tls; do
     if [ "$all_rust" = 1 ] || printf '%s\n' "$changed" | grep -q "^rust/$crate/"; then crates="$crates $crate"; fi
   done
-  printf '%s\n' "$changed" | grep -qE '^rust/(Cargo\.(toml|lock))$' && [ "$all_rust" = 0 ] && crates=" wa-sqlite wa-host wa-host-support wa-governance wa-term wa-rendezvous wa-kernel-runtime wa-capabilities wa-operation wa-jobs wa-graph wa-mesh"
+  printf '%s\n' "$changed" | grep -qE '^rust/(Cargo\.(toml|lock))$' && [ "$all_rust" = 0 ] && crates=" wa-sqlite wa-host wa-host-support wa-governance wa-term wa-rendezvous wa-kernel-runtime wa-capabilities wa-operation wa-jobs wa-graph wa-mesh wa-tls"
   if [ -z "$crates" ]; then echo "fast: rust - no crate touched"; fi
   for crate in $crates; do
     # THE BUILD, measured as the build the tests themselves need - never a second one. 'cargo test
