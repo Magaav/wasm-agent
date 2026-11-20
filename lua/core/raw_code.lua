@@ -748,6 +748,16 @@ M.BATCHING = "One run(code) can do a whole step: read, search, edit and check in
 
 local RAW_PREFIX = "__raw"
 
+-- Names a raw block cannot take: each name becomes a `const` the script reads, so a JavaScript
+-- reserved word would not compile, and `tools`, `__raw` or a built-in the script relies on would be
+-- shadowed for the whole script. Refused by name instead of failing inside the sandbox.
+local RAW_RESERVED = {}
+for name in ([[break case catch class const continue debugger default delete do else enum export extends
+  false finally for function if import in instanceof new null return super switch this throw true try typeof
+  var void while with yield let static implements interface package private protected public await
+  arguments eval undefined NaN Infinity tools __raw console JSON Promise Object Array String Number Boolean
+  Math Date Error RegExp Map Set Symbol globalThis]]):gmatch("%S+") do RAW_RESERVED[name] = true end
+
 function M.run_tool_schema()
   return { name = "run", description = "Run one script, the same way a fenced js run block does: "
     .. "code is the script, and every tool inside it is tools.<name>(args). Use raw to carry file "
@@ -789,13 +799,24 @@ function M.native_run(args)
         note = "a raw block name must be an identifier the script can read (letters, digits, _), "
           .. "because that name is the variable the bytes arrive in" }
     end
+    if RAW_RESERVED[name] then
+      return nil, { error = "run_raw_name", effect = "none", name = name,
+        note = "raw block " .. name .. " would shadow a JavaScript word or a name the script needs "
+          .. "(tools, JSON, Promise...): pick another name" }
+    end
     if type(raw[name]) ~= "string" then
       return nil, { error = "run_raw_not_text", effect = "none", name = name,
         note = "raw block " .. name .. " is not text; raw blocks carry file bodies and patches, not values" }
     end
   end
   local literal = json.encode(raw)
-  return { code = "const " .. RAW_PREFIX .. " = " .. literal .. ";\n" .. code, raw_blocks = names }
+  -- Each block is ALSO its own variable, as the tool description promises ("keyed by the variable
+  -- name the script should read"): only `__raw` was bound, so a script reading `body` died with
+  -- ReferenceError (reported by a native mission, 20/11). The script runs in a block of its own, so
+  -- a script that still writes `const body = __raw.body` declares an inner `body` instead of
+  -- redeclaring the outer one (a SyntaxError).
+  return { code = "const " .. RAW_PREFIX .. " = " .. literal .. ";\nconst { " .. table.concat(names, ", ")
+      .. " } = " .. RAW_PREFIX .. ";\n{\n" .. code .. "\n}", raw_blocks = names }
 end
 
 -- The native-markup path of `take`: the calls run as raw-channel codemode calls; the text before the
