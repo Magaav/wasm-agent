@@ -147,19 +147,36 @@ connector's payloads are MCP's (row 7); `wit/seams/seams.wit` already declares `
 
 ## The gate, and what it said
 
-Run on this node under `flock /home/victor/Work/missions/.suite.lock` (the node's one suite lock - four
-missions were running suites on 16 cores), with the tree's own binary stamped `c1852222, dirty=false`
-(`wa --build-info`):
+Run on this node under `flock /home/victor/Work/missions/.suite.lock` (the node's one suite lock -
+other missions were running suites on the same 16 cores), with the tree's own binary stamped
+`c5a6c3c7, dirty=false` (`wa --build-info`) for this branch, `c1852222` for the report branch.
 
-- **`scripts/fast.sh --jobs 4`: 303 checks, 1 failed, 0 skipped (279 s).** The failure is
-  `scripts/test-refusal-contract.lua:24: lua/core/refusal_codes.lua is stale` - **pre-existing on
-  `origin/main`**, proven without a build: `git archive origin/main | tar -x -C /tmp/base-main` then
-  `lua5.4 scripts/gen-refusal-codes.lua --check` in that pristine tree exits 1 with the same message,
-  and the same command on this branch exits 1 with the same message.
-- **`scripts/test.sh` (the full gate): stops at `scripts/test-sentinel-service-deploy.cjs:23`** -
-  `Expected ['stop','copy','start'], actual ['stop']`. Also **pre-existing on `origin/main`**: the same
-  script run in the pristine base tree (/tmp/base-main) fails with the same assertion. The gate exits on
-  its first failure, so the rows after it did not run - in this branch or on main.
+**`scripts/fast.sh --jobs 4`: 305 checks, 2 failed, 0 skipped (285 s).** Both failures are the
+environment's, and both are proven rather than asserted:
+
+1. `scripts/test-refusal-contract.lua:24: lua/core/refusal_codes.lua is stale` - **pre-existing on
+   `origin/main`**: `git archive origin/main | tar -x -C /tmp/base-main`, then
+   `lua5.4 scripts/gen-refusal-codes.lua --check` in that pristine tree exits 1 with the same message,
+   and the same command on both branches exits 1 with the same message.
+2. `rust wa-capabilities (exit 101)`: `operations::adoption_survives_the_relay_deadline` and
+   `operations::await_returns_at_its_own_wait` panic at once. They are not broken and not this
+   branch's: both tests refuse to run unless `HOME` is a scratch directory ("this test starts real
+   operations, so HOME must be a scratch or temp directory"); the fast path does not set one, the full
+   gate does. **Same binary, same tree, only `HOME` changed**: with `HOME=$(mktemp -d)` the whole
+   crate passes - `test result: ok. 345 passed; 0 failed` (`cargo test --release -p wa-capabilities
+   --lib`). The crate this branch changes is therefore green; the fast path's row turns red because it
+   does not own the environment those two tests demand.
+
+**The parity test this branch adds is in the fast path and passed there**: `sql rows ok (5 checks, 0
+skipped)` - both when run alone (`WA_SCRIPT=scripts/test-sql-rows.lua`) and as a fast-path row.
+
+**`scripts/test.sh` (the full gate): stops at `scripts/test-sentinel-service-deploy.cjs:23`** -
+`Expected ['stop','copy','start'], actual ['stop']` - **pre-existing on `origin/main`**: the same
+script run in the pristine base tree fails with the same assertion, and the gate invokes it
+unconditionally (`scripts/test.sh:243`) on linux, where it is a Windows-deploy proof. The gate exits at
+its first failure, so the rows after it did not run - on this branch, on the report branch, or on main.
+The rust rows before it passed (134 + 18 + 0, all ok).
+
 ## Text this branch adds to operator/model-facing surfaces
 
 1. `scripts/bench-seams.sh`'s usage line: `usage: bash scripts/bench-seams.sh [--iterations N] [--json]`
