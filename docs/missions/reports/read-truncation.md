@@ -108,9 +108,25 @@ are further down the same row and cannot pass while the page carries no truncati
 
 ## Fast path
 
-Supervised operation under the shared suite lock (`flock ~/Work/missions/.suite.lock`), log
-`/tmp/read-truncation-fast.log`. Verdict and any FAIL/SKIP rows are recorded at the end of this
-report once the run settles.
+Supervised operation op-1795171932118072-28317-4 under the shared suite lock
+(flock /home/victor/Work/missions/.suite.lock), log
+/home/victor/Work/missions/read-truncation/fast.log, tree 3be51c04 on change/read-truncation,
+tree binary sha256 8e6e0cd0.
+
+    fast: lua 257/257 passed (58 excluded: scripts/fast-path.exclude)
+    fast: 1 named skip(s) inside passing rows (a skip is not a pass):
+    fast:   scripts/test-cli-view.lua: 1 skip(s), first: reserve agreement: no WASM_AGENT_MODEL_LIMITS fixture (test.sh runs this file again with one)
+    fast: rust - no crate touched
+    fast path ok (303 checks, 0 skipped, 280s)
+    FAST_EXIT=0
+
+scripts/test-read-truncation.lua is named in the run's own result JSON. The single skip is in
+scripts/test-cli-view.lua and is a missing fixture in that row, not this branch; nothing on this
+branch was skipped. No FAIL row.
+
+The pre-existing red recorded above (scripts/test-refusal-contract.lua) does not reappear: this
+branch regenerated lua/core/refusal_codes.lua, which is what that row checks, so the row is green
+here while the base 39bbf2b6 still fails its --check.
 
 ## Texts to approve (model- or operator-facing strings)
 
