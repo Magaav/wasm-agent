@@ -394,6 +394,53 @@ session used to get past a stale stamp, makes `scripts/test-fast-binary.mjs` fai
 measured both ways: with the override it answers `action=use`, without it the row is green. A run that
 needs that override is not a clean run, and the row says so.
 
+### Review round (20/11): the diagnosis, stated correctly, and the five fixes
+
+**The diagnosis, plainly.** The 19/11 collapse was **process crowds**: a probe child that probed again,
+children that accumulated across calls, a finished row whose children nobody reclaimed, and - the one that
+mattered most - a bound held in a Lua table that a codemode run throws away, so ninety-two sandboxed
+scripts each started their own set (554 live probes, ~92 per peer). That is A/B/C/D/E above, each with a
+row red on its own base.
+
+The **tmpfs explained only the exit-101 panics**, and they were a defect of my own fix, not of the node:
+moving every row home off `$TMPDIR` also moved it onto `/tmp`, a 16 G tmpfs at 79% full, and rows died
+with an empty-message Rust panic for want of space. `/tmp` now has to pass a free-space floor, the root is
+`<repo parent>/.wa-scratch`, and the run peaks at 1,067 MB with pids.peak 65.
+
+**Item 1 - a joiner never awaits a fake id (`9accdc72`).** The lease carries the holder RESULT and OWNER; a
+joiner reads the published answer, or waits on the lease FILE, and only an id this caller owns is ever
+awaited or cancelled (`operations.rs` refuses a foreign id). The stub refuses an unknown id like the real
+host and answers `read` like a probe child. HONEST LIMIT, measured: the row passes on the pre-fix tree too.
+The defect it names is shown by a diagnostic, not by that row going red - on `dc2e9eaf`, two calls to the
+same roster answer `answered=0 pending=6` with `probe_timeout` six times, and after the fix `answered>0`,
+`pending=0`.
+
+**Item 2 - no test deletes a caller-supplied root (`17040990`).** `scripts/lib/scratch-home.sh` gains
+`wa_test_workdir <root> <name>`: it makes `<root>/<name>.XXXXXX` and removes only that, and it refuses by
+name a root that is a home or that carries `.git`/`.wasm-agent`. Three rows converted
+(`test-nodes-probe-instances.sh`, `test-fast-watchdog-reap.sh`, `test-nodes-probe-bound.sh`), and each was
+run with `WA_TEST_ROOT` holding a file: `KEEPME` survived all three.
+
+**Item 3 - scratch off the tmpfs, no hardcoded operator path (`17040990`).** `test-nodes-probe-bound.sh`
+takes its root from the fast path resolver instead of `mktemp -d /tmp/...`; `test-nodes-probe-instances.sh`
+finds its binary from `WA_BIN`, then `$CARGO_TARGET_DIR`, then PATH, instead of `/home/victor/...`.
+
+**Item 4 - my own debris, listed before it was removed (`0c5de8dd`).** Removed: `/tmp/node-ops-scratch`
+(3.4 GB), `/tmp/wa-fast-scratch-566890` (1.4 GB), 30+ scratch homes of this session measurements, and the
+three detached worktrees `/tmp/base-{a,b,c}` via `git worktree remove`. **NOT touched**, because they
+predate this session and belong to other missions: `/tmp/mf2` (18/11) and `/tmp/base-land` (18/11, still a
+registered worktree). `/tmp` went from 3.6 GB to 8.4 GB free. An interrupted run now cleans its scratch on
+the next start: each run writes its pid inside its work dir and the next start removes any sibling whose
+pid is gone (proven: `wa-fast-DEAD` reclaimed, `wa-fast-LIVE` kept).
+
+**Item 5 - merged `origin/main` `39bbf2b6` (`dc2e9eaf`).** One real conflict, in
+`lua/core/refusal_codes.lua`, resolved by regenerating the map with its own generator
+(`scripts/gen-refusal-codes.lua --write`: 574 codes from 96 modules, `--check` clean), so both sides
+survive. `nodes.lua` auto-merged and keeps the process-wide marker, the in-flight registry and the lease.
+Two more runner defects were found by running the merged tree, not by reading it: the Rust rows were given
+the ambient `HOME` where main three `wa-capabilities` relay tests refuse anything that is not a scratch
+home (`28513ad4`), and a build in a 2 G scope is OOM-killed, so the run needs 8 G.
+
 ### Mis-measured premises in the brief (re-measured here)
 
 * Item 1 is real and worse than stated: the stop happens BEFORE the detection, so on a sentinel-supervised
