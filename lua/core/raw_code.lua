@@ -163,6 +163,17 @@ function M.child_mode(subagent, policy)
   return M.mode_of(policy)
 end
 
+-- The EXPLICIT switch, parsed, or the string "unset" when the operator set none. Item 2 of review r4
+-- needs the two apart: a pre-release thread honours an explicit switch, and falls back to its frozen
+-- mode only when nobody said anything.
+M.UNSET = "unset"
+
+function M.explicit()
+  local value = tostring(host.getenv("WASM_AGENT_RAW_CODE") or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
+  if value == "" then return M.UNSET end
+  return M.parse_switch(value)
+end
+
 -- The NODE's answer for a thread that has no record: the explicit switch when it is set, otherwise the
 -- provider row (M.default_mode).
 function M.mode()

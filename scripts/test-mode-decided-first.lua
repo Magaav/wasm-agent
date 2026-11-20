@@ -106,12 +106,15 @@ local legacy = with({ WASM_AGENT_RAW_CODE = 'codemode' }, function()
   host.sql_exec('INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)', json.encode({ key, json.encode(value) }))
   return { sid = sid, tools = first.tools }
 end)
--- A legacy thread keeps only, whatever the node says: that is the mode its frozen prefix was built in.
-for _, node_mode in ipairs({ 'native', 'first', 'codemode', 'on', 'stop' }) do
+-- A legacy thread HONOURS an explicit switch (review r4, item 2): that is the mode a27490af froze it
+-- in. codemode is the decision to have no raw channel, recorded as off.
+local EXPLICIT = { native = 'native', first = 'first', only = 'only', codemode = 'off', stop = 'stop' }
+for _, node_mode in ipairs({ 'native', 'first', 'only', 'codemode', 'stop' }) do
   local again = build(legacy.sid, node_mode)
   eq(again.source, 'legacy', node_mode .. ': a record with no mode is named legacy')
-  eq(again.mode, 'only', node_mode .. ': and it keeps only - the mode its prefix was built in')
+  eq(again.mode, EXPLICIT[node_mode], node_mode .. ': and it honours the EXPLICIT switch')
 end
+-- With NO switch at all it keeps only, the mode a27490af froze a record like this in.
 local no_switch = build(legacy.sid, false)
 eq(no_switch.source, 'legacy', 'no switch: still a legacy record')
 eq(no_switch.mode, 'only', 'no switch: and it keeps only')
@@ -119,9 +122,9 @@ eq(no_switch.mode, 'only', 'no switch: and it keeps only')
 -- The no-change property, on a PRISTINE legacy record: frozen in one mode, resumed under that same
 -- explicit switch, twice. Nothing about its prefix may move and no session-update note may be owed -
 -- this is the case the review names (a resume after a restart must not tell the model its tools changed).
-local pristine = with({ WASM_AGENT_RAW_CODE = 'only' }, function()
-  local sid = thread('legacy, frozen in only')
-  build(sid, 'only')
+local pristine = with({ WASM_AGENT_RAW_CODE = 'codemode' }, function()
+  local sid = thread('legacy, never resumed elsewhere')
+  build(sid, 'codemode')
   local key = pcache.key({ session_id = sid, user_id = 'master', role = 'master' })
   local rows = json.decode(host.sql_query('SELECT value FROM meta WHERE key=?', json.encode({ key })))
   local value = json.decode(rows[1].value)
@@ -131,9 +134,9 @@ local pristine = with({ WASM_AGENT_RAW_CODE = 'only' }, function()
 end)
 local settled = build(pristine, 'codemode')
 eq(settled.source, 'legacy', 'the pristine record is legacy')
-eq(settled.mode, 'only', 'and keeps only')
+eq(settled.mode, 'off', 'and honours the switch it froze in')
 local resumed = note_count(pristine)
-local again_pristine = build(pristine, false)
+local again_pristine = build(pristine, 'codemode')
 eq(again_pristine.tools, settled.tools, 'a legacy record resumed under its own switch keeps its tools')
 eq(again_pristine.report.changed, false, 'and its frozen prefix did not change')
 eq(note_count(pristine) - resumed, 0, 'and this build owed the model no session-update note')

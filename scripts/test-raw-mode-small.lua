@@ -129,10 +129,18 @@ host.sql_exec('INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)', json.encode(
 local legacy_read = pcache.read({ session_id = sid_l, user_id = 'master', role = 'master' })
 ok(type(legacy_read) == 'table' and legacy_read.raw_mode == nil,
   'the legacy record reads back with NO raw_mode')
--- A legacy record keeps only, whatever the switch says: that is the mode its prefix was built in.
+-- A legacy record HONOURS an explicit switch (review r4, item 2): that is the mode a27490af froze it in.
 local legacy_thread = with({ WASM_AGENT_RAW_CODE = 'native' }, function() return bot(sid_l) end)
 eq(legacy_thread.mode_source, 'legacy', 'a thread without a recorded mode is named legacy')
-eq(legacy_thread.codemode_policy.raw_mode, 'only', 'and it keeps only - the mode its prefix was built in')
+eq(legacy_thread.codemode_policy.raw_mode, 'native', 'and it honours the EXPLICIT switch')
+eq(raw.mode_of(legacy_thread.codemode_policy), 'native', 'which every mode reader sees')
+-- No switch at all: only, the mode such a record was frozen in.
+local saved_explicit = raw.explicit
+raw.explicit = function() return raw.UNSET end
+local legacy_quiet = with({ WASM_AGENT_RAW_CODE = false }, function() return bot(sid_l) end)
+raw.explicit = saved_explicit
+eq(legacy_quiet.mode_source, 'legacy', 'with no switch at all it is still a legacy record')
+eq(legacy_quiet.codemode_policy.raw_mode, 'only', 'and it keeps only - the mode its prefix was built in')
 
 -- A thread that DECIDED no raw channel keeps that decision (the switch's own word, `off`): it must not
 -- start asking the node again, and it must not read as legacy either.

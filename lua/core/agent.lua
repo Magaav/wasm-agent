@@ -1163,8 +1163,14 @@ function M:build_context()
       self.raw_decided_flag=true
       self.mode_source='record'
     elseif frozen_record then
-      -- Written before the field existed: that thread's prefix was built in only.
-      self.raw_decided_mode=raw_code_lib.LEGACY_THREAD_MODE
+      -- Written before the field existed: it honours an EXPLICIT switch when one is set - that is the
+      -- mode a27490af froze it in - and falls back to only when nobody said anything (review r4, item 2).
+      local explicit=raw_code_lib.explicit()
+      if explicit~=raw_code_lib.UNSET then
+        self.raw_decided_mode=explicit
+      else
+        self.raw_decided_mode=raw_code_lib.LEGACY_THREAD_MODE
+      end
       self.raw_decided_flag=true
       self.mode_source='legacy'
     else
