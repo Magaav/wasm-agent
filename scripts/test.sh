@@ -270,6 +270,18 @@ gate_run env HOME="$GATE_HOME" cargo test --release --offline --manifest-path ru
 # A relayed await answers at the caller wait_ms instead of holding the relay and a peer slot until the
 # operation settles (verification r3). It starts real operations, so it needs the gate scratch HOME.
 gate_run env HOME="$GATE_HOME" cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-capabilities await_returns_at_its_own_wait
+# The certificate authorities every outbound TLS connection trusts (rust/wa-tls): SSL_CERT_FILE and
+# SSL_CERT_DIR are read the way OpenSSL reads them, and each client path answers a scratch HTTPS
+# server presenting a certificate from a private CA. Without the variables the handshake is refused
+# as the certificate step (never as a timeout, never by falling back to the compiled-in roots); with
+# them it completes. The paths are the provider call and the release fetch (wa-capabilities), the
+# mesh relay hop (wa-host), the guest's own exchange and its websocket (wa-kernel-runtime) and the
+# relay answer (wa-rendezvous). Each row names its own module because the filters above name theirs.
+gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-tls
+gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-capabilities tls_anchor_tests
+gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host tls_anchor_tests
+gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-kernel-runtime tls_anchor_tests
+gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-rendezvous tls_anchor_tests
 # The line boundaries `host.http_sse` hands over are tested against real recorded SSE bodies (under
 # `tests/fixtures/subscription/`, kept as generic SSE recordings): a reader that re-frames or drops a
 # line fails here. Every filter above names its own module, so this one is named explicitly.
@@ -1852,6 +1864,14 @@ WA_SCRIPT=scripts/test-memory-window.lua "$BIN" --db "$DB.window" | grep "memory
 # you cannot search for.
 WA_SCRIPT=scripts/test-session-title.lua "$BIN" --db "$DB.title" | grep "session title ok"
 WASM_AGENT_KEYS_DIR="$DB.keys" WA_SCRIPT=scripts/test-vault-keys.lua "$BIN" --db "$DB.keys.db" | grep "vault keys ok"
+# The vault's own upstream TLS (vault/wa_vault.py): Python honours SSL_CERT_FILE through OpenSSL's
+# default verify paths but silently skips a file it cannot read, so the vault must say WHICH source it
+# could not use. The test runs the real vault against a real TLS upstream presenting the scratch CA
+# from rust/wa-tls/fixtures/scratch-tls: an https upstream is reached when the bundle names it, and a
+# bundle that is missing, certificate-free or a directory that cannot be listed is a named refusal
+# (vault_ca_unreadable / vault_ca_without_certificate) instead of a verify error dressed as an
+# unreachable upstream. No binary, no node, no network beyond loopback.
+gate_run python scripts/test-vault.py
 WASM_AGENT_KEYS_DIR="$DB.bash-keys" WA_SCRIPT=scripts/test-cli-bash-restart.lua "$BIN" --db "$DB.bash.db" | grep "cli bash restart ok"
 WA_SCRIPT=scripts/test-mcp-node-runtime.lua "$BIN" --db "$DB.mcp-node.db" | grep '"ok":true'
 WA_SCRIPT=scripts/test-federation.lua "$BIN" --db "$DB.federation.db" | grep '"ok":true'

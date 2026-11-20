@@ -17,3 +17,13 @@ ring = "0.17"
 serde_json = "1"
 ureq = { version = "3", features = ["json"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Whose certificates are trusted: the relay may be behind a private CA, and SSL_CERT_FILE /
+# SSL_CERT_DIR is how this machine says so. Read by wa-tls, the answer every client here shares.
+[dependencies.wa-tls]
+path = "../wa-tls"
+
+# The scratch HTTPS server the relay tests handshake against.
+[dev-dependencies.wa-tls]
+path = "../wa-tls"
+features = ["scratch"]

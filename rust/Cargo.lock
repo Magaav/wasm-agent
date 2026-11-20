@@ -2172,6 +2172,7 @@ dependencies = [
  "wa-rendezvous",
  "wa-sqlite",
  "wa-term",
+ "wa-tls",
  "wa-tool-progress",
  "wa-vault",
  "wa-whatsapp-archive",
@@ -2312,6 +2313,7 @@ dependencies = [
  "wa-mesh",
  "wa-rendezvous",
  "wa-sqlite",
+ "wa-tls",
 ]
 
 [[package]]
@@ -2341,6 +2343,7 @@ dependencies = [
  "anyhow",
  "ring",
  "rusqlite",
+ "rustls",
  "serde_json",
  "tokio",
  "tungstenite",
@@ -2358,6 +2361,7 @@ dependencies = [
  "wa-sqlite",
  "wa-state",
  "wa-stt-remote",
+ "wa-tls",
  "wa-vault",
  "wasmtime",
  "wasmtime-wasi",
@@ -2451,6 +2455,7 @@ dependencies = [
  "rusqlite",
  "serde_json",
  "wa-sqlite",
+ "wa-tls",
  "windows-sys 0.61.2",
 ]
 
@@ -2473,6 +2478,7 @@ dependencies = [
  "wa-host-support",
  "wa-operation",
  "wa-sqlite",
+ "wa-tls",
 ]
 
 [[package]]
@@ -2532,6 +2538,16 @@ dependencies = [
  "serde_json",
  "wa-host-support",
  "wa-tool-progress",
+]
+
+[[package]]
+name = "wa-tls"
+version = "0.1.0"
+dependencies = [
+ "base64 0.23.1",
+ "rustls",
+ "sha1",
+ "ureq",
 ]
 
 [[package]]
