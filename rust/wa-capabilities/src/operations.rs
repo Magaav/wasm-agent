@@ -1299,10 +1299,16 @@ pub(crate) fn owned(caller: &Caller, id: &str) -> Result<Option<Value>, String> 
 /// on a deadline nobody chose and nothing said so. An allow-list, never a block-list: a field start does
 /// not read is a field the caller believes applied.
 fn start_fields_refused(args: &Value) -> Result<(), String> {
+    // EVERY key start() READS belongs here. `vault_env` and `vault_approval` were missing (review r3):
+    // start() reads both - approval_problem (:1384) and seal_request (:1398) - and real callers send them
+    // (lua/core/mcp.lua, lua/core/mcp_session.lua), so every vault-backed MCP launch was refused
+    // operation_unknown_field on this branch while it worked on main. start_fields_match_the_reads()
+    // below parses the args[..] reads out of this function and fails if the list ever drifts again.
     const START_FIELDS: &[&str] = &["action", "id", "owner", "session", "node_scope", "scope",
         "command", "program", "cwd", "_launch_cwd", "kind", "timeout_seconds", "background",
         "control", "tool", "args", "replay_of", "wait_for", "stream", "offset", "limit", "after",
-        "evidence", "output", "include_output", "max_bytes", "wait_ms"];
+        "evidence", "output", "include_output", "max_bytes", "wait_ms",
+        "vault_env", "vault_approval"];
     let Some(object) = args.as_object() else { return Ok(()) };
     let mut unknown: Vec<&str> = object.keys().map(|key| key.as_str())
         .filter(|key| !START_FIELDS.contains(key)).collect();
@@ -2018,6 +2024,49 @@ mod start_field_tests {
         assert!(error.contains("nothing was launched"), "{error}");
         assert!(error.contains("timeout_seconds (1-86400)"), "the refusal names the field that sets it: {error}");
     }
+
+
+/// Review r3 (A1): the allow-list must cover EVERY key start() reads, not the ones a reader remembered.
+///
+/// This does not restate the list - it PARSES the args[..] reads out of control()'s own source and
+/// requires each to be listed. A field added to start() without START_FIELDS fails here by name, which
+/// is exactly the drift that shipped \`vault_env\` and \`vault_approval\` missing while start() read both
+/// (lua/core/mcp.lua sends them; every vault-backed MCP launch was refused operation_unknown_field).
+#[test]
+fn start_fields_cover_every_key_start_reads() {
+    let source = include_str!("operations.rs");
+    // The start() arm of control(): from its opening to the end of the match arm.
+    let begin = source.find("        \"start\" => {").expect("the start arm");
+    let end = source[begin..].find("\n        \"cancel\" => {").map(|i| begin + i).unwrap_or(source.len());
+    let arm = &source[begin..end];
+    // Every key read as args[..], args[..], or args.get(..) in that arm.
+    let mut read: Vec<&str> = Vec::new();
+    for marker in ["args[\"", "args.get(\""] {
+        let mut from = 0;
+        while let Some(at) = arm[from..].find(marker) {
+            let key_at = from + at + marker.len();
+            let room = arm.len() - key_at;
+            let span = &arm[key_at..key_at + room.min(64)];
+            if let Some(close) = span.find('\"') {
+                let key = &span[..close];
+                if !key.is_empty() && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                    read.push(key);
+                }
+            }
+            from = key_at;
+        }
+    }
+    read.sort_unstable();
+    read.dedup();
+    assert!(!read.is_empty(), "the parser must find the reads it is judging");
+    // The list start_fields_refused() enforces, read out of the same source.
+    let list_begin = source.find("const START_FIELDS: &[&str] = &[").expect("START_FIELDS");
+    let list_end = source[list_begin..].find("];").map(|i| list_begin + i).expect("the list ends");
+    let list_text = &source[list_begin..list_end];
+    let missing: Vec<&&str> = read.iter().filter(|key| !list_text.contains(&format!("\"{key}\""))).collect();
+    assert!(missing.is_empty(),
+        "start() reads these keys but START_FIELDS does not list them (a launch that sends one is refused operation_unknown_field): {missing:?}");
+}
 
     /// Every field a real start carries is accepted, including the ones the Lua layer and the
     /// code-mode pending layer stamp - a refusal here would break the callers it is meant to help.
