@@ -120,7 +120,20 @@ Explicitly LATER (after fabric-transport phase 1). Not started.
 
 ## Verification run
 
-Placed in the mission report when the fast path finishes; see "Fast path" below.
+`flock ~/Work/missions/.suite.lock bash scripts/fast.sh --jobs 6` on HEAD f286367e, under rule 15 (it
+queued behind another mission's suite and a full gate before it ran): **304 checks, 1 failed, 0 skipped.**
+
+* `fast: discrimination ok (512ms)` - the new contract row for item 1' passes;
+* `scripts/test-contract-host.lua` is in the fast path inventory
+  (`wa_fast_row_candidates | grep contract-host`) and is not in `scripts/fast-path.exclude`, so it ran
+  among the 256/257 Lua rows;
+* the one failure is **pre-existing and not mine**: `scripts/test-refusal-contract.lua` says
+  `lua/core/refusal_codes.lua is stale`. My diff touches no `refusal` path (`git diff --name-only
+  origin/main..HEAD | grep -i refusal` is empty), and the same failure reproduces on a detached worktree
+  of `origin/main` itself.
+
+`node scripts/test-orphan-tests.mjs` - ok, 276 wired; `node scripts/test-gate-check.mjs` - ALL PASS (the
+HTTP stage skips on Linux, as designed); `node scripts/check-instructions.mjs` - PASS, 79 checks.
 
 ## Texts to approve (1)
 
