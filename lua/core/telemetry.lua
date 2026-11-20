@@ -200,12 +200,18 @@ end
 
 function M.normalize(raw, rates)
   if type(raw) ~= "table" then return {known=false, cache_known=false, cost_known=false} end
-  local prompt, output = number(raw.prompt_tokens), number(raw.completion_tokens)
+  -- Both vocabularies name the same counters (rel r5, after the adapter seam landed): the provider
+  -- payload speaks prompt_tokens/completion_tokens, and the adapter record (lua/core/adapters)
+  -- speaks input_tokens/output_tokens. Reading only one of them made every normalized usage
+  -- {known=false}, so a summary call added no spend - measured: 12 tokens lost, context assertions
+  -- still green. This is the allow-list of names, no guessing.
+  local prompt = number(raw.prompt_tokens) or number(raw.input_tokens)
+  local output = number(raw.completion_tokens) or number(raw.output_tokens)
   local detail = raw.prompt_tokens_details or {}
-  local read = number(detail.cached_tokens or raw.prompt_cache_hit_tokens or raw.cached_tokens
+  local read = number(raw.cache_read_tokens) or number(detail.cached_tokens or raw.prompt_cache_hit_tokens or raw.cached_tokens
     or (raw.prompt_cache or {}).cached_tokens)
-  local write = number(detail.cache_write_tokens) or 0
-  local reasoning = number((raw.completion_tokens_details or {}).reasoning_tokens)
+  local write = number(raw.cache_write_tokens) or number(detail.cache_write_tokens) or 0
+  local reasoning = number(raw.reasoning_tokens) or number((raw.completion_tokens_details or {}).reasoning_tokens)
   local known = prompt ~= nil and output ~= nil
   local cache_known = read ~= nil and prompt ~= nil and read + write <= prompt
   local result = {known=known, cache_known=cache_known, cost_known=false,
