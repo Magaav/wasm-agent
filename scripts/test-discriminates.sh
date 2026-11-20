@@ -166,11 +166,11 @@ run_one() { # <path> -> one row: verdict, path, reason
     return
   fi
   if ! in_list "$path" "$WORKROOT/tests.list"; then
-    record not-applicable "$path" "the branch deletes it, so its subject is gone"
+    record deleted "$path" "the branch deletes it, so its subject is gone"
     return
   fi
   if [ "$runner" = rust ]; then
-    record not-applicable "$path" "a Rust test outside a crate tests/ directory is run by cargo with its crate, not by this script"
+    record skipped "$path" "a Rust test outside a crate tests/ directory is run by cargo with its crate, not by this script"
     return
   fi
   if [ "$runner" = lua ] && [ -z "$LUA_BIN" ]; then
@@ -215,7 +215,7 @@ run_one() { # <path> -> one row: verdict, path, reason
     return
   fi
   if [ "$code" = 0 ]; then
-    record does-not "$path" "it passed on the reverted code, so it would not have caught this change"
+    record passed "$path" "it passed on the reverted code"
     return
   fi
   if printf "%s" "$last" | grep -Eq "$ENV_RE"; then
@@ -223,11 +223,11 @@ run_one() { # <path> -> one row: verdict, path, reason
     return
   fi
   if printf '%s' "$last" | grep -Eq "$LOAD_RE"; then
-    record does-not "$path" "it died before its assertions on the old code: $(printf '%s' "$last" | grep -Eo "$LOAD_RE" | head -1)"
+    record load-error "$path" "it died before its assertions on the old code: $(printf '%s' "$last" | grep -Eo "$LOAD_RE" | head -1)"
     return
   fi
   if printf '%s' "$last" | grep -Eq "$ASSERT_RE"; then
-    record discriminates "$path" "$(printf '%s' "$last" | grep -E "$ASSERT_RE" | tail -1 | cut -c1-160 | tr '\t' ' ')"
+    record asserted "$path" "$(printf '%s' "$last" | grep -E "$ASSERT_RE" | tail -1 | cut -c1-160 | tr '\t' ' ')"
     return
   fi
   # A Lua test signals a failed check by raising an error, and the message carries the
@@ -238,7 +238,7 @@ run_one() { # <path> -> one row: verdict, path, reason
     return
   fi
   if [ "$ALLOW_UNCLASSIFIED" = 1 ]; then
-    record unclassified-allowed "$path" "exit $code, no assertion marker (allowed): $(printf '%s' "$last" | tail -1 | cut -c1-140 | tr '\t' ' ')"
+    record unclassified "$path" "exit $code, no assertion marker (allowed): $(printf '%s' "$last" | tail -1 | cut -c1-140 | tr '\t' ' ')"
   else
     record unclassified "$path" "exit $code and no assertion marker; name the failure or its marker: $(printf '%s' "$last" | tail -1 | cut -c1-140 | tr '\t' ' ')"
   fi
@@ -248,53 +248,87 @@ export -f run_one record in_list runner_for
 # --- the driver ---------------------------------------------------------------------------------------
 say "HEAD $HEAD_SHA vs base $BASE ($MERGE_BASE); scratch worktree $WORKTREE"
 
-if [ -n "$REFACTOR_REASON" ]; then
-  # Exempt from discriminating, but a refactor must keep every test it runs green on the base code.
-  # The tests it touches stand in for "existing" here: a refactor that changes tests still has to keep
-  # them green, which is exactly the assertion a refactor owes.
-  while IFS= read -r t; do
-    [ -n "$t" ] || continue
-    run_one "$t"
-  done < "$WORKROOT/tests.list"
-else
-  while IFS= read -r t; do
-    [ -n "$t" ] || continue
-    run_one "$t"
-  done < "$WORKROOT/tests.list"
-fi
-
-# A test the branch DELETES is reported too: silence about a deleted test reads as "nothing to check".
+# The branch's own new and changed tests, run against the base's non-test code. A test the branch
+# DELETES is reported too: silence about a deleted test reads as "nothing to check".
 while IFS= read -r t; do
   [ -n "$t" ] || continue
-  record not-applicable "$t" "the branch deletes it, so its subject is gone"
+  run_one "$t"
+done < "$WORKROOT/tests.list"
+while IFS= read -r t; do
+  [ -n "$t" ] || continue
+  record deleted "$t" "the branch deletes it, so its subject is gone"
 done < "$WORKROOT/deleted.list"
 
-# --- the verdict --------------------------------------------------------------------------------------
 [ -s "$ROWS" ] || refuse "no row was produced: the branch changes tests but none could be classified"
 
-if [ "$JSON" = 1 ]; then
-  awk -F'\t' 'BEGIN{print "{\"rows\":["} {gsub(/"/,"\\\"",$2); gsub(/"/,"\\\"",$3); printf "%s{\"verdict\":\"%s\",\"test\":\"%s\",\"reason\":\"%s\"}", (NR>1?",":""), $1,$2,$3} END{print "]}"}' "$ROWS"
+# --- the verdict --------------------------------------------------------------------------------------
+# Two modes, and the same raw outcome means opposite things in them:
+#   a fix      a test DISCRIMINATES when it fails on the old code with an assertion, and it does not when
+#              it passes there (it would not have caught the bug) or dies on a missing symbol (it never
+#              reached an assertion);
+#   a refactor behaviour is deliberately unchanged, so a test that still passes is the evidence, and any
+#              failure it did not ask for blocks.
+VERDICTS=$WORKROOT/verdicts.tsv
+if [ -n "$REFACTOR_REASON" ]; then
+  awk -F'	' 'BEGIN{OFS="	"} {
+    if ($1=="passed"||$1=="skipped"||$1=="not-applicable") {print "green",$2,"it stays green on the refactored code"}
+    else if ($1=="deleted") {print "not-applicable",$2,$3}
+    else if ($1=="environment") {print "environment",$2,$3}
+    else {print "does-not",$2,("a refactor must keep every test green, and this one " ($1=="asserted"?"failed an assertion":"did not pass") ": " $3)}
+  }' "$ROWS" > "$VERDICTS"
+else
+  awk -F'	' 'BEGIN{OFS="	"} {
+    if ($1=="asserted") {print "discriminates",$2,$3}
+    else if ($1=="passed") {print "does-not",$2,"it passed on the reverted code, so it would not have caught this change"}
+    else if ($1=="load-error") {print "does-not",$2,$3}
+    else if ($1=="unclassified") {print "unclassified",$2,$3}
+    else if ($1=="deleted"||$1=="not-applicable") {print "not-applicable",$2,$3}
+    else {print $1,$2,$3}
+  }' "$ROWS" > "$VERDICTS"
 fi
 
-if [ "$JSON" != 1 ]; then
+if [ "$JSON" = 1 ]; then
+  # A consumer reads this, so the escaping is done here rather than hoped for: a quote or a backslash
+  # inside a reason would otherwise produce JSON that no parser accepts.
+  printf '{"rows":['
+  first=1
+  while IFS=$(printf '\t') read -r verdict path reason; do
+    [ -n "$verdict" ] || continue
+    esc_path=$(printf '%s' "$path" | sed 's/\\/\\\\/g; s/"/\\"/g')
+    esc_reason=$(printf '%s' "$reason" | tr '\t' ' ' | sed 's/\\/\\\\/g; s/"/\\"/g')
+    [ "$first" = 1 ] || printf ','
+    first=0
+    printf '{"verdict":"%s","test":"%s","reason":"%s"}' "$verdict" "$esc_path" "$esc_reason"
+  done < "$VERDICTS"
+  printf ']}\n'
+else
   while IFS=$(printf '\t') read -r verdict path reason; do
     printf '%s\t%s\t%s\n' "$verdict" "$path" "$reason"
-  done < "$ROWS"
+  done < "$VERDICTS"
 fi
 
-counts=$(cut -f1 "$ROWS" | sort | uniq -c | awk '{printf "%s=%s ", $2, $1}')
-blockers=$(cut -f1 "$ROWS" | grep -c -E '^(does-not|unclassified)$')
-environment=$(cut -f1 "$ROWS" | grep -c '^environment$')
-discriminating=$(cut -f1 "$ROWS" | grep -c '^discriminates$')
+counts=$(cut -f1 "$VERDICTS" | sort | uniq -c | awk '{printf "%s=%s ", $2, $1}')
+blockers=$(cut -f1 "$VERDICTS" | grep -c -E '^(does-not|unclassified)$')
+environment=$(cut -f1 "$VERDICTS" | grep -c '^environment$')
+evidence=$(cut -f1 "$VERDICTS" | grep -c -E '^(discriminates|green)$')
 say "rows: $counts"
-say "$discriminating discriminating, $blockers blocking, $environment not run by this machine"
+if [ -n "$REFACTOR_REASON" ]; then
+  say "$evidence test(s) still green on the refactored code, $blockers blocking, $environment not run by this machine"
+else
+  say "$evidence discriminating, $blockers blocking, $environment not run by this machine"
+fi
 
+# Unknown is not yes: a machine that could not run a test has proved nothing, and says so.
 if [ "$environment" -gt 0 ]; then
   say "refused: this machine could not run $environment test(s); that is not a pass"
   exit 3
 fi
 if [ "$blockers" -gt 0 ]; then
-  say "BLOCKED: $blockers test(s) do not discriminate - named above"
+  if [ -n "$REFACTOR_REASON" ]; then
+    say "BLOCKED: $blockers test(s) are no longer green - named above"
+  else
+    say "BLOCKED: $blockers test(s) do not discriminate - named above"
+  fi
   exit 1
 fi
 exit 0
