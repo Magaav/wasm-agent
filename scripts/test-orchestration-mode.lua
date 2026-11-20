@@ -139,9 +139,11 @@ if host.read_file and pcall(host.read_file,direct_write) then os.remove(direct_w
 -- Nothing is declared there (tools.envelope is empty), so a run block is the only way to act. If the
 -- coordinator's two mode tools were unreachable from it, the mode would be a prompt with no way to
 -- follow it, and every floor refusal's handoff.tool == 'subagent' would name a tool the model cannot call.
-raw_surface=nil
+-- The CodeAct surface is pinned HERE rather than assumed from an unset switch (rel r1 R2: a
+-- tool-calling provider now defaults to native, and this block is about the CodeAct surface).
+raw_surface='only'
 local raw_code=dofile('lua/core/raw_code.lua')
-check(raw_code.mode()=='only' and raw_code.only(nil),'the default surface is CodeAct (raw_code M.DEFAULT = only)')
+check(raw_code.mode()=='only' and raw_code.only(nil),'the CodeAct surface is pinned to only')
 local codeact_declared={}
 for _,item in ipairs(tools.envelope('master',{role='master',user_id='master',session_id=sid})) do codeact_declared[#codeact_declared+1]=item['function'].name end
 check(#codeact_declared==0,'CodeAct declares no tool at all, so the run block is the surface: '..table.concat(codeact_declared,','))

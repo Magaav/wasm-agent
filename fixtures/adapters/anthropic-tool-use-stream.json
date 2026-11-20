@@ -1,0 +1,23 @@
+{
+  "provider": "anthropic-messages",
+  "recorded_at": "2026-11-19",
+  "shape": "a tool_use block whose input arrives as input_json_delta fragments",
+  "expect": {
+    "answer_text": "",
+    "reasoning": "",
+    "tool_calls": 1,
+    "tool_name": "read",
+    "tool_arguments": "{\"path\":\"/etc/hosts\"}",
+    "finish_reason": "tool_calls",
+    "cut": false
+  },
+  "payloads": [
+    "{\"type\":\"message_start\",\"message\":{\"id\":\"msg_2\",\"model\":\"claude-x\",\"usage\":{\"input_tokens\":8}}}",
+    "{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"read\",\"input\":{}}}",
+    "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\"}}",
+    "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\"/etc/hosts\\\"}\"}}",
+    "{\"type\":\"content_block_stop\",\"index\":0}",
+    "{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":14}}",
+    "{\"type\":\"message_stop\"}"
+  ]
+}

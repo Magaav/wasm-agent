@@ -67,8 +67,23 @@ local handle = pending.invoke(dispatch_b, opts, 'bash', { command = 'echo ninth'
 check(type(handle) == 'table' and handle.state == 'pending' and type(handle.op) == 'string',
   'a call past the cap answers a handle: ' .. json.encode(handle or {}):sub(1, 240))
 local op = handle.op
-check(tostring(handle.progress and handle.progress.state) == 'queued',
+-- The same receipt-before-slot ordering holds for the ninth call: its handle is answered from the first
+-- snapshot, and the supervisor announces `queued` only when it reaches Slot::acquire - after writing the
+-- admission record (an fsync). On a loaded disk that snapshot is still `accepted` (measured: a 30 ms
+-- fsync turns this row red in 12 runs of 12, with the op then timing out IN THE QUEUE). So the handle must not
+-- say running, and the op is watched until its supervisor has decided: it is queued (or already settled
+-- as a queue timeout), never running.
+local first = tostring(handle.progress and handle.progress.state)
+check(first == 'queued' or first == 'accepted',
   'and the handle says it is queued, not running: ' .. json.encode(handle.progress or {}):sub(1, 200))
+local decided, decided_ms = first, 0
+while decided == 'accepted' and decided_ms < 5000 do
+  if host.sleep then host.sleep(20) end
+  decided_ms = decided_ms + 20
+  local now = dispatch_b('operation', { action = 'status', id = op })
+  decided = type(now) == 'table' and (now.queue_state == 'timed_out' and 'queued' or tostring(now.state)) or 'unknown'
+end
+check(decided == 'queued', 'its supervisor queues it behind the six: ' .. decided .. ' after ' .. decided_ms .. ' ms')
 
 local entry = pending.wait(dispatch_b, opts, op, { wait_s = 10 })
 check(type(entry) == 'table' and entry.state == 'failed',

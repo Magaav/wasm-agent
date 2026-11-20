@@ -130,6 +130,16 @@ const CLEANUP_MS: u64 = 1000;
 /// is never half-admitted, and 16 code-mode handles per session, each starting a few operations, fit
 /// with room for the node's own shells.
 const MAX_TRACKED: usize = 128;
+
+/// How long a wait sleeps before it polls an operation this process does not own (review r2, item 2).
+///
+/// An operation in this process has a condvar and is woken the instant it settles; one that is not has
+/// only a file to read, so the wait has to be the clock. 100 ms is short enough that a settling
+/// operation is noticed at once by a human reading the transcript and long enough that a long wait is
+/// four syscalls a second instead of a saturated core. The floor keeps a zero budget from spinning.
+pub const FOREIGN_POLL_MIN: Duration = Duration::from_millis(100);
+pub const FOREIGN_POLL_MAX: Duration = Duration::from_millis(1000);
+
 pub const COMMAND_OUTPUT_IDLE_MS: u64 = 100;
 const VIEW_BYTES: usize = 24 * 1024;
 const MAX_ACTIVE: usize = 8;
@@ -546,6 +556,29 @@ mod long_path_tests {
     }
 }
 
+/// Is the process that owns this operation still alive?
+///
+/// The proof is its lease file: the index holds BEGIN EXCLUSIVE on the lease for as long as the process
+/// lives, so a lease that cannot be locked belongs to a dead owner. A missing file is dead too. Anything
+/// we cannot decide answers FALSE - unknown is not yes, and calling live work lost is the failure this
+/// exists to stop.
+fn owner_lease_held(root: &Path, boot: &str) -> bool {
+    if !boot.starts_with("boot-") || boot.len() > 100
+        || !boot.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+        return false;
+    }
+    let path = root.join(format!("{boot}.lease.sqlite"));
+    if !path.is_file() { return false; }
+    match rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE) {
+        Ok(lease) => {
+            let _ = lease.busy_timeout(std::time::Duration::ZERO);
+            // Locked by a live process means held. If we could take it, that owner is gone.
+            lease.execute_batch("BEGIN EXCLUSIVE").is_err()
+        }
+        Err(_) => false,
+    }
+}
+
 pub fn atomic_json(path: &Path, value: &Value) -> io::Result<()> {
     let temporary = path.with_extension(format!(
         "{}.{}.tmp",
@@ -926,13 +959,32 @@ impl Manager {
         }
         let mut state: Value =
             serde_json::from_slice(&fs::read(self.root.join(id).join("state.json"))?)?;
+        // A SECOND PROCESS REATTACHES (item 3, review 19/11). This used to answer outcome_unknown for
+        // every operation not in THIS process's memory, so a resumed turn could not await the work its
+        // own session started and could not read its final result. Measured on avell (which runs the BASE
+        // binary), the result was simply gone to the resumed turn.
+        //
+        // The owner's liveness is a fact on disk: its lease file is held with BEGIN EXCLUSIVE for exactly
+        // as long as the owning process lives (rust/wa-operation/src/index.rs). So:
+        //   * an operation that SETTLED left its own record - read it, that is the result;
+        //   * an owner whose lease we CAN lock is gone, and the work is genuinely unknown;
+        //   * an owner whose lease is still held is ALIVE: this is a reattach, and the answer says so
+        //     instead of pretending the work was lost.
         if state["settled"] != true {
-            state["state"] = json!("outcome_unknown");
-            state["settled"] = json!(true);
-            state["ok"] = json!(false);
-            state["error"] =
-                json!("operation_owner_not_attached; it may still be active elsewhere; reconcile effects, never replay blindly");
-            state["cleanup"] = json!("unknown");
+            let owner_live = state["owner_boot"].as_str()
+                .is_some_and(|boot| owner_lease_held(&self.root, boot));
+            if owner_live {
+                state["reattached"] = json!(true);
+                state["owner_live"] = json!(true);
+                state["reattached_note"] = json!("this operation belongs to a live process this manager is not attached to; the state below is the owner's own record and its output streams are readable. Await it again, or read its output by id. Do not replay it.");
+            } else {
+                state["state"] = json!("outcome_unknown");
+                state["settled"] = json!(true);
+                state["ok"] = json!(false);
+                state["error"] =
+                    json!("operation_owner_not_attached; it may still be active elsewhere; reconcile effects, never replay blindly");
+                state["cleanup"] = json!("unknown");
+            }
         }
         Ok(state)
     }
@@ -1068,7 +1120,23 @@ impl Manager {
                 .wait_timeout_while(state, budget, |s| s["settled"] != true)
                 .map_err(error)?;
             drop(state);
+            return self.snapshot(id);
         }
+        // A FOREIGN OPERATION IS POLLED, NOT BUSY-LOOPED (review r2, item 2). An operation that is not in
+        // THIS process's memory has no condvar to wait on, so this used to fall straight through to
+        // snapshot() and answer at once. The await loop in wa-capabilities calls this in a `loop`, so a
+        // foreign operation that never settles became a hot spin: a core burned at 100% for the whole
+        // wait, on a node that was already busy. The poll is now the wait: sleep the budget (bounded,
+        // whole milliseconds, never zero) and answer one snapshot. 4 polls a second instead of millions,
+        // and the caller's own deadline still bounds the total.
+        // SNAPSHOT FIRST, SLEEP ONLY IF THE WORK HAS NOT SETTLED (review r3, B2): a foreign operation
+        // that finished while nobody looked answers at once instead of paying the poll interval.
+        let state = self.snapshot(id)?;
+        if state["settled"] == true { return Ok(state); }
+        // WHOLE MILLISECONDS: Duration cannot be fractional, and a caller's sub-millisecond budget
+        // must not truncate to a zero sleep - which would be the spin this exists to stop.
+        let nap = Duration::from_millis(budget.min(FOREIGN_POLL_MAX).max(FOREIGN_POLL_MIN).as_millis() as u64);
+        std::thread::sleep(nap);
         self.snapshot(id)
     }
 }

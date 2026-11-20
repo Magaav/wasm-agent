@@ -92,7 +92,13 @@ local function decode(record)
  return {system=record.system, system_sha256=sha(record.system),
    tools=tools, tools_sha256=sha(json.encode(tools)),
    orchestration=record.orchestration==true, parts=record.parts or {},
-   record=record, raw_value=record.raw_value, at=record.at}
+   record=record, raw_value=record.raw_value, at=record.at,
+   -- The raw-code mode this thread was STARTED in (rel review r3, item 1). ONE field carries the whole
+   -- decision: a mode string is that channel, the string "off" is the decision to have NO raw channel
+   -- (the same word the switch uses), and an ABSENT field is a record written before this release - a
+   -- thread whose prefix was built in only (raw_code.LEGACY_THREAD_MODE). A second boolean was tried
+   -- and dropped: any writer that rebuilt the row lost it, and the mode must never depend on that.
+   raw_mode=record.raw_mode}
 end
 M.decode=decode
 
@@ -181,7 +187,8 @@ local function current_state(current)
  -- while proving that an `/mcp` toggle reaches a running session with the tool names it added).
  return {system=system,tools_json=tools_json,tools=current.tools or {},system_sha256=sha(system),tools_sha256=sha(tools_json),
    parts=current.parts or {},orchestration=current.orchestration==true,
-   facts=current.facts or (current.parts or {}).facts or {}}
+   facts=current.facts or (current.parts or {}).facts or {},
+   raw_mode=current.raw_mode, raw_decided=(current.raw_decided==true) or nil}
 end
 
 -- Freeze the prefix on this session's first turn, or return the frozen one. `current` is what this
@@ -202,6 +209,11 @@ function M.enforce(ctx,current)
     tools=now.tools_json,tools_sha256=now.tools_sha256,parts=now.parts,
     orchestration=now.orchestration and true or false,
     orchestration_noted=now.orchestration and true or false,
+    -- Recorded once, at the freeze, and never rewritten: it is why a thread keeps the mode it started in.
+    -- A caller that SUPPLIED a decision (build_context always does) has it written as one string, with
+    -- "off" standing for "no raw channel"; a record frozen from {system=,tools=} alone - a test fixture
+    -- for a pre-release thread - keeps the field absent and reads back as legacy.
+    raw_mode=now.raw_decided and (now.raw_mode or 'off') or nil,
     state=state_hash(now.system_sha256,now.tools_sha256)}
   value.noted=value.state
   local written,why=write_row(k,value)
@@ -391,7 +403,12 @@ function M.notes(ctx,frozen,report,opts)
  local updated={v=record.v,at=record.at,system=record.system,system_sha256=record.system_sha256,
    tools=record.tools,tools_sha256=record.tools_sha256,parts=record.parts,
    orchestration=record.orchestration,state=record.state,noted=report.state,
-   orchestration_noted=report.orchestration and true or false}
+   orchestration_noted=report.orchestration and true or false,
+   -- The thread's recorded raw-code mode travels with the row (rel review r3, item 1). This rewrite
+   -- only moves the already-delivered marker, and a mode lost here was measured the hard way: a thread
+   -- read back as LEGACY one turn later, moved to only, and skipped the empty-list refusal it owed.
+   -- Written only when the old row HAD one, so a pre-release record stays pre-release.
+   raw_mode=record.raw_mode}
  -- The prefix is unchanged: only the "already delivered" marker moves.
  cas_row(k,record.raw_value,updated)
  pcall(function()

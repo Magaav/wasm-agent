@@ -791,6 +791,64 @@ local missing_code, missing_out, missing_err = shell("bash " .. rollback_script 
 ok(missing_code ~= 0, "a rollback with no kept pair refuses")
 contains(tostring(missing_out) .. tostring(missing_err), "rollback_unavailable", "the refusal is named")
 
+-- ---------------------------------------------------------------- case 12b: a worktree failure is never empty
+-- Measured 19/11: `worktree_failed` came back four times with observed:"" (21:45-22:23Z) while the same git
+-- command worked by hand. The old line reported first_line(stderr or stdout), so a failure carrying neither
+-- stream reported nothing at all, and the operator had no bytes and no exit code to act on. Three shapes are
+-- pinned here: git's own words with an exit code, a host-level refusal with no streams, and a host answer that
+-- is not the expected JSON walk - none of them may answer with an empty observed.
+setup_fixture()
+local saved_exec_wt = land.exec
+local function failing_worktree(answer)
+  land.exec = function(command, cwd, timeout)
+    if command:match("^git %-C .* worktree add") then return answer end
+    if command:match("^command %-v gh") then return { code = 0, stdout = "no\n", stderr = "" } end
+    return saved_exec_wt(command, cwd, timeout)
+  end
+  local ok_run = land.run({ run = "case12b", signer = "local", ring = SOLO_RING, branches = { "change/one" }, checks = standard_checks() })
+  land.exec = saved_exec_wt
+  return ok_run, step_of("case12b", "merge") or {}
+end
+do
+  local code, step = failing_worktree({ code = 128, stdout = "", stderr = "fatal: could not create leading directories of 'x'\n" })
+  eq(code, 1, "a refused worktree stops the landing")
+  eq(step.error, "worktree_failed", "the stop is named")
+  contains(step.observed, "fatal: could not create leading directories", "git's own words are in the answer")
+  contains(step.observed, "exit 128", "and so is the exit code it came with")
+  contains(step.observed, "command: git worktree add", "the command that failed is named")
+  contains(step.detail, "exit 128", "the report line carries the code too")
+end
+do
+  local code, step = failing_worktree({ code = 1, stdout = "", stderr = "host_error: disk_cap_refused_before_launch" })
+  eq(code, 1, "a host refusal stops the landing too")
+  contains(step.observed, "disk_cap_refused_before_launch", "a host refusal with no streams still says why")
+  contains(step.observed, "exit 1", "and carries its code")
+  ok(step.observed ~= "", "a host refusal with no streams is never empty")
+  ok(step.observed ~= "", "the observed detail is never empty")
+end
+do
+  local code, step = failing_worktree({ code = 1, stdout = "", stderr = "unreadable operation wrapper: {not json}", raw = "{not json}" })
+  eq(code, 1, "an unreadable host answer stops the landing")
+  contains(step.observed, "raw host answer: {not json}", "the raw host answer is kept when it is not the expected JSON")
+end
+do
+  -- git can fail on STDOUT alone; the old line read stdout only when stderr was empty, and an empty answer
+  -- was what it produced when both were. Neither stream is assumed.
+  local code, step = failing_worktree({ code = 128, stdout = "Preparing worktree (new branch 'land1/final')\nfatal: already used by worktree at /tmp/x\n", stderr = "" })
+  eq(code, 1, "a stdout-only failure stops the landing")
+  contains(step.observed, "fatal: already used by worktree", "git's stdout words are reported when stderr is empty")
+end
+
+do
+  -- The exact shape that produced the empty observed four times: a failure with NEITHER stream. It must
+  -- still say something a reader can act on, rather than nothing at all.
+  local code, step = failing_worktree({ code = 128, stdout = "", stderr = "" })
+  eq(code, 1, "a silent failure still stops the landing")
+  contains(step.observed, "(git answered with no output)", "a failure with no output says exactly that")
+  contains(step.observed, "exit 128", "and still carries the exit code")
+  ok(step.observed ~= "", "the observed detail is never empty, even when git said nothing")
+end
+
 -- ---------------------------------------------------------------- case 9: the signature made on a NAMED node
 -- The vault's admin listener is not on this machine, so the pipeline signs where it is and the signature
 -- travels back. This is that path: the node `laptop` runs the command it is given (its own signer, its own
@@ -1310,7 +1368,7 @@ local gate_commands = {}
 -- Only the gate's own checks are answered here (they are held to their command); everything else - the row
 -- inventory the rows file is proved with, the git calls - still runs for real.
 local function is_gate_check(command)
-  for _, marker in ipairs({ "scripts/fast.sh", "scripts/test-codemode-component.sh", "cargo test", "sync-prompt-docs" }) do
+  for _, marker in ipairs({ "scripts/fast.sh", "scripts/test-codemode-component.sh", "scripts/gate-cargo-codemode.sh", "cargo test", "sync-prompt-docs" }) do
     if command:find(marker, 1, true) then return true end
   end
   return false

@@ -16,6 +16,7 @@ import http.client
 import json
 import os
 import socket
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -450,6 +451,96 @@ try:
     ok(status == 401, "a removed key is refused")
     with open(os.path.join(data_dir, "vault.json")) as handle:
         ok("sk-opencode-SECRET" not in handle.read(), "a removed key is gone from the store")
+
+    # --- the CA bundle the machine names: checked, not silently skipped (review r1, item 2) ----------
+    # Python's HTTPSConnection honours SSL_CERT_FILE/SSL_CERT_DIR through OpenSSL's default verify
+    # paths, and OpenSSL silently SKIPS a file it cannot read: the handshake then fails as a verify
+    # error and the operator is told the upstream is unreachable. These checks are the difference
+    # between "the CA is wrong" and "the network is wrong", measured against a real TLS upstream
+    # presenting the scratch CA from rust/wa-tls/fixtures/scratch-tls.
+    fixtures = os.path.join(ROOT, "rust", "wa-tls", "fixtures", "scratch-tls")
+    for name in ("server.pem", "server.key", "ca.pem"):
+        ok(os.path.exists(os.path.join(fixtures, name)), "the scratch TLS fixture %s is present" % name)
+    tls_port = free_port()
+    tls_upstream = ThreadingHTTPServer(("127.0.0.1", tls_port), Upstream)
+    tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    tls_context.load_cert_chain(os.path.join(fixtures, "server.pem"), os.path.join(fixtures, "server.key"))
+    tls_upstream.socket = tls_context.wrap_socket(tls_upstream.socket, server_side=True)
+    threading.Thread(target=tls_upstream.serve_forever, daemon=True).start()
+    tls_base = "https://127.0.0.1:%d/go/v1" % tls_port
+
+    def start_tls_vault(extra):
+        proxy, admin_port = free_port(), free_port()
+        directory = tempfile.mkdtemp(prefix="wa-vault-tls-")
+        environment = dict(clean_env, WA_VAULT_ADMIN_TOKEN=ADMIN_TOKEN, WA_VAULT_DATA=directory,
+                           WA_VAULT_PROXY_PORT=str(proxy), WA_VAULT_ADMIN_PORT=str(admin_port),
+                           WA_VAULT_BIND="127.0.0.1", WA_VAULT_OPENCODE_BASE=tls_base,
+                           PYTHONDONTWRITEBYTECODE="1")
+        environment.pop("SSL_CERT_FILE", None)
+        environment.pop("SSL_CERT_DIR", None)
+        environment.update(extra)
+        log = tempfile.TemporaryFile()
+        process = subprocess.Popen([sys.executable, os.path.join(ROOT, "vault", "wa_vault.py")],
+                                   env=environment, stdout=log, stderr=subprocess.STDOUT)
+        for _ in range(100):
+            try:
+                request(proxy, "GET", "/status")
+                break
+            except OSError:
+                time.sleep(0.05)
+        generation = json.loads(request(admin_port, "GET", "/api/status",
+                                        headers={"X-Vault-Token": ADMIN_TOKEN})[1])["providers"]["opencode-go"]["generation"]
+        stored, _ = request(admin_port, "POST", "/api/opencode-go/key",
+                            {"key": OPENCODE_KEY, "expected_generation": generation, "operation": str(uuid.uuid4())},
+                            {"X-Vault-Token": ADMIN_TOKEN, "Content-Type": "application/json"})
+        ok(stored == 200, "the key is stored in the tls vault")
+        return process, proxy
+
+    def through(proxy):
+        return request(proxy, "POST", "/opencode-go/v1/chat/completions", {"model": "m1"},
+                       {"Authorization": "Bearer wa-vault-brokered", "Content-Type": "application/json"})
+
+    process, proxy = start_tls_vault({"SSL_CERT_FILE": os.path.join(fixtures, "ca.pem")})
+    try:
+        status, payload = through(proxy)
+        ok(status == 200, "SSL_CERT_FILE naming the CA reaches an https upstream (answered %d)" % status)
+        no_secret(payload, "the tls upstream answer")
+    finally:
+        process.terminate()
+        process.wait(timeout=10)
+
+    process, proxy = start_tls_vault({"SSL_CERT_FILE": "/nonexistent/wa-vault/typo.pem"})
+    try:
+        status, payload = through(proxy)
+        ok(status == 502 and b"vault_ca_unreadable" in payload,
+           "an unreadable SSL_CERT_FILE is a named refusal, not a verify failure (answered %d)" % status)
+        ok(b"/nonexistent/wa-vault/typo.pem" in payload, "and the refusal names the path")
+    finally:
+        process.terminate()
+        process.wait(timeout=10)
+
+    without_certificate = os.path.join(data_dir, "not-a-certificate.pem")
+    with open(without_certificate, "w") as handle:
+        handle.write("this file is not a certificate\n")
+    process, proxy = start_tls_vault({"SSL_CERT_FILE": without_certificate})
+    try:
+        status, payload = through(proxy)
+        ok(status == 502 and b"vault_ca_without_certificate" in payload,
+           "a bundle with no certificate is named as such (answered %d)" % status)
+    finally:
+        process.terminate()
+        process.wait(timeout=10)
+
+    process, proxy = start_tls_vault({"SSL_CERT_DIR": "/nonexistent/wa-vault/certs"})
+    try:
+        status, payload = through(proxy)
+        ok(status == 502 and b"vault_ca_unreadable" in payload,
+           "an unreadable SSL_CERT_DIR is a named refusal (answered %d)" % status)
+        ok(b"/nonexistent/wa-vault/certs" in payload, "and it names the directory")
+    finally:
+        process.terminate()
+        process.wait(timeout=10)
+    tls_upstream.shutdown()
 
     log_file.seek(0)
     no_secret(log_file.read(), "the vault's own log")

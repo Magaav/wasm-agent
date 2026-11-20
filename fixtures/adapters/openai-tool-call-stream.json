@@ -1,0 +1,20 @@
+{
+  "provider": "openai-compatible",
+  "recorded_at": "2026-11-19",
+  "shape": "SSE data payloads whose tool arguments arrive in fragments",
+  "expect": {
+    "answer_text": "",
+    "reasoning": "",
+    "tool_calls": 1,
+    "tool_name": "bash",
+    "tool_arguments": "{\"command\":\"ls\"}",
+    "finish_reason": "tool_calls",
+    "cut": false
+  },
+  "payloads": [
+    "{\"id\":\"b2\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_x\",\"type\":\"function\",\"function\":{\"name\":\"bash\",\"arguments\":\"{\\\"comm\"}}]}}]}",
+    "{\"id\":\"b2\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"and\\\":\\\"ls\\\"}\"}}]}}]}",
+    "{\"id\":\"b2\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}",
+    "[DONE]"
+  ]
+}

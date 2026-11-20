@@ -1293,12 +1293,39 @@ pub(crate) fn owned(caller: &Caller, id: &str) -> Result<Option<Value>, String> 
     Ok(if caller.owns(&state) { Some(state) } else { None })
 }
 
+/// Item 5 (19/11): an unknown field on `operation` start is refused BY NAME, before anything is
+/// admitted. Measured 19/11: a caller passing `timeout_ms` (the plausible spelling of
+/// `timeout_seconds`) got no complaint at all and silently the kind's 300 s default, so a long job died
+/// on a deadline nobody chose and nothing said so. An allow-list, never a block-list: a field start does
+/// not read is a field the caller believes applied.
+fn start_fields_refused(args: &Value) -> Result<(), String> {
+    // EVERY key start() READS belongs here. `vault_env` and `vault_approval` were missing (review r3):
+    // start() reads both - approval_problem (:1384) and seal_request (:1398) - and real callers send them
+    // (lua/core/mcp.lua, lua/core/mcp_session.lua), so every vault-backed MCP launch was refused
+    // operation_unknown_field on this branch while it worked on main. start_fields_match_the_reads()
+    // below parses the args[..] reads out of this function and fails if the list ever drifts again.
+    const START_FIELDS: &[&str] = &["action", "id", "owner", "session", "node_scope", "scope",
+        "command", "program", "cwd", "_launch_cwd", "kind", "timeout_seconds", "background",
+        "control", "tool", "args", "replay_of", "wait_for", "stream", "offset", "limit", "after",
+        "evidence", "output", "include_output", "max_bytes", "wait_ms",
+        "vault_env", "vault_approval"];
+    let Some(object) = args.as_object() else { return Ok(()) };
+    let mut unknown: Vec<&str> = object.keys().map(|key| key.as_str())
+        .filter(|key| !START_FIELDS.contains(key)).collect();
+    if unknown.is_empty() { return Ok(()); }
+    unknown.sort_unstable();
+    Err(format!(
+        "operation_unknown_field: {} - start reads none of these, so nothing was launched. The deadline is timeout_seconds (1-86400); an unknown field is refused rather than silently given the default.",
+        unknown.join(", ")))
+}
+
 pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<Value, String> {
     let id = args["id"].as_str().unwrap_or("");
     let caller = Caller::from(args);
     let result = match action {
         "start" => {
             if args.get("replay_of").is_some(){return Err("operation_replay_forbidden: inspect original and make a separately authorized decision".into());}
+            start_fields_refused(args)?;
             let owner = args["owner"].as_str().unwrap_or("").to_string();
             // Backgrounded unless the caller says it waits for this call: an explicit start hands back a
             // receipt and the caller moves on, and a code-mode pending call the script is actively
@@ -1978,6 +2005,88 @@ mod operation_deadline_tests {
         let error = operation_kind(&json!({"kind": "everything"}), "git status").unwrap_err();
         assert!(error.starts_with("operation_kind_unknown:everything"), "{error}");
         assert!(error.contains("expected one of command, build, test, deploy"), "{error}");
+    }
+}
+
+/// Item 5 (19/11): the timeout notice is impossible to miss because a misspelled field is refused,
+/// not silently given the default. Pinned here without spawning anything.
+#[cfg(test)]
+mod start_field_tests {
+    use super::start_fields_refused;
+    use serde_json::json;
+
+    /// The measured case: `timeout_ms` is not `timeout_seconds`, and the caller must be told so by name.
+    #[test]
+    fn an_unknown_field_is_refused_by_name() {
+        let error = start_fields_refused(&json!({"action":"start","command":"make","timeout_ms":60000}))
+            .unwrap_err();
+        assert!(error.starts_with("operation_unknown_field: timeout_ms"), "{error}");
+        assert!(error.contains("nothing was launched"), "{error}");
+        assert!(error.contains("timeout_seconds (1-86400)"), "the refusal names the field that sets it: {error}");
+    }
+
+
+/// Review r3 (A1): the allow-list must cover EVERY key start() reads, not the ones a reader remembered.
+///
+/// This does not restate the list - it PARSES the args[..] reads out of control()'s own source and
+/// requires each to be listed. A field added to start() without START_FIELDS fails here by name, which
+/// is exactly the drift that shipped \`vault_env\` and \`vault_approval\` missing while start() read both
+/// (lua/core/mcp.lua sends them; every vault-backed MCP launch was refused operation_unknown_field).
+#[test]
+fn start_fields_cover_every_key_start_reads() {
+    let source = include_str!("operations.rs");
+    // The start() arm of control(): from its opening to the end of the match arm.
+    let begin = source.find("        \"start\" => {").expect("the start arm");
+    let end = source[begin..].find("\n        \"cancel\" => {").map(|i| begin + i).unwrap_or(source.len());
+    let arm = &source[begin..end];
+    // Every key read as args[..], args[..], or args.get(..) in that arm.
+    let mut read: Vec<&str> = Vec::new();
+    for marker in ["args[\"", "args.get(\""] {
+        let mut from = 0;
+        while let Some(at) = arm[from..].find(marker) {
+            let key_at = from + at + marker.len();
+            let room = arm.len() - key_at;
+            let span = &arm[key_at..key_at + room.min(64)];
+            if let Some(close) = span.find('\"') {
+                let key = &span[..close];
+                if !key.is_empty() && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                    read.push(key);
+                }
+            }
+            from = key_at;
+        }
+    }
+    read.sort_unstable();
+    read.dedup();
+    assert!(!read.is_empty(), "the parser must find the reads it is judging");
+    // The list start_fields_refused() enforces, read out of the same source.
+    let list_begin = source.find("const START_FIELDS: &[&str] = &[").expect("START_FIELDS");
+    let list_end = source[list_begin..].find("];").map(|i| list_begin + i).expect("the list ends");
+    let list_text = &source[list_begin..list_end];
+    let missing: Vec<&&str> = read.iter().filter(|key| !list_text.contains(&format!("\"{key}\""))).collect();
+    assert!(missing.is_empty(),
+        "start() reads these keys but START_FIELDS does not list them (a launch that sends one is refused operation_unknown_field): {missing:?}");
+}
+
+    /// Every field a real start carries is accepted, including the ones the Lua layer and the
+    /// code-mode pending layer stamp - a refusal here would break the callers it is meant to help.
+    #[test]
+    fn the_fields_real_callers_send_are_accepted() {
+        assert!(start_fields_refused(&json!({"action":"start","command":"cargo build",
+            "cwd":"/tmp","timeout_seconds":60,"background":true,"_launch_cwd":{"source":"node"},
+            "owner":"session-1","session":"session-1","node_scope":false,"tool":"bash"})).is_ok());
+        assert!(start_fields_refused(&json!({"action":"start","program":"/bin/echo","args":["hi"]})).is_ok());
+        assert!(start_fields_refused(&json!({"action":"start","command":"sleep 1","wait_for":"settled",
+            "scope":"node","output":true,"max_bytes":4096})).is_ok());
+        assert!(start_fields_refused(&json!({})).is_ok(), "a non-object is not a start to judge");
+    }
+
+    /// Several unknown fields are all named, in a stable order, so the caller fixes them in one edit.
+    #[test]
+    fn every_unknown_field_is_named() {
+        let error = start_fields_refused(&json!({"zebra":1,"command":"x","alpha":2})).unwrap_err();
+        assert!(error.contains("alpha, zebra"), "{error}");
+        assert!(!error.contains("command,"), "a known field is not named: {error}");
     }
 }
 

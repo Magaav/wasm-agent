@@ -57,22 +57,37 @@ local function without_inline_code(text)
   return rest
 end
 
-function M.markup(text)
+function M.markup(text,policy)
   local raw = tostring(text or "")
   -- A fenced block is a SAMPLE the model wrote, and the raw channel has already looked there for an
   -- action: an answer that quotes a call format inside a fence (a report about this very detector does)
   -- is prose, and failing it would be the false positive this list must not have.
   if raw:find(TICK, 1, true) or raw:find("~~~", 1, true) then return nil end
-  local found = dofile("lua/core/raw_code.lua").markup_in_text(without_inline_code(raw))
+  -- The scan is mode-aware (rel review r2, item 5): the <bash>/<invoke> pairs are the native
+  -- transport's own formats, so only a native node names them. Every other mode sees a27490af's list.
+  local raw_lib = dofile("lua/core/raw_code.lua")
+  -- The thread's mode when the caller has one (a frozen thread keeps the mode it started in), else the
+  -- process switch.
+  local mode = policy and raw_lib.mode_of(policy) or raw_lib.mode()
+  local found = raw_lib.markup_in_text(without_inline_code(raw), mode)
   if not found then return nil end
   return {
     shape = "markup",
     marker = found.marker,
     -- The operator's sentence, verbatim and undivided: the marker is named AFTER it, so the one thing
     -- the model must read is one clause.
-    notice = "[Harness notice] This message had no action: your message contains tool-call markup as "
-      .. "text, so nothing ran; act with a js run block in your answer. The markup was " .. found.marker
-      .. ", and no call could be read from it. One " .. TICK .. "js run block that ends your message.",
+    -- The sentence names the action channel THIS node offers (rel review r1, R4): telling a native node
+    -- to write a fenced block names the tool it does not have. The shape is the same; the instruction
+    -- is the one the mode actually honours.
+    -- rel r1 R4: the operator sentence stays VERBATIM for every mode but native; a native node is
+    -- told to call the run tool it has, because a fenced block names a channel that mode does not use.
+    notice = (mode == "native")
+      and ("[Harness notice] This message had no action: your message contains tool-call markup as "
+        .. "text, so nothing ran. The markup was " .. found.marker .. ", and no call could be read "
+        .. "from it. Act by calling the run tool with the script in its `code` argument.")
+      or ("[Harness notice] This message had no action: your message contains tool-call markup as "
+        .. "text, so nothing ran; act with a js run block in your answer. The markup was " .. found.marker
+        .. ", and no call could be read from it. One " .. TICK .. "js run block that ends your message."),
     failure = "tool_call_markup_as_text: the message carried " .. found.marker .. " tool-call markup as "
       .. "text and nothing ran; the harness asked for a js run block in the answer once already, so the "
       .. "turn is failed rather than finished without its action",

@@ -50,6 +50,16 @@ local function trim(value) return (tostring(value or ""):gsub("^%s+", ""):gsub("
 local function slashes(path) return (tostring(path or ""):gsub("\\", "/")) end
 local function quote(value) return "'" .. tostring(value or ""):gsub("'", "'\\''") .. "'" end
 local function first_line(text) return (tostring(text or ""):match("^%s*([^\r\n]*)") or "") end
+-- The line that carries the verdict. git writes progress first and the failure last ("Preparing worktree
+-- (new branch ...)" then "fatal: already used by worktree at ..."), so first_line reports the progress and
+-- loses the reason - measured by this suite's own case 12b, which is why the failure detail uses this.
+local function last_line(text)
+  local verdict = ""
+  for line in tostring(text or ""):gmatch("[^\r\n]+") do
+    if line:match("%S") then verdict = line end
+  end
+  return trim(verdict)
+end
 local function now() return math.floor(host.now()) end
 
 local function read(path)
@@ -94,14 +104,26 @@ end
 function M.exec(command, cwd, timeout)
   local ok, raw = pcall(host.exec, command, cwd or "", timeout)
   if not ok or type(raw) ~= "string" then
-    return { code = 127, stdout = "", stderr = "host refused: " .. tostring(command):sub(1, 120) }
+    return { code = 127, stdout = "", stderr = "host refused: " .. tostring(command):sub(1, 120),
+             raw = tostring(raw) }
   end
   local decoded_ok, decoded = pcall(json.decode, raw)
   if decoded_ok and type(decoded) == "table" then
-    return { code = tonumber(decoded.code) or 1, stdout = tostring(decoded.stdout or ""),
-             stderr = tostring(decoded.stderr or "") }
+    -- The host answers {"error": ...} when it refused the launch (a disk cap, an unavailable shell) with
+    -- no streams at all. Reading only stdout/stderr made that refusal an EMPTY failure: measured 19/11,
+    -- `worktree_failed` came back four times with observed:"" while the same git command worked by
+    -- hand, and nothing anywhere said why. The error is the message when there are no streams.
+    local code = tonumber(decoded.code)
+    local stdout = tostring(decoded.stdout or "")
+    local stderr = tostring(decoded.stderr or "")
+    if code == nil and decoded.error ~= nil then
+      stderr = "host_error: " .. tostring(decoded.error)
+      return { code = 1, stdout = stdout, stderr = stderr, raw = raw }
+    end
+    return { code = code or 1, stdout = stdout, stderr = stderr }
   end
-  return { code = 1, stdout = "", stderr = "unreadable operation wrapper: " .. tostring(raw):sub(1, 200) }
+  return { code = 1, stdout = "", stderr = "unreadable operation wrapper: " .. tostring(raw):sub(1, 200),
+           raw = tostring(raw) }
 end
 
 -- How a landing waits between two polls of a node's own record. A field, not a sleep call inside the
@@ -302,7 +324,7 @@ M.DEFAULT_CHECKS = {
   { name = "codemode-component", command = "bash scripts/test-codemode-component.sh", timeout = 1800,
     detail = "the code-mode seam: the same scripts through the native loop and through the component" },
   { name = "cargo-codemode",
-    command = "cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-capabilities codemode",
+    command = "bash scripts/gate-cargo-codemode.sh",
     timeout = 1800, min_tests = 1, detail = "the code-mode Rust tests (wa-capabilities: the seam and quickjs)" },
   { name = "cargo-wa-whatsapp", command = "cargo test --lib --offline", cwd = "rust/components/wa-whatsapp",
     timeout = 1200, min_tests = 1, detail = "the wa-whatsapp component's own crate" },
@@ -375,7 +397,7 @@ M.GATE_ALWAYS = { "fast", "prompt-docs" }
 -- the checks that are NOT inside the fast path are listed here.
 M.GATE_TRIGGERS = {
   ["codemode-component"] = { "^lua/core/codemode", "^rust/components/codemode", "^rust/wa%-capabilities/src/codemode", "^scripts/codemode", "^scripts/build%-codemode" },
-  ["cargo-codemode"] = { "^lua/core/codemode", "^rust/components/codemode", "^rust/wa%-capabilities/src/codemode", "^scripts/codemode", "^wit/model/codemode" },
+  ["cargo-codemode"] = { "^lua/core/codemode", "^scripts/gate%-cargo%-codemode", "^rust/components/codemode", "^rust/wa%-capabilities/src/codemode", "^scripts/codemode", "^wit/model/codemode" },
   ["cargo-wa-whatsapp"] = { "^rust/components/wa%-whatsapp", "^rust/wa%-whatsapp%-outbox", "^rust/wa%-whatsapp%-index", "^wit/whatsapp" },
 }
 
@@ -1458,7 +1480,22 @@ impl.merge = function(run, options)
       evidence((added.stdout or "") .. (added.stderr or ""))
     end
     if (added.code or 1) ~= 0 then
-      return false, { error = "worktree_failed", observed = first_line(added.stderr ~= "" and added.stderr or added.stdout),
+      -- What git actually said, what it exited with, and the command that failed - one durable
+      -- sentence. An EMPTY observed was the bug: the old line reported first_line(stderr or stdout), so a
+      -- failure carrying neither stream reported nothing at all; measured 19/11, worktree_failed came back
+      -- with observed:"" four times (21:45-22:23Z) while the same git command worked by hand. The step
+      -- recorder keeps observed, error and next, so every fact a reader needs goes in observed.
+      local detail = trim(tostring(added.stderr or ""))
+      if detail == "" then detail = trim(tostring(added.stdout or "")) end
+      local parts = { last_line(detail ~= "" and detail or "(git answered with no output)"),
+        "exit " .. tostring(added.code),
+        "command: git worktree add -b " .. branch .. " " .. tree .. " " .. base }
+      if added.raw ~= nil then
+        parts[#parts + 1] = "raw host answer: " .. tostring(added.raw):sub(1, 400)
+      elseif trim(tostring(added.stdout or "")) ~= "" and detail ~= trim(tostring(added.stdout or "")) then
+        parts[#parts + 1] = "stdout: " .. last_line(added.stdout)
+      end
+      return false, { error = "worktree_failed", observed = table.concat(parts, "; "),
         next = "check " .. tree .. " (an existing worktree there is reused only when the journal names it)" }
     end
     run.tree, run.land_branch = tree, branch

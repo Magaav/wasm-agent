@@ -45,7 +45,11 @@ pub fn ensure(home: &Path) -> Result<()> {
         let result = (|| -> Result<()> {
             let name = format!("ripgrep-{VERSION}-{suffix}");
             let url = format!("https://github.com/BurntSushi/ripgrep/releases/download/{VERSION}/{name}");
+            // The release comes from GitHub over TLS: the same anchors as every other agent, so a
+            // machine whose CA is named by SSL_CERT_FILE can install ripgrep too, and one whose
+            // named bundle cannot be read is refused here rather than downloading nothing.
             let agent: ureq::Agent = ureq::Agent::config_builder()
+                .tls_config(wa_tls::tls_config()?)
                 .timeout_global(Some(Duration::from_secs(120))).build().into();
             let bytes = agent.get(&url).call()?.body_mut().read_to_vec()?;
             let actual = ring::digest::digest(&ring::digest::SHA256, &bytes).as_ref()

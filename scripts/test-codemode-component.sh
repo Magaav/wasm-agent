@@ -43,7 +43,10 @@ fi
 TARGET="${CARGO_TARGET_DIR:-$ROOT/rust/target}"
 artifact="$TARGET/wasm32-wasip2/release/codemode.wasm"
 echo "building rust/components/codemode (wasm32-wasip2) ..."
-( cd rust/components/codemode && cargo build --release --offline --target wasm32-wasip2 ) || {
+# --target-dir is EXPLICIT: the component is its own workspace, so without it cargo writes to
+# rust/components/codemode/target and the check below looked in the wrong place unless the caller happened
+# to export CARGO_TARGET_DIR (gate 20/11, land67: "no artifact" right after a successful build).
+( cd rust/components/codemode && cargo build --release --offline --target wasm32-wasip2 --target-dir "$TARGET" ) || {
   echo "FAIL the codemode component did not build" >&2; exit 1; }
 [ -f "$artifact" ] || { echo "FAIL no artifact at $artifact" >&2; exit 1; }
 

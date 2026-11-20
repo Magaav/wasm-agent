@@ -72,12 +72,20 @@ pub fn take_jobs() -> Vec<RelayJob> {
 /// the discard belong to this module, and a fake poster measures them without a relay or a key.
 pub type Poster = Arc<dyn Fn(&str, u16, &str) -> Result<(), String> + Send + Sync>;
 
-fn agent(timeout: Duration) -> ureq::Agent {
-    ureq::Agent::config_builder()
+fn agent(url: &str, timeout: Duration) -> Result<ureq::Agent, String> {
+    // The relay's anchors are the machine's answer: SSL_CERT_FILE / SSL_CERT_DIR, read by wa-tls. A
+    // relay behind a private CA is reachable, and a bundle named there that cannot be read is named
+    // here rather than turned into an unexplained TLS failure on every poll.
+    let mut builder = ureq::Agent::config_builder()
         .http_status_as_error(false)
-        .timeout_global(Some(timeout))
-        .build()
-        .into()
+        .timeout_global(Some(timeout));
+    // A plain http:// relay consults no anchor, so a bundle the machine cannot read must not stop it
+    // (review r1, item 7); an https relay still refuses with that bundle named.
+    if wa_tls::is_tls(url) {
+        builder = builder
+            .tls_config(wa_tls::tls_config().map_err(|error| format!("tls_anchors_unavailable:{error}"))?);
+    }
+    Ok(builder.build().into())
 }
 
 fn signed(identity: &Identity, action: &str) -> (String, String, String) {
@@ -97,8 +105,9 @@ fn signed(identity: &Identity, action: &str) -> (String, String, String) {
 pub(crate) fn respond(identity: &Identity, relay_url: &str, id: &str, status: u16, body: &str) -> Result<(), String> {
     let (ts, signature, node_id) = signed(identity, "relay-respond");
     let payload = json!({ "node_id": node_id, "id": id, "status": status, "body": body }).to_string();
-    agent(Duration::from_secs(30))
-        .post(&format!("{}/relay/respond", relay_url.trim_end_matches('/')))
+    let url = format!("{}/relay/respond", relay_url.trim_end_matches('/'));
+    agent(&url, Duration::from_secs(30))?
+        .post(&url)
         .header("Content-Type", "application/json")
         .header("x-wa-node", &node_id)
         .header("x-wa-pub", &identity.public_key)
@@ -259,7 +268,17 @@ pub fn spawn(relay_url: String) {
                 "{}/relay/poll?node_id={node_id}",
                 relay_url.trim_end_matches('/')
             );
-            let response = agent(Duration::from_secs(40))
+            let agent = match agent(&url, Duration::from_secs(40)) {
+                Ok(agent) => agent,
+                Err(error) => {
+                    if polling.swap(false, Ordering::SeqCst) {
+                        eprintln!("[relay] detach node={node_id} at={} reason={error}", at());
+                    }
+                    std::thread::sleep(Duration::from_secs(3));
+                    continue;
+                }
+            };
+            let response = agent
                 .get(&url)
                 .header("x-wa-node", &node_id)
                 .header("x-wa-pub", &identity.public_key)
@@ -402,5 +421,81 @@ mod tests {
         assert!(answers[0].2.contains("relay_busy") && answers[0].2.contains("\"not_started\":true"), "{}", answers[0].2);
         assert_eq!(RUNNING.load(Ordering::SeqCst), limit, "a refusal costs no slot");
         RUNNING.store(0, Ordering::SeqCst);
+    }
+}
+
+/// The relay client's anchors, measured at the handshake.
+///
+/// respond() is the answer a node posts for a relayed job (the poll loop and the bound transport's
+/// worker lane share it), so this drives the same function real use takes - signed by a real node
+/// key, which the test keeps in a directory of its own.
+#[cfg(test)]
+mod tls_anchor_tests {
+    use super::*;
+    use wa_tls::scratch::{self, Env, Server, TempDir};
+
+    /// A node identity whose key lives in the test's own directory: never the live node's key, and
+    /// never by pointing the environment at it.
+    fn identity(dir: &TempDir) -> Identity {
+        Identity::at(dir.path().join("node.key")).expect("a node key in this test's own directory")
+    }
+
+    #[test]
+    fn a_relay_answer_refuses_a_private_ca_that_no_bundle_names() {
+        let dir = TempDir::new("relay-answer");
+        let _env = Env::clear();
+        let identity = identity(&dir);
+        let server = Server::start();
+        let error = respond(&identity, server.base(), "job-1", 200, "{}")
+            .expect_err("a private CA is not in the compiled-in bundle");
+        assert!(
+            error.to_lowercase().contains("certificate"),
+            "the refusal must be the certificate step: {error}"
+        );
+    }
+
+    #[test]
+    fn a_relay_answer_reaches_a_private_ca_named_by_ssl_cert_file() {
+        let dir = TempDir::new("relay-answer-ok");
+        let _env = Env::set(&[(wa_tls::CERT_FILE, &scratch::cert_file())]);
+        let identity = identity(&dir);
+        let server = Server::start();
+        respond(&identity, server.base(), "job-1", 200, "{}")
+            .expect("the CA named by SSL_CERT_FILE");
+    }
+
+    #[test]
+    fn a_relay_answer_reaches_a_private_ca_listed_in_ssl_cert_dir() {
+        let dir = TempDir::new("relay-answer-dir");
+        let certs = scratch::TempDir::new("relay-answer-certs");
+        certs.copy_fixture("ca.pem", "ca.pem");
+        let _env = Env::set(&[(wa_tls::CERT_DIR, certs.path())]);
+        let identity = identity(&dir);
+        let server = Server::start();
+        respond(&identity, server.base(), "job-1", 200, "{}")
+            .expect("the CA in the directory SSL_CERT_DIR names");
+    }
+
+    /// A plain http:// relay consults no anchor: the answer still goes out when the machine named a
+    /// bundle it cannot read (review r1, item 7).
+    #[test]
+    fn a_broken_bundle_does_not_refuse_a_plain_relay_answer() {
+        let dir = TempDir::new("relay-answer-plain");
+        let _env = Env::set_text(wa_tls::CERT_FILE, "/nonexistent/wa-rendezvous/typo.pem");
+        let identity = identity(&dir);
+        let server = Server::start_plain();
+        respond(&identity, server.base(), "job-1", 200, "{}").expect("a plain relay answer needs no anchors");
+    }
+
+    #[test]
+    fn a_broken_bundle_refuses_the_relay_answer_with_the_bundle_in_the_message() {
+        let dir = TempDir::new("relay-answer-broken");
+        let mut env = Env::set_text(wa_tls::CERT_FILE, "/nonexistent/wa-rendezvous/typo.pem");
+        let identity = identity(&dir);
+        let server = Server::start();
+        let error = respond(&identity, server.base(), "job-1", 200, "{}")
+            .expect_err("a named source that cannot be read is not a fall back");
+        assert!(error.contains("tls_anchors_unavailable"), "{error}");
+        assert!(error.contains("typo.pem"), "{error}");
     }
 }

@@ -58,7 +58,15 @@ impl Clone for Identity {
 
 impl Identity {
     pub fn load() -> Result<Identity, String> {
-        let path = key_path();
+        Identity::at(key_path())
+    }
+
+    /// The same, from a named key file.
+    ///
+    /// A test keeps its own key in its own directory this way, instead of pointing WASM_AGENT_NODE_KEY
+    /// at it: setting a variable mutates the environment every other thread of the test binary reads
+    /// through getenv, which is unsound (review r1, item 4).
+    pub fn at(path: PathBuf) -> Result<Identity, String> {
         let pkcs8 = match std::fs::read_to_string(&path) {
             Ok(text) => unhex(&text).ok_or("bad_node_key")?,
             Err(_) => {
@@ -272,10 +280,18 @@ pub fn spawn_heartbeat(url: String) {
             .to_string();
             let path = if registered { "heartbeat" } else { "register" };
             let target = format!("{}/{}", url.trim_end_matches('/'), path);
-            let agent: ureq::Agent = ureq::Agent::config_builder()
-                .http_status_as_error(false)
-                .build()
-                .into();
+            // Registration and heartbeats trust the machine's anchors (SSL_CERT_FILE /
+            // SSL_CERT_DIR, read by wa-tls): a rendezvous behind a private CA must be reachable, and
+            // a bundle named there that cannot be read is said out loud once a minute rather than
+            // silently ignored for an hour of unanswered heartbeats.
+            let agent: ureq::Agent = match rendezvous_agent(&target) {
+                Ok(agent) => agent,
+                Err(error) => {
+                    eprintln!("[rendezvous] {path} not sent: {error}");
+                    std::thread::sleep(Duration::from_secs(60));
+                    continue;
+                }
+            };
             match agent
                 .post(&target)
                 .header("Content-Type", "application/json")
@@ -293,6 +309,18 @@ pub fn spawn_heartbeat(url: String) {
             std::thread::sleep(Duration::from_secs(60));
         }
     });
+}
+
+/// The agent one registration or heartbeat uses: this machine's anchors, bounded by nothing else.
+fn rendezvous_agent(url: &str) -> Result<ureq::Agent, String> {
+    let mut builder = ureq::Agent::config_builder().http_status_as_error(false);
+    // A plain http:// rendezvous consults no anchor: a bundle the machine cannot read must not stop a
+    // node registering with one (review r1, item 7).
+    if wa_tls::is_tls(url) {
+        builder = builder
+            .tls_config(wa_tls::tls_config().map_err(|error| format!("tls_anchors_unavailable:{error}"))?);
+    }
+    Ok(builder.build().into())
 }
 
 /// Milliseconds since the epoch, on one clock for every log line in this crate.

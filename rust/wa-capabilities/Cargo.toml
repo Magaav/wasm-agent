@@ -90,3 +90,15 @@ libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_SystemInformation", "Win32_System_Threading"] }
+
+# Whose certificates are trusted: SSL_CERT_FILE / SSL_CERT_DIR read the way OpenSSL reads them. Every
+# agent in this crate is built from wa-tls's answer, so a machine with its own CA bundle (a cloud
+# sandbox, an interception proxy) can be reached without a rebuild.
+[dependencies.wa-tls]
+path = "../wa-tls"
+
+# The scratch HTTPS server and the environment guard: the TLS tests here complete a real handshake
+# against a private CA instead of asserting on a config value.
+[dev-dependencies.wa-tls]
+path = "../wa-tls"
+features = ["scratch"]
