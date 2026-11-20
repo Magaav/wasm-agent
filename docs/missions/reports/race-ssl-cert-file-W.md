@@ -19,7 +19,7 @@ bridge was bolted on, while `pi` worked. Re-measured here:
 | "provider adapters" | true: they build URLs only (`wa-model-gateway`); the call itself is `host.http` / `host.http_sse` / the streaming completion in `rust/wa-capabilities/src/host.rs`, wired here. |
 | "every outbound HTTPS path" | one path the brief did not name is also TLS: the guest websocket (`wa_ws`, `tungstenite::connect` at `wa-kernel-runtime/src/service_io.rs:260` before this change). Wired here as well. |
 
-## The rule (rust/wa-tls, commit 052235cd)
+## The rule (rust/wa-tls, commit 6d4cf614)
 
 A new leaf crate, `wa-tls`, is the single answer to "what do we trust":
 
@@ -46,14 +46,14 @@ allow-list of anchors, never a disable switch.
 
 | path | site | commit |
 | --- | --- | --- |
-| provider call and stream (`host.http`, `host.http_sse`, streaming completion) | `rust/wa-capabilities/src/host.rs:396` (`build_config_with`), callers at 1861/1868/2501/2621/2947 region | 66bf6ba6 |
-| release fetch (ripgrep from GitHub releases) | `rust/wa-capabilities/src/ripgrep.rs:52` | 66bf6ba6 |
-| mesh relay hop (node -> `https` relay) | `rust/wa-host/src/mesh_transport.rs:37` | 13dbb97a |
-| guest's own HTTP exchange (both the 0.1 poll and the 0.2 await contracts) | `rust/wa-kernel-runtime/src/service_io.rs:590` (`exchange`) | 13dbb97a |
-| guest websocket (`wa_ws`) | `rust/wa-kernel-runtime/src/service_io.rs:248` (`connect_ws`) and `:298` (`ws_connector`) | 13dbb97a |
-| relay poll and the relay answer a node posts | `rust/wa-rendezvous/src/relay_client.rs:79` (`agent`), used at 100 and 262 | 147c3e74 |
-| registration and heartbeats | `rust/wa-rendezvous/src/node.rs:293` (`rendezvous_agent`) | 147c3e74 |
-| gate rows | `scripts/test.sh:260-264` | dbbb2f4a |
+| provider call and stream (`host.http`, `host.http_sse`, streaming completion) | `rust/wa-capabilities/src/host.rs:396` (`build_config_with`), callers at 1861/1868/2501/2621/2947 region | a18f1bc5 |
+| release fetch (ripgrep from GitHub releases) | `rust/wa-capabilities/src/ripgrep.rs:52` | a18f1bc5 |
+| mesh relay hop (node -> `https` relay) | `rust/wa-host/src/mesh_transport.rs:37` | 374d4c45 |
+| guest's own HTTP exchange (both the 0.1 poll and the 0.2 await contracts) | `rust/wa-kernel-runtime/src/service_io.rs:590` (`exchange`) | 374d4c45 |
+| guest websocket (`wa_ws`) | `rust/wa-kernel-runtime/src/service_io.rs:248` (`connect_ws`) and `:298` (`ws_connector`) | 374d4c45 |
+| relay poll and the relay answer a node posts | `rust/wa-rendezvous/src/relay_client.rs:79` (`agent`), used at 100 and 262 | 03a449ef |
+| registration and heartbeats | `rust/wa-rendezvous/src/node.rs:293` (`rendezvous_agent`) | 03a449ef |
+| gate rows | `scripts/test.sh:260-264` | 534de113 |
 | **the Python vault's https upstream** | `vault/wa_vault.py` (`trust_anchors`, called by `http_request` and the proxy handler) | review r1 item 2 |
 | **every child wa starts, for the child's own Node TLS (the MCP connector)** | `rust/wa-operation/src/shell_env.rs` (`inherit_ca_bundle`, from `configure_spec`) | review r1 item 1 |
 
@@ -207,14 +207,14 @@ parses; the tree is clean and every item is its own commit.
 
 | item | commit | test that fails before it |
 | --- | --- | --- |
-| 1. Node MCP: `NODE_EXTRA_CA_CERTS` from `SSL_CERT_FILE` where wa starts children | 1595b002 | `wa-operation` `ca_bundle_tests` (four, including a real node child that reaches the scratch CA only with the forwarded variable) |
+| 1. Node MCP: `NODE_EXTRA_CA_CERTS` from `SSL_CERT_FILE` where wa starts children | 5cf5b487 | `wa-operation` `ca_bundle_tests` (four, including a real node child that reaches the scratch CA only with the forwarded variable) |
 | 2. the Python vault checks both variables and names what it cannot read | this commit | `scripts/test-vault.py`: with the base vault 5 of the new checks fail (`vault_ca_unreadable` / `vault_ca_without_certificate`); with it, 116 checks, 0 failed |
-| 3. the websocket test completes a real RFC 6455 upgrade and echoes a frame | 5c7b3051 | `a_websocket_upgrades_and_echoes_when_the_machine_names_the_ca`: the previous test asserted an *error*, so it fails against this one by construction |
-| 4. the CA test seam installs anchors, never `set_var` | e2c2a46b | `installing_anchors_for_a_test_writes_no_process_environment` |
+| 3. the websocket test completes a real RFC 6455 upgrade and echoes a frame | ec35c33b | `a_websocket_upgrades_and_echoes_when_the_machine_names_the_ca`: the previous test asserted an *error*, so it fails against this one by construction |
+| 4. the CA test seam installs anchors, never `set_var` | f5863195 | `installing_anchors_for_a_test_writes_no_process_environment` |
 | 5. `wa-tls` in the fast path's crate list | see the commit | the fast path's own `rust wa-tls` row (absent before: a change to `wa-tls` ran no rust row) |
 | 6. no CA private keys in the repository | see the commit | `the_repository_holds_no_ca_private_key` |
-| 7. trust gated on the scheme | ca3760c7 | `a_broken_bundle_does_not_refuse_a_plain_http_request` and its siblings in wa-host, wa-kernel-runtime (http and ws) and wa-rendezvous, plus `a_plain_url_is_answered_without_reading_the_bundle` in wa-tls |
-| SHOULD 1. the websocket keeps its redirect behaviour on the anchors path | 44304239 | `a_websocket_follows_a_redirect_and_echoes_on_the_anchors_path` (two scratch servers: the 302 and its target) and `a_websocket_refuses_a_redirect_off_tls` |
+| 7. trust gated on the scheme | a50b896f | `a_broken_bundle_does_not_refuse_a_plain_http_request` and its siblings in wa-host, wa-kernel-runtime (http and ws) and wa-rendezvous, plus `a_plain_url_is_answered_without_reading_the_bundle` in wa-tls |
+| SHOULD 1. the websocket keeps its redirect behaviour on the anchors path | 46e348b2 | `a_websocket_follows_a_redirect_and_echoes_on_the_anchors_path` (two scratch servers: the 302 and its target) and `a_websocket_refuses_a_redirect_off_tls` |
 | SHOULD 2. say compiled-in Mozilla roots, not "system default" | this commit | no test: a wording correction, measured in the premises table above |
 
 ## The rebase, and the two rows that are red on origin/main
