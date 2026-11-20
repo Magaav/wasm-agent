@@ -1293,12 +1293,33 @@ pub(crate) fn owned(caller: &Caller, id: &str) -> Result<Option<Value>, String> 
     Ok(if caller.owns(&state) { Some(state) } else { None })
 }
 
+/// Item 5 (19/11): an unknown field on `operation` start is refused BY NAME, before anything is
+/// admitted. Measured 19/11: a caller passing `timeout_ms` (the plausible spelling of
+/// `timeout_seconds`) got no complaint at all and silently the kind's 300 s default, so a long job died
+/// on a deadline nobody chose and nothing said so. An allow-list, never a block-list: a field start does
+/// not read is a field the caller believes applied.
+fn start_fields_refused(args: &Value) -> Result<(), String> {
+    const START_FIELDS: &[&str] = &["action", "id", "owner", "session", "node_scope", "scope",
+        "command", "program", "cwd", "_launch_cwd", "kind", "timeout_seconds", "background",
+        "control", "tool", "args", "replay_of", "wait_for", "stream", "offset", "limit", "after",
+        "evidence", "output", "include_output", "max_bytes", "wait_ms"];
+    let Some(object) = args.as_object() else { return Ok(()) };
+    let mut unknown: Vec<&str> = object.keys().map(|key| key.as_str())
+        .filter(|key| !START_FIELDS.contains(key)).collect();
+    if unknown.is_empty() { return Ok(()); }
+    unknown.sort_unstable();
+    Err(format!(
+        "operation_unknown_field: {} - start reads none of these, so nothing was launched. The deadline is timeout_seconds (1-86400); an unknown field is refused rather than silently given the default.",
+        unknown.join(", ")))
+}
+
 pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<Value, String> {
     let id = args["id"].as_str().unwrap_or("");
     let caller = Caller::from(args);
     let result = match action {
         "start" => {
             if args.get("replay_of").is_some(){return Err("operation_replay_forbidden: inspect original and make a separately authorized decision".into());}
+            start_fields_refused(args)?;
             let owner = args["owner"].as_str().unwrap_or("").to_string();
             // Backgrounded unless the caller says it waits for this call: an explicit start hands back a
             // receipt and the caller moves on, and a code-mode pending call the script is actively
@@ -1963,6 +1984,45 @@ mod operation_deadline_tests {
         let error = operation_kind(&json!({"kind": "everything"}), "git status").unwrap_err();
         assert!(error.starts_with("operation_kind_unknown:everything"), "{error}");
         assert!(error.contains("expected one of command, build, test, deploy"), "{error}");
+    }
+}
+
+/// Item 5 (19/11): the timeout notice is impossible to miss because a misspelled field is refused,
+/// not silently given the default. Pinned here without spawning anything.
+#[cfg(test)]
+mod start_field_tests {
+    use super::start_fields_refused;
+    use serde_json::json;
+
+    /// The measured case: `timeout_ms` is not `timeout_seconds`, and the caller must be told so by name.
+    #[test]
+    fn an_unknown_field_is_refused_by_name() {
+        let error = start_fields_refused(&json!({"action":"start","command":"make","timeout_ms":60000}))
+            .unwrap_err();
+        assert!(error.starts_with("operation_unknown_field: timeout_ms"), "{error}");
+        assert!(error.contains("nothing was launched"), "{error}");
+        assert!(error.contains("timeout_seconds (1-86400)"), "the refusal names the field that sets it: {error}");
+    }
+
+    /// Every field a real start carries is accepted, including the ones the Lua layer and the
+    /// code-mode pending layer stamp - a refusal here would break the callers it is meant to help.
+    #[test]
+    fn the_fields_real_callers_send_are_accepted() {
+        assert!(start_fields_refused(&json!({"action":"start","command":"cargo build",
+            "cwd":"/tmp","timeout_seconds":60,"background":true,"_launch_cwd":{"source":"node"},
+            "owner":"session-1","session":"session-1","node_scope":false,"tool":"bash"})).is_ok());
+        assert!(start_fields_refused(&json!({"action":"start","program":"/bin/echo","args":["hi"]})).is_ok());
+        assert!(start_fields_refused(&json!({"action":"start","command":"sleep 1","wait_for":"settled",
+            "scope":"node","output":true,"max_bytes":4096})).is_ok());
+        assert!(start_fields_refused(&json!({})).is_ok(), "a non-object is not a start to judge");
+    }
+
+    /// Several unknown fields are all named, in a stable order, so the caller fixes them in one edit.
+    #[test]
+    fn every_unknown_field_is_named() {
+        let error = start_fields_refused(&json!({"zebra":1,"command":"x","alpha":2})).unwrap_err();
+        assert!(error.contains("alpha, zebra"), "{error}");
+        assert!(!error.contains("command,"), "a known field is not named: {error}");
     }
 }
 

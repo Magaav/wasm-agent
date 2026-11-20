@@ -400,3 +400,8 @@ follows the kind of work — `command` 300 s, `build` 5400 s, `test` and `deploy
 command line or given explicitly with `kind`. Every start says which it used: `timeout_source:
 "default"|"caller"`, `timeout_kind` and a `timeout_notice` naming the default and how to change it
 (`wa-capabilities/src/operations.rs`). `bash` keeps its documented 300 s and its `timeout_seconds`.
+
+An unknown field on `start` is refused BY NAME (`operation_unknown_field: <fields>`) instead of being
+ignored: measured 19/11, a caller passing `timeout_ms` - the plausible spelling of `timeout_seconds` - got no
+complaint at all and silently the kind's default, so a long job died on a deadline nobody chose. The list
+of fields `start` reads is an allow-list, and every other key refuses the launch before anything is admitted.
