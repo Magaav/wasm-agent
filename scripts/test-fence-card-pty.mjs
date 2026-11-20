@@ -74,6 +74,12 @@ const ANSWER = [
   'gamma',
   FENCE,
   '',
+  'An untagged ONE-LINE card (no language, one row):',
+  '',
+  FENCE,
+  'untagged-one-line',
+  FENCE,
+  '',
   'A tagged one-line card:',
   '',
   FENCE + 'bash',
@@ -86,6 +92,15 @@ const ANSWER = [
   '  const exact = "' + EXACT + '";',
   '  ' + FENCE,
   '',
+  // A table small enough to fit at the narrowest width this test drives: a table is laid out at
+  // compose width (markdown.lua), so a WIDER one is prose-wrapped on a shrink - a pre-existing rule
+  // this change must not touch, and not something this test can read a card frame out of.
+  'A table, painted with the same border role and never cut as a card:',
+  '',
+  '| head a | head b |',
+  '| --- | --- |',
+  '| cell one | cell two |',
+  
   'Done.',
 ].join('\n');
 
@@ -139,6 +154,11 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 function capture() {
   return String(tmux(['capture-pane', '-p', '-t', SESSION]).stdout || '').replace(/\r/g, '');
 }
+// The whole scrollback, banner included: a big answer scrolls the banner off the visible pane, and the
+// isolation checks are about what the process was TOLD, not about what still fits on screen.
+function captureAll() {
+  return String(tmux(['capture-pane', '-p', '-S', '-2000', '-t', SESSION]).stdout || '').replace(/\r/g, '');
+}
 async function waitFor(predicate, label, timeout = 60000) {
   const deadline = Date.now() + timeout;
   for (;;) {
@@ -168,8 +188,16 @@ const emptyBar = rows => rows.filter(row => new RegExp('^\\s*' + BAR + '\\s*$').
 // is what makes it checkable at every width and with every phrasing: every screen row BETWEEN
 // a card open corner and its close corner must open with the bar. A row that does not is a
 // card row the host re-wrapped as prose, whatever words it happens to carry.
-const OPEN = /^\s*\u250c/;
-const CLOSE = /^\s*\u2514/;
+// A card's frame, told apart from a TABLE's, which wears the same border role: a table rule carries a
+// column divider or a closing corner (┬ ┼ ┴ ┐ ┘ ┤) and a table row ends in its own border bar.
+// This is the same discriminator the host uses (transcript.rs card_edge) - a check that could not tell
+// them apart would report a table as a broken card.
+const OPEN = /^\s*\u250c[^\u252c\u2510]*$/;
+const CLOSE = /^\s*\u2514[^\u2534\u2518]*$/;
+function tableRow(text) {
+  const body = text.replace(/\s+$/, '');
+  return /^\s*\u2502/.test(body) && body.endsWith('\u2502') && !/^\s*\u2502\s*\u2502?\s*$/.test(body);
+}
 function cardInteriorOrphans(rows) {
   const found = [];
   let open = false;
@@ -178,6 +206,7 @@ function cardInteriorOrphans(rows) {
     if (OPEN.test(text)) { open = true; continue; }
     if (CLOSE.test(text)) { open = false; continue; }
     if (!open || text.trim() === '') continue;
+    if (tableRow(text)) { open = false; continue; }
     if (!barRow(text)) found.push(row);
   }
   return found;
@@ -194,16 +223,27 @@ try {
   const started = tmux(['new-session', '-d', '-s', SESSION, '-x', '100', '-y', '40', command]);
   if (started.status !== 0) throw new Error('tmux could not start the session: ' + started.stderr);
 
+  // The banner FIRST: a long answer scrolls the chat region, and the rows the process was told about
+  // are gone from the pane once it has. Read them while they are still the only thing on screen.
+  // The whole scrollback, not the visible pane and not its first rows: the chat region is
+  // bottom-anchored, so the welcome banner sits under the blank rows above it, and a long answer
+  // scrolls it out of the region entirely.
+  const banner = () => captureAll();
+  await waitFor(() => /memory:/.test(banner()), 'the welcome banner');
+  const welcome = banner();
+  check('the banner names the fixture endpoint, not a vault route', welcome.includes('127.0.0.1:' + PORT),
+    welcome);
+  check('the ledger is in the scratch root, not in the real home', welcome.includes(WORK),
+    welcome);
+  check('the banner names no vault route', !/VAULT_URL|:8810/.test(welcome),
+    (welcome.match(/.*(VAULT|:8810).*/g) || []).join('\n'));
+
   await waitFor(() => /Done\./.test(capture()), 'the answer to be drawn');
   await sleep(800);
 
   check('the fixture served the run (a run that reached any other endpoint proves nothing)', served >= 1,
     'requests served: ' + served);
   const head = capture();
-  check('the banner names the fixture endpoint, not a vault route', head.includes('127.0.0.1:' + PORT),
-    head.split('\n').slice(0, 12).join('\n'));
-  check('the ledger is in the scratch root, not in the real home', head.includes(WORK),
-    head.split('\n').slice(0, 12).join('\n'));
 
   const rows = head.split('\n');
   check('the cards are drawn', rows.filter(barRow).length >= 4, rows.filter(barRow).join('\n'));
@@ -212,6 +252,9 @@ try {
   check('at 100 columns the long tagged code line keeps its bar', brokenLong.length === 0, brokenLong.join('\n'));
   const brokenBeta = orphans(rows, /beta with a much longer body/);
   check('at 100 columns the untagged card long line keeps its bar', brokenBeta.length === 0, brokenBeta.join('\n'));
+  check('at 100 columns the untagged one-line card is drawn with its bar',
+    rows.some(row => barRow(row) && stripScrollbar(row).includes('untagged-one-line')),
+    rows.filter(barRow).join('\n'));
 
   // ---- the widths the brief names, and the shrink of ten columns ------------------------------
   for (const columns of [80, 60, 90, 120]) {

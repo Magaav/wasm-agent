@@ -1820,7 +1820,7 @@ mod tests {
             }
             // Every continuation row opens with the bar and the continuation mark, and carries code.
             let continuations: Vec<&String> = plain.iter().filter(|r| r.contains("\u{2502}\u{21aa}")).collect();
-            assert_eq!(continuations.len(), rows.len().saturating_sub(3).max(0),
+            assert_eq!(continuations.len(), rows.len().saturating_sub(3),
                 "one continuation per row past the first, at {width}: {plain:?}");
             // Nothing is dropped and nothing is added: the body rows, in order, are the code. A CUT
             // falls inside a word when no space comes first - that is what "cut by cells" means, and
@@ -1900,6 +1900,28 @@ mod tests {
             row("a value", "another value"),
             rule("\u{2514}", "\u{2534}", "\u{2518}"),
         ]
+    }
+
+
+    #[test]
+    fn the_card_border_colour_is_the_one_the_theme_table_names() {
+        // The colour cannot be read from a theme table at draw time: the host has no channel for the
+        // palette (Lua paints, Rust receives bytes), so the constant is the contract. This test is what
+        // keeps it honest - it reads the ROLE's own value out of `lua/core/cli_view.lua` and fails the
+        // moment the two drift apart, which a comment cannot do.
+        let palette = include_str!("../../../lua/core/cli_view.lua");
+        let role = palette.lines()
+            .find(|line| line.contains("mdCodeBlockBorder"))
+            .and_then(|line| line.split("mdCodeBlockBorder").nth(1))
+            .and_then(|rest| rest.split('"').nth(1))
+            .expect("the mdCodeBlockBorder role is in the palette");
+        assert_eq!(role.len(), 6, "a 24-bit colour: {role:?}");
+        let (r, g, b) = (role[0..2].to_string(), role[2..4].to_string(), role[4..6].to_string());
+        let expected = format!("\x1b[38;2;{};{};{}m",
+            u8::from_str_radix(&r, 16).expect("red"), u8::from_str_radix(&g, 16).expect("green"),
+            u8::from_str_radix(&b, 16).expect("blue"));
+        assert_eq!(CARD_BORDER, expected,
+            "CARD_BORDER must be the colour lua/core/cli_view.lua paints the border with (role {role:?})");
     }
 
     #[test]
