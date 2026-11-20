@@ -206,6 +206,12 @@ function M.contract(host_like)
   record("sleep", host_like.sleep(0))
   record("read_file-missing", host_like.read_file((host_like.paths() or {}).temp .. "/contract-absent.txt"))
   record("sql_query", host_like.sql_query("select 1 as one"))
+  -- An ABSENT directory, so both are asked about the same thing: a real one would differ by whatever else
+  -- the host happens to hold, and the comparison would report the fixture instead of the contract.
+  record("list_dir-missing", host_like.list_dir((host_like.paths() or {}).temp .. "/contract-absent-dir"))
+  -- The clocks are numbers on both sides; only the TYPE is compared, because the value moves.
+  record("now", host_like.now())
+  record("monotonic_ms", host_like.monotonic_ms())
   record("write_file", host_like.write_file((host_like.paths() or {}).temp .. "/contract.txt", "x"))
   record("read_file-present", host_like.read_file((host_like.paths() or {}).temp .. "/contract.txt"))
   return out

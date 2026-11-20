@@ -24,8 +24,8 @@ local real_home = tostring(paths.home or "")
 local temp = tostring(paths.temp or "")
 -- Rule 2 of the quality rules: a test that writes state refuses to run against the real home. The runner
 -- gives every row its own WASM_AGENT_HOME, so a home equal to the operator's means this is not a row.
-assert(real_home ~= "" and real_home ~= "/home/victor/.wasm-agent",
-  "this row must run with a scratch home, never the operator's ~/.wasm-agent: got " .. real_home)
+assert(real_home ~= "" and not real_home:match("/%.wasm%-agent$"),
+  "this row must run with a scratch home, never the node's own ~/.wasm-agent: got " .. real_home)
 assert(temp ~= "", "this row needs a temp directory, got none")
 
 -- --- the real host's answers ---------------------------------------------------------------------------
