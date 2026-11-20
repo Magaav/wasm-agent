@@ -238,7 +238,7 @@ check(lean.offset == 1 and lean.total_lines == 3, 'and the cursor fields still s
 -- its first ("returned bytes 18-17 of 17"), and carries no last_byte/last_line it does not have.
 local past = value(run('const r = await tools.read({path:' .. json.encode(small) .. ', offset:4});\n'
   .. 'return {truncated:r.truncated, bytes_read:r.bytes_read, file_size:r.file_size,'
-  .. ' how:r.how_to_read_rest, truncation:r.truncation};'))
+  .. ' how:r.how_to_read_rest, truncation:r.truncation, range:r.range};'))
 check(past.bytes_read == 0 and past.file_size == 17,
   'the line past the last one returns zero bytes: ' .. json.encode({past.bytes_read, past.file_size}))
 check(past.truncated == true, 'and is truncated (earlier lines were not returned)')
@@ -250,6 +250,9 @@ check(past.truncation ~= nil and past.truncation.last_byte == nil
   'the truncation carries no last_byte/last_line it does not have: ' .. json.encode(past.truncation))
 check(past.truncation ~= nil and past.truncation.first_byte == 18,
   'and still names where the (empty) page starts: ' .. json.encode(past.truncation))
+check(past.range ~= nil and past.range.first_byte == 18 and past.range.last_byte == nil
+  and past.range.last_line == nil,
+  'and range{} carries no backwards last_byte either: ' .. json.encode(past.range))
 
 -- 13. review r1 SHOULD 3: the fence's EDGES, in one place, because each one is a way the fence could
 -- refuse work it has no business refusing (unknown is not yes: only a page this session was served

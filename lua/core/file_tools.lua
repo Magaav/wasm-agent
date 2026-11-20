@@ -287,7 +287,10 @@ function M.read(args,store_image,view_bytes,scope)
     local missing_before=first>1
     result.truncated=missing_before or missing_after
     if result.truncated then
-      result.range={first_byte=page_first_byte,last_byte=page_last_byte,first_line=line,last_line=end_line}
+      -- A zero-byte page has a start and nothing else: no last_byte/last_line, never a backwards range
+      -- (first_byte 18, last_byte 17) - the same rule truncation{} follows (review r2, SHOULD A).
+      result.range={first_byte=page_first_byte,first_line=line}
+      if #part>0 then result.range.last_byte=page_last_byte; result.range.last_line=end_line end
       local reason=missing_after and (column==1 and next_byte>last
         and 'the requested lines ended before the last line of the file'
         or 'this page reached the per-call byte budget')
