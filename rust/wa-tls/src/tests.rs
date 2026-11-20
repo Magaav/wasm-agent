@@ -172,6 +172,23 @@ fn a_value_that_is_not_a_path_is_a_named_error() {
     assert!(error.to_string().contains("not valid UTF-8"), "{error}");
 }
 
+#[test]
+fn installing_anchors_for_a_test_writes_no_process_environment() {
+    let before = (std::env::var_os(CERT_FILE), std::env::var_os(CERT_DIR));
+    let env = Env::set(&[(CERT_FILE, &scratch::cert_file())]);
+    assert_eq!(
+        before,
+        (std::env::var_os(CERT_FILE), std::env::var_os(CERT_DIR)),
+        "set_var is unsound with threads: the seam must not touch the process environment"
+    );
+    // ...and it is really in force: the anchors the test installed, not the compiled-in bundle.
+    let config = tls_config().expect("the anchors the test installed");
+    assert_eq!(anchored(&config), Some(1));
+    // Nothing asserted after the guard drops: another test may hold it a microsecond later, and
+    // reading the answer then would be reading that test's. What this test owns is the two lines
+    // above - the environment was not written, and the anchors it installed are the ones in force.
+}
+
 // ------------------------------------------------------------------------------------ the wire
 
 #[test]

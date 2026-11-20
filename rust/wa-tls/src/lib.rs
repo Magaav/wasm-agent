@@ -79,6 +79,13 @@ impl std::error::Error for RootsError {}
 /// per request would be work in the way of every provider call. A bundle replaced in place is picked
 /// up on the next start, as it is with every other TLS stack.
 pub fn tls_config() -> Result<TlsConfig, RootsError> {
+    // A test that installed the anchors it means (wa_tls::scratch::Env): read those, not the
+    // environment, and cache nothing, so two tests in one process cannot see each other's answer and
+    // no test writes process-wide state another thread could observe.
+    #[cfg(any(test, feature = "scratch"))]
+    if let Some((file, dirs)) = scratch::installed_override() {
+        return build(file.as_deref(), dirs.as_deref());
+    }
     let file = env_text(CERT_FILE)?;
     let dirs = env_text(CERT_DIR)?;
     let mut cache = cache();
@@ -96,6 +103,13 @@ pub fn tls_config() -> Result<TlsConfig, RootsError> {
     value
 }
 
+/// The same answer for an environment named explicitly rather than read from the process: the same
+/// rule, the same errors, and no process-wide state - what a caller that holds its own configuration
+/// (and what wa_tls::scratch::Env) uses.
+pub fn tls_config_at(file: Option<&str>, dirs: Option<&str>) -> Result<TlsConfig, RootsError> {
+    build(file, dirs)
+}
+
 /// The same answer, for an environment handed in rather than read: the seam the tests use, so that a
 /// test about a certificate file cannot pass because of a variable someone else's test left behind.
 pub fn tls_config_from(
@@ -108,6 +122,13 @@ pub fn tls_config_from(
 
 /// The certificates named by the environment, or `None` when it names none.
 pub fn anchors() -> Result<Option<Vec<Certificate<'static>>>, RootsError> {
+    #[cfg(any(test, feature = "scratch"))]
+    if let Some((file, dirs)) = scratch::installed_override() {
+        if file.is_none() && dirs.is_none() {
+            return Ok(None);
+        }
+        return collect(file.as_deref(), dirs.as_deref()).map(Some);
+    }
     let file = env_text(CERT_FILE)?;
     let dirs = env_text(CERT_DIR)?;
     if file.is_none() && dirs.is_none() {

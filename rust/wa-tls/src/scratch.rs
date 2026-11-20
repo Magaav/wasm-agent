@@ -1,4 +1,5 @@
-//! Test scaffolding: a self-signed HTTPS server on loopback, and a guard for the two variables.
+//! Test scaffolding: a self-signed HTTPS server on loopback, and a guard that installs the anchors a
+//! test means without touching the process environment.
 //!
 //! Why a server and not a mock: the question these tests ask is what the TLS handshake accepts, and a
 //! mock connector would answer for a client nobody ships. The server here is the same rustls that
@@ -10,12 +11,11 @@
 //! `127.0.0.1`. A test that uses it binds an ephemeral loopback port and, when it needs a bundle on
 //! disk, writes under the system temp directory in a directory of its own.
 
-use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -212,64 +212,76 @@ fn drain(tls: &mut StreamOwned<ServerConnection, std::net::TcpStream>, mut left:
 /// two tests that change them run one after the other instead of reading each other's bundle - and a
 /// test that does not take the lock never sees a half-applied set, because [`Env::set`] removes both
 /// variables and installs the whole set before it returns.
+/// The anchors for the length of one test, installed explicitly.
+///
+/// The first version of these tests set SSL_CERT_FILE with std::env::set_var. That is unsound in any
+/// process with more than one thread - set_var mutates the environment other threads read through
+/// getenv, and cargo runs one crate's tests in one process, in parallel (review r1, item 4). So the
+/// seam is not the environment: a test installs the anchors it means, wa_tls answers from them while
+/// the guard is held, and no process-wide state another thread can observe is written.
 pub struct Env {
     _guard: MutexGuard<'static, ()>,
-    saved: Vec<(&'static str, Option<OsString>)>,
+    previous: Option<(Option<String>, Option<String>)>,
 }
 
 impl Env {
-    /// Clear both variables, then install exactly the pairs given.
+    /// Both variables absent first, then exactly the pairs given.
     pub fn set(values: &[(&'static str, &Path)]) -> Env {
-        let guard = lock();
-        let saved = vec![
-            (CERT_FILE, std::env::var_os(CERT_FILE)),
-            (CERT_DIR, std::env::var_os(CERT_DIR)),
-        ];
-        std::env::remove_var(CERT_FILE);
-        std::env::remove_var(CERT_DIR);
+        let mut file = None;
+        let mut dirs = None;
         for (name, path) in values {
-            std::env::set_var(name, path);
+            let text = Some(path.to_string_lossy().into_owned());
+            match *name {
+                CERT_FILE => file = text,
+                CERT_DIR => dirs = text,
+                other => panic!("{other} is not one of the two CA variables"),
+            }
         }
-        Env { _guard: guard, saved }
+        Env::install(Some((file, dirs)))
     }
 
     /// Both variables absent: the machine that names no bundle.
     pub fn clear() -> Env {
-        Env::set(&[])
-    }
-
-    /// Also hold one more variable for the length of this guard, restored when it drops: the same
-    /// lock, so a test that needs its own node key (or any other variable the code under test reads)
-    /// cannot see another test's value.
-    pub fn also(&mut self, name: &'static str, value: &Path) {
-        self.saved.push((name, std::env::var_os(name)));
-        std::env::set_var(name, value);
+        Env::install(Some((None, None)))
     }
 
     /// One variable set to a value that is not a path at all - the misconfiguration the loader must
     /// name instead of excusing.
     pub fn set_text(name: &'static str, value: &str) -> Env {
+        let text = Some(value.to_string());
+        match name {
+            CERT_FILE => Env::install(Some((text, None))),
+            CERT_DIR => Env::install(Some((None, text))),
+            other => panic!("{other} is not one of the two CA variables"),
+        }
+    }
+
+    fn install(value: Option<(Option<String>, Option<String>)>) -> Env {
         let guard = lock();
-        let saved = vec![
-            (CERT_FILE, std::env::var_os(CERT_FILE)),
-            (CERT_DIR, std::env::var_os(CERT_DIR)),
-        ];
-        std::env::remove_var(CERT_FILE);
-        std::env::remove_var(CERT_DIR);
-        std::env::set_var(name, value);
-        Env { _guard: guard, saved }
+        let previous = installed_override();
+        *state().write().unwrap_or_else(|poisoned| poisoned.into_inner()) = value;
+        Env { _guard: guard, previous }
     }
 }
 
 impl Drop for Env {
     fn drop(&mut self) {
-        for (name, value) in &self.saved {
-            match value {
-                Some(value) => std::env::set_var(name, value),
-                None => std::env::remove_var(name),
-            }
-        }
+        *state().write().unwrap_or_else(|poisoned| poisoned.into_inner()) = self.previous.take();
     }
+}
+
+/// The anchors a test installed, if any: read by wa_tls::tls_config and wa_tls::anchors before they
+/// look at the environment.
+pub(crate) fn installed_override() -> Option<(Option<String>, Option<String>)> {
+    state()
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
+fn state() -> &'static RwLock<Option<(Option<String>, Option<String>)>> {
+    static STATE: OnceLock<RwLock<Option<(Option<String>, Option<String>)>>> = OnceLock::new();
+    STATE.get_or_init(|| RwLock::new(None))
 }
 
 fn lock() -> MutexGuard<'static, ()> {

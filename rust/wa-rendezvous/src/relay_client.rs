@@ -430,17 +430,17 @@ mod tls_anchor_tests {
     use super::*;
     use wa_tls::scratch::{self, Env, Server, TempDir};
 
-    /// A node identity whose key lives in the test's own directory: never the live node's key.
-    fn identity(dir: &TempDir, env: &mut Env) -> Identity {
-        env.also("WASM_AGENT_NODE_KEY", &dir.path().join("node.key"));
-        Identity::load().expect("a node key in this test's own directory")
+    /// A node identity whose key lives in the test's own directory: never the live node's key, and
+    /// never by pointing the environment at it.
+    fn identity(dir: &TempDir) -> Identity {
+        Identity::at(dir.path().join("node.key")).expect("a node key in this test's own directory")
     }
 
     #[test]
     fn a_relay_answer_refuses_a_private_ca_that_no_bundle_names() {
         let dir = TempDir::new("relay-answer");
-        let mut env = Env::clear();
-        let identity = identity(&dir, &mut env);
+        let _env = Env::clear();
+        let identity = identity(&dir);
         let server = Server::start();
         let error = respond(&identity, server.base(), "job-1", 200, "{}")
             .expect_err("a private CA is not in the compiled-in bundle");
@@ -453,8 +453,8 @@ mod tls_anchor_tests {
     #[test]
     fn a_relay_answer_reaches_a_private_ca_named_by_ssl_cert_file() {
         let dir = TempDir::new("relay-answer-ok");
-        let mut env = Env::set(&[(wa_tls::CERT_FILE, &scratch::cert_file())]);
-        let identity = identity(&dir, &mut env);
+        let _env = Env::set(&[(wa_tls::CERT_FILE, &scratch::cert_file())]);
+        let identity = identity(&dir);
         let server = Server::start();
         respond(&identity, server.base(), "job-1", 200, "{}")
             .expect("the CA named by SSL_CERT_FILE");
@@ -465,8 +465,8 @@ mod tls_anchor_tests {
         let dir = TempDir::new("relay-answer-dir");
         let certs = scratch::TempDir::new("relay-answer-certs");
         certs.copy_fixture("ca.pem", "ca.pem");
-        let mut env = Env::set(&[(wa_tls::CERT_DIR, certs.path())]);
-        let identity = identity(&dir, &mut env);
+        let _env = Env::set(&[(wa_tls::CERT_DIR, certs.path())]);
+        let identity = identity(&dir);
         let server = Server::start();
         respond(&identity, server.base(), "job-1", 200, "{}")
             .expect("the CA in the directory SSL_CERT_DIR names");
@@ -476,7 +476,7 @@ mod tls_anchor_tests {
     fn a_broken_bundle_refuses_the_relay_answer_with_the_bundle_in_the_message() {
         let dir = TempDir::new("relay-answer-broken");
         let mut env = Env::set_text(wa_tls::CERT_FILE, "/nonexistent/wa-rendezvous/typo.pem");
-        let identity = identity(&dir, &mut env);
+        let identity = identity(&dir);
         let server = Server::start();
         let error = respond(&identity, server.base(), "job-1", 200, "{}")
             .expect_err("a named source that cannot be read is not a fall back");

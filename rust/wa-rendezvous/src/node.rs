@@ -58,7 +58,15 @@ impl Clone for Identity {
 
 impl Identity {
     pub fn load() -> Result<Identity, String> {
-        let path = key_path();
+        Identity::at(key_path())
+    }
+
+    /// The same, from a named key file.
+    ///
+    /// A test keeps its own key in its own directory this way, instead of pointing WASM_AGENT_NODE_KEY
+    /// at it: setting a variable mutates the environment every other thread of the test binary reads
+    /// through getenv, which is unsound (review r1, item 4).
+    pub fn at(path: PathBuf) -> Result<Identity, String> {
         let pkcs8 = match std::fs::read_to_string(&path) {
             Ok(text) => unhex(&text).ok_or("bad_node_key")?,
             Err(_) => {
