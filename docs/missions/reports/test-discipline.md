@@ -205,9 +205,12 @@ SHOULD partly taken: the report's claim that `landing-queue.mjs land` reaches th
 `land` runs `scripts/fast.sh`, whose `discrimination` row proves the TOOL (its own fixture), not this branch's
 tests. Only `wa land` judges the branch, through the gate's always-on check.
 
-SHOULD corrected in the report: the 05ef1ccb rows are real assertions - their text begins `lua error:` because
-that is how the native runtime prefixes a raised error, and `ASSERT_RE` matches it. The classification is by the
-error body, not the wrapper.
+SHOULD, corrected by the orchestrator after review r3: the claim that had stood here ("the 05ef1ccb rows are real
+assertions; classification is by the error body") is FALSE. In the replay, test-done-gate.lua and test-turnfeed.lua
+fail with `attempt to call a nil value (field 'note_turn'/'gate_stats')` - a missing symbol - but `ASSERT_RE` matches
+the `lua error:` wrapper first, so they are classified `discriminates` instead of `new-symbol`. Neither verdict
+blocks, so this cannot cause a false positive; making Lua rows reach new-symbol (drop `lua error:` from ASSERT_RE and
+match the body) is a follow-up, not done here.
 
 ### Replays (all must exit 0)
 

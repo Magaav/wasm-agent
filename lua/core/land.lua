@@ -310,8 +310,9 @@ M.DEFAULT_CHECKS = {
   -- non-test changes? A test that still passes there would not have caught the bug it was written for,
   -- and it blocks the landing BY NAME (19-20/11: three of ten hidden tests did not discriminate, and
   -- every review of that round carried a test MUST). A branch declared refactor-only is exempt and must
-  -- instead keep its tests green (scripts/test-discriminates.sh). Exit 3 means this machine could not run
-  -- some test: a refusal, never a pass, and the gate treats it as a named failure rather than a verdict.
+  -- instead keep its tests green (scripts/test-discriminates.sh). A row this machine could not judge
+  -- (unrevertable, timeout, skipped, environment) is named and does NOT block: exit 0 unless a row is a
+  -- named blocker (1) or the script could not answer at all (76) - review r2 MUST 1.
   { name = "discrimination", command = "bash scripts/test-discriminates.sh origin/main", timeout = 900,
     per_test_seconds = 180,
     detail = "every test the branch adds or changes fails on the code before the change" },

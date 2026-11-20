@@ -32,8 +32,8 @@
 # Hermetic: a scratch worktree under ~/.wasm-agent/tmp, a scratch HOME and ledger per test, no
 # rendezvous, no relay, no network, no live fleet. One line per test on stdout.
 #
-# Exit codes: 0 nothing blocks; 1 named blockers; 3 nothing could be judged (every row environment or
-# skipped); 76 the script could not answer at all. A refusal is never a pass.
+# Exit codes: 0 nothing blocks (rows that could not be judged are named, never counted as passes, and do
+# not block); 1 named blockers; 76 the script could not answer at all (review r2 MUST 1 removed exit 3).
 set -uo pipefail
 ROOT=$(cd -- "$(dirname -- "$0")/.." 2>/dev/null && pwd -P)
 BASE=origin/main
