@@ -2455,6 +2455,7 @@ dependencies = [
  "rusqlite",
  "serde_json",
  "wa-sqlite",
+ "wa-tls",
  "windows-sys 0.61.2",
 ]
 
