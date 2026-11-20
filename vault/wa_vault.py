@@ -527,9 +527,47 @@ def release_sign(payload):
 
 # --- upstream ------------------------------------------------------------------------------------
 
+def trust_anchors():
+    """The CA bundle this machine named, or a named refusal.
+
+    Python's HTTPSConnection uses OpenSSL's default verify paths, which do honour SSL_CERT_FILE and
+    SSL_CERT_DIR - and OpenSSL silently SKIPS a file it cannot read. The handshake then fails as
+    "certificate verify failed", which reads like a bad upstream instead of the misconfiguration it
+    is. Measured 20/11: a vault in a sandbox whose SSL_CERT_FILE named a path that no longer existed
+    answered vault_upstream_unreachable for every call, and nothing said why. So the two variables are
+    checked here, once per https request, and the answer is the same shape as every other refusal in
+    this file.
+    """
+    file = os.environ.get("SSL_CERT_FILE", "")
+    if file:
+        try:
+            with open(file, "rb") as handle:
+                data = handle.read()
+        except OSError as error:
+            raise VaultError(502, "vault_ca_unreadable",
+                             "SSL_CERT_FILE %s cannot be read (%s); no https upstream can be verified"
+                             % (file, error.strerror or type(error).__name__))
+        if b"-----BEGIN CERTIFICATE-----" not in data:
+            raise VaultError(502, "vault_ca_without_certificate",
+                             "SSL_CERT_FILE %s carries no PEM certificate" % file)
+    dirs = os.environ.get("SSL_CERT_DIR", "")
+    if dirs:
+        for directory in dirs.split(":"):
+            if not directory:
+                continue
+            try:
+                os.listdir(directory)
+            except OSError as error:
+                raise VaultError(502, "vault_ca_unreadable",
+                                 "SSL_CERT_DIR %s cannot be listed (%s)"
+                                 % (directory, error.strerror or type(error).__name__))
+
+
 def http_request(method, url, headers=None, body=None, timeout=30):
     """One upstream request, no redirects followed. Returns (status, body_bytes)."""
     parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme == "https":
+        trust_anchors()
     connection_class = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
     connection = connection_class(parsed.netloc, timeout=timeout)
     path = parsed.path + (("?" + parsed.query) if parsed.query else "")
@@ -708,6 +746,11 @@ class ProxyHandler(Handler):
             return self.send_error_json(error.status, error.code, error.message)
 
         parsed = urllib.parse.urlsplit(url)
+        if parsed.scheme == "https":
+            try:
+                trust_anchors()
+            except VaultError as error:
+                return self.send_error_json(error.status, error.code, error.message)
         connection_class = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
         connection = connection_class(parsed.netloc, timeout=UPSTREAM_TIMEOUT)
         try:

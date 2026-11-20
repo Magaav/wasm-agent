@@ -1818,6 +1818,14 @@ WA_SCRIPT=scripts/test-memory-window.lua "$BIN" --db "$DB.window" | grep "memory
 # you cannot search for.
 WA_SCRIPT=scripts/test-session-title.lua "$BIN" --db "$DB.title" | grep "session title ok"
 WASM_AGENT_KEYS_DIR="$DB.keys" WA_SCRIPT=scripts/test-vault-keys.lua "$BIN" --db "$DB.keys.db" | grep "vault keys ok"
+# The vault's own upstream TLS (vault/wa_vault.py): Python honours SSL_CERT_FILE through OpenSSL's
+# default verify paths but silently skips a file it cannot read, so the vault must say WHICH source it
+# could not use. The test runs the real vault against a real TLS upstream presenting the scratch CA
+# from rust/wa-tls/fixtures/scratch-tls: an https upstream is reached when the bundle names it, and a
+# bundle that is missing, certificate-free or a directory that cannot be listed is a named refusal
+# (vault_ca_unreadable / vault_ca_without_certificate) instead of a verify error dressed as an
+# unreachable upstream. No binary, no node, no network beyond loopback.
+gate_run python scripts/test-vault.py
 WASM_AGENT_KEYS_DIR="$DB.bash-keys" WA_SCRIPT=scripts/test-cli-bash-restart.lua "$BIN" --db "$DB.bash.db" | grep "cli bash restart ok"
 WA_SCRIPT=scripts/test-mcp-node-runtime.lua "$BIN" --db "$DB.mcp-node.db" | grep '"ok":true'
 WA_SCRIPT=scripts/test-federation.lua "$BIN" --db "$DB.federation.db" | grep '"ok":true'

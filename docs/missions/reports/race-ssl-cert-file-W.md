@@ -12,7 +12,7 @@ bridge was bolted on, while `pi` worked. Re-measured here:
 | --- | --- |
 | "wa uses a TLS client that ignores the CA environment" | true, and the reason is sharper than the brief: the client is `ureq` 3.4.0 (`rust/Cargo.lock:2062`) with `_ring` + `rustls-webpki-roots` and **no** `platform-verifier`, so `ureq::tls::TlsConfig::default()` is `RootCerts::WebPki` - a compiled-in Mozilla bundle. No code named `SSL_CERT_FILE` or `SSL_CERT_DIR` anywhere in the tree (`grep -rn SSL_CERT_FILE` before this change: 0 hits). |
 | "else the system default" | the default is **not** the OS store: it is the compiled-in bundle above. That stays the default here (parity, see below); a machine that names no bundle gets byte-for-byte what it got before. |
-| "wa-vault upstream" is an HTTPS path | **stale**: `rust/wa-vault` contains no HTTP client at all (`grep -rn 'ureq\|https://\|TcpStream' rust/wa-vault/src`: 0 hits). Nothing to wire. |
+| "wa-vault upstream" is an HTTPS path | **right, and my first pass measured the wrong half**. `rust/wa-vault` is the Rust key store and has no HTTP client (0 hits) - but the upstream is the **Python** vault, `vault/wa_vault.py`, which reaches providers with `http.client.HTTPSConnection` (`http_request` at line 530, and the proxy handler at 710). Python honours `SSL_CERT_FILE`/`SSL_CERT_DIR` through OpenSSL's default verify paths, so the anchors themselves already worked; what did not is that **OpenSSL silently skips a file it cannot read**, so a misnamed bundle surfaced as `vault_upstream_unreachable` - a verify failure dressed as a network failure. Fixed in review r1 item 2, with a gate row. |
 | "MCP HTTP" is inside wa | **half stale**: the Rust MCP guest components reach HTTP through `host.http` / `wa_http`, which are wired by this change; the live MCP connector is **Node** (`scripts/mcp-client-core.mjs`, spawned from `lua/core/mcp.lua`), and Node ignores both variables. Measured below, and named as the one gap this change does not close. |
 | "release fetch" | true, and it is `rust/wa-capabilities/src/ripgrep.rs` (a GitHub release download), wired here. |
 | "rendezvous/relay client" | true, three places: `wa-rendezvous/relay_client.rs` (relay poll + the answer a node posts), `wa-rendezvous/node.rs` (registration and heartbeats) and `wa-host/mesh_transport.rs` (the node's `https` relay hop injected into `wa-mesh`). All wired here. |
@@ -54,6 +54,8 @@ allow-list of anchors, never a disable switch.
 | relay poll and the relay answer a node posts | `rust/wa-rendezvous/src/relay_client.rs:79` (`agent`), used at 100 and 262 | 147c3e74 |
 | registration and heartbeats | `rust/wa-rendezvous/src/node.rs:293` (`rendezvous_agent`) | 147c3e74 |
 | gate rows | `scripts/test.sh:260-264` | dbbb2f4a |
+| **the Python vault's https upstream** | `vault/wa_vault.py` (`trust_anchors`, called by `http_request` and the proxy handler) | review r1 item 2 |
+| **every child wa starts, for the child's own Node TLS (the MCP connector)** | `rust/wa-operation/src/shell_env.rs` (`inherit_ca_bundle`, from `configure_spec`) | review r1 item 1 |
 
 The websocket takes the machine's anchors **only when it names a bundle**; otherwise
 `tungstenite::connect` runs unchanged (its own bundle, its own redirect handling). That is an
@@ -120,11 +122,22 @@ So the row is about the depth of the runner's temp directory, not about TLS; it 
 rest of the fast path is green with a shallow `TMPDIR`. Nothing in `wa-graph` was touched by this
 branch (`git diff --stat ac7717e0..HEAD -- rust/wa-graph` is empty).
 
-## The one gap this change does not close, measured
+## The Node MCP path: closed in review r1 item 1
 
-**MCP HTTP from Node.** `scripts/mcp-client-core.mjs` reaches an MCP server with `fetch`, spawned from
-`lua/core/mcp.lua`, and Node ignores both variables. Measured against the same scratch server with
-node v26.13.1 (a probe that starts a TLS server presenting the fixture certificate and runs `fetch`):
+A child wa starts is now given the machine's bundle under `NODE_EXTRA_CA_CERTS` (the name Node reads,
+additive, available since Node 7.3) when `SSL_CERT_FILE` names one and the caller has not set it. It is
+decided once, in `wa-operation`'s `configure_spec`, which every operation child goes through - the MCP
+connector (`scripts/mcp-client.mjs`, started from `lua/core/mcp.lua`) included. `SSL_CERT_DIR` is
+deliberately not forwarded: Node has no directory form, and guessing at a flag older Node builds reject
+would break the connector on exactly the machines that set it. The test spawns a real node 26 child
+against the scratch CA: it reaches the private CA with the forwarded variable and fails without it.
+
+## What is left: measured, not closed
+
+**Node's own TLS is only reached through the child environment.** A Node process started by hand (not
+by wa) still ignores both variables; that is Node's behaviour, not wa's, and `NODE_EXTRA_CA_CERTS` is
+its answer. What wa controls - the children it starts - is covered above. Measured on node v26.13.1
+against the same scratch server:
 
 | invocation | result |
 | --- | --- |
@@ -172,6 +185,11 @@ Also deliberately not changed, with the reason:
 13. `ws_handshake: the url names no host` / `ws_handshake: {io error}` / `ws_handshake: the host
     resolved to no address` / `ws_handshake: interrupted` (the websocket's own refusals on the
     anchors path)
+14. `vault_ca_unreadable`: `SSL_CERT_FILE {path} cannot be read ({reason}); no https upstream can be verified`
+15. `vault_ca_unreadable`: `SSL_CERT_DIR {dir} cannot be listed ({reason})`
+16. `vault_ca_without_certificate`: `SSL_CERT_FILE {path} carries no PEM certificate`
+17. `NODE_EXTRA_CA_CERTS` is set for a child from `SSL_CERT_FILE` (no new text; the variable and the
+    caller's own value are what an operator sees in the child's environment)
 
 ## Self-review (this is self-review, not an independent review)
 
@@ -183,6 +201,18 @@ variables, so a test that changes them cannot read another test's answer; every 
 function real use takes (`UreqTransport::post`, `exchange`, `WsConn::open`, `respond`,
 `build_config_with`/`agent_for_stream`) and none of them asserts on a mock; `bash -n scripts/test.sh`
 parses; the tree is clean and every item is its own commit.
+
+## Review r1 (independent review, verdict FIX): what each item changed
+
+| item | commit | test that fails before it |
+| --- | --- | --- |
+| 1. Node MCP: `NODE_EXTRA_CA_CERTS` from `SSL_CERT_FILE` where wa starts children | 1595b002 | `wa-operation` `ca_bundle_tests` (four, including a real node child that reaches the scratch CA only with the forwarded variable) |
+| 2. the Python vault checks both variables and names what it cannot read | this commit | `scripts/test-vault.py`: with the base vault 5 of the new checks fail (`vault_ca_unreadable` / `vault_ca_without_certificate`); with it, 116 checks, 0 failed |
+| 3. the websocket test completes a real RFC 6455 upgrade and echoes a frame | 5c7b3051 | `a_websocket_upgrades_and_echoes_when_the_machine_names_the_ca`: the previous test asserted an *error*, so it fails against this one by construction |
+| 4. the CA test seam installs anchors, never `set_var` | e2c2a46b | `installing_anchors_for_a_test_writes_no_process_environment` |
+| 5. `wa-tls` in the fast path's crate list | see the commit | the fast path's own `rust wa-tls` row (absent before: a change to `wa-tls` ran no rust row) |
+| 6. no CA private keys in the repository | see the commit | `the_repository_holds_no_ca_private_key` |
+| 7. trust gated on the scheme | ca3760c7 | `a_broken_bundle_does_not_refuse_a_plain_http_request` and its siblings in wa-host, wa-kernel-runtime (http and ws) and wa-rendezvous, plus `a_plain_url_is_answered_without_reading_the_bundle` in wa-tls |
 
 ## What I did not do
 
