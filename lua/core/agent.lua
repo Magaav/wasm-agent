@@ -1683,6 +1683,12 @@ function M:run(text, images)
   self.last_user_text=tostring(text or "")
   self.turn_refused=nil
   self.pending_failure=nil
+  -- THE PREVIOUS RUN'S FAILURE IS NOT THIS RUN'S (review r2, item 1). A served session REUSES one
+  -- agent for its whole life (lua/core/server.lua:87-93), and the failure record below is guarded by
+  -- self.failure==nil. Without this reset the second failed turn on that agent wrote NO failure row at
+  -- all: the session failed silently from then on, which is the exact class of stop this mission
+  -- exists to remove. Cleared per run, so two failed turns leave two rows.
+  self.failure=nil
   self.run_origin=(json.decode(host.runtime_info()) or {}).run_origin
   local resource_ctx={session_id=self.session_id,user_id=self.user,run_id=self.run_id,subagent=self.subagent}
   local claimed=resources.begin(resource_ctx)
