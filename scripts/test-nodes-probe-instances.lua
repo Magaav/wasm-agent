@@ -102,7 +102,33 @@ for _, row in ipairs(capped) do
 end
 assert(named > 0, "the roster over the cap named no peer probe_capacity, so a capped peer would read as unknown")
 
+-- 7. THE BOUND IS ASKED OF THE LEDGER, NOT ONLY OF THIS PROCESS (growth D): 554 live probe children,
+--    ~92 per peer, came from ninety-two processes that could not see each other. probe_children_alive
+--    must therefore consult the operation host, and must NAME why it could not when it cannot.
+local asked = 0
+local real_list = host.operation
+host.operation = function(action, request)
+  if action == "list" then asked = asked + 1; return json.encode({ operations = {} }) end
+  return real_list(action, request)
+end
+cold()
+B.list({ peers = peers, live_capabilities = true })
+assert(asked > 0, "the ledger was never asked how many probe children are alive, so only one process is bounded")
+-- And when the host cannot answer, the reason is named rather than the bound being silently skipped.
+host.operation = function(action, request)
+  if action == "list" then error("no list on this host") end
+  if action == "start" then starts = starts + 1; return json.encode({ operation_id = "fixture-" .. starts }) end
+  if action == "await" then return json.encode({ settled = true }) end
+  if action == "read" then return json.encode({ content = "" }) end
+  return json.encode({})
+end
+cold()
+B.list({ peers = peers, live_capabilities = true })
+assert(_G.WA_PROBE_SHARED_BOUND == "operation_list_unavailable",
+  "a host that cannot list operations left the shared bound unnamed (saw " .. tostring(_G.WA_PROBE_SHARED_BOUND) .. ")")
+local why = "the ledger is asked (" .. asked .. " list call(s)) and a host that cannot answer says why"
+
 print("nodes probe instances ok: two real instances (" .. unmasked .. " children when unmarked), the marked one "
   .. "starts none, an instance loaded after the mark starts none, a repeated call starts none ("
   .. first .. " then 0, no accumulation), 500 peers are capped at " .. starts
-  .. ", and the child environment is named (" .. A.PROBE_CHILD_ENV .. ")")
+  .. ", and the child environment is named (" .. A.PROBE_CHILD_ENV .. "; " .. why)

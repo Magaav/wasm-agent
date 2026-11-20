@@ -329,6 +329,46 @@ local PROBE_DEADLINE_S = 20
 -- process starts no more and names the reason (probe_capacity) instead of forking an unbounded tree.
 --   _G.WA_PROBE_INFLIGHT[peer_id] = { op = <operation_id>, at = <host.now()> }
 local PROBE_MAX_CHILDREN = 64
+
+-- HOW MANY PROBE CHILDREN ARE ALIVE FOR THIS LEDGER, ACROSS EVERY PROCESS (item 0, growth D).
+--
+-- The registry below is ONE process memory, and measurement at row 37 of a --jobs 2 run showed why that
+-- is not enough: 554 live wa nodes-probe children, about 92 PER PEER, with their parents already
+-- re-parented to systemd --user. Ninety-two separate processes had each started its own set and none
+-- could see the others. The bound therefore has to be asked of something the processes SHARE, and the
+-- node already has one: the operation table. host.operation list answers every operation this ledger
+-- knows, each with its owner, so this asks it - and asks defensively, because a host without the verb
+-- must still probe (one named reason, never a crash).
+--
+-- The rule: if this ledger already has PROBE_MAX_CHILDREN live children owned by nodes-probe, start
+-- none and say probe_capacity by name. A peer whose child is already running is joined, not duplicated.
+local PROBE_OWNER = "nodes-probe"
+local function probe_children_alive(now)
+  if type(host.operation) ~= "function" then return nil, "no_operation_host" end
+  local ok, raw = pcall(host.operation, "list", json.encode({}))
+  if not ok or type(raw) ~= "string" then return nil, "operation_list_unavailable" end
+  local decoded = json.decode(raw)
+  if type(decoded) ~= "table" then return nil, "operation_list_unreadable" end
+  local rows = decoded.operations or decoded.ops or decoded
+  if type(rows) ~= "table" then return nil, "operation_list_shape" end
+  local alive = {}
+  for _, row in ipairs(rows) do
+    if type(row) == "table" and tostring(row.owner or "") == PROBE_OWNER then
+      local state = tostring(row.state or row.status or "")
+      local started = tonumber(row.started_at or row.created_at or 0) or 0
+      local fresh = (started == 0) or ((now - started) < PROBE_DEADLINE_S)
+      local live = (state == "" or state == "running" or state == "started" or state == "accepted" or state == "pending")
+      if live and fresh then
+        local key = tostring(row.label or row.id or row.operation_id or "")
+        if key ~= "" then alive[key] = true end
+      end
+    end
+  end
+  local count = 0
+  for _ in pairs(alive) do count = count + 1 end
+  return count
+end
+
 local function probe_inflight()
   local t = _G.WA_PROBE_INFLIGHT
   if type(t) ~= "table" then t = {}; _G.WA_PROBE_INFLIGHT = t end
@@ -350,6 +390,14 @@ local function probe_peers(peers, opts)
   local program = tostring(runtime.binary_path or "")
   if program == "" then return {} end
   local inflight, now, alive = probe_inflight()
+  -- THE CROSS-PROCESS COUNT. When the host can answer, it is the authority on how many probe children this
+  -- ledger has alive; when it cannot, the per-process registry below still bounds this process.
+  local shared, why_shared = probe_children_alive(now)
+  -- The reason the ledger could not be counted is PROCESS-WIDE, like every other fact here: a caller that
+  -- wants to know why the bound fell back reads it from _G, because out is keyed by peer id and a reader
+  -- that has no peer in common still needs the answer.
+  _G.WA_PROBE_SHARED_BOUND = why_shared or nil
+  if shared then alive = shared end
   local launched, at_capacity = {}, {}
   for _, peer in ipairs(peers or {}) do
     local id = tostring(peer.node_id or "")
@@ -383,6 +431,9 @@ local function probe_peers(peers, opts)
   for _, id in ipairs(at_capacity) do
     out[id] = { capabilities = nil, reason = "probe_capacity" }
   end
+  -- A half that could not be counted is named too: a reader told only probe_capacity would not know
+  -- whether the bound was enforced by the ledger or by this process alone.
+  if why_shared then out.__shared_bound = why_shared end
   for _, entry in ipairs(launched) do
     local settled, state = pcall(host.operation, "await", json.encode({ id = entry.operation_id,
       wait_s = tonumber(opts.deadline_s or PROBE_DEADLINE_S) }))
