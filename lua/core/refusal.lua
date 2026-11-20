@@ -367,6 +367,8 @@ local CODES={
   fix='send ONE form: `{"path","old_text","new_text"}` or `{"path","edits":[{"selection","replacement_lines"}]}`.'},
  edits_required_1_to_64={message='`edits` must be a dense array of 1 to 64 edits and the call sent something else ({origin}).',
   fix='send `edits` as an array of 1 to 64 objects, no nils and no holes.'},
+ edit_anchor_outside_read_page={message='this session read only part of this file, and the anchor is outside every byte range that read returned, so it was quoted from a page nobody was given ({origin}).',
+  fix='read the page that holds the anchor (read with offset/column, or the truncation.next the partial page named) and quote the bytes from it; a whole-file read of the same version clears this.'},
  old_text_not_found={message='`old_text` appears nowhere in the file, so nothing could be replaced ({origin}).',
   fix='read the file and copy the exact bytes to replace, whitespace included.'},
  old_text_ambiguous={message='`old_text` appears more than once in the file, so which one to replace is undecidable ({origin}).',
