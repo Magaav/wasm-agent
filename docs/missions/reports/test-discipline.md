@@ -135,15 +135,75 @@ queued behind another mission's suite and a full gate before it ran): **304 chec
 `node scripts/test-orphan-tests.mjs` - ok, 276 wired; `node scripts/test-gate-check.mjs` - ALL PASS (the
 HTTP stage skips on Linux, as designed); `node scripts/check-instructions.mjs` - PASS, 79 checks.
 
-## Texts to approve (1)
+## Review r1 (FIX) - what changed, one item per commit
 
-1. Rule 16, added to `~/Work/missions/launch.sh`, appended to rule 15:
+r1 found the tool wrong in BOTH directions and, since it is wired into `wa land`, a false positive blocks
+every landing. Every MUST is implemented and has a fixture in `scripts/test-discriminates-test.mjs`
+(30 checks; e36fd3b8), and the replay the review named now passes.
 
-> (16) every new test must fail on the code before your change - the land gate checks it with scripts/test-discriminates.sh, which runs the tests you add or change against the base with only your non-test changes reverted and names any that still pass there (a test that cannot fail cannot catch anything); a branch that only refactors says so with a "Refactor-only: <reason>" line in its report and must instead keep every test green; stubs come only from the shared contract fake, never a hand-written one that accepts what the real host refuses; and a bug that crosses processes needs a test that crosses processes;
+| r1 item | fix | commit |
+|---|---|---|
+| 1a missing symbol = non-blocking row | `new-symbol` replaces `does-not` for a missing module/symbol; `does-not` now means only "an ADDED test passed on the old code" | e36fd3b8 |
+| 1b assertions before missing-code | `ASSERT_RE` is consulted first, so `FAIL: the new value is missing` discriminates; the missing-code list also dropped the nil INDEX/COMPARE symptoms it was eating | e36fd3b8 |
+| 1c a modified test whose verdict did not change | `unchanged-verdict`, non-blocking: a test-only fix passes without a Refactor-only line | e36fd3b8 |
+| 1d SKIP | `skipped` row; exit 3 only when NOTHING could be judged | e36fd3b8 |
+| 2 false negatives | the substring `new_subject_of` is gone; a pass on the base is never new-code. A test's own path is no longer a subject | e36fd3b8, e1edf5b1 |
+| 3 changed tests vanished | the subject skip is GONE: every changed test gets exactly one row (test-a/test-b -> 2 rows) | e36fd3b8 |
+| 4 rust/ not reverted | a `rust/` diff makes the Lua rows a named, non-blocking `unrevertable`; the runtime is resolved from the tree's own build only, never a PATH `wa` | e36fd3b8 |
+| 5 refactor leaks across a round | `--branches a,b` + a Refactor-only line REFUSES by name (exit 76); `wa land` is the only enforcer and the report says so | e36fd3b8 |
 
-2. `scripts/test-discriminates.sh --help` and its one line per test (verdict, path, reason) - the strings
-   above: `discriminates`, `does-not`, `unclassified`, `not-applicable`, `environment`, and
-   `BLOCKED: N test(s) do not discriminate - named above`.
+SHOULDs taken:
+
+* the scratch worktree moved under `~/.wasm-agent/tmp` (docs/ONEROOT.md); `INT TERM` now cleans AND exits;
+* the contract test compares `list_dir`, `now` and `monotonic_ms` against the real host and no longer
+  hard-codes the operator's home (5da0c0df: 52 checks, 11 capabilities);
+* the land gate sizes the discrimination check's timeout by the tests the round touches, so a round that
+  touches twenty of them does not time out on the twenty-first (f9a0a59a);
+* the summary names skipped, timed-out and unrevertable rows separately instead of folding them into one
+  `not judged` count (e1edf5b1).
+
+SHOULD not taken, and why:
+
+* **migrating a real stub onto the contract fake.** Rule 16's stub clause is what overstated the work: the
+  fake covers the host's general capabilities (paths, files, SQL, clock, sleep), while the five hand stubs
+  exist to script a SEQUENCE the real host cannot be asked for (a vacuum returning busy three times, a
+  git command answered with fixture text). Migrating one would have meant widening the fake with a
+  scenario language, which is a different tool. Rule 16 was reworded to say exactly that (in
+  `~/Work/missions/launch.sh`, backup `launch.sh.bak-r1-<ts>`), and the five stubs are named in this
+  report for the next round instead.
+* **wiring `landing-queue.mjs land` separately.** It is not needed: `land`'s default check command is
+  `bash scripts/fast.sh`, and the fast path runs the discrimination row, which the land gate also carries
+  as an always-on check (2e9defe2). The report now says `wa land` and the queue's own `land` both reach
+  it through the fast path.
+
+### The replay the review named
+
+`test-discriminates.sh --repo <worktree of 05ef1ccb> 05ef1ccb^` -> **exit 0**, 3 rows, `discriminates=3`,
+`0 blocking`: `test-batching-guidance.lua`, `test-done-gate.lua` and `test-turnfeed.lua` all fail ON AN
+ASSERTION on the old code. The two false positives of the first submission (`does-not ... attempt to call a
+nil value`) are gone.
+
+### What a conversion looks like when it CANNOT discriminate
+
+A file that is both a tool and a `test-*` name (`scripts/test-discriminates.sh` itself) is judged like any
+other changed test: run from another tree it judges that tree and exits 0 with "nothing to discriminate",
+which is a `skipped` row, not a pass (the tool now recognises its own message).
+
+## Texts to approve (2)
+
+1. Rule 16 in `~/Work/missions/launch.sh` (reworded in r1; backup `launch.sh.bak-r1-<ts>`):
+
+> (16) every new test must fail on the code before your change - the land gate checks it with scripts/test-discriminates.sh, which runs the tests you add or change against the base with only your non-test changes reverted and names any that still pass there (a test that cannot fail cannot catch anything); a branch that only refactors says so with a "Refactor-only: <reason>" line in its report and must instead keep every test green; a host stub comes from the shared contract fake (scripts/lib/contract-host.lua), which is judged against the real host by scripts/test-contract-host.lua; a stub written by hand only where the fake does not cover the capability, and then it says which capability and why in its own comment - never a stub that accepts what the real host refuses; and a bug that crosses processes needs a test that crosses processes;
+
+2. The tool's verdict vocabulary, one row per changed test - `discriminates`, `does-not`,
+   `unchanged-verdict`, `new-symbol`, `unclassified`, `not-applicable`, `skipped`, `timeout`,
+   `unrevertable`, `environment`, `green` - plus its summary lines, now:
+
+> N discriminating, M blocking, K not judged by this machine (S skipped, T timed out, U unrevertable, E environment)
+
+> BLOCKED: N test(s) do not discriminate - named above
+
+> refused: a round of N branches carries a Refactor-only line: one declaration cannot speak for several changes - land the refactor alone, or drop the line
 
 3. The land check's operator-facing detail: "every test the branch adds or changes fails on the code
    before the change".
