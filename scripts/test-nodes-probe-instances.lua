@@ -93,8 +93,14 @@ assert(starts == 0, "a second list() inside the deadline started " .. starts .. 
 cold()
 local many = {}
 for i = 1, 500 do many[i] = { node_id = string.format("%064x", i), name = "big" .. i } end
-B.list({ peers = many, live_capabilities = true })
+local capped = B.list({ peers = many, live_capabilities = true })
 assert(starts <= 64, "500 peers started " .. starts .. " children at once; the process cap is 64")
+-- A peer that is over the cap is NAMED, never silently answered as if it had been asked.
+local named = 0
+for _, row in ipairs(capped) do
+  if row.capabilities_reason == "probe_capacity" then named = named + 1 end
+end
+assert(named > 0, "the roster over the cap named no peer probe_capacity, so a capped peer would read as unknown")
 
 print("nodes probe instances ok: two real instances (" .. unmasked .. " children when unmarked), the marked one "
   .. "starts none, an instance loaded after the mark starts none, a repeated call starts none ("

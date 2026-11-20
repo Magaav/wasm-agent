@@ -359,6 +359,9 @@ local function probe_peers(peers, opts)
         -- JOIN the child this process already has for this peer: one live child per peer per deadline.
         launched[#launched + 1] = { id = id, operation_id = running.op, joined = true }
       elseif alive >= PROBE_MAX_CHILDREN then
+        -- Over the cap this process starts NOTHING for this peer and says so by name. It must not fall
+        -- through to the in-process ask: that ask is a blocking http call per peer, so the cap would
+        -- trade a memory blow-up for a serial sum of timeouts, which is the defect item 10a removed.
         at_capacity[#at_capacity + 1] = id
       else
       local argv = { "nodes", "probe", id }
@@ -377,6 +380,9 @@ local function probe_peers(peers, opts)
     end
   end
   local out = {}
+  for _, id in ipairs(at_capacity) do
+    out[id] = { capabilities = nil, reason = "probe_capacity" }
+  end
   for _, entry in ipairs(launched) do
     local settled, state = pcall(host.operation, "await", json.encode({ id = entry.operation_id,
       wait_s = tonumber(opts.deadline_s or PROBE_DEADLINE_S) }))
