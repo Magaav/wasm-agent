@@ -236,6 +236,9 @@ local GUIDANCE_LINES={
  'Calls are always fresh; reuse an earlier result only by asking for it (results.get).',
  '`vars` is your session state: whatever you assign to it, functions included, persists across scripts and turns.',
  'Use full paths, as given (programs and files); never `~`.',
+ -- Operator, 19/11 (change/done-gate-trial, item 2; verbatim, and the only sentence the gate's capture
+ -- gained): the one line that asks for the acceptance checks before the effect, instead of after it.
+ 'When a request asks for a change, record its acceptance checks with `done_criteria` before the first effect.',
 }
 M.guidance=table.concat(GUIDANCE_LINES,'\n')
 -- WASM_AGENT_RAW_CODE=first (lua/core/raw_code.lua): codemode is not declared, so no line may tell the

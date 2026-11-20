@@ -232,6 +232,14 @@ function M.set_name(name)
   return name
 end
 
+local function decode_body(text)
+  if type(text) ~= "string" or text == "" then return nil end
+  local ok, value = pcall(json.decode, text)
+  if not ok or type(value) ~= "table" then return nil end
+  return value
+end
+M.decode_body = decode_body
+
 local function fetch_peers(fresh, cached_only)
   local url = M.rendezvous_url()
   if url == "" then return {} end
@@ -246,17 +254,43 @@ local function fetch_peers(fresh, cached_only)
   -- with this node alone, which is true and cheap; a network read here would put the rendezvous'
   -- latency inside somebody else's turn.
   if cached_only then return cache or {} end
-  local peers = {}
+  local peers, read_ok = {}, false
   pcall(function()
     local headers = json.encode(M.signed_headers("nodes") or {})
-    local response = json.decode(host.http("GET", url:gsub("/+$", "") .. "/nodes", headers, ""))
+    local response = decode_body(host.http("GET", url:gsub("/+$", "") .. "/nodes", headers, ""))
     if response and tonumber(response.status) == 200 then
       local ok, payload = pcall(json.decode, response.body)
       if ok and type(payload) == "table" and type(payload.nodes) == "table" then
         peers = payload.nodes
+        read_ok = true
       end
     end
   end)
+  -- Whether the last roster read could reach the registry, so a caller can tell "no such peer" from
+  -- "I could not ask". Without it a COLD cache during an outage answered unknown_node for every name,
+  -- which reads as "that node never existed" when the truth is "the rendezvous was unreachable".
+  M.roster_last_read = read_ok and {ok = true, at = now} or {ok = false, at = now, error = "roster_unavailable"}
+  if not read_ok then
+    -- A roster read that FAILED is not a roster that is empty. Measured 19/11 ~12:17 UTC, home
+    -- network down: 38 relay detaches, and when the laptop had internet again `wa nodes` listed only
+    -- itself - every peer had been replaced by the empty answer of a failed read, so every
+    -- `wa call <peer>` was unknown_node:<peer> until a restart. A peer that is merely unreachable
+    -- stays KNOWN and is marked offline, with when it was last seen; only a read that succeeded may
+    -- remove one from the roster.
+    local kept = {}
+    for _, peer in ipairs(cache or {}) do
+      local copy = {}
+      for key, value in pairs(peer) do copy[key] = value end
+      copy.online = false
+      copy.last_seen = peer.last_seen or cache_at
+      copy.roster_stale = true
+      kept[#kept + 1] = copy
+    end
+    -- The cache is served with a short TTL, so a link that is still down is retried, and a link that
+    -- came back is re-read. The peers themselves are never dropped by a failed read.
+    cache, cache_at = kept, now - CACHE_TTL + 1
+    return kept
+  end
   cache, cache_at = peers, now
   return peers
 end
@@ -312,6 +346,11 @@ function M.list(opts)
   return out
 end
 
+-- True when the roster could NOT be read: a caller must then answer "unreachable", not "unknown".
+function M.roster_unreadable()
+  return M.roster_last_read ~= nil and M.roster_last_read.ok == false
+end
+
 function M.find(selector)
   if not selector or selector == "" then return nil end
   for _, node in ipairs(M.list()) do
@@ -336,7 +375,7 @@ local function lookup_node(node_id)
   if url == "" or not tostring(node_id):match("^%x+$") then return nil end
   local ok, node = pcall(function()
     local headers = json.encode(M.signed_headers("lookup") or {})
-    local response = json.decode(host.http("GET", url:gsub("/+$", "") .. "/lookup?node_id=" .. node_id, headers, ""))
+    local response = decode_body(host.http("GET", url:gsub("/+$", "") .. "/lookup?node_id=" .. node_id, headers, ""))
     return response and tonumber(response.status) == 200 and json.decode(response.body) or nil
   end)
   return ok and type(node) == "table" and node or nil
@@ -508,6 +547,12 @@ function M.mesh_attempt(node, capability, args, body, headers)
   } }
 end
 
+-- A transport answer is bytes until proven otherwise. These bodies cross a plain-HTTP hop and a proxy,
+-- so a 200 or a 503 can carry an HTML error page, an empty body, or a truncated frame; rxi's json.decode
+-- RAISES on all of those, and an uncaught raise inside a caller's slot accounting leaked the slot for
+-- good (four leaked slots = peer_busy_caller forever, with nothing sent and nothing run). Everything
+-- that reads a transport body goes through here, and a body that is not JSON is a named failure.
+
 -- Send a request to a node: directly when it advertises a routable endpoint,
 -- otherwise through the relay. `headers` are forwarded to the target.
 function M.request(node, path, body, inner_headers)
@@ -516,7 +561,7 @@ function M.request(node, path, body, inner_headers)
   local endpoint = M.endpoint(node)
   local direct = nil
   if endpoint then
-    local response = json.decode(host.http("POST", endpoint:gsub("/+$", "") .. path,
+    local response = decode_body(host.http("POST", endpoint:gsub("/+$", "") .. path,
       json.encode(headers), body or ""))
     if response and tonumber(response.status) == 200 then response.transport = "direct"; return response end
     direct = response
@@ -539,40 +584,67 @@ function M.request(node, path, body, inner_headers)
     -- The three numbers live in ONE place (M.RELAY_*), because the model-facing error names the cap it
     -- hit and a number written twice drifts (19/11, item E).
     local DEADLINE, started = M.RELAY_DEADLINE_SECONDS, host.now()
+    -- One caller holds at most M.RELAY_MAX_IN_FLIGHT relayed calls to this node (see the constant).
+    -- Refused BEFORE anything is sent, so a full queue costs the peer nothing.
+    local slot, slot_problem = M.acquire_slot(node.node_id)
+    if not slot then
+      return { error = slot_problem, node = node.name, node_id = node.node_id, retryable = true,
+        message = string.format("this node already holds %d relayed calls to %s (its cap): nothing was "
+          .. "sent and nothing ran. Wait for one to answer, then retry.", M.RELAY_MAX_IN_FLIGHT,
+          tostring(node.name or node.node_id)) }
+    end
+    -- EVERY exit from the relay loop goes through here - the answered path, the named refusal below,
+    -- and the no-identity refusal that used to return past the release. A slot that is not given back
+    -- is a caller that can never call that node again in this process.
+    local function finish(value)
+      M.release_slot(node.node_id)
+      return value
+    end
     for attempt = 1, M.RELAY_ATTEMPTS do
       local relay_headers = M.signed_headers("relay-send")
-      if not relay_headers then return { error = "no_identity" } end
+      if not relay_headers then return finish({ error = "no_identity", node = node.name, retryable = false }) end
       local envelope = json.encode({
         rid = rid, to = node.node_id, method = "POST", path = path,
         headers = headers, body = body or "",
       })
-      local response = json.decode(host.http("POST", relay:gsub("/+$", "") .. "/relay/send",
+      local response = decode_body(host.http("POST", relay:gsub("/+$", "") .. "/relay/send",
         json.encode(relay_headers), envelope))
       if response and tonumber(response.status) == 200 then
-        local decoded = json.decode(response.body)
+        local decoded = decode_body(response.body)
         if decoded and decoded.ok then
           -- `late` is the relay's word that the answer arrived after the deadline this caller was
           -- given: a result, but not a fresh one, and the caller is told so rather than guessing.
-          return { status = decoded.status, body = decoded.body, rid = rid, transport = "relay",
-            late = decoded.late == true }
+          return finish({ status = decoded.status, body = decoded.body, rid = rid, transport = "relay",
+            late = decoded.late == true })
         end
         -- relay_timeout is retryable too: the relay keeps the result for two
         -- minutes and the id is stable, so a retry re-fetches it.
         if not (decoded and decoded.error == "relay_timeout") then
-          return { error = (decoded and decoded.error) or "relay_error" }
+          return finish({ error = (decoded and decoded.error) or "relay_error" })
         end
       elseif response and tonumber(response.status) == 503 then
         -- Retired by the relay (it holds now), kept for an older rendezvous:
         -- the node was not attached, which is a reason to wait, not to fail. A `node_busy` answer is
         -- different: the target was reached and refused before starting, so the same rid may be sent
         -- again and nothing has run twice.
-        local decoded = json.decode(response.body)
+        local decoded = decode_body(response.body)
         last_error = (decoded and decoded.error == "node_busy") and "node_busy" or "node_not_attached"
+        -- The rendezvous is over ITS cap (19/11: too_many_connections to everyone). Back off with
+        -- jitter and honour Retry-After when the relay names one; never a tight retry, because a
+        -- fleet coming back at once is what filled the cap in the first place.
+        local reason = M.relay_code(response.body)
+        if reason == "too_many_connections" or reason == "relay_busy" then
+          last_error = "relay_busy"
+          local hint = nil
+          local got, body = pcall(json.decode, response.body)
+          if got and type(body) == "table" then hint = body.retry_after_ms or body.retry_after end
+          host.sleep(M.relay_backoff_ms(attempt, hint) / 1000)
+        end
       elseif response and tonumber(response.status) == 504 then
         -- The relay held the request and the node did not answer: either it
         -- never attached (retry when it is back) or it is busy and the action
         -- may still be running - which is exactly why the retry reuses the id.
-        local decoded = json.decode(response.body)
+        local decoded = decode_body(response.body)
         last_error = (decoded and decoded.error) or "node_no_answer"
         if decoded and decoded.retry_after_ms then
           host.sleep(tonumber(decoded.retry_after_ms) / 1000)
@@ -584,19 +656,20 @@ function M.request(node, path, body, inner_headers)
         -- The relay itself refused (401/403/404/400/409/413): retrying the same request cannot
         -- change that answer, and reporting it as `relay_timeout` hid the reason.
         local status = tonumber(response.status)
-        return { error = "relay_refused", relay_status = status,
-          reason = M.relay_code(response.body) or "unrecognized", rid = rid }
+        return finish({ error = "relay_refused", relay_status = status,
+          reason = M.relay_code(response.body) or "unrecognized", rid = rid })
       end
       if (host.now() - started) > DEADLINE then break end
       -- The count comes from the ONE constant the loop above iterates (not a second literal 3), so a
       -- change to RELAY_ATTEMPTS cannot leave this backoff on the old count (round 3, item 7).
-      if attempt < M.RELAY_ATTEMPTS then host.sleep(750 * attempt) end
+      -- Jittered: 750 ms doubling, capped at 8 s, never the same instant for every caller.
+      if attempt < M.RELAY_ATTEMPTS then host.sleep(M.relay_backoff_ms(attempt) / 1000) end
     end
     -- Say that it is retryable, and which reason it kept hitting: "could not
     -- reach the node" and "the node is busy" call for different next steps. The cap itself travels with
     -- the answer, so the sentence the model reads is built from what this loop enforced.
-    return { error = last_error or "relay_timeout", rid = rid, retryable = true,
-      deadline_seconds = DEADLINE, attempts = M.RELAY_ATTEMPTS }
+    return finish({ error = last_error or "relay_timeout", rid = rid, retryable = true,
+      deadline_seconds = DEADLINE, attempts = M.RELAY_ATTEMPTS })
   end
   return { error = "no_route" }
 end
@@ -716,7 +789,7 @@ local function lookup_record(node_id)
   if not tostring(node_id):match("^%x+$") then return nil, "bad_node_id" end
   local ok, response = pcall(function()
     local headers = json.encode(M.signed_headers("lookup") or {})
-    return json.decode(host.http("GET", url:gsub("/+$", "") .. "/lookup?node_id=" .. node_id, headers, ""))
+    return decode_body(host.http("GET", url:gsub("/+$", "") .. "/lookup?node_id=" .. node_id, headers, ""))
   end)
   if not ok or type(response) ~= "table" then return nil, "lookup_failed" end
   if tonumber(response.status) ~= 200 then
@@ -779,6 +852,86 @@ M.RELAY_ATTEMPT_HOLD_SECONDS = 20
 M.RELAY_ATTEMPTS = 3
 M.RELAY_DEADLINE_SECONDS = 60
 
+-- How many relayed calls ONE caller may hold against ONE node at a time, and the backoff it uses when
+-- the relay says it is over its own cap.
+--
+-- Measured 19/11 12:20-12:45 UTC: the rendezvous (MAX_CONNECTIONS=256) answered 503
+-- too_many_connections to everyone while ~470 TCP connections from the home IP kept coming; ~600
+-- relayed calls/min were then logged as "attached but no answer within the caller's wait (45 s)" and
+-- abandoned. A caller that only waits for its own answer will happily put another call on a node that
+-- is already behind, so the queue never drains: every new call keeps one more slot busy.
+--
+-- WHICH callers, from the 19/11 evidence: the two nodes on the home link, **avell** and the **laptop**
+-- (work's container). Their calls to **openclaw** ran at the highest rate the relay logged (~250/min),
+-- with work as the other target. That is why the cap is per TARGET node and shared by every caller on
+-- the calling node: it is those two machines answering each other, not a fleet-wide storm, and each of
+-- them must bound its own share.
+M.RELAY_MAX_IN_FLIGHT = 4
+
+-- Per-node in-flight counters, shared by EVERY caller on this node.
+--
+-- The cap used to live in one Lua table, which is one interpreter: the serve lane builds a fresh one
+-- per admitted call and "wa call" is its own process, so four concurrent callers each saw an empty
+-- table and the cap never bound anything that mattered. The count therefore lives in the node's own
+-- data directory - one file per held slot, named for the peer and the second it was taken. A holder
+-- stamps its file with that second, so a process that dies leaves a file that EXPIRES and a crash
+-- cannot fill the cap for good.
+local SLOT_TTL_SECONDS = 120
+
+-- The fallback for a host with no data directory (a fixture): the cap still applies in-process.
+local relay_in_flight = {}
+
+-- Per-node in-flight counters, THIS INTERPRETER ONLY.
+--
+-- A node-wide counter (one file per peer under paths.data(), so every caller process shares it) was
+-- written here and is DELIBERATELY NOT KEPT: review r4 moved the per-peer call cap to the
+-- fabric-transport mission, where the relay and the caller path are redesigned, and testing it against
+-- today's transport would be work on the wrong base. What remains is the local cap, which is still
+-- what stops one interpreter from putting unbounded calls on a peer, and it is honest about its
+-- scope: it does not bind another process.
+--
+-- The file-based version also carried a real defect worth remembering: it formatted host.now() with %d,
+-- and this host answers a FLOAT, so the first call raised "number has no integer representation" (a
+-- fast-path row caught it). A counter that needs a clock should floor it.
+local relay_in_flight = {}
+
+function M.acquire_slot(node_id)
+  node_id = tostring(node_id or "")
+  local held = relay_in_flight[node_id] or 0
+  if held >= M.RELAY_MAX_IN_FLIGHT then return nil, "peer_busy_caller" end
+  relay_in_flight[node_id] = held + 1
+  return true
+end
+
+function M.release_slot(node_id)
+  node_id = tostring(node_id or "")
+  local held = relay_in_flight[node_id] or 0
+  if held <= 1 then relay_in_flight[node_id] = nil else relay_in_flight[node_id] = held - 1 end
+  return true
+end
+
+function M.slots_held(node_id)
+  return relay_in_flight[tostring(node_id or "")] or 0
+end
+
+-- Never a tight retry on an overloaded relay. The wait doubles per attempt, is capped, and is always
+-- jittered so a fleet that was cut off does not come back in lockstep - the storm's own second half.
+-- A Retry-After hint (seconds, or the milliseconds this tree already uses) wins over the computed
+-- wait, because the server is telling us the earliest time it can serve us again.
+function M.relay_backoff_ms(attempt, retry_after)
+  local hint = tonumber(retry_after)
+  if hint then
+    if hint < 1000 then hint = hint * 1000 end
+    return math.min(30000, math.floor(hint))
+  end
+  local base = 750 * 2 ^ math.max(0, (tonumber(attempt) or 1) - 1)
+  -- The cap is on the WAIT, so it is applied after the jitter: capping first and then multiplying by
+  -- up to 1.5 would let a caller wait 12 s under an 8 s cap, and the comment would be a lie.
+  local capped = math.min(8000, base)
+  local jittered = math.floor(capped * (0.5 + math.random()))
+  return math.max(1, math.min(8000, jittered))
+end
+
 -- The `operation` tool awaits with `wait_ms`, whose MAXIMUM is 10 s (lua/core/tools.lua, the "operation"
 -- schema) - there is no `wait_s` parameter at all, and the 300 s this note used to name does not exist.
 -- A slice must also stay under the relay cap above, or the call that waits is itself cut off by the relay:
@@ -786,6 +939,15 @@ M.RELAY_DEADLINE_SECONDS = 60
 -- both (the schema's maximum and this cap).
 M.OPERATION_AWAIT_MAX_MS = 10000
 M.RELAY_AWAIT_SLICE_MS = math.min(M.OPERATION_AWAIT_MAX_MS, M.RELAY_DEADLINE_SECONDS * 1000)
+
+
+-- How long a PEER may work on one relayed effectful call before it must answer a handle instead of an
+-- outcome (change/remote-pending, item 1). The relay holds a queued call SEND_WAIT (45 s,
+-- rust/wa-rendezvous/src/rendezvous.rs) and tells the node to finish ANSWER_MARGIN_MS (3 s) earlier, so
+-- the honest budget is 42 s; this keeps 7 s of that for the return trip and the signature. It is
+-- stamped in the SIGNED body (M.remote_call), so the peer adopts by the caller's own number and nothing
+-- on the path can raise it.
+M.RELAY_PEER_BUDGET_MS = 35000
 
 -- The reasons the relay deadline produces. Any of them means the same thing to the caller: the answer did
 -- not arrive in time, and the action may or may not have run on that node.
@@ -799,8 +961,12 @@ function M.relay_deadline_note(node, reason)
   local why = (reason and reason ~= "") and (" (last reason: " .. tostring(reason) .. ")") or ""
   return string.format(
     "%s did not answer a relayed call within %d s (%d attempts; the relay holds a queued call about %d s "
-      .. "each), so this call stopped waiting%s. Nothing here says the action did not run: read that node's "
-      .. "state before re-issuing it. Work that needs longer is started ON that node and awaited there: "
+      .. "each), so this call stopped waiting%s. A relayed bash that outlives that hold is ADOPTED, not "
+      .. 'killed: it answers {state:"pending", op, node} and stays running there as a managed operation, '
+      .. "and wait(op) or cancel(op) route back to that node. This answer is a different case: the relay "
+      .. "never delivered the call's answer, and the peer may still have adopted it late - check "
+      .. "operation list on that node before re-issuing it, because nothing here says the action did not "
+      .. "run. Work that needs longer is started ON that node and awaited there: "
       .. 'tools.remote({node:"%s", capability:"operation", action:"start", command:"<the command>"}) returns '
       .. 'its id, and tools.remote({node:"%s", capability:"operation", action:"await", id:"<id>", '
       .. 'wait_ms:%d}): await in slices of %d s until it settles.',
@@ -808,21 +974,66 @@ function M.relay_deadline_note(node, reason)
     M.RELAY_AWAIT_SLICE_MS, M.RELAY_AWAIT_SLICE_MS / 1000)
 end
 
+-- A peer the roster already KNOWS but marks offline (a failed roster read kept it, see fetch_peers).
+-- The answer names it and when it was last seen, instead of the unknown_node that made a network blip
+-- look like a deleted node (19/11: after the link returned, every call to a peer was unknown_node).
+function M.peer_offline(node)
+  local name = tostring((node and (node.name or node.node_id)) or "the peer")
+  local seen = node and tonumber(node.last_seen)
+  local when = "unknown"
+  if seen then
+    local ok, formatted = pcall(os.date, "!%Y-%m-%dT%H:%M:%SZ", math.floor(seen))
+    when = ok and formatted or ("unix " .. tostring(math.floor(seen)))
+  end
+  return { error = "peer_offline:" .. name .. " (last seen " .. when .. ")", node = name,
+    connector = "peer_offline", online = false, last_seen = seen,
+    message = string.format("%s is in the roster but unreachable right now (last seen %s): nothing was "
+      .. "sent, so nothing ran. Check the link and the node, then retry - a peer that is merely "
+      .. "unreachable is never removed from the roster.", name, when),
+    retryable = true }
+end
+
 -- Call a capability on a peer: direct when possible, else through the relay.
 function M.remote_call(selector, capability, args)
   local node = M.find(selector)
-  if not node then return { error = "unknown_node:" .. tostring(selector) } end
+  if not node then
+    -- A COLD roster during an outage is not "no such node": it is "the rendezvous could not be
+    -- asked". Answering unknown_node here is what made a network blip look like a deleted peer.
+    if M.roster_unreadable() then
+      return { error = "roster_unavailable:" .. tostring(selector), node = tostring(selector),
+        connector = "roster_unavailable", retryable = true,
+        message = string.format("the roster could not be read, so %s cannot be looked up right now: "
+          .. "nothing was sent and nothing ran. This is not a missing node - retry once the "
+          .. "rendezvous answers.", tostring(selector)) }
+    end
+    return { error = "unknown_node:" .. tostring(selector) }
+  end
+  -- Known but offline, and with no endpoint to try directly: say so by name. A call that still has a
+  -- direct endpoint is attempted below, because a stale roster mark is not proof the peer is gone.
+  if node.online == false and not M.endpoint(node) then return M.peer_offline(node) end
   local ts = math.floor(host.now())
   -- The body is built before it is signed, and the signature travels in the headers rather than
   -- inside the body: what was signed is the body as it is sent, so the receiver can hash the
   -- bytes it got. `from_node_id` and the public key stay in the body for readability - they are
   -- covered by the hash like everything else.
+  -- Only an effectful capability can outlive the relay hold, so only bash carries the budget a peer
+  -- adopts by (item 1). It travels INSIDE args, which is what the peer hands its capability
+  -- (server.lua: node_capability(capability, request.args, caller)), and it is inside the signed
+  -- bytes either way: the peer reads it as the caller's own word. Copied, never mutating the caller's
+  -- table, and stripped by the peer before the command is launched.
+  local inner = args or {}
+  if capability == "bash" and type(inner) == "table" then
+    local copy = {}
+    for key, value in pairs(inner) do copy[key] = value end
+    copy.budget_ms = M.RELAY_PEER_BUDGET_MS
+    inner = copy
+  end
   local body = json.encode({
     from_node_id = (M.identity() or {}).node_id,
     to_node_id = node.node_id,
     request_id = host.uuid(),
     capability = capability,
-    args = args or {},
+    args = inner,
   })
   local headers, problem = M.signed_headers("call", body)
   if not headers then return { error = problem } end
@@ -831,7 +1042,12 @@ function M.remote_call(selector, capability, args)
   local mesh = M.mesh_enabled() and M.mesh_attempt(node, capability, args, body, headers) or nil
   if mesh and mesh.refused then return mesh.refused end
   local response = (mesh and mesh.response) or M.request(node, "/node/call", body, headers)
-  if not response then return { error = "remote_unreachable", node = node.name } end
+  if not response then
+    -- The transport could not reach a peer the roster already marks offline: name it, do not pretend
+    -- it never existed.
+    if node.online == false then return M.peer_offline(node) end
+    return { error = "remote_unreachable", node = node.name }
+  end
   if response.error == "relay_refused" then
     local refusal = M.refusal("relay", response.reason, response.relay_status, node)
     refusal.rid = response.rid
@@ -851,7 +1067,9 @@ function M.remote_call(selector, capability, args)
         fix = string.format('Start the work on that node and await it there: '
           .. 'tools.remote({node:"%s", capability:"operation", action:"start", command:"<the command>"}) '
           .. 'then tools.remote({node:"%s", capability:"operation", action:"await", id:"<id>", '
-          .. 'wait_ms:%d}): await in slices of %d s until it settles.', name, name,
+          .. 'wait_ms:%d}): await in slices of %d s until it settles. A bash that outlives the hold is '
+          .. 'adopted on its own and answers {state:"pending", op, node}: resume it with wait(op) or stop '
+          .. 'it with cancel(op).', name, name,
           M.RELAY_AWAIT_SLICE_MS, M.RELAY_AWAIT_SLICE_MS / 1000),
         input = tostring(capability or "the remote call") }
     end

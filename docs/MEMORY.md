@@ -314,6 +314,12 @@ and the deploy shape, and a guest can ask the model to repeat its own context:
 | `master` | `WASM_AGENT_AGENTS_MD` | `~/.wasm-agent/AGENTS.md` (the user's global file), then every `AGENTS.md` from `/` down to the session workdir, all injected |
 | `guest` | `WASM_AGENT_AGENTS_MD_GUEST` | `./AGENTS.guest.md`, `~/.wasm-agent/AGENTS.guest.md` |
 
+It is also **scoped by environment**, for what is true of this machine and not of the project
+(`agent.environment_note`): `AGENTS.sandbox.md` when `WASM_AGENT_SANDBOX=1` or `/.dockerenv`
+exists, else `AGENTS.omarchy.md` when `OMARCHY_PATH` is set or `/usr/share/omarchy` is a directory.
+Sandbox wins when both apply, one note at most, and a guest gets none. Overrides are
+`WASM_AGENT_AGENTS_MD_SANDBOX` and `WASM_AGENT_AGENTS_MD_OMARCHY`.
+
 Installers do not write `~/.wasm-agent/AGENTS.md`: it is the user's own file. An older
 `scripts/install.ps1` seeded it with the repo's `AGENTS.md`; the deploy and the installer retire
 an unedited seed to `AGENTS.md.seeded-backup` and warn about an edited one

@@ -41,14 +41,26 @@ check(not provider.is_rate_limited('provider_http_429: {"error":{"type":"GoUsage
   'a terminal monthly quota is a landed outcome, not a wait')
 check(not provider.is_rate_limited('subscription_http_429: busy'),
   'the subscription bridge keeps its own visible reconnect cycles')
-check(provider.rate_limit_retries()==3,
-  'the refusal policy is on by default with pi\'s three attempts')
+-- Brief item 1: a transient error NEVER ends a run while it stays transient, so the class has NO total
+-- cap by default. It used to default to 3 (2, 4, 8 s) and that ended runs a 30-second wait would have
+-- finished. A bound is now set by name, and the bounded case is the identical repeat below.
+check(provider.rate_limit_retries()==math.huge,
+  'the refusal policy has no total cap by default (brief item 1: the operator stops it, not a counter)')
+check(provider.identical_repeat_ceiling()==10,
+  'while an UNCHANGED failure repeating is bounded, so a wall is not a hot loop')
 check(provider.rate_limit_backoff_ms(1,1234)==1234,
   'the provider\'s own Retry-After hint is used ahead of the computed backoff')
 check(provider.retry_after_ms(busy..' [retry_after_ms=2500]')==2500,
   'the hint survives the string error boundary')
 check(provider.rate_limit_backoff_ms(1,nil)==0,
   'the fixture delay makes the agent retry without sleeping')
+-- The backoff is the shape the brief asks for: 1 s doubling to a 30 s cap, jittered.
+overrides.WASM_AGENT_PROVIDER_RATE_LIMIT_DELAY_MS=nil
+local first_wait=provider.rate_limit_backoff_ms(1,nil)
+check(first_wait>=750 and first_wait<=1500,'the first wait is about 1 s, got '..first_wait)
+local capped_wait=provider.rate_limit_backoff_ms(20,nil)
+check(capped_wait>=22500 and capped_wait<=37500,'the wait caps at 30 s, got '..capped_wait)
+overrides.WASM_AGENT_PROVIDER_RATE_LIMIT_DELAY_MS='0'
 
 local sid=session('provider-rate-limit-retry')
 local bot=agentlib.new(sid,function() end,'master','master','')
@@ -90,5 +102,140 @@ local exhausted_ok,exhausted_problem=pcall(exhausted_bot.run,exhausted_bot,'give
 check(not exhausted_ok and tostring(exhausted_problem):find('provider_http_429',1,true),
   'an exhausted retry budget surfaces the refusal')
 check(exhausted_calls==3,'two retries means three provider attempts in total')
+
+-- ---- brief item 1: a plain 5xx waits without a total cap, and only an UNCHANGED repeat is bounded ----
+-- The observed defect: a bare provider_http_503, with no link word in it, got three tries (2, 4, 8 s)
+-- and ended the run. Item 1 says a transient error never ends a run while it stays transient.
+-- The earlier sections of this row set a bound BY NAME (that is the documented way to bound it), so
+-- it is cleared here to measure the DEFAULT the brief specifies.
+overrides.WASM_AGENT_PROVIDER_RATE_LIMIT_RETRIES=nil
+local plain503='lua/core/provider.lua:1405: provider_http_503: {"error":{"message":"upstream is busy"}}'
+check(provider.is_rate_limited(plain503),'a plain 503 is a transient refusal')
+check(provider.rate_limit_retries()==math.huge,'and it has no total cap by default')
+
+-- (a) A long, CHANGING outage finishes: far more attempts than the old three-try cap.
+local long_sid=session('provider-plain-503-long')
+local long_bot=agentlib.new(long_sid,function() end,'master','master','')
+local long_calls,long_events=0,{}
+local long_real=long_bot.emit
+long_bot.emit=function(event) long_events[#long_events+1]=event; return long_real(event) end
+provider.complete_with=function()
+  long_calls=long_calls+1
+  if long_calls<=8 then
+    -- The body changes each attempt, as a real busy upstream's does.
+    error('provider_http_503: {"error":{"message":"upstream is busy, attempt '..long_calls..'"}}')
+  end
+  return {content='answered after a long busy spell',tool_calls={},finish_reason='stop',usage=usage}
+end
+local long_reply=long_bot:run('wait out a long busy spell')
+check(long_reply=='answered after a long busy spell',
+  'a 503 that keeps changing is waited out well past the old three-try cap, got '..long_calls..' calls')
+check(long_calls==9,'it took nine attempts, not three')
+local saw_uncapped=false
+for _,event in ipairs(long_events) do
+  if event.type=='status' and event.text and event.text:find('no limit',1,true) then saw_uncapped=true end
+end
+check(saw_uncapped,'the row says the wait is uncapped, not that a counter is nearly spent')
+
+-- (b) The IDENTICAL 500 is a wall, not a queue: bounded by its own ceiling, then NAMED.
+overrides.WASM_AGENT_PROVIDER_RATE_LIMIT_DELAY_MS='0'
+overrides.WASM_AGENT_PROVIDER_IDENTICAL_REPEATS='3'
+local wall_sid=session('provider-identical-500')
+local wall_bot=agentlib.new(wall_sid,function() end,'master','master','')
+local wall_calls=0
+local wall='lua/core/provider.lua:1405: provider_http_500: {"error":{"message":"deployment is broken"}}'
+provider.complete_with=function() wall_calls=wall_calls+1; error(wall) end
+local wall_ok,wall_problem=pcall(wall_bot.run,wall_bot,'hit a wall')
+check(not wall_ok,'an unchanged 500 still ends the run')
+check(wall_calls==3,'it stops at its identical-repeat ceiling, got '..wall_calls)
+check(tostring(wall_problem):find('the same failure repeated',1,true)~=nil,
+  'and the failure NAMES why it stopped waiting: '..tostring(wall_problem))
+check(tostring(wall_problem):find('provider_http_500',1,true)~=nil,
+  "while keeping the provider's own words")
+overrides.WASM_AGENT_PROVIDER_IDENTICAL_REPEATS=nil
+
+-- (c) The ceiling must NOT apply where repetition is the outage itself. A link answering the same
+-- "connection refused" for minutes, and a 503 with a fixed body, both repeat identically - that is what
+-- an outage looks like - and bounding them would kill the very run this change exists to save.
+overrides.WASM_AGENT_PROVIDER_IDENTICAL_REPEATS='3'
+check(not provider.repeats_are_a_wall('provider_error: connection refused'),
+  'an identical LOST LINK is not a wall: it repeats exactly this way for as long as the outage lasts')
+check(not provider.repeats_are_a_wall('lua/core/provider.lua:1405: provider_http_503: {"error":"busy"}'),
+  'an identical 503 is not a wall: the provider is asking us to wait')
+for _, status in ipairs({'504','408','425','429','529'}) do
+  check(not provider.repeats_are_a_wall('provider_http_'..status..': waiting'),
+    'an identical '..status..' is not a wall')
+end
+check(provider.repeats_are_a_wall('provider_http_500: {"error":"broken deployment"}'),
+  'an identical 500 IS a wall')
+check(not provider.repeats_are_a_wall('provider_http_502: {"error":{"code":"vault_upstream_unreachable"}}'),
+  'an identical vault 502 is the link, not a wall')
+
+-- The link case end to end: twelve identical "connection refused" failures, far past the ceiling of 3,
+-- and the turn still finishes when the link returns.
+overrides.WASM_AGENT_PROVIDER_CONNECT_RETRIES='20'
+overrides.WASM_AGENT_PROVIDER_CONNECT_WAIT_SECONDS='600'
+overrides.WASM_AGENT_PROVIDER_RATE_LIMIT_DELAY_MS='0'
+overrides.WASM_AGENT_PROVIDER_CONNECT_DELAY_MS='0'
+host.sleep=function() end
+local refused_sid=session('provider-identical-link')
+local refused_bot=agentlib.new(refused_sid,function() end,'master','master','')
+local refused_calls=0
+provider.complete_with=function()
+  refused_calls=refused_calls+1
+  if refused_calls<=12 then error('lua/core/provider.lua:1208: provider_error: connection refused') end
+  return {content='answered after the outage',tool_calls={},finish_reason='stop',usage=usage}
+end
+local refused_reply=refused_bot:run('survive an identical-failure outage')
+check(refused_reply=='answered after the outage',
+  'twelve IDENTICAL link failures do not end the run, got '..refused_calls..' calls')
+check(refused_calls==13,'all thirteen attempts were made: the ceiling never applied to the link')
+
+-- ...and the same for a fixed-body 503.
+local busy_sid=session('provider-identical-busy')
+local busy_bot=agentlib.new(busy_sid,function() end,'master','master','')
+local busy_calls=0
+provider.complete_with=function()
+  busy_calls=busy_calls+1
+  if busy_calls<=12 then error('provider_http_503: {"error":"busy"}') end
+  return {content='answered after the busy spell',tool_calls={},finish_reason='stop',usage=usage}
+end
+check(busy_bot:run('survive an identical 503')=='answered after the busy spell',
+  'twelve IDENTICAL 503s do not end the run, got '..busy_calls..' calls')
+overrides.WASM_AGENT_PROVIDER_IDENTICAL_REPEATS=nil
+
+-- (d) A wall must not stay armed: one 500 followed by twelve IDENTICAL link failures is a wall and
+-- then an OUTAGE, and the outlet is what must win. Measured by review r3: the ceiling was armed by the
+-- 500 and never cleared, so the link failures killed the run while the row said "no limit".
+overrides.WASM_AGENT_PROVIDER_IDENTICAL_REPEATS='3'
+overrides.WASM_AGENT_PROVIDER_CONNECT_RETRIES='20'
+overrides.WASM_AGENT_PROVIDER_CONNECT_WAIT_SECONDS='600'
+overrides.WASM_AGENT_PROVIDER_CONNECT_DELAY_MS='0'
+local mixed_sid=session('provider-500-then-link')
+local mixed_bot=agentlib.new(mixed_sid,function() end,'master','master','')
+local mixed_calls=0
+provider.complete_with=function()
+  mixed_calls=mixed_calls+1
+  if mixed_calls==1 then error('provider_http_500: {"error":"broken deployment"}') end
+  if mixed_calls<=13 then error('provider_error: connection refused') end
+  return {content='answered after the mixed outage',tool_calls={},finish_reason='stop',usage=usage}
+end
+local mixed_reply=mixed_bot:run('a 500 and then an outage')
+check(mixed_reply=='answered after the mixed outage',
+  'one 500 followed by twelve IDENTICAL link failures still waits the outage out, got '..mixed_calls..' calls')
+check(mixed_calls==14,'every attempt was made: the 500 did not leave its ceiling armed')
+
+-- ...and a pure wall still stops: ten identical 500s fail by name.
+overrides.WASM_AGENT_PROVIDER_IDENTICAL_REPEATS='10'
+local wall_only_sid=session('provider-500-only')
+local wall_only_bot=agentlib.new(wall_only_sid,function() end,'master','master','')
+local wall_only=0
+provider.complete_with=function() wall_only=wall_only+1; error('provider_http_500: {"error":"broken deployment"}') end
+local wall_ok,wall_problem=pcall(wall_only_bot.run,wall_only_bot,'a pure wall')
+check(not wall_ok,'ten identical 500s end the run')
+check(wall_only==10,'at the ceiling of ten, got '..wall_only)
+check(tostring(wall_problem):find('the same failure repeated',1,true)~=nil,
+  'and the failure is NAMED: '..tostring(wall_problem))
+overrides.WASM_AGENT_PROVIDER_IDENTICAL_REPEATS=nil
 
 print('provider rate-limit recovery ok ('..checks..' checks)')

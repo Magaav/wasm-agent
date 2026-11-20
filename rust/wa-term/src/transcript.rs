@@ -464,7 +464,11 @@ impl Transcript {
                 // cell of the first row instead (no blank cell = the code fills the row: no icon).
                 let mut wrapped = wrap_rows(line, inner);
                 if let Some(first) = wrapped.first_mut() {
-                    if let Some((with_icon, col)) = icon_at_right(first) {
+                    let placed = icon_at_right(first)
+                        // A band row paints its rest with EL and carries no blank cell to put the
+                        // icon in (item F): the icon still goes onto the band, at its right end.
+                        .or_else(|| icon_at_band_end(first, inner));
+                    if let Some((with_icon, col)) = placed {
                         *first = with_icon;
                         copies.push((start, format!("{RIGHT_TAG}{}\u{1}{}", col + usize::from(focused), content.expect("checked"))));
                     }
@@ -983,6 +987,17 @@ fn icon_at_right(row: &str) -> Option<(String, usize)> {
     out.push(COPY_ICON);
     out.extend(chars[at + 1..].iter());
     Some((out, n))
+}
+
+/// The copy icon at the right end of a BAND row: a row that ends with the background-colour erase
+/// (ESC[K) has no blank cell for icon_at_right to take, because the band paints its rest with no
+/// characters at all (item F). The icon is placed by column instead, on the row's own line, with the
+/// band's colour still open, so it wears the band and not the terminal default.
+fn icon_at_band_end(row: &str, width: usize) -> Option<(String, usize)> {
+    if width < 2 || !row.ends_with("\u{1b}[K") { return None }
+    // One column short of the width, so the icon sits at the band's right edge with a cell to spare.
+    let column = width.saturating_sub(1).max(1);
+    Some((format!("{row}\u{1b}[{column}G{COPY_ICON}"), width))
 }
 
 #[cfg(test)]
@@ -1540,6 +1555,60 @@ mod tests {
         }
         // No marker ever reaches the screen, whatever the width.
         for row in chat.view(120, 10) { assert!(!row.contains('\u{1}'), "no marker is drawn: {row:?}"); }
+    }
+
+    /// Item G: a resize is a REPAINT FROM STATE, not a reflow of printed bytes.
+    ///
+    /// The chat is drawn into a scroll region from the blocks this crate owns, so what a changed
+    /// width must produce is exactly what a session opened at that width would show - in both
+    /// directions. The comparison is against a FRESH transcript built from the same writes, so a
+    /// stale row, a lost block or a half-reflowed one all fail it.
+    #[test]
+    fn a_resize_repaints_the_whole_chat_at_the_new_width_in_both_directions() {
+        let writes: Vec<String> = (0..12)
+            .map(|i| format!("message {i}: {}", "uma frase longa com palavras ".repeat(3)))
+            .collect();
+        let build = || {
+            let mut t = plain(Transcript::default());
+            for w in &writes { t.write(w); }
+            t
+        };
+        // 120 -> 60 and back: the same view a session at that width shows.
+        let mut resized = build();
+        let at120 = resized.view(120, 40);
+        let mut fresh120 = build();
+        assert_eq!(at120, fresh120.view(120, 40), "120 columns matches a fresh render");
+        let at60 = resized.view(60, 40);
+        let mut fresh60 = build();
+        assert_eq!(at60, fresh60.view(60, 40), "after a shrink, 60 columns matches a fresh render");
+        let back = resized.view(120, 40);
+        assert_eq!(back, at120, "and widening back restores the 120-column view exactly");
+        assert_ne!(at60, at120, "the two widths really differ, so the comparison is not vacuous");
+    }
+
+    /// Item G's cost, asserted DETERMINISTICALLY: what makes a repaint cheap is that it draws one
+    /// screenful and re-measures nothing at an unchanged width. A wall clock here measured the
+    /// machine as much as the code, so the counters carry it instead.
+    #[test]
+    fn a_long_session_repaints_one_screenful_and_remeasures_nothing() {
+        let build = |messages: usize| {
+            let mut t = plain(Transcript::default());
+            for i in 0..messages {
+                t.write(&format!("row {i}: {}", "palavras de uma mensagem longa ".repeat(2)));
+            }
+            t
+        };
+        let mut long = build(240);
+        let mut short = build(12);
+        assert_eq!(long.view(120, 40).len(), 40, "240 messages draw 40 rows");
+        assert_eq!(short.view(120, 40).len(), 40, "12 messages draw the same 40 rows");
+        let mut third = build(240);
+        let _ = third.view(120, 40);
+        let measured = third.count_width;
+        let _ = third.view(120, 40);
+        assert_eq!(third.count_width, measured, "a second frame at 120 measures at the same width");
+        let _ = third.view(60, 40);
+        assert_ne!(third.count_width, measured, "and a resize is what makes it measure again");
     }
 
     #[test]

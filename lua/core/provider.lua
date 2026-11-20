@@ -1101,6 +1101,63 @@ function M.is_transient(problem)
   return false
 end
 
+-- The failures a replay cannot repair: the request itself, the credential, the model or the content
+-- was refused. Allow-listed by status and by text, because the brief's rule is "unknown is not
+-- final" - a failure this file does not recognise must be retried a bounded number of times and
+-- then named, never treated as terminal on the strength of not matching anything.
+local FINAL_STATUS = { ["400"]=true, ["401"]=true, ["403"]=true, ["404"]=true, ["405"]=true,
+  ["413"]=true, ["415"]=true, ["422"]=true }
+local FINAL_TEXT = { "invalid api key", "invalid_api_key", "incorrect api key", "unauthorized",
+  "permission denied", "forbidden", "authentication failed", "unauthenticated",
+  "model not found", "unknown model", "model_does_not_exist", "no such model",
+  "does not support this protocol", "content policy", "content_policy", "safety system",
+  "context_overflow", "invalid_request", "bad request" }
+
+function M.is_final(problem)
+  local text = tostring(problem or ""):lower()
+  -- The STATUS the server chose is the strongest signal there is, so it is read before any word in
+  -- the body: a 401 whose body happens to mention "connection refused" is still an auth refusal, and
+  -- retrying it would wait forever for a verdict that already arrived.
+  local status = text:match("provider_http_(%d+)")
+  if status and FINAL_STATUS[status] then return true end
+  -- A dead link is never final: the provider has not judged anything yet.
+  if M.is_link_down(text) then return false end
+  for _, pattern in ipairs(FINAL_TEXT) do
+    if text:find(pattern, 1, true) then return true end
+  end
+  return false
+end
+
+-- A provider failure that matches NO known class. It still says "provider", so it is not an internal
+-- guard or a cancellation; the agent retries it a bounded number of times (M.unknown_retries) and
+-- then fails by name, instead of dying on the first attempt as an unnamed provider_error.
+function M.is_unknown_failure(problem)
+  local text = tostring(problem or ""):lower()
+  if text == "" then return false end
+  if not (text:find("provider_error:", 1, true) or text:find("provider_http_", 1, true)) then return false end
+  if M.is_final(text) or M.is_link_down(text) or M.is_connection_lost(text) then return false end
+  if M.is_rate_limited(text) or M.is_response_timeout(text) or M.is_transient(text) then return false end
+  return true
+end
+
+-- Bounded on purpose: an unclassified failure may already have been billed upstream, and retrying it
+-- forever would turn a bug into a loop. Five, then the run says so by name.
+function M.unknown_retries()
+  local off = env("WASM_AGENT_PROVIDER_RETRIES")
+  if off ~= nil and trim(off) == "0" then return 0 end
+  local raw = env("WASM_AGENT_PROVIDER_UNKNOWN_RETRIES")
+  if raw == nil or trim(raw) == "" then return 5 end
+  local count = tonumber(raw)
+  if not count then return 5 end
+  return math.max(0, math.min(5, math.floor(count)))
+end
+
+-- 1, 2, 4, 8, 16 s, jittered: the same shape as a lost link, without its patience.
+function M.unknown_backoff_ms(attempt)
+  local seconds = math.min(30, 2 ^ (math.max(1, tonumber(attempt) or 1) - 1))
+  return math.floor(seconds * 1000 * (0.75 + math.random() * 0.5))
+end
+
 -- How many times a transient failure is retried, with exponential backoff (2, 4, 8, 16 s, jittered).
 function M.transient_retries()
   local count = tonumber(env("WASM_AGENT_PROVIDER_RETRIES") or "")
@@ -1122,33 +1179,79 @@ function M.is_rate_limited(problem)
   local text = tostring(problem or ""):lower()
   local status = text:match("provider_http_(%d+)")
   if not status or not TRANSIENT_STATUS[status] then return false end
+  -- A 5xx that names a dead link is not an answer about the provider's health: the request never
+  -- reached it, so the short refusal budget would give up while the link is still down. Only 5xx is
+  -- downgraded - a 429 means the provider itself answered, and a word in that body must not turn a
+  -- deliberate "slow down" into an unbounded wait for a link that is fine.
+  if status:sub(1, 1) == "5" and M.is_link_down(text) then return false end
   for _, pattern in ipairs(RATE_LIMIT_TERMINAL) do
     if text:find(pattern, 1, true) then return false end
   end
   return true
 end
 
--- Default three, like pi's `retry.maxRetries`. `WASM_AGENT_PROVIDER_RETRIES` still acts as the
--- operator off-switch for every provider retry when it is set; the explicit knob wins when both are.
+-- UNBOUNDED by default. The brief (item 1) is explicit: a transient error never ends a run, and the
+-- operator stops it - "no total cap while it stays transient". Rate limits and 5xx are the ordinary
+-- shape of a busy upstream, and a 3-try cap (2, 4, 8 s) ended runs that a 30-second wait would have
+-- finished. An operator who wants a bound sets WASM_AGENT_PROVIDER_RATE_LIMIT_RETRIES (or the general
+-- WASM_AGENT_PROVIDER_RETRIES off-switch) by name - which is also what every bounded test does.
+--
+-- The bounded case is the IDENTICAL repeat: a 500 that answers the same bytes every time is not a busy
+-- upstream, it is a request or a deployment that will never succeed, and waiting forever would be a hot
+-- loop. `M.identical_repeat_ceiling` bounds THAT, by name, without capping the class.
 function M.rate_limit_retries()
   local raw = env("WASM_AGENT_PROVIDER_RATE_LIMIT_RETRIES")
   if raw == nil or trim(raw) == "" then raw = env("WASM_AGENT_PROVIDER_RETRIES") end
-  if raw == nil or trim(raw) == "" then return 3 end
+  if raw == nil or trim(raw) == "" then return math.huge end
   local count = tonumber(raw)
-  if not count then return 3 end
+  if not count then return math.huge end
   return math.max(0, math.min(8, math.floor(count)))
 end
 
--- 2 s, 4 s, 8 s, ... capped at a minute - the same shape as pi's agent retry.
+-- Whether an UNCHANGED repetition of THIS failure is a wall rather than a queue.
+--
+-- Only two shapes qualify, and the distinction is what keeps the run's own promise ("no limit while it
+-- stays transient") true:
+--
+--   * a provider_http_500 that keeps answering the same bytes - a request or deployment that will never
+--     succeed, where waiting is a hot loop;
+--   * a failure that matched NO class at all, where repeating it proves nothing.
+--
+-- A LOST LINK is deliberately excluded even though its text is identical every time: "connection
+-- refused" repeated for two minutes is exactly what an outage looks like, and bounding it would kill
+-- the run during the outage this whole change exists to survive. The busy statuses (503/504/408/425/
+-- 429/529) are excluded for the same reason: the provider is telling us to wait, and a fixed body does
+-- not turn that into a wall.
+function M.repeats_are_a_wall(problem)
+  local text = tostring(problem or ""):lower()
+  if M.is_link_down(text) then return false end
+  local status = text:match("provider_http_(%d+)")
+  if status then return status == "500" end
+  -- No status at all: the unknown bucket, which is already bounded by its own count.
+  return not M.is_transient(text) and not M.is_connection_lost(text)
+end
+
+-- How many times the SAME failure text may repeat before the run stops calling it transient. A 500
+-- that returns byte-identical answers is a wall, not a queue, and the run says so by NAME instead of
+-- waiting for a change that is not coming. It is a ceiling on repetition, not a total cap on the
+-- class: a link that fails and returns, or a 503 whose body changes, keeps waiting.
+function M.identical_repeat_ceiling()
+  local raw = tonumber(env("WASM_AGENT_PROVIDER_IDENTICAL_REPEATS") or "")
+  if not raw then return 10 end
+  return math.max(2, math.min(100, math.floor(raw)))
+end
+
+-- 1 s, 2 s, 4 s, ... capped at 30 s - the same shape the brief asks for (1 s doubling to a 30 s cap,
+-- jittered), so every transient class waits the same way.
 function M.rate_limit_delay_ms()
   local ms = tonumber(env("WASM_AGENT_PROVIDER_RATE_LIMIT_DELAY_MS") or "")
-  if not ms then return 2000 end
+  if not ms then return 1000 end
   return math.max(0, math.min(60000, math.floor(ms)))
 end
 
 function M.rate_limit_max_delay_ms()
   local ms = tonumber(env("WASM_AGENT_PROVIDER_RATE_LIMIT_MAX_DELAY_MS") or "")
-  if not ms then return 60000 end
+  if not ms then return 30000 end
   return math.max(0, math.min(600000, math.floor(ms)))
 end
 
@@ -1193,8 +1296,44 @@ local CONNECTION_TEXT = { "peer disconnected", "connection reset", "connection r
   -- smaller, explicit pre-response budget above.
   "timeout: connect", "connect: timeout" }
 
+-- A REFUSAL whose body names a dead link, not a provider answer: the local vault could not reach the
+-- provider's upstream. Measured 19/11 12:17 UTC with the home internet down - the vault answered
+--   provider_http_502: {"error":{"code":"vault_upstream_unreachable","message":"wa-vault could not
+--   reach the opencode-go upstream (gaierror)"}}
+-- (reproduced here against the real vault/wa_vault.py with a closed port and with an unresolvable
+-- host: 502 in 0.00 s, both bodies). 502 is a transient STATUS, so is_rate_limited claimed it: three
+-- short tries 2/4/8 s and then run_failed: provider_http_502 vault_upstream_unreachable (gaierror).
+-- The status is a lie about who failed: the provider never saw the request, so nothing was served, no
+-- inference was billed and no tool call can have run. That makes it a lost LINK with the patient
+-- policy, not an HTTP refusal with the short one.
+--
+-- Allow-listed evidence, matched as substrings against the reported text. A TLS HANDSHAKE failure is
+-- a link event (the peer never spoke); a certificate-VERIFY failure is deliberately absent - that is
+-- a trust or configuration refusal, and waiting cannot repair it.
+local LINK_EVIDENCE = { "vault_upstream_unreachable", "gaierror", "temporary failure in name resolution",
+  "name or service not known", "nodename nor servname provided", "no address associated with hostname",
+  "failed to lookup address", "dns error", "connection refused", "connection reset",
+  "network is unreachable", "network unreachable", "no route to host", "connect: timeout",
+  "timeout: connect", "tls handshake", "handshake failure", "connection aborted",
+  "connection was aborted", "os error 10053", "peer disconnected", "unexpected eof" }
+
+-- True when the failure text carries evidence that the LINK, not the provider's health, failed. Read
+-- by is_rate_limited (so the short refusal budget does not claim it) and by is_connection_lost (so
+-- the patient, operator-stoppable policy does).
+function M.is_link_down(problem)
+  local text = tostring(problem or ""):lower()
+  for _, pattern in ipairs(LINK_EVIDENCE) do
+    if text:find(pattern, 1, true) then return true end
+  end
+  return false
+end
+
 function M.is_connection_lost(problem)
   local text = tostring(problem or ""):lower()
+  -- A final STATUS outranks any word in the body here too: a 401 that mentions a refused connection is
+  -- an auth refusal, and waiting for a link that is not the problem would never end.
+  if M.is_final(text) then return false end
+  if M.is_link_down(text) then return true end
   for _, pattern in ipairs(CONNECTION_TEXT) do
     if text:find(pattern, 1, true) then return true end
   end
@@ -1292,10 +1431,28 @@ function M.connection_wait_seconds()
   return math.max(0, math.min(86400, math.floor(seconds)))
 end
 
--- 2, 4, 8, 16, then 30 s, jittered: quick when the link is a blip, patient when it is not.
+-- 1, 2, 4, 8, 16, then 30 s, jittered: quick when the link is a blip, patient when it is not.
+-- The first wait is one second because the common case - a Wi-Fi or uplink blip - is over before a
+-- two-second sleep would finish; the 30 s cap bounds the load a long outage puts on the route
+-- without ever turning the wait into a fail.
 function M.connection_backoff_ms(attempt)
-  local seconds = math.min(30, 2 ^ math.max(1, tonumber(attempt) or 1))
+  local seconds = math.min(30, 2 ^ (math.max(1, tonumber(attempt) or 1) - 1))
   return math.floor(seconds * 1000 * (0.75 + math.random() * 0.5))
+end
+
+-- A lost link is not a budget: while the failure is still the network, waiting is the only correct
+-- action, and a cap merely converts an outage into a dead run - exactly what the 19/11 incident did
+-- after a 2-minute drop. So the link wait is UNBOUNDED by default and bounded only when the operator
+-- asks for a bound by name (WASM_AGENT_PROVIDER_CONNECT_RETRIES or WASM_AGENT_PROVIDER_CONNECT_WAIT_SECONDS),
+-- which also keeps every existing bounded test and off-switch working. The operator still stops a
+-- waiting run with Esc / Ctrl-C or the run's cancel verb, checked between wait slices by the agent
+-- loop. The policy is re-read on every failure, so a link that returns and drops again waits again.
+function M.link_wait_is_unbounded()
+  local retries = env("WASM_AGENT_PROVIDER_CONNECT_RETRIES")
+  if retries ~= nil and trim(retries) ~= "" then return false end
+  local seconds = env("WASM_AGENT_PROVIDER_CONNECT_WAIT_SECONDS")
+  if seconds ~= nil and trim(seconds) ~= "" then return false end
+  return true
 end
 
 -- A stream cut AFTER visible text (or a partial tool call) is not a lost stream: re-sending the same

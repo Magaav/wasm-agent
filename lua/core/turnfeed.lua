@@ -329,6 +329,20 @@ local function exec(statement, params)
   return true, raw
 end
 
+-- Review r2, item 2 (change/done-gate-trial): `query` above answers {} for every failure, so a caller
+-- cannot tell an EMPTY ledger from an UNREADABLE one - which is exactly the distinction the capture rate
+-- turns on ("unknown is not yes"). This one answers nil and a named reason instead of an empty table, and
+-- it reads a ledger error the way every other store in this repo does: a decoded table carrying error.
+local function query_checked(statement, params)
+  local ok, raw = pcall(host.sql_query, statement, json.encode(params or {}))
+  if not ok then return nil, "ledger_unreadable: " .. tostring(raw) end
+  if type(raw) ~= "string" then return nil, "ledger_unreadable: no answer from sql_query" end
+  local decoded_ok, value = pcall(json.decode, raw)
+  if not decoded_ok or type(value) ~= "table" then return nil, "ledger_unreadable: undecodable answer" end
+  if value.error then return nil, "ledger_unreadable: " .. tostring(value.error) end
+  return value
+end
+
 -- "24h", "7d", "90m", "2w", or an ISO date "2026-11-01". Seconds since the epoch, or nil for "all".
 function M.parse_since(text, now)
   now = now or host.now()
@@ -345,6 +359,88 @@ function M.parse_since(text, now)
     return epoch
   end
   return nil, "invalid_since"
+end
+
+-- ---- change/done-gate-trial, item 3: the capture rate the decision rule is judged by ----------------
+--
+-- The operator's rule (19/11): after a day of missions on the release that carries this change, if fewer
+-- than 30% of STATE-CHANGING turns called done_criteria the gate is deleted; at 30% or more, kept and
+-- reduced to what is used. So the number has to be the real one:
+--
+--   * the denominator is every state-changing turn, not only the ones that skipped the capture. Counting
+--     only the skips would report 0% by construction and answer the rule with a tautology;
+--   * done_gate_turn (formerly done_gate_unchecked; both names are read) is written once per run by
+--     lua/core/done_gate.lua (M.note_turn), so a run that
+--     re-entered the gate ten times contributes ONE turn to each side;
+--   * a turn is counted from its event, so it is counted once even if two rows carry its session;
+--   * an UNREADABLE ledger is UNKNOWN, never 0% - a rule that deletes a gate on an unmeasured zero
+--     deletes it on no evidence at all. The code agrees with this sentence (review r2, item 2): the read
+--     goes through query_checked, and a failure answers available = nil, percent = nil and a named
+--     reason, while an empty but readable ledger answers available = true, changed = 0. `wa turns --gate`
+--     refuses the first and reports the second as "no state-changing turn yet";
+--   * the events predate this change: a turn whose event has no changed_state field is not
+--     state-changing, and is left out of both sides rather than guessed at.
+--
+-- since is the same window syntax as the rest of the reader (24h, 7d, or an ISO date), so the rule can
+-- be read over exactly the day it names.
+function M.gate_stats(opts)
+  opts = opts or {}
+  local since = opts.since
+  local params = {}
+  -- Review r1, fix 3: the event was renamed to done_gate_turn because it is written for every
+  -- state-changing turn, not only the unchecked ones. Rows written before the rename still count: the
+  -- reader asks for both names, so a window that straddles the rename is measured, not truncated.
+  local where = "kind IN ('done_gate_turn','done_gate_unchecked')"
+  if since then where = where .. " AND at>=?"; params[#params + 1] = since end
+  local rows, read_reason = query_checked(
+    "SELECT payload, session_id, at FROM harness_events WHERE " .. where .. " ORDER BY at", params)
+  if not rows then
+    -- Review r2, item 2: a ledger that cannot be read is UNKNOWN. It is not an empty ledger and it is
+    -- not 0% - a rule that deletes a gate on an unmeasured zero would delete it on no evidence at all.
+    return { available = nil, reason = read_reason, events = 0, changed = 0, called = 0,
+      percent = nil, sessions = 0, since = since, build = opts.build }
+  end
+  local changed, called = 0, 0
+  local sessions = {}
+  -- Review r1, fix 5: the operator's window is "a day of missions on the RELEASE that carries this
+  -- change", and a window that mixes builds answers a different question. build is the source commit
+  -- the binary embedded (done_gate.note_turn); the filter is a PREFIX, because an operator has a
+  -- 12-character sha in front of them and the payload holds the long one.
+  --
+  -- Unknown is not yes: a turn whose event carries no build (written before this stamp, or by a binary
+  -- that could not name itself) is EXCLUDED when a build was asked for, never assumed to be it. And a
+  -- filter that matches nothing says so by returning changed = 0, which the caller reports as
+  -- unmeasured rather than as 0%.
+  local want = opts.build and tostring(opts.build):lower():gsub('%s', '') or nil
+  if want == '' then want = nil end
+  local skipped_unknown_build = 0
+  local mismatched = 0
+  for _, row in ipairs(rows) do
+    local ok, payload = pcall(json.decode, row.payload or '')
+    payload = ok and type(payload) == 'table' and payload or {}
+    if want then
+      local build = type(payload.build) == 'string' and payload.build:lower() or ''
+      if build == '' then
+        skipped_unknown_build = skipped_unknown_build + 1
+        payload = {}
+      elseif build:sub(1, #want) ~= want then
+        mismatched = mismatched + 1
+        payload = {}
+      end
+    end
+    -- unknown is not yes: a payload that does not say the turn changed state is not counted as one.
+    if payload.changed_state == true then
+      changed = changed + 1
+      if payload.called_done_criteria == true then called = called + 1 end
+      sessions[tostring(row.session_id or '')] = true
+    end
+  end
+  local session_count = 0
+  for _ in pairs(sessions) do session_count = session_count + 1 end
+  local percent = changed > 0 and (called * 100 / changed) or nil
+  return { available = true, events = #rows, changed = changed, called = called,
+    percent = percent, sessions = session_count, since = since, build = want,
+    skipped_unknown_build = skipped_unknown_build, mismatched_build = mismatched }
 end
 
 local function previous_user_seq(session_id, seq)

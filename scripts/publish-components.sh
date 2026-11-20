@@ -177,8 +177,11 @@ cp -f "$REPO_ROOT/components.lock" "$ART/.components.lock.tmp" && mv -f "$ART/.c
 say "bundle: $ART"
 say "release tag: $tag (sha256 of components.lock: $lock_sha)"
 say 'publishing is a human/coordinator action; this script never runs gh. The exact command:'
+# NOT GITHUB'S LATEST EITHER (item 28): a component bundle is an artifact row keyed by the sha256 of
+# components.lock, and taking the badge would point /releases/latest at a tag whose notes are a lock
+# digest. Flagged on the printed command, which is the one a coordinator runs.
 notes="Pinned WASI components for components.lock $lock_sha (source $commit)"
-printf '\ngh release create %s -R %s --title %s --notes %s%s\n\n' \
+printf '\ngh release create %s -R %s --title %s --notes %s --latest=false%s\n\n' \
   "$tag" "$slug" "$tag" "'$notes'" "$(printf ' %s' $assets)"
 say 'If the tag already exists (a re-publish of the same lock), upload over it instead:'
 printf '\ngh release upload %s -R %s%s --clobber\n\n' "$tag" "$slug" "$(printf ' %s' $assets)"

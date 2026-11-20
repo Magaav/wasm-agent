@@ -15,6 +15,7 @@ paid for on every turn. So an instruction lives where it is true, and nowhere el
 | every turn, every node | `AGENTS.md` | always |
 | one role | `AGENTS.guest.md` | guests only |
 | one platform | `AGENTS.<platform>.md` (`AGENTS.windows.md`) | only on that platform |
+| one environment | `AGENTS.<environment>.md` (`AGENTS.omarchy.md`, `AGENTS.sandbox.md`) | only on that machine, one of them |
 | a technique, on demand | `skills/<name>/SKILL.md` | only when the model asks |
 | a fact about a subsystem | `docs/*.md` | only when read |
 

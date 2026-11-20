@@ -22,6 +22,16 @@ check(prompt:find('When multiple tool actions are independent',1,true),'default 
 check(prompt:find('may overlap independent shell commands',1,true),'parallel shell line kept')
 check(prompt:find('leave anything that depends on a result for the next response',1,true),'dependent actions wait for the next response')
 check(not prompt:find('Batching candidate 1:',1,true) and not prompt:find('solver worktrees',1,true),'retired treatment text is gone')
+-- change/done-gate-trial, item J (Victor, 19/11): the <turn> block reports HARNESS friction only.
+-- The model's complaints about its own process (it guessed before measuring, its probe measured nothing)
+-- are not harness reports. Principle 0, no classifier: the prompt asks for the right thing instead of a
+-- filter later guessing which complaint is which. Pinned as written, and the retired wording pinned as
+-- GONE, because a paraphrase here quietly changes what every session reports.
+local HURT=[[- **what hurt** - only what wa did to your reasoning (its tools, instructions, results or missing facts it should have given) and what would have removed it; your own mistakes and the project's own problems (its tests, scripts, fixtures) are not wa friction - leave them out;]]
+check(prompt:find(HURT,1,true),'the what-hurt bullet is the harness-only rule, verbatim')
+check(not prompt:find('what in this turn damaged your reasoning',1,true),'and the retired wording is gone')
+check(select(2,prompt:gsub('are not wa friction',''))==1,'and the rule is said once, not repeated')
+check(agent.system_prompt('master',nil,nil,tools.all_for({read=true},'master')):find(HURT,1,true)~=nil,'the rule survives a smaller tool surface')
 overrides.WASM_AGENT_BATCHING_GUIDANCE='1';overrides.WASM_AGENT_EDIT_SOURCE_FIRST='1'
 check(agent.system_prompt('master',nil,nil,list)==prompt,'retired switches no longer change the prompt')
 overrides.WASM_AGENT_BATCHING_GUIDANCE=nil;overrides.WASM_AGENT_EDIT_SOURCE_FIRST=nil

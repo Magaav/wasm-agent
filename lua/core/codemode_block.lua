@@ -162,6 +162,10 @@ function M.opts(options)
     -- The script row's highlighter (`markdown.scan_code`): a row is dim text whose own tokens carry
     -- their syntax colour, which is what "dim + syntax-highlighted" means on a terminal.
     syntax = o.syntax,
+    -- The erase that paints the rest of a band ROW: the caller owns the palette, so it hands one
+    -- closure that sets the band colour and then EL. A caller with no palette gets nothing, and the
+    -- row is exactly its text.
+    band_erase = o.band_erase or function() return "" end,
     elapsed = o.elapsed or function(ms)
       local value = tonumber(ms) or 0
       if value < 1000 then return string.format("%dms", math.floor(value)) end
@@ -184,6 +188,9 @@ function M.head_text(model, o)
   return table.concat(parts, ", ")
 end
 
+-- The background-colour erase: paint the rest of the ROW in the colour in force, with no
+-- characters. A row that ends in spaces is a row a narrow terminal re-wraps.
+local BAND_ERASE = "\27[K"
 local MARK_OK, MARK_NO, MARK_WAIT = "\226\156\147", "\226\156\151", "\226\143\179"  -- ✓ ✗ ⏳
 M.MARK_OK, M.MARK_NO, M.MARK_WAIT = MARK_OK, MARK_NO, MARK_WAIT
 
@@ -444,7 +451,21 @@ end
 -- `…` (operator 17/11: "each step shows its output completely"). A row that is exactly as wide as the
 -- transcript is wrapped AGAIN by it, which is what drew a blank band row under every code line - the
 -- caller leaves one column free.
-function M.wrap(text, limit, o)
+-- THE one wrapper: every component that breaks a long piece of text into rows calls this.
+--
+-- It breaks at the last SPACE that fits, and inside a word only when that word alone is wider than
+-- the row (a URL, a hash, a schema). It used to cut at the exact cell, which is what Victor's
+-- screenshot of 19/11 11:15 shows in his own message bubbles: “nee|d”, “he|re”, “notati|on”,
+-- “lin|e” - a reader's sentence chopped mid-word at the margin, on every row.
+--
+-- Cells, not bytes, are what the limit counts, and it walks the string one CHARACTER at a time with
+-- its byte width, so a multi-byte character is never split.
+-- A CODE LINE cut by CELLS: the exact column, no regard for words.
+--
+-- Code is not prose (review, item D): breaking it at a space DROPS that space and changes what the
+-- reader sees the line say. A statement is cut where it stops fitting, with M.wrap_marked marking
+-- the break so the pieces read as one line. Prose uses M.wrap; code uses this.
+function M.wrap_cells(text, limit, o)
   o = M.opts(o)
   local value = tostring(text or "")
   limit = math.max(8, tonumber(limit) or 80)
@@ -453,7 +474,6 @@ function M.wrap(text, limit, o)
   while index <= #value do
     local byte = value:byte(index)
     local size = (byte >= 240 and 4) or (byte >= 224 and 3) or (byte >= 192 and 2) or 1
-    -- a combining mark / variation selector rides with the character before it
     local piece = value:sub(index, index + size - 1)
     local cells = o.columns(piece)
     if used + cells > limit and index > start then
@@ -464,6 +484,53 @@ function M.wrap(text, limit, o)
     index = index + size
   end
   if start <= #value then rows[#rows + 1] = value:sub(start) end
+  return rows
+end
+
+function M.wrap(text, limit, o)
+  o = M.opts(o)
+  local value = tostring(text or "")
+  limit = math.max(8, tonumber(limit) or 80)
+  if o.columns(value) <= limit then return { value } end
+  -- One entry per character, with its byte range and its width: the rows are cut between entries,
+  -- never inside one.
+  local chars, index = {}, 1
+  while index <= #value do
+    local byte = value:byte(index)
+    local size = (byte >= 240 and 4) or (byte >= 224 and 3) or (byte >= 192 and 2) or 1
+    local piece = value:sub(index, index + size - 1)
+    chars[#chars + 1] = { start = index, size = size, cells = o.columns(piece), space = piece == " " }
+    index = index + size
+  end
+  local function text_of(from, to)
+    if to < from then return "" end
+    return value:sub(chars[from].start, chars[to].start + chars[to].size - 1)
+  end
+  local rows, first = {}, 1
+  while first <= #chars do
+    -- How far this row reaches: every character that fits, and where the last space in it was.
+    local used, last_fit, last_space = 0, first - 1, nil
+    local cursor = first
+    while cursor <= #chars do
+      local cells = chars[cursor].cells
+      if used + cells > limit and cursor > first then break end
+      used = used + cells
+      if chars[cursor].space then last_space = cursor end
+      last_fit = cursor
+      cursor = cursor + 1
+    end
+    local stop, next_first = last_fit, last_fit + 1
+    if cursor <= #chars and last_space and last_space > first then
+      -- Break AT the space and swallow it: the next row starts on the word that follows, and the
+      -- space itself is the break, never a leading blank in the row below.
+      stop = last_space - 1
+      next_first = last_space + 1
+      while next_first <= #chars and chars[next_first].space do next_first = next_first + 1 end
+    end
+    if stop < first then stop = first end
+    rows[#rows + 1] = text_of(first, stop)
+    first = next_first
+  end
   return rows
 end
 
@@ -484,10 +551,10 @@ function M.wrap_marked(text, limit, o, mark)
   o = M.opts(o)
   mark = mark or "\226\134\170"
   limit = math.max(8, tonumber(limit) or 80)
-  local whole = M.wrap(text, limit, o)
+  local whole = M.wrap_cells(text, limit, o)
   if #whole <= 1 then return whole end
   local room = math.max(1, limit - o.columns(mark))
-  local pieces = M.wrap(text, room, o)
+  local pieces = M.wrap_cells(text, room, o)
   if #pieces <= 1 then return pieces end
   for index = 1, #pieces - 1 do pieces[index] = pieces[index] .. mark end
   return pieces
@@ -533,7 +600,6 @@ function M.rows(model, width, options)
   for _, shown in ipairs(pieces) do
     -- The band is padded by display columns (not bytes) to one column short of the screen, so it is a
     -- band and the transcript never wraps it into an empty second row.
-    local pad = string.rep(" ", math.max(0, band - o.columns(shown)))
     if o.live and o.syntax then
       -- The band is re-applied around every token: `paint` ends each piece with a reset, so a band
       -- painted once around the row would stop at the first coloured token. Padding to the full width
@@ -543,10 +609,17 @@ function M.rows(model, width, options)
         if piece == "" then return end
         parts[#parts + 1] = o.paint(piece, { "codeBand", style or "mdCodeBlock" })
       end)
-      parts[#parts + 1] = o.paint(pad, "codeBand")
+      -- The rest of the ROW is painted by EL (ESC[K) in the band colour, never by a run of spaces
+      -- (item F, Victor 19/11 11:20). Padding is characters: a narrow terminal re-wraps them, so on a
+      -- resize a painted block came apart into ragged fragments. EL erases with the CURRENT
+      -- background, so the row is solid and carries no trailing blanks at all. The band stays active
+      -- after the erase on purpose - the host draws a code block's copy icon on that right-hand cell,
+      -- and it must wear the band, not the terminal default - and the transcript resets the row when
+      -- it draws it.
+      parts[#parts + 1] = o.band_erase()
       rows[#rows + 1] = table.concat(parts)
     else
-      rows[#rows + 1] = shown .. pad
+      rows[#rows + 1] = shown
     end
   end
   if code_hidden > 0 then

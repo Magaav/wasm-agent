@@ -85,6 +85,17 @@ ok(not done_gate.work_shaped('Why does the build fail?'), 'why ... ? is a questi
 ok(not done_gate.work_shaped('What did the smoke test skip?'), 'what ... ? is a question')
 ok(not done_gate.work_shaped('[self-wake] scheduled wake: look again'), 'a harness turn is not an operator request')
 
+-- ---- item 2: the one sentence the model is given about the capture ---------------------------
+-- change/done-gate-trial (19/11): ONE sentence, verbatim, asks for the acceptance checks BEFORE the
+-- first effect. Pinned as written - the operator chose the words, and a paraphrase here is a different
+-- instruction to the model - and pinned once, because a guidance list that says it three times is noise
+-- the model learns to skip.
+local policy = dofile('lua/core/codemode_policy.lua')
+local sentence = [[When a request asks for a change, record its acceptance checks with `done_criteria` before the first effect.]]
+ok(policy.guidance:find(sentence, 1, true) ~= nil, 'the capture sentence is in the code-mode guidance, verbatim')
+ok(select(2, policy.guidance:gsub('record its acceptance checks', '')) == 1, 'and it is said once, not repeated into noise')
+ok(policy.guidance:find('done_criteria') ~= nil, 'and it names the tool the model has to call')
+
 -- ---- A. the store and the tool -----------------------------------------------------------------
 local a = session('store')
 local request = 'Fix the flaky landing queue and prove the fix'
@@ -343,6 +354,148 @@ for _, body in ipairs(requests) do
   if tostring(body):find('You are a verifier', 1, true) then verifier_prompt_seen = true end
 end
 ok(verifier_prompt_seen, 'the verifier receives its own no-stake prompt, not the working session')
+
+-- ---- item 1 + item 3: the missing capture is counted, never printed ---------------------------
+-- change/done-gate-trial (19/11). The line this change removed was printed under 150 of 153 mission
+-- sessions, so the test that ends the stream of it has to read the STREAM, not the source: the events
+-- a run emits are collected by run(), and the journal row is read back from harness_events. Three
+-- facts, one per item-4 clause: it is not in the operator output, the event IS written, and the
+-- counter is right - including the turns that DID call done_criteria, which is the side of the ratio
+-- that a test counting only the skips would never check.
+local function gate_events(sid)
+  local rows = host.sql_query('SELECT payload FROM harness_events WHERE session_id=? AND kind=? ORDER BY seq',
+    json.encode({ sid, done_gate.EVENT }))
+  local decoded = type(rows) == 'string' and json.decode(rows) or rows
+  local out = {}
+  for _, row in ipairs(decoded or {}) do
+    local ok, payload = pcall(json.decode, row.payload or '')
+    out[#out + 1] = ok and payload or {}
+  end
+  return out
+end
+-- The reader's own stream: a status line is what the TUI draws and --once prints, and the removed
+-- warning was one. No status event may carry it.
+local function says_it_changed_state_without_checks(events)
+  for _, event in ipairs(events or {}) do
+    local text = tostring(event.text or '')
+    if text:find('changed state but recorded no', 1, true) then return true end
+  end
+  return false
+end
+
+-- Review r2, item 1: a run that THROWS EARLY is still recorded, and recorded as its OWN turn.
+-- The gate used to be built inside run_body, past the first provider call. A run that failed before that
+-- line left the PREVIOUS run's latched gate on the agent, so this turn wrote nothing at all - a silent
+-- hole in exactly the measurement the operator rule depends on. The gate is now created at run start,
+-- so the end-of-run write always has this run's own (unlatched) gate.
+local s1 = session("early-throw")
+requests = {}
+answers = {
+  calls({ { "write", { path = missing("throw-a.txt"), content = "working" } } }),
+  final("Done."),
+}
+local reply1 = run(s1, "Fix the throw-a path and prove it")
+ok(reply1 == "Done.", "the first run answers: " .. tostring(reply1))
+local first_events = gate_events(s1)
+ok(#first_events == 1, "the first run writes its one event: " .. #first_events)
+-- The second run throws before it can do anything at all.
+local emitted2 = {}
+local bot2 = agent.new(s1, function(event) emitted2[#emitted2 + 1] = event end, "master", "master", "")
+bot2.run_body = function() error("fixture: the run threw before its first effect") end
+local called2 = pcall(function() return bot2:run("Do the second thing and prove it") end)
+ok(called2 == false, "the second run fails, as the fixture made it")
+local both = gate_events(s1)
+ok(#both == 2, "and it is STILL recorded as its own turn: " .. #both .. " event(s) for 2 runs")
+ok(both[2] and both[2].changed_state == false, "the thrown run changed nothing, and says so")
+ok(both[2] and both[2].called_done_criteria == false, "and it called no done_criteria")
+-- One run, one event: a third call on the latched second gate writes nothing more.
+ok(done_gate.note_turn(bot2.gate, { run_id = "again" }) == false, "the recorded run stays a single turn")
+ok(#gate_events(s1) == 2, "and the ledger still holds exactly two")
+
+-- (a) an uncaptured run: its answer never carried the line, and its turn is one state-changing turn
+-- with NO done_criteria call.
+local s7 = session('unchecked-signal')
+requests = {}
+answers = {
+  calls({ { 'write', { path = missing('s7.txt'), content = 'working' } } }),
+  final('Done.'),
+}
+local reply7, emitted7 = run(s7, 'Fix the s7 path and prove it')
+ok(reply7 == 'Done.', 'the uncaptured run answers: ' .. tostring(reply7))
+ok(not says_it_changed_state_without_checks(emitted7), 'the warning is NEVER printed to the user')
+local seen_in_answer = tostring(reply7):find('recorded no acceptance checks', 1, true) ~= nil
+ok(not seen_in_answer, 'and it is not in the answer text either')
+ok(last_gate(s7) ~= nil, 'the gate row is still written: the fact is durable')
+local events7 = gate_events(s7)
+ok(#events7 == 1, 'exactly one counted event for the turn: ' .. #events7)
+ok(events7[1] and events7[1].changed_state == true, 'it says the turn changed state')
+ok(events7[1] and events7[1].called_done_criteria == false, 'and that no done_criteria call was made')
+
+-- (b) a run that DID capture: one event, the other side of the ratio, and no re-entry inflation.
+local s8 = session('checked-signal')
+drop('s8.txt')
+requests = {}
+answers = {
+  calls({ { 'done_criteria', { action = 'capture', checks = {
+    { command = present('s8.txt'), why = 'the artifact exists' } } } } }),
+  calls({ { 'write', { path = missing('s8.txt'), content = 'ok' } } }),
+  final('Done, and the check passes.'),
+}
+local reply8, emitted8 = run(s8, 'Fix the s8 path and prove it')
+ok(reply8 == 'Done, and the check passes.', 'the captured run finishes: ' .. tostring(reply8))
+ok(not says_it_changed_state_without_checks(emitted8), 'and no warning reaches the reader there either')
+local events8 = gate_events(s8)
+ok(#events8 == 1, 'one event for a run that captured and then passed: ' .. #events8)
+ok(events8[1] and events8[1].changed_state == true, 'which changed state')
+ok(events8[1] and events8[1].called_done_criteria == true, 'and DID call done_criteria')
+
+-- (c) the counter over both: 2 state-changing turns, 1 called done_criteria, so 50%.
+local function count_gate_call(module, sid)
+  local rows = host.sql_query('SELECT payload FROM harness_events WHERE session_id=? AND kind=?',
+    json.encode({ sid, module.EVENT }))
+  local decoded = type(rows) == 'string' and json.decode(rows) or rows
+  local changed, called = 0, 0
+  for _, row in ipairs(decoded or {}) do
+    local ok, payload = pcall(json.decode, row.payload or '')
+    payload = ok and type(payload) == 'table' and payload or {}
+    if payload.changed_state == true then
+      changed = changed + 1
+      if payload.called_done_criteria == true then called = called + 1 end
+    end
+  end
+  return changed, called
+end
+local changed7, called7 = count_gate_call(done_gate, s7)
+local changed8, called8 = count_gate_call(done_gate, s8)
+ok(changed7 == 1 and called7 == 0, string.format('the unchecked turn counts once and not as a call: %d/%d', called7, changed7))
+ok(changed8 == 1 and called8 == 1, string.format('the checked turn counts once and as a call: %d/%d', called8, changed8))
+-- Review r1, fix 2: a RE-ENTERED run is ONE turn. This run records a failing check, is re-entered
+-- with the failing output, and only then passes - the shape that used to write a second event at the
+-- second candidate answer. The counter must still see one state-changing turn, not two, and the latch
+-- name is asserted from the module so a rename cannot make this pass silently.
+local s9 = session("reentered")
+drop("s9.txt")
+requests = {}
+answers = {
+  calls({ { "done_criteria", { action = "capture", checks = {
+    { command = present("s9.txt"), why = "the artifact exists" } } } } }),
+  final("Phase 1 is done."),
+  calls({ { "write", { path = missing("s9.txt"), content = "ok" } } }),
+  final("Done, and the check passes."),
+}
+local reply9 = run(s9, "Fix the s9 path and prove it")
+ok(reply9 == "Done, and the check passes.", "the re-entered run answers: " .. tostring(reply9))
+local events9 = gate_events(s9)
+ok(#events9 == 1, "a run that re-entered once still writes ONE counted event: " .. #events9)
+ok(events9[1] and events9[1].called_done_criteria == true, "and it says the run captured its checks")
+local changed9, called9 = count_gate_call(done_gate, s9)
+ok(changed9 == 1 and called9 == 1, string.format("so the re-entered run counts once: %d/%d", called9, changed9))
+
+local stats = dofile('lua/core/turnfeed.lua').gate_stats({})
+ok(stats.changed >= 2 and stats.called >= 1, string.format('the counter sees both turns: %d changed, %d called',
+  stats.changed, stats.called))
+ok(stats.percent ~= nil and stats.percent > 0 and stats.percent <= 100,
+  'and answers a percentage, not a guess: ' .. tostring(stats.percent))
 
 if failed > 0 then print('done-gate: ' .. failed .. ' failed, ' .. checks .. ' checks') os.exit(1) end
 print('done-gate ok: ' .. checks .. ' checks')

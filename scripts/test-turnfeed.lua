@@ -501,6 +501,116 @@ eq(cli.run({ "turns", "--top", "1", "--no-peers", "--no-digest" }), 0, "a one-cl
 eq(cli.run({ "turns", "--since", "last tuesday", "--no-peers", "--no-digest" }), 2,
   "an unparseable window is refused by name")
 
+-- ---- change/done-gate-trial, item 3: wa turns --gate measures the capture rate --------------------
+-- Review r1, fix 2: this block used to RECOUNT the rows itself - a second implementation of the rule,
+-- which can agree with a bug in the first. It now asserts what gate_stats ANSWERS, on a ledger this
+-- row owns. The two facts the operator rule depends on, each pinned: the denominator is every
+-- state-changing turn, and a turn that re-entered the gate is still ONE turn.
+local gate_session = "gate-" .. MARK
+exec("INSERT INTO sessions(id,user_id,node_id,title,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+  { gate_session, "master", "", "gate rate", host.now(), host.now() })
+local function gate_event(payload)
+  exec("INSERT INTO harness_events(id,session_id,run_id,span_id,kind,phase,at,payload) VALUES(?,?,?,?,?,?,?,?)",
+    { host.uuid(), gate_session, "r1", "", "done_gate_unchecked", "end", host.now(), json.encode(payload) })
+end
+-- Two state-changing turns (one captured), one turn that did not change state, and one payload with
+-- no changed_state field at all (unknown is not yes: it is in neither side).
+gate_event({ changed_state = true, called_done_criteria = true })
+gate_event({ changed_state = true, called_done_criteria = false })
+gate_event({ changed_state = false, called_done_criteria = false })
+gate_event({ called_done_criteria = false })
+-- Review r1, fix 3: the event was renamed done_gate_unchecked -> done_gate_turn because it is written
+-- for EVERY state-changing turn. A row written under the old name still counts: the fixture above uses
+-- the OLD name on purpose, so this assertion fails the moment the reader stops accepting it.
+local legacy_stats = core.gate_stats({})
+check(legacy_stats.changed >= 2, "rows written under the old event name are still counted")
+
+-- Review r2, item 2 nit: the old helper took a session id and ignored it - a scoped-looking call that
+-- was a node-wide read. gate_stats IS node-wide by design (the rate is the node release's rate), so the
+-- helper is gone and the two facts it was pretending to scope are asserted separately: the module's own
+-- availability, and the fixture's contribution to the counts (2 changed, 1 captured, 50% when this
+-- fixture is the only stamped build in the window).
+local stats = core.gate_stats({})
+check(stats.available == true, "gate_stats reports its own availability")
+check(stats.changed == 2, "gate_stats counts the two state-changing turns: " .. tostring(stats.changed))
+check(stats.called == 1, "and the one that called done_criteria: " .. tostring(stats.called))
+eq(stats.percent, 50, "so the rate is exactly 50%, answered by the module, not recounted here")
+
+-- The re-entered run: a run that re-entered the gate ten times wrote its one event ten times ONLY if
+-- the latch is broken. note_turn latches on the state, so a second call answers false and writes
+-- nothing - pinned here against the module itself.
+local latch = { session_id = gate_session, effected = true, done_criteria_called = true }
+check(dofile("lua/core/done_gate.lua").note_turn(latch, { run_id = "r1" }) == true, "the first note_turn writes")
+check(dofile("lua/core/done_gate.lua").note_turn(latch, { run_id = "r1" }) == false, "and the second is latched away")
+local after = core.gate_stats({})
+check(after.changed == 3 and after.called == 2, "so one more turn is counted, not two: "
+  .. tostring(after.changed) .. "/" .. tostring(after.called))
+
+-- Review r1, fix 5: the window is "this RELEASE", so the event carries the build and the reader takes
+-- a 12-character prefix of it. Three shapes, each one a way a build filter can lie:
+--   * a stamped turn matches on its prefix (and the payload holds the long sha);
+--   * a turn with NO build stamp is unknown, and is EXCLUDED - never assumed to be this build;
+--   * a turn from ANOTHER build is excluded too, and the answer says how many it left out.
+local function build_event(build, changed, called)
+  exec("INSERT INTO harness_events(id,session_id,run_id,span_id,kind,phase,at,payload) VALUES(?,?,?,?,?,?,?,?)",
+    { host.uuid(), gate_session, "r1", "", "done_gate_turn", "end", host.now(),
+      json.encode({ changed_state = changed, called_done_criteria = called, build = build }) })
+end
+local MINE = "0123456789abcdef0123456789abcdef01234567"
+build_event(MINE, true, true)
+build_event(MINE, true, false)
+build_event("fedcba9876543210fedcba9876543210fedcba98", true, true)
+build_event(nil, true, true)
+local built = core.gate_stats({ build = "0123456789ab" })
+eq(built.changed, 2, "the 12-character prefix selects exactly this build's two turns")
+eq(built.called, 1, "and one of them called done_criteria")
+eq(built.percent, 50, "so the rate over that release alone is 50%")
+-- The exact totals are not fixed here on purpose: this ledger also holds the event note_turn itself
+-- wrote, stamped with whatever build this binary really is. What must hold is that both kinds of
+-- exclusion are REPORTED, and that neither leaks into the two turns the filter selected.
+check(built.mismatched_build >= 1, "the other build's turn is excluded and counted as excluded")
+check(built.skipped_unknown_build >= 1, "a turn with no build stamp is excluded, not assumed")
+eq(built.changed, 2, "and neither exclusion changes the selected build's own count")
+local unstamped = core.gate_stats({ build = "ffffffffffff" })
+eq(unstamped.changed, 0, "a build with no turn answers zero, not another build's turns")
+
+-- Review r2, item 2: an UNREADABLE ledger is unknown, not empty and not 0%. The comment said so and the
+-- code did not (gate_stats always answered available = true), which is the one shape of this metric that
+-- could delete a gate on no evidence. Both halves are pinned here, with the failure injected: a raise,
+-- and the decoded error table the store answers with when SQLite refuses.
+local real_query = host.sql_query
+host.sql_query = function() error("fixture: database is locked") end
+local broken = core.gate_stats({})
+eq(broken.available, nil, "an unreadable ledger answers available = nil, not true")
+eq(broken.percent, nil, "and no percentage")
+check(type(broken.reason) == "string" and broken.reason:find("ledger_unreadable", 1, true) ~= nil,
+  "with a named reason: " .. tostring(broken.reason))
+eq(cli.run({ "turns", "--gate" }), 2, "and wa turns --gate refuses instead of printing a count")
+host.sql_query = function() return json.encode({ error = "database is locked" }) end
+local refused = core.gate_stats({})
+eq(refused.available, nil, "a decoded ledger error is unknown too")
+check(tostring(refused.reason):find("database is locked", 1, true) ~= nil, "and the reason carries the store's words")
+host.sql_query = real_query
+local healed = core.gate_stats({})
+eq(healed.available, true, "and a readable ledger is available again")
+
+-- The verb over it: text, machine, and the refusal of an unreadable window.
+eq(cli.run({ "turns", "--gate" }), 0, "wa turns --gate reports the rate and exits 0")
+printed = {}
+print = function(line) printed[#printed + 1] = tostring(line) end
+eq(cli.run({ "turns", "gate", "--json" }), 0, "the gate verb also answers in machine form")
+print = real_print
+local machine_gate = json.decode(table.concat(printed, "\n"))
+eq(machine_gate.threshold, 30, "the machine form states the rule's threshold")
+-- Compared against the module re-read AT THIS POINT, not a snapshot taken before the build fixtures
+-- were inserted: the verb must print what gate_stats answers now, which is the whole claim.
+local now_stats = core.gate_stats({})
+eq(machine_gate.percent, math.floor(now_stats.percent * 10 + 0.5) / 10,
+  "and the machine form prints the module's own rounded rate, not a second count")
+eq(machine_gate.changed, now_stats.changed, "over the same state-changing turns the module counted")
+eq(cli.run({ "turns", "--gate", "--since", "last tuesday" }), 2, "and refuses an unreadable window by name")
+exec("DELETE FROM harness_events WHERE session_id=?", { gate_session })
+exec("DELETE FROM sessions WHERE id=?", { gate_session })
 -- --------------------------------------------------------------------------- cleanup
 for _, id in ipairs(session_ids) do
   exec("DELETE FROM messages WHERE session_id=?", { id })

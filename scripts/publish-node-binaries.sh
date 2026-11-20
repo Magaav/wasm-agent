@@ -753,12 +753,18 @@ for asset in $assets; do
   asset_paths="$asset_paths $p"
 done
 notes="Prebuilt node binaries for $COMMIT (${MANIFEST_TRIPLES// /, }, glibc <= $GLIBC_FLOOR, code-mode $CODEMODE)"
+# A NODE RELEASE IS NEVER GITHUB'S LATEST (item 28). gh release create marks a new release as the
+# repository's Latest unless told otherwise, so the newest node-<sha12> build - an artifact row
+# keyed by commit, not a product release - took the badge a human is meant to find, and
+# /releases/latest answered a tag whose notes are a triple list. The flag is on the line that is
+# PRINTED and on the one that is RUN, so a coordinator that re-executes the printed command
+# cannot put it back.
 if [ "$PUBLISH" = 1 ]; then
   say 'the release is published by --publish (idempotent: a tag that exists is uploaded over, never recreated)'
 else
   say 'publishing is a human/coordinator action unless --publish is passed; this script never runs gh otherwise. The exact command:'
 fi
-printf '\ngh release create %s -R %s --target %s --title %s --notes %s%s\n\n' \
+printf '\ngh release create %s -R %s --target %s --title %s --notes %s --latest=false%s\n\n' \
   "$TAG" "$REPO_SLUG" "$COMMIT" "$TAG" "'$notes'" "$asset_paths"
 say 'If the tag already exists (a re-publish of the same commit), upload over it instead:'
 printf '\ngh release upload %s -R %s --clobber%s\n\n' "$TAG" "$REPO_SLUG" "$asset_paths"
@@ -770,7 +776,7 @@ if [ "$PUBLISH" = 1 ]; then
       || fail "publish_failed: gh release upload $TAG" 8
     say "published $TAG (uploaded over the existing release): https://github.com/$REPO_SLUG/releases/tag/$TAG"
   else
-    gh release create "$TAG" -R "$REPO_SLUG" --target "$COMMIT" --title "$TAG" --notes "$notes" $asset_paths \
+    gh release create "$TAG" -R "$REPO_SLUG" --target "$COMMIT" --title "$TAG" --notes "$notes" --latest=false $asset_paths \
       || fail "publish_failed: gh release create $TAG" 8
     say "published $TAG: https://github.com/$REPO_SLUG/releases/tag/$TAG"
   fi

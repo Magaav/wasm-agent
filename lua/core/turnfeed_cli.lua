@@ -21,6 +21,9 @@ wa turns - the model's own harness complaints, grouped into a queue
 
   wa turns [--since 24h] [--top N] [--json] [--no-peers] [--no-digest] [--nodes a,b]
   wa turns --day YYYY-MM-DD [--top N] [--json]   one day's themes and counts, from the run journal
+  wa turns --gate [--since 24h] [--build SHA12] [--json]
+                                                 the capture rate: state-changing turns, and how many
+                                                 called done_criteria (change/done-gate-trial, item 3)
   wa turns digest [--since 24h]
   wa turns fixed <cluster> --sha <commit> [--note TEXT]
   wa turns unfixed <cluster>
@@ -70,7 +73,7 @@ local function refused(message)
 end
 
 local VALUED = { ["--since"] = true, ["--top"] = true, ["--nodes"] = true, ["--sha"] = true,
-  ["--note"] = true, ["--day"] = true, ["--limit"] = true }
+  ["--note"] = true, ["--day"] = true, ["--limit"] = true, ["--build"] = true }
 
 -- One collection, shared by every verb that reports: the local notes plus every peer that answered.
 local function collect(args)
@@ -208,6 +211,68 @@ local function unfixed(args)
   return 0
 end
 
+-- change/done-gate-trial, item 3: the capture rate, and the side of the 30% rule it falls on.
+--
+-- The threshold is printed WITH the number, because the number is only worth what it is compared to,
+-- and it is printed as the rule's own words: fewer than 30% deletes the gate, 30% or more keeps it
+-- reduced to what is used. This verb does not decide anything - the operator's rule is applied by the
+-- orchestrator after a day of missions - it measures.
+local function gate_report(args)
+  local since_text = flag(args, '--since')
+  local since, problem = core.parse_since(since_text, host.now())
+  if problem then return refused(problem) end
+  local build = flag(args, '--build')
+  local stats = core.gate_stats({ since = since, build = build })
+  local window = since_text and since_text ~= '' and since_text or 'all time'
+  if build and build ~= '' then window = window .. ', build ' .. tostring(build) end
+  -- Review r2, item 2: a ledger that cannot be read is UNKNOWN, and an unmeasured rate is not 0%. The
+  -- module says so with available = nil; this refuses by name instead of printing a count it does not have.
+  if stats.available == nil then
+    if has(args, '--json') then
+      print(json.encode({ available = false, since = window, events = 0, changed = 0, called = 0,
+        percent = nil, reason = stats.reason or 'ledger_unreadable' }))
+      return 2
+    end
+    return refused('the ledger could not be read, so the rate is unmeasured: '
+      .. tostring(stats.reason or 'ledger_unreadable'))
+  end
+  if stats.changed == 0 then
+    -- Unknown is not zero: no event is not the same as a measured 0%, and the rule deletes a gate on
+    -- evidence, so this says which fact is missing rather than printing a number.
+    if has(args, '--json') then
+      print(json.encode({ available = stats.available, since = window, events = stats.events,
+        changed = 0, called = 0, percent = nil, reason = 'no_state_changing_turn' }))
+    else
+      print(string.format('wa turns --gate (%s): no state-changing turn recorded yet', window))
+      if build and build ~= '' then
+        -- Review r1, fix 5: a build filter that matched nothing must not read like a measured zero, and
+        -- it must say what it excluded - a turn with no build stamp is unknown, not this build.
+        print(string.format('  %d event(s) read; %d carried no build stamp and %d were another build',
+          stats.events, stats.skipped_unknown_build or 0, stats.mismatched_build or 0))
+      end
+      print('the run journal holds ' .. tostring(stats.events) .. ' gate event(s); the capture rate is unmeasured, not 0%')
+    end
+    return 0
+  end
+  local percent = stats.percent
+  local verdict = percent < 30 and 'below 30%' or '30% or more'
+  if has(args, '--json') then
+    print(json.encode({ available = true, since = window, events = stats.events, changed = stats.changed,
+      called = stats.called, percent = math.floor(percent * 10 + 0.5) / 10, sessions = stats.sessions,
+      threshold = 30, side = verdict, build = stats.build,
+      skipped_unknown_build = stats.skipped_unknown_build, mismatched_build = stats.mismatched_build }))
+    return 0
+  end
+  local lines = {}
+  lines[#lines + 1] = string.format('wa turns --gate (%s): %d state-changing turn(s) from %d session(s)',
+    window, stats.changed, stats.sessions)
+  lines[#lines + 1] = string.format('  %d called done_criteria: %.1f%%', stats.called, percent)
+  lines[#lines + 1] = '  rule: fewer than 30% deletes the done gate; 30% or more keeps it, reduced to what is used'
+  lines[#lines + 1] = '  this run is ' .. verdict
+  print(table.concat(lines, "\n"))
+  return 0
+end
+
 -- One day's notes from the RUN JOURNAL (#33), as themes and counts: what the models said hurt the
 -- harness on that day, grouped by the words they used, plus the build/mode they said it on. This is
 -- the roll-up docs/evolution is written from, and it reads the journal rather than the transcripts so
@@ -310,6 +375,10 @@ function M.run(args)
   -- --day is a verb in disguise, and it has to be answered before the "no verb" branch below: that
   -- branch takes every leading -- to the all-time report, which is how "wa turns --day 2026-11-18"
   -- used to print the whole ledger and never the day (review 19/11, item 2).
+  if has(args, "--gate") or verb == "gate" then
+    if has(args, "--help") or has(args, "-h") then print(USAGE); return 0 end
+    return gate_report(args)
+  end
   if has(args, "--day") or verb == "day" then
     if has(args, "--help") or has(args, "-h") then print(USAGE); return 0 end
     return day_report(args)

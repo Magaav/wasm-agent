@@ -308,10 +308,23 @@ pub fn transport(action:&str)->Result<Value,String>{
                 if let Some(fields)=view.as_object_mut(){ fields.remove("dispatch"); }
                 if let Ok(mut status)=STATUS.lock(){*status=Some(view);}
             }
-            std::thread::sleep(Duration::from_secs(2));
+            // Jittered, not a metronome: every node in the fleet leaked in at the same instant in the
+            // 19/11 storm, and a fixed 2 s tick brings them all back at the same instant again. The
+            // interval stays 2 s and the spread comes from the clock, so no dependency is added.
+            std::thread::sleep(tick_interval());
         }
     }).map_err(|e|{*started=false;e.to_string()})?;
     Ok(json!({"ok":true,"state":state,"note":"Transport receipt, not registration/attachment proof. A CLI stands by while a node owns it."}))
+}
+
+/// The wait between two polls: 2 s, spread over [1.5 s, 2.5 s) from the clock. One clock read, no RNG
+/// dependency, and the same fleet-wide spread the 19/11 recovery needed.
+fn tick_interval() -> Duration {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64)
+        .unwrap_or(0);
+    Duration::from_millis(1500 + (nanos % 1000))
 }
 
 /// The production `Serve`: one fresh interpreter per admitted call, its `wa_binding_serve` global.
