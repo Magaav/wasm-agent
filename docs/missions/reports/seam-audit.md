@@ -140,6 +140,21 @@ connector's payloads are MCP's (row 7); `wit/seams/seams.wit` already declares `
   not re-run in this round. Their seams were migrated by earlier missions and their numbers belong to
   those reports; re-running them would not change this table's order.
 
+## The gate, and what it said
+
+Run on this node under `flock /home/victor/Work/missions/.suite.lock` (the node's one suite lock - four
+missions were running suites on 16 cores), with the tree's own binary stamped `c1852222, dirty=false`
+(`wa --build-info`):
+
+- **`scripts/fast.sh --jobs 4`: 303 checks, 1 failed, 0 skipped (279 s).** The failure is
+  `scripts/test-refusal-contract.lua:24: lua/core/refusal_codes.lua is stale` - **pre-existing on
+  `origin/main`**, proven without a build: `git archive origin/main | tar -x -C /tmp/base-main` then
+  `lua5.4 scripts/gen-refusal-codes.lua --check` in that pristine tree exits 1 with the same message,
+  and the same command on this branch exits 1 with the same message.
+- **`scripts/test.sh` (the full gate): stops at `scripts/test-sentinel-service-deploy.cjs:23`** -
+  `Expected ['stop','copy','start'], actual ['stop']`. Also **pre-existing on `origin/main`**: the same
+  script run in the pristine base tree (/tmp/base-main) fails with the same assertion. The gate exits on
+  its first failure, so the rows after it did not run - in this branch or on main.
 ## Text this branch adds to operator/model-facing surfaces
 
 1. `scripts/bench-seams.sh`'s usage line: `usage: bash scripts/bench-seams.sh [--iterations N] [--json]`
