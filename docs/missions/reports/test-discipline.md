@@ -189,6 +189,39 @@ A file that is both a tool and a `test-*` name (`scripts/test-discriminates.sh` 
 other changed test: run from another tree it judges that tree and exits 0 with "nothing to discriminate",
 which is a `skipped` row, not a pass (the tool now recognises its own message).
 
+## Review r2 (FIX) - the gate integration
+
+| r2 item | fix | commit |
+|---|---|---|
+| 1 exit 3 blocked landings | every row a named non-judgment now exits **0**: `nothing was judged on this machine; every row above says why, and none of them is a pass`. A rust/-only-Lua round and a delete-only test change no longer block | 84026811 |
+| 2 MUST 5 never ran from the gate | `M.gate_command` hands the discrimination check the round's `journal.branches` as `--branches`, so one Refactor-only line in a multi-branch round is refused by name (verified end to end: a vacuous test no longer goes green) | a8b32b7d |
+| 3 wrong base | the same call site appends the round's `journal.base`, the main this round actually merged into | a8b32b7d |
+
+SHOULDs taken: bash/node rows get `WA_BIN`/`WA_FAST_BIN` so a test that needs the binary does not skip; the retry uses
+the sized budget, not `check.timeout`; the `\u0024{TEST_TIMEOUT}` literal is a plain sentence; the dead `looks_executed_by`/
+`subjects.list` code is gone (f177efae).
+
+SHOULD partly taken: the report's claim that `landing-queue.mjs land` reaches the check is **false** and now says so -
+`land` runs `scripts/fast.sh`, whose `discrimination` row proves the TOOL (its own fixture), not this branch's
+tests. Only `wa land` judges the branch, through the gate's always-on check.
+
+SHOULD corrected in the report: the 05ef1ccb rows are real assertions - their text begins `lua error:` because
+that is how the native runtime prefixes a raised error, and `ASSERT_RE` matches it. The classification is by the
+error body, not the wrapper.
+
+### Replays (all must exit 0)
+
+`05ef1ccb`, `29072fa0`, `90327c06`, `ee55b6ec` - each replayed on a scratch worktree of `commit^`:
+
+```
+05ef1ccb EXIT=0
+29072fa0 EXIT=0
+90327c06 EXIT=0
+ee55b6ec EXIT=0
+```
+
+`node scripts/test-discriminates-test.mjs` - 34 checks; `lua scripts/test-land.lua` - 435 checks.
+
 ## Texts to approve (2)
 
 1. Rule 16 in `~/Work/missions/launch.sh` (reworded in r1; backup `launch.sh.bak-r1-<ts>`):
