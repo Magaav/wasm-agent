@@ -1,18 +1,101 @@
-# harness-fixes-1 — six items, what review r2 corrected, and the commits that answer each
+# harness-fixes-1 — review r3: A ships, B is fixed and merged; what each round corrected in my work
 
-Base `ac7717e0`, merged forward to `origin/main` `39bbf2b6`. Built and verified on this node (avell)
-only. Nothing pushed.
+Verified on this node (avell) only. Nothing pushed.
 
-**Read this first.** Two rounds of review corrected me twice, and both corrections are recorded here
-rather than smoothed over:
+## BRANCH A — `change/harness-fixes-1a`, HEAD `b5a6c41a`
 
-* **Round 1** — my report claimed items 2 and 3 were "already fixed at base" because a test passed on a
-  base worktree. That reasoning was wrong: avell **runs the base binary**, so both incidents happened
-  ON BASE. A test that passes there proves the test is weak, not that the node is fixed.
-* **Round 2** — my first fixes for items 1–3 still missed the measured shapes: the guard killed a
-  `codemode` call (not `operation`), the nested record says `status: 202` (a number, not a state
-  string), and a clock-only change in the pending answer was being counted as progress.
+Ship-now branch, its own worktree, cherry-picked from `origin/main` (`39bbf2b6`) and then fixed.
+**Fast path on A: `ok (49 checks, 0 failed, 262s)`**, run under `/tmp/wa-suite-hf1a.lock`.
 
+| commit | what |
+| --- | --- |
+| `12762a72` | item 6 — the deploy swap fixture carries the provenance line its block installs from |
+| `5f0d1ada` | item 5 — an unknown field on `operation start` is refused by name |
+| `5727436e` | item 4 — a worktree failure names git's verdict, its exit code and the command |
+| `257cfe7a` | **r3 A1** — `start()`'s allow-list covers every key it reads |
+| `b5a6c41a` | **r3 A-fast** — Rust rows get a scratch HOME; a failed mktemp skips, never exits 0 |
+
+### r3 A1 — my allow-list refused real launches
+
+`START_FIELDS` omitted `vault_env` and `vault_approval`, which `start()` **does** read
+(`approval_problem` at operations.rs:1384, `seal_request` at :1398) and which real callers send
+(`lua/core/mcp.lua`, `lua/core/mcp_session.lua`). Every vault-backed MCP launch was refused
+`operation_unknown_field` on this branch while it worked on main — an incomplete allow-list, which is
+worse than none because it reads as deliberate.
+
+Both keys added, and `start_fields_cover_every_key_start_reads()` PARSES the `args[..]` / `args.get(..)`
+reads out of `control()`'s own start arm and fails by name for any key the list omits. It does not
+restate the list, so it cannot drift with it. Negative proof: removing the two keys again makes it fail
+with `start() reads these keys but START_FIELDS does not list them: ["vault_approval", "vault_env"]`.
+
+### r3 A-fast — a pre-existing defect that made the fast path red on main
+
+`rust wa-capabilities` failed on A and on `origin/main` alike: two tests
+(`operations::adoption_survives_the_relay_deadline`, `operations::await_returns_at_its_own_wait`) START
+REAL OPERATIONS and refuse a non-scratch HOME — measured at `39bbf2b6` in a separate worktree:
+`refusing to run: ... (got /home/victor)`. `scripts/test.sh` runs Rust rows with `HOME=$GATE_HOME`;
+`scripts/fast.sh` gave them none.
+
+Each Rust row now gets `$work/home.XXXXXX`, with `CARGO_HOME`/`RUSTUP_HOME` captured from the real
+environment BEFORE that assignment so `--offline` still resolves. And MUST B-fast: a failed `mktemp` used
+to run `return 0 2>/dev/null || exit 0` — at top level `return` errors, so `exit 0` ran and the WHOLE
+fast path ended as a success with every later row skipped. It now records a `skip` row, increments
+SKIPPED, and the crate loop iterates zero crates. Proven in isolation: `ROW: skip rust rust rows /
+SKIPPED=1 body_iterations=0 / script reached its END, not an early exit`.
+
+## BRANCH B — `change/harness-fixes-1`, merged with `origin/main`
+
+**Fast path on B: `ok (56 checks, 0 failed, 229s)` at `df96d33b`**, under `/tmp/wa-suite-hf1.lock`.
+Every row of interest `pass`: `rust wa-capabilities`, `rust wa-operation`, `test-no-silent-stops`,
+`test-rel-native-poll`, `test-rel-native-replay`, `test-two-failures-reused-agent`,
+`test-run-lease-order`, `test-operation-survives-turn`, `test-land`.
+
+| commit | what |
+| --- | --- |
+| `6b009f67` | **r3 B6** — the guard stops a `wait_s:0` hot loop again |
+| `45c455e2` | **r3 B-fast** — a failed mktemp skips the Rust rows, never exits the fast path with success |
+| `df96d33b` | **r3 SHOULD** — whole-ms polls counted, the dead-owner "either" branch gone, exact failure counts |
+
+### r3 B6 — a REGRESSION I introduced, and the three causes
+
+A `wait_s:0` poll of a running operation with no output stopped at round 3 on main and **never stopped**
+on this branch: measured `ran 31` rounds before the fixture's own provider gave up. Three causes, all
+three mine:
+
+1. **Effects exempted a wait.** `changed` includes `effects>0`, and agent.lua counts every
+   codemode/operation call as an effect. The exemption no longer reads `changed` at all.
+2. **The digest drifted on clocks.** `results_stable` stripped a fixed list of top-level clock fields,
+   but a codemode answer is mostly bookkeeping (`timing{total_ms, execution_ms, ...}`) and evidence
+   pointers whose raw files carry `elapsed_ms`. Replaced by `M.said()`: it digests ONLY
+   operation-progress facts (state, settled, ok, output_bytes, promoted, shell_exited,
+   output_streams_closed, operation_id, op), **follows evidence pointers** to the raw answer, and
+   collects from every record. I tried two narrower fixes first and each still drifted — the field-list
+   approach was the wrong shape, not just incomplete.
+3. **The budget was always zero.** `codemode_pending` strips `wait_s` before dispatching, so agent.lua's
+   `output.wait_s` read never fired and `waited_long` was dead. A long wait is now judged by **the time
+   the call spent**, with a 1000 ms floor: `spent >= max(1000, known budget)`.
+
+So a wait that blocked five minutes and answered the same pending (this mission's own kill, out.log
+step 146–148) is progress, while a `wait_s:0` poll that returned in ~190 ms is not.
+
+Tests: `scripts/test-rel-native-poll.lua` (new, 3 checks) drives the measured shape with `wait_s:0`
+through the real loop and requires the stop — on the previous guard it fails with `ran 31`. The vacuous
+block the review named in `test-no-silent-stops.lua` (it said ten polls and stopped at three) is replaced
+with real assertions: `effects=1` with an unchanged `say` still trips; a 5-minute same-pending await does
+not; a new output byte does not; and `M.said` proves clock-only differences give the SAME digest both at
+the top level and behind an evidence pointer. 144 checks pass.
+
+## What three rounds of review corrected in my work
+
+| round | my claim | what measurement showed |
+| --- | --- | --- |
+| 1 | items 2 and 3 "already fixed at base" | avell **runs the base binary**, so both incidents happened on base; a test passing there proved the test was weak |
+| 2 | item 1 recognised a wait by the `operation` tool; a repeat needed "no new observation" | the killed call was `codemode(...)`; the nested record is `status: 202` (a number); a clock-only change counted as progress |
+| 3 | the allow-list was complete; my r2 guard fix held | `vault_env`/`vault_approval` were missing and refused real launches; the guard no longer stopped a `wait_s:0` hot loop at all |
+
+The pattern in all three: I measured the shape I *expected* rather than the shape the system *emitted*,
+and a test that agreed with my expectation passed while the defect stood. Every claim above now cites
+the measurement that could have failed it.
 ## Branch A — ships now (`change/harness-fixes-1a`, in its own worktree)
 
 Three commits, reviewed OK, cherry-picked from `origin/main` (`39bbf2b6`) into a separate worktree. The
