@@ -53,18 +53,34 @@ pub struct Server {
     worker: Option<JoinHandle<()>>,
 }
 
+/// What the server does once the TLS handshake and the request head are read.
+#[derive(Clone, Copy)]
+enum Answer {
+    /// HTTP/1.1 200 OK with the body ok.
+    Http,
+    /// The RFC 6455 upgrade, then every frame echoed back with its own opcode.
+    Echo,
+}
+
 impl Server {
     /// A server whose certificate is signed by [`cert_file`].
     pub fn start() -> Server {
-        Server::start_with("server.pem", "server.key")
+        Server::start_with("server.pem", "server.key", Answer::Http)
     }
 
     /// A server whose certificate is signed by [`other_cert_file`].
     pub fn start_other() -> Server {
-        Server::start_with("other-server.pem", "other-server.key")
+        Server::start_with("other-server.pem", "other-server.key", Answer::Http)
     }
 
-    fn start_with(certificate: &str, key: &str) -> Server {
+    /// A websocket server on the same certificate: a real upgrade (a correct Sec-WebSocket-Accept),
+    /// then every frame echoed back. A client that only reached the TLS handshake cannot pass a test
+    /// that uses this, which is the point of it.
+    pub fn start_websocket() -> Server {
+        Server::start_with("server.pem", "server.key", Answer::Echo)
+    }
+
+    fn start_with(certificate: &str, key: &str, answer: Answer) -> Server {
         let config = Arc::new(server_config(certificate, key));
         let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback port for the scratch server");
         listener.set_nonblocking(true).expect("a non-blocking listener");
@@ -74,7 +90,7 @@ impl Server {
         let worker = std::thread::spawn(move || {
             while !flag.load(Ordering::SeqCst) {
                 match listener.accept() {
-                    Ok((stream, _)) => serve(stream, &config),
+                    Ok((stream, _)) => serve(stream, &config, answer),
                     // Nothing waiting: sleep a moment rather than spin, and re-check the flag.
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         std::thread::sleep(Duration::from_millis(5))
@@ -151,7 +167,7 @@ fn server_config(certificate: &str, key: &str) -> ServerConfig {
         .expect("a server config from the fixture material")
 }
 
-fn serve(stream: std::net::TcpStream, config: &Arc<ServerConfig>) {
+fn serve(stream: std::net::TcpStream, config: &Arc<ServerConfig>, answer: Answer) {
     let _ = stream.set_nonblocking(false);
     let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
@@ -162,6 +178,12 @@ fn serve(stream: std::net::TcpStream, config: &Arc<ServerConfig>) {
     let Ok(head) = read_head(&mut tls) else {
         return;
     };
+    if let Answer::Echo = answer {
+        if header(&String::from_utf8_lossy(&head), "sec-websocket-key").is_some() {
+            serve_websocket(&mut tls, &head);
+            return;
+        }
+    }
     // Drain what the request announced before answering: a client still writing its body must not
     // meet a reset, which would look like a TLS failure and be reported as one.
     let text = String::from_utf8_lossy(&head).to_ascii_lowercase();
@@ -170,6 +192,99 @@ fn serve(stream: std::net::TcpStream, config: &Arc<ServerConfig>) {
     }
     let _ = tls.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
     let _ = tls.flush();
+}
+
+/// The RFC 6455 server side of the upgrade, then an echo of every frame until the client closes.
+///
+/// Written out rather than delegated to a websocket library: the test question is which TLS anchors
+/// the CLIENT used, so the server job is to be a correct, boring peer - and a peer the test can read
+/// is easier to trust than a second library defaults.
+fn serve_websocket(tls: &mut StreamOwned<ServerConnection, std::net::TcpStream>, head: &[u8]) {
+    let text = String::from_utf8_lossy(head).to_string();
+    let Some(key) = header(&text, "sec-websocket-key") else {
+        return;
+    };
+    let reply = format!(
+        "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n\r\n",
+        accept_key(key)
+    );
+    if tls.write_all(reply.as_bytes()).is_err() {
+        return;
+    }
+    let _ = tls.flush();
+    while let Some((opcode, payload)) = read_frame(tls) {
+        if write_frame(tls, opcode, &payload).is_err() {
+            return;
+        }
+        let _ = tls.flush();
+        if opcode == 0x8 {
+            return;
+        }
+    }
+}
+
+/// One header of a request head, case-insensitively, trimmed.
+fn header<'a>(head: &'a str, name: &str) -> Option<&'a str> {
+    head.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        key.trim().eq_ignore_ascii_case(name).then(|| value.trim())
+    })
+}
+
+/// base64(sha1(key + the GUID RFC 6455 names)): the value a client checks before it will talk.
+fn accept_key(key: &str) -> String {
+    use base64::Engine;
+    use sha1::{Digest, Sha1};
+    let mut hasher = Sha1::new();
+    hasher.update(key.trim().as_bytes());
+    hasher.update(b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+    base64::engine::general_purpose::STANDARD.encode(hasher.finalize())
+}
+
+/// One frame off the wire: its opcode and its unmasked payload.
+fn read_frame<R: Read>(reader: &mut R) -> Option<(u8, Vec<u8>)> {
+    let mut first = [0u8; 2];
+    reader.read_exact(&mut first).ok()?;
+    let opcode = first[0] & 0x0f;
+    let masked = first[1] & 0x80 != 0;
+    let mut length = u64::from(first[1] & 0x7f);
+    if length == 126 {
+        let mut extended = [0u8; 2];
+        reader.read_exact(&mut extended).ok()?;
+        length = u64::from(u16::from_be_bytes(extended));
+    } else if length == 127 {
+        let mut extended = [0u8; 8];
+        reader.read_exact(&mut extended).ok()?;
+        length = u64::from_be_bytes(extended);
+    }
+    // A test peer, not a server: anything past a megabyte is a client bug worth refusing.
+    if length > 1024 * 1024 {
+        return None;
+    }
+    let mut mask = [0u8; 4];
+    if masked {
+        reader.read_exact(&mut mask).ok()?;
+    }
+    let mut payload = vec![0u8; length as usize];
+    reader.read_exact(&mut payload).ok()?;
+    if masked {
+        for (index, byte) in payload.iter_mut().enumerate() {
+            *byte ^= mask[index % 4];
+        }
+    }
+    Some((opcode, payload))
+}
+
+/// One frame onto the wire, unmasked: a server never masks.
+fn write_frame<W: Write>(writer: &mut W, opcode: u8, payload: &[u8]) -> std::io::Result<()> {
+    writer.write_all(&[0x80 | opcode])?;
+    if payload.len() < 126 {
+        writer.write_all(&[payload.len() as u8])?;
+    } else {
+        writer.write_all(&[126])?;
+        writer.write_all(&(payload.len() as u16).to_be_bytes())?;
+    }
+    writer.write_all(payload)
 }
 
 fn read_head(tls: &mut StreamOwned<ServerConnection, std::net::TcpStream>) -> Result<Vec<u8>, ()> {

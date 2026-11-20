@@ -2543,7 +2543,9 @@ dependencies = [
 name = "wa-tls"
 version = "0.1.0"
 dependencies = [
+ "base64 0.23.1",
  "rustls",
+ "sha1",
  "ureq",
 ]
 

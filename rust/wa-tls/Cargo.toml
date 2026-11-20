@@ -9,7 +9,7 @@ description = "The certificate authorities wa trusts, read from SSL_CERT_FILE / 
 # SSL_CERT_DIR tests need. A test server is not linked into a shipped binary: only a test binary
 # enables it (every dependant does so from its own [dev-dependencies]).
 default = []
-scratch = ["dep:rustls"]
+scratch = ["dep:rustls", "dep:sha1", "dep:base64"]
 
 [dependencies]
 # The one HTTP client in this project, so the one anchor set: ureq::tls::RootCerts is what an agent
@@ -19,7 +19,14 @@ ureq = "3"
 # with the same provider (ring), so enabling the scratch feature adds no second TLS stack and no
 # second crypto backend.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging"], optional = true }
+# The websocket server half of the upgrade handshake: Sec-WebSocket-Accept is
+# base64(sha1(key + the RFC 6455 GUID)), and a client that gets the wrong one refuses the connection.
+# Both are already in this workspace lock through tungstenite and ureq.
+sha1 = { version = "0.11", optional = true }
+base64 = { version = "0.23", optional = true }
 
 [dev-dependencies]
 # The same, for this crate's own tests, which compile the scratch module without the feature.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging"] }
+sha1 = "0.11"
+base64 = "0.23"

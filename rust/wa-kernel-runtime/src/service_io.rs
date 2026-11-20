@@ -834,12 +834,16 @@ mod tls_anchor_tests {
         assert!(error.contains("typo.pem"), "{error}");
     }
 
-    /// The websocket path proves the TLS *step*: the scratch server answers HTTP, not an upgrade, so
-    /// a connection that gets past the handshake fails at the upgrade instead. What this test is
-    /// about is which of those two failures happens.
+    /// A real upgrade, a frame there and back, only when the machine names the bundle.
+    ///
+    /// The first version of this test accepted "an error without the word certificate" as proof that
+    /// the handshake had succeeded. It was not proof of anything: the scratch server answered HTTP, so
+    /// every connection died at the upgrade and the test could not tell a working handshake from a
+    /// different failure. The server now completes an RFC 6455 upgrade and echoes a frame, so the
+    /// passing branch is a frame that came back.
     #[test]
-    fn a_websocket_gets_past_tls_only_when_the_machine_names_the_ca() {
-        let server = Server::start();
+    fn a_websocket_upgrades_and_echoes_when_the_machine_names_the_ca() {
+        let server = Server::start_websocket();
         {
             let _env = Env::clear();
             let error = match WsConn::open(&server.ws_url("/ws"), None) {
@@ -853,13 +857,25 @@ mod tls_anchor_tests {
         }
         {
             let _env = Env::set(&[(wa_tls::CERT_FILE, &scratch::cert_file())]);
-            let error = match WsConn::open(&server.ws_url("/ws"), None) {
-                Ok(_) => panic!("the scratch server answers HTTP, so no upgrade can complete"),
-                Err(error) => error,
-            };
-            assert!(
-                !error.to_lowercase().contains("certificate"),
-                "with the bundle the handshake must succeed, so this is the upgrade's refusal: {error}"
+            let mut conn = WsConn::open(&server.ws_url("/ws"), None)
+                .expect("a real upgrade against a private CA named by SSL_CERT_FILE");
+            assert_eq!(conn.send(b"ping".to_vec()), 0, "the frame is queued");
+            let mut echoed = None;
+            for _ in 0..300 {
+                let state = conn.next();
+                if state > 0 {
+                    echoed = conn.take();
+                    break;
+                }
+                if state == CLOSED {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert_eq!(
+                echoed.as_deref(),
+                Some(&b"ping"[..]),
+                "the server echoed the frame back through the upgraded connection"
             );
         }
     }
