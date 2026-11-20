@@ -443,7 +443,7 @@ M.admin = {
     scope = { type = "string", enum = { "node" },
       description = "Only for an operator surface or a session the operator has marked mastermind: scope=\"node\" reaches every session's operations on this node, and is written to the audit journal. A model call in an ordinary session is refused (scope_node_forbidden) and does not get it; read your own operations without a scope." }
   }, {"action"}),
-  schema("read", "Read text with line/byte continuation, or a PNG/JPEG/WebP/GIF (up to 4 MB) as an image. Ask for the range you need and follow next_offset/next_column with `version` until eof. A whole-line page returns `selection` and `edit_lines`, the receipt edit's range_edits form takes.", {
+  schema("read", "Read text with line/byte continuation, or a PNG/JPEG/WebP/GIF (up to 4 MB) as an image. Every text page reports bytes_read against file_size plus its line range and total_lines, and sets truncated with the range it returned and how to read the rest whenever it did not return the whole file; a whole file says truncated: false. Ask for the range you need and follow next_offset/next_column with `version` until eof. A whole-line page returns `selection` and `edit_lines`, the receipt edit's range_edits form takes.", {
     path = { type = "string" },
     offset = { type = "integer", minimum = 1 },
     column = { type = "integer", minimum = 1 }, version = { type = "string" },

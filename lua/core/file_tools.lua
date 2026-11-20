@@ -185,11 +185,45 @@ function M.read(args,store_image,view_bytes)
     while starts[next_line+1] and starts[next_line+1]<=next_byte do next_line=next_line+1 end
     if next_byte>#text then next_line=total+1 end
     local next_column=next_byte-(starts[next_line] or (#text+1))+1
+    local end_line=#part>0 and (next_column==1 and next_line-1 or next_line) or nil
+    -- What the caller has of the file, and what it does not. Every page names its byte range, the
+    -- file's own size and line count, so "4 KB of 186 KB" is never something the caller has to infer
+    -- from a cursor. MEASURED 19-20/11: two sessions edited a file from a page that looked whole - the
+    -- envelope carried next_offset and total_lines and never the size of the file behind it.
     local result={path=args.path,content=part,version=hash,offset=line,column=column,
       next_offset=next_line,next_column=next_column,eof=next_byte>#text,range_complete=next_byte>last,
-      total_lines=total,bytes=#text,returned_bytes=#part,
-      end_offset=#part>0 and (next_column==1 and next_line-1 or next_line) or nil,
+      total_lines=total,bytes=#text,file_size=#text,bytes_read=#part,returned_bytes=#part,
+      range={first_byte=first,last_byte=first+#part-1,first_line=line,last_line=end_line},
+      end_offset=end_line,
       note='Raw text, no synthetic line numbering. Continue with next_offset, next_column and version.'}
+    -- Always a boolean, never an absent field: a caller reading the flag must not have to tell
+    -- "the whole file" from "a node too old to say". Truncated means one thing - this page is not
+    -- the whole file - and says which side is missing, because a page that starts at line 50 and
+    -- runs to eof read "less than the whole file" too.
+    local missing_after=next_byte<=#text
+    local missing_before=first>1
+    result.truncated=missing_before or missing_after
+    if result.truncated then
+      local reason=missing_after and (column==1 and next_byte>last
+        and 'the requested lines ended before the last line of the file'
+        or 'this page reached the per-call byte budget')
+        or 'the read started after the first byte of the file'
+      local ways={}
+      if missing_after then
+        ways[#ways+1]='more follows: call read with truncation.next and follow next_offset until eof'
+      end
+      if missing_before then
+        ways[#ways+1]='earlier lines were not returned: start again at offset 1, column 1'
+      end
+      result.truncation={reason=reason,bytes_read=#part,file_size=#text,
+        first_byte=first,last_byte=first+#part-1,first_line=line,last_line=end_line,
+        lines_in_file=total,missing_before=missing_before,missing_after=missing_after}
+      if missing_after then
+        result.truncation.next={path=args.path,offset=next_line,column=next_column,version=hash}
+      end
+      result.how_to_read_rest='returned bytes '..first..'-'..(first+#part-1)..' of '..#text
+        ..' in '..total..' lines; '..table.concat(ways,'; ')..'.'
+    end
     -- A complete whole-line read is also a durable edit address. It is opaque so the model
     -- cannot accidentally trim byte coordinates while retaining the digest for the wider page.
     if column==1 and next_byte>last and #part>0 and line<=total then
