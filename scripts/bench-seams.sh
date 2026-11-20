@@ -27,18 +27,33 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+# WHICH BINARY, and never a silent one. A bench whose binary came from another tree reports another
+# tree's code: measured here 20/11, a run whose environment lacked CARGO_TARGET_DIR fell through to an
+# installed ~/.local/bin/wa and produced a table for a binary built commits ago - the stale-artifact
+# failure scripts/lib/fast-binary.sh exists to stop, one layer down. So there is no PATH fallback: the
+# tree's own build, or WA_BIN, or a refusal that names the build.
 bin="${WA_BIN:-}"
-for c in "${CARGO_TARGET_DIR:-/nonexistent}/release/wa" "$ROOT/rust/target/release/wa" \
-         "$(command -v wa 2>/dev/null)" "$HOME/.local/bin/wa"; do
-  [ -n "$bin" ] && break; [ -n "$c" ] && [ -x "$c" ] && bin="$c"
-done
-[ -n "$bin" ] || { echo "FAIL no wa binary (build it, or set WA_BIN)" >&2; exit 2; }
+if [ -z "$bin" ]; then
+  for c in "${CARGO_TARGET_DIR:-/nonexistent}/release/wa" "$ROOT/rust/target/release/wa"; do
+    [ -n "$c" ] && [ -x "$c" ] && bin="$c" && break
+  done
+fi
+[ -n "$bin" ] || {
+  echo "FAIL no wa binary from this tree (looked at ${CARGO_TARGET_DIR:-<unset>}/release/wa and $ROOT/rust/target/release/wa)." >&2
+  echo "     Build it:  (in rust/) CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-<dir>} cargo build --release --offline -p wa-host" >&2
+  echo "     Or name one: WA_BIN=<path> bash scripts/bench-seams.sh" >&2
+  echo "     A binary from PATH is refused on purpose: a table measured against another tree's code is not this tree's." >&2
+  exit 2
+}
+stamp=$("$bin" --build-info 2>/dev/null | awk -F= '/^commit=/{print $2}')
+[ -n "$stamp" ] || { echo "FAIL $bin does not answer --build-info; refusing to measure an unidentified binary" >&2; exit 2; }
 
 home=$(mktemp -d "${TMPDIR:-/tmp}/wa-bench-seams-XXXXXX")
 trap 'rm -rf "$home"' EXIT
 mkdir -p "$home/payloads"
 
-echo "bench: seams (bin=$bin, iterations=${iterations:-200}, home=$home)"
+echo "bench: seams (bin=$bin, binary-commit=$stamp, iterations=${iterations:-200}, home=$home)"
+echo "bench: seam rows are os.clock (CPU) on this machine; codemode/mesh/fabric are those benches' own clocks"
 echo
 env WASM_AGENT_LUA_ROOT="$ROOT" \
     WASM_AGENT_HOME="$home" \
