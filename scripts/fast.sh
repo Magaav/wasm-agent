@@ -788,6 +788,8 @@ check fast-watchdog-reap bash scripts/test-fast-watchdog-reap.sh
 # The rule those guards rest on, judged: WASM_AGENT_HOME is the USER home, so the operator home, its
 # store, anything inside it and anything above it are refused (item 4 of the node-ops round).
 check scratch-home bash scripts/test-scratch-home.sh
+# lua_run hands every row fast.sh's WA_FAST_CLEARED unchanged and clears the vault/node variables (test-fast-row-cleared.sh).
+check fast-row-cleared bash scripts/test-fast-row-cleared.sh
 # ROWS THIS BRANCH CANNOT RUN ARE NOT WIRED HERE (review r2, A1). Eleven `check` lines named scripts that
 # only exist on change/node-ops (the probe rows, the build-record rows, the rollback row, the restore row,
 # row-at-sha): on this branch each was an exit-127 FAIL, so the split reported eleven failures that were
