@@ -1643,12 +1643,35 @@ impl.gate = function(run, options)
   local decorator = M.weight()
   run.journal.gate_weight = decorator ~= "" and decorator or "none (no weight could be applied)"
   local rows = {}
+  -- A resume keeps a check that already PASSED (first run, not a retry) on this exact tree with this exact
+  -- command and row list: the same bytes judged by the same command answer the same thing, and re-running a
+  -- green 15-minute check is the slowest part of a resume. Anything else runs again - a red or flaky check, a
+  -- different tree_commit, a changed command (a check definition fixed between attempts) or a different
+  -- WA_FAST_ROWS list. The reuse is written to the evidence and the row, by name, with the sha it passed on.
+  local tree_commit = tostring(run.journal.tree_commit or "")
+  local rows_text = rows_file and (read(rows_file) or "") or ""
+  local earlier = {}
+  for _, prior in ipairs(type(run.journal.gate) == "table" and run.journal.gate or {}) do
+    if type(prior) == "table" and prior.name then earlier[prior.name] = prior end
+  end
   for _, check in ipairs(checks) do
     -- The fast check ALWAYS gets the assignment (M.gate_command): the round's file, or an empty value so a
     -- WA_FAST_ROWS inherited from the environment cannot narrow a run that wrote none.
     local command = M.gate_command(check, rows_file)
     command = (decorator ~= "" and (decorator .. " " .. quote(command))) or command
     local cwd = check.cwd and (slashes(tree) .. "/" .. check.cwd) or slashes(tree)
+    local key = command .. "\n" .. rows_text
+    local prior = earlier[check.name]
+    if tree_commit ~= "" and prior and prior.ok == true and prior.retry == nil and not prior.vacuous
+        and prior.tree_commit == tree_commit and prior.key == key then
+      evidence(string.format("%s: kept - passed on %s with this command in an earlier attempt (%s test(s), %ss)\n",
+        check.name, tree_commit:sub(1, 12), tostring(prior.tests or 0), tostring(prior.seconds or "?")))
+      rows[#rows + 1] = { name = check.name, ok = true, code = prior.code, seconds = 0, tests = prior.tests,
+                          detail = prior.detail, tree_commit = tree_commit, key = key, kept = true,
+                          kept_seconds = prior.kept_seconds or prior.seconds }
+      run.journal.gate = rows
+      save(run)
+    else -- not kept: the check runs (this branch closes at the end of the loop body)
     evidence(command_line(check.name, command))
     local started = now()
     local result = M.exec(command, cwd, check.timeout or 1800)
@@ -1656,7 +1679,7 @@ impl.gate = function(run, options)
     evidence((result.stdout or "") .. (result.stderr or ""))
     local tests = passed_tests((result.stdout or "") .. (result.stderr or ""))
     local row = { name = check.name, ok = (result.code or 1) == 0, code = result.code, seconds = seconds,
-                  tests = tests, detail = check.detail or check.command }
+                  tests = tests, detail = check.detail or check.command, tree_commit = tree_commit, key = key }
     if row.ok and check.min_tests and tests < check.min_tests then
       row.ok = false
       row.vacuous = true
@@ -1704,6 +1727,7 @@ impl.gate = function(run, options)
     rows[#rows + 1] = row
     run.journal.gate = rows
     save(run)
+    end -- not kept
   end
   return true, { detail = string.format("%d check(s) passed, weighted (%s)", #rows,
                   decorator ~= "" and decorator or "no weight available") }

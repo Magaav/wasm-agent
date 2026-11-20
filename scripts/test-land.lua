@@ -689,6 +689,61 @@ eq(vacuous, 1, "a check that proves nothing is not green")
 eq(step_of("case5", "gate").error, "gate_vacuous", "the refusal is named")
 contains(step_of("case5", "gate").detail, "proved nothing", "the detail says the run proved nothing")
 
+-- ---------------------------------------------------------------- case 5b: a resume keeps what already passed
+-- A resume re-ran EVERY gate check, so one red check made the operator pay again for every green one (the
+-- 15-minute cargo checks included). Now a check that passed on this tree_commit with this command is kept, by
+-- name, and only the red one runs again; a changed command is not the same check and runs again.
+do -- its own block: the file is at the main chunk's 200-local limit
+local function counting_check(name)
+  local path = host.paths().home .. "/land-gate/count-" .. name .. ".sh"
+  write_file(path, string.format([[#!/usr/bin/env bash
+COUNT="%s/land-gate/count-%s.n"
+echo $(( $(cat "$COUNT" 2>/dev/null || echo 0) + 1 )) > "$COUNT"
+MODE="$(cat "%s/land-gate/count-%s.state" 2>/dev/null || echo pass)"
+[ "$MODE" = pass ] && { echo "%s ok"; exit 0; }
+echo "FAIL %s: fake red check"; exit 1
+]], host.paths().home, name, host.paths().home, name, name, name))
+  return path
+end
+local function count_of(name)
+  return tonumber((read_file(host.paths().home .. "/land-gate/count-" .. name .. ".n") or "0"):match("%d+")) or 0
+end
+local function set_count_gate(name, mode)
+  write_file(host.paths().home .. "/land-gate/count-" .. name .. ".state", mode .. "\n")
+end
+local green_path, red_path, stop_path = counting_check("green"), counting_check("later"), counting_check("stopper")
+set_count_gate("green", "pass")
+set_count_gate("later", "fail")
+set_count_gate("stopper", "fail")
+-- `stopper` stays red throughout, so every attempt stops at the gate and nothing is pushed by this case.
+local function keep_checks(extra)
+  return { { name = "green", command = "bash " .. green_path .. (extra or ""), timeout = 120 },
+           { name = "later", command = "bash " .. red_path, timeout = 120 },
+           { name = "stopper", command = "bash " .. stop_path, timeout = 120 } }
+end
+observed.pushes = 0
+eq(land.run({ run = "case5b", ring = SOLO_RING, branches = { "change/one" }, checks = keep_checks() }), 1,
+  "a red second check stops the landing")
+eq(count_of("green"), 1, "the green check ran once")
+eq(count_of("later"), 2, "the red check ran twice (beside, then alone)")
+set_count_gate("later", "pass")
+eq(land.run({ run = "case5b", ring = SOLO_RING, resume = true, checks = keep_checks() }), 1, "the resume stops at stopper")
+eq(count_of("green"), 1, "the resume KEPT the check that passed on this tree - it did not run again")
+eq(count_of("later"), 3, "the resume ran the red check again")
+eq(count_of("stopper"), 2, "and reached the next check")
+local gate5b = journal_of("case5b").gate
+eq(gate5b[1].kept, true, "the kept check is marked kept in the journal")
+eq(gate5b[1].tree_commit, journal_of("case5b").tree_commit, "it is kept for the sha it passed on")
+eq(gate5b[2].kept, nil, "the re-run check is not marked kept")
+contains(read_file(step_of("case5b", "gate").evidence) or "", "green: kept - passed on", "the evidence names the kept check")
+-- a changed command is a different check: it runs again even on the same tree; an unchanged one stays kept
+eq(land.run({ run = "case5b", ring = SOLO_RING, resume = true, checks = keep_checks(" # changed") }), 1, "still stopped")
+eq(count_of("green"), 2, "a changed command is not kept: it runs again")
+eq(count_of("later"), 3, "the check that passed on its first run last time is kept now")
+eq(count_of("stopper"), 4, "the check that failed twice runs again")
+eq(observed.pushes, 0, "no attempt of this case pushed")
+end
+
 -- ---------------------------------------------------------------- case 6: resume after the deploy failed on node 3
 -- A fresh repository: case 2 landed these branches and advanced main, so merging them again here would be a
 -- no-op and the tip would already BE main - the run would have nothing to push and prove nothing.
