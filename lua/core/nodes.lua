@@ -318,16 +318,49 @@ end
 --
 -- PROBE_DEADLINE_S bounds the whole fan-out, so a hundred unreachable peers cost one deadline, not a hundred.
 local PROBE_DEADLINE_S = 20
+-- HOW MANY PROBE CHILDREN THIS PROCESS MAY HAVE ALIVE (item 0, the 19/11 OOM).
+--
+-- A child lives up to PROBE_DEADLINE_S. M.list is called many times inside one turn (a row, a view, a
+-- tool), and every call started one child per peer with no memory of the call before it, so children
+-- ACCUMULATED: measured in scripts/test-remote-refusals.lua, 125 live "wa nodes probe" processes for a
+-- 6-peer roster, each ~14-70 MB - the crowd that took the node to 23 GB.
+-- The registry is process-wide for the same reason the marker is (dofile gives every caller its own M
+-- table): a second call inside the deadline JOINS the running child for that peer, and past the cap this
+-- process starts no more and names the reason (probe_capacity) instead of forking an unbounded tree.
+--   _G.WA_PROBE_INFLIGHT[peer_id] = { op = <operation_id>, at = <host.now()> }
+local PROBE_MAX_CHILDREN = 64
+local function probe_inflight()
+  local t = _G.WA_PROBE_INFLIGHT
+  if type(t) ~= "table" then t = {}; _G.WA_PROBE_INFLIGHT = t end
+  local now, alive = host.now(), 0
+  for id, entry in pairs(t) do
+    if type(entry) == "table" and (now - tonumber(entry.at or 0)) < PROBE_DEADLINE_S then
+      alive = alive + 1
+    else
+      t[id] = nil -- past its deadline: that child is not running any more
+    end
+  end
+  return t, now, alive
+end
+
 local function probe_peers(peers, opts)
   opts = opts or {}
   if type(host.operation) ~= "function" then return {} end
   local runtime = json.decode(host.runtime_info and host.runtime_info() or "") or {}
   local program = tostring(runtime.binary_path or "")
   if program == "" then return {} end
-  local launched = {}
+  local inflight, now, alive = probe_inflight()
+  local launched, at_capacity = {}, {}
   for _, peer in ipairs(peers or {}) do
     local id = tostring(peer.node_id or "")
     if id ~= "" then
+      local running = inflight[id]
+      if type(running) == "table" and (now - tonumber(running.at or 0)) < PROBE_DEADLINE_S then
+        -- JOIN the child this process already has for this peer: one live child per peer per deadline.
+        launched[#launched + 1] = { id = id, operation_id = running.op, joined = true }
+      elseif alive >= PROBE_MAX_CHILDREN then
+        at_capacity[#at_capacity + 1] = id
+      else
       local argv = { "nodes", "probe", id }
       local db = host.getenv("WASM_AGENT_DB")
       if db and db ~= "" then argv = { "--db", db, "nodes", "probe", id } end
@@ -335,7 +368,12 @@ local function probe_peers(peers, opts)
         timeout_seconds = tonumber(opts.deadline_s or PROBE_DEADLINE_S), kind = "command",
         owner = "nodes-probe" }))
       local answer = ok and (json.decode(receipt) or {}) or {}
-      if answer.operation_id then launched[#launched + 1] = { id = id, operation_id = answer.operation_id } end
+      if answer.operation_id then
+        launched[#launched + 1] = { id = id, operation_id = answer.operation_id }
+        inflight[id] = { op = answer.operation_id, at = now }
+        alive = alive + 1
+      end
+      end
     end
   end
   local out = {}
