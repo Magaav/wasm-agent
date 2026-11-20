@@ -233,8 +233,16 @@ try {
   const welcome = banner();
   check('the banner names the fixture endpoint, not a vault route', welcome.includes('127.0.0.1:' + PORT),
     welcome);
-  check('the ledger is in the scratch root, not in the real home', welcome.includes(WORK),
-    welcome);
+  // The banner shortens a long path with a trailing ellipsis (a fast-path scratch under a long TMPDIR
+  // is ~120 characters and the pane is 100 wide), so the full WORK path is only there when it fits.
+  // What this check is about is unchanged: the `memory:` value is the scratch ledger - all of it, or a
+  // prefix of it at least 60 characters long (or the whole scratch root when that is shorter), the banner
+  // keeping ~90 - and never anything under the real home.
+  const shown = ((welcome.match(/memory:\s*(\S+)/) || [])[1] || '').replace(/…$/, '');
+  const ledger = path.join(WORK, 'ledger.db');
+  check('the ledger is in the scratch root, not in the real home',
+    shown.length >= Math.min(SCRATCH_ROOT.length, 60) && ledger.startsWith(shown) && !shown.startsWith(REAL_HOME + path.sep),
+    'memory: ' + shown + '\nexpected (a prefix of): ' + ledger + '\n' + welcome);
   check('the banner names no vault route', !/VAULT_URL|:8810/.test(welcome),
     (welcome.match(/.*(VAULT|:8810).*/g) || []).join('\n'));
 
