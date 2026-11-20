@@ -182,7 +182,8 @@ here while the base 39bbf2b6 still fails its --check.
 3. Page `note`, appended when truncated - `how_to_read_rest`:
    "returned bytes <first>-<last> of <size> in <lines> lines; more follows: call read with
    truncation.next and follow next_offset until eof." (or, for a page that starts late: "earlier
-   lines were not returned: start again at offset 1, column 1.")
+   lines were not returned: start again at offset 1, column 1."; and for a page of zero bytes:
+   "no bytes returned of <size> bytes in <lines> lines; ...")
 4. `truncation.reason` values: "this page reached the per-call byte budget", "the requested lines
    ended before the last line of the file", "the read started after the first byte of the file".
 5. Refusal `edit_anchor_outside_read_page` (`lua/core/refusal.lua`):
