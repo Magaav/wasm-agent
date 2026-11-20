@@ -1207,3 +1207,123 @@ fn a_clipped_command_output_keeps_its_first_line_and_says_it_was_clipped() {
     drop(m);
     remove_fixture(root);
 }
+
+/// Items 2 and 3 (review 19/11): CROSS-PROCESS. The two incidents happened on a node running the BASE
+/// binary, so the proof has to cross a process boundary - a same-process fixture cannot see either.
+///
+///   * item 3 - process A starts a long operation and stays alive; process B (a fresh Manager, its own
+///     index, its own memory) reattaches: it reads the state, reads the output, and is NOT told
+///     `outcome_unknown`. When A is gone, the SAME call correctly answers `outcome_unknown`.
+///   * item 2 - the run lease is released before the failure is signalled, so the next turn of the same
+///     session is admitted at once. That half is proved in the Lua suite
+///     (`scripts/test-operation-survives-turn.lua`, which fails on a tree with the old order).
+
+/// Kills the owner process on EVERY path, including a panic: a leaked helper keeps the operation's
+/// process tree alive and the node then refuses the next operation with background_descendants.
+struct ChildGuard(std::process::Child);
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[test]
+fn a_fresh_process_reattaches_to_live_work_and_spares_dead_work() {
+    let base = std::env::temp_dir().join(format!("wa-reattach-{}-{}", std::process::id(), crate::SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+    let _ = fs::remove_dir_all(&base);
+    fs::create_dir_all(&base).unwrap();
+    let root = base.clone();
+    // The owner process: starts the operation, records its id, stays alive while we read.
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--ignored", "--exact", "tests::operation_owner_helper", "--nocapture"])
+        .env("WA_OPERATION_OWNER_ROOT", &root)
+        .env("WA_OPERATION_OWNER_COMMAND", "echo reattach-marker; sleep 3")
+        .env("WA_OPERATION_OWNER_HOLD_MS", "6000")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut child = ChildGuard(child);
+    // Wait for the helper to publish the id it started.
+    let id_path = root.join("helper-operation-id.json");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut id = String::new();
+    while Instant::now() < deadline {
+        if let Ok(text) = fs::read_to_string(&id_path) {
+            if let Ok(value) = serde_json::from_str::<Value>(&text) {
+                if let Some(found) = value["operation_id"].as_str() { id = found.to_string(); break; }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(!id.is_empty(), "the owner process never published an operation id");
+
+    // ---- process B: a FRESH manager, its own memory. It never saw this operation started.
+    let reader = Manager::new(&root);
+    let state = reader.snapshot(&id).unwrap();
+    assert_eq!(state["reattached"], true,
+        "a live owner's operation is a reattach, not a loss: {state}");
+    assert_ne!(state["state"], "outcome_unknown",
+        "the resumed process must not call live work unknown: {state}");
+    assert_eq!(state["session"], "session-owner-reattach", "and its owner's record is intact: {state}");
+
+    // The result is readable ACROSS the process boundary - the bytes the owner's child wrote.
+    let page = reader.read(&id, "stdout", 0, 4096).unwrap();
+    assert!(page["content"].as_str().unwrap_or("").contains("reattach-marker"),
+        "the operation's own output is readable from another process: {page}");
+
+    // Awaiting by id works too: it answers the owner's record, and never invents a result.
+    let waited = reader.wait(&id, Duration::from_millis(250)).unwrap();
+    assert!(waited["operation_id"].is_string(), "await answers the operation by id: {waited}");
+
+    // ---- and when the owner is GONE, the same call says so instead of pretending.
+    let _ = child.0.kill();
+    let _ = child.0.wait();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut after;
+    loop {
+        after = Manager::new(&root).snapshot(&id).unwrap();
+        if after["state"] == "outcome_unknown" || Instant::now() >= deadline { break; }
+        // The lease file is released when the process dies; give the OS a moment to do it.
+        if after["output_bytes"].as_u64().unwrap_or(0) > 0 && after["settled"] == true { break; }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // A settled operation keeps its own record - which is the point: the result survives.
+    if after["settled"] == true && after["state"] != "outcome_unknown" {
+        assert_ne!(after["error"], "operation_owner_not_attached",
+            "a settled operation's record is the result, never a lost-work answer: {after}");
+    } else {
+        assert_eq!(after["state"], "outcome_unknown",
+            "with the owner gone and the work unsettled, the answer is unknown: {after}");
+        assert!(after["error"].as_str().unwrap_or("").starts_with("operation_owner_not_attached"),
+            "the answer carries the named unknown: {after}");
+    }
+    drop(reader); remove_fixture(base);
+}
+
+/// The owner process for `a_fresh_process_reattaches_to_live_work_and_spares_dead_work`: it starts a
+/// supervised operation, publishes its id, and stays alive while the reader process looks at it.
+/// Ignored by default; the parent spawns it with --ignored --exact.
+#[test]
+#[ignore = "helper process only; the parent starts an operation and this process answers"]
+fn operation_owner_helper() {
+    let root = PathBuf::from(std::env::var("WA_OPERATION_OWNER_ROOT").unwrap());
+    let command = std::env::var("WA_OPERATION_OWNER_COMMAND").unwrap();
+    let m = Manager::new(&root);
+    let mut spec = shell(&command);
+    spec.session = "session-owner-reattach".into();
+    let id = m.start(spec).unwrap();
+    // Wait until the operation produced its first bytes, so the reader can read them.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let state = m.snapshot(&id).unwrap();
+        if state["output_bytes"].as_u64().unwrap_or(0) > 0 || Instant::now() >= deadline { break; }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    atomic_json(&root.join("helper-operation-id.json"), &json!({"operation_id": id})).unwrap();
+    let hold = std::env::var("WA_OPERATION_OWNER_HOLD_MS").ok()
+        .and_then(|s| s.parse::<u64>().ok()).unwrap_or(5000);
+    std::thread::sleep(Duration::from_millis(hold));
+}
+

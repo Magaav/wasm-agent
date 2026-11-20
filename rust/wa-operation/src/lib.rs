@@ -546,6 +546,29 @@ mod long_path_tests {
     }
 }
 
+/// Is the process that owns this operation still alive?
+///
+/// The proof is its lease file: the index holds BEGIN EXCLUSIVE on the lease for as long as the process
+/// lives, so a lease that cannot be locked belongs to a dead owner. A missing file is dead too. Anything
+/// we cannot decide answers FALSE - unknown is not yes, and calling live work lost is the failure this
+/// exists to stop.
+fn owner_lease_held(root: &Path, boot: &str) -> bool {
+    if !boot.starts_with("boot-") || boot.len() > 100
+        || !boot.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+        return false;
+    }
+    let path = root.join(format!("{boot}.lease.sqlite"));
+    if !path.is_file() { return false; }
+    match rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE) {
+        Ok(lease) => {
+            let _ = lease.busy_timeout(std::time::Duration::ZERO);
+            // Locked by a live process means held. If we could take it, that owner is gone.
+            lease.execute_batch("BEGIN EXCLUSIVE").is_err()
+        }
+        Err(_) => false,
+    }
+}
+
 pub fn atomic_json(path: &Path, value: &Value) -> io::Result<()> {
     let temporary = path.with_extension(format!(
         "{}.{}.tmp",
@@ -926,13 +949,32 @@ impl Manager {
         }
         let mut state: Value =
             serde_json::from_slice(&fs::read(self.root.join(id).join("state.json"))?)?;
+        // A SECOND PROCESS REATTACHES (item 3, review 19/11). This used to answer outcome_unknown for
+        // every operation not in THIS process's memory, so a resumed turn could not await the work its
+        // own session started and could not read its final result. Measured on avell (which runs the BASE
+        // binary), the result was simply gone to the resumed turn.
+        //
+        // The owner's liveness is a fact on disk: its lease file is held with BEGIN EXCLUSIVE for exactly
+        // as long as the owning process lives (rust/wa-operation/src/index.rs). So:
+        //   * an operation that SETTLED left its own record - read it, that is the result;
+        //   * an owner whose lease we CAN lock is gone, and the work is genuinely unknown;
+        //   * an owner whose lease is still held is ALIVE: this is a reattach, and the answer says so
+        //     instead of pretending the work was lost.
         if state["settled"] != true {
-            state["state"] = json!("outcome_unknown");
-            state["settled"] = json!(true);
-            state["ok"] = json!(false);
-            state["error"] =
-                json!("operation_owner_not_attached; it may still be active elsewhere; reconcile effects, never replay blindly");
-            state["cleanup"] = json!("unknown");
+            let owner_live = state["owner_boot"].as_str()
+                .is_some_and(|boot| owner_lease_held(&self.root, boot));
+            if owner_live {
+                state["reattached"] = json!(true);
+                state["owner_live"] = json!(true);
+                state["reattached_note"] = json!("this operation belongs to a live process this manager is not attached to; the state below is the owner's own record and its output streams are readable. Await it again, or read its output by id. Do not replay it.");
+            } else {
+                state["state"] = json!("outcome_unknown");
+                state["settled"] = json!(true);
+                state["ok"] = json!(false);
+                state["error"] =
+                    json!("operation_owner_not_attached; it may still be active elsewhere; reconcile effects, never replay blindly");
+                state["cleanup"] = json!("unknown");
+            }
         }
         Ok(state)
     }
