@@ -497,6 +497,17 @@ fi
 # orphans, which is the ledger doing its job). Each is hermetic - no network, no cargo, no node binary unless
 # WA_BIN hands it the one this run already built - and each exists for the same reason: an install must never
 # decide about bytes it cannot name, and must refuse rather than guess.
+# The run lease must be released BEFORE the failure is announced. The control reverts the order in a
+# SCRATCH copy of the Lua tree (it never writes this checkout) and requires the row to fail, then
+# restores nothing because nothing was touched. Exit 77 = no python3 to build that copy.
+lease_order=0
+WA_BIN="$BIN" bash scripts/test-run-lease-order.sh || lease_order=$?
+if [ "$lease_order" = "77" ]; then
+  echo "SKIP: the run-lease ordering proof (no python3)"
+  SKIPPED=$((SKIPPED + 1))
+else
+  [ "$lease_order" = "0" ] || exit "$lease_order"
+fi
 WA_BIN="$BIN" gate_run bash scripts/test-install-record.sh            # installed.txt is the binary's own answer
 gate_run bash scripts/test-install-guards.sh                          # every installer refuses an unprovable identity
 gate_run bash scripts/test-deploy-ancestry.sh                         # a deploy never silently goes backwards

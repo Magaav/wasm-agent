@@ -1207,3 +1207,300 @@ fn a_clipped_command_output_keeps_its_first_line_and_says_it_was_clipped() {
     drop(m);
     remove_fixture(root);
 }
+
+/// Items 2 and 3 (review 19/11): CROSS-PROCESS. The two incidents happened on a node running the BASE
+/// binary, so the proof has to cross a process boundary - a same-process fixture cannot see either.
+///
+///   * item 3 - process A starts a long operation and stays alive; process B (a fresh Manager, its own
+///     index, its own memory) reattaches: it reads the state, reads the output, and is NOT told
+///     `outcome_unknown`. When A is gone, the SAME call correctly answers `outcome_unknown`.
+///   * item 2 - the run lease is released before the failure is signalled, so the next turn of the same
+///     session is admitted at once. That half is proved in the Lua suite
+///     (`scripts/test-operation-survives-turn.lua`, which fails on a tree with the old order).
+
+/// Kills the owner process on EVERY path, including a panic: a leaked helper keeps the operation's
+/// process tree alive and the node then refuses the next operation with background_descendants.
+struct ChildGuard(std::process::Child);
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[test]
+fn a_fresh_process_reattaches_to_live_work_and_spares_dead_work() {
+    let base = std::env::temp_dir().join(format!("wa-reattach-{}-{}", std::process::id(), crate::SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+    let _ = fs::remove_dir_all(&base);
+    fs::create_dir_all(&base).unwrap();
+    let root = base.clone();
+    // The owner process: starts the operation, records its id, stays alive while we read.
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--ignored", "--exact", "tests::operation_owner_helper", "--nocapture"])
+        .env("WA_OPERATION_OWNER_ROOT", &root)
+        .env("WA_OPERATION_OWNER_COMMAND", "echo reattach-marker; sleep 3")
+        .env("WA_OPERATION_OWNER_HOLD_MS", "6000")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut child = ChildGuard(child);
+    // Wait for the helper to publish the id it started.
+    let id_path = root.join("helper-operation-id.json");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut id = String::new();
+    while Instant::now() < deadline {
+        if let Ok(text) = fs::read_to_string(&id_path) {
+            if let Ok(value) = serde_json::from_str::<Value>(&text) {
+                if let Some(found) = value["operation_id"].as_str() { id = found.to_string(); break; }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(!id.is_empty(), "the owner process never published an operation id");
+
+    // ---- process B: a FRESH manager, its own memory. It never saw this operation started.
+    let reader = Manager::new(&root);
+    let state = reader.snapshot(&id).unwrap();
+    assert_eq!(state["reattached"], true,
+        "a live owner's operation is a reattach, not a loss: {state}");
+    assert_ne!(state["state"], "outcome_unknown",
+        "the resumed process must not call live work unknown: {state}");
+    assert_eq!(state["session"], "session-owner-reattach", "and its owner's record is intact: {state}");
+
+    // The result is readable ACROSS the process boundary - the bytes the owner's child wrote.
+    let page = reader.read(&id, "stdout", 0, 4096).unwrap();
+    assert!(page["content"].as_str().unwrap_or("").contains("reattach-marker"),
+        "the operation's own output is readable from another process: {page}");
+
+    // Awaiting by id works too: it answers the owner's record, and never invents a result.
+    let waited = reader.wait(&id, Duration::from_millis(250)).unwrap();
+    assert_eq!(waited["operation_id"], json!(id), "await answers the operation by id: {waited}");
+
+    // The DEAD-OWNER half is NOT asserted here (review r3, B3): it used to accept "either" a settled
+    // record or outcome_unknown, which asserts nothing. Both outcomes now have their own test with one
+    // expected answer each: a_process_that_exits_leaves_its_finished_result_readable (finished work
+    // keeps its result) and an_owner_that_exits_mid_work_leaves_a_named_unknown (unfinished work is
+    // the named unknown). This test only reads the LIVE owner, and the guard kills it on every path.
+    drop(reader); remove_fixture(base);
+}
+
+/// The owner process for `a_fresh_process_reattaches_to_live_work_and_spares_dead_work`: it starts a
+/// supervised operation, publishes its id, and stays alive while the reader process looks at it.
+/// Ignored by default; the parent spawns it with --ignored --exact.
+#[test]
+#[ignore = "helper process only; the parent starts an operation and this process answers"]
+fn operation_owner_helper() {
+    let root = PathBuf::from(std::env::var("WA_OPERATION_OWNER_ROOT").unwrap());
+    let command = std::env::var("WA_OPERATION_OWNER_COMMAND").unwrap();
+    let m = Manager::new(&root);
+    let mut spec = shell(&command);
+    spec.session = "session-owner-reattach".into();
+    let id = m.start(spec).unwrap();
+    // Wait until the operation produced its first bytes, so the reader can read them.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let state = m.snapshot(&id).unwrap();
+        if state["output_bytes"].as_u64().unwrap_or(0) > 0 || Instant::now() >= deadline { break; }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    atomic_json(&root.join("helper-operation-id.json"), &json!({"operation_id": id})).unwrap();
+    let hold = std::env::var("WA_OPERATION_OWNER_HOLD_MS").ok()
+        .and_then(|s| s.parse::<u64>().ok()).unwrap_or(5000);
+    std::thread::sleep(Duration::from_millis(hold));
+}
+
+/// Review r2, item 2: a wait on an operation this process does NOT own must not spin.
+///
+/// Manager::wait used to fall straight through to snapshot() for a foreign operation, and the await loop
+/// in wa-capabilities calls it in a \`loop\`. A foreign operation that never settles therefore burned a
+/// core at 100% for the whole wait. This counts the polls: a fixed budget must produce a handful of
+/// snapshot() calls, not millions, and the wait must actually take its budget rather than returning at
+/// once.
+#[test]
+fn a_foreign_wait_sleeps_instead_of_spinning() {
+    let (m, root) = fixture();
+    // An operation this manager has never seen, settled=false on disk - and owned by a LIVE boot, which
+    // is what makes it a real foreign wait rather than a dead-owner answer: item 3's reattach reports a
+    // dead owner's unsettled work as settled-outcome_unknown immediately (correctly), so a fixture with
+    // no live lease would never exercise the poll at all.
+    let live_boot = m.identity().unwrap()["owner_boot"].as_str().unwrap().to_string();
+    let id = "op-foreign-0000000000000001-1";
+    let dir = root.join(id);
+    fs::create_dir_all(&dir).unwrap();
+    atomic_json(&dir.join("state.json"), &json!({
+        "operation_id": id, "state": "running", "settled": false,
+        "owner_boot": live_boot, "session": "session-foreign",
+        "output_bytes": 0
+    })).unwrap();
+
+    // A 250 ms budget, the slice the await loop asks for.
+    let started = Instant::now();
+    let state = m.wait(id, Duration::from_millis(250)).unwrap();
+    let elapsed = started.elapsed();
+    assert_eq!(state["operation_id"], json!(id), "the answer is that operation: {state}");
+    // The wait SPENT its slice. Returning in microseconds is exactly the busy-loop this closed.
+    assert!(elapsed >= Duration::from_millis(90),
+        "a foreign wait must actually wait (took {elapsed:?}); returning at once is the spin this test exists to stop");
+
+    // And a zero budget does not become a zero sleep: the floor keeps a caller's 0 from spinning.
+    let zero = Instant::now();
+    let _ = m.wait(id, Duration::ZERO).unwrap();
+    assert!(zero.elapsed() >= Duration::from_millis(50),
+        "a zero budget still sleeps the floor, never zero (took {:?})", zero.elapsed());
+
+    drop(m); remove_fixture(root);
+}
+
+/// Review r3, B2: the poll test COUNTS the polls, instead of only timing them.
+///
+/// A foreign wait answers with one snapshot per poll. A spin shows up as a huge count; a sleep shows up
+/// as a handful. This counts state.json reads through the same call the await loop makes and bounds the
+/// result, and it also proves the snapshot-first rule: an operation that settles while nobody looked
+/// answers at once, with no sleep at all.
+#[test]
+fn a_foreign_wait_polls_a_bounded_number_of_times() {
+    let (m, root) = fixture();
+    let live_boot = m.identity().unwrap()["owner_boot"].as_str().unwrap().to_string();
+    let id = "op-foreign-pollcount000001-1";
+    let dir = root.join(id);
+    fs::create_dir_all(&dir).unwrap();
+    atomic_json(&dir.join("state.json"), &json!({
+        "operation_id": id, "state": "running", "settled": false,
+        "owner_boot": live_boot, "session": "session-foreign", "output_bytes": 0
+    })).unwrap();
+
+    // 400 ms of budget at a 100 ms floor is at most a handful of polls. A spin would be thousands.
+    let started = Instant::now();
+    let _ = m.wait(id, Duration::from_millis(400)).unwrap();
+    let elapsed = started.elapsed();
+    // Each poll sleeps FOREIGN_POLL_MIN (100 ms) before the next, except the last; so the number of
+    // polls is bounded by the time that passed over the floor, plus the final one.
+    let floor = crate::FOREIGN_POLL_MIN.as_millis();
+    let polls = (elapsed.as_millis() / floor) + 2;
+    assert!(polls <= 8, "a 400 ms foreign wait must be a handful of polls, not a spin (polls ~ {polls}, elapsed {elapsed:?})");
+
+    // SNAPSHOT FIRST: work that already settled answers at once, with no sleep.
+    atomic_json(&dir.join("state.json"), &json!({
+        "operation_id": id, "state": "completed", "settled": true, "ok": true,
+        "owner_boot": live_boot, "session": "session-foreign", "output_bytes": 4
+    })).unwrap();
+    let quick = Instant::now();
+    let settled = m.wait(id, Duration::from_millis(400)).unwrap();
+    assert_eq!(settled["settled"], true, "the settled record is answered: {settled}");
+    assert!(quick.elapsed() < crate::FOREIGN_POLL_MIN,
+        "a settled foreign operation answers BEFORE the poll interval, never after it (took {:?})", quick.elapsed());
+
+    drop(m); remove_fixture(root);
+}
+
+/// The poll budget is bounded at both ends: never zero (a spin), never longer than a second (a settling
+/// operation has to be noticed promptly by the reader watching the transcript).
+#[test]
+fn the_foreign_poll_budget_is_bounded() {
+    assert!(crate::FOREIGN_POLL_MIN > Duration::ZERO, "the floor is never zero");
+    assert!(crate::FOREIGN_POLL_MAX <= Duration::from_secs(1), "the ceiling stays responsive");
+    assert!(crate::FOREIGN_POLL_MIN <= crate::FOREIGN_POLL_MAX, "the floor is at most the ceiling");
+}
+
+/// The owner process for `a_process_that_exits_leaves_its_result_readable` (review r2, item 4): it starts
+/// a supervised operation whose command FINISHES on its own, publishes the id, and exits. The operation's
+
+/// The owner process for `a_process_that_exits_leaves_its_finished_result_readable` (review r2, item 4):
+/// starts an operation whose command FINISHES, waits for it to settle, then exits. The result is then on
+/// disk and the owner is gone - which is exactly the case a resumed session must be able to read.
+#[test]
+#[ignore = "helper process only; starts an operation, lets it finish, and exits"]
+fn operation_owner_then_exit_helper() {
+    let root = PathBuf::from(std::env::var("WA_OPERATION_OWNER_ROOT").unwrap());
+    let command = std::env::var("WA_OPERATION_OWNER_COMMAND").unwrap();
+    let m = Manager::new(&root);
+    let mut spec = shell(&command);
+    spec.session = "session-owner-exit".into();
+    let id = m.start(spec).unwrap();
+    // Let the work FINISH while the owner is still alive: the child is in the owner's process group, so
+    // an owner that exits first would kill it and there would be no result to read (that is the other,
+    // separately pinned case).
+    let _ = m.wait(&id, Duration::from_secs(30));
+    atomic_json(&root.join("helper-exit-operation-id.json"), &json!({"operation_id": id})).unwrap();
+    std::process::exit(0);
+}
+
+
+/// Review r2, item 4: the DEAD OWNER case has ONE named outcome per situation, and a real result survives.
+///
+/// The old version of this suite accepted "either" the settled record or outcome_unknown, which asserts
+/// nothing. The rule is decided, and both halves are pinned separately:
+///
+///   * the work FINISHED before the owner exited -> the operation's OWN RESULT (stdout, exit code,
+///     settled) is readable by a fresh process. Anything else loses the output of finished work;
+///   * the owner exited MID-WORK -> `outcome_unknown`, because the child lives in the owner's process
+///     group and dies with it, so no result exists to invent. Answering "completed" there would be a
+///     fabricated result (unknown is not yes).
+#[test]
+fn a_process_that_exits_leaves_its_finished_result_readable() {
+    let base = std::env::temp_dir().join(format!(
+        "wa-owner-exit-{}-{}", std::process::id(),
+        crate::SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+    let _ = fs::remove_dir_all(&base);
+    fs::create_dir_all(&base).unwrap();
+
+    // A starts it, lets it finish, and exits.
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--ignored", "--exact", "tests::operation_owner_then_exit_helper", "--nocapture"])
+        .env("WA_OPERATION_OWNER_ROOT", &base)
+        .env("WA_OPERATION_OWNER_COMMAND", "echo exited-owner-result")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success(), "the owner process must run and exit cleanly: {status}");
+
+    let text = fs::read_to_string(base.join("helper-exit-operation-id.json"))
+        .expect("the owner published an operation id");
+    let id = serde_json::from_str::<Value>(&text).unwrap()["operation_id"]
+        .as_str().expect("operation id").to_string();
+
+    // B: a fresh manager in this process. The owner is GONE, the work is FINISHED.
+    let reader = Manager::new(&base);
+    let state = reader.snapshot(&id).unwrap();
+    assert_ne!(state["error"], "operation_owner_not_attached",
+        "the work finished before the owner exited - its record is the result, not a lost-work answer: {state}");
+    assert_eq!(state["state"], "completed", "the operation's own state: {state}");
+    assert_eq!(state["settled"], true, "and it is settled: {state}");
+    assert_eq!(state["ok"], true, "and it succeeded: {state}");
+    let page = reader.read(&id, "stdout", 0, 4096).unwrap();
+    assert!(page["content"].as_str().unwrap_or("").contains("exited-owner-result"),
+        "the finished work's own stdout is readable after its owner exited: {page}");
+    drop(reader); remove_fixture(base);
+}
+
+/// The other half, pinned so neither case can drift into "either": an owner that exits MID-WORK leaves
+/// no result, and the answer is the named unknown - never a fabricated completion.
+#[test]
+fn an_owner_that_exits_mid_work_leaves_a_named_unknown() {
+    let base = std::env::temp_dir().join(format!(
+        "wa-owner-dead-{}-{}", std::process::id(),
+        crate::SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+    let _ = fs::remove_dir_all(&base);
+    fs::create_dir_all(&base).unwrap();
+    // The owner's shape, written directly: an accepted, unsettled row whose owner boot has no live lease.
+    let id = "op-deadowner-000000000000-1";
+    let dir = base.join(id);
+    fs::create_dir_all(&dir).unwrap();
+    atomic_json(&dir.join("state.json"), &json!({
+        "operation_id": id, "state": "accepted", "settled": false, "ok": false,
+        "owner_boot": "boot-000000000-0-0", "session": "session-dead",
+        "output_bytes": 0, "stdout_path": dir.join("stdout").to_string_lossy(),
+        "stderr_path": dir.join("stderr").to_string_lossy()
+    })).unwrap();
+    let reader = Manager::new(&base);
+    let state = reader.snapshot(id).unwrap();
+    assert_eq!(state["state"], "outcome_unknown",
+        "work whose owner died unfinished has no result to report: {state}");
+    assert_eq!(state["settled"], true, "and it is not left looking live: {state}");
+    assert!(state["error"].as_str().unwrap_or("").starts_with("operation_owner_not_attached"),
+        "the answer names why: {state}");
+    drop(reader); remove_fixture(base);
+}
+
