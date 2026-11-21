@@ -890,7 +890,7 @@ impl CardWrap {
     /// corner stays one row and moves the frame; everything else is the prose rule, byte for byte.
     pub fn rows(&mut self, line: &str, width: usize) -> Vec<String> {
         let (cells, _) = cells_of(line);
-        match card_edge(&cells) {
+        match card_edge(&cells, self.open) {
             Some(Edge::Open) => { self.open = true; wrap_rows(line, width) }
             Some(Edge::Close) => { self.open = false; wrap_rows(line, width) }
             Some(Edge::Body) if self.open => wrap_card(&cells, width),
@@ -915,7 +915,7 @@ fn border_before(cells: &[(String, char, usize)], at: usize) -> bool {
     cells[..=at.min(cells.len() - 1)].iter().any(|c| c.0.contains(CARD_BORDER))
 }
 
-fn card_edge(cells: &[(String, char, usize)]) -> Option<Edge> {
+fn card_edge(cells: &[(String, char, usize)], in_frame: bool) -> Option<Edge> {
     let lead = cells.iter().position(|c| c.1 != ' ' && c.1 != COPY_ICON)?;
     if !border_before(cells, lead) { return None; }
     // A TABLE wears the same border role and must not be read as a card: its rules carry a column
@@ -925,13 +925,31 @@ fn card_edge(cells: &[(String, char, usize)]) -> Option<Edge> {
     let table_rule = cells.iter().any(|c| matches!(c.1, '\u{252c}' | '\u{253c}' | '\u{2534}' | '\u{2510}' | '\u{2518}' | '\u{2524}'));
     let bars: Vec<usize> = cells.iter().enumerate().filter(|(_, c)| c.1 == '\u{2502}').map(|(i, _)| i).collect();
     let last_visible = cells.iter().rposition(|c| c.1 != ' ');
-    let table_body = bars.len() >= 2 && last_visible == bars.last().copied();
+    // Inside a frame that is already OPEN there is no table to protect: markdown.lua never nests one,
+    // so a code line that merely READS like a table row (`│ a │`) is card code and is cut - the review
+    // caught it being wrapped as prose instead.
+    let table_body = !in_frame && bars.len() >= 2 && last_visible == bars.last().copied();
     match cells[lead].1 {
-        '\u{250c}' if !table_rule => Some(Edge::Open),
+        // The OPENING must be exact: a card's is `┌─` and nothing else, or `┌─ <lang>` with the lang from
+        // the set markdown.lua accepts (fence_of: letters, digits and `+ - _ # .`). A compiler diagnostic is
+        // drawn in the SAME grey (codespan/miette: `┌─ src/main.rs:3:5`), so a check that took any
+        // border-coloured corner opened a frame on it and cut the prose under it by cells.
+        '\u{250c}' if !table_rule && is_card_opening(cells, lead) => Some(Edge::Open),
         '\u{2514}' if !table_rule => Some(Edge::Close),
         '\u{2502}' if !table_body => Some(Edge::Body),
         _ => None,
     }
+}
+
+/// Whether the row from `lead` is a card's OWN opening: `┌─`, or `┌─ <lang>` where the lang is what
+/// `lua/core/markdown.lua` `fence_of` accepts (letters, digits, `+ - _ # .`) - nothing else. This is what
+/// keeps a dim compiler diagnostic (`┌─ src/main.rs:3:5`, the same grey role) from opening a card frame.
+fn is_card_opening(cells: &[(String, char, usize)], lead: usize) -> bool {
+    let text: String = cells[lead..].iter().map(|c| c.1).collect();
+    let Some(rest) = text.strip_prefix("\u{250c}\u{2500}") else { return false };
+    if rest.is_empty() { return true; }
+    let Some(lang) = rest.strip_prefix(' ') else { return false };
+    !lang.is_empty() && lang.chars().all(|c| c.is_alphanumeric() || matches!(c, '+' | '-' | '_' | '#' | '.'))
 }
 
 /// One printable character and the escapes just before it, with its width: the parse `wrap_rows` does.
@@ -1922,6 +1940,66 @@ mod tests {
             u8::from_str_radix(&b, 16).expect("blue"));
         assert_eq!(CARD_BORDER, expected,
             "CARD_BORDER must be the colour lua/core/cli_view.lua paints the border with (role {role:?})");
+    }
+
+
+    #[test]
+    fn only_the_exact_card_opening_opens_a_frame_a_dim_diagnostic_does_not() {
+        // codespan/miette draw a source location as a DIM `┌─ path:line:col` (cli_view.lua:80 dim == 777777,
+        // the same grey as the card border), so a check that accepted any border-coloured corner opened a
+        // frame on a compiler diagnostic and cut the rows under it by cells instead of wrapping them.
+        // The DIM role IS the border colour (both 777777), so the one constant paints the diagnostic.
+        let dim_row = format!("{CARD_BORDER}   ┌─ src/main.rs:3:5{RESET}");
+        let dim_text = format!("{CARD_BORDER}│ the diagnostic text under it is long enough that it wraps at a narrow width{RESET}");
+        let mut cards = CardWrap::default();
+        assert_eq!(cards.rows(&dim_row, 40), wrap_rows(&dim_row, 40), "a dim diagnostic corner is prose");
+        let after = cards.rows(&dim_text, 40);
+        assert_eq!(after, wrap_rows(&dim_text, 40), "and the dim rows under it are prose, never card rows: {after:?}");
+        assert!(!after.iter().any(|r| r.contains("│↪")), "no card continuation on a diagnostic: {after:?}");
+        // A card's OWN opening row is `┌─` or `┌─ <lang>` and nothing else, and it still opens one.
+        for opening in ["┌─", "┌─ bash", "┌─ js"] {
+            let mut fresh = CardWrap::default();
+            let row = format!("{CARD_BORDER}{opening}{RESET}");
+            fresh.rows(&row, 40);
+            let body = format!("{CARD_BORDER}│ {RESET}one rather long line of code that has to be cut at this width to fit");
+            let cut = fresh.rows(&body, 40);
+            assert!(cut.iter().any(|r| r.contains("│↪")), "{opening:?} opens a real card: {cut:?}");
+        }
+    }
+
+
+    #[test]
+    fn with_colour_off_there_is_no_frame_and_the_card_falls_back_to_prose() {
+        // NO_COLOR / WASM_AGENT_CLI_VIEW=plain: `markdown.lua`\'s paint returns the text unchanged, so the
+        // border carries no colour bytes. The host then cannot see a frame and the card wraps as PROSE -
+        // the pre-existing behaviour, which the report states and this test pins.
+        let code = "for f in a b c; do echo one rather long line of shell here to push past the border; done";
+        let plain_rows = vec![
+            "┌─ bash".to_string(),
+            format!("│ {code}"),
+            "└─".to_string(),
+        ];
+        let mut cards = CardWrap::default();
+        let mut screen: Vec<String> = Vec::new();
+        for line in &plain_rows { screen.extend(cards.rows(line, 60)); }
+        let prose: Vec<String> = plain_rows.iter().flat_map(|l| wrap_rows(l, 60)).collect();
+        assert_eq!(screen, prose, "an unpainted card is prose, exactly: {screen:?}");
+        assert!(!screen.iter().any(|r| r.contains("│↪")), "no card mark without colour: {screen:?}");
+    }
+
+    #[test]
+    fn a_table_looking_code_line_inside_a_real_card_is_still_card_code() {
+        // A code line may be anything, including something that reads like a table row. The table check
+        // exists to keep a TABLE out of a card frame; inside a frame that is already OPEN there is no table
+        // to protect (markdown.lua never nests one), so the row must be cut like any other card code.
+        let code = "│ a long line of text that must be cut by cells and ends with a bar │";
+        let mut cards = CardWrap::default();
+        let rows = card_rows(&[code], false).iter().flat_map(|line| cards.rows(line, 40)).collect::<Vec<String>>();
+        let plain: Vec<String> = rows.iter().map(|r| crate::selection::plain(r)).collect();
+        let shown = plain.join("\n");
+        assert!(plain.iter().any(|r| r.contains("│↪")),
+            "a table-looking code line inside an open card is cut like card code: {shown}");
+        assert!(!plain.iter().any(|r| r.trim_end() == "│"), "and no row is only a bar: {shown}");
     }
 
     #[test]

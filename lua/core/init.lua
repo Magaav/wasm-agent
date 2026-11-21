@@ -282,6 +282,12 @@ elseif command == "nodes" then
   if args[2]=='pending' then
     local result=dofile('lua/core/binding_cli.lua').run('nodes','pending')
     if result.error or result.ok==false then os.exit(1) end
+  elseif args[2]=='probe' then
+    -- ONE peer's accepted capabilities, printed as one JSON line (item 10 of the node-ops round). This is
+    -- the child half of the parallel list: M.list starts one per peer at once, because the only
+    -- concurrency a node has is supervised processes (host.http blocks). It is not a model-facing verb.
+    local nodes = dofile("lua/core/nodes.lua")
+    print(json.encode(nodes.probe(args[3])))
   else
     local nodes = dofile("lua/core/nodes.lua")
     print(json.encode({ node_id = (nodes.identity() or {}).node_id, nodes = nodes.list() }))
@@ -296,6 +302,37 @@ elseif command == "stt" then
   local result = dofile("lua/core/stt.lua").cli({ table.unpack(args, 2) })
   print(json.encode(result))
   if result and result.ok == false then os.exit(1) end
+elseif command == "build-env" then
+  -- The node build record, readable and checkable without a build (item 3 of the node-ops round).
+  -- ONE reader exists (scripts/lib/build-requirements.sh); this prints what it says, and a key no
+  -- build reads is a refusal by name with the one line that fixes it - the same verdict
+  -- scripts/fast.sh and scripts/deploy.sh take, so an operator sees the answer before a build does.
+  --
+  -- TWO MEASURED BUGS, both fixed here (item 10 of the node-ops round):
+  --   * the root came from WA_INSTALL_DIR, which is where the BINARY is installed, not the user home the
+  --     record hangs off (<home>/.wasm-agent/build.env). lua/core/paths.lua is the one place that answers
+  --     the home; a second derivation here disagreed with every other reader.
+  --   * the argument was quoted with Lua's %q, which is Lua syntax, not shell syntax: measured,
+  --     ("%q"):format("/tmp/a$HOME `id` b") printed "/tmp/a$HOME `id` b" with double quotes, so
+  --     the shell EXPANDED $HOME and RAN id. A path with a space, a $ or a backtick was not passed
+  --     through, it was executed. shell_quote below is the POSIX single-quote form (the one
+  --     lua/core/harness_evaluator.lua already uses for the same reason).
+  local paths = dofile("lua/core/paths.lua")
+  local root = paths.home() or host.getenv("WASM_AGENT_HOME") or host.getenv("HOME") or ""
+  local function shell_quote(text) return "'" .. tostring(text or ""):gsub("'", "'\\''") .. "'" end
+  local script = (host.getenv("WASM_AGENT_LUA_ROOT") or ".") .. "/scripts/lib/build-requirements.sh"
+  local ran, raw = pcall(host.exec, "bash " .. shell_quote(script) .. " record " .. shell_quote(root), "", 60)
+  local answer = type(raw) == "string" and (select(2, pcall(json.decode, raw))) or raw
+  local code = type(answer) == "table" and (tonumber(answer.code) or 0) or 0
+  print(type(answer) == "table" and (answer.stdout or "") or tostring(raw))
+  if code ~= 0 then os.exit(code) end
+elseif command == "backup" or command == "restore" then
+  -- The snapshot an operator can take and put back with one command (item 1 of the node-ops round):
+  -- 'wa backup' snapshots every store with its manifest, 'wa backup list' names them, and
+  -- 'wa restore --from DIR' puts one back after re-checking every copy's bytes. The module owns both
+  -- (lua/core/backup_cli.lua, lua/core/backup.lua); this is the dispatch only.
+  local code = dofile("lua/core/backup_cli.lua").run(command, { table.unpack(args, 2) })
+  if code and code ~= 0 then os.exit(code) end
 elseif command == "paths" then
   -- What an operator runs first when the agent says "no model configured": where
   -- this node keeps its files, and which file the host actually reads for the
@@ -412,6 +449,106 @@ elseif command == "whatsapp" then
   -- whose model is unreachable must still be able to find out what was archived and push it off.
   local code = dofile("lua/core/whatsapp_archive_cli.lua").run({ table.unpack(args, 2) })
   if code and code ~= 0 then os.exit(code) end
+elseif command == "test" then
+  -- `wa test --at <sha> <row>`: one fast row at a base commit and at this tree (item 5/8, #46).
+  --
+  -- The worker is scripts/lib/row-at-sha.sh, and the script form is scripts/row-at-sha.sh: one
+  -- implementation with three faces. The whole comparison runs as ONE supervised operation, so a row that
+  -- hangs has its process group killed and named instead of holding the node; the worker clears the
+  -- WASM_AGENT_*/WA_MESH* allow-list for each side, exactly as scripts/fast.sh does.
+  --
+  --   wa test --at <sha> <row> [--repo DIR] [--json]
+  --
+  -- Exit: 0 a verdict was produced, 1 the row passed at the base and fails here, 2 refused/no comparison.
+  local at, row, repo, as_json = nil, nil, nil, false
+  local i = 2
+  while i <= #args do
+    local arg = tostring(args[i] or "")
+    if arg == "--at" then at = args[i + 1]; i = i + 2
+    elseif arg == "--repo" then repo = args[i + 1]; i = i + 2
+    elseif arg == "--json" then as_json = true; i = i + 1
+    elseif arg:sub(1, 1) == "-" then
+      print("wa test: refused(row_at_sha_unknown_option): " .. arg .. " (usage: wa test --at <sha> <row> [--repo DIR] [--json])")
+      os.exit(2)
+    else row = arg; i = i + 1
+    end
+  end
+  if not at then
+    print("wa test: refused(row_at_sha_commit_required): name the base commit -- wa test --at <sha> <row>")
+    os.exit(2)
+  end
+  if not row then
+    print("wa test: refused(row_at_sha_row_required): name the row -- wa test --at <sha> <row>")
+    os.exit(2)
+  end
+  -- THE COMMIT IS VALIDATED BEFORE ANY SHELL EXISTS (item 5 of the node-ops round). The comparison is a
+  -- bash command this verb builds, and the commit arrives from a caller's hand. A value that is not a
+  -- commit cannot be compared, so it is refused here by name: nothing is quoted, nothing is executed, and
+  -- a caller who meant `--at latest` learns that from the refusal instead of from bash's own complaint.
+  -- The rule is an ALLOW-LIST (hex only), not a block-list of characters somebody remembered.
+  local at_text = tostring(at or "")
+  if not at_text:match("^%x+$") then
+    local shown = at_text:gsub("[^%w%._/-]", "?")
+    print("wa test: refused(row_at_sha_bad_commit): --at " .. shown .. " is not a commit sha (hex digits only); nothing was run")
+    os.exit(2)
+  end
+  local root = host.getenv("WASM_AGENT_LUA_ROOT") or "."
+  repo = repo or root
+  local lib = root .. "/scripts/lib/row-at-sha.sh"
+  if host.path_kind and host.path_kind(lib) ~= "file" then
+    print("wa test: refused(row_at_sha_lib_missing): " .. lib .. " is not there, so there is no comparison to run")
+    os.exit(2)
+  end
+  -- The worker's own fields are read back rather than re-derived: it prints class=, base_code=,
+  -- change_code= and binary=, and this verb prints the same facts (as JSON with --json, which is the
+  -- shape a harness reads).
+  -- SINGLE QUOTES, NOT %q (item 5). `string.format("%q", x)` is Lua's own escaping: it writes `\"`
+  -- quoting, `\n` and `\ddd` escapes, and a shell does not read any of them the way Lua wrote them - a
+  -- repository path with a backslash or a quote arrived at bash as another string. A value wrapped in
+  -- single quotes and with every internal ' closed-escaped-reopened is what `sh` parses back to exactly
+  -- these bytes, on every shell this node runs.
+  local function shq(value)
+    return "'" .. tostring(value):gsub("'", "'\\''") .. "'"
+  end
+  local command = "bash " .. shq(root .. "/scripts/row-at-sha.sh") .. " " .. shq(at_text)
+    .. " " .. shq(tostring(row)) .. " " .. shq(tostring(repo))
+  local ran, raw = pcall(host.exec, command, repo, 3600)
+  local answer = type(raw) == "string" and (select(2, pcall(json.decode, raw))) or raw
+  if not ran or type(answer) ~= "table" then
+    print("wa test: refused(row_at_sha_run_failed): the comparison could not run: " .. tostring(raw):sub(1, 200))
+    os.exit(2)
+  end
+  local stdout = tostring(answer.stdout or "")
+  local stderr = tostring(answer.stderr or "")
+  local fields = {}
+  for line in stdout:gmatch("[^\r\n]+") do
+    local key, value = line:match("^([a-z_]+)=(.*)$")
+    if key then fields[key] = value end
+  end
+  -- The worker's REFUSAL is the answer when it produced no verdict: it names what was wrong (a sha that is
+  -- not a sha, a row that does not exist, a row absent at the base) and its own exit code is passed through
+  -- rather than being reported as a missing class= line - a refusal is not a comparison that failed.
+  if fields.class == nil and (tonumber(answer.code) or 0) ~= 0 then
+    if as_json then
+      print(json.encode({ ok = false, error = "row_at_sha_refused", exit = tonumber(answer.code),
+        detail = (stderr ~= "" and stderr or stdout):gsub("%s+$", ""), at = tostring(at), row = tostring(row) }))
+    else
+      io.stderr:write(stderr ~= "" and stderr or stdout)
+    end
+    os.exit(tonumber(answer.code) or 2)
+  end
+  if stderr ~= "" and not as_json then io.stderr:write(stderr) end
+  if as_json then
+    print(json.encode({ ok = (tonumber(answer.code) or 1) == 0, class = fields.class,
+      base_code = tonumber(fields.base_code), change_code = tonumber(fields.change_code),
+      binary = fields.binary, at = tostring(at), row = tostring(row), exit = tonumber(answer.code) }))
+  else
+    io.write(stdout)
+    if fields.class == nil then
+      print("wa test: refused(row_at_sha_no_verdict): the worker produced no class= line, so nothing was compared")
+    end
+  end
+  os.exit(tonumber(answer.code) or 2)
 elseif command == "eval" then
   -- The harness evaluator (lua/core/harness_evaluator_cli.lua, docs/HARNESS-EVALUATOR.md): freeze a real
   -- task, replay it against a candidate binary in an isolated home, and print metrics. It gathers

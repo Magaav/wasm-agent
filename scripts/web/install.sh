@@ -5,7 +5,7 @@
 #   ... | sh -s -- --check            resolve + verify, change nothing
 set -eu
 REPO=Magaav/wasm-agent
-SIGNER=release-signing-312805587de9606c
+SIGNER=release-signing-9356608c52260ed9
 PREFIX=${WA_PREFIX:-$HOME/.local/bin}
 UI=${WA_UI:-$HOME/.local/share/wasm-agent/ui}
 check=0; [ "${1:-}" = --check ] && check=1

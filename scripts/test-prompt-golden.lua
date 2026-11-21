@@ -125,9 +125,11 @@ for _, case in ipairs(cases) do
     return out
   end
   local got_tools, want_tools = by_name(got.tools), by_name(want.tools)
-  -- `run` is this branch addition wherever it appears; 39bbf2b6 never declares it.
+  -- `run` and `build` are this branch additions wherever they appear; 39bbf2b6 never declares either.
   ok(want_tools.run == nil, case.name .. ': 39bbf2b6 does not declare the run tool')
+  ok(want_tools.build == nil, case.name .. ': 39bbf2b6 does not declare the build tool')
   got_tools.run = nil
+  got_tools.build = nil
   -- The codemode description is the one schema field this branch changes on purpose.
   if got_tools.codemode and want_tools.codemode then
     local mine, ref = got_tools.codemode['function'], want_tools.codemode['function']

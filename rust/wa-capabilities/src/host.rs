@@ -3,7 +3,9 @@
 //! These are the only things the Lua agent cannot do by itself. Everything the
 //! agent *decides* lives in Lua; everything it *needs from the platform* lives
 //! here, so the same Lua can later run as a WASM component with these imports.
-use wa_host_support::lua::{arg_integer, arg_string, lua_pushlstring, lua_touserdata, upvalue_index, LuaState};
+use wa_host_support::lua::{arg_integer, arg_string, cstr, lua_createtable, lua_pushinteger,
+    lua_pushlstring, lua_pushnil, lua_pushnumber, lua_rawseti, lua_setfield, lua_touserdata,
+    upvalue_index, LuaState};
 // The one answer shape shared with the kernel entry points (`components`, `service`, `state`), which
 // moved to `wa-host-support` with `lua.rs`: they answer through it and may not import this crate.
 use wa_host_support::json::push_json;
@@ -641,45 +643,161 @@ fn under_policy<T>(
     }
 }
 
+/// One column's value, exactly as SQLite reported it, before either answer shape is built.
+enum Cell {
+    Null,
+    Integer(i64),
+    Real(f64),
+    Text(String),
+    /// A blob by LENGTH, never by bytes: `host.sql_query` has always answered one as
+    /// "<N bytes>" (a placeholder that cannot blow up a transcript), and the typed answer keeps
+    /// that same string instead of inventing a second convention for the same column.
+    Blob(usize),
+}
+
+impl Cell {
+    fn json(&self) -> Value {
+        match self {
+            Cell::Null => Value::Null,
+            Cell::Integer(n) => json!(n),
+            Cell::Real(f) => json!(f),
+            Cell::Text(text) => json!(text),
+            Cell::Blob(len) => json!(format!("<{len} bytes>")),
+        }
+    }
+}
+
+/// The ONE reader of a statement's rows. `sql_query` (JSON text) and `sql_rows` (a Lua table) both
+/// answer from this, so the two shapes cannot drift: same statement, same authorizer, same values,
+/// and only the shape they cross the ABI in differs (docs/missions/reports/seam-audit.md, row 9).
+fn read_cells(
+    host: &Host,
+    sql: &str,
+    values: &[Value],
+) -> Result<(Vec<String>, Vec<Vec<Cell>>), String> {
+    let action = action_of(sql);
+    let conn = host.db.lock().map_err(|e| e.to_string())?;
+    under_policy(&conn, &action, || {
+        let mut statement = conn.prepare(sql)?;
+        let names: Vec<String> = statement.column_names().iter().map(|s| s.to_string()).collect();
+        let owned = params(values);
+        let mut rows = statement.query(params_from_iter(owned.iter().map(|p| p.as_ref())))?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next()? {
+            let mut cells = Vec::with_capacity(names.len());
+            for index in 0..names.len() {
+                cells.push(match row.get_ref(index)? {
+                    rusqlite::types::ValueRef::Null => Cell::Null,
+                    rusqlite::types::ValueRef::Integer(n) => Cell::Integer(n),
+                    rusqlite::types::ValueRef::Real(f) => Cell::Real(f),
+                    rusqlite::types::ValueRef::Text(t) => {
+                        Cell::Text(String::from_utf8_lossy(t).into_owned())
+                    }
+                    rusqlite::types::ValueRef::Blob(b) => Cell::Blob(b.len()),
+                });
+            }
+            out.push(cells);
+        }
+        Ok((names, out))
+    })
+}
+
     /// Answers JSON text (one string the caller decodes with `lua/vendor/json.lua`), never a Lua table.
 /// host.sql_query(sql, params_json) -> [ {column: value}, ... ] | {error}
 ///
 /// A read takes no write lock, so the only contention it meets is a schema/journal transition; it is
 /// retried under the same policy as a write (`under_policy`), which is what makes a `status` call
 /// answer while another lane is committing.
+///
+/// The rows come from `read_cells`, the same reader `host.sql_rows` answers from.
 pub extern "C-unwind" fn sql_query(l: *mut LuaState) -> c_int {
     let host = host_of(l);
     let sql = arg_string(l, 1).unwrap_or_default();
     let params_json = arg_string(l, 2).unwrap_or_else(|| "[]".into());
     let values: Vec<Value> = serde_json::from_str(&params_json).unwrap_or_default();
-    let action = action_of(&sql);
-    let outcome = (|| -> Result<Value, String> {
-        let conn = host.db.lock().map_err(|e| e.to_string())?;
-        under_policy(&conn, &action, || {
-            let mut statement = conn.prepare(&sql)?;
-            let names: Vec<String> = statement.column_names().iter().map(|s| s.to_string()).collect();
-            let owned = params(&values);
-            let mut rows = statement.query(params_from_iter(owned.iter().map(|p| p.as_ref())))?;
-            let mut out = Vec::new();
-            while let Some(row) = rows.next()? {
-                let mut object = serde_json::Map::new();
-                for (index, name) in names.iter().enumerate() {
-                    let value = match row.get_ref(index)? {
-                        rusqlite::types::ValueRef::Null => Value::Null,
-                        rusqlite::types::ValueRef::Integer(n) => json!(n),
-                        rusqlite::types::ValueRef::Real(f) => json!(f),
-                        rusqlite::types::ValueRef::Text(t) => json!(String::from_utf8_lossy(t)),
-                        rusqlite::types::ValueRef::Blob(b) => json!(format!("<{} bytes>", b.len())),
-                    };
-                    object.insert(name.clone(), value);
-                }
-                out.push(Value::Object(object));
-            }
-            Ok(Value::Array(out))
-        })
-    })();
-    push_json(l, &outcome.unwrap_or_else(|error| json!({"error": error})));
+    let outcome = read_cells(host, &sql, &values).map(|(names, rows)| {
+        Value::Array(
+            rows.into_iter()
+                .map(|cells| {
+                    let mut object = serde_json::Map::new();
+                    for (name, cell) in names.iter().zip(cells.iter()) {
+                        object.insert(name.clone(), cell.json());
+                    }
+                    Value::Object(object)
+                })
+                .collect(),
+        )
+    });
+    push_json(l, &outcome.unwrap_or_else(|error| json!({ "error": error })));
     1
+}
+
+/// host.sql_rows(sql, params_json) -> rows as a Lua table, or nil plus a named error.
+///
+/// The same statement, the same authorizer and the same values as `host.sql_query` - answered as a
+/// Lua table instead of JSON text. One table per row, column name to value: a SQLite INTEGER as a
+/// Lua integer, a REAL as a float (a non-finite REAL - SQLite can hold +-Inf - as NULL, which is what
+/// the JSON path's `null` decodes to), TEXT as a string, a BLOB as the "<N bytes>" placeholder
+/// `sql_query` answers, and NULL as an ABSENT key (which is what decoding a JSON null into a Lua
+/// table has always produced, since a table cannot hold nil).
+///
+/// Why this exists: the turn loop reads its own transcript with `SELECT *`, and on avell 47 KB of
+/// JSON cost 2.6 ms of pure-Lua decoding per read - 80% of the whole call
+/// (docs/missions/reports/seam-audit.md, row 9). The record shape is `wit/kernel/sql.wit`'s `value`
+/// variant; this is that shape on the native ABI, where the alternative is text plus a decoder.
+///
+/// The failure shape is `nil, error` and NOT `{error}`: a Lua table carrying an `error` key would
+/// itself be a row, and a caller that forgot to check it would read the failure as data.
+pub extern "C-unwind" fn sql_rows(l: *mut LuaState) -> c_int {
+    let host = host_of(l);
+    let sql = arg_string(l, 1).unwrap_or_default();
+    let params_json = arg_string(l, 2).unwrap_or_else(|| "[]".into());
+    let values: Vec<Value> = serde_json::from_str(&params_json).unwrap_or_default();
+    match read_cells(host, &sql, &values) {
+        Ok((names, rows)) => {
+            unsafe {
+                lua_createtable(l, rows.len() as c_int, 0);
+                for (index, cells) in rows.iter().enumerate() {
+                    lua_createtable(l, 0, names.len() as c_int);
+                    for (name, cell) in names.iter().zip(cells.iter()) {
+                        match cell {
+                            // A NULL column is an absent key, exactly as the JSON path leaves it.
+                            Cell::Null => lua_pushnil(l),
+                            Cell::Integer(n) => lua_pushinteger(l, *n),
+                            // SQLite can hold +-Inf; serde_json turns a non-finite f64 into `null`, and a
+                            // null decodes to an ABSENT key. The typed answer has to agree with the JSON one,
+                            // so a non-finite REAL is NULL here too (review r2).
+                            Cell::Real(f) => {
+                                if f.is_finite() {
+                                    lua_pushnumber(l, *f);
+                                } else {
+                                    lua_pushnil(l);
+                                }
+                            }
+                            Cell::Text(text) => {
+                                lua_pushlstring(l, text.as_ptr() as *const c_char, text.len());
+                            }
+                            Cell::Blob(len) => {
+                                let text = format!("<{len} bytes>");
+                                lua_pushlstring(l, text.as_ptr() as *const c_char, text.len());
+                            }
+                        }
+                        let key = cstr(name);
+                        lua_setfield(l, -2, key.as_ptr());
+                    }
+                    lua_rawseti(l, -2, (index + 1) as i64);
+                }
+            }
+            1
+        }
+        Err(error) => {
+            unsafe {
+                lua_pushnil(l);
+                lua_pushlstring(l, error.as_ptr() as *const c_char, error.len());
+            }
+            2
+        }
+    }
 }
 
 /// host.sha256(text) -> hex
@@ -3333,8 +3451,13 @@ pub extern "C-unwind" fn build_identity(l: *mut LuaState) -> c_int {
 }
 
 /// host.runtime_info() -> JSON text of `{version, binary_sha256, build_source_commit, build_source_tree,
-/// build_wave_generation, process_id, boot_id, os, arch, binary_path, run_origin} - one JSON string the
-/// caller decodes with lua/vendor/json.lua, never a Lua table.
+/// build_source_dirty, build_wave_generation, process_id, boot_id, os, arch, binary_path, run_origin} - one JSON
+/// string the caller decodes with lua/vendor/json.lua, never a Lua table.
+///
+/// `build_source_dirty` is the value the binary was BUILT with, not a fresh look at the tree (item 4 of the
+/// node-ops round): a binary built from a work tree that had uncommitted changes embeds code this checkout
+/// does not have, so the same commit is not the same bytes. lua/core/build_status.lua reads it and answers
+/// `edited`; without it a dirty build at the tree HEAD was graded `fresh`, which is the lie the item names.
 pub extern "C-unwind" fn runtime_info(l: *mut LuaState) -> c_int {
     static IDENTITY: OnceLock<Value> = OnceLock::new();
     let identity = IDENTITY.get_or_init(|| {
@@ -3343,6 +3466,7 @@ pub extern "C-unwind" fn runtime_info(l: *mut LuaState) -> c_int {
                 .iter().map(|b| format!("{b:02x}")).collect::<String>());
         json!({"version": env!("CARGO_PKG_VERSION"), "binary_sha256": digest,
             "build_source_commit":option_env!("WA_BUILD_SOURCE_COMMIT").unwrap_or(""),"build_source_tree":option_env!("WA_BUILD_SOURCE_TREE").unwrap_or(""),
+            "build_source_dirty":BUILD_DIRTY.get().map(String::as_str).unwrap_or("unknown"),
             "build_wave_generation":option_env!("WA_BUILD_WAVE_GENERATION").unwrap_or(""),
             "process_id": std::process::id(), "boot_id": new_uuid(), "os": std::env::consts::OS,
             "arch": std::env::consts::ARCH})

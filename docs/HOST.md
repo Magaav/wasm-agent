@@ -224,6 +224,31 @@ atomicity. A transaction is closed only when:
   `Lua::rollback_if_open()`; or
 - the interpreter's connection drops with the VM, rolling back whatever it held.
 
+### The rows, as a table or as text
+
+`host.sql_rows(sql, params_json)` answers the same rows as `host.sql_query` from the same reader
+(`read_cells` in `rust/wa-capabilities/src/host.rs`), so the two cannot drift: same statement, same
+authorizer, same values, and only the shape they cross the ABI in differs. The typed answer is a Lua
+table of rows, column name to value:
+
+- a SQLite INTEGER arrives as a Lua integer and a REAL as a float - the number *type* is part of the
+  contract, because `5` and `5.0` compare equal but concatenate differently - and a NON-FINITE REAL
+  (SQLite can hold +-Inf) arrives as NULL, which is what the JSON path's `null` decodes to;
+- TEXT as a string, and a BLOB as the `<N bytes>` placeholder `sql_query` has always answered
+  (never the bytes themselves);
+- NULL as an ABSENT key, which is exactly what decoding a JSON `null` into a table gives today;
+- a failure as `nil, error` - never `{error}`, because a table carrying an `error` key would itself
+  be a row, and a caller that forgot to check it would read the failure as data.
+
+Why it exists: the turn loop reads its own transcript with `SELECT *`, and on avell 47 KB of JSON cost
+2.6 ms of pure-Lua decoding per read - 80% of the whole call
+(`docs/missions/reports/seam-audit.md`, row 9). The record shape is `wa:kernel/sql`'s `value` variant
+(`wit/kernel/sql.wit`); this is that shape on the native ABI, where the alternative is text plus a
+decoder. `lua/core/memory.lua`'s `query()` takes it when the host has it and keeps the JSON path
+otherwise, so a node whose binary predates the capability is unaffected; `scripts/test-sql-rows.lua`
+proves the two agree, value by value and type by type, on a seeded ledger and on the turn loop's own
+read.
+
 ### Contention: one policy, and a name when it cannot be had
 
 Measured 2026-11-12, the failure this section exists to remove: on `work` an interactive run ended at
@@ -832,6 +857,7 @@ sign                 read-only
 sleep                read-only
 sql_exec             writes files
 sql_query            read-only
+sql_rows             read-only
 state                writes files
 status_snapshot      device
 stt_admin            writes files

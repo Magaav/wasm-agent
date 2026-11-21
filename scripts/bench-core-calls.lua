@@ -10,12 +10,20 @@
 -- No node, no network, no model: the runner's own `--db` and a scratch WASM_AGENT_HOME.
 local json = dofile('lua/vendor/json.lua')
 
-local counts, originals = {}, {}
+local counts, originals, bytes = {}, {}, {}
+-- A capability returns JSON text (or a plain string), so the length of what it hands back is the
+-- bytes that crossed that seam on this turn. Counted here, at the same place the call is counted:
+-- a byte count taken anywhere else is a second guess at what crossed.
 local function install()
   for name, value in pairs(host) do
     if type(value) == 'function' then
       originals[name] = value
-      host[name] = function(...) counts[name] = (counts[name] or 0) + 1; return value(...) end
+      host[name] = function(...)
+        counts[name] = (counts[name] or 0) + 1
+        local result = value(...)
+        if type(result) == 'string' then bytes[name] = (bytes[name] or 0) + #result end
+        return result
+      end
     end
   end
 end
@@ -40,6 +48,14 @@ local memory = dofile('lua/core/memory.lua')
 memory.setup()
 local agent = dofile('lua/core/agent.lua')
 local provider = dofile('lua/core/provider.lua')
+-- The premise this script was written on - hide WASM_AGENT_LLM_API_KEY/BASE_URL/MODEL and the turn
+-- takes the local fallback - stopped being true: the shipped list carries a default route (opencode-go
+-- with its own base_url and model), so configured() answered true with no environment at all and the
+-- counting run refused instead of counting (re-measured 19/11). Pin the empty settings instead: the
+-- same intent (no model call), and now the premise holds. The pin is the module's own switch, not a
+-- second copy of how it decides.
+provider._pinned = { provider = provider.active(), settings = {
+  provider = 'none', label = 'none', base_url = '', api_key = '', model = '' } }
 -- The check runs with the stub still installed: a route this stub cannot hide would be a route the
 -- turn would call, and the counting run must make no model call at all.
 if provider.configured() then
@@ -53,7 +69,7 @@ local session = memory.start_session('local', 'chat',
 memory.append_turn(session, { role = 'user', content = 'read the file /etc/hostname and tell me what it says' })
 
 local turn = agent.new(session, function() end, 'master', 'master', '')
-counts = {}
+counts, bytes = {}, {}
 collecting(true)
 local started = host.monotonic_ms()
 local ok, err = pcall(turn.run, turn, 'read the file /etc/hostname and tell me what it says')
@@ -64,9 +80,10 @@ host.getenv = real_getenv
 local names = {}
 for name in pairs(counts) do names[#names + 1] = name end
 table.sort(names, function(a, b) if counts[a] == counts[b] then return a < b end return counts[a] > counts[b] end)
-local total = 0
-for _, name in ipairs(names) do total = total + counts[name] end
-print(string.format('one turn: %s in %d ms, %d host calls', ok and 'ok' or ('failed: ' .. tostring(err)), math.floor(elapsed), math.floor(total)))
+local total, total_bytes = 0, 0
+for _, name in ipairs(names) do total = total + counts[name]; total_bytes = total_bytes + (bytes[name] or 0) end
+print(string.format('one turn: %s in %d ms, %d host calls, %d bytes back', ok and 'ok' or ('failed: ' .. tostring(err)), math.floor(elapsed), math.floor(total), total_bytes))
+print(string.format('%-6s %6s %10s  %s', 'calls', 'share', 'bytes', 'capability'))
 for _, name in ipairs(names) do
-  print(string.format('%-6d %5.1f%%  %s', math.floor(counts[name]), counts[name] * 100.0 / total, name))
+  print(string.format('%-6d %5.1f%% %10d  %s', math.floor(counts[name]), counts[name] * 100.0 / total, math.floor(bytes[name] or 0), name))
 end

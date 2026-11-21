@@ -16,23 +16,125 @@
 # code-mode assets by scripts/provision-codemode-assets.mjs (integrity-pinned) - which deploy.sh did already.
 # A C compiler, ripgrep and git are system packages: no user-level install, so they are refused by name.
 #
-# <home>/.wasm-agent/build.env carries a machine's build settings, KEY=VALUE, and only these keys are read
-# (it is data, never sourced): WA_BUILD_PATH (extra tool directories, ':'-separated, searched last),
-# WA_BUILD_PROVISION, CARGO_BUILD_JOBS, CARGO_INCREMENTAL, CARGO_PROFILE_RELEASE_*, WA_UPGRADE_IDLE_POLL.
+# <home>/.wasm-agent/build.env carries a node build record, KEY=VALUE, and ONLY the keys named in
+# WA_BUILD_ENV_KEYS are read (it is data, never sourced). Item 3 of the node-ops round: the record is the
+# ONE place a toolchain directory, zig, the target-dir policy, the code-mode assets and the wasi-sdk are
+# written down, and every build entry point - scripts/fast.sh, wa land, scripts/deploy.sh and
+# scripts/mission.sh - reads it here instead of each guessing from its own ambient environment.
+#   WA_BUILD_PATH          extra tool directories, colon-separated, searched last
+#   WA_BUILD_PROVISION     fetch a missing toolchain instead of refusing
+#   WA_BUILD_ZIG           the zig binary a cross build links with
+#   WASI_SDK_PATH          the wasi-sdk whose sysroot the components build against
+#   WA_BUILD_CARGO_TARGET  the target-directory policy (oneroot is the default; docs/ONEROOT.md)
+#   CARGO_BUILD_JOBS, CARGO_INCREMENTAL, CARGO_PROFILE_RELEASE_OPT_LEVEL, WA_UPGRADE_IDLE_POLL
+# A key that is not in that list is IGNORED and said so by wa_build_env_audit: a setting that looks
+# applied and is not is worse than no record at all.
+# The allow-list, in one place, as data: every entry a build may read from the record. A name is added
+# here with the face that consumes it, never read ad hoc at the point of use.
+WA_BUILD_ENV_KEYS="WA_BUILD_PATH WA_BUILD_PROVISION WA_BUILD_ZIG WASI_SDK_PATH WA_BUILD_CARGO_TARGET CARGO_BUILD_JOBS CARGO_INCREMENTAL CARGO_PROFILE_RELEASE_OPT_LEVEL WA_UPGRADE_IDLE_POLL"
+
+# What each entry means and, when it is missing or unusable, the ONE line that fixes it.
+wa_build_env_help() { # <key> -> "meaning<TAB>fix"
+  case "$1" in
+    WA_BUILD_PATH) printf 'extra tool directories, colon-separated, searched last\tadd the directory: WA_BUILD_PATH=/opt/zig:/opt/wasi-sdk/bin' ;;
+    WA_BUILD_PROVISION) printf 'fetch a missing toolchain instead of refusing\tset WA_BUILD_PROVISION=1 when this node may download rustup/node' ;;
+    WA_BUILD_ZIG) printf 'the zig binary a cross build links with\tset WA_BUILD_ZIG=/path/to/zig (scripts/provision-publish-toolchain.sh installs a pinned one)' ;;
+    WASI_SDK_PATH) printf 'the wasi-sdk whose sysroot the components build against\tset WASI_SDK_PATH=/opt/wasi-sdk-24' ;;
+    WA_BUILD_CARGO_TARGET) printf 'the target-directory policy a build uses: oneroot is the default (docs/ONEROOT.md)\tset WA_BUILD_CARGO_TARGET=oneroot, or leave it unset for the default' ;;
+    *) printf 'unknown build.env key\tremove it: only WA_BUILD_ENV_KEYS are read' ;;
+  esac
+}
+
+# Does the record exist, and is every line in it one a build reads?
+#
+# A key nobody reads is a REFUSAL: it looks applied and is not, and a machine can spend a day believing it
+# set a toolchain directory that no build ever looked at. A MISSING record is not a refusal: a node that
+# never needed one builds from its ambient environment exactly as before.
+wa_build_env_audit() { # [ROOT] -> prints one line per fact; WA_BUILD_ENV_PROBLEM names the first refusal
+  local root=${1:-${WASM_AGENT_HOME:-$HOME}} file key value known entry
+  WA_BUILD_ENV_PROBLEM=""
+  file="$root/.wasm-agent/build.env"
+  if [ ! -f "$file" ]; then
+    printf 'record  absent  %s (a node with no record builds from its ambient environment; nothing to check)\n' "$file"
+    return 0
+  fi
+  printf 'record  %s\n' "$file"
+  while IFS='=' read -r key value; do
+    case "$key" in ''|'#'*) continue ;; esac
+    known=0
+    for entry in $WA_BUILD_ENV_KEYS; do [ "$entry" = "$key" ] && known=1 && break; done
+    if [ "$known" = 1 ]; then
+      printf 'entry   %-30s %s\n' "$key" "${value:-(empty)}"
+    else
+      printf 'unknown %-30s not read by any build: remove it, or add it to WA_BUILD_ENV_KEYS with the face that consumes it\n' "$key"
+      [ -n "$WA_BUILD_ENV_PROBLEM" ] || WA_BUILD_ENV_PROBLEM="build_env_key_unknown:$key"
+    fi
+  done < <(grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "$file" 2>/dev/null)
+  # The problem line is part of the AUDIT OUTPUT, not only a variable: an audit read through a command
+  # substitution runs in a subshell, so a caller that captured the text would lose the variable and be
+  # left with a refusal that names nothing.
+  if [ -n "$WA_BUILD_ENV_PROBLEM" ]; then
+    printf 'problem %s\n' "$WA_BUILD_ENV_PROBLEM"
+    return 1
+  fi
+  return 0
+}
+
+# One requirement's named refusal with its remedy.
+#   refused(<code>): <what>. Fix: <the one line>
+wa_build_env_refuse() { # <code> <what>
+  local code=$1 what=$2 help
+  help="$(wa_build_env_help "$code")"
+  printf 'refused(%s): %s. Fix: %s\n' "$code" "$what" "${help#*$(printf '\t')}" >&2
+}
 WA_RUST_MIN_DEFAULT="1.89"   # std File::lock (wa-sentinel) is the newest std API the tree needs
 WA_BUILD_MISSING=""
 
-wa_build_env() { # reads build.env and puts the toolchain directories on PATH (appended: PATH wins)
-  local file="${WASM_AGENT_HOME:-$HOME}/.wasm-agent/build.env" key value dir
+wa_build_env() { # reads build.env: EXPORTS every key it audits, puts tool directories on PATH
+  local file="${WASM_AGENT_HOME:-$HOME}/.wasm-agent/build.env" key value dir entry known
   if [ -f "$file" ]; then
     while IFS='=' read -r key value; do
-      case "$key" in
-        WA_BUILD_PATH|WA_BUILD_PROVISION|CARGO_BUILD_JOBS|CARGO_INCREMENTAL|CARGO_PROFILE_RELEASE_*|WA_UPGRADE_IDLE_POLL)
-          case "$key" in *[!A-Z0-9_]*) continue ;; esac
-          export "$key=$value" ;;
-      esac
-    done < <(grep -E '^[A-Z][A-Z0-9_]*=' "$file" 2>/dev/null)
+      case "$key" in ''|'#'*) continue ;; esac
+      # AN ENTRY THE AUDIT ACCEPTS IS AN ENTRY THIS FUNCTION APPLIES (item 3/6 of the node-ops round).
+      # Measured 19/11: the audit listed WA_BUILD_ZIG, WASI_SDK_PATH and WA_BUILD_CARGO_TARGET as read
+      # entries, and this function exported none of them - a node set a toolchain directory nothing
+      # looked at, which is the exact defect the audit exists to catch, one level deeper. The allow-list
+      # is the same list: nobody edits two places to add a key.
+      known=0
+      for entry in $WA_BUILD_ENV_KEYS; do [ "$entry" = "$key" ] && known=1 && break; done
+      [ "$known" = 1 ] || continue
+      # A QUOTED VALUE IS UNQUOTED (item 8 of the node-ops round): an operator who writes
+      # WASI_SDK_PATH='/opt/wasi-sdk' in the record meant that directory, and a shell that exported the
+      # quotes as part of the value named a path that does not exist - the audit then refused a record
+      # that was in fact correct. One pair of matching single or double quotes is removed; anything else
+      # is handed over exactly as written, because a path may legitimately contain a quote.
+      value="$(printf '%s' "$value" | sed -e "s/^'\(.*\)'$/\1/" -e 's/^"\(.*\)"$/\1/')"
+      # A key that is there and EMPTY is reported by the audit and applied as empty, never silently kept
+      # from the ambient environment: 'I set it' and 'it is set' would then differ with nothing saying so.
+      export "$key=$value"
+    done < <(grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "$file" 2>/dev/null)
   fi
+  # A NAMED DIRECTORY THAT IS NOT THERE IS A REFUSAL, not a silent fallback: the record said where the
+  # tool is, and a build that quietly used another one is the confusion WA_BUILD_ENV_KEYS exists to end.
+  # wa_build_env_refuse is the ONE printer of that refusal, so fast.sh, deploy.sh and wa land say the
+  # same thing with the same one-line fix (item 6 of the node-ops round: a missing entry is refused by
+  # name, never discovered later as a build error that names no cause).
+  if [ -n "${WA_BUILD_ZIG:-}" ] && [ ! -x "${WA_BUILD_ZIG}" ]; then
+    wa_build_env_refuse WA_BUILD_ZIG "${WA_BUILD_ZIG} is named by $file and is not an executable file"
+    return 2
+  fi
+  if [ -n "${WASI_SDK_PATH:-}" ] && [ ! -d "${WASI_SDK_PATH}/share/wasi-sysroot" ]; then
+    wa_build_env_refuse WASI_SDK_PATH "${WASI_SDK_PATH} is named by $file and holds no share/wasi-sysroot, so no component can build against it"
+    return 2
+  fi
+  # WA_BUILD_ZIG is a FILE, and the directories a build searches come from its directory and from the
+  # wasi-sdk root: a record that names them is enough, the caller does not also have to name a PATH.
+  [ -n "${WA_BUILD_ZIG:-}" ] && [ -d "$(dirname "$WA_BUILD_ZIG")" ] && WA_BUILD_PATH="${WA_BUILD_PATH:+$WA_BUILD_PATH:}$(dirname "$WA_BUILD_ZIG")"
+  [ -n "${WASI_SDK_PATH:-}" ] && [ -d "$WASI_SDK_PATH/bin" ] && WA_BUILD_PATH="${WA_BUILD_PATH:+$WA_BUILD_PATH:}$WASI_SDK_PATH/bin"
+  # WA_BUILD_CARGO_TARGET is a POLICY name, not a path: `oneroot` is the default (docs/ONEROOT.md) and a
+  # build reads it through scripts/lib/build-target.sh. It is exported above like every other key, and
+  # nothing here turns it into CARGO_TARGET_DIR - a record may say which policy, not which directory a
+  # caller's own target dir is.
   local IFS=:
   # `.../.wasm-agent/bin` is the node's own tool directory (`host.paths().bin`), where it stages the
   # ripgrep it runs with. Without it here, a deploy started by the sentinel cannot see the rg the node
@@ -42,9 +144,8 @@ wa_build_env() { # reads build.env and puts the toolchain directories on PATH (a
     [ -n "$dir" ] && [ -d "$dir" ] || continue
     case ":$PATH:" in *":$dir:"*) ;; *) PATH="$PATH:$dir" ;; esac
   done
-  export PATH
+  export PATH WA_BUILD_PATH
 }
-
 wa_version_ge() { # A B: is version A >= B (dotted numbers)
   [ "$(printf '%s\n%s\n' "$2" "$1" | sort -t. -k1,1n -k2,2n -k3,3n | head -1)" = "$2" ]
 }
@@ -201,6 +302,11 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
       root="${2:-$(cd "$(dirname "$0")/../.." && pwd)}"
       wa_build_env
       wa_build_check "$root" ;;
-    *) echo "usage: build-requirements.sh check [ROOT]" >&2; exit 2 ;;
+    record)
+      # `wa build-env` and this command: what the record says, and whether every line in it is read.
+      wa_build_env_audit "${2:-}" ;;
+    help)
+      for key in $WA_BUILD_ENV_KEYS; do wa_build_env_help "$key"; printf "\n"; done ;;
+    *) echo "usage: build-requirements.sh check [ROOT] | record [HOME-ROOT] | help" >&2; exit 2 ;;
   esac
 fi

@@ -1330,6 +1330,11 @@ local function node_capability(capability, args, caller)
     -- a master receives the model's words about the harness with third-party text stripped, never a
     -- transcript. A read in every sense: the ledger is opened for SELECT and nothing is written.
     return dofile("lua/core/turnfeed.lua").serve(args)
+  elseif capability == "capabilities" then
+    -- What THIS node accepts for the role the verified caller holds (item 7 of the node-ops round):
+    -- a peer reported capabilities = [] to every caller because the field was never filled. The work
+    -- is wa_node_capabilities below, exposed so a test can drive it without a signed wire call.
+    return wa_node_capabilities(users.normalize(caller.role))
   elseif capability == "status" then
     if args.serving_identity_only then
       local identity,problem=provider.serving_identity(args.model,args.provider)
@@ -1599,6 +1604,10 @@ local MANAGED_CAPABILITIES = { status=true, set_role=true, read=true, write=true
   -- false and this list did not run at all. Binding the node switched the gate on and the call
   -- became `capability_not_granted`. The `operation` tool is master-only in dispatch
   -- (`lua/core/tools.lua`, `forbidden_for_role`), so admitting the name admits masters only.
+  -- What this node accepts for the asking caller (item 7 of the node-ops round). A READ: it runs the
+  -- same catalogue the node's own gate answers from, admits no call, and is the answer `tools.nodes`
+  -- asks a peer for - without it every peer reported capabilities = [] whatever it could do.
+  capabilities=true,
   operation=true,
   -- The speech queue's worker path (docs/QUEUE.md "Phase 2"). An enrolled worker may take,
   -- heartbeat and settle a job; it cannot enqueue, requeue or read another job's audio.
@@ -1615,6 +1624,40 @@ local MANAGED_CAPABILITIES = { status=true, set_role=true, read=true, write=true
   -- construction - the handler opens the ledger for SELECT, redacts before answering and writes
   -- nothing here - which is why it is graded `read` in MESH_VERBS rather than `control`.
   turns=true }
+
+-- What this node accepts, for one role, as data - the answer `nodes` asks a peer for and the peer's
+-- own gate gives (item 7 of the node-ops round).
+--
+-- It is DERIVED, never a second list: the tool catalogue this node would show that role, plus the peer
+-- surface `wa_node_call` dispatches. Two different questions, and a caller asking what it may do here
+-- needs both. A guest is answered with what a guest would actually be admitted, so the answer cannot
+-- promise more than the next call would get.
+function wa_node_capabilities(role)
+  role = role or "guest"
+  local accepted, seen = {}, {}
+  for _, item in ipairs(toolslib.catalog(role)) do
+    local tool = type(item) == "table" and item["function"] and item["function"].name or item
+    if type(tool) == "string" and tool ~= "remote" and tool ~= "capabilities" and not seen[tool] then
+      seen[tool] = true
+      accepted[#accepted + 1] = tool
+    end
+  end
+  -- The peer surface is admitted by `author_of`, which refuses every caller that is not a master
+  -- (nodeslib.author_of, above wa_node_call). Adding those names for a guest would answer with
+  -- capabilities the very next call would refuse - the failure this item exists to end, in the other
+  -- direction. So a guest is answered with its own catalogue and told why the rest is missing.
+  local peer_surface = (role == "master" or role == "admin")
+  if peer_surface then
+    for name in pairs(MANAGED_CAPABILITIES) do
+      if not seen[name] then seen[name] = true accepted[#accepted + 1] = name end
+    end
+  end
+  table.sort(accepted)
+  return { ok = true, node_id = (nodeslib.identity() or {}).node_id, node_name = nodeslib.node_name(),
+    role = role, capabilities = accepted, peer_surface = peer_surface,
+    basis = "this node's own gate, for the role the caller holds",
+    note = "Accepted, not guaranteed: each call is admitted again when it arrives, against the binding, the roster and the policy in force then." }
+end
 
 -- The list as data, for the wiring guard: it asks this node's own gate what it admits instead of
 -- keeping a copy that could drift. Sorted, so a failure names the same capability on every run.
@@ -2108,6 +2151,40 @@ function wa_sync_tick()
   -- interpreter was started to run one test script, not a node: it must not read or write the real
   -- node's state (every `scripts/test-*.lua` runs that way).
   if host.getenv("WA_SCRIPT") == nil then pcall(update_banner.tick) end
+  -- The periodic backup (item 1 of the node-ops round): at most one snapshot per WA_BACKUP_INTERVAL_S,
+  -- due-checked here because this is the one place a node already does recurring work with nobody
+  -- waiting - and TAKEN in a supervised operation, not here (item 10 of the round).
+  if host.getenv("WA_SCRIPT") == nil then
+    -- OFF THE TICK (item 10 of the node-ops round). This used to call backup.tick() HERE, inside the sync
+    -- loop: a VACUUM INTO of a large ledger held the node's sync tick for its whole duration, and a
+    -- failure could only be printed. The tick now asks backup.due() - one read of a memo file, no SQLite -
+    -- and when a snapshot is due it starts `wa backup periodic` as a SUPERVISED OPERATION, so the work
+    -- outlives this call, cannot block the loop, and its outcome is in the operation record instead of a
+    -- log line nobody reads. A launch that cannot start is one printed line: a backup is a safety net,
+    -- not a thing a live node stops for.
+    local backup_mod = dofile("lua/core/backup.lua")
+    local due, why_not = backup_mod.due()
+    if due then
+      local runtime = json.decode(host.runtime_info and host.runtime_info() or '') or {}
+      local program = tostring(runtime.binary_path or '')
+      if program == '' then
+        host.log("backup: periodic snapshot due but this node cannot name its own binary (runtime_info)")
+      else
+        local argv = { "backup", "periodic" }
+        local db = host.getenv("WASM_AGENT_DB")
+        if db and db ~= '' then argv = { "--db", db, "backup", "periodic" } end
+        local launched, receipt = pcall(host.operation, "start", json.encode({
+          program = program, args = argv, timeout_seconds = 3600,
+          kind = "command", owner = "backup-periodic", background = true }))
+        local answer = launched and (json.decode(receipt) or {}) or {}
+        if answer.operation_id then
+          host.log("backup: periodic snapshot started as operation " .. tostring(answer.operation_id))
+        else
+          host.log("backup: periodic snapshot could not start: " .. tostring(answer.error or receipt))
+        end
+      end
+    end
+  end
   if enrollment.managed() then return json.encode({error='managed_sync_disabled'}) end
   local configured = host.getenv("WASM_AGENT_SYNC_TO") or ""
   if configured == "" then return json.encode({ ok = true, peers = 0, pushed = 0 }) end

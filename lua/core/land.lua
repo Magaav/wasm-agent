@@ -1676,6 +1676,32 @@ impl.gate = function(run, options)
   local decorator = M.weight()
   run.journal.gate_weight = decorator ~= "" and decorator or "none (no weight could be applied)"
   local rows = {}
+  -- THE NODE BUILD RECORD, READ BY THIS GATE THE WAY EVERY OTHER ENTRY POINT READS IT (item 6 of the
+  -- node-ops round). `wa land` runs `cargo test` and `bash scripts/fast.sh` here, so it has the same
+  -- question about zig, the wasi-sdk and the target policy that deploy.sh and fast.sh ask - and before
+  -- this it answered it from its own ambient environment, which is two answers to one question. One
+  -- reader (scripts/lib/build-requirements.sh) is applied to every gate command in the same shell, and a
+  -- record naming a directory that is not there refuses the GATE by name instead of failing a check.
+  local record_prefix = ""
+  do
+    local reader = slashes(tree) .. "/scripts/lib/build-requirements.sh"
+    local probe = M.exec("test -f " .. quote(reader) .. " && echo present || echo absent", "", 30)
+    if tostring(probe.stdout or ""):find("present", 1, true) then
+      local applied = M.exec("bash -c " .. quote(". " .. quote(reader) .. " || exit 3; wa_build_env_audit >/dev/null || exit 4; wa_build_env"), slashes(tree), 120)
+      if (applied.code or 1) ~= 0 then
+        return false, { error = "build_env_incomplete", detail = "the build record names a directory that is not there: "
+          .. tostring(applied.stderr or applied.stdout or ""):gsub("%s+$", "") .. " (refused before a gate ran)" }
+      end
+      -- The prefix is applied INSIDE the shell that runs each check: the exported names and the appended
+      -- PATH of the record, so a cargo or bash check sees exactly what deploy.sh/fast.sh see.
+      -- THE AUDIT RUNS INSIDE EVERY GATE SHELL TOO (item 8 of the node-ops round). A key nothing reads
+      -- must stop the gate by name, not be silently ignored while fast.sh and deploy.sh refuse the same
+      -- record: one record, one answer. The audit is cheap (one file, one loop) and it reads the same
+      -- allow-list, so no key can be known to one entry point and unknown to another.
+      record_prefix = ". " .. quote(reader) .. " >/dev/null 2>&1; wa_build_env_audit >/dev/null 2>&1 || { wa_build_env_audit >&2; echo 'refused(build_env_key_unknown): the build record names a setting no build reads' >&2; exit 2; }; "
+        .. "wa_build_env >/dev/null 2>&1 || { echo 'refused(build_env_incomplete): the build record names a directory that is not there' >&2; exit 2; }; "
+    end
+  end
   -- A resume keeps a check that already PASSED (first run, not a retry) on this exact tree with this exact
   -- command and row list: the same bytes judged by the same command answer the same thing, and re-running a
   -- green 15-minute check is the slowest part of a resume. Anything else runs again - a red or flaky check, a
@@ -1690,7 +1716,7 @@ impl.gate = function(run, options)
   for _, check in ipairs(checks) do
     -- The fast check ALWAYS gets the assignment (M.gate_command): the round's file, or an empty value so a
     -- WA_FAST_ROWS inherited from the environment cannot narrow a run that wrote none.
-    local command = M.gate_command(check, rows_file, run)
+    local command = record_prefix .. M.gate_command(check, rows_file, run)
     command = (decorator ~= "" and (decorator .. " " .. quote(command))) or command
     local cwd = check.cwd and (slashes(tree) .. "/" .. check.cwd) or slashes(tree)
     local key = command .. "\n" .. rows_text
@@ -1713,7 +1739,12 @@ impl.gate = function(run, options)
     local budget = check.timeout or 1800
     if check.per_test_seconds and run.journal and run.journal.plan then
       local touched = 0
-      for _, path in ipairs(run.journal.plan.files or {}) do
+      -- plan.files is the COUNT of changed paths (M.plan returns files = #paths), not the list: iterating it
+      -- crashed the gate with "attempt to index a number value" the first time a round reached the
+      -- discrimination check (21/11, batch-4, after a green fast path). The list is asked for by name.
+      local listed = run.journal.plan.files
+      if type(listed) ~= "table" then listed = (M.changed_paths(run)) end
+      for _, path in ipairs(type(listed) == "table" and listed or {}) do
         if tostring(path):match("^tests?/") or tostring(path):match("test%-") then touched = touched + 1 end
       end
       budget = math.max(budget, 300 + check.per_test_seconds * touched)

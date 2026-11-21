@@ -38,11 +38,14 @@ wa_environment_reason() { # <text>
   while IFS= read -r line; do
     [ -n "${line:-}" ] || continue
     pattern=${line%%;;*}; reason=${line#*;;}
-    if printf '%s' "$text" | grep -qE "$pattern"; then printf '%s' "$reason"; return 0; fi
+    # A HERE-STRING, NOT A PIPE: under \`set -o pipefail\` a \`printf | grep -q\` pair fails about 0.15% of the time
+    # (grep exits early, printf takes SIGPIPE), and this classifier would then miss a real environment failure and
+    # report it as a code failure - the wrong verdict on the run. Measured: 3 in 2000.
+    if grep -qE "$pattern" <<< "$text"; then printf '%s' "$reason"; return 0; fi
   done <<< "$WA_FAST_ENVIRONMENT_SIGNATURES"
   # `errno 5` alone is too common in ordinary output to accept as a signature; it is only the machine
   # when the line also names the syscall (CreateProcessW/exec) that returned it.
-  if printf '%s' "$text" | grep -qE '(CreateProcessW|exec|spawn|posix_spawn)[^|]*errno 5\b|errno 5\b[^|]*CreateProcessW'; then
+  if grep -qE '(CreateProcessW|exec|spawn|posix_spawn)[^|]*errno 5\b|errno 5\b[^|]*CreateProcessW' <<< "$text"; then
     printf 'spawn failed (errno 5)'; return 0
   fi
   return 1
