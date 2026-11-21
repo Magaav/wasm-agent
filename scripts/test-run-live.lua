@@ -100,14 +100,18 @@ check(grown > 1, 'and it grew as the fragments arrived, not in one jump: ' .. gr
 
 -- ---- 2. the view: the script is on screen BEFORE the call is announced -------------------------
 -- The events a CLI run is handed for this turn, in the order the host emits them.
+-- The deltas as the agent emits them, read from the committed capture instead of re-decoding the
+-- wire: this half of the file is about what the VIEW does with them, so it must be able to run on a
+-- tree that has no decoder at all (scripts/test-discriminates.sh puts these tests on the base code).
 local deltas = {}
 do
-  local decoder = run_stream.new()
-  for _, fragment in ipairs(frames) do
-    local piece = run_stream.feed(decoder, fragment)
-    if piece ~= '' then
-      deltas[#deltas + 1] = { type = 'run_code_delta', call_id = 'call-run-1', text = piece }
-    end
+  -- The tree this row runs from (scripts/test.sh exports it; the cwd a node reports is not the checkout).
+  local cwd = tostring(os.getenv('WASM_AGENT_LUA_ROOT') or '.')
+  local raw = host.read_file(cwd .. '/tests/fixtures/provider/opencode-go-run-code-recorded.deltas.json')
+  assert(type(raw) == 'string', 'the committed delta capture is unreadable from ' .. cwd)
+  local captured = json.decode(raw)
+  for _, piece in ipairs(captured.deltas) do
+    deltas[#deltas + 1] = { type = 'run_code_delta', call_id = 'call-run-1', text = piece }
   end
 end
 local turn = {
@@ -159,9 +163,10 @@ check(native_text == block_text,
 -- base's `before-native` must still show the collapsed Run(code=...) it replaces - so a regression in
 -- either direction is visible without a model call.
 local function rows_of(name)
-  local path = 'fixtures/run-live/' .. name .. '.json'
-  local raw = host.read_file(path)
-  if not raw then return nil end
+  -- The tree this row runs from (scripts/test.sh exports it; the cwd a node reports is not the checkout).
+  local cwd = tostring(os.getenv('WASM_AGENT_LUA_ROOT') or '.')
+  local raw = host.read_file(cwd .. '/fixtures/run-live/' .. name .. '.json')
+  if type(raw) ~= 'string' then return nil end
   local ok, data = pcall(json.decode, raw)
   if not ok or type(data) ~= 'table' then return nil end
   return tostring(data.rendered or '')
