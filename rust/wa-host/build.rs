@@ -126,6 +126,31 @@ fn generate_build_info() {
         .unwrap_or_default();
     ancestors.sort();
     ancestors.dedup();
+    // WHERE THE WINDOW ENDS. A build from a shallow clone carries only the last N commits, and a question
+    // about a commit BELOW the cut has no answer from it (rust/wa-host/src/build_info.rs answers unknown,
+    // never "no"). The floor is the boundary an operator can act on: an ancestor none of whose parents are
+    // also in the window - the shallow cut, or the root commit of a full history. It is recorded so a refusal
+    // can NAME the cut instead of saying only "the binary cannot answer" (21/11: a release binary refused an
+    // install of 7ddbfa98, a commit it carried 42 down, and nothing in the answer said where its window began).
+    let floor = {
+        let present: std::collections::HashSet<&str> = ancestors.iter().map(|line| line.as_str()).collect();
+        let mut cut: Vec<String> = Vec::new();
+        for line in git(&["rev-list", "--parents", "HEAD"]).unwrap_or_default().lines() {
+            let mut fields = line.split_whitespace();
+            let Some(commit) = fields.next() else { continue };
+            if !present.contains(commit) { continue; }
+            // A root commit has no parents at all; a shallow boundary commit has parents this clone does not
+            // carry. Both mean "nothing below this was embedded", which is the same fact for a reader.
+            if fields.all(|parent| !present.contains(parent)) { cut.push(commit.to_string()); }
+        }
+        // The OLDEST of them, by commit date, with the id as a deterministic tiebreak: a reader asks about the
+        // oldest thing the window can answer for, so that is the number the document carries.
+        cut.sort_by_key(|commit| {
+            let at = git(&["show", "-s", "--format=%ct", commit]).and_then(|value| value.parse::<i64>().ok());
+            (at.unwrap_or(i64::MAX), commit.clone())
+        });
+        cut.first().cloned().unwrap_or_default()
+    };
     // A SHALLOW BUILD CLONE CARRIES ONLY PART OF THE HISTORY. MEASURED: a build from a `--depth 1` clone
     // embedded ancestors=137 and claimed ancestors_complete=true, so `--contains <commit>` answered "no"
     // (exit 1, the verdict a deploy refuses on) for every commit older than the cut - a list that is merely
@@ -158,6 +183,7 @@ fn generate_build_info() {
     source.push_str(&format!("pub const SOURCE_SHARED: &str = {shared:?};\n"));
     source.push_str(&format!("pub const BUILT_EPOCH: u64 = {built_epoch};\n"));
     source.push_str(&format!("pub const ANCESTORS_COMPLETE: bool = {complete};\n"));
+    source.push_str(&format!("pub const ANCESTORS_FLOOR: &str = {floor:?};\n"));
     source.push_str("pub const ANCESTORS: &[&str] = &[\n");
     for ancestor in &ancestors {
         source.push_str(&format!("    {ancestor:?},\n"));

@@ -26,7 +26,7 @@ pub const COMMIT_SOURCE: &str = SOURCE;
 /// be written by copying fields and a reader needs no parser beyond `sed -n 's/^key=//p'`.
 pub fn render() -> String {
     format!(
-        "version={VERSION}\ncommit={}\ntree={}\ndirty={}\nsource={}\nsource_shared={}\nbuilt_epoch={}\nancestors={}\nancestors_complete={}\n",
+        "version={VERSION}\ncommit={}\ntree={}\ndirty={}\nsource={}\nsource_shared={}\nbuilt_epoch={}\nancestors={}\nancestors_complete={}\nancestors_floor={}\n",
         if COMMIT.is_empty() { "unknown" } else { COMMIT },
         if TREE.is_empty() { "unknown" } else { TREE },
         DIRTY,
@@ -35,6 +35,7 @@ pub fn render() -> String {
         BUILT_EPOCH,
         ANCESTORS.len(),
         if ANCESTORS_COMPLETE { "true" } else { "false" },
+        if ANCESTORS_FLOOR.is_empty() { "unknown" } else { ANCESTORS_FLOOR },
     )
 }
 
@@ -183,21 +184,37 @@ pub enum Contains {
 /// Answer whether this build contains `spec`, which may be abbreviated (7+ hex characters): the records
 /// written before full ids were the rule carry the 12 characters `ship.sh` printed.
 pub fn contains(spec: &str) -> Contains {
+    contains_in(spec, if COMMIT.is_empty() { "unknown" } else { COMMIT }, ANCESTORS, ANCESTORS_COMPLETE)
+}
+
+/// The rule, over data a test can hand it: does the build of `commit`, carrying `ancestors`, contain `spec`?
+///
+/// WHY THE LIST IS SEARCHED WHATEVER `complete` SAYS. MEASURED 21/11: a release binary of bfad4f8f refused to
+/// install 7ddbfa98 - "the target binary cannot answer whether it contains 7ddbfa98" - while that commit was
+/// in the binary's own embedded list, 42 commits down. The reader below answered Unknown for EVERY question
+/// once the list was incomplete (`ancestors_complete=false`, which any build from a shallow clone reports),
+/// without looking at the list it did carry. An incomplete list is incomplete at its BOTTOM: everything in
+/// it is a fact, and "is this commit one of the ones I carry" is answered by looking. Only a
+/// MISS needs the completeness, because only a miss is a claim about the history below the cut.
+///
+/// So a hit answers Yes from a partial window - the same certainty as a hit from a full one - and a miss
+/// answers No only when the window is complete; otherwise it says the commit is below the window, and
+/// --contains names where that window begins (ANCESTORS_FLOOR), which is what an operator can act on.
+fn contains_in(spec: &str, commit: &str, ancestors: &[&str], complete: bool) -> Contains {
     let spec = spec.trim().to_ascii_lowercase();
     if spec.is_empty() { return Contains::Unknown("no_commit_named"); }
     if spec.len() < 7 { return Contains::Unknown("commit_too_short"); }
     if !spec.bytes().all(|b| b.is_ascii_hexdigit()) { return Contains::Unknown("commit_not_hex"); }
-    // One candidate, two sources: the build's own commit and the ancestors it carries.
-    if COMMIT.starts_with(&spec) { return Contains::Yes(COMMIT.to_string()); }
+    // One candidate, two sources: the build own commit and the ancestors it carries.
+    if commit != "unknown" && commit.starts_with(&spec) { return Contains::Yes(commit.to_string()); }
     // ANCESTORS is sorted at build time, so a prefix lands on the first entry at or after it.
-    if ANCESTORS_COMPLETE {
-        let at = ANCESTORS.partition_point(|candidate| &candidate[..spec.len().min(candidate.len())] < spec.as_str());
-        if let Some(candidate) = ANCESTORS.get(at) {
-            if candidate.starts_with(&spec) { return Contains::Yes(candidate.to_string()); }
-        }
-        return Contains::No;
+    let at = ancestors.partition_point(|candidate| &candidate[..spec.len().min(candidate.len())] < spec.as_str());
+    if let Some(candidate) = ancestors.get(at) {
+        if candidate.starts_with(&spec) { return Contains::Yes(candidate.to_string()); }
     }
-    Contains::Unknown("no_ancestry_embedded")
+    if complete { return Contains::No; }
+    if ancestors.is_empty() { return Contains::Unknown("no_ancestry_embedded"); }
+    Contains::Unknown("below_ancestry_window")
 }
 
 /// `wa --contains <commit>` -> prints the verdict and returns the process exit code.
@@ -216,7 +233,16 @@ pub fn contains_command(spec: &str) -> i32 {
             1
         }
         Contains::Unknown(reason) => {
-            println!("contains=unknown\nreason={reason}\nasked={}\nthis_build={}\n", spec.trim(), if COMMIT.is_empty() { "unknown" } else { COMMIT });
+            // A WINDOW WITH A BOTTOM SAYS WHERE IT BEGINS. "unknown" alone sent an operator to guess why a
+            // release binary refused a commit the node was running; the floor is the one fact that makes the
+            // answer actionable (install a build whose window reaches it, or deepen the checkout and ask again).
+            if reason == "below_ancestry_window" {
+                println!("contains=unknown\nreason={reason}\nasked={}\nthis_build={}\nancestors_floor={}\n",
+                    spec.trim(), if COMMIT.is_empty() { "unknown" } else { COMMIT },
+                    if ANCESTORS_FLOOR.is_empty() { "unknown" } else { ANCESTORS_FLOOR });
+            } else {
+                println!("contains=unknown\nreason={reason}\nasked={}\nthis_build={}\n", spec.trim(), if COMMIT.is_empty() { "unknown" } else { COMMIT });
+            }
             2
         }
     }
@@ -230,7 +256,7 @@ mod tests {
     #[test]
     fn render_names_every_field_the_records_read() {
         let document = render();
-        for key in ["version=", "commit=", "tree=", "dirty=", "source=", "source_shared=", "built_epoch=", "ancestors=", "ancestors_complete="] {
+        for key in ["version=", "commit=", "tree=", "dirty=", "source=", "source_shared=", "built_epoch=", "ancestors=", "ancestors_complete=", "ancestors_floor="] {
             assert!(document.lines().any(|line| line.starts_with(key)), "missing {key} in:\n{document}");
         }
         assert!(document.ends_with('\n'), "the document is line-oriented");
@@ -243,6 +269,36 @@ mod tests {
         let commit = document.lines().find_map(|line| line.strip_prefix("commit=")).unwrap();
         assert_eq!(commit.is_empty(), false);
         assert!(commit == "unknown" || commit.len() == 40, "commit must be a full id or unknown, got {commit}");
+    }
+
+    /// A HIT FROM A PARTIAL WINDOW IS A FACT. MEASURED 21/11: the release binary of bfad4f8f was asked about
+    /// 7ddbfa98 - a commit it carried 42 down - and answered Unknown because its list came from a shallow clone.
+    /// The list it did carry said yes; the only thing that was incomplete was the history BELOW the cut.
+    #[test]
+    fn a_commit_inside_a_partial_window_is_contained() {
+        let older = "aaaa000000000000000000000000000000000001";
+        let ours = "bbbb000000000000000000000000000000000002";
+        let window = [older, ours];
+        assert_eq!(contains_in(older, ours, &window, false), Contains::Yes(older.to_string()),
+            "a commit the binary carries is contained, whether or not the window reaches the root");
+        assert_eq!(contains_in(&older[..12], ours, &window, false), Contains::Yes(older.to_string()),
+            "an abbreviated id lands on it too");
+        assert_eq!(contains_in(ours, ours, &window, false), Contains::Yes(ours.to_string()),
+            "and so is the build's own commit");
+    }
+
+    /// A MISS FROM A PARTIAL WINDOW IS NOT "NO". Below the cut the binary has no history, and answering "no"
+    /// there is the verdict a deploy refuses on - it would refuse every install of an old release.
+    #[test]
+    fn a_miss_below_a_partial_window_is_unknown_and_a_full_one_is_no() {
+        let window = ["aaaa000000000000000000000000000000000001", "bbbb000000000000000000000000000000000002"];
+        let absent = "cccc000000000000000000000000000000000003";
+        assert_eq!(contains_in(absent, window[1], &window, false), Contains::Unknown("below_ancestry_window"),
+            "below a partial window the honest answer is unknown, and it names why");
+        assert_eq!(contains_in(absent, window[1], &window, true), Contains::No,
+            "a COMPLETE window that does not carry it is a real no");
+        assert_eq!(contains_in(absent, "unknown", &[], false), Contains::Unknown("no_ancestry_embedded"),
+            "and a build carrying no list at all is the other unknown");
     }
 
     #[test]
@@ -376,7 +432,7 @@ commit=unknown
         if ANCESTORS_COMPLETE {
             assert_eq!(contains(absent), Contains::No);
         } else {
-            assert_eq!(contains(absent), Contains::Unknown("no_ancestry_embedded"));
+            assert_eq!(contains(absent), Contains::Unknown("below_ancestry_window"));
         }
     }
 }

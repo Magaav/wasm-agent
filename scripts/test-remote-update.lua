@@ -576,6 +576,39 @@ ok(release_wrapper:find("scripts/release%-install%.sh") ~= nil,
   "and it runs the supported script, not a composed shell", release_wrapper)
 ok(release_wrapper:find(TARGET, 1, true) ~= nil, "with the commit to install")
 
+-- 7h-f. THE OPERATOR'S OVERRIDE REACHES THE SCRIPT THAT INSTALLS. release-install.sh runs upgrade.sh, and
+-- upgrade.sh is what asks the ancestry question again - so a forced request whose reason stops at this
+-- module is a force that did nothing. MEASURED 21/11: a release install with --force --reason was refused
+-- by upgrade.sh (ancestry_unknown) and the reason appears in no record. The wrapper the sentinel runs is
+-- where the decision has to be visible, so that is what the assertions read.
+issued = {}
+local forced_release = remote.serve({ action = "request", mode = "release", commit = TARGET,
+  force_note = "forced past pin pin-abc: the aarch64 node must reach bfad4f8f", reason = "the aarch64 node must reach bfad4f8f" }, MASTER)
+ok(forced_release.ok == true, "a forced release request is admitted", tostring(forced_release.error or forced_release.status))
+local forced_runs = issued_matching("request run")
+ok(#forced_runs == 1, "and one run request was written", tostring(#forced_runs))
+local forced_path = forced_runs[1] and forced_runs[1]:match("%-%-script '([^']+)'")
+local forced_wrapper = forced_path and host.read_file(forced_path) or ""
+ok(forced_wrapper:find("WA_UPGRADE_FORCE_REASON=", 1, true) ~= nil,
+  "the wrapper exports WA_UPGRADE_FORCE_REASON, the one variable upgrade.sh reads as its override", forced_wrapper)
+ok(forced_wrapper:find("the aarch64 node must reach bfad4f8f", 1, true) ~= nil,
+  "and it carries the operator's own reason, so installed.txt can say who decided and why", forced_wrapper)
+
+-- AND AN UNFORCED RELEASE CLEARS IT. A node's environment can carry a reason from an earlier forced install
+-- (measured 2026-10-20: a deploy's reason outlived the deploy and was recorded by a later hand-run upgrade),
+-- so the ordinary path must say "no override" out loud rather than inherit one.
+issued = {}
+local plain_release = remote.serve({ action = "request", mode = "release", commit = TARGET, reason = "ordinary release" }, MASTER)
+ok(plain_release.ok == true, "an ordinary release request is admitted", tostring(plain_release.error or plain_release.status))
+local plain_runs = issued_matching("request run")
+local plain_path = plain_runs[1] and plain_runs[1]:match("%-%-script '([^']+)'")
+local plain_wrapper = plain_path and host.read_file(plain_path) or ""
+ok(plain_wrapper:find("export WA_UPGRADE_FORCE_REASON=''", 1, true) ~= nil,
+  "an unforced release exports an EMPTY override, so it cannot inherit an earlier install's reason", plain_wrapper)
+ok(plain_wrapper:find("the aarch64 node must reach bfad4f8f", 1, true) == nil,
+  "and none of the previous request's reason survives into it", plain_wrapper)
+
+
 -- The mode is refused by name when it is misspelled, so a typo cannot perform the default deploy.
 issued = {}
 local typo = remote.serve({ action = "request", mode = "relase", commit = TARGET }, MASTER)

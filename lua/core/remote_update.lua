@@ -440,6 +440,16 @@ local function request_release(record)
   if install == '' then return nil, { error = 'no_install_dir', observed = 'this node reported no install directory' } end
   local script = install .. '/scripts/release-install.sh'
   local body = {
+    -- THE OPERATOR'S OVERRIDE CROSSES THIS BOUNDARY OR IT DOES NOT EXIST. release-install.sh runs
+    -- upgrade.sh, and upgrade.sh is the process that actually swaps the pair and asks the ancestry question
+    -- again - so a --force --reason accepted here was refused one line later by the installer, with no way
+    -- for the caller to tell that its decision had been dropped. MEASURED 21/11: "wa update nextcloud
+    -- --release --force --reason ..." answered "refused(ancestry_unknown)" from upgrade.sh, and the reason
+    -- the operator had just written appears in no record anywhere. It travels as the one variable every
+    -- install path already reads (scripts/deploy.sh does the same), set on the command that runs, and only
+    -- when the request was forced.
+    'export WA_UPGRADE_FORCE_REASON=' .. quote((record.forced == true) and (record.override_reason or record.force_note or '') or ''),
+    'WA_UPGRADE_VIA=remote-update.sh release',
     'exec bash ' .. quote(script) .. ' ' .. quote(record.target_commit),
   }
   return request_run(record, 'release', body, 'release install')
@@ -1050,6 +1060,23 @@ function M.request(call, selector, options)
         next = 'move it on purpose: ' .. pins.escape_hatch(node_key, pin_in_force),
       }
     end
+  end
+  -- A FORCE THAT OPENS NO PIN IS STILL A FORCE. force_note is set by the pin branch above, so when the node
+  -- carried NO pin - and the refusal the operator was overriding was the ancestry question, not the pin - the
+  -- flag was dropped here and the node never learned the request was forced. MEASURED 21/11: a release update
+  -- sent with --force --reason reached the node as an ORDINARY request, upgrade.sh refused it
+  -- (ancestry_unknown), and the operator's only sanctioned override did nothing on the one path that needed
+  -- it. The note is built from the reason the CLI already requires for --force, in the same words the pin
+  -- branch uses, so the node records ONE kind of force whatever opened it.
+  if options.force == true and not force_note then
+    if trim(options.reason) == '' then
+      return {
+        ok = false, error = 'override_reason_required', node = node_key,
+        message = '--force is an override, and an override nobody can read later is not a decision anyone can review.',
+        next = 'say why: wa update ' .. node_key .. ' --force --reason <text>; nothing was asked of the node',
+      }
+    end
+    force_note = 'forced by an operator: ' .. trim(options.reason)
   end
   local args = { action = 'request', reason = trim(options.reason), session = trim(options.session) }
   if trim(options.commit) ~= '' then args.commit = trim(options.commit) end

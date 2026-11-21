@@ -533,6 +533,25 @@ else
     export CARGO_BUILD_JOBS=6
     say "CARGO_BUILD_JOBS=6 (a Windows host runs out of desktop heap above that: os error 1816)"
   fi
+  # ---- the ancestry window must reach the previous release ----------------------------------------
+  #
+  # A node's install guard asks the CANDIDATE "do you contain what is running?" (wa --contains). The
+  # binary answers from the ancestor list build.rs embedded, which is 'git rev-list HEAD' at build time -
+  # so a build from a SHALLOW clone carries only what is above the cut, and every node updating from the
+  # previous release asks about a commit below it and is refused with 'unknown'. MEASURED 21/11: the
+  # release of bfad4f8f refused 7ddbfa98, a commit 42 back, and a hand override was the only way through.
+  #
+  # So the window is a property of the ARTIFACT, and it is decided here, before the build: the checkout
+  # must carry history back to the previous release tag. A shallow one is deepened ONCE and asked again;
+  # one that still cannot answer is refused by name rather than published with a window nobody checked.
+  WINDOW_FLOOR="$(wa_ancestry_window_floor "$ROOT" "$COMMIT" 2>/dev/null)" || WINDOW_FLOOR=""
+  if [ -z "$WINDOW_FLOOR" ]; then
+    say "this clone cannot say where the ancestry window should begin ($(wa_ancestry_window_floor "$ROOT" "$COMMIT" 2>&1 >/dev/null | head -1)); deepening it once (git fetch --unshallow --tags origin)"
+    wa_ancestry_deepen "$ROOT" || fail "ancestry_window_unknown: $(wa_ancestry_window_floor "$ROOT" "$COMMIT" 2>&1 >/dev/null | head -1). A release built from this checkout would carry a window that stops at the cut, so a node updating from an older release would be refused with 'the target binary cannot answer whether it contains <commit>'. Deepen the checkout (git fetch --unshallow --tags origin), or build from a full clone"
+    WINDOW_FLOOR="$(wa_ancestry_window_floor "$ROOT" "$COMMIT" 2>/dev/null)" || WINDOW_FLOOR=""
+    [ -n "$WINDOW_FLOOR" ] || fail "ancestry_window_unknown: after deepening, this clone still cannot name the previous release below $COMMIT"
+  fi
+  say "ancestry window floor: $WINDOW_FLOOR (the oldest commit this build must be able to contain)"
   say "building $COMMIT for $MANIFEST_TRIPLES (glibc floor $GLIBC_FLOOR, code-mode $CODEMODE${ASSETS:+ from $ASSETS})"
   BUILD_SECONDS=""
   build_started=$(date +%s)
@@ -596,6 +615,22 @@ for triple in $MANIFEST_TRIPLES; do
       fail "glibc_floor_exceeded: $name needs GLIBC_$newest, the pin says $GLIBC_FLOOR" 5
     fi
     say "verified $name: $actual ($bytes bytes, $shape${newest:+, glibc <= $newest})"
+    # THE WINDOW IS IN THESE BYTES, or this release cannot install over its predecessor. Asked of the
+    # artifact itself, because that is what a node asks it. A binary this host cannot execute (a cross
+    # build for another machine) is named as not proved here - never claimed as checked.
+    case "$name" in
+      wa-*)
+        if "$file" --build-info >/dev/null 2>&1; then
+          if "$file" --contains "$WINDOW_FLOOR" >/dev/null 2>&1; then
+            say "ancestry window: $name contains $WINDOW_FLOOR"
+          else
+            floor_rc=$?
+            fail "ancestry_window_short: $name answers $floor_rc for $WINDOW_FLOOR, the previous release it must contain, so a node on that release could not install this one without an override. Build from a checkout whose history reaches it (git fetch --unshallow --tags origin)" 5
+          fi
+        else
+          say "ancestry window: $name cannot be executed on this host ($triple), so it is not proved here"
+        fi ;;
+    esac
   done
 done
 
