@@ -72,7 +72,10 @@ else
   cp -R "$ROOT/ui" "$INSTALL/ui"
   PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
   [ -n "$PORT" ] || { echo "REFUSED healthlabel: no free port could be measured" >&2; exit 2; }
-  ( cd /tmp && env -u WA_UI_DIR -u WASM_AGENT_LUA_ROOT -u WASM_AGENT_RENDEZVOUS -u WASM_AGENT_RELAY \
+  # `exec` INSIDE THE SUBSHELL, so $! IS the node and not a wrapping shell: without it the cleanup killed the
+  # subshell and left the node listening (measured here: three leaked stubs, each still serving after its test
+  # had passed). The node is stopped by that pid, never by a name pattern.
+  ( cd /tmp && exec env -u WA_UI_DIR -u WASM_AGENT_LUA_ROOT -u WASM_AGENT_RENDEZVOUS -u WASM_AGENT_RELAY \
       WA_INSTALL_DIR="$INSTALL" WASM_AGENT_HOME="$SCRATCH_HOME" \
       "$INSTALL/wa" --db "$SCRATCH_HOME/node.db" serve --port "$PORT" --client-port "$((PORT + 1))" \
       --ui "$INSTALL/ui" >"$WORK/serve.log" 2>&1 ) &
