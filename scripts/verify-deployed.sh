@@ -130,7 +130,19 @@ fi
 # The UI shipping closure, mirroring `UI_FILES` in scripts/upgrade.sh. Every file there is copied from the
 # built tree into <install>/ui by an upgrade; comparing them to the commit is what makes "that commit is
 # what users load" a checked fact rather than a story about the deploy log.
-UI_FILES="app.js components.js style.css index.html render.wasm manifest.webmanifest service-worker.js icon-192.png icon-512.png"
+UI_FILES="app.js components.js style.css index.html render.wasm manifest.webmanifest service-worker.js icon-192.png icon-512.png fonts.css"
+# THE FACES, the same closure scripts/upgrade.sh installs (fonts-install item 1, 21/11). They belong to the
+# UI the node serves - ui/index.html loads fonts.css and ui/fonts.css names these files - and they are what
+# 'wa setup fonts' copies into the user's font directory, so an install without them is a node that cannot
+# serve its own stylesheet and cannot install its own fonts. Not 'optional' here: this verifier runs against
+# the commit that is installed, so a commit that carries ui/fonts.css must carry the faces it names.
+UI_FONT_FILES="fonts/waIcons-Regular.ttf fonts/JetBrainsMono-Regular.ttf fonts/JetBrainsMono-Bold.ttf fonts/OFL-JetBrainsMono.txt fonts/LICENSE-SymbolsNerdFont-MIT.txt"
+# A COMMIT FROM BEFORE THE FACES EXISTED is verified against what it actually ships: the faces were added on
+# 21/11, and a downgrade to an earlier release is a supported move - so the closure is this commit's own
+# `git ls-tree`, never a list asserted against every commit in history.
+if git -C "$REPO" cat-file -e "$EXPECTED_FULL:ui/fonts.css" 2>/dev/null; then
+  UI_FILES="$UI_FILES $UI_FONT_FILES"
+fi
 UI_DIR="$INSTALL_DIR/ui"
 for asset in $UI_FILES; do
   expected="$(git -C "$REPO" show "$EXPECTED_FULL:ui/$asset" 2>/dev/null | { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi; } | awk '{print $1}')"

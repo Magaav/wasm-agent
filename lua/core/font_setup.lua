@@ -76,14 +76,129 @@ function M.font_dir(os, home)
   return home .. "/.local/share/fonts"
 end
 
--- The directory the bundle's faces are served from. WA_UI_DIR is what a deployed node's sentinel binds
--- (rust/wa-sentinel/src/instance.rs); a checkout answers from its own ui/fonts through the Lua root.
-function M.source_dir()
-  local ui = host.getenv("WA_UI_DIR")
-  if ui and ui ~= "" then return (ui:gsub("\\", "/"):gsub("/+$", "")) .. "/fonts" end
-  local root = host.getenv("WASM_AGENT_LUA_ROOT")
-  if root and root ~= "" then return (root:gsub("\\", "/"):gsub("/+$", "")) .. "/ui/fonts" end
-  return nil
+-- THE PATH OF THIS BINARY, as the kernel reports it, or nil.
+--
+-- host.runtime_info() answers the running process's own executable (rust/wa-capabilities/src/host.rs) - the
+-- one fact an installed node has about where its bundle lives that no environment variable can take away.
+-- Reading it is what makes 'wa setup fonts' work on an install, where neither WA_UI_DIR nor
+-- WASM_AGENT_LUA_ROOT is set (measured 21/11 on the installed node: the command refused
+-- fonts_source_unknown while the faces sat in the bundle).
+function M.binary_path()
+  if not (host and host.runtime_info) then return nil end
+  local ok, raw = pcall(host.runtime_info)
+  if not ok or type(raw) ~= "string" or raw == "" then return nil end
+  local decoded_ok, info = pcall(json.decode, raw)
+  if not decoded_ok or type(info) ~= "table" then return nil end
+  local path = info.binary_path
+  if type(path) ~= "string" or path == "" then return nil end
+  return (path:gsub("\\", "/"))
+end
+
+-- One path with no trailing separator, so two spellings of one directory compare equal.
+local function clean_dir(value)
+  local text = tostring(value or ""):gsub("\\", "/"):gsub("/+$", "")
+  return text
+end
+M.clean_dir = clean_dir
+
+-- The directory holding the install record this node's supervisor writes (installed.txt), asked for by the
+-- one place that decides it: paths.data()/<...>, then the install dirs a record names.
+--
+-- Every candidate below is a DIR to try, never a claim that it is the bundle: the caller keeps the one that
+-- actually holds the faces. 'label' is what a refusal prints, so an operator sees the exact path that failed
+-- instead of a sentence about a variable they may not have set.
+function M.ui_candidates(opts)
+  opts = opts or {}
+  local out = {}
+  local seen = {}
+  local function add(label, dir)
+    local cleaned = clean_dir(dir)
+    if cleaned == "" or seen[cleaned] then return end
+    seen[cleaned] = true
+    out[#out + 1] = { label = label, dir = cleaned }
+  end
+  -- 1. THE SUPERVISOR'S OWN ANSWER (rust/wa-sentinel/src/instance.rs sets WA_UI_DIR for the node it starts).
+  add("WA_UI_DIR", host.getenv("WA_UI_DIR"))
+  -- 2. A CHECKOUT: its Lua root carries ui/fonts.
+  local root = clean_dir(host.getenv("WASM_AGENT_LUA_ROOT"))
+  if root ~= "" then add("WASM_AGENT_LUA_ROOT/ui", root .. "/ui") end
+  -- 3. THE INSTALL THIS BINARY LIVES IN: <dir of wa>/ui, which is what scripts/deploy.sh and
+  --    scripts/upgrade.sh install beside the binary.
+  local binary = M.binary_path()
+  local install
+  if binary and binary:find("/[^/]+$") then
+    install = binary:gsub("/[^/]+$", "")
+    add("the UI beside this binary (" .. binary .. ")", install .. "/ui")
+  end
+  -- 4. THE RECORD: install-dir.txt in this node's state, and the installed.txt records a deploy writes.
+  --    These are where an install says where it put things when the unit or the supervisor runs a binary
+  --    somewhere else (measured 21/11 on this machine: the node is ~/.local/bin/wa serving the UI from
+  --    ~/.local/share/wasm-agent/ui, named by its unit's --ui and by both records).
+  local ok_paths, paths = pcall(dofile, "lua/core/paths.lua")
+  if ok_paths and type(paths) == "table" then
+    local data = clean_dir(paths.data())
+    if data ~= "" then
+      for _, name in ipairs({ "/install-dir.txt" }) do
+        local recorded = host.read_file(data .. name)
+        if type(recorded) == "string" then
+          local first = recorded:gsub("^%s+", ""):match("^[^\r\n]+")
+          if first and clean_dir(first) ~= "" then add("the install record " .. data .. name, clean_dir(first) .. "/ui") end
+        end
+      end
+      for _, name in ipairs({ "/installed.txt", "/startup/installed.txt" }) do
+        local record = host.read_file(data .. name)
+        if type(record) == "string" then
+          for line in record:gmatch("[^\n]+") do
+            local key, value = line:match("^%s*([%w_]+)%s*=%s*(.+)$")
+            if key == "install_dir" or key == "service_install_dir" then
+              add("the install record " .. data .. name .. " (" .. key .. ")", clean_dir(value) .. "/ui")
+            end
+          end
+        end
+      end
+    end
+  end
+  -- 5. WHERE A DEPLOY ON THIS OS INSTALLS WHEN NOTHING ELSE ANSWERS, still verified before it is used.
+  if install then add("the install's parent beside this binary", clean_dir(install) .. "/../share/wasm-agent/ui") end
+  add("the per-user install default", M.user_home() .. "/.local/share/wasm-agent/ui")
+  return out
+end
+
+-- The directory the bundle's faces are served from, FOUND rather than assumed.
+--
+-- WHAT WAS WRONG (mission fonts-install item 1, measured 21/11): this answered only WA_UI_DIR or
+-- WASM_AGENT_LUA_ROOT and nil otherwise, so an INSTALLED node - where neither is set and the bundle lives
+-- beside the binary - refused fonts_source_unknown although it had the faces. The candidates above are tried
+-- in order and the first one that actually holds ALL THREE faces wins; nothing is assumed from a path's
+-- shape. Returns the fonts directory, or nil plus the list of paths that were tried (so the refusal can
+-- print them).
+function M.source_candidates(opts)
+  opts = opts or {}
+  if opts.source_dir then
+    local direct = clean_dir(opts.source_dir)
+    -- An explicit source_dir is the caller's answer, honoured as given: a test hands it a bundle directly.
+    return { { label = "source_dir", dir = direct } }, direct
+  end
+  local tried, first_fonts = {}, nil
+  for _, candidate in ipairs(M.ui_candidates(opts)) do
+    local fonts = candidate.dir:gsub("/fonts$", "") .. "/fonts"
+    tried[#tried + 1] = { label = candidate.label, path = fonts }
+    local complete = true
+    for _, name in ipairs(M.FONTS) do
+      local kind = host.path_kind and host.path_kind(fonts .. "/" .. name) or (host.read_file(fonts .. "/" .. name) and "file" or "missing")
+      if kind ~= "file" then complete = false end
+    end
+    if complete then return tried, fonts end
+    if not first_fonts then first_fonts = fonts end
+  end
+  -- Nothing complete: answer the FIRST path tried, so the caller's own 'fonts_missing_from_bundle' names a
+  -- real place instead of nothing - and the refusal list says every place that was looked at.
+  return tried, first_fonts
+end
+
+function M.source_dir(opts)
+  local _, fonts = M.source_candidates(opts)
+  return fonts
 end
 
 -- ---- the terminals --------------------------------------------------------------------------------
@@ -694,9 +809,9 @@ function M.font_plan(opts)
   opts = opts or {}
   local os_name = opts.os or M.os()
   local home = opts.home or M.user_home()
-  local source = opts.source_dir or M.source_dir()
+  local tried, source = M.source_candidates(opts)
   local target = opts.font_dir or M.font_dir(os_name, home)
-  local plan = { dir = target, copied = {}, missing = {} }
+  local plan = { dir = target, copied = {}, missing = {}, tried = tried }
   if not source then return nil, plan end
   for _, name in ipairs(M.FONTS) do
     local path = source .. "/" .. name
@@ -711,13 +826,23 @@ function M.install_fonts(opts)
   opts = opts or {}
   local os_name = opts.os or M.os()
   local home = opts.home or M.user_home()
-  local source = opts.source_dir or M.source_dir()
+  local tried, source = M.source_candidates(opts)
   local target = opts.font_dir or M.font_dir(os_name, home)
   local run = opts.run or function(command) return host.exec(command, "", 60) end
-  local done = { dir = target, copied = {}, missing = {} }
+  local done = { dir = target, copied = {}, missing = {}, tried = tried }
+  -- EVERY PLACE THAT WAS LOOKED AT, printed with the refusal. 'I cannot find the faces' is only actionable
+  -- when it names what it looked for and where: an operator can then see the one path that is missing a copy.
+  local function looked_at()
+    local names = {}
+    for _, row in ipairs(tried or {}) do
+      names[#names + 1] = tostring(row.path) .. " [" .. tostring(row.label) .. "]"
+    end
+    if #names == 0 then return "none" end
+    return table.concat(names, ", ")
+  end
 
   if not source then
-    return nil, "fonts_source_unknown: this node cannot say where its own fonts live (WA_UI_DIR, or WASM_AGENT_LUA_ROOT for a checkout)", done
+    return nil, "fonts_source_unknown: this node cannot say where its own fonts live (WA_UI_DIR, or WASM_AGENT_LUA_ROOT for a checkout); tried: " .. looked_at(), done
   end
   for _, name in ipairs(M.FONTS) do
     local path = source .. "/" .. name
@@ -725,7 +850,7 @@ function M.install_fonts(opts)
     if kind ~= "file" then done.missing[#done.missing + 1] = path end
   end
   if #done.missing > 0 then
-    return nil, "fonts_missing_from_bundle: " .. table.concat(done.missing, ", "), done
+    return nil, "fonts_missing_from_bundle: " .. table.concat(done.missing, ", ") .. " (looked at: " .. looked_at() .. ")", done
   end
   local made = run("mkdir -p " .. shell_quote(target) .. " && echo ok 2>/dev/null")
   if not (type(made) == "string" and made:find("ok", 1, true)) then
@@ -994,8 +1119,13 @@ function M.run(opts)
       return result
     end
     if #detail.missing > 0 then
+      -- A DRY RUN NAMES WHAT IS MISSING AND WHERE IT LOOKED, exactly like the real run: the two answer the
+      -- same question and this command's whole value is that its plan is what it does.
+      local where = {}
+      for _, row in ipairs(detail.tried or {}) do where[#where + 1] = tostring(row.path) .. " [" .. tostring(row.label) .. "]" end
       result.ok = false
       result.error = "fonts_missing_from_bundle: " .. table.concat(detail.missing, ", ")
+        .. " (looked at: " .. (#where > 0 and table.concat(where, ", ") or "none") .. ")"
       say("wa setup fonts: refused: " .. result.error)
       return result
     end

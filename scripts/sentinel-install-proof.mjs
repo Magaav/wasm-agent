@@ -61,9 +61,15 @@ function snapshotWithIdentity(root,install,manifest,environment,identity) {
  if(hash(nodeFile)!==hash(path.join(root,'rust/target/release/wa'+suffix))||hash(sentFile)!==hash(path.join(root,'rust/wa-sentinel/target/release/wa-sentinel'+suffix)))throw Error('built_artifact_mismatch');
  // The installer deliberately excludes ui/test-fixtures.js. Derive the served asset set from
  // its actual declaration, and allow only its named recovery backups as additional installed files.
- const declared=/^UI_FILES="([^"]+)"$/m.exec(fs.readFileSync(path.join(root,'scripts/upgrade.sh'),'utf8'));
+ const upgradeScript=fs.readFileSync(path.join(root,'scripts/upgrade.sh'),'utf8');
+ const declared=/^UI_FILES="([^"]+)"$/m.exec(upgradeScript);
  if(!declared)throw Error('ui_asset_declaration_missing');
- const uiFiles=declared[1].split(/\s+/).sort();
+ // THE FACES AND THEIR STYLESHEET ARE PART OF THE UI THE INSTALLER SHIPS (fonts-install item 1, 21/11):
+ // ui/index.html loads fonts.css and ui/fonts.css names ui/fonts/*, so an install that carries the page and not
+ // these serves 404s and cannot install its own fonts. The declaration is read from upgrade.sh exactly as
+ // UI_FILES is - the closure is still the INSTALLER's own answer, and the exact-set rule below is unchanged.
+ const declaredFonts=/^UI_FONT_FILES="([^"]+)"$/m.exec(upgradeScript);
+ const uiFiles=[...declared[1].split(/\s+/),...(declaredFonts?declaredFonts[1].split(/\s+/):[])].sort();
  if(uiFiles.some(n=>!/^[-A-Za-z0-9._]+$/.test(n))||!uiFiles.includes('index.html')||files(path.join(install,'ui')).some(n=>!uiFiles.includes(n)&&!uiFiles.some(asset=>n===asset+'.pre-upgrade'))||digest(path.join(root,'ui'),uiFiles)!==digest(path.join(install,'ui'),uiFiles))throw Error('ui_mismatch');
  const scriptFiles=manifest || files(path.join(install,'scripts')).filter(n=>fs.existsSync(path.join(root,'scripts',n))&&fs.statSync(path.join(root,'scripts',n)).isFile());
  for(const name of ['deploy.sh','upgrade.sh','verify-install.sh','lib/service-target.sh','sentinel-install-proof.mjs','sentinel-return-prepare.sh'])if(!scriptFiles.includes(name))throw Error('required_script_missing:'+name);

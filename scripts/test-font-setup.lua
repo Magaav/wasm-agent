@@ -100,6 +100,65 @@ ok(short_ok == nil, "a bundle missing faces is refused")
 ok(tostring(short_why):find("fonts_missing_from_bundle", 1, true) ~= nil,
   "and the refusal names what is missing: " .. tostring(short_why))
 
+-- ---- WHERE THE FACES COME FROM, on an INSTALLED node (item 1) -----------------------------------------
+-- MEASURED 21/11 on the installed node: 'wa setup fonts' refused fonts_source_unknown although the faces were in
+-- its own bundle, because source_dir() answered only WA_UI_DIR or WASM_AGENT_LUA_ROOT and an install sets
+-- neither. It now FOUNDS the bundle: beside the binary this process was started from, in the install records
+-- this node keeps, and only then the per-user default - verified by the three faces being there, never assumed
+-- from a path's shape. This case builds that install on disk and points the one record the node reads at it.
+do
+  -- THE INSTALLED NODE'S ENVIRONMENT: no WA_UI_DIR and no WASM_AGENT_LUA_ROOT. This test's own process has
+  -- WA_UI_DIR set (it points the rest of the suite at this checkout), and that really is the first candidate -
+  -- so it is cleared here for the length of the case, and put back after.
+  local before_install_env = host.getenv
+  host.getenv = function(key)
+    if key == "WA_UI_DIR" or key == "WASM_AGENT_LUA_ROOT" then return "" end
+    return before_install_env(key)
+  end
+  local installed = scratch_root .. "/installed-node"
+  local install_ui = installed .. "/ui"
+  mkdir(install_ui .. "/fonts")
+  for _, name in ipairs(font_setup.FONTS) do write(install_ui .. "/fonts/" .. name, "a face, not the real bytes") end
+  -- THE RECORD FIRST, then the question: paths.data() is the store the node reads its own install facts from.
+  local data = dofile("lua/core/paths.lua").data()
+  write(data .. "/install-dir.txt", installed .. "\n")
+  -- The call is GUARDED so that on a tree without it this case reports the behaviour it is missing instead of
+  -- dying on a nil call: the assertions below are about where the faces are FOUND, which is the change.
+  local found = type(font_setup.source_candidates) == "function" and font_setup.source_candidates() or {}
+  local labels = {}
+  for _, row in ipairs(found) do labels[#labels + 1] = tostring(row.label) .. "=" .. tostring(row.path) end
+  eq(font_setup.source_dir(), install_ui .. "/fonts",
+    "the faces are found from this node's own install record, with no WA_UI_DIR and no WASM_AGENT_LUA_ROOT (tried: "
+      .. table.concat(labels, " | ") .. ")")
+  -- AND A CANDIDATE IS ONLY USED WHEN IT IS COMPLETE: a record naming a directory with no faces in it must not
+  -- be answered as the bundle (a refusal naming the path is the honest answer, not a half-copy).
+  local empty = scratch_root .. "/installed-empty"
+  mkdir(empty .. "/ui")
+  write(data .. "/install-dir.txt", empty .. "\n")
+  -- AN INCOMPLETE CANDIDATE IS NEVER INSTALLED FROM: with the record naming a ui/ that carries no faces, the
+  -- setup REFUSES (fonts_missing_from_bundle), naming where it looked - it does not copy half an icon set, and it
+  -- does not quietly pass over the record as though the machine had no bundle.
+  local half_detail, half_why = font_setup.install_fonts({
+    home = scratch_root, font_dir = scratch_root .. "/half-fonts", run = fake_run,
+  })
+  ok(half_detail == nil, "an install record whose ui/ carries no faces is not installed from")
+  ok(tostring(half_why):find("fonts_missing_from_bundle", 1, true) ~= nil,
+    "and the refusal names the faces that are missing: " .. tostring(half_why))
+  ok(tostring(half_why):find("looked at", 1, true) ~= nil,
+    "and every path it looked at, so the operator can see which copy is short: " .. tostring(half_why))
+  write(data .. "/install-dir.txt", installed .. "\n")
+  local source_dir = type(font_setup.source_dir) == "function" and font_setup.source_dir() or nil
+  eq(source_dir, install_ui .. "/fonts", "and the complete one is, once the record names it again")
+  -- A candidate that DOES hold all three faces wins over every later one, and the list a refusal prints names
+  -- every path that was tried: an operator must be able to see which copy is missing something.
+  local tried, chosen = font_setup.source_candidates()
+  ok(chosen ~= nil, "a bundle is chosen")
+  local printed = {}
+  for _, row in ipairs(tried) do printed[#printed + 1] = tostring(row.path) end
+  ok(#printed >= 2, "more than one place was tried, so the refusal can name them: " .. table.concat(printed, ", "))
+  host.getenv = before_install_env
+end
+
 -- ---- a terminal config: the edit, the backup, the undo ---------------------------------------------
 -- Fixture configs, written into the scratch tree, because the point is the BYTES this command leaves in
 -- a real terminal's file. A config it cannot measure is left alone; a config whose face already draws

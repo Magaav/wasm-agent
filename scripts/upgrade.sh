@@ -91,6 +91,32 @@ fi
 RUNTIME_ROOT="$(cd "$RUNTIME_ROOT" && pwd)"
 SOURCE_UI="${WA_SOURCE_UI_DIR:-$ROOT/ui}"
 UI_FILES="index.html app.js components.js style.css render.wasm manifest.webmanifest service-worker.js icon-192.png icon-512.png"
+# THE FACES the page and 'wa setup fonts' both need: ui/fonts.css names them and ui/index.html loads fonts.css,
+# so an install that ships the ten files above and not these serves a UI whose stylesheet 404s - and
+# 'wa setup fonts' finds no bundle to install on the machine that just served it. MEASURED 21/11 (mission
+# fonts-install item 1): this node's ~/.local/share/wasm-agent/ui was dated 16/11, held no fonts/ directory,
+# and every UI change since then was missing from the installed node while its own bundle carried them.
+UI_FONT_FILES="fonts.css fonts/waIcons-Regular.ttf fonts/JetBrainsMono-Regular.ttf fonts/JetBrainsMono-Bold.ttf fonts/OFL-JetBrainsMono.txt fonts/LICENSE-SymbolsNerdFont-MIT.txt"
+
+# THE UI CLOSURE, in one place: every relative path this script installs, the assets listed above first and
+# then the faces. TWO answers, because a downgrade is a real move:
+#   recoverable - every file the release may ship (UI_FILES + UI_FONT_FILES): what the copy loop places and
+#                 what a rollback restores from its .pre-upgrade backup;
+#   required    - UI_FILES only: an older release legitimately has no ui/fonts/, and refusing to install it
+#                 because a face is absent would make 'wa update --rollback' to such a release impossible.
+ui_closure() {
+  local asset
+  for asset in $UI_FILES; do printf '%s\n' "$asset"; done
+  case "${1:-recoverable}" in required) return 0 ;; esac
+  for asset in $UI_FONT_FILES; do printf '%s\n' "$asset"; done
+}
+
+# ui_asset_present <relative path>: is this asset in the release being installed? A face the release does not
+# carry is not an error (see 'required' above); an ASSET IT DOES CARRY must be here, and a missing one stops
+# the install before the node is touched.
+ui_asset_present() {
+  [ -n "$SOURCE_UI" ] && [ -f "$SOURCE_UI/$1" ]
+}
 
 NEW=""
 # `--release DIR` names the release the candidate came from; its signed SHA256SUMS is the gate below. A
@@ -850,8 +876,26 @@ else [ -n "$OLD_PID" ] && say "stopping the node (pid $OLD_PID, by pid - never b
 BACKUP="$INSTALLED.pre-upgrade"
 cp -f "$INSTALLED" "$BACKUP" 2>/dev/null && cmp -s "$INSTALLED" "$BACKUP" || { say "cannot verify recovery binary; not stopping the node"; exit 1; }
 if [ -d "$SOURCE_UI" ] && [ "$SOURCE_UI" != "$UI_DIR" ]; then
+  # EVERY ASSET THE RELEASE CARRIES IS BACKED UP, the faces included, and the ones a release must carry are
+  # checked HERE - before the node is touched. A release that loads fonts.css and does not ship it would leave
+  # a node serving a stylesheet 404 and no bundle for 'wa setup fonts' (fonts-install item 1, 21/11).
   for asset in $UI_FILES; do
     [ -f "$SOURCE_UI/$asset" ] || { say "missing release UI asset: $asset"; exit 1; }
+  done
+  # A RELEASE THAT SHIPS ui/fonts.css MUST SHIP THE FACES IT NAMES, checked HERE - before the node is touched.
+  # The faces as a group are optional (ui/fonts/ arrived on 21/11, and a rollback to an earlier release must
+  # still install), but a release whose own stylesheet asks for fonts/JetBrainsMono-Regular.ttf and does not
+  # carry it serves a 404 for the page's own font and leaves 'wa setup fonts' - whose whole job is copying those
+  # faces - with nothing to copy. That is the measured failure (fonts-install item 1, 21/11). The names come
+  # from the release's OWN fonts.css, so what is required is exactly what that release asks the browser to load.
+  if [ -f "$SOURCE_UI/fonts.css" ]; then
+    for face in $(grep -o 'fonts/[^")'"'"' ]*' "$SOURCE_UI/fonts.css" | sort -u); do
+      [ -f "$SOURCE_UI/$face" ] || { say "missing release UI asset: $face (named by the release's own fonts.css)"; exit 1; }
+    done
+  fi
+  for asset in $(ui_closure recoverable); do
+    ui_asset_present "$asset" || continue
+    mkdir -p "$UI_DIR/$(dirname "$asset")"
     [ ! -f "$UI_DIR/$asset" ] || cp -f "$UI_DIR/$asset" "$UI_DIR/$asset.pre-upgrade" || exit 1
   done
 fi
@@ -967,7 +1011,17 @@ if [ -d "$SOURCE_UI" ] && [ "$SOURCE_UI" != "$UI_DIR" ]; then
   mkdir -p "$UI_DIR"
   # `cmp` first: an unconditional `cp -f` moves the mtime of an *unchanged* asset, and the UI's version is
   # read by every open page. A no-op install must be a no-op, not a reason for every window to reload.
-  for asset in $UI_FILES; do
+  #
+  # THE FACES GO IN THE SAME PASS, which is what makes the swap atomic for the node that restarts below: a
+  # fonts.css that loaded while fonts/ arrived one step later is a page whose icons are boxes for as long as
+  # the copy takes, and a 'wa setup fonts' run in that window finds an incomplete bundle and (correctly)
+  # refuses. A face the release does not carry is skipped - see ui_closure.
+  for asset in $(ui_closure recoverable); do
+    # A RELEASE THAT DOES NOT CARRY IT IS SKIPPED, never a failure: ui/fonts/ arrived on 21/11, and a downgrade
+    # to an earlier release (or a rollback to it) must still install. A release that DOES carry an asset has it
+    # copied here, in this same pass, before the node below is restarted.
+    ui_asset_present "$asset" || continue
+    mkdir -p "$UI_DIR/$(dirname "$asset")"
     cmp -s "$SOURCE_UI/$asset" "$UI_DIR/$asset" || cp -f "$SOURCE_UI/$asset" "$UI_DIR/$asset" || UI_OK=0
   done
 fi
@@ -1050,7 +1104,7 @@ if [ "$WATCHDOG" = "1" ]; then
   # took for exactly this.
   if [ -f "$BACKUP" ]; then
     cp -f "$BACKUP" "$INSTALLED.new" && mv -f "$INSTALLED.new" "$INSTALLED"
-    for asset in $UI_FILES; do
+    for asset in $(ui_closure recoverable); do
       [ ! -f "$UI_DIR/$asset.pre-upgrade" ] || cp -f "$UI_DIR/$asset.pre-upgrade" "$UI_DIR/$asset"
     done
     say "restored $INSTALLED and the UI assets from the backup; the watchdog is serving the previous kernel"
@@ -1062,7 +1116,7 @@ fi
 if [ -n "$MANAGED_UNIT" ]; then
   if [ -f "$BACKUP" ]; then
     cp -f "$BACKUP" "$INSTALLED.new" && mv -f "$INSTALLED.new" "$INSTALLED"
-    for asset in $UI_FILES; do
+    for asset in $(ui_closure recoverable); do
       [ ! -f "$UI_DIR/$asset.pre-upgrade" ] || cp -f "$UI_DIR/$asset.pre-upgrade" "$UI_DIR/$asset"
     done
     FAILED_PID="$(pid_on_port)"
@@ -1077,7 +1131,7 @@ fi
 if [ "$SUPERVISED" = "1" ]; then
   if [ -f "$BACKUP" ]; then
     cp -f "$BACKUP" "$INSTALLED.new" && mv -f "$INSTALLED.new" "$INSTALLED"
-    for asset in $UI_FILES; do
+    for asset in $(ui_closure recoverable); do
       [ ! -f "$UI_DIR/$asset.pre-upgrade" ] || cp -f "$UI_DIR/$asset.pre-upgrade" "$UI_DIR/$asset"
     done
     if sentinel_restart "upgrade rollback" && wait_health; then say "rolled back: $(health)"
@@ -1100,7 +1154,7 @@ done
 if port_busy "$PORT"; then say "port $PORT is still occupied; recovery requires checking the listener"; exit 1; fi
 if [ -f "$BACKUP" ]; then
   cp -f "$BACKUP" "$INSTALLED"
-  for asset in $UI_FILES; do
+  for asset in $(ui_closure recoverable); do
     [ ! -f "$UI_DIR/$asset.pre-upgrade" ] || cp -f "$UI_DIR/$asset.pre-upgrade" "$UI_DIR/$asset"
   done
   start_node "$INSTALLED"

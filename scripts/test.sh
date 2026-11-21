@@ -962,6 +962,12 @@ WA_BIN="$BIN" bash scripts/test-update.sh 8874 | grep "the real sentinel's reque
 # The idle wait before an upgrade is bounded by *lack of progress*, not wall time. A legitimate
 # 40-minute turn must not make every queued upgrade wait, fail, and retry while the node stays busy.
 gate_run bash scripts/test-upgrade-idle.sh | grep 'upgrade idle-wait ok'
+# AN INSTALL CARRIES THE UI THE RELEASE SHIPS, faces included (mission fonts-install item 1, 21/11): the measured
+# node had ui/ dated 16/11 with no fonts/ at all, so the page's own stylesheet 404ed and 'wa setup fonts' had no
+# bundle to copy from. This runs upgrade.sh against a scratch install and release and reads the installed ui/
+# back - including a release whose fonts.css names faces it does not carry (refused) and a downgrade to a
+# release from before the faces existed (still installs).
+gate_run bash scripts/test-upgrade-ui-fonts.sh | grep 'ui fonts install: ok'
 # The watchdog (docs/KERNEL.md, "Watchdog"): its own tests plus the CLI contract the upgrade path depends on,
 # then a scratch install upgraded THROUGH the flag - including the assertion that the default path does not
 # touch the watchdog at all. The fake kernel is `wa-watchdog selftest-kernel`; no real node is involved.
