@@ -19,8 +19,9 @@ based on `93168d96`. Committed locally, never pushed.
 | --- | --- | --- |
 | `scripts/test-codemode-wait-shape.lua` (new) | inline and `wait()`-collected answers expose the same `stdout`/`code`/`ok` keys, neither has a `result` key, a pending entry flattens nothing, an unknown op is `{state=failed, reason}`, an announced handle is the value plus its hash | fast path (globbed by `scripts/fast.sh`; not in `scripts/fast-path.exclude`) |
 | `scripts/test-handle-wake.lua` (new) | the sweep, the wake row's words (the answer plus `Still pending (1): <op> (bash, Ns)`), exactly once across a second sweep and a reloaded module, no second `pending_settled`, the row is claimable by `selfloop.claim_due` | fast path |
+| `scripts/test-handle-wake-turn.lua` (new) | the last hop, with the provider stubbed: the wake is claimed exactly as the node tick and the CLI idle prompt claim it, the model is asked ONCE with the settled answer in its input, the turn is a durable `[self-wake ...]` row, the effect ran once, and `wake_only_round` moved by one | fast path |
 | `scripts/test-codemode-counters.lua` (new) | `script_cut_at_cap` once per script (not per handle), `handle_mishandled` on the pending-value TypeError, a clean script moves neither, unknown counter names refused | fast path |
-| `scripts/test-cli-input.lua` (extended) | a `now` array is kept per line, `now_lines()` names the send-now ones, an answer without `now` is queued | `scripts/test.sh` (its existing pipe producer) |
+| `scripts/test-cli-input.lua` (extended) | a `now` array is kept per line, `now_lines()` names the send-now ones, an answer without `now` is queued, **and on the real host** the take answer carries the kinds and a line that arrived through a pipe is queued | `scripts/test.sh` (its existing pipe producer) |
 | `scripts/test-codemode-pending.lua`, `-never-killed`, `-queue-timeout` (updated) | the same assertions as before, read in the flat shape (`.result.code` → `.code`); the cancelled-entry check now asserts the handle's `reason` and that nothing threw | fast path / `test.sh` as before |
 | `rust/wa-term` `enter_queues_and_ctrl_enter_sends_now` | Enter still submits; Ctrl+Enter, Ctrl+G and the xterm form send now; the draft is cleared the same way | `cargo test -p wa-term` (fast path's Rust rows) |
 | `rust/wa-capabilities` `a_queued_line_never_ends_a_run_and_a_send_now_line_does` | the four combinations of (send now, run in flight) and the two line kinds | `cargo test -p wa-capabilities` |
@@ -29,6 +30,17 @@ Discrimination, measured here: `test-codemode-wait-shape.lua` fails on `93168d96
 `keys ["op","result","state","tool"]` and `nested: object`; `test-handle-wake.lua` and
 `test-codemode-counters.lua` fail on the base with `lua_root_unreadable ... handle_wake.lua` /
 `counters.lua` (the modules do not exist there), which is the change itself.
+
+### Test 1 as specified passes on the base, and that is a finding
+
+"Enter mid-script: the script runs to its end, every planned call executed, the message delivered
+right after" is **already true at `93168d96`** (premise 1 below), so a row asserting it would pass on
+the base and catch nothing - which is why none was added for it. What is new, and therefore measured,
+is the pair it presupposes: that the line carries a kind, that the kind of a pipe line is *queued*, and
+that a send-now line is the one that raises the run's interrupt (`test-cli-input.lua` on the real host,
+plus the two Rust unit tests). `scripts/test-cli-steering.lua` already holds the round-boundary
+delivery half ("a complete line typed during a tool call reaches the next model request, and is durable
+in the session").
 
 ## Premises of the brief that were wrong (re-measured at `93168d96`)
 
@@ -62,10 +74,12 @@ Discrimination, measured here: `test-codemode-wait-shape.lua` fails on `93168d96
 * **Test 5's real `opencode-go` turn with cache-read tokens** was not run: it needs a live provider
   and a recorded baseline this session did not have. The prefix-stability claim is therefore
   unverified here.
-* **The wake turn end-to-end with a model** (test 3 with the terminal open and with only the node
-  serving) is verified as far as the row and the claim: `test-handle-wake.lua` proves the row exists,
-  is due and is claimed by the same call both surfaces make. Running that turn against a stub provider
-  through `wa chat` and through the serve tick is **not** written as a test.
+* **The wake turn with a model** is now covered without a network: `scripts/test-handle-wake-turn.lua`
+  claims the row the way both surfaces do and runs the turn with a stubbed provider, asserting one
+  model call, the durable labelled row, the effect run once and the `wake_only_round` increment. What
+  is **not** written is the same turn *through the two transports*: a serve process's
+  `wa_orchestrator_tick` dispatching through `host.enqueue_completion`, and a `wa chat` at its idle
+  prompt. Those need a running node with a stub model behind it.
 * **Counters**: `script_cut_at_cap` counts the pending-answer half only; "hit its deadline with lines
   still to run" is not counted. `handle_mishandled` counts the pending-value TypeError and the
   wait-never-settles bound; "a model polling `wait()` in a loop" is only counted when it ends on that
@@ -100,7 +114,7 @@ Discrimination, measured here: `test-codemode-wait-shape.lua` fails on `93168d96
 Run with this tree's binary and `WASM_AGENT_LUA_ROOT` pointed at the tree, each in a scratch
 `HOME`/`--db`:
 
-* green: `test-codemode-wait-shape` (25 checks), `test-handle-wake` (16), `test-codemode-counters`
+* green: `test-codemode-wait-shape` (25 checks), `test-handle-wake` (16), `test-handle-wake-turn` (10), `test-codemode-counters`
   (11), `test-codemode-pending` (92), `test-codemode-never-killed` (19), `test-codemode-queue-timeout`
   (20), `test-codemode-presentation`, `test-codemode-friction`, `test-cli-input` (21),
   `test-selfloop`, `test-selfloop-pause` (101), `cargo test -p wa-term` (177), the `terminal_tests`
