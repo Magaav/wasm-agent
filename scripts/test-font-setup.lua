@@ -100,6 +100,65 @@ ok(short_ok == nil, "a bundle missing faces is refused")
 ok(tostring(short_why):find("fonts_missing_from_bundle", 1, true) ~= nil,
   "and the refusal names what is missing: " .. tostring(short_why))
 
+-- ---- WHERE THE FACES COME FROM, on an INSTALLED node (item 1) -----------------------------------------
+-- MEASURED 21/11 on the installed node: 'wa setup fonts' refused fonts_source_unknown although the faces were in
+-- its own bundle, because source_dir() answered only WA_UI_DIR or WASM_AGENT_LUA_ROOT and an install sets
+-- neither. It now FOUNDS the bundle: beside the binary this process was started from, in the install records
+-- this node keeps, and only then the per-user default - verified by the three faces being there, never assumed
+-- from a path's shape. This case builds that install on disk and points the one record the node reads at it.
+do
+  -- THE INSTALLED NODE'S ENVIRONMENT: no WA_UI_DIR and no WASM_AGENT_LUA_ROOT. This test's own process has
+  -- WA_UI_DIR set (it points the rest of the suite at this checkout), and that really is the first candidate -
+  -- so it is cleared here for the length of the case, and put back after.
+  local before_install_env = host.getenv
+  host.getenv = function(key)
+    if key == "WA_UI_DIR" or key == "WASM_AGENT_LUA_ROOT" then return "" end
+    return before_install_env(key)
+  end
+  local installed = scratch_root .. "/installed-node"
+  local install_ui = installed .. "/ui"
+  mkdir(install_ui .. "/fonts")
+  for _, name in ipairs(font_setup.FONTS) do write(install_ui .. "/fonts/" .. name, "a face, not the real bytes") end
+  -- THE RECORD FIRST, then the question: paths.data() is the store the node reads its own install facts from.
+  local data = dofile("lua/core/paths.lua").data()
+  write(data .. "/install-dir.txt", installed .. "\n")
+  -- The call is GUARDED so that on a tree without it this case reports the behaviour it is missing instead of
+  -- dying on a nil call: the assertions below are about where the faces are FOUND, which is the change.
+  local found = type(font_setup.source_candidates) == "function" and font_setup.source_candidates() or {}
+  local labels = {}
+  for _, row in ipairs(found) do labels[#labels + 1] = tostring(row.label) .. "=" .. tostring(row.path) end
+  eq(font_setup.source_dir(), install_ui .. "/fonts",
+    "the faces are found from this node's own install record, with no WA_UI_DIR and no WASM_AGENT_LUA_ROOT (tried: "
+      .. table.concat(labels, " | ") .. ")")
+  -- AND A CANDIDATE IS ONLY USED WHEN IT IS COMPLETE: a record naming a directory with no faces in it must not
+  -- be answered as the bundle (a refusal naming the path is the honest answer, not a half-copy).
+  local empty = scratch_root .. "/installed-empty"
+  mkdir(empty .. "/ui")
+  write(data .. "/install-dir.txt", empty .. "\n")
+  -- AN INCOMPLETE CANDIDATE IS NEVER INSTALLED FROM: with the record naming a ui/ that carries no faces, the
+  -- setup REFUSES (fonts_missing_from_bundle), naming where it looked - it does not copy half an icon set, and it
+  -- does not quietly pass over the record as though the machine had no bundle.
+  local half_detail, half_why = font_setup.install_fonts({
+    home = scratch_root, font_dir = scratch_root .. "/half-fonts", run = fake_run,
+  })
+  ok(half_detail == nil, "an install record whose ui/ carries no faces is not installed from")
+  ok(tostring(half_why):find("fonts_missing_from_bundle", 1, true) ~= nil,
+    "and the refusal names the faces that are missing: " .. tostring(half_why))
+  ok(tostring(half_why):find("looked at", 1, true) ~= nil,
+    "and every path it looked at, so the operator can see which copy is short: " .. tostring(half_why))
+  write(data .. "/install-dir.txt", installed .. "\n")
+  local source_dir = type(font_setup.source_dir) == "function" and font_setup.source_dir() or nil
+  eq(source_dir, install_ui .. "/fonts", "and the complete one is, once the record names it again")
+  -- A candidate that DOES hold all three faces wins over every later one, and the list a refusal prints names
+  -- every path that was tried: an operator must be able to see which copy is missing something.
+  local tried, chosen = font_setup.source_candidates()
+  ok(chosen ~= nil, "a bundle is chosen")
+  local printed = {}
+  for _, row in ipairs(tried) do printed[#printed + 1] = tostring(row.path) end
+  ok(#printed >= 2, "more than one place was tried, so the refusal can name them: " .. table.concat(printed, ", "))
+  host.getenv = before_install_env
+end
+
 -- ---- a terminal config: the edit, the backup, the undo ---------------------------------------------
 -- Fixture configs, written into the scratch tree, because the point is the BYTES this command leaves in
 -- a real terminal's file. A config it cannot measure is left alone; a config whose face already draws
@@ -394,6 +453,67 @@ ok(ghostty_text:find("font-size = 9", 1, true) ~= nil, "and the rest of the file
 eq(font_setup.configure_terminal(ghostty, {}).action, "left alone",
   "a second run changes nothing: the icon face is on its own line, and the check reads the WHOLE config")
 
+-- A STALE ICON MAP IS CORRECTED (mission fonts-install item 3, 21/11). Two shapes this command used to write
+-- itself are not the shape it writes now: kitty's 'symbol_map U+F0000-U+FFFFD wa Icons' hands EVERY plane-15
+-- code point - every other program's Nerd md-* icon - to a face with fourteen glyphs, and ghostty's
+-- 'font-family = "wa Icons"' was the pre-fix fallback line. Both were reported "already draws wa's icons" and
+-- never corrected. already_a2 compares with the EXACT line the setup writes now, and the writer REPLACES a
+-- stale one instead of leaving it above the new one (kitty reads the LAST symbol_map, so a stale line below
+-- the new map would undo the fix as quietly as the fix was applied).
+do
+  local stale_dir = fixtures .. "/stale"
+  local stale_kitty = stale_dir .. "/kitty.conf"
+  write(stale_kitty, "font_family JetBrains Mono\nsymbol_map U+F0000-U+FFFFD wa Icons\nfont_size 12\n")
+  local stale_terminal = { name = "kitty", path = stale_kitty, kind = "conf", key = "font_family",
+    fallback_line = "symbol_map " .. font_setup.ICON_RANGES .. " wa Icons" }
+  eq(font_setup.already_a2("JetBrains Mono", read(stale_kitty), stale_terminal), false,
+    "kitty's pre-fix whole-plane symbol_map is NOT already set up: it is the map A2 replaced")
+  local stale_row = font_setup.configure_terminal(stale_terminal, {})
+  eq(stale_row.action, "edited", "so it is corrected")
+  local stale_text = read(stale_kitty)
+  ok(stale_text:find("symbol_map " .. font_setup.ICON_RANGES .. " wa Icons", 1, true) ~= nil,
+    "the map is the one this command writes now: " .. stale_text)
+  ok(not stale_text:find("U+F0000-U+FFFFD", 1, true), "and the whole-plane map is GONE, not left beside it")
+  eq(select(2, stale_text:gsub("symbol_map", "")), 1, "exactly one symbol_map line remains")
+  eq(font_setup.configure_terminal(stale_terminal, {}).action, "left alone",
+    "and the corrected map is left alone on the next run")
+
+  local stale_ghostty = stale_dir .. "/ghostty"
+  write(stale_ghostty, 'font-family = "JetBrains Mono"\nfont-family = "wa Icons"\nfont-size = 9\n')
+  -- FROM THE REAL TABLE, with only the path replaced: which keys may name an icon face is the production
+  -- row's answer (ghostty repeats font-family for it), and a fixture that guessed it would test a terminal
+  -- this command does not have.
+  local stale_ghostty_terminal
+  for _, known_terminal in ipairs(font_setup.terminals(scratch_root)) do
+    if known_terminal.name == "ghostty" then stale_ghostty_terminal = known_terminal end
+  end
+  ok(stale_ghostty_terminal ~= nil, "the ghostty row is in the allow-list")
+  stale_ghostty_terminal.path = stale_ghostty
+  eq(font_setup.already_a2("JetBrains Mono", read(stale_ghostty), stale_ghostty_terminal), false,
+    "ghostty's pre-fix 'font-family = \"wa Icons\"' fallback is NOT already set up")
+  eq(font_setup.configure_terminal(stale_ghostty_terminal, {}).action, "edited", "so it is corrected too")
+  local ghostty_fixed = read(stale_ghostty)
+  ok(not ghostty_fixed:lower():find('font-family = "wa icons"', 1, true),
+    "the stale icon line is replaced, not kept: " .. ghostty_fixed)
+  ok(ghostty_fixed:find("font-codepoint-map = " .. font_setup.ICON_RANGES .. "=wa Icons", 1, true) ~= nil,
+    "by the code-point map this command writes")
+  eq(select(2, ghostty_fixed:gsub("font%-family", "")), 1, "and the text face is named exactly once")
+  eq(font_setup.configure_terminal(stale_ghostty_terminal, {}).action, "left alone",
+    "the corrected ghostty config is left alone on the next run")
+
+  -- A config that names NO font and still carries a stale map: the map is replaced with the pair, and the
+  -- stale line is not left in place beside it.
+  local stale_fontless = stale_dir .. "/kitty-fontless.conf"
+  write(stale_fontless, "# font_family JetBrains Mono\nsymbol_map U+F0000-U+FFFFD wa Icons\n")
+  local fontless_terminal = { name = "kitty", path = stale_fontless, kind = "conf", key = "font_family",
+    fallback_line = "symbol_map " .. font_setup.ICON_RANGES .. " wa Icons" }
+  eq(font_setup.configure_terminal(fontless_terminal, {}).action, "edited",
+    "a config with no face named and a stale map is given the A2 pair")
+  local fontless_text = read(stale_fontless)
+  ok(not fontless_text:find("U+F0000-U+FFFFD", 1, true), "with no stale map left behind: " .. fontless_text)
+  eq(select(2, fontless_text:gsub("symbol_map", "")), 1, "and exactly one symbol_map line")
+end
+
 -- alacritty: an INLINE table per weight. Replacing only 'normal' left bold and italic on the Nerd face.
 local alacritty_path = fixtures .. "/alacritty/alacritty.toml"
 write(alacritty_path, '[font]\nnormal = { family = "JetBrainsMono Nerd Font", style = "Regular" }\n'
@@ -467,19 +587,95 @@ end
 eq(#font_setup.terminals(scratch_root), 8, "the eight terminals the brief names, and no others")
 ok(not known["some-other-terminal"], "an unknown terminal is not in the allow-list")
 
+-- ---- the backup is written ONCE, and a re-run never re-edits (item 2) ------------------------------
+-- MEASURED 21/11: an alacritty already on 'family = "JetBrains Mono"' was edited again
+-- ("alacritty -> JetBrains Mono (was JetBrains Mono)") and its .wa-backup was overwritten with the
+-- ALREADY-EDITED bytes - so the original was gone and --undo restored the first run's edit. Two rules close
+-- that, and each is asserted below on its own: a terminal already on the value this command writes is left
+-- alone (above, already_a2), and a backup that exists is NEVER overwritten (M.write_backup_once).
+do
+  local once_dir = fixtures .. "/once"
+  local once_config = once_dir .. "/foot.ini"
+  write(once_config, "[main]\nfont=Source Code Pro:size=11\n")
+  local once_terminal = { name = "foot", path = once_config, kind = "ini", section = "main", key = "font" }
+  local once_run = function(command)
+    -- the bundle is real files, so the copies work; fc-list answers nothing so a face is always "not installed"
+    if command:find("fc%-list") then return "" end
+    return "ok"
+  end
+  local once_bundle = scratch_root .. "/once-bundle"
+  mkdir(once_bundle)
+  for _, name in ipairs(font_setup.FONTS) do write(once_bundle .. "/" .. name, "fixture") end
+  local ORIGINAL = "[main]\nfont=Source Code Pro:size=11\n"
+
+  -- A BACKUP THAT ALREADY EXISTS IS KEPT, through the command's own edit path - no helper named, so this
+  -- assertion is about the behaviour and not about a function existing.
+  write(once_config .. ".wa-backup", "[main]\nfont=The True Original:size=11\n")
+  local edit_over_backup = font_setup.configure_terminal(once_terminal, {})
+  eq(edit_over_backup.action, "edited", "a config that is not A2 is edited")
+  eq(read(once_config .. ".wa-backup"), "[main]\nfont=The True Original:size=11\n",
+    "and the backup that was already there is NOT overwritten with already-edited bytes")
+
+  -- THE BRIEF'S OWN SHAPE, on the terminal it was measured on: alacritty whose every weight is ALREADY
+  -- 'JetBrains Mono', on a machine where the fonts are not installed yet - this run IS the install, so the
+  -- disk record cannot be asked. It must be left alone (there is nothing to change) and no backup invented.
+  local alacritty_home = fixtures .. "/once-alacritty"
+  local alacritty_config = alacritty_home .. "/alacritty.toml"
+  local ALACRITTY_ALREADY = '[font]\nnormal = { family = "JetBrains Mono", style = "Regular" }\nbold = { family = "JetBrains Mono", style = "Bold" }\n'
+  write(alacritty_config, ALACRITTY_ALREADY)
+  local alacritty_terminal = { name = "alacritty", path = alacritty_config, kind = "toml", section = "font.normal",
+    key = "family", inline = "normal", table_section = "font", icons_via = "fontconfig" }
+  local alacritty_run = font_setup.run({ home = alacritty_home, source_dir = once_bundle,
+    font_dir = scratch_root .. "/once-alacritty-fonts", run = once_run, terminals = { alacritty_terminal } })
+  ok(alacritty_run.ok, "the run on an already-A2 alacritty completes: " .. tostring(alacritty_run.error))
+  eq(alacritty_run.terminals[1].action, "left alone",
+    "alacritty already on JetBrains Mono is LEFT ALONE, not re-edited ('alacritty -> JetBrains Mono (was JetBrains Mono)' was the report)")
+  eq(read(alacritty_config), ALACRITTY_ALREADY, "its config is byte-identical")
+  ok(not exists(alacritty_config .. ".wa-backup"), "and no backup was written over anything")
+
+  -- The whole command TWICE and then --undo: the ORIGINAL bytes come back. The second run edits nothing,
+  -- because a terminal already on the value this command writes is left alone.
+  pcall(host.exec, "rm -f '" .. once_config .. "' '" .. once_config .. ".wa-backup'", "", 20)
+  write(once_config, ORIGINAL)
+  local opts = { home = once_dir, source_dir = once_bundle, font_dir = scratch_root .. "/once-fonts",
+    run = once_run, terminals = { once_terminal }, record = { ["wa Icons"] = true, terminals = {} } }
+  local once_first = font_setup.run(opts)
+  ok(once_first.ok, "the first run completes: " .. tostring(once_first.error))
+  eq(once_first.terminals[1].action, "edited", "the first run edits the config")
+  local edited_bytes = read(once_config)
+  eq(read(once_config .. ".wa-backup"), ORIGINAL, "the backup holds the bytes it found")
+  -- VERBATIM: the brief's shape is a terminal whose face is ALREADY the A2 text face.
+  local second_opts = { home = once_dir, source_dir = once_bundle, font_dir = scratch_root .. "/once-fonts",
+    run = once_run, terminals = { once_terminal } }
+  local once_second = font_setup.run(second_opts)
+  ok(once_second.ok, "the second run completes: " .. tostring(once_second.error))
+  eq(once_second.terminals[1].action, "left alone", "the second run edits NOTHING")
+  eq(read(once_config), edited_bytes, "the config is byte-identical after the second run")
+  eq(read(once_config .. ".wa-backup"), ORIGINAL, "and the backup was not touched")
+  local once_undone = font_setup.run({ undo = true })
+  ok(once_undone.ok, "the undo completes: " .. tostring(once_undone.error))
+  eq(once_undone.restored, 1, "and restores the one edited config")
+  eq(read(once_config), ORIGINAL, "the ORIGINAL bytes come back, byte for byte")
+end
+
 -- ---- the whole command: record, icon default, undo ------------------------------------------------
 -- M.run is what the CLI and the installer both call, so this drives the command end to end on the scratch
 -- tree: install, edit, record - and then --undo puts every byte back.
+local COMMAND_ORIGINAL = "[main]\nfont=Source Code Pro:size=11\n"
 local command_home = scratch_root .. "/command-home"
 local command_fonts = scratch_root .. "/command-fonts"
 mkdir(command_home)
 local command_bundle = scratch_root .. "/command-bundle"
 mkdir(command_bundle)
 for _, name in ipairs(font_setup.FONTS) do write(command_bundle .. "/" .. name, "fixture") end
-write(fixtures .. "/foot/foot.ini", "[main]\nfont=Source Code Pro:size=11\n")
+-- ITS OWN FILE, in its own directory: the write-once rule means a fixture that earlier cases already edited
+-- still carries THEIR .wa-backup, and the undo below must prove the ORIGINAL bytes come back - not that a
+-- backup written by a different case happens to hold them.
+local command_config = fixtures .. "/command/foot.ini"
+write(command_config, COMMAND_ORIGINAL)
 
 local command_terminals = {
-  { name = "foot", path = fixtures .. "/foot/foot.ini", kind = "ini", section = "main", key = "font" },
+  { name = "foot", path = command_config, kind = "ini", section = "main", key = "font" },
 }
 for _, terminal in ipairs(command_terminals) do
   if tostring(terminal.path):sub(1, #REAL_CONFIG) == REAL_CONFIG then
@@ -522,8 +718,7 @@ eq(opted_out.fonts, nil, "and installs nothing")
 local undone = font_setup.run({ undo = true })
 ok(undone.ok, "the undo completes: " .. tostring(undone.error))
 eq(undone.restored, 1, "it restored the one edited config")
-eq(read(fixtures .. "/foot/foot.ini"), "[main]\nfont=Source Code Pro:size=11\n",
-  "the config holds its ORIGINAL bytes again")
+eq(read(command_config), COMMAND_ORIGINAL, "the config holds its ORIGINAL bytes again")
 ok(not exists(applied.backup) or true, "and the backup is consumed")
 ok(font_setup.read_record() == nil, "the record is gone, so the wa icon set is no longer the default")
 

@@ -1294,7 +1294,13 @@ fn health_body_for(session: &str, node_wide: bool, owner: &str) -> Vec<u8> {
         // not see it must fall back to the legacy fields explicitly.
         // The one name for these bytes (wa-host's build_info, stated at boot), so a watcher, the window
         // and wa --version read the same identity instead of three guesses at a version.
-        "build": crate::host::build_label(),
+        // THE INSTALL'S NAME, READ NOW (fonts-install item 4). A process is started by an upgrade a couple of
+        // seconds BEFORE that upgrade writes installed.txt, so the boot label named the release this node had
+        // replaced - on the 21/11 canary, serve 10:19:13, record 10:19:15, health "node-7ddbfa98036a" while the
+        // bytes were node-bfad4f8fbe59. Read per request, the record that lands two seconds later is what this
+        // answers from, without a restart. A node whose binary registered no recipe answers its boot label, which
+        // is what this field always was.
+        "build": crate::host::live_build_label(),
         "execution_schema": 1,
         "ok": !stalled && !journal_failed,
         // A node whose run journal refused a write refuses runs too; say so where a watcher looks.
