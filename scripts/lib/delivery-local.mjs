@@ -1,6 +1,7 @@
 // Local evidence never claims publication. Runtime root is WASM_AGENT_HOME/.wasm-agent.
 import fs from 'node:fs';
 import path from 'node:path';
+import {underTemp} from './temp-roots.mjs';
 import os from 'node:os';
 import {DatabaseSync} from 'node:sqlite';
 import {spawnSync} from 'node:child_process';
@@ -18,8 +19,8 @@ export function bindingSource(sessionDb) {
   const root=path.resolve(process.env.WASM_AGENT_HOME || process.env.USERPROFILE || process.env.HOME,'.wasm-agent');
   if(sessionDb) {
     // Explicit rehearsal only: scratch DB and repository must both be under OS temp.
-    const file=real(sessionDb),temp=real(os.tmpdir());
-    if(!file.startsWith(temp+path.sep))throw Error('private_session_db_required');
+    const file=real(sessionDb);
+    if(!underTemp(file))throw Error('private_session_db_required');
     return {kind:'private-fixture',published:false,file};
   }
   return {kind:'runtime',root,file:path.join(root,'memory.db')};
@@ -32,7 +33,7 @@ export function managedLocal(repo, session, tip, sessionDb, branch=null) {
   if(branch && branch!==expected)throw Error('local_owner_mismatch');
   if(!row || row.workspace_required!==1 || row.workspace_state!=='allocated' || row.workspace_branch!==expected)throw Error('local_workspace_binding_mismatch');
   const tree=real(row.worktree);
-  if(source.kind==='private-fixture' && (!real(repo).startsWith(real(os.tmpdir())+path.sep)||!tree.startsWith(real(os.tmpdir())+path.sep)))throw Error('private_repository_required');
+  if(source.kind==='private-fixture' && (!underTemp(repo)||!underTemp(tree)))throw Error('private_repository_required');
   if(common(tree)!==common(repo))throw Error('local_repository_mismatch');
   if(git(tree,'symbolic-ref','--short','HEAD')!==expected || git(tree,'rev-parse',`refs/heads/${expected}`)!==tip)throw Error('local_tip_moved');
   const body=git(tree,'show','-s','--format=%B',tip).trimEnd().split(/\r?\n/).pop();
