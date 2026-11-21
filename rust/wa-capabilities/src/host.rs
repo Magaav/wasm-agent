@@ -3780,10 +3780,20 @@ fn handle_mouse(state: &mut ConsoleInput, event: wa_term::selection::Mouse) {
     // (wa_term::keymap, the Mouse surface) - the same table /keybindings prints. A press a link
     // claims is a link copy because the table lists LinkCopy before the transcript's selection.
     match event {
-        Mouse::WheelUp | Mouse::WheelDown => {
-            let up = matches!(event, Mouse::WheelUp);
+        Mouse::WheelUp(row, _) | Mouse::WheelDown(row, _) => {
+            let up = matches!(event, Mouse::WheelUp(..));
             for gesture in keymap::gestures(Pose::Wheel) {
                 if let Gesture::Wheel = gesture {
+                    // The pointer is over the input box and its draft has more rows than it shows:
+                    // the wheel is the box's (Victor 21/11). Anywhere else, or a draft that fits,
+                    // it is the transcript's as before.
+                    let over_box = state.nav.is_none() && state.editor.as_ref().and_then(|input| input.box_rows())
+                        .is_some_and(|(top, bottom)| row >= top && row <= bottom);
+                    if over_box && state.editor.as_mut().is_some_and(|input| input.wheel(up, 3)) {
+                        let frame = layout_frame(state);
+                        let _ = wa_term::terminal_editor::write(&frame);
+                        return;
+                    }
                     clear_selection(state);
                     state.transcript.page(if up { 3 } else { -3 });
                     return;

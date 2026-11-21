@@ -32,7 +32,7 @@ pub const DISABLE: &str = "\x1b[?1006l\x1b[?1003l\x1b[?1002l";
 pub const MOTION: usize = 35;
 
 #[derive(Debug, PartialEq, Clone, Copy)]
-pub enum Mouse { Press(usize, usize), Drag(usize, usize), Release(usize, usize), Motion(usize, usize), WheelUp, WheelDown, Other }
+pub enum Mouse { Press(usize, usize), Drag(usize, usize), Release(usize, usize), Motion(usize, usize), WheelUp(usize, usize), WheelDown(usize, usize), Other }
 
 /// Take every complete SGR mouse report (`ESC [ < b ; x ; y M|m`) out of `bytes`, returning the
 /// bytes that were not mouse reports and the reports in order. An incomplete report at the very end
@@ -62,8 +62,8 @@ fn decode(params: &[u8], press: bool) -> Mouse {
     let mut parts = text.split(';').map(|p| p.parse::<usize>().unwrap_or(0));
     let (button, x, y) = (parts.next().unwrap_or(0), parts.next().unwrap_or(1).max(1), parts.next().unwrap_or(1).max(1));
     match (button, press) {
-        (64, true) => Mouse::WheelUp,
-        (65, true) => Mouse::WheelDown,
+        (64, true) => Mouse::WheelUp(y, x),
+        (65, true) => Mouse::WheelDown(y, x),
         (0, true) => Mouse::Press(y, x),
         (32, true) => Mouse::Drag(y, x),
         (MOTION, true) => Mouse::Motion(y, x),
@@ -178,7 +178,7 @@ mod tests {
     fn mouse_reports_are_taken_out_of_the_input_and_the_rest_is_kept() {
         let (rest, events, pending) = take(b"a\x1b[<0;5;3M\x1b[<32;9;4M\x1b[<0;9;4mb\x1b[<64;1;1M");
         assert_eq!(rest, b"ab");
-        assert_eq!(events, vec![Mouse::Press(3, 5), Mouse::Drag(4, 9), Mouse::Release(4, 9), Mouse::WheelUp]);
+        assert_eq!(events, vec![Mouse::Press(3, 5), Mouse::Drag(4, 9), Mouse::Release(4, 9), Mouse::WheelUp(1, 1)]);
         assert!(pending.is_empty());
         let (rest, events, pending) = take(b"x\x1b[<0;5");
         assert_eq!((rest, events.len(), pending), (b"x".to_vec(), 0, b"\x1b[<0;5".to_vec()), "a split report waits for the rest");

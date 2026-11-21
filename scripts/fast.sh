@@ -811,6 +811,10 @@ check install-front-door bash scripts/test-install.sh
   # against a local SSE fixture, and reads the rows back. A row of this run for the same reason
   # fence-card-pty is one: a view change cannot be judged by a Lua double alone.
   WA_BIN="$bin" check run-live-pty node scripts/test-run-live-pty.mjs
+  # THE WINDOW'S CHROME (change/tui-chrome, Victor 21/11): the input box grows to max(3, 30% of the
+  # window), scrolls with the transcript's scrollbar and takes the wheel when the pointer is over it.
+  # The real binary in a private tmux pty, as the two rows above.
+  WA_BIN="$bin" check tui-chrome-pty node scripts/test-tui-chrome-pty.mjs
   # The cutover exporter (docs/WHATSAPP-CUTOVER.md): a synthetic whatsmeow store in, the wacore
   # device record out, plus the guard rails around a live state directory. Seconds, no phone.
   check whatsapp-adopt node --test scripts/test-whatsapp-adopt.mjs
