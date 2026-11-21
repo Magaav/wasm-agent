@@ -1250,6 +1250,14 @@ body.node-offline .composer textarea::placeholder { color: #d29922; }
   overflow-x: auto;
 }
 .msg .body pre code { background: none; padding: 0; font-size: 12px; }
+/* The run tool's SCRIPT, while the model writes it: the code-mode band, not a fenced excerpt. It is
+   drawn line by line as the deltas arrive, so it must not jump when a line lands (pre, no wrap) and
+   must read as one block (no border of its own - the band is the block). */
+.msg .body wa-run-code pre.run-code-script {
+  margin: 0 0 var(--space) 0; padding: 6px 8px; white-space: pre; overflow-x: auto;
+  border: none; border-left: 2px solid var(--line); border-radius: 0;
+  background: #0d1117; font-family: var(--font-mono, ui-monospace, monospace); font-size: 12px;
+}
 /* A fenced block carries its own copy control: always visible (touch has no hover),
    pinned top-right, with the first code line kept clear of it. */
 .msg .body .code-wrap { position: relative; }
