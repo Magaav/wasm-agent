@@ -22,11 +22,16 @@ records `rustc -vV`'s hash in `child/toolchain`). Conditions: same toolchain, no
 now (its build lock is probed non-destructively), and **reflink or nothing** - when the filesystem cannot
 share blocks the build says so and starts cold. There is no full-copy fallback.
 
-A fourth condition was found by this item own test (**f09659bf**): an artifact from the future is not a
-seed. Cargo calls an artifact current by comparing mtimes, so a sibling built *after* the tree sources
-were written hands over artifacts cargo keeps - and the seeded tree ran the sibling code (`base=1` where
-its own library answered `base=2`). The cutoff is now the tree newest source mtime; a sibling holding
-anything newer is passed over, an older sibling is still used, and an unreadable cutoff builds cold.
+The condition a seed must meet is **the same source**, not "the newest sibling" (commit **8da03e49**).
+The first rule was "the seed must be older than every source of this tree", and it was wrong in the way a
+test is for: `scripts/test-build-seed.mjs` produced a tree whose library answered 2 that had been seeded from a
+sibling answering 1, and it printed `base=1` - cargo called the seeded artifacts current and the tree ran the
+SIBLING's code. Mtimes of single files are the wrong question (cargo writes its own files into the child,
+so a sibling is always newer than something). The rule is now: a child records the source identity it was
+built from - the commit plus the SHA-256 of `git status --porcelain`, the whole tracked state, untracked files
+included - and only a sibling with the SAME identity is a seed. Identical source means a rebuild would
+produce exactly those bytes; anything else (another commit, an uncommitted edit, a new file) is a cold
+build, by name. Unknown is not yes: a tree whose identity cannot be read (no git) builds cold.
 
 ### Before/after, measured through the shipped path
 
@@ -38,14 +43,27 @@ Real path (`wa_build_run`, 10 jobs, shipping code-mode assets, two worktrees of 
 | cold (`wt-m1`) | **135** | 255 |
 | seeded (`wt-m2`, from `wt-m1`) | **61** | 33 |
 
-Both binaries report `wasm-agent f09659bf`, and the seeded log says
+The same pair for the **whole workspace** - the binaries the fast path runs, `cargo build --release` of
+`rust/Cargo.toml`, 280 units:
+
+| build | seconds | units compiled |
+| --- | --- | --- |
+| cold | **149** | 280 |
+| seeded from the same-source sibling | **65** | 44 |
+
+Both binaries report `f09659bf` (the tree they were built from), and the seeded log says
 `onebuild: seeded wt-m2-... from wt-m1-...`. The reflink copy itself: 1.4 GB in **105 ms** against the
-74 s it saves. A child seeded across commits (tree at 4169ab79, seed built at 3bd47f4d) built in **61 s**
-and correctly reported `4169ab79`.
+84 s it saves.
+
+A measurement that does NOT survive the source-identity rule, kept so nobody quotes it: before that rule
+(commit 8da03e49), a tree at 4169ab79 seeded from a sibling built at 3bd47f4d built in 61 s and its binary
+correctly reported 4169ab79. That is exactly the case the rule now refuses (artifacts from another source
+are never reused), so cross-commit seeding no longer saves compile time. The saving above is between trees
+of the SAME source, which is what a landing tree, a mission worktree and a retried build of one commit are.
 
 ### Correctness, kept as tests
 
-`scripts/test-build-seed.mjs` (24 checks, wired into **scripts/test.sh:205** and **scripts/fast.sh:745**).
+`scripts/test-build-seed.mjs` (23 checks, wired into **scripts/test.sh:205** and **scripts/fast.sh:745**).
 It builds two tiny two-member workspaces whose library answers a different number in each, and asserts
 the seeded tree **runs and carries its own code**: the changed crate marker string is read out of the
 *binary file*, and the origin binary does not contain it. It drives the refusals (no toolchain record,
@@ -93,25 +111,29 @@ the caller `CARGO_BUILD_JOBS` wins, and a non-cargo command line is never queued
 
 ## What was not measured
 
-* **The land gate end to end.** No landing ran from this mission (commit locally, never push). Its two
-  compiles are the two measured above, so a landing inherits the 135 -> 61 s seed saving, but the gate
-  own wall clock was not run here and is not claimed.
-* **A full `scripts/fast.sh` run** against a cold worktree. The fast path compile row goes through the
-  same helpers and is seeded the same way, and `scripts/test-build-seed.mjs` builds binaries through
-  that path, but the whole run was not timed.
+* **The land gate end to end.** No landing ran from this mission (commit locally, never push), so its wall
+  clock is not claimed. What follows from the measurements is narrower than "a land is 84 s faster": the
+  source-identity rule (8da03e49) means a landing of a NEW commit starts cold, because no sibling was built
+  from that source. What seeding does help there is a retried land of the same commit, and any worktree of
+  a commit some other child already built - and the whole workspace pair above (149 -> 65 s) is that case
+  measured, not an estimate of the gate.
+* **A full `scripts/fast.sh` run** against a cold worktree. The workspace build the fast path binary
+  needs IS measured above (149 s cold, 65 s seeded) and the compile row goes through the same helpers, but
+  the whole run was not timed.
 * **Concurrent-build temperature.** The 20/11 load-105 incident is quoted from the brief; this mission
   measured single builds and the lock serialisation, not a reproduced fleet storm.
 
 ## Texts to approve
 
-1. `onebuild: seeded %s from %s (%s, cp -a --reflink=always: shared blocks, cargo rebuilds only what differs)`
+1. `onebuild: seeded %s from %s (%s, cp -a --reflink=always: the same source, so cargo rebuilds only what differs)`
 2. `onebuild: reflink is not supported on this filesystem, so %s starts cold instead of being seeded from %s (never a full copy)`
-3. `onebuild: %s starts cold: the newest source mtime of this tree cannot be read, so no seed can be shown to predate it`
-4. `onebuild: %s starts cold: the sibling %s holds an artifact newer than this tree's newest source, and cargo would keep it instead of rebuilding (measured: a seeded tree ran the sibling code)`
-5. `onebuild: waited %ss for the node build lock (another build on this node was running; one heavy build at a time)`
-6. `onebuild: waited %ss for the node build lock and gave up; building anyway (WA_BUILD_HOST_LOCK_WAIT raises the wait)`
-7. `onebuild: flock is not available, so this build is not queued behind other builds`
-8. `onebuild: cannot name this build toolchain (rustc -vV failed), so %s starts cold`
+3. `onebuild: %s starts cold: the tree this build is for is unknown, so no sibling can be shown to hold its source`
+4. `onebuild: %s starts cold: the source identity of %s cannot be read (git), so no sibling can be shown to hold its source`
+5. `onebuild: cannot name this build toolchain (rustc -vV failed), so %s starts cold`
+6. `onebuild: waited %ss for the node build lock (another build on this node was running; one heavy build at a time)`
+7. `onebuild: waited %ss for the node build lock and gave up; building anyway (WA_BUILD_HOST_LOCK_WAIT raises the wait)`
+8. `onebuild: flock is not available, so this build is not queued behind other builds`
+9. `onebuild: CARGO_TARGET_DIR was named by the caller: %s (the one build root is %s)` (unchanged)
 
 ## Pre-existing failures
 
