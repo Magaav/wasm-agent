@@ -705,11 +705,25 @@ function M.run(argv)
     return true
   end
 
+  -- A settled pending handle wakes this session (21/11). The node's tick does the same thing on the
+  -- same rows, and both are safe: the wake's id comes from the handle, so whichever gets there first
+  -- schedules it and the other insert is a no-op (lua/core/handle_wake.lua). The sweep is a status read
+  -- per open handle, so it runs on the same slow tick as the restart check, never per keystroke.
+  local handle_swept = 0
+  local function sweep_handles_if_due()
+    local now = host.now()
+    if now - handle_swept < cli_restart.CHECK_SECONDS then return end
+    handle_swept = now
+    local ok, why = pcall(function() return dofile("lua/core/handle_wake.lua").sweep() end)
+    if not ok and host.log then pcall(host.log, "handle wake sweep failed: " .. tostring(why)) end
+  end
+
   local function read_line()
     view:prompt()
     while true do
       restart_if_due()
       catch_up()
+      sweep_handles_if_due()
       -- A due self-wake is a turn this session promised itself; run it now rather than at the next
       -- line the reader types. A wake that brings no line redraws the prompt after its own turn.
       if wake_if_due() then view:prompt() end

@@ -1310,6 +1310,63 @@ function M.announce(scope)
   return out
 end
 
+-- ---------------------------------------------------------------------------- waking the session
+-- A handle settles when its work ends, and the script that started it is usually long gone by then. Until
+-- 21/11 that answer reached the model only if it happened to run another script in the same scope
+-- (announce); now the node WAKES the session instead (docs/CODEMODE.md, "A settled handle wakes the
+-- session"). This function is the settle half, and it is a read: poll every open handle of one scope
+-- with NO wait, and hand each one that just settled to on_settled - exactly once, because the record is
+-- marked the moment the wake is scheduled durably.
+--
+-- on_settled(record, value) returns true when the wake exists; the record is then marked woke_at AND
+-- reported, so a later script's pending_settled does not say the same thing a second time. A false or a
+-- raised callback leaves the record alone, and the next sweep tries again: an unscheduled wake is not a
+-- lost answer, it is a retry.
+function M.wake_settled(dispatch, opts, scope, on_settled)
+  local index = M.open(scope)
+  if index.count == 0 then return 0, index end
+  local woken, changed = 0, false
+  for _, record in pairs(index.ops) do
+    if open_record(record) and record.woke_at == nil
+      and (record.state == "running" or record.state == "unknown") then
+      local executor = executor_of(record)
+      if executor then
+        local state = executor_poll(executor, dispatch, opts, record, 0)
+        if type(state) == "table" and state.settled == true then
+          settle(executor, dispatch, opts, scope, index, record, state)
+          changed = true
+          local value = record.result and select(1, M.retained(record.op, scope)) or nil
+          local called, scheduled = pcall(on_settled or function() return false end, record, value)
+          if called and scheduled then
+            record.woke_at = now_seconds()
+            -- The wake IS the report: a second one from the next script would be the same news twice.
+            record.reported = true
+            woken = woken + 1
+          end
+        end
+      end
+    end
+  end
+  if changed or woken > 0 then M.save(scope, index) end
+  return woken, index
+end
+
+-- The handles a scope still holds, oldest first, as the wake row lists them: what is still running after
+-- a wake, with how long it has been running. A read.
+function M.open_handles(scope, index)
+  index = index or M.open(scope)
+  local now, out = now_seconds(), {}
+  for _, record in pairs(index.ops or {}) do
+    if open_record(record) and (record.state == "running" or record.state == "unknown") then
+      out[#out + 1] = { op = record.op, tool = record.tool, state = record.state,
+        age_s = math.max(0, math.floor(now - (tonumber(record.started_at) or now))),
+        reason = record.reason, progress = record.progress }
+    end
+  end
+  table.sort(out, function(a, b) return tostring(a.op) < tostring(b.op) end)
+  return out
+end
+-- in one place.
 -- `searchTools("select:wait")` (and pending, cancel) answer these: the shape a script should expect,
 -- in one place.
 M.WAIT_HELP = {
