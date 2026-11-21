@@ -90,7 +90,9 @@ check(type(entry) == 'table' and entry.state == 'failed',
   'the handle SETTLES instead of vanishing: ' .. json.encode(entry or {}):sub(1, 300))
 check(tostring(entry.reason) == 'operation_queue_timeout',
   'with the supervisor own name as the reason: ' .. tostring(entry.reason))
-local result = type(entry.result) == 'table' and entry.result or {}
+check(type(entry) == 'table' and type(entry.result) == 'nil',
+  'the wait answers the flat shape: the result is not nested under a result key: ' .. json.encode(entry or {}):sub(1, 300))
+local result = entry
 check(tostring(result.error) == 'operation_queue_timeout',
   'and the result carries the same name: ' .. json.encode(result):sub(1, 300))
 check(tostring(result.queue_state) == 'timed_out',

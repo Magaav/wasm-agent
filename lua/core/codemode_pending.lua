@@ -913,6 +913,41 @@ local function handle(record, waited_s, state)
   return out
 end
 
+-- ONE RESULT SHAPE (21/11). A call that settles inside its wait answers the tool's own result - stdout,
+-- code, ok - and wait(op) on the very same handle used to answer it one level down, under result. Two
+-- shapes for one call is a cost the model paid: it read r.result.stdout on a flat answer, got nothing,
+-- and spent three calls working out which shape it was holding. So a settled entry carries the tool's
+-- result fields at the TOP LEVEL and the handle's own facts beside them:
+--
+--   {op, tool, state = "done", ...the tool's result fields...}
+--
+-- A failed entry is the same shape with state = "failed" and reason; a pending entry has no result to
+-- flatten and keeps {op, tool, state = "pending", waited_s, progress}. The handle's own fields win where
+-- a tool result uses the same word (an operation result's own state - "completed" - is kept as
+-- state_name), so a script never has to guess which state it is reading. A list wait answers a list of
+-- exactly these, in the order asked, and a settled handle's row in pending_settled carries the same
+-- shape with result_sha256 added for results.get().
+function M.flat_entry(op, tool, state, result, reason, retained)
+  local entry = {}
+  if type(result) == "table" then
+    for key, value in pairs(result) do entry[key] = value end
+  elseif result ~= nil then
+    -- An executor that answers a bare value (nothing in this build does): keep it, under a name that
+    -- cannot be mistaken for a handle field.
+    entry.value = result
+  end
+  if state == "done" or state == "failed" then
+    if entry.state ~= nil and entry.state ~= state then entry.state_name = entry.state end
+    entry.state = state
+    if entry.ok == nil then entry.ok = state == "done" end
+  end
+  entry.op = op
+  if entry.tool == nil then entry.tool = tool end
+  if retained ~= nil then entry.result_sha256 = retained end
+  if reason ~= nil then entry.reason = tostring(reason) end
+  return entry
+end
+
 -- ---------------------------------------------------------------------------- the call itself
 -- Where the loop dispatches a tool, it calls this instead. No executor, or a tool whose executor does
 -- not apply to these arguments, takes exactly the old path: `dispatch(name, params, raw)`.
@@ -1106,8 +1141,10 @@ function M.wait(dispatch, opts, asked, wait_opts)
           local result = settle(executor, dispatch, opts, scope, index, record, state)
           record.reported = true
           M.save(scope, index)
-          entry = { op = id, tool = record.tool, state = record.state, result = result }
-          if record.state ~= "done" then entry.reason = record.error end
+          -- The same flat shape a direct call answers (M.flat_entry): the tool's result fields at the
+          -- top level, the handle's facts beside them.
+          entry = M.flat_entry(id, record.tool, record.state, result,
+            record.state ~= "done" and record.error or nil)
           if until_kind == "any" then stop_waiting = true end
         else
           record.progress = executor_progress(executor, dispatch, opts, record, state)
@@ -1254,8 +1291,15 @@ function M.announce(scope)
   local out, changed = {}, false
   for _, record in pairs(index.ops) do
     if record.state ~= "running" and record.state ~= "unknown" and record.reported == false then
-      out[#out + 1] = { op = record.op, tool = record.tool, state = record.state, ok = record.ok == true,
-        result = record.result, error = record.error }
+      -- The value, not only its hash: an announced handle is read by a model that never called wait() on
+      -- it, so the row must be the answer itself (the same flat shape), with the retained hash beside it
+      -- for a later results.get(). A handle whose blob cannot be read is announced by name instead of
+      -- silently answering an empty object.
+      local value, why = M.retained(record.op, scope)
+      local entry = M.flat_entry(record.op, record.tool, record.state, value,
+        record.state ~= "done" and record.error or nil, record.result)
+      if value == nil and why then entry.result_error = tostring(why) end
+      out[#out + 1] = entry
       record.reported = true
       changed = true
     end
@@ -1270,7 +1314,7 @@ end
 -- in one place.
 M.WAIT_HELP = {
   name = "wait",
-  description = "Resume one pending call, or a batch of up to 20, that answered {state:\"pending\", op}. Answers one entry per op in the order asked: {state:\"done\", op, tool, result} with the call's normal result, {state:\"failed\", op, reason} when it failed, {state:\"pending\", op, progress, waited_s} while it is still running. It dispatches nothing and never re-runs an effect, so it batches with anything. wait_s defaults to 60 and is capped at 300 (a script has no clock for a wait to outlive). A wait on one op that never settles ends the script by name (codemode_wait_never_settles) after " .. tostring(M.PENDING_ANSWER_LIMIT) .. " waits that each spent their whole budget - 30 s or more - WITHOUT PROGRESS: no change in that op's output, counters or state. A shorter poll does not count, and any progress resets the count. The handle survives, so the next script resumes it. until:\"any\" stops waiting at the first op that settled and still answers every op, finished or not, so a step can drop the finished, add new calls and wait again - a work pool that grows and shrinks, e.g. const open = (await pending()).ops.map(o => o.op); const done = (await Promise.all(open.map(op => wait(op, {wait_s:0})))).filter(e => e.state !== 'pending').map(e => e.op);",
+  description = "Resume one pending call, or a batch of up to 20, that answered {state:\"pending\", op}. Answers one entry per op in the order asked, in the SAME shape a direct call answers: a settled op answers the call's own fields at the top level (stdout, code, ok, ...) with op, tool and state:\"done\" beside them; a failed one the same with state:\"failed\" and reason; a still-running one {state:\"pending\", op, tool, waited_s, progress}. It answers results, not handles - there is no result key to reach through. It dispatches nothing and never re-runs an effect, so it batches with anything. wait_s defaults to 60 and is capped at 300 (a script has no clock for a wait to outlive). A wait on one op that never settles ends the script by name (codemode_wait_never_settles) after " .. tostring(M.PENDING_ANSWER_LIMIT) .. " waits that each spent their whole budget - 30 s or more - WITHOUT PROGRESS: no change in that op's output, counters or state. A shorter poll does not count, and any progress resets the count. The handle survives, so the next script resumes it. until:\"any\" stops waiting at the first op that settled and still answers every op, finished or not, so a step can drop the finished, add new calls and wait again - a work pool that grows and shrinks, e.g. const open = (await pending()).ops.map(o => o.op); const done = (await Promise.all(open.map(op => wait(op, {wait_s:0})))).filter(e => e.state !== 'pending').map(e => e.op);",
   code = "const first = await tools.bash({command:'bash scripts/fast.sh'});\nif (first.state === 'pending') {\n  const [log, resumed] = await Promise.all([tools.read({path:'fast.log'}), wait(first.op, {wait_s:120})]);\n  return {resumed: resumed.state, tail: first.progress && first.progress.tail};\n}\nreturn {code: first.code};",
 }
 

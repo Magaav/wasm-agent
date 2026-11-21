@@ -163,7 +163,13 @@ never told "still running" with nothing it can do about it.
   a margin)`. A wait never outlives the script that started it; a `wait_s` that is not a number is
   refused by name (`invalid_wait_s`), never quietly replaced with the default.
 * `wait(op | [ops], {wait_s, until:"all"|"any"})` is the one resume: 1..20 ops, one entry per op in the
-  order asked (`done` with the call's normal result, `failed` with `reason`, `pending` with `progress`).
+  order asked, **in the same shape a direct call answers** (21/11, "one result shape"). A settled entry
+  carries the tool's own result fields at the top level - `stdout`, `code`, `ok`, ... - with the
+  handle's facts beside them: `op`, `tool`, `state:"done"` (or `state:"failed"` plus `reason`), and
+  `state_name` when the tool's own result also used the word `state` (an operation says "completed").
+  There is no `result` key to reach through: the same call settles inline as `{stdout, code, ok, ...}` and
+  collected as `{stdout, code, ok, ..., op, state}` - which is the whole point. A pending entry has no
+  result to flatten and stays `{state:"pending", op, tool, waited_s, progress}`.
   A failed entry carries `reason`, never `error`: news about a call is an answer a script branches on,
   not a refusal that throws. It is a **read** - it dispatches nothing, holds no lock or lease - so the
   guest batches it with anything: `Promise.all([wait(a), tools.read({path}), wait(b)])`.
@@ -182,7 +188,9 @@ never told "still running" with nothing it can do about it.
   `pending` with the reason rather than hanging or claiming `failed`, and a resume never re-runs an
   effect.
 * No orphans: an op nobody resumed still settles, and is reported **once**, on the next script of that
-  scope (`pending_settled`), the same exactly-once idea the Sentinel's deploy outcome uses.
+  scope (`pending_settled`), the same exactly-once idea the Sentinel's deploy outcome uses. Each row is
+  the answer itself in that same flat shape, with `result_sha256` beside it for a later
+  `results.get(op)` - the model reading an announced handle never has to reach through a hash either.
 
 **The executors** (`M.EXECUTORS` in `lua/core/codemode_pending.lua`) are how a call becomes a handle,
 and they are the whole difference between "can be resumed" and "cannot":

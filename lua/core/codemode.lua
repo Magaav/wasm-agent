@@ -271,6 +271,14 @@ local function host_global(name, params, calls, selected, lookup, ctx, journal, 
     local value
     if name == 'wait' then
       value = pending_calls.wait(popts.dispatch, popts, asked, type(params) == 'table' and params[2] or nil)
+      -- A wait answers ENTRIES, and since the one-result-shape change (21/11) a settled entry IS the
+      -- tool's own result - so a failed call's own 'error' field sits at the entry's top level, where
+      -- the generic 'a global that answers an error failed' rule below would read it as this call's
+      -- refusal and throw. What a script must be able to do is branch on a failed entry, so the only
+      -- answer that throws is a real REFUSAL of the wait itself (a malformed request), and a refusal
+      -- is the one answer with no 'state': an entry always carries one.
+      local refusal = type(value) == 'table' and value.state == nil and value.error ~= nil
+      return value, not refusal
     elseif name == 'pending' then
       -- The whole pool this scope holds: a read, so a later step or turn needs no memory of handles.
       value = pending_calls.list(popts.dispatch, popts)

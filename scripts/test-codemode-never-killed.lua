@@ -43,10 +43,10 @@ const long = await tools.bash({command:"sleep 70; echo done", wait_s:0});
 const pair = await wait([a.op, b.op], {wait_s:40});
 const early = await wait(long.op, {wait_s:5});
 const resumed = await wait(long.op, {wait_s:200});
-return {pair: pair.map(e => ({state: e.state, stdout: e.result && e.result.stdout})),
+return {pair: pair.map(e => ({state: e.state, stdout: e.stdout})),
   early_state: early.state, early_op: early.op,
-  resumed_state: resumed.state, resumed_stdout: resumed.result && resumed.result.stdout,
-  long_elapsed: resumed.result && resumed.result.elapsed_ms};
+  resumed_state: resumed.state, resumed_stdout: resumed.stdout,
+  long_elapsed: resumed.elapsed_ms};
 ]==]
 local result,elapsed=run(script)
 check(result.ok==true,'a script that waits is not killed: '..shown(result,elapsed))
@@ -93,7 +93,7 @@ check(spin_elapsed<25,'the CPU guard answers in seconds, not at a wall clock: '
 local paused,paused_elapsed=run([==[
 const started = await tools.bash({command:"sleep 5; echo ok", wait_s:0});
 const done = await wait(started.op, {wait_s:20});
-return {state: done.state, stdout: done.result && done.result.stdout};
+return {state: done.state, stdout: done.stdout};
 ]==], {timeout_ms=400})
 check(paused.ok==true,'a computing budget does not stop a script that is waiting: '..shown(paused,paused_elapsed))
 local paused_value=type(paused.value)=='table' and paused.value
