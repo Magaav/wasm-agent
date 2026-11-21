@@ -904,6 +904,8 @@ check module-report-selftest bash scripts/test-module-report.sh
 # second release build), and every duration goes through a portable clock. Static by design, so it runs
 # where the build rows themselves are skipped for want of a toolchain.
 check fast-build-timing bash scripts/test-fast-build-timing.sh
+# A short and a long spelling of one commit are one commit (deploy refused bcacbf38 vs bcacbf38eb3b, 21/11).
+check commit-id bash scripts/test-commit-id.sh
 
 # The measured build times of everything this run compiled, before the verdict, so the claim
 # and the numbers are one screen apart (no gate: scripts/lib/build-times.sh says why).
