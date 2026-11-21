@@ -66,6 +66,8 @@ make_release() { # dir release-id [with-fonts]
     # makes "a release that ships fonts.css must ship the files it names" a check with something to read.
     {
       printf '/* %s fonts.css */\n' "$id"
+      # Comments like the real ui/fonts.css carries: "fonts/" in prose is NOT a face (land249 refused every install).
+      printf '/* faces live under ui/fonts/, from the same bytes the terminal installs (assets/fonts/) */\n'
       for face in JetBrainsMono-Regular.ttf JetBrainsMono-Bold.ttf; do
         printf '@font-face { font-family: "JetBrains Mono"; src: url("fonts/%s") format("truetype"); }\n' "$face"
       done
