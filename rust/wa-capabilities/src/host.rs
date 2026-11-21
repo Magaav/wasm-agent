@@ -2541,6 +2541,25 @@ unsafe fn call_lua_stream_event(l: *mut LuaState, payload: &str) {
     lua_settop(l, base);
 }
 
+/// Hand ONE tool-call argument fragment to the running process as `tool_call_delta`.
+///
+/// A served run has an SSE sink, so its events go to the wire; the script being written belongs to the
+/// process that is decoding it (lua/core/agent.lua emits `run_code_delta` from these fragments), and a
+/// wire-only fact would leave every window without the stream. Same thread and same state as the model
+/// call, and an absent global is a no-op - a build whose Lua predates this keeps streaming to its sink.
+unsafe fn tool_call_delta_to_lua(l: *mut LuaState, index: usize, call_id: &str, name: &str, arguments: &str) {
+    if arguments.is_empty() {
+        return;
+    }
+    call_lua_stream_event(l, &json!({
+        "type": "tool_call_delta",
+        "index": index,
+        "call_id": call_id,
+        "name": name,
+        "arguments": arguments,
+    }).to_string());
+}
+
 /// Answers JSON text (one string the caller decodes with `lua/vendor/json.lua`), never a Lua table:
 /// `{status, content, commentary, tool_calls, termination, chunks, ...}` for a stream that ended, or
 /// `{error}` for one that could not be read. Same arguments as `host.http`, plus an optional fifth
@@ -2565,7 +2584,7 @@ pub extern "C-unwind" fn http_stream(l: *mut LuaState) -> c_int {
         unsafe { call_lua_stream_event(l, payload) }
     });
     let _forwarding = crate::serve::forward_events_to(forwarder);
-    let outcome = stream_completion(&method, &url, &headers, &body, first);
+    let outcome = stream_completion(l, &method, &url, &headers, &body, first);
     match outcome {
         Ok(value) => push_json(l, &value),
         Err(error) => push_json(l, &json!({"error": error})),
@@ -3082,7 +3101,7 @@ fn stall_marker(error: &ureq::Error, first_response_seconds: u64) -> Option<Stri
     }
 }
 
-fn stream_completion(method: &str, url: &str, headers: &[(String, String)], body: &str, first_response_seconds: u64) -> Result<Value, String> {
+fn stream_completion(l: *mut LuaState, method: &str, url: &str, headers: &[(String, String)], body: &str, first_response_seconds: u64) -> Result<Value, String> {
     use std::io::BufRead;
     let started = std::time::Instant::now();
     let mut ttft_ms: Option<u128> = None;
@@ -3248,18 +3267,22 @@ fn stream_completion(method: &str, url: &str, headers: &[(String, String)], body
                 let decision = &mut assembly.decisions[index];
                 if let Some(fragment) = fragment {
                     decision.absorb(&fragment);
-                    // The argument BYTES reach the view as they arrive, not only the bounded preview
-                    // a decision carries: the run tool's code argument is the script, and a reader
-                    // watching the model write it is the presentation this event exists for. It is
-                    // emitted beside the decision, never instead of it - a consumer that only knows
-                    // decision (the window's own row) keeps every field it had.
-                    crate::serve::write_event(&json!({
+                    // The argument BYTES reach the reader as they arrive, not only the bounded preview
+                    // a decision carries: the run tool's code argument is the script, and watching the
+                    // model write it is the presentation this event exists for. It is emitted beside
+                    // the decision, never instead of it - a consumer that only knows decision (the
+                    // window's own row) keeps every field it had.
+                    crate::serve::write_event_if_no_stream(&json!({
                         "type": "tool_call_delta",
                         "index": index,
                         "call_id": decision.display_id(index),
                         "name": decision.name,
                         "arguments": fragment,
                     }).to_string());
+                    // And the same fact reaches the RUNNING process, which is where the script is
+                    // decoded and the window is told: a served run has an SSE sink, so without this
+                    // the deltas would exist only on the wire a reconnecting client reads.
+                    unsafe { tool_call_delta_to_lua(l, index, &decision.display_id(index), &decision.name, &fragment); }
                 }
                 if let Some((display_id, previous)) = decision.publish_update(index) {
                     emit_decision(decision, &display_id, false, previous.as_deref());
@@ -5463,7 +5486,7 @@ mod decision_stream_tests {
         // The events the reader emits are captured in this call's own sink, which is why the
         // assertion below sees them and an outer sink would not.
         let events = crate::serve::capture_events(|| {
-            *result.borrow_mut() = stream_completion("POST", &format!("http://{address}/fixture"), &[], "{}", 0).unwrap();
+            *result.borrow_mut() = stream_completion(std::ptr::null_mut(), "POST", &format!("http://{address}/fixture"), &[], "{}", 0).unwrap();
         });
         server.join().unwrap();
         (result.into_inner(), events)
@@ -5781,7 +5804,7 @@ mod stream_tests {
         });
         let result = std::cell::RefCell::new(Value::Null);
         let events = crate::serve::capture_events(|| {
-            *result.borrow_mut() = stream_completion("POST", &format!("http://{address}/fixture"), &[], "{}", 0).unwrap();
+            *result.borrow_mut() = stream_completion(std::ptr::null_mut(), "POST", &format!("http://{address}/fixture"), &[], "{}", 0).unwrap();
         });
         server.join().unwrap();
         (result.into_inner(), events)
