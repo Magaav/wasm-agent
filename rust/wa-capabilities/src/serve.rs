@@ -1469,6 +1469,14 @@ impl Drop for ForwardGuard {
     }
 }
 
+/// `forward_event`, answering whether a forwarder took the event.
+fn forward_event_reached_process(payload: &str) -> bool {
+    if FORWARDING.with(|flag| flag.get()) { return false; }
+    if EVENT_FORWARDER.with(|cell| cell.borrow().is_none()) { return false; }
+    forward_event(payload);
+    true
+}
+
 /// Hand one event to the run's forwarder, if it has one. Never recurses into itself.
 fn forward_event(payload: &str) {
     if FORWARDING.with(|flag| flag.get()) {
@@ -1520,8 +1528,14 @@ impl Drop for SinkGuard {
 /// With no sink there is no event. A non-streaming run (the CLI's `/chat`) has no
 /// client, and a run whose node-thread is between requests has no client either - and that is
 /// the point: there is deliberately no process-wide fallback to leak into.
-pub fn write_event(payload: &str) {
-    if crate::subagents::capture_event(payload) { return; }
+pub fn write_event(payload: &str) { let _ = write_event_forwarded(payload); }
+
+/// `write_event`, answering whether the event was ALSO handed to the running process itself (a run
+/// with no sink - the CLI's - forwards every event to its own Lua). A caller that would hand the same
+/// fact to the process directly asks this first: handed over twice, a tool call's argument fragment
+/// is decoded twice and the script the window streams stops at its first piece (Victor 21/11).
+pub fn write_event_forwarded(payload: &str) -> bool {
+    if crate::subagents::capture_event(payload) { return false; }
     beat();
     CURRENT_RUN_ID.with(|id| { if id.get() != 0 { record_run_event(id.get(),payload); } });
     ACTIVE_SINK.with(|cell| {
@@ -1542,8 +1556,9 @@ pub fn write_event(payload: &str) {
         }
     });
     if ACTIVE_SINK.with(|cell| cell.borrow().is_none()) {
-        forward_event(payload);
+        return forward_event_reached_process(payload);
     }
+    false
 }
 
 /// Run `f` collecting any events it emits, and return them as an SSE body. Used for a run
