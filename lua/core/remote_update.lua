@@ -449,7 +449,9 @@ local function request_release(record)
     -- install path already reads (scripts/deploy.sh does the same), set on the command that runs, and only
     -- when the request was forced.
     'export WA_UPGRADE_FORCE_REASON=' .. quote((record.forced == true) and (record.override_reason or record.force_note or '') or ''),
-    'WA_UPGRADE_VIA=remote-update.sh release',
+    -- ...and WHO ASKED, exported for the same reason: a var=value prefix on its own line runs `value` as a
+    -- command, and upgrade.sh reads this one to record the caller in installed.txt.
+    'export WA_UPGRADE_VIA=remote-update.sh',
     'exec bash ' .. quote(script) .. ' ' .. quote(record.target_commit),
   }
   return request_run(record, 'release', body, 'release install')
