@@ -943,12 +943,24 @@ function M.footer(run, ctx)
   if run.prompt or run.completion then
     parts[#parts + 1] = string.format("\226\134\145%s \226\134\147%s", M.tokens(run.prompt), M.tokens(run.completion))
   end
+  -- THE SET'S OWN GLYPHS, where the row has an icon's worth of fact (review finding 4, 21/11).
+  --
+  -- This footer was written pi-style, plain words and no glyph at all, so 'wa chat --once' drew NOT ONE
+  -- wa Icons code point: the run showed "1 round · 0 tools · 1.7s · ↑3.7k ↓3 · CH79.7% · ctx 0.4%/1.0M"
+  -- while the session bar two lines above used the set. Victor's decision is that wa's rows wear its
+  -- icons - the cache rate and the context are exactly the two facts the session bar already draws with
+  -- them - so the same two facts take the same glyphs here. The ARROWS stay: they are text (UP/DOWN of a
+  -- count), which the module's own rule keeps glued to their number.
   if run.cached and run.cached > 0 and run.prompt and run.prompt > 0 then
-    parts[#parts + 1] = string.format("CH%.1f%%", 100 * run.cached / run.prompt)
+    -- No "CH" beside the glyph: the session bar draws this same fact as '<cache glyph> 75.20%', and an
+    -- icon that needs a word to explain it is two facts where the set has one.
+    parts[#parts + 1] = string.format("%s%s%.1f%%", GLYPH.cache, GAP, 100 * run.cached / run.prompt)
   end
   if run.cost and run.cost > 0 then parts[#parts + 1] = string.format("$%.4f", run.cost) end
   if ctx.context and ctx.context > 0 and ctx.budget and ctx.budget > 0 then
-    parts[#parts + 1] = string.format("ctx %.1f%%/%s", 100 * ctx.context / ctx.budget, M.tokens(ctx.budget))
+    local percent = 100 * ctx.context / ctx.budget
+    -- The ball is the one M.context_ball chooses, so the glyph and the number beside it are one reading.
+    parts[#parts + 1] = string.format("%s%sctx %.1f%%/%s", M.context_ball(percent), GAP, percent, M.tokens(ctx.budget))
   end
   return table.concat(parts, " \194\183 ")   -- ·
 end
