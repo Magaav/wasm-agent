@@ -568,6 +568,15 @@ gate_run bash scripts/test-deploy-components-shipped.sh
 # side (verify, cache, the refusals, the disk-conditioned fallback, and the order of the calls inside
 # scripts/deploy.sh) and the publish side (--check, --from, every way a manifest can be wrong).
 gate_run bash scripts/test-deploy-node-binaries.sh
+# THE VERIFIED BYTES MUST BE INSTALLABLE (21/11, hand fix 3 of the node-7ddbfa98036a rollout). A release asset
+# arrives 0644; wa_node_binary_download verified the signature, every sha256 and every size and left the bit off,
+# and scripts/upgrade.sh refuses a candidate without it ("no new binary to install") - so release-install.sh, the
+# one path for a node with no tree and no toolchain, could never install what it had just verified. It also
+# re-downloaded the whole release into the same cache on every run. This test serves a signed fixture release
+# from a local directory, downloads it with the real lib, asserts the +x and the unchanged bytes, hands the
+# candidate to the REAL upgrade.sh as its own process, and proves a complete cache entry is reused rather than
+# fetched again (and that a hand-edited entry is not).
+gate_run bash scripts/test-release-install-exec.sh
 gate_run bash scripts/test-node-binaries.sh
 # The glibc floor at both ends: the bytes an artifact needs against the libc the installing host has
 # (18/11, mail: a published binary needed GLIBC_2.39 on a glibc 2.35 node and was down two days). Hermetic -
