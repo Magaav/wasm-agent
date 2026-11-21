@@ -730,7 +730,16 @@ function M.list(opts)
   -- other, so a second instance inside a probe child fanned out again - recursively, 1,653 processes,
   -- 23 GB. `_G.WA_IN_PROBE_CHILD` is shared by every instance in the process, and an inherited env var
   -- carries it into a child before its first line runs.
-  if not opts.cached and opts.live_capabilities ~= false and not M._in_probe_child
+  -- A TEST PROCESS IS NOT A NODE (item 2 of the harness-fixes-2 round). The fan-out below starts one
+  -- `wa nodes probe <peer>` CHILD per peer against the real fleet. Every `scripts/test-*.lua` row that
+  -- called list() unstubbed therefore started real probe children from a test (measured 20/11:
+  -- test-network-roster-offline, test-remote-refusals), which is a live fleet call the rules forbid. The
+  -- process can say what it is (host.script_run, item 1), so a script run refuses to probe unless the row
+  -- ASKS for it: `nodes.list{ probe = true }`. An allow-list, not a block-list - a row that tests probing
+  -- is the only kind that opts in, and every other row gets the refusal for free.
+  local probing_why = nil
+  if host.script_run and host.script_run() and opts.probe ~= true then probing_why = "probe_disabled_script_run" end
+  if not opts.cached and opts.live_capabilities ~= false and probing_why == nil and not M._in_probe_child
      and not _G.WA_IN_PROBE_CHILD and host.getenv(M.PROBE_CHILD_ENV) ~= '1' then
     -- opts.peers is the roster, for a caller that has one already (a test drives the fan-out with a
     -- stubbed host, and a real caller passes nothing and gets the rendezvous' answer as before).
@@ -769,6 +778,12 @@ function M.list(opts)
         if answer then
           peer.capabilities = answer.capabilities
           peer.capabilities_reason = answer.reason
+        elseif probing_why ~= nil then
+          -- REFUSED, BY NAME. A script run did not ask to probe, so neither a child is started nor the
+          -- peer is asked in-process (that is a live network call). The field carries the reason, as it
+          -- does for every other unasked peer: a reader can tell "not asked" from "asked, no answer".
+          peer.capabilities = nil
+          peer.capabilities_reason = probing_why
         else
           -- No child could be started for this peer (no runtime_info, no operation host): the probe
           -- still happens, in this process, and says the same named reason it always did.

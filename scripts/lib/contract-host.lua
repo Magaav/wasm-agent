@@ -155,11 +155,38 @@ function M.new(spec)
     return json.encode(answer)
   end
 
+  -- host.operation: THE ONE CAPABILITY A TEST MUST NOT GET FOR FREE (item 2 of the harness-fixes-2 round).
+  --
+  -- It is how a probe child is started (`wa nodes probe <peer>`, lua/core/nodes.lua probe_peers), and every
+  -- row that called nodes.list() unstubbed started REAL probe children against the live fleet. So this fake
+  -- REFUSES to start anything and COUNTS the attempt: a row asserts `starts == 0`, which is a measured fact
+  -- and not a promise. A row that tests probing opts in by scripting its own host.operation, as the
+  -- nodes-probe rows do - and then the count is that row's business, not the fixture's.
+  --
+  -- Only the shapes the real host answers are here (await/read/list/cancel of an id it refused), so a row
+  -- cannot pass against the fake and fail against the node for a reason the fake invented.
+  local starts, operations = 0, {}
+  api.operation = function(action, request)
+    local req = request and json.decode(request) or {}
+    if type(req) ~= "table" then req = {} end
+    if action == "start" then
+      starts = starts + 1
+      return json.encode({ ok = false, error = "operation_disabled_for_test", action = action,
+        detail = "a test process starts no child process: a probe that needs one opts in explicitly (scripts/lib/contract-host.lua)" })
+    elseif action == "list" then
+      return json.encode({ operations = operations })
+    end
+    -- await/read/cancel name an operation no caller here owns: the real host refuses these by name too.
+    return json.encode({ ok = false, error = "operation_not_found_or_not_owned", action = tostring(action),
+      id = tostring(req.id or "") })
+  end
+
   api.spec = nil -- never a capability: the spec is the test's, not the host's
 
   -- What the test did, for its own assertions (never reached through a capability name the host has).
   M.observed = M.observed or {}
-  return api, { slept_ms = function() return slept_ms end, files = files }
+  return api, { slept_ms = function() return slept_ms end, files = files,
+    operation_starts = function() return starts end }
 end
 
 -- <host_table> -> the observations the contract test compares between the fake and the real host.
