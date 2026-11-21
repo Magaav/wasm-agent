@@ -222,7 +222,11 @@ local codeact_ok,codeact_reply=pcall(function() return agent.new(codeact_sid,fun
 host.http_stream=previous_stream
 check(codeact_ok,'the default-surface run completed: '..tostring(codeact_reply))
 local codeact_declared=codeact_sent[1] and #((codeact_sent[1].tools) or {}) or -1
-check(codeact_declared==0,'the run declared no tool at all ('..codeact_declared..'), so it ran on the CodeAct surface')
+local codeact_name=''
+if codeact_declared>0 and codeact_sent[1].tools and codeact_sent[1].tools[1] and codeact_sent[1].tools[1]['function'] then
+  codeact_name=tostring(codeact_sent[1].tools[1]['function'].name)
+end
+check(codeact_declared==1 and codeact_name=='run','the run declared the one door ('..codeact_declared..': '..codeact_name..'), so it acts through run(code=...)')
 local codeact_system=''
 for _,message in ipairs((codeact_sent[1] or {}).messages or {}) do if message.role=='system' then codeact_system=message.content end end
 check(codeact_system:find(agent.PREAMBLE_GUIDELINE,1,true)~=nil,'preamble guideline on the DEFAULT CodeAct surface')
