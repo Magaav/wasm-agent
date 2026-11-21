@@ -25,6 +25,16 @@ local M = {}
 
 -- The faces this command installs, in the order the record lists them.
 M.FONTS = { "waIcons-Regular.ttf", "JetBrainsMono-Regular.ttf", "JetBrainsMono-Bold.ttf" }
+
+-- THE CODE POINTS wa Icons ACTUALLY CARRIES, as ranges - NOT the whole of plane 15.
+-- Review finding 1, 21/11: the setup wrote 'symbol_map U+F0000-U+FFFFD wa Icons' for kitty, which hands
+-- EVERY plane-15 code point - every Nerd md-* icon any other program uses - to a face that has fourteen
+-- glyphs, so those other icons turned into tofu. The map names only what the font has.
+--
+-- Derived from assets/fonts/waIcons.json (the built font's own cmap), and asserted equal to it by
+-- scripts/test-font-setup.lua: a glyph added to the builder and not to this line is a failing test, not a
+-- silent half-map.
+M.ICON_RANGES = "U+F012C,U+F01BC,U+F0450,U+F051B,U+F0766,U+F0A9E-U+F0AA5,U+F0DFA"
 M.ICON_FAMILY = "wa Icons"
 M.TEXT_FAMILY = "JetBrains Mono"
 
@@ -103,9 +113,10 @@ function M.terminals(home)
     { name = "alacritty", path = config_home .. "/alacritty/alacritty.toml", kind = "toml", section = "font.normal", key = "family",
       inline = "normal", table_section = "font", icons_via = "fontconfig" },
     { name = "kitty", path = config_home .. "/kitty/kitty.conf", kind = "conf", key = "font_family",
-      fallback_line = "symbol_map U+F0000-U+FFFFD wa Icons" },
+      fallback_line = "symbol_map " .. M.ICON_RANGES .. " wa Icons" },
+    -- ghostty names the mapping itself: font-codepoint-map = <ranges>=<family> (review finding 2).
     { name = "ghostty", path = config_home .. "/ghostty/config", kind = "conf", key = "font-family",
-      fallback_line = 'font-family = "wa Icons"' },
+      fallback_line = "font-codepoint-map = " .. M.ICON_RANGES .. "=wa Icons" },
     { name = "wezterm", path = config_home .. "/wezterm/wezterm.lua", kind = "lua-wezterm" },
     -- Windows Terminal keeps one JSON file per user, and its default profile font is a key in it.
     { name = "windows-terminal", path = M.windows_terminal_path(home), kind = "json-wt" },
@@ -392,10 +403,10 @@ end
 
 -- THE A2 PAIR FOR A CONFIG THAT NAMES NO FONT, in each terminal's own syntax. Not an edit of somebody's
 -- value: an addition, in the form that terminal documents for a fallback face.
---   kitty     font_family JetBrains Mono  +  symbol_map U+F0000-U+FFFFD wa Icons
+--   kitty     font_family JetBrains Mono  +  symbol_map <ICON_RANGES> wa Icons
 --   alacritty [font.normal] family = "JetBrains Mono"  (alacritty takes icon fallbacks from fontconfig,
 --             where wa Icons is installed; there is no per-code-point key in its config)
---   ghostty   font-family = "JetBrains Mono" then font-family = "wa Icons" (a repeated key is ghostty's
+--   ghostty   font-family = "JetBrains Mono" + font-codepoint-map = <ICON_RANGES>=wa Icons (ghostty maps the code points itself;
 --             documented way to add a fallback face)
 function M.pair_for_fontless(terminal, text)
   text = tostring(text or "")
@@ -405,9 +416,9 @@ function M.pair_for_fontless(terminal, text)
     return out .. lines .. "\n"
   end
   if terminal.kind == "conf" and terminal.key == "font_family" then
-    return add("font_family JetBrains Mono\nsymbol_map U+F0000-U+FFFFD wa Icons")
+    return add("font_family JetBrains Mono\nsymbol_map " .. M.ICON_RANGES .. " wa Icons")
   elseif terminal.kind == "conf" and terminal.key == "font-family" then
-    return add('font-family = "JetBrains Mono"\nfont-family = "wa Icons"')
+    return add('font-family = "JetBrains Mono"\nfont-codepoint-map = ' .. M.ICON_RANGES .. '=wa Icons')
   elseif terminal.kind == "toml" then
     return add('[font.normal]\nfamily = "JetBrains Mono"')
   end
@@ -417,9 +428,9 @@ end
 -- One phrase per terminal for the dry-run line, so a plan reads as clearly as an edit.
 function M.pair_summary(terminal)
   if terminal.kind == "conf" and terminal.key == "font_family" then
-    return "font_family JetBrains Mono + symbol_map U+F0000-U+FFFFD wa Icons"
+    return "font_family JetBrains Mono + symbol_map " .. M.ICON_RANGES .. " wa Icons"
   elseif terminal.kind == "conf" and terminal.key == "font-family" then
-    return 'font-family = "JetBrains Mono" + font-family = "wa Icons"'
+    return 'font-family = "JetBrains Mono" + font-codepoint-map = ' .. M.ICON_RANGES .. '=wa Icons'
   elseif terminal.kind == "toml" then
     return '[font.normal] family = "JetBrains Mono"'
   end

@@ -13,6 +13,7 @@ local refusal = scratch.guard("test-font-setup.lua")
 if refusal then print("REFUSED " .. refusal); os.exit(2) end
 
 local failed, checks = 0, 0
+local json = dofile("lua/vendor/json.lua")
 local function ok(condition, label)
   checks = checks + 1
   if not condition then print("FAIL " .. label); failed = failed + 1 end
@@ -366,13 +367,13 @@ ok(not claimed_none, "a dry run that plans an edit must NOT say 'no terminal con
 local kitty_path = fixtures .. "/kitty/kitty.conf"
 write(kitty_path, "# Font\n# font_family JetBrainsMono Nerd Font\nfont_size 12\n")
 local kitty = { name = "kitty", path = kitty_path, kind = "conf", key = "font_family",
-  fallback_line = "symbol_map U+F0000-U+FFFFD wa Icons" }
+  fallback_line = "symbol_map " .. font_setup.ICON_RANGES .. " wa Icons" }
 eq(font_setup.current_font(kitty, read(kitty_path)), nil, "a commented-out font names no face")
 local kitty_row = font_setup.configure_terminal(kitty, {})
 eq(kitty_row.action, "edited", "a terminal with no face named is given the A2 pair explicitly")
 local kitty_text = read(kitty_path)
 ok(kitty_text:find("font_family JetBrains Mono", 1, true) ~= nil, "the text face is written")
-ok(kitty_text:find("symbol_map U+F0000-U+FFFFD wa Icons", 1, true) ~= nil,
+ok(kitty_text:find("symbol_map " .. font_setup.ICON_RANGES .. " wa Icons", 1, true) ~= nil,
   "and the ICON face, in kitty's own fallback syntax")
 eq(font_setup.configure_terminal(kitty, {}).action, "left alone", "a second run changes nothing")
 
@@ -381,14 +382,14 @@ eq(font_setup.configure_terminal(kitty, {}).action, "left alone", "a second run 
 local ghostty_path = fixtures .. "/ghostty/config"
 write(ghostty_path, 'font-family = "JetBrainsMono Nerd Font"\nfont-style = Regular\nfont-size = 9\n')
 local ghostty = { name = "ghostty", path = ghostty_path, kind = "conf", key = "font-family",
-  fallback_line = 'font-family = "wa Icons"' }
+  fallback_line = "font-codepoint-map = " .. font_setup.ICON_RANGES .. "=wa Icons" }
 eq(font_setup.current_font(ghostty, read(ghostty_path)), "JetBrainsMono Nerd Font",
   "ghostty's font-family is read through its equals sign")
 local ghostty_row = font_setup.configure_terminal(ghostty, {})
 eq(ghostty_row.action, "edited", "ghostty's Nerd face is switched")
 local ghostty_text = read(ghostty_path)
 ok(ghostty_text:find('font-family = "JetBrains Mono"', 1, true) ~= nil, "to JetBrains Mono")
-ok(ghostty_text:find('font-family = "wa Icons"', 1, true) ~= nil, "with wa Icons as the repeated fallback")
+ok(ghostty_text:find("font-codepoint-map = " .. font_setup.ICON_RANGES .. "=wa Icons", 1, true) ~= nil, "with wa Icons mapped to exactly its code points")
 ok(ghostty_text:find("font-size = 9", 1, true) ~= nil, "and the rest of the file intact")
 eq(font_setup.configure_terminal(ghostty, {}).action, "left alone",
   "a second run changes nothing: the icon face is on its own line, and the check reads the WHOLE config")
@@ -541,6 +542,27 @@ eq(font_setup.cli({ "--nonsense" }), 2, "an unknown flag exits 2")
 local icons = dofile("lua/core/icons.lua")
 eq(icons.marker_path(), font_setup.record_path(),
   "the record the setup writes is the record the icon default reads")
+
+-- THE ICON MAP NAMES EXACTLY THE FONT'S CODE POINTS (21/11). kitty's symbol_map and ghostty's
+-- font-codepoint-map hand these code points to wa Icons; the first version handed it all of plane 15, so
+-- every other program's Nerd md-* icon became tofu. The map is expanded and compared with the built
+-- font's own manifest, so a glyph added to the builder and not to the map is a failing check.
+do
+  local manifest = json.decode(host.read_file("assets/fonts/waIcons.json"))
+  local want = {}
+  for _, glyph in ipairs(manifest.glyphs) do want[#want + 1] = tonumber(glyph.codepoint:sub(3), 16) end
+  table.sort(want)
+  local got = {}
+  for part in font_setup.ICON_RANGES:gmatch("[^,]+") do
+    local lo, hi = part:match("^U%+(%x+)%-U%+(%x+)$")
+    if not lo then lo = part:match("^U%+(%x+)$"); hi = lo end
+    for cp = tonumber(lo, 16), tonumber(hi, 16) do got[#got + 1] = cp end
+  end
+  table.sort(got)
+  eq(table.concat(got, ","), table.concat(want, ","),
+    "ICON_RANGES is exactly the code points wa Icons carries (" .. #want .. ")")
+  ok(not font_setup.ICON_RANGES:find("F0000", 1, true), "the map never claims the whole of plane 15")
+end
 
 print(string.format("font setup: %s (%d checks, %d failed, 0 skipped)",
   failed == 0 and "ok" or "FAILED", checks, failed))
