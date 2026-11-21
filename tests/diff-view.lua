@@ -13,11 +13,16 @@
 -- It writes into the change store, so it refuses unless its home is a scratch one.
 local paths = dofile("lua/core/paths.lua")
 local home = paths.home()
-local env_home = host.getenv("WASM_AGENT_HOME") or ""
-local scratch = env_home:match("^/tmp/") ~= nil or env_home:match("^/var/folders/") ~= nil
-  or (host.getenv("TMPDIR") or ""):match("^/tmp/") ~= nil
-if not scratch or env_home == "" then
-  print("FAIL diff-view needs a scratch WASM_AGENT_HOME, home is " .. tostring(home))
+-- The store this test writes into must be a scratch one, and the oracle is the store the host
+-- actually resolved (paths.home), not an environment variable: the host rewrites HOME to the data
+-- directory, and a harness that passes only --db sets no WASM_AGENT_HOME at all (measured 20/11 in
+-- scripts/test-discriminates.sh, where an env-var guard refused the gate's own scratch home and the
+-- refusal was counted as a discriminating failure). A live store is the operator's own
+-- ~/.wasm-agent and never lives under a temp directory.
+local store = tostring(home)
+local tmp = host.getenv("TMPDIR") or "/tmp"
+if not (store:sub(1, #tmp + 1) == tmp .. "/" or store:match("^/tmp/") or store:match("^/var/folders/")) then
+  print("FAIL diff-view needs a scratch store, this one is " .. store)
   os.exit(1)
 end
 
@@ -167,8 +172,11 @@ ok(slim_widest <= 40, "and every row of the narrow rendering fits 40 cells (wide
 -- The fake above pins the decisions; this pins that a REAL git answers the same way through the real
 -- host. It writes into its own directory inside the scratch home, so it cannot see or touch the
 -- repository this test runs in.
-local scratch_root = (host.getenv("WASM_AGENT_HOME") or ""):gsub("/%.wasm%-agent$", "") .. "/diff-view-git"
-if host.exec and host.paths and scratch_root:match("^/tmp/") then
+-- Beside the store, never inside it: the store is content-addressed files, and a git work
+-- tree among them would be snapshot by a later run. A plain path, because git reports its own
+-- resolved root and a dot-dot would make the two disagree.
+local scratch_root = "/tmp/" .. (store:match("([^/]+)/*$") or "diff-view") .. "-git"
+if host.exec and scratch_root:match("^/tmp/") then
   local function sh(command)
     local ok, raw = pcall(host.exec, command, scratch_root, 20,
       '{"tool":"bash"}')
@@ -194,7 +202,7 @@ if host.exec and host.paths and scratch_root:match("^/tmp/") then
   -- fills the gate home, and the next run would snapshot the previous one.
   sh("cd .. && rm -rf " .. scratch_root)
 else
-  print("FAIL the real-git check needs a scratch WASM_AGENT_HOME and host.exec")
+  print("FAIL the real-git check needs a scratch store and host.exec, store is " .. store)
   failed = failed + 1
 end
 -- ---- a created file -----------------------------------------------------------
