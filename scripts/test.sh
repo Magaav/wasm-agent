@@ -2460,6 +2460,12 @@ gate_run bash scripts/test-deploy-self-ship.sh
 # ledger did not see it either, because it only looked at .mjs/.cjs/.js test scripts. Both halves are here
 # now: the row below, and the ledger's own extension to .sh test files.
 gate_run bash scripts/test-deploy-runtime-recheck.sh
+# WHICH node a deploy runs, and a named refusal when there is none (21/11, hand fix 1 of the node-7ddbfa98036a
+# rollout). A remote "wa update <node> --binary" runs deploy.sh from the node's serve operation, whose PATH has no
+# user Node install, and step 0c died with "node: command not found" - so this runs the REAL deploy.sh as a
+# separate process with a PATH that carries no node at all, and observes which node ran through a wrapper's
+# marker file. It also refuses by name (node_runtime_missing) and names every place it looked.
+gate_run bash scripts/test-node-runtime.sh
 # The residue pass on the deploy record: the on-main rule may not be waived by WA_INSTALL_DIR (it was), the
 # knob is read by value (0 used to be ON), and a killed run's staged copies are collected under a bound
 # (a 248 MB sentinel image could sit there for ever). check-deploy-docs fails when the doc, the skill and the

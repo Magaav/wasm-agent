@@ -86,7 +86,7 @@ WA_LIB="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/lib/service-target.sh"
 # whoever asked for it sees the same progress, and a missing toolchain is named (or fetched) before a build.
 # node-pins is the NODE's own pin record (what a rollback left here), read before anything is replaced:
 # a deploy that builds first and asks later has already spent the build (round-3 item 6).
-for wa_lib_part in build-status build-requirements deploy-components node-binaries glibc-floor retire-unshipped install-record node-pins runtime-binding; do
+for wa_lib_part in build-status build-requirements deploy-components node-binaries glibc-floor retire-unshipped install-record node-pins runtime-binding node-runtime; do
   [ -f "$(dirname "$0")/lib/$wa_lib_part.sh" ] && . "$(dirname "$0")/lib/$wa_lib_part.sh"
 done
 # The one writer of installed.txt and the one ancestry verdict (scripts/lib/install-record.sh). A deploy
@@ -98,6 +98,17 @@ command -v wa_status >/dev/null 2>&1 || { wa_status() { :; }; wa_status_follow()
 # A deploy without the lib still writes a usable record: no phases is `[]`, never an absent field a reader
 # has to distinguish from an old record's.
 command -v wa_phases_json >/dev/null 2>&1 || wa_phases_json() { printf '[]'; }
+# WHICH node, and a named refusal when there is none (scripts/lib/node-runtime.sh, 21/11). A deploy run from
+# a node's own serve operation inherits that service's PATH, which does not carry the user's Node install: step
+# 0c then died with "line 436: node: command not found" and the operator's only fix was to hand-install node
+# where the service happens to look. One resolver for every node call below, and the same PATH for the
+# helpers this deploy sources (install-default-policy.sh, build-requirements.sh) and the children it starts.
+command -v wa_node_path >/dev/null 2>&1 \
+  || { echo "deploy: refused(node_runtime_lib_missing): scripts/lib/node-runtime.sh is not beside this deploy, so no step that runs node can find one and nothing can say which node ran. Nothing was built and nothing was installed." >&2; exit 2; }
+wa_node_path >/dev/null \
+  || { printf 'deploy: refused(node_runtime_missing): %s\n' "$(wa_node_refusal)" >&2; exit 2; }
+NODE_BIN="$(wa_node_require)" \
+  || { printf 'deploy: refused(node_runtime_missing): %s\n' "$(wa_node_refusal)" >&2; exit 2; }
 EXPLICIT_INSTALL="${WA_INSTALL_DIR:-}"
 PORT="${WA_PORT:-8799}"
 CLIENT_PORT="${WA_CLIENT_PORT:-8800}"
@@ -433,7 +444,7 @@ if [ -z "${WA_RUNTIME_WORKTREE:-}" ]; then
     BINDING_PREFLIGHT_SCRIPT="$(cygpath -w "$BINDING_PREFLIGHT_SCRIPT")"
     BINDING_PREFLIGHT_REPO="$(cygpath -w "$BINDING_PREFLIGHT_REPO")"
   fi
-  if ! WA_RUNTIME_PREFLIGHT="$(node "$BINDING_PREFLIGHT_SCRIPT" "$BINDING_PREFLIGHT_REPO" 2>&1)"; then
+  if ! WA_RUNTIME_PREFLIGHT="$("$NODE_BIN" "$BINDING_PREFLIGHT_SCRIPT" "$BINDING_PREFLIGHT_REPO" 2>&1)"; then
     fail "canonical runtime binding refused before anything was built: $WA_RUNTIME_PREFLIGHT"
   fi
   note "runtime worktree resolved before the build: $WA_RUNTIME_PREFLIGHT"
@@ -1011,7 +1022,7 @@ if [ "$REQUIRE_PROOF" = "1" ] && [ -f "$ROOT/rust/Cargo.toml" ]; then
     PROOF_REPO="$(cygpath -w "$PROOF_REPO")"; PROOF_SCRIPT="$(cygpath -w "$PROOF_SCRIPT")"
   fi
   # 2 is "no complete identical-tree receipt", and on this path that is a refusal, not a note.
-  GATE_PROOF="$(node "$PROOF_SCRIPT" "$PROOF_REPO" "$SOURCE_TREE" 2>&1)" || true
+  GATE_PROOF="$("$NODE_BIN" "$PROOF_SCRIPT" "$PROOF_REPO" "$SOURCE_TREE" 2>&1)" || true
   if printf '%s' "$GATE_PROOF" | grep -q '"verified":true'; then
     note "release proof: this tree carries complete exact-tree verification for $SOURCE_TREE: $GATE_PROOF"
   else
@@ -1195,7 +1206,7 @@ mkdir -p "$BUILD_LOGS" 2>/dev/null || BUILD_LOGS="$(mktemp -d)"
 CARGO_LOG_ARG="$BUILD_LOGS/wa-host.log"; command -v cygpath >/dev/null 2>&1 && CARGO_LOG_ARG="$(cygpath -w "$CARGO_LOG_ARG")"
 wa_phase compiling
 wa_status_follow "$BUILD_LOGS/wa-host.log" compiling
-WA_BUILD_CARGO_LOG="$CARGO_LOG_ARG" node "$CODEMODE_BUILD_SCRIPT" build "$CODEMODE_BUILD_ROOT" > "$BUILD_LOGS/wa-host.receipt.json" \
+WA_BUILD_CARGO_LOG="$CARGO_LOG_ARG" "$NODE_BIN" "$CODEMODE_BUILD_SCRIPT" build "$CODEMODE_BUILD_ROOT" > "$BUILD_LOGS/wa-host.receipt.json" \
   || { tail -25 "$BUILD_LOGS/wa-host.log" 2>/dev/null | sed 's/^/  cargo: /' >&2; fail "native code-mode shipping build/readiness failed; nothing installed"; }
 # END native code-mode shipping build.
 wa_status_unfollow
@@ -1499,7 +1510,7 @@ if [ -z "${WA_RUNTIME_WORKTREE:-}" ]; then
   if command -v cygpath >/dev/null 2>&1; then
     BINDING_SCRIPT="$(cygpath -w "$BINDING_SCRIPT")"; BINDING_REPO="$(cygpath -w "$BINDING_REPO")"
   fi
-  WA_RUNTIME_WORKTREE="$(node "$BINDING_SCRIPT" "$BINDING_REPO" 2>&1)" \
+  WA_RUNTIME_WORKTREE="$("$NODE_BIN" "$BINDING_SCRIPT" "$BINDING_REPO" 2>&1)" \
     || fail "canonical runtime binding refused: $WA_RUNTIME_WORKTREE"
   # The same question asked again, now that the build is done, and compared with the preflight answer: the
   # binding must still be clean and equal to main, and it must still be the tree step 0c chose. Comparison
@@ -2055,6 +2066,11 @@ ship_file "$ROOT/scripts/lib/build-requirements.sh" "$INSTALL_DIR/scripts/lib/bu
 # ...and the runtime-binding re-check: an installed copy of this script is what the sentinel runs, and it has to
 # be able to ask the binding question a second time (review of 18/11, item 9).
 ship_file "$ROOT/scripts/lib/runtime-binding.sh" "$INSTALL_DIR/scripts/lib/runtime-binding.sh" "scripts/lib/runtime-binding.sh beside deploy.sh (the install-time binding re-check)"
+# ...and the node resolver: an installed copy of this script runs as the sentinel's neighbour, with the
+# service's PATH - the PATH that carried no user node and made step 0c die with "node: command not found" on
+# mail and nextcloud (21/11). Without this line the installed copy refuses(node_runtime_lib_missing) by name,
+# which is the right answer but leaves a tree-less node with no way to install at all.
+ship_file "$ROOT/scripts/lib/node-runtime.sh" "$INSTALL_DIR/scripts/lib/node-runtime.sh" "scripts/lib/node-runtime.sh beside deploy.sh (which node, and a named refusal when there is none)"
 
 ship_file "$ROOT/scripts/lib/deploy-components.sh" "$INSTALL_DIR/scripts/lib/deploy-components.sh" "scripts/lib/deploy-components.sh beside deploy.sh"
 # ...and the node-binary resolver, for the same reason the component lib is shipped: `request deploy` runs the
@@ -2251,7 +2267,7 @@ fi
 # above, with --force --reason if the operator gave one, so its own decision travels as this variable - the check
 # is not skipped, it is the same answer.
 WA_SHIP_REQUIRE_SHARED=1 WA_ALLOW_UNSHARED_SHIP="$([ "$UNSHARED_COMMIT" = 1 ] && [ "${FORCE:-0}" = 1 ] && [ -n "${REASON:-}" ] && echo 1 || echo 0)" \
-  node "$WAVE_SHIP" "$WAVE_ROOT" "$WAVE_INSTALL" || fail "node installed, but wave continuation scripts are not import-closed"
+  "$NODE_BIN" "$WAVE_SHIP" "$WAVE_ROOT" "$WAVE_INSTALL" || fail "node installed, but wave continuation scripts are not import-closed"
 
 record_installed
 echo "deploy: installed $COMMIT ($HASH)"
@@ -2267,7 +2283,7 @@ if command -v cygpath >/dev/null 2>&1; then
   PROOF_NODE_SCRIPT="$(cygpath -w "$PROOF_NODE_SCRIPT")"; PROOF_NODE_ROOT="$(cygpath -w "$PROOF_NODE_ROOT")"; PROOF_NODE_INSTALL="$(cygpath -w "$PROOF_NODE_INSTALL")"
 fi
 if [ -n "$EXPECTED_SHA" ]; then
-  node "$PROOF_NODE_SCRIPT" record "$PROOF_NODE_ROOT" "$PROOF_NODE_INSTALL" \
+  "$NODE_BIN" "$PROOF_NODE_SCRIPT" record "$PROOF_NODE_ROOT" "$PROOF_NODE_INSTALL" \
     || fail "final source/artifact/script/UI/process identity recording failed"
 fi
 # An old scripts/install.ps1 seeded <config>/AGENTS.md with the repo's own file, which the node now

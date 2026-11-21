@@ -307,6 +307,14 @@ end
 -- composed: the rendezvous deploy (`scripts/deploy-rendezvous.sh`), the binary-only node install
 -- (`scripts/deploy.sh` with WA_DEPLOY_PREBUILT_ONLY=1) and the rollback
 -- (`scripts/rollback-node.sh`). A master request is admitted or refused; it is never a relayed child shell.
+-- Where the installed scripts live on the peer. The same expression scripts/release-install.sh and
+-- request_release use, so a wrapper and the install it starts cannot disagree about the install directory.
+local function install_scripts(record)
+  local install = slashes(tostring(record.server.install or ''))
+  if install == '' then return '' end
+  return install .. '/scripts'
+end
+
 local function run_wrapper(label, body, record)
   local scripts = tostring(host.getenv('WA_SENTINEL_SCRIPTS') or '')
   if scripts == '' then
@@ -318,6 +326,20 @@ local function run_wrapper(label, body, record)
     '#!/usr/bin/env bash',
     '# written by lua/core/remote_update.lua for remote request ' .. record.id .. ' (' .. label .. ')',
     'set -euo pipefail',
+    -- THE NODE THE DEPLOY WILL RUN (21/11). This wrapper is executed from the sentinel's own environment,
+    -- whose PATH is the service's: it carries no user Node install, so step 0c of deploy.sh died with
+    -- "line 436: node: command not found" on mail and nextcloud and the remote update refused. The resolver
+    -- is the SAME one deploy.sh uses (scripts/lib/node-runtime.sh, beside the installed copy of the script
+    -- this wrapper execs), so there is one answer to "which node" and one refusal when there is none.
+    -- A resolver that finds nothing is not a failure here: deploy.sh refuses with node_runtime_missing, and
+    -- that refusal names every place it looked.
+    'for d in ' .. quote(slashes(install_scripts(record)) .. '/lib/node-runtime.sh') .. ' ' ..
+      quote(slashes(record.server.tree or '') .. '/scripts/lib/node-runtime.sh') .. '; do',
+    '  [ -f "$d" ] || continue',
+    '  . "$d" || continue',
+    '  wa_node_path >/dev/null 2>&1 || true',
+    '  break',
+    'done',
   }
   for _, line in ipairs(body) do lines[#lines + 1] = line end
   lines[#lines + 1] = ''

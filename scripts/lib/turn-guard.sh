@@ -17,8 +17,22 @@ turn_owner() {
     cmd=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)
     base=$(basename "${cmd%% *}" 2>/dev/null)
     if [ "$base" = "wa" ] || [ "$base" = "wa.exe" ]; then
-      case " $cmd " in
-        *" serve "*) echo node; return 0 ;;
+      # THE SUBCOMMAND, NOT A SUBSTRING OF THE WHOLE COMMAND LINE. Matching ' serve ' anywhere in the command
+      # line read any ancestor whose ARGUMENTS contained the word - measured 21/11: a chat whose mission brief
+      # says "serve operation" was read as a node turn, so a deploy started from that chat refused with
+      # "cannot deploy from a turn running on the node it would replace" while no node was involved. argv is a
+      # list, so the answer is the first token that is not an option.
+      # The first token that is not an option: a node started with flags before its subcommand is still a
+      # node, and a chat's own arguments (which may contain any word at all) are never reached.
+      local subcommand token
+      subcommand=""
+      for token in ${cmd#* }; do
+        case "$token" in -*) continue ;; esac
+        subcommand="$token"
+        break
+      done
+      case "$subcommand" in
+        serve) echo node; return 0 ;;
         *) found=cli ;;
       esac
     fi
