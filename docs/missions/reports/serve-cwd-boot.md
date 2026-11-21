@@ -109,11 +109,23 @@ install. The probe now runs the candidate from a fixed cwd:
 
     ( cd "$INSTALL_DIR" 2>/dev/null || cd "${TMPDIR:-/tmp}" 2>/dev/null || cd / ; exec env ... "$NEW" serve ... ) &
 
-`INSTALL_DIR` is fixed, small and always present (it is where the candidate is going). This change is
-**not covered by an automated test** in this branch: the probe lives inside the full `upgrade.sh`
-flow, and I did not build a fixture that reaches it. What IS covered is the premise - the guard above
-proves a big cwd no longer delays `/health` - so the probe's own exposure to a caller's cwd is gone at
-the source. An inspection-only change should be reviewed as such.
+`INSTALL_DIR` is fixed, small and always present (it is where the candidate is going).
+
+**Verified by measurement, not by reading.** A wrapper candidate that records its own cwd and then
+execs the real node, run through exactly the edited line from a caller 200 directories deep:
+
+    caller cwd : /home/victor/scratch/bwup.euWDIC/big/d1/.../d200
+    recorded   : /home/victor/scratch/bwup.euWDIC/install
+    install    : /home/victor/scratch/bwup.euWDIC/install
+
+so the candidate starts in `INSTALL_DIR` and the caller depth no longer reaches it.
+`scripts/test-upgrade-idle.sh` still passes (it reaches `upgrade.sh`, though its own row skips the
+port proof by hash cache).
+
+**Not covered by an automated test**: no fixture in this branch reaches the port-proof block itself, so
+a future edit could reintroduce a caller-relative cwd with every test still green. What IS covered is
+the premise - the guard above proves a big cwd no longer delays `/health`. The gap is named here rather
+than claimed closed.
 
 ## Texts to approve (new or changed operator-facing strings)
 
@@ -143,6 +155,7 @@ the source. An inspection-only change should be reviewed as such.
 * `scripts/test-graph-watch.lua` could not run here at all - this binary has no graph component
   (`component_not_installed:graph`), a pre-existing limitation of this build, not of the change. The
   synchronous design above exists precisely to keep its contract intact.
-* The upgrade probe change has no automated test (see its section).
+* The upgrade probe change has no automated test that reaches the port proof; its effect was
+  verified by running the edited line with a cwd-recording wrapper candidate (see its section).
 * openclaw itself was not touched: the defect was reproduced and measured locally, on `/home/victor`
   (713,463 directories, the same shape as the reported `/local`).
