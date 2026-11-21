@@ -56,7 +56,11 @@ wa-provider-manager button, wa-provider-manager a { margin-right:var(--space); }
      `Segoe UI Symbol` draw a text-presentation outline, while `Segoe UI Emoji` draws a colour bitmap.
      A colour emoji font is deliberately NOT in this list: the only glyph that needs it (`👣`) must
      read as a cipher, not as a pictograph. */
-  --glyph-font: "Noto Emoji", "Segoe UI Symbol", "Noto Sans Symbols 2";
+  /* wa Icons FIRST: it carries the fourteen glyphs wa draws (plane 15), and a face is only asked for a
+     character it has - every other glyph falls through to the symbol fonts below exactly as before.
+     This is the file ui/fonts.css embeds and wa setup fonts installs, so the window and the terminal
+     draw the same picture. */
+  --glyph-font: "wa Icons", "Noto Emoji", "Segoe UI Symbol", "Noto Sans Symbols 2";
   --font-size: 14.5px;
 }
 

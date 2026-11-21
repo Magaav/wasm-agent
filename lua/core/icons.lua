@@ -137,10 +137,13 @@ end
 -- a stock font already has.
 M.MARKER = "fonts.json"
 
+-- The record lives under setup/, beside the other things 'wa setup' writes - and the two readers must
+-- name the SAME path: measured 21/11, the setup wrote <data>/setup/fonts.json while this looked at
+-- <data>/fonts.json, so a node that had just installed wa Icons still drew the unicode set.
 function M.marker_path()
   local ok, paths = pcall(dofile, "lua/core/paths.lua")
   if not ok or type(paths) ~= "table" then return nil end
-  return paths.data() .. "/" .. M.MARKER
+  return paths.data() .. "/setup/" .. M.MARKER
 end
 
 -- Did this user's setup install wa Icons? Reads the record the setup wrote (/setup/fonts.json).

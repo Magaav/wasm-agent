@@ -267,6 +267,14 @@ ok(tostring(nothing.error):find("nothing_to_undo", 1, true) ~= nil, "naming the 
 -- An unknown flag on the command line is a refusal with the usage, not a guess.
 eq(font_setup.cli({ "--nonsense" }), 2, "an unknown flag exits 2")
 
+-- THE WRITER AND THE READER NAME THE SAME FILE. The setup records what it installed in
+-- <data>/setup/fonts.json and lua/core/icons.lua reads it to decide the default icon set; measured
+-- 21/11, the two disagreed by one directory (<data>/fonts.json), so a node that had just installed wa
+-- Icons still drew the unicode set. Two modules, one path - asserted, not assumed.
+local icons = dofile("lua/core/icons.lua")
+eq(icons.marker_path(), font_setup.record_path(),
+  "the record the setup writes is the record the icon default reads")
+
 print(string.format("font setup: %s (%d checks, %d failed, 0 skipped)",
   failed == 0 and "ok" or "FAILED", checks, failed))
 os.exit(failed == 0 and 0 or 1)

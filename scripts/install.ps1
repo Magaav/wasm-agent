@@ -550,6 +550,16 @@ if ($waCmd) {
   }
 }
 
+# wa's two faces, for the user who just installed it (item 3 of the wa-fonts mission, Victor 19/11).
+# No prompt: consent is friction. WA_NO_FONT_SETUP=1 turns it off, and the setup backs up every terminal
+# config it touches and reverses itself with 'wa setup fonts --undo'.
+if ($env:WA_NO_FONT_SETUP -ne "1") {
+  $waFonts = Join-Path $nodeDir "wa.exe"
+  if (Test-Path $waFonts) {
+    try { & $waFonts setup fonts 2>&1 | ForEach-Object { Write-Host "   $_" }} catch { }
+  }
+}
+
 Write-Host "     what do you know about Laura?" -ForegroundColor DarkGray
 Write-Host ""
 Write-Host "   memory lives in $env:USERPROFILE\.wasm-agent\memory.db" -ForegroundColor DarkGray
