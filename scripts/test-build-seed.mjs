@@ -57,10 +57,14 @@ function makeTree(dir, value) {
   fs.mkdirSync(path.join(dir, '.git'), {recursive: true});
   fs.writeFileSync(path.join(dir, 'Cargo.toml'), '[workspace]\nmembers = ["base", "app"]\nresolver = "2"\n');
   fs.writeFileSync(path.join(dir, 'base', 'Cargo.toml'), '[package]\nname = "base"\nversion = "0.1.0"\nedition = "2021"\n');
-  fs.writeFileSync(path.join(dir, 'base', 'src', 'lib.rs'), 'pub fn v() -> i32 { ' + value + ' }\n');
+  const tag = path.basename(dir) === 'wt-beta' ? 'pub const TAG: &str = "gatespeed-seed-7c1e";\n' : '';
+  fs.writeFileSync(path.join(dir, 'base', 'src', 'lib.rs'), 'pub fn v() -> i32 { ' + value + ' }\n' + tag);
   fs.writeFileSync(path.join(dir, 'app', 'Cargo.toml'),
     '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\nbase = { path = "../base" }\n');
-  fs.writeFileSync(path.join(dir, 'app', 'src', 'main.rs'), 'fn main() { println!("base={}", base::v()); }\n');
+  const mainBody = path.basename(dir) === 'wt-beta'
+    ? 'fn main() { println!("base={}", base::v()); println!("{}", base::TAG); }\n'
+    : 'fn main() { println!("base={}", base::v()); }\n';
+  fs.writeFileSync(path.join(dir, 'app', 'src', 'main.rs'), mainBody);
   fs.writeFileSync(path.join(dir, 'rust', 'wa-host-support', 'Cargo.toml'),
     '[package]\nname = "wa-host-support"\nversion = "0.1.0"\nedition = "2021"\n');
   return dir;
@@ -99,8 +103,15 @@ const say = (r) => String(r.stdout || '') + String(r.stderr || '');
   // THE POINT: the seeded build is still the tree's own build.
   const binB = path.join(childOf(TREE_B), 'debug', 'app');
   check('the seeded tree produced its own binary', fs.existsSync(binB), binB);
-  const outB = String(spawnSync(binB, [], {encoding: 'utf8'}).stdout || '').trim();
+  const outB = String(spawnSync(binB, [], {encoding: 'utf8'}).stdout || '').trim().split(String.fromCharCode(10))[0];
   check('the seeded tree ran ITS OWN library (base=2, not the seed\'s base=1)', outB === 'base=2', outB);
+  // A string that exists ONLY in this tree's source must be IN the binary file the seeded build
+  // produced. Printing it proves the code ran; grepping the file proves the artifact carries it.
+  const marker = fs.readFileSync(path.join(TREE_B, 'base', 'src', 'lib.rs'), 'utf8').match(/gatespeed-seed-[a-z0-9]+/);
+  check('this tree carries its own marker string', !!marker, String(marker));
+  const bytesOfBin = fs.readFileSync(binB);
+  check('the marker string from the change is IN the seeded binary', bytesOfBin.includes(Buffer.from(marker[0])), marker[0]);
+  check('the origin tree\'s binary does NOT carry the seeded tree\'s marker', !fs.readFileSync(path.join(childOf(TREE_A), 'debug', 'app')).includes(Buffer.from(marker[0])));
 
   // And the tree it was seeded FROM is untouched by the copy.
   const outA = String(spawnSync(path.join(childOf(TREE_A), 'debug', 'app'), [], {encoding: 'utf8'}).stdout || '').trim();
@@ -109,10 +120,10 @@ const say = (r) => String(r.stdout || '') + String(r.stderr || '');
 
 // ---- a changed crate is rebuilt, never served from the seed -----------------------------------------
 {
-  fs.writeFileSync(path.join(TREE_B, 'base', 'src', 'lib.rs'), 'pub fn v() -> i32 { 3 }\n');
+  fs.writeFileSync(path.join(TREE_B, 'base', 'src', 'lib.rs'), 'pub fn v() -> i32 { 3 }\n' + 'pub const TAG: &str = "gatespeed-seed-7c1e";\n');
   const r = build(TREE_B);
   check('a tree with one changed crate rebuilds', r.status === 0, say(r).slice(-600));
-  const out = String(spawnSync(path.join(childOf(TREE_B), 'debug', 'app'), [], {encoding: 'utf8'}).stdout || '').trim();
+  const out = String(spawnSync(path.join(childOf(TREE_B), 'debug', 'app'), [], {encoding: 'utf8'}).stdout || '').trim().split(String.fromCharCode(10))[0];
   check('the rebuilt binary carries the change (base=3)', out === 'base=3', out);
 }
 
