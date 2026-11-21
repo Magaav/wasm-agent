@@ -1,6 +1,6 @@
 # gate-fast: the landing gate's wasted seconds
 
-Branch `change/gate-fast` from origin/main 975d4612. Four commits, no Rust change, no prompt change.
+Branch `change/gate-fast` from origin/main 975d4612. Five commits (the fifth only corrects this report), no Rust change, no prompt change.
 
 ## What changed, per commit
 
@@ -9,7 +9,7 @@ Branch `change/gate-fast` from origin/main 975d4612. Four commits, no Rust chang
 | df49ac81 | `scripts/test-run-live-pty.mjs`: the "let the run finish" loop goes to the bottom of the pane (PgDn) on every poll and is now a check that FAILS, with the last frame, when the answer never arrives (ceiling 90 s, was a silent 180 s). |
 | c2c44c8d | `scripts/gate-cargo-codemode.sh` builds into the tree's named build dir (`fast_binary_target_dir` / `wa_build_target`), compiles with `--no-run` under the node's one build lock, then runs the unchanged test command outside it. New row `scripts/test-gate-cargo-codemode.sh`, wired into `scripts/fast.sh` right after `check fast-watchdog` and into `scripts/test.sh` after the `test-fast-watchdog.sh` line. |
 | 7782c2f1 | `scripts/lib/fast-watchdog.sh` polls every 0.1 s instead of every 1 s (deadline still whole seconds, counted in tenths). `scripts/test-fast-watchdog.sh` gains the timing assertion. |
-| (last) | the two new watchdog failure messages start with "assertion failed:" so `scripts/test-discriminates.sh` classifies them (its ASSERT_RE), plus this report. |
+| 8f804401 | the two new watchdog failure messages start with "assertion failed:" so `scripts/test-discriminates.sh` classifies them (its ASSERT_RE), plus this report. |
 
 ## Measurements (this laptop, 21/11, other agents building at the same time)
 
@@ -87,7 +87,7 @@ All with `TMPDIR=~/wasm-agent/scratch/gate-fast-EyZl/tmp` (the /tmp quota warnin
 
 - No landing, no `scripts/fast.sh`, no `scripts/test.sh` was run (forbidden here). The new `check gate-cargo-codemode`
   row and the watchdog change have not been seen inside a whole fast run.
-- `scripts/test-land.lua` was not run (land.lua is unchanged; the gate script keeps its path and name).
+- `scripts/test-land.lua` WAS run (scratch HOME, 106 s, exit 0); it stubs the gate commands, so it does not execute the changed script.
 - The real path of item 2 - the default named dir under `~/.wasm-agent/build/target` after a real `fast` - was
   exercised only by the stub test in a scratch build root, never against the real node root.
 - `scripts/test-discriminates.sh` was not run on this branch. Expected rows: test-gate-cargo-codemode.sh
