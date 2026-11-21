@@ -179,6 +179,8 @@ part of the round's logic.
   (`<config>\nfile/land`), which is how it is known to discriminate.
 * `bash scripts/test-worker-gate.sh`: `worker-gate ok (29 checks)`.
 * `WASM_AGENT_LUA_ROOT` = this worktree, `bash scripts/test-mission-verb.sh`: `mission-verb ok (36 checks)`.
+* `flock -o ~/Work/missions/.suite.lock bash scripts/test-discriminates.sh bfad4f8f`: `1 discriminating, 0 blocking, 0 not judged (1 environment: scripts/test-land.lua, the tool cannot run a Lua row against a base tree with no wa binary)` - the two shell rows classify as `new-symbol` ("it died on code the base does not have: no such file or directory"), which is the truth: the base has neither script. My first run of this check BLOCKED on those two rows because their refusal line did not use the words the classifier reads (2457da85).
+* `bash scripts/sync-prompt-docs.sh --check`: `sync-prompt-docs: ok (4 blocks current)`.
 * `flock -o ~/Work/missions/.suite.lock bash scripts/fast.sh` on this branch: `fast result ok (354 checks, 0 failed, 0 skipped)` - the gate of this branch is green as it stands
 
 ## Texts to approve
