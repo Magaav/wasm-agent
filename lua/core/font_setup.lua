@@ -1114,7 +1114,14 @@ function M.run(opts)
     detail = M.font_plan(opts)
     if not detail then
       result.ok = false
-      result.error = "fonts_source_unknown: this node cannot say where its own fonts live (WA_UI_DIR, or WASM_AGENT_LUA_ROOT for a checkout)"
+      -- THE SAME WORDS AS A REAL RUN, naming every path that was looked at: a dry run and a real run answer the
+      -- same question, and an operator reading either must see which copy is missing what.
+      local looked = {}
+      for _, row in ipairs((select(2, M.font_plan(opts)) or {}).tried or {}) do
+        looked[#looked + 1] = tostring(row.path) .. " [" .. tostring(row.label) .. "]"
+      end
+      result.error = "fonts_source_unknown: this node cannot say where its own fonts live (WA_UI_DIR, or WASM_AGENT_LUA_ROOT for a checkout); tried: "
+        .. (#looked > 0 and table.concat(looked, ", ") or "none")
       say("wa setup fonts: refused: " .. result.error)
       return result
     end
