@@ -166,6 +166,17 @@ function M.parse_vars(line)
   return list, more
 end
 
+-- A SCRIPT RESULT IS KNOWN BY EITHER NAME (22/11, measured on 1,976 real results of the two days before).
+-- The model calls the script tool `run`; the dispatcher's own name for it is `codemode`. Every rule below
+-- that says "a script's view is its outcome, not its bookkeeping" was written `name=='codemode'`, and the
+-- loop hands this module the name the MODEL used. So from the day `run` became the one path, no script
+-- result got the lean view: the model read the whole stored envelope - `attempts` (each call's arguments
+-- and its output a SECOND time), backend, context_policy, the output as an escaped JSON string - 6,912k
+-- characters where the view this file describes is 4,643k (49% more, on every round, re-read every turn).
+-- One predicate, so the next name is added in one place; lua/core/agent.lua's effect rule reads it too.
+local SCRIPT_NAMES = { codemode = true, run = true }
+function M.is_script(name) return SCRIPT_NAMES[name] == true end
+
 function M.project(name, output)
   -- Encode a non-table only through pcall: a decoded scalar can be `inf` (a numeric
   -- literal too large for a float), and json.encode throws on that *before* the
@@ -185,7 +196,7 @@ function M.project(name, output)
   -- `summary` is nil when the script made no tool call (only helpers such as searchTools): that script's
   -- view is lean too (17/11, session b01db30e: a searchTools-only script answered with the whole 8 KB
   -- envelope - attempts, backend, result-file paths - instead of the schema it returned).
-  if name=='codemode' and output.attempts~=nil and (output.summary~=nil or output.ok~=false) then
+  if M.is_script(name) and output.attempts~=nil and (output.summary~=nil or output.ok~=false) then
     local full = json.encode(output)
     local lean = {}
     for key, value in pairs(output) do
@@ -257,7 +268,7 @@ function M.project(name, output)
     output = lean
   end
   -- A script view in the JSON form names its variables in the same words as the header line.
-  if name == 'codemode' and type(output.vars) == 'table' then
+  if M.is_script(name) and type(output.vars) == 'table' then
     local copy = {}
     for key, value in pairs(output) do copy[key] = value end
     copy.vars = M.vars_line(output.vars)

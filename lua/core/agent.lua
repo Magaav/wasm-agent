@@ -3694,7 +3694,7 @@ function M:run_body(text, images)
       -- not one - that distinction is what keeps an explanation request ungated.
       if ok_tool and not gate.disabled then
         local effect = M.command_effect(function_.name, args)
-        if function_.name == "codemode" then
+        if tool_output.is_script(function_.name) then
           -- Item #34: a script is a script. What it CHANGED is what its own calls did - the rule is
           -- `M.script_effect`, one function, so the gate and the test that pins it read the same code.
           effect = M.script_effect(output)
