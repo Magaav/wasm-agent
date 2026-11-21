@@ -37,6 +37,18 @@ evidence, not a risk score or a correctness certificate.
 | read path | bounded wait for the captured revision, then a pinned read-only SQLite snapshot; no silent stale fallback |
 | overrides | `WA_GRAPH_ROOT`, `WA_GRAPH_DB`; `WA_GRAPH_WATCH=0` disables OS hints, not mutation notifications or admission reconciliation; `WA_GRAPH_PARSE_TIMEOUT_MS` bounds each syntax parse (default30,000;1–120,000) |
 
+A recursive OS watch is one inotify watch PER DIRECTORY, taken synchronously. Registering it over
+an unbounded working directory therefore held `wa serve` before its listener existed: a node
+started in a home that links into a 713k-directory checkout answered `/health` only after 60-150 s
+(measured on `openclaw`, 21/11), while the same binary from `/tmp` answered in 1-2 s. The walk is
+now bounded - `WA_GRAPH_WATCH_DIRS` (default 20,000 directories, and a 5 s scan deadline) - and a
+root past it is left unwatched, logged as `graph_watch_skipped` and reported as `watch_skipped` in
+`graph_status`. Hints are only ever a shortcut: every query still admits content itself, so an
+unwatched root answers exactly, it just pays the admission on each call. `WA_GRAPH_WATCH_DIRS=0`
+registers no OS watch at all. Guarded by `scripts/test-serve-cwd-boot.sh` (wired into
+`scripts/test.sh`), which starts a node in a 200k-directory cwd and fails on 200k watch
+descriptors.
+
 One process-wide deterministic worker and one OS event backend serve root-isolated
 queues. No inference worker, Engine job or recurring wake is introduced. Events,
 including overflow, are hints: admission and startup reconcile supported source
