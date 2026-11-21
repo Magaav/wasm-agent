@@ -1952,6 +1952,11 @@ WA_SCRIPT=tests/diff-view.lua "$BIN" --db "$DB.view-diff" | grep "diff view ok"
 # in place to a checkmark with its duration, and a managed operation result is the command's own output
 # with the whole object one click away instead of ~30 transport fields.
 WA_SCRIPT=scripts/test-raw-view-stream.lua "$BIN" --db "$DB.view-stream" | grep "raw view stream ok"
+# The NATIVE run tool draws like the block above (change/run-live): the script streams as the model
+# writes it, from the provider's own argument fragments (lua/core/run_stream.lua decodes them; the
+# recorded opencode-go wire in tests/fixtures/provider is the input), the awaited calls are WAITING
+# rows that flip, and a native turn and a fenced one draw the SAME block.
+WA_SCRIPT=scripts/test-run-live.lua "$BIN" --db "$DB.run-live" | grep "run live ok"
 # The SAME view suite again, with a model window the compactor resolves (a scratch home has none): the
 # context ball must be coloured against the reserve `maybe_compact` will spend, not the policy default.
 # WASM_AGENT_MODEL_LIMITS is that fixture - the only way a fresh home has a window at all - and the

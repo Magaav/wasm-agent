@@ -84,15 +84,18 @@ local function code_char(state, ch, out)
     return false
   end
   if esc then
+    if ch == 'u' then
+      -- A \u escape may be the SECOND half of a surrogate pair, so a pending high surrogate is
+      -- kept until the four digits say whether it is one. Flushing it here split every emoji the
+      -- model wrote as a pair into two replacement characters.
+      state.esc, state.hex = 'u', ''
+      return false
+    end
     local high = state.high
     state.high = nil
     if high then append(state, out, REPLACEMENT) end
-    if ch == 'u' then
-      state.esc, state.hex = 'u', ''
-    else
-      state.esc = nil
-      append(state, out, ESCAPE[ch] or ch)
-    end
+    state.esc = nil
+    append(state, out, ESCAPE[ch] or ch)
     return false
   end
   if ch == '\\' then state.esc = '' return false end

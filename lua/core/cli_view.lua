@@ -2307,6 +2307,52 @@ function METHODS:delta_piece(text)
   local upto = #d.buf - held
   if upto > d.shown then self:flow("say", d.buf:sub(d.shown + 1, upto)); d.shown = upto end
 end
+-- The native `run` tool's script, drawn as the model writes it. `event.text` is the decoded `code`
+-- argument (lua/core/run_stream.lua): never JSON, never an argument preview, so what lands on the band
+-- is the program itself. Whole lines only - a band row is a row, and a half line redrawn in place is not
+-- what a stream of code looks like - with the last one flushed when the call announces itself.
+function METHODS:run_code_piece(event)
+  if not self:transcript() then return end
+  local text = tostring(event.text or "")
+  if text == "" then return end
+  local stream = self.run_stream
+  if not stream then
+    -- The prose before the call is already written, as the tool path does it, and then the block opens
+    -- one blank line below it - the same shape a fenced run block has.
+    self:commentary_flush()
+    self:flow_end()
+    self:gap(1)
+    if host.transcript_block then pcall(host.transcript_block, true, true) end
+    self.code_streamed = true
+    stream = { pending = "" }
+    self.run_stream = stream
+  end
+  stream.pending = stream.pending .. text
+  local o = self:codemode_opts()
+  while true do
+    local nl = stream.pending:find("\n", 1, true)
+    if not nl then break end
+    local line = stream.pending:sub(1, nl - 1):gsub("\r$", "")
+    stream.pending = stream.pending:sub(nl + 1)
+    for _, row in ipairs(codemode_block.rows(codemode_block.new({ code = line }, self.now()), self.limit, o)) do
+      self:write(row .. "\n")
+    end
+  end
+end
+
+-- The line the model was still writing when its call announced itself: drawn now, so no line of the
+-- script is ever lost to the timing of the provider's last chunk.
+function METHODS:run_code_flush()
+  local stream = self.run_stream
+  self.run_stream = nil
+  if not stream or stream.pending == "" then return end
+  local o = self:codemode_opts()
+  for _, row in ipairs(codemode_block.rows(codemode_block.new({ code = stream.pending }, self.now()), self.limit, o)) do
+    self:write(row .. "\n")
+  end
+  stream.pending = ""
+end
+
 -- The streaming run block: complete lines after the opening fence, each drawn as band rows; the closing
 -- fence ends it (what follows it is dropped by the step, so it is not drawn either).
 function METHODS:code_stream(d)
@@ -2504,6 +2550,11 @@ end
 -- A call is a code-mode call when the tool that runs is `codemode`, whatever wrapper named it
 -- (`tool_call name=codemode` unwraps through `M.target`).
 local function is_codemode(name, args)
+  -- The native `run` tool IS a code-mode call: its `code` argument is the script, its inner calls are
+  -- `tools.X(...)`, and it settles with the same result object. It is drawn by the same block, so the
+  -- reader cannot tell which transport asked for the script (Victor 21/11: the native arm must look
+  -- like the block one).
+  if name == "run" then return true end
   return M.target(name, args) == "codemode"
 end
 M.is_codemode = is_codemode
@@ -2568,8 +2619,10 @@ function METHODS:codemode_start(event)
   self.pending.block, self.pending.shown = true, true
   local o = self:codemode_opts()
   if self.code_streamed then
-    -- The script streamed into its block already (code_stream): only the call rows follow.
+    -- The script streamed into its block already (code_stream, or run_code_piece for the native `run`
+    -- tool): only the call rows follow, after the last line the model finished writing.
     self.code_streamed = nil
+    self:run_code_flush()
   else
     self:flow_end()
     self:gap(1)
@@ -2884,6 +2937,13 @@ function METHODS:event(event)
     self.total_rounds = self.total_rounds + math.max(0, self.round - previous)
     if self.turn then self.turn.rounds = self.round; self.turn.step_started = self.now() end
     self:paint()
+  elseif kind == "run_code_delta" then
+    -- The model writing the `run` tool's script, as it writes it (lua/core/run_stream.lua decodes the
+    -- argument fragments; this one draws them). The old raw channel drew the model's own code in real
+    -- time and the operator wants that back: the script opens its block on the first piece and each
+    -- complete line lands on the band as it arrives, so the call event that follows finds the block on
+    -- screen and adds only its rows.
+    self:run_code_piece(event)
   elseif kind == "tool" then
     self:delta_reset()
     self:flow_end()
@@ -2913,7 +2973,10 @@ function METHODS:event(event)
       -- "Working: codemode" for both. `call_raw_...` is the id the raw channel mints, so the reader is
       -- told what is happening: the model's own script is running.
       local rc = dofile("lua/core/raw_code.lua")
-      self.pending.raw = (rc.is_raw and rc.is_raw(event.id or event.call_id)) or false
+      -- A native `run` call is the model's own script exactly like a fenced block is, so the status row
+      -- says the same thing for both ("Running your script") instead of naming a tool.
+      self.pending.raw = event.name == "run"
+        or (rc.is_raw and rc.is_raw(event.id or event.call_id)) or false
       self:codemode_start(event)
     elseif self:transcript() then
       self:topic(true)
