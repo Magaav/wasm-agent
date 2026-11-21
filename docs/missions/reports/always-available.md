@@ -95,6 +95,21 @@ Discrimination, measured here: `test-codemode-wait-shape.lua` fails on `93168d96
 5. `/stats` rows: `wake_only_round`, `script_cut_at_cap`, `handle_mishandled`.
 6. Refusal added: `handle_wake_requires_a_session` (logged, not shown).
 
+## Rows run here, and one pre-existing failure
+
+Run with this tree's binary and `WASM_AGENT_LUA_ROOT` pointed at the tree, each in a scratch
+`HOME`/`--db`:
+
+* green: `test-codemode-wait-shape` (25 checks), `test-handle-wake` (16), `test-codemode-counters`
+  (11), `test-codemode-pending` (92), `test-codemode-never-killed` (19), `test-codemode-queue-timeout`
+  (20), `test-codemode-presentation`, `test-codemode-friction`, `test-cli-input` (21),
+  `test-selfloop`, `test-selfloop-pause` (101), `cargo test -p wa-term` (177), the `terminal_tests`
+  of `wa-capabilities` (6).
+* **pre-existing failure, not this change**: `scripts/test-codemode-native.lua` stops at line 24
+  ("opt-in adds one tool, direct tools retained", `#boot ~= 11`) **identically on the base worktree**
+  (`/tmp/base-always` at `93168d96`), so the difference is this machine's tool catalogue, not the
+  branch. Named here so it is not read as a regression.
+
 ## Remaining blockers
 
 * `scripts/test-discriminates.sh` (the land gate) was not run: it needs a clean base tree and a
