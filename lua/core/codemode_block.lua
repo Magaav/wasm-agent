@@ -38,8 +38,15 @@ local json = dofile('lua/vendor/json.lua')
 
 -- The script's rows under the heading, before the fold names the rest (`… +N lines`).
 M.CODE_ROWS = 6
--- The value's rows under `⎿`.
-M.RESULT_ROWS = math.huge -- the whole value (operator 17/11: no more eliding)
+-- The value's rows under the result mark: a few, then `... +N lines` (Victor 21/11: "the script's
+-- return value is drawn compactly (pretty, truncated), never as a wrapped 4 KB blob"). This is the
+-- PLAYOUT of a value, not a budget on what the model received: the whole of it stays one click away
+-- (the `transcript_expand` fold) and in /console, which prints the result the tool answered with.
+M.RESULT_ROWS = 8
+-- How many lines of ONE call's own output are drawn under its row, and the indent they sit at: the
+-- call row is drawn two columns in, so its content is drawn four.
+M.CALL_CONTENT_ROWS = 4
+M.CALL_CONTENT_INDENT = "    "
 -- One parallel group is one row; a wider fan-out keeps the newest names.
 M.GROUP_NAMES = 3
 -- An evidence envelope is a pointer, not an answer: `path`/`bytes`/`sha256` and nothing else that a
@@ -83,6 +90,10 @@ function M.settle(model, id, facts)
   call.ms = tonumber(f.ms) or call.ms
   call.error = f.error
   call.code = f.code
+  -- The call's own CONTENT, when the event carried it: what the command said, never the operation
+  -- envelope that carried it (M.output_of is the allow-list). Kept on the slot so the row is drawn
+  -- again at any width, and so a settled call never loses what it said when the block is rewritten.
+  call.output = f.output or call.output
   return call
 end
 
@@ -303,6 +314,87 @@ function M.call_text(call, o, width)
   return o.clip(text, math.max(8, (width or 80) - 3))
 end
 
+-- ---- one call's own content ---------------------------------------------------------
+--
+-- Victor 21/11: "under each tool row draw that call's CONTENT: its stdout (and stderr if any,
+-- dimmed), up to a few lines with +N lines folded, exactly like the old raw-channel view did. The
+-- operation envelope (ids, paths, timing, owner, flags) is NOT content: never drawn by default."
+--
+-- A settled call therefore keeps what it SAID, and the object that carried it never reaches a row:
+-- the same allow-list rule M.operation_of applies to a script's value, applied one level down.
+
+-- The content of one call's answer: its stdout, and its stderr (a failed command answers through
+-- stderr). An allow-list - a table carrying at least one of the two AS A STRING - so a read's value,
+-- a status object or an evidence envelope is never mistaken for a command's output.
+function M.output_of(value)
+  if type(value) == "string" then
+    local first = value:match("^%s*(.)") or ""
+    if first ~= "{" then return nil end
+    local ok, decoded = pcall(json.decode, value)
+    if not ok or type(decoded) ~= "table" then return nil end
+    value = decoded
+  end
+  if type(value) ~= "table" then return nil end
+  if type(value.stdout) ~= "string" and type(value.stderr) ~= "string" then return nil end
+  return { stdout = type(value.stdout) == "string" and value.stdout or "",
+    stderr = type(value.stderr) == "string" and value.stderr or "" }
+end
+
+-- The rows one settled call adds under its own row: its stdout, then its stderr, at most
+-- M.CALL_CONTENT_ROWS of them and the count of the non-blank lines left out. A call still running
+-- has no content yet; a call that said nothing adds no row at all.
+function M.call_content(call, width, o)
+  o = M.opts(o)
+  if type(call) ~= "table" then return {}, 0 end
+  if call.state == "running" or call.state == "pending" then return {}, 0 end
+  local output = M.output_of(call.output)
+  if not output then return {}, 0 end
+  local limit = math.max(8, (width or 80) - o.columns(M.CALL_CONTENT_INDENT) - 1)
+  local rows, shown, hidden = {}, 0, 0
+  local function add(text)
+    if text:gsub("%s", "") == "" then return end
+    if shown >= M.CALL_CONTENT_ROWS then hidden = hidden + 1; return end
+    shown = shown + 1
+    for _, piece in ipairs(M.wrap(text, limit, o)) do rows[#rows + 1] = M.CALL_CONTENT_INDENT .. piece end
+  end
+  for line in (output.stdout:gsub("\r\n", "\n") .. "\n"):gmatch("([^\n]*)\n") do add(line) end
+  for line in (output.stderr:gsub("\r\n", "\n") .. "\n"):gmatch("([^\n]*)\n") do add(line) end
+  if hidden > 0 then rows[#rows + 1] = M.CALL_CONTENT_INDENT .. "… +" .. hidden .. " lines" end
+  return rows, hidden
+end
+
+-- The block's inner rows as ENTRIES, so its two renderers cannot disagree about them: a call's own
+-- row ("call", rewritten in place as it settles) and the content under it ("content", dim).
+function M.call_entries(model, width, o)
+  o = M.opts(o)
+  local entries = {}
+  local function add_call(call)
+    entries[#entries + 1] = { kind = "call", text = M.call_text(call, o, width) }
+    for _, row in ipairs(M.call_content(call, width, o)) do
+      entries[#entries + 1] = { kind = "content", text = row }
+    end
+  end
+  for _, group in ipairs(M.groups(model)) do
+    if #group.calls == 1 then
+      add_call(group.calls[1])
+    else
+      -- A fan-out of one tool is ONE counter row while none of its calls has content; once the
+      -- commands have said something, each call is its own row with its own output under it - a
+      -- counter row (bash x10, check marks) cannot answer "what did each one say".
+      local said = false
+      for _, call in ipairs(group.calls) do
+        if #(M.call_content(call, width, o)) > 0 then said = true; break end
+      end
+      if said then
+        for _, call in ipairs(group.calls) do add_call(call) end
+      else
+        entries[#entries + 1] = { kind = "call", text = M.group_text(group, o, width) }
+      end
+    end
+  end
+  return entries
+end
+
 -- A fan-out of the same tool is one row, not ten: `bash ×10 ⏳4 ✓5 ✗1`. Ten rows of `✓ bash` say the
 -- same thing as one row and cost a screen, and the list is still there when the block is expanded.
 function M.groups(model)
@@ -347,16 +439,12 @@ end
 
 -- The call rows: one per call, unless a name repeated (a `Promise.all`/`.map` fan-out), which
 -- collapses to its counter row.
+-- The call rows: one per call, unless a name repeated (a Promise.all / .map fan-out) and none of
+-- them has content to show - which collapses to its counter row - plus the content rows under each.
 function M.call_rows(model, width, o)
   o = M.opts(o)
   local rows = {}
-  for _, group in ipairs(M.groups(model)) do
-    if #group.calls == 1 then
-      rows[#rows + 1] = M.call_text(group.calls[1], o, width)
-    else
-      rows[#rows + 1] = M.group_text(group, o, width)
-    end
-  end
+  for _, entry in ipairs(M.call_entries(model, width, o)) do rows[#rows + 1] = entry.text end
   return rows
 end
 
@@ -379,6 +467,119 @@ function M.hide_evidence(value, seen)
   local out = {}
   for key, item in pairs(value) do out[key] = M.hide_evidence(item, seen) end
   return out
+end
+
+-- ---- the value, read for a human --------------------------------------------------
+--
+-- A script's value crosses the sandbox boundary as a JSON STRING (measured on the parity capture),
+-- so a table arrives as text; and a dictionary of managed operations arrives as kilobytes of
+-- transport metadata around two lines of output. Three helpers turn either shape into what a reader
+-- can read: M.decoded (the string that is an object), M.readable (every envelope replaced by what it
+-- carried) and M.pretty (JSON, one row per member, M.RESULT_ROWS of them).
+
+-- The value a script really returned: a JSON string is read back, a plain string is prose, anything
+-- else is itself.
+function M.decoded(value)
+  if type(value) ~= "string" then return value end
+  local first = value:match("^%s*(.)") or ""
+  if first ~= "{" and first ~= "[" then return value end
+  local ok, decoded = pcall(json.decode, value)
+  if not ok or type(decoded) ~= "table" then return value end
+  return decoded
+end
+
+-- What ONE managed operation contributes to a value: its own output, trimmed - its stdout, or its
+-- stderr when stdout said nothing. Never the envelope: an id, a path, a timing and an owner are how
+-- the node carried the answer, not the answer. An operation that said nothing at all still says so,
+-- or a key that returned nothing reads as a key that is missing.
+function M.operation_output(operation, o)
+  local out = M.output_of(operation)
+  if not out then return nil end
+  local text = out.stdout
+  if text:gsub("%s", "") == "" then text = out.stderr end
+  if text:gsub("%s", "") == "" then return "… no output" end
+  return (text:gsub("[\r\n]+$", ""))
+end
+
+-- value as the reader should see it: every operation envelope inside it replaced by its output (one
+-- level down or ten - a script that returned {seq: op, uname: op} returned two answers, not two
+-- envelopes). Evidence envelopes are hidden afterwards, by M.hide_evidence.
+function M.readable(value, o, seen)
+  o = M.opts(o)
+  seen = seen or {}
+  if type(value) ~= "table" then return value end
+  if seen[value] then return value end
+  seen[value] = true
+  local output = M.operation_output(value, o)
+  if output then return output end
+  local out = {}
+  for key, item in pairs(value) do out[key] = M.readable(item, o, seen) end
+  return out
+end
+
+-- value as rows of pretty JSON, two columns per level, one member per row. A short array of scalars
+-- stays on one row ([1, 2, 3]): three numbers are one thought, not five rows.
+function M.pretty(value, o, indent, out)
+  o = M.opts(o)
+  indent = tonumber(indent) or 0
+  out = out or {}
+  local pad = string.rep("  ", indent)
+  if type(value) ~= "table" then
+    out[#out + 1] = pad .. tostring(o.encode(value))
+    return out
+  end
+  local keys, array, count = {}, true, 0
+  for key in pairs(value) do
+    count = count + 1
+    keys[#keys + 1] = key
+    if type(key) ~= "number" or key ~= math.floor(key) or key < 1 then array = false end
+  end
+  if count == 0 then
+    out[#out + 1] = pad .. (array and "[]" or "{}")
+    return out
+  end
+  if array then table.sort(keys) else table.sort(keys, function(a, b) return tostring(a) < tostring(b) end) end
+  local open, close = array and "[" or "{", array and "]" or "}"
+  local scalars = true
+  for _, key in ipairs(keys) do if type(value[key]) == "table" then scalars = false; break end end
+  if scalars and count <= 6 then
+    -- A shallow object is ONE row, in the caller's encoder's own compact form: a value that already
+    -- fits a row is drawn exactly as it always was, so a small answer cannot change shape for a
+    -- formatting rule nobody asked for.
+    out[#out + 1] = pad .. tostring(o.encode(value))
+    return out
+  end
+  out[#out + 1] = pad .. open
+  for index, key in ipairs(keys) do
+    local item = value[key]
+    local label = pad .. "  "
+    if not array then label = label .. tostring(o.encode(tostring(key))) .. ": " end
+    if type(item) == "table" then
+      local start = #out + 1
+      M.pretty(item, o, indent + 1, out)
+      -- The member's label rides on its opening row, which already carries the deeper indent.
+      out[start] = label .. tostring(out[start]):sub(#pad + 3)
+    else
+      out[#out + 1] = label .. tostring(o.encode(item))
+    end
+    if index < #keys then out[#out] = out[#out] .. "," end
+  end
+  out[#out + 1] = pad .. close
+  return out
+end
+
+-- The whole of a value, exactly as the node carried it: what a fold answers when the reader asks to
+-- see the rest. Nothing is replaced and nothing is hidden - an operation envelope is EXPLORABLE, it
+-- is only never drawn by default (Victor 21/11).
+function M.raw_rows(value, o)
+  o = M.opts(o)
+  local decoded = value
+  if type(value) == "string" then
+    local ok, one = pcall(json.decode, value)
+    if ok and type(one) == "table" then decoded = one end
+  end
+  if type(decoded) ~= "table" then return { tostring(value) } end
+  return M.pretty(decoded, o)
 end
 
 -- ---- a managed operation's answer ------------------------------------------------
@@ -453,19 +654,31 @@ end
 function M.result_rows(model, width, o)
   o = o or M.opts()
   local rows, hidden = {}, 0
-  local value = M.hide_evidence(model.value)
-  local text
+  local lines
   if model.value ~= nil then
-    text = (type(value) == "string") and value or o.encode(value)
-  elseif model.error then
-    text = tostring(model.error)
-  end
-  if text == nil or text:gsub("%s", "") == "" then return rows, 0 end
-  for line in (tostring(text):gsub("\r\n", "\n") .. "\n"):gmatch("([^\n]*)\n") do
-    if line:gsub("%s", "") ~= "" then
-      if #rows < M.RESULT_ROWS then rows[#rows + 1] = line else hidden = hidden + 1 end
+    local value = M.decoded(model.value)
+    if type(value) == "table" then
+      -- Readable first (an operation becomes its output), then the evidence pointers hidden.
+      lines = M.pretty(M.hide_evidence(M.readable(value, o)), o)
+    else
+      lines = {}
+      for line in (tostring(value):gsub("\r\n", "\n") .. "\n"):gmatch("([^\n]*)\n") do
+        lines[#lines + 1] = line
+      end
     end
+  elseif model.error then
+    lines = { tostring(model.error) }
   end
+  if lines == nil then return rows, 0 end
+  local whole = {}
+  for _, line in ipairs(lines) do
+    if line:gsub("%s", "") ~= "" then whole[#whole + 1] = line end
+  end
+  if #whole == 0 then return rows, 0 end
+  for index, line in ipairs(whole) do
+    if index <= M.RESULT_ROWS then rows[#rows + 1] = line else hidden = hidden + 1 end
+  end
+  if hidden > 0 then rows.whole = table.concat(whole, "\n") end
   return rows, hidden
 end
 
@@ -638,13 +851,18 @@ end
 function M.call_lines(model, width, o)
   o = M.opts(o)
   local rows = {}
-  for _, row in ipairs(M.call_rows(model, width, o)) do
-    -- The whole row in its state's colour (operator 17/11): ⏳ waiting light yellow, ✓ light green,
-    -- ✗ soft red. MARK_OK/MARK_NO/MARK_WAIT are 3 bytes each.
-    local mark = row:sub(1, 3)
-    local style = (mark == MARK_NO and "callFail") or (mark == MARK_WAIT and "callWait")
-      or (mark == MARK_OK and "callOk") or "dim"
-    rows[#rows + 1] = o.paint("  " .. row, style)
+  for _, entry in ipairs(M.call_entries(model, width, o)) do
+    if entry.kind == "content" then
+      -- A command's own words, dim: evidence for the row above, not a verdict of their own.
+      rows[#rows + 1] = o.paint(entry.text, "dim")
+    else
+      -- The whole row in its state's colour (operator 17/11): waiting light yellow, done light green,
+      -- failed soft red. MARK_OK/MARK_NO/MARK_WAIT are 3 bytes each.
+      local mark = entry.text:sub(1, 3)
+      local style = (mark == MARK_NO and "callFail") or (mark == MARK_WAIT and "callWait")
+        or (mark == MARK_OK and "callOk") or "dim"
+      rows[#rows + 1] = o.paint("  " .. entry.text, style)
+    end
   end
   return rows
 end
@@ -713,7 +931,9 @@ function M.tail_rows(model, width, options)
   local operation_rows, operation_hidden
   if operation then
     value, value_hidden = M.operation_preview(operation, width, o), 0
-    operation_rows, operation_hidden = M.result_rows(model, width, o)
+    -- The fold under the preview is the WHOLE object as the node carried it (ids, paths, timing and
+    -- all): never drawn by default, always explorable (Victor 21/11).
+    operation_rows, operation_hidden = M.raw_rows(model.value, o), 0
   end
   -- A script that failed with no value has already said why on its ✗ row: the answer row would be
   -- the same code twice, one line apart.
@@ -739,11 +959,11 @@ function M.tail_rows(model, width, options)
   -- is NOT folded here: the operator asked for its first lines ("results are a compact preview"), and
   -- the whole object rides on the same `rows.expand` below.
   if not operation and o.expandable and #rows > 1 then
-    local whole = table.concat(value, " ")
+    local whole = value.whole or table.concat(value, " ")
     local room = math.max(8, width - 5 - 16)
     local shown = M.wrap(whole, room, o)[1] or ""
     local rest = o.columns(whole) - o.columns(shown)
-    local full = table.concat(rows, "\n")
+    local full = value.whole or table.concat(M.raw_rows(model.value, o), "\n")
     rows = { o.paint(lead, "muted") .. o.paint(shown, style) .. o.paint(" \226\128\166 +" .. rest .. " chars", "muted") }
     rows.expand = { [1] = full }
   end
@@ -792,7 +1012,8 @@ function M.summary(model, width, options)
   local parts = { "\226\143\186 " .. (names ~= "" and (names .. " " .. mark) or mark) }
   if model.seconds then parts[#parts + 1] = o.elapsed(model.seconds * 1000) end
   local text = table.concat(parts, " \194\183 ")
-  local value = M.hide_evidence(model.value)
+  local value = M.decoded(model.value)
+  if type(value) == "table" then value = M.hide_evidence(M.readable(value, o)) end
   local shown
   if model.value ~= nil then
     shown = (type(value) == "string") and value or o.encode(value)

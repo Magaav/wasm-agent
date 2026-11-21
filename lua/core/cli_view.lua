@@ -3111,7 +3111,8 @@ function METHODS:event(event)
       elseif event.state == "pending" then
         codemode_block.pending(model, id, event.op)
       else
-        codemode_block.settle(model, id, { ok = event.ok ~= false, ms = event.ms, error = event.error, code = event.code })
+        codemode_block.settle(model, id, { ok = event.ok ~= false, ms = event.ms, error = event.error,
+          code = event.code, output = event.output })
       end
       self:codemode_sync()
       if self.pending then self:paint() end
