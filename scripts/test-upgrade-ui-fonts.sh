@@ -39,16 +39,20 @@ checks=0; failed=0
 ok()  { checks=$((checks + 1)); printf '  ok   %s\n' "$*"; }
 bad() { checks=$((checks + 1)); failed=$((failed + 1)); printf '  FAIL %s\n' "$*"; }
 
-# A scratch home that is not the operator's: the guard every row here relies on.
-case "${HOME:-}" in
-  '') echo "REFUSED uifonts: HOME is not set, so a scratch home cannot be proven distinct" >&2; exit 2 ;;
-esac
-if [ -z "${WASM_AGENT_HOME:-}" ] || [ "${WASM_AGENT_HOME}" = "${HOME}" ] \
-   || [ "${WASM_AGENT_HOME}" = "${HOME}/.wasm-agent" ] \
-   || [ "${WASM_AGENT_HOME#${HOME}/.wasm-agent/}" != "${WASM_AGENT_HOME}" ]; then
-  echo "REFUSED uifonts: WASM_AGENT_HOME (${WASM_AGENT_HOME:-unset}) must be a scratch home, not $HOME or its store" >&2
-  exit 2
-fi
+# THE SCRATCH-HOME RULE, in the one place every test that gives a node a home agrees on it
+# (scripts/lib/scratch-home.sh). The hand-written comparison that stood here was WRONG: the land gate's own
+# discriminator runs every row with HOME and WASM_AGENT_HOME set to the SAME scratch directory (the node rewrites
+# HOME from WASM_AGENT_HOME at startup, so inside a node they are equal by construction), and refusing that
+# refused the GATE rather than a real node - measured 21/11, the landing blocked with "must be a scratch home".
+. "$ROOT/scripts/lib/scratch-home.sh"
+# AND THE HOME THIS TEST GIVES ITS NODES IS ONE IT MADE, under a root the shared rule found outside the operator
+# store (scripts/test-fast-watchdog.sh does the same). The caller's WASM_AGENT_HOME is never adopted: the land
+# gate's discriminator sets HOME and WASM_AGENT_HOME to the same scratch directory, and a test that acted there
+# would act in whatever home the caller named.
+scratch_root="$(wa_scratch_root wa-upgrade-ui-fonts)" || exit 2
+mkdir -p "$scratch_root"
+SCRATCH_HOME="$(mktemp -d "$scratch_root/home.XXXXXX" 2>/dev/null)" || { echo "REFUSED uifonts: a scratch home could not be made under $scratch_root" >&2; exit 2; }
+wa_scratch_home_guard "$SCRATCH_HOME" || exit 2
 
 # THE RELEASE TREE: the ui/ a commit ships, with the faces, plus the scripts upgrade.sh insists are beside it.
 make_release() { # dir release-id [with-fonts]
@@ -198,12 +202,12 @@ run_upgrade() { # install release-tree
     WA_INSTALL_DIR="$1" WA_PORT="$WA_TEST_PORT" WA_SENTINEL_SCRIPTS="$WORK/no-sentinel" \
     WA_WATCHDOG=1 WA_TEST_PORT="$WA_TEST_PORT" WA_TEST_PIDS="$PIDS" \
     WA_IDLE_TIMEOUT=5 WA_UPGRADE_IDLE_POLL=1 \
-    WASM_AGENT_HOME="$WORK/home" WA_HOME_BEFORE_OVERRIDE="$WORK/home" \
+    WASM_AGENT_HOME="$SCRATCH_HOME" WA_HOME_BEFORE_OVERRIDE="$SCRATCH_HOME" \
     PATH="$STUB:$PATH" \
     bash "$2/scripts/upgrade.sh" "$CANDIDATE" 2>&1
 }
 
-mkdir -p "$WORK/home"
+# $SCRATCH_HOME was made and guarded above; nothing here adopts the caller's home.
 
 # ONE FREE PORT for the whole run, asked of the kernel rather than guessed: every upgrade below starts its
 # stub node on it, and upgrade.sh's own listener check reads the pid that ends up there.

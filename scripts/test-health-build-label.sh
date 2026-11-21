@@ -31,14 +31,18 @@ checks=0; failed=0
 ok()  { checks=$((checks + 1)); printf '  ok   %s\n' "$*"; }
 bad() { checks=$((checks + 1)); failed=$((failed + 1)); printf '  FAIL %s\n' "$*"; }
 
-# The scratch-home rule, in the one place every test agrees on it.
+# The scratch-home rule, in the one place every test agrees on it. The home this test gives its node is
+# WASM_AGENT_HOME when the caller set one: the land gate's discriminator sets HOME and WASM_AGENT_HOME to the SAME
+# scratch directory, and a rule that refused that refused the gate instead of a real node (measured 21/11).
 . "$ROOT/scripts/lib/scratch-home.sh"
-SCRATCH_HOME="$WORK/home"
-mkdir -p "$SCRATCH_HOME"
+# THE HOME THIS NODE GETS IS ONE THIS TEST MADE, under a root the shared rule found OUTSIDE the operator store
+# (scripts/test-fast-watchdog.sh does the same). It never adopts the caller's WASM_AGENT_HOME: the land gate's
+# discriminator sets HOME and WASM_AGENT_HOME to the SAME scratch directory, and acting in it would be acting in
+# whatever home the caller named (measured 21/11: a hand-written comparison refused that and blocked the gate).
+scratch_root="$(wa_scratch_root wa-health-build-label)" || exit 2
+mkdir -p "$scratch_root"
+SCRATCH_HOME="$(mktemp -d "$scratch_root/home.XXXXXX" 2>/dev/null)" || { echo "REFUSED healthlabel: a scratch home could not be made under $scratch_root" >&2; exit 2; }
 wa_scratch_home_guard "$SCRATCH_HOME" || exit 2
-case "${WASM_AGENT_HOME:-}" in
-  ''|"${HOME}") echo "REFUSED healthlabel: WASM_AGENT_HOME must be a scratch home" >&2; exit 2 ;;
-esac
 
 echo "--- 1. the source: /health reads the install's name NOW, and the binary registers the recipe ---"
 if grep -q '"build": crate::host::live_build_label()' "$ROOT/rust/wa-capabilities/src/serve.rs"; then
