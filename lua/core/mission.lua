@@ -172,7 +172,7 @@ M=$(cd "$(dirname "$0")" && pwd -P) || exit 97
 . "$M/env" || exit 98
 cd "$M" || exit 96
 [ "$(hostname -s 2>/dev/null || uname -n)" = "$NODE" ] || { echo "mission: launched on the wrong node (want $NODE)" >&2; exit 95; }
-export WASM_AGENT_RAW_CODE=codemode
+unset WASM_AGENT_RAW_CODE  # native run(code=...) is the one execution path (Victor 21/11); never inherit another
 export RUSTUP_HOME="$TOOLCHAIN/rustup" CARGO_HOME="$TOOLCHAIN/cargo"
 export PATH="$TOOLCHAIN/cargo/bin:$PATH"
 export CARGO_TARGET_DIR="$TARGET"
@@ -545,7 +545,7 @@ export WA_MISSION_CHILD=1
 M=$(cd "$(dirname "$0")" && pwd -P) || exit 97
 . "$M/env" || exit 98
 cd "$M" || exit 96
-export WASM_AGENT_RAW_CODE=codemode
+unset WASM_AGENT_RAW_CODE  # native run(code=...) is the one execution path (Victor 21/11); never inherit another
 export RUSTUP_HOME="$TOOLCHAIN/rustup" CARGO_HOME="$TOOLCHAIN/cargo"
 export PATH="$TOOLCHAIN/cargo/bin:$PATH"
 export CARGO_TARGET_DIR="$TARGET"

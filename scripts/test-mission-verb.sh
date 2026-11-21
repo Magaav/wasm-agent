@@ -69,6 +69,11 @@ for f in env prompt.md run.sh; do [ -s "$M/$f" ] || fail "launch did not write $
 head -1 "$M/prompt.md" | grep -q "^mission demo in " || fail 'the prompt does not start with the marker'
 ok
 has "$(cat "$M/env")" "BRANCH='change/demo'" 'the env names the branch'
+# The runner never picks an execution path of its own: native run(code=...) is the one path (Victor 21/11).
+grep -q '^export WASM_AGENT_RAW_CODE' "$M/run.sh" && fail 'run.sh exports WASM_AGENT_RAW_CODE (a second execution path)'
+ok
+grep -q '^unset WASM_AGENT_RAW_CODE' "$M/run.sh" || fail 'run.sh does not clear an inherited WASM_AGENT_RAW_CODE'
+ok
 out=$(mission launch demo HEAD --wa "$WORK/bin/stub-wa" 2>&1)
 has "$out" 'already_staged' 'a staged mission is not launched twice'
 
