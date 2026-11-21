@@ -66,9 +66,10 @@ pids it started. Nothing here touches `~/.config`, `~/.local/share/fonts` or the
 - **The installed `ui/` on this machine is still the 16/11 copy.** `d72f74da` fixes the installer; it does not
   (and must not) rewrite what the running node serves. The node will pick the faces up at the next deploy.
   Nothing here "restored" a file it found changed.
-- **Pre-existing failures on this node**, identical on a worktree at the base commit: `scripts/test-watchdog.sh`
-  (`test result: FAILED. 7 passed; 2 failed` in the crate's tests, `test-watchdog: FAILED (1 step(s))`). Not
-  caused by this branch, not fixed here.
+- **Pre-existing failures on this node**, each reproduced in a worktree at `bfad4f8f` with the same words,
+  not caused by this branch and not fixed here: `scripts/test-watchdog.sh` (`test result: FAILED. 7 passed; 2
+  failed` in the crate's tests, `test-watchdog: FAILED (1 step(s))`), `scripts/test-watchdog-upgrade.sh`
+  (`FAILED (5 check(s))`), and `scripts/test-deploy-record.sh` (`wa_build_info: command not found`).
 - **`scripts/install.ps1`'s `$uiNames`** already lists `fonts.css` and `fonts/*` (unchanged), and
   `scripts/package-windows.ps1`/`release-package.ps1` already package them - the Windows install path needed no
   change; the Linux `upgrade.sh` closure was the hole.
