@@ -1,0 +1,162 @@
+/// The vocabulary of agent control: what a child is, where it is in its life, and what it left behind.
+///
+/// Every word here is stable, and two of them carry the rules this package exists for:
+///
+/// * **unknown is a state, never a synonym.** A run whose fate the node cannot prove - its record was
+///   not read, its node went away, its journal is unreadable - is UNKNOWN, and a caller that treats it
+///   as done, cancelled or failed is asserting something nobody measured.
+/// * **age-ms rather than a timestamp alone.** A view that says "running" about a child nobody has
+///   heard from in an hour is a lie of omission; the age is what turns a state into evidence.
+///
+/// Node identity and the error vocabulary are the fabric's (wa:fabric, wit/agent-control/deps/fabric):
+/// a child placed on a peer is addressed by the same node-id a heartbeat carries, and a refusal is the
+/// same error a fabric call returns, so one log line and one counter key mean the same thing on both
+/// seams. Nothing is re-declared here that the fabric already declares.
+package wa:agent-control@0.1.0;
+
+interface types {
+    use fabric.types.{error, node-id};
+
+    /// One conversation, as the node that owns it names it.
+    type session-id = string;
+
+    /// The control handle of one child: a forked session, a spawned worker, a subagent run. It is what
+    /// cancel, resume, message, collect and events take, and it outlives the run it names.
+    type child-id = string;
+
+    /// Where a child is in its life.
+    ///
+    /// An allow-list: a state that is not one of these is not reported here. CANCELLING is distinct from
+    /// CANCELLED because a cancel is a request until the run really ends - the difference the caller
+    /// acts on (wait, or stop waiting).
+    enum child-state {
+        /// Admitted, not yet running: the queue or the destination holds it.
+        queued,
+        running,
+        /// The cancel was accepted and the run has not ended yet.
+        cancelling,
+        cancelled,
+        completed,
+        failed,
+        /// The node cannot prove what happened. Never folded into another state.
+        unknown,
+    }
+
+    /// What an event says happened. DONE carries the run's own exit status (rc) - a run that ends
+    /// without one says so by leaving it absent rather than by reporting zero.
+    enum event-kind {
+        started,
+        /// The child committed in its own checkout: commits carries what, empty when it did not.
+        commit,
+        failed,
+        done,
+    }
+
+    /// One commit a child made, read from its checkout.
+    record commit {
+        sha: string,
+        subject: string,
+        at-ms: u64,
+    }
+
+    /// One way a child failed, as data: the caller decides what it means.
+    record failure {
+        /// The stable word for the cause (timeout, cancel, provider, refused, or one this generation
+        /// does not know).
+        kind: string,
+        detail: string,
+        at-ms: u64,
+    }
+
+    /// What to spawn: one bounded task, and the bounds it runs under.
+    ///
+    /// idempotency-key makes a retried spawn the same child rather than a second one; absent, every call
+    /// is a new child.
+    record brief {
+        /// The task, in the caller's own words. Required: a child with no brief has no scope.
+        prompt: string,
+        /// The profile that decides tools, budgets and prompt. Absent means the default profile.
+        profile: option<string>,
+        /// What the child needs to know that is not in the prompt.
+        context: option<string>,
+        /// The commit or ref the child's own checkout is cut from.
+        base: option<string>,
+        model: option<string>,
+        reasoning: option<string>,
+        idempotency-key: option<string>,
+        timeout-ms: option<u64>,
+        max-tokens: option<u64>,
+    }
+
+    /// One child, as its parent sees it: identity, the link to its parent, its state and its cost.
+    record child {
+        id: child-id,
+        /// The child's own session.
+        session: session-id,
+        /// The session that started it: with parent-run this is the parent-to-child link, so a list of
+        /// these records is the tree.
+        parent-session: session-id,
+        /// The parent's run that admitted it. Empty for a fork, which has a parent session only.
+        parent-run: string,
+        /// Where it runs.
+        node: node-id,
+        /// 1 for a child of a root session. A child may not spawn children; depth 2 is refused.
+        depth: u8,
+        state: child-state,
+        profile: string,
+        /// Readable at a glance: the brief's first line, or the fork's source title.
+        title: string,
+        created-at-ms: u64,
+        started-at-ms: option<u64>,
+        settled-at-ms: option<u64>,
+        /// Model rounds it has taken.
+        rounds: u32,
+        tokens: u64,
+        /// How old this observation is, in milliseconds. A large age on RUNNING is a fact about the
+        /// child, not about the caller's clock.
+        age-ms: u64,
+    }
+
+    /// One thing that happened to a child, in order. seq is the cursor: it never goes backwards, and it
+    /// is what events(after) resumes from.
+    record event {
+        seq: u64,
+        id: child-id,
+        kind: event-kind,
+        at-ms: u64,
+        /// The child's state at this point, so a reader that joins halfway does not guess.
+        state: child-state,
+        /// The cause word for FAILED, or what the child said it was doing.
+        detail: option<string>,
+        /// The run's exit status, on DONE only, and only when the run really had one.
+        rc: option<s32>,
+        commits: list<commit>,
+        rounds: option<u32>,
+        tokens: option<u64>,
+    }
+
+    /// A child's settled result, as data: its answer, what it committed, what it touched, how it failed.
+    ///
+    /// A report of measurements, never new authority: nothing in it permits a merge, a deploy, a
+    /// permission change or unrelated work.
+    record answer {
+        id: child-id,
+        state: child-state,
+        /// What the child answered, bounded. Absent for a run that produced no answer - which is
+        /// unreported, not empty.
+        reply: option<string>,
+        /// True when reply was clipped to the bound. A clipped answer says so.
+        reply-truncated: bool,
+        commits: list<commit>,
+        /// Paths the child's own record says it wrote, relative to its checkout.
+        files: list<string>,
+        failures: list<failure>,
+        rc: option<s32>,
+        rounds: u32,
+        tokens: u64,
+        /// Whether the provider measured this run's usage at all. False with usage-reason set is
+        /// "not measured", never a zero that reads like a free run.
+        usage-available: bool,
+        usage-reason: option<string>,
+    }
+}

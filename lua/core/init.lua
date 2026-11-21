@@ -609,6 +609,49 @@ elseif command == "turns" then
   local code = dofile("lua/core/turnfeed_cli.lua").run(args)
   if code and code ~= 0 then os.exit(code) end
 
+elseif command == "mission" then
+  -- The mission loop as one verb (item 2 of change/mastermind): launch, start, resume, status, stop, on
+  -- the agent-control API. The behaviour is scripts/mission.sh's - liveness is the NODE's run, one answer
+  -- permits a start, one fresh session per launch, a done file with the rc - and the missions root is
+  -- configurable (MISSION_ROOT, then MISSIONS_DIR, then ~/Work/missions), so a test never touches the
+  -- operator's own root.
+  local mission = dofile("lua/core/mission.lua")
+  local verb = tostring(args[2] or "")
+  local flags = {}
+  local positional = {}
+  -- A flag takes the value after it when that word is not itself a flag, so --wa <path> and --wa=<path>
+  -- are the same request; a bare flag stays true.
+  local index = 3
+  while index <= #args do
+    local word = tostring(args[index])
+    local key, value = word:match("^%-(%-[%w%-]+)=(.*)$")
+    if word:match("^%-%-[%w%-]+$") and args[index + 1] and not tostring(args[index + 1]):match("^%-%-") then
+      flags[word:sub(3)] = tostring(args[index + 1]); index = index + 2
+    elseif word:match("^%-%-") then flags[word:sub(3)] = true; index = index + 1
+    else positional[#positional + 1] = word; index = index + 1 end
+  end
+  local ctx = { user_id = "master", role = "master", session_id = host.getenv("WA_SESSION") or "" }
+  local request = { name = positional[1], base = positional[2], root = flags.root,
+    message = flags.msg or flags.message, force = flags.force == true,
+    repository = flags.repo or flags.repository, wa = flags.wa,
+    wait_seconds = tonumber(flags["wait-seconds"]) }
+  local result
+  if verb == "launch" then
+    if not request.name or not request.base then
+      print("usage: wa mission launch <name> <base> [--root <dir>] [--repo <path>]")
+      os.exit(2)
+    end
+    result = mission.launch(request, ctx)
+  elseif verb == "start" then result = mission.start(request, ctx)
+  elseif verb == "resume" then result = mission.resume(request, ctx)
+  elseif verb == "status" then result = mission.status(request, ctx)
+  elseif verb == "stop" then result = mission.stop(request, ctx)
+  else
+    print("usage: wa mission launch <name> <base> | start <name> | resume <name> [--msg <text>] | status [name] | stop <name>")
+    os.exit(2)
+  end
+  print(json.encode(result))
+  if type(result) == "table" and result.error then os.exit(1) end
 elseif command == "help" then
   print("wa [chat] [--continue|-c|--resume <id>] [prompt]  |  remember <text> | recall <query>")
   print("    memories | forget <id>")
@@ -643,6 +686,7 @@ elseif command == "help" then
   print("    land --ready | --branches a,b [--dry-run] [--no-deploy]  the whole landing pipeline as one")
   print("                                 resumable machine: merge, gate, push, main, artifacts, publish, deploy")
   print("    land --resume | status [--run <id>] | ready <branch> <sha>  continue, read, or record a READY line")
+  print("    mission launch <name> <base> | start | resume [--msg] | status | stop  the mission loop, on the agent-control API")
 else
   print("unknown command: " .. tostring(command))
   os.exit(2)

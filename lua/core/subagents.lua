@@ -998,6 +998,30 @@ function wa_subagents(body, session)
     run_id = "",
     node_id = "",
   }
+  -- The agent-control API is the ONE entry the HTTP surface uses for the verbs it defines
+  -- (wit/agent-control): a caller driving this node over HTTP and a caller driving it from inside a
+  -- session reach the same implementation, so a child cannot read "running" here and "done" there. Every
+  -- other action keeps its native route unchanged, so nothing that worked before this moved.
+  local control = dofile("lua/core/agent_control.lua")
+  local action = tostring(decoded.action or "")
+  -- An events call with no id is the SESSION's stream (agent-control); with an id it stays the native
+  -- per-child journal page it always was, so no existing reader is touched.
+  local session_events = action == "events" and (decoded.id == nil and decoded.subagent_id == nil)
+  if action == "fork" or action == "spawn" or action == "collect" or action == "tree"
+      or action == "resume_child" or session_events or action == "cancel" or action == "message_to_child" then
+    local ok, result = pcall(function()
+      if action == "fork" then return control.fork(decoded, ctx) end
+      if action == "spawn" then return control.spawn(decoded, ctx) end
+      if action == "collect" then return control.collect(decoded, ctx) end
+      if action == "tree" then return control.list(decoded, ctx) end
+      if session_events then return control.events(decoded, ctx) end
+      if action == "cancel" then return control.cancel(decoded, ctx) end
+      if action == "message_to_child" then return control.message(decoded, ctx) end
+      return control.resume(decoded, ctx)
+    end)
+    if not ok then return json.encode({ error = redact.text(tostring(result)) }) end
+    return json.encode(result)
+  end
   local ok, result = pcall(M.control, decoded, ctx)
   if not ok then
     return json.encode({ error = redact.text(tostring(result)) })

@@ -1,0 +1,91 @@
+/// The one agent-control API: fork, spawn, events, collect, cancel, resume, message, list.
+///
+/// This package is the contract, not a second implementation. Every function here is served by
+/// lua/core/agent_control.lua, which is what the model's subagent tool, the HTTP control route
+/// (POST /subagents), the CLI (wa mission, wa subagents) and the fabric bridge call - one code path, so
+/// the in-CLI master, Fleet View and an external harness cannot disagree about what a child is doing.
+///
+/// Two shapes are deliberate:
+///
+/// * **supervising is not polling.** events is a stream because a parent must learn that a child started,
+///   committed, failed or finished without spending a model round asking. There is no status function
+///   here to poll in a loop: a caller that has read the stream to its end calls list again, which is one
+///   observation of the whole tree and not a poll of one child.
+/// * **collect answers as data.** The answer of a settled child is a record - reply, commits, files,
+///   failures, rc, rounds, tokens and whether usage was measured - so judging a child never needs its
+///   transcript and never needs a second inference.
+///
+/// A child does not spawn children: spawn refuses depth 2 by name (subagent_recursion_forbidden), and a
+/// spawner holds a deadline, a depth guard and a descriptor limit so a failing child cannot fan out.
+package wa:agent-control@0.1.0;
+
+interface control {
+    use types.{
+        answer, brief, child, child-id, commit, error, event, event-kind, failure, session-id,
+    };
+
+    /// Fork this session: a new session with the same context up to a boundary point, linked to this one
+    /// as its child from the moment it exists.
+    ///
+    /// before-seq is the last message the fork inherits; absent means the parent's newest settled message.
+    /// A fork is a conversation, not a background worker: it is created idle, appears in list at once, and
+    /// is answered on its own turns.
+    fork: func(session: session-id, before-seq: option<u64>) -> result<child, error>;
+
+    /// Spawn a fresh child with its own brief and its own session folder, on this node or another one.
+    ///
+    /// node absent means this node. A spawn on a peer goes through the fabric placement, and a placement
+    /// that cannot reach the peer inside its window runs here instead of failing (wa:fabric). The refusal
+    /// names the cause: subagent_recursion_forbidden at depth 2, node_full when a destination has no room
+    /// right now (retryable), a capability refusal otherwise - and a refusal that proves nothing started
+    /// says not-started, so the caller knows a retry cannot duplicate the child.
+    spawn: func(brief: brief, node: option<string>) -> result<child, error>;
+
+    /// Everything that happened to the children this session owns, after a cursor, as a stream.
+    ///
+    /// One stream for the whole tree rather than one per child, because that is what a supervisor needs:
+    /// a started, a commit, a real failure and a done with its rc arrive as events, in order, with the
+    /// child's id, and the parent never asks the model what happened. after is the last seq the caller
+    /// processed (0 for the beginning); the stream is resumable from it, including after a restart, and
+    /// ends only when the supervisor is cancelled or the node stops.
+    events: func(after: option<u64>) -> stream<event>;
+
+    /// What a settled child did, as data. Refuses while the child is still running, naming its state:
+    /// reading a run as finished because the caller asked early is the mistake this refusal prevents.
+    collect: func(id: child-id) -> result<answer, error>;
+
+    /// Cancel a child and make the run really end.
+    ///
+    /// The call is the request; the state goes CANCELLING and then CANCELLED only when the run has
+    /// stopped (its interpreter is cancelled, its provider socket closed, its checkout released). A run
+    /// that will not stop is reported UNKNOWN, never cancelled.
+    cancel: func(id: child-id) -> result<child-state, error>;
+
+    /// Resume a settled child's conversation with one more message - the run it starts is a new run of
+    /// the same child, and its result is collected the same way.
+    ///
+    /// idempotency-key is required here and not optional: a resume whose answer was never received must
+    /// not run the message twice.
+    resume: func(id: child-id, message: option<string>, idempotency-key: string) -> result<child, error>;
+
+    /// Send a child one message without resuming a finished run: steering a live child, or a follow-up
+    /// instruction. delivery says what happened to it (delivered, queued, refused with a reason).
+    message: func(id: child-id, text: string) -> result<string, error>;
+
+    /// The children this session started, newest first: each with its parent link, state, rounds, tokens
+    /// and age - the tree Fleet View draws and the parent's status bar summarises in one line.
+    ///
+    /// session absent means this session; naming another one is allowed only for a session this caller
+    /// owns (session isolation, finding 4), and a session it does not own is refused by name.
+    list: func(session: option<session-id>) -> list<child>;
+}
+
+/// A supervisor: the parent that forks, spawns and watches.
+world supervisor {
+    import control;
+}
+
+/// The node's own view of one child, for an operator surface (Fleet View) and for the parent status bar.
+world agent-tree {
+    import control;
+}
