@@ -833,6 +833,7 @@ fi
 # The deploy's retirement rule: a shipped script main deleted must not survive in the install (measured
 # 2026-11-11: the removed Node WhatsApp bridge stayed installed beside the new set).
 check deploy-prune bash scripts/test-deploy-prune.sh
+check prune-kept-binaries bash scripts/test-prune-kept-binaries.sh
 # The per-row watchdog (item 6 of the node-ops round): a hung row is NAMED and its whole process group
 # dies with it. Measured 18/11 on avell: a row whose fixture forked a long sleep child outlived the row
 # every time, because the bare timeout ends only the process it was given. Seconds, scratch home, no node.
