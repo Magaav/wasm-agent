@@ -570,6 +570,29 @@ wa_node_binary_download() {
   tag="$(wa_node_release_tag "$commit")" || { printf 'node_commit_invalid: %s\n' "$commit" >&2; return 2; }
   short="${tag#node-}"
   entry="$(wa_node_cache_entry "$cache_root" "$commit" "$triple")"
+  # A COMPLETE ENTRY IS NOT FETCHED AGAIN (21/11, hand fix 3). The caller that made this matter is
+  # scripts/release-install.sh: a node with no tree re-runs it for the same commit (an interrupted
+  # install, a retry, a rollback then forward), and every run re-fetched the manifest, the signature and
+  # both binaries into the same cache directory it already had. The entry is trusted only when the
+  # .complete marker's own sha256 still matches the bytes and the manifest still names this commit and
+  # this triple - the same facts the fetch would prove, proved again from disk, so a cache edited by
+  # hand is not an install. A missing +x is repaired here too: entries written before this fix are
+  # complete and unpinned, and upgrade.sh refuses a candidate without the bit.
+  if [ -f "$entry/.complete" ] && [ -f "$entry/wa-$triple-$short" ] \
+    && [ -f "$entry/node-$short.manifest" ] \
+    && [ "$(wa_node_manifest_value "$entry/node-$short.manifest" source_commit)" = "$commit" ]; then
+    local cached_sha cached_want
+    cached_sha="$(wa_node_sha256 "$entry/wa-$triple-$short" 2>/dev/null)"
+    cached_want="$(awk '{print $3}' "$entry/.complete" 2>/dev/null)"
+    if [ -n "$cached_sha" ] && [ "$cached_sha" = "$cached_want" ]; then
+      for file in "wa-$triple-$short" "wa-sentinel-$triple-$short"; do
+        [ -f "$entry/$file" ] || continue
+        [ -x "$entry/$file" ] || chmod +x "$entry/$file" 2>/dev/null || true
+      done
+      printf '%s\n' "$entry"
+      return 0
+    fi
+  fi
   tmp="$cache_root/.incoming.$$.$triple"
   for stale in "$cache_root"/.incoming.*; do
     [ -d "$stale" ] || continue
@@ -619,6 +642,18 @@ wa_node_binary_download() {
     printf '%s\n' "$out" >&2
     return "$rc"
   fi
+  # VERIFY FIRST, THEN +x (21/11, hand fix 3 of the node-7ddbfa98036a rollout). A release asset arrives
+  # with whatever mode the upload carried - 100644 for these two - and scripts/upgrade.sh refuses a
+  # candidate that is not executable, so release-install.sh on a tree-less node could never install
+  # what it had just verified: the one path that exists for a node with no toolchain never worked end
+  # to end. The chmod comes AFTER the signature and every pin, so nothing is made executable that this
+  # node has not already accepted, and a chmod that fails is a named refusal now rather than a
+  # misleading message from upgrade.sh later.
+  for file in "wa-$triple-$short" "wa-sentinel-$triple-$short"; do
+    [ -f "$tmp/$file" ] || continue
+    chmod +x "$tmp/$file" 2>/dev/null \
+      || { rm -rf "$tmp"; printf 'node_not_executable: %s could not be made executable\n' "$file" >&2; return 8; }
+  done
   rm -rf "$entry"
   mkdir -p "$(dirname "$entry")" 2>/dev/null
   mv "$tmp" "$entry" || { rm -rf "$tmp"; printf 'node_cache_unwritable: %s\n' "$entry" >&2; return 8; }
@@ -736,6 +771,18 @@ wa_node_release_digest_search() {
     rm -rf "$entry"
     mkdir -p "$(dirname "$entry")" 2>/dev/null
     mv "$tmp" "$entry" || { rm -rf "$tmp"; printf 'node_cache_unwritable: %s\n' "$entry" >&2; return 8; }
+    # VERIFY FIRST, THEN +x (21/11, hand fix 3 of the node-7ddbfa98036a rollout). A release asset arrives
+    # with whatever mode the upload carried - 100644 for these two - and scripts/upgrade.sh refuses a
+    # candidate that is not executable, so release-install.sh on a tree-less node could never install
+    # what it had just verified: the one path that exists for a node with no toolchain never worked end
+    # to end. The chmod comes AFTER the signature and every pin, so nothing is made executable that this
+    # node has not already accepted, and a chmod that fails is a named refusal now rather than a
+    # misleading message from upgrade.sh later.
+    for file in "wa-$triple-$short" "wa-sentinel-$triple-$short"; do
+      [ -f "$entry/$file" ] || continue
+      chmod +x "$entry/$file" 2>/dev/null \
+        || { rm -rf "$entry"; printf 'node_not_executable: %s could not be made executable\n' "$file" >&2; return 8; }
+    done
     printf '%s %s %s\n' "$short" "$triple" "$(wa_node_sha256 "$entry/wa-$triple-$short")" > "$entry/.complete" \
       || { printf 'node_cache_unwritable: %s\n' "$entry" >&2; return 8; }
     printf '%s\nrelease_tag=%s\nrelease_commit=%s\n' "$entry" "$tag" "$source"

@@ -568,6 +568,15 @@ gate_run bash scripts/test-deploy-components-shipped.sh
 # side (verify, cache, the refusals, the disk-conditioned fallback, and the order of the calls inside
 # scripts/deploy.sh) and the publish side (--check, --from, every way a manifest can be wrong).
 gate_run bash scripts/test-deploy-node-binaries.sh
+# THE VERIFIED BYTES MUST BE INSTALLABLE (21/11, hand fix 3 of the node-7ddbfa98036a rollout). A release asset
+# arrives 0644; wa_node_binary_download verified the signature, every sha256 and every size and left the bit off,
+# and scripts/upgrade.sh refuses a candidate without it ("no new binary to install") - so release-install.sh, the
+# one path for a node with no tree and no toolchain, could never install what it had just verified. It also
+# re-downloaded the whole release into the same cache on every run. This test serves a signed fixture release
+# from a local directory, downloads it with the real lib, asserts the +x and the unchanged bytes, hands the
+# candidate to the REAL upgrade.sh as its own process, and proves a complete cache entry is reused rather than
+# fetched again (and that a hand-edited entry is not).
+gate_run bash scripts/test-release-install-exec.sh
 gate_run bash scripts/test-node-binaries.sh
 # The glibc floor at both ends: the bytes an artifact needs against the libc the installing host has
 # (18/11, mail: a published binary needed GLIBC_2.39 on a glibc 2.35 node and was down two days). Hermetic -
@@ -925,9 +934,25 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-update-watcher.lua" "$BIN" --db "$D
 # feed: no network, no clock. It is here because a node that cannot say "I am behind" updates only
 # when someone remembers to.
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-release.lua" "$BIN" --db "$DB.release" | grep "release ok"
+# THE TRUST SET, WRITTEN BY THE COMMAND THAT READS IT (21/11, hand fix 2 of the node-7ddbfa98036a rollout).
+# Nothing in wa wrote a trusted-keys file, so an operator wrote one by hand and, without the
+# "wa-trusted-keys v1" header, every release on that node refused as release_unsigned_or_forged. This runs the
+# real binary against a scratch HOME: the header is written, the file is read back through the same parser a
+# verification uses, the replaced file is kept, an unreadable one is never overwritten, a retire removes the
+# key, and the fleet door refuses an unknown node by name instead of reporting success. Its source rows make it
+# discriminate without a built binary as well.
+gate_run bash scripts/test-release-trust.sh "$BIN"
 # The route's two modes on a fixture install: a read-only check (no sentinel, no request written) and
 # a deploy path that reports the cached release state without paying for a fetch.
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-update-release.lua" "$BIN" --db "$DB.update-release" | grep "update release ok"
+# A NODE WITH NO TREE, AND THE TWO COMMANDS AN OPERATOR TYPES AT IT (21/11, hand fix 4). "wa update <node>
+# --binary" answered no_runtime_tree about a tree the mode never wanted, while the documented release path was
+# one word away; and "wa update --check" said "no tree or release record to compare with" while installed.txt
+# held a stale hand rollback - naming neither the record nor the command that moves such a node. The fixture
+# process runs from a scratch cwd with a fixture install, so it IS tree-less (update.runtime_tree answers
+# runtime-worktree.txt, then a cwd holding rust/Cargo.toml), and nothing in the module is stubbed.
+gate_run bash -c 'd=$(mktemp -d); mkdir -p "$d/cwd" "$d/install"; cd "$d/cwd" || exit 1; WASM_AGENT_LUA_ROOT="$1" WASM_AGENT_HOME="$d" WA_INSTALL_DIR="$d/install" WA_SCRIPT="$1/scripts/test-update-treeless.lua" "$2" --db "$d/db"' _ "$WASM_AGENT_LUA_ROOT" "$BIN" > "$DB.treeless.log" 2>&1
+grep -q "update treeless ok" "$DB.treeless.log" || { tail -12 "$DB.treeless.log" >&2; exit 1; }
 # The pre-update backup skips every lock file the Rust sources open (binding.transport.sqlite broke /update, 04/11).
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-backup-locks.lua" "$BIN" --db "$DB.backup-locks" | grep "backup locks ok"
 # The same decisions through the route, on a node whose install dir is a fixture. Its sentinel is a
@@ -2460,6 +2485,12 @@ gate_run bash scripts/test-deploy-self-ship.sh
 # ledger did not see it either, because it only looked at .mjs/.cjs/.js test scripts. Both halves are here
 # now: the row below, and the ledger's own extension to .sh test files.
 gate_run bash scripts/test-deploy-runtime-recheck.sh
+# WHICH node a deploy runs, and a named refusal when there is none (21/11, hand fix 1 of the node-7ddbfa98036a
+# rollout). A remote "wa update <node> --binary" runs deploy.sh from the node's serve operation, whose PATH has no
+# user Node install, and step 0c died with "node: command not found" - so this runs the REAL deploy.sh as a
+# separate process with a PATH that carries no node at all, and observes which node ran through a wrapper's
+# marker file. It also refuses by name (node_runtime_missing) and names every place it looked.
+gate_run bash scripts/test-node-runtime.sh
 # The residue pass on the deploy record: the on-main rule may not be waived by WA_INSTALL_DIR (it was), the
 # knob is read by value (0 used to be ON), and a killed run's staged copies are collected under a bound
 # (a 248 MB sentinel image could sit there for ever). check-deploy-docs fails when the doc, the skill and the

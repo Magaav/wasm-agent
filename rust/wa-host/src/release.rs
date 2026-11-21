@@ -314,25 +314,240 @@ pub fn verify_release_at(sums_path: &Path, signature: Option<&Path>, extra: &[Pa
     Ok(signature.key)
 }
 
+/// `wa release trust-key <id> <hex> [--file <path>]` and `wa release trust-key <id> --retire [--file <path>]`
+///
+/// The operator's own command about this node's trust set. Dispatched before the interpreter boots for the
+/// same reason `verify` is: the callers are the deploy paths, and a node whose Lua tree is broken must
+/// still be able to say which keys it trusts.
+///
+/// WHY IT EXISTS (21/11, hand fix 2 of the node-7ddbfa98036a rollout). Nothing in wa wrote a trusted-keys
+/// file. An operator who added a release key wrote one BY HAND, and a hand-written file without the
+/// `wa-trusted-keys v1` header made every release refuse as `release_unsigned_or_forged` - a correct
+/// refusal (a file a reader partly understands trusts something else) reached by the worst possible path.
+///
+/// THE TWO RULES THAT MAKE THIS SAFE:
+///   * the file is written ATOMICALLY, and the one it replaces is kept as `<path>.bak`, so an operator can
+///     always go back to the trust set they had;
+///   * what was written is READ BACK through this module's own parser before "ok" is printed. A writer that
+///     only knows what it meant to write cannot tell the operator that the file they now have is one this
+///     node can actually read.
+fn trust_key(args: &[String]) -> i32 {
+    let mut id: Option<String> = None;
+    let mut hex: Option<String> = None;
+    let mut file: Option<PathBuf> = None;
+    let mut retire = false;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--file" => {
+                match args.get(index + 1) {
+                    Some(value) => file = Some(PathBuf::from(value)),
+                    None => {
+                        eprintln!("release_missing_value: --file needs a path");
+                        return 2;
+                    }
+                }
+                index += 2;
+            }
+            "--retire" => {
+                retire = true;
+                index += 1;
+            }
+            other if other.starts_with('-') => {
+                eprintln!("release_unknown_option: '{other}'");
+                return 2;
+            }
+            other => {
+                if id.is_none() {
+                    id = Some(other.to_string());
+                } else if hex.is_none() {
+                    hex = Some(other.to_string());
+                } else {
+                    eprintln!("release_unexpected_argument: '{other}' (the arguments are the key id, then its public hex)");
+                    return 2;
+                }
+                index += 1;
+            }
+        }
+    }
+    let Some(id) = id else {
+        eprintln!("release_missing_value: no key id was named (usage: wa release trust-key <id> <public hex>)");
+        return 2;
+    };
+    // WHERE. The node's own copy unless the caller names one, resolved the same way key_files resolves it -
+    // never guessed from cwd, because a file read from the wrong directory is a trust set nobody is using.
+    let path = match file {
+        Some(path) => path,
+        None => match std::env::var("WASM_AGENT_HOME").ok().filter(|value| !value.is_empty()) {
+            Some(home) => PathBuf::from(home).join("release-keys.txt"),
+            None => {
+                eprintln!("release_trust_no_home: WASM_AGENT_HOME is not set, so there is no node trust file to write; name one with --file <path>");
+                return 2;
+            }
+        },
+    };
+    let public = if retire {
+        None
+    } else {
+        let Some(hex) = hex else {
+            eprintln!("release_missing_value: no public key was named (a retired key needs only its id: --retire)");
+            return 2;
+        };
+        let Some(bytes) = hex_decode(&hex) else {
+            eprintln!("release_trust_bad_key: '{hex}' is not hex");
+            return 2;
+        };
+        if bytes.len() != 32 {
+            eprintln!("release_trust_bad_key: a public ed25519 key is 32 bytes (64 hex characters); '{hex}' is {}", bytes.len());
+            return 2;
+        }
+        Some(bytes)
+    };
+    // THE EXISTING SET, or an empty one when the file is new. A file that does not parse is NOT rewritten:
+    // replacing a file this node cannot read would throw away whatever it holds, and the operator has to see
+    // the error their file has before anything is added to it.
+    let mut keys: Vec<Key> = Vec::new();
+    match std::fs::read_to_string(&path) {
+        Ok(text) => match parse_trusted_keys(&text, &path.display().to_string()) {
+            Ok(parsed) => keys = parsed,
+            Err(error) => {
+                eprintln!("release_trust_refused: {} is not a trust file this node can read: {}", path.display(), error.message);
+                return 6;
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            eprintln!("release_trust_unreadable: {}: {error}", path.display());
+            return 6;
+        }
+    }
+    match public {
+        Some(public) => {
+            if let Some(existing) = keys.iter().find(|key| key.id == id) {
+                if existing.public != public {
+                    // A key id names one key. Replacing it silently would trust two different keys under one
+                    // name, so the operator has to retire the old one first - a decision, not a typo.
+                    eprintln!("release_trust_conflict: {} already trusts a different key under the id '{id}'; retire it first (wa release trust-key {id} --retire)", path.display());
+                    return 2;
+                }
+                println!("release trust-key: {id} is already trusted in {} ({} key(s)); nothing written", path.display(), keys.len());
+                return 0;
+            }
+            keys.push(Key { id: id.clone(), public });
+        }
+        None => {
+            let before = keys.len();
+            keys.retain(|key| key.id != id);
+            if keys.len() == before {
+                eprintln!("release_trust_unknown_key: {} trusts no key with the id '{id}', so there is nothing to retire", path.display());
+                return 2;
+            }
+        }
+    }
+    // THE FILE THIS NODE WOULD WRITE: the header, then one line per key. This is the format
+    // parse_trusted_keys reads and the one the fixtures in tests/fixtures/release-sign use.
+    let mut text = String::new();
+    text.push_str(TRUST_HEADER);
+    text.push('\n');
+    for key in &keys {
+        text.push_str(&format!("key {} {}\n", key.id, hex_encode(&key.public)));
+    }
+    // A BACKUP, then a rename: a half-written trust file is a node that can install nothing, or the wrong
+    // thing, and neither is a state an operator can see from the command's output.
+    if let Ok(previous) = std::fs::read(&path) {
+        let backup = PathBuf::from(format!("{}.bak", path.display()));
+        if let Err(error) = std::fs::write(&backup, &previous) {
+            eprintln!("release_trust_unwritable: cannot write the backup {}: {error}", backup.display());
+            return 6;
+        }
+    }
+    if let Some(parent) = path.parent() {
+        if let Err(error) = std::fs::create_dir_all(parent) {
+            eprintln!("release_trust_unwritable: cannot create {}: {error}", parent.display());
+            return 6;
+        }
+    }
+    let staged = PathBuf::from(format!("{}.new.{}", path.display(), std::process::id()));
+    if let Err(error) = std::fs::write(&staged, text.as_bytes()) {
+        let _ = std::fs::remove_file(&staged);
+        eprintln!("release_trust_unwritable: cannot write {}: {error}", staged.display());
+        return 6;
+    }
+    if let Err(error) = std::fs::rename(&staged, &path) {
+        let _ = std::fs::remove_file(&staged);
+        eprintln!("release_trust_unwritable: cannot move the new file into {}: {error}", path.display());
+        return 6;
+    }
+    // READ IT BACK THROUGH THE PARSER THAT WILL USE IT. "I wrote it" is the writer's word; what matters is
+    // whether the next verification can read it, and this is the one place that can say so before a deploy
+    // finds out instead.
+    let written = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) => {
+            eprintln!("release_trust_unreadable_after_write: {}: {error}", path.display());
+            return 6;
+        }
+    };
+    match parse_trusted_keys(&written, &path.display().to_string()) {
+        Ok(back) => {
+            // The read-back asks the question the operator asked: after a trust the key is THERE, after a
+            // retire it is GONE. (Requiring presence for both made every retire refuse with
+            // release_trust_not_applied - caught by this module's own retire case.)
+            let present = back.iter().any(|key| key.id == id);
+            if present == retire {
+                eprintln!(
+                    "release_trust_not_applied: {} was written but its own parser {} '{id}' in it",
+                    path.display(),
+                    if retire { "still finds" } else { "does not find" }
+                );
+                return 6;
+            }
+            println!(
+                "release trust-key: {}{} in {} ({} key(s), read back through the same parser a release verification uses)",
+                if retire { "retired " } else { "trusted " },
+                id,
+                path.display(),
+                back.len()
+            );
+            0
+        }
+        Err(error) => {
+            eprintln!("release_trust_unreadable_after_write: {} does not parse: {}", path.display(), error.message);
+            6
+        }
+    }
+}
+
 /// `wa release verify <dir|SHA256SUMS> [SHA256SUMS.sig] [--key <file>]... [--quiet]`
 /// `wa release verify --sums <dir|SHA256SUMS> [--sig <file>] [--key <file>]... [--quiet]`
 ///
 /// A scripts'-facing verb, so the deploy paths have one verifier binary-side as well as shell-side, and so
 /// an operator can check a hand-copied release without installing it. Both spellings name the same two
 /// files: the sums, and the signature that must be about them.
-pub fn run(args: &[String]) -> i32 {
+pub fn run(args: &[String]) -> Option<i32> {
+    // THE FLEET FORM IS NOT THIS NODE'S TO ANSWER. " + BT + "wa release trust-key --node <n>" + BT + " writes the trust file on
+    // ANOTHER node, through the mesh that holds the peer's admission rules (lua/core/release_trust.lua) - the
+    // same way " + BT + "wa update <node>" + BT + " reaches a peer. This binary is the LOCAL writer; it says "not mine" and
+    // the Lua CLI answers, exactly as it does for every other fleet verb.
+    if args.iter().any(|arg| arg == "--node") {
+        return None;
+    }
     if args.iter().any(|arg| arg == "--help" || arg == "-h") || args.is_empty() {
         println!("usage: wa release verify <dir|SHA256SUMS> [SHA256SUMS.sig] [--key <file>]... [--quiet]");
         println!("       wa release verify --sums <dir|SHA256SUMS> [--sig <file>] [--key <file>]... [--quiet]");
-        return if args.is_empty() { 2 } else { 0 };
+        println!("       wa release trust-key <id> <public hex> [--file <path>]");
+        println!("       wa release trust-key <id> --retire [--file <path>]");
+        return Some(if args.is_empty() { 2 } else { 0 });
     }
     match args.first().map(String::as_str) {
         Some("verify") => {}
+        // The trust set, written by the command that reads it (see trust_key's own note).
+        Some("trust-key") => return Some(trust_key(&args[1..])),
         Some(other) => {
-            eprintln!("release_unknown_verb: '{other}' (the verb is 'verify')");
-            return 2;
+            eprintln!("release_unknown_verb: '{other}' (the verbs are 'verify' and 'trust-key')");
+            return Some(2);
         }
-        None => return 2,
+        None => return Some(2),
     }
     let mut sums: Option<PathBuf> = None;
     let mut signature: Option<PathBuf> = None;
@@ -348,7 +563,7 @@ pub fn run(args: &[String]) -> i32 {
                     Some(value) => sums = Some(PathBuf::from(value)),
                     None => {
                         eprintln!("release_missing_value: --sums needs a path");
-                        return 2;
+                        return Some(2);
                     }
                 }
             }
@@ -359,7 +574,7 @@ pub fn run(args: &[String]) -> i32 {
                     Some(value) => signature = Some(PathBuf::from(value)),
                     None => {
                         eprintln!("release_missing_value: --sig needs a path");
-                        return 2;
+                        return Some(2);
                     }
                 }
             }
@@ -370,7 +585,7 @@ pub fn run(args: &[String]) -> i32 {
                     Some(value) => extra.push(PathBuf::from(value)),
                     None => {
                         eprintln!("release_missing_value: --key needs a path");
-                        return 2;
+                        return Some(2);
                     }
                 }
             }
@@ -388,19 +603,19 @@ pub fn run(args: &[String]) -> i32 {
                     // A third path is never guessed at: two files name a release, and a reader that
                     // picked one of three would be trusting its own choice.
                     eprintln!("release_unexpected_argument: '{other}' (the arguments are the sums, then the signature that must be about them)");
-                    return 2;
+                    return Some(2);
                 }
                 index += 1;
             }
             other => {
                 eprintln!("release_unknown_option: '{other}'");
-                return 2;
+                return Some(2);
             }
         }
     }
     let Some(sums) = sums else {
         eprintln!("release_missing_value: no SHA256SUMS was named (usage: wa release verify <dir|SHA256SUMS> [SHA256SUMS.sig])");
-        return 2;
+        return Some(2);
     };
     let release_dir = if sums.is_dir() { sums.clone() } else { sums.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from(".")) };
     let sums_file = if sums.is_dir() { sums.join(SUMS_FILE) } else { sums };
@@ -409,11 +624,11 @@ pub fn run(args: &[String]) -> i32 {
             if !quiet {
                 println!("release signature verified: {key} ({})", release_dir.display());
             }
-            0
+            Some(0)
         }
         Err(error) => {
             eprintln!("release_unsigned_or_forged: {}", error.message);
-            error.code
+            Some(error.code)
         }
     }
 }
@@ -687,4 +902,116 @@ mod tests {
             assert!(key.id.starts_with("release-signing-"), "{}", key.id);
         }
     }
+
+    // ---- wa release trust-key (21/11, hand fix 2) ------------------------------------------------------
+    //
+    // THE DEFECT. Nothing wrote a trusted-keys file, so an operator wrote one by hand and a file without the
+    // header made every release refuse as release_unsigned_or_forged - the right refusal at the end of a path
+    // nobody should walk. These cases pin the properties that make the writer safe: it writes the header and
+    // the key, it READS ITS OWN FILE BACK through this module's parser, it keeps the file it replaced, it
+    // refuses a file it could not read instead of overwriting it, and a key id names one key.
+
+
+    /// The trust file for one case. Passed as `--file` rather than through WASM_AGENT_HOME: cargo runs these
+    /// cases in threads of ONE process, and a process-wide environment variable set by one case is read by
+    /// another - the shape of a test that passes alone and fails in the suite.
+    fn trust_case(name: &str) -> std::path::PathBuf {
+        scratch(name).join("release-keys.txt")
+    }
+
+    fn trust_args(path: &std::path::Path, rest: &[&str]) -> Vec<String> {
+        let mut args: Vec<String> = rest.iter().map(|one| one.to_string()).collect();
+        args.push("--file".to_string());
+        args.push(path.display().to_string());
+        args
+    }
+
+    #[test]
+    fn trust_key_writes_the_header_and_reads_its_own_file_back() {
+        let path = trust_case("trust-key-write");
+        let key = Signer::new("release-signing-test-a");
+        let code = trust_key(&trust_args(&path, &[key.id.as_str(), key.public_hex().as_str()]));
+        assert_eq!(code, 0);
+        let text = std::fs::read_to_string(&path).expect("the trust file exists");
+        assert!(text.starts_with(TRUST_HEADER), "the header is what makes the file readable: {text}");
+        // THE READ-BACK is the command's own claim, so the test makes it independently with the same parser a
+        // verification uses - and then proves the key verifies a release, which is the whole point.
+        let parsed = parse_trusted_keys(&text, "written").expect("the file the command wrote parses");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].id, key.id);
+        assert_eq!(parsed[0].public, key.pair.public_key().as_ref());
+        let directory = scratch("trust-key-verify");
+        release(&directory, &key);
+        assert_eq!(verify_release(&directory, &[path]).expect("verifies against the written file"), key.id);
+    }
+
+    #[test]
+    fn trust_key_keeps_the_file_it_replaced() {
+        let path = trust_case("trust-key-backup");
+        let first = Signer::new("release-signing-test-one");
+        let second = Signer::new("release-signing-test-two");
+        assert_eq!(trust_key(&trust_args(&path, &[first.id.as_str(), first.public_hex().as_str()])), 0);
+        let before = std::fs::read_to_string(&path).expect("first file");
+        assert_eq!(trust_key(&trust_args(&path, &[second.id.as_str(), second.public_hex().as_str()])), 0);
+        let backup = PathBuf::from(format!("{}.bak", path.display()));
+        assert_eq!(std::fs::read_to_string(&backup).expect("the replaced file is kept"), before,
+            "an operator can go back to the trust set they had");
+        let text = std::fs::read_to_string(&path).expect("second file");
+        let parsed = parse_trusted_keys(&text, "written").expect("parses");
+        assert_eq!(parsed.len(), 2, "the key that was there is still trusted");
+    }
+
+    #[test]
+    fn trust_key_refuses_a_file_it_cannot_read_instead_of_overwriting_it() {
+        let path = trust_case("trust-key-bad-file");
+        // The exact shape of the hand-written file the rollout used: keys, no header.
+        let hand_written = "key release-signing-test-a 00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff\n";
+        write(&path, hand_written.as_bytes());
+        let key = Signer::new("release-signing-test-b");
+        assert_eq!(trust_key(&trust_args(&path, &[key.id.as_str(), key.public_hex().as_str()])), 6);
+        assert_eq!(std::fs::read_to_string(&path).expect("still there"), hand_written,
+            "a file this node cannot read is not replaced: the operator has to see its error first");
+        // And nothing was staged beside it: an interrupted write is residue, not state.
+        let leftovers: Vec<_> = std::fs::read_dir(path.parent().expect("parent"))
+            .expect("read dir")
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".new."))
+            .collect();
+        assert!(leftovers.is_empty(), "a refusal leaves no staged file behind");
+    }
+
+    #[test]
+    fn trust_key_retires_a_key_and_refuses_to_retire_an_unknown_one() {
+        let path = trust_case("trust-key-retire");
+        let key = Signer::new("release-signing-test-retire");
+        assert_eq!(trust_key(&trust_args(&path, &[key.id.as_str(), key.public_hex().as_str()])), 0);
+        assert_eq!(trust_key(&trust_args(&path, &[key.id.as_str(), "--retire"])), 0);
+        let text = std::fs::read_to_string(&path).expect("file");
+        assert!(parse_trusted_keys(&text, "written").expect("still a valid file").is_empty(),
+            "a retired key is gone and the file is still one this node can read");
+        assert_eq!(trust_key(&trust_args(&path, &[key.id.as_str(), "--retire"])), 2,
+            "retiring a key that is not there is refused by name, not silently accepted");
+    }
+
+    #[test]
+    fn trust_key_refuses_a_different_key_under_a_known_id_and_bad_input() {
+        let path = trust_case("trust-key-conflict");
+        let key = Signer::new("release-signing-test-same-id");
+        // The id is derived from the key by Signer::new, so two calls never share one: the case this pins
+        // (a DIFFERENT key announced under a KNOWN id) is built by naming the id explicitly.
+        let other = Signer { id: key.id.clone(), pair: Signer::new("other").pair };
+        assert_eq!(trust_key(&trust_args(&path, &[key.id.as_str(), key.public_hex().as_str()])), 0);
+        // A key id names one key: swapping the bytes under it is two keys under one name.
+        assert_eq!(trust_key(&trust_args(&path, &[other.id.as_str(), other.public_hex().as_str()])), 2);
+        let text = std::fs::read_to_string(&path).expect("file");
+        assert_eq!(parse_trusted_keys(&text, "written").expect("parses")[0].public, key.pair.public_key().as_ref());
+        // The same key twice is a no-op, not a second line.
+        assert_eq!(trust_key(&trust_args(&path, &[key.id.as_str(), key.public_hex().as_str()])), 0);
+        assert_eq!(parse_trusted_keys(&std::fs::read_to_string(&path).expect("file"), "written").expect("parses").len(), 1);
+        // Not hex, and not 32 bytes: both refused before anything is written.
+        assert_eq!(trust_key(&trust_args(&path, &["release-signing-test-x", "zz"])), 2);
+        assert_eq!(trust_key(&trust_args(&path, &["release-signing-test-x", "0011"])), 2);
+        assert_eq!(trust_key(&[]), 2, "no id is a usage refusal");
+    }
+
 }

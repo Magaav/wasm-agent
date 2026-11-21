@@ -138,6 +138,16 @@ if command == "land" then
   return
 end
 
+-- "wa release trust-key ... --node <peer>": the trust set of ANOTHER node (lua/core/release_trust.lua).
+-- The binary answers the local form itself, before the interpreter boots (rust/wa-host/src/release.rs), and
+-- it declines (exits nothing) only for the --node form, which is why this door exists. The gate is the word
+-- itself: nothing else in the CLI may pay for reading this module.
+if command == "release" then
+  local trust = dofile("lua/core/release_trust.lua")
+  local code = trust.cli(args)
+  if code ~= nil then os.exit(code) end
+end
+
 if command == "init" then
   print(json.encode({ schema = "ok" }))
 elseif command == "remember" then

@@ -2362,6 +2362,46 @@ impl.publish = function(run, options)
   local start = run.journal.start or {}
   local account = trim(options.account or start.account)
   local routed = account ~= "" and account ~= "local" and account ~= "this"
+  -- WHETHER THE RELEASE EXISTS IS A FACT, AND IT IS ASKED FIRST (21/11, hand fix 5). This used to run AFTER
+  -- the credentials gate, so `wa land --resume` on a round whose release HAD been published stopped at
+  -- publish_needs_credentials for ever; a systemd user unit met the same gate first, because gh auth lives in
+  -- the desktop keyring a unit cannot reach. A release that exists needs no token to be RECORDED as published,
+  -- so the question is asked before any credential is demanded - and it is answered from the public API too,
+  -- because a release on a public repository is a fact anyone can read (gh may be unable to run here at all).
+  local function release_state()
+    local probe = "gh release view " .. quote(tag) .. " >/dev/null 2>&1 && echo present || echo absent"
+    if routed then
+      local reply = M.node_bash(account, probe)
+      if trim(tostring((reply or {}).stdout or "")) == "present" then return "present" end
+    elseif trim(tostring((M.exec(probe, "", 120) or {}).stdout or "")) == "present" then
+      return "present"
+    end
+    -- The public API. An answer that cannot be read is unknown, never absent: a check that guessed would
+    -- report a published release as missing and publish it twice.
+    local ok, banner = pcall(dofile, "lua/core/update_banner.lua")
+    local repo = ok and type(banner) == "table" and banner.repo and banner.repo(tree) or ""
+    if repo == "" then return "unknown" end
+    local url = "https://api.github.com/repos/" .. repo .. "/releases/tags/" .. tag
+    local body = M.exec("curl -fsSL --max-time 20 " .. quote(url) .. " 2>/dev/null", "", 40) or {}
+    if (body.code or 1) ~= 0 then return "unknown" end
+    local text = tostring(body.stdout or "")
+    if not text:find(tag, 1, true) then return "unknown" end
+    local assets = 0
+    for _ in text:gmatch('"name"%s*:') do assets = assets + 1 end
+    if assets == 0 then return "present_no_assets" end
+    return "present"
+  end
+  local state_of_release = release_state()
+  if state_of_release == "present" then
+    evidence("release " .. tag .. " already exists; not published again\n")
+    run.journal.publish = { tag = tag, state = "already_present", signed = true, key_id = artifacts.key_id }
+    return true, { detail = "release " .. tag .. " already published (not repeated)" }
+  end
+  if state_of_release == "present_no_assets" then
+    return false, { error = "publish_release_incomplete",
+      observed = "release " .. tag .. " exists on GitHub with no assets, so it is not the release a node installs",
+      next = "delete it and publish again (gh release delete " .. tag .. " --yes, then wa land --resume), or publish by hand from the shipped ref" }
+  end
   -- THE CHECK IS `gh auth status`, NOT `command -v gh`: the question is whether a token works HERE, and a
   -- binary that is installed and signed out answers it the same way a missing one does. Where the publish is
   -- routed, the question is asked ON THE ACCOUNT NODE, because that is whose token creates the release.
@@ -2383,11 +2423,12 @@ impl.publish = function(run, options)
   if trim(gh_answer) ~= "yes" then
     return false, { error = "publish_needs_credentials", detail = "the release " .. tag .. " was not published",
       observed = routed and ("`gh` on " .. account .. " is missing or not signed in")
-        or "no `gh` here, or a `gh` this machine is not signed in to, so the release cannot be created here",
+        or ("no `gh` here, or a `gh` this machine is not signed in to, so the release cannot be created here"),
       next = routed and ("sign in on " .. account .. " (`gh auth login` there), then `wa land --resume`")
-        or ("name the node that holds the token: `wa land --account <node> --resume`; or publish by hand: " ..
-          "git fetch " .. M.incoming() .. " refs/heads/" .. artifacts.ref .. ":refs/heads/" .. artifacts.ref ..
-          " && git worktree add /tmp/" .. tag .. " " .. artifacts.ref .. " && bash /tmp/" .. tag .. "/PUBLISH.sh") }
+        or ("this is the keyring cause: gh auth status reads a token from the desktop keyring, and a systemd user unit has no session bus to unlock it - so gh is installed and signed out HERE. Publish as an operator: git fetch " ..
+          M.incoming() .. " refs/heads/" .. artifacts.ref .. ":refs/heads/" .. artifacts.ref ..
+          " && git worktree add /tmp/" .. tag .. " " .. artifacts.ref .. " && bash /tmp/" .. tag .. "/PUBLISH.sh" ..
+          " - or give the unit a token it can read (GH_TOKEN in its environment), then wa land --resume") }
   end
   -- The artifacts commit is fetched again here rather than trusted from the ship step: on a resume that step
   -- is `done` and its FETCH_HEAD died with the process that made it.
@@ -2406,20 +2447,6 @@ impl.publish = function(run, options)
   evidence((extract.stdout or "") .. (extract.stderr or ""))
   if (extract.code or 1) ~= 0 then
     return false, { error = "publish_extract_failed", observed = first_line(extract.stderr ~= "" and extract.stderr or extract.stdout) }
-  end
-  -- Whether the release already exists is asked WHERE IT WOULD BE CREATED: a release on the account's GitHub
-  -- account is not visible from a machine that is signed out, and the answer decides whether to publish.
-  local function release_state()
-    if routed then
-      local reply = M.node_bash(account, "gh release view " .. quote(tag) .. " >/dev/null 2>&1 && echo present || echo absent")
-      return trim(tostring((reply or {}).stdout or ""))
-    end
-    return trim(tostring((M.exec("gh release view " .. quote(tag) .. " >/dev/null 2>&1 && echo present || echo absent", "", 120) or {}).stdout or ""))
-  end
-  if release_state() == "present" then
-    evidence("release " .. tag .. " already exists; not published again\n")
-    run.journal.publish = { tag = tag, state = "already_present", signed = true, key_id = artifacts.key_id }
-    return true, { detail = "release " .. tag .. " already published (not repeated)" }
   end
   local published
   if routed then
