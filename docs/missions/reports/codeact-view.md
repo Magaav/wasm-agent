@@ -32,8 +32,9 @@ test-run-view, test-codemode-default, -model-boundary (664), -presentation, test
 test-efficiency (119), test-session-vars (48), test-turnfeed, test-turn-signal, test-hotreload,
 test-skill-content, test-experiment-verify, test-whatsapp-names: green.
 test-envelope-outcomes, test-envelope-iteration, test-exec-timeout, test-read-batch fail in a bare
-`WA_SCRIPT` invocation on this tree AND on unchanged main in the same words (they need the fast runner's
-environment); the landing's gate is their judge. No full fast run was made.
+`WA_SCRIPT` invocation on this tree AND on unchanged main in the same words (all four are listed in
+scripts/fast-path.exclude, so no gate runs them; that is its own finding, not this change.s)
+No full fast run was made.
 
 ## Not in this change (measured, queued in ~/Work/missions/_queue/codeact-next.md)
 - 490 results (25%) fall back to the JSON form only because they carry a `pending_backgrounded` or
