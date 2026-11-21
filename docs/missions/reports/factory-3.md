@@ -143,6 +143,9 @@ first.
 33. `wait-any.sh`: `== ATTENTION (<path>):` before the status
 34. new test verdicts: `test-regenerate ok (28 checks)`, `test-main-health ok (20 checks)`,
     `test-drive ok (26 checks)`, `fast-rows ok (36 checks)`, `land ok (574 checks)`
+35. `SKIP test-main-health: this tree has no scripts/main-health.sh (nothing to judge)`
+36. `SKIP test-drive: this tree has no scripts/drive.sh (nothing to judge)`
+37. `SKIP test-regenerate: this tree has no scripts/regenerate.sh or scripts/generators.txt (nothing to judge)`
 
 ## What I verified, and how to see it again
 
