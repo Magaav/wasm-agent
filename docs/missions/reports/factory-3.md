@@ -156,7 +156,8 @@ first.
 - `bash scripts/test-drive.sh` - the queue is oldest first; m1 lands and its changelog entry is written; m2 is
   red, the driver stops and writes ATTENTION naming the row, m3 does NOT land; a second run still stops; `--skip
   m2` clears it by name and m3 lands; a second driver refuses by name; a red preflight never lands.
-- `bash scripts/test-preflight.sh` (25 checks) - unchanged behaviour plus the new split, which its fake covers.
+- `bash scripts/test-preflight.sh` (38 checks, was 25) - the four MAIN RED cases: both rows red on main, one of
+  each, a record about ANOTHER main (excuses nothing), and a green main (blames the mission as before).
 - `bash scripts/test-land.lua` - `land ok (574 checks)`, including the three new cases above.
 - `bash ~/Work/missions/drive.sh --dry-run` on the real missions root lists the five done missions and lands
   nothing.
@@ -180,5 +181,9 @@ first.
 
 ## Pre-existing failures
 
-None met: every row this round touched or added is green on the branch. `scripts/test-fast-rows.sh` reports 36
-checks (was 26 before), `scripts/test-preflight.sh` 25 (unchanged), `scripts/test-land.lua` 574.
+None met. **The full fast path on this branch is green: 362 checks, 0 failed, 0 skipped, 600 s**
+(`flock -o ~/Work/missions/.suite.lock bash scripts/fast.sh`, result in `/tmp/fast-factory-3.json`), run with
+all of this round's changes except the last two commits; the last two touch `scripts/preflight.sh` (whose row
+was re-run green at 38 checks) and documentation only. Per-row counts: `test-fast-rows.sh` 36 (was 26),
+`test-preflight.sh` 38 (was 25), `test-regenerate.sh` 28 (new), `test-main-health.sh` 20 (new),
+`test-drive.sh` 26 (new), `test-land.lua` 574.
