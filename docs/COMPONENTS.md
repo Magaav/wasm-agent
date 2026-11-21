@@ -296,7 +296,13 @@ guess. Its `commit=` is the release's **40-hex** commit id (the id the manifest'
 checked against), not the short id a build records. For a digest-fallback install the two ids differ and
 both are recorded: `commit=` is the commit whose tree was installed (the Lua tree the node runs, always
 the tree the deploy holds) and `binary_commit=`/`binary_source_commit=` is the commit whose build the
-bytes are - the id a later fast-path deploy reads back as the binary's commit.
+bytes are - the id a later fast-path deploy reads back as the binary's commit. A **Lua fast-path** install
+(21/11) records the same split and needs it: `commit=` is the Lua tree it installed (what `wa update` and
+`verify-deployed.sh` compare with the commit they expect), `binary_commit=` is the commit those kept bytes
+are a build of, and `lua_fast_path=1` says which kind of record it is. Written the other way - the binary's
+commit in `commit=` - a Lua-only install looks N commits behind main for ever, and the deploy that made it
+refused its own binary as `build_commit_mismatch`. When nothing can name the kept bytes, `binary_commit=`
+is written as `unknown` with `binary_commit_why=` beside it rather than as an empty value.
 
 The supervisor is part of the same install, and a prebuilt deploy installs the prebuilt one. The release
 carries `wa-sentinel-<triple>-<sha12>` beside `wa-<triple>-<sha12>`; the sentinel install step takes it
