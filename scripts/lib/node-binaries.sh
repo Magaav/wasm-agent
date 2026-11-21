@@ -289,6 +289,68 @@ wa_node_release_repo() {
   printf '%s\n' "Magaav/wasm-agent"
 }
 
+
+# ---- the ancestry window a release binary carries ------------------------------------------------
+#
+# WHY. A node's install guard asks the CANDIDATE binary "do you contain what is running?"
+# (wa --contains, rust/wa-host/src/build_info.rs). The binary answers from the ancestor list build.rs
+# embedded, which is 'git rev-list HEAD' AT BUILD TIME - so a build from a shallow clone carries a
+# window that stops at the cut. MEASURED 21/11: the release of bfad4f8f was asked about 7ddbfa98, a
+# commit 42 back and inside its window, and refused the install. Two things were wrong, and this lib
+# answers the second: the consumer (contains) must search the list it has, and the PRODUCER must build
+# from a checkout whose window reaches at least the previous release - otherwise every node updating
+# from N-1 to N asks about a commit below the cut and gets 'unknown' forever.
+#
+# The floor is a fact git can answer: the newest 'node-*' release tag that is an ancestor of the
+# commit being built. When the history to answer it is not in this clone (a shallow one cannot see
+# below the cut, and rev-list --max-parents=0 would return the CUT and call it the root), that is
+# unknown - never "the root commit" - and the caller deepens the clone and asks again.
+
+# <repo> <commit> -> the commit the ancestry window must contain (the previous release's commit, or the
+# root commit of a full history when no release tag is reachable). 2 = this clone cannot say, with the
+# reason on stderr; the caller must deepen and ask again.
+wa_ancestry_window_floor() {
+  local repo="${1:-}" commit="${2:-}" shallow tag
+  [ -n "$repo" ] && [ -n "$commit" ] || { printf 'ancestry_floor_args\n' >&2; return 2; }
+  git -C "$repo" rev-parse --git-dir >/dev/null 2>&1 || { printf 'not_a_checkout\n' >&2; return 2; }
+  git -C "$repo" rev-parse --verify -q "${commit}^{commit}" >/dev/null 2>&1 \
+    || { printf 'commit_not_in_clone\n' >&2; return 2; }
+  shallow="$(git -C "$repo" rev-parse --is-shallow-repository 2>/dev/null)"
+  if [ "$shallow" = true ]; then
+    # A shallow clone's 'no tag below here' and its 'root commit' are both the CUT wearing a disguise.
+    printf 'shallow_window_unknown\n' >&2
+    return 2
+  fi
+  tag="$(git -C "$repo" describe --tags --abbrev=0 --match 'node-*' "$commit" 2>/dev/null)"
+  if [ -n "$tag" ]; then
+    git -C "$repo" rev-parse --verify -q "${tag}^{commit}" 2>/dev/null && return 0
+    printf 'release_tag_unreadable\n' >&2
+    return 2
+  fi
+  # No release has been published from this history: the whole history is the window.
+  git -C "$repo" rev-list --max-parents=0 "$commit" 2>/dev/null | head -1 | grep -q . || {
+    printf 'root_commit_unavailable\n' >&2; return 2; }
+  git -C "$repo" rev-list --max-parents=0 "$commit" 2>/dev/null | head -1
+}
+
+# <repo> -> 0 when the clone now carries its full history, 2 when it still does not (reason on stderr).
+# ONE bounded fetch, then the question is asked again by the caller: a deepen that reports success and
+# leaves a shallow repository would be the same lie as a shallow build claiming a complete window.
+wa_ancestry_deepen() {
+  local repo="${1:-}" out
+  [ -n "$repo" ] || { printf 'ancestry_deepen_args\n' >&2; return 2; }
+  git -C "$repo" rev-parse --git-dir >/dev/null 2>&1 || { printf 'not_a_checkout\n' >&2; return 2; }
+  [ "$(git -C "$repo" rev-parse --is-shallow-repository 2>/dev/null)" = true ] || return 0
+  if out="$(git -C "$repo" fetch --unshallow --tags origin 2>&1)"; then :; else
+    printf 'deepen_failed: %s\n' "${out##*$'\n'}" >&2
+    return 2
+  fi
+  [ "$(git -C "$repo" rev-parse --is-shallow-repository 2>/dev/null)" = true ] && {
+    printf 'deepen_left_shallow\n' >&2; return 2; }
+  return 0
+}
+
+
 # <manifest> <key> -> the value of a KEY=VALUE line (empty when absent). The header is KEY=VALUE; the
 # target rows are not, which is how the two are told apart without a second file.
 wa_node_manifest_value() {

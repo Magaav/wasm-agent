@@ -576,12 +576,79 @@ ok(release_wrapper:find("scripts/release%-install%.sh") ~= nil,
   "and it runs the supported script, not a composed shell", release_wrapper)
 ok(release_wrapper:find(TARGET, 1, true) ~= nil, "with the commit to install")
 
+-- 7h-f. THE OPERATOR'S OVERRIDE REACHES THE SCRIPT THAT INSTALLS. release-install.sh runs upgrade.sh, and
+-- upgrade.sh is what asks the ancestry question again - so a forced request whose reason stops at this
+-- module is a force that did nothing. MEASURED 21/11: a release install with --force --reason was refused
+-- by upgrade.sh (ancestry_unknown) and the reason appears in no record. The wrapper the sentinel runs is
+-- where the decision has to be visible, so that is what the assertions read.
+issued = {}
+local forced_release = remote.serve({ action = "request", mode = "release", commit = TARGET,
+  force_note = "forced past pin pin-abc: the aarch64 node must reach bfad4f8f", reason = "the aarch64 node must reach bfad4f8f" }, MASTER)
+ok(forced_release.ok == true, "a forced release request is admitted", tostring(forced_release.error or forced_release.status))
+local forced_runs = issued_matching("request run")
+ok(#forced_runs == 1, "and one run request was written", tostring(#forced_runs))
+local forced_path = forced_runs[1] and forced_runs[1]:match("%-%-script '([^']+)'")
+local forced_wrapper = forced_path and host.read_file(forced_path) or ""
+ok(forced_wrapper:find("WA_UPGRADE_FORCE_REASON=", 1, true) ~= nil,
+  "the wrapper exports WA_UPGRADE_FORCE_REASON, the one variable upgrade.sh reads as its override", forced_wrapper)
+ok(forced_wrapper:find("the aarch64 node must reach bfad4f8f", 1, true) ~= nil,
+  "and it carries the operator's own reason, so installed.txt can say who decided and why", forced_wrapper)
+
+-- AND AN UNFORCED RELEASE CLEARS IT. A node's environment can carry a reason from an earlier forced install
+-- (measured 2026-10-20: a deploy's reason outlived the deploy and was recorded by a later hand-run upgrade),
+-- so the ordinary path must say "no override" out loud rather than inherit one.
+issued = {}
+local plain_release = remote.serve({ action = "request", mode = "release", commit = TARGET, reason = "ordinary release" }, MASTER)
+ok(plain_release.ok == true, "an ordinary release request is admitted", tostring(plain_release.error or plain_release.status))
+local plain_runs = issued_matching("request run")
+local plain_path = plain_runs[1] and plain_runs[1]:match("%-%-script '([^']+)'")
+local plain_wrapper = plain_path and host.read_file(plain_path) or ""
+ok(plain_wrapper:find("export WA_UPGRADE_FORCE_REASON=''", 1, true) ~= nil,
+  "an unforced release exports an EMPTY override, so it cannot inherit an earlier install's reason", plain_wrapper)
+ok(plain_wrapper:find("the aarch64 node must reach bfad4f8f", 1, true) == nil,
+  "and none of the previous request's reason survives into it", plain_wrapper)
+
+
 -- The mode is refused by name when it is misspelled, so a typo cannot perform the default deploy.
 issued = {}
 local typo = remote.serve({ action = "request", mode = "relase", commit = TARGET }, MASTER)
 ok(typo.error == "mode_unknown", "a misspelled mode is refused by name", tostring(typo.error))
 ok(#issued_matching("request deploy") == 0 and #issued_matching("request run") == 0,
   "and nothing was asked of the node")
+
+
+-- 7h-g. THE OVERRIDE SURVIVES A REAL SHELL. The assertions above read the wrapper text; this one RUNS it,
+-- because a bug that crosses a process boundary is only proved across one. The script the wrapper execs is a
+-- fixture that prints its own environment, so the assertion reads what an install path actually inherits.
+local probe_scripts = fixture .. "/release-probe/scripts"
+host.exec("mkdir -p " .. probe_scripts)
+put(probe_scripts .. "/release-install.sh", "#!/usr/bin/env bash\nenv\n")
+host.exec("chmod +x " .. probe_scripts .. "/release-install.sh")
+local real_facts_probe = remote.facts
+local probe_install = fixture .. "/release-probe"
+remote.facts = function()
+  local f = real_facts_probe()
+  f.tree, f.tree_source = nil, nil
+  -- The record names the install directory this node reports, and the wrapper execs THAT path: the probe
+  -- script must be the one the wrapper would really run, or the assertion would prove a shell ran something.
+  f.install = probe_install
+  return f
+end
+issued = {}
+local probed = remote.serve({ action = "request", mode = "release", commit = TARGET,
+  force_note = "forced past pin pin-abc: the aarch64 node must reach bfad4f8f",
+  reason = "the aarch64 node must reach bfad4f8f" }, MASTER)
+ok(probed.ok == true, "a forced release install over a probe script is admitted", tostring(probed.error or probed.status))
+local probe_runs = issued_matching("request run")
+local probe_wrapper = probe_runs[1] and probe_runs[1]:match("%-%-script '([^']+)'")
+local probe_out = tostring(probe_wrapper and host.exec("bash " .. probe_wrapper .. " 2>&1") or "")
+-- The exported text is record.override_reason (the operator's own sentence), not the pin-prefixed force_note:
+-- that is the value upgrade.sh writes into installed.txt as the reason for the move.
+ok(probe_out:find("WA_UPGRADE_FORCE_REASON=the aarch64 node must reach bfad4f8f", 1, true) ~= nil,
+  "RUNNING the wrapper hands upgrade.sh the override in WA_UPGRADE_FORCE_REASON, not only in a comment", probe_out)
+ok(probe_out:find("WA_UPGRADE_VIA=remote-update.sh", 1, true) ~= nil,
+  "and names the caller that asked, so installed.txt can record which path installed it", probe_out)
+remote.facts = real_facts_probe
 
 -- And the CLI has the flag, so an operator can reach it.
 ok(remote.cli({ "update", "peer", "--release", "--help" }) == 0, "wa update --release is a known option")

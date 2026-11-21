@@ -520,7 +520,8 @@ else
 fi
 gate_run bash scripts/test-publish-shared-commit.sh                   # a published commit is one the remote can see
 gate_run bash scripts/test-bootstrap-gate.sh                          # the release-install path honours its override
-WA_BIN="$BIN" gate_run bash scripts/test-build-info.sh                # the bytes answer for themselves (--build-info)
+WA_BIN="$BIN" WA_TEST_SCRATCH_HOME=1 gate_run bash scripts/test-build-info.sh  # the bytes answer for themselves (--build-info)
+WA_BIN="$BIN" WA_TEST_SCRATCH_HOME=1 gate_run bash scripts/test-ancestry-window.sh  # the window reaches the previous release, and its floor is named
 # The suite must exercise the Lua in the working tree. cargo rebuilds the binary when a
 # Lua file changes (they are include_str!-ed), so this is belt as well as braces - but it
 # is the difference between testing the tree and testing a build artefact, and it went
