@@ -23,6 +23,7 @@ end
 
 local changeset = dofile("lua/core/changeset.lua")
 local diff_view = dofile("lua/core/diff_view.lua")
+local bash_changes = dofile("lua/core/bash_changes.lua")
 local markdown = dofile("lua/core/markdown.lua")
 local view_lib = dofile("lua/core/cli_view.lua")
 
@@ -149,6 +150,53 @@ local widest = 0
 for _, row in ipairs(narrow_rows or {}) do widest = math.max(widest, cells(row)) end
 ok(widest <= 32, "every row fits the width a narrow view has (widest " .. widest .. " of 32)")
 
+-- ---- a resize re-renders, it does not clip -------------------------------------
+-- The view reads its width at every frame (METHODS:refresh_limit), so the block is rendered at the
+-- width the screen has NOW. Proved at the renderer's seam: the same change at two widths gives two
+-- different row texts, each fitting its own width - not one wide rendering clipped to a narrow screen.
+local resize = record(before, after, "/tmp/diff-view-resize.lua")
+local wide_rows = view_lib.diff_block({ path = resize.path, before = resize.before, after = resize.after }, 100, false)
+local slim_rows = view_lib.diff_block({ path = resize.path, before = resize.before, after = resize.after }, 40, false)
+ok(table.concat(wide_rows or {}, "\n") ~= table.concat(slim_rows or {}, "\n"),
+  "a narrower width renders different rows, not the same rows clipped")
+local slim_widest = 0
+for _, row in ipairs(slim_rows or {}) do slim_widest = math.max(slim_widest, cells(row)) end
+ok(slim_widest <= 40, "and every row of the narrow rendering fits 40 cells (widest " .. slim_widest .. ")")
+
+-- ---- a real repository, through the real host --------------------------------
+-- The fake above pins the decisions; this pins that a REAL git answers the same way through the real
+-- host. It writes into its own directory inside the scratch home, so it cannot see or touch the
+-- repository this test runs in.
+local scratch_root = (host.getenv("WASM_AGENT_HOME") or ""):gsub("/%.wasm%-agent$", "") .. "/diff-view-git"
+if host.exec and host.paths and scratch_root:match("^/tmp/") then
+  local function sh(command)
+    local ok, raw = pcall(host.exec, command, scratch_root, 20,
+      '{"tool":"bash"}')
+    if not ok or type(raw) ~= "string" then return nil end
+    local decoded = dofile("lua/vendor/json.lua").decode(raw)
+    return type(decoded) == "table" and decoded or nil
+  end
+  -- The directory itself is made by the shell, the way a real command would leave it.
+  -- Made directly, before any shell helper cds into it.
+  os.execute("mkdir -p " .. string.format("%q", scratch_root))
+  host.write_file(scratch_root .. "/seed.txt", "one\ntwo\n")
+  sh("git init -q .")
+  sh("git add seed.txt")
+  sh("git -c user.email=t@t -c user.name=t commit -qm seed")
+  local snap = bash_changes.before(scratch_root, false)
+  ok(type(snap) == "table", "a real work tree takes a real snapshot")
+  host.write_file(scratch_root .. "/seed.txt", "one\nTWO\n")
+  local real_changed, real_refused = bash_changes.changed(snap)
+  ok(#real_changed == 1 and real_changed[1].path == "seed.txt" and real_changed[1].before_text == "one\ntwo\n",
+    "a real git reports the file, and its starting text comes from the index")
+  ok(#real_refused == 0, "and nothing is refused when the index has the text")
+  -- Its own directory goes away: a test that leaves a repository behind is a test that
+  -- fills the gate home, and the next run would snapshot the previous one.
+  sh("cd .. && rm -rf " .. scratch_root)
+else
+  print("FAIL the real-git check needs a scratch WASM_AGENT_HOME and host.exec")
+  failed = failed + 1
+end
 -- ---- a created file -----------------------------------------------------------
 local created = record("", "one\ntwo\n", "/tmp/diff-view-new.lua")
 local created_rows = table.concat(view_lib.diff_block({ path = created.path,
@@ -166,7 +214,6 @@ has(created_rows, "+2 -0", "a created file counts two added lines and no removal
 -- one tracked file and one new one, and a third file was already modified. The starting text comes from
 -- the index at the repository ROOT, which is where git reports its paths from - a command run in a
 -- subdirectory still reports root-relative paths (measured 20/11 on rust/ in this repo).
-local bash_changes = dofile("lua/core/bash_changes.lua")
 local fake = { root = "/repo",
   status_before = "",
   status_after = " M crate/src/changed.rs\n M crate/src/already.rs\n?? crate/src/new.rs\n",
