@@ -426,16 +426,16 @@ do
   ok(handle.dev_mark == "v2", "pure: the turn boundary swaps it in")
   ok(#notices == 1 and notices[1].ok and tostring(notices[1].text):find("raw_code", 1, true),
     "pure: and says so once: " .. json.encode(notices))
-  -- A copy that parses but fails its probe (native_calls broken) is refused; the working copy stays.
-  write(DEV .. "/lua/core/raw_code.lua", (edited:gsub("function M%.native_calls%(text%)", "function M.native_calls(text) do return nil end")))
+  -- A copy that parses but fails its probe (text_action broken) is refused; the working copy stays.
+  write(DEV .. "/lua/core/raw_code.lua", (edited:gsub("function M%.text_action%(text%)", "function M.text_action(text) do return nil end")))
   notices = reload.turn_boundary(host.now() + 30)
-  ok(handle.dev_mark == "v2" and type(handle.native_calls) == "function"
-    and handle.native_calls('<tool_call>{"name":"js","arguments":{"code":"x"}}</tool_call>') ~= nil,
+  ok(handle.dev_mark == "v2" and type(handle.text_action) == "function"
+    and handle.text_action('```js run\nreturn 1;\n```') ~= nil,
     "pure: a copy that fails its probe is refused, the working copy keeps running")
   ok(#notices == 1 and notices[1].ok == false, "pure: and the refusal is one line: " .. json.encode(notices))
   -- The guard reads the node's own raw_code, never the dev tree's.
   local policy = dofile("lua/core/codemode_policy.lua")
-  ok(type(policy.guidance_for) == "function", "the guard still loads")
+  ok(type(policy.prompt) == "function", "the guard still loads")
   write(DEV .. "/lua/core/raw_code.lua", node_text)
   reload.turn_boundary(host.now() + 40)
   ok(handle.dev_mark == nil, "pure: restoring the file restores the module at the next turn")

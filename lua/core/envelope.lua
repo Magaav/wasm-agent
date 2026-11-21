@@ -67,14 +67,10 @@ function M.bootstrap(catalog,ctx)
    -- the control-plane tools a script cannot run (session_worktree...); every other tool - and discovery,
    -- via searchTools - lives inside the script. A direct call to an undeclared tool still runs; a connector
    -- called directly runs as its one-line script (lua/core/tools.lua, codemode_policy.one_line).
-   -- Native mode is arm B (rel review r1, R3): the ONE door is `run`, and `codemode` is not
-   -- declared beside it. Every other mode keeps a27490af's surface byte for byte (R1/R5), which
-   -- is why this reads the mode rather than a transport decision.
-   local native_mode = dofile('lua/core/raw_code.lua').mode_of(ctx and ctx.codemode_policy) == 'native'
-   if native_mode then
-    -- Through the one helper below: the progressive surface and the full one are the same list.
-    for _,kept in ipairs(M.native_surface({item},core,orchestration)) do out[#out+1]=kept end
-   elseif name=='codemode' or (CONTROL_PLANE[name] and core[name]) or (orchestration and ORCHESTRATION_FIRST_CLASS[name]) then out[#out+1]=item end
+   -- ONE path (Victor 21/11): the one door is `run` (and `codemode`, the same call's other name).
+   -- Native is not a mode any more, so every item gets that surface.
+   -- Through the one helper below: the progressive surface and the full one are the same list.
+   for _,kept in ipairs(M.native_surface({item},core,orchestration)) do out[#out+1]=kept end
   elseif core[name] or name=='codemode' or (orchestration and ORCHESTRATION_FIRST_CLASS[name]) then out[#out+1]=item end end;return out
 end
 -- The full envelope (a subagent, an older session, WASM_AGENT_ENVELOPE_MODE=full) declares the whole
@@ -107,9 +103,10 @@ function M.native_surface(catalog,core,orchestration)
 end
 function M.schemas(catalog,ctx)
  if M.mode(ctx)=='progressive' then return M.bootstrap(catalog,ctx) end
- -- A native node declares the same one door in the full envelope (rel review r2, item 3). Read from
- -- the same function the progressive envelope reads, so the two cannot drift.
- if dofile('lua/core/raw_code.lua').mode_of(ctx and ctx.codemode_policy)=='native' then
+ -- The full envelope declares the same one door (Victor 21/11), read from the same helper the
+ -- progressive envelope reads so the two cannot drift. It is no longer a choice: `do` keeps the
+ -- scope the `if` gave it, and every node comes through here.
+ do
   local code_mode=dofile('lua/core/codemode_policy.lua').enforced(ctx)
   if not code_mode then return catalog end
   local orchestration=false

@@ -96,7 +96,7 @@ local function decode(record)
    -- The raw-code mode this thread was STARTED in (rel review r3, item 1). ONE field carries the whole
    -- decision: a mode string is that channel, the string "off" is the decision to have NO raw channel
    -- (the same word the switch uses), and an ABSENT field is a record written before this release - a
-   -- thread whose prefix was built in only (raw_code.LEGACY_THREAD_MODE). A second boolean was tried
+   -- thread whose prefix was built in one of the removed modes. A second boolean was tried
    -- and dropped: any writer that rebuilt the row lost it, and the mode must never depend on that.
    raw_mode=record.raw_mode}
 end

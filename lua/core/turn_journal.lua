@@ -279,10 +279,10 @@ end
 
 -- The mode the run worked in: code mode's own spelling (`only`, `first`, `codemode`...) because that
 -- is the switch every friction note about the harness is really about.
+-- ONE PATH (Victor 21/11): a turn's note carries the transport this build has, and there is nothing
+-- left to ask - the switch and its modes are gone (lua/core/raw_code.lua, M.switch_refusal).
 function M.mode_of()
-  local ok, mode = pcall(function() return dep("raw_code").mode() end)
-  if not ok then return "" end
-  return type(mode) == "string" and mode or ""
+  return "native"
 end
 
 -- The mission, when the session has one: its objective or its title, first line only, bounded. Empty

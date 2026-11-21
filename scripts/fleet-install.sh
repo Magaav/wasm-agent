@@ -455,16 +455,17 @@ fi
 probe="$tmp/lua.lua"
 cat > "$probe" <<'LUA'
 local ok, raw = pcall(dofile, 'lua/core/raw_code.lua')
-if not ok or type(raw) ~= 'table' or type(raw.mode) ~= 'function' then print('unloadable') return end
-local want = tostring(host.getenv('WASM_AGENT_RAW_CODE') or ''):lower()
-if want == '1' or want == 'true' then want = 'on' end
-if want == '' then print('skip') return end
-local got = tostring(raw.mode())
-print(want == got and 'ok' or ('mismatch: env says ' .. want .. ', this Lua says ' .. got))
+if not ok or type(raw) ~= 'table' or type(raw.native_run) ~= 'function' then print('unloadable') return end
+-- ONE path (Victor 21/11): the run tool is the door, and the switch that used to choose a second one
+-- is refused by name. A node whose env still exports it refuses every run, so the verdict says so.
+local refusal = type(raw.switch_refusal) == 'function' and raw.switch_refusal() or nil
+if refusal then print('ok_switch_still_set: this node exports ' .. tostring(refusal.value)
+  .. ' and every run will refuse until it is removed') return end
+print('ok')
 LUA
 verdict=$("$TARGET" --db "$tmp/l.db" >/dev/null 2>&1; WA_SCRIPT="$probe" "$TARGET" --db "$tmp/l.db" 2>/dev/null | tail -1)
 case "$verdict" in
-  ok|skip) say "lua matches this artifact ($verdict)" ;;
+  ok*) say "lua matches this artifact ($verdict)" ;;
   *)
     say "LUA MISMATCH after install ($verdict) — rolling back"
     if [ -f "$backup" ]; then install -m755 "$backup" "$TARGET"; fi

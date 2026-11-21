@@ -284,10 +284,8 @@ function M.set_provider(id, revision)
       -- state file become visible to an interpreter that had cached the old one.
       M.provider_override = nil
       M.overrides = nil
-      -- Nothing to invalidate (rel review r3, item 1): the raw-code mode is not cached for the
-      -- process. A running THREAD keeps the mode it recorded when it started, and the NEXT thread
-      -- reads this route's row through raw_code.mode(), so a switch here is visible to new work only -
-      -- which is the rule, not a stale cache being dropped.
+      -- Nothing to invalidate (Victor 21/11): there is no transport to choose any more, so a route
+      -- switch changes no prompt byte and no declared tool. The next thread is built from this row.
       return {ok=true}
     end
   end
@@ -1492,11 +1490,6 @@ end
 -- WASM_AGENT_LLM_SUMMARY_MODEL is set, otherwise the main model).
 function M.complete_with(model, messages, tools, stream, opts)
   opts=opts or {}
-  -- WASM_AGENT_RAW_CODE=first (lua/core/raw_code.lua): a raw-channel call goes out as the assistant text
-  -- the model wrote plus an `Observation:` user message, not as a tool call/result pair. Only the request
-  -- is rendered; the caller's messages (and the stored rows) are untouched. Before the gateway, so a
-  -- gateway-served call sends the same messages.
-  if opts.raw_history then messages = dofile("lua/core/pure.lua")("lua/core/raw_code.lua").render_history(messages) end
   -- The gateway owns the call when it is enabled: it picks the model by task class, enforces the session's
   -- data label against each provider's `allowed_labels`, applies the fallback chain, the breaker and the
   -- budgets, and returns the same result shape this function does. A missing capability or an unset flag
@@ -1522,7 +1515,7 @@ function M.complete_with(model, messages, tools, stream, opts)
     body.tool_choice = "auto"
   end
   for key, value in pairs(M.cache_params(opts)) do body[key] = value end
-  -- Only the raw code channel sets this (WASM_AGENT_RAW_CODE=stop, lua/core/raw_code.lua).
+  -- A wire option nothing sets any more: the stop sequence belonged to the removed block channel.
   if opts.stop then body.stop = opts.stop end
   if stream then body.stream=true; body.stream_options={include_usage=true} end
   local url = provider.base_url:gsub("/+$", "") .. "/chat/completions"

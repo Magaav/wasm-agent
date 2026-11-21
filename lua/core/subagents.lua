@@ -492,11 +492,10 @@ function M.start(args, ctx)
 
   local initial_text = prompt
   if context ~= "" then initial_text = initial_text .. "\n\nContext:\n" .. context end
-  -- The parent's recorded raw-code mode (rel review r3, item 1): the estimate must see the same door
-  -- the child will act in, and the value travels with the spec below.
-  local raw_lib = dofile('lua/core/raw_code.lua')
-  local parent_mode = raw_lib.mode_of(ctx.codemode_policy)
-  local parent_decided = (ctx.codemode_policy and ctx.codemode_policy.raw_decided) or nil
+  -- ONE path (Victor 21/11): a child acts through the same door as its parent - the run tool - so the
+  -- estimate is made for that door and the spec carries it.
+  local parent_mode = 'native'
+  local parent_decided = true
   local estimated = agentlib.subagent_initial_tokens({
     id = profile.id, allowed = profile.allowed, allowed_tools = profile.allowed_tools,
     instructions = profile.instructions, limits = limits,
