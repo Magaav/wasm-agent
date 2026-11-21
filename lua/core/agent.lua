@@ -979,12 +979,52 @@ end
 -- provider event to this global while the provider call is on the stack. Installed per run and removed
 -- when the run ends, so a second run in the same process cannot inherit a stale emitter.
 local function install_stream_forwarder(agent)
+  -- The `run` tool's script, decoded while the model writes it (lua/core/run_stream.lua). One entry
+  -- per call id, dropped when that call announces itself: a second `run` call in the same turn is
+  -- its own script and must not continue this one.
+  local run_stream = dofile("lua/core/run_stream.lua")
+  local calls = {}
+  local function decode(entry, arguments)
+    entry.decoder = entry.decoder or run_stream.new()
+    local piece = run_stream.feed(entry.decoder, arguments)
+    if piece ~= "" then agent.emit({ type = "run_code_delta", call_id = entry.id, text = piece }) end
+  end
+  local function drain(entry)
+    local held = entry.held
+    entry.held = {}
+    for _, fragment in ipairs(held) do decode(entry, fragment) end
+  end
+  local function tool_call_delta(event)
+    local arguments = event.arguments
+    if type(arguments) ~= "string" or arguments == "" then return end
+    local id = tostring(event.call_id or event.index or "")
+    local name = tostring(event.name or "")
+    local entry = calls[id]
+    if not entry then
+      entry = { id = id, held = {}, verdict = nil }
+      calls[id] = entry
+    end
+    if entry.verdict == "other" then return end
+    if entry.verdict == "run" then return decode(entry, arguments) end
+    -- The name can be split across fragments (`r` then `un`), so a call is not declared NOT to be
+    -- run until the merged name has stopped being a prefix of it. While undecided, every fragment
+    -- is HELD: the script must not lose a byte to the timing of the provider's name chunk.
+    entry.held[#entry.held + 1] = arguments
+    if name == "run" then
+      entry.verdict = "run"
+      drain(entry)
+    elseif name ~= "" and not (("run"):sub(1, #name) == name) then
+      entry.verdict = "other"
+      entry.held = {}
+    end
+  end
   rawset(_G, "wa_stream_event", function(payload)
     local ok, event = pcall(json.decode, payload)
     if not ok or type(event) ~= "table" then return end
+    local kind = tostring(event.type or "")
+    if kind == "tool_call_delta" then return tool_call_delta(event) end
     local text = event.text
     if type(text) ~= "string" or text == "" then return end
-    local kind = tostring(event.type or "")
     if kind == "delta" then
       agent.emit({ type = "delta", text = text })
     elseif kind == "commentary_delta" then
@@ -993,6 +1033,19 @@ local function install_stream_forwarder(agent)
       agent.emit({ type = "reasoning_delta", text = text })
     end
   end)
+  -- The call announced itself as a `tool` event: its arguments are complete, so a name that was
+  -- still undecided is read now, in order, and the entry goes away.
+  agent.run_code_finish = function(call_id)
+    local key = tostring(call_id or "")
+    local entry = calls[key]
+    if not entry then return end
+    calls[key] = nil
+    if entry.verdict == nil then
+      entry.verdict = "run"
+      drain(entry)
+    end
+  end
+  agent.run_code_streams = calls
 end
 
 -- Item #34, the rule itself: what a code-mode result CHANGED, judged by the calls it recorded. A
@@ -3720,6 +3773,10 @@ function M:run_body(text, images)
       end
       self.run_counts.tool_calls=self.run_counts.tool_calls+1
       emit_counts(self)
+      -- A streamed run call's arguments are complete now. The streamer decodes what it HELD while
+      -- the provider had not yet said which tool this was, so the script reaches the view even when
+      -- its own name arrived split across chunks - before the call's own event is drawn.
+      if self.run_code_finish then pcall(self.run_code_finish, call.id) end
       self.emit(emitted)
       local tool_started = host.now()
       local parallel_op = parallel_ops and parallel_ops[call.id]

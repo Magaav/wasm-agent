@@ -1542,6 +1542,21 @@ pub fn write_event(payload: &str) {
 
 /// Run `f` collecting any events it emits, and return them as an SSE body. Used for a run
 /// relayed to a peer: the events are captured in a buffer local to this call and cannot
+/// Record and forward ONE event without putting it on the run's own SSE wire.
+///
+/// The run's sink is what a reconnecting client reads; an event the RUNNING process needs for itself
+/// (a tool call's argument fragments, decoded by the process that will draw the script) would otherwise
+/// exist only on that wire. Journaling and the node relay still happen - only the sink write is skipped,
+/// so a buffered capture (a relayed child) is unaffected.
+pub fn write_event_if_no_stream(payload: &str) {
+    if crate::subagents::capture_event(payload) { return; }
+    beat();
+    CURRENT_RUN_ID.with(|id| { if id.get() != 0 { record_run_event(id.get(),payload); } });
+    if ACTIVE_SINK.with(|cell| cell.borrow().is_none()) {
+        forward_event(payload);
+    }
+}
+
 /// reach a live socket belonging to another run.
 pub(crate) fn capture_events<F: FnOnce()>(f: F) -> String {
     let buffer = Rc::new(RefCell::new(String::new()));

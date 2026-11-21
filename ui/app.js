@@ -1143,6 +1143,7 @@ function keepStatusLast() {
 }
 
 function currentBubble() {
+  if (!runBubble) forgetRunCodeBlocks();
   if (!runBubble) {
     transcript.querySelector('#empty')?.remove();
     answerReleased.delete(transcript);
@@ -2412,6 +2413,57 @@ function currentTrace() {
   return trace;
 }
 
+// A native run tool call draws its SCRIPT as the model writes it, in the block the code-mode
+// transport already draws - never behind a Run(code=...) row (operator, 21/11: "we output real model
+// writing code real time"). The text arrives as run_code_delta events, decoded from the provider's
+// own argument fragments (lua/core/run_stream.lua); this element is only where it lands.
+//
+// It is one element per call, appended where the tool/decision topic would have gone, and it keeps
+// only the script: the awaited tools.X(...) calls are the trace's rows (a WAITING row per call that
+// flips to its outcome), so a reader sees the program and, under it, what it is waiting on.
+class WaRunCode extends HTMLElement {
+  connectedCallback() {
+    if (this._pre) return;
+    this.classList.add("run-code");
+    const pre = document.createElement("pre");
+    pre.className = "run-code-script";
+    this._pre = pre;
+    this.append(pre);
+    this._text = "";
+    this.render();
+  }
+  // The whole script so far: the deltas are cumulative text, not a diff.
+  set script(value) { this._text = String(value == null ? "" : value); this.render(); }
+  get script() { return this._text; }
+  append(piece) { this._text += String(piece || ""); this.render(); }
+  render() {
+    if (!this._pre) return;
+    if (this._pre.textContent !== this._text) this._pre.textContent = this._text;
+  }
+}
+if (!customElements.get("wa-run-code")) customElements.define("wa-run-code", WaRunCode);
+
+// The script of the run call in flight, if one is being written. One per call id: a second call
+// starts its own block, and a delta for an older call still lands in the older block.
+const runCodeBlocks = new Map();
+function runCodeBlock(callId) {
+  const key = String(callId == null ? "" : callId);
+  let node = runCodeBlocks.get(key);
+  if (node && node.isConnected) return node;
+  node = document.createElement("wa-run-code");
+  node.dataset.callId = key;
+  runCodeBlocks.set(key, node);
+  // The block is the step's own topic, created where the step's placeholder was, so the prose that
+  // preceded the call stays above it and the call rows that follow land under it.
+  sealReasoning();
+  currentBubble().body.append(node);
+  anchorRunStepContent(node);
+  pin();
+  return node;
+}
+// A new run starts nothing from the last one's scripts.
+function forgetRunCodeBlocks() { runCodeBlocks.clear(); }
+
 function addTool(name, args, options) {
   const boundMs = options && options.timeoutMs;
   const callId = options && options.callId != null ? String(options.callId) : "";
@@ -3032,7 +3084,17 @@ function handleEvent(event) {
     // fallback so an in-flight line still says "of 300s" instead of only "42s".
     const boundMs = event.timeout_ms != null ? event.timeout_ms
       : (event.name === "bash" || event.name === "shell" ? execTimeoutSeconds * 1000 : null);
-    addTool(event.name, event.arguments, { timeoutMs: boundMs, callId: event.call_id });
+    if (event.name === "run") {
+      // No Run(code=...) row: the script has its own block (drawn from run_code_delta), and a second
+      // row naming the call would be the collapsed presentation this change removes. The script the
+      // provider assembled is authoritative when it differs (a delta lost to a reload), so the block
+      // is completed with it - never re-labelled, never re-ordered.
+      const block = runCodeBlock(event.call_id);
+      const code = event.arguments && typeof event.arguments.code === "string" ? event.arguments.code : "";
+      if (code && block.script !== code) block.script = code;
+    } else {
+      addTool(event.name, event.arguments, { timeoutMs: boundMs, callId: event.call_id });
+    }
   } else if (event.type === "tool_result") {
     settleTool(event.result, event.name, event.failed, event.cancelled);
   } else if (event.type === "pending_delta") {
@@ -3067,6 +3129,13 @@ function handleEvent(event) {
     // transcript's one Markdown renderer, and the character count is the one the resolved state keeps.
     pending.node.setText(pending.text);
     pin();
+  } else if (event.type === "run_code_delta") {
+    // The model writing the run tool's script. Drawn exactly as it arrives: the block opens on the
+    // first piece, and every later one is appended - never re-parsed as an answer and never held until
+    // the call closes (that collapse is what this event exists to undo).
+    showRunStep("tools", "Executing tools");
+    const block = runCodeBlock(event.call_id);
+    block.append(event.text || "");
   } else if (event.type === "delta") {
     showRunStep("answer", "Writing response");
     removePendingText(event.pending_id);

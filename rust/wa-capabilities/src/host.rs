@@ -2541,6 +2541,25 @@ unsafe fn call_lua_stream_event(l: *mut LuaState, payload: &str) {
     lua_settop(l, base);
 }
 
+/// Hand ONE tool-call argument fragment to the running process as `tool_call_delta`.
+///
+/// A served run has an SSE sink, so its events go to the wire; the script being written belongs to the
+/// process that is decoding it (lua/core/agent.lua emits `run_code_delta` from these fragments), and a
+/// wire-only fact would leave every window without the stream. Same thread and same state as the model
+/// call, and an absent global is a no-op - a build whose Lua predates this keeps streaming to its sink.
+unsafe fn tool_call_delta_to_lua(l: *mut LuaState, index: usize, call_id: &str, name: &str, arguments: &str) {
+    if arguments.is_empty() {
+        return;
+    }
+    call_lua_stream_event(l, &json!({
+        "type": "tool_call_delta",
+        "index": index,
+        "call_id": call_id,
+        "name": name,
+        "arguments": arguments,
+    }).to_string());
+}
+
 /// Answers JSON text (one string the caller decodes with `lua/vendor/json.lua`), never a Lua table:
 /// `{status, content, commentary, tool_calls, termination, chunks, ...}` for a stream that ended, or
 /// `{error}` for one that could not be read. Same arguments as `host.http`, plus an optional fifth
@@ -2565,7 +2584,7 @@ pub extern "C-unwind" fn http_stream(l: *mut LuaState) -> c_int {
         unsafe { call_lua_stream_event(l, payload) }
     });
     let _forwarding = crate::serve::forward_events_to(forwarder);
-    let outcome = stream_completion(&method, &url, &headers, &body, first);
+    let outcome = stream_completion(l, &method, &url, &headers, &body, first);
     match outcome {
         Ok(value) => push_json(l, &value),
         Err(error) => push_json(l, &json!({"error": error})),
@@ -3082,7 +3101,7 @@ fn stall_marker(error: &ureq::Error, first_response_seconds: u64) -> Option<Stri
     }
 }
 
-fn stream_completion(method: &str, url: &str, headers: &[(String, String)], body: &str, first_response_seconds: u64) -> Result<Value, String> {
+fn stream_completion(l: *mut LuaState, method: &str, url: &str, headers: &[(String, String)], body: &str, first_response_seconds: u64) -> Result<Value, String> {
     use std::io::BufRead;
     let started = std::time::Instant::now();
     let mut ttft_ms: Option<u128> = None;
@@ -3248,6 +3267,24 @@ fn stream_completion(method: &str, url: &str, headers: &[(String, String)], body
                 let decision = &mut assembly.decisions[index];
                 if let Some(fragment) = fragment {
                     decision.absorb(&fragment);
+                    // The argument BYTES reach the reader as they arrive, not only the bounded preview
+                    // a decision carries: the run tool's code argument is the script, and watching the
+                    // model write it is the presentation this event exists for. It is emitted beside
+                    // the decision, never instead of it - a consumer that only knows decision (the
+                    // window's own row) keeps every field it had.
+                    crate::serve::write_event(&json!({
+                        "type": "tool_call_delta",
+                        "index": index,
+                        "call_id": decision.display_id(index),
+                        "name": decision.name,
+                        "arguments": fragment,
+                    }).to_string());
+                    // The SAME fact also reaches the running process, and that is not a duplicate:
+                    // the wire carries the provider's raw fragment, while lua/core/agent.lua decodes
+                    // the code argument (an escape or a surrogate pair can straddle two chunks) and
+                    // emits run_code_delta, which is what a window draws. Skipping the wire here to
+                    // avoid the second event was wrong - it deleted a fact from the run's record.
+                    unsafe { tool_call_delta_to_lua(l, index, &decision.display_id(index), &decision.name, &fragment); }
                 }
                 if let Some((display_id, previous)) = decision.publish_update(index) {
                     emit_decision(decision, &display_id, false, previous.as_deref());
@@ -5451,7 +5488,7 @@ mod decision_stream_tests {
         // The events the reader emits are captured in this call's own sink, which is why the
         // assertion below sees them and an outer sink would not.
         let events = crate::serve::capture_events(|| {
-            *result.borrow_mut() = stream_completion("POST", &format!("http://{address}/fixture"), &[], "{}", 0).unwrap();
+            *result.borrow_mut() = stream_completion(std::ptr::null_mut(), "POST", &format!("http://{address}/fixture"), &[], "{}", 0).unwrap();
         });
         server.join().unwrap();
         (result.into_inner(), events)
@@ -5499,6 +5536,58 @@ mod decision_stream_tests {
         assert_eq!(seen[1]["arguments_text"], "{\"zone\":\"UTC\"}");
         assert!(seen[0].get("arguments_truncated").is_none() && seen[1].get("arguments_truncated").is_none());
         assert!(seen[1].get("previous_call_id").is_none(), "one stable id needs no re-identification");
+    }
+
+    /// The argument BYTES reach the view as they arrive (change/run-live): `tool_call_delta`
+    /// carries each provider fragment for the call, name and call id included, so the `run` tool's
+    /// script can be drawn while the model writes it instead of appearing whole when the call
+    /// closes. The fragments are the provider's own bytes - never the bounded `decision` preview,
+    /// and never re-encoded - because a script is exactly what the model wrote.
+    #[test]
+    fn argument_fragments_reach_the_view_as_they_arrive() {
+        let (result, events) = decision_fixture(concat!(
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_run","function":{"name":"run","arguments":""}}]}}]}"#, "\n\n",
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"code\":\"const r = "}}]}}]}"#, "\n\n",
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"await tools.b"}}]}}]}"#, "\n\n",
+            r#"data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#, "\n\n",
+            "data: [DONE]\n\n"));
+        assert_eq!(result["tool_calls"][0]["function"]["arguments"],
+            r#"{"code":"const r = await tools.b"#);
+        let deltas: Vec<Value> = events.lines().filter_map(|line| line.strip_prefix("data: "))
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|event| event["type"] == "tool_call_delta").collect();
+        assert_eq!(deltas.len(), 2, "one per non-empty argument fragment: {events}");
+        assert_eq!(deltas[0]["arguments"], r#"{"code":"const r = "#);
+        assert_eq!(deltas[1]["arguments"], "await tools.b");
+        for delta in &deltas {
+            assert_eq!(delta["call_id"], "call_run");
+            assert_eq!(delta["name"], "run");
+            assert_eq!(delta["index"], 0);
+        }
+        // The fragments concatenate to the assembled arguments: nothing is dropped, escaped or
+        // clipped on the way to the reader.
+        let joined: String = deltas.iter().map(|d| d["arguments"].as_str().unwrap_or("")).collect();
+        assert_eq!(joined, result["tool_calls"][0]["function"]["arguments"].as_str().unwrap());
+    }
+
+    /// The real opencode-go/DeepSeek capture: fourteen argument fragments, the script itself split
+    /// mid-string. Every byte the provider sent reaches the reader, in order.
+    #[test]
+    fn the_recorded_run_turn_reaches_the_view_byte_for_byte() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/provider/opencode-go-run-code-recorded.sse");
+        let body = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("recorded fixture {} is unreadable: {error}", path.display()));
+        let (result, events) = decision_fixture(&body);
+        let deltas: Vec<Value> = events.lines().filter_map(|line| line.strip_prefix("data: "))
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|event| event["type"] == "tool_call_delta").collect();
+        assert!(deltas.len() > 1, "the recorded turn streams its arguments: {}", deltas.len());
+        let joined: String = deltas.iter().map(|d| d["arguments"].as_str().unwrap_or("")).collect();
+        let calls = result["tool_calls"].as_array().expect("the turn calls a tool");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(joined, calls[0]["function"]["arguments"].as_str().unwrap());
+        assert!(joined.contains("\\n"), "the script carries a real newline escape: {joined}");
     }
 
     #[test]
@@ -5717,7 +5806,7 @@ mod stream_tests {
         });
         let result = std::cell::RefCell::new(Value::Null);
         let events = crate::serve::capture_events(|| {
-            *result.borrow_mut() = stream_completion("POST", &format!("http://{address}/fixture"), &[], "{}", 0).unwrap();
+            *result.borrow_mut() = stream_completion(std::ptr::null_mut(), "POST", &format!("http://{address}/fixture"), &[], "{}", 0).unwrap();
         });
         server.join().unwrap();
         (result.into_inner(), events)

@@ -30,6 +30,11 @@
 -- the argument summariser and the JSON encoder (`opts`), which is what lets a snapshot test render
 -- the same rows the terminal is given, at any width, without a terminal.
 local M = {}
+-- The vendor decoder, for the ONE shape a script's value crosses the sandbox boundary as: a JSON
+-- string (measured on the parity capture, fixtures/raw-default/base-op-block.json). Pure and
+-- global-free like the rest of this module - the caller's encoder stays injectable (`opts.encode`),
+-- this is only how a string that IS an object is READ back.
+local json = dofile('lua/vendor/json.lua')
 
 -- The script's rows under the heading, before the fold names the rest (`… +N lines`).
 M.CODE_ROWS = 6
@@ -376,6 +381,73 @@ function M.hide_evidence(value, seen)
   return out
 end
 
+-- ---- a managed operation's answer ------------------------------------------------
+--
+-- `await tools.bash(...)` returns the node's OWN operation object (the host's `bash` capability):
+-- `operation_id`, `state`, `stdout`, `stderr`, `code`, `cwd`, `containment`, `timing`, `stdout_path`,
+-- ... Drawn whole that is ~30 rows of transport metadata where the reader asked what the command said
+-- (measured on the parity golden, fixtures/raw-default/base-op-block.json: one row of
+-- `{"cleanup":"terminated","cleanup_budget_ms":1000,...` and `… +1483 chars`).
+--
+-- So the block shows the command's OWN OUTPUT, and the object stays whole in two places it always was:
+-- `tail_rows`' fold (`rows.expand`, one click in the host) and `/console`, which prints the result the
+-- model received. Recognised by an ALLOW-LIST - an operation id AND an output string - so a value that
+-- merely has a `state` or a `code` (a parsed JSON answer, a status object) is still drawn whole.
+M.OPERATION_PREVIEW_ROWS = 6
+
+function M.operation_of(value)
+  -- The value arrives in TWO shapes, both real: a table (a fixture, or a caller that decoded it) and
+  -- the JSON STRING a script's return crosses the sandbox boundary as (measured on the parity capture:
+  -- `value` was `{"cleanup":"terminated",...(1657 chars)}`, not a table). One decoder, then the same
+  -- allow-list, so the two shapes cannot be drawn differently.
+  if type(value) == "string" then
+    local first = value:match("^%s*(.)") or ""
+    if first ~= "{" then return nil end
+    local ok, decoded = pcall(json.decode, value)
+    if not ok or type(decoded) ~= "table" then return nil end
+    value = decoded
+  end
+  if type(value) ~= "table" then return nil end
+  if type(value.operation_id) ~= "string" or value.operation_id == "" then return nil end
+  if type(value.stdout) ~= "string" and type(value.stderr) ~= "string" then return nil end
+  return value
+end
+
+-- The rows of the operation's own output: stdout, or stderr when stdout is blank (a failed command
+-- answers through stderr), at most M.OPERATION_PREVIEW_ROWS non-blank lines. Returns those rows and
+-- how many non-blank lines were left out.
+function M.operation_preview(operation, width, o)
+  o = M.opts(o)
+  local text = tostring(operation.stdout or "")
+  if text:gsub("%s", "") == "" then text = tostring(operation.stderr or "") end
+  local rows, hidden = {}, 0
+  for line in (text:gsub("\r\n", "\n") .. "\n"):gmatch("([^\n]*)\n") do
+    if line:gsub("%s", "") ~= "" then
+      if #rows < M.OPERATION_PREVIEW_ROWS then rows[#rows + 1] = line else hidden = hidden + 1 end
+    end
+  end
+  return rows, hidden
+end
+
+-- The one dim row that names the operation without becoming a second answer: how it ended, how long,
+-- its exit code, a short id - and where the whole object is. Never the JSON.
+function M.operation_note(operation, o, hidden)
+  o = M.opts(o)
+  local parts = { "operation " .. tostring(operation.operation_id):sub(1, 11) }
+  local state = operation.state or (operation.ok == false and "failed" or nil)
+  if state then parts[#parts + 1] = tostring(state) end
+  local exit = operation.process_exit_code
+  if exit == nil then exit = operation.code end
+  if exit ~= nil then parts[#parts + 1] = "exit " .. tostring(exit) end
+  local ms = operation.elapsed_ms or (type(operation.timing) == "table" and operation.timing.measured_ms) or nil
+  if ms ~= nil then parts[#parts + 1] = o.elapsed(tonumber(ms) or 0) end
+  local text = table.concat(parts, " \194\183 ")
+  if hidden and hidden > 0 then
+    text = text .. " \194\183 \226\128\166 +" .. tostring(hidden) .. " lines"
+  end
+  return text .. " \194\183 the whole result is in /console"
+end
+
 -- The value as the reader should see it: one row per line of pretty JSON, cut to `M.RESULT_ROWS`,
 -- with the count of what it left out. A string value is its own text rather than a quoted one.
 function M.result_rows(model, width, o)
@@ -636,6 +708,13 @@ function M.tail_rows(model, width, options)
   width = math.max(20, tonumber(width) or 80)
   local rows = {}
   local value, value_hidden = M.result_rows(model, width, o)
+  -- A managed operation is drawn as its OUTPUT; the object itself is the fold and /console (above).
+  local operation = model.value ~= nil and M.operation_of(model.value) or nil
+  local operation_rows, operation_hidden
+  if operation then
+    value, value_hidden = M.operation_preview(operation, width, o), 0
+    operation_rows, operation_hidden = M.result_rows(model, width, o)
+  end
   -- A script that failed with no value has already said why on its ✗ row: the answer row would be
   -- the same code twice, one line apart.
   if model.value == nil and model.error ~= nil then
@@ -656,8 +735,10 @@ function M.tail_rows(model, width, options)
     end
   end
   -- Folded (operator 17/11): where the host can open a row on a click, a value longer than one row is
-  -- ONE row - its start, then `… +N chars` - and the full rows are what the click shows.
-  if o.expandable and #rows > 1 then
+  -- ONE row - its start, then `… +N chars` - and the full rows are what the click shows. An operation
+  -- is NOT folded here: the operator asked for its first lines ("results are a compact preview"), and
+  -- the whole object rides on the same `rows.expand` below.
+  if not operation and o.expandable and #rows > 1 then
     local whole = table.concat(value, " ")
     local room = math.max(8, width - 5 - 16)
     local shown = M.wrap(whole, room, o)[1] or ""
@@ -668,6 +749,14 @@ function M.tail_rows(model, width, options)
   end
   if value_hidden > 0 then
     rows[#rows + 1] = o.paint("  \226\128\166 +" .. value_hidden .. " lines (/console shows all)", "dim")
+  end
+  if operation then
+    rows[#rows + 1] = o.paint("  " .. M.operation_note(operation, o, operation_hidden), "dim")
+    -- The whole object, one click away - the same mechanism a long value uses (`rows.expand`), which
+    -- the host draws only where it has a transcript to expand into.
+    if operation_rows and (operation_hidden or 0) + #operation_rows > 0 then
+      rows.expand = { [1] = table.concat(operation_rows, "\n") }
+    end
   end
   local evidence = M.evidence_text(model.evidence or M.find_evidence(model.value), o)
   if evidence == nil and M.hidden_evidence(model) then

@@ -76,3 +76,31 @@ compares the exact JSON the model receives, so "UI only" is a measured claim rat
 - `rust/wa-term/src/transcript.rs`: a code block is open while it runs and one row after, a pinned
   block survives the next one (and collapses once unpinned), and `rewrite` flips a row without adding
   one.
+
+## The native run tool draws the same block (change/run-live, 21/11)
+
+Operator, 21/11: *"i want our wa agent (run code) to draw the JS as it used to do in raw code
+channel, so we can see it in real time writing js ... once we moved to run(code=...) we encapsulated it
+and collapsed it ... as we only have one way of executing, we do not need Run(code=...)"*.
+
+The transport did not change: a provider that takes tool calls still asks for the run tool, and it is
+still what executes. What changed is that the script now ARRIVES while the model writes it, and the
+block above draws it, so a native turn is indistinguishable from a fenced one.
+
+| piece | where |
+| --- | --- |
+| the provider's argument fragments, delivered beside the bounded decision preview | `rust/wa-capabilities/src/host.rs` (tool_call_delta) |
+| the code argument decoded incrementally - split escapes, \uXXXX and surrogate pairs across chunks, the tool name still undecided | `lua/core/run_stream.lua`, `lua/core/agent.lua` (run_code_delta) |
+| drawn as it grows (whole lines; the last line flushed when the call announces itself) | `lua/core/cli_view.lua` (run_code_piece) |
+| the same in the window: a wa-run-code block fed by run_code_delta, no Run(code=...) row | `ui/app.js` |
+| the awaited tools.X(...) calls | unchanged: codemode_call is a WAITING row that flips in place to check/error + duration |
+
+Two rows a fenced block never had are gone: the native call's own codemode_call row (the script block
+IS that call) and the Run(code=...) heading. A call whose tool NAME arrives split across chunks (r then
+un) is not declared "not run" while the name is still a prefix of run: its fragments are held and
+decoded when the name lands, so no byte of the script is lost to chunk timing.
+
+The parity record is `fixtures/run-live/` (four real turns recorded through the real agent loop with a
+stubbed provider - before and after, native and fenced; see the README there), and
+`scripts/test-run-live.lua` (TUI) plus `scripts/test-run-code-ui.mjs` (window) assert it in the rows a
+reader receives.

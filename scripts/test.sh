@@ -1988,6 +1988,22 @@ WA_SCRIPT=scripts/test-font-setup.lua "$BIN" --db "$DB.fonts-setup" | grep "font
 # plain NO_COLOR rendering, and that a change the run could not record says so instead of drawing an
 # empty diff. It goes through the view's own event path, as chat.lua hands the view a change event.
 WA_SCRIPT=tests/diff-view.lua "$BIN" --db "$DB.view-diff" | grep "diff view ok"
+# What a run block DRAWS WHILE IT IS WRITTEN (operator, 21/11: "draw the JS as it used to do in raw code
+# channel, so we can see it in real time writing js ... the promises waiting for coming back, the way to
+# explore result"). Three properties, each asserted in the rows the view hands the transcript: the
+# script's lines are drawn before the closing fence arrives, an awaited call is a WAITING row that flips
+# in place to a checkmark with its duration, and a managed operation result is the command's own output
+# with the whole object one click away instead of ~30 transport fields.
+WA_SCRIPT=scripts/test-raw-view-stream.lua "$BIN" --db "$DB.view-stream" | grep "raw view stream ok"
+# The NATIVE run tool draws like the block above (change/run-live): the script streams as the model
+# writes it, from the provider's own argument fragments (lua/core/run_stream.lua decodes them; the
+# recorded opencode-go wire in tests/fixtures/provider is the input), the awaited calls are WAITING
+# rows that flip, and a native turn and a fenced one draw the SAME block.
+WA_SCRIPT=scripts/test-run-live.lua "$BIN" --db "$DB.run-live" | grep "run live ok"
+# The WINDOW half of the same contract: ui/app.js draws the run script while it is written (a
+# wa-run-code block fed by run_code_delta, no Run(code=...) row), driven by the recorded wire own
+# decoded deltas. No browser: the real functions in a minimal page scope.
+gate_run node scripts/test-run-code-ui.mjs | grep "run code UI ok"
 # The SAME view suite again, with a model window the compactor resolves (a scratch home has none): the
 # context ball must be coloured against the reserve `maybe_compact` will spend, not the policy default.
 # WASM_AGENT_MODEL_LIMITS is that fixture - the only way a fresh home has a window at all - and the
