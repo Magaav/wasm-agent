@@ -146,6 +146,65 @@ original bytes, including after two whole runs. Measured against the pre-fix cod
 at `713a1729`: the A2-pair assertion **fails there**, which is the test the brief asked for. Victor's
 real `~/.config/foot/foot.ini` is verified untouched.
 
+## Second review (21/11, found by running the branch on Victor's machine)
+
+Four findings, one commit each, all fixed:
+
+| # | finding | commit |
+|---|---|---|
+| 1 | `wa setup fonts --dry-run` **installed for real**: `M.run` called `install_fonts()` before any dry-run check, so `mkdir`, `cp` and `fc-cache` ran while the operator was asking a question | `8a489ecc` |
+| 2 | a dry run reported a terminal it WOULD edit as "left alone" and summed up "no terminal config needed a change" | `8a489ecc` |
+| 3 | a config that names **no** font (kitty, and ghostty before its line) still draws the system monospace - here `JetBrainsMono Nerd Font` - so its icons were Nerd metrics | `e3ba4319` |
+| 4 | `wa chat --once` drew **no wa Icons code point at all**: `M.footer()` was pi-style plain words | `689191c1` |
+
+**1 and 2.** `M.font_plan()` answers the same question `install_fonts` does - the same source check, the same
+missing-face refusal, the list it would copy - without writing anything, and a dry run calls only that. A row
+now carries the value it would write, the line reads `wa setup fonts: would edit foot: <old> -> <new> (dry
+run)`, and the summary counts the would-edits. Measured on a scratch home: no font directory, no config
+write, no record.
+
+**3.** The readers did not know the shapes these files really write: ghostty uses `font-family = "X"`
+(equals and quotes) and alacritty the **inline** form `normal = { family = "X" }` beside the table form.
+Both are read now. A key is a **literal, not a pattern** - `font-family` contains a hyphen, which Lua
+patterns read as a quantifier, so `M.key_pattern()` escapes it; without that the equals form never matched.
+`M.pair_for_fontless()` writes the A2 pair in each terminal's own syntax (kitty: `font_family JetBrains
+Mono` + `symbol_map U+F0000-U+FFFFD wa Icons`; ghostty: the repeated `font-family = "wa Icons"`;
+alacritty: the `[font.normal]` table), with a backup as for foot. Every alacritty **weight** is switched -
+replacing only `normal` left bold and italic on the Nerd face. The primary face is the **first** one named
+(ghostty's fallback is a second `font-family`), and "already set up" reads the **whole config**, because
+kitty and ghostty name the icon face on a line of its own. Alacritty has no icon-face key at all - it takes
+fallbacks from fontconfig, where wa Icons is installed - so its state is "JetBrains Mono and the setup
+installed wa Icons" (`M.installed_by_setup`).
+
+**4.** The once footer now draws the two facts that have an icon in the session bar - the cache rate and the
+context, with the ball `M.context_ball` chooses - in the set's own gap:
+
+    1 round · 0 tools · 1.7s · ↑3.7k ↓3 · <cache glyph>79.7% · <ball>ctx 0.4%/1.0M
+
+The arrows stay text (UP/DOWN of a count, glued to their number by this module's own rule). Measured through
+the real path, a scratch home with the setup's record present so `icons.resolve` answers `wa`: the footer
+carries `cache` and the empty ball from the **wa** set, not the nerd fallback.
+
+Tests: `scripts/test-font-setup.lua` 139 checks (was 117) and `scripts/test-cli-view.lua` 552 (the two
+footer assertions that named the bare words now assert the glyph, the set's gap and the number - stricter,
+not looser). Every case runs on a scratch home with its own fixture configs; the alacritty/kitty/ghostty
+cases use **copies** of the real Omarchy configs, and `~/.config` is never written.
+
+## The operator's foot.ini at 09:20 on 21/11
+
+midway through this work `/home/victor/.config/foot/foot.ini` was found carrying
+`font=JetBrains Mono:size=9, wa Icons:size=9`, with the three faces installed in
+`~/.local/share/fonts` at `09:20:06` and a backup named
+`foot.ini.bak.20261121T092006-pre-a2` beside it. **That backup name is not one this code writes** (it
+writes `<config>.wa-backup`), so the run was not a test of this branch: every test here passes a scratch
+home and an explicit font_dir, and `scripts/test-font-setup.lua` refuses a path inside the real
+`~/.config` outright.
+
+Whatever ran it, the file was restored from the pristine backup (`diff` against
+`/usr/share/omarchy/config/foot/foot.ini`: none) and the `.wa-backup` removed. The stray
+`.bak.20261121T092006-pre-a2` is left in place rather than deleted: it is evidence, and it is byte-identical
+to the Omarchy default, so the file now matches it twice over.
+
 ## A pre-existing failure, named
 
 `scripts/test-linux-release-fetch.sh` reports **14 passed, 13 failed** on this branch AND on the base
