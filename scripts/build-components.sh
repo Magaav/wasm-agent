@@ -23,6 +23,12 @@ if [ -z "${CARGO_TARGET_DIR:-}" ]; then
   one_build_target=$(wa_build_prepare "$PWD" 2>/dev/null) || one_build_target=''
   if [ -n "$one_build_target" ]; then export CARGO_TARGET_DIR="$one_build_target"; fi
 fi
+# The node's one heavy build at a time (scripts/lib/build-target.sh, rule 2 (heat)): a component build is a
+# cargo invocation like any other and queues with every other build on this node. Sourced separately
+# because a caller that named CARGO_TARGET_DIR skips the block above and still has to queue.
+if ! command -v wa_build_host_lock >/dev/null 2>&1 && [ -f "$PWD/scripts/lib/build-target.sh" ]; then
+  . "$PWD/scripts/lib/build-target.sh"
+fi
 : "${CARGO_TARGET_DIR:=$PWD/rust/target}"
 one_build_target="$CARGO_TARGET_DIR"
 
@@ -168,7 +174,9 @@ for crate in rust/components/*/; do
   # built can be counted: 0 units is a warm cache hit, not a fast build.
   build_log=$(mktemp "${TMPDIR:-/tmp}/wa-component-build-XXXXXX")
   build_started=$(date +%s%N)
-  if ! cargo build --manifest-path "$crate/Cargo.toml" --target "$TARGET" --release ${WA_COMPONENTS_OFFLINE:+--offline} >"$build_log" 2>&1; then
+  # Queued on the node's single build lock and under the node's job cap (scripts/lib/build-target.sh,
+  # rule 2 (heat)): the same treatment every other heavy build on this node gets.
+  if ! CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-$(wa_build_jobs)}" wa_build_host_lock cargo build --manifest-path "$crate/Cargo.toml" --target "$TARGET" --release ${WA_COMPONENTS_OFFLINE:+--offline} >"$build_log" 2>&1; then
     cat "$build_log" >&2; rm -f "$build_log"
     echo "error: component $name did not compile" >&2
     exit 1

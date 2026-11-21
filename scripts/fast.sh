@@ -233,7 +233,23 @@ else
   rm -rf "$work" 2>/dev/null
   exit 2
 fi
-trap 'rm -rf "$work"' EXIT
+# A FAILED ROW'S LOG OUTLIVES THE RUN (item 3 of the harness-fixes-2 round). The scratch work dir is
+# deleted on exit - that is why the reclaim above exists - so a failed row's own output died with it, and
+# the landing gate (lua/core/land.lua) could only report the one line it had already copied. A caller that
+# names a directory here gets every failed row's log copied into it BEFORE the cleanup: the run's evidence
+# then holds the words that failed, not a pointer to a directory that is gone.
+wa_fast_keep_failed_logs() {
+  [ -n "${WA_FAST_KEEP_LOGS:-}" ] || return 0
+  [ -d "$work/logs" ] || return 0
+  mkdir -p "$WA_FAST_KEEP_LOGS" 2>/dev/null || { echo "fast: refused(keep_logs_unwritable): cannot keep failed row logs in $WA_FAST_KEEP_LOGS" >&2; return 0; }
+  local kept=0 log
+  for log in "$work"/logs/*.log; do
+    [ -f "$log" ] || continue
+    cp "$log" "$WA_FAST_KEEP_LOGS/$(basename "$log")" 2>/dev/null && kept=$((kept + 1))
+  done
+  echo "fast: kept $kept failed row log(s) in $WA_FAST_KEEP_LOGS"
+}
+trap 'wa_fast_keep_failed_logs; rm -rf "$work"' EXIT
 
 # The build-time ledger: one line per build this run performs, printed in the summary
 # below, because "a module compiles faster" is a claim about a number (scripts/lib/build-times.sh).
@@ -659,7 +675,7 @@ else
     bstart=$(fast_now_ms); build_rc=0
     # The exit code is KEPT, not discarded: a build that failed compiled nothing, and the note must say
     # so rather than print the warm row's sentence under a red one (scripts/lib/build-times.sh).
-    HOME="$rust_home" CARGO_HOME="$real_cargo_home" RUSTUP_HOME="$real_rustup_home" CARGO_TARGET_DIR="${fast_build_target:-$ROOT/rust/target}" cargo test --no-run --offline $test_args > "$work/build-$crate.log" 2>&1 || build_rc=$?
+    HOME="$rust_home" CARGO_HOME="$real_cargo_home" RUSTUP_HOME="$real_rustup_home" CARGO_TARGET_DIR="${fast_build_target:-$ROOT/rust/target}" CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-$(wa_build_jobs)}" wa_build_host_lock cargo test --no-run --offline $test_args > "$work/build-$crate.log" 2>&1 || build_rc=$?
     wa_build_time_record crate "$crate" "$(( $(fast_now_ms) - bstart ))" "$(wa_build_time_note "$work/build-$crate.log" "$build_rc")"
     s=$(date +%s)
     if [ "$crate" = wa-sentinel ]; then
@@ -737,6 +753,12 @@ if command -v node >/dev/null 2>&1; then
   # kind resolves through, one child per tree inside it, a sweep that deletes what older layouts left,
   # the build cap that evicts the oldest, and the measurement that keeps the per-tree child honest.
   check onebuild node scripts/test-onebuild.mjs
+  # The gate's own cost, kept honest (change/gate-speed, 21/11): a NEW target dir is seeded from the
+  # newest sibling for the same toolchain (a cold wa-host build measured 144 s, the same build seeded 61 s
+  # / 64 s), and one heavy build runs at a time with a job cap. Both rows are seconds and self-contained:
+  # they build two tiny two-member workspaces in their own scratch home.
+  check build-heat node scripts/test-build-heat.mjs
+  check build-seed node scripts/test-build-seed.mjs
   # Session liveness comes from the running process, never from a ledger row another process can
   # close: the 10/11 `owner_ended` refusal of a live session, pinned against a real ledger and a
   # real pid.
@@ -904,6 +926,8 @@ check module-report-selftest bash scripts/test-module-report.sh
 # second release build), and every duration goes through a portable clock. Static by design, so it runs
 # where the build rows themselves are skipped for want of a toolchain.
 check fast-build-timing bash scripts/test-fast-build-timing.sh
+# A short and a long spelling of one commit are one commit (deploy refused bcacbf38 vs bcacbf38eb3b, 21/11).
+check commit-id bash scripts/test-commit-id.sh
 
 # The measured build times of everything this run compiled, before the verdict, so the claim
 # and the numbers are one screen apart (no gate: scripts/lib/build-times.sh says why).

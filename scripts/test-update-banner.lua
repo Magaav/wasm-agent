@@ -327,7 +327,15 @@ ok(chat:find("print(redact.text(seen.line)", 1, true) == nil,
    "and prints it nowhere: a notice is the footer's line, never a transcript line")
 ok(server:find("update_banner.status", 1, true) ~= nil, "the /update check route answers with the banner")
 ok(server:find("pcall(update_banner.tick)", 1, true) ~= nil, "the served node refreshes it on the housekeeping tick")
-ok(server:find('host.getenv("WA_SCRIPT") == nil', 1, true) ~= nil,
+-- The question is asked of the PROCESS, not of the environment: `host.getenv("WA_SCRIPT")` answered for
+-- the wrong process (the host now removes the variable, so a child cannot inherit it, and a child that
+-- ran this tick was never a script run). Asserted both ways - the process question is there, and the
+-- environment read is gone - so a revert of either half fails this row.
+ok(server:find("host.script_run", 1, true) ~= nil,
+   "a script run is asked of the process (host.script_run), so the node tick knows what it is")
+-- The CODE shape, not the word: the comment above it names the old read on purpose (it explains why it
+-- went), so this pins the statement a reader would have to write back, not every mention of the name.
+ok(server:find('if host.getenv("WA_SCRIPT")', 1, true) == nil,
    "and a WA_SCRIPT test run never touches the real node's state")
 
 -- ---- the whole check, against fixtures --------------------------------------

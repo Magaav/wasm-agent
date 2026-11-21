@@ -196,6 +196,13 @@ run_proof_fixture waveOwnerMutations 3 node scripts/test-wave-owner-mutations.mj
 run_proof_fixture waveCorners 24 node scripts/test-wave-activity-corners.mjs
 run_proof_fixture waveDerived 55 node scripts/test-wave-derived-state.mjs
 gate_run node scripts/test-wave-withdrawal.mjs
+
+# The node's build heat and build seeding (change/gate-speed, 21/11). Both are about the gate itself, so
+# they belong in the gate: one heavy build at a time with a bounded job count, and a NEW target dir
+# seeded from the newest sibling - never a seed that makes a tree run another tree's code. Each runs in
+# its own scratch home (.mjs fixtures) and the seeding row needs a filesystem where reflink works.
+gate_run node scripts/test-build-heat.mjs
+gate_run node scripts/test-build-seed.mjs
 run_proof_fixture waveActivityFix 62 node scripts/test-wave-activity-fix.mjs
 # END wave-owner safety proofs
 
@@ -1931,6 +1938,12 @@ WA_SCRIPT=scripts/test-markdown.lua "$BIN" --db "$DB.markdown" | grep "markdown 
 # captured transcript is free of escape sequences - so it is asserted without a model:
 # the view is handed the events agent.lua emits, with a clock the test controls.
 WA_SCRIPT=scripts/test-cli-view.lua "$BIN" --db "$DB.view" | grep "cli view ok"
+# Every file change as a diff block (change/tui-diff-view, Victor 20/11). The block is rendered from
+# the session's own change record, not from the tool result, so the model's context never carries it:
+# this asserts the path and its counts, the real line numbers, the fold that states what it hid, the
+# plain NO_COLOR rendering, and that a change the run could not record says so instead of drawing an
+# empty diff. It goes through the view's own event path, as chat.lua hands the view a change event.
+WA_SCRIPT=tests/diff-view.lua "$BIN" --db "$DB.view-diff" | grep "diff view ok"
 # The SAME view suite again, with a model window the compactor resolves (a scratch home has none): the
 # context ball must be coloured against the reserve `maybe_compact` will spend, not the policy default.
 # WASM_AGENT_MODEL_LIMITS is that fixture - the only way a fresh home has a window at all - and the

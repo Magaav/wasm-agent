@@ -101,11 +101,31 @@ end
 -- as JSON (`code`, `stdout`, `stderr`) and can refuse a command outright; both are normalised here, so no
 -- step has to know about either. The third argument is the operation deadline: the gate runs a suite of
 -- minutes, and the host's default 300 s would kill it into a false red.
-function M.exec(command, cwd, timeout)
-  local ok, raw = pcall(host.exec, command, cwd or "", timeout)
+-- <opts.tee = path>: run the command with its output APPENDED to that file by its own shell, and answer
+-- the bytes this call wrote. The gate uses it to keep a long check legible while it runs (item 3 of the
+-- harness-fixes-2 round). It is an ARGUMENT here, not a rewrite of `command` by the caller, so the command
+-- a seam sees is the command the gate decided on - a stubbed runner still sees it unchanged.
+function M.exec(command, cwd, timeout, opts)
+  local tee = type(opts) == "table" and opts.tee or nil
+  local launch, before = command, 0
+  if type(tee) == "string" and tee ~= "" then
+    before = #(read(tee) or "")
+    -- The closing brace goes on its OWN line, never after a `;` (measured: it broke test-land case5b). A
+    -- check command may legally end in a shell comment (`bash x.sh # changed`), and `; }` on the same line
+    -- belongs to that comment - the group never closes, the shell exits 2, and a green check reads red.
+    launch = "{ " .. tostring(command) .. "\n} >> " .. quote(tee) .. " 2>&1"
+  end
+  local ok, raw = pcall(host.exec, launch, cwd or "", timeout)
   if not ok or type(raw) ~= "string" then
-    return { code = 127, stdout = "", stderr = "host refused: " .. tostring(command):sub(1, 120),
-             raw = tostring(raw) }
+    return slice({ code = 127, stdout = "", stderr = "host refused: " .. tostring(command):sub(1, 120),
+             raw = tostring(raw) })
+  end
+  -- With a tee, the answer is the part of the log THIS call wrote: the check's output is already on disk,
+  -- written by the check itself as it printed, so nothing is lost if this call is killed.
+  local function slice(result)
+    if type(tee) ~= "string" or tee == "" then return result end
+    local full = read(tee) or ""
+    return { code = result.code, stdout = full:sub(before + 1), stderr = "", streamed = true }
   end
   local decoded_ok, decoded = pcall(json.decode, raw)
   if decoded_ok and type(decoded) == "table" then
@@ -118,9 +138,9 @@ function M.exec(command, cwd, timeout)
     local stderr = tostring(decoded.stderr or "")
     if code == nil and decoded.error ~= nil then
       stderr = "host_error: " .. tostring(decoded.error)
-      return { code = 1, stdout = stdout, stderr = stderr, raw = raw }
+      return slice({ code = 1, stdout = stdout, stderr = stderr, raw = raw })
     end
-    return { code = code or 1, stdout = stdout, stderr = stderr }
+    return slice({ code = code or 1, stdout = stdout, stderr = stderr })
   end
   return { code = 1, stdout = "", stderr = "unreadable operation wrapper: " .. tostring(raw):sub(1, 200),
            raw = tostring(raw) }
@@ -129,6 +149,28 @@ end
 -- How a landing waits between two polls of a node's own record. A field, not a sleep call inside the
 -- logic, so a test drains it instantly while production waits a real five seconds.
 function M.sleep(seconds) M.exec("sleep " .. tostring(seconds)) end
+
+-- ---------------------------------------------------------------- the gate's LIVE output
+--
+-- A gate check used to be one plain run, and its output reached evidence/gate.log only when the call
+-- RETURNED. A check the gate's timeout killed therefore left NO output - the one thing a reader needs to
+-- see why it hung - and a failed row's own log died with fast.sh's scratch directory (item 3 of the
+-- harness-fixes-2 round: a check that prints then hangs left an empty log).
+--
+-- So a check runs with its output APPENDED to the log by its OWN shell (M.exec, opts.tee), which the
+-- kernel flushes as the lines appear: a check killed at the deadline has already written every line it
+-- printed, and nothing is held in a buffer that dies with the caller. The command SEAM still sees the
+-- command the gate decided on - the tee is added inside M.exec - so a stubbed runner and its
+-- exact-command assertions are unaffected, and a run with no log to write is the plain runner.
+--
+-- <command> <cwd> <timeout_seconds> <live_path> -> {code, stdout, stderr}: stdout is the part of the log
+-- THIS check wrote, measured from the byte offset the file had when it started.
+function M.exec_streamed(command, cwd, timeout, live_path)
+  if type(live_path) ~= "string" or live_path == "" then
+    return M.exec(command, cwd, timeout)
+  end
+  return M.exec(command, cwd, timeout, { tee = live_path })
+end
 
 -- ---------------------------------------------------------------- where things live
 
@@ -530,11 +572,18 @@ local function save(run)
 end
 
 -- Every step's evidence is one file, appended as the commands run, bounded: a log that grows without a
--- bound is a log nothing reads. `read` before `write` because the host has no append primitive.
+-- bound is a log nothing reads. `read` before `write` because the host has no append primitive - and
+-- every call WRITES AND FLUSHES at once (item 3 of the harness-fixes-2 round): a caller that streams a
+-- running check's output must be able to read it from another process WHILE the check runs, and a buffer
+-- kept only in this one dies with the process that the timeout kills.
 local function sink(run, name)
   local path = M.evidence_path(run.id, name)
-  local buffer = read(path) or ""
+  -- READ BEFORE EVERY WRITE, never once at the start (item 3 of the harness-fixes-2 round). The file is
+  -- written by somebody else while this runs: a gate check appends its own live output to gate.log, so a
+  -- buffer kept here would overwrite - silently delete - every line the CHECK wrote. What is on disk is the
+  -- truth, and this appends to it.
   return function(text)
+    local buffer = read(path) or ""
     buffer = buffer .. tostring(text or "")
     if #buffer > 200000 then buffer = "…\n" .. buffer:sub(-150000) end
     write(path, buffer)
@@ -1564,7 +1613,12 @@ end
 -- somebody else's plan. Every other check runs untouched.
 function M.gate_command(check, rows_file, run)
   if check.name == "fast" then
-    return "WA_FAST_ROWS=" .. (rows_file and quote(rows_file) or "") .. " " .. check.command
+    -- THE FAILED ROWS' OWN LOGS STAY WITH THIS RUN (item 3 of the harness-fixes-2 round): fast.sh
+    -- copies every failed row's log here before it deletes its scratch directory, so a red gate can
+    -- still be read after the fact instead of only the one line gate.log already had.
+    local keep = run and M.run_dir(run.id) .. "/evidence/fast-logs" or ""
+    local keep_env = keep ~= "" and (" WA_FAST_KEEP_LOGS=" .. quote(keep)) or ""
+    return "WA_FAST_ROWS=" .. (rows_file and quote(rows_file) or "") .. keep_env .. " " .. check.command
   end
   -- The discrimination check is the only one whose VERDICT depends on which round it is judging: a
   -- Refactor-only declaration must be refused in a round of several branches, and the base is whichever
@@ -1698,8 +1752,14 @@ impl.gate = function(run, options)
       -- must stop the gate by name, not be silently ignored while fast.sh and deploy.sh refuse the same
       -- record: one record, one answer. The audit is cheap (one file, one loop) and it reads the same
       -- allow-list, so no key can be known to one entry point and unknown to another.
-      record_prefix = ". " .. quote(reader) .. " >/dev/null 2>&1; wa_build_env_audit >/dev/null 2>&1 || { wa_build_env_audit >&2; echo 'refused(build_env_key_unknown): the build record names a setting no build reads' >&2; exit 2; }; "
-        .. "wa_build_env >/dev/null 2>&1 || { echo 'refused(build_env_incomplete): the build record names a directory that is not there' >&2; exit 2; }; "
+      -- THE MESSAGES ARE QUOTED, AND THAT IS THE WHOLE POINT (measured 20/11 on the base). A bare
+      -- `echo refused(build_env_key_unknown): ...` is not a message, it is a SHELL SYNTAX ERROR: the
+      -- unquoted parenthesis after the word ends the command, bash answers `syntax error near unexpected
+      -- token `(`` and the whole prefix dies with exit 2 - so EVERY gate check exited 2 without running,
+      -- in any tree that has a build record script, and the verdict read as a red check. Quoted, the words
+      -- are the words a reader sees and the check after the prefix actually runs.
+      record_prefix = ". " .. quote(reader) .. " >/dev/null 2>&1; wa_build_env_audit >/dev/null 2>&1 || { wa_build_env_audit >&2; echo " .. quote("refused(build_env_key_unknown): the build record names a setting no build reads") .. " >&2; exit 2; }; "
+        .. "wa_build_env >/dev/null 2>&1 || { echo " .. quote("refused(build_env_incomplete): the build record names a directory that is not there") .. " >&2; exit 2; }; "
     end
   end
   -- A resume keeps a check that already PASSED (first run, not a retry) on this exact tree with this exact
@@ -1749,9 +1809,11 @@ impl.gate = function(run, options)
       end
       budget = math.max(budget, 300 + check.per_test_seconds * touched)
     end
-    local result = M.exec(command, cwd, budget)
+    -- STREAMED, NOT COLLECTED (item 3): the check's own shell appends to gate.log as it prints, so a
+    -- check the gate's deadline kills has already said why. `result.stdout` is the part of the log this
+    -- check wrote, which is what the lines below count and report.
+    local result = M.exec_streamed(command, cwd, budget, M.evidence_path(run.id, "gate"))
     local seconds = now() - started
-    evidence((result.stdout or "") .. (result.stderr or ""))
     local tests = passed_tests((result.stdout or "") .. (result.stderr or ""))
     local row = { name = check.name, ok = (result.code or 1) == 0, code = result.code, seconds = seconds,
                   tests = tests, detail = check.detail or check.command, tree_commit = tree_commit, key = key }
@@ -1777,9 +1839,8 @@ impl.gate = function(run, options)
       -- Alone, once. No other check runs beside it, so "it passes alone" is a statement about load.
       local retry_started = now()
       evidence(command_line(check.name .. " (alone, after a failure)", command))
-      local retry = M.exec(command, cwd, budget)
+      local retry = M.exec_streamed(command, cwd, budget, M.evidence_path(run.id, "gate"))
       local retry_tests = passed_tests((retry.stdout or "") .. (retry.stderr or ""))
-      evidence((retry.stdout or "") .. (retry.stderr or ""))
       row.retry = { ok = (retry.code or 1) == 0, code = retry.code, seconds = now() - retry_started, tests = retry_tests }
       rows[#rows + 1] = row
       run.journal.gate = rows

@@ -73,7 +73,7 @@ host = setmetatable({
 
 local nodes = dofile('lua/core/nodes.lua')
 local ok, out = pcall(function()
-  return nodes.list({ peers = { { node_id = 'peer-a' }, { node_id = 'peer-b' }, { node_id = 'peer-c' } } })
+  return nodes.list({ probe = true, peers = { { node_id = "peer-a" }, { node_id = "peer-b" }, { node_id = "peer-c" } } })
 end)
 if not ok then refuse('M.list raised: ' .. tostring(out)) end
 
@@ -134,7 +134,7 @@ if not nodes._in_probe_child then
 end
 starts = 0
 events = {}
-nodes.list({ peers = { { node_id = 'peer-a' }, { node_id = 'peer-b' }, { node_id = 'peer-c' } } })
+nodes.list({ probe = true, peers = { { node_id = "peer-a" }, { node_id = "peer-b" }, { node_id = "peer-c" } } })
 if starts ~= 0 then
   refuse('an M.list() inside a probe child started ' .. starts .. ' children: the recursion is back')
 end

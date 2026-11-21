@@ -53,6 +53,16 @@ pub extern "C-unwind" fn db_ready(l: *mut LuaState) -> c_int {
     1
 }
 
+/// host.script_run() -> boolean: was this process started to run one Lua script file?
+///
+/// The host consumes WA_SCRIPT for ITSELF and records the answer in the process (serve::set_script_run),
+/// so no child inherits it. A caller that asks the environment (`host.getenv("WA_SCRIPT")`) is asking a
+/// question a child can get wrong; this answers the process's own truth.
+pub extern "C-unwind" fn script_run(l: *mut LuaState) -> c_int {
+    unsafe { wa_host_support::lua::lua_pushboolean(l, crate::serve::script_run() as c_int) };
+    1
+}
+
 /// host.mark_db_ready() -> nil: record that the schema migration has run.
 pub extern "C-unwind" fn mark_db_ready(l: *mut LuaState) -> c_int {
     DB_READY.store(true, std::sync::atomic::Ordering::SeqCst);

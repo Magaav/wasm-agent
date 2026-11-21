@@ -48,6 +48,9 @@ local markdown = dofile("lua/core/markdown.lua")
 -- per inner call, then the value. The rules (and why they are those rules) live there; this module
 -- owns where the rows go - the running block streams, the one before it collapses to a line.
 local codemode_block = dofile("lua/core/codemode_block.lua")
+-- A file change as a block, rendered from the session's change store (lua/core/diff_view.lua).
+-- Display only: the tool result the model reads is untouched.
+local diff_view = dofile("lua/core/diff_view.lua")
 -- Live reload (docs/HOTRELOAD.md). This module is one of the reloadable ones, so it reads the store the
 -- core owns rather than keeping state of its own, registers every view it creates so a swap can point it
 -- at the new methods, and ticks the watcher at each frame it begins: a save is visible on the next one.
@@ -85,6 +88,10 @@ local PALETTE = {
   mdCodeBlock = "d4d4d4", mdCodeBlockBorder = "777777", mdQuote = "999999",
   mdQuoteBorder = "777777", mdHr = "777777", mdListBullet = "999999",
   toolDiffAdded = "4eba65", toolDiffRemoved = "ff6b80", toolDiffContext = "999999",
+  -- The BANDS behind a removed/added row of the diff block (Victor 20/11: a red band and a green band,
+  -- full width). Dark enough that the role's own foreground stays readable on them, and painted only
+  -- when the view is live: the plain rendering carries the +/- marker instead.
+  toolDiffAddedBand = "12301c", toolDiffRemovedBand = "3a1620",
   syntaxComment = "6a9955", syntaxKeyword = "569cd6", syntaxFunction = "dcdcaa",
   syntaxString = "ce9178", syntaxNumber = "b5cea8", syntaxType = "4ec9b0",
   -- The reasoning ramp, darkest to brightest: how much thinking the model was asked for.
@@ -760,6 +767,76 @@ function M.outcome(name, result, args)
   if type(result) == "string" then return true, clip(result, 60) end
   if r.ok == false then return false, "failed" end
   return true, ""
+end
+
+-- The files a shell command changed while it ran (Victor 20/11), as one block: each file with its
+-- +N -M and its own diff card, and a dim line for a file whose diff cannot honestly be drawn. The
+-- rows come from the same renderer a write/edit uses (lua/core/diff_view.lua), so the frame, the
+-- line numbers and the widths are one rule. Bounded twice: the snapshot caps how many files are
+-- read (lua/core/bash_changes.lua), and this caps how many rows each file shows.
+function M.bash_changes_block(event, width, live)
+  local files = type(event) == "table" and type(event.files) == "table" and event.files or {}
+  local refused = type(event) == "table" and type(event.refused) == "table" and event.refused or {}
+  if #files == 0 and #refused == 0 then return nil, "no_changes" end
+  local out = {}
+  for _, file in ipairs(files) do
+    local lines = M.diff_block({ path = file.path, before_text = file.before_text,
+      after_text = file.after_text }, width, live)
+    for _, row in ipairs(lines or {}) do out[#out + 1] = row end
+  end
+  -- A file whose starting text is not known is NAMED, never drawn with a guessed one: a reader who
+  -- cannot see the diff must be told why, or an empty block reads as no change.
+  for _, item in ipairs(refused) do
+    out[#out + 1] = paint("b91 " .. tostring(item.path) .. " changed ("
+      .. tostring(item.why):gsub("_%a", function(s) return " " .. s:sub(2) end) .. ")", "dim", live)
+  end
+  return out
+end
+-- A file change, as the rows a reader follows it by: the path and its counts, then the diff with
+-- real line numbers, removed rows on a red band and added rows on a green one, a few context rows and
+-- an ellipsis between hunks. The frame is a fence's (lua/core/diff_view.lua), so the host keeps it
+-- whole at any width; width is the view's own, so a resize re-renders instead of clipping.
+--
+-- Returns the lines to write, or nil and why there is nothing honest to show. change carries the two
+-- content addresses the tool result already names (previous_version and version), not the texts: this
+-- reads them from the session's change store, which is where changeset.record put them.
+local BANDS = { ["+"] = "toolDiffAddedBand", ["-"] = "toolDiffRemovedBand" }
+function M.diff_block(change, width, live)
+  if type(change) ~= "table" then return nil, "no_change" end
+  -- Two texts may arrive already read (a shell command change, lua/core/bash_changes.lua): then
+  -- they ARE the diff, and the content addresses are not consulted at all.
+  local before, after
+  if type(change.before_text) == "string" and type(change.after_text) == "string" then
+    before, after = change.before_text, change.after_text
+  else
+    before, after = diff_view.texts(change)
+  end
+  if before == nil then return nil, tostring(after or "no_text") end
+  local block = diff_view.rows({ path = change.path, before = before, after = after },
+    { width = width })
+  local out = {}
+  for _, row in ipairs(block.rows) do
+    if row.kind == "open" or row.kind == "close" then
+      out[#out + 1] = paint(row.lead, row.role, live)
+    else
+      local band = row.band and BANDS[row.band] or nil
+      local base = { row.role or "text", band }
+      -- Syntax colour inside the row, from the same walker a fence uses: one definition of what a
+      -- keyword or a string looks like in this terminal. A row that is context (unchanged) keeps the
+      -- diff colour alone, because a hunk is read for what changed.
+      local body = row.code or ""
+      local painted = {}
+      if row.op ~= " " and row.lang and row.lang ~= "" then
+        markdown.scan_code(body, row.lang, function(text, style)
+          if text == "" then return end
+          painted[#painted + 1] = paint(text, style and { style, band } or base, live)
+        end)
+      end
+      out[#out + 1] = paint(row.lead, { "mdCodeBlockBorder", band }, live)
+        .. (#painted > 0 and table.concat(painted) or paint(body, base, live))
+    end
+  end
+  return out
 end
 
 -- The lines worth showing under a result. Only where output *is* the answer: a command's
@@ -2858,7 +2935,29 @@ function METHODS:event(event)
     self.session_tools = (self.session_tools or 0) + 1
     self:paint(true)
     self:live_footer()
-  elseif kind == "tool_result" then
+-- A recorded file change, drawn as its own block (Victor 20/11). It arrives as an event of its
+-- own, after the call's result: the change is the run's record (lua/core/changeset.lua), not part
+-- of what the tool returned, so the model's context never carries a line of it.
+  elseif kind == "bash_changes" then
+    -- What the command changed, as its own block: the result above it is the tool's own output.
+    local lines = M.bash_changes_block(event, self.limit, self.live)
+    if lines then
+      self:topic(true)
+      for _, text in ipairs(lines) do self:write(text .. "\n") end
+      self:write("\n")
+      self:topic(false)
+    end
+    return  elseif kind == "change" then
+    local lines, why = M.diff_block(event, self.limit, self.live)
+    if lines then
+      self:topic(true)
+      for _, text in ipairs(lines) do self:write(text .. "\n") end
+      self:write("\n")
+      self:topic(false)
+    elseif why ~= "no_change" then
+      self:line(paint("\226\142\191 no diff shown: " .. tostring(why), "dim", self.live))
+    end
+    return  elseif kind == "tool_result" then
     self:progress("finish")
     local name = event.name or (self.pending and self.pending.name) or "?"
     -- A code-mode block owns its whole result: the value the script returned, the call rows flipped

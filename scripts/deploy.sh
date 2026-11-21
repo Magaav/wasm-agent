@@ -542,6 +542,7 @@ echo "deploy: $BRANCH@$COMMIT -> $INSTALL_DIR (port $PORT)"
 # shipped from a detached HEAD; the artifact looked landed and the next deploy of main removed the features.
 # Asked here, BEFORE the build, so a refusal leaves the node untouched instead of stopping halfway through an
 # install (the wave ship step runs after the files are placed).
+. "$ROOT/scripts/lib/commit-id.sh"  # wa_same_commit: the installed binary is judged by commit, not by spelling
 UNSHARED_COMMIT=0
 if [ -f "$ROOT/scripts/lib/shared-commit.sh" ]; then
   . "$ROOT/scripts/lib/shared-commit.sh"
@@ -1768,7 +1769,7 @@ record_installed() {
     # No guess: a binary that cannot say what it is, is recorded as unknown, and the record says why.
     record_commit=unknown
     note "the installed binary cannot report its own build (build_info=absent): installed.txt records commit=unknown, not this deploy's intention"
-  elif [ "$record_commit" != "$record_expected" ]; then
+  elif ! wa_same_commit "$record_commit" "$record_expected"; then
     fail "refused(build_commit_mismatch): the binary installed at $INSTALLED_BIN_FOR_RECORD reports commit ${record_commit:0:12} but this deploy meant to install ${record_expected:0:12} - the bytes are not the commit they were taken for (a stale build artifact, a reused target directory, or a mislabelled release). Nothing was recorded over the previous record."
   fi
   # A prebuilt record's commit= is the manifest's 40-hex identity or it is not a record of a verified

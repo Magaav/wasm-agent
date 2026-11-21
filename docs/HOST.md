@@ -853,6 +853,7 @@ runtime_info         read-only
 service              runs a process
 selfloop             writes files
 sha256               read-only
+script_run           read-only
 sign                 read-only
 sleep                read-only
 sql_exec             writes files

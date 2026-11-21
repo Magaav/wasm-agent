@@ -32,7 +32,16 @@ for line in text:gmatch('[^\r\n]+') do
   if name then
     checks = checks + 1
     local got = host.getenv(name)
-    if got ~= want then
+    if name == 'WA_SCRIPT' then
+      -- WA_SCRIPT is the HOST's to consume (harness-fixes-2 item 1, c2e060e7): it is read once, removed
+      -- from the environment so no child inherits it, and recorded as a process fact. The row proves it
+      -- reached the node by asking that fact - and that the variable is GONE from the environment.
+      if not (host.script_run and host.script_run() == true) then
+        failures[#failures + 1] = 'WA_SCRIPT: the runner set it, but the node does not say it is a script run (host.script_run)'
+      elseif got ~= nil then
+        failures[#failures + 1] = string.format('WA_SCRIPT: still in the environment (%q), so a child would inherit it', tostring(got))
+      end
+    elseif got ~= want then
       failures[#failures + 1] = string.format('%s: the runner set %q, the row saw %s', name, want,
         got == nil and 'nothing at all' or ('%q'):format(tostring(got)))
     end
