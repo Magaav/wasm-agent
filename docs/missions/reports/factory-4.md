@@ -31,6 +31,7 @@ New behaviour:
   `<mission>/brief.md`. No `priority:` line = never launched by the driver (the folder holds old briefs and
   notes). `hold:` keeps one back. A brief with no `## How Victor tests it`, a name that already exists, or a
   launch that fails becomes a DECISIONS.md line (case 11).
+- **A dead worker is one line.** Launched, no `done`, no unit running it for 3 minutes: `<name>: its worker is DEAD ... - recommended: again` (case 13b; 21/11 a dead worker went unseen for ten hours).
 - `--loop [seconds]` is the service form; `<missions>/.drive/heartbeat` is touched every round.
 - `lua/core/land.lua` `M.regenerate` stages only the paths the generators reported, not `git add -A`.
 
@@ -42,7 +43,7 @@ New behaviour:
 
 ## Checks run
 
-- `bash scripts/test-drive.sh`: `test-drive ok (67 checks)` (was 24). Cases 7-14 are new; on factory-3's
+- `bash scripts/test-drive.sh`: `test-drive ok (69 checks)` (was 24). Cases 7-14 are new; on factory-3's
   drive.sh case 7 fails (it writes ATTENTION and stops for a mission's own red).
 - `scripts/test-land.lua` with `WASM_AGENT_LUA_ROOT` = this worktree, scratch home: `land ok (574 checks)`.
 - `bash scripts/test-regenerate.sh`: `test-regenerate ok (28 checks)`.

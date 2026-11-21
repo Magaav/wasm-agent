@@ -259,6 +259,19 @@ survey() {
     fi
   done
   ready=$(printf '%s' "$ready" | sort -n)
+  # A DEAD WORKER: launched (run.sh and a `started` stamp), no `done`, and no unit running it. 21/11 the first
+  # tui-fit worker died at 11:28 and nobody saw it for ten hours, because a mission with no `done` looks like
+  # one that is still working. It becomes one line a person answers (`again` resumes its session).
+  local alive; alive=$(running_names)
+  for d in "$missions"/*/; do
+    name=$(basename "$d"); d=${d%/}
+    [ -f "$d/run.sh" ] && [ -f "$d/started" ] && [ ! -f "$d/done" ] || continue
+    [ -e "$d/RETIRED" ] || [ -e "$d/HOLD" ] && continue
+    printf '%s\n' "$alive" | grep -qx -- "$name" && continue
+    # a launch or a resume is between its two steps for a moment: only a stamp older than 3 minutes counts
+    [ $(( now - $(stat -c %Y "$d/started" 2>/dev/null || echo "$now") )) -ge 180 ] || continue
+    add_decision "$name" "its worker is DEAD: launched $(cat "$d/started" 2>/dev/null | head -1), no done file, no unit running it - recommended: again"
+  done
 }
 
 # ---- one landing ------------------------------------------------------------------------------------------

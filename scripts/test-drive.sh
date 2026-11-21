@@ -402,6 +402,15 @@ ok
 grep -q '^release-after-m9: the landing moved main and then stopped (exit 1: land: STOPPED at sign' "$missions/DECISIONS.md" || fail "no DECISIONS line for the stopped release: $(cat "$missions/DECISIONS.md")"
 ok
 
+# ---- 13b. a dead worker is one line, and a living one is not -----------------------------------------------
+mkdir -p "$missions/dead1" "$missions/q-running-1"
+for n in dead1 q-running-1; do : > "$missions/$n/run.sh"; echo "2026-11-21T11:00:00Z" > "$missions/$n/started"; touch -d '10 minutes ago' "$missions/$n/started"; done
+out=$(run_launch 9) || fail "the dead-worker round failed: $out"
+grep -q '^dead1: its worker is DEAD' "$missions/DECISIONS.md" || fail "no DECISIONS line for the dead worker: $(cat "$missions/DECISIONS.md")"
+ok
+grep -q '^q-running-1: ' "$missions/DECISIONS.md" && fail "a RUNNING mission was called dead"
+ok
+
 # ---- 14. the site file sets the defaults and the environment wins ---------------------------------------
 printf 'WA_DRIVE_MAX_WORKERS=0\nWA_LAND=/nonexistent/land\n' > "$missions/drive.conf"
 brief qz.md 'priority: 1'
