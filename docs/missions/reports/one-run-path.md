@@ -93,9 +93,55 @@ The gate rows and the fast-path seconds are in section 6, which reports only wha
    it is a prompt change with its own cache miss for every native thread, so it is **not** smuggled into this
    branch: it is proposed here and left for the next one.
 
-## 6. Verification
+## 6. Verification - what was run, and what was not
 
-(see the run recorded at the end of this file)
+**The whole fast path, once, on `d83c98e6`** (the snapshot before the last four commits, under the suite lock - it queued
+behind another session's landing preflight): `fast: lua 266/282 passed (59 excluded)`, every contract check `ok`
+(`prompt-docs`, `instructions`, `direct-workflow`, `discrimination`, `landing-queue`, `cli-scripted`, `fence-card-pty`,
+`run-live-pty`, ...). The 16 red rows were all fixtures of the removed surface; each was then fixed and **re-run by name,
+one row at a time, with the same environment the runner gives a row** (scratch `WASM_AGENT_HOME`, `WA_COMPONENTS_DIR`,
+`WASM_AGENT_LUA_ROOT`, `GATE_ROOT`), and each now prints its own `ok` line:
+
+| row | state now |
+|---|---|
+| `test-toolname-repair.lua` | ok - a `{code}` call is repaired to the declared door, `run` |
+| `test-thinking-block.lua` | ok (99 checks) - the reasoning-field notice names the tool, and a block that ends the answer is markup |
+| `test-skill-discovery.lua` | ok (53 checks) - the run declares the one door |
+| `test-resume-tool-registry.lua` | ok (26 checks) |
+| `test-remote-call-shape.lua` | ok (87 checks) |
+| `test-rel-native-poll.lua` | ok - the poll loop acts through a `run` call, and the repeat guard still stops it |
+| `test-rel-native-replay.lua` | ok |
+| `test-refusal-contract.lua` | ok (16,944 checks) - after `lua5.4 scripts/gen-refusal-codes.lua --write` (584 codes) |
+| `test-prompt-golden.lua` | ok (20 checks) - the arm-B parity rows, the per-mode goldens are gone with the modes |
+| `test-observability.lua` | ok (78 assertions) |
+| `test-hotreload.lua` | ok (217 checks) |
+| `test-envelope.lua` | ok (99 checks) |
+| `test-codemode-model-boundary.lua` | ok (664 checks) |
+| `test-codemode-default.lua` | ok (39 checks) |
+| `test-codemode-boundary.lua` | ok (33 checks) |
+| `test-run-claim-release.lua` | ok (10 checks) - it was red in the suite run and passes by name; it must be re-checked in the full run |
+| `test-one-run-path.lua` | **new**, ok (110 checks) - the switch refusal for every value, the provider door, the text-action reader, and the old thread's move: ONE note naming the mode, earlier rows byte-identical, a thread already on this path paying no cache miss |
+| `test-native-raw-vars.lua` | ok (16 checks) - including `raw.patch` and the refusal of a block named `raw` |
+| `test-leak-net.lua`, `test-native-guidance.lua` (39), `test-batching-instruction.lua` (7), `test-prompt-cache.lua` (195), `test-orchestration-mode.lua` (77), `test-session-worktree-status.lua` (15), `test-codemode-model-boundary` | ok |
+
+**Byte parity of the frozen texts**, measured against `97251587`: a script loaded the base's `raw_code.lua` and this one
+and compared `BATCHING` (253 bytes), `guidance_for('tool_call')` (495 bytes), the run tool's `description` (566 bytes),
+its name and its schema JSON - all `SAME`. That is the half of the cache the brief pins; the prompt's other sections are
+built from branches this branch only removes for modes that no longer exist (the `raw_first`/`raw_only` arms are inert
+when both are false, which is what every native thread passes).
+
+**Not verified, and therefore not claimed:**
+
+- **The whole fast path has not been re-run on the final commit** (`3b14979f`). The evidence above is one full run on
+  `d83c98e6` plus a by-name run of every row that run had red, after each fix. A green gate on the final tree is still owed.
+- No live model turn was made: this node's provider is a live route and rule 13 keeps this branch off it, so "one real
+  turn on each fleet provider acts through `run`" is **not** measured here. What is measured is that the refusal fires in a
+  real process (the gate row above) and that a scripted provider's `run` tool call acts through the one path
+  (`test-rel-native-poll.lua`, `test-thinking-block.lua`, `test-codemode-default.lua`).
+- `test-discriminates.sh` (the base-vs-branch judge for new rows) has not been run: the new row `test-one-run-path.lua`
+  cannot pass on the base - its first assertion is a `switch_refusal` that does not exist there - but that is reasoning,
+  not a measurement.
+
 
 ## 7. Not done here, and known holes
 
