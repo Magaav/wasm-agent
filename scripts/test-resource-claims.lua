@@ -25,11 +25,16 @@ elseif mode=='recover' then
   local failed=tools.dispatch(nil,'client',{action='screenshot'},'master',b)
   host.client=client
   check(failed.error=='fixture uncertain client failure','client failure surfaced')
+  local held=nil
+  for _,c in ipairs(resources.inspect().claims or {}) do if c.key=='client:local' then held=c end end
+  check(held and held.run=='run-b' and held.uncertain==true,'an unknown client effect marks the live run\'s claim uncertain')
   check(resources.finish(b).ok,'failed run can settle')
-  check(resources.claim(a,{'client:local'}).error=='resource_busy','failed client effects retain durable ownership after settlement')
+  -- A run that has ENDED holds nothing (rust/wa-capabilities/src/resources.rs, finish, 10/11): its
+  -- uncertainty is archived on the claim history as finish_uncertain (asserted by the Rust tests there),
+  -- not kept as a lock - an uncertain claim kept past the run refused every `wa resume` until the process
+  -- was killed. Uncertainty WHILE the run lives is the 'held' + uncertain=true claim checked above.
+  check(resources.claim(a,{'client:local'}).ok,'a settled run holds nothing: its uncertainty is archived, not a lock')
   check(tools.dispatch(nil,'resource',{action='list'},'guest',{}).error=='forbidden_for_role:guest','guest cannot inspect or release claims')
-  check(resources.reconcile({key='client:local',run='run-b',principal='bob',evidence='mock client failure inspected; no real effect'}).ok,'settled uncertain owner can be explicitly reconciled')
-  check(resources.claim(a,{'client:local'}).ok,'resource usable after reconciliation')
   check(resources.finish(a).ok,'normal completion releases owned resources')
 elseif mode=='reuse' then
   -- A refusal that never reached the client is not an uncertain effect: uncertainty is
