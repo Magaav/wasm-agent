@@ -769,6 +769,29 @@ function M.outcome(name, result, args)
   return true, ""
 end
 
+-- The files a shell command changed while it ran (Victor 20/11), as one block: each file with its
+-- +N -M and its own diff card, and a dim line for a file whose diff cannot honestly be drawn. The
+-- rows come from the same renderer a write/edit uses (lua/core/diff_view.lua), so the frame, the
+-- line numbers and the widths are one rule. Bounded twice: the snapshot caps how many files are
+-- read (lua/core/bash_changes.lua), and this caps how many rows each file shows.
+function M.bash_changes_block(event, width, live)
+  local files = type(event) == "table" and type(event.files) == "table" and event.files or {}
+  local refused = type(event) == "table" and type(event.refused) == "table" and event.refused or {}
+  if #files == 0 and #refused == 0 then return nil, "no_changes" end
+  local out = {}
+  for _, file in ipairs(files) do
+    local lines = M.diff_block({ path = file.path, before_text = file.before_text,
+      after_text = file.after_text }, width, live)
+    for _, row in ipairs(lines or {}) do out[#out + 1] = row end
+  end
+  -- A file whose starting text is not known is NAMED, never drawn with a guessed one: a reader who
+  -- cannot see the diff must be told why, or an empty block reads as no change.
+  for _, item in ipairs(refused) do
+    out[#out + 1] = paint("b91 " .. tostring(item.path) .. " changed ("
+      .. tostring(item.why):gsub("_%a", function(s) return " " .. s:sub(2) end) .. ")", "dim", live)
+  end
+  return out
+end
 -- A file change, as the rows a reader follows it by: the path and its counts, then the diff with
 -- real line numbers, removed rows on a red band and added rows on a green one, a few context rows and
 -- an ellipsis between hunks. The frame is a fence's (lua/core/diff_view.lua), so the host keeps it
@@ -780,7 +803,14 @@ end
 local BANDS = { ["+"] = "toolDiffAddedBand", ["-"] = "toolDiffRemovedBand" }
 function M.diff_block(change, width, live)
   if type(change) ~= "table" then return nil, "no_change" end
-  local before, after = diff_view.texts(change)
+  -- Two texts may arrive already read (a shell command change, lua/core/bash_changes.lua): then
+  -- they ARE the diff, and the content addresses are not consulted at all.
+  local before, after
+  if type(change.before_text) == "string" and type(change.after_text) == "string" then
+    before, after = change.before_text, change.after_text
+  else
+    before, after = diff_view.texts(change)
+  end
   if before == nil then return nil, tostring(after or "no_text") end
   local block = diff_view.rows({ path = change.path, before = before, after = after },
     { width = width })
@@ -2896,7 +2926,16 @@ function METHODS:event(event)
 -- A recorded file change, drawn as its own block (Victor 20/11). It arrives as an event of its
 -- own, after the call's result: the change is the run's record (lua/core/changeset.lua), not part
 -- of what the tool returned, so the model's context never carries a line of it.
-  elseif kind == "change" then
+  elseif kind == "bash_changes" then
+    -- What the command changed, as its own block: the result above it is the tool's own output.
+    local lines = M.bash_changes_block(event, self.limit, self.live)
+    if lines then
+      self:topic(true)
+      for _, text in ipairs(lines) do self:write(text .. "\n") end
+      self:write("\n")
+      self:topic(false)
+    end
+    return  elseif kind == "change" then
     local lines, why = M.diff_block(event, self.limit, self.live)
     if lines then
       self:topic(true)

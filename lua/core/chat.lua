@@ -95,7 +95,11 @@ local function printer(view)
       elseif type(value) == "string" then
         value = redact.text(value)
       end
-    elseif event.type == "change" then
+
+    elseif event.type == "bash_changes" then
+      -- The files a command changed: the view renders them, and the model never sees this event.
+      ready = { type = "bash_changes", command = event.command, files = event.files,
+        refused = event.refused }    elseif event.type == "change" then
       -- A recorded file change, for the view's diff block (lua/core/diff_view.lua). Only the two
       -- content addresses and the path cross: the texts stay in the store.
       ready = { type = "change", name = event.name, path = event.path, before = event.before,

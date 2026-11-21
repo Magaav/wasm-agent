@@ -8,6 +8,7 @@ local platform = dofile("lua/core/platform.lua")
 local spellslib = dofile("lua/core/spells.lua")
 local nodeslib = dofile("lua/core/nodes.lua")
 local changeset = dofile("lua/core/changeset.lua")
+local bash_changes = dofile("lua/core/bash_changes.lua")
 local patch_audit = dofile("lua/core/patch_audit.lua")
 local tool_output = dofile("lua/core/pure.lua")("lua/core/tool_output.lua")
 local file_tools = dofile("lua/core/file_tools.lua")
@@ -1860,7 +1861,20 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     -- The name the reader knows this call by, for the session-status-content row while the command
     -- runs (docs/TOOL-PROGRESS.md). A label the host draws; it is not a policy fact.
     provenance.tool = "bash"
-    local result = run(args.command, timeout, cwd, provenance)
+    -- The files this command changes, for the READER (Victor 20/11). The snapshot is taken before the
+    -- command runs and compared after it, and only when a listener asks for it: the model's result is
+    -- read before this point and is not touched by it. A read-only command takes no snapshot at all.
+    local watched = nil
+    if ctx and type(ctx.emit) == "function" and ctx.watch_changes then
+      watched = bash_changes.before(cwd, args.command)      watched = bash_changes.before(cwd, args.command, ctx.read_only_command and ctx.read_only_command(args.command))
+    end    local result = run(args.command, timeout, cwd, provenance)    -- After the command: what it changed. Emitted as its own event, so the model's result above stays
+    -- exactly what the tool returned, and a reader who is not watching changes pays nothing.
+    if watched ~= nil and ctx and type(ctx.emit) == "function" then
+      local changed, refused = bash_changes.changed(cwd, watched)
+      if #changed > 0 or #refused > 0 then
+        ctx.emit({ type = "bash_changes", command = args.command, files = changed, refused = refused })
+      end
+    end
     -- The adopted-tree guidance is *policy*, and policy depends on what this caller may use:
     -- a profile with `bash` but not `operation` cannot read or cancel the operation it has just
     -- been handed, so telling it to would be the same dead end the old refusal was. The host

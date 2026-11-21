@@ -3657,7 +3657,13 @@ function M:run_body(text, images)
       -- script reports each nested call as it starts and settles, which is what the CLI's block shows
       -- (`lua/core/codemode.lua` -> `lua/core/codemode_block.lua`). Nothing on the result path reads
       -- it, and a caller with no listener emits into `on_event`, which is a no-op.
-      emit = function(event) self.emit(event) end }
+
+      -- The reader follows what a shell command changed (lua/core/bash_changes.lua). A snapshot around
+      -- every non-read-only command is the cost of that; it is display only.
+      watch_changes = true,
+      -- The one rule for what a shell command may read, handed to the change watcher rather than
+      -- re-derived there (lua/core/bash_changes.lua).
+      read_only_command = M.command_effect,      emit = function(event) self.emit(event) end }
     dispatch_ctx.steering_admit=function() return steering.admit(self.user,self.session_id,self.steering_run_id) end
     local parallel_ops = tools.start_parallel_bash(calls, memory, self.role, dispatch_ctx)
     -- The batching treatment was retired (04/11): every run now carries the default guidance, so

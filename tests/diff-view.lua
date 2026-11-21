@@ -141,6 +141,42 @@ local created_rows = table.concat(view_lib.diff_block({ path = created.path,
   before = created.before, after = created.after }, 80, false) or {}, "\n")
 has(created_rows, "+2 -0", "a created file counts two added lines and no removal")
 
+
+-- ---- the files a shell command changed ----------------------------------------
+-- The snapshot and the diff of what a command changed, through lua/core/bash_changes.lua with a fake
+-- shell (no real git, no real tree): BEFORE is clean, the command writes one file, and AFTER reports it
+-- modified. The starting text comes from the index, so the block shows a real diff; a file that was
+-- already modified is NAMED and its diff refused rather than guessed.
+local bash_changes = dofile("lua/core/bash_changes.lua")
+local fake = { status = " M src/changed.lua\n M src/already.lua\n?? src/new.lua\n",
+  show = { ["src/changed.lua"] = "one\ntwo\n" },
+  files = { ["src/changed.lua"] = "one\nTWO\n", ["src/already.lua"] = "kept\n",
+    ["src/new.lua"] = "fresh\n" } }
+local real_exec, real_read = host.exec, host.read_file
+host.exec = function(command, cwd)
+  if command:match("^git status") then return '{"code":0,"stdout":"' .. fake.status:gsub("\n", "\\n") .. '","stderr":""}' end
+  local path = command:match("^git show :(.+)$")
+  if path and fake.show[path] then
+    return '{"code":0,"stdout":"' .. fake.show[path]:gsub("\n", "\\n") .. '","stderr":""}'
+  end
+  return '{"code":1,"stdout":"","stderr":"no such path"}'
+end
+host.read_file = function(path) return fake.files[path:gsub("^/work/", "")] end
+local changed, refused = bash_changes.changed("/work", { ["src/already.lua"] = "MM" })
+ok(#changed == 2, "a command's own changes are found (got " .. #changed .. ")")
+ok(#refused == 1 and refused[1].path == "src/already.lua",
+  "a file that was already modified is refused by name, not diffed from a guess")
+local block = table.concat(view_lib.bash_changes_block({ files = changed, refused = refused }, 80, false)
+  or {}, "\n")
+has(block, "src/changed.lua", "the changed file is named")
+has(block, "+1 -1", "and its own counts")
+has(block, "src/new.lua", "a new file is shown")
+has(block, "already modified before command", "a refused file says why in words, not as an empty block")
+-- The snapshot is not taken for a read-only command: there is nothing it could have changed.
+ok(bash_changes.before("/work", "git status", true) == nil, "a read-only command takes no snapshot")
+ok(bash_changes.before("/work", "rm -rf build", false) ~= nil, "a command that can write does")
+host.exec, host.read_file = real_exec, real_read
+
 if failed > 0 then
   print("FAILED " .. failed)
   os.exit(1)
