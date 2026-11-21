@@ -318,5 +318,21 @@ printf 'watchdog: %s produced no verdict within 3s: killed the group\n' 'row' > 
 
 grep -q '^watchdog: ' "$out" || fail 'a watchdog line was not recognised'
 
+# THE WATCHDOG DOES NOT ROUND A ROW UP TO A WHOLE SECOND (change/gate-fast, 21/11). It polled with
+# `sleep 1`, so a row that answers in 150 ms cost 1000 ms (measured: 1.04 s, and 2.03 s for a 1.2 s row),
+# on every one of ~170 rows of every run. With the tenth-of-a-second poll the same row is measured at
+# 0.25 s. The best of three, so a loaded host has to be slow three times running to fail this; the old
+# poll could not pass it once, because its first look after the start was a whole second later.
+best=999999
+for attempt in 1 2 3; do
+  started=$(date +%s%N)
+  wa_fast_watchdog 10 "quick row" -- sleep 0.15 || fail "a 150 ms row was reported as failed (exit $?)"
+  took=$(( ($(date +%s%N) - started) / 1000000 ))
+  [ "$took" -lt "$best" ] && best=$took
+done
+[ "$best" -lt 800 ] || fail "a 150 ms row took ${best} ms through the watchdog (best of three): the poll is rounding rows up to whole seconds again"
+# And the deadline is still seconds, never tenths of them: a 2 s deadline does not fire on a 1.2 s row.
+wa_fast_watchdog 2 "row inside its deadline" -- sleep 1.2 || fail "a 1.2 s row was killed by a 2 s deadline (exit $?): the deadline is being counted in the wrong unit"
+
 printf 'test-fast-watchdog: ok (hung row named and its group killed, exits passed through, refusals named, a command own 124 is NOT a hang, and a row really runs through the runner exec path)\n'
 exit 0

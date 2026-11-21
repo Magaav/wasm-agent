@@ -36,10 +36,18 @@ wa_fast_watchdog() { # <seconds> <label> -- <command...>
   "$@" &
   pid=$!
   set +m
+  # THE POLL IS A TENTH OF A SECOND, counted in tenths (`waited` is tenths; the deadline is seconds x 10).
+  # It was `sleep 1`, so every row was rounded UP to a whole second: a row that answers in 150 ms cost
+  # 1000 ms, on each of ~170 rows of every run. The deadline only ever errs late (each tick is the sleep
+  # plus the cost of asking), never early, so no row gets less time than it was promised.
+  # WA_FAST_WATCHDOG_POLL=1 restores the whole-second poll on a host whose sleep(1) takes no fraction.
+  local poll=0.1 per_second=10
+  if [ "${WA_FAST_WATCHDOG_POLL:-}" = 1 ] || ! sleep 0.01 2>/dev/null; then poll=1; per_second=1; fi
+  local limit=$((seconds * per_second))
   while :; do
     kill -0 "$pid" 2>/dev/null || break
-    if [ "$waited" -ge "$seconds" ]; then hung=1; break; fi
-    sleep 1
+    if [ "$waited" -ge "$limit" ]; then hung=1; break; fi
+    sleep "$poll"
     waited=$((waited + 1))
   done
   if [ "$hung" = 1 ]; then
