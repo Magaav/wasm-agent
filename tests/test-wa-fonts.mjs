@@ -133,13 +133,16 @@ function readFont(file) {
 // The code points lua/core/cli_view.lua's GLYPH table names, read from the SOURCE. A table copied into
 // this test would agree with itself and prove nothing, so each row's trailing "-- U+XXXXX" comment is
 // what is parsed - the same comment a reader checks the escape against.
+// The code points lua/core/icons.lua's wa SET draws - the table the rows ask by name (item 4 moved it
+// there from cli_view, so this reads the one place wa's characters live now). Each row's trailing
+// "-- U+XXXXX" comment is what is parsed: a table copied into this test would agree with itself.
 function luaGlyphs() {
-  const source = fs.readFileSync(path.join(ROOT, 'lua', 'core', 'cli_view.lua'), 'utf8');
-  const start = source.indexOf('local GLYPH = {');
-  assert.ok(start > 0, 'lua/core/cli_view.lua no longer has a GLYPH table');
+  const source = fs.readFileSync(path.join(ROOT, 'lua', 'core', 'icons.lua'), 'utf8');
+  const start = source.indexOf('  wa = {');
+  assert.ok(start > 0, 'lua/core/icons.lua no longer has a wa set');
   const body = source.slice(start);
-  const stop = body.indexOf('\n}');
-  assert.ok(stop > 0, 'the GLYPH table is not closed on its own line');
+  const stop = body.indexOf('\n  },');
+  assert.ok(stop > 0, 'the wa set is not closed on its own line');
   const table = body.slice(0, stop);
   const found = new Map();
   for (const line of table.split('\n')) {
@@ -232,8 +235,7 @@ check('the manifest lists every committed font file with its sha256, and nothing
     assert.equal(manifest.a2.size_units_1000, A2_SIZE);
     assert.equal(manifest.a2.gap, '', 'A2 is GLUED: the gap is the empty string');
     for (const needed of [
-      'waIcons-Regular.ttf', 'waIcons-Regular.woff2', 'JetBrainsMono-Regular.ttf',
-      'JetBrainsMono-Bold.ttf', 'JetBrainsMono-Regular.woff2', 'JetBrainsMono-Bold.woff2',
+      'waIcons-Regular.ttf', 'JetBrainsMono-Regular.ttf', 'JetBrainsMono-Bold.ttf',
       'OFL-JetBrainsMono.txt', 'LICENSE-SymbolsNerdFont-MIT.txt']) {
       assert.ok(manifest.files[needed] !== undefined, 'the bundle ships ' + needed);
     }
@@ -242,7 +244,7 @@ check('the manifest lists every committed font file with its sha256, and nothing
 // The window embeds the same two faces (item 5). The node serves ONE directory and its CSP allows this
 // origin only, so the woff2 the page loads lives under ui/fonts - and a served copy that has drifted
 // from the committed one is a window drawing a glyph the terminal no longer draws.
-for (const name of ['waIcons-Regular.woff2', 'JetBrainsMono-Regular.woff2', 'JetBrainsMono-Bold.woff2']) {
+for (const name of ['waIcons-Regular.ttf', 'JetBrainsMono-Regular.ttf', 'JetBrainsMono-Bold.ttf']) {
   check('ui/fonts/' + name + ' is the byte-identical twin of assets/fonts/' + name,
     () => {
       const served = path.join(ROOT, 'ui', 'fonts', name);
@@ -257,7 +259,7 @@ check('the page loads the faces through one stylesheet, from this origin',
     const html = fs.readFileSync(path.join(ROOT, 'ui', 'index.html'), 'utf8');
     assert.match(html, /<link rel="stylesheet" href="fonts\.css"/);
     const css = fs.readFileSync(path.join(ROOT, 'ui', 'fonts.css'), 'utf8');
-    for (const name of ['JetBrainsMono-Regular.woff2', 'JetBrainsMono-Bold.woff2', 'waIcons-Regular.woff2']) {
+    for (const name of ['JetBrainsMono-Regular.ttf', 'JetBrainsMono-Bold.ttf', 'waIcons-Regular.ttf']) {
       // Relative to the page ('fonts/...'), never absolute: the node serves one directory.
       assert.ok(css.includes('url("fonts/' + name + '")'), 'fonts.css does not load fonts/' + name);
     }

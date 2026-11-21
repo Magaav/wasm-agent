@@ -1,9 +1,13 @@
 /* wa's two faces, embedded: JetBrains Mono for text and "wa Icons" for the glyphs wa draws.
  *
  * The node serves ONE directory - the ui dir - and its Content-Security-Policy allows this origin only,
- * so these faces are woff2 files under ui/fonts/, written by scripts/build-wa-icons.py from the same
- * bytes the terminal installs (assets/fonts/) and listed with their sha256 in assets/fonts/waIcons.json.
+ * so these faces live under ui/fonts/, written by scripts/build-wa-icons.py from the same bytes the
+ * terminal installs (assets/fonts/) and listed with their sha256 in assets/fonts/waIcons.json.
  * tests/test-wa-fonts.mjs refuses a served copy that has drifted from the committed one.
+ *
+ * TrueType, not woff2: these are the SAME files 'wa setup fonts' copies into the user's font directory,
+ * and a browser loads a TrueType webfont perfectly well. Shipping a second encoding would mean two
+ * copies of every face in the bundle for no gain (measured: 570 KB of duplicate).
  *
  * font-display:block, not swap. The icons are not decoration: an icon that arrives late is a status row
  * that reflows, and these faces are local files that load in milliseconds.
@@ -13,22 +17,22 @@
   font-style: normal;
   font-weight: 400;
   font-display: block;
-  src: url("fonts/JetBrainsMono-Regular.woff2") format("woff2");
+  src: url("fonts/JetBrainsMono-Regular.ttf") format("truetype");
 }
 @font-face {
   font-family: "JetBrains Mono";
   font-style: normal;
   font-weight: 700;
   font-display: block;
-  src: url("fonts/JetBrainsMono-Bold.woff2") format("woff2");
+  src: url("fonts/JetBrainsMono-Bold.ttf") format("truetype");
 }
 @font-face {
   font-family: "wa Icons";
   font-style: normal;
   font-weight: 400;
   font-display: block;
-  /* The glyphs live in plane 15 (U+F0000..U+F0FFF); naming the range keeps a browser from asking this
-     face for every character it draws and falling through it for the Latin text. */
+  /* The glyphs live in plane 15 (U+F0000..U+F0FFF). Naming the range keeps a browser from asking this
+     face for every character on the page and falling through it for the Latin text. */
   unicode-range: U+F0000-FFFFD;
-  src: url("fonts/waIcons-Regular.woff2") format("woff2");
+  src: url("fonts/waIcons-Regular.ttf") format("truetype");
 }

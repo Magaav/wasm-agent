@@ -20,10 +20,10 @@ asserts those numbers, instead of trusting the bytes in the repo.
          build-wa-icons.py --check --sources        ... and re-download/re-hash the pinned archives
          build-wa-icons.py --verify-font <path>     verify ONE font file, no sources needed
 
-fontTools (+ brotli for woff2) is needed to BUILD and is not installed system-wide, by rule: never
+fontTools is needed to BUILD and is not installed system-wide, by rule: never
 sudo, never system pip:
 
-  python3 -m venv .venv && .venv/bin/pip install fonttools brotli
+  python3 -m venv .venv && .venv/bin/pip install fonttools
   .venv/bin/python scripts/build-wa-icons.py
 
 --check and --verify-font also need fontTools (it is what parses a font); they never need the network.
@@ -126,6 +126,10 @@ K = UPEM_OUT / 1000.0
 ADVANCE = round(ADV_EM * K)               # 1229: ONE cell, which is what "glued" means
 RIGHT_EDGE = A2_SIZE * K                  # 1058.8: the icon's right edge, 1 px inside the cell
 YMID_OUT = YMID * K                       # 747.5: the icon's vertical centre
+
+# The faces that ship: the text font in both weights, and our icons. Named once, because the builder
+# writes them, the web page loads them and wa setup fonts installs them.
+SERVED_FONTS = ("waIcons-Regular.ttf", "JetBrainsMono-Regular.ttf", "JetBrainsMono-Bold.ttf")
 
 FAMILY = "wa Icons"
 MAC_EPOCH = 2082844800                    # 1904-01-01 -> 1970-01-01: fontTools counts from the former
@@ -333,16 +337,6 @@ def verify(font_path):
     return problems
 
 
-def web_font(source_path, out_path):
-    """The woff2 the web UI embeds (item 5). Same outlines, brotli-compressed - which is why brotli is
-    required for a build and never for a check."""
-    from fontTools.ttLib import TTFont
-
-    font = TTFont(source_path, recalcTimestamp=False)
-    font.flavor = "woff2"
-    font.save(out_path)
-
-
 def ship(out_dir, cache):
     """Everything the release bundle carries, from the pinned archives: the two JetBrains Mono weights
     the terminal uses and the Symbols Nerd Font notice."""
@@ -445,11 +439,10 @@ def main():
     parser.add_argument("--check", action="store_true", help="verify the committed fonts, manifest and hashes")
     parser.add_argument("--sources", action="store_true", help="with --check: re-download and re-hash the archives")
     parser.add_argument("--verify-font", default=None, help="verify ONE font file and exit")
-    # The browser cannot reach assets/: the node serves ONE directory (the ui dir, lua/core/server.lua),
-    # so the woff2 the page embeds must live under ui/ in the served tree. This writes that copy from the
-    # same bytes that were just built, and a test compares the two (tests/test-wa-fonts.mjs) so a stale
-    # copy cannot sit in the served tree while the committed font has moved on.
-    parser.add_argument("--web-out", default="ui/fonts", help="where the served woff2 copies are written")
+    # The browser cannot reach assets/: the node serves ONE directory (the ui dir), so the faces the page
+    # embeds live under ui/fonts in the served tree - and they are the SAME files wa setup fonts installs.
+    # tests/test-wa-fonts.mjs compares the two copies, so a stale one cannot sit in the served tree.
+    parser.add_argument("--web-out", default="ui/fonts", help="where the served font copies are written")
     args = parser.parse_args()
 
     built = os.path.join(args.out, "waIcons-Regular.ttf")
@@ -469,13 +462,11 @@ def main():
         finally:
             os.remove(staging)
         written = ship(args.out, args.cache)
-        for name in ("JetBrainsMono-Regular.ttf", "JetBrainsMono-Bold.ttf"):
-            web_font(written[name], os.path.join(args.out, name.replace(".ttf", ".woff2")))
-        web_font(built, os.path.join(args.out, "waIcons-Regular.woff2"))
-        # The copies the node actually SERVES (see the --web-out note above): written from the files just
-        # produced, so the served bytes and the committed bytes are the same build.
+        # The copies the node actually SERVES, and the copies wa setup fonts INSTALLS: the .ttf files
+        # themselves. One file, two uses - a browser loads TrueType webfonts as readily as woff2, and the
+        # installer has to copy a real font anyway, so serving anything else would ship each face twice.
         os.makedirs(args.web_out, exist_ok=True)
-        for name in ("waIcons-Regular.woff2", "JetBrainsMono-Regular.woff2", "JetBrainsMono-Bold.woff2"):
+        for name in SERVED_FONTS:
             with open(os.path.join(args.out, name), "rb") as handle:
                 data = handle.read()
             with open(os.path.join(args.web_out, name), "wb") as handle:
