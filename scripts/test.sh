@@ -2157,6 +2157,15 @@ WEDGE_ONLY=1 WA_BIN="$BIN" bash scripts/test-serve-concurrency.sh "$CONCURRENCY_
 # Both claims are read from one run: the pair costs one fixture, not two.
 grep "a stalled worker is visible" "$DB.concurrency.log"
 grep "the client bridge survived a connection that said nothing" "$DB.concurrency.log"
+# A node must answer /health whatever directory it is started in. It registers an OS watch over
+# its cwd at boot, and an unbounded recursive walk of a huge home held /health for 60-150 s on
+# openclaw (21/11); the watch is now bounded and the walk is named and skipped. The row builds a
+# 200k-directory cwd and asserts BOTH the answer time and that no per-directory watch is held
+# (docs/missions/reports/serve-cwd-boot.md).
+WA_BIN="$BIN" bash scripts/test-serve-cwd-boot.sh > "$DB.cwd-boot.log" 2>&1 || {
+  echo "the serve-cwd boot fixture failed; its output:"; tail -20 "$DB.cwd-boot.log"; exit 1; }
+# A skip is named, never silently a pass: the row needs python3 and curl.
+grep -E "^(serve cwd boot ok|SKIP test-serve-cwd-boot)" "$DB.cwd-boot.log"
 ISOLATION_PORT=$(node scripts/free-test-port-block.cjs)
 WA_BIN="$BIN" bash scripts/test-run-isolation.sh "$ISOLATION_PORT" > "$DB.isolation.log" 2>&1 || {
   echo "the run-isolation fixture failed; its output:"; tail -40 "$DB.isolation.log"; exit 1; }

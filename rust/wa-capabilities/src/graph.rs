@@ -242,6 +242,9 @@ struct State {
     dirty: bool,
     watched: bool,
     watch_error: Option<String>,
+    /// Why this root runs without an OS watch - too large to register, the watcher is off, or the
+    /// platform refused. `None` on a watched root.
+    watch_skipped: Option<String>,
     failure: Option<String>,
     /// Consecutive failed background attempts; reset by a success.
     attempts: u32,
@@ -276,6 +279,53 @@ struct Scheduler {
     ready: Mutex<VecDeque<(Option<Instant>, Arc<Entry>)>>,
     wake: Condvar,
     watcher: Mutex<Option<notify::RecommendedWatcher>>,
+}
+
+/// Directories a boot-time OS watch may cover.
+///
+/// WHY THIS EXISTS. `notify`'s recursive registration adds one inotify watch per directory, and it
+/// does so SYNCHRONOUSLY on the thread that asks. `Scheduler::entry` therefore walked the whole
+/// working directory before `wa serve` could bind its listener: measured on `openclaw` (21/11), a
+/// cwd of 713k directories under `/local` held `/health` for 60-150 s, with the process's directory
+/// fds deep inside the tree and its log stopped just after `[serve] core = native` and
+/// `[client] client-tools bridge`. The same measurement on `avell` with a synthetic 220,201-directory
+/// cwd: 220,201 inotify watches, and 257 ms with `WA_GRAPH_WATCH=0` against 1,494 ms without it.
+///
+/// The OS watch is a hint, not the source of truth - every graph call admits content itself - so a
+/// root past this budget is left unwatched and says so, instead of paying that walk at boot.
+const WATCH_DIR_BUDGET: usize = 20_000;
+/// The count itself is a walk, so it is bounded twice: by `WATCH_DIR_BUDGET` directories and by this
+/// deadline. A slow or network filesystem then costs a bounded scan, never an open-ended one. Both
+/// bounds run on the watch thread, off the caller's.
+const WATCH_SCAN_BUDGET: Duration = Duration::from_secs(5);
+
+/// The directory budget, with the operator's override. `WA_GRAPH_WATCH_DIRS=0` registers no OS watch.
+fn watch_dir_budget() -> usize {
+    std::env::var("WA_GRAPH_WATCH_DIRS").ok().and_then(|text| text.trim().parse::<usize>().ok()).unwrap_or(WATCH_DIR_BUDGET)
+}
+
+/// How many directories a recursive watch of `root` would cover, or `None` when that is past
+/// `budget` (or the scan outran `WATCH_SCAN_BUDGET`).
+///
+/// Every directory counts, excluded ones too: `watcher.watch(root, Recursive)` registers them all,
+/// and only the *events* are filtered later (`ignored`). A count that skipped them would understate
+/// exactly the cost this bounds. Symlinked directories are not followed - neither does notify - so a
+/// symlink loop cannot spend the budget.
+fn watchable_directories(root: &Path, budget: usize) -> Option<usize> {
+    let started = Instant::now();
+    let mut count = 1usize; // the root itself
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        if count > budget || started.elapsed() > WATCH_SCAN_BUDGET {return None;}
+        let Ok(listing) = std::fs::read_dir(&dir) else {continue;};
+        for item in listing.flatten() {
+            if !item.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {continue;}
+            count += 1;
+            if count > budget {return None;}
+            stack.push(item.path());
+        }
+    }
+    Some(count)
 }
 
 fn scheduler() -> &'static Arc<Scheduler> {
@@ -325,14 +375,10 @@ impl Scheduler {
         let shared_root = entries.values().any(|other| other.root == entry.root);
         entries.insert(key, entry.clone());
         drop(entries);
-        if let Some(watcher) = self.watcher.lock().unwrap().as_mut() {
-            use notify::Watcher as _;
-            let result = if shared_root {Ok(())} else {watcher.watch(&entry.root, notify::RecursiveMode::Recursive)};
-            let mut state = entry.state.lock().unwrap();
-            state.watched = result.is_ok();
-            state.watch_error = result.err().map(|error| error.to_string());
-            if let Some(error) = &state.watch_error {eprintln!("graph_watch_register_failed root={} error={error}; content admission remains authoritative", entry.root.display());}
-        }
+        // Bounded, and it has to happen here: `entry()` runs on whatever thread asked for the graph,
+        // and for `wa serve` that is boot, before its listener exists. See `WATCH_DIR_BUDGET` - the
+        // registration is bounded so this thread never pays an unbounded walk.
+        self.register_watch(&entry, shared_root);
         Ok(entry)
     }
 
@@ -544,6 +590,52 @@ impl Scheduler {
         drop(state);
         if queued {self.ready.lock().unwrap().push_back((None, entry.clone()));self.wake.notify_one();}
     }
+
+    /// Register the OS watcher for this entry, or name why it runs unwatched.
+    ///
+    /// SYNCHRONOUS BY DESIGN, and bounded. Registering asynchronously made the answer a race: the parity
+    /// test (scripts/test-graph-watch.lua) reads watch_registered straight after a query and requires a
+    /// real OS registration, and a status read must be able to say what is true now. What must never
+    /// happen is walking an UNBOUNDED tree here - so the directory count is taken first, bounded by
+    /// WATCH_DIR_BUDGET directories and WATCH_SCAN_BUDGET, and a root past it is left unwatched with a
+    /// named reason instead of being walked whole.
+    ///
+    /// shared_root is "another entry already watches this root": it is covered, and the tree is not
+    /// walked for it a second time.
+    fn register_watch(&self, entry: &Entry, shared_root: bool) {
+        let budget = watch_dir_budget();
+        let within = shared_root || (budget != 0 && watchable_directories(&entry.root, budget).is_some());
+        // The watcher lock is taken and released before the state lock: the eviction path in entry takes
+        // the entry list and then the watcher, and two lock orders on the same pair is how a scheduler
+        // deadlocks.
+        let registered = if !within {
+            Err(if budget == 0 {format!("watch_budget_zero")} else {format!("root_too_large_more_than_{budget}_directories")})
+        } else {
+            match self.watcher.lock().unwrap().as_mut() {
+                Some(watcher) => {use notify::Watcher as _; watcher.watch(&entry.root, notify::RecursiveMode::Recursive).map_err(|error| error.to_string())}
+                None => Err("no_os_watcher".to_string()),
+            }
+        };
+        let mut state = entry.state.lock().unwrap();
+        match registered {
+            Ok(()) => {state.watched = true; state.watch_error = None; state.watch_skipped = None;}
+            Err(reason) => {
+                state.watched = false;
+                // A SKIP is a decision (a budget, or no watcher asked for) and a FAILURE is the platform
+                // refusing. They are named apart, and neither may read as "watched".
+                if !within || reason == "no_os_watcher" {
+                    state.watch_skipped = Some(reason.clone());
+                    state.watch_error = None;
+                    eprintln!("graph_watch_skipped root={} reason={reason}; edit hints and per-call content admission keep answers exact", entry.root.display());
+                } else {
+                    state.watch_skipped = None;
+                    state.watch_error = Some(reason.clone());
+                    eprintln!("graph_watch_register_failed root={} error={reason}; content admission remains authoritative", entry.root.display());
+                }
+            }
+        }
+    }
+
 }
 
 /// Unsupported file events and our own DB/build writes cannot create a refresh loop.
@@ -872,6 +964,7 @@ fn overlay(entry: &Entry, value: &mut Value) {
     value["dirty_hint"] = json!(state.dirty);
     value["watch_registered"] = json!(state.watched);
     value["watch_error"] = json!(state.watch_error);
+    value["watch_skipped"] = json!(state.watch_skipped);
     value["failure"] = json!(state.failure);
     value["index_attempts"] = json!(state.attempts);
     value["retry_exhausted"] = json!(state.stopped);

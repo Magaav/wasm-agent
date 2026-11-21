@@ -550,7 +550,13 @@ else
 say "checking $NEW answers on scratch port $SCRATCH_PORT before it goes near the running node"
 # The proof node is a throwaway: it must not announce itself to the fleet. Inheriting the rendezvous
 # made every deploy register a fresh key that no one could ever remove (the stale-node pile, 04/11).
-env -u WASM_AGENT_RENDEZVOUS -u WASM_AGENT_RELAY WASM_AGENT_MANAGED=0 WASM_AGENT_HOME="$SCRATCH_HOME" "$NEW" serve --port "$SCRATCH_PORT" --client-port "$SCRATCH_CLIENT" --db "$SCRATCH_DB" >"$SCRATCH_HOME/out.log" 2>&1 &
+# FROM A FIXED CWD, never the callers. A node starts in whatever directory it is launched from, and
+# its graph scheduler may register an OS watch over that tree; on a home that links into a
+# 713k-directory checkout that walk held /health for 60-150 s (measured on openclaw, 21/11). This
+# probe decides whether a build is installed, so it must measure the BUILD, not the directory the
+# operator happened to run the upgrade from. The install directory is fixed, small, and present
+# because it is where the candidate is going.
+( cd "$INSTALL_DIR" 2>/dev/null || cd "${TMPDIR:-/tmp}" 2>/dev/null || cd / ; exec env -u WASM_AGENT_RENDEZVOUS -u WASM_AGENT_RELAY WASM_AGENT_MANAGED=0 WASM_AGENT_HOME="$SCRATCH_HOME" "$NEW" serve --port "$SCRATCH_PORT" --client-port "$SCRATCH_CLIENT" --db "$SCRATCH_DB" >"$SCRATCH_HOME/out.log" 2>&1 ) &
 SCRATCH_PID=$!
 ok=0
 # Polled in tenths rather than halves: the measured cold start is ~55ms, so a 500ms tick spent most of
