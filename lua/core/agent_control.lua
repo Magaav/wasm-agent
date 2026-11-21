@@ -87,10 +87,13 @@ local SCHEMA = "CREATE TABLE IF NOT EXISTS agent_control("
   .. "child_id TEXT PRIMARY KEY, parent_session TEXT, parent_run TEXT, kind TEXT,"
   .. " source_session TEXT, source_seq INTEGER, node TEXT, created_at REAL)"
 local schema_ready = false
+-- Returns TRUE when the table is there. It wrote no return value once, so every read treated the ledger
+-- as absent and a fork never appeared in list - the caller could not tell "no rows" from "not ready".
 local function ready()
-  if schema_ready then return end
+  if schema_ready then return true end
   local ok = pcall(exec, SCHEMA)
-  schema_ready = ok
+  schema_ready = ok == true
+  return schema_ready
 end
 
 function M.control_row(id)
@@ -206,6 +209,7 @@ end
 
 -- A fork, as one child. A fork is idle by design: it reads running until its own session has ended.
 function M.child_from_fork(row)
+  if type(row) ~= "table" then return nil end
   local session = memory.session(row.child_id)
   local state, started_at, settled_at = "unknown", nil, nil
   if session then
@@ -279,10 +283,13 @@ function M.fork(args, ctx)
   if not before then return { error = "invalid_boundary", not_started = true } end
   local id, fork_why = memory.fork_session(source, before, ctx.user_id)
   if not id then return { error = fork_why or "fork_failed", not_started = true } end
-  record_control(id, { parent_session = source, parent_run = ctx.run_id or "", kind = "fork",
-    source_session = source, source_seq = before, node = ctx.node_id or "" })
+  local fields = { child_id = id, parent_session = source, parent_run = ctx.run_id or "", kind = "fork",
+    source_session = source, source_seq = before, node = ctx.node_id or "" }
+  record_control(id, fields)
   local workspace, allocation = workspaces.ensure(memory, id, source)
   local child = M.child_from_fork(M.control_row(id))
+    or M.child_from_fork({ child_id = id, parent_session = source, parent_run = ctx.run_id or "",
+      source_session = source, created_at = host.now() })
   if not workspace then
     -- The session exists and is the caller's: the refusal keeps the workspace's own word, and the child
     -- is reported so the caller recovers it instead of forking a second time.
@@ -500,11 +507,20 @@ function M.message(args, ctx)
   if not id then return { error = "id_required" } end
   local text = tostring(args.text or args.message or "")
   if text == "" then return { error = "text_required" } end
+  -- Steering is idempotent by request key (lua/core/steering.lua refuses one without). A caller that has
+  -- its own key passes it and a retry is the same message; a caller that has none gets one per call,
+  -- which is what "send this once" means.
+  local key = tostring(args.idempotency_key or "")
+  if key == "" then key = "agent-control-message:" .. tostring(host.uuid()) end
   local api = dofile("lua/core/subagents.lua")
-  local ok, result = pcall(api.control, { action = "steer", id = id, text = text }, ctx)
+  local ok, result = pcall(api.control, { action = "steer", id = id, text = text, idempotency_key = key }, ctx)
   if not ok or type(result) ~= "table" then return { error = "subagent_runtime_error" } end
-  if result.error then return result end
-  return { id = id, delivery = tostring(result.delivery or "steer_accepted"), steering = result }
+  if result.error then
+    -- The refusal keeps the word it came with; nothing here prints delivered over it.
+    return { error = tostring(result.error), id = id, effect = "none" }
+  end
+  local delivery = tostring(result.state or result.delivery or "queued")
+  return { id = id, delivery = delivery, queued = delivery == "queued", steering = result }
 end
 
 --------------------------------------------------------------------------- events
