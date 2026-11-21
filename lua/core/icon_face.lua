@@ -377,7 +377,7 @@ function M.face(opts)
   end
   local set, why = M.spaced_set(description, query, draws)
   return { glued = false, set = set, why = "the config this " .. name .. " window loads does not give the icon code points to "
-    .. M.FAMILY .. " (fontconfig answers '" .. (M.first_family(family) ~= "" and M.first_family(family) or "nothing") .. "'), and " .. why }
+    .. M.FAMILY .. " (fontconfig answers '" .. (M.first_family(family) ~= "" and M.first_family(family) or "nothing") .. "'); " .. why }
 end
 
 return M

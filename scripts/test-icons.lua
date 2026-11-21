@@ -171,9 +171,17 @@ eq(resolved_with("nerd").source, "environment WA_ICONS", "and says the environme
 ok(resolved_with("wobbly").set ~= "wobbly", "an unknown WA_ICONS is not adopted as a set")
 eq(resolved_with("", "icons = ascii\n").set, "ascii", "the config file's icons = ascii is honoured")
 eq(resolved_with("wa", "icons = ascii\n").set, "wa", "the environment beats the config file")
--- The default: the glyphs a stock font has, unless the font setup recorded that it installed ours.
-eq(icons.resolve().set == "wa", icons.installed(),
-  "wa is the default only when the setup recorded it installed wa Icons")
+-- The default is ASKED, not recorded: wa only when the setup recorded it AND the face drawing this
+-- process's terminal was measured to be wa Icons (the fixtures below pin each of the three cases). This
+-- asserted the other way round until 21/11 - resolve()==wa if and only if the record said installed -
+-- which is the glue-over-the-numbers bug itself, written down as a test.
+local home_default = icons.resolve()
+ok(home_default.set ~= "wa" or icons.installed(), "wa is never chosen when nothing was installed")
+ok(type(home_default.source) == "string" and home_default.source ~= "",
+  "and the default always carries its reason: " .. tostring(home_default.source))
+if not icons.installed() then
+  eq(home_default.set, "unicode", "with no record at all, the default is the glyphs a stock font has")
+end
 
 
 -- ---- WHICH FACE DRAWS THEM: the glued set only where wa Icons really is the face (item 5) ---------
@@ -255,6 +263,16 @@ local ALA_INI = "[font.normal]\nfamily = \"JetBrains Mono\"\n"
 local alacritty = resolved_face({ terminal = { name = "alacritty", pid = 7, started_at = 2000 }, stats = { alacritty = 1000 }, seen = {} }, ALA_INI)
 eq(alacritty.set, "nerd", "an alacritty window is the spaced nerd set: fontconfig gives its icons to the Nerd face")
 eq(icons.set(alacritty.set).gap, " ", "and it is spaced")
+
+-- kitty names the icon face on a symbol_map line, which is the config's own statement (foot names it in
+-- the font list); a new kitty window is therefore glued, and the reader that decides it is the one the
+-- setup writes against - a whole-plane symbol_map would not count.
+local KITTY_CONF = "font_family JetBrains Mono\nsymbol_map U+F012C,U+F01BC,U+F0450,U+F051B,U+F0766,U+F0A9E-U+F0AA5,U+F0DFA wa Icons\n"
+local kitty = resolved_face({ terminal = { name = "kitty", pid = 9, started_at = 2000 }, stats = { kitty = 1000 }, seen = {} }, KITTY_CONF)
+eq(kitty.set, "wa", "a new kitty window whose symbol_map names wa Icons gets the glued set")
+local stale_kitty = resolved_face({ terminal = { name = "kitty", pid = 9, started_at = 2000 }, stats = { kitty = 1000 }, seen = {} },
+  "font_family JetBrains Mono\nsymbol_map U+F0000-U+FFFFD wa Icons\n")
+eq(stale_kitty.set, "nerd", "a whole-plane symbol_map is not the map the setup writes, so that window is not glued")
 
 -- A footclient window is drawn by the foot SERVER, which read its config when the server started: this
 -- window does not date that.
