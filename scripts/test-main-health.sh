@@ -18,7 +18,10 @@
 set -uo pipefail
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 script=$root/scripts/main-health.sh
-[ -f "$script" ] || { echo "test-main-health: refused(no_script): $script is missing"; exit 2; }
+# On a tree that does not have the script there is nothing to judge, and that is a SKIP the row names - not a
+# pass and not a failure (scripts/test-discriminates.sh reads it that way): measured, an exit 2 here was
+# `unclassified` and blocked the landing's discrimination check.
+[ -f "$script" ] || { echo "SKIP test-main-health: this tree has no scripts/main-health.sh (nothing to judge)"; exit 0; }
 command -v git >/dev/null 2>&1 || { echo "SKIP test-main-health: git is not on PATH"; exit 0; }
 command -v jq >/dev/null 2>&1 || { echo "SKIP test-main-health: jq is not on PATH"; exit 0; }
 

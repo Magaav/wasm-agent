@@ -22,7 +22,9 @@
 set -uo pipefail
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 drive=$root/scripts/drive.sh
-[ -f "$drive" ] || { echo "test-drive: refused(no_script): $drive is missing"; exit 2; }
+# A tree without drive.sh has nothing to judge, and the row says so instead of failing in a way the
+# discrimination check has to guess at (see scripts/test-main-health.sh).
+[ -f "$drive" ] || { echo "SKIP test-drive: this tree has no scripts/drive.sh (nothing to judge)"; exit 0; }
 
 # ITS OWN HOME, and it refuses the operator's (rule 2): the driver writes ATTENTION, a changelog and a queue.
 work=$(TMPDIR=/tmp mktemp -d) || { echo "SKIP test-drive: mktemp failed"; exit 0; }

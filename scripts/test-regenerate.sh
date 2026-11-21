@@ -20,6 +20,10 @@ set -uo pipefail
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 command -v lua5.4 >/dev/null 2>&1 || { echo "SKIP test-regenerate: lua5.4 is not on PATH"; exit 0; }
 command -v git >/dev/null 2>&1 || { echo "SKIP test-regenerate: git is not on PATH"; exit 0; }
+# A tree without the runner or the registry has nothing to judge: named as a skip, not as a pass and not as a
+# failure (scripts/test-discriminates.sh reads it that way).
+[ -f "$root/scripts/regenerate.sh" ] && [ -f "$root/scripts/generators.txt" ] \
+  || { echo "SKIP test-regenerate: this tree has no scripts/regenerate.sh or scripts/generators.txt (nothing to judge)"; exit 0; }
 
 # ITS OWN HOME, AND IT REFUSES THE OPERATOR'S (rule 2): this row writes repositories and runs generators,
 # and it must never do either inside the operator's node store. The scratch directory is made where a
