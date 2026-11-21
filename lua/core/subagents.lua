@@ -1004,12 +1004,19 @@ function wa_subagents(body, session)
   -- other action keeps its native route unchanged, so nothing that worked before this moved.
   local control = dofile("lua/core/agent_control.lua")
   local action = tostring(decoded.action or "")
-  if action == "fork" or action == "spawn" or action == "collect" or action == "tree" or action == "resume_child" then
+  -- An events call with no id is the SESSION's stream (agent-control); with an id it stays the native
+  -- per-child journal page it always was, so no existing reader is touched.
+  local session_events = action == "events" and (decoded.id == nil and decoded.subagent_id == nil)
+  if action == "fork" or action == "spawn" or action == "collect" or action == "tree"
+      or action == "resume_child" or session_events or action == "cancel" or action == "message_to_child" then
     local ok, result = pcall(function()
       if action == "fork" then return control.fork(decoded, ctx) end
       if action == "spawn" then return control.spawn(decoded, ctx) end
       if action == "collect" then return control.collect(decoded, ctx) end
       if action == "tree" then return control.list(decoded, ctx) end
+      if session_events then return control.events(decoded, ctx) end
+      if action == "cancel" then return control.cancel(decoded, ctx) end
+      if action == "message_to_child" then return control.message(decoded, ctx) end
       return control.resume(decoded, ctx)
     end)
     if not ok then return json.encode({ error = redact.text(tostring(result)) }) end

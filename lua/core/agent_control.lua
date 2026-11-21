@@ -386,7 +386,9 @@ end
 local function receipt_of(id, ctx)
   local control = M.control_row(id)
   if control and control.kind == "fork" then return nil, control end
-  local ok, raw = pcall(host.subagent, "status", json.encode({
+  -- "result", not "status": the native status action deliberately REMOVES the result field (it is the
+  -- smaller observation), and collect's whole job is that field. Same record, one key more.
+  local ok, raw = pcall(host.subagent, "result", json.encode({
     owner_user = ctx.user_id, session = ctx.session_id, id = id }))
   if not ok then return { error = "subagent_runtime_error" }, control end
   return json.decode(raw), control
@@ -473,12 +475,20 @@ function M.cancel(args, ctx)
   local ok, result = pcall(api.control, { action = "cancel", id = id }, ctx)
   if not ok or type(result) ~= "table" then return { error = "subagent_runtime_error" } end
   if result.error and not result.subagent_id then return result end
+  -- Every field the native receipt carries is kept, so a caller that read this shape before the one API
+  -- keeps reading it; the API adds its own vocabulary on top rather than replacing the record.
+  local out = {}
+  for key, value in pairs(result) do out[key] = value end
+  out.id = id
+  out.native_state = tostring(result.state or "")
   if result.settled == true or M.state_of(result.state) == "cancelled" then
-    return { id = id, state = "cancelled", settled = true, native_state = tostring(result.state or "") }
+    out.state = "cancelled"
+  else
+    -- The call is the REQUEST: the run has not ended, so the honest word is cancelling.
+    out.state = "cancelling"
+    out.detail = "cancel accepted; the run has not ended yet"
   end
-  -- The call is the request: the run has not ended, so the honest word is cancelling.
-  return { id = id, state = "cancelling", settled = false, native_state = tostring(result.state or ""),
-    detail = "cancel accepted; the run has not ended yet" }
+  return out
 end
 
 --------------------------------------------------------------------------- resume and message
