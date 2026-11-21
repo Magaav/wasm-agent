@@ -146,3 +146,17 @@ therefore land on the spaced set — not measured on either.
   `scripts/test-font-setup.lua` therefore blocks on the harness, not on its own tests. I reverted a
   cosmetic label fix in that file because of it: line 696 still says an installed record "is what makes
   the wa icon set the default", which after this change is only one of two conditions.
+
+## Harness evaluation
+
+- **What hurt**: there was no way to run a Lua row inside a live terminal. `host.exec` children inherit
+  this node's ancestry (`wa <- bash <- systemd`), so the one fact this mission turns on — which emulator
+  draws the icons — could only be reproduced by copying `bash` and renaming it `foot` in a scratch
+  directory. Proposed fix: a documented terminal fixture in the contract host (a variable that only moves
+  the `comm` the walk reads, e.g. `WASM_AGENT_FAKE_TERM=foot`), judged by
+  `scripts/test-contract-host.lua`. Step delta: ~6 → 2 for the cross-process case.
+- **What hurt**: `scripts/test-discriminates.sh` hands a Lua row `HOME == WASM_AGENT_HOME`, so
+  `scripts/lib/scratch-home.lua` refuses to run and the row comes back `unclassified`/**blocking** —
+  an edit to `scripts/test-font-setup.lua` cannot land on this harness. Proposed fix: give the row a
+  scratch home below its own root, or read a `REFUSED ` line as the `skipped` verdict the runner
+  already has for `SKIP `. Step delta: a blocked row → 0 (one revert of a correct label fix was the cost).
