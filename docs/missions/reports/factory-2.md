@@ -26,7 +26,7 @@ release.
 |---|---|
 | `2e0459fc` | items 1, 2 and 3 together (see "Deviations"): `wa release cut`, the preconditions, the `--until main` result line, test-land cases 46-49 |
 | `94b8abb2` | item 4b: `scripts/prune-kept-binaries.sh` + `scripts/test-prune-kept-binaries.sh`, wired into `scripts/fast.sh` as `prune-kept-binaries` (after `deploy-prune`) |
-| (this commit) | `docs/LAND.md` section, case 49 also exercises the deploy step of a release run, this report |
+| `3cb1fd00`+1 | `docs/LAND.md` section, case 49 also exercises the deploy step of a release run, this report |
 
 ### 1. `wa release cut` (lua/core/land.lua, lua/core/init.lua, rust/wa-host/src/release.rs)
 
