@@ -2410,8 +2410,13 @@ end)()
   contains(text49, "the landing is complete", "the output says the landing is complete")
   contains(text49, "wa release cut", "and names the release command as a separate one")
   eq(observed.builds, builds, "no release was built by the landing")
-  eq(land.run({ run = "case49r", release = true, signer = "local", ring = SOLO_RING, no_deploy = true,
-    checks = standard_checks() }), 0, "a later release runs on its own")
+  deploy_requests = {}
+  eq(land.run({ run = "case49r", release = true, signer = "local", ring = SOLO_RING,
+    checks = standard_checks() }), 0, "a later release runs on its own, and deploys the ring")
+  eq(step_of("case49r", "deploy").state, "done", "the release run's deploy step ran (scripted node)")
+  ok(#deploy_requests >= 1, "the ring's node was asked to install")
+  eq(deploy_requests[#deploy_requests] and deploy_requests[#deploy_requests].commit, j49.tree_commit,
+    "and it was asked for main's commit")
   eq(journal_of("case49r").tree_commit, j49.tree_commit, "it releases the main that landing made")
   local after = journal_of("case49")
   eq(after.result, "stopped_at_until", "the landing's journal is untouched by the release")
