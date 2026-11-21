@@ -178,5 +178,87 @@ assert report["ok"] is True, report
 PY
 ok
 
+# ---- 6. MAIN RED: a row that is red on main's own tip is not counted against the mission -----------
+# 21/11: main was red from bfad4f8f on a whole-tree row, land245 (a 2-line change) went red twice for it and
+# then sat stopped with ten missions behind it. The record scripts/main-health.sh writes is what tells the two
+# apart, and it may only do so for the SAME commit (unknown is not yes).
+export WA_PREFLIGHT_LAND_ROOT=$WORK/land WA_STUB_CONFIG=$WORK/node/.wasm-agent WA_STUB_HOME=$WORK/node
+WA_STUB_LAND=$WA_PREFLIGHT_LAND_ROOT
+export WA_STUB_LAND
+health=$WORK/main-health.json
+export WA_MAIN_HEALTH=$health
+export WA_STUB_MODE=red   # the stub journal's rows: scripts/test-a.lua and scripts/test-c.lua, main 1*40
+# (a) both rows are red on main too: the mission is not blamed at all.
+python3 - "$health" <<'PY'
+import json, sys
+json.dump({"schema": 1, "sha": "1" * 40, "ok": False, "seconds": 12,
+           "failed": [{"row": "scripts/test-a.lua", "first_lines": ["a failed"]},
+                      {"row": "scripts/test-c.lua", "first_lines": ["c failed"]}]}, open(sys.argv[1], "w"))
+PY
+out=$("$SCRIPT" demo 2>&1); code=$?
+[ "$code" = 1 ] || fail "a MAIN RED preflight exits 1, not 0 (got $code): $out"
+ok
+has "$out" 'preflight MAIN RED: 2 row(s) are red on main 111111111111 itself, not on change/demo' 'it says MAIN RED, on which main, and that the branch is not the cause'
+has "$out" 'the mission is NOT blamed, and no landing runs until main is fixed' 'and that nothing lands until main is fixed'
+python3 - "$WORK/missions/demo/preflight.json" <<'PY' || fail 'the MAIN RED report does not say what it must'
+import json, sys
+report = json.load(open(sys.argv[1]))
+assert report["ok"] is False, report
+assert [row["row"] for row in report["main_red"]] == ["scripts/test-a.lua", "scripts/test-c.lua"], report
+assert report["failed"] == [], report
+assert report["main_health"]["same_commit"] is True, report
+assert report["why"].startswith("MAIN RED"), report
+print("main red report ok")
+PY
+ok
+# (b) ONE row is red on main and one is this branch's: the branch's row is still the mission's.
+python3 - "$health" <<'PY'
+import json, sys
+json.dump({"schema": 1, "sha": "1" * 40, "ok": False,
+           "failed": [{"row": "scripts/test-a.lua", "first_lines": ["a failed"]}]}, open(sys.argv[1], "w"))
+PY
+out=$("$SCRIPT" demo 2>&1); code=$?
+[ "$code" = 1 ] || fail "a mixed preflight exits 1 (got $code): $out"
+ok
+has "$out" 'preflight MAIN RED: 1 row(s)' 'it names how many are main red'
+has "$out" 'and 1 row(s) failed on this branch too' 'and how many are the mission’s own'
+python3 - "$WORK/missions/demo/preflight.json" <<'PY' || fail 'the mixed report does not say what it must'
+import json, sys
+report = json.load(open(sys.argv[1]))
+assert [row["row"] for row in report["main_red"]] == ["scripts/test-a.lua"], report
+assert [row["row"] for row in report["failed"]] == ["scripts/test-c.lua"], report
+print("mixed report ok")
+PY
+ok
+# (c) the record is about ANOTHER main: it excuses nothing.
+python3 - "$health" <<'PY'
+import json, sys
+json.dump({"schema": 1, "sha": "9" * 40, "ok": False,
+           "failed": [{"row": "scripts/test-a.lua", "first_lines": ["a failed"]},
+                      {"row": "scripts/test-c.lua", "first_lines": ["c failed"]}]}, open(sys.argv[1], "w"))
+PY
+out=$("$SCRIPT" demo 2>&1); code=$?
+[ "$code" = 1 ] || fail "a red preflight with a stale record exits 1 (got $code): $out"
+ok
+has "$out" 'preflight RED: 2 row(s)' 'a record about another commit excuses nothing'
+python3 - "$WORK/missions/demo/preflight.json" <<'PY' || fail 'a stale record excused a row'
+import json, sys
+report = json.load(open(sys.argv[1]))
+assert report["main_red"] == [], report
+assert len(report["failed"]) == 2, report
+assert report["main_health"]["same_commit"] is False, report
+print("stale record ok")
+PY
+ok
+# (d) main is GREEN: the same rows are the mission's own fault, exactly as before this change.
+python3 - "$health" <<'PY'
+import json, sys
+json.dump({"schema": 1, "sha": "1" * 40, "ok": True, "failed": []}, open(sys.argv[1], "w"))
+PY
+out=$("$SCRIPT" demo 2>&1); code=$?
+[ "$code" = 1 ] || fail "a red preflight on a green main exits 1 (got $code): $out"
+ok
+has "$out" 'preflight RED: 2 row(s)' 'a green main blames the mission, as it must'
+rm -f "$health"
 printf 'preflight ok (%d checks)\n' "$checks"
 

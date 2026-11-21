@@ -200,13 +200,14 @@ else:
         state = str(gate.get("state") or "missing")
         # The ROWS are the most useful sentence there is, so they win over the step's own state: a reader
         # who gets "the gate step is failed" has to open a file to learn what failed.
+        # Inline short sha, not the lambda below: these lines run before it is defined (measured: NameError).
+        main_short = str(report.get("main_sha") or "")[:12]
         if main_red and not own:
             report["why"] = "MAIN RED: %d row(s) are red on main %s itself, not on this branch (%s)" % (
-                len(main_red), sha(report.get("main_sha")), ", ".join(entry["row"] for entry in main_red))
+                len(main_red), main_short, ", ".join(entry["row"] for entry in main_red))
         elif main_red:
             report["why"] = "%d row(s) failed here and %d are MAIN RED on %s (%s)" % (
-                len(own), len(main_red), sha(report.get("main_sha")),
-                ", ".join(entry["row"] for entry in main_red))
+                len(own), len(main_red), main_short, ", ".join(entry["row"] for entry in main_red))
         elif failed:
             report["why"] = "%d row(s) failed" % len(failed)
         elif state != "done":
