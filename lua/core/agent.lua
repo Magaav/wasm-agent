@@ -3915,6 +3915,22 @@ function M:run_body(text, images)
         ms = math.floor((host.now() - tool_started) * 1000) }
       self.emit({ type = "tool_result", name = function_.name, result = output,
         failed = not ok_tool and not cancelled, cancelled = cancelled })
+      -- The change a write/edit made, for the READER only (Victor 20/11: follow every file change as
+      -- it happens). It rides beside the result, never inside it: changeset.summary is the run's own
+      -- record, already kept for undo, and the model's view of the call is the projected result built
+      -- above. The write tool carries no version digests in its result, so this is the one place that
+      -- holds both sides of a recorded change without reading the file back.
+      if function_.name == "write" or function_.name == "edit" then
+        local target = type(output) == "table" and output.path or nil
+        for _, file in ipairs((changeset.summary(self.changes) or {}).files or {}) do
+          if target ~= nil and file.path == target then
+            self.emit({ type = "change", name = function_.name, path = file.path,
+              before = file.before, after = file.after, recorded = file.recorded,
+              added = file.added, removed = file.removed, created = file.created })
+            break
+          end
+        end
+      end
 
       record_turn(self, {
         role = "tool", tool_call_id = call.id or "", tool_name = function_.name or "",

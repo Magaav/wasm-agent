@@ -95,7 +95,12 @@ local function printer(view)
       elseif type(value) == "string" then
         value = redact.text(value)
       end
-      ready = { type = event.type, name = event.name, result = value }
+    elseif event.type == "change" then
+      -- A recorded file change, for the view's diff block (lua/core/diff_view.lua). Only the two
+      -- content addresses and the path cross: the texts stay in the store.
+      ready = { type = "change", name = event.name, path = event.path, before = event.before,
+        after = event.after, recorded = event.recorded, added = event.added,
+        removed = event.removed, created = event.created, quiet = event.quiet }      ready = { type = event.type, name = event.name, result = value }
     elseif event.type == "reasoning" then
       -- Reasoning is model output and goes through the redactor for the same reason a tool's
       -- output does: it is text this process did not write and is about to print.
