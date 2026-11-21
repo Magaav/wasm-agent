@@ -389,12 +389,22 @@ end
 -- from a checkout, the file under `WASM_AGENT_LUA_ROOT`. Never a reload source: the reload tree is only
 -- ever consulted by `text_of` below, and only for a ui module.
 local function node_text(path)
-  if type(EMBEDDED) == "table" and type(EMBEDDED[path]) == "string" then return EMBEDDED[path] end
+  -- THE CHECKOUT FIRST, then the binary. It used to read EMBEDDED first and the root only when the
+  -- module was not compiled in - and every UI module is - so a process started from a checkout drew
+  -- the BINARY's view while `WA_SCRIPT=` rows (which go through the boot's `dofile`, root-aware) drew
+  -- the tree's: measured 21/11, `wa chat` with WASM_AGENT_LUA_ROOT set rendered the old run block for
+  -- an hour of a mission that was editing it. The boot's rule is the rule here: a set root is where
+  -- the modules come from. A file the root does not carry answers nil and falls through to `dofile`,
+  -- which reads the root and reports `lua_root_unreadable` - a missing file is an error, never a
+  -- silent fallback to the binary's copy.
   local root = host.getenv("WASM_AGENT_LUA_ROOT")
-  if type(root) ~= "string" or root == "" then return nil end
-  local ok, text = pcall(host.read_file, root:gsub("/+$", "") .. "/" .. path)
-  if not ok or type(text) ~= "string" or text == "" then return nil end
-  return text
+  if type(root) == "string" and root ~= "" then
+    local ok, text = pcall(host.read_file, root:gsub("/+$", "") .. "/" .. path)
+    if ok and type(text) == "string" and text ~= "" then return text end
+    return nil
+  end
+  if type(EMBEDDED) == "table" and type(EMBEDDED[path]) == "string" then return EMBEDDED[path] end
+  return nil
 end
 
 -- The text a reload source holds for a module, and the file it came from: nil when this node has no source
