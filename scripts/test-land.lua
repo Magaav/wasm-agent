@@ -1462,13 +1462,17 @@ end
 local saved_weight = land.weight_decorator
 land.weight_decorator = ""
 eq(land.impl.gate(added_run, {}), true, "a narrowed gate runs")
-eq(gate_commands[1], "WA_FAST_ROWS='" .. land.run_dir("rows-added") .. "/gate-rows.txt' bash scripts/fast.sh",
+-- The exact command, now including the failed-row log directory (item 3 of the harness-fixes-2 round):
+-- fast.sh keeps every failed row's own log there before it deletes its scratch directory, so a red gate
+-- can still be read afterwards. Exact equality, not a prefix: the whole command is still pinned.
+eq(gate_commands[1], "WA_FAST_ROWS='" .. land.run_dir("rows-added") .. "/gate-rows.txt'"
+  .. " WA_FAST_KEEP_LOGS='" .. land.run_dir("rows-added") .. "/evidence/fast-logs' bash scripts/fast.sh",
   "the narrowed gate runs the fast check with the round's rows file (got " .. tostring(gate_commands[1]) .. ")")
 contains(table.concat(gate_commands, "\n"), "scripts/test-discriminates.sh",
   "the gate runs the discrimination check: a branch whose new test does not discriminate cannot land")
 gate_commands = {}
 eq(land.impl.gate(added_run, { full = true }), true, "a --full gate runs")
-eq(gate_commands[1], "WA_FAST_ROWS= bash scripts/fast.sh",
+eq(gate_commands[1], "WA_FAST_ROWS= WA_FAST_KEEP_LOGS='" .. land.run_dir("rows-added") .. "/evidence/fast-logs' bash scripts/fast.sh",
   "--full runs the fast check with WA_FAST_ROWS EMPTY (got " .. tostring(gate_commands[1]) .. ")")
 contains(read_file(land.evidence_path("rows-added", "gate")) or "", "WA_FAST_ROWS=",
   "and the evidence logs the command that ran, not one it might have run")

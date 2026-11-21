@@ -612,7 +612,23 @@ fn main() {
         host::restore_input();
         std::process::exit(code);
     }
-    if let Ok(script) = std::env::var("WA_SCRIPT") {
+    // WA_SCRIPT IS THIS PROCESS'S, AND ONLY THIS PROCESS'S.
+    //
+    // It used to stay in the environment, so EVERY child `wa` the script started also ran the script
+    // instead of its own command. Measured twice on 20/11: a `wa land` run with WA_SCRIPT set forked
+    // itself recursively (hundreds of `wa`, CPU at 95 C), and a test row's `wa nodes probe` child re-ran
+    // the whole test and printed "remote refusals ok" where a probe answer was expected. The variable is
+    // now read once here and removed from this process's environment BEFORE any interpreter runs, so the
+    // children a script starts (host.exec, an operation, a subagent) inherit nothing of it.
+    //
+    // A reader that needs "is this a script run" (lua/core/server.lua's housekeeping tick) asks the
+    // process, not the environment: host.script_run() answers the flag set here, in this process only.
+    let script = std::env::var("WA_SCRIPT").ok();
+    std::env::remove_var("WA_SCRIPT");
+    if script.is_some() {
+        wa_capabilities::serve::set_script_run(true);
+    }
+    if let Some(script) = script {
         // Say which copy of the Lua this run will load, before it loads any.
         //
         // With no root, `dofile` resolves every module from the copy compiled into this binary, so

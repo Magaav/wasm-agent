@@ -105,7 +105,7 @@ end
 _G.WA_IN_PROBE_CHILD = nil
 A._in_probe_child = nil
 cold()
-B.list({ peers = peers, live_capabilities = true })
+B.list({ peers = peers, live_capabilities = true, probe = true })
 local unmasked = starts
 assert(unmasked > 0, "an unmarked instance started no child per peer, so the guard below proves nothing")
 
@@ -113,7 +113,7 @@ assert(unmasked > 0, "an unmarked instance started no child per peer, so the gua
 _G.WA_IN_PROBE_CHILD = true
 A._in_probe_child = true
 cold()
-local rows = B.list({ peers = peers, live_capabilities = true })
+local rows = B.list({ peers = peers, live_capabilities = true, probe = true })
 assert(starts == 0, "a probe-marked process still started " .. starts .. " probe children of " .. unmasked
   .. " (the 19/11 recursion)")
 assert(#rows >= 1, "the guard swallowed the roster too: list returned no rows")
@@ -121,7 +121,7 @@ assert(#rows >= 1, "the guard swallowed the roster too: list returned no rows")
 -- 3. THE ORDER THAT BROKE IT: an instance loaded AFTER the mark must not fan out either.
 local C = dofile("lua/core/nodes.lua")
 cold()
-C.list({ peers = peers, live_capabilities = true })
+C.list({ peers = peers, live_capabilities = true, probe = true })
 assert(starts == 0, "an instance loaded after the mark started " .. starts .. " probe children")
 
 -- 4. A child is told by its ENVIRONMENT before its first line, without any instance state at all.
@@ -134,11 +134,11 @@ assert(type(A.PROBE_CHILD_ENV) == "string" and A.PROBE_CHILD_ENV ~= "",
 _G.WA_IN_PROBE_CHILD = nil
 A._in_probe_child = nil
 cold()
-B.list({ peers = peers, live_capabilities = true })
+B.list({ peers = peers, live_capabilities = true, probe = true })
 local first = starts
 assert(first > 0, "the first unmarked call started no child, so the reuse below proves nothing")
 reset()
-B.list({ peers = peers, live_capabilities = true })
+B.list({ peers = peers, live_capabilities = true, probe = true })
 assert(starts == 0, "a second list() inside the deadline started " .. starts .. " MORE children for peers that"
   .. " already have one running (the accumulation: " .. first .. " then " .. starts .. ")")
 
@@ -147,7 +147,7 @@ assert(starts == 0, "a second list() inside the deadline started " .. starts .. 
 cold()
 local many = {}
 for i = 1, 500 do many[i] = { node_id = string.format("%064x", i), name = "big" .. i } end
-local capped = B.list({ peers = many, live_capabilities = true })
+local capped = B.list({ peers = many, live_capabilities = true, probe = true })
 local capped_starts = starts
 assert(capped_starts <= 64, "500 peers started " .. capped_starts .. " children at once; the process cap is 64")
 -- A peer that is over the cap is NAMED, never silently answered as if it had been asked.
@@ -167,7 +167,7 @@ host.operation = function(action, request)
   return real_list(action, request)
 end
 cold()
-B.list({ peers = peers, live_capabilities = true })
+B.list({ peers = peers, live_capabilities = true, probe = true })
 assert(asked > 0, "the ledger was never asked how many probe children are alive, so only one process is bounded")
 -- And when the host cannot answer, the reason is named rather than the bound being silently skipped.
 host.operation = function(action, request)
@@ -178,7 +178,7 @@ host.operation = function(action, request)
   return json.encode({})
 end
 cold()
-B.list({ peers = peers, live_capabilities = true })
+B.list({ peers = peers, live_capabilities = true, probe = true })
 assert(_G.WA_PROBE_SHARED_BOUND == "operation_list_unavailable",
   "a host that cannot list operations left the shared bound unnamed (saw " .. tostring(_G.WA_PROBE_SHARED_BOUND) .. ")")
 -- 8. THE LEASE SURVIVES A FRESH LUA STATE (growth E). A codemode run gets a brand-new state, so both
@@ -202,14 +202,14 @@ end
 cold()
 _G.WA_IN_PROBE_CHILD = nil
 A._in_probe_child = nil
-B.list({ peers = peers, live_capabilities = true })
+B.list({ peers = peers, live_capabilities = true, probe = true })
 local first_set = starts
 assert(first_set > 0, "the first call in a cold state started no child, so the lease below proves nothing")
 -- THE FRESH STATE: every in-memory fact forgotten, the disk untouched.
 reset()
 _G.WA_IN_PROBE_INFLIGHT = nil
 local D = dofile("lua/core/nodes.lua")
-local joined = D.list({ peers = peers, live_capabilities = true })
+local joined = D.list({ peers = peers, live_capabilities = true, probe = true })
 assert(starts == 0, "a fresh Lua state started " .. starts .. " MORE children for peers a previous state had"
   .. " already leased (" .. first_set .. " then " .. starts .. ") - that is the 554-process fan-out")
 -- AND IT MUST GET THE ANSWER (review item 1). A joiner that starts nothing but answers probe_timeout or
@@ -248,7 +248,7 @@ end
 cold()
 _G.WA_IN_PROBE_CHILD = nil
 A._in_probe_child = nil
-B.list({ peers = peers, live_capabilities = true })
+B.list({ peers = peers, live_capabilities = true, probe = true })
 assert(#seen > 0, "no await reached the stub, so the request shape below proves nothing")
 for _, one in ipairs(seen) do
   assert(one.owner == "nodes-probe", "an await carried owner=" .. tostring(one.owner)

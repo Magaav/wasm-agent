@@ -2147,14 +2147,20 @@ end
 function wa_sync_tick()
   -- The update banner's cache, at most one request per fifteen minutes. This is the quiet
   -- housekeeping tick (node-thread 0, nobody waiting) - the same place the sync push already pays for
-  -- a network round trip - and the tick is a no-op while the cache is fresh. `WA_SCRIPT` means this
+  -- a network round trip - and the tick is a no-op while the cache is fresh. A SCRIPT RUN means this
   -- interpreter was started to run one test script, not a node: it must not read or write the real
   -- node's state (every `scripts/test-*.lua` runs that way).
-  if host.getenv("WA_SCRIPT") == nil then pcall(update_banner.tick) end
+  --
+  -- Asked of the PROCESS (host.script_run), never of the environment. `host.getenv("WA_SCRIPT")` used to
+  -- be the question, and it answered for the wrong process twice over: the variable is gone from the
+  -- environment now altogether (rust/wa-host/src/main.rs consumes it, so a child cannot inherit it),
+  -- and a child that ran this tick was never a script run in the first place.
+  local script_run = host.script_run ~= nil and host.script_run() or false
+  if not script_run then pcall(update_banner.tick) end
   -- The periodic backup (item 1 of the node-ops round): at most one snapshot per WA_BACKUP_INTERVAL_S,
   -- due-checked here because this is the one place a node already does recurring work with nobody
   -- waiting - and TAKEN in a supervised operation, not here (item 10 of the round).
-  if host.getenv("WA_SCRIPT") == nil then
+  if not script_run then
     -- OFF THE TICK (item 10 of the node-ops round). This used to call backup.tick() HERE, inside the sync
     -- loop: a VACUUM INTO of a large ledger held the node's sync tick for its whole duration, and a
     -- failure could only be printed. The tick now asks backup.due() - one read of a memo file, no SQLite -

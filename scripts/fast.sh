@@ -233,7 +233,23 @@ else
   rm -rf "$work" 2>/dev/null
   exit 2
 fi
-trap 'rm -rf "$work"' EXIT
+# A FAILED ROW'S LOG OUTLIVES THE RUN (item 3 of the harness-fixes-2 round). The scratch work dir is
+# deleted on exit - that is why the reclaim above exists - so a failed row's own output died with it, and
+# the landing gate (lua/core/land.lua) could only report the one line it had already copied. A caller that
+# names a directory here gets every failed row's log copied into it BEFORE the cleanup: the run's evidence
+# then holds the words that failed, not a pointer to a directory that is gone.
+wa_fast_keep_failed_logs() {
+  [ -n "${WA_FAST_KEEP_LOGS:-}" ] || return 0
+  [ -d "$work/logs" ] || return 0
+  mkdir -p "$WA_FAST_KEEP_LOGS" 2>/dev/null || { echo "fast: refused(keep_logs_unwritable): cannot keep failed row logs in $WA_FAST_KEEP_LOGS" >&2; return 0; }
+  local kept=0 log
+  for log in "$work"/logs/*.log; do
+    [ -f "$log" ] || continue
+    cp "$log" "$WA_FAST_KEEP_LOGS/$(basename "$log")" 2>/dev/null && kept=$((kept + 1))
+  done
+  echo "fast: kept $kept failed row log(s) in $WA_FAST_KEEP_LOGS"
+}
+trap 'wa_fast_keep_failed_logs; rm -rf "$work"' EXIT
 
 # The build-time ledger: one line per build this run performs, printed in the summary
 # below, because "a module compiles faster" is a claim about a number (scripts/lib/build-times.sh).
