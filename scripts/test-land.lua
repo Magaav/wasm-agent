@@ -1652,11 +1652,33 @@ ok(not published_anyway, "nothing was published by a node that is not signed in"
 behaviour.gh_authed = true
 
 -- ---------------------------------------------------------------- case 27: mark a step done out of band
+
+-- THE RESUME THE BRIEF IS ABOUT (21/11, hand fix 5). The release already exists on GitHub - published by an
+-- operator, or by an earlier attempt that died after the release was created - and this process still cannot
+-- run gh. It must be RECORDED as published, not stopped at the credential gate for ever.
+setup_fixture()
+behaviour.release_present = true
+local resume_exec = land.exec
+land.exec = function(command, cwd, timeout)
+  if command:match("^command %-v gh") then return { code = 0, stdout = "no\n", stderr = "" } end
+  return resume_exec(command, cwd, timeout)
+end
+local resumed = land.run({ run = "case27b", signer = "local", ring = SOLO_RING, branches = { "change/one" }, checks = standard_checks() })
+eq(resumed, 0, "a round whose release already exists is not stopped by a gh that cannot run here")
+local resumed_publish = step_of("case27b", "publish")
+eq(resumed_publish.state, "done", "the publish step is done")
+eq(journal_of("case27b").publish and journal_of("case27b").publish.state, "already_present",
+  "and it records that the release was already there, rather than claiming to have published it")
+land.exec = resume_exec
+behaviour.release_present = true
+
 -- A release created by hand must reach the journal by a VERB that re-verifies it, not by editing
 -- journal.json. `wa land mark <step> --evidence <file>`: no evidence, no mark; a claim the world does not
 -- support, no mark; a verified claim, a mark with `marked` and the evidence path on the step (item 27).
 setup_fixture()
-behaviour.release_present = true
+behaviour.release_present = false
+-- A round with no gh must stop at publish when the release genuinely is not there; when it WAS
+-- there, the round used to stop anyway - that is the defect the next block proves is gone.
 local quiet_exec = land.exec
 land.exec = function(command, cwd, timeout)
   if command:match("^command %-v gh") then return { code = 0, stdout = "no\n", stderr = "" } end
