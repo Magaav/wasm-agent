@@ -957,6 +957,21 @@ function M.run(argv)
       })
       refresh_model()
       if not done then ui.say(redact.text(tostring(problem))) end
+    elseif line == "/icons" or line:sub(1, 7) == "/icons " then
+      -- Which glyphs the rows draw (item 4 of the wa-fonts mission). The set lives in
+      -- lua/core/icons.lua and the rendering in cli_view, so this arm only chooses and reports: no
+      -- character is spelled here, which is why adding a set does not touch this file.
+      local asked = line:sub(7):gsub("^%s+", ""):gsub("%s+$", "")
+      local view_lib = dofile("lua/core/cli_view.lua")
+      if asked == "" then
+        local set, source = view_lib.icon_set()
+        ui.say("  icons " .. tostring(set) .. "  (" .. tostring(source) .. ")")
+        ui.say("  choose: wa (wa Icons, glued), nerd, unicode, ascii")
+      else
+        local chosen, why = view_lib.use_icons(asked)
+        if not chosen then ui.say("  " .. tostring(why))
+        else ui.say("  icons " .. asked) end
+      end
     elseif line == "/stats" then
       local stats = memory.stats()
       local rows = {}

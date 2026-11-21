@@ -31,7 +31,7 @@
 
 # The UI files the launcher serves and the release claims to carry. Kept as a list, not a
 # directory copy, so an unreviewed file cannot ride into a release unnoticed.
-RL_UI_ASSETS='index.html style.css app.js components.js render.wasm manifest.webmanifest service-worker.js icon-192.png icon-512.png'
+RL_UI_ASSETS='index.html style.css app.js components.js render.wasm manifest.webmanifest service-worker.js icon-192.png icon-512.png fonts.css fonts/waIcons-Regular.ttf fonts/JetBrainsMono-Regular.ttf fonts/JetBrainsMono-Bold.ttf fonts/OFL-JetBrainsMono.txt fonts/LICENSE-SymbolsNerdFont-MIT.txt'
 
 rl_fail() { printf 'termux-update: %s\n' "$*" >&2; exit 1; }
 rl_note() { printf '%s\n' "$*"; }
@@ -613,6 +613,7 @@ rl_assemble() { # <src_root> <bin> <dest> <commit> <remote> <previous> <installe
   install -m 644 "$_rl_src/scripts/termux/release-lib.sh" "$_rl_dest/bin/release-lib.sh" ||
     rl_fail 'assemble_failed: bin/release-lib.sh'
   for _rl_a in $RL_UI_ASSETS; do
+    case $_rl_a in */*) mkdir -p -- "$_rl_dest/ui/${_rl_a%/*}" ;; esac
     install -m 644 "$_rl_src/ui/$_rl_a" "$_rl_dest/ui/$_rl_a" ||
       rl_fail "ui_asset_missing: $_rl_src/ui/$_rl_a"
   done
@@ -1326,6 +1327,7 @@ rl_bundle_install() { # <bundle_dir> <manifest_sha256> <stage_dir>
   install -m 644 "$_rbi_bundle/bin/release-lib.sh" "$_rbi_stage/bin/release-lib.sh" ||
     rbi_fail 'assemble_failed: bin/release-lib.sh'
   for _rbi_a in $RL_UI_ASSETS; do
+    case $_rbi_a in */*) mkdir -p -- "$_rbi_stage/ui/${_rbi_a%/*}" ;; esac
     install -m 644 "$_rbi_bundle/ui/$_rbi_a" "$_rbi_stage/ui/$_rbi_a" || rbi_fail "assemble_failed: ui/$_rbi_a"
   done
   install -m 644 "$_rbi_bundle/LICENSE" "$_rbi_stage/LICENSE" || rbi_fail 'assemble_failed: LICENSE'

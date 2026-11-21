@@ -197,11 +197,14 @@ if (Test-Path -LiteralPath $seeded) {
 $uiDir = Join-Path $nodeDir "ui"
 New-Item -ItemType Directory -Force -Path $uiDir | Out-Null
 $localUiDir = if ($PSScriptRoot) { Join-Path $PSScriptRoot "../ui" } else { $null }
-$uiNames = @("index.html", "style.css", "app.js", "components.js", "render.wasm", "manifest.webmanifest", "service-worker.js", "icon-192.png", "icon-512.png")
+$uiNames = @("index.html", "style.css", "fonts.css", "app.js", "components.js", "render.wasm", "manifest.webmanifest", "service-worker.js", "icon-192.png", "icon-512.png", "fonts/waIcons-Regular.ttf", "fonts/JetBrainsMono-Regular.ttf", "fonts/JetBrainsMono-Bold.ttf", "fonts/OFL-JetBrainsMono.txt", "fonts/LICENSE-SymbolsNerdFont-MIT.txt")
 if ($localUiDir -and (Test-Path $localUiDir)) {
   foreach ($name in $uiNames) {
     $source = Join-Path $localUiDir $name
-    if (Test-Path $source) { Copy-Item $source (Join-Path $uiDir $name) -Force }
+    $target = Join-Path $uiDir $name
+    $targetDir = Split-Path -Parent $target
+    if (-not (Test-Path $targetDir)) { New-Item -ItemType Directory -Force -Path $targetDir | Out-Null }
+    if (Test-Path $source) { Copy-Item $source $target -Force }
   }
   Ok "ui files -> $uiDir (from this checkout)"
 } else {
@@ -544,6 +547,16 @@ if ($waCmd) {
     } else {
       Write-Host "   run: wa toolchain ensure --yes   (or set WA_INSTALL_TOOLCHAIN=1 and re-run)" -ForegroundColor Yellow
     }
+  }
+}
+
+# wa's two faces, for the user who just installed it (item 3 of the wa-fonts mission, Victor 19/11).
+# No prompt: consent is friction. WA_NO_FONT_SETUP=1 turns it off, and the setup backs up every terminal
+# config it touches and reverses itself with 'wa setup fonts --undo'.
+if ($env:WA_NO_FONT_SETUP -ne "1") {
+  $waFonts = Join-Path $nodeDir "wa.exe"
+  if (Test-Path $waFonts) {
+    try { & $waFonts setup fonts 2>&1 | ForEach-Object { Write-Host "   $_" }} catch { }
   }
 }
 

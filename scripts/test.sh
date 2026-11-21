@@ -1959,11 +1959,29 @@ WA_SCRIPT=scripts/test-federation.lua "$BIN" --db "$DB.federation.db" | grep '"o
 # `paint` is passed in, so the test reads the roles the renderer chose.
 WA_SCRIPT=scripts/test-markdown.lua "$BIN" --db "$DB.markdown" | grep "markdown ok"
 
+# wa's two fonts, checked as bytes (item 1 of the wa-fonts mission, Victor 19/11): "wa Icons" is A2 -
+# each icon fills its own cell with a 1 px right margin, centred on JetBrains Mono's capitals, and its
+# advance is EXACTLY one cell (0.600 em) so the value after it is glued. The test parses the committed
+# sfnt itself (no fontTools, no venv, no network) and also asserts the font carries exactly the code
+# points lua/core/cli_view.lua's GLYPH table names, so a row that gains a glyph and a font that does not
+# is a failure here rather than a tofu box in a status line.
+gate_run node tests/test-wa-fonts.mjs
+
 # What a run looks like while it is running. The renderer is where the CLI's whole
 # readable output is decided - a tool call's line, a failed call's line, and whether a
 # captured transcript is free of escape sequences - so it is asserted without a model:
 # the view is handed the events agent.lua emits, with a clock the test controls.
 WA_SCRIPT=scripts/test-cli-view.lua "$BIN" --db "$DB.view" | grep "cli view ok"
+# The ICON SETS, each rendered through the same view (item 4 of the wa-fonts mission, Victor 19/11):
+# wa Icons is GLUED and one cell per icon, nerd keeps the one space, unicode needs no font and ascii
+# needs no glyph at all. The proof is a CELL count - the glued row must be exactly its gapped icons
+# narrower than the spaced one - because a table lookup cannot notice a character that costs a cell.
+WA_SCRIPT=scripts/test-icons.lua "$BIN" --db "$DB.icons" | grep "icons: ok"
+# wa setup fonts (item 3 of the wa-fonts mission, Victor 19/11): the per-OS install path, the
+# terminal config edits with their backup and --undo, and the record that makes the wa icon set the
+# default. Every case runs on a scratch home with its OWN fixture configs and refuses a path inside the
+# operator real ~/.config - a row that edited one on 21/11 is why that guard exists.
+WA_SCRIPT=scripts/test-font-setup.lua "$BIN" --db "$DB.fonts-setup" | grep "font setup: ok"
 # Every file change as a diff block (change/tui-diff-view, Victor 20/11). The block is rendered from
 # the session's own change record, not from the tool result, so the model's context never carries it:
 # this asserts the path and its counts, the real line numbers, the fold that states what it hid, the

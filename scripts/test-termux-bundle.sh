@@ -65,8 +65,8 @@ make_bundle() { # <dir> [abi] [triple]
   cp "$root/scripts/termux/wa-update.sh" "$_d/bin/wa-update"
   cp "$root/scripts/termux/release-lib.sh" "$_d/bin/release-lib.sh"
   chmod +x "$_d/bin/wa" "$_d/bin/wa-update"
-  for _a in index.html style.css app.js components.js render.wasm manifest.webmanifest service-worker.js icon-192.png icon-512.png; do
-    printf 'asset %s\n' "$_a" > "$_d/ui/$_a"
+  for _a in index.html style.css app.js components.js render.wasm manifest.webmanifest service-worker.js icon-192.png icon-512.png fonts.css fonts/waIcons-Regular.ttf fonts/JetBrainsMono-Regular.ttf fonts/JetBrainsMono-Bold.ttf fonts/OFL-JetBrainsMono.txt fonts/LICENSE-SymbolsNerdFont-MIT.txt; do
+    case "$_a" in */*) mkdir -p "$_d/ui/${_a%/*}" ;; esac; printf 'asset %s\n' "$_a" > "$_d/ui/$_a"
   done
   printf 'license text\n' > "$_d/LICENSE"
   {
@@ -140,7 +140,8 @@ make_install() { # <commit> [extra installed.txt lines]
   cp "$root/scripts/termux/wa-update.sh" "$install/bin/wa-update"
   cp "$root/scripts/termux/release-lib.sh" "$install/bin/release-lib.sh"
   chmod +x "$install/bin/wa" "$install/bin/wa-update"
-  for _a in index.html style.css app.js components.js render.wasm manifest.webmanifest service-worker.js icon-192.png icon-512.png; do
+  for _a in index.html style.css app.js components.js render.wasm manifest.webmanifest service-worker.js icon-192.png icon-512.png fonts.css fonts/waIcons-Regular.ttf fonts/JetBrainsMono-Regular.ttf fonts/JetBrainsMono-Bold.ttf fonts/OFL-JetBrainsMono.txt fonts/LICENSE-SymbolsNerdFont-MIT.txt; do
+    case "$_a" in */*) mkdir -p "$install/ui/${_a%/*}" ;; esac
     printf 'asset %s\n' "$_a" > "$install/ui/$_a"
   done
   printf 'license text\n' > "$install/LICENSE"
@@ -293,7 +294,7 @@ expect_ok 'a verified bundle installs on a clean node' 'installed' "$bundle" "$g
 [ -f "$install/bin/wa" ] || die 'the launcher was not installed'
 [ -f "$install/bin/wa-update" ] || die 'the updater was not installed'
 [ -f "$install/bin/release-lib.sh" ] || die 'the updater library was not installed'
-for _a in index.html style.css app.js components.js render.wasm manifest.webmanifest service-worker.js icon-192.png icon-512.png; do
+for _a in index.html style.css app.js components.js render.wasm manifest.webmanifest service-worker.js icon-192.png icon-512.png fonts.css fonts/waIcons-Regular.ttf fonts/JetBrainsMono-Regular.ttf fonts/JetBrainsMono-Bold.ttf fonts/OFL-JetBrainsMono.txt fonts/LICENSE-SymbolsNerdFont-MIT.txt; do
   [ -f "$install/ui/$_a" ] || die "UI asset $_a was not installed"
 done
 ok 'the installed closure is the whole bundle closure (runtime, launcher, updater, UI, LICENSE)'

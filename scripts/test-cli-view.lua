@@ -10,6 +10,14 @@
 local view_lib = dofile("lua/core/cli_view.lua")
 local json = dofile("lua/vendor/json.lua")
 
+-- THE SET THESE ROWS ARE. Every character asserted below is the NERD set - the glyphs wa drew on
+-- 19/11 - and the set is now chosen (item 4 of the wa-fonts mission: wa|nerd|unicode|ascii, from
+-- /icons, WA_ICONS, the config file or what the font setup installed). This file pins it, so the
+-- assertions stay exact instead of being derived from whatever a scratch home happens to default to;
+-- scripts/test-icons.lua is what asserts each set in turn.
+local pinned_set, pinned_why = view_lib.use_icons("nerd")
+assert(pinned_set, pinned_why)
+
 local failed = 0
 local checks = 0
 local function ok(condition, label)
@@ -177,15 +185,19 @@ ok(has(plain_text, "done: one command ran."), "the answer is in the transcript")
 ok(select(2, plain_text:gsub("done: one command ran%.", "")) == 1, "the answer appears exactly once")
 ok(has(plain_text, "1 round \194\183 1 tool"), "the footer counts the run's rounds and tools")
 ok(has(plain_text, "1.2k"), "and its input tokens")
-ok(has(plain_text, "CH91.7%"), "and how much of that input came from the cache")
+-- The cache rate wears the SET's glyph now (review finding 4): the same fact the session bar draws as
+-- '<cache glyph> 75.20%'. Asserted as glyph AND number, which is stricter than the bare word was.
+ok(has(plain_text, view_lib.GLYPH.cache .. view_lib.GAP .. "91.7%"),
+  "and how much of that input came from the cache, with its glyph and the set's gap")
 ok(has(plain_text, "$0.0021"), "and its cost")
-ok(has(plain_text, "ctx 35.2%/128.0k"), "and how full the context window is")
-ok(view_lib.columns(plain_text:match("[^\n]*ctx[^\n]*")) <= 100, "and the footer is one line that fits")
+ok(has(plain_text, view_lib.context_ball(35.2) .. view_lib.GAP .. "35.2%/128.0k"),
+  "and how full the context window is, with the ball M.context_ball chose for it")
+ok(view_lib.columns(plain_text:match("[^\n]*128%.0k[^\n]*")) <= 100, "and the footer is one line that fits")
 
 -- A node that reports no measured prompt (an older binary, a provider without usage)
 -- must not print a context figure it does not have.
 local unmeasured = view_lib.footer({ rounds = 1, prompt = 100 }, { context = 0, budget = 128000 })
-ok(not has(unmeasured, "ctx"), "an unmeasured context is left out rather than shown as zero")
+ok(not has(unmeasured, "/128.0k") and not has(unmeasured, view_lib.context_ball(0)), "an unmeasured context is left out rather than shown as zero")
 
 -- The denominator is the *model's* window, resolved where compaction resolves it. This
 -- deployment's model has a 1,000,000-token window while the old global says 128000, so a
@@ -193,7 +205,7 @@ ok(not has(unmeasured, "ctx"), "an unmeasured context is left out rather than sh
 ok(view_lib.window("m", function() return { context = 1000000, source = "pi-model-store" } end) == 1000000,
   "the footer divides by the model's window, not by the global")
 ok(has(view_lib.footer({ rounds = 1, prompt = 100 }, { context = 450000, budget = 1000000 }),
-  "ctx 45.0%/1.0M"), "and prints that window")
+  "45.0%/1.0M"), "and prints that window")
 ok(view_lib.window("m", function() return { context = 0, source = "unknown" } end)
   == (tonumber(host.getenv("WASM_AGENT_LLM_CONTEXT")) or 0),
   "an unknown window falls back to the global rather than guessing")
@@ -1863,6 +1875,28 @@ do
     "item H: a first step says what this run sent, and carries no SESSION total: " .. first)
 end
 
+
+-- ---- the pi-shaped footer draws the SET's glyphs too (review finding 4, 21/11) -------------------
+-- 'wa chat --once' shows M.footer(), which was written pi-style: "1 round · 0 tools · 1.7s · ↑3.7k ↓3 ·
+-- CH79.7% · ctx 0.4%/1.0M" - plain words, NOT ONE icon, while the session bar above it used the set. The
+-- two facts that have an icon in the session bar (the cache rate, the context) wear it here as well.
+do
+  local row = view_lib.footer({ rounds = 1, tools = 0, seconds = 1.7, prompt = 3700, completion = 3,
+    cached = 2949 }, { context = 4000, budget = 1000000 })
+  ok(has(row, view_lib.GLYPH.cache), "the pi-shaped footer carries the cache glyph: " .. row)
+  ok(has(row, view_lib.GLYPH.ballEighth) or has(row, view_lib.GLYPH.ballEmpty)
+    or has(row, view_lib.GLYPH.ballQuarter), "and a context ball: " .. row)
+  ok(not has(row, "CH79.7"), "the bare word 'CH' is gone: the glyph says which number it is: " .. row)
+  -- The ARROWS stay text: they are the direction of a count, and the module's own rule keeps them glued.
+  ok(has(row, "\226\134\1453.7k"), "the up arrow is still glued to its number")
+  ok(has(row, "$") == false, "and no cost is invented when there is none")
+  -- One glyph per fact, in the set's own gap: nerd keeps its space, wa glues.
+  view_lib.use_icons("wa")
+  local glued = view_lib.footer({ rounds = 1, prompt = 3700, completion = 3, cached = 2949 },
+    { context = 4000, budget = 1000000 })
+  ok(has(glued, view_lib.GLYPH.cache .. "79.7%"), "in the wa set the glyph is GLUED to its value: " .. glued)
+  view_lib.use_icons("nerd")
+end
 
 -- ---- the finish stamp: a run that ended WELL says when --------------------------------
 -- Victor, 19/11 ~10:50: the row left under a finished run ends with a middle dot, the check and the

@@ -360,6 +360,18 @@ if [ "$os" = linux ] && [ "$ACTION" != check ] && [ "${WA_INSTALL_TEST:-0}" != 1
   fi
 fi
 
+# ---- 6. wa's two faces, for the user who just installed it --------------------------------------
+# wa setup fonts runs HERE, with no prompt (Victor, 19/11 09:45: consent is friction): it installs
+# JetBrains Mono + wa Icons into the user's font directory and, for a terminal whose own font cannot
+# draw wa's icons, adds the fallback face - with a backup, one line after the fact, and --undo. It is
+# NOT run by a check, and WA_NO_FONT_SETUP=1 (or WA_INSTALL_TEST=1, a fixture) turns it off.
+# A failure is the setup's to report: the node is installed either way, so this never fails the install.
+if [ "$ACTION" != check ] && [ "${WA_NO_FONT_SETUP:-}" != 1 ] && [ "${WA_INSTALL_TEST:-0}" != 1 ]; then
+  if [ -x "$PREFIX_DIR/wa" ]; then
+    "$PREFIX_DIR/wa" setup fonts 2>&1 | sed 's/^/  /' || say "fonts: the font setup reported a problem (run: wa setup fonts --verbose)"
+  fi
+fi
+
 printf '\n'
 if [ "$ACTION" = check ]; then
   # A check installs nothing, so it must not hand out an "update with this" line for files it did not place.

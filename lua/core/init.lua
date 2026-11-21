@@ -343,6 +343,20 @@ elseif command == "backup" or command == "restore" then
   -- (lua/core/backup_cli.lua, lua/core/backup.lua); this is the dispatch only.
   local code = dofile("lua/core/backup_cli.lua").run(command, { table.unpack(args, 2) })
   if code and code ~= 0 then os.exit(code) end
+elseif command == "setup" then
+  -- 'wa setup fonts' (item 3 of the wa-fonts mission, Victor 19/11): install wa's two faces for this
+  -- user and give a KNOWN terminal the fallback that can draw wa's icons. Run by the installer too, with
+  -- no prompt - the line it prints afterwards is the notice, and --undo reverses it. An unknown
+  -- subcommand is refused by name rather than falling through to nothing.
+  local sub = tostring(args[2] or "")
+  if sub == "fonts" then
+    local code = dofile("lua/core/font_setup.lua").cli({ table.unpack(args, 3) })
+    if code and code ~= 0 then os.exit(code) end
+  else
+    print("usage: wa setup fonts [--undo] [--dry-run] [--verbose]")
+    print("  installs JetBrains Mono + wa Icons for this user and points a known terminal at them")
+    os.exit(2)
+  end
 elseif command == "paths" then
   -- What an operator runs first when the agent says "no model configured": where
   -- this node keeps its files, and which file the host actually reads for the
