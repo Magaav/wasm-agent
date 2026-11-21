@@ -1267,6 +1267,12 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-context-growth.lua" "$BIN" --db "$D
 # (compact_admission tests); Lua must not re-decide it. Master auth, the threshold and the
 # subagent exclusion are asserted here so removing that guard did not remove them too.
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-compact-idle-route.lua" "$BIN" --db "$DB.compact-idle" | grep 'compact idle route ok'
+# The same route, one step further: an IDLE /compact while the session it targets still has work.
+# With always-available a session is idle while its own handles run, and rewriting its history then
+# breaks the provider prefix cache and drops the detail that work is read against. Refused by name
+# for a pending code-mode handle, a pending self-wake or a child run; performed once they clear;
+# an explicit operator /compact unchanged. Every store is the node own, not a stub.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-compact-idle-pending.lua" "$BIN" --db "$DB.compact-idle-pending" | grep 'compact idle pending ok'
 # The node clock is its OS local time with a numeric offset, not a bare UTC value; the model must
 # be able to ask for it (`time`) and see the zone in its environment line.
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-time.lua" "$BIN" --db "$DB.time" | grep 'node local time ok'

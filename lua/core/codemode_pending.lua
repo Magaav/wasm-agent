@@ -179,6 +179,61 @@ function M.open(scope)
   return { ops = {}, count = 0 }
 end
 
+-- ------------------------------------------------------------------- session_open(session_id)
+-- How many handles ONE SESSION still holds, across every scope it can have. A scope is a hash of
+-- session x user x role x workspace x profile, and a reader that holds only the session - the idle
+-- compaction route - cannot rebuild that hash; the record already carries the session it was started
+-- for, so the answer is read out of the records instead of recomputed from the key.
+--
+-- A read: nothing is opened, polled, waited on or settled, and no index is rewritten.
+--
+-- Two answers, because a zero must never be read out of a file nobody could see: `unreadable` counts
+-- the index files whose contents could not be decoded, and the caller decides (the compaction route
+-- refuses rather than compacting on a state it cannot observe). A directory that does not exist yet is
+-- the ordinary state of a node that has never left a call running: no handles, nothing unreadable.
+--
+-- The suffix an index file carries, beside the path builder above.
+local INDEX_SUFFIX = ".json"
+function M.session_open(session_id)
+  session_id = tostring(session_id or "")
+  if session_id == "" then return 0, 0 end
+  if type(host.list_dir) ~= "function" or type(host.path_kind) ~= "function" then return 0, 1 end
+  local dir = M.dir()
+  local kind = host.path_kind(dir)
+  if kind == "missing" then return 0, 0 end
+  if kind ~= "dir" then return 0, 1 end
+  local ok, raw = pcall(host.list_dir, dir)
+  local decoded = nil
+  if ok then
+    local dec_ok, value = pcall(json.decode, tostring(raw))
+    if dec_ok then decoded = value end
+  end
+  if type(decoded) ~= "table" or type(decoded.entries) ~= "table" then return 0, 1 end
+  local open, unreadable = 0, 0
+  for _, entry in ipairs(decoded.entries) do
+    local name = tostring(entry.name or "")
+    if entry.kind == "file" and name:sub(-#INDEX_SUFFIX) == INDEX_SUFFIX then
+      local text = host.read_file(dir .. "/" .. name)
+      local index = nil
+      if type(text) == "string" and text ~= "" then
+        local index_ok, value = pcall(json.decode, text)
+        if index_ok and type(value) == "table" and type(value.ops or {}) == "table" then index = value end
+      end
+      if not index then
+        unreadable = unreadable + 1
+      else
+        for _, record in pairs(index.ops or {}) do
+          if type(record) == "table" and open_record(record)
+            and tostring(record.session or "") == session_id then
+            open = open + 1
+          end
+        end
+      end
+    end
+  end
+  return open, unreadable
+end
+
 -- Closed handles are kept so `results.get(op)` keeps working, but the index stays bounded: past
 -- KEEP_CLOSED the oldest closed ones are dropped (their retained result bytes stay in the node's
 -- tool-results directory; only the name stops resolving, and `results.get` says so).

@@ -562,6 +562,49 @@ function wa_whatsapp_posting(body, session)
   return json.encode({ok=value.ok==true,enabled=value.enabled,error=value.error})
 end
 
+-- Idle-only maintenance never rewrites history while the session it targets still has work.
+-- `onStale` (scripts/on-stale.sh) is the idle path: it posts /compact with `idle:true` after a main
+-- run settles. With always-available a session is idle while its own work still runs - a code-mode
+-- handle nobody waits for, a self-wake about to dispatch, a child run - and compacting then breaks the
+-- provider prefix cache and drops the detail the work is about to be read against (Victor, 21/11).
+-- So the idle request is refused BY NAME while any of them is pending; an explicit operator /compact
+-- carries no `idle` and is unchanged, as is every other refusal on this route.
+--
+-- Nothing is remembered here: the answer is a read of the three stores, re-evaluated on every idle
+-- request, so the first idle request after the work settles compacts. A state that cannot be read is
+-- NOT treated as clear (unknown is not yes): it is reported beside the pending work and refuses too.
+local IDLE_PENDING_CHILD_STATES = { queued = true, running = true, cancelling = true }
+
+local function idle_pending_work(record, user)
+  local pending, unknown = {}, {}
+  local handles, unreadable = dofile('lua/core/codemode_pending.lua').session_open(record.id)
+  if handles > 0 then pending[#pending+1] = tostring(handles)..' code-mode handle(s)' end
+  if unreadable > 0 then
+    unknown[#unknown+1] = tostring(unreadable)..' code-mode handle index file(s) could not be read'
+  end
+  local wakes_ok, wakes = pcall(function() return dofile('lua/core/selfloop.lua').summary(record.id) end)
+  if wakes_ok and type(wakes) == 'table' and tonumber(wakes.total) then
+    if tonumber(wakes.total) > 0 then pending[#pending+1] = tostring(wakes.total)..' self-wake(s)' end
+  else
+    unknown[#unknown+1] = "this session's self-wake schedule could not be read"
+  end
+  local children_ok, children = pcall(function()
+    return dofile('lua/core/agent_control.lua').children_of(record.id,
+      { user_id = user.id, session_id = record.id })
+  end)
+  if children_ok and type(children) == 'table' then
+    local live = 0
+    for _, child in ipairs(children) do
+      if IDLE_PENDING_CHILD_STATES[tostring(child.state or '')] then live = live + 1 end
+    end
+    if live > 0 then pending[#pending+1] = tostring(live)..' child run(s)' end
+  else
+    unknown[#unknown+1] = "this session's child runs could not be read"
+  end
+  if #pending == 0 and #unknown == 0 then return nil end
+  return { pending = pending, unknown = unknown }
+end
+
 local compacting=false
 function wa_compact(body, session)
   local user=require_master(session)
@@ -592,6 +635,19 @@ function wa_compact(body, session)
   end
   if not record then return json.encode({error='session_not_found'}) end
   if record.objective=='subagent' then return json.encode({error='subagent_compaction_refused'}) end
+  -- The idle path is refused while THIS session still has work (see idle_pending_work above).
+  if args.idle == true then
+    local queued = idle_pending_work(record, user)
+    if queued then
+      local said = {}
+      for _, item in ipairs(queued.pending) do said[#said+1] = item end
+      for _, item in ipairs(queued.unknown) do said[#said+1] = item..', which is unknown and not clear' end
+      return json.encode({ok=false,error='work_pending',session_id=record.id,
+        pending=queued.pending,unknown=queued.unknown,
+        note='idle compaction is not performed while this session has work pending or a pending state it cannot see: '
+          ..table.concat(said,', ')..'. Nothing was summarized; the next idle request after the work settles compacts it.'})
+    end
+  end
   compacting=true
   local a=agentlib.new(record.id,nil,users.normalize(user.role),user.id,'')
   a.run_id='compact:'..host.uuid()

@@ -128,7 +128,7 @@ fi
 # run queued, the operator asked for one maintenance check at 40% on the session that just
 # finished. The route atomically reserves the idle node; subagents are ignored, and it never
 # summarizes a subagent.
-compact_body='{"min_percent":40}'
+compact_body='{"idle":true,"min_percent":40}'
 compact_skip=""
 event_sid=""
 if [ -n "${WA_JOB_EVENT_FILE:-}" ]; then
@@ -138,7 +138,7 @@ if [ -n "${WA_JOB_EVENT_FILE:-}" ]; then
   else
     case "$event_sid" in
       *[!A-Za-z0-9._:-]*) compact_skip="$WA_JOB_EVENT_FILE has a session id outside the safe id set ([A-Za-z0-9._:-]); skipping the idle compaction rather than posting it" ;;
-      *) compact_body="{\"min_percent\":40,\"session_id\":\"$event_sid\"}" ;;
+      *) compact_body="{\"idle\":true,\"min_percent\":40,\"session_id\":\"$event_sid\"}" ;;
     esac
   fi
   [ -z "$compact_skip" ] || event_sid=""
@@ -160,6 +160,13 @@ if [ "${WA_STALE_COMPACT:-1}" != "0" ] && [ -z "$compact_skip" ]; then
   case "$compact" in
     *'"error":"node_busy"'*)
       say "onStale: a main run is still active - compaction deferred to its run-finished event"
+      exit 0 ;;
+    *'"error":"work_pending"'*)
+      # The session still holds work (a code-mode handle, a self-wake, a child run): compacting now
+      # would rewrite the history that work is read against, and that is the detail compaction must
+      # not drop. Nothing is remembered - the next idle request after the work settles compacts - so
+      # this is a deferral, not a lost compaction.
+      say "onStale: the session still has work pending - compaction deferred: $compact"
       exit 0 ;;
     '')
       say "onStale: idle compaction returned no response (the request may still be running; not retried here)" ;;
