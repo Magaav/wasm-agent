@@ -519,6 +519,9 @@ if [ -n "$FROM" ]; then
       [ "$(wc -c < "$OUT/$name" | tr -d '[:space:]')" = "$want_bytes" ] || fail "artifact_not_pinned: $name is not $want_bytes bytes" 6
     done
   done
+  ANCESTRY_FLOOR="$(wa_ancestry_window_floor "$ROOT" "$COMMIT" 2>/dev/null)"
+  [ -n "$ANCESTRY_FLOOR" ] || fail "ancestry_window_unknown: this checkout cannot name the release below $COMMIT, so the artifacts in $FROM cannot be shown to contain it"
+  say "ancestry window floor: $ANCESTRY_FLOOR (the oldest commit these artifacts must be able to contain)"
   say "verified $FROM against its own manifest (source_commit $COMMIT, compiled_inputs $DIGEST)"
 else
   # ---- build ---------------------------------------------------------------------------------------
@@ -552,6 +555,11 @@ else
     [ -n "$WINDOW_FLOOR" ] || fail "ancestry_window_unknown: after deepening, this clone still cannot name the previous release below $COMMIT"
   fi
   say "ancestry window floor: $WINDOW_FLOOR (the oldest commit this build must be able to contain)"
+  # The verify loop below is ONE loop for both halves, so the floor it reads must be set by both: the build
+  # half computes it here, and the --from half does it just before that loop. (It used to read the
+  # build-only WINDOW_FLOOR, so a --from publish died with "WINDOW_FLOOR: unbound variable" under set -u -
+  # measured 21/11 on land250's ship step, after every artifact had already been verified.)
+  ANCESTRY_FLOOR="$WINDOW_FLOOR"
   say "building $COMMIT for $MANIFEST_TRIPLES (glibc floor $GLIBC_FLOOR, code-mode $CODEMODE${ASSETS:+ from $ASSETS})"
   BUILD_SECONDS=""
   build_started=$(date +%s)
@@ -621,11 +629,11 @@ for triple in $MANIFEST_TRIPLES; do
     case "$name" in
       wa-*)
         if "$file" --build-info >/dev/null 2>&1; then
-          if "$file" --contains "$WINDOW_FLOOR" >/dev/null 2>&1; then
-            say "ancestry window: $name contains $WINDOW_FLOOR"
+          if "$file" --contains "$ANCESTRY_FLOOR" >/dev/null 2>&1; then
+            say "ancestry window: $name contains $ANCESTRY_FLOOR"
           else
             floor_rc=$?
-            fail "ancestry_window_short: $name answers $floor_rc for $WINDOW_FLOOR, the previous release it must contain, so a node on that release could not install this one without an override. Build from a checkout whose history reaches it (git fetch --unshallow --tags origin)" 5
+            fail "ancestry_window_short: $name answers $floor_rc for $ANCESTRY_FLOOR, the previous release it must contain, so a node on that release could not install this one without an override. Build from a checkout whose history reaches it (git fetch --unshallow --tags origin)" 5
           fi
         else
           say "ancestry window: $name cannot be executed on this host ($triple), so it is not proved here"
