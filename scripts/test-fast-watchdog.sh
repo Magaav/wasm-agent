@@ -259,7 +259,8 @@ else
   cat > "$WORK/real-row.lua" <<'REALROW'
 -- Answers with what the node really sees, so the assertion is on the node, not on the runner's intention.
 print('real row reached the node')
-print('script=' .. tostring(host.getenv('WA_SCRIPT')))
+-- WA_SCRIPT is consumed by the host (harness-fixes-2, c2e060e7): the node answers it as a process fact.
+print('script_run=' .. tostring(host.script_run and host.script_run()) .. ' env=' .. tostring(host.getenv('WA_SCRIPT')))
 print('home=' .. tostring(host.getenv('WASM_AGENT_HOME')))
 print('managed=' .. tostring(host.getenv('WASM_AGENT_MANAGED')))
 print('vault=' .. tostring(host.getenv('WASM_AGENT_VAULT_URL')))
@@ -275,8 +276,8 @@ REALROW
     *) fail "the real row never reached its node. Output: $out" ;;
   esac
   case "$out" in
-    *"script=$WORK/real-row.lua"*) ;;
-    *) fail "the real row did not see WA_SCRIPT. Output: $out" ;;
+    *"script_run=true env=nil"*) ;;
+    *) fail "the real row is not a script run with WA_SCRIPT consumed (host.script_run true, the variable gone). Output: $out" ;;
   esac
   case "$out" in
     *"home=$WORK/run-e/h.1"*) ;;
