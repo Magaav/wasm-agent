@@ -1946,6 +1946,11 @@ gate_run node tests/test-wa-fonts.mjs
 # captured transcript is free of escape sequences - so it is asserted without a model:
 # the view is handed the events agent.lua emits, with a clock the test controls.
 WA_SCRIPT=scripts/test-cli-view.lua "$BIN" --db "$DB.view" | grep "cli view ok"
+# The ICON SETS, each rendered through the same view (item 4 of the wa-fonts mission, Victor 19/11):
+# wa Icons is GLUED and one cell per icon, nerd keeps the one space, unicode needs no font and ascii
+# needs no glyph at all. The proof is a CELL count - the glued row must be exactly its gapped icons
+# narrower than the spaced one - because a table lookup cannot notice a character that costs a cell.
+WA_SCRIPT=scripts/test-icons.lua "$BIN" --db "$DB.icons" | grep "icons: ok"
 # Every file change as a diff block (change/tui-diff-view, Victor 20/11). The block is rendered from
 # the session's own change record, not from the tool result, so the model's context never carries it:
 # this asserts the path and its counts, the real line numbers, the fold that states what it hid, the

@@ -10,6 +10,14 @@
 local view_lib = dofile("lua/core/cli_view.lua")
 local json = dofile("lua/vendor/json.lua")
 
+-- THE SET THESE ROWS ARE. Every character asserted below is the NERD set - the glyphs wa drew on
+-- 19/11 - and the set is now chosen (item 4 of the wa-fonts mission: wa|nerd|unicode|ascii, from
+-- /icons, WA_ICONS, the config file or what the font setup installed). This file pins it, so the
+-- assertions stay exact instead of being derived from whatever a scratch home happens to default to;
+-- scripts/test-icons.lua is what asserts each set in turn.
+local pinned_set, pinned_why = view_lib.use_icons("nerd")
+assert(pinned_set, pinned_why)
+
 local failed = 0
 local checks = 0
 local function ok(condition, label)

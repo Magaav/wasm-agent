@@ -67,6 +67,11 @@ M.commands = {
   { name = "/reasoning", usage = "/reasoning", alias = { "/thinking" }, hint = "set how much the model reasons (low, high, max...)" },
   { name = "/provider", usage = "/provider", hint = "pick the provider for the next turns" },
   { name = "/stats", usage = "/stats", hint = "database counts" },
+  {
+    name = "/icons",
+    usage = "/icons [wa|nerd|unicode|ascii]",
+    hint = "which glyphs the status and footer rows draw: wa = wa Icons (glued), nerd, unicode or ascii (no argument: say which set is in force)",
+  },
   { name = "/console", usage = "/console", hint = "toggle the console: every event and a tool's whole output, unclipped" },
   {
     name = "/efficiency_report",

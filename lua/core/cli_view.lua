@@ -311,43 +311,45 @@ end
 -- two functions that actually lay these rows out - `M.columns` (the count `clip` and the status line
 -- use) and `wa-term`'s `cell_width_of` for the box the row sits in - because a glyph two cells
 -- wide moves every number after it.
--- ONE space between an icon and the value it labels, and ONE place that says so (Victor, 19/11:
--- in the non-Mono Nerd Font a glyph is drawn WIDER than its cell and touches the character after it).
--- The DELTA, UP, DOWN and SIGMA marks are TEXT, not icons: they stay glued to their number.
-local GAP = " "
-M.GAP = GAP
+-- The icons and the gap between an icon and its value come from ONE table, by set (item 4 of the
+-- wa-fonts mission, Victor 19/11). This module USES the set; lua/core/icons.lua decides what each set
+-- draws. The DELTA, UP, DOWN and SIGMA marks are TEXT, not icons: they stay glued to their number.
+local icons = dofile("lua/core/icons.lua")
+M.icons = icons
 
-local GLYPH = {
-  -- The context ball: NINE Material Design circles, eighths of the window - the 8 slices wired up
-  -- (Victor, 19/11). ballEmpty is the floor below 3%; the rest are the nearest eighth from there.
-  ballEmpty = "\243\176\157\166",          -- U+F0766
-  ballEighth = "\243\176\170\158",         -- U+F0A9E
-  ballQuarter = "\243\176\170\159",        -- U+F0A9F
-  ballThreeEighths = "\243\176\170\160",   -- U+F0AA0
-  ballHalf = "\243\176\170\161",           -- U+F0AA1
-  ballFiveEighths = "\243\176\170\162",    -- U+F0AA2
-  ballThreeQuarters = "\243\176\170\163",  -- U+F0AA3
-  ballSevenEighths = "\243\176\170\164",   -- U+F0AA4
-  ballFull = "\243\176\170\165",           -- U+F0AA5
-  steps = "\243\176\183\186",             -- U+F0DFA, the run's steps
-  clock = "\243\176\148\155",             -- U+F051B, the run's elapsed clock
-  turns = "\243\176\145\144",             -- U+F0450, the session's turns
-  cache = "\243\176\134\188",             -- U+F01BC, the cache-hit rate
-  -- The finish stamp (Victor, 19/11 ~10:50): a run that ended well leaves the time it ended,
-  -- not only how long it took. Material Design's check - the one glyph in this set that means
-  -- "this finished".
-  check = "\243\176\132\172",           -- U+F012C, the finish stamp check
-}
-M.GLYPH = GLYPH
+-- The active set, resolved once at load (env > config > what wa setup fonts installed > unicode) and
+-- moved by /icons. Every row below asks GLYPH/GAP/BALLS, so one call re-draws them all.
+local active = icons.resolve(host.getenv("WA_ICONS"))
+
+local GAP, GLYPH, BALLS
+
+-- Adopt one set: its glyphs, its gap, and its nine balls. Refuses an unknown name by name.
+function M.use_icons(name)
+  local set, why = icons.set(name)
+  if not set then return nil, why end
+  GAP = set.gap
+  GLYPH = set
+  -- NINE states, EIGHT slices: context_ball's k is the nearest eighth (1..8), so the empty ball is
+  -- asked for by name and never by index. Taking the nine as they come put every reading one slot low -
+  -- 93.75% drew the seventh slice - which only a render check on each set can see.
+  local nine = icons.balls(icons.valid(name))
+  BALLS = {}
+  for index = 2, 9 do BALLS[index - 1] = nine[index] end
+  M.GAP, M.GLYPH, M.BALLS = GAP, GLYPH, BALLS
+  active = { set = icons.valid(name), source = "use_icons" }
+  return true
+end
+
+-- What this process draws, and why: the reader /icons and the status line ask.
+function M.icon_set() return active.set, active.source end
+
+assert(M.use_icons(active.set))
+
 
 -- ONE function decides which ball a context percentage wears: five bands, each starting at its own
 -- floor - 3% is the second ball, 50% the third, 75% the fourth, 100% the full one. A context measured
 -- past its window (it happens across a compaction boundary) is the full ball, and a percentage nobody
 -- measured is the empty one - the same ball 0% wears, because "nothing measured" is not "nearly full".
--- The eighths, in order: the ball for round(fraction * 8), clamped to 1..8.
-local BALLS = { GLYPH.ballEighth, GLYPH.ballQuarter, GLYPH.ballThreeEighths, GLYPH.ballHalf,
-  GLYPH.ballFiveEighths, GLYPH.ballThreeQuarters, GLYPH.ballSevenEighths, GLYPH.ballFull }
-
 -- The ball for a context percentage: the nearest eighth, with an empty floor below 3%.
 --
 -- The floor is there because "nothing measured" is not "nearly full": a context with no reading at all
