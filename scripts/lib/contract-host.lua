@@ -103,6 +103,22 @@ function M.new(spec)
     end
   end
 
+  -- The real host's content address (`sha256` in rust/wa-capabilities/src/host.rs answers a stable
+  -- digest STRING). Not the real algorithm: a value comparison against the node would be a different
+  -- claim and nothing here makes one. What it must not do is collide for two texts of the same length -
+  -- a length-only stand-in did exactly that in this session's own test, and two sides of a diff then
+  -- shared one content address. Two rounds of djb2 over the bytes, printed in a shape no real digest
+  -- has, so a test can never mistake it for one.
+  api.sha256 = function(text)
+    local s = tostring(text)
+    local a, b = 5381, 52711
+    for i = 1, #s do
+      local byte = s:byte(i)
+      a = (a * 33 + byte) % 4294967296
+      b = (b * 31 + byte) % 4294967296
+    end
+    return string.format("0000%08x%08x", math.floor(a), math.floor(b))
+  end
   api.write_file = function(path, text)
     local resolved, why = owned(path, "write_file")
     if not resolved then return false, why end

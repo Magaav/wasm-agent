@@ -1931,6 +1931,12 @@ WA_SCRIPT=scripts/test-markdown.lua "$BIN" --db "$DB.markdown" | grep "markdown 
 # captured transcript is free of escape sequences - so it is asserted without a model:
 # the view is handed the events agent.lua emits, with a clock the test controls.
 WA_SCRIPT=scripts/test-cli-view.lua "$BIN" --db "$DB.view" | grep "cli view ok"
+# Every file change as a diff block (change/tui-diff-view, Victor 20/11). The block is rendered from
+# the session's own change record, not from the tool result, so the model's context never carries it:
+# this asserts the path and its counts, the real line numbers, the fold that states what it hid, the
+# plain NO_COLOR rendering, and that a change the run could not record says so instead of drawing an
+# empty diff. It goes through the view's own event path, as chat.lua hands the view a change event.
+WA_SCRIPT=tests/diff-view.lua "$BIN" --db "$DB.view-diff" | grep "diff view ok"
 # The SAME view suite again, with a model window the compactor resolves (a scratch home has none): the
 # context ball must be coloured against the reserve `maybe_compact` will spend, not the policy default.
 # WASM_AGENT_MODEL_LIMITS is that fixture - the only way a fresh home has a window at all - and the
