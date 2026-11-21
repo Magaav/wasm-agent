@@ -1561,10 +1561,15 @@ mod tests {
         assert!(log.contains(&format!("handling {tag}")), "the job is in hand: {log}");
 
         // The candidate is started first: what this measures is the swap, not a wasm compile.
-        let next = candidate(name, &request);
+        // The order install::upgrade uses (one instance per name, services::claim): retire first - the
+        // drain is timed here - then start the candidate and register it. 21/11: these tests still
+        // started the candidate beside the live instance, which the claim now refuses.
         let began = Instant::now();
-        let swapped = replace(name, next);
+        let retired = retire(name);
         let waited = began.elapsed();
+        let next = candidate(name, &request);
+        let mut swapped = replace(name, next);
+        swapped["retired"] = retired;
         let drained = &swapped["retired"]["drain"];
         assert_eq!(drained["outcome"], "drained", "{swapped}");
         assert_eq!(swapped["retired"]["queue_handed_over"], 0, "nothing to hand back: {swapped}");
@@ -1647,10 +1652,15 @@ mod tests {
 
         // The candidate is the cooperative mode: it is the one that finishes the handed-over job.
         let fast = json!({"name": name, "config": {"handle_ms": 100, "tick_ms": 20}});
-        let next = candidate(name, &fast);
+        // The order install::upgrade uses (one instance per name, services::claim): retire first - the
+        // drain is timed here - then start the candidate and register it. 21/11: these tests still
+        // started the candidate beside the live instance, which the claim now refuses.
         let began = Instant::now();
-        let swapped = replace(name, next);
+        let retired = retire(name);
         let waited = began.elapsed();
+        let next = candidate(name, &fast);
+        let mut swapped = replace(name, next);
+        swapped["retired"] = retired;
         // Restored as soon as the swap it shaped is over: a later assertion must not leave the knob
         // set for the other tests in this process.
         match previous {
@@ -1699,10 +1709,15 @@ mod tests {
         assert!(log.contains("heartbeat start"), "{log}");
         assert_eq!(status(Some(name))["drain"], "immediate", "no drain hook in this artifact");
 
-        let next = candidate(name, &request);
+        // The order install::upgrade uses (one instance per name, services::claim): retire first - the
+        // drain is timed here - then start the candidate and register it. 21/11: these tests still
+        // started the candidate beside the live instance, which the claim now refuses.
         let began = Instant::now();
-        let swapped = replace(name, next);
+        let retired = retire(name);
         let waited = began.elapsed();
+        let next = candidate(name, &request);
+        let mut swapped = replace(name, next);
+        swapped["retired"] = retired;
         assert_eq!(swapped["retired"]["drain"]["outcome"], "no_hook", "{swapped}");
         assert_eq!(swapped["retired"]["drain"]["waited_ms"], 0, "nothing was waited for: {swapped}");
         assert!(waited < Duration::from_secs(3), "no drain delay on top of the stop: {waited:?}");
