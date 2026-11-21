@@ -359,6 +359,55 @@ for _, line in ipairs(dry_run.lines or {}) do
 end
 ok(not claimed_none, "a dry run that plans an edit must NOT say 'no terminal config needed a change'")
 
+-- ---- a config that names NO font still draws a Nerd fallback (review finding 3) ----------
+-- kitty's font_family is commented out and ghostty's is a real line; where a config names no face, the
+-- terminal draws the system monospace - and 'fc-match monospace' on this machine answers
+-- JetBrainsMono Nerd Font, so its icons are Nerd metrics. The A2 pair is written EXPLICITLY instead.
+local kitty_path = fixtures .. "/kitty/kitty.conf"
+write(kitty_path, "# Font\n# font_family JetBrainsMono Nerd Font\nfont_size 12\n")
+local kitty = { name = "kitty", path = kitty_path, kind = "conf", key = "font_family",
+  fallback_line = "symbol_map U+F0000-U+FFFFD wa Icons" }
+eq(font_setup.current_font(kitty, read(kitty_path)), nil, "a commented-out font names no face")
+local kitty_row = font_setup.configure_terminal(kitty, {})
+eq(kitty_row.action, "edited", "a terminal with no face named is given the A2 pair explicitly")
+local kitty_text = read(kitty_path)
+ok(kitty_text:find("font_family JetBrains Mono", 1, true) ~= nil, "the text face is written")
+ok(kitty_text:find("symbol_map U+F0000-U+FFFFD wa Icons", 1, true) ~= nil,
+  "and the ICON face, in kitty's own fallback syntax")
+eq(font_setup.configure_terminal(kitty, {}).action, "left alone", "a second run changes nothing")
+
+-- ghostty: an EQUALS sign and quotes, and a REPEATED key for the fallback face - the shape that made the
+-- old reader answer "no face to replace" and the old writer append a second line beside the old face.
+local ghostty_path = fixtures .. "/ghostty/config"
+write(ghostty_path, 'font-family = "JetBrainsMono Nerd Font"\nfont-style = Regular\nfont-size = 9\n')
+local ghostty = { name = "ghostty", path = ghostty_path, kind = "conf", key = "font-family",
+  fallback_line = 'font-family = "wa Icons"' }
+eq(font_setup.current_font(ghostty, read(ghostty_path)), "JetBrainsMono Nerd Font",
+  "ghostty's font-family is read through its equals sign")
+local ghostty_row = font_setup.configure_terminal(ghostty, {})
+eq(ghostty_row.action, "edited", "ghostty's Nerd face is switched")
+local ghostty_text = read(ghostty_path)
+ok(ghostty_text:find('font-family = "JetBrains Mono"', 1, true) ~= nil, "to JetBrains Mono")
+ok(ghostty_text:find('font-family = "wa Icons"', 1, true) ~= nil, "with wa Icons as the repeated fallback")
+ok(ghostty_text:find("font-size = 9", 1, true) ~= nil, "and the rest of the file intact")
+eq(font_setup.configure_terminal(ghostty, {}).action, "left alone",
+  "a second run changes nothing: the icon face is on its own line, and the check reads the WHOLE config")
+
+-- alacritty: an INLINE table per weight. Replacing only 'normal' left bold and italic on the Nerd face.
+local alacritty_path = fixtures .. "/alacritty/alacritty.toml"
+write(alacritty_path, '[font]\nnormal = { family = "JetBrainsMono Nerd Font", style = "Regular" }\n'
+  .. 'bold = { family = "JetBrainsMono Nerd Font", style = "Bold" }\n'
+  .. 'italic = { family = "JetBrainsMono Nerd Font", style = "Italic" }\n')
+local alacritty = { name = "alacritty", path = alacritty_path, kind = "toml", section = "font.normal",
+  key = "family", inline = "normal", table_section = "font", icons_via = "fontconfig" }
+eq(font_setup.current_font(alacritty, read(alacritty_path)), "JetBrainsMono Nerd Font",
+  "alacritty's inline family is read")
+font_setup.configure_terminal(alacritty, {})
+local alacritty_text = read(alacritty_path)
+ok(not alacritty_text:find("JetBrainsMono Nerd Font", 1, true),
+  "EVERY weight is switched, not only the one the reader asks about: " .. alacritty_text)
+eq(select(2, alacritty_text:gsub("JetBrains Mono", "")) , 3, "all three weights name JetBrains Mono")
+
 -- ---- the other three terminals the brief names -------------------------------------
 -- WINDOWS TERMINAL: one JSON file per user, its face under "defaults"."font". Edited in place, every other
 -- byte of the file left alone - and refused BY NAME when the file has no "defaults" object to edit.

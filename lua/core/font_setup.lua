@@ -100,9 +100,12 @@ function M.terminals(home)
   config_home = tostring(config_home):gsub("\\", "/"):gsub("/+$", "")
   return {
     { name = "foot", path = config_home .. "/foot/foot.ini", kind = "ini", section = "main", key = "font" },
-    { name = "alacritty", path = config_home .. "/alacritty/alacritty.toml", kind = "toml", section = "font.normal", key = "family" },
-    { name = "kitty", path = config_home .. "/kitty/kitty.conf", kind = "conf", key = "font_family" },
-    { name = "ghostty", path = config_home .. "/ghostty/config", kind = "conf", key = "font-family" },
+    { name = "alacritty", path = config_home .. "/alacritty/alacritty.toml", kind = "toml", section = "font.normal", key = "family",
+      inline = "normal", table_section = "font", icons_via = "fontconfig" },
+    { name = "kitty", path = config_home .. "/kitty/kitty.conf", kind = "conf", key = "font_family",
+      fallback_line = "symbol_map U+F0000-U+FFFFD wa Icons" },
+    { name = "ghostty", path = config_home .. "/ghostty/config", kind = "conf", key = "font-family",
+      fallback_line = 'font-family = "wa Icons"' },
     { name = "wezterm", path = config_home .. "/wezterm/wezterm.lua", kind = "lua-wezterm" },
     -- Windows Terminal keeps one JSON file per user, and its default profile font is a key in it.
     { name = "windows-terminal", path = M.windows_terminal_path(home), kind = "json-wt" },
@@ -131,6 +134,12 @@ function M.windows_terminal_path(home)
     base = home .. "/AppData/Local"
   end
   return base .. "/Packages/Microsoft.WindowsTerminal_8wekyb3d8bbwe/LocalState/settings.json"
+end
+
+-- A terminal's KEY, escaped for use inside a Lua pattern: '-' is a quantifier and '%' starts an escape,
+-- so 'font-family' used raw never matches itself (measured 21/11: ghostty read as having no font).
+function M.key_pattern(key)
+  return (tostring(key or ""):gsub("[%p]", function(char) return "%" .. char end))
 end
 
 -- A font NAME as a shell word: letters, digits, dot, dash, underscore and space only. An allow-list,
@@ -192,27 +201,44 @@ function M.current_font(terminal, text)
       local header = line:match("^%s*%[([^%]]+)%]")
       if header then section = header end
       if section == terminal.section then
-        local value = line:match("^%s*" .. terminal.key .. "%s*=%s*(.-)%s*$")
+        local value = line:match("^%s*" .. M.key_pattern(terminal.key) .. "%s*=%s*(.-)%s*$")
         if value and value ~= "" then found = value end
       end
     end
     return found
   elseif terminal.kind == "toml" then
+    -- TWO SHAPES, both real (this machine's alacritty.toml, 21/11):
+    --   [font.normal]   family = "X"
+    --   [font]          normal = { family = "X", style = "Regular" }
     local section, found = nil, nil
     for line in text:gmatch("[^\n]+") do
       local header = line:match("^%s*%[([^%]]+)%]")
       if header then section = header end
       if section == terminal.section then
-        local value = line:match('^%s*' .. terminal.key .. '%s*=%s*"([^"]*)"')
+        local value = line:match('^%s*' .. M.key_pattern(terminal.key) .. '%s*=%s*"([^"]*)"')
+        if value and value ~= "" then found = value end
+      end
+      local parent, rest = line:match("^%s*([%w_%-]+)%s*=%s*{(.*)$")
+      if parent and parent == (terminal.inline or "normal") and section == (terminal.table_section or "font") then
+        local value = rest:match('family%s*=%s*"([^"]*)"')
         if value and value ~= "" then found = value end
       end
     end
     return found
   elseif terminal.kind == "conf" then
+    -- BOTH separators these files use: 'font_family X' (kitty) and 'font-family = "X"' (ghostty).
     local found = nil
     for line in text:gmatch("[^\n]+") do
-      local value = line:match("^%s*" .. terminal.key .. "%s+([^#]+)")
-      if value and value ~= "" then found = value:gsub("%s+$", "") end
+      if not line:match("^%s*#") then
+        local value = line:match("^%s*" .. M.key_pattern(terminal.key) .. "%s*=%s*(.-)%s*$")
+          or line:match("^%s*" .. M.key_pattern(terminal.key) .. "%s+([^#]+)")
+        if value and value ~= "" then
+          value = value:gsub('^"', ""):gsub('"$', ""):gsub("%s+$", "")
+          -- FIRST wins: a terminal names its TEXT face first and its fallbacks after (ghostty repeats
+          -- font-family for exactly that), so the last match is a fallback, not the face.
+          if value ~= "" and found == nil then found = value end
+        end
+      end
     end
     return found
   elseif terminal.kind == "lua-wezterm" then
@@ -293,12 +319,29 @@ end
 -- glyphs' as 'already set up' left foot on JetBrainsMono Nerd Font, which is the spacing complaint
 -- itself. A terminal is set up when its PRIMARY face is JetBrains Mono AND its icon fallback is wa
 -- Icons; anything else is switched, the Nerd fonts included.
-function M.already_a2(description)
+-- Was wa Icons installed for this user by this command? The record it writes is the answer.
+function M.installed_by_setup()
+  local record = M.read_record()
+  return record ~= nil and record["wa Icons"] == true
+end
+
+function M.already_a2(description, config_text, terminal)
   local text = tostring(description or ""):lower()
   -- The primary face: the text before the first comma (foot) or the whole description (the others).
   local primary = text:match("^([^,]+)") or text
   local is_text_face = primary:find("jetbrains mono", 1, true) ~= nil
+  -- The ICON face may be named on the font line (foot: "..., wa Icons:size=9") or on a line of its own
+  -- (kitty's symbol_map, ghostty's repeated font-family). Judging the font line alone made those two
+  -- not-A2 for ever, so every run edited and overwrote the backup (measured 21/11) - the whole config is
+  -- the evidence, and it is passed in.
+  -- A terminal whose syntax has no icon-face key (alacritty takes fallbacks from fontconfig) is set up
+  -- when its TEXT face is JetBrains Mono and wa Icons is installed for this user: there is no line to look
+  -- for, and demanding one made it edit on every run (measured 21/11).
+  if terminal and terminal.icons_via == "fontconfig" then
+    return is_text_face and M.installed_by_setup()
+  end
   local has_icons_face = text:find("wa icons", 1, true) ~= nil
+    or tostring(config_text or ""):lower():find("wa icons", 1, true) ~= nil
   return is_text_face and has_icons_face
 end
 
@@ -347,6 +390,42 @@ function M.backup_path(path)
   return path .. ".wa-backup"
 end
 
+-- THE A2 PAIR FOR A CONFIG THAT NAMES NO FONT, in each terminal's own syntax. Not an edit of somebody's
+-- value: an addition, in the form that terminal documents for a fallback face.
+--   kitty     font_family JetBrains Mono  +  symbol_map U+F0000-U+FFFFD wa Icons
+--   alacritty [font.normal] family = "JetBrains Mono"  (alacritty takes icon fallbacks from fontconfig,
+--             where wa Icons is installed; there is no per-code-point key in its config)
+--   ghostty   font-family = "JetBrains Mono" then font-family = "wa Icons" (a repeated key is ghostty's
+--             documented way to add a fallback face)
+function M.pair_for_fontless(terminal, text)
+  text = tostring(text or "")
+  local function add(lines)
+    local out = (text:gsub("\n+$", ""))
+    if out ~= "" then out = out .. "\n" end
+    return out .. lines .. "\n"
+  end
+  if terminal.kind == "conf" and terminal.key == "font_family" then
+    return add("font_family JetBrains Mono\nsymbol_map U+F0000-U+FFFFD wa Icons")
+  elseif terminal.kind == "conf" and terminal.key == "font-family" then
+    return add('font-family = "JetBrains Mono"\nfont-family = "wa Icons"')
+  elseif terminal.kind == "toml" then
+    return add('[font.normal]\nfamily = "JetBrains Mono"')
+  end
+  return nil, "this terminal's syntax has no font key this command can add"
+end
+
+-- One phrase per terminal for the dry-run line, so a plan reads as clearly as an edit.
+function M.pair_summary(terminal)
+  if terminal.kind == "conf" and terminal.key == "font_family" then
+    return "font_family JetBrains Mono + symbol_map U+F0000-U+FFFFD wa Icons"
+  elseif terminal.kind == "conf" and terminal.key == "font-family" then
+    return 'font-family = "JetBrains Mono" + font-family = "wa Icons"'
+  elseif terminal.kind == "toml" then
+    return '[font.normal] family = "JetBrains Mono"'
+  end
+  return "the A2 pair"
+end
+
 -- The value that gives a terminal JetBrains Mono with wa Icons as its fallback, in that terminal's own
 -- syntax. Kept in one function so the shapes cannot drift apart.
 -- The point size the operator chose, kept when the face changes: a setup that also silently resized
@@ -390,7 +469,7 @@ function M.edited_text(terminal, text)
         end
         section = header
       end
-      if section == terminal.section and line:match("^%s*" .. terminal.key .. "%s*=") then
+      if section == terminal.section and line:match("^%s*" .. M.key_pattern(terminal.key) .. "%s*=") then
         out[#out + 1] = terminal.key .. "=" .. value
         inserted = true
       else
@@ -403,11 +482,23 @@ function M.edited_text(terminal, text)
     end
     return (table.concat(out, "\n"):gsub("\n+$", "\n"))
   elseif terminal.kind == "toml" then
+    -- EVERY WEIGHT AT ONCE, in one pass. alacritty writes
+    --   normal = { family = "X", style = "Regular" }
+    --   bold   = { family = "X", ... }   italic = { ... }
+    -- and replacing only 'normal' left bold and italic on the Nerd face, so bold text still drew Nerd
+    -- icons - half a fix that reads as a whole one (measured 21/11: 1 of 3 replaced).
+    -- EVERY WEIGHT: alacritty names normal, bold and italic separately, and leaving two of them on the
+    -- Nerd face means bold text still draws Nerd icons - half a fix that reads as a whole one (21/11).
+    local replaced_all, all_count = text:gsub(
+      "([\n]%s*[%w_%-]+%s*=%s*{[^}]-family%s*=%s*)([\"'])(.-)([\"'])",
+      "%1%2" .. value .. "%4")
+    if all_count > 0 then return (replaced_all:gsub("\n+$", "\n")) end
+    -- Nothing matched, so fall back to the section form below.
     local section, out = nil, {}
     for line in (text .. "\n"):gmatch("([^\n]*)\n") do
       local header = line:match("^%s*%[([^%]]+)%]")
       if header then section = header end
-      if section == terminal.section and line:match("^%s*" .. terminal.key .. "%s*=") then
+      if section == terminal.section and line:match("^%s*" .. M.key_pattern(terminal.key) .. "%s*=") then
         out[#out + 1] = terminal.key .. ' = "' .. value .. '"'
       else
         out[#out + 1] = line
@@ -419,17 +510,35 @@ function M.edited_text(terminal, text)
     end
     return (joined:gsub("\n+$", "\n"))
   elseif terminal.kind == "conf" then
+    -- BOTH WRITTEN FORMS, matched the way the READER matches them. ghostty writes 'font-family = "X"';
+    -- a writer that only knew 'font_family X' appended a second line beside the old one, so the reader saw
+    -- the old face, the next run edited again, and each run overwrote the backup (measured 21/11).
     local out, replaced = {}, false
     for line in (text .. "\n"):gmatch("([^\n]*)\n") do
-      if line:match("^%s*" .. terminal.key .. "%s+") then
-        out[#out + 1] = terminal.key .. " " .. value
+      local key_at = line:match("^(%s*" .. M.key_pattern(terminal.key) .. "%s*[= ])")
+      if key_at and not line:match("^%s*#") then
+        if key_at:find("=", 1, true) then
+          out[#out + 1] = terminal.key .. ' = "' .. value .. '"'
+        else
+          out[#out + 1] = terminal.key .. " " .. value
+        end
         replaced = true
       else
         out[#out + 1] = line
       end
     end
-    if not replaced then out[#out + 1] = terminal.key .. " " .. value end
-    return (table.concat(out, "\n"):gsub("\n+$", "\n"))
+    if not replaced then
+      if terminal.key:find("%-") then out[#out + 1] = terminal.key .. ' = "' .. value .. '"'
+      else out[#out + 1] = terminal.key .. " " .. value end
+    end
+    local joined = table.concat(out, "\n")
+    -- AND THE ICON FACE, on the line that terminal documents for a fallback (kitty: symbol_map; ghostty:
+    -- a repeated font-family). Without it the config names a text face and no icon face, the reader is
+    -- right to call that not-A2, and every run edited again and overwrote the backup (measured 21/11).
+    if terminal.fallback_line and not joined:lower():find("wa icons", 1, true) then
+      joined = joined:gsub("\n+$", "\n") .. terminal.fallback_line .. "\n"
+    end
+    return (joined:gsub("\n+$", "\n"))
   elseif terminal.kind == "json-wt" then
     return M.wt_edited(text, value)
   elseif terminal.kind == "lua-wezterm" then
@@ -547,10 +656,35 @@ function M.configure_terminal(terminal, opts)
   end
   row.current = M.current_font(terminal, text)
   if row.current == nil then
-    row.why = "its config names no font of its own, so there is no face to replace"
+    -- NO FACE NAMED IS NOT NO PROBLEM (review finding 3, 21/11). The terminal then draws the system
+    -- monospace, and on this machine 'fc-match monospace' answers JetBrainsMono Nerd Font - so its icons
+    -- are Nerd metrics, exactly what A2 replaced. The A2 pair is written EXPLICITLY instead of skipped.
+    local explicit, why_not = M.pair_for_fontless(terminal, text)
+    if not explicit then
+      row.why = "its config names no font, and this terminal's syntax has no place to add one: " .. tostring(why_not)
+      return row
+    end
+    if opts.dry_run then
+      row.action = "would edit"
+      row.planned = M.pair_summary(terminal)
+      row.why = "its config names no font, so it draws the system monospace"
+      return row
+    end
+    if not host.write_file(M.backup_path(terminal.path), text) then
+      row.why = "backup_failed: " .. M.backup_path(terminal.path)
+      return row
+    end
+    if not host.write_file(terminal.path, explicit) then
+      row.why = "write_failed: " .. terminal.path
+      return row
+    end
+    row.action = "edited"
+    row.current = "(no font named: the system monospace)"
+    row.backup = M.backup_path(terminal.path)
+    row.why = "named no font; the A2 pair is now written explicitly"
     return row
   end
-  local ready = (opts.already or M.already_a2)(row.current)
+  local ready = (opts.already or M.already_a2)(row.current, text, terminal)
   if ready then
     row.why = "'" .. tostring(row.current) .. "' already draws wa's icons with wa Icons: nothing to do"
     return row
@@ -610,7 +744,7 @@ function M.configure_gsettings(terminal, opts)
     return row
   end
   row.current = current
-  local ready = (opts.already or M.already_a2)(current)
+  local ready = (opts.already or M.already_a2)(current, text, terminal)
   if ready then
     row.why = "'" .. tostring(current) .. "' already draws wa's icons with wa Icons: nothing to do"
     return row
