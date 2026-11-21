@@ -182,7 +182,15 @@ wa_build_delete() { # <path> <kind>
   wa_build_deletable "$path" "$kind" || return 1
   case "$kind" in
     island|buildcache|tree-target|fast-components)
-      age=$(( $(date +%s) - $(stat -c %Y "$path" 2>/dev/null || stat -f %m "$path" 2>/dev/null || echo 0) ))
+      # The NEWEST write under the dir's build outputs, not the dir's own mtime: cargo writes into
+      # release/ and debug/ and the top dir's mtime does not move (21/11: a gate's own target, rebuilt
+      # minutes before, was swept as "written 600+ s ago").
+      local stamp newest=0 candidate
+      for candidate in "$path" "$path/release" "$path/debug" "$path/release/wa" "$path/release/deps" "$path/debug/deps" "$path/release/.fingerprint"; do
+        stamp=$(stat -c %Y "$candidate" 2>/dev/null || stat -f %m "$candidate" 2>/dev/null || echo 0)
+        [ "$stamp" -gt "$newest" ] && newest=$stamp
+      done
+      age=$(( $(date +%s) - newest ))
       if [ "$age" -lt "${WASM_AGENT_BUILD_GRACE:-600}" ]; then
         printf 'onebuild: leaving %s alone: written to %ss ago, so a build may be using it (swept after %ss, WASM_AGENT_BUILD_GRACE)\n' \
           "$path" "$age" "${WASM_AGENT_BUILD_GRACE:-600}" >&2
@@ -235,6 +243,9 @@ wa_build_known_trees() {
 # Prints the bytes reclaimed on stdout.
 wa_build_sweep() { # [--quiet]
   local quiet=${1:-} tree legacy total=0 count=0 bytes root home common
+  # A TEST is not this node's housekeeping (21/11): the sweep walks the REAL repo's worktrees whatever
+  # HOME says, so a scratch-home build test deleted the rust/target of the tree running the full gate.
+  [ "${WA_BUILD_SWEEP:-1}" = 0 ] && { printf '0'; return 0; }
   root=$(wa_build_root)
   # 1. islands an older layout wrote: children of <root>/build other than `target`.
   for legacy in "$root"/*; do

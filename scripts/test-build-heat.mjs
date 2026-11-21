@@ -38,7 +38,7 @@ function check(name, condition, detail = '') {
   passed += 1;
   console.log('ok - ' + name);
 }
-const ENV = {...process.env, WASM_AGENT_HOME: HOME};
+const ENV = {...process.env, WASM_AGENT_HOME: HOME, WA_BUILD_SWEEP: '0'}; // never sweep the real repo's worktrees (21/11)
 delete ENV.CARGO_BUILD_JOBS;
 delete ENV.WA_BUILD_JOBS_DEFAULT;
 delete ENV.WA_BUILD_HOST_LOCK_HELD;
