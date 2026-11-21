@@ -196,6 +196,13 @@ run_proof_fixture waveOwnerMutations 3 node scripts/test-wave-owner-mutations.mj
 run_proof_fixture waveCorners 24 node scripts/test-wave-activity-corners.mjs
 run_proof_fixture waveDerived 55 node scripts/test-wave-derived-state.mjs
 gate_run node scripts/test-wave-withdrawal.mjs
+
+# The node's build heat and build seeding (change/gate-speed, 21/11). Both are about the gate itself, so
+# they belong in the gate: one heavy build at a time with a bounded job count, and a NEW target dir
+# seeded from the newest sibling - never a seed that makes a tree run another tree's code. Each runs in
+# its own scratch home (.mjs fixtures) and the seeding row needs a filesystem where reflink works.
+gate_run node scripts/test-build-heat.mjs
+gate_run node scripts/test-build-seed.mjs
 run_proof_fixture waveActivityFix 62 node scripts/test-wave-activity-fix.mjs
 # END wave-owner safety proofs
 
