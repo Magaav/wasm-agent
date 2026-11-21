@@ -571,3 +571,36 @@ fn one_quarantine_copy_per_store_not_one_per_detection() {
     quarantine_database(&entry, "20261111T040000Z").unwrap();
     assert!(dir.join("jobs.db.malformed-20261101T000000Z").exists(), "another store's quarantine is left alone");
 }
+
+// ---- a boot watch is BOUNDED --------------------------------------------------------------------
+
+#[test]
+fn a_watch_count_stops_at_the_budget_instead_of_walking_the_tree() {
+    // The measured defect (21/11, openclaw): a recursive OS watch is one inotify watch PER DIRECTORY and
+    // notify takes them synchronously, so registering the node cwd walked 713k directories before the
+    // listener existed and held /health for 60-150 s. What must hold after the fix: the count is taken
+    // with a budget, and a tree past it is refused rather than counted to the end.
+    let fixture = Fixture::new();
+    let tree = fixture.0.join("bounded");
+    for a in 0..6 { for b in 0..6 { std::fs::create_dir_all(tree.join(format!("a{a}/b{b}"))).unwrap(); } }
+    // 36 leaves + 6 middle directories + the root = 43 directories.
+    assert_eq!(watchable_directories(&tree, 1_000), Some(43), "a small tree is counted exactly");
+    // Over the budget the answer is None, and it is None EARLY: the scan returns as soon as the budget
+    // is passed rather than finishing the tree first (that is what keeps boot bounded).
+    assert_eq!(watchable_directories(&tree, 5), None, "past the budget the root is not watched");
+    assert_eq!(watchable_directories(&tree, 43), Some(43), "exactly at the budget still qualifies");
+    assert_eq!(watchable_directories(&tree, 42), None, "one directory past it does not");
+    // A directory that cannot be read is not a reason to refuse the root: the watcher would simply not
+    // see it, which is the same hint-quality as any unreadable subtree.
+    let missing = fixture.0.join("does-not-exist");
+    assert_eq!(watchable_directories(&missing, 1_000), Some(1), "an unreadable root counts as itself");
+}
+
+#[test]
+fn an_operator_budget_of_zero_means_no_os_watch() {
+    // WA_GRAPH_WATCH_DIRS=0 is the documented off switch; it must not be read as "unlimited".
+    let fixture = Fixture::new();
+    let tree = fixture.0.join("unwatched");
+    std::fs::create_dir_all(tree.join("sub")).unwrap();
+    assert_eq!(watchable_directories(&tree, 0), None, "a zero budget watches nothing");
+}
