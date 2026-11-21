@@ -999,6 +999,18 @@ local function run_script(memory,args,role,ctx,catalog,current_catalog,dispatch,
   -- the way to pending (a wait_s:0 call the script resumes at once is foreground work throughout).
   local lowered=pending_calls.background(scope,dispatch,popts)
   if lowered then result.pending_backgrounded=lowered end
+  -- The counters the next mission is planned from (docs/CODEMODE.md, "The three counters"). One
+  -- increment per SCRIPT, never per call: "this script was told not yet" is the unit both of them
+  -- count, and a script that polled a handle once is not a script that mishandled it.
+  pcall(function()
+    local counters=dofile('lua/core/counters.lua')
+    if popts.cut_at_cap then counters.bump('script_cut_at_cap') end
+    local problem=tostring(result.error or '')
+    if problem:find('has not resolved yet',1,true)~=nil
+      or problem:find(pending_calls.WAIT_BOUND_CODE,1,true)~=nil then
+      counters.bump('handle_mishandled')
+    end
+  end)
   -- What the session holds after this script (its writes committed, or none if it failed).
   local vars=session_vars(memory,scope)
   if #vars>0 then result.vars=vars end

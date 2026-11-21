@@ -1004,6 +1004,9 @@ function M.invoke(dispatch, opts, name, params, raw, wait_s)
   record.progress = executor_progress(executor, dispatch, opts, record, state)
   record.reason = reason
   M.save(scope, index)
+  -- The script is being told "not yet": that is the fact the script_cut_at_cap counter counts, once
+  -- per script (opts is this script's own table), never once per call (lua/core/counters.lua).
+  opts.cut_at_cap = true
   return handle(record, math.floor(budget / 1000), state)
 end
 
@@ -1150,6 +1153,7 @@ function M.wait(dispatch, opts, asked, wait_opts)
           record.progress = executor_progress(executor, dispatch, opts, record, state)
           record.reason = reason
           M.save(scope, index)
+          opts.cut_at_cap = true
           entry = { op = id, tool = record.tool, state = "pending",
             waited_s = math.floor((budget - remaining()) / 1000), progress = record.progress }
           if reason and reason ~= "still_running" then entry.reason = reason end

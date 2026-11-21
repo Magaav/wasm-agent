@@ -995,7 +995,14 @@ function M.run(argv)
       for key, value in pairs(stats) do
         if type(value) ~= "table" then rows[#rows + 1] = string.format("%-10s %s", tostring(key), tostring(value)) end
       end
-      ui.show(balloon.paged("Database", rows, { per = 14, nowrap = true }))
+      -- The three counters the next mission is planned from (21/11): how often a model step was
+      -- caused only by a settled handle, how often a script was cut at its cap, and how often a
+      -- pending answer was used as if it had settled.
+      local counted = dofile("lua/core/counters.lua").read()
+      for _, name in ipairs({ "wake_only_round", "script_cut_at_cap", "handle_mishandled" }) do
+        rows[#rows + 1] = string.format("%-16s %d", name, tonumber(counted[name]) or 0)
+      end
+      ui.show(balloon.paged("Database", rows, { per = 18, nowrap = true }))
     elseif line == "/console" then
       -- The console is the raw view of the same run: every event as it arrived, and a tool's
       -- output whole. It is a toggle rather than a flag on the launcher because the question

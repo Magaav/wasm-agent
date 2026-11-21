@@ -1123,6 +1123,11 @@ function M.run_wake(args)
       WHERE id=? AND status='dispatching']], { row.due_at, now, row.id })
     return { paused = true, wake_id = row.id }
   end
+  -- A wake whose only input is a settled handle IS the wake-only round (21/11): counted here, where
+  -- the step is about to run, so the number is turns and not sweeps (lua/core/counters.lua).
+  if tostring(row.id or ""):match("^handle:") then
+    pcall(function() dofile("lua/core/counters.lua").bump("wake_only_round") end)
+  end
   local content, trace = M.turn_content(row, { now = now })
   -- `SelfWake`: a due wake is claimed and about to spend a turn. The operator may veto it (a quiet
   -- hours rule, a budget that is spent) and say when to try again; a veto without a reschedule is a
