@@ -330,9 +330,9 @@ for attempt in 1 2 3; do
   took=$(( ($(date +%s%N) - started) / 1000000 ))
   [ "$took" -lt "$best" ] && best=$took
 done
-[ "$best" -lt 800 ] || fail "a 150 ms row took ${best} ms through the watchdog (best of three): the poll is rounding rows up to whole seconds again"
+[ "$best" -lt 800 ] || fail "assertion failed: a 150 ms row took ${best} ms through the watchdog (best of three): the poll is rounding rows up to whole seconds again"
 # And the deadline is still seconds, never tenths of them: a 2 s deadline does not fire on a 1.2 s row.
-wa_fast_watchdog 2 "row inside its deadline" -- sleep 1.2 || fail "a 1.2 s row was killed by a 2 s deadline (exit $?): the deadline is being counted in the wrong unit"
+wa_fast_watchdog 2 "row inside its deadline" -- sleep 1.2 || fail "assertion failed: a 1.2 s row was ended by a 2 s deadline (exit $?): the deadline is being counted in the wrong unit"
 
 printf 'test-fast-watchdog: ok (hung row named and its group killed, exits passed through, refusals named, a command own 124 is NOT a hang, and a row really runs through the runner exec path)\n'
 exit 0
