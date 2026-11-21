@@ -56,6 +56,10 @@ PY=${WA_PYTHON:-python3}
 # look, and it reported "the landing never started" about a landing that had run.
 LAND_ROOT=${WA_PREFLIGHT_LAND_ROOT:-}
 LOCK=${WA_SUITE_LOCK:-$MISSIONS/.suite.lock}
+# MAIN'S OWN VERDICT, recorded by scripts/main-health.sh after every landing: a red row that is red there too
+# is a fault this round did not make (21/11: land245 went red twice for lua/core/refusal_codes.lua being stale
+# on main, 855 s, then sat stopped for 40+ minutes while ten finished missions waited).
+HEALTH=${WA_MAIN_HEALTH:-$MISSIONS/main-health.json}
 RUN=preflight-$(date -u +%Y%m%dT%H%M%SZ)-$$
 LOG=$M/preflight.log
 REPORT=$M/preflight.json
@@ -99,10 +103,10 @@ rc=$?
 elapsed=$(( $(date +%s) - started ))
 echo "--- preflight $RUN ended rc=$rc in ${elapsed}s" >> "$LOG"
 
-"$PY" - "$LAND_ROOT/$RUN/journal.json" "$REPORT" "$rc" "$elapsed" "$RUN" "$BRANCH" "$LOG" <<'PY'
+"$PY" - "$LAND_ROOT/$RUN/journal.json" "$REPORT" "$rc" "$elapsed" "$RUN" "$BRANCH" "$LOG" "$HEALTH" <<'PY'
 import json, os, sys
 
-journal_path, report_path, rc, elapsed, run, branch, log = sys.argv[1:8]
+journal_path, report_path, rc, elapsed, run, branch, log, health_path = sys.argv[1:9]
 rc, elapsed = int(rc), int(elapsed)
 report = {"schema": 1, "run": run, "branch": branch, "ok": False,
           "main_sha": None, "tree_commit": None, "tree_sha": None,
@@ -159,10 +163,51 @@ else:
                         first.append(line)
                 failed.append({"row": name, "first_lines": first[:3]})
         report["failed"] = failed
+
+        # MAIN RED IS NOT THIS MISSION'S RED. A row that is red on main's own tip (scripts/main-health.sh,
+        # written after every landing) is a fault nobody in this round made: main was red from bfad4f8f for
+        # six landings on 21/11 and the first mission whose rows included the stale-file row paid twice for
+        # it (855 s) and then sat stopped. The comparison needs the SAME COMMIT - a health file about another
+        # sha proves nothing about this one, so it is named as stale and does NOT excuse a row (unknown is
+        # not yes). While any row is MAIN RED the landing stays stopped: main has to be fixed first, by one
+        # small landing whose only purpose is that fix.
+        health, health_error = None, None
+        try:
+            with open(health_path, encoding="utf-8") as handle:
+                health = json.load(handle)
+        except OSError:
+            health_error = "no main-health file at %s (scripts/main-health.sh writes it after a landing)" % health_path
+        except ValueError as problem:
+            health_error = "the main-health file at %s cannot be read (%s)" % (health_path, problem)
+        health_sha = str((health or {}).get("sha") or "")
+        same_commit = bool(health_sha) and bool(report.get("main_sha")) and health_sha == str(report["main_sha"])
+        red_on_main = set()
+        if health is not None and health.get("ok") is not True:
+            for entry in health.get("failed") or []:
+                if isinstance(entry, dict) and entry.get("row"):
+                    red_on_main.add(str(entry["row"]))
+        main_red, own = [], []
+        for entry in failed:
+            if same_commit and str(entry["row"]) in red_on_main:
+                main_red.append(entry)
+            else:
+                own.append(entry)
+        report["main_red"] = main_red
+        report["failed"] = own
+        report["main_health"] = {"path": health_path, "sha": health_sha or None,
+                                 "ok": (health or {}).get("ok"), "same_commit": same_commit,
+                                 "red_rows": sorted(red_on_main), "why": health_error}
         state = str(gate.get("state") or "missing")
         # The ROWS are the most useful sentence there is, so they win over the step's own state: a reader
         # who gets "the gate step is failed" has to open a file to learn what failed.
-        if failed:
+        if main_red and not own:
+            report["why"] = "MAIN RED: %d row(s) are red on main %s itself, not on this branch (%s)" % (
+                len(main_red), sha(report.get("main_sha")), ", ".join(entry["row"] for entry in main_red))
+        elif main_red:
+            report["why"] = "%d row(s) failed here and %d are MAIN RED on %s (%s)" % (
+                len(own), len(main_red), sha(report.get("main_sha")),
+                ", ".join(entry["row"] for entry in main_red))
+        elif failed:
             report["why"] = "%d row(s) failed" % len(failed)
         elif state != "done":
             report["why"] = "the gate step is %s, not done (%s)" % (state, str(gate.get("detail") or gate.get("error") or ""))
@@ -182,6 +227,22 @@ if report["ok"]:
     print("  preflight.json: %s" % report_path)
     print("  gate evidence: %s" % (report["gate_evidence"] or "-"))
     sys.exit(0)
+if report.get("main_red"):
+    print("preflight MAIN RED: %d row(s) are red on main %s itself, not on %s:" % (
+        len(report["main_red"]), sha(report.get("main_sha")), branch))
+    for entry in report["main_red"]:
+        first = entry["first_lines"]
+        print("  - %s: %s" % (entry["row"], first[0] if first else "(no first line was recorded)"))
+    print("  the mission is NOT blamed, and no landing runs until main is fixed:")
+    print("  one small landing whose only purpose is that fix, then this preflight again")
+    if report["failed"]:
+        print("  and %d row(s) failed on this branch too:" % len(report["failed"]))
+        for entry in report["failed"]:
+            first = entry["first_lines"]
+            print("  - %s: %s" % (entry["row"], first[0] if first else "(no first line was recorded)"))
+    print("  preflight.json: %s" % report_path)
+    print("  main-health: %s" % (report["main_health"].get("path") or "-"))
+    sys.exit(1)
 if report["failed"]:
     print("preflight RED: %d row(s) failed for %s on main %s" % (
         len(report["failed"]), branch, sha(report["main_sha"])))
