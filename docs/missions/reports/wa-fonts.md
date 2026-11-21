@@ -107,6 +107,13 @@ then: three faces in `~/.local/share/fonts`; `foot.ini` carrying
 record written; `icons.resolve()` answering `wa (default (wa setup fonts installed wa Icons))`; and
 `wa setup fonts --undo` restoring `foot.ini`, removing the three files and the record.
 
+## A pre-existing failure, named
+
+`scripts/test-linux-release-fetch.sh` reports **14 passed, 13 failed** on this branch AND on the base
+commit `13247bdb` in a separate clean worktree - the same counts, so nothing here caused it. Its own line
+explains the refusal: `candidate_names_no_commit: wa --build-info answered nothing on this bundle's binary
+(a build older than the flag)`. It is not in the rows this mission touched and is left alone.
+
 ## What is NOT verified
 
 - **The installers were not executed.** `scripts/install.sh` passes `bash -n`; `scripts/install.ps1`
