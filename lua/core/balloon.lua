@@ -38,6 +38,9 @@ local json = dofile("lua/vendor/json.lua")
 -- core owns, not in a table here (docs/HOTRELOAD.md). A command re-entered after this file was reloaded
 -- opens where the reader left it, and `/mcp`'s published pages survive a swap mid-run.
 local reload = dofile("lua/core/reload.lua")
+-- The client's line limit (`rust/wa-cli-views/src/spec.rs`), so a page that composes a long line cannot
+-- cost the reader the whole view: `publish` runs every page's lines through it.
+local view_lines = dofile("lua/core/view_lines.lua")
 
 local M = {}
 
@@ -495,7 +498,7 @@ function M.publish(name, pages, captured_at)
       -- A page link is 1-based here (`page = 2`, the root is 1) and 0-based in the published spec
       -- (`view`): the two renderers read the same links, spelled the way each already reads them.
       options[#options + 1] = {
-        label = tostring(option.label or ""),
+        label = M.fit(tostring(option.label or ""), 200),
         hint = tostring(option.hint or (not option.page and not option.back and not option.pop and not option.run
           and "a change: run this between turns" or "")),
         -- A link is 1-based in a page (`page`, or the older `view` spelling nodes_cli publishes) and
@@ -507,7 +510,12 @@ function M.publish(name, pages, captured_at)
       -- its hint says the change needs a turn, and Back still works.
     end
     views[#views + 1] = {
-      title = page.title, lines = page.lines, options = options, selected = page.selected,
+      -- The lines wrapped and the two fields the client refuses for their LENGTH fitted, all here rather
+      -- than in each builder: one long line (143 tool names, one node's page) used to refuse the whole
+      -- view, and the reader lost a panel that was correct except for its last row (Victor, 21/11).
+      -- `view_lines` counts characters - what the client counts - and never splits one.
+      title = M.fit(page.title, 120), lines = view_lines.wrap(page.lines),
+      options = options, selected = page.selected,
     }
   end
   -- `captured_at` is whole seconds: `host.now()` is a float in this build, and the client's spec is an

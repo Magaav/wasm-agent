@@ -2035,6 +2035,14 @@ WA_SCRIPT=scripts/test-build-identity.lua "$BIN" --db "$DB.identity" | grep "bui
 # left the welcome rule and the code-mode box at the old size, and wider than a shrunk window (Victor,
 # 18/11, "the components do not follow a terminal resize").
 WA_SCRIPT=scripts/test-cli-resize.lua "$BIN" --db "$DB.resize" | grep "resize ok"
+# A local view fits the CLIENT's limits: rust/wa-cli-views/src/spec.rs refuses a whole spec whose line
+# passes 400 characters, and /nodes joined all 143 of a work node's tools on one "Tools: ..." line - so
+# every run answered "! the run view failed: ... line_too_long views[2].lines[3]: 3030 characters" and
+# the node page never showed (Victor, 21/11). The reported node publishes through the REAL host channel
+# here, and every builder that can produce a long line (/nodes, /mcp, /help, /keybindings, /login) is
+# checked against the client's own caps, so a builder over them is this failure rather than a blank
+# panel at run time.
+WA_SCRIPT=scripts/test-local-views.lua "$BIN" --db "$DB.local-views" | grep "local views ok"
 # The view draws NOTHING about other sessions - a progress module that answers elsewhere() must not
 # reach the row (the aggregate is change/session-isolation's; round 3 removed this tree's reader) - and
 # the welcome line reason when there is no model, the sentence that replaced "local mode (no model
