@@ -2,8 +2,8 @@
 
 Base: origin/main 93168d96 (land260). Branch `change/deploy-luafast`. **Committed locally, not pushed.**
 
-Code commit: `4fb06aa5` (scripts/deploy.sh, scripts/test-deploy-luafast-record.sh, scripts/test.sh). This
-report is a second commit on the same branch, with the one docs/COMPONENTS.md sentence cited below.
+Commits: `4fb06aa5` (scripts/deploy.sh, scripts/test-deploy-luafast-record.sh, scripts/test.sh), `723dc560`
+(this report and the docs/COMPONENTS.md sentence), `12b04afe` (round 2: the `install-record` row, below).
 
 ## The failure, re-measured before any code was written
 
@@ -96,8 +96,11 @@ part of it, and I did not deploy this machine or restart anything.
 
 ```
 discriminates\tscripts/test-deploy-luafast-record.sh\t  FAIL 6 the record is written from the binary's answer: got '97251587b3a3...' want '93168d96...'
-test-discriminates: 1 discriminating, 0 blocking, 0 not judged by this machine (0 skipped, 0 timed out, 0 unrevertable, 0 environment)
+test-discriminates: 2 discriminating, 0 blocking, 0 not judged by this machine (0 skipped, 0 timed out, 0 unrevertable, 0 environment)
 ```
+
+Two rows, after round 2: the new file, and `scripts/test-install-record.sh` (amended there - see "Round 2"
+below - and it fails on the base code at the fast-path rows it now carries).
 
 Run by hand on a base worktree (`git worktree add /tmp/base-luafast 93168d96`, the test copied in), the base
 fails 23 of the 37 checks, first with the reported refusal:
@@ -112,6 +115,54 @@ FAIL 1 the kept binary's commit is the binary's own answer: got '' want '9725158
 `git log -S 'RECORD_BINARY_COMMIT' -- scripts/deploy.sh` names 4fb06aa5 as the commit that implements the
 resolution; `git show 4fb06aa5 --stat` = scripts/deploy.sh +93/-10, scripts/test-deploy-luafast-record.sh
 (new), scripts/test.sh +8.
+
+## Round 2 - the preflight gate: `install-record`
+
+The preflight of 21/11 20:26Z (run `preflight-20261121T202620Z-2599541`, main `a8c4cca8`, tree `ced11728`)
+stopped on one row:
+
+```
+FAIL install-record (exit 1): ... test-install-record: 91 checks, 1 failed
+```
+
+Reproduced here with the same binary the gate uses (`WA_BIN=<build>/release/wa bash
+scripts/test-install-record.sh`), the failing check is `scripts/test-install-record.sh:224`:
+
+```
+FAIL deploy.sh still records the caller's commit
+```
+
+which is `if grep -qF 'record_commit="$COMMIT"' scripts/deploy.sh; then bad ...`. Commit `4fb06aa5` writes
+exactly that line, on purpose: a Lua fast path installs no binary, so the install IS the Lua tree the deploy
+staged and verified, and `commit=` has to name it - `scripts/verify-deployed.sh:111-121` compares `commit=`
+with the commit it was asked to verify, and `lua/core/update.lua:192` compares it with `origin/main`. The
+bytes are named separately in `binary_commit=`, from the binary's own `--build-info`.
+
+So the guard and the fix disagreed, and the rule behind the guard is not one to drop: **the caller's belief
+must never become the record's identity** (18/11). What was asserted was the SHAPE of the code, not the
+rule, and the shape stopped being able to tell the two apart. I did not delete it, did not rename the
+variable to slip past the grep, and did not remove the row; the assertion now runs against the record the
+real step writes, for both kinds of install, and it is more than the grep said:
+
+1. a build whose bytes report the commit this deploy holds -> `commit=` is the BINARY's answer (`wa_build_field`);
+2. a build whose bytes report ANOTHER commit -> the step is REFUSED (`build_commit_mismatch`) and writes no
+   record at all, so the caller's commit cannot land in `installed.txt`;
+3. a Lua fast-path record -> `commit=` is the tree, `binary_commit=` is the binary's own answer, the two are
+   distinguishable, and `lua_fast_path=1` says which kind of record it is.
+
+The step is `record_installed()` extracted from `scripts/deploy.sh` (same awk as `scripts/test-deploy-record.sh`),
+run over the real `install-record.sh`, `node-binaries.sh` and `commit-id.sh` with the file's existing stub
+binary. `91 checks, 1 failed` -> `100 checks, 0 failed`: nine checks added, none removed. On the base code the
+amended file fails at row 3 (the base writes the binary's commit in `commit=`), which is what
+`test-discriminates` now reports as the second discriminating row.
+
+Verification of the row as the gate runs it, on a tree that merges this branch onto the CURRENT main
+(`a8c4cca8`, merge clean - `scripts/test.sh` auto-merges):
+
+```
+test-install-record: 100 checks, 0 failed
+test-deploy-luafast-record: 37 checks, 0 failed
+```
 
 ## Rows run here, and rows that fail for reasons older than this branch
 
