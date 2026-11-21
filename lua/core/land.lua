@@ -206,6 +206,26 @@ function M.incoming()
   return explicit ~= "" and explicit or "oc-in"
 end
 
+-- THE REFNAME A REMOTE'S TRACKING BRANCHES LIVE UNDER, computed once. "--incoming" is usually a remote NAME
+-- ("oc-in"), and a name is a legal refname component. It can also be a LOCAL PATH - a bare repository on this
+-- machine, which is how a landing is tested with no network and no other node - and a path is NOT: a fetch
+-- with a path inside the refspec is refused by git, the fetch fails, and every branch then reads as "neither
+-- on the incoming nor a local branch" (measured 21/11, the first preflight replay: the round could not
+-- collect a branch that WAS in the drop box). A path therefore contributes its basename, and every named
+-- remote reads exactly as it did.
+local function tracking(incoming)
+  local spec = tostring(incoming or "")
+  -- A backslash is a path separator too (a Windows path), so both are tested literally.
+  local sep = "\\"
+  if spec:find("/", 1, true) or spec:find(sep, 1, true) then
+    spec = spec:gsub("[/" .. sep .. "]+$", "")
+    local leaf = spec:match("([^/" .. sep .. "]+)$") or spec
+    spec = leaf:gsub("%.git$", "")
+  end
+  return (spec:gsub("[^%w%._%-]", "-"))
+end
+M.tracking = function(incoming) return tracking(incoming) end
+
 function M.origin()
   local explicit = M.origin_remote or trim(host.getenv and host.getenv("WA_LAND_ORIGIN") or "")
   return explicit ~= "" and explicit or "origin"
@@ -685,15 +705,25 @@ impl.collect = function(run, options)
       next = "run `wa land` on a machine with a checkout, or set WA_LAND_REPO=<dir>" }
   end
   local incoming = M.incoming()
-  local fetched = git(run, repo, "fetch --quiet --prune " .. quote(incoming) .. " " .. quote("+refs/heads/*:refs/remotes/" .. incoming .. "/*"))
+  local tracked = tracking(incoming)
+  local fetched = git(run, repo, "fetch --quiet --prune " .. quote(incoming) .. " " .. quote("+refs/heads/*:refs/remotes/" .. tracked .. "/*"))
   evidence(command_line("fetch", "git fetch --prune " .. incoming))
   evidence((fetched.stdout or "") .. (fetched.stderr or ""))
+  -- A FETCH THAT FAILED IS NOT AN EMPTY DROP BOX. It used to be ignored, so an unreachable incoming (or one
+  -- whose refspec git refused) answered "the branch is neither on <incoming> nor a local branch" - a
+  -- statement about the branch, when the truth was a statement about the fetch.
+  if (fetched.code or 1) ~= 0 then
+    return false, { error = "fetch_failed",
+      observed = "git fetch " .. incoming .. " exited " .. tostring(fetched.code) .. ": " ..
+        first_line(tostring(fetched.stderr ~= "" and fetched.stderr or fetched.stdout)),
+      next = "check that " .. incoming .. " is reachable and is a git repository, then wa land --resume" }
+  end
   -- The base is the FURTHEST MAIN both sides agree on. Two mains exist and they can lag each other: the
   -- incoming repository's (every node can read it) and the source of truth's (only a credentialed node can
   -- fast-forward it). A landing stops after main moved but before the release published, so the next one
   -- must start from whichever main already contains the other - and a pair that diverged is a REFUSAL,
   -- because picking either would silently drop one side's work.
-  local incoming_main = rev(repo, "refs/remotes/" .. incoming .. "/main")
+  local incoming_main = rev(repo, "refs/remotes/" .. tracked .. "/main")
   local origin_main = rev(repo, "origin/main")
   local base, base_ref = nil, nil
   if incoming_main and origin_main then
@@ -749,7 +779,7 @@ impl.collect = function(run, options)
   local branches = {}
   for _, want in ipairs(wanted) do
     local ref = nil
-    for _, candidate in ipairs({ "refs/remotes/" .. incoming .. "/" .. want.name, "refs/heads/" .. want.name }) do
+    for _, candidate in ipairs({ "refs/remotes/" .. tracked .. "/" .. want.name, "refs/heads/" .. want.name }) do
       if rev(repo, candidate) then
         ref = candidate
         break
@@ -774,6 +804,7 @@ impl.collect = function(run, options)
   run.journal.base_ref = base_ref
   run.journal.repo = repo
   run.journal.incoming = incoming
+  run.journal.incoming_tracking = tracked
   run.journal.origin = M.origin()
   run.journal.branches = branches
   return true, { detail = string.format("base %s, %d branch(es): %s", base:sub(1, 12), #branches,
@@ -1185,14 +1216,15 @@ function M.plan_preview(options, run)
   local repo = M.repo()
   local incoming = M.incoming()
   local notes = {}
-  local base = rev(repo, "origin/main") or rev(repo, "refs/remotes/" .. incoming .. "/main")
+  local tracked = tracking(incoming)
+  local base = rev(repo, "origin/main") or rev(repo, "refs/remotes/" .. tracked .. "/main")
     or rev(repo, incoming .. "/main")
   if not base then
     return nil, { "no main in " .. tostring(repo) .. ": the plan needs a base, and a dry run does not fetch (run without --dry-run)" }
   end
   local branches = {}
   for _, name in ipairs(options.branches or {}) do
-    local tip = rev(repo, "refs/heads/" .. name) or rev(repo, "refs/remotes/" .. incoming .. "/" .. name)
+    local tip = rev(repo, "refs/heads/" .. name) or rev(repo, "refs/remotes/" .. tracked .. "/" .. name)
     if tip then
       branches[#branches + 1] = { name = name, sha = tip }
     else

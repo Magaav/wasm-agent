@@ -2061,6 +2061,32 @@ exit 1
   eq(step_of("case37", "gate").state, "failed", "the verdict is failed twice, as before")
   eq(#(row37 and row37.failed or {}), 1, "the journal still names the check that failed")
   eq(row37.failed[1] and row37.failed[1].row, "fast", "by name")
+  -- ------------------------------------------ case 38: a LOCAL PATH as the incoming repository
+  --
+  -- A round tested with no network and no other node names a bare repository on this machine as --incoming.
+  -- A path is not a legal refname component, so the fetch refspec was refused by git, the fetch failed in
+  -- SILENCE, and the branch then read as "neither on the incoming nor a local branch" (measured 21/11: the
+  -- first preflight replay could not collect a branch that was sitting in the drop box). The tracking
+  -- namespace is derived from the path's own name now, and a failed fetch is a refusal named after the
+  -- fetch instead of a statement about the branch.
+  setup_fixture()
+  land.incoming_remote = incoming
+  eq(land.run({ run = "case38", ring = SOLO_RING, branches = { "change/one" }, until_step = "gate",
+    checks = until_checks }), 0, "a round whose incoming is a local path collects and gates")
+  eq(step_of("case38", "collect") and step_of("case38", "collect").state, "done", "collect read the drop box")
+  eq((journal_of("case38") or {}).incoming_tracking, "incoming",
+    "the tracking namespace comes from the path's own name")
+  contains(must("git -C " .. repo .. " for-each-ref " .. "'--format=%(refname)'" .. " refs/remotes/incoming/"),
+    "refs/remotes/incoming/change/one", "the fetched branches are readable under that namespace")
+  land.incoming_remote = incoming .. "-missing"
+  eq(land.run({ run = "case39", ring = SOLO_RING, branches = { "change/one" }, until_step = "gate",
+    checks = until_checks }), 1, "an incoming that cannot be fetched stops the round")
+  eq(step_of("case39", "collect") and step_of("case39", "collect").error, "fetch_failed",
+    "and the refusal is named after the fetch, not after the branch")
+  contains(step_of("case39", "collect").observed or "", "-missing",
+    "the refusal names the incoming it could not read")
+  land.incoming_remote = "oc-in"
+
 end)()
 
 stop_vault()

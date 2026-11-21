@@ -49,7 +49,12 @@ fi
 BRANCH=${WA_PREFLIGHT_BRANCH:-change/$NAME}
 WA=${WA_BIN:-wa}
 PY=${WA_PYTHON:-python3}
-LAND_ROOT=${WA_PREFLIGHT_LAND_ROOT:-${WASM_AGENT_HOME:-$HOME/.wasm-agent}/land}
+# THE LAND ROOT IS THE NODE OWN ANSWER, not a path this script guesses: "wa paths" prints the config
+# directory the binary actually uses (it is <WASM_AGENT_HOME>/.wasm-agent when a scratch home is set, NOT
+# <WASM_AGENT_HOME>), and the land root is <config>/land. Guessed, it was right for the default home and
+# wrong for every other one - measured 21/11: the first replay wrote its journal where this script did not
+# look, and it reported "the landing never started" about a landing that had run.
+LAND_ROOT=${WA_PREFLIGHT_LAND_ROOT:-}
 LOCK=${WA_SUITE_LOCK:-$MISSIONS/.suite.lock}
 RUN=preflight-$(date -u +%Y%m%dT%H%M%SZ)-$$
 LOG=$M/preflight.log
@@ -61,6 +66,14 @@ REPORT=$M/preflight.json
 command -v flock >/dev/null 2>&1 || { echo "preflight: refused(flock_missing): flock is not on PATH, so the suite lock cannot be taken"; exit 2; }
 command -v "$PY" >/dev/null 2>&1 || { echo "preflight: refused(python_missing): $PY is not on PATH, so no preflight.json can be written"; exit 2; }
 command -v "$WA" >/dev/null 2>&1 || { echo "preflight: refused(wa_missing): $WA is not on PATH (set WA_BIN)"; exit 2; }
+if [ -z "$LAND_ROOT" ]; then
+  config=$("$WA" paths 2>/dev/null | awk '$1 == "config" { print $2 }')
+  if [ -z "$config" ]; then
+    echo "preflight: refused(land_root_unknown): wa paths printed no config directory, so no journal can be found"
+    exit 2
+  fi
+  LAND_ROOT=$config/land
+fi
 
 opts=(land --branches "$BRANCH" --until gate --run "$RUN")
 [ -n "${WA_LAND_INCOMING:-}" ] && opts+=(--incoming "$WA_LAND_INCOMING")

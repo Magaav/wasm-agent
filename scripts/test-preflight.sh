@@ -42,6 +42,11 @@ cat > "$WORK/wa" <<'STUB'
 set -uo pipefail
 printf '%s\n' "$*" >> "$WA_STUB_ARGS"
 if flock -n "$WA_STUB_LOCK" true 2>/dev/null; then echo 'LOCK_HELD=no' >> "$WA_STUB_ARGS"; else echo 'LOCK_HELD=yes' >> "$WA_STUB_ARGS"; fi
+# The node answers where its land root is; the preflight derives <config>/land from this instead of
+if [ "$1" = "paths" ]; then
+  printf "home         %s/h\nconfig       %s\ndata         %s/h\n" "$WA_STUB_HOME" "$WA_STUB_CONFIG" "$WA_STUB_HOME"
+  exit 0
+fi
 run=''
 prev=''
 for word in "$@"; do [ "$prev" = '--run' ] && run=$word; prev=$word; done
@@ -146,6 +151,26 @@ ok
 has "$out" 'refused(wa_missing)' 'named'
 out=$("$SCRIPT" 2>&1); code=$?
 [ "$code" = 2 ] || fail "no mission name is a usage answer (got $code): $out"
+ok
+
+# ---- 5. the land root is the NODE'S answer, not a guess: with no WA_PREFLIGHT_LAND_ROOT the script asks
+# "wa paths" for the config directory, and a journal under that config's land/ is found and judged. Measured
+# 21/11: the guess was right for the default home only, and the first replay reported "the landing never
+# started" about a landing that had run.
+unset WA_PREFLIGHT_LAND_ROOT
+export WA_STUB_CONFIG=$WORK/node/.wasm-agent WA_STUB_HOME=$WORK/node
+mkdir -p "$WA_STUB_CONFIG/land"
+WA_STUB_LAND=$WA_STUB_CONFIG/land
+export WA_STUB_LAND
+export WA_STUB_MODE=green
+out=$("$SCRIPT" demo 2>&1); code=$?
+[ "$code" = 0 ] || fail "a preflight that derives its land root exits 0 (got $code): $out"; ok
+has "$out" 'preflight green' 'it found the journal under the config directory the node named'
+python3 - "$WORK/missions/demo/preflight.json" <<'PY' || fail 'the derived-root report is not green'
+import json, sys
+report = json.load(open(sys.argv[1]))
+assert report["ok"] is True, report
+PY
 ok
 
 printf 'preflight ok (%d checks)\n' "$checks"
