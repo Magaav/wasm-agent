@@ -3272,16 +3272,18 @@ fn stream_completion(l: *mut LuaState, method: &str, url: &str, headers: &[(Stri
                     // model write it is the presentation this event exists for. It is emitted beside
                     // the decision, never instead of it - a consumer that only knows decision (the
                     // window's own row) keeps every field it had.
-                    crate::serve::write_event_if_no_stream(&json!({
+                    crate::serve::write_event(&json!({
                         "type": "tool_call_delta",
                         "index": index,
                         "call_id": decision.display_id(index),
                         "name": decision.name,
                         "arguments": fragment,
                     }).to_string());
-                    // And the same fact reaches the RUNNING process, which is where the script is
-                    // decoded and the window is told: a served run has an SSE sink, so without this
-                    // the deltas would exist only on the wire a reconnecting client reads.
+                    // The SAME fact also reaches the running process, and that is not a duplicate:
+                    // the wire carries the provider's raw fragment, while lua/core/agent.lua decodes
+                    // the code argument (an escape or a surrogate pair can straddle two chunks) and
+                    // emits run_code_delta, which is what a window draws. Skipping the wire here to
+                    // avoid the second event was wrong - it deleted a fact from the run's record.
                     unsafe { tool_call_delta_to_lua(l, index, &decision.display_id(index), &decision.name, &fragment); }
                 }
                 if let Some((display_id, previous)) = decision.publish_update(index) {
