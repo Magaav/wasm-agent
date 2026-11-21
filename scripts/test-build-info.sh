@@ -83,6 +83,24 @@ fi
 same "contains its own commit -> 0" "$?" "0"
 "$WABIN" --contains "$(printf '%s' "$(field commit)" | cut -c1-12)" >/dev/null 2>&1
 same "contains an abbreviated own commit -> 0" "$?" "0"
+
+# 3b. A COMMIT THE BINARY CARRIES IS CONTAINED, WHATEVER ITS WINDOW'S COMPLETENESS. MEASURED 21/11: a release
+#     binary of bfad4f8f was asked about 7ddbfa98 - a commit 42 down, INSIDE its own embedded list - and answered
+#     unknown, so every rollout that day needed WA_UPGRADE_FORCE_REASON. The reader had refused to look at the
+#     list because ancestors_complete was false. From an incomplete window only a MISS is unknown, so the
+#     boundary commit of this checkout (the oldest one its window carries) must answer YES.
+if [ "$(field source)" = git ]; then
+  window_oldest="$(git -C "$ROOT" rev-list HEAD 2>/dev/null | tail -1)"
+  if [ -n "$window_oldest" ]; then
+    "$WABIN" --contains "$window_oldest" >/dev/null 2>&1
+    # THE STATUS IS READ BEFORE THE LABEL IS BUILT. A $(...) inside the first argument runs a command, which
+    # resets $? to ITS status - so the version of this line that expanded `printf` in the label compared 0
+    # with 0 and could never fail (measured: it passed against a binary that answers unknown here).
+    window_rc=$?
+    same "the OLDEST commit this build carries answers yes ($(printf '%s' "$window_oldest" | cut -c1-12))" "$window_rc" "0"
+  fi
+fi
+
 # a commit that no history can contain: the verdict a deploy refuses on - when the ancestry the binary carries
 # is complete. From an incomplete one the honest answer is 2, and this asserts whichever the binary says of itself.
 "$WABIN" --contains 0123456789abcdef0123456789abcdef01234567 >/dev/null 2>&1
