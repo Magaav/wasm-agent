@@ -17,9 +17,14 @@
 --
 -- WHERE THE SET COMES FROM, in this order: the session's /icons <set>, WA_ICONS, the config file's
 --   icons = <set>
--- line, then the default - wa when wa setup fonts has installed wa Icons on this machine, else unicode,
--- because a set whose font is absent is a row of tofu boxes.
+-- line, then the default: WHAT THIS TERMINAL IS ACTUALLY DRAWING. wa (glued) only when
+-- lua/core/icon_face.lua measures wa Icons to be the face drawing the icon code points in this process's
+-- terminal; otherwise the spaced nerd set (a face that has the glyphs, drawn wider than its cell) or the
+-- spaced unicode set (glyphs a stock font has). A set whose font is absent is a row of tofu boxes, and a
+-- window older than its config is a row of glued icons over its numbers - neither is a default worth
+-- having.
 local json = dofile("lua/vendor/json.lua")
+local faces = dofile("lua/core/icon_face.lua")
 local M = {}
 
 M.SETS = { "wa", "nerd", "unicode", "ascii" }
@@ -146,20 +151,37 @@ function M.marker_path()
   return paths.data() .. "/setup/" .. M.MARKER
 end
 
+-- The record 'wa setup fonts' wrote, decoded, or nil when this user has none: <data>/setup/fonts.json,
+-- whose "wa Icons" key is what --undo and the icon default both ask about.
+function M.record()
+  local path = M.marker_path()
+  if not path then return nil end
+  local raw = host.read_file(path)
+  if type(raw) ~= "string" or raw == "" then return nil end
+  local ok, record = pcall(json.decode, raw)
+  if not ok or type(record) ~= "table" then return nil end
+  return record
+end
+
 -- Did this user's setup install wa Icons? Reads the record the setup wrote (/setup/fonts.json).
 function M.installed()
-  local path = M.marker_path()
-  if not path then return false end
-  local raw = host.read_file(path)
-  if type(raw) ~= "string" or raw == "" then return false end
-  local ok, record = pcall(json.decode, raw)
-  if not ok or type(record) ~= "table" then return false end
-  return record["wa Icons"] == true
+  local record = M.record()
+  return record ~= nil and record["wa Icons"] == true
 end
 
 -- The set in force, and WHY - the same shape features.resolve answers with, so a reader that asks
 -- "which icons is this node drawing, and who said so" gets one answer.
-function M.resolve(session_choice)
+--
+-- THE DEFAULT IS NOT "THE RECORD SAYS wa Icons WAS INSTALLED". The record names the CONFIG FILES the
+-- setup edited, and a terminal reads its config when it STARTS: a window opened before that edit is still
+-- drawing the face it loaded, so gluing its icons is the overlap Victor photographed on 21/11. This asks
+-- lua/core/icon_face.lua which face draws the icon code points in THIS terminal; that module answers
+-- "cannot tell" when it cannot, and the answer carries its reason, which is what /icons prints.
+--
+-- opts (both optional, both for a test): record = a decoded record to use instead of the one on disk,
+-- face = the opts handed to icon_face.face (an observation, a font query, a reader).
+function M.resolve(session_choice, opts)
+  opts = opts or {}
   local chosen = M.valid(session_choice)
   if chosen then return { set = chosen, source = "/icons " .. chosen } end
   local seen = {}
@@ -171,10 +193,12 @@ function M.resolve(session_choice)
     if from_file then seen[#seen + 1] = { set = from_file, source = "config " .. paths.config_file() } end
   end
   if #seen > 0 then return seen[1] end
-  if M.installed() then
-    return { set = "wa", source = "default (wa setup fonts installed wa Icons)" }
+  local record = opts.record or M.record()
+  if not (record and record["wa Icons"] == true) then
+    return { set = "unicode", source = "default (wa Icons is not installed, so the glyphs a stock font has)" }
   end
-  return { set = "unicode", source = "default (wa Icons is not installed, so the glyphs a stock font has)" }
+  local face = faces.face(opts.face or { record = record })
+  return { set = face.set, source = face.why }
 end
 
 -- The set's own table. An unknown set is a named refusal here rather than a table of nils.
