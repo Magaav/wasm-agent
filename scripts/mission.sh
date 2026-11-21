@@ -37,7 +37,9 @@
 #     real launch never carries the id.
 #   * toolchain on PATH, and only on THIS node - a mission on a node without cargo wrote "items 6-8
 #     are not delivered: needs cargo" (harness-fixes-rust, 18/11);
-#   * codemode - WASM_AGENT_RAW_CODE=codemode is exported by the runner, not remembered by the operator;
+#   * codemode - run(code=...) is the ONE execution path (Victor 21/11), so no launcher exports a
+#     switch and every launcher CLEARS an inherited WASM_AGENT_RAW_CODE: a mission that inherited one
+#     would be refused by name instead of running;
 #   * cd into the mission dir - a session whose cwd is the canonical checkout writes into the tree a
 #     deploy ships from (docs/FACTORY.md: runtime-worktree.txt named the wrong tree);
 #   * its own CARGO_TARGET_DIR - one shared target dir is how two missions overwrite each other's work;
@@ -541,7 +543,7 @@ source_env() { # <mission dir>
 }
 enter() { # source_env + export + cd, in this shell
   source_env "$1"
-  export WASM_AGENT_RAW_CODE=codemode
+  unset WASM_AGENT_RAW_CODE  # native run(code=...) is the one execution path (Victor 21/11); never inherit another
   if [ -d "$TOOLCHAIN/cargo/bin" ]; then
     export RUSTUP_HOME="$TOOLCHAIN/rustup" CARGO_HOME="$TOOLCHAIN/cargo"
     export PATH="$TOOLCHAIN/cargo/bin:$PATH"
@@ -619,7 +621,7 @@ M=$(cd "$(dirname "$0")" && pwd -P) || exit 97
 . "$M/env" || exit 98
 cd "$M" || exit 96                       # the mission dir, never the repo's tree
 [ "$(hostname -s 2>/dev/null || uname -n)" = "$NODE" ] || { echo "mission: launched on the wrong node (want $NODE)" >&2; exit 95; }
-export WASM_AGENT_RAW_CODE=codemode
+unset WASM_AGENT_RAW_CODE  # native run(code=...) is the one execution path (Victor 21/11); never inherit another
 export RUSTUP_HOME="$TOOLCHAIN/rustup" CARGO_HOME="$TOOLCHAIN/cargo"
 export PATH="$TOOLCHAIN/cargo/bin:$PATH"
 export CARGO_TARGET_DIR="$TARGET"        # this mission's own build dir, never a shared one

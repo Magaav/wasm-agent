@@ -6,7 +6,7 @@
 -- variant at the end. A pin covering the whole file left the default surface untested (18/11, item 3).
 local raw_surface='codemode'  -- rel r1 R2: the first section tests the CODEMODE surface; the CodeAct
 -- variant at the end pins 'only' for itself, because an unset switch now resolves from the provider.
-do local real=host.getenv; host.getenv=function(k) if k=='WASM_AGENT_RAW_CODE' then return raw_surface end return real(k) end end
+do local real=host.getenv; host.getenv=function(k) if k=='WASM_AGENT_RAW_CODE' then return nil end return real(k) end end
 local json=dofile('lua/vendor/json.lua')
 local memory=dofile('lua/core/memory.lua');memory.setup()
 local tools=dofile('lua/core/tools.lua')
@@ -116,7 +116,11 @@ host.http_stream=previous_stream
 host.getenv=previous_getenv
 check(run_ok,'the default-surface run completed: '..tostring(run_reply))
 local declared=sent[1] and #((sent[1].tools) or {}) or -1
-check(declared==0,'the run declared no tool at all ('..declared..'), so it ran on the CodeAct surface')
+local only_name=''
+if declared>0 and sent[1].tools and sent[1].tools[1] and sent[1].tools[1]['function'] then
+  only_name=tostring(sent[1].tools[1]['function'].name)
+end
+check(declared==1 and only_name=='run','the run declared the one door ('..declared..': '..only_name..'), so it acts through run(code=...)')
 local run_system=''
 for _,message in ipairs((sent[1] or {}).messages or {}) do if message.role=='system' then run_system=message.content end end
 check(run_system:find('final answer so '..tick..'rg'..tick..' can be installed',1,true)~=nil,'ripgrep shell fallback disclosure rule on the DEFAULT CodeAct surface')

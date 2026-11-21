@@ -77,7 +77,8 @@ deploy's own preflight requires exactly one canonical main checkout.
 One fresh session: `wa chat --once "$(cat prompt.md)"`, detached with `setsid nohup`, running in `$M` (the
 mission dir, never the repo). `run.sh` exports, before it launches anything:
 
-    export WASM_AGENT_RAW_CODE=codemode
+    # never set WASM_AGENT_RAW_CODE: run(code=...) is the one execution path (Victor 21/11) and a
+    # launcher that exports the removed switch makes every run refuse by name
     export RUSTUP_HOME="$TOOLCHAIN/rustup" CARGO_HOME="$TOOLCHAIN/cargo"
     export PATH="$TOOLCHAIN/cargo/bin:$PATH"
     export CARGO_TARGET_DIR="$TARGET"     # ~/wasm-agent/target/m-<name>, this mission's own

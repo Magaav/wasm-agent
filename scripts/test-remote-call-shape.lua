@@ -12,7 +12,7 @@ local overrides={WASM_AGENT_PROVIDER='opencode-go',WASM_AGENT_LLM_API_KEY='fixtu
 -- was written against), and nil - the node's default, CodeAct - for the variant in section 7. A pin
 -- that covered the whole file left the default surface untested (review of 18/11, item 3).
 local raw_surface='codemode'
-host.getenv=function(k) if k=='WASM_AGENT_RAW_CODE' then return raw_surface end if overrides[k]~=nil then return overrides[k] or nil end return real_getenv(k) end
+host.getenv=function(k) if k=='WASM_AGENT_RAW_CODE' then return nil end if overrides[k]~=nil then return overrides[k] or nil end return real_getenv(k) end
 host.http=function() error('network forbidden in this fixture') end
 host.http_stream=host.http
 local memory=dofile('lua/core/memory.lua');memory.setup()
@@ -133,7 +133,12 @@ local full=agent.system_prompt('master',nil,nil,list,'full')
 check(full:find(agent.PREAMBLE_GUIDELINE,1,true),'preamble guideline in the full prompt')
 local progressive=agent.system_prompt('master',nil,nil,tools.envelope('master',ctx),'progressive')
 check(progressive:find(agent.PREAMBLE_GUIDELINE,1,true),'preamble guideline in the progressive prompt')
-check(progressive:find('tool_call(name="remote", arguments={"node":',1,true),'flat remote shape in the progressive tools section')
+-- REMOVED with the codemode surface (Victor 21/11): this row asserted the `tool_call(name="remote", ...)`
+-- EXAMPLE, which lived in the codemode progressive tools section. The one path's progressive section is the
+-- run-tool one, and it does not name `tools.remote` at all - the same gap the native node had at base, now
+-- the only path. Adding that sentence is a prompt change with its own cache miss: docs/missions/reports/
+-- one-run-path.md, "not done here". The four sections above still pin the flat/nested shapes the model
+-- sends; what is gone is only the sentence that showed it.
 check(not agent.system_prompt('master',nil,nil,{},'full'):find(agent.PREAMBLE_GUIDELINE,1,true),'no tools, no preamble rule')
 
 -- The relay's deadline (item E, 19/11): before this, a relayed call that ran out of time answered
@@ -217,7 +222,11 @@ local codeact_ok,codeact_reply=pcall(function() return agent.new(codeact_sid,fun
 host.http_stream=previous_stream
 check(codeact_ok,'the default-surface run completed: '..tostring(codeact_reply))
 local codeact_declared=codeact_sent[1] and #((codeact_sent[1].tools) or {}) or -1
-check(codeact_declared==0,'the run declared no tool at all ('..codeact_declared..'), so it ran on the CodeAct surface')
+local codeact_name=''
+if codeact_declared>0 and codeact_sent[1].tools and codeact_sent[1].tools[1] and codeact_sent[1].tools[1]['function'] then
+  codeact_name=tostring(codeact_sent[1].tools[1]['function'].name)
+end
+check(codeact_declared==1 and codeact_name=='run','the run declared the one door ('..codeact_declared..': '..codeact_name..'), so it acts through run(code=...)')
 local codeact_system=''
 for _,message in ipairs((codeact_sent[1] or {}).messages or {}) do if message.role=='system' then codeact_system=message.content end end
 check(codeact_system:find(agent.PREAMBLE_GUIDELINE,1,true)~=nil,'preamble guideline on the DEFAULT CodeAct surface')

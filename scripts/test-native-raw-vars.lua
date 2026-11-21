@@ -53,10 +53,27 @@ check(result and result.ok and value==3,'a script that declares the name itself 
 local plain=assert(raw_code.native_run({code='return 1'}))
 check(plain.code=='return 1','a run without raw is the code as written')
 
--- 5. A name that cannot be a safe variable is refused by name, before anything runs.
-for _,name in ipairs({'tools','class','JSON','__raw','Promise'}) do
+-- 5. A name that cannot be a safe variable is refused by name, before anything runs. raw is one of
+-- them now: it is bound by native_run to the whole object (row 6), so a block of that name would
+-- collide with the binding.
+for _,name in ipairs({'tools','class','JSON','__raw','Promise','raw'}) do
  local call,why=raw_code.native_run({code='return 1',raw={[name]='x'}})
  check(call==nil and why and why.error=='run_raw_name' and why.name==name,'raw block '..name..' is refused as run_raw_name')
 end
+
+-- 6. raw IS the whole object, under the name the tool description uses: a model wrote raw.patch in a
+-- run script and died with ReferenceError: raw is not defined (20/11 and 21/11). raw.patch and patch
+-- are the same bytes, and raw is __raw.
+local patch='--- a/x\n+++ b/x\n'
+result,value=run({code='return {byName: patch === raw.patch, whole: raw === __raw, len: raw.patch.length, text: raw.patch};',raw={patch=patch}})
+check(result and result.ok,'a script reading raw.<name> runs: '..tostring(result and (result.error or result.message)))
+check(type(value)=='table' and value.byName==true and value.whole==true,
+  'raw.patch and patch are the same bytes, and raw IS __raw: '..json.encode(value or {}))
+check(type(value)=='table' and value.len==#patch and value.text==patch,'raw.<name> carries every byte')
+
+-- 7. A block named raw is refused by name, and says why, instead of colliding with the binding.
+local callraw,whraw=raw_code.native_run({code='return 1',raw={raw='x'}})
+check(callraw==nil and whraw and whraw.error=='run_raw_name' and whraw.name=='raw',
+  'a raw block named raw is refused as run_raw_name: '..json.encode(whraw or {}))
 
 print('native raw vars ok ('..checks..' checks)')

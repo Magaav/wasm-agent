@@ -12,7 +12,7 @@ local paths=dofile('lua/core/paths.lua')
 -- The declared surface (what the provider is shown) is real only where tools are declared: the default
 -- CodeAct mode declares nothing at all, so this row reads the envelope through the codemode opt-out.
 local real_getenv=host.getenv
-host.getenv=function(k) if k=='WASM_AGENT_RAW_CODE' then return 'codemode' end return real_getenv(k) end
+host.getenv=function(k) if k=='WASM_AGENT_RAW_CODE' then return nil end return real_getenv(k) end
 local checks=0
 local function check(v,label) assert(v,label);checks=checks+1 end
 local function offered(ctx)

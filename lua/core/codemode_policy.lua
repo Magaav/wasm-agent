@@ -241,32 +241,19 @@ local GUIDANCE_LINES={
  'When a request asks for a change, record its acceptance checks with `done_criteria` before the first effect.',
 }
 M.guidance=table.concat(GUIDANCE_LINES,'\n')
--- WASM_AGENT_RAW_CODE=first (lua/core/raw_code.lua): codemode is not declared, so no line may tell the
--- model to make a codemode call or a direct tool call; the run-block sentence (operator-reviewed,
--- verbatim) opens the guidance and the rest is unchanged.
-function M.guidance_for(opts)
- local only = type(opts)=='table' and opts.raw_only
- if not (type(opts)=='table' and (opts.raw_first or only)) then return M.guidance end
- local lines={}
- for i,line in ipairs(GUIDANCE_LINES) do lines[i]=line end
- lines[1]=dofile('lua/core/raw_code.lua').FIRST_GUIDANCE..' Put `await` before a call whose result you use; a call you return is awaited for you.'
- lines[2]='Find tools with await searchTools("text"); await searchTools("select:a,b") gives their schemas.'
- return table.concat(lines,'\n')
-end
 -- The peers the last federation refresh saw, one line; cache only, so the prompt never waits on them.
 function M.peer_index()
  local ok,names=pcall(function()return dofile('lua/core/federation.lua').cached_peers()end)
  if not ok or type(names)~='table' or #names==0 then return nil end
  return 'Peers seen online at the last refresh (tools.nodes() is current): '..table.concat(names,', ',1,math.min(#names,12))..(#names>12 and (', +'..(#names-12)..' more') or '')
 end
--- `opts.native`: the node acts through the native run tool (arm B), so its ONE guidance source is
--- raw_code.guidance_for("tool_call") - the run-tool sentence with the batching instruction riding
--- inside it (rel review r2, item 1). The codemode lines above are never sent beside it: they name a
--- call and a direct-call shortcut the node does not offer, and a model reads every door it is shown.
--- The connector and peer indexes stay: they are the facts a script needs, not a second guidance.
+-- ONE guidance source, for every thread (Victor 21/11: one path): raw_code.guidance_for() - the
+-- run-tool sentence with the batching instruction riding inside it. The codemode lines above are never
+-- sent beside it: they name a call and a direct-call shortcut the node does not offer, and a model
+-- reads every door it is shown. The connector and peer indexes stay: they are the facts a script
+-- needs, not a second guidance.
 function M.prompt(catalog,opts)
- local native=type(opts)=='table' and opts.native==true
- local lines={native and dofile('lua/core/raw_code.lua').guidance_for('tool_call') or M.guidance_for(opts)}
+ local lines={dofile('lua/core/raw_code.lua').guidance_for()}
  local index=M.connector_index(catalog);if index then lines[#lines+1]=index end
  local peers=M.peer_index();if peers then lines[#lines+1]=peers end
  return table.concat(lines,'\n')

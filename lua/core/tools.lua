@@ -951,16 +951,10 @@ function M.envelope(role,ctx)
     for _,item in ipairs(list) do if not codemode_policy.connector(item['function'].name) then outer[#outer+1]=item end end
     list=outer
   end
-  -- WASM_AGENT_RAW_CODE=only: the run block is the only way to act, so the tools a script can express
-  -- are not offered as direct calls either. They stay callable inside the script.
-  -- WASM_AGENT_RAW_CODE=only: NOTHING is declared. A list that hides some tools just moves the shortcut
-  -- to the next one (measured 17/11: bash hidden, the model called `session_worktree` three times and the
-  -- repetition guard stopped the turn). The catalogue still reaches the script through `capabilities()`
-  -- and `searchTools()`, so nothing is out of reach — only out of sight at the top level.
-  local raw=dofile('lua/core/pure.lua')('lua/core/raw_code.lua')
-  -- The empty surface is a promise the channel can run a block; without the channel the ordinary tools
-  -- stay declared, so a node with code mode off still has a way to act (18/11).
-  if raw.only and raw.only(ctx.codemode_policy) then return {}, envelope.mode(ctx) end
+  -- ONE PATH (Victor 21/11): no mode empties the declared surface any more, so the ordinary tools are
+  -- always declared beside the run tool. A list that hides some tools only moves the shortcut to the
+  -- next one (measured 17/11: bash hidden, the model called `session_worktree` three times and the
+  -- repetition guard stopped the turn).
   return envelope.schemas(list,ctx),envelope.mode(ctx)
 end
 

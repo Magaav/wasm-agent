@@ -2,7 +2,7 @@
 local json=dofile('lua/vendor/json.lua')
 local env=host.getenv;local setting=nil;local asset_override=nil
 host.getenv=function(k)
- if k=='WASM_AGENT_RAW_CODE' then return 'codemode' end -- the declared-tool path; CodeAct is the default since 17/11
+ if k=='WASM_AGENT_RAW_CODE' then return nil end -- the declared-tool path; CodeAct is the default since 17/11
  if k=='WASM_AGENT_CODEMODE' then return setting end
  if k=='WASM_AGENT_CODEMODE_ASSETS' then return asset_override end
  if k=='WASM_AGENT_LLM_API_KEY' then return 'private-fixture' end
@@ -24,9 +24,9 @@ memory.set_session_workspace(sid,{required=true,state='allocated',worktree=root}
 local rounds=0;local nested
 provider.complete_with=function(_,messages,schemas)
  rounds=rounds+1;local names={};for _,s in ipairs(schemas)do names[s['function'].name]=true end
- check(names.codemode,'DEFAULT_POSITIVE: eligible coding exposes codemode without opt-in')
- check(names.session_worktree and not names.read and not names.bash and not names.tool_call,'code mode shows one way to act: codemode and the control plane, no ordinary tools beside it')
- check(messages[1].content:find('Work in code: one `codemode` call',1,true),'native runtime guidance present')
+ check(names.run,'DEFAULT_POSITIVE: eligible coding exposes the run tool without opt-in')
+ check(names.run and names.session_worktree and not names.read and not names.bash and not names.tool_call,'one way to act: the run tool and the control plane, no ordinary tools beside it')
+ check(messages[1].content:find('Work in code: call the run tool',1,true),'runtime guidance names the one door')
  if rounds==1 then
   setting='off' -- active admissions must not follow a later setting change
   return {content='',finish_reason='tool_calls',tool_calls={{id='native-default-call',type='function',['function']={name='codemode',arguments=json.encode({code='const r=await tools.read({path:"sum.txt"}); await tools.edit({path:"sum.txt",edits:[{old_text:r.content,new_text:"a+b"}]}); return (await tools.read({path:"sum.txt"})).content;'})}}}}

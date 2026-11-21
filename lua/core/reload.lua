@@ -439,9 +439,11 @@ end
 local PROBE = {
   -- The pure helpers run their real work on a fixed input: parsed is not parses-the-model's-reply.
   ["lua/core/raw_code.lua"] = function(module)
-    assert(type(module.mode) == "function" and type(module.take) == "function", "mode/take")
-    local found = module.native_calls('<tool_call>{"name":"js","arguments":{"code":"return 1;"}}</tool_call>')
-    assert(found and found.calls[1] and found.calls[1].code == "return 1;", "native_calls")
+    assert(type(module.native_run) == "function" and type(module.text_action) == "function", "native_run/text_action")
+    local call = module.native_run({ code = "return 1;", raw = { body = "x" } })
+    assert(call and call.code:find("const raw = __raw;", 1, true) ~= nil, "native_run binds raw")
+    local found = module.text_action("```js run\nreturn 2;\n```")
+    assert(found and found.marker == "```js run", "text_action")
     local blocks = module.parse("```js run\nreturn 2;\n```")
     assert(type(blocks) == "table" and blocks[1] and blocks[1].run, "parse")
   end,

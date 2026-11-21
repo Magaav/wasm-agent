@@ -643,14 +643,12 @@ local PREAMBLE_GUIDELINE = "When you start a new step with tool calls, first wri
   .. "same step, and do not leave it only in your reasoning: the user does not see reasoning"
 M.PREAMBLE_GUIDELINE = PREAMBLE_GUIDELINE
 
-local function guidelines_for(tool_list, envelope_mode, raw_first)
+local function guidelines_for(tool_list, envelope_mode)
   local have = {}
   for _, tool in ipairs(tool_list or {}) do
     local name = (tool["function"] or {}).name
     if name then have[name] = true end
   end
-  -- WASM_AGENT_RAW_CODE=first: code mode without a declared `codemode`; the scripts still run.
-  if raw_first then have.codemode = true end
   -- Code mode declares `codemode` alone; the core tools are still there, called as tools.<name> inside
   -- the script, so the guidelines that depend on them (shell search, file operations) still apply.
   if have.codemode then
@@ -765,9 +763,6 @@ local function system_sections(role, agents, agents_path, tool_list, envelope_mo
   local sections=dofile('lua/core/prompt_sections.lua')
   session_options=session_options or {}
   local declared=name_set(tool_list)
-  -- WASM_AGENT_RAW_CODE=first: `codemode` is left out of the declared list (the run block replaces the
-  -- call) but code mode is the surface, so every tool is still named as `tools.<name>()`.
-  if session_options.raw_first then declared.codemode=true end
   local available=name_set(session_options.catalog or tool_list)
   for name in pairs(declared) do available[name]=true end
   local generic=render_generic(role,declared,available)
@@ -781,16 +776,11 @@ local function system_sections(role, agents, agents_path, tool_list, envelope_mo
       -- to a preference, and discovery is a call rather than a seventy-line catalogue every request
       -- pays for - that catalogue was ~37% of the envelope (5,686 B, ~1,400 tokens) while telling the
       -- model nothing about how to work.
-      if session_options.raw_first then
-        -- WASM_AGENT_RAW_CODE=first: the script is a run block and no tool call is advertised.
-        lines[#lines+1]='More than one call, or any filtering or looping, is ONE script that returns only what you need.'
-      else
-        lines[#lines+1]='More than one call, or any filtering or looping, is ONE codemode script that returns only what you need. A single trivial call, or an effect that needs approval or a receipt (a send, a deploy), is a direct call. If code mode refuses a name, fall back to the direct call.'
-      end
+      lines[#lines+1]='More than one call, or any filtering or looping, is ONE codemode script that returns only what you need. A single trivial call, or an effect that needs approval or a receipt (a send, a deploy), is a direct call. If code mode refuses a name, fall back to the direct call.'
       lines[#lines+1]='Every tool is a member of `tools`; `ALL_TOOLS` lists them, `capabilities()` is the grant list with each tool\'s workspace status; `searchTools(query)` returns an array of {name, description, callable, route}; `searchTools("select:a,b")` adds each one\'s full schema. Example: `const [a,b]=await Promise.all([tools.read({path:"a"}),tools.read({path:"b"})]); return {a:a.content.length,b:b.content.length};`'
       if #deferred>0 then
         lines[#lines+1]='The '..#deferred..' other tools this role may call are found with `capabilities()` or `searchTools(query)`'
-          ..(session_options.raw_first and '.' or '; any of them is also callable directly.')
+          ..'; any of them is also callable directly.'
       end
     else
       lines[#lines+1]='Tools outside your declared list are called with tool_call(name, arguments); tool_search(query) finds one you do not know and loads its definition.'
@@ -805,7 +795,7 @@ local function system_sections(role, agents, agents_path, tool_list, envelope_mo
   elseif tool_list and #tool_list>0 then
     tools_text=tool_index(tool_list,'Available tools:')..'\n\nIn addition to the tools above, you may have access to other tools depending on the project.'
   end
-  local rules={};for _,line in ipairs(guidelines_for(tool_list,envelope_mode,session_options.raw_first))do rules[#rules+1]='- '..line end
+  local rules={};for _,line in ipairs(guidelines_for(tool_list,envelope_mode))do rules[#rules+1]='- '..line end
   local skills_block=dofile('lua/core/skills.lua').prompt_block(envelope_mode=='progressive' and 'search' or nil)
   local stack=sections.render({
     safety=sections.section('safety',SENTINEL_NOTICE),
@@ -907,18 +897,15 @@ function M.subagent_tool_list(subagent, role,ctx)
   end
   local list=tools.all_for(allowed, role,ctx,memory)
   if allowed.run then
-    local ok,raw_lib=pcall(dofile,'lua/core/raw_code.lua')
-    -- The child's OWN recorded mode (rel review r3, item 1): a child of a native thread is native, and
-    -- the node switch is not consulted for a decision the parent already made.
-    if ok and raw_lib.child_mode(subagent,ctx and ctx.codemode_policy)=='native' then
-      local ctx_ok,policy_ok=pcall(function()
-        local probe_ctx={session_id=ctx and ctx.session_id,user_id=ctx and ctx.user_id,role=role,subagent=subagent}
-        return dofile('lua/core/codemode_policy.lua').pin(memory,role,probe_ctx).enabled
-      end)
-      if ctx_ok and policy_ok then
-        local ok_env,envelope=pcall(dofile,'lua/core/envelope.lua')
-        if ok_env then list=envelope.native_surface(list,envelope.core_names(),false) end
-      end
+    -- ONE PATH (Victor 21/11): a child whose profile lets it run a script gets the native surface,
+    -- always. There is no mode for it to inherit and no switch a node could move under it.
+    local ctx_ok,policy_ok=pcall(function()
+      local probe_ctx={session_id=ctx and ctx.session_id,user_id=ctx and ctx.user_id,role=role,subagent=subagent}
+      return dofile('lua/core/codemode_policy.lua').pin(memory,role,probe_ctx).enabled
+    end)
+    if ctx_ok and policy_ok then
+      local ok_env,envelope=pcall(dofile,'lua/core/envelope.lua')
+      if ok_env then list=envelope.native_surface(list,envelope.core_names(),false) end
     end
   end
   return list
@@ -1289,65 +1276,28 @@ end
 function M:build_context()
   local session = memory.session(self.session_id) or {}
   local agents, agents_path, tool_list, catalog, workdir
-  -- THE MODE IS DECIDED FIRST (review r4, item 1). Everything below reads it: the pinned codemode
-  -- policy, which code_ctx carries, and every tool list that depends on the door (envelope.schemas,
-  -- subagent_tool_list). Built the other way round, code_ctx held a policy pinned BEFORE the decision, so
-  -- a resume after a restart - or any thread on a node whose mode differs from the thread's - resolved its
-  -- tools from the NODE's mode. prompt_cache.enforce then saw the tool list changed and delivered
-  -- "removed: ..." to the model as a session update.
-  --
-  -- Four cases, in this order, and no cache anywhere:
-  --   * a child takes its PARENT's recorded mode (self.subagent.raw_mode, carried with the admission
-  --     receipt): a child is the parent's code door, so the node's switch cannot move it mid-flight;
-  --   * a thread with a frozen prefix keeps the mode it was started in - the prefix, the declared tools
-  --     and every answer since were written for that door;
-  --   * a record written BEFORE this field existed has no raw_mode and keeps `only`
-  --     (raw_code.LEGACY_THREAD_MODE): that is the mode its frozen prefix was built in;
-  --   * only a thread with no record at all asks the node (raw_code.mode()), and records the answer with
-  --     the prefix it is about to freeze.
+  -- THE ONE PATH, AND THE TWO THINGS REFUSED BEFORE IT (Victor 21/11). Nothing decides a mode any
+  -- more - run(code=...) is the transport - so this function reads no switch, no record and no node
+  -- default. What it does read, before a single request is built, is the two ways a node could still
+  -- be pointed at a path this build does not have:
+  --   * it still exports WASM_AGENT_RAW_CODE (removed): refused BY NAME, never read as "off";
+  --   * its provider cannot answer with a tool call: refused BY NAME, never moved to another path.
+  -- Both are raised here, at start, as a named error: nothing is sent, and a scripted turn exits
+  -- non-zero with the reason instead of reporting a finished turn.
   local raw_code_lib=dofile('lua/core/raw_code.lua')
-  local frozen_record
-  -- A string is a decision on its own; a nil needs the marker (rel review r3, item 1).
-  if self.subagent and (type(self.subagent.raw_mode)=='string' or self.subagent.raw_decided) then
-    self.raw_decided_mode=self.subagent.raw_mode
-    self.raw_decided_flag=true
-    self.mode_source='parent'
-  else
-    frozen_record=select(1,dofile('lua/core/prompt_cache.lua').read({
-      session_id=self.session_id,user_id=self.user,role=self.role}))
-    if frozen_record and (type(frozen_record.raw_mode)=='string' or frozen_record.raw_decided) then
-      -- The record DECIDED (a string names a channel, a decided nil names none): never ask again.
-      self.raw_decided_mode=frozen_record.raw_mode
-      self.raw_decided_flag=true
-      self.mode_source='record'
-    elseif frozen_record then
-      -- Written before the field existed: it honours an EXPLICIT switch when one is set - that is the
-      -- mode a27490af froze it in - and falls back to only when nobody said anything (review r4, item 2).
-      -- The switch is read through a27490af's OWN vocabulary (review r5, item 2): that tree did not know
-      -- `native` (or `bash`), so it read them as no raw channel. A pre-release thread set to native
-      -- therefore resumes OFF, which is what its frozen prefix and transcript were built for.
-      local explicit=raw_code_lib.legacy_switch(raw_code_lib.explicit())
-      if explicit~=raw_code_lib.UNSET then
-        self.raw_decided_mode=explicit
-      else
-        self.raw_decided_mode=raw_code_lib.LEGACY_THREAD_MODE
-      end
-      self.raw_decided_flag=true
-      self.mode_source='legacy'
-    else
-      self.raw_decided_mode=raw_code_lib.mode()
-      self.raw_decided_flag=true
-      self.mode_source='switch'
-    end
+  local switch_refusal=raw_code_lib.switch_refusal()
+  if switch_refusal then error(switch_refusal.text,0) end
+  -- The door is the PROVIDER's row, and a provider this node cannot name is not passed as native: the
+  -- node keeps the failure it always had (its own provider error, a few lines later), and this check
+  -- speaks only about a provider it can name.
+  local settings_ok, settings=pcall(function() return dofile('lua/core/provider.lua').settings() end)
+  if settings_ok and type(settings)=='table' and type(settings.provider)=='string' and settings.provider~='' then
+    local transport_refusal=raw_code_lib.transport_refusal(settings.provider, self.model or settings.model)
+    if transport_refusal then error(transport_refusal.text,0) end
   end
-  -- The decision in its own field: run_body pins the codemode policy afresh PER RUN (it sets
-  -- self.codemode_policy=nil first), so the recorded mode has to live somewhere the run does not clear.
-  self.raw_decision={mode=self.raw_decided_mode, decided=self.raw_decided_flag}
-  -- The policy is pinned WITH the decision already on it, so code_ctx carries the mode into everything
-  -- that reads mode_of(ctx.codemode_policy) while the prompt and the tools are built.
+  -- One policy for every thread, pinned with the context the tools and the prompt are built from.
   local code_ctx={session_id=self.session_id,user_id=self.user,role=self.role,subagent=self.subagent}
   self.codemode_policy=dofile('lua/core/codemode_policy.lua').pin(memory,self.role,code_ctx)
-  raw_code_lib.decide(self.codemode_policy, self.raw_decided_mode)
   if self.subagent then
     -- A child deliberately does NOT read the operator instruction file: those
     -- rules name internal paths and the deploy shape, and a child is exactly the
@@ -1361,48 +1311,6 @@ function M:build_context()
     tool_list,self.envelope_mode = tools.envelope(self.role,code_ctx)
     catalog = tools.all(self.role,code_ctx,memory)
   end
-  -- WASM_AGENT_RAW_CODE=first (lua/core/raw_code.lua): the provider is not shown `codemode`; a run block
-  -- is the way to run a script. The tool loop still dispatches the call the block stands for.
-  -- The A/B arm's single door (lua/core/ab_arms.lua): an arm declares an allow-list of tools, and a
-  -- name that is not on it is not declared. codemode keeps the node's ordinary surface.
-  local ab_arms = dofile('lua/core/ab_arms.lua')
-  local ab_arm = ab_arms.current()
-  if ab_arm then
-    local door = ab_arms.door(ab_arm)
-    if door.tools ~= nil then
-      local kept = {}
-      for _, item in ipairs(tool_list) do
-        local name = item['function'] and item['function'].name or ''
-        if door.tools[name] then kept[#kept + 1] = item end
-      end
-      tool_list = kept
-      if ab_arm == 'run_tool' or ab_arm == 'bash' then
-        -- The one door is declared even where the node's own mode would have hidden it.
-        for _, item in ipairs(tools.catalog(self.role)) do
-          local name = item['function'] and item['function'].name or ''
-          if door.tools[name] then
-            local present = false
-            for _, kept_item in ipairs(tool_list) do
-              if kept_item['function'].name == name then present = true end
-            end
-            if not present then tool_list[#tool_list + 1] = item end
-          end
-        end
-      end
-    end
-  end
-  local raw_first=raw_code.first(self.codemode_policy)
-  if raw_first then
-    tool_list=raw_code.without_codemode(tool_list)
-    catalog=catalog and raw_code.without_codemode(catalog)
-  end
-  -- `only`: no direct calls at all. The guidance is one sentence, because the list is already empty.
-  -- Policy-aware: `only` empties the declared surface only where the channel can actually run a block.
-  local raw_only = (raw_code.only and raw_code.only(self.codemode_policy)) or false
-  if raw_only then
-    tool_list=raw_code.without_generic(tool_list)
-    catalog=catalog and raw_code.without_generic(catalog)
-  end
   self.agents_source = agents_path
   local first, parts, facts
   local orchestration_enabled=self.role~='guest'
@@ -1413,8 +1321,6 @@ function M:build_context()
     first, parts, facts = system_prompt(self.role, agents, agents_path, tool_list,self.envelope_mode,{
       orchestration_enabled=orchestration_enabled,
       codemode=self.codemode_policy.enabled,
-      raw_first=raw_first,
-      raw_only=raw_only,
       catalog=catalog,
       workdir=workdir,
     })
@@ -1426,45 +1332,12 @@ function M:build_context()
     -- Native mode (arm B) has ONE guidance source (rel review r2, item 1): the run-tool sentence with
     -- the batching instruction inside it. The codemode sentences are not sent beside it, because they
     -- name a call and a direct-call shortcut this node does not offer.
-    local native_mode = raw_code.mode_of(self.codemode_policy) == 'native'
-    local block=dofile('lua/core/codemode_policy.lua').prompt(code_catalog,{raw_first=raw_first,raw_only=raw_only,native=native_mode})
-    -- `only` already opened with the run-block sentence; appending "you may also run a script" under it
-    -- offers a choice the node does not have, and the model reads the offer (17/11: DeepSeek answered
-    -- the offer with its own <|DSML|> call syntax instead of a block).
-    -- The transport and its guidance come from the model PROFILE (principle 7); with no profile the
-    -- conservative default is used and says so in one line instead of guessing a result. The model is
-    -- never asked to choose between two transports: the sentence it gets names one.
-    -- In native mode the transport IS the mode (rel review r2, item 2): it is not measured, so no
-    -- profile is read - a conform profile whose rates favour the fenced block can never bring the fence
-    -- text back to a node that has no fence channel - and no "no profile yet" notice is owed. Every
-    -- other mode keeps asking the profile, exactly as a27490af does.
-    local transport, transport_source, transport_notice
-    if native_mode then
-      transport, transport_source = 'tool_call', 'native'
-    else
-      transport, transport_source, transport_notice = raw_code.transport_for(self.model, #tool_list > 0)
-    end
-    self.codeact_transport = transport
-    -- The native guidance is already the first line of the block above: appending it again would be
-    -- two sources for one door, which is the defect this item fixes.
-    if not native_mode and raw_code.active(self.codemode_policy) and not raw_first and not raw_only then block=block..'\n'..raw_code.guidance_for(transport) end
-    -- The no-profile-yet line is a note to the OPERATOR, not a sentence for the model (review MUST
-    -- 4). Putting it in the block changed the prompt prefix - the frozen bytes the cache depends on -
-    -- against base for every node that had not run wa conform. It is journalled once per process and
-    -- the prefix stays byte-identical to base.
-    if transport_source == 'default' and not raw_code.TRANSPORT_NOTICE_SHOWN and transport_notice then
-      raw_code.TRANSPORT_NOTICE_SHOWN = true
-      pcall(host.log, transport_notice)
-      telemetry.event(self.session_id, self.run_id, '', 'transport', 'default', {
-        model = tostring(self.model), transport = tostring(transport), notice = transport_notice })
-    end
-    -- An A/B arm may carry its own guidance instead (arm D's shell sentence, arm E2/E3's tags).
-    if ab_arm then
-      local arm_door = ab_arms.door(ab_arm)
-      if arm_door.guidance then
-        block = arm_door.guidance
-      end
-    end
+    -- ONE guidance source (docs/AGENT-SEAT.md, principle 2 with one path): the run-tool sentence
+    -- with the batching instruction inside it, from codemode_policy.prompt. There is no transport to
+    -- choose and no profile to consult - the provider door was checked at start - so no "no profile
+    -- yet" line is owed to the operator either.
+    self.codeact_transport='tool_call'
+    local block=dofile('lua/core/codemode_policy.lua').prompt(code_catalog)
     first=first..'\n\n'..block
     parts=parts or {};parts.codemode=host.sha256(block)
   end
@@ -1476,7 +1349,7 @@ function M:build_context()
   local frozen, prefix_report=prompt_cache.enforce(cache_ctx,{
     system=first, tools=tool_list, parts=parts, orchestration=orchestration_enabled,
     facts=facts, catalog=catalog or tool_list,
-    raw_mode=self.raw_decision.mode, raw_decided=self.raw_decision.decided})
+    raw_mode='native', raw_decided=true})
   if frozen then first, tool_list = frozen.system, frozen.tools end
   if prefix_report and (prefix_report.corrupt or prefix_report.store_error) then
     self.emit({type='status',text='prompt prefix record '
@@ -2214,11 +2087,7 @@ function M:run_body(text, images)
   -- honoured. The pin already degrades to ordinary tools; the notice is what stops "code mode is broken"
   -- from looking exactly like "the agent ignored me" (2026-10-22: seven queued turns failed silently).
   local codemode=dofile('lua/core/codemode_policy.lua')
-  -- The mode is the THREAD's, recorded at build_context (rel review r3, item 1): pinning the policy
-  -- afresh per run must not hand a mid-session switch to a thread that already froze its door.
-  local recorded=self.raw_decision
   self.codemode_policy=codemode.pin(memory,self.role,{session_id=self.session_id,user_id=self.user,role=self.role,subagent=self.subagent})
-  if recorded and recorded.decided then dofile('lua/core/raw_code.lua').decide(self.codemode_policy, recorded.mode) end
   if self.codemode_policy.unavailable then
     self.emit({ type = 'status', text = 'code mode unavailable ('..tostring(self.codemode_policy.unavailable):sub(1,160)..') - this run uses ordinary tools' })
   end
@@ -2371,24 +2240,15 @@ function M:run_body(text, images)
   -- answered `capability_not_in_profile` - corrective, not a dead end. Measured: an ordinary run with no
   -- tools is the shape that failed in gate.log, and a blanket refusal also refused the tool-less child
   -- `scripts/test-provider-connection-abort-recovery.lua` runs (self-review, on this branch).
-  -- With WASM_AGENT_RAW_CODE=first an empty declared list still dispatches: a run block runs as codemode.
-  -- An arm with a text action channel (E2/E3) dispatches like `first`: an empty declared list is
-  -- not a dead end there, because a <codeact> block is the way to act.
-  local ab_tag_arm = dofile('lua/core/ab_arms.lua').current()
-  local tag_channel = (ab_tag_arm == 'e2' or ab_tag_arm == 'e3')
-  if not self.subagent and #tool_list == 0 and not raw_code.first(self.codemode_policy) and not tag_channel then
+  -- ONE PATH (Victor 21/11): no mode's channel would still act with an empty declared list, so an
+  -- empty list is a dead end for every run and is refused by name, exactly as before.
+  if not self.subagent and #tool_list == 0 then
     local reason
     -- #53 (19/11): a resume that cannot run says WHY in terms of the mode this process was started in,
     -- because "no tools" and "the wrong raw-code mode for this thread" call for different repairs.
-    local mode = raw_code.mode_of(self.codemode_policy) or "codemode"
     if self.prefix and self.prefix.frozen then
       reason = "this session's prompt prefix was frozen with an empty tool list "
         .. "(lua/core/prompt_cache.lua), so every run of this thread resolves no tools"
-      if mode == "codemode" then
-        reason = reason .. ", and this process runs WASM_AGENT_RAW_CODE=codemode, whose only action "
-          .. "channel is a declared tool: a raw-code mode set now (`first` or `only`) cannot resume "
-          .. "this thread either, because the frozen prefix is what the request is built from"
-      end
     else
       reason = "this node's catalogue resolved no tools for role " .. tostring(self.role)
     end
@@ -2402,7 +2262,7 @@ function M:run_body(text, images)
     self.emit({ type = "status", text = "turn refused: no_dispatchable_tools" })
     self.emit({ type = "reply", text = reply, message_id = message_id })
     telemetry.event(self.session_id, self.run_id, "", "step", "refused",
-      { reason = "no_dispatchable_tools", tools = 0, mode = raw_code.mode_of(self.codemode_policy) or "codemode" })
+      { reason = "no_dispatchable_tools", tools = 0, mode = "native" })
     -- The turn did not run, so the caller must be able to see that from the outside (#53): the reply is
     -- still returned (an interactive reader sees why, and the thread is not crashed), and the flag is
     -- what `wa chat --once` turns into a non-zero exit (chat.turn_ok).
@@ -2757,14 +2617,6 @@ function M:run_body(text, images)
     local call_opts = {session_id=self.session_id,run_id=self.run_id,round=round,context_tokens=context_tokens,
        on_call_start=self.on_call_start,on_call_end=self.on_call_end,context={estimate_source=context_source,summary_watermark=(memory.session(self.session_id) or {}).summarized_until or 0}}
     for key, value in pairs(budget_opts or {}) do call_opts[key] = value end
-    call_opts.stop = raw_code.stop_sequences(self.codemode_policy)
-    -- WASM_AGENT_RAW_CODE=first: the request renders raw-channel calls as the text the model wrote
-    -- (raw_code.render_history, applied in provider.complete_with); the stored rows are unchanged.
-    -- The tagged arms render their history as tags too (a <codeact> plus a <result>), so a replay
-    -- never shows the model a tool-call pair its own prompt forbids.
-    local history_arm = dofile('lua/core/ab_arms.lua').current()
-    call_opts.raw_history = (raw_code.first(self.codemode_policy)
-      or history_arm == 'e2' or history_arm == 'e3') or nil
     local ok, result = pcall(provider.complete_with, self.model, messages, tool_list, self.stream, call_opts)
     -- No response headers means no model output reached this process, hence no returned tool call
     -- could have run. Retry only that phase, with a strict operator-controlled bound. The upstream
@@ -3183,50 +3035,37 @@ function M:run_body(text, images)
       end
     end
 
-    -- The raw code channel (lua/core/raw_code.lua, WASM_AGENT_RAW_CODE): a ```js run block in the reply
-    -- is appended here as the codemode call it stands for, so everything below - recording, dispatch,
-    -- redaction, projection, the cut/limit refusal - treats it as that call. Off: nothing is read.
-    -- Read whenever the MODE is on, not only when code mode happens to be ready: a run block the node
-    -- cannot run is answered by name (codemode_not_enabled), never left in the text as the answer.
-    -- The THREAD mode, not the node (rel review r3, item 1): this runs on every model call, and the
-    -- recorded decision is what the prefix and the whole transcript were written for.
-    local raw_channel = raw_code.mode_of(self.codemode_policy) ~= nil
-    local raw_run = raw_channel
-      and raw_code.take(result, raw_code.stop_sequences(self.codemode_policy) ~= nil, self.codemode_policy) or nil
-    if raw_run and raw_run.restored_fence then
-      self.emit({ type = "status", text = "the raw-code stop sequence ended the reply at a code fence that was not a run block" })
-    end
-    -- Arm E2/E3: a message in neither shape runs nothing and does not end the turn. The model is
-    -- told once, by name (19/11 ~16:40); a second consecutive one fails the run by that name.
-    if raw_run and raw_run.invalid_message_shape then
-      local tags = dofile('lua/core/arm_tag.lua')
-      local arm_name = dofile('lua/core/ab_arms.lua').current()
-      self.finish_continues = (self.finish_continues or 0) + 1
-      if self.finish_continues > 1 then
-        error('arm_tag_continue: ' .. tags.FAILURE .. ' (' .. tostring(raw_run.reason)
-          .. (raw_run.excerpt and (' | saw: ' .. tostring(raw_run.excerpt)) or '') .. ')')
-      end
-      messages[#messages + 1] = { role = 'user', content = tags.continue_for(arm_name) }
-      self.emit({ type = 'status', text = tags.FAILURE .. ': ' .. tostring(raw_run.reason)
-        .. (raw_run.excerpt and (' | saw: ' .. tostring(raw_run.excerpt)) or '') })
-      goto next_round
+    -- THE ACTION WRITTEN AS TEXT. One path (Victor 21/11): nothing in the reply is turned into a call
+    -- any more, so a step that ends with its action in the wrong form is not an answer. TWO shapes,
+    -- and the same net for both:
+    --   * the model's trained tool-call markup, written as text (raw_code.markup_in_text) - a
+    --     <tool_call>{...}</tool_call>, a <bash>...</bash>, a DSML bar;
+    --   * a run-tagged block that ENDS the answer (raw_code.text_action) - the removed transport's
+    --     shape, which no longer runs and is therefore markup too.
+    local leaked = raw_code.markup_in_text(result.content or "")
+    if not leaked and #(result.tool_calls or {}) == 0 then
+      leaked = raw_code.text_action(result.content or "")
     end
     -- The native transports' leak safety net (review MUST 6). The action was a tool call; the model
     -- wrote its trained call format as TEXT instead, so nothing ran. One named continue asks for the
     -- call; a second consecutive leak fails the run BY NAME rather than ending it silently, which is
     -- the failure this net exists for.
-    if raw_run and raw_run.leaked_markup then
+    if leaked then
       self.finish_continues = (self.finish_continues or 0) + 1
-      local marker = tostring(raw_run.marker)
+      local marker = tostring(leaked.marker)
       local notice = '[Harness notice] Your message carried ' .. marker .. ' tool-call markup as text, so nothing ran. '
         .. 'Act by calling the run tool with the script in its code argument; a message with no tool call is your answer.'
+      -- DURABLE, like every other continue this loop gives (the finish-contract path records its notice the
+      -- same way): the notice is part of the transcript from now on, so a later request carries it in its
+      -- natural position and the evidence of what the model was told survives the process.
+      record_turn(self, { role = "user", content = notice, phase = "leak_net" })
       if self.finish_continues > 1 then
         error('native_markup_continue: tool_call_markup_as_text (' .. marker .. ')')
       end
       messages[#messages + 1] = { role = 'user', content = notice }
       self.emit({ type = 'status', text = 'tool_call_markup_as_text: ' .. marker })
       telemetry.event(self.session_id, self.run_id, '', 'step', 'leaked_markup', {
-        marker = marker, attempt = self.finish_continues, bytes = raw_run.bytes })
+        marker = marker, attempt = self.finish_continues, bytes = #tostring(result.content or "") })
       goto next_round
     end
     local calls, call_repairs = provider.repair_calls(result.tool_calls or {}, tool_list,
@@ -3256,22 +3095,6 @@ function M:run_body(text, images)
       telemetry.event(self.session_id, self.run_id, "", "tool_call", "repaired",
         { calls = repaired_calls, recovered = recovered_calls,
           arrived_name = tostring(first_refused.arrived or "") })
-    end
-    -- A step whose only action the harness never turned into a call is not an answer (18/11: a run block
-    -- the parser did not see ended the turn with `0 tools` and rc 0). The turn fails by name, so a
-    -- scripted `wa chat --once` returns non-zero instead of reporting a silent success.
-    if raw_channel and #calls == 0 then
-      local missed = raw_code.unexecuted(result.content or "", self.codemode_policy)
-      if missed then
-        local reason = "run_block_not_executed: " .. missed.reason
-        local span = trace[#trace]
-        if type(span) == "table" and span.kind == "model_call" then span.ok = false; span.error = reason end
-        record_turn(self, { role = "assistant", content = result.content or "", ok = false, debug = self.debug })
-        self.pending_failure = { trace = trace, round = round, attempts = transient_attempt + 1 }
-        telemetry.event(self.session_id, self.run_id, "", "step", "end", { outcome = "run_block_not_executed" })
-        self.emit({ type = "status", text = reason })
-        error(reason)
-      end
     end
     local assistant = { role = "assistant", content = result.content or "" }
     reply_phase = result.final_phase or ""
@@ -3723,19 +3546,12 @@ function M:run_body(text, images)
     -- The batching treatment was retired (04/11): every run now carries the default guidance, so
     -- telemetry keeps naming it `control`, the label scripts/lib/token-audit.cjs groups by.
     local batching_mode = "control"
-    -- The position of the first run block of this message that failed (#D, below).
-    local raw_failed_at = nil
 
     for tool_index, call in ipairs(calls) do
       local function_ = call["function"] or {}
       -- A call the harness repaired was not a call the model can make: nothing runs, and the answer is a
       -- tool error that names the fault and hands its own arguments back (11/11, gate.log 50f2c555).
       local call_repair = call_repairs[call.id]
-      -- A run block the harness refused (unterminated, empty) is answered with that refusal; it never runs.
-      -- One entry per block the message formed (#D): a message with several run blocks forms several calls,
-      -- and each result is about its own block.
-      local raw_entry = raw_run and raw_run.calls and raw_run.calls[call.id] or nil
-      local raw_refusal = raw_entry and raw_entry.refusal or nil
       -- A call whose name was recovered from its arguments is a call, not a fault: it runs below
       -- under that name and its result carries the one-line note. Only a call nothing identifies is
       -- refused (`provider.repair_calls`).
@@ -3794,16 +3610,7 @@ function M:run_body(text, images)
       -- The protocol needs a result for every call id, so a later block is ANSWERED, not dropped, and the
       -- answer says plainly that it did not run and why - running it on top of a failure is worse than
       -- not running it at all.
-      local raw_skipped = raw_failed_at and raw_code.is_raw(call.id) or nil
       local handled, output = pcall(function() if name_error then return name_error end
-        if raw_refusal then return raw_refusal end
-        if raw_skipped then
-          return { error = "run_block_not_run", effect = "none",
-            note = string.format("run block %s of %s did not run: run block %s failed first, and the run "
-              .. "blocks of one message stop at the first error.",
-              tostring(raw_entry and raw_entry.index or "?"),
-              tostring(raw_entry and raw_entry.blocks or "?"), tostring(raw_failed_at)) }
-        end
         if argument_error then return argument_error end
         if parallel_op then
           -- The batch was launched, so this call really ran: it ends the imitation streak like any
@@ -3827,14 +3634,6 @@ function M:run_body(text, images)
             note=first and ('Reconsider this planned call after reading steering: this call, and '
               ..'any later effectful call in the same batch, were not admitted. Re-issue the ones '
               ..'that remain valid.') or nil}
-        end
-        -- RAW_CODE=only: `codemode` is not a call here. A model that remembers it (its own history, its
-        -- training) gets an answer it can act on, instead of a script it never wrote as a block.
-        -- Measured 17/11: a fresh session, only-mode on, still answered with a JSON codemode call.
-        if function_.name == "codemode" and not raw_code.is_raw(call.id) and raw_code.only(self.codemode_policy) then
-          return { error = "codemode_only", effect = "none",
-            note = "code is not a tool call on this node: end your message with one ```js run block, and "
-              .. "it runs as a single script where every tool is tools.<name>(args)." }
         end
         dispatch_ctx.tool_arguments_json=arguments_text
         dispatch_ctx.tool_call_id=call.id
@@ -3924,21 +3723,11 @@ function M:run_body(text, images)
           content = content .. "\n\n[hook context] " .. tostring(output.hook_context)
         end
       end
-      -- What the harness had to say about a run block (several blocks, text dropped after it) rides
-      -- with its result, like hook context: the projected view itself is the codemode one.
-      if projected and raw_entry then
-        local note = raw_code.note(raw_entry)
-        if note then content = content .. "\n\n" .. note end
-      end
       -- What a navigation call answered (action, found, count): a wrong answer must not be
       -- recorded as a plain success. Enums/booleans/counts only.
       local nav = navigation_outcome(function_.name, args, output)
       if nav then nav.trial_phase=patch_audit.PHASE end
       local cancelled = projected and tool_output.cancelled(output)
-      -- Where the raw batch stopped: the FIRST run block of this message that failed, by its position. It
-      -- is the earliest failure that stopped the batch, so a later failure must not move the mark forward
-      -- and hide the block that actually broke (round 3, item 7).
-      if raw_entry and not ok_tool then raw_failed_at = raw_failed_at or raw_entry.index end
       -- The progress guard's facts about this call: did a real effect succeed, and what did it
       -- answer (a digest - the same bytes again is checkable without keeping them twice).
       if ok_tool and not cancelled and tools.has_effect(function_.name, args) then round_effects = round_effects + 1 end
@@ -4107,7 +3896,7 @@ function M:run_body(text, images)
         mission = turn_journal.mission_of(self.session_id), build = turn_journal.build_of(),
         -- BOTH halves (review r5 item 4): main renamed stripped -> parsed, this branch reports the
         -- THREAD's recorded mode when it has one and the journal's own reading otherwise.
-        mode = raw_code.mode_of(self.codemode_policy) or turn_journal.mode_of(), model = tostring(self.model or ""), block = parsed.block,
+        mode = "native", model = tostring(self.model or ""), block = parsed.block,
       })
       if journal_note then
         -- The fields travel with the event so a consumer never has to re-read the journal to learn

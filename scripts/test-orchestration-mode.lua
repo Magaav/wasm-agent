@@ -6,7 +6,7 @@
 -- covered the whole file made the default surface untested by the very row that added it (review of
 -- 18/11, item 3).
 local raw_surface='codemode'
-do local real=host.getenv; host.getenv=function(k) if k=='WASM_AGENT_RAW_CODE' then return raw_surface end return real(k) end end
+do local real=host.getenv; host.getenv=function(k) if k=='WASM_AGENT_RAW_CODE' then return nil end return real(k) end end
 local json=dofile('lua/vendor/json.lua')
 local memory=dofile('lua/core/memory.lua');memory.setup()
 local mode=dofile('lua/core/orchestration_mode.lua')
@@ -135,18 +135,21 @@ check(direct_result.error~='orchestration_route_required' and direct_result.erro
 check(tools.dispatch(memory,'route_task',{route='direct',task='x'},'master',direct_ctx).error=='orchestration_mode_not_enabled','route_task refuses without the mode')
 check(tools.dispatch(memory,'route_task',{route='direct',task='x'},'master',{session_id=sid,subagent={allowed={route_task=true}}}).error=='orchestration_operator_only','a child cannot record a route')
 if host.read_file and pcall(host.read_file,direct_write) then os.remove(direct_write) end
--- ---- THE DEFAULT SURFACE (CodeAct): the same mode, on the surface the node actually runs ------------
--- Nothing is declared there (tools.envelope is empty), so a run block is the only way to act. If the
--- coordinator's two mode tools were unreachable from it, the mode would be a prompt with no way to
--- follow it, and every floor refusal's handoff.tool == 'subagent' would name a tool the model cannot call.
--- The CodeAct surface is pinned HERE rather than assumed from an unset switch (rel r1 R2: a
--- tool-calling provider now defaults to native, and this block is about the CodeAct surface).
-raw_surface='only'
-local raw_code=dofile('lua/core/raw_code.lua')
-check(raw_code.mode()=='only' and raw_code.only(nil),'the CodeAct surface is pinned to only')
+-- ---- THE DEFAULT SURFACE: the same mode, on the surface the node actually runs -------------------
+-- ONE path (Victor 21/11): the surface is the native one - the run tool and the tools it can call -
+-- and the coordinator's two mode tools must be reachable FROM it. If they were not, the mode would be
+-- a prompt with no way to follow it, and every floor refusal's handoff.tool == 'subagent' would name a
+-- tool the model cannot call.
+raw_surface='native'
 local codeact_declared={}
-for _,item in ipairs(tools.envelope('master',{role='master',user_id='master',session_id=sid})) do codeact_declared[#codeact_declared+1]=item['function'].name end
-check(#codeact_declared==0,'CodeAct declares no tool at all, so the run block is the surface: '..table.concat(codeact_declared,','))
+local codeact_set={}
+for _,item in ipairs(tools.envelope('master',{role='master',user_id='master',session_id=sid})) do
+  codeact_declared[#codeact_declared+1]=item['function'].name; codeact_set[item['function'].name]=true
+end
+check(codeact_set.run==true,'the one door is declared on the surface the node runs: '..table.concat(codeact_declared,','))
+for _,name in ipairs({'route_task','subagent'}) do
+  check(codeact_set[name]==true,'and the mode tool '..name..' is declared beside it: '..table.concat(codeact_declared,','))
+end
 local codeact_policy=dofile('lua/core/codemode_policy.lua')
 local codeact=dofile('lua/core/codemode.lua')
 local probe_sid=memory.start_session('','codeact-surface',{user_id='master'})

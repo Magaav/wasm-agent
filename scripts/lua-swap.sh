@@ -124,14 +124,10 @@ for _, path in ipairs({ 'lua/core/agent.lua', 'lua/core/tools.lua', 'lua/core/co
   if not ok then print('load_failed ' .. path .. ': ' .. tostring(problem):sub(1, 200)) return end
 end
 local raw = dofile('lua/core/raw_code.lua')
--- The markup parser exists from change/codeact on; a tree without it (main before that) is not refused for it.
-if raw.native_calls then
-  local found = raw.native_calls('<tool_call>{"name":"js","arguments":{"code":"return 1;"}}</tool_call>')
-  if not (found and found.calls[1] and found.calls[1].code == 'return 1;') then print('raw_code_parser_broken') return end
-end
-local want = tostring(host.getenv('WASM_AGENT_RAW_CODE') or ''):lower()
-if want == '1' or want == 'true' then want = 'on' end
-if want ~= '' and tostring(raw.mode()) ~= want then print('mode_mismatch env=' .. want .. ' lua=' .. tostring(raw.mode())) return end
+-- ONE path (Victor 21/11): the tree must have the run tool and the leak net's reader, and it must
+-- have let go of the switch - a tree that still honours one is not this build.
+if type(raw.native_run) ~= 'function' or type(raw.text_action) ~= 'function' then print('raw_code_no_native_run') return end
+if type(raw.switch_refusal) == 'function' and raw.switch_refusal() then print('switch_still_set') return end
 print('probe ok')
 LUA
 run_probe() { # $1 = tree dir or "" for what the node loads now

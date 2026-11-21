@@ -20,7 +20,7 @@ local overrides={WASM_AGENT_PROVIDER='opencode-go',WASM_AGENT_LLM_API_KEY='rel-r
   WASM_AGENT_LLM_MODEL='deepseek-v4.1-flash',WASM_AGENT_PI_MODELS_STORE='missing-test-store',
   WASM_AGENT_CONTEXT_BUDGET='0'}
 host.getenv=function(k)
-  if k=='WASM_AGENT_RAW_CODE' then return '1' end
+  if k=='WASM_AGENT_RAW_CODE' then return nil end
   if k=='WASM_AGENT_CODEMODE' then return nil end
   if overrides[k]~=nil then return overrides[k] end
   return real_getenv(k)
@@ -75,7 +75,11 @@ local function script_block()
   return a..'\n'..b..'\n'..c
 end
 
-local reply_text='Still queued. Waiting.\n'..FENCE..'js run\n'..script_block()..'\n'..FENCE
+-- ONE path (Victor 21/11): the action is the run TOOL CALL, not a fenced block. The prose before it
+-- stays the step's commentary; the script is the call's `code` argument.
+local reply_text='Still queued. Waiting.'
+local reply_call=json.encode({id='call_run_poll',type='function',
+  ['function']={name='run',arguments=json.encode({code=script_block()})}})
 
 local rounds=0
 host.http_stream=function()
@@ -85,7 +89,8 @@ host.http_stream=function()
       finish_reason='stop',usage={prompt_tokens=10,completion_tokens=5,total_tokens=15}})
   end
   return json.encode({status=200,content=reply_text,stream_complete=true,
-    finish_reason='stop',usage={prompt_tokens=10,completion_tokens=5,total_tokens=15}})
+    finish_reason='tool_calls',usage={prompt_tokens=10,completion_tokens=5,total_tokens=15},
+    tool_calls={json.decode(reply_call)}})
 end
 
 local handle=agent.new(sid,function() end,'master',user,'')

@@ -2176,7 +2176,7 @@ end
 -- ---- the events ----------------------------------------------------------------
 
 -- Streamed text up to a model's own tool-call markup (`<｜DSML｜...`, `<tool_call>`): from there on the
--- step is a call that runs as a script (lua/core/raw_code.lua, native_calls), so the markup is not shown
+-- step is a run call that runs as a script, so the markup is not shown
 -- (17/11: the raw DSML lines were printed live, then the same call ran as a block). A trailing `<...`
 -- without `>` waits for the next piece, so a marker split across deltas is still caught.
 local function fence_at(text)
@@ -3048,11 +3048,9 @@ function METHODS:event(event)
       -- A run block is dispatched as a codemode call (one pathway), and the status line used to say
       -- "Working: codemode" for both. `call_raw_...` is the id the raw channel mints, so the reader is
       -- told what is happening: the model's own script is running.
-      local rc = dofile("lua/core/raw_code.lua")
-      -- A native `run` call is the model's own script exactly like a fenced block is, so the status row
-      -- says the same thing for both ("Running your script") instead of naming a tool.
+      -- ONE transport (Victor 21/11): the model's own script is the `run` call, and the status row says
+      -- so ("Running your script") instead of naming a tool.
       self.pending.raw = event.name == "run"
-        or (rc.is_raw and rc.is_raw(event.id or event.call_id)) or false
       self:codemode_start(event)
     elseif self:transcript() then
       self:topic(true)
