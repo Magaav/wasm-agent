@@ -333,7 +333,9 @@ ok(server:find("pcall(update_banner.tick)", 1, true) ~= nil, "the served node re
 -- environment read is gone - so a revert of either half fails this row.
 ok(server:find("host.script_run", 1, true) ~= nil,
    "a script run is asked of the process (host.script_run), so the node tick knows what it is")
-ok(server:find('host.getenv("WA_SCRIPT")', 1, true) == nil,
+-- The CODE shape, not the word: the comment above it names the old read on purpose (it explains why it
+-- went), so this pins the statement a reader would have to write back, not every mention of the name.
+ok(server:find('if host.getenv("WA_SCRIPT")', 1, true) == nil,
    "and a WA_SCRIPT test run never touches the real node's state")
 
 -- ---- the whole check, against fixtures --------------------------------------

@@ -1752,8 +1752,14 @@ impl.gate = function(run, options)
       -- must stop the gate by name, not be silently ignored while fast.sh and deploy.sh refuse the same
       -- record: one record, one answer. The audit is cheap (one file, one loop) and it reads the same
       -- allow-list, so no key can be known to one entry point and unknown to another.
-      record_prefix = ". " .. quote(reader) .. " >/dev/null 2>&1; wa_build_env_audit >/dev/null 2>&1 || { wa_build_env_audit >&2; echo refused(build_env_key_unknown): the build record names a setting no build reads >&2; exit 2; }; "
-        .. "wa_build_env >/dev/null 2>&1 || { echo refused(build_env_incomplete): the build record names a directory that is not there >&2; exit 2; }; "
+      -- THE MESSAGES ARE QUOTED, AND THAT IS THE WHOLE POINT (measured 20/11 on the base). A bare
+      -- `echo refused(build_env_key_unknown): ...` is not a message, it is a SHELL SYNTAX ERROR: the
+      -- unquoted parenthesis after the word ends the command, bash answers `syntax error near unexpected
+      -- token `(`` and the whole prefix dies with exit 2 - so EVERY gate check exited 2 without running,
+      -- in any tree that has a build record script, and the verdict read as a red check. Quoted, the words
+      -- are the words a reader sees and the check after the prefix actually runs.
+      record_prefix = ". " .. quote(reader) .. " >/dev/null 2>&1; wa_build_env_audit >/dev/null 2>&1 || { wa_build_env_audit >&2; echo " .. quote("refused(build_env_key_unknown): the build record names a setting no build reads") .. " >&2; exit 2; }; "
+        .. "wa_build_env >/dev/null 2>&1 || { echo " .. quote("refused(build_env_incomplete): the build record names a directory that is not there") .. " >&2; exit 2; }; "
     end
   end
   -- A resume keeps a check that already PASSED (first run, not a retry) on this exact tree with this exact
