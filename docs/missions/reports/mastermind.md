@@ -148,7 +148,16 @@ round adds that a reader sees is listed below.
 8. `fork_is_not_a_run`: "Continue a fork with wa chat --resume <its session>; a fork is a conversation."
 9. `subagent_recursion_forbidden`, `node_not_in_approved_policy`, `child_running`, `idempotency_key_required`, `session_required`, `forbidden_parent_session` - the refusal words of the new API.
 
-## 9. What is not done
+## 9. Pre-existing failures this round met (not caused by it)
+
+- **scripts/test-orchestration-e2e.cjs cannot run on this node as the fast path invokes it**: it needs
+  `rust/wa-sentinel/target/release/wa-sentinel` (line 11), and neither that nor
+  /home/victor/wasm-agent/target/m-mastermind/release/wa-sentinel exists here. It reaches the sentinel
+  job step and fails with ENOENT *after* its child-spawn and interactive checks pass, so the failure is
+  the missing binary, not this round's change. Named here rather than fixed: building the sentinel is a
+  different item.
+
+## 10. What is not done
 
 - Two-node runs and the live fleet: not run, not claimed.
 - `wa mission report|verify|clean`: not implemented (scripts/mission.sh still owns them).

@@ -597,9 +597,6 @@ function M.events(args, ctx)
           events[#events + 1] = event_of(child, seq, "done", row.created_at, updates)
         end
       end
-    elseif child then
-      events[#events + 1] = event_of(child, after, child.state == "failed" and "failed" or "started", row.created_at,
-        { detail = "state_changed" })
     end
   end
   return { session = session_id, events = events, next_seq = next_seq, children = #children }

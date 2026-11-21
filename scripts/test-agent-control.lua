@@ -57,7 +57,15 @@ host.subagent = function(action, payload)
   for _, key in ipairs(order) do
     local item = children[key]
     if item.subagent_id == args.id then
-      if action == 'status' then return json.encode(view(item)) end
+      -- The real node answers 'status' and 'result' from ONE branch
+      -- (rust/wa-capabilities/src/subagents.rs: "status" | "result" => ...), and 'status' removes the
+      -- result field. The stub does the same, so collect's use of 'result' is exercised against the
+      -- shape the host really returns rather than a shape the stub invented.
+      if action == 'status' then
+        local record = view(item); record.result = nil
+        return json.encode(record)
+      end
+      if action == 'result' then return json.encode(view(item)) end
       if action == 'cancel' then
         item.state = 'cancelled'; item.settled = true; item.settled_at = host.now()
         return json.encode(view(item))
