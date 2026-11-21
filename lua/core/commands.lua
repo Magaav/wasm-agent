@@ -69,7 +69,7 @@ M.commands = {
   { name = "/stats", usage = "/stats", hint = "database counts" },
   {
     name = "/icons",
-    usage = "/icons [wa|nerd|unicode|ascii]",
+    usage = "/icons [set]",
     hint = "which glyphs the status and footer rows draw: wa = wa Icons (glued), nerd, unicode or ascii (no argument: say which set is in force)",
   },
   { name = "/console", usage = "/console", hint = "toggle the console: every event and a tool's whole output, unclipped" },
