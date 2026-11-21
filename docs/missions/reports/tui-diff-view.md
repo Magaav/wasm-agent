@@ -49,6 +49,29 @@ NO_COLOR is the same rows with no escape: asserted directly, not inferred -
 `ok(not text:find("\27%[", 1), "a plain view writes no escape sequence at all")` and the same check
 on the rendered block (`654ff0cf`).
 
+## Does the test discriminate? (mutation, not just the harness)
+
+`scripts/test-discriminates.sh` could not answer this. On the base it reported `discriminates` for a
+row whose only output was
+`lua error: lua_root_unreadable: .../base/lua/core/diff_view.lua` - the base has no such module, so the
+test died before any assertion. The script's `ASSERT_RE` (`lua error:` among others) is matched before
+its `LOAD_RE`, so a missing file is credited as a caught defect. That is the false-pass direction, and it
+is not this branch's file to change; it is named here so a later round does not read a green row as
+evidence.
+
+What was done instead: a scratch worktree at `HEAD` (`git worktree add --detach /tmp/dv-mut HEAD`, never
+`git stash`), and the branch's code mutated there one change at a time, running `tests/diff-view.lua`
+after each. Every mutation failed a NAMED assertion, and the restored tree was green again
+(`diff view ok (35 checks)`):
+
+| Mutation | The assertion that caught it |
+| --- | --- |
+| the view's `change` branch removed (`cli_view.lua`) | `the path is on the block` |
+| the footnote text changed | `the footnote says what this is` |
+| the fold stopped stating how much it hid | `a big diff states how many rows it hid and how to see them` |
+| a removed row's old line number replaced by 0 | `a removed row carries the old line number and no new one` |
+| the card opening given a title (`U+250C U+2500 main.lua`) | `the opening row is the bare card corner` |
+| every hidden row silently dropped, no count | `a big diff states how many rows it hid and how to see them` |
 ## What this branch does NOT do
 
 - A file that was ALREADY modified before the command has no captured before-side, so its diff is
