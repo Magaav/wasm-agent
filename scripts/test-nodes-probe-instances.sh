@@ -12,7 +12,7 @@ cd "$ROOT" || exit 2
 # operator set WA_TEST_ROOT - measured shape 11/11, and the review found it here. wa_test_workdir makes
 # <root>/<name>.XXXXXX and refuses by name a root that is a home or carries .git/.wasm-agent.
 . scripts/lib/scratch-home.sh
-WA_ROOT="${WA_TEST_ROOT:-$(dirname "$ROOT")}"
+WA_ROOT="${WA_TEST_ROOT:-$(wa_scratch_root test-nodes-probe-instances)}" || exit 2
 SCRATCH="$(wa_test_workdir "$WA_ROOT" test-nodes-probe-instances)" || exit 2
 mkdir -p "$SCRATCH/home" || exit 2
 cleanup() { local s=$?; rm -rf "$SCRATCH"; exit $s; }
