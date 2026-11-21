@@ -3756,9 +3756,11 @@ struct ConsoleInput {
 }
 
 /// A mouse selection over the chat area: where the drag started and where it is, in screen cells, the
-/// plain rows on screen when it started (the view is frozen while it lasts, so they stay true), and
-/// whether the view was following the bottom - it goes back to following when the selection ends.
-struct Selection { anchor: (usize, usize), head: (usize, usize), rows: Vec<String>, following: bool }
+/// plain rows on screen when it started (the view is frozen while it lasts, so they stay true), the
+/// chat's own columns (`Transcript::text_width`: the screen's width, less the scrollbar's column while
+/// the bar is drawn - a selection never reaches into it, Victor 21/11), and whether the view was
+/// following the bottom - it goes back to following when the selection ends.
+struct Selection { anchor: (usize, usize), head: (usize, usize), rows: Vec<String>, following: bool, cols: usize }
 
 fn clear_selection(state: &mut ConsoleInput) {
     if let Some(selection) = state.selection.take() {
@@ -3863,7 +3865,12 @@ fn handle_mouse(state: &mut ConsoleInput, event: wa_term::selection::Mouse) {
                         let following = state.transcript.following();
                         state.transcript.page(0); // freeze: what is selected must not scroll away under the pointer
                         let shown: Vec<String> = state.transcript.view(width, rows).iter().map(|r| wa_term::selection::plain(r)).collect();
-                        state.selection = Some(Selection { anchor: (row, col), head: (row, col), rows: shown, following });
+                        // The chat's columns only: a press on the bar's last column, or anywhere past
+                        // the text, is a press on the chat's last column (a press that IS the bar's
+                        // went to `keymap`'s BarJump, above).
+                        let cols = state.transcript.text_width(width);
+                        let at = (row, col.min(cols));
+                        state.selection = Some(Selection { anchor: at, head: at, rows: shown, following, cols });
                         state.transcript.dirty = true;
                         return;
                     }
@@ -3915,14 +3922,16 @@ fn handle_mouse(state: &mut ConsoleInput, event: wa_term::selection::Mouse) {
                 }
             }
             let Some(selection) = state.selection.as_mut() else { return; };
-            selection.head = (row.clamp(1, selection.rows.len().max(1)), col);
+            // A pointer that wanders onto the bar's column stops at the chat's last one: the bar is
+            // the bar's (its drag begins only from a press on it), and no copy carries its glyph.
+            selection.head = (row.clamp(1, selection.rows.len().max(1)), col.min(selection.cols));
             if matches!(event, Mouse::Release(..)) && selection.head == selection.anchor { clear_selection(state); return; }
             // Copy on release (29/10): Omarchy's Super+C sends Ctrl+Insert to a terminal, and foot keeps
             // that chord to copy *its own* selection - empty while wa owns the mouse - so Super+C never
             // reached wa. The selection is on the clipboard the moment the button comes up; Super+C then
             // finds it there, and Ctrl+C still copies and clears as before.
             if matches!(event, Mouse::Release(..)) {
-                let text = wa_term::selection::text(&selection.rows, selection.anchor, selection.head);
+                let text = wa_term::selection::text(&selection.rows, selection.anchor, selection.head, selection.cols);
                 let _ = wa_term::terminal_editor::write(&wa_term::selection::osc52(&text));
                 let count = text.chars().count();
                 if let Some(editor) = state.editor.as_mut() {
@@ -3938,7 +3947,7 @@ fn handle_mouse(state: &mut ConsoleInput, event: wa_term::selection::Mouse) {
 /// Ctrl+C with a selection: copy it to the terminal's clipboard and say so in the footer.
 fn copy_selection(state: &mut ConsoleInput) -> bool {
     let Some(selection) = state.selection.as_ref() else { return false };
-    let text = wa_term::selection::text(&selection.rows, selection.anchor, selection.head);
+    let text = wa_term::selection::text(&selection.rows, selection.anchor, selection.head, selection.cols);
     let _ = wa_term::terminal_editor::write(&wa_term::selection::osc52(&text));
     let count = text.chars().count();
     clear_selection(state);
@@ -4026,7 +4035,10 @@ fn layout_frame(state: &mut ConsoleInput) -> String {
     if state.transcript.dirty && want >= 1 {
         frame.push_str(&state.transcript.render(width, want));
         if let Some(selection) = state.selection.as_ref() {
-            frame.push_str(&wa_term::selection::overlay(&selection.rows, selection.anchor, selection.head));
+            frame.push_str(&wa_term::selection::overlay(&selection.rows, selection.anchor, selection.head, selection.cols));
+            // The overlay cleared every row it touched - the bar's column with them - so the track
+            // is drawn back where the transcript put it: the highlight never covers the bar.
+            frame.push_str(&state.transcript.bar_frame(width));
         }
         state.transcript.dirty = false;
     }
@@ -5436,6 +5448,37 @@ mod terminal_tests {
         super::handle_mouse(&mut state, Mouse::Press(3, 80));
         super::handle_mouse(&mut state, Mouse::Motion(5, 80));
         assert!(state.selection.is_none() && !state.transcript.bar_active(), "the open panel kept the mouse");
+    }
+
+    /// A drag over the chat copies the chat (Victor, 21/11: every pasted line ended in the scrollbar's
+    /// glyph). The bar owns the screen's last column, so a selection stops at the column before it -
+    /// both the text on the clipboard and the highlight - and a drag that reaches that column takes
+    /// nothing from it. Driven through the host's own mouse path (`handle_mouse`), over a view the
+    /// transcript really drew a bar into.
+    #[test]
+    fn a_drag_onto_the_bar_column_copies_the_chat_and_never_the_bar() {
+        use wa_term::selection::Mouse;
+        let mut state = super::ConsoleInput::default();
+        let mut editor = wa_term::terminal_editor::Editor::default();
+        editor.row = 39; editor.width = 80; editor.height = 3;
+        state.editor = Some(editor);
+        for n in 0..400 { state.transcript.write(&format!("line {n}\n")); }
+        let _ = super::layout_frame(&mut state); // one frame: the transcript knows its bar
+        assert!(state.transcript.bar().is_some(), "a long chat draws a bar to scroll");
+        super::handle_mouse(&mut state, Mouse::Press(3, 5));
+        assert!(state.selection.is_some(), "a press in the text starts a selection");
+        assert_eq!(state.selection.as_ref().unwrap().cols, 79, "80 columns, one of them the bar's");
+        // The drag runs on to the bar's own column: the selection stops at the chat's last one.
+        super::handle_mouse(&mut state, Mouse::Drag(5, 80));
+        let selection = state.selection.as_ref().expect("a drag keeps it");
+        assert_eq!(selection.head.1, 79, "the drag stops where the chat stops, not on the bar");
+        let text = wa_term::selection::text(&selection.rows, selection.anchor, selection.head, selection.cols);
+        assert!(!text.contains(['\u{2502}', '\u{2503}', '\u{2588}']), "no glyph of the bar: {text:?}");
+        assert!(text.lines().all(|line| line == line.trim_end()), "and no trailing spaces: {text:?}");
+        assert!(text.lines().count() >= 3, "three rows were dragged over: {text:?}");
+        // The highlight is clamped the same way: it never paints the bar's column.
+        let frame = wa_term::selection::overlay(&selection.rows, selection.anchor, selection.head, selection.cols);
+        assert!(!frame.contains(['\u{2502}', '\u{2503}', '\u{2588}']), "the overlay leaves the bar alone: {frame:?}");
     }
 
     /// The rule that keeps a detached console from blanking the screen, and the values a real

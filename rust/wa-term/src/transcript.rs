@@ -690,6 +690,29 @@ impl Transcript {
     /// The bar as the last `view` drew it: `None` while no bar is shown.
     pub fn bar(&self) -> Option<Bar> { self.bar_last }
 
+    /// How many columns the chat's text occupies at a screen `width`: the last column a mouse
+    /// selection may reach. The bar costs a column while it is drawn and `view` wraps the chat one
+    /// column narrower then; this repeats that arithmetic for the caller that copies what was dragged
+    /// over, so a copy cannot disagree with the draw and take the bar's glyph as text (Victor, 21/11:
+    /// every pasted line ended in `\u{2502}`).
+    pub fn text_width(&self, width: usize) -> usize {
+        let width = width.max(1);
+        if self.bar { width.saturating_sub(1).max(1) } else { width }
+    }
+
+    /// The bar's column alone, each cell at its own absolute position: what a frame that repainted
+    /// the chat's rows must write back after it. `selection::overlay` clears a row with `2K`, the
+    /// bar's column with it, so without this the track would vanish under a selection. Empty while
+    /// no bar is drawn.
+    pub fn bar_frame(&self, width: usize) -> String {
+        let Some(bar) = self.bar_last else { return String::new() };
+        let mut frame = String::new();
+        for (offset, (glyph, colour)) in bar.cells().iter().enumerate() {
+            frame.push_str(&format!("\x1b[{};{width}H{colour}{glyph}{RESET}", offset + 1));
+        }
+        frame
+    }
+
     /// Whether a pointer at `(row, col)` of a `width`-wide screen is on the bar: its last column,
     /// while the bar is shown. Rows and columns are screen rows and cells, 1-based, as the terminal
     /// reports them.
