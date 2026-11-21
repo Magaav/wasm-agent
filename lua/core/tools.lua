@@ -1866,9 +1866,11 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     -- read before this point and is not touched by it. A read-only command takes no snapshot at all.
     local watched = nil
     if ctx and type(ctx.emit) == "function" and ctx.watch_changes then
-      watched = bash_changes.before(cwd, args.command)      watched = bash_changes.before(cwd,
+      watched = bash_changes.before(cwd,
         ctx.read_only_command and ctx.read_only_command(args.command) or nil)
-    end    local result = run(args.command, timeout, cwd, provenance)    -- After the command: what it changed. Emitted as its own event, so the model's result above stays
+    end
+    local result = run(args.command, timeout, cwd, provenance)
+    -- After the command: what it changed. Emitted as its own event, so the model's result above stays
     -- exactly what the tool returned, and a reader who is not watching changes pays nothing.
     if watched ~= nil and ctx and type(ctx.emit) == "function" then
       local changed, refused = bash_changes.changed(watched)

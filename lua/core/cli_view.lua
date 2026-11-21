@@ -825,7 +825,8 @@ function M.diff_block(change, width, live)
       -- keyword or a string looks like in this terminal. A row that is context (unchanged) keeps the
       -- diff colour alone, because a hunk is read for what changed.
       local body = row.code or ""
-      local painted = {}      if row.op ~= " " and row.lang and row.lang ~= "" then
+      local painted = {}
+      if row.op ~= " " and row.lang and row.lang ~= "" then
         markdown.scan_code(body, row.lang, function(text, style)
           if text == "" then return end
           painted[#painted + 1] = paint(text, style and { style, band } or base, live)

@@ -3663,7 +3663,8 @@ function M:run_body(text, images)
       watch_changes = true,
       -- The one rule for what a shell command may read, handed to the change watcher rather than
       -- re-derived there (lua/core/bash_changes.lua).
-      read_only_command = function(command) return not M.command_effect("bash", { command = command }) end,      emit = function(event) self.emit(event) end }
+      read_only_command = function(command) return not M.command_effect("bash", { command = command }) end,
+      emit = function(event) self.emit(event) end }
     dispatch_ctx.steering_admit=function() return steering.admit(self.user,self.session_id,self.steering_run_id) end
     local parallel_ops = tools.start_parallel_bash(calls, memory, self.role, dispatch_ctx)
     -- The batching treatment was retired (04/11): every run now carries the default guidance, so
