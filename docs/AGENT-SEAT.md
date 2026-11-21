@@ -7,8 +7,12 @@ one model, or that guesses what the model meant, is not done.
    fix first - a sentence of guidance, one retry, a default - measure it, and build more only for what it does not fix.
 1. **No silent loss.** Every action the model sends is run, or the model is told exactly why not and what to do next (a named,
    counted notice). A turn never ends "answered" on an unexecuted action or a plan, and never fails without saying why.
-2. **Model-agnostic action.** One CodeAct protocol with two transports - a fenced `run` block in the answer, or a native
-   `run(code)` tool call. Which one a model uses is chosen from its measured profile (7), never hard-coded per model name.
+2. **Model-agnostic action, ONE transport.** One CodeAct protocol: the native `run(code)` tool call, and nothing else
+   (operator, 21/11 - the fenced `run` block, the `WASM_AGENT_RAW_CODE` switch that chose between transports and the A/B arms
+   are gone: two doors are two things to get wrong, and the measured failures were all on the fenced one). A model that writes
+   its call, or a run block, as TEXT gets one named continue that names the run tool, and a second consecutive one fails the
+   turn by name - never a silent ending. A provider that cannot answer with a tool call is refused BY NAME at start, never
+   moved to another transport. A model is still measured (7); what the measurement decides is guidance, not a second door.
 3. **Adapters normalize, the core never guesses.** Each provider adapter turns its stream into one normalized message: answer
    text, reasoning, tool calls, finish reason. The core reads only that. A provider quirk is fixed in its adapter. Code is never
    executed from reasoning.

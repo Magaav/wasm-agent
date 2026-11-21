@@ -117,7 +117,20 @@ local PART_REASON={workflow='orchestration',skills='skills',project='instruction
  environment='platform',workdir='platform',keys='keys',tools='policy',guidelines='policy',
  safety='policy',codemode='policy',generic='prompt',role='prompt'}
 
-local REASON_ORDER={'orchestration','skills','tools','policy','instructions','platform','keys','prompt'}
+local REASON_ORDER={'native','orchestration','skills','tools','policy','instructions','platform','keys','prompt'}
+-- The mode a thread was FROZEN in, when this build no longer has it. Victor 21/11: a thread frozen in
+-- a removed mode moves to the native run tool, with ONE note that names the change, and its earlier
+-- rows stay untouched. `native` is the one word that needs no note; "off" (no code channel) and every
+-- word the removed switch took (only, first, stop, on, e2, e3, bash) do; an ABSENT field is a record
+-- written before the field existed, which was frozen in only (a27490af's default).
+local function removed_mode(record)
+ local mode=type(record)=='table' and record.raw_mode or nil
+ if mode=='native' then return nil end
+ if mode==nil or mode=='' then return 'only' end
+ return tostring(mode)
+end
+M.removed_mode=removed_mode
+
 local function ordered(reasons)
  local seen={}
  for _,reason in ipairs(reasons or {}) do seen[reason]=true end
@@ -235,6 +248,15 @@ function M.enforce(ctx,current)
    facts=now.facts}
  if report.changed or report.note_required then
   local reasons,detail=M.classify(record,now)
+  -- ONE path (Victor 21/11): a thread frozen in a mode this build removed is told, by name, in the
+  -- same note that reports the tool list change - and only once, because the note is durable.
+  local gone=removed_mode(record)
+  report.removed_mode=gone
+  if gone then
+   local merged={'native'}
+   for _,reason in ipairs(reasons or {}) do merged[#merged+1]=reason end
+   reasons=ordered(merged)
+  end
   report.detail=detail
   if told~=(now.orchestration==true) then
    local merged={}
@@ -318,6 +340,13 @@ local function compose(report,frozen,opts)
     ..' Effectful calls run directly, with no route_task and no new child. A child that is already '
     ..'running keeps running: collect it with subagent action="status" or "await".')
   end
+ end
+ if set.native then
+  add('This session was started in the mode '..string.format('%q',tostring(report.removed_mode or 'unknown'))
+   ..', and this node no longer has it: the fenced run block and the switch that chose between code '
+   ..'paths are gone, so run(code=...) is the only way to act. Call the run tool with the script in '
+   ..'its code argument; a run block, or any other tool-call markup written as text, runs nothing and '
+   ..'earns one notice naming this. Your earlier messages are unchanged.')
  end
  if set.skills then
   add('The skills on this node changed since this session started, so the skill list in your '

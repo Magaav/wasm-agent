@@ -1287,9 +1287,14 @@ function M:build_context()
   local raw_code_lib=dofile('lua/core/raw_code.lua')
   local switch_refusal=raw_code_lib.switch_refusal()
   if switch_refusal then error(switch_refusal.text,0) end
+  -- The door is the PROVIDER's row, and a provider this node cannot name is not passed as native: the
+  -- node keeps the failure it always had (its own provider error, a few lines later), and this check
+  -- speaks only about a provider it can name.
   local settings_ok, settings=pcall(function() return dofile('lua/core/provider.lua').settings() end)
-  local transport_refusal=raw_code_lib.transport_refusal(settings_ok and settings.provider or nil, self.model)
-  if transport_refusal then error(transport_refusal.text,0) end
+  if settings_ok and type(settings)=='table' and type(settings.provider)=='string' and settings.provider~='' then
+    local transport_refusal=raw_code_lib.transport_refusal(settings.provider, self.model or settings.model)
+    if transport_refusal then error(transport_refusal.text,0) end
+  end
   -- One policy for every thread, pinned with the context the tools and the prompt are built from.
   local code_ctx={session_id=self.session_id,user_id=self.user,role=self.role,subagent=self.subagent}
   self.codemode_policy=dofile('lua/core/codemode_policy.lua').pin(memory,self.role,code_ctx)

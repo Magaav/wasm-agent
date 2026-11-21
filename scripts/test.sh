@@ -1862,6 +1862,20 @@ WA_SCRIPT=scripts/test-leak-net.lua "$BIN" --db "$DB" | grep "leak net ok"
 # runs the code native_run builds in the real sandbox, because the defect is what JavaScript does
 # with that code.
 WA_SCRIPT=scripts/test-native-raw-vars.lua "$BIN" --db "$DB" | grep "native raw vars ok"
+# ONE run path (Victor 21/11). The three things that keep it one: the switch is refused BY NAME for
+# every value, an unmeasured provider is refused by name instead of moved to another path, a run block
+# written as text is markup that runs nothing, and a thread frozen in a removed mode moves to the run
+# tool with ONE note naming the mode - its earlier rows byte-identical and a thread already on this
+# path paying no cache miss.
+WA_SCRIPT=scripts/test-one-run-path.lua "$BIN" --db "$DB" | grep "one run path ok"
+# The same refusal in a REAL process, which is how an operator meets it: a node that still exports the
+# removed switch refuses the turn by name, sends no request, and exits non-zero rather than acting.
+REFUSE_OUT=$(WASM_AGENT_RAW_CODE=only "$BIN" --db "$DB" chat --once "say ok" 2>&1) && REFUSE_STATUS=0 || REFUSE_STATUS=$?
+if [ "$REFUSE_STATUS" = 0 ]; then echo "the removed switch did not refuse the run (exit 0)" >&2; exit 1; fi
+case "$REFUSE_OUT" in
+  *"run_switch_removed: WASM_AGENT_RAW_CODE=only is gone"*) : ;;
+  *) echo "the refusal did not name the switch and its value: $REFUSE_OUT" >&2; exit 1 ;;
+esac
 # ONE guidance source: the run-tool sentence plus the batching sentence, never the codemode guidance,
 # asserted on the prompt build_context really builds.
 WA_SCRIPT=scripts/test-native-guidance.lua "$BIN" --db "$DB" | grep "native guidance ok"
