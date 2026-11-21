@@ -149,6 +149,29 @@ Two rows were red; both are fixed at `af62ac53`, and neither was weakened:
 Both were run on this branch with the tree's binary before the commit; `test-handle-wake` (16) and
 `test-handle-wake-turn` (10) were re-run after the `reason` rename and stay green.
 
+## The gate's second round (main 975d4612 + this branch)
+
+`scripts/test-rel-native-poll.lua` reported `ran 5` instead of 3. Reproduced and diagnosed at
+`d7d7cdb0`; two causes, neither of them the guard's rule:
+
+1. **The fixture's channel had been removed.** The row ran its script as a fenced `js run` block through
+   `WASM_AGENT_RAW_CODE`, and a newer main removed that switch in favour of the run tool (`run(code=...)`
+   is the only way to act). On the merged tree the reply answered `run_switch_removed` and the loop never
+   reached the guard. The fixture now asks `lua/core/raw_code.lua` which door exists (`switch_refusal`
+   present = the switch is gone) and sends the SAME script through it - a fenced block where the switch
+   is honoured, a `run`/`codemode` tool call where it is not, the name taken from the live catalogue
+   (`{type='function', function={name=...}}`, which is the field a first attempt read as `entry.name` and
+   silently missed).
+2. **A real race in the row.** An operation goes `accepted -> running` on its own, and a state change IS
+   progress, so the guard correctly resets its repeat count when it lands mid-loop - hence `ran 5` on a
+   loaded machine and `ran 3` on an idle one. The row now waits for the supervisor to say `running`
+   (bounded at 20 s) and asserts it did, so the loop starts on a running operation and the existing
+   `rounds == 3` assertion is deterministic instead of load-dependent. No assertion was removed or
+   loosened; the row gained two checks (5 now).
+
+Verified: 3 runs on this branch (all 5 checks, 0 failed), one run under 12-way CPU load (0 failed),
+and one run on the exact preflight merge commit `2560215744` (0 failed).
+
 ## Remaining blockers
 
 * `scripts/test-discriminates.sh` (the land gate) was not run: it needs a clean base tree and a
