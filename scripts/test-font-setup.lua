@@ -191,6 +191,49 @@ local refused, refused_why = font_setup.edited_text(wezterm, "return {}\n")
 ok(refused == nil and tostring(refused_why) == "wezterm_font_table_absent",
   "a wezterm config with no font table is refused by name: " .. tostring(refused_why))
 
+-- ---- running it TWICE, and what that protects --------------------------------------
+-- A second run must find nothing to do. It is not tidiness: the backup is the undo, and an idempotent
+-- check that fails here rewrites the file and overwrites the backup with already-edited bytes - which is
+-- exactly how a --undo restored the wrong thing (measured 21/11).
+write(foot_path, "[main]\nfont=Source Code Pro:size=11\n")
+eq(font_setup.draws_icons("Source Code Pro"), false, "an uninstalled font cannot draw wa's icons")
+eq(font_setup.draws_icons("JetBrainsMono Nerd Font"), true, "a Nerd Font can")
+eq(font_setup.draws_icons("JetBrains Mono:size=11:charwidth=6:icons=wa Icons"), true,
+  "and so can the line this command itself writes (or a second run would edit it again)")
+eq(font_setup.draws_icons("JetBrains Mono:size=11"), false,
+  "a plain JetBrains Mono description alone cannot: the family is read before the colon")
+-- The DESCRIPTION is split from the family before fc-list is asked anything.
+eq(font_setup.family_of("Source Code Pro:size=11:charwidth=6"), "Source Code Pro",
+  "foot's description is split at its first colon")
+eq(font_setup.family_of("Fira Code 11"), "Fira Code", "and kitty's trailing size is dropped")
+
+-- The whole command twice, on one scratch tree: the first edits, the second says there is nothing to do,
+-- and the backup still holds the ORIGINAL bytes.
+local twice_home = scratch_root .. "/twice-home"
+mkdir(twice_home)
+local twice_terminal = { name = "foot", path = twice_home .. "/foot.ini", kind = "ini", section = "main", key = "font" }
+write(twice_terminal.path, "[main]\nfont=Source Code Pro:size=11\n")
+local first = font_setup.configure_terminal(twice_terminal, { draws = font_setup.draws_icons })
+eq(first.action, "edited", "the first run edits")
+local original_backup = read(first.backup)
+local second = font_setup.configure_terminal(twice_terminal, { draws = font_setup.draws_icons })
+eq(second.action, "left alone", "the SECOND run leaves it alone: it already carries wa Icons")
+eq(read(first.backup), original_backup, "and the backup is untouched, so --undo still restores the original")
+
+-- A command that FAILS is not a value. host.exec answers an operation ENVELOPE here, and reading it as
+-- text made a gsettings command that failed look like a successful read of a font called {"cleanup":...
+-- (measured 21/11 on this very node).
+local failed_read, failed_why = font_setup.decode_exec('{"ok":false,"process_exit_code":1,"stdout":""}')
+ok(failed_read == nil and tostring(failed_why):find("exec_failed", 1, true) ~= nil,
+  "a failed command decodes to nil plus a reason: " .. tostring(failed_why))
+eq(select(1, font_setup.decode_exec('{"ok":true,"process_exit_code":0,"stdout":"JetBrains Mono 11"}')),
+  "JetBrains Mono 11", "a successful one decodes to its stdout")
+eq(select(1, font_setup.decode_exec("plain stdout")), "plain stdout",
+  "and a host that answers plain text passes through untouched")
+-- A GNOME profile is a bare id: an error message must never become one.
+eq(font_setup.gnome_font and select(1, font_setup.decode_exec('{"ok":false,"process_exit_code":1}')), nil,
+  "no font is invented from a failed read")
+
 -- ---- the other three terminals the brief names -------------------------------------
 -- WINDOWS TERMINAL: one JSON file per user, its face under "defaults"."font". Edited in place, every other
 -- byte of the file left alone - and refused BY NAME when the file has no "defaults" object to edit.

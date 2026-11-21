@@ -14,6 +14,7 @@ Base: 13247bdb (origin/main). Branch change/wa-fonts. Six items, one commit each
 | 5 (refine) | 3f5bae64 | the served copies ARE the .ttf files the installer needs, so no face ships twice (570 KB of duplicate removed). |
 | 4 | 76157aaf | `lua/core/icons.lua`: one table, four sets (wa \| nerd \| unicode \| ascii), `/icons <set>`, `WA_ICONS`, config file, and the default read from the setup's record. Nine context states in wa/nerd/unicode. |
 | 3 | edc40dd4 | `wa setup fonts [--undo] [--dry-run] [--verbose]`: per-user install (Linux/macOS/Windows paths), a known terminal's config edited ONLY when its face measurably cannot draw wa's icons, backup before every write, one line after, undo. |
+| 3 (all eight) | b0cbc329 | the brief lists EIGHT terminals; the first version shipped five. Windows Terminal (JSON, face under defaults) and GNOME Terminal (gsettings, old value as the backup) added; iTerm2 refused BY NAME because its profiles are a binary plist, with the setting to change by hand in the refusal. |
 | 2 | 429ca0fb | both release bundles carry the faces and the licences: Linux (whole `ui/`), Termux `RL_UI_ASSETS`, Windows installer/package/packaging lists. |
 | 3+5 | 1500b9d8 | the installer runs `wa setup fonts` with no prompt; `--glyph-font` leads with "wa Icons"; the writer and the reader of the setup record name the same path (bug, below). |
 

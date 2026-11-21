@@ -140,10 +140,33 @@ function M.safe_name(name)
   return (tostring(name or ""):gsub("[^%w%.%-_ ]", ""):gsub("^%s+", ""):gsub("%s+$", ""))
 end
 
+-- ONE answer shape for a command, on every host.
+--
+-- MEASURED 21/11 on this node: host.exec does NOT answer the command's stdout, it answers a JSON
+-- OPERATION ENVELOPE - {"ok":true,"stdout":"...","stderr":"...","process_exit_code":0} - and a command
+-- that failed answers ok:false with an EMPTY stdout. Treating that envelope as text made
+-- 'gsettings get ...' look like a successful read whose value was the whole envelope, so a GNOME profile
+-- that does not exist on this machine was "read", "measured" and then written to. A command that failed
+-- is not a value: this decodes the envelope, and answers nil plus a named reason for anything that is
+-- not ok. A host that returns plain stdout (older binaries, a test's own stub) passes through untouched.
+local function decode_exec(answer)
+  if type(answer) ~= "string" then return nil, "exec_no_answer" end
+  local trimmed = answer:gsub("^%s+", "")
+  if trimmed:sub(1, 1) == "{" then
+    local decoded_ok, value = pcall(json.decode, trimmed)
+    if decoded_ok and type(value) == "table" and value.ok ~= nil then
+      if value.ok == true then return tostring(value.stdout or ""), nil end
+      return nil, "exec_failed:" .. tostring(value.process_exit_code or "no_exit")
+    end
+  end
+  return answer, nil
+end
+M.decode_exec = decode_exec
+
 local function run_shell(command)
   local ok, out = pcall(host.exec, command, "", 20)
-  if ok and type(out) == "string" then return out end
-  return nil
+  if not ok then return nil, "exec_unavailable" end
+  return decode_exec(out)
 end
 M.run_shell = run_shell
 
@@ -226,9 +249,16 @@ end
 
 -- GNOME Terminal through gsettings: the default profile's id, then that profile's font.
 function M.gnome_profile()
+  -- THE READ MUST FAIL CLOSED. A machine with no GNOME Terminal (this one) fails the command; that is
+  -- nil, and a nil profile means the terminal is left alone - never a profile name invented from an
+  -- error message (measured 21/11: the whole JSON envelope was taken as the profile id).
   local out = run_shell("gsettings get org.gnome.Terminal.ProfilesList default 2>/dev/null")
-  if type(out) ~= "string" then return nil end
-  return out:gsub("^%s+", ""):gsub("%s+$", ""):gsub("^'", ""):gsub("'$", "")
+  if type(out) ~= "string" or out == "" then return nil end
+  local profile = out:gsub("^%s+", ""):gsub("%s+$", ""):gsub("^'", ""):gsub("'$", "")
+  -- A profile id is a bare UUID or a short name. Anything with a brace, a quote or whitespace in it is
+  -- not one, and a value that is not one is refused rather than pasted into a command.
+  if profile == "" or #profile > 64 or profile:find("[%s{}%[%]]") then return nil end
+  return profile
 end
 
 function M.gnome_key(profile)
@@ -238,21 +268,45 @@ end
 function M.gnome_font(profile)
   local out = run_shell("gsettings get " .. M.gnome_key(profile) .. " font 2>/dev/null")
   if type(out) ~= "string" or out == "" then return nil end
-  return out:gsub("^%s+", ""):gsub("%s+$", ""):gsub("^'", ""):gsub("'$", "")
+  local font = out:gsub("^%s+", ""):gsub("%s+$", ""):gsub("^'", ""):gsub("'$", "")
+  -- A font DESCRIPTION, not whatever came back: a value with a brace is a message, not a font.
+  if font == "" or font:find("[{}]") then return nil end
+  return font
+end
+
+-- A terminal's font DESCRIPTION is not a family name: foot writes "Family:size=11:charwidth=6",
+-- kitty "Family 11", and fc-list only answers about the FAMILY. Asking it the whole description is
+-- how this check came to answer "cannot measure" for every configured terminal (measured 21/11).
+function M.family_of(description)
+  local text = tostring(description or "")
+  local family = text:match("^([^:]+)") or text
+  family = family:gsub("%s+%d+%.?%d*$", "")
+  return (family:gsub("^%s+", ""):gsub("%s+$", ""))
 end
 
 -- Can the font this terminal draws TODAY show wa's icons? true / false, or nil when nobody could ask -
 -- and nil never becomes "yes".
 function M.draws_icons(font_name)
   if not font_name or font_name == "" then return nil end
+  -- ALREADY SET UP IS "YES". foot names its fallback in the same line this command writes
+  -- ("JetBrains Mono:size=11:charwidth=6:icons=wa Icons"), and re-reading only the family made a second
+  -- run edit the file again - which is not merely wasteful: it overwrites the backup with already-edited
+  -- bytes, and that is how a --undo came to restore the wrong thing on 21/11.
+  if tostring(font_name):lower():find("wa icons", 1, true) then return true end
   if tostring(font_name):lower():find("nerd", 1, true) then return true end
-  local name = M.safe_name(font_name)
+  local name = M.safe_name(M.family_of(font_name))
   if name == "" then return nil end
-  local listed = run_shell("fc-list '" .. name .. "' 2>/dev/null")
-  if type(listed) ~= "string" or listed == "" then return nil end
+  -- THREE ANSWERS, and the difference is the whole rule:
+  --   the command FAILED           -> nil   (nobody can ask on this machine)     -> no edit
+  --   it ran and matched no font  -> false (a font that is not installed draws nothing) -> edit
+  --   it ran and matched a font   -> ask that font's charset
+  -- fc-list exits 0 even when it matches nothing (measured 21/11), so the tool's own answer is the
+  -- envelope's ok, never the exit code: a failed command must not read as 'no such font'.
+  local listed, listed_why = run_shell("fc-list '" .. name .. "' 2>/dev/null")
+  if listed == nil then return nil, listed_why end
+  if listed == "" then return false end
   local charset = run_shell("fc-list --format '%{charset}\n' '" .. name .. "' 2>/dev/null")
   if type(charset) ~= "string" or charset == "" then return nil end
-  -- The empty context ball, U+F0766: one of the nine every set draws, so a face with it has the family.
   local want = 0xF0766
   for token in charset:gmatch("[^%s]+") do
     local low, high = token:match("^(%x+)%-(%x+)$")
@@ -496,12 +550,18 @@ function M.configure_gsettings(terminal, opts)
   end
   row.profile = profile
   local key = M.gnome_key(profile)
-  local current = opts.gnome_font or run("gsettings get " .. key .. " font 2>/dev/null")
+  local current, read_why = opts.gnome_font or run("gsettings get " .. key .. " font 2>/dev/null")
+  if opts.gnome_font then current, read_why = opts.gnome_font, nil end
   if type(current) ~= "string" or current == "" then
-    row.why = "cannot read the GNOME Terminal profile's font on this machine"
+    row.why = "cannot read the GNOME Terminal profile's font on this machine (" .. tostring(read_why or "no answer") .. ")"
     return row
   end
   current = current:gsub("^%s+", ""):gsub("%s+$", ""):gsub("^'", ""):gsub("'$", "")
+  if current:find("[{}]") then
+    -- Belt and braces: an envelope that reached here would be written as a font name.
+    row.why = "cannot read the GNOME Terminal profile's font on this machine (answer is not a font)"
+    return row
+  end
   row.current = current
   local draws = (opts.draws or M.draws_icons)(current)
   if draws == nil then
