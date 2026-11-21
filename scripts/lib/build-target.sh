@@ -377,17 +377,139 @@ wa_build_cap_enforce() { # <keep path|->
 # Called by `wa_build_run`, and directly by a script that sets CARGO_TARGET_DIR itself but still wants
 # the sweep and the cap to hold.
 wa_build_prepare() { # <tree> [--quiet]
-  local tree=$1 quiet=${2:-} target
+  local tree=$1 quiet=${2:-} target toolchain
   WA_BUILD_THIS_TREE=$(cd "$tree" 2>/dev/null && pwd -P) || WA_BUILD_THIS_TREE=$tree
   export WA_BUILD_THIS_TREE
   target=$(wa_build_target "$tree") || { printf 'onebuild: cannot name a build dir for %s (no sha256 tool)\n' "$tree" >&2; return 1; }
+  # A dir that does not exist yet is seeded BEFORE it is created, from the newest sibling built by this
+  # same toolchain (rule 1 (seeding) below). This is the only place a new child comes into being, so it is
+  # the only place that has to know about it.
+  if [ ! -e "$target" ]; then
+    wa_build_seed "$target" "$quiet"
+  fi
   mkdir -p "$target" 2>/dev/null || { printf 'onebuild: cannot create %s\n' "$target" >&2; return 1; }
-  # The marker is what `wa clean` judges a build dir by: `tree` names the checkout it was built from,
-  # the same file `disk.rs::build_env_for_in` writes.
+  # The marker wa clean judges a build dir by: "tree" names the checkout it was built from, the same file
+  # disk.rs::build_env_for_in writes.
   printf '%s' "$WA_BUILD_THIS_TREE" > "$target/tree" 2>/dev/null || true
+  # Which toolchain builds here. Written on every prepare, because the value that matters is the compiler
+  # the NEXT build will use, and a later new tree reads it to decide whether this child is reusable.
+  toolchain=$(wa_build_toolchain) && printf '%s' "$toolchain" > "$target/toolchain" 2>/dev/null || true
   wa_build_sweep "$quiet" >/dev/null
   wa_build_cap_enforce "$target" >/dev/null
   printf '%s' "$target"
+  return 0
+}
+
+# ---- rule 1 (seeding): a NEW target dir starts from the newest sibling for the same toolchain -------
+
+# WHY. Every tree gets its own child of the one root (rule 2 above), which is what keeps one tree from
+# seeing another tree's artifacts - and it is also why every NEW worktree, every landing tree and every
+# land gate used to compile from cold: no child existed, so cargo had nothing to reuse. Measured on this
+# node (16 cores, btrfs, 21/11): a cold release build of wa-host took 144 s; the same build into a child
+# seeded from a sibling took 61 s (a tree at another commit) and 64 s (same commit, one changed crate),
+# and the binary each produced reported ITS OWN commit, not the seed's. The seed is a copy made with
+# cp -a --reflink=always, so the two children share their blocks on btrfs until one of them writes:
+# 1.4 GB copied in 105 ms, against minutes of compiling.
+#
+# WHAT IT IS NOT. It is not a shared target dir - rule 2 refuses that and scripts/test-onebuild.mjs keeps
+# the refusal. The seed is a POINT-IN-TIME COPY that is the new tree's private child from the moment it
+# exists. Cargo's own fingerprints then decide what is still valid, so a seed only saves the work that
+# did not change, and a tree whose crate differs rebuilds that crate: scripts/test-build-seed.mjs fails
+# if a seeded build ever reports another tree's code.
+#
+# THREE CONDITIONS, because a wrong seed is worse than a cold build:
+#   * SAME TOOLCHAIN. An artifact another rustc produced is not reusable, so every child records the
+#     toolchain that built it (child/toolchain) and only a sibling with the same value is a candidate.
+#     Unknown is not yes: a child with no record is never a seed.
+#   * NOT IN USE. A child another process is compiling into right now is not a seed; its build lock is
+#     probed non-destructively, exactly as the cap does it.
+#   * REFLINK OR NOTHING. --reflink=always either shares the blocks or fails, and it never falls back to
+#     a full copy: a second 1.4 GB per tree is what the cap exists to stop. When it fails the build says
+#     so and starts cold.
+
+# The toolchain a build output belongs to, as one short string. rustc -vV carries the compiler's own
+# commit hash, so two compilers of one version that are not the same binary do not match.
+wa_build_toolchain() {
+  local v
+  v=$(rustc -vV 2>/dev/null) || return 1
+  [ -n "$v" ] || return 1
+  if command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$v" | sha256sum | cut -c1-16
+  elif command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$v" | shasum -a 256 | cut -c1-16
+  else
+    return 1
+  fi
+}
+
+# When a child was last built, in seconds, for "most recently used". The binary a build produces is the
+# best answer; a child with only a debug output, or none yet, falls back to its own entries.
+wa_build_used_at() { # <child> -> seconds
+  local child=$1 newest=0 stamp candidate
+  for candidate in "$child/release/wa" "$child/release/wa.exe" "$child/debug/wa" "$child/debug/wa.exe" "$child/release" "$child/debug" "$child"; do
+    [ -e "$candidate" ] || continue
+    stamp=$(stat -c %Y "$candidate" 2>/dev/null || stat -f %m "$candidate" 2>/dev/null || echo 0)
+    case "$stamp" in ''|*[!0-9]*) continue ;; esac
+    if [ "$stamp" -gt "$newest" ]; then newest=$stamp; fi
+  done
+  printf '%s' "$newest"
+}
+
+# The child to seed from: the most recently built sibling of the same toolchain that is not being built
+# into right now. Prints nothing when there is none, which means a cold build.
+wa_build_seed_candidate() { # <target>
+  local target=$1 mine candidate used best='' best_used=0
+  mine=$(wa_build_toolchain) || return 0
+  for candidate in "$(wa_build_target_root)"/*; do
+    [ -d "$candidate" ] || continue
+    [ -L "$candidate" ] && continue
+    [ "$candidate" = "$target" ] && continue
+    [ -f "$candidate/toolchain" ] || continue
+    [ "$(cat "$candidate/toolchain" 2>/dev/null)" = "$mine" ] || continue
+    if [ ! -d "$candidate/release" ] && [ ! -d "$candidate/debug" ]; then continue; fi
+    if command -v flock >/dev/null 2>&1 && [ -f "$candidate/.wa-build.lock" ]; then
+      flock -n "$candidate/.wa-build.lock" true 2>/dev/null || continue
+    fi
+    used=$(wa_build_used_at "$candidate")
+    if [ "$used" -gt "$best_used" ]; then best=$candidate; best_used=$used; fi
+  done
+  printf '%s' "$best"
+}
+
+# Seed a target dir that does not exist yet. Staged beside it and renamed into place, so a copy that
+# fails halfway leaves NO half-seeded child behind: a partial seed is a silent wrong answer, a missing
+# one is only a slow build.
+wa_build_seed() { # <target> [--quiet]
+  local target=$1 quiet=${2:-} candidate stage bytes
+  if [ "${WA_BUILD_SEED:-1}" = 0 ]; then return 0; fi
+  if ! wa_build_toolchain >/dev/null 2>&1; then
+    printf 'onebuild: cannot name this build toolchain (rustc -vV failed), so %s starts cold\n' "$(basename "$target")" >&2
+    return 0
+  fi
+  candidate=$(wa_build_seed_candidate "$target")
+  [ -n "$candidate" ] || return 0
+  stage="$target.seed-$"
+  rm -rf -- "$stage" 2>/dev/null || true
+  if ! cp -a --reflink=always "$candidate" "$stage" 2>/dev/null; then
+    rm -rf -- "$stage" 2>/dev/null || true
+    if [ "$quiet" != --quiet ]; then
+      printf 'onebuild: reflink is not supported on this filesystem, so %s starts cold instead of being seeded from %s (never a full copy)\n' \
+        "$(basename "$target")" "$(basename "$candidate")" >&2
+    fi
+    return 0
+  fi
+  # The copy carries the origin's markers, and they are the origin's facts, not this child's.
+  rm -f -- "$stage/tree" "$stage/toolchain" "$stage/.wa-build.lock" 2>/dev/null || true
+  if [ -e "$target" ]; then rm -rf -- "$stage" 2>/dev/null || true; return 0; fi
+  if ! mv -- "$stage" "$target" 2>/dev/null; then
+    rm -rf -- "$stage" 2>/dev/null || true
+    return 0
+  fi
+  bytes=$(wa_build_bytes "$target")
+  if [ "$quiet" != --quiet ]; then
+    printf 'onebuild: seeded %s from %s (%s, cp -a --reflink=always: shared blocks, cargo rebuilds only what differs)\n' \
+      "$(basename "$target")" "$(basename "$candidate")" "$(wa_build_human "$bytes")" >&2
+  fi
   return 0
 }
 
