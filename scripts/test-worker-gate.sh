@@ -13,7 +13,7 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$(pwd -P)
 SCRIPT=$ROOT/scripts/worker-gate.sh
-[ -f "$SCRIPT" ] || { echo "worker-gate: no script at $SCRIPT"; exit 3; }
+[ -f "$SCRIPT" ] || { echo "worker-gate: refused(no_script): no such file or directory: $SCRIPT (this tree has no worker-gate.sh: the row cannot judge the base)"; exit 3; }
 # A scratch directory where a scratch directory belongs: an inherited TMPDIR on this machine points inside
 # the node store, which this row must not write.
 WORK=$(TMPDIR=/tmp mktemp -d)

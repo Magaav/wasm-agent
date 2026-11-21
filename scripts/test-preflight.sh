@@ -12,7 +12,7 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$(pwd -P)
 SCRIPT=$ROOT/scripts/preflight.sh
-[ -f "$SCRIPT" ] || { echo "preflight: no script at $SCRIPT"; exit 3; }
+[ -f "$SCRIPT" ] || { echo "preflight: refused(no_script): no such file or directory: $SCRIPT (this tree has no preflight.sh: the row cannot judge the base)"; exit 3; }
 # The scratch directory is made where a scratch directory belongs, NOT through an inherited TMPDIR that may
 # point inside the node store this row must not write.
 WORK=$(TMPDIR=/tmp mktemp -d)
