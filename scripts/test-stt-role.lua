@@ -42,10 +42,19 @@ local roster = {
   { node_id = 'aa11', name = 'me' },
   { node_id = 'bb22', name = 'producer' },
 }
+-- WHAT stt ASKS FOR, not just what it gets back. A roster ask that leaves `opts` out is a LIVE
+-- probe ask: nodes.list starts one `wa nodes probe <peer>` CHILD PROCESS per peer to learn a
+-- capability set (measured 21/11: a child boots the node, and its boot holds the ledger's write lock
+-- 160-164 ms on a copy of this node's own 913 MB ledger). `owners()` needs ids only, so it must say
+-- so - the same `live_capabilities = false` that nodes.find already passes.
+local list_calls = {}
 local registry = {
   identity = function() return { node_id = 'aa11', public_key = 'pk' } end,
   invalidate = function() end,
-  list = function() return roster end,
+  list = function(opts)
+    list_calls[#list_calls + 1] = opts or {}
+    return roster
+  end,
   find = function(selector)
     for _, node in ipairs(roster) do
       if node.name == selector or node.node_id == selector then return node end
@@ -330,5 +339,31 @@ host.stt_pending = function() error('pump exploded') end
 stt.safe_tick()
 check(true, 'a failing pump does not take the node thread down')
 check(stt.view().last_error ~= nil, 'the failure is visible in the view')
+
+-- ---- the refresh never asks for a live probe (21/11) ----------------------------------------------
+-- `owners()` answers one question: which ids may be admitted. It read them from the FULL live list,
+-- which starts a probe child per peer every 30 s refresh (nodes.lua probe_peers) for capabilities it
+-- never reads. The assertion is on the ASK, so it holds however the roster is answered: a refresh
+-- that fans out probe children fails here even when it gets the right ids back.
+env.WASM_AGENT_STT_ROLE = 'worker'
+env.WASM_AGENT_STT_PRODUCER = 'producer'
+-- The roster this block asserts on, stated here: earlier sections replace it with a single node to
+-- test a producer that is not listed, so relying on theirs would make this check depend on them.
+roster = { { node_id = 'aa11', name = 'me' }, { node_id = 'bb22', name = 'producer' } }
+list_calls = {}
+stt.configure('test')
+check(#list_calls > 0, 'a configure that names its owners read the roster at all')
+for i, opts in ipairs(list_calls) do
+  check(opts.live_capabilities == false,
+    'roster read ' .. i .. ' asked for a live probe (opts.live_capabilities is ' ..
+    tostring(opts.live_capabilities) .. '): owners() needs ids, and a probe child per peer is a '
+    .. 'process per peer holding the ledger write lock for its own boot')
+end
+local asked = {}
+stt.configure('test')
+for _, request in ipairs(admin_requests) do
+  if request.action == 'configure' then asked = request end
+end
+check(#asked.owner_nodes == 2, 'the roster still names every owner, probe-free: ' .. tostring(#asked.owner_nodes))
 
 print('stt role ok — ' .. checks .. ' checks')

@@ -211,10 +211,23 @@ end
 local function owners()
   -- Fresh from the rendezvous, never the 15 s display cache: a worker that joined a moment ago must
   -- be admittable now, and a node removed there must stop being one at once.
+  --
+  -- The ROSTER, and nothing about the peers (measured 21/11). This list needs ids - who may be
+  -- admitted - and it asked for the full live list instead: every 30 s refresh started one
+  -- `wa nodes probe <peer>` CHILD PROCESS per peer (nodes.lua probe_peers, deadline 20 s) to learn a
+  -- capability set this function never reads. Two costs, and neither is owed:
+  --   * a child process per peer, and each child boots the node: its own ledger handle, its own
+  --     memory.setup DDL transaction (measured on a copy of this node's 913 MB ledger: a boot holds
+  --     the write lock 160-164 ms, a probe child the same), so a fleet-sized roster turned a
+  --     housekeeping tick into a burst of writers against the one ledger a turn is trying to append to;
+  --   * the refresh itself no longer waits for a probe that can take its full 20 s deadline.
+  -- `live_capabilities = false` is how nodes.lua says "roster only, do not probe" (M.find already
+  -- asks this way). The read is still FRESH - `invalidate()` above drops the cache, so the roster
+  -- comes from the rendezvous on this call, which is what a worker who just joined needs.
   nodes.invalidate()
   local ids = {}
   local seen = {}
-  for _, node in ipairs(nodes.list()) do
+  for _, node in ipairs(nodes.list({ live_capabilities = false })) do
     local id = node.node_id or node.id
     if type(id) == 'string' and id ~= '' and not seen[id] then
       seen[id] = true
