@@ -104,7 +104,33 @@ function M.terminals(home)
     { name = "kitty", path = config_home .. "/kitty/kitty.conf", kind = "conf", key = "font_family" },
     { name = "ghostty", path = config_home .. "/ghostty/config", kind = "conf", key = "font-family" },
     { name = "wezterm", path = config_home .. "/wezterm/wezterm.lua", kind = "lua-wezterm" },
+    -- Windows Terminal keeps one JSON file per user, and its default profile font is a key in it.
+    { name = "windows-terminal", path = M.windows_terminal_path(home), kind = "json-wt" },
+    -- GNOME Terminal has no config file: its profiles live in dconf, so the font is one key, read and
+    -- written through gsettings. The backup is the old VALUE, recorded in the record --undo reads.
+    { name = "gnome-terminal", path = nil, kind = "gsettings" },
+    -- iTerm2's settings are a BINARY plist. Rewriting it wholesale to change one font is the kind of
+    -- edit that cannot be backed up as text and cannot be verified after the write, so this command
+    -- refuses it BY NAME and prints what to do instead: "unknown is not yes" applies to a GUI profile
+    -- as much as to a coverage question.
+    { name = "iterm2", path = nil, kind = "unsupported",
+      why = "iTerm2 keeps its profiles in a binary plist, which this command does not rewrite: set "
+        .. "Settings > Profiles > Text > Font to JetBrains Mono and add wa Icons as the fallback font" },
   }
+end
+
+-- Windows Terminal's settings.json, per user. Named here so a test can drive the path without a Windows
+-- install (the directory is %LOCALAPPDATA%, or the home's AppData\Local on a node that does not set it).
+function M.windows_terminal_path(home)
+  home = tostring(home or M.user_home())
+  local local_app = host.getenv("LOCALAPPDATA")
+  local base
+  if local_app and local_app ~= "" then
+    base = tostring(local_app):gsub("\\", "/"):gsub("/+$", "")
+  else
+    base = home .. "/AppData/Local"
+  end
+  return base .. "/Packages/Microsoft.WindowsTerminal_8wekyb3d8bbwe/LocalState/settings.json"
 end
 
 -- A font NAME as a shell word: letters, digits, dot, dash, underscore and space only. An allow-list,
@@ -168,8 +194,51 @@ function M.current_font(terminal, text)
     return found
   elseif terminal.kind == "lua-wezterm" then
     return M.wezterm_family(text)
+  elseif terminal.kind == "json-wt" then
+    return M.wt_font(text)
   end
   return nil
+end
+
+-- Windows Terminal: the default profile's font face, read from the settings.json an operator already has.
+function M.wt_font(text)
+  text = tostring(text or "")
+  local at = text:find('"defaults"')
+  if not at then return nil end
+  local block = text:sub(at, math.min(#text, at + 2000))
+  local font_at = block:find('"font"')
+  if not font_at then return nil end
+  local face = block:sub(font_at):match('"face"%s*:%s*"([^"]*)"')
+  return face
+end
+
+-- ... and written back into the same defaults object, leaving every other setting byte-for-byte alone.
+function M.wt_edited(text, value)
+  text = tostring(text or "")
+  local out, count = text:gsub('("defaults"%s*:%s*{.-"font"%s*:%s*{.-"face"%s*:%s*")([^"]*)(")',
+    "%1" .. value .. "%3", 1)
+  if count > 0 then return out end
+  -- No font.face under defaults yet: add one, so a fresh install gets the face too.
+  local with_font, added = text:gsub('("defaults"%s*:%s*{)', '%1"font":{"face":"' .. value .. '"},', 1)
+  if added > 0 then return with_font end
+  return nil, "windows_terminal_defaults_absent"
+end
+
+-- GNOME Terminal through gsettings: the default profile's id, then that profile's font.
+function M.gnome_profile()
+  local out = run_shell("gsettings get org.gnome.Terminal.ProfilesList default 2>/dev/null")
+  if type(out) ~= "string" then return nil end
+  return out:gsub("^%s+", ""):gsub("%s+$", ""):gsub("^'", ""):gsub("'$", "")
+end
+
+function M.gnome_key(profile)
+  return "org.gnome.Terminal.Legacy.Profile:/org/gnome/terminal/legacy/profiles:/:" .. tostring(profile) .. "/"
+end
+
+function M.gnome_font(profile)
+  local out = run_shell("gsettings get " .. M.gnome_key(profile) .. " font 2>/dev/null")
+  if type(out) ~= "string" or out == "" then return nil end
+  return out:gsub("^%s+", ""):gsub("%s+$", ""):gsub("^'", ""):gsub("'$", "")
 end
 
 -- Can the font this terminal draws TODAY show wa's icons? true / false, or nil when nobody could ask -
@@ -214,6 +283,8 @@ function M.font_value(terminal)
   elseif terminal.kind == "toml" then
     return M.TEXT_FAMILY
   elseif terminal.kind == "conf" then
+    return M.TEXT_FAMILY
+  elseif terminal.kind == "json-wt" then
     return M.TEXT_FAMILY
   elseif terminal.kind == "lua-wezterm" then
     return M.TEXT_FAMILY
@@ -278,6 +349,8 @@ function M.edited_text(terminal, text)
     end
     if not replaced then out[#out + 1] = terminal.key .. " " .. value end
     return (table.concat(out, "\n"):gsub("\n+$", "\n"))
+  elseif terminal.kind == "json-wt" then
+    return M.wt_edited(text, value)
   elseif terminal.kind == "lua-wezterm" then
     -- wezterm's config is Lua, and a generated line is not a rewrite of somebody's program: the family
     -- inside the existing font table is the only thing replaced, and a config with no font table is
@@ -349,6 +422,15 @@ end
 function M.configure_terminal(terminal, opts)
   opts = opts or {}
   local row = { name = terminal.name, action = "left alone" }
+  -- A terminal this command KNOWS it cannot edit safely says so, with the instruction that replaces the
+  -- edit: a GUI profile is not a file, and "left alone" with no reason is the answer that gets ignored.
+  if terminal.kind == "unsupported" then
+    row.why = tostring(terminal.why or "this terminal's settings are not a file this command can edit")
+    return row
+  end
+  if terminal.kind == "gsettings" then
+    return M.configure_gsettings(terminal, opts)
+  end
   if not terminal.path then
     row.why = "no user config file this command can safely edit"
     return row
@@ -399,6 +481,55 @@ function M.configure_terminal(terminal, opts)
   return row
 end
 
+-- GNOME Terminal: no file, one dconf key. Read through gsettings, decided like every other terminal, and
+-- written with 'gsettings set'. The BACKUP is the old value, kept in the record (there is no file to copy);
+-- --undo sets it back. Where gsettings is absent - which is every node that is not a GNOME desktop - the
+-- reader answers nil and the terminal is left alone, which is the same rule as a coverage question nobody
+-- can answer.
+function M.configure_gsettings(terminal, opts)
+  local row = { name = terminal.name, action = "left alone" }
+  local run = opts.run or run_shell
+  local profile = opts.gnome_profile or M.gnome_profile()
+  if not profile or profile == "" then
+    row.why = "no GNOME Terminal profile to read on this machine"
+    return row
+  end
+  row.profile = profile
+  local key = M.gnome_key(profile)
+  local current = opts.gnome_font or run("gsettings get " .. key .. " font 2>/dev/null")
+  if type(current) ~= "string" or current == "" then
+    row.why = "cannot read the GNOME Terminal profile's font on this machine"
+    return row
+  end
+  current = current:gsub("^%s+", ""):gsub("%s+$", ""):gsub("^'", ""):gsub("'$", "")
+  row.current = current
+  local draws = (opts.draws or M.draws_icons)(current)
+  if draws == nil then
+    row.why = "cannot measure whether '" .. tostring(current) .. "' draws wa's icons on this machine"
+    return row
+  end
+  if draws then
+    row.why = "'" .. tostring(current) .. "' already draws wa's icons"
+    return row
+  end
+  local value = M.TEXT_FAMILY .. " 11"
+  if opts.dry_run then
+    row.action = "would edit"
+    row.why = "'" .. tostring(current) .. "' cannot draw wa's icons"
+    return row
+  end
+  local out = run("gsettings set " .. key .. " font '" .. value .. "' 2>&1")
+  if type(out) == "string" and out:find("error", 1, true) then
+    row.why = "gsettings_write_failed: " .. out
+    return row
+  end
+  row.action = "edited"
+  row.why = "'" .. tostring(current) .. "' cannot draw wa's icons; now " .. M.TEXT_FAMILY
+  -- No file to copy: the old VALUE is the backup, and the undo puts it back.
+  row.backup_value = current
+  return row
+end
+
 function M.record_path()
   local ok, paths = pcall(dofile, "lua/core/paths.lua")
   if not ok or type(paths) ~= "table" then return nil end
@@ -443,11 +574,18 @@ function M.run(opts)
     end
     local restored = 0
     for _, row in ipairs(record.terminals or {}) do
+      -- A FILE edit is undone from its backup.
       if row.backup and row.path and host.read_file(row.backup) then
         if host.write_file(row.path, host.read_file(row.backup)) then
           pcall(host.exec, "rm -f " .. shell_quote(row.backup), "", 20)
           restored = restored + 1
         end
+      end
+      -- A dconf edit has no file: the old VALUE recorded beside it is what goes back.
+      if row.backup_value and row.profile and M.run_shell then
+        local key = M.gnome_key(row.profile)
+        M.run_shell("gsettings set " .. key .. " font '" .. tostring(row.backup_value) .. "' 2>/dev/null")
+        restored = restored + 1
       end
     end
     -- The installed fonts go too: --undo puts the machine back, not half of it.

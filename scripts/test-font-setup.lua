@@ -191,12 +191,62 @@ local refused, refused_why = font_setup.edited_text(wezterm, "return {}\n")
 ok(refused == nil and tostring(refused_why) == "wezterm_font_table_absent",
   "a wezterm config with no font table is refused by name: " .. tostring(refused_why))
 
+-- ---- the other three terminals the brief names -------------------------------------
+-- WINDOWS TERMINAL: one JSON file per user, its face under "defaults"."font". Edited in place, every other
+-- byte of the file left alone - and refused BY NAME when the file has no "defaults" object to edit.
+local wt = { name = "windows-terminal", path = fixtures .. "/wt/settings.json", kind = "json-wt" }
+write(wt.path, '{\n  "defaultProfile": "{abc}",\n  "defaults": { "font": { "face": "Cascadia Mono", "size": 11 } },\n  "profiles": []\n}\n')
+eq(font_setup.current_font(wt, read(wt.path)), "Cascadia Mono", "Windows Terminal's face is read from defaults")
+local wt_text, wt_why = font_setup.edited_text(wt, read(wt.path))
+ok(wt_text ~= nil, "its settings.json is editable: " .. tostring(wt_why))
+ok(wt_text:find('"face": "JetBrains Mono"', 1, true) ~= nil, "the face is replaced")
+ok(wt_text:find('"defaultProfile": "{abc}"', 1, true) ~= nil, "and every other setting survives")
+ok(wt_text:find('"size": 11', 1, true) ~= nil, "including the size beside it")
+local wt_none, wt_none_why = font_setup.edited_text(wt, '{ "profiles": [] }\n')
+ok(wt_none == nil and tostring(wt_none_why) == "windows_terminal_defaults_absent",
+  "a settings.json with no defaults object is refused by name: " .. tostring(wt_none_why))
+
+-- GNOME TERMINAL: no file, one dconf key. The runner is a fake, so this asserts the gsettings commands.
+local gnome = { name = "gnome-terminal", kind = "gsettings" }
+local gnome_calls = {}
+local gnome_ok = font_setup.configure_gsettings(gnome, {
+  gnome_profile = "b1dcc9dd-5262-4d8d-a863-c897e6d979b9",
+  draws = function() return false end,
+  run = function(command) gnome_calls[#gnome_calls + 1] = command; return "'Ubuntu Mono 13'" end,
+})
+eq(gnome_ok.action, "edited", "a GNOME Terminal profile whose font cannot draw wa's icons is edited")
+eq(gnome_ok.current, "Ubuntu Mono 13", "and the row says what it was")
+eq(gnome_ok.backup_value, "Ubuntu Mono 13", "the old VALUE is the backup (there is no file to copy)")
+local set_seen = false
+for _, command in ipairs(gnome_calls) do
+  if command:find("gsettings set", 1, true) and command:find("JetBrains Mono", 1, true) then set_seen = true end
+end
+ok(set_seen, "and the write goes through gsettings set")
+
+-- ... and with no gsettings answer on this machine, it is left alone rather than guessed at.
+local gnome_absent = font_setup.configure_gsettings(gnome, {
+  gnome_profile = nil, draws = function() return false end, run = function() return nil end,
+})
+eq(gnome_absent.action, "left alone", "a machine with no GNOME profile leaves the terminal alone")
+
+-- ITERM2: refused by name, with the instruction that replaces the edit - its profiles are a binary plist.
+local iterm = { name = "iterm2", kind = "unsupported",
+  why = "iTerm2 keeps its profiles in a binary plist, which this command does not rewrite: set "
+    .. "Settings > Profiles > Text > Font to JetBrains Mono and add wa Icons as the fallback font" }
+local iterm_row = font_setup.configure_terminal(iterm, {})
+eq(iterm_row.action, "left alone", "iTerm2 is never edited")
+ok(tostring(iterm_row.why):find("binary plist", 1, true) ~= nil, "and the refusal says why: " .. tostring(iterm_row.why))
+ok(tostring(iterm_row.why):find("Settings > Profiles > Text > Font", 1, true) ~= nil,
+  "and names the setting to change by hand")
+
 -- An unknown terminal is never in the table at all, so nothing can edit it: the list is the allow-list.
 local known = {}
 for _, terminal in ipairs(font_setup.terminals(scratch_root)) do known[terminal.name] = true end
-for _, name in ipairs({ "foot", "alacritty", "kitty", "ghostty", "wezterm" }) do
+for _, name in ipairs({ "foot", "alacritty", "kitty", "ghostty", "wezterm", "windows-terminal",
+                        "gnome-terminal", "iterm2" }) do
   ok(known[name], name .. " is a known terminal")
 end
+eq(#font_setup.terminals(scratch_root), 8, "the eight terminals the brief names, and no others")
 ok(not known["some-other-terminal"], "an unknown terminal is not in the allow-list")
 
 -- ---- the whole command: record, icon default, undo ------------------------------------------------
