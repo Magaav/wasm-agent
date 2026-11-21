@@ -3909,10 +3909,11 @@ fn content_type(path: &str) -> &'static str {
         "json" => "application/json; charset=utf-8",
         "webmanifest" => "application/manifest+json; charset=utf-8",
         "wasm" => "application/wasm",
-        // wa's two faces are served from the ui dir (ui/fonts/). A font served as
-        // application/octet-stream still loads in most browsers, but the type is part of what the page
-        // asked for and a wrong one is a silent cost (no font MIME sniffing, no cache partitioning by
-        // type): the node says what the bytes are.
+        // wa's two faces are served from the ui dir (ui/fonts/), as the .ttf files the installer copies.
+        // A font served as application/octet-stream still loads in most browsers, but the type is what
+        // the page asked for and a wrong one is a silent cost (no font MIME handling, no cache
+        // partitioning by type): the node says what the bytes are.
+        "ttf" => "font/ttf",
         "woff2" => "font/woff2",
         "svg" => "image/svg+xml",
         "png" => "image/png",
@@ -3931,8 +3932,11 @@ mod content_type_tests {
 
     #[test]
     fn fonts_have_their_own_type() {
-        // wa Icons and JetBrains Mono travel as woff2 under ui/fonts (scripts/build-wa-icons.py).
-        assert_eq!(content_type("fonts/waIcons-Regular.woff2"), "font/woff2");
+        // wa Icons and JetBrains Mono are served from ui/fonts as the SAME .ttf files wa setup fonts
+        // installs (scripts/build-wa-icons.py), so the served type is the one that matches them.
+        assert_eq!(content_type("fonts/waIcons-Regular.ttf"), "font/ttf");
+        assert_eq!(content_type("fonts/JetBrainsMono-Regular.ttf"), "font/ttf");
+        // A .woff2 still answers as a font, not as octets, in case one is ever staged by hand.
         assert_eq!(content_type("fonts/JetBrainsMono-Regular.woff2"), "font/woff2");
     }
 
