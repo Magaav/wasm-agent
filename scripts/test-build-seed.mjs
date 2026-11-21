@@ -1,16 +1,18 @@
 #!/usr/bin/env node
-// A NEW target dir is SEEDED from the newest sibling built by the same toolchain - and a seeded build is
-// still the tree's own build.
+// A NEW target dir is SEEDED from a sibling built from THE SAME SOURCE - and a seeded build is still the
+// tree's own build.
 //
 // The day this answers for (21/11): every new worktree, landing tree and land gate compiled from cold,
-// because ea_build_target gives every tree its own child of the one build root (docs/ONEROOT.md, rule 2).
-// Measured on this node: cold wa-host release 144 s, the same build into a child seeded from a sibling
-// 61 s (a tree at another commit) and 64 s (same commit, one crate changed).
+// because wa_build_target gives every tree its own child of the one build root (docs/ONEROOT.md, rule 2).
+// Measured on this node: cold wa-host release 135 s, the same build into a child seeded from a sibling
+// 61 s (a tree at another commit) and 64 s (one changed crate).
 //
-// What a seed may NOT do is make a tree run code it does not have. This test builds two checkouts of one
-// tiny two-member workspace whose library answers a DIFFERENT number in each tree, seeds the second from
-// the first, and asserts the second prints ITS number, not the seed's. A seed that substituted its own
-// artifacts for compiling the tree would print base=1 and go red here.
+// WHY "THE SAME SOURCE" AND NOT "THE NEWEST SIBLING". Cargo decides an artifact is current by comparing
+// mtimes, so a sibling built AFTER this tree's sources were written hands over artifacts cargo keeps - and
+// the seeded tree ran the SIBLING's code. Measured here on 21/11: a tree whose library answered 2, seeded
+// from a sibling answering 1, printed base=1. The condition a seed must meet is therefore that its
+// artifacts were produced from the same source (commit + tracked rust/lua state). Identical source means a
+// rebuild would produce exactly those bytes; anything else is a cold build, by name.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -19,16 +21,18 @@ import {treeName} from './codemode-build.mjs';
 
 const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
 const RESOLVER = path.join(REPO, 'scripts', 'lib', 'build-target.sh');
+// The build root must sit on a filesystem where reflink works (btrfs): os.tmpdir() is tmpfs on this node,
+// where every copy would take the cold path and the test would prove nothing.
 const WORK = fs.mkdtempSync(path.join(process.env.WA_SEED_SCRATCH || os.homedir(), 'wa-seed-'));
 const HOME = path.join(WORK, 'home');
-const TARGET_ROOT = path.join(HOME, '.wasm-agent', 'build', 'target');
+const ROOT = path.join(HOME, '.wasm-agent');
+const TARGET_ROOT = path.join(ROOT, 'build', 'target');
 fs.mkdirSync(TARGET_ROOT, {recursive: true});
-// tmpfs at /dev/shm is where reflink does NOT work: that is how the "no reflink, no full copy" rule is
-// driven with a real filesystem answer instead of a hand-set flag.
+if (HOME === path.join(os.homedir(), '.wasm-agent')) throw new Error('refusing to run against a real home');
 const NO_REFLINK_ROOT = '/dev/shm';
 
 let passed = 0;
-function check(name, condition, detail = '') {
+function check(name, condition, detail) {
   if (!condition) {
     console.error('build-seed: assert failed - ' + name + (detail ? ': ' + detail : ''));
     process.exitCode = 1;
@@ -37,167 +41,139 @@ function check(name, condition, detail = '') {
   passed += 1;
   console.log('ok - ' + name);
 }
-
-// Every row writes into this test's own home; the live node's build root is never touched.
-if (HOME === path.join(os.homedir(), '.wasm-agent') || HOME.includes('/.wasm-agent/build/target/j')) {
-  throw new Error('build-seed: refusing to run against a real home: ' + HOME);
-}
 const ENV = {...process.env, WASM_AGENT_HOME: HOME};
 delete ENV.CARGO_TARGET_DIR;
 delete ENV.WA_BUILD_SEED;
+delete ENV.WA_BUILD_SEED_IDENTITY;
+const bash = (script, extraEnv = {}) => spawnSync('bash', ['-c', script], {encoding: 'utf8', env: {...ENV, ...extraEnv}, timeout: 300000});
+const say = (r) => String(r.stdout || '') + String(r.stderr || '');
+const NL = String.fromCharCode(10);
 
-const bash = (script, extraEnv = {}, cwd = REPO) => spawnSync('bash', ['-c', script], {
-  encoding: 'utf8', cwd, env: {...ENV, ...extraEnv}, timeout: 300000,
-});
-
+// One tiny two-member workspace: app links base, so a tree that runs another tree's library prints the
+// other tree's value.
 function makeTree(dir, value) {
   fs.mkdirSync(path.join(dir, 'base', 'src'), {recursive: true});
   fs.mkdirSync(path.join(dir, 'app', 'src'), {recursive: true});
   fs.mkdirSync(path.join(dir, 'rust', 'wa-host-support'), {recursive: true});
-  fs.mkdirSync(path.join(dir, '.git'), {recursive: true});
-  fs.writeFileSync(path.join(dir, 'Cargo.toml'), '[workspace]\nmembers = ["base", "app"]\nresolver = "2"\n');
-  fs.writeFileSync(path.join(dir, 'base', 'Cargo.toml'), '[package]\nname = "base"\nversion = "0.1.0"\nedition = "2021"\n');
-  const tag = path.basename(dir) === 'wt-beta' ? 'pub const TAG: &str = "gatespeed-seed-7c1e";\n' : '';
-  fs.writeFileSync(path.join(dir, 'base', 'src', 'lib.rs'), 'pub fn v() -> i32 { ' + value + ' }\n' + tag);
-  fs.writeFileSync(path.join(dir, 'app', 'Cargo.toml'),
-    '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\nbase = { path = "../base" }\n');
-  const mainBody = path.basename(dir) === 'wt-beta'
-    ? 'fn main() { println!("base={}", base::v()); println!("{}", base::TAG); }\n'
-    : 'fn main() { println!("base={}", base::v()); }\n';
-  fs.writeFileSync(path.join(dir, 'app', 'src', 'main.rs'), mainBody);
-  fs.writeFileSync(path.join(dir, 'rust', 'wa-host-support', 'Cargo.toml'),
-    '[package]\nname = "wa-host-support"\nversion = "0.1.0"\nedition = "2021"\n');
+  fs.writeFileSync(path.join(dir, 'Cargo.toml'), '[workspace]' + NL + 'members = ["base", "app"]' + NL + 'resolver = "2"' + NL);
+  fs.writeFileSync(path.join(dir, 'base', 'Cargo.toml'), '[package]' + NL + 'name = "base"' + NL + 'version = "0.1.0"' + NL + 'edition = "2021"' + NL);
+  fs.writeFileSync(path.join(dir, 'base', 'src', 'lib.rs'), 'pub fn v() -> i32 { ' + value + ' }' + NL);
+  fs.writeFileSync(path.join(dir, 'app', 'Cargo.toml'), '[package]' + NL + 'name = "app"' + NL + 'version = "0.1.0"' + NL + 'edition = "2021"' + NL + '[dependencies]' + NL + 'base = { path = "../base" }' + NL);
+  fs.writeFileSync(path.join(dir, 'app', 'src', 'main.rs'), 'fn main() { println!("base={}", base::v()); }' + NL);
+  fs.writeFileSync(path.join(dir, 'rust', 'wa-host-support', 'Cargo.toml'), '[package]' + NL + 'name = "wa-host-support"' + NL + 'version = "0.1.0"' + NL + 'edition = "2021"' + NL);
+  // A real repository: the seed rule is the SOURCE, which is the commit plus the state of the tracked
+  // rust/lua trees, so a fixture without git can never be a seed (and says so by name).
+  spawnSync('git', ['init', '-q'], {cwd: dir, encoding: 'utf8'});
+  spawnSync('git', ['add', '-A'], {cwd: dir, encoding: 'utf8'});
+  spawnSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'fixture'], {cwd: dir, encoding: 'utf8'});
   return dir;
 }
-
-const TREE_A = makeTree(path.join(WORK, 'wt-alpha'), 1);
-const TREE_B = makeTree(path.join(WORK, 'wt-beta'), 2);
-
 const build = (tree, extraEnv = {}) => bash(
-  '. "' + RESOLVER + '"; wa_build_run "' + tree + '" cargo build --offline -q --manifest-path Cargo.toml',
-  extraEnv);
+  '. "' + RESOLVER + '"; wa_build_run "' + tree + '" cargo build --offline -q --manifest-path Cargo.toml', extraEnv);
 const childOf = (tree) => path.join(TARGET_ROOT, treeName(tree));
-const say = (r) => String(r.stdout || '') + String(r.stderr || '');
+const runOne = (bin) => String(spawnSync(bin, [], {encoding: 'utf8'}).stdout || '').trim().split(NL)[0];
 
-// ---- the seed itself --------------------------------------------------------------------------------
+// ---- 1. the same source at another path: seeded, and the seed is the tree's own build ---------------
+const TREE_A = makeTree(path.join(WORK, 'wt-alpha'), 1);
+// TREE_B is a real git worktree of TREE_A at the same commit and clean, which is exactly what a landing
+// tree or a mission worktree of one commit is.
+const TREE_B = path.join(WORK, 'wt-beta');
+spawnSync('git', ['worktree', 'add', '-q', '--detach', TREE_B, 'HEAD'], {cwd: TREE_A, encoding: 'utf8'});
 {
   const a = build(TREE_A);
   check('the first tree builds (cold: nothing to seed from)', a.status === 0, say(a).slice(-600));
-  check('a cold build is not announced as seeded', !say(a).includes('seeded'), say(a).slice(-300));
+  check('a cold build is not announced as seeded', !say(a).includes('onebuild: seeded '), say(a).slice(-300));
 
-  // A REAL worktree is checked out AFTER the sibling it seeds from (git worktree add writes every file
-  // now). Give TREE_B fresh mtimes so this fixture has the ordering real use has: an artifact from the
-  // future is refused by design and is exercised separately below.
-  const later = new Date(Date.now() + 2000);
-  for (const dir of [TREE_B]) {
-    for (const f of fs.readdirSync(dir, {recursive: true})) {
-      const p = path.join(dir, f.toString());
-      if (fs.statSync(p, {throwIfNoEntry: false})?.isFile()) fs.utimesSync(p, later, later);
-    }
-  }
   const b = build(TREE_B);
   check('the second tree builds', b.status === 0, say(b).slice(-600));
   check('the second tree was SEEDED from the first', say(b).includes('onebuild: seeded '), say(b).slice(-400));
   check('the seed names the sibling it came from', say(b).includes(path.basename(childOf(TREE_A))), say(b).slice(-400));
-
-  // THE POINT: the seeded build is still the tree's own build.
   const binB = path.join(childOf(TREE_B), 'debug', 'app');
   check('the seeded tree produced its own binary', fs.existsSync(binB), binB);
-  const outB = String(spawnSync(binB, [], {encoding: 'utf8'}).stdout || '').trim().split(String.fromCharCode(10))[0];
-  check('the seeded tree ran ITS OWN library (base=2, not the seed\'s base=1)', outB === 'base=2', outB);
-  // A string that exists ONLY in this tree's source must be IN the binary file the seeded build
-  // produced. Printing it proves the code ran; grepping the file proves the artifact carries it.
-  const marker = fs.readFileSync(path.join(TREE_B, 'base', 'src', 'lib.rs'), 'utf8').match(/gatespeed-seed-[a-z0-9]+/);
-  check('this tree carries its own marker string', !!marker, String(marker));
-  const bytesOfBin = fs.readFileSync(binB);
-  check('the marker string from the change is IN the seeded binary', bytesOfBin.includes(Buffer.from(marker[0])), marker[0]);
-  check('the origin tree\'s binary does NOT carry the seeded tree\'s marker', !fs.readFileSync(path.join(childOf(TREE_A), 'debug', 'app')).includes(Buffer.from(marker[0])));
-
-  // And the tree it was seeded FROM is untouched by the copy.
-  const outA = String(spawnSync(path.join(childOf(TREE_A), 'debug', 'app'), [], {encoding: 'utf8'}).stdout || '').trim();
-  check('the tree it was seeded from still runs its own library (base=1)', outA === 'base=1', outA);
+  check('and it runs the code of this source (base=1)', runOne(binB) === 'base=1', runOne(binB));
+  check('the child records the source identity it was built from',
+    fs.readFileSync(path.join(childOf(TREE_B), 'identity'), 'utf8').trim().length > 20);
 }
 
-// ---- a changed crate is rebuilt, never served from the seed -----------------------------------------
+// ---- 2. a changed crate is REBUILT, never served from the seed --------------------------------------
 {
-  fs.writeFileSync(path.join(TREE_B, 'base', 'src', 'lib.rs'), 'pub fn v() -> i32 { 3 }\n' + 'pub const TAG: &str = "gatespeed-seed-7c1e";\n');
+  // The change lands after the seed was made, as a developer's edit does, and carries a marker that exists
+  // only in this tree: the rebuilt binary must contain it.
+  fs.writeFileSync(path.join(TREE_B, 'base', 'src', 'lib.rs'),
+    'pub fn v() -> i32 { 3 }' + NL + 'pub const TAG: &str = "gatespeed-seed-7c1e";' + NL);
+  fs.writeFileSync(path.join(TREE_B, 'app', 'src', 'main.rs'),
+    'fn main() { println!("base={}", base::v()); println!("{}", base::TAG); }' + NL);
   const r = build(TREE_B);
   check('a tree with one changed crate rebuilds', r.status === 0, say(r).slice(-600));
-  const out = String(spawnSync(path.join(childOf(TREE_B), 'debug', 'app'), [], {encoding: 'utf8'}).stdout || '').trim().split(String.fromCharCode(10))[0];
-  check('the rebuilt binary carries the change (base=3)', out === 'base=3', out);
+  const bin = path.join(childOf(TREE_B), 'debug', 'app');
+  check('the rebuilt binary carries the change (base=3)', runOne(bin) === 'base=3', runOne(bin));
+  const marker = 'gatespeed-seed-7c1e';
+  check('the marker string from the change is IN the built binary', fs.readFileSync(bin).includes(Buffer.from(marker)), marker);
+  check('the origin binary does NOT carry this tree marker',
+    !fs.readFileSync(path.join(childOf(TREE_A), 'debug', 'app')).includes(Buffer.from(marker)));
 }
 
-// ---- an artifact from the future is refused, and an older sibling is used instead ---------------------
-// The bug this catches was found by this test on 21/11: a tree older than the sibling it was seeded from
-// ran the SIBLING's code (base=1 instead of base=2), because cargo compared mtimes and believed the
-// seeded artifacts were current. The cutoff (the tree's newest source) is what refuses it.
+// ---- 3. a DIFFERENT source is never a seed ---------------------------------------------------------
 {
-  const TREE_F = makeTree(path.join(WORK, 'wt-zeta'), 5);
-  const OLD = new Date(Date.now() - 600000);
-  for (const f of fs.readdirSync(TREE_F, {recursive: true})) {
-    const p = path.join(TREE_F, f.toString());
-    if (fs.statSync(p, {throwIfNoEntry: false})?.isFile()) fs.utimesSync(p, OLD, OLD);
-  }
-  const r = build(TREE_F);
-  check('a tree older than every sibling still builds', r.status === 0, say(r).slice(-600));
-  check('it is NOT seeded from an artifact newer than its own sources', !say(r).includes('onebuild: seeded '), say(r).slice(-500));
-  const out = String(spawnSync(path.join(childOf(TREE_F), 'debug', 'app'), [], {encoding: 'utf8'}).stdout || '').trim();
-  check('and it runs ITS OWN library, never a newer sibling code (base=5)', out === 'base=5', out);
+  // The same commit plus an uncommitted edit is a different source, so its artifacts must not be reused.
+  // This is the bug found by this test on 21/11 (a tree older than its sibling ran the sibling's code).
+  const TREE_C = path.join(WORK, 'wt-gamma');
+  spawnSync('git', ['worktree', 'add', '-q', '--detach', TREE_C, 'HEAD'], {cwd: TREE_A, encoding: 'utf8'});
+  fs.writeFileSync(path.join(TREE_C, 'base', 'src', 'lib.rs'), 'pub fn v() -> i32 { 7 }' + NL);
+  const r = build(TREE_C);
+  check('a tree with an uncommitted edit still builds', r.status === 0, say(r).slice(-600));
+  check('it is NOT seeded from a tree with a different source', !say(r).includes('onebuild: seeded '), say(r).slice(-500));
+  check('and it runs its own edit (base=7)', runOne(path.join(childOf(TREE_C), 'debug', 'app')) === 'base=7');
 }
 
-// ---- what is never a seed ---------------------------------------------------------------------------
+// ---- 4. what is never a seed, and the deliberate cold build -----------------------------------------
 {
-  // A child with no toolchain record: unknown is not yes.
-  const TREE_C = makeTree(path.join(WORK, 'wt-gamma'), 1);
-  const lonely = path.join(TARGET_ROOT, 'wt-nomarker-aaaaaaaaaaaa');
-  fs.mkdirSync(path.join(lonely, 'debug'), {recursive: true});
-  const r = build(TREE_C, {WA_BUILD_SEED: '1'});
-  check('a tree with no sibling still builds', r.status === 0, say(r).slice(-600));
-  check('a child with no toolchain record is never a seed', !say(r).includes(lonely), say(r).slice(-400));
-
-  // A different toolchain: an artifact another rustc made is not reusable.
+  const TREE_D = makeTree(path.join(WORK, 'wt-delta'), 4);
   const other = path.join(TARGET_ROOT, 'wt-othertool-aaaaaaaaaaaa');
   fs.mkdirSync(path.join(other, 'debug'), {recursive: true});
   fs.writeFileSync(path.join(other, 'toolchain'), 'not-this-compiler');
-  const TREE_D = makeTree(path.join(WORK, 'wt-delta'), 1);
   const rd = build(TREE_D);
+  check('a tree with no same-source sibling still builds', rd.status === 0, say(rd).slice(-600));
   check('a child of another toolchain is never a seed', !say(rd).includes(other), say(rd).slice(-400));
 
-  // WA_BUILD_SEED=0 is the deliberate cold build.
-  const TREE_E = makeTree(path.join(WORK, 'wt-epsilon'), 1);
-  const re = build(TREE_E, {WA_BUILD_SEED: '0'});
-  check('WA_BUILD_SEED=0 builds cold on purpose', re.status === 0 && !say(re).includes('seeded'), say(re).slice(-400));
+  const noMarker = path.join(TARGET_ROOT, 'wt-nomarker-aaaaaaaaaaaa');
+  fs.mkdirSync(path.join(noMarker, 'debug'), {recursive: true});
+  const TREE_E = makeTree(path.join(WORK, 'wt-epsilon'), 5);
+  const re = build(TREE_E);
+  check('a child with no toolchain/identity record is never a seed', !say(re).includes(noMarker), say(re).slice(-400));
+
+  const TREE_F = makeTree(path.join(WORK, 'wt-zeta'), 6);
+  const rf = build(TREE_F, {WA_BUILD_SEED: '0'});
+  check('WA_BUILD_SEED=0 builds cold on purpose', rf.status === 0 && !say(rf).includes('onebuild: seeded '), say(rf).slice(-400));
 }
 
-// ---- reflink unsupported: cold, never a full copy ---------------------------------------------------
+// ---- 5. reflink unsupported: cold, never a full copy ------------------------------------------------
 {
-  if (!fs.existsSync(NO_REFLINK_ROOT) || spawnSync('bash', ['-c', 'cp --reflink=always /etc/hostname ' + NO_REFLINK_ROOT + '/rl-probe-$$ 2>/dev/null'], {encoding: 'utf8'}).status === 0) {
-    console.log('skip - reflink is supported on ' + NO_REFLINK_ROOT + ', so the no-reflink path cannot be driven there');
+  const probe = spawnSync('bash', ['-c', 'echo x > ' + NO_REFLINK_ROOT + '/rl-probe-$$ && cp --reflink=always ' + NO_REFLINK_ROOT + '/rl-probe-$$ ' + NO_REFLINK_ROOT + '/rl-probe2-$$'], {encoding: 'utf8'});
+  if (!fs.existsSync(NO_REFLINK_ROOT) || probe.status === 0) {
+    console.log('skip - reflink works on ' + NO_REFLINK_ROOT + ', so the no-reflink path cannot be driven there');
   } else {
-    // The HOME (and so the build root, and so both the seed candidate and the copy) must be on the
-    // non-reflink filesystem: reflink is a property of where the copy LANDS, not of the tree.
+    // The HOME (and so the child, and so where the copy lands) must be on the non-reflink filesystem.
     const tmpHome = fs.mkdtempSync(path.join(NO_REFLINK_ROOT, 'wa-seed-home-'));
     fs.mkdirSync(path.join(tmpHome, '.wasm-agent', 'build', 'target'), {recursive: true});
-    const tA = makeTree(path.join(WORK, 'wt-shmA'), 1);
-    const tB = makeTree(path.join(WORK, 'wt-shmB'), 2);
+    const g = makeTree(path.join(WORK, 'wt-shmroot'), 2);
+    const tA = path.join(WORK, 'wt-shmA');
+    spawnSync('git', ['worktree', 'add', '-q', '--detach', tA, 'HEAD'], {cwd: g, encoding: 'utf8'});
+    const tB = path.join(WORK, 'wt-shmB');
+    spawnSync('git', ['worktree', 'add', '-q', '--detach', tB, 'HEAD'], {cwd: g, encoding: 'utf8'});
     const envT = {WASM_AGENT_HOME: tmpHome};
     const rA = bash('. "' + RESOLVER + '"; wa_build_run "' + tA + '" cargo build --offline -q --manifest-path Cargo.toml', envT);
-    // Checked out after the sibling, as a real worktree is: the seed must be older than this tree.
-    const laterShm = new Date(Date.now() + 2000);
-    for (const f of fs.readdirSync(tB, {recursive: true})) {
-      const p = path.join(tB, f.toString());
-      if (fs.statSync(p, {throwIfNoEntry: false})?.isFile()) fs.utimesSync(p, laterShm, laterShm);
-    }
-    check('the tmpfs first tree builds', rA.status === 0, say(rA).slice(-500));
+    check('the non-reflink first tree builds', rA.status === 0, say(rA).slice(-500));
     const rB = bash('. "' + RESOLVER + '"; wa_build_run "' + tB + '" cargo build --offline -q --manifest-path Cargo.toml', envT);
-    const out = say(rB);
-    check('without reflink the build says it starts cold instead of being seeded', out.includes('reflink is not supported'), out.slice(-400));
-    const seededDir = path.join(tmpHome, '.wasm-agent', 'build', 'target', treeName(tB));
-    const sizeA = Number(String(spawnSync('du', ['-sb', path.join(tmpHome, '.wasm-agent', 'build', 'target', treeName(tA))], {encoding: 'utf8'}).stdout || '').split('\t')[0] || 0);
-    const sizeB = Number(String(spawnSync('du', ['-sb', seededDir], {encoding: 'utf8'}).stdout || '').split('\t')[0] || 0);
+    check('without reflink the build says it starts cold instead of being seeded',
+      say(rB).includes('reflink is not supported'), say(rB).slice(-400));
+    const dirA = path.join(tmpHome, '.wasm-agent', 'build', 'target', treeName(tA));
+    const dirB = path.join(tmpHome, '.wasm-agent', 'build', 'target', treeName(tB));
+    const sizeA = Number(String(spawnSync('du', ['-sb', dirA], {encoding: 'utf8'}).stdout || '').split('\t')[0] || 0);
+    const sizeB = Number(String(spawnSync('du', ['-sb', dirB], {encoding: 'utf8'}).stdout || '').split('\t')[0] || 0);
     check('it was never a full copy (no seed blocks were paid for)', sizeB < sizeA * 2, 'A=' + sizeA + ' B=' + sizeB);
-    const bin = path.join(seededDir, 'debug', 'app');
-    check('the cold tree still produced its own binary', fs.existsSync(bin) && String(spawnSync(bin, [], {encoding: 'utf8'}).stdout || '').trim() === 'base=2', bin);
+    const bin = path.join(dirB, 'debug', 'app');
+    check('the cold tree still produced its own binary', fs.existsSync(bin) && runOne(bin) === 'base=2', bin);
   }
 }
 

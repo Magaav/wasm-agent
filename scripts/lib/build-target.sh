@@ -379,7 +379,7 @@ wa_build_cap_enforce() { # <keep path|->
 # Called by `wa_build_run`, and directly by a script that sets CARGO_TARGET_DIR itself but still wants
 # the sweep and the cap to hold.
 wa_build_prepare() { # <tree> [--quiet]
-  local tree=$1 quiet=${2:-} target toolchain
+  local tree=$1 quiet=${2:-} target toolchain identity
   WA_BUILD_THIS_TREE=$(cd "$tree" 2>/dev/null && pwd -P) || WA_BUILD_THIS_TREE=$tree
   export WA_BUILD_THIS_TREE
   target=$(wa_build_target "$tree") || { printf 'onebuild: cannot name a build dir for %s (no sha256 tool)\n' "$tree" >&2; return 1; }
@@ -396,6 +396,9 @@ wa_build_prepare() { # <tree> [--quiet]
   # Which toolchain builds here. Written on every prepare, because the value that matters is the compiler
   # the NEXT build will use, and a later new tree reads it to decide whether this child is reusable.
   toolchain=$(wa_build_toolchain) && printf '%s' "$toolchain" > "$target/toolchain" 2>/dev/null || true
+  # Which SOURCE this child is for: the only thing that makes it a seed for a later tree (wa_build_seed).
+  identity=$(wa_build_source_identity "$WA_BUILD_THIS_TREE")
+  printf '%s' "$identity" > "$target/identity" 2>/dev/null || true
   wa_build_sweep "$quiet" >/dev/null
   wa_build_cap_enforce "$target" >/dev/null
   printf '%s' "$target"
@@ -459,24 +462,23 @@ wa_build_used_at() { # <child> -> seconds
 
 # The child to seed from: the most recently built sibling of the same toolchain that is not being built
 # into right now. Prints nothing when there is none, which means a cold build.
-wa_build_seed_candidate() { # <target> [cutoff-seconds]
-  local target=$1 cutoff=${2:-0} mine candidate used best='' best_used=0
+wa_build_seed_candidate() { # <target>  (reads WA_BUILD_SEED_IDENTITY)
+  local target=$1 mine candidate used best='' best_used=0 ident
   mine=$(wa_build_toolchain) || return 0
+  ident=${WA_BUILD_SEED_IDENTITY:-}
+  [ -n "$ident" ] || return 0
   for candidate in "$(wa_build_target_root)"/*; do
     [ -d "$candidate" ] || continue
     [ -L "$candidate" ] && continue
     [ "$candidate" = "$target" ] && continue
     [ -f "$candidate/toolchain" ] || continue
     [ "$(cat "$candidate/toolchain" 2>/dev/null)" = "$mine" ] || continue
+    # The artifacts must have been produced from THIS tree's source, or they are another tree's code.
+    [ -f "$candidate/identity" ] || continue
+    [ "$(cat "$candidate/identity" 2>/dev/null)" = "$ident" ] || continue
     if [ ! -d "$candidate/release" ] && [ ! -d "$candidate/debug" ]; then continue; fi
     if command -v flock >/dev/null 2>&1 && [ -f "$candidate/.wa-build.lock" ]; then
       flock -n "$candidate/.wa-build.lock" true 2>/dev/null || continue
-    fi
-    # An artifact from the future is not a seed (wa_build_seed says why): a candidate that holds any
-    # file newer than the tree it would seed is passed over, so an OLDER sibling is still reused when
-    # one exists instead of every build going cold.
-    if [ "$cutoff" != 0 ]; then
-      if [ -n "$(find "$candidate" -type f -newermt "@$cutoff" -print -quit 2>/dev/null)" ]; then continue; fi
     fi
     used=$(wa_build_used_at "$candidate")
     if [ "$used" -gt "$best_used" ]; then best=$candidate; best_used=$used; fi
@@ -492,32 +494,50 @@ wa_build_tree_newest_source() { # <tree> -> seconds
   case "$newest" in ''|*[!0-9]*) printf '0' ;; *) printf '%s' "$newest" ;; esac
 }
 
+# The identity of the SOURCE a build output belongs to: the commit, plus the state of the tracked rust
+# and lua trees (so an uncommitted edit is a different identity, not the same one).
+#
+# WHY THIS AND NOT AN MTIME. Cargo decides whether an artifact is current by comparing its mtime with its
+# sources', so seeding an OLDER tree from a NEWER sibling handed over artifacts cargo kept - and the tree
+# ran the SIBLING's code (measured: base=1 where its own library answered base=2). Comparing single files
+# is the wrong question: cargo writes its own files into the child (.rustc_info.json), so a sibling is
+# always 'newer' than something. What a seed has to answer is whether the artifacts were produced from
+# THE SAME SOURCE as the tree being built: identical identity means a rebuild would produce exactly these
+# bytes, so cargo may keep them; a different identity is a cold build, by name.
+wa_build_source_identity() { # <tree>
+  local tree=$1 head dirty
+  head=$(git -C "$tree" rev-parse HEAD 2>/dev/null) || { printf 'unknown'; return 0; }
+  # The WHOLE tracked state, not just the compiled subtrees: a seed is only reused when this tree is the
+  # same source as the sibling, and guessing which edits matter is how a tree ends up running code it does
+  # not have. Untracked files are included by --porcelain too, so a new file also means a cold build.
+  dirty=$(git -C "$tree" status --porcelain 2>/dev/null | sha256sum 2>/dev/null | cut -c1-16)
+  [ -n "$dirty" ] || dirty=unknown
+  printf '%s-%s' "$head" "$dirty"
+}
+
 # Seed a target dir that does not exist yet. Staged beside it and renamed into place, so a copy that
 # fails halfway leaves NO half-seeded child behind: a partial seed is a silent wrong answer, a missing
 # one is only a slow build.
 wa_build_seed() { # <target> [--quiet]
-  local target=$1 quiet=${2:-} candidate stage bytes tree newest_source
+  local target=$1 quiet=${2:-} candidate stage bytes tree identity
   if [ "${WA_BUILD_SEED:-1}" = 0 ]; then return 0; fi
   if ! wa_build_toolchain >/dev/null 2>&1; then
     printf 'onebuild: cannot name this build toolchain (rustc -vV failed), so %s starts cold\n' "$(basename "$target")" >&2
     return 0
   fi
-  # AN ARTIFACT FROM THE FUTURE IS NOT A SEED. Cargo calls an artifact up to date by comparing its mtime
-  # with its sources', so a sibling built AFTER this tree's sources were written would hand over
-  # artifacts cargo believes are current, and the build would then run the SIBLING code. Measured with
-  # scripts/test-build-seed.mjs on 21/11: a tree whose library answers 2, seeded from a sibling answering
-  # 1, printed base=1. So the tree's newest source is the cutoff: only a sibling whose every file is
-  # older than it can be a seed. Unknown is not yes - when the cutoff cannot be read, the build is cold.
   tree=${WA_BUILD_THIS_TREE:-}
-  newest_source=0
-  if [ -n "$tree" ] && [ -d "$tree" ]; then
-    newest_source=$(wa_build_tree_newest_source "$tree")
-  fi
-  if [ "$newest_source" = 0 ]; then
-    printf 'onebuild: %s starts cold: the newest source mtime of this tree cannot be read, so no seed can be shown to predate it\n' "$(basename "$target")" >&2
+  if [ -z "$tree" ] || [ ! -d "$tree" ]; then
+    printf 'onebuild: %s starts cold: the tree this build is for is unknown, so no sibling can be shown to hold its source\n' "$(basename "$target")" >&2
     return 0
   fi
-  candidate=$(wa_build_seed_candidate "$target" "$newest_source")
+  identity=$(wa_build_source_identity "$tree")
+  case "$identity" in
+    unknown*)
+      printf 'onebuild: %s starts cold: the source identity of %s cannot be read (git), so no sibling can be shown to hold its source\n' "$(basename "$target")" "$tree" >&2
+      return 0
+      ;;
+  esac
+  candidate=$(WA_BUILD_SEED_IDENTITY="$identity" wa_build_seed_candidate "$target")
   [ -n "$candidate" ] || return 0
   stage="$target.seed-$$"
   rm -rf -- "$stage" 2>/dev/null || true
@@ -530,7 +550,7 @@ wa_build_seed() { # <target> [--quiet]
     return 0
   fi
   # The copy carries the origin's markers, and they are the origin's facts, not this child's.
-  rm -f -- "$stage/tree" "$stage/toolchain" "$stage/.wa-build.lock" 2>/dev/null || true
+  rm -f -- "$stage/tree" "$stage/toolchain" "$stage/identity" "$stage/.wa-build.lock" 2>/dev/null || true
   if [ -e "$target" ]; then rm -rf -- "$stage" 2>/dev/null || true; return 0; fi
   if ! mv -- "$stage" "$target" 2>/dev/null; then
     rm -rf -- "$stage" 2>/dev/null || true
@@ -538,7 +558,7 @@ wa_build_seed() { # <target> [--quiet]
   fi
   bytes=$(wa_build_bytes "$target")
   if [ "$quiet" != --quiet ]; then
-    printf 'onebuild: seeded %s from %s (%s, cp -a --reflink=always: shared blocks, cargo rebuilds only what differs)\n' \
+    printf 'onebuild: seeded %s from %s (%s, cp -a --reflink=always: the same source, so cargo rebuilds only what differs)\n' \
       "$(basename "$target")" "$(basename "$candidate")" "$(wa_build_human "$bytes")" >&2
   fi
   return 0
