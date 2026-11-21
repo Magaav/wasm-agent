@@ -1575,6 +1575,158 @@ function M.review_collect(run)
   return rows
 end
 
+-- ---------------------------------------------------------------- derived files, regenerated on the merge
+--
+-- A file that is GENERATED and committed goes stale in the one place no worker can see: the merge. On 21/11
+-- land243 added lua/core/agent_control.lua and its refusal codes, land244 was green (its narrowed gate never
+-- ran scripts/test-refusal-contract.lua), and main was red from bfad4f8f for the next landings - every later
+-- mission whose rows included that row paid for a fault nobody had made. Two branches that are each correct
+-- alone are only wrong together, so the repair belongs here and not in the gate.
+--
+-- What this does, exactly, and nothing else:
+--   * scripts/generators.txt is the registry: for each derived file, the paths it is written to and the one
+--     command that writes them from the tree (scripts/generators.txt says what may and may not be listed).
+--     A tree without a registry regenerates nothing, and the step says that instead of looking clean;
+--   * scripts/regenerate.sh runs every generator with --write on the MERGED tree and prints the paths it
+--     changed. A generator that fails is a STOP by name: a derived file we could not recompute is not a file
+--     to land;
+--   * whatever it changed is put in the MERGE COMMIT (staged, then the merge commit amended), so main's tip
+--     is green on its own rows without a second commit nobody asked for;
+--   * a merge that conflicts ONLY in the paths the registry declares as generated is resolved by taking our
+--     side and regenerating: that conflict is in bytes no person wrote. A conflict anywhere else is a stop,
+--     exactly as before - the allow-list is the registry, never a guess about a file name.
+
+-- <tree> -> set of the paths this tree declares as generated, or nil and the reason it could not be told.
+function M.regenerate_outputs(tree)
+  if not read(tree .. "/scripts/regenerate.sh") then
+    return nil, "this tree has no scripts/regenerate.sh, so it declares no generated file"
+  end
+  local listing = M.exec("bash scripts/regenerate.sh --outputs", tree, 120)
+  if (listing.code or 1) ~= 0 then
+    return nil, "scripts/regenerate.sh --outputs exited " .. tostring(listing.code) .. ": " ..
+      first_line(tostring(listing.stderr ~= "" and listing.stderr or listing.stdout))
+  end
+  local set = {}
+  for line in tostring(listing.stdout or ""):gmatch("[^\r\n]+") do
+    local path = trim(line)
+    if path ~= "" then set[path] = true end
+  end
+  return set
+end
+
+-- <run> <tree> <evidence-sink> -> ok, info: run every registered generator on the merged tree and put what
+-- it wrote into the merge commit. `info.changed` is the list of paths this run wrote (empty when the tree was
+-- already current, which is the normal case).
+function M.regenerate(run, tree, evidence)
+  local note = evidence or function() end
+  if not read(tree .. "/scripts/regenerate.sh") then
+    return true, { ran = false, changed = {},
+      why = "no scripts/regenerate.sh in the merged tree: nothing declares a derived file" }
+  end
+  local result = M.exec("bash scripts/regenerate.sh", tree, 900)
+  local out = tostring(result.stdout or "")
+  note(command_line("regenerate", "bash scripts/regenerate.sh"))
+  note(out .. tostring(result.stderr or ""))
+  if (result.code or 1) ~= 0 then
+    local failed = {}
+    for line in out:gmatch("[^\r\n]+") do
+      if line:find("regenerate: FAILED", 1, true) then failed[#failed + 1] = trim(line) end
+    end
+    return false, { error = "regenerate_failed",
+      observed = (#failed > 0 and table.concat(failed, "; ")
+        or ("scripts/regenerate.sh exited " .. tostring(result.code) .. ": " ..
+            first_line(tostring(result.stderr ~= "" and result.stderr or result.stdout)))),
+      next = "fix the generator in scripts/generators.txt, or the file it writes, and land again" }
+  end
+  local changed, count = {}, nil
+  for line in out:gmatch("[^\r\n]+") do
+    local path = line:match("^regenerate: changed (%S.*)$")
+    if path then changed[#changed + 1] = trim(path) end
+    local n = line:match("^regenerate: changed_count (%d+)$")
+    if n then count = tonumber(n) end
+  end
+  -- A generator wrote files and the runner did not say which: the amendment below would stage a guess.
+  if count == nil then
+    return false, { error = "regenerate_unreadable",
+      observed = "scripts/regenerate.sh exited 0 but printed no 'changed_count' line: " .. first_line(out),
+      next = "scripts/regenerate.sh must print 'regenerate: changed_count <n>' (it is what tells the merge whether to amend)" }
+  end
+  if count == 0 or #changed == 0 then
+    return true, { ran = true, changed = {} }
+  end
+  local added = git(run, tree, "add -A", 300)
+  if (added.code or 1) ~= 0 then
+    return false, { error = "regenerate_unstaged",
+      observed = first_line(tostring(added.stderr ~= "" and added.stderr or added.stdout)),
+      next = "the generated files are on disk in " .. tree .. " but could not be staged" }
+  end
+  local head = git(run, tree, "log -1 --format=%B", 60)
+  local lines = { trim(tostring(head.stdout or "")), "",
+    string.format("regenerate: %d derived file(s) refreshed by scripts/regenerate.sh on the merged tree", #changed) }
+  for _, path in ipairs(changed) do lines[#lines + 1] = "regenerate: " .. path end
+  local amended = git(run, tree, "commit --amend --no-edit -m " .. quote(table.concat(lines, "\n")), 300)
+  note(command_line("regenerate amend", "git commit --amend (" .. #changed .. " generated file(s))"))
+  note((amended.stdout or "") .. (amended.stderr or ""))
+  if (amended.code or 1) ~= 0 then
+    return false, { error = "regenerate_uncommitted",
+      observed = first_line(tostring(amended.stderr ~= "" and amended.stderr or amended.stdout)),
+      next = "the regenerated files are staged in " .. tree .. " but the merge commit was not amended" }
+  end
+  return true, { ran = true, changed = changed, commit = rev(tree, "HEAD") }
+end
+
+-- <run> <tree> <branch> <evidence> <message> -> ok, why: the merge this landing may finish BY ITSELF.
+-- It is allowed to finish only when EVERY unmerged path is a path the tree's registry declares as generated;
+-- then our side is taken and staged, and M.regenerate writes the real content afterwards. Any other
+-- unmerged path aborts the merge again and the landing stops, as it always did.
+local function merge_generated_conflict(run, tree, branch, evidence, message)
+  local declared, why = M.regenerate_outputs(tree)
+  if not declared then return false, why end
+  local merged = git(run, tree, "merge --no-ff --no-edit -m " .. quote(message) .. " " .. quote(branch.sha), 600)
+  evidence(command_line("merge (conflicted) " .. branch.name, "git merge " .. branch.sha))
+  evidence((merged.stdout or "") .. (merged.stderr or ""))
+  local unmerged = {}
+  local listing = git(run, tree, "diff --name-only --diff-filter=U", 120)
+  for line in tostring(listing.stdout or ""):gmatch("[^\r\n]+") do
+    local path = trim(line)
+    if path ~= "" then unmerged[#unmerged + 1] = path end
+  end
+  if #unmerged == 0 then
+    git(run, tree, "merge --abort", 120)
+    return false, "the merge failed without naming an unmerged path: " ..
+      first_line(tostring(merged.stderr ~= "" and merged.stderr or merged.stdout))
+  end
+  local foreign = {}
+  for _, path in ipairs(unmerged) do
+    if not declared[path] then foreign[#foreign + 1] = path end
+  end
+  if #foreign > 0 then
+    git(run, tree, "merge --abort", 120)
+    return false, "the conflict is not only in a generated file: " .. table.concat(foreign, ", ")
+  end
+  for _, path in ipairs(unmerged) do
+    local ours = git(run, tree, "checkout --ours -- " .. quote(path), 120)
+    if (ours.code or 1) ~= 0 then
+      git(run, tree, "merge --abort", 120)
+      return false, "cannot take our side of " .. path .. ": " ..
+        first_line(tostring(ours.stderr ~= "" and ours.stderr or ours.stdout))
+    end
+    local staged = git(run, tree, "add -- " .. quote(path), 120)
+    if (staged.code or 1) ~= 0 then
+      git(run, tree, "merge --abort", 120)
+      return false, "cannot stage the resolved " .. path
+    end
+  end
+  evidence("resolved as generated (the merge regenerates them): " .. table.concat(unmerged, ", "))
+  local committed = git(run, tree, "commit --no-edit", 300)
+  if (committed.code or 1) ~= 0 then
+    git(run, tree, "merge --abort", 120)
+    return false, "the merge with the generated files resolved did not commit: " ..
+      first_line(tostring(committed.stderr ~= "" and committed.stdout or committed.stdout))
+  end
+  return true, table.concat(unmerged, ", ")
+end
+
 -- merge: a fresh worktree cut from the base, then one merge per branch. Conflicts stop the landing and keep
 -- the worktree: it is the evidence a human resolves against.
 impl.merge = function(run, options)
@@ -1671,8 +1823,19 @@ impl.merge = function(run, options)
       if (known.code or 1) ~= 0 then
         return false, { error = "commit_missing", observed = branch.name .. " is not in the worktree: " .. branch.sha }
       end
-      return false, { error = "merge_conflict", observed = branch.name .. " conflicts with " .. tostring(run.journal.land_branch),
-        next = "resolve it in " .. tree .. " (the worktree is kept), or land a fixed branch" }
+      -- A CONFLICT IN A GENERATED FILE IS NOT A CONFLICT OF WORK: two branches that each regenerated the
+      -- same derived file disagree about bytes nobody wrote by hand, so the merge resolves it and the
+      -- regeneration after the loop writes the real content. Anything else stops, as it always did.
+      local message = "land " .. tostring(run.journal.land_branch) .. ": merge " .. branch.name
+      local resolved, why = merge_generated_conflict(run, tree, branch, evidence, message)
+      if not resolved then
+        return false, { error = "merge_conflict",
+          observed = branch.name .. " conflicts with " .. tostring(run.journal.land_branch) ..
+            (why and (" - " .. tostring(why)) or ""),
+          next = "resolve it in " .. tree .. " (the worktree is kept), or land a fixed branch" }
+      end
+      run.journal.regenerate_resolved = run.journal.regenerate_resolved or {}
+      run.journal.regenerate_resolved[#run.journal.regenerate_resolved + 1] = { branch = branch.name, paths = why }
     end
     local command = "merge --no-ff --no-edit -m " .. quote("land " .. tostring(run.journal.land_branch) .. ": merge " .. branch.name) .. " " .. quote(branch.sha)
     local result = git(run, tree, command, 600)
@@ -1684,6 +1847,13 @@ impl.merge = function(run, options)
     branch.merged = true
     save(run)
   end
+  -- DERIVED FILES, after every branch is merged and BEFORE the tree commit is recorded: what this writes
+  -- is part of the tree the gate judges and the commit main will get (scripts/generators.txt).
+  local regenerated, regen = M.regenerate(run, tree, evidence)
+  if not regenerated then
+    return false, regen
+  end
+  run.journal.regenerate = { ran = regen.ran, changed = regen.changed, commit = regen.commit, why = regen.why }
   run.journal.tree_commit = rev(tree, "HEAD")
   -- THE BYTES, SEPARATE FROM THE COMMIT THAT CARRIES THEM. A merge commit has its own committer timestamp,
   -- so the SAME content merged twice is TWO commits (measured 21/11: a preflight and the landing that
@@ -1691,8 +1861,14 @@ impl.merge = function(run, options)
   -- alone, so it is what a gate verdict is really about, and it is recorded here for the gate to keep a
   -- verdict across runs with (M.gate_history).
   run.journal.tree_sha = tree_of(tree)
-  return true, { detail = string.format("%d branch(es) merged into %s (%s)", #run.journal.branches,
-                  tostring(run.journal.land_branch), tostring(run.journal.tree_commit):sub(1, 12)) }
+  local detail = string.format("%d branch(es) merged into %s (%s)", #run.journal.branches,
+    tostring(run.journal.land_branch), tostring(run.journal.tree_commit):sub(1, 12))
+  if regen and regen.changed and #regen.changed > 0 then
+    detail = detail .. "; regenerate wrote " .. table.concat(regen.changed, ", ")
+  elseif regen and regen.ran == false then
+    detail = detail .. "; no generator: " .. tostring(regen.why)
+  end
+  return true, { detail = detail }
 end
 
 -- gate: the checks, weighted, one run each - and a failing check is re-run ONCE ALONE. Passing alone after

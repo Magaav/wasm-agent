@@ -372,6 +372,16 @@ local function setup_fixture()
   else
     write_file(repo .. "/config/release-keys.txt", "wa-trusted-keys v1\n")
   end
+  -- A DERIVED FILE, the way this tree has one (scripts/generators.txt + scripts/regenerate.sh): the base
+  -- commit carries a STALE generated/files.txt (it lists only a.txt), so every merge below is the 21/11
+  -- situation - two branches that are each correct alone make a file that is wrong together - and the
+  -- landing's merge step is what fixes it (land.M.regenerate).
+  must("cp -f " .. tree_root .. "/scripts/regenerate.sh " .. repo .. "/scripts/regenerate.sh", "copy the regeneration runner")
+  write_file(repo .. "/scripts/generators.txt", "generated/files.txt = bash scripts/regen-fixture.sh\n")
+  write_file(repo .. "/scripts/regen-fixture.sh",
+    "#!/usr/bin/env bash\nset -u\nmkdir -p generated\nls *.txt | sort > generated/files.txt\n")
+  must("mkdir -p " .. repo .. "/generated", "create the generated directory")
+  write_file(repo .. "/generated/files.txt", "a.txt\n")
   must("chmod +x scripts/publish-node-binaries.sh scripts/publish-artifacts-branch.sh scripts/sign-release.sh", "exec bits", repo)
   must("git add -A && git commit -q -m base", "the base commit", repo)
   must("git push -q origin main && git push -q oc-in main", "publish the base", repo)
@@ -654,7 +664,75 @@ contains(report, "signature", "the report carries the signature row")
 contains(report, "nextcloud", "the report carries the per-node results")
 contains(report, "## review", "the report carries the review section")
 contains(report, "fake reviewer", "and the reviewer's own findings")
+-- THE MERGE REGENERATED THE DERIVED FILE, in the merge commit itself. 21/11: two branches that are each
+-- correct alone left lua/core/refusal_codes.lua stale, land244 was green anyway, and main was red for the
+-- next landings. The fix belongs in the one place that sees both branches, and this is that place.
+-- (Its own block: the file is at the main chunk's 200-local limit.)
+do
+eq(journal.regenerate and journal.regenerate.ran, true, "the merge ran the registered generator")
+local changed = (journal.regenerate or {}).changed or {}
+eq(#changed, 1, "the merge wrote exactly the declared generated file (got " .. flatten(changed) .. ")")
+eq(changed[1], "generated/files.txt", "and it is the file the registry declares")
+contains(step_of("case2", "merge").detail, "regenerate wrote generated/files.txt",
+  "the merge step says what it regenerated")
+local landed_generated = must("git -C " .. repo .. " show " .. tip .. ":generated/files.txt")
+contains(landed_generated, "one.txt", "the landed merge commit carries a fresh generated file")
+contains(landed_generated, "two.txt", "...with both branches' members in it")
+local parents = {}
+for word in must("git -C " .. repo .. " rev-list --parents -n 1 " .. tip):gmatch("%S+") do parents[#parents + 1] = word end
+eq(#parents, 3, "the regeneration is IN the merge commit (two parents), not a commit of its own")
+eq(must("git -C " .. journal.tree .. " status --porcelain"), "", "the merged worktree is clean after the amendment")
 advance_main(tip)
+end
+
+-- ---------------------------------------- case 2b: a conflict only in a GENERATED file is not a stop
+-- Two branches that each regenerated the same derived file disagree about bytes no person wrote. The
+-- registry declares which paths those are, so the merge resolves exactly those and regenerates; anything
+-- else stops, which case 2c proves in the other direction.
+do
+local function branch_with(name, path, text)
+  must("git -C " .. repo .. " checkout -q -B " .. name .. " main", "branch " .. name)
+  write_file(repo .. "/" .. path, text)
+  must("git -C " .. repo .. " add -A && git -C " .. repo .. " commit -q -m '" .. name .. "'", "commit " .. name)
+  must("git -C " .. repo .. " push -q oc-in " .. name .. ":refs/heads/" .. name, "push " .. name)
+  must("git -C " .. repo .. " checkout -q main", "back to main")
+end
+branch_with("change/gen-a", "generated/files.txt", "a.txt\nfrom-a\n")
+branch_with("change/gen-b", "generated/files.txt", "a.txt\nfrom-b\n")
+local gen_code = land.run({ run = "case2b", signer = "local", ring = SOLO_RING, branches = { "change/gen-a", "change/gen-b" },
+  checks = standard_checks() })
+eq(gen_code, 0, "two branches that each edited the generated file still land")
+local gen_journal = journal_of("case2b")
+local first_resolution = (gen_journal.regenerate_resolved or {})[1]
+ok(first_resolution ~= nil, "the journal records that a conflict was resolved, and where")
+contains(tostring(first_resolution and first_resolution.paths or ""), "generated/files.txt", "it names the generated path")
+local gen_body = must("git -C " .. repo .. " show " .. gen_journal.tree_commit .. ":generated/files.txt")
+ok(not gen_body:find("from-a", 1, true) and not gen_body:find("from-b", 1, true),
+  "the landed file is neither branch's hand-written bytes, it is the generator's output (got " .. gen_body .. ")")
+contains(gen_body, "a.txt", "and it is what the generator writes for the merged tree")
+advance_main(gen_journal.tree_commit)
+end
+
+-- ---------------------------------------- case 2c: a conflict anywhere else is still a STOP
+-- The allow-list is the registry and nothing else: a branch that genuinely conflicts with another must stop
+-- the landing for a person, exactly as before this fix.
+do
+local function branch_with(name, path, text)
+  must("git -C " .. repo .. " checkout -q -B " .. name .. " main", "branch " .. name)
+  write_file(repo .. "/" .. path, text)
+  must("git -C " .. repo .. " add -A && git -C " .. repo .. " commit -q -m '" .. name .. "'", "commit " .. name)
+  must("git -C " .. repo .. " push -q oc-in " .. name .. ":refs/heads/" .. name, "push " .. name)
+  must("git -C " .. repo .. " checkout -q main", "back to main")
+end
+branch_with("change/clash-a", "clash.txt", "one\n")
+branch_with("change/clash-b", "clash.txt", "two\n")
+local clash_code = land.run({ run = "case2c", signer = "local", ring = SOLO_RING, branches = { "change/clash-a", "change/clash-b" },
+  checks = standard_checks() })
+eq(clash_code, 1, "a conflict in a file nobody declared generated still stops the landing")
+eq(step_of("case2c", "merge").error, "merge_conflict", "the refusal is named merge_conflict")
+contains(tostring(step_of("case2c", "merge").detail or ""), "clash.txt",
+  "and it names the file a person has to resolve: " .. tostring(step_of("case2c", "merge").detail))
+end
 
 -- ---------------------------------------------------------------- case 3: a red gate stops the landing
 local red = gate_script("gate-red")
