@@ -2542,6 +2542,14 @@ gate_run bash scripts/test-deploy-preconditions.sh
 # and `record_role=final` over upgrade.sh's interim record, and a script that replaces itself while it runs
 # must finish (the 2026-10-02 deploy died there and left `commit=unknown` while serving 2f02b4c).
 gate_run bash scripts/test-deploy-record.sh
+# The Lua fast path's record (21/11, avell: land254 de2c755f and land257 93168d96, twice). A deploy whose
+# change compiled nothing keeps the installed binary and installs only the Lua tree, so its record must name
+# BOTH: commit= for the tree it installed, binary_commit= for the commit those kept bytes are a build of. It
+# also must not refuse its own install as build_commit_mismatch - which it did, because the kept binary's
+# commit was taken from a record field that is empty exactly when the binary can answer. The same file pins
+# binary_commit=unknown WITH its reason for the case where nothing can name the bytes, and that the digest the
+# next deploy compares is the digest of commit=.
+gate_run bash scripts/test-deploy-luafast-record.sh
 gate_run bash scripts/test-deploy-self-ship.sh
 # The install-time re-check of the canonical runtime binding (review of 18/11, item 9). It was written and
 # then named by no harness - so the defect it pins could come back with every gate green - and the orphan
