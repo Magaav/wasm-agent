@@ -225,6 +225,54 @@ resumed - it is never turned into a handle that cannot settle.
 `scripts/test-codemode-component.sh` runs that same suite through the component and compares the check
 counts, and `scripts/test-host-return-docs.lua` keeps the `host.*` encodings honest.
 
+## A settled handle wakes the session (21/11)
+
+A script that hands back a handle is telling the model "this work outlives my budget". Until 21/11
+the answer to that work reached the model only if it happened to run another script in the same
+scope, so a model with nothing else to do never learned its build had finished. The operator's rule
+(21/11, copying Claude Code) is that a settled handle starts a model step by itself - with the
+terminal open, or with only the node serving.
+
+* **The sweep** (`lua/core/handle_wake.lua`) is a read: for every scope of pending handles whose
+  records name a live session, it polls each open handle with no wait
+  (`codemode_pending.wake_settled`) and, for each one that just settled, schedules ONE durable wake.
+* **The wake** is a `self_wakes` row - the table the model's own wakes live in, claimed by the node's
+  placement tick (`wa_orchestrator_tick`) and by the interactive CLI's idle prompt
+  (`lua/core/chat.lua`). Nothing new claims it: the two surfaces that already start a turn with
+  nobody typing do the work, so a session no terminal is on still wakes as soon as a node serves it.
+* **The row says** the answer itself, in the same flat shape `wait(op)` answers (see "one result
+  shape" above), and the list of handles that are STILL pending with their op, tool and age - so a
+  model that restarts or is compacted needs no memory of what it left running. It is labelled as
+  automated node state (`[self-wake · a pending call settled]`), never as the operator's words.
+* **Exactly once.** The wake's id is derived from the operation id (`handle:<op>`), so a second sweep
+  - in this process, in another, or after a restart - is an `INSERT OR IGNORE` no-op; the handle
+  record is marked `woke_at` only after the insert answered, and `reported` with it so the next
+  script's `pending_settled` does not repeat the same news. No effect is ever re-run: a wake reads
+  the retained result.
+* `scripts/test-handle-wake.lua` pins the sweep, the row's words, the still-pending list, the
+  exactly-once behaviour across a reloaded module, and that the row is claimable by the same route
+  both surfaces use.
+
+**A line typed during a run** is queued unless the reader says otherwise: plain Enter is delivered at
+the next context boundary and ends nothing, and Ctrl+Enter (or Ctrl+G where the terminal cannot tell
+the two apart) is "now" - it ends the run's wait and the reader's line is the model's next input.
+`docs/HOST.md`, "A line typed during a run: queued or now", has the rule and the chords.
+
+## The three counters (21/11)
+
+`/stats` shows three numbers, and they decide the next mission (`lua/core/counters.lua`):
+
+| counter | what it counts | where it is counted |
+| --- | --- | --- |
+| `wake_only_round` | a model step whose only input was a settled handle | `selfloop.run_wake`, on a `handle:` wake |
+| `script_cut_at_cap` | a script that was told "not yet" (a pending answer) | `codemode`'s end, once per script |
+| `handle_mishandled` | a script that used a pending answer as a result, or ended on the wait-never-settles bound | `codemode`'s end |
+
+They are telemetry and nothing else: no decision reads them. `script_cut_at_cap` measures the
+pending-answer half only - the "hit its deadline with lines still to run" half is NOT counted yet and
+is named rather than folded in silently. `scripts/test-codemode-counters.lua` holds the two
+script-side counters (one increment per script, never per call) and the read/write half of the third.
+
 ## Peers and discovery (29/10)
 
 Where that policy lives - keep these four in step, and `scripts/test-codemode-boundary.lua` asserts both the
