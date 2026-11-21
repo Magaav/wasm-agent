@@ -2061,6 +2061,19 @@ exit 1
   eq(step_of("case37", "gate").state, "failed", "the verdict is failed twice, as before")
   eq(#(row37 and row37.failed or {}), 1, "the journal still names the check that failed")
   eq(row37.failed[1] and row37.failed[1].row, "fast", "by name")
+  -- ------------------------------------------ case 41: a second mission does not steal the kept gate
+  --
+  -- review r1, item 2: M.gate_history kept only the NEWEST passing row per check name, so two missions
+  -- preflighted before one landing left the first mission's gate unkept - the normal case, not the corner
+  -- one. The history is keyed by the check AND the tree now, so the fourth round below (change/one, the
+  -- same bytes as case 33 and 34) is kept even though case 35 asked the same check about a different tree.
+  eq(land.run({ run = "case41", ring = SOLO_RING, branches = { "change/one" }, until_step = "gate",
+    checks = until_checks }), 0, "a fourth round on the first branch's bytes stops green at the gate")
+  eq(runs_of("gate"), 2, "and it KEPT the check: a different tree preflighted in between did not steal it")
+  local row41 = (journal_of("case41").gate or {})[1]
+  eq(row41 and row41.kept, true, "the journal marks it kept")
+  eq(row41 and row41.tree_sha, (journal_of("case33") or {}).tree_sha, "on the tree object it was passed on")
+
   -- ------------------------------------------ case 38: a LOCAL PATH as the incoming repository
   --
   -- A round tested with no network and no other node names a bare repository on this machine as --incoming.
@@ -2085,6 +2098,88 @@ exit 1
     "and the refusal is named after the fetch, not after the branch")
   contains(step_of("case39", "collect").observed or "", "-missing",
     "the refusal names the incoming it could not read")
+  land.incoming_remote = "oc-in"
+
+  -- ------------------------------------------ case 40: a preflight is not an unfinished landing (r1 B1)
+  --
+  -- A bare `wa land --resume` used to continue the newest run whose result was not done, and a preflight
+  -- ends as stopped_at_until with --until deliberately NOT inherited: so the next resume pushed, fast-forwarded
+  -- main, built a release and deployed, for a branch nobody decided to land.
+  setup_fixture()
+  observed.pushes, observed.main_pushes = 0, 0
+  eq(land.run({ run = "case40", ring = SOLO_RING, branches = { "change/one" }, until_step = "gate",
+    checks = until_checks }), 0, "the preflight answers green and stops at the gate")
+  eq((journal_of("case40") or {}).result, "stopped_at_until", "it is recorded stopped_at_until")
+  eq(land.run({ resume = true }), 1, "a bare --resume finds nothing to resume: a preflight is not unfinished")
+  eq(observed.pushes, 0, "so it pushed nothing")
+  eq((journal_of("case40") or {}).result, "stopped_at_until", "and the preflight journal is untouched")
+  eq(land.run({ run = "case40", resume = true }), 1, "resuming it BY NAME without --until is refused")
+  eq(step_of("case40", "push"), nil, "and still nothing after the gate ran")
+  eq(observed.pushes, 0, "still no push")
+  eq(land.run({ run = "case40", resume = true, until_step = "gate" }), 0,
+    "naming the boundary again is allowed: it continues to the same boundary")
+  eq(observed.pushes, 0, "and pushes nothing")
+
+  -- ------------------------------------------ case 42: the result file must be THIS attempt's (r1 item 3)
+  --
+  -- scripts/fast.sh writes wa-fast-result.json at the END, so an attempt killed early leaves the previous
+  -- attempt's file in the same tree (a resumed run, a retry). Reading it names rows that did not fail now;
+  -- the narrowed retry runs them, they pass, and the verdict is reported as flaky under load - the wrong
+  -- rows and the wrong reason.
+  local stale = host.paths().home .. "/land-gate/stale-rows.sh"
+  write_file(stale, string.format([[#!/usr/bin/env bash
+set -uo pipefail
+HOME_DIR="%s"
+TREE=$(pwd)
+RESULT=$(git rev-parse --git-path wa-fast-result.json 2>/dev/null)
+case "$RESULT" in /*) ;; *) RESULT="$TREE/$RESULT" ;; esac
+MODE=$(cat "$HOME_DIR/land-gate/stale-rows.state" 2>/dev/null || echo write)
+if [ "$MODE" = silent ]; then
+  # FAILS and writes nothing: exactly what an attempt killed before its end leaves behind. It PASSES when
+  # it is asked for a row list, which is what a narrowed retry would do with the leftover rows.
+  if [ -n "${WA_FAST_ROWS:-}" ]; then echo "fast path PASSED (2 of 2 checks)"; exit 0; fi
+  echo "FAIL lua scripts/test-a.lua (exit 1): a failed"
+  echo "fast path FAILED (1 of 2 checks, 0 skipped, 1s)"
+  exit 1
+fi
+printf '%%s\n' '{"schema":1,"checks":[{"name":"scripts/test-a.lua","section":"lua","status":"fail","exit":1,"first_error":"a failed"}]}' > "$RESULT"
+echo "FAIL lua scripts/test-a.lua (exit 1): a failed"
+echo "fast path FAILED (1 of 2 checks, 0 skipped, 1s)"
+exit 1
+]], host.paths().home))
+  local function set_stale(mode)
+    write_file(host.paths().home .. "/land-gate/stale-rows.state", mode .. "\n")
+  end
+  local stale_checks = { { name = "fast", command = "bash " .. stale, timeout = 120 } }
+  set_stale("write")
+  eq(land.run({ run = "case42", ring = SOLO_RING, branches = { "change/one" }, until_step = "gate",
+    checks = stale_checks }), 1, "a red check that wrote its result file stops the round")
+  eq(step_of("case42", "gate").state, "failed", "failed twice: the retry asks for the same failing row")
+  must("sleep 1.2")   -- so the leftover file is unmistakably OLDER than the next attempt
+  set_stale("silent")
+  eq(land.run({ run = "case42", resume = true, checks = stale_checks }), 1, "the resumed attempt is red too")
+  local rows42 = journal_of("case42").gate or {}
+  local row42 = rows42[#rows42]
+  eq(step_of("case42", "gate").state, "failed",
+    "and it stays failed: the leftover result file is not this attempt's, so nothing was narrowed")
+  eq(row42 and row42.retry and row42.retry.rows_file, nil, "the retry named no row list")
+  contains((row42 and row42.retry and row42.retry.why) or "", "not newer than this attempt began", "and it says why")
+
+  -- ------------------------------------------ case 44: a preflight does not need another node awake (r1 item 4)
+  --
+  -- An unreachable NAMED incoming is a warning for a round that stops at or before the gate (FACTORY.md
+  -- rule 1: the local loop has no network and no other node) and still a refusal for a landing, which cannot
+  -- merge what it cannot read.
+  setup_fixture()
+  land.incoming_remote = "no-such-remote-r1"
+  eq(land.run({ run = "case44", ring = SOLO_RING, branches = { "change/one" }, until_step = "gate",
+    checks = until_checks }), 0, "a preflight goes on with the refs it already has when the incoming is down")
+  eq(step_of("case44", "collect") and step_of("case44", "collect").state, "done", "collect finished")
+  contains(read_file(land.run_dir("case44") .. "/evidence/collect.log") or "", "fetch: WARN",
+    "and the evidence carries the warning, by name")
+  eq(land.run({ run = "case45", ring = SOLO_RING, branches = { "change/one" }, checks = until_checks }), 1,
+    "a landing refuses the same unreachable incoming")
+  eq(step_of("case45", "collect") and step_of("case45", "collect").error, "fetch_failed", "by name")
   land.incoming_remote = "oc-in"
 
 end)()
