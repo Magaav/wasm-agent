@@ -107,6 +107,45 @@ then: three faces in `~/.local/share/fonts`; `foot.ini` carrying
 record written; `icons.resolve()` answering `wa (default (wa setup fonts installed wa Icons))`; and
 `wa setup fonts --undo` restoring `foot.ini`, removing the three files and the record.
 
+## Review finding (21/11): a Nerd face was exempted, and that is the complaint itself
+
+`draws_icons()` asked "can this font draw the md-* code points" - and **every Nerd font can**. So foot
+on `JetBrainsMono Nerd Font` (Omarchy's default, and Victor's own) was left untouched and the icons kept
+coming from the Nerd face at Nerd metrics, one space wide: exactly the spacing A2 replaced. Victor's
+19/11 ~10:20 decision is later than the 09:45 "only when the font lacks Nerd glyphs" line, and it means
+wa Icons draws those code points, which a terminal only does when its **primary** face does not carry
+them itself.
+
+Fixed in `c64c32b8`. The question is now "is this terminal already on the A2 pair"
+(`M.already_a2`: primary face JetBrains Mono **and** wa Icons named). A Nerd family fails it and is
+switched; a terminal already on the pair is left alone, so a second run still changes nothing. The value
+is the pair in each terminal's own syntax, **keeping the operator's size**:
+
+    foot          font=JetBrains Mono:size=9, wa Icons:size=9
+    GNOME         'JetBrains Mono 9'
+    the others    JetBrains Mono
+
+The old value was wrong twice over: it wrote `icons=wa Icons`, which is **not foot syntax**
+(foot.ini(5) takes a comma-separated list), and it replaced the operator's size with a fixed 11.
+
+Two more defects this found:
+
+6. **A half undo.** The second (no-op) run rebuilt the record from its own rows and dropped the backup
+   of the edit still in effect, so `--undo` restored 0 configs while removing the fonts. The previous
+   run's backup is now carried forward; verified end to end (two whole runs, then undo, then `diff`
+   against the Omarchy file: byte-for-byte identical).
+7. **`already_a2` had to distinguish a list from a family.** foot's comma form is split before the
+   primary face is judged, so `"JetBrains Mono:size=9, wa Icons:size=9"` reads as set up while
+   `"JetBrainsMono Nerd Font:size=9"` does not.
+
+Test: `scripts/test-font-setup.lua` (117 checks, was 100) uses **the real Omarchy foot.ini bytes** as its
+fixture — copied into the scratch tree from `/usr/share/omarchy/config/foot/foot.ini`, never
+`~/.config`. Before = the Nerd face and `already_a2()` false; after =
+`font=JetBrains Mono:size=9, wa Icons:size=9`; a second run leaves it alone; `--undo` restores the
+original bytes, including after two whole runs. Measured against the pre-fix code in a separate worktree
+at `713a1729`: the A2-pair assertion **fails there**, which is the test the brief asked for. Victor's
+real `~/.config/foot/foot.ini` is verified untouched.
+
 ## A pre-existing failure, named
 
 `scripts/test-linux-release-fetch.sh` reports **14 passed, 13 failed** on this branch AND on the base
