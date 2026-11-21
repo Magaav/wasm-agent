@@ -1739,7 +1739,12 @@ impl.gate = function(run, options)
     local budget = check.timeout or 1800
     if check.per_test_seconds and run.journal and run.journal.plan then
       local touched = 0
-      for _, path in ipairs(run.journal.plan.files or {}) do
+      -- plan.files is the COUNT of changed paths (M.plan returns files = #paths), not the list: iterating it
+      -- crashed the gate with "attempt to index a number value" the first time a round reached the
+      -- discrimination check (21/11, batch-4, after a green fast path). The list is asked for by name.
+      local listed = run.journal.plan.files
+      if type(listed) ~= "table" then listed = (M.changed_paths(run)) end
+      for _, path in ipairs(type(listed) == "table" and listed or {}) do
         if tostring(path):match("^tests?/") or tostring(path):match("test%-") then touched = touched + 1 end
       end
       budget = math.max(budget, 300 + check.per_test_seconds * touched)
