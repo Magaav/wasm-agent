@@ -742,6 +742,16 @@ eq(count_of("green"), 2, "a changed command is not kept: it runs again")
 eq(count_of("later"), 3, "the check that passed on its first run last time is kept now")
 eq(count_of("stopper"), 4, "the check that failed twice runs again")
 eq(observed.pushes, 0, "no attempt of this case pushed")
+-- A check with a PER-TEST budget (the discrimination check's shape) sizes its budget from the round's
+-- changed paths. The journal's plan.files is their COUNT, and iterating it crashed the gate's own code
+-- ("attempt to index a number value", 21/11 batch-4) before the check ever ran.
+local budget_checks = { { name = "budgeted", command = "bash " .. green_path, timeout = 120, per_test_seconds = 30 },
+                        { name = "stopper", command = "bash " .. stop_path, timeout = 120 } }
+eq(land.run({ run = "case5c", ring = SOLO_RING, branches = { "change/one" }, checks = budget_checks }), 1,
+  "the landing stops at the red check")
+local gate5c = journal_of("case5c").gate or {}
+eq(gate5c[1] and gate5c[1].name, "budgeted", "the per-test-budget check RAN (the gate did not crash sizing it)")
+eq(gate5c[1] and gate5c[1].ok, true, "and passed")
 end
 
 -- ---------------------------------------------------------------- case 6: resume after the deploy failed on node 3
