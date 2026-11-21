@@ -316,6 +316,49 @@ if omarchy_bytes then
   eq(read(twice), omarchy_bytes, "byte for byte the original, after a second run that edited nothing")
 end
 
+-- ---- a DRY RUN WRITES NOTHING (review finding 1, 21/11) ---------------------------
+-- It used to call install_fonts() before any dry_run check, so '--dry-run' ran mkdir and cp into the
+-- user font directory and refreshed the cache. A dry run that writes is worse than none: it is asked for
+-- exactly when the operator is unsure.
+local dry_home = scratch_root .. "/dry-home"
+local dry_fonts = scratch_root .. "/dry-fonts"
+mkdir(dry_home)
+local dry_bundle = scratch_root .. "/dry-bundle"
+mkdir(dry_bundle)
+for _, name in ipairs(font_setup.FONTS) do write(dry_bundle .. "/" .. name, "fixture") end
+write(fixtures .. "/omarchy-dry/foot.ini", "[main]\nfont=JetBrainsMono Nerd Font:size=9\n")
+local dry_terminals = {
+  { name = "foot", path = fixtures .. "/omarchy-dry/foot.ini", kind = "ini", section = "main", key = "font" },
+}
+local dry_before = read(fixtures .. "/omarchy-dry/foot.ini")
+local dry_run = font_setup.run({
+  dry_run = true, home = dry_home, source_dir = dry_bundle, font_dir = dry_fonts,
+  run = fake_run, terminals = dry_terminals,
+})
+ok(dry_run.ok, "the dry run completes: " .. tostring(dry_run.error))
+ok(not exists(dry_fonts .. "/waIcons-Regular.ttf"), "a dry run copies NO font")
+ok(not exists(dry_fonts) or #(font_setup_list(dry_fonts)) == 0, "and leaves the font directory empty")
+eq(read(fixtures .. "/omarchy-dry/foot.ini"), dry_before, "a dry run writes NO config")
+eq(font_setup.read_record(), nil, "and writes no record")
+
+-- ... and it says what it WOULD do, in the same shape a real run uses (review finding 2).
+local said_would = false
+for _, line in ipairs(dry_run.lines or {}) do
+  if line:find("would edit foot", 1, true) and line:find("wa Icons", 1, true) then said_would = true end
+end
+ok(said_would, "a dry run names the terminal it would edit and the value it would write:")
+for _, line in ipairs(dry_run.lines or {}) do if line:find("would edit", 1, true) then print("    " .. line) end end
+local counted = false
+for _, line in ipairs(dry_run.lines or {}) do
+  if line:find("would be edited", 1, true) then counted = true end
+end
+ok(counted, "and counts the would-edits in the summary")
+local claimed_none = false
+for _, line in ipairs(dry_run.lines or {}) do
+  if line:find("no terminal config needed a change", 1, true) then claimed_none = true end
+end
+ok(not claimed_none, "a dry run that plans an edit must NOT say 'no terminal config needed a change'")
+
 -- ---- the other three terminals the brief names -------------------------------------
 -- WINDOWS TERMINAL: one JSON file per user, its face under "defaults"."font". Edited in place, every other
 -- byte of the file left alone - and refused BY NAME when the file has no "defaults" object to edit.

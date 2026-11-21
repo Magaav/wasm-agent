@@ -456,6 +456,25 @@ end
 -- Copy the three faces into the user font directory. Refuses when a face is missing from the bundle
 -- (a setup that installs two of three faces is a terminal with half an icon set) and when the
 -- destination cannot be created.
+-- WHAT install_fonts WOULD DO, without doing any of it: the same source check, the same missing-face
+-- refusal, and the list it would copy. A dry run asks THIS, so the two cannot drift.
+function M.font_plan(opts)
+  opts = opts or {}
+  local os_name = opts.os or M.os()
+  local home = opts.home or M.user_home()
+  local source = opts.source_dir or M.source_dir()
+  local target = opts.font_dir or M.font_dir(os_name, home)
+  local plan = { dir = target, copied = {}, missing = {} }
+  if not source then return nil, plan end
+  for _, name in ipairs(M.FONTS) do
+    local path = source .. "/" .. name
+    local kind = host.path_kind and host.path_kind(path) or (host.read_file(path) and "file" or "missing")
+    if kind ~= "file" then plan.missing[#plan.missing + 1] = path
+    else plan.copied[#plan.copied + 1] = name end
+  end
+  return plan
+end
+
 function M.install_fonts(opts)
   opts = opts or {}
   local os_name = opts.os or M.os()
@@ -543,6 +562,7 @@ function M.configure_terminal(terminal, opts)
   end
   if opts.dry_run then
     row.action = "would edit"
+    row.planned = edited:match("font=([^\n]+)") or M.font_value(terminal, row.current)
     row.why = "'" .. tostring(row.current) .. "' is not the A2 pair (JetBrains Mono + wa Icons)"
     return row
   end
@@ -598,6 +618,7 @@ function M.configure_gsettings(terminal, opts)
   local value = M.font_value(terminal, current)
   if opts.dry_run then
     row.action = "would edit"
+    row.planned = M.font_value(terminal, current)
     row.why = "'" .. tostring(current) .. "' is not the A2 pair (JetBrains Mono + wa Icons)"
     return row
   end
@@ -693,12 +714,35 @@ function M.run(opts)
     return result
   end
 
-  local detail, why = M.install_fonts(opts)
-  if not detail then
-    result.ok = false
-    result.error = why
-    say("wa setup fonts: refused: " .. tostring(why))
-    return result
+  -- A DRY RUN INSTALLS NOTHING (review finding 1, 21/11). It used to call install_fonts() before any
+  -- dry_run check, so 'wa setup fonts --dry-run' really ran mkdir and cp into the user font directory
+  -- and refreshed the cache - a dry run that writes is worse than no dry run, because it is asked for
+  -- precisely when the operator is unsure. It now only ASKS: the same plan, no bytes.
+  local detail, why
+  if opts.dry_run then
+    detail = M.font_plan(opts)
+    if not detail then
+      result.ok = false
+      result.error = "fonts_source_unknown: this node cannot say where its own fonts live (WA_UI_DIR, or WASM_AGENT_LUA_ROOT for a checkout)"
+      say("wa setup fonts: refused: " .. result.error)
+      return result
+    end
+    if #detail.missing > 0 then
+      result.ok = false
+      result.error = "fonts_missing_from_bundle: " .. table.concat(detail.missing, ", ")
+      say("wa setup fonts: refused: " .. result.error)
+      return result
+    end
+    say(string.format("wa setup fonts: would install %d font(s) in %s (dry run: nothing written)",
+      #detail.copied, tostring(detail.dir)))
+  else
+    detail, why = M.install_fonts(opts)
+    if not detail then
+      result.ok = false
+      result.error = why
+      say("wa setup fonts: refused: " .. tostring(why))
+      return result
+    end
   end
   result.fonts = detail
 
@@ -710,6 +754,11 @@ function M.run(opts)
     if row.action == "edited" then
       say(string.format("wa setup fonts: %s -> %s (was %s; backup %s)",
         terminal.name, M.TEXT_FAMILY, tostring(row.current), row.backup))
+    elseif row.action == "would edit" then
+      -- A dry run names the terminal it WOULD edit and the exact value it would write. It used to fall
+      -- through to "left alone", which is the opposite of what it plans (review finding 2, 21/11).
+      say(string.format("wa setup fonts: would edit %s: %s -> %s%s",
+        terminal.name, tostring(row.current), tostring(row.planned), opts.dry_run and " (dry run)" or ""))
     elseif opts.verbose then
       say(string.format("wa setup fonts: %s left alone: %s", terminal.name, tostring(row.why)))
     end
@@ -737,9 +786,18 @@ function M.run(opts)
     end
   end
 
-  local edited = 0
-  for _, row in ipairs(rows) do if row.action == "edited" then edited = edited + 1 end end
-  if edited == 0 then
+  local edited, would = 0, 0
+  for _, row in ipairs(rows) do
+    if row.action == "edited" then edited = edited + 1
+    elseif row.action == "would edit" then would = would + 1 end
+  end
+  if would > 0 then
+    -- A dry run says what it would DO, in the same words a real run uses, and counts it: a summary that
+    -- reports "no terminal config needed a change" over a plan to change one is the report lying about
+    -- the plan (review finding 2, 21/11).
+    say(string.format("wa setup fonts: dry run: %d terminal config(s) would be edited", would))
+  end
+  if edited == 0 and would == 0 then
     say("wa setup fonts: installed " .. tostring(#(detail.copied or {})) .. " font(s) in " .. tostring(detail.dir)
       .. "; no terminal config needed a change")
   end
