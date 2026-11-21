@@ -316,7 +316,13 @@ fn main() {
     // scripts/lib/node-binaries.sh, scripts/upgrade.sh).
     if args.first().is_some_and(|arg| arg == "release") {
         host::restore_input();
-        std::process::exit(release::run(&args[1..]));
+        // None is "this node does not answer that form": a fleet command (--node), which falls through to
+        // the Lua CLI exactly as an unrecognised option does. There is no release subcommand in the Lua
+        // tree, so the fleet form is reached here, before the interpreter, and the Lua side of it lives
+        // in lua/core/release_trust.lua (called from init.lua by its own word).
+        if let Some(code) = release::run(&args[1..]) {
+            std::process::exit(code);
+        }
     }
     // A detached launcher must not change the node's worktree/branch identity.
     // The deployment gate writes this explicit location; CLI one-shot commands

@@ -925,6 +925,14 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-update-watcher.lua" "$BIN" --db "$D
 # feed: no network, no clock. It is here because a node that cannot say "I am behind" updates only
 # when someone remembers to.
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-release.lua" "$BIN" --db "$DB.release" | grep "release ok"
+# THE TRUST SET, WRITTEN BY THE COMMAND THAT READS IT (21/11, hand fix 2 of the node-7ddbfa98036a rollout).
+# Nothing in wa wrote a trusted-keys file, so an operator wrote one by hand and, without the
+# "wa-trusted-keys v1" header, every release on that node refused as release_unsigned_or_forged. This runs the
+# real binary against a scratch HOME: the header is written, the file is read back through the same parser a
+# verification uses, the replaced file is kept, an unreadable one is never overwritten, a retire removes the
+# key, and the fleet door refuses an unknown node by name instead of reporting success. Its source rows make it
+# discriminate without a built binary as well.
+gate_run bash scripts/test-release-trust.sh "$BIN"
 # The route's two modes on a fixture install: a read-only check (no sentinel, no request written) and
 # a deploy path that reports the cached release state without paying for a fetch.
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-update-release.lua" "$BIN" --db "$DB.update-release" | grep "update release ok"
