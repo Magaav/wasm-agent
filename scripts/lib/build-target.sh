@@ -610,7 +610,7 @@ wa_build_jobs() {
 #   wa_build_host_lock <command...>
 # No flock(1) on this host means no queueing, not no build: the command runs and says so.
 wa_build_host_lock() {
-  local lock started waited status
+  local lock status
   if [ "${WA_BUILD_HOST_LOCK_HELD:-}" = 1 ]; then "$@"; return $?; fi
   if ! command -v flock >/dev/null 2>&1; then
     printf 'onebuild: flock is not available, so this build is not queued behind other builds\n' >&2
@@ -618,22 +618,24 @@ wa_build_host_lock() {
   fi
   lock=$(wa_build_lock_path)
   mkdir -p "$(dirname "$lock")" 2>/dev/null || true
-  started=$(wa_build_now_ms)
   (
     # -o: the lock is the wait's, never a child's. A build that leaves a compiler or a test behind must
     # not keep the node's build queue blocked after it exits.
+    lock_started=$(wa_build_now_ms)
     if ! flock -o -w "${WA_BUILD_HOST_LOCK_WAIT:-3600}" 8; then
       printf 'onebuild: waited %ss for the node build lock and gave up; building anyway (WA_BUILD_HOST_LOCK_WAIT raises the wait)\n' \
         "${WA_BUILD_HOST_LOCK_WAIT:-3600}" >&2
     fi
+    # The WAIT is measured here, between the start and the acquisition, never around the build: a build
+    # that took 150 s once reported 'waited 149.8s', which credits compile time to the queue.
+    lock_waited=$(( $(wa_build_now_ms) - lock_started ))
+    if [ "$lock_waited" -gt 2000 ]; then
+      printf 'onebuild: waited %ss for the node build lock (another build on this node was running; one heavy build at a time)\n' \
+        "$(awk -v ms="$lock_waited" 'BEGIN{printf "%.1f", ms/1000}')" >&2
+    fi
     WA_BUILD_HOST_LOCK_HELD=1 "$@"
   ) 8>>"$lock"
   status=$?
-  waited=$(( $(wa_build_now_ms) - started ))
-  if [ "$waited" -gt 2000 ]; then
-    printf 'onebuild: waited %ss for the node build lock (another build on this node was running; one heavy build at a time)\n' \
-      "$(awk -v ms="$waited" 'BEGIN{printf "%.1f", ms/1000}')" >&2
-  fi
   return "$status"
 }
 
@@ -707,19 +709,19 @@ wa_build_run() {
     printf 'onebuild: target %s (cap %s, WASM_AGENT_BUILD_CAP_GB)\n' "$target" "$(wa_build_human "$(wa_build_cap_bytes)")" >&2
   fi
   if command -v flock >/dev/null 2>&1 && [ -d "$target" ]; then
-    started=$(wa_build_now_ms)
     (
+      tree_lock_started=$(wa_build_now_ms)
       flock -w "${WA_BUILD_LOCK_WAIT:-1800}" 9 || printf 'onebuild: waited %ss for the build lock on %s and gave up (another build holds it; WA_BUILD_LOCK_WAIT raises the wait)\n' "$(awk -v s="${WA_BUILD_LOCK_WAIT:-1800}" 'BEGIN{printf "%d", s}')" "$(basename "$target")" >&2
+      # The wait, not the build: measured between the start and the acquisition (see the host lock).
+      tree_lock_waited=$(( $(wa_build_now_ms) - tree_lock_started ))
+      if [ "$tree_lock_waited" -gt 2000 ]; then
+        printf 'onebuild: waited %ss for the build lock on %s (another build of this tree was running)\n' \
+          "$(awk -v ms="$tree_lock_waited" 'BEGIN{printf "%.1f", ms/1000}')" "$(basename "$target")" >&2
+      fi
       cd "$tree" 2>/dev/null || exit 1
       wa_build_invoke "$target" "$@"
     ) 9>>"$target/.wa-build.lock"
     status=$?
-    waited=$(( $(wa_build_now_ms) - started ))
-    # Only a wait worth mentioning is mentioned: a build that started at once says nothing.
-    if [ "$waited" -gt 2000 ]; then
-      printf 'onebuild: waited %ss for the build lock on %s (another build of this tree was running)\n' \
-        "$(awk -v ms="$waited" 'BEGIN{printf "%.1f", ms/1000}')" "$(basename "$target")" >&2
-    fi
     return "$status"
   fi
   ( cd "$tree" 2>/dev/null || exit 1; wa_build_invoke "$target" "$@" )
