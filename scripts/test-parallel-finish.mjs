@@ -23,6 +23,9 @@ const finish=(mode,revision=head())=>JSON.parse(run(process.execPath,[runner,mod
 try {
   fs.mkdirSync(repo);fs.mkdirSync(path.join(repo,'scripts'));
   fs.copyFileSync('scripts/gate-lane.mjs',path.join(repo,'scripts/gate-lane.mjs'));
+  // gate-lane.mjs imports its lease helper; without it the lane script dies at import and the gate
+  // reads 'no slot' (the full gate was red on this row from 21/11 back to the import's arrival).
+  fs.mkdirSync(path.join(repo,'scripts/lib'),{recursive:true});fs.copyFileSync('scripts/lib/sqlite-lease.mjs',path.join(repo,'scripts/lib/sqlite-lease.mjs'));
   // Commit the authentic shipped driver before execution. Its emitted identity belongs
   // to this actual tiny source/head, with no after-the-fact envelope augmentation.
   fs.mkdirSync(path.dirname(runner),{recursive:true});fs.copyFileSync(runnerRelative,runner);

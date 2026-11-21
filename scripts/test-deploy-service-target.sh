@@ -90,7 +90,16 @@ mkdir -p "$INSTALL_SERVICE" "$INSTALL_TARGET" "$INSTALL_STRAY" "$INSTALL_HOME" "
 printf 'the node the service runs\n' > "$INSTALL_SERVICE/wa"
 printf 'the node the deploy would install\n' > "$INSTALL_TARGET/wa"
 git -C "$TREE" init -q --initial-branch=main
-git -C "$TREE" -c user.name=fixture -c user.email=fixture@example.invalid commit -q --allow-empty -m 'fixture tree'
+# deploy.sh step 0c runs the tree's own scripts/runtime-install-binding.mjs (no local imports) before the build;
+# the fixture carries it, committed, because step 1 refuses a tree with uncommitted files.
+mkdir -p "$TREE/scripts"; cp "$ROOT/scripts/runtime-install-binding.mjs" "$TREE/scripts/"
+git -C "$TREE" add scripts/runtime-install-binding.mjs
+git -C "$TREE" -c user.name=fixture -c user.email=fixture@example.invalid commit -q -m 'fixture tree'
+# deploy.sh step 0b waits (up to 600 s) for the tree to be exactly origin/main. A tree with no origin never is,
+# so the cases that reach past the service check waited out that bound and failed on its refusal (21/11 survey).
+# The scratch tree is its own origin: origin/main is its main, which is the canonical shape 0b asks for.
+git -C "$TREE" remote add origin "$TREE"
+git -C "$TREE" fetch -q origin
 
 PORT=""
 PORT_BASE=$((20000 + RANDOM % 20000))
@@ -121,6 +130,7 @@ run_deploy() { # unit_file install_dir [deploy_script]
       HOME="$INSTALL_HOME" USERPROFILE="$INSTALL_HOME" \
       WA_DEPLOY_ROOT="$TREE" WA_INSTALL_DIR="$install" WA_PORT="$PORT" WA_CLIENT_PORT="$CLIENT" \
       WA_SERVICE_UNIT_FILE="$unit" WA_PROC_ROOT="${PROC_ROOT_FIXTURE:-}" \
+      WA_DEPLOY_BUILD_ONLY=1 \
       bash "$script" --reason "service-target fixture" 2>&1)"
   last_exit=$?
 }
@@ -171,7 +181,13 @@ ok "$(grep -q 'different installs' <<<"$last_out" && echo 1 || echo 0)" \
   "removing the drop-in brings the refusal back - the falsification was the missing evidence"
 
 # --- (b) a stray holds the port: refused, by process ----------------------------------------------------
-node -e "require('net').createServer().listen($PORT,'127.0.0.1')" >"$W/stray.log" 2>&1 &
+# Where /proc is real the kernel names the holder by its executable. Started as plain `node`, that is
+# /usr/bin/node, and case (c) below then aimed the deploy at /usr/bin (only file permissions stopped it,
+# 21/11). The stray runs from a copy of node AT the stray install's `wa`, which is the shape it stands for: a
+# node running out of another install. Where there is no /proc the naming is staged below instead.
+STRAY_EXE="node"
+if [ -d /proc/self ] && cp "$(command -v node)" "$INSTALL_STRAY/wa" 2>/dev/null; then STRAY_EXE="$INSTALL_STRAY/wa"; fi
+"$STRAY_EXE" -e "require('net').createServer().listen($PORT,'127.0.0.1')" >"$W/stray.log" 2>&1 &
 STRAY_JOB=$!
 LISTEN_PID=""
 # Generous, in tenths and then some: this runs on a loaded machine during a gate, and a fixture that fails
@@ -225,12 +241,19 @@ ok "$(grep -q 'deploy: building' <<<"$last_out" && grep -q 'cannot bind' <<<"$la
 # The witness branch: on a machine with no unit this is the only place the answer can come from (it is the
 # Windows case), and it must resolve the *running* node's directory, not a default. No WA_INSTALL_DIR, because
 # a caller who has said where is a different case (the one above refuses when the two disagree).
+# The stray install is an install like any other: it has a record naming the commit it runs and the bytes it
+# is, or deploy.sh's ancestry gate (step 3, newer than this case) refuses it as running_commit_unprovable
+# before the build this case is waiting to see.
+if [ -f "$INSTALL_STRAY/wa" ]; then
+  printf 'commit=%s\nvia=deploy.sh\nrecord_role=final\nsha256=%s\n' "$(git -C "$TREE" rev-parse HEAD)" \
+    "$(sha256sum "$INSTALL_STRAY/wa" | cut -d' ' -f1)" > "$INSTALL_STRAY/installed.txt"
+fi
 run_deploy "$MISSING_UNIT" ""
 ok "$(grep -q 'deploy: building' <<<"$last_out" && grep -q 'because the node on port' <<<"$last_out" && echo 1 || echo 0)" \
   "with no unit the deploy follows the node on the port and installs into that install" \
   "$(grep -m1 'installing into' <<<"$last_out")"
 ok "$(grep -q 'cannot bind' <<<"$last_out" && echo 0 || echo 1)" "and it is not refused, because that node is the target"
-[ -z "$(grep -m1 'because the node on port' <<<"$last_out")" ] && printf '  note the deploy said this instead:\n%s\n' "$last_out"
+{ ! grep -q 'because the node on port' <<<"$last_out" || ! grep -q 'deploy: building' <<<"$last_out"; } && printf '  note the deploy said this instead:\n%s\n' "$last_out"
 
 # --- (c) the agreeing case: the port is free, the unit names the install the deploy writes ----------------
 kill "$LISTEN_PID" 2>/dev/null

@@ -1,5 +1,5 @@
 // Exact reviewed source bytes; no environment path override.
-import fs from 'node:fs';import path from 'node:path';import os from 'node:os';import {spawnSync} from 'node:child_process';import {digest} from './wave-recovery.mjs';
+import fs from 'node:fs';import path from 'node:path';import os from 'node:os';import {spawnSync} from 'node:child_process';import {digest} from './wave-recovery.mjs';import {underTemp} from './temp-roots.mjs';
 export function verifyRecoverySource(repo,d){
  const fail=s=>{throw Error('recovery_source_'+s);};
  const bytes=(...a)=>{const r=spawnSync('git',['-C',repo,...a],{windowsHide:true,maxBuffer:64*1024*1024});if(r.status!==0)fail('git_unavailable');return r.stdout;};
@@ -34,8 +34,8 @@ export function verifyRecoverySource(repo,d){
   const nativeInputs=d.files.filter(f=>f.path.startsWith('rust/')||f.path.startsWith('lua/'));
   if(JSON.stringify(build.native_inputs)!==JSON.stringify(nativeInputs))fail('native_input_closure');
   if(d.authority==='private-fixture'){
-   const temp=fs.realpathSync(os.tmpdir());
-   if(![repo,root,buildRef.path,build.log.path].every(p=>fs.realpathSync(p).startsWith(temp+path.sep)))fail('private_fixture_root');
+   // a private fixture lives in a temp directory: scripts/lib/temp-roots.mjs says which
+   if(![repo,root,buildRef.path,build.log.path].every(p=>underTemp(p)))fail('private_fixture_root');
   }else if(d.authority!=='operator-local')fail('authority_kind');
  }
  return {verified:true,schema:d.schema||1,authority:d.authority||'legacy-read-only',root,tip:d.tip,tree:d.tree,files:d.files,runtime:d.runtime||null,review_commit:d.review_commit,review_path:d.review_path};

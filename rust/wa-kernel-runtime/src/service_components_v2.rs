@@ -1099,14 +1099,14 @@ mod tests {
         while Instant::now() < deadline {
             let s = status(Some("svc-echo"));
             restarts = s["restarts"].as_u64().unwrap_or(0);
-            if restarts >= 1 && s["last_exit"].as_str().unwrap_or("").starts_with("exit_1") {
+            if restarts >= 1 && { let e = s["last_exit"].as_str().unwrap_or(""); e.starts_with("exit_") && !e.starts_with("exit_0") } {
                 break;
             }
             std::thread::sleep(Duration::from_millis(100));
         }
         let s = status(Some("svc-echo"));
         assert!(restarts >= 1, "{s}");
-        assert!(s["last_exit"].as_str().unwrap_or("").starts_with("exit_1"), "{s}");
+        assert!({ let e = s["last_exit"].as_str().unwrap_or(""); e.starts_with("exit_") && !e.starts_with("exit_0") }, "{s}");
         stop("svc-echo");
     }
 

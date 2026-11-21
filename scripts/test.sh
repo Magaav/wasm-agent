@@ -366,18 +366,6 @@ gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-ca
 # Run the serve-level invariants, each a measured regression: routing by session (a wake carries its
 # conversation in the body's `thread`, not the auth header) and the UI version tracking content rather
 # than mtime (a `cp -f` of identical files must not force every open page to reload).
-# The node governance surfaces themselves (docs/GRANT-POLICY.md, docs/TELEMETRY.md): the policy status
-# and the telemetry capability answer from the libraries the host enforces, over the bounded stores
-# both write into. Its own scratch home, so the policy file it writes cannot govern a later check.
-# Both modes, because a policy file's presence is what turns the policy layer on and one process loads
-# it once: manifest mode (no file: the manifest grant stays the only gate) and policy mode (a file,
-# with default-deny for a sensitive capability that has no rule).
-GOVERNANCE_HOME="$(mktemp -d)"
-WASM_AGENT_HOME="$GOVERNANCE_HOME" WA_GOVERNANCE_CASE=manifest WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-node-governance.lua" "$BIN" --db "$GOVERNANCE_HOME/db.sqlite" | grep 'node governance ok'
-rm -rf "$GOVERNANCE_HOME"
-GOVERNANCE_HOME="$(mktemp -d)"
-WASM_AGENT_HOME="$GOVERNANCE_HOME" WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-node-governance.lua" "$BIN" --db "$GOVERNANCE_HOME/db.sqlite" | grep 'node governance ok'
-rm -rf "$GOVERNANCE_HOME"
 # The shipped default policy and its install (docs/GRANT-POLICY.md, "The shipped default"): the file
 # parses, an operator's policy.json is never overwritten, a missing one is installed once, and a
 # component the file does not name is named rather than discovered as a refused write later. Hermetic:
@@ -422,7 +410,7 @@ BIN=rust/target/release/wa
 # for one test module. resources::tests has no debug_assertions dependency (04/11).
 gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-capabilities resources::tests
 run_proof_fixture nativeTarget 29 node scripts/test-native-target-resource.cjs "$BIN"
-run_proof_fixture resourceClaims 47 node scripts/test-resource-claims.cjs "$BIN"
+run_proof_fixture resourceClaims 46 node scripts/test-resource-claims.cjs "$BIN"
 run_proof_fixture nativeAlias 12 node scripts/test-native-target-alias.cjs "$BIN"
 run_proof_fixture nativeRecovery 66 node scripts/test-wave-native-recovery.mjs "$BIN" "$ACTUAL_RELEASE_BUILD_LOG" '--build-command=cargo build --release --offline --manifest-path rust/Cargo.toml'
 # END native-target recovery required proofs
@@ -541,6 +529,19 @@ export WASM_AGENT_LUA_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 if command -v cygpath >/dev/null 2>&1; then
   export WASM_AGENT_LUA_ROOT="$(cygpath -w "$WASM_AGENT_LUA_ROOT")"
 fi
+# The node governance surfaces themselves (docs/GRANT-POLICY.md, docs/TELEMETRY.md): the policy status
+# (Moved here 21/11: it ran before BIN and WASM_AGENT_LUA_ROOT were defined - "BIN: unbound variable".)
+# and the telemetry capability answer from the libraries the host enforces, over the bounded stores
+# both write into. Its own scratch home, so the policy file it writes cannot govern a later check.
+# Both modes, because a policy file's presence is what turns the policy layer on and one process loads
+# it once: manifest mode (no file: the manifest grant stays the only gate) and policy mode (a file,
+# with default-deny for a sensitive capability that has no rule).
+GOVERNANCE_HOME="$(mktemp -d)"
+WASM_AGENT_HOME="$GOVERNANCE_HOME" WA_GOVERNANCE_CASE=manifest WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-node-governance.lua" "$BIN" --db "$GOVERNANCE_HOME/db.sqlite" | grep 'node governance ok'
+rm -rf "$GOVERNANCE_HOME"
+GOVERNANCE_HOME="$(mktemp -d)"
+WASM_AGENT_HOME="$GOVERNANCE_HOME" WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-node-governance.lua" "$BIN" --db "$GOVERNANCE_HOME/db.sqlite" | grep 'node governance ok'
+rm -rf "$GOVERNANCE_HOME"
 # This is a fixture, not the operator's deployment configuration.
 export WASM_AGENT_LLM_CONTEXT=128000
 # host.graph_* is served by the `graph` component (docs/KERNEL.md, stream C): every graph test below

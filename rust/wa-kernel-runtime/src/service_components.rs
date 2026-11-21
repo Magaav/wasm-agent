@@ -551,7 +551,8 @@ mod tests {
     /// End to end with the 0.1 component fixture (`svc-echo-v1`, wa:kernel@0.1): the poll contract
     /// still runs unchanged beside 0.2 — heartbeat, kv round trip, one granted http exchange, one
     /// refused, clean stop on `lifecycle.stopping()`, and crash mode (a non-zero exit, which
-    /// `wasi:cli/exit` can only express as exit_1) for the restart path.
+    /// older `wasi:cli/exit` reported as exit_1 and a toolchain with exit-with-code reports as the real
+    /// exit_3 - the test asserts NON-ZERO, which is the contract, 21/11) for the restart path.
     #[test]
     fn fixture_v1_component_keeps_running_unchanged() {
         let _dir = crate::components::TEST_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -582,12 +583,12 @@ mod tests {
         let mut last = String::new();
         while Instant::now() < deadline {
             last = status(Some("svc-echo-v1"))["last_exit"].as_str().unwrap_or("").to_string();
-            if last.starts_with("exit_1") {
+            if last.starts_with("exit_") && !last.starts_with("exit_0") {
                 break;
             }
             std::thread::sleep(Duration::from_millis(100));
         }
-        assert!(last.starts_with("exit_1"), "{last}");
+        assert!(last.starts_with("exit_") && !last.starts_with("exit_0"), "{last}");
         stop("svc-echo-v1");
     }
 
