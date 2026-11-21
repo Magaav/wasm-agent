@@ -315,13 +315,32 @@ try {
     'bar groups: ' + JSON.stringify(groupsAfter) + '\n' + scrolled);
 
   // Let the run finish, so nothing is left running when this test ends, and read the settled frame.
-  const settledDeadline = Date.now() + 180000;
+  //
+  // THIS WAIT USED TO RUN ITS WHOLE 180 s ON EVERY RUN AND THEN GO ON IN SILENCE (measured 21/11: the
+  // answer was never on screen when the deadline passed). The PgUp above left the transcript scrolled
+  // up, a scrolled transcript does not follow its tail, and the answer is the LAST row - so the text
+  // this loop polled for could not appear however long it waited. Two changes, both the reader's own:
+  // every poll first goes back to the bottom with PgDn (the TUI's binding, the pair of the PgUp this
+  // half proved), and a wait that expires is a FAILED check carrying the last frame, never a pass.
+  // The slow call is `sleep 20`, so the answer is due some 20-25 s after dispatch; 90 s is the ceiling.
+  const settleStarted = Date.now();
+  const settledDeadline = settleStarted + 90000;
   let settled = '';
+  let answered = false;
   for (;;) {
-    settled = screen_rows('live');
-    if (settled.includes('Both commands ran') || Date.now() > settledDeadline) break;
+    tmux(['send-keys', '-t', 'live', 'NPage']);
     await sleep(200);
+    settled = screen_rows('live');
+    answered = settled.includes('Both commands ran');
+    if (answered || Date.now() > settledDeadline) break;
   }
+  const settleSeconds = ((Date.now() - settleStarted) / 1000).toFixed(1);
+  console.log('run-live-pty: the run settled ' + settleSeconds + 's after the scroll check'
+    + (answered ? '' : ' - NOT: the answer never reached the screen'));
+  check('the run finishes and its answer is drawn at the bottom of the window'
+    , answered, 'waited ' + settleSeconds + 's of 90 (the slow call sleeps 20); ' +
+    'final answers the fixture served: ' + answeredFinal + ', requests: ' + requests
+    + '\n---- the last frame ----\n' + settled);
   // Back to the bottom before reading it: the frame this half checked earlier was scrolled up by
   // its own PgUp, and a scrolled frame is not the answer to "what does the block say".
   // To the bottom the way the reader goes there: PgDn (the TUI's own binding, the one this test
