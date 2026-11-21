@@ -2544,6 +2544,9 @@ node scripts/test-sentinel-quarantine.mjs || exit 1
 node scripts/test-sentinel-install-proof.mjs || exit 1
 node scripts/test-install-speed.mjs || exit 1
 run_proof_fixture orchestration 33 node scripts/test-orchestration-e2e.cjs "$BIN"
+# The agent-control proof (change/mastermind): one local node, a mock provider, three workers spawned
+# through the one API, one cancelled mid-run and its run really ends.
+run_proof_fixture agent-control 23 node scripts/test-agent-control-e2e.cjs "$BIN"
 # The first Python that RUNS: a Linux host commonly has no `python` (openclaw, 30/10), and Windows has a
 # `python3` that is only the Microsoft Store stub - present on PATH, failing when run (wasm_the_first, 30/10).
 GATE_PYTHON="$(for p in python3 python; do command -v "$p" >/dev/null 2>&1 && "$p" -c 'import sys' >/dev/null 2>&1 && { echo "$p"; break; }; done)"
