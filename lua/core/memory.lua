@@ -1428,6 +1428,19 @@ end
 -- were dropped, compare with M.message_count(session_id) - the tool that shows a session
 -- to the model says so in words, because a silent truncation is a memory bug.
 local TOOL_CALL_COLUMNS="id,seq,session_id,role,tool_call_id,tool_name,tool_calls,ok,ms,created_at,phase,CASE WHEN role='tool' THEN content ELSE NULL END AS content"
+-- WHAT A REPLAY NEEDS, AND NOTHING ELSE (21/11). `trace` and `changes` are per-row DIAGNOSTIC JSON:
+-- the tool spans a turn ran, the files it touched. The transcript a model is sent never reads them -
+-- build_context turns rows into {role, content, tool_calls} and drops both - and neither does the CLI
+-- replay. `SELECT *` pulled them anyway, and the loader then decoded every one of them for every row:
+-- measured on a scratch session of 1502 rows carrying real-sized tool spans, 17.3 MB of trace decoded
+-- at 663 ms of a 730 ms transcript load, while the same rows without those two columns loaded in
+-- 181 ms. That was the size-linear cost a long session paid before its first model call, and it grew
+-- with TOOL OUTPUT, which is exactly what a day of real work accumulates.
+--
+-- So a caller that reads rows to REPLAY them says `view='transcript'` and gets the columns it uses.
+-- The two columns are still read by the callers that want them: this is an allow-list for the hot
+-- path, not a change to the row.
+local TRANSCRIPT_COLUMNS="id,seq,session_id,role,content,images,tool_calls,tool_call_id,tool_name,tokens,ms,ok,debug,created_at,reasoning,phase"
 function M.session_messages(session_id, opts)
   opts = opts or {}
   local limit = opts.limit or 200
@@ -1454,10 +1467,14 @@ function M.session_messages(session_id, opts)
     params = {session_id, limit}
   end
   if opts.view=='tool_calls' then sql=sql:gsub('SELECT %*','SELECT '..TOOL_CALL_COLUMNS) end
+  -- A transcript replay: the columns build_context and the CLI draw actually read. `changes` is
+  -- derived from a column this view does not fetch, so it stays nil (the row-level contract already
+  -- says a row with no diff topic has none), and `trace` stays nil for the same reason.
+  if opts.view=='transcript' then sql=sql:gsub('SELECT %*','SELECT '..TRANSCRIPT_COLUMNS) end
   local rows = query(sql, params)
   for _, row in ipairs(rows) do
     row.tool_calls = json.decode(row.tool_calls)
-    if opts.view~='tool_calls' then row.trace = json.decode(row.trace) end
+    if opts.view~='tool_calls' and row.trace ~= nil then row.trace = json.decode(row.trace) end
     if row.images then row.images = decode(row.images) end
     -- An older row has `{}` rather than a summary, and `{}` decodes to an empty table
     -- that is truthy in Lua - so turn it into nil here. Otherwise every turn written
