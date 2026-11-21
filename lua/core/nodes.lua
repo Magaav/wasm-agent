@@ -633,11 +633,16 @@ local function probe_peers(peers, opts)
       else
         local read_ok, chunk = pcall(host.operation, "read", json.encode({ id = entry.operation_id,
           stream = "stdout", offset = 0, limit = 65536, owner = PROBE_OWNER }))
-        local text = read_ok and (json.decode(chunk) or {}) or {}
+        -- A child's stdout is NOT trusted to be JSON (measured: a child that inherited WA_SCRIPT printed a
+        -- test's own "ok" line, and an unguarded decode turned that into a crash of the caller). Every
+        -- decode here is guarded; a line that is not an answer is skipped and the probe reads as unreadable.
+        local text = {}
+        if read_ok then local good, value = pcall(json.decode, chunk); if good and type(value) == "table" then text = value end end
         local body = tostring(text.content or text.data or "")
         local decoded = nil
         for line in body:gmatch("[^\r\n]+") do
-          local one = json.decode(line)
+          local good, one = pcall(json.decode, line)
+          if not good then one = nil end
           if type(one) == "table" and (one.capabilities ~= nil or one.reason ~= nil or one.error ~= nil) then decoded = one end
         end
         if decoded then
