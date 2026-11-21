@@ -41,8 +41,37 @@ BUDGET_MS=5000
 
 checks=0; failed=0
 ok() { checks=$((checks + 1)); if [ "$1" = "1" ]; then printf "  ok   %s\n" "$2"; else failed=$((failed + 1)); printf "  FAIL %s%s\n" "$2" "${3:+ ($3)}"; fi; }
-skip() { printf "SKIP test-serve-cwd-boot: %s\n" "$*"; exit 0; }
+# A skip must never MASK a failure that already happened: this row judges one invariant before it
+# needs any binary, so a skip after a failed check would report "skipped" for a row that actually
+# caught the defect - and the landing gate reads a skip as not-evidence, not as a failure.
+skip() {
+  if [ "$failed" != "0" ]; then
+    printf "test-serve-cwd-boot: NOT SKIPPED (%s) - %s check(s) already failed\n" "$*" "$failed" >&2
+    printf "test-serve-cwd-boot: %s checks, %s failed\n" "$checks" "$failed"
+    exit 1
+  fi
+  printf "SKIP test-serve-cwd-boot: %s\n" "$*"; exit 0; }
 die() { printf "test-serve-cwd-boot: %s\n" "$*" >&2; exit 2; }
+
+# THE INVARIANT IS JUDGED FIRST AND IS NEVER SKIPPABLE. A missing binary must not turn this
+# row into a skip: the gate runs every bash row with a binary built from the branch, so a
+# row that only spawns processes cannot tell the base s source from the fixed one.
+# ---- 0. the source this row runs from bounds the boot watch -------------------------------------
+# WHY THIS CHECK EXISTS. test-discriminates runs every bash row with WA_BIN pointing at THIS tree s
+# build, so a row that only spawns a node executes the FIXED binary even when the code under it is
+# the base - and therefore "passes on the old code" no matter what it asserts. The row must judge the
+# source it is run from as well, and in the gate that source is the base one. This is the invariant
+# the rest of the row then exercises live: the boot registration goes through a BOUNDED path.
+SOURCE="$ROOT/rust/wa-capabilities/src/graph.rs"
+if [ ! -f "$SOURCE" ]; then
+  ok 0 "the tree this row runs from registers its boot watch through a bounded path" "no $SOURCE"
+else
+  if grep -q "WATCH_DIR_BUDGET" "$SOURCE" && grep -q "fn watchable_directories" "$SOURCE"; then
+    ok 1 "the tree this row runs from registers its boot watch through a bounded path"
+  else
+    ok 0 "the tree this row runs from registers its boot watch through a bounded path" "graph.rs here has no WATCH_DIR_BUDGET/watchable_directories: an unbounded recursive watch walks the cwd at boot"
+  fi
+fi
 
 [ -x "$BIN" ] || skip "no wa binary at $BIN (build rust/wa-host, or set WA_BIN)"
 command -v curl >/dev/null 2>&1 || skip "curl is needed to poll /health"
