@@ -613,10 +613,10 @@ fi
 # the record said 14963b6f, an ancestor of main, and the bytes were something else entirely.
 if [ "$RUNNING_SOURCE" = record_mismatch ]; then
   if [ "${FORCE:-0}" != 1 ] || [ -z "${REASON:-}" ]; then
-    fail "downgrade_unprovable(record_not_this_binary): $INSTALL_DIR/installed.txt names sha256 $(sed -n 's/^sha256=//p' "$INSTALL_DIR/installed.txt" 2>/dev/null | head -1 | cut -c1-12) but the binary at $RUNNING_BIN is $(sha256sum < "$RUNNING_BIN" 2>/dev/null | cut -c1-12), so the record's commit=$(printf '%s' "$INSTALLED_COMMIT" | cut -c1-12) describes bytes that are no longer here and nothing can say whether this tree $COMMIT contains what IS running. Nothing was built and nothing was installed. Ask the node what it runs (wa --build-info needs a binary that has it: rebuild or roll it back first), or pass --force --reason <text> and the override is recorded."
+    fail "downgrade_unprovable(record_not_this_binary): $INSTALL_DIR/installed.txt names sha256 $(sed -n 's/^sha256=//p' "$INSTALL_DIR/installed.txt" 2>/dev/null | head -1 | cut -c1-12) but the binary at $RUNNING_BIN is $(sha256sum < "$RUNNING_BIN" 2>/dev/null | cut -c1-12), so the record's commit=$(printf '%s' "${INSTALLED_COMMIT:-unknown}" | cut -c1-12) describes bytes that are no longer here and nothing can say whether this tree $COMMIT contains what IS running. Nothing was built and nothing was installed. Ask the node what it runs (wa --build-info needs a binary that has it: rebuild or roll it back first), or pass --force --reason <text> and the override is recorded."
   fi
   note "the install record is not these bytes (recorded sha256 != the binary's); its commit= is not evidence, and --force --reason was given: ancestry_unverified=yes"
-  note "ancestry_unverified=yes overrode=record_not_this_binary ancestry_replaced=$(printf '%s' "$INSTALLED_COMMIT" | cut -c1-40) ancestry_target=$COMMIT ancestry_by=$(id -un 2>/dev/null || echo unknown)"
+  note "ancestry_unverified=yes overrode=record_not_this_binary ancestry_replaced=$(printf '%s' "${INSTALLED_COMMIT:-unknown}" | cut -c1-40) ancestry_target=$COMMIT ancestry_by=$(id -un 2>/dev/null || echo unknown)"
   RUNNING_COMMIT=""
   ANCESTRY_UNVERIFIED=yes
 fi
@@ -765,9 +765,53 @@ fi
 #     compiled inputs (job relmatch), so "this change needs no new binary" and "that release IS this
 #     commit's binary" can never disagree about the same file.
 LUA_FAST=0
-# The commit whose build the installed binary is (a previous fast path keeps it in binary_commit=).
-INSTALLED_BINARY_COMMIT="$(sed -n 's/^binary_commit=//p' "$INSTALL_DIR/installed.txt" 2>/dev/null | head -1 | tr -d '[:space:]')"
-[ -n "$INSTALLED_BINARY_COMMIT" ] || INSTALLED_BINARY_COMMIT="$INSTALLED_COMMIT"
+# WHICH COMMIT THE BINARY THIS DEPLOY KEEPS IS A BUILD OF (21/11). The Lua fast path installs no binary: it
+# keeps $INSTALL_DIR/wa and replaces the Lua tree beside it, so its record has to name BOTH - the tree it
+# installed (that is `commit=`, written by record_installed below) and the commit the kept bytes are
+# (binary_commit=). The evidence order is this file's own doctrine (scripts/lib/install-record.sh): the binary
+# first, then whatever a record says about it.
+#
+#   1. the binary itself, whenever it answers `wa --build-info`. It is the very file this deploy keeps, so its
+#      own answer cannot be stale - and WA_RUNNING_SOURCE=record is the same evidence, because
+#      wa_running_identity only says `record` after wa_record_describes proved the record's sha256= IS these
+#      bytes. Neither of the other two sources is a witness for a binary that can answer.
+#   2. binary_commit=, what a previous fast-path deploy wrote about those same bytes.
+#   3. nothing: binary_commit= is then written as `unknown` with binary_commit_why= (record_installed below).
+#      NOT the record's commit=: since 21/11 a fast-path record puts the LUA TREE there, so reading that as the
+#      binary's commit would be this same bug with the opposite sign.
+#
+# MEASURED 21/11 on avell, twice (land254 de2c755f, land257 93168d96). This block used to be
+#   INSTALLED_COMMIT="$WA_RUNNING_RECORD_COMMIT"  -> "" whenever the binary can answer, because
+# wa_running_identity returns as soon as the binary names its commit and never reads the record. So a Lua-only
+# deploy after a full install expected $COMMIT, kept the binary, installed the tree, restarted the node, and
+# then refused its own install as refused(build_commit_mismatch) - leaving the previous record in place and
+# failing the deploy unit. The install was right and the record said otherwise.
+# (scripts/test-deploy-luafast-record.sh extracts this block - from the LUA_FAST=0 above to the INSTALLED_BIN=
+#  below - and runs it, so keep it runnable with only INSTALL_DIR, note and the RUNNING_* variables set.)
+INSTALLED_BINARY_COMMIT=""
+case "${RUNNING_SOURCE:-}" in
+  binary|record) INSTALLED_BINARY_COMMIT="${RUNNING_COMMIT:-}" ;;
+esac
+RECORD_BINARY_COMMIT="$(sed -n 's/^binary_commit=//p' "$INSTALL_DIR/installed.txt" 2>/dev/null | head -1 | tr -d '[:space:]')"
+# `unknown` is a value every reader of this file blanks (the same convention as wa_running_identity's read), not
+# a commit id: it must never be compared with a binary's answer.
+[ "$RECORD_BINARY_COMMIT" = unknown ] && RECORD_BINARY_COMMIT=""
+RECORD_LUA_FAST="$(sed -n 's/^lua_fast_path=//p' "$INSTALL_DIR/installed.txt" 2>/dev/null | head -1 | tr -d '[:space:]')"
+if [ "$RECORD_LUA_FAST" = 1 ] && [ "${RUNNING_SOURCE:-}" = record ]; then
+  # A record that describes a fast-path install names the LUA TREE in commit=, so its commit= is not evidence
+  # about the binary beside it; only binary_commit= speaks for the bytes. Reached when the kept binary stopped
+  # answering after that record was written (a bounded probe that timed out), which is exactly the moment a
+  # guess taken from the record would be worst.
+  INSTALLED_BINARY_COMMIT=""
+fi
+if [ -n "$INSTALLED_BINARY_COMMIT" ] && [ -n "$RECORD_BINARY_COMMIT" ] && [ "$INSTALLED_BINARY_COMMIT" != "$RECORD_BINARY_COMMIT" ]; then
+  # Nothing is replaced on a fast path, so there is nothing to refuse here: the bytes are the witness and the
+  # record is a claim that disagrees with them. It is recorded, because a record that stopped matching the
+  # binary is a fact about this machine (a hand-placed binary, a pair restored by hand) that the next reader
+  # should not have to rediscover.
+  note "the install record says binary_commit=${RECORD_BINARY_COMMIT:0:12} but the binary kept here reports ${INSTALLED_BINARY_COMMIT:0:12}; the binary is the witness and the record below is written from its answer"
+fi
+[ -n "$INSTALLED_BINARY_COMMIT" ] || INSTALLED_BINARY_COMMIT="$RECORD_BINARY_COMMIT"
 INSTALLED_BIN="$INSTALL_DIR/wa"; [ -f "$INSTALLED_BIN.exe" ] && INSTALLED_BIN="$INSTALLED_BIN.exe"
 # The fast path needs a binary that *runs* a staged Lua tree, not one that only verifies it. `--lua-tree`
 # proves the bytes are complete and compatible; the property the fast path depends on is that the runtime
@@ -1777,11 +1821,26 @@ record_installed() {
   fi
   [ "$record_commit" = unknown ] && record_commit=""
   if [ -z "$record_commit" ]; then
-    # No guess: a binary that cannot say what it is, is recorded as unknown, and the record says why.
-    record_commit=unknown
-    note "the installed binary cannot report its own build (build_info=absent): installed.txt records commit=unknown, not this deploy's intention"
+    # No guess: a binary that cannot say what it is, is recorded as unknown, and the record says why. On a
+    # fast-path install commit= is the Lua tree (below), so the unknown belongs to binary_commit= alone.
+    if [ "${LUA_FAST:-0}" != 1 ]; then
+      record_commit=unknown
+      note "the installed binary cannot report its own build (build_info=absent): installed.txt records commit=unknown, not this deploy's intention"
+    fi
   elif ! wa_same_commit "$record_commit" "$record_expected"; then
     fail "refused(build_commit_mismatch): the binary installed at $INSTALLED_BIN_FOR_RECORD reports commit ${record_commit:0:12} but this deploy meant to install ${record_expected:0:12} - the bytes are not the commit they were taken for (a stale build artifact, a reused target directory, or a mislabelled release). Nothing was recorded over the previous record."
+  fi
+  # COMMIT= IS THE LUA TREE'S ON A FAST-PATH INSTALL (21/11), and that is not a belief: the tree at $COMMIT is
+  # what this deploy installed beside the binary it kept, and commit= is what every reader of this record asks
+  # about the INSTALL - lua/core/update.lua and wa update compare it with origin/main to answer "is this node
+  # current", verify-deployed.sh compares it with the commit it was asked to verify, and wa_node_binary_reuse
+  # uses it as the commit a later diff starts from. Written as the BINARY's commit (what this field held
+  # before), a Lua-only install was invisible to all three: the node reported itself N commits behind main on
+  # every later wave - so a Lua deploy would be repeated forever - and verify-deployed.sh failed the node that
+  # had just been installed correctly. What the BYTES are is binary_commit=, written below from the binary's
+  # own answer.
+  if [ "${LUA_FAST:-0}" = 1 ]; then
+    record_commit="$COMMIT"
   fi
   # A prebuilt record's commit= is the manifest's 40-hex identity or it is not a record of a verified
   # install: a short id is a name that can collide, and it would be the id the checks downstream compare.
@@ -1844,7 +1903,9 @@ record_installed() {
   printf 'lua_tree=%s\nlua_fast_path=%s\n' "$COMMIT" "$LUA_FAST" >> "$record_tmp" || fail "node installed, but the Lua tree line could not be written"
   # The digest of the compiled inputs the installed binary is built from - the identity the NEXT deploy
   # compares against (wa_node_binary_reuse, scripts/lib/node-binaries.sh). It is the commit's own digest
-  # (`record_commit`: this commit for a build, the release's source commit for a prebuilt), so a fast-path
+  # (`record_commit`: this commit for a build, the release's source commit for a prebuilt, and on a fast-path
+  # install the Lua tree $COMMIT, whose compiled inputs ARE the kept binary's - by the very decision that
+  # allowed the reuse), so a fast-path
   # deploy writes the digest that justified reusing the binary, and the next one reads the same number
   # instead of re-deriving a diff. A tree that cannot digest it writes no line: an absent record is a known
   # gap the caller falls back from, never a wrong digest.
@@ -1865,7 +1926,19 @@ record_installed() {
   # did this deploy install" - and `wa features` answers which of them the node routes to.
   printf 'components_dir=%s\ncomponent_graph_sha256=%s\ncomponent_set=%s\n' "${COMPONENT_DIR:-unrecorded}" "${COMPONENT_SHA:-unrecorded}" "${COMPONENT_SET:-unrecorded}" >> "$record_tmp" || fail "node installed, but the component lines could not be written"
   if [ "$LUA_FAST" = 1 ]; then
-    printf 'binary_commit=%s\n' "$INSTALLED_BINARY_COMMIT" >> "$record_tmp" || fail "node installed, but the binary commit line could not be written"
+    # `unknown` is written as a VALUE, never as an empty one: `binary_commit=` with nothing after it reads as a
+    # fact and names none (measured 21/11 - this line wrote exactly that whenever the kept binary could not name
+    # its own build). Every reader blanks `unknown` (the convention of wa_running_identity's own read), so the
+    # next deploy treats it as absent instead of comparing a binary's answer with the word. Nothing is guessed:
+    # binary_commit_why= says what could not be established, and no check downstream is passed by it.
+    if [ -n "${INSTALLED_BINARY_COMMIT:-}" ]; then
+      printf 'binary_commit=%s\n' "$INSTALLED_BINARY_COMMIT" >> "$record_tmp" || fail "node installed, but the binary commit line could not be written"
+    else
+      printf 'binary_commit=unknown\nbinary_commit_why=%s\n' \
+        "$(printf 'nothing names the commit the kept binary %s is a build of (%s; running_source=%s), and this install record carried no binary_commit=' \
+             "${INSTALLED_BIN_FOR_RECORD:-$INSTALL_DIR/wa}" "${RUNNING_WHY:-no reason recorded}" "${RUNNING_SOURCE:-none}" | tr '\r\n' '  ')" \
+        >> "$record_tmp" || fail "node installed, but the binary commit line could not be written"
+    fi
   fi
   # The policy step's own warnings (6a), on one line: the rules this deploy could not bring into the
   # node's file because both sides had changed them, or a file with no provable base. installed.txt is what
