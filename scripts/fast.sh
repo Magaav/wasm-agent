@@ -871,6 +871,7 @@ WA_BIN="$bin" check pin-label bash scripts/test-pin-label.sh
 check publish-shared-commit bash scripts/test-publish-shared-commit.sh
 check bootstrap-gate bash scripts/test-bootstrap-gate.sh
 WA_BIN="$bin" check build-info bash scripts/test-build-info.sh
+WA_BIN="$bin" WA_TEST_SCRATCH_HOME=1 check ancestry-window bash scripts/test-ancestry-window.sh
 # The mission loop's mechanism (docs/MISSIONS.md): stage, start, status, verify and clean against a scratch
 # repository and a stub wa. Seconds, and no node, no cargo, no model - it proves the runner's environment,
 # the done marker with its rc and the failure count without launching a session.

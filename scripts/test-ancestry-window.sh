@@ -19,7 +19,9 @@ bad()  { checks=$((checks + 1)); failed=$((failed + 1)); printf '  FAIL %s\n' "$
 same() { [ "$2" = "$3" ] && ok "$1 ($2)" || bad "$1: got '$2' want '$3'"; }
 
 # A TEST THAT WRITES PROBES ITS OWN HOME: on the real HOME this would make repositories beside a node's
-# state, so it refuses by name. scripts/test.sh exports WA_TEST_SCRATCH_HOME for every case it runs.
+# state, so it refuses by name. scripts/test.sh and scripts/fast.sh pass WA_TEST_SCRATCH_HOME=1 on this
+# case's own line - the marker is set by the caller that has made the home a scratch one, never inferred
+# from the path, because "looks like a temp dir" is not the same fact as "this run isolated it".
 if [ -d "${HOME:-}/.wasm-agent" ] && [ "${WA_TEST_SCRATCH_HOME:-}" != 1 ]; then
   echo "SKIP test-ancestry-window: HOME (${HOME}) is a real node home; run it through scripts/test.sh" >&2
   exit 0
