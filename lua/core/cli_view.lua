@@ -1161,7 +1161,12 @@ function METHODS:refresh_limit()
   if not ok then return self.limit end
   columns = tonumber(columns)
   if not columns or columns <= 0 then return self.limit end
-  self.limit = math.max(M.MIN_COLUMNS, math.floor(columns))
+  local width = math.max(M.MIN_COLUMNS, math.floor(columns))
+  -- The width this view had, kept for the frame boundary that answers a resize: reading the console and
+  -- ACTING on what it says are two different steps, and the action (clear + draw again, METHODS:resized)
+  -- belongs at the frame boundary, not inside a probe a dozen callers make.
+  if width ~= self.limit then self.width_from = self.limit end
+  self.limit = width
   return self.limit
 end
 
@@ -2077,6 +2082,102 @@ function METHODS:screen_off()
   end
   self:control("\27[r")
   self:control("\27[" .. math.max(screen.footer or screen.input, screen.status) .. ";1H\r\n")
+end
+
+-- The welcome block, as something the view OWNS and can draw again.
+--
+-- MEASURED on the base (0b9d574c): the banner was written ONCE as a finished block -
+-- `print(cli_view.banner{...})` in `lua/core/chat.lua`, where that `print` is the file's own alias for
+-- `view:line` - and its rule was ALREADY EXPANDED to the width of that moment (`M.banner` called
+-- `M.expand_rules`). So no renderer downstream could draw it at another width: with a native editor the
+-- host's transcript held a stored row of 80 rule characters and re-wrapped it into 60 + an orphan row
+-- of 20 when the window narrowed (rust/wa-term/src/transcript.rs `wrap_rows`), and in the plain layout
+-- the terminal itself reflowed the same characters. That is the stray "─" under the rule (Victor,
+-- 21/11), and a rule is nothing but its width, so it is the one component that cannot be committed at
+-- a measured width at all.
+--
+-- Hence: the view keeps the BANNER'S OWN INPUTS (`self.welcome`), and the rule reaches the renderer as
+-- the MARKER (`M.banner`'s `opts.marker`). With the native editor the block goes into the host's
+-- transcript, which expands the marker at every frame's width; in the plain layout this view expands it
+-- at the width the console reports now, and draws the block again when that width moves
+-- (`METHODS:resized`).
+function METHODS:welcome(opts)
+  self.welcome = opts or {}
+  return self:render_welcome()
+end
+
+-- The welcome block at the width the view has NOW. Idempotent: it writes the block where output goes,
+-- so calling it again after a clear is exactly what a repaint is.
+function METHODS:render_welcome()
+  local stored = self.welcome
+  if not stored then return false end
+  local opts = {}
+  for key, value in pairs(stored) do opts[key] = value end
+  local transcript = self:transcript()
+  if transcript then
+    -- The host expands the rule per frame; the width that matters is the one it draws at, so nothing
+    -- here is fitted to a measured width.
+    opts.marker, opts.limit = true, 1000000
+  else
+    opts.limit = self.limit
+  end
+  local text = M.banner(opts)
+  if transcript then self:topic(false) end
+  -- `tail_nl` says how many newlines the last write ended with, and a clear has just made that
+  -- unknowable: starting the block with an open line rather than a gap is the honest state.
+  self.tail_nl = 0
+  self:write(text .. "\n")
+  -- The lines that belong to the block and come after it (the reload source, `METHODS:note`): kept
+  -- with it, so the redraw puts them back instead of leaving them at the width they were written at.
+  for _, line in ipairs(self.welcome_notes or {}) do self:write(line .. "\n") end
+  return true
+end
+
+-- A line of the welcome block that is not the box itself: what this CLI is running from, said under
+-- the banner. Owned like the banner is (kept in `self.welcome_notes` and written where output goes) so
+-- a width change draws it again with the block - a line left at the old width is the same defect as a
+-- rule left at the old width, only quieter.
+function METHODS:note(text)
+  self.welcome_notes = self.welcome_notes or {}
+  self.welcome_notes[#self.welcome_notes + 1] = tostring(text)
+  self:write(tostring(text) .. "\n")
+  return true
+end
+
+-- The window changed width, at the frame boundary that noticed it (METHODS:refresh_limit): draw again
+-- what this view owns, at the width the console has now, and leave nothing behind at the old one.
+--
+-- A row the terminal already holds cannot be reflowed by the process that wrote it - foot, like every
+-- other terminal, re-wraps its own scrollback - so the robust answer is Claude Code's: clear the screen
+-- AND the scrollback and draw the owned content again from state. What that content is, per layout:
+--
+--   * native editor: the host's transcript model, and it repaints itself on a resize (host.rs
+--     REPAINT_CLEAR + `layout_frame`), expanding every rule marker at the new width. The welcome block
+--     is one of its blocks (METHODS:welcome), so there is nothing for this method to do;
+--   * plain layout: no transcript model exists - this view streams the bytes it is given - so the
+--     content it holds is the welcome block plus the frame rows it redraws on every render. They are
+--     what comes back; the rows between them are what the clear removed, and that is said plainly
+--     rather than pretended away.
+function METHODS:resized(previous)
+  -- What makes it safe to clear the screen is that this view OWNS a screen (live, with a layout it drew),
+  -- not that the bytes go to the process's stdout: a view written to a buffer (a test, a capture) is the
+  -- same surface, and the one a test can drive.
+  if not self.live then return false end
+  local screen = self.screen
+  if not screen then return false end
+  -- Nothing it holds to draw again: clearing the screen for a view with no welcome block would cost the
+  -- reader their transcript and put nothing in its place.
+  if not self.welcome then return false end
+  if self:transcript() then return false end
+  self:unanimate()
+  -- The screen is given back (its scroll region with it) BEFORE the clear: the region is a function of
+  -- the height as well as the width, and `screen_on` lays it out again for the console that is there now.
+  self:screen_off()
+  self.tail_nl = nil
+  self:control(SYNC_START .. "\27[?25l\27[2J\27[3J\27[H" .. SYNC_END)
+  self:screen_on()
+  self:render_welcome()
+  return true
 end
 
 -- A framed terminal gives its input rows to the native editor; captured/plain
@@ -3308,6 +3409,12 @@ end
 -- The welcome box: where this is running and what it is running with, the way Claude Code opens.
 -- The workspace and branch come first after the greeting - a chat in the wrong worktree is a
 -- mistake that costs an hour to notice otherwise.
+--
+-- `opts.marker` leaves the rule as M.RULE for a writer that knows the width at DRAW time - the host's
+-- transcript expands it per frame (rust/wa-term/src/transcript.rs `expand_rule`), which is what lets a
+-- resized window draw the banner again at its own width instead of re-wrapping the row the old width
+-- left behind (item 1 of tui-fit, Victor 21/11). Without it the rule is expanded here, which is right
+-- for a writer that writes once (a pipe, a captured transcript).
 function M.banner(opts)
   opts = opts or {}
   local live = opts.live
@@ -3316,10 +3423,10 @@ function M.banner(opts)
   local function fact(label, value)
     if value and value ~= "" then return paint(fit(label .. ": " .. value), "muted", live) end
   end
-  -- The rule, expanded from the marker at the width this banner is drawn at (M.expand_rules): no
-  -- component here spells the rule character itself, so a width fixed at composition time cannot hide
-  -- in the banner (round 4, item 1).
-  local divider = paint(M.expand_rules(M.RULE, limit), "border", live)
+  -- The rule, expanded from the marker at the width this banner is drawn at (M.expand_rules), or kept
+  -- as the marker: no component here spells the rule character itself, so a width fixed at composition
+  -- time cannot hide in the banner (round 4, item 1).
+  local divider = paint(opts.marker and M.RULE or M.expand_rules(M.RULE, limit), "border", live)
   local lines = { divider,
     paint(STAR, "accent", live) .. " Welcome to " .. paint("wasm-agent", "bold", live) .. "!"
       .. ((opts.version and opts.version ~= "") and paint(" v" .. opts.version, "muted", live) or ""),
@@ -3349,7 +3456,7 @@ end
 -- frame may begin", not an ordering.
 local FRAMED = { "paint", "line", "accepted", "answered", "failed", "warn", "event",
   "console_event", "topic_block", "run_started", "run_finished", "footer_draw", "session_draw",
-  "status_draw", "status_blank" }
+  "status_draw", "status_blank", "welcome", "note" }
 for _, name in ipairs(FRAMED) do
   local inner = METHODS[name]
   assert(inner, "cli view: no method to frame: " .. name)
@@ -3364,6 +3471,15 @@ for _, name in ipairs(FRAMED) do
     -- status bar at the old width (Victor, 18/11). Each framed call is a render, so each reads the
     -- console first and the bytes it writes are laid out for the terminal that exists now.
     self:refresh_limit()
+    -- A width change is ACTED ON here, once, rather than wherever the console happened to be read: what
+    -- the terminal already holds is at the old width, and only a clear and a redraw from state can put
+    -- it right (METHODS:resized). The probe recorded the width it replaced; every later frame sees them
+    -- equal and does nothing.
+    if self.width_from then
+      local previous = self.width_from
+      self.width_from = nil
+      self:resized(previous)
+    end
     local notices = reload.tick(self.now())
     local results = table.pack(self:with_frame(inner, ...))
     for _, notice in ipairs(notices) do

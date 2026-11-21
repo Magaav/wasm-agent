@@ -407,7 +407,15 @@ function M.run(argv)
   -- would also make `$(wa chat --once ...)` unusable. The session id is said on stderr instead, below.
   if not scripted then
     view:screen_on()
-    print(cli_view.banner({
+    -- THE VIEW OWNS THE BANNER (item 1 of tui-fit, Victor 21/11). Measured on the base: `print` here is
+    -- this file's alias for `view:line`, so the banner went out as ONE finished block whose rule was
+    -- already expanded to the width of that moment (`M.banner` called `M.expand_rules`) - a row of 80
+    -- rule characters that no renderer could ever draw at another width. Narrowing the window then
+    -- re-wrapped it into 60 columns plus an orphan row of 20: the stray "─" under the rule. Handing the
+    -- banner's own inputs to the view keeps the rule as a MARKER, so it is expanded where the row is
+    -- drawn (the host's transcript, per frame) and this view can draw the block again when the width
+    -- moves (METHODS:resized).
+    view:welcome({
       live = view.live,
       -- The width the terminal has NOW, read through the view, whose own frames refresh it. The
       -- one-time cli_view.terminal_columns() that stood here was measured before the box existed and
@@ -431,11 +439,14 @@ function M.run(argv)
         if session_state and session_state.state == "unfinished" then return session_state.detail end
         return nil
       end)(),
-    }))
+    })
     -- The reload source, said on the line under the banner as well as on the status bar: a reader who is
     -- about to edit a command file needs to know that this session will pick the edit up, and from where.
     if reload.status() then
-      print(cli_view.paint("  \194\183 " .. reload.status() .. ": the UI and commands come from "
+      -- A line of the welcome block, so it is drawn again with the block when the window changes width
+      -- (`METHODS:note`): printed straight to the terminal it was the same stale-width row the banner
+      -- rule was, one line quieter.
+      view:note(cli_view.paint("  \194\183 " .. reload.status() .. ": the UI and commands come from "
         .. tostring(reload.root()), "warning", view.live))
     end
   end
