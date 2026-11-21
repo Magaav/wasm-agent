@@ -3083,6 +3083,10 @@ function METHODS:event(event)
   elseif kind == "codemode_call" then
     -- One inner call of the script that is running: it appears as it starts (`⏳`), and its own row
     -- is rewritten in place when it settles (`✓`/`✗`) - inside the block that is already open.
+    -- The native transport also announces the run CALL ITSELF this way, and that row is the
+    -- collapsed presentation this change removes: the script block already IS that call, so the
+    -- wrapper is not drawn (a fenced run block emits no such row; the two must look the same).
+    if event.name == "run" then return end
     local model = self.code
     if model then
       local id = event.id or event.call_id

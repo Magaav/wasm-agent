@@ -153,5 +153,44 @@ check(native_text == block_text,
   'a native run turn and a fenced one draw the SAME block:\n--- native ---\n' .. native_text
     .. '\n--- block ---\n' .. block_text)
 
+-- ---- 4. the committed parity captures ---------------------------------------------------------
+-- fixtures/run-live/ holds four routed turns recorded through the real agent loop (README there).
+-- The two `after` files are what this branch draws; they must show the script and the call row, and the
+-- base's `before-native` must still show the collapsed Run(code=...) it replaces - so a regression in
+-- either direction is visible without a model call.
+local function rows_of(name)
+  local path = 'fixtures/run-live/' .. name .. '.json'
+  local raw = host.read_file(path)
+  if not raw then return nil end
+  local ok, data = pcall(json.decode, raw)
+  if not ok or type(data) ~= 'table' then return nil end
+  return tostring(data.rendered or '')
+end
+local after_native = rows_of('after-native')
+local after_block = rows_of('after-block')
+local before_native = rows_of('before-native')
+if after_native and after_block and before_native then
+  local function drawing(text)
+    local rows = {}
+    for line in tostring(text):gmatch('[^\n]+') do
+      -- the code band and the call row, without the frame rows around them
+      if line:find('await tools.bash') or line:find('bash 9483') then rows[#rows + 1] = line end
+    end
+    return table.concat(rows, '\n')
+  end
+  check(has(drawing(after_native), 'await tools.bash'),
+    'the recorded NATIVE turn draws the script: ' .. drawing(after_native))
+  check(has(drawing(after_native), 'bash'),
+    'and draws the awaited call as a row: ' .. drawing(after_native))
+  check(not has(after_native, 'Run(code='),
+    'never behind a Run(code=...) wrapper: ' .. after_native)
+  check(has(before_native, 'Run(code='),
+    'the base capture is the collapsed presentation this branch removes')
+  local native_rows, block_rows = drawing(after_native), drawing(after_block)
+  check(native_rows == block_rows,
+    'the two committed captures draw the same code and call rows:\n' .. native_rows .. '\n--- block ---\n' .. block_rows)
+else
+  print('note: fixtures/run-live is absent, the committed-capture checks were skipped')
+end
 print(string.format('run live ok (%d checks, %d failed)', checks, failed))
 if failed > 0 then error('run live: ' .. failed .. ' check(s) failed') end

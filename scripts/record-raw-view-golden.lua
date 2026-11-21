@@ -47,6 +47,20 @@ host.http_stream = function(_, _, _, body)
     local declared_run = false
     for _, name in ipairs(names) do if name == 'run' then declared_run = true end end
     if declared_run then
+      -- WA_CAPTURE_STREAM=1 replays WHAT THE HOST NOW DELIVERS while the model writes: the same
+      -- argument fragments, one tool_call_delta each, through the global the real host calls
+      -- (rust/wa-capabilities/src/host.rs). The assembled call still follows, exactly as the stream
+      -- returns it - so the recording is the live path and not a second description of it.
+      if (os.getenv('WA_CAPTURE_STREAM') or '') == '1' then
+        local emit = rawget(_G, 'wa_stream_event')
+        if emit then
+          local split = { '{"code":"', SCRIPT:sub(1, 24), SCRIPT:sub(25, 60), SCRIPT:sub(61), '"}' }
+          for _, fragment in ipairs(split) do
+            pcall(emit, json.encode({ type = 'tool_call_delta', index = 0, call_id = 'call-run-1',
+              name = 'run', arguments = fragment }))
+          end
+        end
+      end
       return json.encode({ status = 200, content = 'checking', stream_complete = true,
         finish_reason = 'tool_calls', tool_calls = { { id = 'call-run-1', type = 'function',
           ['function'] = { name = 'run', arguments = json.encode({ code = SCRIPT }) } } }, usage = usage })
