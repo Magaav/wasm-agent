@@ -1,0 +1,119 @@
+{
+  "a2": {
+    "advance": 1229,
+    "advance_em": 600,
+    "cap_height": 730,
+    "gap": "",
+    "margin_units_1000": 83,
+    "px_units_1000": 83,
+    "right_edge_units_1000": 517,
+    "size_units_1000": 517,
+    "units_per_em": 2048,
+    "ymid_units_1000": 365.0
+  },
+  "family": "wa Icons",
+  "file": "waIcons-Regular.ttf",
+  "files": {
+    "JetBrainsMono-Bold.ttf": "5590990c82e097397517f275f430af4546e1c45cff408bde4255dad142479dcb",
+    "JetBrainsMono-Bold.woff2": "4e51855c89b453f92439257669f201a83f72e3686ffd9c706c8bb7ad9877fc5d",
+    "JetBrainsMono-Regular.ttf": "a0bf60ef0f83c5ed4d7a75d45838548b1f6873372dfac88f71804491898d138f",
+    "JetBrainsMono-Regular.woff2": "130e699c36e1bff8f1f0d53d8b688fa8225bdf25310df69d33dce9064145f16f",
+    "LICENSE-SymbolsNerdFont-MIT.txt": "84a7a98c82140fb12c37fe42b93805baa16024cb3e5acc599b7ffe612c55d847",
+    "OFL-JetBrainsMono.txt": "30f0c136e3c88e422d0791acd97238870f9054a9729bc34cf2ff0d4ed8cac4ad",
+    "waIcons-Regular.ttf": "95f8d6e282a5d00805125b78fa0452138f7b9f4240c354becee9bf53e0521a6b",
+    "waIcons-Regular.woff2": "d793e5c39d4271fd2ed6ed222af1fe2d79cc815241b52bc1b4c503eb2eb883b1"
+  },
+  "glyphs": [
+    {
+      "codepoint": "U+F0DFA",
+      "means": "the run's steps",
+      "source_glyph": "md-shoe_print"
+    },
+    {
+      "codepoint": "U+F051B",
+      "means": "the run's elapsed clock",
+      "source_glyph": "md-timer_outline"
+    },
+    {
+      "codepoint": "U+F0450",
+      "means": "the session's turns",
+      "source_glyph": "md-refresh"
+    },
+    {
+      "codepoint": "U+F01BC",
+      "means": "the cache-hit rate",
+      "source_glyph": "md-database"
+    },
+    {
+      "codepoint": "U+F0766",
+      "means": "the empty context ball",
+      "source_glyph": "checkbox-blank-circle-outline"
+    },
+    {
+      "codepoint": "U+F012C",
+      "means": "the finish stamp check (Victor, 19/11 ~10:50)",
+      "source_glyph": "md-check"
+    },
+    {
+      "codepoint": "U+F0A9E",
+      "means": "context ball, 1 eighth",
+      "source_glyph": "md-circle_slice_1"
+    },
+    {
+      "codepoint": "U+F0A9F",
+      "means": "context ball, 2 eighths",
+      "source_glyph": "md-circle_slice_2"
+    },
+    {
+      "codepoint": "U+F0AA0",
+      "means": "context ball, 3 eighths",
+      "source_glyph": "md-circle_slice_3"
+    },
+    {
+      "codepoint": "U+F0AA1",
+      "means": "context ball, 4 eighths",
+      "source_glyph": "md-circle_slice_4"
+    },
+    {
+      "codepoint": "U+F0AA2",
+      "means": "context ball, 5 eighths",
+      "source_glyph": "md-circle_slice_5"
+    },
+    {
+      "codepoint": "U+F0AA3",
+      "means": "context ball, 6 eighths",
+      "source_glyph": "md-circle_slice_6"
+    },
+    {
+      "codepoint": "U+F0AA4",
+      "means": "context ball, 7 eighths",
+      "source_glyph": "md-circle_slice_7"
+    },
+    {
+      "codepoint": "U+F0AA5",
+      "means": "context ball, 8 eighths (full)",
+      "source_glyph": "md-circle_slice_8"
+    }
+  ],
+  "sources": {
+    "jetbrains": {
+      "licence": "SIL Open Font License 1.1, Copyright 2020 The JetBrains Mono Project Authors",
+      "members": {
+        "fonts/ttf/JetBrainsMono-Bold.ttf": "5590990c82e097397517f275f430af4546e1c45cff408bde4255dad142479dcb",
+        "fonts/ttf/JetBrainsMono-Regular.ttf": "a0bf60ef0f83c5ed4d7a75d45838548b1f6873372dfac88f71804491898d138f"
+      },
+      "url": "https://github.com/JetBrains/JetBrainsMono/releases/download/v2.304/JetBrainsMono-2.304.zip",
+      "version": "JetBrains Mono v2.304",
+      "zip_sha256": "6f6376c6ed2960ea8a963cd7387ec9d76e3f629125bc33d1fdcd7eb7012f7bbf"
+    },
+    "symbols": {
+      "licence": "MIT, Copyright (c) 2014 Ryan L McIntyre",
+      "members": {
+        "SymbolsNerdFontMono-Regular.ttf": "7f14415832a929155c3d6d1c7d404fae00dfbfe4f1b29940e3736e6e790e3312"
+      },
+      "url": "https://github.com/ryanoasis/nerd-fonts/releases/download/v3.3.0/NerdFontsSymbolsOnly.zip",
+      "version": "Nerd Fonts v3.3.0 (NerdFontsSymbolsOnly.zip)",
+      "zip_sha256": "2078603c1e7a2fc2fa9e625ba1c30264d5d7c39907813d89beaa373f73a3a340"
+    }
+  }
+}

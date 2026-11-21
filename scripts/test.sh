@@ -1933,6 +1933,14 @@ WA_SCRIPT=scripts/test-federation.lua "$BIN" --db "$DB.federation.db" | grep '"o
 # `paint` is passed in, so the test reads the roles the renderer chose.
 WA_SCRIPT=scripts/test-markdown.lua "$BIN" --db "$DB.markdown" | grep "markdown ok"
 
+# wa's two fonts, checked as bytes (item 1 of the wa-fonts mission, Victor 19/11): "wa Icons" is A2 -
+# each icon fills its own cell with a 1 px right margin, centred on JetBrains Mono's capitals, and its
+# advance is EXACTLY one cell (0.600 em) so the value after it is glued. The test parses the committed
+# sfnt itself (no fontTools, no venv, no network) and also asserts the font carries exactly the code
+# points lua/core/cli_view.lua's GLYPH table names, so a row that gains a glyph and a font that does not
+# is a failure here rather than a tofu box in a status line.
+gate_run node tests/test-wa-fonts.mjs
+
 # What a run looks like while it is running. The renderer is where the CLI's whole
 # readable output is decided - a tool call's line, a failed call's line, and whether a
 # captured transcript is free of escape sequences - so it is asserted without a model:
