@@ -106,34 +106,45 @@ pub fn ordered(a: (usize, usize), b: (usize, usize)) -> ((usize, usize), (usize,
     if a <= b { (a, b) } else { (b, a) }
 }
 
-/// The columns of `row` inside the selection, as a half-open 0-based range, or None.
-fn span(row: usize, start: (usize, usize), end: (usize, usize)) -> Option<(usize, usize)> {
+/// The columns of `row` inside the selection, as a half-open 0-based range, or None. `cols` is how
+/// many columns the chat itself owns (the last selectable column, 1-based): every span is clamped to
+/// it, so no cell of the scrollbar's column - the screen's last one while the bar is drawn - is ever
+/// inside a selection. That column holds the bar's glyph, which a copy used to carry at the end of
+/// every line (Victor, 21/11: the pasted text ended in it).
+fn span(row: usize, start: (usize, usize), end: (usize, usize), cols: usize) -> Option<(usize, usize)> {
     if row < start.0 || row > end.0 { return None; }
-    let from = if row == start.0 { start.1 - 1 } else { 0 };
-    let to = if row == end.0 { end.1 } else { usize::MAX };
+    let from = (if row == start.0 { start.1.saturating_sub(1) } else { 0 }).min(cols);
+    let to = (if row == end.0 { end.1 } else { usize::MAX }).min(cols);
     Some((from, to))
 }
 
-/// The selected text from the rows on screen (`rows[0]` is screen row 1): trailing spaces trimmed
-/// per line, lines joined with `\n` - what a terminal copy gives.
-pub fn text(rows: &[String], a: (usize, usize), b: (usize, usize)) -> String {
+/// A plain row cut to the chat's `cols` columns: whatever is past them - the scrollbar's column - is
+/// not chat text, so it is neither copied nor highlighted.
+fn within(text: &str, cols: usize) -> String { split_cells(text, 0, cols).1 }
+
+/// The selected text from the rows on screen (`rows[0]` is screen row 1): the chat's columns only,
+/// trailing spaces trimmed per line, lines joined with `\n` - what a terminal copy gives.
+pub fn text(rows: &[String], a: (usize, usize), b: (usize, usize), cols: usize) -> String {
     let (start, end) = ordered(a, b);
     let mut lines = Vec::new();
     for row in start.0..=end.0 {
         let Some(line) = rows.get(row - 1) else { break };
-        let (from, to) = span(row, start, end).unwrap_or((0, 0));
-        lines.push(split_cells(line, from, to).1.trim_end().to_string());
+        let (from, to) = span(row, start, end, cols).unwrap_or((0, 0));
+        lines.push(split_cells(&within(line, cols), from, to).1.trim_end().to_string());
     }
     lines.join("\n")
 }
 
-/// Redraw the selected rows with the selection in reverse video (the rest of each such row plain).
-pub fn overlay(rows: &[String], a: (usize, usize), b: (usize, usize)) -> String {
+/// Redraw the selected rows with the selection in reverse video (the rest of each such row plain),
+/// inside the chat's columns only - what is highlighted is exactly what `text` copies, and the
+/// scrollbar's column is never painted by it. A row's `2K` does clear that column, so the caller puts
+/// the bar back afterwards (`Transcript::bar_frame`).
+pub fn overlay(rows: &[String], a: (usize, usize), b: (usize, usize), cols: usize) -> String {
     let (start, end) = ordered(a, b);
     let mut frame = String::new();
     for row in start.0..=end.0.min(rows.len()) {
-        let (from, to) = span(row, start, end).unwrap_or((0, 0));
-        let (before, inside, after) = split_cells(&rows[row - 1], from, to);
+        let (from, to) = span(row, start, end, cols).unwrap_or((0, 0));
+        let (before, inside, after) = split_cells(&within(&rows[row - 1], cols), from, to);
         frame.push_str(&format!("\x1b[{row};1H\x1b[2K\x1b[0m{before}\x1b[7m{inside}\x1b[0m{after}"));
     }
     frame
@@ -179,11 +190,52 @@ mod tests {
     fn the_selected_text_is_what_was_dragged_over() {
         let rows: Vec<String> = vec!["\x1b[1mhello world\x1b[0m".into(), "second line   ".into(), "third".into()];
         let rows: Vec<String> = rows.iter().map(|r| plain(r)).collect();
-        assert_eq!(text(&rows, (1, 7), (1, 11)), "world");
-        assert_eq!(text(&rows, (2, 3), (1, 7)), "world\nsec", "dragging backwards selects the same span");
-        assert_eq!(text(&rows, (1, 1), (3, 5)), "hello world\nsecond line\nthird", "trailing spaces trimmed");
-        let frame = overlay(&rows, (1, 7), (1, 11));
+        // `cols` = 80: a screen wide enough for every row here, so these are the spans themselves.
+        assert_eq!(text(&rows, (1, 7), (1, 11), 80), "world");
+        assert_eq!(text(&rows, (2, 3), (1, 7), 80), "world\nsec", "dragging backwards selects the same span");
+        assert_eq!(text(&rows, (1, 1), (3, 5), 80), "hello world\nsecond line\nthird", "trailing spaces trimmed");
+        let frame = overlay(&rows, (1, 7), (1, 11), 80);
         assert!(frame.contains("hello \x1b[7mworld\x1b[0m"), "{frame:?}");
+    }
+
+    /// The chat rows as the transcript hands them to the selection: each line padded to the chat's
+    /// width, then the scrollbar's glyph in the screen's last column (`Transcript::draw_bar`, with
+    /// the bar's three glyphs - track, thumb, thumb under the pointer - one per row).
+    const CHAT: usize = 20;
+    fn chat_rows() -> Vec<String> {
+        let (track, thumb, active) = ('\u{2502}', '\u{2503}', '\u{2588}');
+        ["anchors.", "second line", "third"]
+            .iter()
+            .zip([track, thumb, active])
+            .map(|(line, glyph)| plain(&format!("{line:<CHAT$}{glyph}")))
+            .collect()
+    }
+
+    #[test]
+    fn a_multi_line_copy_stops_at_the_chat_and_carries_no_bar_and_no_padding() {
+        let rows = chat_rows();
+        assert!(rows[0].ends_with('\u{2502}'), "the row the transcript draws ends in the bar: {rows:?}");
+        // A drag from the first column of the first row to the chat's last column of the last one.
+        let copied = text(&rows, (1, 1), (3, CHAT), CHAT);
+        assert_eq!(copied, "anchors.\nsecond line\nthird", "no bar glyph, no trailing spaces: {copied:?}");
+        assert!(!copied.contains(['\u{2502}', '\u{2503}', '\u{2588}']), "no glyph of the bar: {copied:?}");
+        // And a drag that ran on to the bar's own column - what a mouse at the right edge of the
+        // screen reports - copies exactly the same text: that column is not the chat's.
+        assert_eq!(text(&rows, (1, 1), (3, CHAT + 1), CHAT), copied, "a drag onto the bar adds nothing");
+        assert_eq!(text(&rows, (3, CHAT + 1), (1, 1), CHAT), copied, "and neither does one that starts there");
+        assert_eq!(text(&rows, (1, 1), (1, CHAT + 1), CHAT), "anchors.", "one row on its own");
+    }
+
+    #[test]
+    fn the_overlay_paints_the_chat_and_never_the_bar_column() {
+        let rows = chat_rows();
+        let frame = overlay(&rows, (1, 1), (3, CHAT), CHAT);
+        assert!(!frame.contains(['\u{2502}', '\u{2503}', '\u{2588}']), "the bar's column is the transcript's to draw: {frame:?}");
+        // What is highlighted is exactly what a copy takes: the chat's columns, padding included.
+        let expected = format!("\x1b[1;1H\x1b[2K\x1b[0m\x1b[7m{:<CHAT$}\x1b[0m", "anchors.");
+        assert!(frame.contains(&expected), "{frame:?}");
+        // A drag onto the bar's column highlights no more than the chat: same frame.
+        assert_eq!(overlay(&rows, (1, 1), (3, CHAT + 1), CHAT), frame);
     }
 
     #[test]
