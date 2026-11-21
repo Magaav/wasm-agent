@@ -85,6 +85,27 @@ Builds a real 200,000-directory tree, starts `wa serve` **in it**, and asserts f
 
 Wired into `scripts/test.sh` right after the concurrency fixture (commit `8af12988`); a skip is
 printed by name (`SKIP test-serve-cwd-boot`), never silently a pass.
+## The gate caught a hole in this row (fixed in `daa7bab4`)
+
+`scripts/test-discriminates.sh` runs every BASH row with `WA_BIN` pointing at the tree it is invoked
+from - the branch build. A row that only spawns nodes therefore executes the FIXED binary on base
+source and passes on the old code: the first landing refused this branch with
+`does-not scripts/test-serve-cwd-boot.sh`. That was a real hole in the row, not a gate quirk.
+
+The row now judges the SOURCE it is run from before it needs anything else - it requires
+`WATCH_DIR_BUDGET` and `watchable_directories` in `rust/wa-capabilities/src/graph.rs` of its own tree -
+and that check is never skippable: `skip` refuses and exits 1 once a check has failed, so a missing
+binary can no longer turn a caught defect into a "skipped" row (which the gate reads as not-evidence).
+
+Both directions, measured:
+
+    base graph.rs + no binary            -> FAIL, exit 1 (1 check, 1 failed; NOT SKIPPED)
+    base graph.rs + THIS branch binary   -> FAIL, exit 1 (6 checks, 1 failed)
+    this tree + this binary              -> pass, exit 0 (6 checks, 0 failed)
+    bash scripts/test-discriminates.sh ed693a0b...
+      discriminates scripts/test-serve-cwd-boot.sh
+      1 discriminating, 0 blocking, 0 not judged
+
 
 **It discriminates.** Run against a binary built from `bfad4f8f` in a separate worktree:
 
