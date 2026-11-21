@@ -221,7 +221,65 @@ echo "test-install-record: every install path writes through this library"
 for path in scripts/deploy.sh scripts/upgrade.sh scripts/fleet-install.sh scripts/linux/bootstrap.sh scripts/rollback-node.sh; do
   if grep -q 'wa_build_info\|wa_record_install' "$ROOT/$path"; then ok "$path asks the binary"; else bad "$path writes a record without asking the binary"; fi
 done
-if grep -qF 'record_commit="$COMMIT"' "$ROOT/scripts/deploy.sh"; then bad "deploy.sh still records the caller's commit"; else ok "deploy.sh does not record the caller's commit"; fi
+# THE CALLER'S COMMIT MUST NEVER BECOME THE RECORD'S IDENTITY, and this used to be one grep on scripts/deploy.sh
+# (`record_commit="$COMMIT"` must not appear). A grep measures the SHAPE of the code, and on 21/11 the Lua fast
+# path gave commit= a second, honest meaning: a fast-path install places no binary at all, so the install IS the
+# Lua tree that deploy staged and verified, while the binary it KEEPS is named in binary_commit= from its own
+# --build-info (docs/COMPONENTS.md, "The node binary itself"). A shape check cannot tell that apart from the
+# 18/11 mistake, so the rule is asserted where it is decidable - on the record the REAL step writes, for both
+# kinds of install. It is strictly more than the grep said: a build whose bytes report another commit must be
+# REFUSED (the caller's commit cannot be written at all), and a fast-path record must name the tree and the
+# bytes as two different, checkable facts.
+RECORD_STEP="$WORK/record-step.sh"
+STUB_COMMIT=1111222233334444555566667777888899990000
+awk '/^record_installed\(\) \{$/{on=1} on{print} on && /^\}$/{exit}' "$ROOT/scripts/deploy.sh" > "$RECORD_STEP"
+grep -q 'binary_commit=' "$RECORD_STEP" \
+  || bad "could not read record_installed() out of scripts/deploy.sh (nothing below could run)"
+record_step() { # <dir> <LUA_FAST 0|1> <the commit this deploy holds> -> runs the real step, its output on stdout
+  local dir="$1" fast="$2" held="$3"
+  mkdir -p "$dir/scripts"
+  cp "$STUB" "$dir/wa"
+  printf '#!/bin/sh\nexit 0\n' > "$dir/scripts/upgrade.sh"
+  (
+    set -uo pipefail
+    . "$LIB"
+    . "$ROOT/scripts/lib/node-binaries.sh"
+    . "$ROOT/scripts/lib/commit-id.sh"
+    . "$RECORD_STEP"
+    note() { printf 'note: %s\n' "$*"; }
+    fail() { printf 'deploy: %s\n' "$*" >&2; exit 1; }
+    INSTALL_DIR="$dir"; COMMIT="$held"; BRANCH=main; LUA_FAST="$fast"; RELEASE=''; REASON=''
+    SOURCE_ROOT=''; RUNNING_SOURCE=binary; RUNNING_WHY='the running binary reports it'
+    RUNNING_COMMIT="$STUB_COMMIT"; INSTALLED_BINARY_COMMIT="$STUB_COMMIT"
+    UPGRADE_HASH=test; SENTINEL_HASH=test
+    HASH="$(sha256sum < "$dir/wa" | awk '{print $1}')"
+    record_installed
+  )
+}
+HELD_OTHER=9999888877776666555544443333222211110000
+BUILDR="$WORK/record-build"
+OUT="$(record_step "$BUILDR" 0 "$STUB_COMMIT" 2>&1)"; rc=$?
+same "a build's record step finishes -> 0" "$rc" "0"
+same "a build's commit= is the binary's own answer" \
+  "$(wa_build_field "$(cat "$BUILDR/installed.txt" 2>/dev/null)" commit)" "$STUB_COMMIT"
+BUILDR2="$WORK/record-build-other"
+OUT="$(record_step "$BUILDR2" 0 "$HELD_OTHER" 2>&1)"; rc=$?
+same "a build whose bytes report ANOTHER commit is refused -> 1" "$rc" "1"
+shows "...by name" "$OUT" "build_commit_mismatch"
+same "...and the caller's commit is NOT recorded over the previous record" \
+  "$([ -f "$BUILDR2/installed.txt" ] && cat "$BUILDR2/installed.txt" || echo none)" "none"
+FASTR="$WORK/record-fast"
+OUT="$(record_step "$FASTR" 1 "$HELD_OTHER" 2>&1)"; rc=$?
+same "a Lua fast-path record step finishes -> 0" "$rc" "0"
+same "a fast-path record names the LUA TREE it installed in commit=" \
+  "$(wa_build_field "$(cat "$FASTR/installed.txt" 2>/dev/null)" commit)" "$HELD_OTHER"
+same "...and the binary it KEPT in binary_commit=, from the binary's own answer" \
+  "$(wa_build_field "$(cat "$FASTR/installed.txt" 2>/dev/null)" binary_commit)" "$STUB_COMMIT"
+same "...and says which kind of record it is" \
+  "$(wa_build_field "$(cat "$FASTR/installed.txt" 2>/dev/null)" lua_fast_path)" "1"
+same "...so the two commits are distinguishable in one record" \
+  "$([ "$(wa_build_field "$(cat "$FASTR/installed.txt" 2>/dev/null)" commit)" != "$(wa_build_field "$(cat "$FASTR/installed.txt" 2>/dev/null)" binary_commit)" ] && echo distinguishable)" \
+  "distinguishable"
 if grep -qE 'commit="\$PREVIOUS_COMMIT"' "$ROOT/scripts/upgrade.sh"; then bad "upgrade.sh still records the previous record's commit"; else ok "upgrade.sh does not record a previous record's commit"; fi
 
 echo "test-install-record: rollback-node.sh records the RESTORED binary's own answer"
