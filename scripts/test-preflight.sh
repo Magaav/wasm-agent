@@ -44,7 +44,11 @@ printf '%s\n' "$*" >> "$WA_STUB_ARGS"
 if flock -n "$WA_STUB_LOCK" true 2>/dev/null; then echo 'LOCK_HELD=no' >> "$WA_STUB_ARGS"; else echo 'LOCK_HELD=yes' >> "$WA_STUB_ARGS"; fi
 # The node answers where its land root is; the preflight derives <config>/land from this instead of
 if [ "$1" = "paths" ]; then
-  printf "home         %s/h\nconfig       %s\ndata         %s/h\n" "$WA_STUB_HOME" "$WA_STUB_CONFIG" "$WA_STUB_HOME"
+  # The REAL format, including the trailing "config file <path>" line: a reader that matched every line
+  # whose first word is "config" took "file" for the directory and looked for a journal at
+  # "<config>\nfile/land" (measured 21/11, the second replay: the answer was written but the journal was
+  # never found). The stub speaks it so the test can catch that.
+  printf "home         %s/h\nconfig       %s\ndata         %s/h\ncache        %s/h/cache\ntemp         /tmp\nconfig file  %s/env  (missing, nothing to read)\n" "$WA_STUB_HOME" "$WA_STUB_CONFIG" "$WA_STUB_HOME" "$WA_STUB_HOME" "$WA_STUB_CONFIG"
   exit 0
 fi
 run=''
@@ -166,6 +170,7 @@ export WA_STUB_MODE=green
 out=$("$SCRIPT" demo 2>&1); code=$?
 [ "$code" = 0 ] || fail "a preflight that derives its land root exits 0 (got $code): $out"; ok
 has "$out" 'preflight green' 'it found the journal under the config directory the node named'
+has "$(cat "$WORK/missions/demo/preflight.log")" "land root $WA_STUB_CONFIG/land" 'the land root it USED is the node config directory plus /land' # with a reader that also matched the "config file <path>" line the root became "<config>/file/land", and this line is where that shows up
 python3 - "$WORK/missions/demo/preflight.json" <<'PY' || fail 'the derived-root report is not green'
 import json, sys
 report = json.load(open(sys.argv[1]))

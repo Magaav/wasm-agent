@@ -67,7 +67,11 @@ command -v flock >/dev/null 2>&1 || { echo "preflight: refused(flock_missing): f
 command -v "$PY" >/dev/null 2>&1 || { echo "preflight: refused(python_missing): $PY is not on PATH, so no preflight.json can be written"; exit 2; }
 command -v "$WA" >/dev/null 2>&1 || { echo "preflight: refused(wa_missing): $WA is not on PATH (set WA_BIN)"; exit 2; }
 if [ -z "$LAND_ROOT" ]; then
-  config=$("$WA" paths 2>/dev/null | awk '$1 == "config" { print $2 }')
+  # The FIRST line whose second word is an absolute path. `wa paths` also prints a "config file <path>" line,
+  # and a reader that took any line starting with "config" took the word "file" for the directory - the
+  # journal was then looked for under "<config>\nfile/land" and never found (measured 21/11, the second
+  # replay: the answer was written and the report said no landing had run).
+  config=$("$WA" paths 2>/dev/null | awk '$1 == "config" && $2 ~ /^\//{ print $2; exit }')
   if [ -z "$config" ]; then
     echo "preflight: refused(land_root_unknown): wa paths printed no config directory, so no journal can be found"
     exit 2
