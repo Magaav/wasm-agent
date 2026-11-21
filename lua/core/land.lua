@@ -1698,8 +1698,8 @@ impl.gate = function(run, options)
       -- must stop the gate by name, not be silently ignored while fast.sh and deploy.sh refuse the same
       -- record: one record, one answer. The audit is cheap (one file, one loop) and it reads the same
       -- allow-list, so no key can be known to one entry point and unknown to another.
-      record_prefix = ". " .. quote(reader) .. " >/dev/null 2>&1; wa_build_env_audit >/dev/null 2>&1 || { wa_build_env_audit >&2; echo refused(build_env_key_unknown): the build record names a setting no build reads >&2; exit 2; }; "
-        .. "wa_build_env >/dev/null 2>&1 || { echo refused(build_env_incomplete): the build record names a directory that is not there >&2; exit 2; }; "
+      record_prefix = ". " .. quote(reader) .. " >/dev/null 2>&1; wa_build_env_audit >/dev/null 2>&1 || { wa_build_env_audit >&2; echo 'refused(build_env_key_unknown): the build record names a setting no build reads' >&2; exit 2; }; "
+        .. "wa_build_env >/dev/null 2>&1 || { echo 'refused(build_env_incomplete): the build record names a directory that is not there' >&2; exit 2; }; "
     end
   end
   -- A resume keeps a check that already PASSED (first run, not a retry) on this exact tree with this exact
