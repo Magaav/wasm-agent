@@ -237,7 +237,11 @@ def fit(font):
 def build(symbols_path, out_path):
     from fontTools.ttLib import TTFont
 
-    font = TTFont(symbols_path)
+    # recalcTimestamp=False: TTFont stamps head.modified with the WALL CLOCK as it saves unless told
+    # otherwise, which is exactly how "two builds are byte-identical" was believed on 21/11 when the two
+    # builds happened to land in the same second (head times have one-second resolution). The font is a
+    # committed artifact; its bytes may not depend on when it was built.
+    font = TTFont(symbols_path, recalcTimestamp=False)
     fit(font)
 
     # JetBrains Mono's vertical grid, scaled: a terminal that asks the icon font for a line height gets
@@ -334,7 +338,7 @@ def web_font(source_path, out_path):
     required for a build and never for a check."""
     from fontTools.ttLib import TTFont
 
-    font = TTFont(source_path)
+    font = TTFont(source_path, recalcTimestamp=False)
     font.flavor = "woff2"
     font.save(out_path)
 
@@ -441,6 +445,11 @@ def main():
     parser.add_argument("--check", action="store_true", help="verify the committed fonts, manifest and hashes")
     parser.add_argument("--sources", action="store_true", help="with --check: re-download and re-hash the archives")
     parser.add_argument("--verify-font", default=None, help="verify ONE font file and exit")
+    # The browser cannot reach assets/: the node serves ONE directory (the ui dir, lua/core/server.lua),
+    # so the woff2 the page embeds must live under ui/ in the served tree. This writes that copy from the
+    # same bytes that were just built, and a test compares the two (tests/test-wa-fonts.mjs) so a stale
+    # copy cannot sit in the served tree while the committed font has moved on.
+    parser.add_argument("--web-out", default="ui/fonts", help="where the served woff2 copies are written")
     args = parser.parse_args()
 
     built = os.path.join(args.out, "waIcons-Regular.ttf")
@@ -463,6 +472,27 @@ def main():
         for name in ("JetBrainsMono-Regular.ttf", "JetBrainsMono-Bold.ttf"):
             web_font(written[name], os.path.join(args.out, name.replace(".ttf", ".woff2")))
         web_font(built, os.path.join(args.out, "waIcons-Regular.woff2"))
+        # The copies the node actually SERVES (see the --web-out note above): written from the files just
+        # produced, so the served bytes and the committed bytes are the same build.
+        os.makedirs(args.web_out, exist_ok=True)
+        for name in ("waIcons-Regular.woff2", "JetBrainsMono-Regular.woff2", "JetBrainsMono-Bold.woff2"):
+            with open(os.path.join(args.out, name), "rb") as handle:
+                data = handle.read()
+            with open(os.path.join(args.web_out, name), "wb") as handle:
+                handle.write(data)
+        # The claim, measured where it is made: build the SAME bytes a second time, from the same
+        # extracted source, and refuse if the two files differ. A comment cannot notice a wall-clock
+        # stamp; this can. (It is also why the stamps above are pinned at all.)
+        import tempfile
+        with tempfile.TemporaryDirectory() as scratch:
+            again = os.path.join(scratch, "waIcons-Regular.ttf")
+            with open(os.path.join(scratch, "symbols-source.ttf"), "wb") as handle:
+                handle.write(extract("symbols", "SymbolsNerdFontMono-Regular.ttf", args.cache))
+            build(os.path.join(scratch, "symbols-source.ttf"), again)
+            if sha256_file(again) != sha256_file(built):
+                sys.exit("refused: two builds of the same source differ (%s vs %s), so the committed "
+                         "bytes are not reproducible" % (sha256_file(again)[:12], sha256_file(built)[:12]))
+        print("reproducible: a second build of the same source is byte-identical")
         manifest_path = manifest(args.out, built)
         problems = check(args.out, False, args.cache)
         print("built %s (%d glyphs, advance %d of %d)" % (built, len(GLYPHS), ADVANCE, UPEM_OUT))

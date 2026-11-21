@@ -3909,6 +3909,11 @@ fn content_type(path: &str) -> &'static str {
         "json" => "application/json; charset=utf-8",
         "webmanifest" => "application/manifest+json; charset=utf-8",
         "wasm" => "application/wasm",
+        // wa's two faces are served from the ui dir (ui/fonts/). A font served as
+        // application/octet-stream still loads in most browsers, but the type is part of what the page
+        // asked for and a wrong one is a silent cost (no font MIME sniffing, no cache partitioning by
+        // type): the node says what the bytes are.
+        "woff2" => "font/woff2",
         "svg" => "image/svg+xml",
         "png" => "image/png",
         _ => "application/octet-stream",
@@ -3925,6 +3930,12 @@ mod content_type_tests {
     }
 
     #[test]
+    fn fonts_have_their_own_type() {
+        // wa Icons and JetBrains Mono travel as woff2 under ui/fonts (scripts/build-wa-icons.py).
+        assert_eq!(content_type("fonts/waIcons-Regular.woff2"), "font/woff2");
+        assert_eq!(content_type("fonts/JetBrainsMono-Regular.woff2"), "font/woff2");
+    }
+
     fn pwa_assets_have_browser_types() {
         assert_eq!(content_type("manifest.webmanifest"), "application/manifest+json; charset=utf-8");
         assert_eq!(content_type("icon-192.png"), "image/png");

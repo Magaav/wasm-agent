@@ -47,7 +47,10 @@ wa-provider-manager button, wa-provider-manager a { margin-right:var(--space); }
   --radius-sm: var(--radius);
   --radius-lg: var(--radius);
   /* The terminal face pi uses (VS Code/PowerShell ship Consolas on Windows). */
-  --font: Consolas, "Cascadia Mono", "Cascadia Code", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  /* JetBrains Mono FIRST: it is embedded (ui/fonts.css, from assets/fonts) and it is what the terminal
+     draws, so the window and the terminal show the same letter widths. The rest stay as fallbacks for
+     a browser that could not decode the woff2. */
+  --font: "JetBrains Mono", Consolas, "Cascadia Mono", "Cascadia Code", ui-monospace, SFMono-Regular, Menlo, monospace;
   /* The face a stats glyph falls back to when the row's own (monospace) font has no picture of it.
      These are MONOCHROME symbol/emoji fonts, named in this order on purpose: `Noto Emoji` and
      `Segoe UI Symbol` draw a text-presentation outline, while `Segoe UI Emoji` draws a colour bitmap.

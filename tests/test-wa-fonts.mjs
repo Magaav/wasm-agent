@@ -239,6 +239,32 @@ check('the manifest lists every committed font file with its sha256, and nothing
     }
   });
 
+// The window embeds the same two faces (item 5). The node serves ONE directory and its CSP allows this
+// origin only, so the woff2 the page loads lives under ui/fonts - and a served copy that has drifted
+// from the committed one is a window drawing a glyph the terminal no longer draws.
+for (const name of ['waIcons-Regular.woff2', 'JetBrainsMono-Regular.woff2', 'JetBrainsMono-Bold.woff2']) {
+  check('ui/fonts/' + name + ' is the byte-identical twin of assets/fonts/' + name,
+    () => {
+      const served = path.join(ROOT, 'ui', 'fonts', name);
+      assert.ok(fs.existsSync(served), 'the page asks for ui/fonts/' + name + ' and it is not there');
+      const a = crypto.createHash('sha256').update(fs.readFileSync(served)).digest('hex');
+      const b = crypto.createHash('sha256').update(fs.readFileSync(path.join(FONTS, name))).digest('hex');
+      assert.equal(a, b, 'run scripts/build-wa-icons.py again: the served copy is stale');
+    });
+}
+check('the page loads the faces through one stylesheet, from this origin',
+  () => {
+    const html = fs.readFileSync(path.join(ROOT, 'ui', 'index.html'), 'utf8');
+    assert.match(html, /<link rel="stylesheet" href="fonts\.css"/);
+    const css = fs.readFileSync(path.join(ROOT, 'ui', 'fonts.css'), 'utf8');
+    for (const name of ['JetBrainsMono-Regular.woff2', 'JetBrainsMono-Bold.woff2', 'waIcons-Regular.woff2']) {
+      // Relative to the page ('fonts/...'), never absolute: the node serves one directory.
+      assert.ok(css.includes('url("fonts/' + name + '")'), 'fonts.css does not load fonts/' + name);
+    }
+    assert.doesNotMatch(css, /https?:\/\//);
+    assert.match(css, /font-family: "wa Icons"/);
+  });
+
 const failed = checks.filter(row => !row.ok);
 for (const row of checks) if (!row.ok) console.log('FAIL ' + row.name + ': ' + row.why);
 console.log('wa fonts ok (' + checks.length + ' checks, ' + failed.length + ' failed, 0 skipped; '

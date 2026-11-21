@@ -1,0 +1,34 @@
+/* wa's two faces, embedded: JetBrains Mono for text and "wa Icons" for the glyphs wa draws.
+ *
+ * The node serves ONE directory - the ui dir - and its Content-Security-Policy allows this origin only,
+ * so these faces are woff2 files under ui/fonts/, written by scripts/build-wa-icons.py from the same
+ * bytes the terminal installs (assets/fonts/) and listed with their sha256 in assets/fonts/waIcons.json.
+ * tests/test-wa-fonts.mjs refuses a served copy that has drifted from the committed one.
+ *
+ * font-display:block, not swap. The icons are not decoration: an icon that arrives late is a status row
+ * that reflows, and these faces are local files that load in milliseconds.
+ */
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: block;
+  src: url("fonts/JetBrainsMono-Regular.woff2") format("woff2");
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 700;
+  font-display: block;
+  src: url("fonts/JetBrainsMono-Bold.woff2") format("woff2");
+}
+@font-face {
+  font-family: "wa Icons";
+  font-style: normal;
+  font-weight: 400;
+  font-display: block;
+  /* The glyphs live in plane 15 (U+F0000..U+F0FFF); naming the range keeps a browser from asking this
+     face for every character it draws and falling through it for the Latin text. */
+  unicode-range: U+F0000-FFFFD;
+  src: url("fonts/waIcons-Regular.woff2") format("woff2");
+}
