@@ -889,6 +889,12 @@ check mission-verb bash scripts/test-mission-verb.sh
 # it, judged on a scratch missions root and a stub landing - exit 0 green, 1 red with the failed rows by
 # name, 2 refused when it judged nothing, and the suite lock held while the landing ran.
 check preflight bash scripts/test-preflight.sh
+# THE CHANGES ROUND'S OWN ROWS (factory-3, 21/11): a derived file cannot go stale in a merge; "main is green"
+# is a recorded fact; and a finished mission lands itself. Each is seconds and self-contained (a fixture
+# repository, a stub landing, a stub fast path), so they belong on the fast path and not only in the nightly.
+check regenerate bash scripts/test-regenerate.sh
+check main-health bash scripts/test-main-health.sh
+check drive bash scripts/test-drive.sh
 # The worker's own gate loop (item 3): a red preflight resumes the SAME session with the failed rows up to
 # three rounds, and <mission>/done carries rc=<rc> preflight=<verdict> rounds=<n>. Judged on a scratch
 # mission, a stub preflight and a stub CLI.
