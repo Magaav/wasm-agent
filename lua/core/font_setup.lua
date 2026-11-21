@@ -337,8 +337,11 @@ end
 -- itself. A terminal is set up when its PRIMARY face is JetBrains Mono AND its icon fallback is wa
 -- Icons; anything else is switched, the Nerd fonts included.
 -- Was wa Icons installed for this user by this command? The record it writes is the answer.
-function M.installed_by_setup()
-  local record = M.read_record()
+function M.installed_by_setup(record)
+  -- A RECORD THE CALLER ALREADY HOLDS is the same answer as the one on disk, and asking the disk instead made a
+  -- second run inside one command (or a test with a scratch record) edit a terminal that was already set up -
+  -- and overwrite its backup (measured 21/11).
+  record = record or M.read_record()
   return record ~= nil and record["wa Icons"] == true
 end
 
@@ -372,7 +375,7 @@ function M.names_icon_face(terminal, line)
   return false
 end
 
-function M.already_a2(description, config_text, terminal)
+function M.already_a2(description, config_text, terminal, record)
   local text = tostring(description or ""):lower()
   -- The primary face: the text before the first comma (foot) or the whole description (the others).
   local primary = text:match("^([^,]+)") or text
@@ -388,7 +391,7 @@ function M.already_a2(description, config_text, terminal)
   -- is installed for this user: there is no line to look for, and demanding one made it edit on every run
   -- (measured 21/11).
   if terminal.icons_via == "fontconfig" or terminal.kind == "lua-wezterm" or terminal.kind == "json-wt" then
-    return is_text_face and M.installed_by_setup()
+    return is_text_face and M.installed_by_setup(record)
   end
   -- GNOME Terminal holds one font DESCRIPTION and no icon line at all: it is set up when that value is
   -- exactly what this command would set it to.
@@ -456,6 +459,37 @@ end
 
 function M.backup_path(path)
   return path .. ".wa-backup"
+end
+
+-- Write the undo ONCE, and never over a backup that already exists.
+--
+-- MEASURED 21/11 (mission fonts-install item 2): a second run re-edited a config and wrote the already-edited
+-- bytes over alacritty.toml.wa-backup, so the ORIGINAL bytes were gone and --undo could only restore the first
+-- run's edit. The backup is the undo, and an undo that can be overwritten is not one: the first bytes a run
+-- found are the only bytes worth keeping.
+--
+--   * no backup yet            -> write the text the caller is about to replace;
+--   * a backup already there   -> LEAVE IT (true), because it holds an earlier - and therefore more original -
+--                                 state, and the row says so through 'carried';
+--   * cannot tell (unreadable) -> false, so the caller edits nothing: "unknown is not yes" applies to an undo.
+function M.write_backup_once(path, text)
+  local backup = M.backup_path(path)
+  local existing = host.read_file(backup)
+  if type(existing) == "string" then return true, backup, true end
+  if host.path_kind then
+    local kind = host.path_kind(backup)
+    -- 'dir' or 'other' is a path this command must not write through; anything unreadable but present is not
+    -- a missing file, and inventing "no backup" would overwrite it.
+    if kind == "dir" or kind == "other" then return false, backup, false end
+    if kind == "missing" then
+      if not host.write_file(backup, text) then return false, backup, false end
+      return true, backup, false
+    end
+    return false, backup, false
+  end
+  -- No path_kind on this host: a read is the only probe, and nil there means either missing or unreadable -
+  -- an answer that cannot tell them apart is a refusal, not a licence.
+  return false, backup, false
 end
 
 -- THE A2 PAIR FOR A CONFIG THAT NAMES NO FONT, in each terminal's own syntax. Not an edit of somebody's
@@ -759,8 +793,9 @@ function M.configure_terminal(terminal, opts)
       row.why = "its config names no font, so it draws the system monospace"
       return row
     end
-    if not host.write_file(M.backup_path(terminal.path), text) then
-      row.why = "backup_failed: " .. M.backup_path(terminal.path)
+    local backed, backup_path, carried = M.write_backup_once(terminal.path, text)
+    if not backed then
+      row.why = "backup_failed: this command could not secure an undo at " .. tostring(backup_path)
       return row
     end
     if not host.write_file(terminal.path, explicit) then
@@ -769,11 +804,12 @@ function M.configure_terminal(terminal, opts)
     end
     row.action = "edited"
     row.current = "(no font named: the system monospace)"
-    row.backup = M.backup_path(terminal.path)
+    row.backup = backup_path
+    if carried then row.carried = true end
     row.why = "named no font; the A2 pair is now written explicitly"
     return row
   end
-  local ready = (opts.already or M.already_a2)(row.current, text, terminal)
+  local ready = (opts.already or M.already_a2)(row.current, text, terminal, opts.record)
   if ready then
     row.why = "'" .. tostring(row.current) .. "' already draws wa's icons with wa Icons: nothing to do"
     return row
@@ -791,8 +827,9 @@ function M.configure_terminal(terminal, opts)
   end
   -- BACKUP BEFORE THE WRITE, always: the backup is the undo, and an undo that was written afterwards is
   -- the one that is missing when the write fails.
-  if not host.write_file(M.backup_path(terminal.path), text) then
-    row.why = "backup_failed: " .. M.backup_path(terminal.path)
+  local backed, backup_path, carried = M.write_backup_once(terminal.path, text)
+  if not backed then
+    row.why = "backup_failed: this command could not secure an undo at " .. tostring(backup_path)
     return row
   end
   if not host.write_file(terminal.path, edited) then
@@ -801,7 +838,13 @@ function M.configure_terminal(terminal, opts)
   end
   row.action = "edited"
   row.why = "'" .. tostring(row.current) .. "' replaced by JetBrains Mono + wa Icons"
-  row.backup = M.backup_path(terminal.path)
+  row.backup = backup_path
+  if carried then
+    -- AN EXISTING BACKUP IS KEPT, and the row says so: the undo restores the bytes an EARLIER run found, which
+    -- is the most original state this command has a copy of.
+    row.carried = true
+    row.why = row.why .. " (keeping the undo already at " .. tostring(backup_path) .. ")"
+  end
   return row
 end
 
@@ -833,7 +876,7 @@ function M.configure_gsettings(terminal, opts)
     return row
   end
   row.current = current
-  local ready = (opts.already or M.already_a2)(current, text, terminal)
+  local ready = (opts.already or M.already_a2)(current, nil, terminal, opts.record)
   if ready then
     row.why = "'" .. tostring(current) .. "' already draws wa's icons with wa Icons: nothing to do"
     return row
@@ -969,9 +1012,20 @@ function M.run(opts)
   end
   result.fonts = detail
 
+  -- WHAT THIS RUN KNOWS ABOUT ITS OWN FONTS. A fontconfig terminal (alacritty, wezterm, Windows Terminal) is
+  -- set up when its text face is JetBrains Mono and wa Icons is installed for this user - and on a machine
+  -- where this run is the install, the record that says so is written at the END of the run. Reading only the
+  -- disk record here made the FIRST run edit such a terminal again ("alacritty -> JetBrains Mono (was JetBrains
+  -- Mono)", measured 21/11), replace its backup, and give an operator who was already set up a new undo.
+  local run_opts = opts
+  if not opts.record and detail and type(detail.copied) == "table" and #detail.copied == #M.FONTS then
+    run_opts = {}
+    for key, value in pairs(opts) do run_opts[key] = value end
+    run_opts.record = { ["wa Icons"] = true, fonts = detail.copied, font_dir = detail.dir }
+  end
   local terminals, rows = opts.terminals or M.terminals(opts.home), {}
   for _, terminal in ipairs(terminals) do
-    local row = M.configure_terminal(terminal, opts)
+    local row = M.configure_terminal(terminal, run_opts)
     row.path = terminal.path
     rows[#rows + 1] = row
     if row.action == "edited" then

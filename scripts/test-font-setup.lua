@@ -528,19 +528,95 @@ end
 eq(#font_setup.terminals(scratch_root), 8, "the eight terminals the brief names, and no others")
 ok(not known["some-other-terminal"], "an unknown terminal is not in the allow-list")
 
+-- ---- the backup is written ONCE, and a re-run never re-edits (item 2) ------------------------------
+-- MEASURED 21/11: an alacritty already on 'family = "JetBrains Mono"' was edited again
+-- ("alacritty -> JetBrains Mono (was JetBrains Mono)") and its .wa-backup was overwritten with the
+-- ALREADY-EDITED bytes - so the original was gone and --undo restored the first run's edit. Two rules close
+-- that, and each is asserted below on its own: a terminal already on the value this command writes is left
+-- alone (above, already_a2), and a backup that exists is NEVER overwritten (M.write_backup_once).
+do
+  local once_dir = fixtures .. "/once"
+  local once_config = once_dir .. "/foot.ini"
+  write(once_config, "[main]\nfont=Source Code Pro:size=11\n")
+  local once_terminal = { name = "foot", path = once_config, kind = "ini", section = "main", key = "font" }
+  local once_run = function(command)
+    -- the bundle is real files, so the copies work; fc-list answers nothing so a face is always "not installed"
+    if command:find("fc%-list") then return "" end
+    return "ok"
+  end
+  local once_bundle = scratch_root .. "/once-bundle"
+  mkdir(once_bundle)
+  for _, name in ipairs(font_setup.FONTS) do write(once_bundle .. "/" .. name, "fixture") end
+  local ORIGINAL = "[main]\nfont=Source Code Pro:size=11\n"
+
+  -- A BACKUP THAT ALREADY EXISTS IS KEPT, through the command's own edit path - no helper named, so this
+  -- assertion is about the behaviour and not about a function existing.
+  write(once_config .. ".wa-backup", "[main]\nfont=The True Original:size=11\n")
+  local edit_over_backup = font_setup.configure_terminal(once_terminal, {})
+  eq(edit_over_backup.action, "edited", "a config that is not A2 is edited")
+  eq(read(once_config .. ".wa-backup"), "[main]\nfont=The True Original:size=11\n",
+    "and the backup that was already there is NOT overwritten with already-edited bytes")
+
+  -- THE BRIEF'S OWN SHAPE, on the terminal it was measured on: alacritty whose every weight is ALREADY
+  -- 'JetBrains Mono', on a machine where the fonts are not installed yet - this run IS the install, so the
+  -- disk record cannot be asked. It must be left alone (there is nothing to change) and no backup invented.
+  local alacritty_home = fixtures .. "/once-alacritty"
+  local alacritty_config = alacritty_home .. "/alacritty.toml"
+  local ALACRITTY_ALREADY = '[font]\nnormal = { family = "JetBrains Mono", style = "Regular" }\nbold = { family = "JetBrains Mono", style = "Bold" }\n'
+  write(alacritty_config, ALACRITTY_ALREADY)
+  local alacritty_terminal = { name = "alacritty", path = alacritty_config, kind = "toml", section = "font.normal",
+    key = "family", inline = "normal", table_section = "font", icons_via = "fontconfig" }
+  local alacritty_run = font_setup.run({ home = alacritty_home, source_dir = once_bundle,
+    font_dir = scratch_root .. "/once-alacritty-fonts", run = once_run, terminals = { alacritty_terminal } })
+  ok(alacritty_run.ok, "the run on an already-A2 alacritty completes: " .. tostring(alacritty_run.error))
+  eq(alacritty_run.terminals[1].action, "left alone",
+    "alacritty already on JetBrains Mono is LEFT ALONE, not re-edited ('alacritty -> JetBrains Mono (was JetBrains Mono)' was the report)")
+  eq(read(alacritty_config), ALACRITTY_ALREADY, "its config is byte-identical")
+  ok(not exists(alacritty_config .. ".wa-backup"), "and no backup was written over anything")
+
+  -- The whole command TWICE and then --undo: the ORIGINAL bytes come back. The second run edits nothing,
+  -- because a terminal already on the value this command writes is left alone.
+  pcall(host.exec, "rm -f '" .. once_config .. "' '" .. once_config .. ".wa-backup'", "", 20)
+  write(once_config, ORIGINAL)
+  local opts = { home = once_dir, source_dir = once_bundle, font_dir = scratch_root .. "/once-fonts",
+    run = once_run, terminals = { once_terminal }, record = { ["wa Icons"] = true, terminals = {} } }
+  local once_first = font_setup.run(opts)
+  ok(once_first.ok, "the first run completes: " .. tostring(once_first.error))
+  eq(once_first.terminals[1].action, "edited", "the first run edits the config")
+  local edited_bytes = read(once_config)
+  eq(read(once_config .. ".wa-backup"), ORIGINAL, "the backup holds the bytes it found")
+  -- VERBATIM: the brief's shape is a terminal whose face is ALREADY the A2 text face.
+  local second_opts = { home = once_dir, source_dir = once_bundle, font_dir = scratch_root .. "/once-fonts",
+    run = once_run, terminals = { once_terminal } }
+  local once_second = font_setup.run(second_opts)
+  ok(once_second.ok, "the second run completes: " .. tostring(once_second.error))
+  eq(once_second.terminals[1].action, "left alone", "the second run edits NOTHING")
+  eq(read(once_config), edited_bytes, "the config is byte-identical after the second run")
+  eq(read(once_config .. ".wa-backup"), ORIGINAL, "and the backup was not touched")
+  local once_undone = font_setup.run({ undo = true })
+  ok(once_undone.ok, "the undo completes: " .. tostring(once_undone.error))
+  eq(once_undone.restored, 1, "and restores the one edited config")
+  eq(read(once_config), ORIGINAL, "the ORIGINAL bytes come back, byte for byte")
+end
+
 -- ---- the whole command: record, icon default, undo ------------------------------------------------
 -- M.run is what the CLI and the installer both call, so this drives the command end to end on the scratch
 -- tree: install, edit, record - and then --undo puts every byte back.
+local COMMAND_ORIGINAL = "[main]\nfont=Source Code Pro:size=11\n"
 local command_home = scratch_root .. "/command-home"
 local command_fonts = scratch_root .. "/command-fonts"
 mkdir(command_home)
 local command_bundle = scratch_root .. "/command-bundle"
 mkdir(command_bundle)
 for _, name in ipairs(font_setup.FONTS) do write(command_bundle .. "/" .. name, "fixture") end
-write(fixtures .. "/foot/foot.ini", "[main]\nfont=Source Code Pro:size=11\n")
+-- ITS OWN FILE, in its own directory: the write-once rule means a fixture that earlier cases already edited
+-- still carries THEIR .wa-backup, and the undo below must prove the ORIGINAL bytes come back - not that a
+-- backup written by a different case happens to hold them.
+local command_config = fixtures .. "/command/foot.ini"
+write(command_config, COMMAND_ORIGINAL)
 
 local command_terminals = {
-  { name = "foot", path = fixtures .. "/foot/foot.ini", kind = "ini", section = "main", key = "font" },
+  { name = "foot", path = command_config, kind = "ini", section = "main", key = "font" },
 }
 for _, terminal in ipairs(command_terminals) do
   if tostring(terminal.path):sub(1, #REAL_CONFIG) == REAL_CONFIG then
@@ -583,8 +659,7 @@ eq(opted_out.fonts, nil, "and installs nothing")
 local undone = font_setup.run({ undo = true })
 ok(undone.ok, "the undo completes: " .. tostring(undone.error))
 eq(undone.restored, 1, "it restored the one edited config")
-eq(read(fixtures .. "/foot/foot.ini"), "[main]\nfont=Source Code Pro:size=11\n",
-  "the config holds its ORIGINAL bytes again")
+eq(read(command_config), COMMAND_ORIGINAL, "the config holds its ORIGINAL bytes again")
 ok(not exists(applied.backup) or true, "and the backup is consumed")
 ok(font_setup.read_record() == nil, "the record is gone, so the wa icon set is no longer the default")
 
