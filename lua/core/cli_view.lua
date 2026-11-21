@@ -2351,7 +2351,7 @@ function METHODS:run_code_piece(event)
     local line = stream.pending:sub(1, nl - 1):gsub("\r$", "")
     stream.pending = stream.pending:sub(nl + 1)
     for _, row in ipairs(codemode_block.rows(codemode_block.new({ code = line }, self.now()), self.limit, o)) do
-      self:write(row .. "\n")
+      self:run_code_row(row)
     end
   end
 end
@@ -2364,9 +2364,51 @@ function METHODS:run_code_flush()
   if not stream or stream.pending == "" then return end
   local o = self:codemode_opts()
   for _, row in ipairs(codemode_block.rows(codemode_block.new({ code = stream.pending }, self.now()), self.limit, o)) do
-    self:write(row .. "\n")
+    self:run_code_row(row)
   end
   stream.pending = ""
+end
+
+-- One row of the streaming script, written AND remembered: the rows are what `run_code_settle_block`
+-- rewrites in place once the whole script is known.
+function METHODS:run_code_row(row)
+  self.code_stream_rows = self.code_stream_rows or {}
+  self.code_stream_rows[#self.code_stream_rows + 1] = row
+  self:write(row .. "\n")
+end
+
+-- THE SCRIPT ON SCREEN IS THE SCRIPT (Victor 21/11).
+--
+-- The stream can stop early or repeat itself - a provider chunk, a relay, a decoder that met a
+-- fragment it could not split - and the block then held ONE row (`const a = await{`) where the model's
+-- program should be. The call event carries the arguments WHOLE, so when it arrives the block's rows
+-- are rewritten in place to exactly what the script is, and the rows it never got are appended. That
+-- is the same mechanism a settling block uses (`codemode_sync`): a row is rewritten, never removed, so
+-- nothing the reader already sees moves under them.
+function METHODS:run_code_settle_block(script)
+  local drawn = self.code_stream_rows
+  self.code_stream_rows = nil
+  -- Only the rows THIS function's own streaming wrote are completed: a fenced run block streamed its
+  -- code through `code_stream` (it is already whole on screen, and its rows are not tracked here), and
+  -- drawing the script again over it was a second copy of the program under the first.
+  if not drawn or #drawn == 0 then return end
+  local o = self:codemode_opts()
+  local code = type(script) == "string" and script or ""
+  if code == "" then return end
+  local rows = codemode_block.rows(codemode_block.new({ code = code }, self.now()), self.limit, o)
+  local same = #drawn == #rows
+  if same then
+    for index = 1, #drawn do
+      if drawn[index] ~= rows[index] then same = false; break end
+    end
+  end
+  if same then return end
+  if self:transcript() and host.transcript_rewrite then
+    for index = 1, math.min(#drawn, #rows) do
+      pcall(host.transcript_rewrite, index - #drawn - 1, rows[index])
+    end
+  end
+  for index = #drawn + 1, #rows do self:write(rows[index] .. "\n") end
 end
 
 -- The streaming run block: complete lines after the opening fence, each drawn as band rows; the closing
@@ -2603,6 +2645,15 @@ end
 function METHODS:codemode_sync()
   local model = self.code
   if not model then return end
+  -- THE LIVE ROW IS TAKEN DOWN BEFORE THE BLOCK GROWS (Victor 21/11: the scrollbar split in two
+  -- while a call waited, one bar for the block and a stub of it beside the waiting row). The host
+  -- keeps a live row of its own UNDER the transcript for the call in flight and rewrites it in
+  -- place; a block that gains a row (a call's output, a second call) moves that row without telling
+  -- the host, and the live row's next redraw lands on a row of the block - the row it lands on loses
+  -- its last column, which is where the bar is drawn. Cleared here, the rows this writes are the
+  -- newest rows of the transcript and the bar is drawn on every one of them, which is what a reader
+  -- scrolling during the wait is looking at.
+  if self.pending and self.pending.block then self:tool_live("") end
   local o = self:codemode_opts()
   local rows = codemode_block.call_lines(model, self.limit, o)
   local old = self.code_rows or 0
@@ -2639,6 +2690,9 @@ function METHODS:codemode_start(event)
     -- tool): only the call rows follow, after the last line the model finished writing.
     self.code_streamed = nil
     self:run_code_flush()
+    -- What streamed may be less than the script (or not the script at all): the call's own arguments
+    -- are the truth, and the block's rows are made to be exactly them.
+    self:run_code_settle_block(event.arguments and event.arguments.code)
   else
     self:flow_end()
     self:gap(1)

@@ -805,6 +805,12 @@ check install-front-door bash scripts/test-install.sh
   # binary in a private tmux pty and REFUSES to run unless its fixture served the request, so a run
   # that reached any other endpoint fails instead of passing.
   WA_BIN="$bin" check fence-card-pty node scripts/test-fence-card-pty.mjs
+  # THE RUN BLOCK, AS THE OPERATOR READS IT (Victor 21/11): a script the model writes inside run,
+  # then only bash x2 and a four-kilobyte JSON blob where the two commands own output belonged. It
+  # drives the REAL binary twice - wa chat --once and the interactive window in a private tmux pty -
+  # against a local SSE fixture, and reads the rows back. A row of this run for the same reason
+  # fence-card-pty is one: a view change cannot be judged by a Lua double alone.
+  WA_BIN="$bin" check run-live-pty node scripts/test-run-live-pty.mjs
   # The cutover exporter (docs/WHATSAPP-CUTOVER.md): a synthetic whatsmeow store in, the wacore
   # device record out, plus the guard rails around a live state directory. Seconds, no phone.
   check whatsapp-adopt node --test scripts/test-whatsapp-adopt.mjs
