@@ -64,8 +64,8 @@ make_source_tree() { # <dir>
   cp "$root/scripts/termux/adopt-existing.sh" "$_d/scripts/termux/adopt-existing.sh"
   cp "$root/scripts/termux/bootstrap.sh" "$_d/scripts/termux/bootstrap.sh"
   cp "$root/scripts/install-termux.sh" "$_d/scripts/install-termux.sh"
-  for _a in index.html style.css app.js components.js render.wasm manifest.webmanifest service-worker.js icon-192.png icon-512.png; do
-    printf 'asset %s\n' "$_a" > "$_d/ui/$_a"
+  for _a in index.html style.css app.js components.js render.wasm manifest.webmanifest service-worker.js icon-192.png icon-512.png fonts.css fonts/waIcons-Regular.ttf fonts/JetBrainsMono-Regular.ttf fonts/JetBrainsMono-Bold.ttf fonts/OFL-JetBrainsMono.txt fonts/LICENSE-SymbolsNerdFont-MIT.txt; do
+    case "$_a" in */*) mkdir -p "$_d/ui/${_a%/*}" ;; esac; printf 'asset %s\n' "$_a" > "$_d/ui/$_a"
   done
   printf 'license text\n' > "$_d/LICENSE"
   # The build writes rust/target; the source tree must ignore it or the updater's
@@ -186,7 +186,8 @@ make_install() { # <commit> <remote> [previous]
   cp "$root/scripts/termux/wa-update.sh" "$install/bin/wa-update"
   cp "$root/scripts/termux/release-lib.sh" "$install/bin/release-lib.sh"
   chmod +x "$install/bin/wa" "$install/bin/wa-update"
-  for a in index.html style.css app.js components.js render.wasm manifest.webmanifest service-worker.js icon-192.png icon-512.png; do
+  for a in index.html style.css app.js components.js render.wasm manifest.webmanifest service-worker.js icon-192.png icon-512.png fonts.css fonts/waIcons-Regular.ttf fonts/JetBrainsMono-Regular.ttf fonts/JetBrainsMono-Bold.ttf fonts/OFL-JetBrainsMono.txt fonts/LICENSE-SymbolsNerdFont-MIT.txt; do
+    case "$a" in */*) mkdir -p "$install/ui/${a%/*}" ;; esac
     printf 'asset %s\n' "$a" > "$install/ui/$a"
   done
   printf 'license text\n' > "$install/LICENSE"

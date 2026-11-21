@@ -267,6 +267,40 @@ check('the page loads the faces through one stylesheet, from this origin',
     assert.match(css, /font-family: "wa Icons"/);
   });
 
+// ---- the release bundles carry them (item 2) ------------------------------------------------------
+// A font that ships in the repo and not in the bundle is a node whose window falls back to whatever the
+// machine has. Each installer states its file list in its own vocabulary, so each is read here - and the
+// Linux bundle ships the whole ui/ directory, which this asserts rather than assumes.
+const NFONTS = ['waIcons-Regular.ttf', 'JetBrainsMono-Regular.ttf', 'JetBrainsMono-Bold.ttf'];
+const NLICENCES = ['OFL-JetBrainsMono.txt', 'LICENSE-SymbolsNerdFont-MIT.txt'];
+const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8');
+
+check('the Linux bundle ships the whole ui/ directory, fonts and licences included',
+  () => assert.match(read('scripts/release-linux.sh'), /cp -r "\$ROOT\/ui\/\." "\$stage\/ui\/"/));
+
+check('the Termux bundle lists every face and licence',
+  () => { const list = read('scripts/termux/release-lib.sh');
+          for (const name of [...NFONTS, ...NLICENCES]) {
+            assert.ok(list.includes('fonts/' + name), 'RL_UI_ASSETS is missing fonts/' + name);
+          }
+          assert.match(list, /fonts\.css/, 'RL_UI_ASSETS is missing fonts.css'); });
+
+check('the Windows installer and package list every face and licence',
+  () => { for (const rel of ['scripts/install.ps1', 'scripts/lib/release-package.ps1', 'scripts/package-windows.ps1']) {
+            const text = read(rel);
+            for (const name of [...NFONTS, ...NLICENCES]) {
+              assert.ok(text.includes(name), rel + ' is missing ' + name);
+            }
+          } });
+
+check('a bundle that names a font file also creates its directory on the way in',
+  () => { // The assets live under ui/fonts/, so every installer that copies them needs the mkdir.
+          const termux = read('scripts/termux/release-lib.sh');
+          assert.match(termux, /case \$_rl_a in \*\/\*\) mkdir -p/);
+          assert.match(termux, /case \$_rbi_a in \*\/\*\) mkdir -p/);
+          const ps = read('scripts/install.ps1');
+          assert.match(ps, /New-Item -ItemType Directory -Force -Path \$targetDir/); });
+
 const failed = checks.filter(row => !row.ok);
 for (const row of checks) if (!row.ok) console.log('FAIL ' + row.name + ': ' + row.why);
 console.log('wa fonts ok (' + checks.length + ' checks, ' + failed.length + ' failed, 0 skipped; '

@@ -99,9 +99,13 @@ try {
     Remove-Item "Env:$name" -ErrorAction SilentlyContinue
   }
   Copy-Asset $loaders[0].FullName 'WebView2Loader.dll'
-  foreach ($asset in @('ui/index.html', 'ui/style.css', 'ui/app.js', 'ui/components.js',
+  foreach ($asset in @('ui/index.html', 'ui/style.css', 'ui/fonts.css', 'ui/app.js', 'ui/components.js',
                        'ui/render.wasm', 'ui/manifest.webmanifest', 'ui/service-worker.js',
-                       'ui/icon-192.png', 'ui/icon-512.png', 'scripts/upgrade.sh', 'LICENSE')) {
+                       'ui/icon-192.png', 'ui/icon-512.png',
+                       'ui/fonts/waIcons-Regular.ttf', 'ui/fonts/JetBrainsMono-Regular.ttf',
+                       'ui/fonts/JetBrainsMono-Bold.ttf', 'ui/fonts/OFL-JetBrainsMono.txt',
+                       'ui/fonts/LICENSE-SymbolsNerdFont-MIT.txt',
+                       'scripts/upgrade.sh', 'LICENSE')) {
     Copy-Asset (Join-Path $root $asset) $asset
   }
   Copy-Asset (Join-Path $root 'docs/release/RUNTIME.md') 'README.md'

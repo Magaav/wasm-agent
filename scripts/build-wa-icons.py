@@ -466,7 +466,9 @@ def main():
         # themselves. One file, two uses - a browser loads TrueType webfonts as readily as woff2, and the
         # installer has to copy a real font anyway, so serving anything else would ship each face twice.
         os.makedirs(args.web_out, exist_ok=True)
-        for name in SERVED_FONTS:
+        # The LICENCES travel with the served copies too: a bundle that carries a font and not its licence
+        # is a bundle nobody may redistribute, and the installer reads these faces from here.
+        for name in SERVED_FONTS + tuple(SHIPPED_LICENCES):
             with open(os.path.join(args.out, name), "rb") as handle:
                 data = handle.read()
             with open(os.path.join(args.web_out, name), "wb") as handle:

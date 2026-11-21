@@ -197,11 +197,14 @@ if (Test-Path -LiteralPath $seeded) {
 $uiDir = Join-Path $nodeDir "ui"
 New-Item -ItemType Directory -Force -Path $uiDir | Out-Null
 $localUiDir = if ($PSScriptRoot) { Join-Path $PSScriptRoot "../ui" } else { $null }
-$uiNames = @("index.html", "style.css", "app.js", "components.js", "render.wasm", "manifest.webmanifest", "service-worker.js", "icon-192.png", "icon-512.png")
+$uiNames = @("index.html", "style.css", "fonts.css", "app.js", "components.js", "render.wasm", "manifest.webmanifest", "service-worker.js", "icon-192.png", "icon-512.png", "fonts/waIcons-Regular.ttf", "fonts/JetBrainsMono-Regular.ttf", "fonts/JetBrainsMono-Bold.ttf", "fonts/OFL-JetBrainsMono.txt", "fonts/LICENSE-SymbolsNerdFont-MIT.txt")
 if ($localUiDir -and (Test-Path $localUiDir)) {
   foreach ($name in $uiNames) {
     $source = Join-Path $localUiDir $name
-    if (Test-Path $source) { Copy-Item $source (Join-Path $uiDir $name) -Force }
+    $target = Join-Path $uiDir $name
+    $targetDir = Split-Path -Parent $target
+    if (-not (Test-Path $targetDir)) { New-Item -ItemType Directory -Force -Path $targetDir | Out-Null }
+    if (Test-Path $source) { Copy-Item $source $target -Force }
   }
   Ok "ui files -> $uiDir (from this checkout)"
 } else {
