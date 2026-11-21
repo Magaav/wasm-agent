@@ -86,7 +86,7 @@ memory.append_turn(sid, { id = 'before-1', role = 'user', content = 'an earlier 
 memory.append_turn(sid, { id = 'before-2', role = 'assistant', content = 'an earlier answer', debug = false })
 local function rows()
   local list = {}
-  for _, row in ipairs(memory.messages(sid) or {}) do
+  for _, row in ipairs(memory.session_messages(sid) or {}) do
     if row.id == 'before-1' or row.id == 'before-2' then
       list[#list + 1] = json.encode({ id = row.id, role = row.role, content = row.content })
     end

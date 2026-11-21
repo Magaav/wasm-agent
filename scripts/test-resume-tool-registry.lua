@@ -17,7 +17,7 @@
 local env = {}
 local real_getenv = host.getenv
 host.getenv = function(key)
-  if key == "WASM_AGENT_RAW_CODE" then return "codemode" end -- declared tools are what this test counts (CodeAct is the default since 17/11)
+  if key == "WASM_AGENT_RAW_CODE" then return nil end -- declared tools are what this test counts (CodeAct is the default since 17/11)
   if key == "WASM_AGENT_LLM_API_KEY" then return "test-only" end
   if key == "WASM_AGENT_VAULT_URL" or key == "WASM_AGENT_VAULT_DIR"
       or key == "WASM_AGENT_VAULT_KEYSTORE" or key == "WASM_AGENT_VAULT_PASSPHRASE" then return nil end
@@ -120,7 +120,7 @@ local bricked_id = session("frozen with no tools")
 -- a different case and is covered by scripts/test-raw-mode-small.lua.
 local frozen = prompt_cache.enforce({ session_id = bricked_id, user_id = "master", role = "master" },
   { system = "a prompt frozen by a turn that resolved no tools", tools = {},
-    raw_mode = dofile("lua/core/raw_code.lua").mode(), raw_decided = true })
+    raw_mode = 'native', raw_decided = true })
 check(type(frozen) == "table" and type(frozen.tools) == "table" and #frozen.tools == 0,
   "the frozen prefix holds an empty tool list (the record this row is about)")
 

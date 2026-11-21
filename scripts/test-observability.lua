@@ -7,7 +7,7 @@ local overrides={WASM_AGENT_LLM_API_KEY='test-only',WASM_AGENT_PROVIDER='opencod
   WASM_AGENT_CONTEXT_BUDGET='0',WASM_AGENT_MAX_TOOL_ROUNDS='3',
   -- The declared-tool surface: this row asserts that the short index keeps every full tool schema,
   -- and CodeAct (the default since 17/11) declares no tool at all.
-  WASM_AGENT_RAW_CODE='codemode'}
+  }
 host.getenv=function(key) if overrides[key]~=nil then return overrides[key] end return native_getenv(key) end
 host.http=function() error('unexpected HTTP in hermetic test') end
 host.http_stream=host.http

@@ -414,7 +414,8 @@ do
   -- keeps the one that ran, and a guard still reads the node's own copy.
   reload.configure({ dev = DEV })
   local handle = dofile("lua/core/pure.lua")("lua/core/raw_code.lua")
-  ok(type(handle.mode) == "function", "pure: the handle answers the module's functions")
+  ok(type(handle.native_run) == "function" and type(handle.switch_refusal) == "function",
+    "pure: the handle answers the module's functions")
   local node_text = assert(host.read_file(root .. "/lua/core/raw_code.lua"))
   local edited = node_text:gsub("\nreturn M%s*$", "\nM.dev_mark = 'v2'\nreturn M\n")
   ok(edited ~= node_text, "pure: the test edit applies to raw_code's source")
@@ -440,7 +441,7 @@ do
   reload.turn_boundary(host.now() + 40)
   ok(handle.dev_mark == nil, "pure: restoring the file restores the module at the next turn")
   reload.configure({})
-  ok(handle.dev_mark == nil and type(handle.take) == "function", "pure: with no source the node's module answers")
+  ok(handle.dev_mark == nil and type(handle.text_action) == "function", "pure: with no source the node's module answers")
 end
 
 -- ============================================================== 8. the two sources

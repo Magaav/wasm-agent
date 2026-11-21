@@ -92,60 +92,14 @@ local function build(env, subagent)
   return value
 end
 
--- The ONE case whose a27490af bytes carry the conform notice (measured: the first case a recording
--- process builds, because raw_code.TRANSPORT_NOTICE_SHOWN shows it once per process).
-local NOTICE_CASE = 'progressive-only'
+-- The per-mode goldens are GONE with the modes (Victor 21/11): a27490af recorded only the six explicit
+-- values of WASM_AGENT_RAW_CODE, every one of which this build refuses by name, and it has NO native case
+-- to compare against (its own mode() answered 'only' for that value). What this file still proves is the
+-- half that matters for the cache: the bytes a thread on this path gets, asserted below. The three
+-- model-facing strings this path is built from were compared byte-for-byte against 97251587 when the
+-- switch was removed (docs/missions/reports/one-run-path.md). A native golden recorded FROM THIS RELEASE
+-- is the follow-up that pins it from here on.
 
--- ---------------------------------------------------------------- the goldens, every explicit mode
-for _, case in ipairs(cases) do
-  local path = ROOT .. '/' .. case.name .. '.json'
-  local body = host.read_file(path)
-  ok(type(body) == 'string' and body ~= '', 'the golden exists: ' .. path .. ' (regenerate with scripts/generate-prompt-goldens.lua on 39bbf2b6)')
-  local want = json.decode(body)
-  local built = build({ WASM_AGENT_RAW_CODE = case.mode, WASM_AGENT_ENVELOPE_MODE = case.envelope }, case.subagent)
-  local got = golden.normalize(built)
-  -- Nothing is normalised away (rel review r3, item 2): the bytes compare EXACTLY, and the one case
-  -- where a27490af differs is named rather than hidden. Measured on the real tree, not assumed: a27490af
-  -- appends the conform notice to the prompt for the FIRST case it builds in a process
-  -- (raw_code.TRANSPORT_NOTICE_SHOWN shows it once), which in this case list is progressive-only.
-  local base_notices = #golden.notice_lines(want.system)
-  local built_notices = #golden.notice_lines(got.system)
-  eq(built_notices, 0, case.name .. ': this branch puts no conform notice line in the prompt')
-  eq(base_notices, 0, case.name .. ': 39bbf2b6 carries no conform notice in this prompt')
-  -- The reference is 39bbf2b6 OWN bytes, so the comparison cannot agree with itself. The four
-  -- shapes this branch changes BY DESIGN are removed from both sides (prompt-golden.DIFFERENT, an
-  -- allow-list); every other byte must match, and a line outside that list fails by name.
-  eq(golden.upstream_view(got.system), golden.upstream_view(want.system), case.name .. ': the full built system prompt matches 39bbf2b6 outside the named differences')
-  -- The declared tools, against 39bbf2b6 OWN list: this branch ADDS `run` and gives the `codemode`
-  -- description the batching sentence. Those two shapes are named here; every other schema must be
-  -- byte-identical, and a tool that appears or vanishes fails by name.
-  local function by_name(list)
-    local out = {}
-    for _, item in ipairs(list or {}) do out[item['function'].name] = item end
-    return out
-  end
-  local got_tools, want_tools = by_name(got.tools), by_name(want.tools)
-  -- `run` and `build` are this branch additions wherever they appear; 39bbf2b6 never declares either.
-  ok(want_tools.run == nil, case.name .. ': 39bbf2b6 does not declare the run tool')
-  ok(want_tools.build == nil, case.name .. ': 39bbf2b6 does not declare the build tool')
-  got_tools.run = nil
-  got_tools.build = nil
-  -- The codemode description is the one schema field this branch changes on purpose.
-  if got_tools.codemode and want_tools.codemode then
-    local mine, ref = got_tools.codemode['function'], want_tools.codemode['function']
-    local mine_desc, ref_desc = mine.description, ref.description
-    mine.description, ref.description = nil, nil
-    eq(json.encode(mine), json.encode(ref), case.name .. ': the codemode schema matches 39bbf2b6 apart from its description')
-    eq(mine_desc ~= ref_desc, true, case.name .. ': and its description is where this branch batching sentence lives')
-  end
-  local function names_of(list)
-    local out = {}
-    for n in pairs(list) do out[#out + 1] = n end
-    table.sort(out)
-    return table.concat(out, ',')
-  end
-  eq(names_of(got_tools), names_of(want_tools), case.name .. ': the declared tool list matches 39bbf2b6 apart from the run tool this branch adds')
-end
 
 -- ---------------------------------------------------------------- a default node is arm B
 -- No switch at all: the provider ROW decides (model_profile.builtin_transport), the same row a real node
@@ -168,7 +122,7 @@ eq(profile.builtin_transport(settings.provider), profile.TOOL_CALL,
   'the node provider (' .. tostring(settings.provider) .. ') has a tool_call row, so the arm-B rows apply')
 
 do
-  local TOOL_CALL = raw.guidance_for('tool_call')
+  local TOOL_CALL = raw.guidance_for()
   local CODEMODE_LINE = 'one ' .. TICK .. 'codemode' .. TICK .. ' call runs JavaScript'
   for _, envelope in ipairs({ 'progressive', 'full' }) do
     local master = build({ WASM_AGENT_RAW_CODE = '', WASM_AGENT_ENVELOPE_MODE = envelope }, nil)
@@ -190,20 +144,15 @@ end
 -- A child whose profile allows code mode keeps exactly the tools its profile allows. a27490af emptied
 -- this list, but not because of the mode: its A/B arm answered "fence" whenever WASM_AGENT_RAW_CODE was
 -- unset, and that arm's allow-list (no tools) filtered the child; 1468bc53 made the arm read WA_AB_ARM.
-local code_child = build({ WASM_AGENT_RAW_CODE = 'codemode', WASM_AGENT_ENVELOPE_MODE = 'full' },
-  { id = 'orchestration-worker', allowed = { 'read', 'write', 'bash', 'ls', 'run', 'codemode', 'edit' } })
-eq(names_of(code_child.tools), 'bash,codemode,edit,ls,read,run,write',
-  'codemode: a child keeps exactly the tools its profile allows')
+-- The two rows that named a mode here described the removed codemode surface; the child that CAN run
+-- code is asserted by the arm-B rows above (it declares the run tool alone). What survives is the child
+-- that cannot code at all: the one door must never take its only way to act.
 
--- A child that cannot use code mode keeps the tools it has, so the native narrowing can never take a
 -- child's only way to act.
-local read_only = build({ WASM_AGENT_RAW_CODE = 'native', WASM_AGENT_ENVELOPE_MODE = 'full' },
+local read_only = build({ WASM_AGENT_RAW_CODE = '', WASM_AGENT_ENVELOPE_MODE = 'full' },
   { id = 'explore', allowed = { 'read', 'bash', 'ls' } })
 eq(names_of(read_only.tools), 'bash,ls,read', 'a native child without code mode keeps the tools it was given')
 
--- A child that CAN run code declares the one door, in the full envelope too (rel review r2, item 3).
-local native_child = build({ WASM_AGENT_RAW_CODE = 'native', WASM_AGENT_ENVELOPE_MODE = 'full' },
-  { id = 'orchestration-worker', allowed = { 'read', 'write', 'bash', 'ls', 'run', 'codemode', 'edit' } })
-eq(names_of(native_child.tools), 'run', 'a native child that can run code declares the run tool alone')
+
 
 print('prompt golden ok (' .. checks .. ' checks)')

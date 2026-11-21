@@ -20,7 +20,7 @@ local overrides={WASM_AGENT_PROVIDER='opencode-go',WASM_AGENT_LLM_API_KEY='rel-r
   WASM_AGENT_LLM_MODEL='deepseek-v4.1-flash',WASM_AGENT_PI_MODELS_STORE='missing-test-store',
   WASM_AGENT_CONTEXT_BUDGET='0'}
 host.getenv=function(k)
-  if k=='WASM_AGENT_RAW_CODE' then return '1' end
+  if k=='WASM_AGENT_RAW_CODE' then return nil end
   if k=='WASM_AGENT_CODEMODE' then return nil end
   if overrides[k]~=nil then return overrides[k] end
   return real_getenv(k)

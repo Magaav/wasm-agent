@@ -1,5 +1,5 @@
 -- The declared-tool (codemode) path is what this test is about; CodeAct is the default since 17/11.
-do local real=host.getenv; host.getenv=function(k) if k=='WASM_AGENT_RAW_CODE' then return 'codemode' end return real(k) end end
+do local real=host.getenv; host.getenv=function(k) if k=='WASM_AGENT_RAW_CODE' then return nil end return real(k) end end
 local json=dofile('lua/vendor/json.lua')
 local memory=dofile('lua/core/memory.lua');memory.setup()
 local tools=dofile('lua/core/tools.lua')
@@ -29,7 +29,10 @@ local function code_mode_exact(list)
   for name in pairs(declared)do if name~='codemode' and name~='session_worktree' then return false end end
   return true
 end
-check((code_mode_exact(bootstrap) or lean_exact(bootstrap)) and #all>#bootstrap,'bootstrap: code mode shows codemode and the control plane, else the lean set; all capabilities retained')
+local declared_names={}
+for _,item in ipairs(bootstrap) do declared_names[(item['function'] or {}).name or '']=true end
+check(declared_names.run==true and #bootstrap==1 and #all>#bootstrap,
+  'bootstrap: the one declared tool is run, and every capability is retained ('..#bootstrap..' declared, '..#all..' in the catalogue)')
 local before=json.encode(bootstrap)
 local unknown=tools.dispatch(memory,'tool_call',{name='web_searchd',arguments={}},'master',ctx)
 check(unknown.error:find('tool_not_available',1,true)==1 and unknown.error:find('web_search',1,true)~=nil,'an unknown name refuses and lists the closest permitted name')

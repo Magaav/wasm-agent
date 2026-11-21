@@ -1764,9 +1764,11 @@ end
 function M.infer_tool(arguments_text, shown, catalog)
   local keys, value = argument_keys(arguments_text)
   if not keys then return nil end
-  -- Code mode shows `codemode` alone (envelope.lua), but the core tools a script calls are callable
-  -- too: they count as offered, so `{command}` is bash here and not shell on a client machine.
-  if name_in("codemode", shown) and type(catalog) == "table" then
+  -- ONE path (Victor 21/11): the declared door is `run` (envelope.lua), and the core tools a script
+  -- calls are callable too: they count as offered, so `{command}` is bash here and not shell on a
+  -- client machine. `codemode` is kept in the test beside `run` because it is the same call's other
+  -- name, and a node that declares it (a child profile) must repair the same way.
+  if (name_in("run", shown) or name_in("codemode", shown)) and type(catalog) == "table" then
     local core = {}
     for _, n in ipairs(dofile("lua/core/envelope.lua").core_names()) do core[n] = true end
     local wider = {}

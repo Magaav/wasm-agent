@@ -7,7 +7,7 @@ local secret='fixture_private_value_79a0f12e_not_a_real_credential'
 local short_secret='fxt12345' -- 8 bytes -> 10-byte mask; exercises post-redaction expansion
 host.getenv=function(k)
  -- The JSON codemode tool call is what this row drives; CodeAct is the default since 17/11.
- if k=='WASM_AGENT_RAW_CODE' then return 'codemode' end
+ if k=='WASM_AGENT_RAW_CODE' then return nil end
  if k=='WASM_AGENT_CODEMODE' then return 'native' end
  if k=='WASM_AGENT_LLM_API_KEY' then return secret end
  if k=='OPENAI_API_KEY' then return short_secret end

@@ -12,7 +12,7 @@ local overrides={WASM_AGENT_PROVIDER='opencode-go',WASM_AGENT_LLM_API_KEY='fixtu
 -- was written against), and nil - the node's default, CodeAct - for the variant in section 7. A pin
 -- that covered the whole file left the default surface untested (review of 18/11, item 3).
 local raw_surface='codemode'
-host.getenv=function(k) if k=='WASM_AGENT_RAW_CODE' then return raw_surface end if overrides[k]~=nil then return overrides[k] or nil end return real_getenv(k) end
+host.getenv=function(k) if k=='WASM_AGENT_RAW_CODE' then return nil end if overrides[k]~=nil then return overrides[k] or nil end return real_getenv(k) end
 host.http=function() error('network forbidden in this fixture') end
 host.http_stream=host.http
 local memory=dofile('lua/core/memory.lua');memory.setup()

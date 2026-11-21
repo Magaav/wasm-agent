@@ -3055,6 +3055,10 @@ function M:run_body(text, images)
       local marker = tostring(leaked.marker)
       local notice = '[Harness notice] Your message carried ' .. marker .. ' tool-call markup as text, so nothing ran. '
         .. 'Act by calling the run tool with the script in its code argument; a message with no tool call is your answer.'
+      -- DURABLE, like every other continue this loop gives (the finish-contract path records its notice the
+      -- same way): the notice is part of the transcript from now on, so a later request carries it in its
+      -- natural position and the evidence of what the model was told survives the process.
+      record_turn(self, { role = "user", content = notice, phase = "leak_net" })
       if self.finish_continues > 1 then
         error('native_markup_continue: tool_call_markup_as_text (' .. marker .. ')')
       end

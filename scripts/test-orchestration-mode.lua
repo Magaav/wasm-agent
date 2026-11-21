@@ -6,7 +6,7 @@
 -- covered the whole file made the default surface untested by the very row that added it (review of
 -- 18/11, item 3).
 local raw_surface='codemode'
-do local real=host.getenv; host.getenv=function(k) if k=='WASM_AGENT_RAW_CODE' then return raw_surface end return real(k) end end
+do local real=host.getenv; host.getenv=function(k) if k=='WASM_AGENT_RAW_CODE' then return nil end return real(k) end end
 local json=dofile('lua/vendor/json.lua')
 local memory=dofile('lua/core/memory.lua');memory.setup()
 local mode=dofile('lua/core/orchestration_mode.lua')

@@ -15,7 +15,7 @@ local real_getenv = host.getenv
 host.getenv = function(key)
   -- CodeAct, the default mode, PINNED: these rows drive the run-block path, and a node that happens to run
   -- `codemode` (this one does) would otherwise read every one of them with the switch off.
-  if key == 'WASM_AGENT_RAW_CODE' then return 'only' end
+  if key == 'WASM_AGENT_RAW_CODE' then return nil end -- ONE path (Victor 21/11): setting it refuses
   if key == 'WASM_AGENT_LLM_API_KEY' then return 'test-only' end
   return real_getenv(key)
 end
@@ -55,8 +55,9 @@ eq(raw_code.in_thinking(TICK .. 'js run return 1;\n' .. TICK).shape, 'run', '#51
 -- Model-facing strings: asserted verbatim, because they are the fix the model reads.
 local notice = raw_code.thinking_notice({ shape = 'run' })
 has(notice, 'in your thinking, not in your answer', 'the notice names the field the block is in')
-has(notice, 'js run', 'the notice names the tag to write')
-has(notice, 'Write it in your ANSWER', 'the notice says where to write it')
+has(notice, 'run tool', 'the notice names the tool to call')
+has(notice, 'code argument', 'and where the script goes')
+has(notice, 'Act by calling the run tool', 'the notice says how to act now')
 has(raw_code.thinking_notice({ shape = 'plain_js' }), 'tagged js rather than js run',
   'the plain-js notice names the one thing to change')
 has(raw_code.thinking_notice({ shape = 'cut_run' }), 'cut off', 'the cut notice names the cut')
@@ -70,23 +71,15 @@ local blocks = raw_code.parse(TICK .. 'js run const r = 1;\n' .. TICK)
 eq(#blocks, 1, 'one block')
 eq(blocks[1].run, true, 'a statement on the fence line is still a run block')
 eq(blocks[1].inline, 'const r = 1;', 'the fence line carries line 1 of the script')
+-- The block is no longer a door (Victor 21/11), so the same shapes are read by the leak net: a block
+-- that ends the answer is the action in the wrong form, and the code on a fence line is still its line 1.
 local taken_result = { content = TICK .. 'js run const r = 1;\n' .. TICK, finish_reason = 'stop', tool_calls = {} }
-local taken = raw_code.take(taken_result, false, {})
+local shaped = raw_code.text_action(taken_result.content)
 checks = checks + 1
-if not taken then error('a run block with code on its fence line must be taken') end
-local call = taken_result.tool_calls[#taken_result.tool_calls]
-local args = json.decode(call['function'].arguments)
-eq(args.code, 'const r = 1;', '#51/C: the script is the code from the fence line')
-eq(raw_code.parse(TICK .. 'js runner\nx\n' .. TICK)[1].run, false, 'js runner is not the run tag')
-
--- 3. A cut run block (a fence that never closes) is refused by name and answered, never run - the
---    same one-continue shape as above, and the refusal is what the model reads.
+if not (shaped and shaped.marker == TICK .. 'js run') then error('a run block that ends the answer is markup') end
 local cut = { content = TICK .. 'js run\nconst r = 1;', finish_reason = 'stop', tool_calls = {} }
-local cut_taken = raw_code.take(cut, false, {})
 checks = checks + 1
-if not (cut_taken and cut_taken.refusal) then error('a cut run block must be refused, not run') end
-eq(cut_taken.refusal.error, 'raw_code_unterminated', 'the cut block is named')
-has(cut_taken.refusal.message, 'never closed', 'the refusal says the block was cut')
+if not raw_code.text_action(cut.content) then error('a cut run block that ends the answer is markup too') end
 
 -- ---------------------------------------------------------------- the loop
 local agentlib = dofile('lua/core/agent.lua')
@@ -179,8 +172,10 @@ eq((finish_contract.markup('A bare `' .. 'x` and then <ds_tool>{}') or {}).shape
   'round 3: a bare marker OUTSIDE the backticks is still a call the model wrote')
 eq(finish_contract.markup('Example:\n' .. TICK .. 'text\n<ds_tool>{}</ds_tool>\n' .. TICK), nil,
   'a marker inside a fenced sample is prose, not a call the model meant to make')
-has(finish_contract.markup('x <ds_tool>{}').notice, 'your message contains tool-call markup as text, so nothing ran; act with a js run block in your answer',
-  'the markup notice is the sentence the operator asked for')
+has(finish_contract.markup('x <ds_tool>{}').notice, 'your message contains tool-call markup as text, so nothing ran',
+  'the markup notice names what happened')
+has(finish_contract.markup('x <ds_tool>{}').notice, 'Act by calling the run tool with the script in its `code` argument',
+  'and names the one door this node has')
 
 -- ------------------------------------------------------------------ 2. a stale shutdown notice
 local SHUTDOWN = '<system_warning>The previous response was interrupted by a node shutdown\n'
@@ -280,7 +275,7 @@ checks = checks + 1
 if not markup_ok then error('markup as text must continue the turn, not fail it: ' .. tostring(markup_error)) end
 local seen, tools_run, answers = shapes_of(session_id)
 eq(#seen, 1, 'the harness asked once for the action')
-has(seen[1], 'your message contains tool-call markup as text', 'the notice names the markup')
+has(seen[1], 'tool-call markup as text, so nothing ran', 'the notice names the markup and that nothing ran')
 eq(tools_run, 0, 'nothing ran')
 local leaked = false
 for _, answer in ipairs(answers) do if answer:find('<ds_tool>', 1, true) then leaked = true end end
@@ -362,8 +357,9 @@ end
 host.http_stream = function()
   step_calls = step_calls + 1
   if step_calls == 1 then
-    return json.encode({ status = 200, content = TICK .. 'js run\nreturn 1;\n' .. TICK,
-      finish_reason = 'stop', tool_calls = {} })
+    return json.encode({ status = 200, content = '', finish_reason = 'tool_calls',
+      tool_calls = { { id = 'call_run_1', type = 'function',
+        ['function'] = { name = 'run', arguments = json.encode({ code = 'return 1;' }) } } } })
   end
   return json.encode({ status = 200, content = 'Compaction did not end the turn: the task finished.',
     finish_reason = 'stop', tool_calls = {} })
@@ -426,7 +422,8 @@ has(tostring(streak_reply), 'The suite passes', 'the run continued once and then
 
 -- 13. round 3, item 2: the operator's two negative tests, through the real loop. "Done. I'll stop here."
 --     AFTER a tool ran is the answer to the request - no notice, no failure.
-scripted({ { content = TICK .. 'js run\nreturn 1;\n' .. TICK }, { content = 'Done. I\'ll stop here.' } })
+scripted({ { content = '', finish_reason = 'tool_calls', tool_calls = { { id = 'call_run_1', type = 'function', ['function'] = { name = 'run', arguments = json.encode({ code = 'return 1;' }) } } } },
+  { content = 'Done. The work is finished.' } })
 agent, session_id = fresh('done after a tool ran')
 local done_ok, done_reply = pcall(agent.run, agent, 'check the tree')
 checks = checks + 1

@@ -17,7 +17,7 @@ local real_getenv=host.getenv
 local overrides={WASM_AGENT_PROVIDER='opencode-go',WASM_AGENT_LLM_API_KEY='fixture-only',
   WASM_AGENT_LLM_MODEL='deepseek-v4.1-flash',WASM_AGENT_PI_MODELS_STORE='missing-test-store',
   WASM_AGENT_CONTEXT_BUDGET='0',WASM_AGENT_MAX_TOOL_ROUNDS='4',
-  WASM_AGENT_RAW_CODE='codemode'} -- native tool calls are what this test repairs (CodeAct is the default since 17/11)
+  } -- native tool calls are what this test repairs (CodeAct is the default since 17/11)
 host.getenv=function(k) if overrides[k]~=nil then return overrides[k] end return real_getenv(k) end
 host.http=function() error('unexpected network in toolname fixture') end
 host.http_stream=function() error('no stream was stubbed for this step') end
@@ -77,8 +77,8 @@ local function call(name,args)
   return {id='call_'..id,type='function',['function']={name=name,arguments=json.encode(args)}}
 end
 local calls,repairs=provider.repair_calls({call('',{code='return 1'})},shown,tools.all('master'))
-check(calls[1]['function'].name=='codemode','{code} is repaired to codemode')
-check(repairs['call_none'].named=='codemode' and repairs['call_none'].name_missing,'the repair is recorded as a recovered name')
+check(calls[1]['function'].name=='run','{code} is repaired to the declared door, run')
+check(repairs['call_none'].named=='run' and repairs['call_none'].name_missing,'the repair is recorded as a recovered name')
 calls,repairs=provider.repair_calls({call('',{command='echo ok'})},shown,tools.all('master'))
 check(calls[1]['function'].name=='bash','{command} is repaired to bash, the tool this turn showed')
 calls=provider.repair_calls({call('',{command='echo ok',timeout_seconds=5})},shown,tools.all('master'))
