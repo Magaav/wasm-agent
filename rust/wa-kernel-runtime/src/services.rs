@@ -1722,6 +1722,12 @@ mod tests {
         assert_eq!(swapped["retired"]["drain"]["waited_ms"], 0, "nothing was waited for: {swapped}");
         assert!(waited < Duration::from_secs(3), "no drain delay on top of the stop: {waited:?}");
         // The swap itself is unchanged: the new generation is the registry's instance and is running.
+        // The candidate starts AFTER the retire now (the upgrade's order), so it may still be `starting`
+        // for a moment: wait for it, bounded, instead of reading the first instant.
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while status(Some(name))["state"] != "running" && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
         assert_eq!(status(Some(name))["state"], "running");
         assert_ne!(status(Some(name))["generation"], swapped["retired"]["generation"]);
         let log = logs(name, 16 << 10)["log"].as_str().unwrap_or("").to_string();
