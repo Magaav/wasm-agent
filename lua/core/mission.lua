@@ -405,7 +405,18 @@ function M.start(args, ctx)
       detail = "the runner ended before it wrote run.pid, so this was NOT a launch (94 depth guard,"
         .. " 95 wrong node, 96 cannot cd, 97 no mission dir, 98 no env)" }
   end
+  -- The SESSION is named one step after run.pid: the runner writes run.lock when the CLI prints its id.
+  -- 'start' reports that id, so it waits for it on the same bounded window, while the runner lives - a
+  -- loaded node (land242's gate) took longer than the zero wait this used to give it, and answered
+  -- "not named yet" for a session that was named a moment later.
   local session = M.lock_field(dir, "SESSION") or M.recorded_session(dir)
+  step = 0
+  local session_cap = math.min(cap, 30)
+  while not session and step < session_cap * 10 and M.alive(pid) do
+    pcall(host.sleep, 100)
+    step = step + 1
+    session = M.lock_field(dir, "SESSION") or M.recorded_session(dir)
+  end
   return { ok = true, name = name, pid = pid, session = session or "not named yet",
     previous = previous, status = "wa mission status " .. name }
 end
