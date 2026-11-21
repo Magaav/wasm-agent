@@ -284,6 +284,24 @@ function M.family_of(description)
   return (family:gsub("^%s+", ""):gsub("%s+$", ""))
 end
 
+-- DOES THIS TERMINAL ALREADY DRAW THE APPROVED A2 ICONS?
+--
+-- This is the question the setup asks, and it is NOT 'can the current font draw the md-* code points'.
+-- Every Nerd font carries them, so that question answers YES for exactly the case Victor rejected
+-- (19/11 ~10:20): a Nerd font draws wa's icons ITSELF, in its own outlines, one space wide - not with
+-- wa Icons filling a JetBrains Mono cell with the value glued. Review finding, 21/11: treating 'has Nerd
+-- glyphs' as 'already set up' left foot on JetBrainsMono Nerd Font, which is the spacing complaint
+-- itself. A terminal is set up when its PRIMARY face is JetBrains Mono AND its icon fallback is wa
+-- Icons; anything else is switched, the Nerd fonts included.
+function M.already_a2(description)
+  local text = tostring(description or ""):lower()
+  -- The primary face: the text before the first comma (foot) or the whole description (the others).
+  local primary = text:match("^([^,]+)") or text
+  local is_text_face = primary:find("jetbrains mono", 1, true) ~= nil
+  local has_icons_face = text:find("wa icons", 1, true) ~= nil
+  return is_text_face and has_icons_face
+end
+
 -- Can the font this terminal draws TODAY show wa's icons? true / false, or nil when nobody could ask -
 -- and nil never becomes "yes".
 function M.draws_icons(font_name)
@@ -331,17 +349,26 @@ end
 
 -- The value that gives a terminal JetBrains Mono with wa Icons as its fallback, in that terminal's own
 -- syntax. Kept in one function so the shapes cannot drift apart.
-function M.font_value(terminal)
+-- The point size the operator chose, kept when the face changes: a setup that also silently resized
+-- the terminal would be two decisions, and only one of them was approved.
+function M.size_of(description)
+  return tostring(description or ""):match("size=(%d+%.?%d*)")
+end
+
+function M.font_value(terminal, current)
+  -- THE A2 PAIR, in the terminal's own syntax. Victor 19/11 ~10:20: JetBrains Mono for text with
+  -- wa Icons for the glyphs wa draws. Not "JetBrains Mono" alone: a face that carries the md-* code
+  -- points ITSELF (every Nerd font does) shadows wa Icons and draws them at Nerd metrics, which is the
+  -- spacing Victor rejected. The pair is what makes wa Icons the face that draws them.
+  local size = M.size_of(current)
+  local text = M.TEXT_FAMILY .. (size and (":size=" .. size) or "")
+  local icons = M.ICON_FAMILY .. (size and (":size=" .. size) or "")
   if terminal.kind == "ini" then
-    return M.TEXT_FAMILY .. ":size=11:charwidth=6:icons=" .. M.ICON_FAMILY
-  elseif terminal.kind == "toml" then
-    return M.TEXT_FAMILY
-  elseif terminal.kind == "conf" then
-    return M.TEXT_FAMILY
-  elseif terminal.kind == "json-wt" then
-    return M.TEXT_FAMILY
-  elseif terminal.kind == "lua-wezterm" then
-    return M.TEXT_FAMILY
+    -- foot takes a COMMA-SEPARATED list (foot.ini(5), 'font'): the text face, then the icon face.
+    return text .. ", " .. icons
+  elseif terminal.kind == "gsettings" then
+    -- GNOME Terminal names a family and a point size, nothing else.
+    return M.TEXT_FAMILY .. (size and (" " .. size) or "")
   end
   return M.TEXT_FAMILY
 end
@@ -351,7 +378,7 @@ end
 -- assert the exact bytes without touching a home.
 function M.edited_text(terminal, text)
   text = tostring(text or "")
-  local value = M.font_value(terminal)
+  local value = M.font_value(terminal, M.current_font(terminal, text))
   if terminal.kind == "ini" then
     local section, inserted, out = nil, false, {}
     for line in (text .. "\n"):gmatch("([^\n]*)\n") do
@@ -500,13 +527,13 @@ function M.configure_terminal(terminal, opts)
     return row
   end
   row.current = M.current_font(terminal, text)
-  local draws = (opts.draws or M.draws_icons)(row.current)
-  if draws == nil then
-    row.why = "cannot measure whether '" .. tostring(row.current) .. "' draws wa's icons on this machine"
+  if row.current == nil then
+    row.why = "its config names no font of its own, so there is no face to replace"
     return row
   end
-  if draws then
-    row.why = "'" .. tostring(row.current) .. "' already draws wa's icons"
+  local ready = (opts.already or M.already_a2)(row.current)
+  if ready then
+    row.why = "'" .. tostring(row.current) .. "' already draws wa's icons with wa Icons: nothing to do"
     return row
   end
   local edited, why = M.edited_text(terminal, text)
@@ -516,7 +543,7 @@ function M.configure_terminal(terminal, opts)
   end
   if opts.dry_run then
     row.action = "would edit"
-    row.why = "'" .. tostring(row.current) .. "' cannot draw wa's icons"
+    row.why = "'" .. tostring(row.current) .. "' is not the A2 pair (JetBrains Mono + wa Icons)"
     return row
   end
   -- BACKUP BEFORE THE WRITE, always: the backup is the undo, and an undo that was written afterwards is
@@ -530,7 +557,7 @@ function M.configure_terminal(terminal, opts)
     return row
   end
   row.action = "edited"
-  row.why = "'" .. tostring(row.current) .. "' cannot draw wa's icons; now " .. M.TEXT_FAMILY
+  row.why = "'" .. tostring(row.current) .. "' replaced by JetBrains Mono + wa Icons"
   row.backup = M.backup_path(terminal.path)
   return row
 end
@@ -563,19 +590,15 @@ function M.configure_gsettings(terminal, opts)
     return row
   end
   row.current = current
-  local draws = (opts.draws or M.draws_icons)(current)
-  if draws == nil then
-    row.why = "cannot measure whether '" .. tostring(current) .. "' draws wa's icons on this machine"
+  local ready = (opts.already or M.already_a2)(current)
+  if ready then
+    row.why = "'" .. tostring(current) .. "' already draws wa's icons with wa Icons: nothing to do"
     return row
   end
-  if draws then
-    row.why = "'" .. tostring(current) .. "' already draws wa's icons"
-    return row
-  end
-  local value = M.TEXT_FAMILY .. " 11"
+  local value = M.font_value(terminal, current)
   if opts.dry_run then
     row.action = "would edit"
-    row.why = "'" .. tostring(current) .. "' cannot draw wa's icons"
+    row.why = "'" .. tostring(current) .. "' is not the A2 pair (JetBrains Mono + wa Icons)"
     return row
   end
   local out = run("gsettings set " .. key .. " font '" .. value .. "' 2>&1")
@@ -584,7 +607,7 @@ function M.configure_gsettings(terminal, opts)
     return row
   end
   row.action = "edited"
-  row.why = "'" .. tostring(current) .. "' cannot draw wa's icons; now " .. M.TEXT_FAMILY
+  row.why = "'" .. tostring(current) .. "' replaced by JetBrains Mono + wa Icons"
   -- No file to copy: the old VALUE is the backup, and the undo puts it back.
   row.backup_value = current
   return row
@@ -692,6 +715,27 @@ function M.run(opts)
     end
   end
   result.terminals = rows
+
+  -- KEEP THE PREVIOUS RUN'S BACKUPS IN THE RECORD. A second run correctly edits nothing, and a record
+  -- rebuilt from that run alone would DROP the backup pointer of the edit that is still in effect - so
+  -- --undo would have nothing to restore and would leave the terminal edited (measured 21/11, end to
+  -- end: the second run said "no terminal config needed a change" and --undo then restored 0 configs
+  -- while still removing the fonts, a half undo).
+  local previous = opts.record or M.read_record()
+  if previous then
+    local by_name = {}
+    for _, row in ipairs(previous.terminals or {}) do by_name[row.name] = row end
+    for _, row in ipairs(rows) do
+      local before = by_name[row.name]
+      if before and before.backup and row.action == "left alone" then
+        row.backup = before.backup
+        row.backup_value = row.backup_value or before.backup_value
+        row.profile = row.profile or before.profile
+        row.path = row.path or before.path
+        row.carried = true
+      end
+    end
+  end
 
   local edited = 0
   for _, row in ipairs(rows) do if row.action == "edited" then edited = edited + 1 end end

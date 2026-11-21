@@ -125,13 +125,15 @@ eq(foot.name, "foot", "the first known terminal is foot")
 eq(font_setup.current_font(foot, read(foot_path)), "Source Code Pro:size=11", "foot's current font is read from its own section")
 local edited, edit_why = font_setup.edited_text(foot, read(foot_path))
 ok(edited ~= nil, "foot's config is editable: " .. tostring(edit_why))
-ok(edited:find("font=JetBrains Mono", 1, true) ~= nil, "the font line now names JetBrains Mono")
-ok(edited:find("icons=wa Icons", 1, true) ~= nil, "and asks for wa Icons as the icon face")
+ok(edited:find("font=JetBrains Mono:size=11, wa Icons:size=11", 1, true) ~= nil,
+  "the font line is the A2 pair, keeping the size the operator chose")
+ok(edited:find("wa Icons:size=11", 1, true) ~= nil,
+  "and asks for wa Icons as the icon face, in foot's comma-separated form")
 ok(edited:find("foreground=ffffff", 1, true) ~= nil, "the rest of the file is untouched")
 
 -- The edit through the command, with the coverage question answered NO: the file is changed, backed up,
 -- and the backup holds the ORIGINAL bytes.
-local applied = font_setup.configure_terminal(foot, { draws = function() return false end, dry_run = false })
+local applied = font_setup.configure_terminal(foot, {})
 eq(applied.action, "edited", "a terminal whose font cannot draw wa's icons is edited")
 eq(applied.current, "Source Code Pro:size=11", "and the row says what it was")
 ok(exists(applied.backup), "a backup was written BEFORE the edit: " .. tostring(applied.backup))
@@ -139,18 +141,19 @@ eq(read(applied.backup), "[main]\nfont=Source Code Pro:size=11\n\n[colors]\nfore
   "and the backup is the original bytes, exactly")
 ok(read(foot_path):find("font=JetBrains Mono", 1, true) ~= nil, "the live config carries the new font")
 
--- A font that ALREADY draws the icons is left alone: the edit is a repair, not a preference.
-write(foot_path, "[main]\nfont=JetBrainsMono Nerd Font:size=11\n")
-local kept = font_setup.configure_terminal(foot, { draws = function() return true end })
-eq(kept.action, "left alone", "a font that already draws wa's icons is not replaced")
+-- The pair the setup itself writes IS left alone: the edit is a repair, not a preference.
+write(foot_path, "[main]\nfont=JetBrains Mono:size=11, wa Icons:size=11\n")
+local kept = font_setup.configure_terminal(foot, {})
+eq(kept.action, "left alone", "a terminal already on the A2 pair is not replaced")
 ok(tostring(kept.why):find("already draws", 1, true) ~= nil, "and the row says why: " .. tostring(kept.why))
-ok(read(foot_path):find("Nerd Font", 1, true) ~= nil, "its config is untouched")
+ok(read(foot_path):find("wa Icons", 1, true) ~= nil, "its config is untouched")
 
--- Coverage that CANNOT be measured is not a yes: the terminal is left alone.
-write(foot_path, "[main]\nfont=Source Code Pro:size=11\n")
-local unknown = font_setup.configure_terminal(foot, { draws = function() return nil end })
-eq(unknown.action, "left alone", "a coverage question nobody can answer leaves the config alone")
-ok(tostring(unknown.why):find("cannot measure", 1, true) ~= nil, "and says so by name")
+-- A config that names NO font is left alone: there is no face to replace, and inventing one would be
+-- this command choosing a terminal's first face.
+write(foot_path, "[main]\npad=14x14\n")
+local unknown = font_setup.configure_terminal(foot, {})
+eq(unknown.action, "left alone", "a config with no font of its own leaves the config alone")
+ok(tostring(unknown.why):find("names no font", 1, true) ~= nil, "and says so by name: " .. tostring(unknown.why))
 
 -- A terminal with no config file is not created: nobody configured it, and this command is not a
 -- terminal's first run.
@@ -161,7 +164,7 @@ eq(absent.action, "left alone", "a terminal with no config file is not given one
 -- --dry-run says what it WOULD do and writes nothing.
 write(foot_path, "[main]\nfont=Source Code Pro:size=11\n")
 local before = read(foot_path)
-local planned = font_setup.configure_terminal(foot, { draws = function() return false end, dry_run = true })
+local planned = font_setup.configure_terminal(foot, { dry_run = true })
 eq(planned.action, "would edit", "a dry run reports the edit it would make")
 eq(read(foot_path), before, "and leaves the file byte-identical")
 
@@ -233,6 +236,85 @@ eq(select(1, font_setup.decode_exec("plain stdout")), "plain stdout",
 -- A GNOME profile is a bare id: an error message must never become one.
 eq(font_setup.gnome_font and select(1, font_setup.decode_exec('{"ok":false,"process_exit_code":1}')), nil,
   "no font is invented from a failed read")
+
+-- ---- THE OPERATOR'S OWN CASE: Victor's foot runs a NERD font ------------------------------------
+-- Review finding, 21/11. Victor's foot.ini carries "JetBrainsMono Nerd Font" - Omarchy's default - and a
+-- Nerd font CARRIES the md-* code points itself, so it draws wa's icons at ITS metrics, one space wide.
+-- That is exactly the spacing he rejected. The setup must therefore SWITCH a Nerd face to the A2 pair
+-- (JetBrains Mono + wa Icons), which is the only way wa Icons is the face that draws those glyphs.
+--
+-- The fixture is the real Omarchy file's BYTES, copied from /usr/share/omarchy/config/foot/foot.ini into
+-- the scratch tree: never the operator's ~/.config, which the guard above refuses anyway.
+local OMARCHY_FOOT = "/usr/share/omarchy/config/foot/foot.ini"
+local omarchy_bytes = nil
+do
+  local ok_read, text = pcall(host.read_file, OMARCHY_FOOT)
+  if ok_read and type(text) == "string" and text ~= "" then omarchy_bytes = text end
+end
+ok(omarchy_bytes ~= nil, "the Omarchy default foot.ini is readable, so this case is the operator's own")
+if omarchy_bytes then
+  local omarchy_foot = fixtures .. "/omarchy/foot.ini"
+  write(omarchy_foot, omarchy_bytes)
+  local terminal = { name = "foot", path = omarchy_foot, kind = "ini", section = "main", key = "font" }
+
+  -- BEFORE: a Nerd face, which is NOT the A2 pair.
+  local before = font_setup.current_font(terminal, read(omarchy_foot))
+  eq(before, "JetBrainsMono Nerd Font:size=9", "the fixture starts on the Nerd face, as Victor's does")
+  eq(font_setup.already_a2(before), false,
+    "a Nerd font is NOT already set up: it draws wa's icons itself, at Nerd metrics")
+
+  -- AFTER: the A2 pair, and the operator's own size kept.
+  local applied_a2 = font_setup.configure_terminal(terminal, {})
+  eq(applied_a2.action, "edited", "a Nerd face is switched, not exempted")
+  local after = font_setup.current_font(terminal, read(omarchy_foot))
+  eq(after, "JetBrains Mono:size=9, wa Icons:size=9",
+    "the A2 pair: JetBrains Mono for text, wa Icons for the icons, the SAME size he chose")
+  ok(after:find("wa Icons", 1, true) ~= nil, "wa Icons is named, so the icons are drawn by OUR face")
+
+  -- IDEMPOTENT: the pair is left alone on a second run, so the backup cannot be overwritten.
+  local again = font_setup.configure_terminal(terminal, {})
+  eq(again.action, "left alone", "the A2 pair is left alone on a second run")
+  ok(tostring(again.why):find("already draws", 1, true) ~= nil, "and says why: " .. tostring(again.why))
+
+  -- UNDO: byte-for-byte the Omarchy file, because that is what the backup holds.
+  eq(read(applied_a2.backup), omarchy_bytes, "the backup holds the ORIGINAL bytes, byte for byte")
+  local undone_row = font_setup.run({ undo = true, record = {
+    schema = 1, ["wa Icons"] = true, font_dir = nil, fonts = {},
+    terminals = { { name = "foot", path = omarchy_foot, backup = applied_a2.backup, action = "edited" } },
+  }, run = fake_run })
+  ok(undone_row.ok, "the undo completes: " .. tostring(undone_row.error))
+  eq(read(omarchy_foot), omarchy_bytes, "and restores the operator's file BYTE FOR BYTE")
+end
+
+-- THE UNDO SURVIVES A SECOND RUN. A run that edits nothing still rebuilds the record, and a record
+-- rebuilt from that run alone drops the backup of the edit still in effect - then --undo restores 0
+-- configs while removing the fonts (measured 21/11, end to end). The previous run's backup is carried.
+if omarchy_bytes then
+  local twice = fixtures .. "/omarchy-twice/foot.ini"
+  write(twice, omarchy_bytes)
+  local terminal = { name = "foot", path = twice, kind = "ini", section = "main", key = "font" }
+  local first = font_setup.configure_terminal(terminal, {})
+  eq(first.action, "edited", "the first run edits the Nerd face")
+  local second = font_setup.configure_terminal(terminal, {})
+  eq(second.action, "left alone", "the second run edits nothing")
+  -- ... and the whole command, twice, then --undo: the file comes back byte for byte.
+  local run_home = fixtures .. "/omarchy-run"
+  mkdir(run_home)
+  local run_terminal = { name = "foot", path = twice, kind = "ini", section = "main", key = "font" }
+  local bundle2 = scratch_root .. "/bundle2"
+  mkdir(bundle2)
+  for _, name in ipairs(font_setup.FONTS) do write(bundle2 .. "/" .. name, "fixture") end
+  write(twice, omarchy_bytes)
+  font_setup.run({ home = run_home, source_dir = bundle2, font_dir = fixtures .. "/omarchy-fonts",
+    run = fake_run, terminals = { run_terminal } })
+  font_setup.run({ home = run_home, source_dir = bundle2, font_dir = fixtures .. "/omarchy-fonts",
+    run = fake_run, terminals = { run_terminal } })
+  ok(read(twice):find("wa Icons", 1, true) ~= nil, "after two whole runs the A2 pair is in place")
+  local undone2 = font_setup.run({ undo = true })
+  ok(undone2.ok, "the undo completes: " .. tostring(undone2.error))
+  eq(undone2.restored, 1, "and restores the config that is still edited")
+  eq(read(twice), omarchy_bytes, "byte for byte the original, after a second run that edited nothing")
+end
 
 -- ---- the other three terminals the brief names -------------------------------------
 -- WINDOWS TERMINAL: one JSON file per user, its face under "defaults"."font". Edited in place, every other
