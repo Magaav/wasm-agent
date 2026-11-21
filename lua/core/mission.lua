@@ -497,6 +497,69 @@ function M.status(args, ctx)
   return { root = root, missions = listed }
 end
 
+--------------------------------------------------------------------------- preflight
+-- wa mission preflight <name>: the gate this branch will meet, run BEFORE anybody lands it (item 2 of
+-- the factory round - a mission is done only when the landing's gate is green, and this is how the
+-- worker's own loop finds that out without the orchestrator in the path).
+--
+-- The work is scripts/preflight.sh's, run as a process. One implementation, shared with the operator's
+-- `bash ~/Work/missions/preflight.sh <name>`, so the verb and the script cannot disagree - and the file in
+-- the missions root is a symlink to the runtime tree's copy, so an update lands both. A root without one is
+-- refused by name with the command that installs it: a verb that ran a second implementation would be the
+-- drift this verb exists to prevent.
+--
+-- effect is always none on the fleet: a preflight merges and gates, and pushes nothing anywhere.
+local PREFLIGHT_SECONDS = 3600
+function M.preflight(args, ctx)
+  args = args or {}
+  local name, name_why = M.check_name(args.name)
+  if not name then return { error = name_why, effect = "none" } end
+  local root = args.root or M.root()
+  local dir = M.dir(name, root)
+  if not M.exists(dir) then return { error = "no_mission", detail = "no mission at " .. dir, effect = "none" } end
+  local script = root .. "/preflight.sh"
+  if not M.exists(script) then
+    local tree = args.repository or host.getenv("WA_LAND_REPO") or (host.getenv("HOME") or "") .. "/wasm-agent/checkout"
+    return { error = "preflight_script_missing", detail = script .. " is not there", effect = "none",
+      next_action = "install it from the runtime tree: ln -s " .. tostring(tree) .. "/scripts/preflight.sh " .. script }
+  end
+  local command = "bash " .. string.format("%q", script) .. " " .. string.format("%q", name)
+  local called, raw = pcall(host.exec, command, dir, PREFLIGHT_SECONDS)
+  if not called or type(raw) ~= "string" then
+    return { error = "preflight_not_run", detail = tostring(raw), effect = "none" }
+  end
+  local decoded_ok, decoded = pcall(json.decode, raw)
+  if not decoded_ok or type(decoded) ~= "table" then
+    return { error = "preflight_answer_unreadable", effect = "none" }
+  end
+  local code = tonumber(decoded.code) or -1
+  local report = M.read_file(dir .. "/preflight.json")
+  local fields = nil
+  if report then
+    local parsed_ok, parsed = pcall(json.decode, report)
+    if parsed_ok and type(parsed) == "table" then fields = parsed end
+  end
+  local result = { name = name, exit = code, effect = "none",
+    preflight = (code == 0 and "green") or (code == 1 and "red") or "refused",
+    report = dir .. "/preflight.json", log = dir .. "/preflight.log",
+    output = tostring(decoded.stdout or "") }
+  if fields then
+    result.ok = fields.ok == true
+    result.main_sha = fields.main_sha
+    result.tree_sha = fields.tree_sha
+    result.seconds = fields.seconds
+    result.failed = fields.failed or {}
+    result.why = fields.why
+  elseif code ~= 2 then
+    -- An exit code with no report is not an answer: the script writes one on every path it judges, so a
+    -- missing report means it did not judge - named, never read as an empty (green) failure list.
+    result.error = "preflight_no_report"
+    result.detail = "no preflight.json at " .. dir .. "/preflight.json (exit " .. tostring(code) .. ")"
+  end
+  if code == 2 then result.error = result.error or "preflight_refused" end
+  return result
+end
+
 --------------------------------------------------------------------------- stop
 -- Only the pids this mission recorded: the CLI first (so the run stops), then the runner (so it relaunches
 -- nothing). Never a pattern, and nothing that a launch here did not write down.

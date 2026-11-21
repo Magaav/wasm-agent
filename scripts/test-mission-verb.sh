@@ -134,4 +134,41 @@ else
   fail "resume did not refuse by name: $out"
 fi
 
+# --- preflight: the verb runs the mission's own preflight.sh and reports its verdict with its exit code.
+# The script is the one implementation (scripts/preflight.sh, symlinked into the missions root); the verb
+# never re-implements it, so what is judged here is the plumbing: the arguments, the exit code, the report
+# read back, an unknown answer that is refused by name, and a root with no script at all.
+cat > "$MISSION_ROOT/preflight.sh" <<'PRE'
+#!/usr/bin/env bash
+name=${1:?}; dir=$MISSION_ROOT/$name
+mode=$(cat "$dir/preflight.mode" 2>/dev/null || echo green)
+if [ "$mode" = red ]; then
+  printf '{"ok":false,"main_sha":"1111","tree_sha":"2222","seconds":9,"why":"1 row(s) failed","failed":[{"row":"scripts/test-a.lua","first_lines":["a failed"]}]}\n' > "$dir/preflight.json"
+  echo 'preflight RED: 1 row(s) failed'
+  exit 1
+fi
+printf '{"ok":true,"main_sha":"1111","tree_sha":"2222","seconds":7,"failed":[]}\n' > "$dir/preflight.json"
+printf 'preflight green: change/%s\n' "$name"
+exit 0
+PRE
+chmod +x "$MISSION_ROOT/preflight.sh"
+out=$(mission preflight demo 2>&1); code=$?
+[ "$code" = 0 ] || fail "a green preflight verb exits 0 (got $code): $out"; ok
+has "$out" '"preflight":"green"' 'the verb says green'
+has "$out" '"ok":true' 'and carries the report it read back'
+has "$out" '"seconds":7' 'with the seconds the script measured'
+has "$out" '"effect":"none"' 'a preflight touches no node'
+printf 'red\n' > "$MISSION_ROOT/demo/preflight.mode"
+out=$(mission preflight demo 2>&1); code=$?
+[ "$code" = 1 ] || fail "a red preflight verb exits 1, the script's own code (got $code): $out"; ok
+has "$out" '"preflight":"red"' 'the verb says red'
+has "$out" 'scripts/test-a.lua' 'and names the row that failed'
+out=$(mission preflight nothere 2>&1)
+has "$out" 'no_mission' 'a mission that is not there is refused by name'
+rm -f "$MISSION_ROOT/preflight.sh"
+out=$(mission preflight demo 2>&1)
+has "$out" 'preflight_script_missing' 'a missions root with no preflight.sh is refused by name, not run empty'
+has "$out" 'ln -s' 'and the refusal carries the command that installs it'
+
+
 printf 'mission-verb ok (%d checks)\n' "$checks"
