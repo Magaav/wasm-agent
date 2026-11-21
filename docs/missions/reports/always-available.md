@@ -19,6 +19,7 @@ based on `93168d96`. Committed locally, never pushed.
 | --- | --- | --- |
 | `scripts/test-codemode-wait-shape.lua` (new) | inline and `wait()`-collected answers expose the same `stdout`/`code`/`ok` keys, neither has a `result` key, a pending entry flattens nothing, an unknown op is `{state=failed, reason}`, an announced handle is the value plus its hash | fast path (globbed by `scripts/fast.sh`; not in `scripts/fast-path.exclude`) |
 | `scripts/test-handle-wake.lua` (new) | the sweep, the wake row's words (the answer plus `Still pending (1): <op> (bash, Ns)`), exactly once across a second sweep and a reloaded module, no second `pending_settled`, the row is claimable by `selfloop.claim_due` | fast path |
+| `scripts/test-cli-queued.sh` (new, shell) | **end to end**: a real `wa chat` under a stub model on loopback, a line typed three seconds into a running script - the script executes BOTH of its calls (marker file) and the line reaches the model afterwards (`/calls` prompt record). Cannot fail on the base for the queued half (that behaviour was already true); it protects the route | `scripts/test.sh` (the CLI-input block) |
 | `scripts/test-handle-wake-turn.lua` (new) | the last hop, with the provider stubbed: the wake is claimed exactly as the node tick and the CLI idle prompt claim it, the model is asked ONCE with the settled answer in its input, the turn is a durable `[self-wake ...]` row, the effect ran once, and `wake_only_round` moved by one | fast path |
 | `scripts/test-codemode-counters.lua` (new) | `script_cut_at_cap` once per script (not per handle), `handle_mishandled` on the pending-value TypeError, a clean script moves neither, unknown counter names refused | fast path |
 | `scripts/test-cli-input.lua` (extended) | a `now` array is kept per line, `now_lines()` names the send-now ones, an answer without `now` is queued, **and on the real host** the take answer carries the kinds and a line that arrived through a pipe is queued | `scripts/test.sh` (its existing pipe producer) |
@@ -63,6 +64,13 @@ in the session").
 
 ## Not done (named, not hidden)
 
+* **Ctrl+Enter end to end (test 2).** Attempted and NOT achieved: `scripts/test-cli-queued.sh` drives
+  `wa chat` under a pty (`script -qec` with `stty rows 40 cols 120`) and sends `CSI 13;5u` three
+  seconds into the script; the run completed with the whole line delivered as text (marker had both
+  calls, footer `2 rounds`), so the harness cannot deliver the chord to this binary's editor. The phase
+  was removed rather than shipped as a row that cannot tell the two apart, and the script says so where
+  it would have been. Ctrl+Enter is covered by the two Rust unit rows and the queue kind in
+  `test-cli-input.lua`.
 * **Test 2 and test 6 as written**: Ctrl+Enter mid-script and mid-reasoning end-to-end through a real
   terminal. What is measured here is the classification and the interrupt (`wa-term` and
   `wa-capabilities` unit tests) and the queued/send-now queue on the Lua side
@@ -114,7 +122,7 @@ in the session").
 Run with this tree's binary and `WASM_AGENT_LUA_ROOT` pointed at the tree, each in a scratch
 `HOME`/`--db`:
 
-* green: `test-codemode-wait-shape` (25 checks), `test-handle-wake` (16), `test-handle-wake-turn` (10), `test-codemode-counters`
+* green: `test-codemode-wait-shape` (25 checks), `test-handle-wake` (16), `test-handle-wake-turn` (10), `test-cli-queued.sh` (end to end, `script calls=2, model calls=3, line delivered=1`), `test-codemode-counters`
   (11), `test-codemode-pending` (92), `test-codemode-never-killed` (19), `test-codemode-queue-timeout`
   (20), `test-codemode-presentation`, `test-codemode-friction`, `test-cli-input` (21),
   `test-selfloop`, `test-selfloop-pause` (101), `cargo test -p wa-term` (177), the `terminal_tests`
