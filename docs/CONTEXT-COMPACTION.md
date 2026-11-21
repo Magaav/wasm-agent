@@ -17,6 +17,20 @@ Subagents are out of scope: they neither trigger nor block this path, and are ne
 here. The ordinary in-run trigger stays at capacity minus reserve (about 90–95%). This is an
 additional idle path, not a lower in-run default. `WA_STALE_COMPACT=0` disables it.
 
+The idle request carries `idle:true` (scripts/on-stale.sh), and that marker is what the route checks
+before it reads any history: while the session it targets still has work, the idle compaction is
+refused with `{"ok":false,"error":"work_pending"}` and nothing is summarized. The three states are a
+pending code-mode handle (lua/core/codemode_pending.lua, state running/unknown/pending), a pending
+self-wake (`self_wakes`, status pending or dispatching), and a child run still queued or running for
+that session. With always-available a session is idle while its own handles run, and compacting then
+breaks the provider prefix cache and drops the detail that work is about to be read against. A state
+the check cannot read is not treated as clear: it is reported beside the pending work and refuses too.
+Nothing is remembered, so the first idle request after the work settles compacts - which also means a
+session that keeps a long-horizon wake pending does not idle-compact until that wake fires (the in-run
+90-95% trigger is untouched and still applies). An explicit operator `/compact` carries no `idle` and
+is unchanged, as is the node-wide `node_busy` refusal for a queued or running run, which the Rust
+listener decides before this handler is called.
+
 Two non-event cases are distinct. If a delivered event has **no valid top-level session id**
 (missing, empty, or outside the safe set), onStale logs a `MALFORMED EVENT` line naming that
 event file and skips the idle compaction: it does not fall back to `/compact`'s newest-session

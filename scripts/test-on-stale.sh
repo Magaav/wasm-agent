@@ -169,7 +169,7 @@ rc="$(run_compact WA_JOB_EVENT_FILE="$TMP/event-good.json")"
 posted="$(cat "$TMP/compact-body" 2>/dev/null)"
 [ "$rc" = 0 ] && [ -e "$TMP/compact-body" ] \
   && grep -Fq "\"session_id\":\"$event_session\"" "$TMP/compact-body" \
-  && grep -Fq '"min_percent":40' "$TMP/compact-body" \
+  && grep -Fq '"idle":true,"min_percent":40' "$TMP/compact-body" \
   && grep -q "targeted at the event session $event_session" "$TMP/out" \
   && grep -q 'idle compaction' "$TMP/out" \
   && ok "the event's own session id is forwarded to /compact with the 40 threshold ($rc)" \
@@ -207,11 +207,27 @@ rc="$(run_compact WA_JOB_EVENT_FILE="$TMP/event-hostile.json")"
 #     that is a fallback rather than event targeting.
 rm -f "$TMP/compact-body"
 rc="$(run_compact)"
-[ "$rc" = 0 ] && grep -Fq '{"min_percent":40}' "$TMP/compact-body" \
+[ "$rc" = 0 ] && grep -Fq '{"idle":true,"min_percent":40}' "$TMP/compact-body" \
   && ! grep -q 'session_id' "$TMP/compact-body" \
   && grep -q 'latest-main fallback' "$TMP/out" && grep -q 'not event-targeted' "$TMP/out" \
   && ok "a manual run keeps the documented latest-main fallback and says so ($rc)" \
   || bad "manual fallback: rc=$rc body=$(cat "$TMP/compact-body" 2>/dev/null) out=$(cat "$TMP/out")"
+
+# 15b. The route refuses the idle compaction while the session it targets still has work (a pending
+#      code-mode handle, a pending self-wake, a child run). That is a deferral with a named reason -
+#      the same treatment node_busy gets - so the job says so, stops, and summarizes nothing.
+printf '{"ok":false,"error":"work_pending","pending":["1 code-mode handle(s)"]}' > "$TMP/compact-reply.json"
+rm -f "$TMP/compact-body"
+rc="$(run_compact WA_JOB_EVENT_FILE="$TMP/event-good.json")"
+[ "$rc" = 0 ] && [ -e "$TMP/compact-body" ] \
+  && grep -q 'the session still has work pending' "$TMP/out" \
+  && grep -q 'compaction deferred' "$TMP/out" \
+  && grep -q 'work_pending' "$TMP/out" \
+  && ! grep -q 'nothing to do' "$TMP/out" \
+  && ok "a session with work pending defers the idle compaction by name ($rc)" \
+  || bad "work_pending: rc=$rc body=$(cat "$TMP/compact-body" 2>/dev/null) out=$(cat "$TMP/out")"
+# Back to the healthy reply the later cases expect.
+printf '{"ok":true,"compacted":false,"percent":12.5}' > "$TMP/compact-reply.json"
 
 # 16. The hook inventory must describe the event path truthfully: the event session is used, with
 #     the manual fallback, and never the old "latest main session only" claim. Also a shell syntax check.
