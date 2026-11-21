@@ -190,14 +190,14 @@ ok(has(plain_text, "1.2k"), "and its input tokens")
 ok(has(plain_text, view_lib.GLYPH.cache .. view_lib.GAP .. "91.7%"),
   "and how much of that input came from the cache, with its glyph and the set's gap")
 ok(has(plain_text, "$0.0021"), "and its cost")
-ok(has(plain_text, view_lib.context_ball(35.2) .. view_lib.GAP .. "ctx 35.2%/128.0k"),
+ok(has(plain_text, view_lib.context_ball(35.2) .. view_lib.GAP .. "35.2%/128.0k"),
   "and how full the context window is, with the ball M.context_ball chose for it")
-ok(view_lib.columns(plain_text:match("[^\n]*ctx[^\n]*")) <= 100, "and the footer is one line that fits")
+ok(view_lib.columns(plain_text:match("[^\n]*128%.0k[^\n]*")) <= 100, "and the footer is one line that fits")
 
 -- A node that reports no measured prompt (an older binary, a provider without usage)
 -- must not print a context figure it does not have.
 local unmeasured = view_lib.footer({ rounds = 1, prompt = 100 }, { context = 0, budget = 128000 })
-ok(not has(unmeasured, "ctx"), "an unmeasured context is left out rather than shown as zero")
+ok(not has(unmeasured, "/128.0k") and not has(unmeasured, view_lib.context_ball(0)), "an unmeasured context is left out rather than shown as zero")
 
 -- The denominator is the *model's* window, resolved where compaction resolves it. This
 -- deployment's model has a 1,000,000-token window while the old global says 128000, so a
@@ -205,7 +205,7 @@ ok(not has(unmeasured, "ctx"), "an unmeasured context is left out rather than sh
 ok(view_lib.window("m", function() return { context = 1000000, source = "pi-model-store" } end) == 1000000,
   "the footer divides by the model's window, not by the global")
 ok(has(view_lib.footer({ rounds = 1, prompt = 100 }, { context = 450000, budget = 1000000 }),
-  "ctx 45.0%/1.0M"), "and prints that window")
+  "45.0%/1.0M"), "and prints that window")
 ok(view_lib.window("m", function() return { context = 0, source = "unknown" } end)
   == (tonumber(host.getenv("WASM_AGENT_LLM_CONTEXT")) or 0),
   "an unknown window falls back to the global rather than guessing")

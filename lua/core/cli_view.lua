@@ -960,7 +960,9 @@ function M.footer(run, ctx)
   if ctx.context and ctx.context > 0 and ctx.budget and ctx.budget > 0 then
     local percent = 100 * ctx.context / ctx.budget
     -- The ball is the one M.context_ball chooses, so the glyph and the number beside it are one reading.
-    parts[#parts + 1] = string.format("%s%sctx %.1f%%/%s", M.context_ball(percent), GAP, percent, M.tokens(ctx.budget))
+    -- No "ctx" beside the ball, for the reason "CH" left the cache: the ball IS the context, and the word
+    -- cost the four cells that pushed this row past a 60-column terminal (test-cli-resize, land242 gate).
+    parts[#parts + 1] = string.format("%s%s%.1f%%/%s", M.context_ball(percent), GAP, percent, M.tokens(ctx.budget))
   end
   return table.concat(parts, " \194\183 ")   -- ·
 end
