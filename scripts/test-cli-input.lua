@@ -38,10 +38,16 @@ host.sleep(3000)
 
 -- What the host collected while this interpreter was elsewhere. This is the assertion the whole
 -- change exists for: the line is here, in order, and nobody lost it.
-local arrived = cli_input.arrived(0)
+local arrived, arrived_eof, arrived_running, arrived_kinds = cli_input.arrived(0)
 ok(type(arrived) == "table" and arrived[1] == "typed while blocked",
   "a line typed while this process was blocked is waiting for it, got "
   .. tostring(type(arrived) == "table" and arrived[1] or arrived))
+-- This binary speaks the two kinds: the answer carries a "now" array beside its lines, and a line
+-- that arrived through a PIPE is queued - there is no chord on a pipe, and a queued line never ends a
+-- run (docs/HOST.md, "A line typed during a run"). Asserted on the real host here, not on a stub.
+ok(type(arrived_kinds) == "table" and arrived_kinds[1] == false,
+  "the real take answer carries the line kind, and a pipe line is queued: "
+  .. tostring(type(arrived_kinds) == "table" and tostring(arrived_kinds[1]) or type(arrived_kinds)))
 
 -- The producer has closed the pipe by now. The end of input is an answer - nil plus `eof` - and
 -- never a hang, because a REPL that cannot be told the input ended cannot ever exit cleanly.
