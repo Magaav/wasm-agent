@@ -1701,6 +1701,7 @@ impl.gate = function(run, options)
       record_prefix = ". " .. quote(reader) .. " >/dev/null 2>&1; wa_build_env_audit >/dev/null 2>&1 || { wa_build_env_audit >&2; echo refused(build_env_key_unknown): the build record names a setting no build reads >&2; exit 2; }; "
         .. "wa_build_env >/dev/null 2>&1 || { echo refused(build_env_incomplete): the build record names a directory that is not there >&2; exit 2; }; "
     end
+  end
   -- A resume keeps a check that already PASSED (first run, not a retry) on this exact tree with this exact
   -- command and row list: the same bytes judged by the same command answer the same thing, and re-running a
   -- green 15-minute check is the slowest part of a resume. Anything else runs again - a red or flaky check, a
