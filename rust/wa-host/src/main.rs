@@ -400,6 +400,20 @@ fn main() {
     let node_id = node::existing_node_id().unwrap_or_default();
     let identity = build_info::install_label(&state_dir, &install_dir, &node_name, &node_id);
     wa_capabilities::host::set_build_identity(&identity, build_info::COMMIT, build_info::DIRTY);
+    // AND THE RECIPE FOR ASKING AGAIN, for the surfaces that must not report a stale install (fonts-install item
+    // 4): /health is answered by a process that was started BEFORE scripts/upgrade.sh wrote the record naming
+    // these bytes, so its boot label names the release it replaced. The recipe is registered here rather than
+    // called here because the composition lived in this crate, and wa-capabilities (which answers /health) cannot
+    // depend on it - see host::set_live_build_label.
+    {
+        let state = state_dir.clone();
+        let install = install_dir.clone();
+        let name = node_name.clone();
+        let id = node_id.clone();
+        wa_capabilities::host::set_live_build_label(move || {
+            build_info::install_label(&state, &install, &name, &id)
+        });
+    }
     if args.iter().any(|arg| arg == "--version" || arg == "-v") {
         println!("wasm-agent {identity}");
         return;

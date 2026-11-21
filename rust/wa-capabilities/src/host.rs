@@ -3442,6 +3442,40 @@ pub fn build_label() -> &'static str {
     BUILD_LABEL.get().map(String::as_str).filter(|label| !label.is_empty()).unwrap_or("unknown build")
 }
 
+/// THE SAME NAME, COMPOSED FROM WHAT IS ON DISK NOW, for the surfaces that must not report a stale install.
+///
+/// WHY (mission fonts-install item 4, measured 21/11 on the canary): the label is composed ONCE at boot from
+/// `installed.txt`, and `scripts/upgrade.sh` writes that record only AFTER the new node has answered /health. So
+/// the process that came up at 10:19:13 read a record written at 10:19:15 - and reported the PREVIOUS release for
+/// the rest of its life. /health said `node-7ddbfa98036a` while the node ran `node-bfad4f8fbe59`, and only a
+/// second restart would ever have corrected it.
+///
+/// The composition itself lives in the binary (`wa-host`'s `build_info::install_label` reads the record and the
+/// pin ledger, and this crate cannot depend on it), so the binary REGISTERS the recipe here, once, at boot. A
+/// reader that calls this gets the label for the bytes on disk at the moment it asks; with nothing registered -
+/// a library test, a component host - it is the boot label, which is what every reader had before.
+static LIVE_LABEL: std::sync::OnceLock<Box<dyn Fn() -> String + Send + Sync>> = std::sync::OnceLock::new();
+
+/// Register how to name this install from disk. Called once, by the binary, at boot.
+pub fn set_live_build_label<F>(compose: F)
+where
+    F: Fn() -> String + Send + Sync + 'static,
+{
+    let _ = LIVE_LABEL.set(Box::new(compose));
+}
+
+/// The install's name RIGHT NOW. Never empty: an answer that composes nothing falls back to the boot label, so a
+/// broken recipe is a stale name, not a nameless node.
+pub fn live_build_label() -> String {
+    match LIVE_LABEL.get() {
+        Some(compose) => {
+            let label = compose();
+            if label.trim().is_empty() { build_label().to_string() } else { label }
+        }
+        None => build_label().to_string(),
+    }
+}
+
 /// host.build_identity() -> JSON text of `{label, commit, dirty, known}` for the running binary.
 ///
 /// One JSON string the caller decodes with lua/vendor/json.lua; it is a string, not a table.

@@ -968,6 +968,12 @@ gate_run bash scripts/test-upgrade-idle.sh | grep 'upgrade idle-wait ok'
 # back - including a release whose fonts.css names faces it does not carry (refused) and a downgrade to a
 # release from before the faces existed (still installs).
 gate_run bash scripts/test-upgrade-ui-fonts.sh | grep 'ui fonts install: ok'
+# AN UPGRADE'S /health NAMES THE RELEASE IT JUST INSTALLED (mission fonts-install item 4, 21/11): the node is
+# started a couple of seconds BEFORE installed.txt is written, so a label composed once at boot reported the
+# PREVIOUS release for the rest of the process's life (canary: serve 10:19:13, record 10:19:15, health said
+# node-7ddbfa98036a while the bytes were node-bfad4f8fbe59). This asserts both the source shape and, on a real
+# scratch node, that /health follows a record written after it started - with no restart.
+WA_BIN="$BIN" gate_run bash scripts/test-health-build-label.sh | grep 'health build label: ok'
 # The watchdog (docs/KERNEL.md, "Watchdog"): its own tests plus the CLI contract the upgrade path depends on,
 # then a scratch install upgraded THROUGH the flag - including the assertion that the default path does not
 # touch the watchdog at all. The fake kernel is `wa-watchdog selftest-kernel`; no real node is involved.
