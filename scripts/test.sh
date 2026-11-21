@@ -1951,6 +1951,11 @@ WA_SCRIPT=scripts/test-cli-view.lua "$BIN" --db "$DB.view" | grep "cli view ok"
 # needs no glyph at all. The proof is a CELL count - the glued row must be exactly its gapped icons
 # narrower than the spaced one - because a table lookup cannot notice a character that costs a cell.
 WA_SCRIPT=scripts/test-icons.lua "$BIN" --db "$DB.icons" | grep "icons: ok"
+# wa setup fonts (item 3 of the wa-fonts mission, Victor 19/11): the per-OS install path, the
+# terminal config edits with their backup and --undo, and the record that makes the wa icon set the
+# default. Every case runs on a scratch home with its OWN fixture configs and refuses a path inside the
+# operator real ~/.config - a row that edited one on 21/11 is why that guard exists.
+WA_SCRIPT=scripts/test-font-setup.lua "$BIN" --db "$DB.fonts-setup" | grep "font setup: ok"
 # Every file change as a diff block (change/tui-diff-view, Victor 20/11). The block is rendered from
 # the session's own change record, not from the tool result, so the model's context never carries it:
 # this asserts the path and its counts, the real line numbers, the fold that states what it hid, the
