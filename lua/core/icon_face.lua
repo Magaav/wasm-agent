@@ -184,6 +184,16 @@ function M.names_family(answer, wanted)
   return false
 end
 
+-- The FIRST name of a fontconfig family answer ("A,B" -> "A"): the name to print, and the one whose
+-- coverage the fallback question asks about. Any other name in the list is an alias of the same face.
+function M.first_family(answer)
+  for name in tostring(answer or ""):gmatch("[^,]+") do
+    local clean = name:gsub("^%s+", ""):gsub("%s+$", "")
+    if clean ~= "" then return clean end
+  end
+  return ""
+end
+
 -- The family fontconfig answers for the icon code point, given the font the config names.
 function M.glyph_family(description, query)
   local family = font_setup.family_of(description)
@@ -213,15 +223,15 @@ end
 -- the file" and = cannot be ordered at all.
 function M.loaded_by_this_window(started_at, written_at)
   started_at, written_at = tonumber(started_at), tonumber(written_at)
-  if not started_at then return nil, "the terminal's start time could not be read" end
-  if not written_at then return nil, "the config file's write time could not be read" end
+  if not started_at then return nil, nil, "the terminal's start time could not be read" end
+  if not written_at then return nil, nil, "the config file's write time could not be read" end
   if started_at > written_at then
-    return true, "started " .. M.duration(started_at - written_at) .. " after the config was written"
+    return true, M.duration(started_at - written_at) .. " after "
   end
   if started_at < written_at then
-    return false, "started " .. M.duration(written_at - started_at) .. " before the config was written"
+    return false, M.duration(written_at - started_at) .. " before "
   end
-  return nil, "started in the same second its config was written"
+  return nil, "in the same second as "
 end
 
 function M.duration(seconds)
@@ -245,7 +255,7 @@ function M.spaced_set(description, query, draws)
   query = query or M.font_query
   draws = draws or font_setup.draws_icons
   local answer = M.glyph_family(description, query)
-  local family = font_setup.family_of(answer)
+  local family = M.first_family(answer)
   if family == "" then
     return "unicode", "this machine's fontconfig could not say which face draws U+F0766"
   end
@@ -332,7 +342,16 @@ function M.face(opts)
   local description = font_setup.current_font(terminal, text)
   local declared = M.config_names_icon_face(terminal, text, description, record)
   local family = declared and M.FAMILY or M.glyph_family(description, query)
-  local loaded, loaded_why = M.loaded_by_this_window(process.started_at, observation.stats[name])
+  local loaded, relative, time_why = M.loaded_by_this_window(process.started_at, observation.stats[name])
+
+  -- The two clocks, in the words a reader needs: which window, how far from the edit, and which file.
+  local window
+  if relative then
+    window = "this " .. name .. " window started " .. relative .. "wa setup fonts wrote " .. terminal.path
+  else
+    window = "this " .. name .. " window's start time and the write time of " .. terminal.path
+      .. " could not be compared (" .. tostring(time_why) .. ")"
+  end
 
   if M.names_family(family) then
     local installed = query(M.FAMILY)
@@ -342,21 +361,23 @@ function M.face(opts)
         .. tostring(installed or "nothing") .. "' for it, so this " .. name .. " window cannot be drawing it; " .. why }
     end
     if loaded == true then
-      return { glued = true, set = "wa", why = "wa Icons draws the icon code points in this " .. name .. " window, which "
-        .. loaded_why .. " (" .. terminal.path .. ")" }
+      return { glued = true, set = "wa", why = "wa Icons draws the icon code points in this " .. name .. " window, which started "
+        .. relative .. "wa setup fonts wrote " .. terminal.path }
     end
     local set, why = M.spaced_set(description, query, draws)
     local lead
     if loaded == false then
-      lead = "this " .. name .. " window " .. loaded_why .. " (" .. terminal.path .. "), so it is still drawing the face it loaded then"
+      lead = window .. ", so it is still drawing the face it loaded then"
+    elseif relative then
+      lead = window .. ", so which face it loaded cannot be told"
     else
-      lead = "this " .. name .. " window " .. tostring(loaded_why) .. " (" .. terminal.path .. "), so which face it loaded cannot be told"
+      lead = window .. ", so whether it loaded the edit at all cannot be told"
     end
     return { glued = false, set = set, why = lead .. "; " .. why }
   end
   local set, why = M.spaced_set(description, query, draws)
   return { glued = false, set = set, why = "the config this " .. name .. " window loads does not give the icon code points to "
-    .. M.FAMILY .. " (" .. tostring(family or "no face answered") .. "), and " .. why }
+    .. M.FAMILY .. " (fontconfig answers '" .. (M.first_family(family) ~= "" and M.first_family(family) or "nothing") .. "'), and " .. why }
 end
 
 return M

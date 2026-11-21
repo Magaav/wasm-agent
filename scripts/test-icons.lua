@@ -19,6 +19,14 @@ local function eq(actual, expected, label)
   ok(actual == expected, label .. " (got " .. tostring(actual) .. ", wanted " .. tostring(expected) .. ")")
 end
 
+-- THE WHY SURVIVES START-UP. cli_view adopts the resolved set through use_icons(), and until 21/11 that
+-- replaced the reason with the placeholder "use_icons": /icons could say WHICH set but never WHY, which is
+-- half the answer this mission is about. Asserted here, before anything in this file moves the set, so it
+-- reads the source the process really starts with.
+local started_with = select(2, view_lib.icon_set())
+ok(type(started_with) == "string" and started_with ~= "" and started_with ~= "use_icons",
+  "cli_view keeps the reason the set was resolved, not the placeholder: " .. tostring(started_with))
+
 -- A row measured in CELLS, which is what a terminal charges for it: the icons are the reason this test
 -- exists, and counting bytes would hide exactly the defect it looks for.
 local function cells(text) return view_lib.columns(tostring(text or "")) end
@@ -207,7 +215,7 @@ local NO_TERMINAL = { seen = { "bash", "systemd" }, stats = {} }
 local fresh = resolved_face(NEW_WINDOW, FOOT_INI)
 eq(fresh.set, "wa", "a foot window started AFTER the setup wrote its config draws the GLUED wa set")
 eq(icons.set(fresh.set).gap, "", "and that set really is glued")
-ok(tostring(fresh.source):find("after the config was written", 1, true) ~= nil,
+ok(tostring(fresh.source):find("after wa setup fonts wrote", 1, true) ~= nil,
   "and /icons says why: " .. tostring(fresh.source))
 
 -- (b) a window OLDER than the setup: it still draws the face it loaded, so the SPACED nerd set - the
@@ -215,7 +223,7 @@ ok(tostring(fresh.source):find("after the config was written", 1, true) ~= nil,
 local older = resolved_face(OLD_WINDOW, FOOT_INI)
 eq(older.set, "nerd", "a foot window that started BEFORE the setup wrote its config gets the SPACED nerd set")
 eq(icons.set(older.set).gap, " ", "and that set really has the space")
-ok(tostring(older.source):find("before the config was written", 1, true) ~= nil,
+ok(tostring(older.source):find("before wa setup fonts wrote", 1, true) ~= nil,
   "and /icons says why: " .. tostring(older.source))
 ok(tostring(older.source):find("NERD", 1, true) == nil and tostring(older.source):find("wa Icons", 1, true) == nil,
   "without claiming the glued face it is not drawing")

@@ -78,7 +78,10 @@ eq(select(1, faces.loaded_by_this_window(1000, 1000)), nil, "the same second can
 eq(select(1, faces.loaded_by_this_window(nil, 1000)), nil, "an unreadable start time is not a yes")
 eq(select(1, faces.loaded_by_this_window(1000, nil)), nil, "an unreadable config time is not a yes")
 local _, older = faces.loaded_by_this_window(1000, 4600)
-eq(older, "started 1h before the config was written", "and the reason says how much older, in words: " .. tostring(older))
+eq(older, "1h before ", "and the reason says how much older, in words: " .. tostring(older))
+local _, _, unreadable_why = faces.loaded_by_this_window(nil, 4600)
+ok(tostring(unreadable_why):find("terminal's start time", 1, true) ~= nil,
+  "and an unreadable clock names WHICH clock: " .. tostring(unreadable_why))
 
 -- ---- the spaced set, when the glued one is not the truth ----------------------------------------
 local function query_of(answers) return function(pattern) return answers[pattern] end end

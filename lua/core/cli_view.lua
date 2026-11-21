@@ -317,9 +317,10 @@ end
 local icons = dofile("lua/core/icons.lua")
 M.icons = icons
 
--- The active set, resolved once at load (env > config > what wa setup fonts installed > unicode) and
+-- The active set, resolved once at load (env > config > what this terminal is drawing > unicode) and
 -- moved by /icons. Every row below asks GLYPH/GAP/BALLS, so one call re-draws them all.
-local active = icons.resolve(host.getenv("WA_ICONS"))
+local resolved = icons.resolve(host.getenv("WA_ICONS"))
+local active = resolved
 
 local GAP, GLYPH, BALLS
 
@@ -344,6 +345,11 @@ end
 function M.icon_set() return active.set, active.source end
 
 assert(M.use_icons(active.set))
+-- THE REASON SURVIVES THE ADOPTION. Measured 21/11 (item 5): use_icons() replaces the active record with
+-- source = "use_icons", so /icons printed "(use_icons)" at start-up and threw away the one thing that
+-- tells an operator WHY this window draws what it draws - which face wa found, and when the window
+-- started. The resolved source is put back here, and /icons <set> keeps saying what the operator did.
+active.source = resolved.source
 
 
 -- ONE function decides which ball a context percentage wears: five bands, each starting at its own
