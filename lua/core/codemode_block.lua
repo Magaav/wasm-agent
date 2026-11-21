@@ -30,6 +30,11 @@
 -- the argument summariser and the JSON encoder (`opts`), which is what lets a snapshot test render
 -- the same rows the terminal is given, at any width, without a terminal.
 local M = {}
+-- The vendor decoder, for the ONE shape a script's value crosses the sandbox boundary as: a JSON
+-- string (measured on the parity capture, fixtures/raw-default/base-op-block.json). Pure and
+-- global-free like the rest of this module - the caller's encoder stays injectable (`opts.encode`),
+-- this is only how a string that IS an object is READ back.
+local json = dofile('lua/vendor/json.lua')
 
 -- The script's rows under the heading, before the fold names the rest (`… +N lines`).
 M.CODE_ROWS = 6
@@ -391,6 +396,17 @@ end
 M.OPERATION_PREVIEW_ROWS = 6
 
 function M.operation_of(value)
+  -- The value arrives in TWO shapes, both real: a table (a fixture, or a caller that decoded it) and
+  -- the JSON STRING a script's return crosses the sandbox boundary as (measured on the parity capture:
+  -- `value` was `{"cleanup":"terminated",...(1657 chars)}`, not a table). One decoder, then the same
+  -- allow-list, so the two shapes cannot be drawn differently.
+  if type(value) == "string" then
+    local first = value:match("^%s*(.)") or ""
+    if first ~= "{" then return nil end
+    local ok, decoded = pcall(json.decode, value)
+    if not ok or type(decoded) ~= "table" then return nil end
+    value = decoded
+  end
   if type(value) ~= "table" then return nil end
   if type(value.operation_id) ~= "string" or value.operation_id == "" then return nil end
   if type(value.stdout) ~= "string" and type(value.stderr) ~= "string" then return nil end

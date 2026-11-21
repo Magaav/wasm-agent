@@ -184,6 +184,20 @@ end
 
 -- A value that merely LOOKS like a status object is still drawn whole: the preview is an allow-list
 -- (an operation id AND captured output), never "any table with a state field".
+-- The REAL shape first: a script's return crosses the sandbox boundary as a JSON STRING (measured on
+-- the parity capture), so the same allow-list has to answer for that shape and the decoded one.
+do
+  local block_lib = dofile('lua/core/codemode_block.lua')
+  local string_model = block_lib.new({ code = 'return await tools.bash({command: "seq 1 40"});' }, 0)
+  block_lib.finish(string_model,
+    { ok = true, value = json.encode({ operation_id = 'op-1795000000000000-1-9', state = 'completed',
+      ok = true, stdout = '1\n2\n3\n', stderr = '', code = 0, elapsed_ms = 7, cleanup = 'terminated' }) }, 0.1)
+  local string_tail = block_lib.tail_rows(string_model, 100, { columns = view_lib.columns,
+    paint = function(text) return text end, encode = function(v) return json.encode(v) end })
+  local string_text = table.concat(string_tail, '\n')
+  check(has(string_text, '1') and not has(string_text, 'cleanup_budget_ms') and not has(string_text, '"cleanup"'),
+    'the JSON STRING a script actually returns is drawn as the output too: ' .. string_text)
+end
 local plain_view = view_lib.new({ live = true, stdout = true, limit = 100, rows = function() return 40 end,
   out = function() end, now = function() return 300 end })
 plain_view.screen = view_lib.screen_rows(40, true)
