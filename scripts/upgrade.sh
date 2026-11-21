@@ -889,7 +889,10 @@ if [ -d "$SOURCE_UI" ] && [ "$SOURCE_UI" != "$UI_DIR" ]; then
   # faces - with nothing to copy. That is the measured failure (fonts-install item 1, 21/11). The names come
   # from the release's OWN fonts.css, so what is required is exactly what that release asks the browser to load.
   if [ -f "$SOURCE_UI/fonts.css" ]; then
-    for face in $(grep -o 'fonts/[^")'"'"' ]*' "$SOURCE_UI/fonts.css" | sort -u); do
+    # Only url(...) values name a face: the stylesheet's own comments mention "ui/fonts/" and "assets/fonts/",
+    # and reading those as faces refused every install of main as "missing fonts/" (21/11, land249).
+    for face in $(sed 's#/\*.*\*/##g' "$SOURCE_UI/fonts.css" | grep -o 'url([^)]*fonts/[^)]*)' \
+        | sed -e 's#^url(##' -e 's#)$##' -e 's#^["'"'"']##' -e 's#["'"'"']$##' | sort -u); do
       [ -f "$SOURCE_UI/$face" ] || { say "missing release UI asset: $face (named by the release's own fonts.css)"; exit 1; }
     done
   fi
