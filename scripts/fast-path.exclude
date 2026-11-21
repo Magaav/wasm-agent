@@ -61,3 +61,7 @@ scripts/test-worker-integrate.lua  # lua error: [string "scripts/test-worker-int
 scripts/test-workspace-cwd.lua  # lua error: [string "scripts/test-workspace-cwd.lua"]:6: assertion failed!
 scripts/test-workspace-release.lua  # lua error: /t/lua/core/memory.lua:534: no such table: sessions
 scripts/test-workspace-root-recovery.lua  # lua error: [string "scripts/test-workspace-root-recovery.lua"]:9: assertion failed!
+# test-update-treeless.lua (fleet-update, 21/11): needs a cwd outside any git tree and WA_INSTALL_DIR, which
+# scripts/test.sh gives it (gate_run row "update treeless ok"); alone in the fast path it reads the land tree as
+# the install and fails 8 of 10 (land242 gate). Run where test.sh runs it.
+scripts/test-update-treeless.lua
