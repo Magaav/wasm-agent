@@ -1989,6 +1989,11 @@ WA_SCRIPT=scripts/test-cli-view.lua "$BIN" --db "$DB.view" | grep "cli view ok"
 # needs no glyph at all. The proof is a CELL count - the glued row must be exactly its gapped icons
 # narrower than the spaced one - because a table lookup cannot notice a character that costs a cell.
 WA_SCRIPT=scripts/test-icons.lua "$BIN" --db "$DB.icons" | grep "icons: ok"
+# WHICH face draws those icons in THIS terminal (item 5, Victor 21/11): the glued wa set only where
+# wa Icons really is the face, a window older than its config spaced, and an unknown terminal unicode.
+# The /proc walk runs across two REAL processes (a copy of the shell named foot), because that is where
+# the bug lives - and a host without /proc is named as a skip, never counted as a pass.
+WA_SCRIPT=scripts/test-icon-face.lua "$BIN" --db "$DB.icon-face" | grep "icon face: ok"
 # wa setup fonts (item 3 of the wa-fonts mission, Victor 19/11): the per-OS install path, the
 # terminal config edits with their backup and --undo, and the record that makes the wa icon set the
 # default. Every case runs on a scratch home with its OWN fixture configs and refuses a path inside the

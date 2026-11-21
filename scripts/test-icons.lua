@@ -167,6 +167,102 @@ eq(resolved_with("wa", "icons = ascii\n").set, "wa", "the environment beats the 
 eq(icons.resolve().set == "wa", icons.installed(),
   "wa is the default only when the setup recorded it installed wa Icons")
 
+
+-- ---- WHICH FACE DRAWS THEM: the glued set only where wa Icons really is the face (item 5) ---------
+--
+-- The three cases the brief names, put through resolve() - the path a node really takes - with the
+-- terminal observation INJECTED, because a test must not depend on the terminal it happens to run in.
+-- The walk itself is proven across two real processes by scripts/test-icon-face.lua.
+local faces = dofile("lua/core/icon_face.lua")
+local FOOT_INI = "[main]\nfont=JetBrains Mono:size=9, wa Icons:size=9\n"
+local RECORD = { ["wa Icons"] = true, font_dir = "/scratch/fonts",
+  terminals = { { name = "foot", path = "/scratch/.config/foot/foot.ini", action = "edited" } } }
+-- fontconfig's own answers on a node where both faces exist. MEASURED 21/11: asked for a "JetBrains
+-- Mono" stack and U+F0766, fontconfig answers the NERD face, not wa Icons - which is exactly why an
+-- alacritty window is not the glued one, however the record reads.
+local ANSWERS = {
+  ["wa Icons"] = "wa Icons",
+  ["JetBrains Mono:charset=f0766"] = "JetBrains Mono Nerd Font,JetBrains Mono NF",
+  ["JetBrainsMono Nerd Font:charset=f0766"] = "JetBrains Mono Nerd Font",
+}
+local function nerd_or_not(family) return tostring(family):lower():find("nerd", 1, true) ~= nil end
+local function resolved_face(observation, config_text, tweaks)
+  tweaks = tweaks or {}
+  return icons.resolve(nil, {
+    record = RECORD,
+    face = {
+      observation = observation,
+      read = function() return config_text end,
+      query = function(pattern) return (tweaks.answers or ANSWERS)[pattern] end,
+      draws = tweaks.draws or nerd_or_not,
+    },
+  })
+end
+local NEW_WINDOW = { terminal = { name = "foot", pid = 4242, started_at = 2000 }, stats = { foot = 1000 }, seen = {} }
+local OLD_WINDOW = { terminal = { name = "foot", pid = 4242, started_at = 1000 }, stats = { foot = 2000 }, seen = {} }
+local SAME_SECOND = { terminal = { name = "foot", pid = 4242, started_at = 1000 }, stats = { foot = 1000 }, seen = {} }
+local NO_TERMINAL = { seen = { "bash", "systemd" }, stats = {} }
+
+-- (a) a NEW window: wa Icons is the face, so the glued set, and /icons says what it measured.
+local fresh = resolved_face(NEW_WINDOW, FOOT_INI)
+eq(fresh.set, "wa", "a foot window started AFTER the setup wrote its config draws the GLUED wa set")
+eq(icons.set(fresh.set).gap, "", "and that set really is glued")
+ok(tostring(fresh.source):find("after the config was written", 1, true) ~= nil,
+  "and /icons says why: " .. tostring(fresh.source))
+
+-- (b) a window OLDER than the setup: it still draws the face it loaded, so the SPACED nerd set - the
+-- same glyphs, one space before each value, no overlap.
+local older = resolved_face(OLD_WINDOW, FOOT_INI)
+eq(older.set, "nerd", "a foot window that started BEFORE the setup wrote its config gets the SPACED nerd set")
+eq(icons.set(older.set).gap, " ", "and that set really has the space")
+ok(tostring(older.source):find("before the config was written", 1, true) ~= nil,
+  "and /icons says why: " .. tostring(older.source))
+ok(tostring(older.source):find("NERD", 1, true) == nil and tostring(older.source):find("wa Icons", 1, true) == nil,
+  "without claiming the glued face it is not drawing")
+
+-- (c) a terminal nobody can identify: the unicode set, never the glued one.
+local blind = resolved_face(NO_TERMINAL, FOOT_INI)
+eq(blind.set, "unicode", "a terminal that cannot be identified gets the SPACED unicode set")
+eq(icons.set(blind.set).gap, " ", "and it is spaced")
+ok(tostring(blind.source):find("ancestry", 1, true) ~= nil,
+  "and says what it could not see: " .. tostring(blind.source))
+
+-- The same second cannot be ordered: not a yes either, and the spaced set again.
+local ambiguous = resolved_face(SAME_SECOND, FOOT_INI)
+eq(ambiguous.set, "nerd", "a window started in the same second as the write is not glued")
+ok(tostring(ambiguous.source):find("same second", 1, true) ~= nil, "and says so: " .. tostring(ambiguous.source))
+
+-- The font itself gone: the config may still name it, and then it draws tofu, not wa Icons.
+local missing_font = resolved_face(NEW_WINDOW, FOOT_INI, { answers = {
+  ["wa Icons"] = "Some Other Font",
+  ["JetBrains Mono:charset=f0766"] = "JetBrains Mono Nerd Font",
+} })
+eq(missing_font.set, "nerd", "a node where fontconfig cannot resolve wa Icons does not get the glued set")
+ok(tostring(missing_font.source):find("is not installed for this user", 1, true) ~= nil,
+  "and names the missing face: " .. tostring(missing_font.source))
+
+-- A fontconfig terminal in a NEW window: fontconfig answers the Nerd face for the icon code points, so
+-- the icons are wide Nerd glyphs even though the setup edited that config (measured 21/11 on this node).
+local ALA_INI = "[font.normal]\nfamily = \"JetBrains Mono\"\n"
+local alacritty = resolved_face({ terminal = { name = "alacritty", pid = 7, started_at = 2000 }, stats = { alacritty = 1000 }, seen = {} }, ALA_INI)
+eq(alacritty.set, "nerd", "an alacritty window is the spaced nerd set: fontconfig gives its icons to the Nerd face")
+eq(icons.set(alacritty.set).gap, " ", "and it is spaced")
+
+-- A footclient window is drawn by the foot SERVER, which read its config when the server started: this
+-- window does not date that.
+local client = resolved_face({ terminal = { name = "footclient", pid = 8, started_at = 2000 }, stats = {}, seen = {} }, FOOT_INI)
+eq(client.set, "unicode", "a footclient window is not glued: the face is the server's, not this window's")
+ok(tostring(client.source):find("footclient", 1, true) ~= nil, "and says so: " .. tostring(client.source))
+
+-- A config that cannot be read is not a config that names wa Icons.
+local unreadable = resolved_face(NEW_WINDOW, nil)
+eq(unreadable.set, "unicode", "a config that cannot be read is not glued")
+ok(tostring(unreadable.source):find("could not be read", 1, true) ~= nil, "and names the file: " .. tostring(unreadable.source))
+
+-- No record at all: nothing to measure, and the stock glyphs.
+eq(icons.resolve(nil, { record = {} }).set, "unicode", "without a record the default is still unicode")
+eq(icons.resolve(nil, { record = { ["wa Icons"] = false } }).set, "unicode", "and a record that says wa Icons is absent is not a yes")
+
 -- Two readers of one question agree: chat.lua asks icons.resolve, cli_view renders it.
 view_lib.use_icons("unicode")
 eq(select(1, view_lib.icon_set()), "unicode", "cli_view reports the set it is drawing")
