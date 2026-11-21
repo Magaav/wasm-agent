@@ -33,7 +33,7 @@ test-efficiency (119), test-session-vars (48), test-turnfeed, test-turn-signal, 
 test-skill-content, test-experiment-verify, test-whatsapp-names: green.
 test-envelope-outcomes, test-envelope-iteration, test-exec-timeout, test-read-batch fail in a bare
 `WA_SCRIPT` invocation on this tree AND on unchanged main in the same words (all four are listed in
-scripts/fast-path.exclude, so no gate runs them; that is its own finding, not this change.s)
+scripts/fast-path.exclude, so no gate runs them; that is its own finding, not this change).
 No full fast run was made.
 
 ## Not in this change (measured, queued in ~/Work/missions/_queue/codeact-next.md)
