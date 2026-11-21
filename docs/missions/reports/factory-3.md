@@ -179,6 +179,23 @@ first.
 - `prompt-docs`, `discrimination` and the component checks of the real gate were not run in this round's own
   gate; the branch's gate is the fast path (see the run below).
 
+## The discrimination check (rule 16)
+
+`bash scripts/test-discriminates.sh 93168d96` -> **0 blocking**: `discriminates` for `scripts/test-fast-rows.sh`
+("the refusal inventory row is not a never-dropped row: the 21/11 red is back") and `scripts/test-preflight.sh`
+(the MAIN RED assertion fires on the base); `skipped` for the three new rows whose subject exists only on this
+branch (`scripts/test-drive.sh`, `scripts/test-main-health.sh`, `scripts/test-regenerate.sh` print
+`SKIP ... this tree has no <script> (nothing to judge)`), and `environment` for `scripts/test-land.lua` (that
+scratch base worktree has no `wa` binary, so a Lua row cannot run the base code there - the landing's gate, which
+has one, judges it).
+
+## What a person has to know before trusting the wiring
+
+`~/Work/missions/drive.sh` is a symlink to the RUNTIME tree's copy (`~/wasm-agent/checkout/scripts/drive.sh`),
+like `preflight.sh`; that file only exists once this round lands. Until then run it from the worktree:
+
+    bash /home/victor/Work/missions/factory-3/wt/scripts/drive.sh --dry-run
+
 ## Pre-existing failures
 
 None met. **The full fast path on this branch is green: 362 checks, 0 failed, 0 skipped, 600 s**
