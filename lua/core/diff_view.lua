@@ -159,6 +159,9 @@ function M.rows(change, opts)
   local lead_cells = 2 + digits * 2 + 4
   -- The room the CODE has: the whole row is exactly `width` cells, so a band and a border end together.
   local room = math.max(8, width - lead_cells)
+  -- The fence language the row tokens are coloured as, from the file name: the set
+  -- markdown.scan_code knows, and empty when it knows none (the row is then plain, never guessed).
+  local lang = tostring(change.path or ""):match("%.([%w_]+)$") or ""
 
   local rows = {}
 
@@ -178,7 +181,7 @@ function M.rows(change, opts)
       rows[#rows + 1] = { kind = "body", op = band,
         lead = (first and lead or string.rep(" ", lead_cells)),
         code = (chunk:gsub("\27%[[%d;]*m", "")) .. string.rep(" ", left),
-        role = role, band = band, marker = first and marker or " " }
+        role = role, band = band, marker = first and marker or " ", lang = lang }
       text, first = rest, false
     until text == ""
   end
@@ -193,7 +196,7 @@ function M.rows(change, opts)
         used, take = used + cells, take + size
       end
       local chunk, rest = text:sub(1, take - 1), text:sub(take)
-      rows[#rows + 1] = { kind = "body", lead = lead,
+      rows[#rows + 1] = { kind = "body", lead = lead, lang = lang,
         code = chunk .. string.rep(" ", math.max(0, room - cells_of(chunk))), role = role }
       text, lead = rest, string.rep(" ", lead_cells)
     end

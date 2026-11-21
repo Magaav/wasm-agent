@@ -126,6 +126,20 @@ view_lib.new({ out = plain2.out, live = false, now = function() return 0 end, li
     before = "none", after = "none" })
 has(plain2.text(), "no diff shown: not_recorded", "an unrecorded change says so instead of an empty diff")
 
+-- ---- syntax colour inside the rows --------------------------------------------
+-- A live view colours the tokens of a changed row from the same walker a fence uses (markdown.scan_code),
+-- so a keyword in a .lua file is the syntax keyword role. The plain rendering must be the SAME rows with
+-- no escape at all: colour is decoration, and a captured transcript with escape sequences in it is not
+-- a transcript.
+local coded = record("local x = 1\n", "local returnable = true\n", "/tmp/diff-view-syntax.lua")
+local live_rows = table.concat(view_lib.diff_block({ path = coded.path, before = coded.before,
+  after = coded.after }, 80, true) or {}, "\n")
+ok(live_rows:find(view_lib.style("syntaxKeyword"), 1, true) ~= nil,
+  "a live row colours a keyword with the syntax keyword role")
+local plain_rows = table.concat(view_lib.diff_block({ path = coded.path, before = coded.before,
+  after = coded.after }, 80, false) or {}, "\n")
+ok(not plain_rows:find("\27%[", 1), "the plain rendering of the same rows carries no escape at all")
+ok(plain_rows:find("returnable", 1, true) ~= nil, "and it still carries the code itself")
 -- ---- narrow widths ------------------------------------------------------------
 local narrow = record(before, after, "/tmp/diff-view-narrow.lua")
 local narrow_rows = view_lib.diff_block({ path = narrow.path, before = narrow.before,

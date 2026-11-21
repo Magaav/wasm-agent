@@ -820,8 +820,19 @@ function M.diff_block(change, width, live)
       out[#out + 1] = paint(row.lead, row.role, live)
     else
       local band = row.band and BANDS[row.band] or nil
+      local base = { row.role or "text", band }
+      -- Syntax colour inside the row, from the same walker a fence uses: one definition of what a
+      -- keyword or a string looks like in this terminal. A row that is context (unchanged) keeps the
+      -- diff colour alone, because a hunk is read for what changed.
+      local body = row.code or ""
+      local painted = {}      if row.op ~= " " and row.lang and row.lang ~= "" then
+        markdown.scan_code(body, row.lang, function(text, style)
+          if text == "" then return end
+          painted[#painted + 1] = paint(text, style and { style, band } or base, live)
+        end)
+      end
       out[#out + 1] = paint(row.lead, { "mdCodeBlockBorder", band }, live)
-        .. paint(row.code or "", { row.role or "text", band }, live)
+        .. (#painted > 0 and table.concat(painted) or paint(body, base, live))
     end
   end
   return out
