@@ -457,7 +457,10 @@ end
 function M.schedule_settled(op, owner, session_id, reason, prompt, opts)
   M.setup()
   session_id, owner = tostring(session_id or ""), tostring(owner or "")
-  if session_id == "" or owner == "" then return { error = "handle_wake_requires_a_session" } end
+  -- A refusal, but not a model-facing one: nothing renders it through lua/core/refusal.lua, so it is a
+  -- reason rather than a refusal code (a code here would enter the shipped inventory and promise a
+  -- message and a fix that no reader ever sees).
+  if session_id == "" or owner == "" then return { ok = false, reason = "handle_wake_requires_a_session" } end
   local id = "handle:" .. tostring(op)
   local now = clock(opts)
   local changed = exec([[INSERT OR IGNORE INTO self_wakes

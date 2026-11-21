@@ -163,8 +163,10 @@ check(first.node == this_node, "and the node it lives on: " .. tostring(first.no
 local resumed = pending.wait(relay, { scope = scope }, first.op, { wait_s = 30 })
 check(type(resumed) == "table" and resumed.state == "done",
   "wait(op) resumes it: " .. json.encode(resumed or {}):sub(1, 240))
-check(tostring(type(resumed.result) == "table" and resumed.result.stdout or ""):find("rp-resumed", 1, true) ~= nil,
-  "and answers the command's real output")
+-- The one-result-shape change (21/11): a settled entry IS the tool's own result, so the peer's stdout
+-- is at the top level, not under a `result` key. Asserted as a STRING, which is stricter than before.
+check(type(resumed.stdout) == "string" and resumed.stdout:find("rp-resumed", 1, true) ~= nil,
+  "and answers the command's real output: " .. json.encode(resumed):sub(1, 200))
 
 local cancel_raw = json.encode({ node = "rp-scratch-peer", capability = "bash",
   command = "sleep 300", wait_s = 0 })

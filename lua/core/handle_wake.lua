@@ -85,8 +85,8 @@ function M.schedule(session_id, scope, record, value)
   local prompt = M.prompt_for(record, value, still)
   local ok, answer = pcall(selfloop.schedule_settled, record.op, session.user_id, session_id,
     "a pending call settled", prompt)
-  if not ok or type(answer) ~= "table" or answer.error then
-    pcall(host.log, "handle wake: " .. tostring(type(answer) == "table" and answer.error or answer))
+  if not ok or type(answer) ~= "table" or answer.error or answer.ok == false then
+    pcall(host.log, "handle wake: " .. tostring(type(answer) == "table" and (answer.error or answer.reason) or answer))
     return false
   end
   return true
