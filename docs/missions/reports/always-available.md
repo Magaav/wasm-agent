@@ -134,7 +134,7 @@ Run with this tree's binary and `WASM_AGENT_LUA_ROOT` pointed at the tree, each 
 
 ## The gate's first round (preflight, main 0b9d574c + this branch)
 
-Two rows were red; both are fixed at 875f525b's successor \`af62ac53\`, and neither was weakened:
+Two rows were red; both are fixed at `af62ac53`, and neither was weakened:
 
 * \`scripts/test-refusal-contract.lua\` - the inventory of refusal codes was stale because
   \`selfloop.schedule_settled\` answered \`error = "handle_wake_requires_a_session"\`. That string was
