@@ -659,7 +659,7 @@ else
     bstart=$(fast_now_ms); build_rc=0
     # The exit code is KEPT, not discarded: a build that failed compiled nothing, and the note must say
     # so rather than print the warm row's sentence under a red one (scripts/lib/build-times.sh).
-    HOME="$rust_home" CARGO_HOME="$real_cargo_home" RUSTUP_HOME="$real_rustup_home" CARGO_TARGET_DIR="${fast_build_target:-$ROOT/rust/target}" cargo test --no-run --offline $test_args > "$work/build-$crate.log" 2>&1 || build_rc=$?
+    HOME="$rust_home" CARGO_HOME="$real_cargo_home" RUSTUP_HOME="$real_rustup_home" CARGO_TARGET_DIR="${fast_build_target:-$ROOT/rust/target}" CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-$(wa_build_jobs)}" wa_build_host_lock cargo test --no-run --offline $test_args > "$work/build-$crate.log" 2>&1 || build_rc=$?
     wa_build_time_record crate "$crate" "$(( $(fast_now_ms) - bstart ))" "$(wa_build_time_note "$work/build-$crate.log" "$build_rc")"
     s=$(date +%s)
     if [ "$crate" = wa-sentinel ]; then

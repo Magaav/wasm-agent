@@ -513,12 +513,119 @@ wa_build_seed() { # <target> [--quiet]
   return 0
 }
 
+# ---- rule 2 (heat): ONE heavy build at a time on this node, and a bounded job count ----------------
+#
+# WHY. Builds from different trees ran at the same time: a land gate, a mission's fast.sh and a
+# developer's build could each start a 16-job cargo, which is 48 compilers on 16 cores. Measured on this
+# node on 20/11: load average 105, CPU at 95 C, and timing rows failing at random because the machine
+# was thrashing. Serialising them costs nothing when they are already queueing: the work is the same, it
+# just happens one build at a time, so the wall clock of a single build is unchanged while the peak
+# temperature stops depending on how many sessions happen to build at once.
+#
+# WHAT IS LOCKED. The cargo invocation and nothing else. A test suite is NOT run under this lock: a row
+# that builds takes it for that build only and releases it before its tests start, so two suites can
+# still run in parallel and a test that waits on another process cannot deadlock the node's builds.
+# A build started from inside a locked build (a build script that runs cargo) is not deadlocked either:
+# the lock is announced in the environment of the locked command (WA_BUILD_HOST_LOCK_HELD) and a nested
+# call sees it and does not queue behind itself.
+#
+# flock(1) IS USED, NEVER lock(1), AND ALWAYS WITH -o. Without -o a child that a build leaves behind
+# inherits the lock's descriptor and holds the lock after the build has ended (measured 20/11: a fixture
+# sleep 600 held the suite lock for ten minutes after its suite finished, twice). -o closes the
+# descriptor in children, so the lock belongs to the wait and nothing else.
+
+# The one lock every heavy build on this node takes. It lives beside the build root's target directory,
+# not inside it: the cap's candidates are children of <root>/build/target, and a lock file the cap can
+# delete is not a lock.
+wa_build_lock_path() {
+  printf '%s/build.lock' "$(wa_build_root)"
+}
+
+# The default job count, when the caller did not name one. Measured on this node (cold wa-host release,
+# 16 cores, 21/11): 6 jobs 144 s, 10 jobs 136 s, 16 jobs 132 s, every run peaking at 97-98 C. Ten is the
+# default because it is within 3% of sixteen (4 s of 136) and leaves half the cores free: a single build
+# has the same wall clock, while an interactive session, a test row or a second build sharing this node
+# no longer competes with sixteen compilers for sixteen cores. The peak temperature of ONE build is not
+# what this cap moves - a build this long soaks the cooler at any job count, which is what the
+# measurement above shows - what it moves is how bad the machine gets under CONCURRENT builds, which the
+# host lock above serialises. Raise or lower it with WA_BUILD_JOBS_DEFAULT, or per call with
+# CARGO_BUILD_JOBS (which always wins, because a caller that named a number meant it).
+wa_build_jobs() {
+  if [ -n "${CARGO_BUILD_JOBS:-}" ]; then printf '%s' "$CARGO_BUILD_JOBS"; return 0; fi
+  printf '%s' "${WA_BUILD_JOBS_DEFAULT:-10}"
+}
+
+# Run one command under the node's single build lock. Prints the wait when it is worth mentioning.
+#   wa_build_host_lock <command...>
+# No flock(1) on this host means no queueing, not no build: the command runs and says so.
+wa_build_host_lock() {
+  local lock started waited status
+  if [ "${WA_BUILD_HOST_LOCK_HELD:-}" = 1 ]; then "$@"; return $?; fi
+  if ! command -v flock >/dev/null 2>&1; then
+    printf 'onebuild: flock is not available, so this build is not queued behind other builds\n' >&2
+    "$@"; return $?
+  fi
+  lock=$(wa_build_lock_path)
+  mkdir -p "$(dirname "$lock")" 2>/dev/null || true
+  started=$(wa_build_now_ms)
+  (
+    # -o: the lock is the wait's, never a child's. A build that leaves a compiler or a test behind must
+    # not keep the node's build queue blocked after it exits.
+    if ! flock -o -w "${WA_BUILD_HOST_LOCK_WAIT:-3600}" 8; then
+      printf 'onebuild: waited %ss for the node build lock and gave up; building anyway (WA_BUILD_HOST_LOCK_WAIT raises the wait)\n' \
+        "${WA_BUILD_HOST_LOCK_WAIT:-3600}" >&2
+    fi
+    WA_BUILD_HOST_LOCK_HELD=1 "$@"
+  ) 8>>"$lock"
+  status=$?
+  waited=$(( $(wa_build_now_ms) - started ))
+  if [ "$waited" -gt 2000 ]; then
+    printf 'onebuild: waited %ss for the node build lock (another build on this node was running; one heavy build at a time)\n' \
+      "$(awk -v ms="$waited" 'BEGIN{printf "%.1f", ms/1000}')" >&2
+  fi
+  return "$status"
+}
+
 # ---- rule 1 (concurrency): builds that share a target wait, and say how long ------------------------
 
 wa_build_now_ms() {
   local ns
   ns=$(date +%s%N 2>/dev/null)
   case "$ns" in ''|*[!0-9]*) printf '%s' "$(( $(date +%s) * 1000 ))" ;; *) printf '%s' "$((ns / 1000000))" ;; esac
+}
+
+# Is this command line a cargo invocation? True for cargo itself and for the env-prefixed form the
+# callers use (wa_build_run <tree> env VAR=... cargo build ...). Anything else - a script, a test - is
+# run as given and never queued on the build lock: the lock exists for compilers, and a test suite that
+# waited on it could deadlock against a build of its own tree.
+wa_build_is_cargo() {
+  local word
+  for word in "$@"; do
+    case "$word" in
+      env|[A-Za-z_]*=*) continue ;;
+    esac
+    case "$(basename "$word")" in
+      cargo|cargo.exe) return 0 ;;
+      *) return 1 ;;
+    esac
+  done
+  return 1
+}
+
+# The one invocation every build goes through: the tree's target dir, the node's job cap when the caller
+# named none, and the node's single build lock for a cargo build. Kept in one place so no caller can
+# grow a second, unlocked way to compile.
+wa_build_invoke() { # <target> <command...>
+  local target=$1; shift
+  if wa_build_is_cargo "$@"; then
+    if [ -n "${CARGO_BUILD_JOBS:-}" ]; then
+      CARGO_TARGET_DIR="$target" wa_build_host_lock "$@"
+    else
+      CARGO_TARGET_DIR="$target" CARGO_BUILD_JOBS="$(wa_build_jobs)" wa_build_host_lock "$@"
+    fi
+    return $?
+  fi
+  CARGO_TARGET_DIR="$target" "$@"
 }
 
 # `wa_build_run <tree> <command...>` - the one way a script builds.
@@ -553,7 +660,7 @@ wa_build_run() {
     (
       flock -w "${WA_BUILD_LOCK_WAIT:-1800}" 9 || printf 'onebuild: waited %ss for the build lock on %s and gave up (another build holds it; WA_BUILD_LOCK_WAIT raises the wait)\n' "$(awk -v s="${WA_BUILD_LOCK_WAIT:-1800}" 'BEGIN{printf "%d", s}')" "$(basename "$target")" >&2
       cd "$tree" 2>/dev/null || exit 1
-      CARGO_TARGET_DIR="$target" "$@"
+      wa_build_invoke "$target" "$@"
     ) 9>>"$target/.wa-build.lock"
     status=$?
     waited=$(( $(wa_build_now_ms) - started ))
@@ -564,7 +671,7 @@ wa_build_run() {
     fi
     return "$status"
   fi
-  ( cd "$tree" 2>/dev/null || exit 1; CARGO_TARGET_DIR="$target" "$@" )
+  ( cd "$tree" 2>/dev/null || exit 1; wa_build_invoke "$target" "$@" )
 }
 
 # `wa_build_forget <tree>` - delete this tree's build output (worktree removal).
