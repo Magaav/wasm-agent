@@ -110,6 +110,7 @@ pub const REGISTRY: &[Capability] = &[
     upvalue!("sql_exec", WritesFiles, crate::host::sql_exec, "Run one statement against this interpreter's own SQLite connection; returns the changes/row count"),
     upvalue!("sql_query", ReadOnly, crate::host::sql_query, "Run one read query against this interpreter's own SQLite connection; returns rows"),
     upvalue!("sql_rows", ReadOnly, crate::host::sql_rows, "Run one read query against this interpreter's own SQLite connection; returns the rows as a Lua table, not JSON text"),
+    plain!("script_run", ReadOnly, crate::host::script_run, "Whether this process was started to run one Lua script file (WA_SCRIPT), a per-process fact no child inherits"),
     plain!("db_ready", ReadOnly, crate::host::db_ready, "Whether the ledger schema migration has run in this process"),
     plain!("mark_db_ready", WritesFiles, crate::host::mark_db_ready, "Record that the ledger schema migration has run"),
     // ---- paths, environment and the process --------------------------------------------------

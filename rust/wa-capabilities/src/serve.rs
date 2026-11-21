@@ -325,6 +325,14 @@ thread_local! {
     static NODE_THREAD_ID: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static CURRENT_RUN_ID: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static CURRENT_RUN_ORIGIN: std::cell::Cell<&'static str> = const { std::cell::Cell::new("cli") };
+    /// Was THIS process started to run one Lua script file (the host's WA_SCRIPT runner)?
+    ///
+    /// It used to be answered by the environment, which every script child inherited: a child `wa` a
+    /// script started also ran the script instead of its own command (measured 20/11 - a `wa land`
+    /// forked itself recursively, and a probe's answer was a test's "ok" line). The host now reads
+    /// WA_SCRIPT once, for itself, removes it from its own environment, and records the answer here -
+    /// process-local, so no child can inherit it.
+    static SCRIPT_RUN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static IN_RUN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// The cancel flag of the run this thread is executing right now. The runtime's provider reader
     /// and agent loop poll `run_cancel_requested()`, so a cancel request reaches a model call on the
@@ -336,6 +344,22 @@ thread_local! {
 pub(crate) fn current_run_origin() -> &'static str {
     if std::env::var_os("WA_JOB_DELIVERY_ID").is_some() || std::env::var_os("WA_JOB_EVENT_FILE").is_some() { return "job"; }
     CURRENT_RUN_ORIGIN.with(|origin| origin.get())
+}
+
+/// Record that this process runs one Lua script file, and only this process: wa-host calls it when it
+/// consumes WA_SCRIPT for itself (rust/wa-host/src/main.rs). Never read from the environment, so a
+/// child cannot be told it is a script run - and cannot BE one.
+pub fn set_script_run(script: bool) {
+    SCRIPT_RUN.with(|flag| flag.set(script));
+}
+
+/// host.script_run() -> boolean: was this process started to run one Lua script file?
+///
+/// It replaces a read of the WA_SCRIPT environment variable, which a child inherited and then believed
+/// about itself. A node's quiet housekeeping tick (lua/core/server.lua) must not touch the real node's
+/// state while a test script runs; that is what this answers, per process.
+pub fn script_run() -> bool {
+    SCRIPT_RUN.with(|flag| flag.get())
 }
 
 /// Has the owner of the run on this thread requested cancellation?
