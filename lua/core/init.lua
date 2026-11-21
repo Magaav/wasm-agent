@@ -660,11 +660,17 @@ elseif command == "mission" then
   elseif verb == "resume" then result = mission.resume(request, ctx)
   elseif verb == "status" then result = mission.status(request, ctx)
   elseif verb == "stop" then result = mission.stop(request, ctx)
+  elseif verb == "preflight" then result = mission.preflight(request, ctx)
   else
     print("usage: wa mission launch <name> <base> | start <name> | resume <name> [--msg <text>] | status [name] | stop <name>")
+    print("       wa mission preflight <name>   the gate this branch will meet, run before anybody lands it")
     os.exit(2)
   end
   print(json.encode(result))
+  -- A verb that answers with an EXIT CODE of its own uses it (mission preflight: 0 green, 1 red, 2
+  -- refused - a red gate is an answer, not a broken verb, and a shell caller reads the same number the
+  -- script printed). Everything else keeps the old rule: an error is an exit 1.
+  if type(result) == "table" and tonumber(result.exit) then os.exit(tonumber(result.exit)) end
   if type(result) == "table" and result.error then os.exit(1) end
 elseif command == "help" then
   print("wa [chat] [--continue|-c|--resume <id>] [prompt]  |  remember <text> | recall <query>")

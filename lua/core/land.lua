@@ -33,6 +33,9 @@
 --   wa land --no-deploy                land and publish, deploy nothing
 --   wa land --signer <node>|local      where the release is signed (default: the node whose
 --                                      WA_VAULT_ADMIN_URL is set - the vault's admin listener is loopback)
+--   wa land --until <step>             stop cleanly AFTER that step (exit 0, result stopped_at_until):
+--                                      --until gate is collect, plan, review, merge, gate, report and
+--                                      no push, no main, no artifacts, no release, no node
 --   wa land --resume                   continue the newest unfinished run from its failed step
 --   wa land --run <id> --resume        continue that run
 --   wa land status [--run <id>]        the journal as text (read-only)
@@ -202,6 +205,26 @@ function M.incoming()
   local explicit = M.incoming_remote or trim(host.getenv and host.getenv("WA_LAND_INCOMING") or "")
   return explicit ~= "" and explicit or "oc-in"
 end
+
+-- THE REFNAME A REMOTE'S TRACKING BRANCHES LIVE UNDER, computed once. "--incoming" is usually a remote NAME
+-- ("oc-in"), and a name is a legal refname component. It can also be a LOCAL PATH - a bare repository on this
+-- machine, which is how a landing is tested with no network and no other node - and a path is NOT: a fetch
+-- with a path inside the refspec is refused by git, the fetch fails, and every branch then reads as "neither
+-- on the incoming nor a local branch" (measured 21/11, the first preflight replay: the round could not
+-- collect a branch that WAS in the drop box). A path therefore contributes its basename, and every named
+-- remote reads exactly as it did.
+local function tracking(incoming)
+  local spec = tostring(incoming or "")
+  -- A backslash is a path separator too (a Windows path), so both are tested literally.
+  local sep = "\\"
+  if spec:find("/", 1, true) or spec:find(sep, 1, true) then
+    spec = spec:gsub("[/" .. sep .. "]+$", "")
+    local leaf = spec:match("([^/" .. sep .. "]+)$") or spec
+    spec = leaf:gsub("%.git$", "")
+  end
+  return (spec:gsub("[^%w%._%-]", "-"))
+end
+M.tracking = function(incoming) return tracking(incoming) end
 
 function M.origin()
   local explicit = M.origin_remote or trim(host.getenv and host.getenv("WA_LAND_ORIGIN") or "")
@@ -456,6 +479,32 @@ M.GATE_TRIGGERS = {
 -- The plan's own rows/checks, as pure functions so the decisions are testable without git or a build.
 
 -- <paths> -> which of M.GATE_TRIGGERS fire (a pattern is matched against each changed path).
+-- <step name> -> its position in M.STEPS, or nil. One reader, so `--until gate` and the gate step itself
+-- cannot disagree about which side of the boundary they are on.
+function M.step_index(name)
+  for index, step in ipairs(M.STEPS) do
+    if step == tostring(name) then return index end
+  end
+  return nil
+end
+
+-- <incoming> -> true when it is a remote NAME (oc-in) and not a path or a URL. A name is what the node
+-- resolves through its own git config, so an unreachable name means a MACHINE is down (review r1, item 4);
+-- a path or a URL is a fact about the repository the caller named.
+function M.remote_is_named(incoming)
+  local spec = tostring(incoming or "")
+  return spec ~= "" and spec:find("/", 1, true) == nil and spec:find("\\", 1, true) == nil
+end
+
+-- <options> -> true when this round is told to stop at or before the gate, i.e. it is a PREFLIGHT: it
+-- merges and gates and pushes nothing, so it must not need another node to be awake to answer.
+function M.stops_by_gate(options)
+  local boundary = options and options.until_step
+  if not boundary then return false end
+  local at, gate_at = M.step_index(boundary), M.step_index("gate")
+  return at ~= nil and gate_at ~= nil and at <= gate_at
+end
+
 function M.gate_checks_for(paths)
   local wanted = {}
   for _, name in ipairs(M.GATE_ALWAYS) do wanted[name] = true end
@@ -644,6 +693,15 @@ local function rev(tree, spec)
   return sha:match("^%x+$") and sha or nil
 end
 
+-- <tree> -> the tree OBJECT of HEAD: the content, with no author, message or timestamp in it. rev() answers
+-- a commit and appends ^{commit}, so the tree needs its own reader rather than a second spelling of rev.
+local function tree_of(tree)
+  local result = M.exec("git -C " .. quote(slashes(tree)) .. " rev-parse --verify --quiet " .. quote("HEAD^{tree}"), tree, 120)
+  if (result.code or 1) ~= 0 then return nil end
+  local sha = trim(first_line(result.stdout))
+  return sha:match("^%x+$") and sha or nil
+end
+
 local function remote_tip(tree, remote, ref)
   local result = M.exec("git -C " .. quote(slashes(tree)) .. " ls-remote " .. quote(remote) .. " " .. quote(ref), tree, 300)
   if (result.code or 1) ~= 0 then return nil, trim(result.stderr) end
@@ -673,15 +731,37 @@ impl.collect = function(run, options)
       next = "run `wa land` on a machine with a checkout, or set WA_LAND_REPO=<dir>" }
   end
   local incoming = M.incoming()
-  local fetched = git(run, repo, "fetch --quiet --prune " .. quote(incoming) .. " " .. quote("+refs/heads/*:refs/remotes/" .. incoming .. "/*"))
+  local tracked = tracking(incoming)
+  local fetched = git(run, repo, "fetch --quiet --prune " .. quote(incoming) .. " " .. quote("+refs/heads/*:refs/remotes/" .. tracked .. "/*"))
   evidence(command_line("fetch", "git fetch --prune " .. incoming))
   evidence((fetched.stdout or "") .. (fetched.stderr or ""))
+  -- A FETCH THAT FAILED IS NOT AN EMPTY DROP BOX. It used to be ignored, so an unreachable incoming (or one
+  -- whose refspec git refused) answered "the branch is neither on <incoming> nor a local branch" - a
+  -- statement about the branch, when the truth was a statement about the fetch.
+  if (fetched.code or 1) ~= 0 then
+    -- AN UNREACHABLE NAMED REMOTE IS NOT A REFUSAL WHEN THE ROUND STOPS AT OR BEFORE THE GATE (review r1,
+    -- item 4). A landing must read the drop box before it can merge anything, but a PREFLIGHT is the local
+    -- loop (FACTORY.md rule 1: no network, no other node) and it must not depend on openclaw being awake: the
+    -- refs this checkout already has are enough to ask the gate question. A refused refspec or a PATH is a
+    -- different failure - it is a fact about the repository, not about a machine being down - and stays a
+    -- refusal. The warning is in the evidence, so nothing is silent.
+    if M.remote_is_named(incoming) and M.stops_by_gate(options) then
+      evidence("fetch: WARN " .. incoming .. " could not be fetched (" ..
+        first_line(tostring(fetched.stderr ~= "" and fetched.stderr or fetched.stdout)) ..
+        "); this round stops at " .. tostring(options.until_step) .. " so it goes on with the refs this checkout has\n")
+    else
+    return false, { error = "fetch_failed",
+      observed = "git fetch " .. incoming .. " exited " .. tostring(fetched.code) .. ": " ..
+        first_line(tostring(fetched.stderr ~= "" and fetched.stderr or fetched.stdout)),
+      next = "check that " .. incoming .. " is reachable and is a git repository, then wa land --resume" }
+    end
+  end
   -- The base is the FURTHEST MAIN both sides agree on. Two mains exist and they can lag each other: the
   -- incoming repository's (every node can read it) and the source of truth's (only a credentialed node can
   -- fast-forward it). A landing stops after main moved but before the release published, so the next one
   -- must start from whichever main already contains the other - and a pair that diverged is a REFUSAL,
   -- because picking either would silently drop one side's work.
-  local incoming_main = rev(repo, "refs/remotes/" .. incoming .. "/main")
+  local incoming_main = rev(repo, "refs/remotes/" .. tracked .. "/main")
   local origin_main = rev(repo, "origin/main")
   local base, base_ref = nil, nil
   if incoming_main and origin_main then
@@ -737,7 +817,7 @@ impl.collect = function(run, options)
   local branches = {}
   for _, want in ipairs(wanted) do
     local ref = nil
-    for _, candidate in ipairs({ "refs/remotes/" .. incoming .. "/" .. want.name, "refs/heads/" .. want.name }) do
+    for _, candidate in ipairs({ "refs/remotes/" .. tracked .. "/" .. want.name, "refs/heads/" .. want.name }) do
       if rev(repo, candidate) then
         ref = candidate
         break
@@ -762,6 +842,7 @@ impl.collect = function(run, options)
   run.journal.base_ref = base_ref
   run.journal.repo = repo
   run.journal.incoming = incoming
+  run.journal.incoming_tracking = tracked
   run.journal.origin = M.origin()
   run.journal.branches = branches
   return true, { detail = string.format("base %s, %d branch(es): %s", base:sub(1, 12), #branches,
@@ -1173,14 +1254,15 @@ function M.plan_preview(options, run)
   local repo = M.repo()
   local incoming = M.incoming()
   local notes = {}
-  local base = rev(repo, "origin/main") or rev(repo, "refs/remotes/" .. incoming .. "/main")
+  local tracked = tracking(incoming)
+  local base = rev(repo, "origin/main") or rev(repo, "refs/remotes/" .. tracked .. "/main")
     or rev(repo, incoming .. "/main")
   if not base then
     return nil, { "no main in " .. tostring(repo) .. ": the plan needs a base, and a dry run does not fetch (run without --dry-run)" }
   end
   local branches = {}
   for _, name in ipairs(options.branches or {}) do
-    local tip = rev(repo, "refs/heads/" .. name) or rev(repo, "refs/remotes/" .. incoming .. "/" .. name)
+    local tip = rev(repo, "refs/heads/" .. name) or rev(repo, "refs/remotes/" .. tracked .. "/" .. name)
     if tip then
       branches[#branches + 1] = { name = name, sha = tip }
     else
@@ -1524,10 +1606,20 @@ impl.merge = function(run, options)
     -- cannot answer is a refusal by name - a number nobody proved free is not a number to push onto.
     local remote = git(run, repo, "ls-remote --heads " .. quote(M.incoming()) .. " " .. quote("refs/heads/land*/final"), 300)
     if (remote.code or 1) ~= 0 then
+      -- THE SAME RULE AS THE FETCH (review r1, item 4): a round that stops at or before the gate takes the
+      -- free landing-branch number from the refs this checkout has and says so, instead of refusing because
+      -- another node is asleep. A landing still refuses: it must know the remote number, because it pushes
+      -- onto it.
+      if M.remote_is_named(M.incoming()) and M.stops_by_gate(options) then
+        evidence("ls-remote: WARN " .. M.incoming() .. " could not be listed (" ..
+          first_line(tostring(remote.stderr ~= "" and remote.stderr or remote.stdout)) ..
+          "); the landing-branch number comes from the refs this checkout has\n")
+      else
       return false, { error = "land_branch_unknown",
         observed = "cannot list the landing branches of " .. M.incoming() .. ": " ..
           first_line(tostring(remote.stderr ~= "" and remote.stderr or remote.stdout)),
         next = "check the incoming remote (" .. M.incoming() .. ") is reachable, then `wa land --resume`" }
+      end
     end
     for line in tostring(remote.stdout or ""):gmatch("[^\r\n]+") do claim(line) end
     local number = highest + 1
@@ -1593,6 +1685,12 @@ impl.merge = function(run, options)
     save(run)
   end
   run.journal.tree_commit = rev(tree, "HEAD")
+  -- THE BYTES, SEPARATE FROM THE COMMIT THAT CARRIES THEM. A merge commit has its own committer timestamp,
+  -- so the SAME content merged twice is TWO commits (measured 21/11: a preflight and the landing that
+  -- followed it produce different tree commits for an identical merge). The tree object is the content
+  -- alone, so it is what a gate verdict is really about, and it is recorded here for the gate to keep a
+  -- verdict across runs with (M.gate_history).
+  run.journal.tree_sha = tree_of(tree)
   return true, { detail = string.format("%d branch(es) merged into %s (%s)", #run.journal.branches,
                   tostring(run.journal.land_branch), tostring(run.journal.tree_commit):sub(1, 12)) }
 end
@@ -1713,6 +1811,134 @@ function M.gate_rows_file(run, options)
   return path, false, notes
 end
 
+-- <check> <rows_text> <run> -> the IDENTITY of a check's verdict: everything that decides what "this check
+-- passed" means, and nothing that changes from one run to the next.
+--
+-- It is built from the check's own data rather than from the composed shell line, because that line carries
+-- two per-run paths - the WA_FAST_ROWS file and WA_FAST_KEEP_LOGS - and a verdict keyed on those could never
+-- be recognised again, which is exactly the bug item 4 fixes. The row LIST is in it (its content, not its
+-- path), so the same check asked for different rows is a different verdict, and so is a check whose command,
+-- cwd, minimum or subject changed.
+function M.gate_identity(check, rows_text, run)
+  local parts = { tostring(check.name or ""), tostring(check.command or ""), tostring(check.cwd or ""),
+                  tostring(check.min_tests or ""), tostring(rows_text or "") }
+  if check.name == "discrimination" and run and type(run.journal) == "table" then
+    -- The discrimination check is judged against a BASE and a set of branches (M.gate_command appends both),
+    -- so two rounds with the same merged bytes but a different base are not the same verdict.
+    local names = {}
+    for _, branch in ipairs(run.journal.branches or {}) do
+      local name = tostring(branch.name or branch.sha or "")
+      if name ~= "" then names[#names + 1] = name end
+    end
+    parts[#parts + 1] = table.concat(names, ",")
+    parts[#parts + 1] = tostring(run.journal.base or "")
+  end
+  return table.concat(parts, "\n")
+end
+
+-- <run> -> name -> {row, run}: the newest gate row that ANY other run passed on a KNOWN tree content, from
+-- the journals under this root. The keep is proved by the caller (same identity, same tree_sha); this
+-- function only finds candidates, newest run first, and takes the first per check name.
+--
+-- It reads the same 20 newest journals every other reader of this root reads (journals_by_newest), so a
+-- preflight written a minute ago is in it and a flight of old runs cannot crowd it out of the window.
+function M.gate_history(run, limit)
+  local index = {}
+  local current = tostring((run and run.id) or "")
+  for _, path in ipairs(journals_by_newest(limit or 20)) do
+    local journal = json_file(path)
+    if journal and tostring(journal.run or "") ~= current and type(journal.gate) == "table" then
+      for _, row in ipairs(journal.gate) do
+        if type(row) == "table" and row.name and row.ok == true and row.retry == nil and not row.vacuous
+            and tostring(row.key or "") ~= "" and tostring(row.tree_sha or "") ~= "" then
+          -- KEYED BY THE CHECK **AND** THE TREE (review r1, item 2). Keyed by the name alone, the newest
+          -- run won: two missions preflighted before one landed left history[fast] holding the OTHER
+          -- mission tree, the caller tree comparison then failed, and the first mission gate ran in full
+          -- again - the normal case, not the corner one. Newest-first scan, so `not index[slot]` keeps the
+          -- newest row for exactly this check on exactly this content.
+          local slot = row.name .. "\n" .. tostring(row.tree_sha)
+          if not index[slot] then index[slot] = { row = row, run = tostring(journal.run or "") } end
+        end
+      end
+    end
+  end
+  return index
+end
+
+-- <tree> -> failed, why: which ROWS the last fast-path run in that tree reported as failing, read from the
+-- runner's own result file (scripts/fast.sh writes it into the worktree's git dir: name, section, status,
+-- first_error) instead of guessed from its log. failed.lua is the list WA_FAST_ROWS takes; failed.failed
+-- carries each row with its first line for the journal and for a preflight's report; failed.named is the
+-- contract checks, which this runner runs by name and never narrows.
+--
+-- A tree with no readable result file is NOT an empty failure list: it is nil plus a reason, and the caller
+-- then re-runs the whole check (unknown is not "nothing failed").
+-- <tree> -> number, path: the mtime (epoch seconds) of the fast path result file THIS worktree would use,
+-- and its path, or nil when there is no file yet. It is the marker an attempt is judged against: a file
+-- whose timestamp did not move during the attempt is not that attempt\\u2019s answer (review r1, item 3).
+function M.result_mtime(tree)
+  if not tree or tostring(tree) == "" then return nil end
+  local located = M.exec("git -C " .. quote(slashes(tree)) .. " rev-parse --git-path wa-fast-result.json", "", 60)
+  local path = trim(tostring(located.stdout or ""))
+  if (located.code or 1) ~= 0 or path == "" then return nil end
+  if path:sub(1, 1) ~= "/" then path = slashes(tree) .. "/" .. path end
+  local listed = M.exec("stat -c %Y " .. quote(path), "", 30)
+  local written = tonumber(trim(tostring(listed.stdout or "")))
+  if (listed.code or 1) ~= 0 or written == nil then return nil end
+  return written
+end
+
+function M.failed_rows(tree, started)
+  if not tree or tostring(tree) == "" then return nil, "no merged tree is known, so no result file can be read" end
+  local located = M.exec("git -C " .. quote(slashes(tree)) .. " rev-parse --git-path wa-fast-result.json", "", 60)
+  local path = trim(tostring(located.stdout or ""))
+  if (located.code or 1) ~= 0 or path == "" then
+    return nil, "the runner's result file cannot be located in this tree (" ..
+      first_line(tostring(located.stderr or "")) .. ")"
+  end
+  if path:sub(1, 1) ~= "/" then path = slashes(tree) .. "/" .. path end
+  local text = read(path)
+  if not text then return nil, "the runner wrote no result file at " .. path end
+  -- AND IT MUST BELONG TO THIS ATTEMPT (review r1, item 3). scripts/fast.sh writes the file at the END, so
+  -- an attempt killed early (budget, signal, a crash) leaves the PREVIOUS attempt file in the same tree: a
+  -- resumed run, a retry, a second check in the same round. Reading that one names rows that did not fail
+  -- now; the narrowed retry runs them, they pass, and the verdict is reported as flaky under load - which
+  -- stops a landing, but for the WRONG reason and with the wrong rows. The file therefore has to be newer
+  -- than this attempt; one written before it began is treated exactly like a file that cannot be read.
+  -- The comparison is BETWEEN TWO FILESYSTEM TIMESTAMPS, never between a file and the caller clock: this
+  -- module has a monotonic `now()` and the file has a wall clock, and mixing them would silently never
+  -- fire (measured once already). The marker is what the file looked like BEFORE the attempt ran.
+  if type(started) == "number" then
+    local listed = M.exec("stat -c %Y " .. quote(path), "", 30)
+    local written = tonumber(trim(tostring(listed.stdout or "")))
+    if (listed.code or 1) ~= 0 or written == nil then
+      return nil, "the result file at " .. path .. " carries no readable timestamp"
+    end
+    if written <= started then
+      return nil, "the result file at " .. path .. " is not newer than this attempt began: it describes " ..
+        "an earlier run"
+    end
+  end
+  local decoded_ok, decoded = pcall(json.decode, text)
+  if not decoded_ok or type(decoded) ~= "table" then return nil, "the result file at " .. path .. " is not JSON" end
+  local rows, failed, named = {}, {}, {}
+  for _, entry in ipairs(type(decoded.checks) == "table" and decoded.checks or {}) do
+    if type(entry) == "table" then
+      local state, name = tostring(entry.status or ""), tostring(entry.name or "")
+      if name ~= "" and state ~= "pass" and state ~= "skip" then
+        local first = first_line(tostring(entry.first_error or ""))
+        if tostring(entry.section or "") == "lua" then
+          rows[#rows + 1] = name
+          failed[#failed + 1] = { row = name, first = first }
+        else
+          named[#named + 1] = { row = name, first = first }
+        end
+      end
+    end
+  end
+  return { lua = rows, failed = failed, named = named, path = path }
+end
+
 impl.gate = function(run, options)
   local evidence = sink(run, "gate")
   local tree = run.tree
@@ -1768,26 +1994,60 @@ impl.gate = function(run, options)
   -- different tree_commit, a changed command (a check definition fixed between attempts) or a different
   -- WA_FAST_ROWS list. The reuse is written to the evidence and the row, by name, with the sha it passed on.
   local tree_commit = tostring(run.journal.tree_commit or "")
+  local tree_sha = tostring(run.journal.tree_sha or "")
   local rows_text = rows_file and (read(rows_file) or "") or ""
   local earlier = {}
   for _, prior in ipairs(type(run.journal.gate) == "table" and run.journal.gate or {}) do
     if type(prior) == "table" and prior.name then earlier[prior.name] = prior end
   end
+  -- A GREEN VERDICT BELONGS TO THE BYTES, NOT TO THE RUN THAT EARNED IT (item 4). The rule just above - a
+  -- resume keeps a check that already passed on this tree_commit - stopped at the edge of the run, so a
+  -- preflight's green gate (the whole point of asking the question before the landing) was thrown away and
+  -- the landing paid for the same checks on the same bytes again. The identity a verdict can be kept by is
+  -- therefore the check's own data (M.gate_identity) plus the TREE OBJECT - the content - and never the
+  -- merge commit: that commit carries its timestamp, so an identical merge twice is two commits (measured;
+  -- docs/missions/reports/factory-1.md).
+  local history = M.gate_history(run)
   for _, check in ipairs(checks) do
+    -- <rows file> -> the command this run composes for that row list: the record prefix inside the same
+    -- shell, the weight decorator outside it. One function, so the retry below cannot compose a command
+    -- that differs from the one that just ran in anything but the rows it asks for.
+    local function compose(rowsf)
+      local line = record_prefix .. M.gate_command(check, rowsf, run)
+      return (decorator ~= "" and (decorator .. " " .. quote(line))) or line
+    end
     -- The fast check ALWAYS gets the assignment (M.gate_command): the round's file, or an empty value so a
     -- WA_FAST_ROWS inherited from the environment cannot narrow a run that wrote none.
-    local command = record_prefix .. M.gate_command(check, rows_file, run)
-    command = (decorator ~= "" and (decorator .. " " .. quote(command))) or command
+    local command = compose(rows_file)
     local cwd = check.cwd and (slashes(tree) .. "/" .. check.cwd) or slashes(tree)
-    local key = command .. "\n" .. rows_text
+    local key = M.gate_identity(check, rows_text, run)
     local prior = earlier[check.name]
+    local older = nil
+    if tree_sha ~= "" then
+      local found = history[check.name .. "\n" .. tree_sha]
+      if found and tostring(found.row.key) == key and tostring(found.row.tree_sha) == tree_sha then older = found end
+    end
     if tree_commit ~= "" and prior and prior.ok == true and prior.retry == nil and not prior.vacuous
         and prior.tree_commit == tree_commit and prior.key == key then
       evidence(string.format("%s: kept - passed on %s with this command in an earlier attempt (%s test(s), %ss)\n",
         check.name, tree_commit:sub(1, 12), tostring(prior.tests or 0), tostring(prior.seconds or "?")))
       rows[#rows + 1] = { name = check.name, ok = true, code = prior.code, seconds = 0, tests = prior.tests,
-                          detail = prior.detail, tree_commit = tree_commit, key = key, kept = true,
+                          detail = prior.detail, tree_commit = tree_commit, tree_sha = tree_sha, key = key,
+                          kept = true, kept_from = prior.kept_from,
                           kept_seconds = prior.kept_seconds or prior.seconds }
+      run.journal.gate = rows
+      save(run)
+    elseif older then
+      -- THE SAME BYTES, JUDGED BY THE SAME COMMAND, IN ANOTHER RUN: a preflight, a landing that stopped
+      -- after the gate, or an earlier round on an unmoved main. Kept, and the row names the run it was kept
+      -- from, so a reader can go and read that verdict instead of trusting a claim about it.
+      evidence(string.format("%s: kept - passed on tree %s with this command in run %s (%s test(s), %ss)\n",
+        check.name, tree_sha:sub(1, 12), tostring(older.run), tostring(older.row.tests or 0),
+        tostring(older.row.seconds or "?")))
+      rows[#rows + 1] = { name = check.name, ok = true, code = older.row.code, seconds = 0,
+                          tests = older.row.tests, detail = older.row.detail, tree_commit = tree_commit,
+                          tree_sha = tree_sha, key = key, kept = true, kept_from = older.run,
+                          kept_seconds = older.row.kept_seconds or older.row.seconds }
       run.journal.gate = rows
       save(run)
     else -- not kept: the check runs (this branch closes at the end of the loop body)
@@ -1812,11 +2072,15 @@ impl.gate = function(run, options)
     -- STREAMED, NOT COLLECTED (item 3): the check's own shell appends to gate.log as it prints, so a
     -- check the gate's deadline kills has already said why. `result.stdout` is the part of the log this
     -- check wrote, which is what the lines below count and report.
+    -- WHAT THE RUNNER RESULT FILE LOOKED LIKE BEFORE THIS ATTEMPT RAN (review r1, item 3): the retry may
+    -- only name rows a file written DURING this attempt reports.
+    local result_marker = (check.name == "fast") and M.result_mtime(tree) or nil
     local result = M.exec_streamed(command, cwd, budget, M.evidence_path(run.id, "gate"))
     local seconds = now() - started
     local tests = passed_tests((result.stdout or "") .. (result.stderr or ""))
     local row = { name = check.name, ok = (result.code or 1) == 0, code = result.code, seconds = seconds,
-                  tests = tests, detail = check.detail or check.command, tree_commit = tree_commit, key = key }
+                  tests = tests, detail = check.detail or check.command, tree_commit = tree_commit,
+                  tree_sha = tree_sha, key = key }
     if row.ok and check.min_tests and tests < check.min_tests then
       row.ok = false
       row.vacuous = true
@@ -1836,12 +2100,59 @@ impl.gate = function(run, options)
         next = "a check that runs no test cannot pass: fix its command or its filter (" .. M.evidence_path(run.id, "gate") .. ")" }
     end
     if not row.ok then
-      -- Alone, once. No other check runs beside it, so "it passes alone" is a statement about load.
+      -- ONLY THE ROWS THAT FAILED RUN AGAIN ALONE (item 5, and the factory's Rule 6).
+      --
+      -- The retry answers one question - "did this fail because of the load, or because of the tree?" - and
+      -- it used to answer it by running the WHOLE check a second time: 468 s of fast path re-run to classify
+      -- 3 red rows, on a landing that had already spent 354 s finding them (land-20261121T102542Z and
+      -- land-20261121T124854Z, measured in docs/missions/reports/factory-1.md). The runner already names the
+      -- rows that failed in its own result file, and scripts/fast.sh takes a row list through WA_FAST_ROWS,
+      -- so the retry asks for those rows and nothing else. The command, its prefix and its weight are
+      -- composed by the SAME function that composed the first attempt (compose), so the only difference
+      -- between the two runs is the row list.
+      --
+      -- A check that is not the fast path has nothing to narrow - its command IS its row - so it re-runs as
+      -- it always did. When the failed-row list cannot be read the retry says so, by name, and runs the whole
+      -- check: unknown is not "nothing failed", it is the slower, always-correct path.
+      local failed, failed_why = nil, nil
+      if check.name == "fast" then failed, failed_why = M.failed_rows(tree, result_marker) end
+      if failed then
+        row.failed = {}
+        for _, entry in ipairs(failed.failed) do row.failed[#row.failed + 1] = entry end
+        for _, entry in ipairs(failed.named) do row.failed[#row.failed + 1] = entry end
+      end
+      if not row.failed or #row.failed == 0 then
+        row.failed = { { row = check.name,
+          first = first_line((result.stdout or "") ~= "" and result.stdout or result.stderr) } }
+      end
+      local retry_file, retry_note = nil, nil
+      if check.name == "fast" then
+        if failed and #failed.lua > 0 then
+          local candidate = M.run_dir(run.id) .. "/gate-retry-rows.txt"
+          if write(candidate, table.concat(failed.lua, "\n") .. "\n") then
+            retry_file = candidate
+            retry_note = string.format("%d row(s) failed (%s); the retry asks for those and nothing else",
+              #failed.lua, table.concat(failed.lua, " "))
+          else
+            retry_note = "the failed-row list could not be written to " .. candidate ..
+              "; the retry is the whole check"
+          end
+        elseif failed then
+          retry_note = "no Lua row failed (only contract checks did): the retry is the whole check, because " ..
+            "this runner runs every contract check by name and none of them can be narrowed"
+        else
+          retry_note = "the failed rows could not be read (" .. tostring(failed_why) ..
+            "): the retry is the whole check"
+        end
+      end
+      local retry_command = compose(retry_file or rows_file)
       local retry_started = now()
-      evidence(command_line(check.name .. " (alone, after a failure)", command))
-      local retry = M.exec_streamed(command, cwd, budget, M.evidence_path(run.id, "gate"))
+      evidence(command_line(check.name .. " (alone, after a failure)", retry_command))
+      if retry_note then evidence("retry rows: " .. retry_note .. "\n") end
+      local retry = M.exec_streamed(retry_command, cwd, budget, M.evidence_path(run.id, "gate"))
       local retry_tests = passed_tests((retry.stdout or "") .. (retry.stderr or ""))
-      row.retry = { ok = (retry.code or 1) == 0, code = retry.code, seconds = now() - retry_started, tests = retry_tests }
+      row.retry = { ok = (retry.code or 1) == 0, code = retry.code, seconds = now() - retry_started,
+                    tests = retry_tests, rows_file = retry_file, why = retry_note }
       rows[#rows + 1] = row
       run.journal.gate = rows
       save(run)
@@ -2940,7 +3251,14 @@ end
 local function newest_unfinished()
   for _, path in ipairs(journals_by_newest(20)) do
     local journal = json_file(path)
-    if journal and journal.run and journal.result ~= "done" then return tostring(journal.run) end
+    -- A PREFLIGHT IS NOT AN UNFINISHED LANDING. A run that stopped after --until <step> answered the
+    -- question it was asked and then stopped ON PURPOSE, and --until is deliberately not inherited by a
+    -- resume - so continuing it would push, fast-forward main, build a release, publish it and deploy, for
+    -- a branch nobody decided to land (review r1, BLOCKER 1). It stays resumable BY NAME: --run <id>
+    -- --resume is refused by M.run unless the invocation names its own boundary again.
+    if journal and journal.run and journal.result ~= "done" and journal.result ~= "stopped_at_until" then
+      return tostring(journal.run)
+    end
   end
   return nil
 end
@@ -3054,6 +3372,22 @@ function M.run(options)
   -- A DRY RUN WRITES NOTHING, so the start options are recorded only after this return: a plan that wrote a
   -- journal entry would change the thing it says it does not touch.
   if options.dry_run then return M.dry_run(run, options) end
+  -- A RUN THAT STOPPED AFTER --until IS RESUMED ONLY BY AN INVOCATION THAT SAYS WHERE TO STOP AGAIN. The
+  -- boundary was the whole point of that run (a preflight asks the gate and nothing else), and a resume
+  -- that silently dropped it would turn the answer into a landing and a release (review r1, BLOCKER 1).
+  -- The branches are printed so the deliberate command is in front of the operator.
+  if not run.fresh and tostring(run.journal.result or "") == "stopped_at_until" and options.until_step == nil then
+    local names = {}
+    for _, branch in ipairs(run.journal.branches or {}) do
+      names[#names + 1] = tostring(branch.name or branch.sha or "")
+    end
+    print("land: refused(resume_of_stopped_at_until): run " .. run.id .. " stopped after " ..
+      tostring(run.journal.stopped_at or "a step") .. " (--until) and landed nothing")
+    print("land: next: wa land --run " .. run.id .. " --resume --until " ..
+      tostring(run.journal.stopped_at or "gate") .. "   (name the boundary again), or land the branch " ..
+      "on purpose: wa land --branches " .. (#names > 0 and table.concat(names, ",") or "<branch>"))
+    return 1
+  end
   remember_start(run, options)
   if options.run and not run.fresh then
     print("land: resuming run " .. run.id .. " (journal " .. M.journal_path(run.id) .. ")")
@@ -3061,6 +3395,7 @@ function M.run(options)
   run.journal.result = "in_progress"
   save(run)
   local stopped = nil
+  local reached_until = nil
   for _, name in ipairs(M.STEPS) do
     local step = step_of(run.journal, name)
     local settled = step.state == "done" or step.state == "skipped"
@@ -3092,6 +3427,39 @@ function M.run(options)
         if not ok then stopped = name break end
       end
     end
+    -- `--until <step>`: the round STOPS CLEANLY after the named step, and this is the one place that
+    -- boundary is applied. It exists so a check can be asked BY A CALLER that does not want the rest:
+    -- a preflight asks "what would the gate say about this branch on the current main?", pays for
+    -- collect/plan/review/merge/gate and nothing after it, and gets exit 0 - not a red run of a
+    -- landing it never intended to make. The step is a BOUNDARY, not an acknowledgement: whether it
+    -- ran, was skipped by the plan or was already settled, nothing after it runs.
+    if name == options.until_step then reached_until = name break end
+  end
+  if reached_until then
+    local remaining, after = {}, false
+    for _, name in ipairs(M.STEPS) do
+      if name == reached_until then after = true
+      -- report is the exception, and it is in the message below rather than in this list: the report ALWAYS
+      -- renders (a stop without a summary is the thing this file exists to end), so a list that named it
+      -- would contradict the line printed right after it.
+      elseif after and name ~= "report" then remaining[#remaining + 1] = name end
+    end
+    run.journal.result = "stopped_at_until"
+    run.journal.stopped_at = reached_until
+    run.journal.stop_detail = string.format("stopped after %s (--until): %s did not run",
+      reached_until, #remaining > 0 and table.concat(remaining, " ") or "(nothing)")
+    save(run)
+    -- The report still runs: an until-stop is a result a human reads, and the gate's rows are in it.
+    if reached_until ~= "report" then M.run_step(run, "report", options) end
+    write(M.report_path(run.id), M.report_text(run.journal))
+    save(run)
+    print("")
+    print(string.format("land: stopped after %s (--until): nothing after it ran%s", reached_until,
+      #remaining > 0 and (" (" .. table.concat(remaining, " ") .. ")") or ""))
+    print("land: evidence: " .. tostring((step_of(run.journal, "gate") or {}).evidence or "-"))
+    print("land: journal: " .. M.journal_path(run.id))
+    print("land: report: " .. M.report_path(run.id))
+    return 0
   end
   if stopped then
     local step = step_of(run.journal, stopped)
@@ -3532,6 +3900,18 @@ function M.cli(argv)
     elseif flag == "--signer" then
       local value = read_value(flag); if not value then return 2 end
       options.signer = value; index = index + 2
+    elseif flag == "--until" then
+      local value = read_value(flag); if not value then return 2 end
+      -- A STEP BY NAME, checked here: an `--until gat` that silently honoured nothing would run the
+      -- whole landing (push, main, artifacts, the fleet) for a caller who asked for the gate only.
+      local known = false
+      for _, step in ipairs(M.STEPS) do if step == value then known = true break end end
+      if not known then
+        print("wa land: --until " .. value .. " is not a step of this file; the steps are " ..
+          table.concat(M.STEPS, " "))
+        return 2
+      end
+      options.until_step = value; index = index + 2
     elseif flag == "--resume" then options.resume = true; index = index + 1
     elseif flag == "--run" then
       local value = read_value(flag); if not value then return 2 end
@@ -3562,6 +3942,7 @@ function M.cli(argv)
       print("wa land ready <branch> <sha> [--brief <file>]   record a READY line for a finished branch")
       print("  --repo <dir> --incoming <remote> --origin <remote> --ring node:mode,... --json")
       print("  --canary <node> --account <node>  which node goes first (default work) and last (default openclaw)")
+      print("  --until <step>         stop cleanly after that step: exit 0, result stopped_at_until")
       print("  --full                 ignore the plan: run every step and the whole suite (no narrowed rows)")
       print("  --signer <node|local>   where the release is signed (default: the node whose WA_VAULT_ADMIN_URL is set)")
       return 0
