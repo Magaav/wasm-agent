@@ -376,21 +376,16 @@ function M.run(argv)
   -- (`lua/core/local_views.lua`, docs/HOST.md), declared here because `agent.steer` below - the round
   -- boundary - is where they are refreshed.
   local local_views = reload.require("lua/core/local_views.lua")
-  local views_reported = false
   -- Publish the views that are missing or older than `opts.max_age`. Never blocks on the network
-  -- itself (`local_views.refresh`) and never waits for anything: it either hands the client a spec or
-  -- reports, once, that it could not.
+  -- itself (`local_views.refresh`) and never waits for anything.
+  --
+  -- Nothing it can answer is printed: a view the client could not be handed is a COSMETIC failure - a
+  -- panel the reader had not asked for - and it is recorded once, per view, in the node's log
+  -- (`local_views.report`), not as a red `! the run view failed: ...` line in the middle of the
+  -- conversation, which is what every run printed until this (Victor, 21/11). The run continues with
+  -- whatever snapshot the client already has.
   local function publish_views(opts)
-    -- A panel needs the raw editor, the same condition `/status`'s snapshot has.
-    if not (view.editor and view.stdout) then return 0 end
-    local count, problem = local_views.refresh(opts)
-    if problem and not views_reported then
-      views_reported = true
-      -- Once, not once per round: a snapshot that never lands is a fact, and a fact repeated every
-      -- round is noise on a screen the reader is trying to read.
-      view:warn(redact.text("  local views: " .. tostring(problem) .. " (reported once)"))
-    end
-    return count
+    return local_views.publish_all(view, opts)
   end
   agent.steer = function()
     if refresh_status then refresh_status() end
