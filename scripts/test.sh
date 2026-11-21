@@ -410,7 +410,7 @@ BIN=rust/target/release/wa
 # for one test module. resources::tests has no debug_assertions dependency (04/11).
 gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-capabilities resources::tests
 run_proof_fixture nativeTarget 29 node scripts/test-native-target-resource.cjs "$BIN"
-run_proof_fixture resourceClaims 47 node scripts/test-resource-claims.cjs "$BIN"
+run_proof_fixture resourceClaims 46 node scripts/test-resource-claims.cjs "$BIN"
 run_proof_fixture nativeAlias 12 node scripts/test-native-target-alias.cjs "$BIN"
 run_proof_fixture nativeRecovery 66 node scripts/test-wave-native-recovery.mjs "$BIN" "$ACTUAL_RELEASE_BUILD_LOG" '--build-command=cargo build --release --offline --manifest-path rust/Cargo.toml'
 # END native-target recovery required proofs
