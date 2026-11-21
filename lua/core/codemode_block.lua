@@ -343,17 +343,30 @@ end
 -- The rows one settled call adds under its own row: its stdout, then its stderr, at most
 -- M.CALL_CONTENT_ROWS of them and the count of the non-blank lines left out. A call still running
 -- has no content yet; a call that said nothing adds no row at all.
-function M.call_content(call, width, o)
+-- `whole`: every line, uncapped - what a click on the call's row shows. `result_text`: the script's
+-- own return value when it is text (see below).
+function M.call_content(call, width, o, whole, result_text)
   o = M.opts(o)
   if type(call) ~= "table" then return {}, 0 end
   if call.state == "running" or call.state == "pending" then return {}, 0 end
   local output = M.output_of(call.output)
   if not output then return {}, 0 end
+  -- ONE COPY OF THE OUTPUT (Victor 21/11: "duplicated info, unnecessary ... the compressed one is
+  -- better and if we wish we expand it"). Where a row opens on a click the call is its one row and
+  -- its output is that click (`whole`); a FAILED call keeps its first lines in sight. Where nothing
+  -- can be clicked (a pipe), a call whose output the script returned says it once, as the result.
+  if call.state ~= "failed" then
+    if o.expandable and not whole then return {}, 0 end
+    if not o.expandable and type(result_text) == "string" then
+      local said = (output.stdout:gsub("^%s+", ""):gsub("%s+$", ""))
+      if said ~= "" and result_text:find(said, 1, true) then return {}, 0 end
+    end
+  end
   local limit = math.max(8, (width or 80) - o.columns(M.CALL_CONTENT_INDENT) - 1)
   local rows, shown, hidden = {}, 0, 0
   local function add(text)
     if text:gsub("%s", "") == "" then return end
-    if shown >= M.CALL_CONTENT_ROWS then hidden = hidden + 1; return end
+    if not whole and shown >= M.CALL_CONTENT_ROWS then hidden = hidden + 1; return end
     shown = shown + 1
     for _, piece in ipairs(M.wrap(text, limit, o)) do rows[#rows + 1] = M.CALL_CONTENT_INDENT .. piece end
   end
@@ -363,15 +376,37 @@ function M.call_content(call, width, o)
   return rows, hidden
 end
 
+-- The script's return value when it is TEXT (a JSON-quoted string is read back to its text): what
+-- the result line shows, and what a call's own output is compared with so it is not said twice.
+function M.result_text(model)
+  local value = type(model) == "table" and model.value or nil
+  if type(value) ~= "string" then return nil end
+  if value:match('^%s*"') then
+    local ok, decoded = pcall(json.decode, value)
+    if ok and type(decoded) == "string" then return decoded end
+  end
+  local first = value:match("^%s*(.)") or ""
+  if first == "{" or first == "[" then return nil end
+  return value
+end
+
 -- The block's inner rows as ENTRIES, so its two renderers cannot disagree about them: a call's own
 -- row ("call", rewritten in place as it settles) and the content under it ("content", dim).
 function M.call_entries(model, width, o)
   o = M.opts(o)
   local entries = {}
+  local result_text = M.result_text(model)
   local function add_call(call)
-    entries[#entries + 1] = { kind = "call", text = M.call_text(call, o, width) }
-    for _, row in ipairs(M.call_content(call, width, o)) do
+    local entry = { kind = "call", text = M.call_text(call, o, width) }
+    entries[#entries + 1] = entry
+    local content = M.call_content(call, width, o, false, result_text)
+    for _, row in ipairs(content) do
       entries[#entries + 1] = { kind = "content", text = row }
+    end
+    -- Nothing drawn under the row, and the call did say something: the row carries all of it.
+    if o.expandable and #content == 0 then
+      local all = M.call_content(call, width, o, true)
+      if #all > 0 then entry.expand = all end
     end
   end
   for _, group in ipairs(M.groups(model)) do
@@ -383,7 +418,7 @@ function M.call_entries(model, width, o)
       -- counter row (bash x10, check marks) cannot answer "what did each one say".
       local said = false
       for _, call in ipairs(group.calls) do
-        if #(M.call_content(call, width, o)) > 0 then said = true; break end
+        if #(M.call_content(call, width, o, true)) > 0 then said = true; break end
       end
       if said then
         for _, call in ipairs(group.calls) do add_call(call) end
@@ -657,6 +692,8 @@ function M.result_rows(model, width, o)
   local lines
   if model.value ~= nil then
     local value = M.decoded(model.value)
+    local text = M.result_text(model)
+    if text ~= nil then value = text end
     if type(value) == "table" then
       -- Readable first (an operation becomes its output), then the evidence pointers hidden.
       lines = M.pretty(M.hide_evidence(M.readable(value, o)), o)
@@ -675,10 +712,14 @@ function M.result_rows(model, width, o)
     if line:gsub("%s", "") ~= "" then whole[#whole + 1] = line end
   end
   if #whole == 0 then return rows, 0 end
+  -- A TEXT value where nothing can be clicked (a pipe) is printed whole: it is the one copy of the
+  -- output the reader gets (Victor 21/11), and a pipe cannot ask for the rest.
+  local cap = (M.result_text(model) ~= nil and not o.expandable) and math.huge or M.RESULT_ROWS
   for index, line in ipairs(whole) do
-    if index <= M.RESULT_ROWS then rows[#rows + 1] = line else hidden = hidden + 1 end
+    if index <= cap then rows[#rows + 1] = line else hidden = hidden + 1 end
   end
   if hidden > 0 then rows.whole = table.concat(whole, "\n") end
+  if M.result_text(model) ~= nil then rows.text_lines = #whole; rows.whole = table.concat(whole, "\n") end
   return rows, hidden
 end
 
@@ -862,6 +903,14 @@ function M.call_lines(model, width, o)
       local style = (mark == MARK_NO and "callFail") or (mark == MARK_WAIT and "callWait")
         or (mark == MARK_OK and "callOk") or "dim"
       rows[#rows + 1] = o.paint("  " .. entry.text, style)
+      if entry.expand then
+        -- What a click on this row shows in its place: the row itself, then every line the call
+        -- said (`rows.expand[index]`, the same contract `tail_rows` has).
+        local full = { rows[#rows] }
+        for _, line in ipairs(entry.expand) do full[#full + 1] = o.paint(line, "dim") end
+        rows.expand = rows.expand or {}
+        rows.expand[#rows] = table.concat(full, "\n")
+      end
     end
   end
   return rows
@@ -958,7 +1007,22 @@ function M.tail_rows(model, width, options)
   -- ONE row - its start, then `… +N chars` - and the full rows are what the click shows. An operation
   -- is NOT folded here: the operator asked for its first lines ("results are a compact preview"), and
   -- the whole object rides on the same `rows.expand` below.
-  if not operation and o.expandable and #rows > 1 then
+  if not operation and o.expandable and value.text_lines and value.text_lines > 1 then
+    -- TEXT: its first line and how many more there are - lines, because that is what the click
+    -- shows; never the JSON-quoted string with `\n` in it (Victor 21/11).
+    local room = math.max(8, width - 5 - 16)
+    local shown = M.wrap(value[1] or "", room, o)[1] or ""
+    local full = {}
+    local index = 0
+    for line in (value.whole .. "\n"):gmatch("([^\n]*)\n") do
+      index = index + 1
+      full[#full + 1] = (index == 1 and o.paint(lead, "muted") or "  ") .. o.paint(line, style)
+    end
+    rows = { o.paint(lead, "muted") .. o.paint(shown, style)
+      .. o.paint(" \226\128\166 +" .. (value.text_lines - 1) .. " lines", "muted") }
+    rows.expand = { [1] = table.concat(full, "\n") }
+    value_hidden = 0
+  elseif not operation and o.expandable and #rows > 1 then
     local whole = value.whole or table.concat(value, " ")
     local room = math.max(8, width - 5 - 16)
     local shown = M.wrap(whole, room, o)[1] or ""
