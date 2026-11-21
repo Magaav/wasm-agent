@@ -3272,7 +3272,7 @@ fn stream_completion(l: *mut LuaState, method: &str, url: &str, headers: &[(Stri
                     // model write it is the presentation this event exists for. It is emitted beside
                     // the decision, never instead of it - a consumer that only knows decision (the
                     // window's own row) keeps every field it had.
-                    crate::serve::write_event(&json!({
+                    let forwarded = crate::serve::write_event_forwarded(&json!({
                         "type": "tool_call_delta",
                         "index": index,
                         "call_id": decision.display_id(index),
@@ -3284,7 +3284,13 @@ fn stream_completion(l: *mut LuaState, method: &str, url: &str, headers: &[(Stri
                     // the code argument (an escape or a surrogate pair can straddle two chunks) and
                     // emits run_code_delta, which is what a window draws. Skipping the wire here to
                     // avoid the second event was wrong - it deleted a fact from the run's record.
-                    unsafe { tool_call_delta_to_lua(l, index, &decision.display_id(index), &decision.name, &fragment); }
+                    // ONCE (Victor 21/11, "code block is not streaming"): a run with no sink - the
+                    // CLI's own window - already got this fragment through its event forwarder, and
+                    // a second copy made the decoder read every fragment twice: the script stopped
+                    // streaming after its first piece and was printed whole when the call arrived.
+                    if !forwarded {
+                        unsafe { tool_call_delta_to_lua(l, index, &decision.display_id(index), &decision.name, &fragment); }
+                    }
                 }
                 if let Some((display_id, previous)) = decision.publish_update(index) {
                     emit_decision(decision, &display_id, false, previous.as_deref());

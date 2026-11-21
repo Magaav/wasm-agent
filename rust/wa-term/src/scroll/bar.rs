@@ -244,4 +244,14 @@ mod tests {
         assert_eq!(fit("abcdefgh", 4), "abcd", "cut, never wrapping into the bar's column");
         assert_eq!(fit("\x1b[38;2;1;2;3mab\x1b[0m", 3), "\x1b[38;2;1;2;3mab\x1b[0m ", "escape sequences take no cells");
     }
+
+    /// Victor 21/11: "the scrollbar splits while a call waits". The waiting mark U+23F3 is drawn two
+    /// cells wide by a terminal; counted as one, its row was one cell too long and the bar's glyph
+    /// wrapped onto the next row.
+    #[test]
+    fn the_waiting_mark_takes_two_cells_so_its_row_ends_where_the_bar_is() {
+        assert_eq!(fit("  \u{23f3} bash", 12), "  \u{23f3} bash   ", "2 + 2 + 1 + 4 cells, then three of padding");
+        assert_eq!(fit("  \u{2713} bash", 12), "  \u{2713} bash    ", "the tick is one cell");
+        assert_eq!(fit("\u{2705}\u{2b50}x", 4), "\u{2705}\u{2b50}", "wide emoji below U+1F300 are cut by cells");
+    }
 }

@@ -1263,7 +1263,19 @@ fn cell_width(ch: char) -> usize {
     if (0x1100..=0x115f).contains(&cp) || (0x2e80..=0xa4cf).contains(&cp)
         || (0xac00..=0xd7a3).contains(&cp) || (0xf900..=0xfaff).contains(&cp)
         || (0xfe10..=0xfe6f).contains(&cp) || (0xff01..=0xff60).contains(&cp)
-        || (0x1f300..=0x1faff).contains(&cp) { 2 } else { 1 }
+        || (0x1f300..=0x1faff).contains(&cp) || wide_emoji(cp) { 2 } else { 1 }
+}
+
+/// The emoji below U+1F300 that a terminal draws TWO cells wide (Unicode `Emoji_Presentation`, East
+/// Asian Width W): `\u{23f3}` is the run block's waiting mark. Counted as one cell, its row was padded
+/// one cell too far, the scrollbar's glyph wrapped onto the next row and scrolled the pane (Victor
+/// 21/11: "the scrollbar splits while a call waits").
+fn wide_emoji(cp: u32) -> bool {
+    matches!(cp, 0x231a..=0x231b | 0x23e9..=0x23ec | 0x23f0 | 0x23f3 | 0x25fd..=0x25fe | 0x2614..=0x2615
+        | 0x2648..=0x2653 | 0x267f | 0x2693 | 0x26a1 | 0x26aa..=0x26ab | 0x26bd..=0x26be | 0x26c4..=0x26c5
+        | 0x26ce | 0x26d4 | 0x26ea | 0x26f2..=0x26f3 | 0x26f5 | 0x26fa | 0x26fd | 0x2705 | 0x270a..=0x270b
+        | 0x2728 | 0x274c | 0x274e | 0x2753..=0x2755 | 0x2757 | 0x2795..=0x2797 | 0x27b0 | 0x27bf
+        | 0x2b1b..=0x2b1c | 0x2b50 | 0x2b55)
 }
 
 #[cfg(test)]

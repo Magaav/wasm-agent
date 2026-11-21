@@ -831,6 +831,11 @@ check install-front-door bash scripts/test-install.sh
   else
     echo "fast: status-icon-metrics SKIPPED (python3 not on PATH)"; skipped=$((skipped + 1))
   fi
+  # THE RUN BLOCK AS THE OPERATOR READS IT (change/tui-run-block): the script streams while the
+  # fixture sends the code argument in paced deltas, the output is shown once (one compact result
+  # row that a click opens and folds, one row per call), and the scrollbar is one bar while a call
+  # waits. Its own row, its own fixture: about twenty seconds.
+  WA_BIN="$bin" check run-block-pty node scripts/test-run-block-pty.mjs
   # The cutover exporter (docs/WHATSAPP-CUTOVER.md): a synthetic whatsmeow store in, the wacore
   # device record out, plus the guard rails around a live state directory. Seconds, no phone.
   check whatsapp-adopt node --test scripts/test-whatsapp-adopt.mjs
