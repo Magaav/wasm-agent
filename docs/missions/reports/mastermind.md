@@ -77,8 +77,8 @@ Gaps, named not papered over:
 
 | row | checks | red on 7ddbfa98 because | wired in |
 | --- | --- | --- | --- |
-| scripts/test-agent-control.lua | 34 | lua/core/agent_control.lua does not exist: `lua_root_unreadable` | scripts/fast.sh (row inventory picks every scripts/test-*.lua) |
-| scripts/test-mission-verb.sh | 23 | `unknown command: mission` | scripts/fast.sh:880 `check mission-verb` |
+| scripts/test-agent-control.lua | 41 | lua/core/agent_control.lua does not exist: `lua_root_unreadable` | scripts/fast.sh (row inventory picks every scripts/test-*.lua) |
+| scripts/test-mission-verb.sh | 25 | `unknown command: mission` | scripts/fast.sh:880 `check mission-verb` |
 | scripts/test-agent-control-e2e.cjs | 23 | `unknown_subagent_action` | scripts/test.sh:2549 `run_proof_fixture agent-control` |
 
 Verified red on the base with a separate worktree (`git worktree add ... 7ddbfa98`), never a stash.
@@ -91,7 +91,7 @@ scripts/test-orchestrator-defaults.lua both pass after the change.
 | --- | --- | --- |
 | fork: same context, new session id, appears at once as a child | test-agent-control.lua "a fork is a new session / names its parent / appears in list at once" | `f082459f` |
 | spawn: fresh worker, own brief, own session folder, this or another node | test-agent-control.lua (grounds, depth, policy refusals) and the e2e (three real children) | `f082459f` `18c75227` |
-| supervise without burning tokens: started/commit/failure/done+rc arrive as events | e2e "events carry named kinds", "a cursor returns only later events"; the stream is read from the ledger with no model call | `18c75227` |
+| supervise without burning tokens: started/commit/failure/done+rc arrive as events | test-agent-control.lua: a real commit turn produces a commit event carrying the sha read from the child own checkout, a failed run produces failed, a settled one done; e2e: the live stream and its cursor | `446f5c05` |
 | collect: answer, commits, failures as data | e2e "a settled worker answers as data" + "carries commits, files and failures"; test-agent-control.lua unmeasured-usage case | `18c75227` |
 | control: cancel a child cleanly and the run really ends | e2e waits for `settled:true, state:cancelled` AND for the provider call to be closed | `18c75227` |
 | control: resume, message | test-agent-control.lua (key required, refusal keeps its word) | `f082459f` |

@@ -537,8 +537,17 @@ end
 -- Does this recorded turn say the child committed? Read from the child's own tool call, never guessed
 -- from its prose: the commit event carries the commits read from its checkout.
 local function committed_in(tool_calls)
-  local ok, calls = pcall(json.decode, tostring(tool_calls or "[]"))
-  if not ok or type(calls) ~= "table" then return false end
+  -- The ledger hands this column back in two shapes: a JSON string, or a table the store already decoded.
+  -- tostring() on that table is "table: 0x..." and decodes to nothing, which is how a real commit turn
+  -- produced no event at all (measured). Both shapes are accepted.
+  local calls = tool_calls
+  if type(calls) == "string" then
+    local ok, decoded = pcall(json.decode, calls)
+    if not ok then return false end
+    calls = decoded
+  end
+  local ok = type(calls) == "table"
+  if not ok then return false end
   for _, call in ipairs(calls) do
     local fn = type(call) == "table" and (call["function"] or call) or nil
     local arguments = type(fn) == "table" and tostring(fn.arguments or "") or ""
@@ -563,8 +572,18 @@ function M.events(args, ctx)
   local after = tonumber(args.after or 0) or 0
   if after < 0 or after % 1 ~= 0 then return { error = "invalid_native_event_cursor", events = {} } end
   local children = children_of(session_id, ctx)
+  -- A child is keyed by SESSION, but two children can share one session id in a test ledger (a fork's
+  -- session and a run's session both belong to this parent). The stream is per child, and a row is
+  -- attributed to every child whose session wrote it, so nothing is dropped because another child in the
+  -- same parent claimed the id first.
   local by_session = {}
-  for _, child in ipairs(children) do if child.session ~= "" then by_session[child.session] = child end end
+  for _, child in ipairs(children) do
+    if child.session ~= "" then
+      by_session[child.session] = by_session[child.session] or {}
+      local list = by_session[child.session]
+      list[#list + 1] = child
+    end
+  end
   if next(by_session) == nil then return { session = session_id, events = {}, next_seq = after, children = 0 } end
   local ids = {}
   for session in pairs(by_session) do ids[#ids + 1] = session end
@@ -576,8 +595,14 @@ function M.events(args, ctx)
     .. table.concat(holes, ",") .. ") AND seq>? ORDER BY created_at, seq LIMIT 256", values)
   local events, next_seq, commits_cache = {}, after, {}
   for _, row in ipairs(rows) do
-    local child = by_session[row.session_id]
+    local owners = by_session[row.session_id] or {}
     local seq = tonumber(row.seq) or 0
+    local child = owners[1]
+    for _, candidate in ipairs(owners) do
+      -- The child whose own first turn this row is, when there is one: a session's seq 1 belongs to the
+      -- child it was created for, not to whichever entry the map happened to hold first.
+      if seq == 1 and candidate.created_at_ms <= (child and child.created_at_ms or math.huge) then child = candidate end
+    end
     if child and seq > after then
       if seq > next_seq then next_seq = seq end
       if row.role == "user" and seq == 1 then
@@ -592,9 +617,13 @@ function M.events(args, ctx)
         end
         local settled = child.state == "completed" or child.state == "cancelled" or child.state == "failed"
         if settled then
+          -- The kind is the STATE, not a wrapper: a run that failed is an EVENT-KIND.FAILED event with the
+          -- state on it, and a run that finished is DONE. A caller watching for a failure sorts on the
+          -- kind it was promised in the contract rather than on a field it has to know to read.
           local updates = { rounds = child.rounds, tokens = child.tokens }
           if child.state == "failed" then updates.detail = "run_failed" end
-          events[#events + 1] = event_of(child, seq, "done", row.created_at, updates)
+          events[#events + 1] = event_of(child, seq, child.state == "failed" and "failed" or "done",
+            row.created_at, updates)
         end
       end
     end

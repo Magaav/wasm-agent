@@ -121,4 +121,17 @@ has "$out" 'name_must' 'a name that is a path is refused'
 out=$(mission start nothere 2>&1)
 has "$out" 'not_staged' 'an unstaged mission is not started'
 
+# --- resume: the verb exists, refuses by name when there is nothing to resume, and never reports
+# "resumed" for a session that was not found.
+out=$(mission resume nothere 2>&1)
+has "$out" 'not_staged' 'resume refuses an unstaged mission by name'
+out=$(mission resume demo 2>&1)
+if printf '%s' "$out" | grep -q 'not_a_hiccup'; then
+  ok
+elif printf '%s' "$out" | grep -q 'no_session'; then
+  ok
+else
+  fail "resume did not refuse by name: $out"
+fi
+
 printf 'mission-verb ok (%d checks)\n' "$checks"

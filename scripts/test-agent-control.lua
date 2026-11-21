@@ -1,12 +1,19 @@
 -- The agent-control API (wit/agent-control, lua/core/agent_control.lua): one implementation of
 -- fork/spawn/events/collect/cancel/resume/message/list, and the vocabulary it promises.
 --
--- This row runs against the REAL ledger, in its own scratch home, with the native child runtime STUBBED:
--- scripts/lib/contract-host.lua covers the host capabilities, but it does not cover subagents (a native
--- thread per child, its sockets and its cancel flag), so that one capability is stubbed here by hand and
--- says so. The stub answers the exact actions lua/core/subagents.lua dispatches (list, status, cancel,
--- continue, steer) and nothing else: a stub that answered more than the real host does would let this row
--- pass on a call the node would refuse.
+-- This row runs against the REAL ledger and the real host, in its own scratch home, with exactly TWO
+-- capabilities replaced by hand:
+--
+--   * host.subagent, the native child runtime (a thread per child, its sockets, its cancel flag), because
+--     a unit row cannot run a real child inference;
+--   * nothing else - host.exec, host.sql_* and host.now are the node's own.
+--
+-- Neither is covered by the shared contract fake: scripts/lib/contract-host.lua carries no subagent and no
+-- exec entry (measured: 0 matches for either), so a hand stub is the only option here and it says which
+-- capability it replaces and why. The stub answers the exact actions lua/core/subagents.lua dispatches -
+-- list, status, result, cancel, continue, steer, capacity - with the real shapes ('status' removes the
+-- result field, as the native branch does), and nothing else: a stub that answered more than the host does
+-- would let this row pass on a call the node would refuse.
 local scratch = dofile('scripts/lib/scratch-home.lua')
 local why = scratch.guard('test-agent-control.lua')
 if why then print('REFUSED ' .. why); os.exit(2) end
@@ -169,7 +176,67 @@ check(seen, 'a fork appears in list at once')
 check(control.collect({ id = fork_child.id }, ctx).error == 'fork_has_no_run',
   'a fork is never reported as a finished run')
 
--- events: what happened, in order, without asking a model.
+-- events: what happened, in order, without asking a model. Every kind the contract names is exercised
+-- here, because a stream that can only say "started" is not supervision:
+--   started - the child's first turn (the e2e proves it live);
+--   commit  - a turn whose recorded tool call was a git commit, with the commits read from its checkout;
+--   failed  - a run that settled failed, as its own kind, not a done with a field to notice;
+--   done    - a run that finished.
+local ledger = dofile('lua/core/agent_control.lua')
+local child_session = memory.start_session('', 'chat', { user_id = 'master' })
+memory.append_turn(child_session, { role = 'user', content = 'WORKER_X task' })
+memory.append_turn(child_session, { role = 'assistant', content = 'committed',
+  -- A Lua table, not an encoded string: append_turn encodes what it is given, so a string here would be
+  -- stored as a string and the reader that parses the column would see no tool calls at all.
+  tool_calls = { { ['function'] = { name = 'bash', arguments = 'git commit -m work' } } } })
+children.settled.session_id = child_session
+children.settled.state = 'completed'
+-- A child that FAILED, with its own second session, so the failed kind is a real row and not a flag.
+local failed_session = memory.start_session('', 'chat', { user_id = 'master' })
+memory.append_turn(failed_session, { role = 'user', content = 'WORKER_Y task' })
+memory.append_turn(failed_session, { role = 'assistant', content = 'gave up' })
+children.running.session_id = failed_session
+children.running.state = 'failed'; children.running.settled = true
+-- The commits are read from the child's OWN checkout, so this child gets a real one: a scratch git
+-- repository bound to its session, with one commit in it. That is the same read the node performs, not a
+-- stubbed git.
+local scratch_dir = host.getenv('TMPDIR') or '/tmp'
+local repo_dir = scratch_dir .. '/wa-agent-control-commits-' .. tostring(host.uuid())
+local function sh(command, cwd)
+  local ok, raw = pcall(host.exec, command, cwd or '', 60)
+  if not ok then return '' end
+  local decoded = json.decode(raw)
+  return decoded and tostring(decoded.stdout or '') or ''
+end
+sh('mkdir -p ' .. repo_dir)
+sh('git init -q -b main . && git config user.email t@e.invalid && git config user.name t'
+  .. ' && echo work > work.txt && git add work.txt && git commit -qm "do the work"', repo_dir)
+local wanted_sha = (sh('git rev-parse HEAD', repo_dir):gsub('%s+$', ''))
+check(#wanted_sha == 40, 'the scratch checkout has a commit to read: ' .. wanted_sha)
+memory.set_session_workspace(child_session, { managed = true, state = 'bound', worktree = repo_dir,
+  branch = 'change/test' })
+
+local stream = control.events({ after = 0 }, ctx)
+local kinds, commit_seen, commit_sha, failed_state = {}, false, nil, nil
+for _, event in ipairs(stream.events) do
+  kinds[event.kind] = true
+  if event.kind == 'commit' then
+    commit_seen = true
+    commit_sha = event.commits[1] and event.commits[1].sha
+  end
+  if event.kind == 'failed' then failed_state = event.state end
+end
+check(commit_seen and kinds['commit'], 'a turn that committed produces a commit event')
+check(commit_sha == wanted_sha, 'a commit event carries the commit read from its own checkout: '
+  .. tostring(commit_sha) .. ' vs ' .. wanted_sha)
+check(kinds['failed'], 'a run that failed produces a failed event, by kind')
+check(failed_state == 'failed', 'a failed event carries the failed state')
+check(kinds['done'], 'a settled run produces a done event')
+local after_cursor = control.events({ after = stream.next_seq }, ctx)
+check(#after_cursor.events == 0 or (function()
+  for _, event in ipairs(after_cursor.events) do if event.seq <= stream.next_seq then return false end end
+  return true
+end)(), 'events after the cursor never repeat an earlier one')
 local events = control.events({ after = 0 }, ctx)
 check(type(events.events) == 'table', 'events answers with an event list')
 local kinds = {}
