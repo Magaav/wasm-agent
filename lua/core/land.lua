@@ -1654,7 +1654,11 @@ function M.regenerate(run, tree, evidence)
   if count == 0 or #changed == 0 then
     return true, { ran = true, changed = {} }
   end
-  local added = git(run, tree, "add -A", 300)
+  -- ONLY THE PATHS THE GENERATORS SAID THEY WROTE: `add -A` would also put any stray file a generator (or
+  -- anything else in this tree) left behind into the merge commit that becomes main.
+  local quoted = {}
+  for _, path in ipairs(changed) do quoted[#quoted + 1] = quote(path) end
+  local added = git(run, tree, "add -- " .. table.concat(quoted, " "), 300)
   if (added.code or 1) ~= 0 then
     return false, { error = "regenerate_unstaged",
       observed = first_line(tostring(added.stderr ~= "" and added.stderr or added.stdout)),
