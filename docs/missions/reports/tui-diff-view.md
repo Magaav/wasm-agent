@@ -72,6 +72,25 @@ after each. Every mutation failed a NAMED assertion, and the restored tree was g
 | a removed row's old line number replaced by 0 | `a removed row carries the old line number and no new one` |
 | the card opening given a title (`U+250C U+2500 main.lua`) | `the opening row is the bare card corner` |
 | every hidden row silently dropped, no count | `a big diff states how many rows it hid and how to see them` |
+### The same file, run two ways
+
+| How | Result |
+| --- | --- |
+| through the built binary (how the gate runs it) | `diff view ok (35 checks)` |
+| a bare `lua tests/diff-view.lua` (no node at all) | `diff view ok (32 checks)`, plus `SKIP real git: no host.exec in this run (the gate's binary run judges it)` |
+| a bare `lua`, `NO_COLOR=1` | the same 32 checks, the same text, no escape sequence (asserted, not skimmed) |
+
+The bare run is possible because the test uses the ONE shared host fake, `scripts/lib/contract-host.lua`,
+when `host` is absent - never a stub written inside the test. That fake gained `sha256` in this branch
+(`scripts/lib/contract-host.lua`), with its own comment saying what it is: a stable digest string, NOT
+the real algorithm, because two tests needed a content address and a length-only stand-in made both
+sides of a diff collide in this very session. It is deliberately not added to the comparison in
+`scripts/test-contract-host.lua` for that reason - a fake claiming the real digest would be the
+"kinder than the host" failure that file exists to prevent. The fake itself still passes its judgement
+against the real host: `host contract: 52 checks ok, 11 capabilities compared`.
+
+The real-git section is NOT skipped silently in the gate: the binary run executes it (35 vs 32 checks is
+that section plus its assertions), and the skip line names why it cannot be judged in a bare run.
 ## What this branch does NOT do
 
 - A file that was ALREADY modified before the command has no captured before-side, so its diff is
