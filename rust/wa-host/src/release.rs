@@ -532,11 +532,17 @@ pub fn run(args: &[String]) -> Option<i32> {
     if args.iter().any(|arg| arg == "--node") {
         return None;
     }
+    // `wa release cut` is the release loop (lua/core/land.lua): a state machine with a journal, answered
+    // by the Lua CLI like every other fleet verb.
+    if args.first().map(String::as_str) == Some("cut") {
+        return None;
+    }
     if args.iter().any(|arg| arg == "--help" || arg == "-h") || args.is_empty() {
         println!("usage: wa release verify <dir|SHA256SUMS> [SHA256SUMS.sig] [--key <file>]... [--quiet]");
         println!("       wa release verify --sums <dir|SHA256SUMS> [--sig <file>] [--key <file>]... [--quiet]");
         println!("       wa release trust-key <id> <public hex> [--file <path>]");
         println!("       wa release trust-key <id> --retire [--file <path>]");
+        println!("       wa release cut [--dry-run] [--no-deploy] [--signer <node|local>] [--run <id> --resume]");
         return Some(if args.is_empty() { 2 } else { 0 });
     }
     match args.first().map(String::as_str) {

@@ -718,6 +718,159 @@ end
 
 local impl = {}
 
+-- ---------------------------------------------------------------- the release loop (`wa release cut`)
+--
+-- FACTORY.md rule 1: a landing ends at main; a RELEASE is cut from main's tip when the owner says. It is the
+-- same state machine, the same journal and the same steps from the gate on - with nothing to land: collect
+-- reads main, review/merge/push/main are settled as "nothing to land", the gate runs every check (kept when
+-- the same tree object already passed the same command, M.gate_history), then artifacts, sign, ship,
+-- publish, deploy. It pushes no branch and moves no main, so a failure in it leaves every landing as it was.
+
+-- <run> <repo> <base> -> the run's tree: a DETACHED worktree of main's tip. The merge step makes the tree of
+-- a landing; a release has no merge, so this is where artifacts/sign/ship find their checkout. Idempotent:
+-- a resume whose worktree is gone gets it back at the same commit.
+function M.release_tree(run, repo, base, evidence)
+  local tree = run.tree_dir or (M.run_dir(run.id) .. "/tree")
+  if rev(tree, "HEAD") ~= base then
+    git(run, repo, "worktree prune")
+    local added = git(run, repo, "worktree add --quiet --detach " .. quote(tree) .. " " .. quote(base), 600)
+    if evidence then
+      evidence(command_line("worktree", "git worktree add --detach " .. tree .. " " .. base))
+      evidence((added.stdout or "") .. (added.stderr or ""))
+    end
+    if (added.code or 1) ~= 0 or rev(tree, "HEAD") ~= base then
+      return false, { error = "release_tree_failed",
+        observed = "git worktree add --detach " .. tree .. " " .. tostring(base):sub(1, 12) .. " exited " ..
+          tostring(added.code) .. ": " .. last_line(tostring(added.stderr or "") .. "\n" .. tostring(added.stdout or "")),
+        next = "git -C " .. tostring(repo) .. " worktree prune, then wa release cut --run " .. run.id .. " --resume" }
+    end
+  end
+  run.tree = tree
+  run.journal.tree = tree
+  run.journal.tree_commit = base
+  run.journal.tree_sha = tree_of(tree)
+  run.journal.release = true
+  return true
+end
+
+-- THE PRECONDITIONS, asked in the first second and before any build. 5 of 19 landings on 20-21/11 stopped at
+-- sign or publish AFTER paying for the gate and the artifacts, for a reason that was true before the run
+-- began (the signer could not reach the vault; gh could not read the desktop keyring). Each check answers
+-- { ready = bool, why = <text>, next = <the one command that fixes it> } and is a field of this table so a
+-- test (or an operator's wrapper) replaces it without a vault or GitHub.
+M.release_checks = {}
+M.RELEASE_CHECK_ORDER = { "signing", "publishing", "ancestry" }
+-- which step a check protects: a resume whose step is already settled does not ask again.
+M.RELEASE_CHECK_STEP = { signing = "sign", publishing = "publish", ancestry = "artifacts" }
+
+function M.release_checks.signing(options)
+  local signer, problem = M.signer(options)
+  if not signer then
+    return { ready = false, error = "release_signing_not_ready", why = tostring(problem.detail) .. " (" .. tostring(problem.observed) .. ")",
+      next = "wa release cut --signer <the node that runs wa-vault>   (or --signer local on that node)" }
+  end
+  if signer.kind == "node" then
+    if M.probes_vault(signer.node) then return { ready = true, why = "signer " .. signer.node .. " names a vault URL (" .. signer.why .. ")" } end
+    return { ready = false, error = "release_signing_not_ready",
+      why = "the signer " .. signer.node .. " (" .. signer.why .. ") did not answer with a vault URL",
+      next = "wa nodes   (is " .. signer.node .. " reachable?), or name another: wa release cut --signer <node>" }
+  end
+  -- This node signs: the same URL and token rule scripts/lib/release-signing.sh applies, asked without
+  -- printing either value.
+  local probe = M.exec('url="${WA_VAULT_ADMIN_URL:-${WASM_AGENT_VAULT_OPERATOR_URL:-http://127.0.0.1:${WA_VAULT_ADMIN_PORT:-8801}}}"; ' ..
+    'if [ -z "${WA_VAULT_ADMIN_TOKEN:-}" ] && ! { [ -n "${WA_VAULT_ADMIN_TOKEN_FILE:-}" ] && [ -r "${WA_VAULT_ADMIN_TOKEN_FILE}" ]; }; then echo no-token; ' ..
+    'elif curl -s -o /dev/null --max-time 5 "$url"; then echo reachable; else echo unreachable; fi', "", 30) or {}
+  local answer = trim(probe.stdout)
+  if answer == "reachable" then return { ready = true, why = "this node reaches the vault's admin listener (" .. signer.why .. ")" } end
+  if answer == "no-token" then
+    return { ready = false, error = "release_signing_not_ready",
+      why = "this node would sign (" .. signer.why .. ") and has no vault admin token: neither WA_VAULT_ADMIN_TOKEN nor a readable WA_VAULT_ADMIN_TOKEN_FILE",
+      next = "export WA_VAULT_ADMIN_TOKEN_FILE=<the 0600 token file> in this shell, or sign where the vault runs: wa release cut --signer <node>" }
+  end
+  return { ready = false, error = "release_signing_not_ready",
+    why = "this node would sign (" .. signer.why .. ") and the vault's admin listener does not answer",
+    next = "start the vault (or set WA_VAULT_ADMIN_URL to its admin listener), or sign where it runs: wa release cut --signer <node>" }
+end
+
+function M.release_checks.publishing(options)
+  local account = trim(options.account)
+  local routed = account ~= "" and account ~= "local" and account ~= "this"
+  local gh_command = "command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1 && echo yes || echo no"
+  if routed then
+    local reply, problem = M.node_bash(account, gh_command)
+    if reply and trim(reply.stdout) == "yes" then return { ready = true, why = "gh on " .. account .. " is signed in" } end
+    return { ready = false, error = "release_publishing_not_ready",
+      why = reply and ("gh on " .. account .. " is missing or signed out")
+        or (account .. " did not answer: " .. tostring(problem and (problem.observed or problem.detail) or "")),
+      next = "gh auth login   (on " .. account .. "), or publish from here: wa release cut --account local" }
+  end
+  local here = M.exec(gh_command, "", 60) or {}
+  if trim(here.stdout) == "yes" then return { ready = true, why = "gh here is signed in" } end
+  return { ready = false, error = "release_publishing_not_ready",
+    why = "gh here is missing or signed out (gh reads its token from the desktop keyring; a systemd unit or an ssh shell has no session bus to unlock it)",
+    next = "gh auth login   (in a desktop terminal; or export GH_TOKEN there), then run wa release cut from that same shell" }
+end
+
+-- The ancestry rule (docs/missions/reports/release-ancestry.md): a node installs a release over its
+-- predecessor only when the new binary can prove it contains the old commit. Two facts decide that before a
+-- build: the checkout must not be shallow (publish-node-binaries.sh refuses ancestry_window_unknown after
+-- the build otherwise), and main must contain the release this machine published last.
+function M.release_checks.ancestry(options)
+  local repo = M.repo()
+  if not repo then return { ready = true, why = "no checkout to ask (collect refuses that by name)" } end
+  local shallow = git(nil, repo, "rev-parse --is-shallow-repository", 60)
+  if trim(shallow.stdout) == "true" then
+    return { ready = false, error = "release_ancestry_not_ready",
+      why = repo .. " is a shallow clone, so the release cannot prove which commits it contains (ancestry_window_unknown)",
+      next = "git -C " .. repo .. " fetch --unshallow " .. M.origin() }
+  end
+  local main = rev(repo, "origin/main")
+  for _, path in ipairs(M.published_journals and M.published_journals() or {}) do
+    local journal = json_file(path)
+    if journal and type(journal.publish) == "table" and journal.publish.tag and journal.tree_commit then
+      local previous = tostring(journal.tree_commit)
+      if main and rev(repo, previous) and not is_ancestor(repo, previous, main) then
+        return { ready = false, error = "release_ancestry_not_ready",
+          why = "origin/main (" .. main:sub(1, 12) .. ") does not contain the previous release " .. tostring(journal.publish.tag) ..
+            " (run " .. tostring(journal.run) .. "): every node on it would refuse this one",
+          next = "git -C " .. repo .. " log --oneline origin/main.." .. previous:sub(1, 12) .. "   (land those commits, then wa release cut)" }
+      end
+      return { ready = true, why = "main contains the previous release " .. tostring(journal.publish.tag) }
+    end
+  end
+  return { ready = true, why = "full history; no earlier release recorded under " .. M.root() }
+end
+
+-- <options> [journal] -> rows { name, ready, why, next, error }, all_ready. Read-only.
+function M.release_preflight(options, journal)
+  local rows, all = {}, true
+  for _, name in ipairs(M.RELEASE_CHECK_ORDER) do
+    local step = journal and journal.steps and journal.steps[M.RELEASE_CHECK_STEP[name]]
+    local row
+    if step and (step.state == "done" or step.state == "skipped") then
+      row = { ready = true, why = "step " .. M.RELEASE_CHECK_STEP[name] .. " is already " .. step.state .. " in this run" }
+    else
+      local called, answer = pcall(M.release_checks[name], options)
+      row = (called and type(answer) == "table") and answer
+        or { ready = false, error = "release_" .. name .. "_not_ready", why = "the check itself failed: " .. tostring(answer),
+             next = "wa release cut --dry-run" }
+    end
+    row.name = name
+    if row.ready ~= true then all = false end
+    rows[#rows + 1] = row
+  end
+  return rows, all
+end
+
+function M.release_preflight_lines(rows)
+  local lines = {}
+  for _, row in ipairs(rows) do
+    lines[#lines + 1] = string.format("release: %s: %s (%s)", row.name, row.ready == true and "ready" or "not ready", tostring(row.why))
+    if row.ready ~= true then lines[#lines + 1] = "release:   fix: " .. tostring(row.next) end
+  end
+  return lines
+end
+
 -- collect: which branches, at which tips. `--ready` reads the ready box, which is the same line an agent
 -- prints when it finishes (`READY <branch> <sha>`), so a coordinator or an agent records it with
 -- `wa land ready <branch> <sha>` and this step reads it back. A recorded sha that no longer matches the
@@ -787,7 +940,10 @@ impl.collect = function(run, options)
   end
 
   local wanted = {}
-  if options.branches and #options.branches > 0 then
+  if options.release then
+    -- A RELEASE RUN LANDS NOTHING: its tree is main's tip, so there is no branch to resolve (see
+    -- M.release_tree below, which gives the later steps the tree a merge would have given them).
+  elseif options.branches and #options.branches > 0 then
     for _, name in ipairs(options.branches) do wanted[#wanted + 1] = { name = name } end
   elseif options.ready then
     local box = M.ready_file()
@@ -841,10 +997,26 @@ impl.collect = function(run, options)
   run.journal.base = base
   run.journal.base_ref = base_ref
   run.journal.repo = repo
+  if options.release then
+    -- THE RELEASE IS OF origin's MAIN, and of nothing else. When the incoming main is ahead of it a landing
+    -- pushed and did not fast-forward main yet: releasing that tip would publish a commit main does not have.
+    if origin_main and base ~= origin_main then
+      return false, { error = "release_main_not_on_origin",
+        observed = string.format("%s/main is %s and origin/main is %s: a landing pushed and has not moved main",
+          incoming, base:sub(1, 12), origin_main:sub(1, 12)),
+        next = "finish that landing first (wa land --resume), then wa release cut" }
+    end
+    local made, problem = M.release_tree(run, repo, base, evidence)
+    if not made then return false, problem end
+    if origin_main then run.journal.main_sha = base end
+  end
   run.journal.incoming = incoming
   run.journal.incoming_tracking = tracked
   run.journal.origin = M.origin()
   run.journal.branches = branches
+  if options.release then
+    return true, { detail = string.format("release of main's tip %s (%s): no branch to land", base:sub(1, 12), base_ref) }
+  end
   return true, { detail = string.format("base %s, %d branch(es): %s", base:sub(1, 12), #branches,
                   table.concat((function()
                     local names = {}
@@ -1066,6 +1238,9 @@ end
 
 -- The finished runs in the journal: what an estimate is made from. Only a run whose result is `done` is used -
 -- a stopped round's step times are the part that worked, not what a round costs.
+-- The journals the ancestry precondition reads for the last published release (newest first).
+function M.published_journals() return journals_by_newest(40) end
+
 function M.land_runs(limit)
   local runs = {}
   for _, path in ipairs(journals_by_newest(limit)) do
@@ -1227,6 +1402,23 @@ impl.plan = function(run, options)
   local evidence = sink(run, "plan")
   local repo = run.journal.repo or M.repo()
   local paths, path_notes = M.changed_paths(run)
+  if run.journal.release then
+    -- A RELEASE CHANGES NO PATH (its tree IS main) and still takes the full path: every check, the node
+    -- release, every step after the gate. The plan is built the way an unreadable diff is - nothing is
+    -- narrowed - and then says what it really is.
+    local plan = M.build_plan(run, {}, { "release of main's tip" }, M.ring(options))
+    plan.classifier, plan.unknown_paths, plan.rows_why = "release", nil, nil
+    plan.why = "a release is cut from main's tip: the whole gate (kept where this tree already passed it), then the node release"
+    for _, name in ipairs({ "review", "merge", "push", "main" }) do
+      plan.steps[name] = { action = "skip", why = "nothing to land: a release is cut from main's tip" }
+    end
+    run.journal.plan = plan
+    local text = M.plan_text(run.journal)
+    print(text)
+    evidence(text .. "\n")
+    return true, { detail = string.format("release: every check (%d), expected %s (%s)", #plan.checks,
+      M.duration_text(plan.expected_seconds), plan.expected_from) }
+  end
   -- A broken diff is evidence, not an empty round: M.build_plan takes the notes, names every one of them in the
   -- plan's own `why` line (which is printed and kept in the evidence below), and plans the FULL path - so an
   -- unreadable git costs time, never coverage.
@@ -3428,9 +3620,13 @@ end
 
 -- The newest run that is not finished: what `--resume` continues. A stopped run is a run to continue, and so
 -- is one that never got as far as a result.
-local function newest_unfinished()
+local function newest_unfinished(release)
   for _, path in ipairs(journals_by_newest(20)) do
     local journal = json_file(path)
+    -- TWO LOOPS, TWO QUEUES: a bare `wa land --resume` never continues a release run and a bare
+    -- `wa release cut --resume` never continues a landing. Either is resumable by name (--run <id>).
+    local is_release = journal and (journal.release == true or (type(journal.start) == "table" and journal.start.release == true))
+    if journal and (is_release and true or false) ~= (release and true or false) then journal = nil end
     -- A PREFLIGHT IS NOT AN UNFINISHED LANDING. A run that stopped after --until <step> answered the
     -- question it was asked and then stopped ON PURPOSE, and --until is deliberately not inherited by a
     -- resume - so continuing it would push, fast-forward main, build a release, publish it and deploy, for
@@ -3494,7 +3690,7 @@ end
 --
 -- A flag given ON the resume wins: it is the more recent instruction. Everything not given falls back to the
 -- journal. `ring` is stored RESOLVED (node and mode), because the answer to `--ring` is what the round uses.
-local START_KEYS = { "full", "no_deploy", "account", "signer", "canary", "session" }
+local START_KEYS = { "full", "no_deploy", "account", "signer", "canary", "session", "release" }
 
 local function remember_start(run, options)
   local start = run.journal.start or {}
@@ -3534,10 +3730,12 @@ end
 
 function M.run(options)
   options = type(options) == "table" and options or {}
+  if options.release and not options.run then options.run_prefix = options.run_prefix or "release" end
   if options.resume and not options.run then
-    options.run = newest_unfinished()
+    options.run = newest_unfinished(options.release)
     if not options.run then
-      print("land: nothing to resume: no unfinished run under " .. M.root())
+      print((options.release and "release" or "land") .. ": nothing to resume: no unfinished " ..
+        (options.release and "release " or "") .. "run under " .. M.root())
       return 1
     end
   end
@@ -3551,7 +3749,44 @@ function M.run(options)
   end
   -- A DRY RUN WRITES NOTHING, so the start options are recorded only after this return: a plan that wrote a
   -- journal entry would change the thing it says it does not touch.
+  if options.release and (options.branches or options.ready or options.rollback) then
+    print("release: refused(release_takes_no_branch): a release is cut from main's tip and lands nothing")
+    print("release: next: wa land --branches <branch> --until main   (land it), then wa release cut")
+    return 2
+  end
+  if not run.fresh and options.release and type(run.journal.start) == "table" and run.journal.start.release ~= true
+     and run.journal.release ~= true then
+    print("release: refused(release_resume_of_landing): run " .. run.id .. " is a landing, not a release")
+    print("release: next: wa land --run " .. run.id .. " --resume   (or a fresh release: wa release cut)")
+    return 2
+  end
+  if options.dry_run and options.release then return M.release_dry_run(run, options) end
   if options.dry_run then return M.dry_run(run, options) end
+  if options.release then
+    -- BEFORE THE JOURNAL, THE FETCH AND THE BUILD: a precondition that fails refuses here, by name, with
+    -- the command that fixes it, and nothing was written.
+    local rows, all_ready = M.release_preflight(options, run.journal)
+    for _, line in ipairs(M.release_preflight_lines(rows)) do print(line) end
+    if not all_ready then
+      for _, row in ipairs(rows) do
+        if row.ready ~= true then
+          print("release: refused(" .. tostring(row.error) .. "): " .. tostring(row.why))
+          print("release: next: " .. tostring(row.next))
+        end
+      end
+      print("release: nothing was fetched, built, signed or published")
+      return 1
+    end
+    -- A resume whose worktree is gone gets it back before a settled collect is skipped over.
+    if not run.fresh and run.journal.tree_commit and run.journal.repo then
+      local made, problem = M.release_tree(run, run.journal.repo, run.journal.tree_commit, nil)
+      if not made then
+        print("release: refused(" .. tostring(problem.error) .. "): " .. tostring(problem.observed))
+        print("release: next: " .. tostring(problem.next))
+        return 1
+      end
+    end
+  end
   -- A RUN THAT STOPPED AFTER --until IS RESUMED ONLY BY AN INVOCATION THAT SAYS WHERE TO STOP AGAIN. The
   -- boundary was the whole point of that run (a preflight asks the gate and nothing else), and a resume
   -- that silently dropped it would turn the answer into a landing and a release (review r1, BLOCKER 1).
@@ -3587,6 +3822,13 @@ function M.run(options)
         save(run)
       end
       print("land: " .. name .. ": skipped (rollback run)")
+    elseif options.release and (name == "review" or name == "merge" or name == "push" or name == "main") then
+      -- Settled BY NAME: a release has no branch to review or merge, pushes no landing branch and moves no main.
+      if not settled then
+        step.state, step.detail = "skipped", "skipped: nothing to land (a release is cut from main's tip)"
+        save(run)
+      end
+      print("land: " .. name .. ": skipped (nothing to land: a release is cut from main's tip)")
     elseif settled and name ~= "report" then
       print("land: " .. name .. ": " .. step.state .. " already" .. (step.detail and (" (" .. tostring(step.detail) .. ")") or ""))
     else
@@ -3636,6 +3878,12 @@ function M.run(options)
     print("")
     print(string.format("land: stopped after %s (--until): nothing after it ran%s", reached_until,
       #remaining > 0 and (" (" .. table.concat(remaining, " ") .. ")") or ""))
+    if reached_until == "main" and run.journal.main_sha then
+      -- THE LOCAL LOOP'S RESULT (FACTORY.md rule 1): main moved and that is the whole landing. No release
+      -- was made and none is owed by this run; `wa release cut` starts its own run from main's tip.
+      print(string.format("land: landed %s on main - the landing is complete (local loop: no release, no node). A release is its own command: wa release cut",
+        tostring(run.journal.main_sha):sub(1, 12)))
+    end
     print("land: evidence: " .. tostring((step_of(run.journal, "gate") or {}).evidence or "-"))
     print("land: journal: " .. M.journal_path(run.id))
     print("land: report: " .. M.report_path(run.id))
@@ -3653,7 +3901,8 @@ function M.run(options)
     print(string.format("land: STOPPED at %s: %s", stopped, tostring(step.detail or step.error or "")))
     print("land: evidence: " .. tostring(step.evidence or "-"))
     print("land: report: " .. M.report_path(run.id))
-    print("land: continue with: wa land --resume")
+    print(options.release and ("land: continue with: wa release cut --run " .. run.id .. " --resume   (main and every landing are untouched)")
+      or "land: continue with: wa land --resume")
     return 1
   end
   run.journal.result = "done"
@@ -3664,7 +3913,8 @@ function M.run(options)
   -- said done (measured, case29 of this round). The report is the journal as a document, and it must agree
   -- with the journal it documents.
   write(M.report_path(run.id), M.report_text(run.journal))
-  print(string.format("land: done (run %s, landed %s)", run.id, tostring(run.journal.tree_commit or ""):sub(1, 12)))
+  print(string.format(options.release and "release: done (run %s, released main %s)" or "land: done (run %s, landed %s)",
+    run.id, tostring(run.journal.tree_commit or ""):sub(1, 12)))
   return 0
 end
 
@@ -3757,6 +4007,39 @@ function M.dry_run(run, options)
     end
   end
   return 0
+end
+
+-- `wa release cut --dry-run`: the plan, and whether signing and publishing are ready. Nothing is fetched,
+-- written, built or asked of GitHub beyond `gh auth status`.
+function M.release_dry_run(run, options)
+  local repo = M.repo()
+  print("release: dry run - nothing is fetched, built, signed, pushed, published or deployed")
+  print("release: journal would be " .. M.journal_path(run.id))
+  local tip = repo and rev(repo, "origin/main") or nil
+  print("release: from origin/main " .. (tip and tip:sub(1, 12) or "(unknown here)") .. " as this checkout has it (the run fetches first)  repository " .. tostring(repo))
+  print("release: steps: collect (main's tip) - plan - review/merge/push/main skipped (nothing to land) - gate (every check; kept where this tree already passed) - artifacts - sign - ship - publish - " ..
+    (options.no_deploy and "deploy skipped (--no-deploy)" or "deploy") .. " - report")
+  if not options.no_deploy then
+    local waves = M.deploy_waves(M.ring(options), options)
+    for index, wave in ipairs(waves.waves) do
+      for _, entry in ipairs(wave) do
+        print(string.format("release:   deploy wave %d: wa update %s (%s)", index, entry.node, entry.mode))
+      end
+    end
+  end
+  local rows = M.release_preflight(options, run.journal)
+  for _, line in ipairs(M.release_preflight_lines(rows)) do print(line) end
+  return 0
+end
+
+-- `wa release cut ...`: the release loop's door (lua/core/init.lua hands `release cut` here; every other
+-- `wa release` verb belongs to the binary and lua/core/release_trust.lua). The flags are `wa land`'s own.
+function M.release_cli(argv)
+  argv = type(argv) == "table" and argv or {}
+  if argv[1] ~= "release" or argv[2] ~= "cut" then return nil end
+  local forwarded = { "land", "--release" }
+  for index = 3, #argv do forwarded[#forwarded + 1] = argv[index] end
+  return M.cli(forwarded)
 end
 
 -- ---------------------------------------------------------------- `wa land status` / `ready`
@@ -4067,6 +4350,7 @@ function M.cli(argv)
       local value = read_value(flag); if not value then return 2 end
       options.branches = split(value); index = index + 2
     elseif flag == "--ready" then options.ready = true; index = index + 1
+    elseif flag == "--release" then options.release = true; index = index + 1
     elseif flag == "--dry-run" then options.dry_run = true; index = index + 1
     elseif flag == "--full" then options.full = true; index = index + 1
     elseif flag == "--canary" then
@@ -4119,6 +4403,8 @@ function M.cli(argv)
       print("wa land --rollback                 put every node's kept pair back (reverse ring order)")
       print("wa land mark <step> --evidence <file> [--run <id>]   record a step done out of band, after re-verifying it")
       print("wa land status [--run <id>]        the journal, read-only")
+      print("wa release cut [--dry-run] [--no-deploy] [--signer <node|local>] [--account <node>] [--run <id>] [--resume]")
+      print("                                   a signed release FROM MAIN'S TIP, rolled to the fleet; lands nothing")
       print("wa land ready <branch> <sha> [--brief <file>]   record a READY line for a finished branch")
       print("  --repo <dir> --incoming <remote> --origin <remote> --ring node:mode,... --json")
       print("  --canary <node> --account <node>  which node goes first (default work) and last (default openclaw)")
@@ -4133,7 +4419,7 @@ function M.cli(argv)
   end
   if options.status then
     local id = options.run
-    if not id then id = newest_unfinished() end
+    if not id then id = newest_unfinished(options.release) end
     if not id then
       print("wa land: no run under " .. M.root())
       return 1
@@ -4147,7 +4433,8 @@ function M.cli(argv)
     print("report: " .. M.report_path(id))
     return journal.result == "done" and 0 or 1
   end
-  if not options.branches and not options.ready and not options.resume and not options.run and not options.rollback then
+  if not options.branches and not options.ready and not options.resume and not options.run and not options.rollback
+     and not options.release then
     print("wa land: nothing named. Use --ready (the ready box), --branches a,b, --resume, or --rollback.")
     print("wa land --help")
     return 2
