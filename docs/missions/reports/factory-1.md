@@ -4,6 +4,7 @@ Branch `change/factory-1`, base bfad4f8f. Commits (all local, nothing pushed):
 
 | commit | what it implements |
 | --- | --- |
+| 7c12238f | review r1, items 1-4 (below): the resume refusal, the kept gate by tree, the result file by attempt, the preflight without another node |
 | 7390d624 | `wa land --until <step>`; a green gate kept across runs by TREE CONTENT; a red check re-run on the failed rows only |
 | f35a2d5f | `scripts/preflight.sh` + `wa mission preflight <name>` + `scripts/test-preflight.sh`, wired into `scripts/fast.sh` |
 | 449447b6 | `scripts/worker-gate.sh` (the worker's own red-fixing loop) + `scripts/test-worker-gate.sh`, wired into `scripts/fast.sh` |
@@ -232,3 +233,67 @@ duplicated copy (the file's diff against HEAD is now the single intended patch, 
 stale /tmp file. The mission's own other modified files were not touched. Since then every scratch file lives in
 `~/Work/missions/factory-1/scratch/`.
 
+## Review r1 (commit 7c12238f) - what changed, and the test that proves it
+
+All four items are in `7c12238f`, with the tests in `scripts/test-land.lua`. Each new case was run against a
+detached worktree of `7e463ffe` (the reviewed commit) with only `scripts/test-land.lua` copied in, cutting the
+cases already proved so each item got its own failing run. "Before" below is that run's own words.
+
+### 1. BLOCKER - a bare `wa land --resume` could turn a preflight into a landing and a release
+
+* fix: `newest_unfinished()` (land.lua) skips `result == "stopped_at_until"`, and `M.run` refuses a resume of
+  such a run BY NAME unless the invocation names its own `--until`, printing the branches so the deliberate
+  commands are on screen. `--run <id> --resume --until gate` is allowed and stops at the gate again.
+* test: case 40 - a preflight, a bare `--resume`, then `--run <id> --resume`, then the same with `--until`.
+* before: `so it pushed nothing (got 1, want 0)` - the bare resume PUSHED the preflight's branch to the
+  incoming repository. After: refused with `resume_of_stopped_at_until`, 0 pushes, and the journal still
+  reads `stopped_at_until`.
+
+### 2. FIX - the kept gate was lost whenever two missions preflighted before one landed
+
+* fix: `M.gate_history` is keyed by the check **and** the tree object (`row.name .. "\n" .. row.tree_sha`), and
+  the caller looks precisely that up. Newest-first scan, so the newest row for exactly this content wins.
+* test: case 41 - preflight A, preflight B (a different tree), then A's bytes again.
+* before: `and it KEPT the check: a different tree preflighted in between did not steal it (got 3, want 2)` -
+  A's gate ran in full again. After: kept, `kept_from` named, 0 s.
+
+### 3. FIX - `wa-fast-result.json` was read without proving it belongs to this attempt
+
+* fix: `M.result_mtime(tree)` records what the file looked like BEFORE the attempt; `M.failed_rows(tree,
+  marker)` refuses a file whose timestamp did not move (`not newer than this attempt began`) and the retry then
+  runs the whole check, exactly as for a file that cannot be read.
+* test: case 42 - a red check that writes its file, then a RESUME of the same tree (same git dir) whose attempt
+  fails without writing, so only the first attempt's file is there.
+* before: `and it stays failed ... (got flaky, want failed)` - the retry ran the leftover rows, passed them and
+  reported `flaky under load` for a tree that had failed. After: `failed twice`, `retry.rows_file` nil, and the
+  reason in the evidence.
+* note: my first attempt compared the file's mtime with `now()` - which is the module's MONOTONIC clock - so the
+  guard never fired and case 42 said `flaky`. The comparison is now between two filesystem timestamps only.
+
+### 4. RECOMMENDED - a preflight must not need another node to be awake
+
+* fix: `M.remote_is_named` + `M.stops_by_gate`. For a round that stops at or before the gate, an unreachable
+  NAMED remote is a warning in the evidence (`fetch: WARN ...`, and `ls-remote: WARN ...` in merge, which had
+  the same dependency and which the test found) and the round uses the refs this checkout has. A path or URL
+  stays `fetch_failed`, and a landing still refuses both.
+* test: case 44 - an incoming named `no-such-remote-r1`, with `--until gate` and without it.
+* before: `a preflight goes on with the refs it already has when the incoming is down (got 1, want 0)`. After:
+  collect and merge both `done` with their warnings, and the same incoming without `--until` is `fetch_failed`.
+
+### Checks after the fixes
+
+* `WA_SCRIPT=scripts/test-land.lua` with `WASM_AGENT_LUA_ROOT`: `land ok (558 checks)` (was 533; 25 new).
+* the landing's own narrowed gate rows for the files touched: `WA_FAST_ROWS` = test-land.lua,
+  test-land-gate-log.lua, test-hotreload.lua -> `fast result ok (66 checks, 0 failed, 0 skipped)` in 239 s.
+* `scripts/test-discriminates.sh bfad4f8f`: `1 discriminating, 0 blocking, 0 not judged` (test-land.lua is
+  classified `environment` there - no wa binary in the base scratch tree - which is why the four cases were
+  judged against `7e463ffe` by hand, above).
+
+### Texts to approve (continuing the list)
+
+27. `land: refused(resume_of_stopped_at_until): run <id> stopped after <step> (--until) and landed nothing`
+28. `land: next: wa land --run <id> --resume --until <step>   (name the boundary again), or land the branch on purpose: wa land --branches <branch>`
+29. `fetch: WARN <incoming> could not be fetched (<first line>); this round stops at <step> so it goes on with the refs this checkout has`
+30. `ls-remote: WARN <incoming> could not be listed (<first line>); the landing-branch number comes from the refs this checkout has`
+31. `the result file at <path> is not newer than this attempt began: it describes an earlier run`
+32. `the result file at <path> carries no readable timestamp`
