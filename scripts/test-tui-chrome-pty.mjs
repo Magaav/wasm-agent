@@ -138,6 +138,32 @@ try {
   await sleep(800);
   check('the fixture served the run (a run that reached any other endpoint proves nothing)', served >= 1,
     'requests served: ' + served);
+  // ---- B. the copy icon on the fence ----------------------------------------------------------
+  const ICON = '⧉';
+  const drawn = capture();
+  const open = drawn.findIndex(row => /^\s*┌─/.test(row) || row.includes(ICON));
+  const fenceRows = open >= 0 ? drawn.slice(open, open + 4) : [];
+  const corner = fenceRows.length ? fenceRows[0].indexOf('┌') : -1;
+  check('the fence opens with its corner, the icon between the corner and the title',
+    fenceRows.length > 0 && /^\s*┌─ ⧉ bash/.test(fenceRows[0]), fenceRows.join('\n'));
+  check('the corner, the two bars and the closing corner share one column',
+    corner >= 0 && fenceRows[1][corner] === '│' && fenceRows[2][corner] === '│' && fenceRows[3][corner] === '└',
+    'corner column: ' + corner + '\n' + fenceRows.join('\n'));
+  check('the code rows are the content, after the bar',
+    fenceRows.length === 4 && fenceRows[1].includes('echo one') && fenceRows[2].includes('echo two'), fenceRows.join('\n'));
+  const iconCol = fenceRows.length ? fenceRows[0].indexOf(ICON) + 1 : 0;
+  // A click on the corner's cell is not a click on the icon.
+  mouse(0, corner + 1, open + 1); mouse(0, corner + 1, open + 1, true);
+  await sleep(500);
+  check('a click on the corner copies nothing', !capture().some(row => /Copied \d+ character/.test(row)), capture().slice(-3).join('\n'));
+  mouse(0, iconCol, open + 1); mouse(0, iconCol, open + 1, true);
+  const copied = await waitFor(() => capture().map(row => (row.match(/Copied (\d+) character/) || [])[1]).find(Boolean),
+    'the Copied notice after a click on the icon', 5000).catch(() => null);
+  check('a click on the icon cell reports Copied N characters, N = the content (no border)',
+    Number(copied) === CONTENT.length, 'reported: ' + copied + ', content: ' + CONTENT.length + '\n' + capture().slice(-3).join('\n'));
+  // Any key clears the notice; put the draft back to empty for the next section.
+  tmux(['send-keys', '-t', SESSION, '-l', 'z']); tmux(['send-keys', '-t', SESSION, 'BSpace']);
+  await sleep(400);
   // ---- A. the input box ---------------------------------------------------------------------
   const before = capture();
   const empty = box(before, 80);
