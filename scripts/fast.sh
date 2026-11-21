@@ -737,6 +737,12 @@ if command -v node >/dev/null 2>&1; then
   # kind resolves through, one child per tree inside it, a sweep that deletes what older layouts left,
   # the build cap that evicts the oldest, and the measurement that keeps the per-tree child honest.
   check onebuild node scripts/test-onebuild.mjs
+  # The gate's own cost, kept honest (change/gate-speed, 21/11): a NEW target dir is seeded from the
+  # newest sibling for the same toolchain (a cold wa-host build measured 144 s, the same build seeded 61 s
+  # / 64 s), and one heavy build runs at a time with a job cap. Both rows are seconds and self-contained:
+  # they build two tiny two-member workspaces in their own scratch home.
+  check build-heat node scripts/test-build-heat.mjs
+  check build-seed node scripts/test-build-seed.mjs
   # Session liveness comes from the running process, never from a ledger row another process can
   # close: the 10/11 `owner_ended` refusal of a live session, pinned against a real ledger and a
   # real pid.

@@ -239,7 +239,9 @@ wa_build_sweep() { # [--quiet]
   # 1. islands an older layout wrote: children of <root>/build other than `target`.
   for legacy in "$root"/*; do
     [ -e "$legacy" ] || [ -L "$legacy" ] || continue
-    case "$(basename "$legacy")" in target) continue ;; esac
+    # The node's build lock lives here (rule 2 (heat)) and is NOT build output: it is the one file that
+    # must outlive every sweep, or a queued build loses the lock it is waiting on.
+    case "$(basename "$legacy")" in target|build.lock) continue ;; esac
     bytes=$(wa_build_delete "$legacy" island) || continue
     total=$((total + bytes)); count=$((count + 1))
   done
@@ -457,8 +459,8 @@ wa_build_used_at() { # <child> -> seconds
 
 # The child to seed from: the most recently built sibling of the same toolchain that is not being built
 # into right now. Prints nothing when there is none, which means a cold build.
-wa_build_seed_candidate() { # <target>
-  local target=$1 mine candidate used best='' best_used=0
+wa_build_seed_candidate() { # <target> [cutoff-seconds]
+  local target=$1 cutoff=${2:-0} mine candidate used best='' best_used=0
   mine=$(wa_build_toolchain) || return 0
   for candidate in "$(wa_build_target_root)"/*; do
     [ -d "$candidate" ] || continue
@@ -470,25 +472,54 @@ wa_build_seed_candidate() { # <target>
     if command -v flock >/dev/null 2>&1 && [ -f "$candidate/.wa-build.lock" ]; then
       flock -n "$candidate/.wa-build.lock" true 2>/dev/null || continue
     fi
+    # An artifact from the future is not a seed (wa_build_seed says why): a candidate that holds any
+    # file newer than the tree it would seed is passed over, so an OLDER sibling is still reused when
+    # one exists instead of every build going cold.
+    if [ "$cutoff" != 0 ]; then
+      if [ -n "$(find "$candidate" -type f -newermt "@$cutoff" -print -quit 2>/dev/null)" ]; then continue; fi
+    fi
     used=$(wa_build_used_at "$candidate")
     if [ "$used" -gt "$best_used" ]; then best=$candidate; best_used=$used; fi
   done
   printf '%s' "$best"
 }
 
+# The newest source mtime of a tree, in seconds: the time against which cargo judges whether a build
+# artifact is out of date. 0 when it cannot be told.
+wa_build_tree_newest_source() { # <tree> -> seconds
+  local tree=$1 newest
+  newest=$(find "$tree" -name .git -prune -o -type f -printf '%T@\n' 2>/dev/null | cut -d. -f1 | sort -n | tail -1)
+  case "$newest" in ''|*[!0-9]*) printf '0' ;; *) printf '%s' "$newest" ;; esac
+}
+
 # Seed a target dir that does not exist yet. Staged beside it and renamed into place, so a copy that
 # fails halfway leaves NO half-seeded child behind: a partial seed is a silent wrong answer, a missing
 # one is only a slow build.
 wa_build_seed() { # <target> [--quiet]
-  local target=$1 quiet=${2:-} candidate stage bytes
+  local target=$1 quiet=${2:-} candidate stage bytes tree newest_source
   if [ "${WA_BUILD_SEED:-1}" = 0 ]; then return 0; fi
   if ! wa_build_toolchain >/dev/null 2>&1; then
     printf 'onebuild: cannot name this build toolchain (rustc -vV failed), so %s starts cold\n' "$(basename "$target")" >&2
     return 0
   fi
-  candidate=$(wa_build_seed_candidate "$target")
+  # AN ARTIFACT FROM THE FUTURE IS NOT A SEED. Cargo calls an artifact up to date by comparing its mtime
+  # with its sources', so a sibling built AFTER this tree's sources were written would hand over
+  # artifacts cargo believes are current, and the build would then run the SIBLING code. Measured with
+  # scripts/test-build-seed.mjs on 21/11: a tree whose library answers 2, seeded from a sibling answering
+  # 1, printed base=1. So the tree's newest source is the cutoff: only a sibling whose every file is
+  # older than it can be a seed. Unknown is not yes - when the cutoff cannot be read, the build is cold.
+  tree=${WA_BUILD_THIS_TREE:-}
+  newest_source=0
+  if [ -n "$tree" ] && [ -d "$tree" ]; then
+    newest_source=$(wa_build_tree_newest_source "$tree")
+  fi
+  if [ "$newest_source" = 0 ]; then
+    printf 'onebuild: %s starts cold: the newest source mtime of this tree cannot be read, so no seed can be shown to predate it\n' "$(basename "$target")" >&2
+    return 0
+  fi
+  candidate=$(wa_build_seed_candidate "$target" "$newest_source")
   [ -n "$candidate" ] || return 0
-  stage="$target.seed-$"
+  stage="$target.seed-$$"
   rm -rf -- "$stage" 2>/dev/null || true
   if ! cp -a --reflink=always "$candidate" "$stage" 2>/dev/null; then
     rm -rf -- "$stage" 2>/dev/null || true
