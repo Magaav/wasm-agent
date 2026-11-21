@@ -945,6 +945,14 @@ gate_run bash scripts/test-release-trust.sh "$BIN"
 # The route's two modes on a fixture install: a read-only check (no sentinel, no request written) and
 # a deploy path that reports the cached release state without paying for a fetch.
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-update-release.lua" "$BIN" --db "$DB.update-release" | grep "update release ok"
+# A NODE WITH NO TREE, AND THE TWO COMMANDS AN OPERATOR TYPES AT IT (21/11, hand fix 4). "wa update <node>
+# --binary" answered no_runtime_tree about a tree the mode never wanted, while the documented release path was
+# one word away; and "wa update --check" said "no tree or release record to compare with" while installed.txt
+# held a stale hand rollback - naming neither the record nor the command that moves such a node. The fixture
+# process runs from a scratch cwd with a fixture install, so it IS tree-less (update.runtime_tree answers
+# runtime-worktree.txt, then a cwd holding rust/Cargo.toml), and nothing in the module is stubbed.
+gate_run bash -c 'd=$(mktemp -d); mkdir -p "$d/cwd" "$d/install"; cd "$d/cwd" || exit 1; WASM_AGENT_LUA_ROOT="$1" WASM_AGENT_HOME="$d" WA_INSTALL_DIR="$d/install" WA_SCRIPT="$1/scripts/test-update-treeless.lua" "$2" --db "$d/db"' _ "$WASM_AGENT_LUA_ROOT" "$BIN" > "$DB.treeless.log" 2>&1
+grep -q "update treeless ok" "$DB.treeless.log" || { tail -12 "$DB.treeless.log" >&2; exit 1; }
 # The pre-update backup skips every lock file the Rust sources open (binding.transport.sqlite broke /update, 04/11).
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-backup-locks.lua" "$BIN" --db "$DB.backup-locks" | grep "backup locks ok"
 # The same decisions through the route, on a node whose install dir is a fixture. Its sentinel is a

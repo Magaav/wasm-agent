@@ -703,7 +703,32 @@ function M.check(options)
     return M.run_release({ check = true }, facts, record)
   end
   if not facts.tree then
-    return { ok = false, status = "no_runtime_tree", error = "no_runtime_tree", message = "there is no tree or release record to compare with." }
+    -- WHAT THIS NODE ACTUALLY HAS, IN ITS OWN WORDS (21/11, hand fix 4). "no tree or release record to
+    -- compare with" was true and useless: the node HAD an installed.txt - a hand rollback, written by
+    -- nobody the release path recognises - and the answer named neither it nor the one command that moves
+    -- such a node. So the refusal quotes the record it found (its commit, its release, HOW it was
+    -- installed, and when it was written) and offers the release path by name.
+    local fields = {}
+    for _, key in ipairs({ "commit", "release", "via", "binary_release", "binary_source_commit", "installed_at", "binary_release_tag" }) do
+      local value = trim(tostring(record[key] or ""))
+      if value ~= "" then fields[#fields + 1] = key .. "=" .. value end
+    end
+    local wrote = ""
+    local stat = shell("stat -c %y " .. quote(slashes(facts.install) .. "/installed.txt") .. " 2>/dev/null")
+    if stat and (stat.code or 1) == 0 then
+      local stamp = trim(stat.stdout)
+      if stamp ~= "" then wrote = "; the file was last written " .. stamp end
+    end
+    local present = #fields > 0
+      and ("installed.txt says " .. table.concat(fields, ", ") .. wrote)
+      or ("installed.txt names no commit, no release and no install route" .. wrote)
+    return {
+      ok = false, status = "no_runtime_tree", error = "no_runtime_tree",
+      install = facts.install,
+      observed = present,
+      message = "this node has no tree to compare with origin/main, and its install record is not one the release updater recognises (via=linux-bootstrap would be). " .. present .. ".",
+      next = "move it with the release path, which needs no tree: `wa update --release <commit>` on this node or `wa update <this-node> --release` from a master. That fetches the published release, verifies its signature against this node's keys and installs it as a neighbour process.",
+    }
   end
   local fetched = shell("git -C " .. quote(facts.tree) .. " fetch --quiet origin 2>&1")
   if not fetched or fetched.code ~= 0 then

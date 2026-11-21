@@ -535,9 +535,32 @@ function M.admit(args, caller)
   -- A RELEASE-INSTALLED NODE HAS NO TREE AT ALL (item 28). `release` mode is the one path for it: the
   -- published release is fetched and scripts/upgrade.sh installs it as a neighbour process, so the tree it
   -- does not have is not a reason to refuse.
+  -- A TREE-LESS NODE, ASKED FOR A BINARY, GETS THE RELEASE PATH (21/11, hand fix 4 of the node-7ddbfa98036a
+  -- rollout). "wa update <node> --binary" means "install the published release instead of building here", and
+  -- that is exactly what this node needs - so answering no_runtime_tree told the operator about a tree the
+  -- mode never wanted, while the documented release path ("release: verified bundle") existed one line away
+  -- and could only be reached by knowing to ask for it under another name. The routing is recorded in the
+  -- answer (routed_from=/routed_because=) so a reader is never guessing which path ran.
+  local routed_from = nil
+  -- Every answer this call produces carries the routing, refusals included: a later gate saying no is still
+  -- an answer about the RELEASE path, and an operator who sees "no_watcher" on a node they asked to update
+  -- with --binary needs to know the mode was routed rather than silently ignored.
+  local function routed(answer)
+    if type(answer) == 'table' and routed_from then
+      answer.routed_from = routed_from
+      answer.routed_because = 'this node has no tree, so a binary install IS the release install (the published release, fetched and proved as a neighbour process)'
+    end
+    return answer
+  end
   if not facts.tree and not rollback and kind ~= 'release' then
-    return { error = 'no_runtime_tree', effect = 'none',
-      observed = 'this node has no runtime-worktree.txt and does not run from a checkout, so there is no tree to move to a commit' }
+    if kind == 'binary' then
+      routed_from = kind
+      kind = 'release'
+    else
+      return { error = 'no_runtime_tree', effect = 'none',
+        observed = 'this node has no runtime-worktree.txt and does not run from a checkout, so there is no tree to move to a commit',
+        next = 'this node is installed from a release: ask for it with mode="release" (wa update <node> --release), which fetches the published release and installs it as a neighbour process' }
+    end
   end
   local record = new_record(kind, '', reason, caller, args)
   if forced then
@@ -640,7 +663,7 @@ function M.admit(args, caller)
     -- A refusal is recorded too, and the answer names the record: "why not" is evidence an operator
     -- reads on the peer, not an error word the master has to guess about.
     refusal.audit_id = record.id
-    return refusal
+    return routed(refusal)
   end
   record.target_commit = prepared.commit
   record.server.origin_main = prepared.origin_main
@@ -662,7 +685,7 @@ function M.admit(args, caller)
     -- A refusal still answers with the record id, so the master can read what the peer wrote about
     -- its own request instead of guessing from an error word.
     error.audit_id = record.id
-    return error
+    return routed(error)
   end
   record.state = 'queued'
   record.door = done.door
@@ -678,7 +701,7 @@ function M.admit(args, caller)
       note = 'the install was queued but this node could not write the record that names who asked for it' }
   end
   local identity = nodes.identity() or {}
-  return {
+  return routed({
     ok = true, status = 'queued', record = record.id, kind = kind,
     commit = record.target_commit, door = done.door, request = done.request,
     sentinel_request_id = record.sentinel_request_id,
@@ -692,7 +715,7 @@ function M.admit(args, caller)
         or 'deploy'))) ..
       ' under its existing rules. This is not installed yet.',
     next = 'ask again with {action="status", id="' .. record.id .. '"}; the record lands in ' .. M.dir(),
-  }
+  })
 end
 
 -- The node's own pin, refreshed with the commit the rollback actually restored. The queued record could only
