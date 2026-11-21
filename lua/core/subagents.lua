@@ -601,11 +601,22 @@ function M.start(args, ctx)
     raw_mode = parent_mode, raw_decided = parent_decided,
     admission_limit = ctx.placement and ctx.placement.max_tasks,
   }
-  local receipt = memory.transaction(function()
-    local guard=dofile('lua/core/wave_autoflush.lua').admission_guard(ctx)
-    if guard then return guard end
-    return json.decode(host.subagent("start", json.encode(spec)))
+  -- THE GUARD AND THE CHILD ARE TWO UNITS, deliberately (21/11). They used to be one ledger
+  -- transaction wrapped around host.subagent("start"), so a child-process admission happened while
+  -- this node held the ledger write lock: the transaction could not commit until another process
+  -- answered, so every other writer in the fleet - a turn appending its user message, serve, a
+  -- sibling's housekeeping - waited on another process's work. Measured 21/11 on a scratch ledger:
+  -- a write lock held by a second process moves a turn's first model call by exactly the hold
+  -- (12 s hold -> run/start to model_call/start 12.19 s, the wait named [sql] BEGIN IMMEDIATE).
+  -- The guard's read-modify-write is still atomic - that is the part that must not interleave -
+  -- and the admission has its own native lock and its own idempotency key: a repeated start with
+  -- the same key finds the existing child and answers "deduplicated", which is the case the
+  -- two-in-one transaction was there to cover.
+  local blocked = memory.transaction(function()
+    return dofile('lua/core/wave_autoflush.lua').admission_guard(ctx)
   end)
+  if blocked then return blocked end
+  local receipt = json.decode(host.subagent("start", json.encode(spec)))
   if type(receipt) ~= "table" then return { error = "subagent_runtime_error" } end
   if receipt.error then
     -- Admission failed. A refusal that means "come back later" keeps the shell: the coordinator
@@ -712,13 +723,14 @@ function M.control(args, ctx)
     end
     if tostring(args.idempotency_key or "") == "" then return { error = "idempotency_key_required" } end
     for attempt = 1, 3 do
-      local result = memory.transaction(function()
-        local guard=dofile('lua/core/wave_autoflush.lua').admission_guard({session_id=receipt.parent_session_id,user_id=ctx.user_id,role=ctx.role})
-        if guard then return guard end
-        return json.decode(host.subagent("continue", json.encode({
+      -- Same split as the start above: the guard is its own write unit, and the child-process
+      -- call after it is never made while this node holds the ledger write lock.
+      local blocked = memory.transaction(function()
+        return dofile('lua/core/wave_autoflush.lua').admission_guard({session_id=receipt.parent_session_id,user_id=ctx.user_id,role=ctx.role})
+      end)
+      local result = blocked or json.decode(host.subagent("continue", json.encode({
           owner_user = ctx.user_id, session = ctx.session_id, id = receipt.subagent_id, run_origin=ctx.run_origin, text = tostring(args.text or ""),
           new_id = host.uuid(), idempotency_key = tostring(args.idempotency_key) })))
-      end)
       if result.error ~= "session_tail_changed" then
         if result.subagent_id then
           local parent_ctx={user_id=ctx.user_id,role=ctx.role,remote=ctx.remote,session_id=receipt.parent_session_id}
