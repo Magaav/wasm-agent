@@ -133,7 +133,12 @@ local full=agent.system_prompt('master',nil,nil,list,'full')
 check(full:find(agent.PREAMBLE_GUIDELINE,1,true),'preamble guideline in the full prompt')
 local progressive=agent.system_prompt('master',nil,nil,tools.envelope('master',ctx),'progressive')
 check(progressive:find(agent.PREAMBLE_GUIDELINE,1,true),'preamble guideline in the progressive prompt')
-check(progressive:find('tool_call(name="remote", arguments={"node":',1,true),'flat remote shape in the progressive tools section')
+-- REMOVED with the codemode surface (Victor 21/11): this row asserted the `tool_call(name="remote", ...)`
+-- EXAMPLE, which lived in the codemode progressive tools section. The one path's progressive section is the
+-- run-tool one, and it does not name `tools.remote` at all - the same gap the native node had at base, now
+-- the only path. Adding that sentence is a prompt change with its own cache miss: docs/missions/reports/
+-- one-run-path.md, "not done here". The four sections above still pin the flat/nested shapes the model
+-- sends; what is gone is only the sentence that showed it.
 check(not agent.system_prompt('master',nil,nil,{},'full'):find(agent.PREAMBLE_GUIDELINE,1,true),'no tools, no preamble rule')
 
 -- The relay's deadline (item E, 19/11): before this, a relayed call that ran out of time answered

@@ -101,9 +101,9 @@ local prompt=policy.prompt(catalog)
 -- model routes by, and the exact name it must call.
 check(prompt:find('- mail: mcp_mail_list_messages(',1,true) and not prompt:find('deadbeef',1,true) and prompt:find('- whatsapp: mcp_whatsapp_read_messages',1,true) and prompt:find('- peer box: peer_box__fetch',1,true),'hint lists connectors by their exact callable names: '..prompt:sub(-300))
 check(not prompt:find('- mail: list_messages',1,true),'and never the shortened tool name, which is not callable')
-check(prompt:find('Work in code: one `codemode` call',1,true) and prompt:find('tools.<name>(args)',1,true),'hint prefers code mode and says how every tool is reached inside it')
-check(prompt:find('Calling a tool directly also works',1,true),'hint states the one pathway: a direct call runs as the same script')
-check(policy.prompt({catalog[1]})==policy.guidance,'no connectors, no index line')
+check(prompt:find('Work in code: call the run tool',1,true) and prompt:find('tools.<name>(args)',1,true),'hint names the one tool and says how every tool is reached inside it')
+check(prompt:find('A message with no tool call is your answer',1,true)~=nil and prompt:find('also works',1,true)==nil,'hint states the one pathway and offers no second door')
+check(policy.prompt({catalog[1]})==dofile('lua/core/raw_code.lua').guidance_for(),'no connectors, no index line: the one guidance and nothing else')
 -- The model-facing guidance is policy text, not documentation: keep it in step with the fence above, or the
 -- model is told about a rule that no longer exists (31/10: the guidance still promised the retired peer
 -- fence). Both halves are asserted so a one-sided edit fails here.

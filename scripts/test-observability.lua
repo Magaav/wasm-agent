@@ -232,7 +232,11 @@ local full_context=projection:build_context();local full_tools=json.encode(proje
 overrides.WASM_AGENT_TOOL_SNIPPETS='names'
 local short_bot=agentlib.new(session('snippet-index-names'),function() end,'master','master','')
 local short_context=short_bot:build_context()
-check(#short_context[1].content<#full_context[1].content and json.encode(short_bot.tool_list)==full_tools,'opt-in short index retains every full tool schema')
+-- REMOVED with the wide surface (Victor 21/11): this row measured the opt-in SHORT index against the FULL
+-- one over a surface of dozens of tools. The one path declares the run tool alone, so there is no wide
+-- index for the mode to shorten, and comparing the two would measure a length of nothing. What it still
+-- guarantees - that both modes declare the same schemas - is asserted below, unchanged.
+check(json.encode(short_bot.tool_list)==full_tools,'both snippet modes declare the same tool schemas')
 -- The same setting under a *running* session changes nothing it has already sent: the prefix is frozen
 -- (docs/PROMPT-CACHE.md), so the change arrives as an appended note, never as rewritten bytes.
 overrides.WASM_AGENT_ENVELOPE_MODE=nil
