@@ -132,6 +132,23 @@ Run with this tree's binary and `WASM_AGENT_LUA_ROOT` pointed at the tree, each 
   (`/tmp/base-always` at `93168d96`), so the difference is this machine's tool catalogue, not the
   branch. Named here so it is not read as a regression.
 
+## The gate's first round (preflight, main 0b9d574c + this branch)
+
+Two rows were red; both are fixed at 875f525b's successor \`af62ac53\`, and neither was weakened:
+
+* \`scripts/test-refusal-contract.lua\` - the inventory of refusal codes was stale because
+  \`selfloop.schedule_settled\` answered \`error = "handle_wake_requires_a_session"\`. That string was
+  never rendered through \`lua/core/refusal.lua\` (nothing model-facing reads it), so it was a *code*
+  only by spelling. It is now a \`reason\` (\`{ok=false, reason=...}\`) beside a comment saying why, and
+  \`lua/core/refusal_codes.lua\` is byte-identical to main's again - the row passes with 17003 checks.
+* \`scripts/test-remote-pending.lua:166\` - it read a settled \`wait(op)\` entry as
+  \`resumed.result.stdout\`. That is the wrapped shape the one-result-shape change removed; it now reads
+  \`resumed.stdout\` and additionally requires it to be a STRING, which is stricter than before. The row
+  passes with 83 checks.
+
+Both were run on this branch with the tree's binary before the commit; \`test-handle-wake\` (16) and
+\`test-handle-wake-turn\` (10) were re-run after the \`reason\` rename and stay green.
+
 ## Remaining blockers
 
 * `scripts/test-discriminates.sh` (the land gate) was not run: it needs a clean base tree and a
