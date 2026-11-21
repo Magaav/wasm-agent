@@ -141,6 +141,51 @@ check(has(settled, '\226\156\147 bash') and has(settled, '122ms'),
 check(has(settled, 'avell'), 'the script\'s value is the block\'s answer: ' .. settled)
 check(has(settled, 'await tools.bash'), 'and the script is still there, whole: ' .. settled)
 
+-- ---- 2b. the call's own content is drawn under its row -------------------------------------
+-- Victor 21/11, in his own window: "under the first ✓ bash you see 1, 2, 3; under the second you
+-- see the kernel version; no JSON blob with operation_id/timing". The event the loop emits carries the
+-- output (lua/core/codemode.lua, live_settled) and the block draws it under the row.
+do
+  local content_turn = {
+    { type = 'run_code_delta', call_id = 'call-run-c', text = 'const [a, b] = await Promise.all([\n' },
+    { type = 'run_code_delta', call_id = 'call-run-c', text = '  tools.bash({ command: "seq 1 3" }),\n' },
+    { type = 'run_code_delta', call_id = 'call-run-c', text = '  tools.bash({ command: "uname -r" }),\n' },
+    { type = 'run_code_delta', call_id = 'call-run-c', text = ']);\n' },
+    { type = 'tool', name = 'run', call_id = 'call-run-c',
+      arguments = { code = 'const [a, b] = await Promise.all([\n  tools.bash({ command: "seq 1 3" }),\n'
+        .. '  tools.bash({ command: "uname -r" }),\n]);\nreturn { seq: a, uname: b };' } },
+    { type = 'codemode_call', id = 'c1', name = 'bash', arguments = { command = 'seq 1 3' }, state = 'running' },
+    { type = 'codemode_call', id = 'c2', name = 'bash', arguments = { command = 'uname -r' }, state = 'running' },
+  }
+  local waiting = screen(content_turn)
+  check(has(waiting, 'bash'), 'both awaited calls are rows while they wait: ' .. waiting)
+  content_turn[#content_turn + 1] = { type = 'codemode_call', id = 'c1', name = 'bash', state = 'ok', ms = 56,
+    output = { stdout = '1\n2\n3\n', stderr = '' } }
+  content_turn[#content_turn + 1] = { type = 'codemode_call', id = 'c2', name = 'bash', state = 'ok', ms = 57,
+    output = { stdout = '7.2.15-1-omarchy\n', stderr = '' } }
+  local operation = { operation_id = 'op-1795272870-1', state = 'completed', stdout = '1\n2\n3\n',
+    stderr = '', code = 0, elapsed_ms = 56, owner = '51fc9f12', owner_boot = 'boot-2935946',
+    stdout_path = '/home/victor/.wasm-agent/operations/op-1/stdout', timing = { measured_ms = 56 } }
+  content_turn[#content_turn + 1] = { type = 'tool_result', name = 'run',
+    result = { ok = true, value = json.encode({ seq = operation, uname = { operation_id = 'op-1795272871-2',
+      state = 'completed', stdout = '7.2.15-1-omarchy\n', stderr = '', code = 0, owner_boot = 'boot-2935946',
+      stdout_path = '/home/victor/.wasm-agent/operations/op-2/stdout' } }) } }
+  local settled_content = screen(content_turn)
+  check(has(settled_content, '1') and has(settled_content, '2') and has(settled_content, '3'),
+    'the first call\'s own output is drawn under its row: ' .. settled_content)
+  check(has(settled_content, '7.2.15-1-omarchy'),
+    'and the second call\'s: ' .. settled_content)
+  check(not has(settled_content, 'operation_id') and not has(settled_content, 'owner_boot')
+    and not has(settled_content, 'stdout_path') and not has(settled_content, 'cleanup'),
+    'no envelope field anywhere in the block: ' .. settled_content)
+  check(not has(settled_content, '{\"seq\":{\"cleanup'), 'and no JSON blob where the answer belongs: ' .. settled_content)
+  check(has(settled_content, 'tools.bash({ command: "seq 1 3" })') and has(settled_content, 'tools.bash({ command: "uname -r" })'),
+    'the script is still whole on screen, both calls in it: ' .. settled_content)
+  local lines = 0
+  for _ in settled_content:gmatch('[^\n]+') do lines = lines + 1 end
+  check(lines < 30, 'the whole block is a handful of rows, not a wall: ' .. lines)
+end
+
 -- ---- 3. parity: the native turn draws what a fenced run block draws ----------------------------
 local block = {
   { type = 'step_phase', phase = 'commentary', text = 'checking the hostname.' },

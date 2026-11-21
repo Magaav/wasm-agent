@@ -280,9 +280,111 @@ do
     for _, event in ipairs(heard) do states[event.state or '?'] = true end
     check(states.running == true and states.ok == true, 'each call started and settled: ' .. json.encode(heard[1] or {}))
     check(json.encode(quiet.calls) == json.encode(watched.calls), 'the call journal is unchanged too')
+    -- The call's own CONTENT reaches the view, and the envelope it came in does not (Victor 21/11:
+    -- "under each tool row draw that call's CONTENT ... The operation envelope (ids, paths, timing,
+    -- owner, flags) is NOT content"). The script really runs a command here: a view that is handed
+    -- the output is tested on the output the node really produced.
+    local bash_heard = {}
+    local ran = run("return (await tools.bash({command: 'printf hi'})).stdout;",
+      { emit = function(event) bash_heard[#bash_heard + 1] = event end })
+    check(type(ran) == 'table' and ran.ok == true, 'a bash call inside a script ran: ' .. tostring(ran and ran.error))
+    local settle_event
+    for _, event in ipairs(bash_heard) do
+      if event.type == 'codemode_call' and event.state == 'ok' then settle_event = event end
+    end
+    check(settle_event ~= nil, 'the settled call reached the view: ' .. json.encode(bash_heard))
+    check(settle_event and type(settle_event.output) == 'table' and settle_event.output.stdout == 'hi',
+      'the view is handed the command\'s own output: ' .. json.encode(settle_event or {}))
+    check(settle_event and settle_event.stdout == nil and settle_event.operation_id == nil
+      and settle_event.owner == nil and settle_event.timing == nil,
+      'and the envelope stays behind: ' .. json.encode(settle_event or {}))
+
   end
 end
 
+
+-- ---- a call's own content, and a value that is not a blob -----------------------------------
+-- Victor 21/11: "under each tool row draw that call's CONTENT: its stdout (and stderr if any,
+-- dimmed), up to a few lines with +N lines folded ... The operation envelope (ids, paths, timing,
+-- owner, flags) is NOT content" and "the script's return value is drawn compactly (pretty,
+-- truncated), never as a wrapped 4 KB blob". The rows here are the ones the transcript draws - the
+-- same function, not a second renderer.
+do
+  local b = dofile('lua/core/codemode_block.lua')
+  local o = opts()
+  -- The operation the bash capability really answers with, every envelope field included.
+  local op = { operation_id = 'op-1795000000000000-1-7', state = 'completed', ok = true,
+    stdout = '1\n2\n3\n', stderr = '', code = 0, process_exit_code = 0, elapsed_ms = 7,
+    owner = '51fc9f12', owner_boot = 'boot-2935946', owner_process_id = 2935946,
+    stdout_path = '/home/victor/.wasm-agent/operations/op-7/stdout', cleanup = 'terminated',
+    containment = 'posix_process_group', stdout_omitted = 6, output_omitted = true,
+    timing = { measured_ms = 7, schema_version = 1 } }
+  local model = b.new({ code = 'const a = await tools.bash({command: "seq 1 3"});\nreturn {seq: a};' }, 0)
+  b.begin_call(model, 'c1', 'bash', { command = 'seq 1 3' })
+  -- The running row says nothing yet: a call in flight has no output to show.
+  eq(#b.call_rows(model, 100, o), 1, 'a running call is one row and no content')
+  b.settle(model, 'c1', { ok = true, ms = 7, output = { stdout = op.stdout, stderr = op.stderr } })
+  local rows = b.call_rows(model, 100, o)
+  eq(#rows, 4, 'the settled call is its row plus the three lines it printed: ' .. table.concat(rows, '|'))
+  check(has(rows[1], '\226\156\147 bash'), 'the row is the call, ticked: ' .. tostring(rows[1]))
+  eq((rows[2]:gsub('^%s+', '')), '1', 'and under it, the command\'s first line: ' .. tostring(rows[2]))
+  eq((rows[3]:gsub('^%s+', '')), '2', 'then the second')
+  eq((rows[4]:gsub('^%s+', '')), '3', 'then the third')
+  local drawn = table.concat(b.call_lines(model, 100, o), '\n')
+  check(not has(drawn, 'operation_id') and not has(drawn, 'owner_boot') and not has(drawn, 'stdout_path')
+    and not has(drawn, 'containment') and not has(drawn, 'output_omitted'),
+    'the operation envelope is not content and is never drawn: ' .. drawn)
+
+  -- More lines than M.CALL_CONTENT_ROWS fold, and the fold says how many were left out.
+  local long_stdout = {}
+  for i = 1, 30 do long_stdout[#long_stdout + 1] = 'line' .. i end
+  local m2 = b.new({ code = 'x' }, 0)
+  b.begin_call(m2, 'c1', 'bash', { command = 'seq 1 30' })
+  b.settle(m2, 'c1', { ok = true, ms = 3, output = { stdout = table.concat(long_stdout, '\n') .. '\n', stderr = '' } })
+  local folded = b.call_rows(m2, 100, o)
+  eq(#folded, 1 + b.CALL_CONTENT_ROWS + 1, 'a call that printed 30 lines draws four and a fold')
+  check(has(folded[#folded], '\226\128\166 +26 lines'), 'the fold counts the rest: ' .. tostring(folded[#folded]))
+
+  -- A fan-out whose calls have content is one row per call (each with its own output), not a counter:
+  -- a counter row cannot answer "what did each one say".
+  local fan = b.new({ code = 'x' }, 0)
+  b.begin_call(fan, 'a', 'bash', { command = 'seq 1 3' })
+  b.begin_call(fan, 'b', 'bash', { command = 'uname -r' })
+  b.settle(fan, 'a', { ok = true, ms = 5, output = { stdout = '1\n2\n3\n', stderr = '' } })
+  b.settle(fan, 'b', { ok = true, ms = 6, output = { stdout = '7.2.15-1-omarchy\n', stderr = '' } })
+  local frows = b.call_rows(fan, 100, o)
+  check(has(table.concat(frows, '\n'), '7.2.15-1-omarchy'), 'each call of a fan-out shows its own output: '
+    .. table.concat(frows, '|'))
+  check(has(table.concat(frows, '\n'), 'uname') == false, 'and the rows stay call rows, not a counter')
+
+  -- The VALUE: a script that returned a dictionary of two operations is drawn as what they SAID,
+  -- pretty and compact, never as kilobytes of transport metadata.
+  local value_model = b.new({ code = 'x' }, 0)
+  b.finish(value_model, { ok = true, value = json.encode({ seq = op,
+    uname = { operation_id = 'op-1795000000000001-2-9', state = 'completed', stdout = '7.2.15-1-omarchy\n',
+      stderr = '', code = 0, owner_boot = 'boot-2935946',
+      stdout_path = '/home/victor/.wasm-agent/operations/op-9/stdout' } }) }, 0.1)
+  local vrows = b.tail_rows(value_model, 100, o)
+  local vtext = table.concat(vrows, '\n')
+  check(has(vtext, '1\\n2\\n3'), 'the value shows the operations\' own output: ' .. vtext)
+  check(has(vtext, '7.2.15-1-omarchy'), 'both of them: ' .. vtext)
+  check(not has(vtext, 'owner_boot') and not has(vtext, 'stdout_path') and not has(vtext, 'operation_id')
+    and not has(vtext, 'schema_version'), 'and none of the envelope: ' .. vtext)
+  check(#vtext < 400, 'the whole answer is under 400 bytes of rows, not four kilobytes: ' .. #vtext)
+
+  -- A value longer than the cap is truncated with the count, and the whole of it is one click away.
+  local big = {}
+  for i = 1, 40 do big['key' .. i] = i end
+  local big_model = b.new({ code = 'x' }, 0)
+  b.finish(big_model, { ok = true, value = json.encode(big) }, 0.1)
+  local brows = b.tail_rows(big_model, 100, o)
+  check(#brows <= b.RESULT_ROWS + 2, 'a long value is truncated to its rows: ' .. #brows)
+  local expandable = opts()
+  expandable.expandable = false
+  local capped = b.result_rows(big_model, 100, expandable)
+  local _, hiddenv = b.result_rows(big_model, 100, expandable)
+  check(hiddenv > 0, 'and says how many lines it left out: ' .. tostring(hiddenv))
+end
 
 -- A code line longer than the band wraps with a VISIBLE MARK at the break (round 3, item 3).
 --

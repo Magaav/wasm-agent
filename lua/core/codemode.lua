@@ -195,9 +195,20 @@ local function live_settled(ctx, id, name, result, called, started)
   local state = 'ok'
   if not called or (r and (r.error or r.ok == false)) then state = 'failed' end
   if r and r.state == 'pending' then state = 'pending' end
+  -- The call's own CONTENT, so the reader sees what the command said under its row (Victor 21/11).
+  -- An allow-list of the two output strings and nothing else: the operation envelope around them
+  -- (ids, paths, timing, owner, flags) is not content and never travels to the view. This is the
+  -- VIEW's copy only - the value the script gets back, and the result the model receives, are the
+  -- bytes they always were.
+  local output = nil
+  if r and (type(r.stdout) == 'string' or type(r.stderr) == 'string') then
+    output = { stdout = type(r.stdout) == 'string' and r.stdout or '',
+      stderr = type(r.stderr) == 'string' and r.stderr or '' }
+  end
   live(ctx, { type = 'codemode_call', id = id, name = name, state = state,
     ms = math.floor(((tonumber(host.now()) or started) - started) * 1000),
-    error = r and r.error or nil, code = r and (r.code or r.error) or nil, op = r and r.op or nil })
+    error = r and r.error or nil, code = r and (r.code or r.error) or nil, op = r and r.op or nil,
+    output = output })
 end
 
 local function note_fallback(op, reason)
