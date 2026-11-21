@@ -52,6 +52,11 @@ git -C "$TREE" config user.name test
 HEAD="$(git -C "$TREE" rev-parse HEAD)"
 # The fixture's main IS the commit under test: this checkout is on its main, which is what deploy.sh's rule 2
 # asks, and it keeps the test about the ancestry rule rather than about the branch this work happens to be on.
+# deploy.sh fetches origin before it reads origin/main (step 0b). The clone's origin is THIS checkout, whose
+# main is not the commit under test on any branch but main itself, so that fetch moved origin/main back to
+# main and every case waited out the "quiet canonical tree" bound (21/11 survey: 4 minutes a case, then wrong
+# output). The fixture is its own origin: a fetch then finds main == HEAD, which is the shape stated here.
+git -C "$TREE" remote set-url origin "$TREE"
 git -C "$TREE" update-ref refs/remotes/origin/main "$HEAD"
 # ...and on branch main, because main's runtime-binding preflight (deploy.sh step 0c) refuses a deploy from a tree
 # no checkout has on branch main, BEFORE the build and therefore before the ancestry gate this test is about.
@@ -216,6 +221,7 @@ SHALLOWTREE="$WORK/shallow-tree"
 if git clone -q --depth 1 "file://$ROOT" "$SHALLOWTREE" 2>/dev/null; then
   same "the fixture checkout is shallow" "$(git -C "$SHALLOWTREE" rev-parse --is-shallow-repository)" "true"
   SHEAD="$(git -C "$SHALLOWTREE" rev-parse HEAD)"
+  git -C "$SHALLOWTREE" remote set-url origin "$SHALLOWTREE"   # its own origin, as the full fixture above
   git -C "$SHALLOWTREE" update-ref refs/remotes/origin/main "$SHEAD"
   # the same statement as the full fixture above: the shallow clone IS the main checkout for this run
   git -C "$SHALLOWTREE" checkout -q -B main "$SHEAD"
