@@ -9,6 +9,10 @@ local platform = dofile("lua/core/platform.lua")
 local enrollment = dofile("lua/core/enrollment.lua")
 local M = {}
 
+-- The environment a probe child is started with (see probe_peers). A child started before this name
+-- existed inherits nothing and is caught by its argv, which carries the same word.
+M.PROBE_CHILD_ENV = "WA_NODES_PROBE_CHILD"
+
 local CACHE_TTL = 15
 local cache, cache_at = nil, 0
 local operator_cache = {} -- node_id -> { at, value }: see M.operator_status
@@ -304,6 +308,379 @@ function M.invalidate()
   operator_cache = {}
 end
 
+-- Probe peers AT ONCE, through one supervised child process each, and answer { <node_id> = {capabilities, reason} }.
+--
+-- WHY PROCESSES: host.http is one blocking call, so a loop over peers is a sum of their timeouts. The only
+-- concurrency this node has is supervised operations (host.operation), and a child "wa nodes probe <id>" is
+-- the same probe with its own process, its own cache and its own deadline. The children are started
+-- together, awaited together, and a child that cannot start is left out of the answer so the caller falls
+-- back to the in-process probe and says the same named reason as before.
+--
+-- PROBE_DEADLINE_S bounds the whole fan-out, so a hundred unreachable peers cost one deadline, not a hundred.
+local PROBE_DEADLINE_S = 20
+-- HOW MANY PROBE CHILDREN THIS PROCESS MAY HAVE ALIVE (item 0, the 19/11 OOM).
+--
+-- A child lives up to PROBE_DEADLINE_S. M.list is called many times inside one turn (a row, a view, a
+-- tool), and every call started one child per peer with no memory of the call before it, so children
+-- ACCUMULATED: measured in scripts/test-remote-refusals.lua, 125 live "wa nodes probe" processes for a
+-- 6-peer roster, each ~14-70 MB - the crowd that took the node to 23 GB.
+-- The registry is process-wide for the same reason the marker is (dofile gives every caller its own M
+-- table): a second call inside the deadline JOINS the running child for that peer, and past the cap this
+-- process starts no more and names the reason (probe_capacity) instead of forking an unbounded tree.
+--   _G.WA_PROBE_INFLIGHT[peer_id] = { op = <operation_id>, at = <host.now()> }
+local PROBE_MAX_CHILDREN = 64
+
+-- HOW MANY PROBE CHILDREN ARE ALIVE FOR THIS LEDGER, ACROSS EVERY PROCESS (item 0, growth D).
+--
+-- The registry below is ONE process memory, and measurement at row 37 of a --jobs 2 run showed why that
+-- is not enough: 554 live wa nodes-probe children, about 92 PER PEER, with their parents already
+-- re-parented to systemd --user. Ninety-two separate processes had each started its own set and none
+-- could see the others. The bound therefore has to be asked of something the processes SHARE, and the
+-- node already has one: the operation table. host.operation list answers every operation this ledger
+-- knows, each with its owner, so this asks it - and asks defensively, because a host without the verb
+-- must still probe (one named reason, never a crash).
+--
+-- The rule: if this ledger already has PROBE_MAX_CHILDREN live children owned by nodes-probe, start
+-- none and say probe_capacity by name. A peer whose child is already running is joined, not duplicated.
+local PROBE_OWNER = "nodes-probe"
+-- The host caps one await at 10 s and defaults to 1 s (operations.rs); a slice is what makes a long
+-- deadline a real wait instead of a 1 s look followed by a cancel.
+local PROBE_WAIT_SLICE_MS = 5000
+
+-- THE REGISTRY THAT ACTUALLY BOUNDS IT IS A FILE, NOT A TABLE (item 0, growth E, measured).
+--
+-- Both guards above are per Lua STATE, and a codemode run gets a FRESH one: measured on this node, one
+-- row ran 92 sandboxed scripts and each of them saw an empty registry, so one row alone started 552 probe
+-- children (~92 per peer). The only thing every state in this node shares is the disk.
+--
+-- So a lease is a small JSON file in the node's OWN data directory: a list of {at, peer}. A run reads it,
+-- drops entries older than PROBE_DEADLINE_S (that child is gone), and either JOINS the entry for its peer,
+-- writes one more, or - when the list is already PROBE_MAX_CHILDREN long - starts nothing and says
+-- probe_capacity by name. The file is small, it is written at most once per peer per deadline, and a write
+-- that fails degrades to the per-process table above with the reason named (never to an unbounded tree).
+-- THIS PROCESS, BY SOMETHING NO OTHER PROCESS CAN WEAR (review r2, B/MUST 3).
+--
+-- The lease used to record the NODE id as its owner, and that is the same string for every process on
+-- the node: a second state read "owner" and believed the child was its own, so it awaited an id the
+-- host refuses (operation_not_yours) and every peer answered probe_leaseholder_pending. The key must
+-- name the PROCESS. pid alone is not enough either - pids are reused - so it is the pid plus the
+-- kernel's boot id, which is stable for a boot and different after a reboot. Measured: /proc/sys/
+-- kernel/random/boot_id exists on Linux; where it does not, the pid alone is used and the key says so.
+local function probe_process_key()
+  -- The host already reports both halves (measured: runtime_info carries boot_id and process_id), so
+  -- nothing is read from /proc and nothing is invented.
+  local runtime = json.decode(host.runtime_info and host.runtime_info() or "") or {}
+  local pid = tostring(runtime.process_id or "")
+  local boot = tostring(runtime.boot_id or "")
+  if pid == "" then pid = tostring(host.now()) end
+  if boot ~= "" then return "pid:" .. pid .. ":boot:" .. boot end
+  return "pid:" .. pid
+end
+
+-- A DIRECTORY OF ONE FILE PER PROCESS, NOT ONE FILE (review r2, B/MUST 4).
+--
+-- The single lease file was read, merged and written back by every caller: an unlocked
+-- read-modify-write, so two states writing at once lost one of the two entries - and the entry lost was
+-- exactly the child the other one was about to join. The host has no flock, no rename and no O_EXCL
+-- (measured: host.exec, host.read_file, host.list_dir, host.write_file and no locking primitive), so the
+-- fix is to remove the shared write entirely: each process owns <dir>/<process-key>.json and writes ONLY
+-- that file. There is no merge to lose. A reader lists the directory and reads every file, and a file
+-- whose own `at` is past the deadline belongs to a process that is gone.
+local function probe_lease_dir()
+  local ok, paths = pcall(dofile, "lua/core/paths.lua")
+  if not ok or type(paths) ~= "table" or type(paths.data) ~= "function" then return nil end
+  local dir = paths.data()
+  if type(dir) ~= "string" or dir == "" then return nil end
+  return dir .. "/nodes-probe-inflight"
+end
+
+local function probe_lease_file()
+  local dir = probe_lease_dir()
+  if not dir then return nil end
+  local key = probe_process_key():gsub("[^%w]", "_")
+  return dir .. "/" .. key .. ".json"
+end
+
+local function probe_lease_entries(raw, now, live)
+  local decoded = json.decode(raw)
+  local rows = type(decoded) == "table" and (decoded.peers or decoded) or {}
+  if type(rows) ~= "table" then return end
+  for _, row in ipairs(rows) do
+    if type(row) == "table" then
+      local at = tonumber(row.at or 0) or 0
+      local peer = tostring(row.peer or "")
+      if peer ~= "" and (now - at) < PROBE_DEADLINE_S then
+        -- KEEP THE WHOLE ENTRY: result (the answer the holder published), op (its operation id, awaitable
+        -- only by the caller that owns it) and owner (which caller that is).
+        live[#live + 1] = { at = at, peer = peer, op = tostring(row.op or ""),
+          owner = tostring(row.owner or ""), result = type(row.result) == "table" and row.result or nil }
+      end
+    end
+  end
+end
+
+-- READ EVERY PROCESS FILE, not one shared one (review r2, B/MUST 4): each process writes only
+-- <dir>/<its own key>.json, so a reader merges by listing the directory. A file this process cannot read
+-- is skipped, not fatal - another run being killed mid-write must not blind this one.
+local function probe_lease_read(dir, now)
+  if type(dir) ~= "string" or dir == "" then return {} end
+  local live = {}
+  local listed = host.list_dir and host.list_dir(dir) or nil
+  if type(listed) == "string" then listed = json.decode(listed) end
+  for _, item in ipairs(type(listed) == "table" and (listed.entries or {}) or {}) do
+    local name = tostring(type(item) == "table" and item.name or "")
+    if name:match("%.json$") then
+      local ok, raw = pcall(host.read_file, dir .. "/" .. name)
+      if ok and type(raw) == "string" and raw ~= "" then probe_lease_entries(raw, now, live) end
+    end
+  end
+  return live
+end
+
+local function probe_lease_write(path, live)
+  -- REVIEW r1 MUST 5: this was `local ok = pcall(...); return ok`, which is true whenever the CALL did
+  -- not raise - so probe_lease_unwritable could never fire for a write the host refused. The host
+  -- returns its own success flag; both are required.
+  local ok, wrote = pcall(host.write_file, path, json.encode({ peers = live }))
+  return ok and wrote ~= false and wrote ~= nil
+end
+local function probe_children_alive(now)
+  if type(host.operation) ~= "function" then return nil, "no_operation_host" end
+  local ok, raw = pcall(host.operation, "list", json.encode({}))
+  if not ok or type(raw) ~= "string" then return nil, "operation_list_unavailable" end
+  local decoded = json.decode(raw)
+  if type(decoded) ~= "table" then return nil, "operation_list_unreadable" end
+  local rows = decoded.operations or decoded.ops or decoded
+  if type(rows) ~= "table" then return nil, "operation_list_shape" end
+  local alive = {}
+  for _, row in ipairs(rows) do
+    if type(row) == "table" and tostring(row.owner or "") == PROBE_OWNER then
+      local state = tostring(row.state or row.status or "")
+      local started = tonumber(row.started_at or row.created_at or 0) or 0
+      local fresh = (started == 0) or ((now - started) < PROBE_DEADLINE_S)
+      local live = (state == "" or state == "running" or state == "started" or state == "accepted" or state == "pending")
+      if live and fresh then
+        local key = tostring(row.label or row.id or row.operation_id or "")
+        if key ~= "" then alive[key] = true end
+      end
+    end
+  end
+  local count = 0
+  for _ in pairs(alive) do count = count + 1 end
+  return count
+end
+
+local function probe_inflight()
+  local t = _G.WA_PROBE_INFLIGHT
+  if type(t) ~= "table" then t = {}; _G.WA_PROBE_INFLIGHT = t end
+  local now, alive = host.now(), 0
+  for id, entry in pairs(t) do
+    if type(entry) == "table" and (now - tonumber(entry.at or 0)) < PROBE_DEADLINE_S then
+      alive = alive + 1
+    else
+      t[id] = nil -- past its deadline: that child is not running any more
+    end
+  end
+  return t, now, alive
+end
+
+local function probe_peers(peers, opts)
+  opts = opts or {}
+  if type(host.operation) ~= "function" then return {} end
+  local runtime = json.decode(host.runtime_info and host.runtime_info() or "") or {}
+  local program = tostring(runtime.binary_path or "")
+  if program == "" then return {} end
+  local inflight, now, alive = probe_inflight()
+  -- The lease is a DIRECTORY of one file per process (see probe_lease_dir): lease_path names this
+  -- process own file, lease_dir the directory every state reads.
+  local lease_dir = probe_lease_dir()
+  local lease_path = probe_lease_file()
+  local lease, lease_why = nil, nil
+  if lease_path then
+    local ok, live = pcall(probe_lease_read, lease_dir, now)
+    if ok and type(live) == "table" then lease = live else lease_why = "probe_lease_unreadable" end
+  else
+    lease_why = "probe_lease_no_data_dir"
+  end
+  -- host.operation(list) answers only THIS process (measured), so it is a floor, never the authority.
+  local shared, why_shared = probe_children_alive(now)
+  _G.WA_PROBE_SHARED_BOUND = why_shared or nil
+  if shared and shared > alive then alive = shared end
+  local launched, at_capacity = {}, {}
+  local lease_join, lease_add = {}, {}
+  if lease then
+    for _, entry in ipairs(lease) do lease_join[entry.peer] = entry end
+    alive = math.max(alive, #lease)
+  end
+  -- THE RESULT A LEASEHOLDER PUBLISHES (review item 1). A joiner must never await the holder id: that
+  -- id belongs to ANOTHER caller, and the host refuses an await from a session that does not own it
+  -- (rust/wa-capabilities/src/operations.rs, owned()). Measured shape of the defect: a joiner recorded
+  -- "lease:<peer>", the await was refused, the code cancelled it and answered probe_timeout - 20 s of
+  -- waiting for an answer that was already on disk. The lease now carries the holder ANSWER, written
+  -- when the child settles, and a joiner reads it instead of awaiting anything.
+  local published = {}
+  if lease then
+    for _, entry in ipairs(lease) do
+      if type(entry.result) == "table" then published[entry.peer] = entry.result end
+    end
+  end
+  for _, peer in ipairs(peers or {}) do
+    local id = tostring(peer.node_id or "")
+    if id ~= "" then
+      local running = inflight[id]
+      local joined = lease_join[id]
+      if published[id] then
+        launched[#launched + 1] = { id = id, joined = true, from_lease = true, result = published[id] }
+      elseif type(joined) == "table" and joined.result ~= nil then
+        launched[#launched + 1] = { id = id, joined = true, from_lease = true, result = joined.result }
+      elseif type(joined) == "table" and joined.owner == probe_process_key() then
+        -- The lease is OURS: this process (or a state in it) owns the child, so awaiting its real id is
+        -- allowed and is the honest way to get the answer. Only an owned child may be awaited.
+        launched[#launched + 1] = { id = id, operation_id = joined.op, joined = true, owned = true }
+      elseif type(joined) == "table" then
+        -- Another caller owns the child and has not published yet: WAIT ON THE LEASE FILE, never on its
+        -- operation id. The holder writes the result when the child settles.
+        launched[#launched + 1] = { id = id, wait_lease = true, joined = true }
+      elseif type(running) == "table" and (now - tonumber(running.at or 0)) < PROBE_DEADLINE_S then
+        launched[#launched + 1] = { id = id, operation_id = running.op, joined = true }
+      elseif alive >= PROBE_MAX_CHILDREN then
+        at_capacity[#at_capacity + 1] = id
+      else
+        local argv = { "nodes", "probe", id }
+        local db = host.getenv("WASM_AGENT_DB")
+        if db and db ~= "" then argv = { "--db", db, "nodes", "probe", id } end
+        local ok, receipt = pcall(host.operation, "start", json.encode({ program = program, args = argv,
+          timeout_seconds = tonumber(opts.deadline_s or PROBE_DEADLINE_S), kind = "command",
+          owner = "nodes-probe" }))
+        local answer = ok and (json.decode(receipt) or {}) or {}
+        if answer.operation_id then
+          launched[#launched + 1] = { id = id, operation_id = answer.operation_id }
+          inflight[id] = { op = answer.operation_id, at = now }
+          lease_add[#lease_add + 1] = { at = now, peer = id, op = answer.operation_id,
+            owner = probe_process_key() }
+          alive = alive + 1
+          -- WRITTEN RIGHT AFTER START (review r2, B/MUST 4), not after the awaits. The old shape wrote the
+          -- lease only when every await had finished, so a second state starting in the meantime saw no
+          -- entry, started a duplicate child, and the fan-out the lease exists to prevent happened anyway.
+          -- One write per started child, into THIS process own file: there is no merge to lose.
+          if lease_path then probe_lease_write(lease_path, lease_add) end
+        end
+      end
+    end
+  end
+  local out = {}
+  for _, id in ipairs(at_capacity) do
+    out[id] = { capabilities = nil, reason = "probe_capacity" }
+  end
+  if why_shared then out.__shared_bound = why_shared end
+  -- Collect the answers this call is entitled to get, and publish every one of them for the next caller.
+  local settled_results = {}
+  -- A NEGATIVE IS PUBLISHED TOO (review r2, B/MUST 6): a joiner that finds no answer spins for the whole
+  -- deadline and then reports its own timeout, which is a second 20 s wait for a fact the first caller
+  -- already learned. probe_timeout and probe_unreadable go into the lease like any other answer.
+  local negative = {}
+  for _, entry in ipairs(launched) do
+    if entry.wait_lease then
+      -- WAIT ON THE FILE: the owner publishes there. Polling the lease is the only cross-caller wait that
+      -- needs no permission from the host, and it stops the moment the answer arrives or the deadline does.
+      local waited_ms = 0
+      local limit_ms = tonumber(opts.deadline_s or PROBE_DEADLINE_S) * 1000
+      while waited_ms < limit_ms do
+        local again = probe_lease_read(lease_dir, now)
+        local found = nil
+        for _, row in ipairs(again) do
+          if row.peer == entry.id and type(row.result) == "table" then found = row.result end
+        end
+        if found then
+          out[entry.id] = found
+          settled_results[entry.id] = found
+          break
+        end
+        if host.sleep then pcall(host.sleep, 100) else break end
+        waited_ms = waited_ms + 100
+      end
+      if out[entry.id] == nil then out[entry.id] = { capabilities = nil, reason = "probe_leaseholder_pending" } end
+    elseif entry.result then
+      out[entry.id] = entry.result
+      settled_results[entry.id] = entry.result
+    else
+      -- MUST 1 + MUST 2 (review r2). The host decides ownership by the OWNER the caller names
+      -- (operations.rs, Caller::owns: a sessionless caller owns the rows started under its own owner),
+      -- so an await that names no owner is refused even for the child this process started - measured:
+      -- every peer answered probe_leaseholder_pending. And the host reads wait_ms only (cap 10 s,
+      -- default 1 s): wait_s is ignored, so a 20 s deadline was really a 1 s wait followed by a
+      -- cancel. The wait is therefore slices of wait_ms up to the deadline, refreshing `now` each time.
+      local deadline_ms = tonumber(opts.deadline_s or PROBE_DEADLINE_S) * 1000
+      local waited_ms, snapshot = 0, {}
+      while true do
+        local slice = math.min(PROBE_WAIT_SLICE_MS, math.max(1, deadline_ms - waited_ms))
+        local settled, state = pcall(host.operation, "await", json.encode({ id = entry.operation_id,
+          owner = PROBE_OWNER, wait_ms = slice }))
+        snapshot = settled and (json.decode(state) or {}) or {}
+        if type(snapshot) ~= "table" or snapshot.settled == true or snapshot.error then break end
+        waited_ms = waited_ms + slice
+        if waited_ms >= deadline_ms then break end
+        now = host.now()
+      end
+      if type(snapshot) == "table" and snapshot.error and not entry.owned then
+        -- The host refused this id (not ours). Never cancel someone else operation, and never call that
+        -- a timeout: the leaseholder still owns it and will publish.
+        out[entry.id] = { capabilities = nil, reason = "probe_leaseholder_pending" }
+      elseif snapshot.settled ~= true then
+        pcall(host.operation, "cancel", json.encode({ id = entry.operation_id, owner = PROBE_OWNER }))
+        negative[entry.id] = { capabilities = nil, reason = "probe_timeout" }
+        out[entry.id] = negative[entry.id]
+      else
+        local read_ok, chunk = pcall(host.operation, "read", json.encode({ id = entry.operation_id,
+          stream = "stdout", offset = 0, limit = 65536, owner = PROBE_OWNER }))
+        local text = read_ok and (json.decode(chunk) or {}) or {}
+        local body = tostring(text.content or text.data or "")
+        local decoded = nil
+        for line in body:gmatch("[^\r\n]+") do
+          local one = json.decode(line)
+          if type(one) == "table" and (one.capabilities ~= nil or one.reason ~= nil or one.error ~= nil) then decoded = one end
+        end
+        if decoded then
+          local answer = { capabilities = type(decoded.capabilities) == "table" and decoded.capabilities or nil,
+            reason = decoded.reason or decoded.error or (decoded.capabilities and "asked" or "unknown") }
+          out[entry.id] = answer
+          settled_results[entry.id] = answer
+        else
+          negative[entry.id] = { capabilities = nil, reason = "probe_unreadable" }
+          out[entry.id] = negative[entry.id]
+        end
+      end
+    end
+  end
+  -- PUBLISH WHAT WAS LEARNED (and keep every other live lease). This is what makes a joiner cheap.
+  for peer_id, value in pairs(negative) do settled_results[peer_id] = value end
+  if lease_path and (next(settled_results) ~= nil or #lease_add > 0) then
+    local merged, seen = {}, {}
+    for _, entry in ipairs(lease or {}) do
+      if not seen[entry.peer] then
+        seen[entry.peer] = true
+        merged[#merged + 1] = entry
+      end
+    end
+    for _, entry in ipairs(lease_add) do
+      if not seen[entry.peer] then
+        seen[entry.peer] = true
+        merged[#merged + 1] = entry
+      end
+    end
+    for peer_id, result in pairs(settled_results) do
+      local found = false
+      for _, entry in ipairs(merged) do
+        if entry.peer == peer_id then entry.result = result; entry.at = now; found = true end
+      end
+      if not found then merged[#merged + 1] = { at = now, peer = peer_id, result = result } end
+    end
+    if not probe_lease_write(lease_path, merged) then lease_why = "probe_lease_unwritable" end
+  end
+  _G.WA_PROBE_LEASE_BOUND = lease_why or nil
+  return out
+end
+
 -- Local host node + every other peer the rendezvous knows about.
 --
 -- `opts.cached` reads the roster this process already has and never asks the rendezvous (see
@@ -335,11 +712,66 @@ function M.list(opts)
       } or { "read", "ls", "grep", "spell_save", "spell_run", "spell_get" },
     },
   }
-  for _, peer in ipairs(fetch_peers(false, opts.cached)) do
+  -- THE FAN-OUT (item 10 of the node-ops round). Measured before: a peer that could not be reached held
+  -- the whole list for its own deadline, one peer after another - four unreachable peers meant four
+  -- timeouts before a display drew anything. host.http is one blocking call, so the concurrency comes from
+  -- supervised PROCESSES: one "wa nodes probe <node_id>" per peer, ALL started before any is awaited, and
+  -- read back together. A cached view asks nobody, and a view with no live probe keeps its old shape.
+  local live_probes = {}
+  -- THREE WAYS TO NOT PROBE: a cached view, a caller that said so, and a process that IS a probe child
+  -- (M.probe sets _in_probe_child). The third is the one whose absence took the node down.
+  -- THE MARKER IS PROCESS-WIDE, NOT MODULE-WIDE (item 0, the 19/11 OOM). This file is `dofile`d by
+  -- fifteen callers, and each dofile gets its OWN M table: a flag set on one instance was unset on every
+  -- other, so a second instance inside a probe child fanned out again - recursively, 1,653 processes,
+  -- 23 GB. `_G.WA_IN_PROBE_CHILD` is shared by every instance in the process, and an inherited env var
+  -- carries it into a child before its first line runs.
+  if not opts.cached and opts.live_capabilities ~= false and not M._in_probe_child
+     and not _G.WA_IN_PROBE_CHILD and host.getenv(M.PROBE_CHILD_ENV) ~= '1' then
+    -- opts.peers is the roster, for a caller that has one already (a test drives the fan-out with a
+    -- stubbed host, and a real caller passes nothing and gets the rendezvous' answer as before).
+    local peers = type(opts.peers) == "table" and opts.peers or fetch_peers(false, opts.cached)
+    local candidates = {}
+    for _, peer in ipairs(peers) do
+      if peer.node_id ~= identity.node_id then candidates[#candidates + 1] = peer end
+    end
+    if #candidates > 0 then live_probes = probe_peers(candidates, opts) end
+  end
+  local roster = type(opts.peers) == "table" and opts.peers or fetch_peers(false, opts.cached)
+  for _, peer in ipairs(roster) do
     if peer.node_id ~= identity.node_id then
       peer.id = peer.node_id
       peer.kind = "peer"
       peer.local_node = false
+      -- What the peer ACCEPTS, from the peer (item 7 of the node-ops round). The rendezvous stores no
+      -- capabilities at all, so a list built from it answered [] for every peer - including one that
+      -- accepts bash - and a reader had to guess. Three states, and the field always says which:
+      --   capabilities = {...}   the peer answered; these are the names it admits for this caller.
+      --   capabilities = nil     the peer could not be asked (offline, no binding, an older build):
+      --                          capabilities_reason names why, and `opts.cached` means nobody asked.
+      -- A cached display (opts.cached, taken inside somebody else's turn) never pays a network round
+      -- trip: it shows what is already known and says it did not ask.
+      if opts.cached then
+        local known = caps_cache[tostring(peer.node_id or "")]
+        peer.capabilities = known and known.capabilities or nil
+        peer.capabilities_reason = known and known.capabilities and "cached" or "not_asked_cached_view"
+      elseif opts.live_capabilities == false then
+        peer.capabilities = nil
+        peer.capabilities_reason = "not_asked"
+      else
+        -- Answered from the ONE fan-out below, never asked here: asking inside this loop is the serial
+        -- sum of every peer's timeout, which is what item 10 of the node-ops round removed.
+        local answer = live_probes[tostring(peer.node_id or "")]
+        if answer then
+          peer.capabilities = answer.capabilities
+          peer.capabilities_reason = answer.reason
+        else
+          -- No child could be started for this peer (no runtime_info, no operation host): the probe
+          -- still happens, in this process, and says the same named reason it always did.
+          local capabilities, why = M.peer_capabilities(peer)
+          peer.capabilities = capabilities
+          peer.capabilities_reason = capabilities and "asked" or tostring(why or "unknown")
+        end
+      end
       out[#out + 1] = peer
     end
   end
@@ -353,7 +785,7 @@ end
 
 function M.find(selector)
   if not selector or selector == "" then return nil end
-  for _, node in ipairs(M.list()) do
+  for _, node in ipairs(M.list({ live_capabilities = false })) do
     if node.name == selector or node.node_id == selector or node.id == selector then
       return node
     end
@@ -818,6 +1250,96 @@ local function lookup_record(node_id)
 end
 
 local function short_id(id) return tostring(id or ""):sub(1, 12) end
+
+-- What a peer accepts RIGHT NOW, as the peer itself answers it (lua/core/server.lua, capability
+-- "capabilities"). Item 7 of the node-ops round: M.list gave every peer whatever the rendezvous had
+-- stored, which carried no capabilities at all, so tools.nodes reported [] for a peer that accepts bash
+-- - a reader concludes the peer can do nothing, and the field was simply never filled.
+--
+-- The cost rule: a peer that has already answered is not asked again for NODE_CAPS_TTL seconds, and a
+-- peer that could not be asked is not asked again for NODE_CAPS_RETRY - but it says SO, by name, in
+-- capabilities_reason. An empty list with no reason would be the same lie in a quieter shape, so this
+-- never answers [] without saying why.
+local NODE_CAPS_TTL = 120
+local NODE_CAPS_RETRY = 60
+local caps_cache = {} -- node_id -> { at, capabilities, reason }
+
+-- A read-only signed call to one peer, without the mesh first (this is a discovery read and must not
+-- change routing state for real calls) and without a refusal's retry policy.
+local function ask_capabilities(node)
+  local id = tostring(node.node_id or "")
+  local cache_entry = caps_cache[id]
+  local now = host.now()
+  if cache_entry then
+    local ttl = (cache_entry.capabilities and #cache_entry.capabilities > 0) and NODE_CAPS_TTL or NODE_CAPS_RETRY
+    if (now - cache_entry.at) < ttl then return cache_entry.capabilities, cache_entry.reason end
+  end
+  local body = json.encode({ from_node_id = (M.identity() or {}).node_id, to_node_id = node.node_id,
+    request_id = host.uuid(), capability = "capabilities", args = {} })
+  local headers, problem = M.signed_headers("call", body)
+  if not headers then
+    caps_cache[id] = { at = now, reason = tostring(problem) }
+    return nil, tostring(problem)
+  end
+  local response = M.request(node, "/node/call", body, headers)
+  if not response then
+    caps_cache[id] = { at = now, reason = "remote_unreachable" }
+    return nil, "remote_unreachable"
+  end
+  if response.error or response.status ~= 200 then
+    local why = tostring(response.error or ("http_" .. tostring(response.status)))
+    caps_cache[id] = { at = now, reason = why }
+    return nil, why
+  end
+  local ok_decode, envelope = pcall(json.decode, tostring(response.body or ""))
+  if not ok_decode or type(envelope) ~= "table" then
+    caps_cache[id] = { at = now, reason = "answer_unreadable" }
+    return nil, "answer_unreadable"
+  end
+  -- A verified reply carries the peer's own bytes as a string under `reply` (signed_reply in
+  -- lua/core/server.lua); anything else is not the shape this asks for.
+  local answer = envelope
+  if type(envelope.reply) == "string" then
+    local ok_reply, decoded = pcall(json.decode, envelope.reply)
+    if ok_reply and type(decoded) == "table" then answer = decoded end
+  end
+  if type(answer.capabilities) ~= "table" then
+    local why = tostring(answer.error or "capabilities_absent")
+    caps_cache[id] = { at = now, reason = why }
+    return nil, why
+  end
+  local list = {}
+  for _, name in ipairs(answer.capabilities) do
+    if type(name) == "string" then list[#list + 1] = name end
+  end
+  caps_cache[id] = { at = now, capabilities = list }
+  return list, nil
+end
+
+function M.peer_capabilities(node, opts)
+  if type(node) ~= "table" or node.local_node then return nil, "not_a_peer" end
+  return ask_capabilities(node)
+end
+
+-- ONE peer's accepted capabilities, as a child process asks them (item 10 of the node-ops round).
+--
+-- This is the half a `wa nodes probe <node_id>` child runs: read the roster, find that peer, ask it, and
+-- print ONE JSON line. It exists because the host has no concurrent HTTP primitive - host.http is one
+-- blocking request - and the only concurrency a node has is supervised PROCESSES. M.list therefore starts
+-- one of these per peer at once, so N unreachable peers cost one timeout instead of N.
+function M.probe(selector)
+  -- A PROBE CHILD NEVER PROBES AGAIN: it is already the answer, and a child that fanned out forked a
+  -- tree of children (the 19/11 run that took the node down). The mark is set on the GLOBAL and on this
+  -- instance: `dofile` gives every caller its own M table, so instance state alone left the other
+  -- fourteen instances free to fan out.
+  _G.WA_IN_PROBE_CHILD = true
+  M._in_probe_child = true
+  local node = M.find(selector)
+  if not node then return { error = "node_unknown", node = tostring(selector or "") } end
+  if node.local_node then return { node_id = node.node_id, local_node = true } end
+  local capabilities, why = ask_capabilities(node)
+  return { node_id = node.node_id, capabilities = capabilities, reason = capabilities and "asked" or tostring(why or "unknown") }
+end
 
 function M.operator_status(node, opts)
   if type(node) ~= "table" or node.local_node then return nil end

@@ -66,6 +66,15 @@ host.http = function(method, url)
   return json.encode({ status = 503, body = '' })
 end
 
+-- NO PROBE CHILDREN. nodes.list() fans out a live capability probe: `wa nodes probe <peer>` as a real
+-- child process. This row is about the ROSTER, and it promises no network and no live node, so the host
+-- refuses to start any operation here. Before node-ops B that probe's await was refused by the host
+-- (ownerless) and returned at once; once the await worked, every list() waited up to the probe deadline
+-- on a child that, with this row's frozen clock, was joined again and again - the row hung 6 of 6 under
+-- concurrency (bisected to 7c650dc8). Refusing the start keeps the roster path itself unchanged.
+host.operation = function(action)
+  return json.encode({ error = 'operation_disabled_for_test', action = action })
+end
 local nodes = dofile('lua/core/nodes.lua')
 local function find(name)
   for _, node in ipairs(nodes.list()) do

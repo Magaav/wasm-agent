@@ -563,6 +563,10 @@ M.admin = {
     args = { type = "object", description = "Optional older form: the capability's parameters nested here. Prefer the flat form." },
     calls = { type = "array", minItems = 1, maxItems = 8, description = "With capability \"batch\": 1-8 read-only entries {capability, <its params>} run on the peer in ONE signed round trip, ordered results. Reads, history and read-only bash only.",
       items = { type = "object", properties = { capability = { type = "string" } }, required = { "capability" } } } }, { "node", "capability" }),
+  -- Item 4 of the node-ops round (#45): a build is graded against the bytes it embeds. A binary built
+  -- from another commit, or from this commit with uncommitted edits under lua/ or rust/, is not this
+  -- tree, and the answer says WHICH (fresh, stale, edited, unknown) instead of a bare yes.
+  schema("build", "What this node is running against what the tree says: the binary path, sha256 and build commit; the tree HEAD, branch and whether the embedded paths are unmodified; and the relation between them (fresh, stale, edited or unknown). Call it before trusting a build or a test result, and after a rebuild. Unknown is never fresh.", {}),
   schema("nodes", "List this node and every peer known to the rendezvous.", {}),
   schema("session_debug", "Set a session's recording mode. debug keeps every turn verbatim and forever, so a failing task can be reproduced and exported as a fixture.", {
     session_id = { type = "string", description = "Defaults to the current session." },
@@ -786,6 +790,7 @@ local CUES = {
   spell_forget = "Delete a saved spell",
   spell_export = "Export a spell for the sentinel to run",
   remote = "Run a capability on another node",
+  build = "What this node is running against the tree: binary path, sha256 and build commit, and the verdict between them (fresh, stale, edited, unknown)",
   nodes = "List this node and its peers",
   fleetview = "One read-only view of the whole fleet: liveness, version, health, disk, components, work, incidents",
   lessons = "Recall or add what this fleet learned the hard way (symptom, cause, fix, rule)",
@@ -2159,6 +2164,11 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     local recalled = store.recall(args.query, args.limit)
     if recalled.error then return { error = recalled.error, effect = 'none', note = recalled.note } end
     return recalled
+  elseif name == "build" then
+    -- The relation between the running binary and the tree (lua/core/build_status.lua): three facts
+    -- and the verdict between them, so a reader never has to infer that a green row graded another
+    -- commit bytes.
+    return dofile("lua/core/build_status.lua").status()
   elseif name == "nodes" then
     local list = {}
     for _, node in ipairs(nodeslib.list()) do

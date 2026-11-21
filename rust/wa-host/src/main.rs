@@ -275,6 +275,21 @@ fn main() {
     // core, the node key, the plugin directory and the config file all derive
     // their paths from HOME, so one resolution here fixes them together.
     let home = resolve_home();
+    // THE HOME BEFORE THE OVERRIDE IS KEPT, BY NAME (item 3 of the node-ops round).
+    //
+    // MEASURED 19/11: this line rewrites HOME to whatever WASM_AGENT_HOME says, so inside a node
+    // HOME == WASM_AGENT_HOME always - and the scratch-home guards in the Lua rows, which compare
+    // WASM_AGENT_HOME against HOME, could never fail. A row launched with WASM_AGENT_HOME=/home/<user>
+    // therefore wrote the operator's real ~/.wasm-agent and every guard passed it. The operator's own
+    // home is a fact about the process that STARTED this one, so it is recorded before it is overwritten
+    // and read back by scripts/lib/scratch-home.lua. Unset when the two agree: a marker that always
+    // exists says nothing.
+    if let Ok(original) = std::env::var("HOME") {
+        let original = original.trim();
+        if !original.is_empty() && original != home {
+            std::env::set_var("WA_HOME_BEFORE_OVERRIDE", original);
+        }
+    }
     std::env::set_var("HOME", &home);
     let from_file = load_env_file();
     // One answer to "which vault is this node's", bound before any command reads it: `wa vault …`

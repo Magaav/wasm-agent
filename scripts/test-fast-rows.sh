@@ -23,6 +23,10 @@ checks=0
 ok() { checks=$((checks + 1)); }
 fail() { echo "fast-rows FAILED: $*" >&2; exit 1; }
 
+# EVERY CHECK ABOVE READS ITS LIST THROUGH A HERE-STRING (measured 19/11: under `set -o pipefail`, which
+# this file sets, `printf ... | grep -q` is a RACE - grep exits at the first match, printf dies of SIGPIPE,
+# and the pipeline reports failure, so a correct list was read as a missing row 4 times in 16 concurrent
+# runs). The rule is the row library's own (scripts/lib/fast-rows.sh).
 candidates="$WORK/candidates"
 printf '%s\n' scripts/test-alpha.lua scripts/test-beta.lua scripts/test-land.lua \
   scripts/test-fast-row-environment.lua > "$candidates"
@@ -34,14 +38,14 @@ out="$(wa_fast_row_filter "$candidates" "$WORK/request-one")" || fail "a valid r
 first="$(printf '%s\n' "$out" | head -1)"
 [ "$first" = scripts/test-fast-row-environment.lua ] || fail "the row-environment probe is not first: $out"
 ok
-printf '%s\n' "$out" | grep -qx scripts/test-land.lua || fail "test-land.lua is not in the narrowed run: $out"
+grep -qx scripts/test-land.lua <<< "$out" || fail "test-land.lua is not in the narrowed run: $out"
 ok
-printf '%s\n' "$out" | grep -qx scripts/test-alpha.lua || fail "the requested row is missing: $out"
+grep -qx scripts/test-alpha.lua <<< "$out" || fail "the requested row is missing: $out"
 ok
 [ "$(printf '%s\n' "$out" | grep -c .)" = 3 ] || fail "expected 3 rows (2 core + 1 requested), got: $out"
 ok
 # `test-beta.lua` was not asked for and is not core: it is NOT run, and the omission is the point.
-printf '%s\n' "$out" | grep -qx scripts/test-beta.lua && fail "a row nobody asked for ran: $out"
+grep -qx scripts/test-beta.lua <<< "$out" && fail "a row nobody asked for ran: $out"
 ok
 
 # ---- 2. a request that names a core row does not duplicate it -------------------------------------------
@@ -80,9 +84,9 @@ ok
 
 # ---- 6. the core rows are what the runner says they are, and they exist in this tree -------------------
 core="$(wa_fast_core_rows)"
-printf '%s\n' "$core" | grep -qx scripts/test-fast-row-environment.lua || fail "the probe row is no longer core"
+grep -qx scripts/test-fast-row-environment.lua <<< "$core" || fail "the probe row is no longer core"
 ok
-printf '%s\n' "$core" | grep -qx scripts/test-land.lua || fail "test-land.lua is no longer core"
+grep -qx scripts/test-land.lua <<< "$core" || fail "test-land.lua is no longer core"
 ok
 for row in $core; do
   [ -f "$ROOT/$row" ] || fail "a core row does not exist in this tree: $row"
@@ -99,13 +103,13 @@ ok
 # `wa land` plans its requests from this list (lua/core/land.lua, M.row_inventory), so it has to be the runner's
 # list and not a second opinion about it. cwd is the tree root here, as it is for scripts/fast.sh.
 cand="$(wa_fast_row_candidates)"
-printf '%s\n' "$cand" | grep -qx scripts/test-land.lua || fail "the inventory does not list a row the fast path runs (test-land.lua)"
+grep -qx scripts/test-land.lua <<< "$cand" || fail "the inventory does not list a row the fast path runs (test-land.lua)"
 ok
 # The row that failed two landings: the file exists, the ledger declares it not run, so it is NOT a row this
 # run can execute (fast_narrow:unknown_row, land-20261118T172243Z-666a59cf and land-20261118T173351Z-2a481142).
 [ -f scripts/test-agent-benchmark-runtime-route.lua ] || fail "the row this check rests on is gone: scripts/test-agent-benchmark-runtime-route.lua"
 ok
-printf '%s\n' "$cand" | grep -qx scripts/test-agent-benchmark-runtime-route.lua && fail "the inventory lists a row scripts/fast-path.exclude declares not run"
+grep -qx scripts/test-agent-benchmark-runtime-route.lua <<< "$cand" && fail "the inventory lists a row scripts/fast-path.exclude declares not run"
 ok
 skips="$(wa_fast_row_skips)"
 printf '%s\n' "$skips" | grep -q '^scripts/test-agent-benchmark-runtime-route.lua.\+' || fail "the skip list does not name the declared row"

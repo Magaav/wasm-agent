@@ -933,6 +933,42 @@ gate_run bash scripts/test-upgrade-idle.sh | grep 'upgrade idle-wait ok'
 # then a scratch install upgraded THROUGH the flag - including the assertion that the default path does not
 # touch the watchdog at all. The fake kernel is `wa-watchdog selftest-kernel`; no real node is involved.
 gate_run bash scripts/test-watchdog.sh | grep 'test-watchdog: ok'
+# The fast path own per-row watchdog: a hung row names itself and takes every child it forked with it
+# (scripts/lib/fast-watchdog.sh; measured 18/11 on avell - a fixture child outlived its row).
+gate_run bash scripts/test-fast-watchdog.sh | grep 'test-fast-watchdog: ok'
+gate_run bash scripts/test-fast-watchdog-reap.sh | grep 'test-fast-watchdog-reap: ok'
+gate_run bash scripts/test-scratch-home.sh | grep 'test-scratch-home: ok'
+gate_run bash scripts/test-scratch-home-lua.sh | grep 'test-scratch-home-lua: ok'
+# Backup and restore: the manifest, the restore, and the five refusals that write nothing
+# (scripts/test-backup-restore.lua runs under this wrapper with its own scratch home).
+gate_run bash scripts/test-backup-restore.sh | grep 'backup restore ok'
+# What a peer accepts, answered by the peer from its own gate, with a named reason when it cannot be
+# asked (scripts/test-nodes-capabilities.lua under this wrapper).
+gate_run bash scripts/test-nodes-capabilities.sh | grep 'nodes capabilities ok'
+# The rollback identity check: a live pid is the restored bytes, mismatch and unknown are refused, and
+# the Lua tree moves with the binary (scripts/test-rollback-verify.sh).
+gate_run bash scripts/test-rollback-verify.sh | grep 'test-rollback-verify: ok'
+# The build-environment record: one file every build entry point reads, a key no build reads refused by
+# name with its remedy (scripts/test-build-env.sh).
+gate_run bash scripts/test-build-env.sh | grep 'test-build-env: ok'
+# The build relation and the allow-list environment (scripts/test-build-status.lua under this wrapper).
+gate_run bash scripts/test-build-status.sh | grep 'build status ok'
+# A row at a base commit and at the change, as one supervised comparison (scripts/test-row-at-sha.sh).
+gate_run bash scripts/test-row-at-sha.sh | grep 'test-row-at-sha: ok'
+# A green row that printed SKIP is a SKIP, not a pass (item 10 of the node-ops round): the shipped
+# check() is read out of fast.sh and run, so a drift between the two fails here.
+gate_run bash scripts/test-fast-skip-count.sh | grep 'test-fast-skip-count: ok'
+# Peers probe at once, through supervised children (item 10 of the node-ops round).
+gate_run bash scripts/test-nodes-probe-parallel.sh | grep 'nodes probe parallel ok'
+# A probe mark is process-wide: two real instances, the unmarked one fans out and the marked one
+# starts nothing (scripts/test-nodes-probe-instances.lua, the 19/11 recursion).
+gate_run bash scripts/test-nodes-probe-instances.sh | grep 'nodes probe instances ok'
+# The same fan-out bounded by the kernel's own counters (pids.peak/memory.peak in a memory-accounted
+# systemd scope): a probe child that fans out again fails here (19/11: 1,653 processes, 23 GB).
+gate_run bash scripts/test-nodes-probe-bound.sh | grep 'nodes probe bound ok'
+# A REAL node probes a stub peer over HTTP: the only row that can see an ownerless await or a wait_s the
+# host ignores, because every other probe row stubs the host (test-nodes-probe-real.sh).
+gate_run bash scripts/test-nodes-probe-real.sh | grep 'test-nodes-probe-real: ok'
 gate_run bash scripts/test-watchdog-upgrade.sh | grep 'test-watchdog-upgrade: ok'
 # Context budget is per model (provider.budget), and it is NOT the same thing as
 # provider.limits, which fetches the account's rate limits for the UI. Confusing

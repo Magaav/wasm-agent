@@ -294,6 +294,10 @@ local function graph_snapshot(source, copy)
     locked = "graph_store", pages = answer.pages }, nil
 end
 
+-- Assigned below (write_manifest): M.run writes the manifest as it goes, so every snapshot this
+-- module takes is restorable and not only the periodic one.
+local write_manifest
+
 function M.run(label)
   local stamp = os.date("!%Y%m%dT%H%M%SZ") .. '-' .. host.uuid() .. (label and label ~= "" and ("-" .. label:gsub("[^%w_-]", "")) or "")
   local dir = paths.config() .. "/backups/" .. stamp
@@ -319,7 +323,10 @@ function M.run(label)
       end
     end
     M.prune()
-    return { ok = true, dir = dir, stores = results, skipped = skipped }
+    -- The manifest is written for EVERY snapshot this module takes, not only the periodic one: a
+    -- pre-update snapshot nobody can name is the same unusable directory the restore refuses.
+    local manifest = write_manifest(dir, label, stamp, results, skipped)
+    return { ok = true, dir = dir, stores = results, skipped = skipped, manifest = manifest }
   end)
 end
 
@@ -330,6 +337,478 @@ end
 -- function keeps saying what it does: nothing.
 function M.prune()
   return { skipped = 'retention_is_the_reclaim_pass' }
+end
+
+-- ---- the manifest: what a snapshot holds, and which source each copy came from ------------------------
+-- A snapshot without a manifest is a directory of files called '3-memory.db': a reader can check those
+-- bytes, but nothing says which store each one belongs to, so a restore would have to guess a
+-- destination. Unknown is not yes, and a guess is how one store's copy overwrites another's ledger. So
+-- every snapshot this module takes writes manifest.json as it is taken, and 'wa restore --from' reads
+-- THAT file: a directory without one, or a copy whose bytes no longer match it, is refused by name.
+local MANIFEST = 'manifest.json'
+
+-- Is 'path' the directory 'root' or somewhere under it?
+local function inside(path, root)
+  path, root = tostring(path or ''), tostring(root or ''):gsub('/+$', '')
+  if root == '' or path == '' then return false end
+  return path == root or path:sub(1, #root + 1) == root .. '/'
+end
+
+local function basename(path)
+  local _, name = tostring(path or ''):gsub('\\', '/'):match('^(.*)/([^/]+)$')
+  return name or tostring(path or '')
+end
+
+-- The manifest of one snapshot directory: its table, or nil plus the named reason it cannot be used.
+function M.manifest(dir)
+  local ok, text = pcall(host.read_file, tostring(dir or ''):gsub('/+$', '') .. '/' .. MANIFEST)
+  if not ok or type(text) ~= 'string' then return nil, 'restore_manifest_missing' end
+  local decoded, value = pcall(json.decode, text)
+  if not decoded or type(value) ~= 'table' or type(value.stores) ~= 'table' or #value.stores == 0 then
+    return nil, 'restore_manifest_unreadable'
+  end
+  return value
+end
+
+-- Every snapshot under <config>/backups that carries a manifest, newest first. A directory without one is
+-- listed with manifest=false and its reason: it is visible, not silently skipped, and restore refuses it.
+function M.list()
+  local root = paths.config() .. '/backups'
+  local ok, raw = pcall(host.list_dir, root)
+  if not ok then return {} end
+  local value = type(raw) == 'string' and json.decode(raw) or raw
+  local entries = (type(value) == 'table' and value.entries) or value or {}
+  local out = {}
+  for _, entry in ipairs(entries) do
+    if entry.kind == 'dir' then
+      local dir = root .. '/' .. tostring(entry.name)
+      local manifest, why = M.manifest(dir)
+      out[#out + 1] = { dir = dir, name = tostring(entry.name), label = manifest and manifest.label or nil,
+        stamp = manifest and manifest.stamp or nil, taken_utc = manifest and manifest.taken_utc or nil,
+        stores = manifest and #manifest.stores or 0, manifest = manifest ~= nil, reason = why }
+    end
+  end
+  table.sort(out, function(a, b)
+    local as, bs = tostring(a.stamp or ''), tostring(b.stamp or '')
+    if as ~= bs then if as == '' then return false elseif bs == '' then return true end return as > bs end
+    return a.name > b.name
+  end)
+  return out
+end
+
+-- Write the manifest for one snapshot, after its copies exist: every store with the bytes it has now.
+-- A copy whose hash cannot be read is recorded as sha256='unknown' rather than left out, and restore
+-- refuses it - a snapshot that does not know what it holds cannot be put back.
+write_manifest = function(dir, label, stamp, results, skipped)
+  local stores, steps = {}, {}
+  for _, record in ipairs(results or {}) do
+    local sha = nil
+    if host.file_sha256 then
+      local ok, value = pcall(host.file_sha256, record.copy)
+      if ok and type(value) == 'string' and value ~= '' then sha = value end
+    end
+    stores[#stores + 1] = { source = record.source, copy = basename(record.copy), check = record.check,
+      attempts = record.attempts, sha256 = sha or 'unknown', locked = record.locked }
+  end
+  for _, record in ipairs(skipped or {}) do
+    steps[#steps + 1] = { source = record.source, reason = record.reason }
+  end
+  local identity = ''
+  if host.node_identity then
+    local ok, value = pcall(host.node_identity)
+    if ok and type(value) == 'table' then identity = tostring(value.node_id or '') end
+  end
+  local manifest = { version = 1, label = tostring(label or ''), stamp = stamp,
+    taken_utc = os.date('!%Y-%m-%dT%H:%M:%SZ'), node_id = identity, stores = stores, skipped = steps }
+  assert(host.write_file(dir .. '/' .. MANIFEST, json.encode(manifest)), 'backup_manifest_write_failed')
+  return manifest
+end
+
+-- Put one snapshot back: every store to the source path its manifest names.
+--
+-- The order of the checks is the point, and each refusal names the one thing that is wrong:
+--   1. the directory must hold a readable manifest (unknown is not yes);
+--   2. every copy must still hash to what the manifest recorded and pass integrity_check - a torn or
+--      edited backup is refused BEFORE anything of the node's is touched;
+--   3. every destination must be inside this node's own data/config directories or be the live ledger,
+--      so a hand-edited manifest cannot write outside the node;
+--   4. only then is the current file moved aside (.pre-restore-<stamp>) and the copy put in place, so a
+--      failure halfway leaves the old file recoverable rather than gone.
+-- ---- who holds a store, and the one command that stops it (item 2 of the node-ops round, 19/11) --------
+--
+-- MEASURED before this: 'wa restore --from <dir>' replaced the bytes of the ledger while
+-- 'wa-serve.service' was serving it. The file on disk said the snapshot's rows; the node answered from
+-- its own open connection and from the -wal that belonged to the OLD file. Replacing a store under a
+-- live SQLite connection is not a copy problem - a new file inherits a journal that describes the old
+-- one - and a restore that reports ok while the node serves something else is the 'it worked' nobody
+-- can use.
+--
+-- The evidence on POSIX is /proc: a process with the store (or its -wal/-shm) open. This process is
+-- excluded by its own id - it is the caller, and it opened the ledger to read it. A platform with no
+-- readable /proc answers 'unavailable', and the restore REFUSES rather than proceeding blind: unknown
+-- is not yes, and the caller can run the restore from a node that can answer the question.
+local function shell_quote_arg(value) return "'" .. tostring(value):gsub("'", "'\\''") .. "'" end
+
+local function self_process_id()
+  local ok, raw = pcall(host.runtime_info)
+  if not ok then return '' end
+  local info = type(raw) == 'string' and (select(2, pcall(json.decode, raw))) or raw
+  if type(info) ~= 'table' then return '' end
+  return tostring(info.process_id or '')
+end
+
+local function process_holders(path)
+  local self_pid = (self_process_id()):gsub('[^%w]', '')
+  -- ONE PASS OVER EVERY OPEN DESCRIPTOR (measured 19/11: the nested `for d in /proc/[0-9]*; do for f in
+  -- "$d"/fd/*; readlink` loop took 11.5s on this node - 1,647 processes and 10,744 descriptors - while the
+  -- same question answered from ONE `ls -l /proc/[0-9]*/fd/*` pass takes 126ms. The slow scan is why a
+  -- restore of three stores took 130s and was killed by the row watchdog at 120s, and why the row's own
+  -- 20s holder had expired before the scan reached it - a timing defect wearing the name of a missing
+  -- feature.
+  local awk_program = table.concat({
+    'BEGIN { lp=length(p) }',
+    '{ line=$0; n=length(line); if (n < lp) next',
+    '  target=substr(line, n-lp+1)',
+    '  if (target != p && substr(line, n-lp-3) != p "-wal" && substr(line, n-lp-3) != p "-shm") next',
+    '  if (match(line, /[/]proc[/][0-9]+[/]fd[/]/) == 0) next',
+    '  pid=substr(line, RSTART+6, RLENGTH-10)',
+    '  if (pid == self || pid == par) next',
+    '  print pid }',
+  }, '\n')
+  local script = table.concat({
+    'p=' .. shell_quote_arg(path),
+    "self='" .. self_pid .. "'",
+    'par=$PPID',
+    'if [ ! -d /proc ] || [ ! -r /proc/self/fd ]; then echo unavailable; exit 0; fi',
+    'list="${TMPDIR:-/tmp}/wa-holder-$$.list"',
+    'ls -l /proc/[0-9]*/fd/* 2>/dev/null | awk -v p="$p" -v self="$self" -v par="$par" '
+      .. shell_quote_arg(awk_program) .. ' | sort -u > "$list"',
+    'if [ ! -s "$list" ]; then rm -f "$list"; echo none; exit 0; fi',
+    'while IFS= read -r pid; do',
+    '  d=/proc/$pid',
+    '  [ -d "$d" ] || continue',
+    '  comm=$(tr "\\000" " " < "$d/cmdline" 2>/dev/null | cut -c1-120)',
+    '  [ -n "$comm" ] || comm=$(cat "$d/comm" 2>/dev/null)',
+    '  unit=$(sed -n "s|.*/\\([^/]*\\.service\\)$|\\1|p" "$d/cgroup" 2>/dev/null | head -1)',
+    '  printf "%s\\t%s\\t%s\\n" "$pid" "$comm" "$unit"',
+    'done < "$list"',
+    'rm -f "$list"',
+    'exit 0',
+  }, '\n')
+  local ran, raw = pcall(host.exec, script, '', 60)
+  if not ran then return nil, 'the holder scan could not run: ' .. tostring(raw) end
+  local answer = type(raw) == 'string' and (select(2, pcall(json.decode, raw))) or raw
+  if type(answer) ~= 'table' or tonumber(answer.code) ~= 0 then
+    local why = type(answer) == 'table' and tostring(answer.stderr or answer.code) or tostring(raw)
+    return nil, 'the holder scan did not answer: ' .. why
+  end
+  local text = tostring(answer.stdout or '')
+  local holders = {}
+  for line in text:gmatch('[^\r\n]+') do
+    local pid, comm, unit = line:match('^(%d+)\t(.*)\t(.*)$')
+    if pid then holders[#holders + 1] = { pid = tonumber(pid), command = comm, unit = unit } end
+  end
+  if #holders == 0 and not text:find('none', 1, true) then
+    return nil, 'the holder scan answered nothing it could read (' .. tostring(text):gsub('%s+', ' '):sub(1, 120) .. ')'
+  end
+  return holders
+end
+
+-- The ONE command that stops the holder this scan found: its own systemd unit when the process runs
+-- under one (read from /proc/<pid>/cgroup), and its pid otherwise. Never a guess: when neither is
+-- readable the answer says so instead of printing a command that would not work.
+local function stop_command(holder)
+  local unit = tostring(holder.unit or '')
+  if unit ~= '' then return 'systemctl --user stop ' .. unit end
+  if holder.pid then return 'kill ' .. tostring(holder.pid) .. '  # pid ' .. tostring(holder.pid) .. ' (' .. (holder.command ~= '' and holder.command or 'unknown command') .. ')' end
+  return '(this process could not be named)'
+end
+
+local function describe_holders(holders)
+  local parts = {}
+  for _, holder in ipairs(holders) do
+    parts[#parts + 1] = string.format('pid %s (%s)', tostring(holder.pid), holder.command ~= '' and holder.command or 'unknown command')
+  end
+  return table.concat(parts, ', ')
+end
+
+function M.restore(dir, opts)
+  opts = opts or {}
+  local stamp = tostring(opts.stamp or (os.date('!%Y%m%dT%H%M%SZ') .. '-' .. host.uuid()))
+  dir = tostring(dir or ''):gsub('/+$', '')
+  if dir == '' then return { ok = false, error = 'restore_dir_required' } end
+  local manifest, why = M.manifest(dir)
+  if not manifest then
+    return { ok = false, error = why, detail = dir .. ' holds no usable ' .. MANIFEST .. ': a snapshot this cannot name is not restored, and nothing was changed' }
+  end
+  local data, config = paths.data(), paths.config()
+  local live = main_db()
+  local plan = {}
+  for _, store in ipairs(manifest.stores) do
+    local source, copy = tostring(store.source or ''), dir .. '/' .. tostring(store.copy or '')
+    if source == '' or store.copy == nil then
+      return { ok = false, error = 'restore_manifest_incomplete', detail = 'a store row names no source or no copy; nothing was changed' }
+    end
+    local kind = 'unknown'
+    if host.path_kind then
+      local ok, value = pcall(host.path_kind, copy)
+      if ok then kind = tostring(value) end
+    end
+    if kind == 'missing' then
+      return { ok = false, error = 'restore_copy_missing', detail = copy .. ' is named by the manifest and is not there; nothing was changed' }
+    end
+    if kind ~= 'file' then
+      return { ok = false, error = 'restore_copy_unreadable', detail = copy .. ' could not be read as a file (' .. kind .. '); nothing was changed' }
+    end
+    if store.sha256 == nil or store.sha256 == 'unknown' then
+      return { ok = false, error = 'restore_copy_unhashed', detail = copy .. ' has no recorded sha256, so its bytes cannot be shown to be the ones this snapshot took; nothing was changed' }
+    end
+    local current = nil
+    if host.file_sha256 then local ok, value = pcall(host.file_sha256, copy); if ok then current = value end end
+    if type(current) ~= 'string' or current ~= store.sha256 then
+      return { ok = false, error = 'restore_copy_changed', detail = copy .. ' no longer hashes to the manifest (recorded ' .. tostring(store.sha256) .. ', now ' .. tostring(current) .. '); a copy that changed is not this snapshot, and nothing was changed' }
+    end
+    local ok_check, verdict = pcall(check_store, copy, 'integrity_check', false)
+    if not ok_check or verdict ~= 'ok' then
+      return { ok = false, error = 'restore_copy_unverified', detail = copy .. ' does not pass integrity_check (' .. tostring(verdict) .. '); nothing was changed' }
+    end
+    if not (inside(source, data) or inside(source, config) or (live ~= '' and source == live)) then
+      return { ok = false, error = 'restore_source_outside_node', detail = source .. ' is not under ' .. data .. ' or ' .. config .. ' (nor the ledger this process opened), so this manifest would write outside the node; nothing was changed' }
+    end
+    plan[#plan + 1] = { source = source, copy = copy, sha256 = store.sha256 }
+  end
+  -- ---- THE HOLDER CHECK, before anything of the node's is touched ----------------------------------
+  -- A store a live process has open cannot be replaced under it: the node keeps serving its own pages and
+  -- the -wal that belongs to the old file. Refused by name, with the process and the ONE command that
+  -- stops it - never a restore that reports ok while the node answers from somewhere else.
+  local held = {}
+  for _, item in ipairs(plan) do
+    local holders, why = process_holders(item.source)
+    if not holders then
+      return { ok = false, error = 'restore_holder_check_unavailable', detail = item.source .. ': ' .. tostring(why) .. '; nothing was changed' }
+    end
+    for _, holder in ipairs(holders) do held[#held + 1] = { source = item.source, holder = holder } end
+  end
+  if #held > 0 then
+    local lines, commands = {}, {}
+    for _, entry in ipairs(held) do
+      lines[#lines + 1] = string.format('%s is held by pid %s (%s)', entry.source, tostring(entry.holder.pid),
+        entry.holder.command ~= '' and entry.holder.command or 'unknown command')
+      -- The unit (the service that owns the process) AND the pid: a process can sit in a unit this
+      -- restore should not stop on its own (the caller own unit), and a reader told only the unit
+      -- would stop more than the holder. Both facts, so the choice is the operator.
+      commands[#commands + 1] = stop_command(entry.holder)
+      commands[#commands + 1] = "kill " .. tostring(entry.holder.pid)
+    end
+    local seen, unique = {}, {}
+    for _, command in ipairs(commands) do if not seen[command] then seen[command] = true; unique[#unique + 1] = command end end
+    return { ok = false, error = 'restore_store_held',
+      detail = table.concat(lines, '; ') .. '. Stop it first, then restore again: ' .. table.concat(unique, ' && '),
+      held = held, stop = unique }
+  end
+  if opts.dry_run then return { ok = true, dry_run = true, dir = dir, would_restore = plan } end
+  local function quote(path) return "'" .. tostring(path):gsub("'", "'\\''") .. "'" end
+  -- A command's real verdict: exit 0, or the reason it was not. Every move in this function goes through
+  -- it, so no step can fail silently and no report can claim a file was kept that was not.
+  local function run(command, seconds)
+    local ran, raw = pcall(host.exec, command, '', seconds or 120)
+    if not ran then return false, tostring(raw) end
+    local answer = type(raw) == 'string' and (select(2, pcall(json.decode, raw))) or raw
+    if type(answer) ~= 'table' then return false, tostring(raw) end
+    local code = tonumber(answer.code) or 0
+    if code ~= 0 then
+      local why = tostring(answer.stderr or ''):gsub('%s+$', ''):sub(1, 200)
+      if why == '' then why = 'exit ' .. tostring(code) end
+      return false, why
+    end
+    return true, answer
+  end
+  local restored = {}
+  for _, item in ipairs(plan) do
+    local dir_of_source = item.source:match('^(.*)/[^/]+$') or '.'
+    local aside = item.source .. '.pre-restore-' .. stamp
+    local staged = dir_of_source .. '/.' .. basename(item.source) .. '.restoring-' .. stamp
+    -- 1. The verified copy is written BESIDE its destination, not over it: a failure here leaves the
+    --    store exactly as it was, and the last step can then be a rename.
+    local ok_stage, stage_why = run('cp -p ' .. quote(item.copy) .. ' ' .. quote(staged))
+    if not ok_stage then
+      return { ok = false, error = 'restore_stage_failed', detail = item.source .. ': the checked copy could not be staged (' .. tostring(stage_why) .. '); the current file is untouched', restored = restored }
+    end
+    -- The staged bytes are the manifest's bytes: verified again HERE, because the copy was checked at
+    -- plan time and nothing this function has done since may be assumed.
+    local staged_sha = nil
+    if host.file_sha256 then local ok, value = pcall(host.file_sha256, staged); if ok then staged_sha = value end end
+    if type(staged_sha) ~= 'string' or staged_sha ~= item.sha256 then
+      pcall(run, 'rm -f ' .. quote(staged), 60)
+      return { ok = false, error = 'restore_stage_changed', detail = item.source .. ': the staged copy does not hash to the manifest (recorded ' .. tostring(item.sha256) .. ', staged ' .. tostring(staged_sha) .. '); the current file is untouched', restored = restored }
+    end
+    -- 2. The current file is moved aside by RENAME (atomic within its directory), and the move's result is
+    --    checked: `previous` is set only when this really happened, so a report can never print a way back
+    --    that does not exist.
+    local had_current = false
+    if host.path_kind then local ok, value = pcall(host.path_kind, item.source); had_current = ok and value == 'file' end
+    if had_current then
+      local ok_aside, aside_why = run('mv -f ' .. quote(item.source) .. ' ' .. quote(aside))
+      if not ok_aside then
+        pcall(run, 'rm -f ' .. quote(staged), 60)
+        return { ok = false, error = 'restore_aside_failed', detail = item.source .. ': the current file could not be moved aside (' .. tostring(aside_why) .. '); the store is untouched and the staged copy was removed', restored = restored }
+      end
+      if host.path_kind then
+        local ok, value = pcall(host.path_kind, aside)
+        if not ok or value ~= 'file' then
+          return { ok = false, error = 'restore_aside_unverified', detail = item.source .. ': the move aside reported success but ' .. aside .. ' is not a file (' .. tostring(value) .. '); the store is not where it was and needs an operator', restored = restored }
+        end
+      end
+    end
+    -- 2b. THE SIDECARS TRAVEL WITH THE FILE THEY BELONG TO (item 6 of the node-ops round).
+    -- MEASURED: this step used to `rm -f` the old -wal/-shm AFTER the restored file was in place. Those
+    -- two files are part of the OLD database - a -wal holds committed pages not yet checkpointed into it -
+    -- so deleting them threw away the only copy of the previous state at the exact moment an operator is
+    -- most likely to need it: a restore that turns out to be wrong. And the removal came after the swap,
+    -- so a failure there left the store restored with a journal of another file still beside it.
+    -- They are MOVED, beside the previous file and under the same stamp, BEFORE the restored bytes land:
+    -- the way back is <source>.pre-restore-<stamp> plus its sidecars - a whole store, not half of one.
+    local journal_notes = {}
+    for _, suffix in ipairs({ '-wal', '-shm' }) do
+      local path = item.source .. suffix
+      local kind = 'missing'
+      if host.path_kind then local ok, value = pcall(host.path_kind, path); if ok then kind = tostring(value) end end
+      if kind == 'file' then
+        local ok_move, move_why = run('mv -f ' .. quote(path) .. ' ' .. quote(aside .. suffix))
+        if not ok_move then
+          local back = false
+          if had_current then
+            local ok_back = run('mv -f ' .. quote(aside) .. ' ' .. quote(item.source))
+            back = ok_back and true or false
+          end
+          pcall(run, 'rm -f ' .. quote(staged), 60)
+          return { ok = false, error = 'restore_journal_move_failed',
+            detail = item.source .. ': the old ' .. suffix .. ' could not be moved beside the previous file (' .. tostring(move_why) .. '); '
+              .. (had_current and (back and ('the previous file was put back from ' .. aside) or ('the previous file is at ' .. aside .. ' and could NOT be put back'))
+                 or 'there was no previous file'),
+            restored = restored }
+        end
+        journal_notes[#journal_notes + 1] = 'moved the stale ' .. suffix .. ' aside to ' .. aside .. suffix
+      end
+    end
+    -- 3. The store takes its place by RENAME: the swap is atomic, and a half-written ledger cannot be read
+    --    by a node that opens it between the two steps.
+    local ok_place, place_why = run('mv -f ' .. quote(staged) .. ' ' .. quote(item.source))
+    if not ok_place then
+      local rolled_back = false
+      if had_current then
+        local ok_back = run('mv -f ' .. quote(aside) .. ' ' .. quote(item.source))
+        rolled_back = ok_back and true or false
+      end
+      pcall(run, 'rm -f ' .. quote(staged), 60)
+      return { ok = false, error = 'restore_place_failed',
+        detail = item.source .. ': the staged copy could not be renamed into place (' .. tostring(place_why) .. '); '
+          .. (had_current and (rolled_back and ('the previous file was put back from ' .. aside) or ('the previous file is at ' .. aside .. ' and could NOT be put back'))
+            or 'there was no previous file'),
+        restored = restored }
+    end
+    -- 4. NOTHING OF THE OLD FILE MAY BE LEFT BESIDE THE RESTORED ONE. The sidecars were moved above; if one
+    --    is here now, something recreated it while the swap ran, and replaying it into the restored file is
+    --    the corruption this step exists to prevent. Refused by name - never deleted: that file is evidence,
+    --    and the previous store it belongs to goes with it.
+    for _, suffix in ipairs({ '-wal', '-shm' }) do
+      local path = item.source .. suffix
+      local kind = 'missing'
+      if host.path_kind then local ok, value = pcall(host.path_kind, path); if ok then kind = tostring(value) end end
+      if kind ~= 'missing' then
+        return { ok = false, error = 'restore_journal_reappeared',
+          detail = item.source .. ': the restored store is in place but a ' .. suffix .. ' is beside it after the old one was moved aside (' .. path .. '); SQLite would replay it into the new file, so this store must be repaired by hand',
+          restored = restored }
+      end
+    end
+    local is_live = (live ~= '' and item.source == live)
+    restored[#restored + 1] = { source = item.source, copy = item.copy, previous = had_current and aside or nil,
+      sha256 = item.sha256, live = is_live, journal = journal_notes }
+  end
+  local reopens = {}
+  for _, item in ipairs(restored) do if item.live then reopens[#reopens + 1] = item.source end end
+  return { ok = true, dir = dir, restored = restored, stamp = stamp, label = manifest.label,
+    reopen_required = #reopens > 0, reopen = reopens }
+end
+
+-- Retention for the snapshots THIS module takes periodically, and only those.
+--
+-- M.prune above keeps saying that pre-update snapshots belong to the reclaim pass, and that rule is not
+-- changed here: two owners of one rule is the defect that let 48 snapshots accumulate. What is new is a
+-- periodic snapshot nobody asked for, and an unbounded set of those is the same defect pointing the
+-- other way - so the newest WA_BACKUP_KEEP (default 7) 'periodic' snapshots are kept and older ones are
+-- removed, each removal printed. A snapshot with a pending rollback is not 'periodic', so it is not in
+-- this list at all and is never touched.
+local function prune_periodic(keep)
+  keep = tonumber(keep) or 7
+  local removed, kept = 0, 0
+  for _, snapshot in ipairs(M.list()) do
+    if snapshot.label == 'periodic' then
+      kept = kept + 1
+      if kept > keep then
+        local ok, raw = pcall(host.exec, "rm -rf '" .. tostring(snapshot.dir):gsub("'", "'\\''") .. "'", '', 120)
+        local answer = type(raw) == 'string' and (select(2, pcall(json.decode, raw))) or raw
+        if ok and not (type(answer) == 'table' and (tonumber(answer.code) or 0) ~= 0) then removed = removed + 1
+        else print('backup: could not remove the old periodic snapshot ' .. snapshot.dir) end
+      end
+    end
+  end
+  return { removed = removed, kept = math.min(kept, keep) }
+end
+
+-- The periodic snapshot, at most one per WA_BACKUP_INTERVAL_S (default 24 h).
+--
+-- Called from the node's housekeeping tick (lua/core/server.lua), so it is cheap by default: one read of
+-- the memo file while the interval has not passed. The memo is a FILE, not a process variable, because a
+-- node restarts and a restart must not reset the day.
+-- Is a periodic snapshot DUE, without taking one (item 10 of the node-ops round)?
+--
+-- The sync tick asks this before it launches anything. It is one read of the memo file and no SQLite at
+-- all, so a tick that is not due costs nothing and starts no process: measured, the alternative - starting
+-- a background operation on every tick and letting it decide - pays a process per tick to learn 'not yet'.
+function M.due(opts)
+  opts = opts or {}
+  local interval = tonumber(host.getenv('WA_BACKUP_INTERVAL_S') or '') or tonumber(opts.interval_s or '') or 86400
+  if interval <= 0 then return true, nil end
+  local memo = paths.config() .. '/backups/.last-periodic'
+  local ok, last = pcall(host.read_file, memo)
+  local last_s = ok and type(last) == 'string' and tonumber(last:match('^(%d+)%s*$') or '') or nil
+  if last_s == nil then return true, nil end
+  local elapsed = os.time() - last_s
+  if elapsed >= 0 and elapsed < interval then return false, { elapsed_s = elapsed, interval_s = interval } end
+  return true, nil
+end
+
+function M.tick(opts)
+  opts = opts or {}
+  local interval = tonumber(host.getenv('WA_BACKUP_INTERVAL_S') or '') or tonumber(opts.interval_s or '') or 86400
+  local memo = paths.config() .. '/backups/.last-periodic'
+  local now = os.date('!%Y%m%dT%H%M%SZ')
+  -- The memo holds EPOCH SECONDS, not the printable stamp: the stamps are for a reader, and arithmetic on
+  -- "20261119T031729Z" is not arithmetic (measured by this item's own test: the second tick took a second
+  -- snapshot because tonumber(stamp) was nil and nil < interval is never true).
+  local now_s = os.time()
+  if interval > 0 then
+    local ok, last = pcall(host.read_file, memo)
+    local last_s = ok and type(last) == 'string' and tonumber(last:match('^(%d+)%s*$') or '') or nil
+    if last_s ~= nil then
+      local elapsed = now_s - last_s
+      if elapsed >= 0 and elapsed < interval then
+        return { ok = true, skipped = 'interval_not_elapsed', elapsed_s = elapsed, interval_s = interval }
+      end
+    end
+  end
+  local ok, result = pcall(M.run, 'periodic')
+  if not ok then return { ok = false, error = 'periodic_backup_failed', detail = tostring(result) } end
+  -- THE MANIFEST IS WRITTEN ONCE, BY M.run (item 10 of the node-ops round). Measured 19/11: M.run called
+  -- write_manifest, and this function called it AGAIN over the same directory - two writers of one file,
+  -- and the second one re-hashed every copy for a record that already existed. The result M.run returns
+  -- carries its manifest; this reads that one.
+  local manifest = result.manifest or { stores = {}, skipped = {} }
+  pcall(host.write_file, memo, tostring(now_s))
+  local pruned = prune_periodic(tonumber(host.getenv('WA_BACKUP_KEEP') or ''))
+  return { ok = true, dir = result.dir, stores = #manifest.stores, skipped = #manifest.skipped,
+    kept = pruned.kept, removed = pruned.removed }
 end
 
 return M
