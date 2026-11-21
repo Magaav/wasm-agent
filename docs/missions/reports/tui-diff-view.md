@@ -6,17 +6,25 @@ with the path, `+N -M`, the diff with real line numbers, removed rows on a red b
 a green one, syntax colour inside, a few context lines, `...` between hunks, and a dim footnote
 saying it is a convenience view, not a review. Display only: the model's context is unchanged.
 
-## Measurement first (the brief's premise, re-measured)
+## Measurement first (the brief's premise, re-measured), each row with the commit that acts on it
 
-| Premise | Measured 20/11 |
-| --- | --- |
-| edits reach the TUI as tool events | Yes. `agent.lua` emits `{type="tool_result", name=..., result=...}`; `lua/core/chat.lua:85` redacts the result and hands it to `cli_view:event`. |
-| before/after text is available | Yes, already stored. `tools.lua` write/edit call `changeset.record(ctx.changes, path, before, after)`, which puts BOTH sides in the content-addressed store (`lua/core/changeset.lua`), and the edit result carries `previous_version`/`version`. Nothing had to be captured at the tool. |
-| the view showed the diff | No. `cli_view.M.preview` answers nothing for `write`/`edit`, so a change printed `written` and no lines. |
-| the card renderer | `lua/core/markdown.lua` draws a fence as `U+250C U+2500`, `U+2502 `, `U+2514 U+2500`; `rust/wa-term/src/transcript.rs` (`CardWrap`, `is_card_opening`) keeps a card whole by cutting body rows by CELLS. Its opening must be exactly the corner and bar (or a fence language after it) - checked, so the path/counts line is the card's first BODY row, not its title. |
-| `write` has no version digests | Confirmed: `tools.lua` returns `{ok, path, graph_index}`. The recorded change is therefore attached from `changeset.summary(self.changes)` in `agent.lua`. |
-| bash-changed files | No mechanism existed. A snapshot around the command is the honest way, and git's porcelain is the rule readers already trust. |
+| Premise | Measured 20/11 | The commit that acts on it |
+| --- | --- | --- |
+| edits reach the TUI as tool events | Yes. `agent.lua` emits `{type="tool_result", name=..., result=...}`; `lua/core/chat.lua:85` redacts the result and hands it to `cli_view:event`. | `657867fb` (the `change` event it now also emits) |
+| before/after text is available | Yes, already stored. `tools.lua` write/edit call `changeset.record(ctx.changes, path, before, after)`, which puts BOTH sides in the content-addressed store (`lua/core/changeset.lua`); the edit result carries `previous_version`/`version`. Nothing had to be captured at the tool. | `657867fb` (`diff_view.texts` reads exactly those two addresses) |
+| the view showed the diff | No. `cli_view.M.preview` answers nothing for `write`/`edit`, so a change printed `written` and no lines. | `657867fb` (`cli_view.M.diff_block` + the `change` branch) |
+| the card renderer | `lua/core/markdown.lua` draws a fence as `U+250C U+2500`, `U+2502 `, `U+2514 U+2500`; `rust/wa-term/src/transcript.rs` (`CardWrap`, `is_card_opening`) keeps a card whole by cutting body rows by CELLS. Its opening must be exactly the corner and bar (or a fence language after it). | `657867fb` (the opening row is the bare corner, asserted) |
+| `write` has no version digests | Confirmed: `tools.lua` returns `{ok, path, graph_index}`. The recorded change is therefore attached from `changeset.summary(self.changes)` in `agent.lua`. | `657867fb` |
+| bash-changed files | No mechanism existed. A snapshot around the command is the honest way, and git's porcelain is the rule readers already trust. | `7cc4e680`, fixed in `c285191e` |
 
+How to see each claim for yourself, in this order:
+
+```
+git -C /home/victor/Work/missions/tui-diff-view/wt show 657867fb --stat   # the renderer and its wiring
+git -C /home/victor/Work/missions/tui-diff-view/wt show 657867fb -- lua/core/agent.lua | grep -A12 'type = "change"'
+git -C /home/victor/Work/missions/tui-diff-view/wt show 7cc4e680 --stat   # bash-changed files
+git -C /home/victor/Work/missions/tui-diff-view/wt show c285191e          # the two bugs found by measuring
+```
 ## What was built, per commit
 
 - `657867fb` - `lua/core/diff_view.lua` (pure renderer) and its wiring in `cli_view`: a `change`
