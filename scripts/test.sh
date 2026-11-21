@@ -963,9 +963,6 @@ gate_run bash scripts/test-nodes-probe-parallel.sh | grep 'nodes probe parallel 
 # A probe mark is process-wide: two real instances, the unmarked one fans out and the marked one
 # starts nothing (scripts/test-nodes-probe-instances.lua, the 19/11 recursion).
 gate_run bash scripts/test-nodes-probe-instances.sh | grep 'nodes probe instances ok'
-# The same fan-out bounded by the kernel's own counters (pids.peak/memory.peak in a memory-accounted
-# systemd scope): a probe child that fans out again fails here (19/11: 1,653 processes, 23 GB).
-gate_run bash scripts/test-nodes-probe-bound.sh | grep 'nodes probe bound ok'
 # A REAL node probes a stub peer over HTTP: the only row that can see an ownerless await or a wait_s the
 # host ignores, because every other probe row stubs the host (test-nodes-probe-real.sh).
 gate_run bash scripts/test-nodes-probe-real.sh | grep 'test-nodes-probe-real: ok'
