@@ -25,7 +25,7 @@ BIN="${WA_BIN:-}"
 if [ -z "$BIN" ]; then for c in "$ROOT/rust/target/release/wa" "${CARGO_TARGET_DIR:-/nonexistent}/release/wa" "$(command -v wa || true)"; do [ -x "$c" ] && BIN="$c" && break; done; fi
 [ -n "$BIN" ] || { echo "SKIP test-nodes-probe-real: no wa binary (set WA_BIN)"; exit 0; }
 
-cp "$ROOT/scripts/test-nodes-probe-real-stub.mjs" "$SCRATCH/stub.mjs" 2>/dev/null || { echo "SKIP test-nodes-probe-real: the peer stub is not in this tree"; exit 0; }
+cp "$ROOT/scripts/lib/nodes-probe-real-stub.mjs" "$SCRATCH/stub.mjs" 2>/dev/null || { echo "SKIP test-nodes-probe-real: the peer stub is not in this tree"; exit 0; }
 command -v curl >/dev/null 2>&1 || { echo "SKIP test-nodes-probe-real: no curl to wait on the stub"; exit 0; }
 node "$SCRATCH/stub.mjs" "$SCRATCH/port" >"$SCRATCH/stub.log" 2>&1 &
 stub_pid=$!

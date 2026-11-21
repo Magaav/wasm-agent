@@ -20,7 +20,7 @@ cleanup() { local s=$?; set +e; rm -rf "$SCRATCH"; exit $s; }
 trap cleanup EXIT
 . "$ROOT/scripts/lib/scratch-home.sh"
 wa_scratch_home_guard "$SCRATCH/home" || exit 2
-fail() { echo "test-fast-skip-count: $*" >&2; exit 1; }
+fail() { echo "FAIL test-fast-skip-count: $*" >&2; exit 1; }
 
 # The function, from the shipped file: from 'check() {' to the first line that is '}' at column 0.
 check_body="$(awk '/^check\(\) \{/{inside=1} inside{print} inside&&/^}$/{exit}' scripts/fast.sh)"
