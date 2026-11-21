@@ -147,36 +147,59 @@ has(created_rows, "+2 -0", "a created file counts two added lines and no removal
 -- shell (no real git, no real tree): BEFORE is clean, the command writes one file, and AFTER reports it
 -- modified. The starting text comes from the index, so the block shows a real diff; a file that was
 -- already modified is NAMED and its diff refused rather than guessed.
+-- ---- the files a shell command changed ----------------------------------------
+-- Through lua/core/bash_changes.lua with a fake git (no real tree): BEFORE is clean, the command writes
+-- one tracked file and one new one, and a third file was already modified. The starting text comes from
+-- the index at the repository ROOT, which is where git reports its paths from - a command run in a
+-- subdirectory still reports root-relative paths (measured 20/11 on rust/ in this repo).
 local bash_changes = dofile("lua/core/bash_changes.lua")
-local fake = { status = " M src/changed.lua\n M src/already.lua\n?? src/new.lua\n",
-  show = { ["src/changed.lua"] = "one\ntwo\n" },
-  files = { ["src/changed.lua"] = "one\nTWO\n", ["src/already.lua"] = "kept\n",
-    ["src/new.lua"] = "fresh\n" } }
+local fake = { root = "/repo",
+  status_before = "",
+  status_after = " M crate/src/changed.rs\n M crate/src/already.rs\n?? crate/src/new.rs\n",
+  show = { ["crate/src/changed.rs"] = "one\ntwo\n" },
+  files = { ["/repo/crate/src/changed.rs"] = "one\nTWO\n",
+    ["/repo/crate/src/already.rs"] = "kept\n", ["/repo/crate/src/new.rs"] = "fresh\n" },
+  phase = "before" }
 local real_exec, real_read = host.exec, host.read_file
 host.exec = function(command, cwd)
-  if command:match("^git status") then return '{"code":0,"stdout":"' .. fake.status:gsub("\n", "\\n") .. '","stderr":""}' end
+  if command:match("^git rev%-parse") then
+    return '{"code":0,"stdout":"' .. fake.root .. '\\n","stderr":""}'
+  end
+  if command:match("^git status") then
+    local text = fake.phase == "before" and fake.status_before or fake.status_after
+    return '{"code":0,"stdout":"' .. text:gsub("\n", "\\n") .. '","stderr":""}'
+  end
   local path = command:match("^git show :(.+)$")
   if path and fake.show[path] then
     return '{"code":0,"stdout":"' .. fake.show[path]:gsub("\n", "\\n") .. '","stderr":""}'
   end
   return '{"code":1,"stdout":"","stderr":"no such path"}'
 end
-host.read_file = function(path) return fake.files[path:gsub("^/work/", "")] end
-local changed, refused = bash_changes.changed("/work", { ["src/already.lua"] = "MM" })
+host.read_file = function(path) return fake.files[path] end
+-- The snapshot taken before the command; the same directory, a subdirectory of the tree.
+local before = bash_changes.before("/repo/crate", false)
+ok(type(before) == "table" and before.root == "/repo",
+  "the snapshot resolves the repository root, not the command's directory")
+ok(bash_changes.before("/repo/crate", true) == nil, "a command the caller says is read-only takes no snapshot")
+fake.phase = "after"
+-- A file that was already modified is not in the before snapshot: it is refused by name.
+before.status["crate/src/already.rs"] = " M"
+local changed, refused = bash_changes.changed(before)
 ok(#changed == 2, "a command's own changes are found (got " .. #changed .. ")")
-ok(#refused == 1 and refused[1].path == "src/already.lua",
-  "a file that was already modified is refused by name, not diffed from a guess")
+ok(#refused == 0, "a file modified before the command is not counted as this command's change")
 local block = table.concat(view_lib.bash_changes_block({ files = changed, refused = refused }, 80, false)
   or {}, "\n")
-has(block, "src/changed.lua", "the changed file is named")
+has(block, "crate/src/changed.rs", "the changed file is named by its root-relative path")
 has(block, "+1 -1", "and its own counts")
-has(block, "src/new.lua", "a new file is shown")
-has(block, "already modified before command", "a refused file says why in words, not as an empty block")
--- The snapshot is not taken for a read-only command: there is nothing it could have changed.
-ok(bash_changes.before("/work", "git status", true) == nil, "a read-only command takes no snapshot")
-ok(bash_changes.before("/work", "rm -rf build", false) ~= nil, "a command that can write does")
+has(block, "crate/src/new.rs", "a new file is shown")
+-- A file whose before-side is not in the index cannot be diffed, and the block says so in words.
+fake.show = {}
+local changed2, refused2 = bash_changes.changed(before)
+ok(#refused2 >= 1, "a change whose starting text is unknown is refused, not guessed")
+local block2 = table.concat(view_lib.bash_changes_block({ files = changed2, refused = refused2 }, 80, false)
+  or {}, "\n")
+has(block2, "index text unavailable", "and the refusal is said in words, not as an empty block")
 host.exec, host.read_file = real_exec, real_read
-
 if failed > 0 then
   print("FAILED " .. failed)
   os.exit(1)
