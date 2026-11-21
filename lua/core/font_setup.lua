@@ -113,10 +113,16 @@ function M.terminals(home)
     { name = "alacritty", path = config_home .. "/alacritty/alacritty.toml", kind = "toml", section = "font.normal", key = "family",
       inline = "normal", table_section = "font", icons_via = "fontconfig" },
     { name = "kitty", path = config_home .. "/kitty/kitty.conf", kind = "conf", key = "font_family",
-      fallback_line = "symbol_map " .. M.ICON_RANGES .. " wa Icons" },
-    -- ghostty names the mapping itself: font-codepoint-map = <ranges>=<family> (review finding 2).
+      fallback_line = "symbol_map " .. M.ICON_RANGES .. " wa Icons",
+      -- the keys a line may use to name the ICON face (see M.names_icon_face): kitty maps code points on a
+      -- symbol_map line, never on the font_family line itself.
+      icon_keys = { "symbol_map" } },
+    -- ghostty names the mapping itself: font-codepoint-map = <ranges>=<family> (review finding 2). It ALSO
+    -- repeats font-family to name a fallback face, which is why that key is an icon key here too: a writer
+    -- that read such a line as the text face wrote the text face twice (measured 21/11).
     { name = "ghostty", path = config_home .. "/ghostty/config", kind = "conf", key = "font-family",
-      fallback_line = "font-codepoint-map = " .. M.ICON_RANGES .. "=wa Icons" },
+      fallback_line = "font-codepoint-map = " .. M.ICON_RANGES .. "=wa Icons",
+      icon_keys = { "font-codepoint-map", "font-family" } },
     { name = "wezterm", path = config_home .. "/wezterm/wezterm.lua", kind = "lua-wezterm" },
     -- Windows Terminal keeps one JSON file per user, and its default profile font is a key in it.
     { name = "windows-terminal", path = M.windows_terminal_path(home), kind = "json-wt" },
@@ -336,24 +342,75 @@ function M.installed_by_setup()
   return record ~= nil and record["wa Icons"] == true
 end
 
+-- A line with no leading or trailing whitespace, for comparing it with the one this command writes.
+function M.trim_line(text)
+  return (tostring(text or ""):gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+-- The keys a terminal uses for its ICON face, beside the key it uses for its text face. An explicit list on
+-- the terminal wins; otherwise it is the first word of the fallback line the setup writes (kitty's
+-- symbol_map, ghostty's font-codepoint-map).
+function M.icon_line_keys(terminal)
+  if not terminal then return {} end
+  if terminal.icon_keys then return terminal.icon_keys end
+  local keys = {}
+  local first = tostring(terminal.fallback_line or ""):match("^(%S+)")
+  if first and first ~= "" then keys[#keys + 1] = (first:gsub("[=%.]+$", "")) end
+  return keys
+end
+
+-- Does this line name the ICON face - the one this command writes now, or one an earlier run wrote? A line
+-- whose key is one of the terminal's icon keys AND that names "wa Icons". It is the single reader of that
+-- shape, so the check (already_a2) and the writer (edited_text) cannot disagree about what one is.
+function M.names_icon_face(terminal, line)
+  local text = tostring(line or "")
+  if text:match("^%s*#") then return false end
+  if not text:lower():find("wa icons", 1, true) then return false end
+  for _, key in ipairs(M.icon_line_keys(terminal)) do
+    if text:match("^%s*" .. M.key_pattern(key) .. "%s*[= ]") then return true end
+  end
+  return false
+end
+
 function M.already_a2(description, config_text, terminal)
   local text = tostring(description or ""):lower()
   -- The primary face: the text before the first comma (foot) or the whole description (the others).
   local primary = text:match("^([^,]+)") or text
   local is_text_face = primary:find("jetbrains mono", 1, true) ~= nil
-  -- The ICON face may be named on the font line (foot: "..., wa Icons:size=9") or on a line of its own
-  -- (kitty's symbol_map, ghostty's repeated font-family). Judging the font line alone made those two
-  -- not-A2 for ever, so every run edited and overwrote the backup (measured 21/11) - the whole config is
-  -- the evidence, and it is passed in.
-  -- A terminal whose syntax has no icon-face key (alacritty takes fallbacks from fontconfig) is set up
-  -- when its TEXT face is JetBrains Mono and wa Icons is installed for this user: there is no line to look
-  -- for, and demanding one made it edit on every run (measured 21/11).
-  if terminal and terminal.icons_via == "fontconfig" then
+  if not terminal then
+    -- NO TERMINAL: the coarse shape this function had before a caller passed one (a font DESCRIPTION and
+    -- nothing else). Every path that edits a config passes the terminal, so this is only the fallback for a
+    -- caller that cannot say which terminal it is asking about, and it is not a licence to edit.
+    return is_text_face and text:find("wa icons", 1, true) ~= nil
+  end
+  -- A terminal whose syntax has no icon-face line (alacritty and wezterm take fallbacks from fontconfig, and
+  -- Windows Terminal has no per-code-point key) is set up when its TEXT face is JetBrains Mono and wa Icons
+  -- is installed for this user: there is no line to look for, and demanding one made it edit on every run
+  -- (measured 21/11).
+  if terminal.icons_via == "fontconfig" or terminal.kind == "lua-wezterm" or terminal.kind == "json-wt" then
     return is_text_face and M.installed_by_setup()
   end
-  local has_icons_face = text:find("wa icons", 1, true) ~= nil
-    or tostring(config_text or ""):lower():find("wa icons", 1, true) ~= nil
-  return is_text_face and has_icons_face
+  -- GNOME Terminal holds one font DESCRIPTION and no icon line at all: it is set up when that value is
+  -- exactly what this command would set it to.
+  if terminal.kind == "gsettings" then
+    return tostring(description or "") == M.font_value(terminal, description)
+  end
+  -- THE ICON FACE MUST BE EXACTLY THE LINE THIS COMMAND WRITES NOW - not merely a line that mentions
+  -- "wa Icons". MEASURED 21/11: kitty carrying the pre-fix 'symbol_map U+F0000-U+FFFFD wa Icons' and ghostty
+  -- carrying 'font-family = "wa Icons"' were both reported "already draws wa's icons" and never corrected,
+  -- although the first hands EVERY plane-15 code point (every other program's Nerd icon) to a face with
+  -- fourteen glyphs. A map that is not the map the command writes is a map to replace.
+  if terminal.fallback_line then
+    local config = tostring(config_text or "")
+    for line in (config .. "\n"):gmatch("([^\n]*)\n") do
+      if M.trim_line(line) == terminal.fallback_line then return is_text_face end
+    end
+    return false
+  end
+  -- THE ICON FACE RIDES ON THE FONT LINE ITSELF (foot: "JetBrains Mono:size=11, wa Icons:size=11"), so the
+  -- whole line has to be what font_value writes - which is also what makes the answer change when the pair
+  -- changes, instead of the terminal staying "set up" for a line this command no longer writes.
+  return tostring(description or "") == M.font_value(terminal, description)
 end
 
 -- Can the font this terminal draws TODAY show wa's icons? true / false, or nil when nobody could ask -
@@ -408,8 +465,18 @@ end
 --             where wa Icons is installed; there is no per-code-point key in its config)
 --   ghostty   font-family = "JetBrains Mono" + font-codepoint-map = <ICON_RANGES>=wa Icons (ghostty maps the code points itself;
 --             documented way to add a fallback face)
+-- The config with every stale ICON line removed, so the pair can be added without leaving a second map
+-- beside it (kitty reads the LAST symbol_map, so a pre-fix whole-plane map left in place would win).
+function M.without_icon_lines(terminal, text)
+  local out = {}
+  for line in (tostring(text or "") .. "\n"):gmatch("([^\n]*)\n") do
+    if not M.names_icon_face(terminal, line) then out[#out + 1] = line end
+  end
+  return table.concat(out, "\n")
+end
+
 function M.pair_for_fontless(terminal, text)
-  text = tostring(text or "")
+  text = M.without_icon_lines(terminal, text)
   local function add(lines)
     local out = (text:gsub("\n+$", ""))
     if out ~= "" then out = out .. "\n" end
@@ -524,10 +591,21 @@ function M.edited_text(terminal, text)
     -- BOTH WRITTEN FORMS, matched the way the READER matches them. ghostty writes 'font-family = "X"';
     -- a writer that only knew 'font_family X' appended a second line beside the old one, so the reader saw
     -- the old face, the next run edited again, and each run overwrote the backup (measured 21/11).
-    local out, replaced = {}, false
+    local out, replaced, wrote_icons = {}, false, false
     for line in (text .. "\n"):gmatch("([^\n]*)\n") do
       local key_at = line:match("^(%s*" .. M.key_pattern(terminal.key) .. "%s*[= ])")
-      if key_at and not line:match("^%s*#") then
+      -- AN ICON LINE IS NOT A TEXT LINE. ghostty repeats font-family to name its fallback face, and a writer
+      -- that replaced EVERY line under that key turned 'font-family = "wa Icons"' into a second copy of the
+      -- text face: the icon face disappeared and the config looked set up.
+      if M.names_icon_face(terminal, line) then
+        -- A STALE ICON LINE IS REPLACED IN PLACE, never left beside the new one. kitty reads its LAST
+        -- symbol_map, so a pre-fix whole-plane map left above the new line (or a stale line below it) would
+        -- undo the fix as quietly as it was applied.
+        if terminal.fallback_line and not wrote_icons then
+          out[#out + 1] = terminal.fallback_line
+          wrote_icons = true
+        end
+      elseif key_at and not line:match("^%s*#") then
         if key_at:find("=", 1, true) then
           out[#out + 1] = terminal.key .. ' = "' .. value .. '"'
         else
@@ -546,7 +624,7 @@ function M.edited_text(terminal, text)
     -- AND THE ICON FACE, on the line that terminal documents for a fallback (kitty: symbol_map; ghostty:
     -- a repeated font-family). Without it the config names a text face and no icon face, the reader is
     -- right to call that not-A2, and every run edited again and overwrote the backup (measured 21/11).
-    if terminal.fallback_line and not joined:lower():find("wa icons", 1, true) then
+    if terminal.fallback_line and not wrote_icons then
       joined = joined:gsub("\n+$", "\n") .. terminal.fallback_line .. "\n"
     end
     return (joined:gsub("\n+$", "\n"))

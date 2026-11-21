@@ -394,6 +394,67 @@ ok(ghostty_text:find("font-size = 9", 1, true) ~= nil, "and the rest of the file
 eq(font_setup.configure_terminal(ghostty, {}).action, "left alone",
   "a second run changes nothing: the icon face is on its own line, and the check reads the WHOLE config")
 
+-- A STALE ICON MAP IS CORRECTED (mission fonts-install item 3, 21/11). Two shapes this command used to write
+-- itself are not the shape it writes now: kitty's 'symbol_map U+F0000-U+FFFFD wa Icons' hands EVERY plane-15
+-- code point - every other program's Nerd md-* icon - to a face with fourteen glyphs, and ghostty's
+-- 'font-family = "wa Icons"' was the pre-fix fallback line. Both were reported "already draws wa's icons" and
+-- never corrected. already_a2 compares with the EXACT line the setup writes now, and the writer REPLACES a
+-- stale one instead of leaving it above the new one (kitty reads the LAST symbol_map, so a stale line below
+-- the new map would undo the fix as quietly as the fix was applied).
+do
+  local stale_dir = fixtures .. "/stale"
+  local stale_kitty = stale_dir .. "/kitty.conf"
+  write(stale_kitty, "font_family JetBrains Mono\nsymbol_map U+F0000-U+FFFFD wa Icons\nfont_size 12\n")
+  local stale_terminal = { name = "kitty", path = stale_kitty, kind = "conf", key = "font_family",
+    fallback_line = "symbol_map " .. font_setup.ICON_RANGES .. " wa Icons" }
+  eq(font_setup.already_a2("JetBrains Mono", read(stale_kitty), stale_terminal), false,
+    "kitty's pre-fix whole-plane symbol_map is NOT already set up: it is the map A2 replaced")
+  local stale_row = font_setup.configure_terminal(stale_terminal, {})
+  eq(stale_row.action, "edited", "so it is corrected")
+  local stale_text = read(stale_kitty)
+  ok(stale_text:find("symbol_map " .. font_setup.ICON_RANGES .. " wa Icons", 1, true) ~= nil,
+    "the map is the one this command writes now: " .. stale_text)
+  ok(not stale_text:find("U+F0000-U+FFFFD", 1, true), "and the whole-plane map is GONE, not left beside it")
+  eq(select(2, stale_text:gsub("symbol_map", "")), 1, "exactly one symbol_map line remains")
+  eq(font_setup.configure_terminal(stale_terminal, {}).action, "left alone",
+    "and the corrected map is left alone on the next run")
+
+  local stale_ghostty = stale_dir .. "/ghostty"
+  write(stale_ghostty, 'font-family = "JetBrains Mono"\nfont-family = "wa Icons"\nfont-size = 9\n')
+  -- FROM THE REAL TABLE, with only the path replaced: which keys may name an icon face is the production
+  -- row's answer (ghostty repeats font-family for it), and a fixture that guessed it would test a terminal
+  -- this command does not have.
+  local stale_ghostty_terminal
+  for _, known_terminal in ipairs(font_setup.terminals(scratch_root)) do
+    if known_terminal.name == "ghostty" then stale_ghostty_terminal = known_terminal end
+  end
+  ok(stale_ghostty_terminal ~= nil, "the ghostty row is in the allow-list")
+  stale_ghostty_terminal.path = stale_ghostty
+  eq(font_setup.already_a2("JetBrains Mono", read(stale_ghostty), stale_ghostty_terminal), false,
+    "ghostty's pre-fix 'font-family = \"wa Icons\"' fallback is NOT already set up")
+  eq(font_setup.configure_terminal(stale_ghostty_terminal, {}).action, "edited", "so it is corrected too")
+  local ghostty_fixed = read(stale_ghostty)
+  ok(not ghostty_fixed:lower():find('font-family = "wa icons"', 1, true),
+    "the stale icon line is replaced, not kept: " .. ghostty_fixed)
+  ok(ghostty_fixed:find("font-codepoint-map = " .. font_setup.ICON_RANGES .. "=wa Icons", 1, true) ~= nil,
+    "by the code-point map this command writes")
+  eq(select(2, ghostty_fixed:gsub("font%-family", "")), 1, "and the text face is named exactly once")
+  eq(font_setup.configure_terminal(stale_ghostty_terminal, {}).action, "left alone",
+    "the corrected ghostty config is left alone on the next run")
+
+  -- A config that names NO font and still carries a stale map: the map is replaced with the pair, and the
+  -- stale line is not left in place beside it.
+  local stale_fontless = stale_dir .. "/kitty-fontless.conf"
+  write(stale_fontless, "# font_family JetBrains Mono\nsymbol_map U+F0000-U+FFFFD wa Icons\n")
+  local fontless_terminal = { name = "kitty", path = stale_fontless, kind = "conf", key = "font_family",
+    fallback_line = "symbol_map " .. font_setup.ICON_RANGES .. " wa Icons" }
+  eq(font_setup.configure_terminal(fontless_terminal, {}).action, "edited",
+    "a config with no face named and a stale map is given the A2 pair")
+  local fontless_text = read(stale_fontless)
+  ok(not fontless_text:find("U+F0000-U+FFFFD", 1, true), "with no stale map left behind: " .. fontless_text)
+  eq(select(2, fontless_text:gsub("symbol_map", "")), 1, "and exactly one symbol_map line")
+end
+
 -- alacritty: an INLINE table per weight. Replacing only 'normal' left bold and italic on the Nerd face.
 local alacritty_path = fixtures .. "/alacritty/alacritty.toml"
 write(alacritty_path, '[font]\nnormal = { family = "JetBrainsMono Nerd Font", style = "Regular" }\n'
