@@ -19,8 +19,29 @@
 #     narrowed run still executes every one of them.
 #
 # Sourced by scripts/fast.sh; exercised by scripts/test-fast-rows.sh (no node, no cargo, seconds).
+# THE NEVER-DROPPED ROWS. Two kinds, and a third entry is only added with the evidence for it:
+#
+#   * the row-environment probe and `test-land.lua`: the run's own correctness and the landing machine's own
+#     row. A narrowed run that lost either would go green saying less than a full one;
+#   * WHOLE-TREE ROWS: a row whose verdict depends on files it does not name, because the set it judges is
+#     enumerated from the repository - "every reachable module's refusal codes", "every tool's declared
+#     schema". Path-based narrowing cannot map such a row to a change made somewhere else in its set, so a
+#     round that adds one member never selects it, and main goes red in a row that round did not run: 21/11,
+#     change/wa-fonts added lua/core/agent_control.lua and its refusal codes, its gate ran "121 of 294 Lua
+#     rows", scripts/test-refusal-contract.lua was not one of them, and main was red from bfad4f8f - the
+#     next innocent mission whose rows included that row paid for it twice (855 s) and then sat stopped.
+#
+# HOW THESE WERE FOUND, so the list can be extended the same way (21/11): the Lua rows were scanned for the
+# two shapes that enumerate the tree rather than a named file - (1) a shell/directory listing of the repo
+# (`ls lua`, `find lua`, `rg --files`, `git ls-files` without a pathspec, a `%w+/*` glob over lua/), which
+# found scripts/test-refusal-contract.lua reading the generated lua/core/refusal_codes.lua; and (2) a check
+# quantified over a NAMESPACE whose members other rounds add ("every tool", "each tool", "the whole
+# catalogue"), which found scripts/test-tool-schema-fidelity.lua and scripts/test-codemode-parity.lua.
+# scripts/test-fast-rows.sh proves the pairing in the other direction too: any row that reads a path
+# scripts/generators.txt declares as generated MUST be in this list, or the row fails and names it.
 wa_fast_core_rows() {
-  printf '%s\n' scripts/test-fast-row-environment.lua scripts/test-land.lua
+  printf '%s\n' scripts/test-fast-row-environment.lua scripts/test-land.lua \
+    scripts/test-refusal-contract.lua scripts/test-tool-schema-fidelity.lua scripts/test-codemode-parity.lua
 }
 
 # The rows this tree's fast path would run, one repo-relative path per line, cwd = the tree root: every
