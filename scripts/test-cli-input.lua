@@ -106,6 +106,32 @@ local bang = cli_input.new({ deps = {
 ok(#bang:take_steering() == 0, "a ! line is not steered into the run")
 ok(bang:poll(0) == "!git status", "it stays queued for the REPL, in order")
 
+-- A line sent with Ctrl+Enter (send now) is the reader's own kind, not something inferred from its
+-- text: the host records it beside the line, the queue keeps them together, and now_lines() names
+-- the waiting ones that asked to be delivered early. At a context boundary both kinds steer the
+-- model the same way - the kind decides what may END a run, never what is delivered.
+local kinds = cli_input.new({ deps = {
+  start = function() return '{"started":true}' end,
+  take = function() return '{"lines":["queued please","now please"],"now":[false,true],"eof":false,"running":true}' end,
+  held = function() end,
+} })
+ok(kinds:poll(0) == "queued please", "a queued line comes back in order")
+ok(#kinds:now_lines() == 1 and kinds:now_lines()[1] == "now please",
+  "and only the Ctrl+Enter line is named as send-now, got " .. table.concat(kinds:now_lines(), ","))
+ok(kinds:poll(0) == "now please", "the send-now line is still delivered as ordinary input")
+ok(#kinds:now_lines() == 0, "and once it is used it is no longer waiting")
+
+-- A binary older than the chord answers no now array: every line it hands over is queued, which is
+-- what that binary behaves like, and it is asserted rather than assumed.
+local old_binary = cli_input.new({ deps = {
+  start = function() return '{"started":true}' end,
+  take = function() return '{"lines":["from an older binary"],"eof":false,"running":true}' end,
+  held = function() end,
+} })
+local old_line = old_binary:poll(0)
+ok(old_line == "from an older binary" and #old_binary:now_lines() == 0,
+  "a take answer without a now array is a queued line, never a send-now one")
+
 -- An older binary: no capability, no reader thread, and the blocking read this replaced. The
 -- condition is not an error, and it must not hang waiting for something that will never answer.
 -- The stub runs out of lines the way a real stdin does, so the end of input is asserted too.

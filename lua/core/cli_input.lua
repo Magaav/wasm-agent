@@ -88,11 +88,17 @@ function M.arrived(timeout_ms, deps)
   if not ok then return nil end
   local answer = decode(raw)
   if not answer then return nil end
-  local lines = {}
+  local lines, kinds = {}, {}
   if type(answer.lines) == "table" then
-    for _, line in ipairs(answer.lines) do lines[#lines + 1] = tostring(line) end
+    for index, line in ipairs(answer.lines) do
+      lines[#lines + 1] = tostring(line)
+      -- A binary older than the Ctrl+Enter chord answers no "now" array, and every line it hands
+      -- over was sent with plain Enter: the queued kind is the answer for a capability that cannot
+      -- tell them apart, never a guess that a line asked to be delivered early.
+      kinds[#kinds + 1] = type(answer.now) == "table" and answer.now[index] == true or false
+    end
   end
-  return lines, answer.eof and true or false, answer.running and true or false
+  return lines, answer.eof and true or false, answer.running and true or false, kinds
 end
 
 local METHODS = {}
@@ -107,7 +113,8 @@ function METHODS:held()
   self.shown_held = count
   -- A queued `/vault <name> <value>` is listed by name only (lua/core/keys.lua).
   local shown = {}
-  for index, line in ipairs(self.pending) do
+  for index, entry in ipairs(self.pending) do
+    local line = entry.text
     shown[index] = line:match("^%s*/vault%s") and dofile("lua/core/keys.lua").masked(line:gsub("^%s+", "")) or line
   end
   pcall(hold, json.encode(shown))
@@ -144,9 +151,9 @@ end
 -- A wait that produces nothing returns `nil, false`, which is not the end of anything.
 function METHODS:poll(timeout_ms)
   if #self.pending > 0 then
-    local line = table.remove(self.pending, 1)
+    local entry = table.remove(self.pending, 1)
     self:held()
-    return line, self.eof
+    return entry.text, self.eof
   end
   if self.eof then return nil, true end
   -- No reader at all (the caller owns stdin, `M.new` `read = false`): the input has ended as far as this
@@ -163,7 +170,7 @@ function METHODS:poll(timeout_ms)
     end
     return line, false
   end
-  local lines, eof = M.arrived(timeout_ms or M.WAIT_MS, self.deps)
+  local lines, eof, _, kinds = M.arrived(timeout_ms or M.WAIT_MS, self.deps)
   if not lines then
     -- The capability stopped answering: fall back rather than spin on it.
     self.supported = false
@@ -172,12 +179,14 @@ function METHODS:poll(timeout_ms)
   -- Everything the host handed over, kept in order. This is the whole of "a line typed while the
   -- agent was working is not lost": the run does not read, this does, and the run's end is when
   -- the caller comes back for it.
-  for _, line in ipairs(lines) do self.pending[#self.pending + 1] = line end
+  for index, line in ipairs(lines) do
+    self.pending[#self.pending + 1] = { text = line, now = kinds and kinds[index] == true or false }
+  end
   if eof then self.eof = true end
   if #self.pending > 0 then
-    local line = table.remove(self.pending, 1)
+    local entry = table.remove(self.pending, 1)
     self:held()
-    return line, self.eof
+    return entry.text, self.eof
   end
   return nil, self.eof
 end
@@ -187,9 +196,11 @@ end
 -- it in the queue so ordering is preserved. Never block the model waiting for a key.
 function METHODS:take_steering()
   if self.supported and not self.eof then
-    local lines, eof = M.arrived(0, self.deps)
+    local lines, eof, _, kinds = M.arrived(0, self.deps)
     if lines then
-      for _, line in ipairs(lines) do self.pending[#self.pending + 1] = line end
+      for index, line in ipairs(lines) do
+        self.pending[#self.pending + 1] = { text = line, now = kinds and kinds[index] == true or false }
+      end
       if eof then self.eof = true end
     else
       self.supported = false
@@ -197,7 +208,7 @@ function METHODS:take_steering()
   end
   local steering = {}
   while #self.pending > 0 do
-    local text = self.pending[1]:gsub("^%s+", ""):gsub("%s+$", "")
+    local text = self.pending[1].text:gsub("^%s+", ""):gsub("%s+$", "")
     -- `!command` (bash mode) is the reader's own, run after the turn like a slash command.
     local lead = text:sub(1, 1)
     if lead == "/" or lead == "!" then break end
@@ -212,6 +223,17 @@ end
 -- How many lines are waiting, without taking one. The REPL uses it to say so.
 function METHODS:waiting()
   return #self.pending
+end
+
+-- The waiting lines the reader sent with Ctrl+Enter (send now), in order. A caller that wants to
+-- say WHICH of the queued lines asked to be delivered early reads this instead of guessing from the
+-- text: the kind is the reader's, not the content's. Empty on a binary without the chord.
+function METHODS:now_lines()
+  local out = {}
+  for _, entry in ipairs(self.pending) do
+    if entry.now then out[#out + 1] = entry.text end
+  end
+  return out
 end
 
 function METHODS:stop()
