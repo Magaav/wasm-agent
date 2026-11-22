@@ -72,6 +72,8 @@ check(stored:find('Still pending (1)',1,true)~=nil and stored:find(long_op,1,tru
  'and lists the handles still pending, with the op that is still running: '..tostring(stored):sub(1,420))
 check(stored:find(string.format('%s (bash',long_op),1,true)~=nil,
  'each still-pending handle names its tool and age: '..tostring(stored):sub(1,420))
+check(stored:find(string.format('%s (bash, running, ',long_op),1,true)~=nil,
+ 'and names its STATE, not only its tool: unknown is not the same news as running: '..tostring(stored):sub(1,420))
 check(stored:find('"result"',1,true)==nil,
  'the answer is the flat shape - nothing is nested under a result key: '..tostring(stored):sub(1,320))
 
