@@ -22,10 +22,24 @@
 #
 #   bash scripts/test-clipboard-paste.sh        (WA_BIN names the binary; defaults to the tree's)
 set -uo pipefail
-root=$(cd "$(dirname "$0")/.." && pwd)
+root=$(cd "$(dirname "$0")/.." && pwd -P)
 bin=${WA_BIN:-$root/rust/target/release/wa}
 [ -x "$bin" ] || { echo "clipboard paste SKIP: no binary at $bin (set WA_BIN)"; exit 0; }
 command -v script >/dev/null 2>&1 || { echo "clipboard paste SKIP: no script(1) here to give the console a pty"; exit 0; }
+# This row drives a BINARY, so the only code it can judge is the code that binary was built from. The
+# land gate's discrimination check (scripts/test-discriminates.sh) runs a branch's rows with the BASE
+# tree's Lua under the branch's binary to see whether the tests catch the change; a pty row cannot answer
+# that, and passing there would claim it had. Handed another tree, it says so - the gate records a NAMED
+# skip, never a pass. The base binary itself is measured by building it and running this row against it:
+# on c9904f6e 8 of the 14 checks below fail (the report's "what fails before the change").
+if [ -n "${WASM_AGENT_LUA_ROOT:-}" ]; then
+  here=$(cd "$root" && pwd -P)
+  lua_root=$(cd "${WASM_AGENT_LUA_ROOT}" 2>/dev/null && pwd -P)
+  if [ -n "$lua_root" ] && [ "$lua_root" != "$here" ]; then
+    echo "SKIP clipboard paste: WASM_AGENT_LUA_ROOT ($lua_root) is not this row's tree ($here): the binary is another tree's build, so the base code was never run"
+    exit 0
+  fi
+fi
 work=$(mktemp -d "${TMPDIR:-/tmp}/wa-clipboard.XXXXXX") || { echo "clipboard paste FAIL: no scratch dir"; exit 1; }
 trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/bin" "$work/home"

@@ -5245,8 +5245,14 @@ fn attach_image(state: &mut ConsoleInput, mime: &str, bytes: Vec<u8>) -> (String
 /// path becomes the `[Image #n]` token it stands for. A dropped path and a pasted one are this one
 /// function, so they cannot number or record their image differently.
 fn attach_pasted_path(state: &mut ConsoleInput, from: usize) {
+    attach_pasted_path_in(state, from, &image_roots())
+}
+
+/// The same, with the allowed directories injected: a test drives the real function without writing into
+/// the node's own state root, and the launch path passes the real list.
+fn attach_pasted_path_in(state: &mut ConsoleInput, from: usize, roots: &[std::path::PathBuf]) {
     let Some((text, to)) = state.editor.as_ref().map(|e| (e.slice(from, e.cursor()), e.cursor())) else { return };
-    let Some((mime, bytes)) = dropped_image(&text) else { return };
+    let Some((mime, bytes)) = dropped_image_in(&text, roots) else { return };
     let (token, kb) = attach_image(state, &mime, bytes);
     if let Some(editor) = state.editor.as_mut() {
         editor.replace_range(from, to, &token);
@@ -6915,6 +6921,33 @@ mod image_and_token_tests {
             ClipAnswer::Refused);
         assert_eq!(run_clipboard("wa-clipboard-tool-that-is-not-here", &["--list-types"]),
             ClipAnswer::Missing);
+    }
+
+    #[test]
+    fn a_pasted_path_to_an_image_is_the_attachment_a_dropped_path_is() {
+        // Brief item 1's last clause: a file path pasted from the clipboard is attached exactly as a
+        // dropped one, because both arms are one function (attach_pasted_path_in).
+        let dir = scratch_dir("pasted-image-path");
+        let path = scratch(&dir, "pasted.png", PNG);
+        let mut state = ConsoleInput::default();
+        let mut editor = wa_term::terminal_editor::Editor::default();
+        editor.insert_text(&path.to_string_lossy());
+        state.editor = Some(editor);
+        attach_pasted_path_in(&mut state, 0, &allowed(&dir));
+        let editor = state.editor.as_ref().expect("the editor");
+        assert_eq!(editor.slice(0, editor.cursor()), "[Image #1]", "the path became the token");
+        assert_eq!(state.draft_images, vec![1], "and it is this draft's, so the message carries it");
+        assert_eq!(state.pasted_images.len(), 1);
+        assert_eq!(state.pasted_images[0].0, "image/png");
+        // A path outside the allowed directories is NOT read: it stays the text it was.
+        let mut state = ConsoleInput::default();
+        let mut editor = wa_term::terminal_editor::Editor::default();
+        editor.insert_text("/etc/hostname");
+        state.editor = Some(editor);
+        attach_pasted_path_in(&mut state, 0, &allowed(&dir));
+        let editor = state.editor.as_ref().expect("the editor");
+        assert_eq!(editor.slice(0, editor.cursor()), "/etc/hostname");
+        assert!(state.pasted_images.is_empty(), "nothing was attached");
     }
 
     #[test]
