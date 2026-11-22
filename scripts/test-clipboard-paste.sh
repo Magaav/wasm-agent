@@ -23,8 +23,24 @@
 #   bash scripts/test-clipboard-paste.sh        (WA_BIN names the binary; defaults to the tree's)
 set -uo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd -P)
-bin=${WA_BIN:-$root/rust/target/release/wa}
-[ -x "$bin" ] || { echo "clipboard paste SKIP: no binary at $bin (set WA_BIN)"; exit 0; }
+# THE BINARY THIS ROW JUDGES IS THIS TREE'S OWN BUILD. Never the installed ~/.local/bin/wa: only a landing
+# installs (FACTORY rule 12), and a row that measured the installed binary would be judging another commit
+# while looking green. The tree's build directory is asked for through the one resolver
+# (scripts/lib/build-target.sh), the same answer fast.sh's binary resolution uses, with the ordinary
+# rust/target as the fallback for a tree that never ran it.
+onebuild=$( (. "$root/scripts/lib/build-target.sh" >/dev/null 2>&1; wa_build_target "$root" 2>/dev/null) || true )
+for candidate in "${CARGO_TARGET_DIR:-}/release/wa" "${onebuild:-}/release/wa" "$root/rust/target/release/wa"; do
+  [ -n "${candidate%/release/wa}" ] || continue
+  [ -x "$candidate" ] && { target=${candidate%/release/wa}; break; }
+done
+[ -n "${target:-}" ] || target=${CARGO_TARGET_DIR:-$root/rust/target}
+bin=${WA_BIN:-$target/release/wa}
+[ -x "$bin" ] || { echo "clipboard paste SKIP: no binary at $bin (set WA_BIN to this tree's build)"; exit 0; }
+case "$bin" in
+  "${HOME:-/nonexistent}/.local/bin/wa"|"${HOME:-/nonexistent}/.local/bin/wa.exe")
+    echo "clipboard paste FAIL: WA_BIN is the INSTALLED binary, not this tree's build: only a landing installs (FACTORY rule 12), so this row would judge another commit. Pass $target/release/wa"
+    exit 1 ;;
+esac
 command -v script >/dev/null 2>&1 || { echo "clipboard paste SKIP: no script(1) here to give the console a pty"; exit 0; }
 # This row drives a BINARY, so the only code it can judge is the code that binary was built from. The
 # land gate's discrimination check (scripts/test-discriminates.sh) runs a branch's rows with the BASE
