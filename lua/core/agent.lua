@@ -1377,8 +1377,11 @@ function M:build_context()
   if self.resume_notice then
     messages[#messages + 1] = { role = "system", content = dofile('lua/core/prompt_sections.lua').section('onSessionStart_injection',self.resume_notice,{source='resume_notice'}) }
   end
+  -- view='transcript' is the allow-list of columns a replay reads: `trace` and `changes` are
+  -- diagnostic JSON that neither this loop nor the provider ever sees, and decoding them was the
+  -- size-linear cost of a long session (measured 21/11: 17.3 MB of trace = 663 ms of a 730 ms load).
   local rows = memory.session_messages(self.session_id, {
-    after_seq = session.summarized_until or 0, all = true,exclude_summaries=true,
+    after_seq = session.summarized_until or 0, all = true,exclude_summaries=true,view='transcript',
   })
   -- A window that begins with a tool result is missing the tool call it answers
   -- (it was summarised away, or the boundary was cut mid-exchange). Providers
@@ -1616,8 +1619,11 @@ function M:compact_now(messages, opts)
   if not force and trigger and before and before <= trigger then return false end
 
   local session = memory.session(self.session_id) or {}
+  -- view='transcript' is the allow-list of columns a replay reads: `trace` and `changes` are
+  -- diagnostic JSON that neither this loop nor the provider ever sees, and decoding them was the
+  -- size-linear cost of a long session (measured 21/11: 17.3 MB of trace = 663 ms of a 730 ms load).
   local rows = memory.session_messages(self.session_id, {
-    after_seq = session.summarized_until or 0, all = true,exclude_summaries=true,
+    after_seq = session.summarized_until or 0, all = true,exclude_summaries=true,view='transcript',
   })
   -- Retry rows are display evidence, not dialogue; retain originals but never
   -- send them to inference or the summary model.
@@ -2081,17 +2087,65 @@ local function write_guard_checkpoint(self, reason, round, calls, trace, request
   return not refused
 end
 
+-- PER-PHASE PREFLIGHT TIMING (21/11). The gap between a run's start event and its first model call
+-- was 0.2-0.35 s on a fresh session and 16-54 s four times in one day, and the ledger could not say
+-- WHICH step spent the time: every phase between the two marks was one blank span. This records the
+-- measured cost of each one as a single `preflight` event per run, so an unattributed stall names
+-- itself next time instead of needing a /proc/locks watch. Bounded by construction: eight clocks per
+-- run, one row, and only phases over `PREFLIGHT_REPORT_MS` are named, so an ordinary turn's row is
+-- small and a pathological one says exactly where.
+local PREFLIGHT_REPORT_MS = tonumber(host.getenv("WASM_AGENT_PREFLIGHT_REPORT_MS") or "") or 50
+
+function M:preflight_start()
+  self.preflight = { at = (host.monotonic_ms and host.monotonic_ms()) or (host.now() * 1000), phases = {} }
+end
+
+-- Record one phase since the previous mark. Cheap when the run has no clock (a unit test, a direct
+-- dispatch): the function returns at once and nothing is written.
+function M:preflight_mark(name)
+  local clock = self.preflight
+  if not clock then return end
+  local now = (host.monotonic_ms and host.monotonic_ms()) or (host.now() * 1000)
+  clock.phases[#clock.phases + 1] = { name = name, ms = now - clock.at }
+  clock.at = now
+end
+
+-- One row for the whole preflight. `total` is the number the reader feels (run start -> first model
+-- call); `slow` names every phase at or over the threshold, so a stall of 20 s in one phase is a
+-- sentence rather than a search.
+function M:preflight_finish(extra)
+  local clock = self.preflight
+  if not clock then return end
+  self.preflight = nil
+  local now = (host.monotonic_ms and host.monotonic_ms()) or (host.now() * 1000)
+  clock.phases[#clock.phases + 1] = { name = "to_model_call", ms = now - clock.at }
+  local total, slow, all = 0, {}, {}
+  for _, phase in ipairs(clock.phases) do
+    total = total + phase.ms
+    all[phase.name] = math.floor(phase.ms + 0.5)
+    if phase.ms >= PREFLIGHT_REPORT_MS then
+      slow[#slow + 1] = phase.name .. "=" .. tostring(math.floor(phase.ms + 0.5)) .. "ms"
+    end
+  end
+  local payload = { total_ms = math.floor(total + 0.5), phases = all, threshold_ms = PREFLIGHT_REPORT_MS }
+  if #slow > 0 then payload.slow = table.concat(slow, " ") end
+  for key, value in pairs(extra or {}) do payload[key] = value end
+  pcall(telemetry.event, self.session_id, self.run_id, "", "preflight", "phase", payload)
+end
+
 function M:run_body(text, images)
   self.codemode_policy=nil -- configuration is pinned afresh per run, not per inference round
   -- Pin the node capability here, before the first model call, and say it out loud when it cannot be
   -- honoured. The pin already degrades to ordinary tools; the notice is what stops "code mode is broken"
   -- from looking exactly like "the agent ignored me" (2026-10-22: seven queued turns failed silently).
   local codemode=dofile('lua/core/codemode_policy.lua')
+  self:preflight_start()
   self.codemode_policy=codemode.pin(memory,self.role,{session_id=self.session_id,user_id=self.user,role=self.role,subagent=self.subagent})
   if self.codemode_policy.unavailable then
     self.emit({ type = 'status', text = 'code mode unavailable ('..tostring(self.codemode_policy.unavailable):sub(1,160)..') - this run uses ordinary tools' })
   end
   self.model=provider.settings().model
+  self:preflight_mark("setup")
   -- One overflow recovery per run, not per session: a provider rejection is retried once
   -- with a compacted context, and a second failure is surfaced rather than looped.
   self.overflow_recovery_attempted = false
@@ -2169,7 +2223,9 @@ function M:run_body(text, images)
     return reply
   end
 
+  self:preflight_mark("record_turn")
   local messages = self:build_context()
+  self:preflight_mark("build_context")
   -- `SessionStart` is fired once per run, at the context boundary: a hook can add the facts a model
   -- cannot know (the branch, the free disk, the operator's standing instruction) without the caller
   -- having to put them in every prompt. Its answer is a user-role block ahead of the first request.
@@ -2184,6 +2240,7 @@ function M:run_body(text, images)
       messages[#messages + 1] = { role = 'user', content = '[hook context \194\183 UserPromptSubmit] ' .. submitted.additional_context }
     end
   end
+  self:preflight_mark("sessionstart_hooks")
   local trace = {}
   local reply = ""
   local reply_reasoning, reply_phase, reply_message_id, completed = "", "", nil, false
@@ -2617,6 +2674,12 @@ function M:run_body(text, images)
     local call_opts = {session_id=self.session_id,run_id=self.run_id,round=round,context_tokens=context_tokens,
        on_call_start=self.on_call_start,on_call_end=self.on_call_end,context={estimate_source=context_source,summary_watermark=(memory.session(self.session_id) or {}).summarized_until or 0}}
     for key, value in pairs(budget_opts or {}) do call_opts[key] = value end
+    if round == 1 and self.preflight then
+      -- THE ONE ROW THAT NAMES A STALL (21/11). Written before the first request and never after,
+      -- so it measures exactly the window the reader feels: run start -> first model call.
+      self:preflight_mark("pre_call")
+      self:preflight_finish({ round = round, messages = #messages })
+    end
     local ok, result = pcall(provider.complete_with, self.model, messages, tool_list, self.stream, call_opts)
     -- No response headers means no model output reached this process, hence no returned tool call
     -- could have run. Retry only that phase, with a strict operator-controlled bound. The upstream

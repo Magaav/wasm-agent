@@ -124,3 +124,115 @@ Test output only; no model-facing or operator-facing string changed in the produ
 7. `ledger transactions ok — %d checks, %d transaction bodies` — new test success line.
 8. `roster read %d asked for a live probe (opts.live_capabilities is %s): owners() needs ids, and a probe child per peer is a process per peer holding the ledger write lock for its own boot` — extended stt test FAIL line.
 9. `the roster still names every owner, probe-free: %d` / `a configure that names its owners read the roster at all` — extended stt test check lines.
+
+---
+
+# Round 2 (21/11, orchestrator brief): size-linear turns, and naming a fresh-session stall
+
+Branch `change/chat-stall`, base `13247bdb`. Same rules as round 1: scratch HOME under `/tmp/cs`, hermetic
+stub provider on 127.0.0.1:18899, no live fleet node called, everything committed locally and never pushed.
+
+## A. The size-linear turn: found, fixed, and measured at the magnitude it actually has
+
+**What is O(history).** `build_context` loads the whole un-summarised transcript
+(`agent.lua`, `memory.session_messages(..., all = true)`), and that loader asked for `SELECT *` and then
+JSON-decoded **every** row's `trace` and `changes` columns. Neither is ever read on this path:
+`build_context` turns a row into `{role, content, tool_calls}` and drops both. `trace` is the per-row
+record of the tool spans a turn ran, so the cost grew with accumulated **tool output**, which is exactly
+what a long working session piles up.
+
+Measured in-process on a scratch session of 1502 rows seeded with real-sized tool spans (17.3 MB of
+`trace`):
+
+| step | ms |
+|---|---|
+| `session_messages(all=true)`, as `build_context` asked | **730** |
+| the same rows **without** `trace`/`changes` columns | **181** |
+| fetching only `trace` | 712 |
+| decoding that 17.3 MB of trace | **663** |
+| holding the same bytes undecoded | 0 |
+
+So 663 ms of a 730 ms load was decoding JSON that the caller then discarded.
+
+**Fix (`665713bd`).** `memory.session_messages` gained `view = 'transcript'`: an allow-list of the columns
+a replay reads (`TRANSCRIPT_COLUMNS`), applied only when asked, with the per-row `trace` decode made
+conditional so a row without the column is not decoded at all. Both transcript loads in `agent.lua` use
+it. `chat.lua`'s resume replay now asks for the window (`limit = REPLAY`) instead of `all = true`.
+
+**Effect, same session (1129-row context):** `build_context` **1024 ms → 117 ms**.
+
+### The before/after table the brief asked for, and what it honestly shows
+
+Seeded sessions in one scratch ledger, 0/500/1000/2000 messages, `run/start` → `model_call/start`
+from `harness_events`:
+
+| messages | base `13247bdb` | `665713bd` |
+|---|---|---|
+| 6 | 240 ms | 232 ms |
+| 506 | 301 ms | 323 ms |
+| 1006 | 370 ms | 323 ms |
+| 2006 | 513 ms | 544 ms |
+
+**Read this honestly: the two columns are within noise of each other.** With rows seeded at *realistic*
+trace sizes the fix moves the total by tens of milliseconds, not seconds. The brief's figure of
+"~1 s per ~1000 messages" did **not** reproduce on a scratch ledger at any size I tried, and I could not
+make it without rows carrying traces far fatter than this node's own.
+
+**Why the brief's numbers are plausible anyway (measured, not assumed).** On a copy of this node's real
+ledger (53,840 rows, 53.3 MB of trace in total), the per-row average is **990 bytes** and the busiest
+session (`a5ed5f13`, 1746 messages) holds only **1.7 MB** of trace — its transcript load is **266 ms**
+before the fix and **265 ms** after. So the fix is worth 663 ms where traces are fat, and ~1 ms on this
+node's own data. It is a real defect (decoding megabytes a caller discards) at a magnitude the brief
+overstates for this ledger. **I did not reproduce a 1–3.5 s per-turn cost, and I say so rather than
+claiming the number.**
+
+## B. The fresh-session stalls: still unknown, but now they name themselves
+
+**What I ruled out this round, by measurement:**
+
+| candidate | measurement |
+|---|---|
+| vault/provider resolution | `provider.settings()` 1 ms, `vault.base()` 0 ms, `provider.configured()` 1 ms |
+| the ledger write lock (round 1) | a `/proc/locks` monitor, validated against a known 2 s hold, saw **no** writer > 2 s |
+| a probe child (round 1) | a `wa nodes probe` child holds the write lock **158.5 ms** (its own boot) |
+| transcript load | 25.9 ms at 2002 rows; 266 ms on the busiest real session |
+
+**Added (`665713bd`): per-phase preflight timing.** One `preflight` telemetry event per run, written
+immediately before the first model call, carrying `setup`, `record_turn`, `build_context`,
+`sessionstart_hooks`, `pre_call` and `total_ms`, with every phase over `WASM_AGENT_PREFLIGHT_REPORT_MS`
+(default 50 ms) named in a `slow` field. A real row from this round:
+
+```json
+{"messages":1506,"phases":{"build_context":237,"pre_call":44,"record_turn":126,
+ "sessionstart_hooks":0,"setup":1,"to_model_call":0},"round":1,
+ "slow":"record_turn=126ms build_context=237ms","threshold_ms":50,"total_ms":408}
+```
+
+That is the deliverable for B: the next 6–25 s stall will name the phase that spent it, instead of
+needing a `/proc/locks` watch and a guess.
+
+## Test
+
+**`scripts/test-transcript-view.lua`** (`665713bd`) asserts, in increasing order of trust: the row
+**shape** (a `view='transcript'` row carries no `trace`/`changes`, while the default shape still does);
+the **wiring** (both `agent.lua` transcript loads ask for the view — a caller reverting to `all = true`
+restores the cost with no other failing assertion); and the **cost** (the view is >2× cheaper on fat
+rows; measured 4×, so the bound survives a busy machine, and the check says "inconclusive" rather than
+passing when the sample is too fast to compare).
+
+On base `13247bdb`: **4 named FAILs** — `no transcript row carries a trace column (240 did)`,
+`...changes column (120 did)`, `both transcript loads ... (found 0)`, `the transcript view is materially
+cheaper (full 185ms vs view 178ms)`. Green here (11 checks).
+
+Wiring: discovered by the `scripts/test-*.lua` glob in `scripts/fast.sh` and `scripts/test.sh`, and not
+listed in `scripts/fast-path.exclude`.
+
+## What is still not done
+
+1. **The 6.1/16.0/25.9 s fresh-session stalls are still unexplained.** The instrumentation to catch the
+   next one is in; the cause is not found. I will not claim otherwise.
+2. **The size-linear effect at the brief's magnitude did not reproduce.** I found and fixed a real
+   O(history) decode, but on this node's real ledger it is worth ~1 ms per turn, not seconds. Either
+   the live sessions that stalled carried far fatter traces than the ledger now shows, or the cost is
+   elsewhere — and elsewhere is still unknown.
+

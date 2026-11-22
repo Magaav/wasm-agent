@@ -476,13 +476,16 @@ function M.run(argv)
   if not scripted and (resume_last or session_id) then
     local REPLAY = tonumber(host.getenv("WASM_AGENT_CLI_REPLAY")) or 400
     if REPLAY > 0 then
-      local rows = memory.session_messages(agent.session_id, { all = true }) or {}
-      local skipped = math.max(0, #rows - REPLAY)
-      if skipped > 0 then
-        local newest = {}
-        for index = skipped + 1, #rows do newest[#newest + 1] = rows[index] end
-        rows = newest
-      end
+      -- THE WINDOW, NOT THE THREAD (21/11). This asked for every message with `all = true` and then
+      -- kept the newest REPLAY rows in Lua - so a 2000-row thread paid to load, decode and hold 2000
+      -- rows on every resume to draw 400, and the cost grew with the history the reader was not
+      -- looking at. `limit` is the window the store has an index for (messages_session_idx on
+      -- session_id, seq), so the work is now O(REPLAY) whatever the thread's length. `skipped` is
+      -- the difference between the thread and the window, answered by a COUNT on the same index -
+      -- the number the footer needs, without the rows it does not.
+      local total = memory.message_count(agent.session_id)
+      local rows = memory.session_messages(agent.session_id, { limit = REPLAY }) or {}
+      local skipped = math.max(0, total - #rows)
       -- Drawn once, at the end: a frame per row is what made a long thread take a minute to appear.
       local hold = host.transcript_hold
       if hold then pcall(hold, true) end
