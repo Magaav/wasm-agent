@@ -243,7 +243,12 @@ elseif command == "resume" then
     -- touched by the pause, so what is due fires once rather than once per missed interval, and nothing
     -- fires before this line. Nothing held, nothing said.
     local resumed_ok, resumed = pcall(function() return dofile("lua/core/selfloop.lua").resume(target) end)
-    if resumed_ok and type(resumed) == "table" and resumed.resumed then
+    if resumed_ok and type(resumed) == "table" and resumed.parked then
+      -- A parked session is NOT re-armed by this command (22/11): the operator stopped it on purpose,
+      -- and the one command that lifts a park is named rather than assumed.
+      print("  wakes     held: this session is parked" .. (tostring(resumed.reason or "") ~= "" and (" (" .. tostring(resumed.reason) .. ")") or ""))
+      print("            release it with: wa session release " .. target)
+    elseif resumed_ok and type(resumed) == "table" and resumed.resumed then
       print(string.format("  wakes     %d re-armed (they were paused by an interrupt)%s",
         tonumber(resumed.pending) or 0,
         (tonumber(resumed.overdue) or 0) > 0 and ", the overdue one fires once" or ""))
@@ -395,6 +400,16 @@ elseif command == "watch" then
   -- is the dispatch only, and it is next to `call` because it is the same signed peer path.
   local code = dofile("lua/core/session_watch.lua").cli(args)
   if code then os.exit(code) end
+elseif command == "session" and (args[2] == "park" or args[2] == "release" or args[2] == "status") then
+  -- Park a session's schedule, release it, or read which sessions are parked (22/11: a session whose
+  -- mission was stopped kept working, because nothing in this program knew the session was parked).
+  -- The body is the module's; this is the dispatch only, beside `session start` because it is the same
+  -- noun - and the exit code is the verb's, because a release of something that is not parked is a
+  -- refusal a shell caller must be able to read.
+  local rest = {}
+  for i = 3, #args do rest[#rest + 1] = args[i] end
+  local code = dofile("lua/core/session_park.lua").cli(args[2], rest, { user_id = "master" })
+  if code and code ~= 0 then os.exit(code) end
 elseif command == "session" and args[2] == "start" then
   -- The operator's half of `session_start`: start a session on another node, print its id at once.
   local code = dofile("lua/core/session_watch.lua").start_cli(args)
@@ -696,6 +711,8 @@ elseif command == "help" then
   print("    sessions | skills | stats | status | nodes | call <node> <capability> [args-json]")
   print("    watch <node> <session> [--from <cursor>]  follow a session on another node, read-only")
   print("    session start <node> --prompt <text> [--cwd <dir>]  start a session on another node, print its id")
+  print("    session park <id> [--reason <text>] [--mission <name>] | release <id> | status [<id>]")
+  print("        hold a session's schedule and refuse to resume it; only release lifts the hold")
   print("    stt status | stt role <producer|worker|both|off> [--producer <node>]  this node's speech role, changed live")
   print("    capabilities [--json]  what this node can do: every registered host capability")
   print("    services list|status|start|stop|enable|disable <name>  service components, no turn required")

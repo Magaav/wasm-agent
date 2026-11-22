@@ -274,6 +274,20 @@ function M.run(argv)
     session = memory.session(id) or { id = id }
   end
 
+  -- A parked session runs no turn (22/11, docs/SELF-LOOP.md "Park"). The park is the operator's, so
+  -- nothing here lifts it: `--continue`, `--resume <id>` and `--session <id>` all open a thread the
+  -- reader is coming back to, and coming back is exactly what a park must survive - only `wa session
+  -- release <id>` re-arms one. The refusal is by name, before the thread is drawn and before any model
+  -- call, so a parked session answers this with one line and no message, no token and no new turn.
+  local parked_hold = dofile("lua/core/selfloop.lua").hold(session.id)
+  if parked_hold and parked_hold.kind == "park" then
+    print("session " .. tostring(session.id) .. " is parked"
+      .. (tostring(parked_hold.reason or "") ~= "" and (" (" .. tostring(parked_hold.reason) .. ")") or "")
+      .. ": it runs no turn until it is released.")
+    print("release it with: wa session release " .. tostring(session.id))
+    return 2
+  end
+
   local settings = provider.settings()
   -- WHY there is no model, when there is none. "local mode (no model configured)" was true and useless:
   -- it named no cause, so a reader could not tell a node with no provider at all from a shell that simply

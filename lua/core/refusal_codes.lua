@@ -429,6 +429,7 @@ return {
   ['sentinel_unverifiable']='remote_update.lua',
   ['session_batch_budget_too_small']='session_view.lua',
   ['session_cursor_conflict']='session_view.lua',
+  ['session_held_by_interrupt']='selfloop.lua',
   ['session_id_required']='tools.lua',
   ['session_page_budget_too_small']='session_view.lua',
   ['session_required']='agent_control.lua, done_gate.lua, orchestration_mode.lua',
