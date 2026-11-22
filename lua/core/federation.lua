@@ -418,7 +418,13 @@ function M.refresh()
   local nodes = dofile('lua/core/nodes.lua')
   local cache = { at = host.now(), peers = {} }
   local started = host.now()
-  local ok, list = pcall(nodes.list)
+  -- THE ROSTER, NEVER A LIVE PROBE (Victor 22/11: "it keeps on hanging a lot before it starts working").
+  -- nodes.list() with no options starts one `wa nodes probe` child per peer and waits for each up to its
+  -- 20 s deadline; this refresh runs inside a turn before its first model call, once per TTL, so one
+  -- offline peer (measured: node `work`, 20.6 s of silence after Enter on the first prompt of a chat,
+  -- 0.05 s on the second) held every prompt sent more than ten minutes after the last. The roster says who
+  -- is online, nodes.reachable says who is attached, and the catalog call below is the question itself.
+  local ok, list = pcall(nodes.list, { live_capabilities = false })
   for _, node in ipairs(ok and list or {}) do
     if not node.local_node and node.online ~= false then
       local entry = { name = node.name or node.node_id, node_id = node.node_id or node.id, at = host.now() }
