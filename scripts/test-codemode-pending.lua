@@ -138,6 +138,51 @@ check(reread.ok==true and reread_value.ok==true,'results.get(op) answers a settl
 check(reread_value.code==0 and tostring(reread_value.out or ''):find('finished'),'results.get(op) returns the call\'s own result')
 check(lines_of(data..'/marker.txt')==1,'results.get(op) re-reads without re-running (still one line)')
 
+-- 12 (22/11). A pending answer names its OWN next step in ONE plain field, with its id in it, and the
+-- copy the MODEL reads repeats nothing. Measured on the base (ee38c015) in the ledger, session fece6285,
+-- tool message 22/11 11:21:04Z: the model was handed 617 bytes carrying the op id three times
+-- (op, operation_id, progress.op) and the stdout path twice (stdout_path, log_path), and NOT one word
+-- saying `wait(op)` - so it reached for remote operation list on the peer instead, two round-trips.
+local model_view=dofile('lua/core/tool_output.lua')
+local named,named_value=run([==[
+const started = await tools.bash({command: 'echo named-start; sleep 2; echo named-done', wait_s: 0});
+const handle = started;
+const resumed = await wait(started.op, {wait_s: 20});
+return {handle: handle, resumed: {state: resumed.state, code: resumed.code, out: resumed.stdout}};
+]==],60000)
+check(named.ok==true,'a script that starts a call outliving its wait runs: '..tostring(named.error))
+local handle=named_value and named_value.handle or {}
+local op=tostring(handle.op or '')
+check(handle.state=='pending' and op~='','the call answered a handle: '..json.encode(handle):sub(1,200))
+check(type(handle.next)=='string','a pending answer carries one plain field naming the next step: '..json.encode(handle):sub(1,240))
+check(handle.next and handle.next:find('wait("'..op..'")',1,true)~=nil,
+ 'the next step names this call\'s own op: '..tostring(handle.next))
+check(handle.next and handle.next:find('cancel("'..op..'")',1,true)~=nil,
+ 'a handle whose work can be stopped offers cancel in the same field: '..tostring(handle.next))
+-- The SCRIPT's own value keeps every field it read before this change: only the model's copy shrinks.
+check(type(handle.log_path)=='string' and handle.log_path==handle.stdout_path,
+ 'the script still reads log_path (the path it was reading): '..tostring(handle.log_path))
+check(handle.operation_id==op,'the script still reads operation_id')
+check(type(handle.progress)=='table' and handle.progress.output_bytes~=nil,
+ 'the script still reads the output size inside progress (the model view drops that repeat)')
+local view=model_view.project('run',named)
+-- In the text the model reads the handle is JSON, so the quotes inside `next` arrive escaped: the
+-- literal is wait(\"op-...\"). Both spellings are checked; the value a script holds is the plain one.
+local function says_wait(text,wanted)
+ return text:find('wait(\\"'..wanted..'\\")',1,true)~=nil or text:find('wait("'..wanted..'")',1,true)~=nil
+end
+check(type(view)=='string' and says_wait(view,op),
+ 'the model reads the next step in the answer itself: '..tostring(view):sub(1,240))
+check(view:find('"log_path"',1,true)==nil,'the model view drops log_path, the second name of stdout_path')
+check(view:find('"operation_id"',1,true)==nil,'the model view drops operation_id, the third name of the op id')
+-- The size rule: NO LONGER than the base's, measured against the base's own text built from this same
+-- handle - base body is json.encode(handle) and the header lines are the same in both.
+local view_header=view:match('^(.-)\n\n') or ''
+local base_bytes=#view_header+2+#json.encode(handle)
+print('pending bash view: '..#view..' bytes vs the base\'s '..base_bytes..' bytes for the same handle, next field included')
+check(#view<=base_bytes,'the pending answer the model reads is no longer than the base\'s ('
+ ..#view..' vs '..base_bytes..' bytes, next field included)')
+
 -- 2 + 1. A call that finishes inside its wait answers exactly as it did before handles existed.
 local plain,plain_value=run([==[
 const done = await tools.bash({command: 'echo plain'});
@@ -399,11 +444,31 @@ local sent=pending.invoke(outbox_dispatch,outbox_opts,'mcp_whatsapp_send',
  {chat='1234@s.whatsapp.net',text='hello'},'{"chat":"1234@s.whatsapp.net","text":"hello"}',0)
 check(type(sent)=='table' and sent.state=='pending' and sent.op=='msg-42','a send that outlives its wait answers a handle: '..json.encode(sent):sub(1,200))
 check(sent and sent.tool=='mcp_whatsapp_send','the handle names the connector call it belongs to')
+-- 12 (22/11): the same field for every tool, and cancel offered ONLY where a cancel can do something.
+-- A queued message stays sent, so this handle names the wait and says nothing about stopping it.
+check(sent and type(sent.next)=='string' and sent.next:find('wait("msg-42")',1,true)~=nil,
+ 'an outbox handle names wait(op) as its next step: '..tostring(sent and sent.next))
+check(sent and sent.next:find('cancel(',1,true)==nil,
+ 'a message already queued does not offer cancel: '..tostring(sent and sent.next))
 local outbox_list=pending.list(outbox_dispatch,outbox_opts)
 check(outbox_list.count==1 and outbox_list.ops[1].op=='msg-42','pending() lists the outbox handle too')
 local outbox_cancel=pending.cancel(outbox_dispatch,outbox_opts,'msg-42')
 check(outbox_cancel.error=='not_cancellable' and outbox_cancel.why=='a sent message stays sent',
  'cancel on a queued message is not_cancellable, in the recorder\'s words: '..json.encode(outbox_cancel))
+-- 12, the other side of the same rule: a DRAFT is the one outbox handle a cancel can stop (nothing was
+-- sent), so its next step offers cancel - decided by what the handle IS, not by which tool made it.
+local draft_scope=string.rep('e',64)
+local draft_calls={}
+local function draft_dispatch(name,args,raw)
+  draft_calls[#draft_calls+1]={name=name,args=args}
+  if name~='mcp_whatsapp_send' then return {error='unexpected_tool:'..tostring(name)} end
+  return {ok=true,state='pending',draft='9'}
+end
+local drafted=pending.invoke(draft_dispatch,{scope=draft_scope,remaining_ms=60000,ctx={}},'mcp_whatsapp_send',
+ {chat='1234@s.whatsapp.net',text='hello'},'{"chat":"1234@s.whatsapp.net","text":"hello"}',0)
+check(type(drafted)=='table' and drafted.op=='draft-9','an approval draft answers its own handle: '..json.encode(drafted):sub(1,200))
+check(drafted and type(drafted.next)=='string' and drafted.next:find('cancel("draft-9")',1,true)~=nil,
+ 'a draft nothing has sent offers cancel in the same field: '..tostring(drafted and drafted.next))
 local queued=0
 for _, call in ipairs(outbox_calls) do if call.args.id==nil then queued=queued+1 end end
 check(queued==1,'nothing was queued twice by the handle being listed or cancelled (queued '..queued..')')

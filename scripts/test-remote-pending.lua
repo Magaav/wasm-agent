@@ -168,6 +168,48 @@ check(type(resumed) == "table" and resumed.state == "done",
 check(type(resumed.stdout) == "string" and resumed.stdout:find("rp-resumed", 1, true) ~= nil,
   "and answers the command's real output: " .. json.encode(resumed):sub(1, 200))
 
+-- 12 (22/11). The handle names its own next step, and the copy the MODEL reads does not invite a LOCAL
+-- read of a PEER path. Measured on the base (ee38c015): the model was handed the handle itself - 617
+-- bytes, the op id three times, stdout_path and log_path pointing at /home/ubuntu/... on the peer, and
+-- no word about wait(op) - and it went to `remote operation list` on the peer instead (session
+-- fece6285, 22/11 11:21:04Z, the two calls right after that message). A peer path is not a local file:
+-- the view names the node and keeps the paths out, and the exact handle stays in full_result by hash.
+check(type(first.next) == "string" and first.next:find('wait("' .. first.op .. '")', 1, true) ~= nil,
+  "a remote handle names wait(op) as its next step, with its own id: " .. tostring(first.next))
+check(first.next:find('cancel("' .. first.op .. '")', 1, true) ~= nil,
+  "and offers cancel, which the peer's operation tool can do: " .. tostring(first.next))
+-- The SCRIPT's value keeps every field it had.
+check(first.operation_id == first.op and type(first.stdout_path) == "string" and first.log_path == first.stdout_path,
+  "the script still reads operation_id, stdout_path and log_path")
+-- The envelope `codemode.run` hands the loop for a script that returned this handle (`value` is the
+-- returned value as JSON, `attempts` is what makes a result a script's). This row has no code-mode
+-- assets, so the envelope is built here rather than run: the real end-to-end run of the same predicate
+-- and the same function is in scripts/test-codemode-pending.lua (a real run block), and the projection
+-- below is the one the loop calls.
+local model_view = dofile("lua/core/tool_output.lua")
+local envelope = { ok = true, status = 200, items = {}, calls = {}, attempts = {}, value = json.encode(first) }
+local view = model_view.project("run", envelope)
+-- In the text the model reads the handle is JSON, so the quotes inside `next` arrive escaped: the
+-- literal the model sees is wait(\"op-...\"). Both spellings are checked, because the value a script
+-- holds is the unescaped one.
+local function says_wait(text, op)
+  return text:find('wait(\\"' .. op .. '\\")', 1, true) ~= nil or text:find('wait("' .. op .. '")', 1, true) ~= nil
+end
+check(type(view) == "string" and says_wait(view, first.op),
+  "the model's copy of a pending remote answer names the next step: " .. tostring(view):sub(1, 240))
+check(view:find('"stdout_path"', 1, true) == nil and view:find('"log_path"', 1, true) == nil,
+  "and shows no peer path a model could read locally: " .. tostring(view):sub(1, 240))
+check(view:find(tostring(first.node), 1, true) ~= nil,
+  "and still says which machine the work is on: " .. tostring(view):sub(1, 240))
+-- The size rule, measured against the base's own text for this same handle (header lines unchanged,
+-- body was json.encode(handle) before this change).
+local view_header = view:match("^(.-)\n\n") or ""
+local base_bytes = #view_header + 2 + #json.encode(first)
+print("pending remote view: " .. tostring(#view) .. " bytes vs the base's " .. tostring(base_bytes)
+  .. " bytes for the same handle, next field included")
+check(#view <= base_bytes, "the model-facing text of a pending remote answer is no longer than the base's ("
+  .. #view .. " vs " .. base_bytes .. " bytes, next field included)");
+
 local cancel_raw = json.encode({ node = "rp-scratch-peer", capability = "bash",
   command = "sleep 300", wait_s = 0 })
 local cancel_first = pending.invoke(relay, { scope = scope }, "remote",
