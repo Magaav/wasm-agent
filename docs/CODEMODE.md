@@ -158,6 +158,26 @@ never told "still running" with nothing it can do about it.
   this handle's word; and `settled` is true the moment the work ended, even if the handle was formed
   before the result could be read. None of these is a guess: each is copied from the executor's own
   record, and a field the executor did not answer is simply absent.
+* **The handle names its own next step** (22/11, Victor): every pending answer carries ONE plain field,
+  `next`, with this call's own id in it - `wait("op-...")` returns this call's result; `cancel("op-...")`
+  stops it` - the same field for every tool (bash, operation, remote, outbox). Where a cancel can do
+  nothing the field does not offer one: a sent message stays sent, and a kind whose effect cannot be
+  stopped says so (`lua/core/codemode_pending.lua`, the local `stoppable`). It exists because the handle
+  used to say everything about WHERE the work is and nothing about what to do with it: a real run read
+  `stdout_path` on the PEER and spent two round-trips (remote `operation` list, then await) on a call
+  `wait(op)` answers in one (ledger, session fece6285, 22/11 11:21:04Z).
+* **The script's value and the model's copy are two things** (22/11). The handle a SCRIPT holds keeps
+  every field it had - `operation_id`, `stdout_path`, `log_path`, `settled`, `state_name`, the op and
+  node inside `progress`. What the MODEL reads is an allow-listed view of it
+  (`lua/core/tool_output.lua`, `handle_views`): the repeats go (`log_path` is `stdout_path`, the op id is
+  written once, the node is not repeated inside `progress`), `next` is added, and a handle that names a
+  node shows the node and keeps the peer's path fields out - a path on another machine is not a local
+  file, and a model that read one reached for a two-round-trip `remote operation` read. The view is
+  shorter than the base's for the same handle: measured in `scripts/test-remote-pending.lua` (a peer
+  handle) 825 -> 386 bytes and in `scripts/test-codemode-pending.lua` (a local `bash` handle, which keeps
+  its local log paths) 908 -> 793, `next` included. The exact handle stays in `full_result` by hash, so
+  `tool_result({sha256})` still reads it. Only NEW results change: no stored message is rewritten and no
+  tool schema moves (docs/PROMPT-CACHE.md).
 * `wait_s` is a property of the call's *wait*, taken out of the arguments before the tool's own schema
   sees them: default 60 s, 0..300 s, and effectively `min(wait_s, 300, the script's remaining time minus
   a margin)`. A wait never outlives the script that started it; a `wait_s` that is not a number is
