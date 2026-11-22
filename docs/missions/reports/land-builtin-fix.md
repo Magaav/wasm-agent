@@ -65,6 +65,14 @@ branch of their own (`change/gate-round`, b827fbba). Every assertion those cases
   counts the branch's own two paths, not main's Rust (got 3) (got 3, want 2)`; `unchanged-verdict
   scripts/test-land-plan.lua` (a fixture repair that still passes - named here, not a pass).
 
+Measured on this node against the REAL mission directory, through the real path (a Lua row run by
+\`~/.local/bin/wa\` with only \`WASM_AGENT_LUA_ROOT\` pointed at this tree): \`land.missions_root()\` is
+\`/home/victor/Work/missions\` and \`land.how_to_test({branches={{name="change/land-builtin-fix"}}})\` answers
+\`/home/victor/Work/missions/land-builtin-fix/brief.md\` with this mission's own \`## How Victor tests it\` text
+("After it is installed: \`wa land change/<some lua-only branch> --dry-run\` ..."). The root follows \`HOME\` as the
+node sees it, which is what \`wa mission\` reads (a run with \`WASM_AGENT_HOME\` set has the node rewrite HOME, and
+the root follows it - the same rule, not a second one).
+
 Rows run green on this node after the change: test-land-quick (155 checks), test-land-plan (105), test-land-rows
 (137), test-land-review (47), test-land-release (68), test-land-until (81), test-land-resume (42),
 test-land-resume-19-11 (20), test-land-marks (27), test-land-sign (46), test-land-gate-rows (82),
