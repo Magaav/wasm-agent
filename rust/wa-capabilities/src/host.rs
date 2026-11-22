@@ -4772,7 +4772,8 @@ fn finish_opening(state: &mut ConsoleInput) {
     }
 }
 
-/// `host.opening_start()` -> JSON `{started, reason?, frames?, budget_ms?}`: play the opening.
+/// `host.opening_start()` answers one JSON text string the caller decodes with `lua/vendor/json.lua` -
+/// `{started, reason?, frames?, budget_ms?}` - never a Lua table: play the opening.
 ///
 /// The Lua view decides whether a start should have one at all (`cli_view.opening`: a resumed session,
 /// a message argument, the setting, NO_COLOR); this side answers whether it CAN. A console that reports

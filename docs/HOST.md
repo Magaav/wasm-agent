@@ -852,6 +852,8 @@ input_image          device
 input_start          device
 input_stop           device
 input_take           device
+opening_header       device
+opening_start         device
 invoke               runs a process
 isatty               device
 jobs                 writes files
