@@ -1451,32 +1451,37 @@ function M.send(args, ctx)
       return queued
     end
     queued.asked_owner = owner
-    -- `discarded_job` ONLY when the queue said it took the job out (M.discard_local). When the cancel did
-    -- not answer, the job may still be sent from this node if the component is started, so the answer says
-    -- that instead of a word that would be a guess.
-    if discarded ~= nil then queued.discarded_job = discarded end
+  end
+  -- `discarded_job` ONLY when the queue said it took the job out (M.discard_local); when the cancel did not
+  -- answer the job may still go out from this node, and the answer says that instead of a word that would be
+  -- a guess. THE ATTACHMENT IS THE LAST STEP: the answer a caller sees is the one the WAIT produces (or the
+  -- owner's own), not the queueing answer three lines above, so a field set there would be lost.
+  local function with_discard(answer)
+    if type(answer) ~= 'table' then return answer end
+    if discarded ~= nil then answer.discarded_job = discarded end
     if discard_failed ~= nil then
-      queued.discard_failed = discard_failed
-      queued.note = tostring(queued.note or '') .. ' this node had queued the same message as job '
+      answer.discard_failed = discard_failed
+      answer.note = tostring(answer.note or '') .. ' this node had queued the same message as job '
         .. tostring(discard_failed.id) .. ' and the cancel did not answer (' .. tostring(discard_failed.error)
         .. '): if ' .. M.COMPONENT .. ' is started on this node that job may still be sent - cancel it with '
         .. 'mcp_whatsapp_send({cancel=' .. tostring(discard_failed.id) .. '})'
     end
+    return answer
   end
-  if queued.error then return queued end
+  if queued.error then return with_discard(queued) end
   if queued.state == 'pending' and type(queued.draft) == 'string' then
     -- The approval gate stopped it before anything was queued: the handle is the draft, and the wait
     -- follows that instead of a job id. `asked_owner` stays on the answer so a caller on another node
     -- still learns which node holds the draft.
-    return M.settle_draft(queued.draft, wait_s, M.draft_reader(owner or queued.asked_owner, ctx),
-      wait_options(ctx, owner or M.self_name()))
+    return with_discard(M.settle_draft(queued.draft, wait_s, M.draft_reader(owner or queued.asked_owner, ctx),
+      wait_options(ctx, owner or M.self_name())))
   end
   local id = tonumber(queued.id) or queued.id
   if id == nil then
-    return { ok = false, error = 'whatsapp_send_no_id', effect = 'unknown',
-      detail = tostring(queued.note or 'the account node answered no job id') }
+    return with_discard({ ok = false, error = 'whatsapp_send_no_id', effect = 'unknown',
+      detail = tostring(queued.note or 'the account node answered no job id') })
   end
-  return M.settle(id, wait_s, M.status_reader(owner, ctx), wait_options(ctx, owner or M.self_name()))
+  return with_discard(M.settle(id, wait_s, M.status_reader(owner, ctx), wait_options(ctx, owner or M.self_name())))
 end
 
 --- The hidden compatibility alias: `mcp_whatsapp_send({id})` and no wait - one state read, answered with

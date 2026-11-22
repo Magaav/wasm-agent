@@ -397,5 +397,60 @@ local direct = tools.dispatch(memory, 'mcp_whatsapp_send', { chat = '5551@s.what
 ok(direct.error == 'whatsapp_no_owner_on_this_node' and #served == 0,
   'an arrived SEND is refused here too, never bounced: ' .. json.encode(direct))
 
+-- ---- 10. `discarded_job` is true: the local job is really CANCELLED (MUST 3) ---------------------
+-- A send that this node queued and then asked the account node for leaves a job in THIS queue. Naming it
+-- "discarded" without cancelling it is a claim, not a fact: if `wa-whatsapp` is started here later, that
+-- job is picked up and the same message leaves from a second node. The one call that makes the word true
+-- is the queue's own cancel - the same `{id, cancel: true}` request `mcp_whatsapp_send({cancel})` sends
+-- (rust/wa-capabilities/src/whatsapp_send.rs, the `cancel` branch answers `cancelled = true` or
+-- `whatsapp_send_not_cancellable`).
+--
+-- The answer this row drives carries both facts this surface's answers use: a queued job (`id`, `state`
+-- from the queue) and the declared account node (`owner`, the field `component_absent` sends when the
+-- deploy named one). That is the shape in which "this node queued it, and somebody else serves it" is
+-- true at once.
+refresh({ roster = { { node_id = 'peer-9', name = 'nobody', online = true } }, answers = {
+  ['peer-9'] = { ok = true, tools = {}, connectors = { whatsapp_row(false, tools_of(SURFACE)) } } } })
+local cancels, cancel_answer = {}, nil
+host.whatsapp_send = function()
+  local_calls = local_calls + 1
+  return json.encode({ ok = true, id = 9, state = 'pending', owner = 'openclaw' })
+end
+host.whatsapp_send_status = function(request)
+  local decoded = json.decode(request) or {}
+  cancels[#cancels + 1] = decoded
+  if cancel_answer then return json.encode(cancel_answer) end
+  return json.encode({ ok = false, cancelled = false, error = 'whatsapp_send_not_cancellable', state = 'leased' })
+end
+
+-- (a) the cancel answers: the job is gone, and the answer says so with `discarded_job`
+local_calls, served, cancels = 0, {}, {}
+cancel_answer = { ok = true, id = 9, state = 'dead', cancelled = true }
+local discarded = tools.dispatch(memory, 'mcp_whatsapp_send', { chat = '5551@s.whatsapp.net', text = 'oi' },
+  'master', ctx_with({ ok = true, state = 'done', id = 5, status = 'sent' }))
+ok(local_calls == 1 and served[1] and served[1].node == 'openclaw',
+  'the queued send is asked of the account node: ' .. json.encode(served))
+ok(#cancels == 1 and cancels[1].cancel == true and tonumber(cancels[1].id) == 9,
+  'the local job was CANCELLED through the queue (the same request a cancel sends): ' .. json.encode(cancels))
+ok(discarded.discarded_job == 9,
+  'and only then is it called discarded: ' .. json.encode(discarded))
+ok(discarded.discard_failed == nil, 'with nothing to report as failed: ' .. json.encode(discarded.discard_failed))
+
+-- (b) the cancel does NOT answer: the job may still go out, and the answer says exactly that
+local_calls, served, cancels = 0, {}, {}
+cancel_answer = { ok = false, cancelled = false, error = 'whatsapp_send_not_cancellable', state = 'leased' }
+local still = tools.dispatch(memory, 'mcp_whatsapp_send', { chat = '5551@s.whatsapp.net', text = 'oi' },
+  'master', ctx_with({ ok = true, state = 'done', id = 5, status = 'sent' }))
+ok(still.served_by == 'openclaw' or still.asked_owner == 'openclaw',
+  'the message is still asked of the account node: ' .. json.encode(still))
+ok(still.discarded_job == nil,
+  'a cancel that did not answer is NOT called a discard: ' .. json.encode(still))
+ok(type(still.discard_failed) == 'table' and still.discard_failed.error == 'whatsapp_send_not_cancellable',
+  'the failure is named: ' .. json.encode(still.discard_failed))
+ok(tostring(still.note):find('may still be sent', 1, true) ~= nil
+  and tostring(still.note):find('cancel=9', 1, true) ~= nil,
+  'and the answer says the job may still go out, with the call that stops it: ' .. tostring(still.note))
+cancel_answer = nil
+
 dofile = real_dofile
 print('whatsapp finds owner ok (' .. checks .. ' checks)')
