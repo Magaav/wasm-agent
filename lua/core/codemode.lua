@@ -917,11 +917,27 @@ local function explain(result,source,budget)
  local ran={}
  for _,call in ipairs(result.calls or {}) do if call.ok==true then ran[#ran+1]=tostring(call.name) end end
  local before=#ran>0 and ('Already done, not undone: '..table.concat(ran,', '):sub(1,200)..'.') or 'No call had succeeded yet.'
- if raw:find('guest evaluation exception',1,true) then before='The script did not compile, so nothing ran.' end
+ local compile_failure=raw:find('guest evaluation exception',1,true)~=nil
+ if compile_failure then before='The script did not compile, so nothing ran.' end
  local out={};for k,v in pairs(result) do out[k]=v end
  out.message=((name and (name..': ') or '')..message..where):sub(1,600)
  out.error=out.message:match('^[^\n]*'):sub(1,300)
- out.fix=((fix and (fix..' ') or (line and ('Change line '..line..' and run the script again. ') or 'Correct the script and run it again. '))..before):sub(1,600)
+ -- A SYNTAXERROR IS ONE CLASS, AND ITS LINE SAYS SO (22/11). Measured on the two days before: about 35
+ -- compile failures - the largest single failure class - and the fix line then said only "Change line N",
+ -- which names where and not why: 'expecting \';\'', "expected '}' after template expression" and
+ -- 'unexpected end of string' are one cause, a shell command inside a JavaScript string (a backtick,
+ -- ${...} or an unbalanced quote closes the literal early). The way out is the raw argument, where the
+ -- bytes never pass through JavaScript at all - so the sentence names the cause, the way out, and the
+ -- line. A tool's own fix, when there is one, still wins.
+ local syntax_fix
+ if name=='SyntaxError' and compile_failure then
+  syntax_fix='The usual cause is shell text inside a JavaScript string - a backtick, ${...} or an '
+   ..'unbalanced quote closes the literal early. Put the command in the run call\'s '
+   ..'raw argument (raw: {script: "..."}) and pass raw.script to tools.bash, so the bytes never pass through '
+   ..'JavaScript'
+   ..(line and ('. Change line '..line..' and run the script again. ') or '. ')
+ end
+ out.fix=((fix and (fix..' ') or (syntax_fix or (line and ('Change line '..line..' and run the script again. ') or 'Correct the script and run it again. ')))..before):sub(1,600)
  out.input=out.input or 'codemode'
  out.code=code or name
  out.line=line
