@@ -1,26 +1,31 @@
 #!/usr/bin/env node
-// THE WHEEL AND PageUp MOVE THE TRANSCRIPT THE SAME WAY (change/wheel-like-pageup, Victor 22/11):
+// THE WHEEL MOVES THE CHAT LINE BY LINE (change/wheel-scrolls-lines, Victor 22/11 20:30Z):
 //
-//   "scroll with mouse should behave exactly the same as pg up pg down from keyboard (which is
-//    correct), same amount of scroll from both endings."
+//   "the mouse scroll on TUI chat content is jumping way further than the pg up/down which ticks
+//    1/3 of the content by each tick" ... "scroll from mouse should scroll line by line".
 //
-// Read from a REAL pty, over a transcript several screens long:
-//   A. three notches up from the bottom and three PageUps show the same first row (one notch = one
-//      page), and both differ from the row the reader came from;
-//   B. driven past the top, both stop on the same first row - the chat's own first row, with the
-//      answer's first line on screen - and one more step of either moves neither, so neither can
-//      reach a row the other cannot;
-//   C. back down, both end where the transcript resumes following the newest output: the newest row
-//      on screen and nothing below it (the "N more lines" hint gone).
+// This REPLACES the wish it was built on one round earlier (change/wheel-like-pageup: one notch =
+// one PageUp). A terminal sends SEVERAL mouse reports for one notch - foot multiplies them by its
+// scrollback `multiplier` (7.0 in the operator's foot.ini) - so one row per report is one notch of
+// seven lines, and a page per report was more than two screens.
 //
-// WHY C IS READ OFF THE SCREEN AND NOT DRIVEN BY A NEW ANSWER: submitting syncs the transcript to
+// Read from a REAL pty, over a transcript several screens long whose every row carries a number:
+//   A. ONE mouse report moves the chat ONE row (not a page);
+//   B. a foot notch, seven reports as foot sends with multiplier=7.0, moves seven rows - and that is
+//      not the distance PageUp moves, which is still a third of the chat's rows;
+//   C. driven past the top the wheel stops on the chat's own first row and one more report moves
+//      nothing, so it can reach no row the keys cannot;
+//   D. as many reports down as up come home: the newest row on screen, nothing below it (the
+//      "N more lines" hint gone), and the same first row the reader started on.
+//
+// WHY D IS READ OFF THE SCREEN AND NOT DRIVEN BY A NEW ANSWER: submitting syncs the transcript to
 // the bottom itself (host.rs, the Submit arm calls to_bottom), so a submit proves nothing about how
 // the reader got home. What "at the bottom" means is the transcript's own rule (transcript.rs: a view
 // whose first row is the bottom row, outside navigation, drops its freeze and follows again).
 //
 // Same isolation as scripts/test-tui-chrome-pty.mjs: the real binary in a PRIVATE tmux server, a
 // local SSE fixture that must have served the run, env -i with an allow-list, and a scratch HOME that
-// refuses to be the real one. Run: WA_BIN=<wa binary> node scripts/test-wheel-pageup-pty.mjs
+// refuses to be the real one. Run: WA_BIN=<wa binary> node scripts/test-wheel-lines-pty.mjs
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -38,14 +43,14 @@ const REAL_HOME = path.join(os.homedir(), '.wasm-agent');
 const SCRATCH_ROOT = [os.tmpdir(), '/tmp', '/var/tmp']
   .find(base => !path.resolve(base).startsWith(REAL_HOME + path.sep));
 if (!SCRATCH_ROOT) {
-  console.error('wheel-pageup: no scratch root outside ' + REAL_HOME + '; refusing to run');
+  console.error('wheel-lines: no scratch root outside ' + REAL_HOME + '; refusing to run');
   process.exit(2);
 }
-const WORK = fs.mkdtempSync(path.join(SCRATCH_ROOT, 'wa-wheel-pageup-'));
+const WORK = fs.mkdtempSync(path.join(SCRATCH_ROOT, 'wa-wheel-lines-'));
 const HOME = path.join(WORK, 'home');
 fs.mkdirSync(HOME, {recursive: true});
 if (path.resolve(HOME) === path.resolve(REAL_HOME) || HOME.startsWith(REAL_HOME + path.sep)) {
-  console.error('wheel-pageup: refusing to run with HOME inside the real ' + REAL_HOME);
+  console.error('wheel-lines: refusing to run with HOME inside the real ' + REAL_HOME);
   process.exit(2);
 }
 
@@ -101,13 +106,13 @@ const ENV = {
 };
 
 if (spawnSync('tmux', ['-V'], {encoding: 'utf8'}).status !== 0) {
-  console.log('SKIP test-wheel-pageup-pty: no tmux on PATH, and this test reads a real pty through it');
+  console.log('SKIP test-wheel-lines-pty: no tmux on PATH, and this test reads a real pty through it');
   server.close();
   fs.rmSync(WORK, {recursive: true, force: true});
   process.exit(0);
 }
 
-const SOCKET = 'wa-wheel-pageup-' + process.pid;
+const SOCKET = 'wa-wheel-lines-' + process.pid;
 const SESSION = 'wheel';
 const tmux = args => spawnSync('tmux', ['-L', SOCKET, ...args], {encoding: 'utf8'});
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -125,13 +130,17 @@ async function waitFor(predicate, label, timeout = 60000) {
 // One mouse report, written to the pane as the terminal would send it (1-based column, row).
 const mouse = (button, col, row, up = false) =>
   tmux(['send-keys', '-t', SESSION, '-l', '\x1b[<' + button + ';' + col + ';' + row + (up ? 'm' : 'M')]);
-const wheelNotch = up => mouse(up ? 64 : 65, 20, 3);
+const wheelUp = () => mouse(64, 20, 3);
+const wheelDown = () => mouse(65, 20, 3);
 // The keyboard's own sequences, byte for byte (wa_term::keymap: PageUp \x1b[5~, PageDown \x1b[6~,
 // Ctrl+PageDown \x1b[6;5~ = back to the live bottom).
 const key = seq => tmux(['send-keys', '-t', SESSION, '-l', seq]);
 const PAGE_UP = '\x1b[5~';
-const PAGE_DOWN = '\x1b[6~';
 const BOTTOM = '\x1b[6;5~';
+// FOOT'S NOTCH: the operator's foot.ini has [scrollback] multiplier=7.0, and foot multiplies mouse
+// scrolling by it while the app is on the normal screen (wa chat never enters the alternate one), so
+// one notch is SEVEN of the reports below - the number a reader's one turn of the wheel sends.
+const NOTCH = 7;
 // The input box on the screen: the rows between its two full-width rules (the last two on screen).
 const RULE = /^─{20,}$/;
 function box(rows) {
@@ -153,9 +162,15 @@ function view() {
     hasRow: n => transcript.some(row => row.includes('row' + String(n).padStart(3, '0') + ' ')),
     hasTail: () => transcript.some(row => /^\s*TAIL-\d+\s*$/.test(row) || /TAIL-\d+/.test(row))};
 }
+// The number of the fixture row at the top of the chat, which is how far a scroll went.
+function topRow(v) {
+  const row = v.transcript.find(line => /row\d{3}/.test(line));
+  const found = row && /row(\d{3})/.exec(row);
+  return found ? Number(found[1]) : null;
+}
 async function settle(ms = 700) { await sleep(ms); return view(); }
-async function notches(up, count) {
-  for (let n = 0; n < count; n += 1) wheelNotch(up);
+async function reports(up, count) {
+  for (let n = 0; n < count; n += 1) { if (up) wheelUp(); else wheelDown(); }
   return settle(500 + count * 40);
 }
 async function pages(seq, count) {
@@ -178,70 +193,65 @@ try {
   check('the transcript is several screens long, its newest row on screen and nothing below it',
     bottom.transcript.filter(row => /row\d{3}/.test(row)).length >= 30 && bottom.hasTail() && !bottom.hint,
     tick(bottom));
+  const home = topRow(bottom);
+  const chat = bottom.transcript.length;
+  check('the chat has rows to scroll through and a numbered first row on screen',
+    typeof home === 'number' && chat > 10, 'first row: ' + home + ', chat rows on screen: ' + chat);
 
-  // ---- A. one wheel notch = one PageUp --------------------------------------------------------
-  const fromBottom = bottom.top;
-  const afterPages = await pages(PAGE_UP, 3);
-  await pages(BOTTOM, 1);
-  const back = await view();
-  check('the Ctrl+PageDown that starts the second reading really goes back to the bottom',
-    back.hasTail() && !back.hint && back.top === fromBottom,
-    'top row now: ' + JSON.stringify(back.top) + ', was ' + JSON.stringify(fromBottom));
-  const afterWheel = await notches(true, 3);
-  check('three notches up show the same first row as three PageUps (one notch = one page)',
-    afterPages.top === afterWheel.top && afterPages.top !== fromBottom,
-    'PageUp x3: ' + JSON.stringify(afterPages.top) + '\n       wheel x3: ' + JSON.stringify(afterWheel.top) +
-    '\n       bottom before both: ' + JSON.stringify(fromBottom));
+  // ---- A. ONE report is ONE row ---------------------------------------------------------------
+  wheelUp();
+  const one = await settle();
+  check('one mouse report moves the chat ONE row (Victor: "scroll from mouse should scroll line by line")',
+    topRow(one) === home - 1,
+    'one report: ' + JSON.stringify(one.top) + ' (row ' + topRow(one) + '), the bottom was row ' + home);
 
-  // ---- B. the same top, and neither goes past it ----------------------------------------------
-  // 20 steps: more than the rows between the bottom and the chat's first row (154 in an 80x40
-  // window) at one page a step, and only 60 of them at the three-row step this change removes.
-  const pagesTop = await pages(PAGE_UP, 20);
-  const pagesAgain = await pages(PAGE_UP, 1);
+  // ---- B. a foot notch is seven rows, and PageUp is still a third ------------------------------
   await pages(BOTTOM, 1);
-  const wheelTop = await notches(true, 20);
-  const wheelAgain = await notches(true, 1);
-  check('driven past the top, both stop on the same first row',
-    pagesTop.top === wheelTop.top,
-    'PageUp x20: ' + JSON.stringify(pagesTop.top) + '\n       wheel x20: ' + JSON.stringify(wheelTop.top));
-  check('and one more step of either moves neither (the wheel reaches no row PageUp cannot)',
-    pagesAgain.top === pagesTop.top && wheelAgain.top === wheelTop.top,
-    'PageUp then PageUp: ' + JSON.stringify(pagesTop.top) + ' -> ' + JSON.stringify(pagesAgain.top) +
-    '\n       wheel then wheel: ' + JSON.stringify(wheelTop.top) + ' -> ' + JSON.stringify(wheelAgain.top));
-  check('the row they stop on is the chat\'s first (the answer\'s own first line is on that screen)',
-    pagesTop.hasRow(1) && wheelTop.hasRow(1),
-    'top row, wheel: ' + JSON.stringify(wheelTop.top) + '\n       top row, PageUp: ' + JSON.stringify(pagesTop.top) +
-    '\n       first line on screen: wheel ' + wheelTop.hasRow(1) + ', PageUp ' + pagesTop.hasRow(1));
+  const notch = await reports(true, NOTCH);
+  check('a foot notch (' + NOTCH + ' reports, multiplier=7.0) moves the chat ' + NOTCH + ' rows, not screens',
+    topRow(notch) === home - NOTCH,
+    'a notch: ' + JSON.stringify(notch.top) + ' (row ' + topRow(notch) + '), expected row ' + (home - NOTCH));
+  await pages(BOTTOM, 1);
+  const page = await pages(PAGE_UP, 1);
+  const step = Math.max(1, Math.floor(chat / 3));
+  check('PageUp still moves a third of the chat: ' + chat + ' rows on screen, ' + step + ' per press',
+    topRow(page) === home - step,
+    'PageUp: ' + JSON.stringify(page.top) + ' (row ' + topRow(page) + '), expected row ' + (home - step));
+  check('a notch is not a page any more (that is the change this row was written for)',
+    topRow(notch) !== topRow(page),
+    'notch: row ' + topRow(notch) + ', PageUp: row ' + topRow(page));
 
-  // ---- C. back down: both end at the bottom, where following resumes --------------------------
-  // Both readings start at home (the bottom), so the eight steps up are the same eight rows.
+  // ---- C. driven past the top: the chat's first row, and no further ---------------------------
+  const top = await reports(true, ROWS + 40);
+  const topAgain = await reports(true, 1);
+  check('driven past the top, the wheel stops on the chat\'s own first row',
+    top.hasRow(1), 'top row: ' + JSON.stringify(top.top) + '\n' + tick(top));
+  check('and one more report moves nothing (the wheel reaches no row the keys cannot)',
+    topAgain.top === top.top,
+    'before: ' + JSON.stringify(top.top) + '\n       after: ' + JSON.stringify(topAgain.top));
+
+  // ---- D. as many reports down as up come home ------------------------------------------------
   await pages(BOTTOM, 1);
-  const wheelUp = await notches(true, 8);
-  check('eight notches up leave the newest row behind (the view really is scrolled back)',
-    !wheelUp.hasTail() && wheelUp.hint,
-    'hint: ' + wheelUp.hint + ', tail on screen: ' + wheelUp.hasTail() + '\n' + tick(wheelUp));
-  const wheelHome = await notches(false, 8);
-  check('eight notches down come home: the newest row on screen and nothing below it',
-    wheelHome.hasTail() && !wheelHome.hint,
-    'hint: ' + wheelHome.hint + '\n' + tick(wheelHome));
-  const wheelUpAgain = await notches(true, 8);
-  check('eight notches up again land on the same row (one notch, one step, both ways)',
-    wheelUpAgain.top === wheelUp.top,
-    'up: ' + JSON.stringify(wheelUp.top) + '\n       up again: ' + JSON.stringify(wheelUpAgain.top));
-  const pagesHome = await pages(PAGE_DOWN, 8);
-  check('PageDown from the same place ends where the wheel did, row for row',
-    pagesHome.top === wheelHome.top && pagesHome.hasTail() && !pagesHome.hint,
-    'wheel\'s way home: ' + JSON.stringify(wheelHome.top) + '\n       PageDown\'s way home: ' + JSON.stringify(pagesHome.top) +
-    '\n       hint: ' + pagesHome.hint);
+  const up = await reports(true, 8);
+  check('eight reports up leave the newest row behind (the view really is scrolled back)',
+    !up.hasTail() && up.hint && topRow(up) === home - 8,
+    'row: ' + topRow(up) + ', hint: ' + up.hint + ', tail on screen: ' + up.hasTail() + '\n' + tick(up));
+  const back = await reports(false, 8);
+  check('eight reports down come home: the newest row on screen and nothing below it',
+    back.hasTail() && !back.hint,
+    'hint: ' + back.hint + '\n' + tick(back));
+  check('and home is the row it started on, following its newest output again',
+    back.top === bottom.top,
+    'home: ' + JSON.stringify(bottom.top) + '\n       back: ' + JSON.stringify(back.top));
 } catch (error) {
   failed += 1;
-  console.error('wheel-pageup: FAILED - ' + error.message);
+  console.error('wheel-lines: FAILED - ' + error.message);
 } finally {
   tmux(['kill-server']);
   server.close();
   if (failed === 0) fs.rmSync(WORK, {recursive: true, force: true});
-  else console.error('wheel-pageup: scratch kept for diagnosis: ' + WORK);
+  else console.error('wheel-lines: scratch kept for diagnosis: ' + WORK);
 }
 
-console.log('wheel-pageup pty: ' + (checks - failed) + ' ok, ' + failed + ' failed');
+console.log('wheel-lines pty: ' + (checks - failed) + ' ok, ' + failed + ' failed');
 process.exitCode = failed === 0 ? 0 : 1;

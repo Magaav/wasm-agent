@@ -464,7 +464,7 @@ pub const BINDINGS: &[Binding] = &[
     g("Dragging", Pose::Release, Gesture::BarJump, "release the thumb: the view stays where it was dragged"),
     g("Dragging", Pose::Release, Gesture::SelectDrag,
       "release: the selection stays, and Ctrl+C copies it"),
-    g("Scrolling", Pose::Wheel, Gesture::Wheel, "the wheel: a page of the transcript, as PageUp/PageDown (over an input box with more lines than it shows: the draft)"),
+    g("Scrolling", Pose::Wheel, Gesture::Wheel, "the wheel: one row of the chat per event, so one notch is a few lines (your terminal's scrollback multiplier: seven with the 7.0 in foot.ini); over an input box with more lines than it shows: the draft"),
     g("Hovering", Pose::Motion, Gesture::Hover,
       "move the pointer: a row that answers a click brightens, and the bar's thumb thickens"),
 

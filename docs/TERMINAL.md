@@ -6,7 +6,8 @@
 - **inline** (the default today, and the fallback always available): the chat is drawn into a scroll
   region above a pinned input box (`rust/wa-term/src/transcript.rs`, `terminal_editor.rs`, driven by
   `lua/core/cli_view.lua`). The terminal's own scrollback still holds whatever was printed before the
-  frame existed, and the wheel pages the chat.
+  frame existed, and the wheel moves the chat one row per mouse report (a notch is several: the
+  terminal's `multiplier`).
 - **fullscreen** (pi's console): the alternate screen belongs to the program for the length of the
   session, the transcript fills everything above the input box, and the reader scrolls it while the
   agent keeps streaming (`rust/wa-term/src/scroll/`). Below the transcript nothing moves: the same
