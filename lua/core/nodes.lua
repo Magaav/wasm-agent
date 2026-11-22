@@ -518,10 +518,14 @@ local function probe_peers(peers, opts)
   -- "lease:<peer>", the await was refused, the code cancelled it and answered probe_timeout - 20 s of
   -- waiting for an answer that was already on disk. The lease now carries the holder ANSWER, written
   -- when the child settles, and a joiner reads it instead of awaiting anything.
-  local published = {}
+  local published, published_at = {}, {}
   if lease then
     for _, entry in ipairs(lease) do
-      if type(entry.result) == "table" then published[entry.peer] = entry.result end
+      if type(entry.result) == "table" then
+        published[entry.peer] = entry.result
+        -- WHEN that answer was produced, so a caller can say how old what it was told is (23/11).
+        published_at[entry.peer] = tonumber(entry.at) or now
+      end
     end
   end
   for _, peer in ipairs(peers or {}) do
@@ -530,9 +534,11 @@ local function probe_peers(peers, opts)
       local running = inflight[id]
       local joined = lease_join[id]
       if published[id] then
-        launched[#launched + 1] = { id = id, joined = true, from_lease = true, result = published[id] }
+        launched[#launched + 1] = { id = id, joined = true, from_lease = true, result = published[id],
+          at = published_at[id] }
       elseif type(joined) == "table" and joined.result ~= nil then
-        launched[#launched + 1] = { id = id, joined = true, from_lease = true, result = joined.result }
+        launched[#launched + 1] = { id = id, joined = true, from_lease = true, result = joined.result,
+          at = tonumber(joined.at) or now }
       elseif type(joined) == "table" and joined.owner == probe_process_key() then
         -- The lease is OURS: this process (or a state in it) owns the child, so awaiting its real id is
         -- allowed and is the honest way to get the answer. Only an owned child may be awaited.
@@ -584,15 +590,21 @@ local function probe_peers(peers, opts)
       -- WAIT ON THE FILE: the owner publishes there. Polling the lease is the only cross-caller wait that
       -- needs no permission from the host, and it stops the moment the answer arrives or the deadline does.
       local waited_ms = 0
-      local limit_ms = tonumber(opts.deadline_s or PROBE_DEADLINE_S) * 1000
+      -- `opts.wait_s` is how long THIS CALL may wait (a tool that must answer a model in under a second),
+      -- and it is not the child's own deadline: the child keeps `deadline_s` and keeps running, so the
+      -- answer it produces is what the next call joins.
+      local limit_ms = tonumber(opts.wait_s or opts.deadline_s or PROBE_DEADLINE_S) * 1000
       while waited_ms < limit_ms do
         local again = probe_lease_read(lease_dir, now)
-        local found = nil
+        local found, found_at = nil, nil
         for _, row in ipairs(again) do
-          if row.peer == entry.id and type(row.result) == "table" then found = row.result end
+          if row.peer == entry.id and type(row.result) == "table" then
+            found, found_at = row.result, tonumber(row.at) or now
+          end
         end
         if found then
           out[entry.id] = found
+          out[entry.id].at = found_at
           settled_results[entry.id] = found
           break
         end
@@ -602,6 +614,7 @@ local function probe_peers(peers, opts)
       if out[entry.id] == nil then out[entry.id] = { capabilities = nil, reason = "probe_leaseholder_pending" } end
     elseif entry.result then
       out[entry.id] = entry.result
+      if type(out[entry.id]) == "table" and out[entry.id].at == nil then out[entry.id].at = entry.at or now end
       settled_results[entry.id] = entry.result
     else
       -- MUST 1 + MUST 2 (review r2). The host decides ownership by the OWNER the caller names
@@ -610,7 +623,7 @@ local function probe_peers(peers, opts)
       -- every peer answered probe_leaseholder_pending. And the host reads wait_ms only (cap 10 s,
       -- default 1 s): wait_s is ignored, so a 20 s deadline was really a 1 s wait followed by a
       -- cancel. The wait is therefore slices of wait_ms up to the deadline, refreshing `now` each time.
-      local deadline_ms = tonumber(opts.deadline_s or PROBE_DEADLINE_S) * 1000
+      local deadline_ms = tonumber(opts.wait_s or opts.deadline_s or PROBE_DEADLINE_S) * 1000
       local waited_ms, snapshot = 0, {}
       while true do
         local slice = math.min(PROBE_WAIT_SLICE_MS, math.max(1, deadline_ms - waited_ms))
@@ -626,7 +639,17 @@ local function probe_peers(peers, opts)
         -- The host refused this id (not ours). Never cancel someone else operation, and never call that
         -- a timeout: the leaseholder still owns it and will publish.
         out[entry.id] = { capabilities = nil, reason = "probe_leaseholder_pending" }
+      elseif snapshot.settled ~= true and opts.keep_running then
+        -- A CALLER THAT COULD NOT WAIT IS NOT A CHILD THAT FAILED (23/11). Cancelling here is what made
+        -- `tools.nodes()` cost its whole deadline and still answer nothing: the child was killed a
+        -- moment before it would have answered, so the next call started another one. With
+        -- `keep_running` the child is left alone (it publishes its answer on the lease for whoever asks
+        -- next, including this process), NO negative is published, and the answer says "not answered
+        -- yet" with no age instead of pretending a timeout.
+        out[entry.id] = { capabilities = nil, reason = "probe_pending" }
       elseif snapshot.settled ~= true then
+        -- The caller COULD wait and the child still did not answer: that is a timeout, it is named, and
+        -- the child is stopped so the next caller does not join a process that will never answer.
         pcall(host.operation, "cancel", json.encode({ id = entry.operation_id, owner = PROBE_OWNER }))
         negative[entry.id] = { capabilities = nil, reason = "probe_timeout" }
         out[entry.id] = negative[entry.id]
@@ -648,6 +671,8 @@ local function probe_peers(peers, opts)
         if decoded then
           local answer = { capabilities = type(decoded.capabilities) == "table" and decoded.capabilities or nil,
             reason = decoded.reason or decoded.error or (decoded.capabilities and "asked" or "unknown") }
+          -- Asked and answered just now, so the age of this answer is zero.
+          answer.at = now
           out[entry.id] = answer
           settled_results[entry.id] = answer
         else
@@ -768,6 +793,10 @@ function M.list(opts)
         local known = caps_cache[tostring(peer.node_id or "")]
         peer.capabilities = known and known.capabilities or nil
         peer.capabilities_reason = known and known.capabilities and "cached" or "not_asked_cached_view"
+        if known and known.capabilities then
+          peer.capabilities_at = known.at
+          peer.capabilities_age_s = math.max(0, host.now() - (tonumber(known.at) or host.now()))
+        end
       elseif opts.live_capabilities == false then
         peer.capabilities = nil
         peer.capabilities_reason = "not_asked"
@@ -778,6 +807,13 @@ function M.list(opts)
         if answer then
           peer.capabilities = answer.capabilities
           peer.capabilities_reason = answer.reason
+          -- HOW OLD THIS IS: the moment the answer was produced (a child that settled a second ago and
+          -- one that was read from disk ten seconds ago are not the same fact), and the age in seconds.
+          -- A peer that has not answered yet carries no age at all rather than a zero that reads as fresh.
+          if answer.at then
+            peer.capabilities_at = answer.at
+            peer.capabilities_age_s = math.max(0, host.now() - (tonumber(answer.at) or host.now()))
+          end
         elseif probing_why ~= nil then
           -- REFUSED, BY NAME. A script run did not ask to probe, so neither a child is started nor the
           -- peer is asked in-process (that is a live network call). The field carries the reason, as it
@@ -790,6 +826,7 @@ function M.list(opts)
           local capabilities, why = M.peer_capabilities(peer)
           peer.capabilities = capabilities
           peer.capabilities_reason = capabilities and "asked" or tostring(why or "unknown")
+          if capabilities then peer.capabilities_at = host.now(); peer.capabilities_age_s = 0 end
         end
       end
       out[#out + 1] = peer
@@ -1339,6 +1376,48 @@ end
 function M.peer_capabilities(node, opts)
   if type(node) ~= "table" or node.local_node then return nil, "not_a_peer" end
   return ask_capabilities(node)
+end
+
+--- What this node ALREADY knows about its peers' capabilities, and how old each answer is.
+---
+--- No probe is started, nothing is awaited and no network call is made: this reads the answers this
+--- process keeps (`caps_cache`) and the answers other callers in this node have already published on the
+--- probe lease (`probe_lease_dir`). A caller that must answer now - a refusal that has to name the nodes
+--- which list `mcp_whatsapp_*`, a view - reads this instead of paying a deadline, and a peer nobody has
+--- asked yet simply is not in it (unknown is not "no").
+---
+---   { node_id = "...", capabilities = {"bash", ...}, reason = "asked"|"probe_timeout"|..., at = <epoch>,
+---     age_s = <seconds> }
+function M.known_capabilities()
+  local now = host.now()
+  local known = {}
+  for id, entry in pairs(caps_cache) do
+    if type(entry) == "table" then
+      known[tostring(id)] = { node_id = tostring(id), capabilities = entry.capabilities,
+        reason = entry.reason, at = tonumber(entry.at), age_s = math.max(0, now - (tonumber(entry.at) or now)) }
+    end
+  end
+  local dir = probe_lease_dir()
+  if dir then
+    local ok, live = pcall(probe_lease_read, dir, now)
+    for _, entry in ipairs(ok and type(live) == "table" and live or {}) do
+      local result = entry.result
+      if type(result) == "table" and entry.peer ~= "" then
+        local at = tonumber(entry.at) or now
+        local previous = known[entry.peer]
+        -- The newer answer wins; an entry with no answer of its own (a child still running) is not one.
+        if (result.capabilities ~= nil or result.reason ~= nil)
+            and (not previous or (tonumber(previous.at) or 0) <= at) then
+          known[entry.peer] = { node_id = entry.peer, capabilities = result.capabilities,
+            reason = result.reason, at = at, age_s = math.max(0, now - at) }
+        end
+      end
+    end
+  end
+  local out = {}
+  for _, row in pairs(known) do out[#out + 1] = row end
+  table.sort(out, function(a, b) return a.node_id < b.node_id end)
+  return out
 end
 
 -- ONE peer's accepted capabilities, as a child process asks them (item 10 of the node-ops round).

@@ -2192,13 +2192,28 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     -- commit bytes.
     return dofile("lua/core/build_status.lua").status()
   elseif name == "nodes" then
+    -- ANSWERS FROM WHAT THE NODE KNOWS, IN UNDER A SECOND (23/11). The default list started one
+    -- `wa nodes probe` child per peer and WAITED out its 20 s deadline: measured on avell, three calls in
+    -- a row took 20.4 s, 20.4 s and 0.25 s, and a turn cannot call the model until this returns (session
+    -- daf51bb3: 83 s, four of nine rounds spent finding where WhatsApp runs). The probes are still
+    -- started - that is how an answer arrives - but this call waits at most ANSWER_S for them and says
+    -- how old each answer is; a child that has not settled is left running (never cancelled) and
+    -- publishes for the next call.
+    -- Half a second, not a second: an answer already on disk is read with no wait at all, and a probe
+    -- that has not answered inside half a second is reported `probe_pending` (the next call joins it).
+    -- Measured: 0.9 s of wait plus the fan-out's own overhead read as 1.02 s, which is over the second a
+    -- turn's first model call needs.
+    local ANSWER_S = 0.5
     local list = {}
-    for _, node in ipairs(nodeslib.list()) do
+    for _, node in ipairs(nodeslib.list({ wait_s = ANSWER_S, keep_running = true })) do
       local entry = {
         name = node.name, role = node.role, online = node.online,
         local_node = node.local_node, capabilities = node.capabilities,
+        capabilities_reason = node.capabilities_reason,
         endpoints = node.endpoints, node_id = node.node_id,
       }
+      if node.capabilities_at then entry.capabilities_at = node.capabilities_at end
+      if node.capabilities_age_s then entry.capabilities_age_s = node.capabilities_age_s end
       -- Whether this node may call the peer at all: read from the peer's registry binding (cached),
       -- so a refusal is visible before a call is spent on it.
       if not node.local_node then
@@ -2209,7 +2224,8 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
       list[#list + 1] = entry
     end
     return { nodes = list,
-      note = "operator_of_peer: true = this node is pinned in the peer's accepted binding; false = the peer will refuse it (unknown_caller); unknown = no binding on record or the lookup failed. Registry view, cached 60 s." }
+      note = "operator_of_peer: true = this node is pinned in the peer's accepted binding; false = the peer will refuse it (unknown_caller); unknown = no binding on record or the lookup failed. Registry view, cached 60 s. "
+        .. "capabilities_age_s: how old the peer's capabilities answer is (capabilities_at is when it was produced); capabilities_reason probe_pending means a probe is running and had not answered when this list was drawn - ask again in a second and it is there." }
   elseif name == "remote" then
     if type(args) == "table" and (args.capability == "batch" or args.calls ~= nil) then return remote_batch(memory, args, role, ctx) end
     local call, refusal = M.remote_arguments(args, function() return M.catalog(role) end)
