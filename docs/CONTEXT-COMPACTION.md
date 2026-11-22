@@ -25,9 +25,17 @@ self-wake (`self_wakes`, status pending or dispatching), and a child run still q
 that session. With always-available a session is idle while its own handles run, and compacting then
 breaks the provider prefix cache and drops the detail that work is about to be read against. A state
 the check cannot read is not treated as clear: it is reported beside the pending work and refuses too.
-Nothing is remembered, so the first idle request after the work settles compacts - which also means a
-session that keeps a long-horizon wake pending does not idle-compact until that wake fires (the in-run
-90-95% trigger is untouched and still applies). An explicit operator `/compact` carries no `idle` and
+Nothing is remembered, so the first idle request after the work settles compacts - and that request
+is made where the work settles. A code-mode handle that settles, a self-wake that fires and a child
+run that comes back all reach the node as a background completion run, and none of them is a /chat
+run: none emits `node.run_finished`, so the job above is never asked again for them. The node asks the
+same question from that run's own settle (`settle_idle_compaction`, rust/wa-capabilities/src/serve.rs,
+answered by `wa_idle_settled` in lua/core/server.lua), under the same maintenance gate /compact takes:
+one idle compaction at a time, and none while a run is queued or running node-wide. It refuses by name
+there exactly as it does above, and one state more: a parked session (`session_parked`,
+lua/core/session_park.lua) is not rewritten either - it is stopped until `wa session release`. A session
+that keeps a long-horizon wake pending does not idle-compact until that wake fires (the in-run 90-95%
+trigger is untouched and still applies). An explicit operator `/compact` carries no `idle` and
 is unchanged, as is the node-wide `node_busy` refusal for a queued or running run, which the Rust
 listener decides before this handler is called.
 
