@@ -103,6 +103,16 @@ Two halves, both wired in:
   own tick in a third through `scripts/lib/session-park-e2e.lua`; the wake it holds is a
   `deploy_pause.RESUME_REASON` row, i.e. the wake of the 22/11 incident.
 
+**Both paths answer the same way, measured.** On the production node the `selfloop` component is
+provisioned and the wake queries are served by it; the same row, run with `WA_COMPONENTS_DIR` pointing
+at a pinned component set built from this tree, reports `session park: selfloop seam active
+(component)` and 68 checks passed, and reports `native` with 68 checks passed without it. The park
+itself is kernel state (Lua SQL on the one ledger), and the tick's hold filter sits in Lua on BOTH
+paths, in front of the component's own plan and claim (`lua/core/selfloop.lua`, the `held` table read
+once per tick) - so a component can propose a row and the node still dispatches nothing for a parked
+session. The row now prints which half answered, so a green row cannot hide that the seam was never
+reached.
+
 **Both fail on the base** (`12fd4c12`, a separate worktree, no stash): the Lua half dies on
 `lua_root_unreadable: .../lua/core/session_park.lua`, the shell half with 30 assertion failures
 (`unknown command: session`). `scripts/test-discriminates.sh 12fd4c12` reports `discriminates=1`

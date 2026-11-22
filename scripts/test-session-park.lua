@@ -210,4 +210,9 @@ eq(park.status({ wanted = quiet }).pending, 0, "status agrees")
 contains(selfloop.footer_text(quiet), "", "a parked session with no wake says nothing in the footer")
 park.release({ wanted = quiet })
 
+-- Which half answered the wake queries here: the `selfloop` component when this home has it provisioned,
+-- else the built-in. NOT a check - both are correct and the park is kernel state either way - but a log
+-- that does not say it would let a green row hide that the seam was never reached.
+local seam_active = (select(1, dofile("lua/core/features.lua").seam("selfloop")) and true) or false
+print("session park: selfloop seam " .. (seam_active and "active (component)" or "native"))
 print("session park ok (" .. checks .. " checks)")
