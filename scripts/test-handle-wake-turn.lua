@@ -144,4 +144,14 @@ check(lines == 1, 'the effect ran exactly once across the wake (the marker has '
 check(counters.read().wake_only_round == 1,
   'and the step is counted as a wake-only round: ' .. json.encode(counters.read()))
 
+-- Leave nothing running: the two long calls this row opened are stopped through the supported verb,
+-- never by name (a row that leaves them behind is a row whose ``sleep 300`` outlives the suite).
+for _, handle in ipairs({ stay_b, stay_c }) do
+  local op = tostring(handle.op or '')
+  if op ~= '' then
+    local stopped = pending.cancel(dispatch, opts, op, 0)
+    check(type(stopped) == 'table', 'the long call ' .. op .. ' is stopped: ' .. json.encode(stopped))
+  end
+end
+
 print(string.format('handle wake turn: %d checks', checks))
