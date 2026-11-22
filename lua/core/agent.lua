@@ -1291,10 +1291,18 @@ function M:build_context()
   -- node keeps the failure it always had (its own provider error, a few lines later), and this check
   -- speaks only about a provider it can name.
   local settings_ok, settings=pcall(function() return dofile('lua/core/provider.lua').settings() end)
-  if settings_ok and type(settings)=='table' and type(settings.provider)=='string' and settings.provider~='' then
-    local transport_refusal=raw_code_lib.transport_refusal(settings.provider, self.model or settings.model)
-    if transport_refusal then error(transport_refusal.text,0) end
+  if not settings_ok or type(settings) ~= 'table' or type(settings.provider) ~= 'string' or settings.provider == '' then
+    -- UNKNOWN IS NOT YES (review r1, item 5): a node whose provider settings cannot be read used to pass
+    -- the door silently, so nothing ever checked whether its provider can call tools at all. It is refused
+    -- by name, with the two commands that say what this node actually has.
+    error("provider_settings_unreadable: this node cannot read its provider settings ("
+      .. tostring(settings) .. "), so it cannot say whether this provider can answer with a tool call - "
+      .. "and run(code=...) is the only way to act here. The run is refused by name rather than guessing. "
+      .. "`wa status` and `wa capabilities --json` name what this node has; `wa paths` names the config "
+      .. "directory its provider settings come from.", 0)
   end
+  local transport_refusal=raw_code_lib.transport_refusal(settings.provider, self.model or settings.model)
+  if transport_refusal then error(transport_refusal.text,0) end
   -- One policy for every thread, pinned with the context the tools and the prompt are built from.
   local code_ctx={session_id=self.session_id,user_id=self.user,role=self.role,subagent=self.subagent}
   self.codemode_policy=dofile('lua/core/codemode_policy.lua').pin(memory,self.role,code_ctx)
@@ -3098,16 +3106,19 @@ function M:run_body(text, images)
       end
     end
 
-    -- THE ACTION WRITTEN AS TEXT. One path (Victor 21/11): nothing in the reply is turned into a call
-    -- any more, so a step that ends with its action in the wrong form is not an answer. TWO shapes,
-    -- and the same net for both:
-    --   * the model's trained tool-call markup, written as text (raw_code.markup_in_text) - a
-    --     <tool_call>{...}</tool_call>, a <bash>...</bash>, a DSML bar;
-    --   * a run-tagged block that ENDS the answer (raw_code.text_action) - the removed transport's
-    --     shape, which no longer runs and is therefore markup too.
-    local leaked = raw_code.markup_in_text(result.content or "")
-    if not leaked and #(result.tool_calls or {}) == 0 then
-      leaked = raw_code.text_action(result.content or "")
+    -- THE ACTION WRITTEN AS TEXT - and ONLY when this step carried no action at all (review r1, item 1).
+    -- A reply with a real tool call is never scanned: the call IS the action, and a worker that quotes a
+    -- call format in its prose (a test of this very net, a report, a brief) must not lose its call for
+    -- saying the word. Two shapes when there is no call:
+    --   * the model's trained tool-call markup, written as text (raw_code.markup_in_text), read from the
+    --     PROSE only - fenced samples and inline code are quotes, so raw_code.prose_only removes them;
+    --   * a run-TAGGED block that ENDS the answer (raw_code.text_action) - the removed transport's shape,
+    --     which no longer runs and would otherwise end the turn with its action as a sample. A block
+    --     tagged js / javascript WITHOUT the word run is an example and stays an answer.
+    local leaked
+    if #(result.tool_calls or {}) == 0 then
+      leaked = raw_code.markup_in_text(raw_code.prose_only(result.content or ""))
+      if not leaked then leaked = raw_code.text_action(result.content or "") end
     end
     -- The native transports' leak safety net (review MUST 6). The action was a tool call; the model
     -- wrote its trained call format as TEXT instead, so nothing ran. One named continue asks for the

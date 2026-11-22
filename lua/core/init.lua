@@ -621,6 +621,12 @@ elseif command == "conform" then
   end
   local path = dofile("lua/core/model_profile.lua").path(model)
   print("conform: profile stored at " .. tostring(path))
+  -- The measurement runs in a SCRATCH home (above), so the node does not read that file: printing where
+  -- it landed without saying how it gets installed is how a `wa conform` repair that never worked looked
+  -- correct (review r1, item 5).
+  print("conform: this home is a scratch one - install the profile on the node, in a normal shell:")
+  print("  mkdir -p ~/.wasm-agent/models && cp '" .. tostring(path) .. "' ~/.wasm-agent/models/"
+    .. tostring(dofile("lua/core/model_profile.lua").file_name(model) or model) .. ".json")
 
 elseif command == "turns" then
   -- The turn feed (lua/core/turnfeed_cli.lua, docs/TURNS.md): the model's own `<turn>` notes, read out

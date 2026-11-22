@@ -19,7 +19,15 @@ function M.decide(profile)
   end
   local tool_rate = tonumber(profile.rates and profile.rates.uses_run_tool or 0) or 0
   local block_rate = tonumber(profile.rates and profile.rates.acts_in_answer or 0) or 0
-  local transport = tool_rate >= block_rate and M.TOOL_CALL or M.BLOCK
+  -- A profile that measured NO action at all decides NOTHING (review r1, item 5). `tool_rate >= block_rate`
+  -- read 0 >= 0 as tool_call, so an all-fail profile opened the one door this node has - for a model that
+  -- was never seen to act. Unknown is not yes: no action measured means no door, and the node refuses the
+  -- model by name instead.
+  if tool_rate <= 0 and block_rate <= 0 then
+    return { transport = nil, source = "no_action_measured",
+      tool_rate = tool_rate, block_rate = block_rate }
+  end
+  local transport = tool_rate > 0 and tool_rate >= block_rate and M.TOOL_CALL or M.BLOCK
   return { transport = transport, source = "profile",
     tool_rate = tool_rate, block_rate = block_rate }
 end
@@ -47,11 +55,11 @@ end
 -- runner with no provider and no engine.
 -- The harness a task is measured IN, and why it is not the node's own operating mode.
 --
--- What is being measured is a CHOICE between two transports, so both are offered: the declared
--- tools (including the run tool) and the block guidance. A model that acts through a call and one
--- that acts through a fence are each visible that way; a suite that offered only the node's current
--- mode would measure that mode, not the model. `run` is in the catalog whether or not the node's
--- raw-code mode declares it, so this is the same tool the node would hand a tool-calling model.
+-- ONE path (operator 21/11, review r1 item 6): the node has one door, so the harness offers one. What is
+-- measured is whether the model ACTS through it and how often - `uses_run_tool` is the rate the door
+-- reads, and `acts_in_answer` still records a fenced block a model writes anyway (that is a measurement
+-- of the wrong door, and a profile that prefers it does not open the node's). Offering two transports
+-- would measure a choice the node does not have.
 function M.harness(memory, role, ctx)
   local tools = dofile("lua/core/tools.lua")
   local raw_code = dofile("lua/core/raw_code.lua")
@@ -62,9 +70,8 @@ function M.harness(memory, role, ctx)
   end
   local parts = {
     "You are wasm-agent, an engineering agent on this node. Work in code.",
-    "Two ways to act, and either is correct. 1) Call the run tool with `code`: it runs as one script "
-      .. "where every tool is tools.<name>(args), and its result comes back to you. 2) End your "
-      .. "message with one js run block: it runs the same way, and the result replaces it.",
+    "Act by calling the run tool with `code`: it runs as one script where every tool is "
+      .. "tools.<name>(args), and its result comes back to you. A message with no tool call is your answer.",
     "A message with no action is your answer. Bytes that must travel exactly (a file body, a patch) "
       .. "go in the run call's `raw` object, never escaped inside the code.",
   }

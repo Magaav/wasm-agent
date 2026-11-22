@@ -459,13 +459,23 @@ if not ok or type(raw) ~= 'table' or type(raw.native_run) ~= 'function' then pri
 -- ONE path (Victor 21/11): the run tool is the door, and the switch that used to choose a second one
 -- is refused by name. A node whose env still exports it refuses every run, so the verdict says so.
 local refusal = type(raw.switch_refusal) == 'function' and raw.switch_refusal() or nil
-if refusal then print('ok_switch_still_set: this node exports ' .. tostring(refusal.value)
-  .. ' and every run will refuse until it is removed') return end
+if refusal then
+  -- REFUSED, never 'a note and install anyway' (review r1, item 4): on this build the value makes every
+  -- turn, child, self-wake and compaction refuse by name, so installing it onto such a node ships a
+  -- dead node. The refusal below is the same sentence the run gives, with the file when it knows it.
+  print('switch_still_set ' .. tostring(refusal.value) .. ' | ' .. tostring(refusal.text))
+  return
+end
 print('ok')
 LUA
 verdict=$("$TARGET" --db "$tmp/l.db" >/dev/null 2>&1; WA_SCRIPT="$probe" "$TARGET" --db "$tmp/l.db" 2>/dev/null | tail -1)
 case "$verdict" in
-  ok*) say "lua matches this artifact ($verdict)" ;;
+  ok) say "lua matches this artifact ($verdict)" ;;
+  switch_still_set*)
+    say "REFUSING to install: this node still exports WASM_AGENT_RAW_CODE"
+    say "  $verdict"
+    die "refused_switch_still_set: delete that line from the node's env file (and from any unit or launcher), then install again - every run on this build refuses by name until it is gone"
+    ;;
   *)
     say "LUA MISMATCH after install ($verdict) — rolling back"
     if [ -f "$backup" ]; then install -m755 "$backup" "$TARGET"; fi

@@ -1881,6 +1881,9 @@ esac
 # ONE guidance source: the run-tool sentence plus the batching sentence, never the codemode guidance,
 # asserted on the prompt build_context really builds.
 WA_SCRIPT=scripts/test-native-guidance.lua "$BIN" --db "$DB" | grep "native guidance ok"
+# The provider door and the measurement behind it (review r1, item 5, restored): an all-fail profile decides
+# nothing, a model id with a separator can be measured, and only a measured tool-call profile opens the door.
+WA_SCRIPT=scripts/test-conform-profile.lua "$BIN" --db "$DB" | grep "conform profile ok"
 # The FULL built system prompt and declared tool list, checked against goldens RECORDED ON the base:
 # a thread that already runs this way keeps its bytes, so it keeps its cache.
 WA_SCRIPT=scripts/test-prompt-golden.lua "$BIN" --db "$DB" | grep "prompt golden ok"

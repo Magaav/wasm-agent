@@ -64,7 +64,7 @@ for the implementation boundary.
 | Multiple machines | Node keys, signed peer calls, rendezvous discovery and an outbound relay for NAT'd nodes. |
 | Guest execution | Managed guests pin operator keys, require expiring local consent, reject unrelated callers and support local revocation. The managed registry—not a node's claimed role—controls promotion. Public rollout remains gated. |
 | How the model acts: CodeAct (default) | The model acts by writing code: it ends a message with one ` ```js run ` block, which runs as one sandboxed script where every tool is `tools.<name>(args)`, and the result comes back as an observation. `vars` is session state - whatever a script assigns to it, functions included, persists across scripts and turns. A call the model writes in its own tool markup (DSML, `<tool_call>`) runs the same way instead of ending the turn. [Code mode](docs/CODEMODE.md). |
-| How the model acts: codemode (option) | The same sandbox reached through a declared `codemode` tool call with the script as a JSON argument. Opt in per node with `WASM_AGENT_RAW_CODE=codemode` (also `off`, `0`, `false`, `no`); `first` declares both, with the run block first. |
+| How the model acts: one path | `run(code=...)`, a native tool call, is the ONLY execution path (operator decision, 21/11). Never set `WASM_AGENT_RAW_CODE`: the switch, its values and the fenced `run` block are gone, and a node that still exports the variable refuses every run by name. |
 | Reusable procedures | Skills for on-demand instructions; spells for repeatable procedures with postconditions; WASM tool plugins. |
 | WhatsApp audio | Persistent linked-device journal and opt-in incoming + own-outgoing original-chat transcription; EN default/PT per-account. [Pipeline](docs/WHATSAPP-TRANSCRIPTION.md). |
 | Supervision | A separate sentinel handles requested restarts/upgrades and budgeted event-triggered wakes. |
@@ -83,35 +83,33 @@ Explicit memories are a separate store. Tool artifacts and telemetry have their
 own retention limitations. “Evidence” does not mean unlimited archival storage;
 see [memory](docs/MEMORY.md) and [observability](docs/OBSERVABILITY.md).
 
-## CodeAct and codemode
+## One execution path: `run(code=...)`
 
-**CodeAct is the default.** The model does its work as code, in plain blocks - no JSON-escaped tool calls:
+**The model does its work as code, through one door: the `run` tool call.** It passes the script in the
+call's `code` argument (`tools.<name>(args)` inside it), and what the script returns comes back to it.
+RAW blocks ride in the same call's `raw` argument: each value reaches the script byte for byte, as the
+variable named by its key and as the whole object under `raw`. `vars.<name>` persists for the session,
+functions included (`vars.lastMine = async (n) => ...`).
 
-````text
-Looking her up and reading the chat in one step.
+The operator's decision (21/11): **one path, and it is the one that is proven.** The fenced `run` block,
+the `WASM_AGENT_RAW_CODE` switch with every value it took (`only`, `first`, `stop`, `on`, `e2`, `e3`,
+`bash`, `codemode`, `off`, ...) and the A/B arms behind them are **gone**. Their measured cost is in
+`docs/missions/reports/one-run-path.md`.
 
-```js run
-const [who, chat] = await Promise.all([
-  tools.mcp_whatsapp_contacts({ q: "Laura" }),
-  tools.mcp_whatsapp_read({ chat: "112682812330026@lid", limit: 5 }),
-]);
-vars.laura = who.chat;                     // session state: kept for later scripts and turns
-return chat.messages.map(m => m.text);
-```
-````
+What that means for an operator:
 
-- one run block per message; the script's return value is the observation the model reads next;
-- `vars.<name>` persists for the session, functions included (`vars.lastMine = async (n) => ...`);
-- a long result is folded to one row in the CLI (`… +N chars`) and opens on a click;
-- the same policy, approvals and audit apply as for any tool call - a run block is dispatched as one.
+- **Never set `WASM_AGENT_RAW_CODE`.** A node that still exports it (in its env file, a unit or a
+  launcher) refuses every run **by name**, and the refusal says which value and which file it came from.
+  Delete the line and restart the node.
+- A thread started under one of the removed modes **moves** to the `run` tool the first time it is
+  resumed, with one `[session update]` line naming the move; its earlier messages are untouched.
+- A model that writes its call, or a fenced `run` block, as plain **text** gets one named continue that
+  names the `run` tool; a second consecutive one fails the turn by name. Markup quoted inside a fence or
+  inside backticks is prose and is left alone.
+- A provider that cannot answer with a tool call is refused **by name** at start, with the one repair:
+  add a row to `model_profile.DEFAULT_TRANSPORTS`, or measure the model with `wa conform <model>`.
 
-**codemode is the option.** Set it per node in the node's env (`~/.wasm-agent/env`) and restart:
-
-```sh
-WASM_AGENT_RAW_CODE=codemode   # the model calls the declared `codemode` tool with {code}
-WASM_AGENT_RAW_CODE=first      # both declared; the run block is offered first
-# unset (default)              # CodeAct only: the run block is the way to act
-```
+[Code mode](docs/CODEMODE.md) describes the sandbox the script runs in.
 
 ## Trust before reach
 

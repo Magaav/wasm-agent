@@ -152,9 +152,28 @@ M.REMOVED_VALUES = {
 -- EVERY value is refused, known or not: the switch itself is gone, so a value is either a mode this
 -- build removed or a word no build ever had - and an unknown value read as "off" is the bug this
 -- closes, not a default worth keeping.
+-- WHERE THE VALUE CAME FROM (review r1, item 4). The host loads `<config>/env` at start WITHOUT
+-- overwriting the real environment (rust/wa-host/src/main.rs, `load_env_file`), so a launcher's
+-- `unset` cannot win on a node that keeps the line in that file - and a message that only says "remove
+-- it from the environment" sends the operator to the wrong place. This reads the same file the host
+-- reads and names it by path when the key is in it.
+function M.switch_source()
+  local found = nil
+  pcall(function()
+    local file = dofile('lua/core/paths.lua').config_file()
+    local text = host.read_file(file)
+    if type(text) ~= 'string' then return end
+    for line in text:gmatch('[^\n]+') do
+      if line:match('^%s*' .. M.SWITCH .. '%s*=') then found = file break end
+    end
+  end)
+  return found
+end
+
 function M.switch_refusal()
   local value = tostring(host.getenv(M.SWITCH) or ""):gsub("^%s+", ""):gsub("%s+$", "")
   if value == "" then return nil end
+  local source = M.switch_source()
   local known = M.REMOVED_VALUES[value:lower()]
   local why = known
     and ("that value named " .. known .. ", and this build has one path: the run tool")
@@ -163,8 +182,13 @@ function M.switch_refusal()
     text = "run_switch_removed: " .. M.SWITCH .. "=" .. value .. " is gone: " .. why .. ". "
       .. "run(code=...) is the only way to act (Victor 21/11), so there is no mode to set and no other "
       .. "path to fall back to. Remove " .. M.SWITCH .. " from this node's environment - and from any "
-      .. "launcher, unit or script that exports it. This run is refused by name and exits non-zero "
-      .. "rather than acting through a path this build does not have." }
+      .. "launcher, unit or script that exports it."
+      .. (source
+        and (" It is in " .. source .. ": edit that file (the host reads it at start and a launcher's "
+          .. "`unset` does not win over it), then restart the node.")
+        or "")
+      .. " This run is refused by name and exits non-zero rather than acting through a path this build "
+      .. "does not have.", source = source }
 end
 
 -- THE PROVIDER DOOR: native tool calls, or a refusal by name - never a quiet move to another path
@@ -188,8 +212,9 @@ function M.transport_refusal(provider_id, model)
   end
   return { name = "provider_cannot_call_tools",
     text = "provider_cannot_call_tools: this provider cannot call tools; add a row or measure it with "
-      .. "`wa conform " .. tostring(model or "<model>") .. "`. run(code=...) is the only way to act on "
-      .. "this node, so a provider that cannot answer with a tool call has no path here; the run is "
+      .. "`wa conform " .. tostring(model or "<model>") .. "` and INSTALL the profile it prints (it measures "
+      .. "in a scratch home, so its file is not the one this node reads). run(code=...) is the only way to "
+      .. "act on this node, so a provider that cannot answer with a tool call has no path here; the run is "
       .. "refused by name rather than moved to another transport." }
 end
 
@@ -397,12 +422,40 @@ function M.markup_in_text(text)
   return nil
 end
 
--- THE ACTING SHAPE WRITTEN AS TEXT (the leak net's second shape). A run-tagged block, or a bare js /
--- javascript block, that ENDS the answer is the action in the wrong form: nothing runs it any more
--- (the block channel is gone), so the step is not an answer. Only the LAST block counts, and only
--- when nothing but whitespace follows it - a model explaining the format mid-answer is answering, and
--- a block it went on from is a sketch it rejected (the same rule as M.in_thinking).
--- Returns { marker = "```js run", line = n } or nil.
+-- THE MODEL'S PROSE: its answer with the samples it QUOTED taken out. Fenced blocks are removed whole
+-- and inline code spans are blanked, because a call format named inside a fence or inside backticks is
+-- a quote, not a call the model meant to make (review r1, item 1: a worker that writes about this very
+-- net, or a report that quotes the shape, lost its turn to its own prose). Pure: no host, no state.
+function M.prose_only(text)
+  local body = tostring(text or "")
+  if body == "" then return "" end
+  local lines = lines_of(body)
+  local blocks = M.parse(body)
+  local inside = {}
+  for _, block in ipairs(blocks) do
+    for index = block.open, block.close or #lines do inside[index] = true end
+  end
+  local kept = {}
+  for index, line in ipairs(lines) do
+    if not inside[index] then kept[#kept + 1] = line.text end
+  end
+  local prose = table.concat(kept, "\n")
+  -- Double-backtick spans first, so a span that contains one backtick is taken whole (the same order
+  -- finish_contract uses: a quoted marker inside backticks is one span, not three).
+  prose = prose:gsub("``(.-)``", " ")
+  prose = prose:gsub("`[^`\n]-`", " ")
+  return prose
+end
+
+-- THE ACTING SHAPE WRITTEN AS TEXT (the leak net's second shape). A RUN-TAGGED block that ENDS the
+-- answer is the action in the wrong form: nothing runs it any more (the block channel is gone), so the
+-- step is not an answer and the model would otherwise end the turn with its action as a sample. Only
+-- the LAST block counts, and only when nothing but whitespace follows it - an answer that goes on from
+-- a block is prose about code, not a lost action (the same rule as M.in_thinking).
+--
+-- A block tagged js / javascript WITHOUT the word run is an EXAMPLE, not an action (review r1, item 1):
+-- an answer that ends in a sample fence is an answer and earns nothing. Returns
+-- { marker = "```js run", line = n } or nil.
 function M.text_action(text)
   local body = tostring(text or "")
   if not has_fence(body) then return nil end
@@ -411,12 +464,8 @@ function M.text_action(text)
   if not last then return nil end
   local last_line = lines[last.close or #lines]
   if body:sub(last_line.finish + 1):find("%S") then return nil end
-  local tag = tostring(last.info or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
-  local marker
-  if last.run then marker = TICK .. "js run"
-  elseif PLAIN_JS[tag] then marker = TICK .. tag
-  else return nil end
-  return { marker = marker, line = last.open }
+  if not last.run then return nil end
+  return { marker = TICK .. "js run", line = last.open }
 end
 
 return M

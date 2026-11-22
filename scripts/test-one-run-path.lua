@@ -73,7 +73,9 @@ local found = raw_code.text_action(fenced)
 check(found and found.marker == '```js run', 'a run block that ends the answer is the action in the wrong form')
 check(raw_code.text_action('an example, mid-answer:\n```js run\nreturn 1;\n```\nand that is what it means') == nil,
   'a block the answer goes on from is prose, not an action')
-check(raw_code.text_action('```js\nreturn 1;\n```') ~= nil, 'a bare js block that ends the answer is marked the same way')
+-- A block tagged js WITHOUT the word run is a SAMPLE, not a lost action (review r1, item 1): an answer
+-- that ends in an example fence is an answer and earns nothing.
+check(raw_code.text_action('```js\nreturn 1;\n```') == nil, 'a bare js sample fence that ends the answer is an answer')
 check(raw_code.text_action('no code here at all') == nil, 'plain prose is an answer')
 
 -- ---- 4. an old thread moves here, once ---------------------------------------------------------
@@ -176,5 +178,108 @@ local frozen3, report3 = prompt_cache.enforce(ctx2, {
 check(report3.changed == false and report3.note_required == false,
   'a thread already on this path keeps its bytes: no cache miss and no note')
 check(#prompt_cache.notes(ctx2, frozen3, report3, {}) == 0, 'and nothing is appended')
+
+-- ---- 5. a REAL base thread MOVES, through the real loop (review r1, item 2) ----------------------
+-- fixtures/one-run-path/prefix-<mode>.json are REAL prefix records written by the BASE tree
+-- (97251587) with WASM_AGENT_RAW_CODE=<mode>: a session was opened there, build_context froze the
+-- prefix, and the row was copied out byte for byte. Both modes froze an EMPTY tool list - `only`
+-- because it emptied the surface, `first` because codemode was the only code door it declared - which
+-- is exactly why keeping those bytes refused the turn instead of moving it.
+local agentlib = dofile('lua/core/agent.lua')
+local TREE = host.getenv('WASM_AGENT_LUA_ROOT') or '.'
+local real_getenv = host.getenv
+local env_fixture = { WASM_AGENT_PROVIDER = 'opencode-go', WASM_AGENT_LLM_API_KEY = 'one-run-path',
+  WASM_AGENT_LLM_MODEL = 'deepseek-v4.1-flash', WASM_AGENT_PI_MODELS_STORE = 'missing-test-store',
+  WASM_AGENT_CONTEXT_BUDGET = '0' }
+host.http = function() error('network forbidden in the one-run-path fixture') end
+
+for _, mode in ipairs({ 'only', 'first' }) do
+  local fixture = host.read_file(TREE .. '/fixtures/one-run-path/prefix-' .. mode .. '.json')
+  check(type(fixture) == 'string' and fixture ~= '', 'the base record for ' .. mode .. ' is there')
+  local recorded = json.decode(fixture)
+  check(recorded.raw_mode == mode, mode .. ': the fixture is what the base recorded (' .. tostring(recorded.raw_mode) .. ')')
+  check(recorded.tools == '[]', mode .. ': it froze NO tool, which is the refusal this row is about')
+
+  local who = 'moved-' .. mode
+  local moved_sid = memory.start_session('', 'moved from ' .. mode, { user_id = who, node_id = '', title = 'moved ' .. mode })
+  memory.append_turn(moved_sid, { id = 'before-1-' .. mode, role = 'user', content = 'an earlier message', debug = false })
+  memory.append_turn(moved_sid, { id = 'before-2-' .. mode, role = 'assistant', content = 'an earlier answer', debug = false })
+  local function earlier_rows()
+    local list = {}
+    for _, row in ipairs(memory.session_messages(moved_sid) or {}) do
+      if tostring(row.id or ''):find('^before%-') then
+        list[#list + 1] = json.encode({ id = row.id, role = row.role, content = row.content })
+      end
+    end
+    return table.concat(list, '|')
+  end
+  local earlier = earlier_rows()
+  check(earlier ~= '', mode .. ': the thread has earlier rows before the move')
+
+  -- The record, under THIS session's key: the bytes are the base's, only the key is remapped (the row
+  -- holds no session id of its own).
+  local moved_key = prompt_cache.key({ session_id = moved_sid, user_id = who, role = 'master' })
+  host.sql_exec('INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)',
+    json.encode({ moved_key, json.encode(recorded) }))
+
+  -- The real loop, with a provider that acts the one way this build allows: a run call.
+  local steps = 0
+  host.http_stream = function()
+    steps = steps + 1
+    if steps == 1 then
+      return json.encode({ status = 200, content = '', finish_reason = 'tool_calls',
+        tool_calls = { { id = 'call_moved_' .. mode, type = 'function',
+          ['function'] = { name = 'run', arguments = json.encode({ code = 'return 41 + 1;' }) } } } })
+    end
+    return json.encode({ status = 200, content = 'The command ran after the move.', finish_reason = 'stop', tool_calls = {} })
+  end
+  host.getenv = function(key)
+    if key == 'WASM_AGENT_RAW_CODE' then return nil end
+    if env_fixture[key] ~= nil then return env_fixture[key] end
+    return real_getenv(key)
+  end
+  local bot = agentlib.new(moved_sid, function() end, 'master', who, '')
+  bot.stream = true
+  local ran_ok, moved_reply = pcall(bot.run, bot, 'run it again')
+  host.getenv = real_getenv
+  check(ran_ok, mode .. ': a thread frozen in ' .. mode .. ' ACTS after the move: ' .. tostring(moved_reply))
+  check(tostring(moved_reply):find('The command ran', 1, true) ~= nil, mode .. ': the turn answered')
+
+  local tool_rows, note_rows, mode_rows = 0, 0, 0
+  for _, row in ipairs(memory.session_messages(moved_sid) or {}) do
+    if row.role == 'tool' then tool_rows = tool_rows + 1 end
+    local content = tostring(row.content or '')
+    if row.role == 'user' and content:find('[session update]', 1, true) then
+      note_rows = note_rows + 1
+      if content:find(mode, 1, true) then mode_rows = mode_rows + 1 end
+    end
+  end
+  check(tool_rows >= 1, mode .. ': the run call DISPATCHED (its result row is in the transcript)')
+  check(note_rows == 1, mode .. ': exactly ONE session-update note (' .. note_rows .. ')')
+  check(mode_rows == 1, mode .. ': and it names the mode the thread was started in')
+  check(earlier_rows() == earlier, mode .. ': the earlier rows are byte-identical after the move')
+
+  -- The tool list the loop SENT is the one this build resolves, not the empty list it froze: that is
+  -- what makes the call above possible, read from the record after the move rather than assumed.
+  local after = prompt_cache.read({ session_id = moved_sid, user_id = who, role = 'master' })
+  check(type(after) == 'table' and type(after.tools) == 'table' and #after.tools >= 1,
+    mode .. ': the record now carries the native tool list (' .. tostring(after and #(after.tools or {})) .. ' tools)')
+  check(after.raw_mode == 'native', mode .. ': and says the thread is native from now on')
+
+  -- ---- 6. the note cannot come back (review r1, item 3) ------------------------------------------
+  -- A later, unrelated change (the guidance block moved on) owes its OWN note, and must not repeat the
+  -- sentence about the mode: the row said native the moment the move was delivered.
+  local frozen2, report2 = prompt_cache.enforce({ session_id = moved_sid, user_id = who, role = 'master' },
+    { system = after.system, tools = after.tools, parts = { codemode = host.sha256('a later guidance') },
+      orchestration = false, facts = {}, catalog = after.tools, raw_mode = 'native', raw_decided = true })
+  local repeated = false
+  for _, reason in ipairs(report2.reasons or {}) do if reason == 'native' then repeated = true end end
+  check(repeated == false, mode .. ': a later change does not owe the mode sentence again')
+  local delivered2 = prompt_cache.notes({ session_id = moved_sid, user_id = who, role = 'master' }, frozen2, report2, {})
+  for _, text in ipairs(delivered2) do
+    check(not tostring(text):find('was started in the mode', 1, true),
+      mode .. ': and the note it does deliver never repeats it')
+  end
+end
 
 print('one run path ok (' .. checks .. ' checks)')

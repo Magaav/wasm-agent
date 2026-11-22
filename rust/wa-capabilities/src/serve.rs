@@ -1139,6 +1139,94 @@ fn core_health() -> serde_json::Value {
     }
 }
 
+/// ONE execution path (operator 21/11, review r1 item 4): a node that still exports the removed switch
+/// refuses every turn, child, self-wake and compaction BY NAME, and it does so without needing the
+/// interpreter to notice - so it is reported HERE, before a run, for the same reason `codemode` is:
+/// `/health` is the one endpoint every client polls, and a node that cannot act must not look alive.
+///
+/// The value can come from two places and BOTH are read, which is the rollout hazard review r1 names:
+/// the process environment, and `<home>/.wasm-agent/env` - the file the host loads at start WITHOUT
+/// overwriting the real environment (`load_env_file` in rust/wa-host/src/main.rs), so a launcher's
+/// `unset` loses to it on a node that keeps the line there.
+///
+/// Pure: the env value and the file's text are arguments, so the rule is judged without touching either.
+fn execution_path_from(env_value: Option<&str>, env_file_text: Option<&str>, env_file: &str) -> serde_json::Value {
+    const KEY: &str = "WASM_AGENT_RAW_CODE";
+    let refused = |value: String, source: String| {
+        serde_json::json!({
+            "one_path": false,
+            "refused": "run_switch_removed",
+            "switch": KEY,
+            "value": value,
+            "source": source,
+            "note": "this node still exports a switch this build removed; delete that line (env file, unit, launcher) and restart - every run refuses by name until it is gone",
+        })
+    };
+    if let Some(value) = env_value.map(str::trim).filter(|v| !v.is_empty()) {
+        return refused(value.to_string(), "the process environment".to_string());
+    }
+    for line in env_file_text.unwrap_or("").lines() {
+        let line = line.trim();
+        if line.starts_with('#') || line.is_empty() {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once('=') {
+            if key.trim() == KEY && !value.trim().is_empty() {
+                return refused(value.trim().to_string(), env_file.to_string());
+            }
+        }
+    }
+    serde_json::json!({ "one_path": true, "switch": KEY })
+}
+
+/// The live answer: the process environment, then the node's own env file.
+fn execution_path_health() -> serde_json::Value {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let file = format!("{home}/.wasm-agent/env");
+    let text = std::fs::read_to_string(&file).ok();
+    let value = std::env::var("WASM_AGENT_RAW_CODE").ok();
+    execution_path_from(value.as_deref(), text.as_deref(), &file)
+}
+
+#[cfg(test)]
+mod execution_path_tests {
+    use super::execution_path_from;
+
+    /// Nothing set anywhere is the ordinary case: one path, no refusal.
+    #[test]
+    fn an_unset_switch_is_the_ordinary_case() {
+        let answer = execution_path_from(None, Some(""), "/h/.wasm-agent/env");
+        assert_eq!(answer["one_path"], true);
+        assert!(answer.get("refused").is_none());
+    }
+
+    /// The process environment wins and is named as its source.
+    #[test]
+    fn a_value_in_the_environment_is_refused_by_name() {
+        let answer = execution_path_from(Some("only"), None, "/h/.wasm-agent/env");
+        assert_eq!(answer["one_path"], false);
+        assert_eq!(answer["refused"], "run_switch_removed");
+        assert_eq!(answer["value"], "only");
+        assert_eq!(answer["source"], "the process environment");
+    }
+
+    /// The file the host loads at start, which a launcher's `unset` cannot beat: named by PATH.
+    #[test]
+    fn a_value_in_the_env_file_is_refused_and_the_file_is_named() {
+        let answer = execution_path_from(None, Some("OTHER=1\nWASM_AGENT_RAW_CODE=first\n"), "/h/.wasm-agent/env");
+        assert_eq!(answer["one_path"], false);
+        assert_eq!(answer["value"], "first");
+        assert_eq!(answer["source"], "/h/.wasm-agent/env");
+    }
+
+    /// A commented line is documentation, not a setting - the same rule the host's loader uses.
+    #[test]
+    fn a_commented_line_is_not_a_setting() {
+        let answer = execution_path_from(None, Some("#WASM_AGENT_RAW_CODE=only\n"), "/h/.wasm-agent/env");
+        assert_eq!(answer["one_path"], true);
+    }
+}
+
 fn health_body(session: &str) -> Vec<u8> { health_body_for(session, session.is_empty(), "") }
 
 /// The body for the view the caller is entitled to (session isolation, item 6 round 4). `node_wide` and
@@ -1417,6 +1505,10 @@ fn health_body_for(session: &str, node_wide: bool, owner: &str) -> Vec<u8> {
             "assets": codemode_assets,
             "assets_override": codemode_override,
         },
+        // The one execution path (operator 21/11): whether this node still carries the removed switch.
+        // `one_path:false` means every run refuses by name, and the field names the value and where it
+        // came from, so an operator fixes the file that actually holds it.
+        "execution_path": execution_path_health(),
         // The sentinel queue: every request it was asked to perform, its state, its current step and
         // its failures. Without this the only account of a queued restart was a log line.
         "sentinel": sentinel_queue_health(),
@@ -1975,6 +2067,18 @@ pub fn run(first: Core, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, 
             std::process::exit(3);
         }
     };
+    // ONE execution path (operator 21/11, review r1 item 4): say it ONCE, at start, in the log - `/health`
+    // repeats it on every poll - because a node that still carries the removed switch refuses every turn,
+    // child, self-wake and compaction by name. The first version of this check was raised per turn only,
+    // so a service that started with the variable set looked alive and failed every job it was given.
+    let execution = execution_path_health();
+    if execution["one_path"] == false {
+        eprintln!(
+            "[serve] REFUSING TO ACT: WASM_AGENT_RAW_CODE={} in {} - run(code=...) is the only execution path on this build. Delete that line from the env file (and from any unit or launcher) and restart; every run refuses by name until it is gone.",
+            execution["value"].as_str().unwrap_or("?"),
+            execution["source"].as_str().unwrap_or("?")
+        );
+    }
     // The port is owned from here on, so this process - and only this process - may start services.
     // Asked of the core (native or component) because the registry lives in Lua; a failure is reported
     // and does not take the node down (a broken service is not a reason to stop answering /health).

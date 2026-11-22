@@ -17,21 +17,30 @@ local M = {}
 M.BLOCK = "block"
 M.TOOL_CALL = "tool_call"
 
--- A model name is a file name here, and a path is not a name: anything that could escape the models
--- directory is refused rather than sanitised into a different file.
-function M.safe_name(model)
+-- A model id is a file name here, and a path is not a name - but a model id may legitimately CARRY a
+-- separator (`vendor/model`, which is how most providers name them). It used to be refused outright, so
+-- such a model could never have a profile and the door could never open for it (review r1, item 5).
+-- The file name is the id with the separator PERCENT-ENCODED: one-to-one and reversible, so the id is
+-- still the id, and a name still cannot walk out of the models directory.
+function M.file_name(model)
   local name = tostring(model or "")
   if name == "" then return nil, "empty_model" end
-  if name:find("/", 1, true) or name:find("\\", 1, true) or name == "." or name == ".." then
-    return nil, "model_name_not_a_file_name"
-  end
-  if not name:match("^[%w%._%-]+$") then return nil, "model_name_not_a_file_name" end
-  return name
+  if name == "." or name == ".." then return nil, "model_name_not_a_file_name" end
+  if name:find("%z") then return nil, "model_name_not_a_file_name" end
+  local encoded = name:gsub("[/\\]", function(c) return c == "/" and "%%2F" or "%%5C" end)
+  encoded = encoded:gsub("%s", "%%20")
+  if not encoded:match("^[%w%._%%%-]+$") then return nil, "model_name_not_a_file_name" end
+  return encoded
+end
+
+-- The same question, under the name the rest of the tree calls it: a name that is safe to store.
+function M.safe_name(model)
+  return M.file_name(model)
 end
 
 -- ~/.wasm-agent/models/<model>.json, through the state helper so a scratch home is honoured.
 function M.path(model)
-  local name, why = M.safe_name(model)
+  local name, why = M.file_name(model)
   if not name then return nil, why end
   return state.path("models/" .. name .. ".json")
 end
@@ -55,21 +64,22 @@ function M.builtin_transport(provider_id)
 end
 
 function M.read(model)
-  local name = M.safe_name(model)
+  local name = M.file_name(model)
   if not name then return nil, "no_profile" end
   local text = state.read("models/" .. name .. ".json")
   if type(text) ~= "string" or text == "" then return nil, "no_profile" end
   local ok, decoded = pcall(json.decode, text)
   if not ok or type(decoded) ~= "table" then return nil, "profile_unreadable" end
-  if decoded.model ~= name then return nil, "profile_other_model" end
+  -- The profile stores the model ID as the operator names it; the FILE name is the encoded one.
+  if tostring(decoded.model or "") ~= tostring(model) then return nil, "profile_other_model" end
   return decoded
 end
 
 function M.write(model, profile)
-  local name, why = M.safe_name(model)
+  local name, why = M.file_name(model)
   if not name then return nil, why end
   if type(profile) ~= "table" then return nil, "profile_not_a_table" end
-  profile.model = name
+  profile.model = tostring(model)
   local ok, encoded = pcall(json.encode, profile)
   if not ok then return nil, "profile_not_encodable" end
   local wrote, problem = pcall(state.write, "models/" .. name .. ".json", encoded)

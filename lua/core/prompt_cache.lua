@@ -71,15 +71,22 @@ end
 -- processes cannot both deliver the same note for one change.
 local function cas_row(k,expected,value)
  if type(expected)~='string' then return false,'no_record' end
+ local encoded=json.encode(value)
  local ok,raw=pcall(host.sql_exec,'UPDATE meta SET value=? WHERE key=? AND value=?',
-   json.encode({json.encode(value),k,expected}))
+   json.encode({encoded,k,expected}))
  if not ok or type(raw)~='string' then return false,'prompt_cache_store' end
  local decoded
  ok,decoded=pcall(json.decode,raw)
  if not ok or type(decoded)~='table' or decoded.error or decoded.ok~=true then
   return false,'prompt_cache_store'
  end
- return decoded.changes==1,'changed_elsewhere'
+ if decoded.changes~=1 then return false,'changed_elsewhere' end
+ -- The row IS this table now, so remember the bytes this process wrote: the NEXT compare-and-set in
+ -- the same turn (the note that follows a thread's move, review r1 item 2) has to compare against
+ -- something. Without this the marker never advanced and the note was re-delivered on every later
+ -- turn - the `noted` field could never catch up with `state` (review r1, item 3).
+ value.raw_value=encoded
+ return true
 end
 
 local function state_hash(system_sha256,tools_sha256)
@@ -246,12 +253,12 @@ function M.enforce(ctx,current)
    note_required=state~=record.noted,orchestration=now.orchestration,
    orchestration_frozen=record.orchestration==true,orchestration_noted=told==true,
    facts=now.facts}
+ -- ONE path (Victor 21/11): a thread frozen in a mode this build removed is told, by name, in the same
+ -- note that reports the tool list change - and only once, because the note is durable.
+ local gone=removed_mode(record)
+ report.removed_mode=gone
  if report.changed or report.note_required then
   local reasons,detail=M.classify(record,now)
-  -- ONE path (Victor 21/11): a thread frozen in a mode this build removed is told, by name, in the
-  -- same note that reports the tool list change - and only once, because the note is durable.
-  local gone=removed_mode(record)
-  report.removed_mode=gone
   if gone then
    local merged={'native'}
    for _,reason in ipairs(reasons or {}) do merged[#merged+1]=reason end
@@ -267,6 +274,25 @@ function M.enforce(ctx,current)
   report.reasons=reasons
  else
   report.reasons={}
+ end
+ -- THE THREAD MOVES (review r1, item 2). A thread frozen in a removed mode froze its TOOL LIST for a
+ -- door this build no longer has: `only` froze NOTHING, `first` froze a list without the run tool.
+ -- Keeping those bytes refused the turn (no_dispatchable_tools: "start a new session") instead of moving
+ -- it, which is the opposite of the operator's decision (Victor 21/11: old threads MOVE to native). So
+ -- the tool half is re-frozen to what this build just resolved, while the SYSTEM bytes stay exactly as
+ -- they were - the note appended below names the move, and the model reads it there. The cost is the one
+ -- cache miss that was accepted; the row is rewritten so it is paid ONCE, not on every later turn.
+ if gone then
+  local moved={v=record.v,at=record.at,system=record.system,system_sha256=record.system_sha256,
+    tools=now.tools_json,tools_sha256=now.tools_sha256,parts=now.parts,
+    orchestration=record.orchestration,state=state,noted=record.noted,
+    orchestration_noted=record.orchestration_noted,raw_mode='native',moved_from=gone}
+  local written=select(1,cas_row(k,record.raw_value,moved))
+  -- The move happens in this process whether or not the row was rewritten: the turn must ACT. A failed
+  -- CAS is reported (the next turn tries again, and the report says so) rather than refusing the run.
+  frozen=decode(moved)
+  report.moved=true
+  report.moved_written=(written==true)
  end
  return frozen,report
 end
@@ -344,9 +370,11 @@ local function compose(report,frozen,opts)
  if set.native then
   add('This session was started in the mode '..string.format('%q',tostring(report.removed_mode or 'unknown'))
    ..', and this node no longer has it: the fenced run block and the switch that chose between code '
-   ..'paths are gone, so run(code=...) is the only way to act. Call the run tool with the script in '
-   ..'its code argument; a run block, or any other tool-call markup written as text, runs nothing and '
-   ..'earns one notice naming this. Your earlier messages are unchanged.')
+   ..'paths are gone, so run(code=...) is the only way to act. The instructions above still describe '
+   ..'that fenced block, because they are frozen for this session; the run tool replaces them. Call the '
+   ..'run tool with the script in its `code` argument; a run block, or any other tool-call markup '
+   ..'written as text, runs nothing and earns one notice naming this. Your earlier messages are '
+   ..'unchanged, and so is everything you already did.')
  end
  if set.skills then
   add('The skills on this node changed since this session started, so the skill list in your '
@@ -436,8 +464,10 @@ function M.notes(ctx,frozen,report,opts)
    -- The thread's recorded raw-code mode travels with the row (rel review r3, item 1). This rewrite
    -- only moves the already-delivered marker, and a mode lost here was measured the hard way: a thread
    -- read back as LEGACY one turn later, moved to only, and skipped the empty-list refusal it owed.
-   -- Written only when the old row HAD one, so a pre-release record stays pre-release.
-   raw_mode=record.raw_mode}
+   -- Written only when the old row HAD one, so a pre-release record stays pre-release - EXCEPT when
+   -- this note carried the move: then the row says native, which is what the thread is from now on, and
+   -- the "started in a mode" sentence cannot come back on the next unrelated change (review r1, item 3).
+   raw_mode=(report.removed_mode and 'native') or record.raw_mode}
  -- The prefix is unchanged: only the "already delivered" marker moves.
  cas_row(k,record.raw_value,updated)
  pcall(function()
