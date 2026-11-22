@@ -2188,7 +2188,11 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     -- started - that is how an answer arrives - but this call waits at most ANSWER_S for them and says
     -- how old each answer is; a child that has not settled is left running (never cancelled) and
     -- publishes for the next call.
-    local ANSWER_S = 0.9
+    -- Half a second, not a second: an answer already on disk is read with no wait at all, and a probe
+    -- that has not answered inside half a second is reported `probe_pending` (the next call joins it).
+    -- Measured: 0.9 s of wait plus the fan-out's own overhead read as 1.02 s, which is over the second a
+    -- turn's first model call needs.
+    local ANSWER_S = 0.5
     local list = {}
     for _, node in ipairs(nodeslib.list({ wait_s = ANSWER_S, keep_running = true })) do
       local entry = {
