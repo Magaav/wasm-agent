@@ -74,17 +74,17 @@ commit, a file:line in it, or the measurement that produced it.
 
 ## The fast path, on this branch
 
-\`flock -o ~/Work/missions/.suite.lock ... bash scripts/fast.sh --jobs 8\` (commit ecd9c25c, the tree's own
-release binary, \`CARGO_TARGET_DIR=/home/victor/wasm-agent/target/m-sandbox-base64\`):
+`flock -o ~/Work/missions/.suite.lock ... bash scripts/fast.sh --jobs 8` (commit ecd9c25c, the tree's own
+release binary, `CARGO_TARGET_DIR=/home/victor/wasm-agent/target/m-sandbox-base64`):
 
     fast result FAILED (388 checks, 1 failed, 1 skipped)
     fast path FAILED (1 of 388 checks, 1 skipped, 435s)
 
-* the one FAIL is \`install-guards\` - "test-install-guards: 72 checks, 3 failed" - and it fails the same
-  way on the base worktree \`/tmp/base-ee38\` (see below): the installer guards, not this change.
-* the one SKIP is the bytes half of \`component-pins\`: it cannot find a copy of the new codemode pin on
-  this node (\`2f432ec04ea1…\`). Pointed at the artifact this tree built
-  (\`WA_PINNED_COMPONENTS_DIR=/tmp/comps-base64\`) the same check verifies it, and says "source and pin
+* the one FAIL is `install-guards` - "test-install-guards: 72 checks, 3 failed" - and it fails the same
+  way on the base worktree `/tmp/base-ee38` (see below): the installer guards, not this change.
+* the one SKIP is the bytes half of `component-pins`: it cannot find a copy of the new codemode pin on
+  this node (`2f432ec04ea1…`). Pointed at the artifact this tree built
+  (`WA_PINNED_COMPONENTS_DIR=/tmp/comps-base64`) the same check verifies it, and says "source and pin
   moved together". A skip is not a pass, so it is stated rather than counted.
 
 ## Round 2: the preflight's merge conflict, and the repin that follows it
