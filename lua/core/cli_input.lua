@@ -88,7 +88,7 @@ function M.arrived(timeout_ms, deps)
   if not ok then return nil end
   local answer = decode(raw)
   if not answer then return nil end
-  local lines, kinds = {}, {}
+  local lines, kinds, ats = {}, {}, {}
   if type(answer.lines) == "table" then
     for index, line in ipairs(answer.lines) do
       lines[#lines + 1] = tostring(line)
@@ -96,9 +96,13 @@ function M.arrived(timeout_ms, deps)
       -- over was sent with plain Enter: the queued kind is the answer for a capability that cannot
       -- tell them apart, never a guess that a line asked to be delivered early.
       kinds[#kinds + 1] = type(answer.now) == "table" and answer.now[index] == true or false
+      -- WHEN THE HOST SAW THE LINE, in seconds since the epoch, on the same clock as host.now().
+      -- A binary older than the stamp answers none: nil says "this host cannot tell", which is what
+      -- a caller must not mistake for "the reader typed it just now" (change/chat-start-guard, item 3).
+      ats[#ats + 1] = type(answer.at) == "table" and tonumber(answer.at[index]) or nil
     end
   end
-  return lines, answer.eof and true or false, answer.running and true or false, kinds
+  return lines, answer.eof and true or false, answer.running and true or false, kinds, ats
 end
 
 local METHODS = {}
@@ -170,7 +174,7 @@ function METHODS:poll(timeout_ms)
     end
     return line, false
   end
-  local lines, eof, _, kinds = M.arrived(timeout_ms or M.WAIT_MS, self.deps)
+  local lines, eof, _, kinds, ats = M.arrived(timeout_ms or M.WAIT_MS, self.deps)
   if not lines then
     -- The capability stopped answering: fall back rather than spin on it.
     self.supported = false
@@ -180,13 +184,18 @@ function METHODS:poll(timeout_ms)
   -- agent was working is not lost": the run does not read, this does, and the run's end is when
   -- the caller comes back for it.
   for index, line in ipairs(lines) do
-    self.pending[#self.pending + 1] = { text = line, now = kinds and kinds[index] == true or false }
+    self.pending[#self.pending + 1] = { text = line, now = kinds and kinds[index] == true or false,
+      at = ats and ats[index] or nil }
   end
   if eof then self.eof = true end
   if #self.pending > 0 then
     local entry = table.remove(self.pending, 1)
     self:held()
-    return entry.text, self.eof
+    -- The third answer is WHEN THE HOST SAW THIS LINE (nil on a host that cannot say). It is not
+    -- "now": a line that waited in the host's queue while this process was blocked carries the moment
+    -- the reader pressed Enter, which is the only clock a turn's wait before its first record is
+    -- visible on (change/chat-start-guard, item 3).
+    return entry.text, self.eof, entry.at
   end
   return nil, self.eof
 end
@@ -196,10 +205,11 @@ end
 -- it in the queue so ordering is preserved. Never block the model waiting for a key.
 function METHODS:take_steering()
   if self.supported and not self.eof then
-    local lines, eof, _, kinds = M.arrived(0, self.deps)
+    local lines, eof, _, kinds, ats = M.arrived(0, self.deps)
     if lines then
       for index, line in ipairs(lines) do
-        self.pending[#self.pending + 1] = { text = line, now = kinds and kinds[index] == true or false }
+        self.pending[#self.pending + 1] = { text = line, now = kinds and kinds[index] == true or false,
+          at = ats and ats[index] or nil }
       end
       if eof then self.eof = true end
     else

@@ -541,7 +541,20 @@ function M.run(argv)
   -- the same wake twice. Assigned after `mark_seen` exists; `turn` only calls it when it is set.
   local wake_if_due
 
-  local function turn(line)
+  local function turn(line, at)
+    -- THE KEYPRESS, AS THE HOST SAW IT (change/chat-start-guard, item 3). at is the moment the reader
+    -- pressed Enter - NOT the moment this interpreter was handed the line, which is later whenever the CLI
+    -- was busy (a network read, a tool, a long build). It is recorded here, for the lines that become
+    -- turns, so wa stalls can measure a turn from the keypress: a wait BEFORE the run's first record is
+    -- invisible to a measurement that starts at that record, and those waits are the twenty seconds the
+    -- operator kept meeting (measured on d7597689: 20.6 s of silence after Enter). A host that cannot say
+    -- when it saw the line answers nothing and no row is written - unknown is not zero.
+    if tonumber(at) then
+      pcall(function()
+        return dofile('lua/core/telemetry.lua').event(agent.session_id, '', '', 'input', 'submit',
+          { source = 'cli' }, tonumber(at))
+      end)
+    end
     -- The turn boundary: the one moment a `pure` core helper (raw_code, the codemode harness, tool_output)
     -- is swapped from the reload source - never in the middle of a run (lua/core/reload.lua).
     for _, notice in ipairs(reload.turn_boundary(host.now())) do
@@ -792,7 +805,10 @@ function M.run(argv)
       if wake_if_due() then view:prompt() end
       -- Woken every CHECK_SECONDS (not WAIT_MS, half an hour) so an install is noticed at an idle
       -- prompt; the prompt is drawn once, above, so a wake that brings no line redraws nothing.
-      local line, eof = input:poll(math.min(cli_input.WAIT_MS, cli_restart.CHECK_SECONDS * 1000))
+      -- The third answer is WHEN THE HOST SAW THE LINE (cli_input:poll), nil on a host that cannot say:
+      -- it travels with the line so the turn that runs it can record a keypress that may have happened
+      -- long before this interpreter was free (change/chat-start-guard, item 3).
+      local line, eof, keypress_at = input:poll(math.min(cli_input.WAIT_MS, cli_restart.CHECK_SECONDS * 1000))
       if line ~= nil then
         -- The reader's own line, into the transcript, before the input row is reused: the echo of
         -- it lives only on that row, and a message that vanishes when it is sent is one its author
@@ -802,7 +818,7 @@ function M.run(argv)
         -- The terminal echoes a submitted line on the input row. Reclaim it before
         -- the synchronous run starts; otherwise it stays there for the entire run.
         view:submitted()
-        return line
+        return line, keypress_at
       end
       -- The input ended: a closed pipe, or the terminal's own end-of-file. Nothing left to wait
       -- for, and a REPL that keeps prompting for a stream it cannot read is worse than one that
@@ -855,7 +871,7 @@ function M.run(argv)
     -- A save lands here as well as on the next frame: a reload source that only reaches the screen during
     -- a run would miss the idle prompt, which is exactly where a reader is when they edit a command.
     hot()
-    local line = read_line()
+    local line, keypress_at = read_line()
     if line == nil then break end
     line = line:gsub("^%s+", ""):gsub("%s+$", "")
     if line == "" then
@@ -1201,7 +1217,7 @@ function M.run(argv)
         end
       end
     else
-      turn(line)
+      turn(line, keypress_at)
     end
   end
   agent:close()

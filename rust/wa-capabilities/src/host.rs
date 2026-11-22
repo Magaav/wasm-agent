@@ -3761,18 +3761,36 @@ enum LineKind {
     Now,
 }
 
-/// A line the reader handed over, and how it was sent.
+/// Seconds since the UNIX epoch, the clock host.now() answers on - so a caller can compare the two
+/// without a second clock.
+fn epoch_seconds() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
+/// A line the reader handed over, how it was sent, and WHEN THE HOST SAW IT.
+///
+/// at exists for one measurement (change/chat-start-guard, item 3): the moment the reader pressed
+/// Enter is not the moment Lua hears about it - the interpreter may be blocked in a network read, and
+/// the line waits in this queue until it is free. A turn measured from its own first record therefore
+/// cannot see a wait that happened BEFORE that record, which is exactly the twenty-second wait the
+/// operator kept meeting (measured on d7597689: 20.6 s of silence after Enter, invisible to wa stalls).
+/// The stamp is taken where the line is taken from the reader - this side of the queue - and travels
+/// beside the text and the kind in input_take.
 #[derive(Clone, Debug)]
 struct TypedLine {
     text: String,
     kind: LineKind,
+    at: f64,
 }
 
 impl TypedLine {
     /// A line nobody asked to be delivered early: what every reader's Enter produces, and what the
     /// pipe and the balloon's chosen command produce.
-    fn queued(text: String) -> Self { Self { text, kind: LineKind::Queued } }
-    fn now(text: String) -> Self { Self { text, kind: LineKind::Now } }
+    fn queued(text: String) -> Self { Self { text, kind: LineKind::Queued, at: epoch_seconds() } }
+    fn now(text: String) -> Self { Self { text, kind: LineKind::Now, at: epoch_seconds() } }
 }
 
 #[derive(Default)]
@@ -5338,11 +5356,15 @@ pub extern "C-unwind" fn input_take(l: *mut LuaState) -> c_int {
     // "lines" exactly as it always did, and one that reads "now" can tell a queued Enter from a
     // Ctrl+Enter without a second capability.
     let now: Vec<bool> = typed.iter().map(|line| line.kind == LineKind::Now).collect();
+    // WHEN THE HOST SAW EACH LINE, beside the text and the kind (see TypedLine::at): a turn measured from
+    // its own first record cannot see a wait that happened before it, and that wait is the one the
+    // operator meets most (change/chat-start-guard, item 3).
+    let at: Vec<f64> = typed.iter().map(|line| line.at).collect();
     let lines: Vec<String> = typed.into_iter().map(|line| line.text).collect();
     let (eof, running) = (state.eof, state.running);
     if !lines.is_empty() && sync_queued(&mut state) { redraw_bottom(&mut state); }
     drop(state);
-    push_json(l, &json!({"lines": lines, "now": now, "eof": eof, "running": running}));
+    push_json(l, &json!({"lines": lines, "now": now, "at": at, "eof": eof, "running": running}));
     1
 }
 
@@ -5492,6 +5514,22 @@ mod terminal_tests {
         assert_eq!(super::TypedLine::queued("a".into()).kind, super::LineKind::Queued);
         assert_eq!(super::TypedLine::now("b".into()).kind, super::LineKind::Now);
         assert_ne!(super::LineKind::Now, super::LineKind::Queued);
+    }
+
+    /// WHEN THE HOST SAW THE LINE is part of what it hands over (change/chat-start-guard, item 3): the
+    /// stamp is taken on this side of the queue, so a line that waited in it - because the interpreter was
+    /// blocked in a network read - still says the moment the reader pressed Enter.
+    #[test]
+    fn a_line_carries_the_moment_the_host_saw_it() {
+        let before = super::epoch_seconds();
+        let first = super::TypedLine::queued("hi".into());
+        let second = super::TypedLine::now("and this".into());
+        let after = super::epoch_seconds();
+        assert!(first.at >= before && first.at <= after,
+            "the stamp is the host's own clock: {} not in [{before}, {after}]", first.at);
+        assert!(second.at >= first.at, "a later line is never stamped earlier");
+        assert!(first.at > 1.0e9, "epoch seconds, not a monotonic counter: {}", first.at);
+        assert_eq!(first.kind, super::LineKind::Queued, "the stamp does not change the kind");
     }
 
     /// A line sent during a run is listed above the status line until Lua takes it; a line Lua

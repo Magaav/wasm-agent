@@ -38,7 +38,7 @@ host.sleep(3000)
 
 -- What the host collected while this interpreter was elsewhere. This is the assertion the whole
 -- change exists for: the line is here, in order, and nobody lost it.
-local arrived, arrived_eof, arrived_running, arrived_kinds = cli_input.arrived(0)
+local arrived, arrived_eof, arrived_running, arrived_kinds, arrived_ats = cli_input.arrived(0)
 ok(type(arrived) == "table" and arrived[1] == "typed while blocked",
   "a line typed while this process was blocked is waiting for it, got "
   .. tostring(type(arrived) == "table" and arrived[1] or arrived))
@@ -48,6 +48,20 @@ ok(type(arrived) == "table" and arrived[1] == "typed while blocked",
 ok(type(arrived_kinds) == "table" and arrived_kinds[1] == false,
   "the real take answer carries the line kind, and a pipe line is queued: "
   .. tostring(type(arrived_kinds) == "table" and tostring(arrived_kinds[1]) or type(arrived_kinds)))
+
+-- WHEN THE HOST SAW THE LINE travels beside it (change/chat-start-guard, item 3): a stamp on the same
+-- clock as host.now(), taken where the line was taken FROM THE READER - not here, where the interpreter
+-- finally got round to it. That is the only clock a turn's wait BEFORE its own first record is visible
+-- on, so an answer without it would silently fall back to measuring from the run. The line above was
+-- written while this process slept 3 s, so a stamp taken now would be a lie the arithmetic catches.
+ok(type(arrived_ats) == "table" and type(arrived_ats[1]) == "number" and arrived_ats[1] > 1.0e9,
+  "the real take answer carries when the host saw each line, in epoch seconds: "
+  .. tostring(type(arrived_ats) == "table" and arrived_ats[1] or arrived_ats))
+ok(type(arrived_ats) == "table" and type(arrived_ats[1]) == "number"
+  and (host.now() - arrived_ats[1]) >= 1,
+  "the stamp is the moment the host queued it, not the moment this side asked: "
+  .. tostring(type(arrived_ats) == "table" and arrived_ats[1] or arrived_ats)
+  .. " vs now " .. tostring(host.now()))
 
 -- The producer has closed the pipe by now. The end of input is an answer - nil plus `eof` - and
 -- never a hang, because a REPL that cannot be told the input ended cannot ever exit cleanly.
