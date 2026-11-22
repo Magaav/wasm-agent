@@ -1,5 +1,9 @@
 // Local stub model for the "a line typed during a run" rows (scripts/test-cli-queued.sh).
 //
+// The action is the `run` TOOL CALL - one path since change/one-run-path (Victor 21/11): the fenced
+// run block and WASM_AGENT_RAW_CODE are gone, so a fixture that sends `codemode` would be refused by
+// name on this main and measure nothing.
+//
 // OpenAI-shaped, no upstream, no credential. It answers `stub-quiet` to anything, except that a user
 // message asking it to RUN THE SCRIPT (and a conversation that has not used a tool yet) answers one
 // `codemode` tool call whose code runs two bash commands, the first of which sleeps:
@@ -53,7 +57,7 @@ function answer(res, body) {
           {
             id: 'call-script-1',
             type: 'function',
-            function: { name: 'codemode', arguments: JSON.stringify({ code: scriptCode() }) },
+            function: { name: 'run', arguments: JSON.stringify({ code: scriptCode() }) },
           },
         ],
       }
@@ -62,7 +66,7 @@ function answer(res, body) {
     res.writeHead(200, { 'content-type': 'text/event-stream' });
     if (wantsScript) {
       res.write(
-        'data: ' + JSON.stringify({ id: 'stub', choices: [{ delta: { tool_calls: [{ index: 0, id: 'call-script-1', type: 'function', function: { name: 'codemode', arguments: message.tool_calls[0].function.arguments } }] }, finish_reason: null }], usage }) + '\n\n',
+        'data: ' + JSON.stringify({ id: 'stub', choices: [{ delta: { tool_calls: [{ index: 0, id: 'call-script-1', type: 'function', function: { name: 'run', arguments: message.tool_calls[0].function.arguments } }] }, finish_reason: null }], usage }) + '\n\n',
       );
       res.end('data: ' + JSON.stringify({ id: 'stub', choices: [{ delta: {}, finish_reason: 'tool_calls' }] }) + '\n\ndata: [DONE]\n\n');
       return;
