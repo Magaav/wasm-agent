@@ -281,10 +281,9 @@ local function line_delta(before, after)
   return (#b - head - tail), (#a - head - tail)
 end
 
--- Exported for the one other caller that needs the same rules: the change a tool call reports to
--- the READER (lua/core/tools.lua, announce_change). The cap and the count are the record's own, so a
+-- The count rule, exported for the one other caller that needs it: the change a tool call reports to
+-- the READER (lua/core/tools.lua, announce_change). The cap above is exported for the same reason, so a
 -- card and an undo entry cannot disagree about whether a file was recorded or how many lines moved.
-M.RECORD_CAP = RECORD_CAP
 M.line_delta = line_delta
 
 -- Current-file line anchors for a patch audit. Deletions anchor to the nearest surviving
