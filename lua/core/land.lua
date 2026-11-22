@@ -4668,6 +4668,14 @@ function M.ready_mark(branch, sha, brief)
   if not replaced then rows[#rows + 1] = line end
   local wrote = write(M.ready_file(), table.concat(rows, "\n") .. "\n")
   if not wrote then return false, "ready_box_unwritable: " .. M.ready_file() end
+  -- A FINISHED WORKER IS AN EVENT (a `mission` row): the ready line is the worker saying it is done, and until
+  -- now the only reader of that fact was whoever opened the file. Best effort - the line is written above.
+  pcall(function()
+    dofile("lua/core/event_ledger.lua").record({ kind = "mission", step = "finished", result = "ready",
+      mission = tostring(branch):gsub("^change/", ""), branch = tostring(branch), sha = tostring(sha),
+      detail = "READY " .. tostring(branch) .. " " .. tostring(sha) .. (brief and (" brief=" .. tostring(brief)) or ""),
+      source = "wa land ready" })
+  end)
   return true, replaced and "recorded (replaced the line)" or "recorded"
 end
 

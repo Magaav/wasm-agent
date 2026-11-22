@@ -557,6 +557,22 @@ function M.preflight(args, ctx)
     result.detail = "no preflight.json at " .. dir .. "/preflight.json (exit " .. tostring(code) .. ")"
   end
   if code == 2 then result.error = result.error or "preflight_refused" end
+  -- THE PREFLIGHT IS AN EVENT (a `mission` row in the ledger, lua/core/event_ledger.lua): green, red or
+  -- refused, with the rows that made it red and the main it judged. A worker's own loop, the operator and an
+  -- outside agent then read the same fact, and `wa events --follow --kind mission` shows it as it happens.
+  -- Best effort: a preflight's answer must not be lost because its row could not be written.
+  local recorded = pcall(function()
+    local failed = {}
+    for _, row in ipairs(((result.failed) or {})) do
+      failed[#failed + 1] = tostring(type(row) == "table" and (row.row or row.path or row.name) or row)
+    end
+    return dofile("lua/core/event_ledger.lua").record({ kind = "mission", step = "preflight",
+      result = result.preflight, mission = name, branch = "change/" .. name,
+      sha = tostring(result.tree_sha or result.main_sha or ""),
+      detail = (#failed > 0 and ("red rows: " .. table.concat(failed, ", ")))
+        or tostring(result.why or ("the gate on main " .. tostring(result.main_sha or "?") .. " is " .. tostring(result.preflight))),
+      source = "wa mission preflight" })
+  end)
   return result
 end
 

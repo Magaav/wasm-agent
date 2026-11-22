@@ -204,6 +204,58 @@ else
   contains(text, "\"id\"", "every line is one JSON object with its id")
 end
 
+-- ---------------------------------------------------------------- case 8: the two producers of a `mission` row
+-- A worker that finished and a preflight that ran are facts the loop used to keep in a file only a reader could
+-- find. Both write their own row now, and a preflight's verdict is never green by accident: the script's exit
+-- code decides it (0 green, 1 red, anything else refused).
+local land_module = dofile("lua/core/land.lua")
+land_module.root_dir = host.paths().home .. "/ledger-land"
+local marked, mark_why = land_module.ready_mark("change/probe", "abcdef0123", nil)
+ok(marked, "the ready line is recorded (" .. tostring(mark_why) .. ")")
+local finished = nil
+for _, row in ipairs(ledger.read({ kinds = { "mission" }, step = "finished", limit = 20 })) do
+  if tostring(row.mission) == "probe" then finished = row end
+end
+ok(finished ~= nil, "a finished worker is a mission row")
+eq(finished and finished.result, "ready", "with the verdict the ready line carries")
+eq(finished and finished.branch, "change/probe", "and its branch")
+eq(finished and finished.sha, "abcdef0123", "and the sha the worker declared")
+contains(finished and finished.detail, "READY change/probe abcdef0123", "the detail is the line itself")
+
+local missions = host.paths().home .. "/missions-probe"
+local dir = missions .. "/probe"
+host.exec("mkdir -p " .. shq(dir), "")
+host.write_file(missions .. "/preflight.sh", [==[#!/usr/bin/env bash
+set -uo pipefail
+dir="$(cd "$(dirname "$0")" && pwd)/$1"
+mode=$(cat "$dir/mode" 2>/dev/null || echo green)
+if [ "$mode" = red ]; then
+  printf '%s\n' '{"ok":false,"main_sha":"aaaa1111","failed":[{"row":"scripts/test-x.lua"}]}' > "$dir/preflight.json"
+  exit 1
+fi
+printf '%s\n' '{"ok":true,"main_sha":"aaaa1111","tree_sha":"bbbb2222","failed":[]}' > "$dir/preflight.json"
+echo '{"ok":true}'
+exit 0
+]==])
+local mission_module = dofile("lua/core/mission.lua")
+local green = mission_module.preflight({ name = "probe", root = missions })
+eq(green.preflight, "green", "the preflight itself answered green")
+local green_row = nil
+for _, row in ipairs(ledger.read({ kinds = { "mission" }, step = "preflight", limit = 20 })) do
+  if tostring(row.mission) == "probe" and tostring(row.result) == "green" then green_row = row end
+end
+ok(green_row ~= nil, "a green preflight is a mission row")
+eq(green_row and green_row.sha, "bbbb2222", "the row names the tree it judged")
+host.write_file(dir .. "/mode", "red\n")
+local red = mission_module.preflight({ name = "probe", root = missions })
+eq(red.preflight, "red", "the preflight answered red")
+local red_row = nil
+for _, row in ipairs(ledger.read({ kinds = { "mission" }, step = "preflight", limit = 20 })) do
+  if tostring(row.mission) == "probe" and tostring(row.result) == "red" then red_row = row end
+end
+ok(red_row ~= nil, "a red preflight is a mission row")
+contains(red_row and red_row.detail, "scripts/test-x.lua", "and names the row that made it red")
+
 if failed > 0 then
   print(string.format("event ledger: %d of %d checks FAILED", failed, checks))
   os.exit(1)
