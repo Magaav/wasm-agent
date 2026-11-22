@@ -87,6 +87,35 @@ release binary, \`CARGO_TARGET_DIR=/home/victor/wasm-agent/target/m-sandbox-base
   (\`WA_PINNED_COMPONENTS_DIR=/tmp/comps-base64\`) the same check verifies it, and says "source and pin
   moved together". A skip is not a pass, so it is stated rather than counted.
 
+## Round 2: the preflight's merge conflict, and the repin that follows it
+
+The landing gate stopped before running a row: `land-quick: merge conflict with main bcb5c5ce in: components.lock`. Main
+had repinned `codemode` to `c942620dffa4...` (225,166 bytes) from `change/search-miss-names-cli`, and that
+change ALSO edits `rust/components/codemode/src/logic.rs` - so the conflict was not a lock file disagreeing
+about a number, it was two sources for the same component.
+
+* Commit **99e817a8**: the branch is rebased onto `bcb5c5ce` (the rebase merged `logic.rs` and
+  `lua/core/refusal_codes.lua` on its own; only `components.lock` conflicted), the lock keeps MAIN's block,
+  and the component is rebuilt from the MERGED source and pinned again:
+  `codemode 9091cd796ecceaf186c1a5a49619986c02d9422f79149f3f43c083a82d3829f9 225184`, with a comment
+  block that says what moved (the guest globals gain `sleep(ms)`, and the two `codemode_sleep_*` codes come
+  with it). `scripts/test-component-pins.sh` with `WA_PINNED_COMPONENTS_DIR=/tmp/comps-b64b` answers
+  'source and pin moved together' and 'verified codemode: 9091cd796ecc... 225184 bytes ... the bytes this node
+  would INSTALL ARE the pin'.
+* Component tests after the rebase: 16/16 (main's keyword-miss test plus
+  `sleep_is_a_guest_global_the_loop_answers`); the seam's own parity: 50 checks, 21 parity comparisons,
+  0 skipped, with the component built from the merged tree - and the new row through the component loop:
+  `{checks:22, ok:true}`. The Lua rows that touch this: codemode errors 10, promises 31, boundary 33,
+  refusal contract 17122 - all green.
+* The full fast path on the rebased branch (commit 99e817a8, the tree's own release binary):
+  `fast result FAILED (392 checks, 2 failed, 1 skipped)`. The two:
+  - `install-guards`: identical on the base worktree - the installer guards, nothing this branch touches;
+  - `scripts/test-start-instant.lua`: `start-instant: 1 FAIL` under 8 parallel rows. It measures a turn's
+    latency and passed three times alone afterwards (once with the same tree binary, twice more): a load
+    flake on a node running other missions' suites, which is the class the runner's own classifier names.
+    No test was loosened for it and no timeout raised.
+  The skip is the same component-pins bytes half as in round 1, verified by hand with the artifact dir.
+
 ## The component pin
 
 `rust/components/codemode/src/logic.rs` is compiled into the `codemode` component, so the guest-global
