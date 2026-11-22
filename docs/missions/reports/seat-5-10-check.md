@@ -105,6 +105,11 @@ wa counters --days 7        # any window it keeps (1..30)
 wa counters --json          # the same document, for a script
 ```
 
+A node that has not installed this branch answers `unknown command: counters` (measured on the
+installed tree at `4c443e66`, 22/11) - so that one line is the difference between "the branch is not
+installed yet" and "the command is broken", and the deploy is what ships it (the Lua reaches a node
+through the tree deploy; `wa --lua-tree` names the copy in use).
+
 Before `246137b2` there was **no command**: the three numbers were printable only from inside the
 interactive chat (`/stats`), as a paged balloon - nothing an operator or a shell could run
 (`git log -S 'command == "counters"' -- lua/core/init.lua` names only that commit). `wa stats` prints
