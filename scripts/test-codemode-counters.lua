@@ -91,6 +91,118 @@ check(after_clean.script_cut_at_cap==after_misuse.script_cut_at_cap
 check(counters.bump('wake_only_round')==1 and counters.read().wake_only_round==1,
  'wake_only_round counts the steps whose only input was a settled handle')
 
+-- 5. THE THREE-NAME ANSWER IS UNCHANGED (parity): the day book is beside the totals, never in them,
+-- so every existing reader (/stats, and the run turn's own report) sees exactly what it saw before.
+local three=counters.read()
+local seen=0
+for _ in pairs(three) do seen=seen+1 end
+check(three.days==nil and seen==3,
+ 'read() answers the three numbers and nothing else: '..json.encode(three))
+
+-- 6. A DAY BOOK, because "high" is a rate and not a total: a bump lands in today\'s bucket on the
+-- node's own clock, and the total moves the same amount.
+local now=host.now()
+local today=counters.day_of(now)
+local yesterday=counters.day_of(now-86400)
+local before=counters.read()
+local book_before=counters.book()
+local today_before=(book_before[today] and book_before[today].wake_only_round) or 0
+check(counters.bump('wake_only_round')==before.wake_only_round+1
+  and counters.read().wake_only_round==before.wake_only_round+1,
+ 'the bump still answers the new total: '..json.encode(counters.read()))
+local book=counters.book()
+check(type(book[today])=='table' and book[today].wake_only_round==today_before+1,
+ 'and it is in today\'s bucket: '..json.encode(book))
+
+-- 7. A bump that names a day lands there and only there.
+local mis_before=before.handle_mishandled
+check(counters.bump('handle_mishandled',2,{now=now-86400})==mis_before+2,
+ 'a bump with a named time still answers the new total')
+local dated=counters.book()
+local yesterday_before=(book_before[yesterday] and book_before[yesterday].handle_mishandled) or 0
+local today_mis=(book[today] and book[today].handle_mishandled) or 0
+check(dated[yesterday] and dated[yesterday].handle_mishandled==yesterday_before+2
+  and dated[today].handle_mishandled==today_mis,
+ 'and it is counted into THAT day, not today: '..json.encode(dated))
+
+-- 8. A day the store never saw is NOT RECORDED, never three zeros: unknown is not yes.
+local window=counters.window(3,now)
+check(#window==3 and window[1].day==today and window[2].day==yesterday,
+ 'the window is the last three calendar days, today first: '..json.encode(window))
+check(window[1].recorded==true and window[2].recorded==true and window[3].recorded==false,
+ 'a day with a bucket is recorded and a day without one says so: '..json.encode(window))
+check(window[3].wake_only_round==0 and window[3].script_cut_at_cap==0,
+ 'and an unrecorded day carries no claim about its numbers')
+
+-- 9. The book is BOUNDED: the newest M.DAYS_KEPT days are kept and the oldest go, so the document a node
+-- rewrites on every bump cannot grow without a ceiling.
+for back=10,10+counters.DAYS_KEPT+1 do
+ pcall(function() counters.bump('wake_only_round',1,{now=now-back*86400}) end)
+end
+local bounded=counters.book()
+local kept=0
+for _ in pairs(bounded) do kept=kept+1 end
+check(kept==counters.DAYS_KEPT,
+ string.format('the day book keeps exactly %d days, not %d: the document stays bounded',
+  counters.DAYS_KEPT,kept))
+check(bounded[counters.day_of(now-(10+counters.DAYS_KEPT+1)*86400)]==nil,
+ 'and the oldest day written is the one that was dropped')
+
+
+-- 10. THE COMMAND (cross-process, which is how the operator reads it): `wa counters` prints these
+-- numbers from this node's own ledger. A check that cannot run - no binary, no ledger path - FAILS by
+-- name rather than passing, and the binary is the one this run is about (WA_FAST_BIN, else the node
+-- this row IS), so the row judges the tree and not whatever is on PATH.
+local info={}
+if type(host.runtime_info)=='function' then
+ local ok,raw=pcall(host.runtime_info)
+ if ok then
+  local decoded=type(raw)=='string' and json.decode(raw) or raw
+  info=type(decoded)=='table' and decoded or {}
+ end
+end
+local binary=tostring(host.getenv('WA_FAST_BIN') or info.binary_path or '')
+local root=tostring(host.getenv('WASM_AGENT_LUA_ROOT') or '')
+local db=tostring(host.getenv('WASM_AGENT_DB') or '')
+local home=tostring(dofile('lua/core/paths.lua').home())
+check(binary~='' and db~='' and root~='',
+ 'the command half needs the node binary, this tree and this ledger: binary='..binary..' root='..root..' db='..db)
+local function shell(command)
+ local ok,raw=pcall(host.exec,command)
+ if not ok then return nil,tostring(raw) end
+ local decoded_ok,decoded=pcall(json.decode,raw)
+ if not decoded_ok or type(decoded)~='table' then return nil,'unreadable answer: '..tostring(raw):sub(1,200) end
+ return decoded
+end
+local child="env WASM_AGENT_HOME='"..home.."' WASM_AGENT_LUA_ROOT='"..root.."' '"..binary.."' --db '"..db.."'"
+local as_json,why=shell(child.." counters --json 2>&1")
+check(type(as_json)=='table','`wa counters --json` ran: '..tostring(why or (as_json and (as_json.stderr or as_json.stdout))))
+local printed=json.decode(tostring(as_json.stdout or ''))
+check(type(printed)=='table',
+ 'and printed one JSON document: '..tostring(as_json.stdout):sub(1,300)..tostring(as_json.stderr):sub(1,300))
+local totals=counters.read()
+check(printed.wake_only_round==totals.wake_only_round
+  and printed.script_cut_at_cap==totals.script_cut_at_cap
+  and printed.handle_mishandled==totals.handle_mishandled,
+ 'and its numbers are this row\'s own ledger, read from another process: '
+ ..json.encode({printed=printed,totals=totals}))
+check(type(printed.window)=='table' and printed.window[1] and printed.window[1].day==today
+  and printed.window[1].recorded==true,
+ 'with the same per-day window: '..json.encode(printed.window))
+local human=shell(child.." counters 2>&1")
+check(type(human)=='table' and human.ok==true,'and the plain command exits 0')
+local text=tostring(human.stdout or '')
+local named=true
+for _,name in ipairs(counters.NAMES) do if not text:find(name,1,true) then named=false end end
+check(named,'and names all three counters in words an operator reads: '..text:sub(1,400))
+-- A window the store does not keep is refused by name rather than printed as a different number.
+local refused=shell(child.." counters --days 0 2>&1")
+check(type(refused)=='table' and tostring(refused.code)~='0'
+  and tostring(refused.stdout or ''):find('1..',1,true)~=nil,
+ 'a window of 0 days is refused, not silently read as something else: '
+ ..json.encode({code=refused and refused.code,out=tostring(refused and refused.stdout):sub(1,200)}))
+
+
 -- Leave nothing running.
 local pending=dofile('lua/core/codemode_pending.lua')
 local opened=pending.list(dispatch,{ctx=ctx})

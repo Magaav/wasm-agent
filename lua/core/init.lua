@@ -648,6 +648,13 @@ elseif command == "stalls" then
   -- takes to REACH the model. Read-only, and it names the phase each slow run's own preflight row blamed.
   os.exit(dofile("lua/core/stalls.lua").cli(args) or 0)
 
+elseif command == "counters" then
+  -- The three numbers the next mission is planned from (docs/CODEMODE.md, "The three counters"), on the
+  -- command line: until 22/11 they were printable only from inside the interactive chat (/stats), so an
+  -- operator deciding whether durable scripts are worth building had no one command to run. Read-only,
+  -- and it prints a per-day window because "high" is a rate (lua/core/counters.lua).
+  os.exit(dofile("lua/core/counters.lua").cli(args) or 0)
+
 elseif command == "turns" then
   -- The turn feed (lua/core/turnfeed_cli.lua, docs/TURNS.md): the model's own `<turn>` notes, read out
   -- of this node's ledger and every peer that answers, grouped into a ranked queue with a brief per
@@ -720,6 +727,7 @@ elseif command == "help" then
   print("    whatsapp archive list|cut|restore|unload|push|expire [YYYY-MM]  the index's monthly archives")
   print("    turns [--since 24h] [--top N] [--json]  the model's own <turn> complaints, grouped and ranked")
   print("    stalls [--since <hours>] [--json]  run start -> first model call: median, p90, the slow ones and what they waited for")
+  print("    counters [--days N] [--json]  the three counters (wake_only_round, script_cut_at_cap, handle_mishandled), cumulative and per calendar day")
   print("    conform <model>  run the conformance suite against a model and store its profile")
   print("    turns fixed <cluster> --sha <commit>     mark a cluster fixed; the report then says if it is still hurting")
   print("    resume [--list] [--session <id>] [prompt]   see and continue an unfinished thread")
