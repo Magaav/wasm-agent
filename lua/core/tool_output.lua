@@ -205,6 +205,56 @@ local function pending_lines(source)
   return lines
 end
 
+-- THE MODEL'S COPY OF A PENDING HANDLE (22/11, Victor). The handle the SCRIPT holds keeps every field it
+-- had (operation_id, stdout_path, log_path, the op and node inside progress, settled, state_name): this is
+-- only what the MODEL reads, and it repeats nothing and names the next step. Measured on the run behind
+-- this change (session fece6285, 22/11 11:21:04Z): that copy was 617 bytes, the op id written three times
+-- and the stdout path twice, and it named no next step - the model read `stdout_path` on the PEER and
+-- spent two round-trips (remote operation list, then await) on a call `wait(op)` answers in one.
+--
+-- The view is an ALLOW-list, so a field added to the handle later cannot leak a repeat. A handle is
+-- recognised by `next`, which only the code-mode layer writes (lua/core/codemode_pending.lua); the same
+-- {state:"pending", op} shape from the operation tool is left exactly as it was. A path on a PEER is not
+-- a local file - it is what sent the model to a two-round-trip read - so a handle that names a node
+-- shows the node and keeps the path fields out; the exact handle stays in full_result, by hash.
+local HANDLE_FIELDS = { 'state', 'op', 'tool', 'node', 'waited_s', 'next', 'output_bytes', 'reason', 'error' }
+local PROGRESS_FIELDS = { 'state', 'reason', 'elapsed_ms', 'remaining_ms', 'shell_exited', 'output_idle_ms', 'promoted', 'tail' }
+local function handle_view(value)
+  local out = {}
+  for _, key in ipairs(HANDLE_FIELDS) do out[key] = value[key] end
+  if type(value.progress) == 'table' then
+    local progress = {}
+    for _, key in ipairs(PROGRESS_FIELDS) do progress[key] = value.progress[key] end
+    out.progress = progress
+  elseif value.progress ~= nil then
+    out.progress = value.progress
+  end
+  if value.node == nil then
+    -- A LOCAL operation's log is the file the model may read WHILE the work runs; log_path is
+    -- stdout_path under another name and stays behind.
+    out.stdout_path = value.stdout_path
+    out.stderr_path = value.stderr_path
+  end
+  return out
+end
+-- Walks the returned value: a handle can be returned on its own, nested in an object or in an array of
+-- the handles of one pool. A value with no handle in it comes back as the SAME table, so a result that
+-- is not a handle keeps its exact bytes.
+local function handle_views(value)
+  if type(value) ~= 'table' then return value end
+  if value.state == 'pending' and type(value.op) == 'string' and type(value.next) == 'string' then
+    return handle_view(value)
+  end
+  local out, changed = {}, false
+  for key, item in pairs(value) do
+    local kept = handle_views(item)
+    if kept ~= item then changed = true end
+    out[key] = kept
+  end
+  if not changed then return value end
+  return out
+end
+
 function M.project(name, output)
   -- Encode a non-table only through pcall: a decoded scalar can be `inf` (a numeric
   -- literal too large for a float), and json.encode throws on that *before* the
@@ -243,6 +293,8 @@ function M.project(name, output)
     elseif lean.value ~= nil then
       lean.returned = lean.value; lean.value = nil
     end
+    -- What the model reads of a pending handle: no repeats, and the next step named (see handle_views).
+    if lean.returned ~= nil then lean.returned = handle_views(lean.returned) end
     -- Evidence the model can use, and only that (14/11: the per-call path, bytes, id and ok were 9% of
     -- what a real run read). `sha256` is what tool_result / results.get take, `bytes` says whether it is
     -- worth fetching; status says ok.

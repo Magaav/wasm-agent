@@ -895,9 +895,36 @@ end
 -- raises: stdout for the answer, stderr for why it failed, and both are the operation record's own
 -- (absent is nil, never a guess). `op` stays beside `operation_id`: it is the name every existing
 -- script and `wait(op)` already use.
+-- CAN THIS HANDLE BE STOPPED (22/11). The next step a handle names offers `cancel(op)` only where a
+-- cancel can do something: a kind whose effect cannot be stopped says so by name (`executor.cancel ==
+-- false` plus its own `cancel_why`), and an outbox handle is stoppable only while it is still a
+-- DRAFT - a sent message stays sent (`M.cancel`'s own words, and the reason its cancel is a function).
+-- Every other kind answers through the local operation cancel.
+local function stoppable(record)
+  local executor = M.EXECUTORS[record.tool]
+  if type(executor) == "table" then
+    if executor.cancel == false then return false end
+    if executor.kind == "outbox" then return record.draft ~= nil end
+  end
+  return true
+end
+
+-- HOW THIS CALL IS RESUMED (22/11, Victor). The handle said everything about WHERE the work is and
+-- nothing about what to do with it: a real run (session fece6285, 22/11 11:21:04Z) read `stdout_path`
+-- on the PEER and spent two round-trips - remote operation list, then await - on a call that
+-- `wait(op)` answers in one. So every pending answer - bash, operation, remote, outbox, one shape -
+-- carries ONE plain field naming the next step, with its own id in it.
+local function next_step(record)
+  local op = tostring(record.op)
+  if stoppable(record) then
+    return string.format('wait("%s") returns this call\'s result; cancel("%s") stops it', op, op)
+  end
+  return string.format('wait("%s") returns this call\'s result', op)
+end
+
 local function handle(record, waited_s, state)
   local out = { state = "pending", op = record.op, operation_id = record.op, tool = record.tool,
-    waited_s = waited_s, progress = record.progress }
+    waited_s = waited_s, progress = record.progress, next = next_step(record) }
   -- A remote op names the node it lives on: wait(op) and cancel(op) route there, and a caller that
   -- holds only the handle can always tell WHICH machine is still running its work (item 1).
   if record.node ~= nil then out.node = record.node end
@@ -983,7 +1010,10 @@ function M.invoke(dispatch, opts, name, params, raw, wait_s)
   local record = { op = started.op, tool = name, kind = executor.kind or "operation", scope = scope,
     started_at = started_at, state = "running", reported = false, id = started.id,
     session = tostring(opts.session or ""), args = tostring(host.sha256(raw or "{}")),
-    node = started.node }
+    node = started.node,
+    -- An outbox handle can be a DRAFT, and a draft is the one outbox handle a cancel can stop
+    -- (`stoppable`): the executor answers it in `started.draft`, so the record keeps it.
+    draft = started.draft }
   index.ops[record.op] = record
   local state, reason = executor_poll(executor, dispatch, opts, record, budget)
   if not state then
