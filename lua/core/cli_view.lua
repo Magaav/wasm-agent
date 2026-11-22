@@ -1555,7 +1555,9 @@ function METHODS:status_text(with_spinner)
   local template, started = self:status_template()
   -- Coloured only when the line fits: a clipped line must not cut through a colour.
   local fits = visible_columns(template) + 10 <= self.limit
-  local mark = with_spinner and (paint(M.spinner(self.frame), "accent", self.live and fits) .. " ") or ""
+  -- The same green as the mark that travels to the host (`M.marks`): the fallback layout draws the same
+  -- glyph on the same row, and one of the two being warm would be the old colour leaking back.
+  local mark = with_spinner and (paint(M.spinner(self.frame), "matrix", self.live and fits) .. " ") or ""
   -- Through a function, so a mark or a clock containing a `%` is inserted as itself.
   local text = template:gsub("{m}", function() return mark end)
   if started then
