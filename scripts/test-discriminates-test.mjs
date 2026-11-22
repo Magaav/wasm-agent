@@ -30,7 +30,12 @@ if (!fs.existsSync(SUBJECT)) { console.error('FAIL the subject is missing: ' + S
 const home = fs.mkdtempSync(path.join(os.tmpdir(), 'disc-home-'));
 const repo = path.join(home, 'fixture');
 fs.mkdirSync(repo, {recursive: true});
-const env = {...process.env, HOME: home, WASM_AGENT_HOME: home, WASM_AGENT_TMPDIR: path.join(home, 'tmp')};
+// The node's temp root lives INSIDE the operator store in real life ($HOME/.wasm-agent/tmp), and the fixture
+// copies that on purpose: the row homes used to be made under it, which is a home the guard must refuse.
+const tmpdir = path.join(home, 'tmp');
+fs.mkdirSync(tmpdir, {recursive: true});
+const env = {...process.env, HOME: home, WASM_AGENT_HOME: home, TMPDIR: tmpdir,
+  WASM_AGENT_TMPDIR: path.join(home, '.wasm-agent', 'tmp')};
 for (const k of ['WASM_AGENT_VAULT_URL', 'WASM_AGENT_VAULT_DIR', 'WASM_AGENT_DB', 'WASM_AGENT_RENDEZVOUS', 'WASM_AGENT_RELAY', 'WA_BIN']) delete env[k];
 
 const git = (...args) => execFileSync('git', args, {cwd: repo, env, encoding: 'utf8'});
@@ -85,8 +90,12 @@ try {
     ok(!Object.keys(rows).some(k => k.startsWith('lua/')), 'a changed non-test path is never a test row');
     ok(!Object.keys(rows).some(k => k.endsWith('.md') || k.endsWith('.txt')),
       'a report or a snapshot whose name starts with test- is not a test: ' + Object.keys(rows).join(','));
-    ok(fs.readdirSync(path.join(home, 'tmp')).every(n => !n.startsWith('discriminates-')),
-      'the scratch worktree is removed after a run');
+    // The scratch tree AND the row homes are gone after a run (they live under different roots since 22/11:
+    // the tree under the node's temp root inside the operator store, the homes outside it).
+    const left = fs.readdirSync(path.join(home, '.wasm-agent', 'tmp')).filter(n => n.startsWith('discriminates-'));
+    ok(left.length === 0, 'the scratch worktree is removed after a run: ' + left.join(', '));
+    const homes = fs.readdirSync(tmpdir).filter(n => n.startsWith('discriminates-homes-'));
+    ok(homes.length === 0, 'the row homes are removed after a run: ' + homes.join(', '));
   }
 
   // MUST 1c: a MODIFIED test whose verdict does not change is not evidence, and does not block.
@@ -228,10 +237,17 @@ try {
     '#!/usr/bin/env bash',
     '# The shape every guarded row has (scripts/lib/scratch-home.lua): the launcher replaced HOME, so the only',
     '# way this row can prove it is not on the operator home is the home the launcher recorded.',
-    'if [ -z "${WA_HOME_BEFORE_OVERRIDE:-}" ]; then',
+    'real="${WA_HOME_BEFORE_OVERRIDE:-}"',
+    'if [ -z "$real" ]; then',
     '  echo "REFUSED: the launcher replaced HOME and did not record the home it replaced"',
     '  exit 2',
     'fi',
+    '# ...and the home it hands over may not be inside the operator store (scripts/lib/scratch-home.lua).',
+    'case "${WASM_AGENT_HOME:-}" in',
+    '  "$real"/.wasm-agent|"$real"/.wasm-agent/*)',
+    '    echo "REFUSED: the row home is inside the operator store"',
+    '    exit 2 ;;',
+    'esac',
     'grep -q VALUE=guarded lua/knob.txt || { echo "FAIL: the knob is still the old value"; exit 1; }',
     '',
   ].join('\n'));
@@ -242,6 +258,28 @@ try {
     verdictIs(rows, 'scripts/test-guarded-home.sh', 'discriminates',
       'MUST 7: a row that guards its scratch home is judged, not unclassified');
     ok(r.status === 0, 'MUST 7: and it does not block the gate: exit ' + r.status);
+  }
+
+  // ---- MUST 8: a Lua row that cannot LOAD the code under test is new-symbol, not "discriminates" -----
+  // MEASURED 22/11 (mission main-green-2): the row message is the host's own, verbatim -
+  // `lua error: [string "bootstrap"]:1: lua_root_unreadable: <path>` - and it says the base has no such file.
+  // The general assertion marker (`lua error:`) used to swallow it and report that the row had caught a bug.
+  // A shell row here reproduces the exact text; the classifier reads text, so the shape is what is judged.
+  fresh('change/cannot-load');
+  write('lua/knob.txt', 'VALUE=load\n');
+  write('scripts/test-cannot-load.sh', [
+    '#!/usr/bin/env bash',
+    "echo 'lua error: [string \"bootstrap\"]:1: lua_root_unreadable: scripts/lib/nothing-like-this.lua'",
+    'exit 1',
+    '',
+  ].join('\n'));
+  commit('a row that cannot load its subject');
+  {
+    const r = run('main');
+    const rows = rowsOf(r.stdout);
+    verdictIs(rows, 'scripts/test-cannot-load.sh', 'new-symbol',
+      'MUST 8: a load failure is new-symbol, not evidence of a caught bug');
+    ok(r.status === 0, 'MUST 8: and it does not block: exit ' + r.status);
   }
 
   // The real home is never the fixture.
