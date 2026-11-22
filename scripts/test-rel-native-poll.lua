@@ -87,6 +87,23 @@ local reply_text='Still queued. Waiting.'
 local reply_call=json.encode({id='call_run_poll',type='function',
   ['function']={name='run',arguments=json.encode({code=script_block()})}})
 
+-- A LOADED HOST, DETERMINISTICALLY. Measured 22/11 on avell: under 64 busy loops on 16 cores the
+-- host took 1.2-17 s to hand ONE `wait_s:0` poll back, and the guard read that wall clock as a wait
+-- that had spent real time - so this same hot loop stopped at round 4, 7, 9, 13, 18 and 19 instead of
+-- 3 (six of eight runs), and land262 was stopped by it. Here the load is the clock itself: every
+-- dispatch hands the call back 15 s later on the host clock, which is the measured shape on an idle
+-- machine too, on every run. The fix must still stop the loop at round 3; the code before it reads
+-- those 15 s as a real wait and does not stop the loop at all.
+local real_now=host.now
+local skew=0
+host.now=function() return real_now()+skew end
+local real_dispatch=tools.dispatch
+tools.dispatch=function(...)
+  local first,second=real_dispatch(...)
+  skew=skew+15
+  return first,second
+end
+
 local rounds=0
 host.http_stream=function()
   rounds=rounds+1
