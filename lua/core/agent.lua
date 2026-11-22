@@ -1913,6 +1913,40 @@ function M:run(text, images)
   sqlite_busy_lib.on_wait(function(action, reason) self:ledger_wait_notice(action, reason) end)
   sqlite_busy_lib.begin_window(tonumber(host.getenv('WASM_AGENT_START_PATIENCE_MS') or '') or 400)
   self.run_id=host.uuid()
+  -- NO NEW TURN WHILE A DEPLOY WAITS OR INSTALLS (22/11).
+  --
+  -- Measured twice on this laptop (sentinel.log 22/11 09:43Z and 10:01Z): a deploy request sat in the
+  -- sentinel's box 34 and 30 minutes with "held: node busy" while workers ran, and it ran only after the
+  -- operator parked four sessions by hand and stopped one `wa chat --once`. Every one of those turns was a
+  -- NEW turn - a `--once`, a wake, a resume, a child - and each one kept the node busy for another turn.
+  -- A running turn pauses at its step boundary (lua/core/deploy_pause.lua); a turn that has not started must
+  -- not start at all, which is what this is: the one place every path goes through (chat, serve, resume,
+  -- wake, subagent), so no caller can forget it.
+  --
+  -- THE OPERATOR'S OWN TURN IS NOT REFUSED: an interactive `wa chat` and the node's served window set
+  -- `operator_present`, because somebody is there watching it and a pause they did not ask for is worse than
+  -- one more turn. Everything automatic - `--once`, a piped prompt, a wake, a resume dispatch, a subagent
+  -- child - is refused by name, with the commit, before a message, a model call or a tool call.
+  --
+  -- A REFUSED TURN WRITES NOTHING: the caller's text was never taken in, so recording it would be half a
+  -- turn, and recording only the refusal would leave an answer with no question. The caller still holds its
+  -- request (a wake keeps its row, a `--once` exits with the sentence on stdout and a non-zero status), and
+  -- the resumed turn reads its own checkpoint.
+  if not self.operator_present then
+    local gate_ok, deploy_pause = pcall(dofile, "lua/core/deploy_pause.lua")
+    if gate_ok and type(deploy_pause) == "table" and type(deploy_pause.refuse) == "function" then
+      local refused, wait = deploy_pause.refuse(host.now())
+      if refused then
+        self.emit({ type = "status", text = refused:sub(1, 400) })
+        pcall(telemetry.event, self.session_id, self.run_id, "", "deploy_waiting", "turn_not_started",
+          { target = wait and wait.to, since = wait and wait.since, request = wait and wait.id,
+            source = wait and wait.source, subagent = self.subagent and true or nil })
+        pcall(host.log, "turn not started: " .. refused)
+        self.turn_refused = refused
+        return refused
+      end
+    end
+  end
   -- The run's own request, kept for the failure path: a wake this harness scheduled starts with a
   -- known mark, and a run that fails while answering one must not schedule another.
   self.last_user_text=tostring(text or "")

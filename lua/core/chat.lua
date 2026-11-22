@@ -288,6 +288,27 @@ function M.run(argv)
     return 2
   end
 
+  -- NO NEW TURN WHILE A DEPLOY WAITS OR INSTALLS (22/11).
+  --
+  -- The same rule as the park above, for a different reason: a deploy request that is waiting for this node
+  -- to go idle cannot get there while loops keep starting turns, and that is measured - 34 and 30 minutes on
+  -- 22/11 with three workers running. A scripted caller (`--once`, or a stdin that is not a terminal) is
+  -- refused by name, before the thread is drawn and before any model call; a reader at a terminal is not,
+  -- because somebody is there and a pause they did not ask for is worse than one more turn (the run-time gate
+  -- in lua/core/agent.lua carries `operator_present` for that).
+  --
+  -- Exit 2, like the park: this is "refused, nothing ran", not "the turn failed" (docs/SCRIPTED-RUNS.md).
+  if scripted then
+    local deploy_pause_ok, deploy_pause = pcall(dofile, "lua/core/deploy_pause.lua")
+    if deploy_pause_ok and type(deploy_pause) == "table" and type(deploy_pause.refuse) == "function" then
+      local refused = deploy_pause.refuse(host.now())
+      if refused then
+        print(refused)
+        return 2
+      end
+    end
+  end
+
   local settings = provider.settings()
   -- WHY there is no model, when there is none. "local mode (no model configured)" was true and useless:
   -- it named no cause, so a reader could not tell a node with no provider at all from a shell that simply
@@ -366,6 +387,9 @@ function M.run(argv)
   end
   refresh_model()
   local agent = agentlib.new(session.id, printer(view), "master", USER, NODE)
+  -- Somebody is at the keyboard unless this is a scripted run: a deploy that is waiting for this node does
+  -- not refuse THIS operator's turn, and does not pause it before its first step either (lua/core/agent.lua).
+  agent.operator_present = not scripted
   -- What is on disk now is the build this process runs: a later change is a new install.
   if host.binary_changed then pcall(host.binary_changed) end
   -- The host reads complete lines while the interpreter is in a provider/tool call.
@@ -984,6 +1008,8 @@ function M.run(argv)
       local previous = agent.session_id
       local id, notice = commands.new_session({ previous = previous, user = USER, node = NODE })
       agent = agentlib.new(id, printer(view), "master", USER, NODE)
+      -- The REPL is the operator: `/new` cannot be reached by a script (`--once` never reads a line).
+      agent.operator_present = true
       agent.steer = function()
         if refresh_status then refresh_status() end
         publish_views({ max_age = local_views.MAX_AGE, cached = true, session_id = agent.session_id, ctx = { user_id = USER, role = "master", session_id = agent.session_id } })

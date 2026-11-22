@@ -1256,6 +1256,15 @@ function M.run_wake(args)
       WHERE id=? AND status='dispatching']], { row.due_at, now, row.id })
     return { paused = true, wake_id = row.id }
   end
+  -- A deploy landed between the claim and this callback (22/11): the same treatment, for the same reason -
+  -- a new turn here is what keeps the node from going idle. The row goes back EXACTLY as it was, so it fires
+  -- once when the deploy ends, and the sentence an operator reads names the commit that is coming.
+  local deploy_text = dep("deploy_pause").refuse(now, args.deploy_wait)
+  if deploy_text then
+    exec([[UPDATE self_wakes SET status='pending', due_at=?, updated_at=?, last_error=?
+      WHERE id=? AND status='dispatching']], { row.due_at, now, deploy_text:sub(1, 400), row.id })
+    return { deferred = true, wake_id = row.id, deploy_waiting = deploy_text }
+  end
   -- A wake whose only input is a settled handle IS the wake-only round (21/11): counted here, where
   -- the step is about to run, so the number is turns and not sweeps (lua/core/counters.lua).
   if tostring(row.id or ""):match("^handle:") then
@@ -1314,11 +1323,28 @@ function M.tick(opts)
   M.setup()
   opts = opts or {}
   local now = clock(opts)
-  local out = { dispatched = 0, skipped = 0, deferred = 0, unknown = 0, reconciled = 0, paused = 0 }
+  local out = { dispatched = 0, skipped = 0, deferred = 0, unknown = 0, reconciled = 0, paused = 0, deploy_waiting = 0 }
   -- A pause for a deploy is released when the deploy ENDS, not when its bound runs out (deploy_pause). This
   -- runs before the due-row query below, so a row released here is dispatched in the same tick - and it is the
   -- node doing it, which is what makes the promise keepable for a `wa chat --once` worker that has exited.
   out.released = dep("deploy_pause").release_due(now, { exec = exec, query = query, read = opts.deploy_marker })
+  -- NO NEW TURN WHILE A DEPLOY WAITS OR INSTALLS (22/11). This is the node's own tick: it hands a due wake to
+  -- the scheduler, and that wake's turn is a NEW turn - the third of the three things that kept the node busy
+  -- for 34 and 30 minutes on 22/11 while a deploy request waited. A wake is not dropped and not failed: the row
+  -- keeps its time, its order and its prompt, and it fires once when the deploy is over (the release above makes
+  -- the paused sessions' resumes due at that moment, and the rows that were held here are still due).
+  local wait_text = dep("deploy_pause").refuse(now, opts.deploy_wait)
+  if wait_text then
+    local due = query([[SELECT id FROM self_wakes WHERE status='pending' AND due_at IS NOT NULL AND due_at<=?]],
+      { now }) or {}
+    for _, row in ipairs(due) do
+      exec([[UPDATE self_wakes SET last_error=?, updated_at=? WHERE id=? AND status='pending']],
+        { wait_text:sub(1, 400), now, row.id })
+    end
+    out.deploy_waiting = #due
+    out.deferred = (tonumber(out.deferred) or 0) + #due
+    return out
+  end
   -- The sessions whose schedule is held (an interrupted run), read once per tick: a held session's rows
   -- are left exactly as they are - pending, in their order - so the tick dispatches none of them and a
   -- resume fires each one once. Read here rather than filtered in SQL on both paths, because the
