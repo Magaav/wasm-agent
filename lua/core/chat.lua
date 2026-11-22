@@ -408,6 +408,28 @@ function M.run(argv)
     editor = view.live and view.stdout and height and height >= 7
       and host.getenv("WASM_AGENT_CLI_FRAME") ~= "off" })
   view.editor = input.editor
+  -- THE OPENING (Victor, 22/11): green rain, a supernova (flash, debris sphere, one ring), and the
+  -- header's star turning matrix green.
+  -- It is the host's (`rust/wa-term/src/opening.rs`), on the alternate screen: started here and never
+  -- waited for - nothing below this line waits on it, the reader's keys are live from the first frame,
+  -- a key ends it and lands in the draft, and every write this start makes is held by the host and
+  -- written, in order, when it ends. The screen left behind is therefore exactly the one a start
+  -- without an opening writes. `cli_view.opening` is the policy (a resumed session, a message, a pipe,
+  -- NO_COLOR, a small window, the setting); the host refuses again whatever it cannot draw.
+  local opening = cli_view.opening({ live = view.live, editor = input.editor,
+    resumed = (resume_last or session_id ~= nil), message = prompt,
+    columns = view.limit, rows = view.rows() })
+  if opening and host.opening_start then
+    local ok, raw = pcall(host.opening_start)
+    local answer
+    if ok and type(raw) == "string" then
+      local decoded, value = pcall(json.decode, raw)
+      if decoded then answer = value end
+    end
+    opening = type(answer) == "table" and answer.started == true
+  else
+    opening = false
+  end
   -- The reader's input is session state: the store holds the object, so a reload of the module that made
   -- it cannot lose a line typed while the run was working (docs/HOTRELOAD.md).
   reload.store.input = input
@@ -468,7 +490,11 @@ function M.run(argv)
       -- a release's tag, the commit (with +dirty), a pinned node's pin, or "unknown build". It was the
       -- literal 0.1.0 here, so every node claimed the crate's version whatever it was running.
       version = build_identity.label(),
-      model = mode .. (reasoning ~= "" and ("  \194\183  reasoning " .. reasoning) or ""),
+      -- ONE composer for this line (cli_view.model_line): a dot with one space on each side.
+      model = cli_view.model_line(mode, reasoning),
+      -- The product version, from the one constant that owns it (`build_identity.PRODUCT_VERSION`), beside
+      -- the build's own label: `✻ Welcome to wasm-agent! v1.0 · v<sha>`.
+      product = build_identity.PRODUCT_VERSION,
       database = host.getenv("WASM_AGENT_DB") or "~/.wasm-agent/memory.db",
       session = agent.session_id,
       continued = resume_last or session_id ~= nil,
@@ -483,6 +509,19 @@ function M.run(argv)
         return nil
       end)(),
     })
+    -- The welcome block is written into the host's transcript here (or straight out, in the plain
+    -- layout); the opening needs the very same bytes for its last beat, and it needs them now, long
+    -- before its 2 s are up - it holds on the turning cloud until they arrive, and skips the
+    -- translation if they never do, which is a slower start's honest ending.
+    if opening and host.opening_header then
+      local painted = view:welcome_painted()
+      if painted then
+        local lines = {}
+        for line in (painted .. "\n"):gmatch("(.-)\n") do lines[#lines + 1] = line end
+        local ok, handed = pcall(host.opening_header, json.encode({ lines = lines }))
+        if not ok or handed == false then opening = false end
+      end
+    end
     -- The reload source, said on the line under the banner as well as on the status bar: a reader who is
     -- about to edit a command file needs to know that this session will pick the edit up, and from where.
     if reload.status() then

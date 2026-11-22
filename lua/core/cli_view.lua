@@ -98,6 +98,10 @@ local PALETTE = {
   thinkingOff = "505050", thinkingMinimal = "6e6e6e", thinkingLow = "5f87af",
   thinkingMedium = "81a2be", thinkingHigh = "b294bb", thinkingXhigh = "d183e8",
   thinkingMax = "ff5fff",
+  -- The matrix green (Victor, 22/11: the star of the welcome line and the animated first glyph of the
+  -- run status row). Its OWN entry, so those two turn green without moving `accent`, which keeps
+  -- painting the spinner's trail, the prompt mark and every other thing that was warm.
+  matrix = "00d75f",
 }
 
 -- A role is a 24-bit colour (`rrggbb`), or `ansi:<n>` for one of the terminal's own palette slots,
@@ -163,7 +167,7 @@ end
 -- the same characters in the same order as the ones this module prints for itself.
 function M.marks(live)
   local list = {}
-  for index = 1, #SPINNER * HOLD do list[index] = paint(M.spinner(index - 1), "accent", live) .. " " end
+  for index = 1, #SPINNER * HOLD do list[index] = paint(M.spinner(index - 1), "matrix", live) .. " " end
   return list
 end
 
@@ -1015,6 +1019,39 @@ function M.wants_live(getenv, istty)
     or (getenv("WT_SESSION") or "") ~= "" or (getenv("ORCA_TERMINAL_HANDLE") or "") ~= ""
 end
 
+-- ---- the opening -------------------------------------------------------------------------------
+
+-- Whether this start should have one (Victor, 22/11: green rain, a supernova - flash, debris sphere,
+-- one ring - the star of the welcome
+-- line landing in its cell, and the title translated from the alien alphabet). The animation itself is
+-- the host's - `rust/wa-term/src/opening.rs`, on the alternate screen, beside this start work and never
+-- in front of it - and this is the decision it is started or not started on.
+--
+-- Every condition is answered from what the caller has in hand, over a `host` a test can replace, so
+-- the whole table is a Lua test instead of a terminal (scripts/test-opening.lua). It refuses on the
+-- doubt: a caller that cannot say whether it has a terminal, an editor or a size has no opening.
+-- The host refuses AGAIN, by name, whatever it cannot draw (`host.opening_start`), so a wrong answer
+-- here costs a frame and never a broken screen.
+M.OPENING_COLUMNS, M.OPENING_ROWS = 60, 14
+
+function M.opening(o)
+  o = o or {}
+  local getenv = o.getenv or function(name) return host.getenv(name) end
+  local setting = tostring(getenv("WASM_AGENT_CLI_OPENING") or ""):lower()
+  if setting == "off" or setting == "0" or setting == "no" or setting == "false" then return false, "setting" end
+  if o.scripted then return false, "scripted" end
+  if o.live ~= true then return false, "not_a_terminal" end
+  if o.editor ~= true then return false, "no_editor" end
+  if o.resumed then return false, "resumed" end
+  if (o.message or "") ~= "" then return false, "message" end
+  if (getenv("NO_COLOR") or "") ~= "" then return false, "no_color" end
+  if (getenv("TERM") or "") == "dumb" then return false, "dumb_terminal" end
+  local columns, rows = tonumber(o.columns), tonumber(o.rows)
+  if columns and columns < M.OPENING_COLUMNS then return false, "too_small" end
+  if rows and rows < M.OPENING_ROWS then return false, "too_small" end
+  return true, "default"
+end
+
 -- The console's height, asked the way the width is: `host.terminal_size`, nil when there is no
 -- console or it will not answer. The frame is the only caller, and it needs this and nothing else.
 function M.rows(probe)
@@ -1519,7 +1556,9 @@ function METHODS:status_text(with_spinner)
   local template, started = self:status_template()
   -- Coloured only when the line fits: a clipped line must not cut through a colour.
   local fits = visible_columns(template) + 10 <= self.limit
-  local mark = with_spinner and (paint(M.spinner(self.frame), "accent", self.live and fits) .. " ") or ""
+  -- The same green as the mark that travels to the host (`M.marks`): the fallback layout draws the same
+  -- glyph on the same row, and one of the two being warm would be the old colour leaking back.
+  local mark = with_spinner and (paint(M.spinner(self.frame), "matrix", self.live and fits) .. " ") or ""
   -- Through a function, so a mark or a clock containing a `%` is inserted as itself.
   local text = template:gsub("{m}", function() return mark end)
   if started then
@@ -2131,6 +2170,23 @@ function METHODS:render_welcome()
   -- with it, so the redraw puts them back instead of leaving them at the width they were written at.
   for _, line in ipairs(self.welcome_notes or {}) do self:write(line .. "\n") end
   return true
+end
+
+-- The welcome block as it would be drawn NOW, escapes and all: the same composition `render_welcome`
+-- writes, with the rule at the console's width. The opening paints these as its last beat on the
+-- alternate screen, so the frame it hands the reader over to is the frame behind it - `chat.lua` hands
+-- them over with `host.opening_header`, and the two must agree, so this is the one that composes.
+function METHODS:welcome_painted()
+  local stored = self.welcome
+  if not stored then return nil end
+  local opts = {}
+  for key, value in pairs(stored) do opts[key] = value end
+  if self:transcript() then
+    opts.marker, opts.limit = true, 1000000
+    return M.expand_rules(M.banner(opts), self.limit)
+  end
+  opts.limit = self.limit
+  return M.banner(opts)
 end
 
 -- A line of the welcome block that is not the box itself: what this CLI is running from, said under
@@ -3419,6 +3475,15 @@ function METHODS:replay(rows, opts)
   self:line("")
 end
 
+-- The model line of the welcome box: the model, its endpoint, and - when the provider states one - the
+-- reasoning level, separated by a dot with ONE space on each side (Victor, 22/11: it had two). Composed
+-- here, beside the box that draws it, so the one separator has one spelling and a test can say so.
+function M.model_line(mode, reasoning)
+  local text = tostring(mode or "")
+  if reasoning and reasoning ~= "" then text = text .. " \194\183 reasoning " .. tostring(reasoning) end
+  return text
+end
+
 -- The welcome box: where this is running and what it is running with, the way Claude Code opens.
 -- The workspace and branch come first after the greeting - a chat in the wrong worktree is a
 -- mistake that costs an hour to notice otherwise.
@@ -3441,8 +3506,13 @@ function M.banner(opts)
   -- time cannot hide in the banner (round 4, item 1).
   local divider = paint(opts.marker and M.RULE or M.expand_rules(M.RULE, limit), "border", live)
   local lines = { divider,
-    paint(STAR, "accent", live) .. " Welcome to " .. paint("wasm-agent", "bold", live) .. "!"
-      .. ((opts.version and opts.version ~= "") and paint(" v" .. opts.version, "muted", live) or ""),
+    paint(STAR, "matrix", live) .. " Welcome to " .. paint("wasm-agent", "bold", live) .. "!"
+      -- The product version, then the build's own name (Victor, 22/11): `v1.0 · vc6f890e3`. The product
+      -- version is one constant (`build_identity.PRODUCT_VERSION`) and a caller that has none says
+      -- nothing rather than inventing one.
+      .. ((opts.product and opts.product ~= "") and paint(" v" .. opts.product, "muted", live) or "")
+      .. (((opts.product and opts.product ~= "") and (opts.version and opts.version ~= "")) and paint(" \194\183 ", "muted", live) or "")
+      .. ((opts.version and opts.version ~= "") and paint("v" .. opts.version, "muted", live) or ""),
     "",
     paint(fit("/help for help, /login to sign in to a provider"), "muted", live),
     "" }

@@ -2009,6 +2009,15 @@ gate_run node tests/test-wa-fonts.mjs
 # captured transcript is free of escape sequences - so it is asserted without a model:
 # the view is handed the events agent.lua emits, with a clock the test controls.
 WA_SCRIPT=scripts/test-cli-view.lua "$BIN" --db "$DB.view" | grep "cli view ok"
+# THE OPENING'S LUA HALF (Victor, 22/11): the star of the welcome line and the run status row's animated
+# first glyph are the matrix green as a palette entry of their own, accent still paints the phase word of
+# that same row, and `cli_view.opening` refuses on every condition the animation must never play on (a
+# resumed session, a message, a pipe, NO_COLOR, TERM=dumb, a window under 60x14, no editor, the setting).
+WA_SCRIPT=scripts/test-opening.lua "$BIN" --db "$DB.opening" | grep "opening: ok"
+# The animation itself, in a real pty: its bytes, and the FINAL screen read back through the terminal in
+# memory the render tests use (wa_term::scroll::vt). The row SKIPS - by name, never as a pass - when the
+# gate hands it no binary to drive.
+gate_run env WA_BIN="$BIN" cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-term --test opening
 # The ICON SETS, each rendered through the same view (item 4 of the wa-fonts mission, Victor 19/11):
 # wa Icons is GLUED and one cell per icon, nerd keeps the one space, unicode needs no font and ascii
 # needs no glyph at all. The proof is a CELL count - the glued row must be exactly its gapped icons

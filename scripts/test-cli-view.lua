@@ -105,6 +105,18 @@ ok(view_lib.duration(9.5) == "9.5s" and view_lib.duration(74) == "1m14s", "a run
 -- the host draws the clock while this process is blocked, so the rule exists on both sides.
 -- The same three values are asserted in both suites, so changing one alone fails a test here
 -- instead of flickering a frame on a screen.
+-- The model line of the welcome box: the model, its endpoint, and the reasoning level, separated by a dot
+-- with ONE space on each side (Victor, 22/11 21:33Z - it had two).
+local DOT = " \194\183 "
+ok(view_lib.model_line("deepseek-v4.1-flash @ http://127.0.0.1:8810/opencode-go/v1", "high")
+  == "deepseek-v4.1-flash @ http://127.0.0.1:8810/opencode-go/v1" .. DOT .. "reasoning high",
+  "the model line carries one space on each side of its dot")
+ok(not view_lib.model_line("deepseek-v4.1-flash @ http://127.0.0.1:8810/opencode-go/v1", "high"):find("  ", 1, true),
+  "and no double space survives anywhere in it")
+ok(view_lib.model_line("local mode (no model configured)", "") == "local mode (no model configured)",
+  "a provider that states no reasoning level gets no dangling dot")
+ok(view_lib.model_line("local mode (no model configured)", nil) == "local mode (no model configured)",
+  "and an absent level is not the word nil")
 ok(view_lib.duration(59.94) == "59.9s", "under a minute the clock counts tenths of a second")
 ok(view_lib.duration(60.0) == "1m00s", "at a minute it carries its seconds")
 ok(view_lib.duration(125.4) == "2m05s", "and keeps counting in minutes")
@@ -357,7 +369,10 @@ ok(#handed == 1 and handed[1].kind == "start", "a starting run hands its line to
 local spec = handed[1].spec
 ok(type(spec) == "table" and type(spec.line) == "string", "and what it hands over is a line")
 ok(spec.line == animated:status_template(), "the layout, with its two tokens still in it")
-ok(spec.marks[1] == view_lib.paint(view_lib.spinner(0), "accent", true) .. " ", "this view's marks, in this view's order")
+-- The mark's colour is `matrix`, not `accent`, since Victor's change of 22/11: the animated first glyph
+-- of the run status row is the matrix green (the phase word after it keeps the accent, asserted below).
+ok(spec.marks[1] == view_lib.paint(view_lib.spinner(0), "matrix", true) .. " ",
+  "this view's marks, in this view's order, in the green of the welcome star")
 ok(spec.started == animated.turn.started, "and the origin of the clock, so a redraw does not restart it")
 ok(not has(spec.line, view_lib.spinner(0)), "no frame is baked into the layout")
 
