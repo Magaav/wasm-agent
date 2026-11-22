@@ -3035,16 +3035,19 @@ function M:run_body(text, images)
       end
     end
 
-    -- THE ACTION WRITTEN AS TEXT. One path (Victor 21/11): nothing in the reply is turned into a call
-    -- any more, so a step that ends with its action in the wrong form is not an answer. TWO shapes,
-    -- and the same net for both:
-    --   * the model's trained tool-call markup, written as text (raw_code.markup_in_text) - a
-    --     <tool_call>{...}</tool_call>, a <bash>...</bash>, a DSML bar;
-    --   * a run-tagged block that ENDS the answer (raw_code.text_action) - the removed transport's
-    --     shape, which no longer runs and is therefore markup too.
-    local leaked = raw_code.markup_in_text(result.content or "")
-    if not leaked and #(result.tool_calls or {}) == 0 then
-      leaked = raw_code.text_action(result.content or "")
+    -- THE ACTION WRITTEN AS TEXT - and ONLY when this step carried no action at all (review r1, item 1).
+    -- A reply with a real tool call is never scanned: the call IS the action, and a worker that quotes a
+    -- call format in its prose (a test of this very net, a report, a brief) must not lose its call for
+    -- saying the word. Two shapes when there is no call:
+    --   * the model's trained tool-call markup, written as text (raw_code.markup_in_text), read from the
+    --     PROSE only - fenced samples and inline code are quotes, so raw_code.prose_only removes them;
+    --   * a run-TAGGED block that ENDS the answer (raw_code.text_action) - the removed transport's shape,
+    --     which no longer runs and would otherwise end the turn with its action as a sample. A block
+    --     tagged js / javascript WITHOUT the word run is an example and stays an answer.
+    local leaked
+    if #(result.tool_calls or {}) == 0 then
+      leaked = raw_code.markup_in_text(raw_code.prose_only(result.content or ""))
+      if not leaked then leaked = raw_code.text_action(result.content or "") end
     end
     -- The native transports' leak safety net (review MUST 6). The action was a tool call; the model
     -- wrote its trained call format as TEXT instead, so nothing ran. One named continue asks for the

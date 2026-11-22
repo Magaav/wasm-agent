@@ -397,12 +397,40 @@ function M.markup_in_text(text)
   return nil
 end
 
--- THE ACTING SHAPE WRITTEN AS TEXT (the leak net's second shape). A run-tagged block, or a bare js /
--- javascript block, that ENDS the answer is the action in the wrong form: nothing runs it any more
--- (the block channel is gone), so the step is not an answer. Only the LAST block counts, and only
--- when nothing but whitespace follows it - a model explaining the format mid-answer is answering, and
--- a block it went on from is a sketch it rejected (the same rule as M.in_thinking).
--- Returns { marker = "```js run", line = n } or nil.
+-- THE MODEL'S PROSE: its answer with the samples it QUOTED taken out. Fenced blocks are removed whole
+-- and inline code spans are blanked, because a call format named inside a fence or inside backticks is
+-- a quote, not a call the model meant to make (review r1, item 1: a worker that writes about this very
+-- net, or a report that quotes the shape, lost its turn to its own prose). Pure: no host, no state.
+function M.prose_only(text)
+  local body = tostring(text or "")
+  if body == "" then return "" end
+  local lines = lines_of(body)
+  local blocks = M.parse(body)
+  local inside = {}
+  for _, block in ipairs(blocks) do
+    for index = block.open, block.close or #lines do inside[index] = true end
+  end
+  local kept = {}
+  for index, line in ipairs(lines) do
+    if not inside[index] then kept[#kept + 1] = line.text end
+  end
+  local prose = table.concat(kept, "\n")
+  -- Double-backtick spans first, so a span that contains one backtick is taken whole (the same order
+  -- finish_contract uses: a quoted marker inside backticks is one span, not three).
+  prose = prose:gsub("``(.-)``", " ")
+  prose = prose:gsub("`[^`\n]-`", " ")
+  return prose
+end
+
+-- THE ACTING SHAPE WRITTEN AS TEXT (the leak net's second shape). A RUN-TAGGED block that ENDS the
+-- answer is the action in the wrong form: nothing runs it any more (the block channel is gone), so the
+-- step is not an answer and the model would otherwise end the turn with its action as a sample. Only
+-- the LAST block counts, and only when nothing but whitespace follows it - an answer that goes on from
+-- a block is prose about code, not a lost action (the same rule as M.in_thinking).
+--
+-- A block tagged js / javascript WITHOUT the word run is an EXAMPLE, not an action (review r1, item 1):
+-- an answer that ends in a sample fence is an answer and earns nothing. Returns
+-- { marker = "```js run", line = n } or nil.
 function M.text_action(text)
   local body = tostring(text or "")
   if not has_fence(body) then return nil end
@@ -411,12 +439,8 @@ function M.text_action(text)
   if not last then return nil end
   local last_line = lines[last.close or #lines]
   if body:sub(last_line.finish + 1):find("%S") then return nil end
-  local tag = tostring(last.info or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
-  local marker
-  if last.run then marker = TICK .. "js run"
-  elseif PLAIN_JS[tag] then marker = TICK .. tag
-  else return nil end
-  return { marker = marker, line = last.open }
+  if not last.run then return nil end
+  return { marker = TICK .. "js run", line = last.open }
 end
 
 return M
