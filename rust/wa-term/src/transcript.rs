@@ -501,6 +501,14 @@ impl Transcript {
                 // Through `cards` too: a fence's OPENING row carries the copy icon, so it is the
                 // row that opens the card frame - wrapped as prose, the rows under it would never
                 // be known to be a card's.
+                // A fence's opening row keeps its corner where the border is: the icon goes AFTER
+                // `┌─`, before the title (`┌─ ⧉ bash`), and the click target is that cell - the
+                // column travels with the marker (RIGHT_TAG), as the code block's right-end icon does.
+                if let Some((with_icon, col)) = icon_after_corner(line) {
+                    rows.extend(cards.rows(&with_icon, inner));
+                    copies.push((start, format!("{RIGHT_TAG}{}\u{1}{}", col + usize::from(focused), content.expect("checked"))));
+                    continue;
+                }
                 rows.extend(cards.rows(&format!("{COPY_PREFIX}{line}"), inner));
                 copies.push((start, content.expect("checked").clone()));
             } else if is_live {
@@ -978,6 +986,9 @@ fn card_edge(cells: &[(String, char, usize)], in_frame: bool) -> Option<Edge> {
 /// keeps a dim compiler diagnostic (`┌─ src/main.rs:3:5`, the same grey role) from opening a card frame.
 fn is_card_opening(cells: &[(String, char, usize)], lead: usize) -> bool {
     let text: String = cells[lead..].iter().map(|c| c.1).collect();
+    // The copy icon after the corner (`icon_after_corner`: `┌─ ⧉ bash`) is the host's own cell, not
+    // part of the title: the opening is judged without it.
+    let text = text.replacen(&format!(" {COPY_ICON}"), "", 1);
     let Some(rest) = text.strip_prefix("\u{250c}\u{2500}") else { return false };
     if rest.is_empty() { return true; }
     let Some(lang) = rest.strip_prefix(' ') else { return false };
@@ -1178,6 +1189,37 @@ fn icon_at_right(row: &str) -> Option<(String, usize)> {
     Some((out, n))
 }
 
+/// A fenced card's opening row (`┌─ bash`, after any indent and colour) with the copy icon between
+/// the corner and the title: `┌─ ⧉ bash`, and the icon's 1-based column. None when the row does not
+/// open with `┌─` - then the icon is the row's prefix, as for every other copyable line.
+///
+/// Why this is the host's to do (Victor 21/11, "we were never able to fix it"): the Lua marker says
+/// only WHICH line can be copied and with what content; the column was chosen here, by prefixing
+/// `COPY_PREFIX` to the row, and `copy_at` accepted a click in the first two cells only. A fence
+/// redrawn on the Lua side could never move the icon.
+fn icon_after_corner(row: &str) -> Option<(String, usize)> {
+    let chars: Vec<char> = row.chars().collect();
+    let (mut i, mut col) = (0usize, 0usize);
+    while i < chars.len() {
+        if chars[i] == '\x1b' {
+            i += 1;
+            if i < chars.len() && chars[i] == '[' { i += 1; while i < chars.len() && !('@'..='~').contains(&chars[i]) { i += 1; } }
+            i += 1;
+            continue;
+        }
+        if chars[i] == ' ' { i += 1; col += 1; continue; }
+        break;
+    }
+    if chars.get(i) != Some(&'\u{250c}') || chars.get(i + 1) != Some(&'\u{2500}') { return None }
+    let after = i + 2;
+    let mut out: String = chars[..after].iter().collect();
+    out.push(' ');
+    out.push(COPY_ICON);
+    // `┌─ bash` already has its space before the title; an untitled `┌─` gets none after the icon.
+    out.extend(chars[after..].iter());
+    Some((out, col + 4))
+}
+
 /// The copy icon at the right end of a BAND row: a row that ends with the background-colour erase
 /// (ESC[K) has no blank cell for icon_at_right to take, because the band paints its rest with no
 /// characters at all (item F). The icon is placed by column instead, on the row's own line, with the
@@ -1231,6 +1273,22 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_fence_keeps_its_corner_and_the_icon_sits_after_it() {
+        assert_eq!(icon_after_corner("\x1b[2m\u{250c}\u{2500} bash\x1b[0m"),
+            Some(("\x1b[2m\u{250c}\u{2500} \u{29c9} bash\x1b[0m".to_string(), 4)), "the icon is the fourth cell");
+        assert_eq!(icon_after_corner("  \u{250c}\u{2500}"), Some(("  \u{250c}\u{2500} \u{29c9}".to_string(), 6)),
+            "an indented, untitled fence");
+        assert_eq!(icon_after_corner("a heading"), None, "any other copyable line keeps the prefix");
+        // Through the real rows: the corner is the row's first cell, and only the icon's cell copies.
+        let mut t = Transcript::default();
+        t.copyable(&[(0, "echo one".to_string())]);
+        t.write("\u{250c}\u{2500} bash\n\u{2502} echo one\n\u{2514}\u{2500}\n");
+        let rows = t.view(40, 10);
+        let row = rows.iter().position(|r| crate::selection::plain(r).starts_with("\u{250c}\u{2500} \u{29c9} bash")).expect("the fence's first row") + 1;
+        assert_eq!(t.copy_at(row, 4).as_deref(), Some("echo one"));
+        assert_eq!(t.copy_at(row, 1), None, "the corner is not the icon");
+    }
     #[test]
     fn a_copy_icon_under_the_pointer_is_drawn_bright() {
         let mut t = plain(Transcript::default());

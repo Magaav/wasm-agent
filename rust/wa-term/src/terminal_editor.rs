@@ -178,6 +178,9 @@ pub struct Editor {
     anchor: Option<usize>,
     /// Where the current bracketed paste began in the draft.
     paste_from: usize,
+    /// The first draft line shown, while the wheel has moved the box away from the cursor's line
+    /// (`wheel`). None = follow the cursor, which every key goes back to.
+    scroll: Option<usize>,
 }
 
 #[derive(Clone)]
@@ -285,6 +288,8 @@ impl Editor {
     /// recalled from the history is not an edit: the menu stays closed on it, so Down keeps walking
     /// the history after Up brought back a `/command`.
     pub fn feed(&mut self, byte: u8) -> Action {
+        // A key is about the cursor: the box goes back to showing its line.
+        self.scroll = None;
         self.notice.clear();
         // Undo bookkeeping: a byte that extends the open group (the next letter of a word, the next
         // byte of a paste) needs no snapshot - the group's entry already holds the draft before it.
@@ -689,10 +694,12 @@ impl Editor {
         self.chars.splice(a..b, text.chars());
         self.cursor = a + text.chars().count();
         self.anchor = None;
+        self.scroll = None;
     }
     /// Text the host puts in the draft at the cursor (an `[Image #n]` token), as one undo step.
     pub fn insert_text(&mut self, text: &str) {
         let snapshot = Snapshot { chars: self.chars.clone(), cursor: self.cursor };
+        self.scroll = None;
         for ch in text.chars() { self.insert(ch); }
         if self.undo.len() == UNDO_MAX { self.undo.remove(0); }
         self.undo.push(snapshot);
@@ -705,7 +712,7 @@ impl Editor {
     /// The draft index each visual row of `layout` starts at (same wrapping rule), for drawing a selection
     /// and for turning a mouse position in the box into a draft index.
     pub fn line_starts(&self) -> Vec<usize> {
-        let available = self.width.saturating_sub(BOX_CHROME);
+        let available = self.wrap_width();
         let mut starts = vec![0usize];
         let mut col = 0usize;
         for (index, &ch) in self.chars.iter().enumerate() {
@@ -716,8 +723,51 @@ impl Editor {
         }
         starts
     }
+    /// The most draft rows the box shows: what the view asked for (`height`, three) as the floor, and
+    /// 30% of the window's rows when that is more (40 rows -> 12, 12 rows -> 3). `row` is the row above
+    /// the footer, so `row + 1` is the window's height: the limit follows a resize with no other state.
+    /// Never more than the rows above the box's bottom border leave for it and its top border.
+    pub fn max_rows(&self) -> usize {
+        if self.height < 3 { return self.height; }
+        self.height.max((self.row + 1) * 3 / 10).min(self.bottom().saturating_sub(2).max(self.height))
+    }
+    /// How many visual rows the draft wraps into at `available` cells (the rule `layout` applies).
+    fn wrapped_lines(&self, available: usize) -> usize {
+        let (mut lines, mut col) = (1usize, 0usize);
+        for &ch in &self.chars {
+            if ch == '\n' { lines += 1; col = 0; continue; }
+            let width = cell_width(ch);
+            if col + width > available && col > 0 { lines += 1; col = 0; }
+            col += width;
+        }
+        lines
+    }
+    /// Whether the draft has more rows than the box shows: then the box's last column is the
+    /// scrollbar's, and the text wraps one cell earlier so no character sits under it.
+    pub fn overflows(&self) -> bool {
+        self.wrapped_lines(self.width.saturating_sub(BOX_CHROME)) > self.max_rows()
+    }
+    fn wrap_width(&self) -> usize {
+        self.width.saturating_sub(BOX_CHROME + usize::from(self.overflows()))
+    }
+    /// The box's rows on screen, borders included: `(top border, bottom border)`. None when not drawn.
+    pub fn box_rows(&self) -> Option<(usize, usize)> {
+        if !self.drawable() { return None; }
+        Some((self.top(), self.bottom()))
+    }
+    /// The wheel over the box: move the visible lines `rows` up or down, without moving the cursor.
+    /// False when the draft fits (nothing to scroll) - the caller then leaves the wheel to the chat.
+    pub fn wheel(&mut self, up: bool, rows: usize) -> bool {
+        if !self.drawable() { return false; }
+        let (lines, cursor) = self.layout();
+        let (first, shown, _) = self.frame_geometry(lines.len(), cursor.0);
+        if lines.len() <= shown { return false; }
+        let last = lines.len() - shown;
+        self.scroll = Some(if up { first.saturating_sub(rows) } else { (first + rows).min(last) });
+        true
+    }
     fn layout(&self) -> (Vec<String>, (usize, usize)) {
-        let available = self.width.saturating_sub(BOX_CHROME);
+        let available = self.wrap_width();
         let mut lines = vec![String::new()];
         let (mut line, mut col) = (0usize, 0usize);
         let mut cursor = (0usize, 0usize);
@@ -743,18 +793,21 @@ impl Editor {
     /// above it stay blank - the status line sits on the row above the reservation.
     /// Returns (first visible draft line, visible rows, top border row).
     fn frame_geometry(&self, lines: usize, cursor_line: usize) -> (usize, usize, usize) {
-        let shown = lines.clamp(1, self.height);
-        let first = cursor_line.saturating_sub(shown - 1).min(lines.saturating_sub(shown));
+        let shown = lines.clamp(1, self.max_rows().max(1));
+        let follow = cursor_line.saturating_sub(shown - 1).min(lines.saturating_sub(shown));
+        let first = self.scroll.map(|first| first.min(lines.saturating_sub(shown))).unwrap_or(follow);
         (first, shown, self.bottom().saturating_sub(shown + 1))
     }
 
-    fn drawable(&self) -> bool { self.bottom() > self.height + 1 && self.width >= 12 && self.height > 0 }
+    fn drawable(&self) -> bool { self.bottom() > self.height.min(3) + 1 && self.width >= 12 && self.height > 0 }
 
     /// Explicit placement avoids saved cursors moving with Windows scrollback.
     pub fn cursor_frame(&self) -> String {
         if !self.drawable() { return String::new(); }
         let (lines, cursor) = self.layout();
-        let (first, _, top) = self.frame_geometry(lines.len(), cursor.0);
+        let (first, shown, top) = self.frame_geometry(lines.len(), cursor.0);
+        // The wheel moved the cursor's line out of the box: nothing to place (render hid the cursor).
+        if cursor.0 < first || cursor.0 >= first + shown { return String::new(); }
         format!("\x1b[{};{}H", top + 1 + cursor.0 - first, self.left(cursor.0) + 1 + cursor.1)
     }
     /// Where a draft line's text starts: after `❯ ` on the first line, and under it on the others.
@@ -825,6 +878,14 @@ impl Editor {
                 frame.push_str(text);
             }
         }
+        // The scrollbar, when the draft has more rows than the box: the transcript's own bar
+        // (`scroll::bar`: same track, thumb and colours) on the box's last column, one cell per row.
+        if lines.len() > shown {
+            let bar = crate::scroll::bar::Bar::new(shown, lines.len(), first);
+            for (visual, (glyph, colour)) in bar.cells().into_iter().enumerate() {
+                frame.push_str(&format!("\x1b[{};{}H{colour}{glyph}{RESET}", top + 1 + visual, self.width));
+            }
+        }
         frame.push_str(&format!("\x1b[{};1H\x1b[2K{border}{}{RESET}", bottom, "\u{2500}".repeat(self.width)));
         // The footer under the box - hints or the last run's numbers on the left, the model on the
         // right - and the slash menu above the input, opening upward toward the chat.
@@ -855,8 +916,10 @@ impl Editor {
                 frame.push_str(&format!("\x1b[{};1H\x1b[2K{color}{name}{RESET}{HINT}{hint}{RESET}", top - menu + offset));
             }
         }
-        frame.push_str(&format!("\x1b[{};{}H", top + 1 + cursor.0 - first, self.left(cursor.0) + 1 + cursor.1));
-        frame.push_str("\x1b[?25h");
+        if cursor.0 >= first && cursor.0 < first + shown {
+            frame.push_str(&format!("\x1b[{};{}H", top + 1 + cursor.0 - first, self.left(cursor.0) + 1 + cursor.1));
+            frame.push_str("\x1b[?25h");
+        }
         frame
     }
 }
@@ -2003,10 +2066,48 @@ mod tests {
         type_bytes(&mut e, b"\x1b[1;5H\x1b[B"); assert_eq!(e.cursor, 4, "Down from the first line moves a line");
     }
     #[test]
+    fn the_box_grows_to_thirty_percent_of_the_window_then_scrolls_under_a_bar() {
+        // A 40-row window: the limit is 12 rows (30% of 40), not the three the view asked for.
+        let mut e = Editor::default(); e.row = 39; e.width = 80; e.height = 3;
+        for i in 0..40 { if i > 0 { e.insert('\n'); } for ch in format!("line{i:02}").chars() { e.insert(ch); } }
+        assert_eq!(e.max_rows(), 12);
+        let (top, bottom) = e.box_rows().expect("drawn");
+        assert_eq!(bottom - top - 1, 12, "twelve draft rows between the two rules");
+        let frame = e.render();
+        assert!(frame.contains("line39") && frame.contains("line28") && !frame.contains("line27"), "the last twelve lines: {frame:?}");
+        for row in top + 1..bottom {
+            assert!(frame.contains(&format!("\x1b[{row};80H")), "the bar's cell on row {row}, in the last column");
+        }
+        assert!(frame.contains(crate::scroll::bar::THUMB) && frame.contains(crate::scroll::bar::TRACK), "the transcript's glyphs");
+        // The wheel moves the lines, not the cursor; with the cursor's line out of the box it is hidden.
+        assert!(e.wheel(true, 3));
+        let frame = e.render();
+        assert!(frame.contains("line25") && frame.contains("line36") && !frame.contains("line37"), "{frame:?}");
+        assert!(e.cursor_frame().is_empty() && !frame.contains("\x1b[?25h"), "no cursor is placed outside the box");
+        assert_eq!(e.cursor(), e.chars.len(), "the wheel never moves the cursor");
+        for _ in 0..40 { e.wheel(true, 3); }
+        assert!(e.render().contains("\u{276f} line00"), "the wheel stops at the first line");
+        // A key is about the cursor: its line comes back.
+        let _ = e.feed(b'x');
+        assert!(e.render().contains("line39x"));
+        // The limit follows the window: 12 rows -> three, 10 rows -> three.
+        e.row = 11; assert_eq!(e.max_rows(), 3);
+        e.row = 9; assert_eq!(e.max_rows(), 3);
+        // A draft that fits has no bar and leaves the wheel to the chat.
+        let mut short = Editor::default(); short.row = 39; short.width = 80; short.height = 3;
+        for ch in "one\ntwo".chars() { short.insert(ch); }
+        assert!(!short.wheel(true, 3) && !short.overflows());
+        assert!(!short.render().contains(crate::scroll::bar::TRACK));
+    }
+    #[test]
     fn long_draft_does_not_wrap_terminal() {
-        let mut e = Editor::default(); e.row = 15; e.width = 12; e.height = 3;
+        // A 12-row window (row 11): the box's limit is three rows there (30% of 12 is 3), which is the
+        // limit this test was written against; at 16 rows the limit is four and the draft would fit.
+        let mut e = Editor::default(); e.row = 11; e.width = 12; e.height = 3;
         type_bytes(&mut e, b"abcdefghijklmnopqrstuvwxyz0123456789");
-        assert!(e.render().contains("uvwxyz0123") && e.render().contains("456789"));
+        // Four rows of text in a three-row box: the last column is the scrollbar's, so the draft wraps at
+        // nine cells (it was ten before the box had a bar) and the last three rows are the ones shown.
+        assert!(e.render().contains("stuvwxyz0") && e.render().contains("123456789") && e.render().contains("jklmnopqr"));
         assert!(!e.render().contains("\u{276f} abcdef"), "older rows scroll out of the editor");
         assert_eq!(type_bytes(&mut e, b"\r"), Action::Submit("abcdefghijklmnopqrstuvwxyz0123456789".into()));
     }

@@ -87,8 +87,8 @@ impl Console {
         for event in mice {
             use crate::selection::Mouse;
             match event {
-                Mouse::WheelUp => { self.wheel(true); handled.changed = true; }
-                Mouse::WheelDown => { self.wheel(false); handled.changed = true; }
+                Mouse::WheelUp(..) => { self.wheel(true); handled.changed = true; }
+                Mouse::WheelDown(..) => { self.wheel(false); handled.changed = true; }
                 // A press on the bar jumps there and grabs the thumb; a drag with the button down
                 // scrolls; the button coming up lets go. A press anywhere else is not the bar's.
                 Mouse::Press(row, col) => { handled.changed |= self.chat.bar_press(row, col, width); }

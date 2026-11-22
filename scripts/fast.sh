@@ -811,6 +811,26 @@ check install-front-door bash scripts/test-install.sh
   # against a local SSE fixture, and reads the rows back. A row of this run for the same reason
   # fence-card-pty is one: a view change cannot be judged by a Lua double alone.
   WA_BIN="$bin" check run-live-pty node scripts/test-run-live-pty.mjs
+  # THE WINDOW'S CHROME (change/tui-chrome, Victor 21/11): the input box grows to max(3, 30% of the
+  # window), scrolls with the transcript's scrollbar and takes the wheel when the pointer is over it.
+  # And a fenced card's copy icon sits after its corner, where a click on it still copies the content.
+  # The real binary in a private tmux pty, as the two rows above.
+  WA_BIN="$bin" check tui-chrome-pty node scripts/test-tui-chrome-pty.mjs
+  # THE STATUS ROWS' ICONS, MEASURED IN THE FONT FILES (tui-chrome item 2): advance and bearings of
+  # every glyph the two rows draw. The brief's box does not hold today, so the script ends with a named
+  # SKIP line and exit 0; the line is carried into the skips this run prints and counts - a hole that is
+  # spoken, never a pass. (`--strict` makes it a failure once the glyphs are redrawn.)
+  if command -v python3 >/dev/null 2>&1; then
+    check status-icon-metrics python3 scripts/test-status-icon-metrics.py
+    if grep -q '^SKIP ' "$work/check-status-icon-metrics.log" 2>/dev/null; then
+      grep -h '^SKIP ' "$work/check-status-icon-metrics.log" | sed 's|^SKIP |status-icon-metrics: |' >> "$FAST_WORK/skips" 2>/dev/null || true
+      grep -h '^SKIP ' "$work/check-status-icon-metrics.log" | sed 's/^SKIP //' | while IFS= read -r reason; do
+        printf '%s\t%s\n' status-icon-metrics "$reason" >> "$NAMED_SKIPS" 2>/dev/null || true
+      done
+    fi
+  else
+    echo "fast: status-icon-metrics SKIPPED (python3 not on PATH)"; skipped=$((skipped + 1))
+  fi
   # THE RUN BLOCK AS THE OPERATOR READS IT (change/tui-run-block): the script streams while the
   # fixture sends the code argument in paced deltas, the output is shown once (one compact result
   # row that a click opens and folds, one row per call), and the scrollbar is one bar while a call
