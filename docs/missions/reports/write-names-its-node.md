@@ -140,6 +140,16 @@ No schema text, description, refusal sentence or prompt document changed (measur
 hash, above). The regression messages in `scripts/test-write-node-receipt.lua` are test text, not
 model-facing.
 
+### Which word "avell" will be
+
+The acceptance test expects `node: "avell"`. The field is `nodes.node_name()`, whose order is the stored
+name file, then the checkout's directory name, then `WASM_AGENT_NODE_NAME`, then `"host"`
+(`lua/core/nodes.lua:121-131`) - the same word `wa nodes` prints for this node. Measured in this mission's
+worktree, a scratch home and `WASM_AGENT_NODE_NAME=avell` set: the receipt says `"node":"wt"`, because the
+directory name wins over the environment on a master node. So on a node whose checkout, name file or
+`wa nodes` line says `avell`, the receipt says `avell`; in a mission worktree it names the worktree. That
+is deliberate and is why the row asserts equality with `nodes`, not the literal string.
+
 ## Not done / still unknown
 
 * No `node` parameter on write/edit (by the mission's instruction), so a model still cannot *aim* a write
