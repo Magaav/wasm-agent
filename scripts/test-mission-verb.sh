@@ -117,8 +117,12 @@ R=$MISSION_ROOT/refused
 # caller's own timeout (measured: the discrimination gate reported it `timeout`, 22/11). A row that hangs cannot
 # say what is wrong; one that ends in 120 s says it.
 TO=""; command -v timeout >/dev/null 2>&1 && TO="timeout 120"
-out=$($TO env WA_DEPLOY_WAIT_STEP=1 WA_DEPLOY_WAIT_LIMIT=60 bash "$R/run.sh" 2>&1); code=$?
+out=$($TO env WA_DEPLOY_WAIT_STEP=1 WA_DEPLOY_WAIT_LIMIT=60 bash "$R/run.sh" > "$WORK/refused-run.log" 2>&1; code=$?; cat "$WORK/refused-run.log")
 [ "$code" = 124 ] && fail 'the generated runner never returned (a wait that does not end?)'
+# THE RUNNER'S OUTPUT GOES TO A FILE, not through `$( )`: the base runner's timeout watchdog leaves a `sleep`
+# holding an inherited pipe, so a command substitution waited for six hours of an orphan and this row was
+# reported as `timeout` (discrimination gate, 22/11). A file has no such reader, and `timeout 120` above is
+# then a real bound.
 [ "$code" = 0 ] || fail "the runner exits with the turn that finally ran (got $code): $out"
 ok
 has "$(cat "$R/done")" 'rc=0' 'the refusal was waited out, not recorded as the mission run'
@@ -140,7 +144,7 @@ printf 'Never.\n' > "$MISSION_ROOT/never/brief.md"
 out=$(mission launch never HEAD --wa "$WORK/bin/refuse-always-wa" 2>&1)
 has "$out" '"ok":true' 'the always-refused mission is staged'
 N=$MISSION_ROOT/never
-out=$($TO env WA_DEPLOY_WAIT_STEP=1 WA_DEPLOY_WAIT_LIMIT=2 bash "$N/run.sh" 2>&1); code=$?
+out=$($TO env WA_DEPLOY_WAIT_STEP=1 WA_DEPLOY_WAIT_LIMIT=2 bash "$N/run.sh" > "$WORK/never-run.log" 2>&1; code=$?; cat "$WORK/never-run.log")
 [ "$code" = 124 ] && fail 'the generated runner never returned on a refusal it could not wait out'
 [ "$code" = 2 ] || fail "a wait that never ends exits 2, the refusal itself (got $code): $out"
 ok
