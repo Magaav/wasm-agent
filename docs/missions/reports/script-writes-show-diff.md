@@ -115,20 +115,24 @@ Two measurements, both on this node:
   transcript keeps turns, not cards, so `wa chat --continue` shows the same rows it showed before this
   change (the tool result, no card). Doing it means persisting view events in the session record and
   drawing them on replay - more than a small change, so it is left, as the brief allows.
-- **One full fast-path run, and the one row failure in it that was not reproduced.** The full fast path
-  at `fcea7d22` reported 2 failures of 394: `scripts/test-land-quick.lua` (exit 124, the watchdog killed
-  it after 120 s with no verdict, classified `environment`) and this mission's own row
-  (`FAILED 4`). The row then passed: alone (`33 checks`), four instances at once, with the runner's own
-  row environment replicated by hand (cleared env, the built components installed in the home,
-  `WA_COMPONENTS_DIR`/`WASM_AGENT_MANAGED=0`), and against a worktree of the base where it fails as it
-  must. The one mechanism that does explain it was found and fixed: a scripted `rm -f` comes back as
-  `{state:"pending"}` while the operation slots are busy, and the row walked away from the handle, so the
-  Delete was never there to see (`3b9bfcd7` now resumes it, as a real script does). The row also prints
-  the first failing check in its verdict line now (`3fe4471b`), so the next occurrence names itself
-  instead of dying with the runner's work directory.
-  Narrowed reproduction was attempted and is **not possible by row name**: `WA_FAST_ROWS` is a list of
-  CHANGED PATHS (`scripts/lib/fast-rows.sh`), so a row name is refused by name - two attempts of mine
-  therefore ran no rows at all and proved nothing; the full suite is the faithful door.
+- **The full fast path, measured twice, and what it found (both named by the runner, not by me).**
+  Run 1 at `fcea7d22`: 394 checks, 2 failed - `scripts/test-land-quick.lua` (exit 124, the watchdog
+  killed it after 120 s with no verdict, classified `environment`) and this mission's own row
+  (`FAILED 4`). `test-land-quick` passed in run 2, so that one was the machine.
+  Run 2 at `4ed7e6a9`: 394 checks, 2 failed - the same row, and `install-guards` (6 checks), which fails
+  the SAME 6 on a worktree of the base `c6f890e3` in this environment: it expects the `upgrade`
+  candidate-commit guards and gets `upgrade: refused inside a turn running on the node it would
+  replace`, i.e. this shell is inside a turn. **Pre-existing and environmental, not this branch.**
+  The row's failure was real and is fixed: the verdict line added in `3fe4471b` named the first
+  failing check (`the created file is named Create(path)`), and the cause was the CARD, drawn at a
+  fixed width of 80, being cut inside its frame because the runner's scratch home makes the file's
+  path ~105 cells deep - so the heading `Create(<path>)` wrapped onto two rows. Four path-shaped
+  assertions failed on a card that was drawn correctly. `0e347215` draws the card at a width that
+  fits its own path (verified with a home of the runner's shape); cutting inside the card stays
+  `tests/diff-view.lua`'s subject at its own widths.
+  Narrowed reproduction is **not possible by row name**: `WA_FAST_ROWS` is a list of CHANGED PATHS
+  (`scripts/lib/fast-rows.sh`), so a row name is refused by name - two attempts of mine therefore ran
+  no rows at all and proved nothing. The full suite is the faithful door.
 - **My own rule breach, reported rather than hidden:** one throwaway debug script of mine
   (`/tmp/swsd-dbg2.lua`, run by hand at ~22:15Z) drove a real agent loop whose provider seam was not
   stubbed, so it reached the operator's provider through `WASM_AGENT_VAULT_URL` and spent three model
