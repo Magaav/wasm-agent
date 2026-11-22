@@ -118,6 +118,10 @@ const ENV = {
   WASM_AGENT_MANAGED: '0',
   WASM_AGENT_PROVIDER_RETRIES: '0',
   WA_SKIP_UPDATE_CHECK: '1',
+  // The opening (Victor 22/11) is measured by its own row (WA_BIN=... cargo test -p wa-term --test
+  // opening, and scripts/test-opening.lua); this file drives `wa chat` for something else and should
+  // not pay two seconds of animation before the screen it reads.
+  WASM_AGENT_CLI_OPENING: 'off',
   COLUMNS: String(WIDE),
   LINES: '40',
 };

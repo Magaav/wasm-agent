@@ -77,6 +77,13 @@ local topic = view_lib.banner({ live = false })
 ok(not has(topic, MATRIX), "nothing else in the welcome block turned green")
 
 -- ---- 2. the policy ---------------------------------------------------------------------
+--
+-- Everything below asks `cli_view.opening`, which this change ADDS. The guard is not a relaxation: a
+-- build without it fails here by name, and the colour checks above still decide the verdict on the old
+-- code (scripts/test-discriminates.sh reads exactly that).
+if type(view_lib.opening) ~= "function" then
+  ok(false, "cli_view.opening exists: the policy this change adds")
+else
 
 local function env(t) return function(name) return t[name] end end
 local TERM = { TERM = "xterm-256color" }
@@ -118,7 +125,17 @@ ok(asks({ getenv = env({ TERM = "xterm", WASM_AGENT_CLI_OPENING = "0" }) }) == f
 ok(asks({ getenv = env({ TERM = "xterm", WASM_AGENT_CLI_OPENING = "nonsense" }) }) == true,
   "a value that parses as neither is left at its default, as every other knob does")
 
+end
+
 -- ---- 3. the block the opening's last beat draws -----------------------------------------
+
+if type(view_lib.new) ~= "function" then ok(false, "cli_view.new exists")
+elseif not (function()
+  local probe = view_lib.new({ out = function() end, live = true, limit = 100 })
+  return type(probe.welcome_painted) == "function"
+end)() then
+  ok(false, "the view can hand its painted block over (welcome_painted)")
+else
 
 -- The opening paints the welcome block EXACTLY as the view would, so the frame it hands over to is the
 -- frame behind it. That is `welcome_painted`: the same composition, with the rule expanded at the width
@@ -133,6 +150,8 @@ ok(first == string.rep("\226\148\128", 100), "the rule is the console's width, n
 ok(has(block, MATRIX .. STAR), "and the star is the green one in the block too")
 ok(has(visible(block), STAR .. " Welcome to wasm-agent! v23791f56"), "with the line's words unchanged")
 ok(not block:find("\1r\1", 1, true), "no rule marker survives into what the opening draws")
+
+end
 
 print("opening: " .. (checks - failed) .. " ok, " .. failed .. " failed")
 if failed > 0 then os.exit(1) end

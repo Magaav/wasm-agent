@@ -357,7 +357,10 @@ ok(#handed == 1 and handed[1].kind == "start", "a starting run hands its line to
 local spec = handed[1].spec
 ok(type(spec) == "table" and type(spec.line) == "string", "and what it hands over is a line")
 ok(spec.line == animated:status_template(), "the layout, with its two tokens still in it")
-ok(spec.marks[1] == view_lib.paint(view_lib.spinner(0), "accent", true) .. " ", "this view's marks, in this view's order")
+-- The mark's colour is `matrix`, not `accent`, since Victor's change of 22/11: the animated first glyph
+-- of the run status row is the matrix green (the phase word after it keeps the accent, asserted below).
+ok(spec.marks[1] == view_lib.paint(view_lib.spinner(0), "matrix", true) .. " ",
+  "this view's marks, in this view's order, in the green of the welcome star")
 ok(spec.started == animated.turn.started, "and the origin of the clock, so a redraw does not restart it")
 ok(not has(spec.line, view_lib.spinner(0)), "no frame is baked into the layout")
 

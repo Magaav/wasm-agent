@@ -19,8 +19,6 @@ static HELD: Mutex<Option<String>> = Mutex::new(None);
 
 pub fn hold() { *HELD.lock().unwrap_or_else(|e| e.into_inner()) = Some(String::new()); }
 
-pub fn holding() -> bool { HELD.lock().unwrap_or_else(|e| e.into_inner()).is_some() }
-
 /// Stop keeping writes, answering what was kept (empty when nothing was).
 pub fn release() -> String {
     HELD.lock().unwrap_or_else(|e| e.into_inner()).take().unwrap_or_default()

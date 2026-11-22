@@ -80,7 +80,11 @@ impl Pty {
         let stdin = unsafe { Stdio::from_raw_fd(libc::dup(slave)) };
         let stdout = unsafe { Stdio::from_raw_fd(libc::dup(slave)) };
         let mut command = Command::new(bin);
-        command.args(args).stdin(stdin).stdout(stdout).stderr(Stdio::null()).current_dir(dir);
+        // env_clear: an allow-list, not this machine's environment. Without it the test inherited the
+        // operator's provider, vault and relay variables, and the screen it compared held a model this
+        // test never configured (measured: `deepseek-v4.1-flash @ http://127.0.0.1:8810/...` on a scratch
+        // home that has no provider at all).
+        command.args(args).stdin(stdin).stdout(stdout).stderr(Stdio::null()).current_dir(dir).env_clear();
         for (key, value) in env { command.env(key, value); }
         unsafe {
             command.pre_exec(|| {
@@ -228,7 +232,15 @@ fn normalise(rows: &[String]) -> Vec<String> {
             out.push(chars[at]);
             at += 1;
         }
-        out.trim_end().to_string()
+        // The welcome line names the BUILD (`✻ Welcome to wasm-agent! v<commit>`), and two binaries cannot
+        // carry the same one: the row is compared with that one token blanked, not dropped.
+        let mut text = out.trim_end().to_string();
+        if let Some(at) = text.find("Welcome to wasm-agent! v") {
+            let start = at + "Welcome to wasm-agent! ".len();
+            let end = text[start..].find(' ').map(|space| start + space).unwrap_or(text.len());
+            text.replace_range(start..end, "<version>");
+        }
+        text
     }).collect()
 }
 
@@ -282,6 +294,25 @@ fn the_opening_plays_and_leaves_the_screen_a_start_without_it_leaves() {
     without.stop();
 
     assert!(played, "the opening played and the start finished: {} frames", animation_frames(&with_bytes));
+
+    // PARITY WITH THE CODE THIS REPLACES (rule 14), when the gate hands over a base binary: the screen
+    // a start leaves with the opening OFF is the screen the base's own binary leaves - the same bytes, in
+    // the same order, not merely the same picture as this build draws without it.
+    if let Some(base) = std::env::var("WA_BASE_BIN").ok().map(PathBuf::from).filter(|path| path.is_file()) {
+        let mut original = Pty::spawn(&base, &dir, &pairs(&env), &args);
+        original.read_quiet(Duration::from_millis(800), Duration::from_secs(20));
+        let base_screen = normalise(&original.screen().rows());
+        original.stop();
+        assert_eq!(without_screen, base_screen,
+            "opening = off writes the screen the base binary writes:
+--- this tree, off ---
+{}
+--- base ---
+{}",
+            without_screen.join("
+"), base_screen.join("
+"));
+    }
     assert_eq!(without_frames, 0, "opening = off writes no animation frame at all");
     let text = String::from_utf8_lossy(&with_bytes).to_string();
     assert!(text.contains("\u{1b}[?1049l"), "and it gives the reader's own screen back: {:?}",
@@ -430,7 +461,7 @@ fn the_window_too_small_for_the_box_gets_no_opening() {
     let stdin = unsafe { Stdio::from_raw_fd(libc::dup(slave)) };
     let stdout = unsafe { Stdio::from_raw_fd(libc::dup(slave)) };
     let mut command = Command::new(&bin);
-    command.args(&args).stdin(stdin).stdout(stdout).stderr(Stdio::null()).current_dir(&dir);
+    command.args(&args).stdin(stdin).stdout(stdout).stderr(Stdio::null()).current_dir(&dir).env_clear();
     for (key, value) in pairs(&env) { command.env(key, value); }
     unsafe { command.pre_exec(|| { libc::setsid(); Ok(()) }); }
     let mut child = command.spawn().expect("starts");
