@@ -216,14 +216,14 @@ function M.begin_window(patience_ms)
   local patience = math.max(1, math.floor(tonumber(patience_ms) or 400))
   local current = pragma("PRAGMA busy_timeout")
   local previous = tonumber(type(current) == "table" and (current[1] and (current[1].timeout or current[1].busy_timeout) or nil)) or nil
-  -- The statement's own wait, and the policy's attempt count, are the same number (see below): one attempt
-  -- of `patience` ms per write, never five of them.
-  if not pragma("PRAGMA busy_timeout = " .. patience) then return false end
-  -- The same bound, told to the policy module that decides patience for the SQL layer itself
-  -- (rust/wa-sqlite, reached through host.sql_patience): without it the host retries a refused statement
-  -- 5 times of its own accord, and 5 x the window is what turned a 400 ms wait into a 2.2 s write
-  -- (measured 22/11).
-  if type(host.sql_patience) == "function" then pcall(host.sql_patience, tostring(patience)) end
+  -- TWO NUMBERS, ONE WAIT. A newer host takes the window itself (`host.sql_patience`, one attempt) and
+  -- the statement may then wait up to `patience`; an older host has no such knob and retries every
+  -- statement five times of its own accord, so there the connection must not wait at all or the window is
+  -- multiplied by five (measured 22/11: 400 ms became 2.2 s per refused write). A Lua-only deploy
+  -- therefore still bounds the preamble - it just bounds it a little less tightly.
+  local bounded_host = type(host.sql_patience) == "function"
+  if not pragma("PRAGMA busy_timeout = " .. (bounded_host and patience or 0)) then return false end
+  if bounded_host then pcall(host.sql_patience, tostring(patience)) end
   window.open = true
   window.busy = false
   window.patience = patience

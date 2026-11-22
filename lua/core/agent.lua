@@ -2241,7 +2241,9 @@ function M:run_body(text, images)
   -- honoured. The pin already degrades to ordinary tools; the notice is what stops "code mode is broken"
   -- from looking exactly like "the agent ignored me" (2026-10-22: seven queued turns failed silently).
   local codemode=dofile('lua/core/codemode_policy.lua')
-  self:preflight_start()
+  -- The clock is NOT started here any more: M:run starts it before the preamble, and a second start would
+  -- throw away the phases that preamble already marked (resources, steering_begin, provider_pin,
+  -- context_boundary) - which are exactly the ones a held ledger lock is paid in (change/start-instant).
   self.codemode_policy=codemode.pin(memory,self.role,{session_id=self.session_id,user_id=self.user,role=self.role,subagent=self.subagent})
   if self.codemode_policy.unavailable then
     self.emit({ type = 'status', text = 'code mode unavailable ('..tostring(self.codemode_policy.unavailable):sub(1,160)..') - this run uses ordinary tools' })
