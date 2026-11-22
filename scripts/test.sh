@@ -1335,6 +1335,13 @@ gate_run node scripts/test-graph-impact-paging.cjs "$HISTORY_BIN" "$IMPACT_EVIDE
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-session-owner.lua" "$BIN" --db "$DB.session-owner" | grep 'session owner ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-session-worktree.lua" "$BIN" --db "$DB.session-worktree" | grep 'session worktree ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-session-fork.lua" "$BIN" --db "$DB.session-fork" | grep 'session fork ok'
+# A session whose mission was stopped must STAY stopped (Fable 22/11): parked, its due wake dispatches
+# nothing and is held (not dropped), `wa chat --resume` refuses it by name, and releasing it runs that same wake
+# exactly once. The lua row is the ledger and the tick on a real store (it is also a fast-path row by name);
+# the shell row is the operator path across processes - the verb, the refusal a script reads, and a wake that
+# was written by `deploy_pause` and performed only after the release.
+GATE_ROOT="$GATE_ROOT" WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-session-park.lua" "$BIN" --db "$DB.session-park" | grep 'session park ok'
+gate_run bash scripts/test-session-park.sh
 # WHO counts as this node's operator session, through the real constructors: a bare `wa chat` and `/new` build
 # their sessions with objective "chat" (`chat.lua`, `commands.new_session`), so a rule that only accepted an empty
 # objective refused the node's own conversation and admitted nobody else. A `remote` session (another node's

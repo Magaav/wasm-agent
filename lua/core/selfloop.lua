@@ -14,9 +14,12 @@
 --   self_notes          one document per session, owned by the model.
 --   self_notes_archive  the versions a write/compact replaced, retrievable by id.
 --   self_wake_pauses    sessions whose schedule is held: an interrupted run pauses the whole
---                       schedule (operator, 13/11). A paused wake is still a pending wake - nothing
---                       about it was decided - so it keeps its time, its order and its target, and an
---                       overdue one fires once after the resume, never once per missed interval.
+--                       schedule (operator, 13/11), and the operator parks one outright (22/11). A
+--                       held wake is still a pending wake - nothing about it was decided - so it
+--                       keeps its time, its order and its target, and an overdue one fires once after
+--                       the hold is lifted, never once per missed interval. `kind` says which hold it
+--                       is: `pause` is lifted by coming back to the session, `park` only by
+--                       `wa session release <id>`.
 --
 -- Dispatch: a wake becomes due on the node's existing placement tick (`wa_orchestrator_tick`, every
 -- 2s, `lua/core/subagents.lua`) and is handed to the run scheduler through
@@ -100,7 +103,8 @@ local SCHEMA = {
     session_id TEXT PRIMARY KEY,
     owner TEXT NOT NULL DEFAULT '',
     reason TEXT NOT NULL DEFAULT '',
-    paused_at REAL NOT NULL
+    paused_at REAL NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'pause'
   )]],
 }
 
@@ -109,6 +113,15 @@ local SCHEMA = {
 function M.setup()
   if ready then return true end
   for _, statement in ipairs(SCHEMA) do exec(statement, {}) end
+  -- `kind` arrived with the park (22/11): `CREATE TABLE IF NOT EXISTS` leaves an existing ledger's table
+  -- exactly as it is, so the column is added by a conditional ALTER. Without it every ledger older than
+  -- this line would read a park as a pause - and a pause is lifted by coming back to the session, which
+  -- is the one thing a park must never be.
+  local has_kind = false
+  for _, row in ipairs(query("PRAGMA table_info(self_wake_pauses)", {})) do
+    if tostring(row.name or "") == "kind" then has_kind = true end
+  end
+  if not has_kind then exec("ALTER TABLE self_wake_pauses ADD COLUMN kind TEXT NOT NULL DEFAULT 'pause'", {}) end
   ready = true
   return true
 end
@@ -485,6 +498,7 @@ function M.summary(session_id, opts)
       seam_answer.paused = held ~= nil
       seam_answer.paused_since = held and tonumber(held.paused_at) or nil
       seam_answer.paused_reason = held and tostring(held.reason or "") or nil
+      seam_answer.parked = (held ~= nil and tostring(held.kind or "pause") == "park") or nil
     end
     return seam_answer
   end
@@ -509,6 +523,9 @@ function M.summary(session_id, opts)
   out.paused = held ~= nil
   out.paused_since = held and tonumber(held.paused_at) or nil
   out.paused_reason = held and tostring(held.reason or "") or nil
+  -- The operator's park is a hold too, and the one a reader must not confuse with an interrupt: this is
+  -- the fact `wa session status` and the footer print as held.
+  out.parked = (held ~= nil and tostring(held.kind or "pause") == "park") or nil
   return out
 end
 
@@ -517,6 +534,12 @@ end
 function M.footer_text(session_id, opts)
   local ok, summary = pcall(M.summary, session_id, opts)
   if not ok or not summary or (summary.total or 0) == 0 then return "" end
+  -- A park is not an interruption: it is the operator stopping the session, and the footer names it so
+  -- a reader does not go looking for the interrupt that paused it.
+  if summary.parked then
+    return "\226\143\176 " .. tostring(summary.total)
+      .. (summary.total == 1 and " wake held (session parked)" or " wakes held (session parked)")
+  end
   if summary.paused then
     return "\226\143\176 " .. tostring(summary.total) .. (summary.total == 1 and " wake paused" or " wakes paused")
   end
@@ -542,6 +565,7 @@ function M.list(args, ctx)
       local summary = M.summary(tostring((ctx or {}).session_id or args.session_id or ""), { now = clock(args) })
       seam_answer.paused = summary.paused and true or false
       seam_answer.paused_reason = summary.paused_reason
+      seam_answer.parked = summary.parked and true or false
     end
     return seam_answer
   end
@@ -557,7 +581,8 @@ function M.list(args, ctx)
   local summary = M.summary(session.id, { now = now })
   return { wakes = wakes, count = #wakes, now = now, pending = summary.pending,
     event_pending = summary.event_pending, next_at = summary.next_at,
-    paused = summary.paused and true or false, paused_reason = summary.paused_reason }
+    paused = summary.paused and true or false, paused_reason = summary.paused_reason,
+    parked = summary.parked and true or false }
 end
 
 function M.cancel(args, ctx)
@@ -644,17 +669,122 @@ function M.resume(session_id, owner, opts)
   local pending = query([[SELECT COUNT(*) AS n, MIN(CASE WHEN due_at IS NOT NULL AND due_at<=? THEN due_at END) AS overdue_at,
       SUM(CASE WHEN due_at IS NOT NULL AND due_at<=? THEN 1 ELSE 0 END) AS overdue
     FROM self_wakes WHERE session_id=? AND status='pending']], { now, now, session_id })[1] or {}
+  if held and tostring(held.kind or "pause") == "park" then
+    -- The operator stopped this session on purpose (22/11): coming back to it is not the release. The
+    -- call is not refused - a resume that answers `held` is what every caller needs - but it lifts
+    -- nothing, and it names the command that does.
+    return { ok = true, paused = true, resumed = false, parked = true, since = tonumber(held.paused_at),
+      reason = tostring(held.reason or ""), pending = tonumber(pending.n) or 0,
+      overdue = tonumber(pending.overdue) or 0, overdue_at = tonumber(pending.overdue_at),
+      note = "the session is parked: release it with `wa session release " .. session_id .. "`" }
+  end
   if not held then
     return { ok = true, paused = false, resumed = false, pending = tonumber(pending.n) or 0,
       overdue = tonumber(pending.overdue) or 0 }
   end
-  local changed = exec("DELETE FROM self_wake_pauses WHERE session_id=?", { session_id })
+  local changed = exec("DELETE FROM self_wake_pauses WHERE session_id=? AND kind<>'park'", { session_id })
   if (tonumber(changed.changes) or 0) ~= 1 then
     return { ok = true, paused = true, resumed = false, note = "the hold changed underneath this call" }
   end
   return { ok = true, paused = false, resumed = true, since = tonumber(held.paused_at),
     reason = tostring(held.reason or ""), pending = tonumber(pending.n) or 0,
     overdue = tonumber(pending.overdue) or 0, overdue_at = tonumber(pending.overdue_at) }
+end
+
+-- ---- park: the operator stops a session on purpose (22/11) ---------------------------------
+--
+-- Measured 22/11: mission flaky-rel-native-poll was stopped on purpose (its unit stopped at 00:10Z, a
+-- HOLD file written) and its session kept working - 196 messages at the stop, 263 an hour later. Each
+-- install had written a "deploy pending: resume after the node swap" wake (lua/core/deploy_pause.lua)
+-- and the node's own tick performed it. A stopped unit and a HOLD file live outside this program, so
+-- nothing here knew the session was parked, and no verb could say so.
+--
+-- A park is the hold the interrupt pause already is (`self_wake_pauses`: the rows are never rewritten,
+-- so a pending wake keeps its time, its order and its target; the tick dispatches none of them and
+-- counts them held; the release makes each due once), with the one difference that decides
+-- everything: a park is NOT lifted by coming back to the session. `M.resume` - the single door `wa
+-- chat --resume`, `wa resume --session` and a user message go through - refuses it by name, and only
+-- `wa session release <id>` deletes the row. A hold the session's own next visit undid would not have
+-- stopped the 22/11 session for an hour.
+
+-- The hold on a session with its kind told apart, or nil. One indexed read, like `M.paused`.
+function M.hold(session_id)
+  local row = M.paused(session_id)
+  if type(row) ~= "table" then return nil end
+  return { session_id = tostring(row.session_id or ""), kind = tostring(row.kind or "pause"),
+    owner = tostring(row.owner or ""), reason = tostring(row.reason or ""),
+    since = tonumber(row.paused_at) }
+end
+
+-- How many of a session's wakes a hold is keeping, and how many of those are already due. The same
+-- facts `M.resume` reports, so a park and a resume describe a hold the same way.
+local function pending_counts(session_id, now)
+  local row = query([[SELECT COUNT(*) AS n,
+      SUM(CASE WHEN due_at IS NOT NULL AND due_at<=? THEN 1 ELSE 0 END) AS overdue,
+      MIN(CASE WHEN due_at IS NOT NULL AND due_at<=? THEN due_at END) AS overdue_at
+    FROM self_wakes WHERE session_id=? AND status='pending']], { now, now, session_id })[1] or {}
+  return tonumber(row.n) or 0, tonumber(row.overdue) or 0, tonumber(row.overdue_at)
+end
+
+-- Park a session's schedule. Idempotent like `pause`: the first time and the first reason are kept, so
+-- a stop recipe run twice cannot move the moment the session stopped. A hold an interrupt already put
+-- there is UPGRADED to a park - `paused_at` untouched, because the schedule stopped when it stopped -
+-- rather than replaced, so the session stays stopped once the user who interrupted it has gone.
+function M.park(session_id, owner, reason, opts)
+  M.setup()
+  session_id = tostring(session_id or "")
+  if session_id == "" then return { error = "selfloop_requires_session", effect = "none" } end
+  local now = clock(opts)
+  local inserted = exec([[INSERT INTO self_wake_pauses(session_id, owner, reason, paused_at, kind)
+    VALUES(?,?,?,?,'park') ON CONFLICT(session_id) DO NOTHING]],
+    { session_id, tostring(owner or ""), slug(reason), now })
+  local wrote = (tonumber(inserted.changes) or 0) == 1
+  local upgraded = false
+  if not wrote then
+    -- `paused_at` is deliberately NOT written here: the schedule stopped when it stopped, and a park
+    -- that moved that moment would report a hold that started later than it did.
+    local changed = exec([[UPDATE self_wake_pauses SET kind='park', owner=?, reason=?
+      WHERE session_id=? AND kind<>'park']],
+      { tostring(owner or ""), slug(reason), session_id })
+    upgraded = (tonumber(changed.changes) or 0) == 1
+  end
+  local held = M.hold(session_id)
+  if not held or held.kind ~= "park" then
+    -- The row went away between the write and this read (a release in another process): this call did
+    -- not park anything, and it does not say it did.
+    return { ok = true, parked = false, raced = true }
+  end
+  local pending, overdue = pending_counts(session_id, now)
+  return { ok = true, parked = true, already = (not wrote and not upgraded) or nil,
+    upgraded = upgraded or nil, since = held.since, reason = held.reason,
+    pending = pending, overdue = overdue }
+end
+
+-- Release a park. The rows were never touched, so what fires next is what the session asked for, and a
+-- wake whose time passed while it was parked is simply due: the claim takes it once, never once per
+-- missed interval. A hold an INTERRUPT put there is refused by name - this verb is the operator's
+-- park, and re-arming a schedule the user stopped by pressing Esc is `wa chat --resume`'s job.
+function M.release(session_id, opts)
+  M.setup()
+  session_id = tostring(session_id or "")
+  if session_id == "" then return { error = "selfloop_requires_session", effect = "none" } end
+  local now = clock(opts)
+  local held = M.hold(session_id)
+  local pending, overdue, overdue_at = pending_counts(session_id, now)
+  if not held then
+    return { ok = true, parked = false, released = false, pending = pending, overdue = overdue }
+  end
+  if held.kind ~= "park" then
+    return { error = "session_held_by_interrupt", parked = false, released = false,
+      held_kind = held.kind, since = held.since, reason = held.reason, pending = pending,
+      fix = "wa chat --resume " .. session_id }
+  end
+  local changed = exec("DELETE FROM self_wake_pauses WHERE session_id=? AND kind='park'", { session_id })
+  if (tonumber(changed.changes) or 0) ~= 1 then
+    return { ok = true, parked = true, released = false, note = "the hold changed underneath this call" }
+  end
+  return { ok = true, parked = false, released = true, since = held.since, reason = held.reason,
+    pending = pending, overdue = overdue, overdue_at = overdue_at }
 end
 
 -- Is a cancel requested on this thread right now? The same source the agent loop polls

@@ -1949,7 +1949,10 @@ function wa_session(session_id, session)
         -- An interrupted run holds the schedule (`docs/SELF-LOOP.md`): the window's wake line says
         -- `2 wakes paused` instead of a next time, and this is the fact it reads. The wakes themselves
         -- are unchanged - held, not cancelled - and a resume re-arms them.
-        paused = listed.paused and true or false, paused_reason = listed.paused_reason }
+        paused = listed.paused and true or false, paused_reason = listed.paused_reason,
+        -- A park is the operator stopping the session (22/11), not an interrupt: the window must be able
+        -- to say which hold it is looking at, because only one of them is lifted by coming back.
+        parked = listed.parked and true or false }
     end)(),
     orchestration = record.objective~='subagent' and users.is_master(effective_role(user)) and
       dofile('lua/core/orchestration_mode.lua').read(session_id) or nil,
