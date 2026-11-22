@@ -70,6 +70,11 @@ pub const INPUT_REFUSED: &[&str] = &[
     "input_take",
     "input_stop",
     "input_idle",
+    // The opening takes the WHOLE screen (the alternate screen: every console write on this loop is
+    // held while it plays) and is driven by the reader thread's clock. A component run has no console
+    // of its own, so it is refused here rather than left to fail on a half-owned screen.
+    "opening_start",
+    "opening_header",
 ];
 
 /// The one capability with a stream form today. `http_sse` yields lines, so its answer arrives one

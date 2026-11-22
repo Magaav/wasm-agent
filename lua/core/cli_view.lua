@@ -1019,6 +1019,38 @@ function M.wants_live(getenv, istty)
     or (getenv("WT_SESSION") or "") ~= "" or (getenv("ORCA_TERMINAL_HANDLE") or "") ~= ""
 end
 
+-- ---- the opening -------------------------------------------------------------------------------
+
+-- Whether this start should have one (Victor, 22/11: green rain, a tornado, the star of the welcome
+-- line landing in its cell, and the title translated from the alien alphabet). The animation itself is
+-- the host's - `rust/wa-term/src/opening.rs`, on the alternate screen, beside this start work and never
+-- in front of it - and this is the decision it is started or not started on.
+--
+-- Every condition is answered from what the caller has in hand, over a `host` a test can replace, so
+-- the whole table is a Lua test instead of a terminal (scripts/test-opening.lua). It refuses on the
+-- doubt: a caller that cannot say whether it has a terminal, an editor or a size has no opening.
+-- The host refuses AGAIN, by name, whatever it cannot draw (`host.opening_start`), so a wrong answer
+-- here costs a frame and never a broken screen.
+M.OPENING_COLUMNS, M.OPENING_ROWS = 60, 14
+
+function M.opening(o)
+  o = o or {}
+  local getenv = o.getenv or function(name) return host.getenv(name) end
+  local setting = tostring(getenv("WASM_AGENT_CLI_OPENING") or ""):lower()
+  if setting == "off" or setting == "0" or setting == "no" or setting == "false" then return false, "setting" end
+  if o.scripted then return false, "scripted" end
+  if o.live ~= true then return false, "not_a_terminal" end
+  if o.editor ~= true then return false, "no_editor" end
+  if o.resumed then return false, "resumed" end
+  if (o.message or "") ~= "" then return false, "message" end
+  if (getenv("NO_COLOR") or "") ~= "" then return false, "no_color" end
+  if (getenv("TERM") or "") == "dumb" then return false, "dumb_terminal" end
+  local columns, rows = tonumber(o.columns), tonumber(o.rows)
+  if columns and columns < M.OPENING_COLUMNS then return false, "too_small" end
+  if rows and rows < M.OPENING_ROWS then return false, "too_small" end
+  return true, "default"
+end
+
 -- The console's height, asked the way the width is: `host.terminal_size`, nil when there is no
 -- console or it will not answer. The frame is the only caller, and it needs this and nothing else.
 function M.rows(probe)
@@ -2135,6 +2167,23 @@ function METHODS:render_welcome()
   -- with it, so the redraw puts them back instead of leaving them at the width they were written at.
   for _, line in ipairs(self.welcome_notes or {}) do self:write(line .. "\n") end
   return true
+end
+
+-- The welcome block as it would be drawn NOW, escapes and all: the same composition `render_welcome`
+-- writes, with the rule at the console's width. The opening paints these as its last beat on the
+-- alternate screen, so the frame it hands the reader over to is the frame behind it - `chat.lua` hands
+-- them over with `host.opening_header`, and the two must agree, so this is the one that composes.
+function METHODS:welcome_painted()
+  local stored = self.welcome
+  if not stored then return nil end
+  local opts = {}
+  for key, value in pairs(stored) do opts[key] = value end
+  if self:transcript() then
+    opts.marker, opts.limit = true, 1000000
+    return M.expand_rules(M.banner(opts), self.limit)
+  end
+  opts.limit = self.limit
+  return M.banner(opts)
 end
 
 -- A line of the welcome block that is not the box itself: what this CLI is running from, said under

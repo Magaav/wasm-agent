@@ -7,7 +7,39 @@ use std::sync::Mutex;
 
 static OUTPUT: Mutex<()> = Mutex::new(());
 
+/// While the opening owns the screen (crate::opening), every write is KEPT instead of drawn: the
+/// animation is on the alternate screen, and a frame of the chat written into it would land on top of
+/// the rain. hold starts keeping them and release hands back exactly what was kept, in order.
+///
+/// The hold lives here because this function is the one funnel every console write goes through -
+/// the view's terminal_write, the transcript's frames, the ticker and the editor's own rows - so one
+/// flag covers them all, and the reader ends up on the bytes today's start writes, in the order
+/// today's start writes them.
+static HELD: Mutex<Option<String>> = Mutex::new(None);
+
+pub fn hold() { *HELD.lock().unwrap_or_else(|e| e.into_inner()) = Some(String::new()); }
+
+pub fn holding() -> bool { HELD.lock().unwrap_or_else(|e| e.into_inner()).is_some() }
+
+/// Stop keeping writes, answering what was kept (empty when nothing was).
+pub fn release() -> String {
+    HELD.lock().unwrap_or_else(|e| e.into_inner()).take().unwrap_or_default()
+}
+
 pub fn write(text: &str) -> io::Result<()> {
+    {
+        let mut held = HELD.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(buffer) = held.as_mut() {
+            buffer.push_str(text);
+            return Ok(());
+        }
+    }
+    write_now(text)
+}
+
+/// The same funnel with the hold ignored: the opening's own frames, and the writes that give the
+/// screen back at the very end of it.
+pub fn write_now(text: &str) -> io::Result<()> {
     let _guard = OUTPUT.lock().unwrap_or_else(|e| e.into_inner());
     let mut out = io::stdout().lock();
     out.write_all(text.as_bytes())?;

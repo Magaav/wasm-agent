@@ -3842,6 +3842,15 @@ struct ConsoleInput {
     /// The open panel is a **published balloon** (`host.local_view`): its answers walk the stack Lua
     /// captured (`rust/wa-cli-views`), and an option with `run` queues that line for the interpreter.
     balloon: bool,
+    /// The opening (`wa_term::opening`), while it is playing: its frames are this thread's, on the
+    /// alternate screen, and every other write is held until it ends.
+    opening: Option<wa_term::opening::Opening>,
+    /// When the opening must be over whatever frame it is on, and how far its own pacing is stretched
+    /// to land on it (`WA_OPENING_MS` is a test's knob; it can shorten the opening, never lengthen it).
+    opening_until: Option<std::time::Instant>,
+    opening_scale: f32,
+    /// The restore-on-panic hook armed for the opening, put back when it ends.
+    opening_hook: Option<wa_term::scroll::PanicRestore>,
 }
 
 /// A mouse selection over the chat area: where the drag started and where it is, in screen cells, the
@@ -4339,11 +4348,17 @@ fn console_reader() {
         if editor {
             // No key yet: a resize (a maximised window, a split) still redraws now, not at the next
             // key. While a run is live the ticker does the same; this covers an idle chat.
+            //
+            // While the OPENING owns the screen (host.opening_start) this loop is also its clock: one
+            // frame per wait, and a resize ends it. The chat's own rows are not drawn then - every
+            // write is held (wa_term::terminal_editor::write) and goes out when it ends.
             #[cfg(unix)]
-            while !byte_ready(150) {
+            loop {
+                if byte_ready(opening_wait()) { break; }
                 let (lock, wake) = console_input();
                 let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
-                if state.stop { state.running = false; wake.notify_all(); return; }
+                if state.stop { state.running = false; finish_opening(&mut state); wake.notify_all(); return; }
+                if state.opening.is_some() { opening_tick(&mut state); continue; }
                 drop(state);
                 let _ = refresh_editor_size();
                 repaint_if_due();
@@ -4352,10 +4367,17 @@ fn console_reader() {
             let read = read_chunk(&mut handle, &mut chunk);
             let (lock, wake) = console_input();
             let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
-            if state.stop { state.running = false; wake.notify_all(); return; }
+            if state.stop { state.running = false; finish_opening(&mut state); wake.notify_all(); return; }
             match read {
-                Ok(0) | Err(_) => { state.eof = true; state.running = false; wake.notify_all(); return; }
+                Ok(0) | Err(_) => {
+                    finish_opening(&mut state);
+                    state.eof = true; state.running = false; wake.notify_all(); return;
+                }
                 Ok(n) => {
+                    // ANY byte ends the opening at once - a letter, a paste, Ctrl+C, a mouse report. It
+                    // is not consumed here: it goes on to the editor below and lands in the draft, which
+                    // is what "the animation stops and your key is in the input" means.
+                    if state.opening.is_some() { finish_opening(&mut state); }
                     if state.editor.as_ref().is_some_and(|input| input.row > 0) {
                         if let Some((columns, rows)) = console_size().filter(|(_, rows)| *rows >= EDITOR_MIN_ROWS) {
                             resize_console(&mut state, columns as usize, rows as usize);
@@ -4665,6 +4687,162 @@ pub extern "C-unwind" fn input_start(l: *mut LuaState) -> c_int {
     push_json(l, &json!({"started": true, "editor": editor}));
     1
 }
+
+// ---- the opening ------------------------------------------------------------------------------
+
+/// Whether the opening is on the alternate screen right now. Read by the `atexit` handler below, which
+/// must not wait on a lock a dying thread may be holding.
+static OPENING_UP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The terminal is given back even when the process leaves in the middle of the opening (a Lua error, an
+/// exit code): `atexit` writes the restore sequence with a bare `write(1, ..)`, so it can neither panic
+/// nor block.
+#[cfg(unix)]
+extern "C" fn opening_atexit() {
+    if !OPENING_UP.load(std::sync::atomic::Ordering::SeqCst) { return; }
+    let bytes = wa_term::opening::leave_bytes();
+    unsafe { libc::write(1, bytes.as_ptr() as *const libc::c_void, bytes.len()); }
+}
+
+fn register_opening_atexit() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    #[cfg(unix)]
+    ONCE.call_once(|| unsafe { libc::atexit(opening_atexit); });
+    #[cfg(not(unix))]
+    ONCE.call_once(|| {});
+}
+
+/// How long the opening may take: `opening::TOTAL_MS`, or `WA_OPENING_MS` for a test. Clamped to the
+/// same ceiling, because a knob that makes the CLI slower to start is not a knob this offers.
+fn opening_budget_ms() -> u64 {
+    std::env::var("WA_OPENING_MS").ok().and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(wa_term::opening::TOTAL_MS).clamp(100, wa_term::opening::TOTAL_MS)
+}
+
+/// How long the reader thread waits before the next frame: the opening's own pacing, stretched to its
+/// budget, and never past the moment it must be over. 150 ms (the idle repaint) when it is not playing.
+fn opening_wait() -> i32 {
+    let (lock, _) = console_input();
+    let state = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(opening) = state.opening.as_ref() else { return 150 };
+    let scale = if state.opening_scale > 0.0 { state.opening_scale } else { 1.0 };
+    let mut wait = opening.delay() as f32 * scale;
+    if let Some(until) = state.opening_until {
+        wait = wait.min(until.saturating_duration_since(std::time::Instant::now()).as_secs_f32() * 1000.0);
+    }
+    (wait as i32).clamp(1, 150)
+}
+
+/// One beat of the opening: a resize or the end of the budget ends it, otherwise one frame is drawn.
+fn opening_tick(state: &mut ConsoleInput) {
+    let Some(opening) = state.opening.as_ref() else { return };
+    let (width, height) = (opening.width(), opening.height());
+    // A window that changed size ends the opening: the simple answer to "it must survive a resize",
+    // and the one that cannot leave a frame drawn for a width the window no longer has.
+    if let Some((columns, rows)) = console_size() {
+        if columns as usize != width || rows as usize != height { finish_opening(state); return; }
+    }
+    if state.opening_until.is_some_and(|until| std::time::Instant::now() >= until) {
+        finish_opening(state);
+        return;
+    }
+    let painted = state.opening.as_mut().and_then(|opening| opening.step());
+    match painted {
+        Some(bytes) => { if !bytes.is_empty() { let _ = wa_term::terminal_editor::write_now(&bytes); } }
+        None => finish_opening(state),
+    }
+}
+
+/// The opening is over - a key, a resize, its own last frame, the interpreter leaving. The reader's
+/// screen comes back, the writes it held flow again in the order they were made, and the chat's own
+/// screen is drawn once: so the key typed during the animation is in the draft, on its row, the moment
+/// the animation goes, and the screen behind it is exactly what a start without an opening shows.
+fn finish_opening(state: &mut ConsoleInput) {
+    if state.opening.take().is_none() { return; }
+    state.opening_until = None;
+    OPENING_UP.store(false, std::sync::atomic::Ordering::SeqCst);
+    if let Some(hook) = state.opening_hook.take() { hook.restore(); }
+    let _ = wa_term::terminal_editor::write_now(&wa_term::opening::leave_bytes());
+    let held = wa_term::terminal_editor::release();
+    if !held.is_empty() { let _ = wa_term::terminal_editor::write_now(&held); }
+    state.transcript.dirty = true;
+    if state.editor.as_ref().is_some_and(|editor| editor.row > 0) && state.panel.is_none() {
+        let frame = layout_frame(state);
+        if !frame.is_empty() { let _ = wa_term::terminal_editor::write(&frame); }
+    }
+}
+
+/// `host.opening_start()` -> JSON `{started, reason?, frames?, budget_ms?}`: play the opening.
+///
+/// The Lua view decides whether a start should have one at all (`cli_view.opening`: a resumed session,
+/// a message argument, the setting, NO_COLOR); this side answers whether it CAN. A console that reports
+/// no size, no raw editor (a pipe, `WASM_AGENT_CLI_EDITOR=off`, a window too short for the box) or one
+/// under 60x14 is refused BY NAME - never a silent pass that the pty test would then have to guess at.
+pub extern "C-unwind" fn opening_start(l: *mut LuaState) -> c_int {
+    let (lock, _) = console_input();
+    let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let Some((columns, rows)) = console_size() else {
+        push_json(l, &json!({"started": false, "reason": "no_console"}));
+        return 1;
+    };
+    if state.raw.is_none() || state.editor.is_none() {
+        push_json(l, &json!({"started": false, "reason": "no_editor"}));
+        return 1;
+    }
+    if columns < OPENING_MIN_COLUMNS || rows < OPENING_MIN_ROWS {
+        push_json(l, &json!({"started": false, "reason": "too_small", "columns": columns, "rows": rows}));
+        return 1;
+    }
+    if state.opening.is_some() {
+        push_json(l, &json!({"started": false, "reason": "already_playing"}));
+        return 1;
+    }
+    let budget = opening_budget_ms();
+    let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_nanos() as u64).unwrap_or(1);
+    let mut opening = wa_term::opening::Opening::new(columns as usize, rows as usize, seed);
+    let scale = (budget as f32 / opening.planned_ms().max(1) as f32).clamp(0.05, 1.0);
+    let frames = opening.frames();
+    wa_term::terminal_editor::hold();
+    OPENING_UP.store(true, std::sync::atomic::Ordering::SeqCst);
+    register_opening_atexit();
+    state.opening_hook = Some(wa_term::scroll::screen::install_panic_restore_with(
+        wa_term::scroll::Mode::Fullscreen,
+        |bytes| { let _ = wa_term::terminal_editor::write_now(bytes); }));
+    let _ = wa_term::terminal_editor::write_now(wa_term::opening::enter_bytes());
+    let first = opening.step();
+    state.opening_scale = scale;
+    state.opening_until = Some(std::time::Instant::now() + std::time::Duration::from_millis(budget));
+    state.opening = Some(opening);
+    if let Some(bytes) = first { if !bytes.is_empty() { let _ = wa_term::terminal_editor::write_now(&bytes); } }
+    push_json(l, &json!({"started": true, "frames": frames, "budget_ms": budget}));
+    1
+}
+
+/// `host.opening_header(json)` -> boolean: the welcome block as the view painted it, one string per line
+/// (`{"lines": [...]}`), for the opening's last beat. The animation draws exactly those bytes, so the
+/// last frame of the alternate screen and the first frame of the reader's own screen are one picture.
+/// False when no opening is playing or the block is empty - a caller that cannot hand it over is told.
+pub extern "C-unwind" fn opening_header(l: *mut LuaState) -> c_int {
+    let lines: Vec<String> = arg_string(l, 1)
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .and_then(|value| value.get("lines").and_then(|lines| lines.as_array()).map(|lines| {
+            lines.iter().filter_map(|line| line.as_str().map(|text| text.to_string())).collect()
+        }))
+        .unwrap_or_default();
+    let (lock, _) = console_input();
+    let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let ok = match state.opening.as_mut() {
+        Some(opening) if !lines.is_empty() => { opening.header(&lines); true }
+        _ => false,
+    };
+    unsafe { wa_host_support::lua::lua_pushboolean(l, if ok { 1 } else { 0 }) };
+    1
+}
+
+/// The console the opening refuses: Victor's own floor ("a window smaller than 60x14").
+const OPENING_MIN_COLUMNS: i32 = 60;
+const OPENING_MIN_ROWS: i32 = 14;
 
 /// Configure and draw the live editor's input row after the view sets its scroll region.
 /// No reader thread is started here: it must already be the *one* input_start reader.
@@ -5560,6 +5738,10 @@ pub fn restore_input() {
     let (lock, wake) = console_input();
     if let Ok(mut state) = lock.lock() {
         state.stop = true;
+        // A process leaving mid-opening still gives the reader's screen back, and lets the held writes
+        // flow: a blank alternate screen with no cursor is the one failure a terminal program must not
+        // have (docs/TERMINAL.md, "Giving the terminal back").
+        finish_opening(&mut state);
         if state.editor.is_some() { let _ = wa_term::terminal_editor::write(&format!("\x1b[?2004l{}", wa_term::selection::DISABLE)); }
         state.selection = None;
         state.mouse_pending.clear();
