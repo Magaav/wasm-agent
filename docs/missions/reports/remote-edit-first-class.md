@@ -194,7 +194,27 @@ and `reason` - why it cannot be undone. The `before`/`after` are still digests i
 content-addressed store, so the card's existing blob reads work unchanged; a remote file needs the
 `node` beside the path to be honest about where it lives. I did not touch `lua/core/diff_view.lua`.
 
-## 8. What I did not verify
+## 8. The gate's own rows
+
+- `WA_BIN=~/.local/bin/wa bash scripts/test-discriminates.sh dd3fc626`: one `discriminates` row
+  (`scripts/test-remote-edit.lua` fails on the base at "a session that read nothing is not fenced by
+  another session's page"), one `unchanged-verdict` row (`scripts/test-node-dispatch-wiring.lua`), 0
+  blocking.
+- `bash scripts/fast.sh --jobs 6` under the shared suite lock: **394 of 395 checks passed, 1 failed** -
+  `scripts/test-start-instant.lua` (`start-instant: 1 FAIL`), the time-to-first-accepted-key row.
+  **This is not this change, and not a row I touched:** run alone it passes 2/2 on this branch and 2/2
+  on `dd3fc626` (measured after the failure, same machine), and the fast run happened while three other
+  missions' suites were queued on the same lock - the timing-row-under-load class rule 15 names (19/11,
+  load 105 on 16 cores, timing rows failed at random). Nothing was weakened to make it pass: no
+  assertion touched, no timeout raised. **Said plainly: the full fast path was not green end-to-end on
+  this node in this round**, and the row named above is the only one that failed.
+- Every row this change can move was run on its own and is green: test-remote-edit (46),
+  test-changeset (40), test-diff-route, test-read-truncation (69), test-remote-pending (90),
+  test-remote-call-shape (87), test-node-dispatch-wiring (10), test-codemode-boundary (33),
+  test-refusal-contract (17152), test-session-isolation (141), test-write-node-receipt (18),
+  test-whatsapp-finds-owner (59).
+
+## 9. What I did not verify
 
 - No live `avell -> nextcloud` call, and no live fleet at all (rule 13).
 - The relay and the peer's signature check between two real machines: the fixture replaces the
