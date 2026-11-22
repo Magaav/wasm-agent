@@ -56,6 +56,24 @@ local function carries_local_images(result)
   return false
 end
 
+-- A local write or edit names the node it wrote on (mission write-names-its-node). A `remote` result
+-- already carries its peer's name - {"node":"nextcloud","ok":true,"path":...} - and the local one did
+-- not, so a path meant for a peer that landed here read as a plain success: the model's only evidence
+-- was the path it had typed. The word is the one `nodes` uses for this node, so a script compares it
+-- with a `remote` answer's node and learns nothing new. Read once per process: the name does not change
+-- inside a session and node_name() costs a file read. When it cannot be read the field is absent - a
+-- receipt never invents a node.
+local this_node
+local function on_this_node(result)
+  if type(result) ~= "table" then return result end
+  if this_node == nil then
+    local ok, name = pcall(nodeslib.node_name)
+    this_node = ok and type(name) == "string" and name ~= "" and name or false
+  end
+  if this_node and result.node == nil then result.node = this_node end
+  return result
+end
+
 -- `remote` arguments, flattened. The canonical form is ONE level:
 -- {node, capability, <the capability's own params>}; the older nested form
 -- {node, capability, args={...}} still works. Measured on a DeepSeek session: 38 of 114 routed
@@ -1912,10 +1930,10 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     end)
   elseif name == "write" then
     local named, conflict = file_tools.accept_names("write", args)
-    if conflict then return conflict end
+    if conflict then return on_this_node(conflict) end
     args = named
-    if not args.path then return { error = "path_required" } end
-    if type(args.content)~="string" then return {error="content_required"} end
+    if not args.path then return on_this_node({ error = "path_required" }) end
+    if type(args.content)~="string" then return on_this_node({error="content_required"}) end
     local path = resolve_path(memory, ctx, args.path)
     local before = host.read_file and host.read_file(path)
     -- nil is "missing" only if the file is really missing. An existing file that is not readable as
@@ -1931,17 +1949,17 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     if ok and ctx and ctx.changes then
       changeset.record(ctx.changes, path, before, args.content or "")
     end
-    return { ok = ok and true or false, path = path, error=not ok and "write_failed" or nil, graph_index=notification }
+    return on_this_node({ ok = ok and true or false, path = path, error=not ok and "write_failed" or nil, graph_index=notification })
   elseif name == "edit" then
     local named, conflict = file_tools.accept_names("edit", args)
-    if conflict then return conflict end
+    if conflict then return on_this_node(conflict) end
     args = named
     args.path = resolve_path(memory, ctx, args.path)
     local result=file_tools.edit(args,ctx.changes and function(path,before,after)
       changeset.record(ctx.changes,path,before,after)
     end or nil,nil,ctx and ctx.session_id)
     if result.applied then result.graph_index=graph_hint(memory,ctx,result.path) end
-    return result
+    return on_this_node(result)
   elseif name == "ls" then
     -- Native listing: `ls -la` does not exist on Windows, and the description
     -- promises portability.
