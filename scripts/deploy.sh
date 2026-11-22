@@ -200,6 +200,31 @@ fail() {
   exit 1
 }
 
+# A deploy that INSTALLED the node and only failed to bring a watcher back is not a failed build.
+#
+# MEASURED on the laptop, 22/11: seven deploys of one night installed the node correctly - `wa --version` was
+# main's sha, the installed lua/core equal to main's, /health answered 200 - and every one of them ended in the
+# terminal as "wasm-agent build failed (installing: node installed, but the sentinel would not start)". The
+# build did not fail; it was installed and serving. What was missing was the watcher, and the one thing an
+# operator needs from that state is the command that supplies it. So this refusal writes state=installed (the
+# state a finished deploy writes) with a phase that names the truth, and `fail` - which writes state=failed -
+# is never used for it. Both renderers draw that phase: rust/wa-term/src/build_status.rs and
+# lua/core/update_banner.lua, kept in step by scripts/test-build-status.lua.
+#
+# The exit status stays non-zero: the deploy did not finish its job, and a green exit would tell the sentinel a
+# request was performed when the machine still cannot perform the next one.
+fail_installed() { # <what> <the one command that starts the watcher>
+  local what="$1" command="$2"
+  echo "deploy: $what" >&2
+  echo "deploy: the node is installed and answering; start its watcher with: $command" >&2
+  wa_status_unfollow
+  wa_status installed "no watcher is running: $command"
+  printf '%s\t%s\t%s\t%s\n' "$(date +%Y-%m-%dT%H:%M:%S%z)" "${COMMIT:-unknown}" "${BRANCH:-unknown}" \
+    "$what (no watcher is running: $command)" >> "$INSTALL_DIR/deploy.log" 2>/dev/null
+  write_result false "$what (the node is installed and answering; no watcher is running: $command)"
+  exit 1
+}
+
 # The other half of "a refusal is evidence": a check that *could not run* is evidence too, and it must look
 # like neither a refusal nor silence. A gate that goes blind quietly is worse than one that refuses, because
 # nothing afterwards can tell that it never had an opinion. `note` records the same line as `fail` with a
@@ -2076,10 +2101,10 @@ elif [ ! -f "$SENTINEL_CONFIG/sentinel/stop" ]; then
     echo "deploy: starting the sentinel through its unit: $WATCHER_COMMAND"
     env -u WA_DEPLOY_ROOT -u WA_DEPLOY_PIN -u WA_DEPLOY_PIN_DIR -u WA_DEPLOY_BUILD_TARGET \
       -u WA_CODEMODE_TARGET_DIR WA_SENTINEL_SUPERVISOR="$WATCHER_SUPERVISOR" \
-      "$INSTALL_DIR/$SENTINEL_NAME" start || fail "node installed, but the sentinel would not start"
+      "$INSTALL_DIR/$SENTINEL_NAME" start || fail_installed "node installed, but the sentinel would not start" "$WATCHER_COMMAND"
   else
     env -u WA_DEPLOY_ROOT -u WA_DEPLOY_PIN -u WA_DEPLOY_PIN_DIR -u WA_DEPLOY_BUILD_TARGET \
-      -u WA_CODEMODE_TARGET_DIR "$INSTALL_DIR/$SENTINEL_NAME" start || fail "node installed, but the sentinel would not start"
+      -u WA_CODEMODE_TARGET_DIR "$INSTALL_DIR/$SENTINEL_NAME" start || fail_installed "node installed, but the sentinel would not start" "$WATCHER_COMMAND"
   fi
   SENTINEL_NEW_PID=""
   for _ in $(seq 1 50); do
@@ -2099,7 +2124,7 @@ elif [ ! -f "$SENTINEL_CONFIG/sentinel/stop" ]; then
     echo "    HOME=${HOME:-unset} -> ${HOME:-<unset>}/.wasm-agent/sentinel/sentinel.pid"
     echo "    USERPROFILE=${USERPROFILE:-unset}"
     echo "    on disk: $(cat "${HOME:-}/.wasm-agent/sentinel/sentinel.pid" 2>/dev/null || echo 'no pid file at that path')"
-    fail "node installed, but the sentinel did not start watching"
+    fail_installed "node installed, but the sentinel did not start watching" "$WATCHER_COMMAND"
   fi
   echo "deploy: sentinel started (pid $SENTINEL_NEW_PID)"
 else

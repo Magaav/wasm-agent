@@ -526,6 +526,23 @@ eq(banner.session_content({ notice = NOTICE_LINE,
 eq(banner.session_content({ notice = NOTICE_LINE,
   build = { state = "installed", crate = "312s", at = 95 }, now = 95 + banner.INSTALLED_FOR + 1 }).kind,
    "notice", "for a moment only")
+-- A deploy that installed the node and could not bring a watcher back is NOT "build failed" (the laptop,
+-- 22/11: seven deploys ended red over a build that was installed and answering). The state is the same
+-- `installed` - the build is in - and the phase names what is missing and the one command, from the deploy
+-- (scripts/deploy.sh fail_installed) through both renderers. The Rust half is read from its own source here,
+-- so a change to one sentence and not the other fails this test.
+local UNWATCHED = { state = "installed",
+  phase = "no watcher is running: systemctl --user restart wa-sentinel.service", at = 95 }
+local unwatched = banner.session_content({ notice = NOTICE_LINE, build = UNWATCHED, now = 100 })
+eq(unwatched.kind, "installed", "an installed node with no watcher is the installed result, not a failure")
+eq(unwatched.text, "\226\156\147 wasm-agent installed \226\128\148 no watcher is running: systemctl --user restart wa-sentinel.service",
+   "and the line names the truth and the one command")
+ok(not unwatched.text:find("build failed", 1, true), "and it is never the failure sentence")
+eq(banner.session_content({ notice = NOTICE_LINE, build = UNWATCHED, now = 95 + banner.INSTALLED_FOR + 1 }).kind,
+   "notice", "the line is still a moment, not a standing claim")
+eq(banner.NO_WATCHER, (rust:match('NO_WATCHER: &str = "([^"]+)"')),
+   "the phase prefix is the Rust renderer's own constant")
+ok(rust:find("wasm-agent installed", 1, true) ~= nil, "and the Rust renderer draws the same sentence")
 eq(banner.session_content({ notice = NOTICE_LINE,
   build = { state = "failed", phase = "exit 101", at = 95 }, now = 99 }).kind, "failed",
    "a failed build is visible first")

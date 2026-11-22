@@ -28,6 +28,9 @@ const RESET: &str = "\x1b[0m";
 /// The standing session notice's colour: the CLI view's `warning` role (`lua/core/cli_view.lua`,
 /// #ffc107), so the update line is the same yellow in both renderers.
 pub const NOTICE: &str = "\x1b[38;2;255;193;7m";
+/// The phase a deploy writes when the node is installed but no watcher is running (`fail_installed`,
+/// scripts/deploy.sh). It is not a failure of the build and is not drawn as one: see `facts`.
+pub const NO_WATCHER: &str = "no watcher is running";
 
 fn path() -> std::path::PathBuf {
     let data = std::env::var("WASM_AGENT_DATA").ok().filter(|d| !d.is_empty())
@@ -79,6 +82,17 @@ fn facts(status: &Value, now: f64) -> Option<(Build, &'static str, String, Strin
         "current" if age < INSTALLED_FOR => {
             (Build::Installed, DONE, "\u{2713} wasm-agent is up to date".to_string(), String::new())
         }
+        // A deploy that INSTALLED the node and could not bring a watcher back (measured on the laptop, 22/11:
+        // seven deploys, each one reported as "build failed (installing: node installed, but the sentinel
+        // would not start)"). The build is in and serving - so this is the `installed` result, not `failed` -
+        // and the phase carries the truth and the one command, in the same words the file was written with.
+        // The twin is `update_banner.lua`; scripts/test-update-banner.lua pins the sentence on both sides.
+        "installed" if age < INSTALLED_FOR && text("phase").starts_with(NO_WATCHER) => (
+            Build::Installed,
+            NOTICE,
+            format!("\u{2713} wasm-agent installed \u{2014} {}", text("phase")),
+            String::new(),
+        ),
         "installed" if age < INSTALLED_FOR => {
             let took = text("crate");
             let took = if took.is_empty() { String::new() } else { format!(" ({took})") };
@@ -201,6 +215,22 @@ mod tests {
         assert_eq!(plain(&line(&bad, 150.0, 100).unwrap()), "\u{2717} wasm-agent build failed (exit 101)");
         assert!(line(&bad, 100.0 + FAILED_FOR + 1.0, 100).is_none());
         assert!(line(&serde_json::json!({"state":"building"}), 0.0, 100).is_none(), "no `at`: nothing");
+    }
+    #[test]
+    fn an_installed_node_whose_watcher_is_missing_is_not_a_build_failure() {
+        // scripts/deploy.sh fail_installed writes exactly this: state=installed (the build is in and
+        // serving) with the phase naming what is missing and the ONE command. It is the same result row as
+        // a finished deploy, never the red one - seven deploys on the laptop, 22/11, were reported as a
+        // failed build over a node that was installed and answering.
+        let unwatched: Value = serde_json::from_str(r#"{"state":"installed","phase":"no watcher is running: systemctl --user restart wa-sentinel.service","at":100}"#).unwrap();
+        let row = plain(&line(&unwatched, 101.0, 160).unwrap());
+        assert_eq!(row, "\u{2713} wasm-agent installed \u{2014} no watcher is running: systemctl --user restart wa-sentinel.service");
+        assert!(!row.contains("build failed"), "the build is installed and serving: it did not fail");
+        assert_eq!(content(NOTICE_TEXT, Some(&unwatched), 101.0), Some(Content::Installed), "not the failed row either");
+        assert!(line(&unwatched, 100.0 + INSTALLED_FOR + 1.0, 160).is_none(), "still a moment, not a standing claim");
+        // The finished-deploy state keeps its own sentence: the new arm must not swallow it.
+        let done: Value = serde_json::from_str(r#"{"state":"installed","phase":"done","crate":"312s","at":100}"#).unwrap();
+        assert_eq!(plain(&line(&done, 110.0, 160).unwrap()), "\u{2713} wasm-agent rebuilt (312s) \u{2014} restarting into the new build");
     }
     #[test]
     fn a_narrow_screen_drops_the_bar_then_cuts() {
