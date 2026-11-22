@@ -488,8 +488,15 @@ end
 -- File one command's page stack with the host. The client walks the same stack with the same links, so
 -- the balloon a run in flight shows is built by the same code as the one between runs - one builder,
 -- two renderers, the way `lua/core/nodes_cli.lua` already did it for `/nodes`.
-function M.publish(name, pages, captured_at)
-  if not M.publishing() then return false, "unavailable" end
+-- The published SPEC of one view stack: the pages converted to the client's shape, and NOTHING sent.
+--
+-- Split out of M.publish (22/11, change/chat-start-guard) for ONE reason: the idle prefetch builds these
+-- panels in a CHILD PROCESS (lua/core/idle_reads.lua), so an interpreter that is blocked on the network
+-- never has the reader's Enter waiting behind it. A child's spec is then sent by the parent through
+-- M.publish_spec below: the conversion happens ONCE, here, whichever process runs it - a second
+-- conversion would apply the 1-based/0-based page link arithmetic twice and open the wrong page.
+function M.spec(name, pages, captured_at)
+  if not M.publishing() then return nil, "unavailable" end
   local views = {}
   for index, page in ipairs(pages or {}) do
     page = M.page(page)
@@ -522,12 +529,20 @@ function M.publish(name, pages, captured_at)
   -- i64 (`spec_unreadable: floating point ..., expected i64` was measured the first time this ran inside
   -- a live turn, which is the only place the client validates it).
   local at = math.floor(tonumber(captured_at) or tonumber(host.now()) or 0)
-  local spec = { command = name, captured_at = at, views = views }
+  return { command = name, captured_at = at, views = views }
+end
+
+-- Send a spec that was ALREADY built - by M.publish here, or by the idle prefetch in a child process -
+-- to the client that draws mid-run views. Answers true, or false and the client's own reason.
+function M.publish_spec(name, spec)
+  if not M.publishing() then return false, "unavailable" end
+  local at = math.floor(tonumber(spec and spec.captured_at) or tonumber(host.now()) or 0)
+  local set = { command = name, captured_at = at, views = (spec and spec.views) or {} }
   -- What the mid-run channel is showing, in the store: the same field the blocking walk writes, so a
   -- report or a reloaded copy can say what is on the reader's screen without re-deriving it.
   local state = reload.state("balloon")
-  state.command, state.published, state.published_at = name, #views, at
-  local ok, raw = pcall(host.local_view, name, json.encode(spec))
+  state.command, state.published, state.published_at = name, #set.views, at
+  local ok, raw = pcall(host.local_view, name, json.encode(set))
   if not ok then return false, tostring(raw) end
   local decoded_ok, answer = pcall(json.decode, raw)
   if not decoded_ok or type(answer) ~= "table" then return false, "unreadable answer" end
@@ -537,4 +552,9 @@ function M.publish(name, pages, captured_at)
   return true
 end
 
+function M.publish(name, pages, captured_at)
+  local spec, why = M.spec(name, pages, captured_at)
+  if not spec then return false, why end
+  return M.publish_spec(name, spec)
+end
 return M

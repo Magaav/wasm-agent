@@ -550,8 +550,12 @@ function M.run(argv)
     return { title = "Status", lines = rows }
   end
   -- What the host shows if `/status` is submitted while a run is in flight (Lua is blocked in the model
-  -- call then): refreshed at the start of a run and at every round, from limits already read - the
-  -- provider is asked at most every five minutes, at a run's start, never in the middle of one.
+  -- call then): refreshed at the start of a run and at every round, from limits ALREADY READ - nothing
+  -- here asks the network. The provider is asked where it is asked for: `/status` between runs, which is
+  -- the reader's own request and the reader's own wait. A snapshot built before any such read says which
+  -- (lua/core/status.lua, limits_of) instead of making an Enter wait for a number nobody has asked for
+  -- yet - and it cannot be prefetched by a child either: the kernel withholds every provider credential
+  -- from tool children (rust/wa-operation/src/lib.rs, DENY_ENV). See lua/core/idle_reads.lua.
   local function snapshot_status(opts)
     if not (host.status_snapshot and view.editor and view.stdout) then return end
     local built, spec = pcall(status_panel, opts)
@@ -566,7 +570,20 @@ function M.run(argv)
   -- the same wake twice. Assigned after `mark_seen` exists; `turn` only calls it when it is set.
   local wake_if_due
 
-  local function turn(line)
+  local function turn(line, at)
+    -- THE KEYPRESS, AS THE HOST SAW IT (change/chat-start-guard, item 3). at is the moment the reader
+    -- pressed Enter - NOT the moment this interpreter was handed the line, which is later whenever the CLI
+    -- was busy (a network read, a tool, a long build). It is recorded here, for the lines that become
+    -- turns, so wa stalls can measure a turn from the keypress: a wait BEFORE the run's first record is
+    -- invisible to a measurement that starts at that record, and those waits are the twenty seconds the
+    -- operator kept meeting (measured on d7597689: 20.6 s of silence after Enter). A host that cannot say
+    -- when it saw the line answers nothing and no row is written - unknown is not zero.
+    if tonumber(at) then
+      pcall(function()
+        return dofile('lua/core/telemetry.lua').event(agent.session_id, '', '', 'input', 'submit',
+          { source = 'cli' }, tonumber(at))
+      end)
+    end
     -- The turn boundary: the one moment a `pure` core helper (raw_code, the codemode harness, tool_output)
     -- is swapped from the reload source - never in the middle of a run (lua/core/reload.lua).
     for _, notice in ipairs(reload.turn_boundary(host.now())) do
@@ -697,13 +714,31 @@ function M.run(argv)
   -- The fresh reads a turn's start no longer makes (22/11): provider limits at most every five minutes and
   -- the roster every MAX_AGE, WITHOUT a probe child per peer (a probe waits up to 20 s on a peer that does
   -- not answer, and an Enter pressed meanwhile would wait with it). Run at the idle prompt only.
-  local idle_refreshed = 0
+  -- THE FRESH READS, IN A CHILD PROCESS (change/chat-start-guard, 22/11). They used to run here, in this
+  -- interpreter: the provider's rolling limits (measured 4-7 s) and then the roster. Lua is gone while
+  -- those run, so an Enter pressed in that moment waited for the network - measured in a pty on a9d4617d:
+  -- 4.8 s of silence after Enter, with the limits stub answering after 5 s. Both reads are a PREFETCH, for
+  -- a /status or /nodes typed while a run is in flight, so they are now made by a child process
+  -- (lua/core/idle_reads.lua, under host.operation - the mechanism lua/core/nodes.lua uses for probe
+  -- children) and its answer is applied on a later idle tick, when nobody is waiting. A tick is a start, or
+  -- a status read of an operation that is already over; it never waits, so this line cannot hold an Enter.
+  local idle = reload.require("lua/core/idle_reads.lua")
   local function idle_refresh()
-    local now = host.now()
-    if now - idle_refreshed < local_views.MAX_AGE then return end
-    idle_refreshed = now
-    snapshot_status({ color = view.live, max_age = 300 })
-    publish_views({ max_age = local_views.MAX_AGE, live_capabilities = false, session_id = agent.session_id, ctx = { user_id = USER, role = "master", session_id = agent.session_id } })
+    local settled, why = pcall(idle.tick, {
+      session_id = agent.session_id,
+      color = view.live,
+      max_age = idle.MAX_AGE,
+      apply = function(payload)
+        -- The child converted each stack already (balloon.spec, in idle_reads): hand the spec to the
+        -- client, never a second conversion of it.
+        for _, entry in ipairs(payload.views or {}) do
+          if type(entry) == "table" and entry.name and type(entry.spec) == "table" then
+            pcall(local_views.publish_spec, entry.name, entry.spec)
+          end
+        end
+      end,
+    })
+    if not settled and host.log then pcall(host.log, "idle refresh: " .. tostring(why)) end
   end
   local function restart_if_due()
     local now = host.now()
@@ -799,7 +834,10 @@ function M.run(argv)
       if wake_if_due() then view:prompt() end
       -- Woken every CHECK_SECONDS (not WAIT_MS, half an hour) so an install is noticed at an idle
       -- prompt; the prompt is drawn once, above, so a wake that brings no line redraws nothing.
-      local line, eof = input:poll(math.min(cli_input.WAIT_MS, cli_restart.CHECK_SECONDS * 1000))
+      -- The third answer is WHEN THE HOST SAW THE LINE (cli_input:poll), nil on a host that cannot say:
+      -- it travels with the line so the turn that runs it can record a keypress that may have happened
+      -- long before this interpreter was free (change/chat-start-guard, item 3).
+      local line, eof, keypress_at = input:poll(math.min(cli_input.WAIT_MS, cli_restart.CHECK_SECONDS * 1000))
       if line ~= nil then
         -- The reader's own line, into the transcript, before the input row is reused: the echo of
         -- it lives only on that row, and a message that vanishes when it is sent is one its author
@@ -809,7 +847,7 @@ function M.run(argv)
         -- The terminal echoes a submitted line on the input row. Reclaim it before
         -- the synchronous run starts; otherwise it stays there for the entire run.
         view:submitted()
-        return line
+        return line, keypress_at
       end
       -- The input ended: a closed pipe, or the terminal's own end-of-file. Nothing left to wait
       -- for, and a REPL that keeps prompting for a stream it cannot read is worse than one that
@@ -862,7 +900,7 @@ function M.run(argv)
     -- A save lands here as well as on the next frame: a reload source that only reaches the screen during
     -- a run would miss the idle prompt, which is exactly where a reader is when they edit a command.
     hot()
-    local line = read_line()
+    local line, keypress_at = read_line()
     if line == nil then break end
     line = line:gsub("^%s+", ""):gsub("%s+$", "")
     if line == "" then
@@ -1210,7 +1248,7 @@ function M.run(argv)
         end
       end
     else
-      turn(line)
+      turn(line, keypress_at)
     end
   end
   agent:close()

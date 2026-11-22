@@ -246,12 +246,16 @@ function M.normalize(raw, rates)
   return result
 end
 
-function M.event(session_id, run_id, span_id, kind, phase, payload)
+function M.event(session_id, run_id, span_id, kind, phase, payload, at)
   if not session_id or session_id == "" then return end
+  -- at (optional) is the moment the FACT happened, in epoch seconds, for a caller whose fact is older
+  -- than this call. The reader's keypress is the one: the host queues the line and hands it over when
+  -- this interpreter is free, so a submit row stamped HERE would hide exactly the wait a turn is
+  -- measured for (change/chat-start-guard, item 3). Absent, it is now - every other caller.
   -- `setup` may have dropped its own DDL; the line for that loss is already written.
   if not M.setup() then return end
   local written, reason = write("harness_events insert", "INSERT INTO harness_events(id,session_id,run_id,span_id,kind,phase,at,payload) VALUES(?,?,?,?,?,?,?,?)",
-    {host.uuid(), session_id, run_id or "", span_id or "", kind, phase, host.now(), json.encode(payload or {})})
+    {host.uuid(), session_id, run_id or "", span_id or "", kind, phase, tonumber(at) or host.now(), json.encode(payload or {})})
   -- "no such table" is the one refusal worth answering differently: it says the schema is not there,
   -- so the next event replays the DDL instead of trusting the process-wide flag.
   if not written and reason and tostring(reason):find("no such table", 1, true) then

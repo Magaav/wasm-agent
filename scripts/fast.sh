@@ -886,6 +886,14 @@ check install-front-door bash scripts/test-install.sh
   # box used to put it in the last cell of the cut row), and the second visit to a width draws the rows
   # the first one did. A view change cannot be judged by a Lua double alone, hence a real pty here too.
   WA_BIN="$bin" check reflow-blocks-pty node scripts/test-reflow-blocks-pty.mjs
+  # THE TURN'S ROW IS ON SCREEN IN UNDER A SECOND OF THE ENTER (change/chat-start-guard, Victor 22/11):
+  # wa chat, "hi", and the status row at once - with a roster holding a peer that never answers and a
+  # provider-limits stub that takes 5 s, both of which used to be read on the path of the Enter. Measured
+  # 20.6 s of silence after Enter on d7597689, and 4.8 s on a9d4617d, where the same two reads ran at the
+  # idle prompt in THIS interpreter and an Enter pressed meanwhile waited for them. The prefetch's own
+  # operation row is read back too, so a fast row drawn without the fresh views is not a pass. The real
+  # binary in a private tmux pty, as the rows above.
+  WA_BIN="$bin" check chat-start-pty node scripts/test-chat-start-pty.mjs
   # THE RUN BLOCK, AS THE OPERATOR READS IT (Victor 21/11): a script the model writes inside run,
   # then only bash x2 and a four-kilobyte JSON blob where the two commands own output belonged. It
   # drives the REAL binary twice - wa chat --once and the interactive window in a private tmux pty -
