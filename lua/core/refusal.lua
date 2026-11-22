@@ -513,6 +513,8 @@ local CODES={
  -- the WhatsApp surface: the account lives on exactly one node, and every refusal says which
  whatsapp_component_absent={message='no node in this fleet runs the WhatsApp component, so there was nowhere to send the call ({origin}).',
   fix='this is a fleet fact, not an argument: point the node at the owner (`WASM_AGENT_WHATSAPP_OWNER`), or enable the component where the account is; this call queued nothing.'},
+ whatsapp_account_ambiguous={message='two nodes say they hold the WhatsApp account, so this node will not pick one ({origin}).',
+  fix='read `candidates` for both nodes, then ask one of them with the `ask_with` call it carries; or set WASM_AGENT_WHATSAPP_OWNER on this node to name the one that must answer. Nothing was queued here.'},
  whatsapp_account_unreachable={message='the node that holds the WhatsApp account did not answer ({origin}).',
   fix='read `account_lives_on` and `note` for which node it is, and ask that node\'s health before retrying; this call queued no job on this one.'},
  whatsapp_owner_unreachable={message='the node serving the WhatsApp account could not be reached ({origin}).',

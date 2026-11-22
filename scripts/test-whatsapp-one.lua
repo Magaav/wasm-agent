@@ -236,7 +236,12 @@ for _, named in ipairs({ "none", "two" }) do
     owner_catalog = catalog,
     remote_call = function() hops = hops + 1; return { ok = true } end,
   })
-  ok(unowned.error == "whatsapp_component_absent", "with no single owner a send refuses (" .. named .. "): " .. json.encode(unowned))
+  -- The two cases keep their OWN word (23/11): "nobody says it holds the account" and "two nodes say it"
+  -- are different facts about the fleet, and the brief's rule is that the first sentence is used only
+  -- when the roster really lists nobody. The rest of the refusal is the same for both: no owner invented,
+  -- nothing queued, nothing forwarded, and the next step in the note.
+  local expected = named == "none" and "whatsapp_component_absent" or "whatsapp_account_ambiguous"
+  ok(unowned.error == expected, "with no single owner a send refuses (" .. named .. "): " .. json.encode(unowned))
   ok(unowned.owner == nil and unowned.effect == "none" and unowned.id == nil,
     "and invents no owner and queues nothing (" .. named .. ")")
   ok(unowned.note:find("WASM_AGENT_WHATSAPP_OWNER", 1, true) ~= nil, "with the next step in the note (" .. named .. ")")

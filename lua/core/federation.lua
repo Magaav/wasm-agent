@@ -447,6 +447,16 @@ function M.refresh()
         entry.tools = {}
         entry.error = type(answer) == 'table' and (answer.error or answer.detail) or 'no_answer'
       end
+      -- THE CONNECTORS ARE KEPT TOO, and dropping them was a measured defect (23/11). `answer.connectors`
+      -- is the peer's own word about what it runs (`lua/core/federation.lua` `M.connectors`), and
+      -- `whatsapp.owner` reads exactly that field to find the node holding the account. This refresh kept
+      -- `tools` only, so `catalog.peers[*].connectors` was ALWAYS nil and the owner lookup could never
+      -- find anybody - while `tools.nodes` listed the peer and one `tools.remote` answered in 1.04 s
+      -- (session daf51bb3 on avell, 22/11: a queued local job and the false sentence "no node in this fleet
+      -- says it runs wa-whatsapp"). `M.remember` always kept them; this is the other half of the cache.
+      if type(answer) == 'table' and type(answer.connectors) == 'table' then
+        entry.connectors = answer.connectors
+      end
       cache.peers[entry.node_id] = entry
     end
   end

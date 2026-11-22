@@ -560,6 +560,7 @@ return {
   ['wave_source_changed_after_backup']='update.lua',
   ['wave_source_changed_after_prequeue']='update.lua',
   ['web_adapter_not_installed']='web.lua',
+  ['whatsapp_account_ambiguous']='whatsapp.lua',
   ['whatsapp_account_unreachable']='whatsapp.lua',
   ['whatsapp_approve_unreadable']='whatsapp.lua',
   ['whatsapp_archive_answer_unreadable']='tools.lua',
