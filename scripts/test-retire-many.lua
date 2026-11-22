@@ -236,7 +236,13 @@ for _,name in ipairs(names) do
   check(described.error=='unknown_tool' and described.found==false and described.missing==true,
     'a retired name is never offered as callable: '..q(described))
   local found=ask('return await searchTools('..q(name)..');','search '..name)
-  check(#array(found)==0,'searchTools finds no tool for a retired name: '..q(found))
+  -- A search that matches nothing answers one member that SAYS so (22/11), so the answer is no
+  -- longer an empty array: what must not come back is a TOOL. Every member is checked, not the first.
+  local offered=0
+  for _,entry in ipairs(array(found))do if entry.found~=false then offered=offered+1 end end
+  check(offered==0,'searchTools offers no tool for a retired name: '..q(found))
+  check(#array(found)>0 and tostring(array(found)[1].reason):find('no tool',1,true)~=nil,
+   'and the miss it answers says nothing matched: '..q(found))
 end
 -- No alias: the retired read did not read anything, and the retired write did not write.
 check(host.read_file(root..'/never.txt')==nil,'a retired write created nothing')
