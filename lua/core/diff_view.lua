@@ -141,8 +141,9 @@ end
 --
 -- The frame is exactly what a fence draws: an opening row of just the corner and its bar, body rows
 -- that begin with the bar, a closing row. rust/wa-term/src/transcript.rs accepts an opening only as
--- the corner and the bar (or a fence language after it), so the path and its counts are the FIRST body
--- row - the header cannot carry them without the card being read as prose.
+-- the corner and the bar (or a fence language after it), so the heading (`Create(path)`, `Update(path)`,
+-- `Delete(path)`) and the counts are the FIRST body rows - the card cannot carry them in its opening
+-- without being read as prose.
 function M.rows(change, opts)
   opts = opts or {}
   local width = math.max(24, tonumber(opts.width) or 80)
@@ -203,9 +204,14 @@ function M.rows(change, opts)
   end
 
   rows[#rows + 1] = { kind = "open", lead = "\226\148\140\226\148\128", role = "mdCodeBlockBorder" }
-  -- The path and its counts are the card's first ROW, not its title: a card's opening is exact.
-  plain("\226\148\130 ", string.format("%s  +%d -%d", tostring(change.path or "?"), added, removed),
-    "mdCodeBlock")
+  -- The two rows a reader reads first, INSIDE the frame (a card's opening is exact, so they cannot be
+  -- its title): what happened to which path, named the way Claude Code names it, then the counts in
+  -- words. `deleted` is the caller's fact, not a guess from an empty after text - an emptied file and a
+  -- removed file are different things, and only the caller knows which it saw.
+  local heading = change.deleted == true and "Delete"
+    or ((change.before or "") == "" and "Create" or "Update")
+  plain("\226\148\130 ", heading .. "(" .. tostring(change.path or "?") .. ")", "mdCodeBlock")
+  plain("\226\148\130 ", string.format("Added %d lines, removed %d lines", added, removed), "dim")
 
   local blank = string.rep(" ", digits)
   local body, budget = {}, opts.max_body or M.MAX_BODY

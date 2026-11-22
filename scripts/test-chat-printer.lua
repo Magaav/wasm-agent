@@ -32,4 +32,19 @@ check(c.added == 2 and c.removed == 1 and c.recorded == true, "and its counts")
 
 emit({ type = "bash_changes", command = "sed -i x f", files = { { path = "f" } }, refused = {} })
 check(seen[#seen].type == "bash_changes" and seen[#seen].command == "sed -i x f" and #seen[#seen].files == 1, "a shell command's changes reach the view")
+
+-- The two fields this printer learned with the card's own name for a change (Victor 22/11): `deleted`
+-- names the card Delete, and a change made on ANOTHER node is its own event, because the peer's answer
+-- carries no text to draw. Both are allow-listed here, so an event that loses them says so.
+emit({ type = "change", name = "bash", path = "b.lua", before = "b1", after = "e3b0", recorded = true,
+  added = 0, removed = 3, created = false, deleted = true })
+local gone = seen[#seen]
+check(gone.type == "change" and gone.path == "b.lua" and gone.deleted == true, "a removal keeps its path and its deleted fact")
+check(gone.created == false and gone.after == "e3b0", "and the addresses the card reads its lines from")
+emit({ type = "remote_change", capability = "write", node = "peer-one", path = "/srv/x.md", ok = false,
+  error = "not_peer_operator" })
+local remote = seen[#seen]
+check(remote.type == "remote_change" and remote.node == "peer-one" and remote.path == "/srv/x.md",
+  "a change made on another node reaches the view as one row's worth of facts")
+check(remote.ok == false and remote.error == "not_peer_operator", "including that it did not happen")
 print("chat printer ok (" .. checks .. " checks)")

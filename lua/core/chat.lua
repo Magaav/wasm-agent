@@ -103,9 +103,16 @@ local function printer(view)
     elseif event.type == "change" then
       -- A recorded file change, for the view's diff block (lua/core/diff_view.lua). Only the two
       -- content addresses and the path cross: the texts stay in the store.
+      -- `deleted` is the same kind of fact as `created`, and the card names the change with it
+      -- (Create/Update/Delete). An allow-list: nothing else of the event crosses.
       ready = { type = "change", name = event.name, path = event.path, before = event.before,
         after = event.after, recorded = event.recorded, added = event.added,
-        removed = event.removed, created = event.created, quiet = event.quiet }
+        removed = event.removed, created = event.created, deleted = event.deleted,
+        quiet = event.quiet }
+    elseif event.type == "remote_change" then
+      -- A change made on another node, as the one row the view can honestly draw.
+      ready = { type = "remote_change", capability = event.capability, node = event.node,
+        path = event.path, ok = event.ok, error = event.error }
     elseif event.type == "reasoning" then
       -- Reasoning is model output and goes through the redactor for the same reason a tool's
       -- output does: it is text this process did not write and is about to print.

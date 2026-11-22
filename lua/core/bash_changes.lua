@@ -90,6 +90,14 @@ function M.changed(before)
     if count < M.MAX_FILES and (was == nil or was ~= status) then
       count = count + 1
       local now = host.read_file and host.read_file(before.root .. "/" .. path) or nil
+      -- Was the file REMOVED? The host's own answer when it has one (a nil read is also what a binary
+      -- file answers, so it is not an answer to this); otherwise git's porcelain code, which is the same
+      -- question answered from the other side.
+      local gone = false
+      if now == nil then
+        if host.path_kind then gone = host.path_kind(before.root .. "/" .. path) == "missing"
+        else gone = status:find("D", 1, true) ~= nil end
+      end
       if status:sub(1, 2) == "??" then
         -- A new file: there was no text before it, which is a fact, not a guess.
         out[#out + 1] = { path = path, before_text = "", after_text = now or "" }
@@ -98,8 +106,14 @@ function M.changed(before)
         local started = exec("git show :" .. path, before.root)
         if started ~= nil and now ~= nil then
           out[#out + 1] = { path = path, before_text = started, after_text = now }
+        elseif started ~= nil and gone then
+          -- A removal: the text it had is in the index, so the card is drawable - a Delete, with its own
+          -- lines - instead of the wrong sentence "the starting text is unavailable" about a change that
+          -- did happen. The empty after side is the fact (nothing is left), not a missing read.
+          out[#out + 1] = { path = path, before_text = started, after_text = "", deleted = true }
         else
-          refused[#refused + 1] = { path = path, why = "index_text_unavailable" }
+          refused[#refused + 1] = { path = path,
+            why = gone and "deleted_text_unavailable" or "index_text_unavailable" }
         end
       else
         refused[#refused + 1] = { path = path, why = "already_modified" }
