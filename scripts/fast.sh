@@ -838,6 +838,10 @@ check prune-kept-binaries bash scripts/test-prune-kept-binaries.sh
 # dies with it. Measured 18/11 on avell: a row whose fixture forked a long sleep child outlived the row
 # every time, because the bare timeout ends only the process it was given. Seconds, scratch home, no node.
 check fast-watchdog bash scripts/test-fast-watchdog.sh
+# The gate's cargo-codemode check builds into this tree's ONE named build dir, the one this run's own
+# Rust rows just filled, and never a second cold copy under rust/target (138 s of every landing, measured
+# 21/11). A stub cargo, a scratch build root: seconds, no compile.
+check gate-cargo-codemode bash scripts/test-gate-cargo-codemode.sh
 # A row that exits 0 still owns its process group: the children it forked are reclaimed and the sweep
 # says how many, so the accumulation that reached 1,234 processes cannot build up (test-fast-watchdog-reap.sh).
 check fast-watchdog-reap bash scripts/test-fast-watchdog-reap.sh
