@@ -1655,7 +1655,8 @@ impl.plan = function(run, options)
   -- unreadable git costs time, never coverage.
   if #paths == 0 and #path_notes == 0 then
     return false, { error = "plan_no_changes", observed = "the collected branches introduce no path this tree does not already have",
-      next = "nothing to land: check the branches with `git -C " .. tostring(repo) .. " log --oneline <base>..<tip>`" }
+      next = "nothing to land: a branch has no change of its own (main already contains it, or the branch is main's tip) - " ..
+        "check it with `git -C " .. tostring(repo) .. " log --oneline $(git merge-base main <branch>)..<branch>`" }
   end
   local plan = M.build_plan(run, paths, path_notes, M.ring(options))
   run.journal.plan = plan
