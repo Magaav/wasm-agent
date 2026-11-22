@@ -90,6 +90,20 @@ judged by the rows that read it.
 - `wa mission preflight` now writes a row through the ledger; the shell script `scripts/preflight.sh` is
   untouched, and its own file (`preflight.json`) remains the record the verb reads.
 
+## How Victor tests it
+
+1. Land THIS branch once with the script that still exists (`bash ~/Work/missions/land-quick.sh
+   change/land-builtin`): `wa land <branch>` cannot land the branch that implements it - the running node
+   does not have the new step order yet, and it must not be told to.
+2. Then, in one terminal: `wa land change/<a finished branch>` and in another: `wa events --follow --kind land`.
+   The second shows, as they happen: `started`, `collected`, `planned`, `merged`, `tests`, `pushed`, `main`,
+   `installed`, `install-verified`, `main-health` (as `started`), `reported`, `done` - and the first ends with
+   `Local is evolved to <sha>. You can now test: <mission> - <the steps your brief names>`.
+3. `wa events` on its own shows the same rows afterwards; `wa events --kind mission` shows a worker that
+   finished and a preflight that went green or red.
+4. A session can ask to be woken instead of watching: `wake {on = ["land.*"], reason = "..."}`.
+5. `wa land change/<branch> --dry-run` prints the landing's plan and its commands without touching anything.
+
 ## Texts to approve (verbatim, operator- or model-facing)
 
 1. `Local is evolved to <sha>. You can now test: <mission> - <the brief's How Victor tests it section>`
