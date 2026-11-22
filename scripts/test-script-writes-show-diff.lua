@@ -35,16 +35,23 @@ local view_lib = dofile('lua/core/cli_view.lua')
 local markdown = dofile('lua/core/markdown.lua')
 local paths = dofile('lua/core/paths.lua')
 
-local checks, failed = 0, 0
+local checks, failed, first_fail = 0, 0, nil
+-- The first failing label travels in the LAST line as well as its own FAIL line: the runner deletes a
+-- row's work directory, so the verdict line is the only place its log survives (measured 22/11, a row
+-- that failed as "FAILED 4" inside the fast path and passed alone, with no line saying which four).
+local function fail_label(label)
+  failed = failed + 1
+  if first_fail == nil then first_fail = label end
+end
 local function check(condition, label)
   checks = checks + 1
-  if not condition then print('FAIL ' .. label); failed = failed + 1 end
+  if not condition then print('FAIL ' .. label); fail_label(label) end
 end
 local function has(text, needle, label)
   checks = checks + 1
   if not tostring(text):find(needle, 1, true) then
     print('FAIL ' .. label .. ': missing ' .. string.format('%q', needle) .. ' in:\n' .. tostring(text))
-    failed = failed + 1
+    fail_label(label)
   end
 end
 local function visible(text) return (tostring(text):gsub('\27%[[%d;]*m', '')) end
@@ -269,5 +276,5 @@ os.remove(loop_target)
 os.remove(target)
 os.remove(work .. '/bytes.txt')
 os.remove(work .. '/queued.txt')
-if failed > 0 then print('FAILED ' .. failed); os.exit(1) end
+if failed > 0 then print('FAILED ' .. failed .. ' (first: ' .. tostring(first_fail) .. ')'); os.exit(1) end
 print('script writes show a diff ok (' .. checks .. ' checks)')
