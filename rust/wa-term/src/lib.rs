@@ -19,7 +19,8 @@
 pub mod build_status;
 pub mod keymap;
 pub mod links;
-// The opening (opening.rs): the rain, the tornado and the header star Victor asked for on 22/11.
+// The opening (opening.rs): the rain, the supernova (flash, debris sphere, one ring) and the header star
+// Victor asked for on 22/11.
 // Beside the console because it draws on the same screen, and a leaf like the rest: it owns no
 // screen and no keys - the host reader thread writes its frames.
 pub mod opening;

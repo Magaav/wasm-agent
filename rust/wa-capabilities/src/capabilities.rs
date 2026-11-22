@@ -303,7 +303,7 @@ pub const REGISTRY: &[Capability] = &[
     plain!("ticker", Device, crate::host::ticker, "Start or stop the CLI status line, which keeps drawing while the interpreter is blocked"),
     plain!("input_start", Device, crate::host::input_start, "Start the one off-thread console line reader"),
     plain!("input_editor", Device, crate::host::input_editor, "Repaint the live editor's input row"),
-    plain!("opening_start", Device, crate::host::opening_start, "Play the opening on the alternate screen: green rain, a tornado, the header star landing, the title translated from the alien alphabet"),
+    plain!("opening_start", Device, crate::host::opening_start, "Play the opening on the alternate screen: green rain, a supernova (a flash, a sphere of debris in depth, one ring in a tilted plane), the header star landing, the title translated from the alien alphabet"),
     plain!("opening_header", Device, crate::host::opening_header, "Hand the opening the welcome block the view painted, so its last frame is the real header"),
     plain!("panel", Device, crate::host::panel, "Open, replace or close the CLI's bottom panel and wait for the reader's choice"),
     plain!("transcript_write", Device, crate::host::transcript_write, "Append text to the CLI transcript's current block"),

@@ -408,7 +408,8 @@ function M.run(argv)
     editor = view.live and view.stdout and height and height >= 7
       and host.getenv("WASM_AGENT_CLI_FRAME") ~= "off" })
   view.editor = input.editor
-  -- THE OPENING (Victor, 22/11): green rain, a tornado, and the header's star turning matrix green.
+  -- THE OPENING (Victor, 22/11): green rain, a supernova (flash, debris sphere, one ring), and the
+  -- header's star turning matrix green.
   -- It is the host's (`rust/wa-term/src/opening.rs`), on the alternate screen: started here and never
   -- waited for - nothing below this line waits on it, the reader's keys are live from the first frame,
   -- a key ends it and lands in the draft, and every write this start makes is held by the host and
@@ -510,7 +511,7 @@ function M.run(argv)
     })
     -- The welcome block is written into the host's transcript here (or straight out, in the plain
     -- layout); the opening needs the very same bytes for its last beat, and it needs them now, long
-    -- before its 2 s are up - it holds on the shrinking tornado until they arrive, and skips the
+    -- before its 2 s are up - it holds on the turning cloud until they arrive, and skips the
     -- translation if they never do, which is a slower start's honest ending.
     if opening and host.opening_header then
       local painted = view:welcome_painted()

@@ -5,7 +5,7 @@
 --
 --   1. Victor's colour change (22/11: "change the star into the matrix green color as well as the
 --      thinking animated stars first glyph on run status bar"): the welcome line's star and the run
---      status row's animated first glyph are `matrix` (00ff41), as a palette entry of their own, and
+--      status row's animated first glyph are `matrix` (xterm 41, 00d75f), as a palette entry of their own, and
 --      `accent` still paints everything it painted before - the phase word of that same row included;
 --   2. `cli_view.opening`, the table of conditions the opening is never played on: a resumed session, a
 --      message argument, a pipe, a scripted run, NO_COLOR, TERM=dumb, a window under 60x14, no editor,
@@ -24,7 +24,7 @@ local function has(text, needle) return tostring(text):find(needle, 1, true) ~= 
 -- role around one word changed (that is exactly what this change is).
 local function visible(text) return (tostring(text):gsub("\27%[[%d;]*m", "")) end
 
--- The escapes, spelled once. 00ff41 is the matrix green; d77757 is the role this change must not move.
+-- The escapes, spelled once. 00d75f (xterm 41) is the matrix green; d77757 is the role this change must not move.
 local MATRIX = "\27[38;2;0;215;95m"
 local ACCENT = "\27[38;2;215;119;87m"
 local STAR, SPARK = "\226\156\187", "\226\156\182"

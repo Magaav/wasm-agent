@@ -1,6 +1,6 @@
 //! The opening, measured in a real pty: the bytes it writes, and the screen it leaves behind.
 //!
-//! Victor's own test of it ("open a new foot window and run `wa chat`: green rain, a tornado, it shrinks
+//! Victor's own test of it ("open a new foot window and run `wa chat`: green rain, a supernova, it falls
 //! into a green star, the title decodes, and the usual header is there") cannot be a unit test: the
 //! animation lives in the reader thread of a process with a console, and its promise is about the SCREEN
 //! a terminal ends up holding. So this drives the real binary in a pty and reads that screen back through

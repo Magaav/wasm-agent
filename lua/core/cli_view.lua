@@ -1021,7 +1021,8 @@ end
 
 -- ---- the opening -------------------------------------------------------------------------------
 
--- Whether this start should have one (Victor, 22/11: green rain, a tornado, the star of the welcome
+-- Whether this start should have one (Victor, 22/11: green rain, a supernova - flash, debris sphere,
+-- one ring - the star of the welcome
 -- line landing in its cell, and the title translated from the alien alphabet). The animation itself is
 -- the host's - `rust/wa-term/src/opening.rs`, on the alternate screen, beside this start work and never
 -- in front of it - and this is the decision it is started or not started on.
