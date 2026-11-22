@@ -57,7 +57,8 @@ wa_fast_core_rows() {
     scripts/test-land-marks.lua scripts/test-land-release.lua scripts/test-land-gate-rows.lua \
     scripts/test-land-until.lua scripts/test-land-quick.lua \
     scripts/test-event-ledger.lua \
-    scripts/test-refusal-contract.lua scripts/test-tool-schema-fidelity.lua scripts/test-codemode-parity.lua
+    scripts/test-refusal-contract.lua scripts/test-tool-schema-fidelity.lua scripts/test-codemode-parity.lua \
+    scripts/test-edit-aliases.lua
 }
 
 # The rows this tree's fast path would run, one repo-relative path per line, cwd = the tree root: every
