@@ -854,6 +854,11 @@ M.UPDATING_FOR = 1800     -- `build_status::UPDATING_FOR`: an /update in flight,
 M.BUILDING_LINE = "\226\159\179 building wasm-agent"
 M.REBUILT_LINE = "\226\156\147 wasm-agent rebuilt%s \226\128\148 restarting into the new build"
 M.FAILED_LINE = "\226\156\151 wasm-agent build failed%s"
+-- A deploy that installed the node and could not bring a watcher back: the same `installed` result (the build
+-- is in and serving), with the phase naming what is missing and the one command. The Rust renderer's twin is
+-- `build_status::NO_WATCHER`; scripts/test-update-banner.lua pins the sentence on both sides.
+M.NO_WATCHER = "no watcher is running"
+M.INSTALLED_UNWATCHED_LINE = "\226\156\147 wasm-agent installed \226\128\148 %s"
 
 -- `125` -> `2m05s`, `45` -> `45s`, `3720` -> `1h02m`: `elapsed` in build_status.rs, to the second.
 local function elapsed(seconds)
@@ -935,6 +940,9 @@ function M.build_line(build, now)
   end
   if state == "current" and age < M.INSTALLED_FOR then
     return { kind = "installed", text = "\226\156\147 wasm-agent is up to date" }
+  end
+  if state == "installed" and age < M.INSTALLED_FOR and trim(build.phase):sub(1, #M.NO_WATCHER) == M.NO_WATCHER then
+    return { kind = "installed", text = string.format(M.INSTALLED_UNWATCHED_LINE, trim(build.phase)) }
   end
   if state == "installed" and age < M.INSTALLED_FOR then
     local took = trim(build.crate)

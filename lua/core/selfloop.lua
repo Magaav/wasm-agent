@@ -1185,6 +1185,10 @@ function M.tick(opts)
   opts = opts or {}
   local now = clock(opts)
   local out = { dispatched = 0, skipped = 0, deferred = 0, unknown = 0, reconciled = 0, paused = 0 }
+  -- A pause for a deploy is released when the deploy ENDS, not when its bound runs out (deploy_pause). This
+  -- runs before the due-row query below, so a row released here is dispatched in the same tick - and it is the
+  -- node doing it, which is what makes the promise keepable for a `wa chat --once` worker that has exited.
+  out.released = dep("deploy_pause").release_due(now, { exec = exec, query = query, read = opts.deploy_marker })
   -- The sessions whose schedule is held (an interrupted run), read once per tick: a held session's rows
   -- are left exactly as they are - pending, in their order - so the tick dispatches none of them and a
   -- resume fires each one once. Read here rather than filtered in SQL on both paths, because the

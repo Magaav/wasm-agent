@@ -821,6 +821,22 @@ The existing logon task remains the fallback until SCM migration is actually pro
 no console executable is blindly registered as a service. It must not be a child of
 the node: a supervisor that dies with the thing it supervises is decoration.
 
+### A user-local install gets a `--user` unit from the deploy
+
+Where the install lives under `$HOME` (the laptop layout, `~/.local/bin`), the supervisor is a
+systemd **user** unit, `wa-sentinel.service`, running `<prefix>/wa-sentinel watch`. `scripts/deploy.sh`
+writes it, reloads and enables it (`scripts/lib/sentinel-unit.sh`; the release front door,
+`scripts/linux/bootstrap.sh`, writes the same text), and then starts the watcher by asking that unit's
+manager. The unit carries `WA_SENTINEL_SUPERVISOR=user:wa-sentinel.service`, so `wa-sentinel start`,
+`stop` and `restart` say which unit owns the role instead of inferring it - the check itself is
+unchanged: a machine with a system unit for the watcher, a prefix outside `$HOME`, a Windows host or no
+user manager keeps the path it had, and the deploy says why.
+
+A deploy that installs the node but cannot bring a watcher back is **not** reported as a failed build:
+`build-status.json` says `state=installed` with the phase `no watcher is running: <the one command>`, and
+both the window and `wa chat` draw that sentence instead of a red failure. Say `WA_DEPLOY_SENTINEL_UNIT=0`
+to keep a machine unit-less (a test machine, a container).
+
 ## Self-update — the `spell` verb
 
 A plan the agent wrote, executed here because the node cannot execute it. `spells.lua` exports a

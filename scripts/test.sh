@@ -2581,6 +2581,11 @@ gate_run bash scripts/test-node-runtime.sh
 gate_run bash scripts/test-deploy-on-main.sh
 gate_run bash scripts/test-deploy-staging-sweep.sh
 gate_run bash scripts/test-deploy-build-status.sh
+# The sentinel systemd --user unit a deploy installs when nothing outside owns the watcher (the laptop, 22/11:
+# seven deploys installed the node and then reported "the sentinel would not start"). What the unit says, that
+# the install front door writes the same text, that ensure writes/reloads/enables and refuses by name, and
+# which command and supervisor the deploy is handed. It writes a unit and a stub systemctl, in its own home.
+gate_run bash scripts/test-sentinel-unit.sh
 gate_run node scripts/check-deploy-docs.mjs
 gate_run node scripts/test-delivery-refresh.mjs
 env -u GATE_LANE_HELD node scripts/test-gate-lane-wiring.cjs

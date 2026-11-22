@@ -27,6 +27,9 @@ local M = {}
 M.FILE = "deploy-pending.json"
 M.DEFAULT_BOUND = 900
 M.WAKE_MARK = "[deploy pending]"
+-- The reason a paused turn gives the one wake it schedules. It is a constant because it is also the KEY a
+-- later reader matches on: `selfloop.tick` releases exactly these rows when the install ends (release_due).
+M.RESUME_REASON = "deploy pending: resume after the node swap"
 
 function M.path()
   local ok, paths = pcall(dofile, "lua/core/paths.lua")
@@ -120,7 +123,7 @@ function M.at_boundary(self, request, opts)
   end
   local ok, answer = pcall(schedule, {
       in_seconds = M.resume_seconds(marker, now),
-      reason = "deploy pending: resume after the node swap",
+      reason = M.RESUME_REASON,
       prompt = M.prompt(request, marker),
     })
   if ok and type(answer) == "table" and type(answer.wake) == "table" then wake = answer.wake
@@ -128,6 +131,35 @@ function M.at_boundary(self, request, opts)
   M.last_wake = wake
   if wake_error then text = text .. "; the resume wake could NOT be scheduled: " .. wake_error:sub(1, 200) end
   return { text = text, wake = wake, wake_error = wake_error, marker = marker }
+end
+
+-- WHEN THE RESUME HAPPENS. A pause is a promise to continue when the INSTALL ends, not when the installer's
+-- own idle BOUND runs out - and those are different numbers by a factor of a deploy. `resume_seconds` has to
+-- guess before it knows (it arms one wake with a clock, because a paused turn is about to end), so the wake is
+-- armed for `left + 30` where `left` comes from the marker's bound: upgrade.sh writes 1800s, and on 22/11 that
+-- meant every worker paused by a four-minute deploy sat idle for another half hour - which the orchestrator
+-- read as "the scheduled resume never fires" and fixed by hand (00:26Z). The honest moment is observable, so
+-- it is read instead of guessed: the installer removes the marker on exit (upgrade.sh's trap), and the node's
+-- own tick - not the paused process, which is gone under `wa chat --once` - makes those rows due the moment
+-- the marker is no longer there. Whatever shape the paused run had, the resume is performed by the node.
+--
+-- Returns how many rows it made due now. `opts.read` and `opts.query`/`opts.exec` are injected by the test
+-- (scripts/test-deploy-resume.lua); a real caller passes nothing and gets the host's own file and ledger.
+function M.release_due(now, opts)
+  opts = opts or {}
+  now = tonumber(now) or os.time()
+  local exec = opts.exec
+  local query = opts.query
+  if type(exec) ~= "function" or type(query) ~= "function" then return 0 end
+  -- Still installing: the schedule keeps its own time. A marker past its bound is NOT a live install (the
+  -- reader ignores it, and a crashed installer must not hold a session for ever), so it releases too.
+  if (opts.read or M.read)(now) then return 0 end
+  local waiting = query([[SELECT id FROM self_wakes WHERE status='pending' AND reason=? AND due_at>? LIMIT 8]],
+    { M.RESUME_REASON, now })
+  if type(waiting) ~= "table" or #waiting == 0 then return 0 end
+  local changed = exec([[UPDATE self_wakes SET due_at=?, updated_at=?, last_error='deploy ended: resumed now'
+    WHERE status='pending' AND reason=? AND due_at>?]], { now, now, M.RESUME_REASON, now })
+  return tonumber(type(changed) == "table" and changed.changes or 0) or 0
 end
 
 return M
