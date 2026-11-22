@@ -33,6 +33,10 @@ Both of Victor's failures are reproduced on a binary built from the base (`c9904
    so too); what is fixed is the class: the tool is found without the caller's PATH, and the notice
    carries the tool's own words instead of a generic sentence.
 
+   **Measured by Fable 22/11 15:32Z** in Victor's own window (pid 1795668, still open): its start environment has
+   `WAYLAND_DISPLAY=wayland-1`, `DISPLAY=:0`, `XDG_RUNTIME_DIR=/run/user/1000` and `/usr/bin` on PATH, and `/usr/bin/wl-paste` resolves under that PATH.
+   So the missing-variable cause is ruled out; what is left is that `wl-paste` ran and exited non-zero at that moment (empty clipboard, or a selection whose owner was gone), and the old code threw the reason away and said `no clipboard here`. This branch fixes exactly that class: the notice carries the tool's own words.
+
 ## The brief, re-measured (one premise was wrong)
 
 - `rust/wa-term/src/keymap.rs:388-390` — Ctrl+V (byte 22, and kitty's `\x1b[118;5u`) was bound to
