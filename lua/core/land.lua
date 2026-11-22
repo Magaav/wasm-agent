@@ -1651,8 +1651,14 @@ function M.plan_text(journal)
     tostring(plan.classifier or "?")))
   if plan.why then add("land:   " .. tostring(plan.why)) end
   local rows = plan.rows or {}
-  add(string.format("land:   gate: %s%s", table.concat(plan.checks or {}, " "),
-    plan.full and " (the whole suite)" or (" over " .. tostring(#rows) .. " Lua row(s) of the suite")))
+  if journal.landing then
+    -- A LANDING RUNS NO GATE (FACTORY.md rule 10): printing the checks the plan narrowed would say it does.
+    add(journal.gate_landing and "land:   gate: the whole fast path on the merged tree (--gate asked for it)"
+      or "land:   gate: none - a landing runs no gate (the gate belongs to `wa release cut`; --gate asks anyway)")
+  else
+    add(string.format("land:   gate: %s%s", table.concat(plan.checks or {}, " "),
+      plan.full and " (the whole suite)" or (" over " .. tostring(#rows) .. " Lua row(s) of the suite")))
+  end
   -- The rows this plan considered and may NOT ask for, each with the reason: an affected row the fast path
   -- declares not run is reported here, never requested - requesting one is `fast_narrow:unknown_row` and a
   -- round gated on zero tests.
@@ -1660,10 +1666,18 @@ function M.plan_text(journal)
     add("land:   not a gate row: " .. tostring(skipped.path) .. " (" .. tostring(skipped.why) .. ")")
   end
   if plan.rows_why then add("land:   no row inventory: " .. tostring(plan.rows_why)) end
-  for _, name in ipairs(M.STEPS) do
+  for _, name in ipairs(M.steps_for(journal)) do
     local step = (plan.steps or {})[name]
+    -- A step of a landing has no plan entry (the plan describes the pipeline's steps): it runs, and the plan
+    -- says so with the reason it exists rather than leaving a hole in the table.
     if step then
       add(string.format("land:   %-9s %-4s %s", name, step.action == "skip" and "skip" or "run", tostring(step.why or "")))
+    elseif journal.landing then
+      local why = ({ tests = "the branch's own added or changed scripts/test-*.lua, alone (skipped for a Rust branch)",
+        install = "this node: the sentinel's deploy, the install record read back, the installed Lua compared",
+        health = "main's health after a landing that changed lua/ or rust/, as an operation (its verdict is an event)",
+      })[name] or "runs on every landing"
+      add(string.format("land:   %-9s %-4s %s", name, "run", why))
     end
   end
   add(string.format("land:   expected %s (%s)", M.duration_text(plan.expected_seconds or 0), tostring(plan.expected_from or "?")))
@@ -4297,6 +4311,13 @@ function M.run(options)
     -- its own (see remember_start/apply_start).
     options = apply_start(run, options)
   end
+  -- WHAT KIND OF ROUND THIS IS, recorded before anything reads the journal (the dry run's plan, the step order,
+  -- the skip a resumed run keeps): a landing is one from its first line, so nothing downstream has to guess
+  -- from the flags of whichever invocation is running.
+  if options.landing and not options.release then
+    run.journal.landing = true
+    run.journal.gate_landing = options.gate and true or nil
+  end
   -- A DRY RUN WRITES NOTHING, so the start options are recorded only after this return: a plan that wrote a
   -- journal entry would change the thing it says it does not touch.
   if options.release and (options.branches or options.ready or options.rollback) then
@@ -4516,11 +4537,31 @@ function M.dry_run(run, options)
   -- from this checkout's own refs (a dry run fetches nothing), by the same code the round itself uses.
   local plan, notes = M.plan_preview(options, run)
   if plan then
-    print(M.plan_text({ plan = plan }))
+    -- The plan names the round's OWN steps: a landing prints the landing's table, never the pipeline's.
+    print(M.plan_text({ plan = plan, landing = run.journal.landing, gate_landing = run.journal.gate_landing }))
     for _, note in ipairs(notes or {}) do print("land:   note: " .. note) end
   else
     print("land: plan: cannot be made without a fetch - " .. table.concat(notes or { "no base" }, "; "))
   end
+
+  if run.journal.landing then
+    local tree = run.tree or (M.run_dir(run.id) .. "/tree")
+    -- THE LANDING'S OWN COMMANDS, and none of the release's: this is the list land-quick.sh printed by doing it.
+    print("  merge        git worktree add -b <land N>/final " .. tree .. " <base>; one --no-ff merge per branch;")
+    print("               regenerate the declared generated files into the merge commit")
+    print("  tests        each scripts/test-*.lua the branch added or changed, alone, with its own home and ledger")
+    print("               (skipped, by name, when the branch changes Rust: main-health judges that after the install)")
+    if run.journal.gate_landing then print("  gate         bash scripts/fast.sh   (--gate: the whole fast path on the merged tree)") end
+    print("  push         git push " .. M.incoming() .. " HEAD:refs/heads/<land N>/final")
+    print("  main         git push " .. M.origin() .. " <landed>:refs/heads/main")
+    print("  install      git -C " .. tostring(M.repo()) .. " merge --ff-only <landed>")
+    print("               wa-sentinel request deploy --reason 'wa land <run>: install <landed>'")
+    print("               then installed.txt is read back until it names <landed>, and the installed lua/core is compared")
+    print("  health       wa land health-run --repo " .. tostring(M.repo()) .. " --sha <landed>   (an operation; its verdict is an event)")
+    print("  report       the run's report, then: Local is evolved to <sha>. You can now test: ...")
+    return 0
+  end
+
   -- The checks the plan will actually run, not every check the machine knows: the list has to match the plan
   -- line above it, or the dry run reads as "everything" while the round would run a subset.
   for _, check in ipairs(options.checks or M.DEFAULT_CHECKS) do
