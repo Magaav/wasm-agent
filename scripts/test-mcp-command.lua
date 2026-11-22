@@ -395,12 +395,17 @@ local function catalogue()
   for _, item in ipairs(tools.all('master')) do out[#out + 1] = item end
   return out
 end
-local frozen, report = prompt_cache.enforce(session_ctx, { system = 'frozen system', tools = catalogue(), parts = {} })
+-- THE SESSION IN THIS ROW IS A CURRENT ONE: it froze on the run tool, as lua/core/agent.lua's build_context
+-- always records (raw_mode native, decided). A record frozen from {system, tools} alone reads back as a
+-- PRE-RELEASE thread, and since one-run-path r1 such a thread MOVES - its tool list is re-frozen once -
+-- so "back to the frozen bytes" below would be judged against the moved list, not the one this row froze
+-- (22/11: red on main f5373ef2 for that reason; the move itself is scripts/test-one-run-path.lua's subject).
+local frozen, report = prompt_cache.enforce(session_ctx, { system = 'frozen system', tools = catalogue(), parts = {}, raw_mode = 'native', raw_decided = true })
 check(report and report.created, 'the session freezes its prefix')
 local baseline = #catalogue()
 check(command.toggle(session_ctx, 'native_reads', true).ok, 'a master enables the connector mid-session')
 check(#catalogue() == baseline + 4, 'the catalogue gained the connector\'s four tools')
-local frozen2, report2 = prompt_cache.enforce(session_ctx, { system = 'frozen system', tools = catalogue(), parts = {} })
+local frozen2, report2 = prompt_cache.enforce(session_ctx, { system = 'frozen system', tools = catalogue(), parts = {}, raw_mode = 'native', raw_decided = true })
 check(report2.changed == true, 'the running session sees a different catalogue')
 check(report2.note_required == true, 'and owes it a note')
 local added = (report2.detail or {}).tools_added or {}
@@ -412,14 +417,14 @@ check(#notes == 1, 'the note is appended once')
 check(contains(notes[1], '[session update]'), 'it is the existing session update')
 check(contains(notes[1], mcp.namespace('native_reads', 'read_newest')), 'and it names the tool that appeared')
 check(contains(notes[1], 'added:'), 'the note says what was added, not that everything was removed')
-local _, report2b = prompt_cache.enforce(session_ctx, { system = 'frozen system', tools = catalogue(), parts = {} })
+local _, report2b = prompt_cache.enforce(session_ctx, { system = 'frozen system', tools = catalogue(), parts = {}, raw_mode = 'native', raw_decided = true })
 check(report2b.note_required == false, 'the session is not owed the note again')
 check(#prompt_cache.notes(session_ctx, frozen2, report2b, {}) == 0, 'and it is not repeated')
 check(frozen2 ~= nil, 'the frozen prefix is kept')
 -- Turning it back off returns the catalogue to the bytes the session froze in: not `changed`, but the
 -- last note in the transcript says the tools are there, so a note is still owed.
 command.toggle(session_ctx, 'native_reads', false)
-local frozen3, report3 = prompt_cache.enforce(session_ctx, { system = 'frozen system', tools = catalogue(), parts = {} })
+local frozen3, report3 = prompt_cache.enforce(session_ctx, { system = 'frozen system', tools = catalogue(), parts = {}, raw_mode = 'native', raw_decided = true })
 check(report3.changed == false, 'the catalogue is back to the frozen bytes')
 check(report3.note_required == true, 'and the session is still owed the note that says so')
 check(#prompt_cache.notes(session_ctx, frozen3, report3, {}) == 1, 'which is delivered')
