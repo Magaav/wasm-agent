@@ -104,6 +104,13 @@ trap), or the moment its bound has passed. Rows that are already due and wakes w
 left alone. `lua/core/selfloop.lua` calls it at the top of the node's tick, before the due-row query, so
 the release is dispatched in the same 2-second pass — by the node, not by the worker.
 
+**Measured again on this mission's own session** (the installed binary, i.e. the OLD code): the deploy that
+paused it was recorded at `2026-11-22T01:34:12Z`, the deploy itself ended three seconds later
+(`build-status.json` `at` = `01:34:15Z`, no `deploy-pending.json` on disk by `01:50Z`), and the resume wake
+arrived at `02:04:29Z` — 30 minutes after the pause, for an install that had already finished. That is the
+defect exactly: with this branch's `release_due`, the node's next tick after `01:34:15Z` would have made the
+row due and dispatched it.
+
 ## Tests, and where they are wired
 
 | test | what it holds | wired | on the base |
