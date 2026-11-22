@@ -143,6 +143,21 @@ local inside = remote({ node = PEER, capability = "edit", path = big,
 check(inside.applied == true, "an anchor inside the page this session read is applied: " .. json.encode({ error = inside.error }))
 check(tostring(host.read_file(big)):find("line 5 EDITED", 1, true) ~= nil, "and it landed on the peer")
 
+-- 3b. A page read in a BATCH is also a page this session was served. Without the record, the edit
+--     below would state "this session was served nothing" and the fence would have a hole exactly
+--     where the cheapest read is (measured while building this change).
+local deep = root .. "/deep.txt"
+assert(host.write_file(deep, table.concat(lines, "\n") .. "\n"))
+local batch = remote({ node = PEER, capability = "batch",
+  calls = { { capability = "read", path = deep, offset = 1, limit = 10 } } })
+check(batch.ok == true and type(batch.results[1]) == "table" and batch.results[1].truncated == true,
+  "a batch read answers its page")
+local outside_batch = remote({ node = PEER, capability = "edit", path = deep,
+  edits = { { old_text = "line 2800", new_text = "line 2800 BATCH" } } })
+check(outside_batch.error == "edit_anchor_outside_read_page",
+  "an anchor outside a page a BATCH served is refused by name, got " .. json.encode({ error = outside_batch.error }))
+check(tostring(host.read_file(deep)):find("line 2800 BATCH", 1, true) == nil, "and nothing was written")
+
 -- 4. This node's own record of what that session was served there: the new symbol (page_snapshot) is
 --    checked here rather than first, so that on the base this file fails on an assertion about
 --    behaviour instead of on a missing function (scripts/test-discriminates.sh counts a missing symbol

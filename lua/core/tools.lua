@@ -1371,6 +1371,12 @@ local function remote_batch(memory, args, role, ctx)
       value = { error = "remote_image_transport_unsupported", capability = entry.capability }; results[index] = value
     end
     if type(value) ~= "table" or value.error or value.ok == false then failed = failed + 1 end
+    -- A page read in a BATCH was still served to this session (mission remote-edit-first-class). Without
+    -- this, the cheapest read left no record here, a later edit of that file on that node would state
+    -- "this session was served nothing", and the fence would have a hole exactly where the batch is.
+    if entry.capability == "read" and not node.local_node and type(value) == "table" then
+      file_tools.record_peer_page(ctx and ctx.session_id, node.name or node.node_id, entry.args.path, value)
+    end
   end
   return { ok = failed == 0, node = node.name, results = results, failed = failed, round_trips = round_trips, fallback = fallback,
     note = "Ordered per-entry results; every entry was a read." }
@@ -2310,10 +2316,13 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     local options
     if not node.local_node and (call.capability == "edit" or call.capability == "write") then
       options = { record_change = (ctx and ctx.changes) ~= nil }
-      if call.capability == "edit" then
+      if call.capability == "edit" and ctx and ctx.session_id then
         -- Keyed by the path AS IT WAS WRITTEN, which is the same string a read of that file used. `false`
-        -- says this session was served nothing for it at that path: a fact only this process holds.
-        local snapshot = file_tools.page_snapshot(ctx and ctx.session_id, call.args.path, target)
+        -- says this session was served nothing for it at that path: a fact this process holds because it
+        -- keeps the session's record. With NO session id there is no such record to speak from, so the
+        -- field is left out and the peer falls back to its own record for this caller, exactly as before
+        -- - an absent record is not "nothing was read" (unknown is not yes).
+        local snapshot = file_tools.page_snapshot(ctx.session_id, call.args.path, target)
         options.read_pages = { record = snapshot or false }
       end
     end
