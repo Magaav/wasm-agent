@@ -105,7 +105,9 @@ end
 -- version safe to take while a run is in flight.
 function M.views(opts)
   opts = opts or {}
-  local list = nodes.list({ cached = opts.cached })
+  -- `opts.live_capabilities = false` is the roster without a probe child per peer (22/11): the version a
+  -- turn's start may take, because a probe waits up to 20 s on a peer that does not answer.
+  local list = nodes.list({ cached = opts.cached, live_capabilities = opts.live_capabilities })
   local views = { {
     title = "Nodes",
     lines = { cluster_line(), (#list - 1) == 1 and "1 peer" or ((#list - 1) .. " peers") },
