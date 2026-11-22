@@ -17,7 +17,7 @@ set -uo pipefail
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 LIB="$ROOT/scripts/lib/sentinel-unit.sh"
 FRONT_DOOR="$ROOT/scripts/linux/bootstrap.sh"
-[ -f "$LIB" ] || { echo "test-sentinel-unit: lib_missing: $LIB" >&2; exit 2; }
+[ -f "$LIB" ] || { echo "test-sentinel-unit: no such file or directory: $LIB (the unit writer this test is about)" >&2; exit 2; }
 [ -f "$FRONT_DOOR" ] || { echo "test-sentinel-unit: front_door_missing: $FRONT_DOOR" >&2; exit 2; }
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/wa-sentinel-unit-XXXXXX")"
