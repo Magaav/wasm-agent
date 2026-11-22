@@ -27,3 +27,20 @@ locally; nothing pushed, nothing deployed.
   on this tree (the discrimination run is recorded below when it lands).
 - Kept as it was: `WASM_AGENT_CODEMODE=off` still leaves a node with no code door (named in the earlier
   report as an open hole, unchanged here).
+
+## The gate, as far as this machine could judge it
+
+- **Narrowed fast path on this tree: `fast path ok (80 checks, 0 skipped, 633s)`** - the five rows this
+  round touched (`test-leak-net`, `test-one-run-path`, `test-envelope`, `test-conform-profile`,
+  `test-prompt-golden`), the always-on core rows, and every contract check (`prompt-docs`, `instructions`,
+  `direct-workflow`, `discrimination`, `landing-queue`, `fast-binary`, ...).
+- **`scripts/test-discriminates.sh a8cd5348`: 0 blocking, and 0 judged** - it names all five rows
+  `unrevertable` because "this branch changes rust/, and the Lua rows would run against this tree's binary,
+  not the base's". That is a refusal to pass, not a pass.
+- **Discrimination measured by hand instead**, with the same binary and the BASE's Lua tree
+  (`WASM_AGENT_LUA_ROOT=/tmp/base-only`): `test-leak-net` fails there at "B: and the answer is the answer"
+  (the base answers a quoted shape with the harness notice), `test-one-run-path` fails on
+  `switch_refusal` (it does not exist there), and `test-conform-profile` fails at "an all-fail profile
+  decides NOTHING (0 >= 0 is not tool_call)" - the audit's own item 5b. Two rows pass on both trees by
+  design: `test-envelope`'s restored row (it pins behaviour that still exists) and `test-prompt-golden`'s
+  arm-B rows (a scope change, not a new rule).
