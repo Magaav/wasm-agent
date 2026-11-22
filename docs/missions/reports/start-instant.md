@@ -74,9 +74,13 @@ the base with 9.36 s and passes here with 0.6 s.
   `steering.consume` tolerate a refused row (status line, settlement skipped); `record_turn` defers while
   the preamble is open and flushes first afterwards; at the end of the run the ledger is paid with the
   ordinary patience and what is left is named ("the transcript is N message(s) behind …").
-- `rust/wa-sqlite` + `host.sql_patience`: one number the policy already owned, set for a preamble
-  (`attempts=1` inside the window). Registered in `rust/wa-capabilities/src/capabilities.rs` and listed in
-  `docs/HOST.md`.
+- `host.sql_patience` + `rust/wa-capabilities/src/host.rs`: one number the policy already owned, set for
+  a preamble (`attempts=1` inside the window). **It lives in the host crate and not in `wa-sqlite` on
+  purpose**: `wa-sqlite` is an input of the `graph` component, and a policy change for the host must not
+  move a shipped artifact. Measured: with the change in `wa-sqlite`, `scripts/test-component-pins.sh`
+  demanded a new `graph` pin, and a local rebuild cannot produce the pinned bytes (every one of the 11
+  pinned components differs from its pin when rebuilt here — the pins are path-dependent by design). With
+  the change in the host crate the pin check passes: "11 of 11 pinned component(s) verified".
 - `lua/core/stalls.lua` + `wa stalls` (`lua/core/init.lua:625`): item 5, the kept measurement.
 
 **`ac991712` — bookkeeping writes are named, never fatal.** `lua/core/envelope.lua` (the envelope cache),
