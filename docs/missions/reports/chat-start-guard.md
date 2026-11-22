@@ -100,6 +100,18 @@ the prepared code-mode assets): **386 checks, 0 failed, 0 skipped, 468 s**, the 
 `chat-start-pty ok (1694ms)` among them, `lua 309/309 passed`. Two earlier attempts were killed by node
 installs (`1ffffae3`, `eb084ca8`) after their banner; the first green run is the one quoted above.
 
+## Discrimination (rule 16)
+
+`bash scripts/test-discriminates.sh origin/main` (base `a9d4617d`): `discriminates
+scripts/test-chat-start-pty.mjs FAIL - every published view is a spec the client can take`, `0 blocking`.
+The two Lua rows were named `unrevertable` there - the branch changes `rust/`, and that tool would run
+them against THIS tree's binary, not the base's - so both were judged by hand against a base binary
+(`a9d4617d` rust and lua, built in a separate worktree at `/tmp/base-chat-start`):
+
+- `scripts/test-stalls.lua` - **12 of 16 checks fail** on the base;
+- `scripts/test-cli-input.lua` - run the way `scripts/test.sh` runs it (its pipe producer), **2 of 24
+  fail** on the base, and they are exactly the two new stamp checks.
+
 ## What was not done
 
 - `federation.catalog()` still blocks inside a turn when its cache is old AND a peer in the roster is
@@ -107,7 +119,8 @@ installs (`1ffffae3`, `eb084ca8`) after their banner; the first green run is the
   The pty fixture keeps its peer offline for exactly that reason (see above). Measured while building
   this branch: a turn with one online peer that accepts and never answers did not reach its first model
   call within 30 s (`harness_events` held the `run/start` row and no `model_call`).
-- Nothing was pushed; the branch is local (six commits on `change/chat-start-guard`).
+- Nothing was pushed; the branch is local (local commits on `change/chat-start-guard`, never pushed).
+
 ## Texts to approve (rule 10)
 
 1. `wa idle-reads --session <id>` - `usage: wa idle-reads --session <id>`
