@@ -1592,6 +1592,29 @@ function M.build_plan(run, paths, notes, ring)
   table.sort(names)
   local estimate = M.estimate(classified.category)
   local steps = M.plan_steps(classified.category)
+  -- THE BRANCH'S OWN TESTS, named by the plan: this is the row a reader checks BEFORE the push ("what of mine
+  -- will run?"), and 22/11's first real landing answered it in the step and nowhere in the plan. Computed from
+  -- the same path list the step uses - the branch's FORK POINT to its tip - so a printed plan and the round
+  -- cannot disagree, and a Rust branch says why it is skipped instead of leaving the row unmentioned.
+  local rust_paths, own_rows = 0, {}
+  for _, path in ipairs(paths or {}) do
+    local spec = tostring(path)
+    if spec:find("^rust/") then rust_paths = rust_paths + 1
+    elseif spec:match("^scripts/test%-.+%.lua$") then own_rows[#own_rows + 1] = spec end
+  end
+  if unknown then
+    steps.tests = { action = "run", why = "the paths this round changes could not be read (above), so the " ..
+      "merged tree decides which of the branch's own rows run" }
+  elseif rust_paths > 0 then
+    steps.tests = { action = "skip", why = string.format("the branch changes Rust (%d file(s)): its tests need the " ..
+      "new binary, so main-health judges them after the install", rust_paths) }
+  elseif #own_rows > 0 then
+    steps.tests = { action = "run", why = string.format("the branch's own %d row(s), each alone with its own home " ..
+      "and ledger: %s", #own_rows, table.concat(own_rows, ", ")) }
+  else
+    steps.tests = { action = "skip", why = "the branch added or changed no scripts/test-*.lua of its own: " ..
+      "nothing of its own to run" }
+  end
   -- A LUA-ONLY ROUND MUST STILL SHIP A NODE RELEASE WHEN A RING NODE INSTALLS FROM ONE (review r1 #61).
   -- The lua-tree path is right for every node that deploys a tree and wrong for the one that cannot: a
   -- release-installed node has no checkout to deploy, so a round that skipped artifacts/ship/publish left it

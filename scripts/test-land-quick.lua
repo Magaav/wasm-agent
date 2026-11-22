@@ -290,6 +290,12 @@ eq(tonumber(grown.plan.files), 2,
 local tests_log = read_file(land.evidence_path("quick3n", "tests")) or ""
 contains(tests_log, "changed paths: 2 (rust 0,",
   "the tests step measures no Rust in this branch (got: " .. first_line_ish(tests_log) .. ")")
+-- THE PLAN NAMES THE ROW BEFORE THE PUSH (Victor's own check: "the tests step says run and lists the branch's
+-- own scripts/test-*.lua"), and it is the same list the step then runs.
+local plan_text = read_file(land.evidence_path("quick3n", "plan")) or ""
+contains(plan_text, "tests     run  the branch's own 1 row(s)", "the plan says the branch's own test rows run")
+contains(plan_text, "scripts/test-own-lua-new.lua", "and names the row it will run")
+ok(plan_text:find("changes Rust", 1, true) == nil, "and nothing in the plan says the branch changes Rust")
 eq(step_of("quick3n", "tests").state, "done", "its own test row runs instead of being skipped by name")
 contains(step_of("quick3n", "tests").detail, "1 green", "and it is green")
 contains(tests_log, "scripts/test-own-lua-new.lua", "the row that ran is the branch's own test")
