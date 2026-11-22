@@ -1578,6 +1578,7 @@ else
 fi
 gate_run node --test --test-reporter=tap scripts/test-mcp.mjs scripts/test-mcp-session.mjs scripts/test-mcp-request-seal.mjs scripts/test-web.mjs scripts/test-mcp-runtime-closure.mjs scripts/test-whatsapp-connector-http.mjs scripts/test-whatsapp-transcript-watchdog.mjs
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-envelope.lua" "$BIN" --db "$DB.envelope" | grep 'envelope ok'
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-search-miss-cli.lua" "$BIN" --db "$DB.search-miss-cli" | grep 'search miss cli ok'
 MCP_RECOVERY_BIN="$BIN"
 if command -v cygpath >/dev/null 2>&1; then MCP_RECOVERY_BIN="$(cygpath -m "$BIN")"; fi
 gate_run node scripts/test-mcp-recovery.cjs "$MCP_RECOVERY_BIN" "$WASM_AGENT_HOME/mcp-recovery-proof"

@@ -458,7 +458,20 @@ local function tool_lookup(catalog,execution,dispatch)
    found[index]={name=m.name,description=tostring(m.description or ''):match('^[^\n]*'),
      parameters=compact(m.parameters),callable=m.callable,route=m.route}
   end
-  return found,true
+  if #found == 0 then
+   -- A miss answers WHY, as a member of the same array (22/11: `searchTools("github")` answered `[]`
+   -- while `gh` was installed, so the model spent two discovery calls looking for a GitHub tool). The
+   -- entry says nothing matched, and names the program the query means when this machine has it
+   -- (`lua/core/cli_hints.lua`: one PATH lookup, at miss time only, and no probe of anything else).
+   local hints = dofile('lua/core/cli_hints.lua')
+   local echo = envelope.echo_name(query)
+   local installed = hints.hint(query)
+   local miss = {name = echo, found = false, missing = true, query = echo,
+     reason = hints.reason("no tool in this script's catalogue matches '" .. echo .. "'.", installed)}
+   if installed then miss.cli = {name = installed.name, path = installed.path} end
+   return {miss}, true
+  end
+  return found, true
  end
  -- `describeTool(name)` - the hidden compatibility alias
  -- (`searchTools("select:"..name)[0]`, same object): a script written against the old one name keeps
