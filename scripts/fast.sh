@@ -79,6 +79,42 @@ if [ -z "$jobs" ]; then
   [ "$jobs" -gt "$cap" ] 2>/dev/null && jobs=$cap
 fi
 . "$ROOT/scripts/lib/fast-environment.sh"
+# THE NODE'S OWN RECORD OF ITS BUILD ENVIRONMENT (items 3 and 6 of the node-ops round). One file -
+# <home>/.wasm-agent/build.env - names the toolchain directories, zig, the target-dir policy and the
+# wasi-sdk; scripts/lib/build-requirements.sh is the ONE reader of it, and this run reads it the same way
+# deploy.sh, mission.sh and wa land do instead of guessing from the ambient environment. A key no build
+# reads is a REFUSAL here (it looks applied and is not, and a machine can spend a day believing it set a
+# toolchain directory nothing looked at); a MISSING record is not (the ambient environment is exactly what
+# this runner used before it existed).
+#
+# RE-MEASURED 22/11 on main a8cd5348: this read was ABSENT - looking for build_env or build-requirements in
+# scripts/fast.sh answered NOTHING - while scripts/test-build-env.sh (wired at scripts/test.sh:1001) asserts
+# it, so the gate failed with "scripts/fast.sh with an unknown record key exited 0, not 2": the runner that
+# gates a node applied none of the record the deploy on that same node had applied.
+#
+# IT IS APPLIED HERE AND *REPORTED* AFTER THE BANNER (measured 22/11): `wa_build_env` must run before
+# `fast_binary_plan`, which builds this tree's binary and needs the record's toolchain on PATH - but the run's
+# FIRST line is the binary resolution (scripts/test-fast-binary.mjs: the first line of `fast.sh --binary`),
+# so the record's own lines are held here and echoed below that banner instead of in front of it.
+. "$ROOT/scripts/lib/build-requirements.sh"
+if build_env_note="$(wa_build_env_audit 2>&1)"; then
+  BUILD_RECORD_NOTE="$(printf '%s\n' "$build_env_note" | head -1)"
+else
+  printf '%s\n' "$build_env_note" >&2
+  echo "fast: refused($(printf '%s\n' "$build_env_note" | sed -n 's/^problem //p' | tail -1)): the build record names a setting no build reads, so a machine could spend a day believing it set a toolchain directory nothing looked at. Remove that line, or add it to WA_BUILD_ENV_KEYS with the face that consumes it. Nothing was run." >&2
+  exit 2
+fi
+# The same function deploy.sh uses: it puts the record's toolchain directories on PATH (appended, so the
+# caller's PATH still wins) and is a no-op when the record names none.
+if ! wa_build_env; then
+  echo "fast: refused(build_env_incomplete): the build record names a directory that is not there; the refusal above names it and the one line that fixes it. Nothing was run." >&2
+  exit 2
+fi
+BUILD_RECORD_KEYS=""
+for entry in WA_BUILD_ZIG WASI_SDK_PATH WA_BUILD_CARGO_TARGET; do
+  eval "value=\${$entry:-}"
+  [ -n "$value" ] && BUILD_RECORD_KEYS="$BUILD_RECORD_KEYS$entry=$value\n"
+done
 # ---- the environment a row must never inherit --------------------------------------------------------
 # Measured, speed.log: a fixture set WASM_AGENT_LLM_BASE_URL to a dead port and was answered by the
 # operator's REAL provider, because the child inherited WASM_AGENT_VAULT_URL from the session and
@@ -143,6 +179,12 @@ if [ "${FAST_BIN_ACTION:-}" = build ]; then
   fast_binary_banner
 fi
 if [ "${FAST_BIN_ACTION:-}" = refuse ]; then fast_binary_refuse; fi
+# THE RECORD'S OWN LINES, AFTER THE BANNER (item 3/6). The run's FIRST line is the binary resolution by
+# contract (scripts/test-fast-binary.mjs reads it) and a stale binary prints its banner again after the
+# build, so what the record applied is said HERE, once the banner block is done - measured 22/11: printed
+# before it, the record line was the run's first line and the contract was broken where no check looks.
+echo "fast: build record: $BUILD_RECORD_NOTE"
+[ -n "$BUILD_RECORD_KEYS" ] && printf '%b' "$BUILD_RECORD_KEYS"
 # ---- the one build root ------------------------------------------------------------------------------
 # Every cargo invocation this run makes - the rows' `cargo test`, the components, a build a row does for
 # itself - writes into the node's ONE build root, this tree's child of it (`docs/ONEROOT.md`), and the
@@ -489,9 +531,10 @@ run_lua() { # <script> -> one TSV row: exit, ms, script, verdict line, verdict k
   fi
   if [ "$c" != 0 ]; then
     kind=$(wa_environment_kind "$c" "$last")
-    # A hang is only a hang when the watchdog said so in its own line: an exit 124 on its own is also
-    # what a fixture that calls timeout returns, and calling that a hang would be a guess.
-    if grep -q '^watchdog: ' "$out" 2>/dev/null; then kind=hung; last=$(grep '^watchdog: ' "$out" | tail -1); fi
+    # A hang is only a hang when the watchdog said so in its own line: an exit 124 on its own is also what
+    # a fixture that calls timeout returns, and calling that a hang would be a guess (item 8). The predicate
+    # is scripts/lib/fast-watchdog.sh's, not a grep here, so there is one answer to "was this the watchdog".
+    if wa_watchdog_hung "$c" "$(cat "$out" 2>/dev/null)"; then kind=hung; last=$(grep "$WA_FAST_WATCHDOG_HANG_LINE" "$out" | tail -1); fi
     cp "$out" "$FAST_WORK/logs/$(basename "$f").log" 2>/dev/null || true
   fi
   ms=$(( $(fast_now_ms) - s ))
@@ -722,6 +765,25 @@ check() { name=$1; shift; s=$(fast_now_ms)
   wa_environment_retry "$name" "$work/check-$name.log" "$@"; c=$?
   ran=$((ran + 1)); ms=$(( $(fast_now_ms) - s ))
   if [ "$c" = 0 ]; then
+    # A GREEN ROW THAT PRINTED SKIP IS A SKIP, NOT A PASS (item 10 of the node-ops round). Measured 19/11:
+    # 52 test files print "SKIP <test>: <reason>" and exit 0 - a component this machine cannot build, a
+    # fixture that is not installed. This runner collected those lines into the skips table and then recorded
+    # the row as "pass", so "fast path ok (N checks, 0 skipped)" was true of the count and false of the run:
+    # a consumer reading the row status saw a proof where there was a named hole. The row is now recorded
+    # "skip" with that reason and counted in $skipped, which is what its own line said.
+    #
+    # RE-MEASURED 22/11 on main a8cd5348: this branch was GONE - check() went straight from a zero exit to
+    # record_row pass - so scripts/test-fast-skip-count.sh (wired at scripts/test.sh:1008) failed with "the
+    # shipped check() does not look for a SKIP line". It was dropped by 2975b6c5 ("they come back with
+    # their own test") and never came back.
+    local skip_reason
+    skip_reason="$(grep -h '^SKIP ' "$work/check-$name.log" 2>/dev/null | sed 's/^SKIP //' | head -1)"
+    if [ -n "$skip_reason" ]; then
+      skipped=$((skipped + 1))
+      echo "fast: $name SKIPPED (${ms}ms): $skip_reason"
+      record_row skip checks "$name" "$c" "$ms" 0 "$skip_reason"
+      return 0
+    fi
     echo "fast: $name ok (${ms}ms)"; record_row pass checks "$name" "$c" "$ms" 0 ''; return 0
   fi
   fails=$((fails + 1))
