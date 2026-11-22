@@ -1,11 +1,23 @@
 # remote-edit-first-class: a remote edit is the edit you know here
 
-Base main `c6f890e3`. Branch `change/remote-edit-first-class` in
-`/home/victor/Work/missions/remote-edit-first-class/wt`, two commits:
+Base main `dd3fc626` (the mission started on `c6f890e3` and was rebased onto main after
+`change/wheel-scrolls-lines` landed). Branch `change/remote-edit-first-class` in
+`/home/victor/Work/missions/remote-edit-first-class/wt`, five commits:
 
-- `b12862ad` - remote edit on a peer: the fence is the session's, the change is recorded here, undo
+- `89916452` - remote edit on a peer: the fence is the session's, the change is recorded here, undo
   restores it there.
-- `e2caf839` - remote edit: the description shows the edit example the brief names.
+- `68eb38ae` - remote edit: the description shows the edit example the brief names.
+- `b2e86154` - the mission report.
+- `9df3342a` - remote edit: a batch read is a page this session was served; no session, no claim.
+- `ca4c7024` - the report, updated for `9df3342a`.
+
+**The rebase conflict** was one hunk in `lua/core/tools.lua`: `change/write-names-its-node` landed
+`on_this_node(...)` around the same write/edit branches. Both are kept - the change payload travels
+inside their result (`written.change`, then `on_this_node(written)`; `result.change`, then
+`on_this_node(result)`) - and `scripts/test-write-node-receipt.lua` (18 checks) passes beside this
+mission's fixture, so neither change's behaviour was dropped. The measurements in section 1 were made
+on `c6f890e3`; nothing they describe involves what wheel-scrolls-lines or write-names-its-node
+touched, and the prompt-prefix delta was re-measured on `dd3fc626` (unchanged).
 
 Every claim below cites one of those, or a measurement whose command is in this file.
 
@@ -60,7 +72,7 @@ it; the peer answers the second in the same answer.
   two nodes is two records. `remote` records the page its own `read` answer served (tools.lua:2337).
   The record goes in the SIGNED BODY as `read_pages` (nodes.lua:1651 `remote_call(..., options)`),
   never in `args`: `args` is what the model writes, and a fence the model can set is not a fence.
-  A page read in a BATCH is recorded the same way (`14fd289c`, tools.lua:1360): without it the cheapest
+  A page read in a BATCH is recorded the same way (`9df3342a`, tools.lua:1360): without it the cheapest
   read would leave no record and the fence would have a hole exactly there - found while writing this
   change, and the fixture now pins it. With NO session id there is no record to speak from, so the
   field is left out and the peer falls back to its own record, exactly as before: an absent record is
@@ -96,11 +108,11 @@ it; the peer answers the second in the same answer.
 
 1. **Same safety as a local edit.** Exactly-once match, nearest region on a miss, atomic multi-edit,
    `file_changed_before_write` - all unchanged, because a remote edit runs the LOCAL `file_tools.edit`
-   on the peer. The fence is now judged by what THIS session read on THAT node (commit `b12862ad`,
+   on the peer. The fence is now judged by what THIS session read on THAT node (commit `89916452`,
    file_tools.lua:257-330 and 624, server.lua:1413/1561/1594, tools.lua:2290-2370, nodes.lua:1651).
-2. **The change is recorded here, and undo works from here** (`b12862ad`: changeset.lua:117-200, 356,
+2. **The change is recorded here, and undo works from here** (`89916452`: changeset.lua:117-200, 356,
    420-470; server.lua:46 and 2132; tools.lua:996,1014,2337).
-3. **The description names it** (`e2caf839`). Measured byte delta, `tools.catalog('master')` encoded as
+3. **The description names it** (`68eb38ae`). Measured byte delta, `tools.catalog('master')` encoded as
    the prompt prefix: **73190 -> 73547 (+357) bytes**, of which the `remote` description itself is
    **679 -> 1014 (+335)** and the remaining +22 are the JSON escaping of the eleven quote pairs in the
    example. It moves the prefix once, at the next release.
@@ -153,7 +165,7 @@ test-node-dispatch-wiring (10), test-codemode-boundary, test-refusal-contract (1
 test-session-isolation (141).
 
 Pre-existing failure, named not mine: `scripts/test-remote-refusals.lua` fails at line 18 ("node
-refusal through the relay") on the base `c6f890e3` too - measured by running it in a base worktree.
+refusal through the relay") on the base `c6f890e3` too (and on `dd3fc626`) - measured by running it in a base worktree.
 
 ## 6. Texts to approve (model- and operator-facing, verbatim)
 
