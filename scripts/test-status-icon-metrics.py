@@ -89,7 +89,7 @@ ROW_GLYPHS = [
   + [(0xF01BC, "cache", "session footer")] + [(cp, name, "session footer") for cp, name in BALLS]
 
 # THE ANIMATED LINE ABOVE THEM (M.spinner's frames), listed because it is the same chrome and the same
-# question - and MEASURED, not asserted: Jeremy's two rows are the subject of this file, and eight of
+# question - and MEASURED, not asserted: the two rows above are the subject of this file, and seven of
 # these ten frames are not in JetBrains Mono at all, which is a finding for the report and a look change
 # (which shapes the spinner cycles) that needs Victor's eye. Printed on every run, never hidden.
 STATUS_LINE = [(0x2736, "spinner first frame"), (0x2733, "spinner"), (0x2737, "spinner"),
@@ -235,7 +235,8 @@ def foot_report(codepoints, fonts):
         if path and os.path.exists(path):
             resolved[family] = path
     out = []
-    for cp, name in codepoints:
+    for entry in codepoints:
+        cp, name = entry[0], entry[1]
         verdict, kind = None, "fallback"
         for family in families:
             path = resolved.get(family)

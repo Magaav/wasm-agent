@@ -436,7 +436,11 @@ def manifest(out_dir, built, box=None):
     document = {
         "family": FAMILY,
         "file": os.path.basename(built),
-        "box": dict(box, advance_em=ADV_EM, advance=ADVANCE, units_per_em=UPEM_OUT,
+        # The derived lengths are rounded to two units: this file is read by an operator, and a float
+        # with sixteen decimals in a committed artifact is noise, not precision (a unit is 1/2048 em).
+        "box": dict({key: (round(value, 2) if isinstance(value, float) else value)
+                      for key, value in box.items()},
+                     advance_em=ADV_EM, advance=ADVANCE, units_per_em=UPEM_OUT,
                     cap_height=CAP_HEIGHT, ymid_units_1000=YMID, px_units_1000=PX_UNITS, gap=""),
         "glyphs": [{"codepoint": "U+%04X" % cp, "means": means, "source_glyph": cmap.get(cp)}
                    for cp, means in GLYPHS],
