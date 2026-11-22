@@ -793,7 +793,7 @@ function M.bash_changes_block(event, width, live)
   local out = {}
   for _, file in ipairs(files) do
     local lines = M.diff_block({ path = file.path, before_text = file.before_text,
-      after_text = file.after_text }, width, live)
+      after_text = file.after_text, deleted = file.deleted }, width, live)
     for _, row in ipairs(lines or {}) do out[#out + 1] = row end
   end
   -- A file whose starting text is not known is NAMED, never drawn with a guessed one: a reader who
@@ -824,8 +824,8 @@ function M.diff_block(change, width, live)
     before, after = diff_view.texts(change)
   end
   if before == nil then return nil, tostring(after or "no_text") end
-  local block = diff_view.rows({ path = change.path, before = before, after = after },
-    { width = width })
+  local block = diff_view.rows({ path = change.path, before = before, after = after,
+    deleted = change.deleted }, { width = width })
   local out = {}
   for _, row in ipairs(block.rows) do
     if row.kind == "open" or row.kind == "close" then
@@ -3264,6 +3264,29 @@ function METHODS:event(event)
     elseif why ~= "no_change" then
       self:line(paint("\226\142\191 no diff shown: " .. tostring(why), "dim", self.live))
     end
+    return  elseif kind == "remote_change" then
+    -- A create/edit that ran on ANOTHER node (lua/core/tools.lua, the remote branch). When the peer's
+    -- answer carried the two texts (mission remote-edit-first-class puts them on the wire), this is the
+    -- SAME card a local write draws - path, counts, numbered rows - from the peer's own before/after.
+    -- When it did not, the reader gets one honest row saying what ran where, never silence.
+    if type(event.before_text) == "string" and type(event.after_text) == "string" and event.ok ~= false then
+      local lines = M.diff_block({ path = event.path, before_text = event.before_text,
+        after_text = event.after_text }, self.limit, self.live)
+      if lines then
+        self:topic(true)
+        for _, row in ipairs(lines) do self:write(row .. "\n") end
+        self:write("on " .. tostring(event.node) .. "\n\n")
+        self:topic(false)
+        return
+      end
+    end
+    local wrote = event.ok == false and "could not write " or "wrote "
+    local text = wrote .. tostring(event.path) .. " on " .. tostring(event.node)
+    if event.ok == false then text = text .. ": " .. tostring(event.error or "refused") end
+    self:topic(true)
+    self:line(paint(text, event.ok == false and "error" or "dim", self.live))
+    self:write("\n")
+    self:topic(false)
     return  elseif kind == "tool_result" then
     self:progress("finish")
     local name = event.name or (self.pending and self.pending.name) or "?"

@@ -101,7 +101,8 @@ local view = view_lib.new({ out = plain.out, live = false, now = function() retu
 view:event(rec)
 local text = plain.text()
 has(text, "diff-view-target.lua", "the path is on the block")
-has(text, "+2 -1", "the counts are on the block, from the stored record")
+has(text, "Update(/tmp/diff-view-target.lua)", "an existing file is named Update(path), as Claude Code names it")
+has(text, "Added 2 lines, removed 1 lines", "the counts are on the block, from the stored record")
 -- Real line numbers: the removed line was line 2 of the file it came from, and the two added lines are
 -- lines 2 and 3 of the file that replaced it. A diff that numbered its own rows would say 3 and 4.
 has(visible(text), string.format("\226\148\130 %2d %2s - ", 2, ""),
@@ -229,7 +230,18 @@ end
 local created = record("", "one\ntwo\n", "/tmp/diff-view-new.lua")
 local created_rows = table.concat(view_lib.diff_block({ path = created.path,
   before = created.before, after = created.after }, 80, false) or {}, "\n")
-has(created_rows, "+2 -0", "a created file counts two added lines and no removal")
+has(created_rows, "Create(/tmp/diff-view-new.lua)", "a new file is named Create(path)")
+has(created_rows, "Added 2 lines, removed 0 lines", "a created file counts two added lines and no removal")
+-- A DELETE is its own name, and the caller's fact: the same two texts (a text and no text) draw an
+-- Update of an emptied file unless the caller says the file is gone.
+local deleted = record("one\ntwo\n", "", "/tmp/diff-view-gone.lua")
+local deleted_rows = table.concat(view_lib.diff_block({ path = deleted.path, before = deleted.before,
+  after = deleted.after, deleted = true }, 80, false) or {}, "\n")
+has(deleted_rows, "Delete(/tmp/diff-view-gone.lua)", "a removed file is named Delete(path)")
+has(deleted_rows, "Added 0 lines, removed 2 lines", "and it counts the lines it took with it")
+has(visible(deleted_rows), string.format("\226\148\130 %2d %2s - ", 1, ""),
+  "its rows are - rows carrying the numbers the lines had")
+ok(visible(deleted_rows):find("+", 1, true) == nil, "and no + row, because nothing was written")
 
 
 -- ---- the files a shell command changed ----------------------------------------
@@ -279,8 +291,26 @@ ok(#refused == 0, "a file modified before the command is not counted as this com
 local block = table.concat(view_lib.bash_changes_block({ files = changed, refused = refused }, 80, false)
   or {}, "\n")
 has(block, "crate/src/changed.rs", "the changed file is named by its root-relative path")
-has(block, "+1 -1", "and its own counts")
+has(block, "Added 1 lines, removed 1 lines", "and its own counts")
 has(block, "crate/src/new.rs", "a new file is shown")
+-- A REMOVAL is a change with a before side, not a missing one: the index still holds the text the file
+-- had, and the removed file is drawn as a Delete with its own lines. The host is asked whether the path
+-- is really gone (a nil read is also what a binary file answers).
+local real_kind = host.path_kind
+host.path_kind = function(path) return fake.files[path] == nil and "missing" or "file" end
+fake.status_after = fake.status_after .. " D crate/src/gone.rs\n"
+fake.show["crate/src/gone.rs"] = "kept\nthen\nremoved\n"
+local gone_changed, gone_refused = bash_changes.changed(before)
+host.path_kind = real_kind
+local gone_row
+for _, item in ipairs(gone_changed) do if item.path == "crate/src/gone.rs" then gone_row = item end end
+ok(gone_row ~= nil, "a removed file is reported as a change, not as an unavailable one")
+ok(gone_row and gone_row.deleted == true, "and it is marked deleted, which is what names the card")
+ok(gone_row and gone_row.after_text == "", "with an empty after side: nothing is left")
+local gone_block = table.concat(view_lib.bash_changes_block({ files = gone_changed, refused = gone_refused },
+  80, false) or {}, "\n")
+has(gone_block, "Delete(crate/src/gone.rs)", "the block draws it as a Delete card")
+has(gone_block, "Added 0 lines, removed 3 lines", "with the lines it took")
 -- A file whose before-side is not in the index cannot be diffed, and the block says so in words.
 fake.show = {}
 local changed2, refused2 = bash_changes.changed(before)

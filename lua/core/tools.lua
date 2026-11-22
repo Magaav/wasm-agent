@@ -1382,6 +1382,84 @@ local function remote_batch(memory, args, role, ctx)
     note = "Ordered per-entry results; every entry was a read." }
 end
 
+-- The change a write/edit made, for the READER only.
+--
+-- Victor, 22/11: "everything once we create/edit/delete a file must appear as claude code. we like to
+-- see everything. right now we only see like a row 'write 24ms'". Before this, the only change event
+-- came from the agent loop and only for a call NAMED write or edit, so a write inside a `run` script -
+-- the one execution path code mode has - drew nothing: the call was named run.
+--
+-- It is emitted HERE, in the tool's own branch, because this is the single door every call passes
+-- whether the model called it directly or a script did (lua/core/agent.lua hands the same ctx to
+-- lua/core/codemode.lua, which dispatches each inner call through this function). The record it shows
+-- is THE CALL'S OWN before/after text, taken while the previous text is still in hand - not the run's
+-- summarized entry, which keeps the run's starting point: a script that writes a file and then edits it
+-- has two changes to show, and the second one is an Update of what the first wrote.
+--
+-- The model's bytes do not move: the event rides beside the result, the result is exactly what the
+-- branch below returns, and a caller with no listener emits into nothing (ctx.watch_changes/ctx.emit
+-- are the view's, lua/core/agent.lua).
+-- Where a reader's event goes. The agent hands every call a queue (lua/core/agent.lua,
+-- dispatch_ctx.change_queue) and drains it after that call's own result row: a card written while a
+-- code-mode block is still open would land inside it and be overwritten when the block settles. The
+-- order a reader sees is therefore the one it saw before this change - result row, then its cards -
+-- and a caller with no queue (a bare dispatch, a test) gets the event directly.
+local function deliver(ctx, event)
+  local queue = type(ctx) == "table" and ctx.change_queue or nil
+  if type(queue) == "table" then queue[#queue + 1] = event; return end
+  ctx.emit(event)
+end
+
+local function announce_change(ctx, name, path, before, after)
+  if type(ctx) ~= "table" or type(ctx.emit) ~= "function" or not ctx.watch_changes then return end
+  if type(path) ~= "string" or path == "" or type(after) ~= "string" then return end
+  -- An existing file whose text could not be read has no before side (changeset.record's own rule: it
+  -- records false). The card then says it cannot be drawn instead of drawing an empty file.
+  local recorded, original = true, before
+  if type(original) ~= "string" then recorded, original = false, "" end
+  if #original > changeset.RECORD_CAP or #after > changeset.RECORD_CAP then recorded = false end
+  local before_id, after_id
+  if recorded then
+    -- The two texts go to the same content-addressed store the record uses, so the view reads them
+    -- back by address (lua/core/diff_view.lua) and the event stays small.
+    before_id, after_id = changeset.store(original), changeset.store(after)
+    if not before_id or not after_id then recorded = false end
+  end
+  local added, removed = changeset.line_delta(original, after)
+  deliver(ctx, { type = "change", name = name, path = path, before = before_id, after = after_id,
+    recorded = recorded, added = added, removed = removed, created = original == "" })
+end
+
+-- A file this RUN wrote that a command then removed.
+--
+-- The run's own record still holds the text it wrote, so the card is a Delete with its real lines
+-- instead of nothing at all. PROBED, never parsed from the command line: only a path this run recorded,
+-- and only when the host can SAY the path is gone (`path_kind` -> "missing"). A read that answers nil is
+-- also what a binary file answers, and guessing there would draw a deletion that never happened.
+--
+-- Called where a command's effect first becomes known: right after a foreground command
+-- (lua/core/tools.lua, the bash branch) and when a managed operation settles (the operation branch -
+-- which is how a script's bash runs, lua/core/codemode_pending.lua). Each path is reported once, so a
+-- poll costs one flag read.
+local function announce_gone(ctx, reported)
+  if type(ctx) ~= "table" or type(ctx.emit) ~= "function" or not ctx.watch_changes then return end
+  if not host.path_kind then return end
+  local files = type(ctx.changes) == "table" and ctx.changes.files or nil
+  if type(files) ~= "table" then return end
+  for _, file in ipairs(files) do
+    if not (reported and reported[file.path]) and not file.deleted_reported
+        and host.path_kind(file.path) == "missing" then
+      file.deleted_reported = true
+      local before_id = file.after
+      local after_id = changeset.store("")
+      deliver(ctx, { type = "change", name = "bash", path = file.path, before = before_id,
+        after = after_id, recorded = before_id ~= nil and after_id ~= nil, created = false,
+        deleted = true })
+    end
+  end
+end
+M.announce_gone = announce_gone
+
 function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
   args = args or {}
   local requested_cwd = args.cwd
@@ -1662,6 +1740,10 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     local ok, raw = pcall(host.operation, args.action or "status", json.encode(args))
     if not ok then return {error=tostring(raw)} end
     local answer = json.decode(raw)
+    -- A command that just SETTLED may have removed a file this run wrote: the record is where the
+    -- card's lines come from (announce_gone above). One flag read per recorded file per poll, and only
+    -- after a settle, so the display costs a reader nothing until there is something to show.
+    if type(answer) == "table" and answer.settled == true then announce_gone(ctx) end
     -- Item #43: list and await answer IDS AND STATE by default; an output BODY is returned only when it
     -- was asked for, and then bounded. A run that lists four operations should not pay for four logs,
     -- and the one number a caller needs to decide what to do next (is it settled? how many bytes? where
@@ -1924,11 +2006,24 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     local result = run(args.command, timeout, cwd, provenance)
     -- After the command: what it changed. Emitted as its own event, so the model's result above stays
     -- exactly what the tool returned, and a reader who is not watching changes pays nothing.
+    local shell_changed, shell_refused = nil, nil
     if watched ~= nil and ctx and type(ctx.emit) == "function" then
-      local changed, refused = bash_changes.changed(watched)
-      if #changed > 0 or #refused > 0 then
-        ctx.emit({ type = "bash_changes", command = args.command, files = changed, refused = refused })
+      shell_changed, shell_refused = bash_changes.changed(watched)
+      if #shell_changed > 0 or #shell_refused > 0 then
+        ctx.emit({ type = "bash_changes", command = args.command, files = shell_changed, refused = shell_refused })
       end
+    end
+    -- A file this RUN wrote and a command then removed, outside a work tree (where the snapshot above
+    -- has nothing to compare): the run's own record still holds the text, so the card is a Delete with
+    -- its real lines. PROBED, never parsed from the command line - only a path this run recorded is
+    -- looked at, and only when the host can SAY the path is gone: a read that answers nil is also what a
+    -- binary file answers, and guessing there would draw a deletion that never happened. A git tree has
+    -- already reported it above, so a path in that list is not probed twice.
+    if ctx then
+      local reported = {}
+      for _, item in ipairs(shell_changed or {}) do reported[item.path] = true end
+      for _, item in ipairs(shell_refused or {}) do reported[item.path] = true end
+      announce_gone(ctx, reported)
     end
     -- The adopted-tree guidance is *policy*, and policy depends on what this caller may use:
     -- a profile with `bash` but not `operation` cannot read or cancel the operation it has just
@@ -1994,6 +2089,8 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     if ok and ctx and ctx.peer_call and ctx.record_change == true then
       written.change = change_for_wire({ path = path, before = before, after = args.content or "" })
     end
+    -- What the READER sees of it (lua/core/diff_view.lua): the same two texts, unchanged by the call.
+    if ok then announce_change(ctx, "write", path, before, args.content or "") end
     -- The name of the node this ran on (mission write-names-its-node), on the way out for every caller.
     return on_this_node(written)
   elseif name == "edit" then
@@ -2005,10 +2102,18 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     -- two texts back when it will record the change in that session - the run that made a change is the
     -- session that owns its undo.
     local want_change = (ctx and ctx.peer_call and ctx.record_change == true) and true or false
-    local result=file_tools.edit(args,ctx.changes and function(path,before,after)
-      changeset.record(ctx.changes,path,before,after)
-    end or nil,nil,ctx and ctx.session_id,remote_pages(ctx),want_change)
+    -- The callback is the one place that holds both sides of an applied edit, so it keeps the record
+    -- (when this caller has one) AND the two texts the reader's card needs. It runs only after the file
+    -- was written (file_tools.apply), so a failed edit announces nothing.
+    local applied_texts={}
+    local result=file_tools.edit(args,function(path,before,after)
+      if ctx.changes then changeset.record(ctx.changes,path,before,after) end
+      applied_texts[#applied_texts+1]={path=path,before=before,after=after}
+    end,nil,ctx and ctx.session_id,remote_pages(ctx),want_change)
     if result.applied then result.graph_index=graph_hint(memory,ctx,result.path) end
+    if result.applied then
+      for _,item in ipairs(applied_texts) do announce_change(ctx,"edit",item.path,item.before,item.after) end
+    end
     if result.change then result.change = change_for_wire(result.change) end
     return on_this_node(result)
   elseif name == "ls" then
@@ -2357,6 +2462,27 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
         result.online_nodes = online_nodes()
         result.next = REMOTE_REFUSALS[result.error]
       end
+    end
+    -- A file this call changed on ANOTHER node (Victor 22/11: every create/edit has to be visible). The
+    -- peer's answer carries no text this node could draw - an edit's digests address the PEER's store -
+    -- so the card is one honest row naming the path and the node, never nothing. A `local_node` peer
+    -- needs no row: the dispatch above runs here and its own branch already emits the card.
+    if not node.local_node and (call.capability == "write" or call.capability == "edit")
+        and type(result) == "table" and ctx and type(ctx.emit) == "function" and ctx.watch_changes then
+      local target = result.path or (type(call.args) == "table" and call.args.path) or "?"
+      local ok = not result.error and result.ok ~= false
+      -- The peer's answer carries the two texts when the call asked for them (mission
+      -- remote-edit-first-class sends `change` on the wire): then the reader gets the SAME card a local
+      -- write draws, from the peer's own before/after. A peer that sent no texts, or refused the call,
+      -- gives the one honest row - never nothing. An allow-list: only these five fields travel.
+      local wire = result.change
+      if type(wire) ~= "table" or wire.recorded == false
+          or type(wire.before) ~= "string" or type(wire.after) ~= "string" then
+        wire = nil
+      end
+      deliver(ctx, { type = "remote_change", capability = call.capability, node = node.name,
+        path = tostring(target), ok = ok, error = result.error,
+        before_text = wire and wire.before or nil, after_text = wire and wire.after or nil })
     end
     if carries_local_images(result) then
       return {error="remote_image_transport_unsupported",capability=call.capability,

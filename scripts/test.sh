@@ -2039,6 +2039,12 @@ WA_SCRIPT=scripts/test-font-setup.lua "$BIN" --db "$DB.fonts-setup" | grep "font
 # plain NO_COLOR rendering, and that a change the run could not record says so instead of drawing an
 # empty diff. It goes through the view's own event path, as chat.lua hands the view a change event.
 WA_SCRIPT=tests/diff-view.lua "$BIN" --db "$DB.view-diff" | grep "diff view ok"
+# Every file a run CREATES, EDITS or DELETES is a card, the way Claude Code draws one (Victor 22/11:
+# "everything once we create/edit/delete a file must appear as claude code"). The card existed; the
+# event did not, because only a call NAMED write or edit emitted one and code mode's one execution path
+# names the call run. This row runs a REAL script through tools.dispatch: write a new file, edit it,
+# remove it, three cards, and the model's own result byte-identical with a listener and without one.
+WA_SCRIPT=scripts/test-script-writes-show-diff.lua "$BIN" --db "$DB.script-writes-diff" | grep "script writes show a diff ok"
 # What a run block DRAWS WHILE IT IS WRITTEN (operator, 21/11: "draw the JS as it used to do in raw code
 # channel, so we can see it in real time writing js ... the promises waiting for coming back, the way to
 # explore result"). Three properties, each asserted in the rows the view hands the transcript: the
