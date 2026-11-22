@@ -60,6 +60,22 @@ always-available nothing retried at all - a session could stay above 40% until t
 | the trigged end to end (real node, stub model, scratch home) | a scratch seed (one master session, one wake due at once, one wake still pending) + `<bin> serve` with `scripts/mock-provider.cjs` on loopback | observed: `[serve] idle compaction after settle: {"error":"work_pending",...,"pending":["1 self-wake(s)"],...}` - the node asked again where the work settled, and refused by name because one wake was still pending |
 | the crate's own Rust tests | `cargo test --release -p wa-capabilities --lib` | see the last row of this file (the run is recorded there once it finishes) |
 | the land gate's discriminator | `bash scripts/test-discriminates.sh 57551064` | `unrevertable scripts/test-compact-idle-pending.lua - this branch changes rust/, and the Lua rows would run against this tree's binary, not the base's`: it does not judge this branch. Judged by hand above instead, with the base Lua in its own worktree and the same binary |
+| the day-to-day suite | `flock -o ~/Work/missions/.suite.lock bash scripts/fast.sh --jobs 8` | 43 of 380 checks failed, and every one of the 43 was a property of the binary, not of the branch - see below |
+
+The fast-path run above used the binary this mission built with `WA_CODEMODE_ALLOW_EMPTY=1` (the switch
+the gate's own builds use): an artifact that cannot run code mode at all, and one built before the two
+commits, so its embedded build identity named 57551064 on a dirty tree. Rebuilding it with the prepared
+assets (`WA_CODEMODE_BUILD_ASSETS=<the tree's .git/codemode-assets/...> cargo build --release -p wa-host
+--bin wa`, 78 293 224 B) and re-running each failed row on its own (single test files do not need the
+suite lock):
+
+| row(s) | re-run with the asset-embedded binary |
+|---|---|
+| 38 Lua rows named by the run (`test-codemode-*`, `test-run-*`, `test-return-shapes`, `test-retire-many`, `test-hooks-nested`, ...) | `rows: 38 pass, 1 fail` |
+| `test-harness-evaluator-replay.lua` | passes with `FAST_BIN` set (`harness evaluator replay ok (55 checks)`) - the row reads the binary under test from that variable, which the gate provides |
+| `build-info` | `test-build-info: 24 checks, 0 failed` once the binary is built at HEAD on a clean tree (it was `commit is this checkout's HEAD: got 57551064...` before) |
+| `run-block-pty`, `run-live-pty` | `22 ok, 0 failed, 0 skipped` each, and `run-block-pty` gives the same verdict on the base tree with the same binary |
+| `install-guards` | **6 checks fail identically on the base tree with the same binary** (`'refused(candidate_commit_unknown)' not found in 'upgrade: refused inside a turn running on the node it would replace'`): pre-existing on this node when the row runs inside a live turn, not this branch |
 
 ## What this branch does not claim
 
