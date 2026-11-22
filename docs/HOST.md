@@ -625,8 +625,10 @@ therefore turns on SGR mouse reports (`?1002h ?1003h ?1006h`, off again with the
 **a click on the scrollbar's column jumps there and a drag on its thumb scrolls** (the thumb is thick
 while the pointer is on it, which is what `1003` - any motion - is for), and
 **Ctrl+C with a selection copies it** through OSC 52 - the terminal's clipboard, also over ssh and
-`docker exec`. Without a selection Ctrl+C is unchanged (interrupt; twice to quit). The wheel pages
-the chat. Shift+drag still makes the terminal's own selection where the terminal honours it (foot,
+`docker exec`. Without a selection Ctrl+C is unchanged (interrupt; twice to quit). The wheel moves
+the chat **one row per mouse report** - a notch of the wheel is the several reports the terminal sends
+for it (foot multiplies them by its `[scrollback] multiplier`) - and PageUp/PageDown keep their third
+of it. Shift+drag still makes the terminal's own selection where the terminal honours it (foot,
 xterm). The pure part - decoding reports, slicing cells, the copied text - is `src/selection.rs`.
 
 `!` as the first character of an empty draft is bash mode (Claude Code's): the prompt and dividers
