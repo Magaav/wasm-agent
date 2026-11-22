@@ -498,13 +498,16 @@ function M.owner_evidence(catalog_fn, capabilities_fn)
             end
           end
         end
+        -- The node id travels with the row: a call that ARRIVED from a peer must never be routed back to
+        -- it (M.arrived_from), and the id is the only name a peer's session carries.
+        local node_id = type(peer) == 'table' and peer.node_id or id
         if holds then
           named[name] = true
-          owners[#owners + 1] = { name = name, why = 'connector',
+          owners[#owners + 1] = { name = name, node_id = node_id, why = 'connector',
             says = 'its connector says it holds the account' }
         elseif lists then
           named[name] = true
-          candidates[#candidates + 1] = { name = name, why = 'connector_tools', tool = lists,
+          candidates[#candidates + 1] = { name = name, node_id = node_id, why = 'connector_tools', tool = lists,
             says = 'its connector lists ' .. lists }
         end
       end
@@ -526,7 +529,7 @@ function M.owner_evidence(catalog_fn, capabilities_fn)
         end
         if listed then
           named[name] = true
-          candidates[#candidates + 1] = { name = name, why = 'roster', tool = listed,
+          candidates[#candidates + 1] = { name = name, node_id = id, why = 'roster', tool = listed,
             at = row.at, age_s = row.age_s, says = 'its roster lists ' .. listed }
         end
       end
@@ -537,11 +540,78 @@ function M.owner_evidence(catalog_fn, capabilities_fn)
   return { owners = owners, candidates = candidates }
 end
 
+--- The node a call ARRIVED from, or nil: a peer call is marked by `peer_call` and its session is
+--- `peer:<node_id>` (`lua/core/server.lua` `wa_peer_dispatch`, the one seam every inbound peer call
+--- goes through). `true` when the call says it arrived but names no id - the caller is unknown, which is
+--- still an arrival, and the strict side of this must not depend on reading the id.
+function M.arrived_from(ctx)
+  if type(ctx) ~= 'table' or ctx.peer_call ~= true then return nil end
+  local id = type(ctx.session_id) == 'string' and ctx.session_id:match('^peer:([%w%-_]+)$') or nil
+  return id or true
+end
+
+--- Every row of an evidence table, owners first, as one list (owners are the strongest fact).
+function M.evidence_rows(evidence)
+  local rows = {}
+  for _, row in ipairs(type(evidence) == 'table' and evidence.owners or {}) do rows[#rows + 1] = row end
+  for _, row in ipairs(type(evidence) == 'table' and evidence.candidates or {}) do rows[#rows + 1] = row end
+  return rows
+end
+
 --- The exact call that asks one named node this same question, with this call's own verb and arguments.
 function M.remote_call_text(row, tool, args)
   local name = tool and tool.name or 'mcp_whatsapp_read'
   return 'tools.remote({node="' .. tostring(row and row.name or '<node>') .. '", capability="' .. name
     .. '", args=' .. json.encode(args or {}) .. '})'
+end
+
+--- Take a send back out of THIS node's queue, for real, and say what the queue answered.
+---
+--- `discarded_job` used to be a name for a job left exactly where it was: if the component were started on
+--- this node later, the same message would go out from here as well as from the account node (review 23/11,
+--- MUST 3 - a word that is only true when the queue said so). The cancel is the one call that makes it
+--- true, the same `{id, cancel: true}` request `mcp_whatsapp_send({cancel})` sends, and the answer is the
+--- queue's own: `cancelled = true` when it took the job out, `whatsapp_send_not_cancellable` when a worker
+--- already holds it. Returns the id ONLY when the cancel answered.
+function M.discard_local(id)
+  local tool = M.by_verb.send_status
+  local answer = M.invoke(tool, { id = tonumber(id) or id, cancel = true,
+    reason = 'discarded: this node runs no ' .. M.COMPONENT .. ' component, so the message was asked of the account node instead' })
+  if type(answer) == 'table' and answer.cancelled == true and answer.error == nil then return id, nil end
+  local why = type(answer) == 'table' and (answer.error or (answer.cancelled == false and 'whatsapp_send_not_cancelled'))
+    or 'answer_unreadable'
+  return nil, { id = id, error = tostring(why),
+    note = type(answer) == 'table' and answer.note or nil,
+    state = type(answer) == 'table' and answer.state or nil }
+end
+
+--- The refusal a call that ARRIVED from another node gives when this node cannot answer it.
+---
+--- Every managed master admits the nine verbs and each asks its own account node, so "the one peer that
+--- lists `mcp_whatsapp_*`" can be the very node that just asked US: A forwards to B on that evidence, B
+--- would forward back to A on the same evidence, for ever (and each hop is a real relayed call). A call
+--- that arrived is therefore answered here or refused here, by name, and it is never handed on to the node
+--- it came from - one hop at most, and nothing queued on either side.
+function M.arrival_refusal(tool, args, evidence, from, answer)
+  local refusal = { ok = false, error = 'whatsapp_no_owner_on_this_node', effect = 'none',
+    component = M.COMPONENT, where = 'this node', arrived_from = from,
+    state = type(answer) == 'table' and answer.state or nil }
+  local others = {}
+  for _, row in ipairs(M.evidence_rows(evidence)) do
+    if tostring(row.node_id or '') ~= tostring(from) and tostring(row.name) ~= tostring(from) then
+      others[#others + 1] = row
+    end
+  end
+  if #others > 0 then
+    refusal.candidates = others
+    refusal.ask_with = M.remote_call_text(others[1], tool, args)
+  end
+  refusal.note = 'this call arrived from ' .. tostring(from) .. '; this node runs no ' .. M.COMPONENT
+    .. ' component and does not know which node holds the account, so it is answered or refused here - a '
+    .. 'call is never forwarded back to the node it came from (that is how two nodes without the component '
+    .. 'bounce one call between them for ever). Start the component here (wa services start ' .. M.COMPONENT
+    .. '), or set WASM_AGENT_WHATSAPP_OWNER on this node to name the account node.'
+  return refusal
 end
 
 --- The refusal when routing cannot answer: nobody known in the fleet, or two nodes claiming the account.
@@ -676,7 +746,15 @@ M.unreachable_answer = unreachable_answer
 --- it is what a caller needs to say "two nodes claim the account, ask one" instead of taking a hop to a
 --- guess, and it is `nil` only in the two local cases (this node runs the component, or the deploy named
 --- this node). Nothing is written and nothing is queued here: routing is a decision, not a job.
-function M.route(ctx)
+---
+--- `strict` is the caller saying "this call must not go anywhere on a guess", and it is true for two
+--- callers (review 23/11):
+---   * a SEND passes it (`M.send`): a message is forwarded only to a node whose own connector says it holds
+---     the account, or to the node the deploy declared. Weak evidence - a peer that merely admits the nine
+---     verbs - may route a read and never a send;
+---   * a call that ARRIVED from another node is strict whatever the caller asked (`M.arrived_from`), and
+---     the node it came from is never a target: that is the ping-pong guard (M.arrival_refusal).
+function M.route(ctx, strict)
   local declared = M.declared_owner() or ''
   local mine = M.holds_account()
   if declared ~= '' then
@@ -686,8 +764,21 @@ function M.route(ctx)
   end
   if mine then return nil end
   local evidence = M.owner_evidence(ctx and ctx.owner_catalog or nil, ctx and ctx.owner_capabilities or nil)
-  if #evidence.owners == 1 then return evidence.owners[1].name, evidence end
-  if #evidence.owners == 0 and #evidence.candidates == 1 then return evidence.candidates[1].name, evidence end
+  local from = M.arrived_from(ctx)
+  evidence.arrived_from = from or nil
+  local function routable(row)
+    if not from then return true end
+    return tostring(row.node_id or '') ~= tostring(from) and tostring(row.name) ~= tostring(from)
+  end
+  local owners, candidates = {}, {}
+  for _, row in ipairs(evidence.owners) do if routable(row) then owners[#owners + 1] = row end end
+  for _, row in ipairs(evidence.candidates) do if routable(row) then candidates[#candidates + 1] = row end end
+  if #owners == 1 then return owners[1].name, evidence end
+  -- A single weak candidate routes a READ on a node that was asked locally; never a send (`strict`), and
+  -- never a call that arrived from a peer (its "weak candidate" may be the peer itself).
+  if not strict and not from and #owners == 0 and #candidates == 1 then
+    return candidates[1].name, evidence
+  end
   return nil, evidence
 end
 
@@ -713,19 +804,25 @@ end
 --- The deploy's word first (`decoded.owner`, which the absent answer carries), the fleet second, and
 --- this node's own name is never a route: asking yourself again asks the same unanswered question for
 --- ever, so that case says what to start instead of taking a hop.
-local function route_owner(decoded, ctx, tool, args)
+local function route_owner(decoded, ctx, tool, args, strict)
   -- The deploy's word (in the answer, or in this process's own environment) is asked first: it is the one
   -- fact that can turn "nobody in the fleet answered" into "this very node was told to serve it, and its
   -- component is stopped" - which is a different refusal, naming the command that starts it.
   local declared = type(decoded) == 'table' and type(decoded.owner) == 'string' and decoded.owner ~= ''
     and decoded.owner or M.declared_owner()
   local owner, evidence = nil, nil
-  if declared then owner = declared else owner, evidence = M.route(ctx) end
+  if declared then owner = declared else owner, evidence = M.route(ctx, strict) end
   if not owner then
-    -- Two nodes claim the account, or two can answer it: one refusal that names them and the call to make,
-    -- and never a local job (the 22/11 session read the same queued id four times).
-    local rows = evidence and math.max(#evidence.owners, #evidence.candidates) or 0
-    if rows > 1 then return nil, M.routing_refusal(tool, args, evidence, decoded) end
+    -- A call that arrived is refused here (never handed back), two claimants are named, and a fleet that
+    -- only shows nodes which can answer is named with the call to make: one refusal, never a local job
+    -- (the 22/11 session read the same queued id four times).
+    if evidence and evidence.arrived_from then
+      return nil, M.arrival_refusal(tool, args, evidence, evidence.arrived_from, decoded)
+    end
+    local rows = evidence and #M.evidence_rows(evidence) or 0
+    if rows > 0 and (rows > 1 or strict) then
+      return nil, M.routing_refusal(tool, args, evidence, decoded)
+    end
     return nil, absent_answer(decoded, nil)
   end
   if owner == M.self_name() then
@@ -1293,14 +1390,17 @@ function M.send(args, ctx)
   -- and a node that does not hold it never queues locally. 14/11: node work accepted a send into its own
   -- outbox (job 7, served_by work) because its local call did not answer component_absent - and nothing on
   -- work sends WhatsApp, so the message waited forever.
-  local owner, evidence = M.route(ctx)
-  if owner == nil and evidence and math.max(#evidence.owners, #evidence.candidates) > 1 then
-    -- Two nodes claim the account, or two can answer it: a send that lands in a queue nothing settles is
-    -- worse than a send that is not made, so the refusal comes first and nothing is queued here.
-    return M.routing_refusal(tool, args, evidence, nil)
+  -- A SEND IS FORWARDED ONLY TO A NODE THAT SAYS IT HOLDS THE ACCOUNT (review 23/11, MUST 1): the node the
+  -- deploy declared, or the one whose own connector answers `whatsapp_account = true`. Weak evidence - a
+  -- peer that merely admits the nine verbs, a roster line - may route a read; for a message it is a guess,
+  -- and a guess is refused here, with the candidates and the call to make, before anything is queued.
+  local owner, evidence = M.route(ctx, true)
+  if owner == nil and evidence then
+    if evidence.arrived_from then return M.arrival_refusal(tool, args, evidence, evidence.arrived_from, nil) end
+    if #M.evidence_rows(evidence) > 0 then return M.routing_refusal(tool, args, evidence, nil) end
   end
   local queued = owner == nil and M.invoke(tool, args) or { error = 'whatsapp_component_absent' }
-  local discarded = nil
+  local discarded, discard_failed = nil, nil
   if owner == nil and type(queued) == 'table' and not M.holds_account() then
     -- A JOB ON A NODE WHERE NOTHING RUNS THE COMPONENT IS NEVER SENT (reads: 13/11; sends: #99). The
     -- capability can still write one - its registry has not caught up, or this process is not the serving
@@ -1311,9 +1411,11 @@ function M.send(args, ctx)
       or (type(queued.error) == 'string' and queued.error:find('_slow$') ~= nil)
       or (queued.id ~= nil and queued.state == 'pending')
     if stalled then
-      local found, refusal = route_owner(queued, ctx, tool, args)
+      local found, refusal = route_owner(queued, ctx, tool, args, true)
       if found then
-        if queued.id ~= nil then discarded = queued.id end
+        -- The local job is CANCELLED, not merely renamed: a job left in this queue would go out from here
+        -- too if the component were started, which is a second message from a second node.
+        if queued.id ~= nil then discarded, discard_failed = M.discard_local(queued.id) end
         owner, queued = found, { error = 'whatsapp_component_absent' }
       elseif queued.error ~= 'whatsapp_component_absent' then
         -- Nowhere to route to, and this node queued anyway: that is not a message that was sent, and it is
@@ -1349,9 +1451,17 @@ function M.send(args, ctx)
       return queued
     end
     queued.asked_owner = owner
-    -- The local job that was NOT the answer: named so a reader can see it was discarded rather than left
-    -- for a worker that runs nothing (it is never a handle - no worker here can settle it).
+    -- `discarded_job` ONLY when the queue said it took the job out (M.discard_local). When the cancel did
+    -- not answer, the job may still be sent from this node if the component is started, so the answer says
+    -- that instead of a word that would be a guess.
     if discarded ~= nil then queued.discarded_job = discarded end
+    if discard_failed ~= nil then
+      queued.discard_failed = discard_failed
+      queued.note = tostring(queued.note or '') .. ' this node had queued the same message as job '
+        .. tostring(discard_failed.id) .. ' and the cancel did not answer (' .. tostring(discard_failed.error)
+        .. '): if ' .. M.COMPONENT .. ' is started on this node that job may still be sent - cancel it with '
+        .. 'mcp_whatsapp_send({cancel=' .. tostring(discard_failed.id) .. '})'
+    end
   end
   if queued.error then return queued end
   if queued.state == 'pending' and type(queued.draft) == 'string' then
@@ -1432,11 +1542,16 @@ function M.call(name, args, ctx)
   -- it gave up (session b393f280). The decision is therefore taken first, and a node that does not hold
   -- the account never asks itself at all.
   local owner, evidence = M.route(ctx)
-  if owner == nil and evidence and math.max(#evidence.owners, #evidence.candidates) > 1 then
-    -- Two nodes claim the account, or two can answer it: the refusal is taken BEFORE this node's own
-    -- capability is asked, so nothing is written to a queue here (a job nothing can settle was exactly
+  if owner == nil and evidence then
+    -- A call that ARRIVED from a peer is answered or refused HERE: forwarding it again on the strength of
+    -- a list is what turns two nodes without the component into a loop (M.arrival_refusal), and it queues
+    -- nothing. Two nodes claiming the account, or two that can answer it, are refused BEFORE this node's
+    -- own capability is asked, so nothing is written to a queue here (a job nothing can settle was exactly
     -- the 22/11 failure).
-    return M.routing_refusal(tool, args, evidence, nil)
+    if evidence.arrived_from then
+      return M.arrival_refusal(tool, args, evidence, evidence.arrived_from, nil)
+    end
+    if #M.evidence_rows(evidence) > 1 then return M.routing_refusal(tool, args, evidence, nil) end
   end
   if owner ~= nil then return M.routed(owner, tool, args, ctx) end
   local decoded = M.invoke(tool, args)
@@ -1457,16 +1572,24 @@ function M.call(name, args, ctx)
     -- names nobody, this process may simply not be the serving node (a CLI or a `WA_SCRIPT` run has no
     -- registry of its own), so the local answer stands - it names its job, and the same call reads it.
     local found, why = route_owner(decoded, ctx, tool, args)
+    -- A READ job cannot be cancelled through the queue's cancel call: that request is the OUTBOX's, and
+    -- rust/wa-capabilities/src/whatsapp_send.rs (the `cancel` branch) answers `whatsapp_send_unknown_id`
+    -- for any other queue. So it is named as what it is - a job LEFT in this node's queue, which no worker
+    -- here settles - and never as "discarded", which would be a claim this node cannot make.
+    local function left_job(answer)
+      if decoded.id == nil or type(answer) ~= 'table' then return answer end
+      answer.left_job = decoded.id
+      answer.note = tostring(answer.note or '') .. ' this node queued the same read as job '
+        .. tostring(decoded.id) .. '; nothing here settles it, and the account node answers the same call'
+      return answer
+    end
     if found ~= nil and found ~= M.self_name() then
-      local routed = M.routed(found, tool, args, ctx)
-      if type(routed) == 'table' and decoded.id ~= nil then routed.discarded_job = decoded.id end
-      return routed
+      return left_job(M.routed(found, tool, args, ctx))
     end
     if type(why) == 'table' and type(why.candidates) == 'table' and #why.candidates > 0 then
       -- The fleet names nodes that can answer (or that claim the account): that refusal is a better
       -- answer than a local job nobody here can settle, and it carries the call to make.
-      if decoded.id ~= nil then why.discarded_job = decoded.id end
-      return why
+      return left_job(why)
     end
     -- Nobody in this fleet says it holds the account, so there is nowhere to route to - and this
     -- process may not even be the serving node. The local answer stands (it names its job and the same

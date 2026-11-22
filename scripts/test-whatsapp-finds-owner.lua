@@ -307,5 +307,28 @@ ok(stalled.id == 9, 'the queued job keeps its id: ' .. json.encode(stalled))
 ok(tostring(stalled.note):find('nothing here sends that job', 1, true) ~= nil,
   'and the answer says so in one sentence: ' .. tostring(stalled.note))
 
+-- ---- 8. a SEND never hops on weak evidence (review 23/11, MUST 1) ------------------------------
+-- Every managed master admits the nine verbs, so "the one peer that lists mcp_whatsapp_*" says nothing
+-- about where the account is. A READ may take that hop (section 6); a message may not - it is forwarded
+-- only to the node the deploy declared, or the one whose connector says `whatsapp_account = true`, and
+-- otherwise it is refused with the candidates and the call to make, before anything is queued here.
+refresh({
+  roster = { { node_id = 'peer-1', name = 'openclaw', online = true } },
+  answers = { ['peer-1'] = { ok = true, tools = {}, connectors = { old_row() } } },
+})
+ok(whatsapp.owner() == nil, 'a row without the flag is not an owner for a send either')
+local_calls, served = 0, {}
+local weak_send = tools.dispatch(memory, 'mcp_whatsapp_send', { chat = '5551@s.whatsapp.net', text = 'oi' },
+  'master', ctx_with({ ok = true, state = 'done', id = 5 }))
+ok(weak_send.ok == false and weak_send.error == 'whatsapp_component_absent',
+  'a send is not forwarded on weak evidence: ' .. json.encode(weak_send))
+ok(weak_send.effect == 'none' and weak_send.id == nil, 'and it has no effect and no job: ' .. json.encode(weak_send))
+ok(#served == 0 and local_calls == 0, 'nothing was asked: no hop, no local queue: ' .. json.encode(served))
+ok(type(weak_send.candidates) == 'table' and weak_send.candidates[1]
+  and weak_send.candidates[1].name == 'openclaw',
+  'the node that can answer is named: ' .. json.encode(weak_send.candidates))
+ok(tostring(weak_send.ask_with):find('capability="mcp_whatsapp_send"', 1, true) ~= nil,
+  'with the exact call to make: ' .. tostring(weak_send.ask_with))
+
 dofile = real_dofile
 print('whatsapp finds owner ok (' .. checks .. ' checks)')
