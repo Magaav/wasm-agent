@@ -60,6 +60,11 @@ it; the peer answers the second in the same answer.
   two nodes is two records. `remote` records the page its own `read` answer served (tools.lua:2337).
   The record goes in the SIGNED BODY as `read_pages` (nodes.lua:1651 `remote_call(..., options)`),
   never in `args`: `args` is what the model writes, and a fence the model can set is not a fence.
+  A page read in a BATCH is recorded the same way (`14fd289c`, tools.lua:1360): without it the cheapest
+  read would leave no record and the fence would have a hole exactly there - found while writing this
+  change, and the fixture now pins it. With NO session id there is no record to speak from, so the
+  field is left out and the peer falls back to its own record, exactly as before: an absent record is
+  not "nothing was read".
   server.lua:1594 hands it to the tools as `ctx.read_pages`; `edit` uses it in place of its own record
   (file_tools.lua:624) with the same refusal code, range and note as a local edit.
 - **`record = false` is a fact only the caller's process holds**: "this session was served nothing for
@@ -114,7 +119,7 @@ So the safety and the undo need the peer updated; the cost of not updating is th
 
 ## 5. Tests
 
-`scripts/test-remote-edit.lua` - 43 checks, the two-node fixture (the peer half is the real
+`scripts/test-remote-edit.lua` - 46 checks, the two-node fixture (the peer half is the real
 `wa_peer_dispatch`; the caller half is the real `tools.remote` handler; what stands between them is
 `nodes.remote_call`, the seam `tools.remote` itself uses, carrying what the signed body carries).
 It pins: a second session on the same caller node is not fenced by the first one's page; the reading
@@ -122,8 +127,9 @@ session IS refused outside its page, with the page named in the refusal; the pag
 was served on that node (and not on another); the change recorded here with both texts and the node;
 undo through the real `wa_diff` route restoring the file on the peer with a `write` capability call
 carrying the previous text, and redo; the same for a remote write; an older peer's one honest row and
-its named undo refusal; a page record the peer cannot read refused by name with nothing written; the
-signed body carrying both fields outside `args`; and the description holding the example.
+its named undo refusal; a page record the peer cannot read refused by name with nothing written; an
+anchor outside a page a BATCH served refused too; the signed body carrying both fields outside `args`;
+and the description holding the example.
 
 - Hermetic: it refuses to run unless `WASM_AGENT_HOME` is a scratch/temp directory and not
   `~/.wasm-agent`, `host.http` throws, and it never calls the live fleet.
