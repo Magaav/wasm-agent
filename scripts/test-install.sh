@@ -174,6 +174,12 @@ mkbase() { # DIR COMMIT INDEXFILE...
   [ -n "$core_libs" ] || { echo "test-install: cannot read the core's lib list out of $FRONT" >&2; exit 2; }
   mkdir -p "$dir/$commit/scripts/lib"
   for libfile in $core_libs; do cp "$ROOT/scripts/lib/$libfile" "$dir/$commit/scripts/lib/"; done
+  # The tree's trusted keys, where the verifier looks for them (<root>/config/release-keys.txt): the fixture
+  # release is signed with the committed TEST key, so the fixture tree trusts that key. The front door has to
+  # FETCH this file - real_front below runs with WA_RELEASE_KEYS unset, so a front door that does not is a
+  # refused install here, as it was on every fresh machine until 22/11.
+  mkdir -p "$dir/$commit/config"
+  cp "$ROOT/tests/fixtures/release-sign/keys.txt" "$dir/$commit/config/release-keys.txt"
   cp "$FRONT" "$dir/$commit/scripts/install.sh"
   local f
   for f in "$@"; do
@@ -361,7 +367,10 @@ sha_of() { sha256sum "$1" | cut -d' ' -f1; }
 rec() { sed -n "s/^$1=//p" "$P/installed.txt" 2>/dev/null | head -1; }
 real_front() { # base-index-url args...
   local index=$1; shift
-  out=$(env HOME="$T/home" PATH="$T/bin:$PATH" WA_INSTALL_ALLOW_LOCAL=1 WA_LINUX_RELEASE_ALLOW_LOCAL=1 \
+  # WA_RELEASE_KEYS is UNSET on purpose: a new machine has no such variable, and with it exported this row
+  # passed for a front door that never fetched a trusted key (22/11: release_signature_invalid, "no trusted key
+  # is configured", on the first real fresh install).
+  out=$(env -u WA_RELEASE_KEYS HOME="$T/home" PATH="$T/bin:$PATH" WA_INSTALL_ALLOW_LOCAL=1 WA_LINUX_RELEASE_ALLOW_LOCAL=1 \
         WA_LINUX_RELEASE_INDEX_URL="file://$index" \
         sh "$FRONT" --base "file://$T/realbase" --prefix "$P" --no-service --rendezvous none \
         --port 59997 --client-port 59998 "$@" 2>&1); rc=$?
