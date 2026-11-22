@@ -8,8 +8,10 @@
 //   node scripts/landing-queue.mjs status [--repo <dir>] [--json]
 //   node scripts/landing-queue.mjs acquire --branch <name> [--owner <session id>] [--no-wait]
 //                                          [--wait-timeout <s>] [--lease-seconds <s>] [--repo <dir>]
-//   node scripts/landing-queue.mjs pin --commit <sha> [--pin-dir <dir>] [--owner <session id>]
-//                                       [--wait-timeout <s>] [--repo <dir>]
+//   node scripts/landing-queue.mjs pin --commit <sha> [--pin-dir <dir>] [--install-dir <dir>]
+//                                       [--owner <session id>] [--wait-timeout <s>] [--repo <dir>]
+//   node scripts/landing-queue.mjs prune-pins [--pin-dir <dir>] [--install-dir <dir>] [--keep <sha,...>]
+//                                            [--keep-max <n>] [--repo <dir>] [--json]
 //   node scripts/landing-queue.mjs record --tree <ref> [--command "<what ran>"] [--owner <id>]
 //   node scripts/landing-queue.mjs land --branch <name> [--checks "<cmd>"] [--dry-run] [--no-push]
 //                                       [--owner <session id>] [--lease-seconds <s>] [--repo <dir>]
@@ -445,6 +447,188 @@ function ensurePinnedWorktree({canonical, commit, pinDir}) {
   return {root, reused: false};
 }
 
+// ---- pruning the pins a deploy no longer needs ---------------------------------------------------
+//
+// WHY. A pinned worktree is a whole checkout of this repository - measured on avell 2026-11-22 with
+// `du -sh /tmp/wa-deploy-pins/*`: 128 MB each - and until this code nothing removed one. Nineteen of
+// them (2.5 GB) had accumulated by that night, /tmp is a 16 G tmpfs with a per-user quota, the quota was
+// hit and the next install refused (`deploy.log` 2026-11-22T16:29Z, 5ea23581):
+//
+//   refused(deploy_pin_failed): could not pin 5ea235817c4b...: cannot create a pinned worktree ...:
+//   No space left on device
+//
+// The deploy that was blocked could not clean up after itself: creating the pin is what needed the room.
+// So the prune happens twice, and in this order - here, BEFORE a pin is created (a full disk can no
+// longer stop the next install), and again in scripts/deploy.sh after a successful install (so the set
+// left behind is exactly the trees a retry or a rollback would reuse).
+//
+// WHAT IS KEPT IS AN ALLOW-LIST, built from records and never from a guess:
+//   * every commit the node's own install records name - `commit=`, `binary_commit=` and `build_pin=`
+//     from <install>/installed.txt and <install>/rollback/installed.txt (`--install-dir`): the build
+//     this node runs, and the one `wa update <node> --rollback` returns to;
+//   * the commit the caller is pinning right now (`--keep`), which outranks the records because it is
+//     the tree being built in this very call;
+//   * the newest pins by directory mtime, filling the set up to PIN_KEEP_MAX: a Lua fast-path install
+//     keeps the installed binary and pins nothing (measured on avell 2026-11-22, `build_pin=unpinned`
+//     in installed.txt), so the records name fewer trees than a retry would reuse;
+//   * a pin a live process is inside - a build, named with its pid - and, when this machine cannot be
+//     asked which processes are alive at all (`/proc` absent), every pin, because an unknown is not a yes.
+// Everything else is removed with `git worktree remove` (then `--force`, which a build's leftovers need),
+// `git worktree prune` and the tree's build output (`build-target.sh forget`, the same call the reuse
+// path above makes). A removal that FAILS is named and left in place: this is housekeeping on /tmp and it
+// can never undo an install that already happened.
+const PIN_NAME = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+const PIN_RECORD_FIELDS = ['commit', 'binary_commit', 'build_pin'];
+const PIN_KEEP_MAX = 2;
+
+const lastLineOf = result =>
+  String((result && (result.stderr || result.stdout)) || '').trim().split(/\r?\n/).filter(Boolean).slice(-1)[0]
+  || `exit ${result && result.status}`;
+
+function pinKeepsFromRecords(installDir) {
+  const keeps = [];
+  for (const [file, label] of [
+    [path.join(installDir, 'installed.txt'), 'installed.txt'],
+    [path.join(installDir, 'rollback', 'installed.txt'), 'rollback/installed.txt'],
+  ]) {
+    let text;
+    try { text = fs.readFileSync(file, 'utf8'); } catch { continue; }
+    for (const raw of text.split('\n')) {
+      const match = /^([a-z_]+)=(.*)$/.exec(raw.trim());
+      if (!match || !PIN_RECORD_FIELDS.includes(match[1])) continue;
+      const sha = match[2].trim().toLowerCase();
+      // `unpinned`, `unknown` and an empty field are not commits: the SHAPE decides, not the presence of
+      // the key - a record that cannot name a commit must not be read as naming one.
+      if (!PIN_NAME.test(sha)) continue;
+      keeps.push({sha, why: `${label}:${match[1]}=`});
+    }
+  }
+  return keeps;
+}
+
+// The pids with a working directory inside `pinDir`, and how many processes could not be asked. A build
+// (cargo, rustc, a node stage) runs with its cwd in the pinned tree, so this is what "in use by a running
+// build" means. A pid nobody may look at is COUNTED and reported, never silently read as "not in use".
+function pinProcessUsers(pinDir, procRoot = '/proc') {
+  const users = new Map();
+  let entries;
+  try { entries = fs.readdirSync(procRoot); }
+  catch { return {known: false, users, uninspected: 0, why: `${procRoot} cannot be read`}; }
+  let uninspected = 0;
+  const prefix = pinDir.endsWith(path.sep) ? pinDir : pinDir + path.sep;
+  for (const name of entries) {
+    if (!/^[0-9]+$/.test(name)) continue;
+    let cwd;
+    try { cwd = fs.readlinkSync(path.join(procRoot, name, 'cwd')); }
+    catch { uninspected += 1; continue; }
+    if (!cwd.startsWith(prefix)) continue;
+    const pin = cwd.slice(prefix.length).split(path.sep)[0];
+    if (PIN_NAME.test(pin) && !users.has(pin)) users.set(pin, Number(name));
+  }
+  return {known: true, users, uninspected, why: ''};
+}
+
+function pinsIn(pinDir) {
+  let entries;
+  try { entries = fs.readdirSync(pinDir, {withFileTypes: true}); }
+  catch (error) {
+    if (error.code === 'ENOENT') return [];
+    throw new QueueError(`cannot list the pin directory ${pinDir}: ${error.message}`, 76, 'pin_dir_unreadable');
+  }
+  // Only a real directory whose whole name is a commit: a symlink, a note or a half-written name is not
+  // something this code removes.
+  return entries.filter(entry => entry.isDirectory() && PIN_NAME.test(entry.name)).map(entry => entry.name);
+}
+
+function registeredWorktrees(canonical) {
+  const out = git(canonical, ['worktree', 'list', '--porcelain']);
+  if (out.status !== 0) return null;
+  return String(out.stdout || '').split(/\n\n+/)
+    .map(block => block.split('\n').find(line => line.startsWith('worktree ')))
+    .filter(Boolean)
+    .map(line => path.resolve(line.slice('worktree '.length).trim()));
+}
+
+function removePinTree({canonical, dir}) {
+  const plain = git(canonical, ['worktree', 'remove', dir]);
+  let reason = '';
+  if (plain.status !== 0) {
+    reason = lastLineOf(plain);
+    const forced = git(canonical, ['worktree', 'remove', '--force', dir]);
+    if (forced.status !== 0) {
+      // A directory no worktree registers is what a killed or disk-full `git worktree add` leaves behind,
+      // and it is exactly the residue that filled /tmp: it holds no editable state, and the caller has
+      // already established that no live process is inside it.
+      const registered = registeredWorktrees(canonical);
+      if (registered && !registered.includes(path.resolve(dir)) && fs.existsSync(dir)) {
+        try { fs.rmSync(dir, {recursive: true, force: true}); }
+        catch (error) { return {removed: false, why: `${lastLineOf(forced)}; and the directory could not be deleted: ${error.message}`}; }
+        spawnSync('bash', [path.join(canonical, 'scripts', 'lib', 'build-target.sh'), 'forget', dir], {encoding: 'utf8'});
+        return {removed: true, why: `a directory git did not register (${reason})`};
+      }
+      return {removed: false, why: lastLineOf(forced)};
+    }
+    reason = `needed --force: ${reason}`;
+  }
+  git(canonical, ['worktree', 'prune']);
+  // The build output is named after the tree, so it goes with it (docs/ONEROOT.md); best effort, like the
+  // reuse path above: the next build's sweep deletes an island whose tree is gone anyway.
+  spawnSync('bash', [path.join(canonical, 'scripts', 'lib', 'build-target.sh'), 'forget', dir], {encoding: 'utf8'});
+  return {removed: true, why: reason};
+}
+
+function pruneDeployPins({canonical, pinDir, keeps = [], keepMax = PIN_KEEP_MAX, procRoot = '/proc', log = () => {}}) {
+  const result = {pinDir, liveness: 'known', liveness_why: '', uninspected: 0, kept: [], removed: [], failed: []};
+  const names = pinsIn(pinDir);
+  if (names.length === 0) return result;
+  const live = pinProcessUsers(pinDir, procRoot);
+  result.liveness = live.known ? 'known' : 'unknown';
+  result.liveness_why = live.why;
+  result.uninspected = live.uninspected;
+  const chosen = new Map();
+  const cap = Number.isFinite(keepMax) && keepMax > 0 ? keepMax : PIN_KEEP_MAX;
+  for (const entry of keeps) {
+    if (chosen.size >= cap) break;
+    const sha = String(entry && entry.sha !== undefined ? entry.sha : entry).toLowerCase();
+    if (!names.includes(sha) || chosen.has(sha)) continue;
+    chosen.set(sha, (entry && entry.why) || 'named by the caller');
+  }
+  if (chosen.size < cap) {
+    const newest = names.map(name => {
+      try { return {name, at: fs.statSync(path.join(pinDir, name)).mtimeMs}; }
+      catch { return {name, at: 0}; }
+    }).sort((a, b) => b.at - a.at);
+    for (const entry of newest) {
+      if (chosen.size >= cap) break;
+      if (!chosen.has(entry.name)) chosen.set(entry.name, `one of the ${cap} newest pins`);
+    }
+  }
+  for (const [name, pid] of live.users) if (!chosen.has(name)) chosen.set(name, `a live process is inside it (pid ${pid})`);
+  for (const name of names) {
+    if (!live.known) {
+      result.kept.push({name, why: chosen.get(name) || `nothing could say which processes are alive (${live.why}), so nothing was removed`});
+      continue;
+    }
+    if (chosen.has(name)) { result.kept.push({name, why: chosen.get(name)}); continue; }
+    const removal = removePinTree({canonical, dir: path.join(pinDir, name)});
+    if (removal.removed) result.removed.push({name, why: removal.why});
+    else result.failed.push({name, why: removal.why});
+  }
+  for (const entry of result.kept) log(`pin prune: kept ${entry.name.slice(0, 12)} (${entry.why})`);
+  for (const entry of result.removed) log(`pin prune: removed ${entry.name.slice(0, 12)}${entry.why ? ` (${entry.why})` : ''}`);
+  for (const entry of result.failed) log(`pin prune: could not remove ${entry.name.slice(0, 12)}: ${entry.why} - left in place, and the deploy goes on`);
+  return result;
+}
+
+function pinKeeps(options, pinning) {
+  const keeps = [];
+  if (pinning) keeps.push({sha: pinning, why: 'the commit this pin builds'});
+  const dirs = (Array.isArray(options.installDir) ? options.installDir : [options.installDir]).filter(Boolean);
+  for (const dir of dirs) keeps.push(...pinKeepsFromRecords(path.resolve(dir)));
+  for (const sha of String(options.keep || '').split(/[\s,]+/)) if (sha) keeps.push({sha, why: 'named by --keep'});
+  return keeps;
+}
+
 async function commandPin(options) {
   if (!options.commit) throw new QueueError('pin needs --commit <sha> (the exact commit to build)', 75, 'usage');
   const {repo, canonical, dir, db} = open(options);
@@ -480,15 +664,51 @@ async function commandPin(options) {
     quiet(`#${id} ${state}: ${reason}`);
   };
   try {
+    // Prune BEFORE the new tree is created: a pin directory with no room left in it is what stopped the
+    // install of 5ea23581 (2026-11-22), and the pin that could not be created could not clean up either.
+    let pruned = null;
+    try {
+      pruned = pruneDeployPins({canonical, pinDir, keeps: pinKeeps(options, commit), keepMax: pinKeepMax(options),
+        procRoot: options.procRoot || '/proc', log: quiet});
+    } catch (error) {
+      // Housekeeping never fails a pin: a pin is what a deploy builds, a prune is what keeps /tmp usable.
+      quiet(`pin prune: ${String(error.message).split('\n')[0]} - the pin is created anyway`);
+    }
     const pinned = ensurePinnedWorktree({canonical, commit, pinDir});
     const reason = `pinned ${commit.slice(0, 12)} at ${pinned.root} for a deploy to build from (canonical ${canonical} stays free; ${pinned.reused ? 'an existing pinned tree was reused' : 'a detached worktree was created'}); the lease is released and a landing may proceed`;
     db.prepare('UPDATE queue SET candidate_tree=?, verified_tree=? WHERE id=?').run(commit, commit, id);
     finish('pinned', reason, {result: JSON.stringify({commit, pin: pinned.root, reused: pinned.reused, owner: owner.id})});
-    return emit({id, commit, pin: pinned.root, reused: pinned.reused, canonical}, options, reason);
+    return emit({id, commit, pin: pinned.root, reused: pinned.reused, canonical,
+      prune: pruned && {removed: pruned.removed.length, kept: pruned.kept.length, failed: pruned.failed.length}}, options, reason);
   } catch (error) {
     finish('abandoned', `error: ${error.code || 'failed'}: ${String(error.message).split('\n')[0]}`);
     throw error;
   }
+}
+
+// `prune-pins` is the same rule as a command, because a deploy prunes twice: before it pins (inside `pin`)
+// and after the install that proved which commit the node runs (scripts/deploy.sh step 8b). It takes no
+// lease: it writes no row and reads nothing a landing writes, and it removes only a directory whose whole
+// name is a commit, inside the pin directory it was given.
+function pinKeepMax(options) {
+  const max = options.keepMax === undefined ? PIN_KEEP_MAX : Number(options.keepMax);
+  if (!Number.isInteger(max) || max < 1) {
+    throw new QueueError(`--keep-max must be a positive integer, not '${options.keepMax}'`, 75, 'usage');
+  }
+  return max;
+}
+
+function commandPrunePins(options) {
+  const repo = path.resolve(options.repo || process.cwd());
+  const canonical = mainWorktree(repo);
+  const pinDir = path.resolve(options.pinDir || PIN_ROOT_DEFAULT());
+  // A --json answer is one object on stdout: the human lines are suppressed there, never mixed in.
+  const result = pruneDeployPins({canonical, pinDir, keeps: pinKeeps(options), keepMax: pinKeepMax(options),
+    procRoot: options.procRoot || '/proc', log: options.json ? () => {} : say});
+  const summary = `pin prune: ${result.removed.length} removed, ${result.kept.length} kept, ${result.failed.length} left in place in ${pinDir}`
+    + (result.liveness === 'unknown' ? ` - nothing was removed: ${result.liveness_why}` : '')
+    + (result.uninspected ? ` (${result.uninspected} process(es) not inspected)` : '');
+  return emit(result, options, summary);
 }
 
 // ---- record -------------------------------------------------------------------------------------
@@ -1287,6 +1507,7 @@ async function main() {
   if (command === 'status') result = commandStatus(options);
   else if (command === 'acquire') result = await commandAcquire(options);
   else if (command === 'pin') result = await commandPin(options);
+  else if (command === 'prune-pins') result = commandPrunePins(options);
   else if (command === 'record') result = commandRecord(options);
   else if (command === 'land') result = await commandLand(options);
   else if (command === 'preflight') result = await commandPreflight(options);
@@ -1295,7 +1516,7 @@ async function main() {
   else if (command === 'classify') result = commandClassify(options);
   else if (command === 'baseline') result = commandBaseline(options);
   else if (command === 'history') result = commandHistory(options);
-  else throw new QueueError('usage: landing-queue.mjs status|acquire|pin|record|land|preflight|release|reconcile|classify|baseline|history [options]', 75, 'usage');
+  else throw new QueueError('usage: landing-queue.mjs status|acquire|pin|prune-pins|record|land|preflight|release|reconcile|classify|baseline|history [options]', 75, 'usage');
   if (result && result.exit) process.exitCode = result.exit;
   // A preflight that ran the checks and found them red is the check's own result, not a refusal: exit 1
   // so a caller can tell it from `0 recorded` and from the named refusals (75) and lane errors (76).
