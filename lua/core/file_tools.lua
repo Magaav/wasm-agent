@@ -184,10 +184,15 @@ end
 local PAGES,page_order={},{}
 local PAGE_LIMIT=64
 local RANGES_PER_FILE=16
-local function page_key(scope,path) return tostring(scope or '')..'\0'..tostring(path or '') end
-local function record_page(scope,path,version,truncated,first_byte,last_byte,first_line,last_line)
+-- The key names the NODE as well as the session and the path (mission remote-edit-first-class): the
+-- bytes a session was served on one node say nothing about the file with the same name on another. A
+-- local file names no node and keys as 'local', which is what every record before this one did.
+local function page_key(scope,path,node)
+  return tostring(scope or '')..'\0'..tostring(node or 'local')..'\0'..tostring(path or '')
+end
+local function record_page(scope,path,version,truncated,first_byte,last_byte,first_line,last_line,node)
   if not scope then return end
-  local key=page_key(scope,path)
+  local key=page_key(scope,path,node)
   local page=PAGES[key]
   if not page then
     page_order[#page_order+1]=key
@@ -207,7 +212,7 @@ local function record_page(scope,path,version,truncated,first_byte,last_byte,fir
     first_line=first_line,last_line=last_line}
   while #page.ranges>RANGES_PER_FILE do table.remove(page.ranges,1) end
 end
-function M.pages_for(scope,path) return PAGES[page_key(scope,path)] end
+function M.pages_for(scope,path,node) return PAGES[page_key(scope,path,node)] end
 function M.forget_pages() PAGES,page_order={},{} end
 -- True when every byte the caller was served at this version is one of these ranges; nil when this
 -- session has no record of the file at this version, which is not a refusal (nothing was promised).
@@ -245,6 +250,81 @@ local function covered_pages(page,version,a,b)
   end
   return false
 end
+-- The record as a plain table, for the wire: the version, whether the caller was served the whole
+-- file, and the byte ranges it was served. This is what travels with an edit to another node, because
+-- that node cannot answer the question the fence asks - what did THIS session see? - from anything it
+-- holds itself.
+function M.page_snapshot(scope,path,node)
+  local page=PAGES[page_key(scope,path,node)]
+  if not page or type(page.version)~='string' then return nil end
+  local ranges={}
+  for index,range in ipairs(page.ranges) do
+    ranges[index]={first_byte=range.first_byte,last_byte=range.last_byte,
+      first_line=range.first_line,last_line=range.last_line}
+  end
+  return {version=page.version,whole=page.whole==true,ranges=ranges}
+end
+
+-- A page ANOTHER NODE served this session, recorded here (mission remote-edit-first-class, item 1).
+-- The peer cannot keep this record for the master: its own is keyed by the caller NODE, which every
+-- session on that master shares - measured 22/11, a second caller id edited an anchor the first had
+-- never been shown and the fence let it through - and it dies with the peer's process. So the session
+-- that was served the bytes keeps them, and sends the record with the edit that quotes them.
+-- The input is the read answer's own fields and nothing else: `version` (the whole file's digest, even
+-- for a page), `truncated`, and `range` (absent on a whole-file page, which is exactly what makes it
+-- whole). An answer that does not say what it served records nothing and says why - unknown is not a
+-- page, and a page nobody can read must never widen what an anchor may quote.
+function M.record_peer_page(scope,node,path,answer)
+  if scope==nil or scope=='' then return nil,'scope_required' end
+  if node~=nil and (type(node)~='string' or node=='') then return nil,'node_invalid' end
+  if type(path)~='string' or path=='' then return nil,'path_required' end
+  if type(answer)~='table' then return nil,'answer_required' end
+  local version=answer.version
+  if type(version)~='string' or version=='' then return nil,'version_missing' end
+  local truncated=answer.truncated==true
+  local first_byte,last_byte,first_line,last_line
+  if truncated then
+    local range=answer.range
+    if type(range)~='table' or type(range.first_byte)~='number' then return nil,'range_missing' end
+    first_byte=range.first_byte
+    first_line=tonumber(range.first_line) or 1
+    if type(range.last_byte)=='number' then
+      last_byte,last_line=range.last_byte,tonumber(range.last_line) or first_line
+    else
+      -- A page of zero bytes has a start and no last byte: the local read records the same empty range
+      -- (first_byte, first_byte-1), so every byte is uncovered rather than a phantom one being covered.
+      last_byte,last_line=first_byte-1,first_line-1
+    end
+  end
+  record_page(scope,path,version,truncated,first_byte,last_byte,first_line,last_line,node)
+  return M.page_snapshot(scope,path,node)
+end
+
+-- A page record that arrived from the caller's node, checked before it is used. `edit` takes one in
+-- place of the local record (see the fence below). Every field must be the shape this module writes:
+-- a record that cannot be read is refused BY NAME by the edit, never read as "no record", because
+-- that is the one answer that turns the fence off.
+local function readable_pages(pages)
+  if type(pages)~='table' or type(pages.version)~='string' or pages.version=='' then
+    return nil,'edit_read_page_invalid'
+  end
+  if pages.whole~=nil and type(pages.whole)~='boolean' then return nil,'edit_read_page_invalid' end
+  local ranges=pages.ranges
+  if ranges~=nil and type(ranges)~='table' then return nil,'edit_read_page_invalid' end
+  local clean={}
+  for index,range in ipairs(ranges or {}) do
+    if index>RANGES_PER_FILE then return nil,'edit_read_page_invalid' end
+    if type(range)~='table' or type(range.first_byte)~='number' or type(range.last_byte)~='number'
+        or range.first_byte%1~=0 or range.last_byte%1~=0
+        or range.first_byte<1 or range.last_byte<range.first_byte-1 then
+      return nil,'edit_read_page_invalid'
+    end
+    clean[index]={first_byte=range.first_byte,last_byte=range.last_byte,
+      first_line=tonumber(range.first_line) or 0,last_line=tonumber(range.last_line) or 0}
+  end
+  return {version=pages.version,whole=pages.whole==true,ranges=clean}
+end
+
 -- Nil scope (a direct module call, a batch that carries no session) records nothing and is never
 -- fenced: the fence is about a page the session was served, and there is no session here.
 function M.read(args,store_image,view_bytes,scope)
@@ -541,7 +621,7 @@ function M.prepare_write(args)
     result={ok=true,path=args.path,previous_version=hash,version=host.sha256(args.content)}}
 end
 
-function M.edit(args,record,prepare_only,scope)
+function M.edit(args,record,prepare_only,scope,pages,want_change)
   local named,conflict=M.accept_names('edit',args)
   if conflict then return conflict end
   args=named
@@ -693,8 +773,21 @@ function M.edit(args,record,prepare_only,scope)
   -- file, is the failure this fence exists for: the edit is refused BY NAME, with the page's real range
   -- and the way to see the rest, instead of landing on a partial view. Only a page THIS session was
   -- served can refuse: no record, no restriction (see page_key above).
-  if scope then
-    local page=M.pages_for(scope,args.path)
+  -- `pages` is the page record of a CALLER ON ANOTHER NODE, taken from the signed body of that call
+  -- (server.lua wa_peer_dispatch, tools.lua edit) because the session that was served those bytes
+  -- lives there. `false` is the caller's own statement that this session was served nothing for the
+  -- file, and nil keeps the previous behaviour for a caller that predates the field. Unknown is not
+  -- yes: a record this code cannot read refuses the edit by name instead of passing for "no record".
+  local page,page_problem
+  if pages==false then
+    page=nil
+  elseif pages~=nil then
+    page,page_problem=readable_pages(pages)
+    if not page then return {error=page_problem,path=args.path,effect='none'} end
+  elseif scope then
+    page=M.pages_for(scope,args.path)
+  end
+  if page~=nil then
     for _,r in ipairs(ranges) do
       if covered_pages(page,hash,r.a,r.b)==false then
         return {error='edit_anchor_outside_read_page',path=args.path,edit=r.index,
@@ -732,6 +825,14 @@ function M.edit(args,record,prepare_only,scope)
   local plan={path=args.path,before=text,after=updated,
     result={ok=true,path=args.path,edits=#ranges,previous_version=hash,version=host.sha256(updated),replaced=replaced}}
   if prepare_only then return plan end
-  return M.apply(plan,record)
+  local result=M.apply(plan,record)
+  -- The caller on another node asked for the two texts so it can record the change in its OWN session
+  -- (mission remote-edit-first-class, item 2): its change record, its undo, its diff card. Attached
+  -- only when the write landed, so a refused or unchanged edit carries no change to record. The bound
+  -- (the store's own cap) is applied where the record is written, not here: this module does not own it.
+  if want_change and type(result)=='table' and result.applied then
+    result.change={path=plan.path,before=plan.before or '',after=plan.after}
+  end
+  return result
 end
 return M

@@ -67,6 +67,9 @@ end
 -- the change is recorded as `recorded = false`, so the topic can say "too large to undo"
 -- instead of offering a button that cannot work.
 local RECORD_CAP = 262144
+-- Exported so the code that SENDS a change (tools.lua, a peer answering a remote edit) can bound what it
+-- sends by the store that will hold it, instead of keeping a second copy of the number.
+M.RECORD_CAP = RECORD_CAP
 
 -- Lines of a text, where a trailing newline ends the last line rather than starting an empty
 -- one. The previous version appended a newline before splitting, so "a\nb\n" was three lines
@@ -95,6 +98,75 @@ end
 -- function - so a consistently wrong count cancels out and every count assertion still passes. That
 -- is how a phantom trailing line survived a suite that looked like it covered this.
 function M.split_lines(text) return split_lines(text) end
+
+-- WHERE THE FILE LIVES (mission remote-edit-first-class, item 2).
+--
+-- Every entry so far named a path on this node, and this module read and wrote it through `host`. A
+-- change made on ANOTHER NODE names that node too, and is verified and restored THERE - the undo of a
+-- remote edit must put the peer's file back, not write the same path over a local one. This module
+-- still owns no transport: `set_file_host` is installed by server.lua, which is the one place that
+-- knows how a node reaches a peer, and a build with no host refuses a remote entry by name rather than
+-- writing to the wrong machine.
+--
+-- The interface is two functions because that is all an undo needs:
+--   digest(path)      -> sha256 of the file's text as it is NOW, or nil and the reason (e.g. not_found)
+--   write(path,text)  -> true, or nil and the reason
+-- A digest rather than the text is what makes a large file checkable: the read capability answers the
+-- whole file's version even for a one-line page, so the guard costs one small call and no transfer.
+local remote_files
+function M.set_file_host(fn) remote_files = fn end
+
+-- The transport for one file: a transport table when the entry names a node, nil for a local file (the
+-- caller then uses `host` exactly as before), or nil and the reason when this build has no transport.
+local function file_transport(file)
+  if type(file) ~= "table" then return nil end
+  if type(file.node) ~= "string" or file.node == "" then return nil end
+  if type(remote_files) ~= "function" then return nil, "no_node_transport" end
+  local transport = remote_files(file.node)
+  if type(transport) ~= "table" then return nil, "no_node_transport" end
+  return transport
+end
+
+-- Is the file still exactly what the run left there? `left` is the recorded after-text.
+-- A local file is compared as text, exactly as it always was; a file on a peer is compared by digest,
+-- because sending a 200 KB file back to ask "is it still this?" is the cost this design avoids. A peer
+-- that cannot be asked is a refusal with a name, never a pass: an unknown answer must not undo.
+local function unchanged(file, left)
+  local transport, problem = file_transport(file)
+  if not transport then
+    if problem == "no_node_transport" then return nil, problem .. ":" .. file.path end
+    local now = host.read_file and host.read_file(file.path)
+    if now ~= nil and now ~= left then return nil, "changed_since_turn:" .. file.path end
+    if now == nil and left ~= "" then return nil, "missing_since_turn:" .. file.path end
+    return true
+  end
+  if type(transport.digest) ~= "function" then return nil, "no_node_transport:" .. file.path end
+  local digest, why = transport.digest(file.path)
+  if digest == nil then
+    if why == "not_found" then
+      if left ~= "" then return nil, "missing_since_turn:" .. file.path end
+      return true
+    end
+    return nil, "node_unreadable:" .. tostring(why or "unknown") .. ":" .. file.path
+  end
+  if digest ~= host.sha256(left) then return nil, "changed_since_turn:" .. file.path end
+  return true
+end
+
+-- Write one recorded file where it lives. A local file goes through `host` as before; a file on a peer
+-- goes through that node's own `write` capability, so its guards, its workspace and its refusals apply.
+local function write_file(file, text)
+  local transport, problem = file_transport(file)
+  if not transport then
+    if problem == "no_node_transport" then return nil, problem end
+    if not (host.write_file and host.write_file(file.path, text)) then return nil, "write_failed" end
+    return true
+  end
+  if type(transport.write) ~= "function" then return nil, "no_node_transport" end
+  local ok, why = transport.write(file.path, text)
+  if ok then return true end
+  return nil, tostring(why or "write_failed")
+end
 
 -- The changed lines, as an ordered list of {kind="add"|"del", text=...}.
 --
@@ -218,7 +290,12 @@ function M.changed_lines(file)
   if before == nil then return nil, before_err end
   local after, after_err = M.load(file.after)
   if after == nil then return nil, after_err end
-  if host.read_file and host.read_file(file.path) ~= after then return nil, "file_changed_since_record" end
+  if type(file.node) == "string" and file.node ~= "" then
+    local ok = unchanged(file, after)
+    if not ok then return nil, "file_changed_since_record" end
+  elseif host.read_file and host.read_file(file.path) ~= after then
+    return nil, "file_changed_since_record"
+  end
   local a, b = split_lines(before), split_lines(after)
   local head = 0
   while head < #a and head < #b and a[head + 1] == b[head + 1] do head = head + 1 end
@@ -276,14 +353,22 @@ end
 -- what undo has to restore - and takes the newest `after`. v8 arrived at the same rule from the
 -- other side: it kept `first_preimage` so that a later reread could not replace the session's
 -- baseline with a partial window.
-function M.record(entry, path, before, after)
+function M.record(entry, path, before, after, node, reason)
   local existing
   for _, file in ipairs(entry.files) do
-    if file.path == path then existing = file break end
+    -- One path on TWO machines is two files: the key is the pair, or the second node's change would
+    -- inherit the first node's `before` and undo would put one node's text on the other.
+    if file.path == path and file.node == node then existing = file break end
   end
   local recorded = true
   -- `false` means "the file existed but its text could not be captured": not undoable.
-  if before == false then recorded, before = false, "" end
+  local unreadable = before == false
+  if unreadable then recorded, before = false, "" end
+  -- `reason` is how a caller records a change it cannot prove - a peer that answered an edit with no
+  -- before/after text (mission remote-edit-first-class, item 2, an older peer). It is one honest row:
+  -- recorded is false, the reason travels to the topic and to the undo route, and no blob is stored for a
+  -- text nobody has.
+  if type(reason) == "string" and reason ~= "" then recorded = false end
   if type(before) == "string" and #before > RECORD_CAP then recorded = false end
   if type(after) == "string" and #after > RECORD_CAP then recorded = false end
   local before_id, after_id
@@ -311,6 +396,7 @@ function M.record(entry, path, before, after)
     -- Stricter wins: a change that could not be recorded once cannot be undone later just
     -- because a smaller edit followed it.
     existing.recorded = existing.recorded and recorded
+    if type(reason) == "string" and reason ~= "" then existing.reason = reason end
     -- `created` is left as first seen: a file that existed when the run started was not
     -- created by the run's second write to it.
   else
@@ -320,7 +406,12 @@ function M.record(entry, path, before, after)
       added = added, removed = removed, recorded = recorded,
       -- A create is "no text before", recorded rather than re-derived: loading the blob to
       -- ask would be a second source of truth for the same fact, and they could disagree.
-      created = (before or "") == "",
+      -- A file that existed and could not be captured (before == false) is NOT one the run created:
+      -- `created` used to be read off the stored "" alone, so a file that was there before the run was
+      -- reported as created by it.
+      created = (not unreadable) and (before or "") == "",
+      node = node,
+      reason = (type(reason) == "string" and reason ~= "") and reason or nil,
     }
   end
   -- Totals are summed from the files rather than accumulated as we go: with one path recorded
@@ -351,6 +442,11 @@ function M.summary(entry)
       created = file.created == true,
       before = file.before, after = file.after,
       recorded = file.recorded,
+      -- Where the file lives: absent means this node, a name means that peer. The summary is what the
+      -- ledger keeps and what the diff topic reads, so a change made on a peer is still undoable long
+      -- after the run only if this travels with it.
+      node = file.node,
+      reason = file.reason,
     }
   end
   return { files = files, added = entry.added, removed = entry.removed }
@@ -373,6 +469,9 @@ end
 function M.check(entry)
   if M.empty(entry) then return nil, "nothing_to_undo" end
   for _, file in ipairs(entry.files) do
+    -- The reason first: "the peer sent no text" and "the text was too large" are different facts, and
+    -- the reader is owed the one that applies to this file.
+    if type(file.reason) == "string" and file.reason ~= "" then return nil, file.reason .. ":" .. file.path end
     if not file.recorded then return nil, "too_large_to_undo:" .. file.path end
   end
   for _, file in ipairs(entry.files) do
@@ -380,9 +479,8 @@ function M.check(entry)
     if before == nil then return nil, "previous_text_missing:" .. file.path end
     local left = M.load(file.after)
     if left == nil then return nil, "recorded_text_missing:" .. file.path end
-    local now = host.read_file and host.read_file(file.path)
-    if now ~= nil and now ~= left then return nil, "changed_since_turn:" .. file.path end
-    if now == nil and left ~= "" then return nil, "missing_since_turn:" .. file.path end
+    local ok, cannot = unchanged(file, left)
+    if not ok then return nil, cannot end
   end
   return true, "undoable"
 end
@@ -391,14 +489,23 @@ end
 -- locked on Windows) the files already written are put back to what they held a moment ago, so the
 -- result is never half one turn and half the other. `wanted[i]` is the text for entry.files[i].
 function M.apply_all(entry, wanted, done)
-  local host_write = host.write_file
-  if not host_write then return nil, "write_failed:no_host" end
+  if not host.write_file then return nil, "write_failed:no_host" end
+  -- What to put back if a later write fails. For a local file that is its text as it is now; for a file
+  -- on a peer it is the text the recorded change left there - `check` has just proved the two are the
+  -- same - so a rollback needs no extra transfer and still restores exactly what was there.
   local previous = {}
-  for index, file in ipairs(entry.files) do previous[index] = host.read_file and host.read_file(file.path) end
   for index, file in ipairs(entry.files) do
-    if not host_write(file.path, wanted[index]) then
+    if type(file.node) == "string" and file.node ~= "" then
+      previous[index] = M.load(file.after)
+    else
+      previous[index] = host.read_file and host.read_file(file.path)
+    end
+  end
+  for index, file in ipairs(entry.files) do
+    local wrote = write_file(file, wanted[index])
+    if not wrote then
       for back = index - 1, 1, -1 do
-        if previous[back] ~= nil then host_write(entry.files[back].path, previous[back]) end
+        if previous[back] ~= nil then write_file(entry.files[back], previous[back]) end
       end
       return nil, "write_failed:" .. file.path
     end
@@ -600,15 +707,17 @@ function M.normalize(entry)
   if not entry or type(entry.files) ~= "table" then return entry end
   local merged, order = {}, {}
   for _, file in ipairs(entry.files) do
-    local seen = merged[file.path]
+    local key = tostring(file.path) .. "\0" .. tostring(file.node or "")
+    local seen = merged[key]
     if not seen then
-      merged[file.path] = {
+      merged[key] = {
         path = file.path, before = file.before, after = file.after,
         added = file.added or 0, removed = file.removed or 0,
         recorded = file.recorded ~= false, created = file.created == true,
+        node = file.node, reason = file.reason,
         writes = 1,
       }
-      order[#order + 1] = file.path
+      order[#order + 1] = key
     else
       seen.after = file.after
       seen.recorded = seen.recorded and (file.recorded ~= false)
@@ -625,8 +734,8 @@ function M.normalize(entry)
     end
   end
   local files, added, removed = {}, 0, 0
-  for _, path in ipairs(order) do
-    local file = merged[path]
+  for _, key in ipairs(order) do
+    local file = merged[key]
     files[#files + 1] = file
     added, removed = added + file.added, removed + file.removed
   end

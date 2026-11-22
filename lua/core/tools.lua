@@ -574,7 +574,7 @@ M.admin = {
     params = { type = "object", description = "Values for the spell's declared parameters." },
     binary = { type = "string", description = "For an `upgrade` step: the wa binary to install. Defaults to the step's own value." },
     path = { type = "string", description = "Where to write the plan. Defaults to <state>/spell-plans/<name>.json." } }, { "name" }),
-  schema("remote", "Run a capability on another wasm-agent node (peer). Nodes are discovered by ed25519 key through the rendezvous, so the name or node_id is enough. Put the capability's own parameters at this same level, flat: {\"node\":\"<name>\",\"capability\":\"bash\",\"command\":\"ls\"} or {\"node\":\"<name>\",\"capability\":\"read\",\"path\":\"/etc/hosts\"}. Text reads work; image results are refused until the node protocol has bounded binary transfer. Inside codemode tools.remote runs the read-only capabilities (read, ls, grep, sessions, session, search_messages, recall, read-only bash ...); effects run here, outside. capability:\"batch\" with calls:[{capability,...},...] runs up to 8 reads in one round trip.", {
+  schema("remote", "Run a capability on another wasm-agent node (peer). Nodes are discovered by ed25519 key through the rendezvous, so the name or node_id is enough. Put the capability's own parameters at this same level, flat: {\"node\":\"<name>\",\"capability\":\"bash\",\"command\":\"ls\"} or {\"node\":\"<name>\",\"capability\":\"read\",\"path\":\"/etc/hosts\"} or {\"node\":\"<name>\",\"capability\":\"edit\",\"path\":\"/etc/hosts\",\"edits\":[{\"old_text\":\"127.0.0.1\",\"new_text\":\"10.0.0.2\"}]}: an edit there is the edit you know here - exactly-once match, the nearest region on a miss, the read-before-edit fence judged by what this session read on that node - and the change is recorded here, so /undo restores that file there. Text reads work; image results are refused until the node protocol has bounded binary transfer. Inside codemode tools.remote runs the read-only capabilities (read, ls, grep, sessions, session, search_messages, recall, read-only bash ...); effects run here, outside. capability:\"batch\" with calls:[{capability,...},...] runs up to 8 reads in one round trip.", {
     node = { type = "string", description = "Peer name or node_id (the nodes tool lists them)." },
     capability = { type = "string", description = "Tool to run on that node, e.g. bash, read, client, shell." },
     command = { type = "string", description = "For bash/shell: the command." },
@@ -1008,6 +1008,40 @@ end
 -- Resolve a tool path against the session's directory. An absolute path is left alone; a relative
 -- path joins the session's worktree, so `read foo.lua` reads the session's copy, not the node's.
 -- With no session worktree the path is unchanged and the host resolves it against the node cwd.
+-- The before/after text a change record needs, bounded by the store that will hold it (mission
+-- remote-edit-first-class, item 2). A text past the cap is not sent at all: the row says why, instead of
+-- putting a megabyte through the relay only for the receiving store to refuse it.
+local function change_for_wire(change)
+  if type(change) ~= "table" then return nil end
+  local path, before, after = change.path, change.before, change.after
+  if type(before) ~= "string" or type(after) ~= "string" then
+    return { path = path, recorded = false, reason = "text_unavailable" }
+  end
+  if #before > changeset.RECORD_CAP or #after > changeset.RECORD_CAP then
+    return { path = path, recorded = false, reason = "larger_than_record_cap" }
+  end
+  return { path = path, before = before, after = after, recorded = true }
+end
+
+-- The page record of a CALLER ON ANOTHER NODE, as this node's `edit` takes it (server.lua
+-- wa_peer_dispatch hands it over from the signed body): nil when the caller predates the field - this
+-- node's own record for that caller is then used exactly as before - false when the caller's own
+-- process says this session was served nothing for the file, and the record itself otherwise. Any other
+-- shape becomes `{}`, which `file_tools.edit` refuses by name (`edit_read_page_invalid`) rather than
+-- reading as "no record" and turning the fence off.
+local function remote_pages(ctx)
+  local envelope = ctx and ctx.read_pages
+  if envelope == nil then return nil end
+  -- Not "and ... or nil": a bare `false` here is the caller saying it served this session NOTHING, and
+  -- collapsing it to nil would read as "an older caller" - the one answer that silently changes which
+  -- record the fence uses.
+  local record
+  if type(envelope) == "table" then record = envelope.record end
+  if record == false then return false end
+  if type(record) == "table" then return record end
+  return {}
+end
+
 local function resolve_path(memory, ctx, path)
   if type(path) ~= "string" or path == "" then return path end
   local first = path:sub(1, 1)
@@ -1949,16 +1983,27 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     if ok and ctx and ctx.changes then
       changeset.record(ctx.changes, path, before, args.content or "")
     end
-    return on_this_node({ ok = ok and true or false, path = path, error=not ok and "write_failed" or nil, graph_index=notification })
+    local written = { ok = ok and true or false, path = path, error=not ok and "write_failed" or nil, graph_index=notification }
+    -- The caller on another node records this change in its own session (see the edit branch).
+    if ok and ctx and ctx.peer_call and ctx.record_change == true then
+      written.change = change_for_wire({ path = path, before = before, after = args.content or "" })
+    end
+    -- The name of the node this ran on (mission write-names-its-node), on the way out for every caller.
+    return on_this_node(written)
   elseif name == "edit" then
     local named, conflict = file_tools.accept_names("edit", args)
     if conflict then return on_this_node(conflict) end
     args = named
     args.path = resolve_path(memory, ctx, args.path)
+    -- A caller on another node sends the page record of ITS session (see remote_pages), and asks for the
+    -- two texts back when it will record the change in that session - the run that made a change is the
+    -- session that owns its undo.
+    local want_change = (ctx and ctx.peer_call and ctx.record_change == true) and true or false
     local result=file_tools.edit(args,ctx.changes and function(path,before,after)
       changeset.record(ctx.changes,path,before,after)
-    end or nil,nil,ctx and ctx.session_id)
+    end or nil,nil,ctx and ctx.session_id,remote_pages(ctx),want_change)
     if result.applied then result.graph_index=graph_hint(memory,ctx,result.path) end
+    if result.change then result.change = change_for_wire(result.change) end
     return on_this_node(result)
   elseif name == "ls" then
     -- Native listing: `ls -la` does not exist on Windows, and the description
@@ -2258,9 +2303,27 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
       return { error = "unknown_node:" .. tostring(call.node), online_nodes = online_nodes(),
         note = "No peer is named " .. tostring(call.node) .. ". Use one of online_nodes (or a node_id from the nodes tool)." }
     end
+    -- What the peer must know about this SESSION, not about the answer: the page of a file it was
+    -- served there, and that it wants the before/after text of a change back. Both travel in the signed
+    -- body (nodes.lua M.remote_call options) and never in `args`, which is the model's own text.
+    local target = node.name or node.node_id
+    local options
+    if not node.local_node and (call.capability == "edit" or call.capability == "write") then
+      options = { record_change = (ctx and ctx.changes) ~= nil }
+      if call.capability == "edit" then
+        -- Keyed by the path AS IT WAS WRITTEN, which is the same string a read of that file used. `false`
+        -- says this session was served nothing for it at that path: a fact only this process holds.
+        local snapshot = file_tools.page_snapshot(ctx and ctx.session_id, call.args.path, target)
+        options.read_pages = { record = snapshot or false }
+      end
+    end
     local result
     if node.local_node then
-      result=M.dispatch(memory, call.capability, call.args, role)
+      -- A call addressed to THIS node is this node's own tool call, so it runs under this session -
+      -- for the file capabilities only, whose handlers take nothing else from the context. Without
+      -- this, a self-addressed `edit` was the one edit on this machine with no fence and no record.
+      local own = (call.capability == "read" or call.capability == "write" or call.capability == "edit")
+      result=M.dispatch(memory, call.capability, call.args, role, own and ctx or nil)
     else
       -- Fail fast when the registry already says the peer will refuse this node: a cached `false`
       -- is re-read once, fresh, before it refuses, so a binding granted a moment ago is not denied.
@@ -2279,7 +2342,7 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
         result.note = nil
         result.peer_binding, result.peer_operators, result.operator_basis = status.peer_binding, status.peer_operators, status.operator_basis
       else
-        result=nodeslib.remote_call(call.node, call.capability, call.args)
+        result=nodeslib.remote_call(call.node, call.capability, call.args, options)
       end
       if type(result) == "table" and REMOTE_REFUSALS[result.error] then
         result.online_nodes = online_nodes()
@@ -2289,6 +2352,40 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     if carries_local_images(result) then
       return {error="remote_image_transport_unsupported",capability=call.capability,
         note="The image was not returned as text or as a path on the wrong machine."}
+    end
+    -- The caller's own half of a file call on a peer (mission remote-edit-first-class): record the page
+    -- THIS session was served there, and record the change in THIS session, with the node it happened
+    -- on, so undo puts the peer's file back. A call addressed to this node needed neither - its own
+    -- handlers already did both under this session.
+    if type(result) == "table" and not node.local_node then
+      if call.capability == "read" then
+        -- An answer that does not say what it served records nothing and says why (file_tools): a page
+        -- nobody can read must never widen what a later edit there may quote.
+        file_tools.record_peer_page(ctx and ctx.session_id, target, call.args.path, result)
+      elseif call.capability == "edit" or call.capability == "write" then
+        local change = result.change
+        -- The two texts are for the record, not for the model's view: the call asked to change one file,
+        -- not to be shown the whole of it twice.
+        result.change = nil
+        if ctx and ctx.changes and not result.error then
+          if type(change) == "table" then
+            -- Written out, not as "intact and X or Y": with a nil middle the `or` always wins, and the
+            -- entry was recorded as unrecordable every time (measured by this mission's own test before it
+            -- was believed). A peer that could not send the texts says why; then `before` is false, which
+            -- is the store's word for "the file existed and its text could not be captured".
+            local before, reason = change.before, change.reason
+            if change.recorded == false then
+              before, reason = false, (change.reason or "change_not_recorded")
+            end
+            changeset.record(ctx.changes, change.path or call.args.path, before,
+              change.after or "", target, reason)
+          else
+            -- An older peer sends no texts. One honest row that cannot be undone, never a crash, and
+            -- its reason is what the diff topic and the undo route report.
+            changeset.record(ctx.changes, call.args.path, false, "", target, "peer_sent_no_change_text")
+          end
+        end
+      end
     end
     -- Say what was repaired, so the model learns the shape instead of relying on the repair.
     if call.hoisted and type(result) == "table" then

@@ -378,6 +378,8 @@ local CODES={
   fix='send `edits` as an array of 1 to 64 objects, no nils and no holes.'},
  edit_anchor_outside_read_page={message='this session read only part of this file, and the anchor is outside every byte range that read returned, so it was quoted from a page nobody was given ({origin}).',
   fix='read the page that holds the anchor (read with offset/column, or the truncation.next the partial page named) and quote the bytes from it; a whole-file read of the same version clears this.'},
+ edit_read_page_invalid={message='the page record this call carried for the file on that node could not be read, so whether the anchor was ever shown to this session is unknown ({origin}).',
+  fix='nothing was changed. That record is written by the node holding the session, never by hand: if this repeats, that node and this one are on different versions - check `nodes` and update the older one.'},
  old_text_not_found={message='`old_text` appears nowhere in the file, so nothing could be replaced ({origin}).',
   fix='read the file and copy the exact bytes to replace, whitespace included.'},
  old_text_ambiguous={message='`old_text` appears more than once in the file, so which one to replace is undecidable ({origin}).',
