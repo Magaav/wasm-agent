@@ -56,6 +56,11 @@ pub const HOST_GLOBALS: &[&str] = &[
     "wait",
     "cancel",
     "pending",
+    // `sleep(ms)`: the one pause a script can ask for. The loop answers it by sleeping in the host, where
+    // the sandbox's computing clock is stopped, so a pause is never charged to the script's budget
+    // (22/11: `ReferenceError: setTimeout is not defined` was the largest missing-global class in the
+    // ledger - 40 recorded failures - and the guest has no timers).
+    "sleep",
 ];
 
 /// The guest globals this seam answers, with the prelude's `spread` flag.
@@ -72,6 +77,9 @@ pub const GUEST_GLOBALS: &[(&str, bool)] = &[
     ("cancel", true),
     // The pool: the handles this scope still holds, read so a later step needs no memory of them.
     ("pending", true),
+    // Spread: `sleep(ms)` arrives with its one argument. The loop answers it (HOST_GLOBALS): the pause
+    // is the host's, so a seam that answered it would hold the guest's thread and spend its fuel.
+    ("sleep", true),
     ("describeTool", false),
     ("showCall", false),
     ("capabilities", false),
@@ -1038,6 +1046,19 @@ mod tests {
             "a built-in is a permitted name for the correction: {value}");
         assert_eq!(describe_tool(&catalogue, &json!(["searchtools_"])), Some(rows[0].clone()),
             "the alias answers the same member, never a throw");
+    }
+
+    #[test]
+    fn sleep_is_a_guest_global_the_loop_answers() {
+        // 22/11: the sandbox had no timers, and `ReferenceError: setTimeout is not defined` was the
+        // largest missing-global class in the ledger (40 recorded failures). The pause is `sleep(ms)`,
+        // and it must be in BOTH lists: GUEST_GLOBALS gives the guest the name, HOST_GLOBALS makes this
+        // seam hand the call to the loop. A name in one list and not the other is a script that runs
+        // natively and fails through the component (the parity suite exists to catch exactly that).
+        assert!(GUEST_GLOBALS.iter().any(|(name, spread)| *name == "sleep" && *spread),
+            "sleep is a guest global, with one argument: {GUEST_GLOBALS:?}");
+        assert!(HOST_GLOBALS.contains(&"sleep"), "and the loop answers it: {HOST_GLOBALS:?}");
+        assert_eq!(GUEST_GLOBALS.iter().filter(|(name, _)| *name == "sleep").count(), 1, "named once");
     }
 
     #[test]

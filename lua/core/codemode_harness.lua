@@ -225,6 +225,23 @@ function parallel(items){
  for(var index=0;index<items.length;index++){ var item=items[index]; list.push(typeof item==='function'?item():item); }
  return track('parallel([...])',allP(list));
 }
+/* btoa/atob: base64, the standard two (22/11). RE-MEASURED on the pinned QuickJS bytes: the guest ALREADY has both - the brief said it had neither, and btoa("hi") answers aGk= on the base commit. */
+/* What it does not have is a sentence for the standard's own trap: btoa encodes one character per byte, so UTF-8 text above U+00FF throws an InvalidCharacterError that says nothing about the way out. */
+/* These wrappers keep the runtime's own encoder - same bytes, same speed, no JavaScript loop over a large body - and replace only that message, plus a named error if a host without them ever reaches this line. */
+var NATIVE_BTOA=typeof G.btoa==='function'?G.btoa:null;
+var NATIVE_ATOB=typeof G.atob==='function'?G.atob:null;
+var B64BEYONDBYTE=/[^\x00-\xff]/;
+var B64UTF8='btoa takes one character per byte and this text goes above U+00FF. For UTF-8 text use btoa(unescape(encodeURIComponent(text))), and read it back with decodeURIComponent(escape(atob(text))).';
+function btoa(value){
+ var text=String(value===undefined?'undefined':value);
+ if(NATIVE_BTOA===null){ throw new TypeError('base64 is unavailable on this node: its code-mode sandbox predates btoa/atob. '+B64UTF8); }
+ try{ return NATIVE_BTOA(text); }catch(error){ if(B64BEYONDBYTE.test(text)){ throw new TypeError(B64UTF8); } throw error; }
+}
+function atob(value){
+ var text=String(value===undefined?'undefined':value);
+ if(NATIVE_ATOB===null){ throw new TypeError('base64 is unavailable on this node: its code-mode sandbox predates btoa/atob.'); }
+ try{ return NATIVE_ATOB(text); }catch(error){ throw new TypeError('atob takes base64 text: A-Z, a-z, 0-9, + and / with = padding, and nothing else ('+String((error&&error.message)||error)+').'); }
+}
 var results=Object.freeze({
  get:function(hash){ return track('results.get('+preview(hash)+')',rawResults({ op:'get', hash:hash })); },
  last:function(count,options){ return track('results.last('+preview(count)+')',rawResults({ op:'last', n:count, tool:options&&options.tool })); },
@@ -237,7 +254,7 @@ return {
   var helpers={ searchTools:makeGlobal('searchTools',G.searchTools), describeTool:makeGlobal('describeTool',G.describeTool), showCall:makeGlobal('showCall',G.showCall), describe:makeGlobal('describe',G.describe), results:results, parallel:parallel, vars:vars.proxy };
   var boundTools=wrapTools(G.tools,helpers), boundConsole=makeConsole(G.console);
   vars.bind({ tools:boundTools, console:boundConsole, results:results, parallel:parallel, searchTools:helpers.searchTools });
-  var value=await body(boundTools,boundConsole,helpers.searchTools,helpers.describeTool,helpers.showCall,makeGlobal('capabilities',G.capabilities),helpers.describe,results,parallel,text,store,load,image,G.exit,G.ALL_TOOLS,vars.proxy);
+  var value=await body(boundTools,boundConsole,helpers.searchTools,helpers.describeTool,helpers.showCall,makeGlobal('capabilities',G.capabilities),helpers.describe,results,parallel,text,store,load,image,G.exit,G.ALL_TOOLS,vars.proxy,btoa,atob);
   var out=await settleAll(value);
   vars.flush();
   return out;
@@ -273,7 +290,7 @@ local ONE = join(SOURCE)
 -- The session's variables arrive as `{name: bytes}` on line 1 (names are identifiers and sizes integers,
 -- so the text holds no newline and the script's line numbers do not move).
 local OPEN = ONE .. ";return await __h.enter("
-local BODY = ",async function(tools, console, searchTools, describeTool, showCall, capabilities, describe, results, parallel, text, store, load, image, exit, ALL_TOOLS, vars){{"
+local BODY = ",async function(tools, console, searchTools, describeTool, showCall, capabilities, describe, results, parallel, text, store, load, image, exit, ALL_TOOLS, vars, btoa, atob){{"
 M.prologue = OPEN .. "{}" .. BODY
 M.epilogue = "\n}});"
 

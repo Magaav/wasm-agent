@@ -248,7 +248,13 @@ local CODES={
  codemode_target_not_available={message='this target cannot be called from inside a script: it runs outside code mode, or it is not one of the tools this node allows there ({origin}).',
   fix='call it as an ordinary tool call, or ask `searchTools("*")` which tools a script may call - each one answers `callable`.'},
  codemode_global_not_available={message='no script global is named `{input}` ({origin}).',
-  fix='the globals a script has are `searchTools`, `results`, `wait`, `cancel`, `pending`, `describeTool`, `showCall`, `capabilities` and `describe`, plus one member per callable tool on `tools`.'},
+  fix='the globals a script has are `searchTools`, `results`, `wait`, `cancel`, `pending`, `sleep`, `describeTool`, `showCall`, `capabilities` and `describe`, plus one member per callable tool on `tools`.'},
+ -- The one pause a script may ask for (22/11): `sleep(ms)` is answered in the host, so it is not charged
+ -- to the script's computing budget, and the cap is what keeps one script from holding the node.
+ codemode_sleep_requires_milliseconds={message='`sleep` was given something that is not a number of milliseconds ({origin}).',
+  fix='call `await sleep(ms)` with a whole number of milliseconds from 0 to 5000.'},
+ codemode_sleep_too_long={message='`sleep` was asked to pause for longer than one call may ({origin}).',
+  fix='`sleep` pauses at most 5000 ms. To wait for work, give the call a `wait_s` option or call `wait(op)`; `pending()` lists what is still running.'},
  codemode_identifier_collision={message='two tool names become the same script identifier, so `tools.{input}` would be ambiguous ({origin}).',
   fix='call the ambiguous target by its exact name through `searchTools("select:<name>")`, or use the other tool of the pair.'},
  tool_definition_changed={message='the definition of {tool} changed after the script started, so the arguments it validated are no longer the ones the tool takes ({origin}).',

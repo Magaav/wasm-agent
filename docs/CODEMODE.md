@@ -216,6 +216,37 @@ never told "still running" with nothing it can do about it.
   the answer itself in that same flat shape, with `result_sha256` beside it for a later
   `results.get(op)` - the model reading an announced handle never has to reach through a hash either.
 
+## A pause, and base64 (22/11)
+
+The guest has no timers (`setTimeout`, `setInterval`) and the ledger says that was the most common way a
+script reached for something that is not there: 40 recorded `ReferenceError: setTimeout is not defined`
+over the retained results, more than every other missing global together. So the sandbox has ONE pause,
+and it is the host's:
+
+* `await sleep(ms)` - a whole number of milliseconds from 0 to 5000. It is answered by the loop, in the
+  host, where the sandbox's COMPUTING clock is stopped (`rust/wa-capabilities/src/quickjs.rs`, the same
+  pause/resume a tool call already gets), so a pause spends none of the script's budget. Past the cap the
+  call is refused as `codemode_sleep_too_long`, and its fix names the other waits: a call's own
+  `wait_s`, `wait(op)`, `pending()`. A pause is for spacing retries; `sleep` is not a way to wait for
+  work, because nothing else runs while the script sleeps.
+* `btoa(text)` / `atob(text)` - the standard two, from the pinned QuickJS runtime itself (they were
+  there all along; the 22/11 brief said they were not, and `btoa("hi")` answers `aGk=` on that commit).
+  The harness wraps them for one reason: the standard encodes ONE CHARACTER PER BYTE, so UTF-8 text above
+  U+00FF throws an `InvalidCharacterError` that says nothing about the way out. That message now names it -
+  `btoa(unescape(encodeURIComponent(text)))`, read back with `decodeURIComponent(escape(atob(text)))` -
+  and a body large enough that the runtime's own encoder matters is still encoded by it, not by a
+  JavaScript loop (`lua/core/codemode_harness.lua`).
+
+A missing global that is NOT a typo - the script is running in the wrong runtime - is answered by its
+own name instead of "Change line N". The allow-list is `GLOBAL_FIX` in `lua/core/codemode.lua`, and the
+measured reach it was written from is: `setTimeout` 40, `Buffer` 17, `HOME` 16, `location` 12,
+`require` 6. `Buffer` answers with the way a body travels here (a string to `tools.write`, the flat
+`tools.remote` write for a peer, the run call's `raw` argument for bytes that must not pass through
+JavaScript, and `btoa`/`atob`), a timer with `sleep`, `require`/`fs`/`process` with "this is not Node",
+`location`/`window`/`document` with "there is no browser in a script", `HOME` with the `printenv`
+command, and `fetch` with `curl`. A name outside the list keeps the generic sentence, because nothing
+there can say what the script meant.
+
 **The executors** (`M.EXECUTORS` in `lua/core/codemode_pending.lua`) are how a call becomes a handle,
 and they are the whole difference between "can be resumed" and "cannot":
 
