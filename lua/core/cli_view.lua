@@ -98,6 +98,10 @@ local PALETTE = {
   thinkingOff = "505050", thinkingMinimal = "6e6e6e", thinkingLow = "5f87af",
   thinkingMedium = "81a2be", thinkingHigh = "b294bb", thinkingXhigh = "d183e8",
   thinkingMax = "ff5fff",
+  -- The matrix green (Victor, 22/11: the star of the welcome line and the animated first glyph of the
+  -- run status row). Its OWN entry, so those two turn green without moving `accent`, which keeps
+  -- painting the spinner's trail, the prompt mark and every other thing that was warm.
+  matrix = "00ff41",
 }
 
 -- A role is a 24-bit colour (`rrggbb`), or `ansi:<n>` for one of the terminal's own palette slots,
@@ -163,7 +167,7 @@ end
 -- the same characters in the same order as the ones this module prints for itself.
 function M.marks(live)
   local list = {}
-  for index = 1, #SPINNER * HOLD do list[index] = paint(M.spinner(index - 1), "accent", live) .. " " end
+  for index = 1, #SPINNER * HOLD do list[index] = paint(M.spinner(index - 1), "matrix", live) .. " " end
   return list
 end
 
@@ -3441,7 +3445,7 @@ function M.banner(opts)
   -- time cannot hide in the banner (round 4, item 1).
   local divider = paint(opts.marker and M.RULE or M.expand_rules(M.RULE, limit), "border", live)
   local lines = { divider,
-    paint(STAR, "accent", live) .. " Welcome to " .. paint("wasm-agent", "bold", live) .. "!"
+    paint(STAR, "matrix", live) .. " Welcome to " .. paint("wasm-agent", "bold", live) .. "!"
       .. ((opts.version and opts.version ~= "") and paint(" v" .. opts.version, "muted", live) or ""),
     "",
     paint(fit("/help for help, /login to sign in to a provider"), "muted", live),
