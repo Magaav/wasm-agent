@@ -1341,7 +1341,8 @@ function M.tick(opts)
       exec([[UPDATE self_wakes SET last_error=?, updated_at=? WHERE id=? AND status='pending']],
         { wait_text:sub(1, 400), now, row.id })
     end
-    out.deploy_waiting = #due
+    out.deploy_waiting = 1
+    out.deploy_wait_due = #due
     out.deferred = (tonumber(out.deferred) or 0) + #due
     return out
   end

@@ -250,6 +250,31 @@ function M.run(argv)
   end
   local scripted = once or stdin_is_a_terminal() == false
 
+  -- NO NEW TURN WHILE A DEPLOY WAITS OR INSTALLS (22/11).
+  --
+  -- The same rule as the park above, for a different reason: a deploy request that is waiting for this node
+  -- to go idle cannot get there while loops keep starting turns, and that is measured - 34 and 30 minutes on
+  -- 22/11 with three workers running. A scripted caller (`--once`, or a stdin that is not a terminal) is
+  -- refused by name, before the thread is drawn and before any model call; a reader at a terminal is not,
+  -- because somebody is there and a pause they did not ask for is worse than one more turn (the run-time gate
+  -- in lua/core/agent.lua carries `operator_present` for that).
+  --
+  -- Exit 2, like the park: this is "refused, nothing ran", not "the turn failed" (docs/SCRIPTED-RUNS.md).
+  --
+  -- BEFORE THE THREAD, not after it (measured by scripts/test-deploy-wait.sh): the first version of this
+  -- check sat after the session was resolved, so a refused `--once` still created an empty thread - one per
+  -- attempt, and the workers of the incident attempt again every second. A turn that does not start writes
+  -- nothing, including its session.
+  if scripted then
+    local deploy_pause_ok, deploy_pause = pcall(dofile, "lua/core/deploy_pause.lua")
+    if deploy_pause_ok and type(deploy_pause) == "table" and type(deploy_pause.refuse) == "function" then
+      local refused = deploy_pause.refuse(host.now())
+      if refused then
+        print(refused)
+        return 2
+      end
+    end
+  end
   -- Which thread this process runs in. Conversational history is the transcript
   -- of that thread; remembered facts live in memory and are deliberately
   -- independent of it, so `--continue` never changes what `recall` finds.
@@ -288,26 +313,6 @@ function M.run(argv)
     return 2
   end
 
-  -- NO NEW TURN WHILE A DEPLOY WAITS OR INSTALLS (22/11).
-  --
-  -- The same rule as the park above, for a different reason: a deploy request that is waiting for this node
-  -- to go idle cannot get there while loops keep starting turns, and that is measured - 34 and 30 minutes on
-  -- 22/11 with three workers running. A scripted caller (`--once`, or a stdin that is not a terminal) is
-  -- refused by name, before the thread is drawn and before any model call; a reader at a terminal is not,
-  -- because somebody is there and a pause they did not ask for is worse than one more turn (the run-time gate
-  -- in lua/core/agent.lua carries `operator_present` for that).
-  --
-  -- Exit 2, like the park: this is "refused, nothing ran", not "the turn failed" (docs/SCRIPTED-RUNS.md).
-  if scripted then
-    local deploy_pause_ok, deploy_pause = pcall(dofile, "lua/core/deploy_pause.lua")
-    if deploy_pause_ok and type(deploy_pause) == "table" and type(deploy_pause.refuse) == "function" then
-      local refused = deploy_pause.refuse(host.now())
-      if refused then
-        print(refused)
-        return 2
-      end
-    end
-  end
 
   local settings = provider.settings()
   -- WHY there is no model, when there is none. "local mode (no model configured)" was true and useless:

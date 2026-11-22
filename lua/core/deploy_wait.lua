@@ -26,8 +26,11 @@ local json = dofile("lua/vendor/json.lua")
 local M = {}
 
 -- The box, inside the node's data directory. The path is the sentinel's own (rust/wa-sentinel/src/main.rs,
--- `sentinel_dir`): `<home>/.wasm-agent/sentinel/requests`.
-M.SUBDIR = "sentinel/requests"
+-- `sentinel_dir`): `<home>/.wasm-agent/sentinel`, and `M.LANES` are its two lanes. `M.dir()` is that directory
+-- and NOT one lane: a lane is appended per read, so the two cannot drift apart (measured by
+-- scripts/test-deploy-wait.sh's first run: `M.dir()` returned `<data>/sentinel/requests` and the read appended
+-- `requests` again - every process then agreed the box was empty while the request sat in it).
+M.SUBDIR = "sentinel"
 -- The box has two lanes a deploy lives in: it waits in `requests/`, and the moment the sentinel claims it the
 -- file is renamed into `claimed/` (rust/wa-sentinel/src/main.rs: the rename IS the claim) before the installer
 -- is started. Reading only the first lane would leave a gap - request gone, installer's marker not written
@@ -64,6 +67,13 @@ function M.dir(data_dir)
     root = data
   end
   return root .. "/" .. M.SUBDIR
+end
+
+-- One lane by name: `requests` (waiting) or `claimed` (being installed).
+function M.lane_dir(lane, data_dir)
+  local dir = M.dir(data_dir)
+  if not dir then return nil end
+  return dir .. "/" .. tostring(lane)
 end
 
 -- The queue time of a request whose file does not carry `queued_at`: the file is named
