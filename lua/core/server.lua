@@ -605,49 +605,29 @@ local function idle_pending_work(record, user)
   return { pending = pending, unknown = unknown }
 end
 
+-- The idle maintenance threshold (docs/CONTEXT-COMPACTION.md, "Idle maintenance (40%)"): the
+-- number scripts/on-stale.sh posts. Both idle entries below read it from here, so the settle retry
+-- cannot grow a second threshold.
+local IDLE_COMPACT_PERCENT = 40
+
 local compacting=false
-function wa_compact(body, session)
-  local user=require_master(session)
-  if not user then return json.encode({error='forbidden'}) end
-  -- Idle admission is node-wide and owned by the Rust listener (compact_begin), which checks
-  -- queued/running runs before calling this handler and again takes the same gate a run
-  -- admission does. This function's cached `agent` is only the object this node-thread built;
-  -- its run_id is the identity of the last run and stays set after that run settles. Treating
-  -- it as liveness refused every /compact after the first chat (the onStale node_busy report).
-  -- Do not re-add a local busy check here: the scheduler is the authority.
-  if compacting then return json.encode({ok=false,error='compaction_in_progress'}) end
-  local ok,args=pcall(json.decode,body or '{}')
-  if not ok or type(args)~='table' then return json.encode({error='invalid_compact_request'}) end
-  local min=tonumber(args.min_percent) or 40
-  if min<1 or min>95 then return json.encode({error='invalid_compact_percent'}) end
-  local record
-  if type(args.session_id)=='string' and args.session_id~='' then record=memory.session(args.session_id)
-  else
-    -- A session created without a node binding has node_id ''; latest_session(user, node_name)
-    -- cannot find it, so the default /compact from onStale returned session_not_found. Find the
-    -- newest main session on this node (bound or unbound), skipping subagent threads.
-    local rows=memory.list_sessions(user.id,50)
-    for _,row in ipairs(rows) do
-      if row.objective~='subagent' and (row.node_id==nodeslib.node_name() or row.node_id=='' or row.node_id==nil) then
-        record=row; break
-      end
-    end
-  end
-  if not record then return json.encode({error='session_not_found'}) end
-  if record.objective=='subagent' then return json.encode({error='subagent_compaction_refused'}) end
-  -- The idle path is refused while THIS session still has work (see idle_pending_work above).
-  if args.idle == true then
-    local queued = idle_pending_work(record, user)
-    if queued then
-      local said = {}
-      for _, item in ipairs(queued.pending) do said[#said+1] = item end
-      for _, item in ipairs(queued.unknown) do said[#said+1] = item..', which is unknown and not clear' end
-      return json.encode({ok=false,error='work_pending',session_id=record.id,
-        pending=queued.pending,unknown=queued.unknown,
-        note='idle compaction is not performed while this session has work pending or a pending state it cannot see: '
-          ..table.concat(said,', ')..'. Nothing was summarized; the next idle request after the work settles compacts it.'})
-    end
-  end
+
+-- The refusal the idle path gives while the session it targets still has work, in one shape for both
+-- idle entries (the /compact request and the settle retry): the reason by name, what is pending, and
+-- what could not be read. Nothing is summarized and nothing is remembered.
+local function idle_refusal(record, queued)
+  local said = {}
+  for _, item in ipairs(queued.pending) do said[#said+1] = item end
+  for _, item in ipairs(queued.unknown) do said[#said+1] = item..', which is unknown and not clear' end
+  return {ok=false,error='work_pending',session_id=record.id,
+    pending=queued.pending,unknown=queued.unknown,
+    note='idle compaction is not performed while this session has work pending or a pending state it cannot see: '
+      ..table.concat(said,', ')..'. Nothing was summarized; the idle compaction is tried again when that work settles.'}
+end
+
+-- One measurement, and past the threshold one compaction, of `record`. Shared by the operator's
+-- /compact and by the idle entries so the two cannot measure the same session differently.
+local function compact_record(record, user, min)
   compacting=true
   local a=agentlib.new(record.id,nil,users.normalize(user.role),user.id,'')
   a.run_id='compact:'..host.uuid()
@@ -667,7 +647,89 @@ function wa_compact(body, session)
   end)
   pcall(a.close,a)
   compacting=false
-  if not done then return json.encode({ok=false,error='compact_failed',detail=tostring(result)}) end
+  if not done then return {ok=false,error='compact_failed',detail=tostring(result)} end
+  return result
+end
+
+function wa_compact(body, session)
+  local user=require_master(session)
+  if not user then return json.encode({error='forbidden'}) end
+  -- Idle admission is node-wide and owned by the Rust listener (compact_begin), which checks
+  -- queued/running runs before calling this handler and again takes the same gate a run
+  -- admission does. This function's cached `agent` is only the object this node-thread built;
+  -- its run_id is the identity of the last run and stays set after that run settles. Treating
+  -- it as liveness refused every /compact after the first chat (the onStale node_busy report).
+  -- Do not re-add a local busy check here: the scheduler is the authority.
+  if compacting then return json.encode({ok=false,error='compaction_in_progress'}) end
+  local ok,args=pcall(json.decode,body or '{}')
+  if not ok or type(args)~='table' then return json.encode({error='invalid_compact_request'}) end
+  local min=tonumber(args.min_percent) or IDLE_COMPACT_PERCENT
+  if min<1 or min>95 then return json.encode({error='invalid_compact_percent'}) end
+  local record
+  if type(args.session_id)=='string' and args.session_id~='' then record=memory.session(args.session_id)
+  else
+    -- A session created without a node binding has node_id ''; latest_session(user, node_name)
+    -- cannot find it, so the default /compact from onStale returned session_not_found. Find the
+    -- newest main session on this node (bound or unbound), skipping subagent threads.
+    local rows=memory.list_sessions(user.id,50)
+    for _,row in ipairs(rows) do
+      if row.objective~='subagent' and (row.node_id==nodeslib.node_name() or row.node_id=='' or row.node_id==nil) then
+        record=row; break
+      end
+    end
+  end
+  if not record then return json.encode({error='session_not_found'}) end
+  if record.objective=='subagent' then return json.encode({error='subagent_compaction_refused'}) end
+  -- The idle path is refused while THIS session still has work (see idle_pending_work above).
+  if args.idle == true then
+    local queued = idle_pending_work(record, user)
+    if queued then return json.encode(idle_refusal(record, queued)) end
+  end
+  return json.encode(compact_record(record, user, min))
+end
+
+-- The settle retry (compact-not-while-pending, 22/11). A code-mode handle that settles, a self-wake
+-- that fires and a child run that comes back all reach the node as a background completion run, and
+-- none of those is a `/chat` run: none of them emits `node.run_finished`, so the idle path had nothing
+-- to try it again once the work was gone and Victor's rule ("never while work is pending") was only
+-- half kept - the refusal was there, the retry was not. The node calls this after such a run settles,
+-- under the same maintenance gate `/compact` takes (rust/wa-capabilities/src/serve.rs,
+-- `settle_idle_compaction`), so the answer is the idle answer and not a second policy: refused by name
+-- while the session still holds work, and measured only when nothing is left in flight. It is internal
+-- maintenance, not a route: nothing outside this node can name it, and an explicit operator `/compact`
+-- does not come through here.
+function wa_idle_settled(body)
+  local ok,args=pcall(json.decode,body or '{}')
+  if not ok or type(args)~='table' or type(args.session_id)~='string' or args.session_id=='' then
+    return json.encode({ok=false,error='invalid_settle_request'})
+  end
+  if compacting then return json.encode({ok=false,error='compaction_in_progress',session_id=args.session_id}) end
+  local record=memory.session(args.session_id)
+  if not record then return json.encode({ok=false,error='session_not_found',session_id=args.session_id}) end
+  if record.objective=='subagent' or record.parent_session_id~=nil then
+    return json.encode({ok=false,error='subagent_compaction_refused',session_id=record.id})
+  end
+  local user=users.find(record.user_id)
+  if not user then
+    return json.encode({ok=false,error='session_owner_unknown',session_id=record.id,
+      note='the owner of this session is not in the user list, so nothing was summarized'})
+  end
+  -- A parked session is stopped on purpose (lua/core/session_park.lua): its own autonomous work is
+  -- held, so maintenance does not rewrite its history either. Release it and the next settle compacts.
+  local held_ok, held = pcall(function() return dofile('lua/core/selfloop.lua').hold(record.id) end)
+  if not held_ok then
+    return json.encode({ok=false,error='session_hold_unknown',session_id=record.id,
+      note='whether this session is parked could not be read, so nothing was summarized: unknown is not clear'})
+  end
+  if type(held)=='table' and tostring(held.kind or '')=='park' then
+    return json.encode({ok=false,error='session_parked',session_id=record.id,
+      since=tonumber(held.since),reason=held.reason,
+      note='the session is parked: its history is left as the operator stopped it, and the first settle after `wa session release` compacts it'})
+  end
+  local queued = idle_pending_work(record, user)
+  if queued then return json.encode(idle_refusal(record, queued)) end
+  local result=compact_record(record, user, IDLE_COMPACT_PERCENT)
+  result.session_id=record.id
   return json.encode(result)
 end
 

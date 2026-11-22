@@ -1067,13 +1067,9 @@ fn compact_gate_for_run(deadline: std::time::Instant) -> Option<std::sync::Mutex
     }
 }
 
-/// Reserve compaction while holding the same gate a run admission takes. A run cannot begin
-/// between the busy check and the reservation; a later run waits for `compact_end`.
-fn compact_begin() -> bool {
-    let _guard = match COMPACT_GATE.lock() {
-        Ok(guard) => guard,
-        Err(poison) => poison.into_inner(),
-    };
+/// The reservation itself, with the gate already held: `COMPACT_ACTIVE` is "one idle compaction at a
+/// time" across node-threads, and `compact_is_busy` is "none while a run is queued or running".
+fn compact_reserve() -> bool {
     if COMPACT_ACTIVE.load(Ordering::SeqCst) || compact_is_busy() {
         return false;
     }
@@ -1081,8 +1077,60 @@ fn compact_begin() -> bool {
     true
 }
 
+/// Reserve compaction while holding the same gate a run admission takes. A run cannot begin
+/// between the busy check and the reservation; a later run waits for `compact_end`.
+fn compact_begin() -> bool {
+    let _guard = match COMPACT_GATE.lock() {
+        Ok(guard) => guard,
+        Err(poison) => poison.into_inner(),
+    };
+    compact_reserve()
+}
+
+/// The same reservation, refusing instead of waiting when another compaction owns the gate: the settle
+/// retry below is an attempt, not a queue entry.
+fn compact_try_begin() -> bool {
+    let _guard = match COMPACT_GATE.try_lock() {
+        Ok(guard) => guard,
+        Err(_) => return false,
+    };
+    compact_reserve()
+}
+
 fn compact_end() {
     COMPACT_ACTIVE.store(false, Ordering::SeqCst);
+}
+
+/// The settle retry (compact-not-while-pending, 22/11). A code-mode handle that settles, a self-wake
+/// that fires and a child run that comes back all reach the node as a background completion run, and
+/// none of those is a `/chat` run: none of them emits `node.run_finished`, so the idle compaction that
+/// the same work had refused was never asked again, and a session could sit above 40% until the person
+/// typed again. This is the ask, made where the work settled.
+///
+/// It takes the maintenance gate `/compact` takes, so the route's invariants hold here too: one idle
+/// compaction at a time, and none while a run is queued or running node-wide. It does not WAIT for the
+/// gate - it is an attempt, and a node-thread that blocked here would be unavailable for the next
+/// request for as long as somebody else's summary takes; a settle that loses that race is retried by
+/// the next one. The decision is Lua's (`wa_idle_settled`, lua/core/server.lua), which refuses by name
+/// while that session still holds a handle, a wake, a child run or a park, so a session that hands back
+/// more work is left alone. Nothing is remembered either way.
+fn settle_idle_compaction(lua: &Core, session: &str) {
+    if session.is_empty() { return; }
+    if !compact_try_begin() { return; }
+    let body = serde_json::json!({"session_id": session}).to_string();
+    match lua.call_string("wa_idle_settled", &[&body]) {
+        Ok(answer) => {
+            // The two answers an operator can act on are logged: a compaction that ran, and a refusal
+            // by name. "Nothing to do at this size" is the ordinary answer and would be noise once per
+            // settled handle.
+            let value: serde_json::Value = serde_json::from_str(&answer).unwrap_or(serde_json::Value::Null);
+            if value["error"].as_str().is_some() || value["compacted"].as_bool() == Some(true) {
+                eprintln!("[serve] idle compaction after settle: {answer}");
+            }
+        }
+        Err(error) => eprintln!("[serve] idle compaction after settle failed: {error}"),
+    }
+    compact_end();
 }
 
 /// A main run finished. The Sentinel job `on-stale` is event-triggered on this topic; it checks
@@ -2646,6 +2694,11 @@ fn node_thread_loop(
                 set_current_run_io(None,None,String::new());
                 IN_RUN.with(|flag| flag.set(false));
                 scheduler::complete_run(run_id);
+                // The settle retry (compact-not-while-pending, 22/11): a settled code-mode handle, a fired
+                // self-wake and a returned child all arrive here, and none of them is a /chat run, so no
+                // `node.run_finished` ever asks the idle path again. This is that ask, made where the
+                // work settled - the last of it, because the Lua side refuses while any is left.
+                settle_idle_compaction(&lua, request["session_id"].as_str().unwrap_or_default());
                 if let Some(slot)=NODE_THREAD_SESSION.get().and_then(|slots|slots.get(index)) {
                     if let Ok(mut value)=slot.lock() {*value=None;}
                 }
