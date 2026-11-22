@@ -54,8 +54,11 @@ local real_nodes = nodes
 -- call the refresh makes (it must never start a probe): a list with options is the roster only.
 local roster = {}
 local list_opts = nil
+-- Anything this stub does not name falls through to the real module (a caller like
+-- `server.wa_peer_dispatch` reads `nodes.node_name` and `author_of`, and those are not part of what this
+-- row replaces). `remote_call` IS replaced: a test may never reach the real relay.
 local function stub_nodes(extra)
-  local stub = {
+  local stub = setmetatable({
     list = function(opts) list_opts = opts; return roster end,
     remote_call = function(node_id, capability, args)
       asked[#asked + 1] = { node_id = node_id, capability = capability, action = args and args.action }
@@ -65,7 +68,8 @@ local function stub_nodes(extra)
     end,
     known_capabilities = function() return extra and extra.known or {} end,
     self_name = function() return 'avell' end,
-  }
+    node_name = function() return 'avell' end,
+  }, { __index = real_nodes })
   return stub
 end
 
@@ -329,6 +333,69 @@ ok(type(weak_send.candidates) == 'table' and weak_send.candidates[1]
   'the node that can answer is named: ' .. json.encode(weak_send.candidates))
 ok(tostring(weak_send.ask_with):find('capability="mcp_whatsapp_send"', 1, true) ~= nil,
   'with the exact call to make: ' .. tostring(weak_send.ask_with))
+
+-- ---- 9. no ping-pong: a call that ARRIVED from a peer is answered or refused here (MUST 2) ------
+-- Every managed master admits the nine verbs and each asks its own account node, so two nodes WITHOUT the
+-- component are each other's "single peer that lists mcp_whatsapp_*": A forwards to B on that evidence and
+-- B would forward back to A on the same evidence, hop after hop, for ever. A call that arrived is therefore
+-- strict (no weak evidence) and is never routed back to the node it came from.
+--
+-- The arrived side is driven through the REAL seam a peer call goes through, `server.wa_peer_dispatch`
+-- (lua/core/server.lua, the function that builds `peer_call = true` and `session_id = "peer:<caller>"`),
+-- not through a ctx this row invented. B's fleet is A: one weak candidate, exactly the shape that loops.
+-- `wa_peer_dispatch` is a GLOBAL in that module (not a field of a returned table), so it is read from the
+-- interpreter's globals after the dofile - the same function a verified peer call runs.
+real_dofile('lua/core/server.lua')
+local peer_dispatch = wa_peer_dispatch
+ok(type(peer_dispatch) == 'function', 'the peer seam this row drives exists: ' .. type(peer_dispatch))
+local function node_b_fleet()
+  refresh({
+    roster = { { node_id = 'peer-a', name = 'avell', online = true } },
+    answers = { ['peer-a'] = { ok = true, tools = {}, connectors = { old_row() } } },
+  })
+end
+local a_roster = { { node_id = 'peer-1', name = 'openclaw', online = true } }
+local a_answers = { ['peer-1'] = { ok = true, tools = {}, connectors = { old_row() } } }
+refresh({ roster = a_roster, answers = a_answers })
+local_calls, served = 0, {}
+local hops, b_forwarded = 0, {}
+local function to_b(node, capability, args)
+  hops = hops + 1
+  -- B's own view of the fleet for the duration of the call: A is its ONE weak candidate.
+  local mine_roster, mine_answers = roster, remote_answers
+  node_b_fleet()
+  local asked_before = #asked
+  local ok_call, answer = pcall(peer_dispatch, capability, args,
+    { node_id = 'peer-a', role = 'master' }, 'avell')
+  for index = asked_before + 1, #asked do b_forwarded[#b_forwarded + 1] = asked[index] end
+  roster, remote_answers = mine_roster, mine_answers
+  current_nodes = stub_nodes({ roster = roster, answers = remote_answers })
+  if not ok_call then return { error = 'b_raised', detail = tostring(answer) } end
+  return answer
+end
+local ping = tools.dispatch(memory, 'mcp_whatsapp_read', { chat = 'Laura' }, 'master', {
+  user_id = 'master', role = 'master', codemode_nested = true, remote_call = to_b })
+ok(hops == 1, 'the call took exactly ONE hop (A -> B) and no hop back: ' .. hops)
+ok(ping.ok == false and ping.error == 'whatsapp_no_owner_on_this_node',
+  'B refused it by name instead of forwarding it back: ' .. json.encode(ping))
+ok(ping.arrived_from == 'peer-a',
+  'and the refusal says which node it arrived from: ' .. tostring(ping.arrived_from))
+ok(#b_forwarded == 0,
+  'B forwarded nothing: ' .. json.encode({ b_forwarded = b_forwarded }))
+ok(local_calls == 0 and ping.id == nil,
+  'nothing was queued on either node: ' .. json.encode({ local_calls = local_calls, id = ping.id }))
+ok(ping.effect == 'none', 'and no effect was claimed: ' .. tostring(ping.effect))
+
+-- The same refusal, without the peer seam: a call carrying the arrival marker is never forwarded again,
+-- whatever the weak evidence says.
+refresh({ roster = a_roster, answers = a_answers })
+local arrived_ctx = { user_id = 'master', role = 'master', codemode_nested = true,
+  peer_call = true, session_id = 'peer:peer-a', remote_call = relay({ ok = true }) }
+served = {}
+local direct = tools.dispatch(memory, 'mcp_whatsapp_send', { chat = '5551@s.whatsapp.net', text = 'oi' },
+  'master', arrived_ctx)
+ok(direct.error == 'whatsapp_no_owner_on_this_node' and #served == 0,
+  'an arrived SEND is refused here too, never bounced: ' .. json.encode(direct))
 
 dofile = real_dofile
 print('whatsapp finds owner ok (' .. checks .. ' checks)')
