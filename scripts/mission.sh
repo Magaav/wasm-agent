@@ -653,11 +653,45 @@ while [ "$i" -lt 300 ]; do
   kill -0 "$cli" 2>/dev/null || break
   sleep 0.1; i=$((i + 1))
 done
+wait "$cli"; rc=$?
+# A REFUSED TURN IS NOT A FAILED RUN (22/11, review MUST 3). While a deploy waits for or installs on this node
+# the CLI refuses a NEW turn by name and exits 2 (`deploy_waiting: waiting for the install of <sha>`,
+# docs/SCRIPTED-RUNS.md). Nothing was asked and nothing answered, so the launch waits and asks again - up to
+# WA_DEPLOY_WAIT_LIMIT seconds in WA_DEPLOY_WAIT_STEP steps - instead of writing rc=2 into `done`, which is the
+# factory reading a mission that never ran as one whose turn failed. Past the limit the refusal stands as
+# itself: rc=2 in `done` and the give-up line below, because a wait that never ends must be visible.
+step=${WA_DEPLOY_WAIT_STEP:-15}; case "$step" in ''|*[!0-9]*|0) step=15 ;; esac
+limit=${WA_DEPLOY_WAIT_LIMIT:-900}; case "$limit" in ''|*[!0-9]*) limit=900 ;; esac
+waited=0
+while [ "$rc" -eq 2 ] && tail -c 4000 "$M/out.log" 2>/dev/null | grep -q deploy_waiting; do
+  if [ "$waited" -ge "$limit" ]; then
+    printf 'deploy-wait %s gave up after %ss: the node is still waiting for or installing a build, so this turn never started (nothing ran)\n' "$(date -u +%FT%TZ)" "$waited" >> "$M/out.log"
+    break
+  fi
+  sleep "$step"
+  waited=$((waited + step))
+  printf 'deploy-wait %s the node is waiting for or installing a build: asking again (%ss of %ss)\n' "$(date -u +%FT%TZ)" "$waited" "$limit" >> "$M/out.log"
+  printf 'deploy-wait %s refused (nothing ran; asking again in %ss)\n' "$(date -u +%FT%TZ)" "$step" >> "$M/lease.log"
+  "$WA" chat --once "$(cat "$M/prompt.md")" >> "$M/out.log" 2>> "$M/err.log" &
+  cli=$!
+  echo "$cli" > "$M/run.pid"
+  i=0
+  while [ "$i" -lt 300 ]; do
+    sid=$(sed -n 's/^wa: session \([^ ]*\) .*/\1/p' "$M/err.log" 2>/dev/null | tail -n +$((errlines + 1)) | tail -1)
+    case $sid in ''|*[!0-9a-f-]*) sid='' ;; *) [ "${#sid}" -eq 36 ] || sid='' ;; esac
+    [ -n "$sid" ] && break
+    kill -0 "$cli" 2>/dev/null || break
+    sleep 0.1; i=$((i + 1))
+  done
+  wait "$cli"; rc=$?
+done
+# THE LOCK IS BOUND AFTER THE WAIT, not before it (22/11, review MUST 3): a refused attempt names no session -
+# nothing started - so a bind written next to the first ask would bind nothing and the launch would look
+# sessionless in `status` while its turn has actually run.
 if [ -n "${sid:-}" ]; then
   printf '%s\n' "MISSION='$NAME'" "SESSION='$sid'" "WORKTREE='$WT'" "NODE='$NODE'" "LAUNCHER='$$'" "LOCKED='$(date -u +%FT%TZ)'" > "$M/run.lock"
   printf "bind %s session=%s (the node named it; the lock is the run's)\n" "$(date -u +%FT%TZ)" "$sid" >> "$M/lease.log"
 fi
-wait "$cli"; rc=$?
 printf 'rc=%s %s\n' "$rc" "$(date -u +%FT%TZ)" > "$M/done"
 # The CLI's exit is not the run's end: the lock stays until an observer asks the NODE and finds the run
 # settled. Saying so in lease.log is the only claim this shell makes about the run.

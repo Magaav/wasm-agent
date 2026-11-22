@@ -4395,6 +4395,11 @@ function composedBody(text, options = {}) {
   // UI sends are start-if-idle. The native admission lock closes the race with
   // a child-completion/background turn starting after this page's last poll.
   const payload = { text: options.resumeSeq === undefined ? composedText(text) : text, if_idle: true };
+  // A PERSON IS AT THE KEYBOARD (22/11, the deploy wait): the node starts no new turn while a build waits for
+  // it or installs - except the operator's own - and this is how a window says which one this is. It is a
+  // scheduling hint, not an identity: the node decides what a caller may do from the credential. An automatic
+  // client posting to /chat simply leaves it out and is refused for the wait.
+  payload.operator = true;
   if (images.length) payload.images = images.map((file) => ({ name: file.name, mime: file.mime, data: file.data }));
   if (thread) payload.thread = thread;
   if (options.resumeSeq !== undefined) payload.resume_seq = options.resumeSeq;

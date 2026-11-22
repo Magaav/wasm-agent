@@ -215,4 +215,35 @@ local operator = pause.waiting(NOW, { read = function() return nil end,
   read_request = function() return wait.decode(request(), "1700000000000000000-1-0.json", NOW) end })
 ok(operator ~= nil, "the predicate a refused turn and a paused turn share")
 
+-- 7b. AN OPERATOR'S TURN IS PAUSED ONLY FOR THE REAL SWAP (review MUST 2). A request that is only waiting
+-- needs the node to stop STARTING turns, not to cut the turn a person is in the middle of: their multi-step
+-- work would be ended after every step for as long as the wait lasts. The installer's marker is the launch
+-- sequence itself and pauses everybody, as it always did.
+local operator = { session_id = "operator-session", user = "master", operator_present = true }
+local operator_runs = 0
+local operator_paused = pause.at_boundary(operator, "carry on", {
+  now = NOW,
+  read = function() return nil end,
+  read_request = function() return wait.decode(request(), "1700000000000000000-1-0.json", NOW) end,
+  notes = function() operator_runs = operator_runs + 1 end,
+  schedule = function() error("an operator's turn must not schedule a resume for a waiting request") end })
+ok(operator_paused == nil and operator_runs == 0, "a waiting request does not end the operator's turn")
+local operator_marker = pause.at_boundary({ session_id = "operator-session-2", user = "master", operator_present = true },
+  "carry on", {
+    now = NOW,
+    read = function() return { since = NOW - 5, bound_seconds = 600, to = SHA, by = "upgrade.sh" } end,
+    notes = function() end,
+    schedule = function(args) return { wake = { id = "w-op" } } end })
+ok(operator_marker ~= nil and operator_marker.wake and operator_marker.wake.id == "w-op",
+  "the real swap still pauses an operator's turn")
+says(operator_marker.text, "deploy pending", "with the sentence an installing node always said")
+-- ...and an AUTOMATIC turn still pauses for the waiting request: the exemption is the person, not the path.
+local automatic = pause.at_boundary({ session_id = "automatic-session", user = "master" }, "carry on", {
+  now = NOW,
+  read = function() return nil end,
+  read_request = function() return wait.decode(request(), "1700000000000000000-1-0.json", NOW) end,
+  notes = function() end,
+  schedule = function() return { wake = { id = "w-auto" } } end })
+ok(automatic ~= nil, "a turn without a person in front of it pauses for the same request")
+
 print("deploy wait ok (" .. checks .. " checks)")

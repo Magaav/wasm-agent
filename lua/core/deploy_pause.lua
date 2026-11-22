@@ -155,7 +155,19 @@ function M.at_boundary(self, request, opts)
   if not self or self.subagent then return nil end
   if self.deploy_pause then return nil end -- one pause per run
   local now = opts.now or os.time()
-  local marker = M.waiting(now, opts)
+  -- AN OPERATOR'S TURN IS PAUSED ONLY FOR THE REAL SWAP (22/11, review MUST 2).
+  --
+  -- The two signals are not the same emergency. A REQUEST that is only waiting needs the node to stop starting
+  -- turns - not to cut the turn a person is in the middle of: their multi-step work would be ended after every
+  -- step for as long as the wait lasts (minutes), and a person who is present can finish a step and let go.
+  -- The INSTALLER's marker is the launch sequence itself, and that pauses everybody, as it always did. So an
+  -- `operator_present` run asks the marker alone here, and everything automatic asks both.
+  local marker
+  if self.operator_present then
+    marker = (opts.read or M.read)(now)
+  else
+    marker = M.waiting(now, opts)
+  end
   if not marker then return nil end
   self.deploy_pause = marker
   local text = M.say_wait(marker, now)

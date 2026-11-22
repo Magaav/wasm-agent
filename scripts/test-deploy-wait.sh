@@ -206,11 +206,23 @@ turn="$(curl -sN -m 60 -X POST --data 'say something' "http://127.0.0.1:$PORT/ch
 want "$turn" "stub-ok" "the stub model's answer is in the turn"
 neq "$(calls)" "$before" "the model was asked"
 
-step "2. the request arrives: a NEW served turn is refused, and costs no model call"
+step "2. the request arrives: the WINDOW'S OWN turn still runs, and an automatic served turn is refused"
 write_request
+# 2a. A PERSON'S TURN (review MUST 1): the window says so itself - `operator: true` in the body, which is what
+# ui/app.js sends - and the node serves it while a deploy waits. Refusing it would be the node telling its own
+# reader to come back later for up to the request's bound.
+before="$(calls)"
+turn="$(curl -sN -m 60 -X POST --data '{"text":"say something from the window","operator":true}' "http://127.0.0.1:$PORT/chat" 2>&1)"
+want "$turn" "stub-ok" "the window's turn is answered while a deploy waits"
+unwant "$turn" "deploy_waiting" "and is not refused"
+neq "$(calls)" "$before" "the model was asked for it"
+
+# 2b. AN AUTOMATIC SERVED TURN: a client that does not say a person is behind it is refused by name, before a
+# single model call. Scheduling, not a security boundary - and the default, because the node cannot invent a
+# person.
 before="$(calls)"
 turn="$(curl -sN -m 60 -X POST --data 'say something else' "http://127.0.0.1:$PORT/chat" 2>&1)"
-want "$turn" "deploy_waiting" "the turn is refused by name"
+want "$turn" "deploy_waiting" "the automatic turn is refused by name"
 want "$turn" "waiting for the install of 8082b42e1111" "and says which commit is coming"
 want "$turn" "wa-sentinel request withdraw $REQUEST_ID" "and names the way out"
 case "$turn" in *stub-ok*) fail "a refused turn still reached the model" ;; *) ok "the model was not called" ;; esac
@@ -250,6 +262,29 @@ else
 fi
 neq "$(counts)" "$before_counts" "the pause wrote into the ledger (a checkpoint and a wake)"
 
+step "4b. an operator's served turn IN FLIGHT is not cut by a merely WAITING request"
+# Review MUST 2: the request needs the node to stop STARTING turns, not to end the turn a person is in the
+# middle of - that would cut their multi-step work after every step for as long as the wait lasts. So this turn
+# starts with no request, the request arrives while its first model call is in flight, and it must still reach
+# its own answer.
+clear_request
+paused_records() { ls -1 "$HOME_DIR/.wasm-agent/deploy-paused/"*.json 2>/dev/null | wc -l | tr -d ' '; }
+before_paused="$(paused_records)"
+printf '2500' > "$WORK/delay"
+before="$(calls)"
+curl -sN -m 60 -X POST --data '{"text":"wake me and keep going","operator":true}' \
+  "http://127.0.0.1:$PORT/chat" > "$WORK/operator-stream.txt" 2>&1 &
+OPERATOR_PID=$!
+sleep 0.8
+write_request
+wait "$OPERATOR_PID" 2>/dev/null
+operator_turn="$(cat "$WORK/operator-stream.txt")"
+want "$operator_turn" "stub-ok" "the operator's turn reached its own answer while the request waited"
+unwant "$operator_turn" "deploy waiting" "and was not paused or cut by the waiting request"
+unwant "$operator_turn" "deploy_waiting" "nor refused"
+neq "$(calls)" "$before" "it went on to the model, as a turn that keeps working does"
+same "$(paused_records)" "$before_paused" "and it recorded no pause, so the sentinel names it working, not paused"
+
 step "5. the node's own tick holds the due wakes while the deploy is waiting, and while it installs"
 # A wake of a session that is not paused, due now: the loop that starved the deploy on 22/11 was exactly this.
 out="$(lua due)"
@@ -258,7 +293,11 @@ sleep 2
 tick="$(lua tick)"
 want "$tick" "dispatched=0" "a due wake does not run while a deploy waits"
 want "$tick" "deploy_waiting=1" "and the tick says the deploy is waiting"
-want "$tick" "deploy_wait_due=1" "naming the wake it held"
+# ONE OR MORE, not exactly one: the operator's in-flight turn of step 4b scheduled a wake of its own through the
+# stub's tool call, and it is due too - counting it as an oddity would make this row fail for the right reason
+# in the wrong place.
+held_due="$(field "$tick" deploy_wait_due)"
+if [ "${held_due:-0}" -ge 1 ]; then ok "naming the $held_due due wake(s) it held"; else fail "the tick named no due wake: $tick"; fi
 marker_up
 if [ -s "$SIGNAL" ]; then ok "the installer's marker is up"; else fail "the marker was not written"; fi
 tick="$(lua tick)"

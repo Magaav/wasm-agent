@@ -112,18 +112,44 @@ while :; do
     say "red, and no session to resume was found in $ERR: the rows are in $M/preflight.json"
     exit 1
   fi
-  rounds=$((rounds + 1))
+  # The round is COUNTED HERE and charged after the loop only if a turn ran: a refused resume is not a round, so
+  # the counter the wait loop reports against is the number of rounds already spent.
+  pending_round=$((rounds + 1))
   message="[preflight] The gate of your branch (change/$NAME) is RED on the current main. The landing would stop
 on these rows. Fix them, and do not weaken a test to do it (no assertion deleted, no row removed from a
 list, no timeout raised to hide a hang):
 
 $(rows_of)
 
-The whole report is $M/preflight.json and the landing log is $M/preflight.log. Round $rounds of $ROUNDS:
+The whole report is $M/preflight.json and the landing log is $M/preflight.log. Round $pending_round of $ROUNDS:
 work on the branch in $M/wt, run the failing rows yourself, and commit."
-  say "round $rounds of $ROUNDS: resuming session $SID with $(rows_of | grep -c '^- ') red row(s)"
-  "$WA" chat --resume "$SID" --once "$message" >> "$OUT" 2>> "$ERR"
-  resumed=$?
+  say "round $pending_round of $ROUNDS: resuming session $SID with $(rows_of | grep -c '^- ') red row(s)"
+  # A REFUSED TURN IS NOT A ROUND (22/11). While a deploy waits for or installs on this node, `wa chat --once`
+  # refuses a NEW turn by name and exits 2 with `deploy_waiting` (docs/SCRIPTED-RUNS.md): nothing was asked and
+  # nothing answered. Counting that as a round spent the worker's budget on a wait - three refusals and the
+  # mission is recorded red although nobody worked on it. So the resume is asked again, up to
+  # WORKER_GATE_DEPLOY_WAIT seconds (default 900) in WORKER_GATE_DEPLOY_STEP steps (default 15), and the round
+  # is counted only when a turn actually ran. Past the limit the wait is refused by name - `preflight=refused`,
+  # which is this script's word for "nothing was proved either way" - and no round is charged for it.
+  # A step of 0 or a word that is not a number would spin this loop for ever: both fall back, by name.
+  step=${WORKER_GATE_DEPLOY_STEP:-15}; case "$step" in ''|*[!0-9]*|0) step=15 ;; esac
+  limit=${WORKER_GATE_DEPLOY_WAIT:-900}; case "$limit" in ''|*[!0-9]*) limit=900 ;; esac
+  waited=0
+  while :; do
+    "$WA" chat --resume "$SID" --once "$message" >> "$OUT" 2>> "$ERR"
+    resumed=$?
+    [ "$resumed" != 2 ] && break
+    tail -n 5 "$OUT" 2>/dev/null | grep -qi 'deploy_waiting' || break
+    if [ "$waited" -ge "$limit" ]; then
+      done_file refused "$rounds"
+      say "the node refused the resume for ${waited}s (a build is waiting for or installing on it): nothing ran, and no round was spent - the request is in its sentinel's box"
+      exit 1
+    fi
+    say "the node is waiting for or installing a build: the resume waits ${step}s and asks again (${waited}s of ${limit}s) - round $pending_round is not spent"
+    sleep "$step"
+    waited=$((waited + step))
+  done
+  rounds=$pending_round
   if [ "$resumed" != 0 ]; then
     say "the resume of session $SID ended rc=$resumed: asking the gate again anyway (the branch may have moved)"
   fi

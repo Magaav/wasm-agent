@@ -71,6 +71,13 @@ count=$((count + 1))
 printf '%s\n' "$*" > "$WA_STUB_RESUMES/$count.args"
 printf '%s\n' "${@: -1}" > "$WA_STUB_RESUMES/$count.message"
 [ "${WA_STUB_REFUSE:-}" ] && exit 9
+# A DEPLOY WAITING ON THE NODE (22/11): the node's own refusal, word for word, as `wa chat --once` prints it -
+# exit 2 and the sentence on stdout, which is what scripts/worker-gate.sh reads.
+refuse_upto=${WA_STUB_DEPLOY_WAIT:-0}
+if { [ "${refuse_upto}" -gt 0 ] && [ "$count" -le "$refuse_upto" ]; } || [ "${WA_STUB_DEPLOY_FOREVER:-}" = 1 ]; then
+  printf 'deploy_waiting: waiting for the install of 8082b42e1111 (deploy request 1795341684727384607-2971842-00000000000000000000, asked 2s ago). This node starts no new turn while a build is waiting for it or being installed - a turn in flight is exactly what keeps the node from going idle - and this turn did not start. Nothing was lost: this is a wait, not a failure. To stop waiting, withdraw the request: wa-sentinel request withdraw 1795341684727384607-2971842-00000000000000000000\n'
+  exit 2
+fi
 exit 0
 STUB
 chmod +x "$WORK/wa"
@@ -149,6 +156,35 @@ out=$(bash "$SCRIPT" "$WORK/missions/demo" 0 2>&1); code=$?
 [ "$code" = 0 ] || fail "no preflight is not a failure of the worker (got $code): $out"; ok
 has "$(cat "$WORK/missions/demo/done")" 'rc=0 preflight=unknown rounds=0' 'done says the gate was not asked'
 mv "$WORK/preflight.sh.off" "$WORK/missions/preflight.sh"
+
+# ---- 8. A REFUSED RESUME IS NOT A ROUND (22/11, review MUST 3). While a deploy waits for or installs on the
+# node, `wa chat --once` refuses a NEW turn by name and exits 2 with `deploy_waiting` - nothing was asked and
+# nothing answered. Counting that as one of the three rounds recorded a mission red that nobody worked on.
+reset
+printf 'red\nred\ngreen\n' > "$WA_STUB_PLAN"
+printf 'wa: session 11111111-2222-3333-4444-555555555555 ok\n' > "$WORK/missions/demo/err.log"
+# The stub refuses the first TWO resumes with the node's own words, then runs.
+export WA_STUB_DEPLOY_WAIT=2
+out=$(WORKER_GATE_DEPLOY_STEP=1 WORKER_GATE_DEPLOY_WAIT=30 bash "$SCRIPT" "$WORK/missions/demo" 0 2>&1); code=$?
+unset WA_STUB_DEPLOY_WAIT
+[ "$code" = 0 ] || fail "the run still ends green (got $code): $out"; ok
+has "$(cat "$WORK/missions/demo/done")" 'rc=0 preflight=green rounds=2' 'the two WAITED resumes were not charged as rounds'
+[ "$(cat "$WA_STUB_CALLS")" = 3 ] || fail "the gate was asked three times, not $(cat "$WA_STUB_CALLS")"; ok
+[ "$(resumes)" = 4 ] || fail "two refused asks and two real resumes, not $(resumes)"; ok
+has "$out" 'round 1 is not spent' 'the wait is said out loud, and that it costs no round'
+has "$out" 'asks again' 'and that it asks again'
+has "$(cat "$WA_STUB_RESUMES/3.message")" 'Round 1 of 3' 'the turn that finally ran was still round 1'
+
+# ---- 9. a wait that never ends is refused by name, and no round is charged for it
+reset
+printf 'red\nred\ngreen\n' > "$WA_STUB_PLAN"
+printf 'wa: session 11111111-2222-3333-4444-555555555555 ok\n' > "$WORK/missions/demo/err.log"
+export WA_STUB_DEPLOY_FOREVER=1
+out=$(WORKER_GATE_DEPLOY_STEP=1 WORKER_GATE_DEPLOY_WAIT=2 bash "$SCRIPT" "$WORK/missions/demo" 0 2>&1); code=$?
+unset WA_STUB_DEPLOY_WAIT WA_STUB_DEPLOY_FOREVER
+[ "$code" = 1 ] || fail "a wait that never ends exits 1 (got $code): $out"; ok
+has "$(cat "$WORK/missions/demo/done")" 'preflight=refused rounds=0' 'it is a refusal, not a red, and no round was spent'
+has "$out" 'nothing ran, and no round was spent' 'and it says exactly that'
 
 printf 'worker-gate ok (%d checks)\n' "$checks"
 

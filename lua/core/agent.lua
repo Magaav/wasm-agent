@@ -1923,10 +1923,13 @@ function M:run(text, images)
   -- not start at all, which is what this is: the one place every path goes through (chat, serve, resume,
   -- wake, subagent), so no caller can forget it.
   --
-  -- THE OPERATOR'S OWN TURN IS NOT REFUSED: an interactive `wa chat` and the node's served window set
-  -- `operator_present`, because somebody is there watching it and a pause they did not ask for is worse than
-  -- one more turn. Everything automatic - `--once`, a piped prompt, a wake, a resume dispatch, a subagent
-  -- child - is refused by name, with the commit, before a message, a model call or a tool call.
+  -- THE LIST, so a later reader can check it against the code (22/11, the review that found this comment
+  -- claiming something no code did): a turn is refused for a waiting deploy unless the run carries
+  -- `operator_present`, and only two kinds of run set it - `wa chat` at a terminal (lua/core/chat.lua, the
+  -- `scripted` test) and a served turn whose client said `operator: true` in its body (lua/core/server.lua,
+  -- `wa_reply`/`wa_reply_stream`, which is what the window sends). Everything else - a scripted CLI run, a
+  -- wake, a resume dispatch, a subagent child, or a peer's relayed turn on /node/chat - is refused, by name,
+  -- with the commit.
   --
   -- A REFUSED TURN WRITES NOTHING: the caller's text was never taken in, so recording it would be half a
   -- turn, and recording only the refusal would leave an answer with no question. The caller still holds its

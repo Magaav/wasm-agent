@@ -123,7 +123,7 @@ local function parse_run_body(body)
   -- text even when it happens to parse as JSON, so a message someone typed as
   -- {"text":"hi"} still arrives verbatim rather than being silently reinterpreted.
   if not ok or type(decoded) ~= "table"
-     or (decoded.images == nil and type(decoded.thread) ~= "string") then
+     or (decoded.images == nil and type(decoded.thread) ~= "string" and decoded.operator ~= true) then
     return raw, {}
   end
   local images = {}
@@ -134,7 +134,12 @@ local function parse_run_body(body)
   end
   local thread = decoded.thread
   if thread == "" then thread = nil end
-  return tostring(decoded.text or ""), images, nil, thread, decoded.resume_seq
+  -- WHO IS BEHIND THIS TURN (22/11, the deploy wait). `operator = true` says a person is at the keyboard - the
+  -- window the reader has open - and nothing else says it: a script, a peer's relay or a cron posting to /chat
+  -- leaves the field out. It is a SCHEDULING hint and not an identity: what a caller may do is decided from the
+  -- credential (see `resolve_admission` and the session isolation rules), and a caller that lied about it could
+  -- only make its own turn wait less - never read, write or deploy anything it could not already.
+  return tostring(decoded.text or ""), images, nil, thread, decoded.resume_seq, decoded.operator == true
 end
 
 -- Exported for the same reason as `wa_agent_for`: what a body *means* is the one thing
@@ -331,7 +336,7 @@ function wa_served_control(text, session, thread)
 end
 
 function wa_reply(text, session, node)
-  local prompt, images, problem, thread, resume_seq = parse_run_body(text)
+  local prompt, images, problem, thread, resume_seq, operator = parse_run_body(text)
   if problem then return json.encode({ error = redact.text(problem) }) end
   local control = wa_served_control(prompt, session, thread)
   if control then return json.encode({ reply = control, local_control = true }) end
@@ -343,6 +348,12 @@ function wa_reply(text, session, node)
   end
   local bot, refusal = agent_for(session, node, thread)
   if not bot then return json.encode({ error = refusal }) end
+  -- A PERSON'S TURN IS NOT REFUSED FOR A WAITING DEPLOY (22/11, `deploy_waiting`): the client said so in its
+  -- body (`operator = true`, the window sends it), so this run is exempt from the admission gate and is not
+  -- paused by a request that is only waiting (lua/core/agent.lua, lua/core/deploy_pause.lua). Set on the agent
+  -- before EVERY run, because this agent is cached per thread: an automatic turn that follows a person's must
+  -- not inherit the exemption.
+  bot.operator_present = operator == true or nil
   local allowed, reason = resume_guard(bot.session_id, resume_seq)
   if not allowed then return json.encode({ error = reason }) end
   local ok, reply = pcall(bot.run, bot, prompt or "", images)
@@ -353,7 +364,7 @@ end
 -- Streaming turn: events are pushed to the SSE client as the agent runs.
 -- When a peer is selected, its stream is relayed here unchanged.
 function wa_reply_stream(text, session, node)
-  local prompt, images, problem, thread, resume_seq = parse_run_body(text)
+  local prompt, images, problem, thread, resume_seq, operator = parse_run_body(text)
   if problem then
     emit({ type = "error", error = redact.text(problem) })
     return ""
@@ -374,6 +385,8 @@ function wa_reply_stream(text, session, node)
     emit({ type = "error", error = refusal })
     return ""
   end
+  -- The same per-run marker as `wa_reply`: a person's own turn is exempt, an automatic one is not.
+  bot.operator_present = operator == true or nil
   local allowed, reason = resume_guard(bot.session_id, resume_seq)
   if not allowed then
     emit({ type = "error", error = reason })
