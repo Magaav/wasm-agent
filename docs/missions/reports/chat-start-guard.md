@@ -93,20 +93,21 @@ read-back of the ledger the chat just wrote, which is the cross-process half (`f
   own federation catalog, which would make the test double-faulted. Offline is the brief's premise (the
   probe waits on every peer in the roster, online or not).
 
+## The suite
+
+`bash scripts/fast.sh` with this tree's binary (`WA_BIN=.../m-chat-start-guard/release/wa`, built WITH
+the prepared code-mode assets): **386 checks, 0 failed, 0 skipped, 468 s**, the pty row
+`chat-start-pty ok (1694ms)` among them, `lua 309/309 passed`. Two earlier attempts were killed by node
+installs (`1ffffae3`, `eb084ca8`) after their banner; the first green run is the one quoted above.
+
 ## What was not done
 
-- The full fast path was queued and killed twice by node installs (`1ffffae3`, `eb084ca8`); it is not
-  re-run by this report. What WAS run on this branch: the pty row (16/16), `scripts/test-stalls.lua`
-  (16/16), the rust row, and a targeted `WA_FAST_ROWS` run of the rows this change touches
-  (chat-printer, cli-balloon, cli-input, local-views, mcp, mcp-command, stalls, status,
-  telemetry-incremental, whatsapp-owner, view-lines, efficiency-report) - see the session's last
-  operation for its verdict.
-- The binary used for those runs was built with `WA_CODEMODE_ALLOW_EMPTY=1` (the code-mode assets were
-  not prepared on this node), so a code-mode row would report its named skip rather than a pass.
 - `federation.catalog()` still blocks inside a turn when its cache is old AND a peer in the roster is
   ONLINE and does not answer; that is a second, older defect on the same theme and it is NOT fixed here.
-  The pty fixture keeps its peer offline for exactly that reason (see above).
-
+  The pty fixture keeps its peer offline for exactly that reason (see above). Measured while building
+  this branch: a turn with one online peer that accepts and never answers did not reach its first model
+  call within 30 s (`harness_events` held the `run/start` row and no `model_call`).
+- Nothing was pushed; the branch is local (six commits on `change/chat-start-guard`).
 ## Texts to approve (rule 10)
 
 1. `wa idle-reads --session <id>` - `usage: wa idle-reads --session <id>`
@@ -125,4 +126,8 @@ read-back of the ledger the chat just wrote, which is the cross-process half (`f
 
 - `scripts/test-chat-start-pty.mjs` - `scripts/fast.sh`, row `chat-start-pty` (`d7efc26e`)
 - `scripts/test-stalls.lua` - a `scripts/test-*.lua` row of `scripts/fast.sh` (`dc003da3`)
-- `scripts/test-cli-input.lua` - existing row, extended (`dc003da3`)
+- `scripts/test-cli-input.lua` - extended (`dc003da3`); it is a `scripts/test.sh` row, run with its own
+  pipe producer (`( printf 'first'; sleep 2; printf 'typed while blocked' ) | WA_SCRIPT=... wa`), and it
+  is one of the rows `scripts/fast-path.exclude` names (its reason predates this branch: the fast path
+  gives it no producer). Measured with the producer: 24 checks ok on this branch, and on `a9d4617d`
+  exactly the two new stamp checks fail (2 of 24).
