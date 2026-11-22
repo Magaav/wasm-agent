@@ -1,11 +1,14 @@
 #!/usr/bin/env node
 // wa's two fonts, checked as BYTES (item 1 of the wa-fonts mission, Victor 19/11).
 //
-// The look Victor approved is three numbers: an icon FILLS its cell, its right edge sits 1 px inside
-// the cell, its ink is centred on the capitals - and the value after it is GLUED, which is to say the
-// icon's advance is EXACTLY one cell of JetBrains Mono. A font is a derived artifact, so the honest
-// check is not "the file is committed" but "the committed file still has those numbers", read from the
-// tables a terminal reads.
+// The look Victor approved is three numbers: an icon advances EXACTLY one cell of JetBrains Mono (that
+// is what "glued" means), its drawing sits in the same BOX inside that cell - 18% of the cell empty on
+// its right, at least 6% on its left, fitted by one scale so it is never squashed - and the box is
+// centred on the capitals, where the digits sit. (Until 22/11 the rule was "fills its cell, right edge
+// 1 px inside": it left every icon with a different left bearing and a different size. The correction
+// is assets/fonts/waIcons-Regular.ttf built by scripts/build-wa-icons.py, whose geometry() is the same
+// numbers repeated here.) A font is a derived artifact, so the honest check is not "the file is
+// committed" but "the committed file still has those numbers", read from the tables a terminal reads.
 //
 // fontTools is deliberately NOT a dependency here: it is not installed on a gate host, and a test that
 // skips where it runs cannot catch anything. So this parses the sfnt itself - head, hhea, maxp, hmtx,
@@ -27,13 +30,19 @@ import {fileURLToPath} from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const FONTS = path.join(ROOT, 'assets', 'fonts');
 
-// ---- A2, the approved geometry, in JetBrains Mono's units ----------------------------------------
+// ---- THE BOX, the approved geometry, in JetBrains Mono's units ----------------------------------
 // Measured from JetBrainsMono-Regular.ttf: upm 1000, advance 600, cap height 730, hhea 1020/-300.
-const ADV_EM = 600, CELL_PX_AT_9 = 7.2, PX_UNITS = Math.round(ADV_EM / CELL_PX_AT_9);
-const A2_SIZE = ADV_EM - PX_UNITS;              // 517
+const ADV_EM = 600;
+const LEFT_BEARING_PCT = 6, RIGHT_BEARING_PCT = 18;
+const LEFT_BEARING = Math.round(ADV_EM * LEFT_BEARING_PCT / 100);    // 36
+const RIGHT_BEARING = Math.round(ADV_EM * RIGHT_BEARING_PCT / 100);  // 108
+const BOX_SIDE = ADV_EM - LEFT_BEARING - RIGHT_BEARING;              // 456, the square both ways
 const CAP_HEIGHT = 730, YMID = CAP_HEIGHT / 2;  // 365
 const UPEM_OUT = 2048, K = UPEM_OUT / 1000;
-const ADVANCE = Math.round(ADV_EM * K), RIGHT_EDGE = A2_SIZE * K, YMID_OUT = YMID * K;
+const ADVANCE = Math.round(ADV_EM * K), YMID_OUT = YMID * K;
+const LEFT_EDGE = LEFT_BEARING * K, RIGHT_EDGE = (ADV_EM - RIGHT_BEARING) * K;
+const BOX = BOX_SIDE * K, BOX_BOTTOM = YMID_OUT - BOX / 2, BOX_TOP = YMID_OUT + BOX / 2;
+const CELL = ADV_EM * K;
 
 // ---- the sfnt reader ----------------------------------------------------------------------------
 // Reads only what the claims need. Every table it is told to want must exist: a missing table is a
@@ -187,15 +196,25 @@ for (const [role, cp] of glyphs) {
   if (glyph === undefined) continue;
   check(role + ' advances ONE JetBrains Mono cell (' + ADVANCE + '/2048 = 0.600 em): the value is glued',
     () => assert.equal(icons.advances[glyph], ADVANCE));
-  check(role + ' fills its cell and stops 1 px short of the value (A2, right edge ' + RIGHT_EDGE.toFixed(1) + ')',
+  check(role + ' ends on THE box\'s right edge (right bearing ' + RIGHT_BEARING_PCT + '% of the cell = '
+      + RIGHT_EDGE.toFixed(1) + '), the one gap every digit sees',
     () => { const box = icons.bbox(glyph);
             assert.ok(box, 'the glyph has no outline');
-            assert.ok(box.xMax <= Math.round(RIGHT_EDGE) + 1, 'right edge ' + box.xMax + ' is past the 1 px margin');
-            const width = box.xMax - box.xMin, height = box.yMax - box.yMin;
-            if (width >= height) assert.ok(Math.abs(box.xMax - RIGHT_EDGE) <= 1,
-              'fills ' + box.xMax + ', A2 says ' + RIGHT_EDGE.toFixed(1));
+            assert.ok(Math.abs(box.xMax - RIGHT_EDGE) <= 1,
+              'right edge ' + box.xMax + ', the box says ' + RIGHT_EDGE.toFixed(1));
             assert.ok(box.xMax <= ADVANCE, 'wider than its own cell'); });
-  check(role + ' is centred on the capitals (A2, ymid ' + YMID_OUT.toFixed(1) + ')',
+  check(role + ' starts at or after the ' + LEFT_BEARING_PCT + '% left bearing (foot clips what starts before its cell)',
+    () => { const box = icons.bbox(glyph);
+            assert.ok(box, 'the glyph has no outline');
+            assert.ok(box.xMin >= LEFT_EDGE - 1, 'starts at ' + box.xMin + ', the bearing is ' + LEFT_EDGE.toFixed(1)); });
+  check(role + ' fits inside the square box (' + BOX_SIDE + ' units both ways, never squashed)',
+    () => { const box = icons.bbox(glyph);
+            assert.ok(box, 'the glyph has no outline');
+            assert.ok(box.xMax - box.xMin <= BOX + 1, 'is ' + (box.xMax - box.xMin) + ' wide');
+            assert.ok(box.yMax - box.yMin <= BOX + 1, 'is ' + (box.yMax - box.yMin) + ' tall');
+            assert.ok(box.yMin >= BOX_BOTTOM - 1 && box.yMax <= BOX_TOP + 1,
+              'spans y ' + box.yMin + '..' + box.yMax + ', the box is ' + BOX_BOTTOM.toFixed(0) + '..' + BOX_TOP.toFixed(0)); });
+  check(role + ' is centred on the capitals (ymid ' + YMID_OUT.toFixed(1) + ')',
     () => { const box = icons.bbox(glyph);
             assert.ok(box, 'the glyph has no outline');
             const centre = (box.yMax + box.yMin) / 2;
@@ -231,9 +250,13 @@ check('the manifest lists every committed font file with its sha256, and nothing
       const got = crypto.createHash('sha256').update(fs.readFileSync(path.join(FONTS, name))).digest('hex');
       assert.equal(got, want, name + ' changed since the manifest was written');
     }
-    assert.equal(manifest.a2.advance, ADVANCE);
-    assert.equal(manifest.a2.size_units_1000, A2_SIZE);
-    assert.equal(manifest.a2.gap, '', 'A2 is GLUED: the gap is the empty string');
+    assert.equal(manifest.box.advance, ADVANCE);
+    assert.equal(manifest.box.left_bearing_units_1000, LEFT_BEARING);
+    assert.equal(manifest.box.right_bearing_units_1000, RIGHT_BEARING);
+    assert.equal(manifest.box.right_edge_units_1000, ADV_EM - RIGHT_BEARING);
+    assert.equal(manifest.box.box_side_units_1000, BOX_SIDE);
+    assert.equal(manifest.box.right_bearing_pct, RIGHT_BEARING_PCT);
+    assert.equal(manifest.box.gap, '', 'the value is GLUED: the gap is the empty string');
     for (const needed of [
       'waIcons-Regular.ttf', 'JetBrainsMono-Regular.ttf', 'JetBrainsMono-Bold.ttf',
       'OFL-JetBrainsMono.txt', 'LICENSE-SymbolsNerdFont-MIT.txt']) {

@@ -1979,9 +1979,11 @@ WA_SCRIPT=scripts/test-federation.lua "$BIN" --db "$DB.federation.db" | grep '"o
 # `paint` is passed in, so the test reads the roles the renderer chose.
 WA_SCRIPT=scripts/test-markdown.lua "$BIN" --db "$DB.markdown" | grep "markdown ok"
 
-# wa's two fonts, checked as bytes (item 1 of the wa-fonts mission, Victor 19/11): "wa Icons" is A2 -
-# each icon fills its own cell with a 1 px right margin, centred on JetBrains Mono's capitals, and its
-# advance is EXACTLY one cell (0.600 em) so the value after it is glued. The test parses the committed
+# wa's two fonts, checked as bytes (item 1 of the wa-fonts mission, Victor 19/11; the box redrawn by
+# change/icons-box, 22/11): every icon advances EXACTLY one cell (0.600 em) so the value after it is
+# glued, its drawing sits in ONE box inside that cell - 18% of the cell empty on its right, at least 6%
+# on its left, fitted by one scale so it is never squashed - and that box is centred on JetBrains
+# Mono's capitals, where the digits sit. The test parses the committed
 # sfnt itself (no fontTools, no venv, no network) and also asserts the font carries exactly the code
 # points lua/core/cli_view.lua's GLYPH table names, so a row that gains a glyph and a font that does not
 # is a failure here rather than a tofu box in a status line.
