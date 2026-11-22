@@ -140,6 +140,19 @@ fast-path row by the glob (`scripts/test-deploy-wait.lua` is not in `scripts/fas
 - `scripts/test-deploy-signal.sh` was added to `scripts/test.sh` only; the fast path runs the `.sh` rows it names,
   and this one is not among them.
 
+## The whole fast path, and the two rows that failed in it
+
+`flock -o ~/Work/missions/.suite.lock bash scripts/fast.sh` on this tree: **384 checks, 2 failed, 506 s** (306/307
+Lua rows). Neither failure is attributable to this diff, and both were measured:
+
+| row | what it said | measured again |
+| --- | --- | --- |
+| `scripts/test-start-instant.lua` | `FAIL quiet ledger: the model call starts in under 1 s (1073)` | **passes alone on this tree, 2 of 2 runs** (`start-instant ok`). It is a wall-clock threshold row and the suite run was compiling a release binary beside it. The gate this diff adds costs **0.062 ms** per turn start with an empty box and **0.083 ms** with a request waiting (2000 calls each, measured in a scratch home), so it cannot be the 73 ms |
+| `scripts/test-install-guards.sh` | `test-install-guards: 72 checks, 6 failed` | **identical on the base worktree** (`4c443e66`, same 6 FAIL lines, same 72 checks): the in-turn deploy guard answers `refused inside a turn running on the node it would replace` because the runner itself is inside a node turn (`WASM_AGENT_IN_TURN`). Pre-existing and environmental, not this diff |
+
+The fast path also printed the tree's binary as `b56581895221 is on NO branch the remote has` - expected: this branch is
+committed locally and never pushed, as instructed.
+
 ## Knobs
 
 | variable | default | what it does |
