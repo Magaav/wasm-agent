@@ -243,6 +243,29 @@ try {
   console.log('prompt at ' + promptAt + ' ms, roster read at ' + rosterAt + ' ms, Enter at ' + typedAt
     + ' ms, run row at ' + rowAt + ' ms');
 
+
+  // ---- the keypress, read back by a SECOND PROCESS ------------------------------------------------
+  // `wa stalls` measures a turn from the keypress the host saw, which crosses three processes: the
+  // host's reader thread stamps the line, this chat writes kind=input phase=submit with that stamp, and
+  // `wa` run again reads the ledger and pairs the row with the run. A bug that crosses processes needs a
+  // test that crosses processes, so the same ledger this chat just wrote is measured by a second binary.
+  const stalls = spawnSync('env', ['-i', ...Object.entries(ENV).map(([key, value]) => key + '=' + value),
+    BIN, '--db', path.join(WORK, 'ledger.db'), 'stalls', '--json'], {encoding: 'utf8', timeout: 120000});
+  let measured = null;
+  try { measured = JSON.parse(String(stalls.stdout || '').trim().split('\n').pop()); } catch {}
+  check('wa stalls reads this chat\'s own ledger (a second process, the same rows)',
+    measured && Number(measured.turns) >= 1, String(stalls.stdout || '') + String(stalls.stderr || ''));
+  check('the turn was measured FROM THE KEYPRESS, not from the run\'s first record',
+    measured && Number(measured.from_keypress) >= 1,
+    'from_keypress: ' + JSON.stringify(measured && measured.from_keypress) + ', from_run: '
+      + JSON.stringify(measured && measured.from_run));
+  const slowest = (measured && Array.isArray(measured.worst) && measured.worst[0]) || {};
+  check('its worst row is this turn, and says it was measured from the keypress',
+    slowest.from === 'enter' && typeof slowest.gap_ms === 'number' && slowest.gap_ms >= 0,
+    JSON.stringify(measured && measured.worst));
+  check('the row reports how much of the wait was spent before the run began (a number, not unknown)',
+    typeof slowest.pre_run_ms === 'number' && slowest.pre_run_ms >= 0,
+    JSON.stringify(slowest));
   // ---- the prefetch really ran, and the parent could use it --------------------------------------
   // The child's own operation row is on disk under this scratch home: a payload of view specs with no
   // problems. The node log carries an 'idle reads:' line only when the parent could NOT use it

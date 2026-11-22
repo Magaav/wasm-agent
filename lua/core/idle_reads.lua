@@ -151,7 +151,7 @@ local function start(opts)
     local why = ok and ("start_refused: " .. json.encode(answer or {})) or ("start_failed: " .. tostring(receipt))
     return false, why
   end
-  state.op, state.started = tostring(id), host.now()
+  state.op, state.started, state.reads = tostring(id), host.now(), 0
   return true
 end
 
@@ -177,7 +177,10 @@ local function settle(opts)
     return true
   end
   if snapshot.settled ~= true then return false end
-  state.op = nil
+  -- NOT CLEARED YET, and the answer is retried: an operation can be settled a moment before its output
+  -- is readable (measured 22/11: "idle reads: answer_unreadable: 0" with the child exit code in the
+  -- state and its line on disk one tick later). The read below is the honest test, and a retry costs a
+  -- tick of a settled operation - nothing is running.
   local read_ok, chunk = pcall(host.operation, "read",
     json.encode({ id = id, stream = "stdout", offset = 0, limit = M.OUTPUT_LIMIT, owner = M.OWNER }))
   local body = ""
@@ -193,9 +196,13 @@ local function settle(opts)
     if one and type(one.views) == "table" then payload = one end
   end
   if not payload then
+    state.reads = (tonumber(state.reads) or 0) + 1
+    if state.reads <= 2 then return false end
+    state.op, state.reads = nil, nil
     log_once("answer_unreadable: " .. tostring(snapshot.code or snapshot.state or ""))
     return true
   end
+  state.op, state.reads = nil, nil
   if type(opts.apply) == "function" then
     local applied, why = pcall(opts.apply, payload)
     if not applied then log_once("apply_failed: " .. tostring(why)) end
