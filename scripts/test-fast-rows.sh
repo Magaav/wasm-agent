@@ -5,7 +5,8 @@
 # WHY A ROW FOR THIS. The narrowing is the one place a plan can make a green run mean LESS than a full one, so
 # the three rules it must never break are proved here, on lists - no node, no cargo, no build, a second:
 #
-#   1. the always-on core rows run whatever the request says (the row-environment probe and `test-land.lua`);
+#   1. the always-on core rows run whatever the request says (the row-environment probe and the ten land
+#      parts since 22/11: the one land row was 655 checks and 55 s, and no narrowed run could drop it);
 #   2. a request naming a row this run cannot execute is a REFUSAL by name, never a silent omission - a plan
 #      that asks for the wrong thing has to be fixed;
 #   3. an empty request runs nothing, which is refused too (a plan that maps no row to a change must ask for
@@ -28,8 +29,12 @@ fail() { echo "fast-rows FAILED: $*" >&2; exit 1; }
 # and the pipeline reports failure, so a correct list was read as a missing row 4 times in 16 concurrent
 # runs). The rule is the row library's own (scripts/lib/fast-rows.sh).
 candidates="$WORK/candidates"
-printf '%s\n' scripts/test-alpha.lua scripts/test-beta.lua scripts/test-land.lua \
-  scripts/test-fast-row-environment.lua > "$candidates"
+printf '%s\n' scripts/test-alpha.lua scripts/test-beta.lua \
+  scripts/test-fast-row-environment.lua \
+  scripts/test-land-plan.lua scripts/test-land-resume.lua scripts/test-land-sign.lua \
+  scripts/test-land-review.lua scripts/test-land-rows.lua scripts/test-land-resume-19-11.lua \
+  scripts/test-land-marks.lua scripts/test-land-release.lua scripts/test-land-gate-rows.lua \
+  scripts/test-land-until.lua > "$candidates"
 
 # ---- 1. the core rows are added, first, and only once ---------------------------------------------------
 : > "$WORK/request-one"
@@ -38,22 +43,28 @@ out="$(wa_fast_row_filter "$candidates" "$WORK/request-one")" || fail "a valid r
 first="$(printf '%s\n' "$out" | head -1)"
 [ "$first" = scripts/test-fast-row-environment.lua ] || fail "the row-environment probe is not first: $out"
 ok
-grep -qx scripts/test-land.lua <<< "$out" || fail "test-land.lua is not in the narrowed run: $out"
+# EVERY land part, because a narrowed run that lost one would go green saying less than a full run.
+for row in scripts/test-land-plan.lua scripts/test-land-resume.lua scripts/test-land-sign.lua \
+  scripts/test-land-review.lua scripts/test-land-rows.lua scripts/test-land-resume-19-11.lua \
+  scripts/test-land-marks.lua scripts/test-land-release.lua scripts/test-land-gate-rows.lua \
+  scripts/test-land-until.lua; do
+  grep -qx "$row" <<< "$out" || fail "a land part is not in the narrowed run: $row ($out)"
+done
 ok
 grep -qx scripts/test-alpha.lua <<< "$out" || fail "the requested row is missing: $out"
 ok
-[ "$(printf '%s\n' "$out" | grep -c .)" = 3 ] || fail "expected 3 rows (2 core + 1 requested), got: $out"
+[ "$(printf '%s\n' "$out" | grep -c .)" = 12 ] || fail "expected 12 rows (11 core + 1 requested), got: $out"
 ok
 # `test-beta.lua` was not asked for and is not core: it is NOT run, and the omission is the point.
 grep -qx scripts/test-beta.lua <<< "$out" && fail "a row nobody asked for ran: $out"
 ok
 
 # ---- 2. a request that names a core row does not duplicate it -------------------------------------------
-printf '%s\n' scripts/test-land.lua scripts/test-alpha.lua > "$WORK/request-dup"
+printf '%s\n' scripts/test-land-plan.lua scripts/test-alpha.lua > "$WORK/request-dup"
 out="$(wa_fast_row_filter "$candidates" "$WORK/request-dup")" || fail "a request naming a core row was refused"
-[ "$(printf '%s\n' "$out" | grep -c '^scripts/test-land.lua$')" = 1 ] || fail "test-land.lua appears twice: $out"
+[ "$(printf '%s\n' "$out" | grep -c '^scripts/test-land-plan.lua$')" = 1 ] || fail "test-land-plan.lua appears twice: $out"
 ok
-[ "$(printf '%s\n' "$out" | grep -c .)" = 3 ] || fail "expected 3 unique rows, got: $out"
+[ "$(printf '%s\n' "$out" | grep -c .)" = 12 ] || fail "expected 12 unique rows, got: $out"
 ok
 
 # ---- 3. an unknown row is a refusal, by name ----------------------------------------------------------
@@ -86,7 +97,23 @@ ok
 core="$(wa_fast_core_rows)"
 grep -qx scripts/test-fast-row-environment.lua <<< "$core" || fail "the probe row is no longer core"
 ok
-grep -qx scripts/test-land.lua <<< "$core" || fail "test-land.lua is no longer core"
+for row in scripts/test-land-plan.lua scripts/test-land-resume.lua scripts/test-land-sign.lua \
+  scripts/test-land-review.lua scripts/test-land-rows.lua scripts/test-land-resume-19-11.lua \
+  scripts/test-land-marks.lua scripts/test-land-release.lua scripts/test-land-gate-rows.lua \
+  scripts/test-land-until.lua; do
+  grep -qx "$row" <<< "$core" || fail "a land part is no longer a never-dropped row: $row"
+done
+ok
+# ...AND THE LIST IS JUDGED AGAINST THE TREE, not against the ten names above: a row that dofiles the land
+# harness IS part of the land row, so it must be never-dropped whatever it is called. A part added later
+# and left out of the core list is a row a narrowed run silently skips.
+parts=0
+for row in scripts/test-*.lua; do
+  grep -q 'scripts/lib/land-row.lua' "$row" 2>/dev/null || continue
+  parts=$((parts + 1))
+  grep -qx "$row" <<< "$core" || fail "$row uses the land harness but is not a never-dropped row"
+done
+[ "$parts" -ge 10 ] || fail "only $parts row(s) use the land harness: the check above is vacuous"
 ok
 for row in $core; do
   [ -f "$ROOT/$row" ] || fail "a core row does not exist in this tree: $row"
@@ -103,7 +130,7 @@ ok
 # `wa land` plans its requests from this list (lua/core/land.lua, M.row_inventory), so it has to be the runner's
 # list and not a second opinion about it. cwd is the tree root here, as it is for scripts/fast.sh.
 cand="$(wa_fast_row_candidates)"
-grep -qx scripts/test-land.lua <<< "$cand" || fail "the inventory does not list a row the fast path runs (test-land.lua)"
+grep -qx scripts/test-land-plan.lua <<< "$cand" || fail "the inventory does not list a row the fast path runs (test-land-plan.lua)"
 ok
 # The row that failed two landings: the file exists, the ledger declares it not run, so it is NOT a row this
 # run can execute (fast_narrow:unknown_row, land-20261118T172243Z-666a59cf and land-20261118T173351Z-2a481142).

@@ -24,8 +24,10 @@ Code: `lua/core/land.lua` (the machine, the plan and the ring's waves), `lua/cor
 per-node verb it calls), `scripts/sign-release.sh` (the one command that signs a release),
 `scripts/lib/land-classify.sh` (which kind of change a path is - the one definition, over `wa_compiled_input`),
 `scripts/lib/fast-rows.sh` (which Lua rows a narrowed run may execute), `scripts/publish-lua-tree.sh` (the
-record a Lua-only round signs). Tests: `scripts/test-land.lua` (197 checks, real git, a real scratch wa-vault,
-scripted nodes - including the four paths, the gate's narrowing, the deploy's waves and the cost report),
+record a Lua-only round signs). Tests: the ten `scripts/test-land-*.lua` parts (655 checks, real git, a real
+scratch wa-vault, scripted nodes - including the four paths, the gate's narrowing, the deploy's waves and
+the cost report; they share `scripts/lib/land-row.lua`, and each stays under 11 s alone where the one row
+this replaces took 55 s),
 `scripts/test-land-signing.sh` (build -> sign -> re-run the publisher -> publish, without a hand-frozen build)
 and `scripts/test-fast-rows.sh` (the narrowing's three rules).
 

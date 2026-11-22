@@ -30,7 +30,8 @@ It runs, in parallel where it can:
    liveness, the landing baseline, the deploy's retirement rule, and the fast-environment classifier.
 
 **Narrowed, when a landing asks.** `WA_FAST_ROWS=<file> bash scripts/fast.sh` runs only the Lua rows listed
-in that file plus the always-on core rows (the row-environment probe and `scripts/test-land.lua`); the contract
+in that file plus the always-on core rows (the row-environment probe and the ten `scripts/test-land-*.lua`
+parts); the contract
 checks are not narrowable, an unknown row refuses the run by name and an empty request is refused too
 (`scripts/lib/fast-rows.sh`). `wa land` writes that file from the plan - the rows whose text mentions a module
 the round changed - so a Lua-only landing pays for its own rows instead of all of them. The plan requests only

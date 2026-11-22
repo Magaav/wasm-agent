@@ -259,7 +259,8 @@ wa_release_binary_candidates() {
 # upgrade is usually about.
 # A nested `wa` must be asked the CLI QUESTION, not handed the script the caller happens to be running.
 # Measured 13/11 on wa-desktop inside `wa land`'s sign step: the row exported WA_SCRIPT for the harness, every
-# child inherited it, and `wa release verify --help` therefore re-ran the whole `scripts/test-land.lua` - a
+# child inherited it, and `wa release verify --help` therefore re-ran the whole land row (one file then, ten
+# scripts/test-land-*.lua parts since 22/11) - a
 # second vault, a second fixture, a command that never answered (killed at the host's 300 s deadline, and the
 # verdict blamed the signature). `WA_SCRIPT` and `WA_FAST_ROW_ENV` mean "run this instead of the CLI", so the
 # verifier - whose whole job is to run the CLI - removes them, and bounds the probe: a binary that cannot say
