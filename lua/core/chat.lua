@@ -521,8 +521,12 @@ function M.run(argv)
     return { title = "Status", lines = rows }
   end
   -- What the host shows if `/status` is submitted while a run is in flight (Lua is blocked in the model
-  -- call then): refreshed at the start of a run and at every round, from limits already read - the
-  -- provider is asked at most every five minutes, at a run's start, never in the middle of one.
+  -- call then): refreshed at the start of a run and at every round, from limits ALREADY READ - nothing
+  -- here asks the network. The provider is asked where it is asked for: `/status` between runs, which is
+  -- the reader's own request and the reader's own wait. A snapshot built before any such read says which
+  -- (lua/core/status.lua, limits_of) instead of making an Enter wait for a number nobody has asked for
+  -- yet - and it cannot be prefetched by a child either: the kernel withholds every provider credential
+  -- from tool children (rust/wa-operation/src/lib.rs, DENY_ENV). See lua/core/idle_reads.lua.
   local function snapshot_status(opts)
     if not (host.status_snapshot and view.editor and view.stdout) then return end
     local built, spec = pcall(status_panel, opts)
@@ -668,13 +672,31 @@ function M.run(argv)
   -- The fresh reads a turn's start no longer makes (22/11): provider limits at most every five minutes and
   -- the roster every MAX_AGE, WITHOUT a probe child per peer (a probe waits up to 20 s on a peer that does
   -- not answer, and an Enter pressed meanwhile would wait with it). Run at the idle prompt only.
-  local idle_refreshed = 0
+  -- THE FRESH READS, IN A CHILD PROCESS (change/chat-start-guard, 22/11). They used to run here, in this
+  -- interpreter: the provider's rolling limits (measured 4-7 s) and then the roster. Lua is gone while
+  -- those run, so an Enter pressed in that moment waited for the network - measured in a pty on a9d4617d:
+  -- 4.8 s of silence after Enter, with the limits stub answering after 5 s. Both reads are a PREFETCH, for
+  -- a /status or /nodes typed while a run is in flight, so they are now made by a child process
+  -- (lua/core/idle_reads.lua, under host.operation - the mechanism lua/core/nodes.lua uses for probe
+  -- children) and its answer is applied on a later idle tick, when nobody is waiting. A tick is a start, or
+  -- a status read of an operation that is already over; it never waits, so this line cannot hold an Enter.
+  local idle = reload.require("lua/core/idle_reads.lua")
   local function idle_refresh()
-    local now = host.now()
-    if now - idle_refreshed < local_views.MAX_AGE then return end
-    idle_refreshed = now
-    snapshot_status({ color = view.live, max_age = 300 })
-    publish_views({ max_age = local_views.MAX_AGE, live_capabilities = false, session_id = agent.session_id, ctx = { user_id = USER, role = "master", session_id = agent.session_id } })
+    local settled, why = pcall(idle.tick, {
+      session_id = agent.session_id,
+      color = view.live,
+      max_age = idle.MAX_AGE,
+      apply = function(payload)
+        -- The child converted each stack already (balloon.spec, in idle_reads): hand the spec to the
+        -- client, never a second conversion of it.
+        for _, entry in ipairs(payload.views or {}) do
+          if type(entry) == "table" and entry.name and type(entry.spec) == "table" then
+            pcall(local_views.publish_spec, entry.name, entry.spec)
+          end
+        end
+      end,
+    })
+    if not settled and host.log then pcall(host.log, "idle refresh: " .. tostring(why)) end
   end
   local function restart_if_due()
     local now = host.now()

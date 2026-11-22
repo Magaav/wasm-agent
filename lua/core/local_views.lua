@@ -105,6 +105,18 @@ end
 -- Hand one view's stack to the client. Only what the client draws is sent: the builder also carries
 -- the raw node list for the printed fallback, and the roster's resources and endpoints have no
 -- business crossing to the reader thread twice.
+-- Hand a view stack that was ALREADY converted (the idle prefetch's child process, lua/core/idle_reads.lua)
+-- to the client. The spec is the one balloon.spec produces - the exact shape balloon.publish sends - so
+-- this is the same send M.publish makes once its conversion is done; the two differ only in WHICH process
+-- built the pages. Published-and-reported bookkeeping is the caller's (M.refresh), as it is for M.publish.
+function M.publish_spec(name, spec)
+  if not M.available() then return false, "unavailable" end
+  if type(spec) ~= "table" or type(spec.views) ~= "table" then return false, "spec_unreadable" end
+  local balloon = dofile("lua/core/balloon.lua")
+  local done, problem = balloon.publish_spec(name, spec)
+  if done then published_at[name] = math.floor(tonumber(spec.captured_at) or host.now()) end
+  return done, problem
+end
 function M.publish(name, set)
   if not M.available() then return false, "unavailable" end
   local spec = { command = set.command or name, captured_at = math.floor(tonumber(set.captured_at) or tonumber(host.now()) or 0), views = set.views or {} }
@@ -149,44 +161,70 @@ function M.publish_all(view, opts)
   return (M.refresh(opts))
 end
 
--- Rebuild and publish the views that are missing or older than `opts.max_age`.
+-- Build - NEVER publish - the views that are missing or older than opts.max_age, in M.names() order.
 --
--- Called where this side is not blocked: at a turn's start (`opts.cached` unset - a live roster read
--- is what the reader asked for) and at a model-round boundary (`opts.cached = true` - the run is
--- still going, so the roster comes from the cache and the rendezvous is not asked). Returns how many
--- were published, and the first problem, which the caller reports *once* rather than on every round:
--- a snapshot that never lands is a fact worth saying, not worth repeating.
-function M.refresh(opts)
+-- Each entry is {name = "/nodes", set = <the builder's table>, problem = <why it could not be built>}: a
+-- view that failed keeps its place in the order and names its reason, so the caller can apply exactly the
+-- rules M.refresh applies (below) in exactly the order it used to apply them. ONE builder for the two
+-- callers: this process (M.refresh) and the idle prefetch's child (lua/core/idle_reads.lua), which builds
+-- the same panels somewhere else so a blocking read cannot hold the reader's Enter.
+function M.collect(opts)
   opts = opts or {}
-  if not M.available() then return 0, nil end
+  local entries = {}
+  if not M.available() then return entries end
   local now = host.now()
   local max_age = tonumber(opts.max_age) or M.MAX_AGE
-  local count, problem = 0, nil
   for _, name in ipairs(M.names()) do
     local at = published_at[name]
     if not at or (now - at) >= max_age then
       local built, set = pcall(builders[name], opts)
       if not built then
-        -- One view that cannot be built must not cost the others their snapshot: `/login` on a node with
-        -- no provider state used to stop `/nodes` publishing, and the reader lost a view that worked.
-        problem = problem or string.format("%s could not be built: %s", name, tostring(set))
-        M.report(name, string.format("could not be built: %s", tostring(set)))
-        -- Tried: wait max_age like a success. A failure retried at every round boundary paid the whole
-        -- build each round (17/11, work: /mcp refused, rebuilt every round, ~2 s per round).
-        published_at[name] = now
+        entries[#entries + 1] = { name = name,
+          problem = string.format("%s could not be built: %s", name, tostring(set)) }
       elseif type(set) ~= "table" then
         -- Nothing to show (no data yet, or a builder that declined): not a failure, and not worth a line on
         -- the reader's screen. It is tried again at the next boundary.
         M.forget(name)
+        entries[#entries + 1] = { name = name }
       else
-        local done, why = M.publish(name, set)
-        if not done then
-          problem = problem or string.format("%s was not published: %s", name, tostring(why))
-          M.report(name, tostring(why))
-          published_at[name] = now
-        else
-          count = count + 1
-        end
+        entries[#entries + 1] = { name = name, set = set }
+      end
+    end
+  end
+  return entries
+end
+
+-- Rebuild and publish the views that are missing or older than opts.max_age.
+--
+-- Called where this side is not blocked: at a turn's start (opts.cached unset - every read comes from
+-- what this process already has) and, since 22/11, by the idle prefetch's CHILD (lua/core/idle_reads.lua)
+-- whose answer this process publishes on a later tick. Returns how many were published, and the first
+-- problem, which the caller reports *once* rather than on every round: a snapshot that never lands is a
+-- fact worth saying, not worth repeating.
+function M.refresh(opts)
+  opts = opts or {}
+  if not M.available() then return 0, nil end
+  local now = host.now()
+  local count, problem = 0, nil
+  for _, entry in ipairs(M.collect(opts)) do
+    if entry.problem then
+      -- One view that cannot be built must not cost the others their snapshot: /login on a node with no
+      -- provider state used to stop /nodes publishing, and the reader lost a view that worked.
+      problem = problem or entry.problem
+      M.report(entry.name, entry.problem)
+      -- Tried: wait max_age like a success. A failure retried at every round boundary paid the whole build
+      -- each round (17/11, work: /mcp refused, rebuilt every round, ~2 s per round).
+      published_at[entry.name] = now
+    elseif entry.set == nil then
+      -- Declined (M.collect already forgot it): nothing was published and nothing is reported.
+    else
+      local done, why = M.publish(entry.name, entry.set)
+      if not done then
+        problem = problem or string.format("%s was not published: %s", entry.name, tostring(why))
+        M.report(entry.name, tostring(why))
+        published_at[entry.name] = now
+      else
+        count = count + 1
       end
     end
   end

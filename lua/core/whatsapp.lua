@@ -342,7 +342,16 @@ function M.service_row(opts)
   if opts.cache_only then opts = setmetatable({ counts = false }, { __index = opts }) end
   local holds = M.holds_account()
   local self_name = M.self_name()
-  local owner = holds and nil or M.owner(opts.owner_catalog)
+  -- CACHE_ONLY MEANS NO NETWORK - INCLUDING THE TWO FLEET QUESTIONS BELOW (change/chat-start-guard, 22/11).
+  -- opts.cache_only stopped the contacts count and nothing else: the owner came from
+  -- federation.catalog(), which refreshes from every online peer when its cache is old, and the
+  -- seen check asked it again. Measured: a 122 s block building this row for a peer that accepts and
+  -- never answers (scripts/test-mcp-cache-only.lua), inside a call whose whole promise is that a
+  -- snapshot taken mid-run waits for nothing.
+  local fleet = opts.owner_catalog
+    or (opts.cache_only and function() return dofile('lua/core/federation.lua').cached() end)
+    or nil
+  local owner = holds and nil or M.owner(fleet)
   local node = holds and (self_name or 'this node') or owner
   local state, detail = 'unknown', nil
   if holds then
@@ -351,7 +360,8 @@ function M.service_row(opts)
     -- The owner is in the fleet catalog only if it answered it recently; that is the only "is it up"
     -- this node can honestly report about another machine.
     local seen = false
-    local ok, catalog = pcall(opts.owner_catalog or function() return dofile('lua/core/federation.lua').catalog() end)
+    -- The same cache the owner came from when this is a cache-only row (see fleet above).
+    local ok, catalog = pcall(fleet or function() return dofile('lua/core/federation.lua').catalog() end)
     for _, peer in pairs(ok and type(catalog) == 'table' and catalog.peers or {}) do
       if type(peer) == 'table' and peer.name == owner then seen = true end
     end
