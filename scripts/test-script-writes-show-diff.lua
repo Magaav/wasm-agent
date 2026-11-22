@@ -67,6 +67,12 @@ assert(ready, 'this node has no embedded code-mode assets, so no script ran and 
 
 local data = tostring(paths.data())
 local work = data .. '/script-writes'
+-- The card is drawn at a width that FITS its own path: the heading is a body row, so a narrow view cuts
+-- it inside the frame and 'Create(<path>)' becomes two rows. Measured 22/11 in the full fast path, where
+-- the row's home is under the mission's own scratch root and the path is 105 cells deep: at 80 the four
+-- path-shaped assertions failed on a card that was drawn correctly. Cutting inside the card is
+-- tests/diff-view.lua's subject, at its own widths.
+local card_width = math.max(80, #work + 64)
 local target = work .. '/demo.txt'
 os.execute('mkdir -p ' .. string.format('%q', work))
 os.remove(target)
@@ -113,7 +119,7 @@ check(changes[3] and changes[3].deleted == true, 'the removal is a DELETE')
 -- ---- 2. the cards themselves ----------------------------------------------------------------
 local function card(event)
   return table.concat(view_lib.diff_block({ path = event.path, before = event.before,
-    after = event.after, deleted = event.deleted }, 80, false) or {}, '\n')
+    after = event.after, deleted = event.deleted }, card_width, false) or {}, '\n')
 end
 local created_card = changes[1] and card(changes[1]) or ''
 has(created_card, 'Create(' .. target .. ')', 'the created file is named Create(path), as Claude Code names it')
