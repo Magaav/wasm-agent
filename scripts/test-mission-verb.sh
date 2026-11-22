@@ -6,6 +6,12 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$(pwd -P)
 WA=${WA_BIN:-$(command -v wa)}
+# THIS ROW NEVER READS ITS CALLER'S STDIN. `wa chat --once` treats a stdin that is not a terminal as a queue of
+# prompts (docs/SCRIPTED-RUNS.md), so a child that inherited the caller's stdin ATE THE REST OF IT - measured
+# 22/11 by scripts/test-discriminates.sh, whose row list arrives on stdin: six tests were listed and three ran,
+# the other three consumed as extra prompts by a row's `wa chat --once`. One line, before anything starts a CLI.
+exec </dev/null
+
 [ -n "$WA" ] || { echo "mission-verb: no wa on PATH"; exit 3; }
 WORK=$(mktemp -d)
 KIDS=''
