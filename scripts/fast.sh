@@ -905,13 +905,13 @@ check install-front-door bash scripts/test-install.sh
   # And a fenced card's copy icon sits after its corner, where a click on it still copies the content.
   # The real binary in a private tmux pty, as the two rows above.
   WA_BIN="$bin" check tui-chrome-pty node scripts/test-tui-chrome-pty.mjs
-  # THE WHEEL IS PageUp (change/wheel-like-pageup, Victor 22/11: "scroll with mouse should behave
-  # exactly the same as pg up pg down from keyboard ... same amount of scroll from both endings"):
-  # three notches up and three PageUps leave the same row at the top, both stop on the same first row
-  # of the chat, and both come home to the newest row. One notch used to move three rows against
-  # PageUp's twelve, so the wheel could not reach the top at all. The real binary in a private tmux
-  # pty, as the two rows above.
-  WA_BIN="$bin" check wheel-pageup-pty node scripts/test-wheel-pageup-pty.mjs
+  # THE WHEEL MOVES LINE BY LINE (change/wheel-scrolls-lines, Victor 22/11 20:30Z: "the mouse scroll on
+  # TUI chat content is jumping way further than the pg up/down which ticks 1/3 of the content by each
+  # tick" ... "scroll from mouse should scroll line by line"): one mouse report is one row, a foot notch
+  # (multiplier=7.0, so seven reports) is seven rows, PageUp is still a third of the chat, and as many
+  # reports down as up come home. It replaces the previous round's "one notch = one PageUp" row, which
+  # is the behaviour the operator rejected. The real binary in a private tmux pty, as the rows above.
+  WA_BIN="$bin" check wheel-lines-pty node scripts/test-wheel-lines-pty.mjs
   # THE STATUS ROWS' ICONS, MEASURED IN THE FONT FILES (tui-chrome item 2, drawn by change/icons-box):
   # advance, bearings and centre of every glyph the two rows draw, against the box
   # scripts/build-wa-icons.py builds (right bearing 18% of the cell, left >= 6%, one centre on the
