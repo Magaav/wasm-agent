@@ -130,7 +130,17 @@ Two measurements, both on this node:
   assertions failed on a card that was drawn correctly. `0e347215` draws the card at a width that
   fits its own path (verified with a home of the runner's shape); cutting inside the card stays
   `tests/diff-view.lua`'s subject at its own widths.
-  Narrowed reproduction is **not possible by row name**: `WA_FAST_ROWS` is a list of CHANGED PATHS
+  Run 3 at `57c67aa0` (after the fix): 394 checks, 2 failed, and **this mission's row passed inside the
+"
+"  fast path**. The two that failed are neither mine nor stable: `install-guards` (above, reproduced on
+"
+"  the base) and `session-liveness`, which names an owner presence 4001 s old and passes standalone on
+"
+"  THIS tree and on the base (`ok session-liveness: 14 checks`, both) - a wall-clock row measured while
+"
+"  the suite and a node install were sharing the machine.
+"
+"  Narrowed reproduction is **not possible by row name**: `WA_FAST_ROWS` is a list of CHANGED PATHS
   (`scripts/lib/fast-rows.sh`), so a row name is refused by name - two attempts of mine therefore ran
   no rows at all and proved nothing. The full suite is the faithful door.
 - **My own rule breach, reported rather than hidden:** one throwaway debug script of mine
