@@ -19,7 +19,8 @@
 #
 #   . scripts/lib/fast-watchdog.sh
 #   wa_fast_watchdog 120 "lua scripts/test-x.lua" -- timeout 120 wa --db ... 
-#   -> exit 0/other: the command's own exit; 124: it hung, and its group is dead.
+#   -> exit 0/other: the command's own exit; 124: it hung, and its group is dead - but a command may
+#      return 124 itself (timeout), so wa_watchdog_hung needs the LINE as well as the code (item 8).
 #
 # WA_FAST_WATCHDOG_GRACE (default 2s) is how long TERM is given before KILL.
 
@@ -98,4 +99,21 @@ wa_fast_watchdog() { # <seconds> <label> -- <command...>
 }
 
 # Is this exit the watchdog's own? The runner reads it to report `hung` rather than `code`.
-wa_watchdog_hung() { [ "${1-}" = 124 ]; }
+# WHICH 124 IS THE WATCHDOG'S? (item 8 of the node-ops round.)
+#
+# The watchdog answers 124 when it killed a row that produced no verdict - but 124 is also a code a
+# command returns BY ITSELF: `timeout` uses it, and so does any row with a deadline of its own. So the exit
+# code alone cannot tell "this row hung and its group is dead" from "this row ended with 124", and the
+# previous `[ "$1" = 124 ]` answered "hung" for both - a row that timed itself out was reported as a hang
+# the watchdog never saw.
+#
+# The other half of the question is the line the watchdog prints when (and only when) it hung:
+# "watchdog: <label> produced no verdict within <n>s ...". wa_watchdog_hung asks for BOTH, so a caller
+# passes the code and the text: with no text the answer is "not a hang", because a code on its own does not
+# prove one.
+WA_FAST_WATCHDOG_HANG_LINE='produced no verdict within'
+wa_watchdog_hung() { # <exit-code> [the text the watchdog or the row printed] -> 0 only for the watchdog's own hang
+  [ "${1-}" = 124 ] || return 1
+  case "${2-}" in *"$WA_FAST_WATCHDOG_HANG_LINE"*) return 0 ;; esac
+  return 1
+}

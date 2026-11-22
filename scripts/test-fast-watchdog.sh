@@ -72,7 +72,16 @@ sleep 1
 if kill -0 "$child" 2>/dev/null; then
   fail "the row's own child (pid $child, sleep 600) survived the watchdog: this is the leak measured 18/11"
 fi
-wa_watchdog_hung 124 || fail 'wa_watchdog_hung does not recognise 124 as the watchdog'"'"'s own exit'
+# THE CODE IS HALF THE ANSWER (item 8): the watchdog's own line is the other half.
+wa_watchdog_hung 124 "$out" || fail 'wa_watchdog_hung does not recognise the watchdog hang (124 plus the watchdog line)'
+wa_watchdog_hung 124 && fail 'wa_watchdog_hung called a bare 124 a hang: a command that exits 124 itself (timeout, a row with its own deadline) would be reported as a hang the watchdog never saw'
+wa_watchdog_hung 7 "$out" && fail 'wa_watchdog_hung called the watchdog line a hang when the code was not 124'
+# A ROW THAT TIMES ITSELF OUT IS NOT A HANG: its 124 is passed through, and no line says the watchdog killed it.
+set +e
+own="$(wa_fast_watchdog 10 'row with its own 124' -- bash -c 'echo timeout: killed after 1s; exit 124' 2>&1)"; own_code=$?
+set -e
+[ "$own_code" = 124 ] || fail "a row that exited 124 by itself was rewritten to $own_code; the watchdog must not rewrite a verdict"
+wa_watchdog_hung "$own_code" "$own" && fail "a row that exited 124 by itself was reported as a hang: $(printf '%s' "$own" | tail -1)"
 
 # 3. The command's own exit is passed through, both ways.
 wa_fast_watchdog 10 "passing row" -- bash -c 'exit 0' || fail "a passing row was reported as failed (exit $?)"

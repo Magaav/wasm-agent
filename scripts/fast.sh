@@ -531,9 +531,10 @@ run_lua() { # <script> -> one TSV row: exit, ms, script, verdict line, verdict k
   fi
   if [ "$c" != 0 ]; then
     kind=$(wa_environment_kind "$c" "$last")
-    # A hang is only a hang when the watchdog said so in its own line: an exit 124 on its own is also
-    # what a fixture that calls timeout returns, and calling that a hang would be a guess.
-    if grep -q '^watchdog: ' "$out" 2>/dev/null; then kind=hung; last=$(grep '^watchdog: ' "$out" | tail -1); fi
+    # A hang is only a hang when the watchdog said so in its own line: an exit 124 on its own is also what
+    # a fixture that calls timeout returns, and calling that a hang would be a guess (item 8). The predicate
+    # is scripts/lib/fast-watchdog.sh's, not a grep here, so there is one answer to "was this the watchdog".
+    if wa_watchdog_hung "$c" "$(cat "$out" 2>/dev/null)"; then kind=hung; last=$(grep "$WA_FAST_WATCHDOG_HANG_LINE" "$out" | tail -1); fi
     cp "$out" "$FAST_WORK/logs/$(basename "$f").log" 2>/dev/null || true
   fi
   ms=$(( $(fast_now_ms) - s ))
