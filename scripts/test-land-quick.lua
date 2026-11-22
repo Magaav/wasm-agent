@@ -100,6 +100,18 @@ local function branch_with(name, files)
   must("git -C " .. repo .. " checkout -q main", "back to main")
 end
 
+-- A row's first line, for an assertion message (the log itself is too long to print whole).
+local function first_line_ish(text) return (tostring(text):match("[^\n]*") or "") end
+
+-- MAIN GROWS AFTER a branch was cut: a commit on main, pushed to both remotes, so the round's base is newer
+-- than the branch's fork point - the shape the first real landing measured (22/11).
+local function main_grows(files)
+  must("git -C " .. repo .. " checkout -q main", "back to main")
+  for path, text in pairs(files) do write_file(repo .. "/" .. path, text) end
+  must("git -C " .. repo .. " add -A && git -C " .. repo .. " commit -q -m 'main moves on'", "commit on main")
+  must("git -C " .. repo .. " push -q origin main && git -C " .. repo .. " push -q oc-in main", "publish main")
+end
+
 -- The fixture's own main-health: the REAL script (the step and `wa land health-run` both look for it in the
 -- tree), committed to main so every branch carries it. Its command is routed above, so it never runs here.
 local function fixture(name, extra)
@@ -261,8 +273,56 @@ eq(step_of("quick3t", "tests").state, "skipped", "and its own tests are skipped"
 contains(step_of("quick3t", "tests").detail, "Rust", "by name: a Lua row cannot judge a new binary")
 contains(step_of("quick3t", "tests").detail, "main-health", "and says who judges it instead")
 
--- ---------------------------------------------------------------- case 4: scripts/docs only, no deploy
+-- MAIN MOVED ON RUST AFTER THE BRANCH'S FORK POINT, and the branch is judged by ITS OWN change: 22/11, the
+-- first real landing (land-20261122T113743Z-f3fedc13) measured a docs/lua/scripts branch as "the branch changes
+-- Rust (3 file(s))" because main had gained Rust since its base, so its own three test files never ran before
+-- the push. The range is merge-base(main, branch)..branch, so main's later commits cannot buy a skip.
+fixture(nil, function()
+  branch_with("change/own-lua", { ["lua/core/own-lua.lua"] = "return { own = true }\n",
+    ["scripts/test-own-lua-new.lua"] = "print('own lua ok')\n" })
+end)
+main_grows({ ["rust/wa-new/src/main.rs"] = "fn main() {}\n" })
+eq(running(function() return land.run({ run = "quick3n", landing = true, branches = { "change/own-lua" } }) end), 0,
+  "a lua-only branch lands onto a main that moved on Rust")
+local grown = journal_of("quick3n")
+eq(tonumber(grown.plan.files), 2,
+  "the plan counts the branch's own two paths, not main's Rust (got " .. tostring(grown.plan.files) .. ")")
+local tests_log = read_file(land.evidence_path("quick3n", "tests")) or ""
+contains(tests_log, "changed paths: 2 (rust 0,",
+  "the tests step measures no Rust in this branch (got: " .. first_line_ish(tests_log) .. ")")
+-- THE PLAN NAMES THE ROW BEFORE THE PUSH (Victor's own check: "the tests step says run and lists the branch's
+-- own scripts/test-*.lua"), and it is the same list the step then runs.
+local plan_text = read_file(land.evidence_path("quick3n", "plan")) or ""
+contains(plan_text, "tests     run  the branch's own 1 row(s)", "the plan says the branch's own test rows run")
+contains(plan_text, "scripts/test-own-lua-new.lua", "and names the row it will run")
+ok(plan_text:find("changes Rust", 1, true) == nil, "and nothing in the plan says the branch changes Rust")
+eq(step_of("quick3n", "tests").state, "done", "its own test row runs instead of being skipped by name")
+contains(step_of("quick3n", "tests").detail, "1 green", "and it is green")
+contains(tests_log, "scripts/test-own-lua-new.lua", "the row that ran is the branch's own test")
+ok(tostring(step_of("quick3n", "tests").detail):find("Rust", 1, true) == nil,
+  "and nothing in that row says the branch changes Rust")
+
+-- A BRANCH LANDED WITHOUT `wa land ready --brief` still says what to do when the MISSION's own brief has it:
+-- `wa land change/<name>` is launched from ~/Work/missions/<name>/brief.md (22/11, the first real landing, whose
+-- report said "no brief was recorded for this branch, so nothing describes the steps" beside a brief that did).
 fixture()
+local missions_root = type(land.missions_root) == "function" and land.missions_root() or nil
+ok(missions_root ~= nil and missions_root:find(host.paths().home, 1, true) == 1,
+  "the missions root is this node's own home (got " .. tostring(missions_root) .. ")")
+write_file(missions_root .. "/own-brief/brief.md",
+  "# the mission\n\n## How Victor tests it\n\nrun `wa land change/own-brief --dry-run` and read the tests step\n\n## Not this\nignored\n")
+branch_with("change/own-brief", { ["lua/core/own-brief.lua"] = "return true\n" })
+eq(running(function() return land.run({ run = "quick2m", landing = true, branches = { "change/own-brief" } }) end), 0,
+  "the branch lands with no ready brief at all")
+local found2m, line2m = said("Local is evolved to")
+ok(found2m, "the landing ends with its line")
+contains(line2m, "run `wa land change/own-brief --dry-run` and read the tests step",
+  "and quotes the mission's own `How Victor tests it` instead of saying nothing describes the steps")
+ok(tostring(line2m):find("ignored", 1, true) == nil and tostring(line2m):find("no brief was recorded", 1, true) == nil,
+  "and neither the text past the next heading nor the old \"no brief\" line")
+fixture()
+
+-- ---------------------------------------------------------------- case 4: scripts/docs only, no deploy
 eq(running(function() return land.run({ run = "quick4", landing = true, branches = { "change/docs" } }) end), 0,
   "a scripts/docs-only branch lands")
 eq(step_of("quick4", "install").state, "skipped", "without a deploy")

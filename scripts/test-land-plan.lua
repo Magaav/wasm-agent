@@ -156,11 +156,23 @@ contains(tostring(step_of("case2c", "merge").detail or ""), "clash.txt",
   "and it names the file a person has to resolve: " .. tostring(step_of("case2c", "merge").detail))
 end
 
+-- THE BRANCH THE GATE CASES LAND: really unlanded, so the round has a change of its own. Cases 3 to 5c reused
+-- change/one, which case 2 had already landed and whose merge advance_main pushed to main - so the round had
+-- NOTHING to change, and only the old base..tip diff (which reports the branch's own file as a DELETION against
+-- a main that already has it) made it look like it had one. wa land now measures a branch by
+-- merge-base(main, branch)..branch (22/11, the first real landing judged a Lua branch as "changes Rust"), so
+-- these cases name a branch the gate is the first thing to touch.
+must("git -C " .. repo .. " checkout -q -B change/gate-round main", "branch the gate cases land")
+write_file(repo .. "/gate-round.txt", "the gate cases' own change\n")
+must("git -C " .. repo .. " add -A && git -C " .. repo .. " commit -q -m change/gate-round", "commit the gate branch")
+must("git -C " .. repo .. " push -q oc-in change/gate-round:refs/heads/change/gate-round", "push the gate branch")
+must("git -C " .. repo .. " checkout -q main", "back to main")
+
 -- ---------------------------------------------------------------- case 3: a red gate stops the landing
 local red = gate_script("gate-red")
 set_gate("gate-red", "fail")
 observed.pushes = 0
-local red_code = land.run({ run = "case3", ring = SOLO_RING, branches = { "change/one" }, checks = standard_checks(red) })
+local red_code = land.run({ run = "case3", ring = SOLO_RING, branches = { "change/gate-round" }, checks = standard_checks(red) })
 eq(red_code, 1, "a red gate stops the landing")
 eq(journal_of("case3").result, "stopped", "the run is recorded stopped")
 eq(journal_of("case3").stopped_at, "gate", "it stopped at the gate")
@@ -173,7 +185,7 @@ eq(observed.pushes, 0, "no push happened")
 local flaky = gate_script("gate-flaky")
 set_gate("gate-flaky", "flaky")
 observed.pushes = 0
-local flaky_code = land.run({ run = "case4", ring = SOLO_RING, branches = { "change/one" }, checks = standard_checks(flaky) })
+local flaky_code = land.run({ run = "case4", ring = SOLO_RING, branches = { "change/gate-round" }, checks = standard_checks(flaky) })
 eq(flaky_code, 1, "a flaky check stops the landing")
 local flaky_step = step_of("case4", "gate")
 eq(flaky_step.state, "flaky", "the gate step is recorded flaky, not done")
@@ -183,7 +195,7 @@ eq(observed.pushes, 0, "a flaky gate pushes nothing")
 
 -- ---------------------------------------------------------------- case 5: a check that proves nothing
 write_file(host.paths().home .. "/land-gate/vacuous.sh", "#!/usr/bin/env bash\nexit 0\n")
-local vacuous = land.run({ run = "case5", ring = SOLO_RING, branches = { "change/one" },
+local vacuous = land.run({ run = "case5", ring = SOLO_RING, branches = { "change/gate-round" },
   checks = { { name = "cargo-codemode", command = "bash " .. host.paths().home .. "/land-gate/vacuous.sh", min_tests = 1 } } })
 eq(vacuous, 1, "a check that proves nothing is not green")
 eq(step_of("case5", "gate").error, "gate_vacuous", "the refusal is named")
@@ -222,7 +234,7 @@ local function keep_checks(extra)
            { name = "stopper", command = "bash " .. stop_path, timeout = 120 } }
 end
 observed.pushes = 0
-eq(land.run({ run = "case5b", ring = SOLO_RING, branches = { "change/one" }, checks = keep_checks() }), 1,
+eq(land.run({ run = "case5b", ring = SOLO_RING, branches = { "change/gate-round" }, checks = keep_checks() }), 1,
   "a red second check stops the landing")
 eq(count_of("green"), 1, "the green check ran once")
 eq(count_of("later"), 2, "the red check ran twice (beside, then alone)")
@@ -247,7 +259,7 @@ eq(observed.pushes, 0, "no attempt of this case pushed")
 -- ("attempt to index a number value", 21/11 batch-4) before the check ever ran.
 local budget_checks = { { name = "budgeted", command = "bash " .. green_path, timeout = 120, per_test_seconds = 30 },
                         { name = "stopper", command = "bash " .. stop_path, timeout = 120 } }
-eq(land.run({ run = "case5c", ring = SOLO_RING, branches = { "change/one" }, checks = budget_checks }), 1,
+eq(land.run({ run = "case5c", ring = SOLO_RING, branches = { "change/gate-round" }, checks = budget_checks }), 1,
   "the landing stops at the red check")
 local gate5c = journal_of("case5c").gate or {}
 eq(gate5c[1] and gate5c[1].name, "budgeted", "the per-test-budget check RAN (the gate did not crash sizing it)")
