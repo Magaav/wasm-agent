@@ -543,10 +543,16 @@ function M.run(argv)
     for _, notice in ipairs(reload.turn_boundary(host.now())) do
       view:line(cli_view.paint("  " .. tostring(notice.text), notice.ok and "dim" or "warning", view.live))
     end
-    snapshot_status({ color = view.live, max_age = 300 })
-    -- Nothing is blocked yet: a live read of the roster is exactly what a `/nodes` typed in a moment
-    -- will be drawn from, and the reader is not waiting on anything but this turn.
-    publish_views({ max_age = local_views.MAX_AGE, session_id = agent.session_id, ctx = { user_id = USER, role = "master", session_id = agent.session_id } })
+    -- THE READER IS WAITING ON THIS TURN: NOTHING HERE MAY ASK THE NETWORK (Victor 22/11: "it keeps on
+    -- hanging a lot before it starts working ... it should start instantaneously"). Two lines used to run
+    -- before run_started drew anything, and both waited on other machines: the status snapshot asked each
+    -- provider for its limits (once in five minutes; measured 4-7 s), and the /nodes snapshot took a LIVE
+    -- roster - one `wa nodes probe` child per peer, each awaited up to its 20 s deadline (measured in a
+    -- pty: 20.6 s of silence after Enter with one peer, `work`, offline). Both now take what this process
+    -- already has (`cached`), and the fresh reads happen at the idle prompt (`idle_refresh`, below), when
+    -- nobody is waiting for an answer.
+    snapshot_status({ color = view.live, cached = true })
+    publish_views({ max_age = local_views.MAX_AGE, cached = true, session_id = agent.session_id, ctx = { user_id = USER, role = "master", session_id = agent.session_id } })
     view:run_started()
     -- Images pasted with Ctrl+V (`[Image #n]` in the line, the host keeps the bytes): stored as attachments
     -- and sent with the message, the same path the UI's pictures take (operator 17/11).
@@ -659,6 +665,17 @@ function M.run(argv)
     -- left a CLI on a replaced binary for hours after the churn that tripped it (28/10).
     restart_refused = { reason = reason, at = host.now() }
   end
+  -- The fresh reads a turn's start no longer makes (22/11): provider limits at most every five minutes and
+  -- the roster every MAX_AGE, WITHOUT a probe child per peer (a probe waits up to 20 s on a peer that does
+  -- not answer, and an Enter pressed meanwhile would wait with it). Run at the idle prompt only.
+  local idle_refreshed = 0
+  local function idle_refresh()
+    local now = host.now()
+    if now - idle_refreshed < local_views.MAX_AGE then return end
+    idle_refreshed = now
+    snapshot_status({ color = view.live, max_age = 300 })
+    publish_views({ max_age = local_views.MAX_AGE, live_capabilities = false, session_id = agent.session_id, ctx = { user_id = USER, role = "master", session_id = agent.session_id } })
+  end
   local function restart_if_due()
     local now = host.now()
     if now - restart_checked < cli_restart.CHECK_SECONDS then return end
@@ -705,7 +722,7 @@ function M.run(argv)
   local selfloop = dofile("lua/core/selfloop.lua")
   local function wake_turn(row)
     local content, trace = selfloop.turn_content(row)
-    snapshot_status({ color = view.live, max_age = 300 })
+    snapshot_status({ color = view.live, cached = true })
     view:run_started()
     agent.self_wake = trace
     local ok, reply = pcall(agent.run, agent, content)
@@ -746,6 +763,7 @@ function M.run(argv)
     while true do
       restart_if_due()
       catch_up()
+      idle_refresh()
       sweep_handles_if_due()
       -- A due self-wake is a turn this session promised itself; run it now rather than at the next
       -- line the reader types. A wake that brings no line redraws the prompt after its own turn.
