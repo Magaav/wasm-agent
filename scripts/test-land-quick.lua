@@ -100,6 +100,9 @@ local function branch_with(name, files)
   must("git -C " .. repo .. " checkout -q main", "back to main")
 end
 
+-- A row's first line, for an assertion message (the log itself is too long to print whole).
+local function first_line_ish(text) return (tostring(text):match("[^\n]*") or "") end
+
 -- MAIN GROWS AFTER a branch was cut: a commit on main, pushed to both remotes, so the round's base is newer
 -- than the branch's fork point - the shape the first real landing measured (22/11).
 local function main_grows(files)
@@ -233,29 +236,6 @@ ok(found2, "the landing still ends with its line")
 contains(line2, "wa land change/lua` in one terminal", "and repeats the brief's `How Victor tests it` section")
 ok(tostring(line2):find("Not this section", 1, true) == nil, "and nothing past the next heading")
 
--- A row's first line, for an assertion message (the log itself is too long to print whole).
-local function first_line_ish(text) return (tostring(text):match("[^\n]*") or "") end
-
--- A BRANCH LANDED WITHOUT `wa land ready --brief` still says what to do when the MISSION's own brief has it:
--- `wa land change/<name>` is launched from ~/Work/missions/<name>/brief.md (22/11, the first real landing, whose
--- report said "no brief was recorded for this branch, so nothing describes the steps" beside a brief that did).
-fixture()
-local missions_root = land.missions_root()
-ok(missions_root ~= nil and missions_root:find(host.paths().home, 1, true) == 1,
-  "the missions root is this node's own home (got " .. tostring(missions_root) .. ")")
-write_file(missions_root .. "/own-brief/brief.md",
-  "# the mission\n\n## How Victor tests it\n\nrun `wa land change/own-brief --dry-run` and read the tests step\n\n## Not this\nignored\n")
-branch_with("change/own-brief", { ["lua/core/own-brief.lua"] = "return true\n" })
-eq(running(function() return land.run({ run = "quick2m", landing = true, branches = { "change/own-brief" } }) end), 0,
-  "the branch lands with no ready brief at all")
-local found2m, line2m = said("Local is evolved to")
-ok(found2m, "the landing ends with its line")
-contains(line2m, "run `wa land change/own-brief --dry-run` and read the tests step",
-  "and quotes the mission's own `How Victor tests it` instead of saying nothing describes the steps")
-ok(tostring(line2m):find("ignored", 1, true) == nil and tostring(line2m):find("no brief was recorded", 1, true) == nil,
-  "and neither the text past the next heading nor the old \"no brief\" line")
-fixture()
-
 -- ---------------------------------------------------------------- case 3: the branch's own tests decide
 fixture()
 eq(running(function() return land.run({ run = "quick3", landing = true, branches = { "change/tests" } }) end), 0,
@@ -316,8 +296,27 @@ contains(tests_log, "scripts/test-own-lua-new.lua", "the row that ran is the bra
 ok(tostring(step_of("quick3n", "tests").detail):find("Rust", 1, true) == nil,
   "and nothing in that row says the branch changes Rust")
 
--- ---------------------------------------------------------------- case 4: scripts/docs only, no deploy
+-- A BRANCH LANDED WITHOUT `wa land ready --brief` still says what to do when the MISSION's own brief has it:
+-- `wa land change/<name>` is launched from ~/Work/missions/<name>/brief.md (22/11, the first real landing, whose
+-- report said "no brief was recorded for this branch, so nothing describes the steps" beside a brief that did).
 fixture()
+local missions_root = type(land.missions_root) == "function" and land.missions_root() or nil
+ok(missions_root ~= nil and missions_root:find(host.paths().home, 1, true) == 1,
+  "the missions root is this node's own home (got " .. tostring(missions_root) .. ")")
+write_file(missions_root .. "/own-brief/brief.md",
+  "# the mission\n\n## How Victor tests it\n\nrun `wa land change/own-brief --dry-run` and read the tests step\n\n## Not this\nignored\n")
+branch_with("change/own-brief", { ["lua/core/own-brief.lua"] = "return true\n" })
+eq(running(function() return land.run({ run = "quick2m", landing = true, branches = { "change/own-brief" } }) end), 0,
+  "the branch lands with no ready brief at all")
+local found2m, line2m = said("Local is evolved to")
+ok(found2m, "the landing ends with its line")
+contains(line2m, "run `wa land change/own-brief --dry-run` and read the tests step",
+  "and quotes the mission's own `How Victor tests it` instead of saying nothing describes the steps")
+ok(tostring(line2m):find("ignored", 1, true) == nil and tostring(line2m):find("no brief was recorded", 1, true) == nil,
+  "and neither the text past the next heading nor the old \"no brief\" line")
+fixture()
+
+-- ---------------------------------------------------------------- case 4: scripts/docs only, no deploy
 eq(running(function() return land.run({ run = "quick4", landing = true, branches = { "change/docs" } }) end), 0,
   "a scripts/docs-only branch lands")
 eq(step_of("quick4", "install").state, "skipped", "without a deploy")
