@@ -87,7 +87,7 @@ A second `wa chat` within the same minute plays it: there is no state for that, 
 
 ## What was measured, and what each row proves
 
-* `rust/wa-term/tests/opening.rs` (new; four rows, 5.5 s) drives the REAL binary in a private pty and reads the
+* `rust/wa-term/tests/opening.rs` (new; five rows, 6.4 s) drives the REAL binary in a private pty and reads the
   screen back through `wa_term::scroll::vt::Vt` - the terminal in memory the render tests use.
   * the final screen with the opening ON equals the final screen with it OFF, row by row, with only the
     session id and the build's own version blanked (two starts cannot share either); with `WA_BASE_BIN`
@@ -139,7 +139,9 @@ So the katakana stayed: they do not break alignment, and no font on this node is
 
 * A resize ENDS the opening (the simplest answer the brief allowed). `opening_tick` compares the console's
   size with the one the opening was built for and finishes it; the buffered start bytes then go out at the
-  old width and the view repaints at the new one at its next frame.
+  old width and the view repaints at the new one at its next frame. MEASURED by
+  `a_resize_ends_the_opening`: the pty's window is moved to 80x20 while the rain plays, the alternate
+  screen is left within 1500 ms, and the header is on the screen at the new size.
 * The panic path and the `atexit` path are implemented and reviewed but NOT measured: forcing a panic or an
   `os.exit` inside the two seconds the opening is up needs a fault injected into the start path, and none of
   the honest ways to inject it were in scope. `Ctrl+C` IS the ordinary key path and is measured.

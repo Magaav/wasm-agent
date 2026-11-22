@@ -151,6 +151,14 @@ impl Pty {
         self.marks.iter().find(|(_, len)| *len > at).map(|(when, _)| *when)
     }
 
+    /// The window changed size: the ioctl a terminal's own resize does, which is what sends SIGWINCH to
+    /// the chat. The host reads the new size from the console, so this is the whole of the event.
+    fn resize(&mut self, columns: u16, rows: u16) {
+        let mut winsize = libc::winsize { ws_row: rows, ws_col: columns, ws_xpixel: 0, ws_ypixel: 0 };
+        let moved = unsafe { libc::ioctl(self.master, libc::TIOCSWINSZ as _, &mut winsize) };
+        assert_eq!(moved, 0, "the window resized");
+    }
+
     fn write(&mut self, text: &str) {
         let bytes = text.as_bytes();
         let mut sent = 0;
@@ -381,6 +389,40 @@ fn a_key_during_the_opening_is_in_the_draft_and_ends_it() {
         assert!(played < 400, "and it did not sit through the animation it interrupted: {played} ms of it played");
     }
     std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_resize_ends_the_opening() {
+    let Some(bin) = binary() else {
+        eprintln!("SKIP opening resize: no wa binary (WA_BIN)");
+        return;
+    };
+    let dir = scratch("resize");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let db = dir.join("ledger.db");
+    let env = environment(&home, &db);
+    let args = vec!["--db", db.to_str().unwrap(), "chat"];
+
+    let mut pty = Pty::spawn(&bin, &dir, &pairs(&env), &args);
+    let playing = pty.read_until(Duration::from_secs(30), |bytes| {
+        String::from_utf8_lossy(bytes).contains("\u{1b}[?1049h")
+    });
+    assert!(playing, "the opening is playing before the window changes");
+    let resized_at = Instant::now();
+    pty.resize(80, 20);
+    let ended = pty.read_until(Duration::from_secs(10), |bytes| {
+        String::from_utf8_lossy(bytes).contains("\u{1b}[?1049l")
+    });
+    let ended_ms = resized_at.elapsed().as_millis();
+    pty.read_quiet(Duration::from_millis(500), Duration::from_secs(5));
+    let screen = normalise(&pty.screen().rows());
+    pty.stop();
+    std::fs::remove_dir_all(&dir).ok();
+
+    assert!(ended, "a resize ends the opening rather than leaving a frame for a width the window has not");
+    assert!(ended_ms < 1500, "and at once: {ended_ms} ms after the resize");
+    assert!(row_with(&screen, "Welcome to wasm-agent!") != "", "with the header drawn at the new size");
 }
 
 #[test]
