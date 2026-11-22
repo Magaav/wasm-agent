@@ -112,7 +112,13 @@ echo 1 > "$WORK/bin/deploy.left"
 out=$(mission launch refused HEAD --wa "$WORK/bin/refuse-wa" 2>&1)
 has "$out" '"ok":true' 'the mission whose turn will be refused is staged'
 R=$MISSION_ROOT/refused
-out=$(WA_DEPLOY_WAIT_STEP=1 WA_DEPLOY_WAIT_LIMIT=60 bash "$R/run.sh" 2>&1); code=$?
+# BOUNDED, because the code this row judges on the OLD tree can hang: the base runner's timeout watchdog was
+# killed as a subshell, so its `sleep` kept this command substitution's pipe open and the row sat until the
+# caller's own timeout (measured: the discrimination gate reported it `timeout`, 22/11). A row that hangs cannot
+# say what is wrong; one that ends in 120 s says it.
+TO=""; command -v timeout >/dev/null 2>&1 && TO="timeout 120"
+out=$($TO env WA_DEPLOY_WAIT_STEP=1 WA_DEPLOY_WAIT_LIMIT=60 bash "$R/run.sh" 2>&1); code=$?
+[ "$code" = 124 ] && fail 'the generated runner never returned (a wait that does not end?)'
 [ "$code" = 0 ] || fail "the runner exits with the turn that finally ran (got $code): $out"
 ok
 has "$(cat "$R/done")" 'rc=0' 'the refusal was waited out, not recorded as the mission run'
@@ -134,7 +140,8 @@ printf 'Never.\n' > "$MISSION_ROOT/never/brief.md"
 out=$(mission launch never HEAD --wa "$WORK/bin/refuse-always-wa" 2>&1)
 has "$out" '"ok":true' 'the always-refused mission is staged'
 N=$MISSION_ROOT/never
-out=$(WA_DEPLOY_WAIT_STEP=1 WA_DEPLOY_WAIT_LIMIT=2 bash "$N/run.sh" 2>&1); code=$?
+out=$($TO env WA_DEPLOY_WAIT_STEP=1 WA_DEPLOY_WAIT_LIMIT=2 bash "$N/run.sh" 2>&1); code=$?
+[ "$code" = 124 ] && fail 'the generated runner never returned on a refusal it could not wait out'
 [ "$code" = 2 ] || fail "a wait that never ends exits 2, the refusal itself (got $code): $out"
 ok
 has "$(cat "$N/done")" 'rc=2' 'done carries the refusal, not a failed turn'
