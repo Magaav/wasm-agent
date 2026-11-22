@@ -89,7 +89,7 @@ fast-path row by the glob (`scripts/test-deploy-wait.lua` is not in `scripts/fas
 
 - `cargo test --offline --manifest-path rust/wa-sentinel/Cargo.toml -- --test-threads=1`: **142 passed, 0 failed**,
   `holders_tests`' 8 among them.
-- `scripts/test-deploy-wait.sh`: **ok** (20 assertions). `scripts/test-deploy-bound.sh`: **ok** (29 assertions).
+- `scripts/test-deploy-wait.sh`: **ok** (33 checks, 15 s). `scripts/test-deploy-bound.sh`: **ok** (24 checks, 0.6 s).
   `scripts/test-deploy-wait.lua`: **55 checks**. `scripts/test-deploy-signal.sh`: **13 checks**.
 - Unchanged and still green after the change: `scripts/test-deploy-pause.lua` (23), `scripts/test-deploy-resume.lua`
   (25), `scripts/test-session-park.lua` (68), `scripts/test-selfloop.lua` (114 checks, 1 skip),
@@ -143,7 +143,8 @@ fast-path row by the glob (`scripts/test-deploy-wait.lua` is not in `scripts/fas
 ## The whole fast path, and the two rows that failed in it
 
 `flock -o ~/Work/missions/.suite.lock bash scripts/fast.sh` on this tree: **384 checks, 2 failed, 506 s** (306/307
-Lua rows). Neither failure is attributable to this diff, and both were measured:
+Lua rows; `fast: deploy-wait ok (15309ms)` and `fast: deploy-bound ok (207ms)` ran and passed as rows). Neither
+failure is attributable to this diff, and both were measured:
 
 | row | what it said | measured again |
 | --- | --- | --- |
