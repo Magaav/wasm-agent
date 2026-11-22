@@ -2765,10 +2765,19 @@ function METHODS:codemode_sync()
   local rows = codemode_block.call_lines(model, self.limit, o)
   local old = self.code_rows or 0
   if self:transcript() and host.transcript_rewrite then
+    -- A settled call's row opens on a click to what the call said (`rows.expand`): the marker is
+    -- handed to the host just before the row it belongs to, written or rewritten.
+    local function mark(index)
+      local full = rows.expand and rows.expand[index]
+      if full and host.transcript_expand then
+        pcall(host.transcript_expand, json.encode({ { at = 0, text = full } }))
+      end
+    end
     for index = 1, math.min(old, #rows) do
+      mark(index)
       pcall(host.transcript_rewrite, index - old - 1, rows[index])
     end
-    for index = old + 1, #rows do self:write(rows[index] .. "\n") end
+    for index = old + 1, #rows do mark(index); self:write(rows[index] .. "\n") end
   end
   self.code_rows = #rows
 end

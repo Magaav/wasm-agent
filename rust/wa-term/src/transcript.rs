@@ -183,6 +183,15 @@ impl Transcript {
         let index = block.lines.len() as isize + offset;
         if index < 0 || index as usize >= block.lines.len() { return false }
         block.lines[index as usize] = text.to_string();
+        // An expand marker waiting for "the next write" belongs to this row when the row is
+        // rewritten instead (a run block's call row learns its output only when it settles): the
+        // row then opens on a click exactly as a written one does. Without a marker the row is a
+        // plain row again - a rewrite never keeps the fold of the text it replaced.
+        block.expands.remove(&(index as usize));
+        block.opened.remove(&(index as usize));
+        for (at, full) in std::mem::take(&mut self.pending_expand) {
+            if at == 0 { block.expands.insert(index as usize, full); }
+        }
         if let Some(count) = self.counts.last_mut() { *count = None; }
         self.dirty = true;
         true
@@ -1642,6 +1651,18 @@ mod tests {
         let rows = |view: &Vec<String>| view.iter().filter(|row| visible(row) > 0).count();
         assert_eq!(rows(&after), rows(&before), "without adding or removing a row: {after:?}");
         assert!(!t.rewrite(-99, "x"), "an offset past the block rewrites nothing");
+        // A row REWRITTEN with an expand marker waiting opens on a click like a written one (a run
+        // block's call row learns its output when it settles); rewritten without one it is plain.
+        t.expandable(&[(0, "  \u{2713} bash\n    line 1\n    line 2".to_string())]);
+        assert!(t.rewrite(-1, "  \u{2713} bash"));
+        let folded = t.view(60, 12);
+        let row = (1..=12).find(|&r| t.expand_rows.contains_key(&r)).expect("the rewritten row answers a click");
+        assert!(!folded.join("\n").contains("line 2"), "folded by default: {folded:?}");
+        assert!(t.expand_at(row));
+        assert!(t.view(60, 12).join("\n").contains("line 2"), "the click shows what the call said");
+        assert!(t.rewrite(-1, "  \u{2713} bash again"));
+        let plain = t.view(60, 12);
+        assert!(!plain.join("\n").contains("line 2") && t.expand_rows.is_empty(), "a plain rewrite is a plain row: {plain:?}");
     }
     #[test]
     fn the_view_is_bottom_anchored_and_keeps_a_focused_topic_on_screen() {

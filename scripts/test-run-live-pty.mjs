@@ -277,10 +277,29 @@ try {
   check('the waiting call is a row of its own', /\u23f3/.test(waiting),
     waiting);
 
-  // Each call that has already settled shows what it printed, in the same frame.
-  check('the first call\'s output is drawn under its row while the slow one waits',
-    /\u2713 bash/.test(waiting) && /\n\s*1\s*\n\s*2\s*\n\s*3\s*\n/.test(body(waiting)), waiting);
-  check('and the second call\'s kernel version with it', waiting.includes(KERNEL), waiting);
+  // Each call that has already settled is ONE row, and what it printed is one click on that row
+  // away (Victor 21/11 night: "duplicated info, unnecessary ... the compressed one is better and if
+  // we wish we expand it" - the rows under each call were a second copy of the script's result).
+  // The click is the terminal's own: an SGR press and release on the row.
+  const click = async row => {
+    for (const final of ['M', 'm']) {
+      const bytes = Buffer.from('\u001b[<0;6;' + row + final, 'latin1');
+      tmux(['send-keys', '-t', 'live', '-H', ...[...bytes].map(b => b.toString(16))]);
+      await sleep(60);
+    }
+    await sleep(500);
+    return screen_rows('live');
+  };
+  const tickedRows = text => text.split('\n').map((row, index) => (/\u2713 bash/.test(row) ? index + 1 : 0)).filter(Boolean);
+  check('a settled call is one row: its output is not drawn under it by default',
+    tickedRows(waiting).length === 2 && !/\n\s*1\s*\n\s*2\s*\n\s*3\s*\n/.test(body(waiting)), waiting);
+  const firstOpen = await click(tickedRows(waiting)[0]);
+  check('a click on the first call\'s row shows its output while the slow one waits',
+    /\n\s*1\s*\n\s*2\s*\n\s*3\s*\n/.test(body(firstOpen)), firstOpen);
+  const firstFolded = await click(tickedRows(firstOpen)[0]);
+  const secondOpen = await click(tickedRows(firstFolded)[1]);
+  check('and a click on the second call\'s row shows the kernel version', secondOpen.includes(KERNEL), secondOpen);
+  waiting = await click(tickedRows(secondOpen)[1]);
   const envelope = envelopeFields(waiting);
   check('and no envelope field is drawn in the window', envelope.length === 0,
     'fields drawn: ' + envelope.join(', ') + '\n' + waiting);
@@ -288,17 +307,11 @@ try {
   // THE BAR: one bar, and it stays one bar while the reader scrolls during the wait.
   const rows = waiting.split('\n');
   const groups = barGroups(rows);
-  // A KNOWN DEFECT, NAMED AND COUNTED, NEVER A SILENT PASS (item 7 of run-live-2): while a call is
-  // in flight the row the block is still writing loses its last column - the scrollbar - and a stub
-  // of the bar appears on a blank row under the waiting row. The measurement stays in this row; a
-  // skip is printed by the runner and is not a pass.
-  if (groups.length === 1) {
-    check('the scrollbar is ONE bar while a call waits', true);
-  } else {
-    skipped += 1;
-    console.log('SKIP test-run-live-pty: the scrollbar splits while a call waits (' + groups.length +
-      ' bar groups) - a defect this row records and does not hide: ' + JSON.stringify(groups));
-  }
+  // A HARD ASSERTION (it was a recorded SKIP for three rounds): the host counted the waiting mark
+  // U+23F3 as one cell where a terminal draws two, padded the row one cell too far, and the bar's
+  // glyph wrapped onto the next row - a stub under the waiting row, and a pane scrolled by one.
+  check('the scrollbar is ONE bar while a call waits', groups.length === 1,
+    'bar groups: ' + JSON.stringify(groups) + '\n' + waiting);
   tmux(['send-keys', '-t', 'live', 'End']);
   await sleep(400);
   const bottom = screen_rows('live');
@@ -365,10 +378,16 @@ try {
   // The transcript is longer than the pane once the block has every call in it, and the block is
   // append-only: a row either frame shows is a row of this block, so each fact is read from the union
   // of the two frames this test captured itself (never from a frame that shows neither).
-  const seen = waiting + '\n' + atBottom + '\n' + settled;
+  // The slow call's own output is one click on its row away, like the others'.
+  let slowOpen = '';
+  {
+    const ticked = tickedRows(screen_rows('live'));
+    if (ticked.length >= 3) slowOpen = await click(ticked[2]);
+  }
+  const seen = waiting + '\n' + firstOpen + '\n' + secondOpen + '\n' + atBottom + '\n' + settled + '\n' + slowOpen;
   check('after the last call returns the block still shows the script',
     SCRIPT.split('\n').every(line => seen.includes(line)), settled);
-  check('each call\'s output is still under its row', seen.includes(KERNEL), settled);
+  check('each call\'s output is still reachable from its row', seen.includes(KERNEL), settled);
   check('the slow command\'s own output is drawn too', /\n\s*done\s*\n/.test(body(seen)), settled);
   check('and no envelope field is drawn in the settled block', envelopeFields(settled).length === 0,
     settled);
