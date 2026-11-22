@@ -156,6 +156,25 @@ wa_sentinel_unit_ensure() {
   printf 'unit_enabled\n'
 }
 
+# Does a UNIT start the node - the system manager's or this user's? That is the question the unit's
+# WA_SENTINEL_AUTOSTART answers, and asking only the system directories got it wrong on the laptop, where the
+# node is the USER unit wa-serve.service: the sentinel would then also start a node ten seconds after any
+# outage, which is a second answer to "who starts this node". WA_SENTINEL_NODE_UNIT names the node's unit
+# (default WA_SERVICE_UNIT, else wa-serve.service).
+wa_sentinel_node_unit_present() {
+  local unit="${WA_SENTINEL_NODE_UNIT:-${WA_SERVICE_UNIT:-wa-serve.service}}"
+  local systemctl_bin="${WA_SENTINEL_UNIT_SYSTEMCTL:-systemctl}" state
+  if command -v wa_service_unit_file >/dev/null 2>&1 && [ -n "$(wa_service_unit_file 2>/dev/null)" ]; then
+    return 0
+  fi
+  command -v "$systemctl_bin" >/dev/null 2>&1 || return 1
+  case "$("$systemctl_bin" --user is-enabled "$unit" 2>/dev/null | head -1)" in
+    enabled|enabled-runtime|static|indirect|generated|alias) return 0 ;;
+  esac
+  [ "$("$systemctl_bin" --user is-active "$unit" 2>/dev/null | head -1)" = active ] && return 0
+  return 1
+}
+
 # Is there a SYSTEM unit for the watcher already? The unit directories are the ones
 # scripts/lib/service-target.sh searches, and the rule is the same; WA_SENTINEL_SYSTEM_UNIT_FILE is this
 # function's own seam for a fixture, because WA_SERVICE_UNIT_FILE answers about the NODE's unit and setting it
@@ -233,16 +252,18 @@ wa_sentinel_watcher_prepare() {
   verdict="$(wa_sentinel_unit_verdict "$install_dir" 2>/dev/null)"
   first="$(printf '%s\n' "$verdict" | sed -n 1p)"
   why="$(printf '%s\n' "$verdict" | sed -n 2p)"
-  printf 'supervisor=\n'
-  printf 'watcher=%s start\n' "$sentinel"
   if [ "$first" != yes ]; then
+    # No unit: no supervisor is claimed on the machine's behalf, and the command is the one the deploy
+    # always ran. Exactly one line per key, so a caller reading the last of a key cannot pick the wrong one.
+    printf 'supervisor=\n'
+    printf 'watcher=%s start\n' "$sentinel"
     printf 'unit=no: %s\n' "${why:-no reason given}"
     return 0
   fi
   # The node's own unit (wa-serve.service on the laptop) already starts the node: a sentinel that also
   # autostarted one would be a second answer to "who starts this node", so the unit says which it is.
   autostart=1
-  command -v wa_service_unit_file >/dev/null 2>&1 && [ -n "$(wa_service_unit_file 2>/dev/null)" ] && autostart=0
+  wa_sentinel_node_unit_present && autostart=0
   node_dir=""
   command -v wa_node_bin >/dev/null 2>&1 && node_dir="$(dirname "$(wa_node_bin 2>/dev/null)" 2>/dev/null)"
   case "$node_dir" in /*) ;; *) node_dir="" ;; esac
@@ -255,5 +276,7 @@ wa_sentinel_watcher_prepare() {
     printf 'unit=yes: %s\n' "$(printf '%s' "$out" | tr '\n' ' ')"
     return 0
   fi
+  printf 'supervisor=\n'
+  printf 'watcher=%s start\n' "$sentinel"
   printf 'unit=no: %s\n' "$(printf '%s' "$out" | tr '\n' ' ')"
 }

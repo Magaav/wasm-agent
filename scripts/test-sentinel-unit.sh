@@ -55,6 +55,10 @@ mkdir -p "$WORK/bin"
 cat > "$WORK/bin/systemctl" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$STUB_LOG"
+# `is-enabled`/`is-active` answer $STUB_ENABLED: a fixture's way of saying the user manager knows a unit.
+case "$*" in
+  *is-enabled*|*is-active*) [ -n "${STUB_ENABLED:-}" ] && printf '%s\n' "$STUB_ENABLED" ; exit 0 ;;
+esac
 if [ -n "${STUB_FAIL:-}" ]; then
   case "$*" in
     *"$STUB_FAIL"*) echo "stub: $STUB_FAIL refused" >&2; exit 1 ;;
@@ -176,6 +180,16 @@ equal "$(printf '%s\n' "$plan" | sed -n 's/^supervisor=//p' | tail -1)" 'user:wa
 equal "$(printf '%s\n' "$plan" | sed -n 's/^watcher=//p' | tail -1)" 'systemctl --user restart wa-sentinel.service' \
   'the one command is the manager verb'
 contains "$(printf '%s\n' "$plan" | sed -n 's/^unit=//p' | tail -1)" 'yes:' 'the plan says a unit was installed'
+# ...and a node unit the USER manager knows is enough: nothing else starts the node, so this watcher must not.
+# The unit name is one no system directory holds, so the answer comes from the manager (the stub), not from
+# whichever machine this runs on.
+WA_SENTINEL_NODE_UNIT=wa-node-fixture.service
+WA_SERVICE_UNIT_FILE="$WORK/absent-node.service"
+export STUB_ENABLED=enabled
+plan="$(wa_sentinel_watcher_prepare "$PREFIX/wa-sentinel" "$PREFIX" "$CONFIG" 8799 8800)"
+contains "$(cat "$unit_file")" 'Environment=WA_SENTINEL_AUTOSTART=0' \
+  'a node unit the user manager knows stops the sentinel from starting a second one'
+export STUB_ENABLED=""
 # ...and the node own unit, where there is one, is not duplicated by an autostarting sentinel.
 printf '[Service]\n' > "$WORK/wa-serve.service"
 WA_SERVICE_UNIT_FILE="$WORK/wa-serve.service"
