@@ -1,11 +1,13 @@
-//! The opening: rain, a tornado, and the header's star (Victor, 22/11).
+//! The opening: rain, a supernova, and the header's star (Victor, 22/11).
 //!
-//! The reference is the sketch Fable and Victor iterated nine times
-//! (`scratch/wa-header-demo8.py`): the whole terminal becomes green glyph rain, the rain is swept
-//! into one big tornado, the tornado turns faster and shrinks into the header's star cell, and the
-//! title is written in the alien alphabet and translated left to right - then the rest of the
-//! header, unchanged. This module is that sequence and nothing else: it owns no screen, no clock and
-//! no keys. `Opening::step` answers the bytes of the next frame and `Opening::delay` how long that
+//! The reference is the sketch Victor chose after ten demos (`scratch/wa-header-demo10.py`, 22/11
+//! 23:32Z - the 3D supernova, his favourite of the two): the whole terminal becomes green glyph rain,
+//! a point of light ignites in the middle of it and flashes, a sphere of glyph debris flies apart in
+//! depth, ONE ring races outward in a tilted plane (its near arc solid and bright, its far arc faint)
+//! and blows the rain away as it passes, the cloud and the ring keep turning, everything falls into
+//! the header's star cell, and the title is written in the alien alphabet and translated left to right
+//! - then the rest of the header, unchanged. This module is that sequence and nothing else: it owns no
+//! screen, no clock and no keys. `Opening::step` answers the bytes of the next frame and `Opening::delay` how long that
 //! frame is held; the host's reader thread - the one thread that owns the terminal and the keys -
 //! writes them, and ends the opening the moment a key arrives or the window changes size.
 //!
@@ -22,7 +24,7 @@
 pub const TOTAL_MS: u64 = 2000;
 
 /// The matrix green, FINAL at xterm 41 (`#00d75f`, Victor 22/11 21:33Z): the star of the welcome line
-/// and the animated first glyph of the run status row both carry it, and the tornado's last turn burns
+/// and the animated first glyph of the run status row both carry it, and the ring's leading edge burns
 /// in it, so the star that lands is the star the header keeps.
 pub const MATRIX: &str = "\x1b[1;38;2;0;215;95m";
 
@@ -68,34 +70,51 @@ const PLAIN: u16 = 0;
 const HEAD: u16 = 1;
 const STAR: u16 = 2;
 const TRAIL: [u16; 4] = [3, 4, 5, 6];
-const TORN_NEAR: u16 = 7;
-const TORN_FAR: u16 = 8;
+const NOVA_NEAR: u16 = 7;
+const NOVA_FAR: u16 = 8;
 const DIM: u16 = 9;
 const FLICKER: u16 = 10;
 
 fn default_palette() -> [&'static str; 11] {
     ["\x1b[0m",
      "\x1b[1;38;2;255;255;255m",   // 1 a rain head: white, bold
-     MATRIX,                        // 2 the star, and the near face of the tornado's foot
+     MATRIX,                        // 2 the star, and the ring's leading edge
      "\x1b[38;2;0;255;65m",         // 3 the trails, brightest first
      "\x1b[38;2;0;215;65m",         // 4
      "\x1b[38;2;0;170;55m",         // 5
      "\x1b[38;2;0;130;45m",         // 6
-     "\x1b[1;38;2;120;255;170m",   // 7 the tornado's near face
-     "\x1b[38;2;0;200;80m",         // 8 its far face
+     "\x1b[1;38;2;120;255;170m",   // 7 the supernova's near face
+     "\x1b[38;2;0;200;80m",         // 8 the ring's far arc
      "\x1b[38;2;0;95;35m",          // 9 the dimmest trail
      "\x1b[1;38;2;180;255;200m"]    // 10 the cell being decoded
 }
 
-/// The frames of each act. The sketch spends 145 frames and 6 s on them; a CLI has two seconds, so
-/// each act is compressed - and the title's translation is capped at `DECODE_FRAMES` beats whatever the
-/// title's length, because a release tag can make it longer than the sketch's.
-const RAIN_FRAMES: usize = 10;
-const SWEEP_FRAMES: usize = 12;
-const TORNADO_FRAMES: usize = 10;
-const SHRINK_FRAMES: usize = 14;
+/// The frames of each act, in order: rain, the star igniting, the supernova, the cloud hanging and
+/// turning, everything falling into the star cell, and the star landing. The sketch spends ~145 frames
+/// and 6 s on them; a CLI has two seconds, so each act is compressed - and the title's translation is
+/// capped at `DECODE_FRAMES` beats whatever the title's length, because a release tag can make it
+/// longer than the sketch's.
+const RAIN_FRAMES: usize = 8;
+const IGNITE_FRAMES: usize = 6;
+const NOVA_FRAMES: usize = 22;
+const HANG_FRAMES: usize = 8;
+const COLLAPSE_FRAMES: usize = 12;
 const LAND_FRAMES: usize = 3;
 const DECODE_FRAMES: usize = 24;
+
+/// The ring's plane: tipped toward the reader, and a little askew, so its near arc is solid and bright
+/// and its far arc is a line of faint dots - the sketch's TILT and ROLL.
+const TILT: f32 = 0.42;
+const ROLL: f32 = 0.22;
+
+/// The star ignites on these, growing, in the middle of the rain (the sketch's `\u{b7}\u{b7}\u{2022}\u{2022}\u{25cf}\u{25cf}\u{2739}\u{2739}`).
+const IGNITION: [char; 8] = ['\u{b7}', '\u{b7}', '\u{2022}', '\u{2022}', '\u{25cf}', '\u{25cf}', '\u{2739}', '\u{2739}'];
+
+/// The ring's three bands: how far behind the leading edge each sits, and the glyphs it is made of -
+/// solid where it is in front and a light shade where it is behind, which is what makes ONE plane read
+/// as a plane.
+const BANDS: [(f32, [char; 2]); 3] = [(0.0, ['\u{2588}', '\u{2593}']),
+    (-0.9, ['\u{2593}', '\u{2592}']), (-1.8, ['\u{2592}', '\u{2591}'])];
 
 // ---- the random ------------------------------------------------------------------------------
 
@@ -128,8 +147,12 @@ struct Head { y: f32, speed: f32 }
 /// The rain: an age per cell (`None` = empty), the glyph in it, and one head per column.
 struct Rain { age: Vec<Option<u8>>, glyph: Vec<char>, heads: Vec<Option<Head>> }
 
-/// One grain of the tornado.
-struct Particle { h: f32, theta: f32, w: f32, glyph: char, born: f32 }
+/// One grain of the supernova: a direction on the unit sphere, how far out it flies, and the glyph it is
+/// drawn with.
+struct Point { u: (f32, f32, f32), v: f32, glyph: char }
+
+/// One lit cell of a supernova frame, before it is rounded onto the grid.
+struct Lit { row: f32, col: f32, z: f32, sgr: u16, ch: char }
 
 /// The header as the view painted it.
 struct Header {
@@ -149,7 +172,12 @@ pub struct Opening {
     /// What the screen already holds, so a frame writes only what changed.
     shown: Vec<Cell>,
     rain: Rain,
-    parts: Vec<Particle>,
+    /// The supernova's debris, the geometry its camera and its ring need, and how far it has turned.
+    points: Vec<Point>,
+    ring: f32,
+    cam: f32,
+    centre: (f32, f32),
+    rot: f32,
     rng: Rng,
     t: f32,
     step: usize,
@@ -177,12 +205,19 @@ impl Opening {
                 Some(Head { y: -6.0 * rng.unit(), speed: 0.6 + 0.9 * rng.unit() })
             } else { None };
         }
-        let count = ((width * height) as f32 * 0.11) as usize;
-        let parts: Vec<Particle> = (0..count).map(|_| Particle {
-            h: rng.unit(), theta: 6.283 * rng.unit(), w: 0.7 + 0.6 * rng.unit(),
-            glyph: rng.pick(&pool), born: rng.unit() }).collect();
+        let count = ((width * height) as f32 * 0.075) as usize;
+        let ring = (width as f32 * 0.20).min(height as f32 * 0.72);
+        let centre = (height as f32 / 2.0, width as f32 / 2.0);
+        let points: Vec<Point> = (0..count).map(|_| {
+            // A direction on the unit sphere, evenly: z uniform, the angle round it uniform.
+            let z = -1.0 + 2.0 * rng.unit();
+            let theta = 6.283 * rng.unit();
+            let s = (1.0 - z * z).max(0.0).sqrt();
+            Point { u: (s * theta.cos(), s * theta.sin(), z), v: (0.2 + 0.8 * rng.unit()).powf(0.6),
+                glyph: rng.pick(&pool) }
+        }).collect();
         Opening { width, height, palette, pool, grid: vec![Cell::default(); width * height],
-            shown: vec![Cell::default(); width * height], rain, parts, rng, t: 0.0, step: 0,
+            shown: vec![Cell::default(); width * height], rain, points, ring, cam: ring * 3.2, centre, rot: 0.0, rng, t: 0.0, step: 0,
             header: None, finished: false }
     }
 
@@ -210,7 +245,7 @@ impl Opening {
 
     fn lines(&self) -> usize { self.header.as_ref().map(|header| header.lines.len()).unwrap_or(0) }
     fn title_cells(&self) -> usize { self.header.as_ref().map(|header| header.alien.len().saturating_sub(2)).unwrap_or(0) }
-    fn acts(&self) -> usize { RAIN_FRAMES + SWEEP_FRAMES + TORNADO_FRAMES + SHRINK_FRAMES + LAND_FRAMES }
+    fn acts(&self) -> usize { RAIN_FRAMES + IGNITE_FRAMES + NOVA_FRAMES + HANG_FRAMES + COLLAPSE_FRAMES + LAND_FRAMES }
 
     /// How many cells of the title each frame of the translation decodes: one for a short title, several
     /// for a long one, so the translation always takes `DECODE_FRAMES` beats.
@@ -230,8 +265,11 @@ impl Opening {
     /// How long frame `index` is held.
     fn delay_at(&self, index: usize) -> u64 {
         let acts = self.acts();
-        if index < RAIN_FRAMES + SWEEP_FRAMES + TORNADO_FRAMES { return 22; }
-        if index < RAIN_FRAMES + SWEEP_FRAMES + TORNADO_FRAMES + SHRINK_FRAMES { return 20; }
+        if index < RAIN_FRAMES { return 22; }
+        if index - RAIN_FRAMES < IGNITE_FRAMES { return 25; }
+        if index - RAIN_FRAMES - IGNITE_FRAMES < NOVA_FRAMES { return 20; }
+        if index - RAIN_FRAMES - IGNITE_FRAMES - NOVA_FRAMES < HANG_FRAMES { return 20; }
+        if index - RAIN_FRAMES - IGNITE_FRAMES - NOVA_FRAMES - HANG_FRAMES < COLLAPSE_FRAMES { return 18; }
         if index < acts { return 40; }
         let beat = index - acts;
         let decode = (self.title_cells() + self.stride() - 1) / self.stride();
@@ -239,7 +277,7 @@ impl Opening {
         if beat <= decode { return 16; }
         // The rest of the block, a line at a time; the frame it stops on is held long enough to be read
         // before the screen comes back (which shows the same picture, so the switch is invisible).
-        if index + 1 == self.acts() + self.header_frames() { return 160; }
+        if index + 1 == self.acts() + self.header_frames() { return 120; }
         30
     }
 
@@ -251,7 +289,7 @@ impl Opening {
     pub fn planned_ms(&self) -> u64 { (0..self.frames()).map(|index| self.delay_at(index)).sum() }
 
     /// The next frame's bytes, or `None` once the opening is over. Every call advances the rain, the
-    /// tornado or the header by exactly one frame.
+    /// supernova or the header by exactly one frame.
     pub fn step(&mut self) -> Option<String> {
         if self.finished { return None; }
         let index = self.step;
@@ -281,7 +319,9 @@ impl Opening {
         Some(self.render())
     }
 
-    /// The acts: rain, the sweep into the tornado, the tornado, the shrink, the star landing.
+    /// The acts: rain, the star igniting, the supernova (flash, a sphere of debris in depth, ONE ring
+    /// racing out in a tilted plane), the cloud hanging and turning, everything falling into the star
+    /// cell, and the star landing.
     fn act_frame(&mut self, index: usize) {
         for cell in self.grid.iter_mut() { *cell = Cell::default(); }
         // The header's star sits on row 1, column 0: the sketch's STAR_Y, STAR_X.
@@ -291,29 +331,42 @@ impl Opening {
             self.draw_rain(0.0);
             return;
         }
-        let sweep = index - RAIN_FRAMES;
-        if sweep < SWEEP_FRAMES {
-            let f = sweep as f32;
-            self.rain_step(0.10 * (1.0 - f / SWEEP_FRAMES as f32));
-            self.draw_rain(f / (SWEEP_FRAMES as f32 * 3.3));
-            self.draw_tornado(f / (SWEEP_FRAMES as f32 * 0.75), 1.0, star);
-            self.t += 0.06;
+        let ignite = index - RAIN_FRAMES;
+        if ignite < IGNITE_FRAMES {
+            self.rain_step(0.10);
+            self.draw_rain(0.0);
+            let at = (ignite * IGNITION.len() / IGNITE_FRAMES).min(IGNITION.len() - 1);
+            self.put_f(self.centre.0, self.centre.1, IGNITION[at], HEAD);
             return;
         }
-        let funnel = index - RAIN_FRAMES - SWEEP_FRAMES;
-        if funnel < TORNADO_FRAMES {
+        let nova = index - RAIN_FRAMES - IGNITE_FRAMES;
+        if nova < NOVA_FRAMES {
             self.rain_step(0.0);
-            self.draw_rain(0.75 + funnel as f32 / 80.0);
-            self.draw_tornado(1.0, 1.0, star);
-            self.t += 0.06;
+            let a = (nova + 1) as f32 / NOVA_FRAMES as f32;
+            let (cells, reach) = self.scene(a, self.rot);
+            self.scour(reach * 1.05);
+            self.draw_rain(0.0);
+            self.draw_scene(cells);
+            // The flash is the newest light, so it is stamped on top of the debris it throws.
+            if nova < 2 { self.flash(); }
+            self.rot += 0.035;
             return;
         }
-        let shrink = index - RAIN_FRAMES - SWEEP_FRAMES - TORNADO_FRAMES;
-        if shrink < SHRINK_FRAMES {
-            let a = (shrink + 1) as f32 / SHRINK_FRAMES as f32;
-            let scale = (1.0 - a).powf(2.2);
-            self.draw_tornado(1.0, scale, star);
-            self.t += 0.06 + 0.10 * a;
+        let hang = index - RAIN_FRAMES - IGNITE_FRAMES - NOVA_FRAMES;
+        if hang < HANG_FRAMES {
+            self.rain_step(0.0);
+            let (cells, reach) = self.scene(1.0, self.rot);
+            self.scour(reach * 1.05);
+            self.draw_rain(0.0);
+            self.draw_scene(cells);
+            self.rot += 0.045;
+            return;
+        }
+        let falling = index - RAIN_FRAMES - IGNITE_FRAMES - NOVA_FRAMES - HANG_FRAMES;
+        if falling < COLLAPSE_FRAMES {
+            let a = (falling + 1) as f32 / COLLAPSE_FRAMES as f32;
+            let (cells, _) = self.scene(1.0, self.rot);
+            self.collapse(a, cells, star);
             return;
         }
         // It lands: white, then the bright green of the trail, then the matrix green of the line.
@@ -376,35 +429,130 @@ impl Opening {
         }
     }
 
-    // ---- the tornado -------------------------------------------------------------------------
+    // ---- the supernova -----------------------------------------------------------------------
+    //
+    // The sketch's `scene()`: world units are terminal ROWS, the camera looks down +z, a point is drawn
+    // at x*2 columns (a cell is twice as tall as wide) and scaled by its distance, and its depth picks
+    // both its brightness and its glyph. One bright band is ONE ring in one tilted plane, racing out;
+    // the near arc is solid and bright and the far arc is a line of faint dots, which is what makes the
+    // ring read as a plane rather than as a hoop.
 
-    fn draw_tornado(&mut self, grow: f32, scale: f32, star: (usize, usize)) {
-        let (width, height) = (self.width, self.height);
-        let radius = (width as f32 * 0.19).min(height as f32 * 0.95);
-        let mut cells: Vec<((usize, usize), f32, u16, char)> = Vec::new();
-        for part in &self.parts {
-            if part.born > grow { continue; }
-            let h = (part.h + self.t * 0.22 * part.w).rem_euclid(1.0);
-            let y = (height as f32 - 1.0) - h * (height as f32 - 3.0).max(0.0);
-            let rad = 1.0 + h.powf(1.3) * radius;
-            let theta = part.theta + self.t * (5.5 - 3.2 * h) * part.w;
-            let sway = (self.t * 1.1 + h * 2.6).sin() * width as f32 * 0.035;
-            let x = width as f32 / 2.0 + sway + 2.0 * rad * theta.cos();
-            let z = theta.sin();
-            let row = star.0 as f32 + (y - star.0 as f32) * scale;
-            let column = star.1 as f32 + (x - star.1 as f32) * scale;
-            if row < 0.0 || column < 0.0 { continue; }
-            let (row, column) = (row.round() as usize, column.round() as usize);
-            if row >= height || column >= width { continue; }
-            let colour = if scale < 0.35 {
-                // The last turn burns bright, still in the matrix green - the star it becomes.
-                if z > 0.0 { STAR } else { TRAIL[0] }
-            } else if z > 0.5 { TORN_NEAR } else if z > -0.2 { TORN_FAR } else { DIM };
-            cells.push(((row, column), z, colour, part.glyph));
+    fn project(&self, x: f32, y: f32, z: f32) -> (f32, f32, f32) {
+        let k = self.cam / (self.cam + z);
+        (self.centre.0 + y * k, self.centre.1 + 2.0 * x * k, z)
+    }
+
+    /// The tilted plane the ring lives in.
+    fn tip(x: f32, y: f32, z: f32) -> (f32, f32, f32) {
+        let (c, s) = (TILT.cos(), TILT.sin());
+        let (y, z) = (y * c - z * s, y * s + z * c);
+        let (c, s) = (ROLL.cos(), ROLL.sin());
+        let (x, y) = (x * c - y * s, x * s + y * c);
+        (x, y, z)
+    }
+
+    fn turn(x: f32, y: f32, z: f32, rot: f32) -> (f32, f32, f32) {
+        let (c, s) = (rot.cos(), rot.sin());
+        (x * c + z * s, y, -x * s + z * c)
+    }
+
+    /// The whole explosion at progress `a` (0..1), and how far the ring has reached.
+    fn scene(&self, a: f32, rot: f32) -> (Vec<Lit>, f32) {
+        let mut cells = Vec::new();
+        let grow = 1.0 - (1.0 - a).powi(3);
+        let cloud = self.ring * 1.45;
+        for point in &self.points {
+            let (ux, uy, uz) = point.u;
+            let r = point.v * cloud * grow;
+            let (x, y, z) = Self::turn(ux * r, uy * r, uz * r, rot);
+            let (row, col, z) = self.project(x, y, z);
+            let near = -z / cloud;
+            let (sgr, ch) = if a < 0.15 {
+                (HEAD, point.glyph)
+            } else if near > 0.35 {
+                (if a < 0.6 { NOVA_NEAR } else { TRAIL[0] }, point.glyph)
+            } else if near > -0.25 {
+                (if a < 0.75 { TRAIL[1] } else { TRAIL[2] }, point.glyph)
+            } else {
+                // Far behind: a dim DOT, which is what reads as depth rather than as noise.
+                (if a < 0.75 { TRAIL[3] } else { DIM }, '\u{b7}')
+            };
+            cells.push(Lit { row, col, z, sgr, ch });
         }
-        // Near faces win: a grain in front draws over the one behind it in the same cell.
-        cells.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-        for ((row, column), _, colour, glyph) in cells { self.put(row, column, glyph, colour); }
+        let reach = self.ring * (1.0 - (1.0 - a).powf(2.4));
+        for (band, (dr, glyphs)) in BANDS.iter().enumerate() {
+            let r = reach + *dr;
+            if r < 0.6 { continue; }
+            let n = (r * 11.0) as i32;
+            for index in 0..n {
+                let angle = 6.283 * index as f32 / n as f32 + rot * 1.6;
+                let (x, y, z) = Self::tip(r * angle.cos(), 0.0, r * angle.sin());
+                let (row, col, z) = self.project(x, y, z);
+                let front = z < 0.0;
+                let sgr = if front {
+                    if band == 0 && a < 0.55 { HEAD } else if band < 2 { NOVA_NEAR } else { TRAIL[0] }
+                } else if band == 0 { TRAIL[2] } else { DIM };
+                let ch = if front { glyphs[index as usize % 2] } else { '\u{2591}' };
+                // The near arc sits in front of the cloud it is blowing away.
+                cells.push(Lit { row, col, z: z - 0.5, sgr, ch });
+            }
+        }
+        (cells, 2.0 * reach)
+    }
+
+    /// The cells, nearest last, so a grain in front draws over the one behind it in the same cell.
+    fn draw_scene(&mut self, mut cells: Vec<Lit>) {
+        cells.sort_by(|a, b| b.z.partial_cmp(&a.z).unwrap_or(std::cmp::Ordering::Equal));
+        for lit in cells { self.put_f(lit.row, lit.col, lit.ch, lit.sgr); }
+    }
+
+    /// The ring blows the rain away as it passes: everything inside `rad` is gone.
+    fn scour(&mut self, rad: f32) {
+        let (width, height) = (self.width, self.height);
+        let (centre_row, centre_col) = self.centre;
+        for y in 0..height {
+            for x in 0..width {
+                let dy = (y as f32 - centre_row) * 2.0;
+                if self.rain.age[y * width + x].is_some()
+                    && (dy * dy + (x as f32 - centre_col).powi(2)).sqrt() < rad {
+                    self.rain.age[y * width + x] = None;
+                }
+            }
+        }
+    }
+
+    fn put_f(&mut self, row: f32, col: f32, ch: char, sgr: u16) {
+        if row < 0.0 || col < 0.0 { return; }
+        self.put(row.round() as usize, col.round() as usize, ch, sgr);
+    }
+
+    /// The flash: a filled disc of white light at the centre, for the first two frames of the supernova.
+    fn flash(&mut self) {
+        let (centre_row, centre_col) = self.centre;
+        for dy in -3..=3 {
+            for dx in -7..=7 {
+                if ((dy as f32 * 2.0).powi(2) + (dx as f32).powi(2)).sqrt() < 7.0 {
+                    self.put_f(centre_row + dy as f32, centre_col + dx as f32, '\u{2588}', HEAD);
+                }
+            }
+        }
+    }
+
+    /// Everything falls into the header's star cell, with a last turn as it goes (the sketch's collapse).
+    fn collapse(&mut self, a: f32, cells: Vec<Lit>, star: (usize, usize)) {
+        let s = (1.0 - a).powf(2.4);
+        let mut moved = Vec::with_capacity(cells.len());
+        for lit in cells {
+            let turn = (1.0 - s) * 0.9 * if lit.z < 0.0 { 1.0 } else { -1.0 };
+            let dy = (lit.row - star.0 as f32) * 2.0;
+            let dx = lit.col - star.1 as f32;
+            let row = star.0 as f32 + (dy * turn.cos() - dx * turn.sin()) * s * 0.5;
+            let col = star.1 as f32 + (dx * turn.cos() + dy * turn.sin()) * s;
+            // The last frames are a point of light again, still white.
+            let sgr = if s < 0.12 { HEAD } else { lit.sgr };
+            moved.push(Lit { row, col, z: lit.z, sgr, ch: lit.ch });
+        }
+        self.draw_scene(moved);
     }
 
     // ---- the header --------------------------------------------------------------------------
@@ -569,21 +717,102 @@ mod tests {
     }
 
     #[test]
-    fn the_tornado_is_one_funnel_with_a_narrow_foot_and_a_wide_crown() {
-        let mut opening = Opening::new(90, 26, 11);
-        // Walk into the middle of the tornado act and measure how wide each row it covers is.
-        for _ in 0..RAIN_FRAMES + SWEEP_FRAMES + 4 { opening.step(); }
+    fn a_point_of_light_ignites_in_the_middle_of_the_rain() {
+        let mut opening = Opening::new(80, 24, 11);
+        for _ in 0..RAIN_FRAMES { opening.step(); }
+        opening.step();
+        let centre = (opening.centre.0.round() as usize, opening.centre.1.round() as usize);
+        let glyph = opening.text()[centre.0].chars().nth(centre.1).unwrap_or(' ');
+        assert!(IGNITION.contains(&glyph), "the middle of the screen is the star igniting, not rain: {glyph:?}");
+        assert_eq!(opening.sgr_at(centre.0, centre.1), opening.sgr_of(HEAD), "and it is white");
+        let painted: usize = opening.text().iter().map(|row| row.chars().filter(|c| *c != ' ').count()).sum();
+        assert!(painted > 100, "with the rain still falling around it: {painted} cells");
+    }
+
+    #[test]
+    fn the_supernova_flashes_and_blows_a_sphere_of_glyphs_apart() {
+        let mut opening = Opening::new(90, 26, 12);
+        for _ in 0..RAIN_FRAMES + IGNITE_FRAMES { opening.step(); }
+        // The flash: a filled disc of light where the star was.
+        opening.step();
         let rows = opening.text();
-        let drawn: Vec<&String> = rows.iter().filter(|row| !row.trim().is_empty()).collect();
-        assert!(drawn.len() > 6, "the funnel spans many rows: {rows:?}");
-        let ends = |row: &String| {
-            let left = row.len() - row.trim_start().len();
-            let right = row.trim_end().len();
-            right - left
+        let centre = (opening.centre.0.round() as usize, opening.centre.1.round() as usize);
+        let flash: usize = rows[centre.0 - 1..=centre.0 + 1].iter()
+            .map(|row| row.chars().skip(centre.1 - 6).take(13).filter(|c| *c == '\u{2588}').count()).sum();
+        assert!(flash >= 20, "the flash is a disc of light, not one cell: {flash} blocks: {rows:?}");
+        // Then the debris flies apart: the lit cells reach the edges of a wide screen.
+        let mut reach = 0usize;
+        for _ in 0..NOVA_FRAMES - 1 {
+            opening.step();
+            let rows = opening.text();
+            let left = rows.iter().filter_map(|row| row.find(|c: char| c != ' ')).min().unwrap_or(80);
+            let right = rows.iter().map(|row| row.trim_end().chars().count()).max().unwrap_or(0);
+            reach = reach.max(right.saturating_sub(left));
+        }
+        assert!(reach > 40, "the debris is blown across the screen, not a small blob: {reach} columns");
+    }
+
+    #[test]
+    fn the_ring_is_one_band_in_one_tilted_plane_with_a_bright_near_arc() {
+        let mut opening = Opening::new(100, 30, 13);
+        for _ in 0..RAIN_FRAMES + IGNITE_FRAMES + NOVA_FRAMES - 3 { opening.step(); }
+        opening.step();
+        let ring: Vec<char> = BANDS.iter().flat_map(|(_, glyphs)| glyphs.iter().copied()).collect();
+        let rows = opening.text();
+        let mut cells = Vec::new();
+        let mut near = 0;
+        let mut far = 0;
+        for (y, row) in rows.iter().enumerate() {
+            for (x, ch) in row.chars().enumerate() {
+                if !ring.contains(&ch) { continue; }
+                cells.push((y, x));
+                let sgr = opening.sgr_at(y, x);
+                if sgr == opening.sgr_of(NOVA_NEAR).to_string() || sgr == opening.sgr_of(HEAD).to_string() {
+                    near += 1;
+                }
+                if sgr == opening.sgr_of(DIM).to_string() || sgr == opening.sgr_of(TRAIL[2]).to_string() {
+                    far += 1;
+                }
+            }
+        }
+        assert!(cells.len() > 60, "the ring is made of many cells: {}", cells.len());
+        let rows_used = cells.iter().map(|(y, _)| *y).max().unwrap() - cells.iter().map(|(y, _)| *y).min().unwrap();
+        let cols_used = cells.iter().map(|(_, x)| *x).max().unwrap() - cells.iter().map(|(_, x)| *x).min().unwrap();
+        // ONE band, not a filled disc: a band's cells are a small share of the box it spans.
+        let share = cells.len() as f32 / ((rows_used + 1) * (cols_used + 1)) as f32;
+        assert!(share < 0.45, "a band, not a filled disc: {:.0}% of its own box", share * 100.0);
+        assert!(rows_used >= 6 && cols_used >= 30, "and it is a ring across the screen: {rows_used} rows, {cols_used} columns");
+        assert!(near > 5 && far > 5, "a near arc and a far arc, both there: {near} near, {far} far");
+        assert!(near > far || far > 0, "the near arc is not the only one drawn (far {far})");
+    }
+
+    #[test]
+    fn everything_falls_into_the_stars_cell_and_the_star_lands_in_it() {
+        let mut opening = Opening::new(90, 26, 14);
+        opening.header(&header());
+        let acts = opening.acts();
+        for _ in 0..acts - LAND_FRAMES - COLLAPSE_FRAMES { opening.step(); }
+        // Through the collapse the lit cells fall in: their spread shrinks frame by frame.
+        let spread = |opening: &Opening| -> usize {
+            let rows = opening.text();
+            let left = rows.iter().filter_map(|row| row.find(|c: char| c != ' ')).min().unwrap_or(90);
+            let right = rows.iter().map(|row| row.trim_end().chars().count()).max().unwrap_or(0);
+            right.saturating_sub(left)
         };
-        let crown = ends(drawn[0]);
-        let foot = drawn.iter().map(|row| ends(row)).min().unwrap_or(0);
-        assert!(crown > foot, "the crown is wider than the foot (crown {crown}, foot {foot}): {rows:?}");
+        let mut previous = spread(&opening);
+        for _ in 0..COLLAPSE_FRAMES - 1 {
+            opening.step();
+            let now = spread(&opening);
+            assert!(now <= previous + 2, "the cloud only falls in: {previous} then {now}");
+            previous = now;
+        }
+        assert!(previous < 10, "and it ends a point, in the star's cell: {previous} columns wide");
+        let mut landed = false;
+        for _ in 0..LAND_FRAMES {
+            opening.step();
+            if opening.text()[1].starts_with('\u{273b}') { landed = true; }
+        }
+        assert!(landed, "then the star lands in that cell: {:?}", opening.text()[1]);
     }
 
     #[test]

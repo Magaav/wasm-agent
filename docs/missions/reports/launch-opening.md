@@ -5,10 +5,17 @@ change ✻ into the matrix green color as well as the thinking animated stars fi
 bar". The header's TEXT stays exactly as it is today; the star and that one glyph turn green.
 
 Branch `change/launch-opening`, base `23791f56`, worktree
-`/home/victor/Work/missions/launch-opening/wt`. The reference sketch is copied into the mission folder
-(`wa-header-demo8.py`) and was run first, in a private tmux pty, at 100x30: rain over the whole screen,
-the rain swept into one funnel, the funnel shrinking to the star cell, the title translated from the
-sketch's ALIEN table, then the header. That run is the spec for look and order, not code to port.
+`/home/victor/Work/missions/launch-opening/wt`.
+
+**The reference, FINAL (Victor, 22/11 23:32Z): `scratch/wa-header-demo10.py`, the 3D supernova** - his
+favourite of the two (demo 8, the tornado, was replaced: there is no tornado code left and no switch).
+Both sketches were run first, in a private tmux pty at 100x30, and both are copied into the mission folder
+(`wa-header-demo8.py`, `wa-header-demo10.py`); the frames of each run are kept (`refs/`, `refs10/`). The
+order is the spec: rain over the whole screen, a point of light igniting in the middle of the rain, a white
+flash, a sphere of glyph debris flying apart in depth (near pieces bright, far pieces dim dots), ONE ring
+racing outward in a tilted plane (near arc solid and bright, far arc faint) blowing the rain away as it
+passes, the cloud and ring turning for a moment, everything falling into the header's star cell, the star
+landing, the title translated from the sketch's ALIEN table, then the rest of the header.
 
 ## Premises, re-measured on the base before writing code
 
@@ -47,16 +54,45 @@ answers the next frame's bytes and `Opening::delay` how long it is held. Its fra
 step counter, not of the wall clock, so a starved thread cannot make it skip; the host still enforces the
 budget, so it can only be shortened.
 
-### The acts, as the sketch has them, inside 2.0 s (`7d1db266`)
+### The acts, as the sketch has them, inside 2.0 s (`7d1db266`, reworked for demo 10)
 
-rain 10 frames, the sweep into the tornado 12, the tornado 10, the shrink 14, the star landing 3, then the
-header: the rule and the title in alien letters, one translation per beat (at most 24 beats, so a long
-release tag cannot stretch it), then the rest of the block a line at a time. `planned_ms()` for a
-100x30 console with today's 9-line banner is 1890 ms - asserted, not measured by eye, by
-`the_whole_opening_fits_the_budget` and `a_longer_header_cannot_push_the_opening_past_the_budget`.
+rain 8 frames, the ignition 6 (a growing point of light in the middle of the rain: dot, bullet, circle,
+star), the supernova 22 (the flash, the debris sphere, the ring), the cloud hanging and turning 8, the
+collapse 12, the star landing 3 - then the header: the rule and the title in alien letters, the translation
+in at most 24 beats (so a long release tag cannot stretch it), then the rest of the block a line at a time.
+`planned_ms()` for a 100x30 console with today's 9-line banner is **1922 ms** (measured: 87 frames, 59 of them acts) - asserted, not measured by
+eye, by `the_whole_opening_fits_the_budget` and `a_longer_header_cannot_push_the_opening_past_the_budget`.
+
+The 3D is the sketch's, ported: world units are terminal ROWS, the camera looks down +z (`cam = 3.2 x`
+the ring's radius), a point is drawn at `x*2` columns and scaled by its distance (`k = cam/(cam+z)`), and
+depth picks both brightness and glyph - which is why the far debris is a line of middle dots and the near
+pieces keep their letters. The ring is three bands in ONE tilted plane (`TILT`, `ROLL`), solid and bright
+where it is in front and a light shade where it is behind; it scours the rain inside its radius as it
+passes. The collapse is the sketch's too: a last turn (`(1-s) * 0.9`, signed by depth), `s = (1-a)^2.4`,
+ending white in the star's cell. The 3D scene is `Opening::scene`/`collapse`, a pure function of progress
+and turn - which is what lets the tests assert on it without a screen.
 
 Each frame writes only the cells that changed, addressed by row and column, so the translation beats are
 one row each (`a_frame_writes_only_what_changed`: under 400 bytes, and the rule is not redrawn).
+
+### The supernova's own tests (the tornado's are gone with it)
+
+At the level a reader sees it, in `rust/wa-term/src/opening.rs`:
+
+* `a_point_of_light_ignites_in_the_middle_of_the_rain` - the centre cell holds one of the ignition glyphs
+  in the white of `HEAD`, with the rain still falling around it (over 100 painted cells);
+* `the_supernova_flashes_and_blows_a_sphere_of_glyphs_apart` - the first supernova frame is a disc of
+  light (at least 20 solid blocks in the 3 rows around the centre, not one cell), and by the end of the act
+  the lit cells reach across more than 40 columns;
+* `the_ring_is_one_band_in_one_tilted_plane_with_a_bright_near_arc` - the ring's glyphs occupy under 45%
+  of the box they span (a band, not a filled disc), span at least 6 rows and 30 columns, and BOTH arcs are
+  there: bright near cells and dim far ones;
+* `everything_falls_into_the_stars_cell_and_the_star_lands_in_it` - through the collapse the spread only
+  shrinks, ends under 10 columns wide, and the star then lands in that cell;
+* the pty row still measures the promise itself: the final screen equals the one with the opening off (and,
+  with `WA_BASE_BIN`, the base binary's), a key ends it, a resize ends it, and off/NO_COLOR/resumed/message/
+  pipe/too-small write zero frames.
+
 
 ## The two green glyphs (`c8e3f625`)
 
@@ -87,7 +123,7 @@ A second `wa chat` within the same minute plays it: there is no state for that, 
 
 ## What was measured, and what each row proves
 
-* `rust/wa-term/tests/opening.rs` (new; five rows, 6.4 s) drives the REAL binary in a private pty and reads the
+* `rust/wa-term/tests/opening.rs` (new; five rows, 5.2 s) drives the REAL binary in a private pty and reads the
   screen back through `wa_term::scroll::vt::Vt` - the terminal in memory the render tests use.
   * the final screen with the opening ON equals the final screen with it OFF, row by row, with only the
     session id and the build's own version blanked (two starts cannot share either); with `WA_BASE_BIN`
@@ -103,7 +139,7 @@ A second `wa chat` within the same minute plays it: there is no state for that, 
   * The child is started with `env_clear` and an allow-list. Measured before that fix: the pty inherited
     the operator's provider variables and the compared screen said `model: deepseek-v4.1-flash @
     http://127.0.0.1:8810/...` on a scratch home with no provider at all.
-* `scripts/test-opening.lua` (new; 34 checks) is the Lua half, with no terminal: `matrix` is `00ff41` and
+* `scripts/test-opening.lua` (new; 39 checks) is the Lua half, with no terminal: `matrix` is `00ff41` and
   `accent` is still `d77757`; the welcome line's star and every `marks` frame carry the matrix escape and
   not the accent; the phase word of that row still carries the accent; the policy table with all eleven
   refusals, each by name; `WASM_AGENT_CLI_OPENING=on|0|nonsense`; and `welcome_painted` (the block the last
