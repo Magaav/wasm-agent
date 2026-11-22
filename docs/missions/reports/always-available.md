@@ -172,6 +172,31 @@ Both were run on this branch with the tree's binary before the commit; `test-han
 Verified: 3 runs on this branch (all 5 checks, 0 failed), one run under 12-way CPU load (0 failed),
 and one run on the exact preflight merge commit `2560215744` (0 failed).
 
+## Rebase onto origin/main (22/11)
+
+The branch was rebased onto `origin/main` (`a8cd5348`, which is past the `dfd3c253` the notice named:
+`one-run-path`, `codeact-view`, `gate-fast` and others landed since the base). Fifteen commits replayed;
+**one file conflicted**:
+
+* `scripts/test-rel-native-poll.lua` - the gate row from round 2. Upstream rewrote the same fixture for
+  `change/one-run-path`: its reply is a `run` TOOL CALL, `WASM_AGENT_RAW_CODE` answers nil, and the
+  fenced-block path is gone. My side had added (a) the wait that makes the loop start on an operation the
+  supervisor already calls `running`, and (b) a dual-door fixture that picked the removed channel back up.
+  **Resolution: upstream's one-path fixture, plus my running-seen wait and its check; the dual-door
+  machinery, the `switch_refusal` probe and every reference to `WASM_AGENT_RAW_CODE` were dropped** - the
+  switch is refused by this build and the row must not reintroduce it. Every upstream assertion is kept
+  verbatim, my wait is added, and the row reports 4 checks (3 + 1).
+
+No other file needed hand resolution. Adapted to the one-path world where my own additions still named
+it: `scripts/mock-provider-queued.cjs` now has the stub model answer a **`run`** tool call (was
+`codemode`), with a comment saying why a fixture that sends `codemode` would measure nothing here.
+
+**Re-run on the rebased tree** (this tree's Lua, a binary rebuilt from it): `test-codemode-wait-shape`
+25, `test-codemode-counters` 11, `test-handle-wake` 16, `test-handle-wake-turn` 10,
+`test-rel-native-poll` 4 checks 0 failed, `test-cli-input` 22, `test-cli-queued.sh` end to end
+(`script calls=2, model calls=3, line delivered=1`), `scripts/test-land.lua` **655 checks, ok**, and the
+Rust rows `cargo test -p wa-term` 177 passed and `wa-capabilities` `terminal_tests` 6 passed.
+
 ## Remaining blockers
 
 * `scripts/test-discriminates.sh` (the land gate) was not run: it needs a clean base tree and a
