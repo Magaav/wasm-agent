@@ -217,16 +217,17 @@ screen with the BASE binary's screen when `WA_BASE_BIN` is set (green).
 
 ### The product version in the title line
 
-The welcome line is now `✻ Welcome to wasm-agent! v1.0 · v<sha>`: the product version, a space-dot-space,
+The welcome line is now `✻ Welcome to wasm-agent! v0.1.0 · v<sha>`: the product version, a space-dot-space,
 then the build's own label as it was.
 
-**Where the constant lives:** `lua/core/build_identity.lua`, `M.PRODUCT_VERSION = "1.0"` (line 42). It lives
+**Where the constant lives:** `lua/core/build_identity.lua`, `M.PRODUCT_VERSION = "0.1.0"` (line 42). It lives
 there because that module already owns the question "what version is this?" and the *difference between a
 product version and a build's identity* - which it now spells out beside the constant, so the two can never
-be confused again. It is a LITERAL on purpose: the public tags are `v0.1.0-alpha.N` and the crates say
-`0.1.0`, and Victor chose 1.0 for the product; deriving it from the alpha tag would have been the exact
-mistake the module exists to prevent. The release step owns that one line from now on - nothing else in the
-tree spells the number, and `scripts/test-opening.lua` asserts both that it is 1.0 and that it carries no
+be confused again. It is a LITERAL on purpose: it is the product number, not the tags’ `v0.1.0-alpha.N` slug (a release
+step will own it), and deriving one from the other is the exact mistake this module exists to prevent.
+**Victor’s correction, 22/11: it is `0.1.0`, not `1.0` - "v1.0 is wrong"** - which also makes it agree
+with the crates and the public tags. The release step owns that one line from now on - nothing else in the
+tree spells the number, and `scripts/test-opening.lua` asserts both that it is 0.1.0 and that it carries no
 `alpha`.
 
 The tree had NO product-version constant before this: `build_identity` carries `crate_version` (0.1.0, read
@@ -279,7 +280,7 @@ rule) and glyphs from the alien table. The new operator-facing names, verbatim:
 4. The new host capabilities: `opening_start`, `opening_header`.
 ### Texts this addition changes (verbatim)
 
-5. The title line: `✻ Welcome to wasm-agent! v1.0 · vc6f890e3` (was `✻ Welcome to wasm-agent! vc6f890e3`).
+5. The title line: `✻ Welcome to wasm-agent! v0.1.0 · vc6f890e3` (was `✻ Welcome to wasm-agent! vc6f890e3`).
 6. The model line: `deepseek-v4.1-flash @ http://127.0.0.1:8810/opencode-go/v1 · reasoning high`
    (was `... /v1  ·  reasoning high`, two spaces on each side).
 7. The palette entry `matrix`, FINAL at `00d75f` (xterm 41).

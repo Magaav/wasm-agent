@@ -675,7 +675,7 @@ mod tests {
 
     fn header() -> Vec<String> {
         vec![format!("\x1b[38;2;136;136;136m{}\x1b[0m", "\u{2500}".repeat(40)),
-            format!("{}\u{273b}\x1b[0m Welcome to \x1b[1mwasm-agent\x1b[0m!\x1b[38;2;153;153;153m v1.0 \u{b7} v23791f56\x1b[0m", MATRIX),
+            format!("{}\u{273b}\x1b[0m Welcome to \x1b[1mwasm-agent\x1b[0m!\x1b[38;2;153;153;153m v0.1.0 \u{b7} v23791f56\x1b[0m", MATRIX),
             String::new(),
             "\x1b[38;2;153;153;153m/help for help, /login to sign in to a provider\x1b[0m".to_string(),
             String::new(),
@@ -823,7 +823,7 @@ mod tests {
         assert_eq!(frames, opening.frames(), "every frame the plan promised was drawn");
         let screen = opening.text();
         assert_eq!(screen[0], "\u{2500}".repeat(40), "the rule, at its own width");
-        assert!(screen[1].starts_with("\u{273b} Welcome to wasm-agent! v1.0 \u{b7} v23791f56"),
+        assert!(screen[1].starts_with("\u{273b} Welcome to wasm-agent! v0.1.0 \u{b7} v23791f56"),
             "the title is translated back: {:?}", screen[1]);
         assert_eq!(opening.sgr_at(1, 0), MATRIX, "and its star is the matrix green");
         assert!(screen[3].starts_with("/help for help"), "the rest of the block follows: {:?}", screen[3]);
@@ -838,7 +838,7 @@ mod tests {
         opening.step();
         let screen = opening.text();
         let row = &screen[1];
-        assert_eq!(row.chars().count(), 41, "the title keeps its cells: {row:?}");
+        assert_eq!(row.chars().count(), 43, "the title keeps its cells: {row:?}");
         assert!(row.contains(ALIEN[22]), "'w' is its alien glyph at the start: {row:?}");
         assert!(!row.contains("Welcome"), "nothing is decoded yet: {row:?}");
         assert!(row.contains("23791"), "the version's digits are not letters: {row:?}");
@@ -870,7 +870,7 @@ mod tests {
         // capped at DECODE_FRAMES beats whatever the title's length.
         let mut opening = Opening::new(120, 40, 9);
         let mut long = header();
-        long[1] = format!("{MATRIX}\u{273b}\x1b[0m Welcome to wasm-agent! v1.0 \u{b7} v1.2.3-rc.1234+abcdef0123456789");
+        long[1] = format!("{MATRIX}\u{273b}\x1b[0m Welcome to wasm-agent! v0.1.0 \u{b7} v1.2.3-rc.1234+abcdef0123456789");
         for _ in 0..3 { long.push("\x1b[38;2;255;193;7m! unfinished a run was cut off\x1b[0m".to_string()); }
         opening.header(&long);
         assert!(opening.planned_ms() <= TOTAL_MS, "{} ms", opening.planned_ms());
