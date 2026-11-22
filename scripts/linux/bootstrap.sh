@@ -520,7 +520,8 @@ if [ "$service" = 1 ]; then
   unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
   mkdir -p "$unit_dir"
   cat > "$unit_dir/wa-sentinel.service.new" <<UNIT
-# Written by scripts/linux/bootstrap.sh. The sentinel (autostart) starts and supervises wa serve.
+# Written by wasm-agent (scripts/lib/sentinel-unit.sh and scripts/linux/bootstrap.sh write the same text).
+# The sentinel (autostart) starts and supervises wa serve.
 [Unit]
 Description=wasm-agent sentinel (starts, restarts and upgrades the node from outside)
 After=network-online.target

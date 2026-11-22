@@ -86,7 +86,7 @@ WA_LIB="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/lib/service-target.sh"
 # whoever asked for it sees the same progress, and a missing toolchain is named (or fetched) before a build.
 # node-pins is the NODE's own pin record (what a rollback left here), read before anything is replaced:
 # a deploy that builds first and asks later has already spent the build (round-3 item 6).
-for wa_lib_part in build-status build-requirements deploy-components node-binaries glibc-floor retire-unshipped install-record node-pins runtime-binding node-runtime; do
+for wa_lib_part in build-status build-requirements deploy-components node-binaries glibc-floor retire-unshipped install-record node-pins runtime-binding node-runtime sentinel-unit; do
   [ -f "$(dirname "$0")/lib/$wa_lib_part.sh" ] && . "$(dirname "$0")/lib/$wa_lib_part.sh"
 done
 # The one writer of installed.txt and the one ancestry verdict (scripts/lib/install-record.sh). A deploy
@@ -2053,8 +2053,34 @@ elif [ ! -f "$SENTINEL_CONFIG/sentinel/stop" ]; then
   # reboot, or a watcher that died. Start one. The stop file is what `wa-sentinel stop` writes, so an
   # intentional stop is respected: this only fixes the case where there was never one, or it crashed.
   echo "deploy: no sentinel watching - starting one"
-  env -u WA_DEPLOY_ROOT -u WA_DEPLOY_PIN -u WA_DEPLOY_PIN_DIR -u WA_DEPLOY_BUILD_TARGET \
-    -u WA_CODEMODE_TARGET_DIR "$INSTALL_DIR/$SENTINEL_NAME" start || fail "node installed, but the sentinel would not start"
+  # WHICH ONE COMMAND STARTS IT, and whether this machine gets a supervisor at all (scripts/lib/
+  # sentinel-unit.sh). A `wa-sentinel start` from inside this deploy's own transient unit cannot produce a
+  # watcher here: with nothing outside owning the role it either refuses ("which cannot be shown to own this
+  # watcher") or spawns a child of this deploy, and the deploys of 21-22/11 all ended there after installing
+  # the node correctly. A systemd --user unit is the shape the servers already run (deploy/wa-sentinel.service),
+  # so a user-local install gets one - written, reloaded and enabled here - and the watcher is started by
+  # asking that unit's manager, which is what `wa-sentinel start` does when the unit's own supervisor is named
+  # (role::stated_owner). The supervisor check is untouched: nothing here overrides a role the machine states,
+  # and a unit that cannot be installed leaves the old path exactly as it was.
+  WATCHER_COMMAND="$INSTALL_DIR/$SENTINEL_NAME start"
+  WATCHER_SUPERVISOR=""
+  if command -v wa_sentinel_watcher_prepare >/dev/null 2>&1; then
+    WATCHER_PLAN="$(wa_sentinel_watcher_prepare "$INSTALL_DIR/$SENTINEL_NAME" "$INSTALL_DIR" "$SENTINEL_CONFIG" "$PORT" "$CLIENT_PORT" 2>/dev/null)"
+    WATCHER_UNIT="$(printf '%s\n' "$WATCHER_PLAN" | sed -n 's/^unit=//p' | tail -1)"
+    WATCHER_SUPERVISOR="$(printf '%s\n' "$WATCHER_PLAN" | sed -n 's/^supervisor=//p' | tail -1)"
+    WATCHER_ASKED="$(printf '%s\n' "$WATCHER_PLAN" | sed -n 's/^watcher=//p' | tail -1)"
+    [ -n "$WATCHER_ASKED" ] && WATCHER_COMMAND="$WATCHER_ASKED"
+    [ -n "$WATCHER_UNIT" ] && echo "deploy: sentinel unit: $WATCHER_UNIT"
+  fi
+  if [ -n "$WATCHER_SUPERVISOR" ]; then
+    echo "deploy: starting the sentinel through its unit: $WATCHER_COMMAND"
+    env -u WA_DEPLOY_ROOT -u WA_DEPLOY_PIN -u WA_DEPLOY_PIN_DIR -u WA_DEPLOY_BUILD_TARGET \
+      -u WA_CODEMODE_TARGET_DIR WA_SENTINEL_SUPERVISOR="$WATCHER_SUPERVISOR" \
+      "$INSTALL_DIR/$SENTINEL_NAME" start || fail "node installed, but the sentinel would not start"
+  else
+    env -u WA_DEPLOY_ROOT -u WA_DEPLOY_PIN -u WA_DEPLOY_PIN_DIR -u WA_DEPLOY_BUILD_TARGET \
+      -u WA_CODEMODE_TARGET_DIR "$INSTALL_DIR/$SENTINEL_NAME" start || fail "node installed, but the sentinel would not start"
+  fi
   SENTINEL_NEW_PID=""
   for _ in $(seq 1 50); do
     SENTINEL_NEW_PID="$("$INSTALL_DIR/$SENTINEL_NAME" status 2>/dev/null \
@@ -2135,6 +2161,10 @@ ship_file "$ROOT/scripts/lib/turn-guard.sh" "$INSTALL_DIR/scripts/lib/turn-guard
 ship_file "$ROOT/scripts/lib/build-status.sh" "$INSTALL_DIR/scripts/lib/build-status.sh" "scripts/lib/build-status.sh beside deploy.sh"
 ship_file "$ROOT/scripts/lib/deploy-lock.sh" "$INSTALL_DIR/scripts/lib/deploy-lock.sh" "scripts/lib/deploy-lock.sh beside deploy.sh (the build lock a dead holder cannot block)"
 ship_file "$ROOT/scripts/lib/deploy-signal.sh" "$INSTALL_DIR/scripts/lib/deploy-signal.sh" "scripts/lib/deploy-signal.sh beside deploy.sh (the deploy-pending signal)"
+# ...and the unit a deploy installs when the machine has nothing outside owning the watcher: the NEXT deploy
+# runs the copy beside the binary, and without this file the branch that gives a fresh install a supervisor
+# would quietly fall back to the path that cannot start one.
+ship_file "$ROOT/scripts/lib/sentinel-unit.sh" "$INSTALL_DIR/scripts/lib/sentinel-unit.sh" "scripts/lib/sentinel-unit.sh beside deploy.sh (the systemd --user unit a deploy installs and starts)"
 ship_file "$ROOT/scripts/lib/build-requirements.sh" "$INSTALL_DIR/scripts/lib/build-requirements.sh" "scripts/lib/build-requirements.sh beside deploy.sh"
 # ...and the runtime-binding re-check: an installed copy of this script is what the sentinel runs, and it has to
 # be able to ask the binding question a second time (review of 18/11, item 9).
