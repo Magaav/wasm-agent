@@ -257,6 +257,7 @@ fi
 gate_run node scripts/test-install-isolation.mjs
 gate_run node scripts/test-gate-check.mjs
 gate_run node scripts/test-landing-queue.mjs
+gate_run node scripts/test-deploy-pin-prune.mjs
 run_proof_fixture producer 16 node scripts/test-producer-admission.mjs
 gate_run node scripts/test-full-gate-proof.mjs
 gate_run node scripts/test-runtime-install-binding.mjs
