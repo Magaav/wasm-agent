@@ -9,6 +9,7 @@ Branch `change/deploy-never-starved`, base `4c443e66` (item 4 of `sentinel-on-av
 | 3. the cross-process proofs (a real node, a real `--once` worker, a real sentinel) | `82d00ef2` |
 | docs and the suite wiring | `558f13a1` |
 | the row that borrowed its subject, found by the preflight of 22/11 (`does-not`) | `38c27bfe` |
+| round 2 (review MUST 1-3): a served operator turn is never refused nor cut, and the factory's callers wait out exit 2 | `42a3a57a` |
 
 Citations are `git log -S` / `git show`; every claim below names the commit that implements it.
 
@@ -122,6 +123,20 @@ fast-path row by the glob (`scripts/test-deploy-wait.lua` is not in `scripts/fas
    has no proof it paused`; `session <8> is still working (<label>)`.
 9. `wa session status`/a wake row's `last_error` now carries sentences 1–2 instead of nothing when a wake is
    held for a deploy.
+10. The window's chat body carries `"operator": true` (a scheduling hint; `ui/app.js`).
+11. `deploy-wait <time> the node is waiting for or installing a build: asking again (<n>s of <n>s)` - the mission
+   runner's line, in `out.log`, per re-ask.
+12. `deploy-wait <time> gave up after <n>s: the node is still waiting for or installing a build, so this turn
+   never started (nothing ran)` - the runner past its limit.
+13. `deploy-wait <time> refused (nothing ran; asking again in <n>s)` - the same wait in `lease.log`.
+14. `deploy-wait the node is waiting for or installing a build: asking again (<n>s of <n>s)` - the resume
+   runner's line.
+15. `worker-gate: the node is waiting for or installing a build: the resume waits <n>s and asks again (<n>s of
+   <n>s) - round <n> is not spent`.
+16. `worker-gate: the node refused the resume for <n>s (a build is waiting for or installing on it): nothing ran,
+   and no round was spent - the request is in its sentinel's box`.
+17. `docs/SCRIPTED-RUNS.md`: `2` is documented as *refused, nothing ran*, and a runner that resumes a worker
+   must WAIT on it (`WA_DEPLOY_WAIT_LIMIT`/`WA_DEPLOY_WAIT_STEP`) rather than count a round.
 
 ## What this does not claim
 
@@ -129,14 +144,11 @@ fast-path row by the glob (`scripts/test-deploy-wait.lua` is not in `scripts/fas
   `/health` and the real sentinel binary (`82d00ef2`), and the pause/refusal/resume against a real node and a
   real `--once` worker; no deploy of this branch ran on this node from this worktree, so "`wa-sentinel status`
   shows the request, then 0 waiting within about three minutes" (Victor's own test) is **not** measured here.
-- **A served turn is refused while a deploy waits.** `lua/core/server.lua` does not set `operator_present`, and the
-  node cannot tell the window from a script on `/chat`, so the window's own turn gets sentence 1 during a deploy
-  instead of starting. That is the safe side and it is a behaviour change for the window; it is named here rather
-  than silently accepted.
-- **A subagent child that is already running keeps running**: `deploy_pause` never pauses a child (its parent owns
-  the continuation, unchanged since `dfa88ca9`'s neighbours), so a child in flight still holds the node until it
-  ends — the sentinel names it (`N subagent(s) running, M queued`, no session) and refuses to pass the bound over
-  it.
+- **A served AUTOMATIC turn is refused while a deploy waits.** `POST /chat` from a client that does not send
+  `operator: true` is refused (round 2, `42a3a57a`); the window's own turn is not, because the window says so.
+  A peer's relayed turn (`/node/chat`) is a program and is always refused.
+- **A subagent child that is already running keeps running** - the follow-up brief is in the round-2 section
+  above.
 - **The 01:27Z incident could not be re-measured** (not in the retained log; see the table).
 - `scripts/test-deploy-signal.sh` was added to `scripts/test.sh` only; the fast path runs the `.sh` rows it names,
   and this one is not among them.
@@ -194,6 +206,101 @@ directly instead, with the fast path's own environment (`CARGO_TARGET_DIR` set, 
 last complete fast-path run of this branch (the preflight of 22/11, on the merged tree `ac33856e`) reports
 `fast: ok (217 checks, 0 failed)`; the earlier full run here (before these two test-only commits) was 384
 checks / 2 failed, both pre-existing and both re-measured on the base - see below.
+
+## Round 2 - the review's three MUSTs (`42a3a57a`)
+
+### MUST 1 - a served operator turn is never refused
+
+The first version refused EVERY run without `operator_present`, and only `lua/core/chat.lua` set it - so the
+window's own turn got `deploy_waiting` for up to 900 s on every landing, and the comment in `agent.lua` claiming
+otherwise was false. Every served entry that can start a turn, and who is behind it:
+
+| entry | who is behind it | verdict |
+| --- | --- | --- |
+| `POST /chat` non-streaming -> `wa_reply` (`lua/core/server.lua`) | the window's non-SSE fetch, a script, a `curl` | a person IFF the body says `operator: true` (`ui/app.js` sends it); otherwise refused |
+| `POST /chat` streaming -> `wa_reply_stream` | the window (SSE), a script | the same rule, same field |
+| `POST /node/chat` -> `node_agent` (`server.lua`, peer relay) | another node's program | a program: never exempt, refused like any automatic turn |
+| `agent_for`'s cached agent (`server.lua:90`) | whatever the next request is | the marker is set per RUN at both call sites, so an automatic turn cannot inherit a person's exemption |
+| idle compaction (`server.lua:652`) | the node itself | not a turn (a summary model call), unchanged |
+| efficiency report (`server.lua:1980`) | the operator's `/report` | not a turn, unchanged |
+| `wa chat` at a terminal (`chat.lua`) | the operator | exempt since the first round (`scripted` is false at a tty) |
+
+The field is a SCHEDULING hint, not an identity: what a caller may read, write or deploy is still decided from
+its credential (`resolve_admission`, the session-isolation rules), and a client that lied about it could only
+spare its own turn a wait. `parse_run_body` now treats `operator: true` as one of the three things that make a
+body structured (with `images` and `thread`), so the JSON is never handed to the model as text.
+
+### MUST 2 - an operator's turn IN FLIGHT is not cut by a merely WAITING request
+
+`deploy_pause.at_boundary` asked both signals for everybody. Now an `operator_present` run asks the INSTALLER's
+marker alone: a request that is only waiting needs the node to stop starting turns, not to end the turn a person
+is in the middle of, and the real swap still pauses everybody as it always did. `wa-sentinel status` names such
+a session `working` (its holder line, unchanged - it marks `paused for the deploy` only from a pause record, and
+this run writes none).
+
+### MUST 3 - the factory's scripted callers survive the new exit 2
+
+`wa chat --once` exits 2 with `deploy_waiting` while a build waits for or installs on the node. Three callers
+used to spend something on that:
+
+| caller | before | now |
+| --- | --- | --- |
+| `scripts/worker-gate.sh` | counted the refusal as one of the three rounds, then asked the preflight again - three refusals and the mission is recorded red although nobody worked on it | waits and asks again, up to `WORKER_GATE_DEPLOY_WAIT` (900 s) in `WORKER_GATE_DEPLOY_STEP` (15 s) steps, and counts a round only when a turn actually ran; a wait that never ends records `preflight=refused` with `rounds` unchanged |
+| `scripts/mission.sh`'s generated `run.sh` | wrote `rc=2` into `done` - a mission that never ran, read as a failed turn | waits and asks again (`WA_DEPLOY_WAIT_LIMIT`/`WA_DEPLOY_WAIT_STEP`), writes the wait into `out.log` AND `lease.log`, and binds `run.lock` to the session of the attempt that finally ran; past the limit `done` says `rc=2` and the log says nothing ran |
+| `wa mission launch`'s `run.sh` and `wa mission resume`'s `resume-run.sh` (`lua/core/mission.lua`) | the same, and the resume spent one of its 25 tries on the wait | the same wait; the resume's tries are spent only on real attempts |
+
+**The factory's own copy.** `~/Work/missions/worker-gate.sh` is a SYMLINK to the canonical checkout's
+`scripts/worker-gate.sh`, so it inherits this fix when the branch lands - nothing to copy. I first copied the
+fixed file onto that path, which wrote THROUGH the symlink into the canonical checkout's working tree; I saw it
+in `git status` there, restored the file (`git checkout -- scripts/worker-gate.sh`, tree clean again) and left
+the symlink as it was. That mistake is here rather than buried: a factory script that is a link into another
+tree must not be "updated" by copying onto it.
+
+### What the tests measure now (and what fails on the pre-round tip)
+
+| row | on this branch | on the pre-round tip (`1bcd8779`) |
+| --- | --- | --- |
+| `scripts/test-deploy-wait.lua` (59 checks) | ok | **fails**: `a waiting request does not end the operator's turn` (MUST 2) |
+| `scripts/test-deploy-wait.sh` (36 checks) | ok | fails: the window's turn is refused (step 2a), the operator's in-flight turn is cut (step 4b) |
+| `scripts/test-worker-gate.sh` (39 checks) | ok | **fails**: `two refused asks and two real resumes, not 2` (MUST 3) |
+| `scripts/test-mission.sh` (282 checks) | ok | fails: the launch records `rc=2` for a turn that never ran |
+| `scripts/test-mission-verb.sh` (47 checks) | ok | fails: the generated runner records the refusal as the run |
+
+`scripts/test-deploy-wait.sh` step 2 was split as the review asked: **2a** the window's turn (`operator: true`)
+runs while the request waits and spends a completion; **2b** a served turn that says nothing is refused by
+name and spends none. Step **4b** starts an operator turn, writes the request while its first model call is in
+flight, and asserts it reaches its own answer, is not refused, goes on to the model and records no pause.
+
+While building that row I also fixed a real defect it exposed: the launcher's timeout watchdog
+(`( sleep 21600; kill ... ) &`) was killed as a subshell, so the `sleep` inside it survived and held the
+caller's stdout open - `$(bash run.sh)` never saw EOF and hung for up to six hours. The watchdog's own output
+is `/dev/null` now (it needs none), which is a one-line change and is what let the runner be tested in a
+command substitution at all.
+
+## SHOULD: what happens when a turn's step never ends within the bound
+
+A turn that is inside a long tool call when a request starts waiting does not reach a step boundary until the
+call returns, so it keeps the node busy. What the node does about that, exactly:
+
+* no NEW turn starts beside it (the gate), so nothing adds to the wait;
+* the sentinel holds until `WA_DEPLOY_HOLD_BOUND` (180 s) and then asks `bound_verdict`: a holder that is still
+  working is NOT passed over - the deploy keeps waiting and `status` names the session and its label
+  (`session 8082b42e  POST /chat 3m  working`);
+* when the call returns, that turn's next step boundary is where it pauses (or finishes), and the install
+  starts on the next watcher tick;
+* a `bash` call is bounded by the node's own `exec_timeout_seconds` (300 s by default, reported by `/health`),
+  so "never" is a call's bound, not an unbounded wait. If the bound were raised above the request's own window
+  (900 s) the request would expire and the node would start new turns again - named here because that is the
+  setting an operator would reach for on a machine doing long builds.
+
+## SHOULD: the running subagent child (follow-up, not this round)
+
+A child that is already running when the request arrives keeps running: `deploy_pause` never pauses a child
+("its parent owns the continuation", unchanged since the park work), so it holds the node until it ends. The
+sentinel names it (`2 subagent(s) running, 0 queued`, no session) and refuses to pass the bound over it. The
+follow-up brief: give a child the same step-boundary pause, with the parent's continuation carrying the resume -
+or let the sentinel treat a running child like a paused holder once its parent has paused. Both need a test that
+crosses processes (a real child run against a real node), which is why it is not in this round.
 
 ## Knobs
 

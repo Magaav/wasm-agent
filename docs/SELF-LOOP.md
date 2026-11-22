@@ -228,10 +228,16 @@ What the node does while either is live:
   piped prompt, a wake, a resume dispatch, a subagent child - and the CLI refuses it before the thread is even
   opened (`lua/core/chat.lua`, exit 2, nothing written: no thread, no message, no model call). The refusal is
   named and carries the commit: `deploy_waiting: waiting for the install of <sha> (deploy request <id>, asked
-  <when>) ...`. An operator's own interactive turn is NOT refused: somebody is watching it, and a pause they
-  did not ask for is worse than one more turn (`agent.operator_present`, set by `wa chat` at a terminal).
-* **A running turn pauses at its next step boundary** - never mid-call - writes its checkpoint and ends
-  cleanly with one resume wake (the pause half of `deploy_pause`). It records where it paused in
+  <when>) ...`.
+* **A person's turn is never refused, and is never cut by a wait.** Two doors say "a person is here": a
+  terminal (`wa chat`, the `scripted` test) and a served turn whose client sends `operator: true` in its body -
+  which is what the window (`ui/app.js`) sends, and the only thing that does. A served client that says nothing
+  is refused like any other automatic turn. And an operator's turn that is already running pauses only for the
+  INSTALLER's marker, not for a request that is merely waiting: the wait needs the node to stop STARTING
+  turns, not to end the turn a person is in the middle of - that would cut their work after every step for as
+  long as the wait lasts, and `wa-sentinel status` names such a session as `working`.
+* **A running automatic turn pauses at its next step boundary** - never mid-call - writes its checkpoint and
+  ends cleanly with one resume wake (the pause half of `deploy_pause`). It records where it paused in
   `<data>/deploy-paused/<session>.json`.
 * **Nothing resumes until the deploy ends.** The node's own placement tick (`lua/core/selfloop.lua`) holds
   every due wake while either signal is live, and `release_due` does not release the paused sessions: the
