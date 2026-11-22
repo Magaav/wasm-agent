@@ -1640,7 +1640,15 @@ function M.peer_offline(node)
 end
 
 -- Call a capability on a peer: direct when possible, else through the relay.
-function M.remote_call(selector, capability, args)
+-- `options` carries what only the CALLER's process can state about a call, and only for a file
+-- capability on a peer (mission remote-edit-first-class): `read_pages`, the page of a file THIS
+-- session was served on that node, and `record_change`, whether it wants the before/after text of the
+-- change back so the change can be recorded, and undone, from here. Both travel as fields of the
+-- SIGNED BODY and never inside `args` - `args` is what the model writes, and a fence the model can
+-- set is not a fence. An older peer ignores fields it does not know (it verifies the signature over
+-- the body as bytes, so an extra field cannot fail its check), and a caller that sends no options gets
+-- exactly the behaviour it had before.
+function M.remote_call(selector, capability, args, options)
   local node = M.find(selector)
   if not node then
     -- A COLD roster during an outage is not "no such node": it is "the rendezvous could not be
@@ -1674,13 +1682,18 @@ function M.remote_call(selector, capability, args)
     copy.budget_ms = M.RELAY_PEER_BUDGET_MS
     inner = copy
   end
-  local body = json.encode({
+  local fields = {
     from_node_id = (M.identity() or {}).node_id,
     to_node_id = node.node_id,
     request_id = host.uuid(),
     capability = capability,
     args = inner,
-  })
+  }
+  if type(options) == "table" then
+    if options.read_pages ~= nil then fields.read_pages = options.read_pages end
+    if options.record_change == true then fields.record_change = true end
+  end
+  local body = json.encode(fields)
   local headers, problem = M.signed_headers("call", body)
   if not headers then return { error = problem } end
   -- Mesh first when the operator turned it on: the peer decides against its own roster rather than

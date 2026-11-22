@@ -37,6 +37,30 @@ local modules = dofile("lua/core/modules.lua")
 local sttlib = dofile("lua/core/stt.lua")
 function wa_stt_tick() sttlib.safe_tick() end
 
+-- A change recorded for a file on ANOTHER NODE is verified and undone THERE (mission
+-- remote-edit-first-class, item 2). `changeset` holds the two texts in this node's content-addressed
+-- store and never writes a file itself; this is the seam through which it reaches one it does not own,
+-- and it lives here because `nodeslib` is the only route to a peer's filesystem. Nothing is loosened:
+-- the only caller is this node's own `/diff` undo route, which requires a master (wa_diff below), and
+-- the peer answers as it does for any peer call - its own guards, its own workspace, its own refusal.
+changeset.set_file_host(function(node)
+  return {
+    -- The digest of the file's text as the peer has it, not the text: the read capability answers the
+    -- whole file's `version` for a one-line page too, so a 200 KB file is verified without moving it.
+    digest = function(path)
+      local answer = nodeslib.remote_call(node, "read", { path = path, offset = 1, limit = 1 })
+      if type(answer) ~= "table" then return nil, "node_no_answer" end
+      if type(answer.version) == "string" and answer.version ~= "" then return answer.version end
+      return nil, tostring(answer.error or "node_no_answer")
+    end,
+    write = function(path, text)
+      local answer = nodeslib.remote_call(node, "write", { path = path, content = text })
+      if type(answer) == "table" and answer.ok == true then return true end
+      return nil, tostring(type(answer) == "table" and (answer.error or "write_refused") or "node_no_answer")
+    end,
+  }
+end)
+
 memory.setup()
 local agent
 
@@ -1383,7 +1407,10 @@ local function adopt_bash(args, caller, author)
   return answer
 end
 
-local function node_capability(capability, args, caller)
+-- `request` is the decoded signed body of a peer call, so the capability can see the two fields the
+-- caller's own process stamped there (read_pages, record_change, M.remote_call) without any of them
+-- reaching `args`, which is what the model wrote.
+local function node_capability(capability, args, caller, request)
   args = args or {}
   local author = nodeslib.author_of(caller)
   if not author then return { error = "forbidden_role" } end
@@ -1516,7 +1543,7 @@ local function node_capability(capability, args, caller)
       placement=args.placement,
     })
   end
-  return wa_peer_dispatch(capability, args, caller, author)
+  return wa_peer_dispatch(capability, args, caller, author, request)
 end
 
 -- A peer acts in ITS OWN peer-session scope (session isolation, finding 3).
@@ -1531,7 +1558,7 @@ end
 -- caller on the mesh, and nothing on this node fabricates one, so the branch nothing exercised was the
 -- branch everything rests on. Called with a caller table (node_id, role) it is the same code a verified
 -- peer reaches; `from` and the signature are checked by `wa_verify_peer` above it, never here.
-function wa_peer_dispatch(capability, args, caller, author)
+function wa_peer_dispatch(capability, args, caller, author, request)
   args = args or {}
   caller = caller or {}
   local peer_session = "peer:" .. tostring(caller.node_id or "unknown")
@@ -1559,6 +1586,13 @@ function wa_peer_dispatch(capability, args, caller, author)
     node_id = nodeslib.node_name(),
     peer_call = true,
     session_id = peer_session,
+    -- What the CALLER's own process stated about this session, read from the signed body (M.remote_call)
+    -- and never from `args`: the page of a file that session was served on THIS node (`read_pages`),
+    -- and whether it wants the before/after text back so the change can be recorded in its own session
+    -- (`record_change`). Both are the caller's word about itself - the only place that word can come
+    -- from, since a peer cannot say what someone else's session was shown.
+    read_pages = type(request) == "table" and request.read_pages or nil,
+    record_change = type(request) == "table" and request.record_change == true or nil,
   })
 end
 
@@ -1836,12 +1870,12 @@ function wa_node_call(payload, from, public_key, ts, signature, mesh)
       emit({ type = "log", message = "mesh admission: " .. capability .. " admitted by the " .. verb .. " verb" })
     end
     enrollment.audit(caller, capability, "started")
-    local ran, result = pcall(node_capability, capability, request.args, caller)
+    local ran, result = pcall(node_capability, capability, request.args, caller, request)
     enrollment.audit(caller, capability, ran and not result.error and "completed" or "failed")
     if not ran then return answer({ error = tostring(result) }) end
     return answer(result)
   end
-  return answer(node_capability(capability, request.args, caller))
+  return answer(node_capability(capability, request.args, caller, request))
 end
 
 -- Streaming turn requested by a peer (/node/chat): events go to that stream.
@@ -2095,6 +2129,9 @@ function wa_diff(payload, session)
       path = file.path, before = file.before, after = file.after,
       added = file.added or 0, removed = file.removed or 0,
       created = file.created == true, recorded = file.recorded ~= false,
+      -- Where the file lives, so undo writes it there (changeset.set_file_host above) instead of over a
+      -- local file of the same name, and the reason a change could not be recorded travels with it.
+      node = file.node, reason = file.reason,
     }
   end
   -- Turns recorded before repeats were merged hold one entry per write, and the second one's `before` is

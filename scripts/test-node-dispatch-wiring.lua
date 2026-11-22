@@ -47,7 +47,11 @@ end
 
 -- The region of `node_capability` that holds the branches, ending at the fallthrough.
 local function dispatchRegion(text)
-  local start = text:find('local function node_capability(capability, args, caller)', 1, true)
+  -- The anchor stops at the parameter list: the signature gained a fourth parameter (the decoded signed
+  -- request, change/remote-edit-first-class) and matching its closing paren made this guard report "no
+  -- dispatch region" for a file that has one. What is asserted is unchanged: the region exists and the
+  -- fallthrough inside it returns.
+  local start = text:find('local function node_capability(capability, args, caller', 1, true)
   if not start then return nil end
   local fallthrough = text:find('return toolslib.dispatch(memory, capability, args', start + 1, true)
   if not fallthrough then return nil end
