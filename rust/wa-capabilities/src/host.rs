@@ -3866,7 +3866,12 @@ fn handle_mouse(state: &mut ConsoleInput, event: wa_term::selection::Mouse) {
                         return;
                     }
                     clear_selection(state);
-                    state.transcript.page(if up { 3 } else { -3 });
+                    // ONE notch is ONE page, exactly as PageUp/PageDown are (Victor 22/11: "scroll with
+                    // mouse should behave exactly the same as pg up pg down from keyboard ... same amount of
+                    // scroll from both endings"): the same step the key takes, so the same clamp at the top and
+                    // at the bottom, and the same return to following the newest output.
+                    let page = page_rows(state);
+                    state.transcript.page(if up { page } else { -page });
                     return;
                 }
             }
@@ -5528,6 +5533,55 @@ mod terminal_tests {
         let small = state.editor.as_ref().unwrap().out_bottom();
         assert!(small < 6, "a 10-row terminal leaves under six chat rows: {small}");
         assert_eq!(super::page_rows(&state), 1, "and a page there is still one row, never zero");
+    }
+
+    /// The wheel is PageUp/PageDown with a pointer instead of a key (Victor 22/11: "scroll with mouse
+    /// should behave exactly the same as pg up pg down from keyboard (which is correct), same amount
+    /// of scroll from both endings"). One notch is ONE page: the same `page_rows` step the key takes,
+    /// driven through the host's own mouse path over a chat the transcript really drew, and read the
+    /// way the reader reads it - the chat's first visible row.
+    #[test]
+    fn a_wheel_notch_pages_the_chat_exactly_as_pageup_does() {
+        use wa_term::selection::Mouse;
+        use wa_term::terminal_editor::Action;
+        // The chat's first visible row, as the reader would point at it: its own line number.
+        fn first(state: &mut super::ConsoleInput) -> usize {
+            let area = super::output_rows(state.panel.as_ref(), state.editor.as_ref().unwrap());
+            let rows = state.transcript.view(80, area);
+            let row = rows.iter().find(|row| !row.trim().is_empty()).expect("the chat covers the screen");
+            row.split_whitespace().find_map(|word| word.parse::<usize>().ok())
+                .unwrap_or_else(|| panic!("no line number in {row:?}"))
+        }
+        fn a_long_chat(state: &mut super::ConsoleInput) {
+            let mut editor = wa_term::terminal_editor::Editor::default();
+            editor.row = 39; editor.width = 80; editor.height = 3;
+            state.editor = Some(editor);
+            for n in 0..400 { state.transcript.write(&format!("line {n}\n")); }
+            let _ = super::layout_frame(state); // one frame: the transcript knows its height
+        }
+
+        // The key: the editor's own bytes, and the arm the host runs for them.
+        let mut keys = super::ConsoleInput::default();
+        a_long_chat(&mut keys);
+        let bottom = first(&mut keys);
+        let mut action = Action::None;
+        for byte in b"\x1b[5~" { action = keys.editor.as_mut().unwrap().feed(*byte); }
+        assert!(matches!(action, Action::PageUp), "the sequence is PageUp's, not another key's");
+        let page = super::page_rows(&keys);
+        assert_eq!(page, 12, "an 80x40 terminal pages twelve chat rows");
+        keys.transcript.page(page);
+        let from_key = first(&mut keys);
+        assert_eq!(from_key + page as usize, bottom, "PageUp moved one page up");
+
+        // One notch: the host's own mouse path, over the same chat.
+        let mut wheel = super::ConsoleInput::default();
+        a_long_chat(&mut wheel);
+        super::handle_mouse(&mut wheel, Mouse::WheelUp(3, 20));
+        assert_eq!(first(&mut wheel), from_key, "one notch lands on the row one PageUp lands on");
+        // And down again: one notch back is the row it came from, and following the newest output.
+        super::handle_mouse(&mut wheel, Mouse::WheelDown(3, 20));
+        assert_eq!(first(&mut wheel), bottom, "one notch down returns to the row it came from");
+        assert!(wheel.transcript.following(), "and the chat follows its newest output again");
     }
 
     /// The scrollbar's mouse (operator, 13/11 ~06:50). A press in the bar's column scrolls the chat
