@@ -1262,6 +1262,15 @@ function M.run_wake(args)
     pcall(function() dofile("lua/core/counters.lua").bump("wake_only_round") end)
   end
   local content, trace = M.turn_content(row, { now = now })
+  -- Item 5 of the seat list (22/11): pending work is on EVERY wake, not only on a settlement. A handle
+  -- wake already carries what is still running - it was built from a settle - so it is left exactly as
+  -- it was (one list, never two); a timer, an event or a probe wake says it here, from the session's own
+  -- handles, so a model whose context was compacted learns what it left running from the turn itself
+  -- instead of having to remember it. A read, and a failure to read is never in the way of the wake.
+  if not tostring(row.id or ""):match("^handle:") then
+    local ok_pending, block = pcall(function() return dep("handle_wake").pending_text(row.session_id) end)
+    if ok_pending and type(block) == "string" and block ~= "" then content = content .. "\n" .. block end
+  end
   -- `SelfWake`: a due wake is claimed and about to spend a turn. The operator may veto it (a quiet
   -- hours rule, a budget that is spent) and say when to try again; a veto without a reschedule is a
   -- recorded failure rather than a silent skip, because a wake that never runs and never says so is

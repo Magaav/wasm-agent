@@ -44,6 +44,23 @@ local function clip(text, limit)
   return text:sub(1, limit) .. string.format("\n[clipped at %d bytes of %d; the whole answer is the handle's own, read it with results.get(op)]", limit, #text)
 end
 
+-- The words for "work is still running", shared by BOTH kinds of wake (item 5 of the seat list, 22/11:
+-- pending work listed on every wake). Every handle with its op, its tool, its STATE and its age - the
+-- state is named rather than implied by the header, because `running` and `unknown` are both open and
+-- they are not the same news: the one whose state was lost is exactly the one a model must not read as
+-- healthy. One line for a wake row, one block for a turn (M.pending_text).
+local function pending_words(still)
+  local parts = {}
+  for _, handle in ipairs(still) do
+    parts[#parts + 1] = string.format("%s (%s, %s, %ds)", tostring(handle.op),
+      tostring(handle.tool or "call"), tostring(handle.state or "unknown"), tonumber(handle.age_s) or 0)
+  end
+  return {
+    string.format("Still pending (%d): %s", #still, table.concat(parts, ", ")),
+    "wait(op) resumes one, cancel(op) stops one, results.get(op) re-reads an answer.",
+  }
+end
+
 -- The words of one wake row: the answer, then what is still running. Read-only and pure, so a test can
 -- hold it without a node, a model or a tick.
 function M.prompt_for(record, value, still)
@@ -64,13 +81,7 @@ function M.prompt_for(record, value, still)
   if #still == 0 then
     lines[#lines + 1] = "No handle is pending any more."
   else
-    local parts = {}
-    for _, handle in ipairs(still) do
-      parts[#parts + 1] = string.format("%s (%s, %ds)", tostring(handle.op), tostring(handle.tool or "call"),
-        tonumber(handle.age_s) or 0)
-    end
-    lines[#lines + 1] = string.format("Still pending (%d): %s", #still, table.concat(parts, ", "))
-    lines[#lines + 1] = "wait(op) resumes one, cancel(op) stops one, results.get(op) re-reads an answer."
+    for _, line in ipairs(pending_words(still)) do lines[#lines + 1] = line end
   end
   return table.concat(lines, "\n")
 end
@@ -137,6 +148,56 @@ function M.sweep(opts)
     end
   end
   return out
+end
+
+-- Every handle a SESSION still holds, across every scope it owns, oldest first: what a wake that is not
+-- a settlement has to say as well (M.pending_text). A settlement's own row is built from the sweep,
+-- which already has the scope in hand; a timer, an event or a probe wake has only the session id, so the
+-- scopes are walked here - the same read the sweep does on its 2 s tick, never a write.
+function M.pending_for(session_id)
+  session_id = tostring(session_id or "")
+  if session_id == "" then return {} end
+  local pending = dep("codemode_pending")
+  local listing = host.list_dir and host.list_dir(pending.dir()) or nil
+  if type(listing) == "string" then
+    local decoded_ok, decoded = pcall(json.decode, listing)
+    listing = decoded_ok and decoded or nil
+  end
+  local entries = type(listing) == "table" and (listing.entries or {}) or {}
+  local out, seen = {}, {}
+  for _, item in ipairs(entries) do
+    local name = tostring(type(item) == "table" and item.name or "")
+    if name:match("%.json$") then
+      local index = pending.open((name:gsub("%.json$", "")))
+      for _, handle in ipairs(pending.open_handles(nil, index)) do
+        local record = (index.ops or {})[handle.op]
+        -- A handle belongs to the session its own record names: a scope can be shared, and a wake must
+        -- never read another conversation's work into this one.
+        if record and tostring(record.session or "") == session_id and not seen[handle.op] then
+          seen[handle.op] = true
+          out[#out + 1] = handle
+        end
+      end
+    end
+  end
+  table.sort(out, function(a, b)
+    if (tonumber(a.age_s) or 0) ~= (tonumber(b.age_s) or 0) then
+      return (tonumber(a.age_s) or 0) > (tonumber(b.age_s) or 0)
+    end
+    return tostring(a.op) < tostring(b.op)
+  end)
+  return out
+end
+
+-- The block a wake that is NOT a settlement adds to its turn: what this session still has running.
+-- "" when nothing is open, so a session with no pending work reads exactly as it did before (parity:
+-- an empty block is no block).
+function M.pending_text(session_id)
+  local still = M.pending_for(session_id)
+  if #still == 0 then return "" end
+  local lines = { "Your earlier calls are still running; each one wakes this session when it settles:" }
+  for _, line in ipairs(pending_words(still)) do lines[#lines + 1] = line end
+  return table.concat(lines, "\n")
 end
 
 return M

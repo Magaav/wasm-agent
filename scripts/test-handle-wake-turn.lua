@@ -44,6 +44,20 @@ local function dispatch(name, params, raw) return tools.dispatch(memory, name, p
 local scope = 'handle-wake-turn-scope'
 local opts = { ctx = ctx, scope = scope, session = sid, dispatch = dispatch }
 
+-- Two calls that are STILL RUNNING when both wakes below are composed: item 5 of the seat list is
+-- about a wake that finds the model with work pending, and the brief's own scenario is exactly this -
+-- two handles pending and a scheduled wake. They are `sleep`s this row can stop with the supported
+-- cancel verb at the end; nothing is killed by name.
+local stay_b = pending.invoke(dispatch, opts, 'bash', { command = 'sleep 300' },
+  json.encode({ command = 'sleep 300' }), 0)
+local stay_c = pending.invoke(dispatch, opts, 'bash', { command = 'sleep 300' },
+  json.encode({ command = 'sleep 300' }), 0)
+check(type(stay_b) == 'table' and stay_b.state == 'pending',
+  'a long call answers a handle: ' .. json.encode(stay_b or {}))
+check(type(stay_c) == 'table' and stay_c.state == 'pending',
+  'and a second one does too: ' .. json.encode(stay_c or {}))
+local stay_b_op, stay_c_op = tostring(stay_b.op), tostring(stay_c.op)
+
 -- 1. A call that settles with nobody waiting, appending to its own marker: the marker is how the
 -- "never re-run" half is measured.
 -- The command takes about a second, so the call answers a HANDLE rather than finishing inside its
@@ -81,7 +95,6 @@ dofile = function(path)
   return original_dofile(path)
 end
 local answer = selfloop.run_wake({ id = row.id, owner = owner, session_id = sid })
-dofile = original_dofile
 check(type(answer) == 'table' and answer.ok == true,
   'the wake turn ran: ' .. json.encode(answer or {}):sub(1, 240))
 check(calls == 1, 'the model was asked exactly once, with nobody typing: ' .. calls)
@@ -95,6 +108,34 @@ end
 check(found ~= nil, 'the wake is a durable row in the transcript')
 check(found and found:find('a pending call settled', 1, true) ~= nil,
   'and it says what woke the session: ' .. tostring(found):sub(1, 240))
+
+
+-- 4. A wake that is NOT a settlement says the same thing (item 5 of the seat list, 22/11: "pending work
+-- listed on every wake"). The gold rows for this turn are the two lines a scheduled wake always had -
+-- the label and the prompt it carries - and the pending list follows them, unchanged in place.
+local scheduled = selfloop.schedule({ reason = 'the nightly check', prompt = 'look at the build',
+  in_seconds = 1 }, ctx)
+check(type(scheduled) == 'table' and scheduled.ok == true,
+  'a scheduled wake exists: ' .. json.encode(scheduled or {}):sub(1, 240))
+if host.sleep then host.sleep(1600) end
+local timer = selfloop.claim_due(sid, owner)
+check(type(timer) == 'table' and tostring(timer.reason) == 'the nightly check',
+  'and it is due: ' .. json.encode(timer or {}):sub(1, 240))
+local timer_answer = selfloop.run_wake({ id = timer.id, owner = owner, session_id = sid })
+check(type(timer_answer) == 'table' and timer_answer.ok == true,
+  'its turn ran: ' .. json.encode(timer_answer or {}):sub(1, 240))
+local timer_input = tostring(seen.last or '')
+check(timer_input:find('[self-wake', 1, true) == 1 and timer_input:find('look at the build', 1, true) ~= nil,
+  'the scheduled wake keeps its own two lines, as they were: ' .. timer_input:sub(1, 240))
+check(timer_input:find(stay_b_op, 1, true) ~= nil and timer_input:find(stay_c_op, 1, true) ~= nil,
+  'and it lists BOTH handles the session still holds: ' .. timer_input:sub(1, 400))
+check(timer_input:find('(bash, running, ', 1, true) ~= nil,
+  'with each handle\'s own state, not only its name: ' .. timer_input:sub(1, 400))
+check(select(2, timer_input:gsub('Still pending', '')) == 1,
+  'one list, never two: the block is added once: ' .. timer_input:sub(1, 400))
+dofile = original_dofile
+check(counters.read().wake_only_round == 1,
+  'a wake that is not a settlement is not a wake-only round: ' .. json.encode(counters.read()))
 
 -- 4. Nothing was re-run, and the wake-only round is counted.
 local lines = 0
