@@ -106,19 +106,51 @@ ok(tostring(short_why):find("fonts_missing_from_bundle", 1, true) ~= nil,
 -- neither. It now FOUNDS the bundle: beside the binary this process was started from, in the install records
 -- this node keeps, and only then the per-user default - verified by the three faces being there, never assumed
 -- from a path's shape. This case builds that install on disk and points the one record the node reads at it.
+--
+-- AND IT BUILDS THE BINARY THAT NODE REPORTS, TOO (22/11: six checks red on this machine). The case used to
+-- leave "beside this binary" as the RUNNING binary, and on avell that is ~/.local/bin/wa with a complete
+-- ~/.local/bin/ui/fonts beside it - a candidate that comes BEFORE the install record - so the verdict was
+-- about what the machine happens to have installed, not about the code. It was green in the landing gates of
+-- 21/11 and went red only once the local installs put ui/fonts beside ~/.local/bin/wa, which is exactly what
+-- a row must never do.
+--
+-- THE ORDER STAYS THE PRODUCT'S, and it is the right one: the bundle beside the binary that is actually
+-- running is the one that binary was installed with (scripts/upgrade.sh:58 installs to $HOME/.local/bin,
+-- scripts/deploy.sh installs ui/ the same way, rust/wa-sentinel/src/instance.rs hands over WA_UI_DIR), while
+-- the record exists for the case this row is about - a binary somewhere else, named by a record. So the row
+-- provides every fact it depends on: no WA_UI_DIR, no WASM_AGENT_LUA_ROOT, a scratch HOME (so the per-user
+-- default candidate is this case's own directory), and a binary at <scratch>/installed-node/bin/wa with NO
+-- ui/ beside it. The seam is host.runtime_info(), which is what font_setup.binary_path() reads, so the
+-- product's own path - the one an install takes - is the one under test.
 do
-  -- THE INSTALLED NODE'S ENVIRONMENT: no WA_UI_DIR and no WASM_AGENT_LUA_ROOT. This test's own process has
-  -- WA_UI_DIR set (it points the rest of the suite at this checkout), and that really is the first candidate -
-  -- so it is cleared here for the length of the case, and put back after.
-  local before_install_env = host.getenv
-  host.getenv = function(key)
-    if key == "WA_UI_DIR" or key == "WASM_AGENT_LUA_ROOT" then return "" end
-    return before_install_env(key)
-  end
   local installed = scratch_root .. "/installed-node"
   local install_ui = installed .. "/ui"
   mkdir(install_ui .. "/fonts")
   for _, name in ipairs(font_setup.FONTS) do write(install_ui .. "/fonts/" .. name, "a face, not the real bytes") end
+  local scratch_bin = installed .. "/bin/wa"
+  mkdir(installed .. "/bin")
+  write(scratch_bin, "a path, not a program: nothing executes this file\n")
+  -- The two facts the running machine would otherwise supply: no WA_UI_DIR and no WASM_AGENT_LUA_ROOT (this
+  -- test's own process has WA_UI_DIR set - it points the rest of the suite at this checkout - and that really
+  -- is the first candidate), and a HOME that is not the operator's.
+  local before_install_env, before_runtime_info = host.getenv, host.runtime_info
+  host.getenv = function(key)
+    if key == "WA_UI_DIR" or key == "WASM_AGENT_LUA_ROOT" or key == "WA_HOME_BEFORE_OVERRIDE" then return "" end
+    if key == "HOME" or key == "USERPROFILE" then return scratch_root end
+    return before_install_env(key)
+  end
+  -- The binary this node reports is the scratch install's, whose ui/ is the record's - not the complete copy
+  -- that sits beside whatever binary happens to be running this row.
+  host.runtime_info = function()
+    local info = {}
+    local ok, raw = pcall(before_runtime_info)
+    if ok and type(raw) == "string" and raw ~= "" then
+      local decoded_ok, decoded = pcall(json.decode, raw)
+      if decoded_ok and type(decoded) == "table" then info = decoded end
+    end
+    info.binary_path = scratch_bin
+    return json.encode(info)
+  end
   -- THE RECORD FIRST, then the question: paths.data() is the store the node reads its own install facts from.
   local data = dofile("lua/core/paths.lua").data()
   write(data .. "/install-dir.txt", installed .. "\n")
@@ -128,8 +160,18 @@ do
   local labels = {}
   for _, row in ipairs(found) do labels[#labels + 1] = tostring(row.label) .. "=" .. tostring(row.path) end
   eq(font_setup.source_dir(), install_ui .. "/fonts",
-    "the faces are found from this node's own install record, with no WA_UI_DIR and no WASM_AGENT_LUA_ROOT (tried: "
-      .. table.concat(labels, " | ") .. ")")
+    "the faces are found from this node's own install record, with no WA_UI_DIR, no WASM_AGENT_LUA_ROOT and no"
+      .. " ui/ beside this binary (tried: " .. table.concat(labels, " | ") .. ")")
+  -- THE ORDER ITSELF, asserted rather than assumed: "beside this binary" is tried BEFORE the record, which is
+  -- why an install's own ui/ is never shadowed by a record naming an older complete copy.
+  local beside_ui = tostring(scratch_bin):gsub("/[^/]+$", "") .. "/ui/fonts"
+  local function index_of(rows, path)
+    for i, row in ipairs(rows) do if tostring(row.path) == path then return i end end
+    return nil
+  end
+  local beside_at, record_at = index_of(found, beside_ui), index_of(found, install_ui .. "/fonts")
+  ok(beside_at ~= nil and record_at ~= nil and beside_at < record_at,
+    "the UI beside this binary is tried before the install record (" .. tostring(beside_at) .. " < " .. tostring(record_at) .. ")")
   -- AND A CANDIDATE IS ONLY USED WHEN IT IS COMPLETE: a record naming a directory with no faces in it must not
   -- be answered as the bundle (a refusal naming the path is the honest answer, not a half-copy).
   local empty = scratch_root .. "/installed-empty"
@@ -156,7 +198,18 @@ do
   local printed = {}
   for _, row in ipairs(tried) do printed[#printed + 1] = tostring(row.path) end
   ok(#printed >= 2, "more than one place was tried, so the refusal can name them: " .. table.concat(printed, ", "))
-  host.getenv = before_install_env
+  -- THE ORDER, FROM THE OTHER SIDE: with a complete ui/ beside this binary AND a complete one named by the
+  -- record, the bundle beside the binary is the answer. That is the behaviour the live node relies on, and the
+  -- one this row could not see while it ran against whatever was installed on the machine.
+  local beside_fonts = tostring(scratch_bin):gsub("/[^/]+$", "") .. "/ui/fonts"
+  mkdir(beside_fonts)
+  for _, name in ipairs(font_setup.FONTS) do write(beside_fonts .. "/" .. name, "a face beside the binary") end
+  eq(font_setup.source_dir(), beside_fonts,
+    "a complete ui/ beside this binary wins over a record naming another complete one")
+  pcall(host.exec, "rm -rf '" .. tostring(scratch_bin):gsub("/[^/]+$", "") .. "/ui'", "", 20)
+  eq(font_setup.source_dir(), install_ui .. "/fonts",
+    "and with the copy beside the binary gone, the record answers again")
+  host.runtime_info, host.getenv = before_runtime_info, before_install_env
 end
 
 -- ---- a terminal config: the edit, the backup, the undo ---------------------------------------------
