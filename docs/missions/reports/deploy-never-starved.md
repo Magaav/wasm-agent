@@ -8,6 +8,7 @@ Branch `change/deploy-never-starved`, base `4c443e66` (item 4 of `sentinel-on-av
 | 2. `wa-sentinel status` names every holder; a held deploy passes over paused sessions after its bound | `9f57d863` |
 | 3. the cross-process proofs (a real node, a real `--once` worker, a real sentinel) | `82d00ef2` |
 | docs and the suite wiring | `558f13a1` |
+| the row that borrowed its subject, found by the preflight of 22/11 (`does-not`) | `38c27bfe` |
 
 Citations are `git log -S` / `git show`; every claim below names the commit that implements it.
 
@@ -153,6 +154,37 @@ failure is attributable to this diff, and both were measured:
 
 The fast path also printed the tree's binary as `b56581895221 is on NO branch the remote has` - expected: this branch is
 committed locally and never pushed, as instructed.
+
+## The preflight's discrimination row, and the defect it found (`38c27bfe`)
+
+The first preflight of this branch (22/11, HEAD `ac33856e` merged with main `e1d457f0`) stopped on
+`discrimination` with exactly one blocking row:
+
+```
+does-not	scripts/test-deploy-bound.sh	it passed on the old code, and the branch ADDS it: it does not catch this change
+```
+
+**It was right, and the row was wrong in two ways.**
+
+1. **Its subject was borrowed.** The row looked for a prebuilt sentinel at
+   `${CARGO_TARGET_DIR:-$ROOT/rust/target}/debug/wa-sentinel`. Run against the BASE tree with the mission's
+   `CARGO_TARGET_DIR` in the environment, it found the sentinel built from the BRANCH, drove it, passed - and
+   proved nothing. Fixed: the subject is now BUILT from `$ROOT`'s own sources by a cargo invoked with `$ROOT`'s
+   manifest, into that target directory; `WA_SENTINEL_BIN` is accepted only INSIDE `$ROOT`; and the bytes that
+   build produced are copied into the row's own `$WORK/wa-sentinel`, so no concurrent build can swap them
+   between a check and a `once`. The row prints the tree commit and the binary's `sha256` so a reader can see
+   which build it judged. Cost of the honesty: 5 s in a warm target, 12 s from cold.
+2. **Its skips looked like passes.** Every hole was spelled `deploy bound: SKIP (...)` - not `SKIP ` at the
+   start of a line, which is the spelling `scripts/fast.sh` collects and the spelling that made
+   `scripts/test-discriminates.sh` record exit 0 as "it passed on the old code". Both rows now print
+   `SKIP test-deploy-bound: <reason>` / `SKIP test-deploy-wait: <reason>`, and the absence of cargo, of node or
+   of curl is a named non-judgment instead of a silent success.
+
+Re-measured after the fix (`38c27bfe`): `bash scripts/test-discriminates.sh origin/main --branches
+'change/deploy-never-starved' 4c443e66` -> **2 discriminating, 0 blocking, 1 not judged** (`changes=1`,
+`unrevertable=1`: the Lua row, which the tool cannot judge while the branch changes `rust/`, its own named
+limit). On the base worktree the two `sh` rows fail with **12** and **16** failures, and both pass on this
+tree (`deploy bound ok`, `deploy wait ok`).
 
 ## Knobs
 
