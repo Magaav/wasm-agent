@@ -2470,8 +2470,19 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     if not node.local_node and (call.capability == "write" or call.capability == "edit")
         and type(result) == "table" and ctx and type(ctx.emit) == "function" and ctx.watch_changes then
       local target = result.path or (type(call.args) == "table" and call.args.path) or "?"
+      local ok = not result.error and result.ok ~= false
+      -- The peer's answer carries the two texts when the call asked for them (mission
+      -- remote-edit-first-class sends `change` on the wire): then the reader gets the SAME card a local
+      -- write draws, from the peer's own before/after. A peer that sent no texts, or refused the call,
+      -- gives the one honest row - never nothing. An allow-list: only these five fields travel.
+      local wire = result.change
+      if type(wire) ~= "table" or wire.recorded == false
+          or type(wire.before) ~= "string" or type(wire.after) ~= "string" then
+        wire = nil
+      end
       deliver(ctx, { type = "remote_change", capability = call.capability, node = node.name,
-        path = tostring(target), ok = not result.error and result.ok ~= false, error = result.error })
+        path = tostring(target), ok = ok, error = result.error,
+        before_text = wire and wire.before or nil, after_text = wire and wire.after or nil })
     end
     if carries_local_images(result) then
       return {error="remote_image_transport_unsupported",capability=call.capability,

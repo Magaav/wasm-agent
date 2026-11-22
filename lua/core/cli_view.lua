@@ -3209,9 +3209,21 @@ function METHODS:event(event)
       self:line(paint("\226\142\191 no diff shown: " .. tostring(why), "dim", self.live))
     end
     return  elseif kind == "remote_change" then
-    -- A create/edit that ran on ANOTHER node (lua/core/tools.lua, the remote branch): the peer's answer
-    -- carries no text this node could draw, so this is one honest row - what, where and on which node -
-    -- rather than the silence a reader would read as "nothing happened".
+    -- A create/edit that ran on ANOTHER node (lua/core/tools.lua, the remote branch). When the peer's
+    -- answer carried the two texts (mission remote-edit-first-class puts them on the wire), this is the
+    -- SAME card a local write draws - path, counts, numbered rows - from the peer's own before/after.
+    -- When it did not, the reader gets one honest row saying what ran where, never silence.
+    if type(event.before_text) == "string" and type(event.after_text) == "string" and event.ok ~= false then
+      local lines = M.diff_block({ path = event.path, before_text = event.before_text,
+        after_text = event.after_text }, self.limit, self.live)
+      if lines then
+        self:topic(true)
+        for _, row in ipairs(lines) do self:write(row .. "\n") end
+        self:write("on " .. tostring(event.node) .. "\n\n")
+        self:topic(false)
+        return
+      end
+    end
     local wrote = event.ok == false and "could not write " or "wrote "
     local text = wrote .. tostring(event.path) .. " on " .. tostring(event.node)
     if event.ok == false then text = text .. ": " .. tostring(event.error or "refused") end

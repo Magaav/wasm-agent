@@ -212,6 +212,18 @@ view_lib.new({ out = function(text) buffer[#buffer + 1] = text end, live = false
 local failed_row = table.concat(buffer)
 has(failed_row, 'could not write /srv/app/notes.md on peer-one: not_peer_operator',
   'and a refused one says so instead of claiming a write')
+-- The peer's answer carries the two texts when the call asked for them (mission remote-edit-first-class
+-- puts `change` on the wire): then the reader gets the same card a local write draws, followed by the
+-- node it happened on. Without the texts it is the one row above, never nothing - both are asserted.
+buffer = {}
+view_lib.new({ out = function(text) buffer[#buffer + 1] = text end, live = false,
+  now = function() return 0 end, limit = card_width })
+  :event({ type = 'remote_change', capability = 'edit', node = 'peer-one', path = '/srv/app/notes.md',
+    ok = true, before_text = 'one\ntwo\nthree\n', after_text = 'one\nTWO\nthree\n' })
+local peer_card = table.concat(buffer)
+has(peer_card, 'Update(/srv/app/notes.md)', 'a peer that sent its two texts gets the same Update(path) card')
+has(peer_card, 'Added 1 lines, removed 1 lines', 'with the peer change own counts')
+has(peer_card, 'on peer-one', 'and the node it happened on, under the card')
 check(chat ~= nil, 'chat.lua loads (its event filter is what a terminal run hands the view)')
 
 -- ---- 5. through the AGENT LOOP, which is what a `wa chat` turn runs ------------------------

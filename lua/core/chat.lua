@@ -111,8 +111,11 @@ local function printer(view)
         quiet = event.quiet }
     elseif event.type == "remote_change" then
       -- A change made on another node, as the one row the view can honestly draw.
+      -- The two texts travel only when the peer sent them; the view draws the card from them and falls
+      -- back to its one row when they are absent.
       ready = { type = "remote_change", capability = event.capability, node = event.node,
-        path = event.path, ok = event.ok, error = event.error }
+        path = event.path, ok = event.ok, error = event.error,
+        before_text = event.before_text, after_text = event.after_text }
     elseif event.type == "reasoning" then
       -- Reasoning is model output and goes through the redactor for the same reason a tool's
       -- output does: it is text this process did not write and is about to print.

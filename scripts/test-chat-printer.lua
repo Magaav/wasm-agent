@@ -47,4 +47,9 @@ local remote = seen[#seen]
 check(remote.type == "remote_change" and remote.node == "peer-one" and remote.path == "/srv/x.md",
   "a change made on another node reaches the view as one row's worth of facts")
 check(remote.ok == false and remote.error == "not_peer_operator", "including that it did not happen")
+emit({ type = "remote_change", capability = "edit", node = "peer-one", path = "/srv/x.md", ok = true,
+  before_text = "one\n", after_text = "two\n" })
+local peer = seen[#seen]
+check(peer.type == "remote_change" and peer.before_text == "one\n" and peer.after_text == "two\n",
+  "and the two texts the peer sent, which are what the card is drawn from")
 print("chat printer ok (" .. checks .. " checks)")
