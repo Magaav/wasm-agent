@@ -213,6 +213,45 @@ for i = 1, 6 do
     'await ' .. i .. ' that spent its 900 s budget is waiting, not a loop')
 end
 
+-- THE LOAD-SENSITIVE EXEMPTION (measured 22/11 on avell, mission flaky-rel-native-poll; it stopped
+-- land262). A wait_s:0 poll of a running operation is a hot loop whatever the HOST took to hand the
+-- call back: the exemption reads what the wait ASKED and what it SPENT, never the wall clock around
+-- the call. The numbers below are the measured ones - 17000 ms of wall clock for a poll that asked for
+-- no time - and on the base the guard ran that loop to round 18.
+local poll_cost = progress_guard.wait_cost({ action = 'await', id = 'op-1', wait_s = 0 },
+  { state = 'pending', op = 'op-1', waited_s = 0 }, nil, 17000)
+eq(poll_cost.asked_ms, 0, 'a wait_s:0 poll asked for no time')
+eq(poll_cost.spent_ms, 0, 'and spent none: its own answer outranks 17 s of host wall clock')
+local loaded = progress_guard.new({ repeat_limit = 3, idle_rounds = 50, ceiling = 0 })
+for i = 1, 2 do
+  eq(progress_guard.observe(loaded, { signature = 'run(poll)', results = 'same', say = say_same,
+    effects = 1, changes = 'c', waiting = true,
+    wait_spent_ms = poll_cost.spent_ms, wait_budget_ms = poll_cost.asked_ms }), nil,
+    'the loaded poll ' .. i .. ' is a retry')
+end
+has(progress_guard.observe(loaded, { signature = 'run(poll)', results = 'same', say = say_same,
+  effects = 1, changes = 'c', waiting = true,
+  wait_spent_ms = poll_cost.spent_ms, wait_budget_ms = poll_cost.asked_ms }),
+  'guard_repeated_calls',
+  'a wait_s:0 poll of a loaded host is stopped at round 3, never at round 18')
+
+-- The other half is unchanged: a wait that really blocked keeps its exemption. A direct
+-- `operation await wait_s:900` answer names no spend of its own, so the clock counts CAPPED AT the ask.
+local real_wait = progress_guard.wait_cost({ action = 'await', id = 'op-1', wait_s = 900 }, nil, nil, 900400)
+eq(real_wait.asked_ms, 900000, 'an await that asked for 900 s')
+eq(real_wait.spent_ms, 900000, 'and blocked 900.4 s is a real wait')
+-- A nested pending answer reports its own spend; the evidence pointer is followed to read it.
+local nested = progress_guard.wait_cost({ code = 'await(wait_s:900)' },
+  { ok = true, calls = { { name = 'operation', state = 'pending', op = 'op-2', waited_s = 900 } } }, nil, 0)
+eq(nested.spent_ms, 900000, 'a nested pending answer that reports waited_s carries the spend itself')
+local pointed = progress_guard.wait_cost({ code = 'poll' },
+  { ok = true, calls = { { name = 'operation', result = { path = 'answer.json', bytes = 40 } } } },
+  function(path) return '{"state":"pending","op":"op-3","waited_s":0}' end, 17000)
+eq(pointed.spent_ms, 0, 'the nested answer behind the evidence pointer is read, not guessed')
+-- Unknown is not yes: an answer that reports no spend and a call that asked for none spend nothing.
+eq(progress_guard.wait_cost({ code = 'poll' }, { state = 'pending', op = 'op-4' }, nil, 9000).spent_ms, 0,
+  'a poll whose answer reports no spend still spends nothing when it asked for nothing')
+
 -- An await on a SETTLED operation hands back the same bytes: still a loop.
 local settledWait = progress_guard.new({ repeat_limit = 3, idle_rounds = 12, ceiling = 0 })
 eq(progress_guard.observe(settledWait, { signature = 'operation(await)', results = 'r', effects = 0,

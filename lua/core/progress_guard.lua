@@ -195,6 +195,92 @@ function M.said(answer, read)
   return table.concat(into, '\n')
 end
 
+-- WHAT THE WAIT ITSELF SAYS: what it ASKED to spend, and what it SPENT. Both are the call's own
+-- account, and neither moves with the host's load.
+--
+-- Measured 22/11 on avell (mission flaky-rel-native-poll; it stopped land262): a `wait_s:0` poll of a
+-- running operation was exempted from the repeat counter whenever the host took a second or more to
+-- hand the call back, because the spend was `host.now() - tool_started` and the floor `max(1000, ask)`
+-- invented a one-second budget for a call that asked for none. Under 64 busy loops on 16 cores one
+-- poll took 1.2-17 s of wall clock and the same call ran 4, 7, 9, 13, 18 and 19 rounds instead of 3
+-- (six of eight runs), while `say` was identical in every round: nothing but the clock had moved.
+-- The wait's own report is the load-independent fact, so it is what the exemption reads.
+local function named_ms(record, ms_field, s_field)
+  if type(record) ~= 'table' then return nil end
+  local ms = tonumber(record[ms_field])
+  if ms ~= nil then return math.max(0, math.floor(ms)) end
+  local seconds = tonumber(record[s_field])
+  if seconds ~= nil then return math.max(0, math.floor(seconds * 1000)) end
+  return nil
+end
+
+--- What this call ASKED to wait for, in ms: `wait_ms`/`wait_s` in its own arguments, or in its own
+--- answer. 0 when it names neither - a call that asked for nothing asked for nothing, and unknown is
+--- never yes.
+function M.asked(args, answer)
+  local asked = named_ms(args, 'wait_ms', 'wait_s')
+  local in_answer = named_ms(answer, 'wait_ms', 'wait_s')
+  if in_answer ~= nil and (asked == nil or in_answer > asked) then asked = in_answer end
+  return asked or 0
+end
+
+-- The fields a wait reports its own spend in: `waited_s` is the codemode handle's account (seconds),
+-- `waited_ms` the same in ms. Evidence pointers are FOLLOWED, because a nested call's own answer is
+-- what the call actually said (the shape M.said reads for the same reason).
+local SPEND_FIELDS = { waited_ms = 1000, waited_s = 1 }
+
+local function collect_spent(value, into, read, seen, depth)
+  if type(value) ~= 'table' or depth > 6 then return into end
+  for key, item in pairs(value) do
+    local name = tostring(key)
+    if SPEND_FIELDS[name] ~= nil and type(item) ~= 'table' then
+      local amount = tonumber(item)
+      if amount ~= nil then
+        into[#into + 1] = math.max(0, math.floor(amount * (SPEND_FIELDS[name] == 1000 and 1 or 1000)))
+      end
+    elseif type(item) == 'table' then
+      if type(item.path) == 'string' and type(read) == 'function' and not seen[item.path] then
+        seen[item.path] = true
+        local ok, raw = pcall(read, item.path)
+        if ok and type(raw) == 'string' and raw ~= '' then
+          local parsed_ok, parsed = pcall(dofile('lua/vendor/json.lua').decode, raw)
+          if parsed_ok and type(parsed) == 'table' then collect_spent(parsed, into, read, seen, depth + 1) end
+        end
+      end
+      collect_spent(item, into, read, seen, depth + 1)
+    end
+  end
+  return into
+end
+
+--- What the wait itself reports it spent, in ms, or nil when the answer reports nothing at all.
+--- nil is not zero: the caller decides what to do with an answer that stays silent.
+function M.waited(answer, read)
+  local found = collect_spent(answer, {}, read, {}, 0)
+  if #found == 0 then return nil end
+  local most = 0
+  for _, ms in ipairs(found) do if ms > most then most = ms end end
+  return most
+end
+
+--- The two facts the hot-loop exemption reads, taken from the call itself.
+---
+--- asked_ms  what the call asked to wait for (0 when it named nothing).
+--- spent_ms  what the wait says it spent, when the answer carries that; otherwise the host's wall
+---           clock CAPPED AT what the call asked for. That cap is the fix: a `wait_s:0` poll asked
+---           for no time, so no amount of host delay can earn it the exemption, while a 900 s await
+---           on a loaded host still counts as the 900 s it asked for.
+function M.wait_cost(args, answer, read, wall_ms)
+  local asked = M.asked(args, answer)
+  local reported = M.waited(answer, read)
+  local spent = reported
+  if spent == nil then
+    local wall = math.max(0, math.floor(tonumber(wall_ms) or 0))
+    spent = math.min(wall, asked)
+  end
+  return { asked_ms = asked, spent_ms = spent }
+end
+
 function M.new(opts)
   opts = opts or {}
   return {
@@ -269,11 +355,13 @@ function M.observe(state, obs)
   -- observation - a hot loop, not a wait. So a live wait is exempt when its answer MOVED or when it
   -- spent the budget it asked for; a poll that spent nothing stays a repeat, and a wait that spent
   -- real time is progress even when its answer is byte-identical.
-  -- A LONG WAIT IS JUDGED BY THE TIME THE CALL SPENT, not by a budget the call may not report.
-  -- codemode_pending strips wait_s before dispatching, so the answer carries no budget at all and a
-  -- budget test could never fire (review r3, B6). The rule is: a wait that spent at least a second, or
-  -- its own full budget when one is known, is progress - so an await that blocked five minutes and
-  -- answered the same pending is progress, while a wait_s:0 poll that returned at once is not.
+  -- A LONG WAIT IS JUDGED BY THE TIME THE WAIT ITSELF REPORTS, never by the host clock around the call.
+  -- The rule is: a wait that spent at least a second, or its own full budget when one is known, is
+  -- progress - so an await that blocked five minutes and answered the same pending is progress, while
+  -- a wait_s:0 poll that returned at once is not. Both numbers arrive from M.wait_cost (what the call
+  -- ASKED and what the answer says it SPENT): the host's wall clock is only ever used CAPPED AT THE
+  -- ASK, because a wall clock measures the machine's load as well as the wait (measured 22/11: a
+  -- wait_s:0 poll took 1.2-17 s under 64 busy loops and the hot loop ran to round 18 instead of 3).
   local budget = math.max(1000, obs.wait_budget_ms or 0)
   local waited_long = (obs.wait_spent_ms or 0) >= budget
   -- AND NEVER ON EFFECTS. A codemode call that merely awaited counted as an effect, which made
