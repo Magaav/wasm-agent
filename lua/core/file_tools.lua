@@ -36,6 +36,50 @@ local function integer(n,default,maximum)
   return n
 end
 
+-- THE OTHER NAMES MODELS ALREADY KNOW (22/11). Every harness spells the same two arguments its own
+-- way, so a model that learned one writes that spelling here first: the turn note this change answers
+-- is `tools.edit` refusing `old_string`/`new_string` with `unsupported_edit_option` and the round
+-- spent on the refusal instead of on the edit. A well-known name is mapped AT THE DOOR, and the mapped
+-- call then meets exactly the checks it would have met - one occurrence, the anchor fence, the version -
+-- so this is tolerance in what a call may be CALLED, never in what it may DO.
+--
+-- Why not in the schema: the schema is the prompt prefix. A synonym declared there costs every session
+-- its cached context, and it advertises four spellings of one argument to a model that needs one.
+--
+-- A call that sends BOTH spellings is refused by name (`argument_alias_conflict`): two values for one
+-- argument is a question this code must not answer by picking one.
+local ALIASES = {
+  read  = { { 'file_path', 'path' } },
+  write = { { 'file_path', 'path' } },
+  edit  = { { 'file_path', 'path' }, { 'old_string', 'old_text' }, { 'new_string', 'new_text' } },
+}
+-- The fields one replacement inside `edits` accepts, mapped the same way. Kept apart from ALIASES
+-- because an item carries no path, and a top-level pair is not an item.
+local EDIT_ITEM_ALIASES = { { 'old_string', 'old_text' }, { 'new_string', 'new_text' } }
+local function rename_fields(args, pairs_, tool)
+  if type(args) ~= 'table' or type(pairs_) ~= 'table' then return args, nil end
+  for _, pair in ipairs(pairs_) do
+    local alias, argument = pair[1], pair[2]
+    if args[alias] ~= nil then
+      if args[argument] ~= nil then
+        return nil, { error = 'argument_alias_conflict', argument = argument, alias = alias,
+          message = '`' .. tool .. '` was sent both `' .. argument .. '` and its synonym `' .. alias
+            .. '`, so which value to use is not decidable.',
+          fix = 'send `' .. argument .. '` once and drop `' .. alias .. '`; nothing was changed.',
+          input = alias .. ' and ' .. argument }
+      end
+      args[argument] = args[alias]
+      args[alias] = nil
+    end
+  end
+  return args, nil
+end
+-- A well-known spelling for one of this tool's arguments becomes that argument, or the call is refused
+-- by name. Idempotent: the mapping leaves no alias key behind, so the dispatcher mapping and then the
+-- module mapping are one mapping.
+function M.accept_names(tool, args) return rename_fields(args, ALIASES[tool], tool) end
+M.EDIT_ITEM_ALIASES = EDIT_ITEM_ALIASES
+
 -- A read selection is a stateless receipt, not a set of coordinates for the model to edit.
 -- The binding catches a changed field before it can become a different source range; the file
 -- version and selected-content digest are checked again against fresh bytes at edit time.
@@ -204,6 +248,9 @@ end
 -- Nil scope (a direct module call, a batch that carries no session) records nothing and is never
 -- fenced: the fence is about a page the session was served, and there is no session here.
 function M.read(args,store_image,view_bytes,scope)
+  local named,conflict=M.accept_names('read',args)
+  if conflict then return conflict end
+  args=named
   if type(args.path)~='string' or args.path=='' then return {error='path_required'} end
   local line=integer(args.offset,1,2147483647)
   local column=integer(args.column,1,2147483647)
@@ -477,6 +524,9 @@ function M.apply(plan,record)
 end
 
 function M.prepare_write(args)
+  local named,conflict=M.accept_names('write',args)
+  if conflict then return conflict end
+  args=named
   if type(args.path)~='string' or args.path=='' then return {error='path_required'} end
   if type(args.content)~='string' then return {error='content_required',path=args.path} end
   local before=host.read_file(args.path)
@@ -492,6 +542,9 @@ function M.prepare_write(args)
 end
 
 function M.edit(args,record,prepare_only,scope)
+  local named,conflict=M.accept_names('edit',args)
+  if conflict then return conflict end
+  args=named
   if type(args.path)~='string' or args.path=='' then return {error='path_required'} end
   local range_form=args.range_edits~=nil
   local legacy_form=args.edits~=nil or args.old_text~=nil or args.new_text~=nil
@@ -525,6 +578,13 @@ function M.edit(args,record,prepare_only,scope)
     end
   else
     for i,item in ipairs(edits) do
+      -- The same well-known spellings inside one replacement: a model that writes `old_string` at the
+      -- top level writes it here too, and the mapped item meets the checks below unchanged.
+      if type(item)=='table' then
+        local mapped,item_conflict=rename_fields(item,EDIT_ITEM_ALIASES,'edit')
+        if item_conflict then item_conflict.edit=i; return item_conflict end
+        item=mapped; edits[i]=item
+      end
       if type(item)~='table' or type(item.old_text)~='string' or item.old_text=='' then return {error='old_text_required',edit=i} end
       if type(item.new_text)~='string' then return {error='new_text_required',edit=i} end
       for key in pairs(item) do if key~='old_text' and key~='new_text' then return {error='unsupported_replacement_field',edit=i} end end

@@ -1893,6 +1893,11 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     end
     return result
   elseif name == "read" then
+    -- A well-known spelling for one argument becomes the declared one BEFORE the path is resolved, so
+    -- `file_path` resolves, fences and records exactly as `path` does (lua/core/file_tools.lua, ALIASES).
+    local named, conflict = file_tools.accept_names("read", args)
+    if conflict then return conflict end
+    args = named
     args.path = resolve_path(memory, ctx, args.path)
     -- The scope is what lets a later edit refuse an anchor it can prove came from a partial page
     -- (file_tools.page_key): the session is the unit that was served the bytes.
@@ -1906,6 +1911,9 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
       return M.dispatch(memory,tool,options,role,ctx)
     end)
   elseif name == "write" then
+    local named, conflict = file_tools.accept_names("write", args)
+    if conflict then return conflict end
+    args = named
     if not args.path then return { error = "path_required" } end
     if type(args.content)~="string" then return {error="content_required"} end
     local path = resolve_path(memory, ctx, args.path)
@@ -1925,6 +1933,9 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     end
     return { ok = ok and true or false, path = path, error=not ok and "write_failed" or nil, graph_index=notification }
   elseif name == "edit" then
+    local named, conflict = file_tools.accept_names("edit", args)
+    if conflict then return conflict end
+    args = named
     args.path = resolve_path(memory, ctx, args.path)
     local result=file_tools.edit(args,ctx.changes and function(path,before,after)
       changeset.record(ctx.changes,path,before,after)

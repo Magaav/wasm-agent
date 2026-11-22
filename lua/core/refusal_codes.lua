@@ -10,6 +10,7 @@ return {
   ['approval_required']='nodes.lua',
   ['approval_self']='nodes.lua',
   ['approval_target']='nodes.lua',
+  ['argument_alias_conflict']='file_tools.lua',
   ['at_least_two_spells_required']='spells.lua',
   ['audit_record_not_written']='remote_update.lua',
   ['audit_step_already_assessed']='patch_audit.lua',
