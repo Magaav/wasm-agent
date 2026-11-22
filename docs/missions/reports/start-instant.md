@@ -61,7 +61,7 @@ the base with 9.36 s and passes here with 0.6 s.
 
 ## What was fixed
 
-**`f24aed0f` — the window, the outbox, the measurement.**
+**`bfa2f776` — the window, the outbox, the measurement.**
 - `lua/core/sqlite_busy.lua`: a **start window** (`begin_window`/`end_window`, `M.busy_now`,
   `M.on_wait`). For a run's preamble it bounds the patience of ANY write: the retry deadline moves to
   now+patience, the connection's `busy_timeout` is set to it, and the policy module is told via
@@ -83,7 +83,7 @@ the base with 9.36 s and passes here with 0.6 s.
   the change in the host crate the pin check passes: "11 of 11 pinned component(s) verified".
 - `lua/core/stalls.lua` + `wa stalls` (`lua/core/init.lua:625`): item 5, the kept measurement.
 
-**`ac991712` — bookkeeping writes are named, never fatal.** `lua/core/envelope.lua` (the envelope cache),
+**`7775e200` — the override moved to the host crate, and bookkeeping writes are named, never fatal.** `lua/core/envelope.lua` (the envelope cache),
 `lua/core/prompt_cache.lua` (via its own status line), `lua/core/provider.lua` (`serving_sql`, the
 provider-observation store — including "no such table" when the ledger could not create it),
 `lua/core/run_failure.lua`'s path via `record_turn`, and `lua/core/telemetry.lua` (drops at once once the
@@ -110,6 +110,16 @@ row (which is itself dropped if the ledger is the thing that is busy, as it shou
   It reads the tree's binary from `WA_FAST_BIN` (that is the row's own variable), then `WA_BIN`,
   `WA_TEST_BIN`, `FAST_BIN`, then `PATH`.
 
+
+## The binary and the Lua are one change (and what a Lua-only deploy does
+
+The measurement needs both halves. With this tree's binary (which has `host.sql_patience`) a 10 s hold
+costs a turn 0.60 s; with the installed binary and this Lua only, 3.81 s - still bounded, still whole, but
+the host's own five-attempt policy costs one backoff per refused preamble write. `begin_window` chooses
+accordingly: it lets the statement wait the window only when the host can make it the whole wait
+(commit `bdab9667`). Both numbers are printed by `scripts/test-start-instant.lua` on the binary it is
+given, so a row that runs an older binary says so in its own number instead of hiding it.
+
 ## Texts to approve (verbatim)
 
 1. `waiting for the ledger: deploy`
@@ -132,3 +142,16 @@ deferred transcript row.
   journal shows four gate runs in that minute, i.e. a queue of writers, not a single holder.
 - **A deploy is not run here**: the fix reaches the node through the ordinary landing pipeline, and the
   test the brief describes (`wa chat` + "hi" during `wa-sentinel request deploy`) is the operator's.
+
+## Suite state, and one flaky row that is not this change
+
+`bash scripts/fast.sh` (one run, under `flock -o ~/Work/missions/.suite.lock`): **1 of 364 checks failed**,
+`scripts/test-land.lua`, killed by the 120 s row watchdog. It is not this branch: the same row passes
+standalone in **64 s here and 60 s on the base worktree** (655 checks both), so it sits close to the
+watchdog and loses the race under a loaded machine. Named rather than fixed: it is outside this mission,
+and the numbers are above so the next reader does not have to re-derive them.
+
+Two earlier failures in the first suite run were mine and are fixed: `provider_availability_store`
+(a serving-observation write refused by a held lock) and two cancellation rows that my first, too-broad
+`pcall` swallowed - a lock refusal is tolerated now, and nothing else is (measured on the base worktree:
+`network outage recovery ok (34 checks)`, `provider connection abort recovery ok (32 checks)`).
