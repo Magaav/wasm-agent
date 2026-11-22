@@ -164,7 +164,12 @@
 # WA_DEPLOY_COMPONENT_SOURCE unset) is a development deploy, and it must say so with
 # WA_DEPLOY_COMPONENT_REPIN=1 to install what it just built.
 agent-core b24672b26ae4585f53bb6d4f5d9ab3cde61a663148385099eba4951ce8b57d53 392561
-codemode 191818ce6fff35110cca98239a5f10a4c4e24d9f3f85b0ce86c370899a680e62 215594
+# 22/11 repin of codemode alone (change/search-miss-names-cli): a keyword search that matches nothing
+# now answers why and names the command-line program the word means. The seam cannot compose that
+# sentence (it is a PATH lookup on the node), so rust/components/codemode/src/logic.rs hands that one
+# call back to the loop. Built twice, in two target dirs, wasi-sdk 34, same sha256 both times:
+# 225,166 bytes. Published in the same round that lands it.
+codemode c942620dffa45057c944b2bdce200b25b7d318656a40d36607fe8e96d91fea9d 225166
 graph 54779c7d61e163145c69ec4502397a4adf0d75c544c883639989affb6574288a 8186393
 hooks f5fef7083eedac3269aecb50590297935be53e522d282f70bfa97e4bfa7e3e30 215897
 memory 51815e2d8d9595df6b2188097d5a97d97545be69a7804f46a54c8767cb8307f5 207332

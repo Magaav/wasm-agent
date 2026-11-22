@@ -75,7 +75,11 @@ script's own line 1 is line 2 of the compiled source.
   `schema`. The guest's own names (`searchTools`, `results`, `showCall`) are selectable the same way and
   carry their help as the entry's `schema`. A name that is not there is a MEMBER of that array
   (`found:false`, its reason, the nearest permitted names), never a throw, so `.map` works on every
-  form. The shape is documented where the model asks for it: `searchTools("select:searchTools")`.
+  form. A keyword search that matches nothing is a member too (found:false, its reason), and its
+  reason names the command-line program the query means - with the path it lives at - when this machine
+  has it installed (lua/core/cli_hints.lua, one PATH lookup at miss time): a turn that asks for
+  "github" reads that gh runs through tools.bash instead of an empty list (22/11).
+  The shape is documented where the model asks for it: `searchTools("select:searchTools")`.
   `describeTool(name)` survives only as a hidden compatibility alias for `searchTools("select:"..name)[0]`
   and is in no catalogue or guidance text.
 
