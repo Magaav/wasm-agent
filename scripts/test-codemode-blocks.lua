@@ -449,6 +449,9 @@ local fill_mark, hosted_code = hosted_row:match("^\1b(.-)\1(.*)$")
 check(fill_mark ~= nil, 'the row opens with the marker the host reads')
 check(fill_mark == "\27[48;2;23;23;23m\27[K",
   'and the marker carries the band fill the host paints every cut row with: ' .. tostring(fill_mark))
+-- No marker (the row was composed by the old path): say so through the checks below rather than
+-- crashing on nil - a row that dies is not a row that fails for the reason it names.
+hosted_code = hosted_code or ''
 check(hosted_code == LONG_LINE, 'the whole line travels, cell for cell: ' .. #tostring(hosted_code))
 check(not has(hosted_code, "\226\134\170"), 'no mark is drawn where it was composed: the host draws it')
 check(markdown.columns(hosted_code) > 80,

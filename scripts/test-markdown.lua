@@ -262,10 +262,10 @@ local wrapped_plain = md.wrap("one two three four five six seven eight nine ten"
 ok(md.columns(wrapped_plain:match("[^\n]*")) <= 20, "wrapped plain text respects its width")
 ok(has(wrapped_plain, "\n"), "and actually wraps")
 
-if failed > 0 then
-  print(string.format("markdown: %d failed of %d checks", failed, checks))
-  os.exit(1)
-end
+-- The verdict is at the END of this file: it stood here, before the fence and the wrap checks below
+-- it, so a check added under this line could PRINT a FAIL and still exit 0 - a row that cannot fail
+-- cannot catch anything (scripts/test-discriminates.sh says the same of a branch's own tests).
+-- Moved, not weakened: the same lines now see every check in the file.
 -- A wrapped line never starts with the space it broke on.
 do
   local wrapped = md.render("aaaa bbbb cccc dddd", { width = 9, indent = "" })
@@ -375,4 +375,8 @@ do
     .. cutrows .. " rows)")
 end
 
+if failed > 0 then
+  print(string.format("markdown: %d failed of %d checks", failed, checks))
+  os.exit(1)
+end
 print(string.format("markdown ok (%d checks)", checks))

@@ -245,8 +245,10 @@ try {
     // The mark is the fence's, in the same place in both blocks: the cell in front of the text the line
     // goes on with, never inside the cut row (checked above, both blocks).
     if (columns === NARROW) {
+      // A block with ONE row here failed the two checks above; the mark's place is then simply absent,
+      // and saying so is the honest reading (`undefined` is not a pass).
       check('at ' + columns + ' columns both blocks mark the continuation the same way',
-        shown.card[1].startsWith('\u2502\u21aa') && shown.band[1].startsWith('\u21aa')
+        (shown.card[1] || '').startsWith('\u2502\u21aa') && (shown.band[1] || '').startsWith('\u21aa')
         && !shown.card[0].includes('\u21aa') && !shown.band[0].includes('\u21aa'),
         'card: ' + JSON.stringify(shown.card) + '\nband: ' + JSON.stringify(shown.band));
     }
