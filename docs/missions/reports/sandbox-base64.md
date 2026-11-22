@@ -115,9 +115,9 @@ Measured by running each against the base worktree `/tmp/base-ee38` with the sam
    this node with tools.read, tools.ls and tools.bash, get its time with tools.time, and the user's own
    browser is the client tool."
 8. No-network fix: "A script has no network: fetch an address with await tools.bash({command: "curl -s
-   <url>"}), and reach another node with the nodes and remote tools - inside a script those carry reads
-   only." (the last clause is about a `calls` batch, which is the only fenced form; a single remote call
-   may be an effect.)
+   <url>"}), and reach another node with the nodes and remote tools - a remote call is how a script runs
+   a tool on a peer." (the fenced form is a `calls` BATCH, reads only - lua/core/tools.lua:1280; a single
+   remote call may be an effect.)
 9. `HOME` fix: "There are no environment variables in a script: read one with `await
    tools.bash({command: "printenv HOME"})` - a command runs with this node's environment."
 10. `btoa` above U+00FF: "btoa takes one character per byte and this text goes above U+00FF. For UTF-8

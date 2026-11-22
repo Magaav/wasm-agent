@@ -893,8 +893,8 @@ local function script_line(stack,source)
 end
 -- A MISSING GLOBAL IS ONE CLASS, AND ITS FIX LINE SAYS WHY (22/11). Counted over the retained ledger
 -- (~/.wasm-agent/tool-results, every `run` result whose fix line came from this file): setTimeout 40,
--- Buffer 17, HOME 16, location 12, require 6 - and btoa/atob 0, which is why those two are IN the
--- sandbox now (lua/core/codemode_harness.lua) and are not in this table. A name below is not a typo:
+-- Buffer 17, HOME 16, location 12, require 6 - and btoa/atob 0: those two are already in the guest
+-- (the pinned QuickJS), which is why they are not in this table; the harness only wraps their message. A name below is not a typo:
 -- the script is running in the wrong runtime, so "Change line N" (which names where, not why) is
 -- replaced by the way that exists here. The table is an ALLOW-LIST on purpose - a name it does not
 -- hold (a script's own variable, `raw`, `wt`) keeps the plain sentence, because nothing here can say
@@ -909,7 +909,7 @@ local NO_BROWSER = 'There is no browser in a script: no window, document, locati
   ..'node with tools.read, tools.ls and tools.bash, get its time with tools.time, and the user\'s own browser '
   ..'is the client tool.'
 local NO_NET = 'A script has no network: fetch an address with await tools.bash({command: "curl -s <url>"}), '
-  ..'and reach another node with the nodes and remote tools - inside a script those carry reads only.'
+  ..'and reach another node with the nodes and remote tools - a remote call is how a script runs a tool on a peer.'
 local GLOBAL_FIX = {
   Buffer = 'There is no Buffer in this sandbox: a file body is a string, so tools.write({path, content}) '
     ..'writes it here and tools.remote({node: "<name>", capability: "write", path: "<path>", content: "<text>"}) '
