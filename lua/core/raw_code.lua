@@ -89,7 +89,16 @@ function M.native_run(args)
       note = "the run call needs code: the script is the string it runs, exactly as a fenced run block is" }
   end
   local raw = args.raw
-  if raw == nil then return { code = code } end
+  -- `raw` IS BOUND EVEN WHEN THE CALL HAS NONE (22/11). A script that reads raw.<name> in a call with no
+  -- raw argument died with `ReferenceError: raw is not defined` - 7 of the failures measured on the two
+  -- days before 22/11 - a message that names the transport instead of the block the script wanted. With an
+  -- empty object the script compiles, the name reads `undefined`, and the failure is the one that names
+  -- the key. The binding sits on the OPENING LINE of the block, not on a line of its own, so the line
+  -- numbers in a compile error stay where they were (lua/core/codemode.lua's script_line maps the stack by
+  -- the line the script's code starts on).
+  -- The script keeps a block of its OWN, as in the call that has blocks (below): a script that declares its
+  -- own `raw` (const raw = await tools.bash(...)) shadows this one instead of dying on a redeclaration.
+  if raw == nil then return { code = "const raw = {}; {\n" .. code .. "\n}", raw_blocks = {} } end
   if type(raw) ~= "table" then
     return nil, { error = "run_raw_not_object", effect = "none",
       note = "raw is an object of name -> text (one entry per raw block); it is not a string" }

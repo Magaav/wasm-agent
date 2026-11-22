@@ -177,6 +177,34 @@ end
 local SCRIPT_NAMES = { codemode = true, run = true }
 function M.is_script(name) return SCRIPT_NAMES[name] == true end
 
+-- THE TWO NOTES A SCRIPT CAN CARRY BESIDE ITS ANSWER (22/11). pending_settled is a handle that settled
+-- while nobody waited, pending_backgrounded is what this script left running (lua/core/codemode_pending.lua);
+-- lua/core/codemode.lua adds both to the result after the script ends. They were ordinary keys, so a result
+-- carrying either could not be plain: it was sent as a JSON object with the output as an ESCAPED STRING -
+-- 673 of 3,131 real results on the two days before 22/11 (21%). They ride as header lines instead, one per
+-- note, `pending: <what> <the key's own JSON>`, so M.parse_view reads the value back exactly as the key held
+-- it. Measured note sizes: pending_backgrounded median 56 B (max 161), pending_settled median 171 B
+-- (p90 335, max 3,601) - so a note set over NOTE_BYTES keeps the JSON form rather than dropping a field.
+local PENDING_NOTES = { 'pending_settled', 'pending_backgrounded' }
+local NOTE_LABEL = { pending_settled = 'settled', pending_backgrounded = 'backgrounded' }
+local NOTE_WORD = { settled = 'pending_settled', backgrounded = 'pending_backgrounded' }
+local NOTE_BYTES = 4096
+-- The header lines for a result's notes, or nil when one does not fit (the caller keeps the JSON form).
+local function pending_lines(source)
+  local lines, total = {}, 0
+  for _, key in ipairs(PENDING_NOTES) do
+    local value = source[key]
+    if value ~= nil then
+      local ok, encoded = pcall(json.encode, value)
+      if not ok or type(encoded) ~= 'string' then return nil end
+      total = total + #encoded + 12
+      if total > NOTE_BYTES then return nil end
+      lines[#lines + 1] = 'pending: ' .. NOTE_LABEL[key] .. ' ' .. encoded
+    end
+  end
+  return lines
+end
+
 function M.project(name, output)
   -- Encode a non-table only through pcall: a decoded scalar can be `inf` (a numeric
   -- literal too large for a float), and json.encode throws on that *before* the
@@ -242,10 +270,13 @@ function M.project(name, output)
     -- Line 1: status, the per-call summary, where the whole result is; line 2: each call's evidence
     -- (sha256:bytes, the order of the summary). Failures keep their structured error; a result carrying
     -- anything else (printed output, a partial presentation) keeps the JSON form.
-    local plain = { ok = true, status = true, summary = true, returned = true, calls = true, full_result = true, sandbox_calls = true, vars = true }
+    local plain = { ok = true, status = true, summary = true, returned = true, calls = true, full_result = true, sandbox_calls = true, vars = true,
+      pending_settled = true, pending_backgrounded = true }
     local simple = lean.ok ~= false and lean.error == nil
     for key in pairs(lean) do if not plain[key] then simple = false end end
-    if simple then
+    -- A note that does not fit the header is not silently dropped: the result keeps the JSON form.
+    local notes = simple and pending_lines(lean) or nil
+    if notes then
       local header = 'status ' .. tostring(lean.status or 200) .. (lean.summary and (' \194\183 ' .. tostring(lean.summary)) or '')
         .. ' \194\183 full_result ' .. ref.sha256
       local evidence = {}
@@ -255,6 +286,9 @@ function M.project(name, output)
       if #evidence > 0 then header = header .. '\ncalls: ' .. table.concat(evidence, ' ') end
       -- The session's variables, names and sizes only (`vars.<name>` in a script reads one back).
       if lean.vars then header = header .. '\nvars: ' .. lean.vars end
+      -- After calls: and vars: - WHAT BECAME OF A HANDLE while the model was not waiting, and what this
+      -- script left running (22/11). Each line is the key's own JSON, so nothing is paraphrased.
+      for _, note in ipairs(notes) do header = header .. '\n' .. note end
       local body
       if lean.returned == nil then body = '(the script returned nothing)'
       elseif type(lean.returned) == 'string' then body = lean.returned
@@ -368,6 +402,20 @@ function M.parse_view(content)
   if evidence then body = body:sub(#evidence + 9) end
   local varsline = body:match("^vars: ([^\n]*)\n")
   if varsline then body = body:sub(#varsline + 8) end
+  -- One `pending: <what> <json>` line per note (22/11), in the order M.project wrote them. The value is
+  -- the key's own JSON; an undecodable one stays as text rather than vanishing.
+  local pending = {}
+  while true do
+    local note = body:match("^pending: ([^\n]*)\n")
+    if not note then break end
+    body = body:sub(#note + 11)
+    local what, encoded = note:match("^(%S+) (.*)$")
+    local key = what and NOTE_WORD[what]
+    if key then
+      local decoded_ok, value = pcall(json.decode, encoded)
+      pending[key] = decoded_ok and value ~= nil and value or encoded
+    end
+  end
   local text = body:match("^\n(.*)$") or body
   local vars, vars_more = M.parse_vars(varsline)
   local status = tonumber(first:match("^status (%d+)"))
@@ -384,7 +432,8 @@ function M.parse_view(content)
   end
   local decoded_ok, decoded = pcall(json.decode, text)
   local returned = (decoded_ok and decoded ~= nil) and decoded or text
-  return { ok = true, status = status, summary = summary, full_result = sha and { sha256 = sha } or nil, calls = calls, returned = returned, vars = vars, vars_more = vars_more }
+  return { ok = true, status = status, summary = summary, full_result = sha and { sha256 = sha } or nil, calls = calls, returned = returned, vars = vars, vars_more = vars_more,
+    pending_settled = pending.pending_settled, pending_backgrounded = pending.pending_backgrounded }
 end
 
 function M.context_view(name, content)

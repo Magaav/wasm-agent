@@ -14,10 +14,17 @@ scripts/test-codemode-native.lua  # lua error: [string "scripts/test-codemode-na
 scripts/test-codemode-unprepared.lua  # lua error: [string "scripts/test-codemode-unprepared.lua"]:4: default build honestly repor
 scripts/test-context-budget.lua  # lua error: [string "scripts/test-context-budget.lua"]:13: the test must run with WASM_AGEN
 scripts/test-embedded-runtime.lua  # lua error: [string "scripts/test-embedded-runtime.lua"]:1: assertion failed!
-scripts/test-envelope-iteration.lua  # lua error: [string "scripts/test-envelope-iteration.lua"]:9: lean declarations (plus codem
-scripts/test-envelope-outcomes.lua  # lua error: [string "scripts/test-envelope-outcomes.lua"]:91: assertion failed!
+# The two envelope rows below are STALE, by measurement rather than by a flake (22/11): they pin the
+# multi-tool progressive envelope that change/one-run-path retired. tools.envelope('master',ctx) declares
+# exactly ONE tool, "run", with WASM_AGENT_BOOTSTRAP_MODE unset AND with it set to 'lean', so both
+# "lean declarations" (13 names) and "lean reduces the total context" (classic vs lean byte totals) can
+# never hold again: the two modes are the same set. scripts/test-envelope-outcomes.cjs and
+# -iteration.cjs, the drivers docs/PROGRESSIVE-ENVELOPE.md names, run these same rows and fail with them.
+# Deleting an assertion is not this list's call, so the rows stay out of the fast path by name until an
+# operator decides; their verdict is recorded here instead of being guessed at on every run.
+scripts/test-envelope-iteration.lua  # STALE (22/11): pins lean declarations of the retired 13-name envelope; the declared set is one tool ("run") in both bootstrap modes
+scripts/test-envelope-outcomes.lua  # STALE (22/11): pins classic-vs-lean context reduction on the retired envelope; both modes declare the same one tool now, so a strict reduction is unsatisfiable
 scripts/test-evaluation-feedback.lua  # lua error: [string "scripts/test-evaluation-feedback.lua"]:36: assertion failed!
-scripts/test-exec-timeout.lua  # lua error: [string "scripts/test-exec-timeout.lua"]:8: timeout is failure: {"cleanup":"ter
 scripts/test-graph-index-failure.lua  # lua error: [string "scripts/test-graph-index-failure.lua"]:5: exact parse failure visible
 scripts/test-graph-repair.lua  # lua error: [string "scripts/test-graph-repair.lua"]:8: assertion failed!
 scripts/test-graph-watch.lua  # lua error: [string "scripts/test-graph-watch.lua"]:10: external writer must settle
@@ -33,7 +40,7 @@ scripts/test-prefix-stability.lua  # lua error: [string "scripts/test-prefix-sta
 scripts/test-prompt-layers.lua  # lua error: [string "scripts/test-prompt-layers.lua"]:49: assertion failed!
 scripts/test-quarantined-retirement.lua  # lua error: [string "scripts/test-quarantined-retirement.lua"]:3: assertion failed!
 scripts/test-quiet-host.lua  # lua error: [string "scripts/test-quiet-host.lua"]:6: assertion failed!
-scripts/test-read-batch.lua  # lua error: [string "scripts/test-read-batch.lua"]:13: assertion failed!
+scripts/test-read-batch.lua  # STALE (22/11), three retired premises measured: it needs a READ_BATCH_CAPTURE payload (seq5193, 59,723 B) that no script in this tree produces; it calls a global "routed" helper nothing defines (the *_many form); and it pins the "calls_or_cursor_exclusive" refusal the dispatcher no longer makes ({cursor,calls} answers ok, 6 executed)
 scripts/test-reasoning-replay.lua  # lua error: [string "scripts/test-reasoning-replay.lua"]:24: two turns with tool calls must
 scripts/test-resource-claims.lua  # lua error: [string "scripts/test-resource-claims.lua"]:139: unknown fixture mode
 scripts/test-selection-state.lua  # lua error: [string "scripts/test-selection-state.lua"]:4: assertion failed!

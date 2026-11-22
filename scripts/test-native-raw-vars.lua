@@ -49,9 +49,18 @@ check(result and result.ok and value=='one|two','two raw blocks are two variable
 result,value=run({code='const body = __raw.body; return body.length;',raw={body='xyz'}})
 check(result and result.ok and value==3,'a script that declares the name itself still runs: '..tostring(result and (result.error or result.message)))
 
--- 4. A script without raw is untouched (no wrapper, no binding).
+-- 4. A call with NO raw argument still binds `raw`, to an empty object (22/11). It used to bind
+-- nothing, so a script that read raw.<name> died with `ReferenceError: raw is not defined` - 7 of the
+-- failures measured on the two days before 22/11 - a message that names the transport instead of the
+-- block it wanted. The binding sits on the OPENING line of the block, so the script's own line numbers
+-- do not move.
 local plain=assert(raw_code.native_run({code='return 1'}))
-check(plain.code=='return 1','a run without raw is the code as written')
+check(plain.code=='const raw = {}; {\nreturn 1\n}','a run without raw still binds raw, on the opening line: '..plain.code)
+-- and the script has a block of its own, so its own `raw` shadows the bound one (not a redeclaration).
+result,value=run({code='const raw = "mine"; return raw.length;'})
+check(result and result.ok and value==4,'a script that declares its own raw still runs: '..tostring(result and (result.error or result.message)))
+check(select(2,plain.code:gsub('\n',''))==2,'and adds no line of its own before the script')
+check(type(plain.raw_blocks)=='table' and #plain.raw_blocks==0,'and binds no block name')
 
 -- 5. A name that cannot be a safe variable is refused by name, before anything runs. raw is one of
 -- them now: it is bound by native_run to the whole object (row 6), so a block of that name would
@@ -75,5 +84,21 @@ check(type(value)=='table' and value.len==#patch and value.text==patch,'raw.<nam
 local callraw,whraw=raw_code.native_run({code='return 1',raw={raw='x'}})
 check(callraw==nil and whraw and whraw.error=='run_raw_name' and whraw.name=='raw',
   'a raw block named raw is refused as run_raw_name: '..json.encode(whraw or {}))
+
+-- 8. The whole path, on a call with no raw: the TOOL the model calls (run) binds raw as an empty
+-- object, so the script compiles and any failure is the one about what it asked for - never a
+-- ReferenceError about the transport.
+local function tool(args)
+ local result=tools.dispatch(memory,'run',args,'master',ctx)
+ return result, result and result.ok and type(result.value)=='string' and json.decode(result.value) or nil
+end
+local empty,value=tool({code='return {kind: typeof raw, names: Object.keys(raw).length, missing: raw.p1 === undefined};'})
+check(empty and empty.ok==true,'a script that reads raw with no raw argument runs: '..tostring(empty and (empty.error or empty.message)))
+check(type(value)=='table' and value.kind=='object' and value.names==0 and value.missing==true,
+ 'raw is an empty object and a name in it reads undefined: '..json.encode(value or {}))
+local asked=tool({code='const r = await tools.bash({command: raw.p1}); return r.ok;'})
+check(asked and asked.ok==false,'a tool that receives the missing block fails the script, by name: '..tostring(asked and asked.error))
+check(tostring(asked and asked.error):find('command',1,true)~=nil,
+ 'and the failure is about the argument that was missing, not about the transport: '..tostring(asked and asked.error))
 
 print('native raw vars ok ('..checks..' checks)')
