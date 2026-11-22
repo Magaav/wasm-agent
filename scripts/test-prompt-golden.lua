@@ -1,14 +1,10 @@
--- The full built system prompt and declared tool list, pinned as goldens RECORDED FROM 39bbf2b6
--- (rel review r2, item 4). Two things this catches that a hash of a rebuilt block cannot:
---   * the goldens were recorded by scripts/generate-prompt-goldens.lua running ON a27490af, so they
---     describe what that commit really sent - not what this tree believes it sent;
---   * the bytes compared are agent:build_context's own, the same call a first request makes, so a
---     section, guideline or tool ordering that changed anywhere in the stack shows up here.
+-- The prompt a node on this path BUILDS: one guidance sentence, the run tool alone, no codemode
+-- guidance - in both envelopes, for a master and for a child.
 --
--- The one named difference (rel review r3, item 2): upstream put the "conform: no profile for ..."
--- notice INSIDE the prompt, once per process, so a27490af's first recorded case carries it; commit
--- 568ed30c moved it to the operator log, so this branch's prompts carry none. The golden KEEPS base's
--- line and this test compares it exactly, naming the case - nothing is stripped silently.
+-- The per-mode goldens this file used to compare against are gone with the modes (review r1 item 6): a
+--27490af recorded only the six explicit values of WASM_AGENT_RAW_CODE, every one of which this build
+-- refuses by name, and it had no native case to record. What remains is asserted on the bytes
+-- agent:build_context really produces, which is the same call a first request makes.
 if not host then error('this test runs under the node (WA_SCRIPT), not plain Lua') end
 local guard = dofile('scripts/lib/test-home-guard.lua')
 local reason = guard.reason({ home = os.getenv('WASM_AGENT_HOME') or '',
@@ -17,7 +13,6 @@ if reason then error('this test refuses to run (' .. reason .. ')') end
 
 local json = dofile('lua/vendor/json.lua')
 local golden = dofile('scripts/lib/prompt-golden.lua')
-local cases = dofile('scripts/lib/prompt-golden-cases.lua')
 local memory = dofile('lua/core/memory.lua'); memory.setup()
 local agent = dofile('lua/core/agent.lua')
 local tools = dofile('lua/core/tools.lua')
@@ -60,7 +55,6 @@ end
 local TREE = host.getenv('WASM_AGENT_LUA_ROOT') or '.'
 local CWD = dofile('lua/core/platform.lua').cwd()
 ok(CWD == TREE, 'this test must run from the tree root (cwd=' .. tostring(CWD) .. ', tree=' .. tostring(TREE) .. ')')
-local ROOT = TREE .. '/fixtures/prompt-golden'
 local real = host.getenv
 
 -- One build, exactly as the first request makes it.

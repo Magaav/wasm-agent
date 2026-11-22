@@ -104,4 +104,19 @@ check(peers.tools[1] and peers.tools[1].name=='remote' and peers.tools[1].schema
 check(table.concat(peers.guidance,' '):find('tools.remote',1,true) and table.concat(peers.guidance,' '):find('take node',1,true),'remote guidance names the script route and peer history')
 local history=tools.dispatch(memory,'tool_search',{query='search_messages',limit=1},'master',ctx)
 check(history.tools[1].schema['function'].parameters.properties.node,'search_messages declares node')
+-- ---------------------------------------------------------------- code mode OFF keeps a way to act
+-- This row was in scripts/test-codeact-default.lua, which died with the CodeAct mode; the rule it
+-- guarded is still the node's (18/11): a node whose code mode is OFF declares the ordinary tools, so a
+-- run that cannot execute a script still has a way to work (review r1, item 6 asks whether it survives -
+-- it does, and it is judged here now).
+local env_real=host.getenv
+host.getenv=function(k) if k=='WASM_AGENT_CODEMODE' then return 'off' end return env_real(k) end
+local off_sid=session('code mode off')
+local off_list=tools.envelope('master',{session_id=off_sid,user_id='master',role='master'})
+host.getenv=env_real
+local off_names={}
+for _,item in ipairs(off_list or {}) do off_names[(item['function'] or {}).name or '']=true end
+check(#(off_list or {})>0 and (off_names.read==true or off_names.bash==true),
+  'code mode off: the ordinary tools stay declared ('..tostring(#(off_list or {}))..'), so the node still has a way to act')
+
 print('envelope ok ('..checks..' checks)')

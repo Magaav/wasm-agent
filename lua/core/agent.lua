@@ -1291,10 +1291,18 @@ function M:build_context()
   -- node keeps the failure it always had (its own provider error, a few lines later), and this check
   -- speaks only about a provider it can name.
   local settings_ok, settings=pcall(function() return dofile('lua/core/provider.lua').settings() end)
-  if settings_ok and type(settings)=='table' and type(settings.provider)=='string' and settings.provider~='' then
-    local transport_refusal=raw_code_lib.transport_refusal(settings.provider, self.model or settings.model)
-    if transport_refusal then error(transport_refusal.text,0) end
+  if not settings_ok or type(settings) ~= 'table' or type(settings.provider) ~= 'string' or settings.provider == '' then
+    -- UNKNOWN IS NOT YES (review r1, item 5): a node whose provider settings cannot be read used to pass
+    -- the door silently, so nothing ever checked whether its provider can call tools at all. It is refused
+    -- by name, with the two commands that say what this node actually has.
+    error("provider_settings_unreadable: this node cannot read its provider settings ("
+      .. tostring(settings) .. "), so it cannot say whether this provider can answer with a tool call - "
+      .. "and run(code=...) is the only way to act here. The run is refused by name rather than guessing. "
+      .. "`wa status` and `wa capabilities --json` name what this node has; `wa paths` names the config "
+      .. "directory its provider settings come from.", 0)
   end
+  local transport_refusal=raw_code_lib.transport_refusal(settings.provider, self.model or settings.model)
+  if transport_refusal then error(transport_refusal.text,0) end
   -- One policy for every thread, pinned with the context the tools and the prompt are built from.
   local code_ctx={session_id=self.session_id,user_id=self.user,role=self.role,subagent=self.subagent}
   self.codemode_policy=dofile('lua/core/codemode_policy.lua').pin(memory,self.role,code_ctx)

@@ -152,9 +152,28 @@ M.REMOVED_VALUES = {
 -- EVERY value is refused, known or not: the switch itself is gone, so a value is either a mode this
 -- build removed or a word no build ever had - and an unknown value read as "off" is the bug this
 -- closes, not a default worth keeping.
+-- WHERE THE VALUE CAME FROM (review r1, item 4). The host loads `<config>/env` at start WITHOUT
+-- overwriting the real environment (rust/wa-host/src/main.rs, `load_env_file`), so a launcher's
+-- `unset` cannot win on a node that keeps the line in that file - and a message that only says "remove
+-- it from the environment" sends the operator to the wrong place. This reads the same file the host
+-- reads and names it by path when the key is in it.
+function M.switch_source()
+  local found = nil
+  pcall(function()
+    local file = dofile('lua/core/paths.lua').config_file()
+    local text = host.read_file(file)
+    if type(text) ~= 'string' then return end
+    for line in text:gmatch('[^\n]+') do
+      if line:match('^%s*' .. M.SWITCH .. '%s*=') then found = file break end
+    end
+  end)
+  return found
+end
+
 function M.switch_refusal()
   local value = tostring(host.getenv(M.SWITCH) or ""):gsub("^%s+", ""):gsub("%s+$", "")
   if value == "" then return nil end
+  local source = M.switch_source()
   local known = M.REMOVED_VALUES[value:lower()]
   local why = known
     and ("that value named " .. known .. ", and this build has one path: the run tool")
@@ -163,8 +182,13 @@ function M.switch_refusal()
     text = "run_switch_removed: " .. M.SWITCH .. "=" .. value .. " is gone: " .. why .. ". "
       .. "run(code=...) is the only way to act (Victor 21/11), so there is no mode to set and no other "
       .. "path to fall back to. Remove " .. M.SWITCH .. " from this node's environment - and from any "
-      .. "launcher, unit or script that exports it. This run is refused by name and exits non-zero "
-      .. "rather than acting through a path this build does not have." }
+      .. "launcher, unit or script that exports it."
+      .. (source
+        and (" It is in " .. source .. ": edit that file (the host reads it at start and a launcher's "
+          .. "`unset` does not win over it), then restart the node.")
+        or "")
+      .. " This run is refused by name and exits non-zero rather than acting through a path this build "
+      .. "does not have.", source = source }
 end
 
 -- THE PROVIDER DOOR: native tool calls, or a refusal by name - never a quiet move to another path
@@ -188,8 +212,9 @@ function M.transport_refusal(provider_id, model)
   end
   return { name = "provider_cannot_call_tools",
     text = "provider_cannot_call_tools: this provider cannot call tools; add a row or measure it with "
-      .. "`wa conform " .. tostring(model or "<model>") .. "`. run(code=...) is the only way to act on "
-      .. "this node, so a provider that cannot answer with a tool call has no path here; the run is "
+      .. "`wa conform " .. tostring(model or "<model>") .. "` and INSTALL the profile it prints (it measures "
+      .. "in a scratch home, so its file is not the one this node reads). run(code=...) is the only way to "
+      .. "act on this node, so a provider that cannot answer with a tool call has no path here; the run is "
       .. "refused by name rather than moved to another transport." }
 end
 
