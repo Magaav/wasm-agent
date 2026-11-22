@@ -120,9 +120,10 @@ pub enum Action { None, Submit(String), SubmitNow(String), Eof, Interrupt, Nav, 
     /// The draft's selection, for the host to put on the clipboard (OSC 52): Ctrl+C or Ctrl+Insert with
     /// text selected (operator 17/11: "ctrl+a should select whole text-area so we can copy it").
     Copy(String),
-    /// Ctrl+V: the host reads an image from the system clipboard, keeps it, and puts `[Image #n]` in the
-    /// draft (`insert_text`) - what pi and Claude Code do (operator 17/11).
-    PasteImage,
+    /// Ctrl+V: the host reads the system clipboard ONCE - an image becomes `[Image #n]` in the draft
+    /// (`insert_text`), and text is pasted at the cursor (`paste`), the two things pi and Claude Code
+    /// do (operator 17/11, Victor 22/11).
+    Paste,
     /// A bracketed paste ended; it put draft[start..cursor]. A file path dropped or pasted there is the host's
     /// to turn into an attachment (an image path becomes `[Image #n]`).
     Pasted(usize) }
@@ -539,6 +540,9 @@ impl Editor {
         if let Some(act) = keymap::draft_byte(byte) {
             if act != keymap::DraftAct::Type { return self.perform(act); }
         } else if byte < 32 || byte == 127 {
+            // Inside a paste, Tab is data: code pasted from an editor keeps its indentation. Every
+            // other control byte nobody binds is dropped.
+            if self.paste && byte == b'\t' { self.insert('\t'); }
             return Action::None; // a control key nobody binds
         }
         // Any other character goes into the draft (the terminal sends it as UTF-8, byte by byte).
@@ -623,7 +627,7 @@ impl Editor {
             A::SelectAll => { if !self.chars.is_empty() { self.anchor = Some(0); self.cursor = self.chars.len(); } Action::None }
             A::Undo => { self.restore(true); Action::None } // raw mode turned SIGTSTP off
             A::Redo => { self.restore(false); Action::None }
-            A::PasteImage => if self.paste { Action::None } else { Action::PasteImage },
+            A::Paste => if self.paste { Action::None } else { Action::Paste },
             A::PasteStart => { self.delete_selection(); self.paste = true; self.paste_from = self.cursor; Action::None }
             A::PasteEnd => { self.paste = false; Action::Pasted(self.paste_from.min(self.cursor)) }
             // A plain movement ends a selection; Left/Right land on its edge, as every editor does.
@@ -712,6 +716,16 @@ impl Editor {
         self.redo.clear();
         self.group = None;
         self.group_cursor = self.cursor;
+    }
+    /// The clipboard's text at the cursor, exactly as a bracketed paste puts one: the selection goes,
+    /// its newlines stay lines, and the whole paste is ONE undo step (Ctrl+Z takes all of it back).
+    /// The returned span is where it landed, so the host can attach a path to an image in it exactly
+    /// as it does for a dropped one (`Action::Pasted`).
+    pub fn paste(&mut self, text: &str) -> Action {
+        if text.is_empty() { return Action::None; }
+        let from = self.cursor.min(self.chars.len());
+        self.insert_text(text);
+        Action::Pasted(from.min(self.cursor))
     }
     /// A press in the box: the cursor goes there and the selection ends (a drag then extends from it).
     pub fn click(&mut self, index: usize) { self.anchor = None; self.cursor = index.min(self.chars.len()); }
@@ -1595,8 +1609,8 @@ mod tests {
         let mut e = Editor::default();
         e.width = 80;
         type_bytes(&mut e, b"look at ");
-        assert_eq!(e.feed(22), Action::PasteImage, "Ctrl+V asks the host for the clipboard image");
-        assert_eq!(type_bytes(&mut e, b"\x1b[118;5u"), Action::PasteImage, "and so does kitty's Ctrl+V");
+        assert_eq!(e.feed(22), Action::Paste, "Ctrl+V asks the host for the clipboard, once");
+        assert_eq!(type_bytes(&mut e, b"\x1b[118;5u"), Action::Paste, "and so does kitty's Ctrl+V");
         e.insert_text("[Image #1]");
         assert_eq!(e.text(), "look at [Image #1]");
         e.feed(26);
@@ -1604,6 +1618,36 @@ mod tests {
         // Inside a bracketed paste, byte 22 is data, never a command.
         type_bytes(&mut e, b"\x1b[200~a\x16b\x1b[201~");
         assert!(!e.text().contains("[Image"), "{}", e.text());
+    }
+    #[test]
+    fn a_clipboard_text_paste_is_the_bracketed_paste_and_one_undo_step() {
+        let mut e = Editor::default();
+        e.width = 80;
+        type_bytes(&mut e, b"look at ");
+        assert_eq!(e.feed(22), Action::Paste, "Ctrl+V asks the host for the clipboard, once");
+        assert_eq!(e.paste("one\ntwo\tthree"), Action::Pasted(8), "the span it wrote is the host's");
+        assert_eq!(e.text(), "look at one\ntwo\tthree", "its newlines stay lines and its tab is data");
+        assert_eq!(e.cursor, e.chars.len());
+        e.feed(26);
+        assert_eq!(e.text(), "look at ", "the whole paste is one undo step");
+        assert_eq!(e.cursor, 8, "and the cursor goes back with it");
+        assert_eq!(e.paste(""), Action::None, "an empty paste is nothing to undo");
+        // A selection is replaced, and one undo brings back what it covered.
+        type_bytes(&mut e, b"abc");
+        type_bytes(&mut e, b"\x1b[1;2D\x1b[1;2D"); // Shift+Left twice: the last two characters
+        assert_eq!(e.selection(), Some((9, 11)), "two characters are selected");
+        assert_eq!(e.paste("XY"), Action::Pasted(9));
+        assert_eq!(e.text(), "look at aXY", "the paste replaced them");
+        e.feed(26);
+        assert_eq!(e.text(), "look at abc", "and one undo brings them back");
+    }
+    #[test]
+    fn a_bracketed_paste_keeps_its_tabs() {
+        let mut e = Editor::default();
+        type_bytes(&mut e, b"\x1b[200~if x {\n\treturn 1;\n}\x1b[201~");
+        assert_eq!(e.text(), "if x {\n\treturn 1;\n}", "pasted code keeps its indentation");
+        e.feed(26);
+        assert_eq!(e.text(), "", "and the paste is still one undo step");
     }
     #[test]
     fn home_and_end_move_within_the_line_and_shift_selects() {

@@ -106,8 +106,8 @@ pub enum DraftAct {
     KillWord,
     SelectAll,
     Undo, Redo,
-    /// An image from the system clipboard, as `[Image #n]`.
-    PasteImage,
+    /// The system clipboard read once: its text at the cursor, or an image as `[Image #n]`.
+    Paste,
     PasteStart, PasteEnd,
     Left, Right, Up, Down,
     LineStart, LineEnd, DocStart, DocEnd,
@@ -126,7 +126,7 @@ impl DraftAct {
         DraftAct::Interrupt, DraftAct::Copy,
         DraftAct::DeleteForward, DraftAct::Backspace, DraftAct::DeleteForwardOrLeave,
         DraftAct::KillLine, DraftAct::KillToStart, DraftAct::KillWord, DraftAct::SelectAll,
-        DraftAct::Undo, DraftAct::Redo, DraftAct::PasteImage, DraftAct::PasteStart,
+        DraftAct::Undo, DraftAct::Redo, DraftAct::Paste, DraftAct::PasteStart,
         DraftAct::PasteEnd, DraftAct::Left, DraftAct::Right, DraftAct::Up, DraftAct::Down,
         DraftAct::LineStart, DraftAct::LineEnd, DraftAct::DocStart, DraftAct::DocEnd,
         DraftAct::ExtendLeft, DraftAct::ExtendRight, DraftAct::ExtendUp, DraftAct::ExtendDown,
@@ -385,9 +385,9 @@ pub const BINDINGS: &[Binding] = &[
       "the same, as a terminal that reports the shifted letter reports it"),
 
     // ---- the draft: paste and images -------------------------------------------------------
-    d("Paste and images", "Ctrl+V", Trigger::Byte(22), DraftAct::PasteImage,
-      "attach an image from the system clipboard as `[Image #n]`, sent with this message"),
-    d("Paste and images", "Ctrl+V", Trigger::Seq(b"\x1b[118;5u"), DraftAct::PasteImage,
+    d("Paste and images", "Ctrl+V", Trigger::Byte(22), DraftAct::Paste,
+      "paste text or an image from the system clipboard: the text at the cursor, an image as `[Image #n]` sent with this message"),
+    d("Paste and images", "Ctrl+V", Trigger::Seq(b"\x1b[118;5u"), DraftAct::Paste,
       "the same, as the kitty keyboard protocol reports it"),
     d("Paste and images", "a paste", Trigger::Seq(b"\x1b[200~"), DraftAct::PasteStart,
       "a bracketed paste: its newlines stay lines and the paste is one undo step"),

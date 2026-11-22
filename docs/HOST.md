@@ -557,7 +557,13 @@ round-boundary steering, not per-keystroke interruption.
   Ctrl+Z undoes the last draft edit and Ctrl+Y (or Ctrl+Shift+Z where the terminal reports it)
   redoes it, cursor included: typing is one step per word, a paste is one step, and each delete,
   kill, completion or history recall is its own (raw mode clears `ISIG`, so Ctrl+Z is a key here,
-  not SIGTSTP). A line sent while a run is in flight is listed above the status line
+  not SIGTSTP). **Ctrl+V reads the system clipboard once** and pastes what is on it: an image type
+  listed becomes `[Image #n]`, and otherwise the clipboard's text goes into the draft at the cursor as
+  a bracketed paste puts it - its newlines stay lines, it replaces the selection, and the whole paste
+  is one undo step - with a path to an image in that text attached exactly as a dropped path is. The
+  tool is `wl-paste` on Wayland and `xclip` on X11, `WA_CLIPBOARD=off` stops the reading, and the
+  footer says what was there when nothing can be pasted: `the clipboard is empty`, or the types this
+  node cannot paste, named. A line sent while a run is in flight is listed above the status line
   (`↪ Steering queued · next safe boundary: …`, the web UI's words) until Lua takes it, and lines
   Lua takes but holds for after the run (a slash command) stay listed through `input_held(json)`.
   `terminal_write` serializes view, local slash-command output and ticker output with the
