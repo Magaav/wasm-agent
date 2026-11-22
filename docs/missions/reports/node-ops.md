@@ -1,3 +1,178 @@
+# node-ops — round 3 (22/11): re-measured on main, and the three defects that were still real
+
+Branch `change/node-ops`, base **origin/main `a8cd5348`** (the launch note said `dfd3c253`; one more commit
+landed after it, so the base is what `git fetch` answered at the start of the round). Built and tested on
+avell only (16 cores, `CARGO_TARGET_DIR=/home/victor/wasm-agent/target/m-node-ops`). **No `git stash` was
+used**: the base side of every comparison is a separate worktree
+(`/home/victor/Work/missions/node-ops/base-wt`, detached at `a8cd5348`, removed after use) or a saved log.
+
+Every row below names the commit or the `file:line` that shows it NOW, and `git log -1 -S<text> -- <path>`
+reproduces the hash. Where the brief's premise was stale it says so.
+
+## 1. Re-measure: every MUST and LOW item, as main stands
+
+| # | item | evidence on main | verdict |
+|---|---|---|---|
+| 0 | rebase onto `ac7717e0`, full fast path in a scratch home | the worktree was already `origin/main` (`a8cd5348` after this round's `git fetch`, one commit past the `dfd3c253` the note named) and the tree was clean before the first edit; the full fast path in a scratch home is quoted in §3 | rebase obsolete; path run |
+| 1 | rollback must never leave a node down | `scripts/rollback-node.sh:106-119` records `UNIT_BEFORE` (via `wa_node_unit`) BEFORE anything is stopped; `:258` restarts exactly `UNIT="${UNIT_BEFORE:-${STOPPED_UNIT:-$(wa_node_unit)}}"`; `:275` the verdict is `wa_running_binary_verdict "$pid" "$INSTALL/wa"` over `/proc/<pid>/exe` by device+inode (`scripts/lib/rollback-verify.sh`). Introduced by `d18cd696`. Test with the sentinel ACTIVE: `scripts/test-rollback-verify.sh:288-355` builds a fake `systemctl` that answers `is-active`, hides its unit's pid after `stop`, and asserts the unit STOPPED is the unit RESTARTED and that the new serving pid's exe is the restored file | already fixed on main |
+| 2 | `rollback ok` only when the binary AND the Lua tree really match, else name what was not verified | `scripts/rollback-node.sh:298-311`: `rollback ok (binary and Lua tree both verified: …)` only when `BINARY_VERIFIED` and `LUA_VERIFIED` are both set; otherwise `rollback_unverified:` naming `binary_not_read_by_this_run`, `lua_tree_not_compared`, `no_previous_lua_tree_was_kept`, plus the no-systemd and `--no-restart` tails. `534113c9`, `d18cd696`. Asserted for both `--no-restart` shapes at `scripts/test-rollback-verify.sh:374-390` | already fixed |
+| 3 | the four Lua rows' real-home guards compare the USER home | one rule in `scripts/lib/scratch-home.lua` (`M.guard`, `f49dd9d4`), called at `scripts/test-backup-restore.lua:33`, `scripts/test-build-status.lua:25`, `scripts/test-nodes-capabilities.lua:27`, `scripts/test-nodes-probe-parallel.lua:24`. It refuses `$HOME`, `$HOME/.wasm-agent`, anything inside it and anything that CONTAINS it, reads `WA_HOME_BEFORE_OVERRIDE` (inside a node `HOME == WASM_AGENT_HOME` by construction), and refuses a relative home. Its shell twin `scripts/lib/scratch-home.sh` is the same four refusals, 11 checks in `scripts/test-scratch-home.sh` | already fixed |
+| 4 | `host.runtime_info` emits `build_source_dirty` from the build stamp, `build_status` reads it, tested through the real `host.runtime_info` | emitted at `rust/wa-capabilities/src/host.rs:3550` from `BUILD_DIRTY`, which is the value `rust/wa-host/build.rs:117` stamped into the binary from `git status --porcelain --untracked-files=no` at build time (`:181`, read into the runtime at `host.rs:3474`; `aee388da`), read at `lua/core/build_status.lua:87`. The relation (`lua/core/build_status.lua:39-68`): a dirty build at HEAD is `edited` (`:50-55`); the same HEAD with a DIFFERENT stamped source tree is `stale` (`:56-58`); uncommitted edits under `lua/`+`rust/` at the same HEAD are `edited` (`:59-62`); an unreadable fact is `unknown`. Test (`scripts/test-build-status.lua`) drives the real thing: `build status: runtime_info names build_source_dirty=false, and this process is graded fresh`. **The round-2 report sentence was wrong** ("a binary whose stamped source tree differs is `edited` too"): that case is `stale`, and only uncommitted edits are `edited`. The sentence below is corrected; no code change was needed | already fixed (report text corrected in this file) |
+| 5 | `wa test` builds no shell from `%q` and validates `--at` as hex before any shell | `lua/core/init.lua:521` refuses a non-hex `--at` with `refused(row_at_sha_bad_commit)` before a command string exists (an allow-list: `^%x+$`); `:541` `shq()` single-quotes and closes-escapes-reopens every internal `'`; `:552` the command is built only from `shq` (`3d237aaf`). Test: `scripts/test-row-at-sha.sh:140` runs `wa test --at '$(touch <marker>)'` and asserts the marker does not exist | already fixed |
+| 6 | restore moves the old `-wal`/`-shm` with the `.pre-restore-<stamp>` copy, before placing the restored file | `lua/core/backup.lua:663-700` (step 2b): each sidecar is moved to `<source>.pre-restore-<stamp><suffix>` BEFORE the staged bytes land, and a failed move puts the previous file back and says which of the two states the store is in (`1988fe38`). Test `scripts/test-backup-restore.lua:285-308` asserts the store has no stale `-wal` AND that the kept one holds the old bytes | already fixed |
+| 7 | row-at-sha: each side gets its own scratch home | `scripts/lib/row-at-sha.sh:165-166` runs the base row in `$scratch/base/home-<row>` and the change row in `$scratch/change/home-<row>`, and `:172` prints `base_home=`/`change_home=` in the answer (`5c81714c`) | already fixed |
+| 8a | the base side uses the BASE tree's watchdog lib | `scripts/lib/row-at-sha.sh:88-99`: `$root/scripts/lib/fast-watchdog.sh` where `$root` is the tree being run, plus a log line when that tree has none (`56cace56`) | already fixed |
+| 8b | no file-scope `set -uo pipefail` and no EXIT-trap override when sourced | `scripts/lib/row-at-sha.sh:23` sets the options only when `BASH_SOURCE[0] = $0`; `:130-152` saves `trap -p EXIT`, runs its own cleanup FIRST and then restores the caller's trap (`f49dd9d4`, `53f47bb6`) | already fixed |
+| 8c | unknown `build.env` keys refused by deploy/mission/land too, quoted values unquoted | `scripts/deploy.sh:379-383` (`refused(build_env_key_unknown)`), `scripts/mission.sh:560-563`, `lua/core/land.lua:2342-2360`; one pair of matching quotes is removed by the single reader at `scripts/lib/build-requirements.sh:100-112`. **`fast.sh` — the runner named in the same sentence — had lost the read entirely** (`rg 'build_env|build-requirements' scripts/fast.sh` answered nothing on main); fixed in this round (`f9018915`) | deploy/mission/land already; `fast.sh` fixed here |
+| 8d | the watchdog's 124 told apart from a command's own 124 | on main `wa_watchdog_hung` was `[ "$1" = 124 ]` (`scripts/lib/fast-watchdog.sh:101`), so a row that exits 124 itself (`timeout`, a row with its own deadline) was reported as hung. Fixed in this round (`57f11c3f`): the predicate needs the watchdog's own `produced no verdict within` line as well as the code, `fast.sh` uses it instead of a loose `grep '^watchdog: '`, and a row that exits 124 by itself is passed through and not called a hang | was open — fixed |
+| 8e | a green row that printed `SKIP` is not a pass | on main `check()` went from exit 0 straight to `record_row pass`; the branch was dropped by `2975b6c5` ("they come back with their own test") and never returned, so `scripts/test-fast-skip-count.sh` (wired at `scripts/test.sh:1008`) was RED on main. Restored in this round (`11761cb0`) | was open — fixed |
+| 8f | the report lists the full fast path and the restore stop sentence | §3 lists what the fast path runs and quotes a full run; §5 quotes the restore's stop sentence | done here |
+
+**Brief and launch-note facts that were stale (rule 9), measured before writing code:**
+
+1. Item 0's rebase is obsolete twice over: the worktree was already on `origin/main`, and `origin/main` is
+   `a8cd5348`, not `dfd3c253` and not `ac7717e0` (76 commits behind is a 19/11 measurement).
+2. The launch note's "everything your branch had is already on main" was **false for two behaviours and one
+   helper**: `fast.sh` had lost the build-record read (item 8c) and the skip-as-skip branch of `check()`
+   (item 8e), and `wa_watchdog_hung` still answered "hung" to any 124 (item 8d). All three were RED in the
+   gate on unmodified main; all three are fixed in this round.
+3. Item 8c's premise pointed at the wrong faces: deploy, mission and land already refused unknown keys; it
+   was `fast.sh`, the runner in the same sentence, that had none.
+4. Item 4's premise ("a different tree at the same HEAD = `edited` as the report says") was a report error,
+   not a code error: the code answers `stale` for a different stamped tree and `edited` only for uncommitted
+   edits at the same HEAD. The report is corrected here rather than the code.
+
+## 2. What this round changed — three commits
+
+RED was measured on the unmodified tree (HEAD `a8cd5348`, `git status` clean) before any edit:
+
+```
+scripts/test-build-env.sh        exit 1  test-build-env: scripts/fast.sh with an unknown record key exited 0, not 2
+scripts/test-fast-skip-count.sh  exit 1  FAIL test-fast-skip-count: the shipped check() does not look for a SKIP line: a green skip is counted as a pass
+scripts/test-fast-watchdog.sh    exit 0  (green, but wa_watchdog_hung still answered hung to a bare 124 - the assertion did not ask)
+```
+
+| commit | what it does | test |
+|---|---|---|
+| `f9018915` | `fast.sh` sources `scripts/lib/build-requirements.sh` before it resolves the binary (the build needs the record's toolchain on PATH), refuses an unknown key with `refused(build_env_key_unknown:<key>)` and a missing directory with `refused(build_env_incomplete)`, and prints the record's own lines AFTER the binary banner (the banner is the run's first line by contract, `scripts/test-fast-binary.mjs:215-222` — measured: putting them first failed that row `exit 1`) | `scripts/test-build-env.sh` → ok; `node scripts/test-fast-binary.mjs` → `fast binary: 32 checks`, exit 0 |
+| `11761cb0` | restores the skip-as-skip branch of `check()`: a green row with a `SKIP <test>: <reason>` line is recorded `skip`, counted in `$skipped`, and printed `fast: <name> SKIPPED (…)` | `scripts/test-fast-skip-count.sh` → ok; `scripts/test-fast-counters.sh` → `fast counters ok` |
+| `57f11c3f` | `wa_watchdog_hung <code> [text]` answers "hang" only for 124 AND the watchdog's own `produced no verdict within` line; `fast.sh` classifies a hung Lua row with that predicate instead of a loose grep; a row that exits 124 by itself is passed through and reported as its own code | `scripts/test-fast-watchdog.sh` → ok (adds: a bare 124 is not a hang, a hang line with another code is not a hang, a row that times itself out keeps its 124 and is not called hung); `scripts/test-fast-watchdog-reap.sh` → ok |
+
+## 3. The full fast path, in a scratch home
+
+What `scripts/fast.sh` runs, in its own words (`scripts/fast.sh:6-40`): (1) every `scripts/test-*.lua` not
+listed in `scripts/fast-path.exclude`, each in its own scratch home and ledger, in parallel (`nproc`, capped at
+8; `--jobs`/`WA_FAST_JOBS` overrides); (2) the Rust unit tests of the crates the change touches (`--all-rust`
+for every crate), under a scratch HOME; (3) the contract checks — prompt docs in sync, instructions,
+landing queue, landing baseline, fast-environment, the WIT seam and its judge, the watchdog, the rollback
+verification, the restore, the scratch-home rule, the build record, the skip count, the node probe; (4) the
+crates' build times (measured, never gated); (5) the module map (FLAGS only). Before all of that it reads the
+node's build record, builds the components the Lua rows need and builds (or refuses by name) the tree's own
+binary, and it states that binary, its commit, this tree's commit and the verdict as its FIRST line.
+
+Both runs used a scratch home of their own, never the operator store, under
+flock -o ~/Work/missions/.suite.lock, at the tree content the three commits of §2 carry - they were made
+from it after the runs, so the binary stamp the tool printed (e753cf1cf3d2) names the commit that existed
+during the run and the rows are the same Lua either way. The first run is with WA_FAST_ROW_SECONDS=240 -
+see §4: the default 120 s deadline ends scripts/test-land.lua on a busy node, which measures this machine
+and not the branch. The second is the same tree with the default deadline.
+
+```
+fast: binary /home/victor/wasm-agent/target/m-node-ops/release/wa (build e753cf1cf3d2, tree e753cf1cf3d2, fresh: built from this tree) sha256=e5bd0b86523f
+fast: build record: record  absent  /home/victor/Work/missions/node-ops/scratch-fast-home240/.wasm-agent/build.env (a node with no record builds from its ambient environment; nothing to check)
+fast: build root /home/victor/Work/missions/node-ops/scratch-fast-home240/.wasm-agent/build/target/wt-507e20d15ad2 (12K of a 27.9G cap)
+fast: env: node v26.13.1 (node:sqlite yes), cargo cargo 1.100.0 (3acc79c0c 2026-11-05), wasi-sdk 34.0, lua Lua 5.4.9  Copyright (C) 1994-2026 Lua.org, PUC-Rio
+fast: lua 284/284 passed (59 excluded: scripts/fast-path.exclude)
+fast: 1 named skip(s) inside passing rows (a skip is not a pass):
+fast: run-live-pty SKIPPED (46113ms): test-run-live-pty: the scrollbar splits while a call waits (2 bar groups) - a defect this row records and does not hide: [[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32],[34]]
+fast: rust - no crate touched
+...
+fast result ok (353 checks, 0 failed, 1 skipped): /home/victor/wasm-agent/checkout/.git/worktrees/wt28/wa-fast-result.json
+fast path ok (353 checks, 1 skipped, 347s)
+
+```
+
+The SAME tree with the DEFAULT deadline (no WA_FAST_ROW_SECONDS), 353 checks, 308 s:
+
+```
+fast result FAILED (353 checks, 1 failed, 1 skipped): .../wa-fast-result.json
+fast path FAILED (1 of 353 checks, 1 skipped, 308s)
+FAIL lua scripts/test-land.lua (hung): watchdog: test-land.lua produced no verdict within 120s (process group 1920588, 1 process(es)): killed the group with TERM, then KILL after 2s
+```
+
+## 4. Named, and NOT fixed
+
+`scripts/test-land.lua` is a Lua row whose own work takes ~105 s, and the fast path gives every Lua row a
+120 s deadline (`scripts/lib/fast-row-exec.sh:135`, `WA_FAST_ROW_SECONDS:-120`). Measured this round, alone,
+on one machine and under the suite lock:
+
+```
+change (HEAD e753cf1c): exit 0 in 106444ms: land ok (655 checks)
+base   (a8cd5348)     : exit 0 in 103317ms: land ok (655 checks)
+```
+
+So the row is 14 s inside its deadline on an idle machine and ~4 s outside it when the fast path runs eight of
+them at once beside other sessions — a timing margin, not a change in behaviour, and identical on the base
+commit. It is reported here rather than papered over: any full run on a busy node may end `1 row HUNG (land)`
+and that line is the machine, not this branch. Not fixed here because raising a row's deadline changes the
+gate's contract and is not this round's item.
+
+Two more facts from the runs, neither caused by this round and neither hidden:
+
+* `scripts/test-run-live-pty` SKIPS in every run with its own named reason (a scrollbar splits into 2 bar
+  groups while a call waits) - the row records a defect it does not gate. That is the 1 skipped check in
+  both runs above, and it was there before this round.
+* `scripts/test-rel-native-poll.lua` failed ONE of its three checks in the first parallel run of this round
+  (`exit 1`, 7.5 s: "ok rel-native-poll: 3 checks, 1 failed") and passed in both runs quoted in §3. Alone it
+  is green every time, on both trees, measured 22/11 under the suite lock:
+
+  ```
+  change-1 exit=0: ... ok rel-native-poll: 3 checks, 0 failed
+  change-2 exit=0: ... ok rel-native-poll: 3 checks, 0 failed
+  change-3 exit=0: ... ok rel-native-poll: 3 checks, 0 failed
+  base-1   exit=0: ... ok rel-native-poll: 3 checks, 0 failed
+  base-2   exit=0: ... ok rel-native-poll: 3 checks, 0 failed
+  ```
+
+  The row starts a real supervised operation (`sleep 45`) and polls it with `wait_s:0`, so it measures a
+  timer under eight concurrent rows; it is a load-sensitive row, not this branch. Named, not fixed.
+
+## 5. The restore's stop sentence (item 8f)
+
+When a store a live process holds is about to be replaced, the restore refuses with `restore_store_held` and
+one sentence, built at `lua/core/backup.lua:592-600`:
+
+```
+<source> is held by pid <pid> (<command>). Stop it first, then restore again: <systemctl --user stop <unit>> && kill <pid>
+```
+
+Both the unit and the pid are named on purpose (a process can sit in a unit the restore must not stop on its
+own), the duplicates are removed, and `scripts/test-backup-restore.lua` asserts the refusal names the pid and
+that nothing was written. The operator answer is exactly `Stop it first, then restore again:` followed by the
+command(s) that do it.
+
+## 6. Texts to approve (round 3: 31–35, continuing the round-2 list)
+
+31. `fast: refused(build_env_key_unknown:<key>): the build record names a setting no build reads, so a machine could spend a day believing it set a toolchain directory nothing looked at. Remove that line, or add it to WA_BUILD_ENV_KEYS with the face that consumes it. Nothing was run.`
+32. `fast: refused(build_env_incomplete): the build record names a directory that is not there; the refusal above names it and the one line that fixes it. Nothing was run.`
+33. `fast: build record: record  absent  <home>/.wasm-agent/build.env (a node with no record builds from its ambient environment; nothing to check)` — and `fast: build record <KEY>=<value>` per record key. Both are printed AFTER the binary banner, which stays the run's first line.
+34. `fast: <name> SKIPPED (<ms>ms): <reason>` (restored round-2 text 14; the row is recorded `skip`, not `pass`)
+35. no new string for the watchdog: the change is the contract of `wa_watchdog_hung <code> [text]` (a bare 124 is not a hang), and its operator-visible effect is that a row which exits 124 by itself is reported with its own code instead of `hung`.
+
+## 7. Where each test is wired
+
+| test | wired |
+|---|---|
+| `scripts/test-build-env.sh` | `scripts/test.sh:1001` (`gate_run … grep 'test-build-env: ok'`) |
+| `scripts/test-fast-skip-count.sh` | `scripts/test.sh:1008` |
+| `scripts/test-fast-counters.sh` | `scripts/fast.sh` check row `fast-counters` |
+| `scripts/test-fast-watchdog.sh` | `scripts/fast.sh:901` check row `fast-watchdog`, and `scripts/test.sh` |
+| `scripts/test-fast-watchdog-reap.sh` | `scripts/fast.sh:908` check row `fast-watchdog-reap` |
+| `scripts/test-fast-binary.mjs` | `scripts/fast.sh:798` check row `fast-binary` (it is the row that enforces §3's first line) |
+| `scripts/test-rollback-verify.sh` / `test-backup-restore.sh` / `test-build-status.sh` / `test-row-at-sha.sh` / `test-nodes-probe-parallel.sh` / `test-scratch-home.sh` | `scripts/test.sh:991-1010` (gate rows) |
+
+---
+
 # node-ops — node safety and build/test plumbing (19/11, round 2)
 
 Branch `change/node-ops`, base `e4e40405` (origin/main, rebased onto it first). **Never pushed.**
@@ -138,7 +313,10 @@ alone, so a binary built from a dirty tree at HEAD reported `fresh`.
 
 **Fix (`48ae2391`):** `build_status` reads `built_dirty` and `build_source_tree`. A binary that records
 itself as built from a dirty tree at this commit is `edited`; a binary whose stamped source tree differs
-is `edited` too. `fresh` now requires the same commit AND clean AND the same tree.
+at the SAME commit is `stale` (its committed bytes are not this tree at all), and uncommitted edits under
+`lua/` or `rust/` at the same commit are `edited`. `fresh` requires the same commit AND the same tree AND
+a clean work tree. CORRECTED 22/11 (round 3, item 4): the sentence here said the stamped-tree case was
+`edited` too, which is not what `lua/core/build_status.lua:56-62` answers.
 
 **After:** `build status ok: relation stale with its reason, the tool agrees, and the runner clears
 WASM_AGENT_* by allow-list` (the new cases are asserted in `scripts/test-build-status.lua`:
