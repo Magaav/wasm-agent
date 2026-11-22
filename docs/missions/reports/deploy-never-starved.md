@@ -186,6 +186,15 @@ Re-measured after the fix (`38c27bfe`): `bash scripts/test-discriminates.sh orig
 limit). On the base worktree the two `sh` rows fail with **12** and **16** failures, and both pass on this
 tree (`deploy bound ok`, `deploy wait ok`).
 
+**What was NOT re-run after `38c27bfe`/`4665e68c`: the whole fast path.** It was started twice and both times
+queued behind another mission's suite in `~/Work/missions/.suite.lock`; the second attempt sat waiting 24
+minutes while `main-health` held the lock and a `wa land` preflight for another branch queued behind it, so it
+was cancelled (its queued `flock` was blocking that preflight) and the two rows it would have run were run
+directly instead, with the fast path's own environment (`CARGO_TARGET_DIR` set, `WA_BIN` set): both ok. The
+last complete fast-path run of this branch (the preflight of 22/11, on the merged tree `ac33856e`) reports
+`fast: ok (217 checks, 0 failed)`; the earlier full run here (before these two test-only commits) was 384
+checks / 2 failed, both pre-existing and both re-measured on the base - see below.
+
 ## Knobs
 
 | variable | default | what it does |
