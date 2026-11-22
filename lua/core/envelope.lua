@@ -21,10 +21,21 @@ local function rows(sql,params)
  if value.error then error('envelope_store:'..tostring(value.error)) end
  return value
 end
+local sqlite_busy=dofile('lua/core/sqlite_busy.lua')
 local function insert(key,value)
  local r=json.decode(host.sql_exec('INSERT OR IGNORE INTO meta(key,value) VALUES(?,?)',json.encode({key,value})))
- if r.error or r.ok~=true then error('envelope_store_write:'..tostring(r.error)) end
- return r.changes
+ if r.ok==true then return r.changes end
+ -- A CACHE ROW THE LEDGER WILL NOT TAKE IS NOT A RUN FAILURE (change/start-instant, 22/11). This table
+ -- holds what this code would compute again, so a refusal costs one recomputation and nothing else - and
+ -- it must not turn a turn into "the run stopped without an answer" because a deploy held the write lock
+ -- while the prompt was being built (measured: exactly that, envelope_store_write:database_busy).
+ if sqlite_busy.observe(r.error) then
+   -- 1, not 0: 0 means "a row with this key already exists", which is a different statement
+   -- (envelope_loadout_changed at the two call sites below). The value in effect is the one just
+   -- computed; the row is written on a turn that can write.
+   return 1, 'not_stored'
+ end
+ error('envelope_store_write:'..tostring(r.error))
 end
 local function key(ctx,suffix)
  if type(ctx.session_id)~='string' or ctx.session_id=='' then return nil end
@@ -42,8 +53,11 @@ function M.mode(ctx)
  if r[1] then if r[1].value~='full' and r[1].value~='progressive' then error('envelope_mode_corrupt') end;return r[1].value end
  -- Existing conversations retain their original surface. New sessions get the stable facade.
  local existing=rows("SELECT id FROM messages WHERE session_id=? AND role='assistant' LIMIT 1",{ctx.session_id})
- insert(k,#existing>0 and 'full' or 'progressive')
- r=rows('SELECT value FROM meta WHERE key=?',{k});return r[1].value
+ local decided=#existing>0 and 'full' or 'progressive'
+ insert(k,decided)
+ -- Returned from the decision, not from a re-read: the row is a cache, and a turn whose preamble met a
+ -- held ledger lock does not get to fail because the cache could not be written (change/start-instant).
+ return decided
 end
 -- The declared core for a bootstrap mode, sorted; scripts/sync-prompt-docs.lua renders the docs from it.
 function M.core_names(mode)

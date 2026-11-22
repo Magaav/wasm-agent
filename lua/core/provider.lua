@@ -410,7 +410,24 @@ end
 local function serving_sql(verb, statement, params)
   local value = host[verb](statement, json.encode(params or {}))
   if type(value)=='string' then value=json.decode(value) end
-  if not value or value.error then error('provider_availability_store') end
+  if not value then error('provider_availability_store:the host answered nothing') end
+  if value.error then
+    -- A SERVING OBSERVATION THE LEDGER WILL NOT TAKE IS NOT A REFUSED REQUEST (change/start-instant,
+    -- 22/11). This row records what a route did so a later turn can avoid it; a write refused because
+    -- another process held the ledger says nothing about the route, and it used to end the turn before
+    -- its first model call (measured: provider_availability_store, the run stopped without an answer).
+    -- It is reported to the run's start window, which tells the reader once, and the observation is lost
+    -- the way a dropped telemetry record is lost - named, not fatal.
+    local problem = tostring(value.error)
+    if dofile('lua/core/sqlite_busy.lua').observe(problem) then return {} end
+    -- A TABLE THIS LEDGER COULD NOT CREATE IS THE SAME STATEMENT (change/start-instant, 22/11): the
+    -- schema for these observations is created lazily on first use, and a deploy holding the write lock
+    -- at that moment left every later read answering "no such table" - which used to refuse the REQUEST
+    -- with provider_availability_store. Nothing is known about the route, which is exactly what an empty
+    -- answer means here; the table is created on the next turn that can write.
+    if problem:find('no such table', 1, true) or problem:find('unable to open', 1, true) then return {} end
+    error('provider_availability_store:'..problem)
+  end
   return value
 end
 local function serving_binding(provider)

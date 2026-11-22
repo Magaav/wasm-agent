@@ -55,6 +55,12 @@ local function read_row(k)
 end
 
 local function write_row(k,value)
+ -- A RUN'S PREAMBLE THAT ALREADY MET A HELD LEDGER DOES NOT PAY FOR THE SAME ANSWER AGAIN
+ -- (change/start-instant): this record is a cache, the caller already reports "could not be stored", and
+ -- attempting it costs the host's retry backoff on a write that cannot land. Measured: one refused
+ -- statement cost 850 ms of a 2.3 s turn.
+ local busy=dofile('lua/core/sqlite_busy.lua')
+ if busy.busy_now() then return false,'prompt_cache_store' end
  local ok,raw=pcall(host.sql_exec,'INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)',
    json.encode({k,json.encode(value)}))
  if not ok or type(raw)~='string' then return false,'prompt_cache_store' end

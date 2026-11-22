@@ -622,6 +622,11 @@ elseif command == "conform" then
   local path = dofile("lua/core/model_profile.lua").path(model)
   print("conform: profile stored at " .. tostring(path))
 
+elseif command == "stalls" then
+  -- The one number this node exists to keep an eye on (change/start-instant, item 5): how long a turn
+  -- takes to REACH the model. Read-only, and it names the phase each slow run's own preflight row blamed.
+  os.exit(dofile("lua/core/stalls.lua").cli(args) or 0)
+
 elseif command == "turns" then
   -- The turn feed (lua/core/turnfeed_cli.lua, docs/TURNS.md): the model's own `<turn>` notes, read out
   -- of this node's ledger and every peer that answers, grouped into a ranked queue with a brief per
@@ -691,6 +696,7 @@ elseif command == "help" then
   print("    eval capture|list|run|report|verdict|reviewer  freeze real tasks, replay isolated, review a branch, read metrics")
   print("    whatsapp archive list|cut|restore|unload|push|expire [YYYY-MM]  the index's monthly archives")
   print("    turns [--since 24h] [--top N] [--json]  the model's own <turn> complaints, grouped and ranked")
+  print("    stalls [--since <hours>] [--json]  run start -> first model call: median, p90, the slow ones and what they waited for")
   print("    conform <model>  run the conformance suite against a model and store its profile")
   print("    turns fixed <cluster> --sha <commit>     mark a cluster fixed; the report then says if it is still hurting")
   print("    resume [--list] [--session <id>] [prompt]   see and continue an unfinished thread")

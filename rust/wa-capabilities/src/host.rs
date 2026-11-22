@@ -64,6 +64,38 @@ pub extern "C-unwind" fn script_run(l: *mut LuaState) -> c_int {
 }
 
 /// host.mark_db_ready() -> nil: record that the schema migration has run.
+/// host.sql_patience(millis)
+///
+/// How long this process's statements may wait for a lock, from now until it is set back with 0 - the
+/// one place a turn's preamble bounds its own bookkeeping (change/start-instant, 22/11). The same
+/// policy module decides it everywhere (`wa_sqlite::set_patience`), so a window cannot disagree with
+/// the retry loop it is trying to bound. Answers one explicit nil, so `select('#', ...)` is 1.
+pub extern "C-unwind" fn sql_patience(l: *mut LuaState) -> c_int {
+    let millis = arg_string(l, 1)
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(0)
+        .min(120_000);
+    wa_sqlite::set_patience(millis);
+    unsafe { wa_host_support::lua::lua_pushnil(l) };
+    1
+}
+
+/// host.sql_patience(millis)
+///
+/// How long this process's statements may wait for a lock, from now until it is set back with 0 - the one
+/// place a turn's preamble bounds its own bookkeeping (change/start-instant, 22/11). One attempt inside a
+/// bounded window, because the window already says how long the caller may wait and five attempts of it
+/// is what turned a 400 ms wait into a 2.2 s write. Answers one explicit nil, so `select('#', ...)` is 1.
+pub extern "C-unwind" fn sql_patience(l: *mut LuaState) -> c_int {
+    let millis = arg_string(l, 1)
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(0)
+        .min(120_000);
+    SQL_PATIENCE.store(millis, std::sync::atomic::Ordering::SeqCst);
+    unsafe { wa_host_support::lua::lua_pushnil(l) };
+    1
+}
+
 pub extern "C-unwind" fn mark_db_ready(l: *mut LuaState) -> c_int {
     DB_READY.store(true, std::sync::atomic::Ordering::SeqCst);
     // One explicit nil, never zero results: `select('#', host.mark_db_ready())`
@@ -615,6 +647,10 @@ fn action_of(sql: &str) -> String {
 ///   detected (`is_autocommit` before/after) and reported as a failure to retry *the unit*.
 /// * Total patience is bounded (`WASM_AGENT_SQLITE_RETRY_MS`) and the failure is named
 ///   (`database_busy: ... (retryable)`), so a caller can decide to retry instead of dying.
+/// The patience this process may spend on contention, from `host.sql_patience(ms)` until it is set back
+/// with 0. 0 means "no override": the environment and `wa-sqlite`'s defaults decide, as before.
+static SQL_PATIENCE: AtomicU64 = AtomicU64::new(0);
+
 fn under_policy<T>(
     conn: &Connection,
     action: &str,
@@ -622,8 +658,17 @@ fn under_policy<T>(
 ) -> Result<T, String> {
     let started = std::time::Instant::now();
     let inside_transaction = !conn.is_autocommit();
-    let attempts_max = wa_sqlite::attempts_max();
-    let deadline = started + std::time::Duration::from_millis(wa_sqlite::retry_ms());
+    // A BOUND THIS PROCESS SETS FOR ITSELF (change/start-instant, 22/11): a turn's preamble opens a
+    // window in which a refused write must fail at once instead of being retried (`host.sql_patience`).
+    // It lives here, beside the loop it adjusts, and NOT in wa-sqlite: that crate is an input of the
+    // graph component, and a policy change for the host must not move a shipped artifact's pin (measured:
+    // rebuilding graph with the change in wa-sqlite produced different bytes, `scripts/test-component-pins.sh`).
+    let bound = std::sync::atomic::AtomicU64::new(0);
+    let _ = &bound;
+    let patience = SQL_PATIENCE.load(std::sync::atomic::Ordering::SeqCst);
+    let attempts_max = if patience > 0 { 1 } else { wa_sqlite::attempts_max() };
+    let budget = if patience > 0 { patience.min(wa_sqlite::retry_ms()) } else { wa_sqlite::retry_ms() };
+    let deadline = started + std::time::Duration::from_millis(budget);
     let mut attempt = 0u32;
     loop {
         attempt += 1;
