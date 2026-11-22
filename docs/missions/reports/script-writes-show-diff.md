@@ -115,6 +115,20 @@ Two measurements, both on this node:
   transcript keeps turns, not cards, so `wa chat --continue` shows the same rows it showed before this
   change (the tool result, no card). Doing it means persisting view events in the session record and
   drawing them on replay - more than a small change, so it is left, as the brief allows.
+- **One full fast-path run, and the one row failure in it that was not reproduced.** The full fast path
+  at `fcea7d22` reported 2 failures of 394: `scripts/test-land-quick.lua` (exit 124, the watchdog killed
+  it after 120 s with no verdict, classified `environment`) and this mission's own row
+  (`FAILED 4`). The row then passed: alone (`33 checks`), four instances at once, with the runner's own
+  row environment replicated by hand (cleared env, the built components installed in the home,
+  `WA_COMPONENTS_DIR`/`WASM_AGENT_MANAGED=0`), and against a worktree of the base where it fails as it
+  must. The one mechanism that does explain it was found and fixed: a scripted `rm -f` comes back as
+  `{state:"pending"}` while the operation slots are busy, and the row walked away from the handle, so the
+  Delete was never there to see (`3b9bfcd7` now resumes it, as a real script does). The row also prints
+  the first failing check in its verdict line now (`3fe4471b`), so the next occurrence names itself
+  instead of dying with the runner's work directory.
+  Narrowed reproduction was attempted and is **not possible by row name**: `WA_FAST_ROWS` is a list of
+  CHANGED PATHS (`scripts/lib/fast-rows.sh`), so a row name is refused by name - two attempts of mine
+  therefore ran no rows at all and proved nothing; the full suite is the faithful door.
 - **My own rule breach, reported rather than hidden:** one throwaway debug script of mine
   (`/tmp/swsd-dbg2.lua`, run by hand at ~22:15Z) drove a real agent loop whose provider seam was not
   stubbed, so it reached the operator's provider through `WASM_AGENT_VAULT_URL` and spent three model
