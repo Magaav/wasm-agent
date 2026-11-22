@@ -17,7 +17,8 @@ check(refused.error=='federation_tool_not_exported','a tool that is not an expor
 -- Local side, against a stubbed peer `openclaw` exporting one read and one write tool.
 local nodes=dofile('lua/core/nodes.lua')
 local calls={}
-nodes.list=function() return {
+local list_opts
+nodes.list=function(opts) list_opts=opts; return {
   {node_id='self',name='here',local_node=true,online=true},
   {node_id='peer-1',name='openclaw',online=true},
   {node_id='peer-2',name='old-build',online=true},
@@ -35,6 +36,9 @@ local real_dofile=dofile
 dofile=function(path) if path=='lua/core/nodes.lua' then return nodes end return real_dofile(path) end
 
 local cache=federation.refresh()
+-- A refresh runs inside a turn before its first model call: it reads the roster and never starts a live
+-- probe (one offline peer cost every stale turn the probe's 20 s deadline, 22/11).
+check(type(list_opts)=='table' and list_opts.live_capabilities==false,'the refresh asks for the roster only, never a live probe')
 check(cache.peers['peer-1'] and #cache.peers['peer-1'].tools==2,'the online peer catalog is kept')
 check(cache.peers['peer-2'] and cache.peers['peer-2'].error,'an older peer is recorded with its reason, not dropped silently')
 check(cache.peers['peer-3']==nil,'an offline peer is not asked')
