@@ -120,10 +120,12 @@ turns it into the notice, a process with neither display variable is told so bef
   and `a_bracketed_paste_keeps_its_tabs` (new); the two existing Ctrl+V assertions now name
   `Action::Paste`.
 - Run green on this tree at `165f5998`: the 14 clipboard tests, the pty row (18/18), and
-  `scripts/test-keybindings.lua` (53 checks) against this tree's binary. The full crates were last
-  measured green at `3cb3ffed` (`cargo test -p wa-capabilities --lib` **373 passed, 0 failed** with a
-  scratch HOME; `cargo test -p wa-term --lib` **184 passed, 0 failed**); the rerun after `165f5998` was
-  started and its result could not be read back (`operation_owner_not_attached`), so it is **not** claimed.
+  `scripts/test-keybindings.lua` (53 checks) against this tree's binary.
+- **Full crates, this tree:** `cargo test -p wa-capabilities --lib` — **377 passed, 0 failed** (with a
+  scratch HOME, so the two tests that refuse the operator's own home ran too), measured after `165f5998`;
+  that run's operation reported `outcome_unknown` while it ran and its answer arrived later, which is why
+  this line was first written as unclaimed. `cargo test -p wa-term --lib` — **184 passed, 0 failed** at
+  `3cb3ffed`, and no commit after it touches `rust/wa-term` (`git show --stat 3cb3ffed 589d204b 165f5998`).
 - `scripts/test-discriminates.sh` cannot judge this branch and says so: the Rust tests live inside
   `src/` files (not a test path) and the pty row drives a binary, so the row prints
   `SKIP clipboard paste: WASM_AGENT_LUA_ROOT (…) is not this row's tree (…): the binary is another tree's
