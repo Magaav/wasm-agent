@@ -241,17 +241,25 @@ terminal open, or with only the node serving.
   (`lua/core/chat.lua`). Nothing new claims it: the two surfaces that already start a turn with
   nobody typing do the work, so a session no terminal is on still wakes as soon as a node serves it.
 * **The row says** the answer itself, in the same flat shape `wait(op)` answers (see "one result
-  shape" above), and the list of handles that are STILL pending with their op, tool and age - so a
-  model that restarts or is compacted needs no memory of what it left running. It is labelled as
-  automated node state (`[self-wake · a pending call settled]`), never as the operator's words.
+  shape" above), and the list of handles that are STILL pending with their op, tool, state and age -
+  so a model that restarts or is compacted needs no memory of what it left running. The state is
+  named per handle (`running` or `unknown`, both open, not the same news), not implied by the header.
+  It is labelled as automated node state (`[self-wake · a pending call settled]`), never as the
+  operator's words.
+* **Every wake carries it, not only a settlement** (22/11, seat list item 5): a timer, event or probe
+  wake appends the same list for the session's own handles (`handle_wake.pending_for` /
+  `pending_text`, read in `selfloop.run_wake`), after the two lines the wake always had. A handle
+  wake keeps its one list; a session with nothing open reads exactly as it did before.
 * **Exactly once.** The wake's id is derived from the operation id (`handle:<op>`), so a second sweep
   - in this process, in another, or after a restart - is an `INSERT OR IGNORE` no-op; the handle
   record is marked `woke_at` only after the insert answered, and `reported` with it so the next
   script's `pending_settled` does not repeat the same news. No effect is ever re-run: a wake reads
   the retained result.
-* `scripts/test-handle-wake.lua` pins the sweep, the row's words, the still-pending list, the
-  exactly-once behaviour across a reloaded module, and that the row is claimable by the same route
-  both surfaces use.
+* `scripts/test-handle-wake.lua` pins the sweep, the row's words, the still-pending list with each
+  handle's own state, the exactly-once behaviour across a reloaded module, and that the row is
+  claimable by the same route both surfaces use. `scripts/test-handle-wake-turn.lua` runs the turn
+  itself with a stubbed provider: two handles pending, a settlement claimed and run, then a SCHEDULED
+  wake whose input lists both handles with their state.
 
 **A line typed during a run** is queued unless the reader says otherwise: plain Enter is delivered at
 the next context boundary and ends nothing, and Ctrl+Enter (or Ctrl+G where the terminal cannot tell
@@ -268,10 +276,20 @@ the two apart) is "now" - it ends the run's wait and the reader's line is the mo
 | `script_cut_at_cap` | a script that was told "not yet" (a pending answer) | `codemode`'s end, once per script |
 | `handle_mishandled` | a script that used a pending answer as a result, or ended on the wait-never-settles bound | `codemode`'s end |
 
+**Where they are, and how to read them** (22/11, seat list item 10): one row of the node's own
+ledger's `meta` table, `meta['codemode.counters.v1']`. `wa counters` prints it (and
+`wa counters --json` hands the same document to a script), from the command line - `/stats` shows
+the three totals inside the chat. Every bump also increments that calendar day's bucket on the node's
+own clock, the newest 30 days are kept, and **a day this store never saw is reported as `not
+recorded`, never as three zeros**: a cumulative number cannot say whether the last three days were
+busy, and "unknown" is not "quiet". Days before this store kept days say `not recorded` - it does
+not back-fill them from the ledger, because no ledger row carries the same event.
+
 They are telemetry and nothing else: no decision reads them. `script_cut_at_cap` measures the
 pending-answer half only - the "hit its deadline with lines still to run" half is NOT counted yet and
 is named rather than folded in silently. `scripts/test-codemode-counters.lua` holds the two
-script-side counters (one increment per script, never per call) and the read/write half of the third.
+script-side counters (one increment per script, never per call), the read/write half of the third, the
+day book and its bound, and the command itself read from another process on the same ledger.
 
 ## Peers and discovery (29/10)
 
