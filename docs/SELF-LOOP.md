@@ -201,6 +201,59 @@ file are outside this program, so nothing in it knew the session was parked, and
 * The footer of a parked session reads `⏰ 2 wakes held (session parked)`, so a reader does not go
   looking for the interrupt that paused it, and the window's `wakes` block carries `parked`.
 
+## What waits, and what pauses for it: a deploy
+
+A deploy replaces this node, so it can only run while the node is idle - and every turn in flight is what
+keeps it from being idle. Measured twice on this laptop (22/11, `~/.wasm-agent/sentinel/sentinel.log`): the
+deploy for `8082b42e` was held with `the node is busy: a run, a subagent or an operation is in flight` from
+10:01:24Z to 10:31:48Z, thirty minutes, with three workers running; it ran only after the operator parked
+four sessions by hand and stopped one `wa chat --once`. The pause signal that existed was the INSTALLER's
+marker (`lua/core/deploy_pause.lua`, written by `scripts/upgrade.sh` before it waits) - which covers the
+swap and never the wait.
+
+So a deploy is TWO signals, and one predicate answers both:
+
+* **the installer's marker**, `<data>/deploy-pending.json` (`scripts/lib/deploy-signal.sh`), present while
+  `scripts/upgrade.sh` replaces the bytes;
+* **the sentinel's own request box**, `<data>/sentinel/requests/<id>.json` while the request waits and
+  `<data>/sentinel/claimed/<id>.json` from the moment it is claimed until it settles - the rename IS the claim
+  (`rust/wa-sentinel`), so both lanes count and there is no gap between "request gone" and "installer's
+  marker written" while `scripts/deploy.sh` verifies and builds. `lua/core/deploy_wait.lua` reads both, and
+  only for a verb that INSTALLS a build (`deploy`): `upgrade` is retired and held for ever by name, and a
+  `restart`, `stop`, `recover`, `spell`, `run` or `wake` installs nothing.
+
+What the node does while either is live:
+
+* **No new turn starts.** `lua/core/agent.lua`'s run-time gate refuses every automatic turn - a `--once`, a
+  piped prompt, a wake, a resume dispatch, a subagent child - and the CLI refuses it before the thread is even
+  opened (`lua/core/chat.lua`, exit 2, nothing written: no thread, no message, no model call). The refusal is
+  named and carries the commit: `deploy_waiting: waiting for the install of <sha> (deploy request <id>, asked
+  <when>) ...`. An operator's own interactive turn is NOT refused: somebody is watching it, and a pause they
+  did not ask for is worse than one more turn (`agent.operator_present`, set by `wa chat` at a terminal).
+* **A running turn pauses at its next step boundary** - never mid-call - writes its checkpoint and ends
+  cleanly with one resume wake (the pause half of `deploy_pause`). It records where it paused in
+  `<data>/deploy-paused/<session>.json`.
+* **Nothing resumes until the deploy ends.** The node's own placement tick (`lua/core/selfloop.lua`) holds
+  every due wake while either signal is live, and `release_due` does not release the paused sessions: the
+  resume is armed SHORT (60 s) when the pause was for a waiting request, and the tick gives it back unchanged
+  while the deploy continues. The moment both signals are gone the node makes those rows due and performs
+  them in the same tick - the paused `--once` process does not have to exist any more.
+* **The wait is visible and bounded.** `wa-sentinel status` prints, under the queued request, one line per
+  holder of the node - `busy     session 8082b42e  POST /chat 2m  paused for the deploy` (or `working`), from
+  the node's own `/health` - and the bound it will hold to. Past `WA_DEPLOY_HOLD_BOUND` (default 180 s) the
+  sentinel proceeds EVEN THOUGH the node is busy, but only when every holder is a session that recorded a
+  pause for THIS request (a record older than the request says nothing about it). A holder that is still
+  working, a subagent, a queued turn, or a run whose session `/health` does not name is reported by name and
+  not passed over: the bound is a wall on waiting, never a licence to stop a node under a working turn.
+* **Knobs**: `WA_DEPLOY_HOLD_BOUND` (the sentinel's bound; `0` keeps the old unbounded wait),
+  `WA_DEPLOY_IDLE_BOUND` (the installer's own wait once it runs, 1800 s), and `deploy_wait.DEFAULT_BOUND`
+  (900 s) which is how long a waiting request may keep the node's new turns stopped - past it the wait is
+  ignored, so a stuck or abandoned request cannot freeze the node.
+* **The proof**: `scripts/test-deploy-wait.lua` (the reader's judgement, in the fast path),
+  `scripts/test-deploy-wait.sh` (a real node, a real `wa chat --once` worker, a real turn paused mid-flight,
+  the node's own tick holding and then performing the wakes) and `scripts/test-deploy-bound.sh` (the real
+  sentinel binary against a stub `/health`: who it names, and what its bound does and refuses to do).
+
 ## Visibility
 
 * CLI: `⏰ 2 wakes · next 14:05` (count + next due) on a row of its OWN, directly above the session

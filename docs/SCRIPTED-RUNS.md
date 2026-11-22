@@ -40,7 +40,11 @@ A scripted run:
 - releases the session on the way out (`agent:close()`: the presence row and the conversation row go, and
   each run releases its own resource claim on every exit path - `lua/core/agent.lua`), which is the
   orderly version of the kill;
-- exits with the last turn's status: `0` when every turn answered, `1` when one failed.
+- exits with the last turn's status: `0` when every turn answered, `1` when one failed, and `2` when the
+  turn was REFUSED before it started and nothing ran - the session is parked (`wa session release <id>`
+  re-arms it), or a deploy is waiting for or installing on this node (`deploy_waiting: waiting for the
+  install of <sha>`, `docs/SELF-LOOP.md`, "What waits, and what pauses for it"). A refusal writes nothing -
+  no thread, no message, no model call - so a loop that retries it loses nothing and spends nothing.
 
 A reader at a terminal gets exactly what they had: the detection is `== false`, so a binary that cannot
 answer `host.isatty` (an older one) is treated as interactive.
