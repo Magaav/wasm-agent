@@ -132,6 +132,15 @@ end
 -- branches -> a merged tree -> the weighted gate -> the incoming push -> main -> the verified artifacts ->
 -- the release -> every node in ring order. A state machine with a journal: `--resume` continues at the step
 -- that failed, and a push, a main fast-forward or a publish recorded done is never repeated.
+-- `wa events`: the ledger, read or followed (lua/core/event_ledger.lua). A landing, a preflight and a
+-- worker that finished each write ONE row with one schema, and this is the door an outside agent uses:
+-- `wa events --follow --kind land` prints the steps as they happen, one JSON object per line with --json.
+if command == "events" then
+  local code = dofile("lua/core/event_ledger.lua").cli(args)
+  if code and code ~= 0 then os.exit(code) end
+  return
+end
+
 if command == "land" then
   local code = dofile("lua/core/land.lua").cli(args)
   if code and code ~= 0 then os.exit(code) end
@@ -742,6 +751,7 @@ elseif command == "help" then
   print("    land --ready | --branches a,b [--dry-run] [--no-deploy]  the whole landing pipeline as one")
   print("                                 resumable machine: merge, gate, push, main, artifacts, publish, deploy")
   print("    land --resume | status [--run <id>] | ready <branch> <sha>  continue, read, or record a READY line")
+  print("    events [--kind land,mission] [--follow] [--since <id>] [--json] | events record ...  the ledger, read or followed")
   print("    mission launch <name> <base> | start | resume [--msg] | status | stop  the mission loop, on the agent-control API")
 else
   print("unknown command: " .. tostring(command))
