@@ -764,6 +764,25 @@ check() { name=$1; shift; s=$(fast_now_ms)
   wa_environment_retry "$name" "$work/check-$name.log" "$@"; c=$?
   ran=$((ran + 1)); ms=$(( $(fast_now_ms) - s ))
   if [ "$c" = 0 ]; then
+    # A GREEN ROW THAT PRINTED SKIP IS A SKIP, NOT A PASS (item 10 of the node-ops round). Measured 19/11:
+    # 52 test files print "SKIP <test>: <reason>" and exit 0 - a component this machine cannot build, a
+    # fixture that is not installed. This runner collected those lines into the skips table and then recorded
+    # the row as "pass", so "fast path ok (N checks, 0 skipped)" was true of the count and false of the run:
+    # a consumer reading the row status saw a proof where there was a named hole. The row is now recorded
+    # "skip" with that reason and counted in $skipped, which is what its own line said.
+    #
+    # RE-MEASURED 22/11 on main a8cd5348: this branch was GONE - check() went straight from a zero exit to
+    # record_row pass - so scripts/test-fast-skip-count.sh (wired at scripts/test.sh:1008) failed with "the
+    # shipped check() does not look for a SKIP line". It was dropped by 2975b6c5 ("they come back with
+    # their own test") and never came back.
+    local skip_reason
+    skip_reason="$(grep -h '^SKIP ' "$work/check-$name.log" 2>/dev/null | sed 's/^SKIP //' | head -1)"
+    if [ -n "$skip_reason" ]; then
+      skipped=$((skipped + 1))
+      echo "fast: $name SKIPPED (${ms}ms): $skip_reason"
+      record_row skip checks "$name" "$c" "$ms" 0 "$skip_reason"
+      return 0
+    fi
     echo "fast: $name ok (${ms}ms)"; record_row pass checks "$name" "$c" "$ms" 0 ''; return 0
   fi
   fails=$((fails + 1))
