@@ -86,9 +86,14 @@ end
 local function quoted(text) return json.encode(tostring(text)) end
 
 -- ---- 1. create, then edit, then delete, all inside ONE script --------------------------------
+-- The last call RESUMES its own handle when the node hands one back: an operation slot is a shared
+-- resource (lua/core/codemode_pending.lua) -- measured 22/11 in the full fast path, where four rows run
+-- at once and `rm -f` came back as {state: "pending"} -- so a script that walked away from the handle
+-- would leave this row measuring the queue instead of the card.
 local STRIDES = 'const w = await tools.write({path: ' .. quoted(target) .. ', content: "one\\ntwo\\nthree\\n"});\n'
   .. 'const e = await tools.edit({path: ' .. quoted(target) .. ', old_string: "two", new_string: "TWO"});\n'
-  .. 'const b = await tools.bash({command: "rm -f " + ' .. quoted(target) .. '});\n'
+  .. 'let b = await tools.bash({command: "rm -f " + ' .. quoted(target) .. '});\n'
+  .. 'if (b && b.state === "pending" && b.op) { b = await wait(b.op); }\n'
   .. 'return {wrote: w.ok, edited: e.applied === true, removed: b.ok === true};'
 local events = {}
 local result = dispatch(context(events), STRIDES)
