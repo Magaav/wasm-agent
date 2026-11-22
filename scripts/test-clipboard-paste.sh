@@ -83,6 +83,10 @@ case "$FAKE_CLIP" in
   html)
     case "$*" in *--list-types*) printf 'text/html\nimage/svg+xml\n'; exit 0 ;; esac
     exit 1 ;;
+  broken)
+    # What wl-paste says when it cannot reach the display (measured 22/11 on this laptop: exit 1, this line).
+    case "$*" in *--list-types*) echo "error: XDG_RUNTIME_DIR is invalid or not set in the environment." >&2; exit 1 ;; esac
+    exit 1 ;;
   image)
     case "$*" in
       *--list-types*) printf 'image/png\ntext/plain\nTEXT\n' ;;
@@ -126,12 +130,14 @@ RUN
   : > "$work/$name.log"
 }
 
-drive() { # drive <name> <mode> <keys-function>
+drive() { # drive <name> <mode> <keys-function> [nodisplay]
   local name=$1 mode=$2 keys=$3 log="$work/$1.log"
+  local -a display=()
+  [ "${4:-}" = nodisplay ] || display=(WAYLAND_DISPLAY=wayland-0)
   ( "$keys" "$log" ) | timeout 90 env -i PATH="$work/bin:/usr/bin:/bin" TERM=xterm-256color TMPDIR="${TMPDIR:-/tmp}" \
       HOME="$work/home" WASM_AGENT_HOME="$work/home" WASM_AGENT_LUA_ROOT="$root" \
       WASM_AGENT_RENDEZVOUS= WASM_AGENT_RELAY= WASM_AGENT_MANAGED=0 \
-      WAYLAND_DISPLAY=wayland-0 FAKE_CLIP="$mode" \
+      "${display[@]}" FAKE_CLIP="$mode" \
       FAKE_CLIP_TEXT="$work/clip.txt" FAKE_CLIP_IMAGE="$work/clip.png" \
       script -q -e -c "$work/run-$name.sh" /dev/null > "$log" 2>&1
 }
@@ -213,8 +219,40 @@ has "$work/html.log" "the clipboard holds text/html, image/svg+xml, which wa can
 lacks "$work/html.log" "no image on the clipboard" && ok "and the words of the bug are gone here too" \
   || bad "a clipboard holding text/html still says 'no image on the clipboard'"
 
+# 6. A TOOL THAT RAN AND FAILED: the notice is the tool's own words (the 22/11 symptom, named).
+keys_broken() {
+  local log=$1
+  wait_log "$log" "Type a message" 400 || return 1
+  printf '\026'
+  wait_log "$log" "XDG_RUNTIME_DIR" 200 || return 1
+  leave
+}
+console broken broken
+drive broken broken keys_broken
+# The footer is one row and clips, so the assertion is the part that fits - the tool's own reason, where
+# the words "no clipboard here" used to be.
+has "$work/broken.log" "wl-paste said: error: XDG_RUNTIME_DIR is invalid or not set" \
+  && ok "a tool that ran and failed is quoted in its own words" || bad "the tool's own reason is not in the notice"
+lacks "$work/broken.log" "no clipboard here" && ok "and a tool that ran is never called missing" \
+  || bad "a tool that ran and failed was reported as 'no clipboard here'"
+
+# 7. NO DISPLAY VARIABLE IN THIS PROCESS: the notice names that, not a missing tool.
+keys_nodisplay() {
+  local log=$1
+  wait_log "$log" "Type a message" 400 || return 1
+  printf '\026'
+  wait_log "$log" "WAYLAND_DISPLAY" 200 || return 1
+  leave
+}
+console nodisplay text
+drive nodisplay text keys_nodisplay nodisplay
+has "$work/nodisplay.log" "no WAYLAND_DISPLAY or DISPLAY" \
+  && ok "a process with no display variable says so" || bad "no notice named the missing display variables"
+lacks "$work/nodisplay.log" "no clipboard tool" && ok "and does not blame a program it never ran" \
+  || bad "the notice blamed a missing tool instead of the environment"
+
 if [ "$failures" -eq 0 ]; then
-  echo "clipboard paste ok (5 cases, a real console in a pty and a real clipboard tool)"
+  echo "clipboard paste ok (7 cases, a real console in a pty and a real clipboard tool)"
 else
   echo "clipboard paste FAILED: $failures check(s); logs in $work (kept)"
   trap - EXIT
