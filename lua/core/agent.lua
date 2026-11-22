@@ -3737,17 +3737,17 @@ function M:run_body(text, images)
       local call_waiting = ok_tool and not cancelled and progress_guard.waiting(output)
       if not call_waiting then round_waiting = false end
       if call_waiting then
-        -- What the wait ASKED for and what THIS CALL took, never the round: model latency must not buy an
-        -- exemption. The budget is in ms of wall clock; the answer may name it as wait_ms or as wait_s
-        -- SECONDS (codemode's own spelling), so both convert to ms here.
-        local asked = 0
-        if type(output) == 'table' then
-          if tonumber(output.wait_ms) then asked = tonumber(output.wait_ms)
-          elseif tonumber(output.wait_s) then asked = tonumber(output.wait_s) * 1000 end
-        end
-        round_wait_budget_ms = math.max(round_wait_budget_ms, asked)
-        round_wait_spent_ms = math.max(round_wait_spent_ms,
+        -- What the wait ASKED for and what THIS CALL spent, never the round (model latency must not buy
+        -- an exemption) and never the host's wall clock alone: a loaded host stretches the clock around
+        -- a call without the call waiting a moment longer (measured 22/11, mission
+        -- flaky-rel-native-poll: a wait_s:0 poll took 1.2-17 s of wall clock under 64 busy loops, and
+        -- the hot loop ran to round 18 instead of 3). progress_guard.wait_cost reads the spend the wait
+        -- itself reports (waited_s/waited_ms, evidence pointers followed) and otherwise the clock CAPPED
+        -- AT what the call asked for, so a poll that asked for none can never claim a second.
+        local cost = progress_guard.wait_cost(args, output, host.read_file,
           math.floor((host.now() - tool_started) * 1000))
+        round_wait_budget_ms = math.max(round_wait_budget_ms, cost.asked_ms)
+        round_wait_spent_ms = math.max(round_wait_spent_ms, cost.spent_ms)
       end
       round_results[#round_results + 1] = tostring(function_.name) .. ":" .. host.sha256(tostring(content))
       round_stable[#round_stable + 1] = tostring(function_.name) .. ":"
