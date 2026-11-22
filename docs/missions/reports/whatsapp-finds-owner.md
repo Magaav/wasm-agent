@@ -1,8 +1,9 @@
 # whatsapp-finds-owner — a WhatsApp call on a node without the account reaches the node that has it
 
 Branch `change/whatsapp-finds-owner`, base `c9904f6e`. Committed locally, **not pushed**, as this
-mission's brief says. Three commits: `1f71e522` (owner lookup + routing), `535ac807` (nodes() budget and
-the two new rows), `2baae138` (the timeout branch kept beside the pending one).
+mission's brief says. Four commits: `1f71e522` (owner lookup + routing), `535ac807` (nodes() budget and
+the two new rows), `2baae138` (the timeout branch kept beside the pending one), `db874a50` (a gate check
+that was red for the wrong reason — see "One check that was red for the wrong reason").
 
 ## The cause, in one paragraph, before anything was changed
 
@@ -86,6 +87,20 @@ The timing row measures REAL time: its host stub sleeps the `wait_ms` the caller
 `host.sleep`, so an unbounded wait costs ~20 s in that row and the assertion (`elapsed <= 1`, and
 `waited_ms <= 1000`) fails there — it is not an assertion about an argument.
 
+## One check that was red for the wrong reason (`db874a50`)
+
+`scripts/test-whatsapp-go-retired.sh` failed in this worktree and nowhere else: "FAIL no Go WhatsApp source
+file and no go.mod naming the connector". The cause is the checkout's PATH, not the tree:
+`source_findings` grepped the ABSOLUTE path for "whatsapp", so in
+`/home/victor/Work/missions/whatsapp-finds-owner/wt` every `.go` file matched — measured, the two
+legitimate `benchmarks/service-component-spike/guest/*.go` fixtures, on a tree where the same check passes
+from `/tmp/wt-base` (same commit, path without the word). Two changes, both in that one file: the match is
+now on the path INSIDE the tree (which is what the script's own header describes, "a `*whatsapp*.go`
+file"), and `runs()` collects the finder's output instead of piping it into `grep -q` (a finder that
+writes after the reader exits died on SIGPIPE, which `set -o pipefail` reports as the finder failing —
+measured as exit 141 on the fixture). The 18 checks, including the four planted-path proofs, pass in this
+tree and in the base worktree with the same file.
+
 ## Texts to approve (model- or operator-facing, verbatim)
 
 1. `whatsapp_account_ambiguous` (new refusal code, `lua/core/refusal.lua`): "two nodes say they hold the
@@ -113,6 +128,26 @@ The timing row measures REAL time: its host stub sleeps the `wait_ms` the caller
    had not answered when this list was drawn - ask again in a second and it is there."
 7. New per-peer field `capabilities_reason = "probe_pending"` (named, instead of a cancelled
    `probe_timeout`), beside the existing `not_asked` / `remote_unreachable` / `probe_capacity`.
+
+## What was run, and the one red row
+
+`flock -o ~/Work/missions/.suite.lock bash scripts/fast.sh` in this worktree at `db874a50` (715 s):
+
+- `lua 310/310 passed (58 excluded)` — both new rows are among the 310;
+- `rust - no crate touched` (no Rust file is in the diff);
+- `discrimination ok` — the gate's own check that runs the rows this branch adds or changes against the
+  base with only the non-test changes reverted;
+- `whatsapp-go-retired ok` (the row that was red in the run before `db874a50`);
+- every other contract check ok, **one red**: `install-guards` (`test-install-guards: 72 checks, 6 failed`).
+
+That red is the turn guard, not this branch. `scripts/upgrade.sh` refuses with "upgrade: refused inside a
+turn running on the node it would replace" (`scripts/upgrade.sh:42`, `turn_owner` in
+`scripts/lib/turn-guard.sh` walks `/proc` for an ancestor `wa serve`), so the six cases that expect
+`refused(candidate_commit_unknown)` and the override path never run. Measured: the same command run
+reparented outside the node's turn, `setsid --fork bash -c '… bash scripts/test-install-guards.sh'`,
+answers **`test-install-guards: 72 checks, 0 failed`**. No file this row reads is in this branch's diff
+(`git show --stat db874a50 2baae138 535ac807 1f71e522`). A suite started from inside a node turn cannot
+pass that row, which is the guard doing its job.
 
 ## What I did not verify, and what I did not do
 
