@@ -147,6 +147,34 @@ So the katakana stayed: they do not break alignment, and no font on this node is
 * The first frame's first paint happens inside `host.opening_start`; a frame that arrives while the reader
   thread is descheduled is skipped rather than delayed, which is by design and not separately measured.
 
+## The fast path, measured side by side with the base
+
+`flock -o ~/Work/missions/.suite.lock bash scripts/fast.sh` on this branch and on the base worktree
+(`/home/victor/Work/missions/launch-opening/base` at `23791f56`), each with its own binary and target dir:
+
+| | branch `3313a8e9` | base `23791f56` |
+| --- | --- | --- |
+| rows | 397 | 394 |
+| failed | 45 | 44 |
+
+The 44 are the SAME rows by name on both trees - they are not this change, and they are named here
+rather than waved away: `scripts/test-capability-inventory.lua`, the fifteen `scripts/test-codemode-*.lua`
+rows, `test-edit-aliases.lua`, `test-envelope.lua`, `test-harness-evaluator-replay.lua`, `test-hooks-nested.lua`
+and the rest of the list in `trees/wt4` and `trees/base2`'s `wa-fast-result.json`, all of them failing on
+`the sandbox answered capabilities()` / `codemode_not_enabled` in this node's setup. `run-live-pty` fails
+2 ok / 6 failed on both.
+
+The 3 extra rows are the ones this branch adds (`rust wa-term`, `rust wa-capabilities`,
+`scripts/test-opening.lua`) and they PASS. The one row that differed, `build-info`, was the test binary
+being one commit behind its tree (`got '5a575215...' want '3313a8e9...'`, `dirty=true`): after rebuilding
+at HEAD the row answers `test-build-info: 24 checks, 0 failed`.
+
+`scripts/test-discriminates.sh 23791f56` judges neither of the new rows on this machine and says why
+(`unrevertable` for the Lua row - this branch changes `rust/`, so the row would run against this tree's
+binary - and `skipped` for the Rust row). The hand measurement that replaces it is above: the base
+tree + base binary answer `opening: 7 ok, 10 failed`, and the pty row compares this tree's `opening = off`
+screen with the BASE binary's screen when `WA_BASE_BIN` is set (green).
+
 ## Texts to approve
 
 No user-visible text is added: the animation draws the existing header (its words, its version, its
