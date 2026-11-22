@@ -2052,6 +2052,18 @@ pub fn run(first: Core, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, 
             std::process::exit(3);
         }
     };
+    // ONE execution path (operator 21/11, review r1 item 4): say it ONCE, at start, in the log - `/health`
+    // repeats it on every poll - because a node that still carries the removed switch refuses every turn,
+    // child, self-wake and compaction by name. The first version of this check was raised per turn only,
+    // so a service that started with the variable set looked alive and failed every job it was given.
+    let execution = execution_path_health();
+    if execution["one_path"] == false {
+        eprintln!(
+            "[serve] REFUSING TO ACT: WASM_AGENT_RAW_CODE={} in {} - run(code=...) is the only execution path on this build. Delete that line from the env file (and from any unit or launcher) and restart; every run refuses by name until it is gone.",
+            execution["value"].as_str().unwrap_or("?"),
+            execution["source"].as_str().unwrap_or("?")
+        );
+    }
     // The port is owned from here on, so this process - and only this process - may start services.
     // Asked of the core (native or component) because the registry lives in Lua; a failure is reported
     // and does not take the node down (a broken service is not a reason to stop answering /health).
