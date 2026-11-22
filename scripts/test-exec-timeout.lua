@@ -1,6 +1,38 @@
 -- Foreground bash is an operation, not a shell PID plus unbounded reader threads.
 -- Run with WASM_AGENT_EXEC_TIMEOUT_SECONDS=2 and an isolated home/database.
+--
+-- SELF-CONTAINED (22/11). The deadline read below belongs to the HOST and is read when it starts, so a
+-- script cannot set it from inside: run alone, the node's default 300 s deadline makes "timeout is
+-- failure" unsatisfiable and this row could only live in scripts/fast-path.exclude. scripts/test.sh
+-- still runs it with the variable set; the fast path has no per-row environment, so the row re-executes
+-- itself ONCE through the binary it is already inside (WA_FAST_BIN, which scripts/fast.sh hands every
+-- row) with the deadline it needs, and reports what the child measured. Without that binary the row
+-- says SKIP by name - a skip is never a pass (scripts/fast.sh counts it and prints the reason).
 local json = dofile("lua/vendor/json.lua")
+if tostring(host.getenv("WASM_AGENT_EXEC_TIMEOUT_SECONDS") or "") ~= "2" then
+  local bin = tostring(host.getenv("WA_FAST_BIN") or "")
+  if bin == "" then
+    print("SKIP test-exec-timeout: this row needs the node started with WASM_AGENT_EXEC_TIMEOUT_SECONDS=2 "
+      .. "(its deadline is read at start); scripts/fast.sh passes WA_FAST_BIN and runs it, scripts/test.sh "
+      .. "runs it with the variable set")
+    return
+  end
+  local root = tostring(host.getenv("WASM_AGENT_LUA_ROOT") or "")
+  local home = tostring(dofile("lua/core/paths.lua").data()) .. "/exec-timeout-child"
+  if host.mkdir then host.mkdir(home) end
+  local command = "env WASM_AGENT_HOME='" .. home .. "'"
+    .. (root ~= "" and (" WASM_AGENT_LUA_ROOT='" .. root .. "'") or "")
+    .. " WASM_AGENT_EXEC_TIMEOUT_SECONDS=2 WA_SCRIPT='" .. root .. "/scripts/test-exec-timeout.lua' '"
+    .. bin .. "' --db '" .. home .. "/private.db' 2>&1"
+  local child = json.decode(host.exec(command) or '{"ok":false}')
+  if not (child and child.ok == true and tostring(child.stdout):find("exec timeout ok (", 1, true) ~= nil) then
+    print("SKIP test-exec-timeout: the child node with a 2 s deadline could not run this row: "
+      .. tostring(child and (child.stderr or child.stdout) or "no answer"):sub(1, 400))
+    return
+  end
+  print("exec timeout ok (child node with a 2 s deadline)")
+  return
+end
 local output = dofile("lua/core/tool_output.lua")
 local checks = 0
 local function ok(value, label)
