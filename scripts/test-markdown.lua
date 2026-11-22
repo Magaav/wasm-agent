@@ -346,4 +346,27 @@ do
   ok(copies[1] and copies[1].text == long, "the copy is the original line, not the wrapped rows")
 end
 
+-- WHO CUTS THE FENCE (Victor 22/11): on the host transcript's call (`reflow`) the body row is handed
+-- over WHOLE, so the host cuts it at the width it draws the frame at and a resize re-cuts it. A row
+-- cut here is cut for good: a maximised window showed it with empty space to its right.
+do
+  local long = string.rep("y", 50)
+  local text = md.render("```sh\n" .. long .. "\n```", { width = 30, indent = "", reflow = true })
+  local body = 0
+  for row in (text .. "\n"):gmatch("([^\n]*)\n") do
+    if row:find("y", 1, true) then
+      body = body + 1
+      ok(row:sub(1, 3) == "\226\148\130 ", "reflow: the body row keeps the bar and its space: " .. row)
+      ok(md.columns(row) == 52, "reflow: the whole 50-cell line is handed over, not cut at 30: "
+        .. md.columns(row))
+      ok(not row:find("\226\134\170", 1, true), "reflow: no continuation mark is drawn where it is composed")
+    end
+  end
+  ok(body == 1, "reflow: one stored row for one source line, not the rows the compose width cut ("
+    .. body .. ")")
+  local cut = md.render("```sh\n" .. long .. "\n```", { width = 30, indent = "" })
+  local cutrows = select(2, cut:gsub("y", ""))
+  ok(cutrows > 50, "without reflow the same line is still cut here, for a log to read: " .. cutrows)
+end
+
 print(string.format("markdown ok (%d checks)", checks))

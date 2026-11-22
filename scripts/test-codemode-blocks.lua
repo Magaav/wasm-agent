@@ -430,6 +430,30 @@ for _, row in ipairs(drawn) do
 end
 check(marked >= 1, "M.rows marks the wrapped rows of a long code line (" .. marked .. " marked)")
 
+-- WHO CUTS A SCRIPT ROW: on the transcript's own call the row is stored WHOLE, with the band's fill
+-- carried in a marker in front of it, and the host cuts it at the width it draws at
+-- (`rust/wa-term/src/transcript.rs` `band_row` / `wrap_band`) - so a maximised window shows longer
+-- rows and a shrunk one re-cuts them, and the continuation mark is the host's to draw, in the gutter
+-- of the row the line goes on (Victor 22/11).
+local hosted_opts = opts()
+hosted_opts.live = true
+hosted_opts.reflow = true
+hosted_opts.syntax = markdown.scan_code
+hosted_opts.band_erase = function() return "\27[48;2;23;23;23m\27[K" end
+local LONG_LINE = "const a = " .. LONG .. ";"
+local hosted_model = { args = { code = LONG_LINE }, calls = {}, state = 'done' }
+local hosted = block2.rows(hosted_model, 80, hosted_opts)
+check(#hosted == 1, "the transcript path stores a script line whole (one row, got " .. #hosted .. ")")
+local hosted_row = tostring(hosted[1] or '')
+local fill_mark, hosted_code = hosted_row:match("^\1b(.-)\1(.*)$")
+check(fill_mark ~= nil, 'the row opens with the marker the host reads')
+check(fill_mark == "\27[48;2;23;23;23m\27[K",
+  'and the marker carries the band fill the host paints every cut row with: ' .. tostring(fill_mark))
+check(hosted_code == LONG_LINE, 'the whole line travels, cell for cell: ' .. #tostring(hosted_code))
+check(not has(hosted_code, "\226\134\170"), 'no mark is drawn where it was composed: the host draws it')
+check(markdown.columns(hosted_code) > 80,
+  'and it is wider than the 80-column band it was composed at (' .. markdown.columns(hosted_code) .. ')')
+
 if failed > 0 then
   print(string.format('codemode blocks: %d failed of %d checks', failed, checks))
   os.exit(1)

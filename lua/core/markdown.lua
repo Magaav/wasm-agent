@@ -663,18 +663,30 @@ function M.render(text, opts)
       -- A line longer than the card wraps INSIDE it (operator 17/11 "the fence printing breaks"): the
       -- terminal used to wrap it to column 0, outside the border. Each continuation keeps the border and
       -- says it continues (`│↪`), so a reader never mistakes a wrapped half for a line of its own.
+      --
+      -- WHO CUTS IT. On the transcript's own call (`opts.reflow`) the row is handed over WHOLE and the
+      -- host cuts it at the width the frame is drawn at (`rust/wa-term/src/transcript.rs` `wrap_card`,
+      -- which writes the same `│↪` in the same place). A row cut HERE is cut for good: the terminal
+      -- holds it, so a maximised window shows it with empty space to its right and a shrunk one cuts
+      -- it a second time (Victor 22/11). The plain rendering - a log, a captured run - has no host to
+      -- cut it, and keeps cutting here.
       local more = paint(indent .. "\226\148\130", "mdCodeBlockBorder") .. paint("\226\134\170", "dim")
       local room = math.max(8, width - columns(indent) - 2)
       for _, code_line in ipairs(body) do
         code_line = code_line:gsub("\t", "    ")
-        local pieces, from, used, start = {}, 1, 0, 1
-        while from <= #code_line do
-          local size, cells = char_at(code_line, from)
-          if used + cells > room then pieces[#pieces + 1] = code_line:sub(start, from - 1); start, used = from, 0 end
-          used = used + cells
-          from = from + size
+        local pieces = {}
+        if opts.reflow then
+          pieces[1] = code_line
+        else
+          local from, used, start = 1, 0, 1
+          while from <= #code_line do
+            local size, cells = char_at(code_line, from)
+            if used + cells > room then pieces[#pieces + 1] = code_line:sub(start, from - 1); start, used = from, 0 end
+            used = used + cells
+            from = from + size
+          end
+          pieces[#pieces + 1] = code_line:sub(start)
         end
-        pieces[#pieces + 1] = code_line:sub(start)
         for number, piece_line in ipairs(pieces) do
           local parts = { number == 1 and bar or more }
           scan_code(piece_line, lang, function(piece, style)

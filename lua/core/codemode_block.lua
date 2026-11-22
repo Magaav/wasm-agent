@@ -158,6 +158,11 @@ function M.opts(options)
   return {
     paint = function(text, style) return paint(text, style, live) end,
     live = live,
+    -- WHO CUTS A SCRIPT ROW: the host (`rust/wa-term/src/transcript.rs` `band_row`), on the transcript's
+    -- own call. The row is then stored WHOLE and cut at the width the frame is drawn at, so a resize
+    -- re-cuts it in both directions; a row cut here is cut for good, and a maximised window shows it
+    -- with empty space to its right (Victor 22/11). A plain rendering keeps cutting here.
+    reflow = o.reflow == true,
     expandable = o.expandable == true,
     columns = columns,
     clip = o.clip or function(text, limit)
@@ -916,6 +921,15 @@ function M.call_lines(model, width, o)
   return rows
 end
 
+-- THE BAND ROW THE HOST CUTS: `\1b` + the band's rest-of-row fill + `\1` in front of a script row
+-- that is stored UNCUT (`rust/wa-term/src/transcript.rs` `band_row`). The fill travels inside the row
+-- because the palette is this side's: the host sets the band and erases the rest of every row it cuts
+-- with exactly these bytes, and knows no colour of its own (the rule marker `\1r\1` is the precedent).
+function M.band_mark(o)
+  o = M.opts(o)
+  return "\1b" .. o.band_erase() .. "\1"
+end
+
 -- The rows above the value: the heading, the script once, then a row per inner call. A running
 -- block is exactly these, and they only grow (a call appears once and is rewritten in place), which
 -- is what lets the view stream them without redrawing the block.
@@ -929,12 +943,21 @@ function M.rows(model, width, options)
   -- No inset: the code starts at the band's left edge (operator 17/11), and the band ends one column
   -- short of the screen, where the transcript's scrollbar is drawn.
   local band = math.max(8, width - 1)
+  local host_cuts = o.reflow and o.live and o.syntax ~= nil
   local pieces = {}
   for _, line in ipairs(code) do
     -- Wrapped, never clipped, and BEFORE it is highlighted: cutting a string that already carries
     -- escape sequences would cut one in half, and a cut token paints the rest of the block. A line
     -- that continues onto the next band row says so at the break (`M.wrap_marked`).
-    for _, piece in ipairs(M.wrap_marked(line, band, o)) do pieces[#pieces + 1] = piece end
+    --
+    -- On the transcript's own call the line is stored WHOLE and the host cuts it at the width it draws
+    -- at (`M.band_mark`, transcript.rs `wrap_band`): the mark then lands in the LEFT GUTTER of the row
+    -- the line continues on, the same mark in the same place a fence's continuation carries.
+    if host_cuts then
+      pieces[#pieces + 1] = line
+    else
+      for _, piece in ipairs(M.wrap_marked(line, band, o)) do pieces[#pieces + 1] = piece end
+    end
   end
   for _, shown in ipairs(pieces) do
     -- The band is padded by display columns (not bytes) to one column short of the screen, so it is a
@@ -944,6 +967,7 @@ function M.rows(model, width, options)
       -- painted once around the row would stop at the first coloured token. Padding to the full width
       -- is what makes it a band instead of a ragged stripe.
       local parts = {}
+      if host_cuts then parts[#parts + 1] = M.band_mark(o) end
       o.syntax(shown, "js", function(piece, style)
         if piece == "" then return end
         parts[#parts + 1] = o.paint(piece, { "codeBand", style or "mdCodeBlock" })
@@ -955,7 +979,10 @@ function M.rows(model, width, options)
       -- after the erase on purpose - the host draws a code block's copy icon on that right-hand cell,
       -- and it must wear the band, not the terminal default - and the transcript resets the row when
       -- it draws it.
-      parts[#parts + 1] = o.band_erase()
+      --
+      -- Cut by the host, the fill travels in the row's marker instead (`M.band_mark`): the host appends
+      -- it to every row it cuts, so a wrapped line is a solid band on all of its rows.
+      if not host_cuts then parts[#parts + 1] = o.band_erase() end
       rows[#rows + 1] = table.concat(parts)
     else
       rows[#rows + 1] = shown
