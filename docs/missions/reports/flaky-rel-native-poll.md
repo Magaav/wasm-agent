@@ -71,16 +71,30 @@ exemption, which is the case `r3/B6` was opened for.
 Both rows are existing `scripts/test-*.lua` files, so they are wired into the fast path by
 `scripts/fast.sh`'s row inventory (`scripts/lib/fast-rows.sh`) with no new wiring.
 
+## The fast path (run, queued on the suite lock)
+
+    flock -w 3600 -o ~/Work/missions/.suite.lock bash scripts/fast.sh
+
+347 checks, **1 failed** (`fast result FAILED (347 checks, 1 failed, 0 skipped)`), on a binary BUILT
+FROM THIS TREE (`/home/victor/wasm-agent/target/m-flaky-rel-native-poll/release/wa`, build
+`a6a3905fee14`, `fresh: built from this tree`). All 283 Lua rows passed except `scripts/test-font-setup.lua`
+in an earlier, heavily loaded run of the same suite - and that row fails identically on the base
+(`180 checks, 6 failed` on `/tmp/base-975d` at `975d4612`), so it is the machine's fonts, not this change.
+The one failure is `install-guards` (`bash scripts/test-install-guards.sh`: `72 checks, 6 failed`),
+which fails with the same 6 on the base worktree - pre-existing, and untouched by this diff.
+
+An earlier fast run of this branch used the installed binary (`WA_FAST_ALLOW_STALE_BINARY=1`, 282/283
+Lua rows) and failed its own `fast-binary` contract check, which judges exactly that override; that
+failure belonged to the invocation, not the tree. The installed `wa` moved from `a5d8c616` to
+`2e20aa7` mid-mission (another session's deploy); every row here runs this tree's Lua through
+`WASM_AGENT_LUA_ROOT`, and the final run uses this tree's own binary.
+
 ## What I could not verify
 
-- The whole fast path was NOT run: `~/Work/missions/.suite.lock` was held by another session's
-  landing for the whole window (load average 30-56 on 16 cores). Rows that touch the guard were run
-  serially instead: `test-no-silent-stops` (154 checks), `test-rel-native-poll`, `test-rel-native-replay`,
-  `test-hotreload`, `test-session-worktree-status` - all green. `scripts/test-discriminates.sh` was
-  also not run for the same reason (it queues behind the same lock); the base comparison above is its
-  one-row judgement done by hand against a `975d4612` worktree.
-- Nothing was built: the change is Lua only, run through the node's own `wa` binary with
-  `WASM_AGENT_LUA_ROOT` pointing at this tree (a5d8c616 binary).
+- `scripts/test-discriminates.sh` itself was not run: it queues behind the same suite lock, which was
+  held by other sessions for most of the window. The base comparison above is its one-row judgement
+  done by hand against a `975d4612` worktree (`/tmp/base-975d`), which is the same pair of trees it
+  would build.
 
 ## Observed, not fixed (pre-existing)
 
