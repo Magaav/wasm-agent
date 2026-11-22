@@ -848,6 +848,12 @@ if command -v node >/dev/null 2>&1; then
 # The session-isolation suite holds the canaries its own environment sections withhold
 WA_BIN="$bin" check session-isolation bash scripts/test-session-isolation.sh
 WA_BIN="$bin" check tool-env-allow bash scripts/test-tool-env-allow.sh
+# A session whose mission was stopped must STAY stopped (22/11): the verb a stop recipe runs parks it,
+# its due wake is held rather than dropped or dispatched, `wa chat --resume`/`--continue` refuse it by name,
+# and the release runs that same wake exactly once. Cross-process by construction - the park is written by
+# one `wa`, read by a second, and performed by the tick in a third. Its Lua half
+# (scripts/test-session-park.lua) is a fast-path row by name.
+check session-park bash scripts/test-session-park.sh
 # fast.sh runs under set -u: every incremented counter is initialised (test-fast-counters.sh).
 check fast-counters bash scripts/test-fast-counters.sh
 check install-front-door bash scripts/test-install.sh
