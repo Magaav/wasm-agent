@@ -51,6 +51,10 @@ check(not view:find('"pending_backgrounded"', 1, true), 'and no longer a JSON ke
 local calls_at, pending_at = view:find('\ncalls: ', 1, true), view:find('\npending: ', 1, true)
 check(calls_at and pending_at and calls_at < pending_at, 'the note comes after the calls: line, as the reader expects')
 check(view:find('\n\n{"op":"' .. op .. '"}', 1, true) ~= nil, 'the body is still the script own text, unescaped: ' .. view:sub(-200))
+-- The ledger row a later turn reads IS this view: the loop stores what project produced, and
+-- context_view sends a stored view under the budget byte for byte (what "the result row starts with
+-- status 200" means when an operator looks at it in the ledger).
+check(output.context_view('run', view) == view, 'the stored view is sent byte for byte on the next turn')
 local parsed = output.parse_view(view)
 check(type(parsed) == 'table' and type(parsed.pending_backgrounded) == 'table'
   and parsed.pending_backgrounded.count == left.pending_backgrounded.count
@@ -70,6 +74,7 @@ local settled_view = output.project('run', after)
 check(settled_view:match('^status 200'), 'the announcing result keeps the plain form too: ' .. settled_view:sub(1, 160))
 check(settled_view:find('\npending: settled [', 1, true) ~= nil, 'with its own header line: ' .. settled_view:sub(1, 600))
 check(not settled_view:find('\\"', 1, true), 'and nothing in it is an escaped string')
+check(output.context_view('run', settled_view) == settled_view, 'and so is the announcing view')
 local settled_parsed = output.parse_view(settled_view)
 local back
 for _, entry in ipairs(type(settled_parsed.pending_settled) == 'table' and settled_parsed.pending_settled or {}) do
