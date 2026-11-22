@@ -289,6 +289,15 @@ PY
       fetch "$BASE/$CORE_REF/scripts/lib/$libfile" "$tmp/scripts/lib/$libfile" \
         || die "core_lib_unreachable: $BASE/$CORE_REF/scripts/lib/$libfile (the core sources this file beside itself; without it nothing would be installed)"
     done
+    # THE TRUSTED KEYS TRAVEL TOO (22/11). The verifier reads <root>/config/release-keys.txt, and <root> is the
+    # directory above scripts/ - here, $tmp. This list fetched the verifier and not the keys it verifies
+    # against, so on a machine with no node yet the trust set was EMPTY and every fresh install was refused:
+    # "release_signature_invalid: ... signed by release-signing-<id>, which this node does not trust (no trusted
+    # key is configured)" (measured 22/11, v0.1.0-alpha.16, a scratch HOME). The keys come from the same
+    # pinned commit as the core - the same anchor, and still not from the release they verify.
+    mkdir -p "$tmp/config"
+    fetch "$BASE/$CORE_REF/config/release-keys.txt" "$tmp/config/release-keys.txt" \
+      || die "release_keys_unreachable: $BASE/$CORE_REF/config/release-keys.txt (the verifier has no trusted key without it; nothing was installed)"
   fi
   got_sha=$(sha256sum "$tmp/$CORE_PATH" | cut -d' ' -f1)
   if [ "$WANT_PIN" != absent ]; then
