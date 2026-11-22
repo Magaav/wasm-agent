@@ -46,12 +46,17 @@ wa_fast_core_rows() {
   # past the 120 s watchdog ("no verdict within 120s", land261 and main-health, 8 rows in parallel). The
   # cases were already independent fixtures, so they are ten rows by subject now (the harness they share is
   # scripts/lib/land-row.lua), each under 11 s alone. EVERY part is listed: dropping one would go green
-  # saying less than a full run, which is the failure this list exists to prevent.
+  # saying less than a full run, which is the failure this list exists to prevent - and the same rule put
+  # scripts/test-land-quick.lua here on 22/11: the landing (`wa land <branch>`, FACTORY.md rule 10) is what
+  # every round now ends with, so a narrowed run that dropped its row would never see a landing break.
+  # scripts/test-event-ledger.lua is here for the same reason: it is the feed every other row and every
+  # outside agent reads (docs/EVENTS.md).
   printf '%s\n' scripts/test-fast-row-environment.lua \
     scripts/test-land-plan.lua scripts/test-land-resume.lua scripts/test-land-sign.lua \
     scripts/test-land-review.lua scripts/test-land-rows.lua scripts/test-land-resume-19-11.lua \
     scripts/test-land-marks.lua scripts/test-land-release.lua scripts/test-land-gate-rows.lua \
-    scripts/test-land-until.lua \
+    scripts/test-land-until.lua scripts/test-land-quick.lua \
+    scripts/test-event-ledger.lua \
     scripts/test-refusal-contract.lua scripts/test-tool-schema-fidelity.lua scripts/test-codemode-parity.lua
 }
 

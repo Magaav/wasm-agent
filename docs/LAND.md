@@ -31,6 +31,50 @@ this replaces took 55 s),
 `scripts/test-land-signing.sh` (build -> sign -> re-run the publisher -> publish, without a hand-frozen build)
 and `scripts/test-fast-rows.sh` (the narrowing's three rules).
 
+## A landing: `wa land <branch>` (FACTORY.md rule 10)
+
+A LANDING is not a release. It merges onto main, regenerates the derived files, runs the tests the branch
+ITSELF added or changed, pushes, installs THIS node and reads the install record back, and measures main's
+health afterwards. No artifacts, no signature, no publish, no ring, and **no gate**: `wa release cut` is the
+command that runs the gate and makes the release.
+
+```bash
+wa land change/x              # merge, its own tests, push, install this node, then main's health
+wa land change/x change/y     # one run per branch, each named; a refused branch is refused by name
+wa land change/x --gate       # the whole fast path on the merged tree as well (minutes, not the release's set)
+wa land change/x --fix-main   # this landing IS the fix for a red main (rule 8), so it is allowed onto it
+wa land change/x --no-health  # do not measure main's health after this landing
+wa land change/x --dry-run    # the plan and every command; nothing is fetched, merged, pushed or installed
+```
+
+| step | what it does | refuses by name when |
+| --- | --- | --- |
+| `collect` | fetch the incoming repository, resolve the branches and the base | `no_repository`, `branch_unknown`, `ready_sha_moved`, `main_diverged` |
+| `plan` | classify the change, print the plan, decide which steps run and why | `plan_no_changes` |
+| `merge` | the merge onto the base, the regenerated generated files, one commit; **a red main is refused here** (rule 8) | `main_red`, `merge_conflict`, `regenerate_failed`, `worktree_failed` |
+| `tests` | every `scripts/test-*.lua` the branch added or changed, alone, with its own home and ledger; skipped by name for a Rust branch | `own_tests_red` |
+| `gate` (only with `--gate`) | `bash scripts/fast.sh` on the merged tree, its output teed into the evidence | `gate_red` |
+| `push`, `main` | the incoming push, then main's fast-forward, each read back from the remote | `push_failed`, `push_not_readback`, `main_not_fast_forward`, `main_push_needs_credentials` |
+| `install` | the checkout fast-forwarded, the deploy requested through the sentinel, `installed.txt` read back until it names the landed commit, the installed `lua/core` compared with the landed tree's; **skipped (and said so) for a scripts/docs-only branch** | `checkout_not_fast_forwarded`, `deploy_not_requested`, `install_not_recorded`, `install_lua_mismatch` |
+| `health` | `wa land health-run` started as a supervised operation (the whole fast path on main's tip at nice 19). Its verdict is the ledger's `land.main-health` row - green, red, or `refused`, never green by default. Skipped when the landing changed no `lua/` or `rust/` file | `main_health_not_started` |
+| `report` | the run's report, then the one line the operator reads | - |
+
+The last line of a landing is the line FACTORY.md rule 4 asks for: `Local is evolved to <sha>. You can now
+test: <mission> - <the brief's "How Victor tests it" section>`, where the brief is the one recorded on the
+ready line (`wa land ready <branch> <sha> --brief <file>`). No brief, no section: the line says that instead
+of inventing steps. A landing whose install was skipped says `(the checkout only: ...)`.
+
+EVERY STEP IS AN EVENT. Each settled step writes one row to the ledger (`lua/core/event_ledger.lua`, one
+schema, kind `land`) and publishes `<kind>.<step>` on the bus, so a terminal follows it with `wa events
+--follow --kind land` and a session is woken by it (`wake {on = ["land.*"]}`) - docs/EVENTS.md. The steps
+are: `started`, `collected`, `planned`, `merged`, `tests`, `pushed`, `main`, `installed`, `install-verified`,
+`main-health`, `reported`, `done`, and the red ones `install-failed`, `refused`, `stopped`.
+
+What this replaced, one part to one script (re-measured 22/11): `~/Work/missions/land-quick.sh` -> the command
+itself; `~/Work/missions/_quick/line.sh` -> several branches in one invocation; `~/Work/missions/install-local.sh`
+-> the `install` step; `scripts/main-health.sh` -> the `health` step and `wa land health-run`; two sessions
+messaging each other "it is green, land it" -> `wa events --follow --kind land` and a `land.*` wake.
+
 ## The steps, in order
 
 | step | what it does | refuses by name when |
