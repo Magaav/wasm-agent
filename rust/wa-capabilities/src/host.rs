@@ -3884,12 +3884,15 @@ fn handle_mouse(state: &mut ConsoleInput, event: wa_term::selection::Mouse) {
                         return;
                     }
                     clear_selection(state);
-                    // ONE notch is ONE page, exactly as PageUp/PageDown are (Victor 22/11: "scroll with
-                    // mouse should behave exactly the same as pg up pg down from keyboard ... same amount of
-                    // scroll from both endings"): the same step the key takes, so the same clamp at the top and
-                    // at the bottom, and the same return to following the newest output.
-                    let page = page_rows(state);
-                    state.transcript.page(if up { page } else { -page });
+                    // ONE event is ONE row (Victor 22/11 20:30Z: "the mouse scroll on TUI chat content is
+                    // jumping way further than the pg up/down which ticks 1/3 of the content by each tick" ...
+                    // "scroll from mouse should scroll line by line"). This replaces his earlier wish that
+                    // one notch equal one PageUp: a terminal sends SEVERAL wheel events for one notch (foot
+                    // multiplies them by its scrollback `multiplier`, 7.0 in the operator's foot.ini, and wa
+                    // chat never enters the alternate screen where foot drops it), so a page per event jumped
+                    // whole screens. The same `page` step the keys take, one row at a time: the same clamp at
+                    // the top and at the bottom, and the same return to following the newest output there.
+                    state.transcript.page(if up { 1 } else { -1 });
                     return;
                 }
             }
@@ -5755,13 +5758,13 @@ mod terminal_tests {
         assert_eq!(super::page_rows(&state), 1, "and a page there is still one row, never zero");
     }
 
-    /// The wheel is PageUp/PageDown with a pointer instead of a key (Victor 22/11: "scroll with mouse
-    /// should behave exactly the same as pg up pg down from keyboard (which is correct), same amount
-    /// of scroll from both endings"). One notch is ONE page: the same `page_rows` step the key takes,
-    /// driven through the host's own mouse path over a chat the transcript really drew, and read the
-    /// way the reader reads it - the chat's first visible row.
+    /// The wheel moves the chat ONE row per event (Victor 22/11 20:30Z: "the mouse scroll on TUI chat
+    /// content is jumping way further than the pg up/down which ticks 1/3 of the content by each tick" ...
+    /// "scroll from mouse should scroll line by line"), replacing his earlier wish that one notch equal
+    /// one PageUp. Driven through the host's own mouse path over a chat the transcript really drew, and
+    /// read the way the reader reads it - the chat's first visible row. PageUp/PageDown keep their third.
     #[test]
-    fn a_wheel_notch_pages_the_chat_exactly_as_pageup_does() {
+    fn one_wheel_event_moves_the_chat_one_row() {
         use wa_term::selection::Mouse;
         use wa_term::terminal_editor::Action;
         // The chat's first visible row, as the reader would point at it: its own line number.
@@ -5793,15 +5796,30 @@ mod terminal_tests {
         let from_key = first(&mut keys);
         assert_eq!(from_key + page as usize, bottom, "PageUp moved one page up");
 
-        // One notch: the host's own mouse path, over the same chat.
+        // ONE wheel event: the host's own mouse path, over the same chat. One row, not one PageUp.
         let mut wheel = super::ConsoleInput::default();
         a_long_chat(&mut wheel);
         super::handle_mouse(&mut wheel, Mouse::WheelUp(3, 20));
-        assert_eq!(first(&mut wheel), from_key, "one notch lands on the row one PageUp lands on");
-        // And down again: one notch back is the row it came from, and following the newest output.
-        super::handle_mouse(&mut wheel, Mouse::WheelDown(3, 20));
-        assert_eq!(first(&mut wheel), bottom, "one notch down returns to the row it came from");
-        assert!(wheel.transcript.following(), "and the chat follows its newest output again");
+        assert_eq!(first(&mut wheel), bottom - 1, "one wheel event moves the chat one row, not one page");
+        // One notch is SEVERAL events (foot multiplies them by its scrollback `multiplier`, 7.0 in the
+        // operator's foot.ini, so one notch is seven), and a read's events are all handled before the one
+        // frame it draws: the notch is their sum.
+        let mut burst = super::ConsoleInput::default();
+        a_long_chat(&mut burst);
+        for _ in 0..7 { super::handle_mouse(&mut burst, Mouse::WheelUp(3, 20)); }
+        let _ = super::layout_frame(&mut burst); // the read's one frame
+        assert_eq!(first(&mut burst), bottom - 7, "a notch of seven events is seven rows, not two screens");
+        // As many events down as up is the row it started on, and following the newest output again.
+        let mut back = super::ConsoleInput::default();
+        a_long_chat(&mut back);
+        for _ in 0..9 { super::handle_mouse(&mut back, Mouse::WheelUp(3, 20)); }
+        let _ = super::layout_frame(&mut back);
+        assert_eq!(first(&mut back), bottom - 9, "nine events up are nine rows");
+        assert!(!back.transcript.following(), "and the view no longer follows the newest output");
+        for _ in 0..9 { super::handle_mouse(&mut back, Mouse::WheelDown(3, 20)); }
+        let _ = super::layout_frame(&mut back);
+        assert_eq!(first(&mut back), bottom, "nine events down are the row it started on");
+        assert!(back.transcript.following(), "and the chat follows its newest output again");
     }
 
     /// The scrollbar's mouse (operator, 13/11 ~06:50). A press in the bar's column scrolls the chat
