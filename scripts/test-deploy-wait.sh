@@ -39,16 +39,20 @@ if [ -z "$BIN" ]; then
     [ -n "$candidate" ] && [ -x "$candidate" ] && { BIN="$candidate"; break; }
   done
 fi
+# A hole this row names itself, in the ONE spelling both judges read (`SKIP ` at the start of a line):
+# scripts/fast.sh collects `^SKIP ` to print it, and scripts/test-discriminates.sh records it as a named
+# non-judgment instead of reading exit 0 as "it passed on the old code".
+skip() { printf 'SKIP test-deploy-wait: %s\n' "$*"; exit 0; }
+
 if [ -z "$BIN" ] || [ ! -x "$BIN" ]; then
-  echo "deploy wait: SKIP (no wa binary: set WA_BIN, or build rust/wa-host)" >&2
-  exit 0
+  skip "no wa binary: set WA_BIN, or build rust/wa-host"
 fi
 case "$BIN" in /*|[A-Za-z]:*) ;; *) BIN="$ROOT/$BIN" ;; esac
 native() { if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s' "$1"; fi; }
 
 # The claim is about processes and a node, so the row needs node for its stub model: an honest skip, not a pass.
-command -v node >/dev/null 2>&1 || { echo "deploy wait: SKIP (no node on this host: the stub model is a node script)" >&2; exit 0; }
-command -v curl >/dev/null 2>&1 || { echo "deploy wait: SKIP (no curl: the node is asked over HTTP)" >&2; exit 0; }
+command -v node >/dev/null 2>&1 || skip "no node on this host: the stub model is a node script"
+command -v curl >/dev/null 2>&1 || skip "no curl: the node is asked over HTTP"
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/wa-deploy-wait-XXXXXX")"
 SERVER_PID=""
@@ -86,7 +90,7 @@ MODEL_PORT=$((PORT + 2))
 [ "$PORT" = "8799" ] && PORT=8801
 
 HOME_DIR="$WORK/home"
-mkdir -p "$HOME_DIR/.wasm-agent/components" || { echo "deploy wait: SKIP (no scratch home)" >&2; exit 0; }
+mkdir -p "$HOME_DIR/.wasm-agent/components" || skip "no scratch home"
 export WASM_AGENT_HOME="$(native "$HOME_DIR")"
 export WASM_AGENT_LUA_ROOT="$(native "$ROOT")"
 export WA_COMPONENTS_DIR="$(native "$HOME_DIR/.wasm-agent/components")"

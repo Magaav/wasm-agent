@@ -45,36 +45,58 @@ ok()   { printf '    ok: %s\n' "$*"; }
 want() { case "$1" in *"$2"*) ok "$3" ;; *) fail "$3: expected '$2' in: $1" ;; esac; }
 unwant() { case "$1" in *"$2"*) fail "$3: unexpected '$2' in: $1" ;; *) ok "$3" ;; esac; }
 
-# THE BINARY OF THIS TREE, never another commit's: a sentinel that predates the bound would pass every check
-# below by never proceeding, and one from a newer tree would prove nothing about this diff (scripts/lib/fast-binary.sh
-# makes the same point about `wa`).
-SENTINEL="${WA_SENTINEL_BIN:-}"
-if [ -z "$SENTINEL" ]; then
-  for candidate in "${CARGO_TARGET_DIR:-$ROOT/rust/target}/debug/wa-sentinel" "$ROOT/rust/target/debug/wa-sentinel"; do
-    [ -x "$candidate" ] && { SENTINEL="$candidate"; break; }
-  done
+# A hole this row names itself, and says with the ONE spelling both judges read: `SKIP ` at the start of a
+# line (scripts/fast.sh collects `^SKIP `, and scripts/test-discriminates.sh records a skip as a named
+# non-judgment instead of reading exit 0 as "it passed on the old code"). MEASURED by the preflight of
+# 22/11: this row's skips were spelled `deploy bound: SKIP (...)`, so a run in which it could not build its
+# subject exited 0 and was reported as `does-not`: "it passed on the old code, and the branch ADDS it".
+skip() { printf 'SKIP test-deploy-bound: %s\n' "$*"; exit 0; }
+
+# THE BINARY OF THIS TREE, PROVABLY - and this is the whole reason the row is worth having.
+#
+# MEASURED (preflight 22/11, HEAD ac33856e vs base e1d457f0): the first version of this row looked for
+# `${CARGO_TARGET_DIR:-$ROOT/rust/target}/debug/wa-sentinel`. Run against the BASE tree with this mission's
+# CARGO_TARGET_DIR in the environment, it found the sentinel built from the BRANCH - so it exercised the new
+# bound against the old tree, passed, and the discrimination gate named it `does-not`: a test that cannot fail.
+# The fix is not a weaker assertion but a narrower SOURCE: the subject is BUILT from `$ROOT`'s own sources,
+# right here, by a cargo that is invoked with `$ROOT`'s manifest, and the binary that build reports is the one
+# run. A prebuilt binary in an ambient target directory proves nothing about which tree compiled it
+# (`wa-sentinel` answers no build label of its own), so it is never trusted on sight: `WA_SENTINEL_BIN` is a
+# caller's explicit act and is only accepted INSIDE this tree, and any path is rebuilt when its sources are
+# newer than it.
+CARGO="${WA_CARGO:-$(command -v cargo 2>/dev/null || true)}"
+[ -z "$CARGO" ] && [ -x "$HOME/.cargo/bin/cargo" ] && CARGO="$HOME/.cargo/bin/cargo"
+[ -z "$CARGO" ] && skip "no cargo on this host, so this tree's wa-sentinel cannot be built"
+TARGET="${CARGO_TARGET_DIR:-$ROOT/rust/target}"
+SENTINEL=""
+if [ -n "${WA_SENTINEL_BIN:-}" ]; then
+  case "$WA_SENTINEL_BIN" in
+    "$ROOT"/*) SENTINEL="$WA_SENTINEL_BIN" ;;
+    *) skip "WA_SENTINEL_BIN=$WA_SENTINEL_BIN is outside this tree ($ROOT), so nothing proves which tree built it" ;;
+  esac
 fi
 if [ -z "$SENTINEL" ]; then
-  CARGO="$(command -v cargo || true)"
-  [ -z "$CARGO" ] && [ -x "$HOME/.cargo/bin/cargo" ] && CARGO="$HOME/.cargo/bin/cargo"
-  if [ -z "$CARGO" ]; then
-    echo "deploy bound: SKIP (no wa-sentinel for this tree and no cargo to build one)" >&2
-    exit 0
-  fi
-  step "building this tree's wa-sentinel ($CARGO)"
-  if ! CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/rust/target}" "$CARGO" build --offline \
-       --manifest-path rust/wa-sentinel/Cargo.toml >"$WORK/build.log" 2>&1; then
-    echo "deploy bound: SKIP (this tree's wa-sentinel did not build: tail of $WORK/build.log)" >&2
+  step "building this tree's wa-sentinel ($CARGO, target $TARGET)"
+  if ! CARGO_TARGET_DIR="$TARGET" "$CARGO" build --offline \
+       --manifest-path "$ROOT/rust/wa-sentinel/Cargo.toml" >"$WORK/build.log" 2>&1; then
     tail -5 "$WORK/build.log" >&2
-    exit 0
+    skip "this tree's wa-sentinel did not build (tail above, full log ${WORK}/build.log)"
   fi
-  SENTINEL="${CARGO_TARGET_DIR:-$ROOT/rust/target}/debug/wa-sentinel"
+  SENTINEL="$TARGET/debug/wa-sentinel"
 fi
-[ -x "$SENTINEL" ] || { echo "deploy bound: SKIP (no executable sentinel at $SENTINEL)" >&2; exit 0; }
+[ -x "$SENTINEL" ] || skip "no executable sentinel at $SENTINEL after the build"
+# THE BYTES THIS BUILD PRODUCED, kept by this run: the target directory is shared (that is what makes the
+# build 12 s instead of 60), so a concurrent build of the same package could replace the file between a check
+# and a `once`. One private copy, taken now, is the subject for the rest of the row - nothing can swap it.
+cp -f "$SENTINEL" "$WORK/wa-sentinel" 2>/dev/null || skip "cannot copy $SENTINEL into $WORK"
+chmod +x "$WORK/wa-sentinel" 2>/dev/null
+SENTINEL="$WORK/wa-sentinel"
 step "sentinel: $SENTINEL"
+step "        tree: $ROOT at $(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo 'unknown commit')"
+step "        sha256 $(sha256sum "$SENTINEL" 2>/dev/null | cut -c1-16 || echo unknown)"
 
 # The scratch home. Nothing here may be the operator's own store (scripts/lib/scratch-home.sh).
-mkdir -p "$HOME_DIR/.wasm-agent" || { echo "deploy bound: SKIP (cannot create a scratch home)" >&2; exit 0; }
+mkdir -p "$HOME_DIR/.wasm-agent" || skip "cannot create a scratch home"
 export WASM_AGENT_HOME="$HOME_DIR"
 unset WASM_AGENT_RENDEZVOUS WASM_AGENT_RELAY WASM_AGENT_DB
 
@@ -105,8 +127,7 @@ if command -v node >/dev/null 2>&1; then
   export WASM_AGENT_PORT="$(cat "$PORT_FILE")"
   ok "stub /health on 127.0.0.1:$WASM_AGENT_PORT"
 else
-  echo "deploy bound: SKIP (no node on this host: the stub /health is the node here)" >&2
-  exit 0
+  skip "no node on this host: the stub /health is the node here"
 fi
 
 # The installer: it writes its own log, and nothing else. The sentinel spawns it only when it performs the
