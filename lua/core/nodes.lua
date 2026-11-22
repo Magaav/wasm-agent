@@ -647,6 +647,12 @@ local function probe_peers(peers, opts)
         -- next, including this process), NO negative is published, and the answer says "not answered
         -- yet" with no age instead of pretending a timeout.
         out[entry.id] = { capabilities = nil, reason = "probe_pending" }
+      elseif snapshot.settled ~= true then
+        -- The caller COULD wait and the child still did not answer: that is a timeout, it is named, and
+        -- the child is stopped so the next caller does not join a process that will never answer.
+        pcall(host.operation, "cancel", json.encode({ id = entry.operation_id, owner = PROBE_OWNER }))
+        negative[entry.id] = { capabilities = nil, reason = "probe_timeout" }
+        out[entry.id] = negative[entry.id]
       else
         local read_ok, chunk = pcall(host.operation, "read", json.encode({ id = entry.operation_id,
           stream = "stdout", offset = 0, limit = 65536, owner = PROBE_OWNER }))
