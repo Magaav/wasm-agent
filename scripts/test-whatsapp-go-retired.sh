@@ -70,12 +70,29 @@ scan() { # <root> <regex> <path...> -- one "<path>:<line>:<text>" per hit, paths
 }
 
 source_findings() { # <root> -- the Go module directory, a whatsapp*.go file, a go.mod naming it
-  local root="$1"
+  local root="$1" found
   [ -d "$root/connectors/whatsapp" ] && printf 'connectors/whatsapp/: the Go module directory is back\n'
-  find "$root" -path "$root/.git" -prune -o -type f -name '*.go' -print 2>/dev/null \
-    | grep -i whatsapp | sed 's|^|Go source: |'
-  find "$root" -path "$root/.git" -prune -o -type f -name 'go.mod' -print 2>/dev/null \
-    | xargs -r grep -Il 'connectors/whatsapp' 2>/dev/null | sed 's|^|go.mod naming the connector: |'
+  # THE MATCH IS ON THE PATH INSIDE THE TREE, NOT ON THE CHECKOUT'S ABSOLUTE PATH (23/11). It used to
+  # grep the absolute path for "whatsapp", so a checkout that happens to LIVE under a directory whose name
+  # contains it - this very mission's worktree, /home/victor/Work/missions/whatsapp-finds-owner/wt - reported
+  # every .go file in the tree: measured, the two legitimate
+  # benchmarks/service-component-spike/guest/*.go fixtures, on a tree where the same check passes from a
+  # path without the word. What the rule means (this file's own header) is "a *whatsapp*.go file", i.e. a
+  # name inside the tree, and that is what it now reads - the fixtures below still prove the finder finds a
+  # planted connectors/whatsapp/main.go and a planted scripts/whatsapp-thing.go.
+  # The findings are COLLECTED and written once, so a caller can search them without a live pipe (see
+  # `runs()`: a producer whose reader exits early dies on SIGPIPE under `pipefail`).
+  local out=""
+  while IFS= read -r found; do
+    case "${found#$root/}" in
+      *[Ww][Hh][Aa][Tt][Ss][Aa][Pp][Pp]*) out+="Go source: $found"$'\n' ;;
+    esac
+  done < <(find "$root" -path "$root/.git" -prune -o -type f -name '*.go' -print 2>/dev/null)
+  while IFS= read -r found; do
+    out+="go.mod naming the connector: $found"$'\n'
+  done < <(find "$root" -path "$root/.git" -prune -o -type f -name 'go.mod' -print 2>/dev/null \
+    | xargs -r grep -Il 'connectors/whatsapp' 2>/dev/null)
+  printf '%s' "$out"
   return 0
 }
 
@@ -89,7 +106,17 @@ quiet() { # <name> <producer> <root> -- the producer prints nothing
 }
 
 runs() { # <root> <finder: code_findings|doc_findings> <needle> -- the finder reports the needle
-  "$2" "$1" | grep -qF -- "$3"
+  # THE FINDER IS COLLECTED FIRST, THEN SEARCHED (23/11). `"$2" "$1" | grep -qF -- "$3"` closes the pipe as
+  # soon as the needle matches, and a finder that writes anything after that dies on SIGPIPE - which
+  # `set -o pipefail` reports as the finder failing. Measured: with the finder's output collected (as
+  # `silent()` already did) the same call answered 141 instead of 0. No pipe here, so no signal, and the
+  # meaning is unchanged: does the finder's output contain this literal text.
+  local out
+  out="$("$2" "$1")"
+  case "$out" in
+    *"$3"*) return 0 ;;
+  esac
+  return 1
 }
 
 silent() { # <root> <finder> -- the finder reports nothing at all
