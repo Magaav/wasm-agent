@@ -55,7 +55,10 @@ check(result and result.ok and value==3,'a script that declares the name itself 
 -- block it wanted. The binding sits on the OPENING line of the block, so the script's own line numbers
 -- do not move.
 local plain=assert(raw_code.native_run({code='return 1'}))
-check(plain.code=='{ const raw = {};\nreturn 1\n}','a run without raw still binds raw, on the opening line: '..plain.code)
+check(plain.code=='const raw = {}; {\nreturn 1\n}','a run without raw still binds raw, on the opening line: '..plain.code)
+-- and the script has a block of its own, so its own `raw` shadows the bound one (not a redeclaration).
+result,value=run({code='const raw = "mine"; return raw.length;'})
+check(result and result.ok and value==4,'a script that declares its own raw still runs: '..tostring(result and (result.error or result.message)))
 check(select(2,plain.code:gsub('\n',''))==2,'and adds no line of its own before the script')
 check(type(plain.raw_blocks)=='table' and #plain.raw_blocks==0,'and binds no block name')
 

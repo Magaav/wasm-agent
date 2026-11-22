@@ -96,7 +96,9 @@ function M.native_run(args)
   -- the key. The binding sits on the OPENING LINE of the block, not on a line of its own, so the line
   -- numbers in a compile error stay where they were (lua/core/codemode.lua's script_line maps the stack by
   -- the line the script's code starts on).
-  if raw == nil then return { code = "{ const raw = {};\n" .. code .. "\n}", raw_blocks = {} } end
+  -- The script keeps a block of its OWN, as in the call that has blocks (below): a script that declares its
+  -- own `raw` (const raw = await tools.bash(...)) shadows this one instead of dying on a redeclaration.
+  if raw == nil then return { code = "const raw = {}; {\n" .. code .. "\n}", raw_blocks = {} } end
   if type(raw) ~= "table" then
     return nil, { error = "run_raw_not_object", effect = "none",
       note = "raw is an object of name -> text (one entry per raw block); it is not a string" }
