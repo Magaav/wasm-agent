@@ -881,6 +881,7 @@ service              runs a process
 selfloop             writes files
 sha256               read-only
 script_run           read-only
+sql_patience         read-only
 sign                 read-only
 sleep                read-only
 sql_exec             writes files

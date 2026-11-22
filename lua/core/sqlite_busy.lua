@@ -26,6 +26,9 @@
 local M = {}
 
 M.BUSY_NAME = "database_busy"
+-- Forward declaration (change/start-instant): the retry loop below reports a refusal to the start
+-- window defined at the bottom of this file, so the name has to exist before that body is compiled.
+local notify
 local PAUSE_START_MS, PAUSE_MAX_MS = 20, 400
 
 local function number_env(name, default, low, high)
@@ -106,6 +109,9 @@ function M.retry(action, fn, opts)
       if results[1] then return table.unpack(results, 2, results.n) end
       local last = results[2]
       if not M.is_busy(last) then error(last, 0) end
+      -- The reader is told from here, not from a caller that guesses: this is the one place where "I am
+      -- waiting for another process" is a fact (item 3 of change/start-instant).
+      notify(action, last)
       if attempts >= limit or M.clock() >= deadline then
         error(M.failure(action, last, attempts, M.clock() - started), 0)
       end
@@ -119,5 +125,128 @@ function M.retry(action, fn, opts)
   if not results[1] then error(results[2], 0) end
   return table.unpack(results, 2, results.n)
 end
+
+
+-- ---------------------------------------------------------------- the start window (22/11)
+-- A TURN'S FIRST WRITE MUST NOT WAIT FOR ANOTHER PROCESS (Victor 22/11: "it should start
+-- instantaneously"; measured on this node: a land or a serve restart moves a turn's first model call by
+-- 6-21 s, and the wait is the turn's own retry patience, not the holder's work).
+--
+-- Every write in a run's preamble - the session claim, the steering row, the user message, the telemetry
+-- event - is bookkeeping the model does not need: the model is about to answer the text this node
+-- already holds in memory. So for the preamble only, this module bounds the patience of ANY write to a
+-- few hundred milliseconds: the connection's own busy_timeout is shortened (that is what one refused
+-- statement would otherwise spend - 5 s a quantum, measured) and the retry deadline is moved to
+-- now+patience, which a nested retry inherits instead of starting its own. A write refused inside the
+-- window fails at once with the named, retryable answer callers already understand, and a caller that
+-- can do its work later does (lua/core/ledger_defer.lua).
+--
+-- What it is NOT: a shorter patience for the whole process. The window is opened for a preamble and
+-- closed at the first model call (or when the run ends), and the previous busy_timeout is put back.
+-- THE WINDOW LIVES ON _G, NOT IN THIS FILE'S CHUNK. dofile() re-runs a module, so the table a module
+-- builds at load time is a DIFFERENT table for every caller: telemetry.lua and memory.lua each hold their
+-- own copy of this file, and a window opened by the agent was invisible to both (measured 22/11: the
+-- telemetry write never learned the window was open and spent its own 828 ms twice). One shared table, the
+-- same mechanism memory.lua already uses for its transaction depth (__wa_tx_depth).
+local function window_state()
+  local state = rawget(_G, "__wa_start_window")
+  if type(state) ~= "table" then
+    state = { open = false, restore = nil, deadline = nil, enclosing = nil, notifier = nil, noticed = false,
+      busy = false, patience = nil }
+    rawset(_G, "__wa_start_window", state)
+  end
+  return state
+end
+local window = window_state()
+
+-- The one callback a run registers so the READER is told what it waits for (item 3 of change/start-instant):
+-- a silent screen for 20 s is the second half of the complaint.
+function M.on_wait(fn)
+  window.notifier = fn
+  window.noticed = false
+end
+
+function M.noticed() return window.noticed end
+
+local function pragma(statement)
+  if type(host.sql_exec) ~= "function" then return nil end
+  local ok, raw = pcall(host.sql_exec, statement, "{}")
+  if not ok then return nil end
+  local decoded
+  local okd, value = pcall(dofile("lua/vendor/json.lua").decode, raw)
+  if okd then decoded = value end
+  return decoded or {}
+end
+
+function notify(action, reason)
+  -- The ledger refused a write inside the window: from here on, a later writer in the same preamble does
+  -- not have to spend the same patience to learn the same thing (see M.busy_now).
+  if window.open and not window.busy then
+    window.busy = true
+    -- AND THE CONNECTION STOPS WAITING ALTOGETHER. A preamble has a dozen small writers (the steering
+    -- row, the session claim, the envelope cache, the prompt cache, the transcript): each one that has
+    -- to learn "still locked" for itself pays the window again, and ten times 400 ms is the 4.8 s turn
+    -- this was measured as. Zero here means the rest of the preamble finds out at once, which is all
+    -- any of them needs; end_window() puts the connection patience back.
+    pragma("PRAGMA busy_timeout = 0")
+  end
+  if window.noticed or type(window.notifier) ~= "function" then return end
+  window.noticed = true
+  pcall(window.notifier, action, tostring(reason))
+end
+
+-- A caller that talks to the host's SQL boundary directly (telemetry, the envelope cache) reports the
+-- refusal here, so the window learns it once and the reader is told once - whether or not the statement
+-- came through M.retry.
+function M.observe(reason)
+  if not M.is_busy(reason) then return false end
+  notify("sql", reason)
+  return true
+end
+
+-- True while this run's preamble has already been refused the write lock. Callers that can do their
+-- work later (telemetry, the transcript, the steering row) ask this instead of paying for the answer
+-- again: a preamble is not a queue of identical 2 s waits (measured: three of them made a 9.2 s turn).
+function M.busy_now() return window.open and window.busy end
+
+
+-- patience_ms is the budget for the whole window, not per statement.
+function M.begin_window(patience_ms)
+  if window.open then return true end
+  local patience = math.max(1, math.floor(tonumber(patience_ms) or 400))
+  local current = pragma("PRAGMA busy_timeout")
+  local previous = tonumber(type(current) == "table" and (current[1] and (current[1].timeout or current[1].busy_timeout) or nil)) or nil
+  -- TWO NUMBERS, ONE WAIT. A newer host takes the window itself (`host.sql_patience`, one attempt) and
+  -- the statement may then wait up to `patience`; an older host has no such knob and retries every
+  -- statement five times of its own accord, so there the connection must not wait at all or the window is
+  -- multiplied by five (measured 22/11: 400 ms became 2.2 s per refused write). A Lua-only deploy
+  -- therefore still bounds the preamble - it just bounds it a little less tightly.
+  local bounded_host = type(host.sql_patience) == "function"
+  if not pragma("PRAGMA busy_timeout = " .. (bounded_host and patience or 0)) then return false end
+  if bounded_host then pcall(host.sql_patience, tostring(patience)) end
+  window.open = true
+  window.busy = false
+  window.patience = patience
+  window.restore = previous
+  window.enclosing = rawget(_G, "__wa_busy_deadline")
+  window.deadline = M.clock() + patience
+  local enclosing = window.enclosing
+  if not enclosing or enclosing > window.deadline then rawset(_G, "__wa_busy_deadline", window.deadline) end
+  return true
+end
+
+function M.end_window()
+  if not window.open then return end
+  window.open = false
+  window.busy = false
+  if type(host.sql_patience) == "function" then pcall(host.sql_patience, "0") end
+  rawset(_G, "__wa_busy_deadline", window.enclosing)
+  window.enclosing, window.deadline = nil, nil
+  local restore = window.restore or 5000
+  window.restore = nil
+  pragma("PRAGMA busy_timeout = " .. restore)
+end
+
+function M.in_window() return window.open end
 
 return M

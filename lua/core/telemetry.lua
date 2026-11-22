@@ -38,6 +38,9 @@ local function cooldown_ms() return number_env("WASM_AGENT_TELEMETRY_WRITE_COOLD
 local PAUSE_START_MS, PAUSE_MAX_MS = 25, 400
 
 local drops = {count = 0, last_at = nil, last_error = nil, label = nil, cooldown_until = 0}
+-- One load, at the top, of the module that owns "is the ledger refusing writes right now": the write path
+-- asks it on every record, and a dofile per record would be the cost this file exists to avoid.
+local sqlite_busy = dofile("lua/core/sqlite_busy.lua")
 
 local function log_line(text)
   -- The one audible record of a loss. Guarded because a missing `host.log` (an older host) must not
@@ -84,6 +87,13 @@ end
 local function write(label, statement, params)
   local limit, budget = attempts_max(), retry_budget_ms()
   local started = M.clock()
+  -- A run's preamble that has already met a held ledger lock drops its accounting rows instead of paying
+  -- for the same answer twice (change/start-instant: the model call must not wait, and three identical
+  -- 2 s waits were exactly what made a 9 s turn). Not silent: the line below says which record was lost.
+  if sqlite_busy and sqlite_busy.busy_now and sqlite_busy.busy_now() then
+    note_drop(label, "the ledger is busy (this run's preamble already waited once)", 0, 0)
+    return nil, "busy"
+  end
   if started < drops.cooldown_until then
     note_drop(label, "write lock still held by another connection (cooldown)", 0, 0)
     return nil, "cooldown"
@@ -94,6 +104,9 @@ local function write(label, statement, params)
     local result, failure = attempt("sql_exec", statement, params)
     if result then return result end
     reason = failure
+    -- Tell the run's start window (lua/core/sqlite_busy.lua) that the ledger refused a write: the reader
+    -- hears it once, and the next accounting row of the same preamble does not wait to learn it again.
+    pcall(sqlite_busy.observe, failure)
     if attempts >= limit then break end
     if M.clock() - started >= budget then break end
     if host.sleep then host.sleep(tostring(pause)) end

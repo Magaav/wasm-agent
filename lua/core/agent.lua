@@ -150,9 +150,22 @@ local function record_turn(self, turn)
     local copy={};for _,item in ipairs(turn.trace) do copy[#copy+1]=item end
     copy[#copy+1]=counts;turn.trace=copy
   end
-  local seq = memory.append_turn(self.session_id, turn)
-  self.emit({ type = "checkpoint", seq = seq })
+  -- ORDER FIRST: a row the ledger still owes this session is written before this one, so the transcript can
+  -- never show a reply above the message it answers (lua/core/ledger_defer.lua).
+  local defer = dofile('lua/core/ledger_defer.lua')
+  if defer.count() > 0 then pcall(defer.flush) end
+  local seq, refused
+  if self.preamble_open then
+    -- The preamble is the one window where waiting is the defect: the model has not been called yet, so
+    -- every second spent here is a second the reader sees as "it has not started" (Victor, 22/11). A row
+    -- this refuses is kept and written later, and the run carries on with the text it already has.
+    seq, refused = defer.offer(self.session_id, turn)
+  else
+    seq = memory.append_turn(self.session_id, turn)
+  end
+  if seq then self.emit({ type = "checkpoint", seq = seq }) end
   emit_counts(self)
+  _ = refused
   return seq
 end
 
@@ -1518,6 +1531,17 @@ function M:build_context()
       dropped_results = dropped_results + 1
     end
   end
+  -- A row this run could not write yet is still part of the request: the model must see the message it is
+  -- answering, and the ledger is owed it (lua/core/ledger_defer.lua). Appended last, because a deferred row
+  -- is by construction the newest one, and the order the reader sees is the order it is sent in.
+  for _, owed in ipairs(dofile('lua/core/ledger_defer.lua').pending(self.session_id)) do
+    if owed.role == 'user' then
+      messages[#messages + 1] = user_message({ content = owed.content or '',
+        images = type(owed.images) == 'table' and owed.images or {} })
+    elseif owed.role == 'assistant' and tostring(owed.content or '') ~= '' then
+      messages[#messages + 1] = { role = 'assistant', content = owed.content }
+    end
+  end
   if dropped_calls > 0 or dropped_results > 0 or moved_results > 0 or unnamed_calls > 0 or unnamed_results > 0 then
     self.repaired = (self.repaired or 0) + 1
     self.emit({
@@ -1878,6 +1902,16 @@ function M:note_interruption()
 end
 
 function M:run(text, images)
+  -- THE PREAMBLE IS MEASURED AND BOUNDED FROM HERE (change/start-instant, 22/11). The clock used to start
+  -- in run_body, past steering.begin() and the run's own telemetry row - which is where a held ledger
+  -- write lock is actually paid (measured with a 10 s hold: 9.26 s of this function against 200 ms of
+  -- run_body, so the preflight row said record_turn=124ms while the reader waited 9 s).
+  self:preflight_start()
+  self.preamble_open = true
+  local sqlite_busy_lib = dofile('lua/core/sqlite_busy.lua')
+  -- The reader is told what it waits for, from the one place that knows the wait is real (item 3).
+  sqlite_busy_lib.on_wait(function(action, reason) self:ledger_wait_notice(action, reason) end)
+  sqlite_busy_lib.begin_window(tonumber(host.getenv('WASM_AGENT_START_PATIENCE_MS') or '') or 400)
   self.run_id=host.uuid()
   -- The run's own request, kept for the failure path: a wake this harness scheduled starts with a
   -- known mark, and a run that fails while answering one must not schedule another.
@@ -1904,6 +1938,7 @@ function M:run(text, images)
   local resource_ctx={session_id=self.session_id,user_id=self.user,run_id=self.run_id,subagent=self.subagent}
   local claimed=resources.begin(resource_ctx)
   if not claimed.ok then error("run_resource_refused: "..json.encode(claimed)) end
+  self:preflight_mark("resources")
   -- Taking over a session claim another run left behind is a fact, not housekeeping (item 5, 18/11):
   -- the operator reads which run held it and that nothing was replayed.
   if claimed.audit then
@@ -1915,6 +1950,12 @@ function M:run(text, images)
   -- Initialized after provider/child selection is pinned, before the new user row.
   self.run_counts.context_growth={version=1,known=false,source='awaiting_baseline',partial=false,pending=false,compactions=0}
   self.on_call_start=function(kind,request,capacity)
+    -- The preamble is over: from here a wait costs the model's work, not the reader's first second, so the
+    -- connection gets its ordinary patience back (lua/core/sqlite_busy.lua, the start window).
+    if self.preamble_open then
+      self.preamble_open = false
+      dofile('lua/core/sqlite_busy.lua').end_window()
+    end
     self.run_counts.pending_input=request and request.context_tokens_estimate or nil
     self.run_counts.model_calls=self.run_counts.model_calls+1
     if kind=='summary' then
@@ -1962,9 +2003,27 @@ function M:run(text, images)
   self.steering_run_id=self.subagent and self.subagent.run_id or self.run_id
   local span
   local ok,result=pcall(function()
-  steering.begin(self.user,self.session_id,self.steering_run_id)
+  -- A steering row the ledger will not take must not fail the turn: the inbox is an extra, the answer is
+  -- not. It is said out loud, and the settlement at the end of the run is skipped, so nothing reports a
+  -- run as steered that never was.
+  local steered, steering_problem
+  if dofile('lua/core/sqlite_busy.lua').busy_now() then
+    steered, steering_problem = false, 'the ledger is busy (already waited once this run)'
+  else
+    steered, steering_problem = pcall(steering.begin, self.user, self.session_id, self.steering_run_id)
+  end
+  if not steered then
+    -- ONLY A LOCK IS TOLERATED HERE. Anything else - a cancellation landing on this call, a refused
+    -- session, a bug - is the run's own failure and must keep travelling (measured: swallowing it made a
+    -- cancelled run finish as a successful one, scripts/test-network-outage-recovery.lua).
+    if not dofile('lua/core/sqlite_busy.lua').is_busy(steering_problem) then error(steering_problem, 0) end
+    self.steering_unavailable = tostring(steering_problem)
+    self.emit({ type = 'status', text = 'steering is unavailable this turn: a note left now would not be queued' })
+  end
+  self:preflight_mark("steering_begin")
   span=telemetry.start({session_id=self.session_id,run_id=self.run_id},'run',{})
   provider.pin({role=self.role,profile=self.subagent and (self.subagent.id or 'unknown')})
+  self:preflight_mark("provider_pin")
   -- A child's approved model/reasoning override applies to this interpreter only.
   -- `provider.pin()` has already snapshotted the caller's settings, so mutating
   -- the pinned copy changes this child without touching the parent or the
@@ -1978,6 +2037,7 @@ function M:run(text, images)
   end
   local model=provider.settings().model
   local boundary,source=telemetry.last_context_boundary(self.session_id,model)
+  self:preflight_mark("context_boundary")
   self.run_counts.context_growth={version=1,baseline=boundary,current=boundary,
     added=boundary and 0 or nil,model=model,source=source,
     known=boundary~=nil,partial=false,pending=false,compactions=0}
@@ -2007,8 +2067,15 @@ function M:run(text, images)
     if self.run_counts.model_calls==0 then self.run_counts.context_growth.known=false;self.run_counts.context_growth.source='no_provider_boundary' end
   end
   emit_counts(self)
-  local inbox_ok,inbox_error=pcall(steering.finish,self.user,self.session_id,self.steering_run_id,ok and 'settled' or 'failed')
-  if not inbox_ok then ok,result=false,'steering_settlement_failed: '..tostring(inbox_error) end
+  -- No settlement for an inbox that was never opened: reporting "deferred" for notes this run could not read
+  -- would be a claim about a queue that does not exist here (see steering.begin in run()).
+  if self.steering_unavailable then
+    pcall(telemetry.event, self.session_id, self.run_id, '', 'steering', 'unavailable',
+      { reason = redact.text(tostring(self.steering_unavailable)):sub(1, 200) })
+  else
+    local inbox_ok,inbox_error=pcall(steering.finish,self.user,self.session_id,self.steering_run_id,ok and 'settled' or 'failed')
+    if not inbox_ok then ok,result=false,'steering_settlement_failed: '..tostring(inbox_error) end
+  end
   -- THE RUN LEASE IS RELEASED BEFORE THE FAILURE IS SIGNALLED (items 2 and 3, review 19/11).
   -- Measured on avell (which runs the BASE binary): the guard stopped the turn at 22:53:0xZ and the
   -- `--resume` at 22:53:18Z was refused `run_resource_refused resource_busy`, while a launch at
@@ -2049,6 +2116,24 @@ function M:run(text, images)
     self.failure=ending.info
   end
 
+  -- THE LEDGER IS PAID AFTER THE ANSWER, NOT BEFORE IT (item 2). By here the model has run and the reply
+  -- has been emitted, so waiting costs the reader nothing that waiting before cost them everything. What
+  -- still cannot be written is named, with its count, instead of vanishing with the process.
+  dofile('lua/core/sqlite_busy.lua').end_window()
+  do
+    local owed = dofile('lua/core/ledger_defer.lua')
+    if owed.count() > 0 then
+      local written, why = owed.flush()
+      _ = written
+      if owed.count() > 0 then
+        local left = owed.count()
+        self.emit({ type = 'status', text = string.format(
+          'the transcript is %d message(s) behind: the ledger would not take them (%s)', left,
+          redact.text(tostring(why)):sub(1, 120)) })
+        pcall(host.log, string.format('ledger_defer: %d row(s) not stored: %s', left, tostring(why)))
+      end
+    end
+  end
   telemetry.finish(span,{ok=ok,error=not ok and tostring(result) or nil})
   if not ok then error(result, 0) end
   return result
@@ -2104,6 +2189,23 @@ end
 -- small and a pathological one says exactly where.
 local PREFLIGHT_REPORT_MS = tonumber(host.getenv("WASM_AGENT_PREFLIGHT_REPORT_MS") or "") or 50
 
+-- WHAT THE READER IS TOLD WHEN THE LEDGER IS BUSY (item 3 of change/start-instant). A 20 s turn that says
+-- nothing is the second half of the complaint: the screen shows no reason, so the latency reads as a broken
+-- node. This is emitted from sqlite_busy's own first refusal, so it cannot be a guess: the wait is real when
+-- it is said. The holder is named when the node can name it - a deploy leaves a marker
+-- (lua/core/deploy_pause.lua) - and never invented when it cannot.
+function M:ledger_wait_notice(action, reason)
+  local holder = 'another process is writing'
+  local ok, deploy_pause = pcall(dofile, 'lua/core/deploy_pause.lua')
+  if ok and type(deploy_pause) == 'table' and type(deploy_pause.read) == 'function' then
+    local marker = deploy_pause.read(host.now())
+    if marker then holder = 'deploy' end
+  end
+  self.emit({ type = 'status', text = 'waiting for the ledger: ' .. holder })
+  pcall(telemetry.event, self.session_id, self.run_id, '', 'ledger', 'wait',
+    { holder = holder, action = tostring(action), reason = redact.text(tostring(reason)):sub(1, 200) })
+end
+
 function M:preflight_start()
   self.preflight = { at = (host.monotonic_ms and host.monotonic_ms()) or (host.now() * 1000), phases = {} }
 end
@@ -2147,7 +2249,9 @@ function M:run_body(text, images)
   -- honoured. The pin already degrades to ordinary tools; the notice is what stops "code mode is broken"
   -- from looking exactly like "the agent ignored me" (2026-10-22: seven queued turns failed silently).
   local codemode=dofile('lua/core/codemode_policy.lua')
-  self:preflight_start()
+  -- The clock is NOT started here any more: M:run starts it before the preamble, and a second start would
+  -- throw away the phases that preamble already marked (resources, steering_begin, provider_pin,
+  -- context_boundary) - which are exactly the ones a held ledger lock is paid in (change/start-instant).
   self.codemode_policy=codemode.pin(memory,self.role,{session_id=self.session_id,user_id=self.user,role=self.role,subagent=self.subagent})
   if self.codemode_policy.unavailable then
     self.emit({ type = 'status', text = 'code mode unavailable ('..tostring(self.codemode_policy.unavailable):sub(1,160)..') - this run uses ordinary tools' })
@@ -2550,7 +2654,16 @@ function M:run_body(text, images)
   local deploy_pause = dofile("lua/core/deploy_pause.lua")
   local guard_stop = nil
   local function consume_steering()
-    local rows=steering.consume(self.user,self.session_id,self.steering_run_id)
+    -- A NOTE CANNOT BE COLLECTED BY A LEDGER THAT WILL NOT TAKE A WRITE (change/start-instant, 22/11).
+    -- The queue is durable and the row stays queued; the turn carries on without it rather than dying at
+    -- its own step boundary, which is what a held write lock used to do to this call.
+    local collected, rows = pcall(steering.consume, self.user, self.session_id, self.steering_run_id)
+    if not collected then
+      -- A cancellation is not a busy ledger: it ends the run, as it always did.
+      if not dofile('lua/core/sqlite_busy.lua').is_busy(rows) then error(rows, 0) end
+      self.steering_refused = tostring(rows)
+      return 0
+    end
     for _,row in ipairs(rows) do
       messages[#messages+1]={role='user',content=row.text}
       self.emit({type='steering',version=1,id=row.id,run_id=row.run_id,state='read',text=row.text,seq=row.message_seq})
