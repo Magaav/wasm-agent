@@ -170,4 +170,100 @@ ok(joined(corrupt.unknown):find("could not be read") ~= nil,
 ok(host.write_file(broken, json.encode({ ops = {} })) == true, "the same file is repaired")
 ok(idle_compact(master, sid).ok == true, "and the idle compaction is admitted once nothing is unknown")
 
+-- 6. THE SETTLE RETRY. A settled handle, a fired self-wake and a returned child all reach the node
+--    as a background completion run, and none of them is a /chat run: no `node.run_finished` is
+--    emitted, so `onStale` is never asked again and the idle compaction the same work had refused
+--    was lost until the person typed. The node asks again where the work settled
+--    (rust/wa-capabilities/src/serve.rs, `settle_idle_compaction`), under the same maintenance gate
+--    `/compact` takes, and this is the function it asks: the same three states, the same names.
+ok(type(wa_idle_settled) == "function", "the node's settle retry has an entry point to call")
+local function settle(session_id)
+  return json.decode(wa_idle_settled(json.encode({ session_id = session_id })))
+end
+
+-- 6a. A pending code-mode handle refuses the settle retry by name, exactly as the idle request is.
+save_handle(sid)
+local settled_refused = settle(sid)
+ok(settled_refused.ok == false and settled_refused.error == "work_pending",
+  "a pending handle refuses the settle retry by name: " .. tostring(settled_refused.error))
+ok(tostring(settled_refused.session_id) == tostring(sid), "and it names the session it refused for")
+ok(joined(settled_refused.pending):find("code%-mode handle") ~= nil,
+  "and says what is still pending: " .. joined(settled_refused.pending))
+ok(settled_refused.percent == nil, "nothing was measured and no summary was written")
+save_handle(nil)
+
+-- 6b. A pending self-wake refuses it too - the state the settle retry is most likely to meet: the
+--     wake that just fired settles while the next one is still scheduled.
+local next_wake = selfloop.schedule({ session_id = sid, reason = "fixture wake 2", prompt = "fixture",
+  in_seconds = 600 }, { user_id = "master", session_id = sid })
+ok(next_wake and next_wake.ok == true, "a second self-wake is scheduled for the session")
+settled_refused = settle(sid)
+ok(settled_refused.ok == false and settled_refused.error == "work_pending",
+  "a pending self-wake refuses the settle retry: " .. tostring(settled_refused.error))
+ok(joined(settled_refused.pending):find("self%-wake") ~= nil,
+  "and names the wake: " .. joined(settled_refused.pending))
+host.sql_exec("UPDATE self_wakes SET status='cancelled' WHERE session_id=?", json.encode({ sid }))
+
+-- 6c. A running child refuses it, and that child settling is what clears the session.
+host.sql_exec("UPDATE sessions SET ended_at=NULL WHERE id=?", json.encode({ child }))
+host.sql_exec("DELETE FROM agent_control WHERE child_id=?", json.encode({ child }))
+host.sql_exec("INSERT INTO agent_control(child_id,parent_session,parent_run,kind,source_session,source_seq,node,created_at)"
+  .. " VALUES(?,?,?,?,?,?,?,?)", json.encode({ child, sid, "", "fork", sid, 2, "", host.now() }))
+local child_live = 0
+for _, item in ipairs(control.children_of(sid, { user_id = "master", session_id = sid })) do
+  if item.state == "running" or item.state == "queued" then child_live = child_live + 1 end
+end
+ok(child_live == 1, "the session has one running child again (" .. tostring(child_live) .. ")")
+settled_refused = settle(sid)
+ok(settled_refused.ok == false and settled_refused.error == "work_pending",
+  "a running child refuses the settle retry: " .. tostring(settled_refused.error))
+ok(joined(settled_refused.pending):find("child run") ~= nil,
+  "and names the child: " .. joined(settled_refused.pending))
+ok(memory.finish_session(child) == true, "the child's run is settled")
+
+-- 6d. All three clear: the settle retry measures the session itself, at the idle threshold (40%),
+--     with nothing to summarize at this size - so this test still spends no model call.
+local settled = settle(sid)
+ok(settled.ok == true and settled.error == nil, "with all three clear the settle retry runs: "
+  .. tostring(settled.error))
+ok(tostring(settled.session_id) == tostring(sid), "and it measured the session that settled")
+ok(type(settled.percent) == "number" and settled.percent > 0 and settled.percent < 40,
+  "and says how full it is (" .. tostring(settled.percent) .. "%), under the idle threshold")
+ok(settled.compacted == false, "so no summary is written at this size")
+
+-- 6e. A parked session is stopped on purpose (lua/core/session_park.lua): maintenance does not
+--     rewrite its history either, and it says why. Releasing it is what lets the next settle compact.
+local parked = dofile("lua/core/selfloop.lua").park(sid, "master", "fixture park")
+ok(parked and parked.ok == true, "the session is parked")
+local settled_parked = settle(sid)
+ok(settled_parked.ok == false and settled_parked.error == "session_parked",
+  "a parked session is not compacted by the settle retry: " .. tostring(settled_parked.error))
+ok(tostring(settled_parked.note):find("wa session release") ~= nil,
+  "and the refusal names the one verb that lets it resume: " .. tostring(settled_parked.note))
+dofile("lua/core/selfloop.lua").release(sid)
+ok(selfloop.hold(sid) == nil, "the park is released")
+ok(settle(sid).ok == true, "and the settle retry is admitted again")
+
+-- 6f. Unknown is not yes on this path too, and the answers that are not a refusal of the work are
+--     named: a subagent thread, a session that does not exist, and a body with no session at all.
+local settled_subagent = settle(child)
+ok(settled_subagent.ok == false and settled_subagent.error == "subagent_compaction_refused",
+  "a subagent thread is never compacted by the settle retry: " .. tostring(settled_subagent.error))
+local settled_missing = settle("no-such-session")
+ok(settled_missing.ok == false and settled_missing.error == "session_not_found",
+  "an unknown session is refused by name: " .. tostring(settled_missing.error))
+ok(json.decode(wa_idle_settled("{}")).error == "invalid_settle_request",
+  "a settle request with no session is refused rather than picking one")
+save_handle(sid, "running")
+ok(host.write_file(broken, "still not json") == true, "a corrupt index file is left in the pending directory")
+local settled_corrupt = settle(sid)
+ok(settled_corrupt.ok == false and settled_corrupt.error == "work_pending",
+  "an unreadable pending index refuses the settle retry rather than reading as clear: "
+  .. tostring(settled_corrupt.error))
+ok(joined(settled_corrupt.unknown):find("could not be read") ~= nil,
+  "and says which state is unknown: " .. joined(settled_corrupt.unknown))
+ok(host.write_file(broken, json.encode({ ops = {} })) == true, "the index is repaired")
+save_handle(nil)
+ok(settle(sid).ok == true, "and the settle retry is admitted once nothing is unknown")
+
 print("compact idle pending ok (" .. checks .. " checks, 0 skipped)")
