@@ -466,6 +466,16 @@ end
 -- callback: the client cannot run one (it has no registry), so an option the client can draw has to be a
 -- line the interpreter executes. Mid-run that line is queued for the next turn, and the balloon says so.
 local balloon = dofile('lua/core/balloon.lua')
+-- A page line that carries data (a list of input fields, a note, a peer list) is wrapped to the
+-- client's 400-character limit before it is a line: `rust/wa-cli-views/src/spec.rs` refuses the WHOLE
+-- view for one long line, and a refused `/mcp` page is one the reader never sees (Victor, 21/11).
+local view_lines = dofile('lua/core/view_lines.lua')
+
+-- Append `text` as the lines it needs. Every data-carrying row of a page goes through here.
+local function push(lines, text)
+  for _, line in ipairs(view_lines.wrap_line(text)) do lines[#lines + 1] = line end
+  return lines
+end
 
 -- The one word a reader scans for, per state the registry reports. `enabled` is the registry's word for a
 -- connector that answered its last probe and is published; nobody outside `lua/core/mcp.lua` says it.
@@ -545,12 +555,12 @@ function M.tool_page(tool, entry, back)
     'from ' .. tostring(entry.key) .. ' (' .. tostring(entry.where) .. ')',
     string.format('approval: %s \u{b7} %s', tostring(tool.approval or 'unknown'),
       tool.published and 'the model is offered it now' or 'not offered to the model now'),
-    'input: ' .. input_fields(tool),
   }
+  push(lines, 'input: ' .. input_fields(tool))
   if tool.description and tool.description ~= '' then
     for _, line in ipairs(balloon.wrap(tostring(tool.description), balloon.WIDTH, '')) do lines[#lines + 1] = line end
   end
-  if tool.note then lines[#lines + 1] = 'note: ' .. tostring(tool.note) end
+  if tool.note then push(lines, 'note: ' .. tostring(tool.note)) end
   return balloon.page({ title = tostring(tool.name), lines = lines,
     options = { { label = 'Back', hint = 'the connector', back = true } } })
 end
@@ -600,9 +610,9 @@ function M.detail_page(entry, links, opts)
     string.format('state: %s \u{b7} %s callable now (approved %s, discovered %s)', M.state_label(entry),
       tostring(entry.tool_count or 0), tostring(entry.approved or 0), tostring(entry.discovered or 0)),
   }
-  if entry.count_phrase then lines[#lines + 1] = 'carries: ' .. tostring(entry.count_phrase) end
-  if entry.note then lines[#lines + 1] = 'note: ' .. tostring(entry.note) end
-  if entry.observed then lines[#lines + 1] = 'last observation: ' .. tostring(entry.observed) end
+  if entry.count_phrase then push(lines, 'carries: ' .. tostring(entry.count_phrase)) end
+  if entry.note then push(lines, 'note: ' .. tostring(entry.note)) end
+  if entry.observed then push(lines, 'last observation: ' .. tostring(entry.observed)) end
   local error_text = entry.error and tostring(entry.error) or ''
   if entry.last_call and type(entry.last_call) == 'table' and entry.last_call.ok == false and entry.last_call.error then
     error_text = error_text ~= '' and error_text or tostring(entry.last_call.error)
@@ -674,8 +684,8 @@ function M.views(view, opts)
   -- Peers that did not answer the last refresh: one line, not rows posing as connectors.
   if type(view.peers_silent) == 'table' and #view.peers_silent > 0 then
     local age = tonumber(view.peers_at) and math.max(0, math.floor(((tonumber(host.now()) or 0) - view.peers_at) / 60)) or nil
-    list.lines[#list.lines + 1] = 'peers not answering: ' .. table.concat(view.peers_silent, ', ')
-      .. (age and string.format(' (last refresh %d min ago)', age) or '')
+    push(list.lines, 'peers not answering: ' .. table.concat(view.peers_silent, ', ')
+      .. (age and string.format(' (last refresh %d min ago)', age) or ''))
   end
   -- A panel stack has a cap (`max_pages`, the client's MAX_VIEWS = 64 for the mid-run snapshot): over it,
   -- the per-tool pages go and each Tools page still names every tool (17/11, work: 72 panels were refused

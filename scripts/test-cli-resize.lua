@@ -199,6 +199,100 @@ render()
 ok(width_of(framed:rule()) == 120, "the view's rule is the terminal's width after a framed render ("
   .. width_of(framed:rule()) .. ")")
 
+-- ---- THE RECORDED TERMINAL: what the TERMINAL does with what was written (item 1 of tui-fit) -----
+--
+-- Everything above asserts that a freshly drawn row fits the width it is drawn for. The defect Victor
+-- photographed in foot is the other half of the problem: `wa chat` printed the welcome box ONCE, into
+-- the terminal, and it owned those characters from that moment - so a rule of 80 columns stayed 80
+-- columns, and shrinking the window made foot re-wrap it into 60 columns plus an orphan row of 20
+-- under the rule: the stray "─". No later write can reflow a row the terminal already holds.
+--
+-- So this drives the REAL view through the widths he drove (80 -> 200 -> 60), feeds every byte it wrote
+-- into a recorded terminal (scripts/lib/recorded_terminal.lua: a grid, a scroll region, the erase and
+-- clear sequences, and the reflow a resize performs), and asserts on the FINAL screen:
+--   * no row is wider than the terminal it is shown in;
+--   * the welcome rule is on that screen exactly once, exactly the final width - no orphan fragment of
+--     an older width hiding under it;
+--   * and the banner is still there: the redraw puts back what the view owns, it does not wipe it.
+local recorded = dofile("scripts/lib/recorded_terminal.lua")
+local recorded_width = 80
+local bytes = {}
+local drive = cli_view.new({ out = function(text) bytes[#bytes + 1] = text end, live = true,
+  now = function() return 1000 end, rows = function() return 24 end,
+  columns = function() return recorded_width end, limit = recorded_width, register = false })
+local term = recorded.new({ width = recorded_width, height = 24, columns = cli_view.columns })
+local function replay()
+  local text = table.concat(bytes, "")
+  bytes = {}
+  term:feed(text)
+end
+drive:screen_on()
+drive:welcome({ live = true, version = "e5ba9089",
+  model = "deepseek-v4.1-flash @ http://127.0.0.1:1/v1", session = "abc",
+  workspace = "~/work/wasm-agent", branch = "change/tui-fit" })
+replay()
+drive:line("the reader's first line")
+replay()
+local WIDTHS = { 200, 60 }
+for _, width in ipairs(WIDTHS) do
+  -- What a resize is: the console reports a new size and the terminal re-wraps what it holds.
+  recorded_width = width
+  term:resize(width, 24)
+  -- The next frame - a line, a tool call, the status row - is where the view reads the console.
+  drive:line("a line written after the window became " .. width .. " columns")
+  replay()
+end
+local RULE_CHAR = "\226\148\128"
+local widest_row = 0
+for index = 1, 24 do widest_row = math.max(widest_row, term:cells(index)) end
+ok(widest_row <= 60, "no row of the final 60-column screen is wider than 60 (widest " .. widest_row .. ")")
+local rules = {}
+for index, row in ipairs(term:screen()) do
+  if row ~= "" and (row:gsub(RULE_CHAR, "")) == "" then rules[#rules + 1] = index end
+end
+ok(#rules == 1, "the welcome rule is on the final screen exactly once, so no fragment of an older width "
+  .. "is left under it (found " .. #rules .. ")")
+if #rules == 1 then
+  ok(term:cells(rules[1]) == 60, "and it is exactly the terminal's width (drawn "
+    .. term:cells(rules[1]) .. " of 60)")
+  local under = term:screen()[rules[1] + 1] or ""
+  ok(under:find("Welcome to wasm-agent", 1, true) ~= nil,
+    "with the greeting directly under it, not an orphan piece of rule: " .. under:sub(1, 40))
+end
+ok(#term:find("Welcome to wasm-agent") == 1, "the banner is on the final screen, once (not wiped by "
+  .. "the redraw)")
+
+-- ---- the OTHER layout: the banner becomes a block the host redraws ---------------------------------
+--
+-- With the native editor, drawing again is not this view's job: the host owns the transcript as a
+-- model and repaints every block at the frame's width on a resize (host.rs REPAINT_CLEAR, and
+-- rust/wa-term/src/transcript.rs `a_block_written_once_draws_its_rule_at_the_width_of_the_frame` proves
+-- the marker follows the frame). What is asserted here is the ROUTING, because that is what this side
+-- decides: the banner goes through the transcript channel, with the rule left as the marker, so the
+-- width is decided where the row is drawn and nowhere earlier.
+local wrote = {}
+local saved_transcript_write, saved_transcript_block = host.transcript_write, host.transcript_block
+host.transcript_write = function(text) wrote[#wrote + 1] = tostring(text); return true end
+host.transcript_block = function() wrote[#wrote + 1] = "<block>"; return true end
+-- `stdout` is what opens the transcript channel (`METHODS:transcript`: the host's own writer, which
+-- exists because this process draws on its terminal); the bytes it would write are captured here.
+local routed = cli_view.new({ out = function(text) wrote[#wrote + 1] = tostring(text) end, live = true,
+  stdout = true, now = function() return 1000 end, rows = function() return 24 end,
+  columns = function() return 80 end, limit = 80, register = false })
+routed.editor, routed.editor_ready = true, true
+routed:screen_on()
+wrote = {}
+routed:welcome({ live = true, version = "e5ba9089", workspace = "~/work/wasm-agent" })
+local joined = table.concat(wrote, "")
+ok(joined:find(cli_view.RULE, 1, true) ~= nil,
+  "with a native editor the banner keeps the rule marker for the host to expand")
+ok(joined:find(string.rep("\226\148\128", 40), 1, true) == nil,
+  "and measures no width of its own")
+-- The greeting is painted word by word ("wasm-agent" is bold), so the sequence to look for is the
+-- one with no colour inside it.
+ok(joined:find("Welcome to ", 1, true) ~= nil, "the block itself goes to the transcript")
+host.transcript_write, host.transcript_block = saved_transcript_write, saved_transcript_block
+
 if failed == 0 then print("resize ok (" .. checks .. " checks)") else print("FAILED " .. failed .. "/" .. checks) end
 os.exit(failed == 0 and 0 or 1)
 

@@ -4,6 +4,11 @@
 --
 -- `io`: print(text), panel(spec) -> result (optional), paint(text, role).
 local nodes = dofile("lua/core/nodes.lua")
+-- A detail row is wrapped to the client's line limit (400 characters, `rust/wa-cli-views/src/spec.rs`)
+-- by the one module that knows how: 143 capability names on one "Tools: ..." line is 3030 characters,
+-- and a spec with one line too long is refused whole, so the reader never saw the node's page at all
+-- (Victor, 21/11).
+local view_lines = dofile("lua/core/view_lines.lua")
 local M = {}
 
 local MIDDOT = "\194\183"
@@ -57,7 +62,7 @@ function M.details(node)
   if #endpoints > 0 then
     local shown = {}
     for _, e in ipairs(endpoints) do shown[#shown + 1] = type(e) == "table" and tostring(e.url or e.address or e.kind or "?") or tostring(e) end
-    lines[#lines + 1] = "Endpoints: " .. table.concat(shown, ", ")
+    for _, line in ipairs(view_lines.list("Endpoints: ", shown)) do lines[#lines + 1] = line end
   elseif not node.local_node then
     lines[#lines + 1] = "Endpoints: none (reached through the relay)"
   end
@@ -74,7 +79,9 @@ function M.details(node)
     end
   end
   if type(node.capabilities) == "table" and #node.capabilities > 0 then
-    lines[#lines + 1] = "Tools: " .. table.concat(node.capabilities, ", ")
+    -- One line per 400 characters' worth of names, broken at ", " (view_lines): the row still reads as
+    -- a list of the node's tools, and the page is never refused for its length.
+    for _, line in ipairs(view_lines.list("Tools: ", node.capabilities)) do lines[#lines + 1] = line end
   end
   return lines
 end

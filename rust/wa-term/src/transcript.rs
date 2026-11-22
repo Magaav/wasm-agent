@@ -1188,6 +1188,40 @@ mod tests {
     /// adds to a row is one column at the end (`view`), so a test that compared whole rows would
     /// otherwise be asserting the bar's width in every one of them.
     fn plain(mut t: Transcript) -> Transcript { t.scrollbar = Scrollbar::Hidden; t }
+    /// The welcome block is a TRANSCRIPT BLOCK since item 1 of tui-fit (`lua/core/cli_view.lua`
+    /// `METHODS:welcome`): written ONCE, with the rule left as the marker, and drawn again at every
+    /// frame's own width. That is what lets a resized window show the banner at the new width instead of
+    /// re-wrapping the row the old width left in the terminal - the stray "─" under the rule (Victor,
+    /// 21/11). Nothing here measures a width at composition time, in either direction.
+    #[test]
+    fn a_block_written_once_draws_its_rule_at_the_width_of_the_frame() {
+        let mut t = plain(Transcript::default());
+        t.block(false);
+        t.write("\u{1}r\u{1}\n\u{2605} Welcome to wasm-agent!\ncwd: ~/work\n");
+        for width in [80usize, 60, 200] {
+            let rows = t.view(width, 10);
+            let rule = rows
+                .iter()
+                .find(|row| row.chars().filter(|c| *c == '\u{2500}').count() > 0)
+                .unwrap_or_else(|| panic!("no rule row at {width}: {rows:?}"));
+            assert_eq!(
+                rule.matches('\u{2500}').count(),
+                width,
+                "the rule is the frame's width at {width}, not the width it was written at: {rows:?}"
+            );
+            let count: Vec<usize> = rows
+                .iter()
+                .map(|row| row.chars().filter(|c| *c == '\u{2500}').count())
+                .filter(|n| *n > 0)
+                .collect();
+            assert_eq!(count, vec![width], "one rule, exactly the width, at {width}: {rows:?}");
+            assert!(
+                rows.iter().any(|row| row.contains("Welcome to wasm-agent")),
+                "the banner itself is drawn at {width}: {rows:?}"
+            );
+        }
+    }
+
     #[test]
     fn a_copy_icon_under_the_pointer_is_drawn_bright() {
         let mut t = plain(Transcript::default());

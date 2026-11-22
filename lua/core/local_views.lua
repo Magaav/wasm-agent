@@ -83,6 +83,11 @@ local reload = dofile("lua/core/reload.lua")
 local published = reload.state("local_views")
 if type(published.at) ~= "table" then published.at = {} end
 local published_at = published.at
+-- Which views have already said, in the node's log, that they could not be handed to the client. In the
+-- same store for the same reason: a reload of this file must not make the node log the same refusal
+-- twice.
+if type(published.reported) ~= "table" then published.reported = {} end
+local reported = published.reported
 
 -- Whether this binary has the channel at all. False is an ordinary condition, not an error.
 function M.available()
@@ -112,6 +117,38 @@ function M.publish(name, set)
   return false, tostring(problem)
 end
 
+-- A view that could not be published, said ONCE per view and ONLY where a bug is read.
+--
+-- The transcript belongs to the run, and a panel the reader did not ask for is not a failure of it:
+-- `/nodes` printed `! the run view failed: local views: /nodes was not published: line_too_long
+-- views[2].lines[3]: 3030 characters` in red, in the middle of the conversation, on every run (Victor,
+-- 21/11). The fact is still recorded, in the `[lua] ...` channel the rest of the node logs to, once per
+-- view rather than once per model round; nothing is written to the transcript, and the run continues
+-- with whatever snapshot the client already has.
+--
+-- Returns whether this call wrote the line (a test asserts the once).
+function M.report(name, problem)
+  name = tostring(name or "?")
+  if reported[name] then return false end
+  reported[name] = true
+  local text = string.format("local view %s was not published: %s", name, tostring(problem))
+  if type(host) == "table" and type(host.log) == "function" then
+    -- Redacted: the node's log carries no message text (AGENTS.md), and a Lua error can quote one.
+    local ok, redact = pcall(dofile, "lua/core/redact.lua")
+    pcall(host.log, ok and redact.text and redact.text(text) or text)
+  end
+  return true
+end
+
+-- What the chat's publish step is: hand the client the views it is missing, and report a refusal only to
+-- the log. A panel needs the raw editor (the same condition `/status`'s snapshot has), so a console
+-- without one publishes nothing. Returns how many views went out, and NOTHING for a caller to print -
+-- that is the whole point (see `M.report`).
+function M.publish_all(view, opts)
+  if not (view and view.editor and view.stdout) then return 0 end
+  return (M.refresh(opts))
+end
+
 -- Rebuild and publish the views that are missing or older than `opts.max_age`.
 --
 -- Called where this side is not blocked: at a turn's start (`opts.cached` unset - a live roster read
@@ -133,6 +170,7 @@ function M.refresh(opts)
         -- One view that cannot be built must not cost the others their snapshot: `/login` on a node with
         -- no provider state used to stop `/nodes` publishing, and the reader lost a view that worked.
         problem = problem or string.format("%s could not be built: %s", name, tostring(set))
+        M.report(name, string.format("could not be built: %s", tostring(set)))
         -- Tried: wait max_age like a success. A failure retried at every round boundary paid the whole
         -- build each round (17/11, work: /mcp refused, rebuilt every round, ~2 s per round).
         published_at[name] = now
@@ -144,6 +182,7 @@ function M.refresh(opts)
         local done, why = M.publish(name, set)
         if not done then
           problem = problem or string.format("%s was not published: %s", name, tostring(why))
+          M.report(name, tostring(why))
           published_at[name] = now
         else
           count = count + 1
@@ -156,8 +195,9 @@ end
 
 -- Forget what has been published. For tests and for a view whose data must be re-read (a rebind).
 function M.forget(name)
-  if name then published_at[name] = nil else
+  if name then published_at[name] = nil; reported[name] = nil else
     for key in pairs(published_at) do published_at[key] = nil end
+    for key in pairs(reported) do reported[key] = nil end
   end
 end
 
