@@ -126,9 +126,9 @@ no rows file at all - the whole suite runs, and the evidence says which diff fai
 time, never coverage.
 
 `scripts/lib/fast-rows.sh` is where a narrowing is stopped from meaning less than a full run: the always-on
-core rows are added whatever the request says (the row-environment probe, and `scripts/test-land.lua`), the
-contract checks inside `scripts/fast.sh` are not narrowable at all, an unknown row is a refusal by name, and an
-empty request is refused (a plan that maps nothing asks for the whole suite, never for silence).
+core rows are added whatever the request says (the row-environment probe, and the ten `scripts/test-land-*.lua`
+parts), the contract checks inside `scripts/fast.sh` are not narrowable at all, an unknown row is a refusal by
+name, and an empty request is refused (a plan that maps nothing asks for the whole suite, never for silence).
 
 **A failing row is still re-run once alone** under the machine's highest weight, and a row that passes alone
 is reported `flaky under load: <name>` and **still stops the landing** - narrowing changes what runs, never
