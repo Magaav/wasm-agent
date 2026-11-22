@@ -255,6 +255,9 @@ local CODES={
   fix='call `await sleep(ms)` with a whole number of milliseconds from 0 to 5000.'},
  codemode_sleep_too_long={message='`sleep` was asked to pause for longer than one call may ({origin}).',
   fix='`sleep` pauses at most 5000 ms. To wait for work, give the call a `wait_s` option or call `wait(op)`; `pending()` lists what is still running.'},
+ -- The per-SCRIPT cap (22/11 review, MUST): 5 s per call bounds one sleep, not a loop of them.
+ codemode_sleep_total_too_long={message='`sleep` would take this script past the total it may pause, so the call was refused before it paused ({origin}).',
+  fix='this script has paused 30 s in total, which is the cap for one script. A pause spaces retries; to wait for work, give the call its `wait_s` option, or call `wait(op)` on a call that answered a handle.'},
  codemode_identifier_collision={message='two tool names become the same script identifier, so `tools.{input}` would be ambiguous ({origin}).',
   fix='call the ambiguous target by its exact name through `searchTools("select:<name>")`, or use the other tool of the pair.'},
  tool_definition_changed={message='the definition of {tool} changed after the script started, so the arguments it validated are no longer the ones the tool takes ({origin}).',

@@ -262,6 +262,11 @@ end
 -- really does sleep the host - rust/wa-capabilities/src/host.rs host.sleep). A longer wait belongs to a
 -- call's own wait_s, where a managed operation runs while the script waits (22/11).
 local SLEEP_MS_MAX = 5000
+-- ...and a script's pause in TOTAL is bounded too: one CALL may sleep 5 s, one SCRIPT may sleep 30 s.
+-- Without this cap the per-call bound said nothing - 100 calls of 5 s held the node's thread for eight
+-- minutes (22/11 review, MUST). The count lives on this script's own handle table, so a new script
+-- starts at zero and neither loop can be talked into a longer one.
+local SLEEP_TOTAL_MS = 30000
 -- The node's own globals, answered here because they read the living registry and the retained
 -- evidence: `capabilities()`/`describe()` are the host capability inventory, `showCall` and
 -- `describeTool("showCall")` are the presentation's.
@@ -306,9 +311,17 @@ local function host_global(name, params, calls, selected, lookup, ctx, journal, 
     if asked > SLEEP_MS_MAX then
       return { error = 'codemode_sleep_too_long' }, false
     end
+    -- The pause of THIS SCRIPT, not of this call (MUST, 22/11 review): a cap per call says nothing
+    -- about a loop of them. Past the total, the next sleep is refused by name; the fix says where the
+    -- count stands and what to use instead - a pause spaces retries, it never waits for work.
+    local spent = tonumber(popts and popts.slept_ms) or 0
     local slept = math.floor(asked)
+    if spent + slept > SLEEP_TOTAL_MS then
+      return { error = 'codemode_sleep_total_too_long', paused_ms = spent, asked_ms = slept }, false
+    end
     if type(host.sleep) == 'function' then pcall(host.sleep, slept) end
-    return { slept_ms = slept }, true
+    if popts then popts.slept_ms = spent + slept end
+    return { slept_ms = slept, paused_ms = spent + slept }, true
   end
   -- `describeTool(name)` is the hidden alias of `searchTools("select:"..name)[0]`, and `searchTools`
   -- itself is answered here as well when the component hands a call back: one implementation of every

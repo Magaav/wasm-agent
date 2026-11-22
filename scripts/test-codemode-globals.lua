@@ -108,4 +108,32 @@ check(r.ok == false and tostring(r.error):find('^tools%.run failed: SyntaxError'
 check(occurrences(fix, 'No call had succeeded yet.') == 1,
   'and "No call had succeeded yet." is printed once (' .. occurrences(fix, 'No call had succeeded yet.') .. '): ' .. shown(r))
 
+-- 5. The TOTAL pause of one script is bounded (MUST, 22/11 review): 5 s per call bounded one sleep, not
+-- a loop of them, and a pause is not charged to the computing budget - so without this cap two hundred
+-- calls of 5 s would hold the node's thread. The 7th call of 5000 ms is the one past 30 s.
+local started = os.time()
+r = run('for (let i = 0; i < 8; i++) { await sleep(5000); } return `slept`;')
+local wall = os.time() - started
+check(r.ok == false and tostring(r.code) == 'codemode_sleep_total_too_long',
+  'a loop of sleep(5000) is refused on the call past 30 s: ' .. shown(r))
+check(tostring(r.fix):find('30 s in total', 1, true) ~= nil and tostring(r.fix):find('wait_s', 1, true) ~= nil,
+  'and its fix says how much this script has paused and what to use instead: ' .. shown(r))
+check(wall >= 25 and wall < 40, 'the six sleeps it DID run took about 30 s and no more (' .. wall .. ' s)')
+
+-- 6. A sleeping script is still a cancelled one: the loop checks the run between two calls, so the
+-- cancel arrives at the next iteration instead of after the last sleep.
+local real_cancel = host.run_cancelled
+local asked = 0
+local swapped = pcall(function() host.run_cancelled = function() asked = asked + 1; return json.encode({ cancelled = asked > 2 }) end end)
+if swapped and host.run_cancelled ~= real_cancel then
+  r = run('await sleep(200); await sleep(200); await sleep(200); return `done`;')
+  check(r.ok == false and tostring(r.error):find('run_cancelled', 1, true) ~= nil,
+    'a cancelled run ends a script that is sleeping: ' .. shown(r))
+  check(asked >= 2, 'and the loop asked between the sleeps (' .. asked .. ' times)')
+  pcall(function() host.run_cancelled = real_cancel end)
+else
+  pcall(function() host.run_cancelled = real_cancel end)
+  print('SKIP codemode-globals: this node does not let a test replace host.run_cancelled, so cancellation between two sleeps cannot be driven here')
+end
+
 print(json.encode({ ok = true, checks = checks }))

@@ -62,6 +62,7 @@ return {
   ['codemode_sandbox']='rust/wa-capabilities/src/quickjs.rs',
   ['codemode_sleep_requires_milliseconds']='codemode.lua',
   ['codemode_sleep_too_long']='codemode.lua',
+  ['codemode_sleep_total_too_long']='codemode.lua',
   ['codemode_source_required']='codemode.lua',
   ['codemode_store_protocol_invalid']='codemode.lua',
   ['codemode_target_not_available']='codemode.lua',

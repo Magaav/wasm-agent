@@ -184,6 +184,14 @@ Measured by running each against the base worktree `/tmp/base-ee38` with the sam
 11. `atob` on text that is not base64: "atob takes base64 text: A-Z, a-z, 0-9, + and / with = padding,
     and nothing else (...the runtime's own sentence...)."
 
+12. The per-SCRIPT pause cap (22/11 review, MUST): message `sleep` would take this script past the total it
+    may pause, so the call was refused before it paused (this node).
+    fix: this script has paused 30 s in total, which is the cap for one script. A pause spaces retries;
+    to wait for work, give the call its `wait_s` option, or call `wait(op)` on a call that answered a
+    handle. The code is `codemode_sleep_total_too_long`, not `codemode_sleep_too_long`, because that name
+    already means the per-CALL cap (30e60405): one word must not mean 5 s and 30 s at once.
+13. The `sleep` answer now carries the script's own total: `{slept_ms, paused_ms}`, so a script can read how
+    much of its 30 s is spent before it is refused.
 ## Not done, and what is unknown
 
 * The `remote` schema's stale "effects run here, outside" sentence (`lua/core/tools.lua:559`) is left as
