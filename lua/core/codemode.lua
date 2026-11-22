@@ -257,6 +257,16 @@ local function global_params(raw)
   return json.decode(text)
 end
 
+-- The longest a script may pause in one sleep(ms). A pause is not work, so it is not charged to the
+-- script's computing budget; the cap is what keeps one script from holding the node's thread (a pause
+-- really does sleep the host - rust/wa-capabilities/src/host.rs host.sleep). A longer wait belongs to a
+-- call's own wait_s, where a managed operation runs while the script waits (22/11).
+local SLEEP_MS_MAX = 5000
+-- ...and a script's pause in TOTAL is bounded too: one CALL may sleep 5 s, one SCRIPT may sleep 30 s.
+-- Without this cap the per-call bound said nothing - 100 calls of 5 s held the node's thread for eight
+-- minutes (22/11 review, MUST). The count lives on this script's own handle table, so a new script
+-- starts at zero and neither loop can be talked into a longer one.
+local SLEEP_TOTAL_MS = 30000
 -- The node's own globals, answered here because they read the living registry and the retained
 -- evidence: `capabilities()`/`describe()` are the host capability inventory, `showCall` and
 -- `describeTool("showCall")` are the presentation's.
@@ -287,6 +297,31 @@ local function host_global(name, params, calls, selected, lookup, ctx, journal, 
     end
     if type(value) ~= 'table' then return { error = 'codemode_global_not_available' }, false end
     return value, value.error == nil
+  end
+  -- `sleep(ms)`: the one pause a script can ask for (22/11 measured over the retained ledger:
+  -- `ReferenceError: setTimeout is not defined` was the largest missing-global class - 40 recorded
+  -- failures - and the guest has no timers). The pause happens in the HOST, where the sandbox's
+  -- computing clock is stopped (rust/wa-capabilities/src/quickjs.rs pause/resume), so a pause is never
+  -- charged to the script's budget; it is capped, and a longer wait is a call's own `wait_s`.
+  if name == 'sleep' then
+    local asked = type(params) == 'table' and tonumber(params[1]) or nil
+    if not asked or asked ~= asked or asked < 0 then
+      return { error = 'codemode_sleep_requires_milliseconds' }, false
+    end
+    if asked > SLEEP_MS_MAX then
+      return { error = 'codemode_sleep_too_long' }, false
+    end
+    -- The pause of THIS SCRIPT, not of this call (MUST, 22/11 review): a cap per call says nothing
+    -- about a loop of them. Past the total, the next sleep is refused by name; the fix says where the
+    -- count stands and what to use instead - a pause spaces retries, it never waits for work.
+    local spent = tonumber(popts and popts.slept_ms) or 0
+    local slept = math.floor(asked)
+    if spent + slept > SLEEP_TOTAL_MS then
+      return { error = 'codemode_sleep_total_too_long', paused_ms = spent, asked_ms = slept }, false
+    end
+    if type(host.sleep) == 'function' then pcall(host.sleep, slept) end
+    if popts then popts.slept_ms = spent + slept end
+    return { slept_ms = slept, paused_ms = spent + slept }, true
   end
   -- `describeTool(name)` is the hidden alias of `searchTools("select:"..name)[0]`, and `searchTools`
   -- itself is answered here as well when the component hands a call back: one implementation of every
@@ -604,6 +639,8 @@ local function native_run(policy,memory,args,role,ctx,catalog,current_catalog,di
   -- or stops it. Both are registered with `spread` so `wait(op, {wait_s:120})` arrives with both
   -- arguments (`lua/core/codemode_pending.lua`).
   {name='wait',spread=true},{name='cancel',spread=true},{name='pending',spread=true},
+  -- The one pause: in the host, so it spends none of the script's computing budget (see host_global).
+  {name='sleep',spread=true},
   {name='describeTool',spread=false},{name='showCall',spread=false},
   -- Introspection of what this node can do, for a workflow that would otherwise guess. They read
   -- the host capability registry and nothing else: no authority moves, no effect is admitted.
@@ -867,6 +904,49 @@ local function script_line(stack,source)
   end
  end
 end
+-- A MISSING GLOBAL IS ONE CLASS, AND ITS FIX LINE SAYS WHY (22/11). Counted over the retained ledger
+-- (~/.wasm-agent/tool-results, every `run` result whose fix line came from this file): setTimeout 40,
+-- Buffer 17, HOME 16, location 12, require 6 - and btoa/atob 0: those two are already in the guest
+-- (the pinned QuickJS), which is why they are not in this table; the harness only wraps their message. A name below is not a typo:
+-- the script is running in the wrong runtime, so "Change line N" (which names where, not why) is
+-- replaced by the way that exists here. The table is an ALLOW-LIST on purpose - a name it does not
+-- hold (a script's own variable, `raw`, `wt`) keeps the plain sentence, because nothing here can say
+-- what the script meant (AGENTS.md: an allow-list for anything a refusal depends on).
+local NO_TIMERS = 'There are no timers in this sandbox: pause with await sleep(ms) - 0 to 5000 ms, in the '
+  ..'host, so it spends none of the script\'s budget - and wait on work with the call\'s wait_s option or '
+  ..'wait(op, {wait_s}).'
+local NO_NODE = 'This is not Node: a script has no require, module, process or fs. Run a command with '
+  ..'await tools.bash({command: "..."}), and read, write or search files with tools.read, tools.write, '
+  ..'tools.ls and tools.grep.'
+local NO_BROWSER = 'There is no browser in a script: no window, document, location or navigator. Read this '
+  ..'node with tools.read, tools.ls and tools.bash, get its time with tools.time, and the user\'s own browser '
+  ..'is the client tool.'
+local NO_NET = 'A script has no network: fetch an address with await tools.bash({command: "curl -s <url>"}), '
+  ..'and reach another node with the nodes and remote tools - a remote call is how a script runs a tool on a peer.'
+local GLOBAL_FIX = {
+  Buffer = 'There is no Buffer in this sandbox: a file body is a string, so tools.write({path, content}) '
+    ..'writes it here and tools.remote({node: "<name>", capability: "write", path: "<path>", content: "<text>"}) '
+    ..'puts it on a peer in one call. Bytes that must not pass through JavaScript go in the run call\'s raw '
+    ..'argument (raw: {script: "..."}) and reach the script as raw.script. Base64 is built in: btoa, atob.',
+  HOME = 'There are no environment variables in a script: read one with '
+    ..'await tools.bash({command: "printenv HOME"}) - a command runs with this node\'s environment.',
+  setTimeout = NO_TIMERS, setInterval = NO_TIMERS, clearTimeout = NO_TIMERS, clearInterval = NO_TIMERS,
+  setImmediate = NO_TIMERS,
+  require = NO_NODE, module = NO_NODE, exports = NO_NODE, process = NO_NODE, fs = NO_NODE, path = NO_NODE,
+  __dirname = NO_NODE, __filename = NO_NODE,
+  location = NO_BROWSER, window = NO_BROWSER, document = NO_BROWSER, navigator = NO_BROWSER,
+  localStorage = NO_BROWSER, alert = NO_BROWSER,
+  fetch = NO_NET, XMLHttpRequest = NO_NET, WebSocket = NO_NET,
+}
+-- The sentence a fix ends with is printed ONCE (22/11). A tool's own fix can already carry it, and a
+-- nested refusal carries one out, so the model read "... run the script again. No call had succeeded
+-- yet. No call had succeeded yet." - the last sentence twice, the second adding nothing.
+local function fixed_tail(fix, tail)
+ if type(fix)~='string' then return tail end
+ if type(tail)~='string' or tail=='' then return fix end
+ if fix:find(tail,1,true) then return fix end
+ return fix..tail
+end
 local function explain(result,source,budget)
  if type(result)~='table' or result.ok~=false or type(result.error)~='string' or type(source)~='string' then return result end
  local raw=result.error
@@ -904,7 +984,7 @@ local function explain(result,source,budget)
       ..' it was given (or the run was stopped)')
   out.code='TimeoutError'
   out.message=out.error
-  out.fix='Split the work across scripts: waiting on a tool is not charged to the script. '..(#ran>0 and ('Already done, not undone: '..table.concat(ran,', '):sub(1,200)..'.') or 'No call had succeeded yet.')
+  out.fix=fixed_tail('Split the work across scripts: waiting on a tool is not charged to the script. ',(#ran>0 and ('Already done, not undone: '..table.concat(ran,', '):sub(1,200)..'.') or 'No call had succeeded yet.'))
   out.input=out.input or 'codemode'
   return out
  end
@@ -950,7 +1030,18 @@ local function explain(result,source,budget)
    ..'JavaScript'
    ..(line and ('. Change line '..line..' and run the script again. ') or '. ')
  end
- out.fix=((fix and (fix..' ') or (syntax_fix or (line and ('Change line '..line..' and run the script again. ') or 'Correct the script and run it again. ')))..before):sub(1,600)
+ -- A missing global: the sentence names the way that exists here, and the line, in place of the
+ -- generic "Change line N" (GLOBAL_FIX above). A name the allow-list does not hold keeps the generic
+ -- sentence - nothing here could say what a script's own typo meant.
+ local global_fix
+ if name=='ReferenceError' then
+  local missing=message:match('^([%w_]+) is not defined')
+  local said=missing and GLOBAL_FIX[missing]
+  if said then global_fix=said..(line and (' Change line '..line..' and run the script again. ') or ' ') end
+ end
+ local base=fix and (fix..' ') or syntax_fix or global_fix
+  or (line and ('Change line '..line..' and run the script again. ')) or 'Correct the script and run it again. '
+ out.fix=fixed_tail(base,before):sub(1,600)
  out.input=out.input or 'codemode'
  out.code=code or name
  out.line=line
