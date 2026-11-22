@@ -140,4 +140,49 @@ ok
 copies="$(grep -rlF "s/^\\(scripts\\/test-" scripts 2>/dev/null | grep -v '^scripts/lib/fast-rows.sh$' || true)"
 [ -z "$copies" ] || fail "a second copy of the row inventory lives in: $copies"
 ok
+
+# ---- 8. the WHOLE-TREE rows are never dropped, and the list keeps itself honest ------------------------
+# 21/11: change/wa-fonts added a refusal code, its narrowed gate never ran scripts/test-refusal-contract.lua,
+# and main was red from bfad4f8f for the next landings. A row whose verdict depends on files it does not
+# name cannot be reached by path-based narrowing, so it must be a core row whatever the request says.
+core="$(wa_fast_core_rows)"
+grep -qx scripts/test-refusal-contract.lua <<< "$core" || fail "the refusal inventory row is not a never-dropped row: the 21/11 red is back"
+ok
+grep -qx scripts/test-tool-schema-fidelity.lua <<< "$core" || fail "the every-tool schema row is not a never-dropped row"
+ok
+grep -qx scripts/test-codemode-parity.lua <<< "$core" || fail "the catalogue-parity row is not a never-dropped row"
+ok
+# Every core row is a row this runner can execute (a misspelling here would silently drop the guarantee),
+# measured against this tree's REAL row inventory (the list the landing planner draws from), not against
+# the three-row fixture above: a request for one ordinary row still runs every never-dropped row.
+probe_row="$(grep -vxF -f <(wa_fast_core_rows) <<< "$cand" | head -1)"
+[ -n "$probe_row" ] || fail "this tree has no ordinary row to narrow to: the check below would be vacuous"
+printf '%s\n' "$probe_row" > "$WORK/request-core"
+narrowed="$(wa_fast_row_filter "$WORK/candidates-real" "$WORK/request-core" 2>/dev/null)" || fail "a request for $probe_row was refused"
+while IFS= read -r row; do
+  [ -z "$row" ] && continue
+  grep -qxF "$row" <<< "$cand" || fail "a never-dropped row is not a row this run can execute: $row"
+  # And it is never lost to a narrowing: a request for some other row still runs every core row.
+  printf '%s\n' scripts/test-alpha.lua > "$WORK/request-core"
+  # ...and narrowing to one ordinary row did not drop it.
+  grep -qxF "$row" <<< "$narrowed" || fail "a narrowed run dropped a never-dropped row: $row"
+done <<< "$core"
+ok
+# THE PAIRING, proved with the registry rather than by hand: a row that reads a path scripts/generators.txt
+# declares as GENERATED depends on a generator's output, so it is a whole-tree row and must be core. This is
+# what keeps the list honest when a generator is added later (scripts/regenerate.sh --outputs is the same
+# list the landing reads).
+outputs="$(bash "$ROOT/scripts/regenerate.sh" --outputs 2>/dev/null)"
+[ -n "$outputs" ] || fail "scripts/regenerate.sh --outputs answers nothing: the pairing below would be vacuous"
+ok
+while IFS= read -r path; do
+  [ -n "$path" ] || continue
+  readers=$(grep -lF -- "$path" scripts/test-*.lua 2>/dev/null || true)
+  [ -n "$readers" ] || fail "no row reads the generated $path: the generator has no check row"
+  for row in $readers; do
+    grep -qxF "$row" <<< "$core" \
+      || fail "$row reads the generated $path but is not a never-dropped row (a round that regenerates it elsewhere would never run this row)"
+  done
+done <<< "$outputs"
+ok
 echo "fast-rows ok ($checks checks)"

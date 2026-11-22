@@ -143,6 +143,13 @@ end
 -- it declines (exits nothing) only for the --node form, which is why this door exists. The gate is the word
 -- itself: nothing else in the CLI may pay for reading this module.
 if command == "release" then
+  -- `wa release cut`: the RELEASE loop (FACTORY.md rule 1) - a signed release from main's tip, rolled to the
+  -- fleet. It is lua/core/land.lua's state machine with nothing to land, so that module answers it.
+  if args[2] == "cut" then
+    local code = dofile("lua/core/land.lua").release_cli(args)
+    if code and code ~= 0 then os.exit(code) end
+    return
+  end
   local trust = dofile("lua/core/release_trust.lua")
   local code = trust.cli(args)
   if code ~= nil then os.exit(code) end

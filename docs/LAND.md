@@ -159,6 +159,25 @@ The report ends with a `## cost` table: the path taken, every step's seconds, th
 expected, and the average of the finished runs in the journal. A number nobody compares is a number nobody can
 improve; the point of the plan is that "~40 minutes every round" became a measurement per round, per path.
 
+## The release loop: `wa release cut`
+
+A landing can end at main (`wa land --branches <b> --until main`: exit 0, result `stopped_at_until`, and the
+last lines say the landing is complete). A release is then its own command, cut from **origin/main's tip**:
+
+    wa release cut --dry-run      # the plan, and "signing: ready|not ready (<why>)", "publishing: ...", "ancestry: ..."
+    wa release cut                # gate (every check) -> artifacts -> sign -> ship -> publish -> deploy
+    wa release cut --no-deploy    # everything but the ring
+    wa release cut --run <id> --resume
+
+It is this same machine with nothing to land (`wa land --release` is the same door): `collect` reads main's
+tip into a detached worktree, `review`, `merge`, `push` and `main` are recorded `skipped` ("nothing to land"),
+the gate is never narrowed (a check that already passed on the same tree object with the same command is kept),
+and the rest runs as in a landing. It pushes no landing branch and moves no main. Before the journal, the fetch
+and the build it asks three questions and refuses by name with the fix: can the signer reach the vault, is `gh`
+signed in where the publish runs, and does main contain the previous release from a full (not shallow) history.
+A bare `wa land --resume` never continues a release run, and a bare `wa release cut --resume` never continues a
+landing.
+
 ## Resumable, and what it refuses to repeat
 
 The journal is `<config>/land/<run>/journal.json`; each step's evidence is
