@@ -36,7 +36,7 @@ each line back into `pending_settled` / `pending_backgrounded`. A note set large
 (measured note sizes: `pending_backgrounded` median 56 B, max 161; `pending_settled` median 171 B,
 p90 335, max 3,601). Stored views are not rewritten.
 
-Test: `scripts/test-run-pending-header.lua` (17 checks, real sandbox, real handles, own scratch home;
+Test: `scripts/test-run-pending-header.lua` (19 checks, real sandbox, real handles, own scratch home;
 it is in the fast path because it is not in `scripts/fast-path.exclude` and the fast path runs every
 `scripts/test-*.lua` not listed there).
 
@@ -99,8 +99,10 @@ this branch makes; the reference stays. Nothing in `lua/core/tool_output.lua` ch
   the host at start, so run alone the default 300 s makes "timeout is failure" unsatisfiable. It now
   re-executes itself once through the binary it is already inside (`WA_FAST_BIN`, which
   `scripts/fast.sh` gives every row) with `WASM_AGENT_EXEC_TIMEOUT_SECONDS=2`, and prints a named
-  `SKIP` when there is no such binary. Verified alone in the fast-path shape: "exec timeout ok (child
-  node with a 2 s deadline)". `scripts/test.sh:2118` still runs it with the variable set.
+  `SKIP` when there is no such binary; `285b7572` adds `host.runtime_info().binary_path` as the second
+  way to find it, so the row is self-contained wherever a node can run it. Verified alone in the fast-path
+  shape, with and without `WA_FAST_BIN`: "exec timeout ok (child node with a 2 s deadline)".
+  `scripts/test.sh:2118` still runs it with the variable set.
 - `scripts/test-envelope-iteration.lua` and `scripts/test-envelope-outcomes.lua` — **stale**, and not
   by a flake: `tools.envelope('master',ctx)` returns exactly **one** declared tool (`run`) with
   `WASM_AGENT_BOOTSTRAP_MODE` unset **and** with it set to `lean` (measured). So "lean declarations"
@@ -127,21 +129,32 @@ reverted: with its capture skipped it still fails on the retired refusal, above.
    raw argument (raw: {script: "..."}) and pass raw.script to tools.bash, so the bytes never pass
    through JavaScript. Change line N and run the script again. The script did not compile, so nothing
    ran."
-3. The named skip of the timeout row: "SKIP test-exec-timeout: this row needs the node started with
-   WASM_AGENT_EXEC_TIMEOUT_SECONDS=2 (its deadline is read at start); scripts/fast.sh passes WA_FAST_BIN
-   and runs it, scripts/test.sh runs it with the variable set".
+3. The named skip of the timeout row (reachable only when there is no binary to re-execute with at
+   all): "SKIP test-exec-timeout: this row needs the node started with WASM_AGENT_EXEC_TIMEOUT_SECONDS=2
+   (its deadline is read at start) and no binary to re-execute itself with (neither WA_FAST_BIN nor
+   host.runtime_info's binary_path); scripts/test.sh runs it with the variable set".
 4. The three STALE entries in `scripts/fast-path.exclude` (operator-facing comments).
 
 ## Checks run
 
 - Each new or changed row alone, through the tree's own `wa` (release build of this branch):
-  `test-run-pending-header` 17, `test-run-syntax-fix` 27, `test-native-raw-vars` 22,
+  `test-run-pending-header` 19, `test-run-syntax-fix` 27, `test-native-raw-vars` 22,
   `test-exec-timeout` (child node), `test-run-view` 17, `test-session-vars` 48,
   `test-codemode-wait-shape` 25, `test-codemode-pending` 92, `test-whatsapp-names` 8,
   `test-handle-wake` 16, `test-codemode-default` 39, `test-codemode-presentation` 46,
   `test-operation-cpu-priority` 18 — all green.
-- `scripts/test-discriminates.sh 12fd4c12`: result recorded in the section below.
-- Fast path (`WA_FAST_ROWS` on the touched rows): result recorded below.
+- `scripts/test-discriminates.sh 12fd4c12` (final HEAD `7e45765f`; `rc=0`): **3 discriminating, 0
+  blocking, 1 unchanged-verdict**. `test-native-raw-vars`, `test-run-pending-header` and
+  `test-run-syntax-fix` each failed on the base's code with the base's own error (`a run without raw
+  still binds raw, on the opening line: return 1`; `the view opens with the status line, not a JSON
+  envelope`; `the fix names the cause: Change line 2 and run the script again`). `test-exec-timeout` is
+  `unchanged-verdict` - the row was made runnable, the code it measures was not changed, so it passes on
+  the base too and proves nothing about a fix; that is the tool's own rule and it does not block.
+- Fast path, narrowed to the 13 touched rows (`WA_FAST_ROWS`, `--jobs 4`, under the suite lock):
+  **`fast path ok (99 checks, 0 failed, 1 skipped, 367s)`**; 27 Lua rows ran (the 13 plus the
+  never-dropped core rows) and every one passed, `test-exec-timeout` included. The one skip is
+  `test-status-icon-metrics`, a glyph-measurement skip unrelated to this branch (named in
+  `wa-fast-result.json`).
 
 ## Not done, and what would block it
 
