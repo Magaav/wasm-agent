@@ -10,11 +10,19 @@
 -- says SKIP by name - a skip is never a pass (scripts/fast.sh counts it and prints the reason).
 local json = dofile("lua/vendor/json.lua")
 if tostring(host.getenv("WASM_AGENT_EXEC_TIMEOUT_SECONDS") or "") ~= "2" then
-  local bin = tostring(host.getenv("WA_FAST_BIN") or "")
+  -- Which binary to re-execute: the one the fast path names, else the one this node IS (host.runtime_info
+  -- reports the path it was started from), so the row is self-contained wherever a node can run it.
+  local info = {}
+  if type(host.runtime_info) == "function" then
+    local ok, raw = pcall(host.runtime_info)
+    if ok and type(raw) == "string" then local decoded = json.decode(raw); info = type(decoded) == "table" and decoded or {} end
+    if ok and type(raw) == "table" then info = raw end
+  end
+  local bin = tostring(host.getenv("WA_FAST_BIN") or info.binary_path or "")
   if bin == "" then
     print("SKIP test-exec-timeout: this row needs the node started with WASM_AGENT_EXEC_TIMEOUT_SECONDS=2 "
-      .. "(its deadline is read at start); scripts/fast.sh passes WA_FAST_BIN and runs it, scripts/test.sh "
-      .. "runs it with the variable set")
+      .. "(its deadline is read at start) and no binary to re-execute itself with (neither WA_FAST_BIN nor "
+      .. "host.runtime_info's binary_path); scripts/test.sh runs it with the variable set")
     return
   end
   local root = tostring(host.getenv("WASM_AGENT_LUA_ROOT") or "")
