@@ -25,22 +25,34 @@ local function has(text, needle) return tostring(text):find(needle, 1, true) ~= 
 local function visible(text) return (tostring(text):gsub("\27%[[%d;]*m", "")) end
 
 -- The escapes, spelled once. 00ff41 is the matrix green; d77757 is the role this change must not move.
-local MATRIX = "\27[38;2;0;255;65m"
+local MATRIX = "\27[38;2;0;215;95m"
 local ACCENT = "\27[38;2;215;119;87m"
 local STAR, SPARK = "\226\156\187", "\226\156\182"
 
 -- ---- 1. the colours -------------------------------------------------------------------
 
-ok(view_lib.PALETTE.matrix == "00ff41", "the matrix green is a palette entry of its own (00ff41)")
+-- FINAL colour (Victor, 22/11 21:33Z): xterm 41, #00d75f - not the 00ff41 this started as.
+ok(view_lib.PALETTE.matrix == "00d75f", "the matrix green is a palette entry of its own, xterm 41 (#00d75f)")
 ok(view_lib.PALETTE.accent == "d77757", "and accent is still the warm accent it was")
-ok(view_lib.style("matrix") == MATRIX, "the role paints 24-bit 0;255;65")
+-- The product version is ONE constant, in the module that owns "what version is this"
+-- (lua/core/build_identity.lua) - never a second literal in the view, and never the alpha tag's number.
+local identity = dofile("lua/core/build_identity.lua")
+ok(identity.PRODUCT_VERSION == "1.0", "the product version is one constant and it is 1.0")
+ok(not has(view_lib.banner({ live = true, limit = 100 }), "1.0"),
+  "cli_view composes no product version of its own: it draws the one it is handed")
+ok(not has(tostring(identity.PRODUCT_VERSION), "alpha"), "and it is not derived from the public alpha tag")
+
+ok(view_lib.style("matrix") == MATRIX, "the role paints 24-bit 0;215;95, xterm 41")
 
 -- The welcome line: its star, and only its star, is green.
-local banner = view_lib.banner({ live = true, version = "23791f56", limit = 100 })
+local banner = view_lib.banner({ live = true, product = "1.0", version = "23791f56", limit = 100 })
 local star_row = banner:match("[^\n]*Welcome to[^\n]*") or ""
 ok(has(star_row, MATRIX .. STAR), "the star of the welcome line is the matrix green: " .. star_row:sub(1, 40))
 ok(not has(star_row, ACCENT), "and it is no longer the accent: " .. star_row:sub(1, 40))
-ok(has(visible(banner), "Welcome to wasm-agent! v23791f56"), "the line's text is exactly what it was")
+ok(has(visible(banner), "Welcome to wasm-agent! v1.0 \194\183 v23791f56"),
+  "the title is the product version, a dot, then the build's own label (Victor, 22/11)")
+ok(not has(visible(view_lib.banner({ live = true, version = "23791f56", limit = 100 })), "v1.0"),
+  "a caller with no product version says nothing rather than inventing one")
 
 -- The run status row: the mark that travels to the host carries the colour itself (the host draws the
 -- string it is handed), so this is the whole of "the spinning star on the status row is green".
@@ -142,13 +154,17 @@ else
 -- the console has now (the marker is what the host's transcript expands at draw time).
 local painted = recorder()
 local plain = view_lib.new({ out = painted.out, live = true, limit = 100 })
-plain:welcome({ live = true, limit = 100, version = "23791f56", workspace = "/tmp", model = "local mode" })
+plain:welcome({ live = true, limit = 100, product = "1.0", version = "23791f56", workspace = "/tmp",
+  model = view_lib.model_line("local mode (no model configured)", "high") })
 local block = plain:welcome_painted()
 ok(type(block) == "string", "the view can hand its block over")
 local first = visible(block:match("^([^\n]*)"))
 ok(first == string.rep("\226\148\128", 100), "the rule is the console's width, not the transcript's marker")
 ok(has(block, MATRIX .. STAR), "and the star is the green one in the block too")
-ok(has(visible(block), STAR .. " Welcome to wasm-agent! v23791f56"), "with the line's words unchanged")
+ok(has(visible(block), STAR .. " Welcome to wasm-agent! v1.0 \194\183 v23791f56"),
+  "with the title exactly as the view draws it")
+ok(has(visible(block), "model: local mode (no model configured) \194\183 reasoning high"),
+  "and the model line with one space on each side of its dot")
 ok(not block:find("\1r\1", 1, true), "no rule marker survives into what the opening draws")
 
 end

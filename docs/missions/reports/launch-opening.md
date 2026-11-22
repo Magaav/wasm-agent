@@ -177,6 +177,60 @@ binary - and `skipped` for the Rust row). The hand measurement that replaces it 
 tree + base binary answer `opening: 7 ok, 10 failed`, and the pty row compares this tree's `opening = off`
 screen with the BASE binary's screen when `WA_BASE_BIN` is set (green).
 
+## ADDED 22/11 21:33Z: the two text changes, and the colour FINAL at xterm 41
+
+### The product version in the title line
+
+The welcome line is now `✻ Welcome to wasm-agent! v1.0 · v<sha>`: the product version, a space-dot-space,
+then the build's own label as it was.
+
+**Where the constant lives:** `lua/core/build_identity.lua`, `M.PRODUCT_VERSION = "1.0"` (line 42). It lives
+there because that module already owns the question "what version is this?" and the *difference between a
+product version and a build's identity* - which it now spells out beside the constant, so the two can never
+be confused again. It is a LITERAL on purpose: the public tags are `v0.1.0-alpha.N` and the crates say
+`0.1.0`, and Victor chose 1.0 for the product; deriving it from the alpha tag would have been the exact
+mistake the module exists to prevent. The release step owns that one line from now on - nothing else in the
+tree spells the number, and `scripts/test-opening.lua` asserts both that it is 1.0 and that it carries no
+`alpha`.
+
+The tree had NO product-version constant before this: `build_identity` carries `crate_version` (0.1.0, read
+from the binary and explicitly never the identity) and `release.parse_version` parses tags, and neither is a
+product version.
+
+Composition: `M.banner` draws `paint(STAR, "matrix") .. " Welcome to " .. bold("wasm-agent") .. "!"`, then
+` v<product>`, then ` · `, then `v<label>` - each piece from `opts`, so the view composes no number of its own
+(a caller that passes no product gets today's `! v<sha>`, which a test pins). `lua/core/chat.lua` passes
+`product = build_identity.PRODUCT_VERSION` beside `version = build_identity.label()`.
+
+### The model line: one space on each side of the dot
+
+`deepseek-v4.1-flash @ http://127.0.0.1:8810/opencode-go/v1 · reasoning high` - it had two spaces on each
+side. The string was composed inline in `lua/core/chat.lua` (the only place that composed it, measured with
+`rg` over `lua/core`); it is now `cli_view.model_line(mode, reasoning)`, one composer beside the box that
+draws it, and `chat.lua` calls it. `scripts/test-cli-view.lua` pins the exact string, that no double space
+survives in it, and that a provider with no reasoning level gets no dangling dot (`""` and `nil`).
+
+### The colour, FINAL
+
+The star is **xterm 41, `#00d75f`**, not the `00ff41` this branch started from (Victor, 22/11 21:33Z):
+`PALETTE.matrix = "00d75f"` (`lua/core/cli_view.lua:104`) and `wa_term::opening::MATRIX =
+"\x1b[1;38;2;0;215;95m"`, so the star that LANDS in the animation is the star the finished header keeps.
+`scripts/test-opening.lua` asserts the hex, the role's 24-bit escape, the star of the welcome line and every
+`marks` frame; the animator's own unit test asserts the star cell's SGR. The rain's trail ramp is its own
+ramp (it fades through darker greens) and was not moved.
+
+Tests, as they stand after this addition: `scripts/test-opening.lua` **39 checks**, `scripts/test-cli-view.lua`
+**557 checks**, `rust/wa-term` 194 + 4 + **5 pty rows** + 1, all green. In the pty row the screen comparison
+blanks everything after `Welcome to wasm-agent!` (two binaries cannot share a commit, and the product version
+is still compared) and collapses the spaces around `·` (the one string this change edits), so parity with the
+base binary is still a whole-screen comparison of everything else - measured green against `23791f56`.
+
+One thing found and NOT touched, measured on the base as well: `scripts/test-cli-resize.lua:94` and
+`scripts/test-run-live.lua` contain the byte pair `\x0194\x0183` where a `·` was meant - mojibake from an
+earlier patch, identical on `23791f56`, so it is named here and left alone. `scripts/test-cli-input.lua`
+answers `5 failed of 24` on BOTH trees (it is already in `scripts/fast-path.exclude`).
+
+
 ## Texts to approve
 
 No user-visible text is added: the animation draws the existing header (its words, its version, its
@@ -187,11 +241,20 @@ rule) and glyphs from the alien table. The new operator-facing names, verbatim:
 3. The refusal reasons `host.opening_start` can answer: `no_console`, `no_editor`, `too_small`,
    `already_playing`, `draft`.
 4. The new host capabilities: `opening_start`, `opening_header`.
+### Texts this addition changes (verbatim)
+
+5. The title line: `✻ Welcome to wasm-agent! v1.0 · vc6f890e3` (was `✻ Welcome to wasm-agent! vc6f890e3`).
+6. The model line: `deepseek-v4.1-flash @ http://127.0.0.1:8810/opencode-go/v1 · reasoning high`
+   (was `... /v1  ·  reasoning high`, two spaces on each side).
+7. The palette entry `matrix`, FINAL at `00d75f` (xterm 41).
+
 
 ## Files
 
 `lua/core/cli_view.lua` (palette entry, the star, the marks, the fallback spinner, `M.opening`,
-`METHODS:welcome_painted`), `lua/core/chat.lua` (start the opening, hand it the painted block),
+`M.model_line`, `METHODS:welcome_painted`), `lua/core/chat.lua` (start the opening, hand it the painted block,
+pass the product version, compose the model line through `cli_view.model_line`), `lua/core/build_identity.lua`
+(`M.PRODUCT_VERSION`, the one place the product version is spelled),
 `rust/wa-term/src/opening.rs` (new), `rust/wa-term/src/lib.rs`, `rust/wa-term/src/terminal_editor.rs`
 (the hold and `write_now`), `rust/wa-capabilities/src/host.rs` (the two capabilities, the reader thread's
 clock and the hand-back), `rust/wa-capabilities/src/capabilities.rs`, `rust/wa-capabilities/src/core_component.rs`

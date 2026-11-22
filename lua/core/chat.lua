@@ -489,7 +489,11 @@ function M.run(argv)
       -- a release's tag, the commit (with +dirty), a pinned node's pin, or "unknown build". It was the
       -- literal 0.1.0 here, so every node claimed the crate's version whatever it was running.
       version = build_identity.label(),
-      model = mode .. (reasoning ~= "" and ("  \194\183  reasoning " .. reasoning) or ""),
+      -- ONE composer for this line (cli_view.model_line): a dot with one space on each side.
+      model = cli_view.model_line(mode, reasoning),
+      -- The product version, from the one constant that owns it (`build_identity.PRODUCT_VERSION`), beside
+      -- the build's own label: `✻ Welcome to wasm-agent! v1.0 · v<sha>`.
+      product = build_identity.PRODUCT_VERSION,
       database = host.getenv("WASM_AGENT_DB") or "~/.wasm-agent/memory.db",
       session = agent.session_id,
       continued = resume_last or session_id ~= nil,

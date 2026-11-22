@@ -101,7 +101,7 @@ local PALETTE = {
   -- The matrix green (Victor, 22/11: the star of the welcome line and the animated first glyph of the
   -- run status row). Its OWN entry, so those two turn green without moving `accent`, which keeps
   -- painting the spinner's trail, the prompt mark and every other thing that was warm.
-  matrix = "00ff41",
+  matrix = "00d75f",
 }
 
 -- A role is a 24-bit colour (`rrggbb`), or `ansi:<n>` for one of the terminal's own palette slots,
@@ -3474,6 +3474,15 @@ function METHODS:replay(rows, opts)
   self:line("")
 end
 
+-- The model line of the welcome box: the model, its endpoint, and - when the provider states one - the
+-- reasoning level, separated by a dot with ONE space on each side (Victor, 22/11: it had two). Composed
+-- here, beside the box that draws it, so the one separator has one spelling and a test can say so.
+function M.model_line(mode, reasoning)
+  local text = tostring(mode or "")
+  if reasoning and reasoning ~= "" then text = text .. " \194\183 reasoning " .. tostring(reasoning) end
+  return text
+end
+
 -- The welcome box: where this is running and what it is running with, the way Claude Code opens.
 -- The workspace and branch come first after the greeting - a chat in the wrong worktree is a
 -- mistake that costs an hour to notice otherwise.
@@ -3497,7 +3506,12 @@ function M.banner(opts)
   local divider = paint(opts.marker and M.RULE or M.expand_rules(M.RULE, limit), "border", live)
   local lines = { divider,
     paint(STAR, "matrix", live) .. " Welcome to " .. paint("wasm-agent", "bold", live) .. "!"
-      .. ((opts.version and opts.version ~= "") and paint(" v" .. opts.version, "muted", live) or ""),
+      -- The product version, then the build's own name (Victor, 22/11): `v1.0 · vc6f890e3`. The product
+      -- version is one constant (`build_identity.PRODUCT_VERSION`) and a caller that has none says
+      -- nothing rather than inventing one.
+      .. ((opts.product and opts.product ~= "") and paint(" v" .. opts.product, "muted", live) or "")
+      .. (((opts.product and opts.product ~= "") and (opts.version and opts.version ~= "")) and paint(" \194\183 ", "muted", live) or "")
+      .. ((opts.version and opts.version ~= "") and paint("v" .. opts.version, "muted", live) or ""),
     "",
     paint(fit("/help for help, /login to sign in to a provider"), "muted", live),
     "" }

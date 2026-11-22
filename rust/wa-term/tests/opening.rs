@@ -240,15 +240,33 @@ fn normalise(rows: &[String]) -> Vec<String> {
             out.push(chars[at]);
             at += 1;
         }
-        // The welcome line names the BUILD (`✻ Welcome to wasm-agent! v<commit>`), and two binaries cannot
-        // carry the same one: the row is compared with that one token blanked, not dropped.
+        // The welcome line names the BUILDs (`✻ Welcome to wasm-agent! v1.0 · v<commit>`), and two binaries
+        // cannot carry the same commit: everything after the product's `!` is blanked, not dropped - so
+        // the product version is still compared, and only the build's own label is not.
         let mut text = out.trim_end().to_string();
-        if let Some(at) = text.find("Welcome to wasm-agent! v") {
-            let start = at + "Welcome to wasm-agent! ".len();
-            let end = text[start..].find(' ').map(|space| start + space).unwrap_or(text.len());
-            text.replace_range(start..end, "<version>");
+        if let Some(at) = text.find("Welcome to wasm-agent!") {
+            let start = at + "Welcome to wasm-agent!".len();
+            text.replace_range(start..text.len(), " <versions>");
         }
-        text
+        // The dot's spacing is one of the two strings this change edits (one space on each side, Victor
+        // 22/11): a row is compared with it collapsed, which is what lets the base binary's two spaces
+        // and this tree's one be the same screen for every check that is not about that string.
+        let chars: Vec<char> = text.chars().collect();
+        let mut collapsed = String::new();
+        let mut at = 0;
+        while at < chars.len() {
+            if chars[at] == '\u{b7}' {
+                while collapsed.ends_with(' ') { collapsed.pop(); }
+                let mut next = at + 1;
+                while next < chars.len() && chars[next] == ' ' { next += 1; }
+                collapsed.push_str(" \u{b7} ");
+                at = next;
+                continue;
+            }
+            collapsed.push(chars[at]);
+            at += 1;
+        }
+        collapsed
     }).collect()
 }
 

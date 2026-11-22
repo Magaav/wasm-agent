@@ -105,6 +105,18 @@ ok(view_lib.duration(9.5) == "9.5s" and view_lib.duration(74) == "1m14s", "a run
 -- the host draws the clock while this process is blocked, so the rule exists on both sides.
 -- The same three values are asserted in both suites, so changing one alone fails a test here
 -- instead of flickering a frame on a screen.
+-- The model line of the welcome box: the model, its endpoint, and the reasoning level, separated by a dot
+-- with ONE space on each side (Victor, 22/11 21:33Z - it had two).
+local DOT = " \194\183 "
+ok(view_lib.model_line("deepseek-v4.1-flash @ http://127.0.0.1:8810/opencode-go/v1", "high")
+  == "deepseek-v4.1-flash @ http://127.0.0.1:8810/opencode-go/v1" .. DOT .. "reasoning high",
+  "the model line carries one space on each side of its dot")
+ok(not view_lib.model_line("deepseek-v4.1-flash @ http://127.0.0.1:8810/opencode-go/v1", "high"):find("  ", 1, true),
+  "and no double space survives anywhere in it")
+ok(view_lib.model_line("local mode (no model configured)", "") == "local mode (no model configured)",
+  "a provider that states no reasoning level gets no dangling dot")
+ok(view_lib.model_line("local mode (no model configured)", nil) == "local mode (no model configured)",
+  "and an absent level is not the word nil")
 ok(view_lib.duration(59.94) == "59.9s", "under a minute the clock counts tenths of a second")
 ok(view_lib.duration(60.0) == "1m00s", "at a minute it carries its seconds")
 ok(view_lib.duration(125.4) == "2m05s", "and keeps counting in minutes")

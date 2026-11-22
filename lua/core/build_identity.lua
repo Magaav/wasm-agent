@@ -30,6 +30,17 @@ local M = {}
 -- The one line every surface prints when the bytes cannot name themselves.
 M.UNKNOWN = "unknown build"
 
+-- THE PRODUCT VERSION, in one place (Victor, 22/11: the welcome line reads
+-- `✻ Welcome to wasm-agent! v1.0 · v<sha>`).
+--
+-- It is a LITERAL and not a derivation, on purpose. The published tags are `v0.1.0-alpha.N`, the crate
+-- carries `0.1.0`, and every one of those is a build number; the product version is a product decision
+-- that Victor took (1.0) and the release step owns next: when a release names itself, this is the one
+-- line it changes, and nothing else in the tree spells the number. `label()` above stays what it is -
+-- the build's own name - and the two are never conflated: this says what the product IS, the label says
+-- which bytes are running.
+M.PRODUCT_VERSION = "1.0"
+
 local function decode(raw)
   if type(raw) ~= "string" or raw == "" then return nil end
   local ok, value = pcall(json.decode, raw)
