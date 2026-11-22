@@ -260,11 +260,16 @@ tree must not be "updated" by copying onto it.
 
 | row | on this branch | on the pre-round tip (`1bcd8779`) |
 | --- | --- | --- |
-| `scripts/test-deploy-wait.lua` (59 checks) | ok | **fails**: `a waiting request does not end the operator's turn` (MUST 2) |
-| `scripts/test-deploy-wait.sh` (36 checks) | ok | fails: the window's turn is refused (step 2a), the operator's in-flight turn is cut (step 4b) |
+| `scripts/test-deploy-wait.lua` (59 checks, 1 s) | ok | **fails**: `a waiting request does not end the operator's turn` (MUST 2) |
+| `scripts/test-deploy-wait.sh` (36 checks, 17 s) | ok | fails: the window's turn is refused (step 2a), the operator's in-flight turn is cut (step 4b) |
 | `scripts/test-worker-gate.sh` (39 checks) | ok | **fails**: `two refused asks and two real resumes, not 2` (MUST 3) |
 | `scripts/test-mission.sh` (282 checks) | ok | fails: the launch records `rc=2` for a turn that never ran |
-| `scripts/test-mission-verb.sh` (47 checks) | ok | fails: the generated runner records the refusal as the run |
+| `scripts/test-mission-verb.sh` (47 checks, 12 s) | ok | fails: the generated runner exits 2 with the refusal as its rc |
+| `scripts/test-deploy-bound.sh` (24 checks) | ok | fails (12 FAILs) |
+
+`bash scripts/test-discriminates.sh origin/main --branches 'change/deploy-never-starved' 4c443e66` ->
+**5 discriminating, 0 blocking, 1 not judged** (the Lua row; the tool cannot judge a Lua row while the branch
+changes `rust/`).
 
 `scripts/test-deploy-wait.sh` step 2 was split as the review asked: **2a** the window's turn (`operator: true`)
 runs while the request waits and spends a completion; **2b** a served turn that says nothing is refused by
@@ -275,7 +280,15 @@ While building that row I also fixed a real defect it exposed: the launcher's ti
 (`( sleep 21600; kill ... ) &`) was killed as a subshell, so the `sleep` inside it survived and held the
 caller's stdout open - `$(bash run.sh)` never saw EOF and hung for up to six hours. The watchdog's own output
 is `/dev/null` now (it needs none), which is a one-line change and is what let the runner be tested in a
-command substitution at all.
+command substitution at all. The rows that drive a runner write its output to a FILE anyway
+(`scripts/test-mission-verb.sh`), so the old tree - where the orphan still exists - fails this row by name
+instead of hanging it.
+
+And one in the harness's favour: `wa chat --once` treats a stdin that is not a terminal as a queue of prompts,
+so a row whose child inherited the discrimination gate's own stdin (the list of rows) ATE THE REST OF THE LIST -
+six rows were listed and three ran, the other three consumed as extra prompts. Every row that can start a CLI
+now begins with `exec </dev/null` and says why; that is also why the gate now reports all six rows of this
+branch instead of three.
 
 ## SHOULD: what happens when a turn's step never ends within the bound
 
