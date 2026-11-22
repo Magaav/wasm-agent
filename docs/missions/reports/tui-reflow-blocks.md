@@ -130,9 +130,12 @@ untouched snapshot fixture and the module graph, not a byte comparison of a live
 
 ## Not verified
 
+- **The whole fast path was run, in full, on this branch** under `flock -o ~/Work/missions/.suite.lock`:
+  `scripts/fast.sh` -> `fast path ok (381 checks, 1 skipped, 467s)`, 0 failed. The one skip is
+  `status-icon-metrics` (font glyph boxes, redrawn in another round; unrelated to this change), and the
+  new `reflow-blocks-pty` row is a pass in 8.0s inside it, next to `fence-card-pty` (7.6s).
 - The full `scripts/test.sh` gate was not run (this is a display change; the rows above plus
-  `cargo test -p wa-term` are what was measured). `scripts/fast.sh` was run in full under
-  `flock -o ~/Work/missions/.suite.lock` and its verdict is in the session log.
+  `cargo test -p wa-term` and the fast path are what was measured).
 - `scripts/test-codemode-parity.lua` and `scripts/test-codemode-boundary.lua` refuse on this build
   ("code mode is admitted for this run" / no assets); neither was judged.
 
