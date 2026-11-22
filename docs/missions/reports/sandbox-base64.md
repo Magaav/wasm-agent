@@ -72,6 +72,19 @@ commit, a file:line in it, or the measurement that produced it.
 * `lua/core/refusal_codes.lua` regenerated (`lua5.4 scripts/gen-refusal-codes.lua --write`, +2 codes); the
   refusal contract test fails without it, and it was the check that caught it.
 
+## The component pin
+
+`rust/components/codemode/src/logic.rs` is compiled into the `codemode` component, so the guest-global
+list moved the wasm bytes and `scripts/test-component-pins.sh` refused the branch until the pin moved
+with the source. Commit **192c7f55** rebuilds it (`WA_COMPONENTS_DIR=/tmp/comps-base64 bash
+scripts/build-components.sh codemode`) and pins `codemode 2f432ec04ea1051ebae3a8c38b660c41d0478219117436b2463bc995119e270a
+224319` in `components.lock`. With `WA_PINNED_COMPONENTS_DIR=/tmp/comps-base64` that check says
+"verified codemode: 2f432ec04ea1… 224319 bytes … the bytes this node would INSTALL ARE the pin" and
+"source and pin moved together". Without it the check SKIPs the bytes half - it cannot find a copy of the
+pin anywhere on this node, which is the honest state: `scripts/publish-components.sh --from` refuses a
+commit "reachable from no branch the REMOTE has" and this mission does not push, so the release artifact
+for that pin does not exist yet and landing/deploying has to publish it.
+
 ## Prompt cache
 
 No file that composes the model's prefix changed: the codemode tool's schema string
@@ -88,6 +101,7 @@ Measured by running each against the base worktree `/tmp/base-ee38` with the sam
 * `scripts/test-codemode-unprepared.lua` - `default build honestly reports assets not embedded` (same
   cause: the binary is not this tree's).
 * `scripts/test-remote-refusals.lua` - `node refusal through the relay` (needs a relay).
+* `scripts/test-install-guards.sh` - "test-install-guards: 72 checks, 3 failed" on the same base worktree, with the same shell: the installer guards, nothing this branch touches.
 
 ## Texts to approve
 
