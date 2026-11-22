@@ -4482,27 +4482,30 @@ fn console_reader() {
                             // function decides the token number, keeps the bytes and records that
                             // this draft carries it; the two arms differ only in what they replace.
                             wa_term::terminal_editor::Action::Pasted(from) => {
-                                let span = state.editor.as_ref().map(|e| (e.slice(from, e.cursor()), e.cursor()));
-                                if let Some((text, to)) = span {
-                                    if let Some((mime, bytes)) = dropped_image(&text) {
-                                        let (token, kb) = attach_image(&mut state, &mime, bytes);
-                                        if let Some(editor) = state.editor.as_mut() {
-                                            editor.replace_range(from, to, &token);
-                                            editor.notice = format!("{token} attached ({kb} KB)");
-                                        }
+                                attach_pasted_path(&mut state, from);
+                            }
+                            // Ctrl+V is ONE read of the clipboard that does the right thing: an image
+                            // type listed is the `[Image #n]` it always was, and otherwise the text is
+                            // pasted exactly as a bracketed paste puts it - a path to an image in that
+                            // text becoming the same attachment a dropped path is (Action::Pasted).
+                            wa_term::terminal_editor::Action::Paste => match read_clipboard() {
+                                Ok(Clipboard::Image(mime, bytes)) => {
+                                    let (token, kb) = attach_image(&mut state, &mime, bytes);
+                                    if let Some(editor) = state.editor.as_mut() {
+                                        editor.insert_text(&token);
+                                        editor.notice = format!("{token} attached ({kb} KB)");
                                     }
                                 }
-                            }
-                            wa_term::terminal_editor::Action::PasteImage => {
-                                let note = match read_clipboard_image() {
-                                    Ok((mime, bytes)) => {
-                                        let (token, kb) = attach_image(&mut state, &mime, bytes);
-                                        if let Some(editor) = state.editor.as_mut() { editor.insert_text(&token); }
-                                        format!("{token} attached ({kb} KB)")
-                                    }
-                                    Err(reason) => reason,
-                                };
-                                if let Some(editor) = state.editor.as_mut() { editor.notice = note; }
+                                Ok(Clipboard::Text(text)) => {
+                                    let from = match state.editor.as_mut().map(|e| e.paste(&text)) {
+                                        Some(wa_term::terminal_editor::Action::Pasted(from)) => Some(from),
+                                        _ => None,
+                                    };
+                                    if let Some(from) = from { attach_pasted_path(&mut state, from); }
+                                }
+                                Err(reason) => {
+                                    if let Some(editor) = state.editor.as_mut() { editor.notice = reason; }
+                                }
                             }
                             wa_term::terminal_editor::Action::None => {}
                         }
@@ -4967,10 +4970,39 @@ impl ClipboardHost {
     }
 }
 
+/// What one Ctrl+V gives: an image and its mime, or the clipboard's text. One read of the clipboard
+/// decides between them, so a keypress can never read two different clipboards.
+#[derive(Debug, PartialEq)]
+enum Clipboard {
+    Image(String, Vec<u8>),
+    Text(String),
+}
+
+/// What one clipboard tool call answered. `Refused` is the tool RUNNING and declining - `wl-paste` exits
+/// 1 with "Nothing is copied" for an empty clipboard, and exits 1 with its own diagnostic when it cannot
+/// reach the display - and it is not the same fact as `Missing`, where there is no such program here. The
+/// bytes are the tool's stderr, because the notice says what IT said: on 22/11 the console answered "no
+/// clipboard here" over an image on the clipboard and threw the reason away.
+#[derive(Debug, PartialEq)]
+enum ClipAnswer { Bytes(Vec<u8>), Refused(Vec<u8>), Missing }
+
 /// The image types asked of a clipboard, in preference order, and the size a paste may be. Both are
 /// data rather than literals inside the reader so the rules can be tested without a clipboard.
 const CLIPBOARD_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/webp", "image/gif"];
+/// The text types, UTF-8 first. These are the types `wl-paste --list-types` listed on this laptop for
+/// text copied in a browser or an editor (measured 22/11): `text/plain;charset=utf-8`, `text/plain`,
+/// `TEXT`, `STRING`, `UTF8_STRING`.
+const CLIPBOARD_TEXT_TYPES: [&str; 5] =
+    ["text/plain;charset=utf-8", "text/plain", "UTF8_STRING", "TEXT", "STRING"];
 const CLIPBOARD_MAX: usize = 20 * 1024 * 1024;
+/// The directories a clipboard tool is looked for in when PATH does not name it: a console started by a
+/// window manager or a keybinding can carry a short PATH, and the tool then looked absent while it worked
+/// in a shell beside it - one of the two ways 22/11's "no clipboard here" could be said over an image.
+const CLIPBOARD_TOOL_DIRS: [&str; 3] = ["/usr/bin", "/bin", "/usr/local/bin"];
+/// What `wl-paste` says when there is nothing on the clipboard (measured 22/11: exit 1, that line on
+/// stderr). It is the ONE refusal that means an empty clipboard rather than a broken environment; every
+/// other refusal is the tool's own words in the notice.
+const CLIPBOARD_EMPTY_SAYS: &str = "nothing is copied";
 
 /// The first type this node understands from a clipboard's own type list.
 fn pick_clipboard_type(listed: &[u8]) -> Option<&'static str> {
@@ -4978,58 +5010,189 @@ fn pick_clipboard_type(listed: &[u8]) -> Option<&'static str> {
     CLIPBOARD_TYPES.iter().copied().find(|kind| text.lines().any(|line| line.trim() == *kind))
 }
 
+/// The first TEXT type in the same list. It is asked second: an image wins when a clipboard offers
+/// both, which is what a reader means by a screenshot on the clipboard.
+fn pick_clipboard_text_type(listed: &[u8]) -> Option<&'static str> {
+    let text = String::from_utf8_lossy(listed);
+    CLIPBOARD_TEXT_TYPES.iter().copied().find(|kind| text.lines().any(|line| line.trim() == *kind))
+}
+
+/// The types a list names, deduplicated, in the clipboard's own spelling: what the notice names when
+/// the list holds nothing this node can paste.
+fn listed_types(listed: &[u8]) -> Vec<String> {
+    let text = String::from_utf8_lossy(listed);
+    let mut types: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let kind = line.trim();
+        if kind.is_empty() || types.iter().any(|seen| seen == kind) { continue; }
+        types.push(kind.to_string());
+    }
+    types
+}
+
+/// What a tool that ran and failed is reported as: its own first line of stderr, which is the one thing
+/// the reader can act on (`error: XDG_RUNTIME_DIR is invalid or not set in the environment.`), and
+/// "the clipboard is empty" for the single refusal that means that and nothing else.
+fn clipboard_failure(program: &str, stderr: &[u8]) -> String {
+    let said = String::from_utf8_lossy(stderr);
+    let line = said.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or("");
+    if line.to_lowercase().contains(CLIPBOARD_EMPTY_SAYS) { return "the clipboard is empty".into(); }
+    if line.is_empty() { return format!("{program} failed and said nothing"); }
+    format!("{program} said: {line}")
+}
+
+/// One type list, turned into what the paste answers: the image type it names, else the text type it
+/// names. None means the list names neither, and the caller names the types in the notice instead.
+fn from_type_list(listed: &[u8], program: &str, read: impl Fn(&str) -> ClipAnswer)
+    -> Option<Result<Clipboard, String>> {
+    let image = pick_clipboard_type(listed);
+    let text = pick_clipboard_text_type(listed);
+    if image.is_none() && text.is_none() { return None; }
+    if let Some(kind) = image {
+        match read(kind) {
+            ClipAnswer::Bytes(bytes) if bytes.len() > CLIPBOARD_MAX =>
+                return Some(Err("the clipboard image is over 20 MB".into())),
+            ClipAnswer::Bytes(bytes) if !bytes.is_empty() => return Some(clipboard_image(bytes)),
+            // A refusal is the tool's answer about the clipboard as a whole: said as it said it.
+            ClipAnswer::Refused(stderr) => return Some(Err(clipboard_failure(program, &stderr))),
+            _ => {}
+        }
+    }
+    let Some(kind) = text else { return Some(Err("the clipboard is empty".into())) };
+    match read(kind) {
+        ClipAnswer::Bytes(bytes) if bytes.len() > CLIPBOARD_MAX =>
+            Some(Err("the clipboard text is over 20 MB".into())),
+        ClipAnswer::Bytes(bytes) => Some(clipboard_text(bytes)),
+        ClipAnswer::Refused(stderr) => Some(Err(clipboard_failure(program, &stderr))),
+        ClipAnswer::Missing => Some(Err(clipboard_failure(program, &[]))),
+    }
+}
+
 /// The reader, given the host it sees and the way it runs a clipboard tool: `wl-paste --list-types`
 /// then `wl-paste --type <type>` on Wayland, `xclip ... -t TARGETS` then `-t <type> -o` on X11. The
-/// one-line notice the footer shows is the error.
-fn read_clipboard_image_with(host: ClipboardHost, run: impl Fn(&str, &[&str]) -> Option<Vec<u8>>)
-    -> Result<(String, Vec<u8>), String> {
+/// type list is read ONCE and decides everything: an image type listed is an image, else a text type
+/// listed is that text - Ctrl+V does the right thing for what is on the clipboard instead of asking
+/// only about images (Victor, 22/11: text on the clipboard answered "no image on the clipboard").
+///
+/// Every notice names the fact it is: no display variable in this process, no tool to run, the tool's own
+/// words when it refused, an empty clipboard, or the types this node cannot paste. The one line the
+/// footer shows is the error.
+fn read_clipboard_with(host: ClipboardHost, run: impl Fn(&str, &[&str]) -> ClipAnswer)
+    -> Result<Clipboard, String> {
     if host.off {
         return Err("clipboard reading is off here (WA_CLIPBOARD=off)".into());
     }
-    let mut tried = false;
+    if !host.wayland && !host.x11 {
+        // Neither variable is in THIS process: nothing was tried, and saying "no clipboard tool" would
+        // name a missing program when the environment is what is missing (22/11's new foot window).
+        return Err("no WAYLAND_DISPLAY or DISPLAY in this process: start wa chat from the desktop session, and it can read the clipboard".into());
+    }
+    let mut ran = false;
+    let mut unusable: Vec<String> = Vec::new();
     if host.wayland {
-        if let Some(listed) = run("wl-paste", &["--list-types"]) {
-            tried = true;
-            if let Some(kind) = pick_clipboard_type(&listed) {
-                if let Some(bytes) = run("wl-paste", &["--no-newline", "--type", kind]) {
-                    if bytes.len() > CLIPBOARD_MAX { return Err("the clipboard image is over 20 MB".into()); }
-                    if !bytes.is_empty() { return clipboard_image(bytes); }
-                }
+        match run("wl-paste", &["--list-types"]) {
+            ClipAnswer::Bytes(listed) => {
+                ran = true;
+                if let Some(answer) = from_type_list(&listed, "wl-paste", |kind| {
+                    run("wl-paste", &["--no-newline", "--type", kind])
+                }) { return answer; }
+                unusable = listed_types(&listed);
             }
+            ClipAnswer::Refused(stderr) => return Err(clipboard_failure("wl-paste", &stderr)),
+            ClipAnswer::Missing => {}
         }
     }
     if host.x11 {
-        if let Some(listed) = run("xclip", &["-selection", "clipboard", "-t", "TARGETS", "-o"]) {
-            tried = true;
-            if let Some(kind) = pick_clipboard_type(&listed) {
-                if let Some(bytes) = run("xclip", &["-selection", "clipboard", "-t", kind, "-o"]) {
-                    if bytes.len() > CLIPBOARD_MAX { return Err("the clipboard image is over 20 MB".into()); }
-                    if !bytes.is_empty() { return clipboard_image(bytes); }
-                }
+        match run("xclip", &["-selection", "clipboard", "-t", "TARGETS", "-o"]) {
+            ClipAnswer::Bytes(listed) => {
+                ran = true;
+                if let Some(answer) = from_type_list(&listed, "xclip", |kind| {
+                    run("xclip", &["-selection", "clipboard", "-t", kind, "-o"])
+                }) { return answer; }
+                unusable = listed_types(&listed);
             }
+            ClipAnswer::Refused(stderr) => return Err(clipboard_failure("xclip", &stderr)),
+            ClipAnswer::Missing => {}
         }
     }
-    Err(if tried { "no image on the clipboard".into() }
-        else { "no clipboard here: wl-paste (Wayland) or xclip (X11) is needed, on the machine wa chat runs on".into() })
+    Err(if !ran {
+        // Only now, when no program could be started at all, is a missing TOOL the answer.
+        "no clipboard tool here: wl-paste (Wayland) or xclip (X11) is needed, on the machine wa chat runs on".into()
+    } else if unusable.is_empty() {
+        "the clipboard is empty".into()
+    } else {
+        // The types are named, and the words "no image on the clipboard" are never said about a
+        // clipboard that held text.
+        format!("the clipboard holds {}, which wa cannot paste", unusable.join(", "))
+    })
 }
 
 /// A clipboard payload as an attachment: the BYTES say which image it is, and a payload that is not
 /// one of them is refused instead of being attached under a name it does not match.
-fn clipboard_image(bytes: Vec<u8>) -> Result<(String, Vec<u8>), String> {
+fn clipboard_image(bytes: Vec<u8>) -> Result<Clipboard, String> {
     match sniff_image(&bytes) {
-        Some(mime) => Ok((mime.to_string(), bytes)),
+        Some(mime) => Ok(Clipboard::Image(mime.to_string(), bytes)),
         None => Err("the clipboard says it holds an image, but its bytes are not a PNG, JPEG, WebP or GIF".into()),
     }
 }
 
-/// An image from the system clipboard, read where this process runs - the way pi and Claude Code do
-/// it. Err is the one-line notice the footer shows.
-fn read_clipboard_image() -> Result<(String, Vec<u8>), String> {
-    read_clipboard_image_with(ClipboardHost::from_env(), |program, args| {
-        let out = std::process::Command::new(program).args(args)
-            .stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output().ok()?;
-        out.status.success().then_some(out.stdout)
-    })
+/// A clipboard payload as draft text: the bytes are decoded with the invalid ones REPLACED and never
+/// a panic, and every control character except newline and tab is dropped - a clipboard can hold
+/// anything at all, and what the draft shows is text. A carriage return is one of those dropped, so
+/// CRLF arrives as the one newline the draft draws. Nothing left is an empty clipboard.
+fn clipboard_text(bytes: Vec<u8>) -> Result<Clipboard, String> {
+    let text = String::from_utf8_lossy(&bytes);
+    let kept: String = text.chars().filter(|c| *c == '\n' || *c == '\t' || !c.is_control()).collect();
+    if kept.is_empty() { return Err("the clipboard is empty".into()); }
+    Ok(Clipboard::Text(kept))
+}
+
+/// Whether `path` is a file this process may run.
+fn is_executable(path: &std::path::Path) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else { return false };
+    if !meta.is_file() { return false; }
+    #[cfg(unix)] { use std::os::unix::fs::PermissionsExt; meta.permissions().mode() & 0o111 != 0 }
+    #[cfg(not(unix))] { true }
+}
+
+/// The program a clipboard call runs, or None when there is no such program here: an absolute path is
+/// used as it is, a bare name is looked for on PATH first - the caller's own environment is the more
+/// specific answer, and it is what the reader always did - and in [`CLIPBOARD_TOOL_DIRS`] after it, for a
+/// console whose PATH is too short to name the tool.
+fn clipboard_tool(program: &str) -> Option<std::path::PathBuf> {
+    if program.contains('/') {
+        let path = std::path::Path::new(program);
+        return is_executable(path).then(|| path.to_path_buf());
+    }
+    if let Some(found) = std::env::var_os("PATH").and_then(|path| {
+        std::env::split_paths(&path).map(|dir| dir.join(program)).find(|candidate| is_executable(candidate))
+    }) { return Some(found); }
+    tool_in_dirs(program)
+}
+
+/// The closed directory list on its own: what a console with no PATH to speak of still finds.
+fn tool_in_dirs(program: &str) -> Option<std::path::PathBuf> {
+    CLIPBOARD_TOOL_DIRS.iter().map(|dir| std::path::Path::new(dir).join(program))
+        .find(|candidate| is_executable(candidate))
+}
+
+/// The real clipboard tool call, and the three answers it can give: its bytes; a refusal, meaning the
+/// tool ran and declined, with its own stderr (`wl-paste` exits 1 for an empty clipboard AND for a
+/// display it cannot reach, and the two are not the same fact); or no such program here.
+fn run_clipboard(program: &str, args: &[&str]) -> ClipAnswer {
+    let Some(tool) = clipboard_tool(program) else { return ClipAnswer::Missing };
+    match std::process::Command::new(tool).args(args)
+        .stdin(std::process::Stdio::null()).stderr(std::process::Stdio::piped()).output() {
+        Err(_) => ClipAnswer::Missing,
+        Ok(out) if out.status.success() => ClipAnswer::Bytes(out.stdout),
+        Ok(out) => ClipAnswer::Refused(out.stderr),
+    }
+}
+
+/// The system clipboard, read where this process runs - the way pi and Claude Code do it: one read,
+/// and the text or the image. Err is the one-line notice the footer shows.
+fn read_clipboard() -> Result<Clipboard, String> {
+    read_clipboard_with(ClipboardHost::from_env(), run_clipboard)
 }
 
 /// The image types this node attaches, decided by the payload's own first bytes and never by a file
@@ -5140,6 +5303,25 @@ fn attach_image(state: &mut ConsoleInput, mime: &str, bytes: Vec<u8>) -> (String
     let number = state.pasted_images.len();
     state.draft_images.push(number);
     (format!("[Image #{number}]"), kb)
+}
+
+/// The span a paste just wrote: when it is a single path to an image in an allowed directory, that
+/// path becomes the `[Image #n]` token it stands for. A dropped path and a pasted one are this one
+/// function, so they cannot number or record their image differently.
+fn attach_pasted_path(state: &mut ConsoleInput, from: usize) {
+    attach_pasted_path_in(state, from, &image_roots())
+}
+
+/// The same, with the allowed directories injected: a test drives the real function without writing into
+/// the node's own state root, and the launch path passes the real list.
+fn attach_pasted_path_in(state: &mut ConsoleInput, from: usize, roots: &[std::path::PathBuf]) {
+    let Some((text, to)) = state.editor.as_ref().map(|e| (e.slice(from, e.cursor()), e.cursor())) else { return };
+    let Some((mime, bytes)) = dropped_image_in(&text, roots) else { return };
+    let (token, kb) = attach_image(state, &mime, bytes);
+    if let Some(editor) = state.editor.as_mut() {
+        editor.replace_range(from, to, &token);
+        editor.notice = format!("{token} attached ({kb} KB)");
+    }
 }
 
 /// The tokens of `inserted` that the submitted line still carries: an image the reader deleted from
@@ -6655,25 +6837,27 @@ mod image_and_token_tests {
     #[test]
     fn the_clipboard_reader_says_why_it_cannot_read_instead_of_pretending() {
         let off = ClipboardHost { off: true, wayland: true, x11: true };
-        assert_eq!(read_clipboard_image_with(off, |_, _| Some(PNG.to_vec())).unwrap_err(),
+        assert_eq!(read_clipboard_with(off, |_, _| ClipAnswer::Bytes(PNG.to_vec())).unwrap_err(),
             "clipboard reading is off here (WA_CLIPBOARD=off)");
+        // No display variable in this process: the notice names THAT, not a missing tool.
         let none = ClipboardHost::default();
-        assert!(read_clipboard_image_with(none, |_, _| Some(PNG.to_vec())).unwrap_err()
-            .contains("no clipboard here"));
+        let none_notice = read_clipboard_with(none, |_, _| ClipAnswer::Bytes(PNG.to_vec())).unwrap_err();
+        assert!(none_notice.contains("no WAYLAND_DISPLAY or DISPLAY"), "{}", none_notice);
         let wayland = ClipboardHost { off: false, wayland: true, x11: false };
-        let (mime, bytes) = read_clipboard_image_with(wayland, |program, args| {
+        let answered = read_clipboard_with(wayland, |program, args| {
             assert_eq!(program, "wl-paste");
-            if args.contains(&"--list-types") { Some(b"text/plain\nimage/png\n".to_vec()) } else { Some(PNG.to_vec()) }
+            if args.contains(&"--list-types") { ClipAnswer::Bytes(b"text/plain\nimage/png\n".to_vec()) }
+            else { ClipAnswer::Bytes(PNG.to_vec()) }
         }).expect("a clipboard image");
-        assert_eq!(mime, "image/png");
-        assert_eq!(bytes, PNG);
+        assert_eq!(answered, Clipboard::Image("image/png".to_string(), PNG.to_vec()));
     }
 
     #[test]
     fn a_clipboard_that_announces_an_image_it_does_not_hold_is_refused() {
         let wayland = ClipboardHost { off: false, wayland: true, x11: false };
-        let refused = read_clipboard_image_with(wayland, |_, args| {
-            if args.contains(&"--list-types") { Some(b"image/png\n".to_vec()) } else { Some(b"not an image".to_vec()) }
+        let refused = read_clipboard_with(wayland, |_, args| {
+            if args.contains(&"--list-types") { ClipAnswer::Bytes(b"image/png\n".to_vec()) }
+            else { ClipAnswer::Bytes(b"not an image".to_vec()) }
         });
         assert!(refused.unwrap_err().contains("not a PNG, JPEG, WebP or GIF"));
     }
@@ -6682,6 +6866,220 @@ mod image_and_token_tests {
     fn a_clipboard_type_the_node_does_not_understand_is_not_read() {
         assert_eq!(pick_clipboard_type(b"text/html\nimage/svg+xml\n"), None);
         assert_eq!(pick_clipboard_type(b"image/svg+xml\nimage/gif\n"), Some("image/gif"));
+        assert_eq!(pick_clipboard_text_type(b"text/html\nimage/svg+xml\n"), None);
+        assert_eq!(pick_clipboard_text_type(b"text/plain\nimage/png\n"), Some("text/plain"));
+        assert_eq!(pick_clipboard_text_type(b"UTF8_STRING\ntext/plain\n"), Some("text/plain"),
+            "the plain UTF-8 type is asked for before an atom whose encoding is the tool's business");
+    }
+
+    #[test]
+    fn a_clipboard_holding_only_text_answers_the_text() {
+        // The measured list on this laptop for text copied in a browser (22/11): five text types and
+        // no image type at all. On the base this answered "no image on the clipboard" and pasted
+        // nothing (Victor's report).
+        let wayland = ClipboardHost { off: false, wayland: true, x11: false };
+        let listed: &[u8] = b"text/plain;charset=utf-8\ntext/plain\nTEXT\nSTRING\nUTF8_STRING\n";
+        let asked = std::cell::RefCell::new(Vec::<String>::new());
+        let answered = read_clipboard_with(wayland, |program, args| {
+            asked.borrow_mut().push(format!("{program} {}", args.join(" ")));
+            if args.contains(&"--list-types") { ClipAnswer::Bytes(listed.to_vec()) }
+            else { ClipAnswer::Bytes(b"line one\nline two\tend".to_vec()) }
+        }).expect("the clipboard's text");
+        assert_eq!(answered, Clipboard::Text("line one\nline two\tend".to_string()));
+        assert_eq!(asked.borrow()[1], "wl-paste --no-newline --type text/plain;charset=utf-8",
+            "the UTF-8 type the clipboard named is the one read");
+        assert_eq!(asked.borrow().len(), 2,
+            "one list call and one read: Ctrl+V reads the clipboard once");
+    }
+
+    #[test]
+    fn an_image_on_the_clipboard_wins_over_its_text() {
+        let wayland = ClipboardHost { off: false, wayland: true, x11: false };
+        let asked = std::cell::RefCell::new(Vec::<String>::new());
+        let answered = read_clipboard_with(wayland, |_, args| {
+            asked.borrow_mut().push(args.join(" "));
+            if args.contains(&"--list-types") { ClipAnswer::Bytes(b"text/plain\nimage/png\n".to_vec()) }
+            else { ClipAnswer::Bytes(PNG.to_vec()) }
+        }).expect("the image");
+        assert_eq!(answered, Clipboard::Image("image/png".to_string(), PNG.to_vec()));
+        assert_eq!(asked.borrow().iter().filter(|call| call.contains("--type")).count(), 1,
+            "one payload is read: the image, not the text listed beside it");
+    }
+
+    #[test]
+    fn an_empty_clipboard_is_said_to_be_empty_and_not_missing() {
+        let wayland = ClipboardHost { off: false, wayland: true, x11: false };
+        // wl-paste's own answer for nothing copied: exit 1, "Nothing is copied" on stderr.
+        assert_eq!(read_clipboard_with(wayland, |_, _| ClipAnswer::Refused(b"Nothing is copied
+".to_vec())).unwrap_err(),
+            "the clipboard is empty");
+        // A tool that succeeds and lists no type at all says the same thing.
+        assert_eq!(read_clipboard_with(wayland, |_, _| ClipAnswer::Bytes(Vec::new())).unwrap_err(),
+            "the clipboard is empty");
+        // A type named, and nothing given for it.
+        assert_eq!(read_clipboard_with(wayland, |_, args| {
+            if args.contains(&"--list-types") { ClipAnswer::Bytes(b"text/plain\n".to_vec()) }
+            else { ClipAnswer::Bytes(Vec::new()) }
+        }).unwrap_err(), "the clipboard is empty");
+    }
+
+    #[test]
+    fn a_clipboard_holding_a_type_wa_cannot_paste_names_it() {
+        let wayland = ClipboardHost { off: false, wayland: true, x11: false };
+        let refused = read_clipboard_with(wayland, |_, args| {
+            if args.contains(&"--list-types") { ClipAnswer::Bytes(b"text/html\nimage/svg+xml\n".to_vec()) }
+            else { panic!("a type this node cannot paste is never read: {args:?}") }
+        }).unwrap_err();
+        assert_eq!(refused, "the clipboard holds text/html, image/svg+xml, which wa cannot paste");
+        assert!(!refused.contains("no image on the clipboard"),
+            "the words of the bug are never said about a clipboard that held text");
+    }
+
+    #[test]
+    fn x11_is_read_with_xclip_when_wayland_has_no_tool() {
+        let both = ClipboardHost { off: false, wayland: true, x11: true };
+        let answered = read_clipboard_with(both, |program, args| match (program, args.contains(&"TARGETS")) {
+            ("wl-paste", _) => ClipAnswer::Missing,
+            ("xclip", true) => ClipAnswer::Bytes(b"TARGETS\nUTF8_STRING\nSTRING\n".to_vec()),
+            ("xclip", false) => {
+                assert_eq!(args, ["-selection", "clipboard", "-t", "UTF8_STRING", "-o"].as_slice());
+                ClipAnswer::Bytes(b"from x11".to_vec())
+            }
+            _ => ClipAnswer::Missing,
+        }).expect("the X11 clipboard's text");
+        assert_eq!(answered, Clipboard::Text("from x11".to_string()));
+    }
+
+    #[test]
+    fn clipboard_text_keeps_newlines_and_tabs_and_drops_every_other_control_byte() {
+        // A carriage return is dropped, so CRLF arrives as the one newline the draft draws.
+        assert_eq!(clipboard_text(b"one\r\ntwo".to_vec()).unwrap(), Clipboard::Text("one\ntwo".into()));
+        assert_eq!(clipboard_text(b"a\tb".to_vec()).unwrap(), Clipboard::Text("a\tb".into()),
+            "a tab is data: pasted code keeps its indentation");
+        assert_eq!(clipboard_text(b"a\x07b\x1b[31mc".to_vec()).unwrap(), Clipboard::Text("ab[31mc".into()),
+            "a bell and an escape byte are dropped, and what follows them is then plain text");
+        // Invalid UTF-8 is replaced, never a panic.
+        assert_eq!(clipboard_text(b"a\xffb".to_vec()).unwrap(), Clipboard::Text("a\u{fffd}b".into()));
+        assert_eq!(clipboard_text(b"\x00\x01".to_vec()).unwrap_err(), "the clipboard is empty");
+    }
+
+    #[test]
+    fn a_clipboard_payload_over_twenty_megabytes_is_refused_by_name() {
+        let wayland = ClipboardHost { off: false, wayland: true, x11: false };
+        assert_eq!(read_clipboard_with(wayland, |_, args| {
+            if args.contains(&"--list-types") { ClipAnswer::Bytes(b"text/plain\n".to_vec()) }
+            else { ClipAnswer::Bytes(vec![b'a'; CLIPBOARD_MAX + 1]) }
+        }).unwrap_err(), "the clipboard text is over 20 MB");
+        assert_eq!(read_clipboard_with(wayland, |_, args| {
+            if args.contains(&"--list-types") { ClipAnswer::Bytes(b"image/png\n".to_vec()) }
+            else { ClipAnswer::Bytes(vec![0u8; CLIPBOARD_MAX + 1]) }
+        }).unwrap_err(), "the clipboard image is over 20 MB");
+    }
+
+    #[test]
+    fn a_tool_that_ran_and_failed_is_reported_in_its_own_words() {
+        // 22/11: over an image on the clipboard the console said "no clipboard here", because a tool that
+        // exits nonzero and a tool that is absent were the same answer. The reason is the whole notice now.
+        let wayland = ClipboardHost { off: false, wayland: true, x11: false };
+        let failed = read_clipboard_with(wayland, |_, _| ClipAnswer::Refused(
+            b"error: XDG_RUNTIME_DIR is invalid or not set in the environment.
+".to_vec())).unwrap_err();
+        assert_eq!(failed, "wl-paste said: error: XDG_RUNTIME_DIR is invalid or not set in the environment.");
+        assert!(!failed.contains("no clipboard"), "a tool that ran is never called missing: {failed}");
+        // A tool that fails with nothing to say still is not called missing.
+        assert_eq!(read_clipboard_with(wayland, |_, _| ClipAnswer::Refused(Vec::new())).unwrap_err(),
+            "wl-paste failed and said nothing");
+        // And the same answer on the type read, after a list that did name a type.
+        let during_read = read_clipboard_with(wayland, |_, args| {
+            if args.contains(&"--list-types") { ClipAnswer::Bytes(b"text/plain
+".to_vec()) }
+            else { ClipAnswer::Refused(b"Failed to connect to a Wayland server
+".to_vec()) }
+        }).unwrap_err();
+        assert_eq!(during_read, "wl-paste said: Failed to connect to a Wayland server");
+    }
+
+    #[test]
+    fn no_clipboard_tool_is_said_only_when_neither_program_can_be_started() {
+        let both = ClipboardHost { off: false, wayland: true, x11: true };
+        let none = read_clipboard_with(both, |_, _| ClipAnswer::Missing).unwrap_err();
+        assert!(none.contains("no clipboard tool here"), "{}", none);
+        assert!(none.contains("wl-paste") && none.contains("xclip"), "both programs are named: {none}");
+        // One display server with no tool and the other answering is not "no tool": the answer wins.
+        let answered = read_clipboard_with(both, |program, args| match program {
+            "wl-paste" => ClipAnswer::Missing,
+            _ if args.contains(&"TARGETS") => ClipAnswer::Bytes(b"UTF8_STRING
+".to_vec()),
+            _ => ClipAnswer::Bytes(b"x11 text".to_vec()),
+        }).expect("the X11 answer");
+        assert_eq!(answered, Clipboard::Text("x11 text".to_string()));
+    }
+
+    #[test]
+    fn a_process_with_no_display_variable_says_that_instead_of_blaming_a_tool() {
+        let no_display = ClipboardHost { off: false, wayland: false, x11: false };
+        let notice = read_clipboard_with(no_display, |_, _| panic!("nothing may be run without a display variable"))
+            .unwrap_err();
+        assert!(notice.contains("no WAYLAND_DISPLAY or DISPLAY"), "{}", notice);
+        assert!(!notice.contains("no clipboard tool"), "the program was never asked: {notice}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_clipboard_tool_is_found_without_the_callers_path() {
+        // A console started by a window manager can carry a short PATH. The tool is looked for in the
+        // closed directory list first, which is what makes its absence a fact rather than an environment.
+        let sh = clipboard_tool("sh").expect("sh is on PATH or in one of the tool directories");
+        assert!(is_executable(&sh), "{}", sh.display());
+        // The closed list stands on its own, with no PATH to consult: this is the short-PATH case.
+        let fallback = tool_in_dirs("sh").expect("sh is in one of the tool directories");
+        assert!(CLIPBOARD_TOOL_DIRS.iter().any(|dir| fallback == std::path::Path::new(dir).join("sh")), "{}", fallback.display());
+        assert_eq!(tool_in_dirs("wa-clipboard-tool-that-is-not-here"), None);
+        assert_eq!(clipboard_tool("wa-clipboard-tool-that-is-not-here"), None);
+        // An absolute path is used as given, and only when it is a file this process may run.
+        assert_eq!(clipboard_tool("/bin/sh"), Some(std::path::PathBuf::from("/bin/sh")));
+        assert_eq!(clipboard_tool("/etc/hostname"), None, "a file that is not executable is not a tool");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_real_tool_call_tells_a_refusal_from_a_tool_that_is_not_here() {
+        // The three answers the reader tells apart, from real child processes: bytes, a tool that ran
+        // and exited nonzero (an empty clipboard), and no such program at all.
+        assert_eq!(run_clipboard("/bin/sh", &["-c", "printf text/plain"]),
+            ClipAnswer::Bytes(b"text/plain".to_vec()));
+        assert_eq!(run_clipboard("/bin/sh", &["-c", "echo 'Nothing is copied' >&2; exit 1"]),
+            ClipAnswer::Refused(b"Nothing is copied
+".to_vec()), "a refusal carries what the tool said");
+        assert_eq!(run_clipboard("wa-clipboard-tool-that-is-not-here", &["--list-types"]),
+            ClipAnswer::Missing);
+    }
+
+    #[test]
+    fn a_pasted_path_to_an_image_is_the_attachment_a_dropped_path_is() {
+        // Brief item 1's last clause: a file path pasted from the clipboard is attached exactly as a
+        // dropped one, because both arms are one function (attach_pasted_path_in).
+        let dir = scratch_dir("pasted-image-path");
+        let path = scratch(&dir, "pasted.png", PNG);
+        let mut state = ConsoleInput::default();
+        let mut editor = wa_term::terminal_editor::Editor::default();
+        editor.insert_text(&path.to_string_lossy());
+        state.editor = Some(editor);
+        attach_pasted_path_in(&mut state, 0, &allowed(&dir));
+        let editor = state.editor.as_ref().expect("the editor");
+        assert_eq!(editor.slice(0, editor.cursor()), "[Image #1]", "the path became the token");
+        assert_eq!(state.draft_images, vec![1], "and it is this draft's, so the message carries it");
+        assert_eq!(state.pasted_images.len(), 1);
+        assert_eq!(state.pasted_images[0].0, "image/png");
+        // A path outside the allowed directories is NOT read: it stays the text it was.
+        let mut state = ConsoleInput::default();
+        let mut editor = wa_term::terminal_editor::Editor::default();
+        editor.insert_text("/etc/hostname");
+        state.editor = Some(editor);
+        attach_pasted_path_in(&mut state, 0, &allowed(&dir));
+        let editor = state.editor.as_ref().expect("the editor");
+        assert_eq!(editor.slice(0, editor.cursor()), "/etc/hostname");
+        assert!(state.pasted_images.is_empty(), "nothing was attached");
     }
 
     #[test]

@@ -2127,6 +2127,13 @@ fi
 # unit: the claim is about the whole route. WA_BIN names the binary, as the rows above do.
 WA_BIN="$BIN" gate_run bash scripts/test-cli-queued.sh
 
+# Ctrl+V pastes WHAT IS ON THE CLIPBOARD: text at the cursor, an image as `[Image #n]` (Victor, 22/11).
+# A real console in a pty (script(1)) with a fake clipboard tool on its PATH, because the claim is the
+# whole route: the terminal's bytes, the reader thread, the clipboard tool as a CHILD PROCESS, and the
+# draft the reader is shown. The text case, the undo, the empty clipboard, a type wa cannot use and the
+# image that must not regress are all in the row's own header.
+WA_BIN="$BIN" gate_run bash scripts/test-clipboard-paste.sh
+
 # A complete note typed while a tool runs must reach the next model round and the
 # durable transcript. A local mock provider checks the actual agent loop without inference.
 WA_SCRIPT=scripts/test-cli-steering.lua "$BIN" --db "$DB.cli-steering" | grep 'cli steering ok'
