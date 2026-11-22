@@ -5,6 +5,32 @@
   "notes": "newest first; one entry per published Linux bundle and target; read by scripts/linux/bootstrap.sh",
   "releases": [
     {
+      "tag": "v0.1.0-alpha.17",
+      "commit": "d5b17c6007c60f7fac8a248fe0fb6af1be460000",
+      "commit_short": "d5b17c6007c6",
+      "target": "aarch64-unknown-linux-musl",
+      "arch": "arm64",
+      "manifest_sha256": "8ea1c5875656876e23fa22fbb993c2ef0064be9a5c099ed8354beb95d20dbfb1",
+      "url": "https://github.com/Magaav/wasm-agent/releases/download/v0.1.0-alpha.17/wa-linux-arm64-musl-d5b17c6007c6.tar.gz",
+      "size": 19667528,
+      "node_version": "24.22.1",
+      "built_utc": "2026-11-22T18:17:49Z",
+      "installer_sha256": "5859c7c83bfbdc5a86adf4c6a026b21d8d6a951d60b57048185deb6cbb7a2bba"
+    },
+    {
+      "tag": "v0.1.0-alpha.17",
+      "commit": "d5b17c6007c60f7fac8a248fe0fb6af1be460000",
+      "commit_short": "d5b17c6007c6",
+      "target": "x86_64-unknown-linux-musl",
+      "arch": "x64",
+      "manifest_sha256": "d5cde108993d6b2144de09f666adac6fdda8d96f457d91f59ae65af8a7c0b5fd",
+      "url": "https://github.com/Magaav/wasm-agent/releases/download/v0.1.0-alpha.17/wa-linux-x64-musl-d5b17c6007c6.tar.gz",
+      "size": 21623002,
+      "node_version": "24.22.1",
+      "built_utc": "2026-11-22T18:15:34Z",
+      "installer_sha256": "5859c7c83bfbdc5a86adf4c6a026b21d8d6a951d60b57048185deb6cbb7a2bba"
+    },
+    {
       "tag": "v0.1.0-alpha.16",
       "commit": "fc581ca2319b0ec05d8de7c6a566f5421b1042bc",
       "commit_short": "fc581ca2319b",
@@ -91,5 +117,5 @@
       "built_utc": "2026-10-30T16:46:48Z"
     }
   ],
-  "generated_utc": "2026-11-22T17:23:21Z"
+  "generated_utc": "2026-11-22T18:17:49Z"
 }
