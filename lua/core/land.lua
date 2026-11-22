@@ -734,22 +734,58 @@ end
 
 -- WHAT VICTOR TESTS (FACTORY.md rule 4). It comes from the ready line's own brief - the one file a branch's
 -- intent travels on (`wa land ready <branch> <sha> --brief <file>`) - and from that file's `## How Victor tests
--- it` section, verbatim. A branch with no brief, or a brief with no such section, says so instead of inventing
--- steps: "nothing describes what to do" is a fact, and a made-up example is not.
+-- it` section, verbatim.
+--
+-- WHEN NO BRIEF WAS RECORDED THE MISSION'S OWN BRIEF IS READ: `wa land change/<name>` is launched from
+-- ~/Work/missions/<name>/brief.md, which is where the operator already wrote the steps, so a branch landed
+-- without `wa land ready --brief` still ends with what to do instead of "nothing describes the steps" (22/11,
+-- the first real landing). A brief that is not there is the same fact as no brief at all, and a brief without
+-- that section - or a branch name that cannot be a directory - invents nothing.
+local function how_section(text)
+  local section, inside = {}, false
+  for line in tostring(text):gmatch("[^\r\n]+") do
+    if line:match("^##%s*How Victor tests it") then inside = true
+    elseif inside and line:match("^##%s") then inside = false
+    elseif inside and trim(line) ~= "" then section[#section + 1] = trim(line) end
+  end
+  if #section == 0 then return nil end
+  return table.concat(section, " | ")
+end
+
+-- The missions root, read the way `wa mission` reads it (MISSION_ROOT, then MISSIONS_DIR, then
+-- ~/Work/missions): one place decides where a mission lives, so a fixture's scratch root is the one used here.
+function M.missions_root()
+  local ok, mission = pcall(dofile, "lua/core/mission.lua")
+  if ok and type(mission) == "table" and type(mission.root) == "function" then
+    local called, root = pcall(mission.root)
+    if called and type(root) == "string" and trim(root) ~= "" then return slashes(trim(root)) end
+  end
+  local home = trim(host.getenv and host.getenv("HOME") or "")
+  if home == "" then return nil end
+  return slashes(home) .. "/Work/missions"
+end
+
+-- <journal> -> how, where: the `## How Victor tests it` text of the first branch's brief - the ready line's own
+-- first, then the mission's own brief.md - and the file it was read from, so the report can cite it.
 function M.how_to_test(journal)
-  for _, branch in ipairs((journal and journal.branches) or {}) do
+  local branches = (journal and journal.branches) or {}
+  for _, branch in ipairs(branches) do
     local brief = trim(branch.brief or "")
     if brief ~= "" then
-      local text = read(brief)
-      if text then
-        local section, inside = {}, false
-        for line in tostring(text):gmatch("[^\r\n]+") do
-          if line:match("^##%s*How Victor tests it") then inside = true
-          elseif inside and line:match("^##%s") then inside = false
-          elseif inside and trim(line) ~= "" then section[#section + 1] = trim(line) end
-        end
-        if #section > 0 then return table.concat(section, " | "), brief end
-      end
+      local how = how_section(read(brief) or "")
+      if how then return how, brief end
+    end
+  end
+  local root = M.missions_root()
+  if not root then return nil, nil end
+  for _, branch in ipairs(branches) do
+    local name = tostring(branch.name or ""):gsub("^change/", "")
+    -- ONE WORD, NO TRAVERSAL: a mission is a directory name (mission.check_name's rule), and a name that is not
+    -- one would make this read a path nobody named.
+    if name ~= "" and not name:find("[/\\]") and not name:find("..", 1, true) then
+      local path = root .. "/" .. name .. "/brief.md"
+      local how = how_section(read(path) or "")
+      if how then return how, path end
     end
   end
   return nil, nil
@@ -1194,32 +1230,63 @@ end
 -- run, and what the round should cost. Read-only: no fetch, no merge, no build. It runs after `collect`
 -- because the tips are what make "what changed" answerable at all.
 
--- <journal> -> paths, notes: the round's changed paths (base..tip of every collected branch), deduplicated, and
--- a note naming every branch whose diff could NOT be read. Renames are not followed (`--no-renames`): the
--- planner asks which paths the merge introduces, and a rename is two paths - the old one gone and the new one
--- here - exactly as `git diff --name-status` reports it.
+-- <journal> -> paths, notes: the round's changed paths (the FORK POINT of every collected branch, not main's
+-- tip, to that branch's own tip), deduplicated, and a note naming every branch whose diff could NOT be read.
+-- Renames are not followed (`--no-renames`): the planner asks which paths the merge introduces, and a rename is
+-- two paths - the old one gone and the new one here - exactly as `git diff --name-status` reports it.
+--
+-- THE FORK POINT, NOT THE BASE. `git diff <main's tip> <branch>` answers "how do main and the branch differ",
+-- which also reports every commit MAIN gained after the branch was cut. The first real `wa land`
+-- (run land-20261122T113743Z-f3fedc13, branch change/seat-5-10-check - docs/, lua/core/, scripts/) was measured
+-- as "the branch changes Rust (3 file(s))" because main had moved on Rust since its base e7bf6d56, and the
+-- branch's own three test files were never run before its push. What a landing changes ABOUT MAIN is the
+-- branch's own delta - a merge of main into the branch moves main by exactly merge-base(main, branch)..branch -
+-- so that range is what every reader of "what this branch changes" gets: the plan's path, the tests it runs,
+-- the deploy it asks for, whether main's health can have moved.
 --
 -- A git that fails is NOT a round that changed nothing. This list is what the plan narrows on and what the gate's
--- rows file is proved against, so a broken `git diff` must never come back as an empty answer: an empty list is
--- read as "nothing to land", and a missing path is a row the gate then never asks for. The failure is therefore
--- returned by name in `notes`, and every caller that would narrow work on this list runs the whole suite instead.
+-- rows file is proved against, so a broken `git merge-base`/`git diff` must never come back as an empty answer: an
+-- empty list is read as "nothing to land", and a missing path is a row the gate then never asks for. The failure
+-- is therefore returned by name in `notes`, and every caller that would narrow work on this list runs the whole
+-- suite instead.
+
+-- <repo> <base> <tip> -> fork sha, nil: the commit the branch and main parted at. Histories that share nothing
+-- have no fork point (git exits 1), and that is a note, never a guess at "no changes".
+function M.fork_point(repo, base, tip)
+  local answer = M.exec("git -C " .. quote(slashes(repo)) .. " merge-base " .. quote(base) .. " " .. quote(tip),
+    repo, 120)
+  if (answer.code or 1) ~= 0 then
+    return nil, first_line(tostring(answer.stderr ~= "" and answer.stderr or answer.stdout))
+  end
+  local fork = trim(tostring(answer.stdout or ""))
+  if fork == "" then return nil, "git merge-base printed no commit" end
+  return fork
+end
+
 function M.changed_paths(run)
   local repo = run.journal.repo or M.repo()
   local base = run.journal.base
   local seen, paths, notes = {}, {}, {}
   for _, branch in ipairs(run.journal.branches or {}) do
     if base and branch.sha then
-      local listing = M.exec("git -C " .. quote(slashes(repo)) .. " diff --name-only --no-renames " ..
-        quote(base) .. " " .. quote(branch.sha), repo, 120)
-      if (listing.code or 1) ~= 0 then
+      local fork, fork_error = M.fork_point(repo, base, branch.sha)
+      if not fork then
         notes[#notes + 1] = "the changed paths of " .. tostring(branch.name or branch.sha) ..
-          " could not be read (git diff " .. tostring(base) .. " " .. tostring(branch.sha) .. ": " ..
-          first_line(tostring(listing.stderr ~= "" and listing.stderr or listing.stdout)) ..
-          "), so the paths this round changes are unknown"
+          " could not be read (git merge-base " .. tostring(base) .. " " .. tostring(branch.sha) .. ": " ..
+          tostring(fork_error) .. "), so the paths this round changes are unknown"
       else
-        for path in tostring(listing.stdout or ""):gmatch("[^\r\n]+") do
-          path = trim(path)
-          if path ~= "" and not seen[path] then seen[path] = true; paths[#paths + 1] = path end
+        local listing = M.exec("git -C " .. quote(slashes(repo)) .. " diff --name-only --no-renames " ..
+          quote(fork) .. " " .. quote(branch.sha), repo, 120)
+        if (listing.code or 1) ~= 0 then
+          notes[#notes + 1] = "the changed paths of " .. tostring(branch.name or branch.sha) ..
+            " could not be read (git diff " .. tostring(fork) .. " " .. tostring(branch.sha) .. ": " ..
+            first_line(tostring(listing.stderr ~= "" and listing.stderr or listing.stdout)) ..
+            "), so the paths this round changes are unknown"
+        else
+          for path in tostring(listing.stdout or ""):gmatch("[^\r\n]+") do
+            path = trim(path)
+            if path ~= "" and not seen[path] then seen[path] = true; paths[#paths + 1] = path end
+          end
         end
       end
     end
@@ -3673,6 +3740,13 @@ impl.tests = function(run, options)
   end
   local paths, notes = M.changed_paths(run)
   for _, note in ipairs(notes) do evidence("WARN " .. note .. "\n") end
+  if #notes > 0 then
+    -- UNKNOWN IS NOT "NOTHING TO RUN". The paths this branch changes could not be read, so this step cannot say
+    -- which of its tests to run: it names that in its own row instead of passing on an empty list.
+    local detail = table.concat(notes, "; ") .. " - so the branch's own tests were NOT run here"
+    evidence(detail .. "\n")
+    return true, { state = "skipped", detail = detail }
+  end
   local rust, rows, excluded = 0, {}, {}
   for _, path in ipairs(paths) do
     local spec = tostring(path)
