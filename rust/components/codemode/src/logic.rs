@@ -337,6 +337,12 @@ pub fn interpret(catalogue: &Catalogue, target: &str, name: &str, args: Option<&
             "searchTools" => {
                 let params = parse_params(args);
                 let (value, ok) = search_tools(catalogue, &params);
+                // A keyword search that matched nothing is the NODE's answer, not the seam's: its
+                // sentence names the command-line program the word means and the path it lives at
+                // (`keyword_miss`), which is a PATH lookup a sandbox cannot make.
+                if ok && keyword_miss(&params, &value).is_some() {
+                    return Guest::Host;
+                }
                 Guest::Answered(value, ok)
             }
             "describeTool" => {
@@ -463,6 +469,46 @@ pub fn search_tools(catalogue: &Catalogue, params: &Value) -> (Value, bool) {
     // first line, parameters without the per-property prose, callable and route. select: keeps the whole.
     let found: Vec<Value> = matches.into_iter().take(limit.as_f64().unwrap_or(8.0) as usize).map(|(_, _, value)| compact_match(&value)).collect();
     (Value::Array(found), true)
+}
+
+/// The query text a `searchTools(args)` call carries, in either argument shape the model knows:
+/// `searchTools("text", {limit})` and `searchTools({query:"text", limit})`. `None` when the call carries
+/// no query at all - a listing, or a `{names:[…]}` batch.
+fn requested_query_text(params: &Value) -> Option<String> {
+    let mut query = params.get(0).cloned();
+    if matches!(query, Some(Value::Object(_))) && params.get(1).is_none() {
+        query = query.and_then(|object| object.get("query").cloned());
+    }
+    match query {
+        Some(Value::String(text)) => Some(text),
+        _ => None,
+    }
+}
+
+/// The one `searchTools` answer the seam hands BACK to the loop: a keyword search that matched nothing.
+///
+/// WHY. The sentence it must carry says what did not match and, when the word names a program this
+/// machine has installed, which program that is and where it lives (`gh` for github, measured 22/11).
+/// That is a fact about the node's own PATH, read through `host.executable_on_path` - a capability a
+/// sandbox does not have. So this call goes to the loop (`Guest::Host`), which composes the one answer
+/// (`lua/core/codemode.lua` and `lua/core/cli_hints.lua`), and a script reads the same bytes whichever
+/// loop drove it.
+///
+/// The branch is read from the ANSWER and the ARGUMENT rather than re-decided: only the keyword branch
+/// can answer an empty array to a call whose query text is a real word - a batch is never empty (an
+/// empty batch is a refusal) and the listing says what it is by its own argument (no query, `"*"`, or
+/// text with no graphic). A future spelling added to `search_tools` and not here degrades to the seam
+/// answering that call itself, exactly as it did before: it never answers it wrongly.
+fn keyword_miss(params: &Value, value: &Value) -> Option<String> {
+    let rows = value.as_array()?;
+    if !rows.is_empty() {
+        return None;
+    }
+    let text = requested_query_text(params)?;
+    if text == "*" || !has_graphic(&text) {
+        return None;
+    }
+    Some(text)
 }
 
 /// One keyword match, compact: what to call and with what - the same object the native loop builds.
@@ -896,6 +942,29 @@ mod tests {
         assert_eq!(rows[0]["name"], "sessions");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["callable"], true);
+    }
+
+    #[test]
+    fn a_keyword_miss_goes_back_to_the_node_that_can_name_an_installed_program() {
+        let catalogue = catalogue();
+        let miss = |params: Value| keyword_miss(&params, &search_tools(&catalogue, &params).0);
+        // Everything the seam can answer alone stays its own: a hit, the listing in all its spellings,
+        // a batch (whose empty array is a refusal, never an answer) and a bounded page.
+        assert_eq!(miss(json!(["read"])), None);
+        assert_eq!(miss(json!(["*"])), None);
+        assert_eq!(miss(json!([""])), None);
+        assert_eq!(miss(json!([{ "names": ["read"] }])), None);
+        assert_eq!(miss(json!([{ "names": ["read"], "limit": 1 }])), None);
+        // The keyword branch with nothing to show is the one the loop answers, in both spellings of the
+        // call - and it carries the caller's own words, not a fixed sentence.
+        assert_eq!(miss(json!(["zqxnotatool"])), Some("zqxnotatool".to_string()));
+        assert_eq!(miss(json!([{ "query": "zqxnotatool", "limit": 2 }])), Some("zqxnotatool".to_string()));
+        assert!(matches!(interpret(&catalogue, "global", "searchTools", Some("[\"zqxnotatool\"]")), Guest::Host),
+            "a keyword miss is answered by the node, which can name an installed program");
+        assert!(matches!(interpret(&catalogue, "global", "searchTools", Some("[\"read\"]")), Guest::Answered(..)),
+            "a keyword hit is still answered here");
+        assert!(matches!(interpret(&catalogue, "global", "searchTools", Some("[\"*\"]")), Guest::Answered(..)),
+            "the listing is still answered here");
     }
 
     #[test]

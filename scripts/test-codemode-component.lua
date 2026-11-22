@@ -174,6 +174,10 @@ local scripts = {
   { label = 'discovery gives an outside tool its route', code = 'const all = await searchTools("*",{limit:200}); const s=all.find(t=>t.name==="subagent"); return JSON.stringify({callable:s.callable,route:s.route,schema:typeof s.schema});' },
   { label = 'describeTool gives a schema', code = 'const d = await describeTool("operation"); return JSON.stringify({callable:d.callable,route:typeof d.route,parameters:typeof d.parameters});' },
   { label = 'a keyword search', code = 'const one = await searchTools("sessions"); return one.length;' },
+  -- A keyword search that matches nothing is answered by the NODE on both paths (logic.rs hands it back
+  -- through Guest::Host): its reason names the command-line program the word means, which is a PATH
+  -- lookup no sandbox can make. Compared here so the two loops cannot drift about it (22/11).
+  { label = 'a keyword miss says why, the same way on both paths', code = 'const a = await searchTools("zqxnotatool"); return JSON.stringify({n:a.length,found:a[0].found,reason:a[0].reason});' },
   { label = 'a batch with a miss', code = 'const b = await searchTools({names:["sessions","nope_tool"]}); return JSON.stringify({m:b.length,missing:b.filter(x=>x.missing).map(x=>x.name),found:b[1].found,reason:typeof b[1].reason});' },
   -- The guest's own names are discovery entries like any other (operator's decision, 11/11): one tool,
   -- one answer shape, and the help text is the entry. Compared field for field across the two loops.
