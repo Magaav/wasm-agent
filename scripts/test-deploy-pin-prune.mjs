@@ -275,12 +275,14 @@ function deployWiring() {
 // ---- main ----------------------------------------------------------------------------------------
 (async () => {
   const started = Date.now();
-  deployWiring();
+  // The behaviour first, the deploy's wiring last: on the code before this change the behaviour is
+  // what fails, so the failure names the missing rule and not a missing line of shell.
   fourDeploys();
   await pinInUse();
   livenessUnknown();
   removalFails();
   nameAllowList();
+  deployWiring();
   const seconds = Math.round((Date.now() - started) / 1000);
   console.log(`deploy-pin-prune: ${passed} check(s) ok, ${skipped} skipped in ${seconds}s (scratch ${WORK})`);
   if (skipped === 0) fs.rmSync(WORK, {recursive: true, force: true});
