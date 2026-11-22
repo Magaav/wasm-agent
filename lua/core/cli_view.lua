@@ -3507,7 +3507,7 @@ function M.banner(opts)
   local divider = paint(opts.marker and M.RULE or M.expand_rules(M.RULE, limit), "border", live)
   local lines = { divider,
     paint(STAR, "matrix", live) .. " Welcome to " .. paint("wasm-agent", "bold", live) .. "!"
-      -- The product version, then the build's own name (Victor, 22/11): `v1.0 · vc6f890e3`. The product
+      -- The product version, then the build's own name (Victor, 22/11): `v0.1.0 · vc6f890e3`. The product
       -- version is one constant (`build_identity.PRODUCT_VERSION`) and a caller that has none says
       -- nothing rather than inventing one.
       .. ((opts.product and opts.product ~= "") and paint(" v" .. opts.product, "muted", live) or "")

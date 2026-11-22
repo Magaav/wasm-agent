@@ -493,7 +493,7 @@ function M.run(argv)
       -- ONE composer for this line (cli_view.model_line): a dot with one space on each side.
       model = cli_view.model_line(mode, reasoning),
       -- The product version, from the one constant that owns it (`build_identity.PRODUCT_VERSION`), beside
-      -- the build's own label: `✻ Welcome to wasm-agent! v1.0 · v<sha>`.
+      -- the build's own label: `✻ Welcome to wasm-agent! v0.1.0 · v<sha>`.
       product = build_identity.PRODUCT_VERSION,
       database = host.getenv("WASM_AGENT_DB") or "~/.wasm-agent/memory.db",
       session = agent.session_id,
