@@ -8,8 +8,9 @@
 #
 #   * the ALWAYS-ON core rows run whatever the request says (`wa_fast_core_rows`): the row-environment probe,
 #     which is the one row that can say whether the variables the runner sets arrive inside the node, and
-#     `scripts/test-land.lua`, the landing machine's own row. A narrowed run that dropped the probe could go
-#     green saying less than a full run, which is the failure the fast path's own header exists to prevent;
+#     the TEN parts of the landing machine's own row (`scripts/test-land-*.lua`). A narrowed run that dropped
+#     the probe - or one land part - could go green saying less than a full run, which is the failure the
+#     fast path's own header exists to prevent;
 #   * a requested row that is not a candidate (excluded by scripts/fast-path.exclude, misspelled, or gone) is
 #     a REFUSAL by name, never a silent omission: a plan that asks for a row the runner cannot run has to be
 #     fixed, not quietly obeyed;
@@ -21,8 +22,8 @@
 # Sourced by scripts/fast.sh; exercised by scripts/test-fast-rows.sh (no node, no cargo, seconds).
 # THE NEVER-DROPPED ROWS. Two kinds, and a third entry is only added with the evidence for it:
 #
-#   * the row-environment probe and `test-land.lua`: the run's own correctness and the landing machine's own
-#     row. A narrowed run that lost either would go green saying less than a full one;
+#   * the row-environment probe and the ten `test-land-*.lua` parts: the run's own correctness and the landing
+#     machine's own row. A narrowed run that lost any of them would go green saying less than a full one;
 #   * WHOLE-TREE ROWS: a row whose verdict depends on files it does not name, because the set it judges is
 #     enumerated from the repository - "every reachable module's refusal codes", "every tool's declared
 #     schema". Path-based narrowing cannot map such a row to a change made somewhere else in its set, so a
@@ -40,7 +41,17 @@
 # scripts/test-fast-rows.sh proves the pairing in the other direction too: any row that reads a path
 # scripts/generators.txt declares as generated MUST be in this list, or the row fails and names it.
 wa_fast_core_rows() {
-  printf '%s\n' scripts/test-fast-row-environment.lua scripts/test-land.lua \
+  # THE LAND ROW IS TEN rows since 22/11 (mission main-green-2, item 2): it was 655 checks and 55 s in ONE
+  # row, which the fast path may never drop, so every narrowed run paid it - and on a busy machine it grew
+  # past the 120 s watchdog ("no verdict within 120s", land261 and main-health, 8 rows in parallel). The
+  # cases were already independent fixtures, so they are ten rows by subject now (the harness they share is
+  # scripts/lib/land-row.lua), each under 11 s alone. EVERY part is listed: dropping one would go green
+  # saying less than a full run, which is the failure this list exists to prevent.
+  printf '%s\n' scripts/test-fast-row-environment.lua \
+    scripts/test-land-plan.lua scripts/test-land-resume.lua scripts/test-land-sign.lua \
+    scripts/test-land-review.lua scripts/test-land-rows.lua scripts/test-land-resume-19-11.lua \
+    scripts/test-land-marks.lua scripts/test-land-release.lua scripts/test-land-gate-rows.lua \
+    scripts/test-land-until.lua \
     scripts/test-refusal-contract.lua scripts/test-tool-schema-fidelity.lua scripts/test-codemode-parity.lua
 }
 

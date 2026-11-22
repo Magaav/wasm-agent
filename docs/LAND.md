@@ -24,8 +24,10 @@ Code: `lua/core/land.lua` (the machine, the plan and the ring's waves), `lua/cor
 per-node verb it calls), `scripts/sign-release.sh` (the one command that signs a release),
 `scripts/lib/land-classify.sh` (which kind of change a path is - the one definition, over `wa_compiled_input`),
 `scripts/lib/fast-rows.sh` (which Lua rows a narrowed run may execute), `scripts/publish-lua-tree.sh` (the
-record a Lua-only round signs). Tests: `scripts/test-land.lua` (197 checks, real git, a real scratch wa-vault,
-scripted nodes - including the four paths, the gate's narrowing, the deploy's waves and the cost report),
+record a Lua-only round signs). Tests: the ten `scripts/test-land-*.lua` parts (655 checks, real git, a real
+scratch wa-vault, scripted nodes - including the four paths, the gate's narrowing, the deploy's waves and
+the cost report; they share `scripts/lib/land-row.lua`, and each stays under 11 s alone where the one row
+this replaces took 55 s),
 `scripts/test-land-signing.sh` (build -> sign -> re-run the publisher -> publish, without a hand-frozen build)
 and `scripts/test-fast-rows.sh` (the narrowing's three rules).
 
@@ -124,9 +126,9 @@ no rows file at all - the whole suite runs, and the evidence says which diff fai
 time, never coverage.
 
 `scripts/lib/fast-rows.sh` is where a narrowing is stopped from meaning less than a full run: the always-on
-core rows are added whatever the request says (the row-environment probe, and `scripts/test-land.lua`), the
-contract checks inside `scripts/fast.sh` are not narrowable at all, an unknown row is a refusal by name, and an
-empty request is refused (a plan that maps nothing asks for the whole suite, never for silence).
+core rows are added whatever the request says (the row-environment probe, and the ten `scripts/test-land-*.lua`
+parts), the contract checks inside `scripts/fast.sh` are not narrowable at all, an unknown row is a refusal by
+name, and an empty request is refused (a plan that maps nothing asks for the whole suite, never for silence).
 
 **A failing row is still re-run once alone** under the machine's highest weight, and a row that passes alone
 is reported `flaky under load: <name>` and **still stops the landing** - narrowing changes what runs, never

@@ -113,7 +113,8 @@ function M.exec(command, cwd, timeout, opts)
   local launch, before = command, 0
   if type(tee) == "string" and tee ~= "" then
     before = #(read(tee) or "")
-    -- The closing brace goes on its OWN line, never after a `;` (measured: it broke test-land case5b). A
+    -- The closing brace goes on its OWN line, never after a `;` (measured: it broke case5b of what is now
+-- scripts/test-land-plan.lua). A
     -- check command may legally end in a shell comment (`bash x.sh # changed`), and `; }` on the same line
     -- belongs to that comment - the group never closes, the shell exits 2, and a green check reads red.
     launch = "{ " .. tostring(command) .. "\n} >> " .. quote(tee) .. " 2>&1"
@@ -1225,7 +1226,8 @@ end
 -- name itself, which is the only form that works: `ls -1dt '<dir>'/*/journal.json` cannot expand a glob the
 -- shell never sees, so the listing came back empty and every reader of it saw no run at all - the estimate
 -- fell back to the default table and a bare `wa land --resume` answered "nothing to resume" with runs sitting
--- in the directory (measured 19/11; scripts/test-land.lua case 24). One listing, so no two readers disagree.
+-- in the directory (measured 19/11; scripts/test-land-resume-19-11.lua case 24). One listing, so no two
+-- readers disagree.
 local function journals_by_newest(limit)
   local listing = M.exec("find " .. quote(M.root()) .. " -maxdepth 2 -name journal.json -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -" .. tostring(limit or 20), "", 60)
   local paths = {}
@@ -1938,7 +1940,8 @@ impl.merge = function(run, options)
   if not tree then
     -- The format is QUOTED: an unquoted `%(refname:short)` is a shell syntax error, so the listing came
     -- back empty, every run believed it was `land1`, and the second landing of a session died on
-    -- "'land1/final' is already used by worktree" (measured by scripts/test-land.lua, 13/11).
+    -- "'land1/final' is already used by worktree" (measured 13/11; the case is in
+-- scripts/test-land-sign.lua now).
     local listing = git(run, repo, "for-each-ref " .. quote("--format=%(refname:short)") ..
       " " .. quote("refs/heads/land*/final"))
     local highest = 0

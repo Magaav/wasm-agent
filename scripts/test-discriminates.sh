@@ -44,6 +44,17 @@ ALLOW_UNCLASSIFIED=0
 BRANCHES=""
 REPO=$ROOT
 
+# THE HOME THIS LAUNCHER REPLACES, recorded before it does. Every row below runs with HOME=<scratch> - a row
+# may write a repository, a journal or a vault, and none of it may land in the operator's home - and a row
+# that GUARDS its home (scripts/lib/scratch-home.lua, read by the ten scripts/test-land-*.lua parts and by
+# scripts/test-font-setup.lua) can only prove it is not on the operator's by being told what that home was.
+# The node records exactly that as WA_HOME_BEFORE_OVERRIDE when it replaces HOME
+# (rust/wa-host/src/main.rs, and scripts/lib/scratch-home.lua reads it for that reason); a LAUNCHER that
+# replaces HOME itself owes the row the same fact. MEASURED 22/11 (mission main-green-2): without it eleven
+# rows exited 2 with "WASM_AGENT_HOME is the real <scratch>", were classified `unclassified`, and blocked a
+# landing over a fact about this script rather than about the branch.
+OPERATOR_HOME="${HOME:-}"
+
 refuse() { printf 'test-discriminates: refused: %s\n' "$*" >&2; exit 76; }
 say() { printf 'test-discriminates: %s\n' "$*"; }
 
@@ -118,6 +129,22 @@ TMP_ROOT=${WASM_AGENT_TMPDIR:-$HOME/.wasm-agent/tmp}
 mkdir -p "$TMP_ROOT" 2>/dev/null || TMP_ROOT=${TMPDIR:-/tmp}
 WORKROOT=$(mktemp -d "$TMP_ROOT/discriminates-XXXXXX" 2>/dev/null) \
   || refuse "a scratch directory under $TMP_ROOT could not be made"
+# A ROW'S HOME IS A DIFFERENT QUESTION FROM WHERE THE SCRATCH TREE SITS. $TMP_ROOT is the node's temp root on
+# purpose (docs/ONEROOT.md: a scratch TREE never sits beside a checkout), but a row's HOME may not live inside
+# the operator's store: scripts/lib/scratch-home.lua refuses exactly that, and rightly - a row given such a home
+# writes a repository, a journal and a scratch vault there. MEASURED 22/11 (mission main-green-2): with the home
+# under $TMP_ROOT (that is, under ~/.wasm-agent/tmp), eleven guarded rows refused "WASM_AGENT_HOME ... is inside
+# the operator store" and blocked a landing. So the homes get their own root in the system temp directory.
+# A HOME MAY NOT BE INSIDE THE OPERATOR STORE, so the root these are made under may not be either - and on
+# this node TMPDIR POINTS THERE ($HOME/.wasm-agent/tmp), which is what made the first attempt fail in exactly
+# the same way. So the root is the caller's temp directory only when that is outside the store, and /tmp when
+# it is not: the store is the one place a row's home may never be, by the guard's own rule.
+HOMES_PARENT=${TMPDIR:-/tmp}
+case "$HOMES_PARENT" in
+  "$OPERATOR_HOME"/.wasm-agent|"$OPERATOR_HOME"/.wasm-agent/*) HOMES_PARENT=/tmp ;;
+esac
+HOMEROOT=$(mktemp -d "$HOMES_PARENT/discriminates-homes-XXXXXX" 2>/dev/null) \
+  || refuse "a scratch home directory under $HOMES_PARENT could not be made"
 WORKTREE=$WORKROOT/base
 KEEP_ON_EXIT=0
 cleanup() {
@@ -125,7 +152,7 @@ cleanup() {
     say "kept: $WORKTREE (--keep)"
   else
     git -C "$REPO" worktree remove --force "$WORKTREE" >/dev/null 2>&1 || rm -rf "$WORKTREE" 2>/dev/null
-    rm -rf "$WORKROOT" 2>/dev/null
+    rm -rf "$WORKROOT" "$HOMEROOT" 2>/dev/null
   fi
 }
 on_signal() { cleanup; exit 130; }
@@ -234,7 +261,7 @@ run_one() { # <path> <added|modified>
     record environment "$path" "this tree has no wa binary, so a Lua row cannot run the base code"
     return
   fi
-  home=$(mktemp -d "$WORKROOT/h.XXXXXX" 2>/dev/null) || { record environment "$path" 'a scratch home could not be made'; return; }
+  home=$(mktemp -d "$HOMEROOT/h.XXXXXX" 2>/dev/null) || { record environment "$path" 'a scratch home could not be made'; return; }
   out=$WORKROOT/out.$(printf '%s' "$path" | tr '/.' '__').log
   (
     cd "$WORKTREE" || exit 126
@@ -244,23 +271,23 @@ run_one() { # <path> <added|modified>
           -u WASM_AGENT_VAULT_PASSPHRASE -u WASM_AGENT_VAULT_OPERATOR_URL -u WASM_AGENT_OPENCODE_GO_VAULT_URL \
           -u WASM_AGENT_DB -u WASM_AGENT_IN_TURN -u WASM_AGENT_RAW_CODE -u WASM_AGENT_PROVENANCE \
           -u WA_MESH -u WA_MESH_COMPONENT \
-          HOME="$home" WASM_AGENT_HOME="$home" WASM_AGENT_LUA_ROOT="$WORKTREE" \
+          HOME="$home" WASM_AGENT_HOME="$home" WA_HOME_BEFORE_OVERRIDE="$OPERATOR_HOME" WASM_AGENT_LUA_ROOT="$WORKTREE" \
           WASM_AGENT_RENDEZVOUS= WASM_AGENT_RELAY= WASM_AGENT_MANAGED=0 WA_SCRIPT="$path" \
           timeout "$TEST_TIMEOUT" "$LUA_BIN" --db "$home/t.db" ;;
       bash)
         env -u WASM_AGENT_DB -u WASM_AGENT_IN_TURN -u WA_MESH \
-          HOME="$home" WASM_AGENT_HOME="$home" WASM_AGENT_LUA_ROOT="$WORKTREE" \
+          HOME="$home" WASM_AGENT_HOME="$home" WA_HOME_BEFORE_OVERRIDE="$OPERATOR_HOME" WASM_AGENT_LUA_ROOT="$WORKTREE" \
           WASM_AGENT_RENDEZVOUS= WASM_AGENT_RELAY= WASM_AGENT_MANAGED=0 \
           WA_BIN="$LUA_BIN" WA_FAST_BIN="$LUA_BIN" PATH="$home/bin:$PATH" \
           timeout "$TEST_TIMEOUT" bash "$path" ;;
       node)
         env -u WASM_AGENT_DB -u WASM_AGENT_IN_TURN -u WA_MESH \
-          HOME="$home" WASM_AGENT_HOME="$home" WASM_AGENT_LUA_ROOT="$WORKTREE" \
+          HOME="$home" WASM_AGENT_HOME="$home" WA_HOME_BEFORE_OVERRIDE="$OPERATOR_HOME" WASM_AGENT_LUA_ROOT="$WORKTREE" \
           WASM_AGENT_RENDEZVOUS= WASM_AGENT_RELAY= WASM_AGENT_MANAGED=0 \
           WA_BIN="$LUA_BIN" WA_FAST_BIN="$LUA_BIN" \
           timeout "$TEST_TIMEOUT" node "$path" ;;
       python3|pwsh)
-        HOME="$home" WASM_AGENT_HOME="$home" timeout "$TEST_TIMEOUT" "$runner" "$path" ;;
+        HOME="$home" WASM_AGENT_HOME="$home" WA_HOME_BEFORE_OVERRIDE="$OPERATOR_HOME" timeout "$TEST_TIMEOUT" "$runner" "$path" ;;
     esac
   ) > "$out" 2>&1
   code=$?
@@ -296,6 +323,16 @@ run_one() { # <path> <added|modified>
   fi
   if printf '%s' "$last" | grep -Eqi "$ENV_RE"; then
     record environment "$path" "the machine could not run it: $(printf '%s' "$last" | grep -Eo "$ENV_RE" | head -1)"
+    return
+  fi
+  # ...EXCEPT THE ONE LOAD FAILURE LUA PREFIXES WITH `lua error:`: the host answers `lua_root_unreadable: <path>`
+  # when the Lua root has no such module, which is "the base has no such file" and not an assertion. MEASURED
+  # 22/11 (mission main-green-2): the ten scripts/test-land-*.lua parts read scripts/lib/land-row.lua, which the
+  # base does not have, and were reported as `discriminates` - "an assertion failed on the old code" - when
+  # the honest verdict is that they could not run there at all. One token, before the general marker, so the
+  # rule below (an assertion that SAYS "missing" is still an assertion) is untouched.
+  if printf '%s' "$last" | grep -q 'lua_root_unreadable'; then
+    record new-symbol "$path" "it died on code the base does not have: $(printf '%s' "$last" | grep -Eo 'lua_root_unreadable.*' | head -1 | cut -c1-160 | tr '\t' ' ')"
     return
   fi
   # ASSERTIONS FIRST (the review's order): "the new value is missing" is an assertion that fired.
