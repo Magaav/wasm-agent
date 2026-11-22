@@ -79,6 +79,10 @@ fn service_lifecycle(name: &str, verb: &str) -> Result<()> {
 // are delegated instead of done twice by two supervisors (docs/SENTINEL.md, "The watchdog, and what it
 // takes over"). The decision is a pure function over the switch and what the supervisor recorded.
 mod watchdog;
+/// Who keeps this node busy, for how long, and whether a held deploy may pass over them (22/11).
+mod holders;
+#[cfg(test)]
+mod holders_tests;
 
 mod deploy_protocol;
 mod deploy_bootstrap;
@@ -2491,6 +2495,67 @@ pub(crate) fn deploy_idle_bound_secs() -> u64 {
         .unwrap_or(1800)
 }
 
+/// How long a deploy request may be held for a busy node before it proceeds over PAUSED sessions only.
+///
+/// Three minutes (22/11): a session on this build pauses at its next step boundary, so the node is idle in
+/// seconds; a session that cannot pause (an older binary, a long `bash` call) is the case the bound exists for,
+/// and it is still waited on - the bound only ever passes over holders that have said they paused. An operator who
+/// wants the old unbounded wait sets `WA_DEPLOY_HOLD_BOUND=0`.
+pub(crate) fn hold_bound_secs() -> u64 {
+    std::env::var("WA_DEPLOY_HOLD_BOUND")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(180)
+}
+
+/// When a request was asked for: the `queued_at` it recorded, or the epoch in the name it was written under
+/// (`<epoch-nanos>-<pid>-<sequence>.json`, `stamp_seconds`). The older file shape has no field, and a wait that
+/// cannot be measured is a wait nothing can bound.
+pub(crate) fn request_queued_at(request: &Value, stem: &str) -> u64 {
+    request
+        .get("queued_at")
+        .and_then(Value::as_u64)
+        .filter(|value| *value > 0)
+        .or_else(|| stamp_seconds(stem))
+        .unwrap_or_else(now_epoch)
+}
+
+/// Where a session records that it paused for a deploy: `<config>/deploy-paused/<session>.json`
+/// (lua/core/deploy_pause.lua, `record_pause`). One file per session, so two sessions pausing at once never write
+/// the same file, and the sentinel only has to list the directory.
+pub(crate) fn paused_dir() -> PathBuf {
+    config_dir().join("deploy-paused")
+}
+
+/// The instant a session recorded that it paused, when that record is at or after `since`.
+///
+/// `since` is the time the waiting request was QUEUED for: a record left by an earlier deploy says nothing about
+/// this one, and a session that paused for the deploy before this one is still working as far as this request is
+/// concerned. An unreadable or undated record is not a pause either - unknown is not yes.
+pub(crate) fn paused_since(session: &str, since: u64) -> Option<u64> {
+    if session.is_empty() {
+        return None;
+    }
+    let safe: String = session.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect();
+    if safe.is_empty() {
+        return None;
+    }
+    let text = std::fs::read_to_string(paused_dir().join(format!("{safe}.json"))).ok()?;
+    let record: Value = serde_json::from_str(&text).ok()?;
+    let at = record.get("since").and_then(Value::as_u64).filter(|value| *value > 0)?;
+    (at >= since).then_some(at)
+}
+
+/// When the oldest request that waits for idle was queued, if there is one: the deploy `status` is reporting a
+/// pause against. `None` means nothing is waiting, so no session can be "paused for the deploy".
+pub(crate) fn oldest_waiting_queued_at(dir: &Path) -> Option<u64> {
+    pending_requests(dir)
+        .into_iter()
+        .filter(|pending| waits_for_idle(&pending.verb))
+        .filter_map(|pending| pending.queued_at)
+        .min()
+}
+
 /// Make a held request visible: one line in the log and one on the console, once per request. It is not a
 /// failure and it is not a claim: the request stays where it is and is retried next tick.
 ///
@@ -2616,8 +2681,31 @@ fn process_requests(background: bool, held: &mut Held) -> Result<u32> {
         // Maintenance stays queued; observing it never monopolizes the recovery/control loop. The hold is
         // announced with its reason instead of being silent, and the request is still retried next tick.
         if let Some(why)=hold_for(verb,node_activity(),node_is_up) {
-            announce_hold(held,&key,verb,why,asked);
-            continue;
+            // THE BOUND (22/11). Held is not the same as stuck: the request may proceed once it has waited its
+            // bound AND every holder of the node is a session that recorded a pause for this request
+            // (lua/core/deploy_pause.lua writes that record at the moment it pauses). A holder still working, a
+            // subagent, a queued turn, or a run whose session the snapshot does not name is reported and NOT
+            // passed over - stopping a node under a working turn is the failure the pause exists to avoid.
+            let asked_at = request_queued_at(&preview, protocol_id);
+            let waited = now_epoch().saturating_sub(asked_at);
+            let bound = hold_bound_secs();
+            if waited >= bound {
+                let holders = health().map(|body| holders::holders_from(&body)).unwrap_or_default();
+                match holders::bound_verdict(waited, bound, &holders, |session| paused_since(session, asked_at).is_some()) {
+                    Ok(()) => {
+                        let line = format!("{verb} proceeding: held {waited}s, past the {bound}s bound, and all {} holder(s) of the node have paused for it", holders.len());
+                        audit("hold-bound-passed", &format!("{verb} {key}"), &line);
+                        say(&line);
+                    }
+                    Err(still) => {
+                        announce_hold(held,&key,verb,&format!("{why}; {still}"),asked);
+                        continue;
+                    }
+                }
+            } else {
+                announce_hold(held,&key,verb,why,asked);
+                continue;
+            }
         }
         held.settled(&key);
         // Claim before working, not after. This used to read the request, do the work, and only then
@@ -3726,6 +3814,24 @@ fn status() -> Result<()> {
     // log, or to mistake "queued" for "deployed".
     for line in pending_lines(&sentinel_dir().join("requests"), now_epoch(), activity, node_up, watched.is_some()) {
         say(&line);
+    }
+    // WHO is holding the node, for how long, and whether they have paused for the request above (22/11).
+    // Without this, `held: node busy` named nobody: the operator of the 22/11 incident had to park four sessions
+    // by hand because nothing told them which ones, and nothing told them either whether those sessions had
+    // already paused (in which case the wait was about the node, not about them).
+    let holders = health.as_ref().map(holders::holders_from).unwrap_or_default();
+    if !holders.is_empty() {
+        let since = oldest_waiting_queued_at(&sentinel_dir().join("requests"));
+        say(&format!("busy:      {} holder(s) of the node", holders.len()));
+        for line in holders::holder_lines(&holders, |session| {
+            since.map(|at| paused_since(session, at).is_some()).unwrap_or(false)
+        }) {
+            say(&line);
+        }
+        if let Some(at) = since {
+            say(&format!("  the request has waited {}s; past {}s the sentinel proceeds if every holder has paused",
+                now_epoch().saturating_sub(at), hold_bound_secs()));
+        }
     }
     // What became of the requests that are no longer in the box. The lines above answer "why not yet";
     // these answer "what happened" - the step it reached, and the error when it failed. A failure is the row

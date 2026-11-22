@@ -190,7 +190,11 @@ errlines=${errlines:-0}
 cli=$!
 echo "$cli" > "$M/run.pid"
 # TIMEOUT: signals the CLI pid this runner started, and nothing else - never a pattern.
-( sleep ${MISSION_TIMEOUT_SECONDS:-21600}; kill -TERM "$cli" 2>/dev/null; sleep 30; kill -KILL "$cli" 2>/dev/null ) &
+# ITS OWN OUTPUT IS /dev/null: `kill $watchdog` kills the subshell, not the `sleep` inside it, and a leaked
+# sleep that inherited a caller's pipe keeps that pipe open for MISSION_TIMEOUT_SECONDS - a `$(bash run.sh)`
+# never saw EOF (measured by scripts/test-mission-verb.sh, 22/11). The timeout still fires; it just cannot hold
+# anybody's stdout.
+( sleep ${MISSION_TIMEOUT_SECONDS:-21600}; kill -TERM "$cli" 2>/dev/null; sleep 30; kill -KILL "$cli" 2>/dev/null ) >/dev/null 2>&1 &
 watchdog=$!
 i=0
 while [ "$i" -lt 300 ]; do
@@ -206,6 +210,32 @@ if [ -n "${sid:-}" ]; then
 fi
 wait "$cli"; rc=$?
 kill "$watchdog" 2>/dev/null || true
+# A REFUSED TURN IS NOT A FAILED RUN (22/11). While a deploy waits for or installs on this node the CLI
+# refuses a NEW turn by name and exits 2 (`deploy_waiting: waiting for the install of <sha>`,
+# docs/SCRIPTED-RUNS.md). Nothing was asked and nothing answered, so the launch waits and asks again - up to
+# WA_DEPLOY_WAIT_LIMIT seconds, in WA_DEPLOY_WAIT_STEP steps - instead of recording rc=2 as if the mission's
+# first turn had failed. Past the limit the refusal stands as itself: rc=2 in `done`, and the line written here
+# says why, because a wait that never ends is a fact the operator must see and not a silence.
+step=${WA_DEPLOY_WAIT_STEP:-15}; case "$step" in ''|*[!0-9]*|0) step=15 ;; esac
+limit=${WA_DEPLOY_WAIT_LIMIT:-900}; case "$limit" in ''|*[!0-9]*) limit=900 ;; esac
+waited=0
+while [ "$rc" -eq 2 ] && tail -c 4000 "$M/out.log" 2>/dev/null | grep -q deploy_waiting; do
+  if [ "$waited" -ge "$limit" ]; then
+    printf 'deploy-wait %s gave up after %ss: the node is still waiting for or installing a build, so this turn never started (nothing ran)\n' "$(date -u +%FT%TZ)" "$waited" >> "$M/out.log"
+    break
+  fi
+  sleep "$step"
+  waited=$((waited + step))
+  printf 'deploy-wait %s the node is waiting for or installing a build: asking again (%ss of %ss)\n' "$(date -u +%FT%TZ)" "$waited" "$limit" >> "$M/out.log"
+  printf 'deploy-wait %s refused (nothing ran; asking again in %ss)\n' "$(date -u +%FT%TZ)" "$step" >> "$M/lease.log"
+  "$WA" chat --once "$(cat "$M/prompt.md")" >> "$M/out.log" 2>> "$M/err.log" &
+  cli=$!
+  echo "$cli" > "$M/run.pid"
+  ( sleep ${MISSION_TIMEOUT_SECONDS:-21600}; kill -TERM "$cli" 2>/dev/null; sleep 30; kill -KILL "$cli" 2>/dev/null ) >/dev/null 2>&1 &
+  watchdog=$!
+  wait "$cli"; rc=$?
+  kill "$watchdog" 2>/dev/null || true
+done
 printf 'rc=%s %s\n' "$rc" "$(date -u +%FT%TZ)" > "$M/done"
 printf 'cli-exit %s rc=%s session=%s (the lock stays: the node keeps the run)\n' "$(date -u +%FT%TZ)" "$rc" "${sid:--}" >> "$M/lease.log"
 exit "$rc"
@@ -634,7 +664,23 @@ sid=$1; rc=1
 rm -f "$M/done"
 for try in $(seq 1 25); do
   echo "--- resume $try of $sid $(date -u +%FT%TZ)" >> "$M/out.log"
-  "$WA" chat --resume "$sid" --once "${MSG:-[orchestrator] Your last response ended without an answer or action. Continue exactly where you stopped.}" >> "$M/out.log" 2>> "$M/err.log"; rc=$?
+  step=${WA_DEPLOY_WAIT_STEP:-15}; case "$step" in ''|*[!0-9]*|0) step=15 ;; esac
+  limit=${WA_DEPLOY_WAIT_LIMIT:-900}; case "$limit" in ''|*[!0-9]*) limit=900 ;; esac
+  waited=0
+  while :; do
+    "$WA" chat --resume "$sid" --once "${MSG:-[orchestrator] Your last response ended without an answer or action. Continue exactly where you stopped.}" >> "$M/out.log" 2>> "$M/err.log"; rc=$?
+    # A REFUSED TURN IS NOT A TRY (22/11): exit 2 with `deploy_waiting` means a build is waiting for or
+    # installing on this node, so nothing was asked and nothing answered. Wait and ask again rather than
+    # spending one of the 25 tries on a wait; past the limit the refusal stands as rc=2 and the line says why.
+    [ "$rc" -eq 2 ] && tail -c 4000 "$M/out.log" 2>/dev/null | grep -q deploy_waiting || break
+    if [ "$waited" -ge "$limit" ]; then
+      echo "deploy-wait gave up after ${waited}s: the node is still waiting for or installing a build, so this resume never ran" >> "$M/out.log"
+      break
+    fi
+    sleep "$step"
+    waited=$((waited + step))
+    echo "deploy-wait the node is waiting for or installing a build: asking again (${waited}s of ${limit}s)" >> "$M/out.log"
+  done
   [ $rc -eq 0 ] && tail -c 3000 "$M/out.log" | grep -q "</turn>" && break
   tail -c 3000 "$M/out.log" | grep -qE "reasoning is not an answer|provider_stalled|returned no answer|first-response deadline|tool_call_markup_as_text|run_block_in_thinking|reasoning_only|compaction_answer|plan_only|stale_shutdown_notice" || break
   sleep 15

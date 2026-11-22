@@ -854,6 +854,13 @@ WA_BIN="$bin" check tool-env-allow bash scripts/test-tool-env-allow.sh
 # one `wa`, read by a second, and performed by the tick in a third. Its Lua half
 # (scripts/test-session-park.lua) is a fast-path row by name.
 check session-park bash scripts/test-session-park.sh
+# A DEPLOY THAT IS ONLY WAITING ALREADY STOPS THIS NODE FROM STARVING IT (22/11, mission deploy-never-starved).
+# Measured twice: a deploy request held 34 and 30 minutes behind worker turns, and the pause signal that existed
+# (the installer's marker) covers the swap, never the wait. Two cross-process rows, because the fix crosses
+# processes: a real node and a real `wa chat --once` worker, and the real sentinel binary against a stub /health.
+# Their Lua halves (scripts/test-deploy-wait.lua) are fast-path rows by name.
+WA_BIN="$bin" check deploy-wait bash scripts/test-deploy-wait.sh
+WA_BIN="$bin" check deploy-bound bash scripts/test-deploy-bound.sh
 # fast.sh runs under set -u: every incremented counter is initialised (test-fast-counters.sh).
 check fast-counters bash scripts/test-fast-counters.sh
 check install-front-door bash scripts/test-install.sh

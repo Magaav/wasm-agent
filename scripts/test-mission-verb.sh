@@ -6,6 +6,12 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$(pwd -P)
 WA=${WA_BIN:-$(command -v wa)}
+# THIS ROW NEVER READS ITS CALLER'S STDIN. `wa chat --once` treats a stdin that is not a terminal as a queue of
+# prompts (docs/SCRIPTED-RUNS.md), so a child that inherited the caller's stdin ATE THE REST OF IT - measured
+# 22/11 by scripts/test-discriminates.sh, whose row list arrives on stdin: six tests were listed and three ran,
+# the other three consumed as extra prompts by a row's `wa chat --once`. One line, before anything starts a CLI.
+exec </dev/null
+
 [ -n "$WA" ] || { echo "mission-verb: no wa on PATH"; exit 3; }
 WORK=$(mktemp -d)
 KIDS=''
@@ -76,6 +82,75 @@ grep -q '^unset WASM_AGENT_RAW_CODE' "$M/run.sh" || fail 'run.sh does not clear 
 ok
 out=$(mission launch demo HEAD --wa "$WORK/bin/stub-wa" 2>&1)
 has "$out" 'already_staged' 'a staged mission is not launched twice'
+
+# --- the runner `wa mission launch` writes waits out a deploy refusal (22/11, review MUST 3)
+# While a deploy waits for or installs on the node, `wa chat --once` refuses a NEW turn by name and exits 2.
+# The runner used to write that rc=2 into `done` - a mission that never ran, read as a failed turn - so it must
+# wait and ask again. Driven here, not grepped: a stub that refuses its first turn and then answers, and the
+# mission's own files are what the check reads.
+mkdir -p "$MISSION_ROOT/refused"
+printf 'Do nothing either: this is a stub mission too.\n' > "$MISSION_ROOT/refused/brief.md"
+cat > "$WORK/bin/refuse-wa" <<'STUB'
+#!/usr/bin/env bash
+D=$(dirname "$0")
+case ${1-} in
+  chat)
+    n=$(cat "$D/deploy.left" 2>/dev/null || echo 0)
+    case ${n:-0} in ''|*[!0-9]*) n=0 ;; esac
+    if [ "$n" -gt 0 ]; then
+      echo $((n - 1)) > "$D/deploy.left"
+      printf 'deploy_waiting: waiting for the install of 8082b42e1111 (deploy request 1795341684727384607-2971842-00000000000000000000, asked 2s ago). This node starts no new turn while a build is waiting for it or being installed; nothing was lost, and the work starts again once the swap is done.\n'
+      exit 2
+    fi
+    echo "wa: session 33333333-4444-5555-6666-777777777777 ok" >&2
+    exit 0 ;;
+  *) exit 0 ;;
+esac
+STUB
+chmod +x "$WORK/bin/refuse-wa"
+echo 1 > "$WORK/bin/deploy.left"
+out=$(mission launch refused HEAD --wa "$WORK/bin/refuse-wa" 2>&1)
+has "$out" '"ok":true' 'the mission whose turn will be refused is staged'
+R=$MISSION_ROOT/refused
+# BOUNDED, because the code this row judges on the OLD tree can hang: the base runner's timeout watchdog was
+# killed as a subshell, so its `sleep` kept this command substitution's pipe open and the row sat until the
+# caller's own timeout (measured: the discrimination gate reported it `timeout`, 22/11). A row that hangs cannot
+# say what is wrong; one that ends in 120 s says it.
+TO=""; command -v timeout >/dev/null 2>&1 && TO="timeout 120"
+$TO env WA_DEPLOY_WAIT_STEP=1 WA_DEPLOY_WAIT_LIMIT=60 bash "$R/run.sh" > "$WORK/refused-run.log" 2>&1; code=$?
+out="$(cat "$WORK/refused-run.log")"
+[ "$code" = 124 ] && fail 'the generated runner never returned (a wait that does not end?)'
+# THE RUNNER'S OUTPUT GOES TO A FILE, and it is run WITHOUT `$( )`: the base runner's timeout watchdog leaves a
+# `sleep` holding an inherited pipe, so a command substitution waited on an orphan and this row was reported as
+# `timeout` (discrimination gate, 22/11). A file has no such reader, and `timeout 120` above is a real bound.
+[ "$code" = 0 ] || fail "the runner exits with the turn that finally ran (got $code): $out"
+ok
+has "$(cat "$R/done")" 'rc=0' 'the refusal was waited out, not recorded as the mission run'
+has "$(cat "$R/out.log")" 'deploy-wait' 'the wait is in the mission log'
+has "$(cat "$R/lease.log")" 'deploy-wait' 'and in lease.log, where an operator looks for a launch'
+
+# --- ...and a wait that never ends is recorded as itself, with the line that says nothing ran
+echo 0 > "$WORK/bin/deploy.left"
+cat > "$WORK/bin/refuse-always-wa" <<'STUB'
+#!/usr/bin/env bash
+case ${1-} in
+  chat) printf 'deploy_waiting: waiting for the install of 8082b42e1111; nothing was lost, this is a wait.\n'; exit 2 ;;
+  *) exit 0 ;;
+esac
+STUB
+chmod +x "$WORK/bin/refuse-always-wa"
+mkdir -p "$MISSION_ROOT/never"
+printf 'Never.\n' > "$MISSION_ROOT/never/brief.md"
+out=$(mission launch never HEAD --wa "$WORK/bin/refuse-always-wa" 2>&1)
+has "$out" '"ok":true' 'the always-refused mission is staged'
+N=$MISSION_ROOT/never
+$TO env WA_DEPLOY_WAIT_STEP=1 WA_DEPLOY_WAIT_LIMIT=2 bash "$N/run.sh" > "$WORK/never-run.log" 2>&1; code=$?
+out="$(cat "$WORK/never-run.log")"
+[ "$code" = 124 ] && fail 'the generated runner never returned on a refusal it could not wait out'
+[ "$code" = 2 ] || fail "a wait that never ends exits 2, the refusal itself (got $code): $out"
+ok
+has "$(cat "$N/done")" 'rc=2' 'done carries the refusal, not a failed turn'
+has "$(cat "$N/out.log")" 'gave up after' 'and the log says the wait ended and nothing ran'
 
 # --- start
 out=$(mission start demo 2>&1)

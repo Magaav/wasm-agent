@@ -40,7 +40,17 @@ A scripted run:
 - releases the session on the way out (`agent:close()`: the presence row and the conversation row go, and
   each run releases its own resource claim on every exit path - `lua/core/agent.lua`), which is the
   orderly version of the kill;
-- exits with the last turn's status: `0` when every turn answered, `1` when one failed.
+- exits with the last turn's status: `0` when every turn answered, `1` when one failed, and `2` when the
+  turn was REFUSED before it started and nothing ran - the session is parked (`wa session release <id>`
+  re-arms it), or a deploy is waiting for or installing on this node (`deploy_waiting: waiting for the
+  install of <sha>`, `docs/SELF-LOOP.md`, "What waits, and what pauses for it"). A refusal writes nothing -
+  no thread, no message, no model call - so a loop that retries it loses nothing and spends nothing.
+- **a runner that resumes a worker must WAIT on that exit 2, not count it.** `2` with `deploy_waiting` is not
+  a failed turn: nothing was asked and nothing answered, so a round spent on it is a mission recorded red that
+  nobody worked on. The mission runners (`scripts/mission.sh`'s `run.sh`, `wa mission launch`'s and
+  `wa mission resume`'s) and `scripts/worker-gate.sh` wait and ask again, up to `WA_DEPLOY_WAIT_LIMIT`
+  seconds (default 900) in `WA_DEPLOY_WAIT_STEP` steps (default 15), and write the wait into the mission's own
+  log and `lease.log`; past the limit the refusal stands as `rc=2` and the give-up line says nothing ran.
 
 A reader at a terminal gets exactly what they had: the detection is `== false`, so a binary that cannot
 answer `host.isatty` (an older one) is treated as interactive.

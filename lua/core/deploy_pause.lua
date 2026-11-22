@@ -26,6 +26,8 @@ local M = {}
 
 M.FILE = "deploy-pending.json"
 M.DEFAULT_BOUND = 900
+-- How soon a turn paused for a WAITING REQUEST asks to be looked at again (see resume_seconds).
+M.WAIT_RESUME_SECONDS = 60
 M.WAKE_MARK = "[deploy pending]"
 -- The reason a paused turn gives the one wake it schedules. It is a constant because it is also the KEY a
 -- later reader matches on: `selfloop.tick` releases exactly these rows when the install ends (release_due).
@@ -64,9 +66,48 @@ function M.read(now, read)
   return M.decode(text, now or os.time(), M.DEFAULT_BOUND)
 end
 
+-- THE OTHER HALF OF THE SIGNAL: A REQUEST THAT IS STILL WAITING (22/11).
+--
+-- The marker above is written by the INSTALLER, and the installer only runs after the sentinel has
+-- performed the request - so it covers the swap and never the wait. Measured twice on this laptop (22/11
+-- 09:43Z and 10:01Z, ~/.wasm-agent/sentinel/sentinel.log): a deploy request waited 34 and 30 minutes with
+-- "held: node busy" while three workers ran, because while a request is merely held there is no marker, so
+-- no running turn was asked to pause, and every resume wake was released at once ("the marker is gone").
+-- lua/core/deploy_wait.lua reads the sentinel's own request box, which is there for the whole wait.
+--
+-- One predicate, so no caller can honour half of it: an install and a waiting request are the same answer
+-- to "must this node start a turn?".
+local request_module
+local function request_reader()
+  if request_module == nil then
+    local loaded, module = pcall(dofile, "lua/core/deploy_wait.lua")
+    request_module = (loaded and type(module) == "table") and module or false
+  end
+  return request_module or nil
+end
+
+function M.waiting(now, opts)
+  opts = opts or {}
+  now = tonumber(now) or os.time()
+  local marker = (opts.read or M.read)(now)
+  if marker then return marker end
+  local module = request_reader()
+  if not module then return nil end
+  local read = opts.read_request or module.read
+  local found = read(now, opts.request)
+  if found then return found end
+  return nil
+end
+
 -- How long after the pause the session asks to continue. Long enough for a swap and a restart, short
 -- enough that a deploy that failed still gives the session its turn back; the marker's own bound wins.
 function M.resume_seconds(marker, now)
+  -- A pause for a REQUEST is not a pause for a swap that is already under way: the install has not started,
+  -- so the honest arm is the shortest one - the node looks again in a minute. It does not lose the promise:
+  -- while the deploy is still waiting or claimed or installing, lua/core/selfloop.lua's tick starts no turn
+  -- and run_wake gives the row back with a new time, so the wait is a poll of one row a minute, not a
+  -- half-hour of idle work (the 22/11 measurement that made release_due exist).
+  if marker.source == "request" or marker.source == "claimed" then return M.WAIT_RESUME_SECONDS end
   local left = (tonumber(marker.since) or 0) + (tonumber(marker.bound_seconds) or M.DEFAULT_BOUND) - (now or os.time())
   return math.max(60, math.min(math.floor(left) + 30, 1800))
 end
@@ -91,6 +132,20 @@ function M.say(marker)
     .. string.format("; the install bound is %ds, %ds left", tonumber(marker.bound_seconds) or M.DEFAULT_BOUND, left)
 end
 
+-- What a paused turn says. An INSTALL keeps the sentence it always had (an operator and a test both read
+-- it); a WAITING request says the thing a reader has to be told - "waiting for the install of <sha>" -
+-- because nothing is being installed yet: the node is waiting to be allowed to.
+function M.say_wait(marker, now)
+  now = tonumber(now) or os.time()
+  if marker.source ~= "request" and marker.source ~= "claimed" then return M.say(marker) end
+  local module = request_reader()
+  local described = module and module.say(marker, now)
+    or ("waiting for the install of " .. tostring(marker.to or "an unnamed commit"))
+  return "deploy waiting: " .. described .. "; this turn paused after its step and scheduled a resume, so the"
+    .. " node can go idle and the install can start"
+    .. string.format(" (the wait is bounded: %ds from the request)", tonumber(marker.bound_seconds) or M.DEFAULT_BOUND)
+end
+
 -- The hook the turn loop calls at the top of a round. Returns nil when there is nothing to honour, or
 -- a table {text=..., wake=..., wake_error=...} that the caller turns into the run's clean ending.
 -- `opts` exists for the test (scripts/test-deploy-pause.lua) and for nothing else: a real caller passes
@@ -100,10 +155,28 @@ function M.at_boundary(self, request, opts)
   if not self or self.subagent then return nil end
   if self.deploy_pause then return nil end -- one pause per run
   local now = opts.now or os.time()
-  local marker = (opts.read or M.read)(now)
+  -- AN OPERATOR'S TURN IS PAUSED ONLY FOR THE REAL SWAP (22/11, review MUST 2).
+  --
+  -- The two signals are not the same emergency. A REQUEST that is only waiting needs the node to stop starting
+  -- turns - not to cut the turn a person is in the middle of: their multi-step work would be ended after every
+  -- step for as long as the wait lasts (minutes), and a person who is present can finish a step and let go.
+  -- The INSTALLER's marker is the launch sequence itself, and that pauses everybody, as it always did. So an
+  -- `operator_present` run asks the marker alone here, and everything automatic asks both.
+  local marker
+  if self.operator_present then
+    marker = (opts.read or M.read)(now)
+  else
+    marker = M.waiting(now, opts)
+  end
   if not marker then return nil end
   self.deploy_pause = marker
-  local text = M.say(marker)
+  local text = M.say_wait(marker, now)
+  -- WHERE THIS SESSION SAID IT PAUSED (22/11). A pause ends the turn, so the node's own health cannot say
+  -- afterwards which sessions paused and which simply kept working - and the sentinel's status has to name
+  -- the holders that keep the node busy AND tell a paused holder from a working one, because the sentinel's
+  -- 3-minute bound may only pass over sessions that are already paused. One file per session, written where
+  -- the pause is decided: <data>/deploy-paused/<session>.json (read by rust/wa-sentinel/src/main.rs).
+  if not opts.no_record then pcall(M.record_pause, marker, now, self.session_id, self.user) end
   -- The checkpoint the resumed turn reads: the goal, where it stopped and what it had already done.
   local notes = opts.notes or function()
     local selfloop = dofile("lua/core/selfloop.lua")
@@ -143,6 +216,59 @@ end
 -- own tick - not the paused process, which is gone under `wa chat --once` - makes those rows due the moment
 -- the marker is no longer there. Whatever shape the paused run had, the resume is performed by the node.
 --
+-- The sentence a turn that did NOT start returns, or nil when nothing is waiting. One function, so the chat
+-- refusal, the wake deferral and the run-time gate cannot say different things: the words are
+-- lua/core/deploy_wait.lua's `refusal`, and this is only where they are found from.
+function M.refuse(now, opts)
+  local wait = M.waiting(now, opts)
+  if not wait then return nil end
+  local module = request_reader()
+  local text = module and module.refusal and module.refusal(wait, now) or nil
+  if not text then
+    text = "deploy_waiting: waiting for the install of "
+      .. tostring(wait.to and tostring(wait.to):sub(1, 12) or "an unnamed commit")
+      .. ". This node starts no new turn while a build is waiting for it or being installed - a turn in"
+      .. " flight is exactly what keeps the node from going idle - and this turn did not start. Nothing was"
+      .. " lost: this is a wait, not a failure."
+  end
+  return text, wait
+end
+
+-- WHERE THE SESSION SAID IT PAUSED, for the sentinel's own bound.
+--
+-- The node's `/health` says which sessions are BUSY; it cannot say which of them stopped on purpose, because a
+-- paused turn has ended. The sentinel needs exactly that distinction: after its bound (3 minutes) it may pass
+-- over holders that are already paused, and it must not pass over a holder that is still working. One small
+-- file per session, written at the moment the pause is decided and named after the session, so two sessions
+-- pausing at once never write the same file. The reader is `wa-sentinel status` and its dispatcher
+-- (rust/wa-sentinel/src/main.rs), and both only trust a record at or after the request they are holding - a
+-- record left by an earlier deploy says nothing about this one.
+function M.paused_dir()
+  local ok, paths = pcall(dofile, "lua/core/paths.lua")
+  if not ok then return nil end
+  return paths.data() .. "/" .. (request_reader() and request_reader().PAUSE_SUBDIR or "deploy-paused")
+end
+
+function M.record_pause(marker, now, session_id, user)
+  if type(session_id) ~= "string" or session_id == "" then return nil end
+  local dir = M.paused_dir()
+  if not dir then return nil end
+  if type(host) ~= "table" or type(host.write_file) ~= "function" then return nil end
+  local safe = session_id:gsub("[^%w%-_]", "")
+  if safe == "" then return nil end
+  local path = dir .. "/" .. safe .. ".json"
+  local ok = pcall(host.write_file, path, json.encode({
+    session = session_id,
+    since = tonumber(now) or os.time(),
+    to = marker.to,
+    source = marker.source or "install",
+    request = marker.id,
+    by = tostring(user or marker.owner or ""),
+  }))
+  if ok then return path end
+  return nil
+end
+
 -- Returns how many rows it made due now. `opts.read` and `opts.query`/`opts.exec` are injected by the test
 -- (scripts/test-deploy-resume.lua); a real caller passes nothing and gets the host's own file and ledger.
 function M.release_due(now, opts)
@@ -151,9 +277,12 @@ function M.release_due(now, opts)
   local exec = opts.exec
   local query = opts.query
   if type(exec) ~= "function" or type(query) ~= "function" then return 0 end
-  -- Still installing: the schedule keeps its own time. A marker past its bound is NOT a live install (the
-  -- reader ignores it, and a crashed installer must not hold a session for ever), so it releases too.
-  if (opts.read or M.read)(now) then return 0 end
+  -- Still installing OR still only waiting: the schedule keeps its own time. A marker past its bound is NOT a
+  -- live install (the reader ignores it, and a crashed installer must not hold a session for ever), so it
+  -- releases too. A waiting REQUEST counts here as well (22/11): releasing a paused session's resume while
+  -- the deploy has not even started is what let a turn run again, keep the node busy, and starve the install
+  -- for half an hour. The request is in the box until the swap is done, so its absence is the end.
+  if M.waiting(now, opts) then return 0 end
   local waiting = query([[SELECT id FROM self_wakes WHERE status='pending' AND reason=? AND due_at>? LIMIT 8]],
     { M.RESUME_REASON, now })
   if type(waiting) ~= "table" or #waiting == 0 then return 0 end

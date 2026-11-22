@@ -11,7 +11,13 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$(pwd -P)
-MISSION=${MISSION_UNDER_TEST:-$ROOT/scripts/mission.sh}   # a saved head runs the same fixture
+MISSION=${MISSION_UNDER_TEST:-$ROOT/scripts/mission.sh}
+# THIS ROW NEVER READS ITS CALLER'S STDIN. `wa chat --once` treats a stdin that is not a terminal as a queue of
+# prompts (docs/SCRIPTED-RUNS.md), so a child that inherited the caller's stdin ATE THE REST OF IT - measured
+# 22/11 by scripts/test-discriminates.sh, whose row list arrives on stdin: six tests were listed and three ran,
+# the other three consumed as extra prompts by a row's `wa chat --once`. One line, before anything starts a CLI.
+exec </dev/null
+   # a saved head runs the same fixture
 WORK=$(mktemp -d)
 HOLD=''
 KIDS=''
@@ -118,6 +124,18 @@ case ${1-} in
     # one fresh session: the id is said on STDERR (lua/core/chat.lua), stdout is the run's own output.
     # The title is the node's own rule, roughly (first line, furniture stripped, 60 chars): the marker
     # this fixture matches on carries none of that furniture.
+    # A DEPLOY WAITING ON THE NODE (22/11, review MUST 3): the node's own refusal, word for word - exit 2 and
+    # the sentence on stdout - for as many turns as STUB_DEPLOY_REFUSALS says. The runner must wait and ask
+    # again instead of recording rc=2 as a failed turn.
+    n=$(cat "$D/chat.count" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$D/chat.count"
+    # ...a COUNTDOWN file, so a case can put a fresh number down without knowing how many turns ran before it.
+    left=$(cat "$D/deploy.left" 2>/dev/null || echo 0)
+    case ${left:-0} in ''|*[!0-9]*) left=0 ;; esac
+    if [ "$left" -gt 0 ] || [ "${STUB_DEPLOY_FOREVER:-}" = yes ]; then
+      [ "$left" -gt 0 ] && echo $((left - 1)) > "$D/deploy.left"
+      printf 'deploy_waiting: waiting for the install of 8082b42e1111 (deploy request 1795341684727384607-2971842-00000000000000000000, asked 2s ago). This node starts no new turn while a build is waiting for it or being installed - a turn in flight is exactly what keeps the node from going idle - and this turn did not start. Nothing was lost: this is a wait, not a failure. To stop waiting, withdraw the request: wa-sentinel request withdraw 1795341684727384607-2971842-00000000000000000000\n'
+      exit 2
+    fi
     id=$STUB_ID
     title=$(printf '%s' "${3-}" | head -1 | tr -d '#*_>|' | sed 's/  */ /g' | cut -c1-60)
     printf 'wa: session %s %s\n' "$id" "$STUB_RESULT" >&2
@@ -214,6 +232,34 @@ case "$(field "$s" run)" in released*) ok ;; *) fail "status run after a settled
 has "$s" '11111111-2222-3333-4444-555555555555' 'status names the session from the lock, not from run.pid'
 [ -f "$MISSIONS/demo/run.lock" ] && fail 'status must release a lock the node says is settled' || ok
 has "$(cat "$MISSIONS/demo/lease.log")" 'release ' 'the release is a line in lease.log, with its reason'
+
+# ================================================================ a launch whose first turn is refused for a waiting deploy
+# Review MUST 3 (22/11): while a deploy waits for or installs on this node, `wa chat --once` refuses a NEW turn by
+# name and exits 2 (docs/SCRIPTED-RUNS.md). The runner used to write rc=2 into `done`, so the factory read a
+# mission that never ran as one whose turn failed - and the worker-gate above it spent a round on the wait.
+export STUB_ID=33333333-4444-5555-6666-777777777777 STUB_RC=0 STUB_RESULT=ok STUB_NODE_KEEPS_RUN=no
+export WA_DEPLOY_WAIT_STEP=1 WA_DEPLOY_WAIT_LIMIT=60
+echo 2 > "$STUB_STATE/deploy.left"
+rm -f "$MISSIONS/demo/done"
+: > "$MISSIONS/demo/lease.log"
+out=$(run start demo); has "$out" 'started demo' 'a launch whose turn is refused still launches'
+wait_done demo || fail 'the refused launch wrote no done marker'
+has "$(cat "$MISSIONS/demo/done")" 'rc=0' 'the turn that finally ran is the rc: the refusal was waited out'
+has "$(cat "$MISSIONS/demo/out.log")" 'deploy-wait' 'the wait is written in the mission log'
+has "$(cat "$MISSIONS/demo/lease.log")" 'deploy-wait' 'and in lease.log, where an operator looks for a launch'
+[ "$(cat "$STUB_STATE/deploy.left")" = 0 ] || fail "both refusals were consumed, not $(cat "$STUB_STATE/deploy.left")"; ok
+has "$(cat "$MISSIONS/demo/lease.log")" 'bind ' 'and the session the turn finally ran in is still bound'
+
+# ---- ...and a wait that never ends is recorded as itself: rc=2 in done, the line in the log, nothing claimed
+export STUB_DEPLOY_FOREVER=yes
+rm -f "$MISSIONS/demo/done"
+echo 0 > "$STUB_STATE/deploy.left"
+export WA_DEPLOY_WAIT_LIMIT=2
+out=$(run start demo); has "$out" 'started demo' 'a launch the node will keep refusing still launches'
+wait_done demo || fail 'the never-ending refusal wrote no done marker'
+has "$(cat "$MISSIONS/demo/done")" 'rc=2' 'a wait that never ended is rc=2, not a failed turn'
+has "$(cat "$MISSIONS/demo/out.log")" 'gave up after' 'and the log says the wait ended and nothing ran'
+unset STUB_DEPLOY_FOREVER WA_DEPLOY_WAIT_LIMIT WA_DEPLOY_WAIT_STEP
 
 # ================================================================ THE CASE: the CLI exits, the node keeps writing
 export STUB_ID=22222222-3333-4444-5555-666666666666 STUB_RC=1 STUB_RESULT=failed STUB_NODE_KEEPS_RUN=yes

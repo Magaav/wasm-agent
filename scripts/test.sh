@@ -1342,6 +1342,15 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-session-fork.lua" "$BIN" --db "$DB.
 # was written by `deploy_pause` and performed only after the release.
 GATE_ROOT="$GATE_ROOT" WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-session-park.lua" "$BIN" --db "$DB.session-park" | grep 'session park ok'
 gate_run bash scripts/test-session-park.sh
+# A DEPLOY THAT IS ONLY WAITING ALREADY STOPS THIS NODE FROM STARVING IT (22/11, mission deploy-never-starved,
+# item 4 of sentinel-on-avell): a request held 34 and 30 minutes behind worker turns, with the installer's pause
+# marker covering only the swap. A real node refuses new turns and holds due wakes while it waits; the real
+# sentinel binary names each holder and, past its bound, proceeds over the sessions that have PAUSED only.
+WA_BIN="$BIN" gate_run bash scripts/test-deploy-wait.sh
+WA_BIN="$BIN" gate_run bash scripts/test-deploy-bound.sh
+# The installer's own pause marker is the other half of the same signal: its bytes, its atomic write and its
+# clear (`scripts/lib/deploy-signal.sh`). Its reader's judgement is the Lua row above.
+gate_run bash scripts/test-deploy-signal.sh
 # WHO counts as this node's operator session, through the real constructors: a bare `wa chat` and `/new` build
 # their sessions with objective "chat" (`chat.lua`, `commands.new_session`), so a rule that only accepted an empty
 # objective refused the node's own conversation and admitted nobody else. A `remote` session (another node's
