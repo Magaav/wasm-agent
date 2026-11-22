@@ -884,21 +884,14 @@ check install-front-door bash scripts/test-install.sh
   # And a fenced card's copy icon sits after its corner, where a click on it still copies the content.
   # The real binary in a private tmux pty, as the two rows above.
   WA_BIN="$bin" check tui-chrome-pty node scripts/test-tui-chrome-pty.mjs
-  # THE STATUS ROWS' ICONS, MEASURED IN THE FONT FILES (tui-chrome item 2): advance and bearings of
-  # every glyph the two rows draw. The brief's box does not hold today, so the script ends with a named
-  # SKIP line and exit 0; the line is carried into the skips this run prints and counts - a hole that is
-  # spoken, never a pass. (`--strict` makes it a failure once the glyphs are redrawn.)
-  if command -v python3 >/dev/null 2>&1; then
-    check status-icon-metrics python3 scripts/test-status-icon-metrics.py
-    if grep -q '^SKIP ' "$work/check-status-icon-metrics.log" 2>/dev/null; then
-      grep -h '^SKIP ' "$work/check-status-icon-metrics.log" | sed 's|^SKIP |status-icon-metrics: |' >> "$FAST_WORK/skips" 2>/dev/null || true
-      grep -h '^SKIP ' "$work/check-status-icon-metrics.log" | sed 's/^SKIP //' | while IFS= read -r reason; do
-        printf '%s\t%s\n' status-icon-metrics "$reason" >> "$NAMED_SKIPS" 2>/dev/null || true
-      done
-    fi
-  else
-    echo "fast: status-icon-metrics SKIPPED (python3 not on PATH)"; skipped=$((skipped + 1))
-  fi
+  # THE STATUS ROWS' ICONS, MEASURED IN THE FONT FILES (tui-chrome item 2, drawn by change/icons-box):
+  # advance, bearings and centre of every glyph the two rows draw, against the box
+  # scripts/build-wa-icons.py builds (right bearing 18% of the cell, left >= 6%, one centre on the
+  # digits' line), plus the face that draws each of them. It ended with a named SKIP while the glyphs
+  # were still A2's; they are redrawn (commit change/icons-box), so it is an ordinary check now and a
+  # violation FAILS this row. python3 is required by the row itself: absent, the check fails with
+  # "python3: command not found" instead of being counted as a skip nobody reads.
+  check status-icon-metrics python3 scripts/test-status-icon-metrics.py
   # THE RUN BLOCK AS THE OPERATOR READS IT (change/tui-run-block): the script streams while the
   # fixture sends the code argument in paced deltas, the output is shown once (one compact result
   # row that a click opens and folds, one row per call), and the scrollbar is one bar while a call
