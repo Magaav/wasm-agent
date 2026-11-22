@@ -1627,22 +1627,25 @@ do
   ok(has(visible(first.lines[1]), "tools.ls"), "the first row is the script's own: " .. visible(first.lines[1]))
   ok(not has(visible(table.concat(first.lines, "\n")), "code="), "the heading never carries the code")
 
-  -- The script, ONCE: six rows, then the count of what was kept back.
-  -- Eight script lines, the one longer than the band WRAPPED onto a second row (never clipped with …).
-  eq(#first.lines, 9, "all eight script lines, the long one wrapped, no fold and no heading")
+  -- The script, ONCE, one row per source line - and the line longer than the band is handed over
+  -- WHOLE, never cut here (Victor 22/11): the cut is the HOST's, at the width it draws the frame at
+  -- (`rust/wa-term/src/transcript.rs` `band_row` / `wrap_band`), so a maximise shows the whole line and
+  -- a shrink re-cuts it. A row cut here could never be re-cut by anything.
+  eq(#first.lines, 8, "all eight script lines, the long one handed over whole, no fold and no heading")
   ok(not has(visible(table.concat(first.lines, "\n")), "\226\128\166"), "nothing is elided with …")
-  -- The continuation mark sits BETWEEN the two rows (round 3, item 3), so the join is made from the
-  -- rows with that mark taken out - and the mark is asserted separately, because a mark that vanished
-  -- would pass the join just as well.
-  local first_row = visible(first.lines[4]):gsub("^  ", ""):gsub("%s+$", "")
-  local second_row = visible(first.lines[5]):gsub("^  ", ""):gsub("%s+$", "")
-  ok(first_row:sub(-3) == "\226\134\170", "the row above the break ends with the continuation mark: " .. first_row)
-  -- A CODE row is cut by CELLS (review, item D), so the pieces join with NOTHING inserted: the mark
-  -- is the only thing to take out, and every character of the source must survive in order.
-  local joined = (first_row:gsub("\226\134\170", "")) .. (second_row:gsub("\226\134\170", ""))
-  local wanted = ("const out = await Promise.all(hits.map(p => tools.bash({command: 'wc -l ' + p})));"):gsub("%s+", "")
-  eq((joined:gsub("%s+", "")), wanted, "the wrapped line is whole across its two rows")
-  ok(has(visible(first.lines[9]), "return {count: hits.length"), "the last one is drawn too: " .. visible(first.lines[9]))
+  -- The long line travels as ONE row behind the marker the host reads (`\1b` + the band's own fill +
+  -- `\1`): the row is what the host cuts, and the continuation mark is drawn by the host in the
+  -- gutter of the row the line goes on - never inside the text of the row that was cut.
+  local long_row = first.lines[4]
+  local marker, long_code = tostring(long_row):match("^\1b(.-)\1(.*)$")
+  ok(marker ~= nil and has(marker, "\27[K"),
+    "the long row opens with the band marker the host cuts on: " .. tostring(marker))
+  ok(marker == nil or not has(long_code, "\226\134\170"),
+    "and carries no continuation mark: the host draws it where it cuts: " .. visible(long_code or ""))
+  eq(visible(long_code or ""),
+    "const out = await Promise.all(hits.map(p => tools.bash({command: 'wc -l ' + p})));",
+    "the whole line is handed over, uncut")
+  ok(has(visible(first.lines[8]), "return {count: hits.length"), "the last one is drawn too: " .. visible(first.lines[8]))
 
   -- One inner call: it appears as it starts (⏳), and its OWN row flips when it settles - never a
   -- second row, which is what "streams" has to mean in a transcript that can only append.

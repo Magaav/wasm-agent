@@ -356,7 +356,7 @@ do
   for row in (text .. "\n"):gmatch("([^\n]*)\n") do
     if row:find("y", 1, true) then
       body = body + 1
-      ok(row:sub(1, 3) == "\226\148\130 ", "reflow: the body row keeps the bar and its space: " .. row)
+      ok(row:sub(1, 4) == "\226\148\130 ", "reflow: the body row keeps the bar and its space: " .. row)
       ok(md.columns(row) == 52, "reflow: the whole 50-cell line is handed over, not cut at 30: "
         .. md.columns(row))
       ok(not row:find("\226\134\170", 1, true), "reflow: no continuation mark is drawn where it is composed")
@@ -364,9 +364,15 @@ do
   end
   ok(body == 1, "reflow: one stored row for one source line, not the rows the compose width cut ("
     .. body .. ")")
-  local cut = md.render("```sh\n" .. long .. "\n```", { width = 30, indent = "" })
-  local cutrows = select(2, cut:gsub("y", ""))
-  ok(cutrows > 50, "without reflow the same line is still cut here, for a log to read: " .. cutrows)
+  local cutrows, cutmarked = 0, false
+  for row in (md.render("```sh\n" .. long .. "\n```", { width = 30, indent = "" }) .. "\n"):gmatch("([^\n]*)\n") do
+    if row:find("y", 1, true) then
+      cutrows = cutrows + 1
+      if row:find("\226\134\170", 1, true) then cutmarked = true end
+    end
+  end
+  ok(cutrows > 1 and cutmarked, "without reflow the same line is still cut and marked here, for a log to read ("
+    .. cutrows .. " rows)")
 end
 
 print(string.format("markdown ok (%d checks)", checks))
