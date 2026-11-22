@@ -368,6 +368,43 @@ end
 -- arrives after a stopped run is not thrown away with the build.
 M.STEPS = { "collect", "plan", "review", "merge", "gate", "push", "main", "artifacts", "sign", "ship", "publish", "deploy", "report" }
 
+-- ---------------------------------------------------------------- the LANDING (FACTORY.md rule 10)
+--
+-- A landing is not a release: merge onto main, regenerate the derived files, run the tests the branch ITSELF
+-- added or changed, push, install THIS node and read the install record back, then measure main's health in
+-- the background. No artifacts, no signature, no publish, no ring - `wa release cut` is that command and it is
+-- where the whole gate runs.
+--
+-- WHAT IT REPLACES, one part to one script of the night of 21-22/11 (re-measured 22/11):
+--   ~/Work/missions/land-quick.sh      -> `wa land change/x` (this order, one journal, one lock, and every
+--                                         step is a row in the ledger)
+--   ~/Work/missions/_quick/line.sh     -> `wa land change/a change/b` (one run per branch, each named)
+--   ~/Work/missions/install-local.sh   -> the `install` step (the sentinel's deploy, the install record read
+--                                         back, the installed Lua compared with main's)
+--   scripts/main-health.sh             -> the `health` step (started as an operation; its verdict is the event
+--                                         `land.main-health`, green or red)
+--   two sessions messaging "it is green, land it" -> `wa events --follow --kind land`, and a session wakes on
+--                                         `land.*` through the wake rows that already exist
+M.LANDING_STEPS = { "collect", "plan", "merge", "tests", "push", "main", "install", "health", "report" }
+-- `--gate` on a landing is the explicit request for the whole fast path on the merged tree (a human decided
+-- this change deserves it). It is the fast path, not the release's gate: minutes, not the release's set.
+M.LANDING_GATE_STEPS = { "collect", "plan", "merge", "gate", "tests", "push", "main", "install", "health", "report" }
+
+function M.landing_steps(options)
+  return (options and options.gate) and M.LANDING_GATE_STEPS or M.LANDING_STEPS
+end
+
+-- THE STEP ORDER A RUN FOLLOWS is the one it STARTED with: a resumed landing is the same landing, so its order
+-- comes from its journal and not from the invocation that happened to continue it (the same rule the start
+-- options follow, and the reason a resume cannot silently become a release).
+function M.steps_for(journal, options)
+  if options and options.release then return M.STEPS end
+  local landing = (journal and journal.landing) or (options and options.landing)
+  if not landing then return M.STEPS end
+  if (journal and journal.gate_landing) or (options and options.gate) then return M.LANDING_GATE_STEPS end
+  return M.LANDING_STEPS
+end
+
 -- The one command that signs a release's SHA256SUMS, run on whichever host can reach the vault
 -- (`scripts/sign-release.sh` is a thin wrapper over `scripts/lib/release-signing.sh`).
 M.SIGN_SCRIPT = "scripts/sign-release.sh"
@@ -638,6 +675,131 @@ local function sink(run, name)
     if #buffer > 200000 then buffer = "…\n" .. buffer:sub(-150000) end
     write(path, buffer)
   end
+end
+
+-- ---------------------------------------------------------------- the events a landing writes
+--
+-- ONE ROW PER STEP, written after the step settled, in the ledger's one schema
+-- (lua/core/event_ledger.lua): mission, branch, sha, step, result, at. The steps are translated to the loop's
+-- own vocabulary here (merge -> merged, install -> installed), so a subscriber asks for `land.merged` and not
+-- for an internal name, and a step this run does not have writes nothing at all.
+M.EVENT_STEP = { collect = "collected", plan = "planned", review = "reviewed", merge = "merged", gate = "gate",
+  tests = "tests", push = "pushed", main = "main", install = "installed", health = "main-health",
+  artifacts = "artifacts", sign = "signed", ship = "shipped", publish = "published", deploy = "deployed",
+  report = "reported" }
+-- A step whose fact has two halves: `installed` says the record named the landing, `install-verified` says the
+-- node runs THIS landing's Lua. Two rows, in that order, written only when the step answered green (a failed
+-- install writes `installed` red and `install-failed` from the step itself, never a verified row).
+M.EVENT_FOLLOW = { install = "install-verified" }
+M.EVENT_RESULT = { done = "green", skipped = "skipped", failed = "red", flaky = "red", blocked = "blocked" }
+
+-- The mission's own name: the branches of the round without their `change/` prefix. One round, one name, and
+-- a line of several branches names them all - a reader of the feed must be able to tell WHICH landing a row
+-- belongs to without opening the journal.
+function M.mission_name(run)
+  local journal = (run and run.journal) or {}
+  local names = {}
+  for _, branch in ipairs(journal.branches or {}) do
+    local name = tostring(branch.name or "")
+    if name ~= "" then names[#names + 1] = (name:gsub("^change/", "")) end
+  end
+  if #names == 0 then
+    -- BEFORE THE COLLECT STEP the round's branches are still the ones the invocation named, and the `started`
+    -- row has to carry the same mission as every row after it - a feed a reader has to join by hand is not the
+    -- point of this file.
+    for _, name in ipairs((journal.start or {}).branches or {}) do
+      local text = tostring(type(name) == "table" and (name.name or name.sha) or name or "")
+      if text ~= "" then names[#names + 1] = (text:gsub("^change/", "")) end
+    end
+  end
+  return table.concat(names, ",")
+end
+
+function M.branches_text(run)
+  local journal = (run and run.journal) or {}
+  local names = {}
+  for _, branch in ipairs(journal.branches or {}) do
+    local name = tostring(branch.name or branch.sha or "")
+    if name ~= "" then names[#names + 1] = name end
+  end
+  if #names == 0 then
+    -- See M.mission_name: before `collect` the round's own branch list is what the invocation named.
+    for _, name in ipairs((journal.start or {}).branches or {}) do
+      local text = tostring(type(name) == "table" and (name.name or name.sha) or name or "")
+      if text ~= "" then names[#names + 1] = text end
+    end
+  end
+  return table.concat(names, ",")
+end
+
+-- WHAT VICTOR TESTS (FACTORY.md rule 4). It comes from the ready line's own brief - the one file a branch's
+-- intent travels on (`wa land ready <branch> <sha> --brief <file>`) - and from that file's `## How Victor tests
+-- it` section, verbatim. A branch with no brief, or a brief with no such section, says so instead of inventing
+-- steps: "nothing describes what to do" is a fact, and a made-up example is not.
+function M.how_to_test(journal)
+  for _, branch in ipairs((journal and journal.branches) or {}) do
+    local brief = trim(branch.brief or "")
+    if brief ~= "" then
+      local text = read(brief)
+      if text then
+        local section, inside = {}, false
+        for line in tostring(text):gmatch("[^\r\n]+") do
+          if line:match("^##%s*How Victor tests it") then inside = true
+          elseif inside and line:match("^##%s") then inside = false
+          elseif inside and trim(line) ~= "" then section[#section + 1] = trim(line) end
+        end
+        if #section > 0 then return table.concat(section, " | "), brief end
+      end
+    end
+  end
+  return nil, nil
+end
+
+-- THE LINE THE LANDING ENDS WITH. "Local is evolved to <sha>" is only true when the install record named this
+-- landing; a landing whose install was skipped because nothing a node loads changed says exactly that instead
+-- of claiming a deploy that did not happen.
+function M.landed_line(journal, options)
+  local sha = tostring((journal and (journal.main_sha or journal.tree_commit)) or ""):sub(1, 12)
+  local who = M.mission_name({ journal = journal })
+  if who == "" then who = "this change" end
+  local install = ((journal or {}).steps or {}).install or {}
+  local how = M.how_to_test(journal)
+  local tail
+  if tostring(install.state) == "skipped" then
+    tail = "Local is evolved to " .. sha .. " (the checkout only: " .. tostring(install.detail or "no deploy was needed") .. ")"
+  else
+    tail = "Local is evolved to " .. sha
+  end
+  if how then return tail .. ". You can now test: " .. who .. " - " .. how end
+  return tail .. ". You can now test: " .. who .. " (no brief was recorded for this branch, so nothing describes " ..
+    "the steps: record one with `wa land ready <branch> <sha> --brief <file>`)"
+end
+
+-- WRITE ONE FACT. Never fatal: a ledger that cannot be written must not stop a landing (the journal is the
+-- run's state machine, this is the record of what happened), and the failure is PRINTED so it is not silent -
+-- an unrecorded step is not a green one.
+function M.emit(run, step, result, detail, extra)
+  local fields = {
+    kind = "land", step = tostring(step), result = tostring(result),
+    mission = M.mission_name(run), branch = M.branches_text(run),
+    sha = tostring(run.journal.main_sha or run.journal.tree_commit or ""),
+    detail = tostring(detail or ""), source = "wa land " .. tostring(run.id),
+    session = tostring((run.journal.start or {}).session or ""),
+  }
+  for key, value in pairs(extra or {}) do fields[key] = value end
+  local called, answer = pcall(function()
+    return dofile("lua/core/event_ledger.lua").record(fields)
+  end)
+  if not called then
+    print("land: the ledger row for " .. tostring(step) .. " could not be written: " .. tostring(answer))
+    return nil
+  end
+  if type(answer) ~= "table" or answer.error then
+    print("land: the ledger refused the row for " .. tostring(step) .. ": " ..
+      tostring(type(answer) == "table" and answer.error or answer))
+    return nil
+  end
+  return answer
 end
 
 local function command_line(label, command, decorator)
@@ -1931,6 +2093,20 @@ impl.merge = function(run, options)
   local evidence = sink(run, "merge")
   local repo = run.journal.repo or M.repo()
   local base = run.journal.base
+  -- FACTORY.md rule 8, applied where the base is known and before anything is merged: a landing onto a RED main
+  -- is refused by name, with the row that says so, unless this landing IS the fix (`--fix-main`).
+  if options.landing and not options.fix_main then
+    local red = M.main_red(base)
+    if red then
+      local observed = string.format("main-health measured %s red at %s: %s", tostring(red.sha):sub(1, 12),
+        tostring(red.at), tostring(red.detail))
+      M.emit(run, "refused", "red", "main is red: " .. observed, { sha = tostring(base) })
+      return false, { error = "main_red", detail = "main is red, so this landing waits for the fix (FACTORY.md rule 8)",
+        observed = observed,
+        next = "land the fix on its own with `wa land <the fix branch> --fix-main`, or measure main again: " ..
+          "bash scripts/main-health.sh --repo <checkout>" }
+    end
+  end
   local tree = run.tree
   if tree and not rev(tree, "HEAD") then
     -- A resume whose worktree is gone: the merges are redone from the base rather than reported as done.
@@ -2314,8 +2490,47 @@ function M.failed_rows(tree, started)
   return { lua = rows, failed = failed, named = named, path = path }
 end
 
+-- THE RED MAIN RULE (FACTORY.md rule 8): main is always green, and a red main blocks the next landing unless
+-- that landing IS the fix. The verdict is the ledger's own newest `land.main-health` row about THIS main: a red
+-- about an older main is stale and blocks nothing (main-health writes what it measured, and only that), a green
+-- about this main blocks nothing either, and a row that cannot be read is not a pass - it says what it could
+-- not read.
+function M.main_red(base)
+  base = trim(base)
+  if base == "" then return nil end
+  local called, rows = pcall(function()
+    return dofile("lua/core/event_ledger.lua").read({ kinds = { "land" }, step = "main-health", limit = 10 })
+  end)
+  if not called or type(rows) ~= "table" then return nil end
+  for index = #rows, 1, -1 do
+    local row = rows[index]
+    local sha = tostring(row.sha or "")
+    if sha ~= "" and (base:sub(1, #sha) == sha or sha:sub(1, #base) == base) then
+      if tostring(row.result) == "red" then return row end
+      return nil
+    end
+  end
+  return nil
+end
+
 impl.gate = function(run, options)
   local evidence = sink(run, "gate")
+  if options.landing then
+    -- The whole fast path on the merged tree, asked for by name (`--gate`): the command is the runner this tree
+    -- already has, its output is the step's evidence as it is written (the tee), and its exit code is the
+    -- verdict. Minutes, not the release's set: `wa release cut` is the release's gate.
+    local tree = run.tree
+    local command = trim(options.gate_command or "") ~= "" and options.gate_command or "bash scripts/fast.sh"
+    evidence(command_line("gate", command))
+    local started = now()
+    local result = M.exec_streamed(command, tree, tonumber(options.gate_timeout) or 3600, M.evidence_path(run.id, "gate"))
+    local output = tostring(result.stdout or "") .. tostring(result.stderr or "")
+    if (result.code or 1) ~= 0 then
+      return false, { error = "gate_red", detail = "the fast path is red on the merged tree",
+        observed = last_line(output), next = "fix the rows on the branch (wa mission preflight <name> asks the same), then land again" }
+    end
+    return true, { detail = string.format("the whole fast path is green on the merged tree (%ds)", now() - started) }
+  end
   local tree = run.tree
   -- Which checks: the plan's set (M.gate_checks), which is never smaller than the always-on core, and - when
   -- the plan mapped rows and the round is not full - a WA_FAST_ROWS file for `scripts/fast.sh` so a Lua-only
@@ -3429,6 +3644,325 @@ impl.deploy = function(run, options)
 end
 -- report: one summary, written to a file and printed. It runs even when the machine stopped, because the
 -- thing it is for is a human reading what happened.
+-- ---------------------------------------------------------------- the landing's own steps
+--
+-- tests: THE BRANCH'S OWN TESTS, and nothing else (land-quick.sh's rule, which is what made a landing minutes
+-- instead of a gate). Every `scripts/test-*.lua` the branch added or changed, each one ALONE with its own
+-- scratch home and ledger, on the merged tree. A branch that changes Rust is SKIPPED BY NAME: a Lua row cannot
+-- judge a new binary, and main-health judges that after the install - the skip is a recorded fact with its
+-- reason, never a silent pass.
+impl.tests = function(run, options)
+  local evidence = sink(run, "tests")
+  local tree = run.tree
+  if not tree or trim(tree) == "" then
+    return false, { error = "tests_without_tree", observed = "this run has no merged worktree to test" }
+  end
+  local paths, notes = M.changed_paths(run)
+  for _, note in ipairs(notes) do evidence("WARN " .. note .. "\n") end
+  local rust, rows, excluded = 0, {}, {}
+  for _, path in ipairs(paths) do
+    local spec = tostring(path)
+    if spec:find("^rust/") then rust = rust + 1
+    elseif spec:match("^scripts/test%-.+%.lua$") then rows[#rows + 1] = spec end
+  end
+  -- THE EXCLUSION IS READ FROM THE MERGED TREE, where the runner reads it: a row the fast path declares not run
+  -- is not a row this step invents a verdict for.
+  local excluded_text = read(slashes(tree) .. "/scripts/fast-path.exclude") or ""
+  local keep = {}
+  for _, row in ipairs(rows) do
+    local listed = false
+    for line in excluded_text:gmatch("[^\r\n]+") do
+      local text = trim(line)
+      if text ~= "" and text:sub(1, 1) ~= "#" and text == row then listed = true break end
+    end
+    if listed then excluded[#excluded + 1] = row else keep[#keep + 1] = row end
+  end
+  evidence(string.format("changed paths: %d (rust %d, scripts/test-*.lua %d, excluded %d)\n",
+    #paths, rust, #keep, #excluded))
+  if rust > 0 then
+    local detail = string.format("the branch changes Rust (%d file(s)): its tests need the new binary, so they are " ..
+      "judged by main-health after the install, not here", rust)
+    evidence(detail .. "\n")
+    return true, { state = "skipped", detail = detail }
+  end
+  if #keep == 0 then
+    local detail = "the branch changed no scripts/test-*.lua of its own: nothing of its own to run"
+    if #excluded > 0 then detail = detail .. " (" .. table.concat(excluded, ", ") .. " is not a fast-path row)" end
+    evidence(detail .. "\n")
+    return true, { state = "skipped", detail = detail }
+  end
+  -- How a row is run: the way the fast path runs one - its own HOME and ledger, the merged tree's Lua, the
+  -- binary this node runs. `WA_LAND_TEST_BINARY` names another binary (a row can only judge THIS node).
+  local binary = trim(options.test_binary or (host.getenv and host.getenv("WA_LAND_TEST_BINARY") or "")) 
+  if binary == "" then binary = "wa" end
+  local timeout = tonumber(options.test_timeout) or 300
+  local green, red = 0, {}
+  for _, row in ipairs(keep) do
+    local scratch = M.run_dir(run.id) .. "/tests/" .. (row:gsub("[^%w]", "-"))
+    M.exec("rm -rf " .. quote(scratch) .. " && mkdir -p " .. quote(scratch .. "/h/wahome"), tree, 60)
+    local command = table.concat({
+      "WASM_AGENT_LUA_ROOT=" .. quote(slashes(tree)),
+      "WA_SCRIPT=" .. quote(row),
+      "HOME=" .. quote(scratch .. "/h"),
+      "WASM_AGENT_HOME=" .. quote(scratch .. "/h/wahome"),
+      "TMPDIR=" .. quote(scratch),
+      "timeout " .. tostring(math.floor(timeout)),
+      quote(binary), "--db", quote(scratch .. "/t.db"),
+    }, " ")
+    evidence(command .. "\n")
+    local result = M.exec(command, tree, timeout + 60)
+    local output = tostring(result.stdout or "") .. tostring(result.stderr or "")
+    evidence(output .. "\n")
+    if (result.code or 1) == 0 then
+      green = green + 1
+    else
+      red[#red + 1] = row .. " (" .. tostring(result.code) .. ": " .. last_line(output) .. ")"
+    end
+  end
+  local detail = string.format("the branch's own tests: %d green", green)
+  if #excluded > 0 then detail = detail .. ", " .. #excluded .. " not a fast-path row" end
+  if #red > 0 then
+    return false, { error = "own_tests_red", detail = "the branch's own tests are red:",
+      observed = table.concat(red, "; "), next = "fix them on the branch (or record the row as not a fast-path row for a real reason), then land again" }
+  end
+  return true, { detail = detail }
+end
+
+-- WHERE THE INSTALL RECORD IS. `installed.txt` is what a deploy writes and what `wa update --check` reads, and
+-- FACTORY.md rule 4 says exactly why the version string will not do: `wa --version` names the binary, never the
+-- tree the node was last installed from.
+function M.install_dir()
+  if M.install_dir_override and M.install_dir_override ~= "" then return slashes(M.install_dir_override) end
+  local ok, update = pcall(dofile, "lua/core/update.lua")
+  if ok and type(update) == "table" and type(update.install_dir) == "function" then
+    return slashes(update.install_dir())
+  end
+  return nil
+end
+
+function M.install_record()
+  local dir = M.install_dir()
+  if not dir then return nil, "this node cannot name its install directory" end
+  local text = read(dir .. "/installed.txt")
+  if not text then return nil, "no installed.txt in " .. dir end
+  local record = {}
+  for line in tostring(text):gmatch("[^\r\n]+") do
+    local key, value = line:match("^([^=]+)=(.*)$")
+    if key then record[trim(key)] = trim(value) end
+  end
+  return record
+end
+
+-- Does this landing change what a node RUNS? The rule is land-quick.sh's, and it is a list of the paths a node
+-- loads: a scripts/docs-only branch deploys nothing, because a deploy pauses every worker for bytes no node
+-- reads.
+function M.landing_runs(paths)
+  local runs = {}
+  for _, path in ipairs(paths or {}) do
+    local spec = tostring(path)
+    if spec:find("^lua/") or spec:find("^rust/") or spec:find("^ui/") or spec:find("^web/") or spec:find("^assets/") then
+      runs[#runs + 1] = spec
+    end
+  end
+  return runs
+end
+
+-- install: THE LANDING'S SECOND HALF, and the reason a landing is complete only when the record says so.
+--   1. the checkout is fast-forwarded to the landed tip (the deploy builds what the runtime worktree holds);
+--   2. the deploy is REQUESTED through this node's sentinel (the supported door, never a hand-run script);
+--   3. `installed.txt` is READ BACK until it names the landed commit - the record, not a version string;
+--   4. the Lua the node runs is compared with the landed tree's, when this install carries a lua-core tree.
+-- A step that cannot prove (3) is not installed: it stops by name, with what the record does say.
+impl.install = function(run, options)
+  local evidence = sink(run, "install")
+  local repo = M.repo()
+  local sha = tostring(run.journal.main_sha or run.journal.tree_commit or "")
+  if not repo or trim(repo) == "" then
+    return false, { error = "install_no_repository", observed = "this node has no runtime tree",
+      next = "run the landing on a machine with a checkout, or set WA_LAND_REPO=<dir>" }
+  end
+  if sha == "" then
+    return false, { error = "install_without_tip", observed = "the run has no landed tip in its journal",
+      next = "nothing was installed: `wa land --resume` lands the tip first" }
+  end
+  -- (1) the checkout. `merge --ff-only` only: a checkout that cannot take the tip is a refusal, never a reset.
+  local command = "git -C " .. quote(slashes(repo)) .. " fetch --quiet origin main && git -C " .. quote(slashes(repo)) ..
+    " merge --ff-only " .. quote(sha)
+  evidence(command_line("checkout", command))
+  local ff = M.exec(command, slashes(repo), 600)
+  evidence((ff.stdout or "") .. (ff.stderr or ""))
+  if (ff.code or 1) ~= 0 then
+    return false, { error = "checkout_not_fast_forwarded",
+      observed = first_line(tostring(ff.stderr or "") ~= "" and ff.stderr or ff.stdout),
+      next = "make " .. slashes(repo) .. " clean and on main, then `wa land --resume` (the checkout is never reset by a landing)" }
+  end
+  local paths = M.changed_paths(run)
+  local runs = M.landing_runs(paths)
+  if #runs == 0 then
+    local detail = "scripts/docs only (no lua/, rust/, ui/, web/ or assets/ path): the checkout is at " ..
+      sha:sub(1, 12) .. " and no deploy was asked for"
+    evidence(detail .. "\n")
+    return true, { state = "skipped", detail = detail }
+  end
+  -- (2) the deploy request: the sentinel performs it, and its own queue is what it answers about.
+  local reason = "wa land " .. tostring(run.id) .. ": install " .. sha:sub(1, 12)
+  local request_command = "wa-sentinel request deploy --reason " .. quote(reason)
+  evidence(command_line("deploy request", request_command))
+  local request = M.exec(request_command, slashes(repo), 300)
+  evidence((request.stdout or "") .. (request.stderr or ""))
+  if (request.code or 1) ~= 0 then
+    return false, { error = "deploy_not_requested",
+      observed = first_line(tostring(request.stderr or "") ~= "" and request.stderr or request.stdout),
+      next = "check the sentinel is running (wa-sentinel status) on this node, then `wa land --resume`" }
+  end
+  -- (3) the wait, on the RECORD.
+  local deadline = tonumber(options.install_timeout) or
+    tonumber(host.getenv and host.getenv("WA_LAND_INSTALL_TIMEOUT") or "") or 2400
+  local started = now()
+  local record, verdict = nil, nil
+  while true do
+    record, verdict = M.install_record()
+    if record then
+      local installed = tostring(record.commit or "")
+      -- `installed.txt` records the SHORT form on a build and the full id on a prebuilt install (remote_update
+      -- reads both), so the comparison is by prefix, in whichever direction the record was written.
+      if installed ~= "" and (sha:sub(1, #installed) == installed or installed:sub(1, #sha) == sha) then break end
+    end
+    record = nil
+    if (now() - started) >= deadline then break end
+    M.sleep(math.min(10, math.max(1, deadline - (now() - started))))
+  end
+  if not record then
+    local said, where = M.install_record()
+    local detail = "the install record does not name " .. sha:sub(1, 12) .. " after " .. tostring(now() - started) .. "s"
+    local observed = where or (said and ("installed.txt says commit=" .. tostring(said.commit)) or "no record")
+    M.emit(run, "install-failed", "red", detail .. " (" .. tostring(observed) .. ")")
+    return false, { error = "install_not_recorded", detail = detail, observed = tostring(observed),
+      next = "read the sentinel's own queue and records (wa-sentinel status), then `wa land --resume`: the install " ..
+        "step is the only one that proves the node runs the landing" }
+  end
+  local detail = string.format("installed.txt names %s, %ds after the request", tostring(record.commit),
+    math.floor(now() - started))
+  evidence(detail .. "\n")
+  -- (4) the Lua this node runs is main's. A tree-only install writes `lua-core`; a release install keeps its own
+  -- tree, and then there is nothing to compare - which is SAID, never counted as a pass.
+  local installed_lua = M.install_dir() .. "/lua-core/lua/core"
+  local probe = M.exec("test -d " .. quote(installed_lua) .. " && echo yes || echo no", slashes(repo), 60)
+  if trim(tostring(probe.stdout or "")) == "yes" then
+    local diff = M.exec("diff -rq " .. quote(installed_lua) .. " " .. quote(slashes(repo) .. "/lua/core"), slashes(repo), 300)
+    evidence((diff.stdout or "") .. (diff.stderr or ""))
+    if (diff.code or 1) ~= 0 then
+      local observed = "the installed lua/core differs from main's: " ..
+        first_line(tostring(diff.stdout or "") ~= "" and diff.stdout or diff.stderr)
+      M.emit(run, "install-failed", "red", observed)
+      return false, { error = "install_lua_mismatch", detail = "the node was installed but not with this landing's Lua",
+        observed = observed, next = "inspect " .. installed_lua .. " and the deploy's own log, then `wa land --resume`" }
+    end
+    detail = detail .. "; the installed lua/core equals main's"
+  else
+    detail = detail .. "; this install carries no lua-core tree (a release install keeps its own), so the Lua comparison was not made"
+  end
+  return true, { detail = detail }
+end
+
+-- START ONE SUPERVISED OPERATION. The seam is this function, so a test runs a health step without a node; the
+-- default is the node's own operation manager, which is the only supported way to start long work.
+function M.start_operation(spec)
+  if type(host.operation) ~= "function" then return nil, "this node has no operation manager" end
+  local runtime = {}
+  local provided, raw = pcall(host.runtime_info)
+  if provided and type(raw) == "string" then pcall(function() runtime = json.decode(raw) or {} end) end
+  local program = tostring(runtime.binary_path or "")
+  if program == "" then return nil, "this node cannot name its own binary (runtime_info)" end
+  local argv = {}
+  local db = trim(host.getenv and host.getenv("WASM_AGENT_DB") or "")
+  if db ~= "" then argv = { "--db", db } end
+  for _, word in ipairs(spec.args or {}) do argv[#argv + 1] = tostring(word) end
+  local launched, receipt = pcall(host.operation, "start", json.encode({ program = program, args = argv,
+    timeout_seconds = tonumber(spec.timeout_seconds) or 3600, kind = "command",
+    owner = tostring(spec.owner or "land-health"), background = true }))
+  if not launched then return nil, "the operation manager refused: " .. tostring(receipt) end
+  local answer = type(receipt) == "string" and json.decode(receipt) or receipt
+  if type(answer) ~= "table" or not answer.operation_id then
+    return nil, tostring(type(answer) == "table" and (answer.error or "no operation id") or receipt)
+  end
+  return tostring(answer.operation_id)
+end
+
+-- health: main's health, measured ONCE after a landing that can have moved it - lua/ or rust/ - and recorded
+-- as an event. It runs as a SUPERVISED OPERATION and not inside this step: `scripts/main-health.sh` runs the
+-- whole fast path (~10 minutes, holding the suite lock), and land-quick.sh's own comment says why the landing
+-- must not wait for it. The operation's command is `wa land health-run`, which writes the verdict itself.
+impl.health = function(run, options)
+  local evidence = sink(run, "health")
+  local paths = M.changed_paths(run)
+  local touches = 0
+  for _, path in ipairs(paths) do
+    local spec = tostring(path)
+    if spec:find("^lua/") or spec:find("^rust/") then touches = touches + 1 end
+  end
+  if touches == 0 then
+    return true, { state = "skipped", detail = "the landing changed no lua/ or rust/ file, so main's health cannot have moved" }
+  end
+  if options.no_health then
+    return true, { state = "skipped", detail = "skipped: --no-health (main is NOT measured for this landing)" }
+  end
+  local repo = M.repo()
+  local sha = tostring(run.journal.main_sha or run.journal.tree_commit or "")
+  if not repo or trim(repo) == "" or sha == "" then
+    return false, { error = "health_without_target", observed = "no runtime tree or no landed tip to measure" }
+  end
+  local args = { "land", "health-run", "--repo", slashes(repo), "--sha", sha,
+    "--mission", M.mission_name(run), "--branch", M.branches_text(run), "--source", "wa land " .. tostring(run.id) }
+  local id, why_not = M.start_operation({ owner = "land-health", args = args, timeout_seconds = 5400 })
+  evidence("health-run args: " .. table.concat(args, " ") .. "\n")
+  if not id then
+    return false, { error = "main_health_not_started", observed = tostring(why_not),
+      next = "measure it by hand: bash " .. slashes(repo) .. "/scripts/main-health.sh --repo " .. slashes(repo) ..
+        " (its verdict is a `wa land health-run` away), or run `wa land health-run --repo " .. slashes(repo) .. "`" }
+  end
+  local detail = "started as operation " .. id .. ": the whole fast path on main's tip at nice 19 under the " ..
+    "suite lock; its verdict arrives as the event land.main-health"
+  evidence(detail .. "\n")
+  return true, { detail = detail }
+end
+
+-- `wa land health-run`: measure main's health ONCE here and write the verdict as an event. This is the command
+-- the health step starts as its own operation, and it is also what a person runs by hand; both write the same
+-- row, so the ledger says the same thing whoever measured it.
+function M.health_run(options)
+  options = type(options) == "table" and options or {}
+  local repo = trim(options.repo) ~= "" and slashes(options.repo) or M.repo()
+  if not repo or repo == "" then
+    return 2, { error = "no_repository", observed = "no runtime tree and no --repo" }
+  end
+  local script = repo .. "/scripts/main-health.sh"
+  if not read(script) then
+    return 2, { error = "main_health_missing", observed = script .. " does not exist in this tree" }
+  end
+  local command = "bash " .. quote(script) .. " --repo " .. quote(repo)
+  local result = M.exec(command, repo, tonumber(options.timeout) or 5400)
+  local code = tonumber(result.code) or 1
+  -- 0 green, 1 red, anything else is a run that could not judge - and an unknown verdict is never written green.
+  local verdict = code == 0 and "green" or (code == 1 and "red" or "refused")
+  local said = last_line(tostring(result.stdout or "") .. "\n" .. tostring(result.stderr or ""))
+  local detail = verdict == "green" and "the whole fast path is green on main's tip"
+    or (verdict == "red" and ("main is red: " .. said) or ("main-health refused to judge: " .. said))
+  local fields = { kind = "land", step = "main-health", result = verdict, sha = tostring(options.sha or ""),
+    mission = tostring(options.mission or ""), branch = tostring(options.branch or ""), detail = detail,
+    source = tostring(options.source or "wa land health-run") }
+  local called, row = pcall(function() return dofile("lua/core/event_ledger.lua").record(fields) end)
+  if not called or type(row) ~= "table" or row.error then
+    print("land: health-run: the verdict could not be recorded: " ..
+      tostring(type(row) == "table" and row.error or row))
+    -- REFUSED, not red and not green: the measurement happened and the record did not, so nothing here says
+    -- what main is (an unrecorded verdict is exactly the silent red FACTORY.md rule 8 is about).
+    return 2, { verdict = verdict, error = "verdict_not_recorded" }
+  end
+  print(string.format("land: health-run: main is %s (event %s)", verdict, tostring(row.id)))
+  return code, { verdict = verdict, row = row }
+end
+
 impl.report = function(run, options)
   -- The reviews were started by the `review` step and joined here: this is the one step that runs after every
   -- other and also after a stop, so it is where findings become evidence. It cannot fail the landing (`pcall`),
@@ -3498,7 +4032,7 @@ function M.report_text(journal)
   add("")
   add("| step | state | seconds | detail |")
   add("| --- | --- | --- | --- |")
-  for _, name in ipairs(M.STEPS) do
+  for _, name in ipairs(M.steps_for(journal)) do
     local step = (journal.steps or {})[name] or { state = "pending" }
     local seconds = step.started_at and step.finished_at and (step.finished_at - step.started_at) or nil
     add(string.format("| %s | %s | %s | %s |", name, tostring(step.state), seconds and tostring(seconds) or "-",
@@ -3528,7 +4062,7 @@ function M.report_text(journal)
   -- nobody can improve - the point of the plan (and of this table) is that "~40 minutes every round" became a
   -- measurement per round, per path, against the journal's own history.
   local total = 0
-  for _, name in ipairs(M.STEPS) do
+  for _, name in ipairs(M.steps_for(journal)) do
     local step = (journal.steps or {})[name]
     if step and tonumber(step.seconds) then total = total + tonumber(step.seconds) end
   end
@@ -3675,6 +4209,15 @@ function M.run_step(run, name, options)
   local ok, result = outcome, payload
   local passed, _ = finish_step(run, name, ok, result)
   save(run)
+  -- THE FACT OF THE STEP, written after it settled and before it is printed: the journal says what still has to
+  -- happen, this row says what happened, and a subscriber reads the same sentence the terminal does.
+  if run.journal.landing then
+    M.emit(run, M.EVENT_STEP[name] or name, M.EVENT_RESULT[step.state] or (passed and "green" or "red"),
+      tostring(step.detail or step.error or ""))
+    if passed and M.EVENT_FOLLOW[name] then
+      M.emit(run, M.EVENT_FOLLOW[name], "green", tostring(step.detail or ""))
+    end
+  end
   if passed then
     print("land: " .. name .. ": " .. tostring(step.state) .. (step.detail and (" - " .. tostring(step.detail):gsub("\n", " ")) or ""))
   else
@@ -3693,7 +4236,11 @@ end
 --
 -- A flag given ON the resume wins: it is the more recent instruction. Everything not given falls back to the
 -- journal. `ring` is stored RESOLVED (node and mode), because the answer to `--ring` is what the round uses.
-local START_KEYS = { "full", "no_deploy", "account", "signer", "canary", "session", "release" }
+-- `landing`, `gate`, `fix_main` and `no_health` travel with the round for the same reason the ring does: a
+-- resumed landing is the SAME landing (FACTORY.md rule 10), and a resume must not quietly become the full
+-- pipeline, or lose the `--fix-main` that made it legal.
+local START_KEYS = { "full", "no_deploy", "account", "signer", "canary", "session", "release",
+  "landing", "gate", "fix_main", "no_health" }
 
 local function remember_start(run, options)
   local start = run.journal.start or {}
@@ -3810,11 +4357,24 @@ function M.run(options)
   if options.run and not run.fresh then
     print("land: resuming run " .. run.id .. " (journal " .. M.journal_path(run.id) .. ")")
   end
+  if options.landing and run.fresh then
+    run.journal.landing = true
+    run.journal.gate_landing = options.gate and true or nil
+  end
+  if options.landing and not (run.journal.landing) then run.journal.landing = true end
   run.journal.result = "in_progress"
   save(run)
+  local order = M.steps_for(run.journal, options)
+  if run.journal.landing then
+    M.emit(run, "started", "started", string.format("landing started: %s (no gate unless --gate)",
+      #(run.journal.branches or {}) > 0 and table.concat((function()
+        local names = {}
+        for _, branch in ipairs(run.journal.branches or {}) do names[#names + 1] = tostring(branch.name or branch.sha or "") end
+        return names end)(), " ") or "no branch named"))
+  end
   local stopped = nil
   local reached_until = nil
-  for _, name in ipairs(M.STEPS) do
+  for _, name in ipairs(order) do
     local step = step_of(run.journal, name)
     local settled = step.state == "done" or step.state == "skipped"
     if options.rollback and name ~= "deploy" and name ~= "report" then
@@ -3843,10 +4403,16 @@ function M.run(options)
         step.state, step.detail = "skipped", "skipped by the plan: " .. tostring(planned.why)
         save(run)
         print("land: " .. name .. ": skipped by the plan (" .. tostring(planned.why) .. ")")
+        if run.journal.landing then
+          M.emit(run, M.EVENT_STEP[name] or name, "skipped", tostring(step.detail))
+        end
       elseif name == "deploy" and options.no_deploy then
         step.state, step.detail = "skipped", "skipped: --no-deploy"
         save(run)
         print("land: deploy: skipped (--no-deploy)")
+        if run.journal.landing then
+          M.emit(run, M.EVENT_STEP[name] or name, "skipped", "skipped: --no-deploy")
+        end
       else
         local ok = M.run_step(run, name, options)
         if not ok then stopped = name break end
@@ -3862,7 +4428,7 @@ function M.run(options)
   end
   if reached_until then
     local remaining, after = {}, false
-    for _, name in ipairs(M.STEPS) do
+    for _, name in ipairs(order) do
       if name == reached_until then after = true
       -- report is the exception, and it is in the message below rather than in this list: the report ALWAYS
       -- renders (a stop without a summary is the thing this file exists to end), so a list that named it
@@ -3898,6 +4464,12 @@ function M.run(options)
     run.journal.stopped_at = stopped
     run.journal.stop_detail = tostring(step.detail or step.error or "")
     save(run)
+    if run.journal.landing then
+      -- One row for the STOP itself: the step's own row is above (red), and this one says the round ended here
+      -- so a follower is not left waiting for a landing that stopped.
+      M.emit(run, "stopped", "red", string.format("stopped at %s: %s", tostring(stopped),
+        tostring(step.detail or step.error or "")))
+    end
     -- The report still runs: a stop without a summary is what this file exists to end.
     if stopped ~= "report" then M.run_step(run, "report", options) end
     print("")
@@ -3911,6 +4483,9 @@ function M.run(options)
   run.journal.result = "done"
   run.journal.stopped_at = nil
   save(run)
+  if run.journal.landing then
+    M.emit(run, "done", "green", M.landed_line(run.journal, options))
+  end
   -- THE SUMMARY IS REWRITTEN WITH THE FINAL RESULT. report is the last step, so it rendered the journal one
   -- line before result became done: the file a human opens said in_progress while the journal beside it
   -- said done (measured, case29 of this round). The report is the journal as a document, and it must agree
@@ -3918,6 +4493,7 @@ function M.run(options)
   write(M.report_path(run.id), M.report_text(run.journal))
   print(string.format(options.release and "release: done (run %s, released main %s)" or "land: done (run %s, landed %s)",
     run.id, tostring(run.journal.tree_commit or ""):sub(1, 12)))
+  if run.journal.landing then print(M.landed_line(run.journal, options)) end
   return 0
 end
 
@@ -4050,7 +4626,7 @@ end
 function M.status_text(journal)
   local lines = { string.format("run %s: %s%s", tostring(journal.run), tostring(journal.result),
     journal.stopped_at and (" at " .. tostring(journal.stopped_at)) or "") }
-  for _, name in ipairs(M.STEPS) do
+  for _, name in ipairs(M.steps_for(journal)) do
     local step = (journal.steps or {})[name] or { state = "pending" }
     lines[#lines + 1] = string.format("  %-10s %-8s %s", name, tostring(step.state), tostring(step.detail or ""))
   end
@@ -4316,6 +4892,27 @@ function M.cli(argv)
       local ok, answer = M.ready_mark(branch, sha, brief)
       print("wa land ready: " .. tostring(answer) .. (ok and (" - " .. branch .. " " .. sha) or ""))
       return ok and 0 or 1
+    elseif flag == "health-run" then
+      -- `wa land health-run --repo <checkout> [--sha <sha>]`: measure main's health once, here, and write the
+      -- verdict as an event. It is what the `health` step starts as its own operation, and it is the command a
+      -- person runs by hand: both write the same row.
+      local health = {}
+      for scan = index + 1, #argv do
+        local word = tostring(argv[scan])
+        if word == "--repo" then health.repo = argv[scan + 1]
+        elseif word == "--sha" then health.sha = argv[scan + 1]
+        elseif word == "--mission" then health.mission = argv[scan + 1]
+        elseif word == "--branch" then health.branch = argv[scan + 1]
+        elseif word == "--source" then health.source = argv[scan + 1]
+        elseif word == "--timeout" then health.timeout = tonumber(argv[scan + 1])
+        end
+      end
+      local code, answer = M.health_run(health)
+      if answer.error then
+        print("land: health-run: refused(" .. tostring(answer.error) .. "): " ..
+          tostring(answer.observed or answer.verdict or ""))
+      end
+      return code
     elseif flag == "mark" then
       -- `wa land mark <step> --evidence <file> [--run <id>] [--account <node>]`: the verb that records an
       -- effect done out of band, AFTER re-verifying it. It is the only supported way to move a step to done
@@ -4356,6 +4953,20 @@ function M.cli(argv)
     elseif flag == "--release" then options.release = true; index = index + 1
     elseif flag == "--dry-run" then options.dry_run = true; index = index + 1
     elseif flag == "--full" then options.full = true; index = index + 1
+    elseif flag == "--gate" then
+      -- THE GATE ON A LANDING, asked for by name (FACTORY.md rule 10: a landing runs no gate; the gate belongs
+      -- to the release, and this is the one way to ask for it anyway).
+      options.gate = true; options.landing = true; index = index + 1
+    elseif flag == "--fix-main" then
+      -- This landing IS the fix for a red main (FACTORY.md rule 8): it is allowed onto a red main, and nothing
+      -- else is.
+      options.fix_main = true; options.landing = true; index = index + 1
+    elseif flag == "--no-health" then
+      options.no_health = true; options.landing = true; index = index + 1
+    elseif flag == "--install-timeout" then
+      local given = value(flag); if not given then return 2 end
+      if not tonumber(given) then print("wa land: --install-timeout takes seconds"); return 2 end
+      options.install_timeout = tonumber(given); index = index + 2
     elseif flag == "--canary" then
       local value = read_value(flag); if not value then return 2 end
       options.canary = value; index = index + 2
@@ -4373,6 +4984,7 @@ function M.cli(argv)
       -- whole landing (push, main, artifacts, the fleet) for a caller who asked for the gate only.
       local known = false
       for _, step in ipairs(M.STEPS) do if step == value then known = true break end end
+      for _, step in ipairs(M.LANDING_STEPS) do if step == value then known = true break end end
       if not known then
         print("wa land: --until " .. value .. " is not a step of this file; the steps are " ..
           table.concat(M.STEPS, " "))
@@ -4402,6 +5014,13 @@ function M.cli(argv)
       options.ring = rows; index = index + 2
     elseif flag == "--json" then options.json = true; index = index + 1
     elseif flag == "--help" or flag == "-h" then
+      print("wa land <branch>...                THE LANDING: merge onto main, regenerate, the branch's own tests,")
+      print("                                   push, install this node (verified), then main's health. No gate.")
+      print("  --gate                     run the whole fast path on the merged tree anyway (minutes, not the release)")
+      print("  --fix-main                 this landing IS the fix for a red main (FACTORY.md rule 8)")
+      print("  --no-health                do not measure main's health after this landing")
+      print("  --install-timeout <s>      how long the install record has to name the landing (default 2400)")
+      print("wa land health-run --repo <checkout> [--sha <sha>]   measure main's health once; the verdict is an event")
       print("wa land --ready | --branches a,b [--dry-run] [--no-deploy] [--full] [--resume] [--run <id>]")
       print("wa land --rollback                 put every node's kept pair back (reverse ring order)")
       print("wa land mark <step> --evidence <file> [--run <id>]   record a step done out of band, after re-verifying it")
@@ -4415,6 +5034,13 @@ function M.cli(argv)
       print("  --full                 ignore the plan: run every step and the whole suite (no narrowed rows)")
       print("  --signer <node|local>   where the release is signed (default: the node whose WA_VAULT_ADMIN_URL is set)")
       return 0
+    elseif flag:sub(1, 2) ~= "--" then
+      -- `wa land change/x [change/y ...]`: THE LANDING (FACTORY.md rule 10). Positional branches are what the
+      -- operator types; no gate runs unless --gate names it, and the round takes the landing's own step order.
+      options.branches = options.branches or {}
+      options.branches[#options.branches + 1] = flag
+      options.landing = true
+      index = index + 1
     else
       print("wa land: unknown option " .. flag .. "; nothing was done")
       return 2
@@ -4438,7 +5064,8 @@ function M.cli(argv)
   end
   if not options.branches and not options.ready and not options.resume and not options.run and not options.rollback
      and not options.release then
-    print("wa land: nothing named. Use --ready (the ready box), --branches a,b, --resume, or --rollback.")
+    print("wa land: nothing named. Use `wa land <branch>...` (a landing: merge, the branch's own tests, push, " ..
+      "install this node, then main's health), or --ready (the ready box), --branches a,b, --resume, or --rollback.")
     print("wa land --help")
     return 2
   end
