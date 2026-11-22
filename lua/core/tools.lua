@@ -1399,6 +1399,17 @@ end
 -- The model's bytes do not move: the event rides beside the result, the result is exactly what the
 -- branch below returns, and a caller with no listener emits into nothing (ctx.watch_changes/ctx.emit
 -- are the view's, lua/core/agent.lua).
+-- Where a reader's event goes. The agent hands every call a queue (lua/core/agent.lua,
+-- dispatch_ctx.change_queue) and drains it after that call's own result row: a card written while a
+-- code-mode block is still open would land inside it and be overwritten when the block settles. The
+-- order a reader sees is therefore the one it saw before this change - result row, then its cards -
+-- and a caller with no queue (a bare dispatch, a test) gets the event directly.
+local function deliver(ctx, event)
+  local queue = type(ctx) == "table" and ctx.change_queue or nil
+  if type(queue) == "table" then queue[#queue + 1] = event; return end
+  ctx.emit(event)
+end
+
 local function announce_change(ctx, name, path, before, after)
   if type(ctx) ~= "table" or type(ctx.emit) ~= "function" or not ctx.watch_changes then return end
   if type(path) ~= "string" or path == "" or type(after) ~= "string" then return end
@@ -1415,7 +1426,7 @@ local function announce_change(ctx, name, path, before, after)
     if not before_id or not after_id then recorded = false end
   end
   local added, removed = changeset.line_delta(original, after)
-  ctx.emit({ type = "change", name = name, path = path, before = before_id, after = after_id,
+  deliver(ctx, { type = "change", name = name, path = path, before = before_id, after = after_id,
     recorded = recorded, added = added, removed = removed, created = original == "" })
 end
 
@@ -1441,7 +1452,7 @@ local function announce_gone(ctx, reported)
       file.deleted_reported = true
       local before_id = file.after
       local after_id = changeset.store("")
-      ctx.emit({ type = "change", name = "bash", path = file.path, before = before_id,
+      deliver(ctx, { type = "change", name = "bash", path = file.path, before = before_id,
         after = after_id, recorded = before_id ~= nil and after_id ~= nil, created = false,
         deleted = true })
     end
@@ -2459,7 +2470,7 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     if not node.local_node and (call.capability == "write" or call.capability == "edit")
         and type(result) == "table" and ctx and type(ctx.emit) == "function" and ctx.watch_changes then
       local target = result.path or (type(call.args) == "table" and call.args.path) or "?"
-      ctx.emit({ type = "remote_change", capability = call.capability, node = node.name,
+      deliver(ctx, { type = "remote_change", capability = call.capability, node = node.name,
         path = tostring(target), ok = not result.error and result.ok ~= false, error = result.error })
     end
     if carries_local_images(result) then

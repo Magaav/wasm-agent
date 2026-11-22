@@ -159,6 +159,22 @@ check(watched_changes == 1, 'and the listener did receive its card (got ' .. wat
 check(not json.encode(silent):find('Create(', 1, true),
   'no line of a card reaches the result the model reads')
 
+-- ---- 3b. the ORDER a reader sees: the run's queue, drained after the call's own result row ----
+-- lua/core/agent.lua hands every call a queue and drains it after that call's tool_result, because a
+-- card that arrived while a code-mode block was still open would have been written inside it and then
+-- overwritten when the block settled. The seam is at the dispatcher, so it is pinned there: with a
+-- queue on the ctx, a change is QUEUED and not emitted; the drain is what the reader sees.
+local in_call, queue_ctx = {}, { session_id = sid, user_id = 'master', changes = changeset.new(),
+  watch_changes = true, emit = function(event) in_call[#in_call + 1] = event end, change_queue = {} }
+local wrote = tools.dispatch(memory, 'write', { path = work .. '/queued.txt', content = 'q\n' },
+  'master', queue_ctx)
+check(type(wrote) == 'table' and wrote.ok == true, 'a direct write ran through the same door')
+check(#in_call == 0, 'nothing was drawn while the call was still open (got ' .. #in_call .. ')')
+check(#queue_ctx.change_queue == 1, 'the change waits in the run queue (got ' .. #queue_ctx.change_queue .. ')')
+local queued_event = queue_ctx.change_queue[1] or {}
+check(queued_event.type == 'change' and queued_event.path == work .. '/queued.txt' and queued_event.created == true,
+  'and it is the Create for the file just written')
+
 -- ---- 4. a change made on another node --------------------------------------------------------
 -- The peer's answer carries no text this node could draw, so the view draws one honest row. Read
 -- through the chat.lua filter, which is what a `wa chat` reader's view is handed.
@@ -180,7 +196,78 @@ has(failed_row, 'could not write /srv/app/notes.md on peer-one: not_peer_operato
   'and a refused one says so instead of claiming a write')
 check(chat ~= nil, 'chat.lua loads (its event filter is what a terminal run hands the view)')
 
+-- ---- 5. through the AGENT LOOP, which is what a `wa chat` turn runs ------------------------
+-- The dispatcher's card is not the product until the loop carries it: this is the path where the
+-- event used to be emitted (only for a call NAMED write or edit) and where a SECOND emitter would
+-- draw every direct write twice. Both facts are pinned here, in order: the call's result row first,
+-- then its card, and exactly one card.
+--
+-- The model is a fixture, never the network: the vault is refused by name (scripts/lib/test-provider.lua)
+-- and host.http raises, so a row that reached a provider would fail here instead of spending a call.
+local original_dofile = dofile
+local fixture = dofile('scripts/lib/test-provider.lua')
+fixture.refuse_vault('script writes show a diff')
+local fixture_env = host.getenv
+host.getenv = fixture.getenv({ WASM_AGENT_LLM_API_KEY = 'test-only',
+  WASM_AGENT_PROVIDER = 'opencode-go', WASM_AGENT_LLM_MODEL = 'deepseek-v4.1-flash' })
+local real_http, real_stream = host.http, host.http_stream
+host.http = function() error('network forbidden') end
+host.http_stream = host.http
+-- The provider the AGENT will call is the one patched below: agent.lua loads its own copy, so the
+-- module is handed back by name instead of being read a second time (the same seam
+-- scripts/test-codemode-model-boundary.lua uses).
+local provider = dofile('lua/core/provider.lua')
+dofile = function(path) if path == 'lua/core/provider.lua' then return provider end return original_dofile(path) end
+local agent = original_dofile('lua/core/agent.lua')
+local loop_sid = memory.start_session('', 'script writes through the loop', { user_id = 'master' })
+memory.set_session_workspace(loop_sid, { required = true, state = 'allocated', worktree = work })
+local loop_target = work .. '/loop.txt'
+local loop_events, rounds = {}, 0
+local real_complete = provider.complete_with
+provider.complete_with = function(_, _messages)
+  rounds = rounds + 1
+  if rounds == 1 then
+    return { content = '', finish_reason = 'tool_calls',
+      tool_calls = { { id = 'loop-write', type = 'function',
+        ['function'] = { name = 'write',
+          arguments = json.encode({ path = loop_target, content = 'a\nb\n' }) } } } }
+  end
+  return { content = 'LOOP-DONE', finish_reason = 'stop', tool_calls = {} }
+end
+local bot = agent.new(loop_sid, function(event) loop_events[#loop_events + 1] = event end,
+  'master', 'master', '')
+local answer = bot:run('write the fixture file')
+provider.complete_with = real_complete
+dofile = original_dofile
+host.http, host.http_stream = real_http, real_stream
+host.getenv = fixture_env
+check(answer == 'LOOP-DONE', 'the loop finished its two mock rounds (got ' .. tostring(answer) .. ')')
+local result_at, change_at, change_count = nil, nil, 0
+for index, event in ipairs(loop_events) do
+  if event.type == 'tool_result' and event.name == 'write' then result_at = index end
+  if event.type == 'change' and event.path == loop_target then
+    change_at = index; change_count = change_count + 1
+  end
+end
+check(result_at ~= nil, 'the loop emitted the write call own result row')
+check(change_count == 1, 'exactly one card for that call, never two (got ' .. change_count .. ')')
+check(result_at ~= nil and change_at ~= nil and result_at < change_at,
+  'and the card is drained AFTER the result row (' .. tostring(result_at) .. ' < ' .. tostring(change_at) .. ')')
+local loop_card = ''
+for _, event in ipairs(loop_events) do
+  if event.type == 'change' and event.path == loop_target then loop_card = card(event) end
+end
+has(loop_card, 'Create(' .. loop_target .. ')', 'the loop card names the file the model wrote')
+local tool_message = nil
+for _, message in ipairs(memory.session_messages(loop_sid, { limit = 100 })) do
+  if message.role == 'tool' and message.tool_call_id == 'loop-write' then tool_message = message end
+end
+check(tool_message ~= nil, 'the tool message the model reads is stored')
+check(tool_message and not tostring(tool_message.content):find('Create(', 1, true),
+  'and it carries no line of the card')
+os.remove(loop_target)
 os.remove(target)
 os.remove(work .. '/bytes.txt')
+os.remove(work .. '/queued.txt')
 if failed > 0 then print('FAILED ' .. failed); os.exit(1) end
 print('script writes show a diff ok (' .. checks .. ' checks)')

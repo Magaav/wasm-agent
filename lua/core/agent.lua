@@ -2400,6 +2400,10 @@ function M:run_body(text, images)
   -- message, so the diff topic belongs to the message that caused it and undo can reach the
   -- previous text long after the message ended.
   self.changes = changeset.new()
+  -- The file changes this run's calls made, waiting for their own result row (lua/core/tools.lua,
+  -- `deliver`). One table for the whole run, drained in place: a settle that lands late still reaches
+  -- the next drain instead of a queue nobody reads.
+  self.change_queue = {}
   self.reviewed_paths = {}
   self.commit_audits = {}
   self.audit_step = nil
@@ -3746,6 +3750,7 @@ function M:run_body(text, images)
 
     local dispatch_ctx = { session_id = self.session_id, user_id = self.user, node_id = self.node,
       run_id = self.run_id, subagent = self.subagent, run_origin=self.run_origin, changes = self.changes, codemode_policy=self.codemode_policy,
+      change_queue = self.change_queue,
       -- Item 1 (change/done-gate-trial): the gate state this run's tool calls may mark, so a
       -- done_criteria call is counted from the door every call goes through (tools.dispatch), whether
       -- the model called it directly or from inside a script.
@@ -3992,6 +3997,17 @@ function M:run_body(text, images)
         ms = math.floor((host.now() - tool_started) * 1000) }
       self.emit({ type = "tool_result", name = function_.name, result = output,
         failed = not ok_tool and not cancelled, cancelled = cancelled })
+      -- The file changes this call made, in the order they happened, drawn UNDER its own result row:
+      -- a card that arrived while the call's block was open would have been written inside it. One
+      -- flush per call, and the queue keeps its identity so a change that settles later is drained by
+      -- the next one rather than into a table nobody reads any more.
+      do
+        local queue = self.change_queue
+        if type(queue) == "table" and #queue > 0 then
+          for _, event in ipairs(queue) do self.emit(event) end
+          for index = #queue, 1, -1 do queue[index] = nil end
+        end
+      end
       -- The change a write/edit made is NOT emitted here any more (Victor 22/11: "everything once we
       -- create/edit/delete a file must appear as claude code"). It is emitted by the tool's own branch
       -- (lua/core/tools.lua, `announce_change`), which is the one door every call passes: this loop's
