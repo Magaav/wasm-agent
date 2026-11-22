@@ -4797,6 +4797,13 @@ pub extern "C-unwind" fn opening_start(l: *mut LuaState) -> c_int {
         push_json(l, &json!({"started": false, "reason": "already_playing"}));
         return 1;
     }
+    // A key or a paste that arrived before the first frame is a reader who is already typing: the
+    // opening would then be a delay in front of their own line. They are not made to wait for a
+    // decoration - the draft they started is what the screen comes back to.
+    if state.editor.as_ref().is_some_and(|editor| !editor.draft_empty()) || !state.lines.is_empty() {
+        push_json(l, &json!({"started": false, "reason": "draft"}));
+        return 1;
+    }
     let budget = opening_budget_ms();
     let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
         .map(|since| since.as_nanos() as u64).unwrap_or(1);
