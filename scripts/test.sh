@@ -2094,6 +2094,12 @@ else
   exit 1
 fi
 
+# A line typed while a SCRIPT runs is queued: the script finishes every call it planned, and the line
+# reaches the model right after it (21/11, docs/HOST.md "A line typed during a run: queued or now").
+# End to end through a real `wa chat` and a local stub model (scripts/mock-provider-queued.cjs), not a
+# unit: the claim is about the whole route. WA_BIN names the binary, as the rows above do.
+WA_BIN="$BIN" gate_run bash scripts/test-cli-queued.sh
+
 # A complete note typed while a tool runs must reach the next model round and the
 # durable transcript. A local mock provider checks the actual agent loop without inference.
 WA_SCRIPT=scripts/test-cli-steering.lua "$BIN" --db "$DB.cli-steering" | grep 'cli steering ok'

@@ -116,7 +116,7 @@ pub struct RawMode;
 pub fn try_raw() -> Option<RawMode> { None }
 
 #[derive(Debug, PartialEq)]
-pub enum Action { None, Submit(String), Eof, Interrupt, Nav, PageUp, PageDown, Bottom,
+pub enum Action { None, Submit(String), SubmitNow(String), Eof, Interrupt, Nav, PageUp, PageDown, Bottom,
     /// The draft's selection, for the host to put on the clipboard (OSC 52): Ctrl+C or Ctrl+Insert with
     /// text selected (operator 17/11: "ctrl+a should select whole text-area so we can copy it").
     Copy(String),
@@ -314,7 +314,7 @@ impl Editor {
         }
         if !was_pasting && self.paste { self.group = None; } // a new paste never merges into the last one
         self.group_cursor = self.cursor;
-        if matches!(action, Action::Submit(_)) { self.undo.clear(); self.redo.clear(); self.group = None; }
+        if matches!(action, Action::Submit(_) | Action::SubmitNow(_)) { self.undo.clear(); self.redo.clear(); self.group = None; }
         action
     }
 
@@ -561,6 +561,12 @@ impl Editor {
                 if !line.is_empty() && line != "!" && !carries_secret(&line) { self.history.push(line.clone()); }
                 Action::Submit(line)
             }
+            // Send now: the same draft, the same history, the same clearing - the only difference is
+            // what the reader may do with the line while a run is in flight (docs/HOST.md).
+            A::SubmitNow => match self.perform(A::Submit) {
+                Action::Submit(line) => Action::SubmitNow(line),
+                other => other,
+            },
             A::Newline => { self.insert('\n'); Action::None } // Ctrl+J / Shift+Enter
             // A lone Esc only starts the sequence buffer: the console asks the terminal whether
             // anything follows it, and calls escape() when nothing does.
@@ -1490,6 +1496,26 @@ mod tests {
         for &byte in bytes { action = editor.feed(byte); }
         action
     }
+    /// Ctrl+Enter asks for the line NOW; Enter queues it. The chord is the reader's, so it is decided
+    /// here, once, and the same act is reachable from the fallback chord (Ctrl+G) for a terminal whose
+    /// Ctrl+Enter arrives as a plain Enter, and from the xterm form. docs/HOST.md has the rule.
+    #[test]
+    fn enter_queues_and_ctrl_enter_sends_now() {
+        let mut e = Editor::default();
+        e.insert_text("queued");
+        assert_eq!(e.feed(b'\r'), Action::Submit("queued".into()), "Enter sends the draft as it always did");
+        e.insert_text("now please");
+        assert_eq!(type_bytes(&mut e, b"[13;5u"), Action::SubmitNow("now please".into()),
+            "the kitty keyboard protocol's Ctrl+Enter sends now");
+        e.insert_text("fallback");
+        assert_eq!(e.feed(7), Action::SubmitNow("fallback".into()),
+            "Ctrl+G is the same send-now for a terminal that reports Ctrl+Enter as a plain Enter");
+        e.insert_text("xterm");
+        assert_eq!(type_bytes(&mut e, b"[27;5;13~"), Action::SubmitNow("xterm".into()),
+            "and so is xterm's modifyOtherKeys form");
+        assert_eq!(e.text(), "", "a send-now line clears the draft exactly as Enter does");
+    }
+
     #[test]
     fn bang_on_an_empty_draft_is_bash_mode_and_submits_with_its_bang() {
         let mut e = Editor::default();

@@ -489,6 +489,13 @@ pub fn set_run_cancel_probe(probe: fn() -> bool) {
 /// layer to register a probe in the CLI). Cleared when the next line is submitted.
 static CLI_INTERRUPT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// The one place the Enter / Ctrl+Enter difference is decided, so a test can hold it without a
+/// terminal: a send-now line raises the run's own interrupt ONLY while a run is in flight. Plain
+/// Enter never raises it (that is the whole of "the script finishes as if nothing was typed"), and a
+/// send-now line at an idle prompt is an ordinary Enter - raising it there would cancel the next run
+/// before it started.
+fn submit_interrupt(send_now: bool, run_in_flight: bool) -> bool { send_now && run_in_flight }
+
 fn cli_interrupted() -> bool {
     CLI_INTERRUPT.load(std::sync::atomic::Ordering::SeqCst)
 }
@@ -3710,9 +3717,40 @@ pub extern "C-unwind" fn terminal_write(l: *mut LuaState) -> c_int {
 /// and echoes nothing itself, so line editing, the echo and Enter are still the terminal's, as
 /// they are for a shell. What changes is who reads the line, and that a line typed during a run is
 /// still there when the run ends.
+/// How the reader sent a line.
+///
+/// The distinction is the whole of "talk to wa while it works" (Victor, 21/11, copying Claude Code):
+/// a Queued line - plain Enter - is delivered at the next boundary and NEVER ends the script that
+/// is running, so the script finishes exactly as if nothing had been typed. A Now line -
+/// Ctrl+Enter, or Ctrl+G where the terminal sends Ctrl+Enter as a plain Enter - is the reader
+/// saying "this one now": it ends the wait the run is in, the calls in flight stay running as
+/// pending handles, and the model answers it (docs/HOST.md, "A line typed during a run").
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+enum LineKind {
+    /// Plain Enter: delivered at the next context boundary, never interrupts anything.
+    #[default]
+    Queued,
+    /// Ctrl+Enter / Ctrl+G: may end the wait a run is in.
+    Now,
+}
+
+/// A line the reader handed over, and how it was sent.
+#[derive(Clone, Debug)]
+struct TypedLine {
+    text: String,
+    kind: LineKind,
+}
+
+impl TypedLine {
+    /// A line nobody asked to be delivered early: what every reader's Enter produces, and what the
+    /// pipe and the balloon's chosen command produce.
+    fn queued(text: String) -> Self { Self { text, kind: LineKind::Queued } }
+    fn now(text: String) -> Self { Self { text, kind: LineKind::Now } }
+}
+
 #[derive(Default)]
 struct ConsoleInput {
-    lines: Vec<String>,
+    lines: Vec<TypedLine>,
     /// Lines Lua took from `lines` but holds for later (`input_held`): still queued on screen.
     held: Vec<String>,
     eof: bool,
@@ -4335,7 +4373,17 @@ fn console_reader() {
                                 let up = action == wa_term::terminal_editor::Action::PageUp;
                                 state.transcript.page(if up { page } else { -page });
                             }
-                            wa_term::terminal_editor::Action::Submit(text) => {
+                            // Enter and Ctrl+Enter share every line of this arm; the ONE difference is
+                            // recorded below, when the line is queued: send_now says whether the reader
+                            // asked for it at once (and then, only while a run is in flight, the run's own
+                            // interrupt is raised, which is what ends a script's wait).
+                            action @ (wa_term::terminal_editor::Action::Submit(_)
+                              | wa_term::terminal_editor::Action::SubmitNow(_)) => {
+                                let (text, send_now) = match action {
+                                    wa_term::terminal_editor::Action::SubmitNow(text) => (text, true),
+                                    wa_term::terminal_editor::Action::Submit(text) => (text, false),
+                                    _ => unreachable!(),
+                                };
                                 // `/status` while a run is in flight: shown now, over the box, from the
                                 // last snapshot - never queued behind the run, never interrupting it.
                                 let running = state.editor.as_ref().is_some_and(|e| e.status);
@@ -4371,13 +4419,17 @@ fn console_reader() {
                                     state.host_panel = false;
                                     state.panel = None;
                                 }
-                                CLI_INTERRUPT.store(false, std::sync::atomic::Ordering::SeqCst);
+                                // A queued Enter never ends anything; a send-now line raises the run's
+                                // interrupt exactly while a run is in flight (a Ctrl+Enter at an idle
+                                // prompt is an ordinary Enter, and must not poison the next run).
+                                CLI_INTERRUPT.store(submit_interrupt(send_now, running),
+                                  std::sync::atomic::Ordering::SeqCst);
                                 state.transcript.to_bottom();
                                 // The image tokens this draft carries, and only those: the next
                                 // draft starts with none, so `[Image #1]` typed into it is text.
                                 state.submitted_images = submitted_tokens(&state.draft_images, &text);
                                 state.draft_images.clear();
-                                state.lines.push(text);
+                                state.lines.push(if send_now { TypedLine::now(text) } else { TypedLine::queued(text) });
                                 sync_queued(&mut state);
                             }
                             wa_term::terminal_editor::Action::Eof => { state.eof = true; state.running = false; break; }
@@ -4466,7 +4518,7 @@ fn console_reader() {
                                     // In the queue a typed line goes to, so the REPL runs it once the
                                     // turn is over - which is what the balloon's hint says it will do.
                                     wa_cli_views::Answer::Queue(line) => {
-                                        state.lines.push(line);
+                                        state.lines.push(TypedLine::queued(line));
                                         sync_queued(&mut state);
                                     }
                                 },
@@ -4513,7 +4565,7 @@ fn console_reader() {
                     wake.notify_all();
                     return;
                 }
-                state.lines.push(line.trim_end_matches(['\n', '\r']).to_string());
+                state.lines.push(TypedLine::queued(line.trim_end_matches(['\n', '\r']).to_string()));
                 wake.notify_all();
             }
             // A read error is the end of input rather than a lost line: the reader cannot be
@@ -5179,7 +5231,8 @@ pub extern "C-unwind" fn input_commands(l: *mut LuaState) -> c_int {
 /// What the editor lists above the status line as queued: the lines Lua took but holds (a slash
 /// command waits for the run's end; `input_held`), then the lines not taken yet. True if it changed.
 fn sync_queued(state: &mut ConsoleInput) -> bool {
-    let queued: Vec<String> = state.held.iter().chain(state.lines.iter()).cloned().collect();
+    let queued: Vec<String> = state.held.iter()
+        .chain(state.lines.iter().map(|line| &line.text)).cloned().collect();
     match state.editor.as_mut() {
         Some(editor) if editor.queued != queued => { editor.queued = queued; true }
         _ => false,
@@ -5248,11 +5301,16 @@ pub extern "C-unwind" fn input_take(l: *mut LuaState) -> c_int {
         Err(poisoned) => poisoned.into_inner(),
     };
     let mut state = wait_for_input(wake, state, deadline);
-    let lines: Vec<String> = state.lines.drain(..).collect();
+    let typed: Vec<TypedLine> = state.lines.drain(..).collect();
+    // The kinds travel beside the texts, index for index: a caller older than this field sees
+    // "lines" exactly as it always did, and one that reads "now" can tell a queued Enter from a
+    // Ctrl+Enter without a second capability.
+    let now: Vec<bool> = typed.iter().map(|line| line.kind == LineKind::Now).collect();
+    let lines: Vec<String> = typed.into_iter().map(|line| line.text).collect();
     let (eof, running) = (state.eof, state.running);
     if !lines.is_empty() && sync_queued(&mut state) { redraw_bottom(&mut state); }
     drop(state);
-    push_json(l, &json!({"lines": lines, "eof": eof, "running": running}));
+    push_json(l, &json!({"lines": lines, "now": now, "eof": eof, "running": running}));
     1
 }
 
@@ -5388,6 +5446,22 @@ mod terminal_tests {
     use super::usable_size;
     use serde_json::json;
 
+    /// What the queue remembers about a line: the kind the reader sent it with, and whether that
+    /// kind is what ends a run's wait. These are the values the host's take answer carries.
+    #[test]
+    fn a_queued_line_never_ends_a_run_and_a_send_now_line_does() {
+        assert!(super::submit_interrupt(true, true),
+            "Ctrl+Enter during a run ends the wait the run is in");
+        assert!(!super::submit_interrupt(true, false),
+            "Ctrl+Enter at an idle prompt is an ordinary Enter: it must not cancel the next run");
+        assert!(!super::submit_interrupt(false, true),
+            "plain Enter during a run never ends it - the script finishes as if nothing was typed");
+        assert!(!super::submit_interrupt(false, false));
+        assert_eq!(super::TypedLine::queued("a".into()).kind, super::LineKind::Queued);
+        assert_eq!(super::TypedLine::now("b".into()).kind, super::LineKind::Now);
+        assert_ne!(super::LineKind::Now, super::LineKind::Queued);
+    }
+
     /// A line sent during a run is listed above the status line until Lua takes it; a line Lua
     /// holds for after the run (`input_held`) stays listed; taking it hands the rows back to the chat.
     #[test]
@@ -5397,7 +5471,7 @@ mod terminal_tests {
         editor.row = 39; editor.width = 80; editor.height = 3; editor.status = true;
         state.editor = Some(editor);
         let bottom = state.editor.as_ref().unwrap().out_bottom();
-        state.lines.push("use the new requirement".into());
+        state.lines.push(super::TypedLine::queued("use the new requirement".into()));
         assert!(super::sync_queued(&mut state));
         assert!(!super::sync_queued(&mut state), "nothing new: no redraw");
         assert_eq!(state.editor.as_ref().unwrap().out_bottom(), bottom - 1, "one row above the status line");

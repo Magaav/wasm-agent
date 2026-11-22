@@ -105,8 +105,8 @@ const shaped = {state: started.state, op: typeof started.op, tool: started.tool,
   waited_s: started.waited_s, progress: started.progress && started.progress.state,
   progress_bytes: started.progress && started.progress.output_bytes};
 const resumed = await wait(started.op, {wait_s: 20});
-return {shaped: shaped, op: started.op, resumed: {state: resumed.state, code: resumed.result && resumed.result.code,
-  out: resumed.result && resumed.result.stdout, complete: resumed.result && resumed.result.output_complete}};
+return {shaped: shaped, op: started.op, resumed: {state: resumed.state, code: resumed.code,
+  out: resumed.stdout, complete: resumed.output_complete}};
 ]==],60000)
 check(first.ok==true,'a script that starts a call and resumes it runs: '..tostring(first.error))
 check(first_value and first_value.shaped.state=='pending','a call still running after wait_s answers state=pending')
@@ -128,7 +128,7 @@ local the_op=first_value and first_value.op
 
 -- 4. Waiting is a read: the resume dispatched no bash and no new operation.
 local before_bash=count_of('bash')
-local again,again_value=run('const again = await wait("'..tostring(the_op)..'", {wait_s: 5}); return {state: again.state, code: again.result && again.result.code};',30000)
+local again,again_value=run('const again = await wait("'..tostring(the_op)..'", {wait_s: 5}); return {state: again.state, code: again.code};',30000)
 check(again.ok==true and again_value.state=='done','a second wait answers the same settled handle')
 check(count_of('bash')==before_bash,'a resume dispatches nothing: no second bash call was made')
 
@@ -158,7 +158,7 @@ return {op: started.op, state: started.state};
 ]==],60000)
 check(opened.ok==true and opened_value.state=='pending','a script can end with a call still running')
 check(host.read_file(pending.dir()..'/'..scope..'.json')~=nil,'the handle is recorded on disk per scope')
-local later,later_value=run('const late = await wait("'..tostring(opened_value.op)..'", {wait_s: 20}); return {state: late.state, out: late.result && late.result.stdout};',60000)
+local later,later_value=run('const late = await wait("'..tostring(opened_value.op)..'", {wait_s: 20}); return {state: late.state, out: late.stdout};',60000)
 check(later.ok==true and later_value.state=='done','the next script resumes the earlier script\'s call')
 check(tostring(later_value.out or ''):find('later'),'the resumed result is the earlier call\'s output')
 
@@ -312,15 +312,21 @@ check(started_cancel.ok==true and started_cancel_value.state=='pending','a long 
 local cancelled,cancelled_value=run('const stopped = await cancel("'..tostring(started_cancel_value.op)..'"); return {cancelled: stopped.cancelled, state: stopped.state, error: stopped.error};',30000)
 check(cancelled.ok==true and cancelled_value and cancelled_value.cancelled==true,'cancel(op) stops a running call: '..json.encode(cancelled_value):sub(1,200))
 check(cancelled_value and cancelled_value.state=='cancelled','the cancelled handle answers its own state')
-local after_cancel,after_cancel_value=run('const entry = await wait("'..tostring(started_cancel_value.op)..'", {wait_s: 5}); return {state: entry.state, reason: entry.reason, code: entry.result && entry.result.code};',60000)
+local after_cancel,after_cancel_value=run('const entry = await wait("'..tostring(started_cancel_value.op)..'", {wait_s: 5}); return {state: entry.state, reason: entry.reason, code: entry.code};',60000)
 -- A failed call is an answer, not an exception: the script read `state` and `reason` and kept running.
 check(after_cancel.ok==true,'a failed pending call does not throw inside the script: '..tostring(after_cancel.error))
 check(after_cancel_value and after_cancel_value.state=='failed','a cancelled call is never reported as done: '..json.encode(after_cancel_value):sub(1,200))
 check(after_cancel_value and after_cancel_value.reason=='cancelled','the failed entry says why: '..tostring(after_cancel_value and after_cancel_value.reason))
 -- The operator's ruling (12/11): the word is `reason`, and the help text must agree with the
 -- behaviour - news about a call never throws, so a failed entry carries no `error`.
-check(after_cancel_value and after_cancel_value.error==nil,'a failed entry answers reason, never error')
-check(pending.WAIT_HELP.description:find('{state:"failed", op, reason}',1,true)~=nil,
+-- Since the one-result-shape change (21/11) a settled entry IS the tool's own result, so an entry
+-- for a CANCELLED operation also carries that result's own error field. The ruling above is about the
+-- handle's word and about the script keeping its feet: the reason is there (previous line) and nothing
+-- threw (after_cancel.ok), and the help still promises no error key of its own.
+check(after_cancel_value and after_cancel_value.reason=='cancelled',
+ 'a failed entry answers the handle reason: '..json.encode(after_cancel_value or {}):sub(1,200))
+check(pending.WAIT_HELP.description:find('state:"failed"',1,true)~=nil
+  and pending.WAIT_HELP.description:find('reason',1,true)~=nil,
  'the wait help names the failed shape the same way the implementation answers it')
 check(pending.WAIT_HELP.description:find('error',1,true)==nil,'the wait help promises no error key for a failed call')
 -- `searchTools` matches a keyword as a SUBSTRING of name+description, so a builtin whose help says
@@ -402,7 +408,7 @@ local queued=0
 for _, call in ipairs(outbox_calls) do if call.args.id==nil then queued=queued+1 end end
 check(queued==1,'nothing was queued twice by the handle being listed or cancelled (queued '..queued..')')
 local outbox_wait=pending.wait(outbox_dispatch,outbox_opts,'msg-42',{wait_s=5})
-check(outbox_wait.state=='done' and outbox_wait.result and outbox_wait.result.message_id=='MSG-42',
+check(outbox_wait.state=='done' and outbox_wait.message_id=='MSG-42',
  'wait(op) collects the outbox outcome: '..json.encode(outbox_wait):sub(1,200))
 local kept_outbox=pending.retained('msg-42',outbox_scope)
 check(type(kept_outbox)=='table' and kept_outbox.message_id=='MSG-42','results.get(op) re-reads the outbox outcome')

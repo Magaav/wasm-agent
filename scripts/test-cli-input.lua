@@ -38,10 +38,16 @@ host.sleep(3000)
 
 -- What the host collected while this interpreter was elsewhere. This is the assertion the whole
 -- change exists for: the line is here, in order, and nobody lost it.
-local arrived = cli_input.arrived(0)
+local arrived, arrived_eof, arrived_running, arrived_kinds = cli_input.arrived(0)
 ok(type(arrived) == "table" and arrived[1] == "typed while blocked",
   "a line typed while this process was blocked is waiting for it, got "
   .. tostring(type(arrived) == "table" and arrived[1] or arrived))
+-- This binary speaks the two kinds: the answer carries a "now" array beside its lines, and a line
+-- that arrived through a PIPE is queued - there is no chord on a pipe, and a queued line never ends a
+-- run (docs/HOST.md, "A line typed during a run"). Asserted on the real host here, not on a stub.
+ok(type(arrived_kinds) == "table" and arrived_kinds[1] == false,
+  "the real take answer carries the line kind, and a pipe line is queued: "
+  .. tostring(type(arrived_kinds) == "table" and tostring(arrived_kinds[1]) or type(arrived_kinds)))
 
 -- The producer has closed the pipe by now. The end of input is an answer - nil plus `eof` - and
 -- never a hang, because a REPL that cannot be told the input ended cannot ever exit cleanly.
@@ -105,6 +111,32 @@ local bang = cli_input.new({ deps = {
 } })
 ok(#bang:take_steering() == 0, "a ! line is not steered into the run")
 ok(bang:poll(0) == "!git status", "it stays queued for the REPL, in order")
+
+-- A line sent with Ctrl+Enter (send now) is the reader's own kind, not something inferred from its
+-- text: the host records it beside the line, the queue keeps them together, and now_lines() names
+-- the waiting ones that asked to be delivered early. At a context boundary both kinds steer the
+-- model the same way - the kind decides what may END a run, never what is delivered.
+local kinds = cli_input.new({ deps = {
+  start = function() return '{"started":true}' end,
+  take = function() return '{"lines":["queued please","now please"],"now":[false,true],"eof":false,"running":true}' end,
+  held = function() end,
+} })
+ok(kinds:poll(0) == "queued please", "a queued line comes back in order")
+ok(#kinds:now_lines() == 1 and kinds:now_lines()[1] == "now please",
+  "and only the Ctrl+Enter line is named as send-now, got " .. table.concat(kinds:now_lines(), ","))
+ok(kinds:poll(0) == "now please", "the send-now line is still delivered as ordinary input")
+ok(#kinds:now_lines() == 0, "and once it is used it is no longer waiting")
+
+-- A binary older than the chord answers no now array: every line it hands over is queued, which is
+-- what that binary behaves like, and it is asserted rather than assumed.
+local old_binary = cli_input.new({ deps = {
+  start = function() return '{"started":true}' end,
+  take = function() return '{"lines":["from an older binary"],"eof":false,"running":true}' end,
+  held = function() end,
+} })
+local old_line = old_binary:poll(0)
+ok(old_line == "from an older binary" and #old_binary:now_lines() == 0,
+  "a take answer without a now array is a queued line, never a send-now one")
 
 -- An older binary: no capability, no reader thread, and the blocking read this replaced. The
 -- condition is not an error, and it must not hang waiting for something that will never answer.

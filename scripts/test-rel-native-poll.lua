@@ -73,6 +73,22 @@ if not op then
   os.exit(1)
 end
 
+-- THE OPERATION MUST ALREADY BE RUNNING before the loop starts (21/11, preflight round 2: "ran 5"
+-- instead of 3 on a loaded machine). An operation goes accepted -> running on its own, and a state
+-- change IS progress, so the guard correctly resets its repeat count when that lands mid-loop. The row
+-- is about a poll that learns NOTHING, so it waits for the supervisor to say running and asserts it did
+-- - the shape scripts/test-codemode-queue-timeout.lua uses for slots it must see held - which makes the
+-- assertion below deterministic instead of load-dependent.
+local running_seen, running_waited_ms = false, 0
+while running_waited_ms < 20000 do
+  local state = tools.dispatch(memory, 'operation', { action = 'status', id = op }, 'master', ctx)
+  if type(state) == 'table' and tostring(state.state) == 'running' then running_seen = true; break end
+  if host.sleep then host.sleep(100) end
+  running_waited_ms = running_waited_ms + 100
+end
+ok(running_seen, 'the supervised operation is observably running before the loop starts (after '
+  .. running_waited_ms .. ' ms)')
+
 local FENCE='```'
 local function script_block()
   local a='const a = await tools.operation({action:"await", id:"'..op..'", wait_s:0});'

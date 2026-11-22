@@ -711,11 +711,25 @@ function M.run(argv)
     return true
   end
 
+  -- A settled pending handle wakes this session (21/11). The node's tick does the same thing on the
+  -- same rows, and both are safe: the wake's id comes from the handle, so whichever gets there first
+  -- schedules it and the other insert is a no-op (lua/core/handle_wake.lua). The sweep is a status read
+  -- per open handle, so it runs on the same slow tick as the restart check, never per keystroke.
+  local handle_swept = 0
+  local function sweep_handles_if_due()
+    local now = host.now()
+    if now - handle_swept < cli_restart.CHECK_SECONDS then return end
+    handle_swept = now
+    local ok, why = pcall(function() return dofile("lua/core/handle_wake.lua").sweep() end)
+    if not ok and host.log then pcall(host.log, "handle wake sweep failed: " .. tostring(why)) end
+  end
+
   local function read_line()
     view:prompt()
     while true do
       restart_if_due()
       catch_up()
+      sweep_handles_if_due()
       -- A due self-wake is a turn this session promised itself; run it now rather than at the next
       -- line the reader types. A wake that brings no line redraws the prompt after its own turn.
       if wake_if_due() then view:prompt() end
@@ -987,7 +1001,14 @@ function M.run(argv)
       for key, value in pairs(stats) do
         if type(value) ~= "table" then rows[#rows + 1] = string.format("%-10s %s", tostring(key), tostring(value)) end
       end
-      ui.show(balloon.paged("Database", rows, { per = 14, nowrap = true }))
+      -- The three counters the next mission is planned from (21/11): how often a model step was
+      -- caused only by a settled handle, how often a script was cut at its cap, and how often a
+      -- pending answer was used as if it had settled.
+      local counted = dofile("lua/core/counters.lua").read()
+      for _, name in ipairs({ "wake_only_round", "script_cut_at_cap", "handle_mishandled" }) do
+        rows[#rows + 1] = string.format("%-16s %d", name, tonumber(counted[name]) or 0)
+      end
+      ui.show(balloon.paged("Database", rows, { per = 18, nowrap = true }))
     elseif line == "/console" then
       -- The console is the raw view of the same run: every event as it arrived, and a tool's
       -- output whole. It is a toggle rather than a flag on the launcher because the question

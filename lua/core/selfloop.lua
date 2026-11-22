@@ -446,6 +446,31 @@ function M.schedule(args, ctx)
 end
 
 -- The pending wake facts for a session (the footer's and the window's one read).
+-- A settled pending handle wakes its session (21/11; lua/core/handle_wake.lua). The row is a one-shot
+-- wake exactly like the model's own, with two differences that make it safe to ask for twice: the caller
+-- supplies the reason and the words, and the id is DERIVED from the handle - so a second sweep, in this
+-- process or after a restart, cannot schedule the same wake again (INSERT OR IGNORE), and the handle
+-- record is only marked woken after this answered.
+--
+-- It is NOT a second scheduling mechanism: the claim, the dispatch (a completion on the node, the idle
+-- prompt in a terminal), the pause, the hooks and the durable turn are the ones every self-wake takes.
+function M.schedule_settled(op, owner, session_id, reason, prompt, opts)
+  M.setup()
+  session_id, owner = tostring(session_id or ""), tostring(owner or "")
+  -- A refusal, but not a model-facing one: nothing renders it through lua/core/refusal.lua, so it is a
+  -- reason rather than a refusal code (a code here would enter the shipped inventory and promise a
+  -- message and a fix that no reader ever sees).
+  if session_id == "" or owner == "" then return { ok = false, reason = "handle_wake_requires_a_session" } end
+  local id = "handle:" .. tostring(op)
+  local now = clock(opts)
+  local changed = exec([[INSERT OR IGNORE INTO self_wakes
+    (id, owner, session_id, status, reason, prompt, due_at, on_topics, probe, probe_result, event_json,
+     fired_at, created_at, updated_at, attempts, last_error, boot)
+    VALUES (?,?,?,'pending',?,?,?,'[]','','','',0,?,?,0,'','')]],
+    { id, owner, session_id, tostring(reason or ""), tostring(prompt or ""), now, now, now })
+  return { ok = true, id = id, created = (tonumber(changed.changes) or 0) == 1 }
+end
+
 function M.summary(session_id, opts)
   M.setup()
   session_id = tostring(session_id or "")
@@ -1100,6 +1125,11 @@ function M.run_wake(args)
     exec([[UPDATE self_wakes SET status='pending', due_at=?, updated_at=?
       WHERE id=? AND status='dispatching']], { row.due_at, now, row.id })
     return { paused = true, wake_id = row.id }
+  end
+  -- A wake whose only input is a settled handle IS the wake-only round (21/11): counted here, where
+  -- the step is about to run, so the number is turns and not sweeps (lua/core/counters.lua).
+  if tostring(row.id or ""):match("^handle:") then
+    pcall(function() dofile("lua/core/counters.lua").bump("wake_only_round") end)
   end
   local content, trace = M.turn_content(row, { now = now })
   -- `SelfWake`: a due wake is claimed and about to spend a turn. The operator may veto it (a quiet

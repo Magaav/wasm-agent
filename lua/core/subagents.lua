@@ -1059,6 +1059,11 @@ function wa_orchestrator_tick()
   -- The model's own wakes (docs/SELF-LOOP.md): due rows are handed to the same run scheduler, so a
   -- session no browser is watching still keeps a promise it made to itself. Eligibility and state are
   -- in Lua; this tick only gives the loop a heartbeat that outlives a single interpreter turn.
+  -- A pending handle that settled with nobody waiting wakes its session (21/11): one status read per
+  -- open handle, and one durable one-shot wake per settle, which the self-loop tick right below then
+  -- dispatches. This is the half that works with ONLY the node serving - no terminal, no reader
+  -- (lua/core/handle_wake.lua).
+  phase('handle-wake',function() dofile('lua/core/handle_wake.lua').sweep() end)
   pcall(dofile('lua/core/selfloop.lua').tick)
   return "ok"
 end

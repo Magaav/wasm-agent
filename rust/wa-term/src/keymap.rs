@@ -80,6 +80,10 @@ impl Surface {
 pub enum DraftAct {
     /// Send the draft (`!cmd` runs the line here as a bash command).
     Submit,
+    /// Send the draft NOW: the same line as Submit, with the reader saying that this one may end
+    /// the wait a run is in (Ctrl+Enter, and Ctrl+G for a terminal whose Ctrl+Enter arrives as a
+    /// plain Enter). Between runs it is Submit; see docs/HOST.md, "A line typed during a run".
+    SubmitNow,
     /// A new line in the draft, without sending it.
     Newline,
     /// Close the slash menu, leave bash mode; the console decides what a bare Esc means.
@@ -118,7 +122,8 @@ pub enum DraftAct {
 
 impl DraftAct {
     pub const ALL: &'static [DraftAct] = &[
-        DraftAct::Submit, DraftAct::Newline, DraftAct::Escape, DraftAct::Interrupt, DraftAct::Copy,
+        DraftAct::Submit, DraftAct::SubmitNow, DraftAct::Newline, DraftAct::Escape,
+        DraftAct::Interrupt, DraftAct::Copy,
         DraftAct::DeleteForward, DraftAct::Backspace, DraftAct::DeleteForwardOrLeave,
         DraftAct::KillLine, DraftAct::KillToStart, DraftAct::KillWord, DraftAct::SelectAll,
         DraftAct::Undo, DraftAct::Redo, DraftAct::PasteImage, DraftAct::PasteStart,
@@ -277,6 +282,12 @@ pub const BINDINGS: &[Binding] = &[
     // ---- the draft: sending a line ---------------------------------------------------------
     d("Sending", "Enter", Trigger::Byte(b'\r'), DraftAct::Submit,
       "send the draft; a `!cmd` line is run here as a bash command"),
+    d("Sending", "Ctrl+Enter", Trigger::Seq(b"\x1b[13;5u"), DraftAct::SubmitNow,
+      "send the draft NOW: during a run this one ends the wait the run is in and is answered at once (Enter alone is queued and never interrupts)"),
+    d("Sending", "Ctrl+Enter", Trigger::Seq(b"\x1b[27;5;13~"), DraftAct::SubmitNow,
+      "the same, as an xterm's modifyOtherKeys reports it"),
+    d("Sending", "Ctrl+G", Trigger::Byte(7), DraftAct::SubmitNow,
+      "the same send-now, for a terminal whose Ctrl+Enter arrives as a plain Enter"),
     d("Sending", "Ctrl+J, Shift+Enter", Trigger::Byte(b'\n'), DraftAct::Newline,
       "a new line in the draft, without sending it"),
     d("Sending", "Shift+Enter", Trigger::Seq(b"\x1b\r"), DraftAct::Newline,

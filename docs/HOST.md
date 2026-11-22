@@ -499,7 +499,10 @@ round-boundary steering, not per-keystroke interruption.
   second reader - two readers would split the reader's typing between two queues and neither
   caller would see the whole of it.
 - `input_take(timeout_ms)` waits up to that long for at least one line and answers
-  `{lines, eof, running}`. **`lines` is an array and never a missing value**: "nothing typed yet"
+  `{lines, now, eof, running}`. `now` is a parallel array of booleans, index for index with
+  `lines`: true where the reader sent that line with Ctrl+Enter (or the fallback chord) - see
+  "A line typed during a run: queued or now" above. A binary older than that chord answers no
+  `now` array, and every line it hands over is a queued line. **`lines` is an array and never a missing value**: "nothing typed yet"
   is not "no console", and a caller that cannot tell the two apart stops on a keystroke that has
   simply not happened yet. `timeout_ms` of 0 is "take what is there now".
 - `input_stop()` asks the thread to stop and does **not** join it: it is blocked in a read that no
@@ -564,6 +567,30 @@ round-boundary steering, not per-keystroke interruption.
   line input. Raw mode is never enabled for a captured transcript.
 - `lua/core/cli_input.lua` is the Lua side, and tolerates the capability being absent (an older
   binary) by falling back to the blocking read it replaced.
+
+## A line typed during a run: queued or now
+
+While a run is in flight the reader can still type, and the difference between the two ways to send
+that line is the whole of "talk to wa while it works" (Victor, 21/11, copying Claude Code):
+
+* **Enter is QUEUED.** The line is delivered at the next context boundary and it ends nothing: the
+  script that is running finishes exactly as if nothing had been typed, every call it planned is
+  executed, and the line becomes the model's next input right after the script returns.
+* **Ctrl+Enter is NOW.** The host raises the run's own interrupt (the flag `host.run_cancelled`
+  answers, the same one Ctrl+C uses) and queues the line: the script's wait ends at its next
+  one-second slice, calls already in flight keep running and stay resumable as pending handles,
+  effects not yet admitted are refused, and the reader's line is the model's next input.
+* **The fallback chord is Ctrl+G.** Most terminals send the same CR for Ctrl+Enter and Enter, so
+  where the terminal cannot tell them apart (or does not speak the kitty keyboard protocol, which
+  reports Ctrl+Enter as CSI 13;5u) Ctrl+G is the same send-now act. xterm's CSI 27;5;13~ is bound
+  too.
+* The distinction is made in the editor (`rust/wa-term/src/keymap.rs`, the Sending rows) and
+  recorded per line by the reader thread, so the queue holds the kind beside the text and
+  `lua/core/cli_input.lua` hands it on (`METHODS:now_lines()`). It is never inferred from what
+  the line says.
+* Between runs both keys are the same thing: a send-now line at an idle prompt is an ordinary
+  Enter, and the interrupt is raised only while a run is in flight, so it can never cancel a run
+  that has not started.
 
 Risk/limits: the editor uses a three-row viewport; long drafts remain intact but older
 rows scroll out of that viewport. Ctrl+C never discards the draft: during a run it interrupts

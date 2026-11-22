@@ -271,6 +271,14 @@ local function host_global(name, params, calls, selected, lookup, ctx, journal, 
     local value
     if name == 'wait' then
       value = pending_calls.wait(popts.dispatch, popts, asked, type(params) == 'table' and params[2] or nil)
+      -- A wait answers ENTRIES, and since the one-result-shape change (21/11) a settled entry IS the
+      -- tool's own result - so a failed call's own 'error' field sits at the entry's top level, where
+      -- the generic 'a global that answers an error failed' rule below would read it as this call's
+      -- refusal and throw. What a script must be able to do is branch on a failed entry, so the only
+      -- answer that throws is a real REFUSAL of the wait itself (a malformed request), and a refusal
+      -- is the one answer with no 'state': an entry always carries one.
+      local refusal = type(value) == 'table' and value.state == nil and value.error ~= nil
+      return value, not refusal
     elseif name == 'pending' then
       -- The whole pool this scope holds: a read, so a later step or turn needs no memory of handles.
       value = pending_calls.list(popts.dispatch, popts)
@@ -991,6 +999,18 @@ local function run_script(memory,args,role,ctx,catalog,current_catalog,dispatch,
   -- the way to pending (a wait_s:0 call the script resumes at once is foreground work throughout).
   local lowered=pending_calls.background(scope,dispatch,popts)
   if lowered then result.pending_backgrounded=lowered end
+  -- The counters the next mission is planned from (docs/CODEMODE.md, "The three counters"). One
+  -- increment per SCRIPT, never per call: "this script was told not yet" is the unit both of them
+  -- count, and a script that polled a handle once is not a script that mishandled it.
+  pcall(function()
+    local counters=dofile('lua/core/counters.lua')
+    if popts.cut_at_cap then counters.bump('script_cut_at_cap') end
+    local problem=tostring(result.error or '')
+    if problem:find('has not resolved yet',1,true)~=nil
+      or problem:find(pending_calls.WAIT_BOUND_CODE,1,true)~=nil then
+      counters.bump('handle_mishandled')
+    end
+  end)
   -- What the session holds after this script (its writes committed, or none if it failed).
   local vars=session_vars(memory,scope)
   if #vars>0 then result.vars=vars end
