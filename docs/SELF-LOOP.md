@@ -98,8 +98,10 @@ the tools it may call are still the read-only ones permitted for the session's o
 ## Durable state and dispatch
 
 Four tables in the memory database (`memory.db`): `self_wakes`, `self_notes`, `self_notes_archive` and
-`self_wake_pauses`. They are created on first use (`selfloop.setup`), so no migration of an existing
-database is needed.
+`self_wake_pauses` (one row per held session; its `kind` says whether an interrupt paused it or the
+operator parked it - see "Park" below). They are created on first use (`selfloop.setup`), so no
+migration of an existing database is needed beyond the one conditional `ALTER` that adds `kind` to a
+ledger written before it.
 
 ```
 model calls wake
@@ -148,11 +150,62 @@ The pause is kernel state (`self_wake_pauses`, one row per session) and not a st
 paused wake is still a *pending* wake - nothing about it was decided - so a failed rewrite on resume
 cannot lose one.
 
+## Park: the operator stops a session
+
+A session whose work was stopped from outside the node must stay stopped. Measured 22/11: mission
+`flaky-rel-native-poll` was stopped on purpose - its unit stopped at 00:10Z and a `HOLD` file written
+in its mission directory - and its session kept working, 196 messages at the stop and 263 an hour
+later. Each local install had written a `deploy pending: resume after the node swap` wake
+(`lua/core/deploy_pause.lua`) and the node's own placement tick performed it, in a session that was
+running a 64-wide load test and saturating the laptop during two landings. A stopped unit and a `HOLD`
+file are outside this program, so nothing in it knew the session was parked, and no verb could say so
+(`wa mission stop` is the mission loop's, and it stops pids).
+
+`wa session park <id> [--reason <text>] [--mission <name>]` is that verb.
+
+* **Parked, a session runs no turn.** The park is a `self_wake_pauses` row of `kind = 'park'`, so every
+  reader already honours it: the placement tick dispatches none of that session's wakes and counts
+  them held, the CLI's idle claim takes none, and `wa chat --resume <id>` (also `--session`, and
+  `--continue` when that thread is the newest) is **refused by name**, exit 2, naming
+  `wa session release <id>`. Coming back to a parked session lifts nothing: `selfloop.resume` - the one
+  door a resume, a `wa resume --session` and a user message all go through - answers `parked` and
+  keeps the row.
+* **Nothing is dropped and nothing is rewritten.** A parked wake keeps its id, its `due_at`, its
+  reason and its prompt, exactly like an interrupted one; the tick reports it `held`. `wa session
+  status <id>` says `parked since <time>`, how many wakes are held, and the reason; with no id it
+  lists every parked session on the node.
+* **Release** (`wa session release <id> [--mission <name>]`) makes those wakes due again, and a wake
+  whose time passed while it was parked fires **once**, not once per missed interval. A release of a
+  session that is not parked is a refusal (exit 1), not a claim of an effect.
+* **A park is not an interrupt.** An interrupt hold (Esc, a cancelled run) is lifted by coming back to
+  the session; a park only by the release verb. Parking a session an interrupt already holds
+  *upgrades* that row to a park without moving the moment the schedule stopped, and `wa session
+  release` refuses an interrupt hold by name (`session_held_by_interrupt`) instead of lifting it - a
+  release must not re-arm a schedule the user stopped.
+* **What a park does not do**, said plainly: it does not kill a run already in flight (that run's
+  effects are unknown and nothing here may claim to have stopped it; a row already dispatching is
+  settled `unknown`, never replayed), it does not touch a subagent child's own schedule, and it does
+  not cancel a wake.
+* **The factory's stop recipe runs one line**, because `HOLD` is written by a shell script and cannot
+  call into a running node by itself:
+
+  ```sh
+  wa session park --mission <name> --reason "HOLD written: mission stopped"
+  ```
+
+  `--mission` names the mission directory instead of an id: the session it parks is the one the
+  directory already recorded (`run.lock`'s `SESSION=`, else the `wa: session <id>` line in its
+  `out.log`, the same record `wa mission status <name>` prints), and the mission root is
+  `$MISSION_ROOT` (default `~/Work/missions`). An id, or a unique prefix of one, works the same way
+  with `park`/`release`/`status`.
+* The footer of a parked session reads `⏰ 2 wakes held (session parked)`, so a reader does not go
+  looking for the interrupt that paused it, and the window's `wakes` block carries `parked`.
+
 ## Visibility
 
 * CLI: `⏰ 2 wakes · next 14:05` (count + next due) on a row of its OWN, directly above the session
-  status bar (`host.editor_wakes`, refreshed with the session numbers); a held session reads
-  `⏰ 2 wakes paused` there instead. It is not part of the bar's line: putting it there squeezed the
+  status bar (`host.editor_wakes`, refreshed with the session numbers); an interrupted session reads
+  `⏰ 2 wakes paused` there instead, and a parked one `⏰ 2 wakes held (session parked)`. It is not part of the bar's line: putting it there squeezed the
   numbers and wrapped the bar on a narrow terminal. No wake scheduled = no row at all.
 * CLI: `/wakes` lists pending wakes (id, status, due or subscription, cadence, last error);
   `/wake cancel <id>` cancels one.
@@ -210,6 +263,14 @@ claimed-once, cancel, refusals, event wake via `publish` (identity stored, paylo
 dispatch going `unknown`, probe unchanged/changed/error paths, notes write/append/compact/archive,
 the wake turn's shape, the tool arms, the run half end to end against the local fallback (with the
 LLM environment hidden, so no model call), and the real QuickJS sandbox when this binary carries it.
+
+`scripts/test-session-park.lua` (self-contained, same runner, a real ledger in a scratch home, a
+counted scheduler stub) and `scripts/test-session-park.sh` (the operator path across processes: the
+verb, `wa chat --resume`'s and `wa chat --continue`'s refusal and the exit codes, with a wake written by `deploy_pause` that the
+node's tick performs only after the release): a due wake is dispatched (the control), parked it is
+held and unchanged with no new message, a resume and a user message lift nothing, the release runs
+that same wake exactly once, a park upgrades an interrupt hold without moving when it started, and
+`release` refuses an interrupt hold by name.
 
 `scripts/test-selfloop-pause.lua` (self-contained, same runner, fake clock, counted scheduler stub):
 the interrupt/resume contract above - a claimed-under-cancel wake starts no turn, a held session

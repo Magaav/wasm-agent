@@ -149,6 +149,16 @@ step "and nothing is parked any more"
 run session status
 want "no session is parked" "the whole-node listing is empty again"
 
+step "wa chat --continue: a parked newest thread is refused too"
+# Its own ledger, because --continue picks the NEWEST thread and this file already wrote three. The
+# fixture leaves one thread, parked, with a message in it: the exact shape a stopped session has.
+CONTINUE_DB="$WORK/continue.sqlite"
+LAST_OUT="$(PARK_MODE=solo WA_SCRIPT="$ROOT/scripts/lib/session-park-e2e.lua"   "$BIN" --db "$CONTINUE_DB" 2>&1 | grep -v 'served natively')"
+case "$LAST_OUT" in *"solo ok"*) ;; *) fail "the solo fixture did not run: $LAST_OUT" ;; esac
+last_out="$("$BIN" --db "$CONTINUE_DB" chat --continue 2>&1)"; last_code=$?
+want_code 2 "--continue does not open a parked thread"
+want "release it with: wa session release park-solo" "and names the release command"
+
 if [ "$fails" -ne 0 ]; then
   echo "session park: $fails failure(s)" >&2
   exit 1

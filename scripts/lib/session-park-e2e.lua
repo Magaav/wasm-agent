@@ -55,6 +55,20 @@ if mode == "tick" then
   return
 end
 
+if mode == "solo" then
+  -- The thread `wa chat --continue` finds: a message in it, and the node id a chat session carries
+  -- (`chat.lua`'s NODE is ""), because `memory.latest_thread` filters on both. Parked, --continue must
+  -- be refused for the same reason --resume is: it opens a thread the reader is coming back to.
+  local solo = memory.start_session("local", "chat",
+    { id = "park-solo", user_id = "master", node_id = "", title = "park solo" })
+  memory.append_turn(solo, { role = "user", content = "start the load test" })
+  selfloop.schedule({ in_seconds = 60, reason = "the solo wake" }, { session_id = solo, user_id = "master" })
+  local held = selfloop.park(solo, "master", "HOLD written: mission stopped")
+  if not (held and held.parked) then error("the fixture could not park: " .. json.encode(held)) end
+  print("solo ok " .. solo)
+  return
+end
+
 if mode == "read" then
   local hold = selfloop.hold(LEADER)
   local summary = selfloop.summary(LEADER) or {}
