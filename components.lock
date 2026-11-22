@@ -169,7 +169,13 @@ agent-core b24672b26ae4585f53bb6d4f5d9ab3cde61a663148385099eba4951ce8b57d53 3925
 # sentence (it is a PATH lookup on the node), so rust/components/codemode/src/logic.rs hands that one
 # call back to the loop. Built twice, in two target dirs, wasi-sdk 34, same sha256 both times:
 # 225,166 bytes. Published in the same round that lands it.
-codemode c942620dffa45057c944b2bdce200b25b7d318656a40d36607fe8e96d91fea9d 225166
+# 22/11 repin of codemode again, this time from the source MERGED with the block above
+# (change/sandbox-base64): the guest globals gain `sleep(ms)` - the one pause, answered by the loop in
+# the host, where the sandbox's computing clock is stopped, so a pause is never charged to the script's
+# budget - and the two `codemode_sleep_*` refusal codes come with it. That moves the wasm bytes; everything
+# else in the component is the file above. Built with scripts/build-components.sh codemode at wasi-sdk 34:
+# 225,184 bytes.
+codemode 9091cd796ecceaf186c1a5a49619986c02d9422f79149f3f43c083a82d3829f9 225184
 graph 54779c7d61e163145c69ec4502397a4adf0d75c544c883639989affb6574288a 8186393
 hooks f5fef7083eedac3269aecb50590297935be53e522d282f70bfa97e4bfa7e3e30 215897
 memory 51815e2d8d9595df6b2188097d5a97d97545be69a7804f46a54c8767cb8307f5 207332
