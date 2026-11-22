@@ -65,9 +65,14 @@ allowed), a stale red not blocking, an install record naming another commit stop
 `install-failed` row, `--gate` green and red, `health-run` green/red/refused, the ledger's rows in order with
 one sha, the last line's wording, and a resume that keeps the landing's order.
 
-Rows I ran green on this tree (each in its own scratch `HOME`/ledger): `test-event-ledger` 68, `test-land-quick`
-140, `test-land-plan` 105, `test-land-until` 81, `test-land-marks` 27, `test-fast-rows` 37. Also green:
-`scripts/sync-prompt-docs.sh --check` (4 blocks current) and `scripts/check-instructions.mjs` (79 checks).
+Rows I ran green on this tree (each invoked the way the fast path invokes a row: `wa --db <scratch>` with its own
+`HOME`, `WASM_AGENT_HOME` and `WA_SCRIPT`): `test-event-ledger` 68, `test-land-quick` 140,
+`test-land-plan` 105, `test-land-rows` 137, `test-land-resume` 42, `test-land-until` 81,
+`test-land-gate-rows` 82, `test-land-sign` 46, `test-land-review` 47, `test-land-release` 68,
+`test-land-resume-19-11` 20, `test-land-marks` 27, and `test-fast-rows` 37. Also green:
+`scripts/sync-prompt-docs.sh --check` (4 blocks current) and `scripts/check-instructions.mjs` (79 checks,
+335 files). That is every `scripts/test-land-*.lua` in the tree, so the plan/report text this round changed is
+judged by the rows that read it.
 
 ## What is NOT verified, and what this round did not do
 
