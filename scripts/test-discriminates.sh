@@ -44,6 +44,17 @@ ALLOW_UNCLASSIFIED=0
 BRANCHES=""
 REPO=$ROOT
 
+# THE HOME THIS LAUNCHER REPLACES, recorded before it does. Every row below runs with HOME=<scratch> - a row
+# may write a repository, a journal or a vault, and none of it may land in the operator's home - and a row
+# that GUARDS its home (scripts/lib/scratch-home.lua, read by the ten scripts/test-land-*.lua parts and by
+# scripts/test-font-setup.lua) can only prove it is not on the operator's by being told what that home was.
+# The node records exactly that as WA_HOME_BEFORE_OVERRIDE when it replaces HOME
+# (rust/wa-host/src/main.rs, and scripts/lib/scratch-home.lua reads it for that reason); a LAUNCHER that
+# replaces HOME itself owes the row the same fact. MEASURED 22/11 (mission main-green-2): without it eleven
+# rows exited 2 with "WASM_AGENT_HOME is the real <scratch>", were classified `unclassified`, and blocked a
+# landing over a fact about this script rather than about the branch.
+OPERATOR_HOME="${HOME:-}"
+
 refuse() { printf 'test-discriminates: refused: %s\n' "$*" >&2; exit 76; }
 say() { printf 'test-discriminates: %s\n' "$*"; }
 
@@ -244,23 +255,23 @@ run_one() { # <path> <added|modified>
           -u WASM_AGENT_VAULT_PASSPHRASE -u WASM_AGENT_VAULT_OPERATOR_URL -u WASM_AGENT_OPENCODE_GO_VAULT_URL \
           -u WASM_AGENT_DB -u WASM_AGENT_IN_TURN -u WASM_AGENT_RAW_CODE -u WASM_AGENT_PROVENANCE \
           -u WA_MESH -u WA_MESH_COMPONENT \
-          HOME="$home" WASM_AGENT_HOME="$home" WASM_AGENT_LUA_ROOT="$WORKTREE" \
+          HOME="$home" WASM_AGENT_HOME="$home" WA_HOME_BEFORE_OVERRIDE="$OPERATOR_HOME" WASM_AGENT_LUA_ROOT="$WORKTREE" \
           WASM_AGENT_RENDEZVOUS= WASM_AGENT_RELAY= WASM_AGENT_MANAGED=0 WA_SCRIPT="$path" \
           timeout "$TEST_TIMEOUT" "$LUA_BIN" --db "$home/t.db" ;;
       bash)
         env -u WASM_AGENT_DB -u WASM_AGENT_IN_TURN -u WA_MESH \
-          HOME="$home" WASM_AGENT_HOME="$home" WASM_AGENT_LUA_ROOT="$WORKTREE" \
+          HOME="$home" WASM_AGENT_HOME="$home" WA_HOME_BEFORE_OVERRIDE="$OPERATOR_HOME" WASM_AGENT_LUA_ROOT="$WORKTREE" \
           WASM_AGENT_RENDEZVOUS= WASM_AGENT_RELAY= WASM_AGENT_MANAGED=0 \
           WA_BIN="$LUA_BIN" WA_FAST_BIN="$LUA_BIN" PATH="$home/bin:$PATH" \
           timeout "$TEST_TIMEOUT" bash "$path" ;;
       node)
         env -u WASM_AGENT_DB -u WASM_AGENT_IN_TURN -u WA_MESH \
-          HOME="$home" WASM_AGENT_HOME="$home" WASM_AGENT_LUA_ROOT="$WORKTREE" \
+          HOME="$home" WASM_AGENT_HOME="$home" WA_HOME_BEFORE_OVERRIDE="$OPERATOR_HOME" WASM_AGENT_LUA_ROOT="$WORKTREE" \
           WASM_AGENT_RENDEZVOUS= WASM_AGENT_RELAY= WASM_AGENT_MANAGED=0 \
           WA_BIN="$LUA_BIN" WA_FAST_BIN="$LUA_BIN" \
           timeout "$TEST_TIMEOUT" node "$path" ;;
       python3|pwsh)
-        HOME="$home" WASM_AGENT_HOME="$home" timeout "$TEST_TIMEOUT" "$runner" "$path" ;;
+        HOME="$home" WASM_AGENT_HOME="$home" WA_HOME_BEFORE_OVERRIDE="$OPERATOR_HOME" timeout "$TEST_TIMEOUT" "$runner" "$path" ;;
     esac
   ) > "$out" 2>&1
   code=$?

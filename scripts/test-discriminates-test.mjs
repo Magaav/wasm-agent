@@ -215,6 +215,35 @@ try {
     ok(/nothing was judged/.test(r.stdout), 'MUST 1: and it names the non-judgment');
   }
 
+  // ---- MUST 7: a row that GUARDS its scratch home is judged, not left unclassified ------------------
+  // 22/11 (mission main-green-2): this script hands every row a scratch HOME. A row that guards it asks the
+  // node which home it replaced (scripts/lib/scratch-home.lua, WA_HOME_BEFORE_OVERRIDE) and REFUSES with
+  // exit 2 when the launcher replaced HOME without recording the original. Eleven rows - the ten
+  // scripts/test-land-*.lua parts and scripts/test-font-setup.lua - were then `unclassified` and blocked a
+  // landing for a fact about THIS script, not about the branch. The fixture below is that shape: a row that
+  // refuses when the fact is missing and discriminates when it is there.
+  fresh('change/guarded');
+  write('lua/knob.txt', 'VALUE=guarded\n');
+  write('scripts/test-guarded-home.sh', [
+    '#!/usr/bin/env bash',
+    '# The shape every guarded row has (scripts/lib/scratch-home.lua): the launcher replaced HOME, so the only',
+    '# way this row can prove it is not on the operator home is the home the launcher recorded.',
+    'if [ -z "${WA_HOME_BEFORE_OVERRIDE:-}" ]; then',
+    '  echo "REFUSED: the launcher replaced HOME and did not record the home it replaced"',
+    '  exit 2',
+    'fi',
+    'grep -q VALUE=guarded lua/knob.txt || { echo "FAIL: the knob is still the old value"; exit 1; }',
+    '',
+  ].join('\n'));
+  commit('a guarded row');
+  {
+    const r = run('main');
+    const rows = rowsOf(r.stdout);
+    verdictIs(rows, 'scripts/test-guarded-home.sh', 'discriminates',
+      'MUST 7: a row that guards its scratch home is judged, not unclassified');
+    ok(r.status === 0, 'MUST 7: and it does not block the gate: exit ' + r.status);
+  }
+
   // The real home is never the fixture.
   ok(env.WASM_AGENT_HOME === home && home !== os.homedir(), 'this check runs against a scratch home');
 } finally {
