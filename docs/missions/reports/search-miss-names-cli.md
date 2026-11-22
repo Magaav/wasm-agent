@@ -65,7 +65,10 @@ the miss. The help now describes the miss without naming an example word (measur
 * Reproducibility of the pin: `WASI_SDK=/home/victor/wasi-sdk-34 bash scripts/build-components.sh codemode`
   twice, into two target dirs → the same `c942620d…` / 225,166 bytes both times.
 * `bash scripts/test-component-pins.sh` → half 1 "source and pins agree", half 2 "11 of 11 pinned
-  component(s) verified".
+  component(s) verified". The codemode bytes half 2 judged are the build above, placed in the check's own
+  cache for this worktree (`<git-dir>/wa-pinned-components/codemode.wasm`) - NOT in this node's
+  `~/.wasm-agent/components`, which still holds `191818ce…` for the running node. The release the deploy
+  reads (`components-fbe95281b2ce`) does not exist yet.
 * Rows that touch the changed paths, each run here with the tree's Lua and its own scratch home:
   `test-envelope` (100), `test-tool-search-names-codemode` (36), `test-codemode-friction` (21),
   `test-codemode-presentation` (46), `test-codemode-parity` (56), `test-codemode-boundary` (33),
