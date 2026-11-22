@@ -873,6 +873,12 @@ check install-front-door bash scripts/test-install.sh
   # binary in a private tmux pty and REFUSES to run unless its fixture served the request, so a run
   # that reached any other endpoint fails instead of passing.
   WA_BIN="$bin" check fence-card-pty node scripts/test-fence-card-pty.mjs
+  # The TWO BLOCKS OF change/tui-reflow-blocks FOLLOW THE WINDOW (Victor 22/11): a ```bash card and a
+  # ```js run block, drawn at 120, 60, 120 and 60 columns in a real pty. Each is whole and unmarked where
+  # it fits, cut with ONE mark in the left gutter of the row the line goes on where it does not (the run
+  # box used to put it in the last cell of the cut row), and the second visit to a width draws the rows
+  # the first one did. A view change cannot be judged by a Lua double alone, hence a real pty here too.
+  WA_BIN="$bin" check reflow-blocks-pty node scripts/test-reflow-blocks-pty.mjs
   # THE RUN BLOCK, AS THE OPERATOR READS IT (Victor 21/11): a script the model writes inside run,
   # then only bash x2 and a four-kilobyte JSON blob where the two commands own output belonged. It
   # drives the REAL binary twice - wa chat --once and the interactive window in a private tmux pty -

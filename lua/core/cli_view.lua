@@ -2736,6 +2736,10 @@ function METHODS:codemode_opts()
     -- The code band's rest-of-row: the band colour, then EL, so a painted row holds no trailing
     -- spaces for a narrow terminal to re-wrap (item F).
     band_erase = function() return STYLE.codeBand .. "\27[K" end,
+    -- The host CUTS a script row at the width it draws at, so the block follows the window (Victor
+    -- 22/11): the row is written whole, with the band's fill in its marker, and transcript.rs cuts it
+    -- per frame. Only where there is a transcript to cut it - a log keeps the rows Lua cut.
+    reflow = self:transcript(),
     summarise = function(name, args) return M.call_line(name, args, 32) end,
     elapsed = function(ms) return M.elapsed(ms) end,
     encode = function(value) return json.encode(value) end,

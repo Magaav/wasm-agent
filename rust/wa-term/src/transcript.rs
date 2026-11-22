@@ -478,7 +478,12 @@ impl Transcript {
             if content.is_some() && block.code && line_index == 0 {
                 // A code block keeps its code at the band's left edge: the icon takes the last blank
                 // cell of the first row instead (no blank cell = the code fills the row: no icon).
-                let mut wrapped = wrap_rows(line, inner);
+                // A band row is stored UNCUT and cut here (`wrap_band`), like a fence's body row
+                // (`CardWrap`): the two blocks have ONE owner of the cut, and it is this frame's width.
+                let mut wrapped = match band_row(line) {
+                    Some((fill, code)) => wrap_band(&cells_of(code).0, inner, fill),
+                    None => wrap_rows(line, inner),
+                };
                 if let Some(first) = wrapped.first_mut() {
                     let placed = icon_at_right(first)
                         // A band row paints its rest with EL and carries no blank cell to put the
@@ -487,6 +492,21 @@ impl Transcript {
                     if let Some((with_icon, col)) = placed {
                         *first = with_icon;
                         copies.push((start, format!("{RIGHT_TAG}{}\u{1}{}", col + usize::from(focused), content.expect("checked"))));
+                    }
+                }
+                rows.extend(wrapped);
+                continue;
+            }
+            // A band row that is not the block's first line is cut the same way: the copy icon never
+            // rides inside the band (`COPY_PREFIX` in front of a row would paint outside it).
+            if let Some((fill, code)) = band_row(line) {
+                let mut wrapped = wrap_band(&cells_of(code).0, inner, fill);
+                if let Some(content) = content {
+                    if let Some(first) = wrapped.first_mut() {
+                        if let Some((with_icon, col)) = icon_at_right(first).or_else(|| icon_at_band_end(first, inner)) {
+                            *first = with_icon;
+                            copies.push((start, format!("{RIGHT_TAG}{}\u{1}{}", col + usize::from(focused), content)));
+                        }
                     }
                 }
                 rows.extend(wrapped);
@@ -849,6 +869,20 @@ pub fn expand_rule(line: &str, width: usize) -> String {
     line.replace(MARK, &rule)
 }
 
+/// A code-mode BAND row that is stored UNCUT, read back as `(fill, code)`: `lua/core/codemode_block.lua`
+/// `M.band_mark` writes `\u{1}b{fill}\u{1}{code}`, where `fill` is the row's own rest-of-row sequence
+/// (the band's background, then EL). The cut is this frame's (`wrap_band`), for the same reason a rule's
+/// width is (`expand_rule`): a row cut when it was written is cut for good, so a maximised window showed
+/// it with empty space to its right and a shrunk one cut it again (Victor 22/11). The fill travels
+/// inside the row because the palette is Lua's - this file knows no colour of its own.
+///
+/// Nothing else in the protocol emits a bare \1, so this cannot touch text a tool printed.
+fn band_row(line: &str) -> Option<(&str, &str)> {
+    let rest = line.strip_prefix("\u{1}b")?;
+    let end = rest.find('\u{1}')?;
+    Some((&rest[..end], &rest[end + 1..]))
+}
+
 pub fn wrap_rows(line: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
     // The printable characters, each with the escape sequences just before it; `esc` = after the last.
@@ -1062,6 +1096,48 @@ fn wrap_card(cells: &[(String, char, usize)], width: usize) -> Vec<String> {
     }
     row.push_str(RESET);
     rows.push(row);
+    rows
+}
+
+/// The mark a BLOCK row shows when its line continues on the next row: the LEFT GUTTER of the
+/// continuation row, never inside the text of the row that was cut (Victor 22/11 - it used to sit in
+/// the last cell of the cut row here and in the gutter in a fence, two marks for one fact). The fence's
+/// `wrap_card` writes the same glyph in the same place: one cell in front of the text column.
+const CONTINUE_MARK: char = '\u{21aa}';
+
+/// A code-mode BAND row cut to `width` cells: the row that is cut keeps its WHOLE width (the mark is
+/// never paid for out of it) and every row after it opens with `\u{21aa}` in the gutter and the band's
+/// `fill` at its end, so a long script line reads as one line broken and the block is a solid band on
+/// every one of its rows. The colour active where it was cut is reopened after the mark, so the rest of
+/// a cut token keeps its own syntax colour.
+fn wrap_band(cells: &[(String, char, usize)], width: usize, fill: &str) -> Vec<String> {
+    let width = width.max(1);
+    let mut rows: Vec<String> = Vec::new();
+    let mut row = String::new();
+    let mut sgr = String::new();
+    let mut cols = 0usize;
+    let mut i = 0usize;
+    loop {
+        while i < cells.len() {
+            let w = cells[i].2;
+            // `cols > 0`: a cell wider than the whole row still goes on it. A cell cannot be split, and
+            // a loop that refused it would spin forever.
+            if cols + w > width && cols > 0 { break; }
+            row.push_str(&cells[i].0);
+            row.push(cells[i].1);
+            track(&cells[i].0, &mut sgr);
+            cols += w;
+            i += 1;
+        }
+        row.push_str(fill);
+        rows.push(std::mem::take(&mut row));
+        if i >= cells.len() { break; }
+        row.push_str(&sgr);
+        row.push_str(DIM);
+        row.push(CONTINUE_MARK);
+        row.push_str(&sgr);
+        cols = 1;
+    }
     rows
 }
 /// `line` cut to ONE screen row of at most `width` cells, escapes kept whole and a continuation
