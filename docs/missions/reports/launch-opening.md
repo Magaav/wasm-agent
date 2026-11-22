@@ -22,7 +22,7 @@ sketch's ALIEN table, then the header. That run is the spec for look and order, 
 | the live view frames its output with mode 2026 | `:209` `SYNC_START, SYNC_END = "\27[?2026h", "\27[?2026l"` | correct |
 | — | the reader thread (`rust/wa-capabilities/src/host.rs`, `console_reader`) polls stdin with `byte_ready(150)` and is the ONE thread that owns keys and the editor's rows; `wa_term::terminal_editor::write` is the one funnel every console write goes through | this is where the animation had to live, and why |
 
-## Where the animation runs, and why there (`d04e3b49`, `2c0af8a3`, `495e582d`)
+## Where the animation runs, and why there (`7d1db266`, `2c0af8a3`, `495e582d`)
 
 In Rust, in the reader thread, on the ALTERNATE screen. The reasons, in the order they decided it:
 
@@ -60,7 +60,7 @@ one row each (`a_frame_writes_only_what_changed`: under 400 bytes, and the rule 
 
 ## The two green glyphs (`c8e3f625`)
 
-`PALETTE.matrix = "00ff41"` is an entry of its own (`cli_view.lua:80`), so `accent` keeps every other use.
+`PALETTE.matrix = "00ff41"` is an entry of its own (`cli_view.lua:104`, inside the palette the base has at `:79`), so `accent` keeps every other use.
 Three call sites moved to it: the welcome line's star (`M.banner`), `M.marks` (the frames that travel to the
 host, i.e. the animated first glyph of the run status row), and the fallback layout's spinner - the same
 glyph on the same row when there is no native editor, which would otherwise have kept the old colour on a
@@ -68,7 +68,7 @@ short window. The phase word of that row is still `accent`, and `Summary of earl
 
 ## The policy (`2c0af8a3`)
 
-`cli_view.opening(opts)` answers `(plays, reason)`. Off: the setting `WASM_AGENT_CLI_OPENING=off|0|no|false`;
+`cli_view.opening(opts)` (`cli_view.lua:1036`) answers `(plays, reason)`. Off: the setting `WASM_AGENT_CLI_OPENING=off|0|no|false`;
 a scripted run; a start whose stdout is not a live view; no native editor; a resumed session (`--continue`,
 `--resume`, `--session`); a message argument; `NO_COLOR`; `TERM=dumb`; a window under 60x14 (from the view's
 width and `view:rows()`). It refuses on doubt: `editor` must be exactly `true`, `live` exactly `true`.
@@ -107,7 +107,7 @@ A second `wa chat` within the same minute plays it: there is no state for that, 
   `accent` is still `d77757`; the welcome line's star and every `marks` frame carry the matrix escape and
   not the accent; the phase word of that row still carries the accent; the policy table with all eleven
   refusals, each by name; `WASM_AGENT_CLI_OPENING=on|0|nonsense`; and `welcome_painted` (the block the last
-  beat draws) has the rule at the console's width, the green star, and no rule marker left in it.
+  beat draws, `cli_view.lua:2178`) has the rule at the console's width, the green star, and no rule marker left in it.
   Wired into `scripts/test.sh` (next to `test-cli-view.lua`) and picked up by the fast path automatically
   (every `scripts/test-*.lua` not in `scripts/fast-path.exclude` is a fast row, and this one is not listed).
   The pty row is wired into `scripts/test.sh` as `gate_run env WA_BIN="$BIN" cargo test ... -p wa-term --test opening`.
