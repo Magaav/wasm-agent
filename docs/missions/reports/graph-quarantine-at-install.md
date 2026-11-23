@@ -84,6 +84,14 @@ No assertion, limit or quarantine rule was removed; `quarantine_database` and `f
 * Wired: rows are discovered by `scripts/lib/fast-rows.sh` (`wa_fast_row_candidates`, `scripts/test-*.lua`
   minus `scripts/fast-path.exclude`), so this row runs on every fast-path and gate run; the two Rust tests
   are in `rust/wa-capabilities/src/graph_tests.rs` and run under `cargo test -p wa-capabilities`.
+* The component the row cannot run without is named in the row's own text (`WA_GRAPH_COMPONENT_WASM`), which
+  is the runner's contract: `scripts/lib/fast-row-exec.sh` installs a component into a row's own home, and
+  hands over the override, only for the components the row names. Without that line the first main-health
+  run of this row failed with `component_not_installed:graph` (`31b55a46`) - a missing fixture, not a
+  verdict. The row now refuses by name when the override is absent or names no file, and passes through the
+  fast path's own row executor (`lua_run`) with the component built from this tree: measured 23/11, exit 0,
+  `graph_db_journal_resolved ... outcome=rolled_back` and `revision 1 kept, 13 row(s) answered, no
+  quarantine copy`.
 
 **Discrimination, measured twice each on this node:**
 
