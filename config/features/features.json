@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "note": "ONE LIST: every user-facing feature, the role that runs it, the canary that exercises it, where its last real success is recorded, and how stale is too stale. Read by lua/core/feature_health.lua (wa features, /status), by rust/wa-sentinel (wa health) and by the release step in lua/core/land.lua. A feature that ships without a line here fails scripts/check-features-registry.mjs.",
+  "features": [
+    { "name": "chat", "role": "any", "canary": "chat", "last_success": "lua/core/chat.lua: the answer of a finished turn is in the ledger", "stale_after_s": 86400 },
+    { "name": "run-blocks", "role": "any", "canary": "run-block", "last_success": "lua/core/codemode.lua: a run block finished and its result reached the caller", "stale_after_s": 86400 },
+    { "name": "remote-calls", "role": "any", "canary": "remote-call", "last_success": "lua/core/routed_calls.lua: a peer call was answered", "stale_after_s": 86400 },
+    { "name": "undo", "role": "any", "canary": "undo", "last_success": "lua/core/undo_command.lua: a change was put back", "stale_after_s": 604800 },
+    { "name": "self-wake", "role": "any", "canary": "self-wake", "last_success": "lua/core/selfloop.lua: a wake was delivered to the session that asked for it", "stale_after_s": 86400 },
+    { "name": "scheduled-jobs", "role": "any", "canary": "scheduled-jobs", "last_success": "collector:jobs: the jobs ledger's last finished run", "stale_after_s": 86400 },
+    { "name": "mail", "role": "component:wa-email", "canary": "mail", "last_success": "lua/core/mail.lua: a mailbox read answered with messages", "stale_after_s": 21600 },
+    { "name": "whatsapp-receive", "role": "component:wa-whatsapp", "canary": "whatsapp-receive", "last_success": "collector:whatsapp-index: the index holds a message received recently", "stale_after_s": 21600 },
+    { "name": "whatsapp-send", "role": "any", "canary": "whatsapp-send", "last_success": "lua/core/whatsapp.lua: a send was accepted by the transport", "stale_after_s": 604800 },
+    { "name": "whatsapp-transcription", "role": "component:wa-whatsapp", "canary": "whatsapp-transcription", "last_success": "collector:whatsapp-transcripts: the index holds a transcript that answered", "stale_after_s": 21600 },
+    { "name": "whatsapp-copilot-reply", "role": "component:wa-whatsapp", "canary": "whatsapp-copilot-reply", "last_success": "collector:whatsapp-posting: the component posted a transcript back", "stale_after_s": 86400 },
+    { "name": "whatsapp-index", "role": "component:wa-whatsapp", "canary": "whatsapp-index", "last_success": "collector:whatsapp-index: a search answered from the index", "stale_after_s": 21600 },
+    { "name": "release-update", "role": "any", "canary": "release-update", "last_success": "collector:install: the install record names the commit this node runs", "stale_after_s": 2592000 }
+  ]
+}
