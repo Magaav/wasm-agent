@@ -151,9 +151,16 @@ No other assertion was deleted or loosened anywhere.
 
 ## 6. Verified / not verified
 
-**Verified by running it:** the 41 unit tests above; the build of `wa-host` and of the `graph` component
-from this branch; the live store's metadata read-only; the journal counts; the file:line citations
-against base `41d6420c`.
+**Verified by running it:** the 41 unit tests above; the end-to-end component row (§3); the build of
+`wa-host` and of the `graph` component from this branch; the live store's metadata read-only; the journal
+counts; the file:line citations against base `41d6420c`.
+
+**Two processes, two cwds, measured.** Scratch HOME, the `wa` binary built from this branch, two
+processes started in `/tmp/gospr-cwd-a` and `/tmp/gospr-cwd-b`, each running a script that performs one
+`host.write_file` and then reports the state of the graph directories. Both answered
+`graph.roots=missing shared=missing`, and the scratch state directory afterwards held only the fixture
+file the script wrote: **no store was created, no store was touched, and there is no shared store for
+two roots to fight over.**
 
 **Not verified, and said so:**
 * The brief's acceptance test - "a serve + three workers running for ten minutes with no graph call leave
@@ -161,11 +168,11 @@ against base `41d6420c`.
   the mechanism that makes it true (no code path reaches `scheduler()` from a write, and the new test
   holds a store's mtime) and that a `wa` process performing writes and edits creates no store
   (the `test-graph-automatic` row).
-* **Item 5's cross-process form was not run.** The resolution rule (a store keyed by the real root) is a
-  pure function of the root and is tested in-process; the end-to-end row above runs one process that
-  writes and asks. What was NOT run is the brief's literal test - a `serve` plus three workers, in three
-  processes with three cwds, alternating for ten minutes. A child `wa` process started by a Lua row needs
-  the built binary passed in by the row, which this session did not wire.
+* **The brief's literal ten-minute soak was not run.** What was run is the two-process version above (two
+  cwds, two writes, no store) plus the in-process tests. Not run: a `serve` plus three workers
+  alternating for ten minutes with a store that already exists, which is the only form that would also
+  prove an EXISTING store's mtime is untouched over time. The mechanism is the same (no code path reaches
+  `scheduler()` from a write), but mechanism is not measurement, and I am not claiming it.
 * **Item 6, the fair comparison table, is not done** (see §7).
 * Nothing ran against a live peer, and no key, pin or installed file was touched.
 
