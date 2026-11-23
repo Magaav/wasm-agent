@@ -811,6 +811,13 @@ if command -v node >/dev/null 2>&1; then
   # review of that round carried a test MUST). Self-contained: a fixture repository, no binary.
   check discrimination node scripts/test-discriminates-test.mjs
   check landing-queue node scripts/test-landing-queue.mjs
+  # The deploy's pin directory (22/11): a pinned worktree is a whole checkout (128 MB measured) and nothing
+  # removed one, so 19 of them filled the 16 G /tmp and the next install refused with `deploy_pin_failed ...
+  # No space left on device`. Four real deploys on a fixture repository must leave exactly the commit the
+  # node runs and the one before it; a pin a live process is inside is never removed; a machine whose
+  # /proc cannot be read removes nothing. Seconds, self-contained: a fixture repository and a fixture
+  # install record, no binary.
+  check deploy-pin-prune node scripts/test-deploy-pin-prune.mjs
   # The one build root (13/11: 73 build folders, ~196 GB, none ever deleted): one directory every build
   # kind resolves through, one child per tree inside it, a sweep that deletes what older layouts left,
   # the build cap that evicts the oldest, and the measurement that keeps the per-tree child honest.

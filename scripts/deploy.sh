@@ -1173,9 +1173,11 @@ trap 'wa_deploy_lock_release "$DEPLOY_LOCK" "$DEPLOY_LOCK_LOG"' EXIT
 WA_DEPLOY_PIN="${WA_DEPLOY_PIN:-1}"
 BUILD_PIN=""
 BUILD_PIN_ROOT=""
+# The pin directory is named HERE, outside the pin / no-pin branch below: a deploy that pins nothing (the
+# Lua fast path reuses the installed binary) still prunes the pins earlier deploys left behind - step 8b.
+PIN_DIR="${WA_DEPLOY_PIN_DIR:-${TMPDIR:-/tmp}/wa-deploy-pins}"
 if [ "$WA_DEPLOY_PIN" = "1" ]; then
   PIN_COMMIT="$(git rev-parse HEAD)"
-  PIN_DIR="${WA_DEPLOY_PIN_DIR:-${TMPDIR:-/tmp}/wa-deploy-pins}"
   PIN_WAIT="${WA_DEPLOY_PIN_WAIT:-600}"
   PIN_OUT="$(mktemp 2>/dev/null || echo "$INSTALL_DIR/.deploy-pin.$$.json")"
   PIN_ERR="$(mktemp 2>/dev/null || echo "$INSTALL_DIR/.deploy-pin.$$.err")"
@@ -1184,7 +1186,7 @@ if [ "$WA_DEPLOY_PIN" = "1" ]; then
     fail "refused(pin_tool_unavailable): node is not on PATH, so this deploy cannot take the landing queue's lease and pin the commit it would build. A deploy never builds from the live canonical tree, because a landing can move it under the build. Install node, or set WA_DEPLOY_ALLOW_UNPINNED=1 as an explicit exception. Nothing was built."
   fi
   if ! ( cd "$SOURCE_ROOT" && node scripts/landing-queue.mjs pin --commit "$PIN_COMMIT" --pin-dir "$PIN_DIR" \
-        --wait-timeout "$PIN_WAIT" --json ) > "$PIN_OUT" 2> "$PIN_ERR"; then
+        --install-dir "$INSTALL_DIR" --wait-timeout "$PIN_WAIT" --json ) > "$PIN_OUT" 2> "$PIN_ERR"; then
     PIN_REASON="$(tail -3 "$PIN_ERR" 2>/dev/null | tr '\n' ' ')"
     rm -f "$PIN_OUT" "$PIN_ERR"
     if [ "${WA_DEPLOY_ALLOW_UNPINNED:-0}" = "1" ]; then
@@ -2400,6 +2402,36 @@ WA_SHIP_REQUIRE_SHARED=1 WA_ALLOW_UNSHARED_SHIP="$([ "$UNSHARED_COMMIT" = 1 ] &&
 record_installed
 echo "deploy: installed $COMMIT ($HASH)"
 echo "deploy: recorded in $INSTALL_DIR/installed.txt"
+# 8b. THE PINS THIS DEPLOY NO LONGER NEEDS. A pinned worktree is a whole checkout of this repository - 128 MB
+#     measured on avell 2026-11-22 - and until this step nothing removed one: nineteen of them (2.5 GB) had
+#     accumulated in <tmp>/wa-deploy-pins, the 16 G tmpfs hit its per-user quota and the next install refused
+#     (`deploy_pin_failed: cannot create a pinned worktree ...: No space left on device`, deploy.log
+#     2026-11-22T16:29Z). The install that just succeeded is what says which trees those are, so the question
+#     is asked here, with the two records this step has just written.
+#
+#     WHAT IS KEPT is the rule the pin directory needs to be safe: the pins `scripts/landing-queue.mjs
+#     prune-pins` can name from <install>/installed.txt and <install>/rollback/installed.txt (this node's own
+#     commit, the commit its binary was built from, the pin that build used, and the same three for the pair a
+#     rollback restores), the newest two pins when those records name fewer (a Lua fast-path install pins
+#     nothing), and any pin a live process is inside. Everything else is removed with `git worktree remove`,
+#     `git worktree prune` and its build output.
+#
+#     NEVER FATAL: housekeeping on a pin directory cannot undo an install that already happened, so a failure
+#     is a `note` that names it and the deploy finishes. A machine without node never reached the pin step
+#     above either, and says so by name instead of silently keeping every tree.
+if [ -d "$PIN_DIR" ]; then
+  if command -v node >/dev/null 2>&1; then
+    PIN_PRUNE_OUT="$INSTALL_DIR/.deploy-pin-prune.$$"
+    if ( cd "$SOURCE_ROOT" && node scripts/landing-queue.mjs prune-pins --pin-dir "$PIN_DIR" --install-dir "$INSTALL_DIR" ) > "$PIN_PRUNE_OUT" 2>&1; then
+      grep -v '^$' "$PIN_PRUNE_OUT" || true
+    else
+      note "pin prune: $(tail -3 "$PIN_PRUNE_OUT" 2>/dev/null | tr '\n' ' ') - the install stands; the trees under $PIN_DIR are left as they are"
+    fi
+    rm -f "$PIN_PRUNE_OUT"
+  else
+    note "pin prune: node is not on PATH, so this deploy cannot tell which pins under $PIN_DIR are still wanted; nothing was removed"
+  fi
+fi
 echo "deploy: /health -> $(curl -s -m 5 "http://127.0.0.1:$PORT/health" | head -c 260)"
 if [ -n "$EXPECTED_SHA" ]; then
   [ "$(git rev-parse HEAD)" = "$EXPECTED_SHA" ] && [ -z "$(git status --porcelain)" ] \

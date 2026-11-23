@@ -409,6 +409,21 @@ Two residues from the 2026-11-10 night wave, both recorded rather than remembere
   `WA_DEPLOY_PIN=0` is an explicit exception, and `WA_DEPLOY_ALLOW_UNPINNED=1` is the only way past a pin
   that failed.
 
+- **A deploy keeps the two pins it still needs and removes the rest.** Measured 2026-11-22: one pinned
+  worktree is a whole checkout, 128 MB, and nothing ever removed one — 19 of them (2.5 GB) had accumulated
+  under `<tmp>/wa-deploy-pins`, /tmp is a 16 G tmpfs with a per-user quota, the quota was hit and the next
+  install refused `deploy_pin_failed: … cannot create a pinned worktree …: No space left on device`
+  (commit `5ea23581`). The deploy that was blocked could not clean up after itself — creating its pin is
+  what needed the room. So `landing-queue.mjs` prunes in two places: inside `pin`, **before** the new
+  tree is created, and again as `prune-pins` after the install that proved which commit the node runs
+  (`scripts/deploy.sh` step 8b). What is kept is an allow-list, not an age: every commit the install
+  records name (`commit=`, `binary_commit=`, `build_pin=` from `installed.txt` and
+  `rollback/installed.txt`, and only when the value has a commit's shape — `build_pin=unpinned` is not a
+  commit), the commit being pinned, and the newest pins up to `--keep-max` (default 2) when those records
+  name fewer, which is the Lua fast path: it keeps the installed binary and pins nothing. A pin a live
+  process is inside is never removed and is named with its pid; when `/proc` cannot be read, nothing is
+  removed at all, because an unknown is not a yes. A removal that fails is named and left in place — it is
+  housekeeping on /tmp and it never fails an install that already happened.
 - **A lander that died between merge and push is recovered on the next acquire.** When no holder is live and
   the canonical `HEAD` is a queue-shaped merge (`merge(<branch>): …`) ahead of `origin/main`, `acquire` /
   `land` finishes the push and reads it back, or — if the push cannot be made — keeps the merge on
