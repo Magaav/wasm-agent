@@ -4973,6 +4973,10 @@ pub extern "C-unwind" fn input_start(l: *mut LuaState) -> c_int {
             return 1;
         }
     }
+    // The thread that runs the submitted lines is THIS one, and the reader that raises the interrupt is
+    // another: record it, so pressing Esc shuts down this run's sockets and no other call's
+    // (change/esc-socket-per-thread).
+    crate::subagents::set_foreground_run_thread();
     std::thread::spawn(console_reader);
     let editor = lock.lock().unwrap_or_else(|e| e.into_inner()).editor.is_some();
     push_json(l, &json!({"started": true, "editor": editor}));
@@ -6137,6 +6141,11 @@ pub extern "C-unwind" fn input_take(l: *mut LuaState) -> c_int {
     // operator meets most (change/chat-start-guard, item 3).
     let at: Vec<f64> = typed.iter().map(|line| line.at).collect();
     let lines: Vec<String> = typed.into_iter().map(|line| line.text).collect();
+    // A line was taken, so this thread is the one that will run it - recorded BEFORE the run can block
+    // on a provider read, which is exactly when the keypress needs to find its socket.
+    if !lines.is_empty() {
+        crate::subagents::set_foreground_run_thread();
+    }
     let (eof, running) = (state.eof, state.running);
     if !lines.is_empty() && sync_queued(&mut state) { redraw_bottom(&mut state); }
     drop(state);

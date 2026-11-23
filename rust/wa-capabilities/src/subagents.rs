@@ -84,8 +84,9 @@ pub type SocketSlot = Arc<Mutex<Vec<std::net::TcpStream>>>;
 pub fn register_active_socket(stream: &std::net::TcpStream) {
     if let Ok(clone) = stream.try_clone() {
         // A child's call belongs to the child's slot. A call with no task - the interactive CLI's own
-        // provider request, a node run - belongs to the process: it is the FOREGROUND slot the reader
-        // thread shuts down when the operator presses Esc (change/esc-stops-now).
+        // provider request - belongs to the CALLING THREAD's own foreground slot, which is the one the
+        // reader thread shuts down when the operator presses Esc (change/esc-stops-now,
+        // change/esc-socket-per-thread).
         if in_task() {
             CURRENT.with(|slot| {
                 if let Some(context) = slot.borrow().as_ref() {
@@ -94,46 +95,97 @@ pub fn register_active_socket(stream: &std::net::TcpStream) {
                     }
                 }
             });
-        } else if let Ok(mut sockets) = FOREGROUND_SOCKETS.lock() {
+        } else if let Ok(mut sockets) = foreground_slot().lock() {
             sockets.push(clone);
         }
     }
 }
 
-/// The socket a FOREGROUND call (no task context: the interactive CLI's own provider request) is
-/// blocked on. One slot: the reader thread that raises the interrupt is its only other user, and an
-/// interactive process has one foreground request at a time.
-static FOREGROUND_SOCKETS: std::sync::Mutex<Vec<std::net::TcpStream>> = std::sync::Mutex::new(Vec::new());
+thread_local! {
+    /// The slot of THIS thread's own foreground HTTP call. A process can have more than one of those at
+    /// a time - a `wa serve` node thread per session, its control lane, a relayed call - and one call
+    /// finishing must forget its own socket only. The process-wide slot this replaces was wiped by
+    /// whichever call ended first, so the run's own socket was gone from it and a stop could no longer
+    /// wake the run's read (Fable's review of change/esc-stops-now).
+    static FOREGROUND_SLOT: std::cell::RefCell<Option<SocketSlot>> = const { std::cell::RefCell::new(None) };
+}
 
-/// Wake the foreground request's socket when the operator interrupts.
+/// Every live foreground slot, keyed by the thread that owns it, so the thread that raises an
+/// interrupt can reach the RUN's socket without reaching another call's.
+static FOREGROUND_SLOTS: std::sync::Mutex<Vec<(std::thread::ThreadId, SocketSlot)>> = std::sync::Mutex::new(Vec::new());
+
+/// The thread that runs this process's foreground runs: the interpreter that owns the reader
+/// (`host.input_start`) or that just took a submitted line (`host.input_take`). The keypress is handled
+/// on the reader's own thread, so this record is the only thing that tells the two which sockets are
+/// the run's; with none recorded there is no target and nothing is shut down.
+static FOREGROUND_RUN_THREAD: std::sync::Mutex<Option<std::thread::ThreadId>> = std::sync::Mutex::new(None);
+
+/// This thread's own foreground slot, made and registered the first time it needs one.
+fn foreground_slot() -> SocketSlot {
+    if let Some(existing) = FOREGROUND_SLOT.with(|cell| cell.borrow().clone()) {
+        return existing;
+    }
+    let created: SocketSlot = Arc::new(Mutex::new(Vec::new()));
+    if let Ok(mut slots) = FOREGROUND_SLOTS.lock() {
+        slots.push((std::thread::current().id(), created.clone()));
+    }
+    FOREGROUND_SLOT.with(|cell| *cell.borrow_mut() = Some(created.clone()));
+    created
+}
+
+/// Record that THIS thread runs the process's foreground (interactive) runs, so an interrupt raised on
+/// the reader's thread shuts down this run's sockets and no other call's.
+pub fn set_foreground_run_thread() {
+    let mine = std::thread::current().id();
+    *FOREGROUND_RUN_THREAD.lock().unwrap_or_else(|error| error.into_inner()) = Some(mine);
+}
+
+/// Wake the foreground RUN's sockets when the operator interrupts.
 ///
 /// The mechanism a child already had, given to the foreground: a provider that accepted the request
 /// and says nothing blocks the read until its own budget expires, and a flag alone cannot reach a
 /// blocked read. Shutting that socket down wakes it at once (measured: single-digit milliseconds on
 /// Linux), where the transport's cancellation poll would take up to its own slice.
+///
+/// The target is the run thread's own slot and nothing else: a second call in flight in this process
+/// belongs to another thread, and tearing it down would end work the operator did not stop.
 pub fn shutdown_foreground_sockets() {
-    if let Ok(sockets) = FOREGROUND_SOCKETS.lock() {
-        for stream in sockets.iter() {
-            let _ = stream.shutdown(std::net::Shutdown::Both);
-        }
+    let run = *FOREGROUND_RUN_THREAD.lock().unwrap_or_else(|error| error.into_inner());
+    let Some(run) = run else { return };
+    let slot = FOREGROUND_SLOTS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .iter()
+        .find(|(thread, _)| *thread == run)
+        .map(|(_, slot)| slot.clone());
+    if let Some(slot) = slot {
+        shutdown_sockets(&slot);
     }
 }
 
 /// Forget the current request's sockets once it has finished, so a later cancel
 /// does not shut down a pooled connection that is no longer this call's.
 pub fn clear_active_socket() {
-    CURRENT.with(|slot| {
-        if let Some(context) = slot.borrow().as_ref() {
-            if let Ok(mut sockets) = context.sockets.lock() {
-                sockets.clear();
+    if in_task() {
+        CURRENT.with(|slot| {
+            if let Some(context) = slot.borrow().as_ref() {
+                if let Ok(mut sockets) = context.sockets.lock() {
+                    sockets.clear();
+                }
             }
-        }
-    });
-    // The foreground slot too: a finished call must not leave a socket for the next interrupt to shut
-    // down, which by then may be a pooled connection somebody else is reading.
-    if !in_task() {
-        if let Ok(mut sockets) = FOREGROUND_SOCKETS.lock() {
+        });
+        return;
+    }
+    // Only this thread's OWN call. Another thread's in-flight socket is not this call's to forget, and
+    // clearing the process-wide slot is what made one finished call unregister the model stream's.
+    let mine = std::thread::current().id();
+    let slot = FOREGROUND_SLOT.with(|cell| cell.borrow_mut().take());
+    if let Some(slot) = slot {
+        if let Ok(mut sockets) = slot.lock() {
             sockets.clear();
+        }
+        if let Ok(mut slots) = FOREGROUND_SLOTS.lock() {
+            slots.retain(|(thread, _)| *thread != mine);
         }
     }
 }
@@ -1316,6 +1368,11 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
 
+    /// The foreground slot is per thread, but WHICH thread runs the foreground run is one fact per
+    /// process (as it is in the CLI, where there is one interpreter). Two tests that set it must not
+    /// overlap, or one would judge the other's thread: each body holds this for its whole length.
+    static FOREGROUND_TEST_LOCK: Mutex<()> = Mutex::new(());
+
     #[test]
     fn preview_does_not_capture_interactive_run_events() {
         let event = r#"{"type":"delta","text":"durable interactive output"}"#;
@@ -2127,5 +2184,89 @@ mod tests {
         let mut buffer = [0u8; 1];
         let result = client.read(&mut buffer);
         assert!(result.is_err() || result.unwrap() == 0, "a shut-down read must not block");
+    }
+
+    /// Does one finished call unregister another thread's socket? It must not: this is the defect
+    /// Fable's review of change/esc-stops-now found, where the foreground slot was process-wide and
+    /// whichever call ended first wiped it, so the run's own socket was gone and a stop could no longer
+    /// wake the run's read (change/esc-socket-per-thread).
+    #[test]
+    fn a_finished_call_on_another_thread_keeps_the_runs_socket_registered() {
+        let _serialized = FOREGROUND_TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        use std::io::Read;
+        let (run_client, _run_server) = connected_pair();
+        // This thread is the run: the interpreter that took the submitted line.
+        set_foreground_run_thread();
+        register_active_socket(&run_client);
+        // A second, independent call in the same process, on its own thread. It finishes while the run
+        // is still blocked in its read - the shape a `wa serve` control-lane probe has.
+        std::thread::spawn(|| {
+            let (their_client, _their_server) = connected_pair();
+            register_active_socket(&their_client);
+            clear_active_socket();
+        })
+        .join()
+        .expect("the other call's thread");
+        let started = std::time::Instant::now();
+        shutdown_foreground_sockets();
+        let mut client = run_client;
+        client.set_read_timeout(Some(Duration::from_millis(1500))).expect("timeout");
+        let mut buffer = [0u8; 1];
+        let result = client.read(&mut buffer);
+        assert!(
+            result.as_ref().map(|read| *read == 0).unwrap_or(false),
+            "the run's read must wake on the interrupt, not time out: {result:?} after {:?}",
+            started.elapsed()
+        );
+        clear_active_socket();
+    }
+
+    /// Does an interrupt tear down a second call that is in flight in this process? It must not: the
+    /// keypress stops the RUN, and another thread's request is work the operator did not stop.
+    #[test]
+    fn an_interrupt_does_not_tear_down_a_second_call_in_flight() {
+        let _serialized = FOREGROUND_TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        use std::io::Read;
+        let (run_client, _run_server) = connected_pair();
+        set_foreground_run_thread();
+        register_active_socket(&run_client);
+        let (other_client, other_server) = connected_pair();
+        let (ready, registered) = std::sync::mpsc::channel();
+        let other = std::thread::spawn(move || {
+            register_active_socket(&other_client);
+            ready.send(()).expect("ready");
+            // Blocked in a read that the interrupt must leave alone.
+            other_client.set_read_timeout(Some(Duration::from_millis(1500))).expect("timeout");
+            let mut buffer = [0u8; 1];
+            let mut other_client = other_client;
+            let read = other_client.read(&mut buffer);
+            clear_active_socket();
+            (read, other_server)
+        });
+        registered.recv_timeout(Duration::from_secs(5)).expect("the other call registers");
+        shutdown_foreground_sockets();
+        let (read, _other_server) = other.join().expect("the other call's thread");
+        assert!(
+            read.is_err(),
+            "the other call was torn down by the interrupt: {read:?}"
+        );
+        // ...and the run's own socket DID wake, so the assertion above is not passing because the
+        // interrupt did nothing at all.
+        let mut client = run_client;
+        client.set_read_timeout(Some(Duration::from_millis(1500))).expect("timeout");
+        let mut buffer = [0u8; 1];
+        let result = client.read(&mut buffer);
+        assert!(result.as_ref().map(|read| *read == 0).unwrap_or(false), "the run's read must wake: {result:?}");
+        clear_active_socket();
+    }
+
+    /// One connected pair of loopback sockets: request side and the far side that stays open, so a read
+    /// on the request side BLOCKS until something shuts it down - which is the event under test.
+    fn connected_pair() -> (std::net::TcpStream, std::net::TcpStream) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("addr");
+        let client = std::net::TcpStream::connect(address).expect("connect");
+        let (server, _) = listener.accept().expect("accept");
+        (client, server)
     }
 }
