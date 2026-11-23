@@ -914,6 +914,14 @@ check linux-channel bash scripts/test-linux-channel.sh
   # command is the reader's, never the model's), and a second /undo refuses by name. A Lua double cannot
   # see any of that: the door is in the REPL, so the row is a pty one.
   WA_BIN="$bin" check undo-pty node scripts/test-undo-pty.mjs
+  # /UNDO RESTORES A PEER'S FILE, ON THE PEER (mission remote-undo-works): the `remote` description
+  # promises "the change is recorded here, so /undo restores that file there", so the chat's /undo has
+  # to reach the node the change was made on. This row starts a SECOND wasm-agent node on this machine
+  # with its own HOME, a private rendezvous on loopback and both nodes registered there; the model reads
+  # a page on it, edits a line there, and /undo puts it back - and the peer's own log names the call it
+  # ran, because on one machine the bytes cannot tell a local write from a remote one. Nothing of the
+  # operator's fleet is configured or reachable in it.
+  WA_BIN="$bin" check undo-remote-pty node scripts/test-undo-remote-pty.mjs
   # THE RUN BLOCK, AS THE OPERATOR READS IT (Victor 21/11): a script the model writes inside run,
   # then only bash x2 and a four-kilobyte JSON blob where the two commands own output belonged. It
   # drives the REAL binary twice - wa chat --once and the interactive window in a private tmux pty -
