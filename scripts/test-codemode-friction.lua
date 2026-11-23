@@ -25,9 +25,12 @@ check(renamed==nil,'a declared name is never renamed')
 r=run('const a = 1;\nconst b = ;')
 check(r.line==2,'the line is still the script line: '..tostring(r.line))
 -- A command that ran and exited non-zero is a result the script reads, not an exception (a pgrep that
--- found nothing killed its script, 14/11).
-r=run('const r = await tools.bash({command:"exit 3"});\nreturn [r.ok, r.status, r.code].join(",");')
-check(r.ok and tostring(r.value):find('true,200,3',1,true),'a non-zero exit is a result: '..json.encode(r):sub(1,300))
+-- found nothing killed its script, 14/11). Two facts, unchanged: the call is NOT an error (ok:true) and
+-- it carries the exit code. `status` said the same thing as `ok` and is no longer duplicated into the
+-- answer (mission slim-tool-results: a command's answer keeps what a caller acts on), so the assertion
+-- names the absence instead of a number - it is stricter, not looser.
+r=run('const r = await tools.bash({command:"exit 3"});\nreturn [r.ok, r.code, String(r.status)].join(",");')
+check(r.ok and tostring(r.value):find('true,3,undefined',1,true),'a non-zero exit is a result, without a duplicated status: '..json.encode(r):sub(1,300))
 -- A connector read is its data, not the MCP envelope (every email script guessed the path, 14/11).
 local codemode=dofile('lua/core/codemode.lua')
 local env={ok=true,tool_call_issued=true,evidence={sha256='x'},result={content={{type='text',text='{}'}},structuredContent={data={account_id='a',count=2},summary='s'},isError=false}}
