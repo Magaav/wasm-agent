@@ -71,6 +71,21 @@ verbatim (the case blocks were cut by line range out of the previous file, not r
 prove the set is the same. There is nothing for `scripts/test-discriminates.sh` to discriminate: no test's
 verdict changed.
 
+## The proof, through the mechanism that reported the hang
+
+The five parts run through `scripts/fast.sh`'s OWN row runner - `scripts/lib/fast-row-exec.sh` builds each
+row's environment and `scripts/lib/fast-watchdog.sh` owns its process group and its 120 s deadline - with
+`FAST_BIN` = this tree's release build, five at once, at load 5.77:
+
+    scripts/test-land-quick-components.lua     exit=0 seconds=13 | landing ok (12 checks)
+    scripts/test-land-quick.lua                exit=0 seconds=13 | landing ok (81 checks)
+    scripts/test-land-quick-main.lua           exit=0 seconds=23 | landing ok (26 checks)
+    scripts/test-land-quick-tests.lua          exit=0 seconds=28 | landing ok (34 checks)
+    scripts/test-land-quick-install.lua        exit=0 seconds=35 | landing ok (25 checks)
+
+Worst part 35 s, 0.29 of the deadline; the one row it replaces was 145 s under the same kind of load, 1.21 of
+it. Every part's "1 process(es)" would now be a row finished long before the watchdog looked.
+
 ## Not done, not claimed
 
 - I did not run the whole fast path or `scripts/main-health.sh` to completion here (the suite lock was held by
