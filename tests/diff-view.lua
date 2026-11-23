@@ -102,14 +102,24 @@ view:event(rec)
 local text = plain.text()
 has(text, "diff-view-target.lua", "the path is on the block")
 has(text, "Update(/tmp/diff-view-target.lua)", "an existing file is named Update(path), as Claude Code names it")
-has(text, "Added 2 lines, removed 1 lines", "the counts are on the block, from the stored record")
--- Real line numbers: the removed line was line 2 of the file it came from, and the two added lines are
--- lines 2 and 3 of the file that replaced it. A diff that numbered its own rows would say 3 and 4.
-has(visible(text), string.format("\226\148\130 %2d %2s - ", 2, ""),
-  "a removed row carries the old line number and no new one")
-has(visible(text), string.format("\226\148\130 %2s %2d + ", "", 2),
-  "an added row carries the new line number and no old one")
-has(text, "convenience view, not a review", "the footnote says what this is")
+has(text, "Added 2 lines, removed 1 line", "the counts are on the block, from the stored record")
+ok(not text:find("removed 0 lines", 1, true), "and it never reports a change nobody made (removed 0 lines)")
+has(text, "\226\151\143 Update(", "the heading carries the status bullet, as Claude Code's does")
+-- ONE line-number column, Claude Code's (Victor 23/11): the number the line HAS, or had. The removed
+-- line was line 2 of the file it came from, the two added lines are lines 2 and 3 of the file that
+-- replaced it, and the context row "local c = 3" is line 4 of the NEW file (line 3 of the old one) -
+-- so the row a reader opens is the one the number names.
+has(visible(text), string.format("\226\148\130 %2d - local b = 2", 2),
+  "a removed row carries the old line number")
+has(visible(text), string.format("\226\148\130 %2d + local b = 20", 2),
+  "an added row carries the new line number")
+has(visible(text), string.format("\226\148\130 %2d   local c = 3", 4),
+  "a context row carries the number the line has in the new file (3 in the old one)")
+ok(not visible(text):find(string.format("\226\148\130 %2d %2s", 2, ""), 1, true),
+  "and no row carries a second number column")
+ok(not text:find("convenience view, not a review", 1, true),
+  "the card carries no footnote: that sentence is documentation, not a row (Victor 23/11)")
+has(text, "\226\148\148\226\148\128\n\n", "and one blank row follows the card, so nothing is glued to it")
 has(text, "\226\148\140\226\148\128", "the block opens as a card, the way a fence does")
 has(text, "\226\148\148\226\148\128", "and closes as one")
 ok(not text:find("\27%[", 1), "a plain view writes no escape sequence at all (the NO_COLOR path)")
@@ -131,7 +141,8 @@ local big = record(table.concat(big_before, "\n") .. "\n", table.concat(big_afte
 local joined = table.concat(view_lib.diff_block({ path = big.path, before = big.before,
   after = big.after }, 80, false) or {}, "\n")
 has(joined, "line 3", "context rows are shown around a change")
-has(joined, "...", "two distant changes are separated by an ellipsis, not glued together")
+has(joined, "\226\139\174", "two distant changes are separated by the dim vertical ellipsis")
+ok(not joined:find("\226\148\130 ...", 1, true), "and not by a row of dots in the middle of the code")
 
 -- ---- a big change folds, and says how much it hid ------------------------------
 local huge_before, huge_after = {}, {}
@@ -140,9 +151,23 @@ local huge = record(table.concat(huge_before, "\n") .. "\n", table.concat(huge_a
   "/tmp/diff-view-huge.lua")
 local huge_rows = table.concat(view_lib.diff_block({ path = huge.path, before = huge.before,
   after = huge.after }, 80, false) or {}, "\n")
-local folded = huge_rows:match("%.%.%. %+(%d+) more lines: /console shows all")
-ok(folded ~= nil, "a big diff states how many rows it hid and how to see them")
-ok(tonumber(folded or "0") > 0, "and the number is not zero")
+-- The RENDERER draws every line now: the bound a reader meets is the HOST's (CARD_ROWS in
+-- rust/wa-term/src/transcript.rs), which folds the card and opens it on Ctrl+O or a press. A card the
+-- host can hold is therefore never cut here.
+ok(huge_rows:find("old 1", 1, true) ~= nil, "a 200-line rewrite is drawn from its first line")
+ok(huge_rows:find("new 200", 1, true) ~= nil, "to its last: the whole diff belongs to the card")
+ok(not huge_rows:find("/console shows all", 1, true), "and nothing is cut for a diff the host can hold")
+-- The host's own ceiling is the one that DOES cut, and it says where the rest is read.
+local cut_rows = diff_view.rows({ path = huge.path,
+  before = table.concat(huge_before, "\n") .. "\n", after = table.concat(huge_after, "\n") .. "\n" },
+  { width = 80, max_lines = 10 })
+local cut_text = {}
+for _, row in ipairs(cut_rows.rows) do cut_text[#cut_text + 1] = visible(row.code or "") end
+local ceiling = table.concat(cut_text, "\n"):match("%+ ?(%d+) lines: /console shows all")
+ok(ceiling ~= nil, "past the host's own ceiling the card says where the rest is read")
+ok(tonumber(ceiling or "0") > 0, "and the number is not zero")
+ok(cut_rows.body ~= nil and cut_rows.body.to >= cut_rows.body.from,
+  "while the body span it hands the host still covers the lines it drew")
 
 -- ---- a change the run could not record ---------------------------------------
 local plain2 = recorder()
@@ -231,15 +256,17 @@ local created = record("", "one\ntwo\n", "/tmp/diff-view-new.lua")
 local created_rows = table.concat(view_lib.diff_block({ path = created.path,
   before = created.before, after = created.after }, 80, false) or {}, "\n")
 has(created_rows, "Create(/tmp/diff-view-new.lua)", "a new file is named Create(path)")
-has(created_rows, "Added 2 lines, removed 0 lines", "a created file counts two added lines and no removal")
+has(created_rows, "Added 2 lines", "a created file counts its two added lines")
+ok(not created_rows:find("emoved", 1, true), "and says nothing about a removal it did not make")
 -- A DELETE is its own name, and the caller's fact: the same two texts (a text and no text) draw an
 -- Update of an emptied file unless the caller says the file is gone.
 local deleted = record("one\ntwo\n", "", "/tmp/diff-view-gone.lua")
 local deleted_rows = table.concat(view_lib.diff_block({ path = deleted.path, before = deleted.before,
   after = deleted.after, deleted = true }, 80, false) or {}, "\n")
 has(deleted_rows, "Delete(/tmp/diff-view-gone.lua)", "a removed file is named Delete(path)")
-has(deleted_rows, "Added 0 lines, removed 2 lines", "and it counts the lines it took with it")
-has(visible(deleted_rows), string.format("\226\148\130 %2d %2s - ", 1, ""),
+has(deleted_rows, "Removed 2 lines", "and it counts the lines it took with it")
+ok(not deleted_rows:find("Added", 1, true), "a delete does not report an addition it did not make")
+has(visible(deleted_rows), string.format("\226\148\130 %2d - one", 1),
   "its rows are - rows carrying the numbers the lines had")
 ok(visible(deleted_rows):find("+", 1, true) == nil, "and no + row, because nothing was written")
 
@@ -291,7 +318,8 @@ ok(#refused == 0, "a file modified before the command is not counted as this com
 local block = table.concat(view_lib.bash_changes_block({ files = changed, refused = refused }, 80, false)
   or {}, "\n")
 has(block, "crate/src/changed.rs", "the changed file is named by its root-relative path")
-has(block, "Added 1 lines, removed 1 lines", "and its own counts")
+has(block, "Added 1 line, removed 1 line", "and its own counts")
+ok(block:find("\226\148\140\226\148\128", 1, true) ~= nil, "drawn as a card, the way a write is")
 has(block, "crate/src/new.rs", "a new file is shown")
 -- A REMOVAL is a change with a before side, not a missing one: the index still holds the text the file
 -- had, and the removed file is drawn as a Delete with its own lines. The host is asked whether the path
@@ -310,7 +338,9 @@ ok(gone_row and gone_row.after_text == "", "with an empty after side: nothing is
 local gone_block = table.concat(view_lib.bash_changes_block({ files = gone_changed, refused = gone_refused },
   80, false) or {}, "\n")
 has(gone_block, "Delete(crate/src/gone.rs)", "the block draws it as a Delete card")
-has(gone_block, "Added 0 lines, removed 3 lines", "with the lines it took")
+has(gone_block, "Removed 3 lines", "with the lines it took")
+ok(not gone_block:find("Added 0", 1, true), "and no invented addition")
+has(gone_block, "\226\148\148\226\148\128\n\n", "and one blank row after the card")
 -- A file whose before-side is not in the index cannot be diffed, and the block says so in words.
 fake.show = {}
 local changed2, refused2 = bash_changes.changed(before)
@@ -319,6 +349,71 @@ local block2 = table.concat(view_lib.bash_changes_block({ files = changed2, refu
   or {}, "\n")
 has(block2, "index text unavailable", "and the refusal is said in words, not as an empty block")
 host.exec, host.read_file = real_exec, real_read
+-- ---- the heading names the change the way Claude Code does ----------------------
+-- Victor 23/11: `Create(path)` with the bullet in the status colour, and the path as a reader names
+-- it - relative inside the workdir, `~` inside home, absolute otherwise. A change made on ANOTHER node
+-- says which node in the heading, not on a line after the card.
+local function heading_of(rows)
+  for _, row in ipairs(rows) do
+    if row.parts then
+      local text = {}
+      for _, part in ipairs(row.parts) do text[#text + 1] = part.text end
+      local joined = table.concat(text)
+      if joined:find("Create(", 1, true) or joined:find("Update(", 1, true) then return joined end
+    end
+  end
+  return nil
+end
+local inside = heading_of(diff_view.rows({ path = "/home/u/work/crate/x.py", before = "", after = "one\n" },
+  { width = 80, cwd = "/home/u/work", home = "/home/u" }).rows)
+ok(inside ~= nil and inside:find("\226\151\143 Create(crate/x.py)", 1, true) ~= nil,
+  "a path inside the workdir is named relative to it, got " .. tostring(inside))
+ok(diff_view.short_path("/home/u/other/y.py", { cwd = "/home/u/work", home = "/home/u" }) == "~/other/y.py",
+  "a path outside the workdir but inside home is named with ~")
+ok(diff_view.short_path("/etc/x.conf", { cwd = "/home/u/work", home = "/home/u" }) == "/etc/x.conf",
+  "and a path outside both keeps its full name")
+local remote_heading = heading_of(diff_view.rows({ path = "/tmp/x.py", before = "", after = "one\n" },
+  { width = 80, cwd = "/home/u/work", home = "/home/u", node = "nextcloud" }).rows)
+ok(remote_heading ~= nil and remote_heading:find("Create(nextcloud:/tmp/x.py)", 1, true) ~= nil,
+  "a change on another node names the node in the heading, got " .. tostring(remote_heading))
+
+-- ---- the palette: a changed row is READABLE -------------------------------------
+-- Victor 23/11 (screenshot): the one diff row on screen was near-invisible. Measured in a real pty: the
+-- band role was painted as a FOREGROUND, so every changed row's TEXT was the band's own dark green
+-- (38;2;18;48;28 on the terminal's black). A band paints the row BEHIND the text, and both changed
+-- rows keep the contrast a reader needs at the default theme.
+local function luminance(hex)
+  local function channel(value)
+    local c = value / 255
+    return c <= 0.03928 and c / 12.92 or ((c + 0.055) / 1.055) ^ 2.4
+  end
+  local r = channel(tonumber(hex:sub(1, 2), 16))
+  local g = channel(tonumber(hex:sub(3, 4), 16))
+  local b = channel(tonumber(hex:sub(5, 6), 16))
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b
+end
+local function contrast(one, two)
+  local a, b = luminance(one), luminance(two)
+  if a < b then a, b = b, a end
+  return (a + 0.05) / (b + 0.05)
+end
+local palette = view_lib.PALETTE
+ok(view_lib.style("toolDiffAddedBand"):sub(1, 4) == "\27[48", "the added band paints the BACKGROUND")
+ok(view_lib.style("toolDiffRemovedBand"):sub(1, 4) == "\27[48", "the removed band paints the BACKGROUND")
+local added_contrast = contrast(palette.toolDiffAdded, palette.toolDiffAddedBand)
+local removed_contrast = contrast(palette.toolDiffRemoved, palette.toolDiffRemovedBand)
+ok(added_contrast >= 4.5, string.format("an added line reads on its band (%.1f:1, WCAG AA needs 4.5)", added_contrast))
+ok(removed_contrast >= 4.5, string.format("a removed line reads on its band (%.1f:1)", removed_contrast))
+local live_changed = table.concat(view_lib.diff_block({ path = coded.path, before = coded.before,
+  after = coded.after }, 80, true) or {}, "\n")
+ok(live_changed:find("\27[48;2;18;48;28m", 1, true) ~= nil, "a live added row draws the band behind its code")
+ok(not live_changed:find("\27[38;2;18;48;28m", 1, true),
+  "and never paints its TEXT with the band's own colour (the unreadable row of the screenshot)")
+ok(live_changed:find("\27[48;2;58;22;32m", 1, true) ~= nil, "a live removed row draws its own band behind its code")
+ok(not live_changed:find("\27[38;2;58;22;32m", 1, true),
+  "and never paints its text with the removed band's colour either")
+
+
 if failed > 0 then
   print("FAILED " .. failed)
   os.exit(1)

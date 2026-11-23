@@ -531,6 +531,13 @@ round-boundary steering, not per-keystroke interruption.
   under its heading, replaced in place as its facts change (`""` takes it away);
   `transcript_head(text)` rewrites the current block's first line, which is how a heading printed
   when the call started gets its outcome dot when the result lands.
+  `transcript_card(ranges)` marks the DIFF BODY of a card in the NEXT write - `[{from, to}]`, inclusive
+  line offsets of that write. The block is then a card: one blank row above and below it, never folded
+  to three rows, drawn open up to `CARD_ROWS` (40) lines per range with ONE row counting what it hid
+  (`… +N lines (ctrl+o to expand)`), and a press on that row or Ctrl+O on the newest card draws every
+  line. The frame, the heading (`● Create(path)`) and the counts are never folded, and every line is
+  written either way - the bound is display over a block the transcript already holds
+  (lua/core/diff_view.lua, rust/wa-term/src/transcript.rs).
   `transcript_copy(markers)` marks lines of the NEXT write as copyable - `[{at, text}]`, the line of
   that write and the text a click on its copy icon puts on the clipboard (OSC 52): a fenced block in
   the chat copies itself, and a press anywhere but the icon is still a selection (#114).
@@ -918,7 +925,8 @@ ticker               device
 transcript_block     device
 transcript_copy      device
 transcript_copy_first device
-transcript_expand    device
+transcript_card      device
+  transcript_expand    device
 transcript_fold      device
 transcript_head      device
 transcript_hold      device

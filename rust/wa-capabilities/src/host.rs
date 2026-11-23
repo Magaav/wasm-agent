@@ -5446,6 +5446,29 @@ pub extern "C-unwind" fn transcript_expand(l: *mut LuaState) -> c_int {
     1
 }
 
+/// `host.transcript_card(ranges_json)`: the DIFF BODY of a card in the NEXT `transcript_write` -
+/// `[{"from": <first line of that write>, "to": <last line>}]`, inclusive. A block that carries one is
+/// a card: one blank row above and below it, never folded to three rows, and drawn open up to
+/// `wa_term::transcript::CARD_ROWS` lines per range with ONE row counting what it hid - a press on
+/// that row or Ctrl+O on the newest card draws every line. The rows are all written either way: this
+/// is a display bound over a block the transcript already holds, and the frame, the heading and the
+/// counts are never part of what folds (lua/core/diff_view.lua).
+pub extern "C-unwind" fn transcript_card(l: *mut LuaState) -> c_int {
+    let ranges: Vec<(usize, usize)> = arg_string(l, 1)
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .and_then(|value| value.as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|item| Some((item.get("from")?.as_u64()? as usize, item.get("to")?.as_u64()? as usize)))
+        .filter(|(from, to)| from <= to)
+        .collect();
+    let (lock, _) = console_input();
+    let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+    state.transcript.cardable(&ranges);
+    unsafe { wa_host_support::lua::lua_pushboolean(l, if ranges.is_empty() { 0 } else { 1 }) };
+    1
+}
+
 /// What this process can see of the system clipboard: the switch that turns reading off, and which
 /// of the two display servers is reachable.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
