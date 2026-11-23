@@ -105,6 +105,29 @@ pub fn message(record: &Record, quote: Option<&str>) -> serde_json::Value {
             "chars": record.body().chars().count(),
         });
     }
+    // A transcript and an OCR pass are text this index holds and a hit used to cut at 280 characters
+    // with nothing saying so (2026-11-23: a 371-character note came back as "... o proced", so an
+    // agent re-transcribed audio that was already transcribed). Same contract as `text`: the snippet,
+    // a flag that says the index holds more, how many characters, and the exact call that returns the
+    // rest. `body()` is not the transcript, so the count is the transcript's own.
+    for (field, stored) in [("transcript", &record.transcript), ("ocr", &record.ocr)] {
+        let total = stored.chars().count();
+        if total == 0 {
+            continue;
+        }
+        view[field] = serde_json::Value::String(crate::record::one_line(stored, seam::MAX_TEXT_CHARS));
+        if total > seam::MAX_TEXT_CHARS {
+            view[format!("{field}_truncated")] = serde_json::Value::Bool(true);
+            view[format!("{field}_chars")] = serde_json::Value::from(total);
+            view[format!("{field}_full")] = serde_json::json!({
+                "tool": "whatsapp_message",
+                "chat": record.chat,
+                "id": record.id,
+                "field": field,
+                "chars": total,
+            });
+        }
+    }
     if !record.quoted.is_empty() {
         view["reply_to"] = serde_json::json!({
             "id": record.quoted,
