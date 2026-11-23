@@ -423,6 +423,11 @@ we never should get hold from a chat."* The rule of this component is therefore 
   `posting_held_chat` is gone as a refusal code, and an explicit send the owner asks for is never refused
   for a deletion. `held_chats` in the component config is the operator's own hand-written list and nothing
   on the wire can add to it; the gate no longer has a parameter for a derived hold.
+* **A deleted message is never QUOTED, and the message still goes out.** Keeping a deleted message is for the
+  operator to read, not permission to re-publish it: a WhatsApp quote carries the quoted text, so an
+  explicit send that replies to a deleted message is sent WITHOUT the quote and its result carries
+  `note: "sent without the quote: the quoted message was deleted by its author"`. The automatic reply to
+  such a message is skipped anyway, so no other path can quote one.
 * **Matching is by MESSAGE ID, across every chat spelling.** A revoke's key and the message it names are
   exactly the pair WhatsApp spells two ways (`@lid` vs phone JID): the notice is applied to the message
   wherever the store keeps it, looking through the alias rows (`ix/al/`, both directions, learned from the

@@ -1384,10 +1384,12 @@ async fn outbox_tick() -> bool {
             }
         }
         wa_whatsapp_outbox::Decision::Send(request) => {
-            // The last gate before the wire (`outbox::dispatch_refusal`): a posting hold, a revoke/edit
-            // fence or a reply source the index cannot prove refuses the send. A refusal is permanent;
-            // retrying it would post into a chat whose message the user revoked.
-            if let Some(refusal) = outbox_gate(&request).await {
+            // The last gate before the wire (`outbox::dispatch_refusal`): a reply source the index cannot
+            // prove refuses the send. A refusal is permanent; retrying it would ask the same question of
+            // the same stale answer. No deletion refuses a send any more (23/11) - instead the quote of a
+            // deleted message is dropped, and the answer says so (`outbox::quote_decision`).
+            let (refusal, quote) = outbox_gate(&request).await;
+            if let Some(refusal) = refusal {
                 // The answer carries the fact, the log carries the code: a message id is never a log
                 // field (`privacy`), but the caller that named it gets it back.
                 say!("outbox: blocked job={id} code={}", refusal.code);
@@ -1395,6 +1397,16 @@ async fn outbox_tick() -> bool {
                     outbox_note(format!("fail refused: {error:?}"));
                 }
             } else {
+                // A quote of a message its author deleted is not sent: the reply goes out as a plain
+                // message, because a WhatsApp quote re-publishes the quoted text and the node keeps a
+                // deleted message for the OPERATOR, not for the chat it was taken out of.
+                let mut request = request;
+                let mut note = String::new();
+                if let outbox::Quote::Drop(sentence) = quote {
+                    request.reply_to = None;
+                    note = sentence.to_string();
+                    say!("outbox: quote dropped job={id} reason=quoted_deleted");
+                }
                 match send_outbox(&client, &request).await {
                     Ok(message_id) => {
                         say!("outbox: sent job={id} message={} {} mentions={}", privacy::mark(&message_id), privacy::chat(&request.chat.jid()), request.mentions.len());
@@ -1402,7 +1414,7 @@ async fn outbox_tick() -> bool {
                         // read after a successful send did not show the message, and the model went looking
                         // for it (14/11). The sent message is indexed here, as our own, like any other.
                         INDEX_INBOX.with(|q| q.borrow_mut().push_back((sent_record(&client, &request, &message_id), 0)));
-                        let output = wa_whatsapp_outbox::Outcome { message_id: message_id.clone() }.encode();
+                        let output = wa_whatsapp_outbox::Outcome { message_id: message_id.clone(), note }.encode();
                         if let Err(error) = worker::done(wa_whatsapp_outbox::QUEUE.to_string(), id, OUTBOX_WORKER.to_string(), output).await {
                             // The message is out; a settle that failed is a queue problem, and retrying the
                             // send would be a second message. Report it, let the lease lapse.
@@ -1429,7 +1441,7 @@ async fn outbox_tick() -> bool {
 
 /// The pre-dispatch facts: the chat's hold, the reply source's fence, and the exact source record.
 /// The rule itself is pure (`outbox::dispatch_refusal`); this only gathers what the component knows.
-async fn outbox_gate(request: &wa_whatsapp_outbox::Verified) -> Option<outbox::Refusal> {
+async fn outbox_gate(request: &wa_whatsapp_outbox::Verified) -> (Option<outbox::Refusal>, outbox::Quote) {
     let chat = request.chat.jid();
     let reply = request.reply_to.as_deref();
     let source = match reply {
@@ -1443,7 +1455,11 @@ async fn outbox_gate(request: &wa_whatsapp_outbox::Verified) -> Option<outbox::R
         }),
         None => None,
     };
-    outbox::dispatch_refusal(reply, source.as_ref())
+    let refusal = outbox::dispatch_refusal(reply, source.as_ref());
+    // A refused send is not asked about its quote: the refusal decides. Otherwise the quote rule decides,
+    // and it only ever drops the quote - never the message.
+    let quote = if refusal.is_some() { outbox::Quote::Keep } else { outbox::quote_decision(source.as_ref()) };
+    (refusal, quote)
 }
 
 // ---- the message index (`whatsapp.query`) ------------------------------------------------------

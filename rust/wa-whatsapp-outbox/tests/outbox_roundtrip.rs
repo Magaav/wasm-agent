@@ -33,7 +33,7 @@ where
     match decide(&job.payload, now_ms, job.fresh_until) {
         Decision::Send(verified) => match send(&verified) {
             Ok(message_id) => {
-                let _ = queue.done_by(job.id, worker, &Outcome { message_id: message_id.clone() }.encode());
+                let _ = queue.done_by(job.id, worker, &Outcome::sent(&message_id).encode());
                 (Some(id), Some(message_id))
             }
             Err(reason) => {

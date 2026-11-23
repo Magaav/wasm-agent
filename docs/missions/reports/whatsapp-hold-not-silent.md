@@ -154,3 +154,46 @@ still there). No other assertion was loosened, and nothing was skipped.
 4. **`held_chats` survives as operator configuration** (`f746fc61`): the owner's decision enumerates the
    three DERIVED reasons, and the posting-toggle mission owns that config key, so I removed the derived
    hold path and left the hand-written list alone, documented as configuration only.
+
+## Addendum (Fable's review, 23/11 ~20:30Z): the quote is dropped, the send is not
+
+RISK 2 was resolved on review in the NARROW reading, and it is implemented in `2f349148` (the commit
+that carries this addendum's code): an explicit owner send whose reply source is a DELETED message still goes out, as a
+plain message WITHOUT the quote, and the result says so. The reason is the one the reviewer gave: a
+WhatsApp quote carries the original text, so quoting would re-publish what its author deleted, while the
+owner asked to keep deleted content for HIMSELF.
+
+* `outbox::quote_decision(source)` (component, pure, natively tested) is the rule: a deleted source means
+  `Quote::Drop(QUOTE_DROPPED_DELETED)`; everything else keeps its quote. A refusal still decides first -
+  a refused send is not asked about its quote.
+* `guest::outbox_tick` clears `reply_to` on that one path, logs `outbox: quote dropped job=<id>
+  reason=quoted_deleted` (no id in the log), and the job settles with
+  `Outcome { message_id, note }`.
+* `wa_whatsapp_outbox::status` puts the sentence on the answer as `note` (only when non-empty). The
+  message id, the state and the absence of a `reason` are unchanged.
+* No other path quotes a deleted message: the automatic transcript reply builds its quote context from
+  the source message, and it is skipped entirely when the source is flagged deleted (checked at
+  admission, in the streaming loop, and right before the final post), so it can never send one.
+
+Tests added, both run singly:
+
+| test | what it proves |
+| --- | --- |
+| `outbox::tests::an_explicit_send_that_quotes_a_deleted_message_goes_out_without_the_quote` | the send is not refused, the quote decision is `Drop` with that exact sentence, and an image/shape source keeps its quote (a shape is a refusal, not a dropped quote) |
+| `wa_whatsapp_outbox` `status_carries_the_note_when_the_quote_was_dropped` | the answer carries `note` with the sentence, `state=done`, the message id present, no `reason`; a plain send has no `note` |
+
+Rows run for this addendum (narrowed, one at a time): component `cargo test --lib` **196 passed, 0
+failed**; `cargo check --target wasm32-wasip2` exit 0; `cargo test -p wa-whatsapp-outbox` 20 passed;
+`cargo test -p wa-capabilities whatsapp_send` 9 passed. The full `wa-capabilities` crate was NOT green
+here and that is not this branch: two of its tests refuse to run without a scratch `HOME`
+(`operations.rs:3001`, `operations.rs:3078` - they start real operations) and
+`host::tls_anchor_tests::a_provider_call_refuses_a_private_ca_that_no_bundle_names` needs a live TLS
+endpoint (`Timeout(Connect)`); `scripts/test.sh` supplies the `HOME` the first two demand.
+
+### Texts to approve (addendum, continuing the list)
+
+12. The sentence on the result of a send whose quote was dropped, verbatim:
+    `sent without the quote: the quoted message was deleted by its author` (field `note` on the
+    `whatsapp_send` answer; `whatsapp_send_status` carries it too, through the same `status`).
+13. Component log, once per such send: `outbox: quote dropped job=<id> reason=quoted_deleted`.
+

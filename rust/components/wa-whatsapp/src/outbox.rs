@@ -92,6 +92,30 @@ impl Refusal {
     }
 }
 
+/// What a verified request carries as its quote.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Quote {
+    /// Send it as asked: a plain message, a reference quote, or a quote of a message that still exists.
+    Keep,
+    /// Send the message WITHOUT the quote, and say this to the caller: the quoted message was deleted by
+    /// its author, and a quote re-publishes its text (WhatsApp puts the quoted message in the context).
+    Drop(&'static str),
+}
+
+/// The rule for the quote, decided from the index before the wire (Fable's review, 23/11 ~20:30Z).
+///
+/// The node KEEPS a deleted message for the operator to read - that is the owner's decision of 23/11 - and
+/// keeping it is not permission to send it back into the chat its author took it out of. So an explicit
+/// send that names a deleted message as its reply source still GOES OUT, and the quote is dropped with the
+/// sentence [`wa_whatsapp_outbox::QUOTE_DROPPED_DELETED`] on the result. A send whose source the index does
+/// not hold at all is a refusal one layer up (`dispatch_refusal`), not this.
+pub fn quote_decision(source: Option<&SourceFacts>) -> Quote {
+    match source {
+        Some(facts) if facts.deleted => Quote::Drop(wa_whatsapp_outbox::QUOTE_DROPPED_DELETED),
+        _ => Quote::Keep,
+    }
+}
+
 /// The last gate before the wire: why this verified request must not be dispatched, if it must not.
 ///
 /// The placement is deliberate and is the Go connector's: the node already asked its policy, but the
@@ -241,6 +265,25 @@ mod tests {
         let mut deleted = source("text", "oi", false);
         deleted.deleted = true;
         assert_eq!(dispatch_refusal(Some("3EB0"), Some(&deleted)), None);
+    }
+
+    #[test]
+    fn an_explicit_send_that_quotes_a_deleted_message_goes_out_without_the_quote() {
+        // The reviewed rule: the send is never refused for a deletion, and it never re-publishes what the
+        // author deleted. The sentence is the one the caller reads on the result.
+        let mut deleted = source("text", "oi", false);
+        deleted.deleted = true;
+        assert_eq!(dispatch_refusal(Some("3EB0"), Some(&deleted)), None, "the send still goes out");
+        assert_eq!(
+            quote_decision(Some(&deleted)),
+            Quote::Drop("sent without the quote: the quoted message was deleted by its author"),
+            "the operator is told what changed, in those words"
+        );
+        assert_eq!(quote_decision(Some(&deleted)), Quote::Drop(wa_whatsapp_outbox::QUOTE_DROPPED_DELETED));
+        // Everything else keeps whatever quote it asked for.
+        assert_eq!(quote_decision(None), Quote::Keep, "no reply source: nothing to quote");
+        assert_eq!(quote_decision(Some(&source("text", "oi", false))), Quote::Keep);
+        assert_eq!(quote_decision(Some(&source("image", "", false))), Quote::Keep, "a shape is a refusal, not a dropped quote");
     }
 
     #[test]
