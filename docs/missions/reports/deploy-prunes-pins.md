@@ -192,3 +192,12 @@ Text to approve (new):
   (running, its binary's tree, the previous install); the cap keeps the two the records name first and
   removes the third. Nothing today reads a pin except a retry of a build, so this is a cache size, not a
   correctness question - but it is a deliberate truncation, not an oversight.
+
+## Why this branch is called `change/deploy-prunes-pins`
+
+The first round of this mission landed as `70b24e52` and its branch was deleted, so the next round's work
+(marked below) was committed on `change/deploy-prunes-pins-fix`. The preflight that followed reported one row,
+`land-quick: no branch change/deploy-prunes-pins` - not a code failure: it resolved the mission's branch name,
+which no longer existed. The fix branch was renamed back to `change/deploy-prunes-pins` (its commits unchanged)
+so the mission, its preflight and the branch a landing would merge are the same name again, and the "Follow-up
+23/11" section above is what that branch carries.
