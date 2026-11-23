@@ -234,5 +234,12 @@ codes a peer call can return are unchanged.
   `not_registered` proof ran against a scratch rendezvous and scratch nodes on loopback.
 * The dispatch bound is a *count* of `host.operation` calls, not a wall-clock assertion: timing rows flake
   under this node's load, and the count is the thing the cut changed.
-* The full fast path is running under `flock -o ~/Work/missions/.suite.lock`; its result line is added
-  here when it settles (see the last section).
+* **The full fast path is green on this branch.** `flock -o ~/Work/missions/.suite.lock bash
+  scripts/fast.sh` (queued ~55 minutes behind four other suites on the shared lock, then run): **423 checks,
+  0 failed, 0 skipped, 801 s**, and it rebuilt the two crates this branch touches
+  (`wa-capabilities` 170.8 s, `wa-host-support` 8.2 s) before running them. The four new rows ran inside
+  it: `test-network-not-registered` 173 ms, `test-remote-call-bound` 1,992 ms,
+  `test-roster-sample-quick` 480 ms, `test-tool-dispatch-cost` 677 ms - all pass.
+  The board's row was NOT re-measured after the last two commits (`d51b614e` clears three marks the answer
+  carried; `192613ea`, `a91c7b99` are reports): they change no dispatch and no sample, so the 219 ms row
+  above stands, but that is reasoning, not a measurement.
