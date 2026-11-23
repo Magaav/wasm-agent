@@ -315,6 +315,31 @@ The assertions that quote them moved with them and were strengthened, not loosen
 asserts the literal call text `tools.operation({action:"read", id})`, and the wa-capabilities test asserts
 `operation {id}, wait("{id}")` — the spelled call, not the prose.
 
+## Narrowed run for the addendum (the rows this fix touches)
+
+`flock -o ~/Work/missions/.suite.lock env WA_BIN=~/.local/bin/wa WA_FAST_ROWS=/tmp/ops-rows3.txt bash
+scripts/fast.sh` (8 rows: the new one, `test-operation-blocked-on`, `test-operation-survives-turn`, four
+`test-codemode-*`, `test-handle-wake`), log `/tmp/ops-fast5.out`, evidence
+`/home/victor/wasm-agent/checkout/.git/worktrees/wt35/wa-fast-evidence/20261123T180952Z-3712179/`:
+
+* `fast: lua 35/35 passed` (35 of 346 rows selected; the never-dropped core rows included) — every row this
+  change can move is green, including the new one and `test-operation-survives-turn`;
+* 33 contract checks `ok`, among them `discrimination`, `fast-binary`, `landing-queue`, `deploy-pin-prune`;
+* TWO failures, both proven pre-existing on a base worktree of `c1337903`:
+  * `check-esc-stops-pty` — the load-sensitive timing row already named in the main report
+    (`esc-stops: FAILED - timed out waiting for the prompt` on base);
+  * `rust wa-capabilities` — `host::tls_anchor_tests::a_provider_call_refuses_a_private_ca_that_no_bundle_names`
+    panics at `wa-capabilities/src/host.rs:8025` (`expect_err` on a request that should refuse a private CA and
+    did not). Run from a base worktree into this mission's warm target dir:
+    `test result: FAILED. 0 passed; 1 failed; ... finished in 20.28s` — the same failure without a line of this
+    branch, and this diff touches no TLS file (`git diff c1337903 --stat` = `operations.rs`, `wa-operation`,
+    `lua/core/codemode.lua`, `scripts/`). It is a trust-store fact of the reinstalled node.
+* The run never printed its own summary line: the third node install of the night killed it during cleanup, so
+the verdict above is read from its per-check lines and its evidence directory rather than from its result file.
+A first attempt at this run was killed the same way before it reached the front of the queue; a second one
+(exactly this one, then re-started) had to be re-run after the edits that followed it. That is the environment,
+not the diff: three installs landed inside this session.
+
 ## Verification of the addendum
 
 * `cargo test -p wa-operation`: **59 passed, 0 failed, 3 ignored**.
