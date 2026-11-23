@@ -103,7 +103,7 @@ run, not by a query.
   refused repair). Wired through `cargo test -p wa-capabilities`, which `scripts/fast.sh` runs for the
   crates a change touches.
 * `the_scheduler_repairs_an_index_that_disagrees_with_its_table_instead_of_quarantining`
-  (`rust/wa-capabilities/src/graph_tests.rs`, `3fe15724`'s round): the scheduler is handed the verdict the
+  (`rust/wa-capabilities/src/graph_tests.rs`, `3cb9893c`): the scheduler is handed the verdict the
   component answers for an index that disagrees with its table, and the test asserts no copy was taken, the
   store is still in place, `integrity_check` passes and every row is kept. It names **no function this branch
   adds**, so the land gate can run it against the base's own code - and there the same call quarantines
