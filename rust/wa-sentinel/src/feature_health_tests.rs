@@ -1,4 +1,4 @@
-// The feature-health renderer's rules (`wa health`): the same five verdicts the Lua module uses, the same
+// The feature-health renderer's rules (`wa health`): the same six verdicts the Lua module uses, the same
 // bound taken from the row, and a registry that cannot be read named instead of answered as "no features".
 use super::feature_health::*;
 use serde_json::json;
@@ -70,5 +70,31 @@ fn a_missing_registry_is_named_not_answered_as_no_features() {
     assert_eq!(lines.len(), 1);
     assert!(lines[0].starts_with("features:  unreadable - "), "the missing registry is named: {}", lines[0]);
     assert!(lines[0].contains("features.json"), "and so is the file it looked for: {}", lines[0]);
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// A ROW THAT DEFAULTS OFF IS DORMANT, NOT NEVER (docs/GRAPH.md, 23/11): with nothing recorded and the
+/// switch off there is nothing broken to report, and the moment the node's own policy file says true the
+/// row goes back to its ordinary verdict - so switching it on can never be hidden by the word dormant.
+#[test]
+fn a_row_that_defaults_off_is_dormant_until_the_policy_switches_it_on() {
+    let home = scratch("dormant");
+    write_registry(&home, &json!({"schema": 1, "features": [
+        {"name": "chat", "role": "any", "canary": "chat", "last_success": "x", "stale_after_s": 3600},
+        {"name": "graph", "role": "any", "canary": "graph", "default": "off", "last_success": "x", "stale_after_s": 3600}
+    ]}).to_string());
+    let config = config_dir_for(&home);
+    let rows = super::feature_health::rows(&config, 1_700_000_100).expect("the rows answer");
+    assert_eq!(rows[1].name, "graph");
+    assert_eq!(rows[1].verdict, Verdict::Dormant, "off by default and nobody asked: dormant, not never");
+    assert!(rows[1].detail.contains("docs/GRAPH.md"), "the detail names the document: {}", rows[1].detail);
+    assert_eq!(rows[0].verdict, Verdict::Never, "the row beside it is unaffected: the word is per row");
+    let lines = super::feature_health::lines(&config, 1_700_000_100);
+    assert!(lines[0].contains("1 dormant"), "the summary counts it: {}", lines[0]);
+    assert!(lines[0].contains("1 never"), "and chat is still counted red: {}", lines[0]);
+    // The node's own policy switches it on: the ordinary verdict comes back.
+    std::fs::write(config.join("policy.json"), json!({"features": {"graph": true}}).to_string()).unwrap();
+    let switched_on = super::feature_health::rows(&config, 1_700_000_100).expect("the rows answer");
+    assert_eq!(switched_on[1].verdict, Verdict::Never, "switched on with nothing recorded: never, and red");
     let _ = std::fs::remove_dir_all(&home);
 }

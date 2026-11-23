@@ -858,12 +858,7 @@ function M.catalog(role)
 
   role = role or "admin"
   local list = {}
-  local graph = graph_offered()
-  for _, item in ipairs(M.shared) do
-    -- One line, and it is the graph's own (docs/GRAPH.md): the tool a dormant node cannot answer is not in
-    -- the catalogue the model reads, and it comes back the moment the switch says on.
-    if graph or item['function'].name ~= 'graph' then list[#list + 1] = item end
-  end
+  for _, item in ipairs(M.shared) do list[#list + 1] = item end
   if is_master(role) then
     list[#list+1]=schema("tool_result","Retrieve an exact byte range of a full tool result saved after output truncation. Use the full_result.sha256 from the result, then follow next_offset until eof.",{
       sha256={type="string"},offset={type="integer",minimum=1},limit={type="integer",minimum=1,maximum=51200}
@@ -896,6 +891,18 @@ function M.catalog(role)
     for _, plugin in ipairs(plugins) do
       list[#list + 1] = schema_from(plugin.name, plugin.description or "", plugin.parameters)
     end
+  end
+  -- THE GRAPH IS OFF BY DEFAULT (docs/GRAPH.md, 23/11), and a dormant feature costs the model nothing: no
+  -- catalogue line, no `searchTools` hit, no schema bytes in the prompt. One filter over the assembled
+  -- list, because the graph arrives by several roads (its own admin schema, a plugin, a peer's connector)
+  -- and a rule that hid only one of them would be a rule with a hole in it. Asked per build, so the switch
+  -- reaches the next turn without a restart.
+  if not graph_offered() then
+    local kept = {}
+    for _, item in ipairs(list) do
+      if (item['function'] or {}).name ~= 'graph' then kept[#kept + 1] = item end
+    end
+    list = kept
   end
   return list
 end

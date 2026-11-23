@@ -87,6 +87,14 @@
       "stale_after_s": 21600
     },
     {
+      "name": "graph",
+      "role": "component:graph",
+      "canary": "graph",
+      "default": "off",
+      "last_success": "canary: lua/core/canaries/graph.lua (the graph is OFF by default: nothing is proven while it is off, and a switch-on indexes one scratch file and reads it back)",
+      "stale_after_s": 604800
+    },
+    {
       "name": "release-update",
       "role": "any",
       "canary": "release-update",
