@@ -341,6 +341,12 @@ async function scenario(entry) {
   }
   const rows = screen();
   tmux(['kill-server']);
+  if (process.env.ESC_BODIES) {
+    // The probe the display-only rule needs: the request bodies exactly as the provider received them,
+    // so two binaries can be compared byte for byte (ESC_BODIES=/tmp/bodies.json).
+    fs.writeFileSync(process.env.ESC_BODIES + '.' + name,
+      JSON.stringify(state.requests.filter(entry => entry.path.endsWith('/chat/completions')).map(entry => entry.body), null, 1));
+  }
   return {name, escMs: backAt === null ? null : backAt - escAt, escAt, rows, ledger, home,
     requests: state.requests.length, typedAt,
     requestsSeen: state.requests.map(entry => entry.path),
