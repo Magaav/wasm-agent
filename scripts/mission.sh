@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The mission loop as one entry point: stage -> start -> status -> report -> verify -> clean.
+# The mission loop as one entry point: stage -> start -> amend -> status -> report -> verify -> clean.
 #
 #   scripts/mission.sh stage  <name> <base> <brief>  # mission dir, worktree, env, prompt.md, run.sh
 #   scripts/mission.sh start  <name>                 # ONE fresh session, detached; never a resume
@@ -7,6 +7,8 @@
 #   scripts/mission.sh report <name>                 # status + the evidence a handover needs
 #   scripts/mission.sh verify <name> <cmd...>        # run <cmd> in the worktree, record its rc
 #   scripts/mission.sh clean  <name> [--force]       # drop the worktree, keep the evidence
+#   scripts/mission.sh amend  <name> <file|->        # append a change to brief.md AND deliver it to the worker
+#                                                    # running now, at its next context boundary
 #
 # Every rule below is a mechanism here because of a measured failure (measurements: docs/MISSIONS.md):
 #   * LIVENESS IS THE NODE'S RUN, NOT THE LAUNCHER'S PID. Measured 18/11 on this node: session
@@ -67,7 +69,7 @@ refuse() { # <state> <reason> <command that clears it by hand>
   printf 'mission: clear it by hand: %s\n' "$3" >&2
   exit 1
 }
-usage() { sed -n '2,9p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,11p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 m_dir() { printf '%s/%s' "$MISSIONS" "$1"; }
 
@@ -609,6 +611,12 @@ cmd_stage() {
     printf 'never poll an operation in a loop (the progress guard ends a turn that repeats one). Before calling\n'
     printf 'a test failure yours, run it on the base (git stash) and name pre-existing failures in REPORT.md.\n'
     printf 'Write REPORT.md in the worktree root. Commit locally; never push.\n'
+    printf '\n## Amendments\n'
+    printf 'The brief above is what you were started with. A change can arrive WHILE you work: it reaches you as a\n'
+    printf 'message that begins "[amendment <UTC> from the planner]", and the same text is appended to brief.md\n'
+    printf 'under that stamp. An amendment is NEWER than the brief where the two disagree: act on the amendment, not\n'
+    printf 'on the sentence it replaces. Name every amendment you acted on in your report with its UTC stamp, and\n'
+    printf 'name the ones you did not act on with the reason.\n'
     if [ -s "$M/note.md" ]; then printf '\n## Note from the orchestrator\n'; cat "$M/note.md"; fi
   } > "$M/prompt.md"
 
@@ -802,7 +810,312 @@ cmd_start() {
   say "started $name (launcher pid $pid); the run is the node's - watch: scripts/mission.sh status $name"
 }
 
-# ---------------------------------------------------------------- status
+# ---------------------------------------------------------------- amend
+# A CHANGE THAT REACHES A WORKER WHICH IS ALREADY RUNNING (Victor 22/11: "yes (steering?)").
+#
+# THE MEASURED FAILURE (launch-opening, 22/11). The worker reads its brief ONCE, piped in at start
+# (`stage` -> prompt.md -> `wa chat --once "$(cat prompt.md)"`), so three changes from Victor (21:33Z the
+# colour, 23:32Z the supernova, and the v1.0 wording) each waited for the worker's whole turn to end, and the
+# mission took three passes. The orchestrator had no door into that turn: a second `wa chat --session <id>`
+# on a live run is refused `resource_busy`/`run_resource_refused` (the session claim belongs to the run), and
+# killing it is what leaves a session claimed (docs/MISSIONS.md, measured 2026-11-11).
+#
+# THE PRODUCT'S OWN STEERING IS THAT DOOR (lua/core/steering.lua, docs/ORCHESTRATOR-WORKSPACE.md "Live
+# steering"): `wa steer <session> "<note>"` writes a `steering_inbox` row owned by the run in flight, and
+# that run consumes it at its next context boundary, atomically with its read receipt, into its transcript as
+# a user row. So this verb does exactly two things, and nothing else:
+#   1. APPEND the amendment to brief.md under `## Amendment <UTC> (from the planner)`, and
+#   2. hand the same text, with the same stamp, to that door, labelled `[amendment <UTC> from the planner]`.
+#
+# APPENDED, NEVER INSERTED. prompt.md is written once at stage and never rewritten, and brief.md only grows:
+# the worker's prompt prefix - and its prompt cache - is untouched (the fixture hashes prompt.md and the
+# brief's own prefix around the amend).
+#
+# THE STAMP IS THE AMENDMENT'S IDENTITY. amend.log keeps one line per delivery attempt,
+# `<sha> <stamp> <state> <session> <receipt> <detail>`, where <sha> is 16 hex of the amendment text's sha256,
+# so the same file passed twice is ONE amendment: appended once, delivered once. A second call reports what
+# became of the first, from the NODE's own receipt (read / queued / deferred), and appends nothing. The one
+# case that delivers again is the one the node says never landed: `deferred` means the run settled before its
+# context boundary, so the worker never consumed it - that is the between-turns case, and it is resumed with
+# the same stamp and the same text.
+#
+# NOTHING IN FLIGHT IS NOT NOTHING TO DO. A worker between turns (no `done` yet) or finished (`done` carries
+# its rc) has no run to receive a note and `wa steer` refuses it by name (`no_active_steering_target`). Then
+# the amendment is THE MESSAGE OF ITS NEXT TURN, and the command says which of the two happened. It never says
+# "delivered" for a note that was only appended.
+#
+# WHY THE RESUME IS A RUNNER HERE AND NOT `wa mission resume`. The continuation is the documented CLI form
+# (`wa chat --resume <id> --once <text>`), started from this shell, so the turn inherits THIS environment.
+# `wa mission resume` spawns its runner through host.exec, and that child's environment is scrubbed: measured in
+# this script's fixture, the resumed CLI answered "No provider is configured and nothing in memory matched" and
+# made no model request at all, because a mission's provider settings arrive exactly this way (start.sh hands
+# the worker wa-serve's serve.env). The runner keeps the two contracts the other runners keep - the rc goes into
+# `done`, and a turn refused with `deploy_waiting` is waited out rather than recorded as the mission's result.
+
+# The last line amend.log carries for one amendment - the current state of that one delivery.
+amend_last() { # <mission dir> <sha>
+  [ -s "$1/amend.log" ] || return 0
+  awk -v s="$2" '$1 == s { line = $0 } END { if (line != "") print line }' "$1/amend.log"
+}
+
+amend_record() { # <mission dir> <sha> <stamp> <state> <session> <receipt> <detail>
+  printf '%s %s %s %s %s %s\n' "$2" "$3" "$4" "${5:--}" "${6:--}" "${7:--}" >>"$1/amend.log"
+}
+
+# The note as the worker sees it: the stamp first, so the transcript, brief.md and the report carry the same
+# words and the same time, and the prompt template's instruction (name the amendment by its stamp) can be met.
+amend_label() { printf '[amendment %s from the planner] %s' "$1" "$2"; }
+
+# What the node says became of one delivery: the run's own read receipt (lua/core/steering.lua). "read" = the
+# worker was given it at a context boundary, "queued" = it is still waiting for one, "deferred" = the run
+# settled before it was consumed. An answer this cannot read is "unknown", which is never "delivered".
+amend_receipt() { # <session> <receipt id> -> "<state> <message_seq>"
+  local wa out row state seq
+  wa=$(wa_bin)
+  [ -n "$wa" ] || { printf 'unknown -'; return 0; }
+  out=$("$wa" steer "$1" --status --json 2>/dev/null) || { printf 'unknown -'; return 0; }
+  [ -n "$out" ] || { printf 'unknown -'; return 0; }
+  # The status answer is one flat JSON object; each receipt is one `{...}`, so the object carrying this id is
+  # the one line that names the receipt's state.
+  row=$(printf '%s' "$out" | tr '}' '\n' | grep -F "\"id\":\"$2\"" | head -1)
+  [ -n "$row" ] || { printf 'missing -'; return 0; }
+  state=$(printf '%s' "$row" | sed -n 's/.*"state":"\([a-z]*\)".*/\1/p')
+  seq=$(printf '%s' "$row" | sed -n 's/.*"message_seq":\([0-9][0-9]*\).*/\1/p')
+  printf '%s %s' "${state:-unknown}" "${seq:--}"
+}
+
+# WHICH SESSION IS THE WORKER. Three answers, in this order, because the worker's own line is late: the CLI
+# writes "wa: session <id> ok" to stderr when its TURN ENDS (lua/core/chat.lua), so during a live turn neither
+# run.lock nor the logs name anything (measured in this script's own fixture: run.lock's SESSION stayed empty
+# for the whole first turn). The node knows NOW, under the mission's title - the first line of prompt.md, the
+# same criterion mission_run uses to decide which sessions are this mission's.
+amend_session() { # <mission dir> -> one session id, or nothing
+  local M=$1 marker id state title _ row rc found='' first='' lock recorded
+  lock=$(lock_field "$M" SESSION)
+  session_id_ok "${lock:-}" || lock=''
+  recorded=$(recorded_session "$M")
+  if load_node; then
+    marker=$(marker_of "$(basename "$M")" "$(wt_of "$M")")
+    while IFS=$'\t' read -r id state title _; do
+      [ -n "$id" ] || continue
+      [ "${#title}" -ge 20 ] || continue
+      case $marker in "${title%…}"*) ;; *) continue ;; esac
+      [ -n "$first" ] || first=$id
+      # A run in flight is the worker that can be steered RIGHT NOW; anything else is a session to resume.
+      row=$(steer_row "$id"); rc=$?
+      if [ "$rc" -eq 0 ] && [ "${row%% *}" = active ]; then found=$id; break; fi
+    done <<<"$NODE_ROWS"
+  fi
+  # Second: a session the NODE records as working IN this mission's directory (session_presence plus
+  # /proc/<pid>/cwd, the same read a launch's gate makes). This is the answer for a mission whose prompt does
+  # not start with the title marker - the factory's own launcher (~/Work/missions/launch.sh) puts the brief
+  # first and the "Where you are" block after it, so there is no marker to match - and it is the node's own
+  # record of where that process works, not a guess from a pid file.
+  if [ -z "$found" ]; then
+    local pid age cwd
+    while IFS=$'\t' read -r id pid age cwd; do
+      session_id_ok "${id:-}" || continue
+      row=$(steer_row "$id"); rc=$?
+      if [ "$rc" -eq 0 ] && [ "${row%% *}" = active ]; then found=$id; break; fi
+      [ -n "$first" ] || first=$id
+    done <<<"$(node_presence "$M" "$(wt_of "$M")" 2>/dev/null)"
+  fi
+  [ -n "$found" ] || found=$lock
+  [ -n "$found" ] || found=$recorded
+  [ -n "$found" ] || found=$first
+  printf '%s' "$found"
+}
+
+cmd_amend() {
+  local name=${1-} src=${2-}
+  [ -n "$name" ] && [ -n "$src" ] || die "usage: mission.sh amend <name> <file|->"
+  check_name "$name"
+  local M brief wa text bytes sha prev stamp='' append=yes size_before before_sha
+  M=$(m_dir "$name")
+  [ -d "$M" ] || die "no mission at $M"
+  brief=$M/brief.md
+  [ -s "$brief" ] || die "no brief at $brief: amend appends to the brief the worker was started from, and this mission has none to append to"
+  wa=$(wa_bin)
+  [ -n "$wa" ] || die "no 'wa' on PATH (set WA_BIN): the note reaches the worker through 'wa steer', and a command that cannot deliver says so instead of writing the brief alone"
+
+  if [ "$src" = - ]; then text=$(cat); else
+    [ -r "$src" ] || die "cannot read $src: nothing was appended and nothing was delivered"
+    text=$(cat "$src")
+  fi
+  # The text is used as given: only CRs and trailing newlines come off, so what brief.md gains is exactly what
+  # the worker is handed.
+  text=${text//$'\r'/}
+  while [ "${text%$'\n'}" != "$text" ]; do text=${text%$'\n'}; done
+  [ -n "${text//[[:space:]]/}" ] || die "the amendment in $src is empty: nothing to append and nothing to deliver"
+  bytes=$(printf '%s' "$text" | wc -c)
+  # The door's own limit (lua/core/steering.lua refuses a note over 32768 bytes), minus the label. Refused HERE
+  # by name, because a brief that says something the worker was never handed is exactly the drift this verb
+  # exists to end.
+  [ "$bytes" -le 32000 ] || die "the amendment is $bytes bytes; the steering door takes 32768 including the label, so at most 32000 here - split it into two amendments"
+  sha=$(printf '%s' "$text" | sha256sum | cut -c1-16)
+  prev=$(amend_last "$M" "$sha")
+
+  # A REPEATED AMENDMENT IS NOT A SECOND ONE. The record decides, and only the node's receipt can say that the
+  # first attempt never landed (`deferred`) or that nothing was ever delivered (`undelivered`).
+  if [ -n "$prev" ]; then
+    local pstamp pstate psid precipit pdetail receipt
+    pstamp=$(printf '%s' "$prev" | awk '{print $2}')
+    pstate=$(printf '%s' "$prev" | awk '{print $3}')
+    psid=$(printf '%s' "$prev" | awk '{print $4}')
+    precipit=$(printf '%s' "$prev" | awk '{print $5}')
+    pdetail=$(printf '%s' "$prev" | awk '{print $6}')
+    case $pstate in
+      queued)
+        receipt=$(amend_receipt "$psid" "$precipit")
+        case ${receipt%% *} in
+          read)
+            say "mission: already amended: $pstamp (sha $sha) was read by the worker at its next context boundary (receipt $precipit, message ${receipt#* }); nothing was appended and nothing was delivered again"
+            return 0 ;;
+          queued)
+            say "mission: already amended: $pstamp (sha $sha) is still queued for that run (receipt $precipit); the worker reads it at its next context boundary, and it is not delivered twice"
+            return 0 ;;
+          deferred)
+            say "mission: $pstamp (sha $sha) was never consumed - the run settled before its next context boundary - so the worker is resumed with it now (not appended again)"
+            stamp=$pstamp ;;
+          *)
+            say "mission: cannot tell whether $pstamp (sha $sha) reached the worker: the node answered '${receipt%% *}' for receipt $precipit, and unknown is not delivered"
+            say "mission: nothing was appended and nothing was delivered - read it (wa steer ${psid:--} --status), then run this command again once the node answers"
+            return 1 ;;
+        esac ;;
+      resumed)
+        say "mission: already amended: $pstamp (sha $sha) is what session $psid was resumed with, so it is the message of that turn; nothing was appended and nothing was delivered again"
+        return 0 ;;
+      undelivered)
+        say "mission: $pstamp (sha $sha) is already in $brief and was never delivered (${pdetail:-see amend.log}): delivering it now, without appending it again"
+        stamp=$pstamp ;;
+      *)
+        say "mission: already amended: $pstamp (sha $sha) is recorded as $pstate in $M/amend.log; nothing was appended and nothing was delivered"
+        return 0 ;;
+    esac
+  fi
+  if [ -n "$stamp" ]; then append=no; else stamp=$(date -u +%FT%TZ); fi
+
+  if [ "$append" = yes ]; then
+    size_before=$(wc -c <"$brief")
+    before_sha=$(head -c "$size_before" "$brief" | sha256sum)
+    printf '\n\n## Amendment %s (from the planner)\n\n%s\n' "$stamp" "$text" >>"$brief" \
+      || die "cannot append to $brief: nothing was delivered"
+    # APPENDED, NEVER INSERTED, and checked rather than promised: every byte that was in the brief before the
+    # amend is still there, unchanged, and prompt.md is not touched at all.
+    if [ "$(head -c "$size_before" "$brief" | sha256sum)" != "$before_sha" ]; then
+      die "the append to $brief changed bytes that were already there - stop and read that file by hand: $stamp was delivered to nobody"
+    fi
+  fi
+
+  local sid label row rc state run answer receipt epid finished LOCK
+  sid=$(amend_session "$M")
+  if [ -z "$sid" ]; then
+    amend_record "$M" "$sha" "$stamp" undelivered - - no_session
+    say "mission: $stamp is in $brief, but no session of this mission is running or recorded, so nothing was delivered"
+    say "mission: start it once it is staged (scripts/mission.sh start $name) and run this command again - the text is already there and is not appended twice"
+    return 1
+  fi
+  if ! session_id_ok "$sid"; then
+    amend_record "$M" "$sha" "$stamp" undelivered - - bad_session
+    die "the session found for $name is not a session id: [$sid] - nothing was delivered. run.lock, err.log and the node's session list are what to read"
+  fi
+  label=$(amend_label "$stamp" "$text")
+  row=$(steer_row "$sid"); rc=$?
+  if [ "$rc" -ne 0 ]; then
+    amend_record "$M" "$sha" "$stamp" undelivered "$sid" - node_silent
+    say "mission: $stamp is in $brief, but the node could not be asked whether a run is in flight for session $sid ('$wa steer $sid --status --json' answered nothing), so nothing was delivered"
+    say "mission: read it by hand (wa steer $sid --status), then run this command again once the node answers - stop here if that refuses too, because unknown is not a delivery"
+    return 1
+  fi
+  state=${row%% *}
+  run=${row##* }
+  if [ "$state" = active ]; then
+    answer=$("$wa" steer "$sid" --json "$label" 2>&1); rc=$?
+    if [ "$rc" -eq 0 ]; then
+      receipt=$(printf '%s' "$answer" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+      amend_record "$M" "$sha" "$stamp" queued "$sid" "${receipt:--}" "run=$run"
+      say "mission: amendment $stamp queued for run $run (session $sid, receipt ${receipt:--}): the worker sees it at its next context boundary, once"
+      return 0
+    fi
+    case $answer in
+      *no_active_steering_target*)
+        # The run settled between the two reads. That is the between-turns case, not a failure: the worker is
+        # resumed with the amendment below, and the node's own words are the reason.
+        say "mission: the run settled between the two reads (the node answers no_active_steering_target), so the worker is between turns: it is resumed with the amendment"
+        state='between turns' ;;
+      *)
+        amend_record "$M" "$sha" "$stamp" undelivered "$sid" - steer_refused
+        say "mission: $stamp is in $brief, but the node refused the note, so nothing was delivered: $answer"
+        say "mission: clear it by hand: read the run (wa steer $sid --status) and run this command again when it answers - the text is not appended twice"
+        return 1 ;;
+    esac
+  fi
+  # NOTHING IS IN FLIGHT: the worker is between turns (no done file) or has finished (done carries its rc).
+  # Its next turn is a RESUME of that one session with the amendment as its message (see the header for why the
+  # runner is written here instead of calling `wa mission resume`).
+  LOCK=$M/start.flock
+  finished='no done file: the turn ended without one'
+  [ -f "$M/done" ] && finished="done says $(cat "$M/done")"
+  command -v flock >/dev/null 2>&1 || die "no flock on PATH (util-linux): a resume beside a start is a kernel lock, not a guess"
+  exec 9>>"$LOCK" || die "cannot open $LOCK"
+  if ! flock -n 9; then
+    exec 9>&-
+    amend_record "$M" "$sha" "$stamp" undelivered "$sid" - lock_held
+    die "refusing: another 'start', 'clean' or 'amend' of $name is inside its check-and-launch right now (flock -n on $LOCK), so the resume was not attempted. $stamp is in $brief and undelivered: run this command again when that one exits (nothing to clear)"
+  fi
+  # 9>&-: the resumed runner must not inherit this lock, or a 'start' would refuse for the whole length of the
+  # resumed turn - the measured lesson behind the -o rule in scripts/fast.sh (a child that inherits a lock fd
+  # holds the lock after its parent exits).
+  if ! cat > "$M/amend-run.sh" <<'AMEND_RUNNER'
+#!/usr/bin/env bash
+# generated by scripts/mission.sh amend - re-written by the next amend; do not edit.
+set -uo pipefail
+M=$(cd "$(dirname "$0")" && pwd -P) || exit 97
+. "$M/env" || exit 98
+cd "$M" || exit 96
+sid=$1; msg=$2
+rm -f "$M/done"
+printf -- '--- amend-resume %s session=%s\n' "$(date -u +%FT%TZ)" "$sid" >>"$M/out.log"
+printf 'resume-run %s session=%s\n' "$(date -u +%FT%TZ)" "$sid" >>"$M/lease.log"
+# A REFUSED TURN IS NOT A FAILED TURN (22/11, review MUST 3): while a deploy waits for or installs on this node
+# the CLI refuses a NEW turn by name and exits 2, so the wait is waited out instead of written into `done` as the
+# mission's result - the same contract as the launch runner above and lua/core/mission.lua's RESUME_RUNNER.
+step=${WA_DEPLOY_WAIT_STEP:-15}; case "$step" in ''|*[!0-9]*|0) step=15 ;; esac
+limit=${WA_DEPLOY_WAIT_LIMIT:-900}; case "$limit" in ''|*[!0-9]*) limit=900 ;; esac
+waited=0
+while :; do
+  "$WA" chat --resume "$sid" --once "$msg" >>"$M/out.log" 2>>"$M/err.log"
+  rc=$?
+  [ "$rc" -eq 2 ] && tail -c 4000 "$M/out.log" 2>/dev/null | grep -q deploy_waiting || break
+  if [ "$waited" -ge "$limit" ]; then
+    printf 'deploy-wait %s gave up after %ss: the node is still waiting for or installing a build, so this resume never ran (nothing ran)\n' "$(date -u +%FT%TZ)" "$waited" >>"$M/out.log"
+    break
+  fi
+  sleep "$step"
+  waited=$((waited + step))
+  printf 'deploy-wait %s refused (nothing ran; asking again in %ss)\n' "$(date -u +%FT%TZ)" "$step" >>"$M/lease.log"
+done
+printf 'rc=%s %s\n' "$rc" "$(date -u +%FT%TZ)" > "$M/done"
+printf 'amend-resume-exit %s rc=%s session=%s\n' "$(date -u +%FT%TZ)" "$rc" "$sid" >>"$M/lease.log"
+exit "$rc"
+AMEND_RUNNER
+  then
+    amend_record "$M" "$sha" "$stamp" undelivered "$sid" - cannot_write_runner
+    die "cannot write $M/amend-run.sh, so nothing was resumed: $stamp is in $brief and undelivered"
+  fi
+  chmod +x "$M/amend-run.sh" 2>/dev/null || true
+  if command -v setsid >/dev/null 2>&1; then
+    setsid nohup bash "$M/amend-run.sh" "$sid" "$label" >>"$M/out.log" 2>>"$M/err.log" </dev/null 9>&- &
+  else
+    nohup bash "$M/amend-run.sh" "$sid" "$label" >>"$M/out.log" 2>>"$M/err.log" </dev/null 9>&- &
+  fi
+  epid=$!
+  exec 9>&-
+  printf '%s\n' "$epid" > "$M/launch.pid"
+  amend_record "$M" "$sha" "$stamp" resumed "$sid" - "pid=$epid"
+  say "mission: amendment $stamp appended to $brief; the worker is not in flight (state $state; $finished), so session $sid is RESUMED with it (pid $epid): the amendment is the message of its next turn"
+  return 0
+}
 one_status() { # <name>
   local name=$1 M; M=$(m_dir "$name")
   [ -d "$M" ] || die "no mission at $M"
@@ -1015,7 +1328,7 @@ cmd_clean() {
     say "no worktree at ${wt:-$M/wt} (already clean)"
   fi
   release_lock "$M" clean "$MR_WHY"
-  rm -f "$M/run.sh" "$M/run.pid" "$M/launch.pid"
+  rm -f "$M/run.sh" "$M/run.pid" "$M/launch.pid" "$M/amend-run.sh"
   # start.flock is NOT removed: this clean HOLDS that lock (fd 9 above), and deleting the file it holds leaves
   # the next start locking a different inode - no exclusion at all. The file may stay; the lock is the kernel's,
   # not the file's, and the kernel drops it when this clean exits (round 7).
@@ -1030,6 +1343,7 @@ case ${1-} in
   report) shift; cmd_report "$@" ;;
   verify) shift; cmd_verify "$@" ;;
   clean) shift; cmd_clean "$@" ;;
+  amend) shift; cmd_amend "$@" ;;
   ''|-h|--help|help) usage ;;
   *) usage >&2; die "unknown command: $1" ;;
 esac

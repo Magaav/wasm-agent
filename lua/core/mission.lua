@@ -254,6 +254,13 @@ function M.prompt_text(marker, brief, fields, note)
     "Build and test HERE on this node (" .. tostring(fields.node or "") .. "): CARGO_TARGET_DIR=" .. fields.target
       .. " is this mission's only build dir. Never build, test or sync code on another node.",
     "Commit locally; never push.",
+    "",
+    "## Amendments",
+    "The brief above is what you were started with. A change can arrive WHILE you work: it reaches you as a"
+      .. " message that begins \"[amendment <UTC> from the planner]\", and the same text is appended to brief.md"
+      .. " under that stamp. An amendment is NEWER than the brief where the two disagree: act on the amendment,"
+      .. " not on the sentence it replaces. Name every amendment you acted on in your report with its UTC stamp,"
+      .. " and name the ones you did not act on with the reason.",
   }
   if note and note ~= "" then
     parts[#parts + 1] = ""
