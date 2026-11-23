@@ -127,7 +127,23 @@ the previous generation and the whole re-parse, five times in five hours, each 3
   If the evidence file must survive the next quarantine, that deletion rule needs its own decision - it is
   not changed here.
 
-## 9. Pre-existing failures seen while testing
+## 9. The same crash happened again while this was being written (22/11 22:49 local, 23/11T0149Z)
+
+A live install finished on this node at 22:47 local, and at 22:49 its graph store was already in the exact
+state this report describes: `~/.wasm-agent/graph.db.d/` held `graph.db` (182,599,680 B) beside a hot
+`graph.db-journal` (174,969,632 B), and the copy taken to `scratch/evidence2/` measures what the 22/11
+quarantine measured:
+
+* without the journal: `Freelist: size is 1017 but should be 115`, `Tree 4 page 25947 cell 303: Rowid
+  238123 out of order`, `Tree 4 page 33166: btreeInitPage() returns error code 11`;
+* with it, one read-write open: `integrity_check` = `ok`, then 133,090 nodes / 377,622 edges / 2,668 files
+  at revision 3 - the whole index, intact.
+
+The earlier evidence file `graph.db.malformed-20261123T000626Z` no longer exists: a later quarantine
+destroyed it, by the same rule that destroyed the brief's `20261122T144358Z`. The node is still running the
+old code (`2a4b785e` is local and unpushed), so the next graph call on that store will quarantine it too.
+
+## 10. Pre-existing failures seen while testing
 
 `cargo test -p wa-capabilities --lib` (with `HOME` the real home) fails two `operations::` tests by design -
 they refuse to run outside a scratch home (`wa-capabilities/src/operations.rs`, "refusing to run: this test
