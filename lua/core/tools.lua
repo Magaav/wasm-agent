@@ -2031,8 +2031,15 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     -- The files this command changes, for the READER (Victor 20/11). The snapshot is taken before the
     -- command runs and compared after it, and only when a listener asks for it: the model's result is
     -- read before this point and is not touched by it. A read-only command takes no snapshot at all.
+    -- THE CALLER ON ANOTHER NODE ASKS TOO (chat-view-round-2, item 2). A peer's command changed files on
+    -- the peer, and this node drew nothing at all: the watcher only ran for a caller with a local view
+    -- (`ctx.emit`/`ctx.watch_changes`), which a peer call does not have. A caller that asked for the
+    -- change text (`ctx.record_change`, the same word a write/edit uses) gets the LIST here - the paths
+    -- and their line counts, never the texts: a file's whole content is not what crossing a wire for a
+    -- display costs, and the count is what the row says.
+    local for_caller = ctx and ctx.peer_call == true and ctx.record_change == true
     local watched = nil
-    if ctx and type(ctx.emit) == "function" and ctx.watch_changes then
+    if (ctx and type(ctx.emit) == "function" and ctx.watch_changes) or for_caller then
       watched = bash_changes.before(cwd,
         ctx.read_only_command and ctx.read_only_command(args.command) or nil)
     end
@@ -2047,10 +2054,25 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     -- After the command: what it changed. Emitted as its own event, so the model's result above stays
     -- exactly what the tool returned, and a reader who is not watching changes pays nothing.
     local shell_changed, shell_refused = nil, nil
-    if watched ~= nil and ctx and type(ctx.emit) == "function" then
+    if watched ~= nil then
       shell_changed, shell_refused = bash_changes.changed(watched)
-      if #shell_changed > 0 or #shell_refused > 0 then
+      if ctx and type(ctx.emit) == "function" and ctx.watch_changes
+          and (#shell_changed > 0 or #shell_refused > 0) then
         ctx.emit({ type = "bash_changes", command = args.command, files = shell_changed, refused = shell_refused })
+      end
+      if for_caller and (#shell_changed > 0 or #shell_refused > 0) then
+        -- The answer the caller receives: which files, and how much of each. An allow-list of five
+        -- names and no text at all - this crosses a wire for a display row, not for a file.
+        local summary = {}
+        for _, item in ipairs(shell_changed) do
+          local added, removed = changeset.line_delta(item.before_text or "", item.after_text or "")
+          summary[#summary + 1] = { path = item.path, added = added, removed = removed,
+            created = (item.before_text or "") == "", deleted = item.deleted == true }
+        end
+        for _, item in ipairs(shell_refused) do
+          summary[#summary + 1] = { path = item.path, refused = tostring(item.why or "unreadable") }
+        end
+        if type(result) == "table" then result.changes = summary end
       end
     end
     -- A file this RUN wrote and a command then removed, outside a work tree (where the snapshot above
@@ -2535,6 +2557,24 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
       deliver(ctx, { type = "remote_change", capability = call.capability, node = node.name,
         path = tostring(target), ok = ok, error = result.error,
         before_text = wire and wire.before or nil, after_text = wire and wire.after or nil })
+    end
+    -- THE FILES A PEER'S COMMAND CHANGED (chat-view-round-2, item 2). The peer names them (paths and line
+    -- counts, never texts) when the call asked for the change (`record_change`); each is a row of its own,
+    -- in the same place a local `bash_changes` card goes, so a change made by running a command on another
+    -- machine stops being invisible. A peer that sent no list draws nothing new: unknown is not "nothing
+    -- changed".
+    if not node.local_node and call.capability == "bash" and type(result) == "table"
+        and type(result.changes) == "table" and type(ctx) == "table"
+        and type(ctx.emit) == "function" and ctx.watch_changes then
+      for _, item in ipairs(result.changes) do
+        if type(item) == "table" and type(item.path) == "string" then
+          deliver(ctx, { type = "remote_change", capability = "bash", node = node.name,
+            path = item.path, ok = item.refused == nil, error = item.refused,
+            added = tonumber(item.added), removed = tonumber(item.removed),
+            created = item.created == true, deleted = item.deleted == true })
+        end
+      end
+      result.changes = nil
     end
     -- A picture the peer sent (lua/core/remote_image.lua): verified against the digest it named, stored
     -- HERE, and handed on as this node's own reference - the same content-addressed store and the same

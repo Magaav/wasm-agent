@@ -2338,6 +2338,12 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-status-midrun.lua" "$BIN" --db "$DB
 # tree, no peer.
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-script-bash-changes.lua" "$BIN" --db "$DB.script-bash-changes" | grep "script bash changes ok"
 
+# A PEER'S COMMAND SAYS WHICH FILES IT CHANGED (chat-view-round-2, item 2, the other half): the peer
+# answers the list (paths and line counts, never texts) to a caller that asked, the caller draws one
+# row per file, and the model's value carries no list. Its own scratch home and work tree; the peer's
+# transport is the module seam scripts/test-federation.lua uses.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-peer-bash-changes.lua" "$BIN" --db "$DB.peer-bash-changes" | grep "peer bash changes ok"
+
 # And the command itself must be wired to that report, and listed in help: a
 # module nobody can reach is not a command.
 "$BIN" --db "$SDB" status | grep -q "^node "
