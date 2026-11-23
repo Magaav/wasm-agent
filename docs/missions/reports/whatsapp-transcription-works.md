@@ -12,7 +12,7 @@ config change happened on any live node; the three things that need one are list
 | --- | --- |
 | Which node is the WhatsApp producer? | **`openclaw`** (OCI Ampere A1 Flex, 2 OCPU, 12 GB, arm64). `wa-whatsapp` runs there as `wa-whatsapp#1`, `started_at` 1795424981 = `2026-11-23T09:09:41Z`, `restarts 0`, `health: ready`. Read from the node's own answer (`wa call openclaw services '{"action":"status","name":"wa-whatsapp"}'`), not from the CLI. |
 | When did transcription last work? | **`2026-11-23T12:04:19Z`** - and it still works. Two notes were decoded that minute (`job 45` 12:04:10, `job 46` 12:04:19, 12 510 ms and 7 367 ms) and both transcripts are in the index and answer a search: `whatsapp_search {kind: voice}` at 12:23Z returned them with their text (Fernanda, 22 s and 10 s notes). |
-| When did the copilot reply last work? | **Not once in the retained logs.** Every component start since `2026-11-21T13:52Z` (the oldest component log on the node) printed `transcription: language pt, posting off (allow [])`, and the 2 896 retained lines contain **zero** `kind=posted` lines. The `🤖 _Copiloto_` reply has not been posted for at least two days, and nothing in the tree can currently turn it on (below). |
+| When did the copilot reply last work? | **Not once in the retained logs.** Every component start since `2026-11-21T13:52Z` (the oldest component log on the node) printed `transcription: language pt, posting off (allow [])`, and the 2 896 retained lines contain **zero** `kind=posted` lines. The `🤖 _Copiloto_` reply has not been posted for at least two days, and nothing in the tree could turn it on since `67c78621` (2026-11-11 22:00 -03:00) retired the connector that posted (below). |
 | Is the auto indexer behind? | **No.** `index: 1/1 records written` runs to the last message received (12:23Z) and the index answers back to `2026-11-01T13:10:35Z`. No `history:` line appears in the retained log (no history-sync blob was processed in that window; the past it holds came from earlier syncs). Its defect was on the **query** side, not the writer: transcripts were cut at 280 characters with nothing saying so. |
 
 ## 1. PART 1 - what is broken, stage by stage
@@ -33,6 +33,40 @@ The break is the last step only. There are two independent reasons it cannot pos
 confirmed by the artifact rather than inferred.
 
 ### (a)+(b) `posting off`: the reply is never sent, and the toggle talks to a removed service
+
+**Why the posting config is absent, in one sentence:** posting is absent because the only process that
+ever posted - the Go connector - was retired on **2026-11-11 22:00 (-03:00, `2026-11-12T01:00:13Z`) in
+`67c78621`** ("retire the Go connector from the tree (Phase 4)"), and the component that replaced it
+starts with `post_transcripts` off and no `config` block in its definition, while the operator switch
+for that same feature (`wa_whatsapp_posting`, added 2026-10-22 in `e805a3ed`) still POSTs to the
+connector's `/operator/posting` endpoint - so from that day nothing in the tree could turn posting on.
+
+The date is the commit's own: `git show -s --format='%ad %s' 67c78621` -> `2026-11-11T22:00:13-03:00`,
+which is the commit whose message records that the connector "is stopped and disabled there" and that
+removed `connectors/whatsapp/` (52 source files), the three entry points that built and installed it
+and `docs/WHATSAPP-CONNECTOR.md`. The component had existed since `63d1d98c` (2026-11-05) as a *shadow*
+run beside the connector, which is why its default is `post_transcripts: false` with `post_allow: []`
+(`config/whatsapp-shadow.json` is that shape, and its own text says "nothing in this tree deploys
+it"); the cutover made the shadow copy the only copy without ever changing the default or giving the
+switch a new target.
+
+### What the post_allow list was before (recovered read-only, 2026-11-23T13:10Z)
+
+**One entry, and it is a wildcard: the previous configuration allowed every chat.** The retired
+connector's own journal (`/home/ubuntu/.local/state/wa-whatsapp/journal.db`, table `config`, file
+mtime `2026-11-11T19:26:25Z`) carries `all_chats = 1` with `chats = null` and `transcript_posting = 1`
+(language `pt`, mode `transcribe`, generation 2); its `2026-10-29` backup carries the same three
+values. `all_chats = 1` with `chats = null` is the connector's "the owner approved all current and
+future supported chats" form (`connectors/whatsapp/main.go:331-332` at `67c78621^`), not a truncated
+list - so there is no per-chat list to recover, and the component's equivalent of it is
+`post_allow: ["*"]` (`src/posting.rs`: the allow list is the gate, and `*` matches any chat).
+
+The recovered values and their provenance are in `PRIVATE-post-allow.json` (mode 600, outside the
+repository); the file names no chat, because the configuration it records names none. Also searched,
+and empty: the connector's systemd unit and its five backups and `.d` drop-ins (no `--chats` and no
+`--all-chats` flag - the config row is the authority), `~/.wasm-agent/env` (the only `WA_WHATSAPP_*`
+key is `WA_WHATSAPP_OPERATOR_BACKEND`), the current component definition (no `config` block), and the
+tree's two documented examples (`config/whatsapp-shadow.json`, `config/whatsapp-own-chat.json`).
 
 * The gate is `post_transcripts` + `post_allow` (`rust/components/wa-whatsapp/src/posting.rs:42-43`),
   read from the component's config JSON. The stored definition
@@ -124,8 +158,10 @@ brief put behind an approval.
 1. **Turn posting on for the component** - this is what makes Victor's test pass ("send a voice note,
 the text comes back"). There is no supported verb today; the supported path is a definition change
    (`services` tool `action:"put"` with a `config` block, which requires `disable` first, then
-   `enable`), i.e. writing:
-   `{"post_transcripts": true, "post_allow": ["<the chat JIDs the owner allows>"], "alerts": true, "language": "pt"}`.
+   `enable`). The recovered prior configuration is *all chats* (one wildcard entry, see above), so the
+   block that matches what the connector had is
+   `{"post_transcripts": true, "post_allow": ["*"], "alerts": true, "language": "pt"}` -
+   the owner's decision to narrow it to named chats is the only thing that should replace the wildcard.
    Until that is done, transcription is correct and invisible.
 2. **Port the posting toggle** so the next operator does not have to hand-edit a definition:
    `lua/core/server.lua:545` still points at the removed Go connector. Proposed, not written (it
