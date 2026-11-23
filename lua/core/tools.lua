@@ -489,7 +489,7 @@ M.admin = {
     id = { type = "string" } }, { "id" }),
   -- The dialect is in the description because the model otherwise assumes POSIX
   -- and wastes its tool budget on commands this machine does not have.
-  schema("bash", "Run a command on this machine with " .. platform.shell() .. ". Killed after " .. exec_deadline_seconds() .. "s unless timeout_seconds (1-86400) is larger; raise it for builds and long tests. Returns when the shell exits; descendants that remain continue as a supervised operation the result names. stdin is the text the command reads and then sees closed. For deliberate long-lived work use operation start.", {
+  schema("bash", "Run a command on this machine with " .. platform.shell() .. ". Killed after " .. exec_deadline_seconds() .. "s unless timeout_seconds (1-86400) is larger; raise it for builds and long tests. Returns when the shell exits; descendants that remain continue as a supervised operation the result names. stdin is the text the command takes as its standard input, then closed. For deliberate long-lived work use operation start.", {
     command = { type = "string" }, cwd = { type = "string" },
     stdin = { type = "string", maxLength = 1048576, description = "Text fed to the command's standard input, then closed. It is delivered as the command's input, not pasted into the command line." },
     timeout_seconds = { type = "integer", minimum = 1, maximum = 86400, description = "Kill the command after this many seconds. Defaults to the node's foreground deadline (" .. exec_deadline_seconds() .. "s); raise it for a build or a full test gate, lower it to fail fast." } }, { "command" }),
@@ -512,14 +512,14 @@ M.admin = {
     path = { type = "string" },
     offset = { type = "integer", minimum = 1 },
     column = { type = "integer", minimum = 1 }, version = { type = "string" },
-    node = { type = "string", description = "Peer name or node_id (from nodes): read that node's file instead of this one's." },
+    node = { type = "string", description = "Peer name or node_id (from nodes): that node's file instead of this one's." },
     limit = { type = "integer", minimum = 1, maximum = 2000 } }, { "path" }),
-  schema("write", "Create or overwrite a text file. In a required session workspace, writes are limited to the worktree and its session scratch root; a refusal lists both in allowed_writes. node=<peer> writes that peer's file; the result names the node the bytes landed on.", {
+  schema("write", "Create or overwrite a text file. In a required session workspace, writes are limited to the worktree and its session scratch root; a refusal lists both in allowed_writes. node=<peer> answers from that peer, and the result names the node the bytes landed on.", {
     path = { type = "string" }, content = { type = "string" },
-    node = { type = "string", description = "Peer name or node_id (from nodes): write that node's file instead of this one's." } }, { "path", "content" }),
-  schema("edit", "Replace text in one file, using exactly one form. `edits` (old_text/new_text) quotes bytes that must occur exactly once; a miss returns the nearest region. An anchor that lies outside every byte range this session read from that file is refused by name (`edit_anchor_outside_read_page`): read the page that holds it. `range_edits` copies a read `selection` unchanged with replacement_lines (optional start_line/end_line inside its edit_lines), for text you cannot quote; shell output does not provide an edit receipt. All ranges apply atomically; check the echo of what each replaced. node=<peer> edits that peer's file.", {
+    node = { type = "string", description = "Peer name or node_id (from nodes): that node's file instead of this one's." } }, { "path", "content" }),
+  schema("edit", "Replace text in one file, using exactly one form. `edits` (old_text/new_text) quotes bytes that must occur exactly once; a miss returns the nearest region. An anchor that lies outside every byte range this session read from that file is refused by name (`edit_anchor_outside_read_page`): read the page that holds it. `range_edits` copies a read `selection` unchanged with replacement_lines (optional start_line/end_line inside its edit_lines), for text you cannot quote; shell output does not provide an edit receipt. All ranges apply atomically; check the echo of what each replaced. node=<peer> answers from that peer.", {
     path = { type = "string" },
-    node = { type = "string", description = "Peer name or node_id (from nodes): edit that node's file instead of this one's; the result names the node the bytes landed on." },
+    node = { type = "string", description = "Peer name or node_id (from nodes): that node's file instead of this one's; the result names the node the bytes landed on." },
     edits = { type = "array", minItems = 1, maxItems = 64, items = { type = "object",
       properties = {
         old_text = { type = "string", description = "Exact bytes to replace, copied from a read; must occur exactly once in the file." },
@@ -533,15 +533,15 @@ M.admin = {
         replacement_lines = {type="array",maxItems=2000,items={type="string"}}
       }, required = {"selection","replacement_lines"} } }
   }, { "path" }),
-  schema("ls", "List a directory (portable: works the same on every platform). node=<peer> lists that peer's directory.", {
+  schema("ls", "List a directory (portable: works the same on every platform). node=<peer> answers from that peer.", {
     path = { type = "string" },
-    node = { type = "string", description = "Peer name or node_id (from nodes): list that node's directory instead of this one's." } }),
-  schema("grep", "Literal substring search, not regex. Reports omitted files and clipped lines. Use a path to narrow the search, and read the matched range afterwards rather than whole files. Results use the supplied root; extensions are exact suffixes without dots. context returns the lines around each match; node=<peer> searches that peer's files.", {
+    node = { type = "string", description = "Peer name or node_id (from nodes): that node's directory instead of this one's." } }),
+  schema("grep", "Literal substring search, not regex. Reports omitted files and clipped lines. Use a path to narrow the search, and read the matched range afterwards rather than whole files. Results use the supplied root; extensions are exact suffixes without dots. context adds the lines around each match; node=<peer> answers from that peer.", {
     pattern = { type = "string" }, path = { type = "string" },
     ignore_case = {type="boolean"}, limit={type="integer",minimum=1,maximum=500},
     max_depth={type="integer",minimum=0,maximum=64}, extensions={type="array",items={type="string"}},
     context={type="integer",minimum=0,maximum=10,description="Lines of context before and after each match; 0, the default, returns the matches alone."},
-    node = { type = "string", description = "Peer name or node_id (from nodes): search that node's files instead of this one's." }
+    node = { type = "string", description = "Peer name or node_id (from nodes): that node's tree instead of this one's." }
   }, { "pattern" }),
   -- Retrieval returns selected implementation text; relationship and audit actions remain
   -- explicitly separate so their evidence can be evaluated independently.
