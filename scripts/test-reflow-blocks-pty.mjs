@@ -135,7 +135,7 @@ if (!HAVE_TMUX) {
   process.exit(0);
 }
 
-const {SOCKET, tmux} = tmuxSession('wa-reflow-blocks');   // this process's own server, killed on every exit path
+const {tmux} = tmuxSession('wa-reflow-blocks');   // this process's own server, killed on every exit path
 const SESSION = 'reflow';
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 // The scrollbar is drawn in the LAST column of every row, so a blank chat row reads as spaces and a bar.

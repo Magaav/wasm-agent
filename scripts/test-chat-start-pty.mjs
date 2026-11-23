@@ -156,7 +156,7 @@ if (!HAVE_TMUX) {
   process.exit(0);
 }
 
-const {SOCKET, tmux} = tmuxSession('wa-chat-start');   // this process's own server, killed on every exit path
+const {tmux} = tmuxSession('wa-chat-start');   // this process's own server, killed on every exit path
 const SESSION = 'chat-start';
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 function capture() {

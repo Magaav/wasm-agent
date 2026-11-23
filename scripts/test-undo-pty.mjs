@@ -151,7 +151,7 @@ if (!HAVE_TMUX) {
   process.exit(0);
 }
 
-const {SOCKET, tmux} = tmuxSession('wa-undo-pty');   // this process's own server, killed on every exit path
+const {tmux} = tmuxSession('wa-undo-pty');   // this process's own server, killed on every exit path
 const SESSION = 'undo';
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 function capture() {

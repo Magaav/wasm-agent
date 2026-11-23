@@ -154,7 +154,7 @@ const server = http.createServer((req, res) => {
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
 const MODEL_PORT = server.address().port;
 
-const {SOCKET, tmux} = tmuxSession('wa-undo-remote');   // this process's own server, killed on every exit path
+const {tmux} = tmuxSession('wa-undo-remote');   // this process's own server, killed on every exit path
 const SESSION = 'undo-remote';
 function capture() {
   const raw = String(tmux(['capture-pane', '-p', '-t', SESSION]).stdout || '').replace(/\r/g, '');

@@ -165,7 +165,7 @@ if (!HAVE_TMUX) {
   process.exit(0);
 }
 
-const {SOCKET, tmux} = tmuxSession('wa-fence-card');   // this process's own server, killed on every exit path
+const {tmux} = tmuxSession('wa-fence-card');   // this process's own server, killed on every exit path
 const SESSION = 'fence';
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 function capture() {

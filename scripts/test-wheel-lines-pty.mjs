@@ -117,7 +117,7 @@ if (spawnSync('tmux', ['-V'], {encoding: 'utf8'}).status !== 0) {
   process.exit(0);
 }
 
-const {SOCKET, tmux} = tmuxSession('wa-wheel-lines');   // this process's own server, killed on every exit path
+const {tmux} = tmuxSession('wa-wheel-lines');   // this process's own server, killed on every exit path
 const SESSION = 'wheel';
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const capture = () => String(tmux(['capture-pane', '-p', '-t', SESSION]).stdout || '').replace(/\r/g, '').split('\n');

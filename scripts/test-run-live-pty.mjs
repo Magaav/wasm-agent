@@ -185,7 +185,7 @@ if (!HAVE_TMUX) {
   console.log('run live pty: 0 ok, 0 failed (skipped)');
   process.exit(0);
 }
-const {SOCKET, tmux} = tmuxSession('wa-run-live');   // this process's own server, killed on every exit path
+const {tmux} = tmuxSession('wa-run-live');   // this process's own server, killed on every exit path
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 // The scrollbar is drawn in the LAST column of the transcript's rows. One bar means ONE contiguous run
 // of rows that end in it; a split bar is two groups with a plain row between them, which is what the
