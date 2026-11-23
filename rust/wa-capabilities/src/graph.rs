@@ -724,6 +724,36 @@ fn call(entry: &Arc<Entry>, tool: &str, mut arguments: Value, deadline: Instant)
         let removed = if stale.is_dir() {std::fs::remove_dir_all(&stale)} else {std::fs::remove_file(&stale)};
         if removed.is_ok() {eprintln!("graph_db_stale_lock_removed file={file}");}
     }
+    // A COMPONENT RUN KILLED MID-COMMIT LEAVES A HOT JOURNAL, AND THAT IS NOT DAMAGE (measured
+    // 22/11). In `delete` journal mode - which is what the guest's SQLite runs in, whatever
+    // `wa_sqlite::tune` asks for - a commit is a page overwrite before a journal delete, so a kill
+    // between the two leaves a database half the new revision and half the old one. Only the journal
+    // can put it back: a read-only opener cannot roll it back, and the component's admission
+    // pre-flight IS read-only, so the guest answered `database disk image is malformed` for a store
+    // one rollback away from perfect. The scheduler answers that verdict with a quarantine - the
+    // whole index moved aside and rebuilt (three times in 16 minutes across the install of 8862b600,
+    // `graph_db_quarantined ... reason=graph_index_failed:_database_disk_image_is_malformed`, and on
+    // the copy kept from 23/11T000626Z a rollback restored it to `integrity_check: ok` with every one
+    // of its 101,422 nodes still there). The lock above proves no component call is running - the
+    // guest exists only inside one - so the rollback is ours to perform and nobody's to race: one
+    // read-write open, one schema read, and the store is the last committed revision again, with no
+    // copy taken and nothing rebuilt.
+    if let Some(bytes) = hot_journal(&dir, &file) {
+        match roll_back_hot_journal(&dir, &file) {
+            Ok(outcome) => eprintln!("graph_db_journal_resolved root={} file={file} journal_bytes={bytes} outcome={}",
+                entry.root.display(), outcome.name()),
+            Err(error) => eprintln!("graph_db_journal_unresolved root={} file={file} journal_bytes={bytes} error={}",
+                entry.root.display(), error.replace(char::is_whitespace, "_")),
+        }
+    }
+    // Tests drive the scheduling policy with a failing component; the component itself needs the built
+    // wasm binary, which a unit test does not have. The hook sits HERE, after the lock and the journal,
+    // because that is the order the real call has: a test that asks what the component is handed has to
+    // be handed it at the same point, or it measures an order the node does not use.
+    #[cfg(test)]
+    if let Some(replacement) = TEST_CALL.lock().unwrap_or_else(|error| error.into_inner()).as_ref() {
+        return replacement(&entry.root, tool);
+    }
     let remaining = deadline.saturating_duration_since(Instant::now()).as_secs().max(1);
     if !arguments.is_object() {arguments = json!({});}
     let root_text = entry.root.to_string_lossy().into_owned();
@@ -787,6 +817,63 @@ fn lock_store(dir: &Path, file: &str, deadline: Option<Instant>) -> std::io::Res
         }
         if Instant::now() >= deadline {return Ok(None);}
         std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+/// The store's rollback journal, in bytes, when a killed writer left one behind.
+///
+/// A zero-length journal is SQLite's own "nothing to roll back" and is left to SQLite; a store with
+/// no journal beside it has nothing to recover, so every verdict the scheduler makes today stands -
+/// this is the whole of the condition, a hot journal and only that.
+fn hot_journal(dir: &Path, file: &str) -> Option<u64> {
+    let meta = dir.join(format!("{file}-journal")).metadata().ok()?;
+    (meta.is_file() && meta.len() > 0).then_some(meta.len())
+}
+
+/// What happened to a journal that was beside the store.
+#[derive(Debug, PartialEq, Eq)]
+enum Pending {
+    /// SQLite spent the journal and the store read: it rolled the pre-images back (or discarded a file
+    /// it does not recognise as a journal at all - a killed writer writes SQLite's own header, so the
+    /// first is the case that matters). The store is readable and nothing is pending.
+    RolledBack,
+    /// SQLite read the store and left the journal where it was: not a journal to roll back - a writer
+    /// killed between its last journaled page and the commit's record count leaves exactly this. The
+    /// store was readable, so there is nothing to recover and nothing to quarantine.
+    NotPending,
+}
+
+impl Pending {
+    fn name(&self) -> &'static str {
+        match self {
+            Pending::RolledBack => "rolled_back",
+            Pending::NotPending => "not_pending",
+        }
+    }
+}
+
+/// Roll a hot journal back, under the store's lock: a read-write open that cannot create the
+/// database, and one read of the schema - which is the step SQLite performs the rollback in. Nothing
+/// is copied and nothing is rebuilt, and the caller's store is the last committed revision when this
+/// returns Ok.
+///
+/// The distinction between a rollback and an inert journal is reported, not guessed: SQLite spends the
+/// journal (deletes or truncates it) exactly when it rolled it back.
+fn roll_back_hot_journal(dir: &Path, file: &str) -> Result<Pending, String> {
+    let path = dir.join(file);
+    let connection = rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
+        .map_err(|error| error.to_string())?;
+    // The node's one contention policy without the journal-mode half: a rollback that meets another
+    // writer waits its turn instead of answering `database is locked`.
+    let _ = wa_sqlite::tune_wait(&connection);
+    connection.query_row("SELECT COUNT(*) FROM sqlite_master", [], |row| row.get::<_, i64>(0))
+        .map_err(|error| error.to_string())?;
+    drop(connection);
+    // The rollback is only done when the journal is spent: a journal still on the disk means the
+    // store is still rollback-pending, and the line must not claim otherwise.
+    match hot_journal(dir, file) {
+        None => Ok(Pending::RolledBack),
+        Some(_) => Ok(Pending::NotPending),
     }
 }
 
