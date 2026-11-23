@@ -1595,7 +1595,7 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
   -- added to a schema later is accepted here the moment it is declared. A dropped argument used to be a
   -- call that ran as a different call and answered as if it had not; see lua/core/tool_arguments.lua.
   if not tool_arguments then tool_arguments = dofile('lua/core/tool_arguments.lua') end
-  local argument_refusal = tool_arguments.refusal(name, args, M.parameters(name, role))
+  local argument_refusal = tool_arguments.refusal(name, args, M.parameters(name, role), ctx)
   if argument_refusal then return argument_refusal end
   -- Connectors run only inside code mode when this run has it; a direct or routed call is pointed there.
   -- One pathway (operator 14/11): under code mode a tool the MODEL calls directly runs as the one-line
