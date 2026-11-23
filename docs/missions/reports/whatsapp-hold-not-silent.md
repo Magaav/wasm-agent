@@ -157,8 +157,8 @@ still there). No other assertion was loosened, and nothing was skipped.
 
 ## Addendum (Fable's review, 23/11 ~20:30Z): the quote is dropped, the send is not
 
-RISK 2 was resolved on review in the NARROW reading, and it is implemented in `2f349148` (the commit
-that carries this addendum's code): an explicit owner send whose reply source is a DELETED message still goes out, as a
+RISK 2 was resolved on review in the NARROW reading, and it is implemented in `3dbcebd3` (the commit
+that carries this addendum's code; this report line is one commit later so the hash can be exact): an explicit owner send whose reply source is a DELETED message still goes out, as a
 plain message WITHOUT the quote, and the result says so. The reason is the one the reviewer gave: a
 WhatsApp quote carries the original text, so quoting would re-publish what its author deleted, while the
 owner asked to keep deleted content for HIMSELF.
