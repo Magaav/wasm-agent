@@ -891,8 +891,7 @@ function M.amend(args, ctx)
   local code = tonumber(decoded.code) or -1
   local text = tostring(decoded.stdout or "")
   local problems = tostring(decoded.stderr or "")
-  local result = { name = name, exit = code, script = script, file = path, effect = "see output",
-    output = text, errors = problems }
+  local result = { name = name, exit = code, script = script, file = path, output = text, errors = problems }
   if code ~= 0 then
     -- THE SCRIPT'S OWN WORDS, unchained: a refusal and a failed resume are its sentences, and they name what to
     -- fix. The exit code is the script's, so a shell caller reads the same number it would from the script.

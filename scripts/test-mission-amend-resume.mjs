@@ -262,6 +262,7 @@ try {
   const note2File = path.join(WORK, 'note2.txt');
   fs.writeFileSync(note2File, note2 + '\n');
   const before2 = requests.length;
+  const doneBefore2 = doneAt(inflight);
   const a2 = mission('amend', 'inflight', note2File);
   const stamp2 = (a2.stdout.match(/amendment (\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ)/) || [])[1];
   check('a settled factory worker is resumed with the amendment',
@@ -275,8 +276,8 @@ try {
   check('the resumed turn is a real model request, and the amendment is its message',
     String((resumedUser[resumedUser.length - 1] || {}).content || '')
       === `[amendment ${stamp2} from the planner] ${note2}`, JSON.stringify(resumedUser.slice(-2)));
-  await waitFor(() => /rc=0/.test(read(path.join(inflight, 'done'))) && doneAt(inflight) > 0, 'the resumed turn to end');
-  await waitFor(() => /rc=0/.test(read(path.join(inflight, 'done'))), 'the resumed turn rc');
+  await waitFor(() => doneAt(inflight) > doneBefore2 && /rc=0/.test(read(path.join(inflight, 'done'))),
+    'the resumed turn to end with its own rc');
   check("the resumed turn ran to its own rc=0 - the runner found the mission's provider settings in serve.env",
     /rc=0/.test(read(path.join(inflight, 'done'))), read(path.join(inflight, 'done')) + read(path.join(inflight, 'err.log')).slice(-500));
 
@@ -323,6 +324,7 @@ try {
   // ---- 5. `wa mission resume` KEEPS THE PROVIDER SETTINGS -----------------------------------------
   const CLI = (...args) => spawnSync(BIN, args, {cwd: REPO, env: ENV, encoding: 'utf8', timeout: 300000});
   const before5 = requests.length;
+  const doneBefore5 = doneAt(inflight);
   const r5 = CLI('mission', 'resume', 'inflight', '--force', '--msg', 'continue from the CLI');
   let answer5 = {};
   try { answer5 = JSON.parse(r5.stdout); } catch {}
@@ -333,7 +335,8 @@ try {
   check('and that turn really runs: the model request reaches the fixture with the CLI message',
     String((cliTurn[cliTurn.length - 1] || {}).content || '') === 'continue from the CLI',
     JSON.stringify(cliTurn.slice(-2)));
-  await waitFor(() => doneAt(inflight) > 0 && /rc=0/.test(read(path.join(inflight, 'done'))), 'the CLI resumed turn to end');
+  await waitFor(() => doneAt(inflight) > doneBefore5 && /rc=0/.test(read(path.join(inflight, 'done'))),
+    'the CLI resumed turn to end with its own rc');
 
   // ---- 6. `wa mission amend`: THE SAME CODE, THROUGH THE CLI VERB ----------------------------------
   const note6 = 'The CLI door carries the same amendment.';
