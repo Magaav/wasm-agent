@@ -23,10 +23,37 @@
 /// How long the whole opening may take, keys aside. The sketch runs ~6 s on purpose; the CLI may not.
 pub const TOTAL_MS: u64 = 2000;
 
-/// The matrix green, FINAL at xterm 41 (`#00d75f`, Victor 22/11 21:33Z): the star of the welcome line
-/// and the animated first glyph of the run status row both carry it, and the ring's leading edge burns
-/// in it, so the star that lands is the star the header keeps.
-pub const MATRIX: &str = "\x1b[1;38;2;0;215;95m";
+/// The matrix green, xterm 34 (`#00af00`, Victor 23/11: "lets go 34" - the 41 this started at read
+/// too bright). These three numbers are the ONE place this file spells the green: the star of the
+/// welcome line, the ring's leading edge, the rain's trails, the supernova's two faces and the cell
+/// being decoded are all `shade`s of them, so a different green moves every one of them together.
+///
+/// The view paints the same green from its own single source, `PALETTE.matrix` in
+/// `lua/core/cli_view.lua`; this is the constant generated from it, and `scripts/test-opening.lua`
+/// refuses a tree in which the two disagree.
+pub const MATRIX_RGB: [u8; 3] = [0x00, 0xaf, 0x00];
+
+/// The matrix green itself, as the SGR the star is painted in: the star of the welcome line and the
+/// animated first glyph of the run status row both carry it, and the ring's leading edge burns in it,
+/// so the star that lands is the star the header keeps.
+pub fn matrix() -> String { sgr(MATRIX_RGB, true) }
+
+/// One truecolour SGR - bold or not - spelled from a colour's three channels.
+fn sgr(rgb: [u8; 3], bold: bool) -> String {
+    let weight = if bold { "1;" } else { "" };
+    format!("\x1b[{weight}38;2;{};{};{}m", rgb[0], rgb[1], rgb[2])
+}
+
+/// A shade of the matrix green: its channels scaled by `weight` (`1.0` is the green itself, above it
+/// brighter, below it dimmer), then `pale` of the way from there toward white - which is how a shade
+/// reads as the same light rather than as another colour.
+fn shade(weight: f32, pale: f32) -> [u8; 3] {
+    let lift = |channel: u8| -> u8 {
+        let scaled = channel as f32 * weight;
+        (scaled + (255.0 - scaled) * pale).clamp(0.0, 255.0).round() as u8
+    };
+    [lift(MATRIX_RGB[0]), lift(MATRIX_RGB[1]), lift(MATRIX_RGB[2])]
+}
 
 /// The alien alphabet: ONE glyph per ASCII letter, so a word keeps its length and its shape. That is
 /// what makes the rain read as an alphabet rather than as noise, and what lets the title be written in
@@ -75,18 +102,21 @@ const NOVA_FAR: u16 = 8;
 const DIM: u16 = 9;
 const FLICKER: u16 = 10;
 
-fn default_palette() -> [&'static str; 11] {
-    ["\x1b[0m",
-     "\x1b[1;38;2;255;255;255m",   // 1 a rain head: white, bold
-     MATRIX,                        // 2 the star, and the ring's leading edge
-     "\x1b[38;2;0;255;65m",         // 3 the trails, brightest first
-     "\x1b[38;2;0;215;65m",         // 4
-     "\x1b[38;2;0;170;55m",         // 5
-     "\x1b[38;2;0;130;45m",         // 6
-     "\x1b[1;38;2;120;255;170m",   // 7 the supernova's near face
-     "\x1b[38;2;0;200;80m",         // 8 the ring's far arc
-     "\x1b[38;2;0;95;35m",          // 9 the dimmest trail
-     "\x1b[1;38;2;180;255;200m"]    // 10 the cell being decoded
+/// The palette, in entry order. Entry 0 is plain and 1..=10 are the animation's own; every green among
+/// them is a `shade` of `MATRIX_RGB`, so the rain, the flash and the decode are the star's own green at
+/// other weights - and a change of green moves the whole animation with it.
+fn default_palette() -> [String; 11] {
+    ["\x1b[0m".to_string(),
+     sgr([255, 255, 255], true),     // 1 a rain head: white, bold
+     matrix(),                       // 2 the star, and the ring's leading edge: the green itself
+     sgr(shade(1.45, 0.0), false),   // 3 the trails, brightest first: brighter than the green
+     sgr(shade(1.00, 0.0), false),   // 4 the green itself, so the trail passes through the star's colour
+     sgr(shade(0.78, 0.0), false),   // 5
+     sgr(shade(0.59, 0.0), false),   // 6
+     sgr(shade(1.00, 0.62), true),   // 7 the supernova's near face: the green, lifted toward white
+     sgr(shade(0.90, 0.0), false),   // 8 the ring's far arc
+     sgr(shade(0.44, 0.0), false),   // 9 the dimmest trail
+     sgr(shade(1.00, 0.72), true)]   // 10 the cell being decoded: the palest
 }
 
 /// The frames of each act, in order: rain, the star igniting, the supernova, the cloud hanging and
@@ -191,7 +221,7 @@ impl Opening {
     pub fn new(width: usize, height: usize, seed: u64) -> Opening {
         let width = width.max(1);
         let height = height.max(1);
-        let palette: Vec<String> = default_palette().iter().map(|sgr| sgr.to_string()).collect();
+        let palette: Vec<String> = default_palette().into_iter().collect();
         let mut pool: Vec<char> = ALIEN.to_vec();
         pool.extend('0'..='9');
         // Half-width katakana: one column each (measured - East Asian Width `H`, and every one of them
@@ -675,7 +705,7 @@ mod tests {
 
     fn header() -> Vec<String> {
         vec![format!("\x1b[38;2;136;136;136m{}\x1b[0m", "\u{2500}".repeat(40)),
-            format!("{}\u{273b}\x1b[0m Welcome to \x1b[1mwasm-agent\x1b[0m!\x1b[38;2;153;153;153m v0.1.0 \u{b7} v23791f56\x1b[0m", MATRIX),
+            format!("{}\u{273b}\x1b[0m Welcome to \x1b[1mwasm-agent\x1b[0m!\x1b[38;2;153;153;153m v0.1.0 \u{b7} v23791f56\x1b[0m", matrix()),
             String::new(),
             "\x1b[38;2;153;153;153m/help for help, /login to sign in to a provider\x1b[0m".to_string(),
             String::new(),
@@ -686,6 +716,25 @@ mod tests {
         let mut frames = 0;
         while opening.step().is_some() { frames += 1; }
         frames
+    }
+
+    #[test]
+    fn the_rain_is_the_stars_green_at_other_weights() {
+        let palette = default_palette();
+        assert_eq!(palette[STAR as usize], matrix(), "the star is the matrix green itself");
+        assert_eq!(shade(1.0, 0.0), MATRIX_RGB, "a shade of one IS the green: everything else is scaled from it");
+        // Entry by entry the palette's greens are `shade`s of that one base, so a green spelled as a string
+        // again - the 0;255;65 the xterm-41 ramp carried - cannot sit in this palette.
+        let ramp = [(TRAIL[0], 1.45, 0.0, false), (TRAIL[1], 1.00, 0.0, false), (TRAIL[2], 0.78, 0.0, false),
+            (TRAIL[3], 0.59, 0.0, false), (NOVA_NEAR, 1.00, 0.62, true), (NOVA_FAR, 0.90, 0.0, false),
+            (DIM, 0.44, 0.0, false), (FLICKER, 1.00, 0.72, true)];
+        for (index, weight, pale, bold) in ramp {
+            assert_eq!(palette[index as usize], sgr(shade(weight, pale), bold), "entry {index} is a shade of the green");
+        }
+        // And the ramp still descends, so the rain reads as depth rather than as one flat green.
+        let green = |weight: f32| shade(weight, 0.0)[1];
+        assert!(green(1.45) > green(1.00) && green(1.00) > green(0.90) && green(0.90) > green(0.78)
+            && green(0.78) > green(0.59) && green(0.59) > green(0.44), "brighter first, dimmer last");
     }
 
     #[test]
@@ -825,7 +874,7 @@ mod tests {
         assert_eq!(screen[0], "\u{2500}".repeat(40), "the rule, at its own width");
         assert!(screen[1].starts_with("\u{273b} Welcome to wasm-agent! v0.1.0 \u{b7} v23791f56"),
             "the title is translated back: {:?}", screen[1]);
-        assert_eq!(opening.sgr_at(1, 0), MATRIX, "and its star is the matrix green");
+        assert_eq!(opening.sgr_at(1, 0), matrix(), "and its star is the matrix green");
         assert!(screen[3].starts_with("/help for help"), "the rest of the block follows: {:?}", screen[3]);
         assert!(screen[5].starts_with("cwd: "), "line by line: {:?}", screen[5]);
     }
@@ -870,7 +919,7 @@ mod tests {
         // capped at DECODE_FRAMES beats whatever the title's length.
         let mut opening = Opening::new(120, 40, 9);
         let mut long = header();
-        long[1] = format!("{MATRIX}\u{273b}\x1b[0m Welcome to wasm-agent! v0.1.0 \u{b7} v1.2.3-rc.1234+abcdef0123456789");
+        long[1] = format!("{}\u{273b}\x1b[0m Welcome to wasm-agent! v0.1.0 \u{b7} v1.2.3-rc.1234+abcdef0123456789", matrix());
         for _ in 0..3 { long.push("\x1b[38;2;255;193;7m! unfinished a run was cut off\x1b[0m".to_string()); }
         opening.header(&long);
         assert!(opening.planned_ms() <= TOTAL_MS, "{} ms", opening.planned_ms());

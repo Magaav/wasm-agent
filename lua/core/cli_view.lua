@@ -101,7 +101,12 @@ local PALETTE = {
   -- The matrix green (Victor, 22/11: the star of the welcome line and the animated first glyph of the
   -- run status row). Its OWN entry, so those two turn green without moving `accent`, which keeps
   -- painting the spinner's trail, the prompt mark and every other thing that was warm.
-  matrix = "00d75f",
+  -- xterm 34, `#00af00` since 23/11 (Victor: "lets go 34", chosen from the 30 greens in
+  -- scratch/wa-greens.py; the 41 this started at read too bright). THIS is the one source of the
+  -- colour: the opening (rust/wa-term/src/opening.rs) builds its star, its rain and its supernova
+  -- from a Rust constant generated from this value, and scripts/test-opening.lua refuses a tree in
+  -- which the two disagree.
+  matrix = "00af00",
 }
 
 -- A role is a 24-bit colour (`rrggbb`), or `ansi:<n>` for one of the terminal's own palette slots,
