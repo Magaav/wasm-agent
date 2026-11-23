@@ -29,8 +29,16 @@ const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const BIN = process.env.WA_BIN || 'wa';
 // os.tmpdir() on this node is ${WASM_AGENT_HOME}/tmp - INSIDE the operator's own node home - so the scratch
 // directory is made under /tmp and the guard below refuses anything that lands in either real home.
-const SCRATCH_BASE = fs.existsSync('/tmp') ? '/tmp' : os.tmpdir();
+// THE RUNNER'S OWN ROOT FIRST, never a literal /tmp (item 2 of the tests-clean-their-tmp round, 23/11:
+// measured, each FAILING run of this row left a /tmp/wa-mission-amend-* directory behind, in a 16 G tmpfs
+// that filled up three times in one day). GATE_ROOT/WA_TEST_ROOT/TMPDIR are inside the directory
+// scripts/fast.sh makes for the run and deletes at the end.
+const SCRATCH_BASE = process.env.WA_TEST_ROOT || process.env.GATE_ROOT || process.env.TMPDIR || os.tmpdir();
 const WORK = fs.mkdtempSync(path.join(SCRATCH_BASE, 'wa-mission-amend-'));
+// A FAILING ROW KEEPS ITS SCRATCH ONLY WHERE THE RUNNER WILL COLLECT IT (GATE_ROOT: fast.sh copies a
+// "kept for diagnosis" tree out before it deletes its work dir) or when the operator asked to keep it.
+const KEEP_FAILED = process.env.WA_TEST_KEEP_SCRATCH === '1' ||
+  (!!process.env.GATE_ROOT && WORK.startsWith(process.env.GATE_ROOT + path.sep));
 const HOME = path.join(WORK, 'home');
 // The store root is <home>/.wasm-agent (rust/wa-host-support/src/paths.rs: state_root), and WASM_AGENT_HOME
 // replaces the home - measured here: WASM_AGENT_HOME=<dir> puts the ledger in <dir>/.wasm-agent/memory.db, and
@@ -429,12 +437,12 @@ try {
   console.log(`mission amend: ${passed} checks passed`);
 } catch (error) {
   console.error(`mission amend: FAILED after ${passed} checks: ${error.message}`);
-  console.error(`fixture kept for diagnosis: ${WORK}`);
   console.error(`--- mission out.log (last 40 lines)\n${ready('out.log').split('\n').slice(-40).join('\n')}`);
   console.error(`--- mission err.log (last 20 lines)\n${ready('err.log').split('\n').slice(-20).join('\n')}`);
   process.exitCode = 1;
 } finally {
   server.close();
   killOwn();
-  if (!process.exitCode) fs.rmSync(WORK, {recursive: true, force: true});
+  if (process.exitCode && KEEP_FAILED) console.error('fixture kept for diagnosis: ' + WORK);
+  else fs.rmSync(WORK, {recursive: true, force: true});
 }

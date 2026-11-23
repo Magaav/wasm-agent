@@ -72,7 +72,10 @@ check(final.role == "assistant" and final.ok == 1, "the answer is recorded ok")
 check((memory.session_state(sid) or {}).state == "answered", "the thread is settled")
 
 -- 2. A cut while a tool call was forming: the call is never executed, the notice says so.
-local marker = "/tmp/wa-stream-cut-marker-" .. tostring(math.random(1e9))
+-- The marker lives in the temp dir this row was given, never in a literal /tmp: on 23/11 /tmp held 4,721
+-- test scratch entries and a stale marker another run left there would make the "nothing executed" check
+-- below pass for the wrong reason (scripts/lib/tmp-floor.sh).
+local marker = (os.getenv("TMPDIR") or os.getenv("GATE_ROOT") or ".") .. "/wa-stream-cut-marker-" .. tostring(math.random(1e9))
 bodies, script = {
 }, {
   { status = 200, content = "", stream_complete = false, tool_calls = { { id = "c1", type = "function",

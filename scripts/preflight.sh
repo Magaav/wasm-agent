@@ -46,6 +46,8 @@ if [ ! -d "$M" ]; then
   echo "preflight: refused(no_mission): $M is not a directory"
   exit 2
 fi
+# temp-retention: preflight mints no temp family. It asks the floor about /tmp and about TMPDIR; the trees
+# it causes are the landing own, under <config>/land, and this file never creates one.
 # THE TEMP FLOOR, ASKED BEFORE THE GATE IS PAID FOR (item 4 of the tests-clean-their-tmp round, 23/11).
 #
 # A preflight costs a full gate; a gate on a machine whose temp filesystem is full dies somewhere inside a row

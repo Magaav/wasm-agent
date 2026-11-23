@@ -29,6 +29,10 @@
 # The floor is a measurement, not a round number: WA_TMP_MIN_FREE_MB (default 2048) is what one run's
 # leaked scratch cost on this node - 4,721 entries on a 16 G tmpfs at the peak measured on 23/11 - and a
 # caller that knows its own bill (scripts/check-disk-floor.sh's 3.98 GB for a full gate) may name it.
+# temp-retention: nothing here mints a temp family. This file MEASURES the temp filesystems and reports
+# tmp_low, so a name beside a temp root in it is a directory being asked about, not one being kept - the
+# marker is here because scripts/check-temp-retention.mjs reads a temp root within 50 characters of a name
+# as a mint (measured on this file: it was named as an offender the first time it was committed).
 wa_tmp_floor_check() { # [<dir>...] -> 0 room, 1 low, 2 unmeasurable; prints one line when not 0
   local need_mb="${WA_TMP_MIN_FREE_MB:-2048}"
   case "$need_mb" in

@@ -11,16 +11,43 @@
 local changeset = dofile("lua/core/changeset.lua")
 
 local checks = 0
+-- FORWARD DECLARATION: ok() below removes the scratch dir before it raises, and the root (and the
+-- function that removes it) is only defined once the file has read its environment. A local function
+-- declared later is invisible here - measured: the failing row reported "attempt to call a nil value
+-- (global cleanup)" and left its scratch dir behind, which is exactly the failure this change stops.
+local scratch_root, root   -- forward: the root is only known once the environment below is read
+local cleanup
 local function ok(condition, label, detail)
   checks = checks + 1
-  if not condition then error(label .. (detail and (" - " .. tostring(detail)) or "")) end
+  if not condition then cleanup(true); error(label .. (detail and (" - " .. tostring(detail)) or "")) end
 end
 
 local function write(path, text)
   ok(host.write_file(path, text), "the test can write " .. path)
 end
 
-local root = (os.getenv("WASM_AGENT_TEST_DIR") or "/tmp") .. "/wa-changeset-" .. tostring(host.now())
+-- THE SCRATCH ROOT IS THE ONE THIS ROW WAS GIVEN, never a literal /tmp (measured 23/11 on avell: this
+-- line left one /tmp/wa-changeset-<epoch> directory per run and 70 of them were on disk when the round
+-- started, in a 16 G tmpfs that filled up three times in one day - see scripts/lib/tmp-floor.sh). GATE_ROOT
+-- and TMPDIR are inside the runner's own work directory (scripts/fast.sh), so what the row makes there dies
+-- with the run; a hand run with neither set falls back to the current directory, never to /tmp.
+scratch_root = os.getenv("WASM_AGENT_TEST_DIR") or os.getenv("GATE_ROOT") or os.getenv("TMPDIR") or "."
+root = scratch_root .. "/wa-changeset-" .. tostring(host.now())
+-- AND IT IS REMOVED ON EXIT, PASS OR FAIL. host has no remove_file, so the removal is the shell's through
+-- host.exec; both failure paths in this file (ok(), and the trailing asserts) go through cleanup(). A root
+-- inside GATE_ROOT is left for the runner's evidence keeper when the row FAILS: fast.sh copies a "kept for
+-- diagnosis" directory out before it deletes its own work dir, so the evidence survives and nothing is
+-- left behind.
+function cleanup(keep)
+  if not root then return end
+  local inside_run = os.getenv("GATE_ROOT") ~= nil and scratch_root == os.getenv("GATE_ROOT")
+  if keep and inside_run then
+    print("fixture kept for diagnosis: " .. root)
+  elseif host.exec then
+    pcall(host.exec, "rm -rf " .. ("%q"):format(root), "", 30)
+  end
+  root = nil
+end
 local one = root .. "/one.txt"
 local two = root .. "/two.txt"
 
@@ -131,9 +158,9 @@ do
   local entry = changeset.new and changeset.new() or { files = {} }
   changeset.record(entry, "/tmp/wa-binary-target", false, "replacement")
   local file = entry.files[1]
-  assert(file and file.recorded == false, "an uncapturable before is not undoable")
+  ok(file and file.recorded == false, "an uncapturable before is not undoable")
   local can, why = changeset.check(entry)
-  assert(not can and tostring(why):find("too_large_to_undo"), "and undo refuses it: " .. tostring(why))
+  ok(not can and tostring(why):find("too_large_to_undo"), "and undo refuses it: " .. tostring(why))
 end
 -- A blob whose bytes no longer hash to its name is refused, not restored.
 do
@@ -141,8 +168,9 @@ do
   local paths = dofile("lua/core/paths.lua")
   host.write_file(paths.data() .. "/changes/" .. digest:sub(1, 2) .. "/" .. digest, "torn")
   local text, why = changeset.load(digest)
-  assert(text == nil and why == "blob_corrupt", "a torn blob is reported: " .. tostring(why))
-  assert(changeset.store("blob integrity text") == digest and changeset.load(digest) == "blob integrity text",
+  ok(text == nil and why == "blob_corrupt", "a torn blob is reported: " .. tostring(why))
+  ok(changeset.store("blob integrity text") == digest and changeset.load(digest) == "blob integrity text",
     "and storing the text again repairs it")
 end
+cleanup(false)
 print("changeset integrity ok")

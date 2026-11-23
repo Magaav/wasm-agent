@@ -67,17 +67,6 @@ while [ "$#" -gt 0 ]; do
     *) echo "fast: unknown option $1" >&2; exit 2 ;;
   esac
 done
-if [ -z "$jobs" ]; then
-  jobs=$(nproc 2>/dev/null || echo 4)
-  # The fork ceiling is per machine, not per process: the cap leaves room for the sessions this node is
-  # running for, and a row that hits the wall is retried serially below instead of reporting a code
-  # failure nobody can fix.
-  case "$(uname -s 2>/dev/null)" in
-    MINGW*|MSYS*|CYGWIN*) cap=4 ;;
-    *) cap=8 ;;
-  esac
-  [ "$jobs" -gt "$cap" ] 2>/dev/null && jobs=$cap
-fi
 # THE TEMP FLOOR COMES FIRST (item 4 of the tests-clean-their-tmp round, 23/11).
 #
 # /tmp on this node is a 16 G tmpfs with a per-user quota, and it ran out three times in one day; each time a
@@ -96,6 +85,18 @@ if ! tmp_note=$(wa_tmp_floor_check /tmp "${TMPDIR:-}"); then
   esac
   echo "fast: refused(${tmp_code:-tmp_low}): $tmp_note. Nothing was run: a red caused by a full disk is a fact about the machine and never about this tree." >&2
   exit 2
+fi
+
+if [ -z "$jobs" ]; then
+  jobs=$(nproc 2>/dev/null || echo 4)
+  # The fork ceiling is per machine, not per process: the cap leaves room for the sessions this node is
+  # running for, and a row that hits the wall is retried serially below instead of reporting a code
+  # failure nobody can fix.
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*) cap=4 ;;
+    *) cap=8 ;;
+  esac
+  [ "$jobs" -gt "$cap" ] 2>/dev/null && jobs=$cap
 fi
 . "$ROOT/scripts/lib/fast-environment.sh"
 # THE NODE'S OWN RECORD OF ITS BUILD ENVIRONMENT (items 3 and 6 of the node-ops round). One file -
@@ -1085,6 +1086,14 @@ check fast-reclaim-race bash scripts/test-fast-reclaim-race.sh
 # The rule those guards rest on, judged: WASM_AGENT_HOME is the USER home, so the operator home, its
 # store, anything inside it and anything above it are refused (item 4 of the node-ops round).
 check scratch-home bash scripts/test-scratch-home.sh
+# A ROW MUST NOT LEAVE ITS SCRATCH IN /tmp (tests-clean-their-tmp, 23/11). Measured on this node, one row at
+# a time with /tmp diffed afterwards: scripts/test-changeset.lua left a directory there on EVERY run (70 on
+# disk when the round started), scripts/test-agent-control-e2e.cjs one per run even when green, and the two
+# mission-amend rows one per failing run. The check is a test: the static half fails a scripts/test-* file
+# that roots a temp family at the literal /tmp, the dynamic half RUNS two of the fixed rows with a TMPDIR of
+# their own and requires it empty afterwards, and the third half requires main-health, preflight and this
+# runner to refuse a machine with no room by name (tmp_low). 0.6 s measured.
+WA_BIN="$bin" check tmp-cleanliness node scripts/test-tmp-cleanliness.mjs
 # A probe child never probes again, across module instances and across a fresh Lua state: two real
 # dofiles, the unmarked one fans out, the marked one starts nothing, and a joiner gets the ANSWER
 # (test-nodes-probe-instances.lua; the 19/11 recursion and the 554-process crowd).

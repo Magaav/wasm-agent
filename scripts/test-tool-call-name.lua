@@ -115,7 +115,10 @@ end
 local session_id = memory.ensure_session("tool-call-name", "local", "a call with no name")
 local agent = agentlib.new(session_id, function() end, "master", "tool-call-name", "local")
 agent.stream = true
-local marker = "/tmp/wa-tool-call-name-marker-" .. tostring(math.random(1e9))
+-- The marker lives in the temp dir this row was given, never in a literal /tmp: on 23/11 /tmp held 4,721
+-- test scratch entries and a stale marker another run left there would make the "nothing executed" check
+-- below pass for the wrong reason (scripts/lib/tmp-floor.sh).
+local marker = (os.getenv("TMPDIR") or os.getenv("GATE_ROOT") or ".") .. "/wa-tool-call-name-marker-" .. tostring(math.random(1e9))
 
 bodies, script = {}, {
   -- A call whose name did not arrive and whose arguments identify NOTHING: no tool declares a
