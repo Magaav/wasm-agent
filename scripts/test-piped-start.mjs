@@ -133,13 +133,15 @@ function oneRun() {
     let out = '';
     let stderr = '';
     let done = false;
+    // The child is killed and the answer returned at once: waiting for its own 'exit' would hang the whole
+    // test on the one run whose kill raced the event (and a promise nobody resolves exits green with no
+    // verdict - the one failure mode a test must not have). Node reaps the child on its own.
     const finish = (result) => {
       if (done) return;
       done = true;
       clearTimeout(timer);
       try { child.kill('SIGKILL'); } catch {}
-      child.once('exit', () => resolve(result));
-      setTimeout(() => resolve(result), 2000).unref();
+      resolve(result);
     };
     const timer = setTimeout(() => finish({ms: -1, line: '', rchar: null, stderr: stderr + '\n(no first line within 30 s)'}), 30000);
     child.stderr.on('data', chunk => { stderr += chunk.toString(); }
