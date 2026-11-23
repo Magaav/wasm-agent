@@ -105,13 +105,34 @@ fn disk(path: &Path) -> Option<(u64, u64)> {
 // rebuild and names an unmeasurable one separately, which it could not do if this returned 0 or a guess.
 pub fn free_space(path: &Path) -> Option<(u64, u64)> { disk(path) }
 
-pub fn sample() -> Value {
+pub fn sample() -> Value { sample_with(true) }
+
+/// `sample()` WITHOUT the CPU delta, for a caller that shows a number rather than deciding on one.
+///
+/// `cpu_percent()` costs a DELIBERATE `thread::sleep(120 ms)` between two `/proc/stat` reads - a delta
+/// needs two moments, and no cheaper window is honest. Every roster read sampled it
+/// (lua/core/nodes.lua, the local entry of `M.list`, which `M.find` runs for every remote call), so one
+/// peer call paid 120 ms for a display field it never read: measured 23/11, 120.3 ms of a ~460 ms round
+/// trip. This variant reports the same memory, disk and core counts and says, in the answer itself, that
+/// the CPU figure was NOT measured - `used_percent` is null and `cpu.unmeasured` says why, because an
+/// absent number must never read as an idle machine.
+pub fn sample_quick() -> Value { sample_with(false) }
+
+fn sample_with(cpu_delta: bool) -> Value {
     let memory = memory();
     let disk = std::env::current_dir().ok().and_then(|path| disk(&path));
+    let cpu = if cpu_delta {
+        json!({ "used_percent": cpu_percent(), "logical_cores": std::thread::available_parallelism().ok().map(|value| value.get()) })
+    } else {
+        json!({ "used_percent": Value::Null,
+            "logical_cores": std::thread::available_parallelism().ok().map(|value| value.get()),
+            "unmeasured": "no CPU delta was taken: it costs a 120 ms window between two samples, and this caller only displays the sample" })
+    };
     json!({
         "sampled_at": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
             .map(|duration| duration.as_secs()).unwrap_or(0),
-        "cpu": { "used_percent": cpu_percent(), "logical_cores": std::thread::available_parallelism().ok().map(|value| value.get()) },
+        "quick": !cpu_delta,
+        "cpu": cpu,
         "memory": memory.map(|(available, total)| json!({
             "available_bytes": available, "total_bytes": total,
             "used_percent": percent(total.saturating_sub(available), total),

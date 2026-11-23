@@ -3609,8 +3609,21 @@ pub extern "C-unwind" fn runtime_info(l: *mut LuaState) -> c_int {
 
     /// Returns JSON text of the sample; A string the caller decodes (`lua/vendor/json.lua`), never a Lua table.
 /// host.system_resources() -> a fresh CPU, memory and workspace-filesystem sample.
+///
+/// `host.system_resources('{"quick":true}')` samples the same memory, disk and core counts and SKIPS the
+/// CPU delta, which costs a deliberate 120 ms window (wa-host-support, `sample_quick`). The roster's local
+/// entry asks for the quick one (lua/core/nodes.lua): it is a display row, and a caller that decides
+/// something on the CPU figure (the rendezvous heartbeat) still asks for the full one by passing nothing.
 pub extern "C-unwind" fn system_resources(l: *mut LuaState) -> c_int {
-    push_json(l, &wa_host_support::system_resources::sample());
+    let quick = arg_string(l, 1)
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .map(|value| value["quick"] == serde_json::json!(true))
+        .unwrap_or(false);
+    push_json(l, &if quick {
+        wa_host_support::system_resources::sample_quick()
+    } else {
+        wa_host_support::system_resources::sample()
+    });
     1
 }
 

@@ -749,7 +749,15 @@ function M.list(opts)
       -- handed off, and it is not.
       worktree = M.is_master() and M.worktree() or "",
       endpoints = {},
-      resources = (host.system_resources and json.decode(host.system_resources())) or nil,
+      -- THE QUICK SAMPLE, AND WHY (23/11). The full sample measures CPU over a DELIBERATE 120 ms window
+      -- between two /proc/stat reads (wa-host-support, cpu_percent); this row is a display fact, and
+      -- `M.find` builds it for EVERY remote call - measured: 120.3 ms of a ~460 ms peer call, spent on a
+      -- number this path never reads. The quick sample answers the same memory, disk and core counts and
+      -- says in the answer that the CPU figure was not measured (`cpu.used_percent` null,
+      -- `cpu.unmeasured` naming the reason), so an absent number is never read as an idle machine. A
+      -- caller that DECIDES on the CPU figure (the rendezvous heartbeat) still calls host.system_resources()
+      -- with no argument and gets the full sample.
+      resources = (host.system_resources and json.decode(host.system_resources('{"quick":true}'))) or nil,
       -- A guest's own capabilities are read-only. It edits files when a master asks, through
       -- /node/call, which runs as that master - not on its own initiative. So the write tools
       -- are absent here rather than merely discouraged.
