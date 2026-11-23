@@ -71,9 +71,19 @@ r=call('remote',{node=me})
 check(r.error=='remote_capability_required','missing capability named')
 
 -- 4. End to end through tool_call, with the evidence's exact mis-nested shape (local node).
+-- A mis-nested call whose capability declares its OWN `node` is now REFUSED AS AMBIGUOUS instead of being
+-- guessed at: `read`/`grep`/`write`/`edit`/`ls` took a `node` argument of their own (mission
+-- tool-args-honest-and-same-on-peers, item 7), so `{args:{node,capability,path}}` can mean the remote node or
+-- the file tool's node, and the refusal names both readings and where to put the remote one. The hoist itself
+-- is unchanged for a capability that has no `node` of its own - the case below, and the one the evidence in
+-- this file's header came from.
 local raw='{"arguments":{"args":{"path":'..json.encode(file)..',"capability":"read","node":'..json.encode(me)..'}},"name":"remote"}'
 r=call('tool_call',json.decode(raw),raw)
-check(r.content=='remote-ok\n','mis-nested remote call now succeeds via hoisting')
+check(r.error=='remote_node_ambiguous','a mis-nested call whose capability has its own node is refused as ambiguous: '..json.encode(r):sub(1,240))
+check(type(r.note)=='string' and r.note:find('put the remote',1,true),'and the refusal says where to put it: '..tostring(r.note))
+raw='{"arguments":{"args":{"capability":"bash","node":'..json.encode(me)..',"command":"printf hoisted"}},"name":"remote"}'
+r=call('tool_call',json.decode(raw),raw)
+check(json.encode(r):find('hoisted',1,true)~=nil,'a mis-nested call with no ambiguity still hoists and runs: '..json.encode(r):sub(1,240))
 check(type(r.normalized)=='string' and r.normalized:find('node from args',1,true),'the repair is reported to the model')
 raw='{"name":"remote","arguments":{"node":'..json.encode(me)..',"capability":"read","path":'..json.encode(file)..'}}'
 r=call('tool_call',json.decode(raw),raw)

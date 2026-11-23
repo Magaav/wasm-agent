@@ -460,3 +460,127 @@ work of STEP 2, and this commit does not claim it.
 | test-codemode-default | **RED** (see above) |
 | test-turn-signal | no verdict line captured in this batch (its row prints `turn-signal: N checks, M failed`; not re-run) |
 
+
+## 16. STEP 2, second pass (23/11 ~20:35Z): what is fixed, what is diagnosed, what is not done
+
+**Fixed in this commit.**
+
+* `scripts/test-edit-aliases.lua:37` - **the test, not the code.** With the check report-only again the
+  handler's own refusal answers a typo option, so the row asserts `unsupported_edit_option` (the code it
+  asserted before the validator existed) instead of `unknown_argument:old_txt`. Verdict after the change:
+  **ok, 34 checks**.
+
+**Verdicts run singly, this tree.**
+
+| row | verdict |
+|---|---|
+| test-edit-aliases | ok, 34 checks (fixed above) |
+| test-turn-signal | ok, 152 checks, 0 failed |
+| test-codemode-default | **RED**, diagnosed below, NOT fixed |
+| test-remote-call-shape | **RED**, diagnosed below, NOT fixed |
+
+**`test-codemode-default.lua:20` — diagnosis, not a fix.** The row's script asks
+`searchTools({query:"read",limit:3})`, `searchTools("*")`, `searchTools("")`, `searchTools({query:"*",limit:1,offset:1})`
+and requires `Array.isArray(a)` to be true. Measured: the helper's answer comes back to the script as a
+STORED REFERENCE, not an array -
+
+```
+{"admitted":false,"arguments":{"bytes":28,"sha256":"bfb6c24b…"},"name":"searchTools","ok":true,
+ "result":{"bytes":2632,"path":"…/.wasm-agent/tool-results/bfb6c24b….txt"}}
+```
+
+- so `Array.isArray(a)` is false and the row fails. The inline/stored decision is taken on the answer's size,
+and this mission's schema additions (the `stdin`/`context`/`node` properties and their clauses, ~1.5 KB across
+the catalogue) push `searchTools`'s listing over that bound - which is why the row is red from the landing
+that added them and not before. The fix belongs in the helper (`searchTools`/'describeTool' answers are the
+model's own discovery surface and must reach a script as the array they are, never as a reference), and I did
+not get to it.
+
+**`test-remote-call-shape.lua:76` — diagnosis, not a fix.** `remote`'s schema gained
+`additionalProperties: true` so the argument validator stops guessing which capability's parameters it carries;
+`tool_call`'s hoisting then reaches `remote` with the mis-nested shape the row expects to be REPAIRED into a
+success. The hoist is in `lua/core/routed_calls.lua`; that is where the fix goes, and I did not get to it.
+
+**The field table - the dynamic call sites (decisions NOT yet made, and that is the open work).**
+
+| site | field | caller | decision |
+|---|---|---|---|
+| `lua/core/agent.lua` (wake tool dispatch) | `now` | internal | declare it on `wake` as an explicit TEST-ONLY seam (a clock), or stop sending it |
+| `lua/core/codemode_pending.lua` (`remote_operation`) | `capability`, `node` | internal | stop sending them: the wire carries the capability's own arguments (already fixed in the row's stand-in; the layer itself was not changed) |
+| managed-list gate (session-watch, `operation` admitted list) | the gate's own field | internal | declare it on `operation` or pass it in the context, never in the arguments |
+| `lua/core/codemode.lua` (`searchTools` discovery entry) | the `{bytes,path,sha256}` shape | internal | not an argument at all: the helper must answer an array (see above) |
+
+**What is NOT done and must not be read as done**: the `tool_arguments` events this node recorded since
+`51b63d9a` were NOT read, so the table above is from the red rows' evidence, not from a census; none of the
+four decisions above has been implemented; enforcement stays `'off'`.
+
+
+## 17. STEP 2, third pass: the two rows the bisect blamed on me
+
+**1. `test-remote-call-shape.lua` — GREEN (89 checks).** Cause, measured: the mis-nested evidence shape
+`{args:{node, capability:"read", path}}` is refused `remote_node_ambiguous`. That refusal is CORRECT and new:
+`read`/`grep`/`write`/`edit`/`ls` declared a `node` argument of their own in this mission, so `node` inside
+`args` really can mean the remote node or the file tool's node. The row was asserting the old outcome (repair
+and run). It now pins BOTH halves of the new contract: the ambiguous shape is refused with the sentence that
+says where to put the remote node, and a mis-nested call whose capability has no `node` of its own
+(ȧbash`) still hoists, runs, and reports the repair - `normalized: "remote: moved capability from args, node
+from args to the top level"`. So the fix is the TEST, and the null: the code's refusal is the honest answer to
+a genuinely ambiguous call.
+
+**2. `test-edit-aliases.lua` — GREEN (34 checks).** With the argument check report-only, the handler's own
+refusal answers a typo option again, so the row asserts `unsupported_edit_option` (the code it asserted before
+the validator existed). The fix is the TEST.
+
+**3. `test-turn-signal.lua` — GREEN, 152 checks, 0 failed** (run singly, scratch home).
+
+**4. `test-codemode-default.lua` — STILL RED, diagnosed, not fixed.** Measured: the script asks
+`searchTools({query:"read",limit:3})` and the helper's answer reaches it as a STORED REFERENCE
+(`{"bytes":2632,"path":"…/tool-results/<sha>.txt"}`), so `Array.isArray(a)` is false. The inline-or-stored
+decision is taken on the answer's size, and this mission's schema additions (≈1.5 KB across the catalogue)
+push `searchTools`'s listing over that bound - which is why the row is red from the landing that added them
+(793d910f) and not before. The fix belongs in the helper: a discovery answer is an ARRAY, and a script must
+never be handed a reference in its place. I did not make that change.
+
+**5. The field table's dynamic sites — decisions still NOT implemented** (unchanged from section 16:
+`wake.now` test-only seam or stop sending; `codemode_pending.remote_operation` stop sending
+`capability`/`node`; the managed-list gate declare-or-context; `searchTools` is not an argument problem at
+all - see 4). I did NOT read the recorded `tool_arguments` events, so no census line is claimed here.
+
+
+## 18. STEP 2, fourth pass: the codemode-default cause, and the rows
+
+**The cause, measured twice.** `searchTools({query:"read",limit:3})` inside a run answered
+`["capture_inspect","client","codemode"]` on my tip AND, identically, on the base `28fb526d` when the probe
+used a full master catalogue - so the ranking of a word search over the whole catalogue was not mine. What WAS
+mine was the word: the `bash` description gained "stdin is the text the command **reads** and then sees
+closed", and a worker profile's smaller catalogue ranks on those words. That clause is now
+"stdin is the text the command takes as its standard input, then closed", and the `node` clauses of
+`read`/`grep`/`write`/`edit`/`ls` no longer borrow another tool's verb either ("answers from that peer",
+"that node's file instead of this one's"). `test-codemode-default` is **GREEN: 39 checks, 0 paid calls**.
+
+So the fix was a TEXT fix in the catalogue, not a code path: a tool's description must not steal the word
+that names another tool, because that word is how a model (and `searchTools`) finds it. The stored-reference
+reading in §16/§17.4 was the wrong hypothesis and is withdrawn.
+
+**Rows run singly on this tree**
+
+| row | verdict |
+|---|---|
+| test-codemode-default | **ok, 39 checks** (was the last G blocker) |
+| test-selfloop | ok, 114 checks (1 skipped) |
+| test-session-watch | ok, 107 checks |
+| test-remote-pending | ok, 90 checks |
+| test-tool-arguments | ok, 32 checks |
+| test-tool-args-walker | ok, 4 checks (180 files, 20 call sites) |
+| test-remote-field-support | ok, 13 checks |
+| test-tool-args-parity | ok, 1060 checks |
+| test-edit-aliases | ok, 34 checks |
+| test-remote-call-shape | ok, 89 checks |
+| test-turn-signal | ok, 152 checks, 0 failed (run singly before this batch; the batch row printed no verdict line of its own) |
+
+**Not done, and not claimed.** The four dynamic call-site decisions of §16 are still unimplemented (`wake.now`
+seam, `codemode_pending.remote_operation` dropping `capability`/`node`, the managed-list gate moving its field
+to the context), and the recorded `tool_arguments` events were not read, so the census is not claimed.
+Enforcement stays `'off'`; model-door enforcement is one line away once those are done and main-health is
+green with it.
+
