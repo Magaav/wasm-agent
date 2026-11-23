@@ -47,7 +47,7 @@ M.UNKNOWN = "unknown build"
 --     release (`M.tree_version` / `M.next_version`, lua/core/land.lua);
 --   * `M.product_version()` below is the surface reader: the BINARY's answer first (an installed node has no
 --     tree), this constant when the binary is older than the field.
-M.PRODUCT_VERSION = "0.1.1"
+M.PRODUCT_VERSION = "0.1.2"
 
 local function decode(raw)
   if type(raw) ~= "string" or raw == "" then return nil end
