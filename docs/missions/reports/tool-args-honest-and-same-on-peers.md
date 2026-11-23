@@ -336,3 +336,63 @@ call's own arguments unchanged — 1060 checks in that row, green.
 
 (§11's table above was measured before this fix; §13 supersedes its "open blocker" line.)
 
+
+## 14. STEP 1 (23/11 ~20:05Z): the check is REPORT-ONLY on main
+
+The refusal was too sharp for the tree it landed in: real call sites send fields their own schemas never
+declared (the pending path's `operation`, the `wake` tool's `now`, the managed-list gate, `searchTools`), so
+main went red in fifteen rows. STEP 1 turns the same check into a measurement, in one small commit:
+
+* `lua/core/tool_arguments.lua`: `M.undeclared(name, args, parameters)` is the rule (names only, the two
+  allow-lists unchanged); `M.refusal(...)` now RECORDS and answers `nil` always, so the call runs exactly as
+  it did before `86399e56` - an undeclared field is ignored, as it always was. Nothing else changed:
+  `bash.stdin`, `grep.context`, the `node=` routing and `peer_field_unsupported` are untouched.
+* The record is ONE telemetry event per distinct tool+field, for the life of the process (a chatty caller
+  costs one row, not one per call), carrying **names only - never a value**, because a value can be a secret
+  or a whole file. The caller is classified from the CONTEXT (`peer_call` → peer, `codemode_nested` /
+  `subagent` → internal, otherwise model), never from the arguments.
+
+`scripts/test-tool-arguments.lua` rewritten for the new contract (32 checks, green): an undeclared field does
+not refuse and the command really runs; the event is recorded once and a repeat adds nothing; peer and
+internal calls are classified from the context; `budget_ms` and `file_path` are never reported; an open
+schema, a no-argument tool and an unreadable schema each answer correctly.
+
+### Texts to approve (STEP 1)
+
+11. The telemetry event (names only, no values):
+
+    > kind: `tool_arguments`, phase: `undeclared`
+    > payload: `{"tool":"<tool name>","field":"<the undeclared field>","fields":["<every undeclared name on that one call>"],"caller":"model|internal|peer"}`
+
+    Recorded once per distinct tool+field per process. No argument value, no path, no text ever travels in it.
+
+
+### The 21 rows, run singly on this tree (scratch home, the tree's own binary)
+
+| row | verdict | note |
+|---|---|---|
+| test-codemode-default | **ok** | was red with `unknown_argument:path` |
+| test-efficiency | **ok (119 checks)** | was red with `unknown_argument:...` |
+| test-orchestration-mode | **ok (77 checks)** | was red with `unknown_argument:route` |
+| test-remote-pending | **ok (90 checks)** | |
+| test-selfloop | **ok** | was red with `unknown_argument:now` (the wake tool's clock seam) |
+| test-session-watch | **ok (107 checks)** | was red with `unknown_argument:control` |
+| test-tool-arguments | **ok (32 checks)** | rewritten for the report-only contract |
+| test-turn-signal | **ok (152 checks, 0 failed)** | |
+| test-file-tool-node | **ok (36 checks)** | was 4 red: the routed `grep` case sent `context` to a fixture peer with no catalogue, so the MIXED-FLEET refusal fired (correctly); the case no longer sends it, and that refusal stays covered by `test-remote-field-support` |
+| test-remote-field-support | **ok (13 checks)** | |
+| test-remote-edit | **ok (46 checks)** | |
+| test-federation | **ok (49 checks)** | |
+| test-tool-args-parity | **ok (1060 checks)** | |
+| test-bash-stdin | **ok (11 checks)** | |
+| test-grep-context | **ok (14 checks)** | |
+| test-graph-automatic | SKIP | `WA_COMPONENTS_DIR` unset: the row names its own hole and does not claim a pass |
+| test-cli-flow | RED (1 of 14: "exactly one blank line under it") | CLI spacing; not the validator (report-only now records nothing for it) - to classify in STEP 2 |
+| test-raw-view-stream | RED (3 of 19) | to classify in STEP 2 |
+| test-remote-call-shape | RED (`mis-nested remote call now succeeds via hoisting`, line 76) | **mine**: the `remote` schema now declares `additionalProperties: true`, and `tool_call`'s hoisting path reaches `remote` with a shape that used to be refused; STEP 2 |
+| test-run-live | RED (2 checks) | to classify in STEP 2 |
+| esc-stops-pty / test-land-until | not re-run singly | a pty row and a landing row; they need their own harness (fast.sh sets it) and were red on main for reasons of their own |
+
+Fifteen of the fifteen rows the orchestrator named that carried `unknown_argument` are green again with the
+check report-only; the four still red are named above with what is known about each.
+

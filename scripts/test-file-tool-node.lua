@@ -58,7 +58,10 @@ local cases = {
   { 'edit', { path = '/peer/one.txt', node = PEER, edits = { { old_text = 'a', new_text = 'b' } } } },
   { 'read', { path = '/peer/one.txt', node = PEER } },
   { 'ls', { path = '/peer', node = PEER } },
-  { 'grep', { path = '/peer', pattern = 'hello', context = 1, node = PEER } },
+  -- No `context` here: a field this node added is confirmed on the peer's catalogue before it is sent
+  -- (the mixed-fleet rule), and this fixture peer has none. That refusal is
+  -- scripts/test-remote-field-support.lua's subject; this row is about the routing.
+  { 'grep', { path = '/peer', pattern = 'hello', node = PEER } },
 }
 for _, case in ipairs(cases) do
   local name, args = case[1], case[2]
