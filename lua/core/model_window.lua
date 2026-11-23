@@ -57,6 +57,39 @@ M.WINDOWS = {
   ["deepseek-v4-pro"]     = { context = 1000000, output = 384000 },
 }
 
+-- Does this model take IMAGE input? (mission run-block-images-reach-model, item 4)
+--
+-- The default is what this node MEASURED, not a guess: a picture pasted into a chat reached the model
+-- as a real image part and the model described it (session 6a89dcbc, 23/11), so sending a picture is the
+-- standing behaviour and a model that cannot read one says so. A text-only model is DECLARED, most
+-- specific first:
+--
+--   1. `WASM_AGENT_MODEL_IMAGES` = off|no|false (on|yes|true forces it back on);
+--   2. `WASM_AGENT_MODEL_LIMITS` JSON, per model: {"<model>": {"images": false}};
+--   3. `M.WINDOWS[model].images = false`.
+--
+-- Nothing else answers false. An undeclared model keeps the measured behaviour rather than losing a
+-- feature to a table nobody wrote - and when a model IS declared text-only, lua/core/agent.lua sends
+-- one honest sentence per picture (where the file is, its pixel size, its bytes) instead of an image
+-- part: never a base64 blob and never a reference table.
+function M.image_input(model)
+  local declared = (host.getenv("WASM_AGENT_MODEL_IMAGES") or ""):lower()
+  if declared == "off" or declared == "no" or declared == "false" then return false end
+  if declared == "on" or declared == "yes" or declared == "true" then return true end
+  local name = tostring(model or "")
+  if name ~= "" then
+    local raw = host.getenv("WASM_AGENT_MODEL_LIMITS")
+    if raw and raw ~= "" then
+      local ok, parsed = pcall(json.decode, raw)
+      local entry = ok and type(parsed) == "table" and parsed[name] or nil
+      if type(entry) == "table" and entry.images == false then return false end
+    end
+    local known = M.WINDOWS[name]
+    if type(known) == "table" and known.images == false then return false end
+  end
+  return true
+end
+
 -- pi's policy numbers, unchanged: reserve the reply, keep the recent work verbatim.
 M.RESERVE = 16384
 M.KEEP = 20000

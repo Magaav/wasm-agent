@@ -772,6 +772,12 @@ end
 -- tokens, ten times too early, and "compacted" is not an error so nothing said so.
 -- WASM_AGENT_MODEL_LIMITS still overrides everything, and the old global is kept as the
 -- last-resort fallback so no existing deployment changes behaviour by surprise.
+-- Does this model take image input? The per-model fact lives in lua/core/model_window.lua (where the
+-- other per-model facts are, with the same override chain); this is the name callers use.
+function M.image_input(model)
+  return windowlib.image_input(model)
+end
+
 function M.budget(model)
   local window = windowlib.for_model(model)
   local budget = {
