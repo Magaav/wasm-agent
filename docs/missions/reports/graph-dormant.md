@@ -345,3 +345,11 @@ The last three are the pty rows, and they failed **sequentially, one at a time**
 machine carried `main-health`'s full suite: load average 14.3 on 16 cores during the branch run and 28.3
 during the main run. So the branch is as green as main is on this machine, and these five are named rather
 than quietly inherited.
+
+**A second merge, and two of the five reds went away with it (merge `f057e138`, main `4425f670`).** Main moved
+again while this round was being read: `change/esc-stops-now` and `change/tool-args-honest-and-same-on-peers`
+landed, and they fix exactly two of the rows named above - `scripts/test-edit-aliases.lua` (the handler takes
+its aliases back) and the `esc-stops-pty` measurement (the row now reports what its own probing costs). That
+merge was clean, with no conflict at all: this branch's seam in `lua/core/tools.lua` and main's are in
+different places, and the graph's five gate call sites are unchanged (`rg -c graph_offered lua/core/tools.lua`
+= 5).
