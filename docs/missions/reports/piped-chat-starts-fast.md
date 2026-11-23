@@ -206,3 +206,39 @@ FAIL a piped chat's first line arrives in under 900 ms (median N ms)
 ```
 
 3. The fast path's row name `piped-start` and its comment block at `scripts/fast.sh:963`-`970`.
+
+## 8. Addendum (23/11 ~11:40Z): the landed branch left one red row - `change/piped-chat-starts-fast-fix`
+
+main at `5956ae15` was 422/423 because of this branch, on ONE row:
+
+```
+FAIL every capability that answers JSON text says so: ["process_identity"]
+host return docs: 1 of 10 checks failed
+```
+
+**Why.** `scripts/test-host-return-docs.lua` reads `rust/wa-capabilities/src/host.rs` and requires the `///`
+block above every capability whose body calls `push_json` to say BOTH "JSON" and its encoding ("string" or
+"table"). `process_identity`'s block said "JSON text of `{process_id, boot_id}`" and named no encoding word,
+so the fence that exists for exactly this confusion - a caller that takes JSON text for a Lua table - caught
+it. Reproduced here against origin/main's `host.rs` (that one file, `WASM_AGENT_LUA_ROOT` on a tree mirroring
+it): `FAIL ... ["process_identity"]`, 1 of 10.
+
+**Fix** (this branch, one doc line, in `runtime_info`'s own words):
+
+```
+/// host.process_identity() -> JSON text of `{process_id, boot_id}` - one JSON string the caller decodes with lua/vendor/json.lua, never a Lua table.
+```
+
+**Rows run for it:** `scripts/test-host-return-docs.lua` -> `host return docs ok (10 checks; 40 JSON-text
+capabilities documented)`; `bash scripts/sync-prompt-docs.sh --check` -> `sync-prompt-docs: ok (4 blocks
+current)`. The capability registry itself is untouched by a source comment: the count is still 147 and
+`wa capabilities --json` is unchanged, and the inventory proof's sandbox half still cannot run on this node
+(the builds here carry no code-mode assets - section 5).
+
+**Texts to approve:** the line above, verbatim. It is a source comment, NOT text the model reads: the
+capability description the model sees through `wa capabilities` / `capabilities()` is unchanged and still
+reads
+
+```
+process_identity     read-only       This process id and the boot tag it was given, without reading the binary to hash it
+```
