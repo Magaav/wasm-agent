@@ -33,6 +33,12 @@ export HOME=$work/user WASM_AGENT_HOME=$work/node TMPDIR=$work/tmp
 # resolves $CARGO_TARGET_DIR first), and the file the stub board records its arguments in.
 export CARGO_TARGET_DIR=$work/target MAIN_HEALTH_TEST_ARGS=$work/speed-args
 mkdir -p "$HOME" "$WASM_AGENT_HOME" "$TMPDIR" "$work/missions"
+# THE FIXTURE'S OWN MISSIONS ROOT AND SUITE LOCK, pinned rather than inherited. MEASURED 23/11, in this
+# mission's own end-to-end run: with WA_SUITE_LOCK exported by the caller, the fixture main-health this row
+# starts waited for the lock its OWN PARENT suite holds (the fast path runs this row under that lock), and
+# the row hung until it was killed. A row that can deadlock its own suite is not a test; these two lines
+# make it independent of whatever the caller exported.
+export WA_MISSIONS_ROOT=$work/missions WA_SUITE_LOCK=$work/missions/.suite.lock
 operator_home=${OPERATOR_NODE_HOME:-/home/$(id -un)/.wasm-agent}
 case "$work" in
   "$operator_home"|"$operator_home"/*) echo "test-main-health: refused(real_node_home): $work is the operator's node home" >&2; exit 2 ;;
