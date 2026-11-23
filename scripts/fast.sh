@@ -988,6 +988,14 @@ check linux-channel bash scripts/test-linux-channel.sh
   # operation row is read back too, so a fast row drawn without the fresh views is not a pass. The real
   # binary in a private tmux pty, as the rows above.
   WA_BIN="$bin" check chat-start-pty node scripts/test-chat-start-pty.mjs
+  # ESC ENDS A RUN AT ONCE (change/esc-stops-now, items 1-4): the real binary in a private tmux pty against
+  # a fixture that is both the rendezvous and the provider, pressing Esc in each of the five ways a run can
+  # wait - before response headers (30 s hold), mid-stream after a 10 s silence, during a local shell, during
+  # a tools.remote call to a peer that never answers, and during a supervised child - and measuring
+  # Esc-to-prompt for each. Measured before the change: never (20 s give-up), 9775 ms, 326 ms, never,
+  # 259 ms - and after it: 165, 164, 259, 187, 234 ms. The ledger is read back by a second process for the
+  # interrupt row and for the absence of a provider_retry row.
+  WA_BIN="$bin" check esc-stops-pty node scripts/test-esc-stops-pty.mjs
   # /UNDO IN A CHAT PUTS THE FILE BACK (mission remote-undo-works, 23/11): the `remote` tool's own
   # description tells the model "the change is recorded here, so /undo restores that file there", and a
   # chat had no /undo at all - typing it answered "unknown or incomplete command". This drives the REAL

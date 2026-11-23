@@ -1438,12 +1438,21 @@ end
 -- minutes after the previous answer, 21 s inside one silent provider read).
 M.COLD_CONTEXT_SECONDS = 300
 
+-- How much silence makes a model call worth a row of its own. A word for the wait costs the reader
+-- something: the phase word it replaces ("Thinking") is two frames' worth of a fast reply, and a row
+-- that flickers for every 200 ms call is noise, not information. One second is where a reply stops
+-- feeling immediate (warm ttft here is 1.4-2.8 s, so a warm call DOES show it - which is the point).
+M.WAIT_AFTER_SECONDS = 1
+
 -- A MODEL CALL IS WAITING FOR ITS FIRST BYTE, and this is when that wait began (change/esc-stops-now,
 -- item 5). Set where a model call begins - the run's first round, a round boundary, a status event that
 -- announces one, and after a tool result - and cleared by the first thing the provider says: a delta, a
 -- thought, a tool call, or the usage numbers. Display only: nothing here reaches the request bytes.
 function METHODS:model_waiting()
-  self.model_wait = self.model_wait or { started = self.now() }
+  -- FRESH every time: this is called where a model call BEGINS (a run start, a round boundary, a status
+  -- event that announces one, the end of a tool block), and each call's wait is its own. Keeping an
+  -- older start would report the previous call's silence as this one's.
+  self.model_wait = { started = self.now() }
 end
 
 function METHODS:model_spoke()
@@ -1458,6 +1467,7 @@ end
 function METHODS:waiting_text()
   local wait = self.model_wait
   if not wait then return nil end
+  if (self.now() - wait.started) < M.WAIT_AFTER_SECONDS then return nil end
   local line = "waiting for the model \194\183 {w} \194\183 esc to stop"
   local last = self.last_answer_at
   if last and (self.now() - last) >= M.COLD_CONTEXT_SECONDS then

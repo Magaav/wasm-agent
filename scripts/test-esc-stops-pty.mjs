@@ -343,7 +343,9 @@ async function scenario(entry) {
   tmux(['kill-server']);
   return {name, escMs: backAt === null ? null : backAt - escAt, escAt, rows, ledger, home,
     requests: state.requests.length, typedAt,
-    requestsSeen: state.requests.map(entry => entry.path)};
+    requestsSeen: state.requests.map(entry => entry.path),
+    // The provider requests themselves, for the display-only probe below.
+    bodies: state.requests.filter(entry => entry.path.endsWith('/chat/completions')).map(entry => entry.body)};
 }
 
 // The ledger, read by a second process: what the run itself recorded about the stop.
@@ -420,6 +422,19 @@ if (crash) {
       : result.escMs + ' ms (limit ' + LIMIT_MS + ' ms)';
     check(result.name + ': Esc brings the prompt back in under ' + LIMIT_MS + ' ms', result.escMs !== null && result.escMs <= LIMIT_MS, detail);
   }
+  // ---- display only: the row's words never reach the provider --------------------------------
+  // The status row now names the wait and the key that ends it (item 5). Nothing of that may travel:
+  // the request is built from the conversation and the frozen prefix, never from the row, and this is
+  // the check that says so with the real request bodies the fixture received.
+  const leaked = [];
+  for (const result of results) {
+    for (const marker of ['waiting for the model', 'esc to stop', 'Interrupting', 'the first reply is slower']) {
+      if ((result.bodies || []).some(body => String(body).includes(marker))) leaked.push(result.name + ': ' + marker);
+    }
+  }
+  check('the status row is display only: none of its words is in any provider request',
+    leaked.length === 0, 'found in a request body: ' + JSON.stringify(leaked));
+
   const stream = results.find(result => result.name === 'stream');
   if (stream) {
     check('stream: the text that had already streamed is kept on screen (a stop is not a loss)',

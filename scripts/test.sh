@@ -2032,6 +2032,11 @@ gate_run node tests/test-wa-fonts.mjs
 # captured transcript is free of escape sequences - so it is asserted without a model:
 # the view is handed the events agent.lua emits, with a clock the test controls.
 WA_SCRIPT=scripts/test-cli-view.lua "$BIN" --db "$DB.view" | grep "cli view ok"
+# A STOP IS NOT A FAILURE TO REPLAY (change/esc-stops-now, item 4): a provider call that comes back
+# cancelled is asked exactly once, waits for nothing and writes no provider_retry row, while the
+# unclassified-provider bucket it used to fall into still replays its own kind of failure. Measured in
+# the ledger 23/11: a stop wrote "attempt 1 ... reason run_cancelled, wait_ms 1151" and waited it out.
+WA_SCRIPT=scripts/test-cancel-not-retry.lua "$BIN" --db "$DB.cancel" | grep "cancel-not-retry"
 # THE OPENING'S LUA HALF (Victor, 22/11): the star of the welcome line and the run status row's animated
 # first glyph are the matrix green as a palette entry of their own, accent still paints the phase word of
 # that same row, and `cli_view.opening` refuses on every condition the animation must never play on (a
