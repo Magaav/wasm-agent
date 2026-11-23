@@ -259,21 +259,38 @@ local function fetch_peers(fresh, cached_only)
   -- latency inside somebody else's turn.
   if cached_only then return cache or {} end
   local peers, read_ok = {}, false
+  local read_status, read_code = nil, nil
   pcall(function()
     local headers = json.encode(M.signed_headers("nodes") or {})
     local response = decode_body(host.http("GET", url:gsub("/+$", "") .. "/nodes", headers, ""))
-    if response and tonumber(response.status) == 200 then
-      local ok, payload = pcall(json.decode, response.body)
-      if ok and type(payload) == "table" and type(payload.nodes) == "table" then
-        peers = payload.nodes
-        read_ok = true
+    if response then
+      read_status = tonumber(response.status)
+      if read_status == 200 then
+        local ok, payload = pcall(json.decode, response.body)
+        if ok and type(payload) == "table" and type(payload.nodes) == "table" then
+          peers = payload.nodes
+          read_ok = true
+        end
+      else
+        -- Only an allow-listed code out of an unsigned body: the rendezvous' own words are the only
+        -- evidence of WHY the read was refused, and a body is trusted for nothing but its code.
+        read_code = M.relay_code(response.body)
       end
     end
   end)
   -- Whether the last roster read could reach the registry, so a caller can tell "no such peer" from
   -- "I could not ask". Without it a COLD cache during an outage answered unknown_node for every name,
   -- which reads as "that node never existed" when the truth is "the rendezvous was unreachable".
-  M.roster_last_read = read_ok and {ok = true, at = now} or {ok = false, at = now, error = "roster_unavailable"}
+  --
+  -- AND WHY IT COULD NOT BE READ, when the rendezvous said so. A 401 `unknown_node` is not an outage: the
+  -- rendezvous holds no public key for this node's id, so it cannot verify this caller at all, and it
+  -- refuses every roster read the same way until this node registers (it learns a key when the node's OWN
+  -- serve loop registers it: rust/wa-rendezvous/src/rendezvous.rs, register()). Measured 23/11 on a
+  -- scratch caller that never served: 240 attempts in 120 s, every one answered roster_unavailable - a
+  -- network problem's name for a node's own missing registration.
+  M.roster_last_read = read_ok and {ok = true, at = now} or {ok = false, at = now,
+    error = "roster_unavailable", status = read_status, code = read_code,
+    not_registered = ((read_status == 401 and read_code == "unknown_node") or nil)}
   if not read_ok then
     -- A roster read that FAILED is not a roster that is empty. Measured 19/11 ~12:17 UTC, home
     -- network down: 38 relay detaches, and when the laptop had internet again `wa nodes` listed only
@@ -732,7 +749,17 @@ function M.list(opts)
       -- handed off, and it is not.
       worktree = M.is_master() and M.worktree() or "",
       endpoints = {},
-      resources = (host.system_resources and json.decode(host.system_resources())) or nil,
+      -- THE SAMPLE'S COST IS THE CALLER'S TO PAY (23/11, review r1). The full sample measures CPU over a
+      -- DELIBERATE 120 ms window between two /proc/stat reads (wa-host-support, cpu_percent). `M.find`
+      -- builds this row for EVERY remote call and never reads a resource: that was 120.3 ms of a ~460 ms
+      -- peer call. So a caller that does not read the row asks for the quick sample
+      -- (`opts.quick_resources`, below), which answers the same memory, disk and core counts and says in
+      -- the answer that the CPU figure was NOT measured (`cpu.used_percent` null, `cpu.unmeasured` naming
+      -- the reason) - an absent number must never read as an idle machine. Every caller that SHOWS the row
+      -- - 'wa nodes' and the window through nodes_cli, the nodes tool's list, fleetview - passes no option
+      -- and keeps the measured figure, exactly as before.
+      resources = (host.system_resources
+        and json.decode(host.system_resources(opts.quick_resources and '{"quick":true}' or '{}'))) or nil,
       -- A guest's own capabilities are read-only. It edits files when a master asks, through
       -- /node/call, which runs as that master - not on its own initiative. So the write tools
       -- are absent here rather than merely discouraged.
@@ -840,9 +867,38 @@ function M.roster_unreadable()
   return M.roster_last_read ~= nil and M.roster_last_read.ok == false
 end
 
+-- The rendezvous refused this node's roster read with 401 `unknown_node`: it holds NO key for this
+-- node's id, so it cannot verify this caller at all. That is not an outage and not a missing peer - it is
+-- this node never having registered, and no retry can change it. Named apart from roster_unavailable
+-- because the two have different fixes and only one of them is a network problem (measured 23/11: a
+-- scratch caller that never served spent 120 s and 240 attempts reading "roster_unavailable").
+function M.not_registered()
+  local last = M.roster_last_read
+  return type(last) == "table" and last.ok == false and last.not_registered == true
+end
+
+-- The refusal a caller gets when its own registration is what is missing. The code and the sentence say
+-- WHICH registration, and the fix names the one command that makes it: this node's serve loop is what
+-- registers its key at the rendezvous (with heartbeats while it runs).
+function M.not_registered_refusal(selector)
+  local name = tostring(selector or "the peer")
+  return { error = "not_registered:" .. name, node = name, connector = "not_registered",
+    retryable = false, reason = "unknown_node", roster_status = (M.roster_last_read or {}).status,
+    message = string.format("this node is not registered at the rendezvous, so %s cannot be looked up: "
+      .. "the rendezvous holds no key for this node's id and refuses its roster reads. Nothing was sent "
+      .. "to %s and nothing ran there.", name, name),
+    fix = "start this node's own serve loop so it registers its key at WASM_AGENT_RENDEZVOUS - "
+      .. "`wa serve` does it and keeps the registration alive - then retry this call. "
+      .. "`wa bind status` says what the rendezvous knows about this node." }
+end
+
 function M.find(selector)
   if not selector or selector == "" then return nil end
-  for _, node in ipairs(M.list({ live_capabilities = false })) do
+  -- THE QUICK ROW, AND ONLY HERE (review r1, 23/11). A lookup reads a name, a node_id and an endpoint -
+  -- never a resource sample - and this is the path every remote call takes, so it is the one that must not
+  -- pay the 120 ms CPU window. Everything that SHOWS the row ('wa nodes' and the window through
+  -- nodes_cli, the nodes tool's list, fleetview) passes no option and keeps the measured figure.
+  for _, node in ipairs(M.list({ live_capabilities = false, quick_resources = true })) do
     if node.name == selector or node.node_id == selector or node.id == selector then
       return node
     end
@@ -1654,6 +1710,9 @@ function M.remote_call(selector, capability, args, options)
     -- A COLD roster during an outage is not "no such node": it is "the rendezvous could not be
     -- asked". Answering unknown_node here is what made a network blip look like a deleted peer.
     if M.roster_unreadable() then
+      -- ... unless the rendezvous named THIS node's own missing registration: then the roster is not
+      -- "unavailable", and retrying would answer the same way until this node serves.
+      if M.not_registered() then return M.not_registered_refusal(selector) end
       return { error = "roster_unavailable:" .. tostring(selector), node = tostring(selector),
         connector = "roster_unavailable", retryable = true,
         message = string.format("the roster could not be read, so %s cannot be looked up right now: "

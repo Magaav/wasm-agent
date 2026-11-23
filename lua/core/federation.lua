@@ -424,7 +424,10 @@ function M.refresh()
   -- offline peer (measured: node `work`, 20.6 s of silence after Enter on the first prompt of a chat,
   -- 0.05 s on the second) held every prompt sent more than ten minutes after the last. The roster says who
   -- is online, nodes.reachable says who is attached, and the catalog call below is the question itself.
-  local ok, list = pcall(nodes.list, { live_capabilities = false })
+  -- `quick_resources`: this refresh reads names and reachability, never a resource sample, and it runs
+  -- inside a turn BEFORE its first model call - the one place the roster's 120 ms CPU window was paid on
+  -- the operator's behalf every time (review r1, 23/11). The display paths keep the measured figure.
+  local ok, list = pcall(nodes.list, { live_capabilities = false, quick_resources = true })
   for _, node in ipairs(ok and list or {}) do
     if not node.local_node and node.online ~= false then
       local entry = { name = node.name or node.node_id, node_id = node.node_id or node.id, at = host.now() }

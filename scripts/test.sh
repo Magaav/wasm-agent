@@ -1419,6 +1419,23 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-network-outage-recovery.lua" "$BIN"
 # until a restart. The fix keeps every known peer, marked offline with its last-seen stamp, and a call
 # to one answers peer_offline:<name> (last seen ...). A successful read may still remove a peer.
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-network-roster-offline.lua" "$BIN" --db "$DB.network-roster-offline" | grep 'network roster offline ok'
+# A node that never REGISTERED hears so by name (23/11): with only the peer serving, every attempt answered
+# roster_unavailable - a network problem's name for a node's own missing registration (the rendezvous
+# answers GET /nodes only to a node it can verify, and it learns a key when that node registers). The
+# answer is now not_registered:<peer> with the fix; an outage or a key mismatch keeps roster_unavailable.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-network-not-registered.lua" "$BIN" --db "$DB.network-not-registered" | grep 'network not registered ok'
+# A peer bash call pays for the work, not for six bookkeeping dispatches (23/11: the peer's own half of the
+# ~460 ms round trip was 6 tools.dispatch calls at ~35 ms each - a reap list with nothing to reap and a
+# second status read of a record the answer already was). The bound is four, and the reap still runs the
+# moment one handle is adopted.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-remote-call-bound.lua" "$BIN" --db "$DB.remote-call-bound" | grep 'remote call bound ok'
+# The dispatcher builds no catalogue and recompiles no module for a call that reads neither (23/11: every
+# dispatch rebuilt all ~60 tool schemas and re-dofile'd orchestration_mode, which loads nodes.lua - 30-45 ms
+# per tool call, paid by a peer's await and a model's bash alike).
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-tool-dispatch-cost.lua" "$BIN" --db "$DB.tool-dispatch-cost" | grep 'tool dispatch cost ok'
+# The roster's local row must not sleep 120 ms for a CPU delta it only displays (23/11: host.system_resources
+# measures CPU between two /proc/stat reads; nodes.find built that sample for every remote call).
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-roster-sample-quick.lua" "$BIN" --db "$DB.roster-sample-quick" | grep 'roster sample quick ok'
 # The caller's half of the relay storm (19/11 12:20-12:45 UTC: 503 too_many_connections to everyone
 # while ~470 connections kept arriving and ~600 relayed calls/min were abandoned). A caller held as
 # many relayed calls against one node as it liked and retried an over-cap relay with no jittered wait.

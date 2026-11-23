@@ -130,7 +130,7 @@ pub const REGISTRY: &[Capability] = &[
     plain!("runtime_info", ReadOnly, crate::host::runtime_info, "Build and runtime identity of this binary"),
     plain!("process_identity", ReadOnly, crate::host::process_identity, "This process id and the boot tag it was given, without reading the binary to hash it"),
     plain!("build_identity", ReadOnly, crate::host::build_identity, "The one name for this build: its commit (short), whether the tree was dirty, and the full id"),
-    plain!("system_resources", ReadOnly, crate::host::system_resources, "CPU, memory and disk facts for this machine"),
+    plain!("system_resources", ReadOnly, crate::host::system_resources, "CPU, memory and disk facts for this machine; passed {quick:true} it skips the 120 ms CPU delta and says the figure was not measured"),
     plain!("node_identity", ReadOnly, crate::host::node_identity, "This node's identity and network role"),
     plain!("mesh_call", Network, wa_mesh::host_call::mesh_call, "Call a peer directly by hierarchy, when WA_MESH=1; the roster, grants and direct transport of docs/MESH.md"),
     plain!("run_cancelled", ReadOnly, crate::host::run_cancelled, "Whether the current run has been cancelled, for cooperative loops"),

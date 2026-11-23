@@ -264,7 +264,9 @@ function M.signer_nodes(options)
   local ok, nodes = pcall(dofile, "lua/core/nodes.lua")
   if not ok or type(nodes) ~= "table" or type(nodes.list) ~= "function" then return {} end
   local names = {}
-  for _, node in ipairs(nodes.list() or {}) do
+  -- `quick_resources`: the names are all this asks for, so the local row's 120 ms CPU window is not paid
+  -- here (review r1, 23/11).
+  for _, node in ipairs(nodes.list({ live_capabilities = false, quick_resources = true }) or {}) do
     local name = tostring(node.name or "")
     if name ~= "" and node.local_node ~= true then names[#names + 1] = name end
   end

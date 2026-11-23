@@ -259,6 +259,7 @@ return {
   ['not_cancellable']='codemode_pending.lua',
   ['not_found']='file_tools.lua',
   ['not_peer_operator']='tools.lua',
+  ['not_registered:']='nodes.lua',
   ['not_remote']='nodes.lua',
   ['not_revoked_in_roster']='nodes.lua',
   ['not_your_record']='remote_update.lua',
