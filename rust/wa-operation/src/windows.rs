@@ -76,6 +76,12 @@ pub struct Process {
 impl Process {
     pub fn owned_id(&self)->Option<u32>{let id=unsafe{GetProcessId(self.process.0)};if id==0{None}else{Some(id)}}
     pub fn spawn(spec: &Spec) -> io::Result<Self> {
+        // `stdin` is fed on unix (process.rs) and not on this platform yet: this spawn builds its own
+        // pipes (CreatePipe + STARTUPINFO handles) and a stdin handle was never one of them. Refused BY
+        // NAME rather than ignored, so no caller is told a command ran with input it never received.
+        if spec.stdin.is_some() {
+            return Err(io::Error::new(io::ErrorKind::Unsupported, "stdin_unsupported_on_this_platform"));
+        }
         if spec.program.contains('\0')
             || spec.args.iter().any(|a| a.contains('\0'))
             || spec.cwd.contains('\0')

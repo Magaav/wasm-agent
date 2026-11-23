@@ -201,6 +201,10 @@ pub struct Spec {
     /// low CPU priority (18/11 round 2, finding 9): a call the caller actively awaits keeps the node's
     /// own priority, because it is competing with nothing but the work that asked for it.
     pub background: bool,
+    /// Text fed to the command's standard input, then closed (`bash {stdin=...}`). `None` means the
+    /// child's stdin is the null device, which is what every start had before this field existed. The
+    /// caller bounds the text (lua/core/tools.lua, STDIN_MAX_BYTES); this side only carries it.
+    pub stdin: Option<String>,
     /// This start is a CONTROL call: the node's own short read (an MCP connector read, a catalogue
     /// probe), not a workload. It is the only kind of start admitted into the two reserved slots, so a
     /// session that holds its whole share cannot stop the node from asking a question
@@ -223,6 +227,7 @@ impl Spec {
             session: String::new(),
             promote_descendants: false,
             background: false,
+            stdin: None,
             control: false,
         }
     }

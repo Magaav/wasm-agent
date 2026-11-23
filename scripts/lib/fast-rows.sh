@@ -85,6 +85,7 @@ wa_fast_core_rows() {
     scripts/test-release-channel-e2e.lua \
     scripts/test-event-ledger.lua scripts/test-product-version.lua \
     scripts/test-refusal-contract.lua scripts/test-tool-schema-fidelity.lua scripts/test-codemode-parity.lua \
+    scripts/test-tool-args-parity.lua \
     scripts/test-edit-aliases.lua \
     scripts/test-wit-deps.lua \
     scripts/test-email-connector.lua scripts/test-whatsapp-send.lua

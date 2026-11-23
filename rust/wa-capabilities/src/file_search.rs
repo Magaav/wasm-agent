@@ -8,6 +8,9 @@ fn search_bounded(pattern: &str, path: &str, options: &Value, entry_budget: usiz
     let ignore_case=options["ignore_case"].as_bool().unwrap_or(true);
     let limit=options["limit"].as_u64().unwrap_or(100).clamp(1,500) as usize;
     let max_depth=options["max_depth"].as_u64().unwrap_or(12).min(64) as usize;
+    // Context lines around each match (0-10). The default 0 keeps every answer byte-identical to the one
+    // this search gave before the field existed: no window is read and no key appears in the result.
+    let context=options["context"].as_u64().unwrap_or(0).min(10) as usize;
     let extensions: Vec<&str>=options["extensions"].as_array().map(|a|a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
     let needle=if ignore_case {pattern.to_lowercase()} else {pattern.to_owned()};
     let mut matches=vec![];let mut stack=vec![(PathBuf::from(path),0)];
@@ -52,22 +55,55 @@ fn search_bounded(pattern: &str, path: &str, options: &Value, entry_budget: usiz
         if bytes.len()>4*1024*1024 {*skipped.entry("size_limit").or_default()+=1;continue;}
         let text=match String::from_utf8(bytes) {Ok(t)=>t,Err(_)=>{*skipped.entry("non_utf8").or_default()+=1;continue;}};
         scanned+=1;
+        // The lines are collected once per file only when a window was asked for; next_free is the first
+        // line not yet in the answer, so two matches whose windows overlap share the lines between them
+        // instead of repeating them (merged ranges).
+        let all: Vec<&str>=if context>0 {text.lines().collect()} else {Vec::new()};
+        let mut next_free=0usize;
         for (index,line) in text.lines().enumerate() {
             let haystack=if ignore_case{line.to_lowercase()}else{line.to_owned()};
             if haystack.contains(&needle) {
                 if matches.len()==limit {stop=Some("result_limit");break;}
                 let chars=line.chars().count();
-                matches.push(json!({"file":file.to_string_lossy(),"line":index+1,
-                    "text":line.chars().take(400).collect::<String>(),"text_truncated":chars>400,"line_chars":chars}));
+                let mut entry=json!({"file":file.to_string_lossy(),"line":index+1,
+                    "text":line.chars().take(400).collect::<String>(),"text_truncated":chars>400,"line_chars":chars});
+                if context>0 {
+                    let before_from=index.saturating_sub(context).max(next_free);
+                    let after_to=(index+1+context).min(all.len());
+                    let mut before=vec![];
+                    for at in before_from..index { before.push(context_line(all[at],at+1)); }
+                    let mut after=vec![];
+                    for at in (index+1).max(next_free)..after_to { after.push(context_line(all[at],at+1)); }
+                    next_free=next_free.max(after_to).max(index+1);
+                    if let Some(fields)=entry.as_object_mut() {
+                        fields.insert("before".into(),json!(before));
+                        fields.insert("after".into(),json!(after));
+                    }
+                }
+                matches.push(entry);
             }
         }
         if stop.is_some(){break;}
     }
     let complete=stop.is_none() && skipped.is_empty();
-    json!({"matches":matches,"count":matches.len(),"literal":true,"ignore_case":ignore_case,
+    let mut answer=json!({"matches":matches,"count":matches.len(),"literal":true,"ignore_case":ignore_case,
         "complete":complete,"truncated":stop.is_some(),"stop_reason":stop,"skipped":skipped,
         "files_scanned":scanned,"directory_entries_observed":listed,"max_depth":max_depth,"limit":limit,
-        "note":"Paths use the supplied root. Line text may be clipped; use read for exact evidence. No filesystem-wide snapshot."})
+        "note":"Paths use the supplied root. Line text may be clipped; use read for exact evidence. No filesystem-wide snapshot."});
+    if context>0 {
+        if let Some(fields)=answer.as_object_mut() {
+            fields.insert("context".into(),json!(context));
+            fields.insert("note".into(),json!("Paths use the supplied root. before/after carry the context lines around each match, and a line two matches share appears once. Line text may be clipped; use read for exact evidence. No filesystem-wide snapshot."));
+        }
+    }
+    answer
+}
+
+/// One context line, clipped and counted exactly as a matched line is.
+fn context_line(line:&str, number:usize) -> Value {
+    let chars=line.chars().count();
+    json!({"line":number,"text":line.chars().take(400).collect::<String>(),
+        "text_truncated":chars>400,"line_chars":chars})
 }
 #[cfg(test)] mod tests {
     use super::*;
@@ -83,6 +119,39 @@ fn search_bounded(pattern: &str, path: &str, options: &Value, entry_budget: usiz
         let r=search("Needle",p,&json!({"ignore_case":false,"extensions":["rs"]}));assert_eq!(r["count"],1);assert_eq!(r["skipped"]["extension_filter"],1);
         let r=search("needle",p,&json!({"max_depth":0}));assert_eq!(r["skipped"]["depth_limit"],1);assert_eq!(r["count"],4);
         fs::write(root.join("long"),"x".repeat(500)).unwrap();let r=search("xxx",root.join("long").to_str().unwrap(),&json!({}));assert_eq!(r["matches"][0]["text_truncated"],true);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The context window (mission tool-args-honest-and-same-on-peers, item 5): absent by default - the answer
+    /// is byte-identical to the one this search gave before the field existed - and two matches whose windows
+    /// overlap share the lines between them instead of repeating them (merged ranges).
+    #[test] fn context_lines_merge_and_are_absent_by_default() {
+        let root=std::env::temp_dir().join(format!("wa-grep-ctx-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("a.txt"),"one\ntwo\nhit three\nfour\nhit five\nsix\nseven\n").unwrap();
+        let p=root.to_str().unwrap();
+        let plain=search("hit",p,&json!({}));
+        assert!(plain.get("context").is_none(),"{plain}");
+        assert!(plain["matches"][0].get("before").is_none(),"{plain}");
+        assert!(plain["matches"][0].get("after").is_none(),"{plain}");
+        let one=search("hit",p,&json!({"context":1}));
+        assert_eq!(one["context"],1);
+        assert_eq!(one["matches"][0]["line"],3);
+        let before=one["matches"][0]["before"].as_array().unwrap();
+        assert_eq!(before.len(),1);
+        assert_eq!(before[0]["text"],"two");
+        assert_eq!(one["matches"][0]["after"].as_array().unwrap()[0]["text"],"four");
+        // The second match is at line 5; its window starts at line 4, which is already in the answer.
+        assert!(one["matches"][1]["before"].as_array().unwrap().is_empty(),"{one}");
+        assert_eq!(one["matches"][1]["after"].as_array().unwrap()[0]["text"],"six");
+        let two=search("hit",p,&json!({"context":2}));
+        assert_eq!(two["matches"][0]["before"].as_array().unwrap()[0]["text"],"one");
+        assert_eq!(two["matches"][0]["after"].as_array().unwrap().len(),2);
+        // A window that reaches the end of the file stops at the last line instead of inventing one.
+        assert_eq!(two["matches"][1]["after"].as_array().unwrap().len(),2);
+        // Above the declared maximum the search clamps and SAYS which window it used.
+        let clamped=search("hit",p,&json!({"context":99}));
+        assert_eq!(clamped["context"],10);
         fs::remove_dir_all(root).unwrap();
     }
 }

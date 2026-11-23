@@ -1341,8 +1341,30 @@ local function adopt_bash(args, caller, author)
         .. "not start new work while it cannot account for the old; nothing was started" }
   end
   reaped = reaped or {}
-  local started = wa_peer_dispatch("operation", { action = "start", command = command, cwd = args.cwd,
-    timeout_seconds = seconds, background = true }, caller, author)
+  -- ADOPTION WRAPS THE CALL, IT DOES NOT RE-PICK ITS FIELDS (mission tool-args-honest-and-same-on-peers,
+  -- item 3). This used to forward command, cwd and timeout_seconds only, so every other field of `bash` was
+  -- dropped on the peer path while the same call ran with it here - the parity this mission exists to close.
+  -- The set forwarded is now the operation start schema's own declared fields, so a field added to the tool
+  -- later travels without anyone remembering to add it here; a field of `bash` that this node's start cannot
+  -- carry is REFUSED BY NAME rather than run without it.
+  local declared = toolslib.parameters("operation", "master")
+  local properties = type(declared) == "table" and type(declared.properties) == "table" and declared.properties or {}
+  local start = { action = "start", command = command, cwd = args.cwd, timeout_seconds = seconds,
+    background = true }
+  for key, value in pairs(args) do
+    if key ~= "budget_ms" and key ~= "command" and key ~= "cwd" and key ~= "timeout_seconds" then
+      if properties[key] ~= nil then
+        start[key] = value
+      else
+        return { error = "peer_bash_field_not_adoptable", field = tostring(key), effect = "none",
+          carried = (function() local list = {}; for name in pairs(properties) do list[#list + 1] = tostring(name) end; table.sort(list); return list end)(),
+          note = "this node's adoption path (budget_ms) cannot carry `" .. tostring(key)
+            .. "` into the supervised operation, so the call is refused rather than run without it; send the "
+            .. "same call without budget_ms, or declare the field on the operation tool's own schema." }
+      end
+    end
+  end
+  local started = wa_peer_dispatch("operation", start, caller, author)
   local id = type(started) == "table" and tostring(started.operation_id or "") or ""
   if id == "" then
     -- The start was refused (path guard, a bad timeout, capacity): answer it as it is. A refusal is

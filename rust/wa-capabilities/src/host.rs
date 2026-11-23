@@ -1736,7 +1736,9 @@ fn run_bounded(
     // same 1-86400 range `operation start` accepts; an out-of-range value is refused,
     // not clamped, so a caller never believes it got a bound it did not.
     let seconds = effective_exec_timeout_seconds(requested_seconds)?;
-    crate::operations::foreground(program, flag, command, cwd, seconds, &Value::Null)
+    // A child's own shell call has no `stdin` field to carry (only `bash` and `operation start` declare
+    // one), so it keeps the null device it always had.
+    crate::operations::foreground(program, flag, command, cwd, seconds, &Value::Null, None)
 }
 
     /// Answers JSON text (one string the caller decodes with `lua/vendor/json.lua`), never a Lua table.
@@ -1828,15 +1830,20 @@ pub extern "C-unwind" fn resource(l: *mut LuaState) -> c_int {
 /// **One string, not a table**: every use decodes it. The command goes through the path guard and the
 ///
 /// (`{code, ok, stdout, stderr, operation_id, timing, …}`, or `{error}`).
-/// host.exec(command, cwd, timeout_seconds?, context_json?) -> JSON text of the command result
+/// host.exec(command, cwd, timeout_seconds?, context_json?, stdin?) -> JSON text of the command result
+///
+/// `stdin` (5th, optional) is the text fed to the command's standard input and then closed; absent means
+/// the null device, which is what every call before this argument got. It is bounded by the dispatcher
+/// (lua/core/tools.lua, STDIN_MAX_BYTES) so the text a caller may send is one number in one place.
 pub extern "C-unwind" fn exec(l: *mut LuaState) -> c_int {
     let command = arg_string(l, 1).unwrap_or_default();
     let cwd = arg_string(l, 2).unwrap_or_default();
     let requested = arg_integer(l, 3).and_then(|value| u64::try_from(value).ok());
     let (program, flag) = shell_config();
     let context = arg_string(l, 4).and_then(|raw| serde_json::from_str::<Value>(&raw).ok()).unwrap_or(Value::Null);
+    let stdin = arg_string(l, 5);
     let outcome = effective_exec_timeout_seconds(requested).and_then(|seconds|
-        crate::operations::foreground(program, flag, &command, &cwd, seconds, &context));
+        crate::operations::foreground(program, flag, &command, &cwd, seconds, &context, stdin.as_deref()));
     push_json(l, &outcome.unwrap_or_else(|error| json!({"error": error})));
     1
 }
