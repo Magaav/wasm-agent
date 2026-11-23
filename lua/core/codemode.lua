@@ -587,6 +587,10 @@ local function settle_call(s,call)
      else value,success={error=tostring(result),effect='unknown',replay_allowed=false},false end
      local encoded=json.encode(value);local reference=output.store(encoded)
      value,success=script_value(value,success)
+     -- The shape the script RECEIVES is the allow-list, whatever a producer added to the answer (the
+     -- non-zero-exit rewrite above marks it `ok:true, status:200`; a status is the same fact as ok, and the
+     -- caller acts on the ok/code pair). The evidence stored above is the native answer, unchanged.
+     value=bash_result.slim_for(call.tool,params,value)
      -- The shape the SCRIPT saw, recorded once per change (lua/core/return_shapes.lua never raises).
      if success and connector_name(call.tool) then return_shapes.learn(call.tool,current['function'].parameters,value) end
      -- Item 4 (round 3): a bash/shell call the DIRECT path would call a read (git status, rg, ls) is

@@ -19,7 +19,31 @@ end
 local a,wa,ca=allocate('cwd-a')
 local b,wb,cb=allocate('cwd-b')
 local function dispatch(name,args,ctx) return tools.dispatch(memory,name,args,'master',ctx or ca) end
-local function verify(r,w,marker,requested,where)
+-- WHERE THE ATTRIBUTION LIVES (mission slim-tool-results). A command's answer carries what a caller acts
+-- on and no longer the launch directory, so those facts are read from the OPERATION RECORD, through the
+-- handle the answer does carry: `operation {action="status", id=r.operation_id}`. A value that already IS
+-- a record (an `await`) is read as it is, so every caller below keeps reading the same facts with the
+-- same strength - only the door changed.
+local ATTRIBUTION={'effective_cwd','cwd_requested','cwd_source','cwd','cwd_substitution','cwd_note','promoted'}
+local function attribution(r,ctx)
+ if type(r)~='table' then return r end
+ for _,key in ipairs(ATTRIBUTION) do if r[key]~=nil then return r end end
+ if type(r.operation_id)~='string' or r.error~=nil then return r end
+ -- The TOOL, not host.operation: the record belongs to the session that started the work, and the tool
+ -- is what stamps that session (a raw host.operation call is a sessionless caller and is refused by name).
+ local record=dispatch('operation',{action='status',id=r.operation_id},ctx or ca)
+ if type(record)~='table' then return r end
+ local out={};for key,value in pairs(r) do out[key]=value end
+ for _,key in ipairs(ATTRIBUTION) do if out[key]==nil then out[key]=record[key] end end
+ return out
+end
+local function verify(r,w,marker,requested,where,ctx)
+ local slim=r
+ r=attribution(r,ctx)
+ check(slim.operation_id~=nil,'a command answer names its operation record: '..json.encode(slim))
+ -- The slim shape itself: the launch directory is on the record, not in the answer (mission slim-tool-results).
+ check(slim.effective_cwd==nil and slim.cwd==nil and slim.cwd_requested==nil and slim.cwd_source==nil
+   and slim.timing==nil,'the answer a caller receives carries no launch directory and no timing: '..json.encode(slim))
  check(r.code==0 or r.ok==true,'actual process succeeded: '..json.encode(r))
  local pwd,git=tostring(r.stdout):match('([^\r\n]+)\r?\n([^\r\n]+)')
  -- pwd -W gives native paths under Git Bash; Unix uses pwd -P.
@@ -39,11 +63,11 @@ if host.getenv('WA_CWD_NEGATIVE_OPERATION')=='1' then
 end
 first=dispatch('bash',{command=command('foreground.txt')})
 verify(first,wa,'foreground.txt')
-check(first.cwd_source=='session_workspace','authority-derived default is distinct')
+check(attribution(first).cwd_source=='session_workspace','authority-derived default is distinct')
 assert(host.write_file(wa.worktree..'/sub/seed','seed'))
 local sub=dispatch('bash',{command=command('sub.txt'),cwd='sub'})
 verify(sub,wa,'sub.txt','sub',wa.worktree..'/sub')
-check(sub.cwd_source=='explicit','explicit relative request remains distinct')
+check(attribution(sub).cwd_source=='explicit','explicit relative request remains distinct')
 local grouped=tools.start_parallel_bash({
  {id='parallel-default',['function']={name='bash',arguments=json.encode({command=command('parallel.txt')})}},
  {id='parallel-sub',['function']={name='bash',arguments=json.encode({command=command('parallel-sub.txt'),cwd='sub'})}}
@@ -55,7 +79,7 @@ check(eq(start.effective_cwd,wa.worktree) and start.cwd_requested=='','explicit 
 local other=dispatch('operation',{action='start',command=command('other.txt')..'; sleep 3'},cb)
 local relevant=op('relevant',{cwd=wa.worktree})
 local during=dispatch('bash',{command=command('during.txt')},cb)
-verify(during,wb,'during.txt')
+verify(during,wb,'during.txt',nil,nil,cb)
 local seen=false
 for _,entry in ipairs(relevant.operations or {}) do
  check(entry.operation_id~=other.operation_id,'other bound session not relevant')
@@ -68,7 +92,7 @@ local explicit=dispatch('operation',{action='start',cwd='sub',command=command('o
 verify(op('await',{id=explicit.operation_id}),wa,'operation-sub.txt','sub',wa.worktree..'/sub')
 -- Foreground adoption must index the process launch cwd as well.
 local adopted=dispatch('bash',{command=command('adopted.txt')..'; sleep 5 & exit 0'})
-check(adopted.promoted==true,'foreground descendants are adopted')
+check(attribution(adopted).promoted==true,'foreground descendants are adopted')
 seen=false
 for _,entry in ipairs(op('relevant',{cwd=wa.worktree}).operations or {}) do if entry.operation_id==adopted.operation_id then seen=true end end
 check(seen,'foreground adopted operation fences actual workspace')
@@ -129,10 +153,10 @@ local profile={session_id=a,user_id='master',subagent={allowed={bash=true}}}
 check(dispatch('operation',{action='start',command='echo forbidden'},profile).error=='capability_not_in_profile:operation','profile ceiling unchanged')
 check(tools.dispatch(memory,'bash',{command='echo forbidden'},'guest',ca).error=='forbidden_for_role:guest','role ceiling unchanged')
 -- No command parsing: an intentional later shell cd changes behavior, not launcher attribution.
-local later=dispatch('bash',{command='cd sub && '..command('later.txt')})
+local later=attribution(dispatch('bash',{command='cd sub && '..command('later.txt')}))
 check(eq(later.effective_cwd,wa.worktree) and host.read_file(wa.worktree..'/sub/later.txt')=='owned','later cd is not falsely reported as launch cwd')
 local legacy=memory.start_session('','legacy',{user_id='master'})
-local lr=dispatch('bash',{command=pwd..'; git rev-parse --show-toplevel'},{session_id=legacy,user_id='master'})
+local lr=attribution(dispatch('bash',{command=pwd..'; git rev-parse --show-toplevel'},{session_id=legacy,user_id='master'}),{session_id=legacy,user_id='master'})
 check(lr.code==0 and eq(lr.effective_cwd,source) and lr.cwd_requested=='' and lr.cwd=='','legacy unbound native default preserved')
 check(host.read_file(source..'/refused.txt')==nil,'canonical sentinel has no escaped markers')
 print(json.encode({ok=true,checks=checks,a=wa.worktree,b=wb.worktree,paid_calls=0}))
