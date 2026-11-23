@@ -1038,6 +1038,13 @@ check mission-verb bash scripts/test-mission-verb.sh
 # and a real `wa chat --once` against this file's own node store and a local SSE fixture (no model, no
 # network), because a stub steer would accept notes the real door refuses.
 WA_BIN="$bin" check mission-amend node scripts/test-mission-amend.mjs
+# AMEND AND RESUME ON A MISSION STARTED THE FACTORY'S WAY (23/11, mission-resume-keeps-provider): serve.env only,
+# no `env` file. Measured twice on 23/11: the resume runner died on `. "$M/env"` while amend.log already said
+# "resumed", and `wa mission resume` answered "No provider is configured". So a note reaches a run in flight by
+# steering, a settled worker is resumed and the resumed turn's model request really arrives, a resume that never
+# runs a turn is resume_failed with a non-zero exit, and both the script and `wa mission amend` (the same code)
+# do it. Same fixtures as the row above: a real `wa chat --once`, a real scripts/mission.sh, a local SSE provider.
+WA_BIN="$bin" check mission-amend-resume node scripts/test-mission-amend-resume.mjs
 # The preflight (item 2 of the factory round): the script that runs a mission's gate BEFORE anybody lands
 # it, judged on a scratch missions root and a stub landing - exit 0 green, 1 red with the failed rows by
 # name, 2 refused when it judged nothing, and the suite lock held while the landing ran.
