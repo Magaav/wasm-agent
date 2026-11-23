@@ -60,6 +60,15 @@ local function sql(uri, statement)
   return (answer.stdout or ''):gsub('%s+$', ''), answer.code
 end
 local function immutable(path) return 'file:' .. path .. '?immutable=1' end
+-- A copy is compared by its hash: `host.read_file` is a text reader and refuses a SQLite store by size or
+-- by bytes, and evidence that cannot be hashed is not evidence either way.
+local function digest(path)
+  local answer = decode(host.exec('sha256sum ' .. q(path), data, 60), 'sha256sum')
+  assert(answer.code == 0, 'sha256sum refused ' .. path .. ': ' .. tostring(answer.stderr))
+  local value = (answer.stdout or ''):match('^(%x+)')
+  assert(value and #value == 64, 'sha256sum answered nothing for ' .. path .. ': ' .. tostring(answer.stdout))
+  return value
+end
 local function listing()
   local answer = decode(host.exec('ls -a ' .. q(dir), data, 30), 'ls')
   return answer.stdout or ''
@@ -96,12 +105,16 @@ local function quarantine_once(what, wanted)
   tear_the_store()
   local verdict, code = sql(immutable(db), 'pragma integrity_check(100000);')
   assert(code ~= 0 or verdict ~= 'ok', what .. ': the torn store still passes integrity_check, so this row would measure nothing')
-  assert(host.write_file(root .. ('/changed_%d.lua'):format(round), ('local function changed_%d(a) return a end'):format(round)))
+  -- The change must reach the torn table: a function that CALLS one from the tree writes an edge, and an
+  -- edge write walks the `edges` b-tree this row zeroed. A function that calls nobody writes no edge, the
+  -- write never touches the torn page, and the index answers `ok` - measured on this node, 23/11.
+  assert(host.write_file(root .. ('/changed_%d.lua'):format(round), ('local function changed_%d(a) return evidence_1_1(a) end'):format(round)))
   local before = #copies()
   decode(host.graph_notify(json.encode({root = root})), 'notify')
   local deadline = os.time() + 120
   while #copies() <= before do
-    assert(os.time() < deadline, what .. ': no quarantine copy appeared within 120 s; listing: ' .. listing())
+    assert(os.time() < deadline, what .. ': no quarantine copy appeared within 120 s; listing: ' .. listing()
+      .. ' status: ' .. tostring(host.graph_status(json.encode({root = root}))))
     host.exec('sleep 1', data, 10)
   end
   local found = copies()
@@ -113,7 +126,7 @@ local one = quarantine_once('the first quarantine', 1)
 local copy = dir .. '/' .. one[1]
 local copy_text, copy_code = sql(immutable(copy), 'pragma integrity_check(100000);')
 assert(copy_code ~= 0 or copy_text ~= 'ok', 'the kept copy is not the broken store: it passes integrity_check')
-local preserved = assert(host.read_file(copy), 'the kept copy cannot be read, so it is not evidence')
+local preserved = digest(copy)
 
 -- The node rebuilds and answers again: a quarantine is still a quarantine.
 local deadline = os.time() + 120
@@ -128,7 +141,8 @@ assert(answered, 'the node never answered again after the quarantine: ' .. listi
 -- THE RULE: the second quarantine keeps the first one's evidence.
 local two = quarantine_once('the second quarantine', 2)
 assert(#two == 2, 'the retention rule kept ' .. #two .. ' copies instead of two: ' .. table.concat(two, ' '))
-local older = two[1] == one[1] and two[2] or two[1]
+local older = one[1]
+assert(two[1] == older or two[2] == older, 'the first quarantine copy is not among the two that survive: ' .. table.concat(two, ' '))
 assert(older == one[1], 'the copy that survived is not the one the first quarantine made: ' .. table.concat(two, ' '))
-assert(host.read_file(dir .. '/' .. older) == preserved, 'the older copy was rewritten, so it is no longer the store that was quarantined')
+assert(digest(dir .. '/' .. older) == preserved, 'the older copy was rewritten, so it is no longer the store that was quarantined')
 print('graph quarantine evidence ok: ' .. #two .. ' copies kept, the older one byte for byte, and the node answered again')
