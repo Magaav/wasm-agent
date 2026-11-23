@@ -92,9 +92,14 @@ asserts two things, because they answer different questions:
    that reason instead of passing.
 
 The bound is a promise, not a detector: 66 ms inside a 250 ms start cannot be seen by a wall-clock bound on
-an ordinary machine, which is why row 1 carries the discrimination. Stated bound for this branch, this node,
-release build: **a piped `wa chat --once` answers its first line in under 300 ms (median 274 ms), well under
-Victor's "well under a second"**. `WASM_AGENT_LUA_ROOT` unset, scratch home.
+an ordinary machine, which is why row 1 carries the discrimination.
+
+STATED BOUND: **a piped `wa chat --once` answers its first line in under 900 ms on a machine at or below one
+load unit per core (median of five), and under 2500 ms on every single run**. Measured for this branch, this
+node, release build, `WASM_AGENT_LUA_ROOT` unset, scratch home: **274 ms** median on a quiet machine
+(267, 273, 274, 299, 303) and **455 ms** median with this node running three other missions' fast paths at
+once (404, 455, 455, 528, 589) - the bound that holds is the one that survives the load, and Victor's "well
+under a second" is met in both.
 
 Wired at `scripts/fast.sh:971` (row `piped-start`, right after `cli-scripted`, commit `cea738c1`).
 `bash scripts/test-discriminates.sh HEAD~2` answers
@@ -115,6 +120,25 @@ Verified:
   `scripts/test-durable-steering.lua`, `scripts/test-selfloop.lua` (109 checks), `scripts/test-cli-scripted.mjs`
   (21 checks), `scripts/test-build-identity.lua` (21 checks) - all green with the branch binary;
 * the capability inventory's CLI half: `wa capabilities --json` parses, 147 entries against the base's 146.
+
+The full fast path (commit `cea738c1`'s wiring), `WA_BIN` = the branch's release binary, under
+`flock -o ~/Work/missions/.suite.lock`, took 1178 s and ended
+`fast path FAILED (49 of 419 checks, 0 skipped, 1178s)` with **the new row green**
+(`piped-start ... pass ... 1678 ms`, from its `wa-fast-result.json`). The 49 are not this change, and each is
+named here:
+
+* **45 Lua rows** - all 45 fail with a binary built from the base commit too: run one by one with
+  `WA_SCRIPT=<row>` against `/home/victor/wasm-agent/target/pcsf-base-target/release/wa`, none passes (42 exit
+  1, 3 exit 2). The three I read in full (`scripts/test-status.lua`, `scripts/test-codemode-default.lua`,
+  `scripts/test-secret-guard.lua`) fail with the same `codemode_not_enabled`, because these builds carry no
+  code-mode assets (`WA_CODEMODE_ALLOW_EMPTY=1`, the flag `scripts/test.sh` also sets for a non-shipping build).
+* **`run-block-pty`, `run-live-pty`** - `run block pty: 0 ok, 4 failed` with the base binary as well (both rows
+  drive a ```js run block, i.e. code mode).
+* **`build-info`** - the binary I ran the fast path with had been built before the branch's commits, so its
+  embedded commit and dirty flag did not match the tree; rebuilt at `16b61f7b` it is `test-build-info: 27 checks,
+  0 failed`.
+* **`mission-amend-resume`** - fails identically with the base binary (`mission amend/resume: FAILED after 10
+  checks`).
 
 NOT verified:
 
