@@ -123,21 +123,11 @@ impl Transport for ShutdownTcpTransport {
     }
 
     fn await_input(&mut self, timeout: NextTimeout) -> Result<bool, Error> {
-        if !crate::subagents::in_task() && self.stream_control.is_none() {
-            // No task, no cancellation to observe: one read on the request's own budget.
-            update_timeout(timeout, &mut self.timeout_read, &self.stream, |stream, value| {
-                stream.set_read_timeout(value)
-            })
-            .map_err(Error::Io)?;
-            let input = self.buffers.input_append_buf();
-            let amount = match self.stream.read(input) {
-                Ok(amount) => amount,
-                Err(error) if is_timeout(&error) => return Err(Error::Timeout(timeout.reason)),
-                Err(error) => return Err(Error::Io(error)),
-            };
-            self.buffers.input_appended(amount);
-            return Ok(amount > 0);
-        }
+        // EVERY caller of this transport has a cancellation to observe: a child through its own flag,
+        // the interactive CLI and a node run through the same probe (host::run_cancel_requested reads
+        // the CLI interrupt too). The read that used to be one blocking call for a caller with no task
+        // is what made Esc wait for the provider next byte (measured 23/11: 21 s, and a mid-stream
+        // silence outlasted the run), so there is no fast path left here.
         // A task may be cancelled while this read is silent. `shutdown` on a
         // duplicated handle does not wake a blocked `recv` on Windows (measured: the
         // read stays blocked with the socket open), so wait in short slices and
@@ -147,7 +137,10 @@ impl Transport for ShutdownTcpTransport {
         let (budget, reason) = self.stream_control.as_ref().map(|control| control.read_budget(timeout))
             .unwrap_or_else(|| (timeout.not_zero().map(|value| *value), timeout.reason));
         let started = std::time::Instant::now();
-        let slice = std::time::Duration::from_millis(250);
+        // 50 ms, not 250: this slice is the fallback wake (where shutting the socket down does not
+        // wake a blocked read), and it is inside the 300 ms a stop is allowed to take. A silent wait
+        // costs twenty wakeups a second, which is nothing beside the read it is polling.
+        let slice = std::time::Duration::from_millis(50);
         loop {
             if crate::host::run_cancel_requested() {
                 return Err(Error::Timeout(reason));

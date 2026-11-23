@@ -1431,6 +1431,58 @@ end
 -- `{t}` the clock. One layout, two renderers - this module fills them for a line it prints
 -- itself, and `host.ticker` fills them on a timer while this process is blocked. The second
 -- value is when the timed thing started, which is what the clock counts from either way.
+-- HOW LONG A PROVIDER'S PROMPT CACHE LASTS, as far as this row is concerned: five minutes, the shortest
+-- of the providers this deployment talks to. It is an ASSUMPTION, named as one, and it decides one
+-- sentence on one row - after a longer silence the provider re-reads the whole conversation, which is
+-- exactly why the first reply after an idle hour takes far longer than the second (measured 23/11: 47
+-- minutes after the previous answer, 21 s inside one silent provider read).
+M.COLD_CONTEXT_SECONDS = 300
+
+-- How much silence makes a model call worth a row of its own. A word for the wait costs the reader
+-- something: the phase word it replaces ("Thinking") is two frames' worth of a fast reply, and a row
+-- that flickers for every 200 ms call is noise, not information. One second is where a reply stops
+-- feeling immediate (warm ttft here is 1.4-2.8 s, so a warm call DOES show it - which is the point).
+M.WAIT_AFTER_SECONDS = 1
+
+-- A MODEL CALL IS WAITING FOR ITS FIRST BYTE, and this is when that wait began (change/esc-stops-now,
+-- item 5). Set where a model call begins - the run's first round, a round boundary, a status event that
+-- announces one, and after a tool result - and cleared by the first thing the provider says: a delta, a
+-- thought, a tool call, or the usage numbers. Display only: nothing here reaches the request bytes.
+function METHODS:model_waiting()
+  -- FRESH every time: this is called where a model call BEGINS (a run start, a round boundary, a status
+  -- event that announces one, the end of a tool block), and each call's wait is its own. Keeping an
+  -- older start would report the previous call's silence as this one's.
+  self.model_wait = { started = self.now() }
+end
+
+function METHODS:model_spoke()
+  self.model_wait = nil
+end
+
+-- The row while a model call has produced NO BYTE: what the run is waiting on, how long it has been
+-- waiting, and the one key that ends the wait. A silent provider used to look exactly like a dead
+-- session, and the reader's only lever - a key they may not know they have - was nowhere on screen.
+-- The cold-context sentence is the other half of the same fact: after a silence longer than a
+-- provider's prompt cache, the first reply is slower, and that is not a hang either.
+function METHODS:waiting_text()
+  local wait = self.model_wait
+  if not wait then return nil end
+  if (self.now() - wait.started) < M.WAIT_AFTER_SECONDS then return nil end
+  local line = "waiting for the model \194\183 {w} \194\183 esc to stop"
+  local last = self.last_answer_at
+  if last and (self.now() - last) >= M.COLD_CONTEXT_SECONDS then
+    line = line .. " \194\183 the context is cold (" .. M.duration(self.now() - last) .. " idle): the first reply is slower"
+  end
+  return line
+end
+
+-- Is the context this turn sends older than the provider's cache? Read by the composer, so the numbers
+-- (all zero while nothing has arrived) can give the cold sentence the room it needs.
+function METHODS:cold_context()
+  local last = self.last_answer_at
+  return (last and (self.now() - last) >= M.COLD_CONTEXT_SECONDS) and true or false
+end
+
 function METHODS:status_template()
   local boxed = self.screen and self.screen.footer
   if self.screen and not self.turn and self.last_summary then
@@ -1446,6 +1498,9 @@ function METHODS:status_template()
   -- ours to draw (session isolation, finding 1), and this branch draws nothing about other sessions.
   local phase = self.pending and (self.pending.raw and "Running your script"
     or M.phase((M.target(self.pending.name, self.pending.arguments)))) or self.phase
+  -- A MODEL CALL THAT HAS SAID NOTHING YET outranks the phase word while it lasts: Thinking is what a
+  -- run does, and waiting for the model is what this second is (change/esc-stops-now, item 5).
+  local waiting = (not self.pending) and self:waiting_text() or nil
   local started = self.screen and self.turn and self.turn.started
     or (self.pending and self.pending.started) or (self.turn and self.turn.started)
   local step = self.turn and (self.turn.step_started or self.turn.started)
@@ -1460,6 +1515,16 @@ function METHODS:status_template()
     return line .. paint(" \194\183 " .. marker, "warning", live)
   end
   local function compose(shown, live)
+    -- THE WAIT FIRST: while a model call has said nothing, the row is about that wait, whatever else the
+    -- run has done. A cold context takes the numbers row's place, because they are all zero until the
+    -- first byte arrives and the sentence is the thing worth the room (change/esc-stops-now, item 5).
+    if waiting then
+      local text = "{m}" .. paint(waiting, "muted", live)
+      if not self:cold_context() then
+        text = text .. paint(" \194\183 ", "muted", live) .. paint(self:run_numbers("{s}", "{T}"), "muted", live)
+      end
+      return with_source(text, live)
+    end
     if boxed and self.turn then
       -- `✶ 󰷺2·5s Δ12.4k ↑4.6M ↓310 󰔛1:51`: the step this run is on and how long it has taken, what
       -- it ADDED to the context (`Δ`) and the session's input total (`↑`), its output tokens and its
@@ -1468,7 +1533,7 @@ function METHODS:status_template()
       -- wears that gray and cannot drift into a colour of its own (Victor, 18/11).
       return with_source("{m}" .. paint(self:run_numbers("{s}", "{T}"), "muted", live), live)
     end
-    local line = "{m}" .. shown
+    local line = "{m}" .. (waiting and paint(waiting, "accent", live) or shown)
     if not self.turn then return with_source(line, live) end
     if self.screen then
       local run, base, totals = self.turn, self.turn.baseline or {}, self.totals or {}
@@ -1567,6 +1632,12 @@ function METHODS:status_text(with_spinner)
     text = text:gsub("{t}", function() return elapsed end)
     local step = M.step_clock(now - ((self.turn and self.turn.step_started) or started))
     local total = M.run_clock(now - started)
+    -- The wait for the model's first byte (change/esc-stops-now, item 5): the twin of the host ticker's
+    -- {w}, so the frame this process draws and the frames the host draws while it is blocked agree.
+    if self.model_wait then
+      local waited = M.step_clock(now - self.model_wait.started)
+      text = text:gsub("{w}", function() return waited end)
+    end
     text = text:gsub("{s}", function() return step end):gsub("{T}", function() return total end)
   end
   return text
@@ -1587,6 +1658,9 @@ function METHODS:animate()
   local ok = pcall(host.ticker, json.encode({
     line = template, marks = started and M.marks(self.live) or {}, started = started or self.now(), frame = self.frame,
     step_started = self.turn and self.turn.step_started or nil,
+    -- The wait for the model's first byte, so the host's frames count THIS wait and not the run
+    -- (change/esc-stops-now, item 5).
+    wait_started = self.model_wait and self.model_wait.started or nil,
     -- A row of its own while there is a screen: the ticker draws on the status row and hands the
     -- cursor back, which is what lets the reader keep typing on the input row at the same time.
     row = self.screen and self.screen.status or nil,
@@ -2626,6 +2700,8 @@ function METHODS:run_started()
   self.round = 0
   self.deltas = 0
   self.warned = nil
+  -- The run's first model call: the wait the status row counts until the first byte arrives.
+  self:model_waiting()
   -- The usage event carries the *session's* running totals, so a run's own numbers are
   -- the difference across it. The first run's baseline is zero, not nil: a footer with
   -- no numbers on the first turn is a footer that looks broken.
@@ -2971,6 +3047,10 @@ M.bulletize = bulletize
 -- The answer, then the numbers for the run that produced it. A reply that already
 -- streamed (a peer or a window run reaching this printer) is not printed twice.
 function METHODS:answered(reply)
+  -- When the last answer arrived: the one clock that says whether the next request starts from a
+  -- provider's warm cache or from a cold one (change/esc-stops-now, item 5).
+  self.last_answer_at = self.now()
+  self:model_spoke()
   self:delta_reset(true)
   self:flow_end()
   self:commentary_flush()
@@ -3005,6 +3085,16 @@ end
 
 function METHODS:failed(problem, opts)
   opts = opts or {}
+  local cancelled = tostring(problem or ""):find("run_cancelled", 1, true) ~= nil
+  if cancelled then
+    -- WHAT ALREADY STREAMED STAYS (change/esc-stops-now, item 2). A stop used to run straight into
+    -- clear(), which throws the half-written answer away: a reader who interrupted a long reply lost
+    -- the words they had already read on screen. The text is written as it arrived, and the one line
+    -- that says why it ended follows it.
+    self:delta_reset()
+    self:flow_end()
+    self:commentary_flush()
+  end
   self:clear()
   self:flush_call()
   -- An interrupt (Esc, Ctrl+C) is the reader's own choice, not an error: say so plainly, in ONE line, and
@@ -3156,6 +3246,7 @@ function METHODS:event(event)
   if kind == "status" then
     local text = tostring(event.text or "")
     if text == "thinking" or text == "model" then
+      self:model_waiting()
       self.phase = "Thinking"
       self.pending = nil
       self:paint()
@@ -3182,6 +3273,8 @@ function METHODS:event(event)
     self.round = tonumber(event.n) or (self.round + 1)
     self.total_rounds = self.total_rounds + math.max(0, self.round - previous)
     if self.turn then self.turn.rounds = self.round; self.turn.step_started = self.now() end
+    -- A round boundary is a new model call: the wait starts again.
+    self:model_waiting()
     self:paint()
   elseif kind == "run_code_delta" then
     -- The model writing the `run` tool's script, as it writes it (lua/core/run_stream.lua decodes the
@@ -3191,6 +3284,7 @@ function METHODS:event(event)
     -- screen and adds only its rows.
     self:run_code_piece(event)
   elseif kind == "tool" then
+    self:model_spoke()
     self:delta_reset()
     self:flow_end()
     -- The heading is printed when the result arrives, so its dot can say how it went (green or
@@ -3392,6 +3486,7 @@ function METHODS:event(event)
       self:commentary_block(event.text)
     end
   elseif kind == "usage" then
+    self:model_spoke()
     self.totals = event.total or self.totals
     -- The context in use is the last model call's prompt, measured by the provider;
     -- `total.prompt` is the session's running sum and would grow without bound.
@@ -3403,10 +3498,14 @@ function METHODS:event(event)
   elseif kind == "delta" then
     -- The answer, as it arrives. A CLI run used to have no sink, so this never fired and the text
     -- appeared whole when the step settled; the host now forwards the provider's deltas here.
+    -- The provider spoke: the wait for its first byte is over.
+    self:model_spoke()
     self.deltas = self.deltas + 1
     self:delta_piece(event.text or "")
   elseif kind == "reasoning_delta" then
     -- Thinking, as it arrives: `✻ ` and the thought in gray on the same line, no title (operator 17/11).
+    -- A thought is the provider speaking too, which ends the wait for its first byte.
+    self:model_spoke()
     self.reasoning_streamed = true
     if (host.getenv("WASM_AGENT_CLI_THINKING") or ""):lower() ~= "off" then self:flow("think", event.text) end
   elseif kind == "error" then

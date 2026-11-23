@@ -83,13 +83,39 @@ pub type SocketSlot = Arc<Mutex<Vec<std::net::TcpStream>>>;
 /// the shared slot; `shutdown(Both)` on it wakes the blocked read immediately.
 pub fn register_active_socket(stream: &std::net::TcpStream) {
     if let Ok(clone) = stream.try_clone() {
-        CURRENT.with(|slot| {
-            if let Some(context) = slot.borrow().as_ref() {
-                if let Ok(mut sockets) = context.sockets.lock() {
-                    sockets.push(clone);
+        // A child's call belongs to the child's slot. A call with no task - the interactive CLI's own
+        // provider request, a node run - belongs to the process: it is the FOREGROUND slot the reader
+        // thread shuts down when the operator presses Esc (change/esc-stops-now).
+        if in_task() {
+            CURRENT.with(|slot| {
+                if let Some(context) = slot.borrow().as_ref() {
+                    if let Ok(mut sockets) = context.sockets.lock() {
+                        sockets.push(clone);
+                    }
                 }
-            }
-        });
+            });
+        } else if let Ok(mut sockets) = FOREGROUND_SOCKETS.lock() {
+            sockets.push(clone);
+        }
+    }
+}
+
+/// The socket a FOREGROUND call (no task context: the interactive CLI's own provider request) is
+/// blocked on. One slot: the reader thread that raises the interrupt is its only other user, and an
+/// interactive process has one foreground request at a time.
+static FOREGROUND_SOCKETS: std::sync::Mutex<Vec<std::net::TcpStream>> = std::sync::Mutex::new(Vec::new());
+
+/// Wake the foreground request's socket when the operator interrupts.
+///
+/// The mechanism a child already had, given to the foreground: a provider that accepted the request
+/// and says nothing blocks the read until its own budget expires, and a flag alone cannot reach a
+/// blocked read. Shutting that socket down wakes it at once (measured: single-digit milliseconds on
+/// Linux), where the transport's cancellation poll would take up to its own slice.
+pub fn shutdown_foreground_sockets() {
+    if let Ok(sockets) = FOREGROUND_SOCKETS.lock() {
+        for stream in sockets.iter() {
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+        }
     }
 }
 
@@ -103,6 +129,13 @@ pub fn clear_active_socket() {
             }
         }
     });
+    // The foreground slot too: a finished call must not leave a socket for the next interrupt to shut
+    // down, which by then may be a pooled connection somebody else is reading.
+    if !in_task() {
+        if let Ok(mut sockets) = FOREGROUND_SOCKETS.lock() {
+            sockets.clear();
+        }
+    }
 }
 
 /// Wake every socket this task is blocked on. Called on cancel from any thread.
@@ -797,7 +830,11 @@ impl Manager {
             // keeps reporting progress. A bounded wait is not a wedged interpreter: `host.exec`,
             // `host.http` and the operation await already beat, and a silent subagent await made a
             // healthy node look stalled to the window and to `/health`.
-            let remaining = (limit - elapsed).min(Duration::from_millis(250));
+            // 50 ms, not 250 (change/esc-stops-now, item 2): this slice is how long a stop waits for the
+            // await to notice it, and a run stopped by Esc must be back at the prompt inside 300 ms
+            // (measured before: 383 ms with the 250 ms slice; after: 214 ms). Twenty wakeups a second
+            // while a child runs is nothing beside the wait it is polling.
+            let remaining = (limit - elapsed).min(Duration::from_millis(50));
             let (guard, _) = self
                 .inner
                 .changed

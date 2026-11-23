@@ -1115,7 +1115,11 @@ pub fn foreground(
     let tool = context["tool"].as_str().filter(|name| !name.is_empty()).unwrap_or("bash").to_string();
     loop {
         let mut state = manager()
-            .wait(&id, Duration::from_millis(100))
+            // 25 ms, not 100 (change/esc-stops-now, item 2): this is how long an interrupt waits for the
+            // foreground shell to be noticed, and the whole stop has a 300 ms budget that the reader's
+            // own 120 ms lone-Esc lookahead already spends a third of (measured: 306 ms before,
+            // 214 ms after). A wait of a running command is a condvar timeout, not a spin.
+            .wait(&id, Duration::from_millis(25))
             .map_err(|e| e.to_string())?;
         progress_tick(&state, &tool);
         if state["settled"] == true {

@@ -2337,6 +2337,57 @@ do
   end
 end
 
+
+-- ---- a silent model call says what it is waiting for (change/esc-stops-now, item 5) ------------
+--
+-- A provider that accepted the request and said nothing for a minute looked exactly like a dead
+-- session: the row showed a spinner and the run's numbers, nothing else. It now names the wait, counts
+-- THIS wait (not the run), and names the key that ends it; after a silence longer than a provider's
+-- prompt cache it also says the first reply is slower. Display only: the row is drawn from state the
+-- view already has.
+local waiting_out = recorder()
+local waiting_clock = 1000
+local waiting_view = view_lib.new({ out = waiting_out.out, live = false,
+  now = function() return waiting_clock end, limit = 120 })
+waiting_view:run_started()
+ok(not has(waiting_view:status_template(), "waiting for the model"),
+  "a call that has just started is not yet a wait worth a row (one second of silence is)")
+waiting_clock = waiting_clock + 2
+ok(has(waiting_view:status_template(), "waiting for the model"),
+  "a model call that has said nothing says so on the status row")
+ok(has(waiting_view:status_template(), "esc to stop"),
+  "and names the one key that ends the wait")
+ok(has(waiting_view:status_template(), "{w}"),
+  "with its own clock token, not the run's")
+waiting_clock = 1012
+ok(has(visible(waiting_view:status_text(true)), "waiting for the model \194\183 12s"),
+  "the clock counts the wait: " .. visible(waiting_view:status_text(true)))
+-- The provider spoke: the wait is over and the row goes back to naming the call.
+waiting_view:event({ type = "delta", text = "hello" })
+ok(not has(waiting_view:status_template(), "waiting for the model"),
+  "the first byte ends the wait row")
+-- A tool call in flight is NOT a model wait, whatever the last model call did.
+waiting_view:event({ type = "round", n = 1 })
+waiting_view:event({ type = "tool", name = "bash", arguments = { command = "sleep 1" } })
+ok(not has(waiting_view:status_template(), "waiting for the model"),
+  "a running tool is named as the tool, not as a model wait")
+
+-- A silence longer than a provider's prompt cache: the row says the first reply will be slower.
+local cold_out = recorder()
+local cold_clock = 5000
+local cold_view = view_lib.new({ out = cold_out.out, live = false,
+  now = function() return cold_clock end, limit = 120 })
+cold_view:run_started()
+cold_view:answered("an answer")
+ok(not has(cold_view:status_template(), "the first reply is slower"),
+  "a fresh answer leaves the row saying nothing about a cold context")
+cold_clock = cold_clock + view_lib.COLD_CONTEXT_SECONDS + 60
+cold_view:run_started()
+cold_clock = cold_clock + view_lib.WAIT_AFTER_SECONDS + 1
+ok(has(cold_view:status_template(), "the first reply is slower"),
+  "an answer older than the cache lifetime says the first reply is slower: "
+    .. tostring(cold_view:status_template()))
+
 if failed > 0 then
   print(string.format("cli view: %d failed of %d checks", failed, checks))
   os.exit(1)
