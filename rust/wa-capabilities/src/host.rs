@@ -3757,8 +3757,7 @@ fn binary_digest() -> &'static Option<String> {
     })
 }
 
-/// host.process_identity() -> JSON text of `{process_id, boot_id}`: this process, and nothing about
-/// the bytes it runs.
+/// host.process_identity() -> JSON text of `{process_id, boot_id}` - one JSON string the caller decodes with lua/vendor/json.lua, never a Lua table.
 ///
 /// WHY IT IS NOT `host.runtime_info`. A run's presence row needs its pid and its boot tag, and it is
 /// written before the first line a chat prints (`agentlib.new`, `memory.presence_begin`). Asking
