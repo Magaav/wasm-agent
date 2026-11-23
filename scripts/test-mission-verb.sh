@@ -74,6 +74,12 @@ ok
 for f in env prompt.md run.sh; do [ -s "$M/$f" ] || fail "launch did not write $f"; ok; done
 head -1 "$M/prompt.md" | grep -q "^mission demo in " || fail 'the prompt does not start with the marker'
 ok
+# The CLI's prompt builder says what an amendment is, in the same words the script's does: a change that
+# arrives while the worker runs is newer than the brief, and the report names it by its stamp.
+grep -q '^## Amendments' "$M/prompt.md" || fail 'the CLI prompt does not tell the worker what an amendment is'
+ok
+grep -q 'NEWER than the brief' "$M/prompt.md" || fail 'the CLI prompt does not say an amendment is newer than the brief'
+ok
 has "$(cat "$M/env")" "BRANCH='change/demo'" 'the env names the branch'
 # The runner never picks an execution path of its own: native run(code=...) is the one path (Victor 21/11).
 grep -q '^export WASM_AGENT_RAW_CODE' "$M/run.sh" && fail 'run.sh exports WASM_AGENT_RAW_CODE (a second execution path)'

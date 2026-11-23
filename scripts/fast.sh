@@ -1004,6 +1004,12 @@ check mission bash scripts/test-mission.sh
 # The mission verb in the CLI (change/mastermind item 2): launch -> start -> status -> stop against a
 # scratch root and a stub CLI, and the refusals that keep a second writer out of one worktree.
 check mission-verb bash scripts/test-mission-verb.sh
+# A CHANGE THAT REACHES A RUNNING WORKER (Victor 22/11, steer-running-worker): `mission.sh amend` appends the
+# note to brief.md with its UTC stamp and delivers it through the product's own steering, so a real worker's
+# NEXT model request sees it - once - and a finished worker is resumed with it. It drives the real scripts
+# and a real `wa chat --once` against this file's own node store and a local SSE fixture (no model, no
+# network), because a stub steer would accept notes the real door refuses.
+WA_BIN="$bin" check mission-amend node scripts/test-mission-amend.mjs
 # The preflight (item 2 of the factory round): the script that runs a mission's gate BEFORE anybody lands
 # it, judged on a scratch missions root and a stub landing - exit 0 green, 1 red with the failed rows by
 # name, 2 refused when it judged nothing, and the suite lock held while the landing ran.
