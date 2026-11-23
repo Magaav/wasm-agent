@@ -1912,6 +1912,13 @@ function M:run(text, images)
   -- The reader is told what it waits for, from the one place that knows the wait is real (item 3).
   sqlite_busy_lib.on_wait(function(action, reason) self:ledger_wait_notice(action, reason) end)
   sqlite_busy_lib.begin_window(tonumber(host.getenv('WASM_AGENT_START_PATIENCE_MS') or '') or 400)
+  -- A RECORD A KILLED PROCESS SPOOLED IS WRITTEN AS SOON AS THE LEDGER ANSWERS (Fable's review of
+  -- d1777bce, item 1). The run's start is the first moment this process is about to write to the ledger
+  -- anyway, and it is inside the start window, so a jammed ledger cannot make a turn's first second pay for
+  -- a record left by somebody else's kill: the window bounds this to the preamble's patience. Inside a
+  -- pcall, because a ledger that refuses must not stop the turn - the record stays spooled, and the run
+  -- end and the next run try again.
+  pcall(function() telemetry.flush_audit() end)
   self.run_id=host.uuid()
   -- NO NEW TURN WHILE A DEPLOY WAITS OR INSTALLS (22/11).
   --
