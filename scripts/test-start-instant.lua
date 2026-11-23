@@ -51,6 +51,57 @@ local function sh(command, cwd)
 end
 local function first_line(text) return tostring(text or ""):match("([^\r\n]+)") or "" end
 
+-- A TIMING ROW THAT FAILS ON A BUSY MACHINE MEASURES THE MACHINE (change/speed-board, 22/11). This row
+-- stopped a fast path once under load (whatsapp-finds-owner, 22/11: one run red, two green alone) on a
+-- single sample with an absolute bound. The bound is the promise and it does not move; what changes is
+-- that the number is now the MEDIAN OF THREE turns, and that no number is measured at all while the
+-- machine is above its ceiling (one load unit per core): the row then refuses by name, which is what a
+-- reader can act on, instead of failing for a reason nobody can fix.
+-- The machine's own load, from the kernel (Linux) and from uptime (the rest). nil when neither answers, and
+-- nil is never "quiet": an unknown load is not a measured one (rule 1).
+local function load_average()
+  local one = sh('cut -d" " -f1 /proc/loadavg')
+  local value = tonumber(first_line(tostring(one.stdout or '')))
+  if value then return value end
+  local uptime = sh("uptime")
+  local text = first_line(tostring(uptime.stdout or ''))
+  local after = text:match('load averages?:%s*([%d%.]+)')
+  return after and tonumber(after) or nil
+end
+
+local function core_count()
+  local out = sh('nproc')
+  local count = tonumber(first_line(tostring(out.stdout or '')))
+  if count and count >= 1 then return count end
+  return nil
+end
+
+-- Wait (bounded) for the load to come under the ceiling. Returns true, or false and the reason, which the
+-- caller turns into a refusal - never into a pass.
+local function wait_for_quiet(budget_s)
+  local ceiling = core_count()
+  local load = load_average()
+  if not ceiling or not load then return false, 'the machine did not say its load or its cores' end
+  local deadline = os.time() + (budget_s or 60)
+  while os.time() < deadline do
+    load = load_average()
+    if load and load <= ceiling then return true end
+    host.sleep('500')
+  end
+  return false, string.format('the machine stayed at load %s on %d cores (ceiling %d): a timing row cannot tell code from load',
+    tostring(load and string.format('%.2f', load) or 'unknown'), ceiling, ceiling)
+end
+
+local function median(values)
+  local sorted = {}
+  for _, value in ipairs(values or {}) do if tonumber(value) then sorted[#sorted + 1] = tonumber(value) end end
+  if #sorted == 0 then return nil end
+  table.sort(sorted)
+  local middle = math.floor(#sorted / 2)
+  if #sorted % 2 == 1 then return sorted[middle + 1] end
+  return math.floor((sorted[middle] + sorted[middle + 1]) / 2 + 0.5)
+end
+
 local function executable(path)
   if not path or path == "" then return nil end
   if sh('test -x "' .. path .. '"').code ~= 0 then return nil end
@@ -181,11 +232,35 @@ end
 local memory = dofile("lua/core/memory.lua")
 memory.setup()
 
--- ---- 1. the quiet shape -------------------------------------------------------------------------
-local quiet = run_turn("quiet")
-check(quiet.fields.ok == "true", "a turn completes on a quiet ledger (" .. tostring(quiet.fields.error) .. ")")
-check(quiet.gap_ms ~= nil and quiet.gap_ms < 1000,
-  "quiet ledger: the model call starts in under 1 s (" .. tostring(quiet.fields.gap_ms) .. ")")
+-- ---- 0. a machine busy enough to explain any number is not measurable ---------------------------
+-- The row's promise (under 1 s, with a lock held) is only meaningful about the code, so this is measured
+-- on a machine that can tell them apart. A machine that stays above its ceiling for the whole budget
+-- refuses by name (SKIP, and the reason says what it was doing), exactly like a row with no binary.
+local quiet_enough, busy_why = wait_for_quiet(60)
+if not quiet_enough then
+  print("SKIP start-instant: " .. tostring(busy_why))
+  os.exit(0)
+end
+
+-- ---- 1. the quiet shape, as the MEDIAN OF THREE TURNS -------------------------------------------
+-- One sample is what flaked: two of three quiet runs are green and the third pays for whatever else the
+-- machine was doing. The median of three is the number that describes the code, and the assertion below
+-- is unchanged - under 1 s, on the median, with every sample printed so a reader can see the spread.
+local quiet_gaps = {}
+local quiet_ok = true
+for index = 1, 3 do
+  local quiet = run_turn("quiet" .. index)
+  if quiet.fields.ok ~= "true" then quiet_ok = false end
+  if quiet.fields.error then
+    print("     quiet turn " .. index .. ": " .. tostring(quiet.fields.error))
+  end
+  if quiet.gap_ms then quiet_gaps[#quiet_gaps + 1] = quiet.gap_ms end
+end
+local quiet_median = median(quiet_gaps)
+check(quiet_ok, "a turn completes on a quiet ledger (" .. #quiet_gaps .. " of 3 turns produced a gap)")
+check(quiet_median ~= nil and quiet_median < 1000,
+  "quiet ledger: the model call starts in under 1 s (median " .. tostring(quiet_median) .. " ms of "
+    .. table.concat(quiet_gaps, ", ") .. ")")
 
 -- ---- 2. a second process holds the write lock for 10 s, the turn must not pay for it -------------
 local turn_pid, log = start_turn_waiting("held")
@@ -199,7 +274,8 @@ elseif holder_pid and held == false then
   print("FAIL start-instant: the holder did not hold the ledger write lock - the measurement would be a guess")
   failures = failures + 1
 elseif holder_pid and held then
-  print("ok   the held window is real: a BEGIN IMMEDIATE from this process was refused")
+  print("ok   the held window is real: a BEGIN IMMEDIATE from this process was refused (load "
+    .. tostring(load_average()) .. ")")
   host.sleep("100")
   local go = scratch .. "/go-held"
   sh('printf go > "' .. go .. '"')
