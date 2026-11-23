@@ -130,7 +130,9 @@ check(no_number_line ~= nil and no_number_line:find('%d%.%d%d') == nil,
 -- A HOLE DOES NOT CONSUME THE WINDOW: a commit with no number cannot be the floor, and it must not push
 -- the last numbers that exist out of the window either (23/11: the eight commits of 'unavailable' after
 -- 8862b600 would otherwise have hidden its 321 ms start from every comparison).
-local with_holes = { entry('floor', 1.0, 321) }
+-- THREE points at the floor, because a verdict now needs three (see "the three-point floor" below):
+-- the subject here is the WINDOW, not the count.
+local with_holes = { entry('floor', 1.0, 321), entry('floor2', 1.0, 330), entry('floor3', 1.0, 325) }
 for index = 1, 12 do
   with_holes[#with_holes + 1] = stats.finish({ sha = 'hole' .. index, load = 1.0, rows = {
     start = { state = 'unavailable', reason = 'no binary to measure', load = 0 } } })
@@ -138,7 +140,107 @@ end
 local after_holes = stats.judge(with_holes, entry('now', 1.0, 350))
 check(after_holes.rows[1].best_ms == 321 and after_holes.rows[1].best_sha == 'floor',
   'a run of holes does not hide the last real number (best ' .. tostring(after_holes.rows[1].best_ms) .. ')')
-check(after_holes.rows[1].red == false, 'and a number 9% above that floor is not RED')
+check(after_holes.rows[1].state == 'ok' and after_holes.rows[1].red == false, 'and a number 9% above that floor is not RED')
+
+-- ---- the three-point floor -------------------------------------------------------------------------
+-- ONE COMPARABLE POINT IS NOT A VERDICT (mission speed-board-landing-kinds, 23/11). main-health called
+-- 414 ms RED +21.1% against a single 342 ms point, and a landing 288 s RED +14300% against one 2 s point:
+-- two numbers taken on one machine, presented as a regression. Below three comparable points the row has
+-- no verdict at all, and it says how many it has.
+local one = { entry('only', 1.0, 200) }
+local one_verdict = stats.judge(one, entry('now', 1.0, 500))
+check(one_verdict.rows[1].state == 'no_baseline', 'one comparable point is not a verdict: ' .. tostring(one_verdict.rows[1].state))
+check(one_verdict.rows[1].red ~= true, 'a single comparable point NEVER makes RED, however slow the row')
+check(one_verdict.rows[1].reason == '1 of 3 comparable points', 'and the row says how many points it has: ' .. tostring(one_verdict.rows[1].reason))
+check(#one_verdict.red == 0, 'nothing is red on one point')
+local two = { entry('p1', 1.0, 200), entry('p2', 1.0, 210) }
+local two_verdict = stats.judge(two, entry('now', 1.0, 500))
+check(two_verdict.rows[1].state == 'no_baseline' and two_verdict.rows[1].reason == '2 of 3 comparable points',
+  'two comparable points are still short: ' .. tostring(two_verdict.rows[1].reason))
+check(two_verdict.rows[1].red ~= true, 'and still never RED')
+local three = { entry('p1', 1.0, 200), entry('p2', 1.0, 210), entry('p3', 1.0, 205) }
+local three_verdict = stats.judge(three, entry('now', 1.0, 500))
+check(three_verdict.rows[1].state == 'ok' and three_verdict.rows[1].red == true,
+  'three comparable points can make RED')
+check(three_verdict.rows[1].best_sha == 'p1' and three_verdict.rows[1].comparable == 3,
+  'and the verdict names the floor and the count (' .. tostring(three_verdict.rows[1].best_sha) .. ', ' .. tostring(three_verdict.rows[1].comparable) .. ')')
+-- A hole and a busy point are not points either: the count is of comparable points, not of lines.
+local mixed = { entry('p1', 1.0, 200), entry('p2', 1.0, 210), entry('busy', 12.0, 900),
+  stats.finish({ sha = 'hole', load = 1.0, rows = { start = { state = 'unavailable', reason = 'no binary to measure' } } }) }
+local mixed_verdict = stats.judge(mixed, entry('now', 1.0, 500))
+check(mixed_verdict.rows[1].comparable == 2 and mixed_verdict.rows[1].state == 'no_baseline',
+  'a hole and a point at another load do not make up the three (' .. tostring(mixed_verdict.rows[1].comparable) .. ')')
+
+-- ---- the landing row is judged within its own kind ---------------------------------------------------
+-- A LANDING IS NOT ONE COST (23/11): 288 s was called RED +14300% against a 2 s landing that was
+-- scripts-only, and a Rust build reinstalls the whole node. So a landing is compared only with landings of
+-- the kind land-quick recorded, and a line written before kinds existed is counted and named, never used.
+local function landing_point(sha, load, ms, kind)
+  local rows = {}
+  for _, other in ipairs({ 'start', 'first_token', 'tool_roundtrip', 'remote_roundtrip' }) do
+    rows[other] = { samples = { 300 }, load = load }
+  end
+  rows.landing = { samples = { ms }, load = load }
+  if kind then rows.landing.kind = kind end
+  return stats.finish({ sha = sha, load = load, rows = rows })
+end
+local function landing_row_of(verdict)
+  for _, row in ipairs(verdict.rows) do if row.name == 'landing' then return row end end
+  return nil
+end
+local scripts_history = { landing_point('s1', 1.0, 2000, 'scripts'), landing_point('s2', 1.0, 2100, 'scripts'),
+  landing_point('s3', 1.0, 2050, 'scripts') }
+local install_now = stats.judge(scripts_history, landing_point('now', 1.0, 288000, 'lua'))
+local install_row = landing_row_of(install_now)
+check(install_row and install_row.kind == 'lua', 'the landing row carries its kind: ' .. tostring(install_row and install_row.kind))
+check(install_row and install_row.state == 'no_baseline',
+  'an install landing is NEVER compared with scripts-only landings: ' .. tostring(install_row and install_row.reason))
+check(install_row and install_row.reason == '0 of 3 comparable points (landing kind lua)',
+  'and it says which kind it wanted: ' .. tostring(install_row and install_row.reason))
+check(install_row and install_row.red ~= true, 'so a 288 s install is not RED against 2 s scripts landings')
+check(install_row and install_row.ms == 288000, 'while its own number is still printed')
+-- Three of the same kind: now the row has a verdict, and only its own kind is the floor.
+local lua_history = { landing_point('i1', 1.0, 280000, 'lua'), landing_point('i2', 1.0, 290000, 'lua'),
+  landing_point('i3', 1.0, 285000, 'lua'), landing_point('s1', 1.0, 2000, 'scripts') }
+local lua_now = landing_row_of(stats.judge(lua_history, landing_point('now', 1.0, 500000, 'lua')))
+check(lua_now and lua_now.comparable == 3 and lua_now.best_sha == 'i1',
+  'three landings of one kind are a baseline (' .. tostring(lua_now and lua_now.comparable) .. ', ' .. tostring(lua_now and lua_now.best_sha) .. ')')
+check(lua_now and lua_now.red == true, 'and a much slower install of the same kind is RED')
+local scripts_now = landing_row_of(stats.judge(lua_history, landing_point('now', 1.0, 9000, 'scripts')))
+check(scripts_now and scripts_now.state == 'no_baseline' and scripts_now.comparable == 1
+    and scripts_now.reason == '1 of 3 comparable points (landing kind scripts)',
+  'a scripts landing counts only the ONE scripts landing and none of the three installs: '
+    .. tostring(scripts_now and scripts_now.reason))
+-- A LINE WRITTEN BEFORE KINDS EXISTED: not comparable to anything, counted, and said.
+local legacy_history = { landing_point('old1', 1.0, 2000), landing_point('old2', 1.0, 2100),
+  landing_point('old3', 1.0, 2050) }
+local legacy_now = landing_row_of(stats.judge(legacy_history, landing_point('now', 1.0, 3000, 'scripts')))
+check(legacy_now and legacy_now.state == 'no_baseline' and legacy_now.no_kind == 3,
+  'a landing line with no kind is not a baseline, and the count of them is kept (' .. tostring(legacy_now and legacy_now.no_kind) .. ')')
+check(legacy_now and legacy_now.red ~= true, 'and it can never make a landing RED')
+local legacy_with_now = { legacy_history[1], legacy_history[2], legacy_history[3], landing_point('now', 1.0, 3000, 'scripts') }
+local legacy_table = stats.format_table(legacy_with_now, 'now')
+check(legacy_table:find('3 line(s) in the window carry no kind and are not comparable', 1, true) ~= nil,
+  'the table says which lines could not be used:\n' .. legacy_table)
+-- The row ITSELF with no kind (a record written by a land-quick that had no kind to give).
+local no_kind_now = landing_row_of(stats.judge(scripts_history, landing_point('now', 1.0, 1000)))
+check(no_kind_now and no_kind_now.state == 'no_baseline'
+    and no_kind_now.reason == 'the landing record carries no kind (written before kinds, 23/11)',
+  'a landing recorded without a kind has no baseline and says why: ' .. tostring(no_kind_now and no_kind_now.reason))
+local kind_table = stats.format_table({ scripts_history[1], scripts_history[2], scripts_history[3],
+  landing_point('now', 1.0, 288000, 'lua') }, 'now')
+check(kind_table:find('landing kind lua', 1, true) ~= nil, 'the table names the kind it judged within:\n' .. kind_table)
+-- The change against the previous commit says the KIND differs, rather than pretending it is a change.
+local kinds_pair = { landing_point('s1', 1.0, 2000, 'scripts'), landing_point('i1', 1.0, 280000, 'lua') }
+local kind_delta
+for _, delta in ipairs(stats.deltas(kinds_pair, kinds_pair[2])) do
+  if delta.name == 'landing' then kind_delta = delta end
+end
+check(kind_delta and kind_delta.comparable == false and kind_delta.kind_differs == true,
+  'the change against the previous commit says the landing kinds differ')
+local kind_delta_table = stats.format_table(kinds_pair, 'i1')
+check(kind_delta_table:find('(landing kind differs)', 1, true) ~= nil,
+  'and the table says it in the row: ' .. tostring(kind_delta_table:match('landing[^\n]*')))
 
 -- ---- the change against the previous commit -------------------------------------------------------
 local with_previous = { entry("before", 1.0, 400), entry("after", 4.0, 500) }
