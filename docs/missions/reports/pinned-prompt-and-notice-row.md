@@ -193,6 +193,30 @@ In `docs/missions/reports/pinned-prompt-and-notice-row/`, produced by the real b
 * `state-d-after-two-seconds.txt` - the same as B, 2.5 s later: the message is gone and the pin is
   back on the top row.
 
+## The jump-to-bottom pill in its three widths (captures, added after Fable's review)
+
+Fable asked for the pill's own states, scrolled up, at three widths. Real binary in a real pty
+(tmux, 120x36 for the wide pair, resized to 40x24 for the narrow one), same slow fixture as
+`scripts/test-jump-to-bottom-pty.mjs`. The pill is drawn on the transcript region's last row, never on
+the status bar (row 36 keeps `deepseek-v4.1-flash`):
+
+* `state-e-pill-wide.txt` - **wide**, 120 columns, scrolled up during the stream:
+  `↓ 22 more lines · Jump to bottom (Ctrl+PageDown) ↓` (the whole sentence fits, so it is the whole
+  sentence, with the count first);
+* `state-f-pill-narrow.txt` - **narrow**, the same view in a 40-column window:
+  `↓ 44 more lines · Ctrl+PageDown ↓` - the sentence does not fit, so the words that name the action
+  go and the KEY and the count stay. That order is deliberate (`Transcript::view_at`): the key is what
+  the brief requires the pill to name, so a narrow window never clips it;
+* `state-g-pill-at-the-bottom.txt` - **at the bottom**, the view frozen with nothing below it (here by
+  Ctrl+Up into the transcript's blocks, where the run's tool call is a topic):
+  `Jump to bottom (Ctrl+PageDown) ↓`, the count-less form. That chat is shorter than the
+  window, so this frame pins nothing either (the request is on screen): it is the "neither" state
+  and the pill together, which is the state that form belongs to.
+
+What each of the three is drawn by: `Transcript::pill_text(key, new_lines)` (wide) and
+`Transcript::pill_compact(key, new_lines)` (narrow), both taking the key as an ARGUMENT - the caller
+reads it with `keymap::label(Act::Nav(NavAct::Bottom))`, so a rebinding changes what the screen says.
+
 ## Assertions I changed (named, as rule 6 requires)
 
 No assertion was deleted or loosened. Four had to follow a behaviour the brief changes, and each one
