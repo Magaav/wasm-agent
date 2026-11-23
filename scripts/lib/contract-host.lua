@@ -134,6 +134,27 @@ function M.new(spec)
     return text
   end
 
+  -- host.rename_file(from, to) -> ONE boolean: the atomic take the audit spool depends on
+  -- (lua/core/telemetry.lua, M.flush_audit). It REFUSES an existing target exactly as the real capability
+  -- does, because that refusal is what makes two flushers unable to take one file: a fake that allowed the
+  -- clobber would make the race this row exists to catch pass.
+  api.rename_file = function(from, to)
+    local source, target = owned(from, "rename_file"), owned(to, "rename_file")
+    if not source or not target or files[source] == nil or files[target] ~= nil then return false end
+    files[target] = files[source]
+    files[source] = nil
+    return true
+  end
+
+  -- host.remove_file(path) -> ONE boolean: gone (or already gone is NOT true here, matching the real one,
+  -- which answers false when the file is not there).
+  api.remove_file = function(path)
+    local resolved = owned(path, "remove_file")
+    if not resolved or files[resolved] == nil then return false end
+    files[resolved] = nil
+    return true
+  end
+
   api.list_dir = function(path)
     local resolved, why = owned(path, "list_dir")
     if not resolved then return json.encode({ error = why, path = tostring(path) }) end
@@ -272,6 +293,15 @@ function M.contract(host_like)
   record("append_file", host_like.append_file((host_like.paths() or {}).temp .. "/contract-append.txt", "x"))
   record("append_file-refused", host_like.append_file("", "x"))
   record("read_file-present", host_like.read_file((host_like.paths() or {}).temp .. "/contract.txt"))
+  -- The TAKE and the cleanup of the audit spool (lua/core/telemetry.lua, M.flush_audit): a rename with no
+  -- target present, a rename ONTO an existing target (must be refused on both sides), and a remove of a file
+  -- that is there and of one that is not.
+  local temp = (host_like.paths() or {}).temp
+  record("rename_file", host_like.rename_file(temp .. "/contract.txt", temp .. "/contract-renamed.txt"))
+  record("rename_file-existing-target",
+    host_like.rename_file(temp .. "/contract-renamed.txt", temp .. "/contract-renamed.txt"))
+  record("remove_file", host_like.remove_file(temp .. "/contract-renamed.txt"))
+  record("remove_file-missing", host_like.remove_file(temp .. "/contract-absent-remove.txt"))
   return out
 end
 
