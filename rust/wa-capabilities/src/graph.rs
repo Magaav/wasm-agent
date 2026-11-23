@@ -604,6 +604,10 @@ impl Scheduler {
                     // The rebuild is the fix: a fresh database, attempted at once, is not a retry of
                     // the broken one. `rebuilds` bounds a disk that keeps producing garbage.
                     state.attempts = 0;
+                    // The store about to exist is a NEW one: the repairs spent on the old generation are
+                    // not its budget, and a rebuild that is later damaged by index entries is repaired
+                    // like any other. The copies stay bounded by `corruptions` and `rebuilds`.
+                    state.repairs = 0;
                     state.stopped = false;
                     state.retry_at = None;
                     state.reported = Some(error.clone());
