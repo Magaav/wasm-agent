@@ -218,6 +218,82 @@ fn a_malformed_failure_quarantines_and_queues_the_rebuild_at_once() {
     assert!(ready[0].0.is_none(), "the rebuild runs at once, not after a delay");
 }
 
+// ---- a killed writer's journal is not damage -----------------------------------------------------
+
+/// A store with committed rows and a journal beside it, the way a writer killed before its commit leaves
+/// one: SQLite journaled the pages of an open transaction and never wrote the record count that would make
+/// the journal something to roll back. Rusqlite is the same engine the heal uses.
+fn store_with_journal(dir: &Path) -> PathBuf {
+    std::fs::create_dir_all(dir).unwrap();
+    let db = dir.join(DB_FILE);
+    let live = dir.join("live.db");
+    {
+        let connection = rusqlite::Connection::open(&live).unwrap();
+        connection.execute_batch("PRAGMA journal_mode=delete; CREATE TABLE probe(x TEXT);").unwrap();
+        let mut statement = connection.prepare("INSERT INTO probe(x) VALUES (?1)").unwrap();
+        for row in 0..200 { statement.execute([format!("row{row}")]).unwrap(); }
+    }
+    {
+        let connection = rusqlite::Connection::open(&live).unwrap();
+        connection.execute_batch("PRAGMA cache_size=1; BEGIN IMMEDIATE;").unwrap();
+        connection.execute_batch("UPDATE probe SET x = x || 'x';").unwrap();
+        std::fs::copy(&live, &db).unwrap();
+        std::fs::copy(dir.join("live.db-journal"), dir.join(format!("{DB_FILE}-journal"))).unwrap();
+    }
+    db
+}
+
+#[test]
+fn a_journal_beside_the_store_is_resolved_and_the_store_still_reads() {
+    // 22/11: the install swapped the running node while its graph worker was committing. What the kill
+    // left is this - a journal on the disk - and the old path read the store read-only, could not roll it
+    // back, called the result `database disk image is malformed` and quarantined the whole index. Resolving
+    // the journal first is what makes that quarantine unreachable for a crash that damaged nothing.
+    let fixture = Fixture::new();
+    let dir = db_dir(&fixture.0.join("graph.db"));
+    let db = store_with_journal(&dir);
+    let bytes = hot_journal(&dir, DB_FILE).expect("the fixture left no journal beside the store");
+    assert!(bytes > 0, "a journal of zero bytes is not a pending journal");
+    let pending = roll_back_hot_journal(&dir, DB_FILE).expect("the store could not be opened for the journal");
+    // A journal SQLite wrote while the transaction was open carries records but no record count, so the
+    // honest outcome for THIS fixture is "not pending": the store reads and nothing is rolled back. What the
+    // row that matters measures - a journal that carries its record count and IS spent - is the crash-state
+    // path of scripts/test-graph-crash-recovery.lua, which cannot be built without a real killed commit.
+    assert_eq!(pending, Pending::NotPending, "a journal with no record count is not one to roll back");
+    assert_eq!(pending.name(), "not_pending", "the line the operator reads names the outcome");
+    let connection = rusqlite::Connection::open(&db).unwrap();
+    let rows: i64 = connection.query_row("SELECT COUNT(*) FROM probe", [], |row| row.get(0)).unwrap();
+    assert_eq!(rows, 200, "the committed revision survived: nothing was copied and nothing rebuilt");
+    let verdict: String = connection.query_row("PRAGMA integrity_check", [], |row| row.get(0)).unwrap();
+    assert_eq!(verdict, "ok", "the store a killed writer left behind reads clean after the journal is resolved");
+    drop(connection);
+    // A journal file SQLite does not recognise at all is spent rather than rolled back, and the store reads:
+    // the outcome is named, so the line never claims a rollback it did not perform.
+    std::fs::write(dir.join(format!("{DB_FILE}-journal")), b"junk, not a journal at all").unwrap();
+    assert_eq!(roll_back_hot_journal(&dir, DB_FILE).unwrap(), Pending::RolledBack, "a rejected journal is spent, and the store reads");
+    assert_eq!(hot_journal(&dir, DB_FILE), None, "the rejected journal is gone");
+}
+
+#[test]
+fn a_store_without_a_pending_journal_is_never_touched() {
+    // The heal is an allow-list of one cause: a non-empty journal. Everything else keeps every verdict the
+    // scheduler made before it existed - above all a store that is damaged WITHOUT a journal, which is
+    // damage and still quarantines.
+    let fixture = Fixture::new();
+    let dir = db_dir(&fixture.0.join("graph.db"));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(DB_FILE), b"not a database").unwrap();
+    assert_eq!(hot_journal(&dir, DB_FILE), None, "a store with no journal has nothing to recover");
+    std::fs::write(dir.join(format!("{DB_FILE}-journal")), b"").unwrap();
+    assert_eq!(hot_journal(&dir, DB_FILE), None, "a zero-length journal is SQLite's own nothing-to-roll-back");
+    std::fs::remove_file(dir.join(format!("{DB_FILE}-journal"))).unwrap();
+    std::fs::create_dir_all(dir.join(format!("{DB_FILE}-journal"))).unwrap();
+    assert_eq!(hot_journal(&dir, DB_FILE), None, "a directory that happens to carry the name is not a journal");
+    std::fs::remove_dir(dir.join(format!("{DB_FILE}-journal"))).unwrap();
+    assert_eq!(std::fs::read(dir.join(DB_FILE)).unwrap(), b"not a database", "nothing was written to the store");
+}
+
+
 // ---- the disk-eating loop is stopped, not outrun -------------------------------------------------
 
 #[test]
