@@ -140,8 +140,15 @@ named here:
 * **`mission-amend-resume`** - fails identically with the base binary (`mission amend/resume: FAILED after 10
   checks`).
 
+Victor's own shape, with the branch's binary and a scratch home (three runs of
+`time (printf 'hi\n' | wa chat --once | head -1)`): **real 0m0.294s / 0m0.304s / 0m0.282s**, first line `> hi`
+in each. NOT INSTALLED: factory rule 12 kept this branch out of `~/.local/bin`, so the `wa` in Victor's shell is
+still the pre-fix binary and still measures ~351-362 ms / 74 MiB until a deploy installs this commit.
+
 NOT verified:
 
+* **The pty side** is the brief's own number (329-383 ms), not re-measured here; the piped row is now 274 ms,
+  below it, which is what "as fast as a pty one" asks for.
 * **The operator's own store.** `lua/core/secret_guard.lua` refuses any agent tool a path under
   `~/.wasm-agent` (`secret_path_denied`), so I could not copy or measure against the real 1.35 GB
   `memory.db`. Every number here is a scratch home. A bigger ledger may add its own start cost; I did not
