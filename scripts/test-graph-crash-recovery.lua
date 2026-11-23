@@ -46,10 +46,21 @@ end
 -- A row that still finds none REFUSES BY NAME. Never a skip: a test that cannot tell is not a pass.
 local override = host.getenv('WA_GRAPH_COMPONENT_WASM')
 local components = host.getenv('WA_COMPONENTS_DIR')
+-- COMPLETE OR NOT THERE AT ALL. The host refuses a component with no pin or with a manifest it cannot read, so a
+-- half artifact must not be mistaken for a provisioned one: that would turn "the runner installed nothing"
+-- into a host refusal three steps later. All three files, or the row does not run.
+local function complete(directory)
+  if type(directory) ~= 'string' or directory == '' then return false end
+  return file_at(directory .. '/graph.wasm') and file_at(directory .. '/graph.wasm.sha256') and
+    file_at(directory .. '/graph.json')
+end
 local function usable()
-  if file_at(override) then return true end
-  if file_at((components or '') .. '/graph.wasm') then return true end
-  return file_at(paths.data() .. '/components/graph.wasm')
+  if file_at(override) then
+    local beside = tostring(override):match('^(.*)[/\\][^/\\]+$')
+    if complete(beside) then return true end
+  end
+  if complete(components) then return true end
+  return complete(paths.data() .. '/components')
 end
 if not usable() then
   local where = json.decode(host.exec('command -v wa', paths.data(), 10))
