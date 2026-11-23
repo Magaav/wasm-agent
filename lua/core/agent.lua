@@ -2171,6 +2171,21 @@ function M:run(text, images)
       end
     end
   end
+  -- THE AUDIT RECORDS TOO, for the same reason as the transcript above and with the same honesty: a
+  -- security record a refused write kept back during the turn is written here - or the operator is told
+  -- how many are still missing and why - never dropped quietly (change/secret-event-never-lost).
+  do
+    local left = telemetry.owed()
+    if left > 0 then
+      local _, still, why = telemetry.flush_audit()
+      if still > 0 then
+        self.emit({ type = 'status', text = string.format(
+          '%d security record(s) are not in the ledger: the ledger would not take them (%s)', still,
+          redact.text(tostring(why or 'unknown')):sub(1, 120)) })
+        pcall(host.log, string.format('telemetry.audit: %d security record(s) not stored: %s', still, tostring(why)))
+      end
+    end
+  end
   telemetry.finish(span,{ok=ok,error=not ok and tostring(result) or nil})
   if not ok then error(result, 0) end
   return result
@@ -3899,10 +3914,17 @@ function M:run_body(text, images)
       -- about it even though the value itself is gone.
       local redacted_output, secret_hits = redact.value(output, { tool = function_.name, args = args })
       if next(secret_hits) ~= nil then
-        telemetry.event(self.session_id, self.run_id, tool_span and tool_span.id or "",
+        -- THE AUDIT RECORD IS NOT DROPPABLE (change/secret-event-never-lost). `telemetry.event` drops a
+        -- record the ledger refuses, which is how a redaction came to leave no `secret_redacted` row
+        -- (measured 23/11: the redaction worked, the transcript was clean, the row was never written).
+        -- `telemetry.audit` pays the ledger's own patience and keeps the record owed if even that fails,
+        -- so the answer below is a fact and not a hope: recorded, or not recorded with the reason.
+        local recorded, audit_why = telemetry.audit(self.session_id, self.run_id, tool_span and tool_span.id or "",
           "secret_redacted", "redacted", { tool = function_.name, names = secret_hits })
         self.emit({ type = "status", text = "a configured secret was found in " ..
-          tostring(function_.name) .. " output and redacted" })
+          tostring(function_.name) .. " output and redacted" .. (recorded and "" or
+          "; its audit record is not in the ledger yet (" ..
+          redact.text(tostring(audit_why or "unknown")):sub(1, 120) .. ") - the node keeps it and retries") })
       end
       output = redacted_output
       if type(output)=="table" and output.error=="graph_patch_review_required" then

@@ -38,6 +38,9 @@ local function cooldown_ms() return number_env("WASM_AGENT_TELEMETRY_WRITE_COOLD
 local PAUSE_START_MS, PAUSE_MAX_MS = 25, 400
 
 local drops = {count = 0, last_at = nil, last_error = nil, label = nil, cooldown_until = 0}
+-- The audit half of this module: records a refused write kept back instead of dropping (see `M.audit`).
+-- Declared up here because `M.event` reports the count and a reader's `events()` carries it.
+local owed = {}
 -- One load, at the top, of the module that owns "is the ledger refusing writes right now": the write path
 -- asks it on every record, and a dofile per record would be the cost this file exists to avoid.
 local sqlite_busy = dofile("lua/core/sqlite_busy.lua")
@@ -263,6 +266,91 @@ function M.event(session_id, run_id, span_id, kind, phase, payload, at)
   end
 end
 
+
+-- ---------------------------------------------------------------- audit records (change/secret-event-never-lost)
+-- A SECURITY RECORD IS NOT DROPPABLE. `M.event` above drops a record when the ledger refuses the write -
+-- the busy short-cut, the cooldown, and the bounded retry all end in `note_drop` - and that trade is right
+-- for accounting, which is a summary of a run that is still there to be described. It is wrong for the one
+-- record whose loss nothing later can reconstruct: "this node saw a secret and redacted it". Measured
+-- 23/11 with a competing writer holding the ledger's write lock for the length of one turn:
+--   READY sid=42d1deb0-...
+--   secret_redacted_rows=0 events=0 dropped=1 elapsed_ms=20141 available=true
+--   [lua] telemetry: dropped harness_events insert ... this record is lost, the run is not
+-- The redaction itself worked and the transcript was clean; the audit row never arrived, and nothing would
+-- ever retry it. That is exactly the shape of the main-health red on 2104a4d8 (scripts/test-redact-secrets.lua
+-- line 130) with the load on: the record is lost, not late.
+--
+-- THE RULES THIS PATH KEEPS:
+--   * it pays the LEDGER's patience (`sqlite_busy.retry`, WASM_AGENT_SQLITE_RETRY_MS - the budget a
+--     transcript write already gets), not the accounting one, and it never takes the busy_now/cooldown
+--     short-cuts: those exist to keep a turn fast, and this record is the reason the turn is auditable;
+--   * only a LOCK is retried (`sqlite_busy` owns that decision); any other refusal is the same answer next
+--     time and is reported at once;
+--   * a record that still cannot be written is KEPT in `owed` - written at the end of the run, and at the
+--     front of the next audit record - instead of being lost with the turn;
+--   * the answer is `true`, or `false` plus the reason. A caller is never told "recorded" when it was not,
+--     and the loss is never silent: the node logs the line and the reader is told (lua/core/agent.lua).
+local AUDIT_INSERT = "INSERT INTO harness_events(id,session_id,run_id,span_id,kind,phase,at,payload) VALUES(?,?,?,?,?,?,?,?)"
+
+local function write_durable(label, row)
+  local answered, written, why = pcall(function()
+    return sqlite_busy.retry(label, function()
+      local result, reason = attempt("sql_exec", AUDIT_INSERT, row)
+      if result then return true end
+      -- A lock is retried by the loop; anything else is returned, not raised, so the caller gets the
+      -- ledger's own words rather than a retry that cannot help.
+      if sqlite_busy.is_busy(reason) then error(tostring(reason), 0) end
+      return false, tostring(reason)
+    end)
+  end)
+  if not answered then return false, tostring(written) end
+  if written then return true end
+  -- The one refusal worth a different answer next time: the schema is not there, so the next write
+  -- replays the DDL instead of trusting the process-wide migration flag (as `M.event` does).
+  if why and tostring(why):find("no such table", 1, true) then schema_missing, ready = true, false end
+  return false, why
+end
+
+-- Write one audit record and answer whether the LEDGER holds it. <session_id> <run_id> <span_id> <kind>
+-- <phase> <payload> [at]; the arguments are `M.event`'s, so a caller can move a record over without
+-- reshaping it. Returns true, or false plus the reason (and the record stays owed).
+function M.audit(session_id, run_id, span_id, kind, phase, payload, at)
+  if not session_id or session_id == "" then return false, "no_session" end
+  if not M.setup() then return false, "schema_unavailable" end
+  -- What an earlier refusal kept back goes first: one attempt for the whole queue, and only when a caller
+  -- is writing this kind anyway (a queue that retried on every telemetry record would turn one jam into
+  -- many waits).
+  if #owed > 0 then M.flush_audit() end
+  local row = {host.uuid(), session_id, run_id or "", span_id or "", kind, phase,
+    tonumber(at) or host.now(), json.encode(payload or {})}
+  local written, why = write_durable("harness_events audit insert " .. tostring(kind or ""), row)
+  if written then return true end
+  owed[#owed + 1] = row
+  log_line(string.format(
+    "telemetry: the audit record %s is not in the ledger yet (%s) - it is kept and retried, this record is not lost",
+    tostring(kind or "?"), tostring(why)))
+  return false, why
+end
+
+-- How many audit records the ledger still owes. A reader that wants to know whether a session's ledger is
+-- complete asks this (and `M.drops()`); the number is carried in `events().audit_owed` too.
+function M.owed() return #owed end
+
+-- Write what a refusal kept back. <written>, <left>, <last reason>. Called from the end of a run (where the
+-- answer has already been emitted, so waiting costs the reader nothing - lua/core/agent.lua) and from the
+-- front of the next audit record.
+function M.flush_audit()
+  if #owed == 0 then return 0, 0 end
+  local written, last = 0, nil
+  local left = {}
+  for _, row in ipairs(owed) do
+    local ok, why = write_durable("harness_events audit insert (retried)", row)
+    if ok then written = written + 1 else left[#left + 1] = row; last = why end
+  end
+  owed = left
+  return written, #owed, last
+end
+
 function M.start(opts, kind, payload)
   opts = opts or {}
   local span = {id=host.uuid(), session_id=opts.session_id, run_id=opts.run_id,
@@ -324,7 +412,10 @@ function M.events(session_id, cursor, limit, since)
   end
   return {events=rows, next_cursor=rows[#rows] and rows[#rows].seq or tonumber(cursor) or 0,
     has_more=#rows == limit, session_id=session_id, schema_version=1, available=true,
-    dropped_writes=drops.count}
+    dropped_writes=drops.count,
+    -- A security record the ledger owes: zero here means the audit trail of this session's events is
+    -- complete, and a non-zero number is a fact a reader must not read as "nothing was redacted".
+    audit_owed=#owed}
 end
 
 -- One last task-request boundary, not cumulative billed input or cache misses.
@@ -504,7 +595,10 @@ end
 function M.drops()
   return {count=drops.count, last_at=drops.last_at, last_error=drops.last_error, label=drops.label,
     attempts=drops.attempts, retry_budget_ms=retry_budget_ms(), attempts_max=attempts_max(),
-    cooldown_ms=cooldown_ms()}
+    cooldown_ms=cooldown_ms(),
+    -- Dropped accounting rows and owed AUDIT rows are different statements: the first says the report is
+    -- incomplete, the second says a security record is still not stored.
+    audit_owed=#owed}
 end
 
 return M
