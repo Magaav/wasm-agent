@@ -28,6 +28,7 @@ import path from 'node:path';
 import http from 'node:http';
 import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
+import {tmuxSession} from './lib/tmux-session.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const BIN = process.env.WA_BIN || process.env.FAST_BIN || 'wa';
@@ -147,9 +148,10 @@ if (!HAVE_TMUX) {
   process.exit(0);
 }
 
-const SOCKET = 'wa-bash-changes-pty-' + process.pid;
+// The tmux server belongs to this process and dies with it: the one helper that carries the exit handlers
+// and reclaims a server left by a SIGKILLed sibling (scripts/test-tmp-cleanliness.mjs, D1).
+const {tmux} = tmuxSession('wa-bash-changes');
 const SESSION = 'bchg';
-const tmux = args => spawnSync('tmux', ['-L', SOCKET, ...args], {encoding: 'utf8'});
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 function capture() {
   const raw = String(tmux(['capture-pane', '-p', '-t', SESSION]).stdout || '').replace(/\r/g, '');

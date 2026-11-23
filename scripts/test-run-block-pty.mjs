@@ -7,9 +7,10 @@
 //
 //   1. the script appears WHILE it is written: at least three different partial frames of it are
 //      read before the call is dispatched (it used to be printed in one piece);
-//   2. the output is shown ONCE: a call is one row, the result is one compact row counted in LINES
-//      (never a JSON-quoted string with \n in it), a click opens it to every line and a second click
-//      folds it; a call's own row opens the same way; `--once` (a pipe) prints the output once, whole;
+//   2. the output is shown ONCE: a call is one row, the result is ONE row naming its exact size
+//      (`⎿ script output · 91 chars` - chat-view-round-2, item 4, and never a JSON-quoted string with
+//      \n in it), a click opens it to every line and a second click folds it; a call's own row opens
+//      the same way; `--once` (a pipe) prints the output once, whole;
 //   3. the scrollbar is ONE bar while a call waits, and after PgUp.
 //
 // Isolation is test-run-live-pty.mjs's: `env -i` plus an allow-list, a scratch HOME outside the real
@@ -59,6 +60,9 @@ function check(name, condition, detail = '') {
 // frame can be read while the block is unfinished - which is exactly the state Victor photographed.
 const LINES = Array.from({length: 12}, (_, i) => 'line ' + (i + 1));
 const SLOW_SECONDS = Number(process.env.RUN_BLOCK_SLOW || 6);
+// What the slow command prints, exactly: twelve lines and `end`, each ended by a newline. The result row
+// names its length (`⎿ script output · N chars`), and N is this string's length.
+const OUTPUT = [...LINES, 'end'].join('\n') + '\n';
 const SCRIPT = [
   "const quick = await tools.bash({ command: 'echo quick-one' });",
   "// a comment line, so the script has rows to arrive one by one",
@@ -319,26 +323,35 @@ try {
   await sleep(700);
   settled = screen_rows('live');
   fs.writeFileSync(path.join(WORK, 'settled.txt'), settled);
-  check('settled: the output text is on screen exactly once', count(settled, LINE_1) === 1,
+  // THE RESULT IS ONE ROW NOW (chat-view-round-2, item 4): no line of it is printed until the reader
+  // opens it, so "exactly once" became "not at all by default", and the count below names the size.
+  check('settled: no line of the output is on screen until the row is opened', count(settled, LINE_1) === 0,
     'line 1 x' + count(settled, LINE_1) + '\n' + settled);
   check('settled: no output lines under the call rows (line 2 is a click away)',
     count(settled, /line 2(?!\d)/g) === 0 && !QUICK_OUT.test(settled), settled);
-  check('settled: the result row counts LINES and is not a JSON-quoted string',
-    /⎿ line 1 … \+12 lines/.test(settled) && !settled.includes('\\n'), settled);
+  // The count is the size of the result the model got, CHARACTER for character: no line is drawn here,
+  // so a row that counted the rows it drew would count nothing.
+  check('settled: the result row names the exact size and is not a JSON-quoted string',
+    settled.includes('⎿ script output · ' + OUTPUT.length + ' chars') && !settled.includes('\\n'), settled);
   check('settled: both calls are one ticked row each', count(settled, /✓ bash · /g) === 2, settled);
 
-  const resultRow = rowOf(settled, /⎿ line 1/);
+  const resultRow = rowOf(settled, /⎿ script output/);
   await mouse('live', 6, resultRow);
   let opened = screen_rows('live');
   fs.writeFileSync(path.join(WORK, 'opened.txt'), opened);
-  const lost = [...LINES, 'end'].filter(line => !new RegExp('(\\u23bf|\\s) ' + line + '\\s').test(opened));
+  // A row of the opened result starts at the frame's own column (the text is drawn as it is, with no
+  // marker in front): the old pattern required a space before the line, which only the `⎿ `-marked
+  // first row had. Same intent, every line of the output must be on the screen.
+  const lost = [...LINES, 'end'].filter(line => !new RegExp('(^|\\n)\\s*' + line + '\\s').test(opened));
   check('a click on the result row shows every line of the output', lost.length === 0,
     'missing: ' + JSON.stringify(lost) + '\n' + opened);
   check('opened: still one copy', count(opened, /line 7/g) === 1, opened);
-  await mouse('live', 6, rowOf(opened, /⎿ line 1/));
+  // Every row the opened result covers answers the click (rust/wa-term `rows_with_copies`), so the fold
+  // is reached from a row of the text itself - the `⎿ ` row is not drawn while it is open.
+  await mouse('live', 6, rowOf(opened, /line 1(?!\d)/));
   const folded = screen_rows('live');
   check('a second click folds it to the one row again',
-    count(folded, /line 7/g) === 0 && /⎿ line 1 … \+12 lines/.test(folded), folded);
+    count(folded, /line 7/g) === 0 && folded.includes('⎿ script output · ' + OUTPUT.length + ' chars'), folded);
 
   // Each call's own output is one click on ITS row away.
   const quickRow = rowOf(folded, /✓ bash · /);
