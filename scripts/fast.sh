@@ -1195,6 +1195,9 @@ check worker-gate bash scripts/test-worker-gate.sh
 # not invalidate the signature - the 13/11 failure that needed a hand-frozen build (the lua-tree record is
 # covered by the same row).
 check fast-rows bash scripts/test-fast-rows.sh
+# The runner own line about the suite-lock queue (scripts/lib/lock-wait.sh, item 1 of 23/11): a real flock(2)
+# holder, a real file, no suite lock and no node.
+check lock-wait bash scripts/test-lock-wait.sh
 check land-signing bash scripts/test-land-signing.sh
 # The Go WhatsApp connector was removed in Phase 4 (11/11) and must not come back: no Go source, no
 # build/install entry point, no unit that starts it - while the Rust component, its MCP, the operator

@@ -55,6 +55,9 @@ fi
 # 16 G tmpfs here, and the rows had left 4,721 entries in it). A full disk is a fact about the machine, so it
 # is refused by name here, before the lock, before the landing and before any row: exit 2, nothing judged.
 . "$(dirname -- "$0")/lib/temp-floor.sh"
+# The queue, said in this run own log (item 1, 23/11): a preflight that waits for the suite lock names the
+# file, the holder pid and command and how long it has been held, so a reader needs no ps.
+. "$(dirname -- "$0")/lib/lock-wait.sh"
 if ! tmp_note=$(wa_tmp_floor_check /tmp "${TMPDIR:-}"); then
   case "$tmp_note" in
     tmp_unknown:*) tmp_code=tmp_unknown ;;
@@ -115,6 +118,12 @@ started=$(date +%s)
 # THE GATE IS A SUITE: it takes the same lock every suite takes, -o included, so a preflight queues behind
 # another heavy run instead of landing on top of it (and a child that keeps the fd cannot hold the lock
 # after this command ends).
+# THE QUEUE IS A FACT, NOT A SILENCE. flock -n asks without waiting; when the lock is taken, the same three
+# facts the operation own await carries (rust/wa-operation/src/blocked.rs) go into this run log before the
+# wait starts, and the wait itself is unchanged.
+if ! flock -n -o "$LOCK" true 2>/dev/null; then
+  { wa_lock_wait_note "$LOCK" 2>/dev/null || true; } >> "$LOG"
+fi
 flock -o "$LOCK" "$WA" "${opts[@]}" >> "$LOG" 2>&1
 rc=$?
 elapsed=$(( $(date +%s) - started ))
