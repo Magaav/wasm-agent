@@ -174,6 +174,17 @@ function M.run(feature, opts)
   if not called then
     return { feature = row.name, canary = row.canary, mode = ctx.mode, ok = false, stage = 'canary_raised', detail = tostring(ok) }
   end
+  -- THE THIRD OUTCOME: 'off'. A canary that cannot be exercised because the feature is switched off by its
+  -- own configuration (the WhatsApp copilot with posting disabled, the defect this mission starts from)
+  -- answers `return 'off', 'off (posting disabled)', why` - it is NOT a pass (nothing was proven) and NOT a
+  -- failure (nothing is broken: the operator turned it off). It is printed, counted and named, and it is
+  -- never recorded as a success, so a feature that was switched off does not read as "last worked".
+  if ok == 'off' then
+    return {
+      feature = row.name, canary = row.canary, mode = ctx.mode, ok = false, off = true,
+      stage = tostring(ran_stage or 'off'), detail = ran_detail and tostring(ran_detail) or nil,
+    }
+  end
   if scratch_why and (ok == false or ok == nil) then ran_detail = tostring(ran_detail or '') .. ' (' .. scratch_why .. ')' end
   return {
     feature = row.name, canary = row.canary, mode = ctx.mode,
@@ -199,8 +210,12 @@ function M.run_all(opts)
           stage = 'off-node', detail = not_applicable }
       else
         local result = M.run(row.name, opts)
-        result.recorded = feature_health.record(row.name, result.ok, {
-          stage = result.stage, detail = result.detail, source = 'canary' }) and true or false
+        -- An 'off' canary records NOTHING: neither a success (nothing was proven) nor a failure (nothing is
+        -- broken), so the row's last real success keeps its own time and the reason is the operator's switch.
+        if not result.off then
+          result.recorded = feature_health.record(row.name, result.ok, {
+            stage = result.stage, detail = result.detail, source = 'canary' }) and true or false
+        end
         results[#results + 1] = result
       end
     end
@@ -211,11 +226,14 @@ end
 -- One line per result: what an operator and the release report read.
 function M.lines(results)
   local out = {}
-  local passed, failed, skipped = 0, 0, 0
+  local passed, failed, off, skipped = 0, 0, 0, 0
   for _, result in ipairs(results or {}) do
     if result.skipped then
       skipped = skipped + 1
       out[#out + 1] = string.format('  %-22s SKIP  %s (%s)', result.feature, tostring(result.stage), tostring(result.detail))
+    elseif result.off then
+      off = off + 1
+      out[#out + 1] = string.format('  %-22s OFF   %s: %s', result.feature, tostring(result.stage), tostring(result.detail))
     elseif result.ok then
       passed = passed + 1
       out[#out + 1] = string.format('  %-22s PASS  %s', result.feature, tostring(result.stage))
@@ -224,7 +242,7 @@ function M.lines(results)
       out[#out + 1] = string.format('  %-22s FAIL  %s: %s', result.feature, tostring(result.stage), tostring(result.detail))
     end
   end
-  table.insert(out, 1, string.format('canaries: %d passed, %d failed, %d off-node', passed, failed, skipped))
+  table.insert(out, 1, string.format('canaries: %d passed, %d failed, %d off, %d off-node', passed, failed, off, skipped))
   return out
 end
 

@@ -55,6 +55,11 @@ fn a_row_says_when_it_last_worked_and_a_componentless_role_is_off_node() {
     let lines = lines(&config_dir_for(&home), 1_700_000_100);
     assert!(lines[0].contains("2 listed"), "the summary counts the list: {}", lines[0]);
     assert!(lines[1].contains("last worked: 2023-11-14T22:13:20Z"), "each row names the time: {}", lines[1]);
+    // A CANARY'S TIME SAYS SO: a synthetic pass must not read as a user's use (Fable's review, item 4).
+    std::fs::write(home.join(".wasm-agent/feature-health.json"),
+        json!({"schema": 1, "features": {"chat": {"last_ok_at": 1_700_000_000, "last_ok_source": "canary"}}}).to_string()).unwrap();
+    let with_canary = super::feature_health::lines(&config_dir_for(&home), 1_700_000_100);
+    assert!(with_canary[1].contains("last worked: 2023-11-14T22:13:20Z  [canary]"), "a canary-sourced time is labelled: {}", with_canary[1]);
     let _ = std::fs::remove_dir_all(&home);
 }
 

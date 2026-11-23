@@ -108,6 +108,17 @@ canary_module("raiser", table.concat({
 canary_module("unloadable", "error('this module cannot even be loaded')\n")
 canary_module("malformed", "return 42\n")
 canary_module("passes", "return { mode = 'read', run = function() return true, 'done', 'read-only' end }\n")
+check(host.write_file(canary_dir .. "/sendy.lua", table.concat({
+  "local guard = dofile('lua/core/canaries/guard.lua')",
+  "return { mode = 'read', run = function()",
+  "  local ran, ok, stage, detail = guard.no_send(function()",
+  "    host.whatsapp_send('{}')",
+  "    return true, 'sent', 'it sent something'",
+  "  end)",
+  "  if not ran then return false, 'send_attempted', tostring(ok) end",
+  "  return ok, stage, detail",
+  "end }",
+}, "\n")), "the send-guarded canary is written")
 
 local fixture = { schema = 1, features = {
   { name = "passing", role = "any", canary = "passes", last_success = "fixture: nothing", stale_after_s = 600 },
@@ -116,6 +127,7 @@ local fixture = { schema = 1, features = {
   { name = "unloadable-one", role = "any", canary = "unloadable", last_success = "fixture: nothing", stale_after_s = 600 },
   { name = "malformed-one", role = "any", canary = "malformed", last_success = "fixture: nothing", stale_after_s = 600 },
   { name = "no-canary", role = "any", canary = "absent", last_success = "fixture: nothing", stale_after_s = 600 },
+  { name = "sends", role = "any", canary = "sendy", last_success = "fixture: nothing", stale_after_s = 600 },
   { name = "elsewhere", role = "component:not-installed-here", canary = "passes", last_success = "fixture: nothing", stale_after_s = 600 },
 } }
 check(host.write_file(feature_health.installed_registry_path(), json.encode(fixture)), "the fixture registry is written")
@@ -147,6 +159,17 @@ local absent = feature_canary.run("no-canary", { dir = canary_dir })
 eq(absent.ok, false, "a feature with no canary is not a pass")
 eq(absent.stage, "canary_missing", "the missing canary is named")
 contains(absent.detail, "no canary module", "the missing canary names where it looked")
+
+-- NO CANARY MAY MESSAGE A PERSON (Fable's review, item 3): the guard replaces the send doors, so a canary
+-- that tries to send fails BY NAME, and the doors are put back whatever the exercise did.
+local sentinel_door = function() return "the real door" end
+host.whatsapp_send = sentinel_door
+local sending = feature_canary.run("sends", { dir = canary_dir })
+eq(sending.ok, false, "a canary that tries to send is not a pass")
+eq(sending.stage, "send_attempted", "it is named as a send attempt")
+contains(sending.detail, "must never send", "with the guard's own words")
+eq(host.whatsapp_send, sentinel_door, "and the node's send door is restored afterwards")
+host.whatsapp_send = nil
 
 local unknown = feature_canary.run("not-a-feature", { dir = canary_dir })
 eq(unknown.ok, false, "a feature the registry does not have is not a pass")
@@ -182,7 +205,7 @@ eq(reported["broken-child"].last_fail_stage, "turn", "the failing stage reaches 
 eq(reported.elsewhere.verdict, "off-node", "an absent component reads off-node")
 
 local lines = feature_canary.lines(results)
-contains(table.concat(lines, "\n"), "canaries: 1 passed, 5 failed, 1 off-node", "the summary counts every class")
+contains(table.concat(lines, "\n"), "canaries: 1 passed, 6 failed, 0 off, 1 off-node", "the summary counts every class")
 contains(table.concat(lines, "\n"), "FAIL", "a failure is printed, not hidden")
 
 print(string.format("feature-canary ok (%d checks)", checks))
