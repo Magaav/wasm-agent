@@ -198,8 +198,10 @@ pub enum Gesture {
 
 impl Gesture {
     pub const ALL: &'static [Gesture] = &[
-        Gesture::BarJump, Gesture::DraftPress, Gesture::ExpandToggle, Gesture::LinkCopy,
-        Gesture::BlockCopy, Gesture::PinJump, Gesture::JumpBottom, Gesture::NoticeDismiss,
+        // The window's own chrome first (the bar's column, the pinned row, the notice row, the
+        // pill): something drawn OVER the chat is not the chat's to select or copy.
+        Gesture::BarJump, Gesture::PinJump, Gesture::NoticeDismiss, Gesture::JumpBottom,
+        Gesture::DraftPress, Gesture::ExpandToggle, Gesture::LinkCopy, Gesture::BlockCopy,
         Gesture::TranscriptSelection, Gesture::SelectDrag, Gesture::Wheel, Gesture::Hover,
     ];
 }
@@ -456,6 +458,12 @@ pub const BINDINGS: &[Binding] = &[
     // ---- the pointer -----------------------------------------------------------------------
     g("Press", Pose::Press, Gesture::BarJump,
       "press the scrollbar's column: jump the view to that row and grab the thumb"),
+    g("Press", Pose::Press, Gesture::PinJump,
+      "press the request pinned at the top of the transcript: scroll to that turn's request"),
+    g("Press", Pose::Press, Gesture::NoticeDismiss,
+      "press the notice row: the message goes now, instead of when its time is up"),
+    g("Press", Pose::Press, Gesture::JumpBottom,
+      "press the jump-to-bottom pill: back to the newest output, and follow it again"),
     g("Press", Pose::Press, Gesture::DraftPress,
       "press in the draft: the cursor goes there, and a drag from there selects"),
     g("Press", Pose::Press, Gesture::ExpandToggle,
@@ -463,12 +471,6 @@ pub const BINDINGS: &[Binding] = &[
     g("Press", Pose::Press, Gesture::LinkCopy, "press a link: copy that URL to the clipboard"),
     g("Press", Pose::Press, Gesture::BlockCopy,
       "press a block's copy icon (⧉): copy that block's text"),
-    g("Press", Pose::Press, Gesture::PinJump,
-      "press the request pinned at the top of the transcript: scroll to that turn's request"),
-    g("Press", Pose::Press, Gesture::JumpBottom,
-      "press the jump-to-bottom pill: back to the newest output, and follow it again"),
-    g("Press", Pose::Press, Gesture::NoticeDismiss,
-      "press the notice row: the message goes now, instead of when its time is up"),
     g("Press", Pose::Press, Gesture::TranscriptSelection, "press the transcript: start a selection there"),
     g("Dragging", Pose::Drag, Gesture::SelectDrag,
       "drag: select from where the press landed to the pointer (the draft, or the transcript)"),

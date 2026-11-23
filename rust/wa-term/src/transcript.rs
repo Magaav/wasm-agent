@@ -533,9 +533,14 @@ impl Transcript {
     /// scrolls. The mark is drawing only - nothing of it reaches the model or a stored message.
     pub fn write_marked(&mut self, text: &str, request: bool) {
         self.write(text);
-        if request {
-            if let Some(block) = self.blocks.last_mut() { block.request = true; }
-        }
+        if !request { return }
+        // A request gets a block of its OWN, closed behind it: the answer that follows streams into
+        // the next block (it is written with no `topic` call of its own, so without this it would
+        // join the request and the two could never be separated - the pin needs the request's rows
+        // to be able to leave the viewport while the answer grows).
+        if let Some(block) = self.blocks.last_mut() { block.request = true; }
+        self.blocks.push(Block::default());
+        self.counts.push(None);
     }
 
     pub fn topics(&self) -> Vec<usize> { (0..self.blocks.len()).filter(|&i| self.blocks[i].topic && !self.blocks[i].lines.is_empty()).collect() }
@@ -3155,5 +3160,24 @@ mod tests {
         // What is above the viewport now is the turn BEFORE it, and that is what the pin names -
         // the rule is "the last request that scrolled off", not "the last request there was".
         assert!(is_pin(&jumped[0]) && jumped[0].contains("first question"), "{jumped:?}");
+    }
+
+    /// The answer streams into its own block, never into the request's: the pin is measured against
+    /// the request's OWN rows, and a block that keeps growing with the answer could never be above
+    /// the viewport.
+    #[test]
+    fn the_answer_does_not_join_the_request_block() {
+        let mut t = plain(Transcript::default());
+        t.block(false);
+        t.write_marked("❯ a question\n\n", true);
+        for n in 0..4 { t.write(&format!("answer {n}\n")); }
+        let blocks = t.blocks.len();
+        assert!(t.blocks[0].request, "the first block is the request");
+        assert_eq!(t.blocks[0].lines.len(), 2, "and holds only the request: {:?}", t.blocks[0].lines);
+        assert!(blocks >= 2 && !t.blocks[1].request, "the answer is a block of its own: {blocks} blocks");
+        assert!(t.blocks[1].lines.iter().any(|line| line.contains("answer 3")), "{:?}", t.blocks[1].lines);
+        // And the view pins it once the answer has pushed it off the top.
+        let view = t.view(40, 4);
+        assert!(view[0].contains(PIN_BAND) && view[0].contains("a question"), "{view:?}");
     }
 }

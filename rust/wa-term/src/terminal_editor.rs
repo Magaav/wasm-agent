@@ -193,8 +193,10 @@ pub struct Editor {
     /// directly above the session status bar. It used to be appended to the footer's numbers row, where
     /// it squeezed them; "" (no wake scheduled) means the row does not exist and the chat keeps it.
     pub wakes: String,
-    /// A one-keystroke note drawn in the footer's place (`Interrupting…`, `Draft kept`); the next
-    /// key clears it, and so does the run's status row coming or going.
+    /// A one-keystroke note (`Interrupting…`, `Draft kept`): composed here, where the key that
+    /// causes it is handled, and DRAWN on the transcript's notice row at the top of the window - not
+    /// on the session status bar (`host::flush_editor_notice` hands it over; Victor, 23/11 11:20Z:
+    /// "so we never lose vision of the session status bar"). The next key clears it, as before.
     pub notice: String,
     /// Undo/redo of the draft: each entry is the draft and cursor *before* a step. Consecutive typed
     /// characters are one step up to a word boundary, a paste is one step, and every delete, kill,
@@ -946,8 +948,11 @@ impl Editor {
         let right_width: usize = visible_cells(&right);
         let room = self.width.saturating_sub(right_width + if right.is_empty() { 0 } else { 1 });
         let bash_hint = BASH_FOOTER.to_string();
-        let (color, text) = if !self.notice.is_empty() { (NOTICE, &self.notice) }
-            else if self.bash { (BASH, &bash_hint) } else { (HINT, &self.footer) };
+        // The footer is the SESSION STATUS BAR and nothing else: a transient message has the
+        // transcript's own row at the top of the window (`wa_term::transcript`'s notice row), so the
+        // row a reader watches for the run's numbers is never taken by a message (Victor, 23/11
+        // 11:20Z). The note this editor composes is drawn there, by the host, on the next frame.
+        let (color, text) = if self.bash { (BASH, &bash_hint) } else { (HINT, &self.footer) };
         let footer: String = clip_cells(text, room);
         frame.push_str(&format!("\x1b[{};1H\x1b[2K{color}{footer}{RESET}", self.footer_row()));
         if !right.is_empty() {
@@ -988,8 +993,6 @@ const HINT: &str = "\x1b[38;2;119;119;119m";
 const SELECTED: &str = "\x1b[38;2;177;185;249m";
 const MODEL: &str = "\x1b[38;2;153;153;153m";
 const RESET: &str = "\x1b[0m";
-/// The footer's one-keystroke notice and the queued-steer label: the view's warm accent.
-const NOTICE: &str = "\x1b[38;2;215;119;87m";
 const QUEUED: &str = "\x1b[38;2;215;119;87m";
 /// The session-status-content row's notice colour: the view's `warning` role, in Rust because this
 /// renderer draws that row when the native editor owns the screen.
@@ -1617,17 +1620,36 @@ mod tests {
         type_bytes(&mut e, b"draft");
         assert_eq!(e.feed(3), Action::None, "idle with a draft: nothing happens to it");
         assert_eq!(e.text(), "draft");
-        assert!(e.render().contains("Draft kept"), "and the footer says how to clear it");
+        assert!(e.notice.contains("Draft kept"), "and the note says how to clear it");
+        assert!(!e.render().contains("Draft kept"), "drawn on the transcript's notice row, not here");
         assert_eq!(e.feed(3), Action::None, "a second one does not quit and lose the draft");
         assert_eq!(e.text(), "draft");
         e.status = true;
         assert_eq!(e.feed(3), Action::Interrupt, "during a run it interrupts the turn");
         assert_eq!(e.feed(3), Action::Interrupt, "again and again, never quitting over a draft");
         assert_eq!((e.text().as_str(), e.cursor), ("draft", 5), "the draft and cursor are untouched");
-        assert!(e.render().contains("Interrupting\u{2026} (draft kept)"));
+        assert!(e.notice.contains("Interrupting\u{2026} (draft kept)"), "composed, on its way to the notice row");
+        assert!(!e.render().contains("Interrupting"), "and never on the session status bar");
         type_bytes(&mut e, b"!");
-        assert!(!e.render().contains("Interrupting"), "the notice lasts one keystroke");
+        assert!(!e.notice.contains("Interrupting"), "the notice lasts one keystroke");
     }
+    /// A transient message never lands on the session status bar: it has the transcript's own row
+    /// at the top of the window, so this row keeps the run's numbers and the model while a message
+    /// is showing (Victor, 23/11 11:20Z).
+    #[test]
+    fn a_notice_never_takes_the_session_status_bar() {
+        let mut e = Editor::default();
+        e.row = 20; e.width = 60; e.height = 3;
+        e.status = true;
+        e.footer = "waiting for the model".into();
+        e.footer_right = "v4.1".into();
+        e.notice = "Interrupting\u{2026} (draft kept)".into();
+        let frame = e.render();
+        assert!(frame.contains("waiting for the model"), "the run's own line stays on its row: {frame}");
+        assert!(frame.contains("v4.1"), "and the model with it: {frame}");
+        assert!(!frame.contains("Interrupting"), "and the message is not here at all: {frame}");
+    }
+
     #[test]
     fn ctrl_c_on_an_empty_line_interrupts_then_quits() {
         let mut e = Editor::default();

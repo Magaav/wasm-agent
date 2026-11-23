@@ -1432,7 +1432,7 @@ function METHODS:gap(blank)
   if have < want then self:write(string.rep("\n", want - have)) end
 end
 
-function METHODS:write(text)
+function METHODS:write(text, mark)
   local count, only = trailing_newlines(text)
   if count then self.tail_nl = only and ((self.tail_nl or 0) + count) or count end
   -- Output - the transcript, a tool line, an answer - belongs in the region above the status and
@@ -1444,7 +1444,10 @@ function METHODS:write(text)
     -- The host's own writer does not come through `out`, so the frame is opened here, before it: the
     -- transcript block belongs inside the same frame as the status row it is drawn with.
     self:open_frame()
-    pcall(host.transcript_write, text)
+    -- `mark` says what this write IS, not just what it says: "request" is the reader's own turn,
+    -- which the host keeps pinned on the window's top row while its answer scrolls (Victor, 23/11
+    -- 11:20Z). The plain layout ignores it, and so does a host that does not draw a transcript.
+    pcall(host.transcript_write, text, mark)
     return
   end
   if self.screen then
@@ -2475,7 +2478,9 @@ function METHODS:accepted(text)
     end
   end
   self:topic(false)
-  self:write(table.concat(shown, "\n") .. "\n\n")
+  -- ONE write, marked as the reader's request: the host pins its first line above the viewport while
+  -- the answer scrolls, which is the row Claude Code keeps at the top of its window.
+  self:write(table.concat(shown, "\n") .. "\n\n", "request")
   self.tail_nl = 2
   if self.turn then self:paint(true) end
 end
