@@ -46,7 +46,10 @@ impl Drop for Fixture {fn drop(&mut self) {let _=std::fs::remove_dir_all(&self.0
 fn explicit_workspace_has_stable_separate_cache_without_touching_runtime_index() {
     let fixture=Fixture::new();let config=fixture.config();
     let (runtime,db)=locations(&json!({}),Some(&config)).unwrap();
-    assert_eq!(runtime,config.root.canonicalize().unwrap());assert_eq!(db,db_dir(&config.db).join(DB_FILE));
+    assert_eq!(runtime,config.root.canonicalize().unwrap());
+    // The configured root has its OWN store: the shared database is never what a process indexes into.
+    assert_ne!(db,db_dir(&config.db).join(DB_FILE));
+    assert_eq!(db.parent().unwrap().parent().unwrap(),config.db.with_extension("roots"));
     let options=json!({"root":fixture.0.join("owned")});
     let (owned,cache)=locations(&options,Some(&config)).unwrap();
     assert_ne!(owned,runtime);assert_ne!(cache,db);
@@ -62,7 +65,10 @@ fn explicit_database_override_is_preserved_with_verified_root() {
     let options=json!({"root":fixture.0.join("owned"),"db":db});
     assert_eq!(locations(&options,Some(&config)).unwrap().1,db);
     assert_eq!(locations(&options,None).unwrap().1,db);
-    assert_eq!(locations(&json!({"root":config.root}),Some(&config)).unwrap().1,db_dir(&config.db).join(DB_FILE));
+    // Naming the configured root explicitly resolves to the same per-root store, never the shared one.
+    let configured=db_dir(&per_root_store(&config.db,&config.root.canonicalize().unwrap())).join(DB_FILE);
+    assert_eq!(locations(&json!({"root":config.root}),Some(&config)).unwrap().1,configured);
+    assert_ne!(configured,db_dir(&config.db).join(DB_FILE));
 }
 
 #[test]
@@ -973,4 +979,232 @@ fn a_component_verdict_of_malformed_over_a_healthy_store_is_its_own_event_and_no
     assert!(copies.is_empty(), "a healthy store was copied aside: {copies:?}");
     assert_eq!(std::fs::read(&db).unwrap(), before, "a healthy store is kept byte for byte");
     assert!(!scheduler.ready.lock().unwrap().is_empty(), "the component's answer is retried");
+}
+
+// ---- one store per root: two roots must never fight over one graph store -------------------------
+
+#[test]
+fn two_roots_get_two_stores_and_never_the_shared_one() {
+    // THE MEASURED DEFECT, as an assertion. Before this change `locations` answered the configured
+    // database for the configured root, so `wa serve` (cwd = the runtime worktree) and every mission
+    // worker (cwd = its mission directory) indexed into ONE file - `wa-host main.rs` set both to
+    // `<home>/.wasm-agent/graph.db` for every process. Two roots took turns re-parsing ~600 files each
+    // and the store's own `graph_meta` recorded the guest mount point, so it could not even say whose
+    // tree it held (docs/missions/reports/graph-index-tear-cause.md).
+    let fixture = Fixture::new();
+    let config = fixture.config();
+    let shared = db_dir(&config.db).join(DB_FILE);
+    let (runtime_a, store_a) = locations(&json!({}), Some(&config)).unwrap();
+    assert_eq!(runtime_a, config.root.canonicalize().unwrap());
+    assert_ne!(store_a, shared, "the configured root must not index into the shared store");
+    assert_eq!(store_a.parent().unwrap().parent().unwrap(), config.db.with_extension("roots"));
+    let (runtime_b, store_b) = locations(&json!({"root": fixture.0.join("owned")}), Some(&config)).unwrap();
+    assert_ne!(runtime_b, runtime_a);
+    assert_ne!(store_b, store_a, "two roots must not resolve to one store");
+    assert_ne!(store_b, shared);
+    // Stable: asking twice gives the same store, and so does a symlinked spelling of one root (`.`),
+    // which is what a worker's cwd and a tool's root path differ by.
+    assert_eq!(locations(&json!({}), Some(&config)).unwrap().1, store_a);
+    assert_eq!(locations(&json!({"root": fixture.0.join("owned").join(".")}), Some(&config)).unwrap().1, store_b);
+    // Resolving a location writes nothing: an unasked-for store is never created.
+    assert!(!store_a.exists() && !store_b.exists() && !shared.exists());
+    // An explicit database is still used exactly, which is how a test or a tool pins its own store.
+    let private = fixture.0.join("private.db");
+    assert_eq!(locations(&json!({"db": private}), Some(&config)).unwrap().1, private);
+}
+
+
+
+#[test]
+fn a_healthy_store_is_never_quarantined_and_the_component_error_is_named() {
+    // Measured 23/11 06:44Z: a store of 133,959 nodes that `PRAGMA integrity_check` calls ok was renamed
+    // aside, because the component's `database disk image is malformed` outlived REPAIR_LIMIT retries.
+    // A copy is taken to keep the damage; there is no damage to keep, so the answer is a refusal that
+    // names the component's own error and stops the loop.
+    let fixture = Fixture::new();
+    let dir = fixture.0.join("graph.db.d");
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join(DB_FILE);
+    let connection = rusqlite::Connection::open(&db).unwrap();
+    connection.execute_batch("CREATE TABLE graph_meta(key TEXT PRIMARY KEY, value TEXT);\
+        CREATE TABLE files(path TEXT, hash TEXT);\
+        INSERT INTO graph_meta VALUES('root','/graph/root');").unwrap();
+    drop(connection);
+    let entry = test_entry(&fixture.0, &db);
+    {
+        let mut state = entry.state.lock().unwrap();
+        state.repairs = REPAIR_LIMIT; // the repairs this streak was allowed are spent
+        state.min_free_bytes = 1;     // the disk is not the reason here
+    }
+    let scheduler = test_scheduler();
+    scheduler.failed(&entry, "graph_index_failed: database disk image is malformed".to_string());
+    assert!(db.exists(), "a store integrity_check calls ok is never moved aside");
+    let copies = std::fs::read_dir(&dir).unwrap().flatten()
+        .filter(|item| item.file_name().to_string_lossy().contains(".malformed-")).count();
+    assert_eq!(copies, 0, "no copy is taken of a healthy store");
+    let state = entry.state.lock().unwrap();
+    assert!(state.stopped, "automatic retry stops instead of quarantining");
+    assert!(state.retry_at.is_none());
+    drop(state);
+    let line = quarantine_refused_line(&fixture.0, "ok", "graph_index_failed: database disk image is malformed");
+    assert!(line.contains("integrity=ok"), "{line}");
+    assert!(line.contains("component_error=graph_index_failed:_database_disk_image_is_malformed"), "{line}");
+    assert!(line.contains("next=stop") && line.contains("use=graph_index_force"), "{line}");
+}
+
+#[test]
+fn a_write_hint_indexes_nothing_and_leaves_the_store_untouched() {
+    // Item 0: `write`, `edit` and every native write used to enqueue a full index of the tree. Nothing
+    // is parsed or written until a graph call asks, and the answer says so instead of staying silent.
+    let fixture = Fixture::new();
+    let config = fixture.config();
+    let store = per_root_store(&config.db, &config.root.canonicalize().unwrap());
+    std::fs::create_dir_all(db_dir(&store)).unwrap();
+    let path = db_dir(&store).join(DB_FILE);
+    std::fs::write(&path, b"fixture").unwrap();
+    let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+    let source = fixture.0.join("runtime").join("main.lua");
+    std::fs::write(&source, "-- fixture\n").unwrap();
+    let other = fixture.0.join("runtime").join("notes.txt");
+    std::fs::write(&other, "not source\n").unwrap();
+    for _ in 0..3 {
+        let answer = notify(json!({"path": source}), Some(&config));
+        assert_eq!(answer["ok"], json!(true));
+        assert_eq!(answer["queued"], json!(false), "a write hint indexes nothing: {answer}");
+        assert_eq!(answer["reason"], json!("on_demand"));
+    }
+    // The answers that were already named stay named, byte for byte.
+    assert_eq!(notify(json!({"path": other}), Some(&config))["reason"], json!("not_indexable_source"));
+    let outside = fixture.0.join("elsewhere.lua");
+    std::fs::write(&outside, "-- fixture\n").unwrap();
+    assert_eq!(notify(json!({"path": outside}), Some(&config))["reason"], json!("outside_indexed_root"));
+    assert_eq!(notify(json!({}), None)["error"], json!("graph_not_configured"));
+    // The store beside the configured database is not touched at all, and no new one appeared.
+    assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), before, "nothing wrote the store");
+    assert_eq!(std::fs::read(&path).unwrap(), b"fixture");
+    assert!(!db_dir(&config.db).join(DB_FILE).exists(), "the shared store is not created either");
+}
+
+#[test]
+fn the_store_directory_keeps_a_bound_and_never_evicts_what_is_in_use_or_evidence() {
+    // One store per root is unbounded without a cap: every mission worktree would keep its own ~180 MB
+    // index for ever. Eviction is bounded by count and bytes, never touches the store just asked for,
+    // never a store whose lock is held, and never a store that still carries a quarantine copy.
+    let fixture = Fixture::new();
+    let roots = fixture.0.join("graph.roots");
+    let mut made = Vec::new();
+    for index in 0..5 {
+        let store = roots.join(format!("{index}.db"));
+        std::fs::create_dir_all(db_dir(&store)).unwrap();
+        std::fs::write(db_dir(&store).join(DB_FILE), vec![0u8; 10]).unwrap();
+        made.push(store);
+        std::thread::sleep(Duration::from_millis(15)); // distinct mtimes: the order is the policy
+    }
+    std::fs::write(db_dir(&made[0]).join("graph.db.malformed-20261123T000626Z"), b"evidence").unwrap();
+    let held = store_lock_file(&db_dir(&made[1]), DB_FILE).unwrap();
+    held.lock().unwrap();
+    retain_stores(&made[3], 2, u64::MAX);
+    let exists = |store: &PathBuf| db_dir(store).join(DB_FILE).exists();
+    assert!(exists(&made[3]), "the store that was just asked for is never evicted");
+    assert!(exists(&made[4]), "the newest store is kept first");
+    assert!(exists(&made[0]), "a store carrying a quarantine copy is evidence, never deleted");
+    assert!(exists(&made[1]), "a store whose lock is held is in use, never deleted");
+    assert!(!exists(&made[2]), "the rest are bounded by the count: {}", made[2].display());
+    held.unlock().unwrap();
+    // Bytes are the second bound: one store larger than the budget is still not the one being asked for.
+    retain_stores(&made[3], 8, 1);
+    assert!(exists(&made[3]), "the asked-for store survives the byte budget too");
+}
+
+#[test]
+fn the_graph_journal_appends_every_process_line_and_rotates_at_its_bound() {
+    // Item 4: `graph_db_*` lines must be countable for EVERY process, not only the one systemd
+    // captures. Measured 23/11: 23 `graph_db_` lines reached `journalctl --user` in a day while the
+    // store was quarantined 41 times, because a worker's stderr goes to whoever started it.
+    let fixture = Fixture::new();
+    let path = fixture.0.join("graph.log");
+    append_journal(&path, "graph_db_store_healthy root=/a file=graph.db next=retry");
+    append_journal(&path, "graph_db_store_evicted store=b bytes=1 stores_limit=8 bytes_limit=2");
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(text.lines().count(), 2, "one line per event, appended not replaced: {text}");
+    assert!(text.contains("graph_db_store_healthy") && text.contains("graph_db_store_evicted"));
+    std::fs::write(&path, "x".repeat(JOURNAL_BYTES as usize)).unwrap();
+    append_journal(&path, "graph_db_quarantined root=/a");
+    let rotated = fixture.0.join("graph.log.1");
+    assert!(rotated.exists(), "the file is bounded by rotation, not by discarding the older one");
+    assert_eq!(std::fs::metadata(&rotated).unwrap().len(), JOURNAL_BYTES);
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("graph_db_quarantined") && !text.contains("graph_db_store_healthy"));
+}
+#[test]
+fn two_roots_alternating_never_claim_or_read_each_others_store() {
+    // The kernel's half of "two roots, alternating calls, neither re-parses the other's files": each root
+    // claims its own store, keeps it across interleaved calls, and a store that says another root is
+    // refused instead of answered from. (The component's half - each store holding only its own root's
+    // files - is the store path being keyed by the root, asserted in
+    // two_roots_get_two_stores_and_never_the_shared_one.)
+    let fixture = Fixture::new();
+    let alpha = fixture.0.join("alpha");
+    let beta = fixture.0.join("beta");
+    std::fs::create_dir_all(&alpha).unwrap();
+    std::fs::create_dir_all(&beta).unwrap();
+    let alpha = alpha.canonicalize().unwrap();
+    let beta = beta.canonicalize().unwrap();
+    let store_a = db_dir(&per_root_store(&fixture.0.join("graph.db"), &alpha));
+    let store_b = db_dir(&per_root_store(&fixture.0.join("graph.db"), &beta));
+    assert_ne!(store_a, store_b);
+    std::fs::create_dir_all(&store_a).unwrap();
+    std::fs::create_dir_all(&store_b).unwrap();
+    // The first call for each root claims its own store name.
+    assert!(attribute_store(&store_a, DB_FILE, &alpha.to_string_lossy()).unwrap());
+    assert!(attribute_store(&store_b, DB_FILE, &beta.to_string_lossy()).unwrap());
+    std::fs::write(store_a.join(DB_FILE), b"alpha").unwrap();
+    std::fs::write(store_b.join(DB_FILE), b"beta").unwrap();
+    // Alternating calls: each one is answered by its own store, never by the other root's.
+    for _ in 0..3 {
+        assert!(!attribute_store(&store_a, DB_FILE, &alpha.to_string_lossy()).unwrap());
+        assert!(!attribute_store(&store_b, DB_FILE, &beta.to_string_lossy()).unwrap());
+        assert!(attribute_store(&store_a, DB_FILE, &beta.to_string_lossy()).is_err());
+        assert!(attribute_store(&store_b, DB_FILE, &alpha.to_string_lossy()).is_err());
+    }
+    // Each store still names the root that built it, and still holds only its own bytes.
+    assert_eq!(recorded_root(&store_a), Some(alpha.to_string_lossy().into_owned()));
+    assert_eq!(recorded_root(&store_b), Some(beta.to_string_lossy().into_owned()));
+    assert_eq!(std::fs::read(store_a.join(DB_FILE)).unwrap(), b"alpha");
+    assert_eq!(std::fs::read(store_b.join(DB_FILE)).unwrap(), b"beta");
+    // And the other root's store is never opened: the answer is a named refusal.
+    let refusal = attribute_store(&store_a, DB_FILE, &beta.to_string_lossy()).unwrap_err();
+    assert!(refusal.starts_with("graph_store_root_mismatch"), "{refusal}");
+    assert!(!attribute_store(&store_a, DB_FILE, &beta.to_string_lossy()).is_ok());
+}
+
+#[test]
+fn a_store_is_claimed_once_attributed_inside_and_never_adopted_when_it_cannot_say() {
+    let fixture = Fixture::new();
+    let dir = fixture.0.join("graph.roots").join("one.db.d");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mine = fixture.0.join("mine");
+    std::fs::create_dir_all(&mine).unwrap();
+    let mine = mine.canonicalize().unwrap().to_string_lossy().into_owned();
+    // No store and no attribution: this call claims the name, and claiming creates no index.
+    assert!(attribute_store(&dir, DB_FILE, &mine).unwrap(), "the first call for a root claims its store");
+    assert_eq!(recorded_root(&dir).as_deref(), Some(mine.as_str()));
+    assert!(!dir.join(DB_FILE).exists(), "claiming a name creates no store");
+    std::fs::write(dir.join(DB_FILE), b"store").unwrap();
+    // A store that says it is this root's is usable, and says so on every call.
+    assert!(!attribute_store(&dir, DB_FILE, &mine).unwrap(), "a store of this root is not re-claimed");
+    // Another root's store is refused by name and left exactly as it was.
+    let refusal = attribute_store(&dir, DB_FILE, "/somewhere/else").unwrap_err();
+    assert!(refusal.starts_with("graph_store_root_mismatch"), "{refusal}");
+    assert!(refusal.contains(&mine), "the refusal names the store's root: {refusal}");
+    assert_eq!(std::fs::read(dir.join(DB_FILE)).unwrap(), b"store");
+    // UNKNOWN IS NOT YES: an existing store with no attribution is refused, never adopted, and nothing
+    // is written beside it - the operator removes a derived index or pins one with `db`.
+    let unclaimed = fixture.0.join("graph.roots").join("legacy.db.d");
+    std::fs::create_dir_all(&unclaimed).unwrap();
+    std::fs::write(unclaimed.join(DB_FILE), b"legacy").unwrap();
+    let refusal = attribute_store(&unclaimed, DB_FILE, &mine).unwrap_err();
+    assert!(refusal.starts_with("graph_store_unattributed"), "{refusal}");
+    assert_eq!(std::fs::read(unclaimed.join(DB_FILE)).unwrap(), b"legacy");
+    assert!(!unclaimed.join(SOURCE_ROOT).exists(), "nothing claims a store it did not create");
 }
