@@ -332,9 +332,22 @@ do
   local rounds_before = view.turn and view.turn.rounds or 0
 
   -- The save happens WHILE the run is streaming: the change draws a phase word the old copy cannot.
-  local marked = good:gsub('if text == "thinking" or text == "model" then\n      self%.phase = "Thinking"',
-    'if text == "thinking" or text == "model" then\n      self.phase = "StreamProbe"', 1)
-  ok(marked ~= good, "the planted copy renames the phase word")
+  --
+  -- THE ANCHOR IS THE MODEL-PHASE BRANCH, NOT TWO ADJACENT LINES (fixed 23/11, esc-stops-now). It used to
+  -- require the status branch head immediately followed by the phase word, and change/esc-stops-now inserted
+  -- one line into that branch (self:model_waiting()), so the plant stopped matching and this row went red on
+  -- main while the CODE it judges was fine - measured 23/11, main-health on 7865a08e: 2 of 217. What the row
+  -- proves is that the branch which sets the phase word is the one a patch renames, whatever its own arms are
+  -- written between; so the pattern allows exactly one arm line there, and the older two-line shape is still
+  -- accepted. Either shape must match EXACTLY ONCE.
+  local marked, planted = good:gsub(
+    '(text == "thinking" or text == "model" then\n[^\n]*\n)      self%.phase = "Thinking"',
+    '%1      self.phase = "StreamProbe"', 1)
+  if planted == 0 then
+    marked, planted = good:gsub('if text == "thinking" or text == "model" then\n      self%.phase = "Thinking"',
+      'if text == "thinking" or text == "model" then\n      self.phase = "StreamProbe"', 1)
+  end
+  ok(planted == 1, "the planted copy renames the phase word")
   write(DEV .. "/lua/core/cli_view.lua", marked)
   local notices = tick()
   local applied = false
