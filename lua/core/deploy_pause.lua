@@ -258,6 +258,17 @@ function M.claim_wait(claimed, now, opts)
   return refused
 end
 
+-- THE ONE TEST FOR "the node refused this run because a build is waiting for it or being installed".
+--
+-- Both sentences start with the same two words spelled two ways: `deploy_waiting:` is lua/core/deploy_wait.lua's
+-- (the pre-run gate, the scripted CLI's exit 2) and `deploy waiting:` is M.say_wait's (a turn that paused at its
+-- own step). The CLI's exit code and the wake's deferral have to agree about which refusals are a WAIT, so the
+-- test is here and both of them ask it - a second spelling of it is how the two would drift.
+function M.is_refusal(text)
+  if type(text) ~= "string" then return false end
+  return text:match("^deploy[_ ]wait") ~= nil
+end
+
 -- WHERE THE SESSION SAID IT PAUSED, for the sentinel's own bound.
 --
 -- The node's `/health` says which sessions are BUSY; it cannot say which of them stopped on purpose, because a

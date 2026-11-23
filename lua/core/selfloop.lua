@@ -1226,6 +1226,26 @@ function M.finish(row, ok, detail, opts)
 end
 
 -- The scheduler's entry (`wa_completion_run` with kind="self_wake").
+-- A WAKE WHOSE TURN THE NODE REFUSED FOR A WAITING BUILD HAS NOT BEEN DELIVERED (23/11).
+--
+-- The gate at the top of run_wake (deploy_pause.refuse) catches the ordinary case. This is the other one, measured
+-- as `run_resource_refused ... resource_busy` on 23/11: the request arrives BETWEEN that gate and the run's own
+-- session claim, the claim is held by a turn the deploy paused, and the run does not start (lua/core/agent.lua,
+-- deploy_pause.claim_wait). The row goes back with a new time, exactly as the gate's own deferral does, so the wake
+-- is performed after the swap instead of being consumed by its own refusal.
+function M.defer_refused(row, refusal, opts)
+  opts = opts or {}
+  local now = tonumber(opts.now) or os.time()
+  local write = opts.exec or exec
+  if type(write) ~= "function" then return { error = "wake_defer_unavailable" } end
+  local next_at = now + backoff(tonumber(row.attempts) or 0)
+  local called, changed = pcall(write, [[UPDATE self_wakes SET status='pending', due_at=?, last_error=?, updated_at=? WHERE id=?]],
+    { next_at, slug(refusal or "deploy_waiting"), now, row.id })
+  if not called then return { error = tostring(changed) } end
+  if type(changed) == "table" and tonumber(changed.changes) == 0 then return { error = "wake_not_pending" } end
+  return { deferred = true, wake_id = row.id, due_at = next_at, deploy_waiting = tostring(refusal or "") }
+end
+
 function M.run_wake(args)
   M.setup()
   args = args or {}
@@ -1315,6 +1335,10 @@ function M.run_wake(args)
   -- that was mid-turn settles `cancelled` instead of re-arming for its cadence, because the model never
   -- got its turn and a cadence fired under a cancelled run is the loop that produced a failed turn and
   -- an error line per interval.
+  -- A REFUSAL FOR A WAITING BUILD IS A WAIT, NOT A DELIVERED WAKE (23/11): same row, same time, put back.
+  if ok and dep("deploy_pause").is_refusal(bot.turn_refused) then
+    return M.defer_refused(row, tostring(bot.turn_refused), { now = clock({}) })
+  end
   if not ok and M.cancelled_stop(result) then
     local settled = M.settle_interrupted(row, { now = clock({}) })
     return { cancelled = true, wake_id = row.id, status = settled.status }

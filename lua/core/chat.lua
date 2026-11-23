@@ -1372,8 +1372,13 @@ M.start_notice = start_notice
 function M.deploy_refused(agent)
   local refused = type(agent) == "table" and agent.turn_refused or nil
   if type(refused) ~= "string" then return false end
-  -- Both sentences start with the same two words, spelled two ways: `deploy_waiting:` is
-  -- lua/core/deploy_wait.lua's and `deploy waiting:` is the pause's own (deploy_pause.say_wait).
+  -- The rule itself lives in lua/core/deploy_pause.lua (`is_refusal`), because the wake's deferral asks it too.
+  local loaded, pause = pcall(dofile, "lua/core/deploy_pause.lua")
+  if loaded and type(pause) == "table" and type(pause.is_refusal) == "function" then
+    return pause.is_refusal(refused)
+  end
+  -- The module could not be loaded: the two sentences both start with these words, so the answer is still
+  -- right about them - and a module that cannot be read is not a reason to call a wait a failure.
   return refused:match("^deploy[_ ]wait") ~= nil
 end
 
