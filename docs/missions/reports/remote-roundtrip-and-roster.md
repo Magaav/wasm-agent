@@ -116,10 +116,25 @@ synchronous `bash` answers (`code`, `ok`, `stdout`, `stderr`, compared field by 
 `tools.dispatch('bash', ...)` in the same process), and **once one handle is adopted the reap's `list`
 runs again** - laziness removed the idle cost, not the rule.
 
-Parity (rule 14): the field set of a real peer-bash answer was recorded from the old path and compared with
-the new one; both carry `adopted`, `code`, `ok`, `stdout`, `stderr`, `operation_id`, `settled`,
-`state`, `process_exit_code`, `stdout_bytes`, `stderr_bytes`, the `output_*` hints and `timing` -
-the cut removed two reads of a record, not a single field.
+Parity was checked against a **real peer answer recorded on the base commit** (`2104a4d8`, the fixture in
+§1), not only in-process: the base answers **41 fields** (`adopted`, `cleanup`, `cleanup_budget_ms`, `code`,
+`containment`, `cpu_priority`, `cwd`, `cwd_requested`, `cwd_source`, `effective_cwd`, `elapsed_ms`,
+`last_output_elapsed_ms`, `ok`, `operation_id`, `output_bytes`, `output_complete`, `output_streams_closed`,
+`output_truncated`, `overdue`, `owner`, `owner_boot`, `owner_process_id`, `process_exit_code`,
+`process_exit_elapsed_ms`, `promoted`, `session`, `settled`, `state`, `status`, `stderr`, `stderr_bytes`,
+`stderr_elided_bytes`, `stderr_path`, `stderr_truncated`, `stdout`, `stdout_bytes`, `stdout_elided_bytes`,
+`stdout_path`, `stdout_truncated`, `timeout_ms`, `timing`) and this tree answers **exactly those 41** - no
+field missing, none added - after `d51b614e`, which removed three marks the first version of the cut had
+leaked: the answer said `output_omitted: true` (and its hint, "ask for it with output=true") next to
+`stdout: "ok"`, because the snapshot it now reuses had been through `tools.lua`'s list/await pruning. The
+recorded set is asserted by the row (`test-remote-call-bound.lua`, section 2b), so the next cut cannot drop
+or invent a field silently.
+
+Rule 14's order was not kept here and that is a mistake worth naming: the golden set above was recorded from
+the base **after** the cut, not before it. The base worktree at `2104a4d8` and the same fixture were still
+available, so the recording is of the real old path - but it happened in the other order, and the first
+version of the cut had already changed the answer (the three leaked marks) when it was taken. A cut that
+reshapes an answer should record its golden first.
 
 ## 5. Job 5 - the remote `edit` shape: measured, inconclusive, so no schema change
 
