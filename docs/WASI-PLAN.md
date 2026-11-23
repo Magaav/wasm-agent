@@ -273,3 +273,41 @@ One world composed of `wasi:cli|filesystem|clocks|random|sockets|http@0.2.0` imp
 interfaces is the whole porting surface: a new platform implements the six and gets every component
 unchanged. Today the same surface is spread across 151 host functions with no file that lists them for
 a porter - `REGISTRY` is a Rust table, and `docs/HOST.md` is its prose.
+
+## 7. Runtime optimizations, each measured before it is proposed
+
+The brief's greps first, re-checked on this tree (23/11, `1cc642f8`): precompiled `.cwasm` caches are in
+`components.rs:195` (`disk_cached`), `core_component.rs:929` (`load_component`), `quickjs.rs`,
+`wa-kernel-runtime`; epoch interruption in 13 files (`grep -rl epoch_interruption`); a pooling
+allocator in 3 (`components.rs` `pooled_engine`, `core_pool`, `wa-core-pool-bench`); wasmtime **50.0.1**
+(`rust/Cargo.lock`). `InstancePre`/`instantiate_pre` is still absent (0 files) while `Linker::new` is
+built per call at `core_component.rs:1101,1502`, `memory_host.rs:412`, `hooks_host.rs:194`,
+`selfloop_host.rs:350`, `mesh_host.rs:239`, `codemode_seam.rs:650`.
+
+**What one call costs, split.** Two independent measurements agree, and the second one is the prior
+mission's own phase instrumentation (`docs/missions/reports/component-calls-cheap.md`, branch
+`change/component-calls-cheap`, 23/11, same laptop, `WA_PHASE_PROFILE` patch since reverted):
+
+| phase | codemode `open` (prior, n=40) | memory seam, refused op (here, n=50) |
+| --- | --- | --- |
+| artifact read + sha256 | 261 us (median) | ~150 us (read 52 + SHA-256 99, measured on the same 207,332 B file) |
+| `WasiCtx` + `Store` + `Linker::new` + 2x `add_to_linker` | 216 us | - |
+| `Component::instantiate` | 186 us | - |
+| the two together, as one floor | 663 us | **204 us** (p50), 223 (p95) |
+| the guest's own work | 20,808 us (95 %: booting QuickJS) | 0.5-0.7 ms for a real memory op |
+
+The difference between 663 us and 204 us is the component (codemode carries more imports and is bigger)
+and the op (codemode's `open` builds a QuickJS runtime; the memory floor returns an error at once). Both
+point the same way, which is the verdict:
+
+| what | measured saving | verdict |
+| --- | --- | --- |
+| **(a) link once, instantiate from an `InstancePre`** | link+store is **216 us** and instantiate **186 us** per call; of a real memory call (620-714 us) that is 25-35 %, of a codemode call (21 ms) 2 %, of a turn (5.7 s) **0.1 %** | **worth it only together with (a')**: the 261 us read+sha256 happens on *every* call and repeats a fact the resolver already verified (`load_in` re-reads and re-hashes the artifact; the in-process `compiled` cache then finds the compiled component). Caching the `Installed` struct per component (invalidated on pin change) plus an `InstancePre` removes **~0.45 ms of the 0.66 ms setup** - and the same sha256 shows up as **20 % of an idle node's busy CPU** in the prior report's symbol samples |
+| **(b) a warm instance per component** | saves the same ~0.4 ms of setup per call, but the state is per call by construction: memory opens a scoped SQL session and a transaction, codemode opens a script, hooks carries a per-decide payload. Only `selfloop`/`memory` *reads* could reuse a store between calls | **not worth it now** (0.1 % of a turn); revisit if the call count per turn grows |
+| **(c) load a component on first use, not at start** | **already true**: `wa` with a script starts in **14.0 ms** and the first memory call adds **+3.0 ms** with the `.cwasm` cache, **+172 ms** without (one compile, then cached). `wa features` starts with no component loaded (prior report: 0.007 s CPU, RSS 16 MB) | **done**; the only open item is the cold-compile burst (6.13 s for the largest component, prior report) - a cache-priming question, not a start-cost one |
+| **(d) pass large bodies as handles/streams** | the payload is real: **1,125 capability calls and 4.8 MB back per context build**, `read_file` alone **760 calls / 10.5 MB** per turn (prior report, `bench-core-calls`); Lua decodes JSON at ~17.8 MB/s, so **~24 ms of a 117 ms context build is JSON** | **the biggest single win on this list**, and it is not a WASI question: it is "do not copy 10 MB through a string". A handle (open the file, read it in the guest) or a stream removes most of it |
+| **(e) Esc inside a component through the epoch deadline** | the deadline **does** interrupt a running component: a wedging guest with a 200 ms deadline was killed in **203.2 ms of CPU** (section 1.4). Esc itself is **cooperative**: the guest polls `host.run_cancelled` (`lua/core/agent.lua`, `codemode.lua`), so a component that does not poll (a long query, a wedge) runs to its deadline | **partly there**: the mechanism exists (epoch + 10 ms tick), the wiring from Esc to the store's deadline does not; the cost of missing it is up to the deadline (memory's table runs 50-1,000 ms per op) |
+
+So the answer to *"which optimizations would be worth adding?"* is: **(d)** (sizes, measured), then
+**(a')** (stop re-reading and re-hashing the artifact per call), then **(e)** (wire Esc to the deadline),
+and **not** (b) or (c).
