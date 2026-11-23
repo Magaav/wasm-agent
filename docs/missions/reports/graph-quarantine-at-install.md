@@ -92,6 +92,17 @@ No assertion, limit or quarantine rule was removed; `quarantine_database` and `f
   fast path's own row executor (`lua_run`) with the component built from this tree: measured 23/11, exit 0,
   `graph_db_journal_resolved ... outcome=rolled_back` and `revision 1 kept, 13 row(s) answered, no
   quarantine copy`.
+* The landing's own quick step (`wa land`, `lua/core/land.lua` `impl.tests`) runs a branch's rows with the
+  binary this node runs but installed no components, so a component row read `component_not_installed:graph`
+  there and the preflight stopped on a missing fixture (`23/11`, round 2). It now installs THIS NODE's pinned
+  artifact - `<data>/components/<name>.wasm` with its `.wasm.sha256` and `.json` - into the row's own home and
+  points `WA_COMPONENTS_DIR` at it, exactly the directory the host resolves components from; a component this
+  node does not have is NAMED in the step as `not run here` (never counted green), which is the same division
+  of labour a Rust change already has. `ef258a86`, with `scripts/test-land-quick.lua` proving both halves (a
+  fake component arrives in the row's home; a missing one is named and not counted).
+* Measured after the change, in the landing step's own shape (installed binary, the node's component in the
+  row's home, `WA_COMPONENTS_DIR` set): exit 0, same line, no quarantine copy. Without provisioning of either
+  kind the row still refuses by name.
 
 **Discrimination, measured twice each on this node:**
 
