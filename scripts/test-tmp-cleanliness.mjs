@@ -362,7 +362,10 @@ function watchdogProbe() {
     'watchdog=$!',
     'sleep 1',
     'kill "$watchdog" 2>/dev/null',   // what the runner does when the CLI exits normally
-    'sleep 2',
+    // SIX SECONDS, not two: the watchdog's own step is five seconds, so a check that killed it one second
+    // early and then looked immediately would report the step as its own leftover - measured on this file's
+    // first run, where the node refused the call for leaving a background descendant.
+    'sleep 6',
   ].join('\n');
   spawnSync('bash', ['-c', script], { encoding: 'utf8', timeout: 60000 });
   const after = longSleeps();

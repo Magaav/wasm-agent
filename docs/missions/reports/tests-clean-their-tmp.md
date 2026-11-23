@@ -11,6 +11,7 @@ failing with EDQUOT. Branch `change/tests-clean-their-tmp`, base `83772130`, wor
 * `1544404f` the rows that minted in `/tmp` take their root from the runner and remove it on exit, and
   `scripts/test-tmp-cleanliness.mjs` is the test that holds every row to it (wired into `scripts/fast.sh`
   and `scripts/test.sh`);
+* `4098c6ca` a tmux server and a mission watchdog die with the process that started them (item 7);
 * `164e27a8`, `041e410a`, `2bf03283` this report and the two corrections it needed (a line number that moved
   when the floor was added, and the library's own usage line after the file was renamed off the `.gitignore`
   `tmp-*` pattern).
@@ -216,6 +217,64 @@ commit and passes standalone (`bash scripts/test-deploy-wait.sh` with the same b
 ok`, exit 0, 300 s timeout). `wa_fast_watchdog`/wake timing under four concurrent suites is the shape that
 fails; the diff here touches no deploy, wake or timing code.
 
+## Item 7 (added by the orchestrator, 23/11 ~11:35Z) - a server and a sleep die with their parent
+
+Two leaks measured on this node, both from rows that had already PASSED, so nothing in a red row or a log had
+ever named them:
+
+| what was left | how much | where it came from |
+| --- | --- | --- |
+| `tmux -L wa-run-live-1304985`, 41 hours after its parent died, holding a session `live` and a running `wa --db ~/.wasm-agent/tmp/wa-run-live-PNgegf/ledger.db` | 1 server, plus **1,340 `wa-*` socket FILES** in `/tmp/tmux-1000`, every one answering `no server running on ...` | `scripts/test-*-pty.mjs` (nine rows), each starting its own `tmux -L wa-<name>-<pid>` and killing it in a `finally` - which a SIGKILL never reaches |
+| orphaned `sleep 21600` (parent `systemd --user`) | **108 live** when I started counting, in batches of six | `lua/core/mission.lua:197` and `:234`, the mission runner timeout watchdog |
+
+**The tmux half** (`4098c6ca`). One helper, `scripts/lib/tmux-session.mjs`, and all nine pty rows converted to
+it (two lines each: the socket name and the `tmux()` wrapper). It kills its server on every path the process
+can take - `exit`, `SIGINT`, `SIGTERM`, `SIGHUP`, an uncaught exception - and, because a **SIGKILL cannot be
+caught** and that is exactly what happened, it also reclaims: the socket name carries the owning pid, so
+`reclaimStaleServers()` asks the kernel (`kill(pid, 0)`) and kills the server of an owner that is gone. Two
+details measured while building it:
+
+* **a zombie answers `kill(pid, 0)`**, so the first version of the reclaim skipped the server it had just been
+  asked to remove (the leak probe caught it: `wa-sigkill-probe-2128012 survived a SIGKILLed owner`).
+  `ownerAlive()` reads `/proc/<pid>/stat` and treats `Z` as gone;
+* **a killed server leaves its socket FILE behind** (`tmux kill-server` on a socket with no server answers
+  `no server running on ...` and does not unlink it) - which is what the 1,340 files were. `killServer()`
+  unlinks the socket after the kill, so the count is a leak check rather than a count of history.
+
+Measured after the change: the reclaim removed **1,340 stale socket files** on its first run; `wa-*` sockets
+in `/tmp/tmux-1000` went 1,342 -> 2 (`wa-ref`, `wa-sn`, another tool's hand-named servers, left alone);
+`node scripts/test-run-live-pty.mjs` **22 ok, 0 failed, 0 skipped** and left no socket and no server behind.
+
+**The sleep half** (`4098c6ca`). `lua/core/mission.lua` started its watchdog as
+`( sleep ${MISSION_TIMEOUT_SECONDS:-21600}; kill ... ) &` and then `kill "$watchdog"` - which kills the
+SUBSHELL and never the `sleep` inside it, so every launch that ended normally left one behind for the rest of
+the day (six per batch, one batch per launch). The deadline is now COUNTED in five-second steps: the watchdog
+leaves the loop as soon as the CLI is gone, and the most a killed watchdog can leave is one step. Both
+occurrences (the first turn and the deploy-wait retry loop) carry the change and the measurement in a comment.
+
+**The leak check** (`scripts/test-tmp-cleanliness.mjs`, half D - the whole check now runs in 8.3 s measured, up from 0.6 s: the SIGKILL probe waits for a child and the watchdog probe waits out one five-second step):
+
+* **D1 static**: every `scripts/test-*-pty.mjs` that starts a tmux server must do it through the helper - a row
+  that starts its own server is the 41-hour leak again;
+* **D2 dynamic, the SIGKILL path**: a child starts a server through the helper and is killed with SIGKILL
+  (nothing in it can run), the shipped `reclaimStaleServers()` then runs in a third process, and the socket
+  must be gone. The leak it kills is made first and asserted to exist, so the probe cannot pass by making
+  nothing;
+* **D3 dynamic, the watchdog**: the block is taken OUT OF `lua/core/mission.lua` and run the way the runner
+  runs it (start, kill the watchdog after a second), then any `sleep` of 600 s or more that appeared is a
+  FAIL naming its pid. The first version of this probe extracted the block from a `$(` inside the comment
+  above it and passed on the base tree - the extraction now starts at the line that opens the block, and on
+  base D3 fails with `left 1 long sleep(s) behind ... pids 2149579`. The probe also had to be told to WAIT
+  out one step: killing the watchdog one second in and looking immediately reported the watchdog's own
+  five-second step as a leak, and the node refused the surrounding call for leaving a background descendant.
+
+**Discrimination, on a separate worktree of base `83772130`**: the base copy of the test FAILS **17 of 19**
+checks (nine pty rows without the helper, the helper absent, the watchdog leak, plus the three rows and three
+entry points from items 2 and 4); on this branch it PASSES 9 of 9.
+
+**Not done, said plainly:** the 108 `sleep 21600` processes that were already orphaned are still running. I
+did not kill them: they are PIDs I did not start, and this round stops only its own (the standing rule after
+21/11). New launches no longer make them.
 ## Texts to approve (operator- or model-facing, verbatim)
 
 1. `fast: refused(tmp_low): <note>. Nothing was run: a red caused by a full disk is a fact about the machine and never about this tree.`
@@ -225,6 +284,9 @@ fails; the diff here touches no deploy, wake or timing code.
    `tmp_unknown: WA_TMP_MIN_FREE_MB=x is not a number of MiB` / `tmp_unknown: /nope: not a directory`.
 5. `fixture kept for diagnosis: <dir>` (reused, unchanged wording) - now printed only when the directory
    really is kept.
+5b. `the mission runner's watchdog left N long sleep(s) behind on its normal exit` and
+   `a tmux server whose owner was SIGKILLed (<socket>) is reclaimed by the next session (N socket(s) removed)`,
+   `<file>:<line> starts a tmux server without scripts/lib/tmux-session.mjs`.
 6. the check row's name in the fast path: `tmp-cleanliness`.
 7. the test's own lines: `test-tmp-cleanliness: a row cleans up after itself, never mints under a literal
    /tmp, and the suite refuses a full machine`, `  ok   - <row> removed the scratch it made under the TMPDIR
