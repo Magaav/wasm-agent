@@ -155,6 +155,14 @@ local failed = run('text(JSON.stringify(await tools.bash({command:"exit 3"})));'
 check(failed.ok == true and failed.code == 3, 'a command that exited 3 is an answer with code 3, not an error')
 check(#outside(failed) == 0, 'and that answer keeps the same shape')
 
+-- A promoted answer - the shell exited and its descendants are supervised - keeps the one sentence a
+-- caller acts on there: the NOTE that names the operation and says not to rerun.
+local promoted = tools.dispatch(memory, 'bash', { command = 'sleep 4 & exit 0' }, 'master', ctx)
+check(#outside(promoted) == 0, 'a promoted answer keeps the same shape: ' .. table.concat(outside(promoted), ','))
+check(type(promoted.note) == 'string' and promoted.note:find(tostring(promoted.operation_id), 1, true) ~= nil,
+  'and it keeps the note naming the operation it left behind: ' .. tostring(promoted.note))
+tools.dispatch(memory, 'operation', { action = 'cancel', id = promoted.operation_id }, 'master', ctx)
+
 -- 6. THE HANDLE RETURNS EVERY REMOVED FIELD. The record the answer points at is the whole answer.
 -- TWO of the record's own doors, because they answer different halves of it: `status` is the operation's
 -- record (owner, session, launch directory, containment, cleanup, the store paths, the timing), and `wait`

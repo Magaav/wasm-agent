@@ -10,6 +10,7 @@ handle away". Branch `change/slim-tool-results`, base `899fdd47`, worktree
 | `1e523c2b` | `lua/core/bash_result.lua` (the allow-list), the dispatcher door, and the two readers that moved |
 | `691f7ea0` | `scripts/test-slim-bash-result.lua`, the three recorded fixtures, and `scripts/test-workspace-cwd.lua` reading the record |
 | `4db64991` | `docs/CODEMODE.md` "What a command's answer carries", and the fixtures' provenance |
+| `96b1bb05` | `scripts/test-operation-cpu-priority.lua` reads the priority from the record |
 
 ## Premises, re-measured before writing code
 
@@ -30,6 +31,7 @@ tree** - with exactly two exceptions, both handled in this change:
 |---|---|---|
 | `process_exit_code`, `settled` | `lua/core/codemode.lua`, `script_value`: "a command that RAN and exited non-zero is a result, not an exception" decided on `value.process_exit_code` + `value.settled` | reads `code` + `output_complete`, the fields the answer still carries (`1e523c2b`) - the documented behaviour is unchanged and `scripts/test-slim-bash-result.lua` pins it |
 | `effective_cwd`, `cwd_requested`, `cwd_source`, `cwd`, `promoted` | `scripts/test-workspace-cwd.lua`, six assertions | read from the operation record through the handle instead (`691f7ea0`); the assertions are the same six, and one is added |
+| `cpu_priority` | `scripts/test-operation-cpu-priority.lua:35`, "a call the run waits for keeps the node own priority" - a `dispatch('bash')` answer | read from `operation {action="status", id=foreground.operation_id}` (`96b1bb05`); the assertion is unchanged, and the row's own header already said the fact belongs to the record |
 
 Everything else the grep names is a different object, checked line by line: `platform.cwd()` and
 `ctx.cwd` (agent, chat, done_gate), the operation record (`codemode_pending`, `tool_output`,
