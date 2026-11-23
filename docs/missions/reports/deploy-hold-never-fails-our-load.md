@@ -813,6 +813,15 @@ a second pass. `rust/wa-sentinel` unit tests: **159 passed**.
   peer call's own timeout. If the residual (the cheap phases of an already-running pass) ever proves long enough
   to matter, the next yield point belongs between the backup-due check and the banner refresh; that is where the
   remaining work is, and it is milliseconds today.
+* **What is NOT asserted, said plainly:** the gate itself has no row. A test was written for it in
+  `scripts/test-deploy-wait.sh` (step 7c: sample `/health` for the `sync tick` label with nothing waiting, then
+  under a request) and it printed `SKIP`: the label lives only for the duration of the call, which is milliseconds
+  when there is nothing to push, so a 3 s sampling loop cannot observe it - the label measured in `sentinel.log` was
+  long because that pass was doing network work. It was removed rather than kept as a test that proves nothing. The
+  gate's two halves are covered by reading: `wa_deploy_pending` reuses `deploy_pause.waiting` (the signal the pause
+  rows already assert), and `serve.rs` adds one `&& !deploy_pending()` to each housekeeping start. A counter (a
+  `health` field or a per-tick log line) is what would make it assertable, and it is the first thing to add if
+  Fable wants this row.
 * **No label allow-list after the bound:** `holders.rs` is unchanged on this branch, and
   `proposal/housekeeping-holds-no-install` stays **unmerged** (its allow-list is superseded by this).
 
