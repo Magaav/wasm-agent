@@ -91,7 +91,15 @@ passed, 0 failed**. New tests (all in `rust/wa-capabilities/src/graph_tests.rs`)
 | `the_store_directory_keeps_a_bound_and_never_evicts_what_is_in_use_or_evidence` | count and byte bounds, the asked-for store, a locked store and a store with a quarantine copy all survive |
 | `the_graph_journal_appends_every_process_line_and_rotates_at_its_bound` | append (not replace), rotation at the bound, the older copy kept |
 
+**End to end, with the real component.** `scripts/test-graph-automatic.lua` - the row that drives the
+`graph` component through `write`/`edit`/`search_symbols`/`symbol_source` for a whole fixture - was run
+against the `wa` binary and the `graph` component **built from this branch** in a scratch HOME:
+`graph automatic native ok (18 checks)`. It now asserts, on the real path: a native write and a native
+edit answer `queued=false, reason=on_demand`; a hint addressed at a store the test names itself leaves
+that store **uncreated**; and the graph call itself is what commits the index.
+
 Two existing tests encoded the defect and now hold the new rule (tighter, not looser):
+
 `explicit_workspace_has_stable_separate_cache_without_touching_runtime_index` and
 `explicit_database_override_is_preserved_with_verified_root`.
 
@@ -102,13 +110,25 @@ those three checks now hold the new rule (a write and an edit answer `queued=fal
 hint addressed at a store this test names leaves that store uncreated; the graph call itself commits).
 No other assertion was deleted or loosened anywhere.
 
+## 3b. The whole `wa-capabilities` + `wa-graph` unit suites, and what fails there before me
+
+`cargo test -p wa-capabilities -p wa-graph`: **397 passed, 3 failed** in `wa-capabilities`, 0 failed in
+`wa-graph`. All three are named here because none of them is this diff's:
+
+| failure | why it is not mine |
+|---|---|
+| `operations::adoption_survives_the_relay_deadline::an_adopted_operation_...` | it REFUSES to run outside a scratch HOME (`wa-capabilities/src/operations.rs:3001`), and `scripts/test.sh:277` runs it as its own row with `HOME="$GATE_HOME"`. Run by hand with the real HOME it fails by design |
+| `operations::await_returns_at_its_own_wait::a_relayed_await_...` | the same refusal (`operations.rs:3078`), same row `scripts/test.sh:280` |
+| `host::tls_anchor_tests::a_provider_call_refuses_a_private_ca_that_no_bundle_names` | **measured on base `41d6420c`** in a separate worktree (`git worktree add /tmp/gospr-base 41d6420c`, same command): it fails there too, at the same assertion (`host.rs:7861` on base). Pre-existing and environmental, not this change |
+
 ## 4. The numbers this mission produces
 
 * Code: **+478 / -40** lines over 5 files (`git show --stat 41fb8dcc`), of which 238 lines are tests.
 * Stores: one per root under `<configured>.roots/`, capped at **8 stores / 2 GiB**, each a private
   `.d/graph.db`. The old shared store was 185 MB with 2,724 files and 135,192 nodes, plus **727 MB** in
   `graph.db.d/` today (three quarantine copies and the live store).
-* `graph_db_*` reachability before: 23 lines/day in the journal, all from the one `wa serve` unit.
+* `graph_db_*` reachability before: 23 lines/day in the journal, all from the one `wa serve` unit
+  (measured today; the 109 `graph_` lines since 18/11 come from that same process).
   After: every process, one file, countable.
 * CPU spent indexing: **not measured to a number**, and I will not invent one. What is measurable from
   this diff is that no process indexes unless a graph tool call asks, which is the path the ledger says
@@ -141,6 +161,11 @@ against base `41d6420c`.
   the mechanism that makes it true (no code path reaches `scheduler()` from a write, and the new test
   holds a store's mtime) and that a `wa` process performing writes and edits creates no store
   (the `test-graph-automatic` row).
+* **Item 5's cross-process form was not run.** The resolution rule (a store keyed by the real root) is a
+  pure function of the root and is tested in-process; the end-to-end row above runs one process that
+  writes and asks. What was NOT run is the brief's literal test - a `serve` plus three workers, in three
+  processes with three cwds, alternating for ten minutes. A child `wa` process started by a Lua row needs
+  the built binary passed in by the row, which this session did not wire.
 * **Item 6, the fair comparison table, is not done** (see §7).
 * Nothing ran against a live peer, and no key, pin or installed file was touched.
 
