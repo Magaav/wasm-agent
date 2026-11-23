@@ -603,6 +603,8 @@ return {
   ['worktree_not_a_directory']='tools.lua',
   ['write_failed']='file_tools.lua',
   ['write_failed:']='spells.lua',
+  ['write_mismatch']='file_tools.lua, tools.lua',
   ['write_unavailable']='spells.lua',
+  ['write_unverified']='tools.lua',
   ['wrong_target']='binding.lua',
 }
