@@ -113,12 +113,45 @@ end
 -- `parameters` is the tool's own schema parameters object, or nil when this node has no schema for the name
 -- (an unknown tool, or one whose schema only a peer has). No schema is not a verdict: an unknown name is
 -- answered by the dispatcher's own unknown-tool path, so this refuses nothing on a schema it cannot read.
--- Report, never refuse (STEP 1). Answers nil so the dispatch runs the call exactly as it did before.
+
+-- ── ENFORCEMENT (STEP 2, 23/11) ───────────────────────────────────────────────────────────────────────
+-- ONE LINE decides who is refused. 'model' refuses an undeclared field again for a call THE MODEL sent and
+-- records only for internal and peer callers; 'off' is STEP 1's behaviour (record everything, refuse
+-- nothing). The other half of the switch is measured, not promised: internal and peer callers come under
+-- enforcement only after 24 h with no `tool_arguments` event whose caller is internal or peer in this node's
+-- telemetry - the row scripts/test-tool-args-report.lua names that measurement, and the flip is this line.
+-- SHIPPED 'off': the model door can be enforced again in one line ('model'), and G may ship with it only
+-- when the full main-health is green with it. It is off here because STEP 2's field work is not finished:
+-- turning it on today would re-red the rows whose callers still send an undeclared field (see the report's
+-- field table), and a red main is not a place to discover that a declaration is missing.
+M.ENFORCE = 'off'
+
+-- Record always; refuse only what the switch names. STEP 1 recorded everything and refused nothing; STEP 2
+-- refuses the MODEL's own calls again (the door the model reads), and keeps internal and peer callers
+-- report-only until the measurement above says otherwise.
 function M.refusal(name, args, parameters, ctx)
   local unknown = M.undeclared(name, args, parameters)
   if not unknown then return nil end
   for _, field in ipairs(unknown) do note(name, field, unknown, ctx) end
-  return nil
+  local caller = caller_kind(ctx)
+  if M.ENFORCE ~= 'model' or caller ~= 'model' then return nil end
+  local declared = type(parameters) == 'table' and type(parameters.properties) == 'table' and parameters.properties or {}
+  local names = {}
+  for key in pairs(declared) do names[#names + 1] = tostring(key) end
+  table.sort(names)
+  local list = #names > 0 and table.concat(names, ', ') or 'no arguments'
+  return {
+    error = 'unknown_argument:' .. table.concat(unknown, ','),
+    tool = tostring(name),
+    unknown_arguments = unknown,
+    accepted = names,
+    effect = 'none',
+    message = '`' .. tostring(name) .. '` declares: ' .. list .. '. Nothing ran: an argument the tool does not '
+      .. 'declare is refused by name rather than ignored, because a dropped field is a call that did something '
+      .. 'else in silence.',
+    fix = 'send only the names `' .. tostring(name) .. '` declares: ' .. list .. '.',
+    input = table.concat(unknown, ', '),
+  }
 end
 
 return M
