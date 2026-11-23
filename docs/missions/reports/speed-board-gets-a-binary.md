@@ -183,6 +183,23 @@ whole suite again.
    column now prints `-`
 7. `the commit has no number for this row` (the reason a live row with no entry at all carries)
 
+## How Victor tests it, and what it shows today
+
+    bash ~/Work/missions/status.sh            # == speed (installed <sha>)
+
+- **Today it prints `no speed line for 5a4b1a29d409 yet (scripts/main-health.sh writes one after every
+  landing)`** - because NO health run has measured the commit this node just installed (installed
+  `5a4b1a29d409`, main `837721306594`; `jq -r --arg i ... 'select(.sha == $i ...)'
+  ~/Work/missions/speed-history.jsonl` answers nothing, and the last four lines of that file are all
+  `unavailable`). That gap is not closed by this branch: the board can only print a commit it measured.
+- **After this branch lands, the line that follows the landing has numbers.** `scripts/main-health.sh`
+  runs after every landing, mains's tip contains this fix (it hands the fast run's binary over, measured
+  above), and the installed node is then that commit - so `status.sh` prints the six rows: four with
+  numbers, `landing` from land-quick's record and `release` from the release journal. I did not install
+  anything (FACTORY rule 12), so I cannot show that end state from here.
+- **A board with no numbers does not read as fine any more**, which is the half that can be seen today:
+  the real run above prints four `RED ... unavailable` lines and exits 3.
+
 ## What I did not verify
 
 - **The operator's own main-health record**: the end-to-end run wrote to `/tmp/sb-e2e`, not to
