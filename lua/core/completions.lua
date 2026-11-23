@@ -212,7 +212,12 @@ end
 local function deferred_detail(row,error)
   local note="wake not started: "..tostring(error or 'capacity unavailable')
   local detail=tostring(row.detail or "")
-  if detail:find("wake not started",1,true) then return detail end
+  -- THE SAME NOTE TWICE IS ONE NOTE (23/11, Fable's review). This used to keep the detail whenever it carried
+  -- `wake not started` anywhere, so a REASON could never be added to a row that had been retried for capacity,
+  -- and the caller could not tell whether its answer was already the row's. Now a note is appended when it is
+  -- new and the answer is byte-identical when it is not - which is what lets the deploy gate below skip its
+  -- UPDATE instead of rewriting 32 rows on every tick.
+  if detail == note or detail:sub(-#note) == note then return detail end
   return detail=='' and note or (detail..' | '..note)
 end
 
@@ -290,12 +295,19 @@ function M.tick(api)
   -- holds its wakes for this reason; this outbox had no such gate, so a `ready` settlement was admitted as a run
   -- while a deploy waited - one more turn in the queue the deploy cannot pass over - and, because the run's own
   -- gate refuses it at its first step, it came back refused and was recorded as DELIVERED. A reminder that never
-  -- fires is worse than a slow deploy. The row keeps its state and its detail and is retried on a later tick,
-  -- exactly as a capacity refusal already is; nothing is claimed and nothing is written.
+  -- fires is worse than a slow deploy. The row keeps its state and its time and is retried on a later tick,
+  -- exactly as a capacity refusal already is; nothing is claimed and nothing is dispatched.
+  --
+  -- ONE WRITE PER ROW, NOT ONE PER TICK: a tick runs several times a second, so a row already carrying this
+  -- sentence is left byte-identical and not written again (the first version of this gate wrote the same detail
+  -- back on every tick while it claimed nothing was written - measured by the row that now counts the UPDATEs).
   local hold = deploy_hold()
   if hold then
     for _,row in ipairs(query("SELECT rowid AS cursor,* FROM child_completions WHERE state='ready' ORDER BY rowid LIMIT 32")) do
-      exec("UPDATE child_completions SET detail=? WHERE child_id=? AND state='ready'",{deferred_detail(row,hold),row.child_id})
+      local detail=deferred_detail(row,hold)
+      if detail~=tostring(row.detail or '') then
+        exec("UPDATE child_completions SET detail=? WHERE child_id=? AND state='ready'",{detail,row.child_id})
+      end
     end
     return
   end

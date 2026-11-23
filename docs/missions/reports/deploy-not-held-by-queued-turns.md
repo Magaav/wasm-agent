@@ -89,7 +89,7 @@ Worktree `/home/victor/Work/missions/deploy-not-held-by-queued-turns/wt`, branch
 | `rust/wa-capabilities` `pending_queue_tests` (2 rows) | the registry names a run until it starts, one entry per run, never run_id 0; `queue_sessions` publishes count/named/entries and an empty queue is an empty answer | `scripts/fast.sh:733` (`cargo test -p wa-capabilities`, already wired; the rows ride it) |
 | `rust/wa-sentinel` `holders_tests` 9, 10, 11 | a queued turn is named and never called working, the unnamed remainder is still counted, the bound never passes over a turn that has not started, and a request name that is not a stamp is not a time | `scripts/test.sh:220` (`cargo test --manifest-path rust/wa-sentinel/Cargo.toml -- --test-threads=1`, already wired; the rows ride it) |
 | `scripts/test-deploy-wait.sh` step 2e (new) | the door's two scopes across processes: an unauthenticated `POST /chat` gets 503 with no commit, no `target`, no `request`, no `source`, while the authenticated turns of the same step do carry the commit | `scripts/test.sh:1350`, `scripts/fast.sh:869` |
-| `scripts/test-completion-deploy-wait.lua` (new, 10 checks) | a child settlement is held while a deploy waits and delivered exactly once after it, and a run the node refused returns the row to `ready` with the reason instead of `delivered` | globbed by `scripts/fast.sh` (not in `scripts/fast-path.exclude`) |
+| `scripts/test-completion-deploy-wait.lua` (new, 16 checks) | a child settlement is held while a deploy waits and delivered exactly once after it; a run the node refused returns the row to `ready` with the reason instead of `delivered`; and a waiting tick records the reason on a row ONCE and writes nothing on later ticks (`total_changes()` either side of a tick) | globbed by `scripts/fast.sh` (not in `scripts/fast-path.exclude`) |
 | `scripts/test-peer-deploy-wait.lua` (new, 14 checks) | a peer's `503 deploy_waiting` is a named, retryable answer carrying `retry_after_seconds`; a 200, a 500, a 503 that is not the door and no answer keep their old meaning | globbed by `scripts/fast.sh` |
 | `rust/wa-capabilities` `deploy_door_tests` (new, 2 rows) | the anonymous refusal body carries no commit, no request id and no lane; the authenticated one carries them | `scripts/fast.sh:733` |
 | `rust/wa-sentinel` `stamp_seconds` row (new, row 11) | a request name that is not a stamp is not a time | `scripts/test.sh:220` |
@@ -230,6 +230,15 @@ the row to `ready` with the reason instead of `delivered`. Held by the new row
 `scripts/test-completion-deploy-wait.lua` (10 checks): held while a deploy waits, delivered exactly once after it,
 and a refused run is not a delivery.
 
+* **And the gate must not rewrite what it already said (review 3).** Its first version ran
+  `UPDATE child_completions SET detail=...` on up to 32 rows on every tick while its own comment claimed nothing
+  was written - and a tick runs several times a second, so an hour of waiting rewrote the same bytes thousands of
+  times for nobody to read. The write is now made only when the answer differs from the row, the comment says
+  what it does, and the row counts the writes with `total_changes()`: on today's code the first waiting tick
+  wrote 1 row and each of the next three wrote 1 more (and the row never even gained the deploy reason, because
+  the old `deferred_detail` kept any detail that already carried `wake not started`); on this branch it is 1,
+  then 0, 0, 0.
+
 **Who retries, when, how many times:** the node does, on its own tick, once. There is no attempt counter for the
 deploy case and none is needed - the row is not consumed until it is delivered, so a deploy that takes ten minutes
 costs one delivery when it ends, not ten refusals. A send that is refused a second time after the deploy (capacity)
@@ -297,6 +306,12 @@ proposed below rather than written.
   removes it.
 * The door's answer is scoped by the credential (`c83e553c`, Fable review 2), so an anonymous caller learns the
   reason and when to retry and nothing that identifies the install.
+* **Any caller can put `operator: true` in its own body and pass the door**, exactly as it can pass the run
+  gate that has carried the same exemption since 22/11: the field is a client's statement that a person is
+  behind the turn, not a credential. Authentication still runs after it (`wa_admission`, then the run's own
+  authority), so the exemption chooses scheduling and nothing else - and it is not new here, it is the rule the
+  run gate already had (`lua/core/agent.lua`), taken one step earlier so a turn is not queued in the first
+  place.
 * `wa-sentinel`'s two bounds (180 s pass-over, 1800 s advertised) are still two numbers; this change makes the
   pass-over bound real rather than merging them. Merging them is an operator decision, not this brief's.
 * No release, no fleet update, no key retirement, nothing on a live peer; every test above ran on this node with

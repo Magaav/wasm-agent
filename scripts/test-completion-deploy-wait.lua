@@ -117,5 +117,42 @@ ok(enqueued == before + 1, 'the refused settlement is delivered after the deploy
 row = completions.status(queued_child, 'owner')
 ok(row.state == 'accepted', 'and recorded as accepted: ' .. tostring(row and row.state))
 
-print('completion deploy wait ok (' .. checks .. ' checks: held while a deploy waits, delivered once after it, a refused run is not a delivery)')
+-- 5. A WAITING TICK WRITES A ROW ONCE, NOT ONCE PER TICK (23/11, Fable's review 3). The gate's first version
+-- ran `UPDATE child_completions SET detail=...` on up to 32 rows every tick while its own comment said nothing
+-- was written, and a tick runs several times a second: an hour of waiting rewrote the same bytes thousands of
+-- times for nobody to read. A rewrite of the same bytes leaves no trace in the row, so it is counted where
+-- SQLite counts it - `total_changes()` on this process's own connection, read either side of a tick.
+deploy_waiting(false)
+local function row_changes()
+  local rows = json.decode(host.sql_query('SELECT total_changes() AS n', '[]'))
+  return tonumber(rows[1] and rows[1].n) or 0
+end
+local was_enqueue = host.enqueue_completion
+host.enqueue_completion = function() return json.encode({ error = 'full', not_started = true }) end
+completions.watch('child-held', ctx)
+completions.tick(api)
+completions.tick(api)
+host.enqueue_completion = was_enqueue
+local held = completions.status('child-held', 'owner')
+ok(held and held.state == 'ready', 'the settlement is waiting in ready: ' .. tostring(held and held.state))
+
+deploy_waiting(true)
+local before = row_changes()
+completions.tick(api)
+local first = row_changes() - before
+ok(first == 1, 'the first waiting tick records the sentence on that one row (rows written: ' .. first .. ')')
+local noted = completions.status('child-held', 'owner')
+ok(tostring(noted.detail or ''):find('deploy_waiting', 1, true) ~= nil,
+  'and the row says why: ' .. tostring(noted.detail))
+local changed_later = 0
+for _ = 1, 3 do
+  local mark = row_changes()
+  completions.tick(api)
+  changed_later = changed_later + (row_changes() - mark)
+end
+ok(changed_later == 0, 'and no later waiting tick writes it again (rows written by three ticks: ' .. changed_later .. ')')
+ok(completions.status('child-held', 'owner').state == 'ready', 'the row is still waiting, not dispatched')
+deploy_waiting(false)
+
+print('completion deploy wait ok (' .. checks .. ' checks: held while a deploy waits, delivered once after it, a refused run is not a delivery, a waiting tick writes once)')
 
