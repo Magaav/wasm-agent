@@ -272,3 +272,35 @@ which names it wants.
 * `edit`: the synonym TARGETS `old_text`/`new_text` are accepted at the top level (the alias maps
   `old_string` onto `old_text`), so they are allow-listed beside the synonyms.
 
+
+## 12. Addendum (mixed fleet, follow-up of 23/11 ~20:20Z)
+
+Until this build is rolled out, a peer runs a build that IGNORES an argument it does not know - the silent
+drop this mission closed here, one hop out. `tools.remote` therefore confirms a field this node added
+against the peer's OWN catalogue (the cached peer catalogue `lua/core/federation.lua`, refreshed once per
+turn) before the call leaves, and refuses LOCALLY when the answer is not yes:
+
+* fields guarded: `bash.stdin`, `operation.stdin`, `grep.context` (the table
+  `PEER_FIELD_SUPPORT` in `lua/core/tools.lua`); `node` is not among them - it is a routing word for this
+  call and never travels;
+* `federation.declares(peer, tool, field)` answers `true`, `false`, or `nil` when the cache says nothing
+  about that peer or tool - and `nil` is not yes, so it refuses;
+* the catalogue refresh now keeps the version a peer states (`entry.version`), so the refusal can name the
+  build instead of guessing.
+
+`scripts/test-remote-field-support.lua` (13 checks, green): a stub peer whose catalogue lacks `stdin` /
+`context` is refused and RECEIVES NO CALL; a stub peer that declares them gets the call with the field
+intact; a call without the new fields is unchanged; an unknown node keeps its `unknown_node` refusal.
+
+### Texts to approve (addendum)
+
+10. `peer_field_unsupported` (a LOCAL refusal, nothing sent):
+
+    > message: peer <name> runs a build without <field> (version <v>), so nothing was sent.
+    > fix: send the call without <field>, or update that peer to a build whose catalogue declares it; a
+    > field a peer does not declare is never sent to be dropped.
+
+    The parentheses read `(version unknown)` when the peer states no version, and the fields themselves in
+    `error`/`field`/`peer`/`peer_version` are `peer_field_unsupported`, `stdin` (or `context`), the peer's
+    name, and that version.
+
