@@ -67,9 +67,16 @@ local bad = { schema = 1, features = {
   { name = "whatsapp-copilot-reply", role = "any", canary = "tasks-broken", last_success = "fixture: nothing", stale_after_s = 600 },
 } }
 
-local run = { id = "canary-step-test", journal = { main_sha = "0123456789abcdef0123456789abcdef01234567" } }
+local run = { id = "canary-step-test", journal = { main_sha = "0123456789abcdef0123456789abcdef01234567",
+  steps = { deploy = { state = "done", nodes = {} } } } }
+-- THE ONLY SOURCE OF WHO GETS ASKED is the deploy step's own record (`steps.deploy.nodes`); a caller's ring
+-- is not proof that a node installed anything, and the configured ring is not either.
+local function deployed(nodes)
+  run.journal.steps.deploy = { state = "done", nodes = nodes }
+end
 check(host.write_file(feature_health.installed_registry_path(), json.encode(bad)), "the failing registry is written")
-local ok, answer = land.impl.canaries(run, { canary_dir = canary_dir, ring = {} })
+local ok, answer = deployed({})
+local ok, answer = land.impl.canaries(run, { fleet_canaries = true, canary_dir = canary_dir })
 eq(ok, false, "a failed canary makes the step red")
 eq(answer.error, "canary_failed", "and names the reason")
 contains(answer.detail, "whatsapp-copilot-reply (post)", "the red names the feature and the stage")
@@ -98,8 +105,9 @@ local passing_answer = json.encode({ ok = true, failed = 0, features = {
   { feature = "chat", ok = true, stage = "answered" },
   { feature = "whatsapp-copilot-reply", ok = false, off = true, stage = "off (posting disabled)" },
 } })
-local ok_fleet, fleet = land.impl.canaries(run, { canary_dir = canary_dir, ring = ring,
-  remote_call = remote(function() return { output = passing_answer } end) })
+local ok_fleet, fleet = deployed(ring)
+local ok_fleet, fleet = land.impl.canaries(run, { fleet_canaries = true, canary_dir = canary_dir,
+  remote_call = remote(function() return { output = passing_answer } end), fleet_canaries = true })
 check(ok_fleet == true, "a ring whose nodes all answer their canaries lets the release continue: " .. json.encode(fleet))
 check(#asked == 2, "both ring nodes were asked, not just this one: " .. #asked)
 contains(asked[1], "scratch-a:bash:wa features canary json", "each node is asked to run its own canaries")
@@ -111,8 +119,9 @@ contains(fleet_evidence, "## scratch-a", "the evidence keeps the node's own sect
 contains(fleet_evidence, "whatsapp-copilot-reply", "and its rows")
 
 -- 2c. AN UNREACHABLE NODE IS NOT PROVEN: red, with the node named.
-local ok_unproven, unproven = land.impl.canaries(run, { canary_dir = canary_dir, ring = { { node = "scratch-a", mode = "tree" } },
-  remote_call = function() return { error = "relay_timeout", detail = "the relay did not answer" } end })
+deployed({ { node = "scratch-a", mode = "tree" } })
+local ok_unproven, unproven = land.impl.canaries(run, { fleet_canaries = true, canary_dir = canary_dir,
+  remote_call = function() return { error = "relay_timeout", detail = "the relay did not answer" } end, fleet_canaries = true })
 eq(ok_unproven, false, "a node that cannot be asked is not green")
 eq(unproven.error, "canary_unproven", "and it is named as unproven, not as a canary failure")
 contains(unproven.detail, "scratch-a", "the node is named")
@@ -122,8 +131,9 @@ contains(unproven.observed, "relay_timeout", "with the peer's own reason")
 local peer_failure = json.encode({ ok = false, failed = 1, features = {
   { feature = "whatsapp-transcription", ok = false, stage = "no_transcript", detail = "3 voice note(s), none carrying a transcript" },
 } })
-local ok_peer_failed, peer_failed = land.impl.canaries(run, { canary_dir = canary_dir, ring = { { node = "scratch-b", mode = "tree" } },
-  remote_call = function() return { output = peer_failure } end })
+deployed({ { node = "scratch-b", mode = "tree" } })
+local ok_peer_failed, peer_failed = land.impl.canaries(run, { fleet_canaries = true, canary_dir = canary_dir,
+  remote_call = function() return { output = peer_failure } end, fleet_canaries = true })
 eq(ok_peer_failed, false, "a peer's failing canary stops the release")
 eq(peer_failed.error, "canary_failed", "as a canary failure")
 contains(peer_failed.detail, "scratch-b whatsapp-transcription (no_transcript)", "naming the node, the feature and the stage")
@@ -135,7 +145,8 @@ local previous_dir = land.run_dir("fixture-previous-release")
 host.exec("mkdir -p '" .. previous_dir .. "'", "")
 check(host.write_file(previous_dir .. "/journal.json", json.encode({ run = "fixture-previous-release", result = "done",
   tree_commit = previous_commit, publish = { tag = "v0.2.9" } })), "the previous release's journal is written")
-local ok_rollback, rollback = land.impl.canaries(run, { canary_dir = canary_dir, ring = { { node = "scratch-b", mode = "tree" } },
+deployed({ { node = "scratch-b", mode = "tree" } })
+local ok_rollback, rollback = land.impl.canaries(run, { fleet_canaries = true, canary_dir = canary_dir,
   remote_call = function() return { output = peer_failure } end })
 eq(ok_rollback, false, "the same failure is still red")
 contains(rollback.next, "scratch-b: wa update scratch-b --commit " .. previous_commit, "the rollback names the previous release's commit for that node")
@@ -145,7 +156,8 @@ check(not_this_run, "the rollback does NOT name the commit this run shipped")
 
 -- 3. ALL GREEN: the step passes and says what it asked.
 check(host.write_file(feature_health.installed_registry_path(), json.encode(good)), "the passing registry is written")
-local ok2, answer2 = land.impl.canaries(run, { canary_dir = canary_dir, ring = {} })
+deployed({})
+local ok2, answer2 = land.impl.canaries(run, { fleet_canaries = true, canary_dir = canary_dir })
 eq(ok2, true, "a node whose canaries pass lets the release continue: " .. json.encode(answer2))
 eq(answer2.canaries, 1, "it says how many canaries ran")
 contains(answer2.observed, "canary(ies) ran on this node and 0 peer node(s) ran their own", "and says what it asked")
@@ -153,7 +165,8 @@ eq(answer2.nodes_asked, 0, "with an explicit empty ring no peer is asked")
 
 -- 4. A REGISTRY THAT CANNOT BE READ IS A REFUSAL, not a green step.
 check(host.write_file(feature_health.installed_registry_path(), "{ not json"), "the registry is corrupted on purpose")
-local ok3, answer3 = land.impl.canaries(run, { canary_dir = canary_dir, ring = {} })
+deployed({})
+local ok3, answer3 = land.impl.canaries(run, { fleet_canaries = true, canary_dir = canary_dir })
 eq(ok3, false, "an unreadable registry stops the step")
 eq(answer3.error, "canaries_unreadable", "by name")
 

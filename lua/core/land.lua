@@ -4229,11 +4229,16 @@ impl.canaries = function(run, options)
 
   -- 2. THE NODES THE DEPLOY INSTALLED ON (an explicit ring is the caller's answer: a test's, or a release
   -- that wants the ring asked by name). No per-node record means nobody is asked, and that is SAID.
+  -- THE ONLY SOURCE IS THE DEPLOY'S OWN RECORD. The configured ring is not it (a ring names what a round
+  -- WOULD touch, and this round may have stopped before a node), and a caller's list is not it either (a
+  -- caller cannot prove a node installed something). `steps.deploy.nodes` is written by the deploy step
+  -- itself as each node settles, so what is asked here is exactly what was installed.
   local deploy_row = run.journal and run.journal.steps and run.journal.steps.deploy or nil
   local ring, fleet_recorded = {}, false
-  if options.ring ~= nil then
-    ring, fleet_recorded = options.ring, true
-  elseif deploy_row and deploy_row.state == "done" and type(deploy_row.nodes) == "table" then
+  -- ASKED ON A RELEASE (`wa release cut` sets `fleet_canaries`), never on a plain landing: this step is part
+  -- of the release loop, and a caller that runs the loop in a fixture (the land rows) has no fleet to ask -
+  -- its ring names invented nodes, and a row must never call a live peer.
+  if options.fleet_canaries and deploy_row and deploy_row.state == "done" and type(deploy_row.nodes) == "table" then
     ring, fleet_recorded = deploy_row.nodes, true
   end
   if not fleet_recorded then
@@ -5313,6 +5318,10 @@ end
 function M.run(options)
   options = type(options) == "table" and options or {}
   if options.release and not options.run then options.run_prefix = options.run_prefix or "release" end
+  -- THE FLEET IS ASKED BY A RELEASE, NOT BY A LANDING (Fable's review, item 1): `wa release cut` is the path
+  -- whose bytes reach other machines, so its canaries step asks every node the deploy installed on. A plain
+  -- landing, and every fixture that runs this loop, leaves it off - their rings name no node that exists.
+  if options.release then options.fleet_canaries = true end
   if options.resume and not options.run then
     options.run = newest_unfinished(options.release)
     if not options.run then
