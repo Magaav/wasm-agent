@@ -243,9 +243,11 @@ Discrimination, measured rather than argued:
   branch touches `rust/` ("build the base binary to judge it"): the base worktree at `2104a4d8` with this
   branch's test files copied on top, built at `scratch/base-target` (`4m 20s`), run as the gate does:
   - `scripts/test-secret-audit.lua` -> `lua error: ...:31: telemetry must offer a durable audit write
-    (telemetry.audit)`, rc=1: DISCRIMINATES;
+    (telemetry.audit)`, rc=1: DISCRIMINATES (re-run at the final commit, 71 checks on the branch);
   - `scripts/test-contract-host.lua` -> `attempt to call a nil value (field 'append_file')`, rc=1: the base
     host has no such capability, i.e. the gate's `new-symbol` verdict - it exercises code the base lacks.
+  The base binary was built twice for this (`scratch/basebuild.log`, `scratch/basebuild2.log`: 4m 20s, 3m 09s)
+  because `scripts/test-discriminates.sh` cannot revert Lua rows against a rust-changing branch by itself.
 
 Wiring: `scripts/test.sh:1790` runs the row next to `test-redact-secrets.lua`, and the fast path picks it up
 because `scripts/fast-path.exclude` does not list it (a `test-*.lua` not listed there is in the fast path).
@@ -295,6 +297,12 @@ because `scripts/fast-path.exclude` does not list it (a `test-*.lua` not listed 
   in principle have its file adopted by a start-up flush: the cost is a duplicate attempt, never a double row.
 * The row's phase (4) ages the taken file with `touch -d` (GNU coreutils). On a host without it the aging
   step reports its own failure and the row fails loudly instead of passing.
+* **A Lua-only deploy onto an OLDER binary degrades, and says so.** `append_file`/`rename_file`/`remove_file`
+  are host capabilities, so a tree whose Lua is newer than its binary has none of them: `audit` then cannot
+  spool, answers `false, reason, "memory"`, logs line (6) ("kept in this process until the run ends") and the
+  run-end flush writes the row. Nothing is silently claimed as durable; the durability is simply not there
+  until the binary matches. The row cannot be used to check that path (it needs the capabilities), which is
+  why the message is the contract.
 * The row's phase (3) needs this tree's binary (`WA_FAST_BIN`, or `WA_BIN` which `scripts/test.sh:1790` now
   sets). It REFUSES with a named reason when neither is given - it does not skip and it does not pass.
 * Out of scope, reported not changed: `lua/core/bash_mode.lua:69` (the operator's own `/bash` command) redacts
