@@ -1787,7 +1787,7 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-redact-secrets.lua" "$BIN" --db "$D
 # (change/secret-event-never-lost: the row above went red on 2104a4d8 because telemetry DROPS a record
 # the ledger refuses, and nothing retried it). This row injects the host's own refusal and requires the
 # record in the ledger, the refusal reported as not-recorded, and the kept record written on a flush.
-WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-secret-audit.lua" "$BIN" --db "$DB.secret-audit" | grep 'secret audit ok'
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-secret-audit.lua" WA_BIN="$BIN" "$BIN" --db "$DB.secret-audit" | grep 'secret audit ok'
 
 # Session selection: a new thread is the default, --continue finds the latest,
 # --session must reject an unknown id instead of silently starting a new thread.

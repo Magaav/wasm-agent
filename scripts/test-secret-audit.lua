@@ -174,6 +174,24 @@ ok(recorded == false, "a refused audit write must not be reported as recorded")
 ok(type(reason) == "string" and #reason > 0, "the refusal must come with the ledger's own words")
 ok(telemetry.owed() == 1, "the refused record is kept for a later write, not lost (owed=" ..
   tostring(telemetry.owed()) .. ")")
+-- THE SPOOL, NOT THIS PROCESS'S MEMORY (Fable's review of d1777bce, item 1). "Kept" has to survive the
+-- process being stopped, so the refused row is on disk - and the disk copy must not become a second place a
+-- secret lives.
+local spool_path = (host.paths().data or "") .. "/audit-spool.jsonl"
+local spooled_text = host.read_file(spool_path)
+ok(type(spooled_text) == "string" and spooled_text ~= "",
+  "the refused record is spooled to " .. spool_path .. ", not held in memory alone")
+ok(spooled_text:find("\"kind\":\"secret_redacted\"", 1, true) ~= nil,
+  "the spool names the record it kept")
+ok(spooled_text:find(SECRET, 1, true) == nil,
+  "the spool must NOT carry the secret itself: it records what was seen, not the value")
+do
+  local facts = json.decode(host.path_facts(spool_path)) or {}
+  ok(facts.kind == "file", "the spool is a file (got " .. tostring(facts.kind) .. ")")
+  ok(string.format("%o", tonumber(facts.mode) or 0) == "600",
+    "the spool is owner-only (mode " .. tostring(facts.mode) .. ")")
+end
+ok(telemetry.spool_pending() == 1, "the spool itself says it holds one record")
 rows = secret_rows(sid)
 ok(rows == 2, "nothing claims a row that was not written (rows=" .. tostring(rows) .. ")")
 refusals.left = 0
@@ -183,6 +201,63 @@ ok(written == 1 and left == 0, "the kept record is written once the ledger takes
 rows, report = secret_rows(sid)
 ok(rows == 3, "the flushed record is in the ledger (rows=" .. tostring(rows) .. ")")
 ok(report.audit_owed == 0 and telemetry.owed() == 0, "the ledger owes nothing after the flush")
+ok(telemetry.spool_pending() == 0, "the flushed row is out of the spool as well")
+
+-- ---- (3) A KILL CANNOT LOSE IT: a refused record, a killed process, a new process, exactly one row -----
+-- The whole point of the spool, proved across processes - a bug that crosses processes needs a test that
+-- crosses processes. A child writes its record through `telemetry.audit` against a ledger that refuses it,
+-- is KILLED while it is still holding the process open, and a NEW process then writes the row: exactly once.
+local child_bin = host.getenv("WA_FAST_BIN") or host.getenv("WA_BIN") or ""
+ok(child_bin ~= "" and host.path_kind(child_bin) == "file",
+  "this row needs the node's own binary to start a child with it (WA_FAST_BIN or WA_BIN): got '" ..
+  tostring(child_bin) .. "'")
+-- The child is given no ledger of ours: it faces a refusal wherever it writes, and the SPOOL is what
+-- joins the two processes. (A runner may clear WASM_AGENT_DB for its rows, so a row must not need it.)
+local child_script = (host.getenv("WASM_AGENT_LUA_ROOT") or "") .. "/scripts/lib/secret-audit-spool-child.lua"
+ok(host.path_kind(child_script) == "file", "the child fixture must be there: " .. child_script)
+-- The child row belongs to the CHILD's session, so the count that proves "exactly once" is the one keyed
+-- on the child's run id, across every session in this ledger.
+local function child_rows()
+  local result = telemetry.events("*", 0, 500, 0)
+  ok(result.available ~= false, "the whole ledger must be readable to judge the child's record: " ..
+    tostring(result.reason or "unknown"))
+  local n = 0
+  for _, event in ipairs(result.events) do
+    if event.run_id == "child-run" then n = n + 1 end
+  end
+  return n
+end
+local before = child_rows()
+ok(before == 0, "no child record in the ledger before the child runs (rows=" .. tostring(before) .. ")")
+-- `timeout -s KILL`: the child is a live process when it dies, and 137 is what a parent sees for a SIGKILL.
+local command = string.format(
+  'cd %q && WASM_AGENT_LUA_ROOT=%q WASM_AGENT_HOME=%q WASM_AGENT_RENDEZVOUS= WASM_AGENT_RELAY= WASM_AGENT_MANAGED=0 ' ..
+  'WA_SCRIPT=%q timeout -s KILL 8 %q 2>&1',
+  host.getenv("WASM_AGENT_LUA_ROOT") or ".", host.getenv("WASM_AGENT_LUA_ROOT") or "",
+  host.getenv("WASM_AGENT_HOME") or "", child_script, child_bin)
+local raw = host.exec(command, "")
+local child = json.decode(raw) or {}
+local child_out = tostring(child.stdout or "")
+ok(tostring(child.code) == "137", "the child must have been KILLED, not have exited (code " ..
+  tostring(child.code) .. ", output: " .. child_out:sub(1, 200) .. ")")
+ok(child_out:find("CHILD recorded=false", 1, true) ~= nil,
+  "the child's record was refused and kept (output: " .. child_out:sub(1, 200) .. ")")
+local after_kill = child_rows()
+ok(after_kill == 0, "the killed process wrote nothing to the ledger (" .. tostring(after_kill) ..
+  " rows)")
+local kept = host.read_file(spool_path) or ""
+ok(kept:find("child-run", 1, true) ~= nil, "the killed process's record is in the spool")
+ok(kept:find(SECRET, 1, true) == nil, "and the spool still carries no secret")
+-- A NEW process: the child's ledger connection ended with it. This process is that new one.
+local flushed, left_after = telemetry.flush_audit()
+ok(flushed == 1 and left_after == 0, "the new process writes the kept record once (written=" ..
+  tostring(flushed) .. " left=" .. tostring(left_after) .. ")")
+local once = child_rows()
+ok(once == 1, "the killed process's record is in the ledger exactly once (rows=" .. tostring(once) .. ")")
+local again, left_again = telemetry.flush_audit()
+ok(again == 0 and left_again == 0, "a second flush writes nothing more: exactly once (" ..
+  tostring(again) .. " written, " .. tostring(left_again) .. " left)")
+ok(child_rows() == 1, "and the ledger still holds exactly one copy of it")
 
 host.getenv = real_getenv
 host.sql_exec = real_sql_exec
