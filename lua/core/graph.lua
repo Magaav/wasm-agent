@@ -26,8 +26,14 @@ local function call(name, ...)
   return decoded,nil,decoded.graph_snapshot
 end
 
--- Whether this host can answer graph questions at all (an older host cannot).
+-- Whether this host can answer graph questions at all (an older host cannot, and a node whose graph is
+-- switched off has no store to answer from). The switch is the `graph` row of the one feature resolver
+-- (lua/core/features.lua): OFF on every node from G (docs/GRAPH.md, 23/11), on with `WA_GRAPH_COMPONENT=1`
+-- or "graph": true in the policy's features section. Asked here as well as in the catalogue so a caller
+-- that reached this module directly is refused by name instead of meeting a component error.
 function M.available()
+  local ok, entry = pcall(function() return dofile("lua/core/features.lua").resolve("graph") end)
+  if not ok or type(entry) ~= "table" or entry.enabled ~= true then return false end
   return capability("graph_query") and capability("graph_explain")
 end
 

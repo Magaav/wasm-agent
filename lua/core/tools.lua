@@ -297,6 +297,17 @@ local function exec_deadline_seconds()
   return 300
 end
 
+-- THE GRAPH IS OFF BY DEFAULT ON EVERY NODE FROM G (docs/GRAPH.md, 23/11). A dormant feature must cost the
+-- model nothing: no catalogue line, no `searchTools` hit, no schema bytes in the prompt. The switch is the
+-- `graph` row of the one feature resolver, so it is `policy.json`'s `features.graph` (live: the resolver
+-- re-reads the file about once a second) or `WA_GRAPH_COMPONENT=1` for this process - the same answer
+-- `wa features` prints and the host's own capabilities refuse by. Read per catalogue build, not once at
+-- load, so switching it on reaches the next turn without a restart.
+local function graph_offered()
+  local ok, entry = pcall(function() return dofile('lua/core/features.lua').resolve('graph') end)
+  return ok and type(entry) == 'table' and entry.enabled == true
+end
+
 -- Available to everyone.
 M.shared = {
   schema("time", "Current local date/time on this node with its UTC offset, zone, weekday and epoch.", {}),
@@ -847,7 +858,12 @@ function M.catalog(role)
 
   role = role or "admin"
   local list = {}
-  for _, item in ipairs(M.shared) do list[#list + 1] = item end
+  local graph = graph_offered()
+  for _, item in ipairs(M.shared) do
+    -- One line, and it is the graph's own (docs/GRAPH.md): the tool a dormant node cannot answer is not in
+    -- the catalogue the model reads, and it comes back the moment the switch says on.
+    if graph or item['function'].name ~= 'graph' then list[#list + 1] = item end
+  end
   if is_master(role) then
     list[#list+1]=schema("tool_result","Retrieve an exact byte range of a full tool result saved after output truncation. Use the full_result.sha256 from the result, then follow next_offset until eof.",{
       sha256={type="string"},offset={type="integer",minimum=1},limit={type="integer",minimum=1,maximum=51200}
@@ -1307,6 +1323,10 @@ local function reuse_own_client_claim(ctx,refused)
 end
 
 local function graph_hint(memory,ctx,path)
+  -- A DORMANT NODE CALLS NOTHING (docs/GRAPH.md): no hint is sent, so no scheduler entry, OS watch or
+  -- store can appear because a file was written. The write's answer carries no `graph_index` field at
+  -- all, which is the truth - there is no graph here to tell.
+  if not graph_offered() then return nil end
   if type(host.graph_notify)~='function' then return {error='graph_notify_unavailable'} end
   local root,err=patch_audit.workspace_root(memory,ctx)
   if err then return {error=err} end
@@ -2219,6 +2239,10 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     if not ok then return {error=tostring(result)} end
     return json.decode(result)
   elseif name == "graph" then
+    -- Off by default (docs/GRAPH.md): refused by name, before the module is loaded and before any store,
+    -- index or component call could exist. `searchTools` will not find it either - it reads the catalogue.
+    if not graph_offered() then return { error = "graph_dormant", effect = "none",
+      next = 'The code graph is OFF by default on this node (docs/GRAPH.md). Read with read/grep, or switch it on: WA_GRAPH_COMPONENT=1, or "graph": true in the features section of policy.json.' } end
     local graph = dofile("lua/core/graph.lua")
     local action = args.action or "explain"
     local root, root_err

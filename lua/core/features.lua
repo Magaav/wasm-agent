@@ -35,6 +35,7 @@ M.env = {
   mesh_component = 'WA_MESH_COMPONENT',
   agent_core = 'WA_AGENT_CORE_COMPONENT',
   telemetry_sink = 'WA_TELEMETRY_SINK_COMPONENT',
+  graph = 'WA_GRAPH_COMPONENT',
 }
 
 local function decode(raw)
