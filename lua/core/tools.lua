@@ -842,9 +842,16 @@ local CUES = {
 
 function M.snippet(name) return CUES[name] end
 
+-- THE CUE NAMES ARE THE ONES THE INDEX CAN USE. A cue belongs to a tool, and the graph's tool is not in the
+-- catalogue while the feature is dormant (docs/GRAPH.md): reporting its cue would be the same lie as
+-- offering the tool. The cue text itself stays in the table, so switching the graph on brings its index
+-- line back without a second edit.
 function M.cue_names()
   local names = {}
-  for name in pairs(CUES) do names[#names + 1] = name end
+  local graph = graph_offered()
+  for name in pairs(CUES) do
+    if graph or name ~= 'graph' then names[#names + 1] = name end
+  end
   table.sort(names)
   return names
 end

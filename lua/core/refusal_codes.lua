@@ -128,6 +128,7 @@ return {
   ['fork_has_no_run']='agent_control.lua',
   ['fork_is_not_a_run']='agent_control.lua',
   ['git_audit_forbidden_for_subagent']='tools.lua',
+  ['graph_dormant']='tools.lua',
   ['graph_notification_failed']='tools.lua',
   ['graph_notify_unavailable']='tools.lua',
   ['graph_patch_audit_decode_failed']='patch_audit.lua',
