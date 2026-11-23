@@ -325,6 +325,39 @@ reproduce in a 70 s run under load ~7, not this branch's code and not a consiste
 and subagents:: (27, the three socket tests) pass by name; test-cancel-not-retry 15 checks; and
 test-esc-stops-pty is 18 ok / 0 failed at load 21-23 (remote 250 ms, subagent 323 ms).
 
+### Main-health 8010d293: esc-stops-pty red on its bash row (23/11 ~20:15Z)
+
+The failure, from the row's own log (fast-logs-8010d293992f/check-esc-stops-pty.log): load at the key
+**2.32**, headers 163, stream 162, bash **692 ms**, remote 187, subagent 209 - and the run's own shell
+was gone **5 ms** after the prompt. So a stop that was slow for something other than the shell.
+
+Three single runs of the same row on this branch (70454ef0, on main 0238b6dd), one after another:
+
+| run | load at the key | result | bash | notice_ms (Esc -> the run) | the row's own probe |
+|---|---|---|---|---|---|
+| 1 | 10.8-12.9 | 18 ok / 0 failed | 218 ms | 9 ms | 10 looks, worst 4 ms |
+| 2 | 15.4-16.4 | 18 ok / 0 failed | 282 ms | 45 ms | 12 looks, worst 6 ms |
+| 3 | 13.4-14.1 | 18 ok / 0 failed | 285 ms | 70 ms | 12 looks, worst 9 ms |
+
+It did not reproduce - three for three green at load 10-16, on a row that failed at load 2.3. What the
+runs DO show is the shape of the number, and it is why the 692 ms is not blamed on the stop itself:
+
+* the run's own share is small and load-sensitive: Esc-to-the-cancel-line (`notice_ms`, now traced beside
+  the cancel, operations::cancel_trace) was 9, 45 and 70 ms on the three runs, and `issued_ms` (the
+  cancel work) was 0 every time;
+* the rest (~150-200 ms) is the reader's own 120 ms lone-Esc lookahead, the redraw and tmux delivery -
+  the same fixed cost every scenario shows (headers 169-200 ms), not a wait inside the stop;
+* and the row's own measurement now reports what IT costs: every look at the screen is a tmux
+  capture-pane process, and under a burst that process can take longer than the stop it measures. The
+  table gained that column (8-12 looks, worst 3-12 ms here), and the failure detail names it, so a slow
+  measurement can never again be read as a slow stop.
+
+No timeout was raised and no budget widened to hide it: the idle limit is still 300 ms, the load rule is
+unchanged, and what changed is that the row can now say WHICH part of a 692 ms stop it was. If it recurs,
+the row's failure line carries notice_ms and the probe cost, and the answer is one of two things: the
+reader thread did not get scheduled (notice_ms large), or the measurement did (probe large). Max harness
+harm none: 407 lib tests pass (the split touches only the trace line and two accessors).
+
 **Pending, said plainly**: a reproduction of the 1041 ms. Neither a fork storm nor load 32 produced it;
 the trace line above is the first thing to read if it comes back, and `WASM_AGENT_CANCEL_TRACE=1` is how to
 turn it on. Fable's amendment (stop the load loops, rerun on an idle queue, 10 runs) is what produced the

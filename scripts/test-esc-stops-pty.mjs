@@ -395,8 +395,25 @@ async function scenario(entry) {
   tmux(['send-keys', '-t', SESSION, 'Escape']);
   let backAt = null;
   const deadline = Date.now() + GIVE_UP_MS;
+  // WHAT THE MEASUREMENT ITSELF COSTS. Every look at the screen is a tmux capture-pane process, and under a
+  // burst that process can take longer than the stop it is measuring: measured 23/11, a row that failed at
+  // load 2.3 (a 1-minute average that hides the burst) reported a 692 ms stop whose shell was gone 5 ms
+  // after the prompt. The probe's own worst call is reported beside the number, so a slow MEASUREMENT can
+  // never again be read as a slow stop.
+  let probeCalls = 0;
+  let probeMaxMs = 0;
+  let probeMs = 0;
+  const look = () => {
+    const before = Date.now();
+    const seen = screen();
+    const took = Date.now() - before;
+    probeCalls += 1;
+    probeMs += took;
+    if (took > probeMaxMs) probeMaxMs = took;
+    return seen;
+  };
   while (Date.now() < deadline) {
-    if (screen().some(row => row.includes(INTERRUPTED))) { backAt = Date.now(); break; }
+    if (look().some(row => row.includes(INTERRUPTED))) { backAt = Date.now(); break; }
     await sleep(20);
   }
   const rows = screen();
@@ -417,7 +434,8 @@ async function scenario(entry) {
     fs.writeFileSync(process.env.ESC_BODIES + '.' + name,
       JSON.stringify(state.requests.filter(entry => entry.path.endsWith('/chat/completions')).map(entry => entry.body), null, 1));
   }
-  return {name, escMs: backAt === null ? null : backAt - escAt, escAt, rows, ledger, home,
+  return {name, escMs: backAt === null ? null : backAt - escAt, probeCalls, probeMaxMs, probeMs,
+    escAt, rows, ledger, home,
     loadAtEsc, shellGoneMs, survivors: survivors.length,
     requests: state.requests.length, typedAt,
     requestsSeen: state.requests.map(entry => entry.path),
@@ -482,14 +500,16 @@ console.log('');
 // The number and the machine it was measured on, side by side: a 300 ms budget means one thing at load
 // 0.4 and another at 10 (main-health measured this row red at ~10 on 23/11, and the load belongs in the
 // record rather than in a later argument about it).
-console.log('scenario   Esc to prompt            load at the key   run\'s own shell gone after');
+console.log('scenario   Esc to prompt            load at the key   run\'s own shell gone after   the measurement\'s own looks');
 for (const result of results) {
   const ms = result.escMs === null ? 'never (gave up at ' + (GIVE_UP_MS / 1000) + ' s)' : result.escMs + ' ms';
   const load = result.loadAtEsc === null || result.loadAtEsc === undefined ? 'unknown' : String(result.loadAtEsc);
   const shell = result.shellGoneMs === null || result.shellGoneMs === undefined
     ? (result.survivors ? 'NOT GONE (' + result.survivors + ' alive)' : '-')
     : result.shellGoneMs + ' ms';
-  console.log('  ' + result.name.padEnd(9) + ' ' + ms.padEnd(25) + load.padEnd(17) + shell);
+  const probeCol = (result.probeCalls || 0) === 0 ? '-'
+    : result.probeCalls + ' looks, worst ' + result.probeMaxMs + ' ms';
+  console.log('  ' + result.name.padEnd(9) + ' ' + ms.padEnd(25) + load.padEnd(17) + shell.padEnd(26) + probeCol);
 }
 console.log('');
 
@@ -505,7 +525,8 @@ if (crash) {
     const detail = result.escMs === null
       ? (result.why ? result.why + '\n' : '') + 'the screen after the give-up:\n' + result.rows.join('\n')
         + '\nprovider requests: ' + JSON.stringify(result.requestsSeen)
-      : result.escMs + ' ms (limit ' + limit + ' ms at load ' + result.loadAtEsc + ')';
+      : result.escMs + ' ms (limit ' + limit + ' ms at load ' + result.loadAtEsc + '; the probe took '
+        + result.probeMs + ' ms over ' + result.probeCalls + ' looks, worst ' + result.probeMaxMs + ' ms)';
     const ok = result.escMs !== null && result.escMs <= limit && result.escMs <= HARD_MS;
     check(result.name + ': Esc brings the prompt back at once (' + LIMIT_MS + ' ms idle, ' + PER_LOAD_MS
       + ' ms per unit of load, never over ' + HARD_MS + ')', ok, detail);
