@@ -65,7 +65,8 @@ R.start_vault()
     contains(step_of("case46", name).detail, "nothing to land", "and " .. name .. " says why, by name")
   end
   for _, name in ipairs({ "collect", "plan", "gate", "artifacts", "sign", "ship", "publish", "linux", "report" }) do
-    eq(step_of("case46", name).state, "done", "step " .. name .. " ran")
+    local step46 = step_of("case46", name) or {}
+    eq(step46.state, "done", "step " .. name .. " ran")
   end
   contains(step_of("case46", "deploy").detail, "--no-deploy", "--no-deploy is honoured")
   eq(j46.plan.full, true, "the plan is the FULL gate, never a narrowed one")
@@ -84,7 +85,8 @@ R.start_vault()
   ok(channel_main ~= main_before, "a release now moves main by one commit: the channel index")
   eq(must("git -C " .. repo .. " diff --name-only " .. main_before .. " " .. channel_main, "the channel commit's paths"),
     "releases/index-linux.json", "and that commit carries exactly one path (an allow-list, not a hope)")
-  eq(step_of("case46", "linux").state, "done", "the linux step published the channel")
+  local linux46 = step_of("case46", "linux") or {}
+  eq(linux46.state, "done", "the linux step published the channel")
   contains(tostring((journal_of("case46").linux or {}).tag or ""), "wa-linux-", "the journal records the channel tag")
   contains(must("git -C " .. repo .. " show origin/main:releases/index-linux.json", "the live channel index"),
     main_before, "the live index on main names this release's commit")
@@ -197,7 +199,8 @@ R.start_vault()
   ok(resumed_main ~= main_before, "the resumed release published the channel, so main moved by one commit")
   eq(must("git -C " .. repo .. " diff --name-only " .. main_before .. " " .. resumed_main, "the channel commit's paths"),
     "releases/index-linux.json", "and that commit carries exactly one path")
-  eq(step_of("case48", "linux").state, "done", "the channel step is done on the resume")
+  local linux48 = step_of("case48", "linux") or {}
+  eq(linux48.state, "done", "the channel step is done on the resume")
 
   -- ------------------------------------------ case 49: --until main is a complete landing; a release is separate
   setup_fixture()
