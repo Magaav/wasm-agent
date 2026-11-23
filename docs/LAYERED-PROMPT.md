@@ -45,6 +45,11 @@ not a new incremental provider protocol.
 - `<project>`: pi-style project instructions, one `<project_instructions path="...">` frame per
   file: `<config>/AGENTS.md`, then the environment note, then every `AGENTS.md` from the filesystem
   root down to the session's workdir (its worktree when it has one), nearest last.
+  A file whose content is byte-identical to another one in that list is carried ONCE, and the copy
+  nearest the workdir is the one that stays (the walk is root-first, so the last occurrence of a text
+  wins); each skipped path is named in the kept frame's `same_text_as` attribute, never in prose the
+  model reads. That is what keeps a git worktree placed inside its parent checkout, a copied tree or a
+  symlinked file from putting the same instruction text in the prompt twice.
   `WASM_AGENT_AGENTS_MD` names one explicit file instead. Guests get `AGENTS.guest.md` only and never
   fall back to operator files.
   The environment note is `AGENTS.<environment>.md`, for what is true of this machine and not of the
