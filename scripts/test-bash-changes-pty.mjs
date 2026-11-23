@@ -193,8 +193,10 @@ try {
   check('a card heading names the created file, the same heading a write draws',
     new RegExp('(Create|Update|Delete)\([^)]*' + MADE.replace(/\./g, '\\.') + '\)').test(text), text);
   check('and its count row', /Added \d+ lines?/.test(text), text);
-  check('the run block still shows its result as one `script output` row',
-    /script output \u00b7 \d+ chars/.test(text), text);
+  // The script returns `"done"`, ONE row of output: a result that already fits a row is drawn as itself
+  // (chat-view-round-2's fold applies to results longer than one row - scripts/test-cli-flow.lua).
+  check('the run block still shows its result, drawn as itself',
+    /\u23bf done/.test(text), text);
   check('the change cost the model nothing: the turn ended with its own words',
     text.includes(PLAN[0].final), text);
 
