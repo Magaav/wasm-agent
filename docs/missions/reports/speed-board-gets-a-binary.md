@@ -110,7 +110,7 @@ tool_roundtrip=173ms remote_roundtrip=461ms` (load 7.57, 16 cores), four rows nu
 `scripts/main-health.sh` (this branch's script) against a scratch repository whose `main` is this branch
 with one edit - a stub `scripts/fast.sh` that writes the suite's result file, because the question here is
 what main-health HANDS the board, and the fast path's own build half is proven by its banner above. Every
-output went to `/tmp/sb-e2e/wiring`, nothing to `~/Work/missions`. Verbatim, its stderr and the line it
+output went to `/home/victor/Work/missions/speed-board-gets-a-binary/scratch/e2e/wiring`, nothing to `~/Work/missions`. Verbatim, its stderr and the line it
 wrote:
 
     main-health: green at 08566747ab25 (0 s, 1 checks) -> .../main-health.json
@@ -150,7 +150,7 @@ The suite ran on f0e11fb5 and did its job twice over.
 ## The full suite
 
 `bash scripts/main-health.sh` (this branch's script) on a scratch clone whose `main` is **97c88958**, the
-node's suite lock taken by the launcher, all output under `/tmp/sb-e2e`: **416 checks, 410 passed, 6 failed,
+node's suite lock taken by the launcher, all output under `/home/victor/Work/missions/speed-board-gets-a-binary/scratch/e2e`: **416 checks, 410 passed, 6 failed,
 0 skipped, 603 s**. The six red rows, and what each is:
 
 | row | why it is not this branch |
@@ -183,7 +183,23 @@ whole suite again.
    column now prints `-`
 7. `the commit has no number for this row` (the reason a live row with no entry at all carries)
 
+## Where the scratch and the evidence live
+
+Nothing of this mission sits in `/tmp` (a RAM tmpfs with a per-user quota: it ran out three times tonight
+and killed health runs). Moved there tonight at the orchestrator's request:
+
+- **the build target**: `CARGO_TARGET_DIR=/home/victor/wasm-agent/target/m-speed-board-gets-a-binary`
+  (`/home`, on `/dev/mapper/root`), which is where `scripts/lib/fast-binary.sh` also looks when the caller
+  names it - no `/tmp` copy exists;
+- **the scratch and its evidence**: `/home/victor/Work/missions/speed-board-gets-a-binary/scratch/e2e`
+  (176 KB, 24 files, on `/home`) - the suite's own logs `mh/fast-97c889582d10.log` and
+  `mh/fast-result-97c889582d10.json`, the board history of the real measurement
+  `history-with-mine.jsonl`, the no-binary run's `holes-history.jsonl`, the wiring run under `wiring/`,
+  and the three scripts that produced them. The two 1.3 GB scratch clones and the main-health worktrees
+  that were in `/tmp/sb-e2e` are deleted; `/tmp/sb-e2e` no longer exists.
+
 ## How Victor tests it, and what it shows today
+
 
     bash ~/Work/missions/status.sh            # == speed (installed <sha>)
 
@@ -202,7 +218,7 @@ whole suite again.
 
 ## What I did not verify
 
-- **The operator's own main-health record**: the end-to-end run wrote to `/tmp/sb-e2e`, not to
+- **The operator's own main-health record**: the end-to-end run wrote to `/home/victor/Work/missions/speed-board-gets-a-binary/scratch/e2e`, not to
   `~/Work/missions`. Nothing was installed (FACTORY rule 12), so `status.sh` still reads the line for the
   installed commit, and that line is written by the next health run after this lands.
 - **A quiet-load comparison against 8862b600**: the numbers above were taken at load 7.57, and
