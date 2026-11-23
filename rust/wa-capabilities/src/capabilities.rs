@@ -138,6 +138,7 @@ pub const REGISTRY: &[Capability] = &[
     plain!("read_file", ReadOnly, crate::host::read_file, "Read a UTF-8 text file; nil plus a named reason when missing, not text, or over the read limit"),
     plain!("read_image_base64", ReadOnly, crate::host::read_image_base64, "Read a bounded PNG/JPEG/WebP/GIF as base64 with its MIME type"),
     plain!("write_file", WritesFiles, crate::host::write_file, "Create or overwrite a text file"),
+    plain!("append_file", WritesFiles, crate::host::append_file, "Append text to a file, created owner-only, and fsync it before answering"),
     plain!("path_kind", ReadOnly, crate::host::path_kind, "Classify a path as file/dir/missing/other without reading it"),
     // What a path IS, for the one decision that must not be made from a name: whether a program is the
     // platform's (root-owned, not group/other-writable) or the connector's own code. and the sha256 of a

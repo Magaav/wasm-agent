@@ -1499,6 +1499,34 @@ mod atomic_write_tests {
     }
 }
 
+/// The audit spool's write: appends, never replaces, is owner-only on the file it creates, and answers
+/// false when it cannot put the bytes on the device (lua/core/telemetry.lua keeps a refused audit record
+/// there, so "true" has to mean the record survives the process).
+#[cfg(test)]
+mod append_file_tests {
+    #[test]
+    fn appends_each_block_and_creates_an_owner_only_file() {
+        let root = std::env::temp_dir().join(format!("wa-append-{}", super::new_uuid()));
+        std::fs::create_dir_all(&root).unwrap();
+        let spool = root.join("audit-spool.jsonl");
+        let path = spool.display().to_string();
+        assert!(super::append_durably(&path, "{\"kind\":\"secret_redacted\"}\n"));
+        assert!(super::append_durably(&path, "{\"kind\":\"secret_redacted\",\"n\":2}\n"));
+        let text = std::fs::read_to_string(&spool).unwrap();
+        // Both lines, in the order they were appended: an appender that replaced the file would leave one.
+        assert_eq!(text.lines().count(), 2);
+        assert!(text.lines().next().unwrap().ends_with("\"secret_redacted\"}"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&spool).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        // An empty path is not a file: refuse rather than write somewhere surprising.
+        assert!(!super::append_durably("", "x"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
     /// host.write_file(path, text) -> a Lua boolean (written atomically).
     /// Not JSON: one true/false, and the graph index is told about the write.
 pub extern "C-unwind" fn write_file(l: *mut LuaState) -> c_int {
@@ -1506,6 +1534,49 @@ pub extern "C-unwind" fn write_file(l: *mut LuaState) -> c_int {
     let text = arg_string(l, 2).unwrap_or_default();
     let ok = write_atomic(&path, &text);
     if ok {crate::graph::native_write(&path);}
+    unsafe { wa_host_support::lua::lua_pushboolean(l, ok as c_int) };
+    1
+}
+
+/// Append one block of text to a file and put it ON THE DEVICE before answering: create it owner-only
+/// (0600) when absent, open it O_APPEND so two processes appending one line each never overwrite one
+/// another's bytes, write, and fsync. True, or false when the file could not be written or synced.
+///
+/// This exists for the one file a node must be able to keep when its ledger refuses a write: the audit
+/// spool of lua/core/telemetry.lua (`M.audit`). `write_file` cannot serve it - it replaces the whole file
+/// atomically (read-modify-write, so two spoolers lose one row) and takes its mode from the target's
+/// existing permissions - and a line that only reached the page cache is not a kept record at all. The
+/// fsync is the point of the capability, which is why it is not an option on an existing one.
+fn append_durably(path: &str, text: &str) -> bool {
+    use std::io::Write;
+    let target = std::path::PathBuf::from(path);
+    if let Some(parent) = target.parent() {
+        if !parent.as_os_str().is_empty() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.append(true).create(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // Ignored when the file already exists: an existing file's mode is its owner's choice.
+        options.mode(0o600);
+    }
+    let mut file = match options.open(&target) {
+        Ok(file) => file,
+        Err(_) => return false,
+    };
+    if file.write_all(text.as_bytes()).is_err() {
+        return false;
+    }
+    file.sync_all().is_ok()
+}
+
+pub extern "C-unwind" fn append_file(l: *mut LuaState) -> c_int {
+    let path = arg_string(l, 1).unwrap_or_default();
+    let text = arg_string(l, 2).unwrap_or_default();
+    let ok = !path.is_empty() && append_durably(&path, &text);
     unsafe { wa_host_support::lua::lua_pushboolean(l, ok as c_int) };
     1
 }

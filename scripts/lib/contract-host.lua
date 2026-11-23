@@ -155,6 +155,17 @@ function M.new(spec)
   end
 
   -- The real host answers SQL as JSON text, never as a Lua table (the list_dir lesson, 12/11).
+  -- host.append_file(path, text) -> ONE boolean: the text is on the device. It APPENDS (two writers keep
+  -- both blocks) and creates the file owner-only. The reason a path outside the root gets `false` and not
+  -- `false, why` is the contract itself: the real capability answers one value, and the fake answers what
+  -- the real one answers (scripts/test-contract-host.lua compares the arity).
+  api.append_file = function(path, text)
+    local resolved = owned(path, "append_file")
+    if not resolved then return false end
+    files[resolved] = (files[resolved] or "") .. tostring(text)
+    return true
+  end
+
   api.sql_query = function(statement)
     local answer = sql_answers[tostring(statement)]
     if answer == nil then return json.encode({ error = "the contract fake scripts no answer for: " .. tostring(statement) }) end
@@ -256,6 +267,10 @@ function M.contract(host_like)
   record("now", host_like.now())
   record("monotonic_ms", host_like.monotonic_ms())
   record("write_file", host_like.write_file((host_like.paths() or {}).temp .. "/contract.txt", "x"))
+  -- The APPEND is the capability the audit spool depends on (lua/core/telemetry.lua, M.audit): a fake that
+  -- silently replaced the file would make a row about "a kept record" green while the real node lost it.
+  record("append_file", host_like.append_file((host_like.paths() or {}).temp .. "/contract-append.txt", "x"))
+  record("append_file-refused", host_like.append_file("", "x"))
   record("read_file-present", host_like.read_file((host_like.paths() or {}).temp .. "/contract.txt"))
   return out
 end
