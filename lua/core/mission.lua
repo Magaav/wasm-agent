@@ -365,8 +365,25 @@ function M.run_verdict(session_id, dir)
     end
     return "unknown", "node_answer_unreadable"
   end
-  if body.active == true then return "active", "the node holds a live run for this session" end
-  if body.active == false then return "released", "the node says the run settled" end
+  -- WHAT THE NODE ACTUALLY ANSWERS (measured 23/11 from this node and in this file's own fixture): one flat
+  -- object, {"target":{...,"state":"active"|"settled"|"failed"|"unknown"},"receipts":[...]}. This used to
+  -- read a key called `active` that the answer has never carried, so every session the node knew about came back
+  -- "unknown" - and "unknown" refuses every launch and every resume beside it, which is a verb that cannot work.
+  -- The run row's own state is the word, and `body.active` stays supported for a stub that speaks the older
+  -- shape. `target` absent is the node saying it records no run for this session: nothing is in flight.
+  local state = type(body.target) == "table" and tostring(body.target.state or "") or ""
+  if body.active == true or state == "active" then
+    return "active", "the node holds a live run for this session"
+  end
+  if body.active == false or state == "settled" or state == "failed" then
+    return "released", "the node says the run is " .. (state ~= "" and state or "settled")
+  end
+  if state == "unknown" or state == "deferred" then
+    return "unknown", "the node says the run is " .. state .. ": an interruption nobody can vouch for"
+  end
+  if body.target == nil and body.active == nil then
+    return "released", "the node records no run for this session"
+  end
   if body.error then return "unknown", tostring(body.error) end
   return "unknown", "node_did_not_say"
 end
@@ -765,8 +782,16 @@ function M.resume(args, ctx)
     if fresh:find("no such session", 1, true) then
       return { error = "session_not_found", session = session, detail = "the CLI did not find this session" }
     end
-    if fresh:find("Thinking", 1, true) or fresh:find("run ", 1, true) or fresh:find("</turn>", 1, true) then
+    -- A COMPLETED ANSWER IS THE PROOF, NOT THE CLI'S "Thinking" LINE (23/11): "Thinking" is printed when the
+    -- model request STARTS (measured in scripts/test-mission-amend-resume.mjs), so a turn whose provider answers
+    -- nothing prints it and fails - the false "resumed" this file already records on 23/11. `</turn>` is the
+    -- answer itself, and the run lease is the node's own word.
+    if fresh:find("</turn>", 1, true) then
       return { ok = true, resumed = session, pid = pid }
+    end
+    if step % 5 == 0 then
+      local verdict = select(1, M.run_verdict(session, dir))
+      if verdict == "active" then return { ok = true, resumed = session, pid = pid } end
     end
     if not M.alive(pid) then
       local last_out, last_err = "", ""

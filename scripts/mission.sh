@@ -861,12 +861,14 @@ cmd_start() {
 # said "resumed", and no turn ran. So the runner sources `env` AND `serve.env` when each is there, and the
 # command REFUSES BY NAME before it writes anything when the mission has neither.
 #
-# "RESUMED" IS A CLAIM THAT A TURN STARTED (23/11, the same failures). Saying it before the runner had run
-# anything is how a dead resume read as a live one for 15 minutes. So amend waits for the TURN ITSELF: the
-# node's own run lease for that session saying `active` after the spawn, or the CLI's own first line of a turn
-# ("Thinking · 0.0s · run 1", the shape every real mission log carries). A runner that exits before that is
-# `resume_failed`, with the reason, and the command exits non-zero. Nothing is called delivered on a guess
-# either: a steering note needs the node's receipt id, or it is `steer_unconfirmed`.
+# "RESUMED" IS A CLAIM THAT A TURN RAN (23/11, the same failures). Saying it before the runner had run anything
+# is how a dead resume read as a live one for 15 minutes. So amend waits for the TURN ITSELF: the node's own run
+# lease for that session saying `active` after the spawn, or the turn's completed answer (`</turn>`) in out.log.
+# NOT the CLI's "Thinking" line - measured in the fixture, that is printed when the request STARTS, so a turn
+# whose provider answers nothing prints it and never answers. A runner that exits before any of that is
+# `resume_failed`, with its reason, and the command exits non-zero. Nothing is called delivered on a guess
+# either: a steering note needs the node's receipt id, and the node asked again for that receipt, or it is
+# `steer_unconfirmed`.
 
 # The last line amend.log carries for one amendment - the current state of that one delivery.
 amend_last() { # <mission dir> <sha>
@@ -910,11 +912,13 @@ amend_env_files() { # <mission dir>
   done
 }
 
-# HAS THE TURN THIS COMMAND STARTED ACTUALLY BEGUN? Two answers, both the product's own: the node's run lease
+# HAS THE TURN THIS COMMAND STARTED ACTUALLY RUN? Two answers, both the product's own: the node's run lease
 # for the session saying `active` with an update AFTER the spawn (a run in flight named by the node, never
-# inferred from a pid), or the CLI's own first line of a turn in out.log ("Thinking · 0.0s · run 1", the
-# shape every real mission log carries - measured: always-available, boot-walk, deploy-prunes-pins).
-# Nothing else counts, and "no news" is not a yes: differ.
+# inferred from a pid), or the turn's own completed answer in out.log (`</turn>`, which a runner that never got
+# an answer cannot print). NOT "Thinking · 0.0s · run 1": that line is printed when the model request STARTS,
+# measured in this mission's own fixture - a resumed turn whose provider answers nothing prints it and then
+# fails, and calling that "resumed" is the same false success this check exists to end. Nothing else counts,
+# and "no news" is not a yes: differ.
 amend_turn_started() { # <mission dir> <session id> <epoch the resume started> <out.log offset>
   local row state upd
   row=$(steer_row "$2") || return 1
@@ -923,7 +927,7 @@ amend_turn_started() { # <mission dir> <session id> <epoch the resume started> <
   upd=${upd%%.*}
   case $upd in ''|*[!0-9]*) upd=0 ;; esac
   [ "$state" = active ] && [ "$upd" -ge "$3" ] && return 0
-  tail -c +"$(( $4 + 1 ))" "$1/out.log" 2>/dev/null | grep -q 'Thinking ' && return 0
+  tail -c +"$(( $4 + 1 ))" "$1/out.log" 2>/dev/null | grep -q '</turn>' && return 0
   return 1
 }
 
