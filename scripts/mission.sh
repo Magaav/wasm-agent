@@ -1017,7 +1017,7 @@ cmd_amend() {
   fi
   if ! session_id_ok "$sid"; then
     amend_record "$M" "$sha" "$stamp" undelivered - - bad_session
-    die "the session recorded for $name is not a session id: [$sid] - nothing was delivered. run.lock and err.log are what to read"
+    die "the session found for $name is not a session id: [$sid] - nothing was delivered. run.lock, err.log and the node's session list are what to read"
   fi
   label=$(amend_label "$stamp" "$text")
   row=$(steer_row "$sid"); rc=$?
@@ -1328,7 +1328,7 @@ cmd_clean() {
     say "no worktree at ${wt:-$M/wt} (already clean)"
   fi
   release_lock "$M" clean "$MR_WHY"
-  rm -f "$M/run.sh" "$M/run.pid" "$M/launch.pid"
+  rm -f "$M/run.sh" "$M/run.pid" "$M/launch.pid" "$M/amend-run.sh"
   # start.flock is NOT removed: this clean HOLDS that lock (fd 9 above), and deleting the file it holds leaves
   # the next start locking a different inode - no exclusion at all. The file may stay; the lock is the kernel's,
   # not the file's, and the kernel drops it when this clean exits (round 7).
