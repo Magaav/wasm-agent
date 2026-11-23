@@ -48,6 +48,7 @@ The row asserts that against that fixture, field by field and type by type.
 | --- | --- |
 | `0f530bf9` | `lua/core/whatsapp_posting.lua` (the switch: gate, allow-list validation, write through the services registry, safe restart, health-line verification), `lua/core/whatsapp_posting_cli.lua` (`wa whatsapp posting`), the route in `lua/core/server.lua` (the connector transport removed), the `wa whatsapp posting` dispatch and its `wa help` line in `lua/core/init.lua`, `scripts/test-whatsapp-posting-toggle.lua`, `tests/fixtures/whatsapp-posting-old-door.json` |
 | `541f8a12` | `docs/WHATSAPP-TRANSCRIPTION.md` ("The operator switch"), `docs/SERVICE-COMPONENTS.md`, the row in `scripts/test.sh`, the UI wording in `ui/components.js` |
+| `de5a0780` | Fable's review follow-up: `*` (every chat, groups included) takes the second word `--all-chats`, the answer states the number of chats it covers (a count from the component's index, never ids), docs + tests |
 | `ca0ae9b9` | the row (`scripts/test-whatsapp-posting-toggle.lua`, added in `0f530bf9`) loads the switch through `pcall`, so a tree without it fails on a **named check** (the shape `scripts/test-discriminates.sh` reads) instead of a raw load error |
 
 No Rust was changed: the operator route already exists and is wired
@@ -59,7 +60,8 @@ that was removed, not the route.
 ```text
 wa whatsapp posting                       # status (default)
 wa whatsapp posting on | off
-wa whatsapp posting allow own             # or: *, 5511999999999@s.whatsapp.net, 1203...@g.us
+wa whatsapp posting allow own             # or: 5511999999999@s.whatsapp.net, 1203...@g.us
+wa whatsapp posting allow '*' --all-chats  # every chat, groups included: the flag is the second word
 wa whatsapp posting alerts on | off
 wa whatsapp posting language en|pt|auto
 wa whatsapp posting status --json         # the module's own answer
@@ -76,7 +78,14 @@ What a `set` does, in order, and what it refuses to do:
    `own`, `*`, `<digits>@s.whatsapp.net`, `<digits>@lid`, `<id>@g.us`. An entry that is none of these is
    `posting_allow_invalid` and the refusal names the **position**, never the entry. An empty list is
    `posting_allow_required`, and so is turning posting **on** without a scope - `post_transcripts: true`
-   with an empty list is exactly the shadow mode that made this mission necessary.
+   with an empty list is exactly the shadow mode that made this mission necessary. `*` - every chat,
+   groups included - is the one scope that is not a name, so naming it takes a second word:
+   `--all-chats` on the CLI, `"all_chats": true` on the endpoint. Without it the request is refused
+   `posting_all_chats_unconfirmed` with a sentence that names the flag, so a list cannot be widened to
+   every chat by a typo or a copy-paste. When the stored scope is `*`, every answer (status and set)
+   carries `all_chats: {chats, covers, source}`: the count comes from the component's own index - the same
+   `contacts` call with no query that `lua/core/whatsapp.lua` reads for its `chats` figure - and when the
+   index cannot answer, `chats` is null and `unverified` names why instead of a number being invented.
 3. **The four keys it owns** are `post_transcripts`, `post_allow`, `alerts`, `language`. Every other key
    (`stream_edits`, `held_chats`, `pair_phone`, `health_every_seconds`, the index settings) is copied
    through untouched - measured in the row, which sets `stream_edits`, `health_every_seconds` and
@@ -96,6 +105,9 @@ What a `set` does, in order, and what it refuses to do:
 
 ## 4. Security
 
+* **The one scope that is not a name takes two words**: `*` needs `--all-chats` / `"all_chats":true`
+  on the request that names it, and the answer says how many chats it covers (a count from the index,
+  never a list of chats). `own` and an exact JID are one step.
 * **Who can change it**: a master on this node, and only a master. The route gates on `require_master`
   (the same authority as every other operator endpoint), the module re-checks with `users.is_master`,
   `services.control` refuses a guest and a child agent again for every write, and a caller with no role
@@ -112,7 +124,7 @@ What a `set` does, in order, and what it refuses to do:
 
 ## 5. Tests, and where they run
 
-`scripts/test-whatsapp-posting-toggle.lua` - **120 checks**, run under `WA_SCRIPT` with its own scratch
+`scripts/test-whatsapp-posting-toggle.lua` - **140 checks**, run under `WA_SCRIPT` with its own scratch
 `WASM_AGENT_HOME`, its own database, the node's real services registry and real SQL; only `host.service`
 is a stub (see the row's header for why the shared contract fake does not cover it and what shapes it
 copies from `rust/wa-kernel-runtime/src/services.rs`).
@@ -121,8 +133,10 @@ What it proves, in order: a definition with no `config` reports posting off (the
 turning posting on without a scope is refused; the switch turns it on and the **component's** health line
 says `posting=on posted=3`; the exact four keys are what the component was started with; a no-op set
 writes nothing and restarts nothing; other config keys survive; the allow-list forms and every refusal;
-a guest, a child agent and a role-less caller are refused and the store is untouched; the route refuses a
-guest session and answers a master; an unreadable health line is `..._unverified`; a component that
+a guest, a child agent and a role-less caller are refused and the store is untouched; `*` is refused
+without `--all-chats` (naming the flag, nothing stored) and accepted with it, the answer carrying the
+count the component's index answered, and carrying `unverified` instead when the index cannot answer; the
+route refuses a guest session and answers a master; an unreadable health line is `..._unverified`; a component that
 refuses to start gets the old definition back and keeps running it; the CLI's verbs and the `wa help`
 line; the removed connector is never called even with its five variables set, and its API fields are
 refused by name; and the recorded old-door answers keep their fields and words.
@@ -218,21 +232,26 @@ and `wa land --until gate`.
 
 ## 8. Texts to approve
 
-1. The CLI usage block (`lua/core/whatsapp_posting_cli.lua`):
+1. The CLI usage block (`lua/core/whatsapp_posting_cli.lua`), as it now prints:
    ```text
-   wa whatsapp posting <verb> [--json]
+   wa whatsapp posting <verb> [--all-chats] [--json]
      status    what is stored, whether the component runs, and what its health line reports
      on        post the transcript of every allowed chat
      off       post nothing (transcription keeps working)
-     allow     the chats posting may reach: own, *, or exact chat JIDs, comma separated
+     allow     the chats posting may reach: own, exact chat JIDs, or * with --all-chats (every chat, groups included)
      alerts    the own-chat alert when a note could not be transcribed: on|off
      language  the language the pipeline transcribes in: en|pt|auto
+
+     "*" is every chat, groups included: it takes the second word --all-chats, and the answer says
+     how many chats it covers (a count from the component index, never the ids). "own" needs no flag.
+     Master only: the allow list is never printed back in a refusal and never logged.
    ```
 2. The `wa help` line: `whatsapp posting status|on|off|allow <chats>|alerts on|off|language <code>  the
    component's transcript posting switch`.
 3. The refusal codes this verb adds: `whatsapp_posting_component_missing`,
    `whatsapp_posting_connector_removed`, `posting_allow_required`, `posting_allow_invalid`,
    `posting_allow_too_many`, `posting_language_invalid`, `posting_alerts_boolean_required`,
+   `posting_all_chats_unconfirmed`, `posting_all_chats_boolean_required`,
    `posting_change_required`, `whatsapp_posting_write_refused`, `whatsapp_posting_start_refused`,
    `whatsapp_posting_store_unverified`, `whatsapp_posting_unverified`,
    `whatsapp_posting_not_effective`, `whatsapp_posting_health_unreadable`,
@@ -251,6 +270,14 @@ and `wa land --until gate`.
 7. The two documentation sections: `docs/WHATSAPP-TRANSCRIPTION.md` -> "The operator switch: posting on
    the component (2026-11-23)", and the paragraph added to `docs/SERVICE-COMPONENTS.md` under the
    component's configuration table.
+8. The refusal that asks for the second word, verbatim: "\"*\" posts to EVERY chat, groups included. Name
+   it twice: `wa whatsapp posting allow '*' --all-chats` (or {"action":"set","allow":["*"],"all_chats":true} on the operator endpoint). \"own\" and exact chat JIDs need no flag". The code is
+   `posting_all_chats_unconfirmed` (the `*` case) and `posting_all_chats_boolean_required` (the flag sent
+   as something other than a boolean).
+9. The one line that says what `*` covers, verbatim: `covers    every chat, groups included (N chats in
+   the index)`, and when the index cannot answer: `covers    every chat, groups included (the index's chat
+   count is unknown: <why>)`. In JSON the same fact is `all_chats: {chats, covers, source}` with
+   `chats: null` and `unverified: <why>` when it is unknown.
 
 ## 9. Proposals (never written)
 
