@@ -5,7 +5,7 @@ Branch `change/operations-explain-and-survive`, base `c1337903`, worktree
 node (avell). No release, no fleet call, no peer beyond scratch; `~/.wasm-agent/graph.db.malformed-20261122T144358Z`
 untouched.
 
-Five commits, one per finished piece, in this order:
+Commits, one per finished piece, in this order (the last two are this report itself):
 
 | commit | item | what it does |
 | --- | --- | --- |
@@ -164,9 +164,32 @@ Still open in this item, named:
 * Narrowed fast path (`flock -o ~/Work/missions/.suite.lock env WA_BIN=~/.local/bin/wa WA_FAST_ROWS=/tmp/ops-rows.txt
   bash scripts/fast.sh`), rows: `test-operation-blocked-on.lua`, `test-codemode-wait-shape.lua`,
   `test-codemode-pending.lua`, `test-codemode-wait-bound.lua`, `test-handle-wake.lua`. Log: `/tmp/ops-fast2.log`.
-  **Verdict: see the note below** — the first attempt was killed by the node swap before it reached the front of
-  the queue; the second was started on the new boot and its verdict is recorded in the session's report to the
-  orchestrator.
+  The first attempt was killed by the node swap before it reached the front of the queue (its handle then answered
+  `operation_owner_not_attached`, which is premise (b) reproduced for real); the second ran on the new boot:
+  **123 checks, 3 failed, 877 s**, narrowed to 32 of 345 Lua rows (`fast: lua 32/32 passed`), including
+  `check lock-wait`, which is the row this branch adds. Evidence directory:
+  `/home/victor/wasm-agent/checkout/.git/worktrees/wt35/wa-fast-evidence/20261123T144233Z-3426431/`.
+
+### The 3 failures are pre-existing (rule: prove it on the base, never on a hunch)
+
+Both offending rows are untouched by this branch, and both reproduce on a base worktree of `c1337903`
+(`git worktree add /tmp/base-ops c1337903`):
+
+* `check-install-guards`: 6 of 72 checks fail with
+  `upgrade: refused inside a turn running on the node it would replace; request the external sentinel instead`.
+  On the base worktree the same row gives `base-install-guards=1`, 6 FAIL — an environment effect of the 23/11
+  node install, not of this diff.
+* `check-esc-stops-pty`: `FAIL - bash: Esc brings the prompt back at once (300 ms idle, 120 ms per unit of load,
+  never over 2000)`. On the base worktree: `esc-stops: FAILED - timed out waiting for the prompt`, `-1 ok, 1 failed`.
+  Same failure without this branch, and a load-sensitive timing row besides.
+
+## What was NOT done (named, not hidden)
+
+* item 3 needed no code (premise stale, pinned by an existing row).
+* one documented shape for `start`/`status`/`await` is not unified (see item 4).
+* the `background_descendants` refusal still replaces a call's result, so that output is reachable only by id.
+* the dead-owner enrichment reads the record the old owner left; an owner that died before writing `state.json`
+  still answers a bare unknown (nothing to read, and nothing is invented).
 
 ## Texts to approve (Fable; every model- or operator-facing string added or changed)
 
