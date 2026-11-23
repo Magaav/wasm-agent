@@ -89,6 +89,14 @@ Worktree `/home/victor/Work/missions/deploy-not-held-by-queued-turns/wt`, branch
 | `rust/wa-capabilities` `pending_queue_tests` (2 rows) | the registry names a run until it starts, one entry per run, never run_id 0; `queue_sessions` publishes count/named/entries and an empty queue is an empty answer | `scripts/fast.sh:733` (`cargo test -p wa-capabilities`, already wired; the rows ride it) |
 | `rust/wa-sentinel` `holders_tests` 9, 10, 11 | a queued turn is named and never called working, the unnamed remainder is still counted, the bound never passes over a turn that has not started, and a request name that is not a stamp is not a time | `scripts/test.sh:220` (`cargo test --manifest-path rust/wa-sentinel/Cargo.toml -- --test-threads=1`, already wired; the rows ride it) |
 
+The three Lua rows that read the same deploy state as the new gate are green against this tree's binary:
+`scripts/test-deploy-wait.lua` (59 checks), `scripts/test-deploy-pause.lua` (23), `scripts/test-deploy-resume.lua`
+(25).
+
+**The whole fast path was NOT run here**: my run of `flock -o ~/Work/missions/.suite.lock bash scripts/fast.sh`
+queued behind two other missions' suites on the shared lock and was cancelled rather than hold the queue for an
+hour; nothing of it had started. The land gate runs it.
+
 **Discrimination, measured here** (`scripts/test-discriminates.sh ae3cbb37`):
 `discriminates scripts/test-deploy-wait.sh`. The same gate reported `scripts/test-deploy-bound.sh` as *skipped*
 ("this tree's wa-sentinel did not build" inside its scratch worktree), so it was judged by hand instead: a
