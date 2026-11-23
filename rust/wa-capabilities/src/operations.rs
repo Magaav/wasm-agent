@@ -1093,22 +1093,26 @@ pub fn foreground(
     cwd: &str,
     seconds: u64,
     context: &Value,
+    stdin: Option<&str>,
 ) -> Result<Value, String> {
     let launch = command_launch(program, flag, command)?;
     // Before the work is paid for, not after it dies on a full disk.
     cap_guard(command)?;
     let staged = launch.staged.clone();
+    // The caller's `stdin` text travels with the spec, so the ONE spawn path feeds it (process.rs).
+    let mut launched = spec(
+        &launch,
+        cwd,
+        seconds,
+        format!("worker:{}", crate::serve::node_thread_id()),
+        true,
+        // A foreground shell: the run waits for this call, so it runs at the node own priority
+        // (18/11 round 2, finding 9).
+        false,
+    );
+    launched.stdin = stdin.map(|text| text.to_string());
     let id = manager()
-        .start(launch_context(spec(
-            &launch,
-            cwd,
-            seconds,
-            format!("worker:{}", crate::serve::node_thread_id()),
-            true,
-            // A foreground shell: the run waits for this call, so it runs at the node own priority
-            // (18/11 round 2, finding 9).
-            false,
-        ), context))
+        .start(launch_context(launched, context))
         .map_err(|e| e.to_string())?;
     // The name the reader knows this call by: the `bash` tool's own name, sent with the launch
     // (`lua/core/tools.lua`), so the row says `⟳ bash` and not `⟳ worker:7`.
@@ -1309,7 +1313,7 @@ fn start_fields_refused(args: &Value) -> Result<(), String> {
     // operation_unknown_field on this branch while it worked on main. start_fields_match_the_reads()
     // below parses the args[..] reads out of this function and fails if the list ever drifts again.
     const START_FIELDS: &[&str] = &["action", "id", "owner", "session", "node_scope", "scope",
-        "command", "program", "cwd", "_launch_cwd", "kind", "timeout_seconds", "background",
+        "command", "program", "cwd", "_launch_cwd", "kind", "timeout_seconds", "background", "stdin",
         "control", "tool", "args", "replay_of", "wait_for", "stream", "offset", "limit", "after",
         "evidence", "output", "include_output", "max_bytes", "wait_ms",
         "vault_env", "vault_approval"];
@@ -1385,6 +1389,12 @@ pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<V
             // transcript (operator 17/11 "its credential should be in the vault"). Only the kernel's own
             // callers send it (the MCP client and session); the generic operation route strips it.
             let mut launch = launch;
+            // The bytes a caller wants fed to the command's standard input. `bash {stdin=...}` reaches an
+            // adopted command through here, so the field is read once and carried by the spec to the one
+            // spawn path (wa-operation/src/process.rs) - never re-interpreted per caller.
+            if let Some(text) = args["stdin"].as_str() {
+                launch.stdin = Some(text.to_string());
+            }
             let vault_launch = args.get("vault_env").and_then(|value| value.as_object()).is_some();
             let mut verified: VerifiedFiles = Vec::new();
             if let Some(map) = args.get("vault_env").and_then(|value| value.as_object()) {
@@ -3026,7 +3036,7 @@ mod adoption_survives_the_relay_deadline {
 
         // 1. The flag is LIVE in this process: the foreground path cancels its own operation (the bug this
         // mission exists for). A test that did not prove this could pass while flipping nothing.
-        let foreground = super::foreground(&shell.0, &shell.1, "sleep 5", "", 30, &serde_json::json!({}));
+        let foreground = super::foreground(&shell.0, &shell.1, "sleep 5", "", 30, &serde_json::json!({}), None);
         assert!(foreground.is_err() || foreground.as_ref().map(|v| v["error"] == "run_cancelled"
                 || v["ok"] == false).unwrap_or(false),
             "with the run cancelled, the foreground shell must be stopped, not reported done: {:?}",

@@ -518,6 +518,32 @@ fn normal_command_succeeds_and_closes_stdin() {
     remove_fixture(root);
 }
 #[test]
+fn stdin_text_reaches_the_command_and_then_closes() {
+    // The field a caller could send and lose (mission tool-args-honest-and-same-on-peers, item 4): the
+    // bytes must reach the command's own standard input, and the command must then see EOF rather than
+    // wait for a terminal that will never arrive.
+    let (m, root) = fixture();
+    let mut cat = shell("cat");
+    cat.stdin = Some("hello\nworld\n".into());
+    let id = m.start(cat).unwrap();
+    let s = settled(&m, &id);
+    assert_eq!(s["ok"], true, "{s}");
+    assert_eq!(s["stdout"], "hello\nworld\n", "{s}");
+    // A command that reads one line gets it, and a second read gets end-of-input.
+    let mut reader = shell("read line; printf '%s' \"$line\"");
+    reader.stdin = Some("one\n".into());
+    let id = m.start(reader).unwrap();
+    let s = settled(&m, &id);
+    assert_eq!(s["stdout"], "one", "{s}");
+    // No field is the null device it always was.
+    let id = m.start(shell("read nothing; printf '%s' done")).unwrap();
+    let s = settled(&m, &id);
+    assert_eq!(s["stdout"], "done", "{s}");
+    drop(m);
+    remove_fixture(root);
+}
+
+#[test]
 fn exited_shell_cannot_leave_descendant_or_lose_output() {
     let (m, root) = fixture();
     let mut spec = shell("sleep 30 & printf visible; printf diagnostic >&2");

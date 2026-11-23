@@ -20,6 +20,29 @@ mod platform;
 #[cfg(windows)]
 pub use platform::Process;
 
+/// The bytes of a child's standard input, as a file the child inherits and this process unlinks at once.
+///
+/// A pipe would be the obvious carrier and is the wrong one here: the supervisor has no writer thread by
+/// design, and `write_all` into a pipe blocks as soon as the text outgrows the pipe buffer (64 KiB on Linux)
+/// while the child is not reading yet - a background command that never reads stdin would wedge the manager.
+/// A file has no such state: the child reads the bytes and then EOF, exactly as a shell heredoc does.
+#[cfg(unix)]
+fn stdin_file(text: &str) -> io::Result<std::fs::File> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_nanos()).unwrap_or(0);
+    let path = std::env::temp_dir().join(format!("wa-stdin-{}-{}", std::process::id(), stamp));
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path)?;
+    file.write_all(text.as_bytes())?;
+    file.flush()?;
+    drop(file);
+    let read = std::fs::File::open(&path)?;
+    // Unlinked while the descriptor is open: safe on unix, and no crash leaves the text under TMPDIR.
+    let _ = std::fs::remove_file(&path);
+    Ok(read)
+}
+
 #[cfg(unix)]
 pub struct Process {
     child: std::process::Child,
@@ -37,10 +60,14 @@ impl Process {
         let mut command = Command::new(&spec.program);
         command
             .args(&spec.args)
-            .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .process_group(0);
+        // `stdin` is the caller's text or, as before this field existed, the null device.
+        command.stdin(match spec.stdin.as_deref() {
+            Some(text) => Stdio::from(stdin_file(text)?),
+            None => Stdio::null(),
+        });
         if !spec.cwd.is_empty() {
             command.current_dir(&spec.cwd);
         }
