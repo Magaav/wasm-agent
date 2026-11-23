@@ -232,7 +232,7 @@ Generator, operator-facing (stdout/stderr):
 
     wit-deps: wrote <out> from <sources>
     wit-deps: %d deps copies from %d canonical file(s): %d written, %d already exact
-    wit-deps: STALE <out> (line %d: want %q, have %q)
+    wit-deps: STALE <out> (line %d: want %s, have %s)   # %s is %q, or <blank line>, or <end of file>
     wit-deps: MISSING <out> (the manifest names it; run bash scripts/regenerate.sh)
     wit-deps: %d deps copies are exactly what their canonical files say
     wit-deps: %d of %d deps copies differ from their canonical files - run bash scripts/regenerate.sh
@@ -259,8 +259,8 @@ Header written into every trimmed copy:
     // comment above it. The canonical file is the source; this one only says what is kept.
 
 Test row, on failure: `scripts/gen-wit-deps.lua must load: ...`, `the manifest must render: ...`, `the
-manifest names no copy at all`, `<out> is not what its canonical file says: line %d should be %q and
-is %q`, `%d of %d vendored WIT copies differ from their canonical text - run bash
+manifest names no copy at all`, `<out> is not what its canonical file says: line %d should be %s and
+is %s` (an empty line and a missing line are named apart: `<blank line>`, `<end of file>`), `%d of %d vendored WIT copies differ from their canonical text - run bash
 scripts/regenerate.sh (or \`lua5.4 scripts/gen-wit-deps.lua --write\`)`, `a copy the manifest names
 is gone`, `this row does not name an output the generator writes, so the never-dropped pairing in
 scripts/test-fast-rows.sh cannot see it`, `this row names a path the generator does not write`, `the

@@ -128,8 +128,8 @@ for _, entry in ipairs(plan) do
     local diff = generator.difference(entry.text, actual)
     if diff then
       stale[#stale + 1] = string.format(
-        '%s is not what its canonical file says: line %d should be %q and is %q',
-        entry.out, diff.line, diff.expected or '<end of file>', diff.actual or '<none>')
+        '%s is not what its canonical file says: line %d should be %s and is %s',
+        entry.out, diff.line, generator.show(diff.expected), generator.show(diff.actual))
     end
   end
 end

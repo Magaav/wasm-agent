@@ -330,6 +330,14 @@ function M.outputs()
   return out
 end
 
+-- An empty line and a missing line are different facts and must not read the same: a copy that gained a
+-- blank line is not a copy that lost a block.
+function M.show(line)
+  if line == nil then return '<end of file>' end
+  if line == '' then return '<blank line>' end
+  return string.format('%q', line)
+end
+
 -- The first line on which `expected` and `actual` differ, as { line = n, expected = .., actual = .. }, or
 -- nil when they are the same bytes. Named, because "stale" without a line is a search.
 function M.difference(expected, actual)
@@ -376,8 +384,8 @@ local function main()
         local diff = M.difference(entry.text, current)
         if diff then
           stale = stale + 1
-          print(string.format('wit-deps: STALE %s (line %d: want %q, have %q)', entry.out, diff.line,
-            diff.expected or '<end of file>', diff.actual or '<none>'))
+          print(string.format('wit-deps: STALE %s (line %d: want %s, have %s)', entry.out, diff.line,
+            M.show(diff.expected), M.show(diff.actual)))
         end
       end
     end
