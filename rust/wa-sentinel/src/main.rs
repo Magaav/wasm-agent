@@ -122,6 +122,14 @@ mod queue_tests;
 #[path = "withdraw_tests.rs"]
 mod withdraw_tests;
 // The return-observation lane: one line per (id, problem), then the directory leaves the lane.
+// WHICH USER-FACING FEATURES STILL WORK ON THIS NODE (lua/core/feature_health.lua keeps the facts):
+// `wa health` prints them after the node's own document, so the answer survives a node that will not
+// start - which is the state the question is usually asked in.
+mod feature_health;
+#[cfg(test)]
+#[path = "feature_health_tests.rs"]
+mod feature_health_tests;
+
 #[cfg(test)]
 #[path = "observation_tests.rs"]
 mod observation_tests;
@@ -3767,9 +3775,30 @@ pub(crate) fn sentinel_line(up: bool, pid: Option<u32>, why: &str) -> String {
 
 /// `wa-sentinel health`: the node's own `/health` report, verbatim, on stdout.
 fn health_verb() -> Result<()> {
-    let body = health_body()
-        .with_context(|| format!("the node does not answer {} (is it down?)", health_url()))?;
-    println!("{}", body.trim_end());
+    // A DOWN NODE MUST NOT TAKE THIS ANSWER WITH IT. The features below are read from two files, so they
+    // are the half of this command that still answers when the node is the thing that is broken - which is
+    // when an operator runs it. The node's own document is printed when it answers; the exit code still
+    // says whether it did.
+    let body = health_body();
+    if let Some(text) = &body {
+        println!("{}", text.trim_end());
+    }
+    // AND WHETHER THE USER-FACING FEATURES STILL WORK (Victor, 23/11: "wa health lists every feature with
+    // last worked: <time>"). Read from the node's own two files rather than asked of the node, so a node
+    // that is up but broken still answers this half - the /health document above is about the process, and
+    // a feature that stopped is exactly what it never said.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or(0);
+    for line in feature_health::lines(&feature_health::config_dir_for(&home()), now) {
+        println!("{line}");
+    }
+    if body.is_none() {
+        // The features above are answered; the exit code and the message stay what they were, so a script
+        // that reads `wa health` for the node's health keeps its meaning.
+        anyhow::bail!("the node does not answer {} (is it down?)", health_url());
+    }
     Ok(())
 }
 
