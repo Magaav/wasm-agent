@@ -69,6 +69,11 @@ wa_fast_core_rows() {
   # scripts/test-land-health-program.lua too: it is the one row that proves the health step can START its
   # measurement after an install replaced this process's binary (22/11: every landing that installed stopped
   # at `health` with program_not_found), and it can only prove it by running that binary as its own process.
+  # scripts/test-release-channel-e2e.lua is here because it dofiles the land harness (scripts/lib/land-row.lua)
+  # AND because it is the only row that runs the real `linux` step of a release end to end -
+  # scripts/release-linux.sh, the build receipt, the signature, the index commit - which is the row release F
+  # needed and none of the land parts runs (scripts/test-fast-rows.sh judges this list against the tree for
+  # exactly this reason). Its stand-ins live in the row, so it is ~15 s and needs nothing set up for it.
   printf '%s\n' scripts/test-fast-row-environment.lua \
     scripts/test-land-plan.lua scripts/test-land-resume.lua scripts/test-land-sign.lua \
     scripts/test-land-review.lua scripts/test-land-rows.lua scripts/test-land-resume-19-11.lua \
@@ -77,6 +82,7 @@ wa_fast_core_rows() {
     scripts/test-land-quick-components.lua scripts/test-land-quick-main.lua \
     scripts/test-land-quick-install.lua scripts/test-land-health-program.lua \
     scripts/test-land-linux.lua \
+    scripts/test-release-channel-e2e.lua \
     scripts/test-event-ledger.lua scripts/test-product-version.lua \
     scripts/test-refusal-contract.lua scripts/test-tool-schema-fidelity.lua scripts/test-codemode-parity.lua \
     scripts/test-edit-aliases.lua \

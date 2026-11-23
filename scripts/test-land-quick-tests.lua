@@ -98,6 +98,71 @@ local found4, line4 = said("Local is evolved to")
 ok(found4, "the landing still ends with its line")
 contains(line4, "the checkout only", "and says the install was the checkout, not a deploy")
 
+-- ---------------------------------------------------------------- THE DESCRIPTION ROWS (Fable, 23/11 11:20Z)
+--
+-- MEASURED 23/11: piped-chat-starts-fast landed 7df9dc7f with a new capability line that did not say "JSON text";
+-- main-health on 5956ae15 went red on scripts/test-host-return-docs.lua, and the landing's preflight had never run
+-- that row - a landing ran the branch's OWN rows, and a capability description is a Rust change, which skipped the
+-- tests step entirely. So a round that touches a description runs the description rows first, and this is that
+-- case over the REAL row (the fixture tree carries the tree's own rust/wa-capabilities/src/host.rs and the JSON
+-- library the row decodes with; the fixture's other two checks are red for want of a tree, which is why the
+-- assertions here are about WHICH rows are named).
+fixture()
+local real_source = read_file(R.tree_root .. "/rust/wa-capabilities/src/host.rs")
+local real_json = read_file(R.tree_root .. "/lua/vendor/json.lua")
+ok(type(real_source) == "string" and #real_source > 1000, "the tree's host capability source is readable")
+local undocumented = real_source .. [[
+/// Count the widgets in a directory.
+pub(crate) extern "C-unwind" fn widget_count(state: *mut c_void) -> *mut c_char {
+    answer(state, self.push_json(&body))
+}
+]]
+local documented = real_source .. [[
+/// Count the widgets in a directory: one JSON text string a caller decodes to {count}.
+pub(crate) extern "C-unwind" fn widget_count(state: *mut c_void) -> *mut c_char {
+    answer(state, self.push_json(&body))
+}
+]]
+-- The three rows themselves travel WITH the branch, as they would in a real tree: the step runs them from the
+-- MERGED tree, and the row a description change needs is the tree's own (copied here, not re-implemented).
+local function description_files(source)
+  return {
+    ["rust/wa-capabilities/src/host.rs"] = source,
+    ["lua/vendor/json.lua"] = real_json,
+    ["scripts/test-host-return-docs.lua"] = read_file(R.tree_root .. "/scripts/test-host-return-docs.lua"),
+    ["scripts/test-prompt-tool-names.lua"] = read_file(R.tree_root .. "/scripts/test-prompt-tool-names.lua"),
+    ["scripts/sync-prompt-docs.sh"] = read_file(R.tree_root .. "/scripts/sync-prompt-docs.sh"),
+  }
+end
+branch_with("change/description", description_files(undocumented))
+branch_with("change/description-named", description_files(documented))
+eq(running(function() return land.run({ run = "quickd", landing = true, branches = { "change/description" } }) end), 1,
+  "a branch whose capability line does not say JSON text STOPS the landing")
+eq(step_of("quickd", "tests").error, "description_rows_red", "and the step refuses by name")
+contains(step_of("quickd", "tests").observed, "test-host-return-docs.lua", "naming the row that caught it")
+local description_log = read_file(land.evidence_path("quickd", "tests")) or ""
+contains(description_log, "every capability that answers JSON text says so",
+  "and the row's own words are in the step's evidence: the capability that does not say it, by name")
+contains(description_log, "widget_count", "with the capability this branch added")
+eq(step_of("quickd", "push"), nil, "nothing was pushed")
+contains(step_of("quickd", "tests").detail, "rust/wa-capabilities/src/host.rs", "the step says which description moved")
+eq(running(function() return land.run({ run = "quickdn", landing = true, branches = { "change/description-named" } }) end), 1,
+  "the same branch with the phrase is not stopped for that reason (the fixture's other checks have no tree)")
+ok(not tostring(step_of("quickdn", "tests").observed or ""):find("host-return-docs", 1, true),
+  "the capability row is GREEN once the line says JSON text: " .. tostring(step_of("quickdn", "tests").observed))
+local named_log = read_file(land.evidence_path("quickdn", "tests")) or ""
+ok(not named_log:find("every capability that answers JSON text says so", 1, true),
+  "and its evidence carries no such failure (the trigger is the phrase, not the file)")
+-- THE PLAN SAYS SO BEFORE THE PUSH: `wa land --dry-run` names the description rows for this round.
+local plan = land.build_plan({ id = "quickdp", tree = repo, journal = {} },
+  { "rust/wa-capabilities/src/host.rs" }, {}, nil)
+contains(tostring((plan.steps or {}).tests and plan.steps.tests.why), "description rows",
+  "the plan names the description rows for a round that touches a capability")
+contains(tostring(plan.steps.tests.why), "test-host-return-docs", "with the row names")
+ok(#land.description_paths({ "docs/notes.txt", "lua/core/chat.lua" }) == 0,
+  "a round that touches no description path pays for none of them")
+eq(#land.description_paths({ "docs/HOST.md", "lua/core/tools.lua" }), 2, "and the allow-list answers for the ones that are")
+
 
 if R.count() > 0 and false then os.exit(1) end
 print(string.format("landing ok (%d checks)", R.count()))

@@ -184,6 +184,24 @@ record_release() {
   created=$(jq -r '.created_at // empty' "$journal" 2>/dev/null)
   updated=$(jq -r '.updated_at // empty' "$journal" 2>/dev/null)
   if [ "$done" != done ] || [ -z "$created" ] || [ -z "$updated" ]; then
+    # A RELEASE WHOSE PUBLIC BUNDLE WAS PUBLISHED BY HAND (Fable, 23/11). The channel step did not run, so the run
+    # has no `done` result and this row used to read "not a finished release" about work that WAS finished -
+    # release F's, published by hand at 09:22Z. `wa land mark linux --by-hand --who <name> --why <text>
+    # --evidence <file>` records it in the journal (lua/core/land.lua, mark_verdict), and the row reads that
+    # record instead of a result it will never have.
+    local by_hand who why
+    by_hand=$(jq -r '.linux.by_hand.state // empty' "$journal" 2>/dev/null)
+    if [ "$by_hand" = by_hand ]; then
+      who=$(jq -r '.linux.by_hand.who // "unnamed"' "$journal" 2>/dev/null)
+      why=$(jq -r '.linux.by_hand.why // ""' "$journal" 2>/dev/null)
+      if [ -z "$created" ] || [ -z "$updated" ]; then
+        skip_row release unknown "the newest release journal ($(basename "$(dirname "$journal")")) was published by hand ($who) and carries no created/updated time"; return
+      fi
+      local ms_hand=$(( (updated - created) * 1000 ))
+      jq -n --argjson ms "$ms_hand" --argjson load "$load_before" --arg journal "$(basename "$(dirname "$journal")")" --arg who "$who" --arg why "$why"         '{release: {ms: $ms, samples: [$ms], load: $load, state: "ok",
+          reason: ("cut -> published by hand (" + $who + "): " + $why + "; journal " + $journal)}}' > "$(row_file release)"
+      return
+    fi
     skip_row release unknown "the newest release journal ($(basename "$(dirname "$journal")")) is not a finished release"; return
   fi
   local ms=$(( (updated - created) * 1000 ))

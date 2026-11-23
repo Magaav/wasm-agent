@@ -30,13 +30,27 @@ R.start_vault()
 local function origin_main() return (must("git -C " .. repo .. " ls-remote origin refs/heads/main"):match("^(%x+)")) end
 local function head() return must("git -C " .. repo .. " rev-parse HEAD") end
 local function live_channel(sha) return must("git -C " .. repo .. " show " .. sha .. ":releases/index-linux.json") end
+-- The by-hand case (23/11) writes a SCRATCH journal and reads it back: the names it needs are the harness's.
+local read_file, write_file, json = R.read_file, R.write_file, R.json
 
 -- ---------------------------------------------------------------- the step's place, and its name
 local position = {}
 for index, name in ipairs(land.STEPS) do position[name] = index end
 -- AFTER THE RING (Fable, 23/11, measured): a node deploys a commit only while HEAD == origin/main == that commit,
 -- and this step moves main, so publishing the channel first would refuse every tree deploy of the release.
-eq(position.linux, (position.deploy or 0) + 1, "the channel step comes right after the deploy")
+-- MEASURED 23/11 17:15Z on main 85593e74 (the rebase that went red here): the plan gained a `canaries` step
+-- between the deploy and the channel ("every feature this node runs proves itself, after the deploy
+-- read-back"), so `deploy + 1` is no longer the channel and the adjacency this row pinned was a fact about
+-- one plan rather than the invariant. The invariant is kept and NAMED as an allow-list: the channel is the
+-- first step after the ring, and the only steps it may be separated from the deploy by are ones that read
+-- the deployed bytes WITHOUT touching main - today exactly `canaries`. A new step in that gap has to be added
+-- here in its own right, which is the question this row asks of the next plan change.
+local between_ring_and_channel = {}
+for index = (position.deploy or 0) + 1, (position.linux or 0) - 1 do
+  between_ring_and_channel[#between_ring_and_channel + 1] = land.STEPS[index]
+end
+eq(table.concat(between_ring_and_channel, ","), "canaries",
+  "the channel step comes after the deploy, and only a step that does not move main may sit between them")
 eq(position.linux, (position.report or 0) - 1, "and the report is still last")
 ok(position.publish ~= nil and position.deploy ~= nil, "both neighbours exist")
 eq(land.EVENT_STEP.linux, "linux-channel", "its ledger row has a name of its own")
@@ -294,6 +308,70 @@ eq(routed_passed, true, "a run that signs on another node publishes the channel 
 eq(R.state.sign_calls, sign_calls_before + 1, "and the sums were signed on that node, once")
 contains(tostring((routed_result or {}).detail), "published v", "its answer names the release it published as well")
 contains(live_channel(origin_main()), routed_sha, "the live index names the release")
+
+-- -------- BY HAND (Fable, 23/11): a channel published OUTSIDE the step is recorded, with who and why.
+--
+-- Release F's public bundle was published by hand at 09:22Z, so its run has no `done` result and the speed board
+-- read "the newest release journal ... is not a finished release" about work that WAS finished. The verb records it
+-- - after verifying the effect the step itself verifies (the live channel on origin/main names this commit for
+-- every target) - and refuses BY NAME when the hand is unnamed, the reason is missing, or the claim cannot be
+-- verified. The subject is a SCRATCH journal written here; no real journal is ever touched.
+fresh_fixture()
+local hand_sha = head()
+must("git -C " .. repo .. " tag node-" .. hand_sha:sub(1, 12), "the node release whose channel was published")
+local function publish_index_for(commit)
+  local rows = {}
+  for _, target in ipairs({ "x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl" }) do
+    rows[#rows + 1] = string.format(
+      '    {"tag": "v0.1.0", "commit": "%s", "commit_short": "%s", "target": "%s", "arch": "x64", "manifest_sha256": "%s", "url": "https://example.invalid/wa.tar.gz", "size": 1, "node_version": "24.22.1", "built_utc": "2026-11-23T09:22:00Z"}',
+      commit, commit:sub(1, 12), target, string.rep("0", 64))
+  end
+  write_file(repo .. "/releases/index-linux.json",
+    '{\n  "schema": "wasm-agent-linux-release-index",\n  "schema_version": 1,\n  "notes": "newest first",\n  "releases": [\n' ..
+    table.concat(rows, ",\n") .. '\n  ]\n}\n')
+end
+publish_index_for(hand_sha)
+-- cwd is the FIXTURE repository: a bare `must` runs in the node's own working directory, which is the tree under
+-- test (measured 23/11 in this mission: a missing cwd committed the worktree and tried to push it at main).
+must("git add -A && git commit -q -m 'releases: linux v0.1.0 (published by hand)' && git push -q origin main",
+  "the hand's index commit", repo)
+local hand_dir = land.run_dir("release-byhand")
+local hand_evidence = hand_dir .. "/evidence/hand.log"
+must("mkdir -p '" .. hand_dir .. "/evidence'", "the run's evidence directory")
+local function scratch_journal(commit)
+  write_file(land.journal_path("release-byhand"), json.encode({ schema = 1, run = "release-byhand", release = true,
+    tree = repo, tree_commit = commit, created_at = 1000, updated_at = 1150, steps = {} }))
+  return json.decode(read_file(land.journal_path("release-byhand")) or "{}")
+end
+scratch_journal(hand_sha)
+write_file(hand_evidence, "$ gh release upload v0.1.0 wa-linux-x64-musl-....tar.gz\npublished by hand at 09:22Z\n")
+local marked, answer = land.mark("release-byhand", "linux", hand_evidence,
+  { by_hand = true, who = "Victor", why = "the vault was on the desktop and the cut ran from there", evidence = hand_evidence })
+eq(marked, true, "a channel published by hand is recorded (" .. tostring((not marked) and ((answer or {}).error or "") .. ": " .. tostring((answer or {}).observed or "") or "ok") .. ")")
+local journal = json.decode(read_file(land.journal_path("release-byhand")) or "{}")
+eq(tostring(((journal.linux or {}).by_hand or {}).who), "Victor", "the journal names the hand that did it")
+eq(tostring(((journal.linux or {}).by_hand or {}).why), "the vault was on the desktop and the cut ran from there",
+  "and the reason it was done by hand")
+eq(tostring(((journal.linux or {}).by_hand or {}).commit), hand_sha, "and the commit the live channel names")
+eq(tostring(((journal.steps or {}).linux or {}).state), "done", "the step reads done, so a resume does not repeat it")
+eq(((journal.steps or {}).linux or {}).marked, true, "and it says it was marked, with its evidence")
+-- the refusals, each by name, each leaving the journal unwritten
+local function refused_mark(commit, options, expected)
+  scratch_journal(commit)
+  local passed, why = land.mark("release-byhand", "linux", hand_evidence, options)
+  eq(passed, false, expected .. ": the mark is refused")
+  eq((why or {}).error, expected, "and named " .. expected)
+  eq(json.decode(read_file(land.journal_path("release-byhand")) or "{}").linux, nil, expected .. ": nothing was recorded")
+  return why
+end
+local needs_form = refused_mark(hand_sha, { evidence = hand_evidence, who = "Victor", why = "by hand" }, "mark_by_hand_required")
+contains(tostring((needs_form or {}).next), "--by-hand", "and it names the form that records a hand")
+refused_mark(hand_sha, { by_hand = true, why = "by hand", evidence = hand_evidence }, "mark_by_hand_needs_who")
+refused_mark(hand_sha, { by_hand = true, who = "Victor", evidence = hand_evidence }, "mark_by_hand_needs_why")
+local unverified = refused_mark(must("git -C " .. repo .. " rev-parse change/one"),
+  { by_hand = true, who = "Victor", why = "by hand", evidence = hand_evidence }, "mark_not_verified")
+contains(tostring((unverified or {}).observed), "does not name",
+  "an unverifiable claim says which targets the live channel does not name")
 
 R.stop_vault()
 print(string.format("land-linux ok (%d checks)", R.count()))

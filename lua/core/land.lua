@@ -1706,6 +1706,15 @@ function M.build_plan(run, paths, notes, ring)
     steps.tests = { action = "skip", why = "the branch added or changed no scripts/test-*.lua of its own: " ..
       "nothing of its own to run" }
   end
+  -- THE DESCRIPTION ROWS ARE PART OF THE PLAN (Fable, 23/11): a round that touches what a model reads about this
+  -- node runs them in the tests step whatever else that step does (a Rust change skips the branch's own rows and
+  -- these are exactly the rows a capability change needs). The plan says so before the push, not after main is red.
+  local described_paths = M.description_paths(paths)
+  if #described_paths > 0 then
+    steps.tests = { action = "run", why = string.format(
+      "the description rows (%s), because the round changes what a model reads about this node: %s",
+      table.concat(M.description_names(), ", "), table.concat(described_paths, ", ")) }
+  end
   -- A LUA-ONLY ROUND MUST STILL SHIP A NODE RELEASE WHEN A RING NODE INSTALLS FROM ONE (review r1 #61).
   -- The lua-tree path is right for every node that deploys a tree and wrong for the one that cannot: a
   -- release-installed node has no checkout to deploy, so a round that skipped artifacts/ship/publish left it
@@ -4616,6 +4625,94 @@ function M.node_component(name)
   return nil, label
 end
 
+-- ---------------------------------------------------------------- the description rows (Fable, 23/11 11:20Z)
+--
+-- WHAT A MODEL READS ABOUT THIS NODE is a contract with rows of its own, and a landing ran only the branch's OWN
+-- rows. Measured 23/11: piped-chat-starts-fast landed 7df9dc7f with a new capability line that did not say "JSON
+-- text", main-health on 5956ae15 went red on scripts/test-host-return-docs.lua, and the landing's preflight had
+-- never run that row. So a round that touches a description runs the description rows BEFORE it lands - whatever
+-- else it is, because a Rust change skips the branch's own tests entirely and this is exactly the change that
+-- lands green and breaks main.
+--
+-- THE PATHS are an allow-list of what those rows judge: the host capability registry and its doc, the tool
+-- descriptions the prompt shows, and the prompt doc. A path that is not here does not pay for these rows.
+M.DESCRIPTION_PATHS = { "rust/wa-capabilities/src/capabilities.rs", "rust/wa-capabilities/src/host.rs",
+  "docs/HOST.md", "lua/core/tools.lua", "lua/core/codemode_policy.lua", "docs/PROMPT.md" }
+
+-- One row or check per entry: a Lua row (`row`) runs the way every row here runs - its own home and ledger, the
+-- merged tree's Lua, this node's binary - and a shell check (`command`) runs in the merged tree. Both answer by
+-- exit code, and a red one is named in the step and in its ledger row.
+M.DESCRIPTION_CHECKS = {
+  { name = "host-return-docs", row = "scripts/test-host-return-docs.lua" },
+  { name = "prompt-tool-names", row = "scripts/test-prompt-tool-names.lua" },
+  { name = "prompt-docs", command = "bash scripts/sync-prompt-docs.sh --check" },
+}
+
+-- <paths> -> the changed paths that are descriptions.
+function M.description_paths(paths)
+  local listed = {}
+  for _, path in ipairs(paths or {}) do
+    local spec = tostring(path)
+    for _, candidate in ipairs(M.DESCRIPTION_PATHS) do
+      if spec == candidate then listed[#listed + 1] = spec break end
+    end
+  end
+  return listed
+end
+
+-- What the plan names: the ROW (or the command), so a reader can run it themselves; the short name is what the
+-- step and its ledger row use.
+function M.description_names()
+  local names = {}
+  for _, check in ipairs(M.DESCRIPTION_CHECKS) do
+    names[#names + 1] = tostring(check.row or check.command or check.name)
+  end
+  return names
+end
+
+-- <run> <tree> <described paths> <options> <evidence> -> the red rows (empty when every one is green), how many
+-- ran. A check that cannot run at all (a missing script, a binary that will not start) is RED: unknown is not yes.
+function M.run_description_checks(run, tree, described, options, evidence)
+  options = type(options) == "table" and options or {}
+  evidence = evidence or function() end
+  local binary = trim(options.test_binary or ((host.getenv and host.getenv("WA_LAND_TEST_BINARY")) or ""))
+  if binary == "" then binary = "wa" end
+  local timeout = tonumber(options.test_timeout) or 300
+  local red, ran = {}, 0
+  evidence(string.format("description paths changed: %s - running %s\n", table.concat(described or {}, ", "),
+    table.concat(M.description_names(), ", ")))
+  for _, check in ipairs(M.DESCRIPTION_CHECKS) do
+    local name = tostring(check.name)
+    local scratch = M.run_dir(run.id) .. "/descriptions/" .. name
+    M.exec("rm -rf " .. quote(scratch) .. " && mkdir -p " .. quote(scratch .. "/h/wahome"), tree, 60)
+    -- The environment first, then `timeout`, then the command: a `timeout` in front of an assignment runs the
+    -- ASSIGNMENT as the command (measured here 23/11: three rows answered exit 127, "failed to run command
+    -- WA_SCRIPT=..." - red for the wrong reason, which is the kind of red this mission exists to remove).
+    local parts = { "WASM_AGENT_LUA_ROOT=" .. quote(slashes(tree)), "HOME=" .. quote(scratch .. "/h"),
+      "WASM_AGENT_HOME=" .. quote(scratch .. "/h/wahome"), "TMPDIR=" .. quote(scratch) }
+    if check.row then parts[#parts + 1] = "WA_SCRIPT=" .. quote(check.row) else parts[#parts + 1] = "WA_BIN=" .. quote(binary) end
+    parts[#parts + 1] = "timeout " .. tostring(math.floor(timeout))
+    if check.row then
+      parts[#parts + 1] = quote(binary)
+      parts[#parts + 1] = "--db"
+      parts[#parts + 1] = quote(scratch .. "/t.db")
+    else
+      parts[#parts + 1] = tostring(check.command)
+    end
+    local command = table.concat(parts, " ")
+    evidence(command .. "\n")
+    local result = M.exec(command, tree, timeout + 60)
+    local output = tostring(result.stdout or "") .. tostring(result.stderr or "")
+    evidence(output .. "\n")
+    ran = ran + 1
+    if (result.code or 1) ~= 0 then
+      red[#red + 1] = name .. " (" .. tostring(check.row or check.command) .. ", exit " .. tostring(result.code) .. ": " ..
+        last_line(output) .. ")"
+    end
+  end
+  return red, ran
+end
+
 impl.tests = function(run, options)
   local evidence = sink(run, "tests")
   local tree = run.tree
@@ -4630,6 +4727,19 @@ impl.tests = function(run, options)
     local detail = table.concat(notes, "; ") .. " - so the branch's own tests were NOT run here"
     evidence(detail .. "\n")
     return true, { state = "skipped", detail = detail }
+  end
+  -- THE DESCRIPTION ROWS GO FIRST, and they run whatever else the branch is (23/11): a Rust change skips the
+  -- branch's own tests below, and a capability description IS a Rust change.
+  local described = M.description_paths(paths)
+  if #described > 0 then
+    local red, ran = M.run_description_checks(run, tree, described, options, evidence)
+    if #red > 0 then
+      return false, { error = "description_rows_red",
+        detail = "the round changes what a model reads about this node (" .. table.concat(described, ", ") .. ") and its description rows are red:",
+        observed = table.concat(red, "; "),
+        next = "fix the description the row names - docs/HOST.md and the capability's own comment have to say the same thing - then land again" }
+    end
+    evidence(string.format("description rows green: %d\n", ran))
   end
   local rust, rows, excluded = 0, {}, {}
   for _, path in ipairs(paths) do
@@ -5755,7 +5865,13 @@ end
 -- `wa land mark <step> --evidence <file>` reads the evidence, RE-VERIFIES the effect with the same checks the
 -- step itself would pass, and only then records the step as done, with `marked` and the evidence path on it.
 -- A verification that cannot tell is a refusal by name: unknown is not yes.
-M.MARKABLE = { "push", "main", "sign", "ship", "publish" }
+M.MARKABLE = { "push", "main", "sign", "ship", "publish", "linux" }
+-- THE ONE STEP A HAND CAN FINISH (Fable, 23/11). The public channel's bundle can be published by hand - release F's
+-- was, at 09:22Z - and a run finished that way has no `done` result, so the speed board read "the newest release
+-- journal is not a finished release" about work that WAS finished. `wa land mark linux --by-hand --who <name>
+-- --why <text> --evidence <file>` records it: the effect is verified the way the step verifies it (the live
+-- channel on origin/main names this commit for every target), and the hand that did it is named, with its reason,
+-- in the journal - never a hand-edited journal.json.
 
 local function mark_verdict(run, step, options)
   local id = run.id
@@ -5784,6 +5900,45 @@ local function mark_verdict(run, step, options)
         next = "nothing was marked: main is read back from the remote" }
     end
     return true, { detail = M.origin() .. " main = " .. sha:sub(1, 12) .. " (verified)" }
+  end
+  -- A CHANNEL ENTRY PUBLISHED BY HAND: verified first (the live channel must name this commit for every target,
+  -- which is the same fact `impl.linux` reads back), then recorded WITH the hand that did it and why. An
+  -- unverifiable claim is a refusal, and a claim with no name or no reason is a claim nobody can review.
+  if step == "linux" then
+    if options.by_hand ~= true then
+      return false, { error = "mark_by_hand_required",
+        detail = "the channel step is marked by hand only, and the mark has to say who and why",
+        observed = "wa land mark linux was asked without --by-hand",
+        next = "wa land mark linux --by-hand --who <name> --why <text> --evidence <file>" }
+    end
+    local who, why = trim(options.who or ""), trim(options.why or "")
+    if who == "" then
+      return false, { error = "mark_by_hand_needs_who", detail = "a by-hand publish is recorded with the person who did it",
+        observed = "--who was not given", next = "wa land mark linux --by-hand --who <name> --why <text> --evidence <file>" }
+    end
+    if why == "" then
+      return false, { error = "mark_by_hand_needs_why", detail = "a by-hand publish is recorded with the reason it was done by hand",
+        observed = "--why was not given", next = "wa land mark linux --by-hand --who <name> --why <text> --evidence <file>" }
+    end
+    local targets = linux_targets(options)
+    local doc, why_not = origin_main_index(tree)
+    if not doc then
+      return false, { error = "mark_not_verified", detail = "the public channel could not be read back",
+        observed = tostring(why_not),
+        next = "git -C " .. slashes(tree or ".") .. " fetch " .. M.origin() .. " main, then mark again: a by-hand publish is recorded only once it is on main" }
+    end
+    local _, missing = index_covers(doc, sha, targets)
+    if #missing > 0 then
+      return false, { error = "mark_not_verified",
+        detail = "the channel on " .. M.origin() .. "/main does not name this commit for every target",
+        observed = M.LINUX_INDEX .. " does not name " .. sha:sub(1, 12) .. " for " .. table.concat(missing, ", "),
+        next = "commit and push the index entry the by-hand publish wrote (" .. M.LINUX_INDEX .. "), then mark again - nothing was marked" }
+    end
+    run.journal.linux = type(run.journal.linux) == "table" and run.journal.linux or {}
+    run.journal.linux.by_hand = { who = who, why = why, evidence = tostring(options.evidence or ""),
+      at = now(), commit = sha, targets = targets, state = "by_hand" }
+    return true, { detail = "published by hand by " .. who .. " (" .. why .. "): the channel on " .. M.origin() ..
+      "/main names " .. sha:sub(1, 12) .. " for " .. #targets .. " target(s) (verified)" }
   end
   local artifacts = run.journal.artifacts or {}
   if step == "sign" then
@@ -5996,6 +6151,7 @@ function M.cli(argv)
       local step = argv[index + 1]
       if type(step) ~= "string" or step == "" or step:sub(1, 2) == "--" then
         print("wa land mark needs a step: wa land mark <" .. table.concat(M.MARKABLE, "|") .. "> --evidence <file> [--run <id>]")
+        print("  wa land mark linux --by-hand --who <name> --why <text> --evidence <file>   record a channel published by hand")
         return 2
       end
       local mark_options = {}
@@ -6005,6 +6161,9 @@ function M.cli(argv)
         elseif word == "--run" then mark_options.run = argv[scan + 1]
         elseif word == "--account" then mark_options.account = argv[scan + 1]
         elseif word == "--signer" then mark_options.signer = argv[scan + 1]
+        elseif word == "--by-hand" then mark_options.by_hand = true
+        elseif word == "--who" then mark_options.who = argv[scan + 1]
+        elseif word == "--why" then mark_options.why = argv[scan + 1]
         end
       end
       local id = mark_options.run

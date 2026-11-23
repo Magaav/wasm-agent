@@ -49,71 +49,14 @@ bad() { failed=$((failed+1)); printf 'FAIL %s\n' "$1"; [ -n "${2:-}" ] && printf
 # ---------------------------------------------------------------- the fake GitHub
 #
 # It reads and writes files, and that is the point: the publisher is held to the effect (the asset is ON the
-# release, with the size it measured), never to the command it ran. The state is one directory per tag.
+# release, with the size it measured), never to the command it ran. The state is one directory per tag. The fake
+# itself is SHARED with the channel step's end-to-end row (scripts/lib/fake-gh.sh): two copies would drift, and a
+# row would then be green against a GitHub that does not exist.
 mkdir -p "$T/bin" "$T/gh"
-cat > "$T/bin/gh" <<'GH'
-#!/usr/bin/env bash
-# A fake GitHub CLI: state is one directory per tag, and every verb answers from the files there. It is what
-# lets the suite hold the publisher to the EFFECT (the archive is on the release, with the size it measured)
-# instead of to the command it typed. FAKE_GH_FAIL picks the way it misbehaves.
-set -uo pipefail
-STATE="${FAKE_GH_STATE:?}"
-FAIL="${FAKE_GH_FAIL:-}"
-verb=$1; shift || exit 1
-if [ "$verb" = auth ]; then [ "$FAIL" = auth ] && exit 1; exit 0; fi
-[ "$verb" = release ] || exit 1
-sub=$1; shift || exit 1
-tag=$1; shift || exit 1
-case "$sub" in
-  view)
-    [ -d "$STATE/$tag" ] || exit 1
-    case " $* " in
-      *" --json "*)
-        printf '{"assets":['
-        first=1
-        for f in "$STATE/$tag"/*; do
-          [ -f "$f" ] || continue
-          [ "$first" = 1 ] || printf ','
-          first=0
-          printf '{"name":"%s","size":%s}' "$(basename "$f")" "$(wc -c < "$f" | tr -d ' ')"
-        done
-        printf ']}\n' ;;
-      *) printf 'title:\t%s\ntag:\t%s\n' "$tag" "$tag" ;;
-    esac
-    exit 0 ;;
-  create|upload)
-    if [ "$FAIL" = publish ] || [ "$FAIL" = "$sub" ]; then printf 'gh: %s refused\n' "$sub" >&2; exit 1; fi
-    mkdir -p "$STATE/$tag"
-    while [ "$#" -gt 0 ]; do
-      case "$1" in
-        --repo|--target|--title|--notes) shift 2 ;;
-        --*) shift ;;
-        *) if [ -f "$1" ]; then cp -f "$1" "$STATE/$tag/$(basename "$1")"; fi; shift ;;
-      esac
-    done
-    [ "$FAIL" = readback ] && rm -f "$STATE/$tag"/*.tar.gz
-    exit 0 ;;
-  download)
-    [ -d "$STATE/$tag" ] || exit 1
-    pattern=; dir=.
-    while [ "$#" -gt 0 ]; do
-      case "$1" in
-        --pattern) pattern=$2; shift 2 ;;
-        --dir) dir=$2; shift 2 ;;
-        --repo) shift 2 ;;
-        *) shift ;;
-      esac
-    done
-    mkdir -p "$dir"; found=1
-    for f in "$STATE/$tag"/*; do
-      [ -e "$f" ] || continue
-      case "$(basename "$f")" in $pattern) cp -f "$f" "$dir/"; found=0 ;; esac
-    done
-    exit $found ;;
-  *) exit 1 ;;
-esac
-GH
-chmod +x "$T/bin/gh"
+# shellcheck source=lib/fake-gh.sh
+. "$ROOT/scripts/lib/fake-gh.sh"
+wa_fake_gh_install "$T/bin" || { printf 'FAIL fake_gh_unavailable
+' >&2; exit 1; }
 export FAKE_GH_STATE="$T/gh"
 
 sign_fixture() { python3 "$ROOT/scripts/lib/release-fixture-sign.py" "$1" --key A >/dev/null 2>&1; }
