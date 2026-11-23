@@ -146,6 +146,25 @@ impl<T: Persist> AudioQueue<T> {
 
     /// Forget a queued item: its source was proven revoked/edited, so it is never transcribed. An
     /// item already in flight is left alone (the fence stops it before it posts).
+    /// Drop every PENDING item the predicate names, in queue order, and return their keys.
+    ///
+    /// It exists for one rule (23/11): a deletion notice that cannot be matched to a stored message
+    /// skips the automatic replies that are still waiting - one reply at a time, never the chat. An item
+    /// in flight is not here (`flights`), so an item already being decoded or posted is never touched.
+    pub fn drop_where(&mut self, mut matches: impl FnMut(&str, &T) -> bool) -> Vec<String> {
+        let mut dropped = Vec::new();
+        let mut kept = std::collections::VecDeque::new();
+        while let Some(item) = self.items.pop_front() {
+            if matches(&item.key, &item.payload) {
+                dropped.push(item.key);
+            } else {
+                kept.push_back(item);
+            }
+        }
+        self.items = kept;
+        dropped
+    }
+
     pub fn drop_key(&mut self, key: &str) -> bool {
         match self.items.iter().position(|i| i.key == key) {
             Some(at) => {

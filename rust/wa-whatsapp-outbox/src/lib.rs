@@ -310,7 +310,12 @@ pub fn decide(payload: &[u8], now_ms: i64, fresh_until: Option<i64>) -> Decision
 /// permanent; a transport failure is not. The queue decides *how many* attempts a retryable failure
 /// gets; this only says whether retrying can possibly help.
 pub fn retryable(reason: &str) -> bool {
-    const PERMANENT: [&str; 12] = [
+    // The component's refusals name the message they are about (`reply_source_own:<id>`, ...), so the
+    // classification reads the head: a reason is permanent when its code is, whatever fact follows it.
+    // The reply-source refusals are on this list because retrying one would ask the same question of the
+    // same stale index answer - and the send is refused for the SHAPE of the quote, which a retry cannot
+    // change (23/11: the same message read twice refused twice).
+    const PERMANENT: [&str; 16] = [
         "bad_chat",
         "bad_mention",
         "bad_reply_to",
@@ -323,6 +328,10 @@ pub fn retryable(reason: &str) -> bool {
         "not_logged_in",
         "logged_out",
         "policy_denied",
+        "reply_source_not_indexed",
+        "reply_source_own",
+        "reply_source_unsupported",
+        "reply_source_not_plain_text",
     ];
     !PERMANENT.iter().any(|code| reason == *code || reason.starts_with(&format!("{code}:")))
 }

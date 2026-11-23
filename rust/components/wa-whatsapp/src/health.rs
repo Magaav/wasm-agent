@@ -32,6 +32,12 @@ pub struct Health {
     pub last_post_ms: Option<i64>,
     pub records_indexed: u64,
     pub last_index_ms: Option<i64>,
+    /// Deletion notices this node could attach to a stored message (`crate::notices`).
+    pub notices_matched: u64,
+    /// Deletion notices it could NOT attach to one: a defect counter, never a block (23/11).
+    pub notices_unmatched: u64,
+    pub last_notice_ms: Option<i64>,
+    pub last_unmatched_ms: Option<i64>,
 }
 
 impl Health {
@@ -44,7 +50,7 @@ impl Health {
         }
         let reason = if self.last_failure_reason.is_empty() { "-" } else { self.last_failure_reason.as_str() };
         format!(
-            "health: v=1 transcripts ok={} last={} chars={} failed={} last_failure={} reason={reason} posting={posting} posted={} last_post={} index written={} last={}",
+            "health: v=1 transcripts ok={} last={} chars={} failed={} last_failure={} reason={reason} posting={posting} posted={} last_post={} index written={} last={} notices matched={} unmatched={} last_notice={} last_unmatched={}",
             self.transcripts_ok,
             at(self.last_transcript_ms),
             self.last_transcript_chars,
@@ -54,6 +60,10 @@ impl Health {
             at(self.last_post_ms),
             self.records_indexed,
             at(self.last_index_ms),
+            self.notices_matched,
+            self.notices_unmatched,
+            at(self.last_notice_ms),
+            at(self.last_unmatched_ms),
         )
     }
 }
@@ -100,6 +110,39 @@ pub fn indexed(records: usize, at_ms: i64) {
         let mut health = cell.borrow_mut();
         health.records_indexed += records as u64;
         health.last_index_ms = Some(at_ms);
+    });
+}
+
+/// One deletion notice that found its message. The counter is the proof that matching works; without it a
+/// node that could not match anything would look exactly like a node with nothing to match.
+pub fn notice_matched(at_ms: i64) {
+    HEALTH.with(|cell| {
+        let mut health = cell.borrow_mut();
+        health.notices_matched += 1;
+        health.last_notice_ms = Some(at_ms);
+    });
+}
+
+/// One deletion notice that named no message this node holds. It is a defect counter and NOT a block
+/// (the owner's rule: a notice never holds a chat), so it is counted, timed, and carried on the line.
+pub fn notice_unmatched(at_ms: i64) {
+    HEALTH.with(|cell| {
+        let mut health = cell.borrow_mut();
+        health.notices_unmatched += 1;
+        health.last_notice_ms = Some(at_ms);
+        health.last_unmatched_ms = Some(at_ms);
+    });
+}
+
+/// What a previous run left in the ledger: a restart must not reset a defect counter to zero, or the
+/// line would say the node has never failed to match a notice it has been failing to match for days.
+pub fn notices_restored(ledger: crate::notices::Ledger) {
+    HEALTH.with(|cell| {
+        let mut health = cell.borrow_mut();
+        health.notices_matched = ledger.matched;
+        health.notices_unmatched = ledger.unmatched;
+        health.last_notice_ms = (ledger.last_ms > 0).then_some(ledger.last_ms);
+        health.last_unmatched_ms = (ledger.last_unmatched_ms > 0).then_some(ledger.last_unmatched_ms);
     });
 }
 

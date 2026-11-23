@@ -149,6 +149,16 @@ pub struct Record {
     pub edited: bool,
     pub edits: u32,
     pub deleted: bool,
+    /// When the sender deleted this message, Unix ms (0 = never deleted). It stays on the record with
+    /// the content: the owner's rule of 23/11 is that a deletion is a FLAG on a message this node keeps
+    /// ("keep the content in case i want to know"), not a reason to forget it.
+    pub deleted_at: i64,
+    /// Who deleted it, when the notice carried a sender (the message's author for a revoke, the
+    /// administrator in a group revocation, the owner for a clear). Empty when the wire did not say.
+    pub deleted_by: String,
+    /// The text this message carried before its last edit: an edit keeps the earlier text and stores the
+    /// new one, so the operator can still see what was said first (23/11, the same decision).
+    pub previous_text: String,
     /// When the last edit/delete was applied, Unix ms (0 for a plain message).
     pub event_ts: i64,
     pub media: Option<Media>,
@@ -234,10 +244,11 @@ impl Record {
     }
 
     /// A bounded one-line snippet for an answer: never a newline, never the whole message.
+    ///
+    /// A deleted message answers with its content and the caller's view carries `deleted` beside it: the
+    /// node keeps what it was told (23/11), and an empty snippet for a message this store holds would be
+    /// the forgetting the owner ruled out.
     pub fn snippet(&self, max: usize) -> String {
-        if self.deleted {
-            return String::new();
-        }
         one_line(self.body(), max)
     }
 

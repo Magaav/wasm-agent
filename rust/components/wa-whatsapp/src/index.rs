@@ -25,17 +25,22 @@
 //! Decisions worth naming:
 //!
 //! * **A message that has not arrived yet is not a hole.** A revoke or an edit can arrive before the
-//!   message it names (a re-delivery, a history sync); the mutation is kept under `ix/pend` and applied
-//!   when the record lands, so a deleted message is never indexed with its text.
+//!   message it names (a re-delivery, a history sync); the mutation is kept under `ix/pend` and, for a
+//!   deletion, as a tombstone by MESSAGE ID under `ix/tomb` (`key_tombstone`), so the message is flagged
+//!   deleted on arrival under whichever chat spelling the wire used for it.
 //! * **Reactions are folded, not threads.** A reaction is recorded (who, which emoji, to which message)
 //!   and attached to its target; `read` shows it on the message, and it is not a separate bubble.
 //!   An empty emoji is a removal: the same actor's row is deleted, not overwritten with a blank.
-//! * **Deleting a message deletes its text.** A revoke clears the text, the media keys and every token
-//!   entry, so a search can never return words the sender took back; the row stays as the event that
-//!   says it happened.
+//! * **Deleting a message flags it and KEEPS it** (the owner's decision of 23/11: *"it should only flag it
+//!   got deleted, and keep the content in case i want to know"*). The record gains `deleted`,
+//!   `deleted_at` and `deleted_by`, keeps its text, transcript, OCR text, media metadata and token keys,
+//!   and every read and search hit carries the flag beside the content. An edit keeps the earlier text
+//!   in `previous_text` and stores the new one. No deletion touches another message of the chat, and no
+//!   deletion holds the chat.
 //! * **Retention is by age, in bounded passes.** No count is maintained (a counter that drifts is a
 //!   counter that deletes live data); [`prune`] walks `ix/all` from the oldest and stops at the first
 //!   record inside the window or at its budget, and the caller runs it again next tick.
+use crate::notices::Tombstone;
 use crate::record::{self, Record};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use wa_whatsapp_index as seam;
@@ -263,6 +268,15 @@ fn jump_key(end_ms: i64) -> Vec<u8> {
 
 fn key_pending(chat: &str, id: &str) -> String {
     format!("{PREFIX}pend/{chat}/{id}")
+}
+
+/// ix/tomb/<id> -> a deletion notice that named a message this store does not hold: the message is
+/// flagged deleted the moment it arrives, under WHATEVER chat form it arrives (a re-delivery, a history
+/// sync, a backfill). It is keyed by the message id alone on purpose: the notice's own chat spelling and
+/// the spelling a later arrival uses are exactly the pair that did not meet on 23/11
+/// (fence_here=0 fence_anywhere=1 in the component log), and a message id is unique in WhatsApp.
+fn key_tombstone(id: &str) -> String {
+    format!("{PREFIX}tomb/{id}")
 }
 
 /// One image the OCR lane already answered: [`OcrMark`] as JSON. Without it the lane's backlog pass
@@ -854,7 +868,13 @@ pub async fn put<S: Store>(store: &S, record: &Record) -> Result<(), String> {
 async fn put_message<S: Store>(store: &S, record: &Record) -> Result<(), String> {
     let pending = pending_of(store, &record.chat, &record.id).await?;
     let mut record = record.clone();
-    if let Some(pending) = pending {
+    // A notice that could not be matched when it arrived left a tombstone by message id: the message is
+    // deleted on arrival, under this chat's spelling or any other (key_tombstone). It is applied once.
+    if let Some(tombstone) = tombstone_of(store, &record.id).await? {
+        mark_deleted(&mut record, tombstone.at_ms, &tombstone.by);
+        store.del(key_tombstone(&record.id).as_bytes()).await?;
+        store.del(key_pending(&record.chat, &record.id).as_bytes()).await?;
+    } else if let Some(pending) = pending {
         // The order the network chose is not the order the phone shows: a revoke re-delivered ahead of
         // its message must still win. Never the other way round - text the sender took back is not
         // indexed, not even for the tick it takes the tombstone to arrive.
@@ -869,7 +889,7 @@ async fn put_message<S: Store>(store: &S, record: &Record) -> Result<(), String>
                     record.event_ts = pending.ts;
                 }
             }
-            "delete" => redact(&mut record, pending.ts),
+            "delete" => mark_deleted(&mut record, pending.ts, ""),
             _ => {}
         }
         store.del(key_pending(&record.chat, &record.id).as_bytes()).await?;
@@ -1287,7 +1307,7 @@ fn bare_user(jid: &str) -> Option<String> {
     let user = user.split(':').next().unwrap_or("");
     let server = if server == "c.us" { "s.whatsapp.net" } else { server };
     let bare = format!("{user}@{server}");
-    crate::holds::valid_user(&bare).then_some(bare)
+    crate::notices::valid_user(&bare).then_some(bare)
 }
 
 /// Two addresses as one `(lid, pn)` pair, in either order, or `None` when they are not exactly one
@@ -1959,19 +1979,53 @@ async fn put_event<S: Store>(store: &S, record: &Record) -> Result<(), String> {
     write(store, record).await
 }
 
+/// Every chat spelling a message id may be stored under, most specific first: the spelling this build
+/// stores, and each alias the store learned for it (`ix/al/`, written both ways from the wire's own
+/// `sender_alt` and from `whatsapp-rust`'s `lid/` map).
+pub async fn chat_forms<S: Store>(store: &S, chat: &str) -> Vec<String> {
+    let mut forms = vec![crate::chat::storable(chat)];
+    for _ in 0..2 {
+        let Some(current) = forms.last().cloned() else { break };
+        match alias_of(store, &current).await {
+            Ok(Some(other)) if !forms.contains(&other) => forms.push(other),
+            _ => break,
+        }
+    }
+    forms
+}
+
+/// One message by `(chat, id)`, across every spelling of that chat this store knows.
+///
+/// Matching a mutation by MESSAGE ID first is the whole fix of 23/11 (the component log said
+/// `fence_here=0 fence_anywhere=1`: the id WAS in the store, under another chat key).
+async fn load_any_form<S: Store>(store: &S, chat: &str, id: &str) -> Result<Option<Record>, String> {
+    for form in chat_forms(store, chat).await {
+        if let Some(record) = load(store, &form, id).await? {
+            return Ok(Some(record));
+        }
+    }
+    Ok(None)
+}
+
 async fn apply_edit<S: Store>(store: &S, event: &Record) -> Result<(), String> {
     if event.target.is_empty() {
         return Ok(());
     }
-    match load(store, &event.chat, &event.target).await? {
+    match load_any_form(store, &event.chat, &event.target).await? {
         Some(mut target) => {
             if target.deleted {
-                return Ok(()); // an edit after a revoke changes nothing: the message is gone
+                // An edit after a revoke changes no content: the message keeps what it said and stays
+                // flagged deleted (`mark_deleted`).
+                return Ok(());
             }
+            // The earlier text is KEPT, not dropped: the owner's rule of 23/11 is that this node keeps
+            // what it was told, and an edit is the same question as a deletion.
+            let earlier = target.text.clone();
             let was = target.tokens();
             target.text = event.text.clone();
             target.quoted = event.quoted.clone();
             target.mentions = event.mentions.clone();
+            target.previous_text = earlier.chars().take(seam::MAX_TEXT_CHARS).collect();
             target.edited = true;
             target.edits = target.edits.max(1);
             target.event_ts = event.ts;
@@ -1980,6 +2034,8 @@ async fn apply_edit<S: Store>(store: &S, event: &Record) -> Result<(), String> {
             }
             write(store, &target).await
         }
+        // No tombstone for an edit: its text arrives with the event itself, so a message that turns up
+        // later carries its own text and nothing was taken away. The same-chat pending row is enough.
         None => set_pending(store, &event.chat, &event.target, "edit", Some(event)).await,
     }
 }
@@ -1988,38 +2044,87 @@ async fn apply_delete<S: Store>(store: &S, event: &Record) -> Result<(), String>
     if event.target.is_empty() {
         return Ok(());
     }
-    match load(store, &event.chat, &event.target).await? {
+    match load_any_form(store, &event.chat, &event.target).await? {
         Some(mut target) => {
-            // Every token key of the text being taken back goes first: a search must not find a word
-            // because the index forgot to forget it.
-            for token in target.tokens() {
-                store.del(key_token(&token, target.ts, &target.id, &target.chat).as_bytes()).await?;
-            }
-            redact(&mut target, event.ts);
-            // A reaction to a message that no longer exists is not a reaction to anything.
-            for (key, _) in store.scan(reaction_prefix(&event.chat, &event.target).as_bytes(), None, 64).await? {
-                store.del(&key).await?;
-            }
+            // The content STAYS, with the flag beside it: the words, the transcript, the OCR text, the
+            // media metadata and the token keys, so a search still finds what was said and says it was
+            // deleted (23/11: "keep the content in case i want to know").
+            mark_deleted(&mut target, event.ts, &event.sender);
             write(store, &target).await
         }
-        None => set_pending(store, &event.chat, &event.target, "delete", None).await,
+        None => {
+            // The notice is a fact even when its message is not here yet: the tombstone by message id
+            // flags it on arrival under any chat spelling, and the same-chat row keeps the older path.
+            set_pending(store, &event.chat, &event.target, "delete", None).await?;
+            let tombstone = Tombstone {
+                chat: event.chat.clone(),
+                kind: "revoke".to_string(),
+                at_ms: event.ts,
+                by: event.sender.clone(),
+            };
+            set_tombstone(store, &event.target, &tombstone).await
+        }
     }
 }
 
-/// What a revoked message keeps: the fact, the envelope and the kind. Not the text, not the media
-/// keys, not one token - the sender took it back, and a search that still finds it is a bug.
-fn redact(record: &mut Record, event_ts: i64) {
-    record.text.clear();
-    record.transcript.clear();
-    record.ocr.clear();
-    record.quoted.clear();
-    record.mentions.clear();
-    record.media = None;
-    record.place = None;
-    record.contacts.clear();
-    record.poll = None;
+/// What one deletion notice did to the store.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NoticeOutcome {
+    /// The notice named a message this store holds: it is now flagged deleted, content kept.
+    Matched,
+    /// The notice named no message this store holds: a tombstone waits for it, and it is counted.
+    Unmatched,
+    /// The notice named nothing narrower than the chat: nothing to flag, nothing to wait for.
+    Untargeted,
+}
+
+/// Apply one deletion notice from the wire to the index (`crate::notices::Notice`).
+///
+/// A revoke flags the message it names, wherever the store keeps it, and leaves a tombstone when it is
+/// not here yet. An edit only says whether the id is known: its text arrives as its own event record
+/// (`apply_edit`). No path here touches another message of the chat.
+pub async fn notice<S: Store>(store: &S, notice: &crate::notices::Notice) -> Result<NoticeOutcome, String> {
+    if !notice.targeted() {
+        return Ok(NoticeOutcome::Untargeted);
+    }
+    if let Some(mut record) = load_any_form(store, &notice.chat, &notice.target).await? {
+        if notice.kind == "revoke" {
+            mark_deleted(&mut record, notice.at_ms, &notice.sender);
+            write(store, &record).await?;
+        }
+        return Ok(NoticeOutcome::Matched);
+    }
+    if notice.kind == "revoke" {
+        let tombstone = Tombstone {
+            chat: notice.chat.clone(),
+            kind: "revoke".to_string(),
+            at_ms: notice.at_ms,
+            by: notice.sender.clone(),
+        };
+        set_tombstone(store, &notice.target, &tombstone).await?;
+    }
+    Ok(NoticeOutcome::Unmatched)
+}
+
+/// Flag a message as deleted and KEEP everything it carried: its text, its transcript, its OCR text, its
+/// media metadata and its token keys. A read and a search show the flag beside the content; nothing else
+/// about the message changes, and no other message of the chat is affected.
+pub fn mark_deleted(record: &mut Record, at_ms: i64, by: &str) {
     record.deleted = true;
-    record.event_ts = event_ts;
+    record.deleted_at = if at_ms > 0 { at_ms } else { record.event_ts.max(record.ts) };
+    record.deleted_by = by.chars().take(64).collect();
+    record.event_ts = at_ms.max(record.event_ts);
+}
+
+/// The tombstone a notice left for a message this store did not hold, if any.
+pub async fn tombstone_of<S: Store>(store: &S, id: &str) -> Result<Option<Tombstone>, String> {
+    let Some(bytes) = store.get(key_tombstone(id).as_bytes()).await? else { return Ok(None) };
+    Ok(serde_json::from_slice(&bytes).ok())
+}
+
+async fn set_tombstone<S: Store>(store: &S, id: &str, tombstone: &Tombstone) -> Result<(), String> {
+    let value = serde_json::to_vec(tombstone).map_err(|error| format!("tombstone encode: {error}"))?;
+    store.set(key_tombstone(id).as_bytes(), &value).await
 }
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -2053,9 +2158,11 @@ async fn pending_of<S: Store>(store: &S, chat: &str, id: &str) -> Result<Option<
 /// search finds a voice note by what was said in it and a photo by what it shows.
 pub async fn attach_text<S: Store>(store: &S, chat: &str, id: &str, text: &str, source: Source) -> Result<bool, String> {
     let Some(mut record) = load(store, chat, id).await? else { return Ok(false) };
-    if record.deleted || text.is_empty() {
+    if text.is_empty() {
         return Ok(false);
     }
+    // A deleted message keeps what this node derived about it (`mark_deleted`): a transcript that lands
+    // after the revoke is still the content of that one message, and the flag is what says it was deleted.
     let was = record.tokens();
     let bounded: String = text.chars().take(record::MAX_TEXT).collect();
     match source {

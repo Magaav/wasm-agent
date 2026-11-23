@@ -20,8 +20,10 @@
 //!   index, its snippet. A quote the index has not seen keeps its id and an empty `quote`, which is
 //!   honest about a partial history instead of pretending there was nothing quoted.
 //! * `media` is metadata only (`kind`, `name`, `size`, `caption`, `mime`): no bytes, no media key.
-//! * `edited`/`deleted` are the source mutations, and a revoked message carries no text at all (the
-//!   record was redacted before this point).
+//! * `edited`/`deleted` are the source mutations, and they travel WITH the content: a revoked message
+//!   keeps its text, transcript and OCR text (the owner's decision of 23/11 - *"keep the content in case
+//!   i want to know"*), and the answer says when it was deleted and by whom. An edit carries the text
+//!   it replaced as `previous_text`.
 //!
 //! Nothing here reads message text into a log line, and nothing here makes a name up: every string is
 //! either stored on the record or a stable word.
@@ -145,9 +147,20 @@ pub fn message(record: &Record, quote: Option<&str>) -> serde_json::Value {
     }
     if record.edited {
         view["edited"] = serde_json::Value::Bool(true);
+        if !record.previous_text.is_empty() {
+            // What the message said before the edit: kept, and said to be the earlier text.
+            view["previous_text"] = serde_json::Value::String(record.previous_text.clone());
+        }
     }
     if record.deleted {
         view["deleted"] = serde_json::Value::Bool(true);
+        if record.deleted_at > 0 {
+            view["deleted_at"] = serde_json::Value::from(record.deleted_at);
+            view["deleted_at_iso"] = serde_json::Value::String(iso(record.deleted_at));
+        }
+        if !record.deleted_by.is_empty() {
+            view["deleted_by"] = serde_json::Value::String(record.deleted_by.clone());
+        }
     }
     if record.from_history() {
         view["source"] = serde_json::Value::String(crate::record::SOURCE_HISTORY.to_string());
