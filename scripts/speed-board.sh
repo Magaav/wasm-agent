@@ -62,6 +62,13 @@ for tool in lua5.4 jq; do
 done
 stats="$root_default/scripts/lib/speed-stats.lua"
 [ -f "$stats" ] || { echo "speed-board: refused(stats_missing): $stats" >&2; exit 2; }
+# THE LIBRARY READS lua/vendor/json.lua BY A RELATIVE PATH (it is a plain Lua module: no host, no tree), so
+# every call to it runs from THIS board's tree rather than from wherever the caller started the board.
+# MEASURED 23/11, in this mission's own end-to-end run: main-health started from a directory outside the
+# tree measured four rows and then wrote nothing - `speed-board: refused(history_write_failed)` - because
+# the json module could not be found from there. A board that measures and cannot write is the hole this
+# mission exists to close, so the call, not the caller, decides the directory.
+stats_lua() { ( cd "$root_default" && lua5.4 "$stats" "$@" ); }
 cores=$(nproc 2>/dev/null || echo 1)
 # The load this machine is under. WA_SPEED_LOAD overrides it: the tests need a load they can name, and a
 # machine whose loadavg cannot be read must say 0 rather than crash the board.
@@ -78,17 +85,17 @@ fi
 [ -n "$sha" ] || { echo "speed-board: refused(no_commit): no --sha, nothing installed and no HEAD in $root" >&2; exit 2; }
 
 if [ "$mode" = print ]; then
-  lua5.4 "$stats" table "$history" "$sha"
+  stats_lua table "$history" "$sha"
   exit 0
 fi
 
 if [ "$mode" = check ]; then
-  entry=$(lua5.4 "$stats" last "$history")
+  entry=$(stats_lua last "$history")
   [ -n "$entry" ] || { echo "speed-board: no history at $history yet - nothing was judged" >&2; exit 2; }
   # The newest line's verdict, then its red rows by name and by commit. Nothing is printed as green that
   # was not measured (rule 1).
-  lua5.4 "$stats" table "$history" "$entry" | sed -n '/RED/,$p'
-  if lua5.4 "$stats" table "$history" "$entry" | grep -q 'RED'; then exit 3; fi
+  stats_lua table "$history" "$entry" | sed -n '/RED/,$p'
+  if stats_lua table "$history" "$entry" | grep -q 'RED'; then exit 3; fi
   exit 0
 fi
 
@@ -214,11 +221,11 @@ jq -n --arg sha "$sha" --arg at "$(date -u +%FT%TZ)" --argjson load "$load_befor
 
 # THE MEDIAN IS THE LIBRARY'S: the entry is handed to speed-stats, which fills every row's ms from its
 # samples before anything is written.
-lua5.4 "$stats" finish "$entry_file" > "$work/finished.json" 2>/dev/null && mv "$work/finished.json" "$entry_file"
+stats_lua finish "$entry_file" > "$work/finished.json" 2>/dev/null && mv "$work/finished.json" "$entry_file"
 
-lua5.4 "$stats" append "$history" "$entry_file" > /dev/null || { echo "speed-board: refused(history_write_failed)" >&2; exit 2; }
+stats_lua append "$history" "$entry_file" > /dev/null || { echo "speed-board: refused(history_write_failed)" >&2; exit 2; }
 verdict_file="$(dirname "$history")/speed-verdict.json"
-lua5.4 "$stats" judge "$history" "$entry_file" > "$verdict_file" 2>/dev/null || verdict_file=""
+stats_lua judge "$history" "$entry_file" > "$verdict_file" 2>/dev/null || verdict_file=""
 
 # The line the orchestrator reads, and the RED rows by name. A guarded or unavailable row is printed with
 # its reason: a speed board that hid what it could not measure would be the thing this mission exists to

@@ -153,7 +153,19 @@ check(recorded.code == 0, 'a measurement with records still writes (' .. tostrin
 check((recorded.stdout or ''):find('landing=42000ms', 1, true) ~= nil, 'the landing row is landed from its own record: ' .. tostring((recorded.stdout or ''):match('landing=[^ ]*')))
 check((recorded.stdout or ''):find('release=150000ms', 1, true) ~= nil, 'the release row is cut -> published from the journal: ' .. tostring((recorded.stdout or ''):match('release=[^ ]*')))
 
--- 8. one line per commit, and a re-run of a commit replaces its own line.
+-- 8. THE BOARD STARTED FROM ANOTHER DIRECTORY STILL WRITES ITS LINE (23/11). The library it calls
+-- (scripts/lib/speed-stats.lua) reads lua/vendor/json.lua by a path relative to the CALLER's directory, and
+-- main-health does not always run from the tree: measured in this mission's end-to-end run, the board
+-- measured four rows and then wrote nothing - `speed-board: refused(history_write_failed)`. A board that
+-- measures and cannot write is the hole this mission exists to close.
+local elsewhere = sh('cd "' .. work .. '" && WA_SPEED_LOAD=2 ' .. board .. ' --measure --probes "' .. work
+  .. '/probes" --history "' .. history .. '" --sha c0009 --bin /bin/true --samples 3 2>&1')
+check(elsewhere.code == 0, 'the board writes its line when it is started from another directory ('
+  .. tostring(elsewhere.code) .. '): ' .. tostring((elsewhere.stdout or ''):match('refused[^\n]*')))
+check((elsewhere.stdout or ''):find('start=100ms', 1, true) ~= nil,
+  'and it measured the rows there: ' .. tostring((elsewhere.stdout or ''):match('start=[^ ]*')))
+
+-- 9. one line per commit, and a re-run of a commit replaces its own line.
 local before = sh('wc -l < "' .. history .. '"').stdout or ''
 measure('c0007', ' --bin /bin/true --samples 3')
 local after = sh('wc -l < "' .. history .. '"').stdout or ''
