@@ -16,10 +16,15 @@ const repo = path.resolve(__dirname, '..');
 const wa = path.resolve(process.argv[2] || process.env.WA_BIN || '/home/victor/.local/bin/wa');
 // The scratch root. os.tmpdir() on this node is the OPERATOR's own ~/.wasm-agent/tmp (docs/ONEROOT.md),
 // so a fixture that took it would write its evidence inside the real node home - exactly what a test must
-// never do. /tmp is used when it exists, and a root that still resolves inside the operator's store is
-// refused by name instead of used.
+// never do. That is why /tmp used to be preferred, and the cost was measured on 23/11: one
+// /tmp/wa-agent-control-e2e-* directory per run, EVEN WHEN THE ROW PASSED (eight of them on disk), in a
+// 16 G tmpfs that filled up three times in one day (scripts/lib/tmp-floor.sh). The runner's own roots come
+// first now - it sets WA_TEST_ROOT/GATE_ROOT/TMPDIR inside ONE work directory it deletes at the end
+// (scripts/fast.sh) - then TMPDIR, then /tmp. The guard below still refuses any root inside the operator's
+// store, whatever was named.
 const operatorHome = path.join(os.homedir(), '.wasm-agent');
-const preferred = fs.existsSync('/tmp') ? '/tmp' : os.tmpdir();
+const preferred = process.env.WA_TEST_ROOT || process.env.GATE_ROOT || process.env.TMPDIR || os.tmpdir();
+const keepScratch = process.env.WA_TEST_KEEP_SCRATCH === '1';
 const root = fs.mkdtempSync(path.join(preferred, 'wa-agent-control-e2e-'));
 if (root.startsWith(operatorHome + path.sep) || root === operatorHome) {
   throw Error('refused: the scratch root is inside the operator node home: ' + root);
@@ -183,11 +188,11 @@ async function freePort() {
     const evidence = {schema: 'wasm-agent.agent-control-proof/v1', checks, failed: 0,
       model: 'local-mock', nodes: 1, workers: workers.map(w => w.id)};
     fs.writeFileSync(path.join(root, 'verdict.json'), JSON.stringify(evidence, null, 2));
-    console.log('agent-control e2e ok (' + checks + ' checks, one local node, mock provider)\nevidence: ' + root);
+    console.log('agent-control e2e ok (' + checks + ' checks, one local node, mock provider)');
   } catch (error) {
     fs.writeFileSync(path.join(root, 'verdict.json'), JSON.stringify({schema: 'wasm-agent.agent-control-proof/v1',
       ok: false, checks, failed: 1, error: String(error)}, null, 2));
-    console.error(error.stack); console.error('evidence: ' + root); process.exitCode = 1;
+    console.error(error.stack); process.exitCode = 1;   // the finally below says where the evidence went
   } finally {
     for (const response of held.values()) response.destroy();
     if (child && child.exitCode === null) {
@@ -196,5 +201,13 @@ async function freePort() {
     }
     if (hostLog !== undefined) fs.closeSync(hostLog);
     provider?.closeAllConnections(); provider?.close();
+    // THE SCRATCH GOES ON EXIT, PASS OR FAIL (item 2 of the tests-clean-their-tmp round). A failing row's
+    // evidence is kept only where the RUNNER owns the directory - inside GATE_ROOT it copies a
+    // "kept for diagnosis" tree out before deleting its own work dir - or when the operator asked for it
+    // with WA_TEST_KEEP_SCRATCH=1. Anywhere else it is removed here: that is the difference between one
+    // directory left per run and none.
+    const insideRun = !!process.env.GATE_ROOT && root.startsWith(process.env.GATE_ROOT + path.sep);
+    if (keepScratch || (process.exitCode && insideRun)) console.error('fixture kept for diagnosis: ' + root);
+    else fs.rmSync(root, {recursive: true, force: true});
   }
 })();

@@ -27,6 +27,7 @@ import path from 'node:path';
 import http from 'node:http';
 import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
+import {tmuxSession} from './lib/tmux-session.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const BIN = process.env.WA_BIN || process.env.FAST_BIN || 'wa';
@@ -184,8 +185,7 @@ if (!HAVE_TMUX) {
   console.log('run live pty: 0 ok, 0 failed (skipped)');
   process.exit(0);
 }
-const SOCKET = 'wa-run-live-' + process.pid;
-const tmux = args => spawnSync('tmux', ['-L', SOCKET, ...args], {encoding: 'utf8'});
+const {tmux} = tmuxSession('wa-run-live');   // this process's own server, killed on every exit path
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 // The scrollbar is drawn in the LAST column of the transcript's rows. One bar means ONE contiguous run
 // of rows that end in it; a split bar is two groups with a plain row between them, which is what the

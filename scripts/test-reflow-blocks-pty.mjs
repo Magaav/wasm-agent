@@ -25,6 +25,7 @@ import path from 'node:path';
 import http from 'node:http';
 import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
+import {tmuxSession} from './lib/tmux-session.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const BIN = process.env.WA_BIN || process.env.FAST_BIN || 'wa';
@@ -134,9 +135,8 @@ if (!HAVE_TMUX) {
   process.exit(0);
 }
 
-const SOCKET = 'wa-reflow-blocks-' + process.pid;
+const {tmux} = tmuxSession('wa-reflow-blocks');   // this process's own server, killed on every exit path
 const SESSION = 'reflow';
-const tmux = args => spawnSync('tmux', ['-L', SOCKET, ...args], {encoding: 'utf8'});
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 // The scrollbar is drawn in the LAST column of every row, so a blank chat row reads as spaces and a bar.
 const SCROLLBAR = new Set(['\u2502', '\u2503']);

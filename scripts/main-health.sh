@@ -47,6 +47,22 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$out" ] || out=$missions/main-health.json
 
+# THE TEMP FLOOR, BEFORE MAIN'S TIP IS EVEN CHECKED OUT (item 4 of the tests-clean-their-tmp round, 23/11).
+#
+# This script exists to turn a suite run into a RECORDED verdict about main. On 23/11 it wrote one about a full
+# disk instead: 22808bc8 was red on ENOSPC, /tmp being a 16 G tmpfs that the rows had filled with 4,721
+# scratch entries, and a red like that is indistinguishable from a tree that does not build - the landing queue
+# then blames the mission that was waiting. So the machine is asked first, and a machine without room is a
+# refusal by name (exit 2, "nothing was judged"), never a verdict.
+. "$(dirname -- "$0")/lib/temp-floor.sh"
+if ! tmp_note=$(wa_tmp_floor_check /tmp "${TMPDIR:-}"); then
+  case "$tmp_note" in
+    tmp_unknown:*) tmp_code=tmp_unknown ;;
+    *) tmp_code=tmp_low ;;
+  esac
+  echo "main-health: refused(${tmp_code:-tmp_low}): $tmp_note. Nothing was judged." >&2
+  exit 2
+fi
 # WHAT THIS CANNOT DO WITHOUT, refused by name rather than half-done: without git there is no tip to measure,
 # without the lock this run would compete with a landing (19/11: load 105 on 16 cores, timing rows red at
 # random), and without a way to read the result file the verdict would be a guess about a log.

@@ -35,7 +35,11 @@ if (!fs.existsSync(binary) || !fs.statSync(binary).isFile()) {
 }
 
 const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(WA_|WASM_AGENT_)/i.test(key)));
-const root = fs.mkdtempSync(path.join(process.env.WA_FABRIC_BENCH_TMP || '/tmp', 'wa-fabric-test-'));
+// THE RUNNER'S OWN ROOT FIRST, then TMPDIR, then os.tmpdir() - a literal /tmp only as the last resort
+// (item 2 of the tests-clean-their-tmp round: the runner sets GATE_ROOT/TMPDIR inside ONE work directory
+// it deletes at the end, and a row that mints under /tmp writes where it cannot clean).
+const SCRATCH = process.env.WA_FABRIC_BENCH_TMP || process.env.GATE_ROOT || process.env.TMPDIR || os.tmpdir();
+const root = fs.mkdtempSync(path.join(SCRATCH, 'wa-fabric-test-'));
 const json = path.join(root, 'smoke.json');
 const run = spawnSync(process.execPath, [BENCH, '--binary', binary, '--smoke', '--json', json], {env, encoding: 'utf8', timeout: 300000});
 const output = (run.stdout || '') + (run.stderr || '');
@@ -56,14 +60,14 @@ const target = cpu.nodes && cpu.nodes.target1;
 ok(target && Number.isFinite(target.cpu_seconds) && target.cpu_seconds >= 0,
   'cpu: the target node has an attributed CPU figure (target1.cpu_seconds is a finite number)');
 ok(cpu.sockets && cpu.sockets.peak >= 1, 'relay: the connection count was sampled');
-ok(String(report.root || '').includes(path.join(process.env.WA_FABRIC_BENCH_TMP || '/tmp', 'wa-fabric-bench-')),
+ok(String(report.root || '').includes(path.join(SCRATCH, 'wa-fabric-bench-')),
   'the scratch tree lives under the scratch base, not a node home');
 ok(!fs.existsSync(report.root), 'a passing run removes its scratch tree');
 
 // The guard: a scratch base inside the node home must be refused, by name, before anything runs.
 // It runs under a SCRATCH home of its own - the one directory this must never write to is the real
 // node home, and a test that made its refusal case inside it would be the accident it is checking for.
-const realHome = fs.mkdtempSync(path.join(process.env.WA_FABRIC_BENCH_TMP || '/tmp', 'wa-fabric-test-home-'));
+const realHome = fs.mkdtempSync(path.join(SCRATCH, 'wa-fabric-test-home-'));
 const inside = path.join(realHome, 'wa-fabric-bench-should-refuse');
 fs.mkdirSync(inside, {recursive: true});
 const refused = spawnSync(process.execPath, [BENCH, '--binary', binary, '--smoke'], {

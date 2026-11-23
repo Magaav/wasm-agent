@@ -28,8 +28,16 @@ import {fileURLToPath} from 'node:url';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const BIN = process.env.WA_BIN || 'wa';
-const SCRATCH_BASE = fs.existsSync('/tmp') ? '/tmp' : os.tmpdir();
+// THE RUNNER'S OWN ROOT FIRST, never a literal /tmp (item 2 of the tests-clean-their-tmp round, 23/11:
+// measured, each FAILING run of this row left a /tmp/wa-mission-amend-resume-* directory - eight of them on
+// disk - in a 16 G tmpfs that filled up three times in one day). GATE_ROOT/WA_TEST_ROOT/TMPDIR are inside
+// the directory scripts/fast.sh makes for the run and deletes at the end.
+const SCRATCH_BASE = process.env.WA_TEST_ROOT || process.env.GATE_ROOT || process.env.TMPDIR || os.tmpdir();
 const WORK = fs.mkdtempSync(path.join(SCRATCH_BASE, 'wa-mission-amend-resume-'));
+// A FAILING ROW KEEPS ITS SCRATCH ONLY WHERE THE RUNNER WILL COLLECT IT (GATE_ROOT: fast.sh copies a
+// "kept for diagnosis" tree out before it deletes its work dir) or when the operator asked to keep it.
+const KEEP_FAILED = process.env.WA_TEST_KEEP_SCRATCH === '1' ||
+  (!!process.env.GATE_ROOT && WORK.startsWith(process.env.GATE_ROOT + path.sep));
 const HOME = path.join(WORK, 'home');
 const NODE = path.join(HOME, '.wasm-agent');
 const MISSIONS = path.join(WORK, 'missions');
@@ -371,7 +379,6 @@ try {
   console.log(`mission amend/resume (factory shape): ${passed} checks passed`);
 } catch (error) {
   console.error(`mission amend/resume: FAILED after ${passed} checks: ${error.message}`);
-  console.error(`fixture kept for diagnosis: ${WORK}`);
   for (const name of ['inflight', 'deadprovider', 'noenv']) {
     const dir = path.join(MISSIONS, name);
     console.error(`--- ${name}/amend.log\n${read(path.join(dir, 'amend.log'))}`);
@@ -382,5 +389,6 @@ try {
 } finally {
   server.close();
   killOwn();
-  if (!process.exitCode) fs.rmSync(WORK, {recursive: true, force: true});
+  if (process.exitCode && KEEP_FAILED) console.error('fixture kept for diagnosis: ' + WORK);
+  else fs.rmSync(WORK, {recursive: true, force: true});
 }

@@ -25,6 +25,7 @@ import path from 'node:path';
 import http from 'node:http';
 import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
+import {tmuxSession} from './lib/tmux-session.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const BIN = process.env.WA_BIN || process.env.FAST_BIN || 'wa';
@@ -164,9 +165,8 @@ if (!HAVE_TMUX) {
   process.exit(0);
 }
 
-const SOCKET = 'wa-fence-card-' + process.pid;
+const {tmux} = tmuxSession('wa-fence-card');   // this process's own server, killed on every exit path
 const SESSION = 'fence';
-const tmux = args => spawnSync('tmux', ['-L', SOCKET, ...args], {encoding: 'utf8'});
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 function capture() {
   return String(tmux(['capture-pane', '-p', '-t', SESSION]).stdout || '').replace(/\r/g, '');

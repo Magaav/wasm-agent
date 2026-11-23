@@ -46,6 +46,23 @@ if [ ! -d "$M" ]; then
   echo "preflight: refused(no_mission): $M is not a directory"
   exit 2
 fi
+# temp-retention: preflight mints no temp family. It asks the floor about /tmp and about TMPDIR; the trees
+# it causes are the landing own, under <config>/land, and this file never creates one.
+# THE TEMP FLOOR, ASKED BEFORE THE GATE IS PAID FOR (item 4 of the tests-clean-their-tmp round, 23/11).
+#
+# A preflight costs a full gate; a gate on a machine whose temp filesystem is full dies somewhere inside a row
+# and the answer comes back as "this branch is red" - on 23/11 that happened three times in one day (/tmp is a
+# 16 G tmpfs here, and the rows had left 4,721 entries in it). A full disk is a fact about the machine, so it
+# is refused by name here, before the lock, before the landing and before any row: exit 2, nothing judged.
+. "$(dirname -- "$0")/lib/temp-floor.sh"
+if ! tmp_note=$(wa_tmp_floor_check /tmp "${TMPDIR:-}"); then
+  case "$tmp_note" in
+    tmp_unknown:*) tmp_code=tmp_unknown ;;
+    *) tmp_code=tmp_low ;;
+  esac
+  echo "preflight: refused(${tmp_code:-tmp_low}): $tmp_note. Nothing was judged." >&2
+  exit 2
+fi
 BRANCH=${WA_PREFLIGHT_BRANCH:-change/$NAME}
 WA=${WA_BIN:-wa}
 PY=${WA_PYTHON:-python3}

@@ -2553,6 +2553,14 @@ gate_run node scripts/test-naming-check.cjs
 # are printed on every run and are not fatal (`scripts/check-temp-retention.mjs` names each one).
 node scripts/check-temp-retention.mjs
 gate_run node scripts/test-temp-retention-check.cjs
+# AND A ROW MAY NOT LEAVE ITS SCRATCH IN THE OS TEMP DIRECTORY (tests-clean-their-tmp, 23/11: /tmp is a 16 G
+# tmpfs here, it ran out three times in one day, and each time a verdict was lost - a row red on ENOSPC, a
+# health run red on a full disk). Static half: no scripts/test-* file roots a temp family at the literal
+# /tmp without asking the runner environment first. Dynamic half: two rows this change fixed are RUN with a
+# TMPDIR of their own and must leave it empty. Third half: main-health, preflight and the fast path refuse
+# a machine with no room BY NAME (tmp_low), before they start, so a full disk can never be recorded as a
+# product red. It refuses (exit 2) rather than passing when there is no binary to run the rows with.
+WA_BIN="$BIN" gate_run node scripts/test-tmp-cleanliness.mjs
 # The reclaim pass's safety rule, on fixtures where the answer is known: an ended session's worktree is
 # the only tree whose rust/target may be pruned, and a live session's, the canonical checkout's and a
 # lane's are kept with the reason printed. Also the refusal that matters - a tree with no session row is
