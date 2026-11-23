@@ -111,12 +111,14 @@ local function component_log(config)
   return table.concat({
     "[    0.00s] clock: 1795447000000 ms since epoch",
     string.format("[    0.01s] transcription: language %s, posting %s (allow [%s]), alerts %s, stream_edits %s"
-      .. " (min 15 s, edit every 5 s), held chats 0 (configured 0)", language, mode,
+      .. " (min 15 s, edit every 5 s), blocked chats 0 (operator configuration; no mutation can block a chat)",
+      language, mode,
       table.concat(allow, ", "), config.alerts == true and "on" or "off",
       config.stream_edits == true and "true" or "false"),
     "[    0.01s] wa-whatsapp: starting (pairing by QR)",
     string.format("[    0.02s] health: v=1 transcripts ok=0 last=- chars=0 failed=0 last_failure=- reason=-"
-      .. " posting=%s posted=%d last_post=- index written=0 last=-", mode, runtime.posted),
+      .. " posting=%s posted=%d last_post=- index written=0 last=- notices matched=0 unmatched=0"
+      .. " last_notice=- last_unmatched=-", mode, runtime.posted),
     "[    0.02s] wa-whatsapp: starting the protocol task",
   }, "\n") .. "\n"
 end

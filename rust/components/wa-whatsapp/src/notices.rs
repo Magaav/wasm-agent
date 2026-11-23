@@ -115,7 +115,17 @@ pub struct Ledger {
     pub last_ms: i64,
     /// The last notice that named no message this store holds (Unix ms, 0 = never).
     pub last_unmatched_ms: i64,
+    /// The day (`at_ms` / 86_400_000) the two fields below belong to, and how many unmatched notices it
+    /// has seen: what makes "M above the bound in a DAY" a fact instead of a guess.
+    pub day: i64,
+    pub unmatched_today: u64,
 }
+
+/// Unmatched deletion notices this node may see in one day before it says so ONCE. Stated, not derived:
+/// the measurement behind it is the account's own busiest day, 23/11, with 7 deletion notices in a day
+/// and several of them unmatched - a bound above that would never warn, and one below it would warn on
+/// normal traffic.
+pub const UNMATCHED_PER_DAY: u64 = 5;
 
 impl Ledger {
     pub fn new() -> Self {
@@ -134,6 +144,18 @@ impl Ledger {
         self.unmatched = self.unmatched.saturating_add(1);
         self.last_ms = at_ms;
         self.last_unmatched_ms = at_ms;
+        let day = at_ms.div_euclid(86_400_000);
+        if day != self.day {
+            self.day = day;
+            self.unmatched_today = 0;
+        }
+        self.unmatched_today = self.unmatched_today.saturating_add(1);
+    }
+
+    /// Has this day just passed the bound? True exactly once per day and per crossing, so the caller can
+    /// say it in ONE line (`features never break silently`, and a stream would be worse than silence).
+    pub fn crossed_unmatched_bound(&self) -> bool {
+        self.unmatched_today == UNMATCHED_PER_DAY + 1
     }
 
     pub fn to_json(&self) -> String {
@@ -178,11 +200,31 @@ mod tests {
         let mut ledger = Ledger::new();
         ledger.matched(1_000);
         ledger.unmatched(2_000);
-        assert_eq!(ledger, Ledger { matched: 1, unmatched: 1, last_ms: 2_000, last_unmatched_ms: 2_000 });
+        assert_eq!(ledger, Ledger { matched: 1, unmatched: 1, last_ms: 2_000, last_unmatched_ms: 2_000, day: 0, unmatched_today: 1 });
         // An unmatched notice does not move the "last matched" number: the two are different facts.
         ledger.matched(3_000);
         assert_eq!((ledger.unmatched, ledger.last_unmatched_ms), (1, 2_000));
         assert_eq!((ledger.matched, ledger.last_ms), (2, 3_000));
+    }
+
+    #[test]
+    fn the_daily_bound_on_unmatched_notices_is_crossed_once_and_resets_with_the_day() {
+        let mut ledger = Ledger::new();
+        let day = 20_000 * 86_400_000;
+        for i in 0..UNMATCHED_PER_DAY {
+            ledger.unmatched(day + i as i64);
+            assert!(!ledger.crossed_unmatched_bound(), "under the bound, nothing is said");
+        }
+        ledger.unmatched(day + 100);
+        assert!(ledger.crossed_unmatched_bound(), "the notice past the bound is the one that says it");
+        ledger.unmatched(day + 200);
+        assert!(!ledger.crossed_unmatched_bound(), "and it is said once, not once per notice");
+        assert_eq!(ledger.unmatched_today, UNMATCHED_PER_DAY + 2);
+        // A new day starts the count again: a defect that repeats tomorrow is a new defect.
+        ledger.unmatched(day + 86_400_000);
+        assert_eq!(ledger.unmatched_today, 1);
+        assert!(!ledger.crossed_unmatched_bound());
+        assert_eq!(ledger.unmatched, UNMATCHED_PER_DAY + 3, "the lifetime counter never resets");
     }
 
     #[test]

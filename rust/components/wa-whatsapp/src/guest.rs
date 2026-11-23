@@ -575,8 +575,22 @@ async fn apply_notice(notice: Notice) {
         Ok(index::NoticeOutcome::Unmatched) => {
             // A deletion notice this node cannot attach to a message is a DEFECT it must not hide: it is
             // counted, named in the log by mark, and the tombstone flags the message if it ever arrives.
-            LEDGER.with(|l| l.borrow_mut().unmatched(at));
+            let crossed = LEDGER.with(|l| {
+                let mut ledger = l.borrow_mut();
+                ledger.unmatched(at);
+                ledger.crossed_unmatched_bound()
+            });
             health::notice_unmatched(at);
+            if crossed {
+                // ONCE per day, not a stream: a deletion notice this node could not attach to a message is a
+                // defect (`features never break silently`), and the counter that stays visible is on the
+                // health line. Never a block, and never a chat hold (23/11).
+                say!(
+                    "notices: unmatched above bound count={} bound={}",
+                    LEDGER.with(|l| l.borrow().unmatched_today),
+                    crate::notices::UNMATCHED_PER_DAY
+                );
+            }
             say!("notice unmatched {} kind={} target={}", privacy::chat(&chat), notice.kind, privacy::id(&target));
             true
         }

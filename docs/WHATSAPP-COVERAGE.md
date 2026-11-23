@@ -145,7 +145,17 @@ These are proved SOURCE possibilities, not an attribution of the existing36 hold
 No historical event buffer was replayed or history resync forced. No initial-history
 bulk compute/post, gap/unknown reset, expiry or general AI sends were added.
 
-## Historical holds remain unresolved; aggregate status is not a new gate
+## Historical holds: GONE as a rule (owner's decision, 23/11)
+
+This section is history: everything below describes the Go bridge's journal, which is
+NOT this component's state. On 23/11 the owner removed chat holds entirely ("we never
+should get hold from a chat"): the component flags the deleted MESSAGE and keeps its
+content, skips that one not-yet-posted reply, and the first start of the new build lifts
+every hold the previous one left in one counted line. `reprove-holds`, `release-hold`
+and `requeue-held-audio` are removed with the rule they served, and the journal at
+`~/.local/state/wa-whatsapp/journal.db` is stale (`max(sent)` = 2026-11-11T18:42:17Z on
+this account) - a tool that still opens it reports `state_moved`
+(`docs/WHATSAPP-TRANSCRIPTION.md`). The counts quoted above are the old journal's.
 
 No code clears/reclassifies an existing hold or reopens blocked_source audio on its
 own. Since 2026-10-27 the offline, operator-run `requeue-held-audio` (dry run by
