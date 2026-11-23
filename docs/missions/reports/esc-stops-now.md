@@ -221,3 +221,96 @@ Narrowed re-run of the rows this follow-up touches, on this tree (`debug` binary
 the follow-up commit): `test-esc-stops-pty.mjs` **18 ok / 0 failed**, `test-hotreload.lua` **217 checks ok**,
 `test-tmp-cleanliness.mjs` 9 checks with the diff-card failure above, `test-cli-view.lua` **566 checks ok**,
 `test-cancel-not-retry.lua` **15 checks, 0 failed**.
+
+## 9. The 1041 ms, answered: the settle wait was in the path, and the stop no longer waits for it
+
+Fable asked for twenty measured cancels of a local shell at load 10+, the distribution, and whether
+`rust/wa-capabilities/src/operations.rs`'s 1000 ms settle wait is in the stop path. It was, it cost 4-33 ms, and it is gone.
+
+**The instrument** (this branch's follow-up commit): `cancel_trace` in `operations.rs` writes one line -
+`part=foreground settled/issued/waited/cap_hit/cleanup` - to the CLI's own log when `WASM_AGENT_CANCEL_TRACE=1`.
+It costs nothing otherwise, and the pty row passes the knob through to the CLI.
+
+**The measurement, 20 runs before the change, load 26.5-28.8** (the bash scenario: Esc during
+`sleep 30`): Esc-to-prompt **341-537 ms** (median 410), the run's own shell gone **10-58 ms** after the
+prompt, and in every one of the twenty the trace read
+
+    part=foreground settled=1 issued_ms=0 settle_ms=6 looks=1 cap_hit=0
+
+i.e. the 1000 ms cap was **never** reached: `manager().cancel` raises the flag, the operation's own thread
+SIGKILLs the process group, and the FIRST 50 ms look inside the old loop already found it settled
+(4-33 ms). So the cap was not main-health's 1041 ms - and the answer to "is the 1000 ms wait in the stop
+path" is YES, at 4-33 ms of the reader's time.
+
+**The change**: the stop no longer waits at all. `foreground` cancels the operation, returns at once, and
+says so in the receipt (`cleanup: "supervised"`, `state: "cancelled"`, plus a `cleanup_note`); the supervisor
+finishes the kill behind the run. A caller that needs the settle reads the operation (status/wait)
+instead of holding the run for it; `lua/core/tools.lua` already does that on its own path, and treats
+`cleanup == "unknown"` - not "supervised" - as the failure signal.
+
+**The measurement, 20 runs after the change, load 26.8-32.4**: Esc-to-prompt **287-403 ms** (median 327),
+shell gone **9-42 ms** after the prompt, and in all twenty:
+
+    part=foreground settled=0 issued_ms=0 waited=0 cap_hit=0 cleanup=supervised
+
+**And 10 runs on the quiet queue** Fable's amendment asked for (load 6.3-7.3, the lowest this node reached
+all session): Esc-to-prompt **209-237 ms** (median 232), shell gone **4-9 ms** after the prompt, same
+`waited=0` line in all ten. That is the number Victor asked for, and it is inside the 300 ms idle budget
+without needing the load allowance at all.
+
+**The test that fails if the prompt waits on the settle**:
+`operations::await_returns_at_its_own_wait::a_cancelled_shell_returns_before_its_settle_finishes`
+(`rust/wa-capabilities/src/operations.rs`). It flips the production cancel probe, calls the real `foreground`
+with a `sleep 5` shell, and asserts: the receipt says `cleanup: "supervised"` (the code before this change
+answered "settled", so it fails there), the call comes back in under 600 ms for a shell it only had to
+cancel, and the operation really does settle BEHIND the call within a few seconds - the kill is not lost
+by returning early.
+
+### The regression this found, and the fix that belongs with it
+
+Running the crate's own suite (`cargo test -p wa-capabilities --lib`, 394 tests) showed that e311b1ed had
+broken `host::tls_anchor_tests::a_provider_call_refuses_a_private_ca_that_no_bundle_names` on main: the
+private-CA refusal arrived as `Timeout(Connect)` after the whole connect budget. Cause, traced with a
+temporary write/read trace and confirmed by bisecting `agent_for_stream` back to its base shape (which made
+the test pass again): `register_active_socket` stored a CLONE of the socket in the process-wide slot and
+nothing ever took it back when the request ended, so the refused connection stayed OPEN. The TLS fixture
+serves one connection at a time, so the second agent in that test never got a handshake - and in
+production the same retention meant a connection (an fd) held past the end of every call that did not run
+through `host.http` / `http_stream` (which do clear the slot).
+
+The fix: each registration gets an id (`subagents::NEXT_SOCKET_ID`), the transport owns its id, and
+`impl Drop for ShutdownTcpTransport` takes exactly its own socket back (`unregister_active_socket`). The clone
+and the transport that owns it now live and die together. `cargo test -p wa-capabilities --lib`: **394
+passed, 0 failed** (the TLS anchor test included).
+
+### Narrowed rows re-run on this tree (nothing else)
+
+| row | result |
+|---|---|
+| `cargo test -p wa-capabilities --lib` | 394 passed, 0 failed |
+| `scripts/test-esc-stops-pty.mjs` | 18 ok, 0 failed (load 27: 214/178/297/234/343 ms) |
+| `scripts/test-hotreload.lua` | 217 checks ok |
+| `scripts/test-cancel-not-retry.lua` | 15 checks, 0 failed |
+| `scripts/test-cli-view.lua` | 566 checks ok |
+| `scripts/test-tmp-cleanliness.mjs` | 9 checks, 1 failed - `scripts/test-diff-card-pty.mjs` still starts its tmux server without the helper (change/diff-card, not this branch) |
+
+
+### Rebased onto origin/main 4ba1c3d9 (23/11, after the approval)
+
+`change/esc-socket-per-thread` (beae64c6) had made the foreground socket slot PER THREAD and this branch had made each registration an id its transport releases on drop; the rebase kept BOTH, which is the only shape that holds: the slot is still the calling thread own (so one call finishing cannot unregister run socket), and every entry in it carries the id a `ShutdownTcpTransport` gives back when it drops (`unregister_active_socket(id)` looks in the task slot, this thread slot and every registered slot, so an agent dropped on another thread still releases exactly its own fd). `clear_active_socket` keeps main per-thread behaviour unchanged. No other behaviour was touched by the rebase: the stop still does not wait for the settle, the budget is still per unit of load, and the approval content is the same.
+
+
+### Rebased again onto main 28fb526d (23/11, the preflight's merge conflict)
+
+The branch is rebased onto 28fb526d; the only conflict was the same subagents.rs region as the first
+rebase (main's per-thread foreground slot against this branch's per-registration id), and it was
+resolved the same way - both kept. Rows re-run on THIS tree: cargo test -p wa-capabilities --lib 406
+passed / 0 failed; subagents:: - the three socket tests, including main's two per-thread ones - 27
+passed; scripts/test-cancel-not-retry.lua 15 checks 0 failed; scripts/test-esc-stops-pty.mjs 18 ok 0
+failed (remote 189 ms, subagent 257 ms at load 10). No assertion was deleted, no row dropped, no
+timeout raised.
+
+**Pending, said plainly**: a reproduction of the 1041 ms. Neither a fork storm nor load 32 produced it;
+the trace line above is the first thing to read if it comes back, and `WASM_AGENT_CANCEL_TRACE=1` is how to
+turn it on. Fable's amendment (stop the load loops, rerun on an idle queue, 10 runs) is what produced the
+quiet-queue block above; the busy loops were killed by pid before that run.

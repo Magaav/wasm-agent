@@ -1109,6 +1109,17 @@ fn progress_tick(state: &Value, tool: &str) {
     crate::tool_progress::tick(id, tool, crate::tool_progress::now_epoch() - elapsed, stdout, stderr, owner);
 }
 
+/// One line about a CANCELLED foreground call, on the CLI's own stderr when WASM_AGENT_CANCEL_TRACE=1.
+///
+/// The stop path had no number anywhere: main-health saw a local shell take 1041 ms to give the prompt
+/// back (23/11, load ~10) and nothing in the ledger or the operation record could say which of its parts
+/// that was. This is the one line that can, and it costs nothing unless asked for.
+fn cancel_trace(text: &str) {
+    if std::env::var("WASM_AGENT_CANCEL_TRACE").ok().as_deref() == Some("1") {
+        eprintln!("[operation] cancel: {text}");
+    }
+}
+
 pub fn foreground(
     program: &str,
     flag: &str,
@@ -1188,24 +1199,26 @@ pub fn foreground(
                 json!({"operation_id":id,"ok":false,"code":-1,"error":"operation_supervisor_overdue","cleanup":"unknown","output_complete":false}),
             );
         }
-        // A cancelled run or child cancels its operation too, and stays attached
-        // until the operation actually settles: returning while it still runs would
-        // let the effect outlive the execution that owns it.
+        // A cancelled run or child cancels its operation too - AND DOES NOT WAIT FOR IT TO SETTLE.
+        //
+        // Measured 23/11 at load ~27, twenty runs of the cancelled-shell stop (the pty row's bash
+        // scenario): the settle lands in 4-33 ms and the 1000 ms cap this loop used to carry was never
+        // reached - so that cap was never the 1041 ms main-health saw. It was still the reader's time
+        // spent on bookkeeping, and a stop that waits even 4 ms watching a receipt waits for something the
+        // supervisor already owns: manager().cancel raises the flag, the operation's own thread sees it,
+        // SIGKILLs the process group and closes its pipes behind this call. The receipt says so
+        // ("cleanup": "supervised") instead of claiming a settle it did not watch, and a caller that does
+        // need the settle reads the operation (status/wait) rather than holding the run for it.
         if crate::host::run_cancel_requested() {
+            let cancel_started = std::time::Instant::now();
             crate::tool_progress::finish(&id);
             let _ = manager().cancel(&id);
-            let cleanup = std::time::Instant::now() + Duration::from_millis(1000);
-            while std::time::Instant::now() < cleanup {
-                let stopped = manager()
-                    .wait(&id, Duration::from_millis(50))
-                    .map_err(|e| e.to_string())?;
-                if stopped["settled"] == true {
-                    return Ok(json!({"operation_id":id,"ok":false,"error":"run_cancelled",
-                        "state":stopped["state"],"cleanup":"settled","output_complete":stopped["output_complete"]}));
-                }
-            }
+            cancel_trace(&format!(
+                "part=foreground settled=0 issued_ms={} waited=0 cap_hit=0 cleanup=supervised",
+                cancel_started.elapsed().as_millis()));
             return Ok(json!({"operation_id":id,"ok":false,"error":"run_cancelled",
-                "cleanup":"unknown","output_complete":false}));
+                "state":"cancelled","cleanup":"supervised","output_complete":false,
+                "cleanup_note":"the shell is cancelled and its supervisor finishes the kill; this run did not wait for it"}));
         }
         // This is the waiting interpreter observing the supervisor, not a helper beating forever.
         crate::serve::beat();
@@ -3156,6 +3169,47 @@ mod await_returns_at_its_own_wait {
         let out = settled["stdout"].as_str().unwrap_or("");
         assert_eq!(out.matches("waited").count(), 1,
             "the command ran exactly once, stdout was {out:?}");
+    }
+
+    /// A STOP DOES NOT WAIT FOR THE SETTLE (change/esc-stops-now, follow-up 23/11).
+    ///
+    /// The cancelled-shell stop used to stay attached until the operation settled - a loop with a
+    /// 1000 ms cap. Measured at load ~27 (twenty runs): the settle lands in 4-33 ms and the cap was never
+    /// reached, so the cap was never main-health's 1041 ms; the wait is still the reader's time spent on
+    /// bookkeeping that the supervisor already owns. What is pinned here:
+    ///   * the receipt says the supervisor finishes the kill (cleanup: "supervised") and no longer claims
+    ///     a settle it did not watch;
+    ///   * the call for a sleep-5 shell comes back at once, not after the shell it only had to cancel;
+    ///   * the operation really does settle BEHIND the call - the kill is not lost by returning early.
+    /// A stop that waited would answer cleanup: "settled" and would have spent the wait on the prompt.
+    #[test]
+    fn a_cancelled_shell_returns_before_its_settle_finishes() {
+        use std::sync::{Arc, atomic::AtomicBool};
+        let _home = scratch_home_or_refuse();
+        let shell = shell_config();
+        // The production probe, and the same relay context the serve layer installs - flipped to
+        // cancelled before the shell starts, which is exactly the state Esc leaves behind.
+        crate::host::set_run_cancel_probe(crate::serve::run_cancel_requested);
+        let flag = Arc::new(AtomicBool::new(true));
+        crate::serve::install_relay_context(Some(flag), None, "relay:cancel-settle-test".into());
+        let started = std::time::Instant::now();
+        let receipt = super::foreground(&shell.0, &shell.1, "sleep 5", "", 30, &serde_json::json!({}))
+            .expect("a cancelled shell is a receipt, not an error");
+        let elapsed = started.elapsed();
+        assert_eq!(receipt["error"], serde_json::json!("run_cancelled"), "receipt: {receipt}");
+        assert_eq!(receipt["cleanup"], serde_json::json!("supervised"),
+            "a stop must not claim a settle it did not watch: {receipt}");
+        assert!(elapsed < std::time::Duration::from_millis(600),
+            "the stop waited {elapsed:?} for a shell it only had to cancel");
+        // ...and the supervisor finishes it behind the call.
+        let id = receipt["operation_id"].as_str().expect("operation id").to_string();
+        let mut settled = false;
+        for _ in 0..60 {
+            let state = super::manager().wait(&id, std::time::Duration::from_millis(50))
+                .expect("operation state");
+            if state["settled"] == serde_json::json!(true) { settled = true; break; }
+        }
+        assert!(settled, "the cancelled shell never settled behind the call");
     }
 }
 
