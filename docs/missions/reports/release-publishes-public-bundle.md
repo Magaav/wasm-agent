@@ -191,6 +191,40 @@ its single path, and the live index naming the release), which is why they fail 
 23. `published v0.1.1 (2 target(s)) and releases/index-linux.json on origin/main = <sha12>: the released bytes say v0.1.1, and main's next cut is v0.1.2 (one patch past the release it follows); read back, fresh: ...`
 24. `main's number is <N> and v<N> does not exist yet` (the version row, ready) and the reader's documented fallback `a binary older than the field falls back to the tree's one constant`
 25. the bump commit's message: `releases: v0.1.1, the public Linux channel for <sha12> (main's next cut is v0.1.2)`
+26. `version_already_released: the public channel for <sha12> was not published: its version is released elsewhere` with `<tag> already exists in this clone|on <origin> and names <sha12>, not <sha12>` - and, for a fresh run, `<tag> already exists ...` under `main's lua/core/build_identity.lua says <N> and ...`
+### D. A resume was stuck on its own tag - fixed (round 3)
+
+`impl.linux` refused `version_already_released` as soon as `v<N>` existed, BEFORE the "already present" probe. But
+the tag is made by the publisher (`gh release create`) and the index commit is pushed afterwards, so a failure in
+between (a refused push, a read-back, the freshness check) made `--resume` answer `version_already_released` for
+ever - for a tag that very run had created. The same refusal also fired on a resume of a run that had finished.
+
+- `M.version_tag_owner(tree, tag, commit)`: a tag that is ABSENT, or that names THIS release commit (locally or on
+  the remote), is ours; only a tag naming ANOTHER commit is a collision. The step uses it instead of "any tag"; the
+  publisher re-uploads with `--clobber` into a release of ours, which is what makes a resume idempotent.
+- `M.release_checks.version(options, journal)` keeps refusing on ANY existing tag for a FRESH run (no
+  `journal.tree_commit` yet) and applies the same "ours" rule on a resume - the row now gets the journal.
+- A resume of a FINISHED run answers `already_present` (the probe runs and finds the index on main), never a
+  refusal.
+- The stale comments are gone ("from the tree's VERSION file ... `M.next_version` ... `v0.1.0` for the first cut",
+  "a first cut of a tree whose VERSION already says 0.1.0"): the step's header now says the current rule.
+
+**The test, and that it fails on the round-2 commit** (`scripts/test-land-linux.lua`, 101 checks):
+
+- the fixture publisher now creates the tag too (`git tag -f <tag> <commit>`, which is what `gh release create
+  --target` does), so a resume meets the state the field meets;
+- a push that fails ONCE: the step stops as `linux_index_push_failed`, main did not move, and the tag exists at the
+  release commit - then the RESUME completes, with exactly one tag, exactly one index commit (its two allow-listed
+  paths, nothing else) and the entry written once per target (no duplicate from the second publish);
+- a finished run resumed says `already_present`, and main does not move again;
+- the preflight: the same tag is refused for a fresh run and accepted when the journal names that commit, and a tag
+  naming another commit is refused in both cases.
+
+Run against `64e2dcb6` with only `lua/core/land.lua` reverted (the harness and the row kept), the row FAILS at
+`the same tag is not a refusal when the journal says this run is releasing that commit (got false, want true)` -
+so the test does catch the defect.
+
+
 ## 6. What was NOT verified (and what would verify it)
 
 - **No real cut was run** (the mission forbids it), so the real path - two musl bundles built by

@@ -338,6 +338,9 @@ tag=${tag:-wa-linux-$short}
   done
 } > "$out/SHA256SUMS" || { echo 'linux-channel: checksums_failed' >&2; exit 1; }
 echo "linux-channel: checksums $out/SHA256SUMS"
+# `gh release create <tag> --target <commit>` makes the TAG as well as the release, so the fixture does the same:
+# a resume then meets a tag this very run created, which is the round-3 defect (a push that failed after it).
+git -C "$tree" tag -f "$tag" "$commit" >/dev/null 2>&1 || true
 echo "linux-channel: tag $tag"
 echo "linux-channel: index $index"
 exit 0

@@ -1028,7 +1028,7 @@ end
 -- it is a precondition and not a failure at the end of the channel step (which runs after the node release is
 -- out). The same row holds an explicit bump to Victor's quoted instruction, because a minor is decided one
 -- release AHEAD now: the bump this release writes is the next cut's number.
-function M.release_checks.version(options)
+function M.release_checks.version(options, journal)
   local repo = M.repo()
   if not repo then return { ready = true, why = "no checkout to ask (collect refuses that by name)" } end
   local shown = M.exec("git -C " .. quote(slashes(repo)) .. " show " .. quote("origin/main:" .. M.VERSION_FILE), "", 120) or {}
@@ -1046,10 +1046,14 @@ function M.release_checks.version(options)
   end
   local release = M.format_product_version(current)
   local tag = M.version_tag(release)
-  local where = rev(repo, tag) and "in this clone" or (remote_tip(repo, M.origin(), "refs/tags/" .. tag) and ("on " .. M.origin()))
-  if where then
+  -- A resume carries the commit it is releasing, so a tag that names THAT commit is this run's own work (the
+  -- publisher created it before the index commit was pushed) and the cut goes on. A fresh run has no commit yet
+  -- and any existing tag means the number is taken.
+  local resuming = type(journal) == "table" and tostring(journal.tree_commit or "")
+  local ours, why_tag = M.version_tag_owner(repo, tag, resuming ~= "" and resuming or nil)
+  if not ours then
     return { ready = false, error = "version_already_released",
-      why = "main's " .. M.VERSION_FILE .. " says " .. release .. " and " .. tag .. " already exists " .. where ..
+      why = "main's " .. M.VERSION_FILE .. " says " .. release .. " and " .. tostring(why_tag) ..
         ": the previous release's bump commit is missing, so this cut would ship bytes whose tag is taken",
       next = "publish the bump commit (a release writes the NEXT number into M.PRODUCT_VERSION), or set that line to the next number, then cut again" }
   end
@@ -1132,7 +1136,7 @@ function M.release_preflight(options, journal)
     if step and (step.state == "done" or step.state == "skipped") then
       row = { ready = true, why = "step " .. M.RELEASE_CHECK_STEP[name] .. " is already " .. step.state .. " in this run" }
     else
-      local called, answer = pcall(M.release_checks[name], options)
+      local called, answer = pcall(M.release_checks[name], options, journal)
       row = (called and type(answer) == "table") and answer
         or { ready = false, error = "release_" .. name .. "_not_ready", why = "the check itself failed: " .. tostring(answer),
              next = "wa release cut --dry-run" }
@@ -3696,6 +3700,24 @@ function M.bump_version(current, options)
   return { major = current.major, minor = current.minor, patch = current.patch + 1 }, "one patch past the release it follows"
 end
 
+-- <tree> <tag> <commit> -> true when the tag is absent or names THIS commit, false + why when it names ANOTHER one.
+--
+-- The distinction is the difference between a resume and a collision (Fable, round 3): `scripts/publish-linux-channel.sh`
+-- creates the release tag with `gh release create`, and the index commit is pushed LATER - so between those two a
+-- tag exists that this very run made, and refusing it would make `--resume` impossible for ever. A tag that names
+-- another commit is a release somebody else published under this number, and that is refused.
+function M.version_tag_owner(tree, tag, commit)
+  local local_commit = rev(tree, tag)
+  local remote_commit = remote_tip(tree, M.origin(), "refs/tags/" .. tag)
+  local holder = local_commit or remote_commit
+  if not holder then return true, nil end
+  local mine = tostring(commit or "")
+  if mine ~= "" and (local_commit == mine or remote_commit == mine) then return true, nil end
+  local where = (local_commit == holder) and "in this clone" or ("on " .. M.origin())
+  return false, tag .. " already exists " .. where .. " and names " .. tostring(holder):sub(1, 12) .. ", not " ..
+    (mine ~= "" and mine:sub(1, 12) or "this commit")
+end
+
 -- <tree> <kind> <version> -> true, or false + why. A minor or major bump is Victor's decision, and the ONLY
 -- evidence this accepts is his instruction QUOTED in the release notes file, naming the bump and the version it
 -- produces. A flag alone is never enough.
@@ -3775,9 +3797,9 @@ impl.linux = function(run, options)
       next = "wa release cut --run " .. tostring(run.id) .. " --resume" }
   end
   local short = tostring(sha):sub(1, 12)
-  -- THE VERSION IS DECIDED HERE, by the release, from the tree's `VERSION` file and the tags that exist
-  -- (`M.next_version`): `v0.1.0` for the first cut, one patch more for each after it. A minor or major bump is
-  -- refused unless Victor's quoted instruction is in the notes file.
+  -- THE VERSION IS THE TREE'S OWN NUMBER (`M.tree_version`): main's constant always names the release this tree
+  -- will be cut as, so the bytes built here print the number they are released as. A minor or major bump is
+  -- refused unless Victor's quoted instruction is in the notes file, and it changes the BUMP, not this release.
   local current, why_version = M.tree_version(tree)
   if not current then
     return false, { error = "linux_version_unreadable",
@@ -3794,10 +3816,15 @@ impl.linux = function(run, options)
   -- THE SAME TWO FACTS AS THE PREFLIGHT (`M.release_checks.version`), checked AGAIN here: the preflight is the
   -- first second and this is the last, and a version that is already released or an unquoted minor bump must be
   -- refused at BOTH ends - a caller that reaches this step without the preflight gets the same answer.
-  if rev(tree, tag) or remote_tip(tree, M.origin(), "refs/tags/" .. tag) then
+  -- A TAG THAT POINTS AT THIS RELEASE IS OURS (Fable, round 3). The publisher creates it (`gh release create`), and
+  -- the index commit is pushed afterwards: a failure in between would otherwise answer `version_already_released`
+  -- for ever, for a tag this very run made. So only a tag pointing at ANOTHER commit refuses - the publisher
+  -- re-uploads with `--clobber` into a release of ours, which is what makes a resume idempotent.
+  local ours_tag, why_ours = M.version_tag_owner(tree, tag, sha)
+  if not ours_tag then
     return false, { error = "version_already_released",
-      detail = "the public channel for " .. short .. " was not published: its version is already released",
-      observed = version_text .. " already has the tag " .. tag,
+      detail = "the public channel for " .. short .. " was not published: its version is released elsewhere",
+      observed = tostring(why_ours),
       next = "main's M.PRODUCT_VERSION must name the NEXT release: publish the bump commit (a release writes it), then cut again" }
   end
   if options.major or options.minor then
@@ -3923,9 +3950,9 @@ impl.linux = function(run, options)
     end
   end
   local index = slashes(index_tree) .. "/" .. M.LINUX_INDEX
-  -- THE VERSION IS WRITTEN IN THE SAME COMMIT as the entry it names: one commit, one release, so the number a
-  -- person reads and the bytes a machine installs never disagree. Idempotent: a first cut of a tree whose
-  -- VERSION already says 0.1.0 writes the same bytes and stages nothing for it.
+  -- THE BUMP IS WRITTEN IN THE SAME COMMIT as the entry it follows: one commit, one release, so the number a
+  -- person reads and the bytes a machine installs never disagree. It writes `next` (the following release), never
+  -- the number this release is published as.
   local version_path = slashes(index_tree) .. "/" .. M.VERSION_FILE
   local version_source = read(version_path)
   if not version_source then

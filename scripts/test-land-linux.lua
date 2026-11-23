@@ -69,6 +69,14 @@ must("git -C " .. repo .. " push -q origin HEAD:refs/tags/v0.1.0", "the same tag
 eq(land.release_checks.version({}).error, "version_already_released", "a tag on the remote counts as released too")
 must("git -C " .. repo .. " push -q origin :refs/tags/v0.1.0", "clean the remote tag")
 eq(land.release_checks.version({}).ready, true, "and with neither tag the number is releasable again")
+-- A RESUME carries the commit it is releasing: a tag naming THAT commit is this run's own (Fable, round 3).
+must("git -C " .. repo .. " tag -f v0.1.0 HEAD", "a tag this run made")
+eq(land.release_checks.version({}, { tree_commit = must("git -C " .. repo .. " rev-parse HEAD") }).ready, true,
+  "the same tag is not a refusal when the journal says this run is releasing that commit")
+-- the fixture's HEAD is its own root commit, so ANOTHER commit is taken from a branch tip
+eq(land.release_checks.version({}, { tree_commit = must("git -C " .. repo .. " rev-parse change/one") }).ready, false,
+  "but a tag naming ANOTHER commit still is")
+must("git -C " .. repo .. " tag -d v0.1.0", "clear it again")
 -- an unquoted minor bump is refused in the preflight as well as in the step
 local minor_row = land.release_checks.version({ minor = true })
 eq(minor_row.ready, false, "--minor without the quote is not ready")
@@ -215,6 +223,55 @@ eq(allowed_passed, true, "with the quoted instruction the minor bump is allowed 
 eq((allowed.journal.linux or {}).version, "0.1.0", "the release published is still the tree's own number")
 eq((allowed.journal.linux or {}).tag, "v0.1.0", "under the tag v0.1.0")
 eq((allowed.journal.linux or {}).next_version, "0.2.0", "and the bump it writes is the minor step: the next cut is 0.2.0")
+
+-- -------- D (Fable, round 3): a RESUME of a release whose index push failed must not answer
+-- `version_already_released` for ever. The publisher creates the tag (`gh release create`) and the index commit is
+-- pushed afterwards, so between those two the tag exists and belongs to this very run.
+fresh_fixture()
+local resume_sha = head()
+local resume_before = origin_main()
+local run_k = channel_run("linuxK")
+-- the push fails once, as a refused push does in the field
+local saved_exec = land.exec
+local refused_once = false
+land.exec = function(command, cwd, timeout)
+  if not refused_once and command:find("linux%-channel/index%-tree", 1) and command:find(" push ", 1, true) then
+    refused_once = true
+    return { code = 1, stdout = "", stderr = "fatal: the remote end hung up unexpectedly\n" }
+  end
+  return saved_exec(command, cwd, timeout)
+end
+local first_ok, first_result = land.impl.linux(run_k, { signer = "local" })
+land.exec = saved_exec
+eq(first_ok, false, "a refused push stops the step")
+eq((first_result or {}).error, "linux_index_push_failed", "named linux_index_push_failed")
+eq(origin_main(), resume_before, "and the index commit never reached main")
+-- the publisher DID create the tag, at THIS release commit: that is the state a resume meets
+eq(must("git -C " .. repo .. " rev-parse " .. land.version_tag("0.1.0")), resume_sha,
+  "the publisher's tag exists, at this release's commit")
+-- ... and the resume must go on (before the fix this answered version_already_released for ever)
+local again_k = channel_run("linuxK")
+local second_ok, second_result = land.impl.linux(again_k, { signer = "local" })
+eq(second_ok, true, "the resume completes (" ..
+  tostring((not second_ok) and (second_result and (second_result.error .. ": " .. tostring(second_result.observed)) or second_result)) .. ")")
+eq((again_k.journal.linux or {}).state, "published", "and it published")
+-- ONE tag, ONE index commit, and the entry written once per target
+eq(must("git -C " .. repo .. " tag --list " .. land.version_tag("0.1.0")), land.version_tag("0.1.0"),
+  "exactly one tag, and it is the release's")
+eq(must("git -C " .. repo .. " rev-parse " .. origin_main() .. "^1"), resume_sha,
+  "exactly one index commit, on top of the release")
+eq(must("git -C " .. repo .. " diff --name-only " .. resume_sha .. " " .. origin_main()),
+  "lua/core/build_identity.lua\nreleases/index-linux.json", "carrying its two allow-listed paths, nothing else")
+local resume_entries = 0
+for _ in live_channel(origin_main()):gmatch('"commit": "' .. resume_sha .. '"') do resume_entries = resume_entries + 1 end
+eq(resume_entries, 2, "the entry is written once per target - no duplicate from the second publish")
+-- A FINISHED run resumed says already_present, not a refusal (the tag it made is still there).
+local finished = channel_run("linuxK2")
+local finished_ok, finished_result = land.impl.linux(finished, { signer = "local" })
+eq(finished_ok, true, "a finished run resumes green")
+eq((finished.journal.linux or {}).state, "already_present", "and says already_present")
+contains(tostring((finished_result or {}).detail), "already names", "with the tag and the commit it found")
+eq(origin_main(), must("git -C " .. repo .. " rev-parse " .. origin_main()), "and main did not move again")
 
 -- -------- a second run of the same step publishes nothing twice
 local again_before = origin_main()
