@@ -40,10 +40,20 @@ M.INTERNAL = {
   -- `operation start` is called with the priority flag set by code mode (lua/core/tools.lua bash,
   -- ctx.background_operation): the caller's own statement about who waits, not an argument of the tool.
   background = 'operation start priority flag, set by lua/core/tools.lua from code mode',
+  -- `operation`'s own control flag: the kernel's control call (a catalogue probe), never a model's word.
+  control = 'operation control call, sent by the kernel',
+  -- The pending layer asks an await for the command's output in the same call (lua/core/codemode_pending.lua):
+  -- the answer is the call's, not a field of the tool the model is naming.
+  output = 'code-mode pending: ask the await for output (lua/core/codemode_pending.lua)',
+  max_bytes = 'code-mode pending: the await output bound (lua/core/codemode_pending.lua)',
   -- The file tools' synonyms live here, read from the one table that defines them (file_tools.ALIASES).
   file_path = 'synonym for path (lua/core/file_tools.lua ALIASES)',
   old_string = 'synonym for old_text (lua/core/file_tools.lua ALIASES)',
   new_string = 'synonym for new_text (lua/core/file_tools.lua ALIASES)',
+  -- The targets those synonyms map onto: `edit` accepts a single top-level old_text/new_text pair (the
+  -- ALIASES table maps old_string onto old_text, so the handler reads exactly these names).
+  old_text = 'top-level single-edit pair (lua/core/file_tools.lua ALIASES target)',
+  new_text = 'top-level single-edit pair (lua/core/file_tools.lua ALIASES target)',
 }
 
 -- The report mode, used to MEASURE before refusing: with WASM_AGENT_TOOL_ARGUMENTS=report every would-be
@@ -86,15 +96,20 @@ function M.refusal(name, args, parameters)
   local path = report_to()
   if path then record(path, name, unknown, args); return nil end
   local list = #names > 0 and table.concat(names, ', ') or 'no arguments'
+  -- The sentence is THIS module's, not the refusal renderer's: `message`, `fix` and `input` together make
+  -- lua/core/refusal.lua keep it as written (its own templates describe a code's family, and a code with a
+  -- field in it is not a family). The first line names what the tool DOES take, which is the line a model
+  -- acts on.
   return {
     error = 'unknown_argument:' .. table.concat(unknown, ','),
     tool = tostring(name),
     unknown_arguments = unknown,
     accepted = names,
     effect = 'none',
-    note = '`' .. tostring(name) .. '` declares: ' .. list .. '. Nothing ran: an argument the tool does not '
+    message = '`' .. tostring(name) .. '` declares: ' .. list .. '. Nothing ran: an argument the tool does not '
       .. 'declare is refused by name rather than ignored, because a dropped field is a call that did something '
-      .. 'else in silence. Send the declared names only.',
+      .. 'else in silence.',
+    fix = 'send only the names `' .. tostring(name) .. '` declares: ' .. list .. '.',
     input = table.concat(unknown, ', '),
   }
 end

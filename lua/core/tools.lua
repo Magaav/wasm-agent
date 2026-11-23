@@ -261,12 +261,16 @@ function M.remote_arguments(args, catalog)
   return { node = node, capability = capability, args = params, hoisted = #hoisted > 0 and hoisted or nil }
 end
 
-local function schema(name, description, properties, required)
+local function schema(name, description, properties, required, extra)
   -- An empty Lua table encodes as `[]`, which providers reject as a schema, so
   -- only emit `properties`/`required` when they actually have entries.
   local parameters = { type = "object" }
   if properties and next(properties) ~= nil then parameters.properties = properties end
   if required and #required > 0 then parameters.required = required end
+  -- A keyword the schema needs but this helper cannot derive (`additionalProperties` for a tool that
+  -- forwards another tool's arguments). Merged last, so a caller names it once and it lands on the
+  -- parameters object a provider and the node's own argument validator both read.
+  if type(extra) == "table" then for key, value in pairs(extra) do parameters[key] = value end end
   return { type = "function", ["function"] = {
     name = name, description = description, parameters = parameters } }
 end
@@ -612,7 +616,12 @@ M.admin = {
     path = { type = "string", description = "For read/ls/write/edit: the path on that node." },
     args = { type = "object", description = "Optional older form: the capability's parameters nested here. Prefer the flat form." },
     calls = { type = "array", minItems = 1, maxItems = 8, description = "With capability \"batch\": 1-8 read-only entries {capability, <its params>} run on the peer in ONE signed round trip, ordered results. Reads, history and read-only bash only.",
-      items = { type = "object", properties = { capability = { type = "string" } }, required = { "capability" } } } }, { "node", "capability" }),
+      items = { type = "object", properties = { capability = { type = "string" } }, required = { "capability" } } }
+    -- This schema does NOT declare the capability's own parameters and cannot: they are the other tool's
+    -- (a bash `cwd`, an edit's `edits`, a read's `offset`). Saying so keeps the one argument validator from
+    -- refusing a field `remote` is meant to forward - the open declaration is the honest one here, not a
+    -- list that silently falls behind every capability it carries.
+  }, { "node", "capability" }, { additionalProperties = true }),
   -- Item 4 of the node-ops round (#45): a build is graded against the bytes it embeds. A binary built
   -- from another commit, or from this commit with uncommitted edits under lua/ or rust/, is not this
   -- tree, and the answer says WHICH (fresh, stale, edited, unknown) instead of a bare yes.
