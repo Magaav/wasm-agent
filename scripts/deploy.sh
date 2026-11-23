@@ -879,6 +879,13 @@ lua_tree_mode() { # <binary> -> 0 when it runs the Lua tree it is given
 # digest fallback and the publisher, so "this change needs no new binary" and "that release IS this
 # commit's binary" cannot disagree about the same file. A deploy that no longer holds the lib still
 # builds: no decision, no reuse.
+# THE PIN DIRECTORY IS NAMED HERE, ON EVERY PATH. The pin step itself (3c below) is inside the build
+# branch, so a Lua fast-path deploy pins nothing - and it still prunes the pins of earlier deploys (step 8b),
+# which is the whole point of that step (22/11: 19 pins / 2.5 GB filled the 16 G /tmp and the next install
+# refused). Measured 23/11: with this line inside the build branch instead, EVERY Lua fast-path deploy died
+# at step 8b - `deploy.sh: line 2422: PIN_DIR: unbound variable` - after a finished install, and its
+# wa-deploy-* unit was marked failed. The declaration belongs where both paths pass.
+PIN_DIR="${WA_DEPLOY_PIN_DIR:-${TMPDIR:-/tmp}/wa-deploy-pins}"
 LUA_FAST=0
 if [ "${WA_DEPLOY_FULL:-0}" != 1 ] && [ -n "$INSTALLED_BIN" ] && [ -x "$INSTALLED_BIN" ] && command -v wa_node_binary_reuse >/dev/null 2>&1; then
   INSTALLED_DIGEST="$("$INSTALLED_BIN" --capability-digest 2>/dev/null | tr -d '[:space:]')"
@@ -1173,9 +1180,8 @@ trap 'wa_deploy_lock_release "$DEPLOY_LOCK" "$DEPLOY_LOCK_LOG"' EXIT
 WA_DEPLOY_PIN="${WA_DEPLOY_PIN:-1}"
 BUILD_PIN=""
 BUILD_PIN_ROOT=""
-# The pin directory is named HERE, outside the pin / no-pin branch below: a deploy that pins nothing (the
-# Lua fast path reuses the installed binary) still prunes the pins earlier deploys left behind - step 8b.
-PIN_DIR="${WA_DEPLOY_PIN_DIR:-${TMPDIR:-/tmp}/wa-deploy-pins}"
+# PIN_DIR is named further up, before the Lua fast-path branch: this block is only reached by a deploy that
+# builds, and step 8b - which every path reaches - must not depend on that.
 if [ "$WA_DEPLOY_PIN" = "1" ]; then
   PIN_COMMIT="$(git rev-parse HEAD)"
   PIN_WAIT="${WA_DEPLOY_PIN_WAIT:-600}"
@@ -2402,36 +2408,31 @@ WA_SHIP_REQUIRE_SHARED=1 WA_ALLOW_UNSHARED_SHIP="$([ "$UNSHARED_COMMIT" = 1 ] &&
 record_installed
 echo "deploy: installed $COMMIT ($HASH)"
 echo "deploy: recorded in $INSTALL_DIR/installed.txt"
-# 8b. THE PINS THIS DEPLOY NO LONGER NEEDS. A pinned worktree is a whole checkout of this repository - 128 MB
-#     measured on avell 2026-11-22 - and until this step nothing removed one: nineteen of them (2.5 GB) had
-#     accumulated in <tmp>/wa-deploy-pins, the 16 G tmpfs hit its per-user quota and the next install refused
-#     (`deploy_pin_failed: cannot create a pinned worktree ...: No space left on device`, deploy.log
-#     2026-11-22T16:29Z). The install that just succeeded is what says which trees those are, so the question
-#     is asked here, with the two records this step has just written.
-#
-#     WHAT IS KEPT is the rule the pin directory needs to be safe: the pins `scripts/landing-queue.mjs
-#     prune-pins` can name from <install>/installed.txt and <install>/rollback/installed.txt (this node's own
-#     commit, the commit its binary was built from, the pin that build used, and the same three for the pair a
-#     rollback restores), the newest two pins when those records name fewer (a Lua fast-path install pins
-#     nothing), and any pin a live process is inside. Everything else is removed with `git worktree remove`,
-#     `git worktree prune` and its build output.
-#
-#     NEVER FATAL: housekeeping on a pin directory cannot undo an install that already happened, so a failure
-#     is a `note` that names it and the deploy finishes. A machine without node never reached the pin step
-#     above either, and says so by name instead of silently keeping every tree.
-if [ -d "$PIN_DIR" ]; then
-  if command -v node >/dev/null 2>&1; then
-    PIN_PRUNE_OUT="$INSTALL_DIR/.deploy-pin-prune.$$"
-    if ( cd "$SOURCE_ROOT" && node scripts/landing-queue.mjs prune-pins --pin-dir "$PIN_DIR" --install-dir "$INSTALL_DIR" ) > "$PIN_PRUNE_OUT" 2>&1; then
-      grep -v '^$' "$PIN_PRUNE_OUT" || true
-    else
-      note "pin prune: $(tail -3 "$PIN_PRUNE_OUT" 2>/dev/null | tr '\n' ' ') - the install stands; the trees under $PIN_DIR are left as they are"
+# wa-deploy-pin-prune: begin
+# 8b. A step every path reaches, so it may depend on nothing the build branch alone sets: `${PIN_DIR:-}`, and
+#     a path that names no pin directory says so by name instead of dying under `set -u` (23/11: every Lua
+#     fast-path deploy failed here with `PIN_DIR: unbound variable` after a finished install).
+case "${PIN_DIR:-}" in
+  '')
+    note "pin prune: this path names no pin directory (WA_DEPLOY_PIN_DIR is not set and PIN_DIR is empty), so nothing under it was removed - the deploy's pin step and this one disagree about WA_DEPLOY_PIN_DIR, which is a hole in this script, not a machine state"
+    ;;
+  *)
+    if [ -d "$PIN_DIR" ]; then
+      if command -v node >/dev/null 2>&1; then
+        PIN_PRUNE_OUT="$INSTALL_DIR/.deploy-pin-prune.$$"
+        if ( cd "$SOURCE_ROOT" && node scripts/landing-queue.mjs prune-pins --pin-dir "$PIN_DIR" --install-dir "$INSTALL_DIR" ) > "$PIN_PRUNE_OUT" 2>&1; then
+          grep -v '^$' "$PIN_PRUNE_OUT" || true
+        else
+          note "pin prune: $(tail -3 "$PIN_PRUNE_OUT" 2>/dev/null | tr '\n' ' ') - the install stands; the trees under $PIN_DIR are left as they are"
+        fi
+        rm -f "$PIN_PRUNE_OUT"
+      else
+        note "pin prune: node is not on PATH, so this deploy cannot tell which pins under $PIN_DIR are still wanted; nothing was removed"
+      fi
     fi
-    rm -f "$PIN_PRUNE_OUT"
-  else
-    note "pin prune: node is not on PATH, so this deploy cannot tell which pins under $PIN_DIR are still wanted; nothing was removed"
-  fi
-fi
+    ;;
+esac
+# wa-deploy-pin-prune: end
 echo "deploy: /health -> $(curl -s -m 5 "http://127.0.0.1:$PORT/health" | head -c 260)"
 if [ -n "$EXPECTED_SHA" ]; then
   [ "$(git rev-parse HEAD)" = "$EXPECTED_SHA" ] && [ -z "$(git status --porcelain)" ] \
