@@ -1271,7 +1271,11 @@ same-session serialization. It has no model tool or HTTP route. An accepted
 receipt is not delivery; interrupted admissions are unknown and never replayed.
 `host.system_resources()` returns a fresh advisory sample of CPU use, logical cores,
 physical memory and free/total bytes on the filesystem containing the node workspace.
-Unavailable measurements are `nil`; zero is never substituted for missing capacity.
+Unavailable measurements are `nil`; zero is never substituted for missing capacity. `host.system_resources('{"quick":true}')` answers the same
+sample without the CPU delta, which costs a deliberate 120 ms window between two
+`/proc/stat` reads; the quick answer sets `cpu.used_percent` to `null` and names the reason in
+`cpu.unmeasured`, so an unmeasured figure can never be read as an idle machine. The roster's local row
+(`nodes.list`, which `nodes.find` builds for every remote call) asks for the quick one.
 The Lua loader records hashes in `LOADED_SOURCES` before evaluating each module.
 HTTP clients reuse their connection pool. Stream results include provider request
 ID, first-content/reasoning/tool-delta latency and `stream_complete`; EOF without
