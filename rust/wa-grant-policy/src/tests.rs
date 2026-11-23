@@ -426,7 +426,9 @@ fn target_mode_controls_what_the_trail_says() {
 /// `kv.write -> deny(target_not_allowed)` on openclaw (`~/.wasm-agent/audit/grant-policy.jsonl`, 62
 /// refusals from 21/11 15:58 to 23/11 12:10, `target` a digest only: `sha256:00b109cf...` is the
 /// sha256 of "queue" and `sha256:3b97260d...` of "holds"). A reserved outbox part and a held chat were
-/// therefore never persisted, and the audit could not name the key that was refused.
+/// therefore never persisted, and the audit could not name the key that was refused. On 23/11 the owner
+/// removed chat holds, so `holds` left this list with the code that wrote it and `notices` (the
+/// deletion-notice counters) took its place: a row here is a key the component writes NOW.
 ///
 /// A key that is written but not allowed is a refusal the component cannot see the reason for, so this
 /// is a test of the *shipped* file (`policies/default.json`), not of the example beside this crate.
@@ -449,7 +451,7 @@ fn the_shipped_node_policy_allows_every_durable_key_the_whatsapp_component_write
         ("guest.rs:540", "tx/5511999999999@s.whatsapp.net/3EB0ABCDEF"),
         ("guest.rs:554", "fence/3EB0ABCDEF"),
         ("guest.rs:677", "queue"),
-        ("guest.rs:680", "holds"),
+        ("guest.rs:persist_state", "notices"),
         ("index.rs:44", "ix/r/5511999999999@s.whatsapp.net/3EB0ABCDEF"),
     ];
     let mut engine = Engine::new(PolicySet::parse(NODE_POLICY).expect("policies/default.json parses"));

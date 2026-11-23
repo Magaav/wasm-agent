@@ -2791,6 +2791,8 @@ run_proof_fixture agent-control 23 node scripts/test-agent-control-e2e.cjs "$BIN
 GATE_PYTHON="$(for p in python3 python; do command -v "$p" >/dev/null 2>&1 && "$p" -c 'import sys' >/dev/null 2>&1 && { echo "$p"; break; }; done)"
 gate_run "${GATE_PYTHON:-python3}" scripts/test-whatsapp-local.py
 gate_run bash scripts/test-whatsapp-go-retired.sh
+# The other half of that history: the component must not hold a CHAT again (owner's decision of 23/11).
+gate_run bash scripts/test-whatsapp-no-hold-writer.sh
 # The Go connector's `./...` test block stood here. It went with the connector tree in Phase 4
 # (11/11): the tree holds no Go module, so there is no toolchain to pin and nothing to SKIP. The gate
 # row that refuses a Go build/start path coming back is `scripts/test-whatsapp-go-retired.sh`.

@@ -93,8 +93,8 @@ worker pipe (`"segments": true` in the request, which the Go connector never sen
 | module | does |
 | --- | --- |
 | `queue.rs` | the seam: `enqueue` / `take_main` / `take_express` / `done` / `fail` / `expire_stale` / `drop_key` / `snapshot` / `restore`, with a `Policy` (fresh window, retry backoff, attempts) and `Notice`s for what it gives up. Two lanes: the main lane takes anything, the express lane only short notes (≤ 90 s declared) while the main lane decodes a long one. A shared `wa:queue` component (WASI 0.3, kv-backed, future/stream, remote STT workers via the relay) replaces it later without touching the pipeline |
-| `holds.rs` | chat holds and message fences derived from revokes/edits (the Go journal's `mutationProof`/`mutate`/`reproveHolds`): a *provable* mutation fences the exact IDs it names, an unproven one fences its target everywhere and holds the chat for posting only, an untargeted or owner mutation holds the whole chat (no transcription either). Holds strengthen, never weaken; `reprove` releases a posting-only hold once the store can prove its evidence |
-| `posting.rs` | the single posting gate (`Gate::Post`/`Shadow`/`Held`) over the allowlist, the configured holds and the derived ones; Go-identical parts (`🤖 _Copiloto_`, 2500 characters, `(i/n)`), post-then-edit pacing |
+| `notices.rs` | deletion notices for revokes and edits, and the reason there is no chat hold: the owner's decision of 23/11 (*we never should get hold from a chat*) makes a deletion a fact about ONE MESSAGE. The notice names a message id; the index (`index::notice`) flags that message wherever it is stored, matching by id across every chat spelling the store learned, and leaves a tombstone by id (`ix/tomb/<id>`) when the message is not here yet, so a late arrival is flagged on arrival. `Ledger` holds the matched/unmatched counters the health line prints. This module replaced `holds.rs`, which held whole chats (`unproven_mutation_chat_hold` / `untargeted_mutation_chat_hold` / `owner_chat_clear_hold`) and could only be released by a re-proof |
+| `posting.rs` | the single posting gate (`Gate::Post`/`Shadow`/`Blocked`) over the allowlist and the operator's own `held_chats` list - and over nothing derived from the wire, since no mutation can block a chat any more (23/11); Go-identical parts (the `_Copiloto_` header, 2500 characters, `(i/n)`), post-then-edit pacing |
 | `alerts.rs` | own-chat log, Go-identical wording, ≤ 1 message a minute, 12 listed, dropped after 6 h; group alerts name the group's *subject*, never the sender's push name |
 | `lib.rs` (guest) | glue: admit (unsupported/fence/held/dedup) → download → recognize (segments) → post as a reply quoting the audio → kv record `tx/<chat>/<id>` (which is also the author record a later revoke is proved against). Host I/O only: the crate is split so `queue`/`holds`/`posting`/`alerts` are pure and compiled on the host too |
 | `store.rs` (guest) | wacore's in-memory backend for reads plus write-through of the durable protocol state to `wa:kernel/kv` |
@@ -108,7 +108,7 @@ Configuration (the service definition's `config`):
 | `language` | `pt` | recognizer language hint (`pt`, `en`, `auto`) |
 | `post_transcripts` | `false` | posting master switch |
 | `post_allow` | `[]` | where posting may happen: `"own"` (the account's own chat, PN or LID), exact chat JIDs, or `"*"` (cutover). Empty = nowhere |
-| `held_chats` | `[]` | chats whose posting is held (transcribed and recorded, `post_held` alert) |
+| `held_chats` | `[]` | chats the OPERATOR blocks from posting by hand. Configuration only: since 23/11 no revoke, edit or clear on the wire can add to it, and nothing in the component writes it |
 | `alerts` | `false` | send the own-chat log (off while the Go connector also sends it) |
 | `stream_edits` | `false` | post-then-edit for notes ≥ `stream_min_seconds` |
 | `stream_min_seconds` | `15` | streaming threshold (declared audio length) |
@@ -144,9 +144,9 @@ recognition - the host's `wa:kernel/speech` runs one warm worker, one request at
 worker in `service_stt.rs` is the host-side prerequisite for real two-decode parallelism). The
 component still learns about source mutations only from `on_message` (
 `protocol_message` REVOKE/`MESSAGE_EDIT` and `info.edit`); whether whatsapp-rust delivers those to
-that handler has not been verified live (unchanged from B2). The operator hold-release command has no
-counterpart: a hold is released by `reprove` or not at all.
-
+that handler has not been verified live (unchanged from B2). There is no hold-release command because
+there is no hold: a deletion flags its own message and skips that one not-yet-posted reply, and an
+explicit send the owner asks for is never refused for a deletion (23/11).
 Tests: the four pure modules are compiled and tested natively, without the wasm target or the
 protocol crate's `Send` bounds:
 
@@ -183,10 +183,10 @@ list, the `LocalPool` polling loop and the 5 ms nap are gone. What replaces them
 | `Sleep` on a timer vector | `wasi:clocks@0.3.0.wait-for` |
 | spawned tasks run by `LocalPool::run_until_stalled` | a `FuturesUnordered` driven by the same entry point, joined with the main loop |
 
-The pipeline modules (`queue`, `holds`, `posting`, `alerts`) are unchanged and still tested natively —
+The pipeline modules (`queue`, `notices`, `posting`, `alerts`, `index`) are unchanged in shape and still tested natively —
 the port is host I/O, not decisions. `store.rs` awaits the kv calls (the names did not change) and
-`reprove` reads a chat's author rows in one `kv.scan` page set before the pure proof runs.
-
+`apply_notice` reads one record per chat spelling (`index::chat_forms`) instead of scanning a chat's
+author rows for a proof: a deletion is matched by MESSAGE ID, not by an author proof.
 Build and test:
 
 ```

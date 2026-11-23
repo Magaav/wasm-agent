@@ -21,17 +21,16 @@ would have silently dropped image OCR while voice notes kept working. The
 component's world now imports `wa:kernel/vision@0.2.0` and its manifest grants
 `ocr: true`; `scripts/test-whatsapp-send.lua` fails if either goes away.
 
-## A chat hold gates posting, not indexing
+## No chat hold exists (owner's decision, 23/11)
 
-Indexing an image (and transcribing audio) is a **local derive with no external
-effect**, so a `chat_holds` row annotates the queued task instead of fencing it:
-`media_reason = source_hold_index_only` / `audio.reason = source_hold_transcription_only`.
-Before this, one unproven mutation in a chat marked every later image
-`media_state = blocked_source` and the OCR worker never saw it; Fernanda's two
-27 Oct screenshots were lost that way. A **proven per-message fence** is different
-and still absolute: a `source_blocks` row (revoke/edit/delete naming that exact ID)
-stops the media before indexing, and the outbox/`Ready`/`Send` path keeps refusing
-to post anything from a held chat.
+The Go bridge's `chat_holds` / `source_blocks` model is gone from this component, and this section is
+kept only to say what replaced it. A deletion is a fact about ONE MESSAGE: the record gains `deleted`,
+`deleted_at` and `deleted_by` and KEEPS its content - the text, the OCR text, the transcript and the
+media metadata (`index::mark_deleted`). Indexing and OCR are local derives with no external effect, so
+nothing about a deletion stops them; what a deletion stops is the one automatic reply to that message
+that has not been posted yet (`skipped: source deleted`). An explicit send the owner asks for is never
+refused for a deletion. An OCR pass that lands after a revoke still attaches: the text is the content
+of that message, and the flag says the sender deleted it.
 
 History is recoverable on request, not silently: `wa-whatsapp reindex --state
 <private-dir> [--chat <exact-id>] --confirm` re-queues faded audio/media rows in one
@@ -162,7 +161,8 @@ warm worker, exactly as a voice note is transcribed by the kernel's recognizer.
 4. **The text is attached to the record** with `index::attach_text(…, Source::Ocr)`:
    the same `ocr` field a search already reads, bounded to `record::MAX_TEXT`
    characters like a transcript. So `whatsapp_search` finds a photo by what it
-   shows with no new query path, and a revoke deletes the OCR text with the rest.
+   shows with no new query path. A revoke KEEPS the OCR text and flags the record as deleted
+   (`deleted`, `deleted_at`, `deleted_by`): this node does not forget what it was told (23/11).
 
 **Bounds and privacy, unchanged from the old bridge.** 20 MiB per image
 (`ocr::MAX_IMAGE_BYTES`, refused before the download *and* before the reader);

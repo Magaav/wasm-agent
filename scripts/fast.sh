@@ -1223,6 +1223,11 @@ check land-signing bash scripts/test-land-signing.sh
 # client and the STT/OCR workers stay. The scan is proved on fixtures, so it is a gate and not a grep
 # nobody tests.
 check whatsapp-go-retired bash scripts/test-whatsapp-go-retired.sh
+# No chat hold exists any more (the owner's decision of 23/11): the component must have no hold writer, no
+# hold refusal code and no write of the `holds` key, and must carry the per-message deletion path. The scan
+# is proved on a fixture and it fails on the tree before the change (holds.rs, `posting_held_chat`,
+# `Gate::Held`), so it is a gate and not a grep nobody tested.
+check whatsapp-no-hold-writer bash scripts/test-whatsapp-no-hold-writer.sh
 # The runner's half of "the machine, not the code": the classifier and the serial retry, against fixture
 # commands that fail the way a starved machine fails (and a real failure that must NOT be excused).
 check fast-environment bash scripts/test-fast-environment.sh

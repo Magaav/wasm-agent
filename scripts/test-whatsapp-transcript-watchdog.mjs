@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { findProblems, LIMITS } from './whatsapp-transcript-watchdog.mjs';
+import { findProblems, LIMITS, stateMoved } from './whatsapp-transcript-watchdog.mjs';
 const at = 1_800_000_000;
 const quiet = { config: { requested_on: true }, lastConnected: at - 10, lastDisconnected: at - 100, pending: [], held: ['a@g.us'], unposted: [] };
 
@@ -54,4 +54,23 @@ test('an alert is written and reported as undelivered, with the one sentence', a
   assert.match(written.text, /alert text/);
   assert.equal(written.at, 1_800_000_000);
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// The two-store trap (23/11): the old bridge's journal is not this component's state, and a hold read out
+// of it is a chat blocked in a store nothing enforces. A journal behind the newest indexed message says
+// `state_moved` and answers nothing else.
+test('a journal behind the newest indexed message is refused as state_moved, never read for holds', () => {
+  const journal = 1_794_000_000;             // 2026-11-11, the day this account's old journal stops
+  const index = (journal + 3600) * 1000;     // an hour of messages the component indexed later
+  const moved = stateMoved(journal, index);
+  assert.equal(moved.reason, 'state_moved');
+  assert.equal(moved.journal_ms, journal * 1000);
+  assert.equal(moved.index_ms, index);
+});
+test('a journal that is level with the index is not stale, and no index at all refuses nothing', () => {
+  assert.equal(stateMoved(1_794_000_000, 1_794_000_000_000), null, 'the same instant is not behind');
+  assert.equal(stateMoved(1_794_000_000, 0), null, 'no component store here: nothing to compare');
+});
+test('a journal with no message at all, beside an index with messages, is state_moved', () => {
+  assert.equal(stateMoved(0, 1_794_000_000_000).reason, 'state_moved');
 });
