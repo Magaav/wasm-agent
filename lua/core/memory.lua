@@ -1517,6 +1517,27 @@ function M.message(message_id, opts)
   return row
 end
 
+-- The newest turn of a session that recorded a file change, with `changes` decoded like M.message's.
+--
+-- What a chat's /undo puts back: the last change of THIS session, not a turn the reader picked out of a
+-- transcript, so it is found by the ledger's own order rather than by an id someone has to know. The row
+-- is the shape M.message returns, because the caller does what the /diff route does with it
+-- (changeset.normalize, then check/undo).
+function M.last_change_turn(session_id)
+  if not session_id or session_id == "" then return nil end
+  local rows = query("SELECT * FROM messages WHERE session_id=? AND changes IS NOT NULL AND changes<>'{}' "
+    .. "ORDER BY seq DESC LIMIT 1", { session_id })
+  local row = rows[1]
+  if not row then return nil end
+  row.changes = decode(row.changes)
+  -- A row whose `changes` names no file is not a change (memory writes '{}' for the rest), and an undo
+  -- that treated it as one would spend a refusal on a message nobody could see.
+  if type(row.changes) ~= "table" or type(row.changes.files) ~= "table" or #row.changes.files == 0 then
+    return nil
+  end
+  return row
+end
+
 function M.search_messages(text, user_id, limit)
   limit = limit or 20
   local rows = seam_or_native("search_messages", { text = tostring(text or ""), user_id = user_id, limit = limit })
