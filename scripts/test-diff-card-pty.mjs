@@ -30,6 +30,7 @@ import path from 'node:path';
 import http from 'node:http';
 import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
+import {tmuxSession} from './lib/tmux-session.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const REAL_HOME = path.join(os.homedir(), '.wasm-agent');
@@ -165,9 +166,10 @@ if (!HAVE_TMUX) {
   process.exit(0);
 }
 
-const SOCKET = 'wa-diff-card-pty-' + process.pid;
+// This process's own tmux server, killed on every exit path this process can take and reclaimed when a
+// SIGKILLed sibling left one behind (scripts/lib/tmux-session.mjs, the one rule the leak check enforces).
 const SESSION = 'dcard';
-const tmux = args => spawnSync('tmux', ['-L', SOCKET, ...args], {encoding: 'utf8'});
+const {tmux, killServer} = tmuxSession('wa-diff-card-pty');
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 function capture() {
   const raw = String(tmux(['capture-pane', '-p', '-t', SESSION]).stdout || '').replace(/\r/g, '');
@@ -282,7 +284,7 @@ try {
   await sleep(400);
   tmux(['send-keys', '-t', SESSION, 'C-c']);
   await sleep(1500);
-  tmux(['kill-server']);
+  killServer();
   started = false;
   launch(['--continue']);
   await waitFor(() => screen().includes('Type a message'), 'the prompt of the continued session');
@@ -296,7 +298,7 @@ try {
   console.error('diff-card-pty: FAILED - ' + error.message);
   try { console.error(capture().join('|')); } catch {}
 } finally {
-  if (started) tmux(['kill-server']);
+  if (started) killServer();
   server.close();
   if (failed === 0) fs.rmSync(WORK, {recursive: true, force: true});
   else console.error('diff-card-pty: scratch kept for diagnosis: ' + WORK);

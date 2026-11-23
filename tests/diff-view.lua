@@ -372,6 +372,21 @@ ok(diff_view.short_path("/home/u/other/y.py", { cwd = "/home/u/work", home = "/h
   "a path outside the workdir but inside home is named with ~")
 ok(diff_view.short_path("/etc/x.conf", { cwd = "/home/u/work", home = "/home/u" }) == "/etc/x.conf",
   "and a path outside both keeps its full name")
+-- `~` means the READER's home, and the node's own state directory is not it. Encoded as one pure
+-- function (`lua/core/cli_view.lua tilde_home`) so it is pinned by its rule rather than by whatever HOME
+-- a runner happens to hand a row: main-health 23/11 drew
+-- `Create(~/.wasm-agent/.wasm-agent/script-writes/demo.txt)` for a file that was in no home at all.
+local tilde = view_lib.tilde_home
+ok(tilde("/home/u", "/home/u/.wasm-agent", "/home/u/.wasm-agent") == "/home/u",
+  "the operator's home is `~`, even with the node's state directory inside it")
+ok(tilde("/home/u/.wasm-agent", "/home/u/.wasm-agent", "/home/u/.wasm-agent/.wasm-agent") == "",
+  "the node's state directory itself is never `~`")
+ok(tilde("/home/u/.wasm-agent/tmp", "/home/u/.wasm-agent", "/home/u/.wasm-agent") == "",
+  "nor anything under it")
+ok(tilde("/tmp/scratch/home", "/tmp/scratch/home", "/tmp/scratch/home/.wasm-agent") == "",
+  "and a scratch home that IS the node's home is not `~` either (a test row's shape)")
+ok(tilde("", "/home/u/.wasm-agent", "") == "", "no home at all shortens nothing")
+
 local remote_heading = heading_of(diff_view.rows({ path = "/tmp/x.py", before = "", after = "one\n" },
   { width = 80, cwd = "/home/u/work", home = "/home/u", node = "nextcloud" }).rows)
 ok(remote_heading ~= nil and remote_heading:find("Create(nextcloud:/tmp/x.py)", 1, true) ~= nil,

@@ -34,6 +34,7 @@ local changeset = dofile('lua/core/changeset.lua')
 local view_lib = dofile('lua/core/cli_view.lua')
 local markdown = dofile('lua/core/markdown.lua')
 local paths = dofile('lua/core/paths.lua')
+local diff_view = dofile('lua/core/diff_view.lua')
 
 local checks, failed, first_fail = 0, 0, nil
 -- The first failing label travels in the LAST line as well as its own FAIL line: the runner deletes a
@@ -73,6 +74,18 @@ local work = data .. '/script-writes'
 -- path-shaped assertions failed on a card that was drawn correctly. Cutting inside the card is
 -- tests/diff-view.lua's subject, at its own widths.
 local card_width = math.max(80, #work + 64)
+-- The name a card gives a path, from the CARD's own rule (lua/core/diff_view.lua short_path, with the
+-- two directories lua/core/cli_view.lua place() hands it): relative inside the workdir, `~` for the
+-- operator's own home, absolute when neither holds. A test that hard-coded the absolute form went red
+-- wherever the runner's HOME made the path shortenable - main-health 23/11 drew
+-- `Create(~/.wasm-agent/.wasm-agent/script-writes/demo.txt)` on a card that was CORRECT, because that
+-- row's ambient HOME was the node's state directory. The policy itself is pinned by tests/diff-view.lua
+-- (short_path, and cli_view.tilde_home refusing the state directory); this file pins that the heading
+-- goes through it.
+local function shown_path(path)
+  return diff_view.short_path(path, { cwd = view_lib.place('cwd'), home = view_lib.place('home') })
+end
+
 local target = work .. '/demo.txt'
 os.execute('mkdir -p ' .. string.format('%q', work))
 os.remove(target)
@@ -122,20 +135,22 @@ local function card(event)
     after = event.after, deleted = event.deleted }, card_width, false) or {}, '\n')
 end
 local created_card = changes[1] and card(changes[1]) or ''
-has(created_card, 'Create(' .. target .. ')', 'the created file is named Create(path), as Claude Code names it')
+has(created_card, 'Create(' .. shown_path(target) .. ')',
+  'the created file is named Create(path), as Claude Code names it')
+check(shown_path(target) ~= '', 'and the heading names a file, not a cut')
 has(created_card, 'Added 3 lines', 'the card counts what the create added')
 check(not created_card:find('removed', 1, true), 'and says nothing about a removal it did not make')
 has(visible(created_card), string.format('\226\148\130 %2d + ', 1),
   'the created lines are numbered + rows, in ONE number column')
 local edited_card = changes[2] and card(changes[2]) or ''
-has(edited_card, 'Update(' .. target .. ')', 'the edit is named Update(path)')
+has(edited_card, 'Update(' .. shown_path(target) .. ')', 'the edit is named Update(path)')
 has(edited_card, 'Added 1 line, removed 1 line', 'the update counts its own one-line change')
 has(visible(edited_card), string.format('\226\148\130 %2d - ', 2),
   'the replaced line is a - row carrying the number it had')
 has(visible(edited_card), string.format('\226\148\130 %2d + ', 2),
   'and the line that replaced it is a + row with its new number')
 local deleted_card = changes[3] and card(changes[3]) or ''
-has(deleted_card, 'Delete(' .. target .. ')', 'the removal is named Delete(path)')
+has(deleted_card, 'Delete(' .. shown_path(target) .. ')', 'the removal is named Delete(path)')
 has(deleted_card, 'Removed 3 lines', 'and it counts the lines that went with it')
 has(visible(deleted_card), string.format('\226\148\130 %2d - ', 1),
   'the removed lines are - rows with the numbers they had')
@@ -290,7 +305,7 @@ local loop_card = ''
 for _, event in ipairs(loop_events) do
   if event.type == 'change' and event.path == loop_target then loop_card = card(event) end
 end
-has(loop_card, 'Create(' .. loop_target .. ')', 'the loop card names the file the model wrote')
+has(loop_card, 'Create(' .. shown_path(loop_target) .. ')', 'the loop card names the file the model wrote')
 local tool_message = nil
 for _, message in ipairs(memory.session_messages(loop_sid, { limit = 100 })) do
   if message.role == 'tool' and message.tool_call_id == 'loop-write' then tool_message = message end

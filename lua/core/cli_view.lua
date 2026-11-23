@@ -832,15 +832,38 @@ local BANDS = { ["+"] = "toolDiffAddedBand", ["-"] = "toolDiffRemovedBand" }
 -- state directory, which is what the host rewrites HOME to - and the working directory the session
 -- runs in. Read once from the two supported sources and handed to the pure renderer, so a card cannot
 -- name a path by an environment a test does not share. platform.cwd() is host.runtime_info().cwd.
+-- Which directory a card may call `~`. The operator's own home may; the node's STATE directory may
+-- not. MEASURED 23/11 in main-health: a row whose ambient HOME was the state directory drew
+-- `● Create(~/.wasm-agent/.wasm-agent/script-writes/demo.txt)` - a `~` that pointed inside the agent,
+-- not at the reader's home, for a file the reader would look for in neither. A path is shortened with
+-- `~` only when that name means what the reader thinks it means; otherwise it stays absolute.
+function M.tilde_home(home, state, data)
+  local function trim(dir) return (tostring(dir or ""):gsub("\\", "/"):gsub("/+$", "")) end
+  local h, s, d = trim(home), trim(state), trim(data)
+  if h == "" then return "" end
+  local function inside(dir)
+    if dir == "" then return false end
+    return h == dir or h:sub(1, #dir + 1) == dir .. "/"
+  end
+  if inside(s) or inside(d) then return "" end
+  return h
+end
+
 local place_cache = nil
 function M.place(which)
   if not place_cache then
     local home = host and host.getenv and tostring(host.getenv("WA_HOME_BEFORE_OVERRIDE") or "") or ""
     if home == "" and host and host.getenv then home = tostring(host.getenv("HOME") or "") end
+    local state, data = "", ""
+    local ok_paths, paths = pcall(function() return dofile("lua/core/paths.lua") end)
+    if ok_paths and type(paths) == "table" then
+      if type(paths.home) == "function" then state = tostring(paths.home() or "") end
+      if type(paths.data) == "function" then data = tostring(paths.data() or "") end
+    end
     local cwd = ""
     local ok, value = pcall(function() return dofile("lua/core/platform.lua").cwd() end)
     if ok and type(value) == "string" then cwd = value end
-    place_cache = { home = home, cwd = cwd }
+    place_cache = { home = M.tilde_home(home, state, data), cwd = cwd }
   end
   if which == "home" then return place_cache.home end
   if which == "cwd" then return place_cache.cwd end
