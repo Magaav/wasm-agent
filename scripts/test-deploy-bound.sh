@@ -50,6 +50,7 @@ fail() { printf 'FAIL %s\n' "$*"; fails=$((fails + 1)); }
 ok()   { printf '    ok: %s\n' "$*"; }
 want() { case "$1" in *"$2"*) ok "$3" ;; *) fail "$3: expected '$2' in: $1" ;; esac; }
 unwant() { case "$1" in *"$2"*) fail "$3: unexpected '$2' in: $1" ;; *) ok "$3" ;; esac; }
+same() { if [ "$1" = "$2" ]; then ok "$3 (still $1)"; else fail "$3: expected $2, got $1"; fi }
 
 # A hole this row names itself, and says with the ONE spelling both judges read: `SKIP ` at the start of a
 # line (scripts/fast.sh collects `^SKIP `, and scripts/test-discriminates.sh records a skip as a named
@@ -243,10 +244,17 @@ grep -q 'still working' "$SENT_DIR/sentinel.log" \
 # every tick for twenty-five minutes and only ended when the operator restarted wa-serve.
 grep -q 'hold-bound-failed' "$SENT_DIR/sentinel.log" \
   && ok "the failure is written down" || fail "a request past its bound left no failure line"
-unwant "$(cat "$SENT_DIR/failed/1700000000000000000-4242-00000000000000000000.json" 2>/dev/null)" "" \
-  "a request that cannot proceed is recorded in failed/"
+if [ -s "$SENT_DIR/failed/1700000000000000000-4242-00000000000000000000.json" ]; then
+  ok "a request that cannot proceed is recorded in failed/ (with its reason)"
+else
+  fail "a request that failed at its bound left no record in failed/"
+fi
 
 step "past the bound with every holder paused: the install runs"
+# A FRESH REQUEST, because the step above ends its request at the bound now (a bound is a wall in both
+# directions). Same id and queue time, so nothing else about this step changes.
+clear_request
+write_request "1700000000000000000-4242-00000000000000000000" "$ASKED"
 pause_record "$SESSION" "$((NOW + 1))"
 pause_record "deadbeef-1111-2222-3333-444455556666" "$((NOW + 1))"
 rm -f "$INSTALLER_LOG"

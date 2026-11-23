@@ -1912,6 +1912,13 @@ fn deploy_admission_refusal(
         }
     };
     if answer.get("waiting").and_then(serde_json::Value::as_bool) != Some(true) {
+        // The third answer, said out loud: the module that reads the deploy state could not be loaded, so this
+        // node did not ask the question at all. The run's own gate asks it at the top of the turn; a reader
+        // looking at this node's log should not have to infer that from a missing refusal.
+        if answer.get("gate").and_then(serde_json::Value::as_str) == Some("unavailable") {
+            eprintln!("[serve] the deploy admission gate is unavailable ({}); the run's own gate judges it",
+                answer.get("detail").and_then(serde_json::Value::as_str).unwrap_or("no detail"));
+        }
         return None;
     }
     Some(serde_json::json!({

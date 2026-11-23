@@ -171,6 +171,27 @@ export WASM_AGENT_LLM_API_KEY=stub-key-not-a-secret
 export WASM_AGENT_LLM_MODEL=deepseek-v4.1-flash
 unset WASM_AGENT_LLM_SUMMARY_MODEL
 calls() { local n; n=$(wc -l < "$WORK/model.calls" 2>/dev/null | tr -d ' '); echo "${n:-0}"; }
+# Two readers for the /health samples of steps 2c and 2d: one dotted field, and the sum of the per-node-thread
+# `queued` counts. Both answer an empty string for a document that does not parse - a sample that says nothing is
+# never read as a zero.
+pick() { node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{let v=null;try{v=JSON.parse(s)}catch{};for(const k of String(process.argv[1]||"").split(".")){v=v==null?null:(typeof v==="object"?v[k]:null)};console.log(v==null?"":(typeof v==="object"?JSON.stringify(v):String(v)))})' "$2" < "$1"; }
+num() { case "$1" in ''|*[!0-9]*) echo 0 ;; *) echo "$1" ;; esac; }
+threads_queued() { node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const h=JSON.parse(s);console.log(String((h.node_threads||[]).reduce((a,t)=>a+(Number(t.queued)||0),0)))}catch{console.log("")}})' < "$1"; }
+
+# The request must arrive while the turn is INSIDE its first model call: before that the turn has not passed its
+# own gate (and would be refused by it, which is a different subject), after it the turn has already paused or
+# ended. "Its first completion reached the stub" is the exact evidence, so it is waited for instead of guessed
+# with a sleep (measured 23/11: 0.8 s was enough until the two queue steps above moved the fixture's start-up,
+# and then this turn was refused at its gate instead of pausing at its boundary).
+inside_first_call() { # <calls-before>
+  local before="$1"
+  for _ in $(seq 1 120); do
+    [ "$(calls)" -gt "$before" ] && return 0
+    sleep 0.05
+  done
+  return 1
+}
+
 lua() { # <mode> [extra env...]
   DW_MODE="$1" WA_SCRIPT="scripts/lib/deploy-wait-e2e.lua" "$BIN" --db "$DB" 2>&1 | grep -v 'served natively'
 }
@@ -234,6 +255,99 @@ want "$turn" "wa-sentinel request withdraw $REQUEST_ID" "and names the way out"
 case "$turn" in *stub-ok*) fail "a refused turn still reached the model" ;; *) ok "the model was not called" ;; esac
 same "$(calls)" "$before" "no completion was spent"
 
+
+step "2c. the node NAMES the turns it has admitted and not started (23/11)"
+# ONE CONVERSATION, deliberately: a node runs conversations in parallel on their own node-threads, so a queue
+# only forms behind a turn in the SAME conversation (measured on this fixture's first run: three turns of three
+# conversations all ran at once and the queue stayed at 0). The incident's pile-up was one conversation's worth of
+# automated turns behind another - which is what `thread` here reproduces.
+THREAD="2c2c2c2c-1111-2222-3333-444455556666"
+# MEASURED (~/.wasm-agent/sentinel/sentinel.log, 23/11): the deploy for e9a42d20 was held behind `10 turn(s)
+# admitted and not started` - a count, and a count cannot be asked whether it paused, so the sentinel could
+# neither verify it nor pass over it and the deploy waited out its bound. The queue is a real state of a real
+# node (a long turn in flight), so it is produced here and read back from /health: WHO is queued, for how long,
+# and on which node-thread.
+clear_request
+printf '2500' > "$WORK/delay"
+curl -sN -m 60 -X POST --data "{\"text\":\"hold the node while the queue forms\",\"operator\":true,\"thread\":\"$THREAD\"}" \
+  "http://127.0.0.1:$PORT/chat" > "$WORK/holder-2c.txt" 2>&1 &
+HOLDER_PID=$!
+sleep 0.2
+curl -sN -m 60 -X POST --data "{\"text\":\"queued turn one\",\"thread\":\"$THREAD\"}" \
+  "http://127.0.0.1:$PORT/chat" > "$WORK/queued-1.txt" 2>&1 &
+Q1=$!
+curl -sN -m 60 -X POST --data "{\"text\":\"queued turn two\",\"thread\":\"$THREAD\"}" \
+  "http://127.0.0.1:$PORT/chat" > "$WORK/queued-2.txt" 2>&1 &
+Q2=$!
+queued_max=0; named_max=0; threads_mismatch=0
+for _ in $(seq 1 8); do
+  sleep 0.15
+  curl -s -m 2 "http://127.0.0.1:$PORT/health" > "$WORK/health-2c.json" 2>/dev/null
+  q="$(num "$(pick "$WORK/health-2c.json" queue)")"
+  n="$(num "$(pick "$WORK/health-2c.json" queue_sessions.named)")"
+  t="$(num "$(threads_queued "$WORK/health-2c.json")")"
+  [ "$q" -gt "$queued_max" ] && queued_max="$q"
+  [ "$n" -gt "$named_max" ] && named_max="$n"
+  [ "$t" = "$q" ] || threads_mismatch=1
+done
+wait "$Q1" 2>/dev/null; wait "$Q2" 2>/dev/null; wait "$HOLDER_PID" 2>/dev/null
+printf '0' > "$WORK/delay"
+if [ "$queued_max" -ge 2 ]; then ok "the node reported $queued_max turn(s) admitted and not started"; else
+  fail "the queue never formed (max $queued_max): $(cat "$WORK/health-2c.json" 2>/dev/null | cut -c1-300)"
+fi
+if [ "$named_max" -ge 2 ]; then ok "and NAMED $named_max of them (queue_sessions)"; else
+  fail "the queue named nobody: a deploy would be told a count and no session ($(cat "$WORK/health-2c.json" 2>/dev/null | cut -c1-300))"
+fi
+if [ "$threads_mismatch" = "0" ]; then ok "the per-node-thread counts add up to the queue"; else
+  fail "the per-node-thread queued counts and /health queue disagree"
+fi
+
+step "2d. a deploy that waits refuses a turn at the DOOR: nothing is admitted behind it (23/11)"
+write_request
+printf '2500' > "$WORK/delay"
+# Measured BEFORE the operator's turn starts: that turn is the only one in this step that is allowed to reach the
+# model, and the stub makes it two rounds (its first answer asks for a tool), so exactly two calls are its own.
+before="$(calls)"
+curl -sN -m 60 -X POST --data "{\"text\":\"a person keeps working while the deploy waits\",\"operator\":true,\"thread\":\"$THREAD\"}" \
+  "http://127.0.0.1:$PORT/chat" > "$WORK/holder-2d.txt" 2>&1 &
+HOLDER_PID=$!
+sleep 0.2
+DOOR_PIDS=()
+for i in 1 2 3; do
+  ( curl -s -o "$WORK/door-$i.body" -w '%{http_code}' -m 20 -X POST \
+      --data "{\"text\":\"door turn $i\",\"thread\":\"$THREAD\"}" \
+      "http://127.0.0.1:$PORT/chat" > "$WORK/door-$i.code" 2>&1 ) &
+  DOOR_PIDS+=("$!")
+done
+door_max=0
+for _ in $(seq 1 8); do
+  sleep 0.15
+  curl -s -m 2 "http://127.0.0.1:$PORT/health" > "$WORK/health-2d.json" 2>/dev/null
+  q="$(num "$(pick "$WORK/health-2d.json" queue)")"
+  [ "$q" -gt "$door_max" ] && door_max="$q"
+done
+for pid in "${DOOR_PIDS[@]}"; do wait "$pid" 2>/dev/null; done
+wait "$HOLDER_PID" 2>/dev/null
+printf '0' > "$WORK/delay"
+for i in 1 2 3; do
+  code="$(cat "$WORK/door-$i.code" 2>/dev/null)"
+  body="$(cat "$WORK/door-$i.body" 2>/dev/null)"
+  if [ "$code" = "503" ]; then ok "turn $i was refused with 503"; else
+    fail "turn $i answered HTTP ${code:-nothing}, not the named refusal (body: $(printf '%s' "$body" | cut -c1-200))"
+  fi
+  want "$body" '"not_started":true' "turn $i says it did not start"
+  want "$body" 'deploy_waiting' "turn $i names the refusal"
+  want "$body" 'retry_after_seconds' "and says when to look again"
+  # The stub's own answer, in the body, is the proof that a turn RAN: a refusal that still reached the model
+  # would be no refusal at all, and this is asserted per turn rather than on a count of completions (the
+  # operator's turn in this step shares its conversation, so its own number of rounds is not a constant).
+  unwant "$body" 'stub-ok' "turn $i never reached the model"
+done
+if [ "$door_max" = "0" ]; then ok "no turn was admitted while the deploy waited"; else
+  fail "$door_max turn(s) were admitted and queued behind the waiting deploy (the pile-up this row is about)"
+fi
+neq "$(calls)" "$before" "the operator's turn did reach the model, so the fixture was a live node, not an idle one"
+
 step "3. a real `wa chat --once` - the worker shape of the incident - is refused, exit 2, nothing written"
 before_counts="$(counts)"
 before_calls="$(calls)"
@@ -248,10 +362,11 @@ same "$(counts)" "$before_counts" "and wrote nothing into the ledger"
 step "4. a turn ALREADY RUNNING pauses at its next step, by itself"
 clear_request
 printf '2500' > "$WORK/delay"
+before="$(calls)"
 DW_REQUEST="$BOX/$REQUEST_ID.json" DW_TURN_PROMPT='wake me when the deploy is done' \
   WA_SCRIPT="scripts/lib/deploy-wait-e2e.lua" DW_MODE=turn "$BIN" --db "$DB" > "$WORK/turn.log" 2>&1 &
 TURN_PID=$!
-sleep 0.8
+inside_first_call "$before" || fail "the turn never reached its first model call"
 write_request
 wait "$TURN_PID" 2>/dev/null
 TURN_RC=$?
@@ -281,7 +396,7 @@ before="$(calls)"
 curl -sN -m 60 -X POST --data '{"text":"wake me and keep going","operator":true}' \
   "http://127.0.0.1:$PORT/chat" > "$WORK/operator-stream.txt" 2>&1 &
 OPERATOR_PID=$!
-sleep 0.8
+inside_first_call "$before" || fail "the operator's turn never reached its first model call"
 write_request
 wait "$OPERATOR_PID" 2>/dev/null
 operator_turn="$(cat "$WORK/operator-stream.txt")"
