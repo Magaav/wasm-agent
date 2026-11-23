@@ -4097,8 +4097,8 @@ fn status() -> Result<()> {
     say(&format!("requests:  {pending} waiting, {done} done, {failed} failed"));
     // THE HEALTH LINE (23/11, G blocker): how many sessions are paused for a deploy right now, and how long the
     // oldest has been waiting. A pause is a promise this node resumes; a promise two hours old must be visible.
-    let (paused_count, paused_oldest) = paused_summary(now_epoch());
-    say(&format!("paused sessions: {paused_count}, oldest {}",
+    let (paused_count, paused_oldest, paused_abandoned) = paused_summary(now_epoch());
+    say(&format!("paused sessions: {paused_count}, oldest {}, abandoned: {paused_abandoned}",
         match paused_oldest {
             Some(since) => age(now_epoch(), since),
             None => "none".to_string(),
@@ -4172,9 +4172,12 @@ fn status() -> Result<()> {
 /// by two hours with nothing visible anywhere. One line, always printed, so "paused sessions: 0, oldest none" is a
 /// fact an operator can check rather than an absence they have to notice. The records are the ones
 /// lua/core/deploy_pause.lua writes at the moment a session pauses (`<data>/deploy-paused/<session>.json`).
-pub(crate) fn paused_summary(now: u64) -> (usize, Option<u64>) {
+pub(crate) fn paused_summary(now: u64) -> (usize, Option<u64>, usize) {
     let mut count = 0usize;
     let mut oldest: Option<u64> = None;
+    // A pause the node gave up on (lua/core/deploy_pause.lua `mark_abandoned`): the resume could not run after its
+    // re-arms, and that is a fact an operator must see, not a pause that quietly stays.
+    let mut abandoned = 0usize;
     if let Ok(entries) = std::fs::read_dir(paused_dir()) {
         for entry in entries.flatten() {
             let path = entry.path();
@@ -4182,6 +4185,11 @@ pub(crate) fn paused_summary(now: u64) -> (usize, Option<u64>) {
                 continue;
             }
             count += 1;
+            let read: Value = std::fs::read(&path).ok()
+                .and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or(Value::Null);
+            if read.get("abandoned").and_then(Value::as_bool) == Some(true) {
+                abandoned += 1;
+            }
             let record: Value = std::fs::read(&path).ok()
                 .and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or(Value::Null);
             let since = record.get("since").and_then(Value::as_u64).filter(|at| *at > 0);
@@ -4193,7 +4201,7 @@ pub(crate) fn paused_summary(now: u64) -> (usize, Option<u64>) {
             }
         }
     }
-    (count, oldest)
+    (count, oldest, abandoned)
 }
 
 fn print_help() {

@@ -307,22 +307,92 @@ end
 
 -- A RESUME THAT IS NOT PENDING IS A DEBT THE NODE PAYS (23/11).
 --
--- MEASURED on avell, twice in one evening: session 603425eb paused for the install of 7e38abe9 at 19:29:43Z and
--- sat TWO HOURS, and 66c0d5c1 paused at 20:19:38Z and sat the same (their mission logs: "- the node owns session
--- 603425eb... after a deploy pause: waiting for it to go quiet", then "--- still paused for a deploy after 2 h: no
--- done written"). Both pause sentences said "scheduled a resume"; the request they paused for ended in the
--- sentinel's `done/`; and `wa session status` now answers `0 wakes pending` for both - so the promise was ARMED
--- and then LOST, not deferred. The one way a resume row leaves `pending` without a turn is the dispatch that was
--- cut (the node replaced by the very install it paused for): the row ends `unknown` ("dispatch interrupted; not
--- replayed`"), and nothing re-arms it because an unknown outcome is, by design, never replayed.
+-- MEASURED on avell, three times in one evening: session 603425eb paused for the install of 7e38abe9 at
+-- 19:29:43Z and sat TWO HOURS; 66c0d5c1 paused at 20:19:38Z and sat the same; this mission's own session paused
+-- at ~22:0xZ and was resumed by the orchestrator and no node. Each had scheduled its resume, the request it
+-- paused for reached the sentinel's `done/`, and `wa session status` then answered `0 wakes pending`: the resume
+-- row was cut by the very install it paused for and left `unknown` ("dispatch interrupted; not replayed"), which
+-- is by design never replayed.
 --
--- So the debt is read from the ledger, once the deploy is over: a resume row that ended unknown, failed or
--- cancelled is re-armed NOW, with its own new row, and the old one is marked `superseded` so it is not re-armed
--- again. Nothing else changes: a session whose resume is still pending or dispatching is left alone, and while a
--- build waits or installs nothing is re-armed at all (that is the phase the pause is for).
+-- The debt is read from the ledger once nothing waits, and paid under FOUR rules, each of which was a defect
+-- Fable found in the first version (23/11 ~22:35Z) and each of which is tested:
 --
--- `opts` exists for the test (scripts/test-deploy-pause.lua): exec, query, schedule and the clock are injected;
--- a real caller passes nothing and gets the host's ledger, selfloop's scheduler and os.time().
+--   1. A WINDOW (M.RESUME_WINDOW_SECONDS, 6 h) on the row's own `created_at`, and only for a session that still
+--      exists and is not parked. Without it the first tick after an install on EVERY node at G would wake every
+--      session that ever lost a resume - paid model turns, days later, acting on stale requests. Rows older than
+--      the window are retired ONCE by a migration that says how many it retired;
+--   2. A CHAIN of at most M.RESUME_MAX_REARMS (2) re-arms per pause, counted on the row's own `attempts` and
+--      spaced by a backoff. The re-armed wake is itself a resume row, so without the cap a session that can
+--      never run (gone, provider down) is re-armed every tick for ever; after the cap the row is
+--      `resume_abandoned`, its pause record says so, and the health line counts it;
+--   3. AN OPERATOR'S CANCEL IS FINAL. `cancelled` is re-armed only when the NODE cancelled it - the run's own
+--      'cancelled before execution' (lua/core/selfloop.lua, the dispatch cut before it started) - and never a
+--      bare 'cancelled', which is what `wa wake cancel` and an escalation write (lua/core/selfloop.lua:612, :822).
+--      Re-arming over a person's decision would override them, which no repair may do;
+--   4. NOTHING IS RE-ARMED WHILE A BUILD WAITS OR INSTALLS: that is the phase the pause is for.
+M.RESUME_WINDOW_SECONDS = 6 * 3600
+M.RESUME_MAX_REARMS = 2
+M.RESUME_BACKOFF_SECONDS = 30
+M.MIGRATION_MARKER = "resume-migration-1"
+
+-- The lost rows this module is allowed to act on: `unknown` and `failed` always, and `cancelled` only when the
+-- NODE cancelled the dispatch. The predicate is here, in one place, because the migration and the per-tick pass
+-- must agree about which rows are debts.
+local LOST_WHERE = "reason=? AND (status IN ('unknown','failed') OR (status='cancelled' AND last_error LIKE 'cancelled before execution%'))"
+
+local function marker_path()
+  local ok, paths = pcall(dofile, "lua/core/paths.lua")
+  if not ok then return nil end
+  return paths.data() .. "/" .. M.MIGRATION_MARKER
+end
+
+local function migrated(opts)
+  if type(opts.migrated) == "function" then return opts.migrated() end
+  local path = marker_path()
+  if not path then return true end -- no path: nothing to migrate against, and never migrate twice-blind
+  local reader = host and host.read_file
+  if type(reader) ~= "function" then return true end
+  local ok, text = pcall(reader, path)
+  return ok and type(text) == "string" and text ~= ""
+end
+
+local function record_migrated(opts, count)
+  if type(opts.migrate) == "function" then return opts.migrate(count) end
+  local path = marker_path()
+  if not path then return end
+  local writer = host and host.write_file
+  if type(writer) ~= "function" then return end
+  pcall(writer, path, json.encode({ at = os.time(), retired = count }))
+end
+
+-- Every pause record the node owes, abandoned ones included, for the health line's `abandoned: n`.
+function M.mark_abandoned(session, reason, opts)
+  opts = opts or {}
+  local dir = M.paused_dir()
+  if not dir then return nil end
+  local reader = opts.read_file or (host and host.read_file)
+  local writer = opts.write_file or (host and host.write_file)
+  if type(reader) ~= "function" or type(writer) ~= "function" then return nil end
+  local safe = tostring(session or ""):gsub("[^%w%-_]", "")
+  if safe == "" then return nil end
+  local path = dir .. "/" .. safe .. ".json"
+  local ok, text = pcall(reader, path)
+  local record = {}
+  if ok and type(text) == "string" then
+    local decoded_ok, decoded = pcall(json.decode, text)
+    if decoded_ok and type(decoded) == "table" then record = decoded end
+  end
+  record.session = session
+  record.abandoned = true
+  record.abandoned_reason = tostring(reason or ""):sub(1, 300)
+  record.abandoned_at = os.time()
+  pcall(writer, path, json.encode(record))
+  return path
+end
+
+-- `opts` exists for the test (scripts/test-deploy-pause.lua): exec, query, schedule, the session check, the
+-- migration marker and the clock are injected; a real caller passes nothing and gets the host's ledger,
+-- selfloop's scheduler and os.time().
 function M.ensure_resumes(now, opts)
   opts = opts or {}
   now = tonumber(now) or os.time()
@@ -331,36 +401,78 @@ function M.ensure_resumes(now, opts)
   if type(exec) ~= "function" or type(query) ~= "function" then
     return { error = "no_ledger", rearmed = 0 }
   end
-  if M.waiting(now, opts) then return { waiting = true, rearmed = 0 } end
-  local lost = query([[SELECT id, session_id, owner FROM self_wakes
-    WHERE reason=? AND status IN ('unknown','failed','cancelled')]], { M.RESUME_REASON }) or {}
+  local cutoff = now - M.RESUME_WINDOW_SECONDS
+  -- 1. THE ONE-TIME MIGRATION: rows older than the window are retired, and it says how many.
+  local migration = 0
+  if not migrated(opts) then
+    local retired = exec([[UPDATE self_wakes SET status='superseded', last_error='superseded: too old to resume',
+      updated_at=? WHERE ]] .. LOST_WHERE .. [[ AND created_at<?]], { now, M.RESUME_REASON, cutoff })
+    migration = tonumber(type(retired) == "table" and retired.changes or 0) or 0
+    record_migrated(opts, migration)
+    if type(host) == "table" and type(host.log) == "function" then
+      pcall(host.log, string.format(
+        "deploy pause: migration: %d lost resume row(s) older than %ds marked superseded (too old to resume)",
+        migration, M.RESUME_WINDOW_SECONDS))
+    end
+  end
+  if M.waiting(now, opts) then return { waiting = true, rearmed = 0, migration = migration } end
+  local lost = query([[SELECT id, session_id, owner, attempts FROM self_wakes WHERE ]] .. LOST_WHERE
+    .. [[ AND created_at>=?]], { M.RESUME_REASON, cutoff }) or {}
   local schedule = opts.schedule
   if type(schedule) ~= "function" then
     schedule = function(args, session, user)
       return dofile("lua/core/selfloop.lua").schedule(args, { session_id = session, user_id = user })
     end
   end
-  local rearmed = 0
+  local exists = opts.session_exists
+  if type(exists) ~= "function" then
+    exists = function(session)
+      local ok, row = pcall(function() return dofile("lua/core/memory.lua").session(session) end)
+      return ok and type(row) == "table"
+    end
+  end
+  local rearmed, abandoned = 0, 0
   for _, row in ipairs(lost) do
     local session = tostring(row.session_id or "")
-    if session ~= "" then
-      -- Still owed and already on its way (a newer row a later pause wrote): leave it.
+    if session ~= "" and exists(session) then
+      -- A PARKED session is one nobody may resume: the operator held it (lua/core/session_park.lua), and the
+      -- tick skips its rows for the same reason.
+      local parked = query("SELECT session_id FROM self_wake_pauses WHERE session_id=? LIMIT 1", { session }) or {}
       local live = query([[SELECT id FROM self_wakes WHERE session_id=? AND reason=?
         AND status IN ('pending','dispatching') LIMIT 1]], { session, M.RESUME_REASON }) or {}
-      if #live == 0 then
-        local owner = tostring(row.owner or "master")
-        local armed = schedule({ in_seconds = 0, reason = M.RESUME_REASON, prompt = M.resume_prompt() }, session, owner)
-        local wake = type(armed) == "table" and armed.wake or nil
-        if wake and wake.id then
-          pcall(exec, [[UPDATE self_wakes SET status='superseded', last_error=?, updated_at=? WHERE id=?]],
-            { "a newer resume was armed: " .. tostring(wake.id), now, row.id })
-          rearmed = rearmed + 1
-          pcall(M.say_rearmed, session, row.id, wake.id)
+      if #parked == 0 and #live == 0 then
+        local chain = (tonumber(row.attempts) or 0) + 1
+        if chain > M.RESUME_MAX_REARMS then
+          -- 2. THE CHAIN IS SPENT: this pause is over, and it says so instead of trying for ever.
+          pcall(exec, [[UPDATE self_wakes SET status='resume_abandoned', last_error=?, updated_at=? WHERE id=?]],
+            { string.format("resume_abandoned: %d re-arm(s) and no turn", chain - 1), now, row.id })
+          pcall(M.mark_abandoned, session, "the resume could not run after " .. tostring(chain - 1) .. " re-arm(s)", opts)
+          if type(host) == "table" and type(host.log) == "function" then
+            pcall(host.log, string.format(
+              "deploy pause: ABANDONED the resume of session %s after %d re-arm(s) (wake %s); the pause record says so",
+              session, chain - 1, tostring(row.id)))
+          end
+          abandoned = abandoned + 1
+        else
+          local armed = schedule({
+            in_seconds = M.RESUME_BACKOFF_SECONDS * chain,
+            reason = M.RESUME_REASON,
+            prompt = M.resume_prompt(),
+          }, session, tostring(row.owner or "master"))
+          local wake = type(armed) == "table" and armed.wake or nil
+          if wake and wake.id then
+            -- The chain is carried on the new row, so the next tick counts THIS attempt.
+            pcall(exec, "UPDATE self_wakes SET attempts=? WHERE id=?", { chain, wake.id })
+            pcall(exec, [[UPDATE self_wakes SET status='superseded', last_error=?, updated_at=? WHERE id=?]],
+              { "a newer resume was armed: " .. tostring(wake.id), now, row.id })
+            rearmed = rearmed + 1
+            pcall(M.say_rearmed, session, row.id, wake.id)
+          end
         end
       end
     end
   end
-  return { rearmed = rearmed }
+  return { rearmed = rearmed, abandoned = abandoned, migration = migration }
 end
 
 -- Said once, on the log an operator reads, every time a lost resume is re-armed. Cheap on purpose: the fact is

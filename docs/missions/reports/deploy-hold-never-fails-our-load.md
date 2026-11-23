@@ -456,3 +456,73 @@ built from the same `<data>/deploy-paused/*.json` records the sentinel already r
 The guarantee is the node's, not the runner's: it is the same `selfloop.tick` for every session kind, and it
 holds with no watchdog present - which is what makes it safe for a fleet node and for a person's chat, neither of
 which has the orchestrator's paused-marker watchdog. That watchdog can stay until this is rolled out.
+
+## Addendum 3 (Fable, 23/11 ~22:35Z): the resume repair, bounded
+
+Fable accepted the root cause of `94c66c5b` and found three defects in it, plus one question. All four are fixed
+on this branch; the texts 15-17 he approved are unchanged.
+
+### 1. No age bound -> a 6 h window, and a one-time migration
+
+`ensure_resumes` now reads only rows whose own `created_at` is inside `M.RESUME_WINDOW_SECONDS` (**6 h**), and
+only for a session that still exists and is not parked. Without the bound, the first tick after an install on
+every node at G would wake every session that ever lost a resume - paid model turns, days later, on stale
+requests. Rows older than the window are retired ONCE, by a migration that says how many it retired
+(`deploy pause: migration: N lost resume row(s) older than 21600s marked superseded (too old to resume)`), keyed
+by `<data>/resume-migration-1` so it runs once per node.
+
+Tested with a fake ledger: an `unknown` row created 7 h ago and one created 1 min ago -> exactly one wake, for
+the recent one; and with the marker absent, the migration reports `changes` and writes it with that count, while
+still waking nothing old.
+
+### 2. "Exactly once" was false -> a chain of 2, with backoff, then abandoned
+
+The re-armed wake is itself a resume row, so a session that can never run would be re-armed every tick for ever.
+The chain is carried on the new row's own `attempts` (`+1` per re-arm), the wait grows
+(`M.RESUME_BACKOFF_SECONDS * chain`: 30 s, then 60 s), and past `M.RESUME_MAX_REARMS` (**2**) the row becomes
+`resume_abandoned`, the session's pause record is marked `abandoned` (so the health line can count it) and ONE
+log line says so. So a resume that always fails is tried **3 times in total** (the original turn, one re-arm, a
+second re-arm) and then stops.
+
+Tested: a row at the cap is abandoned, not re-armed (`rearmed=0, abandoned=1`), no wake is scheduled, its row
+says `resume_abandoned` and the pause record is marked; and in the same pass both under-cap rows are re-armed
+with 1x and 2x backoff and carry their place in the chain.
+
+### 3. An operator's cancel is final
+
+`cancelled` is re-armed ONLY when the NODE cancelled the dispatch - `last_error = 'cancelled before execution'`
+(`lua/core/selfloop.lua:1262`, the run's own cancellation before it started) - and never a bare `cancelled`,
+which is what `wa wake cancel` writes (`lua/core/selfloop.lua:612`) and what the due-cancel writes (`:822`).
+Tested: one row of each; only the node's is re-armed, and the person's stands.
+
+### 4. An interactive chat whose window was CLOSED during the pause
+
+**It is resumed, and it is not a new policy: it is the existing behaviour of every wake in this tree.** Closing
+the window ends the SSE stream and nothing else - no code parks a session when a reader goes away (the only
+writer of a hold is `wa session park`, `lua/core/session_park.lua`, whose state is a `self_wake_pauses` row of
+kind `park`; `lua/core/server.lua:782-792` is a ­reader of that state, not a writer). `selfloop.tick` dispatches
+the rows of every session that is not parked, exactly as it does for a `--once` worker and a self-wake, so the
+resume runs with nobody attached and its answer is written into the transcript - which is what the person finds
+when they reopen the conversation, and what the ledger's `unfinished` state already assumes.
+
+The two mechanisms that DO stop a session are honoured by `ensure_resumes`: a session row that no longer exists
+is not woken, and a parked one (`self_wake_pauses`) is not woken - the same rule the tick uses. If the product
+ever wants "no turn without a reader", that is a park, and `wa session park` already exists for it; this mission
+does not invent a second rule.
+
+### Rows run for this review
+
+| row | result |
+| --- | --- |
+| `scripts/test-deploy-pause.lua` (window, migration, chain, backoff, operator cancel, gone/parked, waiting) | `deploy claim wait ok (49 checks)` |
+| `scripts/test-deploy-wait.sh` (incl. 7b: served/worker/selfwake x install/withdraw) | `deploy wait ok` |
+| `scripts/test-deploy-bound.sh` (incl. the health line with `abandoned:`) | `deploy bound ok` |
+| `scripts/test-selfloop-pause.lua` | `self-loop pause: 113 checks passed` |
+| `scripts/test-cli-wake-row.lua` | `cli wake row ok (30 checks)` |
+| `scripts/test-handle-wake.lua` | `handle wake: 17 checks` |
+
+### Texts to approve (added by this review)
+
+18. `deploy pause: ABANDONED the resume of session <id> after <n> re-arm(s) (wake <lost>); the pause record says so`
+19. `deploy pause: migration: <n> lost resume row(s) older than 21600s marked superseded (too old to resume)`
+20. `wa-sentinel status`: `paused sessions: <n>, oldest <age>, abandoned: <m>` (text 17 now carries the count)
