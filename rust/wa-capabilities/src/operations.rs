@@ -812,7 +812,30 @@ fn command_result(manager: &Manager, id: &str, mut state: Value) -> Value {
     state["note"] = json!(format!(
         "the shell command completed with exit code {code}; descendants remain supervised as operation {id} under the original command timeout. Their work is not complete, and they may produce more output. Observe or await full settlement only if the task depends on them."
     ));
+    // IT SAYS SO IN THE SAME RESULT (item 4, 23/11). A foreground shell whose descendants were ADOPTED used
+    // to answer a state that carried `promoted: true` deep in it and a note about "descendants", so a reader
+    // that looked for the ordinary command answer saw a result that had quietly turned into a background
+    // operation (ledger notes 106, 148, 151, 170). The sentence names the fact, the SECOND it happened at,
+    // the operation to await and the output so far, which is everything a caller needs to continue.
+    if state["promoted"] == true {
+        let milliseconds = state["foreground_return_elapsed_ms"]
+            .as_u64()
+            .or_else(|| state["elapsed_ms"].as_u64())
+            .unwrap_or(0);
+        state["moved_to_background"] = json!(true);
+        state["moved_to_background_after_ms"] = json!(milliseconds);
+        state["moved_to_background_note"] = json!(promoted_note(id, milliseconds, code));
+    }
     state
+}
+
+/// The one sentence a promotion answers, so `bash`, `operation await` and the code-mode handle all say the
+/// same thing about the same event (item 4, 23/11).
+fn promoted_note(id: &str, milliseconds: u64, code: i64) -> String {
+    let seconds = milliseconds as f64 / 1000.0;
+    format!(
+        "moved to the background after {seconds:.1}s: operation {id}, await it. The shell itself exited with code {code} and its descendants are still supervised under the original timeout; stdout/stderr below are what they had written when this answer was taken, and more may follow."
+    )
 }
 /// The names this node's policy re-grants to tool children: "tool_env_allow": ["GH_TOKEN", ...] in the
 /// grant policy file (wa_features::policy_path). Read here, once, because this is where the one manager
@@ -3123,5 +3146,69 @@ mod await_returns_at_its_own_wait {
         let out = settled["stdout"].as_str().unwrap_or("");
         assert_eq!(out.matches("waited").count(), 1,
             "the command ran exactly once, stdout was {out:?}");
+    }
+}
+
+/// ITEM 4 (23/11): a promotion SAYS SO in the same result, with the output so far.
+///
+/// The measured complaint (ledger notes 106, 148, 151, 170): a foreground shell whose descendants were
+/// adopted turned into a background operation, and the answer a reader got did not say that had happened -
+/// it read like an ordinary command answer with a `note` about "descendants", so the caller either re-ran the
+/// work or hunted for an id it had not noticed. This drives the REAL foreground path with a command that
+/// exits leaving a live descendant, and pins the sentence, the seconds it happened at, the operation to
+/// await and the output so far.
+///
+/// Isolation: `manager()` roots its records under $HOME (a OnceLock), so the test REFUSES to run unless HOME
+/// is a scratch/temp directory - the same guard the adopted-tree tests beside it use.
+#[cfg(test)]
+mod promotion_says_so {
+    use super::*;
+    use crate::host::shell_config;
+
+    fn scratch_home_or_refuse() -> std::path::PathBuf {
+        let home = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default());
+        let text = home.to_string_lossy().to_string();
+        let scratch = text.contains("tmp") || text.contains("temp") || text.contains("scratch")
+            || text.contains("TMP");
+        let real = text.ends_with("/.wasm-agent");
+        assert!(scratch && !real,
+            "refusing to run: this test starts real operations, so HOME must be a scratch or temp \
+             directory and never the node's own ~/.wasm-agent (got {text})");
+        home
+    }
+
+    #[test]
+    fn a_promoted_shell_says_in_the_same_result_that_it_moved_to_the_background() {
+        let _home = scratch_home_or_refuse();
+        let shell = shell_config();
+        // The shell prints, leaves a live descendant behind, and EXITS: that is the promotion.
+        let result = super::foreground(
+            &shell.0, &shell.1,
+            "echo first-line; (sleep 3; echo later) & exit 0",
+            "", 60, &serde_json::json!({"tool": "bash"}),
+        ).expect("the foreground path answers");
+        let id = result["operation_id"].as_str().expect("operation id").to_string();
+        assert_eq!(result["promoted"], serde_json::json!(true),
+            "the fixture must actually promote, or this test proves nothing: {result}");
+        assert_eq!(result["moved_to_background"], serde_json::json!(true),
+            "the result carries the fact in its own field: {result}");
+        let note = result["moved_to_background_note"].as_str().unwrap_or("");
+        assert!(note.starts_with("moved to the background after "),
+            "the sentence names the move: {note}");
+        assert!(note.contains(&format!("operation {id}, await it")),
+            "and the id to await, in the same sentence: {note}");
+        assert!(note.contains("more may follow"),
+            "and that the output is not complete: {note}");
+        assert!(result["moved_to_background_after_ms"].is_u64(),
+            "the seconds it happened at are measured, not guessed: {result}");
+        assert!(result["stdout"].as_str().unwrap_or("").contains("first-line"),
+            "and the output so far travels with the sentence: {result}");
+        // Stop this test's own work: cancel reaches the adopted tree, and a test that left a `sleep` behind
+        // would hold the node's next run.
+        let _ = super::control("cancel", &serde_json::json!({"id": id, "session": ""}), &shell);
+        let stopped = super::control("wait", &serde_json::json!({"id": id, "wait_ms": 10000, "session": ""}), &shell)
+            .unwrap_or(serde_json::json!({}));
+        assert_eq!(stopped["settled"], serde_json::json!(true),
+            "the cancelled promotion settled, so nothing of this test is left running: {stopped}");
     }
 }
