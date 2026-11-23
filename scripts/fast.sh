@@ -974,6 +974,12 @@ check linux-channel bash scripts/test-linux-channel.sh
   # binary in a private tmux pty and REFUSES to run unless its fixture served the request, so a run
   # that reached any other endpoint fails instead of passing.
   WA_BIN="$bin" check fence-card-pty node scripts/test-fence-card-pty.mjs
+  # THE DIFF CARD READS LIKE CLAUDE CODE'S (Victor 23/11, two screenshots): open by default, ONE
+  # blank row above and below it, a readable band, `● Create(path)` with the shortest name, one
+  # number column, `… +N lines (ctrl+o to expand)` past 40 lines and Ctrl+O drawing the rest.
+  # Same shape as the fence card above it: the REAL binary in a private tmux pty against a local
+  # SSE fixture that plays the model, and a failure (never a pass) when the fixture served nothing.
+  WA_BIN="$bin" check diff-card-pty node scripts/test-diff-card-pty.mjs
   # The TWO BLOCKS OF change/tui-reflow-blocks FOLLOW THE WINDOW (Victor 22/11): a ```bash card and a
   # ```js run block, drawn at 120, 60, 120 and 60 columns in a real pty. Each is whole and unmarked where
   # it fits, cut with ONE mark in the left gutter of the row the line goes on where it does not (the run
