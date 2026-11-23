@@ -2789,6 +2789,10 @@ gate_run bash scripts/test-termux.sh
 # The PUBLIC Linux channel's publisher: build (stubbed), sign (fixture key), verify, upload (fake GitHub), index,
 # and the freshness verdict - with the index left untouched by every refusal. Hermetic, 2 s.
 gate_run bash scripts/test-linux-channel.sh
+# The channel STEP, end to end: the real step, the real publisher and the real builder (the build and gh stand
+# in) - the join that failed on release F (23/11). Needs a Linux host, the same fixtures, a scratch vault.
+if [ "$(uname -s)" = Linux ]; then gate_run bash scripts/test-release-channel-e2e.sh
+else echo 'SKIP: release channel step end-to-end row (needs a Linux host)'; SKIPPED=$((SKIPPED + 1)); fi
 if [ "$(uname -s)" = Linux ]; then gate_run bash scripts/test-linux-release-fetch.sh
 else echo 'SKIP: Linux release channel fixture (needs a Linux host)'; SKIPPED=$((SKIPPED + 1)); fi
 # The one-command installer (scripts/install.sh): the platform matrix, the channel per platform, the
