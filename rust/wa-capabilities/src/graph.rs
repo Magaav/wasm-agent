@@ -568,8 +568,29 @@ impl Scheduler {
             state.repairs = state.repairs.saturating_add(1);
             drop(state);
             match repair_indexes(&dir, &file) {
-                Repair::Repaired {complaints} | Repair::Healthy {complaints} => {
+                Repair::Repaired {complaints} => {
                     let line = format!("graph_db_repaired root={} file={file} complaints={complaints} next=reindex", entry.root.display());
+                    let mut state = entry.state.lock().unwrap();
+                    state.attempts = 0;
+                    state.stopped = false;
+                    state.retry_at = None;
+                    state.reported = Some(line.clone());
+                    drop(state);
+                    eprintln!("{line}");
+                    self.enqueue(&entry);
+                    return;
+                }
+                // NOT DAMAGE AND NOT A REPAIR: the component answered `database disk image is malformed`
+                // and `PRAGMA integrity_check` answers `ok` about the same file. Nothing was reindexed,
+                // so the line may not say anything was - `graph_db_repaired complaints=0 next=reindex`
+                // reported an event that never happened for exactly the pair of verdicts this node still
+                // cannot explain (measured 23/11 03:44 local: `graph.db.malformed-20261123T064420Z`
+                // reads `integrity_check: ok` natively, with all 133,959 nodes, and the component had
+                // called it malformed). It is its own event and `next=retry` is what happens: the store
+                // is kept as it is and the component's answer is retried, bounded by `REPAIR_LIMIT` a
+                // streak before the verdict that was always taken - a quarantine and a rebuild.
+                Repair::Healthy => {
+                    let line = store_healthy_line(&entry.root, &file);
                     let mut state = entry.state.lock().unwrap();
                     state.attempts = 0;
                     state.stopped = false;
@@ -1011,8 +1032,10 @@ enum Repair {
     /// Every complaint was an index entry, and after `REINDEX` the store passes `integrity_check`.
     Repaired {complaints: usize},
     /// The store passes `integrity_check` already: the component's verdict is not the store's, so the
-    /// index is not thrown away - nothing is copied and nothing is rebuilt.
-    Healthy {complaints: usize},
+    /// index is not thrown away - nothing is copied, nothing is reindexed and nothing is rebuilt. The
+    /// verdict that gets retried is the component's own answer, and it carries no complaint count
+    /// because no complaint was found (see `store_healthy_line`).
+    Healthy,
     /// Not index-only, or the rebuild did not settle it. The verdict is why, and it is what the
     /// quarantine line must carry.
     StillDamaged {verdict: String},
@@ -1046,7 +1069,7 @@ fn repair_under_lock(dir: &Path, file: &str) -> Repair {
         // attempted and the quarantine is - exactly what happened before this path existed.
         Err(verdict) => return Repair::StillDamaged {verdict},
     };
-    if complaints.len() == 1 && complaints[0] == "ok" {return Repair::Healthy {complaints: 0};}
+    if complaints.len() == 1 && complaints[0] == "ok" {return Repair::Healthy;}
     // UNKNOWN IS NOT YES. A list SQLite truncated at `INTEGRITY_ERRORS` cannot say that every complaint is
     // an index entry, so it is neither repaired nor reported as repaired.
     if complaints.len() as i64 >= INTEGRITY_ERRORS {
@@ -1158,6 +1181,20 @@ fn retain_quarantine(dir: &Path, file: &str, keep: usize, budget: u64) -> usize 
 
 /// The one line a quarantine prints. A function because it is what an operator reads in the journal, and
 /// because a test can hold its fields to account without starting a node.
+/// The one verdict that is neither damage nor a repair: the component called the store malformed and
+/// `PRAGMA integrity_check` calls it healthy.
+///
+/// It has its own name because the repair line was false for it - nothing was reindexed - and because this
+/// pair of verdicts about one file is the disagreement this node has not explained yet: on the copy
+/// `~/.wasm-agent/graph.db.d/graph.db.malformed-20261123T064420Z` (quarantined 23/11 03:44 local, read
+/// only, 182,968,320 B) `PRAGMA integrity_check(200)` answers `ok` with 133,959 nodes, 380,380 edges and
+/// 2,694 files, while the component had answered `database disk image is malformed` for the same store.
+/// `next=retry` is what the scheduler does with it: the store is kept as it is and the component's answer
+/// is asked again.
+fn store_healthy_line(root: &Path, file: &str) -> String {
+    format!("graph_db_store_healthy root={} file={file} next=retry", root.display())
+}
+
 fn quarantine_line(root: &Path, moved: &[PathBuf], reason: &str, integrity: &str, kept: usize, disk_note: &str) -> String {
     let names: Vec<String> = moved.iter().map(|path| path.display().to_string()).collect();
     format!("graph_db_quarantined root={} moved={} reason={} integrity={} kept={kept} next=rebuild{disk_note}",
