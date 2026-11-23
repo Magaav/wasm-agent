@@ -22,7 +22,8 @@
 # Sourced by scripts/fast.sh; exercised by scripts/test-fast-rows.sh (no node, no cargo, seconds).
 # THE NEVER-DROPPED ROWS. Two kinds, and a third entry is only added with the evidence for it:
 #
-#   * the row-environment probe and the ten `test-land-*.lua` parts: the run's own correctness and the landing
+#   * the row-environment probe and the land rows (`test-land-*.lua`: the ten parts of the landing machine's
+#     own row, and the quick row's five by subject since 23/11): the run's own correctness and the landing
 #     machine's own row. A narrowed run that lost any of them would go green saying less than a full one;
 #   * WHOLE-TREE ROWS: a row whose verdict depends on files it does not name, because the set it judges is
 #     enumerated from the repository - "every reachable module's refusal codes", "every tool's declared
