@@ -9,6 +9,7 @@ Branch `change/chat-view-round-2`, base `7865a08e`. Five commits:
 | `446a1cca` | the cost on its own row (a wide Usage row was being cut by the panel), and the three pty rows, wired into the fast path |
 | `a562ece8` | a peer's command names the files it changed; this node draws one row per file |
 | `6599daee` | drop a probe script a measurement left behind |
+| `eef97c22` | the three pty rows start tmux through `scripts/lib/tmux-session.mjs` (the row that guards against leaked servers found them), and `scripts/test-run-block-pty.mjs` reads the new one-row result |
 
 Nothing was pushed, no release, no fleet, nothing on a live peer, no install into `~/.local/bin`, no `git stash`. Item 3 of the brief (the Create/Update card) was already landed by `change/diff-card-reads-like-claude-code` (base commit `edad0d39`): measured on the base, its card is drawn open with the blank row above and below, so it is NOT redone here and no file of `lua/core/diff_view.lua` was touched.
 
@@ -100,6 +101,24 @@ Nothing the model reads changed: measured with the same probe on the base and on
 ### Regression rows run here (this session, this node)
 
 `scripts/test-script-bash-changes.lua` 15 ok · `scripts/test-codemode-blocks.lua` 85 ok · `scripts/test-status-midrun.lua` 25 ok · `scripts/test-chat-printer.lua` 12 ok · `cargo test -p wa-term` green (202 lib tests among them, plus the new pair) · the three pty rows above, each green on the tip and red on a base worktree.
+
+## The narrowed fast path, run here (suite rule: the rows my files touch)
+
+`flock -o ~/Work/missions/.suite.lock env WA_BIN=<this tree's release build> WA_FAST_ROWS=/tmp/cvr2-rows.txt bash scripts/fast.sh`,
+491 s, **128 checks, 3 failed**, over the rows for `status`, `telemetry`, `codemod-block`, `codemod-pending`,
+`script-writes`, `cli-view`, `chat-printer`, the two whole-tree rows (`tool-schema-fidelity`,
+`refusal-contract`) and the three new pty rows:
+
+| failed row | whose | what was measured |
+|---|---|---|
+| `esc-stops-pty` - `bash: Esc brings the prompt back in under 300 ms` | **pre-existing**: the same row fails on a base worktree at `7865a08e` with this binary (825 ms against a 300 ms bound), and this branch touches no file of that path (`git diff --name-only 7865a08e HEAD` names none of `esc-stops`, `session_view`, the interrupt lane) | a load-sensitive bound on a machine that was installing builds all session |
+| `tmp-cleanliness` (2 checks) | **pre-existing in the row, mine FIXED**: the row requires every `scripts/test-*-pty.mjs` to start tmux through `scripts/lib/tmux-session.mjs`. It named my three new rows and `test-diff-card-pty.mjs` + `test-esc-stops-pty.mjs`; mine were moved onto the helper in `eef97c22`, and the two that still fail are not this branch's (`diff-card` landed from the sibling mission, `esc-stops` predates it) | the leak guard works: it found exactly the rows that start their own server |
+| `install-guards` (6 checks) | **environmental**: every failed check reports `upgrade: refused inside a turn running on the node it would replace; request the external sentinel instead` - the deploy-in-flight guard answered instead of the row's own subject, because the node was installing two builds while the suite ran (two failed `wa-deploy-*` units are still listed on this machine). No file of the upgrade path is touched by this branch | re-run when the node is idle |
+
+Before `eef97c22` the same narrowed run failed 5 rows; the two that were mine (`run-block-pty`'s three
+result-row checks, and the three pty rows in `tmp-cleanliness`) are green now:
+`test-run-block-pty.mjs` 22 ok, `test-status-midrun-pty.mjs` 12 ok, `test-script-output-pty.mjs` 11 ok,
+`test-bash-changes-pty.mjs` 8 ok, each run singly against this tree's binary.
 
 ## Not done, and open
 
