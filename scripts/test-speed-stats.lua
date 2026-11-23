@@ -238,6 +238,12 @@ for _, delta in ipairs(stats.deltas(kinds_pair, kinds_pair[2])) do
 end
 check(kind_delta and kind_delta.comparable == false and kind_delta.kind_differs == true,
   'the change against the previous commit says the landing kinds differ')
+-- A PREVIOUS LINE WITHOUT A KIND IS NOT "ANOTHER KIND": it cannot be compared at all, and the table
+-- says which of the two it is - a line recorded before kinds (23/11) or a landing of another shape.
+local old_then_new = { landing_point('old', 1.0, 2000), landing_point('new', 1.0, 280000, 'lua') }
+local old_delta_table = stats.format_table(old_then_new, 'new')
+check(old_delta_table:find('(previous landing carries no kind)', 1, true) ~= nil,
+  'a previous line with no kind says so, not "another kind": ' .. tostring(old_delta_table:match('landing[^\n]*')))
 local kind_delta_table = stats.format_table(kinds_pair, 'i1')
 check(kind_delta_table:find('(landing kind differs)', 1, true) ~= nil,
   'and the table says it in the row: ' .. tostring(kind_delta_table:match('landing[^\n]*')))

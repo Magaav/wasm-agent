@@ -28,6 +28,16 @@ Branch `change/speed-board-landing-kinds`, base `85593e74`.
    text is in the diff (`git diff 85593e74..HEAD -- lua/ rust/ docs/HOST.md` is empty); the speed table and
    the main-health line are operator-facing.
 
+### What the table says, measured on the real 20-line history
+
+A copy of `~/Work/missions/speed-history.jsonl` with the newest landing row given `kind=lua` (the shape
+the next landing will write) prints, through `scripts/lib/speed-stats.lua table`:
+
+```
+  landing    9.7 min   -  +28900.0% (previous landing carries no kind)  no_baseline: 0 of 3 comparable points (landing kind lua); 18 line(s) in the window carry no kind and are not comparable
+```
+
+No RED, the count, the kind, and the reason the older lines cannot be used - the sentence Victor asked for, on the history as it is today (18 of the 19 landing lines carry no kind).
 ## main-health: which binary the live rows run, and the 4b314af5 hour
 
 `992fc457` (`scripts/main-health.sh`). The speed block runs at the END of a health run that takes ~20
@@ -207,23 +217,24 @@ speed-stats table / verdict (`scripts/lib/speed-stats.lua`):
 4. `ok (<N> comparable points)` / `ok (landing kind <kind>, <N> comparable points)`
 5. `; <N> line(s) in the window carry no kind and are not comparable`
 6. `+x.x% (landing kind differs)` beside the delta column (the existing `(load differs)` stays)
+7. `+x.x% (previous landing carries no kind)` beside the delta column, when the line before it was recorded before kinds
 
 speed-board line (`scripts/speed-board.sh`):
-7. `landing=<ms>ms@<load>/<kind>` and `landing=<ms>ms@<load>/nokind`
+8. `landing=<ms>ms@<load>/<kind>` and `landing=<ms>ms@<load>/nokind`
 
 main-health (`scripts/main-health.sh`), stderr:
-8. `main-health: speed binary <path> (source: the binary this run's fast path proved for <sha12> (sha256 <hash12>))`
-9. `main-health: speed binary <path> (source: the tree's own binary, by its stamp (scripts/lib/fast-binary.sh))`
-10. `main-health: speed binary <path> (source: the installed node, and installed.txt names this commit)`
-11. `main-health: speed binary (none: no binary of <sha12> on this machine - <reason>, so the four live rows are RED)`
+9. `main-health: speed binary <path> (source: the binary this run's fast path proved for <sha12> (sha256 <hash12>))`
+10. `main-health: speed binary <path> (source: the tree's own binary, by its stamp (scripts/lib/fast-binary.sh))`
+11. `main-health: speed binary <path> (source: the installed node, and installed.txt names this commit)`
+12. `main-health: speed binary (none: no binary of <sha12> on this machine - <reason>, so the four live rows are RED)`
     with `<reason>` one of: `the binary the fast path used (<path>) was sha256 <a> and is now <b>: another build
     replaced it while this run measured`; `the fast run recorded no sha256 for <path>, so its bytes cannot be
     shown to be <sha12>`; `sha256sum is not on PATH, so the fast run's binary (<path>) cannot be shown to be
     the bytes it graded`; `the binary of the fast run (<path>) is gone, or its commit (<sha12>) is not <sha12>`
 
 test-speed-board (a failing run):
-12. `FAIL speed-board: <N> of <M> checks failed`
-13. `scratch kept for diagnosis: <dir>`
+13. `FAIL speed-board: <N> of <M> checks failed`
+14. `scratch kept for diagnosis: <dir>`
 
 ## FACTORY.md - proposed, not written
 

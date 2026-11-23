@@ -293,6 +293,9 @@ function M.deltas(history, entry)
           row.kind = now_kind
           row.previous_kind = before_kind
           row.kind_differs = not same_kind
+          -- WHICH KIND OF DIFFERENT, said correctly: a line written before kinds existed has none to
+          -- compare with, and calling that 'the kind differs' would read as two landings of two kinds.
+          row.previous_kind_missing = (before_kind == nil)
         end
         row.comparable = same_kind and M.load_comparable(row.load, row.previous_load)
       end
@@ -408,7 +411,8 @@ function M.format_table(history, sha)
       -- kind. The number stays on the table - it is a fact about two points - and the note says what it
       -- cannot be read as.
       if delta.kind_differs then
-        change = change .. ' (landing kind differs)'
+        change = change .. (delta.previous_kind_missing and ' (previous landing carries no kind)'
+          or ' (landing kind differs)')
       elseif delta.comparable == false then
         change = change .. ' (load differs)'
       end
