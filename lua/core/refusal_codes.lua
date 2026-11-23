@@ -546,6 +546,7 @@ return {
   ['wake_already_dispatching']='selfloop.lua',
   ['wake_at_is_in_the_past']='selfloop.lua',
   ['wake_at_must_be_unix_epoch_seconds']='selfloop.lua',
+  ['wake_defer_unavailable']='selfloop.lua',
   ['wake_dispatch_answer_unreadable']='selfloop.lua',
   ['wake_dispatch_no_receipt']='selfloop.lua',
   ['wake_dispatch_unavailable']='selfloop.lua',
