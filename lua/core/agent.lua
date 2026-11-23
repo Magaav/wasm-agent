@@ -3916,6 +3916,15 @@ function M:run_body(text, images)
       -- when the call was killed by its bound, where the phases *are* the explanation.
       -- The rule and the reasons live in `tool_output.execution_timing`.
       local execution_timing=tool_output.execution_timing(function_.name,output)
+      -- A command's answer no longer carries its phase breakdown (mission slim-tool-results), so the
+      -- tool branch hands it to the span through the context instead; the operation id must match, so a
+      -- value from an earlier call cannot be attached to this one.
+      if execution_timing==nil and type(dispatch_ctx)=="table" and type(dispatch_ctx.execution_timing)=="table"
+          and type(output)=="table" and dispatch_ctx.execution_timing.operation_id~=nil
+          and dispatch_ctx.execution_timing.operation_id==output.operation_id then
+        execution_timing=dispatch_ctx.execution_timing.timing
+      end
+      if type(dispatch_ctx)=="table" then dispatch_ctx.execution_timing=nil end
       local tool_images=take_tool_images(function_.name,output)
       local ok_tool = tool_output.outcome(function_.name,output)
       -- What the done gate counts as an effect: something outside this run may have changed. A read-only

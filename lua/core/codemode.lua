@@ -56,10 +56,14 @@ local function script_value(value,success)
   end
   return {text=text},true
  end
- if not success and type(value.process_exit_code)=='number' and value.process_exit_code~=0 and value.settled==true
+ -- The fields are the ones a command result still CARRIES (lua/core/bash_result.lua): code, ok and
+ -- output_complete. `settled`/`process_exit_code` moved to the operation record, and a reader left on
+ -- them would have made every non-zero exit a thrown error again - the one behaviour this branch exists
+ -- to keep (a command that RAN and exited non-zero is a result, not an exception).
+ if not success and type(value.code)=='number' and value.code~=0 and value.output_complete~=false
    and value.timed_out~=true and value.cancelled~=true and value.error==nil then
   local out={};for k,v in pairs(value) do out[k]=v end
-  out.ok=true;out.status=200;out.code=value.process_exit_code;out.state=nil
+  out.ok=true;out.status=200
   return out,true
  end
  return value,success
@@ -86,6 +90,8 @@ local session_results=dofile('lua/core/codemode_results.lua')
 -- on the managed operations the node already supervises - this file only names which tool call an
 -- operation is (`lua/core/codemode_pending.lua`).
 local pending_calls=dofile('lua/core/codemode_pending.lua')
+-- What a command's answer keeps for the caller, in one allow-list (lua/core/bash_result.lua).
+local bash_result=dofile('lua/core/bash_result.lua')
 -- What a connector answers, learned from its settled answers for the connector index (keys only).
 local return_shapes=dofile('lua/core/return_shapes.lua')
 local connector_name=dofile('lua/core/codemode_policy.lua').connector
@@ -567,6 +573,17 @@ local function settle_call(s,call)
      local called,result=pcall(pending_calls.invoke,s.dispatch,s.popts,call.tool,params,stripped,wait_s);admitted=true
      live_settled(ctx,call.id,call.tool,result,called,live_started)
      if called then
+      -- A command's answer keeps what a caller acts on (lua/core/bash_result.lua). The dispatcher already
+      -- slimmed a DIRECT call; this one is the same shape built from the operation record by the pending
+      -- layer (a script's bash IS a managed operation, lua/core/codemode_pending.lua), so it is slimmed
+      -- here - one function, two producers, one shape for the script and for the evidence showCall reads.
+      -- The phase breakdown of a command leaves the answer here, and it is AGGREGATE EVIDENCE, not
+      -- context: it travels to the tool span through the context (lua/core/agent.lua), keyed by the
+      -- operation so it can never be attached to another call.
+      if type(result)=="table" and type(result.timing)=="table" and type(ctx)=="table" then
+        ctx.execution_timing={operation_id=result.operation_id,timing=result.timing}
+      end
+      result=bash_result.slim_for(call.tool,params,result)
       value=result;success=type(value)~='table' or (not value.error and value.ok~=false)
       -- Journaled before it is encoded: a fresh read-only call that repeats an identical earlier one
       -- comes back with `prior:{call, age_s, same}`, and the repeat is counted in telemetry.
@@ -576,6 +593,10 @@ local function settle_call(s,call)
      else value,success={error=tostring(result),effect='unknown',replay_allowed=false},false end
      local encoded=json.encode(value);local reference=output.store(encoded)
      value,success=script_value(value,success)
+     -- The shape the script RECEIVES is the allow-list, whatever a producer added to the answer (the
+     -- non-zero-exit rewrite above marks it `ok:true, status:200`; a status is the same fact as ok, and the
+     -- caller acts on the ok/code pair). The evidence stored above is the native answer, unchanged.
+     value=bash_result.slim_for(call.tool,params,value)
      -- The shape the SCRIPT saw, recorded once per change (lua/core/return_shapes.lua never raises).
      if success and connector_name(call.tool) then return_shapes.learn(call.tool,current['function'].parameters,value) end
      -- Item 4 (round 3): a bash/shell call the DIRECT path would call a read (git status, rg, ls) is

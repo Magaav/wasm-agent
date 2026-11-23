@@ -141,6 +141,37 @@ from the row in the shared `run_script` (`lua/core/codemode.lua`, `session_vars`
 
 `scripts/test-session-vars.lua` holds all of the above against the real sandbox.
 
+## What a command's answer carries (22/11)
+
+`tools.bash` - and a peer's `bash` through `tools.remote`, as one call or as an entry of a read-only
+batch - answers what a caller ACTS on, and nothing else:
+
+`stdout`, `stderr`, `code`, `ok`, `node` (a peer's answer), `operation_id`, `timeout_ms`, the
+truncation facts (`stdout_truncated`, `stderr_truncated`, `output_truncated`, `output_complete`,
+`stdout_elided_bytes`, `stderr_elided_bytes`, `stdout_bytes`, `stderr_bytes`) and every hint or
+refusal sentence (`output_hint`, `error`, `note`, `fix`, `normalized`).
+
+Everything the answer used to repeat about the CALL is one handle away, not gone:
+`operation {action:"status", id:<operation_id>}` answers the operation record - `timing` (per phase),
+`owner`/`owner_boot`/`owner_process_id`, `session`,
+`cwd`/`cwd_requested`/`cwd_source`/`effective_cwd`, `containment`, `cpu_priority`,
+`cleanup`/`cleanup_budget_ms`, `state`/`status`/`process_exit_code`/`process_exit_elapsed_ms`,
+`promoted`/`settled`, `stdout_path`/`stderr_path`, `output_bytes`, and, while the work is still
+running, the live-wait facts `overdue`/`shell_exited`/`output_idle_ms`.
+
+Why: measured over 200 recorded results, the envelope was 2,111 bytes per call median against 756 bytes
+a caller acts on - a third of the window was bookkeeping, 179 bytes per call of it the PEER's own
+filesystem layout. A command that prints `hi` cost 1,408 bytes of JSON on the base and costs 261 now
+(`scripts/test-slim-bash-result.lua` measures both from recorded answers). pi and Claude Code answer the
+same way: the text and the exit code, one pointer to the rest.
+
+Two rules keep it honest. A shape that is not a command envelope - a transport refusal, a
+`{state:"pending", op}` handle, a page a `read` returned - is passed through UNTOUCHED: unknown is not
+empty, and a shape the layer does not recognise is not one it may rewrite. And the allow-list lives in
+one place, `lua/core/bash_result.lua`, applied where the answer leaves the dispatcher and again to the
+answer a script receives - so a direct call and a script see one shape whoever ran the command, including
+a peer that predates this shape and answers fat.
+
 ## Pending calls (12/11)
 
 A call that can outlive its wait is the general case, not an exception: a build, `scripts/fast.sh`, a

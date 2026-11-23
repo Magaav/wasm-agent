@@ -2004,6 +2004,13 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
         ctx.read_only_command and ctx.read_only_command(args.command) or nil)
     end
     local result = run(args.command, timeout, cwd, provenance)
+    -- The phase breakdown is AGGREGATE EVIDENCE, not context: it leaves the answer a caller receives
+    -- (lua/core/bash_result.lua) and the agent records it on this call's tool span from here
+    -- (lua/core/agent.lua, tool_output.execution_timing), so the numbers are neither lost nor spent on
+    -- every shell line. Keyed by the operation, so a stale one can never be attached to another call.
+    if type(result) == "table" and type(result.timing) == "table" and ctx then
+      ctx.execution_timing = { operation_id = result.operation_id, timing = result.timing }
+    end
     -- After the command: what it changed. Emitted as its own event, so the model's result above stays
     -- exactly what the tool returned, and a reader who is not watching changes pays nothing.
     local shell_changed, shell_refused = nil, nil
@@ -2657,6 +2664,12 @@ function M.await_parallel_bash(operation_id, role, ctx)
   local stderr = M.dispatch(nil, "operation", { action = "read", id = operation_id,
     stream = "stderr", offset = 0, limit = pages.STDERR_PAGE_BYTES }, role, ctx, nil, true)
   local code = tonumber(state.process_exit_code) or -1
+  -- The phase breakdown of a PARALLEL command is aggregate evidence like a direct one's: the answer a
+  -- caller receives no longer carries it (mission slim-tool-results, lua/core/bash_result.lua), so it
+  -- travels to this call's tool span through the context (lua/core/agent.lua).
+  if type(state.timing) == "table" and type(ctx) == "table" then
+    ctx.execution_timing = { operation_id = operation_id, timing = state.timing }
+  end
   return { operation_id = operation_id, code = code, ok = code == 0,
     stdout = type(stdout) == "table" and stdout.content or "",
     stderr = type(stderr) == "table" and stderr.content or "",
@@ -2828,8 +2841,17 @@ end
 -- every return path - refusals, hooks, effects, scripts - gets the same signal without each site saying it.
 do
   local status = dofile("lua/core/status.lua")
+  local bash_result = dofile("lua/core/bash_result.lua")
   local inner = M.dispatch
-  M.dispatch = function(...) return status.stamp(inner(...)) end
+  -- A command's answer is slimmed HERE, at the one door every call passes last: after the hooks, after
+  -- the refusal renderer and after the status stamp, so every other caller of this layer sees exactly
+  -- what it saw before and only the answer a script receives changes. The record keeps every field -
+  -- `operation {action="status", id=<operation_id>}` answers it (lua/core/bash_result.lua, mission
+  -- slim-tool-results).
+  M.dispatch = function(memory, name, args, role, ctx, cwd_provenance, same_call)
+    return bash_result.slim_for(name, args,
+      status.stamp(inner(memory, name, args, role, ctx, cwd_provenance, same_call)))
+  end
 end
 
 return M
