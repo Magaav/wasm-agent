@@ -217,16 +217,17 @@ local child_script = (host.getenv("WASM_AGENT_LUA_ROOT") or "") .. "/scripts/lib
 ok(host.path_kind(child_script) == "file", "the child fixture must be there: " .. child_script)
 -- The child row belongs to the CHILD's session, so the count that proves "exactly once" is the one keyed
 -- on the child's run id, across every session in this ledger.
-local function child_rows()
+local function rows_for(run_id)
   local result = telemetry.events("*", 0, 500, 0)
-  ok(result.available ~= false, "the whole ledger must be readable to judge the child's record: " ..
+  ok(result.available ~= false, "the whole ledger must be readable to judge run " .. run_id .. ": " ..
     tostring(result.reason or "unknown"))
   local n = 0
   for _, event in ipairs(result.events) do
-    if event.run_id == "child-run" then n = n + 1 end
+    if event.run_id == run_id then n = n + 1 end
   end
   return n
 end
+local child_rows = function() return rows_for("child-run") end
 local before = child_rows()
 ok(before == 0, "no child record in the ledger before the child runs (rows=" .. tostring(before) .. ")")
 -- `timeout -s KILL`: the child is a live process when it dies, and 137 is what a parent sees for a SIGKILL.
@@ -258,6 +259,49 @@ local again, left_again = telemetry.flush_audit()
 ok(again == 0 and left_again == 0, "a second flush writes nothing more: exactly once (" ..
   tostring(again) .. " written, " .. tostring(left_again) .. " left)")
 ok(child_rows() == 1, "and the ledger still holds exactly one copy of it")
+
+-- ---- (4) THE RACE THE REVIEW FOUND: an append during a flush is never lost --------------------------
+-- The flush used to REWRITE the spool: A reads it, B appends a refused record, A writes the file back without
+-- B's line - B's record gone, which is the very loss this branch exists to stop, and two processes on one data
+-- dir (serve + workers) is the normal case. The flush now TAKES the spool by an atomic rename and never
+-- rewrites it, so this runs the interleaving where it happens: take, then an append, then the finish.
+local spool_data = host.paths().data or ""
+local function spool_file(name) return spool_data .. "/" .. name end
+local function refused(run_id)
+  sqlite_attempts = "1"
+  refusals.left = 1
+  local recorded = telemetry.audit(sid, run_id, "span-" .. run_id, "secret_redacted", "redacted",
+    { tool = "bash", names = { WASM_AGENT_LLM_API_KEY = 1 } })
+  ok(recorded == false, "the audit write for " .. run_id .. " must be refused for this phase")
+  ok(telemetry.spool_pending() >= 1, "and kept in the spool")
+end
+refused("race-a")
+-- THE TAKE, as a flusher does it: rename the spool to a private name of this "flusher".
+local private = spool_file("audit-spool." .. host.uuid() .. ".flushing")
+ok(host.rename_file(spool_file("audit-spool.jsonl"), private) == true, "the flusher takes the spool by rename")
+ok(host.path_kind(spool_file("audit-spool.jsonl")) == "missing", "and the main spool name is free again")
+-- THE APPEND that used to be lost: a second record, spooled after the take, lands in the NEW spool file.
+refused("race-b")
+local appended = host.read_file(spool_file("audit-spool.jsonl")) or ""
+ok(appended:find("race-b", 1, true) ~= nil, "the append after the take is in the spool the flush will not touch")
+ok(appended:find("race-a", 1, true) == nil, "and it did not land in the file being processed")
+-- The taken file is now old enough to be adopted, as a killed flusher's would be.
+local aged = host.exec(string.format("touch -d '-2 minutes' %q", private), "")
+ok(tostring((json.decode(aged) or {}).code) == "0", "the taken file is aged like a killed flusher's")
+ok(rows_for("race-a") == 0 and rows_for("race-b") == 0, "neither record is in the ledger before the flush")
+sqlite_attempts = "5"
+refusals.left = 0
+local race_written = telemetry.flush_audit()
+ok(race_written == 2, "the flush writes the taken file's row AND the row appended during the flush (wrote " ..
+  tostring(race_written) .. ")")
+ok(rows_for("race-a") == 1, "the record the flusher took is in the ledger exactly once")
+ok(rows_for("race-b") == 1, "the record appended DURING the flush is in the ledger - it was never lost")
+ok(host.path_kind(private) == "missing", "the taken file is gone once its rows are safe")
+ok(host.path_kind(spool_file("audit-spool.jsonl")) == "missing", "and so is the spool the flush took")
+ok(telemetry.spool_pending() == 0, "nothing is owed")
+local race_again = telemetry.flush_audit()
+ok(race_again == 0 and rows_for("race-a") == 1 and rows_for("race-b") == 1,
+  "a second flush writes nothing more: the adopted rows are written exactly once")
 
 host.getenv = real_getenv
 host.sql_exec = real_sql_exec
