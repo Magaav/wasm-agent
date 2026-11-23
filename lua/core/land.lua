@@ -4344,6 +4344,59 @@ end
 -- scratch home and ledger, on the merged tree. A branch that changes Rust is SKIPPED BY NAME: a Lua row cannot
 -- judge a new binary, and main-health judges that after the install - the skip is a recorded fact with its
 -- reason, never a silent pass.
+-- THE COMPONENTS ONE ROW NAMES, INSTALLED INTO THAT ROW'S OWN HOME THE WAY THE FAST PATH INSTALLS THEM.
+-- A row declares a component by naming `WA_<NAME>_COMPONENT_WASM` in its text (the string
+-- scripts/lib/fast-row-exec.sh greps for), and the host resolves components from the components DIRECTORY
+-- (`WA_COMPONENTS_DIR`, default `<home>/components`, docs/COMPONENTS.md), never from a variable. So this
+-- copies THIS NODE's pinned artifact - the one its binary was built with, which is the artifact the quick step
+-- judges with - into the row's home, and points the row at that directory. Returns the arguments to add and,
+-- when this node has no such component, its name so the step can say the row was NOT run here and why.
+function M.install_row_components(tree, row, home)
+  local arguments, missing = {}, nil
+  local text = read(slashes(tree) .. "/" .. row) or ""
+  local directory = slashes(tostring(home)) .. "/components"
+  local installed = false
+  local seen = {}
+  for name in text:gmatch("WA_([A-Z0-9_]+)_COMPONENT_WASM") do
+    if not seen[name] then
+      seen[name] = true
+      local source, label = M.node_component(name)
+      if not source then
+        missing = missing or label
+      else
+        local made = M.exec("mkdir -p " .. quote(directory), nil, 30)
+        if (made.code or 1) ~= 0 then
+          missing = missing or label
+        else
+          -- wasm, pin and manifest together: a component with no pin is refused by the host, so a half copy
+          -- would read as a broken component rather than a missing one.
+          local copied = M.exec("cp " .. quote(source) .. " " .. quote(directory) .. "/", nil, 60)
+          if (copied.code or 1) == 0 then installed = true else missing = missing or label end
+        end
+      end
+    end
+  end
+  if installed then arguments[#arguments + 1] = "WA_COMPONENTS_DIR=" .. quote(directory) end
+  return arguments, missing
+end
+
+-- A component as this node keeps it: `<data>/components/<name>.wasm` with its `.sha256` pin and `.json`
+-- manifest. The row spells the name with underscores, the file with hyphens, so both are tried. Files are
+-- confirmed with `test -f`, not by reading them: a component is megabytes and `read` would pull all of it into
+-- Lua to answer a yes/no question.
+function M.node_component(name)
+  local dir = paths.data()
+  local label = name:lower():gsub("_", "-")
+  if not dir or trim(tostring(dir)) == "" then return nil, label end
+  for _, stem in ipairs({ name:lower(), label }) do
+    local base = slashes(tostring(dir)) .. "/components/" .. stem
+    local probe = M.exec("test -f " .. quote(base .. ".wasm") .. " && test -f " .. quote(base .. ".wasm.sha256") ..
+      " && test -f " .. quote(base .. ".json"), nil, 30)
+    if probe and (probe.code or 1) == 0 then return base .. ".wasm", label end
+  end
+  return nil, label
+end
+
 impl.tests = function(run, options)
   local evidence = sink(run, "tests")
   local tree = run.tree
@@ -4396,19 +4449,36 @@ impl.tests = function(run, options)
   local binary = trim(options.test_binary or (host.getenv and host.getenv("WA_LAND_TEST_BINARY") or "")) 
   if binary == "" then binary = "wa" end
   local timeout = tonumber(options.test_timeout) or 300
-  local green, red = 0, {}
+  local green, red, deferred = 0, {}, {}
   for _, row in ipairs(keep) do
+    -- THE COMPONENTS THE ROW NAMES, HANDED OVER THE WAY THE FAST PATH HANDS THEM OVER. A row cannot answer
+    -- without the component whose override it names in its text (`WA_<NAME>_COMPONENT_WASM`, the string
+    -- scripts/lib/fast-row-exec.sh greps for), and this step runs on the binary THIS NODE runs - so it hands
+    -- over the component this node runs, from the node's own component directory, and never a build. Measured
+    -- 23/11: without it a row read `component_not_installed:<name>` and the landing stopped on a missing
+    -- fixture instead of on the branch's own change. A component this node does not have is NAMED in the step
+    -- as not run here (main-health builds one and judges the row after the install, the same division of
+    -- labour as a Rust change) - never a silent pass.
     local scratch = M.run_dir(run.id) .. "/tests/" .. (row:gsub("[^%w]", "-"))
     M.exec("rm -rf " .. quote(scratch) .. " && mkdir -p " .. quote(scratch .. "/h/wahome"), tree, 60)
-    local command = table.concat({
+    local overrides, missing = M.install_row_components(tree, row, slashes(scratch) .. "/h/wahome")
+    if missing then
+      deferred[#deferred + 1] = row .. " (needs the " .. missing .. " component, which this node has not installed)"
+      evidence("not run here: " .. deferred[#deferred] .. "\n")
+    else
+    local parts = {
       "WASM_AGENT_LUA_ROOT=" .. quote(slashes(tree)),
       "WA_SCRIPT=" .. quote(row),
       "HOME=" .. quote(scratch .. "/h"),
       "WASM_AGENT_HOME=" .. quote(scratch .. "/h/wahome"),
       "TMPDIR=" .. quote(scratch),
-      "timeout " .. tostring(math.floor(timeout)),
-      quote(binary), "--db", quote(scratch .. "/t.db"),
-    }, " ")
+    }
+    for _, override in ipairs(overrides) do parts[#parts + 1] = override end
+    parts[#parts + 1] = "timeout " .. tostring(math.floor(timeout))
+    parts[#parts + 1] = quote(binary)
+    parts[#parts + 1] = "--db"
+    parts[#parts + 1] = quote(scratch .. "/t.db")
+    local command = table.concat(parts, " ")
     evidence(command .. "\n")
     local result = M.exec(command, tree, timeout + 60)
     local output = tostring(result.stdout or "") .. tostring(result.stderr or "")
@@ -4418,8 +4488,10 @@ impl.tests = function(run, options)
     else
       red[#red + 1] = row .. " (" .. tostring(result.code) .. ": " .. last_line(output) .. ")"
     end
+    end
   end
   local detail = string.format("the branch's own tests: %d green", green)
+  if #deferred > 0 then detail = detail .. ", " .. #deferred .. " not run here: " .. table.concat(deferred, "; ") end
   if #excluded > 0 then detail = detail .. ", " .. #excluded .. " not a fast-path row" end
   if #red > 0 then
     return false, { error = "own_tests_red", detail = "the branch's own tests are red:",

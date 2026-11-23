@@ -242,6 +242,42 @@ eq(running(function() return land.run({ run = "quick3", landing = true, branches
   "a branch whose own test is green lands")
 contains(step_of("quick3", "tests").detail, "1 green", "and the step counts the row it ran")
 
+-- A ROW THAT NAMES A COMPONENT IS HANDED THE NODE'S COMPONENT. scripts/lib/fast-row-exec.sh installs one into
+-- a row's own home for the string `WA_<NAME>_COMPONENT_WASM`; this step is not the fast path, so it hands over
+-- the component THIS NODE runs from the node's own component directory. Measured 23/11: without it the
+-- crash-recovery row read `component_not_installed:graph` and a landing stopped on a missing fixture instead of
+-- on the branch's own change. The row below only passes if the override actually arrives.
+local component_dir = dofile("lua/core/paths.lua").data() .. "/components"
+fixture()
+must("mkdir -p " .. component_dir .. " && printf '\\0asm' > " .. component_dir .. "/fake.wasm" ..
+  " && printf 'pin' > " .. component_dir .. "/fake.wasm.sha256 && printf '{}' > " .. component_dir .. "/fake.json", "fake component")
+branch_with("change/own-comp", {
+  -- WA_FAKE_COMPONENT_WASM is the declaration; the host resolves components from WA_COMPONENTS_DIR, so the row
+  -- proves the artifact itself arrived in its own home.
+  ["scripts/test-own-comp.lua"] = "-- WA_FAKE_COMPONENT_WASM\nlocal dir = host.getenv('WA_COMPONENTS_DIR')\nassert(dir and dir ~= '', 'no WA_COMPONENTS_DIR was handed over')\nassert(host.read_file(dir .. '/fake.wasm') ~= nil, 'the component was not installed into this row home')\nprint('own-component ok')\n",
+})
+eq(running(function() return land.run({ run = "quick3c", landing = true, branches = { "change/own-comp" } }) end), 0,
+  "a row that names a component lands when this node has that component")
+contains(step_of("quick3c", "tests").detail, "1 green", "and the row really ran")
+contains(read_file(land.evidence_path("quick3c", "tests")) or "", "WA_COMPONENTS_DIR=",
+  "the row was handed the component directory")
+contains(read_file(land.evidence_path("quick3c", "tests")) or "", "own-component ok",
+  "and it found the component installed in its own home")
+-- (the fake component stays: the node-state guard refuses a delete inside it, and no other case names it)
+
+-- AND WHEN THIS NODE HAS NO SUCH COMPONENT THE ROW IS NAMED AS NOT RUN, never counted green: the component is
+-- built by the fast path and judged by main-health, which is the division of labour a Rust change already has.
+fixture()
+-- The row names WA_MISSING_COMPONENT_WASM, and this node has no such component.
+branch_with("change/own-miss", {
+  ["scripts/test-own-miss.lua"] = "-- WA_MISSING_COMPONENT_WASM\nprint('never runs here')\n",
+})
+eq(running(function() return land.run({ run = "quick3m", landing = true, branches = { "change/own-miss" } }) end), 0,
+  "a row whose component this node lacks does not stop the landing")
+contains(step_of("quick3m", "tests").detail, "not run here", "the step says the row did not run")
+contains(step_of("quick3m", "tests").detail, "missing", "and names the component it needs")
+contains(step_of("quick3m", "tests").detail, "0 green", "it is not counted as a pass")
+
 fixture()
 local main_before = must("git -C " .. repo .. " ls-remote origin refs/heads/main")
 eq(running(function() return land.run({ run = "quick3r", landing = true, branches = { "change/tests-red" } }) end), 1,

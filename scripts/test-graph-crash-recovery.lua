@@ -24,10 +24,20 @@ local paths = dofile('lua/core/paths.lua')
 -- (measured 23/11, the first main-health run of this row). A row that still sees no component REFUSES BY
 -- NAME below rather than skipping: the runner promised it (scripts/fast.sh counts a promised component
 -- reported missing as a FAIL), so "cannot tell" is never "pass".
-local component = host.getenv('WA_GRAPH_COMPONENT_WASM')
-assert(component and component ~= '', 'refused: no graph component: this row measures a store the real component reads, so it needs WA_GRAPH_COMPONENT_WASM, which the fast path installs into this row home (scripts/lib/fast-row-exec.sh)')
-local probe = json.decode(host.exec('test -f ' .. "'" .. component .. "'", paths.data(), 10))
-assert(probe.code == 0, 'refused: WA_GRAPH_COMPONENT_WASM names ' .. tostring(component) .. ', which is not a file on this machine')
+local function file_at(path)
+  if type(path) ~= 'string' or path == '' then return false end
+  local answer = json.decode(host.exec('test -f ' .. "'" .. path:gsub("'", "'\\''") .. "'", paths.data(), 10))
+  return answer ~= nil and answer.code == 0
+end
+-- Two runners provision it two ways, and the row accepts either: scripts/lib/fast-row-exec.sh sets
+-- WA_GRAPH_COMPONENT_WASM, and lua/core/land.lua installs the node's pinned artifact into the row's own home
+-- and points WA_COMPONENTS_DIR at it (the directory the host actually resolves components from). What the row
+-- will not do is run without one: a missing component is a named refusal, never a pass.
+local override = host.getenv('WA_GRAPH_COMPONENT_WASM')
+local components = host.getenv('WA_COMPONENTS_DIR')
+local usable = file_at(override) or file_at((components or '') .. '/graph.wasm')
+assert(usable, 'refused: no graph component: this row measures a store the real component reads, so it needs the graph component installed for this row - WA_GRAPH_COMPONENT_WASM (the fast path) or a pinned graph.wasm in WA_COMPONENTS_DIR (the landing step)')
+
 local function q(s) return "'" .. s:gsub("'", "'\\''") .. "'" end
 local function decode(raw, what)
   local value = json.decode(raw)
