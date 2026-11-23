@@ -18,7 +18,7 @@
 # RUN: bash scripts/test-release-channel-e2e.sh      (prints "release-channel-e2e ok (<n> checks)")
 set -uo pipefail
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
-T=$(mktemp -d /tmp/wa-release-channel-e2e.XXXXXX) || { printf 'FAIL tmpdir_unavailable\n' >&2; exit 1; }
+T=$(mktemp -d "${TMPDIR:-/tmp}/wa-release-channel-e2e.XXXXXX") || { printf 'FAIL tmpdir_unavailable\n' >&2; exit 1; }
 # WA_E2E_KEEP=1 keeps the work directory and prints it, so a failing run leaves its evidence behind.
 if [ "${WA_E2E_KEEP:-0}" = 1 ]; then printf 'workdir %s\n' "$T" >&2; else trap 'rm -rf "$T"' EXIT; fi
 # THE HOME THIS ROW WRITES IS ITS OWN, and it says so before it writes anything.

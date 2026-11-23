@@ -28,7 +28,7 @@ set -uo pipefail
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 # NOT under $TMPDIR: a node sets TMPDIR inside its own store (<home>/.wasm-agent/tmp), and a scratch HOME there
 # is inside the operator's store - which scripts/lib/scratch-home.lua refuses, correctly. /tmp is outside every home.
-T=$(mktemp -d /tmp/wa-cli-help.XXXXXX) || { printf 'FAIL tmpdir_unavailable\n' >&2; exit 1; }
+T=$(mktemp -d "${TMPDIR:-/tmp}/wa-cli-help.XXXXXX") || { printf 'FAIL tmpdir_unavailable\n' >&2; exit 1; }
 trap 'rm -rf "$T"' EXIT
 original_home="${WA_HOME_BEFORE_OVERRIDE:-${HOME:-}}"
 unset WASM_AGENT_HOME
