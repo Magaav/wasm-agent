@@ -32,6 +32,13 @@ export HOME=$work/user WASM_AGENT_HOME=$work/node TMPDIR=$work/tmp
 # The one build dir the fixture's fast path writes this tree's binary into (scripts/lib/fast-binary.sh
 # resolves $CARGO_TARGET_DIR first), and the file the stub board records its arguments in.
 export CARGO_TARGET_DIR=$work/target MAIN_HEALTH_TEST_ARGS=$work/speed-args
+# AND THE VARIABLES THAT DECIDE WHICH BINARY, cleared rather than inherited. MEASURED in this mission's own
+# full-suite run: `scripts/fast.sh:489` exports WA_BIN for every row ("so a row's node is THIS tree"), the
+# fixture main-health inherited it, treated it as the caller's explicit choice, and - correctly - refused it
+# as a binary stamped with the SUITE's commit rather than the fixture's, so the board was handed nothing and
+# this row failed inside the suite while passing alone. The switches that could make it accept a stale tree
+# binary are cleared for the same reason.
+unset WA_BIN WA_FAST_ALLOW_STALE_BINARY WA_FAST_SKIP_BUILD
 mkdir -p "$HOME" "$WASM_AGENT_HOME" "$TMPDIR" "$work/missions"
 # THE FIXTURE'S OWN MISSIONS ROOT AND SUITE LOCK, pinned rather than inherited. MEASURED 23/11, in this
 # mission's own end-to-end run: with WA_SUITE_LOCK exported by the caller, the fixture main-health this row
