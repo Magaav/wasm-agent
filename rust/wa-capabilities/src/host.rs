@@ -536,6 +536,21 @@ fn clear_cli_interrupt() {
     CLI_INTERRUPT_KEY.store(0, std::sync::atomic::Ordering::SeqCst);
 }
 
+/// The moment the reader last raised the interrupt, in milliseconds since the epoch, or 0.
+///
+/// The stop's own trace (operations::cancel_trace) needs it to say how much of a stop happened BEFORE
+/// anything the run controls: the reader noticing the key, the poll that reaches the foreground shell, and
+/// then the cancel. Without that split a 692 ms stop at load 2.3 (main-health, 23/11) cannot be told apart
+/// from a slow reader or a slow manager().cancel.
+pub(crate) fn cli_interrupt_millis() -> u64 {
+    CLI_INTERRUPT_MS.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Now, in the same milliseconds-since-epoch the interrupt stamp uses.
+pub(crate) fn epoch_millis() -> u64 {
+    (epoch_seconds() * 1000.0) as u64
+}
+
 /// The interrupt the reader last raised, as (seconds since the epoch, key name), or None.
 fn cli_interrupt_stamp() -> Option<(f64, &'static str)> {
     let millis = CLI_INTERRUPT_MS.load(std::sync::atomic::Ordering::SeqCst);

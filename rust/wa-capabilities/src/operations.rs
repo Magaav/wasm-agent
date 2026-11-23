@@ -1210,12 +1210,24 @@ pub fn foreground(
         // ("cleanup": "supervised") instead of claiming a settle it did not watch, and a caller that does
         // need the settle reads the operation (status/wait) rather than holding the run for it.
         if crate::host::run_cancel_requested() {
+            // The split, when the trace is on: how long the KEY took to reach this line (the reader's own
+            // 120 ms lone-Esc lookahead plus this loop's poll), and how long the cancel work itself took.
+            // A stop that is slow for a reason outside those two is the unwind and the redraw, which the
+            // row measures from the outside.
+            let interrupt_ms = crate::host::cli_interrupt_millis();
+            let notice_ms = if interrupt_ms == 0 { 0 } else {
+                crate::host::epoch_millis().saturating_sub(interrupt_ms)
+            };
             let cancel_started = std::time::Instant::now();
             crate::tool_progress::finish(&id);
             let _ = manager().cancel(&id);
             cancel_trace(&format!(
-                "part=foreground settled=0 issued_ms={} waited=0 cap_hit=0 cleanup=supervised",
-                cancel_started.elapsed().as_millis()));
+                "part=foreground settled=0 notice_ms={} issued_ms={} total_ms={} waited=0 cap_hit=0 cleanup=supervised",
+                notice_ms,
+                cancel_started.elapsed().as_millis(),
+                if interrupt_ms == 0 { 0 } else {
+                    crate::host::epoch_millis().saturating_sub(interrupt_ms)
+                }));
             return Ok(json!({"operation_id":id,"ok":false,"error":"run_cancelled",
                 "state":"cancelled","cleanup":"supervised","output_complete":false,
                 "cleanup_note":"the shell is cancelled and its supervisor finishes the kill; this run did not wait for it"}));
@@ -3193,7 +3205,9 @@ mod await_returns_at_its_own_wait {
         let flag = Arc::new(AtomicBool::new(true));
         crate::serve::install_relay_context(Some(flag), None, "relay:cancel-settle-test".into());
         let started = std::time::Instant::now();
-        let receipt = super::foreground(&shell.0, &shell.1, "sleep 5", "", 30, &serde_json::json!({}))
+        // The seventh argument is the stdin the foreground path now carries (change/run-bodies-without-
+        // quoting); this stop test sends none, and the signature is the one that has to be called.
+        let receipt = super::foreground(&shell.0, &shell.1, "sleep 5", "", 30, &serde_json::json!({}), None)
             .expect("a cancelled shell is a receipt, not an error");
         let elapsed = started.elapsed();
         assert_eq!(receipt["error"], serde_json::json!("run_cancelled"), "receipt: {receipt}");
@@ -3249,7 +3263,7 @@ mod promotion_says_so {
         let result = super::foreground(
             &shell.0, &shell.1,
             "echo first-line; (sleep 3; echo later) & exit 0",
-            "", 60, &serde_json::json!({"tool": "bash"}),
+            "", 60, &serde_json::json!({"tool": "bash"}), None,
         ).expect("the foreground path answers");
         let id = result["operation_id"].as_str().expect("operation id").to_string();
         assert_eq!(result["promoted"], serde_json::json!(true),
