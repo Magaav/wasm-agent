@@ -266,7 +266,9 @@ function M.verdict(row, entry, now)
   if age > row.stale_after_s then
     return 'stale', string.format('last worked %s ago (%s), past its bound of %s', M.age(age), M.iso(entry.last_ok_at), M.span(row.stale_after_s))
   end
-  return 'working', string.format('last worked %s ago', M.age(age))
+  -- 'just now' is already an adverb: 'last worked just now ago' is the kind of sentence a reader trips on.
+  local when = M.age(age)
+  return 'working', when == 'just now' and 'last worked just now' or string.format('last worked %s ago', when)
 end
 
 -- Every feature, its row, its entry and its verdict, in registry order. 'applies' decides between a
