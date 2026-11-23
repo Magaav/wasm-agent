@@ -119,4 +119,20 @@ grep -q 'FAIL - it names the version' "$SCRATCH/evidence/failures.txt" 2>/dev/nu
 grep -q 'kept 2 failed row log(s) and 1 scratch dir(s)' "$SCRATCH/keep.out" || fail "the keeper did not say what it kept: $(cat "$SCRATCH/keep.out")"
 [ -f "$SCRATCH/evidence/test-not-failed.lua.log" ] && fail 'a row that passed had its log kept: a green row is not evidence'
 
+
+# A FAILED LUA ROW THAT NOTHING NAMED (mission speed-board-landing-kinds, 23/11). The list the keeper is
+# handed is built by check(), the SHELL row recorder, so a Lua row that failed never reached it - and
+# main-health could report only the verdict line ("speed-board: 5 FAIL of 30") and nothing about the
+# five, because the row log it would have read was deleted with the scratch. The runner own table
+# ($work/lua.tsv) names the script, so the keeper reads it too; a row that passed is still not evidence.
+rm -rf "$SCRATCH/evidence2"; rm -f "$work"/check-*.log "$work"/logs/test-not-failed.lua.log
+printf 'ok - one\t\nFAIL speed-board: 5 of 30 checks failed\t\n' > "$work/logs/test-lua-only.lua.log"
+printf 'all good\t\n' > "$work/logs/test-lua-passed.lua.log"
+printf "0\t10\tscripts/test-lua-passed.lua\tok\tok\t\n1\t20\tscripts/test-lua-only.lua\tspeed-board: 5 FAIL of 30\tok\t\n" > "$work/lua.tsv"
+fails=1; failed_rows=''
+WA_FAST_KEEP_LOGS="$SCRATCH/evidence2" wa_fast_keep_failed_logs > "$SCRATCH/keep2.out" 2>&1
+[ -f "$SCRATCH/evidence2/test-lua-only.lua.log" ] || fail "a failed Lua row that nothing named had its log dropped: $(cat "$SCRATCH/keep2.out")"
+[ -f "$SCRATCH/evidence2/test-lua-passed.lua.log" ] && fail 'a Lua row that passed had its log kept: a green row is not evidence'
+grep -q 'FAIL speed-board: 5 of 30 checks failed' "$SCRATCH/evidence2/failures.txt" 2>/dev/null || fail "failures.txt does not carry the Lua row own FAIL line: $(cat "$SCRATCH/evidence2/failures.txt" 2>/dev/null)"
+rm -f "$work/lua.tsv"
 echo 'test-fast-skip-count: ok (a green row that printed SKIP is recorded skip and counted, a silent green row is still a pass, a failure stays a failure, the runner prints the line that failed with the log it came from, and the logs and kept directories of failed rows survive the run)'

@@ -81,9 +81,18 @@ if [ "${MAIN_HEALTH_TEST_BUILD_BIN:-1}" = 1 ]; then
   } > "$CARGO_TARGET_DIR/release/wa"
   chmod +x "$CARGO_TARGET_DIR/release/wa"
 fi
+# THE ENVIRONMENT RECORD: the real fast path names the binary it ran, the commit it was built from and its
+# sha256 (scripts/fast.sh:420 writes env.tsv, scripts/fast-result.mjs puts it in the result). main-health
+# now takes ITS binary from there, so the fixture has to write the same three fields or this row would
+# test a shape the runner never produces.
+env_bin=${MAIN_HEALTH_TEST_ENV_BIN:-$CARGO_TARGET_DIR/release/wa}
+env_commit=$(git rev-parse --short HEAD)
+# The sha256 the record claims can be PINNED (MAIN_HEALTH_TEST_ENV_SHA): case 10 edits the file after
+# the record was written, and a record that re-hashes the file at every run could never say that.
+env_sha=${MAIN_HEALTH_TEST_ENV_SHA:-$(sha256sum "$env_bin" 2>/dev/null | cut -d" " -f1)}
 case "${MAIN_HEALTH_FIXTURE_VERDICT:-green}" in
-  green) jq -n '{schema:1, summary:{checks:3, passed:3, failed:0, skipped:0, ok:true, exit_code:0}, checks:[{name:"alpha",status:"pass",first_error:""}]}' > "$WA_FAST_RESULT" ;;
-  red)   jq -n '{schema:1, summary:{checks:3, passed:2, failed:1, skipped:0, ok:false, exit_code:1}, checks:[{name:"alpha",status:"pass",first_error:""},{name:"test-beta",status:"fail",first_error:"beta is stale"}]}' > "$WA_FAST_RESULT"; exit 1 ;;
+  green) jq -n --arg bin "$env_bin" --arg commit "$env_commit" --arg sha "$env_sha" '{schema:1, env:{bin:$bin, commit:$commit, bin_sha256:$sha}, summary:{checks:3, passed:3, failed:0, skipped:0, ok:true, exit_code:0}, checks:[{name:"alpha",status:"pass",first_error:""}]}' > "$WA_FAST_RESULT" ;;
+  red)   jq -n --arg bin "$env_bin" --arg commit "$env_commit" --arg sha "$env_sha" '{schema:1, env:{bin:$bin, commit:$commit, bin_sha256:$sha}, summary:{checks:3, passed:2, failed:1, skipped:0, ok:false, exit_code:1}, checks:[{name:"alpha",status:"pass",first_error:""},{name:"test-beta",status:"fail",first_error:"beta is stale"}]}' > "$WA_FAST_RESULT"; exit 1 ;;
   none)  exit 1 ;;
 esac
 exit 0
@@ -213,6 +222,9 @@ printf 'commit=%s\n' "${main_sha:0:8}" > "$HOME/.local/bin/installed.txt"
 install_stub=$HOME/.local/bin/wa
 {
   echo '#!/bin/sh'
+  # A scripted refusal of the identity probe stands for a machine that could not answer it (the
+  # shape 4b314af5 failed in), so the fast path own record is the only way to the binary.
+  echo 'if [ -n "${MAIN_HEALTH_TEST_PROBE_FAILS:-}" ]; then exit 1; fi'
   echo "printf '{"build_source_commit":"$main_sha","binary_sha256":"cafe"}\n'"
   echo 'echo "quickjs=1"'
 } > "$install_stub"
@@ -224,4 +236,39 @@ ok
 [ "$(arg_after --bin "$MAIN_HEALTH_TEST_ARGS")" = "$install_stub" ] || fail "the installed node of this commit was not handed to the board: $(tr '\n' ' ' < "$MAIN_HEALTH_TEST_ARGS")"
 ok
 
+
+# ---- 10. FAST REUSED THE INSTALLED BINARY: its OWN record is enough -------------------------------
+# MEASURED on 4b314af5 (23/11): fast.sh printed "binary /home/victor/.local/bin/wa (build 4b314af5cd56,
+# tree 4b314af5cd56, fresh: built from this tree)", and the speed block - twenty minutes later, after a
+# landing had replaced that file and moved installed.txt to 3655948d - found nothing and reported the four
+# live rows RED. The record fast.sh writes names the binary AND its sha256, so main-health uses it while the
+# bytes are the ones that run graded; a probe it cannot run is not a reason to lose a binary fast proved.
+# installed.txt names ANOTHER commit here, as it did then: it is the last install that FINISHED, never this
+# commit proof.
+printf 'commit=deadbeef\n' > "$HOME/.local/bin/installed.txt"
+: > "$MAIN_HEALTH_TEST_ARGS"
+out=$(MAIN_HEALTH_TEST_BUILD_BIN=0 MAIN_HEALTH_TEST_ENV_BIN="$install_stub" MAIN_HEALTH_TEST_PROBE_FAILS=1 \
+      MAIN_HEALTH_FIXTURE_VERDICT=green bash "$script" --repo "$repo" --out "$json" 2>&1); rc=$?
+[ "$rc" = 0 ] || fail "the run with fast own binary exited $rc: $out"
+ok
+[ "$(arg_after --bin "$MAIN_HEALTH_TEST_ARGS")" = "$install_stub" ] || fail "the binary fast.sh ran was not handed to the board: $(tr '\n' ' ' < "$MAIN_HEALTH_TEST_ARGS")"
+ok
+grep -qF "main-health: speed binary $install_stub (source: the binary this run's fast path proved" <<< "$out" || fail "main-health does not say where the binary came from: $out"
+ok
+# AND A PATH WHOSE BYTES CHANGED IS NOT THIS COMMIT BINARY: the recorded sha256 no longer matches, so the
+# bytes at that path belong to another build - refused BY NAME, never measured as this commit.
+install_stub_sha=$(sha256sum "$install_stub" | cut -d" " -f1)
+printf 'changed\n' >> "$install_stub"
+: > "$MAIN_HEALTH_TEST_ARGS"
+out=$(MAIN_HEALTH_TEST_BUILD_BIN=0 MAIN_HEALTH_TEST_ENV_BIN="$install_stub" MAIN_HEALTH_TEST_PROBE_FAILS=1 \
+      MAIN_HEALTH_TEST_ENV_SHA="$install_stub_sha" \
+      MAIN_HEALTH_FIXTURE_VERDICT=green bash "$script" --repo "$repo" --out "$json" 2>&1); rc=$?
+[ "$rc" = 0 ] || fail "the run with a replaced binary exited $rc: $out"
+ok
+if grep -qxF -- '--bin' "$MAIN_HEALTH_TEST_ARGS"; then
+  fail "a binary whose sha256 changed was handed to the board anyway: $(tr '\n' ' ' < "$MAIN_HEALTH_TEST_ARGS")"
+fi
+ok
+grep -qF 'another build replaced it while this run measured' <<< "$out" || fail "main-health does not name why the binary was refused: $out"
+ok
 echo "test-main-health ok ($checks checks)"
