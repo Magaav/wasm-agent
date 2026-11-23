@@ -66,7 +66,14 @@ function check(condition, label) {
   failures += 1;
   return false;
 }
-function skip(reason) { console.log('SKIP piped-start: ' + reason); process.exit(failures > 0 ? 1 : 0); }
+// A run leaves nothing behind when it passes, and keeps its scratch when it fails: the ledger and the log
+// are what a reader needs then, and a directory nobody can find again is not.
+function done(code) {
+  if (code === 0) { try { fs.rmSync(WORK, {recursive: true, force: true}); } catch {} }
+  else console.log('piped-start: scratch kept for diagnosis: ' + WORK);
+  process.exit(code);
+}
+function skip(reason) { console.log('SKIP piped-start: ' + reason); done(failures > 0 ? 1 : 0); }
 
 // ---- which binary -------------------------------------------------------------------------------
 function executable(candidate) {
@@ -188,7 +195,7 @@ function median(values) {
     // A machine without /proc/<pid>/io cannot answer this row, and an unknown is not a pass.
     console.log('SKIP piped-start: this platform does not say what a process has read (/proc/<pid>/io)');
     console.log('     the timing row below still ran: median ' + median(runs.map(run => run.ms)) + ' ms');
-    process.exit(failures > 0 ? 1 : 0);
+    done(failures > 0 ? 1 : 0);
   }
   const readMedian = median(rchars);
   const MB = value => (value / (1024 * 1024)).toFixed(2) + ' MB';
@@ -207,7 +214,8 @@ function median(values) {
 
   if (failures > 0) {
     console.log(`piped-start: ${failures} FAIL`);
-    process.exit(1);
+    done(1);
   }
   console.log('piped-start ok');
+  done(0);
 })();
