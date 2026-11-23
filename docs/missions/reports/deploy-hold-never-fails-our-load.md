@@ -3,7 +3,7 @@
 An install under the factory's own load waits or proceeds - it never fails at the bound. Two deadlock shapes and
 the promise a pause makes to the worker that paused.
 
-Branch `change/deploy-hold-never-fails-our-load`, base `41d6420c`. Commit list at the end; every claim below
+Branch `change/deploy-hold-never-fails-our-load`, base `41d6420c`, rebased onto `c1337903` (origin/main, 23/11 ~16:20Z) before the last run. Commit list at the end; every claim below
 cites the commit that implements it.
 
 ## What was re-measured before writing code (the brief's premises)
@@ -59,7 +59,7 @@ holder named `a run, with no label`; `operation_overdue` is a holder named `an o
 
 ### 3. A request that does fail at the bound is re-queued once (job 3)
 
-`rust/wa-sentinel/src/main.rs` (**ae815084**): `fail_held_request` writes the same `failed/` record and then
+`rust/wa-sentinel/src/main.rs` (**c4420837**): `fail_held_request` writes the same `failed/` record and then
 parks the request in `<sentinel>/requeue/<id>.json`; `replay_requeues()` runs at the top of every
 `process_requests` tick (so `once` does it too) and puts it back in `requests/` with `queued_at = now` and
 `requeued: true` on the first tick `hold_for` says the node is quiet enough to run it — the same predicate the
@@ -68,18 +68,18 @@ in `failed/` and in `status` names the landing that asked (`the request's reason
 `wa-sentinel status` prints `requeue:   N request(s) that failed at their bound run when the node is quiet
 enough`.
 
-### 4. A paused worker is not killed by its own pause (the ADDED item)
+### 4. A paused worker is not killed by its own pause (the ADDED item, and the 16:40Z amendment)
 
-`lua/core/deploy_pause.lua` (**4daff95a**): `M.claim_wait(claimed, now, opts)` — a session claim that is busy
+`lua/core/deploy_pause.lua` (**f4fdb170**, `is_refusal` in **20b538cf**): `M.claim_wait(claimed, now, opts)` — a session claim that is busy
 **while a build waits or is being installed** is the wait, not the run's failure. Only `resource_busy` qualifies;
 every other claim failure stays the caller's error.
 
-`lua/core/agent.lua` (**4daff95a**) uses it at the claim: a non-operator run whose session claim is held while
+`lua/core/agent.lua` (**f4fdb170**) uses it at the claim: a non-operator run whose session claim is held while
 a build waits emits the deploy sentence, sets `turn_refused` and returns — nothing ran, nothing was claimed,
 the same request runs again when the node is back. A person's turn is exempt, which is the existing rule for a
 merely waiting request (`deploy_pause.at_boundary`).
 
-`lua/core/chat.lua` (**4daff95a**): `M.deploy_refused(agent)` recognises both sentences (`deploy_waiting:`
+`lua/core/chat.lua` (**f4fdb170**, `is_refusal` in **20b538cf**): `M.deploy_refused(agent)` recognises both sentences (`deploy_waiting:`
 from `deploy_wait.lua`, `deploy waiting:` from the pause), the scripted branch exits **2** for one (this tree's
 documented "refused before it started, nothing ran", `docs/SCRIPTED-RUNS.md`, which
 `scripts/worker-gate.sh` and `scripts/mission.sh` already wait out without spending a round), and the line on
@@ -101,9 +101,9 @@ The others: the unnamed-holder and busy-with-nobody shapes must keep the request
 `failed/` record; an overdue operation is named; a bound failure is parked, re-queued once on the first quiet
 tick, and the `done/` record shows `"requeued":true`; a second failure at the bound is not parked again.
 
-Unit level: `rust/wa-sentinel/src/holders_tests.rs` tests 12–14 (**ae815084**),
-`scripts/test-deploy-pause.lua` (5 new checks, **4daff95a**) and `scripts/test-thinking-block.lua`
-(5 new checks, **4daff95a**) — all three files are existing rows.
+Unit level: `rust/wa-sentinel/src/holders_tests.rs` tests 12–14 (**c4420837**),
+`scripts/test-deploy-pause.lua` (5 new checks, **f4fdb170**) and `scripts/test-thinking-block.lua`
+(5 new checks, **f4fdb170**) — all three files are existing rows.
 
 ### They fail on the base (measured, not asserted)
 
@@ -204,5 +204,66 @@ Nothing the model reads changes. What an operator, a landing or a worker sees, v
 
 | commit | what |
 | --- | --- |
-| `ae815084` | holders: `Verdict` (Proceed/Wait/Fail), a child completion never holds the install, an unnamed holder is never a failure, the reporter names `current`-without-a-label and an overdue operation; the bound failure is re-queued once; unit tests 12–14 |
-| `4daff95a` | `deploy_pause.claim_wait` + `agent.lua` defers instead of failing a run whose claim the pause holds; `chat.deploy_refused` and exit 2 and `not started`; the six new steps in `scripts/test-deploy-bound.sh` and the new checks in `test-deploy-pause.lua` / `test-thinking-block.lua` |
+| `c4420837` | holders: `Verdict` (Proceed/Wait/Fail), a child completion never holds the install, an unnamed holder is never a failure, the reporter names `current`-without-a-label and an overdue operation; the bound failure is re-queued once; unit tests 12–14 |
+| `f4fdb170` | `deploy_pause.claim_wait` + `agent.lua` defers instead of failing a run whose claim the pause holds; `chat.deploy_refused` and exit 2 and `not started`; the six new steps in `scripts/test-deploy-bound.sh` and the new checks in `test-deploy-pause.lua` / `test-thinking-block.lua` |
+
+## The 16:40Z amendment: a worker mid-turn must PAUSE, never end rc=2
+
+MEASURED (orchestrator, 23/11 ~16:40Z): four workers - project-instructions-once, release-linux-reads-the-
+receipt, graph-one-store-per-root and this mission - ended rc=2 in half an hour because their turn did NOT
+start while a deploy waited (`deploy_waiting ... This node starts no new turn while a build is waiting`), and
+every resume message sent while a deploy waited ended the same way.
+
+That is the answer for a turn that has NOT started, and it is the documented one (`docs/SCRIPTED-RUNS.md`:
+`2` = "refused before it started and nothing ran"; `scripts/worker-gate.sh` and `scripts/mission.sh` wait it
+out without spending a round). A turn that is ALREADY RUNNING is a different path and must end differently:
+it pauses at its own step boundary, writes its checkpoint and one resume wake, and ends CLEANLY - `0`. That
+was never asserted, and a regression there would have read exactly like the four above. It is asserted now:
+
+* `scripts/test-deploy-wait.sh` step 4 (**975df366**): the real turn of `scripts/lib/deploy-wait-e2e.lua`,
+  mid-flight when the request lands, now asserts
+  `[ "$TURN_RC" = "0" ] ... else fail "a turn that paused for the deploy ended rc=$TURN_RC: it must end
+  cleanly, never as a refusal"`. Step 5 of the same row (unchanged) then proves the node's own tick performs
+  the held resume after the deploy ends, which is the "resumes after the install" half.
+* The claim-race half (the run refuses at its own session claim rather than at the gate) is the
+  `deploy_pause.claim_wait` + `chat.deploy_refused` work above; a wake that hits it goes back with a new time
+  instead of being consumed (`selfloop.defer_refused`, **20b538cf**, 13 assertions in
+  `scripts/test-selfloop-pause.lua`).
+
+## Rows run after the rebase (narrowed, singly where the lock was busy)
+
+| row | result |
+| --- | --- |
+| `scripts/test-deploy-bound.sh` (rebuilt this tree's sentinel) | `deploy bound ok` |
+| `scripts/test-deploy-wait.sh` (real node, real worker, real pause) | `deploy wait ok` (59 checks + the new rc assertion) |
+| `scripts/test-deploy-wait.lua` | `deploy wait ok (59 checks)` |
+| `scripts/test-deploy-pause.lua` | `deploy claim wait ok (28 checks)` |
+| `scripts/test-thinking-block.lua` | `thinking block ok (104 checks)` |
+| `scripts/test-selfloop-pause.lua` | `self-loop pause: 113 checks passed` |
+| `scripts/test-completion-deploy-wait.lua` | `completion deploy wait ok (16 checks)` |
+| `rust/wa-sentinel` unit tests (post-rebase) | `test result: ok. 148 passed; 0 failed` |
+
+`scripts/fast.sh` narrowed (`WA_FAST_ROWS`) was **not** run to completion: the suite lock
+(`~/Work/missions/.suite.lock`) was held by other missions' full suites for the whole window (measured with
+`pgrep -af flock`: release-linux-reads-the-receipt with `--jobs 12`, project-instructions-once, main-health),
+so the narrowed run queued behind them and was cancelled rather than waited out. The same rows were run one
+by one, which is what the narrowed run would have selected, and single rows do not need the lock
+(FACTORY rule 15). The always-on rows inside `fast.sh` (the land row's ten parts, prompt-docs, the
+component checks) are therefore NOT covered by this report.
+
+## One flake, named
+
+`scripts/test-deploy-wait.sh` step 6 ("the held wakes run once the deploy ends") failed ONCE on this branch
+(`dispatched=0` after `marker_down` + `clear_request`) and passed on an immediate re-run with nothing changed
+between them; the two later runs (both after the rebase) also passed. It is timing under load (this node was
+running three other suites), not a behaviour this mission changed: nothing in the diff touches
+`selfloop.tick`'s dispatch or `deploy_pause.release_due`'s predicate. Not investigated further, and not
+claimed as fixed.
+
+## The last commit
+
+| commit | what |
+| --- | --- |
+| `975df366` | `scripts/test-deploy-wait.sh`: a turn that paused for a deploy ends rc=0, never as a refusal |
+| `20b538cf` | `deploy_pause.is_refusal` (one home for the two sentences), `chat.deploy_refused` asks it, `selfloop.defer_refused` puts a refused wake back; `test-selfloop-pause.lua` 13 assertions |
+| `c4420837`, `f4fdb170`, `81ab7d49` | the sentinel, Lua and doc/report commits above, rebased onto `c1337903` |
