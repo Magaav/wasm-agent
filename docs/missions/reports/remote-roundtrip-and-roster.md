@@ -136,6 +136,18 @@ available, so the recording is of the real old path - but it happened in the oth
 version of the cut had already changed the answer (the three leaked marks) when it was taken. A cut that
 reshapes an answer should record its golden first.
 
+### The rows that were run, individually (the full fast path was queued behind the suite lock)
+
+Twenty rows were run one at a time on this tree, each with its own scratch home, no network: the four above
+plus `test-session-isolation` (141 checks), `test-remote-edit` (46), `test-remote-call-shape` (87),
+`test-remote-pending` (90), `test-undo-command` (40), `test-refusal-contract` (17,181),
+`test-orchestration-mode` (77, no inference), `test-node-dispatch-wiring` (10, 29 admitted capabilities),
+`test-tool-schema-fidelity` (69), `test-codemode-parity` (56, 67 tools), `test-codemode-boundary` (33),
+`test-hooks-tools` (25), `test-prompt-tool-names` (288). All green. `test-exec-timeout` SKIPPED by its own
+guard (its fixture child cannot run here), and `test-orchestration-routing` is not runnable standalone at
+all - it asserts `WA_ROUTING_SOURCE`, a private-Git fixture only the runner provides (`scripts/fast.sh`) -
+so its green is only claimed by the suite, not here.
+
 ## 5. Job 5 - the remote `edit` shape: measured, inconclusive, so no schema change
 
 The premise is right: the `remote` schema's *parameters* are `node, capability, command, path, args, calls`
