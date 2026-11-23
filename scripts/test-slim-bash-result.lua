@@ -74,7 +74,7 @@ check(#keys(old_script) > #keys(old_local), 'the run-block answer had two more f
 -- The removed set is derived from the recorded answer, so a field added to the record later is covered
 -- by this row without editing it.
 local removed = outside(old_local)
-check(#removed + (#keys(old_local) - #removed) == #keys(old_local) and #removed > 20,
+check(#removed > 20 and #removed > #keys(old_local) / 2,
   'the recorded answer is mostly bookkeeping: ' .. #removed .. ' of ' .. #keys(old_local) .. ' fields are not kept')
 
 -- 1. The allow-list, on the recorded answers.
