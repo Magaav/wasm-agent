@@ -4,13 +4,16 @@ Priority 1, 23/11. `/tmp` on avell is a 16 G tmpfs with a per-user quota; it ran
 and each time a verdict was lost - `main-health` red on ENOSPC (22808bc8), the row `regenerate` dead on
 `fatal: unable to write loose object file: Disk quota exceeded` (2104a4d8, 07:36Z), and a tool result
 failing with EDQUOT. Branch `change/tests-clean-their-tmp`, base `83772130`, worktree
-`/home/victor/Work/missions/tests-clean-their-tmp/wt`. Two commits:
+`/home/victor/Work/missions/tests-clean-their-tmp/wt`. Commits:
 
 * `f942c21c` the temp floor: `main-health`, `preflight` and the fast path refuse a machine with no room in
   `/tmp` by name (`tmp_low`), before they start anything;
 * `1544404f` the rows that minted in `/tmp` take their root from the runner and remove it on exit, and
   `scripts/test-tmp-cleanliness.mjs` is the test that holds every row to it (wired into `scripts/fast.sh`
-  and `scripts/test.sh`).
+  and `scripts/test.sh`);
+* `164e27a8`, `041e410a`, `2bf03283` this report and the two corrections it needed (a line number that moved
+  when the floor was added, and the library's own usage line after the file was renamed off the `.gitignore`
+  `tmp-*` pattern).
 
 ## Premises, re-measured on this node before writing code
 
