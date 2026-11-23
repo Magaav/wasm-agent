@@ -96,3 +96,28 @@ here rather than hidden in a count.
    the next deploy prunes`
 5. `pin prune: kept <sha12> (a live process is inside it (pid <pid>, cwd <path>))` and the same with
    `exe <path>`
+
+## Preflight, 23/11 05:03Z: four rows in the first run, two after the fast path's own retry
+
+`bash scripts/preflight.sh deploy-prunes-pins-safe` merged this branch (`172081e550dc`) and ran the gate:
+
+- **first run**: `412 checks, 4 failed` - `undo-pty`, `undo-remote-pty`, `chat-start-pty` (15 ok, 1 failed) and
+  `scripts/test-graph-quarantine-evidence.lua`, which **hung** (`watchdog: ... produced no verdict within
+  120s`, killed and retried, not an assertion);
+- **the fast path's retry** (narrowed to the rows the plan touches, `fetch-retry-rows.txt`): `107 checks, 2
+  failed`, and the result JSON (`checkout/.git/worktrees/tree92/wa-fast-result.json`) lists exactly
+  `undo-pty` and `undo-remote-pty`. `chat-start-pty ok (1589ms)` and every Lua row passed there
+  (`fast: lua 24/24 passed`).
+
+So after the retry this branch fails nothing of its own, and the two rows left are the ones
+`~/Work/missions/main-health.json` records as red on main: `undo-pty`, `undo-remote-pty` (and
+`test-land-quick.lua`, which this gate did not fail) - rule 14's case, and the preflight says so itself
+(`the mission is NOT blamed`). The transient two are load-sensitive: they failed in the first run while the
+box was running two other suites, and passed in the retry; neither imports anything this branch touches
+(`chat-start-pty`: `scripts/test-chat-start-pty.mjs`; the Lua row: `scripts/test-graph-quarantine-evidence.lua`),
+and `git diff origin/main...HEAD --stat` is `scripts/deploy.sh`, `scripts/landing-queue.mjs`,
+`scripts/test-deploy-pin-prune.mjs` and this report.
+
+`preflight.json` reports `ok: false` with `why: 2 row(s) failed here and 2 are MAIN RED on ae3cbb37ddcf
+(undo-pty, undo-remote-pty)`: its parser unions the first run and the retry, so the two transient rows stay
+in the list even though the retry passed them.
