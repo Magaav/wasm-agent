@@ -685,8 +685,12 @@ local function settle_call(s,call)
       -- because a reader looks for that word), and without an `error` key. `start`/`cancel` are NOT in
       -- this allow-list: a refused start is a refusal of what the script asked for and must still raise.
       if call.tool=='operation' and OPERATION_READ_ACTIONS[tostring(params and params.action or 'status')] then
-        success=true
-        if type(value)=='table' and (value.error~=nil or value.ok==false) then
+        -- ONLY A RECORD travels this way. A refusal OF THE READ ITSELF is not a record: "operation <id> is not
+        -- your operation" carries `not_your_operation` and no `state`, and it must stay a refusal of the call
+        -- (otherwise a session could read another session's log by catching the answer instead of the raise).
+        local is_record = type(value)=='table' and value.state~=nil and value.not_your_operation~=true
+        if is_record then success=true end
+        if is_record and (value.error~=nil or value.ok==false) then
           local record={}
           for key,item in pairs(value) do record[key]=item end
           if value.error~=nil then
