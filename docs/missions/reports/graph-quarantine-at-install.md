@@ -103,6 +103,16 @@ No assertion, limit or quarantine rule was removed; `quarantine_database` and `f
 * Measured after the change, in the landing step's own shape (installed binary, the node's component in the
   row's home, `WA_COMPONENTS_DIR` set): exit 0, same line, no quarantine copy. Without provisioning of either
   kind the row still refuses by name.
+* THAT LANDING CHANGE CANNOT HELP THE GATE THAT DEMANDED IT, and that is a bootstrap, not a bug: `wa land`
+  runs the **installed** `lua/core/land.lua` while the rows come from the merged tree, so a preflight uses the
+  old step until the branch is installed. Round 3 stopped on exactly that. So the row now provisions itself as
+  well (`4ed085fb`): if no `WA_GRAPH_COMPONENT_WASM`, no `graph.wasm` in `WA_COMPONENTS_DIR` and none in this
+  row's own home, it takes the component THIS NODE runs - the binary names the install (`wa` in `.local/bin`,
+  the components beside the node's data directory), the host resolves components per call - and copies the
+  three files (wasm, pin, manifest) into the row's own home. Nothing is built. Measured in the landing step's
+  shape with no component environment at all: exit 0, `graph_db_journal_resolved ... outcome=rolled_back`,
+  `revision 1 kept, 13 row(s) answered, no quarantine copy`; with no component anywhere and no `wa` on PATH:
+  `refused: no graph component: ...`, exit 1.
 
 **Discrimination, measured twice each on this node:**
 
