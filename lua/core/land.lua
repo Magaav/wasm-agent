@@ -4250,6 +4250,54 @@ impl.canaries = function(run, options)
   if options.fleet_canaries and deploy_row and deploy_row.state == "done" and type(deploy_row.nodes) == "table" then
     ring, fleet_recorded = deploy_row.nodes, true
   end
+  -- WHO THIS MACHINE CAN ACTUALLY ADDRESS. A node the deploy installed on is asked; a node this machine has
+  -- no roster entry for cannot be asked from here, and that is a fact about THIS machine (a scratch home has
+  -- no roster at all), not a failure of the feature - so an empty roster asks nobody and says so, while a
+  -- roster that is missing ONE of the deployed nodes is `not proven` for that node (a release that installed
+  -- on a node it cannot then reach has not proven that node). A caller that supplies `remote_call` owns
+  -- reachability itself (a test), and every deployed node is asked through it.
+  local roster, roster_why = {}, nil
+  if type(options.remote_call) ~= "function" then
+    local loaded_nodes, nodeslib = pcall(dofile, "lua/core/nodes.lua")
+    if not loaded_nodes or type(nodeslib) ~= "table" or type(nodeslib.peers) ~= "function" then
+      roster_why = "lua/core/nodes.lua could not be loaded, so no peer plane exists here"
+    else
+      local ok_peers, peers = pcall(nodeslib.peers, {})
+      if ok_peers and type(peers) == "table" then roster = peers else roster_why = "the roster could not be read" end
+    end
+  end
+  local function in_roster(name)
+    for _, peer in ipairs(roster) do
+      local known = tostring((type(peer) == "table" and (peer.node or peer.name or peer.node_id)) or peer or "")
+      if known == name then return true end
+    end
+    return false
+  end
+  local unreachable = {}
+  if #ring > 0 and type(options.remote_call) ~= "function" then
+    if #roster == 0 then
+      evidence(string.format("## fleet: not asked - this node has no roster (%s), so it cannot address a peer; the deploy's %d node(s) cannot have been reached from here either\n",
+        tostring(roster_why or "no peer is known"), #ring))
+      unreachable = ring
+      ring = {}
+    else
+      local askable = {}
+      for _, entry in ipairs(ring) do
+        local name = tostring((type(entry) == "table" and entry.node) or entry or "")
+        if name ~= "" and in_roster(name) then askable[#askable + 1] = entry
+        elseif name ~= "" then unreachable[#unreachable + 1] = { node = name } end
+      end
+      ring = askable
+    end
+  end
+  -- A node the deploy recorded and this machine cannot address is NOT PROVEN (red), never skipped.
+  for _, entry in ipairs(unreachable) do
+    local name = tostring((type(entry) == "table" and entry.node) or entry or "")
+    if name ~= "" and #roster > 0 then
+      unproven[#unproven + 1] = name .. " (this node has no roster entry for it, so its canaries could not be asked)"
+      evidence(string.format("%s: NOT PROVEN - no roster entry here, so it could not be asked\n", name))
+    end
+  end
   if not fleet_recorded then
     evidence(string.format("## fleet: not asked - the deploy step recorded no per-node outcome (%s), so this release has proven nothing about the fleet\n",
       tostring(deploy_row and deploy_row.state or "no deploy row")))
