@@ -1099,11 +1099,20 @@ end
 -- The settled command's answer, read from the operation itself: the same fields the synchronous bash
 -- answers (stdout, stderr, the byte counts, code/ok), so a call that fitted in the budget reads exactly
 -- as it did before adoption existed.
-local function adopted_result(id, author, caller)
+-- THE SETTLED RECORD IS READ ONCE (23/11). The caller already holds the snapshot that said "settled" -
+-- from `await` or from the last-word `status` - and this function used to ask for that same record a
+-- SECOND time. Both are rust/wa-operation's `snapshot(id)`, field for field, so `settled_state` is the
+-- same answer; a caller that has no snapshot in hand (none today, and a future one would be wrong rather
+-- than silent) still pays for one status read. Measured on the remote row: 6 tools.dispatch calls per peer
+-- bash call, ~35 ms each (the guards plus the schema catalogue), of which this was one.
+local function adopted_result(id, author, caller, settled_state)
   local ctx = { user_id = author, node_id = nodeslib.node_name(), peer_call = true,
     session_id = adopt_session(caller) }
-  local state = toolslib.dispatch(memory, "operation", { action = "status", id = id }, "master", ctx)
-  local out = type(state) == "table" and state or {}
+  local out = type(settled_state) == "table" and settled_state or nil
+  if out == nil then
+    local state = toolslib.dispatch(memory, "operation", { action = "status", id = id }, "master", ctx)
+    out = type(state) == "table" and state or {}
+  end
   for _, stream in ipairs({ "stdout", "stderr" }) do
     local page = toolslib.dispatch(memory, "operation",
       { action = "read", id = id, stream = stream, offset = 0, limit = stream == "stdout" and 24576 or 8192 },
@@ -1194,6 +1203,13 @@ local function adopted_open(caller, author)
     session_id = adopt_session(caller) }
   local index, index_problem = adopted_index_read(caller)
   if index == nil then return nil, tostring(index_problem) end
+  -- NOTHING ADOPTED, NOTHING TO REAP (23/11). The list below is only ever intersected with THIS peer
+  -- session's own adopted ids, so with none recorded there is no id to reap, no slot to count and nothing
+  -- to write back: the loop would answer (0, nil, {}) and the index would be rewritten empty. Answering
+  -- that here is the same answer without paying a whole `operation list` dispatch - which is ~35 ms of
+  -- guards and schema catalogue on every peer bash call (measured on the remote row). The old-work
+  -- housekeeping this function exists for still runs, unchanged, the moment one id HAS been adopted.
+  if next(index) == nil then return 0, nil, {} end
   local page = toolslib.dispatch(memory, "operation", { action = "list", limit = 50 }, "master", ctx)
   local rows = type(page) == "table" and (page.operations or page.items) or nil
   if type(rows) ~= "table" then return nil, "list_unreadable" end
@@ -1300,7 +1316,7 @@ local function adopt_bash(args, caller, author)
       -- still travels with it: the fact belongs to the CALL, not to the shape of its answer.
       -- A command that fitted the budget answers its own result, and the reap this call performed (if
       -- any) still travels with it: the fact belongs to the CALL, not to the shape of its answer.
-      local settled_answer = adopted_result(id, author, caller)
+      local settled_answer = adopted_result(id, author, caller, state)
       if #reaped > 0 then
         settled_answer.reaped = reaped
         settled_answer.reaped_note = "an earlier adopted command of yours outlived the ceiling this node "
@@ -1315,7 +1331,7 @@ local function adopt_bash(args, caller, author)
   -- is STILL RUNNING is adopted below.
   local final = toolslib.dispatch(memory, "operation", { action = "status", id = id }, "master", ctx)
   if type(final) == "table" and (final.settled == true or tostring(final.state or "") == "settled") then
-    local final_answer = adopted_result(id, author, caller)
+    local final_answer = adopted_result(id, author, caller, final)
     if #reaped > 0 then
       final_answer.reaped = reaped
       final_answer.reaped_note = "an earlier adopted command of yours outlived the ceiling this node gave "
