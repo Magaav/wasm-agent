@@ -60,6 +60,9 @@ Measured as bytes rather than milliseconds (deterministic, build-independent): t
   second mint would make a run not recognise its own row. Verified in a real run block: both calls
   answered `pid=3248483 boot=f2aeb435-f9d9-4dac-a507-b9a99cec51d5`, and `memory.process_identity()`
   matched.
+* The lazy digest still answers the bytes' own name: `host.runtime_info()` on the branch reports
+  `binary_sha256 = 1624da5f5e67...`, and `scripts/test-capability-inventory.mjs` independently hashes the
+  same file to `1624da5f5e6736cda5f2a7afe3d035e2b3fe8304e1fbd53e4db51d2f88329c60` (commit `dd2ef0f3`).
 * `lua/core/memory.lua`'s `process_identity` prefers `host.process_identity` and keeps `host.runtime_info`
   as the fallback for a binary that does not know the new call (commit `dd2ef0f3`), so an older installed
   binary behaves exactly as before.
