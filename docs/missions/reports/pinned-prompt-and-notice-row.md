@@ -135,6 +135,36 @@ and there is no pinned row at all. The `wa-term` unit tests are about symbols (`
 the reverted-non-test form of this branch fails to build its own tests, which is the strongest form
 of "fails on the base" and is stated plainly rather than dressed up as a red assertion.
 
+## The rows I ran, and the one run that was cut
+
+Each Lua row singly against this tree's binary (`WA_SCRIPT=<row>`, its own scratch `HOME`), because a
+narrowed `scripts/fast.sh` was killed twice by the node re-installing itself mid-run (nine installs
+landed during this session: `dc2a60ce`, `a029d0d5`, `82d09add`, `1cc642f8`, `8010d293` among them).
+The `fast.sh` log stopped after `fast: components ... pinned` with no row line and no EXIT, so it
+proves nothing and is not counted as green.
+
+| row | result |
+| --- | --- |
+| `scripts/test-host-return-docs.lua` | ok (10 checks; 40 JSON-text capabilities documented) |
+| `scripts/test-cli-view.lua` | ok (566 checks) |
+| `scripts/test-cli-notice.lua` | ok (11 checks) |
+| `scripts/test-cli-resize.lua` | ok (81 checks) |
+| `scripts/test-cli-welcome.lua` | ok (15 checks) |
+| `scripts/test-cli-interrupt.lua` | ok (27 checks) |
+| `scripts/test-cli-steering.lua` | ok |
+| `scripts/test-transcript-view.lua` | ok (11 checks) |
+| `scripts/test-keybindings.lua` | ok (53 checks, 0 failed) |
+| `scripts/test-prompt-tool-names.lua` | ok (288 checks, 0 skipped) |
+| `scripts/test-prompt-golden.lua` | ok (20 checks) |
+| `scripts/test-cli-flow.lua` | **1 failed of 14**: `exactly one blank line under it` - **pre-existing**, `scripts/row-at-sha.sh b79da519 scripts/test-cli-flow.lua` answers `class=pre_existing` (base exit 1, change exit 1) |
+| `scripts/test-tmp-cleanliness.mjs` | PASS (9 checks) - including "every pty row that starts a tmux server does it through the helper (16 files scanned)" |
+| `cargo test -p wa-term --lib` | 218 passed, 0 failed |
+| `scripts/test-pinned-request-pty.mjs` | 26 ok, 0 failed |
+| `scripts/test-jump-to-bottom-pty.mjs` | 14 ok, 0 failed |
+
+**Not run here**: the full suite (`scripts/test.sh`, `fast.sh`, `preflight`), per the G wave's rule - a
+landing runs no gate and main-health runs the full check on main.
+
 ## 6. The frame cost of a 5,000-row chat (measured, not argued)
 
 `WA_FRAME_MS=1 cargo test --release -p wa-term --lib frame_cost -- --nocapture`, 5,000 rows at
