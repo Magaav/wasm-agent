@@ -22,21 +22,21 @@ answer from before the send. The component log the orchestrator measured is cons
 component was healthy and writing one record at a time, and the reads were answered by jobs that had run
 minutes earlier.
 
-Fix (commit `49e2bde2`): a dedupe claim may be **in-flight only**
+Fix (commit `958e8831`): a dedupe claim may be **in-flight only**
 (`EnqueueRequest::dedupe_in_flight()`, `Job::dedupe_in_flight`); it is released when the job settles
 (done, dead, expired), `repair` does not resurrect it, and the encoding reads an old record that predates
 the flag as the long-lived claim it was. `rust/wa-capabilities/src/whatsapp_query.rs` asks for it, so a
 query answers the index as it is now; `whatsapp.send` keeps the long-lived claim, because a repeated send
-must not go out twice (asserted both ways in `rust/wa-queue/src/tests.rs`, commit `49e2bde2`).
+must not go out twice (asserted both ways in `rust/wa-queue/src/tests.rs`, commit `958e8831`).
 
 **Not verified: the scratch-pair reproduction.** The cause was found by reading the code and is proven at
-the queue and at the tool by tests (`49e2bde2`, `856762fd`), not by running two nodes against each other.
+the queue and at the tool by tests (`958e8831`, `03c97b6a`), not by running two nodes against each other.
 openclaw was read-only and I did not run a scratch pair, so I have not watched the old code answer 15:40
 and 16:15 with the same call in a live process.
 
 ## B. The read contract, in the answer itself
 
-`index::read_paced` / `index::search_paced` (`rust/components/wa-whatsapp/src/index.rs`, commit `92faddba`):
+`index::read_paced` / `index::search_paced` (`rust/components/wa-whatsapp/src/index.rs`, commit `2c95f22f`):
 
 * `as_of` (ms), `as_of_iso`, `as_of_local` - the time of the newest message the index holds for that chat
   (null when it holds none, because a time is not a missing fact);
@@ -56,29 +56,29 @@ and 16:15 with the same call in a live process.
 A search carries `as_of` + `as_of_iso` + `as_of_scope: "matches"` (a search is not one chat, so the scope
 is said), the same `order`, and the same `index` block.
 
-Tests (`4e18b5e9`):
+Tests (`cf44d068`):
 `index::tests::a_read_says_how_fresh_it_is_and_two_reads_in_a_row_never_go_backwards`,
 `index::tests::a_search_says_how_new_its_newest_match_is_and_how_caught_up_the_writer_is`.
 
 ## C. READ YOUR WRITES
 
 * The component now writes the record of its own send into the index **before the send answers**
-  (`rust/components/wa-whatsapp/src/guest.rs`, the outbox `Ok(message_id)` arm, commit `92faddba`): it used
+  (`rust/components/wa-whatsapp/src/guest.rs`, the outbox `Ok(message_id)` arm, commit `2c95f22f`): it used
 to hand it to the pipeline inbox and be written on a later tick, which is exactly the window in which a
 read issued the moment the send answered answered from before the send. A refused write still answers the
 send (the message *is* out) with `in_history: false` and hands the record to the inbox retry lane;
 * `wa-whatsapp-outbox::Outcome` carries `in_history`, and `outbox::status` answers it
-  (`rust/wa-whatsapp-outbox/src/lib.rs`, commit `e3f9a882`), with `in_history_note` when it is false;
-* the tool carries it through (`lua/core/whatsapp.lua`, commit `a6c68650`) - both the single-id answer and
+  (`rust/wa-whatsapp-outbox/src/lib.rs`, commit `f212ba01`), with `in_history_note` when it is false;
+* the tool carries it through (`lua/core/whatsapp.lua`, commit `3eecc178`) - both the single-id answer and
 the `ids` wait entry rebuild their answers field by field, so without this the field would never have
 reached a caller;
 * a read that cannot show a message it already has names it in `pending` (test
   `index::tests::a_message_accepted_and_not_written_yet_is_named_pending_and_the_answer_says_it_is_behind`,
-  `4e18b5e9`).
+  `cf44d068`).
 
 ## D. A voice or image record never answers an empty text
 
-`rust/components/wa-whatsapp/src/view.rs` (`stand_in`, commit `92faddba`): a voice/audio record with no
+`rust/components/wa-whatsapp/src/view.rs` (`stand_in`, commit `2c95f22f`): a voice/audio record with no
 text and no transcript answers `text: "transcript pending"`, `text_reason: "transcript_pending"`; with a
 stated reason it answers `"not transcribed: media_too_large"` (or `view_once`, `ephemeral_media_not_retained`, …)
 and `text_reason: "unsupported"`; an image/video/sticker says `ocr pending` / `not read: <reason>`.
@@ -93,18 +93,18 @@ Tests: `view::tests::a_voice_note_with_no_transcript_says_so_instead_of_an_empty
 `index::read` merges the addresses the index learned for a chat (`ix/al`, `remember_alias`) instead of
 reading one prefix: the requested address plus its alias, interleaved by inverted time and deduplicated by
 message id, with quotes and folded reactions looked up under both, `as_of` the max over both, and
-`addresses` naming the pair when they are joined (commit `92faddba`). Before this, a read by `@lid` and a
+`addresses` naming the pair when they are joined (commit `2c95f22f`). Before this, a read by `@lid` and a
 read by the phone number were two different histories. Test:
-`index::tests::one_chat_is_one_history_under_both_of_its_addresses` (`4e18b5e9`).
+`index::tests::one_chat_is_one_history_under_both_of_its_addresses` (`cf44d068`).
 
 ## F. Tests and canaries
 
 * queue: `tests::an_in_flight_claim_stops_answering_when_the_job_settles_and_a_send_claim_does_not`
-  (`49e2bde2`); tool: `whatsapp_query::tests::a_settled_read_is_not_replayed_to_the_next_caller`
-  (`856762fd`);
-* component: the four tests named above (`4e18b5e9`) plus the two view tests (`92faddba`);
-* outbox: `status_says_whether_the_sent_message_is_in_the_history` (`e3f9a882`);
-* the WhatsApp index canary (`lua/core/canaries/whatsapp-index.lua`, commit `e3f9a882`) now reads the
+  (`958e8831`); tool: `whatsapp_query::tests::a_settled_read_is_not_replayed_to_the_next_caller`
+  (`03c97b6a`);
+* component: the four tests named above (`cf44d068`) plus the two view tests (`2c95f22f`);
+* outbox: `status_says_whether_the_sent_message_is_in_the_history` (`f212ba01`);
+* the WhatsApp index canary (`lua/core/canaries/whatsapp-index.lua`, commit `f212ba01`) now reads the
   newest chat twice on a live node and refuses a `read` answer with no `as_of`, no `order`, no `index`
   state, or a later read whose `as_of` went back. It stays read-only (two `host.whatsapp_read` calls, no
   send, no index write) and its report carries counts and times only - no chat, no id, no text.
@@ -118,7 +118,7 @@ rather than inventing a file the factory would not run.
 * `rust/wa-capabilities/src/whatsapp_query/tests.rs`: three tests drove a settled answer by asking again
   (`ask_in` twice), which is now a **new** job by design. Their assertions are unchanged; the setup now
   decodes the settled job through the new `settled_answer(op, &job)` - the same function `settle` uses
-  (`856762fd`). The old behaviour is asserted the other way round by
+  (`03c97b6a`). The old behaviour is asserted the other way round by
   `a_settled_read_is_not_replayed_to_the_next_caller`.
 * `rust/wa-queue/src/tests.rs::dedupe_key_names_one_job_per_queue` still asserts the long-lived claim for a
   job that did not ask for in-flight-only, which is unchanged behaviour.
@@ -128,7 +128,7 @@ rather than inventing a file the factory would not run.
 `cargo test -p wa-capabilities --lib` does not compile at base `51b63d9a`: `rust/wa-capabilities/src/operations.rs`
 calls `super::foreground(...)` with six arguments where the function takes seven (the `stdin` parameter was
 added and two test call sites were not updated; the third was). Confirmed on the base commit
-(`git show 51b63d9a:rust/wa-capabilities/src/operations.rs`, lines 3196 and 3249). Repaired in `856762fd`
+(`git show 51b63d9a:rust/wa-capabilities/src/operations.rs`, lines 3196 and 3249). Repaired in `03c97b6a`
 by passing `None` at both call sites - test-only, no assertion touched.
 
 ## Texts to approve (model- or operator-facing, verbatim)
@@ -164,15 +164,35 @@ by passing `None` at both call sites - test-only, no assertion touched.
 
 ## Checks run here (avell), narrowed as the brief asks
 
-* `cargo test --offline -p wa-queue --lib` - 37 passed (`49e2bde2`).
-* `cargo test --offline -p wa-capabilities --lib whatsapp_query` - 15 passed (`856762fd`).
-* `cargo test --offline -p wa-whatsapp-outbox` - all passed (`e3f9a882`).
+* `cargo test --offline -p wa-queue --lib` - 37 passed (`958e8831`).
+* `cargo test --offline -p wa-capabilities --lib whatsapp_query` - 15 passed (`03c97b6a`).
+* `cargo test --offline -p wa-whatsapp-outbox` - 14 passed + 7 passed (the crate and its integration file), 0 failed (`f212ba01`).
 * `cargo test --offline --manifest-path rust/components/wa-whatsapp/Cargo.toml` - 202 passed
-  (`92faddba`, `4e18b5e9`).
+  (`2c95f22f`, `cf44d068`).
 * `flock -o ~/Work/missions/.suite.lock env WA_FAST_ROWS=<rows> bash scripts/fast.sh` with the rows for the
   Lua files touched (`test-whatsapp-one-surface.lua`, `test-whatsapp-send.lua`, `test-whatsapp-one.lua`,
-  `test-return-shapes.lua`, `test-prompt-tool-names.lua`, `test-host-return-docs.lua`) - result recorded
-  below this line when it finished.
+  `test-return-shapes.lua`, `test-prompt-tool-names.lua`, `test-host-return-docs.lua`): **135 checks, 6
+  failed**, 837 s. The six, and what each is:
+  * `check-component-pins` (2 FAILs: `wa-whatsapp` and `wa-email` source changed and the pin did not) -
+    **mine, and fixed** (commit `d56f6e8b`): `rust/wa-queue` is an input of both components, and the
+    component sources changed, so I rebuilt the two from this tree with
+    `WA_COMPONENTS_DIR=$PWD/build/components-pinned bash scripts/build-components.sh wa-whatsapp wa-email`
+    and wrote their sha256 and size into `components.lock`. `bash scripts/test-component-pins.sh` then
+    answered `11 of 11 pinned component(s) verified` and `the pinned bytes answer all 8 ops the seam
+    defines`. Nothing was installed on this node's live component directory: the build wrote into this
+    worktree's `build/components-pinned/`, which the pin check reads as one of its candidate sources.
+  * `check-install-guards.log` (6 checks): every one is `wa upgrade` answering "refused inside a turn
+    running on the node it would replace" where the test expected the override path. That is the guard
+    doing its job in the environment the row ran in (a worker turn), not a code path this branch touches.
+  * `test-edit-aliases.lua` (1 check): the `edit` tool's option names (`unsupported_edit_option`). No
+    file this branch changes is on that path.
+  * `check-esc-stops-pty.log`, `check-tui-chrome-pty.log`, `check-run-block-pty.log` (1 each): pty/timing
+    rows, one assertion each, on a node that had a second mission running a build at the same time.
+
+  None of the four non-pin failures reads a file this branch changes (`git diff --name-only 51b63d9a..HEAD`
+  is the 14 files above). I did **not** re-run them against a base worktree, so I name them as unrelated and
+  unproven-on-base rather than as "pre-existing": the one pre-existing failure I did prove is the
+  `foreground` arity above.
 
 ## What I did not do or could not verify
 
