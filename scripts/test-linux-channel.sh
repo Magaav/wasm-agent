@@ -133,8 +133,10 @@ mkdir -p "$repo/scripts/lib" "$repo/releases"
 # tracked copy would make every case after the first one `source_dirty` (the publisher's own refusal) - which is
 # exactly what happened on the first run of this suite.
 printf 'releases/index-linux.json\n' > "$repo/.gitignore"
-# THE VERSION, the one owner of the number the channel publishes under (v<version>).
-printf '0.1.0\n' > "$repo/VERSION"
+# THE VERSION, the one owner of the number the channel publishes under (v<version>): the constant in
+# lua/core/build_identity.lua, which the release writes.
+mkdir -p "$repo/lua/core"
+printf 'local M = {}\nM.PRODUCT_VERSION = "0.1.0"\nreturn M\n' > "$repo/lua/core/build_identity.lua"
 cp "$ROOT/scripts/publish-linux-channel.sh" "$ROOT/scripts/check-linux-channel-fresh.sh" "$repo/scripts/"
 # The verifier is the REAL one: a signature is worth what the verifier says it is, so the fixture judges the
 # publisher's chain with the same code a node installs with.

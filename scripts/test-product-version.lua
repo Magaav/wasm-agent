@@ -40,8 +40,11 @@ local middle_dot = "\194\183"
 -- uses, so the shapes are asserted without depending on which binary runs this row.
 eq(identity.product_version({ native = { product_version = "0.1.0" } }), "0.1.0", "the version is read from the binary's own answer")
 eq(identity.product_version({ native = { product_version = "0.2.12" } }), "0.2.12", "a two-digit patch number too")
-eq(identity.product_version({ native = { label = "abc12345", known = true } }), "unknown",
-  "a binary older than the field answers unknown, never a made-up number")
+-- A binary older than the field: the TREE's constant is the answer (it is the last released version, and a
+-- dev build between releases shows exactly that with its own sha beside it) - never a made-up number, and never
+-- the crate's metadata.
+eq(identity.product_version({ native = { label = "abc12345", known = true } }), identity.PRODUCT_VERSION,
+  "a binary older than the field falls back to the tree's one constant")
 eq(identity.product_version({ native = { product_version = "  0.1.3  " } }), "0.1.3", "and the field is trimmed")
 
 -- ---------------------------------------------------------------- the header line
@@ -70,15 +73,22 @@ local function read(path)
   local ok, text = pcall(host.read_file, path)
   return (ok and type(text) == "string") and text or nil
 end
-local text = read(root .. "/VERSION")
-ok(text ~= nil, "the tree has a VERSION file (" .. root .. "/VERSION)")
-text = (tostring(text or ""):gsub("^%s+", ""):gsub("%s+$", ""))
-ok(text:match("^%d+%.%d+%.%d+$") ~= nil, "VERSION holds d.d.d ('" .. text .. "')")
+local source = root .. "/lua/core/build_identity.lua"
+local module = read(source)
+ok(module ~= nil, "the tree has the one owner (" .. source .. ")")
+local text = tostring(module or ""):match([[M%.PRODUCT_VERSION%s*=%s*"([^"]*)"]]) or ""
+ok(text:match("^%d+%.%d+%.%d+$") ~= nil, "M.PRODUCT_VERSION holds d.d.d ('" .. text .. "')")
 local native = identity.native() or {}
 local binary_product = tostring(native.product_version or "")
-ok(binary_product ~= "", "the running binary carries a product version (the build embeds the file)")
-ok(binary_product:match("^%d+%.%d+%.%d+$") ~= nil or binary_product == "unknown",
-  "and it is a version or 'unknown', never something invented ('" .. binary_product .. "')")
+if binary_product ~= "" then
+  ok(binary_product:match("^%d+%.%d+%.%d+$") ~= nil or binary_product == "unknown",
+    "the running binary carries a version, or 'unknown', never something invented ('" .. binary_product .. "')")
+else
+  -- The binary that runs this row may be older than the field (an installed node's `wa`): the reader falls back
+  -- to the tree's constant, and that fallback is what the header then shows.
+  eq(identity.product_version(), text, "a binary older than the field still answers the tree's number")
+  print("note: the running binary has no product_version field; the reader's fallback is being asserted")
+end
 -- The tree's commit, so the two numbers are compared only when they can be: `host.exec` answers a JSON string.
 local json = dofile("lua/vendor/json.lua")
 local tree_commit = ""
@@ -91,7 +101,7 @@ if host.exec then
   tree_commit = (tree_commit:gsub("%s+$", ""))
 end
 local binary_commit = tostring(native.commit or "")
-if tree_commit ~= "" and binary_commit ~= "" and binary_commit ~= "unknown" and binary_commit:sub(1, 40) == tree_commit:sub(1, 40) then
+if binary_product ~= "" and tree_commit ~= "" and binary_commit ~= "" and binary_commit ~= "unknown" and binary_commit:sub(1, 40) == tree_commit:sub(1, 40) then
   eq(binary_product, text, "a binary built from this commit reports this tree's VERSION")
 else
   print(string.format("note: the running binary is commit %s and the tree is %s; the two are held equal only on a build of the same commit",

@@ -137,7 +137,8 @@ contains(header("0.1.0"), "Welcome to wasm-agent! v0.1.0 \194\183 vabc12345", "t
 must("git -C " .. repo .. " tag -f v0.1.0 " .. release_sha, "the release tag gh created for the first cut")
 must("git -C " .. repo .. " push -q origin refs/tags/v0.1.0", "push that tag to the fixture's origin")
 local second = head()
-eq(must("git -C " .. repo .. " show origin/main:VERSION"), "0.1.0", "after the first cut the tree carries 0.1.0")
+contains(must("git -C " .. repo .. " show origin/main:lua/core/build_identity.lua"), 'M.PRODUCT_VERSION = "0.1.0"',
+    "after the first cut the one owner says 0.1.0")
 must("git -C " .. repo .. " fetch -q origin main", "read main back")
 must("git -C " .. repo .. " reset -q --hard origin/main", "the next cut is made from the main the first one left")
 local second_run = channel_run("linuxH")
@@ -146,7 +147,8 @@ eq(second_passed, true, "the second release publishes too (" ..
   tostring((not second_passed) and (second_result and second_result.observed or second_result)) .. ")")
 eq((second_run.journal.linux or {}).version, "0.1.1", "and it is 0.1.1: one patch past the release it follows")
 eq((second_run.journal.linux or {}).tag, "v0.1.1", "with v0.1.1 as the tag")
-eq(must("git -C " .. repo .. " show origin/main:VERSION"), "0.1.1", "and VERSION on main says 0.1.1 - the ONE owner, written by the release")
+contains(must("git -C " .. repo .. " show origin/main:lua/core/build_identity.lua"), 'M.PRODUCT_VERSION = "0.1.1"',
+    "and the one owner on main says 0.1.1 - written by the release")
 contains(live_channel(origin_main()), "\"tag\": \"v0.1.1\"", "the live index names v0.1.1")
 contains(header("0.1.1"), "Welcome to wasm-agent! v0.1.1", "and a build of it would show v0.1.1 in the header")
 -- A minor/major bump is Victor's word, quoted, or it does not happen - in both directions.

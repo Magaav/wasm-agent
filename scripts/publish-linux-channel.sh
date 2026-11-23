@@ -87,8 +87,11 @@ short=$(printf '%.12s' "$commit")
 
 # THE VERSION IS THE TREE'S, not a second number decided here: the tag is `v` + the first line of `VERSION`.
 if [ -z "$tag" ]; then
-  [ -f "$tree/VERSION" ] || fail "version_missing: $tree/VERSION (the one owner of the product version; wa release cut writes it)"
-  tag="v$(sed -n '1p' "$tree/VERSION" | tr -d ' \r')"
+  version_source="$tree/lua/core/build_identity.lua"
+  [ -f "$version_source" ] || fail "version_missing: $version_source (the one owner of the product version, M.PRODUCT_VERSION; wa release cut writes it)"
+  product=$(grep -m1 'M[.]PRODUCT_VERSION' "$version_source" | sed 's/.*= *//' | tr -d '"' | tr -d ' \r')
+  [ -n "$product" ] || fail "version_missing: $version_source has no M.PRODUCT_VERSION line"
+  tag="v$product"
 fi
 case "$tag" in
   v[0-9]*.[0-9]*.[0-9]*) ;;

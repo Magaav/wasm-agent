@@ -49,7 +49,11 @@ echo "work" > "$STATE/node.name"
 version() { HOME="$HOME_DIR" WASM_AGENT_HOME="$HOME_DIR" "$WABIN" --version 2>/dev/null; }
 # The one owner of the product version: the binary was built from THIS tree, so the version it prints is
 # this file.
-TREE_VERSION="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)/VERSION"
+# The ONE owner of the product version: `M.PRODUCT_VERSION` in lua/core/build_identity.lua (the release
+# writes that line; the binary embeds it). This script reads it the same way the build does.
+TREE_VERSION="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)/lua/core/build_identity.lua"
+
+tree_version() { grep -m1 'M[.]PRODUCT_VERSION' "$TREE_VERSION" | sed 's/.*= *//' | tr -d '\"' | tr -d ' \r'; }
 
 # A pin for a DIFFERENT node must not mark this one. This is the finding: the ledger is fleet-wide.
 cat > "$PINFILE" <<'LEDGER'
@@ -122,13 +126,13 @@ hides "...never echoing the commit it cleared" "$OUT" "33333333"
 # READ from the tree's VERSION file and the sha is printed beside it, so the line is held to both and to their
 # order: a version without a sha would be the 18/11 lie again.
 shows "the version line names the program" "$OUT" "wasm-agent v"
-shows "...the PRODUCT version, from the tree's VERSION file" "$OUT" "v$(sed -n '1p' "$TREE_VERSION")"
+shows "...the PRODUCT version, from the tree's VERSION file" "$OUT" "v$(tree_version)"
 # the separator is the middle dot the line uses (U+00B7); built with printf so this file stays ASCII
 DOT=$(printf '\302\267')
 shows "...and the bytes beside it, on the same line" "$OUT" " $DOT v"
 ok_line=$(printf '%s' "$OUT" | head -1)
 case "$ok_line" in
-  "wasm-agent v$(sed -n '1p' "$TREE_VERSION") "* ) ok "...in that order: version first, the sha after the separator" ;;
+  "wasm-agent v$(tree_version) "* ) ok "...in that order: version first, the sha after the separator" ;;
   *) bad "the version line is '<program> v<version> . v<sha>'" "$ok_line" ;;
 esac
 

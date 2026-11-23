@@ -3553,8 +3553,9 @@ pub fn live_build_label() -> String {
     }
 }
 
-/// The product version this binary was built for, from the tree's `VERSION` file - ONE owner, read here.
-pub const PRODUCT_VERSION: &str = include_str!("../../../VERSION");
+/// The product version this binary was built for: the build script reads its ONE owner
+/// (`M.PRODUCT_VERSION` in lua/core/build_identity.lua) and emits it here. A reader, never a copy.
+include!(concat!(env!("OUT_DIR"), "/product_version.rs"));
 
 /// host.build_identity() -> JSON text of `{label, commit, dirty, known, product_version}` for the running binary.
 ///

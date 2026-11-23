@@ -3583,7 +3583,7 @@ M.LINUX_INDEX = "releases/index-linux.json"
 -- 0.1.1, 0.1.2 ... - the patch moves by one per release, and minor/major move ONLY when the operator says so
 -- with `--minor`/`--major` AND Victor's own quoted instruction in `docs/release/RELEASE_NOTES.md` (he decides
 -- when a 1.0.0 is due: "[a 1.0.0] needs major changes so i need to say so").
-M.VERSION_FILE = "VERSION"
+M.VERSION_FILE = "lua/core/build_identity.lua"
 M.VERSION_NOTES = "docs/release/RELEASE_NOTES.md"
 
 -- <text> -> {major, minor, patch} or nil. `0.1.0` and nothing else: a version this does not understand must not
@@ -3605,15 +3605,25 @@ function M.version_tag(version)
   return "v" .. text
 end
 
+-- <text> -> the number `M.PRODUCT_VERSION` names in lua/core/build_identity.lua, or nil.
+function M.product_version_line(text)
+  local value = tostring(text or ""):match([[M%.PRODUCT_VERSION%s*=%s*"([^"]*)"]] )
+  if not value then return nil end
+  return trim(value)
+end
+
 -- <tree> -> the version this tree carries, or nil + why. Read from the checkout, so a resume reads the same
--- number the release was started from.
+-- number the release was started from - and from the ONE owner (`M.PRODUCT_VERSION`), never a second file.
 function M.tree_version(tree)
   local text = read(slashes(tree) .. "/" .. M.VERSION_FILE)
-  if not text then return nil, "version_file_missing: " .. M.VERSION_FILE .. " is not in this tree" end
-  local line = trim(first_line(text))
+  if not text then return nil, "version_source_missing: " .. M.VERSION_FILE .. " is not in this tree" end
+  local line = M.product_version_line(text)
+  if not line then
+    return nil, "version_invalid: " .. M.VERSION_FILE .. " has no M.PRODUCT_VERSION line (this release bumps only d.d.d)"
+  end
   local parsed = M.parse_product_version(line)
   if not parsed then
-    return nil, "version_invalid: " .. M.VERSION_FILE .. " holds '" .. line .. "' and this release bumps only d.d.d"
+    return nil, "version_invalid: M.PRODUCT_VERSION is '" .. line .. "' and this release bumps only d.d.d"
   end
   return parsed, nil
 end
@@ -3736,7 +3746,7 @@ impl.linux = function(run, options)
     return false, { error = "linux_version_unreadable",
       detail = "the channel was not published for " .. short .. " because this release has no version",
       observed = tostring(why_version),
-      next = "add " .. M.VERSION_FILE .. " at the tree root (its current release number, e.g. 0.1.0) and cut again" }
+      next = "set M.PRODUCT_VERSION in " .. M.VERSION_FILE .. " (the current release number, e.g. 0.1.0) and cut again" }
   end
   if options.major or options.minor then
     local kind = options.major and "major" or "minor"
@@ -3864,7 +3874,16 @@ impl.linux = function(run, options)
   -- person reads and the bytes a machine installs never disagree. Idempotent: a first cut of a tree whose
   -- VERSION already says 0.1.0 writes the same bytes and stages nothing for it.
   local version_path = slashes(index_tree) .. "/" .. M.VERSION_FILE
-  if not write(version_path, version_text .. "\n") then
+  local version_source = read(version_path)
+  if not version_source then
+    return false, { error = "linux_version_write_failed", observed = "cannot read " .. version_path }
+  end
+  -- ONE LINE, rewritten in place: every other byte of the module stays as the release found it.
+  local rewritten = version_source:gsub([[M%.PRODUCT_VERSION%s*=%s*"[^"]*"]], "M.PRODUCT_VERSION = \"" .. version_text .. "\"", 1)
+  if rewritten == version_source and version_source:find("M.PRODUCT_VERSION", 1, true) == nil then
+    return false, { error = "linux_version_write_failed", observed = version_path .. " has no M.PRODUCT_VERSION line to write" }
+  end
+  if not write(version_path, rewritten) then
     return false, { error = "linux_version_write_failed", observed = "cannot write " .. version_path }
   end
 
