@@ -221,4 +221,30 @@ else
     .. 'checked: ' .. json.encode(remote or {}) .. ' (name: ' .. here .. ')')
 end
 
+-- 5. `rg -rn PATTERN` IS A REPLACEMENT, NOT grep's -rn (23/11). Two workers typed grep's habit into
+--    ripgrep; the answer came back with every match replaced by the letter n, and one built conclusions on
+--    code it had not read (ledger notes 120 and 263). The mistake is the model's - nothing is refused - but
+--    an answer that looks like a search result and is not says so, once, in `note`.
+local answer = { stdout = 'a\nb\n', code = 0, ok = true }
+local rg_note = bash_result.rg_replace
+check(type(rg_note) == 'function', 'the rg replacement note has one definition')
+local said_habit = rg_note('rg -rn tools.bash lua/')
+check(said_habit ~= nil, 'rg -rn is named: the cluster -rn means -r n')
+check(tostring(said_habit):find("'n' replaced every match", 1, true) ~= nil,
+  'and it names the replacement the command actually used: ' .. tostring(said_habit))
+check(tostring(said_habit):find('rg -n (line numbers)', 1, true) ~= nil,
+  'and it names what to type instead: ' .. tostring(said_habit))
+check(rg_note('rg -rl tools.bash lua/') ~= nil, 'the same habit spelled -rl is named too')
+check(rg_note('rg --replace=body -n x .') ~= nil, '--replace=body is named, so a model that meant it is understood')
+check(rg_note('rg -n tools.bash lua/') == nil, 'an ordinary rg -n stays quiet')
+check(rg_note('rg --files lua/') == nil, 'a listing stays quiet')
+check(rg_note('grep -rn tools.bash lua/') == nil, 'grep -rn is grep own pair: nothing is said about it')
+check(rg_note('cd lua && rg -n raw_code .') == nil, 'rg after && is read as rg, and still quiet without -r')
+local noted = bash_result.slim_for('bash', { command = 'rg -rn tools.bash lua/' }, answer)
+check(tostring(noted.note):find('--replace', 1, true) ~= nil,
+  'the answer the model receives carries the sentence: ' .. tostring(noted.note))
+check(#outside(noted) == 0, 'and nothing outside the kept set: ' .. table.concat(outside(noted), ','))
+local quiet = bash_result.slim_for('bash', { command = 'rg -n tools.bash lua/' }, answer)
+check(quiet.note == nil, 'a command that did not replace anything says nothing: ' .. tostring(quiet.note))
+
 print(json.encode({ ok = true, checks = checks, removed = #removed, slim_bytes = #json.encode(direct) }))
