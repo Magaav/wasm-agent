@@ -5,11 +5,13 @@
 --
 --   1. Victor's colour change (22/11: "change the star into the matrix green color as well as the
 --      thinking animated stars first glyph on run status bar"): the welcome line's star and the run
---      status row's animated first glyph are `matrix` (xterm 41, 00d75f), as a palette entry of their own, and
+--      status row's animated first glyph are `matrix` (xterm 34, 00af00), as a palette entry of their own, and
 --      `accent` still paints everything it painted before - the phase word of that same row included;
 --   2. `cli_view.opening`, the table of conditions the opening is never played on: a resumed session, a
 --      message argument, a pipe, a scripted run, NO_COLOR, TERM=dumb, a window under 60x14, no editor,
---      and the setting. Each answers with a NAMED reason, and each is refused on doubt.
+--      and the setting. Each answers with a NAMED reason, and each is refused on doubt;
+--   3. the ONE green: the colour the Rust opening paints its own star and rain in (MATRIX_RGB in
+--      rust/wa-term/src/opening.rs) is the palette's, and no second green is spelled there.
 --
 -- No terminal, no model, no database: the view is handed a recorder, the environment is a table.
 local view_lib = dofile("lua/core/cli_view.lua")
@@ -24,15 +26,16 @@ local function has(text, needle) return tostring(text):find(needle, 1, true) ~= 
 -- role around one word changed (that is exactly what this change is).
 local function visible(text) return (tostring(text):gsub("\27%[[%d;]*m", "")) end
 
--- The escapes, spelled once. 00d75f (xterm 41) is the matrix green; d77757 is the role this change must not move.
-local MATRIX = "\27[38;2;0;215;95m"
+-- The escapes, spelled once. 00af00 (xterm 34) is the matrix green; d77757 is the role this change must not move.
+local MATRIX = "\27[38;2;0;175;0m"
 local ACCENT = "\27[38;2;215;119;87m"
 local STAR, SPARK = "\226\156\187", "\226\156\182"
 
 -- ---- 1. the colours -------------------------------------------------------------------
 
--- FINAL colour (Victor, 22/11 21:33Z): xterm 41, #00d75f - not the 00ff41 this started as.
-ok(view_lib.PALETTE.matrix == "00d75f", "the matrix green is a palette entry of its own, xterm 41 (#00d75f)")
+-- The colour (Victor, 23/11: "lets go 34"): xterm 34, #00af00 - not the xterm 41 (#00d75f) this tree
+-- started at, which he found too bright.
+ok(view_lib.PALETTE.matrix == "00af00", "the matrix green is a palette entry of its own, xterm 34 (#00af00)")
 ok(view_lib.PALETTE.accent == "d77757", "and accent is still the warm accent it was")
 -- The product version is ONE constant, in the module that owns "what version is this"
 -- (lua/core/build_identity.lua) - never a second literal in the view, and never the alpha tag's number.
@@ -50,7 +53,48 @@ ok(not has(tostring(identity.PRODUCT_VERSION), "alpha"), "and it is not derived 
 ok(identity.product_version({ native = { product_version = identity.PRODUCT_VERSION } }) == identity.PRODUCT_VERSION,
   "and every surface reads it through the one reader")
 
-ok(view_lib.style("matrix") == MATRIX, "the role paints 24-bit 0;215;95, xterm 41")
+ok(view_lib.style("matrix") == MATRIX, "the role paints 24-bit 0;175;0, xterm 34")
+
+-- ---- 1b. the ONE green: the Rust opening builds its own from this value -------------------------
+--
+-- The rain, the supernova, the star it collapses into and the rune decode are drawn by the host
+-- (rust/wa-term/src/opening.rs), which cannot read this module: its green is a constant GENERATED from
+-- `PALETTE.matrix`, and this is the row that refuses a tree in which one moved and the other did not -
+-- which is exactly what the 41 -> 34 change of 23/11 is. Unknown is not yes: a source this row cannot
+-- read, or a constant it cannot find, FAILS by name rather than passing.
+local function read_source(path)
+  local handle = io.open(path, "rb")
+  if handle then
+    local text = handle:read("*a")
+    handle:close()
+    return text
+  end
+  if type(host) == "table" and host.read_file then
+    local read, text = pcall(host.read_file, path)
+    if read and type(text) == "string" then return text end
+  end
+  return nil
+end
+local root = ((type(host) == "table") and host.getenv and host.getenv("WASM_AGENT_LUA_ROOT")) or "."
+local rust_path = root .. "/rust/wa-term/src/opening.rs"
+local rust = read_source(rust_path)
+ok(rust ~= nil, "the opening's source is readable from here (" .. rust_path .. ")")
+local spelled = tostring(rust or ""):match("MATRIX_RGB:%s*%[u8;%s*3%]%s*=%s*%[([^%]]*)%]")
+local channels = {}
+for value in tostring(spelled or ""):gmatch("0[xX](%x+)") do
+  channels[#channels + 1] = tonumber(value, 16)
+end
+ok(#channels == 3, "the opening spells its green once, as MATRIX_RGB's three channels (" .. tostring(spelled) .. ")")
+local want = { tonumber(view_lib.PALETTE.matrix:sub(1, 2), 16), tonumber(view_lib.PALETTE.matrix:sub(3, 4), 16),
+  tonumber(view_lib.PALETTE.matrix:sub(5, 6), 16) }
+ok(#channels == 3 and channels[1] == want[1] and channels[2] == want[2] and channels[3] == want[3],
+  "the Rust opening's green IS PALETTE.matrix: " .. tostring(view_lib.PALETTE.matrix) .. " vs "
+    .. string.format("%02x%02x%02x", channels[1] or 0, channels[2] or 0, channels[3] or 0))
+-- ...and no second green: every green the opening paints is a shade of that constant, so a truecolour SGR
+-- with a zero red channel - what a spelled green looks like - cannot appear in the file at all.
+local literals = 0
+for _ in tostring(rust or ""):gmatch("38;2;0;") do literals = literals + 1 end
+ok(literals == 0, "and no green escape is spelled in it; its greens are shades of MATRIX_RGB (" .. literals .. ")")
 
 -- The welcome line: its star, and only its star, is green.
 local banner = view_lib.banner({ live = true, product = "0.1.0", version = "23791f56", limit = 100 })
