@@ -52,9 +52,11 @@ Rule 9: every fact in the brief was re-measured before it was used.
   ledger is refused to an agent tool by its own secret guard (`secret_path_denied`, which is correct), and
   rule 13 puts live peers out of bounds. What could be measured locally was: 8/8 `component`, and **zero**
   `served natively` lines in the retained log (`~/.wasm-agent/logs/cli-stderr.log`, 19 KB).
-- **The narrowed fast-path run's wall time** - the run is queued behind the shared suite lock (three other
-  missions' runs and two installs); it had not started by the end of this round and was cancelled, not
-  left running.
+- **The narrowed fast-path run itself** - \`flock -o ~/Work/missions/.suite.lock env WA_FAST_ROWS="..." bash
+  scripts/fast.sh\` was started, spent **913 s wall** behind other rounds' suites, built this tree's
+  binary and its eight components, and exited 2 **without reaching a row**. The component's two rows were
+  then run singly (allowed by the suite rule) and are the measured numbers in the table above and in
+  \`docs/WASI-PLAN.md\` section 4a.
 
 ## Texts to approve (proposed, never written)
 

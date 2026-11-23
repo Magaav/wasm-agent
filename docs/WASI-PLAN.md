@@ -459,12 +459,25 @@ Measured costs around that subset: rebuilding the `memory` component after one c
 rebuilding `wa` after one changed file in `wa-kernel-runtime` **0.3-1.1 s**; `publish-components.sh --check`
 **0.55 s** (it refuses with `commit_not_on_pushed_branch`, correctly).
 
-**The measured factory limit is the lock, not the work.** The narrowed run of those two rows
-(`flock -o ~/Work/missions/.suite.lock env WA_FAST_ROWS="scripts/test-memory-component.lua
-scripts/test-wit-deps.lua" bash scripts/fast.sh`) waited for the shared suite lock while three other
-missions' runs and installs held it; the run was started at 20:47 and had not begun at 21:05. That queue -
-one heavy suite at a time on 16 cores, each up to 999 s - is the real cost of a round, and no amount of
-component splitting removes it.
+**What the component's own rows cost, measured singly** (the suite rule allows a single test file; the
+same scratch home, the components the fast run had just built from this tree):
+
+| row | wall | verdict |
+| --- | --- | --- |
+| \`scripts/test-memory-component.lua\` (12 checks + 24 native/component parity comparisons) | **628 ms** | green; it also prints its own per-op comparison - \`search_messages\` native 0.2 ms vs component 1.8 ms, \`sessions\` 0.3 vs 1.8 |
+| \`scripts/test-wit-deps.lua\` (16 checks over 34 vendored copies of 11 canonical files) | **36 ms** | green |
+
+So the part of a component change that is *the component's own* costs **0.66 s**. Everything else a
+component round pays is the floor: the 29 never-dropped rows (the land parts are "under 11 s alone"
+each, by their own header comment) plus the runner's contract checks.
+
+**And the measured factory limit is the lock, not the work.** The narrowed run of those two rows
+(\`flock -o ~/Work/missions/.suite.lock env WA_FAST_ROWS="scripts/test-memory-component.lua
+scripts/test-wit-deps.lua" bash scripts/fast.sh\`) spent **913 s wall** and never reached a row: three
+other missions' runs and two installs held the lock, and the runner had only built this tree's binary and
+its components when the window closed (it exited 2 with no row executed - an invocation fact, not a
+verdict). One heavy suite at a time on 16 cores, each up to 999 s: that queue is the real cost of a round,
+and no amount of component splitting removes it.
 
 ### 4b. What hot-swapping ONE component on a running node needs beyond `wa dev`
 
