@@ -132,6 +132,11 @@ fn admit(root: &Path, db: &Path, force: bool, deadline: Instant, started: Instan
     let report = Store::open(db).and_then(|mut store| store.index_manifest(&manifest, force, revision, &mut |_, _| {}));
     match report {
         Ok(report) => {
+            // THE STORE NAMES THE ROOT IT WAS BUILT FOR (graph-one-store-per-root item 2). `root` in
+            // graph_meta is the guest mount point (measured 23/11: `root|/graph/root`), so a store could
+            // not tell whose tree it held. This is the host path the kernel passed; it is what the kernel
+            // compares against the root asking to use the store, and a mismatch is a named refusal.
+            if let Ok(store) = Store::open(db) {let _ = store.set_meta("source_root", &shown.0);}
             let work = json!({"revision":revision,"parsed":report.indexed,"unchanged":report.unchanged,"removed":report.removed,"re_resolved":report.re_resolved,
                 "nodes":report.nodes,"edges":report.edges,"resolved":report.resolved,"unresolved":report.unresolved});
             Ok(Admit::Ready { required: revision, work, reused: false, skipped: manifest.skipped_non_utf8 })

@@ -25,11 +25,17 @@ local outside=json.decode(host.graph_notify(json.encode({root=root,path=root..'-
 assert(outside.ok and outside.queued==false and outside.reason=='outside_indexed_root','only the selected root owns its mutation hints')
 local first=call('write',{path='a.lua',content='function alpha() return 1 end\n'})
 local second=call('write',{path='b.lua',content='function beta() return alpha() end\n'})
-check(first.ok and first.graph_index.ok and second.ok and second.graph_index.queued,'every native write queues its owned-root indexing')
+check(first.ok and first.graph_index.ok and second.ok and second.graph_index.queued==false and
+  second.graph_index.reason=='on_demand','a native write asks nothing to be indexed (graph-one-store-per-root item 0)')
+-- A hint addressed to a store this test names itself must leave that store uncreated: the hint is not a
+-- call, and nothing is parsed or written until one asks. (Measured in this node's ledger: zero graph
+-- calls in five days and 41 quarantines in a day - the WRITE was what started the indexer.)
+local hinted=dofile('lua/core/paths.lua').data()..'/graph-hint-store.db'
+local hint=json.decode(host.graph_notify(json.encode({root=root,db=hinted,path=root..'/a.lua'})))
+assert(hint.ok and hint.queued==false and hint.reason=='on_demand','an indexable hint names on_demand')
 local wait_command=dofile('lua/core/platform.lua').os()=='windows' and 'ping -n 2 127.0.0.1' or 'sleep 1'
 local waited=json.decode(host.exec(wait_command,nil,5));assert(waited.code==0,'bounded fixture wait')
-local background=json.decode(host.graph_status(json.encode({root=root})))
-assert(background.ready and background.committed_revision>0,'successful native writes must really commit before any query admission')
+assert(host.path_kind(hinted)=='missing' and host.path_kind(hinted..'.d')=='missing','no write and no hint created a store')
 local manual=host.graph_index;host.graph_index=function()error('navigation must not call manual indexing')end
 local hit=graph({action='search_symbols',name='alpha',limit=3})
 check(hit.count>=1 and hit.results[1].name=='alpha' and #hit.results[1].source_version==64,'automatic cold discovery and exact file selector version')
@@ -41,7 +47,8 @@ local path=graph({action='path',from='beta',to='alpha'})
 check(path.found and #path.steps==2,'fresh resolved relationship')
 local edited=call('edit',{path='a.lua',edits={{old_text='alpha() return 1',new_text='gamma() return 2'}}})
 local edited_two=call('edit',{path='b.lua',edits={{old_text='alpha()',new_text='gamma()'}}})
-check(edited.applied and edited.graph_index.ok and edited_two.applied,'every native edit queues its own mutation hint')
+check(edited.applied and edited.graph_index.ok and edited.graph_index.queued==false and edited_two.applied,
+  'a native edit asks nothing to be indexed either')
 local after=graph({action='search_symbols',name='gamma',limit=3})
 check(after.count>=1 and after.results[1].name=='gamma' and after.graph_snapshot.required_revision>required,'a native edit to graph needs no manual refresh')
 -- The `symbol_source_many` action is retired: one call answers one definition, each with its own

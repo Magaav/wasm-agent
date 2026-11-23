@@ -170,6 +170,16 @@ impl Store {
         Ok(Self { conn })
     }
 
+    /// Record one fact about this store in `graph_meta`.
+    ///
+    /// `source_root` uses it: `root` is the root the GUEST walked (`/graph/root`, its mount point), so
+    /// a store could not say whose tree it holds. This is the host path the kernel handed the component,
+    /// written after a successful index and read by the kernel before it lets anyone write the store.
+    pub fn set_meta(&self, key: &str, value: &str) -> Result<()> {
+        self.conn.execute("INSERT OR REPLACE INTO graph_meta(key,value) VALUES(?1,?2)", params![key, value])?;
+        Ok(())
+    }
+
     /// Pin a committed graph generation while the caller verifies and reads it.
     pub fn begin_read(&self) -> Result<()> {
         self.conn.execute_batch("BEGIN")?;

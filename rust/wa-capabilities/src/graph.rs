@@ -24,6 +24,15 @@ const GUEST_ROOT: &str = "/graph/root";
 const GUEST_DB: &str = "/graph/db";
 const DB_FILE: &str = "graph.db";
 const ROOT_LIMIT: usize = 32;
+/// How many per-root stores are kept beside the configured database, and how many bytes they may hold.
+/// See `retain_stores`: one store per root is unbounded without these two numbers.
+const STORE_LIMIT: usize = 8;
+const STORE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+/// The line journal every `graph_db_*` record is appended to, under the node's home. See `journal_line`.
+const JOURNAL_FILE: &str = "graph.log";
+/// The sidecar beside a store naming the root that built it. See `attribute_store`.
+const SOURCE_ROOT: &str = "source_root";
+const JOURNAL_BYTES: u64 = 1024 * 1024;
 /// How long a cold build may take. A first index of this repository (1,533 files, 57k definitions,
 /// 168k edges) takes ~51 s in-process and ~578 s through the component (measured 05/11, docs/KERNEL.md
 /// "C1 results"), so the 120 s cap this replaces refused the graph on exactly the trees it is for.
@@ -80,17 +89,87 @@ fn locations(options: &Value, config: Option<&Config>) -> Result<(PathBuf, PathB
     if !root.is_dir() {return Err("graph_root_not_directory".into());}
     if let Some(db) = opt_str(options, "db") {return Ok((root, PathBuf::from(db)));}
     let config = config.ok_or_else(|| "graph_not_configured".to_string())?;
+    let store = per_root_store(&config.db, &root);
+    retain_stores(&store, STORE_LIMIT, STORE_BYTES);
+    Ok((root, db_dir(&store).join(DB_FILE)))
+}
+
+/// THE STORE OF ONE ROOT, and of no other (graph-one-store-per-root, measured 23/11).
+///
+/// WHY. `wa serve` runs with the node's runtime worktree as its cwd, every mission worker with its own
+/// mission directory, and a file write in either answered with a hint that indexed INTO THE SAME
+/// `~/.wasm-agent/graph.db`. Two roots then took turns re-parsing ~600 files each: the flock serialises
+/// them, so it was a fight rather than a tear - each switch re-admitted the other root's tree, the indexer
+/// committed for hours, and the long write is what a kill, a pause or a deploy met (41 quarantines in a
+/// day, docs/missions/reports/graph-index-tear-cause.md). The store's `graph_meta` recorded the GUEST
+/// mount point (`root=/graph/root`, measured 23/11 on the live store), so no store could say whose it was.
+///
+/// The key is the SHA-256 of the REAL root as the kernel resolved it (canonicalised, case-folded where the
+/// platform is), so it is stable across boots and between a root and its symlinked spelling, and two
+/// different roots never meet. `roots` is the directory beside the configured database; the configured
+/// path itself is left alone, so the legacy shared store is neither read nor written by this code.
+fn per_root_store(configured: &Path, root: &Path) -> PathBuf {
     let identity = |path: &Path| {
         let text = path.to_string_lossy().into_owned();
         if cfg!(windows) {text.to_lowercase()} else {text}
     };
-    let same = config.root.canonicalize().ok().map(|p| identity(&p) == identity(&root)).unwrap_or(false);
-    let db = if same {config.db.clone()} else {
-        let digest = ring::digest::digest(&ring::digest::SHA256, identity(&root).as_bytes());
-        let key: String = digest.as_ref().iter().map(|byte| format!("{byte:02x}")).collect();
-        config.db.with_extension("roots").join(format!("{key}.db"))
-    };
-    Ok((root, db_dir(&db).join(DB_FILE)))
+    let digest = ring::digest::digest(&ring::digest::SHA256, identity(root).as_bytes());
+    let key: String = digest.as_ref().iter().map(|byte| format!("{byte:02x}")).collect();
+    configured.with_extension("roots").join(format!("{key}.db"))
+}
+
+/// Keep at most `limit` per-root stores and `bytes` of them, deleting only what nothing can be reading
+/// and nothing is evidence of.
+///
+/// THE BOUND EXISTS BECAUSE ONE STORE PER ROOT IS UNBOUNDED OTHERWISE: every mission worktree would keep
+/// a ~180 MB index for ever. Eviction is therefore: never the store that was just asked for, never a store
+/// whose kernel lock is held (a call or an index is inside it), never a store that still carries a
+/// `graph.db.malformed-*` copy (that copy is the evidence of a quarantine, see QUARANTINE_KEEP), and never
+/// anything but this directory's own `*.db.d`. The newest stores by store mtime win; every deletion
+/// prints one `graph_db_store_evicted` line so it can be counted.
+fn retain_stores(store: &Path, limit: usize, bytes: u64) {
+    let Some(dir) = store.parent() else {return;};
+    let mut stores: Vec<(PathBuf, std::time::SystemTime, u64)> = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {return;};
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.ends_with(".db.d") || !entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {continue;}
+        let db = entry.path().join(DB_FILE);
+        if !db.is_file() {continue;}
+        let at = db.metadata().and_then(|meta| meta.modified()).unwrap_or(std::time::UNIX_EPOCH);
+        stores.push((entry.path(), at, dir_bytes(&entry.path())));
+    }
+    if stores.len() <= limit && stores.iter().map(|(_, _, size)| *size).sum::<u64>() <= bytes {return;}
+    stores.sort_by(|a, b| b.1.cmp(&a.1));
+    let wanted = db_dir(store);
+    let mut kept = 0usize;
+    let mut used = 0u64;
+    for (path, _, size) in stores {
+        let fits = kept < limit && used.saturating_add(size) <= bytes;
+        if fits || path == wanted {kept += 1; used = used.saturating_add(size); continue;}
+        // Evidence stays: a quarantine copy beside this store is why the store is worth keeping.
+        let evidenced = std::fs::read_dir(&path).map(|entries| entries.flatten()
+            .any(|item| item.file_name().to_string_lossy().contains(".malformed-"))).unwrap_or(true);
+        if evidenced {kept += 1; used = used.saturating_add(size); continue;}
+        let Some(name) = path.file_name().map(|name| name.to_string_lossy().trim_end_matches(".d").to_string()) else {continue;};
+        match lock_store(&path, DB_FILE, Some(Instant::now())) {
+            Ok(None) => {kept += 1; used = used.saturating_add(size);} // in use: never evicted
+            Ok(Some(handle)) => {
+                let removed = std::fs::remove_dir_all(&path);
+                let _ = handle.unlock();
+                if removed.is_ok() {journal_line(&format!("graph_db_store_evicted store={name} bytes={size} stores_limit={limit} bytes_limit={bytes}"));}
+            }
+            Err(error) => journal_line(&format!("graph_db_store_evict_unavailable store={name} error={error}")),
+        }
+    }
+}
+
+/// Bytes one store directory holds, quarantine copies included.
+fn dir_bytes(dir: &Path) -> u64 {
+    std::fs::read_dir(dir).map(|entries| entries.flatten()
+        .filter_map(|item| item.metadata().ok())
+        .filter(|meta| meta.is_file())
+        .map(|meta| meta.len()).sum()).unwrap_or(0)
 }
 
 /// The component's private directory for a logical database path `P`: `P.d/`, holding `graph.db`.
@@ -435,14 +514,6 @@ impl Scheduler {
         for entry in entries {self.enqueue(&entry);}
     }
 
-    fn notify_path(&self, path: &Path) {
-        if !indexable(&path.to_string_lossy()) {return;}
-        let Ok(path) = path.canonicalize() else {return};
-        let entries: Vec<_> = self.entries.lock().unwrap().values()
-            .filter(|entry| path.strip_prefix(&entry.root).map_or(false, |relative| !excluded(relative))).cloned().collect();
-        for entry in entries {self.enqueue(&entry);}
-    }
-
     fn run(&self) {
         loop {
             // Only an entry whose retry time has come is taken; the rest wait on the condvar until
@@ -603,8 +674,8 @@ impl Scheduler {
                 }
                 // Not index-only, or the rebuild of the indexes did not settle it: fall through to the
                 // quarantine, whose line carries the verdict measured on the store itself.
-                Repair::StillDamaged {verdict} => {eprintln!("graph_db_repair_refused root={} file={file} verdict={}", entry.root.display(), one_line(&verdict, 160));}
-                Repair::Unavailable {reason} => {eprintln!("graph_db_repair_unavailable root={} file={file} reason={}", entry.root.display(), one_line(&reason, 160));}
+                Repair::StillDamaged {verdict} => {journal_line(&format!("graph_db_repair_refused root={} file={file} verdict={}", entry.root.display(), one_line(&verdict, 160)));}
+                Repair::Unavailable {reason} => {journal_line(&format!("graph_db_repair_unavailable root={} file={file} reason={}", entry.root.display(), one_line(&reason, 160)));}
             }
         }
 
@@ -641,8 +712,24 @@ impl Scheduler {
                     self.enqueue(&entry);
                     return;
                 }
+                // NOTHING WAS MOVED, AND THE REASON IS THE STORE'S OWN: `integrity_check` calls it ok,
+                // so there is no damage to keep and nothing may be renamed aside. The component's error
+                // is what gets named, and automatic retry stops here: a healthy store may only be
+                // re-asked so many times (REPAIR_LIMIT), and a loop that re-asks for ever is the CPU this
+                // mission exists to stop. `graph index force=true` is the deliberate retry.
+                Ok(quarantined) if quarantined.integrity == "ok" => {
+                    let line = quarantine_refused_line(&entry.root, &quarantined.integrity, &error);
+                    let mut state = entry.state.lock().unwrap();
+                    state.stopped = true;
+                    state.retry_at = None;
+                    let report = report_needed(state.reported.as_deref(), &line);
+                    if report {state.reported = Some(line.clone());}
+                    drop(state);
+                    if report {journal_line(&line);}
+                    return;
+                }
                 Ok(_) => {}
-                Err(error) => eprintln!("graph_db_quarantine_failed root={} error={error}", entry.root.display()),
+                Err(error) => journal_line(&format!("graph_db_quarantine_failed root={} error={error}", entry.root.display())),
             }
         }
         let retry = retry_allowed(attempts);
@@ -809,7 +896,7 @@ fn call(entry: &Arc<Entry>, tool: &str, mut arguments: Value, deadline: Instant)
     let stale = dir.join(format!("{file}.lock"));
     if stale.symlink_metadata().is_ok() {
         let removed = if stale.is_dir() {std::fs::remove_dir_all(&stale)} else {std::fs::remove_file(&stale)};
-        if removed.is_ok() {eprintln!("graph_db_stale_lock_removed file={file}");}
+        if removed.is_ok() {journal_line(&format!("graph_db_stale_lock_removed file={file}"));}
     }
     // A COMPONENT RUN KILLED MID-COMMIT LEAVES A HOT JOURNAL, AND THAT IS NOT DAMAGE (measured
     // 22/11). In `delete` journal mode - which is what the guest's SQLite runs in, whatever
@@ -827,11 +914,20 @@ fn call(entry: &Arc<Entry>, tool: &str, mut arguments: Value, deadline: Instant)
     // copy taken and nothing rebuilt.
     if let Some(bytes) = hot_journal(&dir, &file) {
         match roll_back_hot_journal(&dir, &file) {
-            Ok(outcome) => eprintln!("graph_db_journal_resolved root={} file={file} journal_bytes={bytes} outcome={}",
-                entry.root.display(), outcome.name()),
-            Err(error) => eprintln!("graph_db_journal_unresolved root={} file={file} journal_bytes={bytes} error={}",
-                entry.root.display(), error.replace(char::is_whitespace, "_")),
+            Ok(outcome) => journal_line(&format!("graph_db_journal_resolved root={} file={file} journal_bytes={bytes} outcome={}",
+                entry.root.display(), outcome.name())),
+            Err(error) => journal_line(&format!("graph_db_journal_unresolved root={} file={file} journal_bytes={bytes} error={}",
+                entry.root.display(), error.replace(char::is_whitespace, "_"))),
         }
+    }
+    // WHOSE STORE IS THIS (graph-one-store-per-root item 2)? Two roots sharing one file is what tore
+    // this index for a day. The path is now keyed by the root, and the store also says whose it is; a
+    // store that says another root, or cannot say, is neither read nor written, and the refusal is
+    // named with the fix. Under the lock, because this is where a store first becomes this root's.
+    if let Err(refusal) = attribute_store(&dir, &file, &entry.root.to_string_lossy()) {
+        let _ = lock.unlock();
+        drop(calls);
+        return json!({"error": refusal, "next": "This store is not this root's, so no answer was taken from it. Call the graph without an explicit db so this root gets its own store, or pin a store of your own with db; a derived index you do not want may be removed."});
     }
     // Tests drive the scheduling policy with a failing component; the component itself needs the built
     // wasm binary, which a unit test does not have. The hook sits HERE, after the lock and the journal,
@@ -961,6 +1057,77 @@ fn roll_back_hot_journal(dir: &Path, file: &str) -> Result<Pending, String> {
     match hot_journal(dir, file) {
         None => Ok(Pending::RolledBack),
         Some(_) => Ok(Pending::NotPending),
+    }
+}
+
+/// Append one `graph_db_*` line to the node's own log, and print it too.
+///
+/// WHY A FILE AND NOT ONLY STDERR. A `wa serve` under systemd has its stderr in the user journal, but a
+/// mission worker's stderr goes to whoever started it, so the lines that matter most - a quarantine, a
+/// repair, a refused rebuild - were countable only for one process per node. Measured 23/11: 23
+/// `graph_db_` lines reached `journalctl --user` in a day while the store was quarantined 41 times.
+/// One append-only file under the node's home makes the count the same for every process.
+///
+/// Bounded by rotation (`JOURNAL_BYTES`, one older copy), and a log that cannot be written never breaks
+/// the caller: the line was already printed.
+fn journal_line(line: &str) {
+    eprintln!("{line}");
+    let home = wa_host_support::paths::resolve_home();
+    append_journal(&Path::new(&home).join(".wasm-agent").join(JOURNAL_FILE), line);
+}
+
+/// Append one line to `path`, rotating it to `<name>.1` once it holds `JOURNAL_BYTES`.
+///
+/// Split from `journal_line` so a test can hold the file's own rules (append, one rotation, a bounded
+/// size) against a fixture path, without moving the process's HOME where every other test would see it.
+fn append_journal(path: &Path, line: &str) {
+    if let Some(dir) = path.parent() {if std::fs::create_dir_all(dir).is_err() {return;}}
+    let size = path.metadata().map(|meta| meta.len()).unwrap_or(0);
+    if size >= JOURNAL_BYTES {
+        let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_else(|| JOURNAL_FILE.to_string());
+        let _ = std::fs::rename(path, path.with_file_name(format!("{name}.1")));
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        use std::io::Write as _;
+        let _ = writeln!(file, "{line}");
+    }
+}
+
+/// The root a store was built for, from the sidecar the kernel keeps beside it.
+///
+/// `graph_meta.root` cannot answer it: the component walked `/graph/root`, so that is what it recorded
+/// (measured 23/11 on the live store: `root|/graph/root`), and a store therefore could not tell whose it
+/// was - which is how a healthy 133,959-node store came to be quarantined from another root's tree. The
+/// component now also records `source_root` INSIDE the store (so a copied store still says whose it is),
+/// and the kernel keeps the same fact beside it: one small file, read on every call, no SQLite open.
+fn recorded_root(dir: &Path) -> Option<String> {
+    std::fs::read_to_string(dir.join(SOURCE_ROOT)).ok().map(|text| text.trim().to_string()).filter(|text| !text.is_empty())
+}
+
+/// May this root use the store in `dir`? Claim it when this call is the one creating it, and refuse by
+/// name when it belongs to another root - or when an existing store cannot say whose it is.
+///
+/// UNKNOWN IS NOT YES. A store that predates the sidecar (or one whose sidecar was removed) could be
+/// another tree's index, and answering from it is the wrong-caller noise this mission exists to stop. It
+/// is never written and never read: the refusal names the store and the fix, which is to remove a
+/// derived index or to pin one deliberately with `db`.
+///
+/// So the three answers are: `Ok(true)` - there was no store, this root has now claimed the name;
+/// `Ok(false)` - the store says it is this root's; `Err(named)` - it says another root's, or it cannot
+/// say. The claim is written only when no store file exists, never over one.
+fn attribute_store(dir: &Path, file: &str, asked: &str) -> Result<bool, String> {
+    match recorded_root(dir) {
+        Some(recorded) if recorded != asked => Err(format!(
+            "graph_store_root_mismatch: recorded={recorded} asked={asked} store={}", dir.display())),
+        Some(_) => Ok(false),
+        None if dir.join(file).exists() => Err(format!(
+            "graph_store_unattributed: store={} records no source_root, so it may be another root's index", dir.display())),
+        None => {
+            std::fs::write(dir.join(SOURCE_ROOT), format!("{asked}
+"))
+                .map_err(|error| format!("graph_store_unattributable: {error}"))?;
+            Ok(true)
+        }
     }
 }
 
@@ -1125,6 +1292,15 @@ fn quarantine_database(entry: &Arc<Entry>, stamp: &str) -> std::io::Result<Quara
         // SQLite's own refusal is the verdict: it names the damage even when it cannot list it.
         Err(verdict) => verdict,
     };
+    // A STORE THAT integrity_check CALLS OK IS NEVER QUARANTINED (graph-one-store-per-root item 3).
+    // Measured 23/11 06:44Z: a healthy store of 133,959 nodes was renamed aside with integrity=ok,
+    // because the component's "database disk image is malformed" outlived REPAIR_LIMIT retries. The
+    // copy is taken for one reason - to keep the damage - and there is no damage to keep, so nothing
+    // is copied: the empty `moved` is what tells the caller to report the component's own error.
+    if integrity == "ok" {
+        let _ = lock.unlock();
+        return Ok(Quarantined {moved: Vec::new(), integrity, kept: 0});
+    }
     let mut moved = Vec::new();
     for suffix in ["", "-wal", "-shm", "-journal"] {
         let source = dir.join(format!("{file}{suffix}"));
@@ -1193,6 +1369,11 @@ fn retain_quarantine(dir: &Path, file: &str, keep: usize, budget: u64) -> usize 
 /// is asked again.
 fn store_healthy_line(root: &Path, file: &str) -> String {
     format!("graph_db_store_healthy root={} file={file} next=retry", root.display())
+}
+
+fn quarantine_refused_line(root: &Path, integrity: &str, component_error: &str) -> String {
+    format!("graph_db_quarantine_refused root={} integrity={integrity} component_error={} kept=0 next=stop use=graph_index_force",
+        root.display(), one_line(component_error, 160))
 }
 
 fn quarantine_line(root: &Path, moved: &[PathBuf], reason: &str, integrity: &str, kept: usize, disk_note: &str) -> String {
@@ -1391,30 +1572,39 @@ pub extern "C-unwind" fn graph_sources(l: *mut LuaState) -> std::ffi::c_int {
     reply(l, run(json_arg(l, 1), "sources", &[]))
 }
 
-/// A successful native write is a hint: refresh that root in the background.
-pub(crate) fn native_write(path: &str) {
-    scheduler().notify_path(Path::new(path));
+pub extern "C-unwind" fn graph_notify(l: *mut LuaState) -> std::ffi::c_int {
+    reply(l, notify(json_arg(l, 1), CONFIG.get()))
 }
 
-pub extern "C-unwind" fn graph_notify(l: *mut LuaState) -> std::ffi::c_int {
-    let options = json_arg(l, 1);
+/// A write hint asks NOTHING TO BE INDEXED (graph-one-store-per-root item 0).
+///
+/// WHY THIS IS NOT AN ENQUEUE ANY MORE. `write`, `edit` and every native write called this, and this
+/// created a scheduler entry, registered a RECURSIVE OS watch on the root and queued an index - so the
+/// indexer ran for every process that wrote one file, without anyone ever calling the `graph` tool.
+/// Measured in this node's ledger over 18/11 09:28Z - 23/11 08:02Z (368,218 events, ~104,000 tool calls
+/// from every session and worker): ZERO `graph` calls and zero patch-audit events, and 41 quarantines in
+/// a day with 688 MB in `graph.db.d`. What starts the indexer is therefore the WRITE, not the reader.
+///
+/// Nothing is lost by dropping it: every graph call admits content itself (capture → compare → index the
+/// changes as a new revision), so an answer is never older than the bytes on disk at the start of the
+/// call. A hint only ever made that admission cheaper, and it cost a full index of the tree instead.
+/// The answer keeps its shape and names why nothing was queued, so a caller is told, never left to guess.
+fn notify(options: Value, config: Option<&Config>) -> Value {
     let outcome = (|| -> Result<Value, String> {
-        let (root, db) = if let Some(path) = opt_str(&options, "path") {
+        let root = if let Some(path) = opt_str(&options, "path") {
             if !indexable(&path) {return Ok(json!({"ok":true,"queued":false,"reason":"not_indexable_source"}));}
-            let (root, db) = locations(&options, CONFIG.get())?;
+            let (root, _) = locations(&options, config)?;
             let target = PathBuf::from(path).canonicalize().map_err(|e| format!("graph_edit_path_unavailable:{e}"))?;
             let relative = match target.strip_prefix(&root) {Ok(path) => path, Err(_) => return Ok(json!({"ok":true,"queued":false,"reason":"outside_indexed_root"}))};
             if excluded(relative) {return Ok(json!({"ok":true,"queued":false,"reason":"excluded_source_directory"}));}
-            (root, db)
+            root
         } else {
-            locations(&options, CONFIG.get())?
+            locations(&options, config)?.0
         };
-        let scheduler = scheduler();
-        let entry = scheduler.entry(&root, &db)?;
-        scheduler.enqueue(&entry);
-        Ok(json!({"ok":true,"queued":true}))
+        Ok(json!({"ok":true,"queued":false,"reason":"on_demand","root":root.to_string_lossy(),
+            "next":"nothing was indexed; a graph call admits content itself"}))
     })();
-    reply(l, outcome.unwrap_or_else(|error| json!({"error": error})))
+    outcome.unwrap_or_else(|error| json!({"error": error}))
 }
 
 /// host.graph_source(opts_json) -> an exact, bounded page of one indexed definition.
