@@ -142,6 +142,36 @@ and a `GATE_ROOT` so the home guard can tell it from a real one.
 * the base's own handler still names the removed route: `grep -c '/operator/posting'
   /tmp/wa-base-41d6420c/lua/core/server.lua` = 1, which the row's section J refuses.
 
+### One more measurement, through the real binary and the real host (not the row)
+
+The row stubs `host.service`. To check the half a stub cannot check, the verb was run through the built
+node binary, its own services store and its own `host.service`, in a scratch `WASM_AGENT_HOME` with a
+stored definition and **no component artifact installed**:
+
+```text
+$ wa whatsapp posting allow own
+posting   off
+allow     own
+alerts    off
+language  pt
+component not_running
+health    unavailable (whatsapp_posting_component_not_running)
+written   yes
+note      the component is stored disabled, so nothing is running to report its posting mode; `wa services enable wa-whatsapp` starts it
+$ wa whatsapp posting on        # exit 0, same shape, posting on
+$ wa whatsapp posting status --json
+{"alerts":false,"allow":["own"],"allow_count":1,"connection":"not_running","enabled":true,"language":"pt","live":false,"name":"wa-whatsapp","note":"...","ok":true,"posting":"unknown","stored":true,"unverified":"whatsapp_posting_component_not_running"}
+$ wa whatsapp posting status    # before any definition is stored
+whatsapp posting: status: whatsapp_posting_component_missing      (exit 1)
+$ wa whatsapp             # the other door under the same word, unchanged
+wa whatsapp archive <verb> [YYYY-MM] [--to <node|dir>] [--keep-local] [--json]
+```
+
+So the store half, the CLI dispatch, the `wa help` line and the honest "unknown, because nothing is
+running" answer are measured against the real node, not only against the fake. What is **not** measured
+here is an enabled definition starting for real: that needs a built `wa-whatsapp.wasm` and a live
+WhatsApp session, which this round does not have (and must not touch).
+
 ## 6. The suite (the G-wave rule: no full gate, only the rows for the files touched)
 
 The G-wave rule (`flock -o ~/Work/missions/.suite.lock`, only the rows the touched files map to): the
