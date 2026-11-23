@@ -321,7 +321,7 @@ wa_fast_evidence_dir() {
 # The log a row writes, of either kind: a `check` row (a pty row) writes check-<name>.log, a Lua row writes
 # logs/<its file>.log. Only the FAILED rows are asked for: a green row's log is not evidence, and copying
 # every row's log made 85 files for 6 failures (measured on this change's own first fast.sh run).
-wa_fast_row_logs() { # <row name>...
+wa_fast_row_logs() { # <row name>... plus every Lua row that failed in this run
   local name log
   for name in "$@"; do
     [ -n "$name" ] || continue
@@ -329,6 +329,18 @@ wa_fast_row_logs() { # <row name>...
       [ -f "$log" ] || continue
       printf '%s\n' "$log"
     done
+  done
+  # A FAILED LUA ROW IS EVIDENCE TOO (mission speed-board-landing-kinds, 23/11). The list this function is
+  # handed is built by check(), the SHELL row recorder, so a Lua row that failed was never on it and its
+  # log - the only record of WHICH checks failed - died with the scratch directory: main-health could
+  # report 'speed-board: 5 FAIL of 30' and nothing about the five. The runner own table ($work/lua.tsv:
+  # exit, ms, script, verdict line, kind) is written by run_lua and outlives the rows, so the failed
+  # scripts are read from it. The caller de-duplicates: a row named by both lists is copied once.
+  [ -n "${work:-}" ] && [ -s "$work/lua.tsv" ] || return 0
+  awk -F'\t' '$1 != 0 { print $3 }' "$work/lua.tsv" 2>/dev/null | while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    log="$work/logs/$(basename "$name").log"
+    [ -f "$log" ] && printf '%s\n' "$log"
   done
 }
 wa_fast_keep_failed_logs() {
@@ -349,14 +361,14 @@ wa_fast_keep_failed_logs() {
       [ -n "$named" ] && [ -d "$named" ] || continue
       cp -a "$named" "$dir/$(basename "$named")" 2>/dev/null && dirs=$((dirs + 1))
     done < <(grep -o 'kept for diagnosis: [^ ]*' "$log" 2>/dev/null)
-  done < <(wa_fast_row_logs ${failed_rows:-})
+  done < <(wa_fast_row_logs ${failed_rows:-} | awk '!seen[$0]++')
   # One file that answers "what failed" without opening a log per row.
   : > "$dir/failures.txt" 2>/dev/null || true
   while IFS= read -r log; do
     { wa_fast_row_failure_line "$log"; last_line_of "$log"; } | while IFS= read -r named; do
       [ -n "$named" ] && printf '%s: %s\n' "$(basename "$log")" "$named"
     done >> "$dir/failures.txt" 2>/dev/null || true
-  done < <(wa_fast_row_logs ${failed_rows:-})
+  done < <(wa_fast_row_logs ${failed_rows:-} | awk '!seen[$0]++')
   echo "fast: kept $kept failed row log(s) and $dirs scratch dir(s) in $dir (what failed: $dir/failures.txt)"
   # The default location is bounded: keep the five newest runs, so a broken main cannot fill the disk.
   if [ -z "${WA_FAST_KEEP_LOGS:-}" ]; then
