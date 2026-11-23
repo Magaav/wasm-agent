@@ -1067,6 +1067,10 @@ function M.settle(id, wait_s, read, options)
       local done = { ok = true, status = 200, state = 'done', id = id, message_id = answer.message_id,
         waited_s = waited_since(started), reads = reads }
       if answer.attempts ~= nil then done.attempts = answer.attempts end
+      -- READ YOUR WRITES (23/11): the component says whether the message it just sent is in the history a
+      -- read answers from. Carried through, so nobody confirms a delivery by searching the text back.
+      if type(answer.in_history) == 'boolean' then done.in_history = answer.in_history end
+      if type(answer.in_history_note) == 'string' then done.in_history_note = answer.in_history_note end
       if who() then done.served_by = who() end
       if type(answer.asked_owner) == 'string' then done.asked_owner = answer.asked_owner end
       return done
@@ -1278,6 +1282,8 @@ function M.settle_many(ids, wait_s, read, options)
         local state = type(answer.state) == 'string' and answer.state or nil
         if answer.error == nil and state == 'done' then
           entry.state, entry.message_id, terminal[index] = 'done', answer.message_id, true
+          if type(answer.in_history) == 'boolean' then entry.in_history = answer.in_history end
+          if type(answer.in_history_note) == 'string' then entry.in_history_note = answer.in_history_note end
         elseif answer.error == nil and state and FAILED_STATES[state] then
           entry.state, entry.reason, terminal[index] = 'failed', answer.reason or state, true
         elseif answer.error then
