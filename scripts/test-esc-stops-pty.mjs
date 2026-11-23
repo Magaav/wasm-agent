@@ -343,6 +343,9 @@ function environment(home) {
     WASM_AGENT_MANAGED: '0',
     WA_SKIP_UPDATE_CHECK: '1',
     WASM_AGENT_CLI_OPENING: 'off',
+    // The node's own diagnostic knobs pass through when the caller set them, because a row that
+    // measures a stop has to be able to ask the stop why it was slow (operations.rs, cancel_trace).
+    ...(process.env.WASM_AGENT_CANCEL_TRACE ? {WASM_AGENT_CANCEL_TRACE: process.env.WASM_AGENT_CANCEL_TRACE} : {}),
     COLUMNS: '100',
     LINES: '30',
   };
@@ -560,7 +563,8 @@ if (crash) {
 
 server.close();
 blackhole.close();
-if (failed === 0) fs.rmSync(WORK, {recursive: true, force: true});
+if (process.env.ESC_KEEP) console.error('esc-stops: scratch kept (ESC_KEEP): ' + WORK);
+else if (failed === 0) fs.rmSync(WORK, {recursive: true, force: true});
 else console.error('esc-stops: scratch kept for diagnosis: ' + WORK);
 
 console.log('esc-stops pty: ' + (checks - failed) + ' ok, ' + failed + ' failed');
