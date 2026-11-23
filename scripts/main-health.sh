@@ -105,6 +105,25 @@ jq --arg sha "$sha" --arg at "$now" --argjson seconds "$seconds" \
 ' "$result" > "$out.tmp" && mv "$out.tmp" "$out" || {
   echo "main-health: refused(write_failed): cannot write $out" >&2; exit 2; }
 
+# THE SPEED LINE FOR THIS COMMIT (change/speed-board, 22/11). One JSON line per commit on main, kept as
+# history under the missions root and judged against the last ten commits at a comparable load. It runs
+# AFTER the verdict is written, it can never fail the health run, and it only uses a binary that IS this
+# commit: a scratch worktree has none of its own, and a number taken with another commit's binary would
+# not be about this commit (the row says 'unavailable: no binary to measure' instead - rule 1).
+if [ -f "$tree/scripts/speed-board.sh" ]; then
+  speed_bin=""
+  speed_installed=$(sed -n 's/^commit=//p' "$HOME/.local/bin/installed.txt" 2>/dev/null | head -1)
+  if [ -n "$speed_installed" ] && [ "${sha#$speed_installed}" = "" ] && [ -x "$HOME/.local/bin/wa" ]; then
+    speed_bin="$HOME/.local/bin/wa"
+  fi
+  speed_args=(--measure --root "$tree" --sha "$sha")
+  [ -n "$speed_bin" ] && speed_args+=(--bin "$speed_bin")
+  WA_MISSIONS_ROOT="$missions" bash "$tree/scripts/speed-board.sh" "${speed_args[@]}" \
+    >> "$root/speed-$short.log" 2>&1 || true
+  # The board's own last line, and any RED row, on stderr: main-health's stdout stays its one verdict.
+  grep -E '^speed-board:' "$root/speed-$short.log" 2>/dev/null | tail -n 8 | sed 's/^/main-health: /' >&2 || true
+fi
+
 ok=$(jq -r '.ok' "$out" 2>/dev/null)
 rows=$(jq -r '(.failed // []) | map(.row) | join(" ")' "$out" 2>/dev/null)
 if [ "$ok" = true ]; then
