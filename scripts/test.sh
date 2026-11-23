@@ -2789,6 +2789,9 @@ gate_run bash scripts/test-termux.sh
 # The PUBLIC Linux channel's publisher: build (stubbed), sign (fixture key), verify, upload (fake GitHub), index,
 # and the freshness verdict - with the index left untouched by every refusal. Hermetic, 2 s.
 gate_run bash scripts/test-linux-channel.sh
+# `wa <verb> --help` runs nothing (Fable 23/11: `wa update --help` ran a local update). Every acting verb the
+# tree declares, driven on this host, its own scratch home and database.
+gate_run bash scripts/test-cli-help.sh
 # The channel STEP, end to end: the real step, the real publisher and the real builder (the build and gh stand
 # in) - the join that failed on release F (23/11). Needs a Linux host, the same fixtures, a scratch vault.
 if [ "$(uname -s)" = Linux ]; then gate_run bash scripts/test-release-channel-e2e.sh

@@ -978,6 +978,9 @@ check install-front-door bash scripts/test-install.sh
 # publisher, its refusals and the freshness verdict are judged here against a fake GitHub - no build, no
 # upload, no vault. 2 s.
 check linux-channel bash scripts/test-linux-channel.sh
+# `wa <verb> --help` IS A QUESTION AND RUNS NOTHING (Fable 23/11): every acting verb the tree declares, held to a
+# usage line, exit 0 and no other output - measured 09:30Z, `wa update --help` ran a local update. Hermetic, ~10 s.
+check cli-help bash scripts/test-cli-help.sh
 # THE CHANNEL STEP END TO END (Fable 23/11): the real `wa release cut` linux step over the real
 # scripts/publish-linux-channel.sh AND the real scripts/release-linux.sh - the join no row had ever run, which is
 # why release F published nothing on its first real cut ("no built binary at .../rust/target/...", while the
