@@ -289,7 +289,8 @@ entry points from items 2 and 4); on this branch it PASSES 9 of 9.
 fails when three or four suites share this 16-core node, not a regression from this round: run 2 (commit
 `1544404f`) had it red before `lua/core/mission.lua` or the pty rows were touched. It is named here rather
 than blamed on the branch, and the full run main-health does after the landing is what decides it.
-**Not done, said plainly:** the 108 `sleep 21600` processes that were already orphaned are still running. I
+**Not done, said plainly:** the `sleep 21600` processes that were already orphaned - 108 when I started counting,
+90 at the last count (nothing here killed them; they age out on their own after six hours) - are still running. I
 did not kill them: they are PIDs I did not start, and this round stops only its own (the standing rule after
 21/11). New launches no longer make them.
 ## Texts to approve (operator- or model-facing, verbatim)
