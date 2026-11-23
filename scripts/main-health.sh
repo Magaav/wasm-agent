@@ -55,6 +55,8 @@ done
 # then blames the mission that was waiting. So the machine is asked first, and a machine without room is a
 # refusal by name (exit 2, "nothing was judged"), never a verdict.
 . "$(dirname -- "$0")/lib/temp-floor.sh"
+# The queue, said in the run own log (item 1, 23/11): see scripts/lib/lock-wait.sh.
+. "$(dirname -- "$0")/lib/lock-wait.sh"
 if ! tmp_note=$(wa_tmp_floor_check /tmp "${TMPDIR:-}"); then
   case "$tmp_note" in
     tmp_unknown:*) tmp_code=tmp_unknown ;;
@@ -94,6 +96,11 @@ git -C "$repo" worktree add --quiet --detach "$tree" "$sha" >/dev/null 2>&1 || {
 result=$root/fast-result-$short.json
 rm -f "$result"
 started=$(date +%s)
+# THE QUEUE IS A FACT, NOT A SILENCE (item 1, 23/11): a run that waits behind another suite names the holder
+# in its own log before the wait, then waits as it always did.
+if ! flock -n -o "$lock" true 2>/dev/null; then
+  { wa_lock_wait_note "$lock" 2>/dev/null || true; } >> "$root/fast-$short.log"
+fi
 WA_FAST_RESULT=$result WA_FAST_KEEP_LOGS=$root/fast-logs-$short \
   flock -o "$lock" nice -n "$nice_level" bash -c "cd '$tree' && bash scripts/fast.sh" \
   > "$root/fast-$short.log" 2>&1
