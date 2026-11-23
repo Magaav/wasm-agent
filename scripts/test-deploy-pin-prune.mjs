@@ -255,6 +255,10 @@ function nameAllowList() {
   }
   check('none of them counted as a pin', answer.kept.length === 0 && answer.removed.length === 0 && answer.failed.length === 0,
     result.stdout);
+  // The cap is a number a caller states: a bad one is refused by name, not read as 'no cap'.
+  const bad = q(['prune-pins', '--pin-dir', dir, '--keep-max', '0']);
+  check('a keep-max of zero is refused by name', bad.status === 75 && /--keep-max must be a positive integer, not '0'/.test(bad.stderr),
+    bad.stdout + bad.stderr);
 }
 
 // ---- 8. deploy.sh asks the same rule, after its install, and never fatally ------------------------

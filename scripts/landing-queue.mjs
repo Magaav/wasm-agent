@@ -666,9 +666,12 @@ async function commandPin(options) {
   try {
     // Prune BEFORE the new tree is created: a pin directory with no room left in it is what stopped the
     // install of 5ea23581 (2026-11-22), and the pin that could not be created could not clean up either.
+    // A bad --keep-max is a usage error and stops the call here, outside the catch below: only the
+    // housekeeping itself is allowed to fail quietly.
+    const keepMax = pinKeepMax(options);
     let pruned = null;
     try {
-      pruned = pruneDeployPins({canonical, pinDir, keeps: pinKeeps(options, commit), keepMax: pinKeepMax(options),
+      pruned = pruneDeployPins({canonical, pinDir, keeps: pinKeeps(options, commit), keepMax,
         procRoot: options.procRoot || '/proc', log: quiet});
     } catch (error) {
       // Housekeeping never fails a pin: a pin is what a deploy builds, a prune is what keeps /tmp usable.
