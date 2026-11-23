@@ -105,17 +105,54 @@ jq --arg sha "$sha" --arg at "$now" --argjson seconds "$seconds" \
 ' "$result" > "$out.tmp" && mv "$out.tmp" "$out" || {
   echo "main-health: refused(write_failed): cannot write $out" >&2; exit 2; }
 
-# THE SPEED LINE FOR THIS COMMIT (change/speed-board, 22/11). One JSON line per commit on main, kept as
-# history under the missions root and judged against the last ten commits at a comparable load. It runs
-# AFTER the verdict is written, it can never fail the health run, and it only uses a binary that IS this
-# commit: a scratch worktree has none of its own, and a number taken with another commit's binary would
-# not be about this commit (the row says 'unavailable: no binary to measure' instead - rule 1).
+# THE SPEED LINE FOR THIS COMMIT (change/speed-board, 22/11; the binary comes from the fast run on
+# 23/11). One JSON line per commit on main, kept as history under the missions root and judged against
+# the last ten MEASURED commits at a comparable load. It runs AFTER the verdict is written, it can never
+# fail the health run, and it only uses a binary that IS this commit: a number taken with another
+# commit's binary would not be about this commit (rule 1).
+#
+# WHICH BINARY, MEASURED 23/11 (that is why this block changed): the rule used to be "the installed
+# binary, and only when installed.txt names exactly this commit". The install lags main by landings, so
+# nearly every commit got four rows of 'unavailable: no binary to measure' - 071d1ab5, 899fdd47,
+# fe60dc0a, 3665b1b7, e9a42d20, da912828 and ae3cbb37 in ~/Work/missions/speed-history.jsonl - and a
+# board with no numbers read as fine. The fast path above has just BUILT this tree's own binary
+# (scripts/lib/fast-binary.sh, stamped with this commit and identified by the stamp, not by the path),
+# so that is the binary the rows run. It is asked for through the same resolver, and only a binary whose
+# stamp is THIS sha is used.
+#   * the tree's binary the fast run built or verified: fresh, or explicitly named by WA_BIN, and stamped
+#     with $sha;
+#   * else the installed one, and only when installed.txt names this commit (the old rule, kept as the
+#     fallback for a machine whose build could not run);
+#   * else no --bin at all: the board then says 'unavailable' and speed-stats judges that a RED row, which
+#     is the honest answer for a commit nothing could measure.
 if [ -f "$tree/scripts/speed-board.sh" ]; then
   speed_bin=""
-  speed_installed=$(sed -n 's/^commit=//p' "$HOME/.local/bin/installed.txt" 2>/dev/null | head -1)
-  if [ -n "$speed_installed" ] && [ "${sha#$speed_installed}" = "" ] && [ -x "$HOME/.local/bin/wa" ]; then
-    speed_bin="$HOME/.local/bin/wa"
+  speed_bin=$(ROOT=$tree bash -c '
+    set -u
+    . "$ROOT/scripts/lib/fast-binary.sh" 2>/dev/null || exit 1
+    fast_binary_plan >/dev/null 2>&1 || exit 1
+    [ "${FAST_BIN_ACTION:-}" = use ] || exit 1
+    case "${FAST_BIN_VERDICT:-}" in fresh|explicit) ;; *) exit 1 ;; esac
+    [ -n "${FAST_BIN:-}" ] && [ -x "$FAST_BIN" ] || exit 1
+    [ "${FAST_BIN_COMMIT:-}" = "$1" ] || exit 1
+    printf "%s" "$FAST_BIN"
+  ' _ "$sha" 2>/dev/null) || speed_bin=""
+  if [ -z "$speed_bin" ]; then
+    speed_installed=$(sed -n 's/^commit=//p' "$HOME/.local/bin/installed.txt" 2>/dev/null | head -1)
+    # A PREFIX COMPARISON, and it had to be repaired: installed.txt records the commit in the 8 characters
+    # `wa install` writes, so the old test `[ "${sha#$speed_installed}" = "" ]` stripped those 8 from the
+    # 40-character sha and compared the REMAINDER with the empty string - true only when installed.txt
+    # carried all 40 characters, which it never does. Measured 23/11: every commit on main got four rows
+    # of 'unavailable' even when the installed node WAS that commit (scripts/test-main-health.sh case 9 is
+    # the check that fails on the old form).
+    if [ -n "$speed_installed" ] && [ "${sha:0:${#speed_installed}}" = "$speed_installed" ] \
+        && [ -x "$HOME/.local/bin/wa" ]; then
+      speed_bin="$HOME/.local/bin/wa"
+    fi
   fi
+  # The binary is named on main-health's stderr: a speed row whose binary nobody can name is the failure
+  # scripts/lib/fast-binary.sh exists to prevent.
+  echo "main-health: speed binary ${speed_bin:-(none: no binary of $short on this machine, so the four live rows are RED)}" >&2
   speed_args=(--measure --root "$tree" --sha "$sha")
   [ -n "$speed_bin" ] && speed_args+=(--bin "$speed_bin")
   WA_MISSIONS_ROOT="$missions" bash "$tree/scripts/speed-board.sh" "${speed_args[@]}" \

@@ -88,6 +88,8 @@ check(table_text:find('start', 1, true) ~= nil and table_text:find('100 ms', 1, 
 check(table_text:find('landing', 1, true) ~= nil and table_text:find('no landing recorded', 1, true) ~= nil,
   'a landing nobody recorded is unknown with the reason, not a zero')
 check(table_text:find('release', 1, true) ~= nil, 'the release row is on the table')
+check(table_text:find('RED landing', 1, true) == nil and table_text:find('RED release', 1, true) == nil,
+  'a landing or release that has not happened yet is unknown, never RED')
 
 -- 2. a second commit, 25% slower on start: RED, named, and --check exits 3.
 write_probe('probe-cold-start', probe({ 125, 125, 125 }))
@@ -107,7 +109,11 @@ check(print_table('c0003'):find('at a comparable load', 1, true) ~= nil,
 -- 4. above the ceiling nothing is measured: the reason is written down instead.
 local guarded = sh('WA_SPEED_LOAD=99 ' .. board .. ' --measure --probes "' .. work .. '/probes" --history "' .. history
   .. '" --sha c0004 --bin /bin/true --samples 3 2>&1')
-check(guarded.code == 0, 'a guarded run still records its line (' .. tostring(guarded.code) .. ')')
+-- A guarded board measured NOTHING: it still records its line, and it is RED because four live rows have
+-- no number (23/11). Exit 3 is the board's RED, not a crash.
+check(guarded.code == 3, 'a guarded run still records its line, and it is RED (' .. tostring(guarded.code) .. ')')
+check((guarded.stdout or ''):find('RED start: guarded', 1, true) ~= nil,
+  'the guarded row is named as RED with its reason: ' .. tostring((guarded.stdout or ''):match('RED [^\n]*')))
 check((guarded.stdout or ''):find('start=guarded', 1, true) ~= nil, 'the live rows are guarded, not measured: ' .. tostring((guarded.stdout or ''):match('start=[^ ]*')))
 check((guarded.stdout or ''):find('100ms', 1, true) == nil, 'nothing was measured at load 99')
 
@@ -116,16 +122,23 @@ write_probe('probe-cold-start', probe({ 100, 100, 100 }))
 local refusing = '#!/usr/bin/env bash\necho "unavailable: the fixture said no" >&2\nexit 2\n'
 write_probe('probe-first-token', refusing)
 local refused = measure('c0005', ' --bin /bin/true --samples 3')
-check(refused.code == 0, 'one refused row does not fail the board (' .. tostring(refused.code) .. ')')
+check(refused.code == 3, 'one refused row makes the board RED, and it still writes its line (' .. tostring(refused.code) .. ')')
+check((refused.stdout or ''):find('RED first_token: unavailable', 1, true) ~= nil,
+  'the refused row is a RED row: ' .. tostring((refused.stdout or ''):match('RED [^\n]*')))
 check((refused.stdout or ''):find('first_token=unavailable', 1, true) ~= nil, 'the refused row is unavailable: ' .. tostring((refused.stdout or ''):match('first_token=[^ ]*')))
 local refused_table = print_table('c0005')
 check(refused_table:find('the fixture said no', 1, true) ~= nil, 'the table carries the probe own reason')
 
 -- 6. no binary: every live row says so, by name.
 local no_bin = sh(board .. ' --measure --probes "' .. work .. '/probes" --history "' .. history .. '" --sha c0006 --samples 3 2>&1')
-check(no_bin.code == 0, 'a board with no binary still records its line (' .. tostring(no_bin.code) .. ')')
+-- A BOARD WITH NO NUMBERS IS NOT FINE (23/11): it records its line, and every live row is a RED row named
+-- with its reason - the thing that made main read green with four 'unavailable' rows.
+check(no_bin.code == 3, 'a board with no binary still records its line, and it is RED (' .. tostring(no_bin.code) .. ')')
 check((no_bin.stdout or ''):find('start=unavailable', 1, true) ~= nil, 'the start row says it had no binary')
 check((no_bin.stdout or ''):find('remote_roundtrip=unavailable', 1, true) ~= nil, 'so does the remote row')
+check((no_bin.stdout or ''):find('RED start: unavailable - no binary to measure', 1, true) ~= nil,
+  'the hole is a RED row of the board: ' .. tostring((no_bin.stdout or ''):match('RED [^\n]*')))
+check(print_table('c0006'):find('RED unavailable', 1, true) ~= nil, 'and the table shows it as RED')
 
 -- 7. the two records: land-quick's own line and a release journal.
 write_probe('probe-first-token', probe({ 200, 200, 200 }))

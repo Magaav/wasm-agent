@@ -136,7 +136,9 @@ measure_row() { # measure_row <name> <probe base name>
   local csv reason
   csv=$(sed -n 's/^sample [0-9][0-9]* \([0-9][0-9]*\)$/\1/p' "$out" | paste -sd, -)
   if [ "$rc" -ne 0 ]; then
-    reason=$(grep -m1 '^unavailable:' "$err" 2>/dev/null | cut -c1-240)
+    # The probe says 'unavailable: <why>'; the row already says ` + "`unavailable`" + ` in its state, so the
+    # prefix is dropped here and the table reads 'unavailable: <why>' instead of 'unavailable: unavailable'.
+    reason=$(grep -m1 '^unavailable:' "$err" 2>/dev/null | sed 's/^unavailable: *//' | cut -c1-240)
     [ -n "$reason" ] || reason=$(head -1 "$err" 2>/dev/null | cut -c1-240)
     [ -n "$reason" ] || reason="the probe exited $rc and said nothing"
     skip_row "$name" unavailable "$reason" "$ended"
@@ -220,11 +222,13 @@ lua5.4 "$stats" judge "$history" "$entry_file" > "$verdict_file" 2>/dev/null || 
 
 # The line the orchestrator reads, and the RED rows by name. A guarded or unavailable row is printed with
 # its reason: a speed board that hid what it could not measure would be the thing this mission exists to
-# replace.
+# replace. And a hole in one of the four LIVE rows is RED itself (speed-stats judges it so, 23/11): a
+# board whose rows are all 'unavailable' must not read as fine, so it exits 3 with the row and the reason
+# named, exactly like a row that got slower.
 summary=$(jq -r '[.rows | to_entries[] | .key + "=" + (if .value.state == "ok" then ((.value.ms|tostring) + "ms@" + ((.value.load // 0)|tostring)) else .value.state end)] | join(" ")' "$entry_file" 2>/dev/null)
 echo "speed-board: $(printf '%s' "$sha" | cut -c1-12) $summary (load $load_before)"
 if [ -n "$verdict_file" ]; then
-  red=$(jq -r '.rows[] | select(.red == true) | "\(.name): \(.ms) ms, \(.delta_pct * 10 | round / 10)% slower than the best of the last 10 commits at a comparable load (\(.best_ms) ms at \(.best_sha[0:12]))"' "$verdict_file" 2>/dev/null)
+  red=$(jq -r '.rows[] | select(.red == true) | if .hole == true then "\(.name): \(.state) - \(.reason // "no number and no reason")" else "\(.name): \(.ms) ms, \(.delta_pct * 10 | round / 10)% slower than the best of the last 10 commits at a comparable load (\(.best_ms) ms at \(.best_sha[0:12]))" end' "$verdict_file" 2>/dev/null)
   if [ -n "$red" ]; then
     printf '%s\n' "$red" | sed 's/^/speed-board: RED /'
     exit 3

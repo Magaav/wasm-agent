@@ -20,6 +20,13 @@
 --   * NOTHING IS EVER GREEN BY ABSENCE (rule 1). A row with no samples is `unavailable` or `unknown`
 --     and is printed with its reason; it is never counted as passing, and it never makes a RED row
 --     disappear.
+--   * A LIVE ROW WITH NO NUMBER IS A RED ROW (23/11). The four live rows are what main must have a number
+--     for: when a probe could not measure, or the machine was too busy to try, the board names that row
+--     RED with its reason instead of letting a table of dashes read as fine. The two RECORD rows are
+--     different: no landing has happened since the record started, and that is not a red board.
+--   * THE WINDOW IS TEN MEASURED COMMITS. A commit with no number for a row is not a baseline and does
+--     not consume the window: otherwise a run of holes hides the last real numbers (23/11: eight commits
+--     of `unavailable` after 8862b600 would have hidden its 321 ms start from every comparison).
 --
 -- The history file (one JSON line per commit on main, oldest first) is the record:
 --   {"schema":1,"sha":"<40>","at":"2026-11-22T21:20:00Z","load":1.2,"cores":16,
@@ -41,6 +48,9 @@ M.LOAD_CEILING_PER_CORE = 1.5
 
 -- The rows, in the order a reader wants them: the things Victor feels first, then the two records.
 M.ROWS = { 'start', 'first_token', 'tool_roundtrip', 'remote_roundtrip', 'landing', 'release' }
+-- The rows that are MEASURED on this machine, and therefore must have a number on every commit: a hole
+-- in one of these is a RED row of the board (M.rows below). The other two are records of events.
+M.LIVE = { start = true, first_token = true, tool_roundtrip = true, remote_roundtrip = true }
 M.LABELS = {
   start = 'cold start (process -> key accepted, pty)',
   first_token = 'first token (Enter -> first model byte)',
@@ -147,6 +157,14 @@ function M.judge(history, entry)
       out.reason = (type(row) == 'table' and row.reason) or 'the commit has no number for this row'
       out.ms = type(row) == 'table' and number(row.ms) or nil
       out.load = type(row) == 'table' and number(row.load) or nil
+      -- A LIVE ROW WITH NO NUMBER IS RED (23/11): the reason is named and the row is in verdict.red, so
+      -- main-health prints it and status.sh shows it as RED. A record row (landing, release) may
+      -- legitimately be unknown - no landing has happened for a new commit - and is NOT red.
+      if M.LIVE[name] then
+        out.hole = true
+        out.red = true
+        verdict.red[#verdict.red + 1] = out
+      end
       verdict.rows[#verdict.rows + 1] = out
     else
       out.state = 'ok'
@@ -154,13 +172,10 @@ function M.judge(history, entry)
       out.load = number(row.load) or number(entry.load)
       -- The window is the last WINDOW commits, THEN the comparable loads among them, in that order: a
       -- quiet baseline after a storm of busy commits is still the baseline.
-      local window = {}
-      for index = #previous, 1, -1 do
-        if #window >= M.WINDOW then break end
-        window[#window + 1] = previous[index]
-      end
       local best_ms, best_sha, comparable = nil, nil, 0
-      for _, past in ipairs(window) do
+      for index = #previous, 1, -1 do
+        if comparable >= M.WINDOW then break end
+        local past = previous[index]
         local old = (past.rows or {})[name]
         if type(old) == 'table' and old.state == 'ok' and number(old.ms) then
           local old_load = number(old.load) or number(past.load)
@@ -331,7 +346,9 @@ function M.format_table(history, sha)
       state = row.red and string.format('RED: %.1f%% slower than best (%s)', row.delta_pct, M.short(row.best_sha))
         or (row.comparable == 0 and 'ok (no comparable baseline)' or 'ok')
     else
-      state = row.state .. (row.reason and (': ' .. row.reason) or '')
+      -- A hole in a live row is RED here too: the table must not read as fine because a probe could not
+      -- run (23/11), and the reason it carries is what the reader acts on.
+      state = (row.red and 'RED ' or '') .. row.state .. (row.reason and (': ' .. row.reason) or '')
     end
     lines[#lines + 1] = string.format('  %-24s %10s %8s %10s  %s', row.name,
       row.ms and fmt_ms(row.ms) or '-', row.load and string.format('%.2f', row.load) or '-', change, state)

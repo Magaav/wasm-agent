@@ -45,8 +45,16 @@ check(finished.rows.landing.state == 'unknown' and finished.rows.landing.ms == n
   'finish leaves an unknown row unknown (never a zero that would read as fast)')
 
 -- Twelve commits at a comparable load, each with the four live rows; the tenth-from-last is the floor.
+-- A MEASURED commit has a number for all four live rows: a real entry always does, because the harness
+-- writes a row even when it could not measure. `value` moves the start row, which is the row these
+-- checks judge; the other three sit still at 300 ms, so only the subject of each check can be red - a
+-- fixture that left them out would now be a commit with three holes, and that is RED for a reason this
+-- file does not mean to test.
 local function entry(sha, load, value, extra)
   local rows = { start = { samples = { value }, load = load } }
+  for _, name in ipairs({ 'first_token', 'tool_roundtrip', 'remote_roundtrip' }) do
+    rows[name] = { samples = { 300 }, load = load }
+  end
   for name, row in pairs(extra or {}) do rows[name] = row end
   return stats.finish({ sha = sha, load = load, rows = rows })
 end
@@ -83,20 +91,56 @@ check(outside.rows[1].best_ms == 400 and outside.rows[1].red == false,
   'a floor 12 commits back is outside the window of 10')
 
 -- A row the commit does not have, or could not measure, is named with its reason and is not red.
-local holes = stats.judge(history, stats.finish({ sha = 'holes', load = 1.0, rows = {
+local holes_entry = stats.finish({ sha = 'holes', load = 1.0, rows = {
   start = { samples = { 400 } },
   remote_roundtrip = { state = 'unavailable', reason = 'no binary to measure' },
-} }))
+} })
+local holes = stats.judge(history, holes_entry)
 local remote
 for _, candidate in ipairs(holes.rows) do if candidate.name == 'remote_roundtrip' then remote = candidate end end
 check(remote and remote.state == 'unavailable' and remote.reason == 'no binary to measure',
   'an unavailable row is printed with its reason')
 check(holes.rows[3] and holes.rows[3].state == 'unknown', 'a row the commit has no number for is unknown')
 
+-- A LIVE ROW WITH NO NUMBER IS RED (23/11). The four live rows are what main must have a number for, so a
+-- hole in one is a red row of the board, named with its reason - never a table of dashes that reads as
+-- fine. The two records are different: an unknown landing is not a red board.
+check(remote and remote.red == true and remote.hole == true,
+  'an unavailable live row is RED, not merely printed')
+-- This entry is judged against the twelve commits above, so `start` is red for its own reason (400 ms
+-- against the 200 ms floor). What this check is about is the HOLES: each live row without a number is a
+-- red row, and neither record row is.
+local red_state = {}
+for _, red_row in ipairs(holes.red) do red_state[red_row.name] = red_row.state end
+check(red_state.first_token == 'unknown' and red_state.tool_roundtrip == 'unknown'
+    and red_state.remote_roundtrip == 'unavailable',
+  'every live row without a number is a red row of the board')
+check(red_state.landing == nil and red_state.release == nil, 'and no record row is one')
+local landing_row
+for _, candidate in ipairs(holes.rows) do if candidate.name == 'landing' then landing_row = candidate end end
+check(landing_row and landing_row.state == 'unknown' and not landing_row.red,
+  'a record row that has not happened is unknown, never RED')
+check(stats.format_table({ holes_entry }, 'holes'):find('RED unavailable: no binary to measure', 1, true) ~= nil,
+  'the table shows a live hole as RED with its reason')
+
+-- A HOLE DOES NOT CONSUME THE WINDOW: a commit with no number cannot be the floor, and it must not push
+-- the last numbers that exist out of the window either (23/11: the eight commits of 'unavailable' after
+-- 8862b600 would otherwise have hidden its 321 ms start from every comparison).
+local with_holes = { entry('floor', 1.0, 321) }
+for index = 1, 12 do
+  with_holes[#with_holes + 1] = stats.finish({ sha = 'hole' .. index, load = 1.0, rows = {
+    start = { state = 'unavailable', reason = 'no binary to measure', load = 0 } } })
+end
+local after_holes = stats.judge(with_holes, entry('now', 1.0, 350))
+check(after_holes.rows[1].best_ms == 321 and after_holes.rows[1].best_sha == 'floor',
+  'a run of holes does not hide the last real number (best ' .. tostring(after_holes.rows[1].best_ms) .. ')')
+check(after_holes.rows[1].red == false, 'and a number 9% above that floor is not RED')
+
 -- ---- the change against the previous commit -------------------------------------------------------
 local with_previous = { entry("before", 1.0, 400), entry("after", 4.0, 500) }
 local deltas = stats.deltas(with_previous, with_previous[2])
-check(#deltas == 1 and math.abs(deltas[1].delta_pct - 25) < 0.001, 'the delta against the previous commit is 25%')
+check(#deltas == 4 and math.abs(deltas[1].delta_pct - 25) < 0.001,
+  'the delta against the previous commit is 25% on the start row, and every live row is compared (' .. #deltas .. ')')
 check(deltas[1].comparable == false, 'a delta across two different loads says the loads differ')
 
 -- ---- one line per commit --------------------------------------------------------------------------
