@@ -23,7 +23,7 @@
 # operator store (~/.wasm-agent/tmp), so measuring only TMPDIR would report a healthy /home while the 16 G
 # tmpfs the rows actually fill was at 95% - the exact blindness this closes.
 #
-#   . scripts/lib/tmp-floor.sh
+#   . scripts/lib/temp-floor.sh
 #   note=$(wa_tmp_floor_check /tmp "${TMPDIR:-}") || { echo "fast: refused(tmp_low): $note"; exit 2; }
 #
 # The floor is a measurement, not a round number: WA_TMP_MIN_FREE_MB (default 2048) is what one run's
