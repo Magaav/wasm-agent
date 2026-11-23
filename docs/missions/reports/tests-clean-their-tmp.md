@@ -8,7 +8,7 @@ failing with EDQUOT. Branch `change/tests-clean-their-tmp`, base `83772130`, wor
 
 * `f942c21c` the temp floor: `main-health`, `preflight` and the fast path refuse a machine with no room in
   `/tmp` by name (`tmp_low`), before they start anything;
-* `a4001c39` the rows that minted in `/tmp` take their root from the runner and remove it on exit, and
+* `1544404f` the rows that minted in `/tmp` take their root from the runner and remove it on exit, and
   `scripts/test-tmp-cleanliness.mjs` is the test that holds every row to it (wired into `scripts/fast.sh`
   and `scripts/test.sh`).
 
@@ -19,7 +19,7 @@ failing with EDQUOT. Branch `change/tests-clean-their-tmp`, base `83772130`, wor
 | /tmp is a 16 G tmpfs, /tmp held 4,721 entries at 07:35Z | `df -h /tmp` -> `tmpfs 16G`, 5.5 G used; `ls -1 /tmp | wc -l` -> **3,232** at 06:45Z (others had already removed the 4,721, and other sessions kept writing: 3,264 by 08:10Z) | correct in kind, the count had moved |
 | a full /tmp turns main-health red on a product row | the mechanism is real and I reproduced its cause: one fast-path run leaves `/tmp/wa-changeset-<epoch>` **every run**, so the count only grows. `scripts/main-health.sh` writes its verdict out of the row results, so an ENOSPC inside a row is indistinguishable from a red row (`scripts/main-health.sh`, the jq that builds `failed[]` from `checks[]`) | correct |
 | fast.sh already keeps a failing row's evidence (the undo-rows fix) | `scripts/fast.sh`, function `wa_fast_keep_failed_logs`: it copies each failed row's log and any directory named `kept for diagnosis: <dir>` into the evidence dir before deleting its work dir, and keeps the five newest runs | correct - and the row fixes below are built to feed it |
-| fast.sh runs the suite under one parent scratch dir | `scripts/fast.sh:259` `work=$(mktemp -d "$scratch_root/wa-fast-XXXXXX")`, `:562` `export TMPDIR="$work/tmp" GATE_ROOT="$work"`, `trap 'wa_fast_keep_failed_logs; rm -rf "$work"' EXIT`. Measured on my run: the work dir was `/home/victor/Work/missions/tests-clean-their-tmp/.wa-scratch/wa-fast-SNR8Uy` - on disk, outside `/tmp`, deleted at exit | correct, already done by `ac2ebdc3`; what was missing is that rows ignored it |
+| fast.sh runs the suite under one parent scratch dir | `scripts/fast.sh:279` `work=$(mktemp -d "$scratch_root/wa-fast-XXXXXX")`, `:582` `export TMPDIR="$work/tmp" GATE_ROOT="$work"`, `trap 'wa_fast_keep_failed_logs; rm -rf "$work"' EXIT`. Measured on my run: the work dir was `/home/victor/Work/missions/tests-clean-their-tmp/.wa-scratch/wa-fast-SNR8Uy` - on disk, outside `/tmp`, deleted at exit | correct, already done by `ac2ebdc3`; what was missing is that rows ignored it |
 
 The brief's facts held. What it did not say, and I measured: the leak was not the runner, it was **four
 rows that never asked the runner where to write**.
@@ -33,10 +33,10 @@ mints are attributed to it; other sessions on this node write to `/tmp` too.
 
 | family left in /tmp | minted by (base `83772130`) | per run | on disk 23/11 | state |
 | --- | --- | --- | --- | --- |
-| `wa-changeset-<epoch>` | `scripts/test-changeset.lua:23` `(os.getenv("WASM_AGENT_TEST_DIR") or "/tmp") .. "/wa-changeset-"` | **1, every run, pass or fail** | 70 | fixed in `a4001c39` |
-| `wa-agent-control-e2e-*` | `scripts/test-agent-control-e2e.cjs:22` `fs.existsSync('/tmp') ? '/tmp' : os.tmpdir()` | **1, every run, even green** | 8 | fixed in `a4001c39` |
-| `wa-mission-amend-resume-*` | `scripts/test-mission-amend-resume.mjs:31`, same shape | 1 per **failing** run (the cleanup ran only `if (!process.exitCode)`) | 8 | fixed in `a4001c39` |
-| `wa-mission-amend-*` | `scripts/test-mission-amend.mjs:32`, same shape | 1 per failing run | 0 visible (removed by hand at 07:38Z) | fixed in `a4001c39` |
+| `wa-changeset-<epoch>` | `scripts/test-changeset.lua:23` `(os.getenv("WASM_AGENT_TEST_DIR") or "/tmp") .. "/wa-changeset-"` | **1, every run, pass or fail** | 70 | fixed in `1544404f` |
+| `wa-agent-control-e2e-*` | `scripts/test-agent-control-e2e.cjs:22` `fs.existsSync('/tmp') ? '/tmp' : os.tmpdir()` | **1, every run, even green** | 8 | fixed in `1544404f` |
+| `wa-mission-amend-resume-*` | `scripts/test-mission-amend-resume.mjs:31`, same shape | 1 per **failing** run (the cleanup ran only `if (!process.exitCode)`) | 8 | fixed in `1544404f` |
+| `wa-mission-amend-*` | `scripts/test-mission-amend.mjs:32`, same shape | 1 per failing run | 0 visible (removed by hand at 07:38Z) | fixed in `1544404f` |
 | `wa-component-build-XXXXXX` (file, 4 K) | `scripts/build-components.sh:175` `mktemp "${TMPDIR:-/tmp}/wa-component-build-XXXXXX"` | 1 per component build, removed on pass (`:180`, `:186`) | 1 | correct as it is: kept only as a failing build's log |
 | `wa-fast-build-XXXXXX` (file) | `scripts/lib/fast-binary.sh:281`, removed at `:323` | 1 per failing binary build | 1 | correct as it is (the log of a build that failed) |
 | `wa-eval-review-change-fixture-*`, `wa-eval-replay-fixture-*`, `narrow*`, `fastkeep*` | **not this tree**: another live mission (`remote-roundtrip-and-roster`, `wa-eval-review`) ran on this node throughout | n/a | 116 + 59 + others | not this change's, named so the map is honest |
@@ -48,7 +48,7 @@ other suites and my own per-row probes.
 
 ## Item 2 - every row removes its own scratch, pass or fail
 
-`a4001c39`. The rule applied to each row: take the scratch root from the environment the runner sets
+`1544404f`. The rule applied to each row: take the scratch root from the environment the runner sets
 (`WA_TEST_ROOT`, `GATE_ROOT`, `TMPDIR`, then `os.tmpdir()`), and remove what you made **on exit, pass or
 fail**. A failing row's evidence is kept only where the runner will collect it - inside `GATE_ROOT`, where
 `scripts/fast.sh`'s keeper copies a directory named `kept for diagnosis: <dir>` out before it deletes its own
@@ -101,16 +101,16 @@ Wired in three places, each before any work:
 
 | entry point | where | what it prints |
 | --- | --- | --- |
-| `scripts/main-health.sh:55-62` | before the tool checks, before the worktree, before the suite | `main-health: refused(tmp_low): tmp_low: /tmp 10281 free, need 999999999; ... Nothing was judged.` exit 2 |
-| `scripts/preflight.sh:55-62` | before the lock, before the landing, before the gate | `preflight: refused(tmp_low): ... Nothing was judged.` exit 2 |
-| `scripts/fast.sh:81-95` | immediately after the options, before the build record and before the first row | `fast: refused(tmp_low): ... Nothing was run: a red caused by a full disk is a fact about the machine and never about this tree.` exit 2 |
+| `scripts/main-health.sh:52-66` (`:58` is the call) | before the tool checks, before the worktree, before the suite | `main-health: refused(tmp_low): tmp_low: /tmp 10281 free, need 999999999; ... Nothing was judged.` exit 2 |
+| `scripts/preflight.sh:52-66` (`:58` is the call) | before the lock, before the landing, before the gate | `preflight: refused(tmp_low): ... Nothing was judged.` exit 2 |
+| `scripts/fast.sh:74-95` (`:81` is the call) | immediately after the options, before the build record and before the first row | `fast: refused(tmp_low): ... Nothing was run: a red caused by a full disk is a fact about the machine and never about this tree.` exit 2 |
 
 Exit 2 is the code both `scripts/main-health.sh` and `scripts/preflight.sh` already document as "nothing was
 judged", so a full disk can no longer be written down as `ok:false` about main or about a branch.
 
 ## Item 5 - a test that fails when a row leaves a dir behind
 
-`scripts/test-tmp-cleanliness.mjs` (`a4001c39`), three halves, 0.6 s measured:
+`scripts/test-tmp-cleanliness.mjs` (`1544404f`), three halves, 0.6 s measured:
 
 * **A, static**: every tracked `scripts/test-*` file that roots a temp family at a literal `/tmp` fails,
   unless the runner's environment is asked first on that line or the file is in `DEFERRED` with a reason
@@ -171,7 +171,37 @@ belongs where a session reads its rules, and in the one script that writes every
 
 ## Acceptance - the fast path twice, /tmp counted before and after
 
-ACCEPTANCE_PLACEHOLDER
+Victor's acceptance: "run the fast path twice: the count of entries in /tmp is the same before and after (except kept failure evidence)".
+
+**Run 1 (the full fast path on this branch, 1544404f): GREEN - 419 checks, 0 failed, 0 skipped, 565 s**
+(`fast path ok (419 checks, 0 skipped, 565s)`), including the new row `fast: tmp-cleanliness ok (376ms)`.
+
+/tmp entry count: **3,260 before -> 3,232 after**. The net change is negative because other sessions cleaned
+their own scratch in the same window; the window is the whole queue wait (10:27:11Z -> 11:06:16Z), because
+this node had three other suites queued on ~/Work/missions/.suite.lock. So the count alone is not the proof -
+the entries are:
+
+* the run itself executed 10:56:00Z-11:06:16Z. In exactly that window nine entries appeared, and **none of
+  them belongs to this tree**: fastkeep5, dbgf, rowout, wa-home-ops, preflight.log, db-rb.log, dw-rb.log,
+  tmp.* are other sessions shell scratch, and wa-eval-review-change-fixture-* / wa-eval-replay-fixture-*
+  are the wa-eval-review mission rows, which ran at the same time;
+* the five /tmp/wa-changeset-* directories that appear in the wider diff were all created **outside** the
+  run window (epochs 1795429505, 1795429634, 1795430221, 1795430236, 1795431003; the run own epoch range is
+  1795431360-1795431960), by other sessions running the **unfixed** row from their own trees. Each holds the
+  row three files and nothing else - they are the leak this change removes, made by trees without it.
+
+**The tight measurement, per row (the four sources the full run exercises), each in the fast path own
+environment and with /tmp diffed by mtime**: scripts/test-changeset.lua, scripts/test-agent-control-e2e.cjs,
+scripts/test-mission-amend.mjs, scripts/test-mission-amend-resume.mjs, scripts/test-fabric-bench.mjs,
+scripts/test-stream-cut-recovery.lua, scripts/test-tool-call-name.lua -> `/tmp+0`, `own-TMPDIR-left=0` for
+every one of them. On the base commit the same harness measured wa-changeset-<epoch> (test-changeset),
+wa-agent-control-e2e-* (agent-control-e2e) and wa-mission-amend-resume-* (the failing resume row).
+
+**Run 2 (the second full fast path) did not start within this session**: it was queued behind other
+missions suites on the shared lock for 45+ minutes and was cancelled at the end, so the twice half of the
+acceptance is **not** verified as a second full run. What is verified twice is the sequence that matters:
+the row-level zero measured before and after the fixes, and one full green fast path whose window contains no
+entry from this tree.
 
 ## Texts to approve (operator- or model-facing, verbatim)
 
