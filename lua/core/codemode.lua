@@ -577,6 +577,12 @@ local function settle_call(s,call)
       -- slimmed a DIRECT call; this one is the same shape built from the operation record by the pending
       -- layer (a script's bash IS a managed operation, lua/core/codemode_pending.lua), so it is slimmed
       -- here - one function, two producers, one shape for the script and for the evidence showCall reads.
+      -- The phase breakdown of a command leaves the answer here, and it is AGGREGATE EVIDENCE, not
+      -- context: it travels to the tool span through the context (lua/core/agent.lua), keyed by the
+      -- operation so it can never be attached to another call.
+      if type(result)=="table" and type(result.timing)=="table" and type(ctx)=="table" then
+        ctx.execution_timing={operation_id=result.operation_id,timing=result.timing}
+      end
       result=bash_result.slim_for(call.tool,params,result)
       value=result;success=type(value)~='table' or (not value.error and value.ok~=false)
       -- Journaled before it is encoded: a fresh read-only call that repeats an identical earlier one

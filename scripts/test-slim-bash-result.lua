@@ -163,6 +163,13 @@ check(type(promoted.note) == 'string' and promoted.note:find(tostring(promoted.o
   'and it keeps the note naming the operation it left behind: ' .. tostring(promoted.note))
 tools.dispatch(memory, 'operation', { action = 'cancel', id = promoted.operation_id }, 'master', ctx)
 
+-- A refusal keeps the NAME of what refused it: the path guard's answer is what a caller acts on, and a
+-- refusal that says only "no" is the round the model spends guessing.
+local guarded = tools.dispatch(memory, 'bash', { command = 'rm -rf "$HOME"' }, 'master', ctx)
+check(#outside(guarded) == 0, 'a guarded answer keeps the same shape: ' .. table.concat(outside(guarded), ','))
+check(guarded.blocked_by == 'path_guard' and guarded.ok == false and guarded.blocked_reason ~= nil,
+  'a refusal names what refused it and why: ' .. json.encode(guarded or {}):sub(1, 300))
+
 -- 6. THE HANDLE RETURNS EVERY REMOVED FIELD. The record the answer points at is the whole answer.
 -- TWO of the record's own doors, because they answer different halves of it: `status` is the operation's
 -- record (owner, session, launch directory, containment, cleanup, the store paths, the timing), and `wait`

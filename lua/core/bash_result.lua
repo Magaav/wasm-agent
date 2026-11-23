@@ -35,7 +35,11 @@ M.KEEP = {
   -- Hints and refusals, which are what a caller acts on: the pointer to the omitted body, the Windows
   -- staged-script note ($0 is the file path), and the words every refusal carries.
   output_hint = true, staged_script_note = true,
+  -- A refusal is what a caller acts on, and so is the name of what refused: the path guard's
+  -- `blocked_by`/`blocked_reason` and a hook's `denied_by`/`permission` (scripts/test-path-guard-canary.lua
+  -- asserts the first pair; a refusal that says only "no" is the round the model spends guessing).
   error = true, note = true, fix = true, normalized = true,
+  blocked_by = true, blocked_reason = true, denied_by = true, permission = true,
 }
 
 -- One command's envelope: the streams or an exit code. Every other shape is somebody else's answer.
