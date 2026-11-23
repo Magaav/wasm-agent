@@ -2595,6 +2595,14 @@ fn fail_held_request(request: &Value, id: &str, path: &Path, detail: &str) -> Re
     } else {
         format!("re-request with: wa-sentinel request deploy --expected-sha {target} --reason '{}'", reason.replace("'", ""))
     };
+    // A REQUEST THAT FAILS AT ITS BOUND IS NOT DROPPED (23/11): it goes back into the box the first tick the
+    // node is quiet (replay_requeues), so a landing whose install lost a race against its own workers still
+    // installs. The promise is in the reason because that is what the operator and the landing read.
+    let retry = if request.get("requeued").and_then(Value::as_bool) == Some(true) {
+        format!("{retry}; this request was already re-queued once, so it is not re-queued again")
+    } else {
+        format!("{retry}; it is re-queued automatically once, when this node is next quiet")
+    };
     let detail = &format!("{detail}; {retry}");
     if let Err(error) = deploy_protocol::record(request, id, "failed", detail) {
         audit("protocol-record-failed", id, &error.to_string());
@@ -2608,11 +2616,105 @@ fn fail_held_request(request: &Value, id: &str, path: &Path, detail: &str) -> Re
         wa_operation::atomic_json(&target, &json!({"request":request,"ok":false,"phase":"failed",
             "detail":detail,"at":now_epoch(),"bound_failed":true}))?;
         std::fs::remove_file(&claim)?;
+        // ONCE (23/11): a request that already came back is not parked a second time - the second failure at its
+        // bound is terminal, which is what stops a node that never goes idle from re-queueing for ever.
+        if request.get("requeued").and_then(Value::as_bool) != Some(true) {
+            schedule_requeue(request, &key, detail)?;
+        }
     }
     let line = format!("the request failed at its bound: {detail}");
     audit("hold-bound-failed", &format!("{} {key}", request["verb"].as_str().unwrap_or("request")), &line);
     say(&line);
     Ok(())
+}
+
+/// Where a request that failed at its bound waits for the next quiet moment.
+pub(crate) fn requeue_dir() -> PathBuf {
+    sentinel_dir().join("requeue")
+}
+
+/// Park a request that failed at its bound, so the first tick that finds this node quiet puts it back in the box.
+///
+/// MEASURED (23/11, the two landings this mission exists for): a deploy request failed at its bound because the
+/// node was busy with the very workers the deploy had paused, and the landing that asked for it got nothing but a
+/// `failed/` record - so the operator had to notice and ask again by hand. Once is the bound: the request that
+/// comes back carries `requeued`, and a second failure at its bound is terminal (it is not re-queued for ever).
+fn schedule_requeue(request: &Value, key: &str, detail: &str) -> Result<()> {
+    let dir = requeue_dir();
+    std::fs::create_dir_all(&dir)?;
+    let stored = json!({"request": request, "detail": detail, "at": now_epoch()});
+    wa_operation::atomic_json(&dir.join(key), &stored)?;
+    Ok(())
+}
+
+/// How many requests that failed at their bound are waiting for the next quiet moment.
+pub(crate) fn requeue_pending() -> usize {
+    std::fs::read_dir(requeue_dir()).map(|entries| entries.flatten().count()).unwrap_or(0)
+}
+
+/// Put the parked requests back in the box, once, the first time this node is quiet enough to run them.
+///
+/// "Quiet enough" is `hold_for`, the same predicate the dispatcher holds the request for - so a request that
+/// comes back here would have run had it been written a moment ago. Nothing is replayed: the request is the same
+/// request, with a new `queued_at` and `requeued: true`, and the landing that asked for it is named in the audit
+/// line. Returns how many went back.
+pub(crate) fn replay_requeues() -> u32 {
+    let dir = requeue_dir();
+    let entries: Vec<PathBuf> = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries.filter_map(|entry| entry.ok().map(|e| e.path())).collect(),
+        Err(_) => return 0,
+    };
+    let mut back = 0;
+    for source in entries {
+        let name = source.file_name().map(|name| name.to_string_lossy().to_string()).unwrap_or_default();
+        if name.is_empty() {
+            continue;
+        }
+        let stored: Value = match std::fs::read(&source).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()) {
+            Some(stored) => stored,
+            None => {
+                audit("hold-bound-requeue-unreadable", &name, "the parked request could not be read; it stays parked");
+                continue;
+            }
+        };
+        let request = stored.get("request").cloned().unwrap_or(Value::Null);
+        let verb = request.get("verb").and_then(Value::as_str).unwrap_or("").to_string();
+        let up = node_is_up();
+        if hold_for(&verb, node_activity(), || up).is_some() {
+            continue; // still busy: the sidecar stays, and the next tick asks again
+        }
+        let target = sentinel_dir().join("requests").join(&name);
+        if target.exists() {
+            // A newer request already carries this name: it is the one that will run, and the parked copy has
+            // nothing to add. Parking it for ever would re-announce it on every tick.
+            let _ = std::fs::remove_file(&source);
+            continue;
+        }
+        let mut request = request;
+        if !request.is_object() {
+            audit("hold-bound-requeue-unreadable", &name, "the parked request holds no request object");
+            continue;
+        }
+        request["queued_at"] = json!(now_epoch());
+        request["requeued"] = json!(true);
+        request["requeued_at"] = json!(now_epoch());
+        if let Err(error) = wa_operation::atomic_json(&target, &request) {
+            audit("hold-bound-requeue-failed", &name, &error.to_string());
+            continue;
+        }
+        let _ = std::fs::remove_file(&source);
+        let id = name.trim_end_matches(".json");
+        let reason = request.get("reason").and_then(Value::as_str).unwrap_or("(no reason given)");
+        let detail = format!("the node is quiet again: a request that failed at its bound went back into the box (the request's reason: {reason})");
+        queue::observe(&request, id, "queued", "requeued", &detail);
+        if let Err(error) = deploy_protocol::record(&request, id, "queued", &detail) {
+            audit("protocol-record-failed", id, &error.to_string());
+        }
+        audit("hold-bound-requeued", &format!("{verb} {name}"), &detail);
+        say(&format!("{verb} re-queued: {detail}"));
+        back += 1;
+    }
+    back
 }
 
 fn announce_hold(held: &mut Held, key: &str, verb: &str, why: &str, asked: &str) {
@@ -2636,6 +2738,12 @@ fn announce_hold(held: &mut Held, key: &str, verb: &str, why: &str, asked: &str)
 }
 
 fn process_requests(background: bool, held: &mut Held) -> Result<u32> {
+    // BEFORE the box is read: a request that failed at its bound goes back in here, once, on the first tick that
+    // finds the node quiet enough to run it - and is then picked up by this very call.
+    let requeued = replay_requeues();
+    if requeued > 0 {
+        say(&format!("re-queued {requeued} request(s) that failed at their bound: the node is quiet enough now"));
+    }
     let dir = sentinel_dir().join("requests");
     let mut handled = 0;
     let mut entries: Vec<PathBuf> = std::fs::read_dir(&dir)
@@ -2733,11 +2841,13 @@ fn process_requests(background: bool, held: &mut Held) -> Result<u32> {
         // Maintenance stays queued; observing it never monopolizes the recovery/control loop. The hold is
         // announced with its reason instead of being silent, and the request is still retried next tick.
         if let Some(why)=hold_for(verb,node_activity(),node_is_up) {
-            // THE BOUND (22/11). Held is not the same as stuck: the request may proceed once it has waited its
-            // bound AND every holder of the node is a session that recorded a pause for this request
-            // (lua/core/deploy_pause.lua writes that record at the moment it pauses). A holder still working, a
-            // subagent, a queued turn, or a run whose session the snapshot does not name is reported and NOT
-            // passed over - stopping a node under a working turn is the failure the pause exists to avoid.
+            // THE BOUND (22/11, sharpened 23/11). Held is not the same as stuck: the request may proceed once
+            // it has waited its bound AND every holder of the node is one the install cannot hurt - a session
+            // that recorded a pause for this request (lua/core/deploy_pause.lua writes that record at the moment
+            // it pauses), or a CHILD COMPLETION, which starts after the install. A holder still working, or a
+            // named turn admitted and not started, is reported by name and NOT passed over - stopping a node
+            // under a working turn is the failure the pause exists to avoid. A holder the snapshot does not
+            // name fails nothing: the request keeps waiting (holders::bound_verdict).
             let asked_at = request_queued_at(&preview, protocol_id);
             let waited = now_epoch().saturating_sub(asked_at);
             let bound = hold_bound_secs();
@@ -2746,14 +2856,26 @@ fn process_requests(background: bool, held: &mut Held) -> Result<u32> {
             if bound > 0 && waited >= bound {
                 let holders = health().map(|body| holders::holders_from(&body)).unwrap_or_default();
                 match holders::bound_verdict(waited, bound, &holders, |session| paused_since(session, asked_at).is_some()) {
-                    Ok(()) => {
-                        let line = format!("{verb} proceeding: held {waited}s, past the {bound}s bound, and all {} holder(s) of the node have paused for it", holders.len());
+                    holders::Verdict::Proceed => {
+                        // A CHILD COMPLETION IS PASSED OVER WITH THE PAUSED SESSIONS (23/11): it is the
+                        // notification a settled child is owed, and it starts after the install - while a request
+                        // waits the node refuses to start it, so it waits for the install and never the reverse.
+                        let line = format!("{verb} proceeding: held {waited}s, past the {bound}s bound, and none of the {} holder(s) of the node can be hurt by it (each has paused for this request, or is a child completion that starts after the install)", holders.len());
                         audit("hold-bound-passed", &format!("{verb} {key}"), &line);
                         say(&line);
                     }
-                    Err(still) => {
-                        // Past the bound and still not safe to proceed: the answer is a NAMED failure, not another
-                        // announcement. `unknown is not yes` and `silence is not a wait` are the same rule here.
+                    holders::Verdict::Wait(still) => {
+                        // NOT A FAILURE, AND NOT A PASS (23/11). MEASURED: the requests for 7865a08e and e9a42d20
+                        // failed at this bound against a holder the node did not name - "the node reports itself
+                        // busy and names no holder" - which proves neither that a turn is running nor that one
+                        // paused. The request keeps waiting and the line names what is missing; an operator reads
+                        // it, and `wa-sentinel request withdraw` is the way out.
+                        announce_hold(held,&key,verb,&format!("{why}; {still}"),asked);
+                        continue;
+                    }
+                    holders::Verdict::Fail(still) => {
+                        // Past the bound with every blocker NAMED: the answer is a named failure, not another
+                        // announcement. It is re-queued once for the next quiet moment (fail_held_request).
                         fail_held_request(&preview, protocol_id, &path, &format!("{why}; {still}"))?;
                         held.settled(&key);
                         continue;
@@ -3896,6 +4018,10 @@ fn status() -> Result<()> {
     let done = std::fs::read_dir(sentinel_dir().join("done")).map(|d| d.count()).unwrap_or(0);
     let failed = std::fs::read_dir(sentinel_dir().join("failed")).map(|d| d.count()).unwrap_or(0);
     say(&format!("requests:  {pending} waiting, {done} done, {failed} failed"));
+    let parked = requeue_pending();
+    if parked > 0 {
+        say(&format!("requeue:   {parked} request(s) that failed at their bound run when the node is quiet enough"));
+    }
     // A count is not a fact. Each waiting request is one line: what was asked, which commit it would install,
     // when it was queued and why it has not run - so "1 waiting" no longer leaves the operator to read the
     // log, or to mistake "queued" for "deployed".

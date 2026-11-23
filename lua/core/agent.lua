@@ -2011,7 +2011,36 @@ function M:run(text, images)
   self.run_origin=(json.decode(host.runtime_info()) or {}).run_origin
   local resource_ctx={session_id=self.session_id,user_id=self.user,run_id=self.run_id,subagent=self.subagent}
   local claimed=resources.begin(resource_ctx)
-  if not claimed.ok then error("run_resource_refused: "..json.encode(claimed)) end
+  if not claimed.ok then
+    -- A SESSION CLAIM HELD BY THE DEPLOY'S OWN PAUSE IS A WAIT, NOT THIS RUN'S FAILURE (23/11).
+    -- MEASURED (avell, 23/11 ~14:2xZ): the deploy pause ENDED the workers components-calls-cheap (d2d69ff3) and
+    -- release-linux-reads-the-receipt (0b8c9d78) - both ended rc=1 with
+    -- 'run_resource_refused: {"error":"resource_busy", ... "key":"session:0b8c9d78-..."}' from this line, while the
+    -- node held each session after the pause ("waiting for it to go quiet"). The harness's auto-continues hit that
+    -- claim until they ran out, so a worker that had paused to let the install happen was DEAD when it ended -
+    -- the opposite of what the pause promised it. The claim belongs to a turn the deploy paused, and the install
+    -- ends it; so while a build is waiting for this node or being installed, this run did not start: it says the
+    -- same sentence the pre-run gate says, and the request runs again when the node is back (the same exit 2 a
+    -- refusal has, docs/SCRIPTED-RUNS.md). Nothing is replayed and nothing is claimed.
+    -- The decision is deploy_pause.claim_wait's alone: a person's turn is exempt, because a merely WAITING
+    -- request must not refuse the turn a reader is in (deploy_pause.at_boundary's rule, 22/11).
+    if not self.operator_present then
+      local loaded, deploy_pause = pcall(dofile, 'lua/core/deploy_pause.lua')
+      local refused = nil
+      if loaded and type(deploy_pause) == 'table' and type(deploy_pause.claim_wait) == 'function' then
+        refused = deploy_pause.claim_wait(claimed, host.now())
+      end
+      if refused then
+        self.emit({ type = "status", text = tostring(refused):sub(1, 400) })
+        pcall(telemetry.event, self.session_id, self.run_id, "", "deploy_waiting", "session_claimed_by_pause",
+          { detail = json.encode(claimed) })
+        pcall(host.log, "turn not started: " .. tostring(refused))
+        self.turn_refused = tostring(refused)
+        return self.turn_refused
+      end
+    end
+    error("run_resource_refused: "..json.encode(claimed))
+  end
   self:preflight_mark("resources")
   -- Taking over a session claim another run left behind is a fact, not housekeeping (item 5, 18/11):
   -- the operator reads which run held it and that nothing was replayed.

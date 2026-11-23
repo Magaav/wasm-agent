@@ -249,7 +249,37 @@ check(selfloop.footer_text(quiet_session):find("paused", 1, true) == nil,
 check(type(selfloop.resume(quiet_session, "master", { now = T0 + 2 }).resumed) == "boolean",
   "resuming a session that is not held answers plainly")
 
-for _, name in ipairs({ "pause", "resume", "paused", "cancel_requested", "cancelled_stop", "settle_interrupted" }) do
+-- ---- a wake the node REFUSED for a waiting build is put back, not consumed (23/11) --------------
+-- MEASURED (avell, ~14:2xZ): the pause ended two workers rc=1 with `run_resource_refused ... resource_busy`
+-- while a build waited. The same race reaches a WAKE: the request arrives between run_wake's own gate and the
+-- run's session claim, the run does not start, and the row must keep its place instead of being settled by its
+-- own refusal. The two halves are asserted here: the one test for the sentences, and the deferral itself.
+local pause_mod = dofile("lua/core/deploy_pause.lua")
+check(pause_mod.is_refusal("deploy_waiting: waiting for the install of 8082b42e1111"),
+  "a pre-run-gate refusal is recognised")
+check(pause_mod.is_refusal("deploy waiting: waiting for the install of 8082b42e1111; this turn paused after its step"),
+  "and so is a paused turn's own sentence")
+check(not pause_mod.is_refusal("provider_failed"), "a provider failure is not a refusal for a build")
+check(not pause_mod.is_refusal(nil), "and neither is nothing at all")
+local refused_session = memory.start_session("local", "chat",
+  { id = "wakes-pause-refused", user_id = "master", node_id = "test-node", title = "refused for a build" })
+local fctx = { user_id = "master", role = "master", session_id = refused_session }
+local refused_wake = selfloop.schedule({ in_seconds = 5, reason = "resume after the swap" }, fctx)
+check(refused_wake.ok, "the wake is scheduled: " .. json.encode(refused_wake))
+local claimed_refused = selfloop.claim_due(refused_session, "master", { now = T0 + 10 })
+check(claimed_refused and claimed_refused.id == refused_wake.wake.id, "and claimed for its turn")
+local refusal = "deploy_waiting: waiting for the install of 8082b42e1111 (deploy request 1-2, asked 2s ago)"
+local put_back = selfloop.defer_refused(claimed_refused, refusal, { now = T0 + 10 })
+check(put_back.deferred == true, "the refused wake is put back: " .. json.encode(put_back))
+local refused_row = row_of(refused_wake.wake.id)
+eq(refused_row.status, "pending", "the row is pending again, not delivered")
+check(tonumber(refused_row.due_at) > T0 + 10, "with a time ahead, so it is looked at again")
+check(tostring(refused_row.last_error):find("deploy_waiting", 1, true) ~= nil,
+  "and the refusal is on the row: " .. tostring(refused_row.last_error))
+eq(selfloop.defer_refused({ id = "no-such-wake", attempts = 0 }, refusal, { now = T0 + 10 }).error, "wake_not_pending",
+  "a row that is not pending is refused by name, never guessed at")
+
+for _, name in ipairs({ "pause", "resume", "paused", "cancel_requested", "cancelled_stop", "settle_interrupted", "defer_refused" }) do
   check(type(selfloop[name]) == "function", "the module exposes " .. name)
 end
 

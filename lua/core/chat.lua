@@ -749,13 +749,23 @@ function M.run(argv)
     end
     -- The session id goes to stderr, so stdout stays the run's own output for a caller capturing it,
     -- and the id is still there to resume the thread or steer a later run of it.
+    -- A RUN REFUSED BY A WAITING BUILD IS NOT A FAILED ONE (23/11): `not started` is the third word the runners
+    -- already act on (exit 2 with `deploy_waiting`, docs/SCRIPTED-RUNS.md) - a turn that wrote nothing and ran
+    -- nothing was never "failed".
     io.stderr:write(string.format("wa: session %s %s\n", tostring(agent.session_id),
-      ran_ok and "ok" or "failed"))
+      ran_ok and "ok" or (M.deploy_refused(agent) and "not started" or "failed")))
     -- A thread that was busy, and the one this run started instead, said out loud (finding 6).
     if agent.session_note then io.stderr:write("wa: " .. tostring(agent.session_note) .. "\n") end
     agent:close()
     input:stop()
     view:screen_off()
+    -- A REFUSAL IS NOT A FAILED TURN (23/11). Exit 2 is this tree's own word for "the turn was refused before
+    -- it started and nothing ran" (docs/SCRIPTED-RUNS.md), and the pre-run gate already answers it. A run the
+    -- AGENT refused because its session's claim was held by a turn the deploy paused must answer the same: the
+    -- mission runners wait on `2` with `deploy_waiting` and do not spend a round, while `1` ended the worker
+    -- (measured 23/11: components-calls-cheap d2d69ff3 and release-linux-reads-the-receipt 0b8c9d78, both rc=1
+    -- with `run_resource_refused ... resource_busy`, while a deploy was waiting for or installing on the node).
+    if not ran_ok and M.deploy_refused(agent) then return 2 end
     return ran_ok and 0 or 1
   end
 
@@ -1356,6 +1366,22 @@ M.start_notice = start_notice
 -- resumed thread, #53) failed too: it recorded no answer and ran nothing, so reporting it as a finished
 -- turn with exit 0 is the silent success this exists to remove. Exported so the rule has one home and a
 -- test can read it without a process.
+-- Was this run refused by a WAITING OR INSTALLING BUILD, rather than failed? The sentence is
+-- lua/core/deploy_wait.lua's (`deploy_waiting: ...`) and lua/core/deploy_pause.lua's own pause sentence
+-- (`deploy waiting: ...`); both start with the same two words, and nothing else in this tree does.
+function M.deploy_refused(agent)
+  local refused = type(agent) == "table" and agent.turn_refused or nil
+  if type(refused) ~= "string" then return false end
+  -- The rule itself lives in lua/core/deploy_pause.lua (`is_refusal`), because the wake's deferral asks it too.
+  local loaded, pause = pcall(dofile, "lua/core/deploy_pause.lua")
+  if loaded and type(pause) == "table" and type(pause.is_refusal) == "function" then
+    return pause.is_refusal(refused)
+  end
+  -- The module could not be loaded: the two sentences both start with these words, so the answer is still
+  -- right about them - and a module that cannot be read is not a reason to call a wait a failure.
+  return refused:match("^deploy[_ ]wait") ~= nil
+end
+
 function M.turn_ok(ok, agent)
   if not ok then return false end
   return not (type(agent) == "table" and agent.turn_refused ~= nil)

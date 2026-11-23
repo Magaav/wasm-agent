@@ -409,6 +409,20 @@ eq(chat.turn_ok(true, { turn_refused = 'no_dispatchable_tools: ...' }), false,
 eq(chat.turn_ok(true, {}), true, 'a run that answered is a finished turn')
 eq(chat.turn_ok(false, {}), false, 'a run that raised failed')
 
+-- 11b. 23/11: A RUN REFUSED BY A WAITING OR INSTALLING BUILD IS A WAIT, NOT A FAILED TURN. The runners wait on
+--      exit 2 with `deploy_waiting` and charge no round (docs/SCRIPTED-RUNS.md); a claim held by the turn the
+--      deploy paused used to end the worker rc=1 instead (components-calls-cheap d2d69ff3,
+--      release-linux-reads-the-receipt 0b8c9d78). The scripted branch of `wa chat` asks exactly this before it
+--      exits, so the rule is asserted here beside turn_ok.
+eq(chat.deploy_refused({ turn_refused = 'deploy_waiting: waiting for the install of 8082b42e1111' }), true,
+  'a deploy refusal is recognised by the sentence the pre-run gate writes')
+eq(chat.deploy_refused({ turn_refused = 'deploy waiting: the node is installing a new build; paused after this step' }), true,
+  'and by the one a paused turn writes')
+eq(chat.deploy_refused({ turn_refused = 'no_dispatchable_tools: ...' }), false,
+  'every other refusal is still a failed turn')
+eq(chat.deploy_refused({}), false, 'and a run that refused nothing is not one')
+eq(chat.deploy_refused(nil), false, 'nor is no agent at all')
+
 -- 12. round 3, item 1: the streak is per RUN. An agent object is reused across turns, and a counter that
 --     survived its run failed the next turn's FIRST offence as if it were the second. The counter is reset
 --     where the run starts (lua/core/agent.lua, next to fake_answer_repeats), so a stale value does nothing.

@@ -394,6 +394,14 @@ turn="$(cat "$WORK/turn.log")"
 want "$turn" "session=" "the turn ran in a session"
 want "$turn" "deploy waiting: waiting for the install of 8082b42e1111" "the turn paused at its step boundary"
 want "$turn" "paused after its step and scheduled a resume" "and says it scheduled its resume"
+# A PAUSED TURN IS NOT A REFUSED ONE (orchestrator, 23/11 ~16:40Z). MEASURED that day: four workers
+# (project-instructions-once, release-linux-reads-the-receipt, graph-one-store-per-root, and the mission that
+# wrote this row) ended rc=2 because their turn did NOT start while a deploy waited. A turn that is ALREADY
+# RUNNING is a different answer: it pauses at its own step boundary, writes its checkpoint and its one resume
+# wake, and ends CLEANLY - `0`, never `2` - so the runner does not treat the pause as a refusal and the work
+# continues after the swap (step 5 performs that resume). Asserted here because exit 2 is what killed them.
+if [ "$TURN_RC" = "0" ]; then ok "the paused turn ended rc=0, not a refusal"
+else fail "a turn that paused for the deploy ended rc=$TURN_RC: it must end cleanly, never as a refusal"; fi
 PAUSED_SESSION="$(printf '%s' "$turn" | sed -n 's/^session=//p' | tail -1)"
 [ -n "$PAUSED_SESSION" ] || fail "the turn printed no session id"
 if [ -s "$HOME_DIR/.wasm-agent/deploy-paused/$PAUSED_SESSION.json" ]; then

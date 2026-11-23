@@ -247,10 +247,17 @@ What the node does while either is live:
 * **The wait is visible and bounded.** `wa-sentinel status` prints, under the queued request, one line per
   holder of the node - `busy     session 8082b42e  POST /chat 2m  paused for the deploy` (or `working`), from
   the node's own `/health` - and the bound it will hold to. Past `WA_DEPLOY_HOLD_BOUND` (default 180 s) the
-  sentinel proceeds EVEN THOUGH the node is busy, but only when every holder is a session that recorded a
-  pause for THIS request (a record older than the request says nothing about it). A holder that is still
-  working, a subagent, a queued turn, or a run whose session `/health` does not name is reported by name and
-  not passed over: the bound is a wall on waiting, never a licence to stop a node under a working turn.
+  sentinel proceeds EVEN THOUGH the node is busy, but only when no holder is one the install could hurt: a
+  session that recorded a pause for THIS request (a record older than the request says nothing about it), or
+  a CHILD COMPLETION - the notification a settled child is owed, which the node starts after the install and
+  never before, because a waiting request is exactly what stops it starting turns (23/11: three of them held
+  a deploy for 40 minutes while the deploy held them). Three answers are possible, and each is deliberate:
+  a NAMED holder that is still working, or a NAMED turn admitted and not started, fails the request BY NAME
+  (and that request is re-queued once, automatically, on the first tick that finds the node quiet - the
+  `failed/` record keeps the reason and says so); a holder `/health` does not name - a subagent, an overdue
+  operation, a count with no session - is never passed over and never a failure, so the request keeps waiting
+  and `wa-sentinel status` names what is missing. The bound is a wall on waiting, never a licence to stop a
+  node under a working turn.
 * **Knobs**: `WA_DEPLOY_HOLD_BOUND` (the sentinel's bound; `0` keeps the old unbounded wait),
   `WA_DEPLOY_IDLE_BOUND` (the installer's own wait once it runs, 1800 s), and `deploy_wait.DEFAULT_BOUND`
   (900 s) which is how long a waiting request may keep the node's new turns stopped - past it the wait is

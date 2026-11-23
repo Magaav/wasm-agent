@@ -94,9 +94,9 @@ fn current_is_a_holder_once() {
 #[test]
 fn holder_lines_name_the_session_and_its_duration() {
     let holders = vec![
-        holders::Holder { session: "8082b42e-1111-2222".into(), label: "POST /chat".into(), ms: 134_000, queued: false },
-        holders::Holder { session: "deadbeef-1111-2222".into(), label: "POST /chat".into(), ms: 9_000, queued: false },
-        holders::Holder { session: "".into(), label: "2 subagent(s) running, 0 queued".into(), ms: 0, queued: false },
+        holders::Holder { session: "8082b42e-1111-2222".into(), label: "POST /chat".into(), ms: 134_000, queued: false, completion: false },
+        holders::Holder { session: "deadbeef-1111-2222".into(), label: "POST /chat".into(), ms: 9_000, queued: false, completion: false },
+        holders::Holder { session: "".into(), label: "2 subagent(s) running, 0 queued".into(), ms: 0, queued: false, completion: false },
     ];
     let lines = holders::holder_lines(&holders, |session| session.starts_with("8082b42e"));
     assert_eq!(lines.len(), 3, "one line per holder: {lines:?}");
@@ -109,31 +109,33 @@ fn holder_lines_name_the_session_and_its_duration() {
 /// for this request and over nothing else - not a working session, not a subagent, not a run with no session.
 #[test]
 fn the_bound_passes_over_paused_sessions_only() {
-    let working = holders::Holder { session: "8082b42e-1111".into(), label: "POST /chat".into(), ms: 120_000, queued: false };
-    let paused_one = holders::Holder { session: "aaaa1111-2222".into(), label: "POST /chat".into(), ms: 120_000, queued: false };
-    let nameless = holders::Holder { session: "".into(), label: "2 subagent(s) running, 0 queued".into(), ms: 0, queued: false };
+    let working = holders::Holder { session: "8082b42e-1111".into(), label: "POST /chat".into(), ms: 120_000, queued: false, completion: false };
+    let paused_one = holders::Holder { session: "aaaa1111-2222".into(), label: "POST /chat".into(), ms: 120_000, queued: false, completion: false };
+    let nameless = holders::Holder { session: "".into(), label: "2 subagent(s) running, 0 queued".into(), ms: 0, queued: false, completion: false };
 
     // Before the bound: held, whatever the holders are doing.
     let early = holders::bound_verdict(10, 180, &[paused_one.clone()], |_| true);
-    assert!(early.is_err(), "a bound not reached passes over nothing: {early:?}");
+    assert!(matches!(early, holders::Verdict::Wait(_)), "a bound not reached passes over nothing: {early:?}");
 
     // Everyone paused: the wait is about the node, not about the sessions.
-    assert_eq!(holders::bound_verdict(200, 180, &[paused_one.clone()], |_| true), Ok(()));
+    assert_eq!(holders::bound_verdict(200, 180, &[paused_one.clone()], |_| true), holders::Verdict::Proceed);
 
-    // One session still working: reported by name, never passed over.
+    // One session still working, and the snapshot NAMES it: the failure names it too.
     let refused = holders::bound_verdict(200, 180, &[paused_one.clone(), working], |session| session != "8082b42e-1111");
-    assert_eq!(refused.unwrap_err(), "session 8082b42e is still working (POST /chat)",
+    assert_eq!(refused, holders::Verdict::Fail("session 8082b42e is still working (POST /chat)".to_string()),
         "the refusal names the holder that blocks it");
 
-    // A holder with no session: nothing proves it paused, so nothing passes over it.
-    let nameless_refusal = holders::bound_verdict(200, 180, &[nameless], |_| true);
-    let nameless_why = nameless_refusal.as_ref().unwrap_err();
-    assert!(nameless_why.contains("names no session"), "{nameless_refusal:?}");
+    // A holder with no session: nothing proves it paused - and nothing there can be FAILED either (23/11).
+    match holders::bound_verdict(200, 180, &[nameless], |_| true) {
+        holders::Verdict::Wait(why) => assert!(why.contains("names no session"), "{why:?}"),
+        other => panic!("an unnamed holder must not fail a request: {other:?}"),
+    }
 
-    // The node says busy and names nobody: a guess, not a proof.
-    let empty = holders::bound_verdict(200, 180, &[], |_| true);
-    let empty_why = empty.as_ref().unwrap_err();
-    assert!(empty_why.contains("names no holder"), "{empty:?}");
+    // The node says busy and names nobody: a guess, not a proof, and not a failure.
+    match holders::bound_verdict(200, 180, &[], |_| true) {
+        holders::Verdict::Wait(why) => assert!(why.contains("names no holder"), "{why:?}"),
+        other => panic!("a node that names nobody must not fail a request: {other:?}"),
+    }
 }
 
 /// 7. A pause record says something about the request it was written for, and nothing about a later one. The record
@@ -219,7 +221,7 @@ fn a_queued_turn_is_named_and_the_unnamed_ones_are_still_counted() {
 fn the_bound_never_passes_over_a_turn_that_has_not_started() {
     let queued = holders::Holder::admitted("9b28c30d-1111", "admitted, not started", 45_000);
     let refused = holders::bound_verdict(200, 180, &[queued.clone()], |_| true);
-    let why = refused.as_ref().unwrap_err();
+    let holders::Verdict::Fail(why) = &refused else { panic!("a named queued turn is a failure, not a wait: {refused:?}") };
     assert!(why.contains("admitted and not started"), "the refusal names the queued turn: {refused:?}");
     assert!(why.contains("session 9b28c30d"), "with the session as `wa sessions` prints it: {refused:?}");
 }
@@ -236,4 +238,99 @@ fn a_request_name_that_is_not_a_stamp_is_not_a_time() {
     assert_eq!(stamp_seconds(""), None);
     let fresh = request_queued_at(&serde_json::json!({"verb": "deploy"}), "100-deploy");
     assert!(fresh > 1_700_000_000, "a request with no measurable queue time is not fifty-six years old: {fresh}");
+}
+
+/// 12. A CHILD COMPLETION NEVER HOLDS THE INSTALL (23/11). MEASURED twice on avell, in both directions:
+///
+///   * 13:11Z, session 40adee0f: the node PAUSED the worker for the deploy and the deploy then waited for that
+///     same session's queued child completion - a mutual wait, and the request failed at its bound;
+///   * 14:37Z, three sessions (da212b83, 6bce1698, b7be279e): the completions were admitted and not started, the
+///     node refused to start them while the request waited (its admission gate), and the deploy waited 40 minutes
+///     for them. Withdrawing the request made them run within 90s.
+///
+/// So neither "paused" nor "not started" is the test for a completion: it starts after the install, and the
+/// install never waits on it. Asserted from the SHAPE the node answers (`queue_sessions`, `kind: completion`),
+/// not from a hand-built holder, so the reader and the rule are judged together.
+#[test]
+fn a_child_completion_never_holds_the_install() {
+    let body = health(
+        r#"{"ok":true,"queue":2,
+             "queue_sessions":{"count":2,"named":2,"truncated":false,"entries":[
+               {"run_id":41,"session":"da212b83-1111-2222-3333-444455556666","node_thread":0,"kind":"completion","waited_ms":1500000},
+               {"run_id":42,"session":"6bce1698-1111-2222-3333-444455556666","node_thread":1,"kind":"completion","waited_ms":1500000}]},
+             "node_threads":[],"current":null,
+             "subagents":{"queued":0,"running":0,"active":0}}"#,
+    );
+    let holders = holders::holders_from(&body);
+    assert_eq!(holders.len(), 2, "each completion is named: {holders:?}");
+    assert!(holders.iter().all(|holder| holder.completion && holder.queued), "{holders:?}");
+    // NOT ONE of them has a pause record, and the request still proceeds: the install cannot hurt a completion.
+    assert_eq!(holders::bound_verdict(200, 180, &holders, |_| false), holders::Verdict::Proceed,
+        "an admitted child completion never holds the install: {holders:?}");
+    let lines = holders::holder_lines(&holders, |_| false);
+    assert!(lines.iter().all(|line| line.contains("does not hold the deploy")), "{lines:?}");
+    assert!(lines.iter().any(|line| line.contains("session da212b83  child completion, admitted, not started")),
+        "the status says what the turn is: {lines:?}");
+}
+
+/// 13. A completion the node could not name does not hold the install either, and a NAMED turn does: the
+/// difference is the kind the snapshot reports, not the count.
+#[test]
+fn a_named_turn_and_a_nameless_completion_are_read_differently() {
+    let body = health(
+        r#"{"ok":true,"queue":2,
+             "queue_sessions":{"count":2,"named":1,"truncated":false,"entries":[
+               {"run_id":41,"session":"9b28c30d-1111-2222-3333-444455556666","node_thread":0,"kind":"run","waited_ms":45000},
+               {"run_id":42,"session":"","node_thread":3,"kind":"completion","waited_ms":50}]},
+             "node_threads":[],"current":null,
+             "subagents":{"queued":0,"running":0,"active":0}}"#,
+    );
+    let holders = holders::holders_from(&body);
+    let counted = holders.iter().find(|holder| holder.label == "1 turn(s) admitted and not started")
+        .expect("the turn the node could not name is still counted");
+    assert!(counted.completion, "and the one it named as a completion is not a turn that must run: {counted:?}");
+    // The named turn is the blocker, and it is named: that is a failure the operator can act on.
+    let verdict = holders::bound_verdict(200, 180, &holders, |_| true);
+    assert!(matches!(verdict, holders::Verdict::Fail(ref why) if why.contains("session 9b28c30d")), "{verdict:?}");
+
+    // The same body with a turn the node could not name: unknown is not yes, and it is not a failure.
+    let mut unnameable = body.clone();
+    unnameable["queue_sessions"]["entries"][1]["kind"] = serde_json::json!("run");
+    let holders = holders::holders_from(&unnameable);
+    let verdict = holders::bound_verdict(200, 180, &holders, |_| true);
+    match verdict {
+        holders::Verdict::Wait(why) => assert!(why.contains("names no session"), "{why:?}"),
+        other => panic!("a turn the node could not name must never fail a request: {other:?}"),
+    }
+}
+
+/// 14. THE REPORTER NAMES WHAT IT KNOWS (23/11). MEASURED: the request for 7865a08e failed at its bound with
+/// "the node reports itself busy and names no holder" - and `e9a42d20` sat 25 minutes behind a count-only queue.
+/// Two shapes the reader used to throw away are holders: a `current` run the snapshot gives no label, and an
+/// overdue operation (which `activity_of` counts as busy on its own).
+#[test]
+fn a_holder_the_reporter_knows_is_named() {
+    let unlabelled = health(
+        r#"{"ok":true,"queue":0,"node_threads":[],
+             "current":{"label":"","ms":42000,"session":"8082b42e-1111-2222-3333-444455556666"},
+             "subagents":{"queued":0,"running":0,"active":0}}"#,
+    );
+    let holders = holders::holders_from(&unlabelled);
+    assert_eq!(holders.len(), 1, "a run named only by its session is still a run: {holders:?}");
+    assert_eq!(holders[0].session, "8082b42e-1111-2222-3333-444455556666");
+    assert_eq!(holders[0].label, "a run, with no label", "and it says it has no label instead of vanishing");
+
+    let overdue = health(
+        r#"{"ok":true,"queue":0,"operation_overdue":true,"node_threads":[],"current":null,
+             "subagents":{"queued":0,"running":0,"active":0}}"#,
+    );
+    let holders = holders::holders_from(&overdue);
+    assert!(holders.iter().any(|holder| holder.label == "an operation is overdue"),
+        "an overdue operation is work the node reported and nobody named: {holders:?}");
+    let lines = holders::holder_lines(&holders, |_| false);
+    assert!(lines.iter().any(|line| line.contains("(no session named)  an operation is overdue")));
+    match holders::bound_verdict(200, 180, &holders, |_| true) {
+        holders::Verdict::Wait(why) => assert!(why.contains("an operation is overdue"), "{why:?}"),
+        other => panic!("work with no session is never passed over and never failed: {other:?}"),
+    }
 }
