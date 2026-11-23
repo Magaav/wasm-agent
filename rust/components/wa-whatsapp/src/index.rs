@@ -2864,6 +2864,13 @@ pub async fn read_paced<S: Store>(store: &S, request: &seam::Verified, pace: &Pa
             pending.push(serde_json::Value::String(id.clone()));
         }
     }
+    let written = pace.pending.len().saturating_sub(pending.len());
+    let counted = Pace {
+        pending: Vec::new(),
+        pending_total: pace.pending_total.saturating_sub(written),
+        newest_seen: pace.newest_seen,
+        catching_up: pace.catching_up,
+    };
     // The header: which chat this is, in words. A card is what the index observed; an index written
     // before the card existed answers with the address and says so.
     let card = card_of(store, &chat).await?;
@@ -2905,7 +2912,9 @@ pub async fn read_paced<S: Store>(store: &S, request: &seam::Verified, pace: &Pa
             "as_of_iso": if as_of > 0 { serde_json::Value::String(crate::view::iso(as_of)) } else { serde_json::Value::Null },
             "as_of_local": if as_of > 0 { serde_json::Value::String(crate::view::local(as_of)) } else { serde_json::Value::Null },
             "order": order_block(),
-            "index": index_state(pace, as_of),
+            // The ids that turned out to be indexed already are not waiting any more: the count says
+            // what is still behind the wire, not what this answer happened to list.
+            "index": index_state(&counted, as_of),
         }),
     );
     if addresses.len() > 1 {

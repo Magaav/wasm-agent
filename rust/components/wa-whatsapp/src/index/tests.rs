@@ -2621,3 +2621,144 @@ fn a_cut_transcript_says_so_and_the_two_exact_ops_return_it_whole() {
     assert!(hit.get("transcript_truncated").is_none(), "a whole transcript is not flagged: {hit}");
     assert!(hit.get("transcript_full").is_none(), "nothing to point at: {hit}");
 }
+
+// ---- the read contract of 23/11: fresh, ordered, monotone, one history --------------------------
+
+/// A chat of this test's own, so the process-wide monotonic guard (`observe_as_of`) cannot see an
+/// earlier test's answer for the same address.
+const FRESH_CHAT: &str = "5511977776666@s.whatsapp.net";
+
+fn read_of(store: &Memory, chat: &str) -> serde_json::Value {
+    block_on(read(store, &verified(seam::Request { op: "read".into(), chat: Some(chat.into()), limit: Some(20), ..Default::default() }))).unwrap()
+}
+
+#[test]
+fn a_read_says_how_fresh_it_is_and_two_reads_in_a_row_never_go_backwards() {
+    let store = Memory::new();
+    block_on(put(&store, &direct(FRESH_CHAT, "Ana", "A1", base(), "um"))).unwrap();
+    let first = read_of(&store, FRESH_CHAT);
+    assert_eq!(first["as_of"], base(), "as_of is the newest message the index holds: {first}");
+    assert_eq!(first["as_of_iso"], "2025-10-09T08:53:20Z");
+    assert_eq!(first["as_of_local"], "2025-10-09 05:53");
+    assert_eq!(first["order"]["key"], "ts", "the order key, said out loud");
+    assert_eq!(first["order"]["direction"], "newest_first");
+    assert_eq!(first["order"]["cursor"], "next_before");
+    assert_eq!(first["index"]["state"], "current");
+    assert_eq!(first["index"]["pending"], 0);
+    assert_eq!(first["index"]["lag_ms"], 0);
+    assert!(first.get("as_of_regressed").is_none(), "nothing regressed on a first read");
+
+    // A second read of the same chat, with nothing new: the same picture, and the same as_of.
+    let second = read_of(&store, FRESH_CHAT);
+    assert_eq!(second["as_of"], first["as_of"], "two reads in a row agree: {second}");
+    assert_eq!(second["messages"], first["messages"]);
+    assert_eq!(second["count"], 1);
+
+    // A message arrives: the next read is newer, and says so by its own number.
+    block_on(put(&store, &direct(FRESH_CHAT, "Ana", "A2", base() + 60_000, "dois"))).unwrap();
+    let third = read_of(&store, FRESH_CHAT);
+    assert_eq!(third["as_of"], base() + 60_000, "{third}");
+    assert_eq!(third["messages"][0]["id"], "A2");
+    assert!(third.get("as_of_regressed").is_none(), "newer is not a regression");
+
+    // Records leaving the index (a retention pass, a restored month) is the ONE honest way a read can
+    // be older than an earlier one, and the answer then says so instead of quietly going backwards.
+    let thread = format!("{PREFIX}m/{FRESH_CHAT}/{}/{}", inv(base() + 60_000), "A2");
+    block_on(store.del(thread.as_bytes())).unwrap();
+    block_on(store.del(key_id(FRESH_CHAT, "A2").as_bytes())).unwrap();
+    let fourth = read_of(&store, FRESH_CHAT);
+    assert_eq!(fourth["as_of"], base());
+    assert_eq!(fourth["as_of_regressed"]["was_ms"], base() + 60_000, "{fourth}");
+    assert_eq!(fourth["as_of_regressed"]["now_ms"], base());
+    assert!(fourth["as_of_regressed"]["was_iso"].as_str().unwrap().ends_with('Z'));
+    assert!(
+        fourth["as_of_regressed"]["reason"].as_str().unwrap().contains("retention"),
+        "the reason names what can do this: {fourth}"
+    );
+}
+
+#[test]
+fn one_chat_is_one_history_under_both_of_its_addresses() {
+    // The 23/11 finding, at the read: the same person under `@lid` and under the phone number answered
+    // with two different histories. The alias row (`ix/al`) joins them, and a read by either is the same
+    // read.
+    let store = Memory::new();
+    let lid = "72103978127548@lid";
+    let pn = "5511977776667@s.whatsapp.net";
+    block_on(put(&store, &direct(lid, "Laura", "L1", base(), "pelo lid"))).unwrap();
+    block_on(put(&store, &direct(lid, "Laura", "L2", base() + 1_000, "pelo lid dois"))).unwrap();
+    block_on(put(&store, &direct(pn, "Laura", "P1", base() + 2_000, "pelo numero"))).unwrap();
+    block_on(remember_alias(&store, lid, pn)).unwrap();
+
+    let by_lid = read_of(&store, lid);
+    let by_pn = read_of(&store, pn);
+    let ids = |answer: &serde_json::Value| -> Vec<String> {
+        answer["messages"].as_array().unwrap().iter().map(|message| message["id"].as_str().unwrap().to_string()).collect()
+    };
+    assert_eq!(ids(&by_lid), vec!["P1", "L2", "L1"], "the merged history, newest first: {by_lid}");
+    assert_eq!(ids(&by_pn), ids(&by_lid), "the same messages from either address");
+    assert_eq!(by_pn["as_of"], by_lid["as_of"]);
+    assert_eq!(by_lid["as_of"], base() + 2_000);
+    assert_eq!(by_lid["count"], 3);
+    // Both addresses are named, so a caller can see why the answer holds more than the address it asked
+    // about - and the answer keeps the chat it was asked about as `chat`.
+    assert_eq!(by_lid["chat"], lid);
+    assert_eq!(by_lid["addresses"], serde_json::json!([lid, pn]));
+    assert_eq!(by_pn["chat"], pn);
+    // An address the index knows nothing about still answers: it is its own history, and it says so.
+    let stranger = read_of(&store, "5511977776668@s.whatsapp.net");
+    assert_eq!(stranger["count"], 0);
+    assert_eq!(stranger["as_of"], serde_json::Value::Null, "no message, no as_of: null is not a time");
+    assert!(stranger.get("addresses").is_none());
+}
+
+#[test]
+fn a_message_accepted_and_not_written_yet_is_named_pending_and_the_answer_says_it_is_behind() {
+    // READ YOUR WRITES: the moment after a send, the answer must never be a silent picture from before
+    // it. A record the component has accepted and not written is named, with how far behind the wire the
+    // answer is - and the same answer turns back to `current` once the write landed.
+    let store = Memory::new();
+    block_on(put(&store, &direct(FRESH_CHAT, "Ana", "B1", base(), "antes do envio"))).unwrap();
+    let pending = Pace {
+        pending: vec![(FRESH_CHAT.to_string(), "SENT1".to_string())],
+        pending_total: 1,
+        newest_seen: base() + 30_000,
+        catching_up: false,
+    };
+    let asking = verified(seam::Request { op: "read".into(), chat: Some(FRESH_CHAT.into()), limit: Some(20), ..Default::default() });
+    let behind = block_on(read_paced(&store, &asking, &pending)).unwrap();
+    assert_eq!(behind["index"]["state"], "catching_up", "{behind}");
+    assert_eq!(behind["index"]["pending"], 1);
+    assert_eq!(behind["index"]["lag_ms"], 30_000, "how far behind the newest message it has SEEN");
+    assert_eq!(behind["index"]["newest_seen_ms"], base() + 30_000);
+    assert_eq!(behind["pending"], serde_json::json!(["SENT1"]));
+    assert!(behind["pending_note"].as_str().unwrap().contains("not in the index yet"));
+    // The id is a message of another chat: it is not this read's pending list.
+    let elsewhere = Pace { pending: vec![(OTHER.to_string(), "SENT2".to_string())], ..pending.clone() };
+    let other = block_on(read_paced(&store, &asking, &elsewhere)).unwrap();
+    assert!(other.get("pending").is_none(), "another chat's pending id is not named here: {other}");
+
+    // The write lands: the very same pending list now names nothing, and the answer is current again.
+    block_on(put(&store, &direct(FRESH_CHAT, "Ana", "SENT1", base() + 30_000, "acabei de mandar"))).unwrap();
+    let after = block_on(read_paced(&store, &asking, &pending)).unwrap();
+    assert!(after.get("pending").is_none(), "{after}");
+    assert_eq!(after["index"]["pending"], 0);
+    assert_eq!(after["index"]["state"], "current");
+    assert_eq!(after["as_of"], base() + 30_000, "the sent message is in the history, and as_of says so");
+    assert_eq!(after["messages"][0]["id"], "SENT1");
+}
+
+#[test]
+fn a_search_says_how_new_its_newest_match_is_and_how_caught_up_the_writer_is() {
+    let store = Memory::new();
+    block_on(put(&store, &direct(FRESH_CHAT, "Ana", "Q1", base(), "o boleto vence amanha"))).unwrap();
+    let answer = block_on(search(&store, &search_request("boleto"))).unwrap();
+    assert_eq!(answer["as_of"], base(), "{answer}");
+    assert_eq!(answer["as_of_scope"], "matches", "a search is not one chat, and says so");
+    assert_eq!(answer["order"]["direction"], "newest_first");
+    assert_eq!(answer["index"]["state"], "current");
+    // Nothing matched: no as_of, and the shape is still the same shape.
+    let none = block_on(search(&store, &search_request("inexistente"))).unwrap();
+    assert_eq!(none["as_of"], serde_json::Value::Null);
+    assert_eq!(none["index"]["state"], "current");
+}
