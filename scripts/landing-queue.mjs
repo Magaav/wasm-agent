@@ -533,31 +533,56 @@ function readUid(procRoot, pid) {
   return match ? Number(match[1]) : null;
 }
 
-function pinProcessUsers(pinDir, procRoot = '/proc') {
+function pinProcessUsers(pinDir, procRoot = '/proc', ownUid = process.getuid ? process.getuid() : null) {
   const users = new Map();
-  const programs = [];
+  const own = [];
+  let others = 0;
   let noProgram = 0;
   let entries;
   try { entries = fs.readdirSync(procRoot); }
   catch {
-    return {known: false, users, programs, noProgram, why: `${procRoot} cannot be read`};
+    return {known: false, users, own, others, noProgram, why: `${procRoot} cannot be read`};
   }
   const prefix = pinDir.endsWith(path.sep) ? pinDir : pinDir + path.sep;
+  // The pin a path is inside, or '' when it is outside every pin.
+  const pinOf = location => {
+    if (!location || !location.startsWith(prefix)) return '';
+    const name = location.slice(prefix.length).split(path.sep)[0];
+    return PIN_NAME.test(name) ? name : '';
+  };
+  const use = (pin, pid, how) => { if (!users.has(pin)) users.set(pin, {pid, how}); };
   for (const name of entries) {
     if (!/^[0-9]+$/.test(name)) continue;
-    let cwd;
+    const pid = Number(name);
+    // TWO WAYS IN, NOT ONE. A build normally runs with its cwd in the pinned tree, but a binary started
+    // FROM the pinned tree (a test harness out of the pinned target dir, a script that cd's away) has its
+    // cwd elsewhere and its exe right there - measured on this node: the deploy's own proof binaries run
+    // from the pin. So a process is a user of a pin when EITHER its cwd or its exe is inside it.
+    // Linux appends " (deleted)" to an exe whose file was replaced under it: the path is still the pin's.
+    let exe = null;
+    try { exe = fs.readlinkSync(path.join(procRoot, name, 'exe')).replace(/ \(deleted\)$/, ''); } catch {}
+    const fromExe = pinOf(exe);
+    if (fromExe) use(fromExe, pid, `exe ${exe}`);
+    let cwd = null;
     try { cwd = fs.readlinkSync(path.join(procRoot, name, 'cwd')); }
     catch {
+      // WHAT AN UNREADABLE PROCESS IS, MEASURED RATHER THAN ASSUMED (avell, 23/11: 575 pids, 240 readable,
+      // 334 not): 301 have an empty cmdline - kernel threads and zombies, no working directory by
+      // definition - and 33 are real programs. Only a pid of THIS uid is "cannot tell": a build of this
+      // tree runs as this uid (the pins are ours, 0755, so no other user can write into one), and this
+      // uid's processes are readable, so one that is not is an anomaly worth stopping for. The others are
+      // named and left out of scope; a ROOT process sitting in a pin stays the residual risk.
       const cmdline = readCmdline(procRoot, name);
-      if (cmdline === '') noProgram += 1;
-      else programs.push({pid: Number(name), uid: readUid(procRoot, name), cmd: cmdline === null ? 'unknown' : cmdline});
+      if (cmdline === '') { noProgram += 1; continue; }
+      const uid = readUid(procRoot, name);
+      if (ownUid === null || uid === null || uid === ownUid) own.push({pid, uid, cmd: cmdline === null ? 'unknown' : cmdline});
+      else others += 1;
       continue;
     }
-    if (!cwd.startsWith(prefix)) continue;
-    const pin = cwd.slice(prefix.length).split(path.sep)[0];
-    if (PIN_NAME.test(pin) && !users.has(pin)) users.set(pin, Number(name));
+    const fromCwd = pinOf(cwd);
+    if (fromCwd) use(fromCwd, pid, `cwd ${cwd}`);
   }
-  return {known: true, users, programs, noProgram, why: ''};
+  return {known: true, users, own, others, noProgram, why: ''};
 }
 
 function pinsIn(pinDir) {
@@ -611,23 +636,24 @@ function removePinTree({canonical, dir}) {
 
 function pruneDeployPins({canonical, pinDir, keeps = [], keepMax = PIN_KEEP_MAX, procRoot = '/proc',
   buildsExcludedBy = '', log = () => {}}) {
-  const result = {pinDir, liveness: 'known', liveness_why: '', uninspected: 0, uninspected_no_program: 0,
-    uninspected_programs: 0, builds_excluded_by: buildsExcludedBy, blind: [], kept: [], removed: [], failed: []};
+  const result = {pinDir, liveness: 'known', liveness_why: '', uninspected: 0, uninspected_own: 0,
+    uninspected_others: 0, uninspected_no_program: 0, builds_excluded_by: buildsExcludedBy, blind: [], kept: [], removed: [], failed: []};
   const names = pinsIn(pinDir);
   if (names.length === 0) return result;
   const live = pinProcessUsers(pinDir, procRoot);
   result.liveness = live.known ? 'known' : 'unknown';
   result.liveness_why = live.why;
-  result.uninspected = live.noProgram + live.programs.length;
+  result.uninspected = live.noProgram + live.own.length + live.others;
+  result.uninspected_own = live.own.length;
+  result.uninspected_others = live.others;
   result.uninspected_no_program = live.noProgram;
-  result.uninspected_programs = live.programs.length;
   // CANNOT TELL = KEEP THE PIN. A real program whose working directory nobody could read may be a build
   // running from any of these trees, and this code has no way to rule that out - so it removes nothing at
   // all and says which processes and why. The one thing that turns the unknown into an answer is a CALLER
   // that can prove no other build exists (`--builds-excluded-by`, e.g. the deploy's own build lock): the
   // proof replaces the inference, and the line then says so instead of the count.
-  const blind = live.known && live.programs.length > 0 && !buildsExcludedBy;
-  result.blind = blind ? live.programs.slice(0, 3) : [];
+  const blind = live.known && live.own.length > 0 && !buildsExcludedBy;
+  result.blind = blind ? live.own.slice(0, 3) : [];
   const chosen = new Map();
   const cap = Number.isFinite(keepMax) && keepMax > 0 ? keepMax : PIN_KEEP_MAX;
   for (const entry of keeps) {
@@ -646,14 +672,14 @@ function pruneDeployPins({canonical, pinDir, keeps = [], keepMax = PIN_KEEP_MAX,
       if (!chosen.has(entry.name)) chosen.set(entry.name, `one of the ${cap} newest pins`);
     }
   }
-  for (const [name, pid] of live.users) if (!chosen.has(name)) chosen.set(name, `a live process is inside it (pid ${pid})`);
+  for (const [name, seen] of live.users) if (!chosen.has(name)) chosen.set(name, `a live process is inside it (pid ${seen.pid}, ${seen.how})`);
   for (const name of names) {
     if (!live.known) {
       result.kept.push({name, why: chosen.get(name) || `nothing could say which processes are alive (${live.why}), so nothing was removed`});
       continue;
     }
     if (blind) {
-      result.kept.push({name, why: chosen.get(name) || `${live.programs.length} process(es) could not be inspected and no lock proves no build is running, so nothing was removed`});
+      result.kept.push({name, why: chosen.get(name) || `${live.own.length} process(es) of this user could not be inspected and no lock proves no build is running, so nothing was removed`});
       continue;
     }
     if (chosen.has(name)) { result.kept.push({name, why: chosen.get(name)}); continue; }
@@ -756,17 +782,20 @@ function commandPrunePins(options) {
   const result = pruneDeployPins({canonical, pinDir, keeps: pinKeeps(options), keepMax: pinKeepMax(options),
     procRoot: options.procRoot || '/proc', buildsExcludedBy: options.buildsExcludedBy || '',
     log: options.json ? () => {} : say});
-  // The line has to say what it did NOT know, and on what basis it went on anyway: a count of "processes not
-  // inspected" alone reads as a footnote, and it hides that 302 of those cannot be a build at all while the
-  // 33 that could are the reason nothing was removed.
-  const seen = result.uninspected
-    ? ` ${result.uninspected} process(es) not inspected: ${result.uninspected_no_program} with no program (kernel threads, zombies), ${result.uninspected_programs} real program(s)`
-    : '';
+  // The line has to say what it did NOT know, and on what basis it went on anyway. The count is split,
+  // because the two halves are different facts: a pid of this user nobody could inspect is an anomaly that
+  // stops the removal, and every other user's process is reported and out of scope (a build of this tree
+  // runs as this user; the pins are ours, 0755, so no other user can write into one).
+  const seen = [
+    result.uninspected_own ? `${result.uninspected_own} process(es) of this user not inspected` : '',
+    result.uninspected_others ? `${result.uninspected_others} process(es) of other users not inspected` : '',
+    result.uninspected_no_program ? `${result.uninspected_no_program} with no program (kernel threads, zombies)` : '',
+  ].filter(Boolean).join(', ');
   const summary = `pin prune: ${result.removed.length} removed, ${result.kept.length} kept, ${result.failed.length} left in place in ${pinDir}`
-    + seen
+    + (seen ? ` (${seen})` : '')
     + (result.liveness === 'unknown' ? ` - nothing was removed: ${result.liveness_why}` : '')
     + (result.blind.length
-      ? ` - nothing was removed: ${result.uninspected_programs} process(es) could not be inspected (${result.blind.map(p => `pid ${p.pid} ${p.cmd.slice(0, 40)}`).join('; ')}), so it cannot be told whether a build runs from a pin`
+      ? ` - nothing was removed: ${result.uninspected_own} process(es) of this user could not be inspected (${result.blind.map(p => `pid ${p.pid} ${p.cmd.slice(0, 40)}`).join('; ')}), so it cannot be told whether a build runs from a pin`
       : '')
     + (result.builds_excluded_by ? ` - no other build can be running (${result.builds_excluded_by})` : '');
   return emit(result, options, summary);

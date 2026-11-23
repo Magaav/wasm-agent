@@ -1,108 +1,98 @@
 # deploy-prunes-pins-safe
 
-Priority: the safety question of the pin prune, raised by the orchestrator on the first real deploy of
-`fc1334f0` (branch `change/deploy-prunes-pins-safe`, from main `3bbf9220`).
+Branch `change/deploy-prunes-pins-safe` from main `3bbf9220`. The safety question raised by the first real
+deploy of `fc1334f0`, whose line was `pin prune: 0 removed, 2 kept, 0 left in place in /tmp/wa-deploy-pins
+(322 process(es) not inspected)` - a number that was printed on every run and explained nothing.
 
 ## The two answers, measured on this machine
 
-The deploy's own line was `pin prune: 0 removed, 2 kept, 0 left in place in /tmp/wa-deploy-pins (322
-process(es) not inspected)`.
+**1. Which processes, and why weren't they inspected.** Every pid whose `/proc/<pid>/cwd` link a non-root
+reader may not follow. Classified over `/proc` on avell (575 pids at the time of writing; the deploy's 322
+is the same population at that moment):
 
-**1. Which processes, and why weren't they inspected.** Classified over `/proc` on avell (575 pids at the
-time of writing; the deploy's 322 is the same population at that moment):
-
-| class | count | why it could not be inspected | can it be a build? |
+| class | count | why the cwd is unreadable | is it a build of ours? |
 | --- | --- | --- | --- |
-| kernel threads and zombies | **301** | empty `cmdline`; they have no working directory at all, so `readlink /proc/<pid>/cwd` fails by definition | no - there is nothing running |
-| root-owned system daemons | **22** | `/sbin/init`, `/usr/bin/NetworkManager`, `bluetoothd`, `intel_lpmd`, `limine-snapper-watcher`, ... - their `cwd` link is behind `ptrace_may_access`, so a non-root reader gets `EACCES` | possibly (root can write anywhere) |
-| other system uids | **8** | `dbus-broker` (uid 81), `polkitd` (102), `systemd-resolved`/`-timesyncd`/`-networkd`/`-udevd` (972-977), `avahi-daemon` (979) | no - they cannot write into a pin we own (0755) |
-| our own uid, not dumpable | **3** | `systemd --user` (1136), `(sd-pam)` (1138), `fusermount3` (1706, setuid helper): `dumpable=0`, so even `victor` may not read their cwd | no - but `/proc` alone cannot prove that |
+| kernel threads and zombies | **301** | empty `cmdline`; they have no working directory at all | no - no program is running |
+| other users' real programs | **30** | `ptrace_may_access`: `/sbin/init`, `NetworkManager`, `dbus-broker` (uid 81), `polkitd` (102), `systemd-resolved`/`-timesyncd`/`-networkd`/`-udevd` (972-977), `avahi-daemon` (979) | no - the pins are ours, mode 0755, so another user cannot build in one |
+| **this user's real programs** | **3** | `systemd --user` (1136), `(sd-pam)` (1138), `fusermount3` (1706, a setuid helper): `dumpable=0`, so even `victor` may not look | no - but the code cannot prove that from `/proc` |
 
-Every process of our uid that *is* inspectable was inspected (240 of the 575 pids had a readable `cwd`,
-and every build of this tree runs as our uid). So the population divides into "cannot be a build at all"
-(301 + 8) and "an unknown" (22 root daemons + 3 non-dumpable), and the old line added all of them into one
-number - which is why it read as a footnote instead of as the open question it was.
+A build of this tree runs as this user, and this user's processes are readable - so the third row is the one
+that means "cannot tell", and the other two are facts with an answer. The old line added all 334 into one
+number, which is why it read as a hole.
 
-**2. What the prune does with a pin when it could not inspect a process.** It keeps it - and not only that
-one: **nothing is removed at all**, and the line says which processes and why. Measured live on this branch,
-against this node's own pin directory, with no proof supplied:
+**2. What the prune does with a pin when it could not inspect a process.** A pid **of this user** that could
+not be inspected stops the removal: nothing is removed, and the line names the pid. Measured live on this
+branch, against this node's own pin directory, with no proof supplied:
 
 ```
-landing-queue: pin prune: 0 removed, 2 kept, 0 left in place in /tmp/wa-deploy-pins 334 process(es) not
-  inspected: 301 with no program (kernel threads, zombies), 33 real program(s) - nothing was removed: 33
-  process(es) could not be inspected (pid 1 /sbin/init splash; pid 1000 /usr/bin/dbus-broker-launch --scope
-  syst; pid 1002 dbus-broker --log 10 --controller 9 --ma), so it cannot be told whether a build runs from a pin
+landing-queue: pin prune: 0 removed, 2 kept, 0 left in place in /tmp/wa-deploy-pins (3 process(es) of this
+  user not inspected, 30 process(es) of other users not inspected, 300 with no program (kernel threads,
+  zombies)) - nothing was removed: 3 process(es) of this user could not be inspected (pid 1136
+  /usr/lib/systemd/systemd --user; pid 1138 (sd-pam); pid 1706 fusermount3 -o rw,nosuid,nodev,fsname=po), so
+  it cannot be told whether a build runs from a pin
 ```
 
-The one thing that turns the unknown into an answer is a caller that can prove no build exists: the deploy's
-**build lock**, which `scripts/deploy.sh` and `onStale` both claim for their build phase. A build-path deploy
-already holds it at that step; a Lua fast-path deploy - the path that never claims it - now takes it for the
-prune alone and gives it back. While it is held, no other deploy or onStale build can be running from a pin,
-and the line says which lock was the proof (`- no other build can be running (/home/victor/.local/bin/.deploy.lock
-(this deploy holds it, so no other deploy or onStale build is running))`). If the lock is busy, nothing is
-removed and the line names it: the next deploy prunes.
+The one thing that turns that unknown into an answer is a caller that can prove no build is running: the
+deploy's **build lock**, which `scripts/deploy.sh` and `onStale` both claim for their build phase. A build-path
+deploy holds it at that step already; a Lua fast-path deploy - the path that never claims it - takes it for
+the prune alone and gives it back. The line then says which lock was the proof, or that the lock was busy and
+nothing was removed.
 
-## What was wrong in `fc1334f0`
-
-`pinProcessUsers` incremented one `uninspected` counter for every unreadable `cwd`, and `pruneDeployPins`
-reported that count while removing pins regardless. On a machine with any root daemon - every machine - the
-count was never zero, so the line that was meant to be a safety note was permanently printed and permanently
-ignored.
+This is also what the first real removal was judged by: the deploy of `f05b3150` printed `removed
+899fdd47caee`, and a scan afterwards found no process with `exe` or `cwd` under that tree.
 
 ## The fix (this branch)
 
-- `pinProcessUsers` classifies instead of adding up: `noProgram` (empty `cmdline`: a kernel thread or a
-  zombie) and `programs` (a real program, with its uid and cmdline). A process with an unreadable `cmdline`
-  is a program too - an unknown is not an empty one.
-- `pruneDeployPins({buildsExcludedBy})`: if there is at least one uninspected **real program** and the caller
-  states no proof, every pin is kept and each line says why; `result.blind` carries the first three pids and
-  cmdlines, and the human summary prints them.
-- `prune-pins --builds-excluded-by <reason>` and the same flag on `pin`: the caller's proof, carried into the
-  answer as `builds_excluded_by=`.
-- `scripts/deploy.sh`: the lock's names (`DEPLOY_LOCK`, `DEPLOY_LOCK_LOG`, the library) are hoisted above the
-  Lua fast-path branch; `DEPLOY_LOCK_HELD=1` after the build branch claims it; step 8b takes the lock for its
-  own few hundred milliseconds when the deploy did not, passes that lock as the reason, and releases it.
+- **The count is split** by what it means: `uninspected_own` (this uid), `uninspected_others` (other uids),
+  `uninspected_no_program` (kernel threads and zombies).
+- **Only this uid's uninspectable process stops the removal** (`pruneDeployPins`'s `blind`): every pin is kept
+  and each line says why; `blind` carries the first three pids and cmdlines into the answer. Another user's
+  process is reported as `N process(es) of other users not inspected` and is out of scope.
+- **A pin is in use when a process's `cwd` OR its `exe` is under it.** A test binary started out of the
+  pinned target dir has its cwd elsewhere and its exe right there; the reason line says which (`cwd <path>` /
+  `exe <path>`), and a Linux ` (deleted)` suffix is stripped before the comparison.
+- **`--builds-excluded-by <reason>`** is the caller's proof that no build can be running; `scripts/deploy.sh`
+  passes the deploy lock (it holds it on the build path), and on the Lua fast-path it takes that lock for the
+  prune alone - so the proof is a fact there too, and is given back. The lock's names are hoisted above the
+  Lua fast-path branch for exactly this (that branch never claimed it).
 
 ## Tests
 
-`scripts/test-deploy-pin-prune.mjs`, 80 checks (fast path row `deploy-pin-prune`, gate row in
-`scripts/test.sh`), new section 10 `cannotTellKeepsThePin()` on a fixture process root shaped like this
-machine's - one real program with no readable `cwd` and its `cmdline`, one kernel thread with an empty
-`cmdline`:
+`scripts/test-deploy-pin-prune.mjs`, **86 checks** (fast path row `deploy-pin-prune`; gate row in
+`scripts/test.sh`), section 10 on fixture process roots shaped like this machine's:
 
-- the two are counted separately (`uninspected_programs: 1`, `uninspected_no_program: 1`);
-- with no proof, **nothing** is removed and all three pins stay, and the answer names pid 2000;
-- the human line says `nothing was removed: 1 process(es) could not be inspected (pid 2000 ...)`;
-- with `--builds-excluded-by`, the prune goes ahead and removes down to the kept set, and the answer carries
-  the reason;
-- a process with no program does not block the prune on its own.
+- one real program of THIS uid with no readable cwd, one of another uid, one kernel thread: the three counts
+  are separate (`1 / 1 / 1`), nothing is removed, the pid of ours is named, and the human line reads `1
+  process(es) of this user not inspected, 1 process(es) of other users not inspected, 1 with no program`;
+- the same tree with `--builds-excluded-by`: the prune goes ahead and removes down to the kept set, and the
+  answer carries the reason;
+- another user's process alone (plus a kernel thread) does **not** stop the prune, and is reported by name;
+- a process whose `cwd` is outside a pin and whose `exe` is `<pin>/target/probe-binary` keeps that pin, with
+  the reason naming the exe - and removing that process makes the same call remove the pin.
 
-The pin step's own command line is now asserted flag by flag (`--pin-dir`, `--install-dir`,
-`--builds-excluded-by`, `--wait-timeout`, `--json`) instead of as one exact substring - stronger, not weaker:
-a dropped flag fails. `bash scripts/test-discriminates.sh origin/main`: `discriminates`, failing on the old
-code at `the unknowable process is counted as a real program, the kernel thread is not`.
+`bash scripts/test-discriminates.sh origin/main`: `discriminates` (it fails on the old code at the
+classification assertion). Also re-run green on this branch: `test-deploy-luafast-record.sh` (it extracts a
+neighbouring block of the same file), `test-deploy-policy-order.sh`, `test-deploy-ship.sh`,
+`test-deploy-lock.sh` (the lock is now named on every path), `check-deploy-shipped.mjs` (190 checks),
+`check-temp-retention.mjs`.
 
-## Residual limits, named
+## Residual risk, named
 
-- A **root** build started by hand inside a pin (`sudo cargo build` from `/tmp/wa-deploy-pins/<sha>`) is
-  invisible to this code: `/proc/<pid>/cwd` of a root process cannot be read by us. It is excluded only by
-  the lock proof, and the lock binds `deploy.sh` and `onStale`, not a hand-run command. Every build this
-  project starts goes through those two.
-- A process of another uid cannot write into a pin (the directory is ours, mode 0755), so it cannot be
-  building from one; it is counted as a real program by the classifier because `/proc` cannot tell us what it
-  is doing, and it is only ruled out by the proof.
-- The classification reads `cmdline` and `status`, which are world-readable for exactly the processes whose
-  `cwd` is not; a process that hides both is still an unknown, and unknown keeps the pin.
+A **root** process sitting in a pin (`sudo cargo build` started by hand from `/tmp/wa-deploy-pins/<sha>`) is
+invisible: a non-root reader may not follow its `cwd` or `exe`. It is excluded only by the lock proof, which
+binds `deploy.sh` and `onStale` - every build this project starts - and not a hand-run command. Recorded
+here rather than hidden in a count.
 
 ## Texts to approve
 
-1. `pin prune: <r> removed, <k> kept, <f> left in place in <dir> <N> process(es) not inspected: <M> with no
-   program (kernel threads, zombies), <K> real program(s)`
-2. `pin prune: ... - nothing was removed: <K> process(es) could not be inspected (pid <p> <cmd>; pid <p>
-   <cmd>; pid <p> <cmd>), so it cannot be told whether a build runs from a pin`
+1. `pin prune: <r> removed, <k> kept, <f> left in place in <dir> (<N> process(es) of this user not inspected,
+   <M> process(es) of other users not inspected, <P> with no program (kernel threads, zombies))` - each part
+   printed only when it is not zero
+2. `pin prune: ... - nothing was removed: <N> process(es) of this user could not be inspected (pid <p> <cmd>;
+   pid <p> <cmd>; pid <p> <cmd>), so it cannot be told whether a build runs from a pin`
 3. `pin prune: ... - no other build can be running (<lock path> (this deploy holds it, so no other deploy or
-   onStale build is running))` - or `(taken for this prune alone, so no build is running from a pin)`
+   onStale build is running))` or `(taken for this prune alone, so no build is running from a pin)`
 4. `pin prune: another build holds <lock>, so nothing was removed - a pin it may be building from is kept, and
    the next deploy prunes`
-5. `pin prune: <kept|kept>: <sha12> (<K> process(es) could not be inspected and no lock proves no build is
-   running, so nothing was removed)` - the per-pin line in that state
+5. `pin prune: kept <sha12> (a live process is inside it (pid <pid>, cwd <path>))` and the same with
+   `exe <path>`
