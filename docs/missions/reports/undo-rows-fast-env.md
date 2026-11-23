@@ -1,7 +1,8 @@
 # undo-rows-fast-env: the two /undo pty rows under fast.sh, and the evidence fast.sh was throwing away
 
 Base `fc1334f0` (main; the /undo work itself landed as `e9a42d20`). Branch `change/undo-rows-fast-env`.
-Commit `75f0f519`.
+Commits `75f0f519` (the fix and the evidence) and `4cc06496` (only the failed rows' logs are kept, and
+two counters declared one per line after `scripts/test-fast-counters.sh` caught the shared `local` list).
 
 ## The cause, in one line
 
@@ -55,7 +56,9 @@ nothing of a `check` row.
   `$work/tmp` and used to be deleted with the run, so the evidence the row pointed at was already gone.
 - It runs on any failed run, not only when `WA_FAST_KEEP_LOGS` is set. The default destination is the
   worktree's own git dir (`<git dir>/wa-fast-evidence/<timestamp>-<pid>`), pruned to the five newest
-  runs, with a `failures.txt` that names each row's failing line and its summary.
+  runs, with a `failures.txt` that names each row's failing line and its summary. Only the FAILED rows'
+  logs are kept (check-`<name>`.log, or logs/`<file>`.log): the first run of the keeper kept 85 files for
+  6 failures, which is noise, and a green row's log is not evidence.
 
 `scripts/test-fast-skip-count.sh` (already a fast-path row) now reads the shipped `check()`, the shipped
 failure-line helper and the shipped keepers OUT of `scripts/fast.sh` and drives them: a row whose failing
@@ -71,6 +74,17 @@ undo pty: 16 ok, 1 failed` - the reported symptom, reproduced in a test.
 3. `fast: kept <N> failed row log(s) and <M> scratch dir(s) in <dir> (what failed: <dir>/failures.txt)`
 4. `fast: refused(keep_evidence_nowhere): no git dir to keep the failed rows' evidence in`
 5. `fast: refused(keep_evidence_unwritable): cannot keep the failed rows' evidence in <dir>`
+
+## The runs of this branch
+
+- Narrowed fast path (`WA_FAST_ROWS=/tmp/rows-undo-fix.txt`, 24 of 327 Lua rows, every pty row and every
+  contract check): the two /undo rows are GREEN in it - `fast: undo-pty ok (2093ms)`, `fast: undo-remote-pty
+  ok (4632ms)` - which is the row pair the health run had red. The same run failed 4 rows that need code
+  mode and `build-info`, all because this session had named an explicit `WA_BIN` built with
+  `WA_CODEMODE_ALLOW_EMPTY=1` (the health run, which builds its own, had them green), and `fast-counters`,
+  which was mine and is fixed in `4cc06496`.
+- The evidence keeper proved itself in that same run: it kept the failed rows' logs, their kept scratch
+  dirs and a `failures.txt`, in the worktree's git dir, with no `WA_FAST_KEEP_LOGS` set by this session.
 
 ## What this does NOT do
 
