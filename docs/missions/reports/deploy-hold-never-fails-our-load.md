@@ -267,3 +267,60 @@ claimed as fixed.
 | `975df366` | `scripts/test-deploy-wait.sh`: a turn that paused for a deploy ends rc=0, never as a refusal |
 | `20b538cf` | `deploy_pause.is_refusal` (one home for the two sentences), `chat.deploy_refused` asks it, `selfloop.defer_refused` puts a refused wake back; `test-selfloop-pause.lua` 13 assertions |
 | `c4420837`, `f4fdb170`, `81ab7d49` | the sentinel, Lua and doc/report commits above, rebased onto `c1337903` |
+
+## Follow-up review (Fable, 23/11 ~17:10Z): `7e5ff9b1`
+
+### (a) rc=2 can never reach a turn that is already running
+
+The two places a run is refused, both BEFORE anything is asked:
+
+1. **the pre-run gate** — `lua/core/chat.lua` (the `--once`/`--resume` gate, `deploy_pause.refuse`) returns 2
+   before `agent.run` is called. Only a NEW scripted run reaches it.
+2. **the run's own session claim** — `lua/core/agent.lua`, `resources.begin` → `deploy_pause.claim_wait`
+   (**f4fdb170**): the claim was taken by a turn the deploy paused, the run did not start, `turn_refused` is
+   set and the CLI answers 2.
+
+A turn that is mid-flight takes a different path: `deploy_pause.at_boundary` sets `reply` and `completed` and
+leaves `turn_refused` nil, so the turn ANSWERED. That is now one function instead of an inline condition —
+`chat.exit_code(ok, agent)` (**7e5ff9b1**): `0` answered, `2` refused-with-nothing-run, `1` failed — and the
+`wa: session <id> ...` word follows it. Tests: `scripts/test-thinking-block.lua` asserts all four combinations
+including **`exit_code(true, {turn_refused = 'deploy waiting: paused after this step'}) == 0`**, and
+`scripts/test-deploy-wait.sh` step 4 asserts the paused turn end to end (`rc=0` with a deploy waiting).
+
+**"retry when idle"**: `deploy_wait.RETRY` ends every refusal (`refusal`, `refusal_redacted`, and the pause's
+own fallback in `deploy_pause.refuse`), so a script tells a wait from a failure with one substring instead of
+judging prose. Asserted in `scripts/test-thinking-block.lua` and `scripts/test-deploy-pause.lua`.
+
+### (b) a `Wait` with no end is noticed once
+
+`Verdict::Wait` is deliberately endless, so after `WA_DEPLOY_HOLD_NOTICE` seconds (default **900**, `0` = off)
+on the SAME reason the sentinel writes ONE `hold-wait-notice` line naming the holder — not a failure, and not
+silence. The clock is a file (`<sentinel>/held/<request>.json`: reason, since, noticed), so a `once` and a
+long-running watcher agree, and a restart does not restart the fifteen minutes; a **different** reason resets
+it (it is a different holder, which is the fact the operator reads), and the record is removed when the request
+stops waiting. Unit-tested with a **fake clock** (`holders_tests.rs`, `a_wait_that_never_ends_is_noticed_once`,
+`wait_notice(key, why, now, 900)` with `now` 899 s and 900 s later and 100 000 s later), and end to end in
+`scripts/test-deploy-bound.sh` (`WA_DEPLOY_HOLD_NOTICE=1`: no notice on the first tick, one after the window,
+none on a later tick, the request still in the box).
+
+### Base check for these follow-up tests (measured, not asserted)
+
+A worktree of `origin/main` `b79da519` with only these test files: `test-deploy-pause.lua` fails on
+`a refusal ends in retry-when-idle`; `test-thinking-block.lua` fails on `exit_code` (`attempt to call a nil
+value`); the Rust tests do not compile (`cannot find function wait_notice` / `waiting_since`).
+
+### Rows run for this follow-up
+
+`scripts/test-deploy-bound.sh` → `deploy bound ok` (with the notice step);
+`scripts/test-deploy-wait.lua` → `deploy wait ok (59 checks)`; `scripts/test-deploy-pause.lua` →
+`deploy claim wait ok (30 checks)`; `scripts/test-thinking-block.lua` → `thinking block ok (111 checks)`;
+`rust/wa-sentinel` → `test result: ok. 149 passed; 0 failed`.
+
+### Texts to approve (follow-up), verbatim
+
+12. `deploy_waiting: ... To stop waiting, withdraw the request: wa-sentinel request withdraw <id>. retry when idle:
+    nothing was asked and nothing ran, so ask again once the node is back` (appended to both
+    `deploy_wait.refusal` and `deploy_wait.refusal_redacted`, and to `deploy_pause.refuse`'s fallback)
+13. `still waiting after <N>s on the same holder, unchanged: <the reason>. The request stays in the box; this is a
+    notice, not a failure (wa-sentinel request withdraw <id> stops it)` — console and audit `hold-wait-notice`
+14. `WA_DEPLOY_HOLD_NOTICE` — the new knob (default 900 s, `0` turns the notice off)
