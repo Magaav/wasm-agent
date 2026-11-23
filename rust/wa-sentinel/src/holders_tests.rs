@@ -94,9 +94,9 @@ fn current_is_a_holder_once() {
 #[test]
 fn holder_lines_name_the_session_and_its_duration() {
     let holders = vec![
-        holders::Holder { session: "8082b42e-1111-2222".into(), label: "POST /chat".into(), ms: 134_000 },
-        holders::Holder { session: "deadbeef-1111-2222".into(), label: "POST /chat".into(), ms: 9_000 },
-        holders::Holder { session: "".into(), label: "2 subagent(s) running, 0 queued".into(), ms: 0 },
+        holders::Holder { session: "8082b42e-1111-2222".into(), label: "POST /chat".into(), ms: 134_000, queued: false },
+        holders::Holder { session: "deadbeef-1111-2222".into(), label: "POST /chat".into(), ms: 9_000, queued: false },
+        holders::Holder { session: "".into(), label: "2 subagent(s) running, 0 queued".into(), ms: 0, queued: false },
     ];
     let lines = holders::holder_lines(&holders, |session| session.starts_with("8082b42e"));
     assert_eq!(lines.len(), 3, "one line per holder: {lines:?}");
@@ -109,9 +109,9 @@ fn holder_lines_name_the_session_and_its_duration() {
 /// for this request and over nothing else - not a working session, not a subagent, not a run with no session.
 #[test]
 fn the_bound_passes_over_paused_sessions_only() {
-    let working = holders::Holder { session: "8082b42e-1111".into(), label: "POST /chat".into(), ms: 120_000 };
-    let paused_one = holders::Holder { session: "aaaa1111-2222".into(), label: "POST /chat".into(), ms: 120_000 };
-    let nameless = holders::Holder { session: "".into(), label: "2 subagent(s) running, 0 queued".into(), ms: 0 };
+    let working = holders::Holder { session: "8082b42e-1111".into(), label: "POST /chat".into(), ms: 120_000, queued: false };
+    let paused_one = holders::Holder { session: "aaaa1111-2222".into(), label: "POST /chat".into(), ms: 120_000, queued: false };
+    let nameless = holders::Holder { session: "".into(), label: "2 subagent(s) running, 0 queued".into(), ms: 0, queued: false };
 
     // Before the bound: held, whatever the holders are doing.
     let early = holders::bound_verdict(10, 180, &[paused_one.clone()], |_| true);
@@ -184,4 +184,56 @@ fn a_request_takes_its_time_from_its_name_when_it_records_none() {
     // Nothing to measure: "now" is the only answer, and it means "no wait yet", never "waited for ever".
     let now = request_queued_at(&request, "not-a-stamp");
     assert!(now > 1_700_000_000, "an undated request is not old: {now}");
+}
+
+/// 9. A queued turn is NAMED (23/11). MEASURED: the deploy for e9a42d20 was held for twenty-five minutes behind
+/// `10 turn(s) admitted and not started` - a count, and a count cannot be asked whether it paused. `/health`
+/// names the admitted-and-not-started runs under `queue_sessions`; this reads them, keeps the count for the ones
+/// a node could not name, and never turns the two into a number that is neither.
+#[test]
+fn a_queued_turn_is_named_and_the_unnamed_ones_are_still_counted() {
+    let body = health(
+        r#"{"ok":true,"queue":2,
+             "queue_sessions":{"count":2,"named":1,"truncated":false,"entries":[
+               {"run_id":41,"session":"9b28c30d-1111-2222-3333-444455556666","node_thread":0,"kind":"run","waited_ms":45000},
+               {"run_id":42,"session":"","node_thread":3,"kind":"completion","waited_ms":50}]},
+             "node_threads":[],"current":null,
+             "subagents":{"queued":0,"running":0,"active":0}}"#,
+    );
+    let holders = holders::holders_from(&body);
+    let named = holders.iter().find(|holder| holder.session.starts_with("9b28c30d")).expect("the queued session is named");
+    assert_eq!(named.label, "admitted, not started");
+    assert_eq!(named.ms, 45_000, "and how long it has waited");
+    assert!(named.queued, "and that nothing of it has run: {holders:?}");
+    assert!(holders.iter().any(|holder| holder.label == "1 turn(s) admitted and not started" && !holder.queued),
+        "the turn the node could not name is still counted: {holders:?}");
+    let lines = holders::holder_lines(&holders, |_| false);
+    assert!(lines.iter().any(|line| line.contains("session 9b28c30d  admitted, not started 45s  not started yet")),
+        "the line says a queued turn has not started, not that it is working: {lines:?}");
+}
+
+/// 10. A turn that has not started is NOT a turn that paused: no pause record can exist for it (a pause is
+/// written by a running turn at a step boundary), so the bound must never pass over one - even if a record with
+/// that session's name is there.
+#[test]
+fn the_bound_never_passes_over_a_turn_that_has_not_started() {
+    let queued = holders::Holder::admitted("9b28c30d-1111", "admitted, not started", 45_000);
+    let refused = holders::bound_verdict(200, 180, &[queued.clone()], |_| true);
+    let why = refused.as_ref().unwrap_err();
+    assert!(why.contains("admitted and not started"), "the refusal names the queued turn: {refused:?}");
+    assert!(why.contains("session 9b28c30d"), "with the session as `wa sessions` prints it: {refused:?}");
+}
+
+/// 11. A request's NAME carries its queue time only when it is a stamp. MEASURED (23/11): this sentinel read
+/// `100-deploy.json` as `100` epoch-nanoseconds - "queued for fifty-six years" - so the request was past every
+/// bound the moment it arrived. That was invisible while the bound only picked an announcement; now that a
+/// request past its bound without a provable pause FAILS, it would fail a request that had just been written.
+#[test]
+fn a_request_name_that_is_not_a_stamp_is_not_a_time() {
+    assert_eq!(stamp_seconds("1700000000123456789-4242-00000000000000000000"), Some(1_700_000_000));
+    assert_eq!(stamp_seconds("100-deploy"), None, "a sequence number is not an epoch-nanos stamp");
+    assert_eq!(stamp_seconds("not-a-stamp"), None);
+    assert_eq!(stamp_seconds(""), None);
+    let fresh = request_queued_at(&serde_json::json!({"verb": "deploy"}), "100-deploy");
+    assert!(fresh > 1_700_000_000, "a request with no measurable queue time is not fifty-six years old: {fresh}");
 }

@@ -159,6 +159,76 @@ fn record_run_event(run_id: u64, payload: &str) {
     log.events.push((seq, event));
 }
 
+/// The runs this node has ADMITTED and NOT STARTED - who is in the queue, not only how many.
+///
+/// MEASURED (23/11, ~/.wasm-agent/sentinel/sentinel.log): a deploy for e9a42d20 was held out of the node with
+/// "the holder `10 turn(s) admitted and not started` names no session, so this request has no proof it paused"
+/// - a COUNT, because `/health` published a count. A hold line that names no session is a hold line nothing can
+/// act on: `wa-sentinel` cannot ask whether that holder paused (lua/core/deploy_pause.lua records a pause per
+/// SESSION), so its bound could never be satisfied and the deploy waited past it.
+///
+/// One entry per admitted run, written BEFORE the run is handed to a node-thread and removed when that
+/// node-thread starts it, so a reader gets the conversation and how long it has waited. Observation only:
+/// nothing here admits, refuses, orders or times out a run - the scheduler and the node-threads own that.
+static PENDING: OnceLock<Mutex<Vec<PendingRun>>> = OnceLock::new();
+/// How many queued runs `/health` names. A node with more than this waiting has a different problem, and an
+/// unbounded array in the one endpoint that must never be the thing that lies is not where to show it.
+const PENDING_PUBLISHED: usize = 32;
+
+#[derive(Clone)]
+struct PendingRun {
+    run_id: u64,
+    /// The conversation this run will write, as admission resolved it. Empty only when admission had none.
+    session: String,
+    node_thread: usize,
+    since_ms: u64,
+    /// `run` (a served or relayed turn) or `completion` (a child answer, which is a turn too).
+    kind: &'static str,
+}
+
+fn pending_registry() -> &'static Mutex<Vec<PendingRun>> {
+    PENDING.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Record that `run_id` was admitted and handed to node-thread `node_thread`. Called BEFORE the hand-off: the
+/// node-thread can pick the run up before this function returns, and an entry written afterwards would never
+/// be removed - which is the stale-queue defect in the other direction.
+fn pending_admitted(run_id: u64, session: &str, node_thread: usize, kind: &'static str) {
+    if run_id == 0 { return; }
+    let Ok(mut list) = pending_registry().lock() else { return };
+    if list.iter().any(|entry| entry.run_id == run_id) { return; }
+    list.push(PendingRun { run_id, session: session.to_string(), node_thread, since_ms: now_ms(), kind });
+}
+
+/// The run started, or its admission was given back: it is not waiting any more.
+fn pending_started(run_id: u64) {
+    if run_id == 0 { return; }
+    if let Ok(mut list) = pending_registry().lock() { list.retain(|entry| entry.run_id != run_id); }
+}
+
+fn pending_snapshot() -> Vec<PendingRun> {
+    pending_registry().lock().map(|list| list.clone()).unwrap_or_default()
+}
+
+/// The queue, itemised for `/health`: one entry per run admitted and not started, with the conversation it
+/// will write and how long it has waited. `count` is `queue` again (the number every existing reader trusts);
+/// `named` says how many of them a reader can check a pause for - the rest are work the node reports without a
+/// session, which `wa-sentinel` must never pass over (rust/wa-sentinel/src/holders.rs).
+fn queue_sessions_health(pending: &[PendingRun]) -> serde_json::Value {
+    serde_json::json!({
+        "count": pending.len(),
+        "named": pending.iter().filter(|entry| !entry.session.is_empty()).count(),
+        "truncated": pending.len() > PENDING_PUBLISHED,
+        "entries": pending.iter().take(PENDING_PUBLISHED).map(|entry| serde_json::json!({
+            "run_id": entry.run_id,
+            "session": entry.session,
+            "node_thread": entry.node_thread,
+            "kind": entry.kind,
+            "waited_ms": now_ms().saturating_sub(entry.since_ms),
+        })).collect::<Vec<_>>(),
+    })
+}
+
 /// How many interpreters a node runs, and how it decides.
 ///
 /// Node-thread 0 is the run node-thread and always exists: it owns every route that changes something - runs,
@@ -1312,6 +1382,12 @@ fn health_body_for(session: &str, node_wide: bool, owner: &str) -> Vec<u8> {
     // Per-node-thread detail, so "which one is busy, and with what" is answerable without reading a log. The
     // aggregate fields above are kept exactly as they were: the window and the sentinel read them, and a
     // new field must not move an old one.
+    // WHO is queued, beside HOW MANY (`queue` above keeps its meaning and its readers). A deploy held behind
+    // these is now told which conversations to ask to pause, instead of `10 turn(s)`.
+    let pending = pending_snapshot();
+    let mut queued_by_thread: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+    for entry in &pending { *queued_by_thread.entry(entry.node_thread).or_insert(0) += 1; }
+    let queue_sessions = queue_sessions_health(&pending);
     let mut node_threads = Vec::new();
     if let Some(pool) = POOL.get() {
         if let Ok(slots) = pool.slots.lock() {
@@ -1332,6 +1408,7 @@ fn health_body_for(session: &str, node_wide: bool, owner: &str) -> Vec<u8> {
                 }
                 node_threads.push(serde_json::json!({
                     "id": index,
+                    "queued": queued_by_thread.get(&index).copied().unwrap_or(0),
                     "role": if index < control_floor() { "runs" } else { "reads" },
                     "session": node_thread_session(index),
                     "run_id": node_thread_run_id(index),
@@ -1448,6 +1525,9 @@ fn health_body_for(session: &str, node_wide: bool, owner: &str) -> Vec<u8> {
         "worker": state,
         "stalled_ms": age_ms,
         "queue": QUEUED.load(Ordering::Relaxed),
+        // The same count, itemised: one entry per run admitted and not started (empty when the node is
+        // keeping up). `queue` is the number every existing reader already trusts; this is who it is.
+        "queue_sessions": queue_sessions,
         "read_admission": {
             "waiting": READ_WAITING.load(Ordering::Relaxed),
             "queue_depth": read_queue_depth(),
@@ -1798,6 +1878,60 @@ fn admission_timeout() -> (u16, String, String) {
 }
 
 /// The `(conversation, owner)` for a run, resolved before it is admitted.
+/// Why this run may not be admitted right now, as the answer the caller gets - or `None` when it may.
+///
+/// The judgment is Lua's, not this function's: `wa_deploy_admission` (lua/core/server.lua) asks
+/// `deploy_pause.refuse`, the same reader the run's own gate asks, so the two cannot disagree about what
+/// "a deploy is waiting" means, how long its bound lasts, or which lanes count. This side only carries the
+/// decision: `waiting` becomes a 503 with a named code and `not_started`, which is a refusal a client can act
+/// on, and it never becomes a queued turn.
+///
+/// A gate that cannot be asked is NOT an idle node: the run is left to the authoritative gate inside the turn
+/// (lua/core/agent.lua), which refuses there - later, and with one run in the queue. Said out loud, never
+/// silently passed.
+fn deploy_admission_refusal(
+    request: &Request,
+    tx: &std::sync::mpsc::SyncSender<ResolveRequest>,
+    deadline: std::time::Instant,
+) -> Option<serde_json::Value> {
+    let body = String::from_utf8_lossy(&request.body).to_string();
+    // A person's turn (the window says `operator: true`): the exemption lua/core/server.lua gives it, taken
+    // here so a reader at a terminal or in the window is never told to come back later for the length of a
+    // deploy. The Lua half answers the same for a body it is given, so this is a shortcut, not a second rule.
+    if serde_json::from_str::<serde_json::Value>(&body).ok()
+        .and_then(|value| value.get("operator").and_then(serde_json::Value::as_bool))
+        == Some(true)
+    {
+        return None;
+    }
+    let answer = match resolve_with(tx, "wa_deploy_admission", vec![body], deadline) {
+        Ok(answer) => answer,
+        Err((_status, code, hint)) => {
+            eprintln!("[serve] the deploy admission gate could not be asked ({code}: {hint}); the run's own gate judges it");
+            return None;
+        }
+    };
+    if answer.get("waiting").and_then(serde_json::Value::as_bool) != Some(true) {
+        return None;
+    }
+    Some(serde_json::json!({
+        "error": answer.get("code").and_then(serde_json::Value::as_str).unwrap_or("deploy_waiting"),
+        "hint": answer.get("refusal").and_then(serde_json::Value::as_str).unwrap_or(""),
+        "not_started": true,
+        "effect": "none",
+        "target": answer.get("to").cloned().unwrap_or(serde_json::Value::Null),
+        "request": answer.get("id").cloned().unwrap_or(serde_json::Value::Null),
+        "source": answer.get("source").cloned().unwrap_or(serde_json::Value::Null),
+        // When to look again: the pause machinery makes a node idle in seconds, and a caller that retries
+        // sooner only adds refusals. One number, so no client invents its own backoff.
+        "retry_after_seconds": DEPLOY_WAITING_RETRY_SECONDS,
+    }))
+}
+
+/// How long a client refused for a waiting deploy should wait before asking again (`retry_after_seconds` in the
+/// refusal body). The deploy's own bound is minutes, and the node reports a paused turn within one step.
+const DEPLOY_WAITING_RETRY_SECONDS: u64 = 30;
+
 fn resolve_admission(
     tx: &std::sync::mpsc::SyncSender<ResolveRequest>,
     request: &Request,
@@ -2419,6 +2553,22 @@ fn dispatch_http(
     // decides *and reserves* in one step, so two back-to-back admissions for one conversation
     // cannot both be handed a fresh node-thread - the hole that let a conversation be written twice.
     let is_run = is_run_route(&request);
+    // A DEPLOY THAT IS WAITING IS REFUSED A NEW TURN AT THE DOOR (23/11).
+    //
+    // MEASURED (~/.wasm-agent/sentinel/sentinel.log, 23/11): the deploy for e9a42d20 was held out of this node
+    // for twenty-five minutes behind `10 turn(s) admitted and not started`. The refusal this node had
+    // (lua/core/agent.lua's gate at the top of a turn) is made inside the turn - so every automatic run that
+    // arrived while the deploy waited was first ADMITTED, ordered behind a running one, and counted in
+    // `/health`'s `queue`: the state the sentinel can neither verify nor pass over. Asking before admission is
+    // what keeps the node able to go idle, and the caller gets its answer in this round trip instead of a queue
+    // it cannot see. A person's turn is exempt exactly as it is inside the run (`operator: true`).
+    if is_run {
+        if let Some(refusal) = deploy_admission_refusal(&request, resolve_tx, deadline) {
+            let body = refusal.to_string();
+            let _ = respond(&mut stream, 503, "application/json", body.as_bytes());
+            return;
+        }
+    }
     let target = if is_run {
         if split_path(&request.path).0 == "/node/chat" {
             // A peer run is authenticated by its signature, verified ONCE here, before admission,
@@ -2541,6 +2691,7 @@ fn dispatch_http(
         let _ = respond(&mut stream, 503, "application/json", body.as_bytes());
         return;
     }
+    pending_admitted(request.run_id, &request.routing_session, target, "run");
     QUEUED.fetch_add(1, Ordering::Relaxed);
     // A node-thread can retire between selection and delivery. Independent
     // requests reselect within reserved capacity, then refuse boundedly.
@@ -2563,6 +2714,7 @@ fn dispatch_http(
                     // The conversation's owner retired between admission and delivery. Release
                     // the place rather than hand the run to a node-thread that does not own it.
                     scheduler::complete_run(admitted_run_id);
+                    pending_started(admitted_run_id);
                     QUEUED.fetch_sub(1, Ordering::Relaxed);
                     let body = b"{\"error\":\"node_busy\",\"hint\":\"the node-thread retired before the run could start; retry shortly\"}";
                     let _ = respond(&mut stream, 503, "application/json", body);
@@ -2578,6 +2730,7 @@ fn dispatch_http(
                         continue;
                     }
                 }
+                pending_started(admitted_run_id);
                 QUEUED.fetch_sub(1, Ordering::Relaxed);
                 let body = b"{\"error\":\"node_busy\",\"hint\":\"the node is answering other requests; retry shortly\"}";
                 let _ = respond(&mut stream, 503, "application/json", body);
@@ -2592,6 +2745,7 @@ fn dispatch_http(
                 if is_run {
                     scheduler::complete_run(admitted_run_id);
                 }
+                pending_started(admitted_run_id);
                 QUEUED.fetch_sub(1, Ordering::Relaxed);
                 // A bounded queue: refusing loudly beats an unbounded backlog that every client waits in.
                 let body = b"{\"error\":\"node_busy\",\"hint\":\"the node is answering other requests; retry shortly\"}";
@@ -2602,6 +2756,7 @@ fn dispatch_http(
                 let pair = unwrap_http(work);
                 if is_run {
                     scheduler::complete_run(admitted_run_id);
+                    pending_started(admitted_run_id);
                     QUEUED.fetch_sub(1, Ordering::Relaxed);
                     let (mut stream, _request) = pair;
                     let body = b"{\"error\":\"node_busy\",\"hint\":\"the node-thread retired before the run could start; retry shortly\"}";
@@ -2618,6 +2773,7 @@ fn dispatch_http(
                         continue;
                     }
                 }
+                pending_started(admitted_run_id);
                 QUEUED.fetch_sub(1, Ordering::Relaxed);
                 let (mut stream, _request) = pair;
                 let body = b"{\"error\":\"node_busy\",\"hint\":\"the node is answering other requests; retry shortly\"}";
@@ -2668,6 +2824,7 @@ fn node_thread_loop(
         let local = receiver.recv_timeout(std::time::Duration::from_millis(100));
         match local {
             Ok(Work::Completion { body, run_id, cancel, sockets }) => {
+                pending_started(run_id);
                 QUEUED.fetch_sub(1, Ordering::Relaxed);
                 begin_work("child completion".into());
                 let args: serde_json::Value=serde_json::from_str(&body).unwrap_or_default();
@@ -2714,6 +2871,7 @@ fn node_thread_loop(
                     eprintln!("[serve] test hook: stalling node-thread 0 on purpose");
                     std::thread::sleep(std::time::Duration::from_secs(3600));
                 }
+                pending_started(request.run_id);
                 QUEUED.fetch_sub(1, Ordering::Relaxed);
                 LAST_SERVED_MS.store(now_ms(), Ordering::Relaxed);
                 begin_work(format!("{} {}", request.method, request.path));
@@ -3440,6 +3598,61 @@ mod query_value_tests {
     }
 }
 
+#[cfg(test)]
+mod pending_queue_tests {
+    use super::{pending_admitted, pending_snapshot, pending_started};
+
+    /// The registry answers "who is queued": the conversation, the node-thread and the kind. A run that is
+    /// given its place back, or that a node-thread starts, is not waiting any more - and an id of 0 (a read or
+    /// a control route) is never recorded at all.
+    #[test]
+    fn a_queued_run_is_named_until_it_starts() {
+        pending_admitted(77_001, "session-aaaa", 0, "run");
+        pending_admitted(77_002, "session-bbbb", 2, "completion");
+        pending_admitted(0, "session-ignored", 0, "run");
+        let queued = pending_snapshot();
+        let first = queued.iter().find(|entry| entry.run_id == 77_001).expect("run 77001 is queued");
+        assert_eq!(first.session, "session-aaaa");
+        assert_eq!(first.node_thread, 0);
+        assert_eq!(first.kind, "run");
+        assert!(queued.iter().any(|entry| entry.run_id == 77_002 && entry.kind == "completion"));
+        assert!(!queued.iter().any(|entry| entry.run_id == 0), "a request that is not a run is not a queued turn");
+        // One entry per run: a second registration of the same id cannot double-count the queue.
+        pending_admitted(77_001, "session-aaaa", 0, "run");
+        assert_eq!(pending_snapshot().iter().filter(|entry| entry.run_id == 77_001).count(), 1);
+        pending_started(77_001);
+        assert!(!pending_snapshot().iter().any(|entry| entry.run_id == 77_001), "a started run is not queued");
+        pending_started(77_002);
+        assert!(pending_snapshot().is_empty(), "an emptied queue reports nothing");
+    }
+
+    /// What `/health` publishes: the count, how many of them a reader can check against a pause record, and one
+    /// entry per queued run. `named` is the number that makes a hold line actionable - `hold: 10 turn(s)` was
+    /// the number that did not.
+    #[test]
+    fn the_health_answer_names_the_queued_conversations() {
+        use super::{queue_sessions_health, PendingRun};
+        let pending = vec![
+            PendingRun { run_id: 1, session: "session-one".into(), node_thread: 0, since_ms: 0, kind: "run" },
+            PendingRun { run_id: 2, session: String::new(), node_thread: 3, since_ms: 0, kind: "completion" },
+        ];
+        let answer = queue_sessions_health(&pending);
+        assert_eq!(answer["count"], serde_json::json!(2));
+        assert_eq!(answer["named"], serde_json::json!(1));
+        assert_eq!(answer["truncated"], serde_json::json!(false));
+        let entries = answer["entries"].as_array().expect("entries");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["session"], serde_json::json!("session-one"));
+        assert_eq!(entries[0]["node_thread"], serde_json::json!(0));
+        assert_eq!(entries[1]["session"], serde_json::json!(""));
+        // An empty queue is an empty answer, not a missing key: a reader that finds no `entries` cannot tell
+        // "nothing is queued" from "this node is too old to say".
+        let empty = queue_sessions_health(&[]);
+        assert_eq!(empty["count"], serde_json::json!(0));
+        assert_eq!(empty["entries"].as_array().map(Vec::len), Some(0));
+    }
+}
+
 fn split_path(path: &str) -> (String, String) {
     match path.split_once('?') {
         Some((route, query)) => (route.to_string(), query.to_string()),
@@ -3500,11 +3713,12 @@ pub(crate) fn enqueue_completion(body: &str) -> serde_json::Value {
             let recorded=scheduler::global().is_some_and(|s| s.record_request(run_id,body).is_ok());
             if !recorded {scheduler::complete_run(run_id);return serde_json::json!({"error":"run_journal_unavailable","not_started":true});}
             let sender=POOL.get().and_then(|pool| pool.slots.lock().ok().and_then(|slots| slots.get(node_thread).cloned().flatten()));
+            pending_admitted(run_id, session, node_thread, "completion");
             QUEUED.fetch_add(1,Ordering::Relaxed);
             if sender.is_some_and(|s| s.try_send(Work::Completion {body:body.to_string(),run_id,cancel,sockets}).is_ok()) {
                 serde_json::json!({"accepted":true,"run_id":run_id,"run_key":run_id.to_string()})
             } else {
-                QUEUED.fetch_sub(1,Ordering::Relaxed);scheduler::complete_run(run_id);
+                pending_started(run_id);QUEUED.fetch_sub(1,Ordering::Relaxed);scheduler::complete_run(run_id);
                 serde_json::json!({"error":"completion_queue_full","not_started":true})
             }
         }
