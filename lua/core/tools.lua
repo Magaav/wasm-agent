@@ -304,8 +304,8 @@ end
 -- `wa features` prints and the host's own capabilities refuse by. Read per catalogue build, not once at
 -- load, so switching it on reaches the next turn without a restart.
 local function graph_offered()
-  local ok, entry = pcall(function() return dofile('lua/core/features.lua').resolve('graph') end)
-  return ok and type(entry) == 'table' and entry.enabled == true
+  local ok, on = pcall(function() return dofile('lua/core/features.lua').on('graph') end)
+  return ok and on == true
 end
 
 -- Available to everyone.

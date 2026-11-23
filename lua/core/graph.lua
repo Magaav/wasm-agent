@@ -32,8 +32,8 @@ end
 -- or "graph": true in the policy's features section. Asked here as well as in the catalogue so a caller
 -- that reached this module directly is refused by name instead of meeting a component error.
 function M.available()
-  local ok, entry = pcall(function() return dofile("lua/core/features.lua").resolve("graph") end)
-  if not ok or type(entry) ~= "table" or entry.enabled ~= true then return false end
+  local ok, on = pcall(function() return dofile("lua/core/features.lua").on("graph") end)
+  if not ok or on ~= true then return false end
   return capability("graph_query") and capability("graph_explain")
 end
 

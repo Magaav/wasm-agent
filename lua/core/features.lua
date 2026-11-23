@@ -79,6 +79,15 @@ function M.resolve(feature)
   }
 end
 
+-- IS THIS FEATURE SWITCHED ON AT ALL? `seam` below answers "which code answers its calls", which is a
+-- different question and is `false` for a feature that has no native path to fall back to. The graph is the
+-- first such row (docs/GRAPH.md, 23/11): off means the tool, the store and every capability are absent, not
+-- that a native version answers instead. Unknown is not yes - an id this cannot answer for answers `false`.
+function M.on(feature)
+  local entry = M.resolve(feature)
+  return type(entry) == 'table' and entry.enabled == true
+end
+
 -- What a gate asks: `active` is true when the component must answer this feature's calls. The reason
 -- is `seam_disabled` when the feature is simply off - the native path IS the off state, so there is
 -- nothing to report - and the resolver's own reason (`component_missing`, `component_pin_mismatch`, …)

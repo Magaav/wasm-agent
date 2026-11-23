@@ -21,8 +21,8 @@ function M.enabled()
   -- The audit is answered FROM the graph, so the opt-in alone cannot turn it on: on a node whose graph is
   -- dormant (docs/GRAPH.md, the default) there is nothing to audit against and a refusal would look like
   -- a broken review. Off is off, and the reason is the switch, not an error.
-  local ok, entry = pcall(function() return dofile("lua/core/features.lua").resolve("graph") end)
-  return ok and type(entry) == "table" and entry.enabled == true
+  local ok, on = pcall(function() return dofile("lua/core/features.lua").on("graph") end)
+  return ok and on == true
 end
 
 -- One root for the patch and index. A missing required binding must not silently
