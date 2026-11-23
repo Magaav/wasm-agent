@@ -275,21 +275,7 @@ fn settle(q: &wa_queue::Queue, op: seam::Op, id: u64, wait_ms: u64) -> Value {
             Err(error) => return seam::refusal(op, "queue_failed", one_line(&error.to_string())),
         };
         match job.state.as_str() {
-            "done" => {
-                let Some(result) = job.result.as_deref() else {
-                    return seam::refusal(op, "answer_missing", "the query settled without a result");
-                };
-                let value: Value = match serde_json::from_slice::<Value>(result) {
-                    Ok(value) => value,
-                    Err(_) => return seam::refusal(op, "answer_unreadable", "the stored answer is not readable"),
-                };
-                if value.get("ok") == Some(&Value::Bool(false)) {
-                    if let Some(code) = value.get("code").and_then(Value::as_str) {
-                        return refused(op, code, value.get("detail").and_then(Value::as_str).unwrap_or_default(), value.get("op").and_then(Value::as_str));
-                    }
-                }
-                return value;
-            }
+            "done" => return settled_answer(op, &job),
             "dead" | "expired" => {
                 let reason = job.last_error.unwrap_or_else(|| job.state.as_str().to_string());
                 if let Some(code) = seam::permanent_code(&reason) {
@@ -311,6 +297,29 @@ fn settle(q: &wa_queue::Queue, op: seam::Op, id: u64, wait_ms: u64) -> Value {
         crate::serve::beat();
         std::thread::sleep(POLL);
     }
+}
+
+/// The tool's answer from a job the component settled.
+///
+/// It is its own function because it is the one place a settled answer becomes a tool answer, and the
+/// tests measure it directly: since 23/11 a settled query job releases its dedupe claim, so `ask` never
+/// reaches a done job by itself (a later identical question is a NEW job - that is the fix for the
+/// reads that answered 15:40, 16:15 and 15:44 in a row). A refusal the component settled is answered by
+/// its own word, never dressed as a slow query.
+fn settled_answer(op: seam::Op, job: &wa_queue::Job) -> Value {
+    let Some(result) = job.result.as_deref() else {
+        return seam::refusal(op, "answer_missing", "the query settled without a result");
+    };
+    let value: Value = match serde_json::from_slice::<Value>(result) {
+        Ok(value) => value,
+        Err(_) => return seam::refusal(op, "answer_unreadable", "the stored answer is not readable"),
+    };
+    if value.get("ok") == Some(&Value::Bool(false)) {
+        if let Some(code) = value.get("code").and_then(Value::as_str) {
+            return refused(op, code, value.get("detail").and_then(Value::as_str).unwrap_or_default(), value.get("op").and_then(Value::as_str));
+        }
+    }
+    value
 }
 
 /// The tool's answer for a refusal the component made: its own error word, and - when the code is
