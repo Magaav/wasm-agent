@@ -171,37 +171,47 @@ belongs where a session reads its rules, and in the one script that writes every
 
 ## Acceptance - the fast path twice, /tmp counted before and after
 
-Victor's acceptance: "run the fast path twice: the count of entries in /tmp is the same before and after (except kept failure evidence)".
+Victor's acceptance: "run the fast path twice: the count of entries in /tmp is the same before and after
+(except kept failure evidence)".
 
-**Run 1 (the full fast path on this branch, 1544404f): GREEN - 419 checks, 0 failed, 0 skipped, 565 s**
-(`fast path ok (419 checks, 0 skipped, 565s)`), including the new row `fast: tmp-cleanliness ok (376ms)`.
+| run | result | /tmp entries |
+| --- | --- | --- |
+| 1, full fast path on `1544404f` | **green: 419 checks, 0 failed, 0 skipped, 565 s**, and `fast: tmp-cleanliness ok (376ms)` | 3,260 -> **3,232** |
+| 2, the same commit again | 419 checks, **1 failed**: `FAIL deploy-wait (exit 1): the held wakes run once the deploy ends: still 0`, 612 s | 3,232 -> 3,327 |
 
-/tmp entry count: **3,260 before -> 3,232 after**. The net change is negative because other sessions cleaned
-their own scratch in the same window; the window is the whole queue wait (10:27:11Z -> 11:06:16Z), because
-this node had three other suites queued on ~/Work/missions/.suite.lock. So the count alone is not the proof -
-the entries are:
+**The counts are not the proof, and this is why.** Both windows include the time the run spent queued for
+`~/Work/missions/.suite.lock` (38 and 46 minutes: four other missions were running suites on this node all
+afternoon), so they measure the machine, not the suite. `ls -1 /tmp` grew and shrank by hundreds of entries
+that belong to other sessions.
 
-* the run itself executed 10:56:00Z-11:06:16Z. In exactly that window nine entries appeared, and **none of
-  them belongs to this tree**: fastkeep5, dbgf, rowout, wa-home-ops, preflight.log, db-rb.log, dw-rb.log,
-  tmp.* are other sessions shell scratch, and wa-eval-review-change-fixture-* / wa-eval-replay-fixture-*
-  are the wa-eval-review mission rows, which ran at the same time;
-* the five /tmp/wa-changeset-* directories that appear in the wider diff were all created **outside** the
-  run window (epochs 1795429505, 1795429634, 1795430221, 1795430236, 1795431003; the run own epoch range is
-  1795431360-1795431960), by other sessions running the **unfixed** row from their own trees. Each holds the
-  row three files and nothing else - they are the leak this change removes, made by trees without it.
+**What is the proof, in order of strength:**
 
-**The tight measurement, per row (the four sources the full run exercises), each in the fast path own
-environment and with /tmp diffed by mtime**: scripts/test-changeset.lua, scripts/test-agent-control-e2e.cjs,
-scripts/test-mission-amend.mjs, scripts/test-mission-amend-resume.mjs, scripts/test-fabric-bench.mjs,
-scripts/test-stream-cut-recovery.lua, scripts/test-tool-call-name.lua -> `/tmp+0`, `own-TMPDIR-left=0` for
-every one of them. On the base commit the same harness measured wa-changeset-<epoch> (test-changeset),
-wa-agent-control-e2e-* (agent-control-e2e) and wa-mission-amend-resume-* (the failing resume row).
+1. **The row takes its root from the runner, shown end to end.** Running the row through the fast path own
+   exec chain (`scripts/lib/fast-row-exec.sh` -> `wa_fast_row_exec`) with `TMPDIR`/`GATE_ROOT` exported, a
+   probe row prints `TMPDIR=/tmp/wa-probe-chain/tmp` and `GATE_ROOT=/tmp/wa-probe-chain` - the variables
+   arrive. With `GATE_ROOT` set and the row made to FAIL, `scripts/test-changeset.lua` keeps its scratch at
+   `<GATE_ROOT>/wa-changeset-1795429111.5966` and prints `fixture kept for diagnosis: <that path>`: the root
+   is inside the runner work dir, not `/tmp`, and the keeper can copy it.
+2. **Per row, measured with `/tmp` diffed by mtime**, each in the fast path own environment: the seven rows
+   this change fixed left **zero** new `/tmp` entries and zero in their own `TMPDIR`. The same harness on the
+   base commit measured `wa-changeset-<epoch>` (test-changeset), `wa-agent-control-e2e-*` (agent-control-e2e)
+   and `wa-mission-amend-resume-*` (the failing resume row).
+3. **Attribution of the entries that DID appear.** In run 1 window nine entries appeared and none belongs to
+   this tree (`fastkeep5`, `dbgf`, `rowout`, `wa-home-ops`, `preflight.log`, `db-rb.log`, `dw-rb.log` are
+   other sessions shell scratch; `wa-eval-*` are the `wa-eval-review` mission rows running at the same
+   time). In run 2 window four `wa-changeset-*` and two `wa-mission-amend-resume-*` appeared: three of the
+   four predate run 2 execution, and all of them are consistent with the **twenty-three** of the twenty-four mission
+   worktrees on this node that still carry the unfixed line (measured: 23 of the 24 trees that have
+   that row still match 'or "/tmp"'; the one that does not is this worktree), each producing
+   one per run.
+   **One of them (`wa-changeset-1795434665`, 11:53:45Z) falls inside run 2 window and I cannot attribute it
+   by name**: it is the same shape this tree stopped producing, one second inside the window, and it is what
+   the twenty-three unfixed trees emit. I am not counting it as mine and I am not claiming it is not.
 
-**Run 2 (the second full fast path) did not start within this session**: it was queued behind other
-missions suites on the shared lock for 45+ minutes and was cancelled at the end, so the twice half of the
-acceptance is **not** verified as a second full run. What is verified twice is the sequence that matters:
-the row-level zero measured before and after the fixes, and one full green fast path whose window contains no
-entry from this tree.
+**Run 2 one failure is not this change.** `deploy-wait` passed in run 1 thirty minutes earlier on the same
+commit and passes standalone (`bash scripts/test-deploy-wait.sh` with the same binary: `deploy wait
+ok`, exit 0, 300 s timeout). `wa_fast_watchdog`/wake timing under four concurrent suites is the shape that
+fails; the diff here touches no deploy, wake or timing code.
 
 ## Texts to approve (operator- or model-facing, verbatim)
 
