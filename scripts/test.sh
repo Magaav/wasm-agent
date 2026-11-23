@@ -1294,6 +1294,22 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-compact-idle-route.lua" "$BIN" --db
 # for a pending code-mode handle, a pending self-wake or a child run; performed once they clear;
 # an explicit operator /compact unchanged. Every store is the node own, not a stub.
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-compact-idle-pending.lua" "$BIN" --db "$DB.compact-idle-pending" | grep 'compact idle pending ok'
+
+# The operator switch for transcript posting (lua/core/whatsapp_posting.lua, `wa whatsapp posting`):
+# the gate is the wa-whatsapp COMPONENT's own config (post_transcripts + post_allow + alerts +
+# language), so the switch writes the stored definition through the services registry, restarts the
+# component and answers with the health line the component prints. The door it replaces POSTed to the
+# Go connector removed on 11/11 and is refused by name here. The row runs its own scratch home (it
+# writes a services registry) and refuses a home that is not under one.
+POSTING_HOME="$(mktemp -d "${GATE_ROOT:-${TMPDIR:-/tmp}}/wa-posting-$$-XXXXXX")"
+case "$POSTING_HOME" in
+  "${GATE_ROOT:-${TMPDIR:-/tmp}}"/*) : ;;
+  *) echo "FAIL: the posting row got a home outside its scratch root: $POSTING_HOME" >&2; exit 1 ;;
+esac
+GATE_ROOT="${GATE_ROOT:-${TMPDIR:-/tmp}}" WASM_AGENT_HOME="$POSTING_HOME" \
+  WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-whatsapp-posting-toggle.lua" \
+  "$BIN" --db "$POSTING_HOME/t.db" | grep 'whatsapp posting toggle ok'
+rm -rf "$POSTING_HOME"
 # The node clock is its OS local time with a numeric offset, not a bare UTC value; the model must
 # be able to ask for it (`time`) and see the zone in its environment line.
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-time.lua" "$BIN" --db "$DB.time" | grep 'node local time ok'

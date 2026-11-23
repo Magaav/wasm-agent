@@ -1802,7 +1802,7 @@ class WaMcps extends HTMLElement {
     this.postingToggle=document.createElement('input');this.postingToggle.type='checkbox';this.postingToggle.setAttribute('aria-label','Reply to audio with a transcript');
     const postingName=document.createElement('strong');postingName.textContent='WhatsApp audio transcripts';
     postingLabel.append(this.postingToggle,postingName);
-    this.postingStatus=document.createElement('p');this.postingStatus.textContent='Reading connector policy…';
+    this.postingStatus=document.createElement('p');this.postingStatus.textContent='Reading the posting switch…';
     this.posting.append(postingLabel,this.postingStatus);
     this.postingToggle.addEventListener('change',()=>this.setPosting(this.postingToggle.checked));
     const details=document.createElement('details'),summary=document.createElement('summary');summary.textContent='Add or edit a trusted MCP';
@@ -1824,14 +1824,17 @@ class WaMcps extends HTMLElement {
   }
   async loadPosting(){
     if(!this.postingToggle)return;
-    this.postingStatus.textContent='Reading connector policy…';
-    try{const value=await this.postingCall({action:'status'});this.postingToggle.checked=value.enabled===true;this.postingStatus.textContent=value.connection==='connected'?'Incoming and your own outgoing audio.':'Connector '+String(value.connection||'unknown')+'.';}
+    this.postingStatus.textContent='Reading the posting switch…';
+    // The switch is the wa-whatsapp component's own configuration: `enabled` is its posting gate and
+    // `connection` is what the host says the component is doing, so a stopped component is said to be
+    // stopped rather than shown as an unknown connector.
+    try{const value=await this.postingCall({action:'status'});this.postingToggle.checked=value.enabled===true;this.postingStatus.textContent=value.connection==='running'?'The component is running; transcripts of the allowed chats are posted.':'Component '+String(value.connection||'unknown')+'.';}
     catch(error){this.postingToggle.disabled=true;this.postingStatus.textContent='Posting control unavailable: '+String(error.message||error);}
   }
   async setPosting(enabled){
     if(!this.postingToggle)return;
     this.postingToggle.disabled=true;const previous=!enabled;
-    try{const value=await this.postingCall({action:'set',enabled});this.postingToggle.checked=value.enabled===true;this.postingStatus.textContent=value.enabled?'Transcript replies enabled for incoming and own outgoing audio.':'Transcript replies disabled.';}
+    try{const value=await this.postingCall({action:'set',enabled});this.postingToggle.checked=value.enabled===true;this.postingStatus.textContent=value.enabled?'Transcript replies enabled for the allowed chats.':'Transcript replies disabled.';}
     catch(error){this.postingToggle.checked=previous;this.postingStatus.textContent='Posting change refused: '+String(error.message||error);}
     finally{this.postingToggle.disabled=false;}
   }
@@ -1839,7 +1842,7 @@ class WaMcps extends HTMLElement {
   set busy(value){this.pending=!!value;this.querySelectorAll('button').forEach(button=>button.disabled=!!value||button.dataset.approvalRequired==='true');}
   configureScope(scope){
     if(this.scope===scope)return;this.connectedCallback();if(this.scope!==undefined)this.drafts.set(this.scope,this.editor.value);
-    this.scope=scope;this.editor.value=this.drafts.get(scope)||'';this.data=null;this.list.replaceChildren();this.message='MCP inventory not yet loaded for this node/account';this.postingLoaded=false;this.postingToggle.disabled=false;this.postingStatus.textContent='Reading connector policy…';this.busy=false;
+    this.scope=scope;this.editor.value=this.drafts.get(scope)||'';this.data=null;this.list.replaceChildren();this.message='MCP inventory not yet loaded for this node/account';this.postingLoaded=false;this.postingToggle.disabled=false;this.postingStatus.textContent='Reading the posting switch…';this.busy=false;
   }
   set inventory(data){
     this.connectedCallback();this.data=data;this.list.replaceChildren();
