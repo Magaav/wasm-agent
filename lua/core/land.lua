@@ -4133,19 +4133,65 @@ end
 -- update ITSELF (`lua/core/remote_update.lua`): this machine only asks and reads back, and "queued" is
 -- never reported as installed. `--rollback` runs the same ring in reverse and puts each node's kept pair
 -- back (`scripts/rollback-node.sh` through that node's own Sentinel).
--- THE CANARIES, AFTER THE FLEET READ-BACK (Victor, 23/11): a node that took the new bytes must prove that
--- its user-facing features still do their work.
+-- THE CANARIES, AFTER THE FLEET READ-BACK (Victor, 23/11; Fable's review, items 1 and 2).
 --
--- Why a step here and not in the gate: the gate tests the TREE in a scratch home, and the deploy step's own
--- read-back answers "which commit does this node run" - both of which a feature that installs correctly and
--- then cannot do its job passes (the copilot reply was off for two days that way). This step is the first
--- thing in the release loop that asks the INSTALLED node to exercise its own features.
+-- WHY A STEP HERE, AND WHY IT ASKS THE FLEET. The break this step exists for was on `openclaw`, not on the
+-- machine that cut the release, so asking THIS node proves nothing about the fleet. The gate tests the TREE
+-- in a scratch home and the deploy read-back answers "which commit are you running"; both are passed by a
+-- feature that installs correctly and then cannot do its job (the copilot reply was off for two days that
+-- way). So the step asks every node the deploy INSTALLED ON to run its own canaries, collects the answers,
+-- and refuses to call an unreachable node green: an unreachable node is `not proven`, named, and red -
+-- 'unknown' is not yes.
 --
--- The verdict is the node's own (lua/core/feature_canary.lua): a failed canary stops the run BY NAME, with
--- the stage it broke in and the evidence file, and the `next` line says how to put the node back on the
--- previous release. The step does not roll back by itself - a release that reverts a node on its own word
--- would hide the failure instead of reporting it, and Fable's rule is that a rollback is a decision.
+-- WHICH NODES: the deploy step's own record (`steps.deploy.nodes`), never the configured ring. A round that
+-- skipped the deploy, or stopped before a node, put these bytes on no node, and asking one anyway would
+-- report a red for a deploy nobody performed. When the deploy recorded no per-node outcome the step says so
+-- in its evidence and in `observed` and asks nobody - it does not guess.
+--
+-- THE ROLLBACK LINE NAMES THE PREVIOUS RELEASE, per node (item 2): the release journals under the run root
+-- are read newest-first and the first one that is not this run is the previous tag and its commit. When no
+-- such journal exists the line says so by name and points at the node's own install record instead of
+-- printing this run's commit - the commit that FAILED.
+function M.previous_release(run)
+  local current = tostring((run and run.journal and (run.journal.main_sha or run.journal.tree_commit)) or "")
+  for _, path in ipairs(M.published_journals and M.published_journals() or {}) do
+    local journal = json_file(path)
+    if journal and type(journal.publish) == "table" and journal.publish.tag and journal.tree_commit
+      and tostring(journal.tree_commit) ~= current then
+      return { tag = tostring(journal.publish.tag), commit = tostring(journal.tree_commit), run = tostring(journal.run or "") }
+    end
+  end
+  return nil
+end
+
+-- The peer call this step makes, in one place so a test can replace it (`options.remote_call`, or the
+-- module-level `impl.canaries_remote` a fixture stubs once) and never reach a live peer.
+local function ask_node(options, node)
+  local command = "wa features canary json"
+  if type(options.remote_call) == "function" then return options.remote_call(node, "bash", { command = command }) end
+  if type(impl.canaries_remote) == "function" then return impl.canaries_remote(node, "bash", { command = command }) end
+  local loaded, nodes = pcall(dofile, "lua/core/nodes.lua")
+  if not loaded or type(nodes) ~= "table" or type(nodes.remote_call) ~= "function" then
+    return { error = "nodes_unavailable", detail = "lua/core/nodes.lua could not be loaded, so " .. node .. " was not asked" }
+  end
+  return nodes.remote_call(node, "bash", { command = command }, {})
+end
+
+-- <answer> -> document | nil, why. The peer answers the bash tool's own shape; the JSON is inside it.
+local function canary_answer(answer)
+  if type(answer) ~= "table" then return nil, "the node answered nothing" end
+  if answer.error then return nil, tostring(answer.error) .. (answer.detail and (" - " .. tostring(answer.detail)) or "") end
+  local text = answer.output or answer.stdout or answer.content or answer.result
+  if type(text) ~= "string" or text == "" then return nil, "the node's answer carried no output" end
+  for line in text:gmatch("[^\r\n]+") do
+    local parsed, document = pcall(json.decode, line)
+    if parsed and type(document) == "table" and type(document.features) == "table" then return document end
+  end
+  return nil, "the node's answer carried no canary table: " .. tostring(text):sub(1, 200)
+end
+
 impl.canaries = function(run, options)
+  options = options or {}
   local evidence = sink(run, "canaries")
   local loaded, canaries = pcall(dofile, "lua/core/feature_canary.lua")
   if not loaded or type(canaries) ~= "table" then
@@ -4153,46 +4199,119 @@ impl.canaries = function(run, options)
       observed = "lua/core/feature_canary.lua could not be loaded: " .. tostring(canaries),
       next = "fix the tree this landing runs from; no node was asked anything" }
   end
-  local opts = {}
-  if options.canary_dir then opts.dir = options.canary_dir end
-  local results, why = canaries.run_all(opts)
+
+  local previous = M.previous_release(run)
+  local function rollback_line(node)
+    if previous then
+      return string.format("%s: wa update %s --commit %s (back to %s)", node, node, previous.commit, previous.tag)
+    end
+    return string.format("%s: the previous release is not recorded under %s - read the node's own install record (wa call %s bash 'cat <install>/installed.txt') and pass its commit to wa update %s --commit <that>",
+      node, tostring(M.root()), node, node)
+  end
+
+  local failed, unproven, off = {}, {}, {}
+  local nodes_asked, nodes_answered = 0, 0
+
+  -- 1. THIS NODE, first: it is the one the operator is sitting at.
+  local results, why = canaries.run_all(options.canary_dir and { dir = options.canary_dir } or {})
   if not results then
     return false, { error = "canaries_unreadable", observed = tostring(why),
       next = "the feature registry or its canaries could not be read; check config/features/features.json" }
   end
-  evidence("# canaries, after the deploy read-back\n")
+  evidence("# canaries, after the deploy read-back\n## this node\n")
   for _, line in ipairs(canaries.lines(results)) do evidence(line .. "\n") end
-  local failed, ran = {}, 0
   for _, result in ipairs(results) do
-    if not result.skipped then
-      ran = ran + 1
-      if not result.ok then
-        failed[#failed + 1] = string.format("%s (%s)", tostring(result.feature), tostring(result.stage))
-        evidence(string.format("failed: %s at stage %s: %s\n", tostring(result.feature), tostring(result.stage), tostring(result.detail)))
+    if result.off then off[#off + 1] = tostring(result.feature) .. " (" .. tostring(result.stage) .. ")" end
+    if not result.skipped and not result.off and not result.ok then
+      failed[#failed + 1] = string.format("this-node %s (%s)", tostring(result.feature), tostring(result.stage))
+    end
+  end
+
+  -- 2. THE NODES THE DEPLOY INSTALLED ON (an explicit ring is the caller's answer: a test's, or a release
+  -- that wants the ring asked by name). No per-node record means nobody is asked, and that is SAID.
+  -- THE ONLY SOURCE IS THE DEPLOY'S OWN RECORD. The configured ring is not it (a ring names what a round
+  -- WOULD touch, and this round may have stopped before a node), and a caller's list is not it either (a
+  -- caller cannot prove a node installed something). `steps.deploy.nodes` is written by the deploy step
+  -- itself as each node settles, so what is asked here is exactly what was installed.
+  local deploy_row = run.journal and run.journal.steps and run.journal.steps.deploy or nil
+  local ring, fleet_recorded = {}, false
+  -- ASKED ON A RELEASE (`wa release cut` sets `fleet_canaries`), never on a plain landing: this step is part
+  -- of the release loop, and a caller that runs the loop in a fixture (the land rows) has no fleet to ask -
+  -- its ring names invented nodes, and a row must never call a live peer.
+  if options.fleet_canaries and deploy_row and deploy_row.state == "done" and type(deploy_row.nodes) == "table" then
+    ring, fleet_recorded = deploy_row.nodes, true
+  end
+  if not fleet_recorded then
+    evidence(string.format("## fleet: not asked - the deploy step recorded no per-node outcome (%s), so this release has proven nothing about the fleet\n",
+      tostring(deploy_row and deploy_row.state or "no deploy row")))
+  end
+  for _, entry in ipairs(ring or {}) do
+    local node = tostring((type(entry) == "table" and entry.node) or entry or "")
+    if node ~= "" then
+      nodes_asked = nodes_asked + 1
+      local asked_ok, answer = pcall(ask_node, options, node)
+      if not asked_ok then
+        unproven[#unproven + 1] = node .. " (the call raised: " .. tostring(answer) .. ")"
+        evidence(string.format("%s: NOT PROVEN - the call raised: %s\n", node, tostring(answer)))
+      else
+        local document, refused = canary_answer(answer)
+        if not document then
+          unproven[#unproven + 1] = node .. " (" .. tostring(refused) .. ")"
+          evidence(string.format("%s: NOT PROVEN - %s\n", node, tostring(refused)))
+        else
+          nodes_answered = nodes_answered + 1
+          evidence("## " .. node .. "\n")
+          evidence(string.format("%s: %s\n", node, document.ok == true and "all its canaries passed" or "canaries FAILED"))
+          for _, row in ipairs(document.features or {}) do
+            evidence(string.format("  %-22s %s %s%s\n", tostring(row.feature),
+              row.off and "OFF" or (row.skipped and "SKIP" or (row.ok and "PASS" or "FAIL")),
+              tostring(row.stage or ""), row.detail and (": " .. tostring(row.detail)) or ""))
+            if row.off then off[#off + 1] = node .. "/" .. tostring(row.feature) .. " (" .. tostring(row.stage) .. ")" end
+            if not row.ok and not row.skipped and not row.off then
+              failed[#failed + 1] = string.format("%s %s (%s)", node, tostring(row.feature), tostring(row.stage))
+            end
+          end
+        end
       end
     end
   end
-  evidence(string.format("canaries: %d ran, %d failed, %d off-node (evidence: %s)\n", ran, #failed, #results - ran,
-    M.evidence_path(run.id, "canaries")))
-  -- THE SAME STOPPED FEATURES SPEAK TO THE OPERATOR'S CHANNEL ONCE, here as everywhere else: the release
-  -- step records and prints; the notice is lua/core/feature_notice.lua, and a send that failed is retried
-  -- by the next call rather than counted as sent.
+
+  evidence(string.format("canaries: this node ran %d; %d peer node(s) asked, %d answered; %d failed, %d off, %d not proven (evidence: %s)\n",
+    #results, nodes_asked, nodes_answered, #failed, #off, #unproven, M.evidence_path(run.id, "canaries")))
+
   local noticed = "not asked"
   local ok_notice, feature_notice = pcall(dofile, "lua/core/feature_notice.lua")
   if ok_notice and type(feature_notice) == "table" then
     local ok_call, answer = pcall(feature_notice.notice)
     noticed = ok_call and tostring((answer or {}).reason or "") or ("raised: " .. tostring(answer))
   end
+
   if #failed > 0 then
+    local how = {}
+    for _, entry in ipairs(ring or {}) do
+      local name = tostring((type(entry) == "table" and entry.node) or entry or "")
+      if name ~= "" then how[#how + 1] = rollback_line(name) end
+    end
     return false, { error = "canary_failed",
-      observed = "the node failed its own canaries: " .. table.concat(failed, ", ") .. " (notice: " .. noticed .. ")",
+      observed = "canaries failed: " .. table.concat(failed, ", ") .. (nodes_asked > 0 and (" (peers asked: " .. nodes_answered .. "/" .. nodes_asked .. ")") or "") .. " (notice: " .. noticed .. ")",
       detail = "release is RED by name: " .. table.concat(failed, ", "),
       evidence = M.evidence_path(run.id, "canaries"),
-      next = "put the node back on the previous release (wa update <node> --commit " .. tostring(run.journal.main_sha or run.journal.tree_commit or "<previous>") .. "), unless Fable says otherwise; then fix " .. tostring(failed[1]) .. " before cutting again",
+      next = (#how > 0 and ("put the node(s) back on the PREVIOUS release, unless Fable says otherwise: " .. table.concat(how, "; "))
+        or ("fix " .. tostring(failed[1]) .. " before cutting again")),
       notice = noticed }
   end
-  return true, { canaries = ran, off_node = #results - ran, notice = noticed,
-    observed = string.format("%d canar(ies) ran and passed on this node; %d feature(s) it does not run were off-node", ran, #results - ran) }
+  if #unproven > 0 then
+    return false, { error = "canary_unproven",
+      observed = "NOT PROVEN (an unreachable or silent node is never green): " .. table.concat(unproven, "; "),
+      detail = "release is RED by name: not proven on " .. table.concat(unproven, "; "),
+      evidence = M.evidence_path(run.id, "canaries"),
+      next = "make each named node answer (wa nodes, wa services status), then cut again: a node whose canaries could not be collected has not been proven by this release",
+      notice = noticed }
+  end
+  return true, { canaries = #results, nodes_asked = nodes_asked, nodes_answered = nodes_answered, off = #off, notice = noticed,
+    observed = string.format("%d canary(ies) ran on this node and %d peer node(s) ran their own; %d off%s%s",
+      #results, nodes_answered, #off, #off > 0 and (" (" .. table.concat(off, ", ") .. ")") or "",
+      fleet_recorded and "" or " - the deploy recorded no per-node outcome, so the fleet was not asked") }
 end
 
 impl.deploy = function(run, options)
@@ -4354,6 +4473,7 @@ impl.deploy = function(run, options)
     end)() }
   local stopped = nil
   local deployed = 0
+  local deployed_nodes = {}
   for index, wave in ipairs(plan.waves) do
     if #wave == 0 then
       local _ = index
@@ -4407,12 +4527,18 @@ impl.deploy = function(run, options)
       for _, row in ipairs(asked) do
         record(row)
         deployed = deployed + 1
+        -- WHICH NODES TOOK THESE BYTES, for the canaries step: a node that settled as `installed`, or as
+        -- `unknown` (the deadline passed - its own records are the truth). A node that was never asked is not
+        -- in this list, and the canaries step asks only the list.
+        if row.state == "installed" or row.state == "unknown" then
+          deployed_nodes[#deployed_nodes + 1] = { node = tostring(row.node), mode = tostring(row.mode or "tree"), state = tostring(row.state) }
+        end
         if not stopped then stopped = row.failure or failure_for(row) end
       end
     end
   end
   if stopped then return false, stopped end
-  return true, { detail = string.format("%d node(s) installed in %d wave(s) (canary %s first, account %s last)",
+  return true, { nodes = deployed_nodes, detail = string.format("%d node(s) installed in %d wave(s) (canary %s first, account %s last)",
     deployed, #plan.waves, tostring(plan.canary or "-"), tostring(plan.account or "-")) }
 end
 -- report: one summary, written to a file and printed. It runs even when the machine stopped, because the
@@ -5091,6 +5217,9 @@ local function finish_step(run, name, ok, result)
   if ok then
     step.state = result and result.state or "done"
     step.detail = result and result.detail or nil
+    -- WHAT A STEP RECORDED FOR THE STEP AFTER IT: the deploy names the nodes it installed on, and the
+    -- canaries step asks exactly those.
+    step.nodes = result and result.nodes or nil
     return true, nil
   end
   step.state = (result and result.state) or "failed"
@@ -5189,6 +5318,10 @@ end
 function M.run(options)
   options = type(options) == "table" and options or {}
   if options.release and not options.run then options.run_prefix = options.run_prefix or "release" end
+  -- THE FLEET IS ASKED BY A RELEASE, NOT BY A LANDING (Fable's review, item 1): `wa release cut` is the path
+  -- whose bytes reach other machines, so its canaries step asks every node the deploy installed on. A plain
+  -- landing, and every fixture that runs this loop, leaves it off - their rings name no node that exists.
+  if options.release then options.fleet_canaries = true end
   if options.resume and not options.run then
     options.run = newest_unfinished(options.release)
     if not options.run then

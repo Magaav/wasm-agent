@@ -321,9 +321,13 @@ function M.lines(now)
     #rows, counts.working, counts.stale, counts.failing, counts.never, counts['off-node'])
   local out = { summary }
   for _, item in ipairs(rows) do
+    -- WHAT KIND OF SUCCESS IT WAS, in the same line as when it happened. Until real-traffic hooks land, most
+    -- rows are proven by their CANARY, and a synthetic pass read as real use is exactly the false comfort
+    -- this mission is against (Fable, 23/11). A canary-sourced time is therefore labelled; a hook's is not.
     local last = item.last_ok_at and M.iso(item.last_ok_at) or 'never'
-    out[#out + 1] = string.format('  %-' .. width .. 's  %-9s  last worked: %s  (%s)',
-      item.name, item.verdict, last, item.detail)
+    local kind = item.last_ok_source == 'canary' and '  [canary]' or ''
+    out[#out + 1] = string.format('  %-' .. width .. 's  %-9s  last worked: %s%s  (%s)',
+      item.name, item.verdict, last, kind, item.detail)
   end
   return out
 end

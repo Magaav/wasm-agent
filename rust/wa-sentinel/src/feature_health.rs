@@ -42,6 +42,9 @@ pub struct Row {
     pub name: String,
     pub verdict: Verdict,
     pub last_ok_at: Option<i64>,
+    /// What KIND of success the time records: 'canary' means an exercise proved it, not a user (Fable,
+    /// 23/11: a synthetic pass must not read as real use). "record"/absent is a real code path.
+    pub last_ok_source: Option<String>,
     pub detail: String,
 }
 
@@ -168,6 +171,10 @@ pub fn rows(config: &Path, now: i64) -> Result<Vec<Row>, String> {
             name,
             verdict,
             last_ok_at: entry.and_then(|e| number(e.get("last_ok_at"))),
+            last_ok_source: entry
+                .and_then(|e| e.get("last_ok_source"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
             detail,
         });
     }
@@ -193,8 +200,12 @@ pub fn lines(config: &Path, now: i64) -> Vec<String> {
             let width = rows.iter().map(|row| row.name.len()).max().unwrap_or(0);
             for row in rows {
                 let last = row.last_ok_at.map(iso_utc).unwrap_or_else(|| "never".to_string());
+                // A CANARY'S TIME SAYS SO. Until real-traffic hooks land most rows are proven by an exercise,
+                // and printing that as if a user had just used the feature is the false comfort this whole
+                // mechanism is against.
+                let kind = if row.last_ok_source.as_deref() == Some("canary") { "  [canary]" } else { "" };
                 out.push(format!(
-                    "  {:<width$}  {:<8}  last worked: {last}  ({})",
+                    "  {:<width$}  {:<8}  last worked: {last}{kind}  ({})",
                     row.name,
                     row.verdict.word(),
                     row.detail,
