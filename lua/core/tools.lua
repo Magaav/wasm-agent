@@ -128,13 +128,26 @@ local REMOTE_READ = { read = true, ls = true, grep = true, graph = true,
   -- so it may travel inside a code-mode read set and a `calls` batch like any other read.
   turns = true }
 M.REMOTE_READ = REMOTE_READ
+-- ONE INSTANCE OF THE ORCHESTRATION MODE MODULE, NOT ONE COMPILE PER CALL (23/11). `dofile` re-reads and
+-- re-compiles the file on every call, and this module's own header loads json, memory, users and NODES
+-- (1,969 lines): measured 9 ms for every tool dispatch on this node, paid whether the dispatch had
+-- anything to do with orchestration or not. One instance answers exactly as a fresh one did - the mode,
+-- the route and the admitted children live in the memory ledger keyed by session, never in an upvalue -
+-- and the load stays LAZY, so a process that never dispatches a tool never compiles it. The disk is still
+-- the source of truth on every call: nothing is cached but the compiled chunk.
+local orchestration_module
+local function orchestration()
+  if not orchestration_module then orchestration_module = dofile('lua/core/orchestration_mode.lua') end
+  return orchestration_module
+end
+
 function M.remote_read_refusal(capability, args)
   local retired = M.retired(capability)
   if retired then return { error = retired, capability = tostring(capability), effect = "none" } end
   if REMOTE_READ[capability] then return nil end
   if capability == "bash" then
     local command = type(args) == "table" and args.command or nil
-    if dofile("lua/core/orchestration_mode.lua").read_only_command(command) then return nil end
+    if orchestration().read_only_command(command) then return nil end
     return { error = "remote_effect_outside_codemode", capability = "bash", effect = "none",
       note = "A `calls` batch carries reads only (1-8 in one signed round trip): read-only bash is ls/cat/grep/rg/git status|log|diff|show..., no redirection or substitution; use cwd instead of cd or git -C. Send an effectful command as its own remote call - a script may, a batch may not." }
   end
@@ -883,7 +896,7 @@ PROMPT_HIDDEN.route_task=true -- Orchestration-mode-only; `M.all` re-adds it for
 local function orchestration_surface(role,ctx)
   if not is_master(role or 'guest') then return false end
   if not ctx or ctx.subagent then return false end
-  local ok,mode=pcall(dofile,'lua/core/orchestration_mode.lua')
+  local ok,mode=pcall(orchestration)
   return ok and mode.mode_on(ctx) or false
 end
 
@@ -1528,11 +1541,11 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
   -- turn has a recorded route ('direct' allows short work here, 'delegate' hands it to a child)
   -- or a child admitted for the turn. The floor reads the mode, route and admission records only -
   -- never the user's text - and it starts nothing: the route and the child are the model's.
-  local delegation = dofile('lua/core/orchestration_mode.lua').guard(name, args, ctx)
+  local delegation = orchestration().guard(name, args, ctx)
   if delegation then return delegation end
   if name=='route_task' then
     if not is_master(role) then return {error='forbidden_for_role:'..role} end
-    return dofile('lua/core/orchestration_mode.lua').record_route(args,ctx)
+    return orchestration().record_route(args,ctx)
   end
   -- History on a peer (29/10): the same read, run there through `remote` and its refusals. A peer that
   -- receives one never forwards it again (`peer_call`), so a node cannot be used as a hop.
@@ -1553,10 +1566,22 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     end
     args=forwarded
   end
-  local routed_catalog=ctx.subagent and M.all_for(ctx.subagent.allowed or {},role,ctx,memory) or M.all(role,ctx,memory)
+  -- THE CATALOGUE IS BUILT WHERE IT IS READ (23/11). This line used to build every tool schema - measured
+  -- 11-18 ms - for EVERY dispatch, including a peer's `operation await` and a model's `bash`, neither of
+  -- which ever reads it. The five readers below (tool_search, tool_call, run/codemode, capabilities) get
+  -- exactly the same table as before; a dispatch that reads none of them pays nothing. Laziness, not a
+  -- different answer: `M.all` is asked at the same points, in the same order, with the same arguments.
+  local catalog_built, catalog_value = false, nil
+  local function routed_catalog()
+    if not catalog_built then
+      catalog_built = true
+      catalog_value = ctx.subagent and M.all_for(ctx.subagent.allowed or {},role,ctx,memory) or M.all(role,ctx,memory)
+    end
+    return catalog_value
+  end
   if name=='tool_search' then
     local describe=M.discovery_execution(memory,ctx)
-    return envelope.search(routed_catalog or M.all(role),args,ctx,describe)
+    return envelope.search(routed_catalog() or M.all(role),args,ctx,describe)
   end
   if name=='tool_call' then
     local scope=''
@@ -1565,7 +1590,7 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
       scope=host.sha256(json.encode({kind='routed_read_batch',user=ctx.user_id or user_id,role=role,
         session=ctx.session_id or '',cwd=memory and session_cwd(memory,ctx) or platform.cwd(),workspace=workspace,profile=ctx.subagent and ctx.subagent.allowed or nil}))
     end
-    return dofile('lua/core/routed_calls.lua').invoke(routed_catalog or M.all(role),args,ctx,scope,function(target,parameters,fragment)
+    return dofile('lua/core/routed_calls.lua').invoke(routed_catalog() or M.all(role),args,ctx,scope,function(target,parameters,fragment)
       local original=ctx.tool_arguments_json;ctx.tool_arguments_json=fragment
       local ok,result=pcall(M.dispatch,memory,target,parameters,role,ctx);ctx.tool_arguments_json=original
       if not ok then error(result) end;return result
@@ -1911,7 +1936,7 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
       if not call then return refused end
       args=call
     end
-    local catalog=routed_catalog or M.all(role)
+    local catalog=routed_catalog() or M.all(role)
     local execution=M.discovery_execution(memory,ctx)
     return dofile('lua/core/codemode.lua').run(memory,args,role,ctx,catalog,function()
       return ctx.subagent and M.all_for(ctx.subagent.allowed or {},role,ctx,memory) or M.all(role,ctx,memory)
@@ -1923,7 +1948,7 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
   elseif name == "capabilities" then
     local list,execution={},{}
     local describe,workspace=M.discovery_execution(memory,ctx)
-    for _,item in ipairs(routed_catalog or M.all(role)) do
+    for _,item in ipairs(routed_catalog() or M.all(role)) do
       local tool=item['function'].name;list[#list+1]=tool;execution[tool]=describe(tool)
     end
     return {role=role,capabilities=list,execution=execution,workspace=workspace,
