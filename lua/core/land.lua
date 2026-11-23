@@ -2684,6 +2684,20 @@ function M.failed_rows(tree, started)
   return { lua = rows, failed = failed, named = named, path = path }
 end
 
+-- IS THIS ROW A MEASUREMENT OF MAIN, or a step that merely mentions it? `wa land health-run` writes
+-- `data = { measured = "scripts/main-health.sh" }` beside its verdict; a landing's own health STEP writes a row
+-- with the same step name and no such field, because it answers a different question (did the step start the
+-- measurement), not what main is. A row without the marker is skipped in BOTH directions - it neither reds
+-- main (the 22/11 false red) nor greens it (a step that started is not a green suite) - and the search goes on
+-- to the older row about this main that IS a measurement.
+local function measured_verdict(row)
+  local raw = row and row.data
+  if type(raw) ~= "string" or trim(raw) == "" then return false end
+  local ok, fields = pcall(json.decode, raw)
+  if not ok or type(fields) ~= "table" then return false end
+  return trim(tostring(fields.measured or "")) ~= ""
+end
+
 -- THE RED MAIN RULE (FACTORY.md rule 8): main is always green, and a red main blocks the next landing unless
 -- that landing IS the fix. The verdict is the ledger's own newest `land.main-health` row about THIS main: a red
 -- about an older main is stale and blocks nothing (main-health writes what it measured, and only that), a green
@@ -2699,7 +2713,7 @@ function M.main_red(base)
   for index = #rows, 1, -1 do
     local row = rows[index]
     local sha = tostring(row.sha or "")
-    if sha ~= "" and (base:sub(1, #sha) == sha or sha:sub(1, #base) == base) then
+    if sha ~= "" and (base:sub(1, #sha) == sha or sha:sub(1, #base) == base) and measured_verdict(row) then
       if tostring(row.result) == "red" then return row end
       return nil
     end
@@ -4679,8 +4693,13 @@ function M.health_run(options)
   local said = last_line(tostring(result.stdout or "") .. "\n" .. tostring(result.stderr or ""))
   local detail = verdict == "green" and "the whole fast path is green on main's tip"
     or (verdict == "red" and ("main is red: " .. said) or ("main-health refused to judge: " .. said))
+  -- `data.measured` IS WHAT MAKES THIS ROW A VERDICT about main: a landing's health STEP writes a row with the
+  -- same step name and its own outcome (started, or not started), which is a fact about the step and not about
+  -- main. M.main_red reads only rows carrying this marker, so a health step that never started can no longer
+  -- red a green main (22/11: `program_not_found` refused the next landing at merge).
   local fields = { kind = "land", step = "main-health", result = verdict, sha = tostring(options.sha or ""),
     mission = tostring(options.mission or ""), branch = tostring(options.branch or ""), detail = detail,
+    data = { measured = "scripts/main-health.sh" },
     source = tostring(options.source or "wa land health-run") }
   local called, row = pcall(function() return dofile("lua/core/event_ledger.lua").record(fields) end)
   if not called or type(row) ~= "table" or row.error then
