@@ -77,12 +77,15 @@ undo pty: 16 ok, 1 failed` - the reported symptom, reproduced in a test.
 
 ## The runs of this branch
 
-- Narrowed fast path (`WA_FAST_ROWS=/tmp/rows-undo-fix.txt`, 24 of 327 Lua rows, every pty row and every
-  contract check): the two /undo rows are GREEN in it - `fast: undo-pty ok (2093ms)`, `fast: undo-remote-pty
-  ok (4632ms)` - which is the row pair the health run had red. The same run failed 4 rows that need code
-  mode and `build-info`, all because this session had named an explicit `WA_BIN` built with
-  `WA_CODEMODE_ALLOW_EMPTY=1` (the health run, which builds its own, had them green), and `fast-counters`,
-  which was mine and is fixed in `4cc06496`.
+- **The final run, with the binary fast.sh builds itself** (`WA_FAST_ROWS=/tmp/rows-undo-fix.txt`, 24 of
+  327 Lua rows, every pty row, every contract check): `fast: undo-pty ok (3231ms)`,
+  `fast: undo-remote-pty ok (6107ms)`, and the verdict `fast path ok (107 checks, 0 skipped, 431s)` -
+  green, including `fast-counters` and `fast-skip-count`, the two rows that read fast.sh itself.
+- An earlier run of the same narrowing, which had named an explicit `WA_BIN` built with
+  `WA_CODEMODE_ALLOW_EMPTY=1`, failed 4 rows that need code mode plus `build-info` - all of them because of
+  that binary, not the branch: the same rows are green once fast.sh builds the tree's own binary. It also
+  caught `fast-counters`, which WAS mine (a shared `local` list hid two counters) and is fixed in
+  `4cc06496`. That is the row pair the health run had red, and the reason the fix was verified twice.
 - The evidence keeper proved itself in that same run: it kept the failed rows' logs, their kept scratch
   dirs and a `failures.txt`, in the worktree's git dir, with no `WA_FAST_KEEP_LOGS` set by this session.
 
