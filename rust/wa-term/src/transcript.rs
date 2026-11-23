@@ -225,6 +225,21 @@ impl Transcript {
         let index = self.focus.or_else(|| (0..self.blocks.len()).rev().find(|&i|
             (self.blocks[i].code && !self.blocks[i].lines.is_empty()) || !self.blocks[i].cards.is_empty()))?;
         let block = &mut self.blocks[index];
+        // A folded RESULT line (`⎿ script output · 2,549 chars`, lua/core/codemode_block.lua)
+        // opens with this key too, and the same key folds it back: the row's own press does exactly
+        // this (expand_at), and a reader told "click or Ctrl+O" has one key to remember (Victor
+        // 23/11). Only when the block HAS such a line: a block without one keeps the pin below.
+        if !block.expands.is_empty() {
+            let open_all = block.opened.len() < block.expands.len();
+            if open_all {
+                for line in block.expands.keys() { block.opened.insert(*line); }
+            } else {
+                block.opened.clear();
+            }
+            if let Some(count) = self.counts.get_mut(index) { *count = None; }
+            self.dirty = true;
+            return Some(open_all);
+        }
         // A card's key IS its fold: the same press opens it and folds it back. A code block's key is
         // the pin, which is what keeps a LATER block from collapsing it.
         if !block.cards.is_empty() {
@@ -1504,6 +1519,39 @@ mod tests {
         let folded = t.view(60, 120).join("\n");
         assert!(folded.contains("ctrl+o to expand") && !folded.contains("value_60"),
             "back to the counting row: {folded}");
+    }
+
+    #[test]
+    fn ctrl_o_opens_a_folded_script_output_row_and_the_same_key_folds_it() {
+        // Victor 23/11: "script output should show 'script output · <n> chars' so we can expand". The
+        // row's own press opens it (expand_at); this key does the same thing to the newest block, and
+        // the same press folds it back, so "click or Ctrl+O" is one behaviour with two doors.
+        let mut t = plain(Transcript::default());
+        t.code_block();
+        t.expandable(&[(0, "value_01\nvalue_02\nvalue_03".to_string())]);
+        t.write("\u{23bf} script output \u{b7} 26 chars\n");
+        let folded = t.view(60, 20).join("\n");
+        assert!(folded.contains("script output"), "the folded row is drawn: {folded}");
+        assert!(!folded.contains("value_02"), "and its lines are not: {folded}");
+        assert_eq!(t.pin_toggle(), Some(true), "Ctrl+O opens the folded result");
+        let open = t.view(60, 20).join("\n");
+        assert!(open.contains("value_01") && open.contains("value_03"),
+            "the whole result is drawn in its place: {open}");
+        assert_eq!(t.pin_toggle(), Some(false), "and the same key folds it back");
+        let again = t.view(60, 20).join("\n");
+        assert!(again.contains("script output") && !again.contains("value_02"),
+            "back to the one row: {again}");
+    }
+
+    #[test]
+    fn a_block_without_a_folded_row_keeps_ctrl_o_as_its_pin() {
+        // The key still pins a code block that has no result line of its own: the new branch must not
+        // take the key away from every block.
+        let mut t = plain(Transcript::default());
+        t.code_block();
+        t.write("const x = 1;\n");
+        assert_eq!(t.pin_toggle(), Some(true), "Ctrl+O pins a block with nothing to fold");
+        assert_eq!(t.pin_toggle(), Some(false), "and the same key lets it go");
     }
 
     #[test]

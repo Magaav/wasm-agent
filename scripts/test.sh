@@ -2332,6 +2332,12 @@ rm -f "$DB.status.lua"
 # a ledger), no network: the provider's /usage is the test's stub.
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-status-midrun.lua" "$BIN" --db "$DB.status-midrun" | grep "status mid-run ok"
 
+# A SCRIPT'S BASH THAT CHANGED FILES DRAWS ITS CARD (chat-view-round-2, item 2): the watcher used to
+# sit after the managed-operation return of the bash branch, so every command a run block ran changed
+# files unseen, and `git status -uno` hid every file a command created. Its own scratch home and work
+# tree, no peer.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-script-bash-changes.lua" "$BIN" --db "$DB.script-bash-changes" | grep "script bash changes ok"
+
 # And the command itself must be wired to that report, and listed in help: a
 # module nobody can reach is not a command.
 "$BIN" --db "$SDB" status | grep -q "^node "

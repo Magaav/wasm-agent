@@ -657,10 +657,15 @@ end
 -- The rows of the operation's own output: stdout, or stderr when stdout is blank (a failed command
 -- answers through stderr), at most M.OPERATION_PREVIEW_ROWS non-blank lines. Returns those rows and
 -- how many non-blank lines were left out.
-function M.operation_preview(operation, width, o)
+function M.operation_preview(operation, width, o, failed_script)
   o = M.opts(o)
   local text = tostring(operation.stdout or "")
-  if text:gsub("%s", "") == "" then text = tostring(operation.stderr or "") end
+  local errors = tostring(operation.stderr or "")
+  if text:gsub("%s", "") == "" then text, errors = errors, "" end
+  -- A FAILED command's rows put its error first (Victor 23/11): the stderr of a script that exited
+  -- non-zero is the one thing the reader has to act on, and it used to be drawn only when stdout was
+  -- blank - a command that printed a line and then failed hid its own reason.
+  if failed_script and errors:gsub("%s", "") ~= "" then text = errors .. "\n" .. text end
   local rows, hidden = {}, 0
   for line in (text:gsub("\r\n", "\n") .. "\n"):gmatch("([^\n]*)\n") do
     if line:gsub("%s", "") ~= "" then
@@ -997,8 +1002,7 @@ end
 
 -- The rows under the calls: the value the script returned (a few rows, the rest counted), then where
 -- the evidence envelope went. Empty while the script runs - there is no answer yet.
-function M.tail_rows(model, width, options)
-  local o = M.opts(options)
+local function open_result_rows(model, width, o)
   width = math.max(20, tonumber(width) or 80)
   local rows = {}
   local value, value_hidden = M.result_rows(model, width, o)
@@ -1006,7 +1010,7 @@ function M.tail_rows(model, width, options)
   local operation = model.value ~= nil and M.operation_of(model.value) or nil
   local operation_rows, operation_hidden
   if operation then
-    value, value_hidden = M.operation_preview(operation, width, o), 0
+    value, value_hidden = M.operation_preview(operation, width, o, M.failed(model)), 0
     -- The fold under the preview is the WHOLE object as the node carried it (ids, paths, timing and
     -- all): never drawn by default, always explorable (Victor 21/11).
     operation_rows, operation_hidden = M.raw_rows(model.value, o), 0
@@ -1076,6 +1080,98 @@ function M.tail_rows(model, width, options)
   if evidence then
     for _, piece in ipairs(M.wrap(evidence, width - 3, o)) do rows[#rows + 1] = o.paint("  " .. piece, "dim") end
   end
+  return rows
+end
+
+-- 2,549 - the count in the shape a reader reads it in.
+local function thousands(count)
+  local text = tostring(math.max(0, math.floor(tonumber(count) or 0)))
+  local out = text:reverse():gsub("(%d%d%d)", "%1,"):reverse()
+  return (out:gsub("^,", ""))
+end
+
+-- How many CHARACTERS a text holds: its bytes minus the UTF-8 continuation bytes, so the `✓` or the
+-- `·` in a script's output is one character and not two or three.
+local function char_count(text)
+  local whole = tostring(text or "")
+  -- gsub answers the STRING with the matches removed (and a count, which is not the string): the
+  -- difference in length is how many continuation bytes there were, one per multi-byte character.
+  local without_continuation = (whole:gsub("[\128-\191]", ""))
+  return #without_continuation
+end
+
+-- DID THIS SCRIPT FAIL? A thrown error (no value), or an operation that came back with a non-zero exit
+-- or the node's own `failed` state. The same allow-list `M.operation_note` prints, so the row and the
+-- note cannot disagree about how a command ended.
+function M.failed(model)
+  if type(model) ~= "table" then return false end
+  if model.value == nil then return model.error ~= nil end
+  local operation = M.operation_of(model.value)
+  if operation then
+    local exit = operation.process_exit_code
+    if exit == nil then exit = operation.code end
+    if tonumber(exit) ~= nil and tonumber(exit) ~= 0 then return true end
+    if tostring(operation.state or "") == "failed" then return true end
+  end
+  return model.error ~= nil
+end
+
+-- The text a result IS, without colour: what a press shows, and what "2,549 chars" counts. An
+-- operation answers its own output (stdout, else stderr), a string is its own text, a table is the
+-- same pretty rows the preview draws.
+function M.result_text_of(model, o)
+  o = M.opts(o)
+  if type(model) ~= "table" then return "" end
+  if model.value ~= nil then
+    local operation = M.operation_of(model.value)
+    if operation then
+      -- The command's own output, whole: what it printed, then what it said on stderr when it said
+      -- anything there too. The count says "chars", so it counts every character the click shows.
+      local out = tostring(operation.stdout or "")
+      local errors = tostring(operation.stderr or "")
+      if out:gsub("%s", "") == "" then return errors end
+      if errors:gsub("%s", "") == "" then return out end
+      return out:gsub("\n$", "") .. "\n" .. errors
+    end
+    local value = M.decoded(model.value)
+    local text = M.result_text(model)
+    if text ~= nil then return tostring(text) end
+    if type(value) == "table" then
+      return table.concat(M.pretty(M.hide_evidence(M.readable(value, o)), o), "\n")
+    end
+    return tostring(value)
+  end
+  if model.error ~= nil then return tostring(model.error) end
+  return ""
+end
+
+-- THE RESULT, AS ONE ROW THE READER OPENS (Victor 23/11: "script output should show
+-- 'script output · <n> chars' so we can expand"). Every row the result would have printed is still
+-- built - it is exactly what the press shows - and the transcript draws ONE row for it. The preview
+-- it replaces measured six rows plus `… +N chars`, then a note saying the whole result was in
+-- /console, which is not the screen the reader is looking at.
+--
+-- A FAILED script is drawn OPEN, its error first and no press needed: a fold over a failure would hide
+-- the one thing the reader has to act on.
+function M.tail_rows(model, width, options)
+  local o = M.opts(options)
+  width = math.max(20, tonumber(width) or 80)
+  -- The rows are built as the reader WOULD see them without a fold (expandable off): this row IS the
+  -- fold, and folding twice would put one "... +N chars" row inside another.
+  local inner = {}
+  for key, value in pairs(o) do inner[key] = value end
+  inner.expandable = false
+  local open = open_result_rows(model, width, inner)
+  -- Nothing to fold, or no transcript to fold it into (a captured log, a pipe): the rows are the answer.
+  if not o.expandable or #open == 0 or M.failed(model) then return open end
+  -- What the press shows is the WHOLE result, not the preview: the open rows are capped (a table is cut
+  -- to M.RESULT_ROWS), and a fold that hid the same rows twice would be a second ceiling for no reason.
+  local text = M.result_text_of(model, o)
+  local whole = text ~= "" and text or table.concat(open, "\n")
+  local count = char_count(whole)
+  local rows = { o.paint("\226\142\191 ", "muted")
+    .. o.paint("script output \194\183 " .. thousands(count) .. " chars", "dim") }
+  rows.expand = { [1] = whole }
   return rows
 end
 
