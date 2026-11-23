@@ -201,3 +201,32 @@ The first round of this mission landed as `70b24e52` and its branch was deleted,
 which no longer existed. The fix branch was renamed back to `change/deploy-prunes-pins` (its commits unchanged)
 so the mission, its preflight and the branch a landing would merge are the same name again, and the "Follow-up
 23/11" section above is what that branch carries.
+
+## Preflight, 23/11 04:50Z: the row was a missing branch name, and the two red rows it revealed are main's
+
+`bash scripts/preflight.sh deploy-prunes-pins` (quick mode, the mission's own runner) first reported one
+row, `land-quick: no branch change/deploy-prunes-pins`. That was not code: the branch had landed as
+`70b24e52` and been deleted (see the section above), so the mission's branch name no longer existed. After
+the rename back it resolved the branch, merged it (`213d51547698`) and ran the gate: **410 checks, 2
+failed** - `undo-pty` and `undo-remote-pty`, with `16 ok, 1 failed` and `14 ok, 1 failed`.
+
+Neither row is this branch's, and the evidence is that main alone fails them in the same environment:
+
+| run | tree | result |
+| --- | --- | --- |
+| the preflight's gate (merged tree) | `213d5154` (main `da912828` + this branch) | `FAIL undo-pty` (16 ok, 1 failed), `FAIL undo-remote-pty` (14 ok, 1 failed) |
+| main's own health run, no branch of mine | `da912828`, its own freshly built binary | the same two rows, the same counts (`~/.wasm-agent/main-health/fast-da912828082d.log`) |
+| `WA_BIN=<installed> node scripts/test-undo-pty.mjs` in this worktree | `e9a42d20` + this branch | `undo pty: 17 ok, 0 failed` |
+| the same command in a worktree at main `da912828` | `da912828` | `undo pty: 17 ok, 0 failed` |
+| main `e9a42d20`'s recorded health run | `e9a42d20` | 410 checks, 0 failed (`~/.wasm-agent/main-health/fast-result-e9a42d203fa5.json`) |
+
+So the two rows are red on main `da912828` in the fast path's own environment (it stages `graph hooks memory
+selfloop mesh codemode svc-echo` and runs its own binary there), and green outside it in both trees - the
+regression arrived with the `graph-quarantine-at-install` landing, not with anything in this diff. Named
+here rather than touched: a red main is `wa land --fix-main` or another branch's fix, and no assertion of
+those rows was loosened to make this branch look green.
+
+This branch's own rows, re-run on the final commit: `scripts/test-deploy-pin-prune.mjs` 65 checks (0
+skipped), `scripts/test-landing-queue.mjs` 100 checks, `test-deploy-luafast-record.sh`,
+`test-deploy-policy-order.sh`, `test-deploy-ship.sh`, `check-deploy-shipped.mjs` (190), `sync-prompt-docs
+--check`, `check-instructions.mjs`, `test-direct-workflow-instructions.mjs`, `test-discriminates-test.mjs`.
