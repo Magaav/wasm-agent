@@ -207,7 +207,8 @@ because `scripts/fast-path.exclude` does not list it (a `test-*.lua` not listed 
   before it ran a single row (`scratch/fast.log` is 0 bytes), so nothing of this branch's fast run has a
   verdict. What WAS run, individually and green, on this node AFTER Fable's three changes:
   `test-secret-audit.lua` (48 checks, incl. the kill/restart proof), `test-contract-host.lua` (64 checks, 13
-  capabilities compared), `rs wa-capabilities append_file_tests` (1 passed), `test-redact-secrets.lua` (23),
+  capabilities compared), the whole `cargo test -p wa-capabilities` crate (387 passed, 0 failed, `HOME`=scratch
+  the way the gate runs it - `scratch/rust-full.log`), `test-redact-secrets.lua` (23),
   `test-redact-secrets.lua` (23), `test-telemetry-incremental.lua` (40 checks), `test-telemetry-lock-run.lua`,
   `test-telemetry-lock-holder.lua`, `test-hook-events.lua` (28), `test-durable-steering.lua`,
   `test-stalls.lua` (16); and the always-on contract checks the fast path runs, directly:
@@ -229,6 +230,18 @@ because `scripts/fast-path.exclude` does not list it (a `test-*.lua` not listed 
 * Out of scope, reported not changed: `lua/core/bash_mode.lua:69` (the operator's own `/bash` command) redacts
   a result with `redact.value` and records NO `secret_redacted` event - the same silence in a second path, a
   candidate for its own round.
+
+### What the harness caught on the way, and what it cost
+
+* The capability drift test (`capabilities::tests::documented_inventory_matches_the_live_registry`) went red as
+  soon as `append_file` was registered, and named the exact capability: `docs/HOST.md` carries a
+  hand-maintained inventory ("adding a capability is two edits: one entry in the registry, one row here"). The
+  row and a prose paragraph are in `docs/HOST.md` now, and that test is green.
+* Two rows of the same crate (`operations::await_returns_at_its_own_wait`,
+  `operations::adoption_survives_the_relay_deadline`) failed on my first run and passed on a second: they
+  REFUSE to run when `HOME` is the operator's ("this test starts real operations, so HOME must be a scratch or
+  temp directory ... scripts/test.sh runs it with HOME=$GATE_HOME"). Not a flake and not mine - they were run
+  the way the gate runs them and both pass.
 
 ## 6. Pre-existing failures (measured on the base, not mine)
 
