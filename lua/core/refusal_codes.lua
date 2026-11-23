@@ -505,7 +505,6 @@ return {
   ['tree_dirty']='remote_update.lua, update.lua',
   ['unknown_access_action']='access.lua',
   ['unknown_action']='tools.lua',
-  ['unknown_argument:']='tool_arguments.lua',
   ['unknown_caller']='binding.lua',
   ['unknown_capability']='capability_inventory.lua',
   ['unknown_component_param:']='spells.lua',
