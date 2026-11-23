@@ -1372,7 +1372,9 @@ M.start_notice = start_notice
 function M.deploy_refused(agent)
   local refused = type(agent) == "table" and agent.turn_refused or nil
   if type(refused) ~= "string" then return false end
-  return refused:find("deploy_wait", 1, true) == 1
+  -- Both sentences start with the same two words, spelled two ways: `deploy_waiting:` is
+  -- lua/core/deploy_wait.lua's and `deploy waiting:` is the pause's own (deploy_pause.say_wait).
+  return refused:match("^deploy[_ ]wait") ~= nil
 end
 
 function M.turn_ok(ok, agent)

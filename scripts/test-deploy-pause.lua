@@ -100,16 +100,18 @@ print(string.format("deploy pause: %d checks passed", checks))
 -- waits is the WAIT, not the run's failure; every other refusal stays the run's failure (unknown is not yes).
 local busy = { ok = false, error = "resource_busy",
   claim = { key = "session:0b8c9d78-cd2f-4270-b902-7c408377cec6", run = "ebf3d007-7fb1-4a2b-82cf-f5cee6e2211a" } }
-local waiting = function() return { to = "8082b42e1111", id = "1795341684727384607-2971842", since = now - 300,
+-- The marker reader is INJECTED (`opts.read`), the same seam every other case in this file uses: no filesystem,
+-- no node, no clock.
+local marker_read = function() return { to = "8082b42e1111", id = "1795341684727384607-2971842", since = now - 300,
   source = "request", bound_seconds = 600 } end
-local claimed_wait = pause.claim_wait(busy, now, { waiting = waiting })
+local claimed_wait = pause.claim_wait(busy, now, { read = marker_read })
 ok(type(claimed_wait) == "string" and claimed_wait:find("deploy_waiting", 1, true) == 1,
   "a claim held while a build waits is the wait, not the run's failure", tostring(claimed_wait))
-ok(claimed_wait:find("nothing was lost", 1, true) ~= nil,
+ok(claimed_wait:find("Nothing was lost", 1, true) ~= nil,
   "and it says nothing was lost, because nothing ran", tostring(claimed_wait))
-local claim_none = pause.claim_wait(busy, now, { waiting = function() return nil end })
+local claim_none = pause.claim_wait(busy, now, { read = function() return nil end })
 ok(claim_none == nil, "with no build waiting, a busy claim is the run's own failure again", tostring(claim_none))
-local other_problem = pause.claim_wait({ ok = false, error = "resource_store_failed" }, now, { waiting = waiting })
+local other_problem = pause.claim_wait({ ok = false, error = "resource_store_failed" }, now, { read = marker_read })
 ok(other_problem == nil, "another claim failure is not a deploy wait", tostring(other_problem))
-ok(pause.claim_wait({ ok = true }, now, { waiting = waiting }) == nil, "a claim that was granted is not a wait")
+ok(pause.claim_wait({ ok = true }, now, { read = marker_read }) == nil, "a claim that was granted is not a wait")
 print('deploy claim wait ok (' .. checks .. ' checks)')
