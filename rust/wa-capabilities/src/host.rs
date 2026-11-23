@@ -461,10 +461,11 @@ fn agent(url: &str) -> Result<ureq::Agent, String> {
 /// cancel from another thread wakes a silent read immediately, and the body
 /// budget still bounds a provider that never speaks at all.
 fn agent_for_call(url: &str) -> Result<ureq::Agent, String> {
-    if !crate::subagents::in_task() {
-        return agent(url);
-    }
     let (_, read, _) = http_timeouts();
+    // A child's call is bounded by its remaining budget and a foreground call by the request's own
+    // timeout. BOTH go through the shutdown-aware transport (change/esc-stops-now): the difference
+    // between a child and this process is who may shut the socket down - a task cancel, or the
+    // operator's Esc - never whether a silent read can be woken at all.
     let body = match crate::subagents::remaining_budget() {
         Some(remaining) => remaining.as_secs().clamp(1, read.max(1)),
         None => read,
@@ -478,13 +479,12 @@ fn agent_for_stream(url: &str, first_response_seconds: u64) -> Result<ureq::Agen
     let (_, read, respond) = http_timeouts();
     let read = read.min(first_response_seconds.max(1));
     let respond = respond.min(first_response_seconds.max(1));
-    if !crate::subagents::in_task() {
-        return Ok(build_config_with(url, read, respond)?.into());
-    }
     let body = match crate::subagents::remaining_budget() {
         Some(remaining) => remaining.as_secs().clamp(1, read.max(1)),
         None => read,
     };
+    // The same transport for a child and for this process (change/esc-stops-now): the provider read is
+    // where a run waits longest, so it is the one that must be wakeable by whoever interrupts it.
     Ok(crate::http_transport::agent(build_config_with(url, body, respond)?))
 }
 
@@ -504,6 +504,44 @@ pub fn set_run_cancel_probe(probe: fn() -> bool) {
 /// Ctrl+C on an empty line in `wa chat`: the terminal-side half of cancellation (there is no serve
 /// layer to register a probe in the CLI). Cleared when the next line is submitted.
 static CLI_INTERRUPT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// WHEN the reader raised that interrupt, in milliseconds since the epoch, and which key raised it
+/// (change/esc-stops-now, item 3). The stop itself is what a reader feels, so the keypress is its own
+/// record: without a stamp taken HERE, the ledger could only say when the interpreter next looked, and
+/// the whole of "how long did the stop take" would be invisible. 0 means no interrupt has been raised.
+static CLI_INTERRUPT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// 0 none, 1 Esc, 2 Ctrl+C, 3 a send-now line (Ctrl+Enter).
+static CLI_INTERRUPT_KEY: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+fn interrupt_key_name(code: u8) -> &'static str {
+    match code { 1 => "esc", 2 => "ctrl+c", 3 => "send-now", _ => "" }
+}
+
+/// Raise the CLI's interrupt as ONE act: the flag the interpreter reads, the moment it happened, and
+/// the socket a silent provider read is blocked on - shut down, so a stop does not wait for the
+/// provider's next byte (change/esc-stops-now, item 2). A flag alone cannot wake a blocked read; this
+/// is the mechanism a supervised child already had, in subagents::shutdown_sockets.
+fn raise_cli_interrupt(key: u8) {
+    CLI_INTERRUPT.store(true, std::sync::atomic::Ordering::SeqCst);
+    CLI_INTERRUPT_MS.store((epoch_seconds() * 1000.0) as u64, std::sync::atomic::Ordering::SeqCst);
+    CLI_INTERRUPT_KEY.store(key, std::sync::atomic::Ordering::SeqCst);
+    crate::subagents::shutdown_foreground_sockets();
+}
+
+/// A line was submitted, so whatever interrupt was raised belongs to the run that ended: the next one
+/// starts unleaded. The stamp clears with the flag, so a later cancelled run cannot inherit it.
+fn clear_cli_interrupt() {
+    CLI_INTERRUPT.store(false, std::sync::atomic::Ordering::SeqCst);
+    CLI_INTERRUPT_MS.store(0, std::sync::atomic::Ordering::SeqCst);
+    CLI_INTERRUPT_KEY.store(0, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// The interrupt the reader last raised, as (seconds since the epoch, key name), or None.
+fn cli_interrupt_stamp() -> Option<(f64, &'static str)> {
+    let millis = CLI_INTERRUPT_MS.load(std::sync::atomic::Ordering::SeqCst);
+    if millis == 0 { return None; }
+    Some((millis as f64 / 1000.0, interrupt_key_name(CLI_INTERRUPT_KEY.load(std::sync::atomic::Ordering::SeqCst))))
+}
 
 /// The one place the Enter / Ctrl+Enter difference is decided, so a test can hold it without a
 /// terminal: a send-now line raises the run's own interrupt ONLY while a run is in flight. Plain
@@ -2244,6 +2282,10 @@ struct TickerSpec {
     width: Option<usize>,
     /// When the current step began, for `{s}`; the run's start (`started`) when absent.
     step_started: Option<f64>,
+    /// When the model call now waiting for its first byte began, for the {w} token
+    /// (change/esc-stops-now, item 5). A provider that has said nothing for a minute is the one case
+    /// where the row's own clock is not the answer the reader wants: it counts the run, not this wait.
+    wait_started: Option<f64>,
 }
 
 struct Ticker {
@@ -2310,7 +2352,10 @@ fn ticker_render(spec: &TickerSpec, ticks: usize) -> String {
     let clock = ticker_duration(now - spec.started);
     let text = spec.line.replace("{m}", mark).replace("{t}", &clock)
         .replace("{s}", &ticker_step(now - spec.step_started.unwrap_or(spec.started)))
-        .replace("{T}", &ticker_clock(now - spec.started));
+        .replace("{T}", &ticker_clock(now - spec.started))
+        // The wait for the model's first byte, in the whole seconds the step clock uses. Absent, it draws
+        // zero rather than the run's age: a token with no wait behind it must not invent one.
+        .replace("{w}", &ticker_step(now - spec.wait_started.unwrap_or(now)));
     let width = spec.width.map(|width| console_size().map(|(cols, _)| width.min(cols as usize)).unwrap_or(width));
     match width {
         Some(width) if visible_width(&text) > width => {
@@ -2555,7 +2600,8 @@ fn parse_ticker_spec(text: &str) -> Option<TickerSpec> {
     let row = value.get("row").and_then(Value::as_u64).filter(|row| *row > 0).map(|row| row as u16);
     let width = value.get("width").and_then(Value::as_u64).filter(|width| *width > 0).map(|width| width as usize);
     let step_started = value.get("step_started").and_then(Value::as_f64);
-    Some(TickerSpec { line, marks, started, frame, row, width, step_started })
+    let wait_started = value.get("wait_started").and_then(Value::as_f64);
+    Some(TickerSpec { line, marks, started, frame, row, width, step_started, wait_started })
 }
 
 #[cfg(test)]
@@ -2563,11 +2609,11 @@ mod ticker_tests {
     use super::*;
 
     fn spec(line: &str, frame: usize) -> TickerSpec {
-        TickerSpec { line: line.to_string(), marks: vec!["one ".to_string(), "two ".to_string()], started: ticker_seconds(), frame, row: None, width: None, step_started: None }
+        TickerSpec { line: line.to_string(), marks: vec!["one ".to_string(), "two ".to_string()], started: ticker_seconds(), frame, row: None, width: None, step_started: None, wait_started: None }
     }
 
     fn rowed(line: &str, row: u16) -> TickerSpec {
-        TickerSpec { line: line.to_string(), marks: vec!["one ".to_string()], started: ticker_seconds(), frame: 0, row: Some(row), width: None, step_started: None }
+        TickerSpec { line: line.to_string(), marks: vec!["one ".to_string()], started: ticker_seconds(), frame: 0, row: Some(row), width: None, step_started: None, wait_started: None }
     }
 
     /// The same three values `scripts/test-cli-view.lua` pins for `cli_view.duration`:
@@ -3286,7 +3332,19 @@ fn stall_marker(error: &ureq::Error, first_response_seconds: u64) -> Option<Stri
     }
 }
 
+/// One provider stream, with the socket it was blocked on forgotten however it ended.
+///
+/// The transport registers that socket so an interrupt can wake a silent read
+/// (subagents::register_active_socket -> shutdown_foreground_sockets). Leaving it registered after the
+/// call returns would hand the next Esc a pooled connection that is no longer this call's, so every
+/// exit - the answered one, the refused one and the cancelled one - goes through here.
 fn stream_completion(l: *mut LuaState, method: &str, url: &str, headers: &[(String, String)], body: &str, first_response_seconds: u64) -> Result<Value, String> {
+    let outcome = stream_completion_inner(l, method, url, headers, body, first_response_seconds);
+    crate::subagents::clear_active_socket();
+    outcome
+}
+
+fn stream_completion_inner(l: *mut LuaState, method: &str, url: &str, headers: &[(String, String)], body: &str, first_response_seconds: u64) -> Result<Value, String> {
     use std::io::BufRead;
     let started = std::time::Instant::now();
     let mut ttft_ms: Option<u128> = None;
@@ -3307,6 +3365,10 @@ fn stream_completion(l: *mut LuaState, method: &str, url: &str, headers: &[(Stri
         request = request.header(key, value);
     }
     let response = request.send(body.as_bytes()).map_err(|error| {
+        // A stop is not a provider failure (change/esc-stops-now): the socket this send was reading was
+        // shut down by the interrupt, and reporting the transport's words for that made a stop look
+        // like a dead provider - and like one worth retrying.
+        if run_cancel_requested() { return "run_cancelled".to_string(); }
         // Keep the transport's own words - the retry predicates and the failure layer match on them -
         // and add the stall marker only where it is true (stall_marker above).
         match stall_marker(&error, first_response_seconds) {
@@ -3367,7 +3429,18 @@ fn stream_completion(l: *mut LuaState, method: &str, url: &str, headers: &[(Stri
             crate::subagents::clear_active_socket();
             return Err("run_cancelled".into());
         }
-        let line = line.map_err(|error| error.to_string())?;
+        let line = match line {
+            Ok(line) => line,
+            // The same rule for a read that ends because the interrupt shut the socket down: the stop is
+            // what happened, and the read error is only how the read found out.
+            Err(error) => {
+                if run_cancel_requested() {
+                    crate::subagents::clear_active_socket();
+                    return Err("run_cancelled".into());
+                }
+                return Err(error.to_string());
+            }
+        };
         let Some(data) = line.trim().strip_prefix("data:") else { continue };
         let data = data.trim();
         if data.is_empty() {
@@ -4707,8 +4780,8 @@ fn console_reader() {
                                 // A queued Enter never ends anything; a send-now line raises the run's
                                 // interrupt exactly while a run is in flight (a Ctrl+Enter at an idle
                                 // prompt is an ordinary Enter, and must not poison the next run).
-                                CLI_INTERRUPT.store(submit_interrupt(send_now, running),
-                                  std::sync::atomic::Ordering::SeqCst);
+                                if submit_interrupt(send_now, running) { raise_cli_interrupt(3); }
+                                else { clear_cli_interrupt(); }
                                 state.transcript.to_bottom();
                                 // The image tokens this draft carries, and only those: the next
                                 // draft starts with none, so `[Image #1]` typed into it is text.
@@ -4720,7 +4793,7 @@ fn console_reader() {
                             wa_term::terminal_editor::Action::Eof => { state.eof = true; state.running = false; break; }
                             // The editor put its own notice (`Interrupting…`) in the footer's place; the
                             // frame below draws it. The draft is never touched by Ctrl+C.
-                            wa_term::terminal_editor::Action::Interrupt => CLI_INTERRUPT.store(true, std::sync::atomic::Ordering::SeqCst),
+                            wa_term::terminal_editor::Action::Interrupt => raise_cli_interrupt(2),
                             // The draft's selection to the clipboard (Ctrl+C / Ctrl+Insert with text selected):
                             // OSC 52, the same write the transcript's copy icon makes.
                             wa_term::terminal_editor::Action::Copy(text) => {
@@ -4769,6 +4842,9 @@ fn console_reader() {
                     let pasting = state.panel.as_ref().map(|panel| panel.pasting())
                         .or_else(|| state.editor.as_ref().map(|input| input.pasting())).unwrap_or(false);
                     let escape = wa_term::keymap::console_escape();
+                    // Esc interrupts the run, as Ctrl+C does, and it does so as ONE act (see
+                    // raise_cli_interrupt): the flag, the stamp and the socket shutdown.
+                    let mut escape_interrupt = false;
                     if !state.eof && escape.is_some() && keys.last().copied() == escape && !pasting && !byte_ready(120) {
                         if let Some(panel) = state.panel.as_mut() { panel.escape(); }
                         else if let Some(nav) = state.nav.as_mut() {
@@ -4780,11 +4856,14 @@ fn console_reader() {
                             // Bash mode is left the same way, never interrupting the run.
                             let menu_open = input.menu_rows() > 0 || input.bash;
                             input.escape();
+                            // The interrupt is raised after the editor's own borrow ends, because raising it
+                            // also shuts a socket down and cannot run under a borrow of this state.
                             if !menu_open && input.status {
-                                CLI_INTERRUPT.store(true, std::sync::atomic::Ordering::SeqCst);
                                 input.notice = "Interrupting\u{2026}".into();
+                                escape_interrupt = true;
                             }
                         }
+                        if escape_interrupt { raise_cli_interrupt(1); }
                     }
                     // An answer to a panel this thread owns. `/status` closes on it; a published
                     // balloon walks its stack - draw the next page, go back, close, or queue the
@@ -5945,7 +6024,16 @@ pub extern "C-unwind" fn input_take(l: *mut LuaState) -> c_int {
     let (eof, running) = (state.eof, state.running);
     if !lines.is_empty() && sync_queued(&mut state) { redraw_bottom(&mut state); }
     drop(state);
-    push_json(l, &json!({"lines": lines, "now": now, "at": at, "eof": eof, "running": running}));
+    // THE KEY THAT STOPPED A RUN travels beside its lines (change/esc-stops-now, item 3): interrupt_at
+    // is the moment the reader pressed Esc (or Ctrl+C, or sent a line early) as the host stamped it,
+    // and interrupt_key says which key - null and "" when nothing has been raised. A caller writes the
+    // ledger row from these, so the record of a stop starts at the key and not at the run's end.
+    let (interrupt_at, interrupt_key) = match cli_interrupt_stamp() {
+        Some((at, key)) => (json!(at), json!(key)),
+        None => (Value::Null, json!("")),
+    };
+    push_json(l, &json!({"lines": lines, "now": now, "at": at, "eof": eof, "running": running,
+        "interrupt_at": interrupt_at, "interrupt_key": interrupt_key}));
     1
 }
 

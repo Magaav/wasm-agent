@@ -102,7 +102,14 @@ function M.arrived(timeout_ms, deps)
       ats[#ats + 1] = type(answer.at) == "table" and tonumber(answer.at[index]) or nil
     end
   end
-  return lines, answer.eof and true or false, answer.running and true or false, kinds, ats
+  -- THE KEY THAT STOPPED A RUN, when the host has one (change/esc-stops-now, item 3): the moment the
+  -- reader pressed Esc (or Ctrl+C, or sent a line early), stamped by the host where it saw the key, and
+  -- which key it was. nil on a host older than this field, which is "cannot say", never "just now".
+  local interrupt = nil
+  if tonumber(answer.interrupt_at) then
+    interrupt = { at = tonumber(answer.interrupt_at), key = tostring(answer.interrupt_key or "") }
+  end
+  return lines, answer.eof and true or false, answer.running and true or false, kinds, ats, interrupt
 end
 
 local METHODS = {}
@@ -198,6 +205,25 @@ function METHODS:poll(timeout_ms)
     return entry.text, self.eof, entry.at
   end
   return nil, self.eof
+end
+
+-- The interrupt the reader last raised, as (key, when the host saw it), or nil.
+--
+-- Asked with a ZERO wait, and the lines that answer carries are KEPT exactly as poll keeps them, so a
+-- line typed in the same moment as the key cannot be lost by asking. The caller writes one ledger row
+-- from it (lua/core/chat.lua): a stop's record then starts at the key, not at the run's end, which is
+-- the number a reader feels and the number nothing used to record (change/esc-stops-now, item 3).
+function METHODS:interrupt()
+  if not self.supported or self.reader_off then return nil end
+  local lines, eof, _, kinds, ats, interrupt = M.arrived(0, self.deps)
+  if not lines then return nil end
+  for index, line in ipairs(lines) do
+    self.pending[#self.pending + 1] = { text = line, now = kinds and kinds[index] == true or false,
+      at = ats and ats[index] or nil }
+  end
+  if eof then self.eof = true end
+  if not interrupt then return nil end
+  return interrupt.key, interrupt.at
 end
 
 -- Take complete, ordinary messages for the current run at a model-round boundary.

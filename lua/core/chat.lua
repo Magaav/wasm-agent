@@ -624,6 +624,23 @@ function M.run(argv)
   -- the same wake twice. Assigned after `mark_seen` exists; `turn` only calls it when it is set.
   local wake_if_due
 
+  -- THE KEY THAT STOPPED A RUN, AS ITS OWN ROW (change/esc-stops-now, item 3). This interpreter is
+  -- blocked inside the run when the reader presses Esc, so the HOST stamps the moment it saw the key;
+  -- this writes that stamp, not the moment it is written, which is what makes "how long did the stop
+  -- take" a number the ledger can answer afterwards. Written where a cancelled run ends (below) and
+  -- again at the prompt (read_line), deduped by the stamp so one key is one row.
+  local interrupt_recorded = nil
+  local function record_interrupt()
+    if not (input and input.interrupt) then return end
+    local key, at = input:interrupt()
+    if not at or at == interrupt_recorded then return end
+    interrupt_recorded = at
+    pcall(function()
+      return dofile('lua/core/telemetry.lua').event(agent.session_id, '', '', 'input', 'interrupt',
+        { source = 'cli', key = key or '' }, at)
+    end)
+  end
+
   local function turn(line, at)
     -- THE KEYPRESS, AS THE HOST SAW IT (change/chat-start-guard, item 3). at is the moment the reader
     -- pressed Enter - NOT the moment this interpreter was handed the line, which is later whenever the CLI
@@ -670,6 +687,9 @@ function M.run(argv)
     end
     local ok, reply = pcall(agent.run, agent, line, #images > 0 and images or nil)
     if not ok then
+      -- A STOP IS A STOP: if this run came back cancelled, its key is recorded here, at the end of the
+      -- run it ended, before anything else can go wrong (change/esc-stops-now, item 3).
+      if tostring(reply):find('run_cancelled', 1, true) then record_interrupt() end
       view:failed(redact.text(tostring(reply)))
     else
       -- The view prints the reply when nothing streamed (an error before the first
@@ -879,6 +899,7 @@ function M.run(argv)
   local function read_line()
     view:prompt()
     while true do
+      record_interrupt()
       restart_if_due()
       catch_up()
       idle_refresh()

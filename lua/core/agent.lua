@@ -2922,6 +2922,9 @@ function M:run_body(text, images)
     -- call ended the run with `empty_reply` on the first attempt and never asked again.
     local function retryable(value)
       if not ok then
+        -- A stop is not a failure to replay (change/esc-stops-now, item 4): the reader asked for it, so
+        -- the loop below never runs and no provider_retry row is written for a cancellation.
+        if provider.is_cancellation(tostring(value)) then return false end
         -- A lost link is retryable by definition (nothing was sent); an unclassified provider failure
         -- is retried a bounded number of times; everything else keeps the opt-in transient policy.
         return provider.is_connection_lost(tostring(value))
@@ -2954,6 +2957,7 @@ function M:run_body(text, images)
     -- A provider failure that matches no known class is NOT final: it takes a bounded budget and then
     -- fails by NAME, because "not in my tables" is not a judgement about the request (brief item 3).
     local unknown_failure = (not ok) and not connection_lost and not rate_limited
+      and not provider.is_cancellation(tostring(result))
       and provider.is_unknown_failure(tostring(result))
     -- An empty stop (a reply with no text, no reasoning and no tool call) is its own bucket: it is
     -- not an ambiguous transport failure, it is the turn failing to produce anything at all, and it

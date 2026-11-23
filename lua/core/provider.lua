@@ -1143,6 +1143,22 @@ function M.is_final(problem)
   return false
 end
 
+-- A STOP IS NOT A FAILURE (change/esc-stops-now, item 4). The provider call reports the reader's own
+-- interrupt as an error like any other, and the retry classifier below treats an unrecognised
+-- provider_error as worth five replays: measured 23/11, a cancelled call wrote a provider_retry
+-- "attempt 1 ... reason run_cancelled, wait_ms 1151" before the run could end, which is a stop taking
+-- longer than the answer it stopped. The two codes a cancellation path raises are named here, so every
+-- caller asks one question and no caller replays a stop.
+local CANCELLATION_CODES = { "run_cancelled", "subagent_cancelled" }
+
+function M.is_cancellation(problem)
+  local text = tostring(problem or "")
+  for _, code in ipairs(CANCELLATION_CODES) do
+    if text:find(code, 1, true) then return true end
+  end
+  return false
+end
+
 -- A provider failure that matches NO known class. It still says "provider", so it is not an internal
 -- guard or a cancellation; the agent retries it a bounded number of times (M.unknown_retries) and
 -- then fails by name, instead of dying on the first attempt as an unnamed provider_error.
