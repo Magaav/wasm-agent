@@ -101,6 +101,13 @@ wa serve --port 8799
 The node registers, heartbeats every 60s, and any master can resolve it by
 `node_id`.
 
+A node that does NOT serve cannot call anybody, and now hears why. `GET /nodes` is answered only to a
+node the registry can verify, and the registry learns a node's key when that node registers - so a caller
+with no registration gets **401 `unknown_node`** on its own roster read. `wa call` names that case
+`not_registered:<peer>` with the fix (`wa serve`, which registers and heartbeats) instead of the
+`roster_unavailable` that an unreachable registry produces: measured 23/11, a scratch caller that never
+served spent 120 s and 240 attempts reading a network problem's name.
+
 ## Binding an existing personal CLI
 
 `/bind` uses an explicit signed pending request and administrator acceptance,
