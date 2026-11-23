@@ -48,8 +48,16 @@ mkdir -p "$repo"
 # THE REAL TREE under test: the Lua modules the inventory scans, the generator, the runner and the registry.
 cp -a "$root/lua" "$repo/lua" || fail "cannot copy lua/ into the replay"
 mkdir -p "$repo/scripts" "$repo/rust/wa-capabilities"
-cp "$root/scripts/gen-refusal-codes.lua" "$root/scripts/regenerate.sh" "$root/scripts/generators.txt" "$repo/scripts/" \
+cp "$root/scripts/gen-refusal-codes.lua" "$root/scripts/regenerate.sh" "$repo/scripts/" \
   || fail "cannot copy the generator and the runner into the replay"
+# THE REPLAY'S OWN REGISTRY, one line: this row replays ONE generator - the refusal inventory, over a copy
+# of lua/ and rust/wa-capabilities/src - so it declares that one. It copied the tree's registry until
+# 22/11, which was the same thing while the tree had one generator; the second one (scripts/gen-wit-deps.lua,
+# the vendored WIT copies) made this replay run a generator whose script it does not carry, so the merge
+# sequence below saw `regenerate: FAILED` and a changed_count of 1 on a tree nothing had touched. The
+# tree's own registry is judged at the END of this row, with the real lines and the two exclusions.
+printf '%s\n' 'lua/core/refusal_codes.lua = lua5.4 scripts/gen-refusal-codes.lua --write' > "$repo/scripts/generators.txt" \
+  || fail "cannot write the replay's registry"
 cp -a "$root/rust/wa-capabilities/src" "$repo/rust/wa-capabilities/src" || fail "cannot copy rust/wa-capabilities/src"
 cd "$repo" || fail "cannot cd into the replay"
 git_c init -q -b main . || fail "git init"
@@ -64,7 +72,16 @@ ok
 out=$(bash scripts/regenerate.sh --outputs)
 grep -qx 'lua/core/refusal_codes.lua' <<< "$out" || fail "the registry does not declare the inventory as an output: $out"
 ok
-[ "$(printf '%s\n' "$out" | grep -c .)" = 1 ] || fail "--outputs printed more than the one declared output: $out"
+# EXACTLY the outputs the registry's lines name: every one, once, and nothing else. This compared the
+# count with 1 until 22/11, when scripts/generators.txt grew a second generator (scripts/gen-wit-deps.lua,
+# the vendored WIT copies) and the count went red on main - the rule was never "one output", it was "what
+# the registry declares", which the set comparison below says for any number of generators. The registry
+# is read with the runner's own pattern and split by its own rule (the spec before " = ", comma separated),
+# so a runner that printed one output twice or invented a path still fails here.
+declared=$(sed -n '/^[[:space:]]*[^#[:space:]]/p' scripts/generators.txt | sed -n '/ = /p'   | sed 's/ = .*$//' | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^$' | LC_ALL=C sort)
+[ -n "$declared" ] || fail "the registry declares no output at all, so the comparison below would be vacuous"
+printed=$(printf '%s\n' "$out" | grep -v '^$' | LC_ALL=C sort)
+[ "$printed" = "$declared" ] || fail "--outputs did not print exactly the outputs the registry declares: $(diff <(printf '%s\n' "$declared") <(printf '%s\n' "$printed") | head -4)"
 ok
 
 # ---- the replay: two branches, one refusal code each, in DIFFERENT modules, each green alone -----------
@@ -188,6 +205,16 @@ grep -q 'gen-balloon' <<< "$commands" && fail "a balloon golden is registered as
 ok
 grep -q 'sync-prompt-docs.sh --write' <<< "$commands" \
   && fail "sync-prompt-docs is registered: it writes whatever the installed wa produces, not what this tree does"
+ok
+# AND IT PRINTS EXACTLY WHAT IT DECLARES, once each: the same set comparison the replay makes of its own
+# one-line registry, here over the real one. `--outputs` reads the registry and never runs a generator, so
+# this holds for every generator the tree declares whether or not this row can run it.
+tree_printed=$(bash scripts/regenerate.sh --outputs | grep -v '^$' | LC_ALL=C sort)
+tree_declared=$(sed -n '/^[[:space:]]*[^#[:space:]]/p' scripts/generators.txt | sed -n '/ = /p' \
+  | sed 's/ = .*$//' | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^$' | LC_ALL=C sort)
+[ -n "$tree_declared" ] || fail "scripts/generators.txt declares no output, so this comparison would be vacuous"
+[ "$tree_printed" = "$tree_declared" ] \
+  || fail "--outputs does not print exactly the outputs this tree's registry declares: $(diff <(printf '%s\n' "$tree_declared") <(printf '%s\n' "$tree_printed") | head -4)"
 ok
 
 echo "test-regenerate ok ($checks checks)"
