@@ -57,9 +57,11 @@ row: five rows by subject, sharing one harness.
 | | | | **178** |
 
 The one row was 178 checks; the five parts are 178 checks, measured, so nothing was dropped, and no watchdog
-bound was touched. The shared harness is `scripts/lib/land-quick.lua` (commit 0e620a1b): the fixture, the
-scripted sentinel/health/fast-path routes, the print capture and the scratch-home `arm()` that every part calls
-before it writes a ledger row.
+bound was touched. The same holds assertion by assertion - counted over `git show 3bbf9220:scripts/test-land-quick.lua`
+against the five files: `ok(` 26 = 26, `eq(` 68 = 68, `contains(` 48 = 48, and `must(` 27 = 12 in the parts + 15
+in the shared harness, which is where the fixture's own commands now live. The shared harness is
+`scripts/lib/land-quick.lua` (commit 0e620a1b): the fixture, the scripted sentinel/health/fast-path routes, the
+print capture and the scratch-home `arm()` that every part calls before it writes a ledger row.
 
 **Wired where (rule 3):** all five are never-dropped core rows in `scripts/lib/fast-rows.sh`
 (`wa_fast_core_rows`, commit 0e620a1b) - a narrowed run cannot drop one - and `scripts/test-fast-rows.sh`
@@ -88,10 +90,12 @@ it. Every part's "1 process(es)" would now be a row finished long before the wat
 
 ## Not done, not claimed
 
-- I did not run the whole fast path or `scripts/main-health.sh` to completion here (the suite lock was held by
-  other missions for most of this round). The narrowed fast-path run over the five parts is the check that the
-  parts are green under the real runner, the real per-row watchdog and the tree's own binary; its result is in
-  `scratch/fast-quick.log` and is reported in the answer.
+- I did not run the whole fast path or `scripts/main-health.sh` here, and the narrowed fast-path run I queued
+  did not execute either: `flock -o ~/Work/missions/.suite.lock` (rule 15) had six suites in front of it and the
+  holder was still running after 36 minutes, so I cancelled it rather than leave it queued. What ran instead is
+  the same machinery one level down - `scripts/lib/fast-row-exec.sh`'s `lua_run` and
+  `scripts/lib/fast-watchdog.sh`'s 120 s deadline, five rows at once, the tree's binary (section above). The
+  end-to-end verdict (`scripts/main-health.sh` green) is Victor's to take on the landed commit.
 - The sibling finding (`undo-pty` and `undo-remote-pty` each failing one check in fast.sh since e9a42d20) is
   not investigated here: those rows belong to the remote-undo-works mission. The measurements above give one
   hint only - both are pty rows that drive the real binary, and this machine's rows are much slower per
