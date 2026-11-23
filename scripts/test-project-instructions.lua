@@ -56,5 +56,63 @@ ok(same_title[1].path == global_path and same_title[1].text:find("SAME_TITLE_GLO
   "a global file sharing a project file's title is still the user's and is injected first")
 if had then host.write_file(global_path, had) else sh("rm -f '" .. global_path .. "'") end
 
+-- ONE TEXT, ONE FRAME (mission project-instructions-once, 23/11). The walk above is right for a
+-- monorepo and wrong for the shapes that copy one file into two ancestors: a worktree placed inside its
+-- parent checkout, a copied tree, a symlink. Before the change both copies were injected - measured on
+-- this node, a 27,540-byte prompt carried two byte-identical 6,924-byte copies. Now a file whose content
+-- is byte-identical to one already read is carried once, the copy nearest the workdir is the one kept,
+-- and the skipped path is named in the frame's attribute (never in prose the model reads).
+local same_root, same_work = base .. "/dup/repo", base .. "/dup/repo/pkg/app"
+sh("mkdir -p '" .. same_work .. "'")
+assert(host.write_file(same_root .. "/AGENTS.md", "# Same rules\nSAME_TEXT\n"))
+assert(host.write_file(same_work .. "/AGENTS.md", "# Same rules\nSAME_TEXT\n"))
+local same_text = agent.project_instructions("master", same_work)
+local copies, kept = 0, nil
+for _, file in ipairs(same_text) do
+  if file.text:find("SAME_TEXT", 1, true) then copies = copies + 1; kept = file end
+end
+ok(copies == 1, "two byte-identical ancestor files are one frame, got " .. copies)
+ok(kept and kept.path == same_work .. "/AGENTS.md", "the copy nearest the workdir is the one kept")
+ok(kept and table.concat(kept.same_text_as or {}, ",") == same_root .. "/AGENTS.md",
+  "the skipped path is named on the kept file")
+local same_sections = agent.system_sections("master", same_text, same_text[#same_text].path, {}, "full", { workdir = same_work })
+ok(select(2, same_sections.project:gsub("<project_instructions ", "")) == #same_text, "one frame per kept file")
+ok(same_sections.project:find('<project_instructions path="' .. same_work .. '/AGENTS.md" same_text_as="'
+  .. same_root .. '/AGENTS.md">', 1, true), "the skipped path rides the frame attribute the model reads")
+ok(select(2, same_sections.project:gsub("SAME_TEXT", "")) == 1, "the same text reaches the prompt once")
+
+-- Two DIFFERENT files at the same depths are both kept, root-first: the rule is about bytes, not depth.
+ok(select(2, sections.project:gsub("OUTER_KEEP", "")) == 1 and select(2, sections.project:gsub("INNER_KEEP", "")) == 1,
+  "two different files are both carried, once each")
+
+-- Two paths that resolve to one real file (a symlink) are one frame too: the loader compares what it
+-- read, so it does not need the paths to look alike.
+local link_root = base .. "/link"
+sh("mkdir -p '" .. link_root .. "/pkg'")
+assert(host.write_file(link_root .. "/AGENTS.md", "# Linked\nLINK_TEXT\n"))
+sh("ln -s '../AGENTS.md' '" .. link_root .. "/pkg/AGENTS.md'")
+local linked = 0
+for _, file in ipairs(agent.project_instructions("master", link_root .. "/pkg")) do
+  if file.text:find("LINK_TEXT", 1, true) then linked = linked + 1 end
+end
+ok(linked == 1, "a symlinked instruction file is read once, got " .. linked)
+
+-- A git worktree placed INSIDE its parent checkout: the worktree carries the same AGENTS.md as the repo
+-- above it, which is the shape measured on this node (checkout/ inside wasm-agent/).
+local parent = base .. "/parent"
+sh("mkdir -p '" .. parent .. "' && cd '" .. parent .. "' && git init -q ."
+  .. " && printf '# Rules\nWT_TEXT\n' > AGENTS.md && git add -A"
+  .. " && git -c user.email=t@example.invalid -c user.name=t commit -qm init"
+  .. " && git worktree add -q '" .. parent .. "/wt' HEAD")
+local in_worktree = agent.project_instructions("master", parent .. "/wt")
+local wt_copies, wt_kept = 0, nil
+for _, file in ipairs(in_worktree) do
+  if file.text:find("WT_TEXT", 1, true) then wt_copies = wt_copies + 1; wt_kept = file end
+end
+ok(wt_copies == 1, "a worktree inside its parent checkout reads one copy, got " .. wt_copies)
+ok(wt_kept and wt_kept.path == parent .. "/wt/AGENTS.md", "the worktree's own file is the one kept")
+ok(wt_kept and table.concat(wt_kept.same_text_as or {}, ",") == parent .. "/AGENTS.md",
+  "the parent checkout's copy is named as the skipped one")
+
 sh("rm -rf '" .. base .. "'")
 print("project instructions ok (" .. checks .. " checks, 0 skipped)")

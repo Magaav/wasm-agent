@@ -7,7 +7,12 @@
 --   catalogue        declared tool count per role (the whole catalogue a role may use)
 --   envelope         the tools the model is SHOWN for an empty master session, by name
 --   envelope_bytes   the exact JSON bytes of that declaration array (what the request carries)
---   system_bytes     the exact system-prompt bytes for that session
+--   system_bytes     the system message's CONTENT bytes: the exact string the model reads (the
+--                    code-mode block is already inside it when code mode is on)
+--   system_wire_bytes the same message JSON-encoded, which is what the ledger's
+--                    harness_events prompt_shape.system_bytes counts (lua/core/telemetry.lua:185-211,
+--                    `encoded = #json.encode(message)`): quotes and escapes are ~350 B on a 20 KB
+--                    prompt, so the probe's number and the ledger's are never compared to each other
 --   prompt_bytes     system_bytes + the serialized declaration array (the prompt half of the request)
 --   codemode_bytes   the routing block appended to the system prompt when code mode is on
 --   retired          per-name bytes of each retired schema, measured from the base when present
@@ -49,6 +54,7 @@ local bot=agent.new(sid,function() end,'master','master','')
 local ok,messages=pcall(function() return bot:build_context() end)
 if ok and type(messages)=='table' and messages[1] then
   out.system_bytes=#tostring(messages[1].content or '')
+  out.system_wire_bytes=#json.encode(messages[1])
   out.prompt_bytes=out.system_bytes+out.envelope_bytes
   local block=dofile('lua/core/codemode_policy.lua').prompt(tools.all('master',ctx,memory))
   out.codemode_bytes=#tostring(block or '')
