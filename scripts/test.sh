@@ -325,6 +325,11 @@ gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-gr
 # per-component kv through `wa-queue`, `wa-bus` and `wa-state` (docs/QUEUE.md item 1, docs/BUS.md
 # "Retention", docs/STATE.md). It has no wasmtime in it, so it runs here beside the other crates.
 gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-kv
+# The grant policy's own crate: what a rule means, what a check answers and what the audit keeps.
+# Until 23/11 it ran in no row at all, which is how policies/default.json came to refuse two keys the
+# wa-whatsapp component writes on every settle (queue, holds) with nothing red anywhere. One of its
+# tests now holds the shipped file against that component's own write sites.
+gate_run cargo test --offline --manifest-path rust/Cargo.toml -p wa-grant-policy
 # Queue phase 2 (docs/QUEUE.md, "Phase 2"): the request payload, the signed worker envelope with its
 # admission rules, the remote-first preference policy and the two-node simulation (two queues, two
 # clocks and a relay in one process). No wasmtime in it, so it runs here beside the other crates.

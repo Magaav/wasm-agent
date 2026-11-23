@@ -737,13 +737,17 @@ else
   # r1 item 5): a change there decides the anchors of every other rust row, and until now the fast path
   # never ran its own tests at all - the row list is explicit, so a crate left out of it is a crate
   # whose tests do not run however it changed.
+  # wa-grant-policy decides what every other component may do, and its tests ran in no row at all until
+  # 23/11: that is how policies/default.json came to refuse queue and holds, the two keys the
+  # wa-whatsapp component writes on every settle, with nothing red anywhere. One of its tests now holds
+  # the shipped policy against that component's own write sites.
   # wa-keystore is the crate every other vault row depends on and the one whose decisions are invisible
   # from above it: which protection wraps the root key, what a wrapped-root file is read as, and what a
   # kernel-keyring refusal means. Its tests are seconds (a leaf with ring/chacha20/argon2), and until now
   # they ran nowhere in the fast path - which is how two defects in it reached a landing (13/11: the key
   # quota leak behind `keystore_keyring_unavailable`, and a wrapped root read with the wrong cipher behind
   # `sealed_blob_version_unknown`).
-  for crate in wa-sqlite wa-host wa-host-support wa-governance wa-term wa-rendezvous wa-kernel-runtime wa-capabilities wa-operation wa-jobs wa-graph wa-sentinel wa-whatsapp-outbox wa-whatsapp-index wa-mesh wa-stt-remote wa-model-gateway wa-tool-progress wa-model-router wa-fleetview wa-keystore wa-tls; do
+  for crate in wa-sqlite wa-host wa-host-support wa-governance wa-term wa-rendezvous wa-kernel-runtime wa-capabilities wa-operation wa-jobs wa-graph wa-sentinel wa-whatsapp-outbox wa-whatsapp-index wa-mesh wa-stt-remote wa-model-gateway wa-tool-progress wa-model-router wa-fleetview wa-keystore wa-tls wa-grant-policy; do
     # A HERE-STRING, NOT A PIPE (measured 19/11: under \`set -o pipefail\`, \`printf | grep -q\` fails about 0.15% of the
     # time - grep exits at the first match and printf dies of SIGPIPE - and here that silently DROPS a crate from the
     # run, so the fast path tested less than it said. Measured: 3 false failures in 2000 calls.)

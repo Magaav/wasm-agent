@@ -417,3 +417,47 @@ fn target_mode_controls_what_the_trail_says() {
     assert_eq!(records[1].target, "chat:self");
     assert_eq!(audit_target(TargetMode::Digest, "chat:self").len(), 7 + 32);
 }
+
+/// `policies/default.json` must allow every key the `wa-whatsapp` component writes to its own kv.
+///
+/// The list below is the component's own write sites, one line each, so the change that adds a key is
+/// the change that adds it here. On 23/11 two of them were missing - `queue` (the durable outbox part,
+/// B3's port) and `holds` (the unproven-mutation chat holds) - and every write was answered
+/// `kv.write -> deny(target_not_allowed)` on openclaw (`~/.wasm-agent/audit/grant-policy.jsonl`, 62
+/// refusals from 21/11 15:58 to 23/11 12:10, `target` a digest only: `sha256:00b109cf...` is the
+/// sha256 of "queue" and `sha256:3b97260d...` of "holds"). A reserved outbox part and a held chat were
+/// therefore never persisted, and the audit could not name the key that was refused.
+///
+/// A key that is written but not allowed is a refusal the component cannot see the reason for, so this
+/// is a test of the *shipped* file (`policies/default.json`), not of the example beside this crate.
+#[test]
+fn the_shipped_node_policy_allows_every_durable_key_the_whatsapp_component_writes() {
+    const NODE_POLICY: &str = include_str!("../../../policies/default.json");
+    // (wa-whatsapp/src/<file>:<line>, the key that site builds with a real-looking value)
+    const WRITES: &[(&str, &str)] = &[
+        ("store.rs:101", "dev"),
+        ("store.rs:189", "id/5511999999999@s.whatsapp.net"),
+        ("store.rs:203", "ses/5511999999999@s.whatsapp.net"),
+        ("store.rs:217", "pk/0123456789abcdef"),
+        ("store.rs:243", "spk/5511999999999@s.whatsapp.net"),
+        ("store.rs:257", "sk/5511999999999@s.whatsapp.net"),
+        ("store.rs:275", "sync/0123456789abcdef"),
+        ("store.rs:282", "ver/critical_unblock_low"),
+        ("macshards.rs:53", "mac/control~0"),
+        ("store.rs:338", "lid/12345678901234@lid"),
+        ("store.rs:375", "tc/5511999999999@s.whatsapp.net"),
+        ("guest.rs:540", "tx/5511999999999@s.whatsapp.net/3EB0ABCDEF"),
+        ("guest.rs:554", "fence/3EB0ABCDEF"),
+        ("guest.rs:677", "queue"),
+        ("guest.rs:680", "holds"),
+        ("index.rs:44", "ix/r/5511999999999@s.whatsapp.net/3EB0ABCDEF"),
+    ];
+    let mut engine = Engine::new(PolicySet::parse(NODE_POLICY).expect("policies/default.json parses"));
+    for (site, key) in WRITES {
+        let decision = engine.check("wa-whatsapp", "kv.write", Some(key), T0);
+        assert!(
+            decision.is_allow(),
+            "{site} writes {key}, and the node's policy refuses it: {decision:?}"
+        );
+    }
+}
