@@ -261,12 +261,20 @@ codes a peer call can return are unchanged.
   `not_registered` proof ran against a scratch rendezvous and scratch nodes on loopback.
 * The dispatch bound is a *count* of `host.operation` calls, not a wall-clock assertion: timing rows flake
   under this node's load, and the count is the thing the cut changed.
-* **The full fast path is green on this branch.** `flock -o ~/Work/missions/.suite.lock bash
-  scripts/fast.sh` (queued ~55 minutes behind four other suites on the shared lock, then run): **423 checks,
-  0 failed, 0 skipped, 801 s**, and it rebuilt the two crates this branch touches
-  (`wa-capabilities` 170.8 s, `wa-host-support` 8.2 s) before running them. The four new rows ran inside
-  it: `test-network-not-registered` 173 ms, `test-remote-call-bound` 1,992 ms,
-  `test-roster-sample-quick` 480 ms, `test-tool-dispatch-cost` 677 ms - all pass.
-  The board's row was NOT re-measured after the last two commits (`d51b614e` clears three marks the answer
-  carried; `192613ea`, `a91c7b99` are reports): they change no dispatch and no sample, so the 219 ms row
-  above stands, but that is reasoning, not a measurement.
+* **The full fast path is green on this branch** (before the review-r1 fix):
+  `flock -o ~/Work/missions/.suite.lock bash scripts/fast.sh` - **423 checks, 0 failed, 0 skipped,
+  801 s**, having rebuilt the two crates this branch touches (`wa-capabilities` 170.8 s,
+  `wa-host-support` 8.2 s) before running them.
+* **A narrowed fast path is green after the review-r1 fix** (`6ff20cea`, the commit Fable asked for):
+  `WA_FAST_ROWS=<the 56 rows whose paths this branch touches> bash scripts/fast.sh` - **150 checks,
+  0 failed, 0 skipped, 523 s**, 64 Lua rows (my 56 plus the 8 never-dropped core rows) and every contract
+  check. My four rows ran inside both runs. The narrowed run's first attempt was REFUSED by
+  `scripts/lib/fast-rows.sh` because my request named `test-orchestration-routing.lua`, a row the runner
+  cannot execute - the refusal is by name, and the rerun with the 56 real candidates is the one quoted
+  here.
+* **Preflight is green and judged the MERGE, not the gate**: `WA_BIN=<this tree> bash
+  ~/Work/missions/preflight.sh remote-roundtrip-and-roster` answered `preflight green (quick, no gate)`
+  with `ok: true`, `failed: []`, `seconds: 38` - `land-quick` merged the branch onto main `5a4b1a29`
+  (dry run, nothing pushed, nothing installed) but ran no gate rows, so `gate_seconds` is null. That is
+  the same-runner answer the script gives when a landing plan runs no gate - named here rather than
+  folded into the green, because the rows it would have judged are the narrowed run's, above.
