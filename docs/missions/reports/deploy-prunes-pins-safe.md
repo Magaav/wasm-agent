@@ -121,3 +121,20 @@ and `git diff origin/main...HEAD --stat` is `scripts/deploy.sh`, `scripts/landin
 `preflight.json` reports `ok: false` with `why: 2 row(s) failed here and 2 are MAIN RED on ae3cbb37ddcf
 (undo-pty, undo-remote-pty)`: its parser unions the first run and the retry, so the two transient rows stay
 in the list even though the retry passed them.
+
+### Round 2, 05:56Z: only main's rows are left
+
+Re-run after main moved (`a0bb0262`, the landing of `change/land-quick-row-not-hung`), merged as
+`e5cf1447fec4`:
+
+```
+preflight RED: 2 row(s) failed for change/deploy-prunes-pins-safe on main 37b6422774e7
+  - undo-pty: ok - a second /undo refuses by name
+  - undo-remote-pty: undo remote pty: 14 ok, 1 failed
+```
+
+`preflight.json`: `ok:false, why: "2 row(s) failed", failed: [undo-pty, undo-remote-pty], tree e5cf1447`,
+1672 s. The first run's `412 checks, 4 failed` became `417 checks, 2 failed` in this one (the graph-quarantine
+row did not hang and `chat-start-pty` passed on its first try), and the two that remain are the two
+`~/Work/missions/main-health.json` has recorded as red on main since `da912828` - rule 14's case, named here
+and not worked around: no assertion was loosened, no row removed, no timeout raised.
