@@ -56,8 +56,21 @@ if tree == "" then
   os.exit(0)
 end
 if binary == "" then
-  print("SKIP test-land-health-program: no WA_FAST_BIN, so there is no binary of this tree to copy "
-    .. "(that half is UNPROVEN, not passed)")
+  -- ITS OWN BINARY, which is exactly the one the health step hands the operation manager: a copy is made
+  -- below and only THAT copy is swapped, so neither the build tree nor this process's own file is touched.
+  -- (WA_FAST_BIN is what the fast path exports; a row run by hand, or by scripts/test-discriminates.sh, has
+  -- no such variable and must not skip on a fact it can read itself - a skip there is a half that was never
+  -- judged.)
+  local provided, raw = pcall(host.runtime_info)
+  local info = {}
+  if provided and type(raw) == "string" then pcall(function() info = json.decode(raw) or {} end) end
+  binary = trim(tostring(info.binary_path or ""))
+  local replaced = " (deleted)"
+  if binary:sub(-#replaced) == replaced then binary = binary:sub(1, #binary - #replaced) end
+end
+if binary == "" then
+  print("SKIP test-land-health-program: this process cannot name its own binary (runtime_info) and there is "
+    .. "no WA_FAST_BIN, so there is nothing to copy (that half is UNPROVEN, not passed)")
   os.exit(0)
 end
 
