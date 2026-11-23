@@ -311,3 +311,109 @@ point the same way, which is the verdict:
 So the answer to *"which optimizations would be worth adding?"* is: **(d)** (sizes, measured), then
 **(a')** (stop re-reading and re-hashing the artifact per call), then **(e)** (wire Esc to the deadline),
 and **not** (b) or (c).
+
+## 8. Upstream asks (report only - Fable and Victor post, the worker never does)
+
+Each row: what wa needs, what it costs wa **measured here**, a reproduction with nothing private in it,
+and the issue that already exists (checked 23/11 through the GitHub search API, so the numbers are live,
+not remembered).
+
+### 8.1 Starting a process (bash, cargo, a subagent)
+
+- **Cost to wa**: the whole (b) process family - 11 capabilities (`exec`, `exec_timeout`, `operation`,
+  `jobs`, `enqueue_completion`, `subagent`, `service`, `invoke`, `cli_reexec`, `quickjs`, `plugins`),
+  and behind them `wa-capabilities/src/operations.rs` (3,278 lines) + `subagents.rs` (2,309). A component
+  cannot run a hook command, a subagent or `bash` at all, so the whole agent-core component still has
+  to ask the host for every process it starts: that is why `wa:kernel` exists and why `WA_AGENT_CORE_WASM`
+  is a switch and not the only path.
+- **Existing**: WebAssembly/WASI **#414** (*posix_spawn/CreateProcess API*, open), **#763** (*Provide
+  interface to spawn a new wasm component*, open), **#899** (*wasi:exec*, open). Nothing in the phase
+  list (`docs/Proposals.md`) proposes a process interface at any phase.
+- **Reproduction** (20 lines, no wa code): a component that imports a process interface has no world to
+  compile against; the smallest honest statement of the gap is the WIT nobody can import:
+
+```wit
+package example:spawn@0.1.0;
+
+interface process {
+  enum signal { term, kill, int }
+  record status { code: s32, signal: option<signal> }
+  spawn: func(program: string, args: list<string>, env: list<tuple<string,string>>) -> result<u32, string>;
+  wait: func(handle: u32) -> result<status, string>;
+  kill: func(handle: u32, sig: signal) -> result<(), string>;
+}
+world w { import process; }
+```
+
+  Against `wasmtime 50.0.1` and `wasi:cli@0.2.0` this compiles to nothing: there is no such interface
+  to link, and the only way to start a program is a host function of wa's own (`wa:kernel/host.call`).
+
+### 8.2 A terminal / pty interface (raw mode, size, key events)
+
+- **Cost to wa**: 33 `Device` capabilities - the TUI's whole surface - and behind them `wa-term`
+  (11,068 lines) + `wa-window` (3,208) + `wa-capabilities/src/audio.rs` (592) + `client_bridge.rs`
+  (619). Measured shape of that surface: an idle TUI node burns 7.6 % of a core and the *drawing* is not
+  in its busy samples (`docs/missions/reports/component-calls-cheap.md`).
+- **Existing**: no interface; the two closest conversations are closed (WASI **#42**, *Does the current
+  spec allow for things like `ioctl` and `termios`?*). `wasi:cli` has `stdin/stdout/stderr` as byte
+  streams and nothing about a terminal's mode, size, or key events.
+- **Reproduction**: a component that wants raw mode and a key event cannot express it: `wasi:cli/stdin`
+  reads, and there is no `isatty`, no `termios`, no size, no resize event. 20 lines of WIT (an `interface
+  terminal { set_raw: func(on: bool); size: func() -> tuple<u16,u16>; read_key: func() -> ... }`) have no
+  home in `wasi-0.2`; wa carries all of it in `wa:kernel/host.call` today.
+
+### 8.3 Path-independent component builds (cargo)
+
+- **Cost to wa, measured** (`components.lock`, re-measured 13/11): two builds in one path gave
+  **8,582,128 bytes / `f3d60624…` twice**; the same tree copied to another path gave **8,582,132 bytes /
+  `cb410807…`**. Cause measured: a path package's `-C metadata` is a hash of its canonical absolute path
+  (`libwa_whatsapp_index-49271f4b…` in one tree, `-5caf7479…` in the other). Consequence: a pin names
+  ONE build from ONE path, so "build it where you are and publish" is not possible, and every
+  per-component publish (item 4b) has to happen in the canonical checkout.
+- **Existing**: rust-lang/cargo **#13586** (*Not reproducible when a project is copied to another
+  directory*, closed), **#8140** (*Non-reproducible `-C metadata=hash` passed to rustc depending on the
+  compiling OS*, open), **#17512** (*build-dir artifact duplication*, open for the neighbouring need).
+- **Reproduction**: `cp -a repo repo2 && (cd repo && cargo build --release) && (cd repo2 && cargo build
+  --release) && sha256sum repo/target/release/lib*.so repo2/target/release/lib*.so` - two digests for
+  identical sources, and the difference is `-C metadata` alone.
+
+### 8.4 File locking (`flock`)
+
+- **Cost to wa**: the ledger is one SQLite file shared by every process of a node; `sql_patience`
+  exists only to bound how long a statement waits for the lock, and the memory seam's own deadline table
+  (50-1,000 ms per op) is sized around it. A component cannot take that lock itself, which is one of the
+  two reasons the ledger stays native (class (c), section 6).
+- **Existing**: WebAssembly/WASI **#773** (*File locking*, open).
+- **Reproduction**: a component opening the same file twice and writing between the opens has no
+  advisory lock to take; `wasi:filesystem` has no `flock`/`fcntl` and no `O_EXCL` answer that survives a
+  crash in the middle of a two-file update.
+
+### 8.5 Sleeping in a component
+
+- **Cost to wa**: one capability (`sleep`, 8 lines) and the engine's epoch tick (10 ms) is the only other
+  way to wait; every "wake in 30 s" today is a host call.
+- **Existing**: WebAssembly/WASI **#691** (*Split interfaces to separate sleeping from reporting the
+  time?*, open), **#857** (*clocks: Cannot implement `clock_nanosleep(CLOCK_REALTIME, ...)` in C*, open).
+- **Reproduction**: `wasi:clocks/monotonic-clock@0.2.0` has `now` and `resolution` and no `sleep`; the
+  only portable way to wait in a component is to spin (and burn a core the host pays for).
+
+### 8.6 TLS and credentials for a component's own HTTP
+
+- **Cost to wa**: `wa-tls` (1,167 lines) stays native, and no component can do its own HTTPS: the
+  model-gateway component imports `wa:kernel/http@0.2.0` (the tree's own interface,
+  `rust/components/model-gateway/wit/model.wit:325`) instead of `wasi:http`, because credentials and the
+  policy that decides who may call what live in the host. `wasmtime-wasi-http` is not even a dependency
+  of this tree.
+- **Existing**: `wasi:tls` is a **phase-1** proposal (`docs/Proposals.md`), `wasi:crypto` likewise;
+  `wasi:http` is phase 3 and has no notion of a credential or a policy.
+- **Reproduction**: a component that imports `wasi:http/outgoing-handler@0.2.0` and requests
+  `https://example.com` gets whatever the *embedder* does about TLS; there is no standard import that
+  lets the component own it, and no standard for "this component may use this secret".
+
+### 8.7 What is *not* an upstream ask
+
+Two items from the brief's expectation list are answered by the measurements and need no upstream
+request: **"link once" (item 7a)** is a wasmtime API that already exists (`InstancePre`), so it is wa's own
+call path that has to use it; and **"the component model can't share an instance"** is not wa's problem -
+the prior report measured one instance per call and found setup is 0.1-0.8 % of a turn
+(`component-calls-cheap.md`).
