@@ -234,6 +234,30 @@ function M.refuse(now, opts)
   return text, wait
 end
 
+-- A RUN WHOSE SESSION CLAIM IS BUSY WHILE A BUILD WAITS OR IS BEING INSTALLED (23/11).
+--
+-- MEASURED (avell, 23/11 ~14:2xZ): the pause ENDED the workers components-calls-cheap (d2d69ff3) and
+-- release-linux-reads-the-receipt (0b8c9d78), and both ended rc=1 with
+-- `run_resource_refused: {"error":"resource_busy", "key":"session:0b8c9d78-..."}` while the node held each
+-- session after the pause. The harness's auto-continues hit that claim until they ran out, so a worker that had
+-- paused to let the install happen was DEAD when it ended - the opposite of what the pause promised it.
+--
+-- The claim belongs to the turn the deploy paused, and the install is what ends it. So this is the same answer
+-- the pre-run gate gives: a wait, not a failure. The caller decides what to do with it (nothing ran, so nothing
+-- is lost and the same request runs again after the swap); it is here, in the one module that knows what
+-- "a build is waiting" means, so no caller can invent a second spelling of it.
+--
+-- `opts` exists for the test (scripts/test-deploy-pause.lua) and for nothing else.
+function M.claim_wait(claimed, now, opts)
+  opts = opts or {}
+  -- ONLY A BUSY CLAIM: every other refusal (`resource_store_failed`, a claim the host could not grant) is a
+  -- different fact and stays the caller's failure. unknown is not yes, and a wrong claim is not a wait.
+  if type(claimed) ~= "table" or claimed.error ~= "resource_busy" then return nil end
+  local refused = M.refuse(now, opts)
+  if not refused then return nil end
+  return refused
+end
+
 -- WHERE THE SESSION SAID IT PAUSED, for the sentinel's own bound.
 --
 -- The node's `/health` says which sessions are BUSY; it cannot say which of them stopped on purpose, because a

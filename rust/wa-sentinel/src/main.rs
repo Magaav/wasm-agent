@@ -2608,7 +2608,11 @@ fn fail_held_request(request: &Value, id: &str, path: &Path, detail: &str) -> Re
         wa_operation::atomic_json(&target, &json!({"request":request,"ok":false,"phase":"failed",
             "detail":detail,"at":now_epoch(),"bound_failed":true}))?;
         std::fs::remove_file(&claim)?;
-        schedule_requeue(request, &key, detail)?;
+        // ONCE (23/11): a request that already came back is not parked a second time - the second failure at its
+        // bound is terminal, which is what stops a node that never goes idle from re-queueing for ever.
+        if request.get("requeued").and_then(Value::as_bool) != Some(true) {
+            schedule_requeue(request, &key, detail)?;
+        }
     }
     let line = format!("the request failed at its bound: {detail}");
     audit("hold-bound-failed", &format!("{} {key}", request["verb"].as_str().unwrap_or("request")), &line);

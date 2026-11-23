@@ -175,6 +175,32 @@ IDLE='{"ok":true,"queue":0,"operation_overdue":false,"current":null,"node_thread
 # the node could not name, which is the one a reader must still count and still never pass over.
 QUEUED_TURNS='{"ok":true,"queue":2,"operation_overdue":false,"current":null,"node_threads":[],"workers":[],"queue_sessions":{"count":2,"named":1,"truncated":false,"entries":[{"run_id":41,"session":"9b28c30d-1111-2222-3333-444455556666","node_thread":0,"kind":"run","waited_ms":45000},{"run_id":42,"session":"","node_thread":3,"kind":"completion","waited_ms":50}]},"subagents":{"queued":0,"running":0,"active":0}}'
 
+# A node that says it is busy and names NOTHING this reader can point at: its queue is empty and its one worker is
+# not `alive`. The shape the request for 7865a08e failed at its bound against ("the node reports itself busy and
+# names no holder", 23/11 13:17Z).
+UNNAMEABLE='{"ok":true,"queue":0,"operation_overdue":false,"current":null,"node_threads":[],"workers":[{"id":0,"state":"stale"}],"subagents":{"queued":0,"running":0,"active":0}}'
+
+# THE REAL SHAPE OF THE TWO 23/11 DEADLOCKS (orchestrator, 23/11 15:19Z - measured live on avell). Three workers
+# mid-turn, each with a CHILD COMPLETION admitted and not started, one of the sessions already paused for the
+# request: `da212b83` (child completion, 25m, paused), `6bce1698` and `b7be279e` (child completion, admitted and
+# not started). The deploy for 07308add waited 40 minutes here and only withdrew; the completions began 90 s later.
+COMPLETIONS='{"ok":true,"queue":5,"operation_overdue":false,"current":null,"node_threads":[],
+  "queue_sessions":{"count":5,"named":5,"truncated":false,"entries":[
+    {"run_id":51,"session":"da212b83-1111-2222-3333-444455556666","node_thread":0,"kind":"completion","waited_ms":1500000},
+    {"run_id":52,"session":"6bce1698-1111-2222-3333-444455556666","node_thread":1,"kind":"completion","waited_ms":1500000},
+    {"run_id":53,"session":"6bce1698-1111-2222-3333-444455556666","node_thread":1,"kind":"completion","waited_ms":1500000},
+    {"run_id":54,"session":"b7be279e-1111-2222-3333-444455556666","node_thread":2,"kind":"completion","waited_ms":1500000},
+    {"run_id":55,"session":"b7be279e-1111-2222-3333-444455556666","node_thread":2,"kind":"completion","waited_ms":1500000}]},
+  "subagents":{"queued":0,"running":0,"active":0}}'
+# The same, with no session that recorded a pause - the 14:37Z-15:20Z wait: every holder is a completion whose
+# session has already ENDED, and the node starts none of them while the request waits (its admission gate).
+COMPLETIONS_ONLY='{"ok":true,"queue":3,"operation_overdue":false,"current":null,"node_threads":[],
+  "queue_sessions":{"count":3,"named":3,"truncated":false,"entries":[
+    {"run_id":51,"session":"da212b83-1111-2222-3333-444455556666","node_thread":0,"kind":"completion","waited_ms":1500000},
+    {"run_id":52,"session":"6bce1698-1111-2222-3333-444455556666","node_thread":1,"kind":"completion","waited_ms":1500000},
+    {"run_id":53,"session":"b7be279e-1111-2222-3333-444455556666","node_thread":2,"kind":"completion","waited_ms":1500000}]},
+  "subagents":{"queued":0,"running":0,"active":0}}'
+
 # A deploy request in the box, as the agent's request writer leaves it: verb, target, when it was asked for.
 write_request() { # <id> <queued-at>
   mkdir -p "$BOX"
@@ -185,6 +211,11 @@ write_request() { # <id> <queued-at>
     "$SHA" "$2" > "$BOX/$1.json"
 }
 clear_request() { rm -f "$BOX"/*.json; }
+# A request that failed at its bound is parked in requeue/ (23/11) and goes back in the box the first tick the node
+# is quiet. A step that is not about that parks nothing, so it clears it - explicitly, never as a hidden side
+# effect of clear_request.
+clear_requeue() { rm -rf "$SENT_DIR/requeue"; }
+reset_box() { clear_request; clear_requeue; }
 pause_record() { # <session> <since> [file-name]
   mkdir -p "$PAUSED"
   printf '{"session":"%s","since":%s,"to":"%s","source":"request"}\n' "$1" "$2" "$SHA" \
@@ -200,7 +231,7 @@ NOW="$(date +%s)"
 # "now" would never be past it (the sentinel's own bound is seconds, not milliseconds).
 ASKED="$((NOW - 30))"
 # The sentinel's own records: a request the operator asked for, and a node that is busy with two sessions.
-clear_request
+reset_box
 rm -rf "$PAUSED"
 busy_body "$BUSY"
 write_request "1700000000000000000-4242-00000000000000000000" "$ASKED"
@@ -244,6 +275,12 @@ grep -q 'still working' "$SENT_DIR/sentinel.log" \
 # every tick for twenty-five minutes and only ended when the operator restarted wa-serve.
 grep -q 'hold-bound-failed' "$SENT_DIR/sentinel.log" \
   && ok "the failure is written down" || fail "a request past its bound left no failure line"
+# AND IT IS NOT DROPPED (23/11): a request that fails at its bound is parked, once, for the first tick that finds
+# the node quiet enough to run it. The landing that asked for it is told in the same record.
+grep -q 're-queued automatically once' "$SENT_DIR/failed/1700000000000000000-4242-00000000000000000000.json" \
+  && ok "the failure record promises the re-queue" || fail "the failure record does not say the request comes back"
+[ -f "$SENT_DIR/requeue/1700000000000000000-4242-00000000000000000000.json" ] \
+  && ok "and the request is parked for the next quiet moment" || fail "a failed request was not parked for a re-queue"
 if [ -s "$SENT_DIR/failed/1700000000000000000-4242-00000000000000000000.json" ]; then
   ok "a request that cannot proceed is recorded in failed/ (with its reason)"
 else
@@ -253,7 +290,7 @@ fi
 step "past the bound with every holder paused: the install runs"
 # A FRESH REQUEST, because the step above ends its request at the bound now (a bound is a wall in both
 # directions). Same id and queue time, so nothing else about this step changes.
-clear_request
+reset_box
 write_request "1700000000000000000-4242-00000000000000000000" "$ASKED"
 pause_record "$SESSION" "$((NOW + 1))"
 pause_record "deadbeef-1111-2222-3333-444455556666" "$((NOW + 1))"
@@ -264,7 +301,7 @@ grep -q 'hold-bound-passed' "$SENT_DIR/sentinel.log" \
   && ok "and the decision is written down" || fail "the bound being passed left no line in the log"
 
 step "a pause recorded BEFORE the request was queued does not count"
-clear_request; rm -f "$INSTALLER_LOG"
+reset_box; rm -f "$INSTALLER_LOG"
 busy_body "$BUSY"
 write_request "1700000000000000001-4242-00000000000000000000" "$ASKED"
 pause_record "$SESSION" "$((NOW - 500))"
@@ -273,7 +310,7 @@ out="$(WA_DEPLOY_HOLD_BOUND=1 once_out)"
 unwant "$(installs)" "1" "a pause from an earlier deploy says nothing about this one"
 
 step "a holder that names no session is never passed over"
-clear_request; rm -f "$INSTALLER_LOG"
+reset_box; rm -f "$INSTALLER_LOG"
 rm -rf "$PAUSED"
 busy_body "$SUBAGENT_BUSY"
 write_request "1700000000000000002-4242-00000000000000000000" "$ASKED"
@@ -282,17 +319,115 @@ unwant "$(installs)" "1" "a subagent holder blocks the bound"
 grep -q 'names no session' "$SENT_DIR/sentinel.log" \
   && ok "the log says why it could not pass" || fail "the log did not name the reason"
 
-step "a node that reports itself busy and names nobody is not passed over"
-clear_request; rm -f "$INSTALLER_LOG"
-busy_body "$NAMED_NOTHING"
+step "a node that reports itself busy and names nobody is not passed over - and is not FAILED either (23/11)"
+reset_box; rm -f "$INSTALLER_LOG"
+busy_body "$UNNAMEABLE"
 write_request "1700000000000000003-4242-00000000000000000000" "$ASKED"
 out="$(WA_DEPLOY_HOLD_BOUND=1 once_out)"
 unwant "$(installs)" "1" "nothing proves a pause, so nothing is passed over"
 grep -q 'names no holder' "$SENT_DIR/sentinel.log" \
   && ok "the log says the node named no holder" || fail "the log did not say it"
+# MEASURED (23/11 13:17Z, the request for 7865a08e): past its bound, this answer FAILED the request - for a holder
+# nothing named. An unnamed holder proves neither that a turn is running nor that one paused, so the request keeps
+# waiting and stays where the operator can withdraw or serve it.
+[ -f "$BOX/1700000000000000003-4242-00000000000000000000.json" ] \
+  && ok "the request keeps waiting in the box" || fail "an unnamed holder failed the request"
+if [ -f "$SENT_DIR/failed/1700000000000000003-4242-00000000000000000000.json" ]; then
+  fail "a request was failed against a holder the node never named"
+else
+  ok "no failed/ record: an unnamed holder is waited on, never failed"
+fi
+
+step "an overdue operation is NAMED now (it used to be "busy" and nobody)"
+reset_box; rm -f "$INSTALLER_LOG"
+busy_body "$NAMED_NOTHING"
+write_request "1700000000000000007-4242-00000000000000000000" "$ASKED"
+out="$(status_out)"
+want "$out" "an operation is overdue" "status names the work the node reports without a session"
+out="$(WA_DEPLOY_HOLD_BOUND=1 once_out)"
+unwant "$(installs)" "1" "an operation names no session, so nothing proves it paused"
+grep -q 'an operation is overdue' "$SENT_DIR/sentinel.log" \
+  && ok "and the log names it" || fail "the log did not name the overdue operation"
+[ -f "$BOX/1700000000000000007-4242-00000000000000000000.json" ] \
+  && ok "and the request keeps waiting" || fail "an overdue operation failed the request"
+
+step "three workers mid-turn, each with a child completion, one session paused: it installs (23/11)"
+reset_box; rm -f "$INSTALLER_LOG"; rm -rf "$PAUSED"
+busy_body "$COMPLETIONS"
+write_request "1700000000000000008-4242-00000000000000000000" "$ASKED"
+# The paused session recorded its pause (the record the pause writes at the moment it pauses). The two whose
+# workers had ENDED have none - and they must not hold the install either.
+pause_record "da212b83-1111-2222-3333-444455556666" "$NOW"
+out="$(status_out)"
+want "$out" "busy:      5 holder(s) of the node" "the five holders the amendment measured, and no thread: a paused worker's turn has ENDED"
+want "$out" "session da212b83  child completion, admitted, not started 25m  not started yet, and does not hold the deploy" \
+  "the paused worker's own completion says it cannot hold the deploy"
+want "$out" "session 6bce1698  child completion, admitted, not started 25m  not started yet, and does not hold the deploy" \
+  "and so does a session that never paused"
+STARTED_MS="$(date +%s%3N)"
+out="$(WA_DEPLOY_HOLD_BOUND=1 once_out)"
+ELAPSED_MS=$(( $(date +%s%3N) - STARTED_MS ))
+if [ "$(installs)" = "1" ]; then ok "the installer ran once"; else fail "expected one install, saw $(installs): $out"; fi
+grep -q 'hold-bound-passed' "$SENT_DIR/sentinel.log" \
+  && ok "and the decision is written down" || fail "the bound being passed left no line in the log"
+grep -q 'child completion that starts after the install' "$SENT_DIR/sentinel.log" \
+  && ok "the line says WHY a completion is not a holder" || fail "the passing line does not name the completion"
+if [ "$ELAPSED_MS" -lt 10000 ]; then
+  ok "the request was not waited on: the tick answered in ${ELAPSED_MS}ms (N = 10s for this row)"
+else
+  fail "the install took ${ELAPSED_MS}ms, past this row's own 10s bound"
+fi
+
+step "three child completions whose sessions have ENDED hold nothing either (14:37Z-15:20Z, 07308add)"
+reset_box; rm -f "$INSTALLER_LOG"; rm -rf "$PAUSED"
+busy_body "$COMPLETIONS_ONLY"
+write_request "1700000000000000009-4242-00000000000000000000" "$ASKED"
+STARTED_MS="$(date +%s%3N)"
+out="$(WA_DEPLOY_HOLD_BOUND=1 once_out)"
+ELAPSED_MS=$(( $(date +%s%3N) - STARTED_MS ))
+if [ "$(installs)" = "1" ]; then ok "the installer ran once: an admitted completion waits for the install, never for it"; else fail "the deploy waited on three completions: $out"; fi
+if [ "$ELAPSED_MS" -lt 10000 ]; then ok "in ${ELAPSED_MS}ms"; else fail "the install took ${ELAPSED_MS}ms"; fi
+
+step "a failure at the bound is RE-QUEUED once, and installs on the first quiet moment (23/11)"
+reset_box; rm -f "$INSTALLER_LOG"; rm -rf "$PAUSED"
+busy_body "$QUEUED_TURNS"
+write_request "1700000000000000010-4242-00000000000000000000" "$ASKED"
+out="$(WA_DEPLOY_HOLD_BOUND=1 once_out)"
+unwant "$(installs)" "1" "a named turn that has not started is not passed over"
+[ -f "$SENT_DIR/requeue/1700000000000000010-4242-00000000000000000000.json" ] \
+  && ok "the failed request is parked" || fail "the failed request was dropped"
+out="$(status_out)"
+want "$out" "requeue:   1 request(s) that failed at their bound run when the node is quiet enough" \
+  "and status says it comes back"
+# The node goes quiet: the very next tick puts it back in the box and performs it.
+busy_body "$IDLE"
+out="$(once_out)"
+grep -q 'hold-bound-requeued' "$SENT_DIR/sentinel.log" \
+  && ok "the re-queue is written down" || fail "the re-queue left no line in the log"
+grep -q 'the request.s reason: land the fix Victor is waiting for' "$SENT_DIR/sentinel.log" \
+  && ok "and names the landing that asked for it" || fail "the re-queue did not name the request or its reason"
+if [ "$(installs)" = "1" ]; then ok "the re-queued request installed"; else fail "the re-queued request did not install: $out"; fi
+want "$(cat "$SENT_DIR/done/1700000000000000010-4242-00000000000000000000.json" 2>/dev/null)" \
+  '"requeued":true' "and the record shows it is the re-queued copy, not a replay"
+
+step "a request that fails at its bound a SECOND time is not re-queued again"
+reset_box; rm -f "$INSTALLER_LOG"; rm -rf "$PAUSED"
+busy_body "$QUEUED_TURNS"
+mkdir -p "$BOX"
+printf '{"verb":"deploy","target_commit":"%s","queued_at":%s,"reason":"a second failure","requeued":true}\n' \
+  "$SHA" "$ASKED" > "$BOX/1700000000000000011-4242-00000000000000000000.json"
+out="$(WA_DEPLOY_HOLD_BOUND=1 once_out)"
+unwant "$(installs)" "1" "it is held by the same named turn"
+if [ -f "$SENT_DIR/requeue/1700000000000000011-4242-00000000000000000000.json" ]; then
+  fail "a request that already came back was parked a second time"
+else
+  ok "once is the bound: the second failure at the bound is terminal"
+fi
+grep -q 'already re-queued once' "$SENT_DIR/failed/1700000000000000011-4242-00000000000000000000.json" \
+  && ok "and its record says so" || fail "the record does not say why it does not come back"
 
 step "an idle node needs no bound at all: the request runs at once"
-clear_request; rm -f "$INSTALLER_LOG"
+reset_box; rm -f "$INSTALLER_LOG"
 busy_body "$IDLE"
 write_request "1700000000000000004-4242-00000000000000000000" "$ASKED"
 out="$(WA_DEPLOY_HOLD_BOUND=600 once_out)"
@@ -300,7 +435,7 @@ if [ "$(installs)" = "1" ]; then ok "an idle node runs the deploy without waitin
 
 
 step "a turn admitted and not started is NAMED, and is not passed over (23/11)"
-clear_request; rm -f "$INSTALLER_LOG"; rm -rf "$PAUSED"
+reset_box; rm -f "$INSTALLER_LOG"; rm -rf "$PAUSED"
 busy_body "$QUEUED_TURNS"
 write_request "1700000000000000005-4242-00000000000000000000" "$ASKED"
 out="$(status_out)"
@@ -340,7 +475,7 @@ want "$out" "admitted and not started" "and the holder that blocked it, by name"
 want "$out" "re-request with: wa-sentinel request deploy --expected-sha 8082b42e1111" "and how to ask again"
 
 step "WA_DEPLOY_HOLD_BOUND=0 is the documented unbounded wait, and really is one"
-clear_request; rm -f "$INSTALLER_LOG"
+reset_box; rm -f "$INSTALLER_LOG"
 busy_body "$QUEUED_TURNS"
 write_request "1700000000000000006-4242-00000000000000000000" "$ASKED"
 out="$(WA_DEPLOY_HOLD_BOUND=0 once_out)"
