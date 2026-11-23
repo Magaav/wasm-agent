@@ -117,6 +117,30 @@ function M.validate_allow(list)
   return nil, normalized
 end
 
+-- ---- the "every chat" scope -----------------------------------------------------------------------
+--- How many chats `"*"` covers, from the component's own index: a COUNT, never a list of ids.
+--- (`lua/core/whatsapp.lua` answers it from a `contacts` call with no query, which the component counts
+--- over its index.) Unknown stays unknown: the answer names it instead of inventing a number.
+function M.all_chats()
+  local loaded, whatsapp = pcall(dofile, 'lua/core/whatsapp.lua')
+  if not loaded or type(whatsapp) ~= 'table' or type(whatsapp.holds_account) ~= 'function' then
+    return { chats = nil, covers = 'every chat, groups included', unverified = 'whatsapp_index_count_unreadable',
+      note = 'the account is not served by a component on this node, so its index cannot be counted here' }
+  end
+  if not whatsapp.holds_account() then
+    return { chats = nil, covers = 'every chat, groups included', unverified = 'whatsapp_posting_account_elsewhere',
+      note = 'this node does not hold the WhatsApp account, so the index that would count the chats is elsewhere' }
+  end
+  local answer = whatsapp.invoke(whatsapp.by_verb.contacts, { limit = 1 })
+  local index = type(answer) == 'table' and answer.index or nil
+  local chats = type(index) == 'table' and tonumber(index.chats) or nil
+  if not chats then
+    return { chats = nil, covers = 'every chat, groups included', unverified = 'whatsapp_index_count_unreadable',
+      note = 'the component did not answer how many chats its index holds, so what "*" covers is unknown here' }
+  end
+  return { chats = chats, covers = 'every chat, groups included', source = 'index' }
+end
+
 -- ---- the stored definition ------------------------------------------------------------------------
 local function store_row(name)
   local inventory = services.inventory()
@@ -236,6 +260,10 @@ function M.status(ctx)
     stored = true,
   }
   if live.sha256 then answer.sha256 = tostring(live.sha256) end
+  -- The one scope that is not a name: say what it covers, as a count from the index.
+  for _, entry in ipairs(cfg.allow) do
+    if entry == '*' then answer.all_chats = M.all_chats(); break end
+  end
   local legacy = legacy_env()
   if legacy then answer.connector_removed = legacy end
   if row.enabled then
@@ -288,6 +316,7 @@ function M.set(args, ctx)
     end
   end
   if args.alerts ~= nil and type(args.alerts) ~= 'boolean' then return fail('posting_alerts_boolean_required') end
+  if args.all_chats ~= nil and type(args.all_chats) ~= 'boolean' then return fail('posting_all_chats_boolean_required') end
   if args.enabled == nil and allow == nil and args.alerts == nil and language == nil then
     return fail('posting_change_required', {
       note = 'name at least one of enabled (boolean), allow (list), alerts (boolean), language (en|pt|auto)' })
@@ -307,6 +336,17 @@ function M.set(args, ctx)
   if args.alerts ~= nil then config.alerts = args.alerts; wanted.alerts = args.alerts end
   if language ~= nil then config.language = language; wanted.language = language end
   local was_enabled = row.enabled == true
+  -- "*" is every chat, groups included, and it is the setting that made this mission necessary. Naming it
+  -- on this request takes a second word, so a list cannot be widened by a typo or a copy-paste: "own" and
+  -- an exact JID need no flag.
+  local wildcard = false
+  for _, entry in ipairs(wanted.allow) do if entry == '*' then wildcard = true end end
+  if wildcard and args.allow ~= nil and args.all_chats ~= true then
+    return fail('posting_all_chats_unconfirmed', { covers = 'every chat, groups included',
+      note = '"*" posts to EVERY chat, groups included. Name it twice: `wa whatsapp posting allow \'*\''
+        .. ' --all-chats` (or {"action":"set","allow":["*"],"all_chats":true} on the operator endpoint).'
+        .. ' "own" and exact chat JIDs need no flag' })
+  end
   if wanted.enabled and #wanted.allow == 0 then
     -- `post_transcripts: true` with an empty list is the shadow mode that made this mission necessary:
     -- the gate says on and nothing is ever delivered. A switch that posts nowhere is a refusal by name.

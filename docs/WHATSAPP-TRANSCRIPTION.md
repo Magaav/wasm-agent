@@ -527,7 +527,14 @@ The allow list is an allow-list of accepted forms, exactly the ones the componen
 (`posting.rs` `allowed`): `own`, `*`, or one exact chat JID (`<digits>@s.whatsapp.net`,
 `<digits>@lid`, `<id>@g.us`). An empty list is refused, and so is turning posting on without naming a
 scope - `post_transcripts: true` with nothing in the list is the shadow mode that made this page
-necessary. Two rules hold everywhere on this path: the allow list is never written to this repository,
+necessary. `*` - every chat, groups included - is the one scope that is not a name, so it takes a
+second word: `wa whatsapp posting allow '*' --all-chats` (`{"allow":["*"],"all_chats":true}` on the
+endpoint). Without it the verb refuses with `posting_all_chats_unconfirmed` and names that flag, so a
+list cannot be widened to every chat by a typo or a copy-paste; `own` and an exact JID are one step.
+When the stored scope is `*`, the answer says how many chats it covers - a COUNT from the component's own
+index (the same `contacts` call with no query that `lua/core/whatsapp.lua` reads for its `chats` count),
+never a list of ids - and says so by name (`whatsapp_index_count_unreadable`) when the index cannot be
+counted instead of inventing a number. Two rules hold everywhere on this path: the allow list is never written to this repository,
 never logged and never echoed in a refusal (a refusal names the POSITION that failed, not the entry);
 and only a master may read or change it - the same authority as every other operator endpoint
 (`require_master` on the route, `users.is_master` in the module, a child agent refused).
@@ -535,7 +542,8 @@ and only a master may read or change it - the same authority as every other oper
 ```sh
 wa whatsapp posting                      # what is stored, what the component reports
 wa whatsapp posting on | off             # the gate
-wa whatsapp posting allow own            # or: *, 5511999999999@s.whatsapp.net, 1203...@g.us
+wa whatsapp posting allow own            # or: 5511999999999@s.whatsapp.net, 1203...@g.us
+wa whatsapp posting allow '*' --all-chats # every chat, groups included: the flag is the second word
 wa whatsapp posting alerts on | off      # own-chat alert for a note that could not be transcribed
 wa whatsapp posting language en|pt|auto  # what the pipeline transcribes in
 ```
