@@ -110,6 +110,38 @@ run, not by a query.
   the older byte for byte, and that the node answers again. On the base the second quarantine deletes the
   first copy, so the row fails there.
 
+**Measured, on this node, on the fixed tree (`c96e60c3`)** - the row run through the fast path's own
+`lua_run` (`scripts/lib/fast-row-exec.sh`), with the `graph` component built from this tree:
+
+```
+graph_db_quarantined root=.../evidence-tree moved=.../graph.db.malformed-20261123T043847Z reason=graph_index_failed:_database_disk_image_is_malformed integrity=database_disk_image_is_malformed kept=1 next=rebuild
+graph_db_repair_refused root=.../evidence-tree file=graph.db verdict=database_disk_image_is_malformed
+graph_db_quarantined root=.../evidence-tree moved=.../graph.db.malformed-20261123T043848Z reason=graph_index_failed:_database_disk_image_is_malformed integrity=database_disk_image_is_malformed kept=2 next=rebuild
+graph quarantine evidence ok: 2 copies kept, the older one byte for byte, and the node answered again
+```
+
+Two things this row had to learn, both measured and both now in its own comments: it must name
+`WA_GRAPH_COMPONENT_WASM` or the runner gives it a home with no component
+(`component_not_installed:graph`, measured 23/11 04:32), and the content it changes must produce an **edge**
+- admission compares a manifest fingerprint and then writes only what changed, so a new function that calls
+nobody never touches the torn `edges` b-tree and no quarantine follows (measured 04:35).
+
+**Pre-existing failures seen in the same fast run, not this branch's:** `undo-pty` and `undo-remote-pty`
+(the first with `ok - a second /undo refuses by name`, the second `13 ok, 2 failed`) failed in the 108-check
+run of 23/11 01:15 that included this branch's first row attempt. This branch touches
+`rust/wa-capabilities/src/graph.rs`, `graph_tests.rs`, one Lua row and this report - nothing on the pty or
+undo path - and they were **not** re-run on the base here (that needs a second worktree and its own build);
+they are named, not claimed.
+
+**Why the row cannot pass on the base, cited rather than run.** At the base commit `e9a42d20`,
+`quarantine_database` deletes every earlier copy before it renames the new one
+(`git show e9a42d20:rust/wa-capabilities/src/graph.rs`, lines 898-905: `if !name.starts_with(&prefix)
+{continue;} let _ = std::fs::remove_file(entry.path());` inside the loop over the store directory), so
+after two quarantines exactly one copy exists and the row's `#two == 2` fails.
+`scripts/test-discriminates.sh` - which runs the changed tests with the base's non-test code - was **not**
+run here: it needs a second worktree, its own release build and the suite lock, and the node was running
+the factory's own suites (three lock waiters) for most of this session.
+
 Two assertions were **adapted, not loosened**: the pre-existing copies-per-store test asserted "exactly one
 copy" - the rule this branch changes - and now asserts three, byte-for-byte content included.
 
@@ -140,9 +172,10 @@ copy" - the rule this branch changes - and now asserts three, byte-for-byte cont
 
 ## 6. Not verified, and left open
 
-* The row's own run on this node is reported below only if it finished; the `integrity=` field of the
-  quarantine line is covered by a unit test on the formatting function and **not** captured from a live
-  node's stderr (a Lua row cannot read its own node's stderr).
+* The row learns a quarantine from its **effects** (which copies exist, what they hash to) plus the
+  `kept=` and `integrity=` fields the node logged, which it cannot read from its own stderr - the exact
+  line text is held by a unit test instead. A run that produced no copy is a failure of the row, never a
+  pass.
 * Class B's *exact* trigger was not reproduced end to end: a stale index root that is one page deep answers
   stale values without an error, so the cross-process reproduction of "the guest answers malformed for
   index-only damage" was not built. What is reproduced is the repair itself, on a real SQLite store, and the
