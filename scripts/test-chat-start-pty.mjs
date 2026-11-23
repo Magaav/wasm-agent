@@ -30,6 +30,7 @@ import http from 'node:http';
 import net from 'node:net';
 import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
+import {tmuxSession} from './lib/tmux-session.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const BIN = process.env.WA_BIN || process.env.FAST_BIN || 'wa';
@@ -155,9 +156,8 @@ if (!HAVE_TMUX) {
   process.exit(0);
 }
 
-const SOCKET = 'wa-chat-start-' + process.pid;
+const {SOCKET, tmux} = tmuxSession('wa-chat-start');   // this process's own server, killed on every exit path
 const SESSION = 'chat-start';
-const tmux = args => spawnSync('tmux', ['-L', SOCKET, ...args], {encoding: 'utf8'});
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 function capture() {
   const raw = String(tmux(['capture-pane', '-p', '-t', SESSION]).stdout || '').replace(/\r/g, '');

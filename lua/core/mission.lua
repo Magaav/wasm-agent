@@ -190,11 +190,23 @@ errlines=${errlines:-0}
 cli=$!
 echo "$cli" > "$M/run.pid"
 # TIMEOUT: signals the CLI pid this runner started, and nothing else - never a pattern.
-# ITS OWN OUTPUT IS /dev/null: `kill $watchdog` kills the subshell, not the `sleep` inside it, and a leaked
-# sleep that inherited a caller's pipe keeps that pipe open for MISSION_TIMEOUT_SECONDS - a `$(bash run.sh)`
-# never saw EOF (measured by scripts/test-mission-verb.sh, 22/11). The timeout still fires; it just cannot hold
-# anybody's stdout.
-( sleep ${MISSION_TIMEOUT_SECONDS:-21600}; kill -TERM "$cli" 2>/dev/null; sleep 30; kill -KILL "$cli" 2>/dev/null ) >/dev/null 2>&1 &
+#
+# NO SIX-HOUR SLEEP OUTLIVES THIS RUNNER (measured 23/11 on avell: 108 orphaned `sleep 21600` processes,
+# parent systemd --user, in batches of six - one batch per mission launch). The shape this replaces was
+# `( sleep 21600; kill ... ) &`, and `kill $watchdog` kills the SUBSHELL, not the `sleep` inside it: every
+# launch that ended normally left its sleep behind for the rest of the day. So the deadline is COUNTED in
+# short steps: the watchdog leaves the loop as soon as the CLI is gone (a normal launch ends it at once, not
+# after the deadline), and the most a killed watchdog can leave behind is ONE STEP of 5 s.
+# ITS OWN OUTPUT IS /dev/null: a sleep that inherited a caller pipe keeps that pipe open and a
+# `$(bash run.sh)` never saw EOF (measured by scripts/test-mission-verb.sh, 22/11).
+wa_deadline=${MISSION_TIMEOUT_SECONDS:-21600}
+case "$wa_deadline" in ''|*[!0-9]*) wa_deadline=21600 ;; esac
+( wa_waited=0
+  while [ "$wa_waited" -lt "$wa_deadline" ]; do
+    sleep 5; wa_waited=$((wa_waited + 5))
+    kill -0 "$cli" 2>/dev/null || exit 0
+  done
+  kill -TERM "$cli" 2>/dev/null; sleep 30; kill -KILL "$cli" 2>/dev/null ) >/dev/null 2>&1 &
 watchdog=$!
 i=0
 while [ "$i" -lt 300 ]; do
@@ -231,7 +243,12 @@ while [ "$rc" -eq 2 ] && tail -c 4000 "$M/out.log" 2>/dev/null | grep -q deploy_
   "$WA" chat --once "$(cat "$M/prompt.md")" >> "$M/out.log" 2>> "$M/err.log" &
   cli=$!
   echo "$cli" > "$M/run.pid"
-  ( sleep ${MISSION_TIMEOUT_SECONDS:-21600}; kill -TERM "$cli" 2>/dev/null; sleep 30; kill -KILL "$cli" 2>/dev/null ) >/dev/null 2>&1 &
+  ( wa_waited=0
+  while [ "$wa_waited" -lt "$wa_deadline" ]; do
+    sleep 5; wa_waited=$((wa_waited + 5))
+    kill -0 "$cli" 2>/dev/null || exit 0
+  done
+  kill -TERM "$cli" 2>/dev/null; sleep 30; kill -KILL "$cli" 2>/dev/null ) >/dev/null 2>&1 &
   watchdog=$!
   wait "$cli"; rc=$?
   kill "$watchdog" 2>/dev/null || true

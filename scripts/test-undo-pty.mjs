@@ -28,6 +28,7 @@ import http from 'node:http';
 import crypto from 'node:crypto';
 import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
+import {tmuxSession} from './lib/tmux-session.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const REAL_HOME = path.join(os.homedir(), '.wasm-agent');
@@ -150,9 +151,8 @@ if (!HAVE_TMUX) {
   process.exit(0);
 }
 
-const SOCKET = 'wa-undo-pty-' + process.pid;
+const {SOCKET, tmux} = tmuxSession('wa-undo-pty');   // this process's own server, killed on every exit path
 const SESSION = 'undo';
-const tmux = args => spawnSync('tmux', ['-L', SOCKET, ...args], {encoding: 'utf8'});
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 function capture() {
   const raw = String(tmux(['capture-pane', '-p', '-t', SESSION]).stdout || '').replace(/\r/g, '');

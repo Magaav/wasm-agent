@@ -31,6 +31,7 @@ import http from 'node:http';
 import crypto from 'node:crypto';
 import {spawn, spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
+import {tmuxSession} from './lib/tmux-session.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const REAL_HOME = path.join(os.homedir(), '.wasm-agent');
@@ -153,9 +154,8 @@ const server = http.createServer((req, res) => {
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
 const MODEL_PORT = server.address().port;
 
-const SOCKET = 'wa-undo-remote-' + process.pid;
+const {SOCKET, tmux} = tmuxSession('wa-undo-remote');   // this process's own server, killed on every exit path
 const SESSION = 'undo-remote';
-const tmux = args => spawnSync('tmux', ['-L', SOCKET, ...args], {encoding: 'utf8'});
 function capture() {
   const raw = String(tmux(['capture-pane', '-p', '-t', SESSION]).stdout || '').replace(/\r/g, '');
   return raw.split('\n').map(row => row.replace(/\s+$/, ''));

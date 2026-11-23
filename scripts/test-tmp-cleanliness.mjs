@@ -40,7 +40,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -245,10 +245,157 @@ function floorScan() {
   }
 }
 
+// ---------------------------------------------------------------------------------------------------
+// D. A SERVER AND A SLEEP DIE WITH THE PROCESS THAT STARTED THEM.
+//
+// Two leaks measured on this node on 23/11, both from rows that had already passed:
+//
+//   * `tmux -L wa-run-live-1304985` was alive 41 HOURS after its parent died, holding a session called
+//     'live' and a running `wa --db .../wa-run-live-PNgegf/ledger.db`. The parent was killed outright, so
+//     the row's `finally` never ran - and there were also 1,340 `wa-*` socket FILES with no server behind
+//     them, one per killed row since whenever. D1 keeps every pty row on the one helper that handles both
+//     (`scripts/lib/tmux-session.mjs`) and D2 kills one the way the machine did and requires it to be gone;
+//   * 108 orphaned `sleep 21600` processes, parent systemd --user, in batches of six - one batch per mission
+//     launch. `lua/core/mission.lua` started its timeout watchdog as `( sleep 21600; kill ... ) &`, and
+//     `kill $watchdog` kills the subshell, never the sleep inside it, so every launch that ended normally
+//     left one behind. D3 RUNS that block out of the shipped file the way the runner does.
+
+// D1: every pty row that starts a tmux server goes through the helper, because the helper is the thing that
+// carries the exit handlers and the reclaim. A row that starts its own server is the 41-hour leak again.
+function ptyRowsScan() {
+  const files = trackedTests().filter(f => /^scripts\/test-.*-pty\.mjs$/.test(f));
+  const off = files.filter(file => {
+    const text = fs.readFileSync(path.join(root, file), 'utf8');
+    if (!/new-session/.test(text)) return false;
+    return !/from '\.\/lib\/tmux-session\.mjs'/.test(text);
+  });
+  for (const file of off) fail(`${file} starts a tmux server without scripts/lib/tmux-session.mjs`,
+    'the helper kills the server on every exit path and reclaims one left by a SIGKILLed sibling');
+  if (!off.length) pass(`every pty row that starts a tmux server does it through the helper (${files.length} files scanned)`);
+}
+
+// D2: the SIGKILL path. A child starts a server through the helper and is killed with SIGKILL - nothing in it
+// can run, which is exactly what happened - and the next process that asks for a session must reclaim it.
+function tmuxKillProbe() {
+  const helper = path.join(root, 'scripts', 'lib', 'tmux-session.mjs');
+  if (!fs.existsSync(helper)) { fail('scripts/lib/tmux-session.mjs is absent, so no server is reclaimed', 'unknown is not yes'); return; }
+  if (spawnSync('tmux', ['-V'], { encoding: 'utf8' }).status !== 0) {
+    pass('tmux is not installed here, so no tmux server can leak on this machine');
+    return;
+  }
+  // THE CHILD NAMES ITS SOCKET IN A FILE, not on stdout: this process waits synchronously (the leak it is
+  // measuring is worth a 20 s bound), and a synchronous loop never turns the event loop that would deliver a
+  // stdout chunk - measured on the first run of this probe: 'the probe child never named its tmux socket'.
+  const named = path.join(os.tmpdir(), 'wa-sigkill-probe-' + process.pid + '.name');
+  try { fs.rmSync(named, { force: true }); } catch {}
+  const childCode = [
+    "import(" + JSON.stringify(helper) + ").then(({tmuxSession}) => {",
+    "  const {SOCKET, tmux} = tmuxSession('wa-sigkill-probe');",
+    "  tmux(['new-session', '-d', '-s', 'probe', 'sleep 60']);",
+    "  require('node:fs').writeFileSync(" + JSON.stringify(named) + ", SOCKET);",
+    '  setInterval(() => {}, 1000);',
+    '});',
+  ].join('\n');
+  const child = spawn(process.execPath, ['-e', childCode], { stdio: 'ignore' });
+  const deadline = Date.now() + 20000;
+  let socket = '';
+  while (Date.now() < deadline) {
+    try { socket = fs.readFileSync(named, 'utf8').trim(); } catch {}
+    if (socket) break;
+    spawnSync('sleep', ['0.1']);
+  }
+  const name = socket;
+  if (!name) {
+    child.kill('SIGKILL');
+    fail('the probe child never named its tmux socket, so the kill path was not measured', 'no socket name on stdout');
+    return;
+  }
+  child.kill('SIGKILL');
+  spawnSync('sleep', ['0.5']);
+  const dir = path.join(process.env.TMUX_TMPDIR || '/tmp', 'tmux-' + String(os.userInfo().uid));
+  const left = fs.existsSync(path.join(dir, name));
+  if (!left) {
+    fail(`the SIGKILLed child left no socket (${name}), so the reclaim was not measured`,
+      'the probe proves nothing if the leak it kills cannot be made');
+    return;
+  }
+  // THE SHIPPED RECLAIM, run in a child process: this file waits synchronously, and the rule being judged is
+  // scripts/lib/tmux-session.mjs's, not a copy of it.
+  const count = path.join(os.tmpdir(), 'wa-sigkill-probe-' + process.pid + '.count');
+  try { fs.rmSync(count, { force: true }); } catch {}
+  spawnSync(process.execPath, ['-e', [
+    "import(" + JSON.stringify(helper) + ").then(m => {",
+    "  require('node:fs').writeFileSync(" + JSON.stringify(count) + ", String(m.reclaimStaleServers().length));",
+    '});',
+  ].join('\n')], { encoding: 'utf8', timeout: 60000 });
+  let reclaimed = 0;
+  try { reclaimed = Number(fs.readFileSync(count, 'utf8')); } catch {}
+  if (fs.existsSync(path.join(dir, name))) {
+    fail(`${name} survived a SIGKILLed owner and the reclaim did not remove it`,
+      'this is the 41-hour server: tmux-session.mjs reclaimStaleServers() must kill it');
+    return;
+  }
+  pass(`a tmux server whose owner was SIGKILLed (${name}) is reclaimed by the next session (${reclaimed} socket(s) removed)`);
+}
+
+// D3: the mission runner's timeout watchdog, run out of the shipped file. The runner kills the watchdog on its
+// normal path; what must not survive that kill is a sleep the length of the deadline.
+function watchdogProbe() {
+  const source = fs.readFileSync(path.join(root, 'lua', 'core', 'mission.lua'), 'utf8');
+  const at = source.indexOf('TIMEOUT: signals the CLI pid');
+  const endMark = '>/dev/null 2>&1 &';
+  const end = source.indexOf(endMark, at);
+  // THE BLOCK STARTS AT THE LINE THAT OPENS IT, not at the first '(' after the comment: the comment above it
+  // quotes `$(bash run.sh)`, so a search for '(' found that one - measured: the probe then ran a fragment of
+  // prose and reported a pass it had not earned, on the base tree where the leak is certain.
+  const opened = Math.max(source.lastIndexOf('\n( ', end), source.lastIndexOf('\n  ( ', end));
+  if (at < 0 || end < 0 || opened < 0) {
+    fail('the timeout watchdog could not be found in lua/core/mission.lua', 'the shape this check knows is gone');
+    return;
+  }
+  const block = source.slice(opened + 1, end + endMark.length);
+  const before = longSleeps();
+  const script = [
+    'cli=$$',
+    'wa_deadline=${MISSION_TIMEOUT_SECONDS:-21600}',
+    block,
+    'watchdog=$!',
+    'sleep 1',
+    'kill "$watchdog" 2>/dev/null',   // what the runner does when the CLI exits normally
+    'sleep 2',
+  ].join('\n');
+  spawnSync('bash', ['-c', script], { encoding: 'utf8', timeout: 60000 });
+  const after = longSleeps();
+  const leaked = [...after].filter(pid => !before.has(pid));
+  if (leaked.length) {
+    fail(`the mission runner's watchdog left ${leaked.length} long sleep(s) behind on its normal exit`,
+      'pids ' + leaked.join(', ') + ' - kill $watchdog ends the subshell, never the sleep inside it: count the deadline in short steps (lua/core/mission.lua)');
+    for (const pid of leaked) { try { process.kill(pid, 'SIGKILL'); } catch {} }
+    return;
+  }
+  pass('the mission runner leaves no long sleep behind when its watchdog is killed the way the runner kills it');
+}
+
+// Every sleep whose argument is 10 minutes or more, by pid: a deadline that outlives its process would be a
+// sleep this long, and a fixture's own short sleep is not a leak.
+function longSleeps() {
+  const ps = spawnSync('ps', ['-eo', 'pid=,args='], { encoding: 'utf8' });
+  const pids = new Set();
+  for (const line of String(ps.stdout || '').split('\n')) {
+    const match = /^\s*(\d+)\s+sleep\s+(\d+)\s*$/.exec(line);
+    if (!match) continue;
+    if (Number(match[2]) >= 600) pids.add(Number(match[1]));
+  }
+  return pids;
+}
+
 console.log('test-tmp-cleanliness: a row cleans up after itself, never mints under a literal /tmp, and the suite refuses a full machine');
 staticScan();
 dynamicScan();
 floorScan();
+ptyRowsScan();
+tmuxKillProbe();
+watchdogProbe();
 for (const c of checks) console.log(`  ${c.ok ? 'ok  ' : 'FAIL'} - ${c.label}`);
 const failedRows = checks.filter(c => !c.ok).length;
 console.log(`test-tmp-cleanliness: ${failedRows ? 'FAIL' : 'PASS'} (${checks.length} checks${failedRows ? ', ' + failedRows + ' failed' : ''})`);

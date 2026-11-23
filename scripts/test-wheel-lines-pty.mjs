@@ -32,6 +32,7 @@ import path from 'node:path';
 import http from 'node:http';
 import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
+import {tmuxSession} from './lib/tmux-session.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const BIN = process.env.WA_BIN || process.env.FAST_BIN || 'wa';
@@ -116,9 +117,8 @@ if (spawnSync('tmux', ['-V'], {encoding: 'utf8'}).status !== 0) {
   process.exit(0);
 }
 
-const SOCKET = 'wa-wheel-lines-' + process.pid;
+const {SOCKET, tmux} = tmuxSession('wa-wheel-lines');   // this process's own server, killed on every exit path
 const SESSION = 'wheel';
-const tmux = args => spawnSync('tmux', ['-L', SOCKET, ...args], {encoding: 'utf8'});
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const capture = () => String(tmux(['capture-pane', '-p', '-t', SESSION]).stdout || '').replace(/\r/g, '').split('\n');
 async function waitFor(predicate, label, timeout = 60000) {
