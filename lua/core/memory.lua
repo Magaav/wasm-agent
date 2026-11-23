@@ -1054,7 +1054,15 @@ local function process_identity()
   -- Published on the module (`M.process_identity`) so a reader ABOVE this line can ask who it is without
   -- a second implementation of the same question: `ensure_session` compares a presence row's pid with it.
   local identity = { pid = 0, boot = "" }
-  local ok, raw = pcall(host.runtime_info)
+  -- THE CHEAP PAIR FIRST, and `runtime_info` only when the binary does not know it (an older one).
+  -- `host.process_identity` answers the same two values and reads nothing; `host.runtime_info` answers
+  -- them beside `binary_sha256`, which it can only fill by reading and hashing this whole binary - 66 ms
+  -- of a release start, 730 ms of a debug one, measured 23/11 (a piped `wa chat` spent 28% and 52% of its
+  -- time to first line there). A presence row needs the pid and the boot tag and never the digest, so
+  -- the digest is not paid on the way to it. Neither half is trusted from a binary that cannot say one:
+  -- pid 0 refuses the row by name in `presence_begin`, exactly as before.
+  local source = type(host.process_identity) == "function" and host.process_identity or host.runtime_info
+  local ok, raw = pcall(source)
   local info = ok and type(raw) == "string" and (json.decode(raw) or {}) or {}
   identity.pid = tonumber(info.process_id) or 0
   identity.boot = tostring(info.boot_id or "")
