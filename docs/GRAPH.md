@@ -1,5 +1,67 @@
 # The code graph
 
+**Status: DORMANT - OFF by default on every node from G (23/11).** The code, the component and the tests
+stay in the tree, and a node can switch the graph on (§Switching it on). Nothing runs while it is off: the
+`graph` tool is not in the catalogue the model reads, `host.graph_*` refuses with `graph_dormant`, no
+scheduler entry, no OS watch, no index and no store is created, and a file write sends no hint. A node that
+switches it on gets exactly the behaviour this document describes below.
+
+## Why it is off
+
+Mission `graph-one-store-per-root` took the decision with measurements, through the tool itself, on ten real
+questions over a source-only root of 642 files (`docs/missions/reports/graph-one-store-per-root.md`, §6b):
+
+| # | question | graph callers | correct | wrong | missed | graph ms | graph bytes | grep call sites | grep ms | grep bytes |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | who calls `quarantine_database` | 1 | 1 | 0 | 0 | 1969 | 5,831 | 1 | 9 | 1,008 |
+| 2 | who calls `integrity_complaints` | 4 | 4 | 0 | 0 | 1412 | 6,378 | 4 | 9 | 1,034 |
+| 3 | who calls `index_only` | 1 | 1 | 0 | 0 | 1702 | 4,714 | 1 | 10 | 1,344 |
+| 4 | who calls `lock_store` | 5 | 5 | 0 | 0 | 1645 | 5,889 | 5 | 10 | 1,042 |
+| 5 | who calls `retain_quarantine` | 1 | 1 | 0 | 0 | 1336 | 4,412 | 1 | 9 | 922 |
+| 6 | who calls `repair_indexes` | 1 | 1 | 0 | 0 | 3500 | 3,173 | 1 | 8 | 540 |
+| 7 | what calls `remote_call` (18 files) | 15 | 13 | 0 | **10** | 3111 | 8,056 | 23 | 9 | 6,697 |
+| 8 | who calls `announce_change` | 2 | 2 | 0 | 0 | 2603 | 3,403 | 2 | 11 | 586 |
+| 9 | who calls `graph_hint` | 2 | 2 | 0 | 0 | 1474 | 2,772 | 2 | 8 | 264 |
+| 10 | who calls `resolve_path` | 7 | 7 | 0 | 0 | 3220 | 3,721 | 7 | 8 | 676 |
+
+Read honestly, in one paragraph: the graph matches grep on the nine questions where grep cannot be wrong
+either, at **150-400x the time** (1.3-3.5 s against 8-11 ms per question, because every call re-admits the
+content of all 642 files); on the one question with real fan-out it returned 13 of 23 real call sites and
+**no warning that 10 were missing** (76 % of its edges are unresolved, and the misses are all of one shape,
+`dofile('lua/core/nodes.lua').remote_call(...)`); and it **cannot index this repository in one call at all** -
+`graph {action:'index', force=true}` over 2,654 files answered `graph_component_unavailable:
+component_deadline` after 609 s and left the store empty. It returned no wrong caller on any question, so what
+fails is recall, not precision.
+
+A feature that costs 150-400x per question to be equal on easy ones and silently incomplete on the hard one
+does not earn a line in the catalogue every model reads. It stays in the tree, where it costs nothing.
+
+## Switching it on
+
+ONE switch, the `graph` row of the feature resolver (`docs/FEATURES.md`) - the same door `wa features` prints
+and every other gate asks:
+
+| where | how | scope |
+|---|---|---|
+| the node's policy file | `"features": { "graph": true }` in `<state>/policy.json` | durable, re-read about once a second, no restart |
+| the environment | `WA_GRAPH_COMPONENT=1` | that process only |
+
+Off again with `false`/`0`. `wa features` prints the row and says why it is off (`default_off` - nobody said
+anything - versus `feature_off` - the operator wrote `false`). `policies/default.json` ships it `false`, so a
+fresh install is dormant without anyone having to remember. If the switch says on and the component is not
+installed with a verified pin, the row reports `component_missing` rather than pretending a native graph
+exists: the graph has no native path.
+
+While it is off, in the code: `lua/core/tools.lua` drops the schema from the catalogue (`M.catalog`, one
+filter over the assembled list), its dispatch answers `graph_dormant`, `lua/core/graph.lua`'s `available()` is
+false, `lua/core/patch_audit.lua`'s `enabled()` requires the switch as well as its own `WA_GRAPH_PATCH_AUDIT`,
+and the write path sends no hint at all. In Rust, `wa_features::enabled("graph")` gates `graph.rs`'s `run`,
+`notify`, `graph_status`, `graph_snapshot` and `watch_configured`, so a node that never asked pays for no
+store, no worker and no watch. The measured prompt cost of being off is in
+`docs/missions/reports/graph-dormant.md`.
+
+The rest of this document describes the graph **as it behaves when switched on**:
+
 The node indexes its own source with `wa-graph` and exposes it to Lua as
 `host.graph_*`. A run asks "what is `append_turn` and who calls it" in one call
 instead of a grep plus a read of every candidate. The design and measurements
