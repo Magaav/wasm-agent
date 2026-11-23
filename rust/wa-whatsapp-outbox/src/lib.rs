@@ -345,6 +345,15 @@ pub struct Outcome {
     /// deleted goes out as a plain message, and this says why (`QUOTE_DROPPED_DELETED`).
     #[serde(default)]
     pub note: String,
+    /// True when the message the component sent is already in the message index, so a read of that chat
+    /// issued the moment this answer arrives holds it.
+    ///
+    /// READ YOUR WRITES (23/11): the component writes the record of its own send at send time instead
+    /// of queueing it for the next pipeline tick, and this flag is that write's receipt. The model used
+    /// to confirm delivery by searching the text back, because nothing said the message was in the
+    /// history; `false` is "not indexed yet", never "sent" dressed as "there".
+    #[serde(default)]
+    pub in_history: bool,
 }
 
 /// The sentence a send carries when its quote was dropped. WhatsApp's quote re-publishes the quoted
@@ -353,9 +362,14 @@ pub struct Outcome {
 pub const QUOTE_DROPPED_DELETED: &str = "sent without the quote: the quoted message was deleted by its author";
 
 impl Outcome {
-    /// A plain send: the message went out exactly as it was asked for.
+    /// A plain send: the message went out exactly as it was asked for, and is not in the index yet.
     pub fn sent(message_id: &str) -> Outcome {
-        Outcome { message_id: message_id.to_string(), note: String::new() }
+        Outcome { message_id: message_id.to_string(), note: String::new(), in_history: false }
+    }
+
+    /// The same, with the receipt of the index write that goes with it.
+    pub fn indexed(message_id: &str, in_history: bool) -> Outcome {
+        Outcome { message_id: message_id.to_string(), note: String::new(), in_history }
     }
 }
 
@@ -426,6 +440,7 @@ pub fn status(
 ) -> serde_json::Value {
     let outcome = result.and_then(Outcome::decode);
     let message_id = outcome.as_ref().map(|outcome| outcome.message_id.clone());
+    let in_history = outcome.as_ref().map(|outcome| outcome.in_history);
     let note = outcome.map(|outcome| outcome.note).unwrap_or_default();
     let state = state_word(state);
     let mut answer = serde_json::json!({
@@ -436,6 +451,16 @@ pub fn status(
     });
     if let Some(message_id) = message_id {
         answer["message_id"] = serde_json::Value::String(message_id);
+    }
+    if let Some(in_history) = in_history {
+        // The receipt a caller needs instead of searching the text back: is this message in the index
+        // a read of that chat answers from?
+        answer["in_history"] = serde_json::Value::Bool(in_history);
+        if !in_history {
+            answer["in_history_note"] = serde_json::Value::String(
+                "sent, but the message is not in the index yet: a read of this chat may not show it for a moment".into(),
+            );
+        }
     }
     if !note.is_empty() {
         // What changed to make the send safe, in the words the operator reads: the quote was dropped,
