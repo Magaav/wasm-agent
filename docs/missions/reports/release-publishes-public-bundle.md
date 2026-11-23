@@ -214,17 +214,22 @@ Victor: "make v0.1.0 be reflected into the entrance; v1.0 is wrong. each release
 [a 1.0.0] needs major changes so i need to say so", and Fable's addition: "wa --version prints the product version
 and the sha, from the same source, with a test".
 
-**What was on the base first**: neither owner existed - no `VERSION` file at the tree root and no `PRODUCT_VERSION`
-in `lua/core/build_identity.lua` (measured on `6eb4b206`; that module reads the binary's identity and composes
-nothing). So this branch CREATES the owner rather than choosing between two: **`VERSION` at the tree root**, one
-line (`0.1.0`), read by everyone else. If the parallel `launch-opening` mission adds `PRODUCT_VERSION` to
-`build_identity.lua`, that constant must READ this file (or the file goes and the constant becomes the owner) -
-two numbers on one screen is the thing this change exists to end.
+**What was on the base first, and what the rebase changed**: on `6eb4b206` neither owner existed - no `VERSION`
+file at the tree root and no `PRODUCT_VERSION` in `lua/core/build_identity.lua` - so this branch created a
+`VERSION` file as the owner. Then main landed `change/launch-opening` (`8862b600`), which added
+`M.PRODUCT_VERSION = "0.1.0"` in `build_identity.lua` with the comment that the release step owns that line.
+Main landed first, so after the rebase the CONSTANT is the owner and this branch is the release that writes it:
+the `VERSION` file is gone, `rust/wa-host/build.rs` and `rust/wa-capabilities/build.rs` each EXTRACT the constant
+at build time (two readers, one owner - `wa-capabilities` cannot depend on `wa-host`), and
+`M.product_version()` answers with the binary's embedded value, falling back to the constant for a binary older
+than the field. The conflict in `chat.lua`/`cli_view.lua` was resolved by keeping BOTH sides: main's
+`cli_view.model_line` composer and its `matrix` palette role, plus this branch's "each half only when it is
+known, never `vunknown`" rule and the `v` prefix on a commit label.
 
-- `rust/wa-host/build.rs` embeds the file as `PRODUCT_VERSION` (`include_str`-style read at build time, plus
-  `cargo:rerun-if-changed`), `rust/wa-host/src/build_info.rs::product_version()` trims it and `--build-info`'s
-  `version=` is now this number, not cargo's crate metadata.
-- `rust/wa-capabilities/src/host.rs` reads the same file (`PRODUCT_VERSION`) and puts `product_version` into the
+- `rust/wa-host/build.rs` extracts `M.PRODUCT_VERSION` from `lua/core/build_identity.lua` at build time (with
+  `cargo:rerun-if-changed` on that file), `rust/wa-host/src/build_info.rs::product_version()` trims it and
+  `--build-info`'s `version=` is this number, not cargo's crate metadata.
+- `rust/wa-capabilities/build.rs` reads the same line and puts `product_version` into the
   `host.build_identity()` JSON, so every Lua surface reads it from the binary instead of keeping a copy.
 - `lua/core/build_identity.lua::product_version()`; `lua/core/chat.lua` hands it to the banner;
   `lua/core/cli_view.lua::banner` prints `✻ Welcome to wasm-agent! v0.1.0 · v<sha>` (a commit label gets the `v`,
@@ -238,7 +243,7 @@ two numbers on one screen is the thing this change exists to end.
   the same number twice). The `linux` step uses it as the channel release tag (`v0.1.0`, no more `wa-linux-<sha12>`
   and no more `-alpha.N`), writes it into `VERSION` and commits that with the index entry - one commit, so the
   number a person reads and the bytes a machine installs never disagree. The commit's allow-list is now exactly
-  `VERSION` and `releases/index-linux.json`.
+  `lua/core/build_identity.lua` and `releases/index-linux.json`.
 - **`--minor` / `--major` never move on their own**: the step refuses with `linux_bump_not_authorised` unless
   `docs/release/RELEASE_NOTES.md` carries Victor's instruction QUOTED, naming the bump and the version it produces
   (`Victor: "0.2.0 is a minor release: ..."`). A flag alone is never enough, and a tree without the notes file
@@ -246,14 +251,14 @@ two numbers on one screen is the thing this change exists to end.
 
 **Tests**
 
-- `scripts/test-land-linux.lua` (68 checks): two releases in a row give `0.1.0` then `0.1.1` in `VERSION` on main,
+- `scripts/test-land-linux.lua` (68 checks): two releases in a row give `0.1.0` then `0.1.1` in the constant on main,
   in the tag, and in the index entry - and the header text is held to `Welcome to wasm-agent! v0.1.0 · vabc12345` /
   `v0.1.1`; `--minor` refused without the quote (`linux_bump_not_authorised`) and ALLOWED with it (`0.2.0`, tag
   `v0.2.0`).
 - `scripts/test-product-version.lua` (16 checks, new, wired into the fast path's core rows): the reader's four
   answers (a version, a two-digit patch, `unknown` for a binary older than the field, trimmed), the four header
   shapes (version+sha, version+release tag, version+dirty sha, sha alone) and the ONE source: a binary built from
-  this commit reports this tree's `VERSION`.
+  this commit reports this tree's constant.
 - `scripts/test-build-info.sh` (+3 checks) and `scripts/test-pin-label.sh` (rewritten): `--version` is held to
   `wasm-agent v<version> · v<...>`, `version=` to the file. The pin row's old assertion - "never the crate's
   0.1.0" (the 18/11 rule) - is REPLACED by the 22/11 one, not deleted: the line must carry the product version AND
