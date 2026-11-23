@@ -119,14 +119,18 @@ const pins = dir => (fs.existsSync(dir) ? fs.readdirSync(dir, {withFileTypes: tr
 
 // One pin step, exactly as scripts/deploy.sh makes it, and one post-install step, exactly as 8b does.
 function pinStep(at, pinDir = PINS) {
-  const result = q(['pin', '--commit', at, '--pin-dir', pinDir, '--install-dir', INSTALL, '--json']);
+  // The proof the deploy itself states: it holds the build lock, so no other build is running (deploy.sh
+  // passes the same reason to the same call). Without it a process this machine cannot inspect keeps pins.
+  const result = q(['pin', '--commit', at, '--pin-dir', pinDir, '--install-dir', INSTALL,
+    '--builds-excluded-by', 'test-fixture: no build runs here', '--json']);
   if (result.status !== 0) throw new Error(`pin ${short(at)} in ${pinDir} failed: ${result.stdout}${result.stderr}`);
   const answer = JSON.parse(result.stdout);
   if (answer.pin !== path.join(pinDir, at)) throw new Error(`pin named ${answer.pin}, not ${path.join(pinDir, at)}`);
   return answer;
 }
 function postInstallPrune(extra = []) {
-  const result = q(['prune-pins', '--pin-dir', PINS, '--install-dir', INSTALL, ...extra]);
+  const result = q(['prune-pins', '--pin-dir', PINS, '--install-dir', INSTALL,
+    '--builds-excluded-by', 'test-fixture: no build runs here', ...extra]);
   return {code: result.status, out: `${result.stdout}${result.stderr}`};
 }
 
@@ -176,7 +180,7 @@ async function pinInUse() {
   const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], {cwd: busy, stdio: 'ignore'});
   await new Promise(resolve => setTimeout(resolve, 300));
   try {
-    const result = q(['prune-pins', '--pin-dir', dir, '--json']);
+    const result = q(['prune-pins', '--pin-dir', dir, '--builds-excluded-by', 'test-fixture: no build runs here', '--json']);
     check('the command with a pin in use exits 0', result.status === 0, result.stdout + result.stderr);
     const answer = JSON.parse(result.stdout);
     check('a pin a live process is inside is not removed', fs.existsSync(busy), JSON.stringify(answer.removed));
@@ -190,7 +194,7 @@ async function pinInUse() {
     await new Promise(resolve => child.on('exit', resolve));
   }
   // Without the live process the same command removes it - the rule is the process, not the directory.
-  const after = q(['prune-pins', '--pin-dir', dir, '--json']);
+  const after = q(['prune-pins', '--pin-dir', dir, '--builds-excluded-by', 'test-fixture: no build runs here', '--json']);
   check('with nothing inside it the same pin is removed',
     JSON.parse(after.stdout).removed.some(entry => entry.name === COMMITS[0]), after.stdout);
 }
@@ -223,14 +227,14 @@ function removalFails() {
   check('the stuck fixture holds three pins', before.length === 3, before.map(short).join(' '));
   fs.chmodSync(dir, 0o555); // the trees cannot be unlinked out of a directory nobody may write
   try {
-    const result = q(['prune-pins', '--pin-dir', dir, '--json']);
+    const result = q(['prune-pins', '--pin-dir', dir, '--builds-excluded-by', 'test-fixture: no build runs here', '--json']);
     check('a failed removal still exits 0', result.status === 0, result.stdout + result.stderr);
     const answer = JSON.parse(result.stdout);
     check('the failure is named in the answer, with the pin it is about',
       answer.failed.length === 1 && answer.failed[0].name === COMMITS[0],
       JSON.stringify({failed: answer.failed, removed: answer.removed, kept: answer.kept}));
     check('the tree is left in place', fs.existsSync(path.join(dir, COMMITS[0])));
-    const human = q(['prune-pins', '--pin-dir', dir]);
+    const human = q(['prune-pins', '--pin-dir', dir, '--builds-excluded-by', 'test-fixture: no build runs here']);
     check('the human output names the pin it could not remove and says the deploy goes on',
       /could not remove .*left in place, and the deploy goes on/.test(human.stdout), human.stdout + human.stderr);
   } finally {
@@ -247,7 +251,7 @@ function nameAllowList() {
   fs.writeFileSync(path.join(dir, 'b'.repeat(40)), 'a FILE named like a commit\n');
   fs.writeFileSync(path.join(dir, 'not-a-commit'), 'neither is this\n');
   fs.symlinkSync(path.join(dir, 'a-note.txt'), path.join(dir, 'c'.repeat(40)));
-  const result = q(['prune-pins', '--pin-dir', dir, '--json']);
+  const result = q(['prune-pins', '--pin-dir', dir, '--builds-excluded-by', 'test-fixture: no build runs here', '--json']);
   check('a pin directory of things that are not trees is a no-op', result.status === 0, result.stdout + result.stderr);
   const answer = JSON.parse(result.stdout);
   for (const name of keep) {
@@ -268,8 +272,13 @@ function deployWiring() {
   check('deploy.sh records the final install (record_installed)', record > 0);
   const call = text.indexOf('landing-queue.mjs prune-pins --pin-dir "$PIN_DIR" --install-dir "$INSTALL_DIR"');
   check('deploy.sh prunes the pins after that record', call > record && call > 0, `record at ${record}, call at ${call}`);
-  check('the pin step hands the same records to the pin, so the prune before it knows them',
-    text.includes('--install-dir "$INSTALL_DIR" --wait-timeout "$PIN_WAIT" --json'));
+  // The pin invocation, as one command line: it must name the pin directory, the install records the prune
+  // reads, the proof the prune trusts, and the wait bound. Checked as a whole line, so a flag dropped in a
+  // later edit cannot pass by being mentioned somewhere else in the file.
+  const pinCall = (text.match(/landing-queue\.mjs pin --commit[\s\S]*?--json/) || [''])[0].replace(/\s+/g, ' ');
+  for (const flag of ['--pin-dir "$PIN_DIR"', '--install-dir "$INSTALL_DIR"', '--builds-excluded-by', '--wait-timeout "$PIN_WAIT"', '--json']) {
+    check(`the pin step passes ${flag}`, pinCall.includes(flag), pinCall);
+  }
   const block = text.slice(Math.max(0, call - 2500), call + 2000);
   check('a failed prune is a note, never a fail', /else\n\s*note "pin prune:/.test(block));
   check('a machine without node says so by name instead of keeping every tree',
@@ -315,6 +324,12 @@ function fastPathBlock() {
       'note() { printf \'NOTE [%s]\\n\' "$*"; }',
       `INSTALL_DIR=${JSON.stringify(INSTALL)}`,
       `SOURCE_ROOT=${JSON.stringify(sourceRoot)}`,
+      // The deploy's own lock names, and the real lock library: step 8b takes the lock for itself when the
+      // deploy did not, so the harness must offer the same thing a machine does, not a stub.
+      `DEPLOY_LOCK=${JSON.stringify(path.join(WORK, 'deploy.lock'))}`,
+      `DEPLOY_LOCK_LOG=${JSON.stringify(path.join(WORK, 'deploy-lock.log'))}`,
+      'DEPLOY_LOCK_HELD=0',
+      `. ${JSON.stringify(path.join(REPO, 'scripts', 'lib', 'deploy-lock.sh'))}`,
       pinDir === null ? 'unset PIN_DIR 2>/dev/null || true' : `PIN_DIR=${JSON.stringify(pinDir)}`,
       block,
       'printf \'STEP-8B-REACHED-THE-END\\n\'',
@@ -375,6 +390,106 @@ function fastPathBlock() {
     declared > 0 && declared < branch, `PIN_DIR at ${declared}, the Lua fast-path branch at ${branch}`);
 }
 
+// ---- 10. cannot tell = keep the pin; another user's process is out of scope ----------------------
+// The safety question of a prune, measured on this machine (avell, 23/11, 575 pids): 240 have a readable
+// cwd; of the 334 that do not, 301 have an EMPTY cmdline (kernel threads and zombies, no working directory
+// by definition) and 33 are real programs - 30 of other uids (root daemons, dbus, polkitd, systemd-*) and 3
+// of ours (systemd --user, (sd-pam), fusermount3: not dumpable). A build of this tree runs as this uid, and
+// this uid's processes are readable, so a pid of ours that is not is the one that means "cannot tell": the
+// removal stops and the line says which pid. Another user's process is reported and left out of scope.
+function cannotTellKeepsThePin() {
+  const me = process.getuid ? process.getuid() : 0;
+  const dir = path.join(WORK, 'pins-blind');
+  for (const sha of [COMMITS[0], COMMITS[1], COMMITS[2]]) pinStep(sha, dir);
+  const before = pins(dir);
+  check('the blind fixture holds three pins', before.length === 3, before.map(short).join(' '));
+
+  // A process root shaped like this machine's: one real program of THIS uid whose working directory cannot
+  // be read, one of another uid, and one kernel thread.
+  const proc = path.join(WORK, 'proc-blind');
+  const program = (pid, uid, cmdline) => {
+    fs.mkdirSync(path.join(proc, String(pid)), {recursive: true});
+    fs.writeFileSync(path.join(proc, String(pid), 'cmdline'), cmdline);
+    fs.writeFileSync(path.join(proc, String(pid), 'status'), `Name:\tprobe\nUid:\t${uid}\t${uid}\t${uid}\t${uid}\n`);
+  };
+  program(2000, me, '/usr/bin/uninspectable-probe\u0000--flag\u0000');
+  program(2500, 0, '/usr/bin/dbus-broker\u0000--log\u000010\u0000');
+  program(3000, 0, '');
+
+  const blind = q(['prune-pins', '--pin-dir', dir, '--proc-root', proc, '--json']);
+  check('a prune that cannot tell still exits 0', blind.status === 0, blind.stdout + blind.stderr);
+  const answer = JSON.parse(blind.stdout);
+  check('the counts are split: this user, other users, and no program at all',
+    answer.uninspected_own === 1 && answer.uninspected_others === 1 && answer.uninspected_no_program === 1,
+    JSON.stringify({own: answer.uninspected_own, others: answer.uninspected_others, no_program: answer.uninspected_no_program}));
+  check('nothing is removed when a process of this user could not be inspected', answer.removed.length === 0,
+    JSON.stringify(answer.removed));
+  check('all three pins are still there', pins(dir).length === 3, pins(dir).map(short).join(' '));
+  check('the answer names the pid of this user it could not inspect',
+    answer.blind.length === 1 && answer.blind[0].pid === 2000 && /uninspectable-probe/.test(answer.blind[0].cmd),
+    JSON.stringify(answer.blind));
+  const human = q(['prune-pins', '--pin-dir', dir, '--proc-root', proc]);
+  check('the human line separates the other users from the one that stopped it',
+    /1 process\(es\) of this user not inspected, 1 process\(es\) of other users not inspected, 1 with no program/.test(human.stdout),
+    human.stdout);
+  check('and it says nothing was removed, naming the pid',
+    /nothing was removed: 1 process\(es\) of this user could not be inspected \(pid 2000 /.test(human.stdout), human.stdout);
+
+  // The same tree, with a caller that can prove no other build is running: the proof replaces the unknown.
+  const proved = q(['prune-pins', '--pin-dir', dir, '--proc-root', proc,
+    '--builds-excluded-by', 'test-fixture: no build runs here', '--json']);
+  check('a caller that proves no build runs still prunes', proved.status === 0, proved.stdout + proved.stderr);
+  const provedAnswer = JSON.parse(proved.stdout);
+  check('it removes down to the kept set', provedAnswer.removed.length === 1 && pins(dir).length === 2,
+    JSON.stringify({removed: provedAnswer.removed, left: pins(dir).map(short)}));
+  check('the answer carries the reason it trusted',
+    provedAnswer.builds_excluded_by === 'test-fixture: no build runs here', JSON.stringify(provedAnswer.builds_excluded_by));
+
+  // ANOTHER USER'S PROCESS IS NOT THIS ONE'S UNKNOWN: it is reported and the prune goes on.
+  const theirs = path.join(WORK, 'proc-theirs');
+  fs.mkdirSync(path.join(theirs, '2500'), {recursive: true});
+  fs.writeFileSync(path.join(theirs, '2500', 'cmdline'), '/usr/bin/dbus-broker\u0000--log\u000010\u0000');
+  fs.writeFileSync(path.join(theirs, '2500', 'status'), 'Name:\tdbus\nUid:\t0\t0\t0\t0\n');
+  fs.mkdirSync(path.join(theirs, '3000'), {recursive: true});
+  fs.writeFileSync(path.join(theirs, '3000', 'cmdline'), '');
+  const otherPins = path.join(WORK, 'pins-theirs');
+  for (const sha of [COMMITS[0], COMMITS[1], COMMITS[2]]) pinStep(sha, otherPins);
+  const outOfScope = q(['prune-pins', '--pin-dir', otherPins, '--proc-root', theirs, '--json']);
+  check('a process of another user does not stop the prune', outOfScope.status === 0
+    && JSON.parse(outOfScope.stdout).removed.length === 1, outOfScope.stdout + outOfScope.stderr);
+  const otherHuman = q(['prune-pins', '--pin-dir', otherPins, '--proc-root', theirs]);
+  check('it is reported by name, not hidden', /1 process\(es\) of other users not inspected/.test(otherHuman.stdout),
+    otherHuman.stdout);
+
+  // A PROCESS WHOSE EXE IS UNDER THE PIN is a user of it, even with its cwd elsewhere: a test binary started
+  // out of the pinned target dir looks exactly like that (measured on this node: the deploy's own proof
+  // binaries run from the pin).
+  const exePins = path.join(WORK, 'pins-exe');
+  for (const sha of [COMMITS[0], COMMITS[1], COMMITS[2]]) pinStep(sha, exePins);
+  const exeProc = path.join(WORK, 'proc-exe');
+  fs.mkdirSync(path.join(exeProc, '4000'), {recursive: true});
+  fs.writeFileSync(path.join(exeProc, '4000', 'status'), `Name:\tprobe\nUid:\t${me}\t${me}\t${me}\t${me}\n`);
+  fs.symlinkSync(WORK, path.join(exeProc, '4000', 'cwd'));
+  fs.symlinkSync(path.join(exePins, COMMITS[0], 'target', 'probe-binary'), path.join(exeProc, '4000', 'exe'));
+  const exeRun = q(['prune-pins', '--pin-dir', exePins, '--proc-root', exeProc,
+    '--builds-excluded-by', 'test-fixture: no build runs here', '--json']);
+  check('a prune that can rule builds out still keeps a pin a running exe came from', exeRun.status === 0,
+    exeRun.stdout + exeRun.stderr);
+  const exeAnswer = JSON.parse(exeRun.stdout);
+  const exeKept = exeAnswer.kept.find(entry => entry.name === COMMITS[0]);
+  check('the pin the exe is under is kept, and the reason names the exe',
+    Boolean(exeKept) && /exe .*target\/probe-binary/.test(exeKept.why), JSON.stringify(exeAnswer.kept));
+  check('it is not in the removed list', !exeAnswer.removed.some(entry => entry.name === COMMITS[0]),
+    JSON.stringify(exeAnswer.removed));
+  // And with the process gone the same call removes it: the rule is the process, not the directory.
+  fs.rmSync(path.join(exeProc, '4000'), {recursive: true, force: true});
+  const exeGone = q(['prune-pins', '--pin-dir', exePins, '--proc-root', exeProc,
+    '--builds-excluded-by', 'test-fixture: no build runs here', '--json']);
+  check('with nothing running from it the same pin is removed',
+    JSON.parse(exeGone.stdout).removed.some(entry => entry.name === COMMITS[0]), exeGone.stdout);
+}
+
+
 // ---- main ----------------------------------------------------------------------------------------
 (async () => {
   const started = Date.now();
@@ -385,6 +500,7 @@ function fastPathBlock() {
   livenessUnknown();
   removalFails();
   nameAllowList();
+  cannotTellKeepsThePin();
   fastPathBlock();
   deployWiring();
   const seconds = Math.round((Date.now() - started) / 1000);
