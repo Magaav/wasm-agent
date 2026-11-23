@@ -32,8 +32,12 @@ local function run(code) return tools.dispatch(memory, 'codemode', { code = code
 local foreground = dispatch('bash', { command = 'echo foreground' })
 check(type(foreground) == 'table' and foreground.ok == true, 'the foreground shell ran: '
   .. json.encode(foreground or {}):sub(1, 200))
-check(tostring(foreground.cpu_priority) == 'default',
-  'a call the run waits for keeps the node own priority: ' .. tostring(foreground.cpu_priority))
+-- The priority is on the OPERATION RECORD, which the answer names (mission slim-tool-results: a command
+-- answer keeps what a caller acts on, and the header above already says this row reads the fact from the
+-- record). The assertion is unchanged.
+local foreground_record = dispatch('operation', { action = 'status', id = foreground.operation_id })
+check(tostring(foreground_record.cpu_priority) == 'default',
+  'a call the run waits for keeps the node own priority: ' .. tostring(foreground_record.cpu_priority))
 
 -- ---------------------------------------------------------------- an explicit start is backgrounded
 local started = dispatch('operation', { action = 'start', command = 'sleep 3', timeout_seconds = 60 })
