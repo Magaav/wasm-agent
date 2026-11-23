@@ -105,6 +105,29 @@ function M.row(samples, load, state, reason)
   return row
 end
 
+-- The harness collects samples and hands the entry here: the MEDIAN IS THIS FILE'S (see M.median for why),
+-- so no caller can write a number of its own choosing - and a row without samples becomes 'unknown' with a
+-- reason instead of a zero that would read as a fast row (rule 1).
+function M.finish(entry)
+  if type(entry) ~= 'table' then return entry end
+  entry.rows = entry.rows or {}
+  for name, row in pairs(entry.rows) do
+    if type(row) == 'table' then
+      if row.state == nil then row.state = 'ok' end
+      if row.state == 'ok' then
+        local ms = M.median(row.samples or {})
+        if ms then
+          row.ms = ms
+        else
+          row.state = 'unknown'
+          row.reason = row.reason or ('the row has no samples: ' .. tostring(name))
+        end
+      end
+    end
+  end
+  return entry
+end
+
 -- ---- the judgement -------------------------------------------------------------------------------
 -- `history` is the entries from the file, oldest first, and MUST NOT contain `entry` itself (the caller
 -- holds the file, so replacing a commit's own line is the caller's job - see write_history).
@@ -324,12 +347,46 @@ end
 local function cli(argv)
   local verb, history_path, argument = argv[1], argv[2], argv[3]
   local history = M.read_history(history_path or '')
+  -- finish <entry.json>: fill every row's ms from its samples (the median is this file's).
+  if verb == 'finish' then
+    -- finish takes ONE argument (the entry), so the file is the second word, not the third.
+    local target = argument or history_path
+    local file = io.open(target or '', 'r')
+    if not file then print('speed-stats: refused(entry_missing): ' .. tostring(target)); return 2 end
+    local text = file:read('a')
+    file:close()
+    local json = json_module()
+    if not json then print('speed-stats: refused(no_json)'); return 2 end
+    local ok, entry = pcall(json.decode, text)
+    if not ok or type(entry) ~= 'table' then print('speed-stats: refused(entry_invalid)'); return 2 end
+    local encoded = M.encode(M.finish(entry))
+    if not encoded then print('speed-stats: refused(encode_failed)'); return 2 end
+    print(encoded)
+    return 0
+  end
   if verb == 'table' then
     print(M.format_table(history, argument))
     return 0
   end
   if verb == 'last' then
     print(history[#history] and history[#history].sha or '')
+    return 0
+  end
+  -- append <history> <entry.json>: one line per commit, a re-measured commit replaces its own line.
+  if verb == 'append' then
+    local file = io.open(argument or '', 'r')
+    if not file then print('speed-stats: refused(entry_missing): ' .. tostring(argument)); return 2 end
+    local text = file:read('a')
+    file:close()
+    local json = json_module()
+    if not json then print('speed-stats: refused(no_json)'); return 2 end
+    local ok, entry = pcall(json.decode, text)
+    if not ok or type(entry) ~= 'table' or type(entry.sha) ~= 'string' then
+      print('speed-stats: refused(entry_invalid): ' .. tostring(argument)); return 2
+    end
+    local count, why = M.write_history(history_path, entry)
+    if not count then print('speed-stats: refused(write_failed): ' .. tostring(why)); return 2 end
+    print(count)
     return 0
   end
   if verb == 'judge' then
@@ -346,7 +403,7 @@ local function cli(argv)
     print(encoded)
     return 0
   end
-  print('usage: speed-stats.lua judge <history> <entry.json> | table <history> <sha> | last <history>')
+  print('usage: speed-stats.lua judge <history> <entry.json> | append <history> <entry.json> | table <history> <sha> | last <history>')
   return 2
 end
 
