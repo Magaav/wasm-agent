@@ -185,12 +185,13 @@ fn a_malformed_database_is_moved_aside_with_a_timestamp_and_never_deleted() {
     std::fs::write(&db, &bytes).unwrap();
     std::fs::write(dir.join("graph.db-wal"), b"wal").unwrap();
     let entry = test_entry(&fixture.0, &db);
-    let moved = quarantine_database(&entry, "20261110T184200Z").unwrap();
-    assert_eq!(moved.len(), 2, "the database and its wal");
+    let moved = quarantine_database(&entry, "20261110T184200Z").unwrap().moved;
+    let named: Vec<String> = moved.iter().map(|path| path.file_name().unwrap().to_string_lossy().into_owned()).collect();
+    assert_eq!(moved.len(), 2, "the database and its wal: {named:?}");
     assert!(!db.exists() && !dir.join("graph.db-wal").exists());
     assert_eq!(std::fs::read(dir.join("graph.db.malformed-20261110T184200Z")).unwrap(), bytes, "preserved, never deleted");
     assert!(dir.join("graph.db.malformed-20261110T184200Z-wal").exists());
-    assert!(quarantine_database(&entry, "20261110T184300Z").unwrap().is_empty(), "nothing moves twice");
+    assert!(quarantine_database(&entry, "20261110T184300Z").unwrap().moved.is_empty(), "nothing moves twice");
 }
 
 #[test]
@@ -623,29 +624,135 @@ fn the_lockless_writer_a_wasi_guest_is_can_only_be_copied_under_the_store_lock()
 }
 
 #[test]
-fn one_quarantine_copy_per_store_not_one_per_detection() {
-    // 77 copies in `graph.db.d/` on node `work`, 30 on `openclaw`: each detection left its own. The
-    // newest is the evidence worth keeping, so the copy it replaces is removed - by name, and only
-    // for this store's own siblings.
+fn the_newest_three_quarantine_copies_of_one_store_are_kept_and_the_older_ones_deleted() {
+    // 77 copies in `graph.db.d/` on node `work`, 30 on `openclaw`: each detection left its own, and the
+    // directory filled. Keeping ONE was the other half of the same mistake: the copy that explains a
+    // quarantine was destroyed by the next one - measured twice on 22/11, the brief's own evidence file
+    // `graph.db.malformed-20261122T144358Z` gone 71 s after it was made. Three copies, the newest three.
     let fixture = Fixture::new();
     let dir = db_dir(&fixture.0.join("graph.db"));
     std::fs::create_dir_all(&dir).unwrap();
     let entry = test_entry(&fixture.0, &dir.join(DB_FILE));
-    for stamp in ["20261110T220000Z", "20261111T030000Z"] {
+    let stamps = ["20261110T220000Z", "20261111T030000Z", "20261111T040000Z", "20261111T050000Z"];
+    for stamp in stamps {
         std::fs::write(dir.join(DB_FILE), format!("broken {stamp}")).unwrap();
         let moved = quarantine_database(&entry, stamp).unwrap();
-        assert_eq!(moved.len(), 1, "{stamp}: the store is moved aside");
-        let copies: Vec<String> = std::fs::read_dir(&dir).unwrap().flatten()
-            .map(|entry| entry.file_name().to_string_lossy().into_owned())
-            .filter(|name| name.starts_with("graph.db.malformed-")).collect();
-        assert_eq!(copies, vec![format!("graph.db.malformed-{stamp}")], "exactly one copy, the newest: {copies:?}");
-        assert_eq!(std::fs::read_to_string(dir.join(format!("graph.db.malformed-{stamp}"))).unwrap(), format!("broken {stamp}"));
+        assert_eq!(moved.moved.len(), 1, "{stamp}: the store is moved aside");
+        // Every copy is byte-for-byte the store that was moved: it is evidence, so nothing rewrites it.
+        for kept in &moved.moved {
+            let name = kept.file_name().unwrap().to_string_lossy().into_owned();
+            let stamp_of = name.trim_start_matches("graph.db.malformed-").trim_end_matches("-journal");
+            assert_eq!(std::fs::read_to_string(kept).unwrap(), format!("broken {stamp_of}"), "{name} is not the copy it names");
+        }
     }
+    let copies: Vec<String> = std::fs::read_dir(&dir).unwrap().flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("graph.db.malformed-"))
+        .collect();
+    let mut expected: Vec<String> = stamps[1..].iter().map(|stamp| format!("graph.db.malformed-{stamp}")).collect();
+    let mut sorted = copies.clone();
+    sorted.sort();
+    expected.sort();
+    assert_eq!(sorted, expected, "the newest three copies are kept, the oldest is deleted: {copies:?}");
     // A sibling of ANOTHER store is not this store's business.
     std::fs::write(dir.join("jobs.db.malformed-20261101T000000Z"), "other").unwrap();
     std::fs::write(dir.join(DB_FILE), "broken again").unwrap();
-    quarantine_database(&entry, "20261111T040000Z").unwrap();
+    quarantine_database(&entry, "20261111T060000Z").unwrap();
     assert!(dir.join("jobs.db.malformed-20261101T000000Z").exists(), "another store's quarantine is left alone");
+    let after: Vec<String> = std::fs::read_dir(&dir).unwrap().flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("graph.db.malformed-"))
+        .collect();
+    assert_eq!(after.len(), 3, "still three of this store's: {after:?}");
+}
+
+#[test]
+fn the_quarantine_retention_is_a_group_rule_with_a_budget_and_a_newest_copy_that_always_survives() {
+    // Retention is a decision about EVIDENCE, so the rule is exercised with the numbers small enough to
+    // read: three copies of ten bytes, a budget of twenty-five, and a budget no copy can fit.
+    let fixture = Fixture::new();
+    let dir = fixture.0.join("store.d");
+    std::fs::create_dir_all(&dir).unwrap();
+    let write = |stamp: &str, suffix: &str, bytes: usize| {
+        std::fs::write(dir.join(format!("graph.db.malformed-{stamp}{suffix}")), vec![0u8; bytes]).unwrap();
+    };
+    for stamp in ["20261122T010000Z", "20261122T020000Z", "20261122T030000Z", "20261122T040000Z"] {
+        write(stamp, "", 10);
+    }
+    // A group is the database AND its journal: one stamp is one evidence set, deleted together.
+    write("20261122T040000Z", "-journal", 5);
+    let left = || -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(&dir).unwrap().flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned()).collect();
+        names.sort();
+        names
+    };
+    assert_eq!(retain_quarantine(&dir, "graph.db", 3, 1_000), 3, "three groups kept");
+    assert_eq!(left(), vec![
+        "graph.db.malformed-20261122T020000Z".to_string(),
+        "graph.db.malformed-20261122T030000Z".to_string(),
+        "graph.db.malformed-20261122T040000Z".to_string(),
+        "graph.db.malformed-20261122T040000Z-journal".to_string(),
+    ], "the oldest group goes, the journal of a kept group stays");
+    // The budget, not the count, is what binds here: 30 bytes of groups against 25 keeps the newest 15.
+    assert_eq!(retain_quarantine(&dir, "graph.db", 3, 25), 2, "the budget keeps the newest that fit");
+    assert_eq!(left(), vec![
+        "graph.db.malformed-20261122T030000Z".to_string(),
+        "graph.db.malformed-20261122T040000Z".to_string(),
+        "graph.db.malformed-20261122T040000Z-journal".to_string(),
+    ]);
+    // A budget smaller than the newest copy alone still keeps it: a store bigger than the ceiling must
+    // leave the copy that explains the quarantine it caused.
+    assert_eq!(retain_quarantine(&dir, "graph.db", 3, 1), 1, "the newest copy survives any budget");
+    // A store's copies that are NOT this store's are left alone, and a name that is not one of the four
+    // suffixes is not counted as a copy this rule may delete.
+    std::fs::write(dir.join("jobs.db.malformed-20261101T000000Z"), "other").unwrap();
+    std::fs::write(dir.join("graph.db.malformed-20261101T000000Z-junk"), "junk").unwrap();
+    assert_eq!(retain_quarantine(&dir, "graph.db", 3, 1_000), 1);
+    assert!(dir.join("jobs.db.malformed-20261101T000000Z").exists(), "another store's quarantine is left alone");
+    assert!(dir.join("graph.db.malformed-20261101T000000Z-junk").exists(), "an unknown suffix is not evidence this rule owns");
+}
+
+#[test]
+fn index_only_is_an_allow_list_of_the_two_measured_shapes() {
+    // Measured on the store quarantined at 22/11 22:56 (`graph.db.malformed-20261123T015417Z`):
+    // `PRAGMA integrity_check(100000)` answered 150 complaints, 149 of them `row <n> missing from index
+    // <name>` and one `wrong # of entries in index <name>`. Those two are what a REINDEX repairs.
+    assert!(index_only("row 101406 missing from index idx_edges_path"));
+    assert!(index_only("row 7 missing from index idx_edges_src"));
+    assert!(index_only("wrong # of entries in index idx_edges_src"));
+    // Everything else is refused by name: a table, page or freelist fault needs the journal or a rebuild,
+    // and a repair that guessed would be a write over damage nobody diagnosed.
+    for complaint in [
+        "*** in database main ***",
+        "Freelist: size is 1017 but should be 45",
+        "Tree 4 page 33166: btreeInitPage() returns error code 11",
+        "Page 5: never used but is listed in the freelist",
+        "2nd reference to page 17995",
+        "database disk image is malformed",
+        "file is not a database",
+        "row 5 missing from index ",
+        "row  missing from index idx_a",
+        "row x missing from index idx_a",
+        "wrong # of entries in index ",
+        "ok",
+    ] {
+        assert!(!index_only(complaint), "{complaint} is not an index-entry complaint");
+    }
+}
+
+#[test]
+fn the_quarantine_line_names_the_integrity_error_the_reason_and_how_many_copies_survive() {
+    let moved = vec![PathBuf::from("/h/graph.db.d/graph.db.malformed-20261123T015417Z")];
+    let line = quarantine_line(Path::new("/srv/tree"), &moved,
+        "graph_index_failed: database disk image is malformed",
+        "row 101406 missing from index idx_edges_path", 3, " free_bytes=10 floor_bytes=5");
+    assert_eq!(line, "graph_db_quarantined root=/srv/tree moved=/h/graph.db.d/graph.db.malformed-20261123T015417Z reason=graph_index_failed:_database_disk_image_is_malformed integrity=row_101406_missing_from_index_idx_edges_path kept=3 next=rebuild free_bytes=10 floor_bytes=5", "{line}");
+    // A verdict that cannot be measured says so, and a very long one is bounded without splitting a
+    // character.
+    assert!(quarantine_line(Path::new("/r"), &moved, "e", "unmeasurable: unable to open database file", 1, "").contains(" integrity=unmeasurable:_unable_to_open_database_file "), "an unmeasurable verdict is named");
+    let long = quarantine_line(Path::new("/r"), &moved, "e", &"x".repeat(400), 1, "");
+    assert!(long.contains(&format!("integrity={}~ ", "x".repeat(180))), "a long verdict is cut and marked: {long}");
 }
 
 // ---- a boot watch is BOUNDED --------------------------------------------------------------------
@@ -679,4 +786,153 @@ fn an_operator_budget_of_zero_means_no_os_watch() {
     let tree = fixture.0.join("unwatched");
     std::fs::create_dir_all(tree.join("sub")).unwrap();
     assert_eq!(watchable_directories(&tree, 0), None, "a zero budget watches nothing");
+}
+
+/// A store with one table and two indexes holding `rows` rows: the smallest thing that has an index to
+/// disagree with its table.
+fn store_with_rows(path: &Path, rows: i64) {
+    let connection = rusqlite::Connection::open(path).unwrap();
+    connection.execute_batch("CREATE TABLE t (a INTEGER PRIMARY KEY, b TEXT, c TEXT); CREATE INDEX idx_b ON t(b); CREATE INDEX idx_c ON t(c);").unwrap();
+    let mut insert = connection.prepare("INSERT INTO t (b, c) VALUES (?1, ?2)").unwrap();
+    for i in 0..rows {insert.execute((format!("b{i}"), format!("c{i}"))).unwrap();}
+}
+
+fn page_of(path: &Path, page: u64, page_size: u64) -> Vec<u8> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).unwrap();
+    let mut bytes = vec![0u8; page_size as usize];
+    file.seek(SeekFrom::Start((page - 1) * page_size)).unwrap();
+    file.read_exact(&mut bytes).unwrap();
+    bytes
+}
+
+fn write_page(path: &Path, page: u64, page_size: u64, bytes: &[u8]) {
+    use std::io::{Seek, SeekFrom, Write};
+    let mut file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+    file.seek(SeekFrom::Start((page - 1) * page_size)).unwrap();
+    file.write_all(bytes).unwrap();
+    file.sync_all().unwrap();
+}
+
+fn rootpage(path: &Path, name: &str) -> u64 {
+    let connection = rusqlite::Connection::open(path).unwrap();
+    connection.query_row("SELECT rootpage FROM sqlite_master WHERE name = ?1", [name], |row| row.get::<_, u64>(0)).unwrap()
+}
+
+fn page_size(path: &Path) -> u64 {
+    let connection = rusqlite::Connection::open(path).unwrap();
+    connection.query_row("PRAGMA page_size", [], |row| row.get(0)).unwrap()
+}
+
+#[test]
+fn index_only_damage_is_repaired_in_place_and_no_copy_is_taken() {
+    // The state measured on 22/11 22:56: the table pages of the new revision beside the index of the old
+    // one, no journal left to roll back, and `REINDEX` the whole repair (0.746 s on the 183 MB store).
+    let fixture = Fixture::new();
+    let dir = fixture.0.join("graph.db.d");
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join(DB_FILE);
+    let old = fixture.0.join("old.db");
+    store_with_rows(&old, 60);
+    std::fs::copy(&old, &db).unwrap();
+    {
+        let connection = rusqlite::Connection::open(&db).unwrap();
+        let mut insert = connection.prepare("INSERT INTO t (b, c) VALUES (?1, ?2)").unwrap();
+        for i in 60..200 {insert.execute((format!("b{i}"), format!("c{i}"))).unwrap();}
+    }
+    // The damage: one index root page from the older revision, in place of this one's.
+    let size = page_size(&db);
+    let root = rootpage(&db, "idx_b");
+    write_page(&db, root, size, &page_of(&old, root, size));
+    let complaints = integrity_complaints(&db).unwrap();
+    assert!(complaints.len() > 1, "the fixture is damaged: {complaints:?}");
+    assert!(complaints.iter().all(|complaint| index_only(complaint)), "the fixture is INDEX-ONLY damage: {complaints:?}");
+    let rows: i64 = rusqlite::Connection::open(&db).unwrap().query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0)).unwrap();
+    let before = std::fs::read(&db).unwrap();
+    match repair_indexes(&dir, DB_FILE) {
+        Repair::Repaired {complaints: fixed} => assert_eq!(fixed, complaints.len(), "the line names how many complaints were repaired"),
+        other => panic!("index-only damage was not repaired: {other:?}"),
+    }
+    assert_eq!(integrity_complaints(&db).unwrap(), vec!["ok".to_string()], "the repaired store passes integrity_check");
+    let after: i64 = rusqlite::Connection::open(&db).unwrap().query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0)).unwrap();
+    assert_eq!(after, rows, "every row is still there: a repair derives the index from the table, it never drops rows");
+    assert_ne!(std::fs::read(&db).unwrap(), before, "the store was rewritten in place, not copied");
+    let copies: Vec<String> = std::fs::read_dir(&dir).unwrap().flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("graph.db.malformed-")).collect();
+    assert!(copies.is_empty(), "a repair is not a quarantine: {copies:?}");
+}
+
+#[test]
+fn a_torn_table_page_is_never_repaired_and_a_refusal_writes_nothing() {
+    // The other class, and the one the rollback journal exists for: a zeroed table page. The allow-list
+    // refuses it, nothing is written, and the caller quarantines exactly as before.
+    let fixture = Fixture::new();
+    let dir = fixture.0.join("graph.db.d");
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join(DB_FILE);
+    store_with_rows(&db, 60);
+    let size = page_size(&db);
+    let root = rootpage(&db, "t");
+    write_page(&db, root, size, &vec![0u8; size as usize]);
+    let before = std::fs::read(&db).unwrap();
+    match integrity_complaints(&db) {
+        Ok(complaints) => assert!(complaints.iter().any(|complaint| !index_only(complaint)), "a torn table page is not an index complaint: {complaints:?}"),
+        // SQLite refusing to walk the store at all is damage this path must not repair either.
+        Err(text) => assert!(!index_only(&text), "the pragma's own error is not an index complaint: {text}"),
+    }
+    match repair_indexes(&dir, DB_FILE) {
+        Repair::StillDamaged {verdict} => assert!(!verdict.is_empty(), "the refusal names the verdict"),
+        other => panic!("a torn table page was not refused: {other:?}"),
+    }
+    assert_eq!(std::fs::read(&db).unwrap(), before, "a refused repair leaves the store byte for byte as it was");
+    // And a store that is not there is not repaired into existence.
+    assert!(matches!(repair_indexes(&dir.join("absent"), DB_FILE), Repair::Unavailable {..} | Repair::StillDamaged {..}), "no store, no repair");
+}
+
+#[test]
+fn the_scheduler_repairs_an_index_that_disagrees_with_its_table_instead_of_quarantining() {
+    // THE ASSERTION THAT FAILS ON THE BASE, and the one a review will look for: it names no function this
+    // branch adds, so the land gate can run it against the base's own code. The store is damaged the way the
+    // copy quarantined on 22/11 22:56 was - the table pages of a revision beside the index of the one before
+    // (see the report), no journal left to roll back - and the scheduler is handed the verdict the component
+    // answered for it. On the base that verdict moves 181 MB aside and starts a rebuild from nothing; here the
+    // indexes are rebuilt from the tables and the store stays.
+    let fixture = Fixture::new();
+    let dir = db_dir(&fixture.0.join("graph.db"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join(DB_FILE);
+    let older = fixture.0.join("older.db");
+    store_with_rows(&older, 60);
+    std::fs::copy(&older, &db).unwrap();
+    {
+        let connection = rusqlite::Connection::open(&db).unwrap();
+        let mut insert = connection.prepare("INSERT INTO t (b, c) VALUES (?1, ?2)").unwrap();
+        for i in 60..200 {insert.execute((format!("b{i}"), format!("c{i}"))).unwrap();}
+    }
+    let size = page_size(&db);
+    let root = rootpage(&db, "idx_b");
+    write_page(&db, root, size, &page_of(&older, root, size));
+    let rows_before: i64 = rusqlite::Connection::open(&db).unwrap()
+        .query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0)).unwrap();
+    let scheduler = test_scheduler();
+    let entry = test_entry(&fixture.0, &db);
+    entry.state.lock().unwrap().min_free_bytes = 1;
+    scheduler.failed(&entry, "graph_index_failed: database disk image is malformed".into());
+    let state = entry.state.lock().unwrap();
+    assert!(state.quarantined.is_empty(), "an index that disagrees with its table was thrown away: {:?}", state.quarantined);
+    assert_eq!(state.corruptions, 0, "nothing was quarantined, so nothing is counted as one");
+    drop(state);
+    assert!(db.exists(), "the store is still where it was");
+    let copies: Vec<String> = std::fs::read_dir(&dir).unwrap().flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("graph.db.malformed-")).collect();
+    assert!(copies.is_empty(), "a copy of the store was taken: {copies:?}");
+    // The store is repaired, not merely kept: it passes integrity_check and still holds every row.
+    let connection = rusqlite::Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let verdict: String = connection.query_row("PRAGMA integrity_check", [], |row| row.get(0)).unwrap();
+    assert_eq!(verdict, "ok", "the repaired store still does not pass integrity_check");
+    let rows_after: i64 = connection.query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0)).unwrap();
+    assert_eq!(rows_after, rows_before, "the repair lost rows");
+    assert!(!scheduler.ready.lock().unwrap().is_empty(), "the repaired store is re-queried");
 }
