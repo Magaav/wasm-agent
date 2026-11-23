@@ -310,6 +310,21 @@ passed; scripts/test-cancel-not-retry.lua 15 checks 0 failed; scripts/test-esc-s
 failed (remote 189 ms, subagent 257 ms at load 10). No assertion was deleted, no row dropped, no
 timeout raised.
 
+
+### Landed, then main moved: merge 0238b6dd and the stdin argument (23/11, later)
+
+This branch is merged (a029d0d5). Main then added a seventh argument to
+operations::foreground (stdin, change/run-bodies-without-quoting) and its own test call sites took it;
+TWO were left behind and the wa-capabilities lib TEST build stopped compiling - this branch's
+a_cancelled_shell_returns_before_its_settle_finishes and an older promoted-shell test. Both now pass
+None, which is the value the product passes when nothing is fed (host.rs:1741). No assertion was
+touched. Re-run on this tree: cargo test -p wa-capabilities --lib 406 passed / 1 failed, and the one
+failure is graph::tests::the_lockless_writer_a_wasi_guest_is_can_only_be_copied_under_the_store_lock,
+which PASSES twice when run alone (2/2 in 1.5 s each) - a torn-write reproduction that did not
+reproduce in a 70 s run under load ~7, not this branch's code and not a consistent red. The settle test
+and subagents:: (27, the three socket tests) pass by name; test-cancel-not-retry 15 checks; and
+test-esc-stops-pty is 18 ok / 0 failed at load 21-23 (remote 250 ms, subagent 323 ms).
+
 **Pending, said plainly**: a reproduction of the 1041 ms. Neither a fork storm nor load 32 produced it;
 the trace line above is the first thing to read if it comes back, and `WASM_AGENT_CANCEL_TRACE=1` is how to
 turn it on. Fable's amendment (stop the load loops, rerun on an idle queue, 10 runs) is what produced the

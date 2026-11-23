@@ -3193,7 +3193,9 @@ mod await_returns_at_its_own_wait {
         let flag = Arc::new(AtomicBool::new(true));
         crate::serve::install_relay_context(Some(flag), None, "relay:cancel-settle-test".into());
         let started = std::time::Instant::now();
-        let receipt = super::foreground(&shell.0, &shell.1, "sleep 5", "", 30, &serde_json::json!({}))
+        // The seventh argument is the stdin the foreground path now carries (change/run-bodies-without-
+        // quoting); this stop test sends none, and the signature is the one that has to be called.
+        let receipt = super::foreground(&shell.0, &shell.1, "sleep 5", "", 30, &serde_json::json!({}), None)
             .expect("a cancelled shell is a receipt, not an error");
         let elapsed = started.elapsed();
         assert_eq!(receipt["error"], serde_json::json!("run_cancelled"), "receipt: {receipt}");
@@ -3249,7 +3251,7 @@ mod promotion_says_so {
         let result = super::foreground(
             &shell.0, &shell.1,
             "echo first-line; (sleep 3; echo later) & exit 0",
-            "", 60, &serde_json::json!({"tool": "bash"}),
+            "", 60, &serde_json::json!({"tool": "bash"}), None,
         ).expect("the foreground path answers");
         let id = result["operation_id"].as_str().expect("operation id").to_string();
         assert_eq!(result["promoted"], serde_json::json!(true),
