@@ -112,6 +112,7 @@ impl Queue {
             attempts: 0,
             lease_expiries: 0,
             dedupe_key: request.dedupe_key,
+            dedupe_in_flight: request.dedupe_in_flight,
             state: JobState::Ready,
             lease_worker: None,
             lease_until: None,
@@ -720,7 +721,11 @@ impl Queue {
                 _ => {}
             }
             if let Some(key) = &job.dedupe_key {
-                dedupe_wanted.push((dedupe_key(&job.queue, key), job.id));
+                // An in-flight claim belongs to a live job only. Re-adding it for a settled one would
+                // recreate exactly the replay the flag prevents, so repair drops it instead.
+                if !job.dedupe_in_flight || !job.state.is_terminal() {
+                    dedupe_wanted.push((dedupe_key(&job.queue, key), job.id));
+                }
             }
         }
         // Orphan index entries.
@@ -840,6 +845,7 @@ impl Queue {
         job.updated_at = now;
         self.save(&job)?;
         self.kv.del(&index_key(&job, STATE_LEASED))?;
+        self.release_claim(&job)?;
         Ok(job)
     }
 
@@ -853,6 +859,7 @@ impl Queue {
         job.last_error = Some(sanitize(reason));
         job.updated_at = now;
         self.save(job)?;
+        self.release_claim(job)?;
         self.record_alert(job, now, AlertKind::Expired, reason)?;
         Ok(())
     }
@@ -870,6 +877,7 @@ impl Queue {
         job.lease_until = None;
         job.updated_at = now;
         self.save(job)?;
+        self.release_claim(job)?;
         let reason = job.last_error.clone().unwrap_or_else(|| sanitize(why));
         self.record_alert(job, now, AlertKind::Dead, &reason)?;
         Ok(())
@@ -949,6 +957,26 @@ impl Queue {
             _ => return Ok(()),
         };
         self.kv.put(&index_key(job, state), &[])?;
+        Ok(())
+    }
+
+    /// Give the dedupe claim back when it was only ever an in-flight claim.
+    ///
+    /// A job whose claim is in-flight-only must stop answering a later caller the moment it settles: a
+    /// settled result is an answer to the question as it stood when the job ran, and handing it to the
+    /// next caller is a silent cache. Measured 23/11 on the account node: three reads of one chat in a
+    /// row answered 15:40, 16:15 and 15:44, because each was a different cached job. The claim is
+    /// deleted only when it still names this job, so a later claim on the same key is never dropped.
+    fn release_claim(&self, job: &Job) -> Result<()> {
+        if !job.dedupe_in_flight {
+            return Ok(());
+        }
+        if let Some(key) = &job.dedupe_key {
+            let key = dedupe_key(&job.queue, key);
+            if self.kv.get(&key)?.and_then(|bytes| id_from_bytes(&bytes)) == Some(job.id) {
+                self.kv.del(&key)?;
+            }
+        }
         Ok(())
     }
 
@@ -1084,6 +1112,9 @@ fn encode_job(job: &Job) -> Vec<u8> {
     opt_bytesb(&mut out, job.result.as_deref());
     u32b(&mut out, job.progress_entries);
     u64b(&mut out, job.progress_bytes);
+    // Appended, so a record written before this flag existed still decodes (trailing bytes are optional
+    // there: absent means the long-lived claim, which is what every older job had).
+    out.push(u8::from(job.dedupe_in_flight));
     out
 }
 
@@ -1114,6 +1145,7 @@ fn decode_job(id: JobId, bytes: &[u8]) -> Result<Job> {
     let result = r.opt_bytes()?;
     let progress_entries = r.u32()?;
     let progress_bytes = r.u64()?;
+    let dedupe_in_flight = if r.more() { r.u8()? == 1 } else { false };
     r.finished()?;
     Ok(Job {
         id,
@@ -1127,6 +1159,7 @@ fn decode_job(id: JobId, bytes: &[u8]) -> Result<Job> {
         attempts,
         lease_expiries,
         dedupe_key,
+        dedupe_in_flight,
         state,
         lease_worker,
         lease_until,

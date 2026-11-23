@@ -244,7 +244,12 @@ fn enqueue(q: &wa_queue::Queue, verified: &seam::Verified, build: &str) -> Resul
             .fresh_for(seam::FRESH_MS)
             .max_attempts(seam::MAX_ATTEMPTS)
             // The build is part of the key (`seam::Verified::dedupe_key_in`), never the request alone.
-            .dedupe(verified.dedupe_key_in(build)),
+            .dedupe(verified.dedupe_key_in(build))
+            // ...and the key stops answering the moment the job settles (dedupe_in_flight): a query
+            // answers the state of the index now, so a settled answer handed to a later caller is a
+            // silent cache. That is what three reads of one chat in a row did on 23/11: 15:40, 16:15,
+            // 15:44, each a different job that had already run.
+            .dedupe_in_flight(),
     ) {
         Ok(enqueued) => Ok(enqueued.id.0),
         Err(error) => Err(seam::refusal(op, "queue_failed", one_line(&error.to_string()))),
