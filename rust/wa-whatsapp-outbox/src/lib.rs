@@ -703,12 +703,32 @@ mod tests {
         assert!(settled.get("note").is_none(), "a plain send changes nothing and says nothing");
     }
 
+    /// READ YOUR WRITES (23/11): the answer says whether the message it reports is in the history a read
+    /// answers from, so nobody confirms a delivery by searching the text back. `false` is "sent, not
+    /// indexed yet", and it carries the sentence that says so.
+    #[test]
+    fn status_says_whether_the_sent_message_is_in_the_history() {
+        let here = status(12, "done", 1, Some(&Outcome::indexed("3EB0A", true).encode()), None);
+        assert_eq!(here["message_id"], "3EB0A");
+        assert_eq!(here["in_history"], true);
+        assert!(here.get("in_history_note").is_none(), "nothing to explain when it is there");
+        let later = status(13, "done", 1, Some(&Outcome::indexed("3EB0B", false).encode()), None);
+        assert_eq!(later["in_history"], false);
+        assert!(
+            later["in_history_note"].as_str().unwrap_or_default().contains("not in the index yet"),
+            "the reason a read may not show it: {later}"
+        );
+        // A job that has not answered yet says nothing about the index, because there is nothing to say.
+        let queued = status(14, "queued", 0, None, None);
+        assert!(queued.get("in_history").is_none(), "{queued}");
+    }
+
     /// The reviewed rule (Fable, 23/11 ~20:30Z): a send whose quote was dropped goes out and the answer
     /// says so, in this sentence. The quote is dropped because WhatsApp re-publishes the quoted text, and
     /// what its author deleted is kept for the operator, not sent back to the chat.
     #[test]
     fn status_carries_the_note_when_the_quote_was_dropped() {
-        let outcome = Outcome { message_id: "3EB0".into(), note: QUOTE_DROPPED_DELETED.into() };
+        let outcome = Outcome { message_id: "3EB0".into(), note: QUOTE_DROPPED_DELETED.into(), in_history: true };
         let answer = status(11, "done", 1, Some(&outcome.encode()), None);
         assert_eq!(answer["state"], "done");
         assert_eq!(answer["message_id"], "3EB0", "the message went out: only the quote was dropped");
