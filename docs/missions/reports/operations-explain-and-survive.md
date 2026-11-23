@@ -283,6 +283,29 @@ It pins four things: status answers `outcome_unknown`; `read` hands over the byt
 `await` answers the same record; `operation_ok == false` and `reason` carry the fact `ok`/`error` used to; and a
 REFUSED `start` still raises, so the strict half did not move.
 
+## The refusal that must stay a refusal (`c3e9a89d`)
+
+A record is not the only thing these actions answer. `operation <id> is not your operation` is a refusal of the
+READ, and it carries `not_your_operation: true`, `effect: "none"` and no `state`
+(`rust/wa-capabilities/src/operations.rs`, `Caller::refusal`). The rename therefore only applies when the answer IS
+a record (`state` present, not a not-yours refusal); an ownership refusal still raises, so no session can read
+another session's output by catching an answer instead of an error. Pinned by the neighbouring row
+`scripts/test-operation-survives-turn.lua`, which asserts `awaited.error ~= "operation_not_yours"` for its own
+handle: green, `16 checks, 0 failed`.
+
+## Item 1 verified on the installed node, in passing
+
+While this addendum was being written, the narrowed run below sat behind the suite lock for ten minutes, and a
+`tools.operation({action:"status"})` on it answered (verbatim, from the installed build):
+
+    waiting on a file lock: /home/victor/Work/missions/.suite.lock (FLOCK WRITE) is held by pid 2749211
+    (flock -o /home/victor/Work/missions/.suite.lock nice -n 19 bash -c cd
+    '/home/victor/.wasm-agent/main-health/wt-51b63d9af8f5-2749017' && bash scripts/fast.sh); that process started
+    12m 46s ago, so the lock has been held at most that long
+
+with `queue_position: 1` and `waiting_pid` naming this mission's own waiter — which is exactly what ledger notes
+0, 1, 3, 189, 244, 264 and 269 asked for, measured on the real node rather than in a fixture.
+
 ## Texts, spelled (Fable, then this commit)
 
 * `owner_gone_note` now says the read is `tools.operation({action:"read", id})` (was the prose "(operation read)").
