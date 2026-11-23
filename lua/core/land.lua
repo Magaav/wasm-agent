@@ -4368,10 +4368,20 @@ function M.install_row_components(tree, row, home)
         if (made.code or 1) ~= 0 then
           missing = missing or label
         else
-          -- wasm, pin and manifest together: a component with no pin is refused by the host, so a half copy
-          -- would read as a broken component rather than a missing one.
-          local copied = M.exec("cp " .. quote(source) .. " " .. quote(directory) .. "/", nil, 60)
-          if (copied.code or 1) == 0 then installed = true else missing = missing or label end
+          -- WASM, PIN AND MANIFEST TOGETHER, IN ONE COPY: the host refuses a component with no pin and a
+          -- manifest it cannot read, so a row handed only the module would read as a BROKEN component rather
+          -- than a missing one - and a row that provisions itself (scripts/test-graph-crash-recovery.lua finds a
+          -- .wasm and stops looking) would then hand the host an unpinned artifact. A copy that fails at all
+          -- leaves nothing behind and the row is NOT RUN, which is the honest half-provision.
+          local copied = M.exec("cp " .. quote(source) .. ".wasm " .. quote(source) .. ".wasm.sha256 " ..
+            quote(source) .. ".json " .. quote(directory) .. "/", nil, 60)
+          if (copied.code or 1) == 0 then
+            installed = true
+          else
+            M.exec("rm -f " .. quote(directory) .. "/" .. quote(label) .. ".wasm " .. quote(directory) .. "/" ..
+              quote(label) .. ".wasm.sha256 " .. quote(directory) .. "/" .. quote(label) .. ".json", nil, 30)
+            missing = missing or label
+          end
         end
       end
     end
@@ -4380,10 +4390,11 @@ function M.install_row_components(tree, row, home)
   return arguments, missing
 end
 
--- A component as this node keeps it: `<data>/components/<name>.wasm` with its `.sha256` pin and `.json`
--- manifest. The row spells the name with underscores, the file with hyphens, so both are tried. Files are
--- confirmed with `test -f`, not by reading them: a component is megabytes and `read` would pull all of it into
--- Lua to answer a yes/no question.
+-- A component as this node keeps it: `<data>/components/<name>.wasm` with its `.wasm.sha256` pin and `.json`
+-- manifest. Returns the STEM (`<data>/components/<name>`, no suffix) because all three travel together, and the
+-- pin and the manifest are what the host requires. The row spells the name with underscores, the file with
+-- hyphens, so both are tried. Files are confirmed with `test -f`, not by reading them: a component is megabytes
+-- and `read` would pull all of it into Lua to answer a yes/no question.
 function M.node_component(name)
   local dir = paths.data()
   local label = name:lower():gsub("_", "-")
@@ -4392,7 +4403,9 @@ function M.node_component(name)
     local base = slashes(tostring(dir)) .. "/components/" .. stem
     local probe = M.exec("test -f " .. quote(base .. ".wasm") .. " && test -f " .. quote(base .. ".wasm.sha256") ..
       " && test -f " .. quote(base .. ".json"), nil, 30)
-    if probe and (probe.code or 1) == 0 then return base .. ".wasm", label end
+    -- The STEM is returned, not the module: the caller copies the pin and the manifest beside it, and a
+    -- component without them is refused by the host (docs/COMPONENTS.md).
+    if probe and (probe.code or 1) == 0 then return base, label end
   end
   return nil, label
 end

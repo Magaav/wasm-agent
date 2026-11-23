@@ -254,7 +254,11 @@ must("mkdir -p " .. component_dir .. " && printf '\\0asm' > " .. component_dir .
 branch_with("change/own-comp", {
   -- WA_FAKE_COMPONENT_WASM is the declaration; the host resolves components from WA_COMPONENTS_DIR, so the row
   -- proves the artifact itself arrived in its own home.
-  ["scripts/test-own-comp.lua"] = "-- WA_FAKE_COMPONENT_WASM\nlocal dir = host.getenv('WA_COMPONENTS_DIR')\nassert(dir and dir ~= '', 'no WA_COMPONENTS_DIR was handed over')\nassert(host.read_file(dir .. '/fake.wasm') ~= nil, 'the component was not installed into this row home')\nprint('own-component ok')\n",
+  -- THE WHOLE ARTIFACT MUST ARRIVE: the module, its pin and its manifest. The host refuses a component with
+  -- no pin, so a row handed only the .wasm would read as a BROKEN component rather than a missing one - and a
+  -- row that provisions itself finds the .wasm, stops looking, and then fails at the host (measured 23/11 in
+  -- Fable's review of d61594ce: the step copied the module alone).
+  ["scripts/test-own-comp.lua"] = "-- WA_FAKE_COMPONENT_WASM\nlocal dir = host.getenv('WA_COMPONENTS_DIR')\nassert(dir and dir ~= '', 'no WA_COMPONENTS_DIR was handed over')\nfor _, file in ipairs({ 'fake.wasm', 'fake.wasm.sha256', 'fake.json' }) do\n  assert(host.read_file(dir .. '/' .. file) ~= nil, 'the artifact is incomplete: ' .. file .. ' was not installed into this row home')\nend\nprint('own-component ok')\n", 
 })
 eq(running(function() return land.run({ run = "quick3c", landing = true, branches = { "change/own-comp" } }) end), 0,
   "a row that names a component lands when this node has that component")
@@ -277,6 +281,20 @@ eq(running(function() return land.run({ run = "quick3m", landing = true, branche
 contains(step_of("quick3m", "tests").detail, "not run here", "the step says the row did not run")
 contains(step_of("quick3m", "tests").detail, "missing", "and names the component it needs")
 contains(step_of("quick3m", "tests").detail, "0 green", "it is not counted as a pass")
+
+-- A COMPONENT WITH NO PIN IS NOT A COMPONENT: the host refuses it, so the row is NOT RUN rather than run with
+-- half an artifact (Fable's review of d61594ce: the step copied only the module).
+fixture()
+must("printf '\\0asm' > " .. component_dir .. "/unpinned.wasm && printf '{}' > " .. component_dir ..
+  "/unpinned.json", "a component with no pin")
+branch_with("change/own-unpinned", {
+  ["scripts/test-own-unpinned.lua"] = "-- WA_UNPINNED_COMPONENT_WASM\nprint('never runs here')\n",
+})
+eq(running(function() return land.run({ run = "quick3u", landing = true, branches = { "change/own-unpinned" } }) end), 0,
+  "a row whose component this node has no pin for does not stop the landing")
+contains(step_of("quick3u", "tests").detail, "not run here", "the step says that row did not run")
+contains(step_of("quick3u", "tests").detail, "unpinned", "and names the component it needs")
+contains(step_of("quick3u", "tests").detail, "0 green", "it is not counted as a pass either")
 
 fixture()
 local main_before = must("git -C " .. repo .. " ls-remote origin refs/heads/main")
