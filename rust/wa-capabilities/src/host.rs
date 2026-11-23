@@ -4742,10 +4742,10 @@ fn console_reader() {
                             // text becoming the same attachment a dropped path is (Action::Pasted).
                             wa_term::terminal_editor::Action::Paste => match read_clipboard() {
                                 Ok(Clipboard::Image(mime, bytes)) => {
-                                    let (token, kb) = attach_image(&mut state, &mime, bytes);
+                                    let (token, kb, size) = attach_image(&mut state, &mime, bytes);
                                     if let Some(editor) = state.editor.as_mut() {
                                         editor.insert_text(&token);
-                                        editor.notice = format!("{token} attached ({kb} KB)");
+                                        editor.notice = attachment_notice(&token, kb, size);
                                     }
                                 }
                                 Ok(Clipboard::Text(text)) => {
@@ -5713,12 +5713,106 @@ fn dropped_image_in(text: &str, roots: &[std::path::PathBuf]) -> Option<(String,
 /// Keep one image for this session and answer the token that names it plus the size said in KB. The
 /// only place a token is minted, so a dropped path and a Ctrl+V paste cannot number or record their
 /// image differently.
-fn attach_image(state: &mut ConsoleInput, mime: &str, bytes: Vec<u8>) -> (String, usize) {
+/// The pixel size of a picture, read from its own header: PNG, GIF, JPEG and WebP, the four this node
+/// keeps. None is "this reader does not know", never a guess.
+///
+/// WHY IT IS HERE. A pasted picture used to be announced by its size in KB alone, and a 4x1086 strip of
+/// wallpaper arrived labelled exactly like a full screenshot: session 6a89dcbc (23/11) reasoned about "a
+/// thin strip" it had been handed instead of the page it asked for, and only the pixel size would have
+/// shown the capture was wrong before it was sent. The bytes are already in hand at paste time, so the
+/// size costs one header read.
+pub fn picture_size(bytes: &[u8]) -> Option<(u32, u32)> {
+    let be32 = |at: usize| -> Option<u32> {
+        bytes.get(at..at + 4).map(|s| u32::from_be_bytes([s[0], s[1], s[2], s[3]]))
+    };
+    let be24 = |at: usize| -> Option<u32> {
+        bytes.get(at..at + 3).map(|s| ((s[0] as u32) << 16) | ((s[1] as u32) << 8) | s[2] as u32)
+    };
+    let le16 = |at: usize| -> Option<u32> {
+        bytes.get(at..at + 2).map(|s| u16::from_le_bytes([s[0], s[1]]) as u32)
+    };
+    // JPEG is BIG-endian throughout: a segment's length and the frame's height/width are stored the other
+    // way round from GIF/WebP. Reading them little-endian is not a subtle error - the length became 4096 and
+    // the walk left the file (measured by this module's own test before the fix).
+    let be16 = |at: usize| -> Option<u32> {
+        bytes.get(at..at + 2).map(|s| u16::from_be_bytes([s[0], s[1]]) as u32)
+    };
+    let le32 = |at: usize| -> Option<u32> {
+        bytes.get(at..at + 4).map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
+    };
+    let sized = |width: Option<u32>, height: Option<u32>| match (width, height) {
+        (Some(w), Some(h)) if w > 0 && h > 0 => Some((w, h)),
+        _ => None,
+    };
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        // Signature, then IHDR (which must be first): 16 bytes in, width and height, big-endian.
+        if bytes.get(12..16)? != b"IHDR" { return None; }
+        return sized(be32(16), be32(20));
+    }
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        return sized(le16(6), le16(8));
+    }
+    if bytes.starts_with(&[0xFF, 0xD8]) {
+        // Walk the segments to the frame header: SOF0..SOF15 carry the size; C4/C8/CC are not frames.
+        let mut at = 2usize;
+        while at + 9 <= bytes.len() {
+            if bytes[at] != 0xFF { at += 1; continue; }
+            let kind = *bytes.get(at + 1)?;
+            if kind == 0xFF { at += 1; continue; }
+            if kind == 0xD8 || kind == 0x01 || (0xD0..=0xD7).contains(&kind) { at += 2; continue; }
+            let length = be16(at + 2)? as usize;
+            if length < 2 { return None; }
+            if (0xC0..=0xCF).contains(&kind) && kind != 0xC4 && kind != 0xC8 && kind != 0xCC {
+                return sized(be16(at + 7), be16(at + 5));
+            }
+            if kind == 0xDA { return None; }
+            at += 2 + length;
+        }
+        return None;
+    }
+    if bytes.len() > 30 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        match &bytes[12..16] {
+            b"VP8X" => return sized(be24(24).map(|v| v + 1), be24(27).map(|v| v + 1)),
+            b"VP8 " => {
+                if bytes.get(23..26)? != b"\x9d\x01\x2a" { return None; }
+                return sized(le16(26), le16(28));
+            }
+            b"VP8L" => {
+                if bytes.get(20) != Some(&0x2F) { return None; }
+                let bits = le32(21)?;
+                return Some(((bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1));
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// A pasted picture below this on either side is almost never what the reader meant to paste: a 4-pixel
+/// column of wallpaper arrived as a full attachment in session 6a89dcbc. The number is the warning line's
+/// business, not a refusal - a genuinely tiny picture is still sent.
+pub const PASTE_STRAY_SIDE: u32 = 16;
+
+/// How a pasted picture is announced: the token, the KB, and the pixel size when the header was read.
+/// The token text itself stays `[Image #n]` because it is a contract two parsers share
+/// (`submitted_tokens` here, `lua/core/chat.lua`'s pattern on the other side of the seam).
+fn attachment_notice(token: &str, kb: usize, size: Option<(u32, u32)>) -> String {
+    match size {
+        Some((width, height)) if width < PASTE_STRAY_SIDE || height < PASTE_STRAY_SIDE => format!(
+            "{token} attached ({kb} KB, {width}x{height}) - that looks like a stray selection: paste again"
+        ),
+        Some((width, height)) => format!("{token} attached ({kb} KB, {width}x{height})"),
+        None => format!("{token} attached ({kb} KB)"),
+    }
+}
+
+fn attach_image(state: &mut ConsoleInput, mime: &str, bytes: Vec<u8>) -> (String, usize, Option<(u32, u32)>) {
     let kb = bytes.len() / 1024;
+    let size = picture_size(&bytes);
     state.pasted_images.push((mime.to_string(), base64::engine::general_purpose::STANDARD.encode(&bytes)));
     let number = state.pasted_images.len();
     state.draft_images.push(number);
-    (format!("[Image #{number}]"), kb)
+    (format!("[Image #{number}]"), kb, size)
 }
 
 /// The span a paste just wrote: when it is a single path to an image in an allowed directory, that
@@ -5733,10 +5827,10 @@ fn attach_pasted_path(state: &mut ConsoleInput, from: usize) {
 fn attach_pasted_path_in(state: &mut ConsoleInput, from: usize, roots: &[std::path::PathBuf]) {
     let Some((text, to)) = state.editor.as_ref().map(|e| (e.slice(from, e.cursor()), e.cursor())) else { return };
     let Some((mime, bytes)) = dropped_image_in(&text, roots) else { return };
-    let (token, kb) = attach_image(state, &mime, bytes);
+    let (token, kb, size) = attach_image(state, &mime, bytes);
     if let Some(editor) = state.editor.as_mut() {
         editor.replace_range(from, to, &token);
-        editor.notice = format!("{token} attached ({kb} KB)");
+        editor.notice = attachment_notice(&token, kb, size);
     }
 }
 
@@ -7549,14 +7643,75 @@ mod image_and_token_tests {
     #[test]
     fn the_attachment_mints_one_token_number_and_records_it_for_this_draft() {
         let mut state = ConsoleInput::default();
-        let (token, kb) = attach_image(&mut state, "image/png", vec![0u8; 4096]);
+        let (token, kb, size) = attach_image(&mut state, "image/png", vec![0u8; 4096]);
+        assert_eq!(size, None, "filler is not a picture, so no pixel size is claimed for it");
         assert_eq!(token, "[Image #1]");
         assert_eq!(kb, 4);
-        let (token, _) = attach_image(&mut state, "image/gif", GIF.to_vec());
+        let (token, _, size) = attach_image(&mut state, "image/gif", GIF.to_vec());
+        assert_eq!(size, Some((1, 1)), "a real GIF's own header gives its size");
         assert_eq!(token, "[Image #2]");
         assert_eq!(state.draft_images, vec![1, 2]);
         assert_eq!(state.pasted_images.len(), 2);
         assert_eq!(state.pasted_images[1].0, "image/gif");
+    }
+
+    /// A 3-byte PNG header plus IHDR is enough for the size, and every other format answers from its
+    /// own header - or None, which is unknown and never a guess.
+    #[test]
+    fn a_pictures_own_header_says_its_pixel_size() {
+        use super::picture_size;
+        // PNG: signature, then IHDR as the first chunk (length, type, width, height, ...).
+        let mut png = Vec::new();
+        png.extend_from_slice(b"\x89PNG\r\n\x1a\n");
+        png.extend_from_slice(&13u32.to_be_bytes());
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&800u32.to_be_bytes());
+        png.extend_from_slice(&600u32.to_be_bytes());
+        png.extend_from_slice(&[8, 2, 0, 0, 0]);
+        assert_eq!(picture_size(&png), Some((800, 600)), "PNG width and height come from IHDR");
+        // GIF: version, then two little-endian 16-bit sizes.
+        let mut gif = b"GIF89a".to_vec();
+        gif.extend_from_slice(&4u16.to_le_bytes());
+        gif.extend_from_slice(&1086u16.to_le_bytes());
+        assert_eq!(picture_size(&gif), Some((4, 1086)), "the 4x1086 strip is read exactly as itself");
+        // WebP lossy: RIFF/WEBP, a chunk header, the 3-byte frame tag + start code, then 14-bit sizes.
+        let mut webp = b"RIFF".to_vec();
+        webp.extend_from_slice(&100u32.to_le_bytes());
+        webp.extend_from_slice(b"WEBP");
+        webp.extend_from_slice(b"VP8 ");
+        webp.extend_from_slice(&50u32.to_le_bytes());
+        webp.extend_from_slice(&[0, 0, 0]);
+        webp.extend_from_slice(b"\x9d\x01\x2a");
+        webp.extend_from_slice(&320u16.to_le_bytes());
+        webp.extend_from_slice(&240u16.to_le_bytes());
+        webp.extend_from_slice(&[0u8; 8]); // the rest of a real chunk: the reader needs the header only
+        assert_eq!(picture_size(&webp), Some((320, 240)), "WebP sizes are 14-bit little-endian");
+        // JPEG: SOI, a segment to skip, then SOF0 with height before width.
+        let mut jpeg = vec![0xFF, 0xD8];
+        jpeg.extend_from_slice(&[0xFF, 0xE0, 0x00, 0x10]);
+        jpeg.extend_from_slice(&[0u8; 14]);
+        jpeg.extend_from_slice(&[0xFF, 0xC0, 0x00, 0x11, 0x08]);
+        jpeg.extend_from_slice(&480u16.to_be_bytes());
+        jpeg.extend_from_slice(&640u16.to_be_bytes());
+        jpeg.extend_from_slice(&[3, 1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1]);
+        assert_eq!(picture_size(&jpeg), Some((640, 480)), "JPEG width and height come from the frame header");
+        assert_eq!(picture_size(b"not an image at all"), None, "unknown bytes claim no size");
+        assert_eq!(picture_size(b""), None, "an empty payload claims no size");
+    }
+
+    /// What the reader is told at paste time: the size always when it could be read, and the stray-selection
+    /// warning exactly when a side is under the threshold - never for a picture that is merely small.
+    #[test]
+    fn a_pasted_picture_is_announced_with_its_pixel_size_and_a_stray_selection_is_called_out() {
+        use super::attachment_notice;
+        assert_eq!(attachment_notice("[Image #1]", 11, Some((800, 600))),
+            "[Image #1] attached (11 KB, 800x600)");
+        assert_eq!(attachment_notice("[Image #1]", 11, Some((4, 1086))),
+            "[Image #1] attached (11 KB, 4x1086) - that looks like a stray selection: paste again");
+        assert_eq!(attachment_notice("[Image #1]", 11, Some((16, 16))),
+            "[Image #1] attached (11 KB, 16x16)", "the threshold itself is not stray");
+        assert_eq!(attachment_notice("[Image #1]", 11, None), "[Image #1] attached (11 KB)",
+            "a size that could not be read is not invented");
     }
 }
 

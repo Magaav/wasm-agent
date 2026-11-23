@@ -21,6 +21,14 @@ local function be24(text,at)
   return (a*256+b)*256+c
 end
 
+-- JPEG stores its segment lengths and frame sizes BIG-endian, the other way round from GIF and WebP
+-- (scripts/test-image-meta.lua measures it from a real JPEG).
+local function be16(text,at)
+  local a,b = text:byte(at,at+1)
+  if not b then return nil end
+  return a*256+b
+end
+
 local function le16(text,at)
   local a,b = text:byte(at,at+1)
   if not b then return nil end
@@ -64,11 +72,13 @@ local function jpeg(text)
       if kind == 0xFF then at = at + 1
       elseif kind == 0xD8 or kind == 0x01 or (kind >= 0xD0 and kind <= 0xD7) then at = at + 2
       else
-        local length = le16(text, at + 3)
+        -- 1-based: text[at] is 0xFF, text[at+1] the kind, so the segment length starts at at+2 (a
+        -- big-endian count that INCLUDES its own two bytes).
+        local length = be16(text, at + 2)
         if not length or length < 2 then return nil end
         -- SOF0..SOF15 hold the frame size; C4 (DHT), C8 (JPG) and CC (DAC) are not frames.
         if kind >= 0xC0 and kind <= 0xCF and kind ~= 0xC4 and kind ~= 0xC8 and kind ~= 0xCC then
-          local height, width = le16(text, at + 5), le16(text, at + 7)
+          local height, width = be16(text, at + 5), be16(text, at + 7)
           if not width or not height or width == 0 or height == 0 then return nil end
           return width, height
         end
