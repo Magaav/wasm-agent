@@ -618,43 +618,13 @@ function wa_whatsapp_posting(body, session)
   if not ok or type(args)~='table' then return json.encode({error='invalid_posting_request'}) end
   local action=args.action or 'status'
   if action~='status' and action~='set' then return json.encode({error='invalid_posting_action'}) end
-  local base=host.getenv('WA_WHATSAPP_POSTING_URL') or ''
-  local account=host.getenv('WA_WHATSAPP_ACCOUNT') or ''
-  local generation=tonumber(host.getenv('WA_WHATSAPP_GENERATION') or '') or 0
-  if base=='' or account=='' or generation<1 then return json.encode({error='whatsapp_posting_not_configured'}) end
-  local function secret(path)
-    if not path or path=='' then return nil end
-    local ok,value=pcall(host.read_file,path)
-    if not ok or type(value)~='string' then return nil end
-    value=value:gsub('%s+$','')
-    if #value~=64 then return nil end
-    return value
-  end
-  local read_token=secret(host.getenv('WA_WHATSAPP_READ_TOKEN_FILE'))
-  local approval=secret(host.getenv('WA_WHATSAPP_APPROVAL_TOKEN_FILE'))
-  if not read_token or not approval then return json.encode({error='whatsapp_posting_credentials_unavailable'}) end
-  local function request(path, token, payload)
-    local headers=json.encode({['Authorization']='Bearer '..token,['Content-Type']='application/json'})
-    local ok,raw=pcall(host.http,'POST',base..path,headers,json.encode(payload or {}))
-    if not ok or type(raw)~='string' then return nil,'whatsapp_posting_transport_failed' end
-    -- host.http returns {status, body} or {error}; the connector's JSON is inside body.
-    local decoded,envelope=pcall(json.decode,raw)
-    if not decoded or type(envelope)~='table' then return nil,'whatsapp_posting_response_invalid' end
-    if envelope.error then return nil,'whatsapp_posting_transport_failed' end
-    if type(envelope.body)~='string' then return nil,'whatsapp_posting_response_invalid' end
-    local body_ok,value=pcall(json.decode,envelope.body)
-    if not body_ok or type(value)~='table' then return nil,'whatsapp_posting_response_invalid' end
-    return value
-  end
-  if action=='status' then
-    local value,problem=request('/status',read_token,{account=account,generation=generation})
-    if not value then return json.encode({error=problem}) end
-    return json.encode({ok=value.ok==true,enabled=value.config and value.config.transcript_posting==true,connection=value.connection,error=value.error})
-  end
-  if type(args.enabled)~='boolean' then return json.encode({error='posting_enabled_boolean_required'}) end
-  local value,problem=request('/operator/posting',approval,{enabled=args.enabled})
-  if not value then return json.encode({error=problem}) end
-  return json.encode({ok=value.ok==true,enabled=value.enabled,error=value.error})
+  -- The switch is the `wa-whatsapp` COMPONENT's own configuration (lua/core/whatsapp_posting.lua):
+  -- it reads the definition this node stores, writes it through the services registry, restarts the
+  -- component and answers with the health line the component prints. The Go connector this handler
+  -- used to POST to was removed on 11/11 (`67c78621`), and no URL is called from here any more: a
+  -- request that still carries that API's fields is refused BY NAME (`whatsapp_posting_connector_removed`).
+  return json.encode(dofile('lua/core/whatsapp_posting.lua').answer(args,
+    {role=effective_role(user),user_id=user.id,session_id=tostring(session or '')}))
 end
 
 -- Idle-only maintenance never rewrites history while the session it targets still has work.

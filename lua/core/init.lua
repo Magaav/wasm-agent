@@ -499,10 +499,17 @@ elseif command == "approve" then
   if type(code) == "table" and code.ok == false then os.exit(1) end
 
 elseif command == "whatsapp" then
-  -- The index archives (`lua/core/whatsapp_archive_cli.lua`, docs/WHATSAPP-ARCHIVE.md): list, cut,
-  -- restore, unload, push, expire. Master-only at the host capability, and it needs no turn: a node
-  -- whose model is unreachable must still be able to find out what was archived and push it off.
-  local code = dofile("lua/core/whatsapp_archive_cli.lua").run({ table.unpack(args, 2) })
+  -- Two doors behind one word. `wa whatsapp posting ...` is the operator's switch for the
+  -- component's transcript posting gate (lua/core/whatsapp_posting_cli.lua; the gate itself is
+  -- lua/core/whatsapp_posting.lua); every other verb is the index archives
+  -- (lua/core/whatsapp_archive_cli.lua, docs/WHATSAPP-ARCHIVE.md): list, cut, restore, unload, push,
+  -- expire. Both need no turn, so a node whose model is unreachable can still answer what was
+  -- archived and still turn the copilot reply on or off. The dispatch is here, so the verb exists in
+  -- the binary an operator runs, not only in a module.
+  local posting_cli = tostring(args[2] or "") == "posting"
+  local cli_path = posting_cli and "lua/core/whatsapp_posting_cli.lua" or "lua/core/whatsapp_archive_cli.lua"
+  local cli_args = posting_cli and { table.unpack(args, 3) } or { table.unpack(args, 2) }
+  local code = dofile(cli_path).run(cli_args)
   if code and code ~= 0 then os.exit(code) end
 elseif command == "test" then
   -- `wa test --at <sha> <row>`: one fast row at a base commit and at this tree (item 5/8, #46).
@@ -748,6 +755,7 @@ elseif command == "help" then
   print("    services list|status|start|stop|enable|disable <name>  service components, no turn required")
   print("    eval capture|list|run|report|verdict|reviewer  freeze real tasks, replay isolated, review a branch, read metrics")
   print("    whatsapp archive list|cut|restore|unload|push|expire [YYYY-MM]  the index's monthly archives")
+  print("    whatsapp posting status|on|off|allow <chats>|alerts on|off|language <code>  the component's transcript posting switch")
   print("    turns [--since 24h] [--top N] [--json]  the model's own <turn> complaints, grouped and ranked")
   print("    stalls [--since <hours>] [--json]  Enter -> first model call: median, p90, the slow ones and what they waited for")
   print("    counters [--days N] [--json]  the three counters (wake_only_round, script_cut_at_cap, handle_mishandled), cumulative and per calendar day")
