@@ -396,3 +396,67 @@ schema, a no-argument tool and an unreadable schema each answer correctly.
 Fifteen of the fifteen rows the orchestrator named that carried `unknown_argument` are green again with the
 check report-only; the four still red are named above with what is known about each.
 
+
+## 15. STEP 2 (23/11 ~20:30Z): the switch, the walker, and where it stands
+
+**What shipped in this commit.**
+
+1. **One enforcement switch** (`lua/core/tool_arguments.lua`, `M.ENFORCE`). `'model'` refuses an undeclared
+   field again for a call the MODEL sent and only records for internal and peer callers; `'off'` is STEP 1
+   (record, refuse nothing). It SHIPS `'off'`, with the reason in the code: STEP 2's field work is not
+   finished, and turning it on today would re-red the rows whose callers still send an undeclared field. The
+   flip is one line, so G can ship model-door enforcement the moment the full main-health is green with it.
+   The 24 h rule is measured, not promised: internal and peer callers come under enforcement only when this
+   node's telemetry holds no `tool_arguments` event with `caller: internal|peer` in the last 24 h. While
+   enforcement is `'off'` every call records, so that measurement is always running.
+2. **The walker** (`scripts/test-tool-args-walker.lua`): reads every `lua/core/*.lua`, finds each
+   `tools.dispatch` / `M.dispatch` / `wa_peer_dispatch` call whose target is a STRING LITERAL and whose
+   arguments are a table literal, and judges every top-level key against `tools.parameters` plus the two
+   allow-lists. Measured on this tree: **180 files, 20 call sites, 47 keys judged, 0 undeclared**; 6 call
+   sites carry a literal that spans lines and are SKIPPED AND COUNTED, not guessed at (the first version
+   tried to brace-match a multi-line table and read a much later table - 150 false findings from one call
+   site, which is why the rule is one line only).
+3. **The event shape** is unchanged from STEP 1 (§14, item 11).
+
+**The field table, as far as it is measured.** The walker's verdict on literal internal call sites is "none
+undeclared". The offenders the red rows named are all calls with a name or an arguments table built at run
+time (the code-mode `searchTools` path, the pending layer's resume, `wake{now}`, the managed-list gate), so
+the walker counts them as unresolved rather than guessing. Declaring or stopping each one is the remaining
+work of STEP 2, and this commit does not claim it.
+
+**Two reds I was told to fix and did NOT.**
+
+* `scripts/test-codemode-default.lua:20` - **not fixed, classified**: the row drives the scripted model
+  through `searchTools`, and the failing attempt is
+  `{"admitted":false,"arguments":{"bytes":28,"path":"…/.wasm-agent/tool-results/<sha>.txt","sha256":"…"},"id":1,"name":"searchTools","ok":true,...}`
+  - a TOOL-RESULT reference (`bytes/path/sha256`) offered as `searchTools` arguments. That shape is not this
+  mission's: no field of `searchTools` was added or removed here, and the check is report-only now, so this
+  row's red does not come from an `unknown_argument` refusal. It needs its own reading against
+  `lua/core/codemode.lua`'s discovery entry.
+* `scripts/test-remote-call-shape.lua:76` ("mis-nested remote call now succeeds via hoisting") - **not
+  fixed, mine**: `remote`'s schema gained `additionalProperties: true` so the argument validator stops
+  guessing which capability's parameters it carries, and the `tool_call` hoisting path now reaches `remote`
+  with a shape that used to be refused. The next step is in `lua/core/routed_calls.lua`'s hoist, not in the
+  schema.
+
+**Rows run singly on this tree (all after the switch was set to 'off')**
+
+| row | verdict |
+|---|---|
+| test-tool-arguments | 32 checks, 0 failed |
+| test-tool-args-walker | 4 checks, 0 failed (180 files, 20 call sites) |
+| test-file-tool-node | 36 checks, 0 failed |
+| test-bash-stdin | 11 checks, 0 failed |
+| test-grep-context | 14 checks, 0 failed |
+| test-remote-field-support | 13 checks, 0 failed |
+| test-tool-args-parity | 1060 checks, 0 failed |
+| test-remote-pending | ok, 90 checks |
+| test-remote-edit | ok, 46 checks |
+| test-federation | ok, 49 checks |
+| test-selfloop | ok, 114 checks (1 skipped) |
+| test-session-watch | ok, 107 checks |
+| test-efficiency | ok, 119 checks |
+| test-orchestration-mode | ok, 77 checks |
+| test-codemode-default | **RED** (see above) |
+| test-turn-signal | no verdict line captured in this batch (its row prints `turn-signal: N checks, M failed`; not re-run) |
+
