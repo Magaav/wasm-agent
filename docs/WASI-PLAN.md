@@ -417,3 +417,126 @@ request: **"link once" (item 7a)** is a wasmtime API that already exists (`Insta
 call path that has to use it; and **"the component model can't share an instance"** is not wa's problem -
 the prior report measured one instance per call and found setup is 0.1-0.8 % of a turn
 (`component-calls-cheap.md`).
+
+## 4. Factory speed, measured
+
+### 4a. Which rows one component owns, and what that subset costs
+
+The full fast path on this laptop today: **999 s, 144 checks** (a run at 17:21 from another worktree of
+this repository - `/tmp/fast-ok.log`, `fast: kept 1 failed row log(s) ... fast path FAILED (7 of 144
+checks, 0 skipped, 999s)` - quoted because the suite rule for this wave forbids running the whole thing).
+
+The material it has to choose from: **418** `scripts/test-*.lua`, of which **74** are excluded from the
+fast path (`scripts/fast-path.exclude`), so **360** are candidates; plus **29 rows the runner may never
+drop** (`wa_fast_core_rows` in `scripts/lib/fast-rows.sh`: the row-environment probe, the ten
+`test-land-*` parts, the five `test-land-quick-*` parts, `test-event-ledger`, `test-land-health-program`,
+`test-release-channel-e2e`, `test-refusal-contract`, `test-tool-schema-fidelity`,
+`test-codemode-parity`, `test-email-connector`, `test-whatsapp-send`, `test-wit-deps`,
+`test-tool-args-parity`, `test-edit-aliases`, `test-product-version`, `test-land-gate-rows`, ... - the
+list is 29 lines long and printed by `source scripts/lib/fast-rows.sh; wa_fast_core_rows`).
+
+Which of the 360 a change selects is the planner's rule (`lua/core/land.lua:1459-1501`): a row is affected
+when the round changed it, when its *name* names a changed module (`lua/core/agent.lua` ->
+`scripts/test-agent*.lua`), or when the row's **text mentions the changed path**. Applied to the
+component directories here (`grep -rlF <path> scripts/test-*.lua`):
+
+| change | rows that name it |
+| --- | --- |
+| `rust/components/memory/**` | `test-memory-component.lua` (1) |
+| `rust/components/hooks/**` | none (0) |
+| `rust/components/selfloop/**` | none (0) |
+| `rust/components/codemode/**` | none (0) |
+| `rust/wa-mesh/**` | `test-mesh-component.lua`, `test-mesh-gate.lua`, `test-mesh-verb-admission.lua` (3) |
+| `wit/memory/**` (the seam's own contract) | `test-wit-deps.lua` (1, always-on anyway) |
+
+The honest reading: **a change inside a component owns one row, and pays for 29 rows it does not own**
+plus the runner's contract checks (prompt docs, instructions, landing queue, landing baseline, fast
+binary/environment/result, install front door, component provisioning, `wit-lint`, `wit-deps`). That is
+the *floor* of every narrowed run, and it is why "build and test only what changed" does not get cheaper
+than ~30 rows.
+
+Measured costs around that subset: rebuilding the `memory` component after one changed file **1.4 s**;
+rebuilding `wa` after one changed file in `wa-kernel-runtime` **0.3-1.1 s**; `publish-components.sh --check`
+**0.55 s** (it refuses with `commit_not_on_pushed_branch`, correctly).
+
+**The measured factory limit is the lock, not the work.** The narrowed run of those two rows
+(`flock -o ~/Work/missions/.suite.lock env WA_FAST_ROWS="scripts/test-memory-component.lua
+scripts/test-wit-deps.lua" bash scripts/fast.sh`) waited for the shared suite lock while three other
+missions' runs and installs held it; the run was started at 20:47 and had not begun at 21:05. That queue -
+one heavy suite at a time on 16 cores, each up to 999 s - is the real cost of a round, and no amount of
+component splitting removes it.
+
+### 4b. What hot-swapping ONE component on a running node needs beyond `wa dev`
+
+`wa dev <component-dir>` (`rust/wa-host/src/dev.rs`) is a loop for **service** components: watch, `cargo
+build --target wasm32-wasip2`, lay the artifact down in a dev directory, then `wa_kernel_runtime::dev::swap`
+- start the new instance beside the old one, wait for `lifecycle.report(ready)`, stop the old one; a
+candidate that exits or never reports health keeps the previous instance. It deliberately does not join a
+running `wa serve` registry (there is no node endpoint for "start a second instance of this name and keep
+the old one").
+
+For the components that are on a **per-call** path (memory, hooks, selfloop, codemode, mesh) a swap needs
+nothing else on the call side, and that is measured: every dispatch re-reads the artifact and its pin
+(`load_in`, `components.rs`), so the next call after the swap uses the new bytes and an in-flight call
+keeps the copy it already loaded. The price of that property is the per-call read + SHA-256 in section 7.
+
+What does need building, outside `wa dev`:
+
+| need | today | what a per-component swap adds |
+| --- | --- | --- |
+| publish | `scripts/publish-components.sh` builds, verifies and bundles **every** component `components.lock` pins, one release tag `components-<sha12 of the lock>`, and refuses a commit that is not on a pushed branch | a per-artifact tag/pin: one changed component today republishes the whole bundle and re-pins the whole lock |
+| pin | `components.lock`, edited by hand, judged by `scripts/test-component-pins.sh` | a generated pin file: there is **no** `component-pins-generated` in this tree (`rg` finds 0 files) - the brief's name for it does not exist yet |
+| signature | the pin is a sha256 in a committed lock; the *release* signature covers release sums (`scripts/sign-release.sh`, `scripts/lib/release-signing.sh`) | a signature over the per-component bytes, so a swapped artifact is trusted for the same reason a release is |
+| in-flight calls | nothing needed (per-call load, above) | nothing |
+| a node's own cache | `~/.wasm-agent/cache/components/<sha>-<engine>.cwasm`, keyed by pin | nothing: a new pin is a new key |
+
+### 4c. How much of a week's change lives inside the one agent-core component
+
+`git log --since='14 days ago' --oneline -- <path>`, this repository, 23/11:
+
+| window | commits | `lua/` | `rust/` | `wit/` | `components.lock` | `scripts/` | `rust/components/` |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 14 days | **1,972** | 765 (39 %) | 384 (19 %) | 4 | 22 | 1,163 | **48 (2.4 %)** |
+| 7 days | **1,528** | 561 (37 %) | 279 | 2 | - | - | **12** |
+
+Per component over the same 14 days: `codemode` 16, `graph` 2, `model-gateway` 1, `telemetry-sink` 1, and
+`agent-core`, `hooks`, `memory`, `mesh`, `selfloop` **0**.
+
+So today's split gives "build and test only what changed" a payoff on **2.4 % of the work**, and the other
+~97 % is one unit: the Lua core plus the binary it runs in. The Lua that would live *inside* agent-core is
+**37-39 % of every commit** - that is the mass a finer split along the WIT seams would have to carve up
+before per-component builds pay for the factory's real cost (the 999 s suite). The static library and the
+`wa` incremental rebuild are already fast (1.4 s and 0.3-1.1 s); the tests are not, and they are not
+time-sliced by component today.
+
+## 5. Omni device: which hosts exist, and what a third would need
+
+**Hosts that ship today** (`releases/index-linux.json`, `releases/index.json`):
+
+| host | target | channel |
+| --- | --- | --- |
+| Linux x86_64 | `x86_64-unknown-linux-musl` | `index-linux.json`, `wa update` |
+| Linux arm64 | `aarch64-unknown-linux-musl` | `index-linux.json` |
+| Android arm64 (Termux) | `aarch64-linux-android` | `index.json`, prebuilt only (`scripts/release-android.sh`: *"the phone cannot compile this workspace (measured rustc SIGSEGV on cranelift), so the release, not a build, is its update channel"*) |
+| Windows | 28 `.rs` files carry `cfg(windows)` code and `AGENTS.windows.md` describes the shell, but **no Windows artifact is in either release index** | none |
+
+**The components do not have to be ported.** A component is wasm32-wasip2 and the same bytes run on every
+host (`components.lock`: *"its bytes are wasm32-wasip2, so they do not depend on the CPU - the same artifact
+runs on arm64 and x86_64"*). What a third host ports is the **six interfaces of section 6** plus WASI's
+
+own six. Per capability family, what each candidate host would have to provide:
+
+| family (section 6) | macOS | Android/Termux | browser (a JS host) |
+| --- | --- | --- | --- |
+| WASI 0.2 itself (files, clocks, random, sockets, cli) | provided by wasmtime-wasi on macOS, complete | complete, but the app sandbox restricts files to Termux's own home - the ledger and the component dir already live there | **files and sockets have no complete story**: OPFS gives no durable random writes and no sockets beyond fetch/WebSocket; clocks/random are fine |
+| \(a\) the 62 guest-side capabilities | nothing to port - they move into the guest | same | same |
+| process (\(b\): exec, subagents, `bash`) | `posix_spawn` + `waitpid`, ~ the same shape as Linux | Termux has fork/exec for its own binaries; `systemd` does not exist, so the supervisor model changes | **not possible**: a page cannot start a process |
+| terminal/pty (\(b\): the TUI, 33 capabilities) | `termios` + `ioctl(TIOCGWINSZ)`, ~ the same shape | `termios` works in Termux | a terminal can be *drawn* in a page, but there is no pty and no raw keystroke stream outside the page |
+| keys (\(b\): sign/verify, keyring) | Security.framework's keychain | no keychain in Termux: needs Android Keystore through a JNI shim, or a file with a passphrase | WebCrypto + IndexedDB (non-extractable keys) - the closest of the three |
+| system (\(b\): statvfs, CPU, locks, sleep, systemd) | `statfs`, `sysctl`, `flock` | `statvfs`/`flock` present, no systemd | **not possible**: no statvfs, no flock, no sleep beyond timers |
+| ledger (\(c\): SQLite) | `sqlite3` links as it does on Linux | same | SQLite compiled to wasm over OPFS: real, but every write is a copy and two tabs cannot share one store |
+
+So the omni-device answer is: **the component half is already portable (one artifact, three hosts), and
+the host half is six interfaces**. macOS and Termux are each a small port of (process, terminal, system)
+plus a real one for (keys); a browser host can run the guest only if the *chat* does not need a process,
+a terminal or a shared ledger - which today it does.
