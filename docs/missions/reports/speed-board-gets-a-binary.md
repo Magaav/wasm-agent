@@ -34,6 +34,11 @@ change/speed-board-gets-a-binary, 23/11. Base a0bb0262. Built and tested in
   for the lock its own parent suite holds, and the row hung until it was killed.
 - **358ebffe** - `scripts/lib/speed-stats.lua` prints no load for a row with no number (`0.00` beside a
   RED row reads as a measurement), with its check in `scripts/test-speed-stats.lua`.
+- **0fc38be2** - `scripts/speed-board.sh` runs every `speed-stats` call from the board's OWN tree
+  (`stats_lua`): the library reads `lua/vendor/json.lua` by a path relative to the caller's directory, so a
+  board started outside the tree measured four rows and then wrote nothing (`refused(history_write_failed)`,
+  measured in this mission's end-to-end run). Checked in `scripts/test-speed-board.lua` ("the board writes
+  its line when it is started from another directory").
 - **97c88958** - `scripts/test-main-health.sh` clears `WA_BIN`, `WA_FAST_ALLOW_STALE_BINARY` and
   `WA_FAST_SKIP_BUILD`: `scripts/fast.sh:489` exports `WA_BIN` for every row, so inside the suite the
   fixture's main-health treated the SUITE's binary as the caller's explicit choice, refused it (its stamp
@@ -78,13 +83,15 @@ release=1475000ms@7.57 remote_roundtrip=461ms@7.44 start=402ms@7.57 tool_roundtr
 ## Verified here
 
 - **The three changed tests, run alone** (`WASM_AGENT_HOME=<scratch> WA_SCRIPT=<row> wa --db <scratch>/t.db`):
-  `speed-stats ok (40 checks)`, `speed-board ok (28 checks)`, `test-main-health ok (30 checks)` - all green.
+  `speed-stats ok (40 checks)`, `speed-board ok (30 checks)` (three runs in a row), `test-main-health ok
+  (30 checks)` - all green.
 - **They fail on the base** (`WA_BIN=/home/victor/.local/bin/wa bash scripts/test-discriminates.sh a0bb0262`,
   verbatim):
   `discriminates  scripts/test-main-health.sh  test-main-health FAILED: --bin does not name the binary the fast run built: ...` /
-  `discriminates  scripts/test-speed-board.lua  speed-board: 7 FAIL of 28` /
-  `discriminates  scripts/test-speed-stats.lua  speed-stats: 5 FAIL of 39` /
-  `3 discriminating, 0 blocking`.
+  `discriminates  scripts/test-speed-board.lua  speed-board: 9 FAIL of 30` /
+  `discriminates  scripts/test-speed-stats.lua  speed-stats: 5 FAIL of 40` /
+  `3 discriminating, 0 blocking` (re-run on the final tip 0fc38be2 after the node's install; the first run,
+  at e0b9f640, said the same in the same shape).
 - **A real board run with a real binary of this commit**: `start=402ms first_token=260ms
 tool_roundtrip=173ms remote_roundtrip=461ms` (load 7.57, 16 cores), four rows numbered, `verdict.red`
   empty. The binary was built by the real resolver (`fast: building this tree's binary
@@ -140,9 +147,29 @@ The suite ran on f0e11fb5 and did its job twice over.
    bash scripts/fast.sh`), so production is not affected - but a harness that exports it hangs the suite,
    and `scripts/test-drive.sh` is not hardened here. That is a candidate brief, not a fix of this mission.
 
-## The full suite on this commit
+## The full suite
 
-PENDING-FULL-SUITE
+`bash scripts/main-health.sh` (this branch's script) on a scratch clone whose `main` is **97c88958**, the
+node's suite lock taken by the launcher, all output under `/tmp/sb-e2e`: **416 checks, 410 passed, 6 failed,
+0 skipped, 603 s**. The six red rows, and what each is:
+
+| row | why it is not this branch |
+| --- | --- |
+| `undo-pty`, `undo-remote-pty` | red in the operator's OWN health runs on main: `fast-result-ae3cbb37ddcf.json` and `fast-result-da912828082d.json` both name them |
+| `scripts/test-graph-crash-recovery.lua` | same: red at e9a42d20, 3665b1b7, fe60dc0a, bfb06cc4 in `~/.wasm-agent/main-health/fast-result-*.json` |
+| `publish-artifacts` | `FAIL publish-artifacts (exit 1): publish artifacts FAILED: the transport ships a v...`, twice in the land gates' own logs (`~/.wasm-agent/land/*/evidence/gate.log`) |
+| `deploy-bound` | failed once here and PASSED in this mission's earlier run of the same environment (f0e11fb5, row 40); it is a timing bound taken at load 13-18 |
+| `scripts/test-release-sign.lua` | same: failed once here, passed in the earlier run of the same environment; `2 of 5 checks failed` under the same load |
+
+The row this branch had broken - `main-health` - PASSES in this run: `97c88958` (clearing the inherited
+`WA_BIN`) is the fix, and it is the row that failed in the run before it.
+
+**Not run on the last two commits.** After this run I made `0fc38be2` (the board's cwd fix) and the report
+edits. Running the whole suite again would need another turn in a queue that was 30-60 minutes deep all
+night, so what is verified for those two is narrower and named: `scripts/test-speed-board.lua` green three
+runs in a row (28 checks before the cwd case, 30 after) and `scripts/test-speed-stats.lua` 40 checks,
+`scripts/test-main-health.sh` 30 checks, plus the discrimination rows below. The landing gate runs the
+whole suite again.
 
 ## Texts to approve (new or changed, verbatim)
 
