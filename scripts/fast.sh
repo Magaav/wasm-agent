@@ -1104,6 +1104,17 @@ check release-channel bash scripts/test-release-channel-e2e.sh
   # reports down as up come home. It replaces the previous round's "one notch = one PageUp" row, which
   # is the behaviour the operator rejected. The real binary in a private tmux pty, as the rows above.
   WA_BIN="$bin" check wheel-lines-pty node scripts/test-wheel-lines-pty.mjs
+  # THE LAST REQUEST STAYS ON THE TOP ROW, AND A MESSAGE HAS ONE OF ITS OWN ABOVE IT (pinned-prompt-
+  # and-notice-row, Victor 23/11 11:20Z): during a streaming run the request is the first row of the
+  # window; a copy is announced on the notice row ABOVE it and never on the session status bar; the
+  # message goes after about two seconds and an error waits for the next key. The real binary in a
+  # private tmux pty against a slow local SSE fixture, as the rows above. On the base row 3 does not
+  # exist at all (the message is drawn in the footer's place, over the status bar).
+  WA_BIN="$bin" check pinned-request-pty node scripts/test-pinned-request-pty.mjs
+  # JUMP TO BOTTOM (the same brief, item 7): scrolled away from the newest output, a pill sits on the
+  # transcript's last row and names the key the KEYMAP binds to Bottom (read from the table); the key
+  # and a click on the pill both go back and follow the output again. Same shape: a real pty.
+  WA_BIN="$bin" check jump-to-bottom-pty node scripts/test-jump-to-bottom-pty.mjs
   # THE STATUS ROWS' ICONS, MEASURED IN THE FONT FILES (tui-chrome item 2, drawn by change/icons-box):
   # advance, bearings and centre of every glyph the two rows draw, against the box
   # scripts/build-wa-icons.py builds (right bearing 18% of the cell, left >= 6%, one centre on the
