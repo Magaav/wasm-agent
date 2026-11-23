@@ -334,3 +334,52 @@ fn a_holder_the_reporter_knows_is_named() {
         other => panic!("work with no session is never passed over and never failed: {other:?}"),
     }
 }
+
+/// 15. A `Wait` HAS NO BOUND, SO IT SAYS SO ONCE (Fable's review, 23/11 ~17:10Z). An unnamed holder is not a
+/// failure and the request keeps waiting - but nothing else would ever tell an operator that the same holder has
+/// been there for a quarter of an hour. One notice, naming it, once; a DIFFERENT reason starts its own clock; and
+/// the record is on disk, so a `once` and a long-running watcher agree about when the fifteen minutes began.
+///
+/// The clock is an argument (`now`), which is the whole point of the test: no sleep, no race, no live node.
+#[test]
+fn a_wait_that_never_ends_is_noticed_once() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let home = std::env::temp_dir().join(format!("wa-held-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).unwrap();
+    let previous = std::env::var_os("WASM_AGENT_HOME");
+    std::env::set_var("WASM_AGENT_HOME", &home);
+
+    let key = "1700000000000000000-4242-00000000000000000000.json";
+    let why = "the node reports itself busy and names no holder";
+    let other = "the holder `2 subagent(s) running, 0 queued` names no session, so nothing proves it paused";
+
+    // The first Wait starts the clock and says nothing: the announcement already covered the fact.
+    assert_eq!(wait_notice(key, why, 1_000, 900), None, "a wait that just began is no news");
+    assert_eq!(waiting_since(key, why, 1_000).0, 1_000, "and the clock is the one it began at");
+    // Fourteen minutes later: still silence, and the clock did not move.
+    assert_eq!(wait_notice(key, why, 1_000 + 899, 900), None, "one second short of the notice is silence");
+    assert_eq!(waiting_since(key, why, 1_000 + 899).0, 1_000, "the clock survives being read");
+    // Fifteen minutes: ONE notice, and it names the holder it is waiting on.
+    let notice = wait_notice(key, why, 1_000 + 900, 900).expect("fifteen minutes on the same holder is news");
+    assert!(notice.contains("still waiting after 900s on the same holder"), "{notice}");
+    assert!(notice.contains("names no holder"), "the notice names what it is waiting on: {notice}");
+    assert!(notice.contains("notice, not a failure"), "and that the request is not being failed: {notice}");
+    // And never again, however long it waits.
+    assert_eq!(wait_notice(key, why, 1_000 + 100_000, 900), None, "a notice is made once, not every tick");
+    // A DIFFERENT reason is a different wait: the clock starts again and the notice is due again later.
+    assert_eq!(wait_notice(key, other, 1_000 + 100_001, 900), None, "a new holder starts its own clock");
+    assert_eq!(waiting_since(key, other, 1_000 + 100_001).0, 1_000 + 100_001);
+    assert!(wait_notice(key, other, 1_000 + 100_901, 900).is_some(), "and its own notice when it too never resolves");
+    // The request stopped waiting: the next wait starts from zero, so a notice is never inherited.
+    clear_wait_clock(key);
+    assert_eq!(wait_notice(key, why, 1_000 + 200_000, 900), None, "a cleared request inherits no clock");
+    // Turned off by the operator: `0` says nothing, ever.
+    assert_eq!(wait_notice(key, why, 1_000 + 400_000, 0), None, "WA_DEPLOY_HOLD_NOTICE=0 is silence");
+
+    match previous {
+        Some(value) => std::env::set_var("WASM_AGENT_HOME", value),
+        None => std::env::remove_var("WASM_AGENT_HOME"),
+    }
+    let _ = std::fs::remove_dir_all(&home);
+}

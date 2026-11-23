@@ -229,7 +229,8 @@ function M.refuse(now, opts)
       .. tostring(wait.to and tostring(wait.to):sub(1, 12) or "an unnamed commit")
       .. ". This node starts no new turn while a build is waiting for it or being installed - a turn in"
       .. " flight is exactly what keeps the node from going idle - and this turn did not start. Nothing was"
-      .. " lost: this is a wait, not a failure."
+      .. " lost: this is a wait, not a failure. "
+      .. ((request_reader() and request_reader().RETRY) or "retry when idle")
   end
   return text, wait
 end

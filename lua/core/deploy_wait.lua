@@ -222,6 +222,7 @@ function M.refusal(wait, now)
     .. "starts again once the swap is done. A running turn pauses after its current step instead "
     .. "(lua/core/deploy_pause.lua). To stop waiting, withdraw the request: "
     .. "wa-sentinel request withdraw " .. tostring(wait and wait.id or "<id>")
+    .. ". " .. M.RETRY
 end
 
 -- THE SAME REFUSAL WITHOUT ANYTHING THAT IDENTIFIES THE INSTALL (23/11). A caller who has not proved who it is
@@ -229,11 +230,17 @@ end
 -- lane of the box the request is in (`/health` publishes those to a caller that is already trusted with the
 -- node's own state; an anonymous request is not). Composed here, beside `refusal`, so the two cannot drift about
 -- what the node is doing.
+-- THE LAST WORDS OF EVERY REFUSAL, so a script can tell a WAIT from a FAILURE without parsing the prose
+-- (Fable's review, 23/11 ~17:10Z: a worker's run ended rc=2 and nothing in the sentence said what to do about it).
+-- It is a constant because three sentences carry it - this module's two and the pause's own fallback - and a
+-- caller greps for it the same way it greps for `deploy_waiting`.
+M.RETRY = "retry when idle: nothing was asked and nothing ran, so ask again once the node is back"
+
 function M.refusal_redacted()
   return "deploy_waiting: this node is waiting for or installing a new build. This node starts no new turn while "
     .. "a build is waiting for it or being installed - a turn in flight is exactly what keeps the node from going "
     .. "idle - and this turn did not start. Nothing was lost: this is a wait, not a failure, and the work starts "
-    .. "again once the swap is done."
+    .. "again once the swap is done. " .. M.RETRY
 end
 
 return M

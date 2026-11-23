@@ -107,6 +107,13 @@ local marker_read = function() return { to = "8082b42e1111", id = "1795341684727
 local claimed_wait = pause.claim_wait(busy, now, { read = marker_read })
 ok(type(claimed_wait) == "string" and claimed_wait:find("deploy_waiting", 1, true) == 1,
   "a claim held while a build waits is the wait, not the run's failure", tostring(claimed_wait))
+-- THE SENTENCE A SCRIPT READS (Fable's review, 23/11 ~17:10Z): a refusal and a failure must be tellable
+-- apart without judging prose, so every refusal ends in the same words.
+local refusal_text = pause.refuse(now, { read = marker_read })
+ok(type(refusal_text) == "string" and refusal_text:find("retry when idle", 1, true) ~= nil,
+  'a refusal ends in retry-when-idle, so a runner can tell it from a failure', tostring(refusal_text))
+ok(refusal_text:find("deploy_waiting", 1, true) == 1, "and still names the wait as its first word",
+  tostring(refusal_text))
 ok(claimed_wait:find("Nothing was lost", 1, true) ~= nil,
   "and it says nothing was lost, because nothing ran", tostring(claimed_wait))
 local claim_none = pause.claim_wait(busy, now, { read = function() return nil end })

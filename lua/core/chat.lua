@@ -753,7 +753,7 @@ function M.run(argv)
     -- already act on (exit 2 with `deploy_waiting`, docs/SCRIPTED-RUNS.md) - a turn that wrote nothing and ran
     -- nothing was never "failed".
     io.stderr:write(string.format("wa: session %s %s\n", tostring(agent.session_id),
-      ran_ok and "ok" or (M.deploy_refused(agent) and "not started" or "failed")))
+      M.exit_code(ran_ok, agent) == 2 and "not started" or (ran_ok and "ok" or "failed")))
     -- A thread that was busy, and the one this run started instead, said out loud (finding 6).
     if agent.session_note then io.stderr:write("wa: " .. tostring(agent.session_note) .. "\n") end
     agent:close()
@@ -765,8 +765,7 @@ function M.run(argv)
     -- mission runners wait on `2` with `deploy_waiting` and do not spend a round, while `1` ended the worker
     -- (measured 23/11: components-calls-cheap d2d69ff3 and release-linux-reads-the-receipt 0b8c9d78, both rc=1
     -- with `run_resource_refused ... resource_busy`, while a deploy was waiting for or installing on the node).
-    if not ran_ok and M.deploy_refused(agent) then return 2 end
-    return ran_ok and 0 or 1
+    return M.exit_code(ran_ok, agent)
   end
 
   -- The input, and where the prompt is drawn. Both matter to the same thing: a reader who can see
@@ -1369,6 +1368,18 @@ M.start_notice = start_notice
 -- Was this run refused by a WAITING OR INSTALLING BUILD, rather than failed? The sentence is
 -- lua/core/deploy_wait.lua's (`deploy_waiting: ...`) and lua/core/deploy_pause.lua's own pause sentence
 -- (`deploy waiting: ...`); both start with the same two words, and nothing else in this tree does.
+-- THE EXIT CODE OF A SCRIPTED RUN, in one place (Fable's review, 23/11 ~17:10Z): 0 when the turn answered, 2 when
+-- it was REFUSED before it started and nothing ran, 1 when it failed. Only a refusal can be 2 - and a turn that
+-- PAUSED for a deploy is not one: it answered (lua/core/deploy_pause.lua `at_boundary` sets the reply and
+-- `completed`, and `turn_refused` stays nil), so it exits 0 and its work resumes from the wake it scheduled.
+-- `scripts/test-thinking-block.lua` asserts all four combinations, and `scripts/test-deploy-wait.sh` step 4
+-- asserts the paused one end to end (rc=0 with a deploy waiting).
+function M.exit_code(ok, agent)
+  if ok then return 0 end
+  if M.deploy_refused(agent) then return 2 end
+  return 1
+end
+
 function M.deploy_refused(agent)
   local refused = type(agent) == "table" and agent.turn_refused or nil
   if type(refused) ~= "string" then return false end
