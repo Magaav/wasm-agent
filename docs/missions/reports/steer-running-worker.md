@@ -42,8 +42,11 @@ scripts/mission.sh amend <name> <file|->      # a change from the planner, while
 - **Delivers** the same text, labelled `[amendment <UTC> from the planner]`, through the product's own
   steering door (`wa steer <session> --json <text>`): a durable `steering_inbox` row for the run in flight,
   consumed at its next context boundary.
-- **Finds the session from the node**, in this order: a run the node says is in flight under the mission's
-  title; then `run.lock`'s `SESSION`; then the `wa: session` line a finished run left in the logs.
+- **Finds the session from the node** (`754197cc`), in this order: a run the node says is in flight
+  under the mission's title (the first line of `prompt.md`); then a run the node records as working in the
+  mission's directory (`session_presence` + `/proc/<pid>/cwd`, which is what covers a mission staged the way
+  the factory's own launcher stages one - brief first, no marker); then `run.lock`'s `SESSION`; then the
+  `wa: session` line a finished run left in the logs.
 
 ### 2. Between turns, finished, and never twice (`84e221eb`)
 
@@ -66,18 +69,19 @@ it; `scripts/test-mission-verb.sh` asserts the CLI's does.
 
 ### 4. The fixture (`84e221eb`)
 
-`node scripts/test-mission-amend.mjs`, 38 checks, wired into `scripts/fast.sh` as `check mission-amend`.
+`node scripts/test-mission-amend.mjs`, 43 checks, wired into `scripts/fast.sh` as `check mission-amend`.
 It is not a stub: `scripts/mission.sh` stages and starts the mission itself, the worker is a real
 `wa chat --once` process against the fixture's own node store, the amendment is sent by a separate
 `scripts/mission.sh amend` process while the turn is held at its first model request, and the proof that the
 worker saw it is its **next** model request. The only substitute is the provider: a local SSE fixture (the
 shape `rust/wa-capabilities/src/host.rs` parses), so no model and no network.
 
-It proves, among the 38: the note is appended with its stamp and the prompt prefix is untouched; the inbox row
+It proves, among the 43: the note is appended with its stamp and the prompt prefix is untouched; the inbox row
 is durable before delivery; the next context boundary sees the note **exactly once**, labelled; it is in the
 transcript once as a user row; the receipt is `read` with its message; the same file twice appends and
 delivers nothing; a finished worker is resumed and the resumed turn's first user message **is** the amendment;
-the refusals (no session, empty note, no brief, usage) append nothing.
+the refusals (no session, empty note, no brief, usage) append nothing; and a worker whose prompt has no title
+marker at all (the factory's launcher shape) is steered too, found through the node's presence record.
 
 **It fails on the base**: run in a worktree of `8862b600` it stops at check 3 - the base prompt has no
 `## Amendments` section and the base script has no `amend` verb.
@@ -85,7 +89,7 @@ the refusals (no session, empty note, no brief, usage) append nothing.
 ### 5. FACTORY.md (`6f6e422e` cites the docs; the rule itself is outside the repo)
 
 Rule 13 was appended to `~/Work/missions/FACTORY.md` (the factory's own rule file, which is NOT in this
-repository - so it cannot be cited by commit; it is a file under `~/Work/missions`, 24 lines added, rule text
+repository - so it cannot be cited by commit; it is a file under `~/Work/missions`, 19 lines added, rule text
 in "Texts to approve" below). The repository's knowledge document, `docs/MISSIONS.md`, gained step **4b**,
 the two new files in its mission-directory table, and the three measurements above.
 
@@ -93,7 +97,7 @@ the two new files in its mission-directory table, and the three measurements abo
 
 | row | result | note |
 | --- | --- | --- |
-| `node scripts/test-mission-amend.mjs` | **38 checks passed** | `WA_BIN=/home/victor/.local/bin/wa` (a build of `8862b600`, this branch's base) |
+| `node scripts/test-mission-amend.mjs` | **43 checks passed** | `WA_BIN=/home/victor/.local/bin/wa` (a build of `8862b600`, this branch's base) |
 | the same file, in a worktree of `8862b600` | **FAILED after 2 checks** | it discriminates (rule 16) |
 | `bash scripts/test-mission.sh` | **282 checks ok** | with the same binary |
 | `bash scripts/test-mission-verb.sh` | **49 checks ok** | includes the two new prompt assertions |
