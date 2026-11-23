@@ -598,7 +598,33 @@ function M.project_instructions(role, workdir)
     local file = read(join(chain[i], "AGENTS.md"))
     if file then files[#files + 1] = file end
   end
-  return files
+  -- ONE TEXT, ONE FRAME (project-instructions-once, 23/11). The walk above is right for a monorepo and
+  -- wrong for the two shapes that copy one file into two ancestors: a git worktree placed inside its
+  -- parent checkout, and a copied or symlinked tree. Measured on this node before this change: cwd
+  -- checkout/ read its own AGENTS.md AND the byte-identical one a directory above (6,924 bytes each),
+  -- so a quarter of a 27,540-byte prompt was the same text twice on every request from that directory
+  -- or below it. A file whose content is byte-identical to another one included here is now carried
+  -- once. The copy that STAYS is the one nearest the workdir - the chain is root-first, so the last
+  -- occurrence of a text wins and the most specific file keeps its place last - and every skipped path
+  -- is named in the kept frame's attribute (never in prose the model reads), so which ancestors said
+  -- the same thing is still visible. Byte equality is also what makes two paths that resolve to one
+  -- real file (a symlink, a hard link) one frame: the loader compares what it read, not the path.
+  local nearest = {}
+  for i = #files, 1, -1 do
+    if nearest[files[i].text] == nil then nearest[files[i].text] = i end
+  end
+  local unique = {}
+  for i = 1, #files do
+    local file, keep = files[i], nearest[files[i].text]
+    if keep == i then
+      unique[#unique + 1] = file
+    else
+      local keeper = files[keep]
+      keeper.same_text_as = keeper.same_text_as or {}
+      keeper.same_text_as[#keeper.same_text_as + 1] = file.path
+    end
+  end
+  return unique
 end
 
 -- Execution role is separate from authority. Guests never inherit either
@@ -830,7 +856,11 @@ local function system_sections(role, agents, agents_path, tool_list, envelope_mo
   if type(agents)=='table' then
     local frames={}
     for _,file in ipairs(agents) do
-      frames[#frames+1]=sections.section('project_instructions',file.text,{path=file.path})
+      -- A text carried once for several ancestors (see project_instructions) still names every path it
+      -- stands for, in the frame the model reads: a dropped copy is visible, not silently gone.
+      local same=type(file.same_text_as)=='table' and #file.same_text_as>0
+        and table.concat(file.same_text_as,', ') or nil
+      frames[#frames+1]=sections.section('project_instructions',file.text,{path=file.path,same_text_as=same})
     end
     if #frames>0 then project='Project-specific instructions and guidelines:\n'..table.concat(frames,'\n') end
   elseif agents and agents~='' then
