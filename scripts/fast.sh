@@ -298,16 +298,27 @@ wa_fast_evidence_dir() {
   [ -n "$gd" ] || return 1
   printf '%s' "$gd/wa-fast-evidence/$(date +%Y%m%dT%H%M%SZ)-$$"
 }
-wa_fast_rows_logged() { # every log a row wrote, of either kind
-  local log
-  for log in "$work"/check-*.log "$work"/logs/*.log; do
-    [ -f "$log" ] || continue
-    printf '%s\n' "$log"
+# The log a row writes, of either kind: a `check` row (a pty row) writes check-<name>.log, a Lua row writes
+# logs/<its file>.log. Only the FAILED rows are asked for: a green row's log is not evidence, and copying
+# every row's log made 85 files for 6 failures (measured on this change's own first fast.sh run).
+wa_fast_row_logs() { # <row name>...
+  local name log
+  for name in "$@"; do
+    [ -n "$name" ] || continue
+    for log in "$work/check-$name.log" "$work/logs/$(basename "$name").log"; do
+      [ -f "$log" ] || continue
+      printf '%s\n' "$log"
+    done
   done
 }
 wa_fast_keep_failed_logs() {
   [ "${fails:-0}" -gt 0 ] || return 0
-  local dir log named kept=0 dirs=0
+  # One declaration per counter, and each with its =0 on the same statement: scripts/test-fast-counters.sh
+  # reads the shipped file for `(^|; |local )<name>=[0-9]`, and a counter packed into a shared `local`
+  # list ("local a b kept=0") is invisible to it - it read this one as never initialised.
+  local kept=0
+  local dirs=0
+  local dir log named
   dir=$(wa_fast_evidence_dir) || { echo "fast: refused(keep_evidence_nowhere): no git dir to keep the failed rows' evidence in" >&2; return 0; }
   mkdir -p "$dir" 2>/dev/null || { echo "fast: refused(keep_evidence_unwritable): cannot keep the failed rows' evidence in $dir" >&2; return 0; }
   while IFS= read -r log; do
@@ -318,14 +329,14 @@ wa_fast_keep_failed_logs() {
       [ -n "$named" ] && [ -d "$named" ] || continue
       cp -a "$named" "$dir/$(basename "$named")" 2>/dev/null && dirs=$((dirs + 1))
     done < <(grep -o 'kept for diagnosis: [^ ]*' "$log" 2>/dev/null)
-  done < <(wa_fast_rows_logged)
+  done < <(wa_fast_row_logs ${failed_rows:-})
   # One file that answers "what failed" without opening a log per row.
   : > "$dir/failures.txt" 2>/dev/null || true
   while IFS= read -r log; do
     { wa_fast_row_failure_line "$log"; last_line_of "$log"; } | while IFS= read -r named; do
       [ -n "$named" ] && printf '%s: %s\n' "$(basename "$log")" "$named"
     done >> "$dir/failures.txt" 2>/dev/null || true
-  done < <(wa_fast_rows_logged)
+  done < <(wa_fast_row_logs ${failed_rows:-})
   echo "fast: kept $kept failed row log(s) and $dirs scratch dir(s) in $dir (what failed: $dir/failures.txt)"
   # The default location is bounded: keep the five newest runs, so a broken main cannot fill the disk.
   if [ -z "${WA_FAST_KEEP_LOGS:-}" ]; then
@@ -344,14 +355,14 @@ wa_fast_row_failure_line() { # <log>
   [ -n "$line" ] || line=$(first_error_of "$log")
   printf '%s' "$line" | cut -c1-300
 }
-export -f wa_fast_row_failure_line wa_fast_rows_logged 2>/dev/null || true
+export -f wa_fast_row_failure_line wa_fast_row_logs 2>/dev/null || true
 trap 'wa_fast_keep_failed_logs; rm -rf "$work"' EXIT
 
 # The build-time ledger: one line per build this run performs, printed in the summary
 # below, because "a module compiles faster" is a claim about a number (scripts/lib/build-times.sh).
 . "$ROOT/scripts/lib/build-times.sh"
 wa_build_times_init "$work/build-times.tsv"
-fails=0; envfails=0; skipped=0; ran=0
+fails=0; envfails=0; skipped=0; ran=0; failed_rows=''
 
 # ---- the environment this verdict belongs to ---------------------------------------------------------
 # A red row is a fact about the TREE only if the machine is named with it. Measured 11/12 on wa-desktop:
@@ -841,6 +852,7 @@ check() { name=$1; shift; s=$(fast_now_ms)
     echo "fast: $name ok (${ms}ms)"; record_row pass checks "$name" "$c" "$ms" 0 ''; return 0
   fi
   fails=$((fails + 1))
+  failed_rows="$failed_rows $name"
   # WHAT FAILED, IN THE ROW'S OWN WORDS (23/11). This reported `tail -3`, and a row whose failing
   # assertion is followed by two more lines reported only green ones: twice per fast.sh run the two /undo
   # pty rows read "ok - /help lists /undo ... 16 ok, 1 failed", with the failing check three lines up and

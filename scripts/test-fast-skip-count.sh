@@ -61,18 +61,18 @@ failure_line_body="$(function_body wa_fast_row_failure_line)"
 eval "$failure_line_body"
 # The keepers, or - on a base that has none of them - the shape it DID have, so the case below fails on
 # what was kept rather than on a missing function (a missing symbol is evidence of nothing).
-for keeper in wa_fast_evidence_dir wa_fast_rows_logged wa_fast_keep_failed_logs; do
+for keeper in wa_fast_evidence_dir wa_fast_row_logs wa_fast_keep_failed_logs; do
   body="$(function_body "$keeper")"
   [ -n "$body" ] && eval "$body"
 done
 # The base's own shape: no evidence-dir helper, and only `logs/*.log` collected.
 type wa_fast_evidence_dir >/dev/null 2>&1 || eval 'wa_fast_evidence_dir() { printf "%s" "${WA_FAST_KEEP_LOGS:-}"; }'
-type wa_fast_rows_logged >/dev/null 2>&1 || eval 'wa_fast_rows_logged() { local log; for log in "$work"/logs/*.log; do [ -f "$log" ] && printf "%s\n" "$log"; done; }'
+type wa_fast_row_logs >/dev/null 2>&1 || eval 'wa_fast_row_logs() { :; }'
 
 run_case() { # <name> <expected status> <expected skipped delta> <command...>
   local name=$1 want=$2 want_skip=$3; shift 3
   : > "$SCRATCH/rows"
-  ran=0; fails=0; envfails=0; skipped=0
+  ran=0; fails=0; envfails=0; skipped=0; failed_rows=''
   check "$name" "$@" > "$SCRATCH/out" 2>&1 || true
   local got got_skip
   got="$(cut -f1 "$SCRATCH/rows" | head -1)"
@@ -108,12 +108,15 @@ mkdir -p "$work/tmp/wa-undo-pty-KEEP/data"
 printf 'alpha\nbeta\n' > "$work/tmp/wa-undo-pty-KEEP/data/demo.txt"
 printf 'ok - one\nFAIL - it names the version\nok - two\nok - three\nscratch kept for diagnosis: %s/tmp/wa-undo-pty-KEEP\nundo pty: 16 ok, 1 failed\n' "$work" > "$work/check-undo-pty.log"
 printf 'lua error: boom\n' > "$work/logs/test-some-row.lua.log"
+printf 'all good\n' > "$work/logs/test-not-failed.lua.log"
 fails=1
+failed_rows='undo-pty scripts/test-some-row.lua'
 WA_FAST_KEEP_LOGS="$SCRATCH/evidence" wa_fast_keep_failed_logs > "$SCRATCH/keep.out" 2>&1
 [ -f "$SCRATCH/evidence/check-undo-pty.log" ] || fail "a pty row's log (check-<name>.log) was not kept: $(cat "$SCRATCH/keep.out")"
 [ -f "$SCRATCH/evidence/test-some-row.lua.log" ] || fail "a Lua row's log was not kept: $(cat "$SCRATCH/keep.out")"
 [ -f "$SCRATCH/evidence/wa-undo-pty-KEEP/data/demo.txt" ] || fail "the directory the row kept for diagnosis was not kept: $(cat "$SCRATCH/keep.out")"
 grep -q 'FAIL - it names the version' "$SCRATCH/evidence/failures.txt" 2>/dev/null || fail "failures.txt does not name the failing line: $(cat "$SCRATCH/evidence/failures.txt" 2>/dev/null)"
 grep -q 'kept 2 failed row log(s) and 1 scratch dir(s)' "$SCRATCH/keep.out" || fail "the keeper did not say what it kept: $(cat "$SCRATCH/keep.out")"
+[ -f "$SCRATCH/evidence/test-not-failed.lua.log" ] && fail 'a row that passed had its log kept: a green row is not evidence'
 
 echo 'test-fast-skip-count: ok (a green row that printed SKIP is recorded skip and counted, a silent green row is still a pass, a failure stays a failure, the runner prints the line that failed with the log it came from, and the logs and kept directories of failed rows survive the run)'
