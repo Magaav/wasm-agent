@@ -134,6 +134,37 @@ ok(telemetry.owed() == 0, "no audit record is still owed")
 ok(telemetry.drops().count == 0, "the refusal cost no dropped record (drops=" ..
   tostring(telemetry.drops().count) .. ")")
 
+-- ---- (1b) THE TURN keeps it too: a record the ledger refused is written before the run returns ------
+-- The agent's own flush at the end of the turn (lua/core/agent.lua, "THE AUDIT RECORDS TOO") and not this
+-- row's: the audit path's patience is one attempt here, so the write is refused, the record is kept owed
+-- through the rest of the turn, and the run writes it before it returns.
+sqlite_attempts = "1"
+refusals.left = 1
+step = 0
+host.exec = function()
+  return json.encode({ code = 0, stdout = "=== env ===\nWASM_AGENT_LLM_API_KEY=" .. SECRET, stderr = "" })
+end
+local stream_again = host.http_stream
+host.http_stream = function()
+  step = step + 1
+  if step == 1 then
+    return json.encode({ status = 200, content = "", finish_reason = "tool_calls",
+      tool_calls = { { id = "c2", type = "function",
+        ["function"] = { name = "bash", arguments = json.encode({ command = "cat " .. leak_path }) } } } })
+  end
+  return json.encode({ status = 200, content = "done", finish_reason = "stop", tool_calls = {} })
+end
+local ran_again = pcall(agent.run, agent, "run env again")
+host.exec = real_exec
+host.http_stream = stream_again
+ok(ran_again, "the second turn must run")
+ok(refusals.fired == 3, "the ledger refused this turn's audit write too (fired=" ..
+  tostring(refusals.fired) .. ")")
+rows, report = secret_rows(sid)
+ok(rows == 2, "the run's own flush wrote the kept record before it returned (rows=" .. tostring(rows) .. ")")
+ok(telemetry.owed() == 0 and report.audit_owed == 0, "nothing is left owed after the turn")
+sqlite_attempts = "5"
+
 -- ---- (2) a ledger that refuses for the whole patience is NOT reported as recorded -----------------
 sqlite_attempts = "1"
 refusals.left = 1
@@ -144,13 +175,13 @@ ok(type(reason) == "string" and #reason > 0, "the refusal must come with the led
 ok(telemetry.owed() == 1, "the refused record is kept for a later write, not lost (owed=" ..
   tostring(telemetry.owed()) .. ")")
 rows = secret_rows(sid)
-ok(rows == 1, "nothing claims a row that was not written (rows=" .. tostring(rows) .. ")")
+ok(rows == 2, "nothing claims a row that was not written (rows=" .. tostring(rows) .. ")")
 refusals.left = 0
 local written, left = telemetry.flush_audit()
 ok(written == 1 and left == 0, "the kept record is written once the ledger takes writes again (written=" ..
   tostring(written) .. " left=" .. tostring(left) .. ")")
 rows, report = secret_rows(sid)
-ok(rows == 2, "the flushed record is in the ledger (rows=" .. tostring(rows) .. ")")
+ok(rows == 3, "the flushed record is in the ledger (rows=" .. tostring(rows) .. ")")
 ok(report.audit_owed == 0 and telemetry.owed() == 0, "the ledger owes nothing after the flush")
 
 host.getenv = real_getenv
