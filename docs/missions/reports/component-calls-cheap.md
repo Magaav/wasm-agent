@@ -143,13 +143,22 @@ main that has `esc-stops-now`, and this branch does not carry that work. No numb
 
 ## Open lead (worth its own item next round)
 
-**Two code-mode sessions per tool call.** 1 tool call -> 2 `open` + 2 `finish`; 20 -> 40. The only
-`seam({op='open',...})` call site is `lua/core/codemode.lua:796`, so the second session is opened by
-another entry point that this round did not locate. If the second open is avoidable, it removes
-**~20 ms per tool call** (about half of the 11 % the guest `open` costs a tool-heavy turn) without
-touching any component's behaviour - a candidate that is worth more than all five approved items
-together. A probe to decide whether the second session also *executes* the script (double effects) was
-attempted with `tools.bash` inside code mode and did not run, so **that question is open too**.
+**Two code-mode sessions per tool call, with near-identical scripts.** Measured with a temporary
+`open session=... owner=... codelen=... code=...` print (reverted, not committed):
+
+```
+open session=13dc274f-... owner=4c0ef016... codelen=20232 code=var __h=(function(G){ var P=Promise; ...
+open session=21a97cc0-... owner=4c0ef016... codelen=20215 code=var __h=(function(G){ var P=Promise; ...
+```
+
+Two different sessions, the same owner, the same 20 KB harness-prelude script differing by **17 bytes**,
+each paying the full 15-21 ms guest `open`. The only `seam({op='open',...})` call site is
+`lua/core/codemode.lua:796` and the only caller of `codemode.run` is `lua/core/tools.lua:1941`, so the
+second session comes from a path this round did not trace to its line. If the second session is
+avoidable, it removes **~20 ms per tool call** - about half of the 11 % the guest `open` costs a
+tool-heavy turn - without changing any component's behaviour, which makes it worth more than all five
+approved items together. Whether the second session also *executes* the script's effects is **not
+established**: the probe for it (`tools.bash` inside code mode) did not run in this scratch node.
 
 ## Where the CPU actually goes, in one line each
 
