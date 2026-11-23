@@ -100,9 +100,20 @@ No assertion, limit or quarantine rule was removed; `quarantine_database` and `f
   node does not have is NAMED in the step as `not run here` (never counted green), which is the same division
   of labour a Rust change already has. `ef258a86`, with `scripts/test-land-quick.lua` proving both halves (a
   fake component arrives in the row's home; a missing one is named and not counted).
-* Measured after the change, in the landing step's own shape (installed binary, the node's component in the
-  row's home, `WA_COMPONENTS_DIR` set): exit 0, same line, no quarantine copy. Without provisioning of either
-  kind the row still refuses by name.
+* MEASURED WITH THE STEP ITSELF DOING THE COPY (23/11, `avell`): `lua/core/land.lua`'s own
+  `M.install_row_components` was driven from a node (`WA_SCRIPT=scratch/step-driver.lua`, `WASM_AGENT_HOME` a
+  scratch home holding the node's pinned `graph.wasm` + `.wasm.sha256` + `.json`); it returned
+  `WA_COMPONENTS_DIR=<row home>/components` and the row's home held all three files. With exactly that
+  environment the row then ran (`WA_SCRIPT=scripts/test-graph-crash-recovery.lua`, the node's installed binary)
+  and exited 0: `graph_db_journal_resolved ... outcome=rolled_back`, `revision 1 kept, 13 row(s) answered, no
+  quarantine copy`. The copy in that measurement is the step's, not a hand copy.
+* THE MODULE ALONE IS NOT A COMPONENT (`901d8fa3`, Fable's review of d61594ce): the step copied only
+  `<name>.wasm` while its own comment required the pin and the manifest, and the host refuses a component with
+  no pin - so a row handed the module would have looked provisioned and failed at the host. It now copies
+  `.wasm`, `.wasm.sha256` and `.json` in ONE copy, removes a half copy if that copy fails, and names the row
+  `not run here` instead. `scripts/test-land-quick.lua` asserts all three files arrive (`quick3c`) and that a
+  component with no pin is named and not counted green (`quick3u`); the machine's own row is green with 165
+  checks.
 * THAT LANDING CHANGE CANNOT HELP THE GATE THAT DEMANDED IT, and that is a bootstrap, not a bug: `wa land`
   runs the **installed** `lua/core/land.lua` while the rows come from the merged tree, so a preflight uses the
   old step until the branch is installed. Round 3 stopped on exactly that. So the row now provisions itself as
