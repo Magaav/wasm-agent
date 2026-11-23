@@ -1140,7 +1140,17 @@ local function explain(result,source,budget,origin,origin_line)
   if mapped>=1 and mapped<=count then line,col=mapped,acol end
  end
  local where=''
- if line then where='\nline '..line..(col and (':'..col) or '')..'\n'..excerpt(origin,line,1) end
+ if line then
+  -- The header keeps its recorded shape (`line N:C | the text`), because that is what a row and a reader
+  -- already parse and this change is additive: the text is capped the same way the excerpt is, so it cannot
+  -- end silently either.
+  local rows={}
+  for row in (origin..'\n'):gmatch('([^\n]*)\n') do rows[#rows+1]=row end
+  local first=(rows[line] or ''):gsub('^%s+','')
+  local trimmed=first:sub(1,EXCERPT_LINE)
+  if #first>EXCERPT_LINE then trimmed=trimmed..' +'..(#first-EXCERPT_LINE) end
+  where='\nline '..line..(col and (':'..col) or '')..' | '..trimmed..'\n'..excerpt(origin,line,1)
+ end
  local ran={}
  for _,call in ipairs(result.calls or {}) do if call.ok==true then ran[#ran+1]=tostring(call.name) end end
  local before=#ran>0 and ('Already done, not undone: '..table.concat(ran,', '):sub(1,200)..'.') or 'No call had succeeded yet.'
