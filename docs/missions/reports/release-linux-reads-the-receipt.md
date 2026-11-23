@@ -1,14 +1,18 @@
 # release-linux-reads-the-receipt
 
-Branch `change/release-linux-reads-the-receipt`, base `4b314af5`, four commits, lands on green, no review.
-Mission: the public channel step publishes from the binary the build actually made; and the three additions
-of 23/11 09:45Z, 10:50Z and 11:20Z.
+Branch `change/release-linux-reads-the-receipt`, rebased onto `origin/main` = `7865a08e` (the installed build),
+four commits plus this report, lands on green, no review. Mission: the public channel step publishes from the
+binary the build actually made; and the three additions of 23/11 09:45Z, 10:50Z and 11:20Z.
 
-    git log --oneline 4b314af5..HEAD
-    c5331658 land: a description change runs the description rows before it lands
-    264351ce land: wa land mark linux --by-hand records a hand-published channel, and the board reads it
-    46d1ee99 cli: wa <verb> --help is a question and runs nothing, with a row that enumerates the acting verbs
-    3cefe6c5 release-linux: stage the bundle from the build receipt, and a channel step row that runs the join
+    git log --oneline 7865a08e..HEAD
+    000bbc5f land: a description change runs the description rows before it lands
+    c7bd3d98 land: wa land mark linux --by-hand records a hand-published channel, and the board reads it
+    fb6ca151 cli: wa <verb> --help is a question and runs nothing, with a row that enumerates the acting verbs
+    94c39059 release-linux: stage the bundle from the build receipt, and a channel step row that runs the join
+    (the same four commits as before the rebase: 3cefe6c5, 46d1ee99, 264351ce, c5331658 on base 4b314af5)
+
+The rebase onto `7865a08e` was clean (fast.sh and test.sh carry this branch's two added `check` lines after it),
+and the nine rows below were run again on the rebased branch: all green.
 
 ## 1. What was measured, before anything was changed
 
@@ -64,7 +68,7 @@ discrimination the land gate asks for: the row fails on `4b314af5` and passes on
 
 ## 2. The items
 
-### Item 2 - the bundle comes from the receipt (commit `3cefe6c5`)
+### Item 2 - the bundle comes from the receipt (commit `94c39059`)
 
 `scripts/release-linux.sh` no longer guesses a target directory. After the shipping build it reads the receipt
 through the new `scripts/lib/build-receipt.mjs`, and refuses BY NAME, never by falling back:
@@ -79,7 +83,7 @@ The sentinel's path comes from `cargo build|zigbuild --message-format=json` thro
 `scripts/lib/cargo-executable.mjs` (`no built wa-sentinel` when cargo named no executable), so the guess that
 breaks under an ambient `CARGO_TARGET_DIR` is gone there too. No guessed path remains:
 
-    $ git show c5331658:scripts/release-linux.sh | grep -n 'rust/target'
+    $ git show 000bbc5f:scripts/release-linux.sh | grep -n 'rust/target'
     145:# not into rust/target - and until 23/11 this script staged the bundle from `rust/target/<triple>/release/wa` and
     (a comment recording the defect; no path is built from it)
 
@@ -87,7 +91,7 @@ The forwarding of `--message-format=json` through `cargo-zigbuild` (0.24.1) was 
 crate: it prints `{"reason":"compiler-artifact",...,"executable":...}` lines. A full two-target musl build was
 NOT run here: this node has no `zig` on PATH.
 
-### Item 3 - the channel step, end to end (commit `3cefe6c5`)
+### Item 3 - the channel step, end to end (commit `94c39059`)
 
 `scripts/test-release-channel-e2e.sh` + `scripts/test-release-channel-e2e.lua`. Until now every row replaced
 one half of the step: `test-land-linux.lua` ran the real step against a fixture publisher, `test-linux-channel.sh`
@@ -118,7 +122,7 @@ No prompt text, no `docs/HOST.md`, no tool or capability description is touched 
 (`git show --stat 3cefe6c5 46d1ee99 264351ce c5331658`): the new strings are operator/CLI texts, listed in
 section 4.
 
-### Item 6 - `--help` is a question and runs nothing (commit `46d1ee99`)
+### Item 6 - `--help` is a question and runs nothing (commit `fb6ca151`)
 
 `lua/core/cli_help.lua` holds the one list of the verbs that ACT (25 of them) with the lines that answer for
 each, and the guard in `lua/core/init.lua` takes `--help`/`-h` above the dispatch, so no verb's body sees it.
@@ -130,7 +134,7 @@ tree declares; the fleet-membership verbs (bind, unbind, accept, promote, demote
 not driven (a base tree would make them ask a live rendezvous, rule 13) and are covered by the in-process
 check of the same list. On `4b314af5` the row fails first on `wa update --help`.
 
-### Item 7 - a channel published by hand is recorded (commit `264351ce`)
+### Item 7 - a channel published by hand is recorded (commit `c7bd3d98`)
 
 `wa land mark linux --by-hand --who <name> --why <text> --evidence <file>`:
 
@@ -146,7 +150,7 @@ a journal with no such record is still `unknown`. Release F's journal was NOT to
 proved on a scratch journal in `scripts/test-land-linux.lua` and `scripts/test-speed-board.lua`, both red on
 `4b314af5`.
 
-### Item 8 - a description change runs the description rows (commit `c5331658`)
+### Item 8 - a description change runs the description rows (commit `000bbc5f`)
 
 `lua/core/land.lua`: `M.DESCRIPTION_PATHS` (allow-list: `rust/wa-capabilities/src/capabilities.rs`,
 `rust/wa-capabilities/src/host.rs`, `docs/HOST.md`, `lua/core/tools.lua`, `lua/core/codemode_policy.lua`,
@@ -171,7 +175,7 @@ capability line this case adds) and the JSON library the real row decodes with; 
 
 ## 4. Texts to approve (every new or changed operator/CLI string, verbatim)
 
-`scripts/release-linux.sh` (commit `3cefe6c5`):
+`scripts/release-linux.sh` (commit `94c39059`):
 
     release-linux: wa        <path> (sha256 <12 hex>)
     release-linux: sentinel  <path>
@@ -183,7 +187,7 @@ capability line this case adds) and the JSON library the real row decodes with; 
     release-linux: no built wa-sentinel: <cargo's last line>
     release-linux: build_artifact_absent: cargo named <path>, which is not an executable file
 
-`lua/core/cli_help.lua` (commit `46d1ee99`) - one `usage:` line + detail lines per verb; the usage lines:
+`lua/core/cli_help.lua` (commit `fb6ca151`) - one `usage:` line + detail lines per verb; the usage lines:
 
     usage: wa update [--check]   update THIS node (tree: the Sentinel deploy; release: the verified bundle)
            wa update <node> [--commit <sha>] [--binary|--tree|--release] [--reason <text>] [--json]
@@ -230,7 +234,7 @@ capability line this case adds) and the JSON library the real row decodes with; 
 (and the same sentences in `scripts/test-cli-help.sh` / `scripts/lib/cli-help-verbs.lua` as check labels, which
 only a developer reads).
 
-`wa land mark` (commit `264351ce`):
+`wa land mark` (commit `c7bd3d98`):
 
     wa land mark linux --by-hand --who <name> --why <text> --evidence <file>   record a channel published by hand
     wa land mark: published by hand by <name> (<why>): the channel on <origin>/main names <sha12> for <n> target(s) (verified)
@@ -239,13 +243,13 @@ only a developer reads).
     refused (mark_by_hand_needs_why): a by-hand publish is recorded with the reason it was done by hand
     refused (mark_not_verified): the channel on <origin>/main does not name this commit for every target
 
-`lua/core/land.lua`, the tests step (commit `c5331658`):
+`lua/core/land.lua`, the tests step (commit `000bbc5f`):
 
     refused (description_rows_red): the round changes what a model reads about this node (<paths>) and its
       description rows are red:
     the description rows (<rows>), because the round changes what a model reads about this node: <paths>
 
-`scripts/speed-board.sh` (commit `264351ce`):
+`scripts/speed-board.sh` (commit `c7bd3d98`):
 
     cut -> published by hand (<who>): <why>; journal <release-id>
     the newest release journal (<id>) was published by hand (<who>) and carries no created/updated time
@@ -319,6 +323,6 @@ The line, exactly, with the sentence that saves the next operator a refused resu
   `scripts/test-land-linux.lua` called the harness's `must(...)` without its `cwd` argument, so `git add -A &&
   git commit` ran in the WORKTREE under test and created two junk commits; the `git push origin main` that
   followed was refused (non-fast-forward) and `origin/main` stayed at `7865a08e` (checked with
-  `git ls-remote`). The commits were removed with `git reset --mixed 46d1ee99` (no stash, nothing lost), and the
+  `git ls-remote`). The commits were removed with `git reset --mixed 46d1ee99` - that is the pre-rebase name of `fb6ca151` - (no stash, nothing lost), and the
   call now passes `repo` with the reason in a comment. `must` without a cwd runs in the node's working
   directory - the fixture helper must always name its repository.
