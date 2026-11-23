@@ -822,9 +822,10 @@ end
 --     file's preflight verb already finds its script;
 --   * `<runtime tree>/scripts/mission.sh`, the tree being WASM_AGENT_LUA_ROOT, then WA_LAND_REPO, then
 --     ~/wasm-agent/checkout - the tree the running binary was built from.
--- THE MISSION'S OWN BINARY IS NAMED (WA_BIN): the script asks the node through `wa steer`, and a child of
--- host.exec has a scrubbed environment whose PATH is not the operator's - the measured reason a resume spawned
--- that way answered "No provider is configured". `host.runtime_info().binary_path` is the CLI running this.
+-- THE MISSION'S OWN BINARY IS NAMED (WA_BIN): the script asks the node through `wa steer`, and the PATH a
+-- child of host.exec gets is the one the node was started with - measured 21/11, a serve unit started with a
+-- bare environment had no `wa` on it at all (every mission died with "wa: command not found"). Naming the
+-- binary removes the lookup: `host.runtime_info().binary_path` is the CLI running this verb.
 M.AMEND_SECONDS = 600
 
 function M.amend_script(root, explicit)

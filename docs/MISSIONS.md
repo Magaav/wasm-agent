@@ -311,7 +311,8 @@ The same two things through the CLI: `wa mission resume` keeps the provider sett
 and `serve.env`) and reports `resume_failed` when its runner exits before a turn, and `wa mission amend <name>
 <file>` (or `--text <words>`) is the door to this same script - it finds `scripts/mission.sh` beside the
 missions root, in the runtime tree the binary was built from, or at `--script`, and passes the mission's own
-binary as `WA_BIN` because a child of `host.exec` has a scrubbed environment.
+binary as `WA_BIN`, because the PATH a child of `host.exec` gets is the one the node was started with
+(measured 21/11: a serve unit with a bare environment had no `wa` on it at all).
 
 Its fixture is `node scripts/test-mission-amend-resume.mjs` (29 checks, on the fast path): a mission laid out
 exactly as the factory's launcher lays one out (`serve.env` and no `env`), a real `wa chat --once` against a local

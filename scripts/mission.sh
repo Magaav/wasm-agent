@@ -846,7 +846,8 @@ cmd_start() {
 #
 # WHY THE RESUME IS A RUNNER HERE AND NOT `wa mission resume`. The continuation is the documented CLI form
 # (`wa chat --resume <id> --once <text>`), started from this shell, so the turn inherits THIS environment.
-# `wa mission resume` spawns its runner through host.exec, and that child's environment is scrubbed: measured in
+# `wa mission resume` spawns its runner through host.exec, and a child of the node keeps no provider credential
+# (rust/wa-operation/src/lib.rs withholds `*_API_KEY`, `*_TOKEN`, `*_SECRET` ... from every tool child): measured in
 # this script's fixture, the resumed CLI answered "No provider is configured and nothing in memory matched" and
 # made no model request at all, because a mission's provider settings arrive exactly this way (start.sh hands
 # the worker wa-serve's serve.env). The runner keeps the two contracts the other runners keep - the rc goes into
