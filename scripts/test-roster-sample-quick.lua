@@ -60,22 +60,41 @@ check(type(full.cpu.used_percent) == "number",
   "and still carries a measured CPU percentage, got " .. tostring(full.cpu.used_percent))
 check(full_ms >= 100, string.format("and still pays its own 120 ms window, took %.1f ms", full_ms))
 
--- 3. THE ROSTER'S LOCAL ROW IS THE QUICK ONE, so no remote call pays that window to build it.
+-- 3. THE ROW IS THE CALLER'S CHOICE (review r1). A lookup never reads a resource sample, so it asks for the
+-- quick row and spends no 120 ms window; everything that SHOWS the row - 'wa nodes' and the window through
+-- nodes_cli, the nodes tool's list, fleetview - passes no option and keeps the measured CPU figure. The
+-- first version of this fix made the quick sample the DEFAULT and 'wa nodes' printed 'CPU: N cores, ?% used'.
 host.operation = function(action) return json.encode({ error = "operation_disabled_for_test", action = action }) end
 local real_http = host.http
 host.http = function() return json.encode({ status = 503, body = "" }) end
 local nodes = dofile('lua/core/nodes.lua')
-local before_row = host.monotonic_ms()
+
+-- 3a. list() with no option: the measured figure, exactly as before.
+local before_full_row = host.monotonic_ms()
 local list = nodes.list({ live_capabilities = false })
-local row_ms = host.monotonic_ms() - before_row
-host.http = real_http
+local full_row_ms = host.monotonic_ms() - before_full_row
 check(type(list) == "table" and type(list[1]) == "table", "the roster lists this node")
 local resources = list[1].resources
 check(type(resources) == "table", "and its row carries a resource sample")
 check(type(resources.memory) == "table" and resources.memory.total_bytes ~= nil,
-  "with the same memory facts, got " .. tostring(resources.memory and resources.memory.total_bytes))
-check(resources.cpu and resources.cpu.used_percent == nil,
-  "and no CPU percentage it did not measure, got " .. tostring(resources.cpu and resources.cpu.used_percent))
-check(row_ms < 100, string.format("the roster row costs less than the 120 ms window, took %.1f ms", row_ms))
+  "with the memory facts, got " .. tostring(resources.memory and resources.memory.total_bytes))
+check(type(resources.cpu) == "table" and type(resources.cpu.used_percent) == "number",
+  "and a MEASURED CPU percentage for whoever displays it, got " .. tostring(resources.cpu and resources.cpu.used_percent))
+check(full_row_ms >= 100, string.format("and it still pays that 120 ms window, took %.1f ms", full_row_ms))
 
+-- 3b. find() - the path every remote call takes - asks for the quick row and spends no window.
+local local_name = nodes.node_name()
+local before_find = host.monotonic_ms()
+local found = nodes.find(local_name)
+local find_ms = host.monotonic_ms() - before_find
+host.http = real_http
+check(type(found) == "table" and found.local_node == true, "find answers this node's own row")
+check(type(found.resources) == "table", "and it carries a resource sample")
+check(type(found.resources.memory) == "table" and found.resources.memory.total_bytes ~= nil,
+  "with the same memory facts, got " .. tostring(found.resources.memory and found.resources.memory.total_bytes))
+check(found.resources.cpu and found.resources.cpu.used_percent == nil,
+  "and no CPU percentage it did not measure, got " .. tostring(found.resources.cpu and found.resources.cpu.used_percent))
+check(type(found.resources.cpu.unmeasured) == "string" and found.resources.cpu.unmeasured ~= "",
+  "and the reason named in the answer")
+check(find_ms < 100, string.format("a lookup spends less than the 120 ms window, took %.1f ms", find_ms))
 print("roster sample quick ok (" .. checks .. " checks)")

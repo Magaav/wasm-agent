@@ -55,7 +55,7 @@ therefore sleeps 120 ms on purpose. `M.find` builds that local roster row for *e
 | the settled record is read once: `adopted_result` takes the snapshot that already said "settled" | `a2bb92e6` | `lua/core/server.lua` (`adopted_result`, two call sites) |
 | the dispatcher builds the tool catalogue only where it is read | `af2db6d6` | `lua/core/tools.lua` (`routed_catalog`) |
 | `orchestration_mode` is compiled once per process, not once per dispatch (lazily, and the disk stays the source of truth on every call) | `af2db6d6` | `lua/core/tools.lua` (`orchestration()`) |
-| the roster's local row asks for a resource sample without the 120 ms CPU delta, and the answer says the figure was not measured | `27a4ff96` | `lua/core/nodes.lua` (`M.list`), `rust/wa-host-support/src/system_resources.rs` (`sample_quick`), `rust/wa-capabilities/src/host.rs` (`system_resources`), `capabilities.rs` |
+| a caller that only LOOKS UP a node asks for a resource sample without the 120 ms CPU delta, and the answer says the figure was not measured | `27a4ff96` (+ review r1) | `lua/core/nodes.lua` (`M.list` `opts.quick_resources`, asked by `M.find`, the federation refresh and the landing's name helper), `rust/wa-host-support/src/system_resources.rs` (`sample_quick`), `rust/wa-capabilities/src/host.rs` (`system_resources`), `capabilities.rs` |
 
 Measured, alternating base worktree and this tree in one session, five samples per run, three rounds
 (median of each run shown; this node's load was 2-10 on 16 cores):
@@ -103,7 +103,7 @@ the base commit** (`git worktree add /tmp/base-rr 2104a4d8`, rule 12 - no stash)
 | `scripts/test-network-not-registered.lua` (19 checks) | `scripts/test.sh` line 1426, and the fast path (not excluded) | `got roster_unavailable:box` where `not_registered:box` is required |
 | `scripts/test-remote-call-bound.lua` (21 checks) | `scripts/test.sh` line 1431, fast path | `a short peer bash costs at most 4 host.operation calls, got 6: list,start,await,status,read,read` |
 | `scripts/test-tool-dispatch-cost.lua` (9 checks) | `scripts/test.sh` line 1435, fast path | `two dispatches load orchestration_mode once, loaded 4` |
-| `scripts/test-roster-sample-quick.lua` (15 checks) | `scripts/test.sh` line 1438, fast path | `and no CPU percentage it did not measure, got 64.4` (the roster row took the 120 ms full sample) |
+| `scripts/test-roster-sample-quick.lua` (21 checks) | `scripts/test.sh` line 1438, fast path | `and no CPU percentage it did not measure, got 31.9` (`find` took the 120 ms full sample) |
 
 The last row has two halves. Its Lua half was run against the base *tree* with this tree's binary and fails
 there as shown. Its Rust half (`{quick:true}`) cannot fail against the base tree at all, because the host is
@@ -150,6 +150,28 @@ guard (its fixture child cannot run here), and `test-orchestration-routing` is n
 all - it asserts `WA_ROUTING_SOURCE`, a private-Git fixture only the runner provides (`scripts/fast.sh`) -
 so its green is only claimed by the suite, not here.
 
+### Review r1 (Fable): the quick sample was moved off the display row
+
+The first version of that cut made the quick sample the DEFAULT for `nodes.list`, so every caller got it -
+and `wa nodes` printed "CPU: N cores, ?% used" for this node (`lua/core/nodes_cli.lua:72` reads
+`r.cpu.used_percent`), while the nodes tool's list answer lost the local CPU figure. The review's fix, and
+what the code does now:
+
+* `nodes.list` keeps the FULL sample unless the caller passes `opts.quick_resources`;
+* only the callers that never read a resource sample pass it - `M.find` (the path every remote call takes),
+  `federation.refresh` (which runs before a turn's first model call, so it was the one place the window was
+  paid on the operator's behalf every turn), and the landing's node-name helper;
+* every caller that SHOWS the row passes no option and keeps the measured figure: `wa nodes` and the window
+  through `nodes_cli`, the nodes tool's list, `fleetview`.
+
+Verified the way the review asked: `wa nodes` in a scratch home answers
+`"resources":{"cpu":{"logical_cores":16,"used_percent":13.2},...,"quick":false}` - a measured number -
+and the row now says so in `test-roster-sample-quick.lua` (21 checks): `list()` with no option carries a
+numeric `cpu.used_percent` and still pays the window (>= 100 ms), `find()` carries `null` plus the reason
+and spends < 100 ms. It fails on the base tree at `find`'s assertion, as the table in §4 says.
+
+Re-measured after the fix, load 8: base 455 ms (451-477) -> this tree 242 ms (210-315) on the board's row -
+the cut still holds, because `remote_call` reaches the roster through `M.find`.
 ## 5. Job 5 - the remote `edit` shape: measured, inconclusive, so no schema change
 
 The premise is right: the `remote` schema's *parameters* are `node, capability, command, path, args, calls`
@@ -200,11 +222,14 @@ count of `tool_name:"remote"` results once that indexing exists).
    "CPU, memory and disk facts for this machine; passed {quick:true} it skips the 120 ms CPU delta and says
    the figure was not measured".
 
-4. The sample itself (`rust/wa-host-support/src/system_resources.rs`, commit `27a4ff96`), read by anything
-   that decodes `host.system_resources` or `tools.nodes[1].resources`:
+4. The sample itself (`rust/wa-host-support/src/system_resources.rs`, commit `27a4ff96`, wording
+   corrected in the review-r1 commit), read by anything that decodes `host.system_resources` or the
+   quick row of `tools.nodes`:
    `"quick": true` and
    `"cpu": {"logical_cores": 16, "used_percent": null, "unmeasured": "no CPU delta was taken: it costs a
-   120 ms window between two samples, and this caller only displays the sample"}`.
+   120 ms window between two samples, and this caller only asked which node to talk to"}`.
+   The clause was "only displays the sample" in `27a4ff96`, before the review ordered the quick sample
+   moved from the display row to the lookup path; the wording follows who now asks.
 
 No other model-facing string changed: the peer-bash answer keeps every field it had (§4), and the refusal
 codes a peer call can return are unchanged.

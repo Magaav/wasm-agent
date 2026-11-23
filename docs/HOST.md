@@ -1271,11 +1271,16 @@ same-session serialization. It has no model tool or HTTP route. An accepted
 receipt is not delivery; interrupted admissions are unknown and never replayed.
 `host.system_resources()` returns a fresh advisory sample of CPU use, logical cores,
 physical memory and free/total bytes on the filesystem containing the node workspace.
-Unavailable measurements are `nil`; zero is never substituted for missing capacity. `host.system_resources('{"quick":true}')` answers the same
-sample without the CPU delta, which costs a deliberate 120 ms window between two
+Unavailable measurements are `nil`; zero is never substituted for missing capacity.
+`host.system_resources('{"quick":true}')` answers the same sample without the CPU
+delta, which costs a deliberate 120 ms window between two
 `/proc/stat` reads; the quick answer sets `cpu.used_percent` to `null` and names the reason in
-`cpu.unmeasured`, so an unmeasured figure can never be read as an idle machine. The roster's local row
-(`nodes.list`, which `nodes.find` builds for every remote call) asks for the quick one.
+`cpu.unmeasured`, so an unmeasured figure can never be read as an idle machine. Who pays the window is the
+caller's choice: `nodes.list` builds its local row from the full sample unless the caller passes
+`quick_resources`, and only the callers that never read a resource sample do - `nodes.find` (the path
+every remote call takes), the federation refresh before a turn's first model call, and the landing's
+node-name helper. Every caller that SHOWS the row - `wa nodes` and the window through `nodes_cli`, the
+nodes tool's list, `fleetview` - passes no option and keeps the measured figure.
 The Lua loader records hashes in `LOADED_SOURCES` before evaluating each module.
 HTTP clients reuse their connection pool. Stream results include provider request
 ID, first-content/reasoning/tool-delta latency and `stream_complete`; EOF without

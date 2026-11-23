@@ -126,7 +126,7 @@ fn sample_with(cpu_delta: bool) -> Value {
     } else {
         json!({ "used_percent": Value::Null,
             "logical_cores": std::thread::available_parallelism().ok().map(|value| value.get()),
-            "unmeasured": "no CPU delta was taken: it costs a 120 ms window between two samples, and this caller only displays the sample" })
+            "unmeasured": "no CPU delta was taken: it costs a 120 ms window between two samples, and this caller only asked which node to talk to" })
     };
     json!({
         "sampled_at": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
