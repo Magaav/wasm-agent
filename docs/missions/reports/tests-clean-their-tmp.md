@@ -272,6 +272,23 @@ occurrences (the first turn and the deploy-wait retry loop) carry the change and
 checks (nine pty rows without the helper, the helper absent, the watchdog leak, plus the three rows and three
 entry points from items 2 and 4); on this branch it PASSES 9 of 9.
 
+**Measured in the narrowed fast path** (the wave rule for this round: no full suite) -
+`flock -o ~/Work/missions/.suite.lock env WA_FAST_ROWS=<one row> bash scripts/fast.sh`, commit
+`0d02018a`, **113 checks, 1 failed, 509 s**:
+
+| row | verdict |
+| --- | --- |
+| `run-live-pty` (converted to the helper) | **ok, 50.9 s** - the row that left the 41-hour server |
+| `fence-card-pty`, `reflow-blocks-pty`, `chat-start-pty`, `undo-pty`, `undo-remote-pty`, `tui-chrome-pty`, `run-block-pty`, `wheel-lines-pty` | ok (3.6-11.6 s each) |
+| `tmp-cleanliness` (the leak check with half D) | **ok, 8.1 s** |
+| `mission`, `mission-verb` (the rows that launch a generated `run.sh`) | **ok, 31.1 s and 12.4 s**, and no `sleep 21600` younger than the run existed afterwards |
+| `deploy-wait` | **FAIL `the held wakes run once the deploy ends: still 0`** - see below |
+
+`deploy-wait` failed here and in acceptance run 2, and passed in acceptance run 1 AND standalone
+(`deploy wait ok`, exit 0), all three runs on commits from before this item. It is a load-sensitive row that
+fails when three or four suites share this 16-core node, not a regression from this round: run 2 (commit
+`1544404f`) had it red before `lua/core/mission.lua` or the pty rows were touched. It is named here rather
+than blamed on the branch, and the full run main-health does after the landing is what decides it.
 **Not done, said plainly:** the 108 `sleep 21600` processes that were already orphaned are still running. I
 did not kill them: they are PIDs I did not start, and this round stops only its own (the standing rule after
 21/11). New launches no longer make them.
