@@ -58,8 +58,16 @@ node's own presence recovery).
   this branch adds. **The test fails on today's main.**
 - Unchanged by this branch, re-run on this tree with these changes: `node scripts/test-mission-amend.mjs` (43
   checks), `bash scripts/test-mission-verb.sh` (49 checks), `bash scripts/test-mission.sh` (282 checks) - all
-  green. The full fast path was not run by this session (rule 15: one heavy suite at a time, and the land gate
-  runs it).
+  green.
+- The land gate's own discrimination check, run here: `bash scripts/test-discriminates.sh f05b3150` ->
+  `discriminates  scripts/test-mission-amend-resume.mjs`, `rows: discriminates=1`, `0 blocking`.
+- The full fast path: started narrowed (`WA_FAST_ROWS` = this branch's changed paths) under
+  `flock -o ~/Work/missions/.suite.lock`, and it sat in the queue behind a `wa land --until gate` and another
+  mission's fast path for ~50 minutes without starting; it was cancelled rather than left pending, so **this
+  session did not run the full fast path** - the land gate runs it. What that leaves unjudged by this session:
+  the contract rows (`prompt-docs`, `instructions`, `landing-queue`, `fast-result`) and every other Lua row.
+  No row that reads the changed paths was skipped: the three mission suites above are the rows that exercise
+  `scripts/mission.sh`, `lua/core/mission.lua` and the `wa mission` dispatch.
 
 ## Texts to approve (every new or changed operator- or model-facing string, verbatim)
 
