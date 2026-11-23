@@ -88,6 +88,12 @@ end
 -- A refusal says what arrived (keys, never values), where a misplaced key was found, which nodes
 -- are online, and a minimal correct call, so the retry differs from the failed call.
 local REMOTE_OWN = { node = true, capability = true, args = true }
+
+-- The fields THIS node added to a capability, per capability: a peer whose own catalogue does not declare
+-- one of them would ignore it (mission tool-args-honest-and-same-on-peers, mixed-fleet follow-up). Only
+-- what this node learned to send in that mission is named; a capability absent from this table sends
+-- everything, exactly as before.
+local PEER_FIELD_SUPPORT = { bash = { 'stdin' }, operation = { 'stdin' }, grep = { 'context' } }
 local REMOTE_EXAMPLE = '{"node":"<name>","capability":"bash","command":"ls -la"}'
 
 local function sorted_keys(value)
@@ -2599,6 +2605,28 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     -- served there, and that it wants the before/after text of a change back. Both travel in the signed
     -- body (nodes.lua M.remote_call options) and never in `args`, which is the model's own text.
     local target = node.name or node.node_id
+    -- MIXED FLEET (mission tool-args-honest-and-same-on-peers, follow-up): a peer that predates a field
+    -- IGNORES it - the silent drop this mission closed on this node, one hop out. Before the call leaves,
+    -- a field this node added is confirmed against the peer's OWN catalogue; unconfirmed is refused HERE,
+    -- with nothing sent. `node` is not in the list: it is a routing word for this call and never travels.
+    if not node.local_node then
+      for _, field in ipairs(PEER_FIELD_SUPPORT[call.capability] or {}) do
+        if type(call.args) == 'table' and call.args[field] ~= nil then
+          local federation = dofile('lua/core/federation.lua')
+          local declared, version = federation.declares(target, call.capability, field)
+          if declared ~= true then
+            local version_text = (type(version) == 'string' and version ~= '' and version ~= 'unknown')
+              and (' (version ' .. version .. ')') or ' (version unknown)'
+            return { error = 'peer_field_unsupported', effect = 'none', capability = tostring(call.capability),
+              field = field, peer = tostring(target), peer_version = version,
+              message = 'peer ' .. tostring(target) .. ' runs a build without ' .. field .. version_text
+                .. ', so nothing was sent.',
+              fix = 'send the call without ' .. field .. ', or update that peer to a build whose catalogue'
+                .. ' declares it; a field a peer does not declare is never sent to be dropped.' }
+          end
+        end
+      end
+    end
     local options
     if not node.local_node and (call.capability == "edit" or call.capability == "write") then
       options = { record_change = (ctx and ctx.changes) ~= nil }
