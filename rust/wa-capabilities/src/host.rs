@@ -1499,6 +1499,67 @@ mod atomic_write_tests {
     }
 }
 
+/// The audit spool's write: appends, never replaces, is owner-only on the file it creates, and answers
+/// false when it cannot put the bytes on the device (lua/core/telemetry.lua keeps a refused audit record
+/// there, so "true" has to mean the record survives the process).
+#[cfg(test)]
+mod append_file_tests {
+    #[test]
+    fn appends_each_block_and_creates_an_owner_only_file() {
+        let root = std::env::temp_dir().join(format!("wa-append-{}", super::new_uuid()));
+        std::fs::create_dir_all(&root).unwrap();
+        let spool = root.join("audit-spool.jsonl");
+        let path = spool.display().to_string();
+        assert!(super::append_durably(&path, "{\"kind\":\"secret_redacted\"}\n"));
+        assert!(super::append_durably(&path, "{\"kind\":\"secret_redacted\",\"n\":2}\n"));
+        let text = std::fs::read_to_string(&spool).unwrap();
+        // Both lines, in the order they were appended: an appender that replaced the file would leave one.
+        assert_eq!(text.lines().count(), 2);
+        assert!(text.lines().next().unwrap().ends_with("\"secret_redacted\"}"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&spool).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        // An empty path is not a file: refuse rather than write somewhere surprising.
+        assert!(!super::append_durably("", "x"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+/// The other two calls the audit spool's flush depends on: the atomic TAKE (a rename that refuses an existing
+/// target, so two flushers can never win one file) and the cleanup.
+#[cfg(test)]
+mod rename_and_remove_tests {
+    #[test]
+    fn a_take_is_a_rename_that_refuses_an_existing_target() {
+        let root = std::env::temp_dir().join(format!("wa-rename-{}", super::new_uuid()));
+        std::fs::create_dir_all(&root).unwrap();
+        let spool = root.join("audit-spool.jsonl");
+        std::fs::write(&spool, "one\n").unwrap();
+        let mine = root.join("audit-spool.abc.flushing");
+        assert!(super::rename_durably(
+            &spool.display().to_string(),
+            &mine.display().to_string()
+        ));
+        assert!(!spool.exists() && mine.exists(), "the take moved the file, it did not copy it");
+        // A second flusher taking the same target must lose, and its own source must be untouched: that is
+        // what keeps two flushers from processing (and truncating) one file.
+        let second = root.join("audit-spool.jsonl");
+        std::fs::write(&second, "two\n").unwrap();
+        assert!(!super::rename_durably(
+            &second.display().to_string(),
+            &mine.display().to_string()
+        ));
+        assert!(second.exists(), "the refused source is still there");
+        assert_eq!(std::fs::read_to_string(&mine).unwrap(), "one\n", "and nobody overwrote the taken file");
+        // An empty path is never a rename.
+        assert!(!super::rename_durably("", "x"));
+        assert!(std::fs::remove_file(&mine).is_ok());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
     /// host.write_file(path, text) -> a Lua boolean (written atomically).
     /// Not JSON: one true/false, and the graph index is told about the write.
 pub extern "C-unwind" fn write_file(l: *mut LuaState) -> c_int {
@@ -1506,6 +1567,96 @@ pub extern "C-unwind" fn write_file(l: *mut LuaState) -> c_int {
     let text = arg_string(l, 2).unwrap_or_default();
     let ok = write_atomic(&path, &text);
     if ok {crate::graph::native_write(&path);}
+    unsafe { wa_host_support::lua::lua_pushboolean(l, ok as c_int) };
+    1
+}
+
+/// Append one block of text to a file and put it ON THE DEVICE before answering: create it owner-only
+/// (0600) when absent, open it O_APPEND so two processes appending one line each never overwrite one
+/// another's bytes, write, and fsync. True, or false when the file could not be written or synced.
+///
+/// This exists for the one file a node must be able to keep when its ledger refuses a write: the audit
+/// spool of lua/core/telemetry.lua (`M.audit`). `write_file` cannot serve it - it replaces the whole file
+/// atomically (read-modify-write, so two spoolers lose one row) and takes its mode from the target's
+/// existing permissions - and a line that only reached the page cache is not a kept record at all. The
+/// fsync is the point of the capability, which is why it is not an option on an existing one.
+fn append_durably(path: &str, text: &str) -> bool {
+    use std::io::Write;
+    let target = std::path::PathBuf::from(path);
+    if let Some(parent) = target.parent() {
+        if !parent.as_os_str().is_empty() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.append(true).create(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // Ignored when the file already exists: an existing file's mode is its owner's choice.
+        options.mode(0o600);
+    }
+    let mut file = match options.open(&target) {
+        Ok(file) => file,
+        Err(_) => return false,
+    };
+    if file.write_all(text.as_bytes()).is_err() {
+        return false;
+    }
+    file.sync_all().is_ok()
+}
+
+pub extern "C-unwind" fn append_file(l: *mut LuaState) -> c_int {
+    let path = arg_string(l, 1).unwrap_or_default();
+    let text = arg_string(l, 2).unwrap_or_default();
+    let ok = !path.is_empty() && append_durably(&path, &text);
+    unsafe { wa_host_support::lua::lua_pushboolean(l, ok as c_int) };
+    1
+}
+
+/// host.rename_file(from, to) -> one boolean. The ATOMIC step that makes two processes able to share a spool
+/// (lua/core/telemetry.lua's audit spool): the flusher renames the spool to a private name it owns, so an
+/// appender that writes after that point appends to a NEW file and can never be overwritten by the flusher's
+/// rewrite. Refuses when the target exists (a name carrying a fresh uuid never does, and a refusal is the
+/// answer that keeps one flusher from clobbering another's work) and fsyncs both directory entries, because a
+/// rename that is not on the device is not a take at all.
+fn rename_durably(from: &str, to: &str) -> bool {
+    if from.is_empty() || to.is_empty() || std::path::Path::new(to).exists() {
+        return false;
+    }
+    if std::fs::rename(from, to).is_err() {
+        return false;
+    }
+    #[cfg(unix)]
+    for directory in [
+        std::path::Path::new(from).parent(),
+        std::path::Path::new(to).parent(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if let Ok(handle) = std::fs::File::open(directory) {
+            let _ = handle.sync_all();
+        }
+    }
+    true
+}
+
+pub extern "C-unwind" fn rename_file(l: *mut LuaState) -> c_int {
+    let from = arg_string(l, 1).unwrap_or_default();
+    let to = arg_string(l, 2).unwrap_or_default();
+    let ok = rename_durably(&from, &to);
+    unsafe { wa_host_support::lua::lua_pushboolean(l, ok as c_int) };
+    1
+}
+
+/// host.remove_file(path) -> one boolean: the file is gone (true), or it could not be removed (false). This
+/// adds no reach a caller did not already have - `write_file(path, "")` truncates any regular file the node
+/// may write - and it is what lets the audit spool's flusher clear the private file it took, instead of
+/// leaving one empty file behind per recovery flush. A directory is refused by the platform and answered false.
+pub extern "C-unwind" fn remove_file(l: *mut LuaState) -> c_int {
+    let path = arg_string(l, 1).unwrap_or_default();
+    let ok = !path.is_empty() && std::fs::remove_file(&path).is_ok();
     unsafe { wa_host_support::lua::lua_pushboolean(l, ok as c_int) };
     1
 }

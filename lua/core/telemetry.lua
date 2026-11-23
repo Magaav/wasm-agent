@@ -38,6 +38,13 @@ local function cooldown_ms() return number_env("WASM_AGENT_TELEMETRY_WRITE_COOLD
 local PAUSE_START_MS, PAUSE_MAX_MS = 25, 400
 
 local drops = {count = 0, last_at = nil, last_error = nil, label = nil, cooldown_until = 0}
+-- The audit half of this module: records a refused write kept back instead of dropping (see `M.audit`).
+-- Declared up here because `M.event` reports the count and a reader's `events()` carries it.
+local owed = {}
+-- How many rows a previous flush saw in the audit spool (<data>/audit-spool.jsonl): refreshed whenever this
+-- process looks at that file. `M.owed()` reports what this process knows, and `M.spool_pending()` asks the
+-- file itself.
+local spool_pending, spool_seen = 0, false
 -- One load, at the top, of the module that owns "is the ledger refusing writes right now": the write path
 -- asks it on every record, and a dofile per record would be the cost this file exists to avoid.
 local sqlite_busy = dofile("lua/core/sqlite_busy.lua")
@@ -263,6 +270,346 @@ function M.event(session_id, run_id, span_id, kind, phase, payload, at)
   end
 end
 
+
+-- ---------------------------------------------------------------- audit records (change/secret-event-never-lost)
+-- A SECURITY RECORD IS NOT DROPPABLE. `M.event` above drops a record when the ledger refuses the write -
+-- the busy short-cut, the cooldown, and the bounded retry all end in `note_drop` - and that trade is right
+-- for accounting, which is a summary of a run that is still there to be described. It is wrong for the one
+-- record whose loss nothing later can reconstruct: "this node saw a secret and redacted it". Measured
+-- 23/11 with a competing writer holding the ledger's write lock for the length of one turn:
+--   READY sid=42d1deb0-...
+--   secret_redacted_rows=0 events=0 dropped=1 elapsed_ms=20141 available=true
+--   [lua] telemetry: dropped harness_events insert ... this record is lost, the run is not
+-- The redaction itself worked and the transcript was clean; the audit row never arrived, and nothing would
+-- ever retry it. That is exactly the shape of the main-health red on 2104a4d8 (scripts/test-redact-secrets.lua
+-- line 130) with the load on: the record is lost, not late.
+--
+-- THE RULES THIS PATH KEEPS:
+--   * it pays the LEDGER's patience (`sqlite_busy.retry`, WASM_AGENT_SQLITE_RETRY_MS - the budget a
+--     transcript write already gets), not the accounting one, and it never takes the busy_now/cooldown
+--     short-cuts: those exist to keep a turn fast, and this record is the reason the turn is auditable;
+--   * only a LOCK is retried (`sqlite_busy` owns that decision); any other refusal is the same answer next
+--     time and is reported at once;
+--   * a record that still cannot be written is KEPT in `owed` - written at the end of the run, and at the
+--     front of the next audit record - instead of being lost with the turn;
+--   * the answer is `true`, or `false` plus the reason. A caller is never told "recorded" when it was not,
+--     and the loss is never silent: the node logs the line and the reader is told (lua/core/agent.lua).
+local AUDIT_INSERT = "INSERT INTO harness_events(id,session_id,run_id,span_id,kind,phase,at,payload) VALUES(?,?,?,?,?,?,?,?)"
+
+-- THE SPOOL: "KEPT" MUST SURVIVE A KILL (Fable's review of d1777bce, 23/11, item 1). `owed` alone is process
+-- memory, so "it is kept and retried, this record is not lost" would be false the moment the node is
+-- stopped - a deploy pause, a crash, and the very jam that caused the refusal. So a record the ledger
+-- refuses is APPENDED, one JSON object per line, to <data>/audit-spool.jsonl BEFORE the caller is told
+-- `false`: `host.append_file` creates it owner-only (0600) and fsyncs it, so the line is on the device when
+-- that call returns (rust/wa-capabilities/src/host.rs, `append_durably`; O_APPEND, so two processes spooling
+-- one line each keep both). A later write - the end of the run, the next audit record, the start of a run -
+-- reads the spool and moves its rows into the ledger, rewriting the file with what is left. A row is never
+-- written twice: `harness_events.id` is UNIQUE, and a duplicate is read as "already in the ledger", so a
+-- flush interrupted between the insert and the rewrite finishes instead of doubling the record.
+--
+-- WHAT THE SPOOL HOLDS: the row itself - id, session, run, span, kind, phase, at, and the payload the caller
+-- passed. For a redaction that payload is the tool name and the NAMES of the secrets found
+-- (`{tool=..., names={WASM_AGENT_LLM_API_KEY=1}}`, lua/core/agent.lua from redact.lua's hit table), never a
+-- value: the spool is a record that a secret was seen, not a second copy of it. Asserted, not assumed -
+-- scripts/test-secret-audit.lua redacts a known secret and reads the spool back.
+--
+-- THE READ-MODIFY-WRITE RACE, AND THE TAKE THAT CLOSES IT (Fable's review r2 of the spool, 23/11). Rewriting
+-- the spool in place was a lost-update: A's flush reads the file, B appends a refused record, A writes the
+-- file back without B's line - B's record gone, the very loss this branch exists to stop, and two processes
+-- on one data dir (serve + workers) is the normal case here. So a flusher never rewrites the spool:
+--
+--   1. it RENAMES the spool to a private name it owns (`audit-spool.<uuid>.flushing`, atomic, and
+--      `host.rename_file` refuses an existing target, so no two flushers take the same file);
+--   2. it processes THAT file: every row goes to the ledger, one patience for the first and one attempt for
+--      the rest, stopping at the first refusal;
+--   3. rows the ledger still refuses are RE-APPENDED to the spool with `append_file` (an appender never
+--      rewrites, so a line an appender wrote after step 1 is never touched), and the private file is removed.
+--
+-- An appender only ever appends to `audit-spool.jsonl`. An appender that writes between step 1 and step 3
+-- therefore appends to the file the node will read next - never to a file somebody is rewriting.
+--
+-- A flusher that is KILLED between the take and the cleanup leaves its private file behind. A flush adopts
+-- any `*.flushing` file older than `ADOPT_AFTER_S` seconds (by the age `host.list_dir` reports), by renaming
+-- it to a private name of its own first - so two flushers cannot both adopt it - and writes its rows. Rows are
+-- still written exactly once: `harness_events.id` is UNIQUE and a duplicate insert is read as "already there".
+local SPOOL_NAME = "audit-spool.jsonl"
+local SPOOL_BASE, SPOOL_SUFFIX = "audit-spool", ".flushing"
+-- Longer than any single flush (one patience, 20 s by default), so a live flusher's file is never adopted.
+local ADOPT_AFTER_S = 60
+
+local function spool_dir()
+  local ok, paths = pcall(function() return host.paths() end)
+  local data = ok and type(paths) == "table" and paths.data or nil
+  if type(data) ~= "string" or data == "" then return nil end
+  return data
+end
+
+local function spool_path()
+  local dir = spool_dir()
+  return dir and (dir .. "/" .. SPOOL_NAME) or nil
+end
+
+local function private_path(dir)
+  return dir .. "/" .. SPOOL_BASE .. "." .. tostring(host.uuid()) .. SPOOL_SUFFIX
+end
+
+-- The rows of ONE spool file, oldest first. A line that does not parse is KEPT (flagged `unreadable`) instead
+-- of being dropped: a record nobody can read is still a record, and a spool that deletes what it cannot
+-- understand would be the very loss this file is about.
+local function rows_of(path)
+  if type(path) ~= "string" or path == "" then return { rows = {}, count = 0, reason = "no_data_directory" } end
+  local text = (type(host.read_file) == "function") and host.read_file(path) or nil
+  if type(text) ~= "string" or text == "" then return { rows = {}, count = 0, path = path } end
+  local rows = {}
+  for line in (text .. "\n"):gmatch("([^\n]*)\n") do
+    if line ~= "" then
+      local decoded, row = pcall(json.decode, line)
+      if decoded and type(row) == "table" and type(row.kind) == "string" then
+        rows[#rows + 1] = { row = row, raw = line }
+      else
+        rows[#rows + 1] = { unreadable = true, raw = line }
+      end
+    end
+  end
+  return { rows = rows, count = #rows, path = path }
+end
+
+-- Append one row to the spool: true, or false plus why. This is the call that makes `false` honest.
+local function spool_append(row)
+  local path = spool_path()
+  if not path then return false, "no_data_directory" end
+  if type(host.append_file) ~= "function" then return false, "host_has_no_append_file" end
+  local ok, written = pcall(host.append_file, path, json.encode(row) .. "\n")
+  if not ok then return false, tostring(written) end
+  if written ~= true then return false, "append_file_refused" end
+  spool_pending, spool_seen = spool_pending + 1, true
+  return true
+end
+
+-- What the data directory holds: the spool, its private files, and the ones old enough to adopt. Read from
+-- `host.list_dir`, whose entries carry `modified` in epoch seconds - the only clock this decision needs, and
+-- one the host already answers. A listing that cannot be read is NOT "no spool": it is reported.
+local function spool_listing()
+  local dir = spool_dir()
+  if not dir then return { dir = nil, entries = {}, reason = "no_data_directory" } end
+  if type(host.list_dir) ~= "function" then return { dir = dir, entries = {}, reason = "host_has_no_list_dir" } end
+  local answered, raw = pcall(host.list_dir, dir)
+  if not answered then return { dir = dir, entries = {}, reason = "list_dir_failed" } end
+  local decoded, value = pcall(json.decode, tostring(raw))
+  local list = decoded and type(value) == "table" and (value.entries or value) or nil
+  if type(list) ~= "table" then return { dir = dir, entries = {}, reason = "list_dir_unreadable" } end
+  local entries = {}
+  local now = host.now()
+  for _, entry in ipairs(list) do
+    local name = type(entry) == "table" and tostring(entry.name or "") or ""
+    if name ~= "" then
+      local stale = name:sub(1, #SPOOL_BASE + 1) == SPOOL_BASE .. "."
+        and name:sub(-#SPOOL_SUFFIX) == SPOOL_SUFFIX
+        and (now - (tonumber(entry.modified) or now)) >= ADOPT_AFTER_S
+      entries[#entries + 1] = { name = name, path = dir .. "/" .. name, size = tonumber(entry.size) or 0,
+        modified = tonumber(entry.modified) or 0, adoptable = stale }
+    end
+  end
+  return { dir = dir, entries = entries }
+end
+
+-- Append these entries' lines to the SPOOL (never rewrite it): the flusher's one way to put back what the
+-- ledger still refuses. One append for the whole block, so it is one fsync and one atomic step.
+local function spool_append_entries(entries)
+  if #entries == 0 then return true end
+  local path = spool_path()
+  if not path then return false, "no_data_directory" end
+  local lines = {}
+  for _, entry in ipairs(entries) do lines[#lines + 1] = entry.raw end
+  local ok, written = pcall(host.append_file, path, table.concat(lines, "\n") .. "\n")
+  if not ok then return false, tostring(written) end
+  if written ~= true then return false, "append_file_refused" end
+  spool_pending, spool_seen = spool_pending + #lines, true
+  return true
+end
+
+-- Drop a private file this process has finished with. Reported when it fails: a file that cannot be removed
+-- is adopted later as stale, which is slower but not a loss.
+local function spool_drop(path)
+  if type(host.remove_file) ~= "function" then return false, "host_has_no_remove_file" end
+  local ok, removed = pcall(host.remove_file, path)
+  if not ok then return false, tostring(removed) end
+  return removed == true, removed == true and nil or "remove_file_refused"
+end
+
+local function audit_params(row)
+  return {row.id, row.session_id, row.run_id or "", row.span_id or "", row.kind, row.phase,
+    tonumber(row.at) or host.now(), json.encode(row.payload or {})}
+end
+
+-- <opts.attempts>/<opts.budget_ms> override the patience for ONE row (the flush's later rows get one
+-- attempt, so a queue of owed records cannot multiply the wait).
+local function write_durable(label, row, opts)
+  local retry_opts = nil
+  if type(opts) == "table" and (opts.attempts or opts.budget_ms) then
+    retry_opts = { attempts = opts.attempts, budget_ms = opts.budget_ms }
+  end
+  local answered, written, why = pcall(function()
+    return sqlite_busy.retry(label, function()
+      local result, reason = attempt("sql_exec", AUDIT_INSERT, audit_params(row))
+      if result then return true end
+      -- The record is already there: a flush stopped between the insert and the spool rewrite, or two
+      -- writers of one row. The UNIQUE id is what makes "exactly once" true, and this is the branch that
+      -- lets it finish.
+      if reason and tostring(reason):find("UNIQUE constraint failed", 1, true) then return true end
+      -- A lock is retried by the loop; anything else is returned, not raised, so the caller gets the
+      -- ledger's own words rather than a retry that cannot help.
+      if sqlite_busy.is_busy(reason) then error(tostring(reason), 0) end
+      return false, tostring(reason)
+    end, retry_opts)
+  end)
+  if not answered then return false, tostring(written) end
+  if written then return true end
+  -- The one refusal worth a different answer next time: the schema is not there, so the next write
+  -- replays the DDL instead of trusting the process-wide migration flag (as `M.event` does).
+  if why and tostring(why):find("no such table", 1, true) then schema_missing, ready = true, false end
+  return false, why
+end
+
+-- Write one audit record and answer whether the LEDGER holds it. <session_id> <run_id> <span_id> <kind>
+-- <phase> <payload> [at]; the arguments are `M.event`'s, so a caller can move a record over without
+-- reshaping it. Returns true, or false plus the reason and where it was kept ("spooled" or "memory").
+function M.audit(session_id, run_id, span_id, kind, phase, payload, at)
+  if not session_id or session_id == "" then return false, "no_session" end
+  if not M.setup() then return false, "schema_unavailable" end
+  -- What an earlier refusal kept back - in this process's memory or in a spool a killed one left - goes
+  -- first, so a jam is worked off by the next record instead of accumulating.
+  if #owed > 0 or spool_pending > 0 or not spool_seen then
+    if not spool_seen then M.spool_pending() end
+    if #owed > 0 or spool_pending > 0 then M.flush_audit() end
+  end
+  local row = {id = host.uuid(), session_id = session_id, run_id = run_id or "", span_id = span_id or "",
+    kind = kind, phase = phase, at = tonumber(at) or host.now(), payload = payload or {}}
+  local written, why = write_durable("harness_events audit insert " .. tostring(kind or ""), row)
+  if written then return true end
+  local spooled, spool_why = spool_append(row)
+  if spooled then
+    log_line(string.format(
+      "telemetry: the audit record %s is not in the ledger yet (%s) - it is kept and retried, this record is not lost",
+      tostring(kind or "?"), tostring(why)))
+    return false, why, "spooled"
+  end
+  owed[#owed + 1] = row
+  log_line(string.format(
+    "telemetry: the audit record %s is not in the ledger yet (%s) and could not be spooled (%s) - it is kept in this process until the run ends",
+    tostring(kind or "?"), tostring(why), tostring(spool_why)))
+  return false, why, "memory"
+end
+
+-- How many audit records the ledger still owes, as far as this process knows: its own kept rows plus the
+-- spool's size at the last look. A reader that wants a FRESH answer asks `M.spool_pending()`; the number is
+-- carried in `events().audit_owed` and `drops().audit_owed` too.
+function M.owed() return #owed + spool_pending end
+
+-- Look at the spool itself: <rows>, <count>, <reason>. This is what a node calls when it starts, so the
+-- records a killed process spooled are written as soon as the ledger answers. It counts the spool AND every
+-- file a killed flusher left behind, because both are owed.
+function M.spool_pending()
+  local listing = spool_listing()
+  local total, reason = 0, listing.reason
+  for _, entry in ipairs(listing.entries) do
+    if entry.name == SPOOL_NAME or entry.adoptable then
+      local rows = rows_of(entry.path)
+      total = total + rows.count
+      reason = reason or rows.reason
+    end
+  end
+  spool_pending, spool_seen = total, true
+  return total, total, reason
+end
+
+-- Write what a refusal kept back. <written>, <left>, <last reason>. Called from the end of a run (where the
+-- answer has already been emitted, so waiting costs the reader nothing - lua/core/agent.lua), from the start
+-- of a run, and from the front of the next audit record.
+--
+-- ONE PATIENCE PER FLUSH (Fable's review, item 2): the first row pays the ledger's patience, every row after
+-- it gets ONE attempt, and the first refusal stops the flush and keeps the rest. Ten owed rows on a jammed
+-- ledger used to cost ten patiences (200 s); now they cost one, plus at most one connection wait.
+--
+-- THE FLUSH TAKES, IT NEVER REWRITES. In order: every private file a killed flusher left (older than
+-- ADOPT_AFTER_S), the spool itself, and this process's in-memory rows. Each file is taken by RENAME first, so
+-- an appender that writes a new refused record during the flush appends to a file this flush will not touch.
+function M.flush_audit()
+  local listing = spool_listing()
+  local pending, files = {}, {}
+  -- (1) A killed flusher's private file. Renaming it to a name of OUR OWN is the adoption: two flushers can
+  -- never both adopt it, because the second rename finds the source gone.
+  for _, entry in ipairs(listing.entries) do
+    if entry.adoptable then
+      local mine = private_path(listing.dir)
+      local took = pcall(host.rename_file, entry.path, mine)
+      if took then
+        files[#files + 1] = { path = mine, entries = rows_of(mine).rows }
+      end
+    end
+  end
+  -- (2) The spool. `host.rename_file` refuses an existing target and answers false when the source vanished,
+  -- which is what a second flusher taking it looks like - then it is simply not ours to process.
+  local main = listing.dir and (listing.dir .. "/" .. SPOOL_NAME) or nil
+  if main and type(host.rename_file) == "function" then
+    local mine = private_path(listing.dir)
+    local took, renamed = pcall(host.rename_file, main, mine)
+    if took and renamed == true then files[#files + 1] = { path = mine, entries = rows_of(mine).rows } end
+  end
+  for _, file in ipairs(files) do
+    for _, entry in ipairs(file.entries) do pending[#pending + 1] = entry end
+  end
+  -- (3) What this process kept in memory.
+  for _, row in ipairs(owed) do pending[#pending + 1] = { row = row, raw = json.encode(row), memory = true } end
+  if #pending == 0 and #files == 0 then
+    spool_pending, spool_seen = 0, true
+    return 0, 0
+  end
+  if not M.setup() then return 0, #pending, "schema_unavailable" end
+  local written, last, stopped = 0, nil, false
+  local left = {}
+  for index, entry in ipairs(pending) do
+    if stopped then
+      left[#left + 1] = entry
+    elseif entry.unreadable then
+      -- A line nobody can parse names its own reason and stays exactly where it is.
+      last, stopped = "unreadable_spool_line", true
+      left[#left + 1] = entry
+    else
+      local ok, why = write_durable("harness_events audit insert (retried)", entry.row,
+        index == 1 and nil or { attempts = 1, budget_ms = 0 })
+      if ok then written = written + 1 else last, stopped = why, true; left[#left + 1] = entry end
+    end
+  end
+  local remaining_memory, remaining_spool = {}, {}
+  for _, entry in ipairs(left) do
+    if entry.memory then
+      remaining_memory[#remaining_memory + 1] = entry.row
+    else
+      remaining_spool[#remaining_spool + 1] = entry
+    end
+  end
+  owed = remaining_memory
+  -- What the ledger still refuses goes back by APPEND - the one operation that cannot lose an appender's
+  -- line - and only then are the private files dropped: a file is not removed before its rows are safe.
+  local put_back, put_back_why = spool_append_entries(remaining_spool)
+  if not put_back then
+    last = last or put_back_why
+    log_line("telemetry: the audit spool could not be written back after a flush (" .. tostring(put_back_why) ..
+      "); the taken files are kept and will be adopted by the next flush")
+    return written, #owed + #remaining_spool, last
+  end
+  for _, file in ipairs(files) do
+    local dropped, drop_why = spool_drop(file.path)
+    if not dropped then
+      -- Kept, so it is adopted later (its rows are already in the ledger; the UNIQUE id answers for them).
+      last = last or drop_why
+    end
+  end
+  spool_pending, spool_seen = #remaining_spool, true
+  return written, #owed + #remaining_spool, last
+end
+
 function M.start(opts, kind, payload)
   opts = opts or {}
   local span = {id=host.uuid(), session_id=opts.session_id, run_id=opts.run_id,
@@ -316,7 +663,7 @@ function M.events(session_id, cursor, limit, since)
     -- between a measured zero and an absent number.
     return {events={}, next_cursor=tonumber(cursor) or 0, has_more=false, session_id=session_id,
       schema_version=1, available=false, reason="ledger_unreadable", detail=reason,
-      dropped_writes=drops.count}
+      dropped_writes=drops.count, audit_owed=M.owed()}
   end
   for _, row in ipairs(rows) do
     local ok, payload = pcall(json.decode, row.payload)
@@ -324,7 +671,12 @@ function M.events(session_id, cursor, limit, since)
   end
   return {events=rows, next_cursor=rows[#rows] and rows[#rows].seq or tonumber(cursor) or 0,
     has_more=#rows == limit, session_id=session_id, schema_version=1, available=true,
-    dropped_writes=drops.count}
+    dropped_writes=drops.count,
+    -- A security record the ledger owes: zero here means the audit trail of this session's events is
+    -- complete, and a non-zero number is a fact a reader must not read as "nothing was redacted". It is
+    -- this process's kept rows plus what the spool held when this process last looked at it
+    -- (`M.spool_pending()` asks the file itself).
+    audit_owed=M.owed()}
 end
 
 -- One last task-request boundary, not cumulative billed input or cache misses.
@@ -504,7 +856,11 @@ end
 function M.drops()
   return {count=drops.count, last_at=drops.last_at, last_error=drops.last_error, label=drops.label,
     attempts=drops.attempts, retry_budget_ms=retry_budget_ms(), attempts_max=attempts_max(),
-    cooldown_ms=cooldown_ms()}
+    cooldown_ms=cooldown_ms(),
+    -- Dropped accounting rows and owed AUDIT rows are different statements: the first says the report is
+    -- incomplete, the second says a security record is still not stored (in this process's memory or in the
+    -- spool under <data>/audit-spool.jsonl).
+    audit_owed=M.owed()}
 end
 
 return M

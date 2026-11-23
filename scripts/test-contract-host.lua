@@ -88,6 +88,19 @@ do
   ok(os.clock() - started >= 1.0, "the fake really sleeps: a timeout test would pass on a pretend wait")
 end
 
+-- --- the APPEND really appends ------------------------------------------------------------------------
+-- The contract compares one answer's arity and type, and `true` is `true` whether the capability appended
+-- or replaced the file. The audit spool (lua/core/telemetry.lua, M.audit) rests on the difference, so the
+-- fake's promise is asserted here rather than assumed from the shape.
+do
+  local path = root .. "/append-fidelity.txt"
+  ok(fake.append_file(path, "one\n") == true, "the fake appends and answers one true")
+  ok(fake.append_file(path, "two\n") == true, "and again")
+  ok(fake.read_file(path) == "one\ntwo\n", "the fake APPENDS: both blocks are there (got " ..
+    tostring(fake.read_file(path)) .. ")")
+  ok(fake.append_file("/etc/passwd", "x") == false, "the fake refuses to append outside its scratch root")
+end
+
 -- --- sql text, not a table (the list_dir lesson: 34 of 78 capabilities answer JSON text) ---------------
 do
   local answer = fake.sql_query("select 1")

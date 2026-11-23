@@ -795,6 +795,7 @@ Adding a capability is two edits: one entry in the registry, one row here.
 ; One line per capability: name, then effect class. Hand-maintained; checked against the live registry in
 ; rust/wa-capabilities/src/capabilities.rs by the drift test in that module (cargo test -p wa-capabilities capabilities::tests).
 ; Lines starting with ";" and blank lines are ignored by the checker.
+append_file          writes files
 audio                device
 beat                 read-only
 binary_changed       read-only
@@ -883,6 +884,8 @@ quickjs              runs a process
 read_file            read-only
 read_image_base64    read-only
 relay                network
+remove_file          writes files
+rename_file          writes files
 resource             writes files
 run_cancelled        read-only
 build_identity       read-only
@@ -942,6 +945,23 @@ email_read           read-only
 email_media          read-only
 write_file           writes files
 <!-- capability-inventory:end -->
+
+`host.append_file(path, text)` appends one block of text to a file and puts it **on the device** before it
+answers `true`: the file is created owner-only (`0600`) when absent, opened `O_APPEND` so two processes
+appending one line each keep both lines, and `fsync`ed. It answers one boolean, never a reason.
+`host.write_file` cannot serve that caller: it replaces the whole file atomically (a read-modify-write, so
+two writers lose one) and takes its mode from whatever the target already had. The caller is
+`lua/core/telemetry.lua`'s audit spool - a security record the ledger refused, which has to survive the
+process that saw it.
+
+`host.rename_file(from, to)` and `host.remove_file(path)` are the rest of that story, and they add no reach
+beyond `write_file`: `remove_file` does what `write_file(path, "")` already could, and `rename_file`
+**refuses an existing target** (so two writers can never both take the same file) and fsyncs both directory
+entries. Two processes on one data directory is the normal case here (a `wa serve` and its workers), and the
+spool's flush is what they share: the flusher renames the spool to a private `audit-spool.<uuid>.flushing`,
+processes that file, appends whatever the ledger still refuses back to `audit-spool.jsonl`, and removes the
+private file. An appender only ever appends, so a record written while a flush runs can never be overwritten
+by it - the failure mode a read-modify-write had.
 
 ## Direct peer calls by hierarchy (`host.mesh_call`)
 

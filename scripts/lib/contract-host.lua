@@ -134,6 +134,27 @@ function M.new(spec)
     return text
   end
 
+  -- host.rename_file(from, to) -> ONE boolean: the atomic take the audit spool depends on
+  -- (lua/core/telemetry.lua, M.flush_audit). It REFUSES an existing target exactly as the real capability
+  -- does, because that refusal is what makes two flushers unable to take one file: a fake that allowed the
+  -- clobber would make the race this row exists to catch pass.
+  api.rename_file = function(from, to)
+    local source, target = owned(from, "rename_file"), owned(to, "rename_file")
+    if not source or not target or files[source] == nil or files[target] ~= nil then return false end
+    files[target] = files[source]
+    files[source] = nil
+    return true
+  end
+
+  -- host.remove_file(path) -> ONE boolean: gone (or already gone is NOT true here, matching the real one,
+  -- which answers false when the file is not there).
+  api.remove_file = function(path)
+    local resolved = owned(path, "remove_file")
+    if not resolved or files[resolved] == nil then return false end
+    files[resolved] = nil
+    return true
+  end
+
   api.list_dir = function(path)
     local resolved, why = owned(path, "list_dir")
     if not resolved then return json.encode({ error = why, path = tostring(path) }) end
@@ -155,6 +176,17 @@ function M.new(spec)
   end
 
   -- The real host answers SQL as JSON text, never as a Lua table (the list_dir lesson, 12/11).
+  -- host.append_file(path, text) -> ONE boolean: the text is on the device. It APPENDS (two writers keep
+  -- both blocks) and creates the file owner-only. The reason a path outside the root gets `false` and not
+  -- `false, why` is the contract itself: the real capability answers one value, and the fake answers what
+  -- the real one answers (scripts/test-contract-host.lua compares the arity).
+  api.append_file = function(path, text)
+    local resolved = owned(path, "append_file")
+    if not resolved then return false end
+    files[resolved] = (files[resolved] or "") .. tostring(text)
+    return true
+  end
+
   api.sql_query = function(statement)
     local answer = sql_answers[tostring(statement)]
     if answer == nil then return json.encode({ error = "the contract fake scripts no answer for: " .. tostring(statement) }) end
@@ -256,7 +288,20 @@ function M.contract(host_like)
   record("now", host_like.now())
   record("monotonic_ms", host_like.monotonic_ms())
   record("write_file", host_like.write_file((host_like.paths() or {}).temp .. "/contract.txt", "x"))
+  -- The APPEND is the capability the audit spool depends on (lua/core/telemetry.lua, M.audit): a fake that
+  -- silently replaced the file would make a row about "a kept record" green while the real node lost it.
+  record("append_file", host_like.append_file((host_like.paths() or {}).temp .. "/contract-append.txt", "x"))
+  record("append_file-refused", host_like.append_file("", "x"))
   record("read_file-present", host_like.read_file((host_like.paths() or {}).temp .. "/contract.txt"))
+  -- The TAKE and the cleanup of the audit spool (lua/core/telemetry.lua, M.flush_audit): a rename with no
+  -- target present, a rename ONTO an existing target (must be refused on both sides), and a remove of a file
+  -- that is there and of one that is not.
+  local temp = (host_like.paths() or {}).temp
+  record("rename_file", host_like.rename_file(temp .. "/contract.txt", temp .. "/contract-renamed.txt"))
+  record("rename_file-existing-target",
+    host_like.rename_file(temp .. "/contract-renamed.txt", temp .. "/contract-renamed.txt"))
+  record("remove_file", host_like.remove_file(temp .. "/contract-renamed.txt"))
+  record("remove_file-missing", host_like.remove_file(temp .. "/contract-absent-remove.txt"))
   return out
 end
 
