@@ -168,8 +168,13 @@ op_view:event({ type = 'codemode_call', id = 'b1', name = 'bash', arguments = { 
 op_view:event({ type = 'codemode_call', id = 'b1', name = 'bash', state = 'ok', ms = 42 })
 op_view:event({ type = 'tool_result', name = 'codemode', result = { ok = true, value = operation } })
 local op_text = op_fake.all_blocks_text()
-check(has(op_text, '1') and has(op_text, '6'),
-  'the command\'s own first lines are the answer: ' .. op_text)
+-- THE OPERATION IS ONE ROW NOW (chat-view-round-2, item 4; Victor 23/11: "script output should show
+-- 'script output · <n> chars' so we can expand"). This row used to require the command's first lines drawn
+-- as the answer; the answer became the row that names its size, and the lines moved one press away -
+-- asserted in the two checks below, so nothing this test was guarding is dropped.
+check(has(op_text, 'script output · 21 chars'),
+  'the answer is one row naming the size of the command\'s output: ' .. op_text)
+check(not has(op_text, '1\n2\n3'), 'and the output is not printed under it: ' .. op_text)
 check(not has(op_text, 'cleanup_budget_ms') and not has(op_text, 'containment') and not has(op_text, 'operation_id":'),
   'and none of the operation\'s transport fields is drawn as the answer: ' .. op_text)
 check(has(op_text, '/console'),
@@ -180,6 +185,10 @@ if #op_fake.expansions > 0 then
   local expanded = payload and payload[1] and payload[1].text or ''
   check(has(expanded, 'operation_id') and has(expanded, 'cleanup'),
     'the expanded rows are the WHOLE object, byte for byte: ' .. tostring(expanded):sub(1, 200))
+  local out_at, object_at = expanded:find('1\n2\n3', 1, true), expanded:find('operation_id', 1, true)
+  check(out_at ~= nil and object_at ~= nil and out_at < object_at,
+    'and the command\'s own output comes first in them, because that is what the reader opened: '
+      .. tostring(expanded):sub(1, 120))
 end
 
 -- A value that merely LOOKS like a status object is still drawn whole: the preview is an allow-list
