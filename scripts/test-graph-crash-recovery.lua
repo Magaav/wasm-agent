@@ -15,6 +15,19 @@
 -- committed revision does not fall back to 1 as a rebuild's would.
 local json = dofile('lua/vendor/json.lua')
 local paths = dofile('lua/core/paths.lua')
+-- THE COMPONENT THIS ROW CANNOT RUN WITHOUT, NAMED SO THE RUNNER INSTALLS IT. scripts/fast.sh builds the
+-- components a run needs, and scripts/lib/fast-row-exec.sh installs one into the row's OWN home only when the
+-- row's text mentions its override - that string check IS the contract, so this line is it:
+--    WA_GRAPH_COMPONENT_WASM
+-- Without it the row finds a scratch home with no component, the node answers
+-- `component_not_installed:graph`, and the row fails as a missing fixture instead of on what it measures
+-- (measured 23/11, the first main-health run of this row). A row that still sees no component REFUSES BY
+-- NAME below rather than skipping: the runner promised it (scripts/fast.sh counts a promised component
+-- reported missing as a FAIL), so "cannot tell" is never "pass".
+local component = host.getenv('WA_GRAPH_COMPONENT_WASM')
+assert(component and component ~= '', 'refused: no graph component: this row measures a store the real component reads, so it needs WA_GRAPH_COMPONENT_WASM, which the fast path installs into this row home (scripts/lib/fast-row-exec.sh)')
+local probe = json.decode(host.exec('test -f ' .. "'" .. component .. "'", paths.data(), 10))
+assert(probe.code == 0, 'refused: WA_GRAPH_COMPONENT_WASM names ' .. tostring(component) .. ', which is not a file on this machine')
 local function q(s) return "'" .. s:gsub("'", "'\\''") .. "'" end
 local function decode(raw, what)
   local value = json.decode(raw)
