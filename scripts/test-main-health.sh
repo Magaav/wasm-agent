@@ -29,7 +29,23 @@ command -v jq >/dev/null 2>&1 || { echo "SKIP test-main-health: jq is not on PAT
 work=$(TMPDIR=/tmp mktemp -d) || { echo "SKIP test-main-health: mktemp failed"; exit 0; }
 trap 'rm -rf "$work"' EXIT
 export HOME=$work/user WASM_AGENT_HOME=$work/node TMPDIR=$work/tmp
+# The one build dir the fixture's fast path writes this tree's binary into (scripts/lib/fast-binary.sh
+# resolves $CARGO_TARGET_DIR first), and the file the stub board records its arguments in.
+export CARGO_TARGET_DIR=$work/target MAIN_HEALTH_TEST_ARGS=$work/speed-args
+# AND THE VARIABLES THAT DECIDE WHICH BINARY, cleared rather than inherited. MEASURED in this mission's own
+# full-suite run: `scripts/fast.sh:489` exports WA_BIN for every row ("so a row's node is THIS tree"), the
+# fixture main-health inherited it, treated it as the caller's explicit choice, and - correctly - refused it
+# as a binary stamped with the SUITE's commit rather than the fixture's, so the board was handed nothing and
+# this row failed inside the suite while passing alone. The switches that could make it accept a stale tree
+# binary are cleared for the same reason.
+unset WA_BIN WA_FAST_ALLOW_STALE_BINARY WA_FAST_SKIP_BUILD
 mkdir -p "$HOME" "$WASM_AGENT_HOME" "$TMPDIR" "$work/missions"
+# THE FIXTURE'S OWN MISSIONS ROOT AND SUITE LOCK, pinned rather than inherited. MEASURED 23/11, in this
+# mission's own end-to-end run: with WA_SUITE_LOCK exported by the caller, the fixture main-health this row
+# starts waited for the lock its OWN PARENT suite holds (the fast path runs this row under that lock), and
+# the row hung until it was killed. A row that can deadlock its own suite is not a test; these two lines
+# make it independent of whatever the caller exported.
+export WA_MISSIONS_ROOT=$work/missions WA_SUITE_LOCK=$work/missions/.suite.lock
 operator_home=${OPERATOR_NODE_HOME:-/home/$(id -un)/.wasm-agent}
 case "$work" in
   "$operator_home"|"$operator_home"/*) echo "test-main-health: refused(real_node_home): $work is the operator's node home" >&2; exit 2 ;;
@@ -39,6 +55,8 @@ checks=0
 ok() { checks=$((checks + 1)); }
 fail() { echo "test-main-health FAILED: $*" >&2; exit 1; }
 git_c() { git -c user.email=test@example.invalid -c user.name=Test -c commit.gpgsign=false "$@"; }
+# The argument that follows $1 in the board's recorded argv (empty when it is not there).
+arg_after() { awk -v k="$1" 'p == k { print; exit } { p = $0 }' "$2"; }
 
 repo=$work/repo
 mkdir -p "$repo/scripts"
@@ -50,6 +68,19 @@ cat > scripts/fast.sh <<'STUB'
 #!/usr/bin/env bash
 set -uo pipefail
 test "$(git rev-parse HEAD)" = "$(git rev-parse main)" || { echo "fixture: not on main's tip" >&2; exit 3; }
+# THE BINARY THE FAST PATH BUILDS is what main-health now hands the speed board: a node whose identity
+# probe carries this worktree's HEAD, at the one path scripts/lib/fast-binary.sh resolves.
+if [ "${MAIN_HEALTH_TEST_BUILD_BIN:-1}" = 1 ]; then
+  mkdir -p "$CARGO_TARGET_DIR/release"
+  {
+    echo '#!/bin/sh'
+    # jq writes the identity JSON so the quotes survive: written by hand in a double-quoted echo they are
+    # shell quoting and the probe reads {build_source_commit:...}, which it cannot parse (measured).
+    echo "printf '%s\n' '$(jq -cn --arg sha "$(git rev-parse HEAD)" '{build_source_commit:$sha,binary_sha256:"deadbeef"}')'"
+    echo 'echo "quickjs=1"'
+  } > "$CARGO_TARGET_DIR/release/wa"
+  chmod +x "$CARGO_TARGET_DIR/release/wa"
+fi
 case "${MAIN_HEALTH_FIXTURE_VERDICT:-green}" in
   green) jq -n '{schema:1, summary:{checks:3, passed:3, failed:0, skipped:0, ok:true, exit_code:0}, checks:[{name:"alpha",status:"pass",first_error:""}]}' > "$WA_FAST_RESULT" ;;
   red)   jq -n '{schema:1, summary:{checks:3, passed:2, failed:1, skipped:0, ok:false, exit_code:1}, checks:[{name:"alpha",status:"pass",first_error:""},{name:"test-beta",status:"fail",first_error:"beta is stale"}]}' > "$WA_FAST_RESULT"; exit 1 ;;
@@ -58,6 +89,18 @@ esac
 exit 0
 STUB
 chmod +x scripts/fast.sh
+# THE SPEED BLOCK'S TWO DEPENDENCIES. The resolver is the REAL scripts/lib/fast-binary.sh (copied, like
+# scripts/test-fast-binary.mjs does): the question this row asks is which binary main-health hands the
+# board, and answering it with a rewrite of the resolver would answer a different question. The board is a
+# stub because the numbers are not this row's subject - it records the arguments it was handed.
+mkdir -p scripts/lib
+cp "$root/scripts/lib/fast-binary.sh" scripts/lib/fast-binary.sh
+cat > scripts/speed-board.sh <<'BOARD'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "${MAIN_HEALTH_TEST_ARGS:-/dev/null}"
+echo "speed-board: fixture-board (this row asks what it was handed, not what it measures)"
+BOARD
+chmod +x scripts/speed-board.sh
 printf 'base\n' > a.txt
 git_c add -A >/dev/null && git_c commit -q -m base || fail "the base commit"
 main_sha=$(git_c rev-parse main)
@@ -126,6 +169,59 @@ ok
 grep -q 'nice -n' "$root/scripts/main-health.sh" || fail "main-health does not run at a low priority"
 ok
 grep -q 'flock -o' "$root/scripts/main-health.sh" || fail "main-health does not take the suite lock (it would compete with a landing)"
+ok
+
+# ---- 7. THE SPEED BOARD IS HANDED A BINARY (23/11) ------------------------------------------------
+# The measured failure: main-health handed the board nothing unless ~/.local/bin/installed.txt named this
+# exact commit, so nearly every commit on main got four rows of 'unavailable: no binary to measure' and a
+# board with no numbers read as fine. The binary it now hands is the one the fast run just built for this
+# tree - and only one whose stamp is this commit.
+: > "$MAIN_HEALTH_TEST_ARGS"
+# `2>&1` INSIDE the substitution: the line that names the binary goes to main-health's stderr, and a
+# command substitution captures stdout only (measured: the grep below read a variable without it).
+out=$(run green 2>&1); rc=$?
+[ "$rc" = 0 ] || fail "the green run with a board exited $rc: $out"
+ok
+tree_bin=$CARGO_TARGET_DIR/release/wa
+[ -x "$tree_bin" ] || fail "the fixture fast path did not write this tree's binary at $tree_bin"
+ok
+[ "$(arg_after --bin "$MAIN_HEALTH_TEST_ARGS")" = "$tree_bin" ] || fail "--bin does not name the binary the fast run built: $(tr '\n' ' ' < "$MAIN_HEALTH_TEST_ARGS")"
+ok
+[ "$(arg_after --sha "$MAIN_HEALTH_TEST_ARGS")" = "$main_sha" ] || fail "--sha does not name main's tip: $(tr '\n' ' ' < "$MAIN_HEALTH_TEST_ARGS")"
+ok
+grep -qF "main-health: speed binary $tree_bin" <<< "$out" || fail "main-health does not name the binary it measured: $out"
+ok
+
+# ---- 8. NO BINARY OF THIS COMMIT: the board is handed none, and speed-stats makes that a RED row -------
+# A --bin belonging to another commit would be a number about another commit; the honest answer is no
+# number at all, which the board now reports as RED with the reason.
+rm -f "$tree_bin"
+: > "$MAIN_HEALTH_TEST_ARGS"
+out=$(MAIN_HEALTH_TEST_BUILD_BIN=0 MAIN_HEALTH_FIXTURE_VERDICT=green bash "$script" --repo "$repo" --out "$json" 2>&1); rc=$?
+[ "$rc" = 0 ] || fail "a run that found no binary of this commit exited $rc: $out"
+ok
+if grep -qxF -- '--bin' "$MAIN_HEALTH_TEST_ARGS"; then
+  fail "the board was handed a --bin with no binary of this commit: $(tr '\n' ' ' < "$MAIN_HEALTH_TEST_ARGS")"
+fi
+ok
+grep -qF 'main-health: speed binary (none:' <<< "$out" || fail "main-health does not say it had no binary: $out"
+ok
+
+# ---- 9. THE INSTALLED NODE, WHEN IT IS THIS COMMIT: the old rule, still the fallback -----------------
+mkdir -p "$HOME/.local/bin"
+printf 'commit=%s\n' "${main_sha:0:8}" > "$HOME/.local/bin/installed.txt"
+install_stub=$HOME/.local/bin/wa
+{
+  echo '#!/bin/sh'
+  echo "printf '{"build_source_commit":"$main_sha","binary_sha256":"cafe"}\n'"
+  echo 'echo "quickjs=1"'
+} > "$install_stub"
+chmod +x "$install_stub"
+: > "$MAIN_HEALTH_TEST_ARGS"
+out=$(MAIN_HEALTH_TEST_BUILD_BIN=0 MAIN_HEALTH_FIXTURE_VERDICT=green bash "$script" --repo "$repo" --out "$json" 2>&1); rc=$?
+[ "$rc" = 0 ] || fail "a run with an installed node of this commit exited $rc: $out"
+ok
+[ "$(arg_after --bin "$MAIN_HEALTH_TEST_ARGS")" = "$install_stub" ] || fail "the installed node of this commit was not handed to the board: $(tr '\n' ' ' < "$MAIN_HEALTH_TEST_ARGS")"
 ok
 
 echo "test-main-health ok ($checks checks)"
