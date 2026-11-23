@@ -577,6 +577,10 @@ local function dense_array(value,maximum)
   return true
 end
 
+-- The largest body the apply above reads back and compares; above it the read-back is skipped and the
+-- answer says so (EDIT_VERIFY_MAX, 23/11: an 8 MB body is not worth a second read per edit).
+local EDIT_VERIFY_MAX = 8 * 1024 * 1024
+
 -- Apply only a freshly rechecked text snapshot. Shared by single-file edits
 -- and mutation batches; preparation must not write or record anything.
 function M.check(plan)
@@ -594,6 +598,23 @@ function M.apply(plan,record)
   local called,written=pcall(host.write_file,plan.path,plan.after)
   if not called or not written then return {ok=false,error='write_failed',path=plan.path,outcome='unknown',
     note='Inspect the file before retrying; earlier batch effects were not rolled back.'} end
+  -- A BODY IS NEVER SILENTLY ALTERED (23/11), the same rule as tools.write and the one place every edit and
+  -- mutation batch passes: M.check above proved the file held `before` a moment ago; this proves it holds
+  -- `after` now. An edit reported as applied over a file that does not hold the text is a corrupted file
+  -- with a success receipt, so a mismatch is a REFUSAL whose outcome is unknown - something did happen to
+  -- that path, and this call cannot say what. A body too large to compare is not compared, and the answer
+  -- says so instead of implying it was.
+  if #plan.after <= EDIT_VERIFY_MAX then
+    local held=host.read_file(plan.path)
+    if held~=plan.after then
+      return {ok=false,error='write_mismatch',path=plan.path,outcome='unknown',applied=false,
+        note='the file does not hold the text this edit sent ('
+          ..tostring(held and ('it holds '..#held..' bytes, the edit sent '..#plan.after) or 'it could not be read back')
+          ..'): nothing here can say what wrote the rest, so this edit is not reported as applied.'}
+    end
+  else
+    result.body_unverified='body_too_large_to_compare'
+  end
   result.applied=true
   if record then
     local ok=pcall(record,plan.path,plan.before or '',plan.after)

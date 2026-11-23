@@ -63,38 +63,84 @@ pub struct SourceFacts {
     pub ts: i64,
 }
 
+/// A refusal with the fact that names it: the stable code a caller switches on, and the message id the
+/// refusal is about (`""` when the refusal names no message).
+///
+/// The id is there because a code alone does not answer *which* message: on 23/11 a send was refused
+/// with one word and no chat, no id and no date, and four rounds of a session went into finding out what
+/// the word was about. The caller named this id itself, so echoing it back tells it nothing it did not
+/// say. It is never logged: the log line keeps the code, and `privacy` marks the id.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Refusal {
+    pub code: &'static str,
+    pub about: String,
+}
+
+impl Refusal {
+    fn about(code: &'static str, id: &str) -> Refusal {
+        Refusal { code, about: id.chars().take(128).collect() }
+    }
+
+    /// What the queue stores as the job's failure reason: `code` alone when no message is named,
+    /// `code:<id>` otherwise. `wa_whatsapp_outbox::retryable` keeps reading the head.
+    pub fn stored(&self) -> String {
+        if self.about.is_empty() {
+            self.code.to_string()
+        } else {
+            format!("{}:{}", self.code, self.about)
+        }
+    }
+}
+
+/// What a verified request carries as its quote.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Quote {
+    /// Send it as asked: a plain message, a reference quote, or a quote of a message that still exists.
+    Keep,
+    /// Send the message WITHOUT the quote, and say this to the caller: the quoted message was deleted by
+    /// its author, and a quote re-publishes its text (WhatsApp puts the quoted message in the context).
+    Drop(&'static str),
+}
+
+/// The rule for the quote, decided from the index before the wire (Fable's review, 23/11 ~20:30Z).
+///
+/// The node KEEPS a deleted message for the operator to read - that is the owner's decision of 23/11 - and
+/// keeping it is not permission to send it back into the chat its author took it out of. So an explicit
+/// send that names a deleted message as its reply source still GOES OUT, and the quote is dropped with the
+/// sentence [`wa_whatsapp_outbox::QUOTE_DROPPED_DELETED`] on the result. A send whose source the index does
+/// not hold at all is a refusal one layer up (`dispatch_refusal`), not this.
+pub fn quote_decision(source: Option<&SourceFacts>) -> Quote {
+    match source {
+        Some(facts) if facts.deleted => Quote::Drop(wa_whatsapp_outbox::QUOTE_DROPPED_DELETED),
+        _ => Quote::Keep,
+    }
+}
+
 /// The last gate before the wire: why this verified request must not be dispatched, if it must not.
 ///
-/// The placement is deliberate and is the Go connector's: the node already asked its policy, but a
-/// posting hold or a revoke/edit fence can have arrived while the job waited, and only the component
-/// holds that state. A held chat and a fenced reply source are refusals, never retries - sending would
-/// post into a chat whose earlier message the user revoked, which is the one thing the hold exists to
-/// prevent.
+/// The placement is deliberate and is the Go connector's: the node already asked its policy, but the
+/// index can have learned something about the quoted message while the job waited, and only the
+/// component holds that state. A refusal is never a retry.
 ///
-/// A reply source is checked exactly, from the index: a reference quote to an own message, to a
-/// deleted one, or to a non-text bubble would render as something the operator did not approve, so it
-/// is refused instead of sent. The explicit send accepted a quote without this check before the hold
-/// work landed; the check is here, on the one path that reaches the wire.
-pub fn dispatch_refusal(chat_held: bool, reply_to: Option<&str>, reply_fenced: bool, source: Option<&SourceFacts>) -> Option<&'static str> {
-    if chat_held {
-        return Some("posting_held_chat");
-    }
-    let Some(_reply) = reply_to else { return None };
-    if reply_fenced {
-        return Some("source_fence");
-    }
-    let Some(source) = source else { return Some("reply_source_not_indexed") };
+/// WHAT IS NOT HERE ANY MORE (23/11). There is no chat gate: no revoke, no edit and no clear on the wire
+/// refuses an explicit send, and this function no longer has a parameter for one. A message the owner
+/// deletes is flagged and kept (`index::mark_deleted`), and quoting it is allowed - the owner's rule is
+/// that this node never refuses his send *for a deletion*.
+///
+/// A reply source is still checked exactly, from the index, because the refusal is about what the quote
+/// would RENDER, not about a deletion: a quote of an own message, of an unsupported bubble or of a
+/// non-text message would show as something the operator did not approve.
+pub fn dispatch_refusal(reply_to: Option<&str>, source: Option<&SourceFacts>) -> Option<Refusal> {
+    let reply = reply_to?;
+    let Some(source) = source else { return Some(Refusal::about("reply_source_not_indexed", reply)) };
     if source.own {
-        return Some("reply_source_own");
-    }
-    if source.deleted {
-        return Some("reply_source_deleted");
+        return Some(Refusal::about("reply_source_own", reply));
     }
     if !source.unsupported.is_empty() {
-        return Some("reply_source_unsupported");
+        return Some(Refusal::about("reply_source_unsupported", reply));
     }
     if source.kind != "text" || source.text.trim().is_empty() || source.ts <= 0 {
-        return Some("reply_source_not_plain_text");
+        return Some(Refusal::about("reply_source_not_plain_text", reply));
     }
     None
 }
@@ -210,26 +256,56 @@ mod tests {
     }
 
     #[test]
-    fn a_posting_hold_or_a_fenced_source_blocks_the_wire() {
+    fn a_clean_quote_goes_out_and_no_deletion_refuses_a_send() {
         let plain = source("text", "oi", false);
-        assert_eq!(dispatch_refusal(true, None, false, None), Some("posting_held_chat"));
-        assert_eq!(dispatch_refusal(false, Some("3EB0"), true, Some(&plain)), Some("source_fence"));
-        // No reply: the hold is the only gate, and a clean chat sends.
-        assert_eq!(dispatch_refusal(false, None, false, None), None);
-        assert_eq!(dispatch_refusal(false, Some("3EB0"), false, Some(&plain)), None);
+        assert_eq!(dispatch_refusal(None, None), None, "no reply, no gate: a chat can never block a send");
+        assert_eq!(dispatch_refusal(Some("3EB0"), Some(&plain)), None);
+        // The owner's rule of 23/11: a message the sender deleted keeps its content here, and quoting it
+        // is not a refusal. The refusal that used to live here (`reply_source_deleted`) is gone.
+        let mut deleted = source("text", "oi", false);
+        deleted.deleted = true;
+        assert_eq!(dispatch_refusal(Some("3EB0"), Some(&deleted)), None);
+    }
+
+    #[test]
+    fn an_explicit_send_that_quotes_a_deleted_message_goes_out_without_the_quote() {
+        // The reviewed rule: the send is never refused for a deletion, and it never re-publishes what the
+        // author deleted. The sentence is the one the caller reads on the result.
+        let mut deleted = source("text", "oi", false);
+        deleted.deleted = true;
+        assert_eq!(dispatch_refusal(Some("3EB0"), Some(&deleted)), None, "the send still goes out");
+        assert_eq!(
+            quote_decision(Some(&deleted)),
+            Quote::Drop("sent without the quote: the quoted message was deleted by its author"),
+            "the operator is told what changed, in those words"
+        );
+        assert_eq!(quote_decision(Some(&deleted)), Quote::Drop(wa_whatsapp_outbox::QUOTE_DROPPED_DELETED));
+        // Everything else keeps whatever quote it asked for.
+        assert_eq!(quote_decision(None), Quote::Keep, "no reply source: nothing to quote");
+        assert_eq!(quote_decision(Some(&source("text", "oi", false))), Quote::Keep);
+        assert_eq!(quote_decision(Some(&source("image", "", false))), Quote::Keep, "a shape is a refusal, not a dropped quote");
     }
 
     #[test]
     fn a_reply_source_must_be_exact_plain_text_by_someone_else() {
-        assert_eq!(dispatch_refusal(false, Some("3EB0"), false, None), Some("reply_source_not_indexed"));
-        assert_eq!(dispatch_refusal(false, Some("3EB0"), false, Some(&source("text", "oi", true))), Some("reply_source_own"));
-        let mut deleted = source("text", "oi", false);
-        deleted.deleted = true;
-        assert_eq!(dispatch_refusal(false, Some("3EB0"), false, Some(&deleted)), Some("reply_source_deleted"));
+        let code = |r: Option<Refusal>| r.map(|refusal| refusal.stored());
+        assert_eq!(code(dispatch_refusal(Some("3EB0"), None)), Some("reply_source_not_indexed:3EB0".to_string()));
+        assert_eq!(code(dispatch_refusal(Some("3EB0"), Some(&source("text", "oi", true)))), Some("reply_source_own:3EB0".to_string()));
         let mut unsupported = source("text", "oi", false);
         unsupported.unsupported = "view_once".into();
-        assert_eq!(dispatch_refusal(false, Some("3EB0"), false, Some(&unsupported)), Some("reply_source_unsupported"));
-        assert_eq!(dispatch_refusal(false, Some("3EB0"), false, Some(&source("audio", "", false))), Some("reply_source_not_plain_text"));
-        assert_eq!(dispatch_refusal(false, Some("3EB0"), false, Some(&source("text", "   ", false))), Some("reply_source_not_plain_text"));
+        assert_eq!(code(dispatch_refusal(Some("3EB0"), Some(&unsupported))), Some("reply_source_unsupported:3EB0".to_string()));
+        assert_eq!(code(dispatch_refusal(Some("3EB0"), Some(&source("audio", "", false)))), Some("reply_source_not_plain_text:3EB0".to_string()));
+        assert_eq!(code(dispatch_refusal(Some("3EB0"), Some(&source("text", "   ", false)))), Some("reply_source_not_plain_text:3EB0".to_string()));
+    }
+
+    #[test]
+    fn a_refusal_names_the_message_it_is_about_and_a_bare_code_is_a_bare_code() {
+        // The whole defect of 23/11 in one assertion: a refusal must say WHICH message, or the caller
+        // has to hash every chat in the account to find out.
+        let refusal = Refusal { code: "reply_source_own", about: "3EB0ABCD".into() };
+        assert_eq!(refusal.stored(), "reply_source_own:3EB0ABCD");
+        assert_eq!(Refusal { code: "bad_chat", about: String::new() }.stored(), "bad_chat");
+        // `retryable` reads the code at the head, never the id after it.
+        assert!(!retryable(&refusal.stored()));
     }
 }

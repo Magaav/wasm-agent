@@ -1736,7 +1736,9 @@ fn run_bounded(
     // same 1-86400 range `operation start` accepts; an out-of-range value is refused,
     // not clamped, so a caller never believes it got a bound it did not.
     let seconds = effective_exec_timeout_seconds(requested_seconds)?;
-    crate::operations::foreground(program, flag, command, cwd, seconds, &Value::Null)
+    // A child's own shell call has no `stdin` field to carry (only `bash` and `operation start` declare
+    // one), so it keeps the null device it always had.
+    crate::operations::foreground(program, flag, command, cwd, seconds, &Value::Null, None)
 }
 
     /// Answers JSON text (one string the caller decodes with `lua/vendor/json.lua`), never a Lua table.
@@ -1828,15 +1830,20 @@ pub extern "C-unwind" fn resource(l: *mut LuaState) -> c_int {
 /// **One string, not a table**: every use decodes it. The command goes through the path guard and the
 ///
 /// (`{code, ok, stdout, stderr, operation_id, timing, …}`, or `{error}`).
-/// host.exec(command, cwd, timeout_seconds?, context_json?) -> JSON text of the command result
+/// host.exec(command, cwd, timeout_seconds?, context_json?, stdin?) -> JSON text of the command result
+///
+/// `stdin` (5th, optional) is the text fed to the command's standard input and then closed; absent means
+/// the null device, which is what every call before this argument got. It is bounded by the dispatcher
+/// (lua/core/tools.lua, STDIN_MAX_BYTES) so the text a caller may send is one number in one place.
 pub extern "C-unwind" fn exec(l: *mut LuaState) -> c_int {
     let command = arg_string(l, 1).unwrap_or_default();
     let cwd = arg_string(l, 2).unwrap_or_default();
     let requested = arg_integer(l, 3).and_then(|value| u64::try_from(value).ok());
     let (program, flag) = shell_config();
     let context = arg_string(l, 4).and_then(|raw| serde_json::from_str::<Value>(&raw).ok()).unwrap_or(Value::Null);
+    let stdin = arg_string(l, 5);
     let outcome = effective_exec_timeout_seconds(requested).and_then(|seconds|
-        crate::operations::foreground(program, flag, &command, &cwd, seconds, &context));
+        crate::operations::foreground(program, flag, &command, &cwd, seconds, &context, stdin.as_deref()));
     push_json(l, &outcome.unwrap_or_else(|error| json!({"error": error})));
     1
 }
@@ -4213,6 +4220,38 @@ fn handle_mouse(state: &mut ConsoleInput, event: wa_term::selection::Mouse) {
                             return;
                         }
                     }
+                    // The pinned request on the top row: a press scrolls to the turn it stands for.
+                    // Claimed before the content gestures, because the row IS the pin (the chat
+                    // does not draw under it).
+                    Gesture::PinJump => {
+                        if !over_transcript { return; }
+                        if state.transcript.on_pin(row) && state.transcript.jump_to_pinned(width) {
+                            let frame = layout_frame(state);
+                            let _ = wa_term::terminal_editor::write(&frame);
+                            return;
+                        }
+                    }
+                    // The notice row: a press takes the message away now.
+                    Gesture::NoticeDismiss => {
+                        if !over_transcript { return; }
+                        if state.transcript.on_notice(row) && state.transcript.clear_notice() {
+                            let frame = layout_frame(state);
+                            let _ = wa_term::terminal_editor::write(&frame);
+                            return;
+                        }
+                    }
+                    // The jump-to-bottom pill, on the region's last row: back to the newest output,
+                    // and following it again - the key (the table's Bottom) does the same.
+                    Gesture::JumpBottom => {
+                        if !over_transcript { return; }
+                        if state.transcript.on_pill(row, col, rows) {
+                            state.transcript.to_bottom();
+                            state.transcript.dirty = true;
+                            let frame = layout_frame(state);
+                            let _ = wa_term::terminal_editor::write(&frame);
+                            return;
+                        }
+                    }
                     // An expandable line (a folded code-mode result): the press opens or folds it.
                     Gesture::ExpandToggle => {
                         if !over_transcript { return; }
@@ -4232,9 +4271,7 @@ fn handle_mouse(state: &mut ConsoleInput, event: wa_term::selection::Mouse) {
                             {
                                 let _ = wa_term::terminal_editor::write(&wa_term::selection::osc52(&url));
                                 let count = url.chars().count();
-                                if let Some(editor) = state.editor.as_mut() {
-                                    editor.notice = format!("Copied link ({count} character{})", if count == 1 { "" } else { "s" });
-                                }
+                                say(state, format!("Copied link ({count} character{})", if count == 1 { "" } else { "s" }), false);
                                 let frame = layout_frame(state);
                                 let _ = wa_term::terminal_editor::write(&frame);
                                 return;
@@ -4249,9 +4286,7 @@ fn handle_mouse(state: &mut ConsoleInput, event: wa_term::selection::Mouse) {
                         if let Some(text) = state.transcript.copy_at(row, col) {
                             let _ = wa_term::terminal_editor::write(&wa_term::selection::osc52(&text));
                             let count = text.chars().count();
-                            if let Some(editor) = state.editor.as_mut() {
-                                editor.notice = format!("Copied {count} character{}", if count == 1 { "" } else { "s" });
-                            }
+                            say(state, format!("Copied {count} character{}", if count == 1 { "" } else { "s" }), false);
                             let frame = layout_frame(state);
                             let _ = wa_term::terminal_editor::write(&frame);
                             return;
@@ -4331,9 +4366,7 @@ fn handle_mouse(state: &mut ConsoleInput, event: wa_term::selection::Mouse) {
                 let text = wa_term::selection::text(&selection.rows, selection.anchor, selection.head, selection.cols);
                 let _ = wa_term::terminal_editor::write(&wa_term::selection::osc52(&text));
                 let count = text.chars().count();
-                if let Some(editor) = state.editor.as_mut() {
-                    editor.notice = format!("Copied {count} character{}", if count == 1 { "" } else { "s" });
-                }
+                say(state, format!("Copied {count} character{}", if count == 1 { "" } else { "s" }), false);
             }
             state.transcript.dirty = true;
         }
@@ -4348,9 +4381,7 @@ fn copy_selection(state: &mut ConsoleInput) -> bool {
     let _ = wa_term::terminal_editor::write(&wa_term::selection::osc52(&text));
     let count = text.chars().count();
     clear_selection(state);
-    if let Some(editor) = state.editor.as_mut() {
-        editor.notice = format!("Copied {count} character{}", if count == 1 { "" } else { "s" });
-    }
+    say(state, format!("Copied {count} character{}", if count == 1 { "" } else { "s" }), false);
     true
 }
 
@@ -4443,6 +4474,39 @@ fn layout_frame(state: &mut ConsoleInput) -> String {
     let frame = frame + &match state.panel.as_ref() { Some(panel) => panel.render(), None => editor.render() };
     state.region = want.max(1);
     frame
+}
+
+/// Say something on the transcript's NOTICE ROW: this is THE one place a transient TUI message is
+/// written - a copy, a paste, an attachment, the editor's own one-keystroke notes, a refusal. It
+/// used to live in `Editor::notice`, on the session status bar's row, which is exactly what Victor
+/// asked to stop (23/11 11:20Z: "so we never lose vision of the session status bar"): a message
+/// there pushed the run's own line aside. The row is above the pinned request at the top of the
+/// transcript, it is nobody else's, and it goes after about two seconds - or, when `sticky`, on the
+/// next key (an error the reader has to see).
+fn say(state: &mut ConsoleInput, text: impl Into<String>, sticky: bool) -> bool {
+    let text = text.into();
+    state.transcript.notice(&text, std::time::Instant::now(), sticky)
+}
+
+/// The editor still composes its own one-keystroke notes in `Editor::notice` (`Interrupting\u{2026}`,
+/// `Draft kept`); they are TUI messages like any other, so they are handed to the notice row before
+/// the frame is drawn. `Editor::render` no longer paints that field, so the row it used to overwrite
+/// - the session status bar - cannot be taken by a message again.
+fn flush_editor_notice(state: &mut ConsoleInput) -> bool {
+    let text = state.editor.as_mut().map(|editor| std::mem::take(&mut editor.notice)).unwrap_or_default();
+    if text.is_empty() { return false }
+    say(state, text, false)
+}
+
+/// Take a notice whose two seconds are up off the row. The reader thread runs this while it waits
+/// for a key (every ~150 ms, mid-run too), so the row returns to the chat by itself.
+fn expire_notice() {
+    let (lock, _) = console_input();
+    let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+    if !state.transcript.expire_notice(std::time::Instant::now()) { return }
+    if state.editor.as_ref().is_none_or(|editor| editor.row == 0) || state.panel.is_some() { return }
+    let frame = layout_frame(&mut state);
+    let _ = wa_term::terminal_editor::write(&frame);
 }
 
 fn status_visible() -> bool {
@@ -4645,6 +4709,7 @@ fn console_reader() {
                 if state.opening.is_some() { opening_tick(&mut state); continue; }
                 drop(state);
                 let _ = refresh_editor_size();
+                expire_notice();
                 repaint_if_due();
             }
             let mut chunk = [0u8; 512];
@@ -4672,6 +4737,9 @@ fn console_reader() {
                     data.extend_from_slice(&chunk[..n]);
                     let (keys, mice, pending) = wa_term::selection::take(&data);
                     state.mouse_pending = pending;
+                    // An error on the notice row stays until the next key: this is that key (a mouse
+                    // report counts, as any other press of the reader's does).
+                    if state.transcript.clear_notice() { state.transcript.dirty = true; }
                     for event in mice { handle_mouse(&mut state, event); }
                     for &byte in &keys {
                         if let Some(panel) = state.panel.as_mut() { panel.feed(byte); continue; }
@@ -4797,9 +4865,7 @@ fn console_reader() {
                             wa_term::terminal_editor::Action::Copy(text) => {
                                 let _ = wa_term::terminal_editor::write(&wa_term::selection::osc52(&text));
                                 let count = text.chars().count();
-                                if let Some(editor) = state.editor.as_mut() {
-                                    editor.notice = format!("Copied {count} character{}", if count == 1 { "" } else { "s" });
-                                }
+                                say(&mut state, format!("Copied {count} character{}", if count == 1 { "" } else { "s" }), false);
                             }
                             // A dropped (or pasted) path to an image file, and Ctrl+V on a
                             // clipboard image: the same attachment inserted the same way. One
@@ -4815,10 +4881,8 @@ fn console_reader() {
                             wa_term::terminal_editor::Action::Paste => match read_clipboard() {
                                 Ok(Clipboard::Image(mime, bytes)) => {
                                     let (token, kb, size) = attach_image(&mut state, &mime, bytes);
-                                    if let Some(editor) = state.editor.as_mut() {
-                                        editor.insert_text(&token);
-                                        editor.notice = attachment_notice(&token, kb, size);
-                                    }
+                                    if let Some(editor) = state.editor.as_mut() { editor.insert_text(&token); }
+                                    say(&mut state, attachment_notice(&token, kb, size), false);
                                 }
                                 Ok(Clipboard::Text(text)) => {
                                     let from = match state.editor.as_mut().map(|e| e.paste(&text)) {
@@ -4827,9 +4891,7 @@ fn console_reader() {
                                     };
                                     if let Some(from) = from { attach_pasted_path(&mut state, from); }
                                 }
-                                Err(reason) => {
-                                    if let Some(editor) = state.editor.as_mut() { editor.notice = reason; }
-                                }
+                                Err(reason) => { say(&mut state, reason, true); }
                             }
                             wa_term::terminal_editor::Action::None => {}
                         }
@@ -4899,6 +4961,7 @@ fn console_reader() {
                             state.transcript.dirty = true;
                         }
                     }
+                    flush_editor_notice(&mut state);
                     let frame = layout_frame(&mut state);
                     if !frame.is_empty() { let _ = wa_term::terminal_editor::write(&frame); }
                     wake.notify_all();
@@ -5279,12 +5342,16 @@ pub extern "C-unwind" fn editor_notice(l: *mut LuaState) -> c_int {
     1
 }
 
-/// `host.transcript_write(text)`: append to the chat's current block (the host draws it).
+/// `host.transcript_write(text, mark)`: append to the chat's current block (the host draws it).
+/// `mark` = `"request"` says this write is the READER'S OWN TURN, which the view keeps pinned on the
+/// window's top row while the answer scrolls (`lua/core/cli_view.lua`'s `accepted` passes it). It is
+/// a drawing fact only: the same bytes are stored and sent to the model either way.
 pub extern "C-unwind" fn transcript_write(l: *mut LuaState) -> c_int {
     let text = arg_string(l, 1).unwrap_or_default();
+    let request = arg_string(l, 2).unwrap_or_default() == "request";
     let (lock, _) = console_input();
     let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
-    state.transcript.write(&text);
+    state.transcript.write_marked(&text, request);
     let ok = if state.editor.as_ref().is_some_and(|e| e.row > 0) && state.panel.is_none() && !state.transcript_held {
         let frame = layout_frame(&mut state);
         wa_term::terminal_editor::write(&frame).is_ok()
@@ -5933,10 +6000,8 @@ fn attach_pasted_path_in(state: &mut ConsoleInput, from: usize, roots: &[std::pa
     let Some((text, to)) = state.editor.as_ref().map(|e| (e.slice(from, e.cursor()), e.cursor())) else { return };
     let Some((mime, bytes)) = dropped_image_in(&text, roots) else { return };
     let (token, kb, size) = attach_image(state, &mime, bytes);
-    if let Some(editor) = state.editor.as_mut() {
-        editor.replace_range(from, to, &token);
-        editor.notice = attachment_notice(&token, kb, size);
-    }
+    if let Some(editor) = state.editor.as_mut() { editor.replace_range(from, to, &token); }
+    say(state, attachment_notice(&token, kb, size), false);
 }
 
 /// The tokens of `inserted` that the submitted line still carries: an image the reader deleted from
@@ -6027,8 +6092,9 @@ pub extern "C-unwind" fn editor_status(l: *mut LuaState) -> c_int {
     let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
     let ok = if let Some(editor) = state.editor.as_mut() {
         if editor.status != on {
+            // The notice is not on this row any more (it has one of its own at the top of the
+            // transcript), so a run starting or ending says nothing about a message.
             editor.status = on;
-            editor.notice.clear();
             if editor.row > 0 && state.panel.is_none() {
                 let frame = layout_frame(&mut state);
                 let _ = wa_term::terminal_editor::write(&frame);

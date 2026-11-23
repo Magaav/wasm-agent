@@ -32,6 +32,61 @@ local VALUE_PATTERNS = {
 local NAME_PATTERN =
   "([%w_%.%-]*(API_?KEY|_KEY|KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH)[%w_%.%-]*\"?%s*[=:]%s*[\"']?)([^\"'%s,}]+)"
 
+-- The marker words the NAME=value pattern needs, and the gate that skips asking for them when none is
+-- present. THE GATE IS AN OPTIMIZATION WITH THE SAME ANSWER, not a weaker scan: the pattern below cannot
+-- match without one of these words, so a text that contains none of them has nothing for it to find.
+--
+-- It exists because that pattern is QUADRATIC in the length of an unbroken token: `[%w_%.%-]*` consumes
+-- the rest of the text at every start position before the alternation fails. Measured on this node with a
+-- run of one repeated character: 10 KB 0.40 s, 20 KB 1.66 s, 40 KB 6.74 s - four times the work for twice
+-- the text, so a 1 MB argument would have cost hours. It reached the operator as a `bash` call that never
+-- came back: the refusal for its own oversize `stdin` was redacted on the way out and the redaction never
+-- finished (mission tool-args-honest-and-same-on-peers, item 4). The same shape hits any long token in a
+-- tool result, a log line or a refusal.
+local NAME_WORDS = { "KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL", "AUTH" }
+local function names_a_secret(text)
+  for _, word in ipairs(NAME_WORDS) do
+    if text:find(word, 1, true) then return true end
+  end
+  return false
+end
+
+-- The same pattern, run one WINDOW at a time instead of over the whole text (mission
+-- tool-args-honest-and-same-on-peers, item 4). The gate above skips the scan when no marker word exists; a
+-- text that mentions "KEY" anywhere would still have paid the quadratic cost over all of it, which is the
+-- `bash` call with a long token in its input that never came back. Each window below holds one marker word
+-- with room on both sides for the name and the value the pattern needs, so the pattern sees everything it
+-- could match: the answer is the same, and the work is bounded per marker instead of per byte.
+local NAME_WINDOW = 400
+local function mask_names(text)
+  local piece, copied, at = {}, 1, 1
+  while at <= #text do
+    local best, word
+    for _, marker in ipairs(NAME_WORDS) do
+      local start = text:find(marker, at, true)
+      if start and (best == nil or start < best) then best, word = start, marker end
+    end
+    if not best then break end
+    local from = math.max(1, best - NAME_WINDOW)
+    local to = math.min(#text, best + #word + NAME_WINDOW)
+    local sliced, count = text:sub(from, to):gsub(NAME_PATTERN, function(name, secret)
+      -- Leave already-masked values alone so repeated passes are stable.
+      if secret == "<redacted>" or secret:find("%.%%.%.") then return name .. secret end
+      return name .. mask(secret)
+    end)
+    if count > 0 then
+      piece[#piece + 1] = text:sub(copied, from - 1)
+      piece[#piece + 1] = sliced
+      copied = to + 1
+      at = to + 1
+    else
+      at = best + #word
+    end
+  end
+  piece[#piece + 1] = text:sub(copied)
+  return table.concat(piece)
+end
+
 -- Redact a string. Applied repeatedly until it stops changing, because a
 -- replacement can expose a neighbouring pattern (and because masking is
 -- idempotent).
@@ -43,11 +98,7 @@ function M.text(value)
     for _, pattern in ipairs(VALUE_PATTERNS) do
       text = text:gsub(pattern[1], pattern[2])
     end
-    text = text:gsub(NAME_PATTERN, function(name, secret)
-      -- Leave already-masked values alone so repeated passes are stable.
-      if secret == "<redacted>" or secret:find("%.%%.%.") then return name .. secret end
-      return name .. mask(secret)
-    end)
+    if names_a_secret(text) then text = mask_names(text) end
     text = text:gsub("([Bb]earer%s+)([%w_%.-]+)", function(prefix, token)
       if token == "<redacted>" or token:find("%.%%.%.") then return prefix .. token end
       return prefix .. mask(token)

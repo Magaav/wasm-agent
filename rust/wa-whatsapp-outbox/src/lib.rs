@@ -310,7 +310,12 @@ pub fn decide(payload: &[u8], now_ms: i64, fresh_until: Option<i64>) -> Decision
 /// permanent; a transport failure is not. The queue decides *how many* attempts a retryable failure
 /// gets; this only says whether retrying can possibly help.
 pub fn retryable(reason: &str) -> bool {
-    const PERMANENT: [&str; 12] = [
+    // The component's refusals name the message they are about (`reply_source_own:<id>`, ...), so the
+    // classification reads the head: a reason is permanent when its code is, whatever fact follows it.
+    // The reply-source refusals are on this list because retrying one would ask the same question of the
+    // same stale index answer - and the send is refused for the SHAPE of the quote, which a retry cannot
+    // change (23/11: the same message read twice refused twice).
+    const PERMANENT: [&str; 16] = [
         "bad_chat",
         "bad_mention",
         "bad_reply_to",
@@ -323,6 +328,10 @@ pub fn retryable(reason: &str) -> bool {
         "not_logged_in",
         "logged_out",
         "policy_denied",
+        "reply_source_not_indexed",
+        "reply_source_own",
+        "reply_source_unsupported",
+        "reply_source_not_plain_text",
     ];
     !PERMANENT.iter().any(|code| reason == *code || reason.starts_with(&format!("{code}:")))
 }
@@ -331,6 +340,23 @@ pub fn retryable(reason: &str) -> bool {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Outcome {
     pub message_id: String,
+    /// What the send had to change to be safe, said to the caller (empty when nothing was changed).
+    /// The one case today is the dropped quote: an explicit send that quoted a message its author
+    /// deleted goes out as a plain message, and this says why (`QUOTE_DROPPED_DELETED`).
+    #[serde(default)]
+    pub note: String,
+}
+
+/// The sentence a send carries when its quote was dropped. WhatsApp's quote re-publishes the quoted
+/// text, and the node keeps a deleted message for the OPERATOR to read - not to send back into the
+/// chat its author took it out of (the owner's rule of 23/11, reviewed by Fable ~20:30Z).
+pub const QUOTE_DROPPED_DELETED: &str = "sent without the quote: the quoted message was deleted by its author";
+
+impl Outcome {
+    /// A plain send: the message went out exactly as it was asked for.
+    pub fn sent(message_id: &str) -> Outcome {
+        Outcome { message_id: message_id.to_string(), note: String::new() }
+    }
 }
 
 impl Outcome {
@@ -398,7 +424,9 @@ pub fn status(
     result: Option<&[u8]>,
     last_error: Option<&str>,
 ) -> serde_json::Value {
-    let message_id = result.and_then(Outcome::decode).map(|outcome| outcome.message_id);
+    let outcome = result.and_then(Outcome::decode);
+    let message_id = outcome.as_ref().map(|outcome| outcome.message_id.clone());
+    let note = outcome.map(|outcome| outcome.note).unwrap_or_default();
     let state = state_word(state);
     let mut answer = serde_json::json!({
         "ok": true,
@@ -408,6 +436,11 @@ pub fn status(
     });
     if let Some(message_id) = message_id {
         answer["message_id"] = serde_json::Value::String(message_id);
+    }
+    if !note.is_empty() {
+        // What changed to make the send safe, in the words the operator reads: the quote was dropped,
+        // not the message.
+        answer["note"] = serde_json::Value::String(note);
     }
     if !state.eq("done") {
         if let Some(reason) = last_error {
@@ -633,14 +666,30 @@ mod tests {
 
     #[test]
     fn status_reports_the_message_id_only_once_the_job_is_done() {
-        let done = status(7, "done", 1, Some(&Outcome { message_id: "3EB0".into() }.encode()), None);
+        let done = status(7, "done", 1, Some(&Outcome::sent("3EB0").encode()), None);
         assert_eq!(done["message_id"], "3EB0");
         assert_eq!(done["state"], "done");
         let failed = status(8, "ready", 2, None, Some("timeout"));
         assert_eq!(failed["reason"], "timeout");
         assert!(failed.get("message_id").is_none());
         // A done job never reports a stale error reason beside its id.
-        let settled = status(9, "done", 2, Some(&Outcome { message_id: "X".into() }.encode()), Some("earlier"));
+        let settled = status(9, "done", 2, Some(&Outcome::sent("X").encode()), Some("earlier"));
         assert!(settled.get("reason").is_none());
+        assert!(settled.get("note").is_none(), "a plain send changes nothing and says nothing");
+    }
+
+    /// The reviewed rule (Fable, 23/11 ~20:30Z): a send whose quote was dropped goes out and the answer
+    /// says so, in this sentence. The quote is dropped because WhatsApp re-publishes the quoted text, and
+    /// what its author deleted is kept for the operator, not sent back to the chat.
+    #[test]
+    fn status_carries_the_note_when_the_quote_was_dropped() {
+        let outcome = Outcome { message_id: "3EB0".into(), note: QUOTE_DROPPED_DELETED.into() };
+        let answer = status(11, "done", 1, Some(&outcome.encode()), None);
+        assert_eq!(answer["state"], "done");
+        assert_eq!(answer["message_id"], "3EB0", "the message went out: only the quote was dropped");
+        assert_eq!(answer["note"], QUOTE_DROPPED_DELETED);
+        assert_eq!(QUOTE_DROPPED_DELETED, "sent without the quote: the quoted message was deleted by its author");
+        // A note is not a reason: a done job carries no reason at all.
+        assert!(answer.get("reason").is_none());
     }
 }

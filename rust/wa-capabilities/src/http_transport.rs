@@ -12,6 +12,8 @@
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
+#[cfg(unix)]
+use std::os::unix::io::AsRawFd;
 use std::time::Duration;
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use ureq::config::Config;
@@ -79,16 +81,31 @@ pub struct ShutdownTcpTransport {
     timeout_write: Option<Duration>,
     timeout_read: Option<Duration>,
     stream_control: Option<StreamControl>,
+    /// The slot entry this transport owns, released when it drops: a clone left in the slot keeps the
+    /// connection open (see subagents::NEXT_SOCKET_ID).
+    registered: Option<u64>,
+}
+
+impl Drop for ShutdownTcpTransport {
+    fn drop(&mut self) {
+        if let Some(id) = self.registered {
+            crate::subagents::unregister_active_socket(id);
+        }
+    }
 }
 
 impl ShutdownTcpTransport {
     fn new(stream: TcpStream, stream_control: Option<StreamControl>) -> Self {
+        // The registration happens here, not at connect(), so the clone and the transport that owns it
+        // live and die together.
+        let registered = crate::subagents::register_active_socket(&stream);
         ShutdownTcpTransport {
             stream,
             buffers: LazyBuffers::new(128 * 1024, 128 * 1024),
             timeout_write: None,
             timeout_read: None,
             stream_control,
+            registered,
         }
     }
 }
@@ -127,7 +144,9 @@ impl Transport for ShutdownTcpTransport {
         // the interactive CLI and a node run through the same probe (host::run_cancel_requested reads
         // the CLI interrupt too). The read that used to be one blocking call for a caller with no task
         // is what made Esc wait for the provider next byte (measured 23/11: 21 s, and a mid-stream
-        // silence outlasted the run), so there is no fast path left here.
+        // silence outlasted the run) - so every read that HAS a phase budget now polls it, and the
+        // interrupt also shuts the socket down. The one remaining blocking read is the phase with no
+        // budget at all (a TLS handshake), handled below by name.
         // A task may be cancelled while this read is silent. `shutdown` on a
         // duplicated handle does not wake a blocked `recv` on Windows (measured: the
         // read stays blocked with the socket open), so wait in short slices and
@@ -137,6 +156,24 @@ impl Transport for ShutdownTcpTransport {
         let (budget, reason) = self.stream_control.as_ref().map(|control| control.read_budget(timeout))
             .unwrap_or_else(|| (timeout.not_zero().map(|value| *value), timeout.reason));
         let started = std::time::Instant::now();
+        // A phase with NO budget of its own (ureq passes none during a TLS handshake, and none for a
+        // caller that configured no timeout): one read on the socket's own timeout, exactly as ureq's
+        // own transport does. Polling here was a bug with a name - see the TLS anchor test: the slices
+        // swallowed the phase deadline, the handshake never finished and the caller was told the
+        // CONNECT had timed out. A cancel still reaches this read, because the interrupt shuts the
+        // socket down (subagents::shutdown_foreground_sockets) rather than waiting to be polled.
+        if budget.is_none() {
+            self.stream.set_read_timeout(None).map_err(Error::Io)?;
+            self.timeout_read = None;
+            let input = self.buffers.input_append_buf();
+            let amount = match self.stream.read(input) {
+                Ok(amount) => amount,
+                Err(error) if is_timeout(&error) => return Err(Error::Timeout(reason)),
+                Err(error) => return Err(Error::Io(error)),
+            };
+            self.buffers.input_appended(amount);
+            return Ok(amount > 0);
+        }
         // 50 ms, not 250: this slice is the fallback wake (where shutting the socket down does not
         // wake a blocked read), and it is inside the 300 ms a stop is allowed to take. A silent wait
         // costs twenty wakeups a second, which is nothing beside the read it is polling.
@@ -170,18 +207,30 @@ impl Transport for ShutdownTcpTransport {
     }
 
     fn is_open(&mut self) -> bool {
-        // Mirrors ureq's own probe: a connection with unread bytes to the server
-        // or a closed peer is not reusable.
-        if self.stream.set_nonblocking(true).is_err() {
-            return false;
+        // ureq's own probe reads a byte to find out whether the peer is gone, which CONSUMES it. That is
+        // survivable for a pooled plain-text connection and fatal for a TLS one: the byte can be the first
+        // of a ServerHello, and dropping it leaves rustls waiting for a record that will never come
+        // (measured 23/11: the private-CA anchor test stalled in the handshake for the whole connect
+        // budget and was reported as Timeout(Connect) - the symptom that led here). This peeks instead:
+        // MSG_PEEK answers the same question and consumes nothing.
+        #[cfg(unix)]
+        {
+            let mut byte = [0u8];
+            let peeked = unsafe {
+                libc::recv(self.stream.as_raw_fd(), byte.as_mut_ptr() as *mut libc::c_void, 1, libc::MSG_PEEK)
+            };
+            if peeked > 0 { return false; } // bytes already here: the peer spoke unprompted at EOF
+            if peeked == 0 { return false; } // an orderly close
+            let error = std::io::Error::last_os_error();
+            matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                | std::io::ErrorKind::TimedOut)
         }
-        let mut byte = [0u8];
-        let open = match self.stream.read(&mut byte) {
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => true,
-            _ => false,
-        };
-        let _ = self.stream.set_nonblocking(false);
-        open
+        #[cfg(not(unix))]
+        {
+            // Windows has no MSG_PEEK on a std TcpStream and a consuming probe is the hazard above, so
+            // the answer is the safe one: a transport this module built is open until a read says else.
+            true
+        }
     }
 
     fn is_tls(&self) -> bool {
@@ -223,8 +272,8 @@ impl<In: Transport> Connector<In> for ShutdownTcpConnector {
                     if details.config.no_delay() {
                         let _ = stream.set_nodelay(true);
                     }
-                    // The handle that lets another thread shut this read down.
-                    crate::subagents::register_active_socket(&stream);
+                    // The handle that lets another thread shut this read down: registered inside
+                    // ShutdownTcpTransport::new, which takes it back when the transport drops.
                     // Close the window between a cancel arriving and this socket being
                     // registered: if it was already requested, the read that is about to
                     // block must not wait for a chunk that may never come.

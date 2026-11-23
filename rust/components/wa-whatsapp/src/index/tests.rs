@@ -477,64 +477,157 @@ fn an_edit_replaces_the_text_indexes_the_new_words_and_is_itself_an_event() {
     assert_eq!(messages[0]["text"], "chego as dez");
 }
 
+fn delete_event(id: &str, ts: i64, target: &str) -> Record {
+    record::from_message(
+        &envelope(id, ts),
+        &wap::Message {
+            protocol_message: MessageField::some(wap::message::ProtocolMessage {
+                r#type: Some(wap::message::protocol_message::Type::REVOKE),
+                key: MessageField::some(wap::MessageKey { id: Some(target.into()), ..Default::default() }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    )
+}
+
 #[test]
-fn a_delete_removes_the_text_the_media_and_every_token() {
+fn a_delete_keeps_the_content_and_flags_it_beside_it() {
+    // THE RULE OF 23/11 (the owner: "it should only flag it got deleted, and keep the content in case i
+    // want to know"): a revoke flags its message and keeps everything it carried. It used to clear the
+    // text, the media and every token (`redact`), and this test used to assert that.
     let store = Memory::new();
     let ts = 1_760_000_000_000;
     block_on(put(&store, &image("I1", ts, "o comprovante do pix"))).unwrap();
     assert_eq!(block_on(search(&store, &search_request("comprovante"))).unwrap()["hits"].as_array().unwrap().len(), 1);
 
-    let delete = record::from_message(
-        &envelope("E2", ts + 30),
-        &wap::Message {
-            protocol_message: MessageField::some(wap::message::ProtocolMessage {
-                r#type: Some(wap::message::protocol_message::Type::REVOKE),
-                key: MessageField::some(wap::MessageKey { id: Some("I1".into()), ..Default::default() }),
-                ..Default::default()
-            }),
-            ..Default::default()
-        },
-    );
-    assert_eq!(delete.kind, "delete");
-    block_on(put(&store, &delete)).unwrap();
+    block_on(put(&store, &delete_event("E2", ts + 30, "I1"))).unwrap();
 
     let target = block_on(load(&store, CHAT, "I1")).unwrap().unwrap();
-    assert!(target.deleted);
-    assert!(target.text.is_empty() && target.media.is_none());
-    // The words the sender took back are not findable, and neither is the media key.
-    assert_eq!(block_on(search(&store, &search_request("comprovante"))).unwrap()["hits"].as_array().unwrap().len(), 0);
+    assert!(target.deleted, "the flag is the fact");
+    assert_eq!(target.deleted_at, ts + 30, "when the sender deleted it");
+    assert_eq!(target.deleted_by, SENDER, "who deleted it, when the notice said");
+    assert_eq!(target.text, "o comprovante do pix", "the content is KEPT");
+    assert!(target.media.is_some(), "the media metadata is kept too");
+    // And a search still finds it, flagged: the words are not lost, they are marked.
+    let hits = block_on(search(&store, &search_request("comprovante"))).unwrap();
+    let hit = hits["hits"].as_array().unwrap().iter().find(|hit| hit["id"] == "I1").cloned().expect("the message is still findable");
+    assert_eq!(hit["deleted"], true, "the flag travels with the content");
+    assert_eq!(hit["text"], "o comprovante do pix");
     let leftover: Vec<String> = store.keys().into_iter().filter(|key| key.contains("comprovante")).collect();
-    assert!(leftover.is_empty(), "token keys left behind: {leftover:?}");
-    // The fact is still there: a thread read shows the message, marked deleted.
+    assert!(!leftover.is_empty(), "the token keys stay, or the search could not find it at all");
+    // A thread read shows the message, its text, and the flag.
     let answer = block_on(read(&store, &read_request(20))).unwrap();
     let message = answer["messages"].as_array().unwrap().iter().find(|m| m["id"] == "I1").cloned().unwrap();
     assert_eq!(message["deleted"], true);
-    assert_eq!(message["text"], "");
+    assert_eq!(message["text"], "o comprovante do pix");
+    assert!(message["deleted_at_iso"].as_str().is_some_and(|iso| iso.ends_with('Z')), "a date a reader can use");
 }
 
 #[test]
-fn a_revoke_that_arrives_before_its_message_still_wins() {
+fn a_revoke_that_arrives_before_its_message_flags_it_when_it_lands() {
     let store = Memory::new();
     let ts = 1_760_000_000_000;
-    let delete = record::from_message(
-        &envelope("E2", ts + 30),
-        &wap::Message {
-            protocol_message: MessageField::some(wap::message::ProtocolMessage {
-                r#type: Some(wap::message::protocol_message::Type::REVOKE),
-                key: MessageField::some(wap::MessageKey { id: Some("I1".into()), ..Default::default() }),
-                ..Default::default()
-            }),
-            ..Default::default()
-        },
-    );
-    block_on(put(&store, &delete)).unwrap();
+    block_on(put(&store, &delete_event("E2", ts + 30, "I1"))).unwrap();
     // Now the message itself lands (a re-delivery, a history sync).
     block_on(put(&store, &image("I1", ts, "o comprovante do pix"))).unwrap();
     let target = block_on(load(&store, CHAT, "I1")).unwrap().unwrap();
     assert!(target.deleted, "the tombstone is applied when the record lands");
-    assert!(target.text.is_empty());
-    assert_eq!(block_on(search(&store, &search_request("comprovante"))).unwrap()["hits"].as_array().unwrap().len(), 0);
+    assert_eq!(target.deleted_at, ts + 30, "dated by the notice, not by the arrival");
+    assert_eq!(target.text, "o comprovante do pix", "content kept: the node never had to forget it");
+    // Applied once: the tombstone is gone, and a second arrival is a plain message.
+    assert!(block_on(tombstone_of(&store, "I1")).unwrap().is_none());
 }
+
+#[test]
+fn a_notice_matches_the_message_under_the_other_spelling_of_the_same_chat() {
+    // The measured defect of 23/11 ("fence_here=0 fence_anywhere=1"): the message was in the store, the
+    // notice named the same conversation under its other address, and nothing matched. Matching is by
+    // message id across every form the store learned.
+    let store = Memory::new();
+    let ts = 1_760_000_000_000;
+    let mut direct = image("I1", ts, "o comprovante do pix");
+    direct.chat = LID.to_string();
+    direct.group = false;
+    direct.sender = LID.to_string();
+    block_on(put(&store, &direct)).unwrap();
+    // The alias the store learned from a previous envelope (both ways, `learn_alias`).
+    let pass = block_on(learn_alias(&store, LID, "5511999999999@s.whatsapp.net")).unwrap();
+    assert_eq!(pass.checked, 1);
+    let keys = store.keys();
+    assert!(keys.iter().any(|key| key == &format!("ix/al/{LID}")), "the join is written the way chat_forms reads it: {keys:?}");
+    assert!(keys.iter().any(|key| key == "ix/al/5511999999999@s.whatsapp.net"), "both ways, so either spelling finds the other");
+
+    // The notice arrives under the phone-number spelling.
+    let deletion = crate::notices::Notice { at_ms: ts + 40, ..crate::notices::Notice::revoke("5511999999999@s.whatsapp.net", "I1") };
+    assert_eq!(block_on(notice(&store, &deletion)).unwrap(), NoticeOutcome::Matched);
+    let target = block_on(load(&store, LID, "I1")).unwrap().unwrap();
+    assert!(target.deleted, "the message was flagged where it actually lives");
+    assert_eq!(target.text, "o comprovante do pix");
+    assert!(block_on(tombstone_of(&store, "I1")).unwrap().is_none(), "a match leaves no tombstone");
+}
+
+#[test]
+fn a_tombstone_flags_a_late_arrival_under_another_chat_form() {
+    let store = Memory::new();
+    let ts = 1_760_000_000_000;
+    // The notice names a message this store does not hold, under a spelling nothing was learned for yet.
+    let deletion = crate::notices::Notice { at_ms: ts + 40, ..crate::notices::Notice::revoke("5511999999999@s.whatsapp.net", "I9") };
+    assert_eq!(block_on(notice(&store, &deletion)).unwrap(), NoticeOutcome::Unmatched);
+    let kept = block_on(tombstone_of(&store, "I9")).unwrap().expect("a tombstone waits for the message");
+    assert_eq!(kept.at_ms, ts + 40);
+    assert_eq!(kept.chat, "5511999999999@s.whatsapp.net", "the chat as the wire gave it");
+    // The message arrives later, under the OTHER form of that conversation (a history sync).
+    let mut late = image("I9", ts, "chegou atrasada");
+    late.chat = LID.to_string();
+    block_on(put(&store, &late)).unwrap();
+    let target = block_on(load(&store, LID, "I9")).unwrap().unwrap();
+    assert!(target.deleted, "flagged on arrival, under whichever spelling it arrived");
+    assert_eq!(target.deleted_at, ts + 40);
+    assert_eq!(target.text, "chegou atrasada", "kept");
+    assert!(block_on(tombstone_of(&store, "I9")).unwrap().is_none(), "applied once");
+}
+
+#[test]
+fn an_untargeted_notice_changes_no_message_at_all() {
+    let store = Memory::new();
+    let ts = 1_760_000_000_000;
+    block_on(put(&store, &image("I1", ts, "o comprovante do pix"))).unwrap();
+    let deletion = crate::notices::Notice { at_ms: ts + 40, owner: true, ..crate::notices::Notice::revoke(CHAT, "") };
+    assert_eq!(block_on(notice(&store, &deletion)).unwrap(), NoticeOutcome::Untargeted);
+    let target = block_on(load(&store, CHAT, "I1")).unwrap().unwrap();
+    assert!(!target.deleted, "nothing narrower than the chat is named, and a chat is never held");
+    assert_eq!(target.text, "o comprovante do pix");
+}
+
+#[test]
+fn an_edit_keeps_the_earlier_text_and_stores_the_new_one() {
+    let store = Memory::new();
+    let ts = 1_760_000_000_000;
+    block_on(put(&store, &text("T1", ts, "chego as 18h"))).unwrap();
+    let edit = record::from_message(
+        &envelope("E2", ts + 60),
+        &wap::Message {
+            protocol_message: MessageField::some(wap::message::ProtocolMessage {
+                r#type: Some(wap::message::protocol_message::Type::MESSAGE_EDIT),
+                key: MessageField::some(wap::MessageKey { id: Some("T1".into()), ..Default::default() }),
+                edited_message: MessageField::some(wap::Message { conversation: Some("chego as 19h".into()), ..Default::default() }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    );
+    block_on(put(&store, &edit)).unwrap();
+    let target = block_on(load(&store, CHAT, "T1")).unwrap().unwrap();
+    assert_eq!(target.text, "chego as 19h", "the new text is what a read answers with");
+    assert_eq!(target.previous_text, "chego as 18h", "the earlier text is kept");
+    assert!(target.edited && !target.deleted);
+    let answer = block_on(read(&store, &read_request(20))).unwrap();
+    let message = answer["messages"].as_array().unwrap().iter().find(|m| m["id"] == "T1").cloned().unwrap();
+    assert_eq!(message["previous_text"], "chego as 18h");
+    assert_eq!(message["edited"], true);
+}
+
 
 #[test]
 fn a_view_once_message_is_a_fact_without_text_or_keys() {

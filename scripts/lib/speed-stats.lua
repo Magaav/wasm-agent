@@ -38,6 +38,24 @@ M.SCHEMA = 1
 -- is red.
 M.WINDOW = 10
 M.RED_PCT = 20
+-- A VERDICT NEEDS THREE COMPARABLE POINTS (mission speed-board-landing-kinds, 23/11). One point is one
+-- sample of a machine: 414 ms against a single 342 ms was reported RED +21.1% on a laptop whose load was
+-- 3.07, and the next commit would have cleared it without a line of code changing. Below this count a row
+-- is `no_baseline` WITH THE COUNT ("2 of 3 comparable points"), never ok and never RED: a verdict the
+-- evidence cannot support is a false alarm, and a false alarm is how a board stops being read.
+M.MIN_COMPARABLE = 3
+-- THE LANDING ROW IS JUDGED WITHIN ITS OWN KIND. A landing is not one cost: a scripts/docs-only landing is
+-- a checkout fast-forward (seconds), a Lua install is a deploy, and a Rust build is a deploy that compiled
+-- the node (minutes). Measured 23/11: 288000 ms was called RED +14300% against a 2000 ms landing that was
+-- scripts-only - the row was comparing two different jobs. The kind is what land-quick DID, and it is
+-- written into land-quick's own record when it lands (scripts/land-quick records it from the branch it
+-- landed and from the install it ran).
+M.LANDING_KINDS = {
+  scripts = 'scripts/docs-only: nothing the node runs changed, no deploy',
+  lua = 'Lua install: a deploy of a branch that touched no rust/',
+  rust = 'Rust build: a deploy of a branch that changed rust/',
+  held = 'install held: main moved, nothing installed (LQ_NO_INSTALL=1)',
+}
 -- A load is comparable to another when it is within this share of it, plus this much slack.
 M.LOAD_SHARE = 0.25
 M.LOAD_SLACK = 0.5
@@ -141,6 +159,16 @@ end
 -- ---- the judgement -------------------------------------------------------------------------------
 -- `history` is the entries from the file, oldest first, and MUST NOT contain `entry` itself (the caller
 -- holds the file, so replacing a commit's own line is the caller's job - see write_history).
+--
+-- TWO RULES DECIDE WHETHER A NUMBER MAY BE COMPARED AT ALL, and both are refusals rather than penalties:
+-- a point counts only when it was measured at a comparable load AND, for the landing row, on a landing of
+-- the same kind; below M.MIN_COMPARABLE points the row has no verdict.
+local function landing_kind(row)
+  if type(row) == 'table' and type(row.kind) == 'string' and M.LANDING_KINDS[row.kind] then return row.kind end
+  return nil
+end
+M.landing_kind = landing_kind
+
 function M.judge(history, entry)
   local verdict = { schema = M.SCHEMA, sha = entry.sha, at = entry.at, load = number(entry.load),
     cores = number(entry.cores), rows = {}, red = {}, notes = {} }
@@ -151,7 +179,7 @@ function M.judge(history, entry)
   end
   for _, name in ipairs(M.ROWS) do
     local row = mine[name]
-    local out = { name = name, label = M.LABELS[name] or name }
+    local out = { name = name, label = M.LABELS[name] or name, min_comparable = M.MIN_COMPARABLE }
     if type(row) ~= 'table' or row.state ~= 'ok' or not number(row.ms) then
       out.state = (type(row) == 'table' and row.state) or 'unknown'
       out.reason = (type(row) == 'table' and row.reason) or 'the commit has no number for this row'
@@ -170,28 +198,53 @@ function M.judge(history, entry)
       out.state = 'ok'
       out.ms = number(row.ms)
       out.load = number(row.load) or number(entry.load)
+      local kind = landing_kind(row)
+      if name == 'landing' then out.kind = kind end
       -- The window is the last WINDOW commits that HAVE this row at a comparable load, counted with the
       -- comparability test itself: a hole (unavailable, guarded, unknown) or a number taken at another
       -- load is not a baseline, and it must not consume one of the ten slots - otherwise a run of holes
       -- hides the last real numbers (23/11: eight `unavailable` lines after 8862b600 would have hidden
       -- its 321 ms start). A quiet baseline after a storm of busy commits is still the baseline.
-      local best_ms, best_sha, comparable = nil, nil, 0
+      local best_ms, best_sha, comparable, no_kind = nil, nil, 0, 0
       for index = #previous, 1, -1 do
         if comparable >= M.WINDOW then break end
         local past = previous[index]
         local old = (past.rows or {})[name]
         if type(old) == 'table' and old.state == 'ok' and number(old.ms) then
           local old_load = number(old.load) or number(past.load)
-          if M.load_comparable(out.load, old_load) then
+          -- THE KIND GATE, for the landing row only: a landing of another kind is another job, and a line
+          -- written before kinds existed (23/11) cannot be shown to be the same job - it is COUNTED and
+          -- said, never compared (rule 1: unknown is not yes).
+          local same_kind = true
+          if name == 'landing' then
+            local old_kind = landing_kind(old)
+            if old_kind == nil then
+              same_kind = false
+              no_kind = no_kind + 1
+            elseif kind == nil then
+              same_kind = false
+            else
+              same_kind = (old_kind == kind)
+            end
+          end
+          if same_kind and M.load_comparable(out.load, old_load) then
             comparable = comparable + 1
             if best_ms == nil or number(old.ms) < best_ms then best_ms, best_sha = number(old.ms), past.sha end
           end
         end
       end
       out.comparable = comparable
-      if best_ms == nil then
+      if no_kind > 0 then out.no_kind = no_kind end
+      if name == 'landing' and kind == nil then
+        -- A landing recorded without a kind cannot be compared with anything: not with a landing of the
+        -- same kind (it has none) and not with the number beside it. Its own number is still printed, so
+        -- the reader sees what the landing cost and the row says why it is not a verdict.
         out.state = 'no_baseline'
-        out.reason = 'no commit in the last ' .. M.WINDOW .. ' has this row at a comparable load'
+        out.reason = 'the landing record carries no kind (written before kinds, 23/11)'
+      elseif comparable < M.MIN_COMPARABLE then
+        out.state = 'no_baseline'
+        out.reason = string.format('%d of %d comparable points', comparable, M.MIN_COMPARABLE)
+          .. (name == 'landing' and (' (landing kind ' .. tostring(kind) .. ')') or '')
       else
         out.best_ms = best_ms
         out.best_sha = best_sha
@@ -230,9 +283,21 @@ function M.deltas(history, entry)
         row.previous_ms = number(before.ms)
         row.previous_load = number(before.load) or number(previous.load)
         row.delta_pct = ((row.ms - row.previous_ms) / row.previous_ms) * 100
-        -- The delta is printed even when the two loads are not comparable, and then it SAYS so: a
-        -- change measured against a machine that was doing something else is not a change.
-        row.comparable = M.load_comparable(row.load, row.previous_load)
+        -- The delta is printed even when the two points are not comparable, and then it SAYS so: a
+        -- change measured against a machine that was doing something else is not a change, and (from
+        -- 23/11) neither is a landing of one kind measured against a landing of another.
+        local same_kind = true
+        if name == 'landing' then
+          local now_kind, before_kind = landing_kind(now), landing_kind(before)
+          same_kind = (now_kind ~= nil and before_kind ~= nil and now_kind == before_kind)
+          row.kind = now_kind
+          row.previous_kind = before_kind
+          row.kind_differs = not same_kind
+          -- WHICH KIND OF DIFFERENT, said correctly: a line written before kinds existed has none to
+          -- compare with, and calling that 'the kind differs' would read as two landings of two kinds.
+          row.previous_kind_missing = (before_kind == nil)
+        end
+        row.comparable = same_kind and M.load_comparable(row.load, row.previous_load)
       end
       out[#out + 1] = row
     end
@@ -342,16 +407,32 @@ function M.format_table(history, sha)
     local change = '-'
     if delta and delta.delta_pct then
       change = string.format('%+.1f%%', delta.delta_pct)
-      if delta.comparable == false then change = change .. ' (load differs)' end
+      -- WHY a delta is not a change, named: another machine load, or (from 23/11) a landing of another
+      -- kind. The number stays on the table - it is a fact about two points - and the note says what it
+      -- cannot be read as.
+      if delta.kind_differs then
+        change = change .. (delta.previous_kind_missing and ' (previous landing carries no kind)'
+          or ' (landing kind differs)')
+      elseif delta.comparable == false then
+        change = change .. ' (load differs)'
+      end
     end
     local state
     if row.state == 'ok' then
+      -- A VERDICT NAMES ITS EVIDENCE: how many comparable points it rests on, and - for a landing - the
+      -- kind it was judged within (the row is not one cost, see M.LANDING_KINDS).
       state = row.red and string.format('RED: %.1f%% slower than best (%s)', row.delta_pct, M.short(row.best_sha))
-        or (row.comparable == 0 and 'ok (no comparable baseline)' or 'ok')
+        or ('ok (' .. (row.kind and ('landing kind ' .. row.kind .. ', ') or '')
+          .. string.format('%d comparable points)', row.comparable))
     else
       -- A hole in a live row is RED here too: the table must not read as fine because a probe could not
       -- run (23/11), and the reason it carries is what the reader acts on.
       state = (row.red and 'RED ' or '') .. row.state .. (row.reason and (': ' .. row.reason) or '')
+      -- LINES WRITTEN BEFORE KINDS EXISTED, named rather than silently dropped: they are in the history and
+      -- a reader who wonders why a landing has no baseline is told exactly which lines could not be used.
+      if row.no_kind then
+        state = state .. string.format('; %d line(s) in the window carry no kind and are not comparable', row.no_kind)
+      end
     end
     lines[#lines + 1] = string.format('  %-24s %10s %8s %10s  %s', row.name,
       row.ms and fmt_ms(row.ms) or '-',

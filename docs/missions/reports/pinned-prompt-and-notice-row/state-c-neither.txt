@@ -1,0 +1,40 @@
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+✻ Welcome to wasm-agent! v0.1.2 · vac0382ef+dirty
+
+/help for help, /login to sign in to a provider
+
+cwd: /tmp/wa-caps-Vwt5MW
+model: deepseek-v4.1-flash @ http://127.0.0.1:40697 · reasoning high
+session: ebe3bed4-711f-4b72-906b-12e21e79f4bf
+memory: /tmp/wa-caps-Vwt5MW/l.db
+────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ Type a message, or / for commands
+────────────────────────────────────────────────────────────────────────────────────────────────────
+/ for commands · /login to sign in · ctrl+c twice to quit                   deepseek-v4.1-flash·high

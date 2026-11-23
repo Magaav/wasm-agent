@@ -54,10 +54,51 @@ end
 
 -- The caller's copy: the kept keys, in a fresh table, so nothing else in the process can be reached
 -- through the answer it hands out.
-function M.slim(value)
+-- `rg -r n` IS A REPLACEMENT, NOT A FLAG PAIR (23/11). Two workers spelled grep's `-rn` (recursive,
+-- line numbers) into ripgrep, where -r IS --replace: the answer came back with every match replaced by the
+-- letter n, one of them read rewritten code as if it were the file and built conclusions on it (ledger
+-- notes 120 and 263). The mistake is the model's, so nothing here is refused or rewritten back - but an
+-- answer that LOOKS like a search result and is not is the expensive part, so the answer says once what
+-- the flag did. Only the shapes a grep habit produces are named: a short cluster holding r (rg reads the
+-- rest of the cluster as the replacement, so -rn replaces with "n") and a bare -r followed by a one-letter
+-- word. `--replace body` is named too, because a model that meant it can see it was understood.
+function M.rg_replace(command)
+  if type(command) ~= 'string' or command == '' then return nil end
+  if not (command:match('^rg%s') or command:match('[%s;&|(]rg%s')) then return nil end
+  local tokens = {}
+  for word in command:gmatch('%S+') do tokens[#tokens + 1] = word end
+  local function said(replacement)
+    return "rg reads -r as --replace: '" .. replacement .. "' replaced every match in the output above, "
+      .. "so that text is not what the files contain. For grep's -rn use rg -n (line numbers) and drop -r."
+  end
+  for index, word in ipairs(tokens) do
+    local literal = word:match('^%-%-replace=(.*)$')
+    if literal and literal ~= '' then return said(literal) end
+    if word == '--replace' then
+      local following = tokens[index + 1]
+      if following and following ~= '' then return said(following) end
+    end
+    local cluster = word:match('^%-([%a][%a])$') or word:match('^%-([%a][%a][%a])$')
+    local at = cluster and cluster:find('r', 1, true)
+    if at then
+      local replacement = cluster:sub(at + 1)
+      if replacement == '' then replacement = tokens[index + 1] end
+      if replacement and replacement ~= '' and replacement:sub(1, 1) ~= '-' then return said(replacement) end
+    end
+  end
+  return nil
+end
+
+-- The caller's copy: the kept keys, in a fresh table, so nothing else in the process can be reached
+-- through the answer it hands out. `args` is the call, and the one thing this asks of it is the command
+-- text (`M.rg_replace` above, which adds one sentence to `note`): a rewritten answer is still an answer,
+-- and the sentence is what stops a reader building a conclusion on text that is not in the file.
+function M.slim(value, args)
   if not envelope(value) then return value end
   local out = {}
   for key, item in pairs(value) do if M.KEEP[key] then out[key] = item end end
+  local said = type(args) == 'table' and M.rg_replace(args.command) or nil
+  if said then out.note = out.note and (out.note .. ' ' .. said) or said end
   return out
 end
 
@@ -67,9 +108,9 @@ end
 -- nothing new and the shape a script reads is the same whoever ran the command.
 function M.slim_for(name, args, value)
   if type(value) ~= 'table' then return value end
-  if name == 'bash' then return M.slim(value) end
+  if name == 'bash' then return M.slim(value, args) end
   if name ~= 'remote' or type(args) ~= 'table' then return value end
-  if args.capability == 'bash' then return M.slim(value) end
+  if args.capability == 'bash' then return M.slim(value, args) end
   local calls, results = args.calls, value.results
   if args.capability == 'batch' and type(calls) == 'table' and type(results) == 'table' then
     local out, changed = nil, false

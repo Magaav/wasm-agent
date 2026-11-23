@@ -180,6 +180,12 @@ pub enum Gesture {
     LinkCopy,
     /// A press on a block's copy icon: copy that block's text.
     BlockCopy,
+    /// A press on the request pinned at the top of the transcript: scroll to that turn's request.
+    PinJump,
+    /// A press on the "jump to bottom" pill: back to the newest output, and follow it again.
+    JumpBottom,
+    /// A press on the notice row: the message goes now, instead of when its time is up.
+    NoticeDismiss,
     /// A press in the transcript: start selecting there.
     TranscriptSelection,
     /// A drag: select from where the press landed to the pointer.
@@ -192,9 +198,11 @@ pub enum Gesture {
 
 impl Gesture {
     pub const ALL: &'static [Gesture] = &[
-        Gesture::BarJump, Gesture::DraftPress, Gesture::ExpandToggle, Gesture::LinkCopy,
-        Gesture::BlockCopy, Gesture::TranscriptSelection, Gesture::SelectDrag, Gesture::Wheel,
-        Gesture::Hover,
+        // The window's own chrome first (the bar's column, the pinned row, the notice row, the
+        // pill): something drawn OVER the chat is not the chat's to select or copy.
+        Gesture::BarJump, Gesture::PinJump, Gesture::NoticeDismiss, Gesture::JumpBottom,
+        Gesture::DraftPress, Gesture::ExpandToggle, Gesture::LinkCopy, Gesture::BlockCopy,
+        Gesture::TranscriptSelection, Gesture::SelectDrag, Gesture::Wheel, Gesture::Hover,
     ];
 }
 
@@ -450,6 +458,12 @@ pub const BINDINGS: &[Binding] = &[
     // ---- the pointer -----------------------------------------------------------------------
     g("Press", Pose::Press, Gesture::BarJump,
       "press the scrollbar's column: jump the view to that row and grab the thumb"),
+    g("Press", Pose::Press, Gesture::PinJump,
+      "press the request pinned at the top of the transcript: scroll to that turn's request"),
+    g("Press", Pose::Press, Gesture::NoticeDismiss,
+      "press the notice row: the message goes now, instead of when its time is up"),
+    g("Press", Pose::Press, Gesture::JumpBottom,
+      "press the jump-to-bottom pill: back to the newest output, and follow it again"),
     g("Press", Pose::Press, Gesture::DraftPress,
       "press in the draft: the cursor goes there, and a drag from there selects"),
     g("Press", Pose::Press, Gesture::ExpandToggle,
@@ -682,6 +696,15 @@ pub fn json() -> String {
     serde_json::Value::Array(rows).to_string()
 }
 
+/// The key a reader presses for `act`, as the table spells it (`Ctrl+PageDown`) - READ from the
+/// table rather than written beside it, so a screen that names a key (the transcript's
+/// jump-to-bottom pill) follows a rebinding instead of printing the key this build shipped with.
+/// The first row with that act: the draft's rows come before the transcript's, and a key at the
+/// prompt is the one a reader most often has their hands on.
+pub fn label(act: Act) -> Option<&'static str> {
+    BINDINGS.iter().find(|binding| binding.act == act).map(|binding| binding.key)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -837,5 +860,24 @@ mod tests {
         assert!(draft_prefix(b"\x1bO"), "the application-mode escape is swallowed, not typed");
         assert!(!draft_prefix(b"\x1bz"), "ESC z is Alt+z, not the start of a sequence");
         assert!(draft_seq(b"\x1b[A").is_some(), "Up is the draft's own key");
+    }
+
+    /// A name a screen shows for a key (the transcript's jump-to-bottom pill says
+    /// `Jump to bottom (Ctrl+PageDown)`) is READ from the table: the label of an act is that act's
+    /// own `key`, so a rebinding here changes what the screen says without a second string to edit.
+    #[test]
+    fn a_key_a_screen_names_is_the_tables_own_label() {
+        for act in [Act::Nav(NavAct::Bottom), Act::Draft(DraftAct::Bottom), Act::Nav(NavAct::PageUp)] {
+            let label = label(act).unwrap_or_else(|| panic!("{act:?} has no key to name"));
+            let row = BINDINGS.iter().find(|binding| binding.act == act).expect("a label comes from a row");
+            assert_eq!(label, row.key, "{act:?}'s label is its row's key");
+            assert!(!label.trim().is_empty(), "{act:?} names a key");
+        }
+        assert_eq!(label(Act::Nav(NavAct::Bottom)), label(Act::Draft(DraftAct::Bottom)),
+            "back to the bottom is one key on both surfaces a reader presses it on");
+        // Every act has a row (`every_act_has_a_row`), so every act has a key to name - and a
+        // surface asking for one it has is answered rather than panicking on a screen.
+        for act in DraftAct::ALL.iter().map(|a| Act::Draft(*a)) { assert!(label(act).is_some(), "{act:?} names no key"); }
+        for act in NavAct::ALL.iter().map(|a| Act::Nav(*a)) { assert!(label(act).is_some(), "{act:?} names no key"); }
     }
 }

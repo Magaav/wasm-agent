@@ -141,6 +141,28 @@ this branch's row is green, run singly against the rebased tip's own stamped bui
 `test-run-block-pty.mjs` 22 ok, `test-status-midrun-pty.mjs` 12 ok, `test-script-output-pty.mjs` 11 ok,
 `test-bash-changes-pty.mjs` 8 ok, each run singly against this tree's binary.
 
+## main-health, after the landing: what broke and why (`2594617a`)
+
+Three rows went red on main at the landing (`b79da519`), all three from item 4's fold:
+
+| row | what it asserted | who was wrong |
+|---|---|---|
+| `test-cli-flow.lua` - `exactly one blank line under it` | the block's answer row is `⎿ 42` | **the code**: the fold hid a result that already fitted ONE row behind a click. A short result now stays itself (`#open <= 1` is returned as it is). The assertion is unchanged. |
+| `test-run-live.lua` - `the script's value is the block's answer` | the same, for a replayed run's values | **the code**, same fix. The assertions are unchanged. |
+| `test-raw-view-stream.lua` - `the full result is still reachable, named on the block` and `the expanded rows are the WHOLE object, byte for byte` | an operation's block names `/console` on screen and its click is the whole object | **the code**: the fold replaced the note and made the click the output only. Now the operation keeps its `operation <id> · completed · exit 0 · the whole result is in /console` row on screen, and its click is the output rows FIRST and then the raw object, byte for byte. |
+
+Two assertions in `test-raw-view-stream.lua` were changed, and only these two:
+
+* `the command's own first lines are the answer` became `the answer is one row naming the size of the command's output` (`script output · 21 chars`) plus `and the output is not printed under it`. The pair is a superset of the old check: the old one wanted the output drawn AS the answer, the brief (Victor 23/11) moved it one press away, and the new pair pins both halves - the row's exact text and the absence of the preview.
+* `and one click carries the whole object (transcript_expand)` is kept as it was, and a new check after it pins that the click's first rows are the command's own output (`out_at < object_at`). Nothing was loosened.
+
+`scripts/test-codemode-blocks.lua` (this branch's own row) gained three checks for the same rules: a one-row result drawn as itself, the `/console` note on an operation, and the output preceding the raw object in the click.
+`scripts/test-bash-changes-pty.mjs` replaced one assertion - it expected `script output · N chars` for a script whose value is the one word `done`, which is now drawn as `⎿ done`; it asserts that instead (same intent: the result is on screen).
+
+**Measured after the fix, on the rebased tip `2594617a` (origin/main `51b63d9a`), each row run singly:** `test-cli-flow.lua` 14 ok - `test-raw-view-stream.lua` 21 ok - `test-run-live.lua` 31 ok - `test-codemode-blocks.lua` 89 ok - `test-status-midrun.lua` 25 ok - `test-script-bash-changes.lua` 15 ok - `test-peer-bash-changes.lua` 13 ok - `test-chat-printer.lua` 12 ok; pty rows `test-script-output-pty` 11 ok, `test-status-midrun-pty` 12 ok, `test-bash-changes-pty` 8 ok.
+
+Pre-existing on main, NOT this branch (measured with the same binary in a worktree at `origin/main`): `test-run-block-pty.mjs` fails its interactive half - `timed out waiting for the run to settle` - because main renamed the scrolled-view marker to `Jump to bottom (Ctrl+PageDown)` (`rust/wa-term/src/transcript.rs`) while that row still waits for `(PgDn)` (`scripts/test-run-block-pty.mjs:317-320`). The probe (`probe-prompt-bytes`, byte-identical on base and tip) and `test-host-return-docs.lua` (10 checks) are green on the tip.
+
 ## Not done, and open
 
 * **`tools.remote` write/edit cards are not re-measured end to end.** The emitter and the `changeset.record` with the node are in the base (`lua/core/tools.lua`, the remote branch); exercising them needs a peer that signs its answers, and this session had no scratch peer (`WASM_AGENT_RENDEZVOUS` fixture answers unsigned, and the caller verifies - `nodes.verified_reply`). A peer's `bash` list IS measured, at the module seam the repository already uses (`scripts/test-federation.lua`) and through the real dispatcher.

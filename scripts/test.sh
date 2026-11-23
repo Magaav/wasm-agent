@@ -2796,6 +2796,8 @@ run_proof_fixture agent-control 23 node scripts/test-agent-control-e2e.cjs "$BIN
 GATE_PYTHON="$(for p in python3 python; do command -v "$p" >/dev/null 2>&1 && "$p" -c 'import sys' >/dev/null 2>&1 && { echo "$p"; break; }; done)"
 gate_run "${GATE_PYTHON:-python3}" scripts/test-whatsapp-local.py
 gate_run bash scripts/test-whatsapp-go-retired.sh
+# The other half of that history: the component must not hold a CHAT again (owner's decision of 23/11).
+gate_run bash scripts/test-whatsapp-no-hold-writer.sh
 # The Go connector's `./...` test block stood here. It went with the connector tree in Phase 4
 # (11/11): the tree holds no Go module, so there is no toolchain to pin and nothing to SKIP. The gate
 # row that refuses a Go build/start path coming back is `scripts/test-whatsapp-go-retired.sh`.
@@ -2811,6 +2813,13 @@ gate_run bash scripts/test-termux.sh
 # The PUBLIC Linux channel's publisher: build (stubbed), sign (fixture key), verify, upload (fake GitHub), index,
 # and the freshness verdict - with the index left untouched by every refusal. Hermetic, 2 s.
 gate_run bash scripts/test-linux-channel.sh
+# `wa <verb> --help` runs nothing (Fable 23/11: `wa update --help` ran a local update). Every acting verb the
+# tree declares, driven on this host, its own scratch home and database.
+gate_run bash scripts/test-cli-help.sh
+# The channel STEP, end to end: the real step, the real publisher and the real builder (the build and gh stand
+# in) - the join that failed on release F (23/11). Needs a Linux host, the same fixtures, a scratch vault.
+if [ "$(uname -s)" = Linux ]; then gate_run bash scripts/test-release-channel-e2e.sh
+else echo 'SKIP: release channel step end-to-end row (needs a Linux host)'; SKIPPED=$((SKIPPED + 1)); fi
 if [ "$(uname -s)" = Linux ]; then gate_run bash scripts/test-linux-release-fetch.sh
 else echo 'SKIP: Linux release channel fixture (needs a Linux host)'; SKIPPED=$((SKIPPED + 1)); fi
 # The one-command installer (scripts/install.sh): the platform matrix, the channel per platform, the

@@ -65,5 +65,55 @@ check(tostring(runtime.fix):find('shell text inside', 1, true) == nil,
   'a runtime failure does not get the compile-failure sentence: ' .. tostring(runtime.fix))
 check(tostring(runtime.error):find('TypeError', 1, true) ~= nil, 'and keeps its own error: ' .. tostring(runtime.error))
 
+-- 5. THE LINE IS THE MODEL'S OWN (23/11). A run call is not compiled as it was written: raw_code.native_run
+--    wraps it (one line for the `raw` binding, four when the call carries raw blocks) and the harness adds
+--    a prologue - and script_line undid only the prologue. So the answer named a line of the WRAPPED
+--    source: reproduced on 23/11 with one raw block, a three-line script was told "Change line 6", a line
+--    that script does not have. Measured over the retained ledger: 202 compile failures in the five days
+--    to 23/11 13:00Z, and 132 of them arrived after the fix line already named `raw`, so the sentence
+--    being there is not the same as the model finding its line.
+local raw_code = dofile('lua/core/raw_code.lua')
+local function native(code, blocks)
+  local call, refused = raw_code.native_run({ code = code, raw = blocks })
+  check(call ~= nil, 'the native call is accepted: ' .. tostring(refused and refused.note))
+  return codemode.run(memory, call, 'master', ctx, catalog, function() return catalog end, dispatch, execution)
+end
+local Q = string.char(39)   -- a single quote, so this row's own source needs no escaping
+local quoted = 'const a = 1;\nconst s = ' .. Q .. 'hello;\nreturn a;'
+local with_raw = native(quoted, { body = 'x' })
+check(type(with_raw) == 'table' and with_raw.ok == false,
+  'a native call that does not compile fails: ' .. tostring(with_raw and with_raw.error))
+check(with_raw.line == 2, 'the line it names is the model own line (2), not a line of the wrapped source (got '
+  .. tostring(with_raw.line) .. ')')
+check(tostring(with_raw.message):find('line 2', 1, true) ~= nil,
+  'and the message says line 2: ' .. tostring(with_raw.message))
+check(tostring(with_raw.fix):find('Change line 2', 1, true) ~= nil,
+  'and the fix says which line to change: ' .. tostring(with_raw.fix))
+--    Without raw blocks the wrapper is one line, which is the shape most calls have.
+local plain = native(quoted, nil)
+check(plain.line == 2, 'a call with no raw blocks names its own line too (got ' .. tostring(plain.line) .. ')')
+
+-- 6. THREE LINES AROUND IT, MARKED (23/11). One line was shown before, and the cause of "expecting ';'" or
+--    "unexpected end of string" is often the line ABOVE - a literal left open - which was never shown at
+--    all. The '>' row is the line the sandbox stopped on.
+local around = 'const a = 1;\nconst b = 2;\nconst s = ' .. Q .. 'oops;\nreturn a;'
+local r3 = native(around, nil)
+local msg3 = tostring(r3.message)
+check(r3.line == 3, 'the error is on the model line 3 (got ' .. tostring(r3.line) .. '): ' .. msg3)
+check(msg3:find('\n 2: const b = 2;', 1, true) ~= nil, 'the line above is shown: ' .. msg3)
+check(msg3:find('\n>3: const s = ', 1, true) ~= nil, 'the error line is marked with >: ' .. msg3)
+check(msg3:find('\n 4: return a;', 1, true) ~= nil, 'the line below is shown: ' .. msg3)
+
+-- 7. A LONG LINE IS NOT SILENTLY CUT (23/11). 39 of the 202 measured failures showed an offending line cut
+--    at exactly 160 characters with nothing said, so the backtick the sentence asks about could sit past the
+--    cut and stay invisible. A line too long for the excerpt now says how much it is not showing.
+local longline = 'const s = ' .. Q .. string.rep('x', 300) .. ';'
+local long = longline .. '\nreturn 1;'
+local rlong = native(long, nil)
+local msglong = tostring(rlong.message)
+check(rlong.line == 1, 'the long line is the one named (got ' .. tostring(rlong.line) .. ')')
+check(#longline > 200 and msglong:find(' +' .. (#longline - 200), 1, true) ~= nil,
+  'the count of characters not shown is printed (#' .. #longline .. ' - 200): ' .. msglong)
+
 print(dofile('lua/vendor/json.lua').encode({ ok = true, checks = checks }))
 print('run-syntax-fix ok (' .. checks .. ' checks)')

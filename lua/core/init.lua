@@ -87,6 +87,22 @@ if command == nil or command == "chat" then
   return
 end
 
+-- `wa <verb> --help` IS A QUESTION, AND A QUESTION RUNS NOTHING (Fable, 23/11).
+--
+-- MEASURED 23/11 09:30Z, and again by this mission in a scratch home: `wa update --help` ran a LOCAL UPDATE and
+-- answered with the update's own report - a deploy request refused for want of a sentinel watcher. The flag went
+-- into the verb as an argument and the verb acted. The list of the verbs that ACT, and the lines that answer for
+-- each of them, is lua/core/cli_help.lua; this is the ONE place the flag is taken, above every branch below, so
+-- no verb's body ever sees it. A verb that already answers --help itself keeps its own words (cli_help.asked
+-- says which, and why `wa update <node> --help` still reaches remote_update.lua).
+do
+  local cli_help = dofile("lua/core/cli_help.lua")
+  if cli_help.asked(args) then
+    print(cli_help.text(args))
+    return
+  end
+end
+
 -- `wa update` / `wa --update`: the same request `/update` makes in the chat and the window, from a
 -- shell - so one command updates any node: a tree install queues the Sentinel deploy, a release install
 -- runs the verifying bootstrap. `--check` is read-only: is this node behind what an update would install?
@@ -748,7 +764,9 @@ elseif command == "mission" then
   -- script printed). Everything else keeps the old rule: an error is an exit 1.
   if type(result) == "table" and tonumber(result.exit) then os.exit(tonumber(result.exit)) end
   if type(result) == "table" and result.error then os.exit(1) end
-elseif command == "help" then
+elseif command == "help" or command == "--help" or command == "-h" then
+  -- `wa --help` and `wa -h` are the same question as `wa help` (23/11): before this they were an unknown
+  -- command with exit 2, which is a worse answer to a person who typed the shortest form of the question.
   print("wa [chat] [--continue|-c|--resume <id>] [prompt]  |  remember <text> | recall <query>")
   print("    memories | forget <id>")
   print("    sessions | skills | stats | status | nodes | call <node> <capability> [args-json]")

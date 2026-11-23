@@ -76,12 +76,21 @@ fn subagent_root() -> PathBuf {
 
 /// Sockets the current child request is blocked on, shared with the task so a
 /// cancel from another thread can `shutdown` a silent provider read.
-pub type SocketSlot = Arc<Mutex<Vec<std::net::TcpStream>>>;
+pub type SocketSlot = Arc<Mutex<Vec<(u64, std::net::TcpStream)>>>;
+
+/// The id of one registration, so the request that made it can take it back.
+///
+/// The slot holds a CLONE of the socket, and a clone keeps the connection open: a registration that is
+/// never taken back is an fd the process cannot give back, and - measured 23/11 in the TLS anchor test -
+/// a connection the peer still sees as live long after the request ended. The id is what lets the
+/// transport take back exactly its own socket when it drops.
+static NEXT_SOCKET_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// Register the socket a provider request just connected on, so cancelling the
 /// task can interrupt a read that is producing no chunks. The clone is stored in
 /// the shared slot; `shutdown(Both)` on it wakes the blocked read immediately.
-pub fn register_active_socket(stream: &std::net::TcpStream) {
+pub fn register_active_socket(stream: &std::net::TcpStream) -> Option<u64> {
+    let id = NEXT_SOCKET_ID.fetch_add(1, Ordering::SeqCst);
     if let Ok(clone) = stream.try_clone() {
         // A child's call belongs to the child's slot. A call with no task - the interactive CLI's own
         // provider request - belongs to the CALLING THREAD's own foreground slot, which is the one the
@@ -91,12 +100,40 @@ pub fn register_active_socket(stream: &std::net::TcpStream) {
             CURRENT.with(|slot| {
                 if let Some(context) = slot.borrow().as_ref() {
                     if let Ok(mut sockets) = context.sockets.lock() {
-                        sockets.push(clone);
+                        sockets.push((id, clone));
                     }
                 }
             });
         } else if let Ok(mut sockets) = foreground_slot().lock() {
-            sockets.push(clone);
+            sockets.push((id, clone));
+        }
+        return Some(id);
+    }
+    None
+}
+
+/// Take ONE registration back - what the transport does when it drops.
+///
+/// By id, and over every slot this process has: the transport releases the socket it registered, no
+/// matter which thread drops it (the task slot when it was a child, this thread's own foreground slot,
+/// or - for an agent dropped elsewhere - whichever registered foreground slot holds that id). Emptying
+/// a whole slot is clear_active_socket's job, not this one's.
+pub fn unregister_active_socket(id: u64) {
+    CURRENT.with(|slot| {
+        if let Some(context) = slot.borrow().as_ref() {
+            if let Ok(mut sockets) = context.sockets.lock() {
+                sockets.retain(|(held, _)| *held != id);
+            }
+        }
+    });
+    FOREGROUND_SLOT.with(|cell| {
+        if let Some(slot) = cell.borrow().as_ref() {
+            if let Ok(mut sockets) = slot.lock() { sockets.retain(|(held, _)| *held != id); }
+        }
+    });
+    if let Ok(slots) = FOREGROUND_SLOTS.lock() {
+        for (_, slot) in slots.iter() {
+            if let Ok(mut sockets) = slot.lock() { sockets.retain(|(held, _)| *held != id); }
         }
     }
 }
@@ -193,7 +230,7 @@ pub fn clear_active_socket() {
 /// Wake every socket this task is blocked on. Called on cancel from any thread.
 pub fn shutdown_sockets(sockets: &SocketSlot) {
     if let Ok(sockets) = sockets.lock() {
-        for stream in sockets.iter() {
+        for (_, stream) in sockets.iter() {
             // Best-effort immediate wake; where the platform honours it the read
             // returns at once, and where it does not (Windows on a duplicated handle)
             // the transport's cancellation poll still notices within 250ms.
@@ -2178,7 +2215,7 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
         let address = listener.local_addr().expect("addr");
         let mut client = std::net::TcpStream::connect(address).expect("connect");
-        let slot: SocketSlot = Arc::new(Mutex::new(vec![client.try_clone().expect("clone")]));
+        let slot: SocketSlot = Arc::new(Mutex::new(vec![(1, client.try_clone().expect("clone"))]));
         shutdown_sockets(&slot);
         use std::io::Read;
         let mut buffer = [0u8; 1];

@@ -136,23 +136,48 @@ for manifest in rust/Cargo.toml rust/wa-sentinel/Cargo.toml; do
 done
 mkdir -p "$out"
 say "building wa ($triple) - ${cross:+cross }code-mode shipping build"
-node "$ROOT/scripts/codemode-build.mjs" build "$ROOT" ${cross:+--target "$cross"} > "$out/wa-host.receipt.json" 2> "$out/wa-host.log" \
+receipt="$out/wa-host.receipt.json"
+node "$ROOT/scripts/codemode-build.mjs" build "$ROOT" ${cross:+--target "$cross"} > "$receipt" 2> "$out/wa-host.log" \
   || { tail -25 "$out/wa-host.log" >&2; fail 'build_failed: wa (codemode-build.mjs)'; }
-say 'building wa-sentinel'
-if [ -n "$cross" ]; then
-  ( cd "$ROOT/rust" && cargo zigbuild --release --offline --locked --manifest-path wa-sentinel/Cargo.toml --target "$cross" ) 2> "$out/wa-sentinel.log" \
-    || { tail -25 "$out/wa-sentinel.log" >&2; fail 'build_failed: wa-sentinel'; }
-  wa_bin="$ROOT/rust/target/$cross/release/wa"
-  sentinel_bin="$ROOT/rust/wa-sentinel/target/$cross/release/wa-sentinel"
-else
-( cd "$ROOT/rust" && cargo build --release --offline --locked --manifest-path wa-sentinel/Cargo.toml ) 2> "$out/wa-sentinel.log" \
-  || { tail -25 "$out/wa-sentinel.log" >&2; fail 'build_failed: wa-sentinel'; }
-wa_bin="$ROOT/rust/target/release/wa"
-sentinel_bin="$ROOT/rust/wa-sentinel/target/release/wa-sentinel"
-[ -x "$sentinel_bin" ] || sentinel_bin="$ROOT/rust/target/release/wa-sentinel"
+
+# ---- WHICH BYTES DID THE BUILD MAKE? Its own receipt says so, and nothing here guesses a directory ----------
+# The onebuild shipping build writes into the node's ONE build root (scripts/lib/build-target.sh, docs/ONEROOT.md),
+# not into rust/target - and until 23/11 this script staged the bundle from `rust/target/<triple>/release/wa` and
+# refused "no built binary" for bytes it had just built correctly. Measured on release F
+# (release-20261123T082627Z-3fc25b76): wa-host.receipt.json named
+# <home>/.wasm-agent/build/target/<tree>/x86_64-unknown-linux-musl/release/wa and the step looked in the tree.
+# So: the receipt is READ (scripts/lib/build-receipt.mjs) and held to THIS release - its commit, its tree, the
+# triple asked for, the checkout that built it - and a receipt that cannot say so is a NAMED refusal, never a
+# fallback to a guessed path. The bytes themselves are measured against the sha256 the receipt recorded.
+wa_tree=$(git -C "$ROOT" rev-parse "$commit^{tree}") || fail "commit_unknown: $commit"
+if ! node "$ROOT/scripts/lib/build-receipt.mjs" "$receipt" --commit "$commit" --tree "$wa_tree" \
+     ${cross:+--target "$cross"} --root "$ROOT" > "$out/wa-host.fields" 2> "$out/wa-host.refusal"; then
+  fail "$(head -1 "$out/wa-host.refusal")"
 fi
-[ -x "$wa_bin" ] || fail "no built binary at $wa_bin"
-[ -x "$sentinel_bin" ] || fail 'no built wa-sentinel'
+wa_bin=$(sed -n 's/^binary=//p' "$out/wa-host.fields")
+wa_bin_sha=$(sed -n 's/^binary_sha256=//p' "$out/wa-host.fields")
+[ -n "$wa_bin" ] || fail "build_receipt_no_binary: $receipt names no binary"
+[ -x "$wa_bin" ] || fail "build_receipt_binary_absent: the receipt names $wa_bin, which is not an executable file"
+[ "$(sha256sum "$wa_bin" | cut -d' ' -f1)" = "$wa_bin_sha" ] \
+  || fail "build_binary_changed: $wa_bin is not the bytes the build measured ($wa_bin_sha)"
+say "wa        $wa_bin (sha256 ${wa_bin_sha:0:12})"
+
+say 'building wa-sentinel'
+# THE SENTINEL COMES FROM CARGO'S OWN ANSWER TOO (onebuild builds wa-host only, so this build is this script's).
+# `--message-format=json` makes cargo name the executable it produced, which is the same fact whatever
+# CARGO_TARGET_DIR the caller's environment happens to carry; the compiler's own words still go to the log.
+if [ -n "$cross" ]; then
+  ( cd "$ROOT/rust" && cargo zigbuild --release --offline --locked --manifest-path wa-sentinel/Cargo.toml --target "$cross" --message-format=json ) > "$out/wa-sentinel.artifacts.json" 2> "$out/wa-sentinel.log" \
+    || { tail -25 "$out/wa-sentinel.log" >&2; fail 'build_failed: wa-sentinel'; }
+else
+  ( cd "$ROOT/rust" && cargo build --release --offline --locked --manifest-path wa-sentinel/Cargo.toml --message-format=json ) > "$out/wa-sentinel.artifacts.json" 2> "$out/wa-sentinel.log" \
+    || { tail -25 "$out/wa-sentinel.log" >&2; fail 'build_failed: wa-sentinel'; }
+fi
+sentinel_bin=$(node "$ROOT/scripts/lib/cargo-executable.mjs" "$out/wa-sentinel.artifacts.json" wa-sentinel) \
+  || fail "no built wa-sentinel: $(tail -1 "$out/wa-sentinel.log")"
+[ -n "$sentinel_bin" ] || fail 'no built wa-sentinel: cargo reported no executable for it (see wa-sentinel.log)'
+[ -x "$sentinel_bin" ] || fail "build_artifact_absent: cargo named $sentinel_bin, which is not an executable file"
+say "sentinel  $sentinel_bin"
 
 # ---- stage: exactly the shipped closure ---------------------------------------------------------
 stage="$out/$name"

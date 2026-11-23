@@ -16,15 +16,18 @@ pub enum Gate {
     Post,
     /// Do not post: the chat is not in the allowlist (shadow mode).
     Shadow,
-    /// Do not post: the chat is held (configuration, or an unproven source mutation).
-    Held,
+    /// Do not post: the operator's own list (`held_chats`) blocks this chat. This is CONFIGURATION and
+    /// nothing else: since 23/11 no mutation on the wire can block a chat, so no wire event can reach
+    /// this arm (the owner: *"we never should get hold from a chat"*).
+    Blocked,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PostConfig {
     pub post: bool,
     pub allow: Vec<String>,
-    /// Chats where posting is held (the Go connector's chat holds, carried over by configuration).
+    /// Chats the operator's configuration blocks from posting (`held_chats`). It is a list an operator
+    /// writes, never something this component derives from a revoke or an edit.
     pub held: Vec<String>,
     pub alerts: bool,
     pub stream_edits: bool,
@@ -69,15 +72,18 @@ impl PostConfig {
         self.held.iter().any(|c| c == chat)
     }
 
-    /// The whole posting gate for one source chat: the configuration allowlist, the configured
-    /// holds, and the holds derived from the wire (`holds`). Kept in one place so no caller can
-    /// post from a chat the component has held.
-    pub fn gate(&self, chat: &str, own_users: &[String], holds: &crate::holds::Holds) -> Gate {
+    /// The whole posting gate for one source chat: the configuration allowlist and the operator's own
+    /// blocked list. Kept in one place so no caller can post from a chat the operator blocked.
+    ///
+    /// It has one input fewer than it had before 23/11: the wire-derived holds are gone, so a revoke or
+    /// an edit in a chat can no longer stop its posts. What a deletion does instead is skip the one
+    /// reply to the deleted message (`guest::dispatch`, `docs/WHATSAPP-TRANSCRIPTION.md`).
+    pub fn gate(&self, chat: &str, own_users: &[String]) -> Gate {
         if !self.allowed(chat, own_users) {
             return Gate::Shadow;
         }
-        if self.held(chat) || holds.posting_held(chat) {
-            return Gate::Held;
+        if self.held(chat) {
+            return Gate::Blocked;
         }
         Gate::Post
     }
@@ -159,20 +165,26 @@ mod tests {
     }
 
     #[test]
-    fn the_gate_composes_the_allowlist_with_the_configured_and_derived_holds() {
+    fn the_gate_composes_the_allowlist_with_the_operators_own_blocked_list() {
         let own = vec!["5519994939204".to_string()];
-        let mut holds = crate::holds::Holds::new();
         let mut gate_cfg = cfg(serde_json::json!({"post_transcripts": true, "post_allow": ["own"]}));
-        assert_eq!(gate_cfg.gate("5519994939204@s.whatsapp.net", &own, &holds), Gate::Post);
-        assert_eq!(gate_cfg.gate("5511888@s.whatsapp.net", &own, &holds), Gate::Shadow, "not in the allowlist");
+        assert_eq!(gate_cfg.gate("5519994939204@s.whatsapp.net", &own), Gate::Post);
+        assert_eq!(gate_cfg.gate("5511888@s.whatsapp.net", &own), Gate::Shadow, "not in the allowlist");
         gate_cfg.held = vec!["5519994939204@s.whatsapp.net".to_string()];
-        assert_eq!(gate_cfg.gate("5519994939204@s.whatsapp.net", &own, &holds), Gate::Held, "configured hold");
-        gate_cfg.held.clear();
-        // An unproven revoke in the chat holds posting; a proven one fences only its target.
-        holds.apply(&crate::holds::Mutation::revoke("5519994939204@s.whatsapp.net", "MSG1"), None);
-        assert_eq!(gate_cfg.gate("5519994939204@s.whatsapp.net", &own, &holds), Gate::Held);
-        // Nothing about a hold makes posting possible: the allowlist is still required.
-        assert_eq!(cfg(serde_json::json!({"post_transcripts": true, "post_allow": []})).gate("5519994939204@s.whatsapp.net", &own, &holds), Gate::Shadow);
+        assert_eq!(gate_cfg.gate("5519994939204@s.whatsapp.net", &own), Gate::Blocked, "the operator's own list");
+        // Nothing about the blocked list makes posting possible: the allowlist is still required.
+        assert_eq!(cfg(serde_json::json!({"post_transcripts": true, "post_allow": []})).gate("5519994939204@s.whatsapp.net", &own), Gate::Shadow);
+    }
+
+    #[test]
+    fn no_mutation_on_the_wire_can_block_a_chat_any_more() {
+        // The gate takes the chat and the own users and nothing else: there is no parameter left for a
+        // hold derived from a revoke, which is the property the owner asked for on 23/11. A chat with a
+        // blocked look-alike is still postable.
+        let own = vec!["5519994939204".to_string()];
+        let gate_cfg = cfg(serde_json::json!({"post_transcripts": true, "post_allow": ["*"]}));
+        assert_eq!(gate_cfg.gate("5511888@s.whatsapp.net", &own), Gate::Post);
+        assert_eq!(gate_cfg.gate("7210397@lid", &own), Gate::Post);
     }
 
     #[test]

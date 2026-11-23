@@ -321,7 +321,7 @@ wa_fast_evidence_dir() {
 # The log a row writes, of either kind: a `check` row (a pty row) writes check-<name>.log, a Lua row writes
 # logs/<its file>.log. Only the FAILED rows are asked for: a green row's log is not evidence, and copying
 # every row's log made 85 files for 6 failures (measured on this change's own first fast.sh run).
-wa_fast_row_logs() { # <row name>...
+wa_fast_row_logs() { # <row name>... plus every Lua row that failed in this run
   local name log
   for name in "$@"; do
     [ -n "$name" ] || continue
@@ -329,6 +329,18 @@ wa_fast_row_logs() { # <row name>...
       [ -f "$log" ] || continue
       printf '%s\n' "$log"
     done
+  done
+  # A FAILED LUA ROW IS EVIDENCE TOO (mission speed-board-landing-kinds, 23/11). The list this function is
+  # handed is built by check(), the SHELL row recorder, so a Lua row that failed was never on it and its
+  # log - the only record of WHICH checks failed - died with the scratch directory: main-health could
+  # report 'speed-board: 5 FAIL of 30' and nothing about the five. The runner own table ($work/lua.tsv:
+  # exit, ms, script, verdict line, kind) is written by run_lua and outlives the rows, so the failed
+  # scripts are read from it. The caller de-duplicates: a row named by both lists is copied once.
+  [ -n "${work:-}" ] && [ -s "$work/lua.tsv" ] || return 0
+  awk -F'\t' '$1 != 0 { print $3 }' "$work/lua.tsv" 2>/dev/null | while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    log="$work/logs/$(basename "$name").log"
+    [ -f "$log" ] && printf '%s\n' "$log"
   done
 }
 wa_fast_keep_failed_logs() {
@@ -349,14 +361,14 @@ wa_fast_keep_failed_logs() {
       [ -n "$named" ] && [ -d "$named" ] || continue
       cp -a "$named" "$dir/$(basename "$named")" 2>/dev/null && dirs=$((dirs + 1))
     done < <(grep -o 'kept for diagnosis: [^ ]*' "$log" 2>/dev/null)
-  done < <(wa_fast_row_logs ${failed_rows:-})
+  done < <(wa_fast_row_logs ${failed_rows:-} | awk '!seen[$0]++')
   # One file that answers "what failed" without opening a log per row.
   : > "$dir/failures.txt" 2>/dev/null || true
   while IFS= read -r log; do
     { wa_fast_row_failure_line "$log"; last_line_of "$log"; } | while IFS= read -r named; do
       [ -n "$named" ] && printf '%s: %s\n' "$(basename "$log")" "$named"
     done >> "$dir/failures.txt" 2>/dev/null || true
-  done < <(wa_fast_row_logs ${failed_rows:-})
+  done < <(wa_fast_row_logs ${failed_rows:-} | awk '!seen[$0]++')
   echo "fast: kept $kept failed row log(s) and $dirs scratch dir(s) in $dir (what failed: $dir/failures.txt)"
   # The default location is bounded: keep the five newest runs, so a broken main cannot fill the disk.
   if [ -z "${WA_FAST_KEEP_LOGS:-}" ]; then
@@ -978,6 +990,15 @@ check install-front-door bash scripts/test-install.sh
 # publisher, its refusals and the freshness verdict are judged here against a fake GitHub - no build, no
 # upload, no vault. 2 s.
 check linux-channel bash scripts/test-linux-channel.sh
+# `wa <verb> --help` IS A QUESTION AND RUNS NOTHING (Fable 23/11): every acting verb the tree declares, held to a
+# usage line, exit 0 and no other output - measured 09:30Z, `wa update --help` ran a local update. Hermetic, ~10 s.
+check cli-help bash scripts/test-cli-help.sh
+# THE CHANNEL STEP END TO END (Fable 23/11): the real `wa release cut` linux step over the real
+# scripts/publish-linux-channel.sh AND the real scripts/release-linux.sh - the join no row had ever run, which is
+# why release F published nothing on its first real cut ("no built binary at .../rust/target/...", while the
+# build's receipt named the binary it had made). The build itself and gh stand in (scripts/test-release-channel-e2e.sh
+# says where); the signature is a scratch vault and the commit is pushed onto a fixture main. Linux only.
+check release-channel bash scripts/test-release-channel-e2e.sh
   # The canonical runtime binding is decided in PREFLIGHT, before anything is built, and a refusal names
   # every worktree that is on branch main (measured 18/11: a deploy refused after ~4 minutes of build with
   # "exactly one canonical main checkout is required" and named neither path the operator had to choose
@@ -1083,6 +1104,17 @@ check linux-channel bash scripts/test-linux-channel.sh
   # reports down as up come home. It replaces the previous round's "one notch = one PageUp" row, which
   # is the behaviour the operator rejected. The real binary in a private tmux pty, as the rows above.
   WA_BIN="$bin" check wheel-lines-pty node scripts/test-wheel-lines-pty.mjs
+  # THE LAST REQUEST STAYS ON THE TOP ROW, AND A MESSAGE HAS ONE OF ITS OWN ABOVE IT (pinned-prompt-
+  # and-notice-row, Victor 23/11 11:20Z): during a streaming run the request is the first row of the
+  # window; a copy is announced on the notice row ABOVE it and never on the session status bar; the
+  # message goes after about two seconds and an error waits for the next key. The real binary in a
+  # private tmux pty against a slow local SSE fixture, as the rows above. On the base row 3 does not
+  # exist at all (the message is drawn in the footer's place, over the status bar).
+  WA_BIN="$bin" check pinned-request-pty node scripts/test-pinned-request-pty.mjs
+  # JUMP TO BOTTOM (the same brief, item 7): scrolled away from the newest output, a pill sits on the
+  # transcript's last row and names the key the KEYMAP binds to Bottom (read from the table); the key
+  # and a click on the pill both go back and follow the output again. Same shape: a real pty.
+  WA_BIN="$bin" check jump-to-bottom-pty node scripts/test-jump-to-bottom-pty.mjs
   # THE STATUS ROWS' ICONS, MEASURED IN THE FONT FILES (tui-chrome item 2, drawn by change/icons-box):
   # advance, bearings and centre of every glyph the two rows draw, against the box
   # scripts/build-wa-icons.py builds (right bearing 18% of the cell, left >= 6%, one centre on the
@@ -1226,6 +1258,11 @@ check land-signing bash scripts/test-land-signing.sh
 # client and the STT/OCR workers stay. The scan is proved on fixtures, so it is a gate and not a grep
 # nobody tests.
 check whatsapp-go-retired bash scripts/test-whatsapp-go-retired.sh
+# No chat hold exists any more (the owner's decision of 23/11): the component must have no hold writer, no
+# hold refusal code and no write of the `holds` key, and must carry the per-message deletion path. The scan
+# is proved on a fixture and it fails on the tree before the change (holds.rs, `posting_held_chat`,
+# `Gate::Held`), so it is a gate and not a grep nobody tested.
+check whatsapp-no-hold-writer bash scripts/test-whatsapp-no-hold-writer.sh
 # The runner's half of "the machine, not the code": the classifier and the serial retry, against fixture
 # commands that fail the way a starved machine fails (and a real failure that must NOT be excused).
 check fast-environment bash scripts/test-fast-environment.sh

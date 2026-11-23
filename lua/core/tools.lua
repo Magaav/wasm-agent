@@ -2,6 +2,8 @@
 -- masters get everything; guests get on-demand memory plus a way to list
 -- what they may do. "spells" means deterministic, verified executions only (spells.lua).
 local json = dofile("lua/vendor/json.lua")
+-- Loaded at first use: the ONE argument validator (lua/core/tool_arguments.lua).
+local tool_arguments
 -- The one WhatsApp surface (#118): the nine `mcp_whatsapp_*` tools, and which node answers them.
 local whatsapp_lib = dofile("lua/core/whatsapp.lua")
 local platform = dofile("lua/core/platform.lua")
@@ -86,6 +88,12 @@ end
 -- A refusal says what arrived (keys, never values), where a misplaced key was found, which nodes
 -- are online, and a minimal correct call, so the retry differs from the failed call.
 local REMOTE_OWN = { node = true, capability = true, args = true }
+
+-- The fields THIS node added to a capability, per capability: a peer whose own catalogue does not declare
+-- one of them would ignore it (mission tool-args-honest-and-same-on-peers, mixed-fleet follow-up). Only
+-- what this node learned to send in that mission is named; a capability absent from this table sends
+-- everything, exactly as before.
+local PEER_FIELD_SUPPORT = { bash = { 'stdin' }, operation = { 'stdin' }, grep = { 'context' } }
 local REMOTE_EXAMPLE = '{"node":"<name>","capability":"bash","command":"ls -la"}'
 
 local function sorted_keys(value)
@@ -259,12 +267,16 @@ function M.remote_arguments(args, catalog)
   return { node = node, capability = capability, args = params, hoisted = #hoisted > 0 and hoisted or nil }
 end
 
-local function schema(name, description, properties, required)
+local function schema(name, description, properties, required, extra)
   -- An empty Lua table encodes as `[]`, which providers reject as a schema, so
   -- only emit `properties`/`required` when they actually have entries.
   local parameters = { type = "object" }
   if properties and next(properties) ~= nil then parameters.properties = properties end
   if required and #required > 0 then parameters.required = required end
+  -- A keyword the schema needs but this helper cannot derive (`additionalProperties` for a tool that
+  -- forwards another tool's arguments). Merged last, so a caller names it once and it lands on the
+  -- parameters object a provider and the node's own argument validator both read.
+  if type(extra) == "table" then for key, value in pairs(extra) do parameters[key] = value end end
   return { type = "function", ["function"] = {
     name = name, description = description, parameters = parameters } }
 end
@@ -296,6 +308,13 @@ local function exec_deadline_seconds()
   end
   return 300
 end
+
+-- The most text a caller may feed a command's standard input (`bash {stdin=...}`, `operation start`).
+-- One number in one place: the schemas state it (maxLength), the bash handler refuses above it, and the peer
+-- path inherits both because it is this same code. 1 MiB is ten times the largest heredoc a real call in the
+-- ledger carried, and small enough that the temp file the launcher hands the child stays in the node root.
+local STDIN_MAX_BYTES = 1048576
+M.STDIN_MAX_BYTES = STDIN_MAX_BYTES
 
 -- THE GRAPH IS OFF BY DEFAULT ON EVERY NODE FROM G (docs/GRAPH.md, 23/11). A dormant feature must cost the
 -- model nothing: no catalogue line, no `searchTools` hit, no schema bytes in the prompt. The switch is the
@@ -469,14 +488,16 @@ M.admin = {
     id = { type = "string" } }, { "id" }),
   -- The dialect is in the description because the model otherwise assumes POSIX
   -- and wastes its tool budget on commands this machine does not have.
-  schema("bash", "Run a command on this machine with " .. platform.shell() .. ". Killed after " .. exec_deadline_seconds() .. "s unless timeout_seconds (1-86400) is larger; raise it for builds and long tests. Returns when the shell exits; descendants that remain continue as a supervised operation the result names. For deliberate long-lived work use operation start.", {
+  schema("bash", "Run a command on this machine with " .. platform.shell() .. ". Killed after " .. exec_deadline_seconds() .. "s unless timeout_seconds (1-86400) is larger; raise it for builds and long tests. Returns when the shell exits; descendants that remain continue as a supervised operation the result names. stdin is the text the command reads and then sees closed. For deliberate long-lived work use operation start.", {
     command = { type = "string" }, cwd = { type = "string" },
+    stdin = { type = "string", maxLength = 1048576, description = "Text fed to the command's standard input, then closed. It is delivered as the command's input, not pasted into the command line." },
     timeout_seconds = { type = "integer", minimum = 1, maximum = 86400, description = "Kill the command after this many seconds. Defaults to the node's foreground deadline (" .. exec_deadline_seconds() .. "s); raise it for a build or a full test gate, lower it to fail fast." } }, { "command" }),
   schema("operation", "Start, observe, read streamed output, wait briefly for, or cancel a supervised external operation. A launch receipt is not completion. Output read uses byte cursors; when text_lossy is true, decode content_base64 for exact bytes instead of concatenating content. `await` on work adopted by foreground bash defaults to the shell command result after output reaches EOF or is idle for 100ms; descendants remain supervised and may still produce output. Set wait_for=`settled` to await their full operation. Explicitly started operations always await full settlement. Jobs are automation rules, not operations. No automatic replay after an unknown outcome.", {
     action = { type = "string", enum = {"start", "list", "status", "read", "wait", "await", "cancel", "background"},
       description = "background only lowers a running operation's CPU priority once nobody is waiting for it; code mode does that by itself when a call goes pending." },
     id = { type = "string" }, command = { type = "string" }, cwd = { type = "string" },
     timeout_seconds = { type = "integer", minimum = 1, maximum = 86400 },
+    stdin = { type = "string", maxLength = 1048576, description = "start only: text fed to the command's standard input, then closed." },
     stream = { type = "string", enum = {"stdout", "stderr"} }, offset = { type = "integer", minimum = 0 },
     -- The ceiling is codemode_pending.STDOUT_PAGE_BYTES (24 KiB, the Rust page). It is written out
     -- because a schema table is a literal; scripts/test-turn-signal.lua asserts the two agree, so
@@ -490,11 +511,14 @@ M.admin = {
     path = { type = "string" },
     offset = { type = "integer", minimum = 1 },
     column = { type = "integer", minimum = 1 }, version = { type = "string" },
+    node = { type = "string", description = "Peer name or node_id (from nodes): read that node's file instead of this one's." },
     limit = { type = "integer", minimum = 1, maximum = 2000 } }, { "path" }),
-  schema("write", "Create or overwrite a text file. In a required session workspace, writes are limited to the worktree and its session scratch root; a refusal lists both in allowed_writes.", {
-    path = { type = "string" }, content = { type = "string" } }, { "path", "content" }),
-  schema("edit", "Replace text in one file, using exactly one form. `edits` (old_text/new_text) quotes bytes that must occur exactly once; a miss returns the nearest region. An anchor that lies outside every byte range this session read from that file is refused by name (`edit_anchor_outside_read_page`): read the page that holds it. `range_edits` copies a read `selection` unchanged with replacement_lines (optional start_line/end_line inside its edit_lines), for text you cannot quote; shell output does not provide an edit receipt. All ranges apply atomically; check the echo of what each replaced.", {
+  schema("write", "Create or overwrite a text file. In a required session workspace, writes are limited to the worktree and its session scratch root; a refusal lists both in allowed_writes. node=<peer> writes that peer's file; the result names the node the bytes landed on.", {
+    path = { type = "string" }, content = { type = "string" },
+    node = { type = "string", description = "Peer name or node_id (from nodes): write that node's file instead of this one's." } }, { "path", "content" }),
+  schema("edit", "Replace text in one file, using exactly one form. `edits` (old_text/new_text) quotes bytes that must occur exactly once; a miss returns the nearest region. An anchor that lies outside every byte range this session read from that file is refused by name (`edit_anchor_outside_read_page`): read the page that holds it. `range_edits` copies a read `selection` unchanged with replacement_lines (optional start_line/end_line inside its edit_lines), for text you cannot quote; shell output does not provide an edit receipt. All ranges apply atomically; check the echo of what each replaced. node=<peer> edits that peer's file.", {
     path = { type = "string" },
+    node = { type = "string", description = "Peer name or node_id (from nodes): edit that node's file instead of this one's; the result names the node the bytes landed on." },
     edits = { type = "array", minItems = 1, maxItems = 64, items = { type = "object",
       properties = {
         old_text = { type = "string", description = "Exact bytes to replace, copied from a read; must occur exactly once in the file." },
@@ -508,11 +532,15 @@ M.admin = {
         replacement_lines = {type="array",maxItems=2000,items={type="string"}}
       }, required = {"selection","replacement_lines"} } }
   }, { "path" }),
-  schema("ls", "List a directory (portable: works the same on every platform).", { path = { type = "string" } }),
-  schema("grep", "Literal substring search, not regex. Reports omitted files and clipped lines. Use a path to narrow the search, and read the matched range afterwards rather than whole files. Results use the supplied root; extensions are exact suffixes without dots.", {
+  schema("ls", "List a directory (portable: works the same on every platform). node=<peer> lists that peer's directory.", {
+    path = { type = "string" },
+    node = { type = "string", description = "Peer name or node_id (from nodes): list that node's directory instead of this one's." } }),
+  schema("grep", "Literal substring search, not regex. Reports omitted files and clipped lines. Use a path to narrow the search, and read the matched range afterwards rather than whole files. Results use the supplied root; extensions are exact suffixes without dots. context returns the lines around each match; node=<peer> searches that peer's files.", {
     pattern = { type = "string" }, path = { type = "string" },
     ignore_case = {type="boolean"}, limit={type="integer",minimum=1,maximum=500},
-    max_depth={type="integer",minimum=0,maximum=64}, extensions={type="array",items={type="string"}}
+    max_depth={type="integer",minimum=0,maximum=64}, extensions={type="array",items={type="string"}},
+    context={type="integer",minimum=0,maximum=10,description="Lines of context before and after each match; 0, the default, returns the matches alone."},
+    node = { type = "string", description = "Peer name or node_id (from nodes): search that node's files instead of this one's." }
   }, { "pattern" }),
   -- Retrieval returns selected implementation text; relationship and audit actions remain
   -- explicitly separate so their evidence can be evaluated independently.
@@ -605,7 +633,12 @@ M.admin = {
     path = { type = "string", description = "For read/ls/write/edit: the path on that node." },
     args = { type = "object", description = "Optional older form: the capability's parameters nested here. Prefer the flat form." },
     calls = { type = "array", minItems = 1, maxItems = 8, description = "With capability \"batch\": 1-8 read-only entries {capability, <its params>} run on the peer in ONE signed round trip, ordered results. Reads, history and read-only bash only.",
-      items = { type = "object", properties = { capability = { type = "string" } }, required = { "capability" } } } }, { "node", "capability" }),
+      items = { type = "object", properties = { capability = { type = "string" } }, required = { "capability" } } }
+    -- This schema does NOT declare the capability's own parameters and cannot: they are the other tool's
+    -- (a bash `cwd`, an edit's `edits`, a read's `offset`). Saying so keeps the one argument validator from
+    -- refusing a field `remote` is meant to forward - the open declaration is the honest one here, not a
+    -- list that silently falls behind every capability it carries.
+  }, { "node", "capability" }, { additionalProperties = true }),
   -- Item 4 of the node-ops round (#45): a build is graded against the bytes it embeds. A binary built
   -- from another commit, or from this commit with uncommitted edits under lua/ or rust/, is not this
   -- tree, and the answer says WHICH (fresh, stale, edited, unknown) instead of a bare yes.
@@ -1275,7 +1308,7 @@ local function launch_cwd(memory, ctx, requested)
     required=workspace and workspace.required == true or false, session=(ctx and ctx.session_id) or ""}
 end
 
-local function run(command, timeout_seconds, cwd, provenance)
+local function run(command, timeout_seconds, cwd, provenance, stdin)
   -- Set the process launch directory, never hide it in shell command text. Later shell `cd`
   -- remains command behavior, not something the operation receipt claims to observe.
   -- A recursive delete of a protected path never reaches the shell: the guard names the path and the
@@ -1283,7 +1316,9 @@ local function run(command, timeout_seconds, cwd, provenance)
   -- or a host that swaps `host.exec` after init would otherwise be enough to lose a home.
   local allowed, refused = path_guard.command(command, cwd)
   if not allowed then return { error = refused, effect = "none", blocked_by = "path_guard" } end
-  local ok, raw = pcall(host.exec, path_guard.wrap(command), cwd or "", timeout_seconds, json.encode(provenance))
+  -- stdin (5th): the caller's text for the command's own standard input, fed by the one spawn path. Absent
+  -- is the null device, which is what every call without it got before the argument existed.
+  local ok, raw = pcall(host.exec, path_guard.wrap(command), cwd or "", timeout_seconds, json.encode(provenance), stdin)
   if not ok then return { error = tostring(raw) } end
   local decoded = json.decode(raw)
   if type(decoded) ~= "table" then return { error = tostring(raw) } end
@@ -1353,6 +1388,12 @@ end
 -- that call.
 
 local HISTORY_ON_NODE = { sessions = true, session = true, search_messages = true }
+
+-- The file tools take the same optional `node` (mission tool-args-honest-and-same-on-peers, item 7). A path
+-- meant for a peer used to land HERE without a word: one worker wrote a peer's file onto this node and the
+-- only evidence was the path it had typed. These five are routed through the SAME call `remote` makes - one
+-- code path, so a local call and a peer call cannot drift - and the answer names the node that ran it.
+local NODE_ON_TOOL = { read = true, ls = true, grep = true, write = true, edit = true }
 
 -- `remote` with capability "batch" and calls:[...] (29/10): up to eight reads on one peer in ONE signed round trip (~350 ms
 -- each measured against openclaw), so a script or an outer turn pays one hop, not N. Read-only on both
@@ -1507,6 +1548,47 @@ local function announce_gone(ctx, reported)
 end
 M.announce_gone = announce_gone
 
+-- A BODY IS NEVER SILENTLY ALTERED (23/11). Measured first, because the ledger says the write path
+-- corrupts a file and the measurement says it does not: a body containing a LITERAL backslash-n (`A\nB`)
+-- went through tools.write and arrived as the four bytes it was (`od -c`: `A \ n B`), and the same body in
+-- a run call's raw block arrived byte for byte too. The double decoding the ledger reports (notes 83, 116:
+-- "a literal \n became a newline inside a Lua string") happens in the MODEL's own string literal, one layer
+-- above this one - the harness never sees the pre-decoding text, so it cannot undo it. What the harness can
+-- see is the file after the write, so it compares: a caller told ok=true about a file that does not hold
+-- the bytes it sent has no way to find out, and a body silently altered is the expensive class. A mismatch
+-- is a REFUSAL (effect unknown: something did happen to that path), never a success.
+local WRITE_VERIFY_MAX = 8 * 1024 * 1024
+function M.written_body(path, content, read_back)
+  -- nil when the file holds exactly `content` (or when nothing can be compared), else the refusal table.
+  if type(path) ~= 'string' or type(content) ~= 'string' then return nil end
+  local read = read_back or host.read_file
+  if type(read) ~= 'function' then return nil end
+  if #content > WRITE_VERIFY_MAX then
+    -- Not compared: say so on the way out rather than pretend. The size is the one fact that is cheap.
+    return { unverified = true, bytes_sent = #content, why = 'body_too_large_to_compare' }
+  end
+  local held = read(path)
+  if held == content then return nil end
+  if type(held) ~= 'string' then
+    return { error = 'write_unverified', effect = 'unknown', path = path, bytes_sent = #content,
+      note = 'the file could not be read back, so nothing here can say it holds the bytes this call sent: '
+        .. 'check it with tools.read before relying on it' }
+  end
+  local at = 1
+  local limit = math.min(#held, #content)
+  while at <= limit and held:byte(at) == content:byte(at) do at = at + 1 end
+  local function shown(text, from)
+    local piece = text:sub(from, from + 40)
+    return (piece:gsub('[^%g ]', function(ch) return string.format('\\%03d', ch:byte()) end))
+  end
+  return { error = 'write_mismatch', effect = 'unknown', path = path, at_byte = at,
+    bytes_sent = #content, bytes_on_disk = #held,
+    note = 'the file does not hold the bytes this call sent - they first differ at byte ' .. at
+      .. ' (sent ' .. #content .. ' bytes, the file holds ' .. #held .. '): sent "' .. shown(content, at)
+      .. '", on disk "' .. shown(held, at) .. '". Nothing here can say what wrote the rest, so this call '
+      .. 'does not report success.' }
+end
+
 function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
   args = args or {}
   local requested_cwd = args.cwd
@@ -1541,6 +1623,14 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
   if (whatsapp_lib.renamed(name) or whatsapp_lib.retired_name(name)) and not whatsapp_lib.tool(name) then
     return whatsapp_lib.call(name, args, ctx)
   end
+  -- A FIELD THE TOOL DOES NOT DECLARE IS REFUSED BY NAME, HERE, BEFORE ANYTHING RUNS (mission
+  -- tool-args-honest-and-same-on-peers). This is the one dispatch a local call, a script's `tools.<name>`,
+  -- a `tool_call` batch and a peer's capability all pass, so one refusal covers every route and a field
+  -- added to a schema later is accepted here the moment it is declared. A dropped argument used to be a
+  -- call that ran as a different call and answered as if it had not; see lua/core/tool_arguments.lua.
+  if not tool_arguments then tool_arguments = dofile('lua/core/tool_arguments.lua') end
+  local argument_refusal = tool_arguments.refusal(name, args, M.parameters(name, role), ctx)
+  if argument_refusal then return argument_refusal end
   -- Connectors run only inside code mode when this run has it; a direct or routed call is pointed there.
   -- One pathway (operator 14/11): under code mode a tool the MODEL calls directly runs as the one-line
   -- script it stands for, so its inputs, outputs, waits and errors are exactly the in-script ones - no
@@ -1591,8 +1681,16 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
   end
   -- History on a peer (29/10): the same read, run there through `remote` and its refusals. A peer that
   -- receives one never forwards it again (`peer_call`), so a node cannot be used as a hop.
-  if HISTORY_ON_NODE[name] and type(args)=='table' and args.node~=nil and args.node~='' then
-    if ctx.peer_call then return {error='history_node_not_forwarded',effect='none',note='A peer answers history reads about itself only.'} end
+  if (HISTORY_ON_NODE[name] or NODE_ON_TOOL[name]) and type(args)=='table' and args.node~=nil and args.node~='' then
+    if ctx.peer_call then
+      if HISTORY_ON_NODE[name] then
+        return {error='history_node_not_forwarded',effect='none',note='A peer answers history reads about itself only.'}
+      end
+      -- The same rule one tool family over: a call that arrived from a peer is answered here or refused
+      -- here, never forwarded a second hop, so no node can be used as a relay for another's files.
+      return {error='node_not_forwarded',effect='none',node=args.node,
+        note='This call already arrived from another node, so it is answered on this one or refused; it is never forwarded again. Name the peer in a call made on the node you are talking from.'}
+    end
     local target=nodeslib.find(args.node)
     local forwarded={};for key,value in pairs(args)do if key~='node' then forwarded[key]=value end end
     if not target or not target.local_node then
@@ -2024,6 +2122,15 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     if timeout ~= nil and (type(timeout) ~= "number" or timeout % 1 ~= 0 or timeout < 1 or timeout > 86400) then
       return { error = "invalid_timeout_seconds" }
     end
+    -- The bytes the command reads. Refused by name above the bound, never clipped: a command given half its
+    -- input is a command that hangs or writes the wrong thing, and the caller has to know which happened.
+    local stdin = args.stdin
+    if stdin ~= nil then
+      if type(stdin) ~= "string" then return { error = "invalid_stdin", effect = "none" } end
+      if #stdin > STDIN_MAX_BYTES then
+        return { error = "stdin_too_large", bytes = #stdin, max_bytes = STDIN_MAX_BYTES, effect = "none" }
+      end
+    end
     -- An explicit `args.cwd` still wins; a session's worktree is the default, and "" keeps the
     -- node's own cwd.
     local cwd = args.cwd
@@ -2052,7 +2159,7 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
       -- model chose this call group; policy, session cwd and the commit review still run here.
       -- The `operation` start is this same bash call, not a second one: `same_call`.
       return M.dispatch(memory, "operation", { action = "start", command = args.command,
-        cwd = cwd, timeout_seconds = timeout,
+        cwd = cwd, timeout_seconds = timeout, stdin = stdin,
         -- Low CPU priority is for work nobody is waiting for (18/11 round 2, finding 9): the code-mode
         -- pending layer says whether this call is backgrounded, and a call the script is actively
         -- awaiting keeps the node's own priority.
@@ -2077,7 +2184,7 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
       watched = bash_changes.before(cwd,
         ctx.read_only_command and ctx.read_only_command(args.command) or nil)
     end
-    local result = run(args.command, timeout, cwd, provenance)
+    local result = run(args.command, timeout, cwd, provenance, stdin)
     -- The phase breakdown is AGGREGATE EVIDENCE, not context: it leaves the answer a caller receives
     -- (lua/core/bash_result.lua) and the agent records it on this call's tool span from here
     -- (lua/core/agent.lua, tool_output.execution_timing), so the numbers are neither lost nor spent on
@@ -2181,14 +2288,23 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     if before == nil then
       before = (host.path_kind and host.path_kind(path) == "file") and false or ""
     end
+    local verified
     local ok = host.write_file and host.write_file(path, args.content or "")
+    if ok then
+      local compared = M.written_body(path, args.content or "")
+      if compared and compared.error then return on_this_node(compared) end
+      verified = compared
+    end
     local notification=ok and graph_hint(memory,ctx,path) or nil
     -- Record what changed while the previous text is still in hand: this is what the diff
     -- topic shows and what its undo replays. A failed write records nothing.
     if ok and ctx and ctx.changes then
       changeset.record(ctx.changes, path, before, args.content or "")
     end
-    local written = { ok = ok and true or false, path = path, error=not ok and "write_failed" or nil, graph_index=notification }
+    local written = { ok = ok and true or false, path = path, error=not ok and "write_failed" or nil,
+      graph_index=notification }
+    -- A body too large to compare is named on the answer, so "ok" is not read as "the bytes were checked".
+    if verified and verified.unverified then written.body_unverified = verified.why end
     -- The caller on another node records this change in its own session (see the edit branch).
     if ok and ctx and ctx.peer_call and ctx.record_change == true then
       written.change = change_for_wire({ path = path, before = before, after = args.content or "" })
@@ -2233,12 +2349,13 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     end
     return run("ls -la -- " .. shell_quote(listed))
   elseif name == "grep" then
-    local allowed={pattern=true,path=true,ignore_case=true,limit=true,max_depth=true,extensions=true}
+    local allowed={pattern=true,path=true,ignore_case=true,limit=true,max_depth=true,extensions=true,
+      context=true,node=true}
     for key in pairs(args) do if not allowed[key] then return {error='unsupported_search_option',option=key} end end
     if type(args.pattern)~='string' then return {error='pattern_required'} end
     if args.path~=nil and type(args.path)~='string' then return {error='invalid_search_path'} end
     if args.ignore_case~=nil and type(args.ignore_case)~='boolean' then return {error='invalid_ignore_case'} end
-    for key,bounds in pairs({limit={1,500},max_depth={0,64}}) do
+    for key,bounds in pairs({limit={1,500},max_depth={0,64},context={0,10}}) do
       local n=args[key]
       if n~=nil and (type(n)~='number' or n%1~=0 or n<bounds[1] or n>bounds[2]) then return {error='invalid_search_range',option=key} end
     end
@@ -2526,6 +2643,28 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     -- served there, and that it wants the before/after text of a change back. Both travel in the signed
     -- body (nodes.lua M.remote_call options) and never in `args`, which is the model's own text.
     local target = node.name or node.node_id
+    -- MIXED FLEET (mission tool-args-honest-and-same-on-peers, follow-up): a peer that predates a field
+    -- IGNORES it - the silent drop this mission closed on this node, one hop out. Before the call leaves,
+    -- a field this node added is confirmed against the peer's OWN catalogue; unconfirmed is refused HERE,
+    -- with nothing sent. `node` is not in the list: it is a routing word for this call and never travels.
+    if not node.local_node then
+      for _, field in ipairs(PEER_FIELD_SUPPORT[call.capability] or {}) do
+        if type(call.args) == 'table' and call.args[field] ~= nil then
+          local federation = dofile('lua/core/federation.lua')
+          local declared, version = federation.declares(target, call.capability, field)
+          if declared ~= true then
+            local version_text = (type(version) == 'string' and version ~= '' and version ~= 'unknown')
+              and (' (version ' .. version .. ')') or ' (version unknown)'
+            return { error = 'peer_field_unsupported', effect = 'none', capability = tostring(call.capability),
+              field = field, peer = tostring(target), peer_version = version,
+              message = 'peer ' .. tostring(target) .. ' runs a build without ' .. field .. version_text
+                .. ', so nothing was sent.',
+              fix = 'send the call without ' .. field .. ', or update that peer to a build whose catalogue'
+                .. ' declares it; a field a peer does not declare is never sent to be dropped.' }
+          end
+        end
+      end
+    end
     local options
     if not node.local_node and (call.capability == "edit" or call.capability == "write") then
       options = { record_change = (ctx and ctx.changes) ~= nil }
@@ -2826,6 +2965,14 @@ end
 -- "the arguments were wrong" into "this tool takes path (string, required)". It reads the two tables
 -- this module already holds - never `M.catalog`, which asks the connectors and the peers: a refusal must
 -- not make a network call to explain itself, and a peer that is down would turn one refusal into two.
+-- The ONE lookup the argument validator and the peer bash path use (mission
+-- tool-args-honest-and-same-on-peers): a tool's declared parameters, by name and role.
+--
+-- The two hand-written lists are scanned first - no host call, no catalogue - which covers every tool this
+-- file declares, the WhatsApp surface (appended to M.admin at load, lua/core/tools.lua) and `tool_result` /
+-- `route_task`. A name that is not there is a connector, a peer's exported tool or a wasm plugin, and those
+-- are looked up in the catalogue: built at most once per role every CATALOG_TTL seconds, because
+-- `M.catalog` costs 11-18 ms and a call that is not one of them must not pay for it.
 local function parameters_of(name,role)
  local lists = { M.shared or {} }
  if is_master(role or "guest") then lists[#lists+1] = M.admin or {} end
@@ -2837,6 +2984,29 @@ local function parameters_of(name,role)
  end
  return nil
 end
+
+local catalog_parameters, CATALOG_TTL = {}, 30
+function M.parameters(name, role)
+  local declared = parameters_of(name, role)
+  if declared then return declared end
+  if type(name) ~= 'string' or name == '' then return nil end
+  local key = tostring(role or 'guest')
+  local now = tonumber(host.now()) or 0
+  local entry = catalog_parameters[key]
+  if not entry or now - entry.at >= CATALOG_TTL then
+    entry = { at = now, by_name = {} }
+    local ok, list = pcall(M.catalog, role)
+    if ok and type(list) == 'table' then
+      for _, item in ipairs(list) do
+        local fn = item['function'] or {}
+        if type(fn.name) == 'string' and type(fn.parameters) == 'table' then entry.by_name[fn.name] = fn.parameters end
+      end
+    end
+    catalog_parameters[key] = entry
+  end
+  return entry.by_name[name]
+end
+
 
 -- Hook points around one tool call (docs/HOOKS.md). This wrapper is the one funnel every tool call
 -- passes - the model's, a subagent's, a probe's, and one made *inside* another call: code mode's

@@ -95,9 +95,15 @@ check(both_paths.error == 'argument_alias_conflict', 'path with file_path is the
 
 -- 6. A truly unknown argument: the FIRST line names what the tool does take.
 local unknown = call('edit', { path = three, edits = { { old_text = 'a2', new_text = 'a3' } }, old_txt = 'typo' })
-check(unknown.error == 'unsupported_edit_option', 'an unknown option still keeps its code: ' .. json.encode(unknown):sub(1, 300))
+-- An unknown option is refused before the handler runs, by the ONE argument validator: the code is
+-- `unknown_argument:<name>` instead of this handler's own `unsupported_edit_option`. The sentence names
+-- the arguments the schema declares, and the synonyms the handler still maps are not in that sentence
+-- because they are not in the schema (section 1 above proves they still work). Mission
+-- tool-args-honest-and-same-on-peers, item 2.
+check(unknown.error == 'unknown_argument:old_txt', 'an unknown option is refused by name: ' .. json.encode(unknown):sub(1, 300))
+check(unknown.effect == 'none', 'and nothing ran: ' .. tostring(unknown.effect))
 local first_line = tostring(unknown.message):match('^[^\n]*') or ''
-check(first_line:find('old_text', 1, true) ~= nil and first_line:find('file_path', 1, true) ~= nil,
+check(first_line:find('edits', 1, true) ~= nil and first_line:find('range_edits', 1, true) ~= nil,
   'the first line names the accepted arguments: ' .. first_line)
 
 -- 7. The schema the model is sent is the one it was sent before: no synonym appears in it.

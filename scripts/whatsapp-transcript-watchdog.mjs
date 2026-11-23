@@ -57,6 +57,38 @@ export function findProblems(snapshot, previousHeld, at = now) {
   return problems;
 }
 
+// Which store holds the truth about a chat, and how to tell that this one does not.
+//
+// `journal.db` is the OLD Go bridge's journal: on this account it stops at 2026-11-11T18:42:17Z and its
+// `chat_holds` rows describe a rule the component no longer has (23/11: the owner removed chat holds).
+// A journal is STALE when its newest message is behind the newest message the component indexed - the
+// live state being `~/.wasm-agent/components/wa-whatsapp.state/kv.sqlite`, keys `ix/m/<chat>/<inv(ts)>/<id>`
+// with `inv(ts)` = `u64::MAX - ts` as 16 hex digits. Reading a stale journal and reporting its holds is
+// exactly the mistake this function exists to refuse: the answer is `state_moved`, not `held`.
+export function stateMoved(journalMaxSentSeconds, indexNewestMs) {
+  if (!indexNewestMs) return null; // no component store here: nothing to compare, and nothing to refuse
+  const journal = Number(journalMaxSentSeconds || 0) * 1000;
+  if (!journal) return { reason: 'state_moved', why: 'the journal holds no message at all and the component index does' };
+  if (journal >= indexNewestMs) return null;
+  return { reason: 'state_moved', journal_ms: journal, index_ms: indexNewestMs };
+}
+
+// The newest message the component indexed, from its own kv (read-only, one row): the 16 hex digits of
+// `inv(ts)` are zero-padded, so the smallest one lexicographically is the newest message.
+function componentNewest() {
+  const kv = path.join(home, '.wasm-agent/components/wa-whatsapp.state/kv.sqlite');
+  if (!fs.existsSync(kv)) return 0;
+  try {
+    const db = new DatabaseSync(kv, { readOnly: true });
+    const row = db.prepare("SELECT substr(k, instr(substr(k, 6), '/') + 6, 16) AS h FROM kv WHERE k LIKE 'ix/m/%' ORDER BY h LIMIT 1").get();
+    db.close();
+    if (!row || !row.h || !/^[0-9a-f]{16}$/.test(row.h)) return 0;
+    return Number(0xFFFFFFFFFFFFFFFFn - BigInt('0x' + row.h));
+  } catch {
+    return 0; // an unreadable store is not evidence that the journal is current
+  }
+}
+
 function snapshot() {
   const db = new DatabaseSync(path.join(stateDir, 'journal.db'), { readOnly: true });
   const one = (sql, ...args) => db.prepare(sql).get(...args);
@@ -72,8 +104,9 @@ function snapshot() {
       AND NOT EXISTS (SELECT 1 FROM outbox o WHERE o.account=a.account AND o.generation=a.generation AND o.chat=a.chat AND o.source=a.id)`,
     Number(config.activated_at || 0)).filter((row) => !heldSet.has(row.chat)) : [];
   const lastConnected = at('connected'), lastDisconnected = at('disconnected');
+  const journalSent = (one('SELECT max(sent) AS sent FROM messages') || {}).sent || 0;
   db.close();
-  return { config, lastConnected, lastDisconnected, pending, held, unposted };
+  return { config, lastConnected, lastDisconnected, pending, held, unposted, journalSent };
 }
 
 // The alert's own file. One path, fixed, beside the watchdog's memory: an operator or a model can read
@@ -92,6 +125,17 @@ export function deliver(account, text, problems, at = now) {
 export function main() {
   const memory = fs.existsSync(memoryFile) ? JSON.parse(fs.readFileSync(memoryFile, 'utf8')) : { reported: {}, held: null };
   const snap = snapshot();
+  // A stale journal answers nothing: reporting its holds would be a chat blocked in a store the component
+  // does not read (the 23/11 trap: `chat_holds` empty for a chat the component refused to post into).
+  const moved = stateMoved(snap.journalSent, componentNewest());
+  if (moved) {
+    const result = { ok: false, reason: moved.reason, ...moved, journal: path.join(stateDir, 'journal.db'),
+      live: '~/.wasm-agent/components/wa-whatsapp.state/kv.sqlite',
+      note: "the old bridge journal: this watchdog no longer answers holds or posting from it" };
+    console.log(JSON.stringify(result));
+    process.exitCode = 1;
+    return result;
+  }
   const problems = findProblems(snap, memory.held);
   const fresh = problems.filter((problem) => !memory.reported[problem.key] || now - memory.reported[problem.key] > DAY);
   let delivery = null;

@@ -18,7 +18,7 @@
 //!
 //! The crate is split so the decisions can be tested on the host: `queue` (freshness, retry, the
 //! express lane), `posting` (allowlist gate, holds, chunks, edit pacing), `alerts` (own-chat log,
-//! group titles), `holds` (chats held until a revoke is proven), `recognize` (the segment stream +
+//! group titles), `notices` (a deletion flags its message, never a chat), `recognize` (the segment stream +
 //! transcript future as one job, with the timings a shadow run compares), `ocr` (the image reader's
 //! policy, its bounds and the attach into the index) and `telemetry` (the
 //! stable `wa-transcript key=value` log lines) are pure logic with no host call and no wasm target
@@ -30,7 +30,6 @@ pub mod alerts;
 /// chat is converted to the protocol library's `Jid`, so no two paths can accept different chats.
 pub mod chat;
 pub mod health;
-pub mod holds;
 /// The past: the messages a history sync carries and the on-demand request that asks the primary
 /// phone for more, indexed under a budget (`docs/WHATSAPP-TRANSCRIPTION.md`, "The past").
 pub mod history;
@@ -40,6 +39,10 @@ pub mod index;
 /// App-state mutation MACs as a few kv blobs per collection (the store's write budget): pure, so
 /// `cargo test` pins the snapshot cost natively while `store.rs` stays wasm-only.
 pub mod macshards;
+/// Deletion notices: a revoke or an edit is a fact about ONE MESSAGE (the owner's decision of 23/11), the
+/// tombstone a notice leaves when its message is not here yet, and the counters that make an unmatched
+/// notice visible. No chat hold exists any more.
+pub mod notices;
 /// One inbound message as the index keeps it: every kind, plus the source mutations as events.
 pub mod record;
 /// OCR for image messages: the 20 MiB bound, which record is worth reading, what a permanent answer

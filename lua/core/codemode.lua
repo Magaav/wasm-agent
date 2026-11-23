@@ -1004,6 +1004,27 @@ local function script_line(stack,source)
   end
  end
 end
+-- THREE LINES AROUND THE ERROR, IN THE MODEL'S OWN SCRIPT (23/11). One line was shown before, trimmed at
+-- 160 characters: measured over the retained ledger (202 compile failures in the five days to 23/11
+-- 13:00Z), 39 had their offending line cut at exactly that 160, so the backtick or quote the sentence asks
+-- the model to remove could sit just past the cut and stay invisible. And the cause of "expecting ';'" or
+-- "unexpected end of string" is often the line ABOVE, a literal left open - which was never shown. The
+-- excerpt is the model's own text (origin), the '>' row is the line the sandbox stopped on, and a row too
+-- long for the budget says how much it is not showing instead of ending silently.
+local EXCERPT_LINE=200
+local MESSAGE_MAX=900
+local function excerpt(origin,line,radius)
+ local rows={}
+ for row in (origin..'\n'):gmatch('([^\n]*)\n') do rows[#rows+1]=row end
+ local out={}
+ for i=math.max(1,line-radius),math.min(#rows,line+radius) do
+  local text=rows[i]:gsub('^%s+','')
+  local dropped=#text-EXCERPT_LINE
+  if dropped>0 then text=text:sub(1,EXCERPT_LINE)..' +'..dropped end
+  out[#out+1]=(i==line and '>' or ' ')..i..': '..text
+ end
+ return table.concat(out,'\n')
+end
 -- A MISSING GLOBAL IS ONE CLASS, AND ITS FIX LINE SAYS WHY (22/11). Counted over the retained ledger
 -- (~/.wasm-agent/tool-results, every `run` result whose fix line came from this file): setTimeout 40,
 -- Buffer 17, HOME 16, location 12, require 6 - and btoa/atob 0: those two are already in the guest
@@ -1047,7 +1068,7 @@ local function fixed_tail(fix, tail)
  if fix:find(tail,1,true) then return fix end
  return fix..tail
 end
-local function explain(result,source,budget)
+local function explain(result,source,budget,origin,origin_line)
  if type(result)~='table' or result.ok~=false or type(result.error)~='string' or type(source)~='string' then return result end
  local raw=result.error
  -- A script that ran out of CPU says so, with the way on (14/11 replay: two email scripts died on
@@ -1104,16 +1125,39 @@ local function explain(result,source,budget)
   fix=type(inner.fix)=='string' and inner.fix or nil
   name=nil
  end
- local line,col,text=script_line(err.stack,source)
+ -- THE LINE THE MODEL WROTE, NOT THE LINE THE HARNESS COMPILED (23/11). `source` is not the model's
+ -- script: the run tool wraps it before the sandbox sees it (lua/core/raw_code.lua: one line for the
+ -- `raw = {}` binding, four when the call carries raw blocks) and the harness adds a prologue.
+ -- script_line undoes the prologue only, so a call with one raw block answered "Change line 6" for a
+ -- three-line script (reproduced on 23/11: reported 6, the line that broke was 2) - a line that does not
+ -- exist, pointing at the end of the model's script. origin is the text as it was sent and origin_line is
+ -- the source line it starts on, so the number below is the model's own line.
+ local at,acol=script_line(err.stack,source)
+ local line,col
+ if at then
+  local mapped=at-(tonumber(origin_line) or 1)+1
+  local count=select(2,origin:gsub('\n',''))+1
+  if mapped>=1 and mapped<=count then line,col=mapped,acol end
+ end
  local where=''
- if line then where='\nline '..line..(col and (':'..col) or '')..(text and text:find('%S') and (' | '..text:gsub('^%s+',''):sub(1,160)) or '') end
+ if line then
+  -- The header keeps its recorded shape (`line N:C | the text`), because that is what a row and a reader
+  -- already parse and this change is additive: the text is capped the same way the excerpt is, so it cannot
+  -- end silently either.
+  local rows={}
+  for row in (origin..'\n'):gmatch('([^\n]*)\n') do rows[#rows+1]=row end
+  local first=(rows[line] or ''):gsub('^%s+','')
+  local trimmed=first:sub(1,EXCERPT_LINE)
+  if #first>EXCERPT_LINE then trimmed=trimmed..' +'..(#first-EXCERPT_LINE) end
+  where='\nline '..line..(col and (':'..col) or '')..' | '..trimmed..'\n'..excerpt(origin,line,1)
+ end
  local ran={}
  for _,call in ipairs(result.calls or {}) do if call.ok==true then ran[#ran+1]=tostring(call.name) end end
  local before=#ran>0 and ('Already done, not undone: '..table.concat(ran,', '):sub(1,200)..'.') or 'No call had succeeded yet.'
  local compile_failure=raw:find('guest evaluation exception',1,true)~=nil
  if compile_failure then before='The script did not compile, so nothing ran.' end
  local out={};for k,v in pairs(result) do out[k]=v end
- out.message=((name and (name..': ') or '')..message..where):sub(1,600)
+ out.message=((name and (name..': ') or '')..message..where):sub(1,MESSAGE_MAX)
  out.error=out.message:match('^[^\n]*'):sub(1,300)
  -- A SYNTAXERROR IS ONE CLASS, AND ITS LINE SAYS SO (22/11). Measured on the two days before: about 35
  -- compile failures - the largest single failure class - and the fix line then said only "Change line N",
@@ -1182,6 +1226,10 @@ local function run_script(memory,args,role,ctx,catalog,current_catalog,dispatch,
  -- alike, and the script's own line 1 is line 2 of what the interpreter compiles
  -- (lua/core/codemode_harness.lua). A copy, so the decorated source never becomes the tool's args.
  local source=args.code
+ -- What the model sent, and where its first line sits in `source` (raw_code.native_run says; a direct
+ -- codemode call is its own origin from line 1). Used only by the line a compile error names.
+ local origin=type(args.origin)=='string' and args.origin or source
+ local origin_line=math.max(1,math.floor(tonumber(args.origin_line) or 1))
  local workspace=memory.session_workspace and memory.session_workspace(ctx.session_id) or nil
  -- The scope key this script's variables and pending handles live under. It carried the session
  -- straight from ctx.session_id, and a nil session simply vanished from the encoded table - so EVERY
@@ -1209,7 +1257,7 @@ local function run_script(memory,args,role,ctx,catalog,current_catalog,dispatch,
  pending_calls.begin(dispatch,popts)
  local function finish(result)
   if type(result)~='table' then return result end
-  result=explain(result,source,budget)
+  result=explain(result,source,budget,origin,origin_line)
   if type(result)=='table' and result.summary==nil then result.summary=summary_of(result.calls) end
   local settled=pending_calls.announce(scope)
   if settled then result.pending_settled=settled end

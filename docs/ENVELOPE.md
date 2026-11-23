@@ -149,13 +149,13 @@ runs on the client too, while `bash` runs on this node.
 | `tool_result` | `sha256` `limit?` `offset?` | Read an exact byte range of a truncated tool result |
 | `route_task` | `route` `task` `reason?` | Record whether this turn is done here or delegated (orchestration mode) |
 | `forget` | `id` | Delete a stored fact by id |
-| `bash` | `command` `cwd?` `timeout_seconds?` | Run a shell command on this machine |
-| `operation` | `action` `command?` `cwd?` `id?` `limit?` `offset?` `scope?` `stream?` `timeout_seconds?` `wait_for?` `wait_ms?` | Run or collect a supervised long command |
-| `read` | `path` `column?` `limit?` `offset?` `version?` | Read a file (text or image), paged |
-| `write` | `content` `path` | Create or overwrite a file |
-| `edit` | `path` `edits?` `range_edits?` | Replace a versioned range returned by read |
-| `ls` | `path?` | List a directory |
-| `grep` | `pattern` `extensions?` `ignore_case?` `limit?` `max_depth?` `path?` | Find lines matching literal text |
+| `bash` | `command` `cwd?` `stdin?` `timeout_seconds?` | Run a shell command on this machine |
+| `operation` | `action` `command?` `cwd?` `id?` `limit?` `offset?` `scope?` `stdin?` `stream?` `timeout_seconds?` `wait_for?` `wait_ms?` | Run or collect a supervised long command |
+| `read` | `path` `column?` `limit?` `node?` `offset?` `version?` | Read a file (text or image), paged |
+| `write` | `content` `path` `node?` | Create or overwrite a file |
+| `edit` | `path` `edits?` `node?` `range_edits?` | Replace a versioned range returned by read |
+| `ls` | `node?` `path?` | List a directory |
+| `grep` | `pattern` `context?` `extensions?` `ignore_case?` `limit?` `max_depth?` `node?` `path?` | Find lines matching literal text |
 | `diagnose` | `steps` | Run a fixed read/grep check sequence once |
 | `client` | `action` `button?` `id?` `key?` `max_chars?` `port?` `profile?` `reuse?` `script?` `target?` `text?` `timeout_ms?` `url?` `x?` `y?` | Act on the user's machine: screen, mouse, keyboard, browser |
 | `shell` | `command` `cwd?` `shell?` | Run a shell command on the client machine |

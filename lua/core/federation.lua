@@ -446,6 +446,10 @@ function M.refresh()
       end
       if type(answer) == 'table' and answer.ok and type(answer.tools) == 'table' then
         entry.tools = answer.tools
+        -- The build the peer says it runs, when it says one: a refusal about a field the peer's catalogue
+        -- does not declare can then name the version instead of "unknown" (mission
+        -- tool-args-honest-and-same-on-peers, mixed-fleet follow-up). Absent stays absent - never invented.
+        if type(answer.version) == 'string' and answer.version ~= '' then entry.version = answer.version end
       else
         entry.tools = {}
         entry.error = type(answer) == 'table' and (answer.error or answer.detail) or 'no_answer'
@@ -560,6 +564,32 @@ local function peer_parameters(tool)
   return { type = 'object' }
 end
 
+
+-- Does PEER declare FIELD on TOOL, from the cached peer catalogue? (mission
+-- tool-args-honest-and-same-on-peers, mixed-fleet follow-up)
+--
+-- A peer that predates a field IGNORES it: sending `stdin` or `context` to a v0.1.1 peer would be the
+-- silent drop this mission closed on this node, one hop out. So the caller confirms the field against the
+-- peer's OWN catalogue before the call leaves (`tools.remote`, lua/core/tools.lua), and refuses locally
+-- when it cannot. Answers (declared, version): declared is true, false, or nil when the cache says nothing
+-- about that peer or that tool - and nil is NOT yes.
+function M.declares(peer_name, tool_name, field)
+  if type(peer_name) ~= 'string' or type(tool_name) ~= 'string' or type(field) ~= 'string' then return nil, 'unknown' end
+  for _, peer in pairs(load_cache().peers or {}) do
+    if peer.name == peer_name or peer.node_id == peer_name then
+      local version = tostring(peer.version or peer.build or peer.version_string or 'unstated')
+      for _, tool in ipairs(peer.tools or {}) do
+        if tool.name == tool_name then
+          local parameters = peer_parameters(tool) or {}
+          local properties = type(parameters.properties) == 'table' and parameters.properties or {}
+          return properties[field] ~= nil, version
+        end
+      end
+      return nil, version
+    end
+  end
+  return nil, 'unknown'
+end
 function M.schemas()
   local out = {}
   for _, peer in pairs(M.catalog().peers or {}) do

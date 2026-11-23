@@ -1,0 +1,40 @@
+❯ please rebuild the node and tell me when it is done
+step 27 of the long job is done                                                                    │
+step 28 of the long job is done                                                                    │
+step 29 of the long job is done                                                                    │
+step 30 of the long job is done                                                                    │
+step 31 of the long job is done                                                                    │
+step 32 of the long job is done                                                                    │
+step 33 of the long job is done                                                                    │
+step 34 of the long job is done                                                                    │
+step 35 of the long job is done                                                                    │
+step 36 of the long job is done                                                                    │
+step 37 of the long job is done                                                                    │
+step 38 of the long job is done                                                                    │
+step 39 of the long job is done                                                                    │
+step 40 of the long job is done                                                                    │
+step 41 of the long job is done                                                                    │
+step 42 of the long job is done                                                                    │
+step 43 of the long job is done                                                                    │
+step 44 of the long job is done                                                                    │
+step 45 of the long job is done                                                                    │
+step 46 of the long job is done                                                                    ┃
+step 47 of the long job is done                                                                    ┃
+step 48 of the long job is done                                                                    ┃
+step 49 of the long job is done                                                                    ┃
+step 50 of the long job is done                                                                    ┃
+step 51 of the long job is done                                                                    ┃
+step 52 of the long job is done                                                                    ┃
+step 53 of the long job is done                                                                    ┃
+step 54 of the long job is done                                                                    ┃
+step 55 of the long job is done                                                                    ┃
+step 56 of the long job is done                                                                    ┃
+step 57 of the long job is done                                                                    ┃
+step 58 of the long job is done                                                                    ┃
+step 59 of the long job is done                                                                    ┃
+                                                                                                   ┃
+▸ 1·6s Δ↑0 ↓0 ◷ 0:06 · ✓16:27                                                                      ┃
+────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ Type a message, or / for commands
+────────────────────────────────────────────────────────────────────────────────────────────────────
+↻ 1 Σ↑0 Σ↓0 ○ 0.0%/1.0M                                                     deepseek-v4.1-flash·high

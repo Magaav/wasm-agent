@@ -46,6 +46,15 @@ local json = dofile("lua/vendor/json.lua")
 local land = dofile("lua/core/land.lua")
 local real_host = host
 
+-- THE FLEET ASK THIS FIXTURE CANNOT MAKE. The release loop's canaries step asks every node the deploy
+-- installed on to run its own canaries; a fixture's ring names an invented node (SOLO_RING's `work`), and a
+-- row must never call a live peer, so the peer call is answered once here with "this node passed". The asking
+-- itself is proven in scripts/test-land-canary-step.lua, with its own stub per node and its own not-proven
+-- case; this line is the fixture's answer, not a weaker assertion.
+land.impl.canaries_remote = function()
+  return { output = json.encode({ ok = true, failed = 0, features = {} }) }
+end
+
 -- WHAT A CASE MAY REBIND, not just read: these four are written by the cases themselves (a reset of the
 -- recorded peer calls, a sign counter, the vault's availability) and read back by this file's helpers, so
 -- they live in a table the parts hold: an alias would go stale the moment a case reset one.
