@@ -50,8 +50,6 @@ memory.setup()
 local users = dofile("lua/core/users.lua")
 local services = dofile("lua/core/services.lua")
 dofile("lua/core/server.lua")
-local posting = dofile("lua/core/whatsapp_posting.lua")
-local cli = dofile("lua/core/whatsapp_posting_cli.lua")
 
 local checks = 0
 local function ok(value, label)
@@ -77,6 +75,19 @@ local function absent(haystack, needle, label)
     error("WHATSAPP POSTING CHECK FAILED: " .. label .. " (found " .. tostring(needle) .. ")")
   end
 end
+
+-- The two modules this row is about, loaded through pcall so that a tree WITHOUT them fails on a
+-- NAMED check - the shape scripts/test-discriminates.sh reads as "an assertion failed on the old code" -
+-- instead of dying on a raw load error that says nothing about the change.
+local function load_module(path)
+  local loaded, module = pcall(dofile, path)
+  if loaded and type(module) == "table" then return module end
+  return nil
+end
+local posting = load_module("lua/core/whatsapp_posting.lua")
+ok(posting ~= nil, "the operator switch exists as a module (lua/core/whatsapp_posting.lua)")
+local cli = load_module("lua/core/whatsapp_posting_cli.lua")
+ok(cli ~= nil, "and so does its operator CLI (lua/core/whatsapp_posting_cli.lua)")
 
 local SERVICE = "wa-whatsapp"
 local MASTER = { role = "master", user_id = "test" }
