@@ -78,6 +78,25 @@ if [ -z "$jobs" ]; then
   esac
   [ "$jobs" -gt "$cap" ] 2>/dev/null && jobs=$cap
 fi
+# THE TEMP FLOOR COMES FIRST (item 4 of the tests-clean-their-tmp round, 23/11).
+#
+# /tmp on this node is a 16 G tmpfs with a per-user quota, and it ran out three times in one day; each time a
+# verdict was LOST: main-health red on ENOSPC (22808bc8), and the row 'regenerate' dying on "fatal: unable to
+# write loose object file: Disk quota exceeded" (2104a4d8 07:36Z). A run that cannot write its scratch
+# reports a red about the MACHINE, and this runner's output is read as a verdict about the TREE - by a
+# landing, by a mission and by scripts/main-health.sh, which copies the failed rows into its verdict. So the
+# question is asked here, before anything is built and before the first row is spawned, and it is answered by
+# a refusal (exit 2) that nothing downstream can count as a failed row. "Unknown is not yes": a machine whose
+# free space cannot be measured is refused too, by the same path.
+. "$ROOT/scripts/lib/temp-floor.sh"
+if ! tmp_note=$(wa_tmp_floor_check /tmp "${TMPDIR:-}"); then
+  case "$tmp_note" in
+    tmp_unknown:*) tmp_code=tmp_unknown ;;
+    *) tmp_code=tmp_low ;;
+  esac
+  echo "fast: refused(${tmp_code:-tmp_low}): $tmp_note. Nothing was run: a red caused by a full disk is a fact about the machine and never about this tree." >&2
+  exit 2
+fi
 . "$ROOT/scripts/lib/fast-environment.sh"
 # THE NODE'S OWN RECORD OF ITS BUILD ENVIRONMENT (items 3 and 6 of the node-ops round). One file -
 # <home>/.wasm-agent/build.env - names the toolchain directories, zig, the target-dir policy and the
