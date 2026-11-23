@@ -442,7 +442,10 @@ contains "$out" "0 new" "import/export/include of an existing interface declare 
 out=$(bash scripts/wit-lint.sh 2>&1); rc=$?
 [ "$rc" = 0 ] && ok || fail "the tree's own wit/ must pass, exit $rc: $out"
 contains "$out" "wit-lint ok" "the tree's verdict line"
-contains "$out" "5 baselined (3 json-name, 2 poll-without-future)" "the five shapes main has are the five this tree records, and the two kinds are counted apart (three JSON-carrying names, two poll funcs)"
+# Six since 22/11: `journal-entry.payload` is now visible in the memory copy too (its doc comment came
+# back with the regenerated slice, scripts/gen-wit-deps.lua), so the fourth json-name is the same field
+# in the third file that declares it - not a new exception.
+contains "$out" "6 baselined (4 json-name, 2 poll-without-future)" "the six shapes main has are the six this tree records, and the two kinds are counted apart (four JSON-carrying names, two poll funcs)"
 listed=$(bash scripts/wit-lint.sh --list 2>&1)
 for expected in "codemode.wit	interface:types/record:tool-facts	field schema-json" \
                 "hooks.wit	interface:types/record:decision	field updated-input-json" \

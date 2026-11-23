@@ -53,10 +53,12 @@
 #   * a list<u8> field that carries JSON (hooks.wit's row.json is one). The rule is about 'string',
 #     because that is where the confusion lives; a bytes field is a different call, and REPORT.md lists
 #     it rather than this check judging it.
-#   * a variant case's payload (failed(string)), which has no name of its own to carry -json.
-#     wit/memory/deps/kernel/kernel.wit's journal-entry.payload is the measured case: the same field
-#     this rule flags in wit/kernel/sql.wit, unseen here because that copy carries no doc comment. The
-#     rule reads what a file says, never what a copy of it meant.
+#   * a variant case's payload (failed(string)), which has no name of its own to carry -json. A
+#     record field that carries JSON is judged where it is declared, which for `journal-entry.payload`
+#     is three files - the canonical `wit/kernel/sql.wit` and its two vendored copies under
+#     `wit/*/deps/kernel/` - and all three are in the baseline. The rule reads what a file says; since
+#     22/11 a copy says exactly what the canonical file says (scripts/gen-wit-deps.lua), where before
+#     the memory copy had lost that comment to a hand trim and the rule could not see it.
 #   * a mention of a JSON *file* is not a mention of a JSON *value*: 'kind: string' documented
 #     "native (hooks.json) or claude (settings.json)" is not a JSON-carrying field, and filenames are
 #     stripped before a doc is read (scripts/test-wit-lint.sh proves that case).
