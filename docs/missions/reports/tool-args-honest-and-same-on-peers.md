@@ -546,3 +546,41 @@ never be handed a reference in its place. I did not make that change.
 `capability`/`node`; the managed-list gate declare-or-context; `searchTools` is not an argument problem at
 all - see 4). I did NOT read the recorded `tool_arguments` events, so no census line is claimed here.
 
+
+## 18. STEP 2, fourth pass: the codemode-default cause, and the rows
+
+**The cause, measured twice.** `searchTools({query:"read",limit:3})` inside a run answered
+`["capture_inspect","client","codemode"]` on my tip AND, identically, on the base `28fb526d` when the probe
+used a full master catalogue - so the ranking of a word search over the whole catalogue was not mine. What WAS
+mine was the word: the `bash` description gained "stdin is the text the command **reads** and then sees
+closed", and a worker profile's smaller catalogue ranks on those words. That clause is now
+"stdin is the text the command takes as its standard input, then closed", and the `node` clauses of
+`read`/`grep`/`write`/`edit`/`ls` no longer borrow another tool's verb either ("answers from that peer",
+"that node's file instead of this one's"). `test-codemode-default` is **GREEN: 39 checks, 0 paid calls**.
+
+So the fix was a TEXT fix in the catalogue, not a code path: a tool's description must not steal the word
+that names another tool, because that word is how a model (and `searchTools`) finds it. The stored-reference
+reading in §16/§17.4 was the wrong hypothesis and is withdrawn.
+
+**Rows run singly on this tree**
+
+| row | verdict |
+|---|---|
+| test-codemode-default | **ok, 39 checks** (was the last G blocker) |
+| test-selfloop | ok, 114 checks (1 skipped) |
+| test-session-watch | ok, 107 checks |
+| test-remote-pending | ok, 90 checks |
+| test-tool-arguments | ok, 32 checks |
+| test-tool-args-walker | ok, 4 checks (180 files, 20 call sites) |
+| test-remote-field-support | ok, 13 checks |
+| test-tool-args-parity | ok, 1060 checks |
+| test-edit-aliases | ok, 34 checks |
+| test-remote-call-shape | ok, 89 checks |
+| test-turn-signal | ok, 152 checks, 0 failed (run singly before this batch; the batch row printed no verdict line of its own) |
+
+**Not done, and not claimed.** The four dynamic call-site decisions of §16 are still unimplemented (`wake.now`
+seam, `codemode_pending.remote_operation` dropping `capability`/`node`, the managed-list gate moving its field
+to the context), and the recorded `tool_arguments` events were not read, so the census is not claimed.
+Enforcement stays `'off'`; model-door enforcement is one line away once those are done and main-health is
+green with it.
+
