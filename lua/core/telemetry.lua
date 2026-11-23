@@ -312,21 +312,52 @@ local AUDIT_INSERT = "INSERT INTO harness_events(id,session_id,run_id,span_id,ki
 -- (`{tool=..., names={WASM_AGENT_LLM_API_KEY=1}}`, lua/core/agent.lua from redact.lua's hit table), never a
 -- value: the spool is a record that a secret was seen, not a second copy of it. Asserted, not assumed -
 -- scripts/test-secret-audit.lua redacts a known secret and reads the spool back.
+--
+-- THE READ-MODIFY-WRITE RACE, AND THE TAKE THAT CLOSES IT (Fable's review r2 of the spool, 23/11). Rewriting
+-- the spool in place was a lost-update: A's flush reads the file, B appends a refused record, A writes the
+-- file back without B's line - B's record gone, the very loss this branch exists to stop, and two processes
+-- on one data dir (serve + workers) is the normal case here. So a flusher never rewrites the spool:
+--
+--   1. it RENAMES the spool to a private name it owns (`audit-spool.<uuid>.flushing`, atomic, and
+--      `host.rename_file` refuses an existing target, so no two flushers take the same file);
+--   2. it processes THAT file: every row goes to the ledger, one patience for the first and one attempt for
+--      the rest, stopping at the first refusal;
+--   3. rows the ledger still refuses are RE-APPENDED to the spool with `append_file` (an appender never
+--      rewrites, so a line an appender wrote after step 1 is never touched), and the private file is removed.
+--
+-- An appender only ever appends to `audit-spool.jsonl`. An appender that writes between step 1 and step 3
+-- therefore appends to the file the node will read next - never to a file somebody is rewriting.
+--
+-- A flusher that is KILLED between the take and the cleanup leaves its private file behind. A flush adopts
+-- any `*.flushing` file older than `ADOPT_AFTER_S` seconds (by the age `host.list_dir` reports), by renaming
+-- it to a private name of its own first - so two flushers cannot both adopt it - and writes its rows. Rows are
+-- still written exactly once: `harness_events.id` is UNIQUE and a duplicate insert is read as "already there".
 local SPOOL_NAME = "audit-spool.jsonl"
+local SPOOL_BASE, SPOOL_SUFFIX = "audit-spool", ".flushing"
+-- Longer than any single flush (one patience, 20 s by default), so a live flusher's file is never adopted.
+local ADOPT_AFTER_S = 60
 
-local function spool_path()
+local function spool_dir()
   local ok, paths = pcall(function() return host.paths() end)
   local data = ok and type(paths) == "table" and paths.data or nil
   if type(data) ~= "string" or data == "" then return nil end
-  return data .. "/" .. SPOOL_NAME
+  return data
 end
 
--- The spool's rows, oldest first. A line that does not parse is KEPT (flagged `unreadable`) instead of being
--- dropped: a record nobody can read is still a record, and a spool that deletes what it cannot understand
--- would be the very loss this file is about.
-local function spool_rows()
-  local path = spool_path()
-  if not path then return { rows = {}, count = 0, reason = "no_data_directory" } end
+local function spool_path()
+  local dir = spool_dir()
+  return dir and (dir .. "/" .. SPOOL_NAME) or nil
+end
+
+local function private_path(dir)
+  return dir .. "/" .. SPOOL_BASE .. "." .. tostring(host.uuid()) .. SPOOL_SUFFIX
+end
+
+-- The rows of ONE spool file, oldest first. A line that does not parse is KEPT (flagged `unreadable`) instead
+-- of being dropped: a record nobody can read is still a record, and a spool that deletes what it cannot
+-- understand would be the very loss this file is about.
+local function rows_of(path)
+  if type(path) ~= "string" or path == "" then return { rows = {}, count = 0, reason = "no_data_directory" } end
   local text = (type(host.read_file) == "function") and host.read_file(path) or nil
   if type(text) ~= "string" or text == "" then return { rows = {}, count = 0, path = path } end
   local rows = {}
@@ -355,18 +386,55 @@ local function spool_append(row)
   return true
 end
 
--- Rewrite the spool with exactly these entries, atomically through `write_file`. An empty list leaves an
--- empty owner-only file rather than removing it: a spool that disappears is indistinguishable from one that
--- was never written, and the reader's `audit_owed` must not be a guess.
-local function spool_rewrite(entries)
+-- What the data directory holds: the spool, its private files, and the ones old enough to adopt. Read from
+-- `host.list_dir`, whose entries carry `modified` in epoch seconds - the only clock this decision needs, and
+-- one the host already answers. A listing that cannot be read is NOT "no spool": it is reported.
+local function spool_listing()
+  local dir = spool_dir()
+  if not dir then return { dir = nil, entries = {}, reason = "no_data_directory" } end
+  if type(host.list_dir) ~= "function" then return { dir = dir, entries = {}, reason = "host_has_no_list_dir" } end
+  local answered, raw = pcall(host.list_dir, dir)
+  if not answered then return { dir = dir, entries = {}, reason = "list_dir_failed" } end
+  local decoded, value = pcall(json.decode, tostring(raw))
+  local list = decoded and type(value) == "table" and (value.entries or value) or nil
+  if type(list) ~= "table" then return { dir = dir, entries = {}, reason = "list_dir_unreadable" } end
+  local entries = {}
+  local now = host.now()
+  for _, entry in ipairs(list) do
+    local name = type(entry) == "table" and tostring(entry.name or "") or ""
+    if name ~= "" then
+      local stale = name:sub(1, #SPOOL_BASE + 1) == SPOOL_BASE .. "."
+        and name:sub(-#SPOOL_SUFFIX) == SPOOL_SUFFIX
+        and (now - (tonumber(entry.modified) or now)) >= ADOPT_AFTER_S
+      entries[#entries + 1] = { name = name, path = dir .. "/" .. name, size = tonumber(entry.size) or 0,
+        modified = tonumber(entry.modified) or 0, adoptable = stale }
+    end
+  end
+  return { dir = dir, entries = entries }
+end
+
+-- Append these entries' lines to the SPOOL (never rewrite it): the flusher's one way to put back what the
+-- ledger still refuses. One append for the whole block, so it is one fsync and one atomic step.
+local function spool_append_entries(entries)
+  if #entries == 0 then return true end
   local path = spool_path()
   if not path then return false, "no_data_directory" end
   local lines = {}
-  for _, entry in ipairs(entries or {}) do lines[#lines + 1] = entry.raw end
-  local ok, written = pcall(host.write_file, path, #lines > 0 and (table.concat(lines, "\n") .. "\n") or "")
-  if not ok or written ~= true then return false, "write_file_refused" end
-  spool_pending, spool_seen = #lines, true
+  for _, entry in ipairs(entries) do lines[#lines + 1] = entry.raw end
+  local ok, written = pcall(host.append_file, path, table.concat(lines, "\n") .. "\n")
+  if not ok then return false, tostring(written) end
+  if written ~= true then return false, "append_file_refused" end
+  spool_pending, spool_seen = spool_pending + #lines, true
   return true
+end
+
+-- Drop a private file this process has finished with. Reported when it fails: a file that cannot be removed
+-- is adopted later as stale, which is slower but not a loss.
+local function spool_drop(path)
+  if type(host.remove_file) ~= "function" then return false, "host_has_no_remove_file" end
+  local ok, removed = pcall(host.remove_file, path)
+  if not ok then return false, tostring(removed) end
+  return removed == true, removed == true and nil or "remove_file_refused"
 end
 
 local function audit_params(row)
@@ -412,7 +480,7 @@ function M.audit(session_id, run_id, span_id, kind, phase, payload, at)
   -- What an earlier refusal kept back - in this process's memory or in a spool a killed one left - goes
   -- first, so a jam is worked off by the next record instead of accumulating.
   if #owed > 0 or spool_pending > 0 or not spool_seen then
-    if not spool_seen then spool_pending, spool_seen = spool_rows().count, true end
+    if not spool_seen then M.spool_pending() end
     if #owed > 0 or spool_pending > 0 then M.flush_audit() end
   end
   local row = {id = host.uuid(), session_id = session_id, run_id = run_id or "", span_id = span_id or "",
@@ -439,11 +507,20 @@ end
 function M.owed() return #owed + spool_pending end
 
 -- Look at the spool itself: <rows>, <count>, <reason>. This is what a node calls when it starts, so the
--- records a killed process spooled are written as soon as the ledger answers.
+-- records a killed process spooled are written as soon as the ledger answers. It counts the spool AND every
+-- file a killed flusher left behind, because both are owed.
 function M.spool_pending()
-  local spool = spool_rows()
-  spool_pending, spool_seen = spool.count, true
-  return spool.count, spool.count, spool.reason
+  local listing = spool_listing()
+  local total, reason = 0, listing.reason
+  for _, entry in ipairs(listing.entries) do
+    if entry.name == SPOOL_NAME or entry.adoptable then
+      local rows = rows_of(entry.path)
+      total = total + rows.count
+      reason = reason or rows.reason
+    end
+  end
+  spool_pending, spool_seen = total, true
+  return total, total, reason
 end
 
 -- Write what a refusal kept back. <written>, <left>, <last reason>. Called from the end of a run (where the
@@ -453,13 +530,41 @@ end
 -- ONE PATIENCE PER FLUSH (Fable's review, item 2): the first row pays the ledger's patience, every row after
 -- it gets ONE attempt, and the first refusal stops the flush and keeps the rest. Ten owed rows on a jammed
 -- ledger used to cost ten patiences (200 s); now they cost one, plus at most one connection wait.
+--
+-- THE FLUSH TAKES, IT NEVER REWRITES. In order: every private file a killed flusher left (older than
+-- ADOPT_AFTER_S), the spool itself, and this process's in-memory rows. Each file is taken by RENAME first, so
+-- an appender that writes a new refused record during the flush appends to a file this flush will not touch.
 function M.flush_audit()
-  local spool = spool_rows()
-  spool_pending, spool_seen = spool.count, true
-  local pending = {}
-  for _, entry in ipairs(spool.rows) do pending[#pending + 1] = entry end
+  local listing = spool_listing()
+  local pending, files = {}, {}
+  -- (1) A killed flusher's private file. Renaming it to a name of OUR OWN is the adoption: two flushers can
+  -- never both adopt it, because the second rename finds the source gone.
+  for _, entry in ipairs(listing.entries) do
+    if entry.adoptable then
+      local mine = private_path(listing.dir)
+      local took = pcall(host.rename_file, entry.path, mine)
+      if took then
+        files[#files + 1] = { path = mine, entries = rows_of(mine).rows }
+      end
+    end
+  end
+  -- (2) The spool. `host.rename_file` refuses an existing target and answers false when the source vanished,
+  -- which is what a second flusher taking it looks like - then it is simply not ours to process.
+  local main = listing.dir and (listing.dir .. "/" .. SPOOL_NAME) or nil
+  if main and type(host.rename_file) == "function" then
+    local mine = private_path(listing.dir)
+    local took, renamed = pcall(host.rename_file, main, mine)
+    if took and renamed == true then files[#files + 1] = { path = mine, entries = rows_of(mine).rows } end
+  end
+  for _, file in ipairs(files) do
+    for _, entry in ipairs(file.entries) do pending[#pending + 1] = entry end
+  end
+  -- (3) What this process kept in memory.
   for _, row in ipairs(owed) do pending[#pending + 1] = { row = row, raw = json.encode(row), memory = true } end
-  if #pending == 0 then return 0, 0 end
+  if #pending == 0 and #files == 0 then
+    spool_pending, spool_seen = 0, true
+    return 0, 0
+  end
   if not M.setup() then return 0, #pending, "schema_unavailable" end
   local written, last, stopped = 0, nil, false
   local left = {}
@@ -485,15 +590,23 @@ function M.flush_audit()
     end
   end
   owed = remaining_memory
-  local rewrote, rewrite_why = spool_rewrite(remaining_spool)
-  if not rewrote then
-    -- The rows are in the ledger but the spool still names them: the NEXT flush sees the same ids and the
-    -- UNIQUE id answers "already there", so nothing is written twice. Said, not swallowed.
-    last = last or rewrite_why
-    log_line("telemetry: the audit spool could not be rewritten after a flush (" .. tostring(rewrite_why) ..
-      "); its rows are in the ledger and a later flush will recognise them")
-    return written, #owed + spool.count, last
+  -- What the ledger still refuses goes back by APPEND - the one operation that cannot lose an appender's
+  -- line - and only then are the private files dropped: a file is not removed before its rows are safe.
+  local put_back, put_back_why = spool_append_entries(remaining_spool)
+  if not put_back then
+    last = last or put_back_why
+    log_line("telemetry: the audit spool could not be written back after a flush (" .. tostring(put_back_why) ..
+      "); the taken files are kept and will be adopted by the next flush")
+    return written, #owed + #remaining_spool, last
   end
+  for _, file in ipairs(files) do
+    local dropped, drop_why = spool_drop(file.path)
+    if not dropped then
+      -- Kept, so it is adopted later (its rows are already in the ledger; the UNIQUE id answers for them).
+      last = last or drop_why
+    end
+  end
+  spool_pending, spool_seen = #remaining_spool, true
   return written, #owed + #remaining_spool, last
 end
 
