@@ -142,12 +142,18 @@ because `scripts/fast-path.exclude` does not list it (a `test-*.lua` not listed 
 * **I could not make the row fail with machine load alone**: 200 runs, 6 concurrent, cargo build alongside -
   all green. If the health flake has a second cause, it is still unnamed; the durable path makes it moot for
   this record either way `M.event` is not used for it any more.
-* The fast path was started on the five touched/neighbouring rows under the suite lock
-  (`flock -o ~/Work/missions/.suite.lock`) and queued behind two other missions' suites; the rows were also run
-  directly and all passed: `test-redact-secrets.lua` (23), `test-secret-audit.lua` (25),
-  `test-telemetry-incremental.lua` (40), `test-telemetry-lock-run.lua`, `test-telemetry-lock-holder.lua`,
-  `test-hook-events.lua` (28), `test-durable-steering.lua`, `test-stalls.lua` (16). Whether the queued fast
-  run finished is stated in the session's answer, not assumed here.
+* **The full fast path was NOT run to completion here.** It was started on the five touched/neighbouring
+  rows under the suite lock (`flock -o ~/Work/missions/.suite.lock`, the operation ran 951 s) and never
+  acquired it: two other missions' suites held it for the whole window; the waiting process was cancelled
+  before it ran a single row (`scratch/fast.log` is 0 bytes), so nothing of this branch's fast run has a
+  verdict. What WAS run, individually and green, on this node: `test-secret-audit.lua` (25 checks),
+  `test-redact-secrets.lua` (23), `test-telemetry-incremental.lua` (40 checks), `test-telemetry-lock-run.lua`,
+  `test-telemetry-lock-holder.lua`, `test-hook-events.lua` (28), `test-durable-steering.lua`,
+  `test-stalls.lua` (16); and the always-on contract checks the fast path runs, directly:
+  `sync-prompt-docs.sh --check` (ok), `check-instructions.mjs` (PASS, 79 checks/371 files),
+  `test-landing-queue.mjs` (100 checks), `test-orphan-tests.mjs` (336 wired), `test-session-liveness.mjs`
+  (14 checks), and the land gate's own `scripts/test-discriminates.sh 2104a4d8` (WA_BIN = this tree's build):
+  `1 discriminating, 0 blocking` for `scripts/test-secret-audit.lua` (`scratch/discriminates.json`).
 * Out of scope, reported not changed: `lua/core/bash_mode.lua:69` (the operator's own `/bash` command) redacts
   a result with `redact.value` and records NO `secret_redacted` event - the same silence in a second path, a
   candidate for its own round.
