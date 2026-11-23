@@ -405,6 +405,65 @@ local function operation_progress(dispatch, opts, record, state)
   return entry
 end
 
+-- ---- a script's command changed files (chat-view-round-2, item 2) --------------------------------
+--
+-- The watcher for a shell command lives in the dispatcher's bash branch (lua/core/tools.lua), and a
+-- script's bash never reaches the end of it: that branch starts a MANAGED OPERATION and returns
+-- (`ctx.parallel_start`), so a command run inside code mode - the one execution path this node has -
+-- changed files with no card at all. Measured 23/11 in a scratch work tree through the real
+-- dispatcher: `tools.bash({command:"printf C > tracked.txt"})` inside a `run` block emitted NOTHING,
+-- while the very same command dispatched directly emitted `bash_changes[1] tracked.txt`.
+--
+-- So the snapshot is taken HERE, before the operation starts, and compared when it settles - the only
+-- moment at which what the command did is a fact. Both halves are lua/core/bash_changes.lua's own
+-- functions, the event is the same `bash_changes` the view already draws cards from, and it goes to
+-- the run's change queue (lua/core/agent.lua drains it after this call's result row, so the card
+-- cannot land inside the code block that is still open). A read-only command takes no snapshot, an
+-- operation that never settles claims nothing, and a caller with no listener pays nothing.
+local bash_changes = dofile("lua/core/bash_changes.lua")
+
+local function watch_before(opts, params)
+  local ctx = type(opts) == "table" and opts.ctx or nil
+  if type(ctx) ~= "table" or type(ctx.emit) ~= "function" or not ctx.watch_changes then return nil end
+  local command = type(params) == "table" and tostring(params.command or "") or ""
+  if command == "" then return nil end
+  local cwd = type(params) == "table" and tostring(params.cwd or "") or ""
+  local read_only = nil
+  if type(ctx.read_only_command) == "function" then read_only = ctx.read_only_command(command) end
+  local watched = bash_changes.before(cwd, read_only)
+  if type(watched) ~= "table" then return nil end
+  watched.command = command
+  return watched
+end
+
+local function watch_settle(opts, record, state)
+  local ctx = type(opts) == "table" and opts.ctx or nil
+  local watched = type(record) == "table" and record.watch or nil
+  if type(watched) ~= "table" or type(ctx) ~= "table" then return end
+  record.watch = nil
+  -- Only a settled operation is an answer: an op still running has not finished changing files yet,
+  -- and comparing now would report half of what it did.
+  if type(state) ~= "table" or state.settled ~= true then return end
+  local files, refused = bash_changes.changed(watched)
+  if #files == 0 and #refused == 0 then return end
+  local event = { type = "bash_changes", command = watched.command, files = files, refused = refused }
+  local queue = type(ctx.change_queue) == "table" and ctx.change_queue or nil
+  if queue then queue[#queue + 1] = event
+  elseif type(ctx.emit) == "function" then ctx.emit(event) end
+  -- A file this run wrote that the command then removed (lua/core/tools.lua, announce_gone): the
+  -- run's own record still holds its text, so the reader gets a Delete with its real lines.
+  if type(ctx.changes) == "table" and type(ctx.emit) == "function" then
+    local loaded, tools_module = pcall(dofile, "lua/core/tools.lua")
+    local announce = loaded and type(tools_module) == "table" and tools_module.announce_gone or nil
+    if type(announce) == "function" then
+      local reported = {}
+      for _, item in ipairs(files) do reported[item.path] = true end
+      for _, item in ipairs(refused) do reported[item.path] = true end
+      pcall(announce, ctx, reported)
+    end
+  end
+end
+
 -- The managed-operation family: `bash` starts one through the tool's own serial path, and the
 -- `operation` tool's `start` registers the receipt it just answered while `await` becomes a bounded
 -- wait on the id the caller already has.
@@ -426,6 +485,8 @@ do
       local ctx = opts.ctx or {}
       local saved = ctx.parallel_start
       local saved_background = ctx.background_operation
+      -- Before the command runs: the files it may change, for the reader only (watch_settle).
+      local watched = watch_before(opts, copy)
       ctx.parallel_start = true
       -- The CPU priority of the operation this starts: low only for a call nobody waits for
       -- (18/11 round 2, finding 9).
@@ -435,7 +496,7 @@ do
       ctx.background_operation = saved_background
       if not ok then return { result = { error = tostring(result), effect = "unknown", replay_allowed = false } } end
       if type(result) == "table" and type(result.operation_id) == "string" and result.operation_id ~= "" then
-        return { op = result.operation_id }
+        return { op = result.operation_id, watch = watched }
       end
       -- A refusal, a guarded command, a rejected timeout: the call finished, and it answers as it
       -- always did. A refusal is never permission to run the command a second way.
@@ -482,6 +543,16 @@ for _, name in ipairs({ "bash", "operation" }) do
       record.cpu_priority = tostring(answer.cpu_priority)
     end
     return answer
+  end
+end
+
+-- A script's bash, watched when it settles: the same event a direct bash emits.
+do
+  local shared = M.EXECUTORS["bash"].settle
+  M.EXECUTORS["bash"].settle = function(dispatch, opts, record, state)
+    local result = shared(dispatch, opts, record, state)
+    watch_settle(opts, record, state)
+    return result
   end
 end
 
@@ -1009,6 +1080,10 @@ function M.invoke(dispatch, opts, name, params, raw, wait_s)
   end
   local record = { op = started.op, tool = name, kind = executor.kind or "operation", scope = scope,
     started_at = started_at, state = "running", reported = false, id = started.id,
+    -- The shell command's before-snapshot, kept with the handle it belongs to and read once, when
+    -- that handle settles (watch_settle). It is this call's own evidence: a map of path -> porcelain
+    -- status, never a file's text, and it is dropped at the moment it is compared.
+    watch = started.watch,
     session = tostring(opts.session or ""), args = tostring(host.sha256(raw or "{}")),
     node = started.node,
     -- An outbox handle can be a DRAFT, and a draft is the one outbox handle a cancel can stop

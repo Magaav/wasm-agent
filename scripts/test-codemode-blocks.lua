@@ -160,7 +160,10 @@ end
 local expected = assert(host.read_file(path), 'fixtures/codemode-blocks.txt must be readable from the repository root')
 eq(rendered, expected, 'the rendered blocks are the committed snapshot')
 
--- A long value folds to ONE row where the host can open it (operator 17/11), and the full rows ride along.
+-- A RESULT IS ONE ROW THE READER OPENS (Victor 23/11: "script output should show 
+-- 'script output · <n> chars' so we can expand"). It used to be a preview of six rows plus
+-- `... +N chars`, then a note saying the whole result was in /console - a place the reader was not
+-- looking at.
 do
   local o = opts()
   o.expandable = true
@@ -169,8 +172,13 @@ do
   for i = 1, 40 do long[#long + 1] = 'item' .. i end
   block.finish(model, { ok = true, value = { list = long } }, 0.1)
   local tail = block.tail_rows(model, 80, o)
-  check(#tail >= 1 and tail[1]:find('chars', 1, true) and tail[1]:find('\226\128\166 %+%d+ chars') ~= nil, 'folded to one row ending … +N chars: ' .. tostring(tail[1]))
+  check(#tail == 1, 'the result is ONE row: ' .. tostring(#tail))
+  check(tail[1]:find('\226\142\191 script output \194\183 ', 1, true) == 1 and tail[1]:find(' chars$') ~= nil,
+    'and it reads `... script output \194\183 N chars`: ' .. tostring(tail[1]))
+  local count = tonumber((tail[1]:match('script output \194\183 ([%d,]+) chars'):gsub(',', '')))
+  check(count ~= nil and count > 0, 'with the count of the result, not of the preview: ' .. tostring(tail[1]))
   check(tail.expand and tail.expand[1] and tail.expand[1]:find('item40', 1, true), 'and the click shows the whole value')
+  check(tail.expand[1]:find('"item1"', 1, true) and tail.expand[1]:find('"item40"', 1, true), 'every row of it, first to last')
   o.expandable = false
   local plainrows = block.tail_rows(model, 80, o)
   check(#plainrows > 1 and not plainrows.expand, 'without the host capability the whole value is shown')
@@ -182,6 +190,54 @@ do
   block.settle(m2, 'b', { ok = true, ms = 3 })
   block.call_lines(m2, 80, po)
   check(painted[1] == 'callWait' and painted[2] == 'callOk', 'call rows: waiting callWait, done callOk: ' .. table.concat(painted, ','))
+end
+
+-- The count is thousands-separated, and it counts CHARACTERS (a `✓` in the output is one of them).
+do
+  local o = opts()
+  o.expandable = true
+  local model = block.new({ code = 'return s;' }, 0)
+  block.finish(model, { ok = true, value = string.rep('a', 2549) }, 0.1)
+  local tail = block.tail_rows(model, 80, o)
+  check(tail[1]:find('script output \194\183 2,549 chars', 1, true) ~= nil,
+    'a 2,549-character result reads `2,549 chars`: ' .. tostring(tail[1]))
+  local unicode = block.new({ code = 'return u;' }, 0)
+  block.finish(unicode, { ok = true, value = string.rep('\226\156\147', 10) }, 0.1)
+  local t2 = block.tail_rows(unicode, 80, o)
+  check(t2[1]:find('script output \194\183 10 chars', 1, true) ~= nil,
+    'ten ticks are ten characters, not thirty bytes: ' .. tostring(t2[1]))
+end
+
+-- A FAILED script is drawn OPEN, its error first, and no press needed: a fold over a failure would hide
+-- the one thing the reader has to act on.
+do
+  local o = opts()
+  o.expandable = true
+  -- a command that printed a line and then failed: its stderr is the reason, and stdout is not blank
+  local op = { operation_id = 'op-1', state = 'failed', stdout = 'partial output\n',
+    stderr = 'boom: the thing did not work\n', process_exit_code = 2 }
+  local model = block.new({ code = 'await tools.bash({command:"x"})' }, 0)
+  block.finish(model, { ok = false, value = json.encode(op) }, 0.1)
+  check(block.failed(model) == true, 'a non-zero exit is a failure')
+  local rows = block.tail_rows(model, 80, o)
+  check(#rows > 1, 'a failed script is drawn open, not folded: ' .. tostring(#rows))
+  check(rows[1]:find('boom', 1, true) ~= nil, 'with its ERROR first: ' .. tostring(rows[1]))
+  check(table.concat(rows, '\n'):find('partial output', 1, true) ~= nil,
+    'and the rest of what it said, after the error')
+  -- A thrown error is a failure too, and its message is on the screen.
+  local thrown = block.new({ code = 'throw new Error("nope")' }, 0)
+  block.finish(thrown, { ok = false, error = 'Error: nope' }, 0.1)
+  check(block.failed(thrown) == true, 'a thrown error is a failure')
+  check(table.concat(block.tail_rows(thrown, 80, o), '\n'):find('nope', 1, true) ~= nil,
+    'and its message is on the screen')
+  -- A completed operation is not a failure, whatever else the record says.
+  local good = block.new({ code = 'await tools.bash({command:"true"})' }, 0)
+  block.finish(good, { ok = true, value = json.encode({ operation_id = 'op-2', state = 'completed',
+    stdout = 'fine\n', stderr = '', process_exit_code = 0 }) }, 0.1)
+  check(block.failed(good) == false, 'exit 0 is not a failure')
+  local good_rows = block.tail_rows(good, 80, o)
+  check(#good_rows == 1 and good_rows[1]:find('script output', 1, true) ~= nil,
+    'and a command that worked is the one row: ' .. table.concat(good_rows, '|'))
 end
 
 -- The snapshot says what it looks like; these say why, so a failure names the rule that broke.

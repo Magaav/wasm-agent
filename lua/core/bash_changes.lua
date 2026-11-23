@@ -45,8 +45,17 @@ end
 
 -- path -> the two-letter porcelain status, for the whole work tree. nil when git is not there or the
 -- directory is not a work tree: a snapshot nobody can take is not a clean tree.
+--
+-- UNTRACKED FILES ARE IN THE SNAPSHOT (chat-view-round-2, item 2). It was `-uno`, so a command that
+-- CREATED a file reported nothing at all: measured 23/11 in a scratch work tree, `printf x > new.txt`
+-- followed by this module's own before/changed pair answered 0 files - the create was invisible on
+-- every path that ever called it, and a model that writes files by running python on a peer or by
+-- `cat > f` looked like it had changed nothing. `-uall` lists each untracked file (not its directory)
+-- so the entry for a new file is the file's own path: measured 0.010 s on this repository, and the
+-- reading is still capped by M.MAX_FILES. A `??` entry is what `M.changed` already reads as "there was
+-- no text before it, which is a fact".
 function M.snapshot(root)
-  local out = exec("git status --porcelain=v1 -uno", root)
+  local out = exec("git status --porcelain=v1 --untracked-files=all", root)
   if out == nil then return nil end
   local map = {}
   for line in out:gmatch("[^\r\n]+") do

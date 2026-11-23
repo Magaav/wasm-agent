@@ -39,6 +39,10 @@ M.KEEP = {
   -- `blocked_by`/`blocked_reason` and a hook's `denied_by`/`permission` (scripts/test-path-guard-canary.lua
   -- asserts the first pair; a refusal that says only "no" is the round the model spends guessing).
   error = true, note = true, fix = true, normalized = true,
+  -- The files this command changed, when the CALLER asked for them (chat-view-round-2, item 2): a peer's
+  -- caller gets the paths and the line counts so it can draw a row per file. Absent on a local call
+  -- (the watcher delivers the cards to the view instead), so the model's own answer never grows one.
+  changes = true,
   blocked_by = true, blocked_reason = true, denied_by = true, permission = true,
 }
 

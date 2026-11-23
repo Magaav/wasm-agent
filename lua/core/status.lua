@@ -232,17 +232,37 @@ local function reported_providers(active)
   return list
 end
 
--- The limits last read per provider, so a `/status` built during a run (`opts.cached`) never waits on
--- the network: the run is what the reader is waiting on.
+-- The limits last read per provider, with WHEN they were read, so a `/status` built during a run
+-- (`opts.cached`) never waits on the network - the run is what the reader is waiting on - and can
+-- still say how old the numbers it draws are (Victor 23/11: mid-run `/status` answered "limits
+-- unavailable: read on the next /status between runs" while the panel had a reading it could have
+-- shown with its age). A read this constructor has not made yet is still refused by name: an age is
+-- a fact about a number that exists, and "unknown" is not "4 minutes ago".
 M._limits = {}
+
+-- How old a reading is, in the words the reader repeats it in. Rounded to the unit it is read in: a
+-- bar that was true 4 minutes ago is not "256 s ago".
+function M.age_text(seconds)
+  local s = tonumber(seconds) or 0
+  if s < 45 then return "just now" end
+  if s < 5400 then return string.format("as of %d min ago", math.floor((s + 30) / 60)) end
+  if s < 129600 then return string.format("as of %d h ago", math.floor(s / 3600 + 0.5)) end
+  return string.format("as of %d d ago", math.floor(s / 86400 + 0.5))
+end
+
+-- Answers the limits, the problem that came with them, WHEN they were read, and whether this call
+-- read them itself (`fresh`) or drew a reading already in hand (`cached`): the caller says the age
+-- only for the second kind.
 local function limits_of(id, opts)
   local seen = M._limits[id]
   local now = host.now()
-  if seen and (opts.cached or now - seen.at < (opts.max_age or 30)) then return seen.limits, seen.problem end
-  if opts.cached then return nil, "read on the next /status between runs" end
+  if seen and (opts.cached or now - seen.at < (opts.max_age or 30)) then
+    return seen.limits, seen.problem, seen.at, "cached"
+  end
+  if opts.cached then return nil, "read on the next /status between runs", nil, nil end
   local limits, problem = provider.limits(id)
   M._limits[id] = { at = now, limits = limits, problem = problem }
-  return limits, problem
+  return limits, problem, now, "fresh"
 end
 
 -- `/status`: rows for the CLI's panel (or printed where there is none). `opts.color` paints the bars;
@@ -265,15 +285,32 @@ function M.session_lines(session_id, opts)
     if total.cache_known and tonumber(total.prompt) and total.prompt > 0 then
       parts[#parts + 1] = string.format("cache %.0f%%", 100 * (total.cacheRead or 0) / total.prompt)
     end
-    parts[#parts + 1] = total.cost_known and string.format("$%.4f", tonumber(total.cost) or 0) or "cost unknown"
     lines[#lines + 1] = dim("Usage    ") .. table.concat(parts, dim("  \194\183  "))
+    -- THE COST, ON ITS OWN ROW AND NAMED FOR WHOSE NUMBER IT IS (Victor 23/11). It used to be the last
+    -- segment of the Usage row, which measured 55 cells on his screen and - measured in a pty at 100
+    -- columns on 23/11 - is CUT by the panel: the row the reader got ended at `out 100`, so a cost that
+    -- was there read as a cost that was missing. Short enough to survive any panel width.
+    -- `cost` is priced from this node's rate snapshot (unknown for a provider that publishes none);
+    -- `list_cost` is the provider's OWN price for each call, summed - opencode-go answers
+    -- `opencode.list_cost` on every usage block (0.00102713 on a real call), so "cost unknown" was a
+    -- refusal to read a number the provider had already sent.
+    if total.cost_known then
+      lines[#lines + 1] = dim("Cost     ") .. string.format("$%.4f", tonumber(total.cost) or 0)
+        .. dim("  \194\183  rated")
+    elseif total.list_cost_known then
+      lines[#lines + 1] = dim("Cost     ") .. string.format("list $%.4f", tonumber(total.list_cost) or 0)
+        .. dim("  \194\183  the provider's own list price, summed over " .. tostring(total.calls)
+          .. (total.calls == 1 and " call" or " calls"))
+    else
+      lines[#lines + 1] = dim("Cost     ") .. "unknown"
+    end
   else
     lines[#lines + 1] = dim("Usage    ") .. "not yet observed in this session"
   end
   for _, item in ipairs(reported_providers(settings.provider)) do
     lines[#lines + 1] = ""
     lines[#lines + 1] = bold(item.id) .. (item.id == settings.provider and dim("  (in use)") or "")
-    local limits, problem = limits_of(item.id, opts)
+    local limits, problem, at, freshness = limits_of(item.id, opts)
     local shown = 0
     for _, window in ipairs({ { "5h", "rolling" }, { "7d", "weekly" }, { "30d", "monthly" } }) do
       local entry = type(limits) == "table" and limits[window[2]]
@@ -284,7 +321,13 @@ function M.session_lines(session_id, opts)
         shown = shown + 1
       end
     end
-    if shown == 0 then lines[#lines + 1] = dim("  limits unavailable" .. (problem and (": " .. problem) or "")) end
+    if shown == 0 then
+      lines[#lines + 1] = dim("  limits unavailable" .. (problem and (": " .. problem) or ""))
+    elseif freshness == "cached" and at then
+      -- The rows above are a reading, not a measurement taken now: say how old it is, so a bar on the
+      -- screen mid-run cannot be read as this second's allowance.
+      lines[#lines + 1] = dim("  " .. M.age_text(host.now() - at))
+    end
   end
   return lines
 end

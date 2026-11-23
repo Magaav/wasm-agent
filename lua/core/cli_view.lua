@@ -3465,6 +3465,36 @@ function METHODS:event(event)
         return
       end
     end
+    -- A COMMAND THAT CHANGED A FILE ON A PEER (chat-view-round-2, item 2): the peer named the path and
+    -- the line counts, and drew no diff (its texts never cross the wire for a display). The row says the
+    -- one thing the reader can act on - which file, on which machine, how much - in the same words the
+    -- local `bash_changes` note uses, so one change reads the same whichever machine ran it.
+    if event.capability == "bash" and event.ok ~= false then
+      local counts = {}
+      if tonumber(event.added) then counts[#counts + 1] = "added " .. tostring(event.added)
+        .. (tonumber(event.added) == 1 and " line" or " lines") end
+      if tonumber(event.removed) and tonumber(event.removed) > 0 then
+        counts[#counts + 1] = "removed " .. tostring(event.removed)
+          .. (tonumber(event.removed) == 1 and " line" or " lines")
+      end
+      local verb = event.deleted and "deleted " or (event.created and "created " or "changed ")
+      local text = verb .. tostring(event.path) .. " on " .. tostring(event.node)
+        .. (#counts > 0 and (" (" .. table.concat(counts, ", ") .. ")") or "")
+      self:topic(true)
+      self:line(paint(text, "dim", self.live))
+      self:write("\n")
+      self:topic(false)
+      return
+    end
+    if event.capability == "bash" then
+      local text = "could not run " .. tostring(event.path) .. " on " .. tostring(event.node)
+        .. ": " .. tostring(event.error or "refused")
+      self:topic(true)
+      self:line(paint(text, "error", self.live))
+      self:write("\n")
+      self:topic(false)
+      return
+    end
     local wrote = event.ok == false and "could not write " or "wrote "
     local text = wrote .. tostring(event.path) .. " on " .. tostring(event.node)
     if event.ok == false then text = text .. ": " .. tostring(event.error or "refused") end

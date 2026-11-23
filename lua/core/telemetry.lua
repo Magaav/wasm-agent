@@ -237,6 +237,14 @@ function M.normalize(raw, rates)
   local result = {known=known, cache_known=cache_known, cost_known=false,
     prompt=prompt, output=output, cacheRead=read, cacheWrite=write,
     reasoning=reasoning, total=known and (prompt + output) or nil}
+  -- THE PROVIDER'S OWN PRICE, when its usage block names one (opencode-go answers
+  -- `opencode.list_cost` on every call: the list price of THAT call, 0.00102713 on a real one,
+  -- 23/11). An ALLOW-LIST of the one name a real payload carries - a field that merely looks like
+  -- a cost is not a price - and it is kept apart from `cost`, which stays what a rate snapshot
+  -- priced.
+  local own_cost = number(type(raw.opencode) == "table" and raw.opencode.list_cost)
+  if own_cost == nil then own_cost = number(raw.list_cost) end
+  if own_cost ~= nil then result.list_cost, result.list_cost_known = own_cost, true end
   if read and prompt and read + write > prompt then result.issue = "cache_exceeds_input" end
   if reasoning and output and reasoning>output then result.issue="reasoning_exceeds_output" end
   if cache_known then result.input = prompt - read - write end
@@ -705,7 +713,7 @@ end
 local function empty()
   return {calls=0, failed=0, missing_usage=0, missing_cache=0, unpriced=0,
     prompt=0, input=0, cacheRead=0, cacheWrite=0, output=0, reasoning=0,
-    reasoning_unknown=0, transport_failed_attempts=0, cost=0, ms=0}
+    reasoning_unknown=0, transport_failed_attempts=0, cost=0, list_cost=0, list_cost_missing=0, ms=0}
 end
 local function add(total, data)
   total.calls = total.calls + 1
@@ -717,7 +725,8 @@ local function add(total, data)
   if not u.cache_known then total.missing_cache = total.missing_cache + 1 end
   if not u.cost_known then total.unpriced = total.unpriced + 1 end
   if u.reasoning == nil then total.reasoning_unknown = total.reasoning_unknown + 1 end
-  for _, key in ipairs({"prompt","input","cacheRead","cacheWrite","output","reasoning","cost"}) do
+  if not u.list_cost_known then total.list_cost_missing = total.list_cost_missing + 1 end
+  for _, key in ipairs({"prompt","input","cacheRead","cacheWrite","output","reasoning","cost","list_cost"}) do
     total[key] = total[key] + (u[key] or 0)
   end
 end
@@ -828,6 +837,9 @@ function M.snapshot(session_id)
   report.total.cost_known = report.total.unpriced == 0 and report.total.calls > 0
     and report.total.transport_failed_attempts == 0
   report.total.cache_known = report.total.missing_cache == 0 and report.total.calls > 0
+  -- The provider's own list cost, summed: known only when EVERY call that made up the total named
+  -- one, because a sum with a hole in it is not the session's cost (unknown is not zero).
+  report.total.list_cost_known = report.total.list_cost_missing == 0 and report.total.calls > 0
   -- The two context reads are not allowed to take the report down with them: what a ledger that can be
   -- read says with an unavailable context block is still more than a Lua error to the caller.
   local session_row = query("SELECT summarized_until,length(CAST(summary AS BLOB)) AS summary_bytes FROM sessions WHERE id=?",{session_id})
