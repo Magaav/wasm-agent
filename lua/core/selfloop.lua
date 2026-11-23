@@ -1361,6 +1361,12 @@ function M.tick(opts)
   -- runs before the due-row query below, so a row released here is dispatched in the same tick - and it is the
   -- node doing it, which is what makes the promise keepable for a `wa chat --once` worker that has exited.
   out.released = dep("deploy_pause").release_due(now, { exec = exec, query = query, read = opts.deploy_marker })
+  -- AND A RESUME THAT WAS LOST IS RE-ARMED (23/11): a row that ended `unknown` (its dispatch was cut by the very
+  -- install it paused for) is a debt, and the node pays it here, in the same tick, once nothing waits.
+  local rearmed = dep("deploy_pause").ensure_resumes(now, { exec = exec, query = query, read = opts.deploy_marker })
+  if type(rearmed) == "table" and tonumber(rearmed.rearmed) and tonumber(rearmed.rearmed) > 0 then
+    out.resume_rearmed = tonumber(rearmed.rearmed)
+  end
   -- NO NEW TURN WHILE A DEPLOY WAITS OR INSTALLS (22/11). This is the node's own tick: it hands a due wake to
   -- the scheduler, and that wake's turn is a NEW turn - the third of the three things that kept the node busy
   -- for 34 and 30 minutes on 22/11 while a deploy request waited. A wake is not dropped and not failed: the row
