@@ -906,6 +906,20 @@ amend_session() { # <mission dir> -> one session id, or nothing
       if [ "$rc" -eq 0 ] && [ "${row%% *}" = active ]; then found=$id; break; fi
     done <<<"$NODE_ROWS"
   fi
+  # Second: a session the NODE records as working IN this mission's directory (session_presence plus
+  # /proc/<pid>/cwd, the same read a launch's gate makes). This is the answer for a mission whose prompt does
+  # not start with the title marker - the factory's own launcher (~/Work/missions/launch.sh) puts the brief
+  # first and the "Where you are" block after it, so there is no marker to match - and it is the node's own
+  # record of where that process works, not a guess from a pid file.
+  if [ -z "$found" ]; then
+    local pid age cwd
+    while IFS=$'\t' read -r id pid age cwd; do
+      session_id_ok "${id:-}" || continue
+      row=$(steer_row "$id"); rc=$?
+      if [ "$rc" -eq 0 ] && [ "${row%% *}" = active ]; then found=$id; break; fi
+      [ -n "$first" ] || first=$id
+    done <<<"$(node_presence "$M" "$(wt_of "$M")" 2>/dev/null)"
+  fi
   [ -n "$found" ] || found=$lock
   [ -n "$found" ] || found=$recorded
   [ -n "$found" ] || found=$first

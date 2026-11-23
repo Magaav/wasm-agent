@@ -258,8 +258,11 @@ context boundary, atomically with its read receipt, into its transcript as a use
   that turn's rc lands in `done`. The command says which of the two happened and never calls an appended note
   delivered.
 - **The session is the node's answer, not a guess.** The CLI prints `wa: session <id> ok` to stderr when its
-  turn ENDS, so during a live turn neither `run.lock` nor the logs name the session; `amend` asks the node for
-  the session carrying the mission's title (the first line of `prompt.md`), the criterion a launch's gate uses.
+  turn ENDS, so during a live turn neither `run.lock` nor the logs name the session. `amend` asks the node, in
+  two ways: the sessions carrying the mission's title (the first line of `prompt.md`, the criterion a launch's
+  gate uses), and - for a mission staged the way the factory's own launcher does it, brief first and no marker -
+  the session the node records as working in the mission's directory (`session_presence` plus `/proc/<pid>/cwd`).
+  Then `run.lock`, then the `wa: session` line a finished run left in the logs.
   The resume runs from a runner `amend` writes (`amend-run.sh`), in `amend`'s own environment: a resume
   spawned through `host.exec` gets a scrubbed environment, and a mission's provider settings arrive that way
   (measured: the resumed CLI answered "No provider is configured" and made no model request).

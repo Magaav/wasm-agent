@@ -67,8 +67,16 @@ function check(name, condition, detail = '') {
 // deterministically, not by sleeping. Every later request answers with how many amendments the model was
 // actually shown, and those messages are what the checks read.
 const requests = [];
-let releaseFirst = null;
-const firstMayAnswer = new Promise(resolve => { releaseFirst = resolve; });
+// Requests whose answer is HELD until the fixture says so: index 0 belongs to the mission the fixture stages,
+// and index 3 to the worker of a mission staged the way the factory's own launcher stages one (see the end).
+const held = new Map();
+function holdNext(index) {
+  let release = () => {};
+  const promise = new Promise(resolve => { release = resolve; });
+  held.set(index, promise);
+  return release;
+}
+const releaseFirst = holdNext(0);
 const server = http.createServer((req, res) => {
   let body = '';
   req.on('data', chunk => { body += chunk; });
@@ -83,8 +91,8 @@ const server = http.createServer((req, res) => {
       res.write('data: [DONE]\n\n');
       res.end();
     };
+    if (held.has(index)) await held.get(index);
     if (index === 0) {
-      await firstMayAnswer;
       send([
         {id: 'mock-1', choices: [{index: 0, delta: {role: 'assistant', tool_calls: [
           {index: 0, id: 'call-read-1', type: 'function', function: {name: 'read', arguments: JSON.stringify({path: 'brief.md', limit: 2})}},
@@ -375,6 +383,48 @@ try {
   const u1 = mission('amend', 'onlyname');
   check('amend with no file is its usage',
     u1.status === 1 && /usage: mission.sh amend/.test(`${u1.stdout}${u1.stderr}`));
+
+  // ---- 7. a mission staged the way the FACTORY'S OWN launcher stages one: brief first, no title marker
+  // The launcher the driver uses today (~/Work/missions/launch.sh) writes the brief as the prompt's first line
+  // and "Where you are" after it, so the node's session title matches no marker. The session then comes from
+  // the node's own presence record - which pid works in the mission's directory - and this row is what proves
+  // amend reaches the missions the factory actually runs, not only the ones this script stages.
+  const oldstyle = path.join(MISSIONS, 'oldstyle');
+  fs.mkdirSync(path.join(oldstyle, 'wt'), {recursive: true});
+  const oldBrief = '# oldstyle: a fixture mission staged the old way\n\nDo the work.\n';
+  fs.writeFileSync(path.join(oldstyle, 'brief.md'), oldBrief);
+  fs.writeFileSync(path.join(oldstyle, 'prompt.md'), oldBrief);
+  const heldIndex = requests.length;                  // its first model request is the next index
+  const releaseOldstyle = holdNext(heldIndex);
+  const worker = spawn(BIN, ['chat', '--once', oldBrief], {cwd: oldstyle, env: ENV, stdio: ['ignore', 'pipe', 'pipe']});
+  ownPids.push(worker.pid);
+  let workerErr = '';
+  worker.stderr.on('data', chunk => { workerErr += String(chunk); });
+  const workerEnded = new Promise(resolve => worker.on('close', code => resolve(code)));
+  await waitFor(() => requests.length > heldIndex, "the old-style worker's first model request");
+  const oldstyleSession = await waitFor(() => {
+    const rows = query("SELECT session_id FROM steering_runs WHERE state='active' LIMIT 1");
+    return rows.length ? String(rows[0].session_id) : null;
+  }, 'the node to record the old-style run in flight');
+  check('a worker whose prompt carries no title marker is named nowhere in its mission directory',
+    !fs.existsSync(path.join(oldstyle, 'run.lock')) && !fs.existsSync(path.join(oldstyle, 'err.log')));
+  const note4 = 'The old-style mission gets a change too.';
+  const note4File = path.join(WORK, 'note4.txt');
+  fs.writeFileSync(note4File, note4 + '\n');
+  const a5 = mission('amend', 'oldstyle', note4File);
+  const stamp4 = (a5.stdout.match(/amendment (\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ)/) || [])[1];
+  check("amend finds the session from the node's own presence record when the prompt has no marker",
+    a5.status === 0 && /queued for run/.test(a5.stdout) && a5.stdout.includes(oldstyleSession),
+    `${a5.status} ${a5.stdout}${a5.stderr}`);
+  check('the old-style brief ends with the amendment', fs.readFileSync(path.join(oldstyle, 'brief.md'), 'utf8')
+    .trimEnd().endsWith(note4));
+  releaseOldstyle();
+  const oldstyleCode = await workerEnded;
+  check('that worker finished the turn it was given', oldstyleCode === 0, `${oldstyleCode} ${workerErr.slice(-400)}`);
+  const oldBoundary = (requests[heldIndex + 1] || {messages: []}).messages;
+  check('and it saw the amendment at its next context boundary, once',
+    oldBoundary.filter(message => message.role === 'user' && String(message.content || '').includes(stamp4)).length === 1,
+    JSON.stringify(oldBoundary).slice(-700));
 
   console.log(`mission amend: ${passed} checks passed`);
 } catch (error) {
