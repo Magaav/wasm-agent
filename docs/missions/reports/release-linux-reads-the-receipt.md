@@ -1,20 +1,26 @@
 # release-linux-reads-the-receipt
 
-Branch `change/release-linux-reads-the-receipt`, rebased onto `origin/main` = `7865a08e` (the installed build),
-four commits plus this report, lands on green, no review. Mission: the public channel step publishes from the
-binary the build actually made; and the three additions of 23/11 09:45Z, 10:50Z and 11:20Z.
+Branch `change/release-linux-reads-the-receipt`, rebased onto `origin/main` = `c1337903` (three times, see
+section 8), nine commits plus this report, lands on green, no review. Mission: the public channel step publishes
+from the binary the build actually made; and the three additions of 23/11 09:45Z, 10:50Z and 11:20Z.
 
-    git log --oneline 7865a08e..HEAD
-    000bbc5f land: a description change runs the description rows before it lands
-    c7bd3d98 land: wa land mark linux --by-hand records a hand-published channel, and the board reads it
-    fb6ca151 cli: wa <verb> --help is a question and runs nothing, with a row that enumerates the acting verbs
-    94c39059 release-linux: stage the bundle from the build receipt, and a channel step row that runs the join
-    (the same four commits as before the rebase: 3cefe6c5, 46d1ee99, 264351ce, c5331658 on base 4b314af5)
+    git log --oneline c1337903..HEAD
+    e3870e26 test: the two new rows follow the runner's TMPDIR, and the channel row is never dropped
+    d762326c test: the channel row owns its stand-ins, so the landing can run it
+    83a6d527 report: main moved to ad4576ee by one unrelated landing (no overlap)
+    2ba5f3c5 report: rebased onto origin/main 7865a08e, rows re-run green
+    b5273f80 report: the channel step reads the receipt, and the three 23/11 additions
+    976ca882 land: a description change runs the description rows before it lands
+    b2c1a86d land: wa land mark linux --by-hand records a hand-published channel, and the board reads it
+    955584e7 cli: wa <verb> --help is a question and runs nothing, with a row that enumerates the acting verbs
+    2e6d22cd release-linux: stage the bundle from the build receipt, and a channel step row that runs the join
+    (the four item commits were 94c39059, fb6ca151, c7bd3d98, 000bbc5f on base 7865a08e; the two test commits
+     were b47c9081 and, before this round, nothing - the rows they fix are section 8's)
 
-The rebase onto `7865a08e` was clean (fast.sh and test.sh carry this branch's two added `check` lines after it),
-and the nine rows below were run again on the rebased branch: all green. `origin/main` has since moved once more
-(`ad4576ee`, land-quick: diff-card-reads-like-claude-code), touching `lua/core/cli_view.lua`, `tests/diff-view.lua`,
-two rows and its own report - no overlap with anything this branch changes, so the landing's merge is a clean one.
+Every rebase was clean, in the tree and in the rows: onto `7865a08e`, onto `41d6420c` (ten commits of other
+missions) and onto `c1337903` (fifteen, including `change/esc-socket-per-thread`). The narrowed fast path under
+the second one found two red rows no single-row run had shown; both are fixed (`e3870e26`) and section 8 records
+what the runner measured and what it did not.
 
 ## 1. What was measured, before anything was changed
 
@@ -174,6 +180,9 @@ capability line this case adds) and the JSON library the real row decodes with; 
   `gate_run bash scripts/test-cli-help.sh`.
 * `scripts/test-land-linux.lua` and `scripts/test-land-quick-tests.lua` are existing always-run rows
   (`scripts/lib/fast-rows.sh`, `wa_fast_core_rows`); `scripts/test-speed-board.lua` is reached by its subject.
+* `scripts/test-release-channel-e2e.lua` is a never-dropped row too (`wa_fast_core_rows`, commit
+  `e3870e26`): it dofiles the land harness, and `scripts/test-fast-rows.sh` judges that list against the
+  tree - a narrowed run that dropped it would silently skip the one row that runs the real channel step.
 
 ## 4. Texts to approve (every new or changed operator/CLI string, verbatim)
 
@@ -327,6 +336,42 @@ the landing runs it. That is the gap this round closes.
       (the landing's own invocation: plain PATH, scratch HOME, nothing set up for it)
     the same row on 4b314af5, the landing's way                              -> fails: the channel step builds nothing
       (linux_channel_build_failed, "no built binary at .../rust/target/..."), so it still discriminates.
+
+## 8. Rounds 2 and 3 of the gate: what only the fast PATH found
+
+The first narrowed fast run on the rebased branch (`WA_FAST_ROWS` = the land rows + `test-speed-board.lua`, 29
+of 342 Lua rows plus every contract check, `flock -o` on the suite lock) was red on three checks. Two were this
+branch's, and neither could be seen by running a row singly - which is what every earlier round did:
+
+    FAIL tmp-cleanliness: scripts/test-cli-help.sh:31 roots its scratch at a literal /tmp (mktemp)
+    FAIL tmp-cleanliness: scripts/test-release-channel-e2e.sh:21 roots its scratch at a literal /tmp (mktemp)
+    FAIL fast-rows: scripts/test-release-channel-e2e.lua uses the land harness but is not a never-dropped row
+
+Both are fixed in `e3870e26`:
+
+* the two shell rows now take their root from `${TMPDIR:-/tmp}`, the shape `scripts/test-linux-channel.sh`
+  already uses, so a run under the runner's own TMPDIR mints there - and the rows' own guard still refuses a
+  root inside the operator store (measured by hand on this node, whose TMPDIR is `/home/victor/.wasm-agent/tmp`:
+  `REFUSED ... WASM_AGENT_HOME (.../wa-cli-help.XXXXXX/home) is inside the operator store`);
+* `scripts/test-release-channel-e2e.lua` is in `wa_fast_core_rows` with the reason written beside it.
+
+Re-run singly after the fix, each green: `scripts/test-fast-rows.sh` fast-rows ok (37 checks);
+`node scripts/test-tmp-cleanliness.mjs` PASS (9 checks); `scripts/test-cli-help.sh` ok (42 checks) + cli-help-verbs
+ok (113 checks); `scripts/test-release-channel-e2e.sh` ok (20 checks).
+
+The third red was not this branch's:
+
+    FAIL esc-stops-pty: bash: Esc brings the prompt back at once (300 ms idle, 120 ms per unit of load, never
+         over 2000) - 2362 ms (limit 1175 ms at load 9.79)
+
+That row is `change/esc-socket-per-thread`'s (on main since `beae64c6`), and this branch's diff touches no pty,
+term or provider path (`git diff --stat origin/main..HEAD -- rust/wa-term rust/wa-host` is empty). The same row on
+the same tree and binary, run again 20 minutes later, was `esc-stops pty: 18 ok, 0 failed`; and main-health
+measured it green on main at 12:34Z (`fast: esc-stops-pty ok (30951ms)`). So it is a load-sensitive timing row on
+a machine at load 10-32, not a regression from this branch.
+
+For the record, main-health's own run on `41d6420c` was red on one row - `scripts/test-speed-board.lua`
+(`speed-board: 5 FAIL of 30`), main's version of a row this branch rewrites; on this branch that row is green.
 
 ## 6. What was not verified, and what is open
 
