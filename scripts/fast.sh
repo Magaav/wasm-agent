@@ -960,6 +960,15 @@ check linux-channel bash scripts/test-linux-channel.sh
   # must be steerable with `wa steer` instead of killed (docs/SCRIPTED-RUNS.md). It drives the real
   # binary, because the failure it covers is a process that never exits: a Lua-only test cannot see it.
   WA_BIN="$bin" check cli-scripted node scripts/test-cli-scripted.mjs
+  # A PIPED `wa chat` SPEAKS ITS FIRST LINE WITHOUT READING ITS OWN BINARY FIRST (change/piped-chat-starts-fast,
+  # 23/11). On the base, `printf 'hi\n' | wa chat --once` answered `> hi` after 351 ms having read 74.4 MiB,
+  # and that reading was ONE call: the run's presence row asked `host.runtime_info` for its pid and boot tag,
+  # and that function fills its `binary_sha256` by reading and hashing the whole binary (66 ms of a release
+  # start, 730 ms of a debug one). `host.process_identity` answers the pair alone - same start: 0.54 MiB, 274
+  # ms. The row asserts both halves: the BYTES read before the first line (the discriminating one - 74 MiB on
+  # the base against 0.5 MiB fixed) and the TIME to that line, a median of five runs under a load guard,
+  # because a bound alone cannot see 66 ms inside a 250 ms start.
+  WA_BIN="$bin" check piped-start node scripts/test-piped-start.mjs
   # A fenced code card keeps its border when the screen is narrower than the width it was rendered at
   # (a focused block is boxed two columns in; a resize redraws at the new width). It drives the REAL
   # binary in a private tmux pty and REFUSES to run unless its fixture served the request, so a run

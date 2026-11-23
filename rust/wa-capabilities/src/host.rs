@@ -3730,6 +3730,47 @@ pub extern "C-unwind" fn build_identity(l: *mut LuaState) -> c_int {
     1
 }
 
+/// The tag that says WHICH process instance this is, minted once and never again: a pid is reused
+/// across reboots and, on a busy node, between processes, so the presence rows a run publishes
+/// (`lua/core/memory.lua`) carry both halves.
+///
+/// One source for both readers: `host.process_identity` (the cheap pair) and `host.runtime_info`
+/// (`boot_id`, which `lua/core/steering.lua` and `lua/core/selfloop.lua` compare with a stored row)
+/// must answer the same tag in the same process, or a run would not recognise its own presence.
+fn process_boot_id() -> &'static str {
+    static BOOT: OnceLock<String> = OnceLock::new();
+    BOOT.get_or_init(new_uuid).as_str()
+}
+
+/// SHA-256 of this binary's own bytes, read and hashed on first ask and never again - and only when
+/// something ASKS. It is not free: it reads the whole file, which on this node (avell, 23/11) is
+/// 77 MB / 66 ms for a release build and 861 MB / 730 ms for a debug one. That cost belongs to a
+/// caller answering "which bytes is this node running" (`lua/core/build_status.lua`, `payload.lua`,
+/// the turn journal); it does not belong in front of a chat's first line, which is what
+/// `host.process_identity` below exists for.
+fn binary_digest() -> &'static Option<String> {
+    static DIGEST: OnceLock<Option<String>> = OnceLock::new();
+    DIGEST.get_or_init(|| {
+        std::env::current_exe().ok().and_then(|path| std::fs::read(path).ok())
+            .map(|bytes| ring::digest::digest(&ring::digest::SHA256, &bytes).as_ref()
+                .iter().map(|b| format!("{b:02x}")).collect::<String>())
+    })
+}
+
+/// host.process_identity() -> JSON text of `{process_id, boot_id}`: this process, and nothing about
+/// the bytes it runs.
+///
+/// WHY IT IS NOT `host.runtime_info`. A run's presence row needs its pid and its boot tag, and it is
+/// written before the first line a chat prints (`agentlib.new`, `memory.presence_begin`). Asking
+/// `runtime_info` for the pair made that row wait on a whole-file SHA-256 of the binary: measured
+/// 23/11 on avell, 66 ms of a release start and 730 ms of a debug one, 28% and 52% of the time a
+/// piped `wa chat` took to say anything at all. Neither half is in that digest, so it is not paid
+/// here; a caller that really wants the digest still asks `runtime_info` and pays it then.
+pub extern "C-unwind" fn process_identity(l: *mut LuaState) -> c_int {
+    push_json(l, &json!({"process_id": std::process::id(), "boot_id": process_boot_id()}));
+    1
+}
+
 /// host.runtime_info() -> JSON text of `{version, binary_sha256, build_source_commit, build_source_tree,
 /// build_source_dirty, build_wave_generation, process_id, boot_id, os, arch, binary_path, run_origin} - one JSON
 /// string the caller decodes with lua/vendor/json.lua, never a Lua table.
@@ -3741,14 +3782,11 @@ pub extern "C-unwind" fn build_identity(l: *mut LuaState) -> c_int {
 pub extern "C-unwind" fn runtime_info(l: *mut LuaState) -> c_int {
     static IDENTITY: OnceLock<Value> = OnceLock::new();
     let identity = IDENTITY.get_or_init(|| {
-        let digest = std::env::current_exe().ok().and_then(|path| std::fs::read(path).ok())
-            .map(|bytes| ring::digest::digest(&ring::digest::SHA256, &bytes).as_ref()
-                .iter().map(|b| format!("{b:02x}")).collect::<String>());
-        json!({"version": env!("CARGO_PKG_VERSION"), "binary_sha256": digest,
+        json!({"version": env!("CARGO_PKG_VERSION"), "binary_sha256": binary_digest(),
             "build_source_commit":option_env!("WA_BUILD_SOURCE_COMMIT").unwrap_or(""),"build_source_tree":option_env!("WA_BUILD_SOURCE_TREE").unwrap_or(""),
             "build_source_dirty":BUILD_DIRTY.get().map(String::as_str).unwrap_or("unknown"),
             "build_wave_generation":option_env!("WA_BUILD_WAVE_GENERATION").unwrap_or(""),
-            "process_id": std::process::id(), "boot_id": new_uuid(), "os": std::env::consts::OS,
+            "process_id": std::process::id(), "boot_id": process_boot_id(), "os": std::env::consts::OS,
             "arch": std::env::consts::ARCH})
     });
     let mut value=identity.clone();

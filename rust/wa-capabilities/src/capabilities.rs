@@ -128,6 +128,7 @@ pub const REGISTRY: &[Capability] = &[
     plain!("uuid", ReadOnly, crate::host::uuid, "A fresh random UUID"),
     plain!("sha256", ReadOnly, crate::host::sha256, "SHA-256 of a string, as hex"),
     plain!("runtime_info", ReadOnly, crate::host::runtime_info, "Build and runtime identity of this binary"),
+    plain!("process_identity", ReadOnly, crate::host::process_identity, "This process id and the boot tag it was given, without reading the binary to hash it"),
     plain!("build_identity", ReadOnly, crate::host::build_identity, "The one name for this build: its commit (short), whether the tree was dirty, and the full id"),
     plain!("system_resources", ReadOnly, crate::host::system_resources, "CPU, memory and disk facts for this machine"),
     plain!("node_identity", ReadOnly, crate::host::node_identity, "This node's identity and network role"),

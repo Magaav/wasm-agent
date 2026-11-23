@@ -880,6 +880,7 @@ paths                read-only
 platform             read-only
 plugins              read-only
 policy_status        read-only
+process_identity     read-only
 quickjs              runs a process
 read_file            read-only
 read_image_base64    read-only
