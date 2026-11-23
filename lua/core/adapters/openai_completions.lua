@@ -37,6 +37,10 @@ function M.usage_of(raw)
     cache_read_tokens = tonumber(prompt.cached_tokens) or 0,
     cache_write_tokens = tonumber(raw.cache_write_tokens) or 0,
     reasoning_tokens = tonumber(completion.reasoning_tokens) or 0,
+    -- The provider's own price for this call, when its usage block carries one (opencode-go:
+    -- `opencode.list_cost`). Passed through unchanged under the name the account uses; nil is
+    -- "this provider does not say", never a zero (lua/core/telemetry.lua reads the same allow-list).
+    list_cost = tonumber(type(raw.opencode) == "table" and raw.opencode.list_cost) or tonumber(raw.list_cost),
   }
 end
 

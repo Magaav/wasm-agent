@@ -2327,6 +2327,11 @@ LUA
 WA_SCRIPT="$DB.status.lua" "$BIN" --db "$SDB" | grep "status ok"
 rm -f "$DB.status.lua"
 
+# /status DURING A RUN (chat-view-round-2, item 1): the limits read it already has, with their AGE,
+# and the provider's own list cost summed instead of "cost unknown". Its own scratch home (it writes
+# a ledger), no network: the provider's /usage is the test's stub.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-status-midrun.lua" "$BIN" --db "$DB.status-midrun" | grep "status mid-run ok"
+
 # And the command itself must be wired to that report, and listed in help: a
 # module nobody can reach is not a command.
 "$BIN" --db "$SDB" status | grep -q "^node "
