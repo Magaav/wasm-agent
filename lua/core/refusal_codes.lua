@@ -295,6 +295,7 @@ return {
   ['path_required']='capture_view.lua, file_tools.lua, tools.lua',
   ['pattern_required']='tools.lua',
   ['peer_answer_unreadable']='federation.lua',
+  ['peer_field_unsupported']='tools.lua',
   ['peer_offline:']='nodes.lua',
   ['periodic_backup_failed']='backup.lua',
   ['pin_node_required']='pins.lua',
