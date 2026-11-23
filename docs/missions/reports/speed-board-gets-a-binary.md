@@ -34,6 +34,11 @@ change/speed-board-gets-a-binary, 23/11. Base a0bb0262. Built and tested in
   for the lock its own parent suite holds, and the row hung until it was killed.
 - **358ebffe** - `scripts/lib/speed-stats.lua` prints no load for a row with no number (`0.00` beside a
   RED row reads as a measurement), with its check in `scripts/test-speed-stats.lua`.
+- **97c88958** - `scripts/test-main-health.sh` clears `WA_BIN`, `WA_FAST_ALLOW_STALE_BINARY` and
+  `WA_FAST_SKIP_BUILD`: `scripts/fast.sh:489` exports `WA_BIN` for every row, so inside the suite the
+  fixture's main-health treated the SUITE's binary as the caller's explicit choice, refused it (its stamp
+  is not the fixture's commit - correctly) and handed the board nothing. The row failed inside the suite
+  while passing alone; see "What the suite found".
 
 No file outside the repository was changed by this mission.
 
@@ -115,6 +120,25 @@ WHY `tool_roundtrip` WAS `unavailable` THERE: that scratch clone carries no `.gi
 its binary was built with `WA_CODEMODE_ALLOW_EMPTY=1` and has no QuickJS. The canonical checkout on this
 node has them (`~/wasm-agent/checkout/.git/codemode-assets/pi-1.2.0-quickjs-3.6.2`) and the same build
 there says `with code-mode assets`, which is how the four live rows above were measured.
+
+## What the suite found (and what it cost)
+
+The suite ran on f0e11fb5 and did its job twice over.
+
+1. **It failed the row I had just written.** `FAIL main-health (exit 1): ... test-main-health FAILED:
+   --bin does not name the binary the fast run built`. Cause, measured: `scripts/fast.sh:489` exports
+   `WA_BIN="$bin"` for every row, the fixture main-health inherited it, `fast_binary_plan` took it as the
+   caller's explicit binary, and my resolution refused it - correctly, its stamp is the SUITE's commit,
+   not the fixture's - so the board was handed nothing. Fixed in **97c88958** by clearing the three
+   variables that decide a binary, and verified by running the row with `WA_BIN` set to this tree's
+   binary exactly as the suite does: `test-main-health ok (30 checks)`.
+2. **A deadlock I caused, and the shape of it.** With `WA_SUITE_LOCK` exported by my harness, two rows
+   waited for the lock their OWN suite holds: the fixture main-health (fixed by pinning the lock in
+   **e0b9f640**) and `scripts/test-drive.sh`'s `land --branches` child, which still inherits it. Measured
+   twice; the run was killed and restarted with the node lock taken by the launcher instead. Nothing in
+   the landing or preflight path exports `WA_SUITE_LOCK` (measured: `WA_FAST_ROWS= WA_FAST_KEEP_LOGS=...
+   bash scripts/fast.sh`), so production is not affected - but a harness that exports it hangs the suite,
+   and `scripts/test-drive.sh` is not hardened here. That is a candidate brief, not a fix of this mission.
 
 ## The full suite on this commit
 
