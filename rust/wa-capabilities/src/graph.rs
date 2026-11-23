@@ -1526,8 +1526,18 @@ fn wait_deadline(options: &Value) -> Instant {
 /// the `features` section of `policy.json` - so the tool's catalogue line, this store and the answer a
 /// caller gets cannot disagree about whether this node has a graph.
 fn enabled() -> bool {
+    // The same seam the component call has (`TEST_CALL`): a unit test drives the gate with an answer it
+    // sets rather than with the process environment, which is shared by every test in the binary. It does
+    // not exist in a release build.
+    #[cfg(test)]
+    if let Some(value) = *TEST_SWITCH.lock().unwrap_or_else(|error| error.into_inner()) {
+        return value;
+    }
     wa_features::enabled("graph")
 }
+
+#[cfg(test)]
+pub(crate) static TEST_SWITCH: std::sync::Mutex<Option<bool>> = std::sync::Mutex::new(None);
 
 /// The one answer a dormant graph gives: named, with the switch that turns it on, and `effect: none`. A
 /// caller that reached a graph capability by another road than the tool (a pinned older Lua tree, a
