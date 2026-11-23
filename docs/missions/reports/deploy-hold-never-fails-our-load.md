@@ -526,3 +526,56 @@ does not invent a second rule.
 18. `deploy pause: ABANDONED the resume of session <id> after <n> re-arm(s) (wake <lost>); the pause record says so`
 19. `deploy pause: migration: <n> lost resume row(s) older than 21600s marked superseded (too old to resume)`
 20. `wa-sentinel status`: `paused sessions: <n>, oldest <age>, abandoned: <m>` (text 17 now carries the count)
+
+## Addendum 4 (Fable, 23/11 ~23:40Z): what `sync tick` is, and should it hold an install?
+
+Read-only measurement; the proposal is on a branch that is **not** merged.
+
+### What it is
+
+`sync tick` is one label around the node's whole **housekeeping pass** on node-thread 0 - peer sync, the sync
+cadence, retention - set by `begin_work("sync tick".to_string())` in the node-thread loop
+(`rust/wa-capabilities/src/serve.rs:3145`, the block at `:3128` "Housekeeping last, and only when nobody is
+waiting and the node has been quiet"). `begin_work` is what `/health` publishes as the thread's `label`, and
+`holders::holders_from` turns every labelled thread into a holder; with no session on it, it lands in
+`Verdict::Wait` ("the holder `sync tick` names no session, so nothing proves it paused") - so the install keeps
+waiting, which is what the sentinel logged.
+
+### How long it held today (`~/.wasm-agent/sentinel/sentinel.log`, read-only)
+
+| deploy request (reason) | sync-tick hold lines | span of the hold | first tick line -> installer started |
+| --- | --- | --- | --- |
+| `179540254619617968` | 5 | **602 s** | 1264 s |
+| `179546726666232120` (tool-args-honest c618da4f) | 8 | **661 s** | 705 s |
+| `179546963874689690` (4287aae1) | 6 | **422 s** | 584 s |
+| `179547102933736299` (4425f670) | 6 | **481 s** | 500 s |
+| `179547337894649177` (ad3fb3c5) | 5 | **361 s** | 529 s |
+| `179547471149786849` (ffd2a0a5 - this mission) | 1 | 0 s | **297 s** |
+
+Six installs, and between 6 and 11 minutes of waiting each; the install of this mission's own fix waited 297 s on
+it (`sentinel.log:1016`, `1795475023  maintenance-deferred  deploy 1795474711497868497 … the holder `sync tick`
+names no session`, with the installer at `1795475320`). It is new in the sense that matters: no other unnamed
+holder appears this often, and a pass that the node itself decides to start (because it looks quiet) is exactly
+the work that a queued install should not have to outlast.
+
+### Should it be excluded, the way admitted-not-started completions are? YES - within an allow-list
+
+A housekeeping pass is not a turn: it holds no session, it can never pause, and the node the install brings up
+runs the same pass again (sync and retention are idempotent and their progress is a file/ledger, not a
+conversation). Waiting for it costs the install minutes and buys nothing a resume would not give back. So the
+proposal skips it in `bound_verdict`, exactly as `completion` is skipped, under two rules:
+
+1. an **ALLOW-LIST** (`is_housekeeping`: `sync tick`, `sync tick:*`), so a label this tree does not know still
+   holds the install - unknown is not yes;
+2. it changes nothing before the bound: the install still waits its `WA_DEPLOY_HOLD_BOUND` first, and the pass is
+   only passed over afterwards.
+
+Residual risk, stated: the installer stops the unit with SIGTERM while a pass may be mid-write. That risk already
+exists for any run at the bound, the pass is idempotent, and a cut pass is redone by the new node - but it is the
+one thing to weigh, and it is why this is proposed rather than landed. A second, independent lever (not proposed
+here) is to make the node not START housekeeping while a deploy request waits: the node can read the sentinel's
+box (`deploy_wait.read`), which is the same signal the pause uses.
+
+### The proposal (branch `proposal/housekeeping-holds-no-install`, commit `5aba5a93`) - NOT merged
+
+```diff
