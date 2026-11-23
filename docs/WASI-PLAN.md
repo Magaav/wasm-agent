@@ -199,3 +199,77 @@ missing hook engine costs a guard that is still there and a session that behaves
 `hooks.json`; `memory` and `agent_core` go last because they are what a chat is made of, and because the
 lying-component test does not exist yet.
 
+
+## 6. The host: what has to stay native, and how thin it can get
+
+Something native must load and run the components, so the host cannot be zero. The question is how
+much of `rust/` it has to keep.
+
+**Inventory, measured.** `rust/wa-capabilities/src/capabilities.rs` `REGISTRY` has **151**
+capabilities (`grep -cE '^\s+(plain|upvalue)!\(' ...`); their entry functions are **1,887** lines,
+found by parsing each entry's path and counting the brace-matched function body. Behind them
+`rust/` outside `rust/components/` is **188,893 lines** of Rust (`find rust -name '*.rs'`, excluding
+`components/`, `plugins/`, `ui-wasm/`).
+
+**Checked against the current WASI list** (fetched 23/11 from `github.com/WebAssembly/WASI`,
+`wasi-0.2` branch and `docs/Proposals.md`), not from memory:
+
+| phase | interfaces |
+| --- | --- |
+| 3 - implementation (what 0.2 ships) | **Clocks, Random, Filesystem, Sockets, CLI, HTTP** |
+| 2 - spec text | key-value store, wasi-nn, runtime config, WebGPU, I2C, messaging, HTTP informational response |
+| 1 - proposal | **crypto, logging, SQL, SQL embed, threads, TLS, blob store, distributed lock service**, GPIO, observe, parallel, pattern match, SPI |
+| 0.3 | 0.2's set with `future`/`stream` replacing explicit streams and polling - **no new device APIs** |
+| **nothing at all** | **starting a process, a pty/terminal, signals, file locks, a keyring, systemd** |
+
+The classification, by capability (the classes below are in the document's own vocabulary, and each
+one names the interface that decides it):
+
+| class | capabilities | entry lines | what is in it | verdict |
+| --- | --- | --- | --- | --- |
+| **(a)** could be a component today on standard WASI 0.2 | **62** | **725** | files and paths (14), clocks and random (3), environment/identity (7), `log` (wasi:cli/stderr), the 15 `graph_*` (calls to the graph component), the 7 seam calls (`memory`, `selfloop`, `hooks`, `mesh`, `codemode`, `components`, `component_mcp`), sockets (`relay`, `mesh_call`, `binding_*`, `beat`), `http`/`http_stream`/`http_sse`, `sha256` | moves into the guest, on `wasi:filesystem`, `wasi:clocks`, `wasi:random`, `wasi:cli`, `wasi:sockets`, `wasi:http`, plus direct WIT imports of the other components |
+| **(b)** needs a small native import - WASI has no standard for it | **79** | **964** | starting processes (11: `exec`, `exec_timeout`, `operation`, `jobs`, `enqueue_completion`, `subagent`, `service`, `invoke`, `cli_reexec`, `quickjs`, `plugins`), the terminal/TUI (33 `Device` capabilities: `terminal_*`, `input_*`, `transcript_*`, `editor_*`, `opening_*`, `panel`, `ticker`, `client`, `audio`, `isatty`), `sleep` (0.2 has no sleep), `sign`/`verify` (keys), `system_resources`/`disk` (statvfs, CPU), `run_cancelled`, `telemetry`, `process_identity`, and the credential-bearing connectors (STT 5, fabric 4, WhatsApp 12, email 5) | a native import per family: `wa:host/process`, `wa:host/terminal`, `wa:host/keys`, `wa:host/system`, `wa:host/secrets` |
+| **(c)** must stay native for speed or safety | **8** | **169** | the ledger: `sql_exec`, `sql_query`, `sql_rows`, `sql_patience`, `db_ready`, `mark_db_ready`, `state`, `resource` | stays native, with the measurement: a memory operation through a component costs **0.62-0.71 ms** against **0.06-0.08 ms** on the native path (§1.2), and the store is one SQLite file shared by every process - `wasi:sql` is a phase-1 proposal and `wasi:filesystem` gives no `flock` |
+| unclassified in this pass | 2 | 29 | `plugins`, `binary_changed` | `plugins` is (b) (a native plugin registry), `binary_changed` is (a) |
+
+**The number that answers the question.** If every (a) moves, these native modules go with it:
+
+| module | lines |
+| --- | --- |
+| `rust/wa-graph` (the graph engine the `graph` component drives) | 5,668 |
+| `wa-capabilities/src/graph.rs` + `graph_tests.rs` (the capability layer over it) | 2,920 |
+| `wa-kernel-runtime/src/{memory,hooks,selfloop,mesh}_host.rs` (the proxies that exist only because the Lua core calls a component through the host) | 2,643 |
+| `wa-capabilities/src/codemode_seam.rs` | 906 |
+| `wa-capabilities/src/http_transport.rs` (the `http*` capabilities) | 405 |
+| the connectors' native halves that duplicate the shipped `wa-email` / `wa-whatsapp` components: `wa-email-index` 1,217 + `wa-email-outbox` 902 + `wa-whatsapp-index` 2,167 + `wa-whatsapp-archive` 1,675 + `wa-whatsapp-outbox` 950 | 6,911 |
+| **total** | **19,453** |
+
+**So: ~19,500 of 188,893 lines (10%) move, and ~169,400 lines of native Rust remain.** That is the
+honest answer, and it is the opposite of the intuition in the question: going WASI-default does **not**
+make the host thin, because the (a) capabilities are the small part. What stays is the terminal
+(`wa-term` 11,068 + `wa-window` 3,208), the node supervisor (`wa-sentinel` 16,170), the serving layer
+(`wa-capabilities/serve.rs` 4,848), process start and subagents (`operations.rs` 3,278 +
+`subagents.rs` 2,309), the mesh (`wa-mesh` 11,246 + `wa-mesh-core` 2,558), telemetry (8,173), the
+kernel runtime that *is* the components' host (`wa-kernel-runtime` 20,111), keys and vault
+(`wa-keystore` 1,479 + `wa-vault` 2,372), TLS (`wa-tls` 1,167, a phase-1 proposal), and the ledger.
+
+**The interface the thin host implements per platform** - this is also exactly the porting cost of
+item 5:
+
+```wit
+package wa:host@0.1.0;
+
+// What every platform must provide before a component can run. Everything a guest gets from WASI
+// 0.2 stays a WASI import; these are the families WASI has no standard for today.
+interface process { ... }   // spawn, stdout/stderr, exit status, signals, a terminal in pty mode
+interface terminal { ... }  // raw mode, size, key events, the screen the TUI draws on
+interface keys { ... }      // open a keyring item, sign, verify - never the key's bytes
+interface system { ... }    // statvfs, cpu/memory, locks, sleep, systemd notify
+interface secrets { ... }   // a connector's credential, granted by name
+interface ledger { ... }    // the one SQLite connection (class (c))
+```
+
+One world composed of `wasi:cli|filesystem|clocks|random|sockets|http@0.2.0` imports plus these six
+interfaces is the whole porting surface: a new platform implements the six and gets every component
+unchanged. Today the same surface is spread across 151 host functions with no file that lists them for
+a porter - `REGISTRY` is a Rust table, and `docs/HOST.md` is its prose.
