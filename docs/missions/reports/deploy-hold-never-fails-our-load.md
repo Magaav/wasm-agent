@@ -376,3 +376,83 @@ did not drain — a fixture fault, not the node's; the release is the code path 
 child's report; the honest lever is the one this branch added — the deploy stops waiting for it. If a queued
 completion's session is gone by the time it runs, `wa_completion_run` refuses it by name
 (`completion_forbidden`, `lua/core/completions.lua`) and the queue entry is released at dequeue, as above.
+
+## Addendum 2 (Fable, 23/11 ~21:40Z - G BLOCKER): a paused session is ALWAYS resumed by the node
+
+A session paused for a deploy must be resumed by the node after the install, or after the request is withdrawn.
+It was not, and a fleet node - or a person's own chat on `work` - has no factory watchdog to cover it.
+
+### 1. Measured, read-only, on this laptop
+
+| what | the record |
+| --- | --- |
+| the pause | `~/.wasm-agent/deploy-paused/603425eb-...json`: `{"since":1795465178,"source":"request","request":"1795465166243274647-...","to":"7e38abe976a0"}`; `66c0d5c1-...json`: `since:1795465172`, same request |
+| the resume it armed | both mission logs say `paused after its step and scheduled a resume` with **no** `the resume wake could NOT be scheduled` (`esc-stops-now/out.log:36080`, `worker-write-guard/out.log:19`) |
+| the deploy it waited for | `sentinel.log:903` `1795465166 maintenance-deferred deploy 1795465166243274647 ...`; `:906` `return-observation-problem ... missing binding.json`; `:912` `return-observation-retired ...` - and the request is in `~/.wasm-agent/sentinel/done/` |
+| the state today | `wa session status` for both: `0 wakes pending` |
+| the mission's own clock | `worker-write-guard/out.log`: `the node owns session 603425eb after a deploy pause: waiting for it to go quiet 2026-11-23T19:29:43Z`, then `still paused for a deploy after 2 h: no done written ... the orchestrator resumes it` |
+| a third case, live | this mission's own session, paused at ~22:0xZ for the install of `dd76f874`, was resumed by the orchestrator and by no node (`paused-evidence.log`: `rows-that-render session 93cf1a67 ... sat 901s`) |
+
+**Why `release_due` did not fire.** It fired nothing because there was nothing for it to fire: `release_due`
+(`lua/core/deploy_pause.lua`) only ever touches rows that are still `pending`
+(`SELECT ... WHERE status='pending' AND reason=? AND due_at>?`). The resume row of each session had already left
+`pending` without a turn: its dispatch was cut by the very install it paused for, and the reconcile then wrote
+`unknown` with `dispatch interrupted; not replayed` - which is by design never replayed. So the promise was
+armed once and then lost, and the ledger had no owner for it.
+
+### 2. The fix (`94c66c5b`)
+
+`deploy_pause.ensure_resumes(now, opts)`, called by the node's own tick (`lua/core/selfloop.lua`, right after
+`release_due`, once nothing waits or installs): every resume row that ended `unknown`, `failed` or `cancelled`
+is a DEBT - the node arms a fresh resume for that session, marks the lost row `superseded` (so it is re-armed
+exactly once) and says so on the log it keeps (`deploy pause: re-armed the LOST resume of session ...`). A
+session that already has a `pending`/`dispatching` resume is left alone, and while a build waits or installs
+nothing is re-armed at all. The new wake carries `deploy_pause.resume_prompt()`: the deploy is over, the resume
+that was armed was lost, re-establish the real state and continue (text listed below).
+
+### 3. Tests: every session kind, both endings
+
+`scripts/test-deploy-wait.sh` step **7b** (real node, real ledger, real scheduler stub; `deploy wait ok`, six
+cases green): for `served`, `worker` and `selfwake`, and for `install` and `withdraw`:
+
+1. a paused session whose resume row is `unknown` is written by the fixture (the record, the armed wake, the cut);
+2. while the deploy waits (request in the box; marker up for `install`): `dispatched=0`, `rearmed=0`;
+3. the deploy ends (marker down for `install`, request withdrawn for `withdraw`): `rearmed=1`, and the resumed
+   turn is dispatched on that tick or the next one (measured: `rearmed=1 dispatched=0`, then `dispatched=1`,
+   because `selfloop.schedule` never arms a past time);
+4. and once only: `rearmed=0` on every later tick.
+
+Unit level, with a **fake ledger, scheduler and clock** (`scripts/test-deploy-pause.lua`, 37 checks): a waiting
+deploy re-arms nothing; two lost resumes are re-armed and one that already owes a newer pending row is not; the
+lost rows are marked `superseded`; the prompt is the new sentence; a later tick re-arms nothing.
+
+### 4. The health line
+
+`wa-sentinel status` prints it always, so "none" is a fact an operator can check rather than an absence they
+have to notice:
+
+```
+paused sessions: 2, oldest 2h
+paused sessions: 0, oldest none
+```
+
+Asserted in `scripts/test-deploy-bound.sh` (two records, one two hours old: `paused sessions: 2, oldest 2h`), and
+built from the same `<data>/deploy-paused/*.json` records the sentinel already read for `paused_since`
+(`paused_summary`, **94c66c5b**). An undated record is counted, so it never reads as "none".
+
+### 5. Texts to approve (23/11, G blocker)
+
+15. the re-armed wake's prompt (it goes to a model): `[deploy pending] The deploy this session paused for is OVER,
+    and the resume that was armed for it was lost (a dispatch cut by the install it was waiting for). Nothing was
+    replayed and nothing was cut mid-call. Re-establish the real state from the machine first (files, `git status`,
+    processes, and this session's own notes checkpoint under "Deploy pause"), then continue the request you were
+    already working on and say plainly what had already been done before the pause.`
+16. the log line of a re-arm: `deploy pause: re-armed the LOST resume of session <id> (wake <lost> had no outcome,
+    new wake <new>)` — `host.log`, once per re-arm
+17. `wa-sentinel status`: `paused sessions: <n>, oldest <age>` (or `oldest none`)
+
+### 6. Scope (G blocker)
+
+The guarantee is the node's, not the runner's: it is the same `selfloop.tick` for every session kind, and it
+holds with no watchdog present - which is what makes it safe for a fleet node and for a person's chat, neither of
+which has the orchestrator's paused-marker watchdog. That watchdog can stay until this is rolled out.
