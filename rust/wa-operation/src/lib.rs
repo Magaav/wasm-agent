@@ -1,6 +1,7 @@
 //! An operation owns execution, output, cancellation and settlement. A job is an automation rule,
 //! not a process. See docs/OPERATIONS.md. No model, Lua state, HTTP or UI is needed to supervise it.
 mod process;
+pub mod blocked;
 pub mod shell_env;
 mod redact;
 mod index;
@@ -303,6 +304,32 @@ impl Slot {
         }
     }
 }
+impl Entry {
+    /// What this operation is waiting on, when the kernel can say (item 1, 23/11): `None` when it is
+    /// simply running, which is the honest answer for work that is computing.
+    ///
+    /// Cached for `BLOCKED_SCAN` because `snapshot` is called on every 25 ms wait slice of a foreground
+    /// call, and a /proc scan per slice would be a cost nobody asked for. The cache is per operation and
+    /// the answer is recomputed after the interval, so a waiter that gives up one lock and queues behind
+    /// another is followed within a second.
+    fn blocked_reason(&self) -> Option<Value> {
+        let mut cache = self.blocked.lock().ok()?;
+        if let Some((at, held)) = cache.as_ref() {
+            if at.elapsed() < BLOCKED_SCAN {
+                return held.clone();
+            }
+        }
+        let pid = self
+            .owned_child
+            .lock()
+            .ok()?
+            .as_ref()
+            .and_then(|child| child["process_id"].as_u64())?;
+        let found = blocked::lock_wait(pid as u32);
+        *cache = Some((Instant::now(), found.clone()));
+        found
+    }
+}
 impl Drop for Slot {
     fn drop(&mut self) {
         if let Ok(mut running) = RUNNING.lock() {
@@ -330,6 +357,11 @@ struct Entry {
     /// Milliseconds. Mutable because adopting a descendant tree extends the deadline,
     /// and `snapshot` must read it without taking the state lock.
     deadline_ms: AtomicU64,
+    /// What this operation's process tree is parked on, and when it was last looked at (item 1, 23/11).
+    /// A /proc scan on every 25 ms wait slice would be a cost nobody asked for, so the answer is kept for
+    /// `BLOCKED_SCAN` and recomputed after it: a lock wait lasts minutes, and one scan per second still
+    /// follows a waiter that moves to another lock.
+    blocked: Mutex<Option<(Instant, Option<Value>)>>,
 }
 #[derive(Clone)]
 pub struct Manager {
@@ -345,6 +377,10 @@ pub struct Manager {
     /// The registry ceiling this manager enforces (MAX_TRACKED unless a test asks for a smaller one).
     tracked_limit: usize,
 }
+/// How long one answer about a blocked process tree is reused (item 1, 23/11). A lock wait lasts minutes,
+/// so a second is fresh enough, and it keeps a 25 ms wait loop from scanning /proc forty times a second.
+const BLOCKED_SCAN: Duration = Duration::from_secs(1);
+
 fn error(message: impl ToString) -> io::Error {
     io::Error::other(message.to_string())
 }
@@ -796,6 +832,7 @@ impl Manager {
             settled: Condvar::new(),
             started: Instant::now(),
             deadline_ms: AtomicU64::new(spec.timeout.as_millis() as u64),
+            blocked: Mutex::new(None),
         });
         entries.insert(id.clone(), entry.clone());
         drop(entries);
@@ -941,6 +978,17 @@ impl Manager {
                 } else {
                     "command"
                 });
+                // WHAT IT IS WAITING ON, when the kernel says so (item 1, 23/11). A suite queued behind
+                // another mission's ~/Work/missions/.suite.lock answered a bare "running" for 20-50
+                // minutes, and the worker spent its turns probing with ps. `blocked_on` is the fact and
+                // `blocked_note` the sentence a reader can quote; both are absent for work that is simply
+                // computing, which is the usual case.
+                if let Some(blocked) = entry.blocked_reason() {
+                    state["blocked_on"] = blocked.clone();
+                    if let Some(note) = blocked["note"].as_str() {
+                        state["blocked_note"] = json!(note);
+                    }
+                }
                 if let Some(process_exit) = state["process_exit_elapsed_ms"].as_u64() {
                     let last = state["post_exit_last_output_elapsed_ms"]
                         .as_u64()

@@ -431,7 +431,8 @@ fn accepted_output_before_initialization_is_pending_not_a_launch_failure() {
     let state = json!({"state":"accepted","settled":false,"timing":timing_payload()});
     let entry = Arc::new(Entry {owned_child:Mutex::new(None),index,
         cancel:AtomicBool::new(false),demote:AtomicBool::new(false),control:false,state:Mutex::new(state),
-        settled:Condvar::new(),started:Instant::now(),deadline_ms:AtomicU64::new(300000)});
+        settled:Condvar::new(),started:Instant::now(),deadline_ms:AtomicU64::new(300000),
+        blocked:Mutex::new(None)});
     m.entries.lock().unwrap().insert(id.into(),entry.clone());
     for stream in ["stdout","stderr"] {
         assert_eq!(File::open(root.join(id).join(stream)).unwrap_err().kind(),io::ErrorKind::NotFound);
@@ -1504,3 +1505,126 @@ fn an_owner_that_exits_mid_work_leaves_a_named_unknown() {
     drop(reader); remove_fixture(base);
 }
 
+
+/// Item 1 (23/11): an operation parked on a FILE LOCK says which file, whose, and for how long.
+///
+/// The measured complaint (ledger notes 0, 1, 3, 189, 244, 264, 269): a suite queued behind another
+/// mission's ~/Work/missions/.suite.lock answered a bare "still running" for 20-50 minutes, so the worker
+/// spent its turns probing with ps to find the holder. The facts are in the kernel, so the answer names
+/// them - and this test uses a REAL flock(2) holder and a REAL waiter inside a real operation, because a
+/// bug about a process parked in a syscall cannot be shown by a stub.
+#[test]
+fn a_wait_on_a_file_lock_names_the_lock_the_holder_and_how_long_it_is_held() {
+    let (m, root) = fixture();
+    let scratch = root.join("scratch");
+    fs::create_dir_all(&scratch).unwrap();
+    let lock = scratch.join("suite.lock");
+    fs::write(&lock, b"").unwrap();
+    // A real holder, holding the lock in a syscall of its own: flock <lock> sleep 30
+    let mut holder = std::process::Command::new("flock")
+        .arg(&lock)
+        .arg("sleep")
+        .arg("30")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("flock is on PATH (every suite on this node runs under it)");
+    // Everything the holder starts, remembered BEFORE it is killed, and killed by a guard so that a
+    // FAILING assertion cleans up too: measured 23/11, a failed assertion left `flock ... sleep 30` alive
+    // and the next operation start was refused with background_descendants.
+    std::thread::sleep(Duration::from_millis(200));
+    let holder_tree = crate::blocked::tree(holder.id());
+    let _guard = TreeGuard(holder_tree.clone());
+    // A real waiter, inside the operation: the operation's own child parks in flock(2).
+    let mut spec = shell(&format!("flock '{}' true", lock.display()));
+    spec.cwd = scratch.to_string_lossy().to_string();
+    let id = m.start(spec).unwrap();
+    let observed = Instant::now();
+    let blocked = loop {
+        let state = m.snapshot(&id).unwrap();
+        if state["blocked_on"].is_object() || state["settled"] == true || observed.elapsed() >= Duration::from_secs(8) {
+            break state;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let facts = &blocked["blocked_on"];
+    assert_eq!(facts["kind"], "file_lock", "the wait is named as a lock wait: {blocked}");
+    assert_eq!(
+        facts["lock_path"].as_str().unwrap_or(""),
+        lock.canonicalize().unwrap().to_string_lossy(),
+        "the LOCK FILE is named, not just 'a lock': {blocked}"
+    );
+    assert_eq!(facts["holder_pid"].as_u64(), Some(holder.id() as u64),
+        "the HOLDER's pid is the process that took the lock: {blocked}");
+    assert!(facts["holder_command"].as_str().unwrap_or("").contains("flock"),
+        "and its command: {blocked}");
+    assert!(facts["holder_started_ms"].is_u64(),
+        "and how long it has held it, as the holder's own age: {blocked}");
+    assert!(facts["waiting_pid"].as_u64().is_some(), "{blocked}");
+    assert!(facts["queue_position"].as_u64().unwrap_or(0) >= 1, "{blocked}");
+    let note = blocked["blocked_note"].as_str().unwrap_or("");
+    assert!(note.starts_with("waiting on a file lock: "), "the sentence a reader can quote: {blocked}");
+    assert!(note.contains(&*lock.canonicalize().unwrap().to_string_lossy()),
+        "the sentence names the file: {note}");
+    assert!(note.contains(&format!("pid {}", holder.id())), "and the holder: {note}");
+    assert!(note.contains("has been held at most"), "and how long: {note}");
+    // The control: work that is merely COMPUTING carries no cause. A wrong cause costs more than none.
+    let mut quiet = shell("sleep 0.4");
+    quiet.cwd = scratch.to_string_lossy().to_string();
+    let quiet_id = m.start(quiet).unwrap();
+    let caught = m.snapshot(&quiet_id).unwrap();
+    assert_eq!(caught["settled"], false, "the quiet operation is still running: {caught}");
+    assert!(caught.get("blocked_on").is_none(), "a command that is not waiting on a lock says nothing: {caught}");
+    let _ = m.wait(&quiet_id, Duration::from_secs(10));
+    // Stop this test's own processes: the operations first, then the holder's tree.
+    let _ = m.cancel(&id);
+    let _ = m.wait(&id, Duration::from_secs(10));
+    for pid in holder_tree.iter().rev() {
+        unsafe { libc::kill(*pid as i32, libc::SIGKILL) };
+    }
+    let _ = holder.kill();
+    let _ = holder.wait();
+    drop(m);
+    remove_fixture(root);
+}
+
+/// Stops what a test started even when an assertion panics (see the lock test's clean-up note).
+struct TreeGuard(Vec<u32>);
+impl Drop for TreeGuard {
+    fn drop(&mut self) {
+        for pid in self.0.iter().rev() {
+            unsafe { libc::kill(*pid as i32, libc::SIGKILL) };
+        }
+    }
+}
+
+/// The same facts from a /proc/locks body, with no lock and no child: the parse is pinned on its own so
+/// a kernel row this code does not understand fails HERE rather than silently in the field.
+#[test]
+fn a_lock_row_names_the_owner_and_the_queue_position() {
+    // The shape measured on this node (23/11): the owner has no arrow, a waiter has one, and a second
+    // lock in the same body must not be confused with it.
+    let body = "\
+1: POSIX  ADVISORY  READ  2494 00:1e:12246 0 0
+21: FLOCK  ADVISORY  WRITE 2519447 00:38:7671677 0 EOF
+21: -> FLOCK  ADVISORY  WRITE 2519662 00:38:7671677 0 EOF
+22: FLOCK  ADVISORY  WRITE 999 00:1e:7 0 EOF
+";
+    let rows = crate::blocked::parse_locks(body);
+    assert_eq!(rows.len(), 4, "every row is read: {rows:?}");
+    let view = crate::blocked::waiter_view(&rows, 2519662).expect("the waiter is named");
+    assert_eq!(view["holder_pid"], 2519447, "the owning row of the same lock id: {view}");
+    assert_eq!(view["lock_inode"], 7671677, "{view}");
+    assert_eq!(view["lock_device"], "00:38", "{view}");
+    assert_eq!(view["lock_mode"], "FLOCK WRITE", "{view}");
+    assert_eq!(view["queue_position"], 1, "alone in the queue: {view}");
+    // A row whose owner is not in this body: the waiter is still named, the holder is NOT invented.
+    let orphan = "21: -> FLOCK  ADVISORY  WRITE 2519662 00:38:7671677 0 EOF\n";
+    let rows = crate::blocked::parse_locks(orphan);
+    let view = crate::blocked::waiter_view(&rows, 2519662).expect("the waiter is still named");
+    assert_eq!(view["holder_pid"], Value::Null, "an unnamed holder stays null: {view}");
+    let note = crate::blocked::lock_wait_note(&json!({"lock_path": "/x/.suite.lock", "lock_mode": "FLOCK WRITE", "holder_pid": Value::Null}));
+    assert!(note.contains("a process this node cannot name"), "and the sentence says so: {note}");
+    // A pid that is not waiting on anything gets nothing at all.
+    assert!(crate::blocked::waiter_view(&rows, 4242).is_none());
+}
