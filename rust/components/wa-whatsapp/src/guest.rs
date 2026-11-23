@@ -825,7 +825,8 @@ async fn admit(job: AudioJob) {
     let key = format!("{chat}\u{0}{}", job.id);
     let sent = job.sent_ms;
     let seconds = job.audio.seconds.unwrap_or(0);
-    // The author record is what a later revoke/edit of this message is proved against.
+    // The pipeline state row for this message (and, until 23/11, the author record a revoke was proved
+    // against; a deletion is matched by MESSAGE ID now, so no proof is needed).
     record(&chat, &job.id, serde_json::json!({"state": "queued", "sender": job.sender.to_string(), "sender_alt": job.sender_alt, "own": job.own})).await;
     if QUEUE.with(|q| q.borrow_mut().enqueue(key, sent, seconds, job)) {
         STATE_DIRTY.with(|d| d.set(true));
