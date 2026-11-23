@@ -123,6 +123,10 @@ the pty rows are timing-bound, while this box was running other missions' suites
 cores) throughout. **Not proven green as a whole**: I did not get a clean 416-check line, and I did not exclude a
 row to manufacture one.
 
+The peer row was rewritten after run 3 (it now measures through `remote_chat` instead of pinning a helper, so it
+discriminates); it passes standalone on this tree and fails on the base, and the next full run is the first that
+measures it inside the suite.
+
 Green in all three runs: the two rows this branch changes - `fast: deploy-wait ok (27279ms)` and
 `fast: deploy-bound ok (589ms)` - plus the Rust rows of both crates this branch touches
 (`fast: rust wa-capabilities ok`, `fast: rust wa-sentinel ok`).
