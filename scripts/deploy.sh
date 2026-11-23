@@ -886,6 +886,17 @@ lua_tree_mode() { # <binary> -> 0 when it runs the Lua tree it is given
 # at step 8b - `deploy.sh: line 2422: PIN_DIR: unbound variable` - after a finished install, and its
 # wa-deploy-* unit was marked failed. The declaration belongs where both paths pass.
 PIN_DIR="${WA_DEPLOY_PIN_DIR:-${TMPDIR:-/tmp}/wa-deploy-pins}"
+# THE BUILD LOCK'S NAMES, ON EVERY PATH. The claim itself belongs to the build branch below (only a build
+# needs it), but step 8b has to know WHICH lock would prove "no other build can be running", and a Lua
+# fast-path deploy reaches 8b without ever entering that branch. Naming it here is what lets that step take
+# the lock for its own few hundred milliseconds rather than guess.
+DEPLOY_LOCK="$INSTALL_DIR/.deploy.lock"
+DEPLOY_LOCK_LOG="$INSTALL_DIR/deploy-lock.log"
+DEPLOY_LOCK_HELD=0
+DEPLOY_LOCK_LIB="$SOURCE_ROOT/scripts/lib/deploy-lock.sh"
+[ -f "$DEPLOY_LOCK_LIB" ] || DEPLOY_LOCK_LIB="$(dirname "$0")/lib/deploy-lock.sh"
+[ -f "$DEPLOY_LOCK_LIB" ] || fail "refused(deploy_lock_lib_missing): $DEPLOY_LOCK_LIB is not in this tree, so the build lock cannot tell a dead holder from a live one; nothing was built and nothing was installed"
+. "$DEPLOY_LOCK_LIB"
 LUA_FAST=0
 if [ "${WA_DEPLOY_FULL:-0}" != 1 ] && [ -n "$INSTALLED_BIN" ] && [ -x "$INSTALLED_BIN" ] && command -v wa_node_binary_reuse >/dev/null 2>&1; then
   INSTALLED_DIGEST="$("$INSTALLED_BIN" --capability-digest 2>/dev/null | tr -d '[:space:]')"
@@ -1158,15 +1169,10 @@ deploy_requirements
 # the deploy correctly refused an installed binary that was not the proved one. The lock itself - and the
 # reclaim of a dead holder's lock, with its evidence - is scripts/lib/deploy-lock.sh, tested by
 # scripts/test-deploy-lock.sh. A live holder refuses; a holder whose pid is gone is moved aside and logged.
-DEPLOY_LOCK="$INSTALL_DIR/.deploy.lock"
-DEPLOY_LOCK_LOG="$INSTALL_DIR/deploy-lock.log"
-DEPLOY_LOCK_LIB="$SOURCE_ROOT/scripts/lib/deploy-lock.sh"
-[ -f "$DEPLOY_LOCK_LIB" ] || DEPLOY_LOCK_LIB="$(dirname "$0")/lib/deploy-lock.sh"
-[ -f "$DEPLOY_LOCK_LIB" ] || fail "refused(deploy_lock_lib_missing): $DEPLOY_LOCK_LIB is not in this tree, so the build lock cannot tell a dead holder from a live one; nothing built"
-. "$DEPLOY_LOCK_LIB"
 if ! wa_deploy_lock_claim "$DEPLOY_LOCK" "$DEPLOY_LOCK_LOG" "$SOURCE_ROOT"; then
   fail "${WA_DEPLOY_LOCK_REASON:-another deploy/onStale build holds $DEPLOY_LOCK; nothing built}"
 fi
+DEPLOY_LOCK_HELD=1
 trap 'wa_deploy_lock_release "$DEPLOY_LOCK" "$DEPLOY_LOCK_LOG"' EXIT
 
 # 3c. PIN THE COMMIT THE BUILD READS. The build used to read the tree this command was pointed at, and on
@@ -1192,7 +1198,7 @@ if [ "$WA_DEPLOY_PIN" = "1" ]; then
     fail "refused(pin_tool_unavailable): node is not on PATH, so this deploy cannot take the landing queue's lease and pin the commit it would build. A deploy never builds from the live canonical tree, because a landing can move it under the build. Install node, or set WA_DEPLOY_ALLOW_UNPINNED=1 as an explicit exception. Nothing was built."
   fi
   if ! ( cd "$SOURCE_ROOT" && node scripts/landing-queue.mjs pin --commit "$PIN_COMMIT" --pin-dir "$PIN_DIR" \
-        --install-dir "$INSTALL_DIR" --wait-timeout "$PIN_WAIT" --json ) > "$PIN_OUT" 2> "$PIN_ERR"; then
+        --install-dir "$INSTALL_DIR" --builds-excluded-by "$DEPLOY_LOCK" --wait-timeout "$PIN_WAIT" --json ) > "$PIN_OUT" 2> "$PIN_ERR"; then
     PIN_REASON="$(tail -3 "$PIN_ERR" 2>/dev/null | tr '\n' ' ')"
     rm -f "$PIN_OUT" "$PIN_ERR"
     if [ "${WA_DEPLOY_ALLOW_UNPINNED:-0}" = "1" ]; then
@@ -2409,25 +2415,45 @@ record_installed
 echo "deploy: installed $COMMIT ($HASH)"
 echo "deploy: recorded in $INSTALL_DIR/installed.txt"
 # wa-deploy-pin-prune: begin
-# 8b. A step every path reaches, so it may depend on nothing the build branch alone sets: `${PIN_DIR:-}`, and
-#     a path that names no pin directory says so by name instead of dying under `set -u` (23/11: every Lua
-#     fast-path deploy failed here with `PIN_DIR: unbound variable` after a finished install).
+# 8b. This step is reached on every path, so it may depend on nothing the build branch alone sets
+#     (`${PIN_DIR:-}`, `${DEPLOY_LOCK_HELD:-0}`), and it never removes a pin it cannot rule a build out of.
+#
+#     CANNOT TELL = KEEP. A pinned tree is removed only when this step can exclude a build running from it.
+#     The exclusion is the deploy's own build lock, which deploy.sh and onStale both claim for their build
+#     phase: a build-path deploy holds it already, and a Lua fast-path deploy takes it for these few hundred
+#     milliseconds (and gives it back). Without it nothing is removed and the line says which lock was busy.
 case "${PIN_DIR:-}" in
   '')
     note "pin prune: this path names no pin directory (WA_DEPLOY_PIN_DIR is not set and PIN_DIR is empty), so nothing under it was removed - the deploy's pin step and this one disagree about WA_DEPLOY_PIN_DIR, which is a hole in this script, not a machine state"
     ;;
   *)
     if [ -d "$PIN_DIR" ]; then
-      if command -v node >/dev/null 2>&1; then
-        PIN_PRUNE_OUT="$INSTALL_DIR/.deploy-pin-prune.$$"
-        if ( cd "$SOURCE_ROOT" && node scripts/landing-queue.mjs prune-pins --pin-dir "$PIN_DIR" --install-dir "$INSTALL_DIR" ) > "$PIN_PRUNE_OUT" 2>&1; then
-          grep -v '^$' "$PIN_PRUNE_OUT" || true
-        else
-          note "pin prune: $(tail -3 "$PIN_PRUNE_OUT" 2>/dev/null | tr '\n' ' ') - the install stands; the trees under $PIN_DIR are left as they are"
-        fi
-        rm -f "$PIN_PRUNE_OUT"
-      else
+      if ! command -v node >/dev/null 2>&1; then
         note "pin prune: node is not on PATH, so this deploy cannot tell which pins under $PIN_DIR are still wanted; nothing was removed"
+      else
+        PIN_PRUNE_PROOF=""
+        PIN_PRUNE_TOOK_LOCK=0
+        if [ "${DEPLOY_LOCK_HELD:-0}" = "1" ]; then
+          PIN_PRUNE_PROOF="$DEPLOY_LOCK (this deploy holds it, so no other deploy or onStale build is running)"
+        elif wa_deploy_lock_claim "$DEPLOY_LOCK" "$DEPLOY_LOCK_LOG" "$SOURCE_ROOT" 2>/dev/null; then
+          PIN_PRUNE_TOOK_LOCK=1
+          PIN_PRUNE_PROOF="$DEPLOY_LOCK (taken for this prune alone, so no build is running from a pin)"
+        fi
+        if [ -z "$PIN_PRUNE_PROOF" ]; then
+          note "pin prune: another build holds $DEPLOY_LOCK, so nothing was removed - a pin it may be building from is kept, and the next deploy prunes"
+        else
+          PIN_PRUNE_OUT="$INSTALL_DIR/.deploy-pin-prune.$$"
+          if ( cd "$SOURCE_ROOT" && node scripts/landing-queue.mjs prune-pins --pin-dir "$PIN_DIR" --install-dir "$INSTALL_DIR" \
+               --builds-excluded-by "$PIN_PRUNE_PROOF" ) > "$PIN_PRUNE_OUT" 2>&1; then
+            grep -v '^$' "$PIN_PRUNE_OUT" || true
+          else
+            note "pin prune: $(tail -3 "$PIN_PRUNE_OUT" 2>/dev/null | tr '\n' ' ') - the install stands; the trees under $PIN_DIR are left as they are"
+          fi
+          rm -f "$PIN_PRUNE_OUT"
+        fi
+        if [ "$PIN_PRUNE_TOOK_LOCK" = "1" ]; then
+          wa_deploy_lock_release "$DEPLOY_LOCK" "$DEPLOY_LOCK_LOG"
+        fi
       fi
     fi
     ;;
