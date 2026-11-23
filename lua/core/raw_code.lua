@@ -98,7 +98,16 @@ function M.native_run(args)
   -- the line the script's code starts on).
   -- The script keeps a block of its OWN, as in the call that has blocks (below): a script that declares its
   -- own `raw` (const raw = await tools.bash(...)) shadows this one instead of dying on a redeclaration.
-  if raw == nil then return { code = "const raw = {}; {\n" .. code .. "\n}", raw_blocks = {} } end
+  -- ORIGIN, for the line a compile error names (23/11). The wrapper below is prepended to the model's
+  -- script, so the source the sandbox compiles is NOT what the model wrote: a compile error names a line
+  -- of `code` here, and codemode.lua has to subtract this wrapper before it says "Change line N". origin
+  -- is the text as the model sent it and origin_line is the source line its first line occupies; both are
+  -- passed through untouched (a direct codemode call carries neither and is its own origin).
+  if raw == nil then
+    local prefix = "const raw = {}; {\n"
+    return { code = prefix .. code .. "\n}", raw_blocks = {}, origin = code,
+      origin_line = select(2, prefix:gsub("\n", "")) + 1 }
+  end
   if type(raw) ~= "table" then
     return nil, { error = "run_raw_not_object", effect = "none",
       note = "raw is an object of name -> text (one entry per raw block); it is not a string" }
@@ -130,9 +139,11 @@ function M.native_run(args)
   -- raw IS the whole object too, under the name the description uses: a model that wrote raw.patch in
   -- a run script died with ReferenceError: raw is not defined (20/11 and again 21/11). raw.patch and
   -- patch now read the same bytes.
-  return { code = "const " .. RAW_PREFIX .. " = " .. literal .. ";\nconst raw = " .. RAW_PREFIX
+  local prefix = "const " .. RAW_PREFIX .. " = " .. literal .. ";\nconst raw = " .. RAW_PREFIX
       .. ";\nconst { " .. table.concat(names, ", ")
-      .. " } = " .. RAW_PREFIX .. ";\n{\n" .. code .. "\n}", raw_blocks = names }
+      .. " } = " .. RAW_PREFIX .. ";\n{\n"
+  return { code = prefix .. code .. "\n}", raw_blocks = names, origin = code,
+    origin_line = select(2, prefix:gsub("\n", "")) + 1 }
 end
 
 -- THE SWITCH IS GONE, AND SAYS SO (Victor 21/11). Every value the removed parser knew, and what door
