@@ -49,7 +49,7 @@ M.LOAD_CEILING_PER_CORE = 1.5
 -- The rows, in the order a reader wants them: the things Victor feels first, then the two records.
 M.ROWS = { 'start', 'first_token', 'tool_roundtrip', 'remote_roundtrip', 'landing', 'release' }
 -- The rows that are MEASURED on this machine, and therefore must have a number on every commit: a hole
--- in one of these is a RED row of the board (M.rows below). The other two are records of events.
+-- in one of these is a RED row of the board (M.judge). The other two are records of events.
 M.LIVE = { start = true, first_token = true, tool_roundtrip = true, remote_roundtrip = true }
 M.LABELS = {
   start = 'cold start (process -> key accepted, pty)',
@@ -170,8 +170,11 @@ function M.judge(history, entry)
       out.state = 'ok'
       out.ms = number(row.ms)
       out.load = number(row.load) or number(entry.load)
-      -- The window is the last WINDOW commits, THEN the comparable loads among them, in that order: a
-      -- quiet baseline after a storm of busy commits is still the baseline.
+      -- The window is the last WINDOW commits that HAVE this row at a comparable load, counted with the
+      -- comparability test itself: a hole (unavailable, guarded, unknown) or a number taken at another
+      -- load is not a baseline, and it must not consume one of the ten slots - otherwise a run of holes
+      -- hides the last real numbers (23/11: eight `unavailable` lines after 8862b600 would have hidden
+      -- its 321 ms start). A quiet baseline after a storm of busy commits is still the baseline.
       local best_ms, best_sha, comparable = nil, nil, 0
       for index = #previous, 1, -1 do
         if comparable >= M.WINDOW then break end
