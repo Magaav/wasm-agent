@@ -159,6 +159,33 @@ operator's `HOME` (`refusing to run: this test starts real operations, so HOME m
 and never the node own ~/.wasm-agent (got /home/victor)`) and pass with `HOME=<scratch>` (49 passed, 0 failed);
 `bash scripts/test-deploy-wait.sh` (`deploy wait ok`); `bash scripts/test-deploy-bound.sh` (`deploy bound ok`).
 
+## Rebased on main, and the gate (23/11, after `remote-roundtrip-and-roster` landed)
+
+* **Rebased on `origin/main` `5956ae15`** (`land-quick: merge change/remote-roundtrip-and-roster`), 12 commits,
+  **no conflicts**: the landed change touches `nodes.lua` (roster diagnostics, `not_registered`, the quick
+  resource row in `M.list`/`M.find`, `remote_call`) and `server.lua` (the adopted-operation reads), while this
+  branch adds `nodes.chat_answer` beside `remote_chat`, `wa_deploy_admission` beside `wa_admission`, and the two
+  peer-error fields in `wa_reply`/`wa_reply_stream` - different functions, so git had nothing to resolve.
+* **`lua/core/refusal_codes.lua` carries all three codes** after the rebase (`deploy_waiting`, `remote_deploy_waiting`
+  from this branch and `not_registered:` from the landed one): `lua5.4 scripts/gen-refusal-codes.lua --check` -
+  `594 codes from 106 reachable modules, up to date`; no regeneration was needed beyond what the rebase already did.
+* **Every assertion kept**: `git diff <pre-rebase tip> HEAD` contains only the landed change; no row was edited to
+  fit. Re-run on the rebased tree: `test-refusal-contract` (17241 checks), `test-regenerate` (29), `deploy-wait.sh`
+  (`deploy wait ok`), `deploy-bound.sh` (`deploy bound ok`), the Lua rows `test-deploy-wait` (59),
+  `test-deploy-pause` (23), `test-deploy-resume` (25), `test-completion-deploy-wait` (16),
+  `test-completion-outbox`, `test-peer-deploy-wait` (14), `cargo test --manifest-path rust/wa-sentinel`
+  (145 passed), and the two new `wa-capabilities` rows.
+* **Preflight**: the first run was **invalid by my own invocation** - I passed `WA_BIN` pointing at this
+  worktree's debug binary, which carries no code-mode assets, so six rows failed with `codemode_not_enabled`
+  (and the two pty rows that need a real run binary). Re-run the way the gate builds for itself:
+
+  `preflight green: change/deploy-not-held-by-queued-turns on main 42f493852c79, gate 1089s of 2712s, tree 397cf26282b9`
+
+  (`preflight.json`: `ok: true`, `failed: []`, `main_health.ok: true`, `same_commit: true`, run
+  `preflight-20261123T115440Z-1549387`). Main had moved on to `42f49385` since the rebase, so that run is the
+  merge of this branch with the main that is there now - the compatibility question the preflight exists to
+  answer.
+
 ## Texts to approve (new or changed, verbatim)
 
 1. `/health` key `queue_sessions` = `{count, named, truncated, entries:[{run_id, session, node_thread, kind,
