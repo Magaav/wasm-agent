@@ -153,6 +153,45 @@ check(recorded.code == 0, 'a measurement with records still writes (' .. tostrin
 check((recorded.stdout or ''):find('landing=42000ms', 1, true) ~= nil, 'the landing row is landed from its own record: ' .. tostring((recorded.stdout or ''):match('landing=[^ ]*')))
 check((recorded.stdout or ''):find('release=150000ms', 1, true) ~= nil, 'the release row is cut -> published from the journal: ' .. tostring((recorded.stdout or ''):match('release=[^ ]*')))
 
+-- 7b. A RELEASE WHOSE PUBLIC BUNDLE WAS PUBLISHED BY HAND (Fable, 23/11). Release F's channel entry was published
+-- by hand at 09:22Z, so its run has no `done` result and this row read "not a finished release" about work that
+-- WAS finished. `wa land mark linux --by-hand --who <name> --why <text>` records it in the journal
+-- (lua/core/land.lua mark_verdict, proved in scripts/test-land-linux.lua), and the board reads that record.
+local function last_row()
+  local file = assert(io.open(history, 'r'))
+  local text = file:read('a')
+  file:close()
+  local last
+  for line in text:gmatch('[^\n]+') do last = line end
+  local decoded = json.decode(last or '{}')
+  return (type(decoded) == 'table' and type(decoded.rows) == 'table' and decoded.rows.release) or {}
+end
+-- The times are the ones case 7 already published (150000 ms) on purpose: this case judges the STATE and the
+-- REASON of the row, and a slower journal here would turn the row RED for a reason that is not the subject.
+local by_hand_journal = '{"created_at":1000,"updated_at":1150,"linux":{"by_hand":{"state":"by_hand","who":"Victor","why":"published by hand at 09:22Z","evidence":"/tmp/hand.log"}}}'
+local hand_file = assert(io.open(release_dir .. '/journal.json', 'w'))
+hand_file:write(by_hand_journal .. '\n')
+hand_file:close()
+local hand = sh('HOME="' .. work .. '/home" WA_SPEED_LANDINGS="' .. landings .. '" ' .. board
+  .. ' --measure --probes "' .. work .. '/probes" --history "' .. history .. '" --sha c0011 --bin /bin/true --samples 3 2>&1')
+check(hand.code == 0, 'a measurement over a by-hand release still writes (' .. tostring(hand.code) .. ')')
+local hand_row = last_row()
+check(hand_row.state == 'ok', 'a release published BY HAND is a finished release on the board (' .. tostring(hand_row.state) .. ')')
+check(tostring(hand_row.reason or ''):find('by hand', 1, true) ~= nil,
+  'and the row says so in words: ' .. tostring(hand_row.reason))
+check(tostring(hand_row.reason or ''):find('Victor', 1, true) ~= nil,
+  'and names the hand that did it: ' .. tostring(hand_row.reason))
+-- THE CONTROL: the same journal with no by-hand record is the unknown row it always was (a journal that says
+-- nothing about a hand did not have one).
+local plain_file = assert(io.open(release_dir .. '/journal.json', 'w'))
+plain_file:write('{"created_at":1000,"updated_at":1150}\n')
+plain_file:close()
+sh('HOME="' .. work .. '/home" WA_SPEED_LANDINGS="' .. landings .. '" ' .. board
+  .. ' --measure --probes "' .. work .. '/probes" --history "' .. history .. '" --sha c0012 --bin /bin/true --samples 3 2>&1')
+local plain_row = last_row()
+check(plain_row.state ~= 'ok' and tostring(plain_row.reason or ''):find('not a finished release', 1, true) ~= nil,
+  'a journal with no result and no by-hand record is still unknown: ' .. tostring(plain_row.reason))
+
 -- 8. THE BOARD STARTED FROM ANOTHER DIRECTORY STILL WRITES ITS LINE (23/11). The library it calls
 -- (scripts/lib/speed-stats.lua) reads lua/vendor/json.lua by a path relative to the CALLER's directory, and
 -- main-health does not always run from the tree: measured in this mission's end-to-end run, the board

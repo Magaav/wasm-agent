@@ -5622,7 +5622,13 @@ end
 -- `wa land mark <step> --evidence <file>` reads the evidence, RE-VERIFIES the effect with the same checks the
 -- step itself would pass, and only then records the step as done, with `marked` and the evidence path on it.
 -- A verification that cannot tell is a refusal by name: unknown is not yes.
-M.MARKABLE = { "push", "main", "sign", "ship", "publish" }
+M.MARKABLE = { "push", "main", "sign", "ship", "publish", "linux" }
+-- THE ONE STEP A HAND CAN FINISH (Fable, 23/11). The public channel's bundle can be published by hand - release F's
+-- was, at 09:22Z - and a run finished that way has no `done` result, so the speed board read "the newest release
+-- journal is not a finished release" about work that WAS finished. `wa land mark linux --by-hand --who <name>
+-- --why <text> --evidence <file>` records it: the effect is verified the way the step verifies it (the live
+-- channel on origin/main names this commit for every target), and the hand that did it is named, with its reason,
+-- in the journal - never a hand-edited journal.json.
 
 local function mark_verdict(run, step, options)
   local id = run.id
@@ -5651,6 +5657,45 @@ local function mark_verdict(run, step, options)
         next = "nothing was marked: main is read back from the remote" }
     end
     return true, { detail = M.origin() .. " main = " .. sha:sub(1, 12) .. " (verified)" }
+  end
+  -- A CHANNEL ENTRY PUBLISHED BY HAND: verified first (the live channel must name this commit for every target,
+  -- which is the same fact `impl.linux` reads back), then recorded WITH the hand that did it and why. An
+  -- unverifiable claim is a refusal, and a claim with no name or no reason is a claim nobody can review.
+  if step == "linux" then
+    if options.by_hand ~= true then
+      return false, { error = "mark_by_hand_required",
+        detail = "the channel step is marked by hand only, and the mark has to say who and why",
+        observed = "wa land mark linux was asked without --by-hand",
+        next = "wa land mark linux --by-hand --who <name> --why <text> --evidence <file>" }
+    end
+    local who, why = trim(options.who or ""), trim(options.why or "")
+    if who == "" then
+      return false, { error = "mark_by_hand_needs_who", detail = "a by-hand publish is recorded with the person who did it",
+        observed = "--who was not given", next = "wa land mark linux --by-hand --who <name> --why <text> --evidence <file>" }
+    end
+    if why == "" then
+      return false, { error = "mark_by_hand_needs_why", detail = "a by-hand publish is recorded with the reason it was done by hand",
+        observed = "--why was not given", next = "wa land mark linux --by-hand --who <name> --why <text> --evidence <file>" }
+    end
+    local targets = linux_targets(options)
+    local doc, why_not = origin_main_index(tree)
+    if not doc then
+      return false, { error = "mark_not_verified", detail = "the public channel could not be read back",
+        observed = tostring(why_not),
+        next = "git -C " .. slashes(tree or ".") .. " fetch " .. M.origin() .. " main, then mark again: a by-hand publish is recorded only once it is on main" }
+    end
+    local _, missing = index_covers(doc, sha, targets)
+    if #missing > 0 then
+      return false, { error = "mark_not_verified",
+        detail = "the channel on " .. M.origin() .. "/main does not name this commit for every target",
+        observed = M.LINUX_INDEX .. " does not name " .. sha:sub(1, 12) .. " for " .. table.concat(missing, ", "),
+        next = "commit and push the index entry the by-hand publish wrote (" .. M.LINUX_INDEX .. "), then mark again - nothing was marked" }
+    end
+    run.journal.linux = type(run.journal.linux) == "table" and run.journal.linux or {}
+    run.journal.linux.by_hand = { who = who, why = why, evidence = tostring(options.evidence or ""),
+      at = now(), commit = sha, targets = targets, state = "by_hand" }
+    return true, { detail = "published by hand by " .. who .. " (" .. why .. "): the channel on " .. M.origin() ..
+      "/main names " .. sha:sub(1, 12) .. " for " .. #targets .. " target(s) (verified)" }
   end
   local artifacts = run.journal.artifacts or {}
   if step == "sign" then
@@ -5863,6 +5908,7 @@ function M.cli(argv)
       local step = argv[index + 1]
       if type(step) ~= "string" or step == "" or step:sub(1, 2) == "--" then
         print("wa land mark needs a step: wa land mark <" .. table.concat(M.MARKABLE, "|") .. "> --evidence <file> [--run <id>]")
+        print("  wa land mark linux --by-hand --who <name> --why <text> --evidence <file>   record a channel published by hand")
         return 2
       end
       local mark_options = {}
@@ -5872,6 +5918,9 @@ function M.cli(argv)
         elseif word == "--run" then mark_options.run = argv[scan + 1]
         elseif word == "--account" then mark_options.account = argv[scan + 1]
         elseif word == "--signer" then mark_options.signer = argv[scan + 1]
+        elseif word == "--by-hand" then mark_options.by_hand = true
+        elseif word == "--who" then mark_options.who = argv[scan + 1]
+        elseif word == "--why" then mark_options.why = argv[scan + 1]
         end
       end
       local id = mark_options.run
