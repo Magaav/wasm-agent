@@ -111,6 +111,35 @@ those three checks now hold the new rule (a write and an edit answer `queued=fal
 hint addressed at a store this test names leaves that store uncreated; the graph call itself commits).
 No other assertion was deleted or loosened anywhere.
 
+## 3a. The brief's acceptance test, run for real (not a mechanism argument)
+
+Scratch HOME `/tmp/gospr-soak`, the `wa` binary built from this branch. One root (`a`) had a store
+BEFORE the soak: one `graph` search built it (94,208 B, mtime `1795453516`). Then, for **1,148 s of
+`wa serve` uptime (19 min, longer than the ten the brief asks for)**:
+
+* `wa serve --port 18799` with cwd = root `a`;
+* three `wa` processes with cwd = roots `b`, `c`, `d`, each writing a new `.lua` file every 30 s for 20
+  iterations - **60 native writes in three roots**;
+* **no `graph` call from any of the four processes.**
+
+Result:
+
+| what | before | after 19 min |
+|---|---|---|
+| store of root `a` | mtime `1795453516`, 94,208 B | **mtime `1795453516`, 94,208 B** |
+| stores under `graph.roots/` | 1 (root `a`) | **1** - roots `b`, `c`, `d` created none |
+| `~/.wasm-agent/graph.log` | empty | **0 lines** |
+| files written | - | 20 in each of `b`, `c`, `d` |
+
+That is the brief's test at 0 (six characters of it, "the store's mtime untouched"), for a store that
+really existed, across four processes and three non-canonical roots.
+
+One observation worth its own look, and not this mission's to fix: a byte-identical copy of that store
+appeared at `<home>/.wasm-agent/graph.db.d/graph.db` at serve start, once, and was not touched again.
+`lua/core/backup.lua` snapshots every store whose name is `graph.db` (its `is_graph_store`), so the
+legacy path can exist without anyone indexing into it - the copy is not an index and its mtime did not
+move either. `locations()` in this branch never chooses that path.
+
 ## 3b. The whole `wa-capabilities` + `wa-graph` unit suites, and what fails there before me
 
 `cargo test -p wa-capabilities -p wa-graph`: **397 passed, 3 failed** in `wa-capabilities`, 0 failed in
