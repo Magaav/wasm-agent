@@ -2828,8 +2828,17 @@ end
 -- every return path - refusals, hooks, effects, scripts - gets the same signal without each site saying it.
 do
   local status = dofile("lua/core/status.lua")
+  local bash_result = dofile("lua/core/bash_result.lua")
   local inner = M.dispatch
-  M.dispatch = function(...) return status.stamp(inner(...)) end
+  -- A command's answer is slimmed HERE, at the one door every call passes last: after the hooks, after
+  -- the refusal renderer and after the status stamp, so every other caller of this layer sees exactly
+  -- what it saw before and only the answer a script receives changes. The record keeps every field -
+  -- `operation {action="status", id=<operation_id>}` answers it (lua/core/bash_result.lua, mission
+  -- slim-tool-results).
+  M.dispatch = function(memory, name, args, role, ctx, cwd_provenance, same_call)
+    return bash_result.slim_for(name, args,
+      status.stamp(inner(memory, name, args, role, ctx, cwd_provenance, same_call)))
+  end
 end
 
 return M
