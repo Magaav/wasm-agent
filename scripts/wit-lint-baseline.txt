@@ -16,10 +16,14 @@
 # record, the same shape the native path writes) and named payload since the journal existed -
 # lua/core/memory.lua writes that key and the Rust writer reads it. Renaming it is a wire change in
 # wa:kernel/sql v0.1, which memory and selfloop VENDOR under wit/*/deps/kernel/, so it moves when that
-# interface moves rather than in a change about the rule. Both copies are listed because this tree
-# reads both; wit/memory/deps/kernel/kernel.wit has the same field with NO doc comment on it, which is
-# why rule 1 cannot see that third copy (the check reads what a file says).
+# interface moves rather than in a change about the rule. All three files are listed because this tree
+# reads all three, and they are one field: `wit/kernel/sql.wit` and its two copies. Until 22/11 the
+# memory copy carried no doc comment on that field (a hand trim had dropped it) and this rule could not
+# see it; the copies are now slices of the canonical text (scripts/gen-wit-deps.lua), so the comment
+# this rule reads came back with them and the third line is a record of the same approved field, not a
+# new exception.
 json-name kernel/sql.wit interface:sql/record:journal-entry payload
+json-name memory/deps/kernel/kernel.wit interface:sql/record:journal-entry payload
 json-name selfloop/deps/kernel/kernel.wit interface:sql/record:journal-entry payload
 #
 # wa:kernel/service.run takes the registry definition's config object as JSON text (word for word:
