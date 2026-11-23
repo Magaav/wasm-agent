@@ -1059,8 +1059,11 @@ impl Manager {
                     state["stdout_bytes"].as_u64().unwrap_or(0)
                         + state["stderr_bytes"].as_u64().unwrap_or(0));
                 state["output_readable"] = json!(true);
+                // The texts are SPELLED (Fable, 23/11): a reader must be able to copy the call out of the
+                // sentence, so the read is named as `tools.operation({action:"read", id})` and not as the
+                // prose "operation read".
                 state["owner_gone_note"] = json!(
-                    "the process that started this operation is gone and the operation never reported an outcome: its state above is the last one that process recorded. The output it wrote is on disk at stdout_path/stderr_path and is readable by id (operation read); the exit code is only known if the record carries one. Nothing was replayed and no success is claimed.");
+                    "the process that started this operation is gone and the operation never reported an outcome: its state above is the last one that process recorded. The output it wrote is on disk at stdout_path/stderr_path and is readable by id: tools.operation({action:\"read\", id}). The exit code is only known if the record carries one. Nothing was replayed and no success is claimed.");
             }
         }
         Ok(state)
