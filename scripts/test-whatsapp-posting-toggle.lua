@@ -95,7 +95,7 @@ local GROUP = "120363021234567890@g.us"
 
 -- ---- the runtime this row plays: `host.service`, and only it --------------------------------
 local runtime = { instances = {}, starts = {}, requests = {}, posted = 0, fail_next_start = nil, log_override = nil,
-  http_calls = {}, logged = {} }
+  http_calls = {}, logged = {}, index_chats = 7, index_calls = 0 }
 
 -- The component's own start lines, byte for byte as `src/guest.rs` `serve` and `src/health.rs` `line`
 -- print them (the `[  n.nn s] ` prefix is `say!`). A fake that printed something else would let a
@@ -155,6 +155,19 @@ host.service = function(request_json)
     return json.encode({ ok = true, name = name, bytes = #instance.log, log = instance.log })
   end
   return json.encode({ ok = false, error = "invalid_service_action" })
+end
+
+-- The ONE other capability this row stubs, and why: the "every chat" answer states HOW MANY chats it
+-- covers, and that count comes from the component's own index through the same `contacts` call
+-- `lua/core/whatsapp.lua` uses (`service_row`: no query, `limit: 1`, answer `index.chats`;
+-- rust/wa-capabilities/src/whatsapp_query.rs). A scratch node has no component to answer it.
+host.whatsapp_contacts = function(request)
+  runtime.index_calls = runtime.index_calls + 1
+  if runtime.index_chats == "error" then
+    return json.encode({ ok = false, error = "whatsapp_contacts_failed" })
+  end
+  return json.encode({ ok = true, index = { chats = runtime.index_chats }, candidates = {}, count = 0,
+    truncated = false })
 end
 
 -- The only place the allow list could leak into an operator's log.
@@ -270,7 +283,32 @@ eq(kept.post_transcripts, true, "and so is the gate")
 eq(#runtime.starts, 4, "changing a key restarts the component once")
 
 -- ---- E. the allow list is validated as an allow-list ----------------------------------------
-eq(#ask({ action = "set", allow = { "*" } }).allow, 1, "the wildcard is an accepted scope")
+-- "*" is every chat, groups included, so it takes a SECOND WORD and the answer says what it covers.
+local before_wildcard = encode(stored_config())
+local wildcard = ask({ action = "set", allow = { "*" } })
+eq(wildcard.ok, false, "\"*\" without the second word is refused")
+eq(wildcard.error, "posting_all_chats_unconfirmed", "by name")
+contains(encode(wildcard), "--all-chats", "and the refusal names the flag that confirms it")
+eq(encode(stored_config()), before_wildcard, "and nothing was stored")
+local wide = ask({ action = "set", allow = { "*" }, all_chats = true })
+eq(wide.ok, true, "\"*\" with --all-chats is accepted: " .. tostring(wide.error))
+eq(encode(wide.allow), encode({ "*" }), "the stored scope is the wildcard")
+ok(type(wide.all_chats) == "table", "and the answer carries what it covers")
+eq(wide.all_chats.chats, runtime.index_chats, "as a COUNT from the component's index")
+eq(wide.all_chats.covers, "every chat, groups included", "named in words")
+eq(wide.all_chats.source, "index", "and says where the number came from")
+absent(encode(wide), "@g.us", "never as a list of chats")
+eq(ask({ action = "status" }).all_chats.chats, runtime.index_chats, "status carries the same count")
+runtime.index_chats = "error"
+local blind = ask({ action = "status" })
+ok(type(blind.all_chats) == "table", "status still answers when the index cannot be counted")
+eq(blind.all_chats.chats, nil, "with no number invented")
+eq(blind.all_chats.unverified, "whatsapp_index_count_unreadable", "and the reason named")
+runtime.index_chats = 7
+eq(ask({ action = "set", allow = { "own" }, all_chats = "yes" }).error, "posting_all_chats_boolean_required",
+  "the flag is a boolean")
+eq(ask({ action = "set", allow = { "own" }, all_chats = true }).ok, true, "the flag is harmless on a named scope")
+eq(ask({ action = "set", allow = { "own" } }).ok, true, "and \"own\" is one step, as before")
 eq(ask({ action = "set", allow = { "5511999999999@s.whatsapp.net" } }).allow_count, 1, "an exact JID is accepted")
 eq(ask({ action = "set", allow = { GROUP } }).allow_count, 1, "a group JID is accepted")
 eq(ask({ action = "set", allow = { "5511999999999@lid" } }).allow_count, 1, "a LID is accepted")
@@ -359,6 +397,9 @@ eq(encode(runtime.instances[SERVICE].config), before_restore, "and the running c
 eq(cli.run({ "status", "--json" }), 0, "wa whatsapp posting status --json succeeds")
 eq(cli.run({ "frobnicate" }), 2, "an unknown verb is a usage refusal")
 eq(cli.run({ "allow" }), 2, "allow without a list is a usage refusal")
+eq(cli.run({ "allow", "*" }), 1, "the CLI refuses \"*\" without the flag")
+eq(cli.run({ "allow", "*", "--all-chats" }), 0, "\"*\" with --all-chats is accepted")
+contains(host.read_file("lua/core/whatsapp_posting_cli.lua") or "", "--all-chats", "the CLI names the flag in its usage")
 eq(cli.run({ "alerts", "maybe" }), 2, "alerts needs on or off")
 eq(cli.run({ "help" }), 0, "help is a request, never a change")
 local init = host.read_file("lua/core/init.lua") or ""

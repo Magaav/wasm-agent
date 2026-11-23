@@ -26,7 +26,7 @@ local VERBS = {
   status = 'what is stored, whether the component runs, and what its health line reports',
   on = 'post the transcript of every allowed chat',
   off = 'post nothing (transcription keeps working)',
-  allow = 'the chats posting may reach: own, *, or exact chat JIDs, comma separated',
+  allow = 'the chats posting may reach: own, exact chat JIDs, or * with --all-chats (every chat, groups included)',
   alerts = 'the own-chat alert when a note could not be transcribed: on|off',
   language = 'the language the pipeline transcribes in: en|pt|auto',
 }
@@ -34,7 +34,7 @@ local VERBS = {
 local function usage(stream)
   stream = stream or 'out'
   local function say(line) if stream == 'err' then io.stderr:write(line .. '\n') else print(line) end end
-  say('wa whatsapp posting <verb> [--json]')
+  say('wa whatsapp posting <verb> [--all-chats] [--json]')
   for _, verb in ipairs({ 'status', 'on', 'off', 'allow', 'alerts', 'language' }) do
     say(string.format('  %-9s %s', verb, VERBS[verb]))
   end
@@ -42,6 +42,8 @@ local function usage(stream)
   say('  The switch is the `' .. posting.SERVICE .. '` service component\'s own configuration. A change is')
   say('  written through the services registry (disable -> put -> enable), so `wa services` and this verb')
   say('  cannot disagree about the definition, and the answer is the health line the component prints.')
+  say('  "*" is every chat, groups included: it takes the second word --all-chats, and the answer says')
+  say('  how many chats it covers (a count from the component index, never the ids). "own" needs no flag.')
   say('  Master only: the allow list is never printed back in a refusal and never logged.')
 end
 
@@ -60,6 +62,16 @@ local function text_state(answer)
   end
   print(string.format('alerts    %s', answer.alerts and 'on' or 'off'))
   print(string.format('language  %s', tostring(answer.language)))
+  if type(answer.all_chats) == 'table' then
+    local cover = answer.all_chats
+    if tonumber(cover.chats) then
+      print(string.format('covers    %s (%d %s in the index)', tostring(cover.covers or 'every chat, groups included'),
+        tonumber(cover.chats), tonumber(cover.chats) == 1 and 'chat' or 'chats'))
+    else
+      print(string.format('covers    %s (the index\'s chat count is unknown: %s)',
+        tostring(cover.covers or 'every chat, groups included'), tostring(cover.unverified or 'unavailable')))
+    end
+  end
   print(string.format('component %s', tostring(answer.connection or 'unknown')))
   if answer.health then
     print(string.format('health    posting=%s posted=%s last_post=%s', tostring(answer.health.posting),
@@ -84,6 +96,9 @@ local function apply(args, want_json)
   if type(answer) ~= 'table' then return fail(1, 'the module answered nothing') end
   if want_json then print(json.encode(answer)) end
   if answer.ok == false or answer.error then
+    -- The refusal's own sentence travels with the code: a refusal a reader cannot act on (which flag,
+    -- which form) is half a refusal. Nothing in these sentences is an allow-list entry.
+    if type(answer.note) == 'string' and answer.note ~= '' then io.stderr:write('whatsapp posting: ' .. answer.note .. '\n') end
     return fail(1, string.format('%s: %s', tostring(args.action or 'status'), tostring(answer.error)))
   end
   return want_json and 0 or text_state(answer)
@@ -93,9 +108,11 @@ end
 function M.run(argv)
   argv = type(argv) == 'table' and argv or {}
   local verb = tostring(argv[1] or '')
-  local want_json, rest = false, {}
+  local want_json, all_chats, rest = false, false, {}
   for index = 2, #argv do
-    if argv[index] == '--json' then want_json = true else rest[#rest + 1] = argv[index] end
+    if argv[index] == '--json' then want_json = true
+    elseif argv[index] == '--all-chats' then all_chats = true
+    else rest[#rest + 1] = argv[index] end
   end
   if verb == '' or verb == 'status' then return apply({ action = 'status' }, want_json) end
   if verb == 'help' or verb == '--help' or verb == '-h' then usage('out'); return 0 end
@@ -116,7 +133,7 @@ function M.run(argv)
       local trimmed = entry:gsub('^%s+', ''):gsub('%s+$', '')
       if trimmed ~= '' then list[#list + 1] = trimmed end
     end
-    return apply({ action = 'set', allow = list }, want_json)
+    return apply({ action = 'set', allow = list, all_chats = all_chats }, want_json)
   end
   if verb == 'alerts' then
     local value = tostring(rest[1] or '')
