@@ -18,6 +18,13 @@
 --   * the SECOND quarantine leaves TWO copies, the older one byte for byte as it was - this is the
 --     assertion that fails on the code before this change, which kept one;
 --   * the node answers again afterwards, so the quarantine is still the rebuild it always was.
+--
+-- THE COMPONENT THIS ROW NEEDS, named so the runner installs it: `WA_GRAPH_COMPONENT_WASM`. The fast path
+-- builds each component from THIS tree and gives every row that names `WA_<NAME>_COMPONENT_WASM` that
+-- artifact in the row's own home (`scripts/fast.sh`, "the components the Lua rows need"). Measured on this
+-- node, 23/11: without the name the row runs against a home with no component and answers
+-- `graph_component_unavailable: component_not_installed:graph`, which is a failure of the runner's promise,
+-- not of the store.
 local json = dofile('lua/vendor/json.lua')
 local paths = dofile('lua/core/paths.lua')
 local guard = dofile('scripts/lib/test-home-guard.lua')
@@ -78,12 +85,18 @@ local function tear_the_store()
   assert(answer.code == 0, 'the store was not torn: ' .. tostring(answer.stderr))
 end
 
--- A quarantine is decided by the scheduler's worker after a failed component call, so the row enqueues the
--- root exactly as an edit does and then waits for the copy: the real path, never a direct call.
+-- A quarantine is decided by the scheduler's worker after a failed component call, so the row tears the
+-- store, CHANGES CONTENT, enqueues the root exactly as an edit does and waits for the copy: the real path,
+-- never a direct call. The content change is not decoration - admission compares a manifest fingerprint
+-- first, so a store nobody edited is declared fresh and is never written, and a torn store in that state
+-- would be discovered by no index run at all.
+local round = 0
 local function quarantine_once(what, wanted)
+  round = round + 1
   tear_the_store()
-  local verdict = sql(immutable(db), 'pragma integrity_check(100000);')
-  assert(verdict ~= 'ok', what .. ': the torn store still passes integrity_check, so this row would measure nothing')
+  local verdict, code = sql(immutable(db), 'pragma integrity_check(100000);')
+  assert(code ~= 0 or verdict ~= 'ok', what .. ': the torn store still passes integrity_check, so this row would measure nothing')
+  assert(host.write_file(root .. ('/changed_%d.lua'):format(round), ('local function changed_%d(a) return a end'):format(round)))
   local before = #copies()
   decode(host.graph_notify(json.encode({root = root})), 'notify')
   local deadline = os.time() + 120
@@ -98,7 +111,8 @@ end
 
 local one = quarantine_once('the first quarantine', 1)
 local copy = dir .. '/' .. one[1]
-assert(sql(immutable(copy), 'pragma integrity_check(100000);') ~= 'ok', 'the kept copy is not the broken store: it passes integrity_check')
+local copy_text, copy_code = sql(immutable(copy), 'pragma integrity_check(100000);')
+assert(copy_code ~= 0 or copy_text ~= 'ok', 'the kept copy is not the broken store: it passes integrity_check')
 local preserved = assert(host.read_file(copy), 'the kept copy cannot be read, so it is not evidence')
 
 -- The node rebuilds and answers again: a quarantine is still a quarantine.
