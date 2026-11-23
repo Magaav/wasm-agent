@@ -1628,3 +1628,66 @@ fn a_lock_row_names_the_owner_and_the_queue_position() {
     // A pid that is not waiting on anything gets nothing at all.
     assert!(crate::blocked::waiter_view(&rows, 4242).is_none());
 }
+
+/// Item 2 (23/11): a handle whose OWNER IS GONE still answers with what it knows, and its output is named.
+///
+/// The measured complaint (ledger notes 113, 153, 169, 172, 179, 190, 205, 229, 235, 240, 91): after a deploy
+/// pause or a node restart, status/await answered `operation_owner_not_attached` with `output_bytes: 0` and no
+/// paths, so the only route to the output the disk already held was walking ~/.wasm-agent/operations/<id>/ by
+/// hand - and a finished suite was re-run to get an answer that was on disk the whole time. The outcome is
+/// still unknown (that half is pinned by the test above and is NOT loosened here); what this pins is that
+/// unknown does not mean empty: the last recorded state, the output paths and their real sizes travel, and a
+/// cancel of that dead handle answers at once instead of waiting for a process that is not there.
+#[test]
+fn a_handle_whose_owner_is_gone_names_its_output_and_cancels_at_once() {
+    let base = std::env::temp_dir().join(format!(
+        "wa-owner-gone-output-{}-{}", std::process::id(),
+        crate::SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+    let _ = fs::remove_dir_all(&base);
+    fs::create_dir_all(&base).unwrap();
+    let id = "op-deadowner-output-1";
+    let dir = base.join(id);
+    fs::create_dir_all(&dir).unwrap();
+    // The record a killed owner leaves: unsettled, with the exit code it had already observed, and output
+    // it had already written to disk.
+    fs::write(dir.join("stdout"), b"suite row 1 ok\nsuite row 2 ok\n").unwrap();
+    fs::write(dir.join("stderr"), b"warning: something\n").unwrap();
+    atomic_json(&dir.join("state.json"), &json!({
+        "operation_id": id, "state": "draining", "settled": false, "ok": false,
+        "owner_boot": "boot-000000000-0-0", "session": "session-gone", "owner": "worker:1",
+        "process_exit_code": 0, "output_bytes": 0, "cwd": "/tmp",
+        "stdout_path": dir.join("stdout").to_string_lossy(),
+        "stderr_path": dir.join("stderr").to_string_lossy()
+    })).unwrap();
+    let reader = Manager::new(&base);
+    let state = reader.snapshot(id).unwrap();
+    // The unknown half is unchanged: this is not a fabricated success.
+    assert_eq!(state["state"], "outcome_unknown", "{state}");
+    assert_eq!(state["settled"], true, "{state}");
+    assert_eq!(state["ok"], false, "{state}");
+    assert!(state["error"].as_str().unwrap_or("").starts_with("operation_owner_not_attached"), "{state}");
+    assert_eq!(state["cleanup"], "unknown", "{state}");
+    // What the record and the disk DO know travels with it.
+    assert_eq!(state["last_recorded_state"], "draining", "the last state the owner wrote is kept: {state}");
+    assert_eq!(state["process_exit_code"], 0, "an exit code the record already carried is not thrown away: {state}");
+    assert_eq!(state["stdout_path"].as_str().unwrap_or(""), dir.join("stdout").to_string_lossy(),
+        "the stdout path is named: {state}");
+    assert_eq!(state["stderr_path"].as_str().unwrap_or(""), dir.join("stderr").to_string_lossy(),
+        "and stderr: {state}");
+    assert_eq!(state["stdout_bytes"], 30, "the stdout SIZE is the file's, not a zero: {state}");
+    assert_eq!(state["stderr_bytes"], 19, "and stderr's: {state}");
+    assert_eq!(state["output_bytes"], 49, "the total is those two: {state}");
+    assert!(state["owner_gone_note"].as_str().unwrap_or("").contains("readable by id"),
+        "and the answer says where to read it: {state}");
+    // The bytes really are readable BY ID through the manager, which is the point of naming them.
+    let page = reader.read(id, "stdout", 0, 4096).unwrap();
+    assert!(page["content"].as_str().unwrap_or("").contains("suite row 1 ok"), "{page}");
+    // A cancel of that handle answers AT ONCE (no process to wait for) and says the same unknown.
+    let asked = Instant::now();
+    let cancelled = reader.cancel(id).unwrap();
+    assert!(asked.elapsed() < Duration::from_secs(2),
+        "cancel of a dead owner answered in {:?}, which is not 'at once'", asked.elapsed());
+    assert_eq!(cancelled["state"], "outcome_unknown", "{cancelled}");
+    assert_eq!(cancelled["stdout_bytes"], 30, "and it still names the output: {cancelled}");
+    drop(reader); remove_fixture(base);
+}

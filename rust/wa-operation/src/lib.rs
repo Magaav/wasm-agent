@@ -1026,12 +1026,36 @@ impl Manager {
                 state["owner_live"] = json!(true);
                 state["reattached_note"] = json!("this operation belongs to a live process this manager is not attached to; the state below is the owner's own record and its output streams are readable. Await it again, or read its output by id. Do not replay it.");
             } else {
+                // THE OWNER IS GONE AND THE WORK NEVER SETTLED. The outcome is unknown - it may have been
+                // killed with its owner, or it may have finished just before (item 2, 23/11) - but that is
+                // not the same as "nothing is known". Measured in the worker ledger: this answer carried
+                // `output_bytes: 0` and no paths, so the only way to the output that HAD been written was
+                // to walk ~/.wasm-agent/operations/<id>/ by hand, and finished suites were re-run to get a
+                // result the disk already held.
+                //
+                // So the record keeps everything it had (the last state the owner wrote, its exit code if it
+                // recorded one, its timing) and the DISK is asked what it still holds: the two output streams
+                // and their sizes. Nothing here is a claim that the work succeeded, and nothing is replayed.
+                state["last_recorded_state"] = state["state"].clone();
                 state["state"] = json!("outcome_unknown");
                 state["settled"] = json!(true);
                 state["ok"] = json!(false);
                 state["error"] =
                     json!("operation_owner_not_attached; it may still be active elsewhere; reconcile effects, never replay blindly");
                 state["cleanup"] = json!("unknown");
+                let dir = self.root.join(id);
+                for stream in ["stdout", "stderr"] {
+                    let path = dir.join(stream);
+                    let bytes = fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+                    state[format!("{stream}_path")] = json!(path.to_string_lossy());
+                    state[format!("{stream}_bytes")] = json!(bytes);
+                }
+                state["output_bytes"] = json!(
+                    state["stdout_bytes"].as_u64().unwrap_or(0)
+                        + state["stderr_bytes"].as_u64().unwrap_or(0));
+                state["output_readable"] = json!(true);
+                state["owner_gone_note"] = json!(
+                    "the process that started this operation is gone and the operation never reported an outcome: its state above is the last one that process recorded. The output it wrote is on disk at stdout_path/stderr_path and is readable by id (operation read); the exit code is only known if the record carries one. Nothing was replayed and no success is claimed.");
             }
         }
         Ok(state)
