@@ -325,11 +325,11 @@ own six. Per capability family, what each candidate host would have to provide:
 | --- | --- | --- | --- |
 | WASI 0.2 itself (files, clocks, random, sockets, cli) | provided by wasmtime-wasi on macOS, complete | complete, but the app sandbox restricts files to Termux's own home - the ledger and the component dir already live there | **files and sockets have no complete story**: OPFS gives no durable random writes and no sockets beyond fetch/WebSocket; clocks/random are fine |
 | (a) the 62 guest-side capabilities | nothing to port - they move into the guest | same | same |
-| process ((b): exec, subagents, `bash`) | `posix_spawn` + `waitpid`, ~ the same shape as Linux | Termux has fork/exec for its own binaries; `systemd` does not exist, so the supervisor model changes | **not possible**: a page cannot start a process |
-| terminal/pty ((b): the TUI, 33 capabilities) | `termios` + `ioctl(TIOCGWINSZ)`, ~ the same shape | `termios` works in Termux | a terminal can be *drawn* in a page, but there is no pty and no raw keystroke stream outside the page |
-| keys ((b): sign/verify, keyring) | Security.framework's keychain | no keychain in Termux: needs Android Keystore through a JNI shim, or a file with a passphrase | WebCrypto + IndexedDB (non-extractable keys) - the closest of the three |
-| system ((b): statvfs, CPU, locks, sleep, systemd) | `statfs`, `sysctl`, `flock` | `statvfs`/`flock` present, no systemd | **not possible**: no statvfs, no flock, no sleep beyond timers |
-| ledger ((c): SQLite) | `sqlite3` links as it does on Linux | same | SQLite compiled to wasm over OPFS: real, but every write is a copy and two tabs cannot share one store |
+| process (b: exec, subagents, `bash`) | `posix_spawn` + `waitpid`, ~ the same shape as Linux | Termux has fork/exec for its own binaries; `systemd` does not exist, so the supervisor model changes | **not possible**: a page cannot start a process |
+| terminal/pty (b: the TUI, 33 capabilities) | `termios` + `ioctl(TIOCGWINSZ)`, ~ the same shape | `termios` works in Termux | a terminal can be *drawn* in a page, but there is no pty and no raw keystroke stream outside the page |
+| keys (b: sign/verify, keyring) | Security.framework's keychain | no keychain in Termux: needs Android Keystore through a JNI shim, or a file with a passphrase | WebCrypto + IndexedDB (non-extractable keys) - the closest of the three |
+| system (b: statvfs, CPU, locks, sleep, systemd) | `statfs`, `sysctl`, `flock` | `statvfs`/`flock` present, no systemd | **not possible**: no statvfs, no flock, no sleep beyond timers |
+| ledger (c: SQLite) | `sqlite3` links as it does on Linux | same | SQLite compiled to wasm over OPFS: real, but every write is a copy and two tabs cannot share one store |
 
 So the omni-device answer is: **the component half is already portable (one artifact, three hosts), and
 the host half is six interfaces**. macOS and Termux are each a small port of (process, terminal, system)
