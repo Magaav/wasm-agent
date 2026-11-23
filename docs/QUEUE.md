@@ -129,10 +129,14 @@ so a caller that pastes an error message cannot inject text into the log.
 | lane picked by a worker loop; `inflight` map | `take(queue, worker, lease)`; the lease is the `inflight` set, and it survives a restart |
 | transcript segments | `progress(job, segment)`; the final text is the `done` result |
 
-What stays outside the queue, on purpose: chat holds and fences (`computeFence`, `chat_holds`,
-`target_fences`) decide *whether* work may run; the queue only decides *when* and *in what order*. A
-fenced job is `fail`ed with the fence reason (or never enqueued), and the hold is re-checked by the
-worker after compute, as the connector does today. Same for the outbox `send_id` and reply
+What stays outside the queue, on purpose: *whether* work may run is decided beside it, and the queue
+only decides *when* and *in what order*. The Go bridge modelled that as chat holds and fences
+(`computeFence`, `chat_holds`, `target_fences`); since 23/11 this tree has neither, because the owner
+removed them ("we never should get hold from a chat"). What decides now is a fact about ONE MESSAGE:
+the index's `deleted` flag, which `index::notice` sets on the message a deletion notice names. A queued
+reply to a deleted message is dropped (`drop_key`, and `drop_where` for the pending replies of that
+sender) and recorded as `skipped: source deleted`; nothing else in the chat is touched, and the flag is
+re-read after compute, right before the post. See `docs/WHATSAPP-TRANSCRIPTION.md`. Same for the outbox `send_id` and reply
 semantics: the queue carries the job, the channel owns the send.
 
 ## Phase 2 — workers on another node

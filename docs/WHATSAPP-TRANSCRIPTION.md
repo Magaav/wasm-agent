@@ -400,81 +400,68 @@ is a knob, and the measurement behind the default is in the commit/report, not a
 quality claim. `without_timestamps` and the batched pipeline are not defaults: they
 are unmeasured on the production host.
 
-## Unproven revokes no longer hold a whole chat's transcription
+## A deletion flags one message; no chat is ever held (owner's decision, 23/11)
 
-A revoke whose chat scope or author cannot be proven used to insert a chat hold that
-blocked every later audio in that chat from transcription forever (38 chats, 553
-tasks on the production journal, 2026-10-27). The most common cause was a DM
-journaled under its `@lid` while the revoke key carried the phone-number JID.
+Victor, 23/11, after a send into a chat was refused with the single word `posting_held_chat` and no way
+to lift it: *"in case an audio gets deleted right after, it should just skip the reply as it was deleted.
+we never should get hold from a chat."* The rule of this component is therefore PER MESSAGE:
 
-- **Alias proof.** When the envelope carries no PN/LID alternate, the mapper asks the
-  SDK device store's LID map (both directions must agree) for that exact user.
-  A match proves the scope (`scope_proof=sdk_lid_store`) and fills the author alias,
-  so the revoke becomes an exact source fence. Groups never use the DM map.
-- **Policy.** An unproven mutation that still names an exact target ID now
-  (1) fences THAT ID in every chat of the account (`target_fences`; a revoked audio
-  that arrives later, under either alias, is never transcribed), and (2) holds the
-  chat for **posting only** (`chat_holds.reason=unproven_mutation_chat_hold`). Other
-  audio in that chat is transcribed into the private journal with
-  `reason=posting_held_chat` and NO outbox row, so nothing is posted into a held
-  chat and a later `release-hold` replays nothing. Posting, operator replies and
-  final dispatch admission still honour every hold and every fence.
-- Unchanged: an unproven mutation with no target ID (`untargeted_mutation_chat_hold`),
-  owner ClearChat/DeleteChat (`owner_chat_clear_hold`) and exact verified fences still
-  block transcription. A broader mutation upgrades a posting-only hold; nothing
-  weakens one.
+* **A deleted message is flagged and KEPT.** The record gains `deleted`, `deleted_at` (from the notice's
+  own time) and `deleted_by` (when the wire said who), and keeps its text, its transcript, its OCR text,
+  its media metadata and its token keys. Reads and search show the flag beside the content:
+  `whatsapp_read`, `whatsapp_search`, `whatsapp_message` and `whatsapp_media` carry `deleted: true`,
+  `deleted_at_iso` and `deleted_by`. `index::mark_deleted`.
+* **An edit keeps the earlier text.** The record gains `previous_text` and `edited: true`, and the new text
+  is what a read answers with.
+* **The one reply that was about to go out is skipped.** A queued reply to a deleted message is dropped by
+  message id and its row says `skipped: source deleted`; a reply that was already posted is left alone.
+  When the notice names a message this store does not hold, the pending automatic replies of that sender
+  in that chat are skipped too, inside the queue's own freshness window (`fresh_seconds`, default 300 s):
+  an older job could never post anyway, and a wider window would skip replies the notice has nothing to do
+  with. Nothing else in the chat is affected.
+* **NO CHAT HOLD EXISTS.** Not for an unproven deletion, not for an untargeted one, not for an owner clear.
+  `posting_held_chat` is gone as a refusal code, and an explicit send the owner asks for is never refused
+  for a deletion. `held_chats` in the component config is the operator's own hand-written list and nothing
+  on the wire can add to it; the gate no longer has a parameter for a derived hold.
+* **A deleted message is never QUOTED, and the message still goes out.** Keeping a deleted message is for the
+  operator to read, not permission to re-publish it: a WhatsApp quote carries the quoted text, so an
+  explicit send that replies to a deleted message is sent WITHOUT the quote and its result carries
+  `note: "sent without the quote: the quoted message was deleted by its author"`. The automatic reply to
+  such a message is skipped anyway, so no other path can quote one.
+* **Matching is by MESSAGE ID, across every chat spelling.** A revoke's key and the message it names are
+  exactly the pair WhatsApp spells two ways (`@lid` vs phone JID): the notice is applied to the message
+  wherever the store keeps it, looking through the alias rows (`ix/al/`, both directions, learned from the
+  wire's `sender_alt` and from the client's `lid/` map). A notice that names a message this store does not
+  hold leaves a TOMBSTONE by id (`ix/tomb/<id>`): the message is flagged deleted the moment it arrives (a
+  re-delivery, a history sync, a backfill), under whichever spelling it arrives with.
+* **The signal stays visible.** The health line carries `notices matched=<n> unmatched=<m>` with the time of
+  the last of each. An unmatched notice is a DEFECT COUNTER - a deletion this node could not attach to a
+  message - and never a block: it is counted, timed, logged once per notice (chat and id as `sha256:`
+  marks), and it never holds a chat.
+* **Migration.** The first start of this build lifts every hold the previous one left: the held chats are
+  counted in ONE line (`N chat holds lifted: holds were removed by the owner's decision of 23/11`), the
+  `holds` key is deleted, and every fenced message id (the old `fence/<id>` keys and the ids the hold state
+  carried) becomes the deletion flag of the message it names. Nothing is replayed, and no transcript is
+  re-posted.
 
-### Re-proving a posting hold from the journal (operator, offline, 29/10)
+There is nothing to release, because there is no hold: `reprove-holds` and `release-hold` are removed with
+this change, and so is `requeue-held-audio` (the audio it would requeue was transcribed all along).
 
-On openclaw a DM journaled under its `@lid` had carried a posting-only hold since
-21/10 (one revoke, `remote_mismatch`): every voice note from that contact was
-transcribed (`source_hold_transcription_only`) and never posted. The 27/10
-`sdk_lid_store` proof only helps mutations that arrive after it is deployed.
+### The old journal is not this component's state
 
-`reprove-holds` re-checks each `unproven_mutation_chat_hold` against the journal.
-A hold is replaced by exact source fences (`verified_source_<kind>_journal_reproof`)
-only when it has recorded evidence (`hold_origins`) and EVERY `chat_hold` mutation
-recorded for that chat is a revoke/edit naming a message journaled in that same chat
-by the same author (the `mutationProof` author rules, alias and ambiguity included).
-Legacy holds without evidence, untargeted or owner mutations, a target never seen in
-the chat, a mismatched or ambiguous author, and compute holds stay. The revoked
-message stays fenced; nothing is replayed (already-held transcripts remain unposted);
-only later audio in the chat is posted. Dry run unless `--apply`, counts only, event
-`hold_reproved`, idempotent. Service stopped (owner lock):
+`~/.local/state/wa-whatsapp/journal.db` is the OLD Go bridge's journal. It stops at 11/11 on this account
+(`max(messages.sent) = 2026-11-11T18:42:17Z`, 86 788 rows) and its `chat_holds` / `mutation_evidence`
+tables describe a rule this component no longer has. Real evidence of the trap: four rounds of a session
+went into reading the wrong store - `chat_holds` was empty for the refused chat, so it read as "no hold",
+which the refusal itself contradicted.
 
-```sh
-"$WA" reprove-holds --state "$STATE"           # dry run
-"$WA" reprove-holds --state "$STATE" --apply
-```
-
-### Re-queueing audio blocked only by a chat hold (operator, offline)
-
-Existing `blocked_source` rows are NOT reopened automatically. With the service
-stopped (the owner lock refuses a running service):
-
-```sh
-WA="$RELEASE/wa-whatsapp"; STATE="$HOME/.local/state/wa-whatsapp"
-"$WA" requeue-held-audio --state "$STATE"                 # dry run: counts only
-"$WA" requeue-held-audio --state "$STATE" --limit 50 --apply   # 50 newest
-"$WA" requeue-held-audio --state "$STATE" --apply         # all eligible
-```
-
-It moves a row only if its chat's hold is posting-only and the row's own ID is not a
-source block, target fence or ANY recorded mutation target; it skips chats with an
-untargeted recorded mutation. Rows are taken newest first and get state by the
-normal rules: `pending` (attempts/failures reset), `journal_only` before the
-activation cutoff, or `unsupported` for their recorded reason. Holds are not
-released, no outbox row is created, an event `held_audio_requeued` records the
-counts, and a second run finds nothing (idempotent). Output is counts only.
-
-Legacy holds (created before `hold_origins`, no recorded target): audio that was
-already in the chat when the hold landed may BE the revoked message and is never
-requeued (`skipped_possible_target_legacy_hold`). Audio that arrived after such a
-hold is requeued only with `--include-legacy-holds`, an explicit operator decision
-(the small residual risk: a revoke delivered before its own original, out of order).
-New audio arriving in a legacy-held chat after this version is transcribed (not
-posted) without that flag, because a revoke targets an earlier message.
-
+* **The live state is the component's own kv**: `~/.wasm-agent/components/wa-whatsapp.state/kv.sqlite`,
+  keys `ix/m/<chat>/<inv(ts)>/<id>` for messages, `ix/tomb/<id>` for a notice waiting for its message, and
+  `notices` for the counters. `docs/SERVICE-COMPONENTS.md` (the message index) is its definition.
+* **A journal is stale when its `max(sent)` is behind the newest indexed message.** That check is the one
+  to run before believing a `chat_holds` row, and the answer then is `state_moved`, not a hold.
+* Nothing in this tree writes that journal any more; a tool that still opens it reports `state_moved`
+  instead of answering (the transcript watchdog does).
 ## The health line, and what a cut transcript says (2026-11-23)
 
 Three things were added because the pipeline could not answer for itself; all three are in the

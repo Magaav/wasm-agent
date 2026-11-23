@@ -24,7 +24,7 @@
 //! and no wasm target requirement; everything else (`guest`, `store`) needs the wasm32-wasip2
 //! bindings and is compiled only for that target, so `cargo test` runs the decisions natively while
 //! `cargo build --target wasm32-wasip2` builds the component.
-use crate::holds::{Author, Holds, Mutation, POSTING_ONLY};
+use crate::notices::{Ledger, Notice, Tombstone};
 use crate::wa::kernel::types::Error as KError;
 use crate::wa::kernel::{drain, http as khttp, kv as kkv, lifecycle, speech, vision, websocket};
 use crate::wasi::clocks::monotonic_clock;
@@ -485,11 +485,13 @@ thread_local! {
     static ALERTS: RefCell<alerts::AlertBook> = RefCell::new(alerts::AlertBook::default());
     static ALERT_SENDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Chat holds and message fences derived from revokes/edits (holds.rs); persisted in kv.
-    static HOLDS: RefCell<Holds> = RefCell::new(Holds::new());
+    /// The deletion-notice counters (and only the counters: a tombstone lives in the index, under
+    /// `ix/tomb/<id>`, which is the store that sees the message arrive).
+    static LEDGER: RefCell<Ledger> = RefCell::new(Ledger::new());
     /// The queue or the holds changed: write them to kv on the next tick.
     static STATE_DIRTY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Revoke/edit envelopes, handed over by the message handler.
-    static INBOX_MUTATIONS: RefCell<Vec<Mutation>> = const { RefCell::new(Vec::new()) };
+    static INBOX_MUTATIONS: RefCell<Vec<Notice>> = const { RefCell::new(Vec::new()) };
     /// The connected client, for media downloads from the audio pipeline.
     static CLIENT: RefCell<Option<Arc<whatsapp_rust::Client>>> = const { RefCell::new(None) };
     /// What this instance's own bot is doing (`outbox::Bot`). Set on connect, and set to `Stopped` when
@@ -544,129 +546,175 @@ async fn record(chat: &str, id: &str, value: serde_json::Value) {
     let _ = kkv::set(tx_key(chat, id).into_bytes(), value.to_string().into_bytes()).await;
 }
 
+/// Is this one message flagged deleted in the index? One read. The flag is a fact about ONE message, and
+/// it is the only thing on this path that can skip work (the owner's rule of 23/11).
+async fn source_deleted(chat: &str, id: &str) -> bool {
+    index::load(&IndexKv, &crate::chat::storable(chat), id).await.ok().flatten().is_some_and(|record| record.deleted)
+}
+
 async fn already_handled(chat: &str, id: &str) -> bool {
     matches!(kkv::get(tx_key(chat, id).into_bytes()).await, Ok(Some(_)))
 }
 
-async fn fence(id: &str) {
-    // Kept for the targets an older build fenced directly: this build fences through holds.rs,
-    // but a fence already on disk must never be forgotten.
-    let _ = kkv::set(format!("fence/{id}").into_bytes(), b"1".to_vec()).await;
-}
-
-/// Fenced: a proven revoke/edit of this message here, an unproven target anywhere (a DM alias may
-/// differ from the chat), or a fence written by an earlier build.
-async fn fenced(chat: &str, id: &str) -> bool {
-    if HOLDS.with(|h| h.borrow().blocked(chat, id)) {
-        return true;
-    }
-    matches!(kkv::get(format!("fence/{id}").into_bytes()).await, Ok(Some(_)))
-}
-
-/// Is this the same chat? A mutation key may carry a device part or the other address of the same
-/// user (`7210:12@lid` vs `7210@lid`): the comparison is on the user and server only.
-fn same_chat(a: &str, b: &str) -> bool {
-    let bare = |jid: &str| {
-        let (user, server) = jid.split_once('@').unwrap_or((jid, ""));
-        format!("{}@{server}", user.split(':').next().unwrap_or(user))
+/// One deletion notice, applied where the messages are.
+///
+/// THE RULE (the owner, 23/11): a deletion is a fact about ONE MESSAGE. The index flags the message it
+/// names and keeps its content, a tombstone waits for a message that has not arrived yet, and the only
+/// thing this function does besides that is skip the automatic replies that were about to be posted to
+/// the deleted message - one reply, never a chat, never an explicit send.
+async fn apply_notice(notice: Notice) {
+    let at = if notice.at_ms > 0 { notice.at_ms } else { now_ms() };
+    let chat = notice.chat.clone();
+    let target = notice.target.clone();
+    let unmatched = match index::notice(&IndexKv, &notice).await {
+        Ok(index::NoticeOutcome::Matched) => {
+            LEDGER.with(|l| l.borrow_mut().matched(at));
+            health::notice_matched(at);
+            false
+        }
+        Ok(index::NoticeOutcome::Unmatched) => {
+            // A deletion notice this node cannot attach to a message is a DEFECT it must not hide: it is
+            // counted, named in the log by mark, and the tombstone flags the message if it ever arrives.
+            let crossed = LEDGER.with(|l| {
+                let mut ledger = l.borrow_mut();
+                ledger.unmatched(at);
+                ledger.crossed_unmatched_bound()
+            });
+            health::notice_unmatched(at);
+            if crossed {
+                // ONCE per day, not a stream: a deletion notice this node could not attach to a message is a
+                // defect (`features never break silently`), and the counter that stays visible is on the
+                // health line. Never a block, and never a chat hold (23/11).
+                say!(
+                    "notices: unmatched above bound count={} bound={}",
+                    LEDGER.with(|l| l.borrow().unmatched_today),
+                    crate::notices::UNMATCHED_PER_DAY
+                );
+            }
+            say!("notice unmatched {} kind={} target={}", privacy::chat(&chat), notice.kind, privacy::id(&target));
+            true
+        }
+        Ok(index::NoticeOutcome::Untargeted) => {
+            // An owner clear names no message: there is nothing narrower than the chat to act on, and the
+            // owner's rule is that a chat is never blocked. Counted, so it stays visible.
+            LEDGER.with(|l| l.borrow_mut().unmatched(at));
+            health::notice_unmatched(at);
+            say!("notice untargeted {} kind={} owner={}", privacy::chat(&chat), notice.kind, notice.owner);
+            false
+        }
+        Err(reason) => {
+            // The store refused the write. Nothing was flagged, so nothing is counted: an unknown is not
+            // a match and not a miss (the tombstone is retried when the notice is re-delivered).
+            say!("notice failed {} reason={}", privacy::chat(&chat), one_line(&reason));
+            return;
+        }
     };
-    bare(a) == bare(b)
-}
-
-/// What a recorded author row says (kv `tx/<chat>/<id>`): the only thing that can prove a revoke is
-/// about that message by the same person.
-fn author_of(bytes: &[u8]) -> Option<Author> {
-    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
-    let sender = value["sender"].as_str().filter(|s| !s.is_empty())?;
-    let alt = value["sender_alt"].as_str().unwrap_or("");
-    Some(Author::new(sender, alt, value["own"] == serde_json::json!(true)))
-}
-
-async fn known_author(chat: &str, id: &str) -> Option<Author> {
-    let bytes = kkv::get(tx_key(chat, id).into_bytes()).await.ok().flatten()?;
-    author_of(&bytes)
-}
-
-/// Apply one revoke/edit: fence the exact message, hold the chat, or hold nothing (holds.rs decides).
-async fn apply_mutation(mutation: Mutation) {
-    let chat = mutation.chat.clone();
-    let key = if mutation.target.is_empty() { None } else { Some(format!("{chat}\u{0}{}", mutation.target)) };
-    let known = known_author(&chat, &mutation.target).await;
-    let verdict = HOLDS.with(|h| h.borrow_mut().apply(&mutation, known.as_ref()));
     STATE_DIRTY.with(|d| d.set(true));
-    say!(
-        "mutation {} kind={} verified={} proof={} fence_here={} fence_anywhere={} hold={}",
-        privacy::chat(&chat),
-        mutation.kind,
-        verdict.verified,
-        verdict.proof,
-        verdict.fence_here.len(),
-        verdict.fence_everywhere.len(),
-        verdict.hold.unwrap_or("none")
-    );
-    for id in &verdict.fence_everywhere {
-        fence(id).await;
+    if notice.kind != "revoke" {
+        return;
     }
-    // A proven revoke/edit is a source we must not even transcribe: drop it if it is still queued
-    // (an item already decoding finishes and is caught by the fence before it posts).
-    if let (true, Some(key)) = (!verdict.fence_here.is_empty(), key) {
+    // The reply that was about to go out for the deleted message is skipped (one reply, by id), and the
+    // transcript row says why instead of being posted under a message the sender took back.
+    let forms = index::chat_forms(&IndexKv, &chat).await;
+    let mut dropped = 0usize;
+    for form in &forms {
+        let key = format!("{form}\u{0}{target}");
         if QUEUE.with(|q| q.borrow_mut().drop_key(&key)) {
-            record(&chat, &mutation.target, serde_json::json!({"state": "blocked", "reason": "source_fence"})).await;
+            dropped += 1;
+            record(form, &target, serde_json::json!({"state": "skipped", "reason": "source_deleted"})).await;
         }
     }
-    // The common unproven case (a DM revoked under its other alias) is provable as soon as the
-    // target's author is on record: try at once instead of leaving the chat held until a restart.
-    if verdict.hold == Some(POSTING_ONLY) {
-        reprove(chat.as_str()).await;
+    if dropped > 0 {
+        say!("reply skipped {} reason=source_deleted replies={dropped}", privacy::at(&chat, &target));
+        note(telemetry::Note::new("skipped").about(&chat, &target).field("stage", "admit").field("reason", "source_deleted"));
+        return;
+    }
+    // Nothing of that id was queued: when the notice names a message this store does not hold, no waiting
+    // reply can be proved to be about another message, so the pending ones from that sender are skipped
+    // too. The window is the queue's own freshness window (`policy().fresh_ms`, 5 min): an older job can
+    // never post anyway, and a wider window would skip replies that have nothing to do with the notice.
+    if unmatched {
+        let window = QUEUE.with(|q| q.borrow().policy().fresh_ms);
+        let sender = notice.sender.clone();
+        let skipped: Vec<String> = QUEUE.with(|q| {
+            q.borrow_mut().drop_where(|key, job| {
+                forms.iter().any(|form| key.starts_with(&format!("{form}\u{0}")))
+                    && job.sender.to_string() == sender
+                    && job.sent_ms <= at
+                    && at - job.sent_ms <= window
+            })
+        });
+        for key in &skipped {
+            if let Some((form, id)) = key.split_once('\u{0}') {
+                record(form, id, serde_json::json!({"state": "skipped", "reason": "source_deleted_unproven"})).await;
+            }
+        }
+        if !skipped.is_empty() {
+            say!("reply skipped {} reason=source_deleted_unproven replies={}", privacy::chat(&chat), skipped.len());
+        }
+        STATE_DIRTY.with(|d| d.set(true));
     }
 }
 
-/// Re-prove the posting-only hold of one chat from what the component recorded (hold_reprove.go).
-/// The author rows are read in one scan of the chat's keys, so the proof itself stays the pure
-/// function holds.rs tests.
-async fn reprove(chat: &str) {
-    let prefix = format!("tx/{chat}/");
-    let mut known: std::collections::HashMap<String, Author> = std::collections::HashMap::new();
+/// Lift every chat hold the previous build left, and turn its message fences into deletions.
+///
+/// ONE LINE, ONE TIME (the owner's decision of 23/11): holds are gone, so a hold on disk is a chat that
+/// stays blocked forever if nothing lifts it. The held chats are counted and dropped; a fenced message
+/// id becomes the `deleted` flag of the message it names (a tombstone when the message is not here), and
+/// the `fence/<id>` keys of the older builds are migrated the same way. Nothing is replayed.
+async fn lift_holds() {
+    let mut lifted = 0usize;
+    let mut fenced: Vec<String> = Vec::new();
+    if let Ok(Some(bytes)) = kkv::get(b"holds".to_vec()).await {
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
+            if let Some(held) = value["held"].as_object() {
+                lifted = held.len();
+            }
+            if let Some(ids) = value["fence_everywhere"].as_array() {
+                fenced.extend(ids.iter().filter_map(|id| id.as_str().map(str::to_string)));
+            }
+            if let Some(here) = value["fence_here"].as_object() {
+                for ids in here.values() {
+                    if let Some(ids) = ids.as_array() {
+                        fenced.extend(ids.iter().filter_map(|id| id.as_str().map(str::to_string)));
+                    }
+                }
+            }
+        }
+        let _ = kkv::delete(b"holds".to_vec()).await;
+    }
+    // The `fence/<id>` keys an older build wrote are message fences too: they become deletions.
     let mut cursor: Option<Vec<u8>> = None;
     loop {
-        let Ok(page) = kkv::scan(prefix.clone().into_bytes(), cursor.clone(), 500).await else { break };
+        let Ok(page) = kkv::scan(b"fence/".to_vec(), cursor.clone(), 200).await else { break };
         if page.is_empty() {
             break;
         }
         cursor = page.last().map(|entry| entry.key.clone());
         for entry in page {
             let key = String::from_utf8_lossy(&entry.key).into_owned();
-            if let Some(id) = key.strip_prefix(&prefix) {
-                if let Some(author) = author_of(&entry.value) {
-                    known.insert(id.to_string(), author);
-                }
+            if let Some(id) = key.strip_prefix("fence/") {
+                fenced.push(id.to_string());
             }
+            let _ = kkv::delete(entry.key.clone()).await;
         }
     }
-    let report = HOLDS.with(|h| h.borrow_mut().reprove(chat, |id| known.get(id).cloned()));
-    if report.reproved > 0 {
-        say!("hold reproved {} fenced={}", privacy::chat(chat), report.fenced);
-        STATE_DIRTY.with(|d| d.set(true));
-    } else if let Some(skipped) = report.skipped {
-        say!("hold kept {} reason={skipped}", privacy::chat(chat));
-    }
-}
-
-/// Re-prove every posting-only hold at start: a hold left by the last run may be provable now.
-async fn reprove_holds() {
-    for (chat, reason) in HOLDS.with(|h| h.borrow().held_reasons()) {
-        if reason == POSTING_ONLY {
-            reprove(&chat).await;
+    fenced.sort();
+    fenced.dedup();
+    for id in &fenced {
+        let tombstone = Tombstone { chat: String::new(), kind: "revoke".into(), at_ms: now_ms(), by: String::new() };
+        if let Ok(value) = serde_json::to_vec(&tombstone) {
+            let _ = kkv::set(format!("ix/tomb/{id}").into_bytes(), value).await;
         }
     }
+    if lifted > 0 || !fenced.is_empty() {
+        say!("{lifted} chat holds lifted: holds were removed by the owner's decision of 23/11 (message fences became deletions: {})", fenced.len());
+    }
 }
 
-fn compute_held(chat: &str) -> bool {
-    HOLDS.with(|h| h.borrow().compute_held(chat))
-}
-
-/// Write the queue and the holds to kv (one key each). Called when they changed, never per tick
-/// with nothing to say.
+/// Write the queue and the deletion-notice counters to kv (one key each). Called when they changed,
+/// never per tick with nothing to say.
 async fn persist_state() {
     if !STATE_DIRTY.with(|d| d.replace(false)) {
         return;
@@ -676,21 +724,22 @@ async fn persist_state() {
     if let Ok(text) = serde_json::to_vec(&queue) {
         let _ = kkv::set(b"queue".to_vec(), text).await;
     }
-    let holds = HOLDS.with(|h| h.borrow().to_json());
-    let _ = kkv::set(b"holds".to_vec(), holds.into_bytes()).await;
+    let ledger = LEDGER.with(|l| l.borrow().to_json());
+    let _ = kkv::set(b"notices".to_vec(), ledger.into_bytes()).await;
 }
 
-/// Read what the last run left in kv: the held chats and fences, and the queue. Items that were in
+/// Read what the last run left in kv: the deletion-notice counters and the queue. Items that were in
 /// flight when the component stopped are reported, never re-posted (an unknown send is not retried).
+///
+/// The chat holds an earlier build kept are LIFTED here, before anything reads state: they are not a
+/// thing this build can hold, and a hold left on disk would be a chat blocked for good.
 async fn restore_state() {
-    if let Ok(Some(bytes)) = kkv::get(b"holds".to_vec()).await {
+    lift_holds().await;
+    if let Ok(Some(bytes)) = kkv::get(b"notices".to_vec()).await {
         let text = String::from_utf8_lossy(&bytes).into_owned();
-        let restored = Holds::from_json(&text);
-        let held = restored.held_chats();
-        HOLDS.with(|h| *h.borrow_mut() = restored);
-        if held > 0 {
-            say!("holds: {held} chat(s) held from the last run");
-        }
+        let restored = Ledger::from_json(&text);
+        LEDGER.with(|l| *l.borrow_mut() = restored);
+        health::notices_restored(restored);
     }
     let Ok(Some(bytes)) = kkv::get(b"queue".to_vec()).await else { return };
     let Ok(snapshot) = serde_json::from_slice::<serde_json::Value>(&bytes) else { return };
@@ -761,31 +810,23 @@ async fn admit(job: AudioJob) {
         }
         return;
     }
-    if fenced(&chat, &job.id).await {
-        say!("transcript blocked {} reason=source_fence", privacy::at(&chat, &job.id));
-        record(&chat, &job.id, serde_json::json!({"state": "blocked", "reason": "source_fence"})).await;
-        note(telemetry::Note::new("blocked").about(&chat, &job.id).field("stage", "admit").field("reason", "source_fence"));
-        if live {
-            alert(&chat, &job.title, "blocked", "source_fence", job.sent_ms);
-        }
-        return;
-    }
-    if compute_held(&chat) {
-        // An untargeted mutation or an owner clear: nothing narrower than the chat is provable, so
-        // this audio is not even transcribed (Go: blocked_source / source_mutation_or_chat_hold).
-        let reason = HOLDS.with(|h| h.borrow().reason(&chat).unwrap_or("chat_hold").to_string());
-        say!("transcript blocked {} reason={reason}", privacy::at(&chat, &job.id));
-        record(&chat, &job.id, serde_json::json!({"state": "blocked", "reason": reason})).await;
-        note(telemetry::Note::new("blocked").about(&chat, &job.id).field("stage", "admit").field("reason", &reason));
-        if live {
-            alert(&chat, &job.title, "blocked", &reason, job.sent_ms);
-        }
+    // A voice note the sender already deleted is skipped, ONE message, by id: WhatsApp no longer serves
+    // its media, so a decode cannot produce the content, and the reply that would have quoted it is the
+    // one reply the owner's rule of 23/11 skips. Another message of that chat is untouched, and no chat
+    // can block transcription any more.
+    let deleted = source_deleted(&chat, &job.id).await;
+    if deleted {
+        let reason = "source_deleted";
+        say!("transcript skipped {} reason={reason}", privacy::at(&chat, &job.id));
+        record(&chat, &job.id, serde_json::json!({"state": "skipped", "reason": reason})).await;
+        note(telemetry::Note::new("skipped").about(&chat, &job.id).field("stage", "admit").field("reason", reason));
         return;
     }
     let key = format!("{chat}\u{0}{}", job.id);
     let sent = job.sent_ms;
     let seconds = job.audio.seconds.unwrap_or(0);
-    // The author record is what a later revoke/edit of this message is proved against.
+    // The pipeline state row for this message (and, until 23/11, the author record a revoke was proved
+    // against; a deletion is matched by MESSAGE ID now, so no proof is needed).
     record(&chat, &job.id, serde_json::json!({"state": "queued", "sender": job.sender.to_string(), "sender_alt": job.sender_alt, "own": job.own})).await;
     if QUEUE.with(|q| q.borrow_mut().enqueue(key, sent, seconds, job)) {
         STATE_DIRTY.with(|d| d.set(true));
@@ -854,8 +895,7 @@ async fn process(job: &AudioJob, language: &str, cfg: &posting::PostConfig) -> O
     };
     let seconds = job.audio.seconds.unwrap_or(0);
     let own = own_users();
-    let holds = HOLDS.with(|h| h.borrow().clone());
-    let gate = cfg.gate(&chat, &own, &holds);
+    let gate = cfg.gate(&chat, &own);
     let may_post = gate == posting::Gate::Post;
     let streaming = may_post && cfg.streams(seconds);
     let context = wacore::proto_helpers::build_quote_context_with_info(&job.id, &job.sender, &job.chat, &job.chat, &job.message);
@@ -894,7 +934,7 @@ async fn process(job: &AudioJob, language: &str, cfg: &posting::PostConfig) -> O
             continue;
         }
         let now = now_ms();
-        if pacer.ready(now) && !fenced(&chat, &job.id).await {
+        if pacer.ready(now) && !source_deleted(&chat, &job.id).await {
             let body = posting::partial(tracker.so_far(), &header);
             match &posted.first_id {
                 None => match send(&client, &job.chat, body, &context).await {
@@ -970,24 +1010,27 @@ async fn process(job: &AudioJob, language: &str, cfg: &posting::PostConfig) -> O
         note(telemetry::Note::new("shadow").about(&chat, &job.id).field("reason", "shadow"));
         return Outcome::Done;
     }
-    if gate == posting::Gate::Held {
+    if gate == posting::Gate::Blocked {
+        // The OPERATOR's own list (`held_chats`) blocks this chat. It is configuration, never a revoke:
+        // since 23/11 nothing on the wire can block a chat, and this arm has no other way in.
         let mut v = base;
         v["posted"] = false.into();
-        v["reason"] = "posting_held_chat".into();
+        v["reason"] = "posting_blocked_by_config".into();
         record(&chat, &job.id, v).await;
-        let reason = HOLDS.with(|h| h.borrow().reason(&chat).unwrap_or("posting_held_chat").to_string());
-        note(telemetry::Note::new("held").about(&chat, &job.id).field("reason", &reason));
-        let title = alert_title(&client, job).await;
-        alert(&chat, &title, "post_held", &reason, job.sent_ms);
+        note(telemetry::Note::new("blocked").about(&chat, &job.id).field("reason", "posting_blocked_by_config"));
         return Outcome::Done;
     }
-    if fenced(&chat, &job.id).await {
+    if source_deleted(&chat, &job.id).await {
+        // The message this transcript belongs to was deleted while it was being decoded: the ONE reply is
+        // skipped and recorded as such (23/11: "it should just skip the reply as it was deleted"). The
+        // transcript itself is kept on the record - content this node already derived is never thrown
+        // away - and nothing else in the chat is affected.
         let mut v = base;
         v["posted"] = false.into();
-        v["reason"] = "source_fence_during_decode".into();
+        v["reason"] = "skipped_source_deleted".into();
         record(&chat, &job.id, v).await;
-        say!("transcript not posted {} reason=source_fence_during_decode", privacy::at(&chat, &job.id));
-        note(telemetry::Note::new("blocked").about(&chat, &job.id).field("reason", "source_fence_during_decode"));
+        say!("transcript not posted {} reason=skipped_source_deleted", privacy::at(&chat, &job.id));
+        note(telemetry::Note::new("skipped").about(&chat, &job.id).field("reason", "source_deleted"));
         return Outcome::Done;
     }
     // Never post an old transcript: a ready result that could not go out within the window expires.
@@ -1341,15 +1384,29 @@ async fn outbox_tick() -> bool {
             }
         }
         wa_whatsapp_outbox::Decision::Send(request) => {
-            // The last gate before the wire (`outbox::dispatch_refusal`): a posting hold, a revoke/edit
-            // fence or a reply source the index cannot prove refuses the send. A refusal is permanent;
-            // retrying it would post into a chat whose message the user revoked.
-            if let Some(code) = outbox_gate(&request).await {
-                say!("outbox: blocked job={id} code={code}");
-                if let Err(error) = worker::fail(wa_whatsapp_outbox::QUEUE.to_string(), id, OUTBOX_WORKER.to_string(), code.to_string()).await {
+            // The last gate before the wire (`outbox::dispatch_refusal`): a reply source the index cannot
+            // prove refuses the send. A refusal is permanent; retrying it would ask the same question of
+            // the same stale answer. No deletion refuses a send any more (23/11) - instead the quote of a
+            // deleted message is dropped, and the answer says so (`outbox::quote_decision`).
+            let (refusal, quote) = outbox_gate(&request).await;
+            if let Some(refusal) = refusal {
+                // The answer carries the fact, the log carries the code: a message id is never a log
+                // field (`privacy`), but the caller that named it gets it back.
+                say!("outbox: blocked job={id} code={}", refusal.code);
+                if let Err(error) = worker::fail(wa_whatsapp_outbox::QUEUE.to_string(), id, OUTBOX_WORKER.to_string(), refusal.stored()).await {
                     outbox_note(format!("fail refused: {error:?}"));
                 }
             } else {
+                // A quote of a message its author deleted is not sent: the reply goes out as a plain
+                // message, because a WhatsApp quote re-publishes the quoted text and the node keeps a
+                // deleted message for the OPERATOR, not for the chat it was taken out of.
+                let mut request = request;
+                let mut note = String::new();
+                if let outbox::Quote::Drop(sentence) = quote {
+                    request.reply_to = None;
+                    note = sentence.to_string();
+                    say!("outbox: quote dropped job={id} reason=quoted_deleted");
+                }
                 match send_outbox(&client, &request).await {
                     Ok(message_id) => {
                         say!("outbox: sent job={id} message={} {} mentions={}", privacy::mark(&message_id), privacy::chat(&request.chat.jid()), request.mentions.len());
@@ -1357,7 +1414,7 @@ async fn outbox_tick() -> bool {
                         // read after a successful send did not show the message, and the model went looking
                         // for it (14/11). The sent message is indexed here, as our own, like any other.
                         INDEX_INBOX.with(|q| q.borrow_mut().push_back((sent_record(&client, &request, &message_id), 0)));
-                        let output = wa_whatsapp_outbox::Outcome { message_id: message_id.clone() }.encode();
+                        let output = wa_whatsapp_outbox::Outcome { message_id: message_id.clone(), note }.encode();
                         if let Err(error) = worker::done(wa_whatsapp_outbox::QUEUE.to_string(), id, OUTBOX_WORKER.to_string(), output).await {
                             // The message is out; a settle that failed is a queue problem, and retrying the
                             // send would be a second message. Report it, let the lease lapse.
@@ -1384,15 +1441,11 @@ async fn outbox_tick() -> bool {
 
 /// The pre-dispatch facts: the chat's hold, the reply source's fence, and the exact source record.
 /// The rule itself is pure (`outbox::dispatch_refusal`); this only gathers what the component knows.
-async fn outbox_gate(request: &wa_whatsapp_outbox::Verified) -> Option<&'static str> {
+async fn outbox_gate(request: &wa_whatsapp_outbox::Verified) -> (Option<outbox::Refusal>, outbox::Quote) {
     let chat = request.chat.jid();
     let reply = request.reply_to.as_deref();
-    let (held, fenced) = HOLDS.with(|h| {
-        let h = h.borrow();
-        (h.posting_held(&chat), reply.is_some_and(|id| h.blocked(&chat, id)))
-    });
     let source = match reply {
-        Some(id) => index::load(&IndexKv, &chat, id).await.ok().flatten().map(|record| outbox::SourceFacts {
+        Some(id) => index::load(&IndexKv, &crate::chat::storable(&chat), id).await.ok().flatten().map(|record| outbox::SourceFacts {
             kind: record.kind,
             text: record.text,
             own: record.own,
@@ -1402,7 +1455,11 @@ async fn outbox_gate(request: &wa_whatsapp_outbox::Verified) -> Option<&'static 
         }),
         None => None,
     };
-    outbox::dispatch_refusal(held, reply, fenced, source.as_ref())
+    let refusal = outbox::dispatch_refusal(reply, source.as_ref());
+    // A refused send is not asked about its quote: the refusal decides. Otherwise the quote rule decides,
+    // and it only ever drops the quote - never the message.
+    let quote = if refusal.is_some() { outbox::Quote::Keep } else { outbox::quote_decision(source.as_ref()) };
+    (refusal, quote)
 }
 
 // ---- the message index (`whatsapp.query`) ------------------------------------------------------
@@ -2474,18 +2531,17 @@ async fn serve(config: serde_json::Value) {
         let policy = queue::Policy { fresh_ms: seconds.clamp(60, 86_400) * 1000, ..queue::Policy::default() };
         QUEUE.with(|q| *q.borrow_mut() = queue::AudioQueue::new(policy));
     }
-    // What the last run left behind: held chats, fences, and queued (or interrupted) voice notes.
+    // What the last run left behind: the deletion-notice counters, any hold an older build left (lifted
+    // there, once, and counted in one line), and queued (or interrupted) voice notes.
     restore_state().await;
-    reprove_holds().await;
     say!(
-        "transcription: language {language}, posting {} (allow {:?}), alerts {}, stream_edits {} (min {} s, edit every {} s), held chats {} (configured {})",
+        "transcription: language {language}, posting {} (allow {:?}), alerts {}, stream_edits {} (min {} s, edit every {} s), blocked chats {} (operator configuration; no mutation can block a chat)",
         if post.post { "on" } else { "off" },
         post.allow,
         if post.alerts { "on" } else { "off" },
         post.stream_edits,
         post.stream_min_seconds,
         post.edit_interval_ms / 1000,
-        HOLDS.with(|h| h.borrow().held_chats()),
         post.held.len()
     );
     say!(
@@ -2670,8 +2726,9 @@ async fn serve(config: serde_json::Value) {
                 let line = format!("message {} kind={} media={}", privacy::at(&ctx.info.source.chat.to_string(), &ctx.info.id), ctx.info.r#type, ctx.info.media_type);
                 let base = ctx.message.get_base_message();
                 let chat = ctx.info.source.chat.to_string();
-                // Revokes and edits are the only source mutations we can see: each names the message
-                // ID it changes, and holds.rs decides whether that is provable (holds.rs).
+                // Revokes and edits are the only source mutations we can see: each names the message ID
+                // it changes, and the index flags THAT message (`apply_notice`). No mutation can put a
+                // chat on hold any more (the owner's decision of 23/11).
                 let kind = match base.protocol_message.as_option().map(|pm| pm.r#type) {
                     Some(Some(wap::message::protocol_message::Type::REVOKE)) => Some("revoke"),
                     Some(Some(wap::message::protocol_message::Type::MESSAGE_EDIT)) => Some("edit"),
@@ -2686,19 +2743,20 @@ async fn serve(config: serde_json::Value) {
                         // Proved when the mutation's key names this chat; a DM may be journaled under
                         // its LID while the key carries the PN, which is exactly the unproven case
                         // (proven later from the recorded author, holds.rs `reprove`).
-                        let scope_proven = key_chat.is_empty() || same_chat(&key_chat, &chat);
+                        let scope_proven = key_chat.is_empty() || crate::notices::same_chat(&key_chat, &chat);
                         INBOX_MUTATIONS.with(|m| {
-                            m.borrow_mut().push(Mutation {
+                            m.borrow_mut().push(Notice {
                                 chat: chat.clone(),
                                 kind: kind.to_string(),
                                 target,
-                                // The mutation's author is the envelope's sender, never the key's
+                                // The notice's author is the envelope's sender, never the key's
                                 // participant (that is the author of the message being changed).
                                 sender: ctx.info.source.sender.to_string(),
                                 sender_alt: ctx.info.source.sender_alt.as_ref().map(|j| j.to_string()).unwrap_or_default(),
                                 own: ctx.info.source.is_from_me,
                                 owner: false,
                                 scope_proven,
+                                at_ms: ctx.info.timestamp.timestamp_millis(),
                             })
                         });
                     }
@@ -2786,8 +2844,8 @@ async fn main_loop(language: &str, post: &posting::PostConfig, index: &IndexConf
     // Where the address-book <-> `@lid` join stands (`alias_tick`).
     let mut aliases = AliasRun::new();
     loop {
-        for mutation in INBOX_MUTATIONS.with(|m| std::mem::take(&mut *m.borrow_mut())) {
-            apply_mutation(mutation).await;
+        for notice in INBOX_MUTATIONS.with(|m| std::mem::take(&mut *m.borrow_mut())) {
+            apply_notice(notice).await;
         }
         for job in AUDIO_INBOX.with(|q| std::mem::take(&mut *q.borrow_mut())) {
             admit(job).await;

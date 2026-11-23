@@ -204,6 +204,14 @@ function M.parse_health(log)
           transcripts = tonumber(line:match('ok=(%d+)') or '') or 0,
           failed = tonumber(line:match('failed=(%d+)') or '') or 0,
           reason = line:match('reason=(%S+)'),
+          -- The deletion notices (owner's decision of 23/11): how many this node could attach to a stored
+          -- message, how many it could not (a defect counter, never a block), and when each last happened.
+          -- An unmatched notice is the signal that the node could not match a deletion - the thing a chat
+          -- hold used to hide - so it is carried beside the posting mode rather than in a log line alone.
+          notices_matched = tonumber(line:match('matched=(%d+)') or '') or 0,
+          notices_unmatched = tonumber(line:match('unmatched=(%d+)') or '') or 0,
+          last_notice = line:match('last_notice=(%S+)'),
+          last_unmatched = line:match('last_unmatched=(%S+)'),
         }
       end
     end

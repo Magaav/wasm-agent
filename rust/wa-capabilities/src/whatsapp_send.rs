@@ -475,7 +475,7 @@ mod tests {
             .unwrap();
         let taken = queue.take(outbox::QUEUE, WORKER, None).unwrap();
         let wa_queue::TakeOutcome::Job(job) = taken else { panic!("the job must be takeable") };
-        queue.done_by(job.id, WORKER, &outbox::Outcome { message_id: "3EB0TEST".into() }.encode()).unwrap();
+        queue.done_by(job.id, WORKER, &outbox::Outcome::sent("3EB0TEST").encode()).unwrap();
         let settled = queue.job(enqueued.id).unwrap().unwrap();
         let answer = outbox::status(settled.id.0, settled.state.as_str(), settled.attempts, settled.result.as_deref(), settled.last_error.as_deref());
         assert_eq!(answer["state"], "done");
