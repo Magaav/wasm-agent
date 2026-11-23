@@ -29,6 +29,14 @@ local absent=run('return String("no_such_tool" in tools);');check(tostring(absen
 r=run('const r = tools.time({});\nreturn r.now;')
 check(r.line==2 and tostring(r.error):find('has not resolved yet',1,true),'a missing await points at its line: '..shown(r))
 -- a script past its budget says so, with the budget and the way on
-r=tools.dispatch(memory,'codemode',{code='while (true) {}',timeout_ms=300},'master',ctx)
+-- A BUDGET FAR FROM THE THRESHOLD, SO THE GUARD THAT STOPS IT IS THE SAME ON A BUSY MACHINE (mission
+-- speed-board-landing-kinds, 23/11). This was timeout_ms=300 and it went red in main-health at load ~27
+-- ("an endless loop is named, without the wasm backtrace") while passing alone: at 300 ms the stop is near
+-- the boundary where the shape changes - measured on this node, the same endless loop answers
+-- 'InternalError: interrupted' at 1, 10 and 50 ms, and 'the script was stopped while computing' at 100 ms
+-- and above, the instruction guard stopping it after 0.06-0.17 s of computing either way. A budget of
+-- 3000 ms leaves a twentyfold margin over that 0.17 s, so what stops the script is the guard that counts
+-- COMPUTING - not a clock racing a loaded machine - and the sentence under test is the one the model gets.
+r=tools.dispatch(memory,'codemode',{code='while (true) {}',timeout_ms=3000},'master',ctx)
 check(tostring(r.error):find('^TimeoutError: the script was stopped while computing') and not tostring(r.error):find('backtrace',1,true),'an endless loop is named, without the wasm backtrace: '..shown(r))
 print(json.encode({ok=true,checks=checks}))
