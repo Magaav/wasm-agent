@@ -75,7 +75,7 @@ No assertion, limit or quarantine rule was removed; `quarantine_database` and `f
   scratch home). It indexes a 120-file tree, builds the crash state with `scripts/lib/crash-store.sh`, then
   requires: the same store answers, no `graph.db.malformed-*` appears, and the committed revision does not
   fall back (a rebuild starts at revision 1).
-* `scripts/lib/crash-store.sh` builds the state a killed writer leaves and **verifies it with SQLite**: a
+* `scripts/lib/crash-store.sh` (needs `sqlite3` on PATH - it refuses by name without it, never passes) builds the state a killed writer leaves and **verifies it with SQLite**: a
   transaction is journaled with a small page cache, the commit is caught by its own record count (0 while
   journaling, non-zero when the commit begins), the journal is copied and the writer killed; then the page
   the caller's read breaks on is chosen by SQLite and the pair is accepted only if the copy **without** the
