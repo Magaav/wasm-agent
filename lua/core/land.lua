@@ -4565,15 +4565,43 @@ impl.install = function(run, options)
   return true, { detail = detail }
 end
 
+-- THE PROGRAM AN OPERATION RUNS: this process's own binary, at a path that EXISTS NOW.
+--
+-- `runtime_info().binary_path` is the host's `current_exe()`, and on Linux a binary that an install replaced
+-- answers `<path> (deleted)`: the path, plus a marker saying that the file this process runs is no longer the
+-- file at that path (measured 23/11 with a copy of this binary - rename a new file over it, and
+-- `current_exe()` answers `/tmp/.../wa (deleted)`). The operation manager refuses a program that is not a file
+-- (rust/wa-capabilities/src/operations.rs, `program_not_found`), so EVERY landing that installed stopped at
+-- `health`: the ledger's row of 22/11T12:48:09Z is `land main-health red detail=program_not_found`.
+--
+-- The install writes the landed binary AT this path, so the path without the marker is the binary to run -
+-- the one the landing just installed, which is the binary main must be judged with. The path is checked with
+-- the same rule the operation manager applies (a regular file), so a refusal can say what to do; a path with
+-- nothing at it is refused BY NAME, never satisfied by whatever `wa` is found on PATH, because a health run
+-- started from a binary nobody chose judges main with it.
+local function running_program()
+  local provided, raw = pcall(host.runtime_info)
+  local runtime = {}
+  if provided and type(raw) == "string" then pcall(function() runtime = json.decode(raw) or {} end) end
+  local path = trim(tostring(runtime.binary_path or ""))
+  local replaced = " (deleted)"
+  local was_replaced = path:sub(-#replaced) == replaced
+  if was_replaced then path = path:sub(1, #path - #replaced) end
+  if path == "" then return nil, "this node cannot name its own binary (runtime_info)" end
+  local probe = M.exec("test -f " .. quote(path) .. " && echo yes || echo no", "/", 60)
+  if trim(tostring(probe and probe.stdout or "")) ~= "yes" then
+    return nil, "the binary this process runs is not a file at " .. path ..
+      (was_replaced and " (this process's binary was replaced, and nothing is installed at that path)" or "")
+  end
+  return path
+end
+
 -- START ONE SUPERVISED OPERATION. The seam is this function, so a test runs a health step without a node; the
 -- default is the node's own operation manager, which is the only supported way to start long work.
 function M.start_operation(spec)
   if type(host.operation) ~= "function" then return nil, "this node has no operation manager" end
-  local runtime = {}
-  local provided, raw = pcall(host.runtime_info)
-  if provided and type(raw) == "string" then pcall(function() runtime = json.decode(raw) or {} end) end
-  local program = tostring(runtime.binary_path or "")
-  if program == "" then return nil, "this node cannot name its own binary (runtime_info)" end
+  local program, program_problem = running_program()
+  if not program then return nil, program_problem end
   local argv = {}
   local db = trim(host.getenv and host.getenv("WASM_AGENT_DB") or "")
   if db ~= "" then argv = { "--db", db } end
@@ -4617,7 +4645,10 @@ impl.health = function(run, options)
   local id, why_not = M.start_operation({ owner = "land-health", args = args, timeout_seconds = 5400 })
   evidence("health-run args: " .. table.concat(args, " ") .. "\n")
   if not id then
-    return false, { error = "main_health_not_started", observed = tostring(why_not),
+    local observed = tostring(why_not)
+    return false, { error = "main_health_not_started",
+      detail = "main's health was NOT measured: the health run was not started (" .. observed .. ")",
+      observed = observed,
       next = "measure it by hand: bash " .. slashes(repo) .. "/scripts/main-health.sh --repo " .. slashes(repo) ..
         " (its verdict is a `wa land health-run` away), or run `wa land health-run --repo " .. slashes(repo) .. "`" }
   end

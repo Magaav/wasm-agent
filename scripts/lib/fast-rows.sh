@@ -59,11 +59,15 @@ wa_fast_core_rows() {
   # every round now ends with, so a narrowed run that dropped its row would never see a landing break.
   # scripts/test-event-ledger.lua is here for the same reason: it is the feed every other row and every
   # outside agent reads (docs/EVENTS.md).
+  # scripts/test-land-health-program.lua too: it is the one row that proves the health step can START its
+  # measurement after an install replaced this process's binary (22/11: every landing that installed stopped
+  # at `health` with program_not_found), and it can only prove it by running that binary as its own process.
   printf '%s\n' scripts/test-fast-row-environment.lua \
     scripts/test-land-plan.lua scripts/test-land-resume.lua scripts/test-land-sign.lua \
     scripts/test-land-review.lua scripts/test-land-rows.lua scripts/test-land-resume-19-11.lua \
     scripts/test-land-marks.lua scripts/test-land-release.lua scripts/test-land-gate-rows.lua \
-    scripts/test-land-until.lua scripts/test-land-quick.lua scripts/test-land-linux.lua \
+    scripts/test-land-until.lua scripts/test-land-quick.lua scripts/test-land-health-program.lua \
+    scripts/test-land-linux.lua \
     scripts/test-event-ledger.lua scripts/test-product-version.lua \
     scripts/test-refusal-contract.lua scripts/test-tool-schema-fidelity.lua scripts/test-codemode-parity.lua \
     scripts/test-edit-aliases.lua \
