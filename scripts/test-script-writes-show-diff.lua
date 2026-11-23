@@ -123,20 +123,21 @@ local function card(event)
 end
 local created_card = changes[1] and card(changes[1]) or ''
 has(created_card, 'Create(' .. target .. ')', 'the created file is named Create(path), as Claude Code names it')
-has(created_card, 'Added 3 lines, removed 0 lines', 'the card counts what the create added')
-has(visible(created_card), string.format('\226\148\130 %2s %2d + ', '', 1),
-  'the created lines are numbered + rows')
+has(created_card, 'Added 3 lines', 'the card counts what the create added')
+check(not created_card:find('removed', 1, true), 'and says nothing about a removal it did not make')
+has(visible(created_card), string.format('\226\148\130 %2d + ', 1),
+  'the created lines are numbered + rows, in ONE number column')
 local edited_card = changes[2] and card(changes[2]) or ''
 has(edited_card, 'Update(' .. target .. ')', 'the edit is named Update(path)')
-has(edited_card, 'Added 1 lines, removed 1 lines', 'the update counts its own one-line change')
-has(visible(edited_card), string.format('\226\148\130 %2d %2s - ', 2, ''),
+has(edited_card, 'Added 1 line, removed 1 line', 'the update counts its own one-line change')
+has(visible(edited_card), string.format('\226\148\130 %2d - ', 2),
   'the replaced line is a - row carrying the number it had')
-has(visible(edited_card), string.format('\226\148\130 %2s %2d + ', '', 2),
+has(visible(edited_card), string.format('\226\148\130 %2d + ', 2),
   'and the line that replaced it is a + row with its new number')
 local deleted_card = changes[3] and card(changes[3]) or ''
 has(deleted_card, 'Delete(' .. target .. ')', 'the removal is named Delete(path)')
-has(deleted_card, 'Added 0 lines, removed 3 lines', 'and it counts the lines that went with it')
-has(visible(deleted_card), string.format('\226\148\130 %2d %2s - ', 1, ''),
+has(deleted_card, 'Removed 3 lines', 'and it counts the lines that went with it')
+has(visible(deleted_card), string.format('\226\148\130 %2d - ', 1),
   'the removed lines are - rows with the numbers they had')
 
 -- ---- 3. the model's bytes --------------------------------------------------------------------
@@ -221,9 +222,11 @@ view_lib.new({ out = function(text) buffer[#buffer + 1] = text end, live = false
   :event({ type = 'remote_change', capability = 'edit', node = 'peer-one', path = '/srv/app/notes.md',
     ok = true, before_text = 'one\ntwo\nthree\n', after_text = 'one\nTWO\nthree\n' })
 local peer_card = table.concat(buffer)
-has(peer_card, 'Update(/srv/app/notes.md)', 'a peer that sent its two texts gets the same Update(path) card')
-has(peer_card, 'Added 1 lines, removed 1 lines', 'with the peer change own counts')
-has(peer_card, 'on peer-one', 'and the node it happened on, under the card')
+has(peer_card, 'Update(peer-one:/srv/app/notes.md)',
+  'a peer that sent its two texts gets the same Update(path) card, with its node in the heading')
+has(peer_card, 'Added 1 line, removed 1 line', 'with the peer change own counts')
+check(not peer_card:find('on peer-one', 1, true),
+  'and no line after the card: the node is in the heading (Victor 23/11)')
 check(chat ~= nil, 'chat.lua loads (its event filter is what a terminal run hands the view)')
 
 -- ---- 5. through the AGENT LOOP, which is what a `wa chat` turn runs ------------------------

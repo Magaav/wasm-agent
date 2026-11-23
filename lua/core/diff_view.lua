@@ -24,11 +24,16 @@ local markdown = dofile("lua/core/markdown.lua")
 
 local M = {}
 
--- Context rows around a change, and how many body rows a block shows before it folds. Both are
--- display facts: a reader scrolling the terminal wants the shape of the change, and a 2000-line
--- rewrite is not more useful for being shown whole.
-M.CONTEXT = 2
-M.MAX_BODY = 40
+-- Context rows around a change: three, the way Claude Code shows them, so a reader sees what the
+-- changed line sat in and not only the line itself in isolation.
+M.CONTEXT = 3
+-- The host's ceiling for ONE block (`MAX_LINES` in rust/wa-term/src/transcript.rs). A card longer than
+-- this cannot be honoured by "ctrl+o opens it fully", so it is cut HERE and says where the rest is
+-- read (/console) rather than promising something the host would refuse. The bound a reader meets
+-- first is the host's own DISPLAY bound (`CARD_ROWS` there): this file renders the whole diff, and the
+-- host folds what does not fit and opens it on ctrl+o or a click. Neither bound costs the model
+-- anything - both are drawing, not context.
+M.MAX_LINES = 19960
 
 local function cells_of(text)
   local used, from = 0, 1
@@ -131,18 +136,42 @@ function M.hunks(ops, context)
   return hunks
 end
 
+-- A path as the reader names it (Victor 23/11, Claude Code's heading): relative to the workdir when
+-- the file is inside it, `~` for the operator's home, the full path otherwise. PURE: the two
+-- directories arrive as arguments, because a renderer that read the environment could draw a
+-- different heading than the terminal does.
+function M.short_path(path, opts)
+  local function trim(dir) return (tostring(dir or ""):gsub("\\", "/"):gsub("/+$", "")) end
+  local full = tostring(path or ""):gsub("\\", "/")
+  local cwd, home = trim(opts and opts.cwd), trim(opts and opts.home)
+  if cwd ~= "" and full:sub(1, #cwd + 1) == cwd .. "/" then return full:sub(#cwd + 2) end
+  if home ~= "" and full:sub(1, #home + 1) == home .. "/" then return "~" .. full:sub(#home + 1) end
+  return full
+end
+
+-- What happened to the file, in words, and ONLY what happened: a create says "Added 26 lines" and
+-- never "removed 0 lines" (Victor 23/11 - the count row reported a change nobody made).
+function M.counts(added, removed)
+  local function lines(n, verb) return string.format("%s %d line%s", verb, n, n == 1 and "" or "s") end
+  if added == 0 and removed == 0 then return "No lines changed" end
+  if removed == 0 then return lines(added, "Added") end
+  if added == 0 then return lines(removed, "Removed") end
+  return lines(added, "Added") .. ", " .. lines(removed, "removed")
+end
+
 -- The rows of one file's change. change is {path, before, after} with the two texts already loaded;
--- opts.width is the cells available for a whole row, border included.
+-- opts.width is the cells available for a whole row, border included, and opts.cwd/opts.home/opts.node
+-- name the change the way the heading says it.
 --
--- Every row carries lead (the border, the two line numbers and the marker), code (the text, padded to
--- the width with spaces so a band covers the whole row), role - the palette role its code is painted
--- with - and band (the op kind, for a row that takes a background band). hidden is how many body rows
--- were folded away, never dropped silently.
+-- Every row carries lead (the border, ONE line number and the marker), and then either code (the text,
+-- padded to the width with spaces so a band covers the whole row) or parts (coloured pieces of one
+-- row: the heading's bullet, which keeps the status colour, and its name) - with role, the palette role
+-- the code is painted with, and band (the op kind, for a row that takes a background band).
 --
 -- The frame is exactly what a fence draws: an opening row of just the corner and its bar, body rows
 -- that begin with the bar, a closing row. rust/wa-term/src/transcript.rs accepts an opening only as
 -- the corner and the bar (or a fence language after it), so the heading (`Create(path)`, `Update(path)`,
--- `Delete(path)`) and the counts are the FIRST body rows - the card cannot carry them in its opening
+-- `Delete(path)`) and the count row are the FIRST body rows - the card cannot carry them in its opening
 -- without being read as prose.
 function M.rows(change, opts)
   opts = opts or {}
@@ -156,8 +185,10 @@ function M.rows(change, opts)
   local most, digits = 1, 2
   for _, op in ipairs(ops) do most = math.max(most, op.old or 0, op.new or 0) end
   digits = math.max(2, #tostring(most))
-  -- The border bar and its space, two number columns, the marker and its space: what the code has left.
-  local lead_cells = 2 + digits * 2 + 4
+  -- The border bar and its space, ONE line number, the marker and its space: what the code has left.
+  -- One number, not two (Claude Code's): the new number for a context or an added row, the old one for
+  -- a removed row - the number the line has, or had, in a file a reader can open.
+  local lead_cells = 2 + digits + 3
   -- The room the CODE has: the whole row is exactly `width` cells, so a band and a border end together.
   local room = math.max(8, width - lead_cells)
   -- The fence language the row tokens are coloured as, from the file name: the set
@@ -187,6 +218,26 @@ function M.rows(change, opts)
     until text == ""
   end
 
+  -- A row of coloured PARTS: the heading's bullet keeps the status colour while the name keeps the
+  -- card's, and the row is cut and padded by the same cell rule as every other row (so the border ends
+  -- on the same column). The plain rendering (`live = false`) is the same parts with no escape written
+  -- into them, because the painter, never this renderer, decides colour.
+  local function rich(lead, parts)
+    local kept, used = {}, 0
+    for _, part in ipairs(parts) do
+      local text, at, last = tostring(part.text or ""), 1, 0
+      while at <= #text do
+        local size, cells = markdown.char_at(text, at)
+        if used + cells > room then break end
+        used, last, at = used + cells, at + size - 1, at + size
+      end
+      if last > 0 then kept[#kept + 1] = { text = text:sub(1, last), role = part.role } end
+      if used >= room then break end
+    end
+    if used < room then kept[#kept + 1] = { text = string.rep(" ", room - used) } end
+    rows[#rows + 1] = { kind = "body", lead = lead, parts = kept, lang = lang }
+  end
+
   -- A row of text that is not code: cut too, so a long path never pushes the border out.
   local function plain(lead, text, role)
     while #text > 0 do
@@ -205,44 +256,58 @@ function M.rows(change, opts)
 
   rows[#rows + 1] = { kind = "open", lead = "\226\148\140\226\148\128", role = "mdCodeBlockBorder" }
   -- The two rows a reader reads first, INSIDE the frame (a card's opening is exact, so they cannot be
-  -- its title): what happened to which path, named the way Claude Code names it, then the counts in
-  -- words. `deleted` is the caller's fact, not a guess from an empty after text - an emptied file and a
-  -- removed file are different things, and only the caller knows which it saw.
-  local heading = change.deleted == true and "Delete"
-    or ((change.before or "") == "" and "Create" or "Update")
-  plain("\226\148\130 ", heading .. "(" .. tostring(change.path or "?") .. ")", "mdCodeBlock")
-  plain("\226\148\130 ", string.format("Added %d lines, removed %d lines", added, removed), "dim")
+  -- its title): what happened to which path, named the way Claude Code names it - `● Create(path)`, the
+  -- bullet in the colour of the outcome - then the counts in words. `deleted` is the caller's fact, not
+  -- a guess from an empty after text: an emptied file and a removed file are different things, and only
+  -- the caller knows which it saw.
+  local deleted = change.deleted == true
+  local created = (change.before or "") == "" and not deleted
+  local what = deleted and "Delete" or (created and "Create" or "Update")
+  local name = M.short_path(change.path, { cwd = opts.cwd, home = opts.home })
+  -- A change made on ANOTHER node says so in the heading itself (Victor 23/11): `Create(nextcloud:/x)`,
+  -- not a line after the card that the eye has to reach past the diff to find.
+  if opts.node ~= nil and tostring(opts.node) ~= "" then name = tostring(opts.node) .. ":" .. name end
+  rich("\226\148\130 ", {
+    { text = "\226\151\143 ", role = deleted and "error" or "success" },
+    { text = what .. "(" .. name .. ")", role = "mdCodeBlock" } })
+  plain("\226\148\130 ", M.counts(added, removed), "dim")
 
   local blank = string.rep(" ", digits)
-  local body, budget = {}, opts.max_body or M.MAX_BODY
+  local body, budget = {}, opts.max_lines or M.MAX_LINES
   for index, hunk in ipairs(hunks) do
     if index > 1 then body[#body + 1] = { kind = "gap" } end
     for _, op in ipairs(hunk) do body[#body + 1] = { kind = "body", op = op } end
   end
   local hidden = math.max(0, #body - budget)
+  local from = #rows + 1
   local shown = 0
   for _, item in ipairs(body) do
     if shown >= budget then break end
     shown = shown + 1
     if item.kind == "gap" then
-      plain("\226\148\130 " .. blank .. " " .. blank .. "   ", "...", "mdQuote")
+      -- Two hunks are separated by ONE dim mark in the line-number column - the vertical ellipsis a
+      -- reader already knows - instead of a row of text in the middle of the code.
+      plain("\226\148\130 " .. blank .. " ", "\226\139\174", "mdQuote")
     else
       local op = item.op
-      local old = op.old and string.format("%" .. digits .. "d", op.old) or blank
-      local new = op.new and string.format("%" .. digits .. "d", op.new) or blank
+      local number = op.new or op.old or 0
+      local lead = "\226\148\130 " .. string.format("%" .. digits .. "d", number) .. " " .. op.kind .. " "
       local role = op.kind == "+" and "toolDiffAdded" or op.kind == "-" and "toolDiffRemoved" or "toolDiffContext"
-      push("\226\148\130 " .. old .. " " .. new .. " " .. op.kind .. " ", (op.text or ""):gsub("\t", "    "),
-        role, op.kind, op.kind)
+      push(lead, (op.text or ""):gsub("\t", "    "), role, op.kind, op.kind)
     end
   end
+  local to = #rows
   if hidden > 0 then
-    plain("\226\148\130 " .. blank .. " " .. blank .. "   ",
-      string.format("... +%d more lines: /console shows all", hidden), "dim")
+    -- The host's own ceiling was reached: the rest of the diff is in /console, and the row says so
+    -- instead of promising an expansion that cannot be honoured.
+    plain("\226\148\130 " .. blank .. " ",
+      string.format("\226\128\166 +%d lines: /console shows all", hidden), "dim")
   end
-  -- The footnote is the card's LAST body row, so it is inside the frame and dim, not a line under it.
-  plain("\226\148\130 ", "convenience view, not a review", "dim")
   rows[#rows + 1] = { kind = "close", lead = "\226\148\148\226\148\128", role = "mdCodeBlockBorder" }
-  return { rows = rows, added = added, removed = removed, hidden = hidden, width = width }
+  -- `body` is the span of rows that IS the diff (1-based, inclusive). The view hands it to the host, so
+  -- the host's fold can keep the frame, the heading and the counts and fold only the code in between.
+  return { rows = rows, added = added, removed = removed, hidden = hidden, width = width,
+    body = { from = from, to = to } }
 end
 
 -- The two texts for one recorded file, or nil and why. A change the run could not record (too large,

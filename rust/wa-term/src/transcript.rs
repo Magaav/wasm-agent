@@ -12,6 +12,11 @@ use crate::terminal_editor::cell_width_of;
 use std::collections::HashMap;
 
 pub const FOLDED_ROWS: usize = 3;
+/// How much of a CARD (a file change's diff, lua/core/diff_view.lua) is drawn when it is drawn: its
+/// whole body up to this many lines, then one row that counts what it hid. A card is never folded to
+/// `FOLDED_ROWS`: a reader looking at a change wants the change (Victor 23/11, twice). Every line is
+/// here - the bound is display only - so Ctrl+O or a press on the counting row draws the rest.
+pub const CARD_ROWS: usize = 40;
 /// The copy affordance shown in front of a block that can be copied (#114): one glyph and a space,
 /// what pi and Claude Code put before a fenced block's title. A mouse press on it copies the block's
 /// content through OSC 52 (the terminal's clipboard), which is the only clipboard that works over
@@ -26,6 +31,9 @@ const BRIGHT: &str = "\x1b[1m\x1b[38;2;255;255;255m";
 /// Marks an expandable line among a block's copy markers (`rows_with_copies`), so the screen-row map
 /// is built in the one place the copy icons' map is: `\u{1}expand:<block>:<line>`.
 const EXPAND_TAG: &str = "\u{1}expand:";
+/// Marks the counting row of a folded card among a block's markers (`rows_with_copies`), so a press
+/// on it opens the card: `\u{1}card:<block>`.
+const CARD_TAG: &str = "\u{1}card:";
 /// Marks a copy icon drawn at the RIGHT end of a row (a code block's first row: its code keeps the
 /// band's left edge, operator 17/11 "a copy icon on its top"): `{RIGHT_TAG}{col}\u{1}{content}`.
 const RIGHT_TAG: &str = "\u{1}right:";
@@ -53,7 +61,12 @@ pub struct Block { pub lines: Vec<String>, open: bool, pub topic: bool, pub expa
     pub summary: Option<String>,
     /// Ctrl+O on this block: pinned expanded, so the next code-mode block does not collapse it. The
     /// same key lets it go.
-    pub pinned: bool }
+    pub pinned: bool,
+    /// The CARD body ranges of this block, by line: `(from, to)`, inclusive - the lines of one diff
+    /// body inside a card's frame (`cardable`, marked by lua/core/cli_view.lua's `card_mark`). A block
+    /// carrying one is a card: one blank row above and below it, never folded by the topic rule, and
+    /// drawn open up to `CARD_ROWS` lines per range with the rest counted on one row.
+    pub cards: Vec<(usize, usize)> }
 
 pub struct Transcript { pub blocks: Vec<Block>, pub focus: Option<usize>, pub dirty: bool,
     /// The scrollbar in the last column (#115): `auto` shows it when the chat is taller than the
@@ -106,7 +119,12 @@ pub struct Transcript { pub blocks: Vec<Block>, pub focus: Option<usize>, pub di
     expand_hover: Option<(usize, usize)>,
     /// The screen row whose copy icon the pointer is on: drawn bright, so the icon reads as a button
     /// (operator 17/11 "it does not have a hover effect").
-    copy_hover: Option<usize> }
+    copy_hover: Option<usize>,
+    /// The card body ranges waiting for the next `write` (`cardable`), like `pending_copy`.
+    pending_card: Vec<(usize, usize)>,
+    /// Where a folded card's counting row was drawn in the last `view`: screen row -> block. A press
+    /// there opens the card, exactly as Ctrl+O does.
+    card_rows: HashMap<usize, usize> }
 
 impl Default for Transcript {
     fn default() -> Self {
@@ -114,7 +132,8 @@ impl Default for Transcript {
             page_delta: 0, nav: false, live_row: None, pending_copy: Vec::new(),
             copy_rows: HashMap::new(), copy_right: HashMap::new(), scrollbar: Scrollbar::Auto, counts: Vec::new(),
             count_width: 0, bar: false, bar_last: None, bar_hovered: false, bar_grab: None,
-            pending_expand: Vec::new(), expand_rows: HashMap::new(), expand_hover: None, copy_hover: None }
+            pending_expand: Vec::new(), expand_rows: HashMap::new(), expand_hover: None, copy_hover: None,
+            pending_card: Vec::new(), card_rows: HashMap::new() }
     }
 }
 
@@ -128,10 +147,11 @@ impl Transcript {
         self.clear_live();
         self.pending_copy.clear();
         self.pending_expand.clear();
+        self.pending_card.clear();
         if let Some(last) = self.blocks.last_mut() {
             if last.lines.is_empty() {
                 last.topic = topic; last.expanded = false;
-                last.code = false; last.summary = None; last.pinned = false;
+                last.code = false; last.summary = None; last.pinned = false; last.cards.clear();
                 return;
             }
         }
@@ -200,9 +220,19 @@ impl Transcript {
     /// Ctrl+O: pin the focused block - or the newest code-mode block - expanded, so the blocks that
     /// follow it no longer collapse it; the same key lets it go. Returns the new state.
     pub fn pin_toggle(&mut self) -> Option<bool> {
-        let index = self.focus.or_else(|| (0..self.blocks.len()).rev()
-            .find(|&i| self.blocks[i].code && !self.blocks[i].lines.is_empty()))?;
+        // The newest block that can answer, whether it is a code-mode block or a CARD: after a run the
+        // card is the newer one, and this key on it means "show me all of it" (Victor 23/11).
+        let index = self.focus.or_else(|| (0..self.blocks.len()).rev().find(|&i|
+            (self.blocks[i].code && !self.blocks[i].lines.is_empty()) || !self.blocks[i].cards.is_empty()))?;
         let block = &mut self.blocks[index];
+        // A card's key IS its fold: the same press opens it and folds it back. A code block's key is
+        // the pin, which is what keeps a LATER block from collapsing it.
+        if !block.cards.is_empty() {
+            block.expanded = !block.expanded;
+            if let Some(count) = self.counts.get_mut(index) { *count = None; }
+            self.dirty = true;
+            return Some(block.expanded);
+        }
         block.pinned = !block.pinned;
         if block.pinned { block.expanded = true; }
         if let Some(count) = self.counts.get_mut(index) { *count = None; }
@@ -263,8 +293,25 @@ impl Transcript {
         self.dirty = true;
         true
     }
-    /// A press on an expandable line toggles it. Returns whether the press was one.
+    /// Mark the CARD body ranges of the NEXT `write`: `(from, to)`, inclusive line offsets of that
+    /// write - the lines of one diff body inside a card's frame. The block then draws them open up to
+    /// `CARD_ROWS`, counts the rest on one row, and opens fully on Ctrl+O or a press: the frame, the
+    /// heading and the counts are never folded away.
+    pub fn cardable(&mut self, ranges: &[(usize, usize)]) {
+        self.pending_card = ranges.to_vec();
+    }
+
+    /// A press on an expandable line toggles it; a press on a folded card's counting row opens (or
+    /// folds) that card. Returns whether the press was one of those.
     pub fn expand_at(&mut self, row: usize) -> bool {
+        if let Some(&index) = self.card_rows.get(&row) {
+            if let Some(block) = self.blocks.get_mut(index) {
+                block.expanded = !block.expanded;
+                if let Some(count) = self.counts.get_mut(index) { *count = None; }
+                self.dirty = true;
+                return true;
+            }
+        }
         let Some(&(block, line)) = self.expand_rows.get(&row) else { return false };
         let Some(found) = self.blocks.get_mut(block) else { return false };
         if !found.opened.remove(&line) { found.opened.insert(line); }
@@ -307,6 +354,10 @@ impl Transcript {
 
     /// One marker of `rows_with_copies`, placed on the screen: a copy icon or an expandable line.
     fn place(&mut self, row: usize, content: String) {
+        if let Some(key) = content.strip_prefix(CARD_TAG) {
+            if let Ok(index) = key.parse() { self.card_rows.insert(row, index); }
+            return;
+        }
         if let Some(key) = content.strip_prefix(EXPAND_TAG) {
             if let Some((b, l)) = key.split_once(':') {
                 if let (Ok(b), Ok(l)) = (b.parse(), l.parse()) { self.expand_rows.insert(row, (b, l)); }
@@ -365,6 +416,7 @@ impl Transcript {
         self.clear_live();
         let markers = std::mem::take(&mut self.pending_copy);
         let expands = std::mem::take(&mut self.pending_expand);
+        let cards = std::mem::take(&mut self.pending_card);
         if self.blocks.is_empty() { self.blocks.push(Block::default()); }
         let block = self.blocks.last_mut().unwrap();
         let text = text.replace('\r', "");
@@ -388,6 +440,12 @@ impl Transcript {
         for (at, full) in expands {
             if at < produced.max(1) && first + at < block.lines.len() {
                 block.expands.insert(first + at, full);
+            }
+        }
+        // The card body ranges of this write, now that its lines have indices of their own.
+        for (from, to) in cards {
+            if from <= to && to < produced.max(1) && first + to < block.lines.len() {
+                block.cards.push((first + from, first + to));
             }
         }
         block.open = !closed;
@@ -454,10 +512,50 @@ impl Transcript {
         let inner = if focused { width.saturating_sub(2).max(1) } else { width.max(1) };
         let mut rows: Vec<String> = Vec::new();
         let mut copies: Vec<(usize, String)> = Vec::new();
+        // A CARD is drawn OPEN (Victor 23/11): its body up to `CARD_ROWS` lines, then ONE row that
+        // counts what it hid. Per card range, `(last line kept, lines hidden, first line hidden)`;
+        // nothing at all while the card is expanded, focused, or short enough to fit.
+        let card = !block.cards.is_empty();
+        let mut folds: Vec<(usize, usize, usize)> = Vec::new();
+        if card && !block.expanded && !focused {
+            for &(from, to) in &block.cards {
+                if to >= from + CARD_ROWS {
+                    folds.push((from + CARD_ROWS - 1, to - (from + CARD_ROWS - 1), from + CARD_ROWS));
+                }
+            }
+        }
+        let count_at = |line: usize| folds.iter().find(|&&(_, _, first)| first == line).map(|&(_, hidden, _)| hidden);
+        let hidden_at = |line: usize| folds.iter().any(|&(kept, hidden, _)| line > kept && line <= kept + hidden);
+        // Where each card's body is DRAWN, while the card is open: those rows answer a press too, so a
+        // second click folds the card it just opened - the same rule `expandable` already uses for an
+        // opened result (every row it covers answers the click).
+        let mut open_spans: Vec<(usize, usize)> = Vec::new();
+        let mut span_from: Option<usize> = None;
+        // One blank row ABOVE a card, so its frame is never glued to the line that introduced it; the
+        // row below is added after the loop. Both are the block's own rows, so they survive a resize,
+        // a re-render, and the transcript a --continue replays.
+        if card { rows.push(String::new()); }
         // A card's rows are cut, not wrapped as prose (`CardWrap`): the frame state follows the
         // block's lines in order, which is the only way a row can be known to be a card's.
         let mut cards = CardWrap::default();
         for (line_index, raw) in block.lines.iter().enumerate() {
+            // Where a card's body stops fitting: ONE row counts the rest, and it keeps the card's own
+            // bar so the frame still reads as one frame.
+            if let Some(hidden) = count_at(line_index) {
+                rows.push(format!("{CARD_BORDER}\u{2502}{RESET} {DIM}\u{2026} +{hidden} lines (ctrl+o to expand){RESET}"));
+                copies.push((rows.len() - 1, format!("{CARD_TAG}{index}")));
+            }
+            if let Some((&(from, _), _)) = block.cards.iter().zip(0..).find(|(&(from, _), _)| from == line_index) {
+                if card && block.expanded { span_from = Some(rows.len()); }
+                let _ = from;
+            }
+            if let Some(&(_, to)) = block.cards.iter().find(|&&(_, to)| to + 1 == line_index) {
+                if let Some(start) = span_from.take() { open_spans.push((start, rows.len().saturating_sub(1))); }
+                let _ = to;
+            }
+            // A folded line is not drawn: its count is on the row above, and Ctrl+O or a press on
+            // that row draws every one of them - the lines are all in the block.
+            if hidden_at(line_index) { continue; }
             // A rule is drawn at THIS frame's width, never at the width it was written at
             // (expand_rule): a transcript outlives a resize, and what is drawn inside it does not.
             let line = &expand_rule(raw, inner);
@@ -537,7 +635,16 @@ impl Transcript {
                 rows.extend(cards.rows(line, inner));
             }
         }
-        while block.topic && rows.last().is_some_and(|r| visible(r) == 0) { rows.pop(); }
+        for (start, end) in open_spans {
+            for at in start..=end.min(rows.len().saturating_sub(1)) {
+                copies.push((at, format!("{CARD_TAG}{index}")));
+            }
+        }
+        // A card keeps exactly ONE blank row under it, so the thinking or answer text that follows is
+        // never glued to its closing corner (Victor 23/11). Every other topic loses its trailing
+        // blanks: they separated it from a block that is no longer drawn.
+        while rows.last().is_some_and(|r| visible(r) == 0) { rows.pop(); }
+        if card { rows.push(String::new()); }
         // A code-mode block is open while it runs and ONE row afterwards: the summary a newer block
         // left it with. Pinned (Ctrl+O) or focused, it shows everything it holds.
         if block.code && !block.expanded && !block.pinned && !focused {
@@ -549,7 +656,8 @@ impl Transcript {
         }
         // Folded: the topic's title row, then its first FOLDED_ROWS rows of content - blank rows
         // skipped, so three rows are three lines of text - then how much is hidden.
-        if block.topic && !block.expanded && rows.len() > 1 + FOLDED_ROWS {
+        // A card is never folded by this rule: its own bound (`CARD_ROWS`) is the one it answers to.
+        if block.cards.is_empty() && block.topic && !block.expanded && rows.len() > 1 + FOLDED_ROWS {
             let title = rows[0].clone();
             let kept: Vec<usize> = (1..rows.len()).filter(|&i| visible(&rows[i]) > 0).collect();
             if kept.len() > FOLDED_ROWS {
@@ -606,6 +714,7 @@ impl Transcript {
         self.copy_rows.clear();
         self.copy_right.clear();
         self.expand_rows.clear();
+        self.card_rows.clear();
         let (width, height) = (width.max(1), height.max(1));
         // The bar costs a column, and WHICH width the chat wraps at is decided once per change:
         // deciding it afresh each frame would re-wrap the whole chat twice on every keystroke of a
@@ -1056,6 +1165,22 @@ fn cells_of(line: &str) -> (Vec<(String, char, usize)>, String) {
 /// paints outside its own cells; the bar's own colour is set from `CARD_BORDER`, so a `RESET` never
 /// leaves a continuation in the terminal's default colour.
 fn wrap_card(cells: &[(String, char, usize)], width: usize) -> Vec<String> {
+    // A row that is too wide only by its own PADDING is cut at the width, never continued. The diff
+    // card pads every row so its band covers the whole width, and the frame is one column narrower
+    // whenever the scrollbar is drawn - so without this every padded row grew an empty continuation
+    // row and the card came out twice as tall (measured 23/11: a 30-line card drew 61 rows).
+    // `wrap_rows` has the same rule for a padded band row; this is its card twin.
+    let total: usize = cells.iter().map(|c| c.2).sum();
+    let padding = cells.iter().rev().take_while(|c| c.1 == ' ').count();
+    if total > width && total - padding <= width {
+        let (mut row, mut cols) = (String::new(), 0usize);
+        for cell in cells {
+            if cols + cell.2 > width { break; }
+            row.push_str(&cell.0); row.push(cell.1); cols += cell.2;
+        }
+        row.push_str(RESET);
+        return vec![row];
+    }
     // The prefix is the indent, the bar and the blank after it; the code starts where the view put it.
     let bar = cells.iter().position(|c| c.1 == '\u{2502}').unwrap_or(0);
     let mut start = bar + 1;
@@ -1310,6 +1435,104 @@ fn icon_at_band_end(row: &str, width: usize) -> Option<(String, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One CARD block exactly as lua/core/cli_view.lua writes it: a bare opening corner, the heading,
+    /// the count row, the numbered body, the closing corner and the blank row under it - with the body
+    /// range marked, which is what host.transcript_card carries (0-based, the lines of that write).
+    fn card_block(t: &mut Transcript, lines: usize) {
+        t.block(true);
+        let mut text = String::from("\u{250c}\u{2500}\n");
+        text.push_str("\u{2502} \u{25cf} Create(demo.py)\n");
+        text.push_str(&format!("\u{2502} Added {lines} lines\n"));
+        for i in 1..=lines {
+            text.push_str(&format!("\u{2502} {i:2} + value_{i:02} = {i}\n"));
+        }
+        text.push_str("\u{2514}\u{2500}\n\n");
+        t.cardable(&[(3, 2 + lines)]);
+        t.write(&text);
+    }
+
+    #[test]
+    fn a_card_is_drawn_open_not_folded_to_three_rows() {
+        let mut t = plain(Transcript::default());
+        card_block(&mut t, 12);
+        let rows = t.view(60, 30);
+        let text = rows.join("\n");
+        assert!(text.contains("Create(demo.py)"), "the heading is drawn: {text}");
+        assert!(text.contains("value_01") && text.contains("value_12"),
+            "every line of a card is drawn, not the topic's three rows: {text}");
+        assert!(!text.contains("(ctrl+o") && !text.contains("\u{2026} +"),
+            "and nothing is counted away: {text}");
+    }
+
+    #[test]
+    fn a_card_past_the_bound_counts_the_lines_it_hid_and_a_press_opens_it() {
+        let mut t = plain(Transcript::default());
+        card_block(&mut t, 60);
+        let rows = t.view(60, 120);
+        let text = rows.join("\n");
+        assert!(text.contains("value_01") && text.contains("value_40"), "the first CARD_ROWS lines: {text}");
+        assert!(text.contains(&format!("\u{2026} +{} lines (ctrl+o to expand)", 60 - CARD_ROWS)), "{text}");
+        assert!(!text.contains("value_41"), "the rest is not drawn: {text}");
+        // A press on the counting row opens the whole card - the lines were never dropped.
+        let at = (1..=rows.len()).find(|&r| rows[r - 1].contains("ctrl+o to expand"))
+            .expect("the counting row is on screen");
+        assert!(t.expand_at(at), "the counting row answers a press");
+        let open = t.view(60, 200).join("\n");
+        assert!(open.contains("value_60") && !open.contains("ctrl+o to expand"),
+            "every line, and no counting row left: {open}");
+        // A second press - on the body the first one opened - folds it back, so a reader is never
+        // stuck open (the rule `expandable` uses for an opened result).
+        let rows = t.view(60, 120);
+        let at = (1..=rows.len()).find(|&r| rows[r - 1].contains("value_05"))
+            .expect("the opened body is on screen");
+        assert!(t.expand_at(at), "a press on the opened body folds the card");
+        let folded = t.view(60, 120).join("\n");
+        assert!(folded.contains("ctrl+o to expand") && !folded.contains("value_60"), "{folded}");
+    }
+
+    #[test]
+    fn ctrl_o_opens_the_newest_card_and_the_same_key_folds_it() {
+        let mut t = plain(Transcript::default());
+        card_block(&mut t, 60);
+        let _ = t.view(60, 120);
+        assert_eq!(t.pin_toggle(), Some(true), "Ctrl+O on the newest card opens it");
+        let open = t.view(60, 200).join("\n");
+        assert!(open.contains("value_60") && !open.contains("ctrl+o to expand"),
+            "the whole card is drawn: {open}");
+        assert_eq!(t.pin_toggle(), Some(false), "and the same key folds it again");
+        let folded = t.view(60, 120).join("\n");
+        assert!(folded.contains("ctrl+o to expand") && !folded.contains("value_60"),
+            "back to the counting row: {folded}");
+    }
+
+    #[test]
+    fn a_card_keeps_one_blank_row_above_and_below_it() {
+        let mut t = plain(Transcript::default());
+        card_block(&mut t, 3);
+        t.block(false);
+        t.write("done\n");
+        let rows: Vec<String> = t.view(60, 20).iter().map(|row| crate::selection::plain(row)).collect();
+        let open = rows.iter().position(|row| row.contains('\u{250c}')).expect("the card's opening row");
+        let close = rows.iter().position(|row| row.contains('\u{2514}')).expect("the card's closing row");
+        assert_eq!(rows[open - 1].trim(), "", "one blank row ABOVE the card: {rows:?}");
+        assert_eq!(rows[close + 1].trim(), "", "and one BELOW it: {rows:?}");
+        assert_eq!(rows[close + 2].trim(), "done", "so the next text is never glued to it: {rows:?}");
+    }
+
+    #[test]
+    fn a_card_is_cut_at_the_width_it_is_drawn_at_and_keeps_its_gap() {
+        let mut t = plain(Transcript::default());
+        card_block(&mut t, 6);
+        let narrow = t.view(40, 20);
+        for row in &narrow {
+            assert!(visible(row) <= 40, "every row fits the frame it is drawn in: {row:?}");
+        }
+        let text: Vec<String> = narrow.iter().map(|row| crate::selection::plain(row)).collect();
+        assert!(text.iter().any(|row| row.contains("value_06")), "the card is still whole: {text:?}");
+        let close = text.iter().position(|row| row.contains('\u{2514}')).expect("the closing row");
+        assert_eq!(text[close + 1].trim(), "", "and the gap survives the resize: {text:?}");
+    }
     /// A transcript with the scrollbar off: the tests that read rows for their TEXT (a page step, a
     /// fold, the bottom anchor) are not about the bar, and the bar's own tests set it. What the bar
     /// adds to a row is one column at the end (`view`), so a test that compared whole rows would

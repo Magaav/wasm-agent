@@ -318,6 +318,7 @@ pub const REGISTRY: &[Capability] = &[
     plain!("transcript_rewrite", Device, crate::host::transcript_rewrite, "Replace a committed line of the current transcript block by offset from its end"),
     plain!("transcript_copy", Device, crate::host::transcript_copy, "Mark lines of the next transcript write as copyable: a copy icon on each, a click puts its content on the clipboard"),
     plain!("transcript_expand", Device, crate::host::transcript_expand, "Mark lines of the next transcript write as expandable (hover brightens, click shows the full text)"),
+    plain!("transcript_card", Device, crate::host::transcript_card, "Mark the diff body of a card in the next transcript write: drawn open up to the card bound, the rest counted on one row, Ctrl+O or a click draws it all"),
     plain!("status_snapshot", Device, crate::host::status_snapshot, "Store the /status panel the CLI shows by itself while a run is in flight"),
     plain!("local_view", Device, crate::host::local_view, "Store a read-only command's balloon so the CLI draws it while a run is in flight"),
     plain!("transcript_hold", Device, crate::host::transcript_hold, "Keep CLI transcript writes undrawn until released, then draw once"),

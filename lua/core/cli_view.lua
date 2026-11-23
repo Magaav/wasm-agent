@@ -124,6 +124,13 @@ local function bg(hex)
 end
 STYLE.codeBand = bg("171717")
 for role, hex in pairs(PALETTE) do STYLE[role] = fg(hex) end
+-- A BAND IS A BACKGROUND, never a foreground (measured 23/11 in a real pty: painted as a foreground,
+-- the band's own dark green became the TEXT colour of every changed row - 38;2;18;48;28 on the
+-- terminal's black - so an added line was near-invisible, which is Victor's screenshot). The two roles
+-- are named "...Band" for exactly this reason; every other role paints text, and these two paint the
+-- row BEHIND it, which is what "a green band" means.
+STYLE.toolDiffAddedBand = bg(PALETTE.toolDiffAddedBand)
+STYLE.toolDiffRemovedBand = bg(PALETTE.toolDiffRemovedBand)
 -- The names the earlier view used, kept because callers and tests use them: each is now a
 -- role rather than a literal, so `green` and `success` cannot drift apart.
 STYLE.red = STYLE.error
@@ -790,11 +797,18 @@ function M.bash_changes_block(event, width, live)
   local files = type(event) == "table" and type(event.files) == "table" and event.files or {}
   local refused = type(event) == "table" and type(event.refused) == "table" and event.refused or {}
   if #files == 0 and #refused == 0 then return nil, "no_changes" end
-  local out = {}
+  local out, cards = {}, {}
   for _, file in ipairs(files) do
-    local lines = M.diff_block({ path = file.path, before_text = file.before_text,
+    local lines, _, body = M.diff_block({ path = file.path, before_text = file.before_text,
       after_text = file.after_text, deleted = file.deleted }, width, live)
-    for _, row in ipairs(lines or {}) do out[#out + 1] = row end
+    if lines then
+      -- One blank row between two cards of the same block: a command that changed three files is
+      -- three cards, and glued together they read as one (Victor 23/11).
+      if #out > 0 then out[#out + 1] = "" end
+      local base = #out
+      for _, row in ipairs(lines) do out[#out + 1] = row end
+      if body then cards[#cards + 1] = { from = base + body.from, to = base + body.to } end
+    end
   end
   -- A file whose starting text is not known is NAMED, never drawn with a guessed one: a reader who
   -- cannot see the diff must be told why, or an empty block reads as no change.
@@ -802,7 +816,7 @@ function M.bash_changes_block(event, width, live)
     out[#out + 1] = paint("b91 " .. tostring(item.path) .. " changed ("
       .. tostring(item.why):gsub("_%a", function(s) return " " .. s:sub(2) end) .. ")", "dim", live)
   end
-  return out
+  return out, nil, cards
 end
 -- A file change, as the rows a reader follows it by: the path and its counts, then the diff with
 -- real line numbers, removed rows on a red band and added rows on a green one, a few context rows and
@@ -813,6 +827,25 @@ end
 -- content addresses the tool result already names (previous_version and version), not the texts: this
 -- reads them from the session's change store, which is where changeset.record put them.
 local BANDS = { ["+"] = "toolDiffAddedBand", ["-"] = "toolDiffRemovedBand" }
+
+-- Where a change's path is shortened against (Victor 23/11): the OPERATOR's own home - never the node's
+-- state directory, which is what the host rewrites HOME to - and the working directory the session
+-- runs in. Read once from the two supported sources and handed to the pure renderer, so a card cannot
+-- name a path by an environment a test does not share. platform.cwd() is host.runtime_info().cwd.
+local place_cache = nil
+function M.place(which)
+  if not place_cache then
+    local home = host and host.getenv and tostring(host.getenv("WA_HOME_BEFORE_OVERRIDE") or "") or ""
+    if home == "" and host and host.getenv then home = tostring(host.getenv("HOME") or "") end
+    local cwd = ""
+    local ok, value = pcall(function() return dofile("lua/core/platform.lua").cwd() end)
+    if ok and type(value) == "string" then cwd = value end
+    place_cache = { home = home, cwd = cwd }
+  end
+  if which == "home" then return place_cache.home end
+  if which == "cwd" then return place_cache.cwd end
+  return place_cache.home, place_cache.cwd
+end
 function M.diff_block(change, width, live)
   if type(change) ~= "table" then return nil, "no_change" end
   -- Two texts may arrive already read (a shell command change, lua/core/bash_changes.lua): then
@@ -825,11 +858,18 @@ function M.diff_block(change, width, live)
   end
   if before == nil then return nil, tostring(after or "no_text") end
   local block = diff_view.rows({ path = change.path, before = before, after = after,
-    deleted = change.deleted }, { width = width })
+    deleted = change.deleted }, { width = width, cwd = M.place("cwd"), home = M.place("home"), node = change.node })
   local out = {}
   for _, row in ipairs(block.rows) do
     if row.kind == "open" or row.kind == "close" then
       out[#out + 1] = paint(row.lead, row.role, live)
+    elseif row.parts then
+      -- A row of coloured PARTS (the heading's bullet, which keeps the status colour, and the name):
+      -- each piece painted by its own role and the padding by none, so the row still ends on the
+      -- border's column.
+      local buf = { paint(row.lead, "mdCodeBlockBorder", live) }
+      for _, part in ipairs(row.parts) do buf[#buf + 1] = paint(part.text, part.role, live) end
+      out[#out + 1] = table.concat(buf)
     else
       local band = row.band and BANDS[row.band] or nil
       local base = { row.role or "text", band }
@@ -848,7 +888,12 @@ function M.diff_block(change, width, live)
         .. (#painted > 0 and table.concat(painted) or paint(body, base, live))
     end
   end
-  return out
+  -- The span of rows that IS the diff (1-based inside out), for the host's fold; nil for a card with
+  -- no body at all, which has nothing to fold.
+  -- 0-based, because the host counts the lines of the ONE write that carries a card.
+  local span = block.body
+  if span == nil or span.to < span.from then span = nil else span = { from = span.from - 1, to = span.to - 1 } end
+  return out, nil, span
 end
 
 -- The lines worth showing under a result. Only where output *is* the answer: a command's
@@ -1323,6 +1368,23 @@ end
 -- outside the transcript.
 function METHODS:topic(topic)
   if self:transcript() and host.transcript_block then pcall(host.transcript_block, topic and true or false) end
+end
+
+-- Tell the host which lines of the NEXT write are a card's diff body, so it can keep the frame, the
+-- heading and the counts, fold what does not fit, and open it fully on ctrl+o or a click (Victor
+-- 23/11). It is drawing only: nothing of it reaches a tool result or the model's context. A host that
+-- cannot hold a card, and the plain layout, get nothing - the same rows are written either way.
+function METHODS:card_mark(cards)
+  if type(cards) ~= "table" or #cards == 0 then return end
+  if not (self:transcript() and host and type(host.transcript_card) == "function") then return end
+  local list = {}
+  for _, card in ipairs(cards) do
+    if type(card) == "table" and tonumber(card.from) and tonumber(card.to) then
+      list[#list + 1] = { from = tonumber(card.from), to = tonumber(card.to) }
+    end
+  end
+  if #list == 0 then return end
+  pcall(host.transcript_card, json.encode(list))
 end
 
 -- How many newlines what this view wrote ends with (escapes ignored): 0 = a line is open, 1 = a line
@@ -3247,19 +3309,20 @@ function METHODS:event(event)
 -- of what the tool returned, so the model's context never carries a line of it.
   elseif kind == "bash_changes" then
     -- What the command changed, as its own block: the result above it is the tool's own output.
-    local lines = M.bash_changes_block(event, self.limit, self.live)
+    local lines, _, cards = M.bash_changes_block(event, self.limit, self.live)
     if lines then
       self:topic(true)
-      for _, text in ipairs(lines) do self:write(text .. "\n") end
-      self:write("\n")
+      self:card_mark(cards)
+      self:write(table.concat(lines, "\n") .. "\n\n")
       self:topic(false)
     end
     return  elseif kind == "change" then
-    local lines, why = M.diff_block(event, self.limit, self.live)
+    local lines, why, body = M.diff_block(event, self.limit, self.live)
     if lines then
       self:topic(true)
-      for _, text in ipairs(lines) do self:write(text .. "\n") end
-      self:write("\n")
+      if body then self:card_mark({ body }) end
+      -- ONE write: the card's lines are the lines of that write, which is what the marker counts.
+      self:write(table.concat(lines, "\n") .. "\n\n")
       self:topic(false)
     elseif why ~= "no_change" then
       self:line(paint("\226\142\191 no diff shown: " .. tostring(why), "dim", self.live))
@@ -3270,12 +3333,12 @@ function METHODS:event(event)
     -- SAME card a local write draws - path, counts, numbered rows - from the peer's own before/after.
     -- When it did not, the reader gets one honest row saying what ran where, never silence.
     if type(event.before_text) == "string" and type(event.after_text) == "string" and event.ok ~= false then
-      local lines = M.diff_block({ path = event.path, before_text = event.before_text,
-        after_text = event.after_text }, self.limit, self.live)
+      local lines, _, body = M.diff_block({ path = event.path, before_text = event.before_text,
+        after_text = event.after_text, node = event.node }, self.limit, self.live)
       if lines then
         self:topic(true)
-        for _, row in ipairs(lines) do self:write(row .. "\n") end
-        self:write("on " .. tostring(event.node) .. "\n\n")
+        if body then self:card_mark({ body }) end
+        self:write(table.concat(lines, "\n") .. "\n\n")
         self:topic(false)
         return
       end
