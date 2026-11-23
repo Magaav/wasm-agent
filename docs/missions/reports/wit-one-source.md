@@ -289,3 +289,27 @@ quickjs` in this tree, so there is nothing to generate it from. It is in the gen
 `PACKAGE_LOCAL` list with that reason, which is what lets the row's allow-list name it instead of
 passing over it.
 * Nothing on the fleet, no deploy, no release, no key, no pin, no push.
+
+## 9. What this landing broke on main, and the fix (`cfb2e1da`)
+
+main-health on the landing reported one red row: `test-regenerate FAILED: --outputs printed more
+than the one declared output: lua/core/refusal_codes.lua` (reproduced on a worktree of main:
+exit 1, same line, 35 outputs printed). Cause, measured: `scripts/test-regenerate.sh` copied this
+tree's `scripts/generators.txt` into its replay and asserted that `--outputs` printed exactly ONE
+line - true while the tree had one generator, false from `0239592a` on, and worse, the replay then
+ran `scripts/gen-wit-deps.lua` without carrying it, so the merge sequence that row replays saw
+`regenerate: FAILED` and `changed_count 1` on a tree nothing had touched.
+
+The fix is `cfb2e1da`, one file, and it does not loosen the assertion: the replay writes its own
+one-line registry (it replays one generator, and always did), and the count is replaced by an
+exact-set comparison against what the registry's lines declare - every output once, nothing else -
+which is stricter than `= 1` for one line and true for any number. It was proved live in both
+directions against a patched copy of the runner: green on the real one (35 outputs), red on one
+that prints a path the registry does not declare, red on one that prints none. The tree's real
+registry now gets the same comparison at the end of that row, where its lines and the two
+exclusions are already judged (`test-regenerate ok (29 checks)` on this tree).
+
+What I got wrong: `scripts/generators.txt` had a second consumer I had not read -
+`scripts/test-regenerate.sh` - and my registry line was correct for `regenerate.sh` and wrong for
+that row. The lesson is the one the brief states: re-measure the premise, and here the premise was
+"who else reads this file", not "what does this file declare".
