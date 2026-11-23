@@ -1674,6 +1674,23 @@ else
   note "scripts/lib/install-default-policy.sh is not in this tree: policy.json was not installed"
 fi
 
+# 6b. THE FEATURE REGISTRY (config/features/features.json), installed with the policy and for the same
+# reason: `wa features`, the /status line and the release step's canary collect read it LIVE, so a node
+# whose file is missing answers with a NAMED refusal ("the feature registry is not readable") instead of
+# pretending everything is fine - and a node that answers that at release time is red by name. It is a
+# generated list, not operator state, so it is copied whole; nothing is merged.
+WA_FEATURES_SRC="$ROOT/config/features/features.json"
+WA_FEATURES_DEST="$SENTINEL_CONFIG/features.json"
+if [ -f "$WA_FEATURES_SRC" ]; then
+  if install -m 0644 "$WA_FEATURES_SRC" "$WA_FEATURES_DEST" 2>/dev/null; then
+    note "features: registry installed at $WA_FEATURES_DEST"
+  else
+    note "features: the registry could not be installed at $WA_FEATURES_DEST; wa features will refuse by name"
+  fi
+else
+  note "features: config/features/features.json is not in $ROOT; wa features will refuse by name"
+fi
+
 # wa-deploy-upgrade-invocation: begin
 # Everything upgrade.sh is told goes on the command's own lines, and the COMMENTS LIVE ABOVE IT on purpose.
 # That is not style. bash drops a simple command's whole `VAR=value \` prefix when a comment line sits

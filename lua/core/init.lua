@@ -652,6 +652,12 @@ elseif command == "conform" then
   print("  mkdir -p ~/.wasm-agent/models && cp '" .. tostring(path) .. "' ~/.wasm-agent/models/"
     .. tostring(dofile("lua/core/model_profile.lua").file_name(model) or model) .. ".json")
 
+elseif command == "features" then
+  -- The ONE list of user-facing features, and what each last DID (lua/core/feature_health.lua), with its
+  -- canary (lua/core/feature_canary.lua). The behaviour is the modules'; this is the dispatch only, and
+  -- the exit code is the verb's - a node where a feature has stopped answers non-zero.
+  os.exit(dofile("lua/core/features_cli.lua").run(args) or 0)
+
 elseif command == "stalls" then
   -- The one number this node exists to keep an eye on (change/start-instant, item 5): how long a turn
   -- takes to REACH the model. Read-only, and it names the phase each slow run's own preflight row blamed.

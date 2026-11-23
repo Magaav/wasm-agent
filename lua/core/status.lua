@@ -143,6 +143,20 @@ function M.lines()
   local ok_clean, clean_line = pcall(function() return dofile("lua/core/clean.lua").status_line() end)
   lines[#lines + 1] = "root      " .. (ok_clean and clean_line or ("unavailable - " .. tostring(clean_line)))
   lines[#lines + 1] = "config    " .. M.config_path()
+  -- WHICH FEATURES STILL WORK (lua/core/feature_health.lua): one line, because this page is the operator's
+  -- short read - the full table is `wa features`, and the first stopped feature is named here so a reader
+  -- who does not run that command still sees that something has stopped.
+  local ok_features, feature_lines = pcall(function() return dofile("lua/core/feature_health.lua").lines() end)
+  if ok_features and type(feature_lines) == "table" and type(feature_lines[1]) == "string" then
+    local first_red
+    for _, line in ipairs(feature_lines) do
+      if line:find("failing") or line:find("stale") then first_red = first_red or line; break end
+    end
+    lines[#lines + 1] = "features  " .. tostring(feature_lines[1]):gsub("^features: ", "")
+      .. (first_red and ("  <- " .. tostring(first_red):gsub("^%s+", "")) or "")
+  else
+    lines[#lines + 1] = "features  unavailable - " .. tostring(feature_lines)
+  end
   return lines
 end
 

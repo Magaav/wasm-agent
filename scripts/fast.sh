@@ -891,6 +891,11 @@ check() { name=$1; shift; s=$(fast_now_ms)
       record_row fail checks "$name" "$c" "$ms" 0 "$(first_error_of "$log")" ;; esac
 }
 WA_BIN="$bin" check prompt-docs bash scripts/sync-prompt-docs.sh --check
+# THE ONE LIST OF USER-FACING FEATURES (config/features/features.json, docs/FEATURES-HEALTH.md): every row
+# must exist with its canary and its last-success source. Seconds, no node - so a feature that ships
+# without a line in the list, or a canary that is named but not written, fails HERE rather than at the
+# release step that collects the canaries.
+WA_BIN="$bin" check features-registry node scripts/check-features-registry.mjs
 if command -v node >/dev/null 2>&1; then
   # Which binary the rows run (11/11): the tree's own and named in the first line, or a named refusal.
   # A lane whose rows graded the canonical checkout's node instead of its own tree was green and wrong.
