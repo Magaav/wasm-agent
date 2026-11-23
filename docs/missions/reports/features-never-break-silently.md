@@ -185,3 +185,74 @@ rows). So the rows above were run DIRECTLY, one process each, with the tree's ow
 `WASM_AGENT_HOME`: that is not a weaker check for these files (the fast path would spawn the same binary
 with the same fence), but it is not the runner's own verdict either, and the bridge's full run will be the
 first time the `features-registry` contract line executes inside `scripts/fast.sh`.
+
+## 12. Fable's review, the four fixes (`8409562b`)
+
+### 1. The fleet runs its own canaries
+
+The canaries step no longer proves only the machine that cut the release. `impl.canaries` asks **every node
+the deploy INSTALLED ON** - `steps.deploy.nodes`, written by the deploy step as each node settles as
+`installed` or `unknown`, never the configured ring (a ring names what a round WOULD touch) - to run
+`wa features canary json` over the peer plane, and collects the answers into the evidence file, one section
+per node.
+
+| outcome | verdict |
+| --- | --- |
+| every node answered, nothing failed | green, with the count asked/answered |
+| a node's canary failed | **red**, naming `node feature (stage)` |
+| a node could not be reached or answered nothing parseable | **red** as `canary_unproven`, naming the node and the peer's own reason (`unknown_node:work`, `relay_timeout`, ...) |
+| the deploy recorded no per-node outcome | nobody is asked, and the step says so in its evidence and in `observed` |
+
+The ask is turned on by a RELEASE (`M.run` sets `fleet_canaries` when `options.release`), so a plain landing
+and every fixture that runs the loop leaves it off. Tests (`scripts/test-land-canary-step.lua`, 49 checks):
+both ring nodes are asked with exactly `wa features canary json`; an unreachable node is `canary_unproven`
+and never green; a peer's failing canary is red with `scratch-b whatsapp-transcription (no_transcript)`; the
+evidence keeps a section per node. No live peer is ever called: the peer call is `options.remote_call` (the
+test's stub) or `impl.canaries_remote` (a fixture's).
+
+### 2. The rollback names the PREVIOUS release, per node
+
+The old line printed `run.journal.main_sha` - **the commit that just failed**. `M.previous_release(run)` now
+reads the published journals under the run root newest-first and takes the first one that is not this run
+(`publish.tag` + `tree_commit`), and the `next` line is
+
+```
+scratch-b: wa update scratch-b --commit 1111... (back to v0.2.9)
+```
+
+per node. When no previous release is recorded the line says so by name and points at the node's own install
+record (`wa call <node> bash 'cat <install>/installed.txt'`) instead of printing a commit that is not a
+rollback target. Tested: the line carries the fixture's previous commit and tag and does **not** contain this
+run's sha.
+
+### 3. What each WhatsApp canary touches, and the guarantee it cannot post
+
+| canary | what it touches on a live node |
+| --- | --- |
+| `whatsapp-index` | one read: `host.whatsapp_contacts('{}')` (`lua/core/canaries/whatsapp-index.lua:16`) |
+| `whatsapp-receive` | one read of contacts + one `host.whatsapp_read` of the newest message (`whatsapp-receive.lua:15-20`) |
+| `whatsapp-transcription` | one read: `host.whatsapp_search({kind="voice", limit=5})` (`whatsapp-transcription.lua:16`) |
+| `whatsapp-copilot-reply` | one read of `<state>/components/wa-whatsapp.json` (`whatsapp-copilot-reply.lua:19-25`) |
+| `whatsapp-send` | one read: `host.whatsapp_send_status({id="canary-no-such-send"})` (`whatsapp-send.lua:19`) - no send exists to read |
+
+**None of them can message anybody**: every one runs its body inside `guard.no_send`
+(`lua/core/canaries/whatsapp-send.lua:17`, `whatsapp-copilot-reply.lua:29`, `whatsapp-index.lua:13`,
+`whatsapp-receive.lua:12`, `whatsapp-transcription.lua:13`), which replaces `host.whatsapp_send` and
+`host.whatsapp_approve` with functions that RAISE and restores them afterwards
+(`lua/core/canaries/guard.lua:16-33`). A canary that grows a send fails as `send_attempted` instead - proven
+in `scripts/test-feature-canary.lua` (a fixture canary that calls `host.whatsapp_send` is refused, and the
+node's real door is verified restored).
+
+**Posting off is not a failure.** With `post_transcripts` off the copilot canary answers
+`off (posting disabled)` - the reader switched it off. Posting ON with an empty `post_allow` is a real
+misconfiguration and still fails (`posting_unscoped`). `off` is a third outcome: printed as `OFF`, counted
+separately, and **never recorded** as a success (so an off feature does not read as "last worked").
+
+### 4. A canary's time is labelled
+
+`feature_health.lines()` and the Rust renderer print `last worked: <ISO>  [canary]` when the snapshot's
+`last_ok_source` is `canary`, and nothing when a real code path recorded it. So `wa features`, `/status` and
+`wa health` cannot show a synthetic pass as real use. Tested in `scripts/test-feature-health.lua` (a
+canary-sourced row is labelled, a hook's is not) and in the crate's tests (the rendered line carries the
+marker).
+
