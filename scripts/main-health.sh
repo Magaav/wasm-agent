@@ -142,17 +142,65 @@ jq --arg sha "$sha" --arg at "$now" --argjson seconds "$seconds" \
 #   * else no --bin at all: the board then says 'unavailable' and speed-stats judges that a RED row, which
 #     is the honest answer for a commit nothing could measure.
 if [ -f "$tree/scripts/speed-board.sh" ]; then
-  speed_bin=""
-  speed_bin=$(ROOT=$tree bash -c '
-    set -u
-    . "$ROOT/scripts/lib/fast-binary.sh" 2>/dev/null || exit 1
-    fast_binary_plan >/dev/null 2>&1 || exit 1
-    [ "${FAST_BIN_ACTION:-}" = use ] || exit 1
-    case "${FAST_BIN_VERDICT:-}" in fresh|explicit) ;; *) exit 1 ;; esac
-    [ -n "${FAST_BIN:-}" ] && [ -x "$FAST_BIN" ] || exit 1
-    [ "${FAST_BIN_COMMIT:-}" = "$1" ] || exit 1
-    printf "%s" "$FAST_BIN"
-  ' _ "$sha" 2>/dev/null) || speed_bin=""
+  # WHICH BINARY, MEASURED TWICE (mission speed-board-landing-kinds, 23/11). The rule used to be "the
+  # installed binary, and only when installed.txt names exactly this commit", so nearly every commit got
+  # four rows of 'unavailable' (071d1ab5, 899fdd47, fe60dc0a, 3665b1b7, e9a42d20, da912828, ae3cbb37 in
+  # speed-history.jsonl) and a board with no numbers read as fine. Then it became "the tree's binary,
+  # through scripts/lib/fast-binary.sh", which failed on 4b314af5 for a reason worth writing down:
+  # main-health runs for ~20 minutes, a LANDING moved main to 3655948d while it measured, the deploy of
+  # 3655948d replaced ~/.local/bin/wa - and the speed block runs at the END of that run. The plan then
+  # resolved a binary that was no longer 4b314af5 and refused it, correctly, so the four live rows went
+  # 'unavailable' although fast.sh at the START of the same run had printed "4b314af5 fresh: built from
+  # this tree". installed.txt named 3655948d for the same reason: deploy.sh writes it as the FINAL record
+  # of a deploy, so it names the last install that FINISHED - never this commit's proof, and never a
+  # statement about the bytes at any path.
+  #
+  # So the first source is FAST'S OWN RESULT - the binary that ran this very tree, with the commit it was
+  # built from and its sha256 (scripts/fast.sh:420 writes both, scripts/fast-result.mjs puts them in the
+  # result as env.bin, env.commit, env.bin_sha256) - and it is used only while the bytes are still the ones
+  # fast.sh graded. A path whose sha256 has changed is another build (a landing, a deploy) and is refused
+  # BY NAME rather than measured as this commit. Then the plan (a binary whose stamp is $sha), then the old
+  # installed.txt rule, then no --bin at all: speed-stats judges four live rows without a number a RED row,
+  # which is the honest answer for a commit nothing could measure (rule 1: unknown is not yes).
+  speed_bin=""; speed_source=""; speed_reason=""
+  fast_bin=$(jq -r '.env.bin // empty' "$result" 2>/dev/null)
+  fast_commit=$(jq -r '.env.commit // empty' "$result" 2>/dev/null)
+  fast_sha=$(jq -r '.env.bin_sha256 // empty' "$result" 2>/dev/null)
+  if [ -n "$fast_bin" ] && [ -x "$fast_bin" ] && [ -n "$fast_commit" ] && [ "${sha:0:${#fast_commit}}" = "$fast_commit" ]; then
+    if command -v sha256sum >/dev/null 2>&1; then
+      now_sha=$(sha256sum "$fast_bin" 2>/dev/null | cut -d' ' -f1)
+    else
+      now_sha=""
+    fi
+    case "$fast_sha" in
+      ''|unknown)
+        speed_reason="the fast run recorded no sha256 for $fast_bin, so its bytes cannot be shown to be $short" ;;
+      *)
+        if [ -n "$now_sha" ] && [ "$now_sha" = "$fast_sha" ]; then
+          speed_bin=$fast_bin
+          speed_source="the binary this run's fast path proved for $short (sha256 ${fast_sha:0:12})"
+        elif [ -n "$now_sha" ]; then
+          speed_reason="the binary the fast path used ($fast_bin) was sha256 ${fast_sha:0:12} and is now ${now_sha:0:12}: another build replaced it while this run measured"
+        else
+          speed_reason="sha256sum is not on PATH, so the fast run's binary ($fast_bin) cannot be shown to be the bytes it graded"
+        fi ;;
+    esac
+  elif [ -n "$fast_bin" ]; then
+    speed_reason="the binary of the fast run ($fast_bin) is gone, or its commit ($fast_commit) is not $short"
+  fi
+  if [ -z "$speed_bin" ]; then
+    speed_bin=$(ROOT=$tree bash -c '
+      set -u
+      . "$ROOT/scripts/lib/fast-binary.sh" 2>/dev/null || exit 1
+      fast_binary_plan >/dev/null 2>&1 || exit 1
+      [ "${FAST_BIN_ACTION:-}" = use ] || exit 1
+      case "${FAST_BIN_VERDICT:-}" in fresh|explicit) ;; *) exit 1 ;; esac
+      [ -n "${FAST_BIN:-}" ] && [ -x "$FAST_BIN" ] || exit 1
+      [ "${FAST_BIN_COMMIT:-}" = "$1" ] || exit 1
+      printf "%s" "$FAST_BIN"
+    ' _ "$sha" 2>/dev/null) || speed_bin=""
+    [ -n "$speed_bin" ] && speed_source="the tree's own binary, by its stamp (scripts/lib/fast-binary.sh)"
+  fi
   if [ -z "$speed_bin" ]; then
     speed_installed=$(sed -n 's/^commit=//p' "$HOME/.local/bin/installed.txt" 2>/dev/null | head -1)
     # A PREFIX COMPARISON, and it had to be repaired: installed.txt records the commit in the 8 characters
@@ -164,11 +212,18 @@ if [ -f "$tree/scripts/speed-board.sh" ]; then
     if [ -n "$speed_installed" ] && [ "${sha:0:${#speed_installed}}" = "$speed_installed" ] \
         && [ -x "$HOME/.local/bin/wa" ]; then
       speed_bin="$HOME/.local/bin/wa"
+      speed_source="the installed node, and installed.txt names this commit"
     fi
   fi
-  # The binary is named on main-health's stderr: a speed row whose binary nobody can name is the failure
-  # scripts/lib/fast-binary.sh exists to prevent.
-  echo "main-health: speed binary ${speed_bin:-(none: no binary of $short on this machine, so the four live rows are RED)}" >&2
+  # The binary is named on main-health's stderr, WITH WHERE IT CAME FROM: a speed row whose binary nobody
+  # can name is the failure scripts/lib/fast-binary.sh exists to prevent, and "where did that come from" is
+  # the question the 4b314af5 hour was spent on. When there is none, the reason it could not be had goes
+  # beside it, so the four RED rows have a cause and not just a verdict.
+  if [ -n "$speed_bin" ]; then
+    echo "main-health: speed binary $speed_bin (source: $speed_source)" >&2
+  else
+    echo "main-health: speed binary (none: no binary of $short on this machine${speed_reason:+ - $speed_reason}, so the four live rows are RED)" >&2
+  fi
   speed_args=(--measure --root "$tree" --sha "$sha")
   [ -n "$speed_bin" ] && speed_args+=(--bin "$speed_bin")
   WA_MISSIONS_ROOT="$missions" bash "$tree/scripts/speed-board.sh" "${speed_args[@]}" \
