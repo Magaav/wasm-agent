@@ -324,3 +324,55 @@ value`); the Rust tests do not compile (`cannot find function wait_notice` / `wa
 13. `still waiting after <N>s on the same holder, unchanged: <the reason>. The request stays in the box; this is a
     notice, not a failure (wa-sentinel request withdraw <id> stops it)` — console and audit `hold-wait-notice`
 14. `WA_DEPLOY_HOLD_NOTICE` — the new knob (default 900 s, `0` turns the notice off)
+
+## Addendum (Fable, 23/11 ~20:50Z): 18 completions "admitted, not started" for finished workers
+
+**Short answer.** The entry `wa-sentinel status` printed is not the `child_completions` row: it is a `PendingRun`
+in the node's own scheduler queue (`rust/wa-capabilities/src/serve.rs`), pushed when a run is admitted to a
+node-thread and removed when that thread STARTS it. Its age (`waited_ms`, which status prints as `13m`) is how
+long it has been in a node thread's channel. So "the worker finished" is not the question: the completion is a
+turn of its SESSION, and the session's node thread had a turn in front of it (the worker's own last turn, or the
+deploy's pause). It is cleared by the node thread that dequeues it, and by nothing else.
+
+**Who admits them.** `scheduler::admit(session, owner, RunClass::Background, pick_run_node_thread)` →
+`Decision::Run`/`Decision::Behind` → `pending_admitted(run_id, session, node_thread, "completion")` —
+`rust/wa-capabilities/src/serve.rs:3789` for a completion (the `"run"` sibling is line 2724). The DB-side
+admission is a different lifecycle: `child_completions.state` (`ready` → `dispatching` → `running`) in
+`lua/core/completions.lua`, dispatched by the node's tick (`lua/core/selfloop.lua`).
+
+**Who releases them.** `pending_started(run_id)` — called by the node-thread loop when it takes the item
+(`serve.rs:2857` for a completion work item, `:2904` for an HTTP run), and by the give-back paths at `:2747`,
+`:2763`, `:2778`, `:2789`, `:2806` when an admission is returned (each paired with `scheduler::complete_run`).
+There is no timeout in `pending_registry`: an entry lives exactly as long as its turn waits. That is the right
+shape while the turn ahead is real work, and it is why 18 of them can be 13 minutes old without anything leaking.
+
+**Measured on a scratch node** (`wa serve`, a stub model, ONE conversation, one 4 s turn ahead of three others;
+the fixture is the one `scripts/test-deploy-wait.sh` uses):
+
+```
+-- sample 1  queue=3 named=3 entries=[{T1,kind=run,ms=1196},{T1,run,1190},{T1,run,1186}]
+-- sample 2  queue=3 named=3 entries=[{T1,run,ms=2489},{T1,run,2486},{T1,run,2483}]
+-- sample 3  queue=3 named=3 entries=[{T1,run,ms=3779},{T1,run,3776},{T1,run,3773}]
+```
+
+Three runs admitted behind one turn, each entry's `waited_ms` growing by exactly the clock, `named` counting all
+three because `/health` names the session of each. (In that scratch run my stub turn never finished, so the queue
+did not drain — a fixture fault, not the node's; the release is the code path above, and the drain is measured by
+`scripts/test-deploy-wait.sh` step 2c, which builds a real queue and then sees it empty.)
+
+**Whether they can ever hold a deploy: no.** Three independent reasons, all in this branch:
+
+1. `holders::bound_verdict` SKIPS `completion` holders (`c4420837`): a completion is admitted, not started, and
+   starts after the install — so a deploy proceeds over it. The measured shape is in
+   `scripts/test-deploy-bound.sh` (five holders, three sessions: installs in 15 ms), and the field's 18 entries
+   are the same shape with more of them;
+2. while a request waits, a NEW completion never gets admitted at all: `wa_deploy_admission`
+   (`lua/core/server.lua`) refuses the run at the door, and the node's tick defers it before dispatch
+   (`lua/core/selfloop.lua:1262`);
+3. what those entries wait for is a node thread, not the deploy: the deploy no longer waits on them, so the queue
+   they are in is served as soon as the thread ahead finishes.
+
+**Not a defect, and not fixable by a timeout.** Cancelling a queued completion after N minutes would delete a
+child's report; the honest lever is the one this branch added — the deploy stops waiting for it. If a queued
+completion's session is gone by the time it runs, `wa_completion_run` refuses it by name
+(`completion_forbidden`, `lua/core/completions.lua`) and the queue entry is released at dequeue, as above.
