@@ -44,7 +44,16 @@ local tip = journal.tree_commit
 ok(tostring(tip):match("^%x+$") ~= nil, "the journal names a landed tip")
 contains(must("git -C " .. repo .. " ls-remote oc-in refs/heads/" .. journal.land_branch), tip,
   "the landed tip is on the incoming repository")
-contains(must("git -C " .. repo .. " ls-remote origin refs/heads/main"), tip, "main was fast-forwarded to it")
+-- THE ROUND PUBLISHES, SO MAIN MOVES BY ONE COMMIT (Fable 22/11): the public channel's index entry is a commit
+-- on main (`impl.linux`), because a machine with no node installs from `releases/index-linux.json` as main
+-- carries it. The assertion used to be "main IS the landed tip"; the true and tighter one is: one commit past
+-- it, carrying exactly one path, and the live channel it carries names this release.
+local main_tip = (must("git -C " .. repo .. " ls-remote origin refs/heads/main"):match("^(%x+)"))
+eq(must("git -C " .. repo .. " rev-parse " .. main_tip .. "^"), tip, "main is one commit past the landed tip: the channel index")
+eq(must("git -C " .. repo .. " diff --name-only " .. tip .. " " .. main_tip), "releases/index-linux.json",
+  "and that commit carries exactly one path (an allow-list)")
+contains(must("git -C " .. repo .. " show " .. main_tip .. ":releases/index-linux.json"), tip,
+  "the live channel index names this release's commit")
 -- The release set, the signature and the reference.
 eq(journal.artifacts.commit, tip, "the release set is this commit's")
 contains(journal.artifacts.manifest, "node-" .. tip:sub(1, 12) .. ".manifest", "the journal names the manifest")

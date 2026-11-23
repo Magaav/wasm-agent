@@ -40,6 +40,7 @@ R.start_vault()
     land.release_checks = {
       signing = function() asked.signing = true return { ready = true, why = "stub: the vault answers" } end,
       publishing = function() asked.publishing = true return { ready = true, why = "stub: gh is signed in" } end,
+      channel = function() asked.channel = true return { ready = true, why = "stub: the musl toolchain is here" } end,
       ancestry = function() asked.ancestry = true return { ready = true, why = "stub: full history" } end,
     }
     return asked
@@ -63,7 +64,7 @@ R.start_vault()
     eq(step_of("case46", name).state, "skipped", name .. " is settled as skipped")
     contains(step_of("case46", name).detail, "nothing to land", "and " .. name .. " says why, by name")
   end
-  for _, name in ipairs({ "collect", "plan", "gate", "artifacts", "sign", "ship", "publish", "report" }) do
+  for _, name in ipairs({ "collect", "plan", "gate", "artifacts", "sign", "ship", "publish", "linux", "report" }) do
     eq(step_of("case46", name).state, "done", "step " .. name .. " ran")
   end
   contains(step_of("case46", "deploy").detail, "--no-deploy", "--no-deploy is honoured")
@@ -73,16 +74,32 @@ R.start_vault()
   eq(observed.builds, builds + 1, "exactly one build")
   if R.state.vault_available then eq(observed.signs, signs + 1, "exactly one signature") end
   eq(observed.pushes, pushes, "no landing branch was pushed")
-  eq(observed.main_pushes, main_pushes, "main was not pushed")
-  eq(origin_main(), main_before, "origin/main is where it was")
+  eq(observed.main_pushes, main_pushes, "no landing step pushed main")
+  -- THE CHANNEL IS THE ONE COMMIT A RELEASE WRITES (Fable 22/11): a machine with no node installs from
+  -- `releases/index-linux.json`, which is read from main, so the entry has to be committed there or the channel
+  -- never moves. The assertion used to be "origin/main is where it was"; the true and tighter form is: main
+  -- moved by EXACTLY one commit, that commit carries exactly ONE path, and that path names this release.
+  eq(observed.channel_pushes, 1, "the channel's index commit was pushed onto main, once")
+  local channel_main = origin_main()
+  ok(channel_main ~= main_before, "a release now moves main by one commit: the channel index")
+  eq(must("git -C " .. repo .. " diff --name-only " .. main_before .. " " .. channel_main, "the channel commit's paths"),
+    "releases/index-linux.json", "and that commit carries exactly one path (an allow-list, not a hope)")
+  eq(step_of("case46", "linux").state, "done", "the linux step published the channel")
+  contains(tostring((journal_of("case46").linux or {}).tag or ""), "wa-linux-", "the journal records the channel tag")
+  contains(must("git -C " .. repo .. " show origin/main:releases/index-linux.json", "the live channel index"),
+    main_before, "the live index on main names this release's commit")
   eq(must("git -C " .. repo .. " for-each-ref refs/heads/land"), "", "no landing branch exists")
-  ok(asked.signing and asked.publishing and asked.ancestry, "every precondition was asked before the run")
-  -- The gate verdict is kept by TREE OBJECT: a second release run on the same main does not pay again.
+  ok(asked.signing and asked.publishing and asked.channel and asked.ancestry, "every precondition was asked before the run")
+  -- The gate verdict is kept by TREE OBJECT - and a release now moves the tree (the channel index is a commit),
+  -- so the reuse is proved where main cannot move: two release runs that stop AT the gate, one after the other.
   eq(land.run({ run = "case46b", release = true, until_step = "gate", checks = standard_checks() }), 0,
-    "a second release run on the same main stops green at the gate")
-  local row46 = (journal_of("case46b").gate or {})[1]
+    "a release run that stops at the gate is green")
+  eq(land.run({ run = "case46c", release = true, until_step = "gate", checks = standard_checks() }), 0,
+    "a second one on the same main is green too")
+  eq(origin_main(), channel_main, "and neither of them moved main (the channel step is after the gate)")
+  local row46 = (journal_of("case46c").gate or {})[1]
   eq(row46 and row46.kept, true, "and its gate verdict is KEPT from the first, by tree object")
-  eq(row46 and row46.kept_from, "case46", "naming the run it was kept from")
+  eq(row46 and row46.kept_from, "case46b", "naming the run it was kept from")
 
   -- ------------------------------------------ case 47: the preconditions refuse in the first second
   land.release_checks = {
@@ -122,8 +139,41 @@ R.start_vault()
   rows = land.release_preflight({ signer = "local" })
   eq(rows[2].ready, true, "a signed-in gh is ready")
   if R.state.vault_available then eq(rows[1].ready, true, "the scratch vault answers, so signing is ready") end
-  eq(rows[3].ready, true, "main contains the release this fixture published")
-  contains(rows[3].why, "previous release", "and the row says which fact it read")
+  eq(rows[3].name, "channel", "the third row is the public channel's toolchain")
+  eq(rows[4].ready, true, "main contains the release this fixture published")
+  contains(rows[4].why, "previous release", "and the row says which fact it read")
+  -- The channel's check, both answers, with its own probe stubbed: what it reads is this host's toolchain, and a
+  -- case may not depend on whether the machine that runs it has zig.
+  do
+    local saved_probe = land.exec
+    land.exec = function(command, cwd, timeout)
+      if command:find("cargo%-zigbuild", 1) then return { code = 0, stdout = "no\n", stderr = "" } end
+      return saved_probe(command, cwd, timeout)
+    end
+    local row = land.release_checks.channel({})
+    land.exec = saved_probe
+    eq(row.ready, false, "no cargo-zigbuild: the channel's precondition is not ready")
+    contains(row.why, "cargo-zigbuild", "and it names what is missing")
+    contains(row.next, "provision-publish-toolchain", "with the one command that fixes it")
+  end
+  do
+    local saved_probe = land.exec
+    local asked_targets = {}
+    land.exec = function(command, cwd, timeout)
+      if command:find("cargo%-zigbuild", 1) then return { code = 0, stdout = "yes\n", stderr = "" } end
+      if command:find("rustup target list", 1) then
+        asked_targets[#asked_targets + 1] = command
+        return { code = 0, stdout = "yes\n", stderr = "" }
+      end
+      return saved_probe(command, cwd, timeout)
+    end
+    local row = land.release_checks.channel({})
+    land.exec = saved_probe
+    eq(row.ready, true, "with the toolchain and both rust targets, the channel's precondition is ready")
+    eq(#asked_targets, 2, "and it asks for the std of each target the channel publishes")
+    contains(asked_targets[1], "x86_64-unknown-linux-musl", "the first is this machine's")
+    contains(asked_targets[2], "aarch64-unknown-linux-musl", "the second is the other one the channel publishes")
+  end
 
   -- ------------------------------------------ case 48: a failed release leaves main alone and resumes by id
   setup_fixture()
@@ -143,7 +193,11 @@ R.start_vault()
   eq(journal_of("case48").result, "done", "the release is done")
   eq(step_of("case48", "merge").state, "skipped", "and the resume merged nothing")
   eq(observed.builds, builds, "the build was not repeated")
-  eq(origin_main(), main_before, "main is still untouched")
+  local resumed_main = origin_main()
+  ok(resumed_main ~= main_before, "the resumed release published the channel, so main moved by one commit")
+  eq(must("git -C " .. repo .. " diff --name-only " .. main_before .. " " .. resumed_main, "the channel commit's paths"),
+    "releases/index-linux.json", "and that commit carries exactly one path")
+  eq(step_of("case48", "linux").state, "done", "the channel step is done on the resume")
 
   -- ------------------------------------------ case 49: --until main is a complete landing; a release is separate
   setup_fixture()

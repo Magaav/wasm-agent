@@ -38,12 +38,16 @@
 #   --reason TEXT    recorded in the release notes
 #   --check          print what would be built and published; build nothing, upload nothing
 #   --no-publish     build and sign the bundles, then stop: no gh, no index write, no upload (a proof run)
+#   --build-only     build the bundles and write SHA256SUMS, then stop UNSIGNED - for a run whose signer is
+#                    another node (`wa release cut --signer <node>`): that node signs, then --upload-only finishes
+#   --upload-only    do not build: verify the signed sums this directory already holds, upload, write the entry
+#                    (the second half of a deferred signature; it refuses an unsigned directory)
 #
 # Exit codes: 0 published (or built, with --no-publish); 1 a named refusal, printed as `linux-channel: <name>`.
 set -uo pipefail
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 REPO="Magaav/wasm-agent"
-commit=; tree="$ROOT"; tag=; targets=; out=; index=; reason=; check=0; publish=1
+commit=; tree="$ROOT"; tag=; targets=; out=; index=; reason=; check=0; publish=1; build_only=0; upload_only=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --commit)  [ "$#" -ge 2 ] || { echo 'linux-channel: commit_value_required' >&2; exit 1; }; commit=$2; shift 2 ;;
@@ -55,10 +59,14 @@ while [ "$#" -gt 0 ]; do
     --reason)  [ "$#" -ge 2 ] || { echo 'linux-channel: reason_value_required' >&2; exit 1; }; reason=$2; shift 2 ;;
     --check)   check=1; shift ;;
     --no-publish) publish=0; shift ;;
+    --build-only) build_only=1; shift ;;
+    --upload-only) upload_only=1; shift ;;
     -h|--help) sed -n '2,41p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "linux-channel: unknown_option: $1" >&2; exit 1 ;;
   esac
 done
+
+[ "$build_only" = 1 ] && [ "$upload_only" = 1 ] && { echo 'linux-channel: modes_conflict: --build-only and --upload-only are two halves of one run; pick the half that is missing' >&2; exit 1; }
 
 say()  { printf 'linux-channel: %s\n' "$*" >&2; }
 fail() { printf 'linux-channel: %s\n' "$*" >&2; exit 1; }
@@ -110,7 +118,7 @@ assets=${assets# }
 
 # THE CREDENTIAL IS ASKED FOR BEFORE THE BUILD, not after it: a cut that spent the bundle build and then found
 # gh signed out is the 19/11 defect (gh installed, its token unreadable in a unit) paid for twice.
-if [ "$publish" = 1 ]; then
+if [ "$publish" = 1 ] && [ "$build_only" = 0 ]; then
   command -v gh >/dev/null 2>&1 || fail 'gh_missing: install the GitHub CLI (gh auth status must answer for the account that owns the release)'
   gh auth status >/dev/null 2>&1 || fail 'publish_needs_credentials: gh here is missing or signed out (gh reads its token from the desktop keyring; a systemd user unit has no session bus to unlock it), so nothing was built and nothing was uploaded; run the cut from a desktop shell, or build with --no-publish and upload by hand'
 fi
@@ -132,103 +140,118 @@ out=$(CDPATH= cd -- "$out" && pwd) || fail "out_unwritable: $out (cannot resolve
 paths=
 for asset in $assets; do paths="$paths $out/$asset"; done
 paths=${paths# }
-rows=
-installer_sha=
-for triple in $targets; do
-  case "$triple" in x86_64-*) arch=x64 ;; *) arch=arm64 ;; esac
-  name="wa-linux-$arch-musl-$short"
-  asset="$name.tar.gz"
-  log="$out/build-$arch.log"
-  say "building $triple -> $asset"
-  if ! bash "$tree/scripts/release-linux.sh" --commit "$commit" --out "$out" --target "$triple" > "$log" 2>&1; then
-    tail -20 "$log" >&2
-    fail "build_failed: scripts/release-linux.sh --target $triple (log $log)"
-  fi
-  stage="$out/$name"
-  [ -f "$stage/bundle.manifest" ] || fail "bundle_incomplete: $stage/bundle.manifest is missing after the build (log $log)"
-  [ -f "$out/$asset" ] || fail "bundle_incomplete: $out/$asset is missing after the build (log $log)"
-  mval() { sed -n "s/^$1=//p" "$stage/bundle.manifest" | head -1; }
-  [ "$(mval source_commit)" = "$commit" ] || fail "commit_mismatch: the bundle records $(mval source_commit), not $commit"
-  [ "$(mval target_triple)" = "$triple" ] || fail "target_mismatch: the bundle records $(mval target_triple), not $triple"
-  [ "$(mval local_only)" = 0 ] || fail "local_bundle: the bundle was built with --local (a test artefact) and is not publishable"
-  manifest_sha=$(sha256sum "$stage/bundle.manifest" | cut -d' ' -f1)
-  size=$(wc -c < "$out/$asset" | tr -d ' ')
-  [ -n "$manifest_sha" ] && [ -n "$size" ] || fail "bundle_unmeasurable: $out/$asset"
-  if [ -f "$stage/scripts/linux/bootstrap.sh" ]; then
-    installer_sha=$(sha256sum "$stage/scripts/linux/bootstrap.sh" | cut -d' ' -f1)
-  fi
-  rows="$rows$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s' "$triple" "$(mval arch)" "$manifest_sha" "$asset" "$size" "$(mval node_version)" "$(mval built_utc)")"
-  rows="$rows"$'\n'
-  say "bundle  $out/$asset ($size bytes, manifest sha256 $manifest_sha)"
-done
-
-# ---- one SHA256SUMS over the archives, signed, and verified HERE --------------------------------------------
 sums="$out/SHA256SUMS"
-sums_new="$out/.SHA256SUMS.$$"
-: > "$sums_new" || fail "sums_unwritable: $sums_new"
-# A release can be revisited (a second target later, a rerun after a stop): the rows already published stay, and
-# only the rows for the archives about to be uploaded are replaced. The same rule as scripts/release-linux.sh.
-if [ "$publish" = 1 ] && command -v gh >/dev/null 2>&1 && gh release view "$tag" --repo "$REPO" >/dev/null 2>&1; then
-  mkdir -p "$out/sums-prev"
-  gh release download "$tag" --repo "$REPO" --pattern SHA256SUMS --dir "$out/sums-prev" >/dev/null 2>&1 || true
-  if [ -s "$out/sums-prev/SHA256SUMS" ]; then
-    grep -v -F -f <(for asset in $assets; do printf ' %s\n' "$asset"; done) "$out/sums-prev/SHA256SUMS" >> "$sums_new" 2>/dev/null || true
+rows=; installer_sha=
+
+# <none> -> one row per target, read from the bundle in --out. A row is the index entry minus the fields the tag
+# supplies, and it is read from the BUNDLE (never from the build's output): --upload-only trusts only bytes it can
+# measure, and a bundle that records another commit, another triple or local_only=1 never becomes an entry.
+collect_rows() {
+  rows=; installer_sha=
+  for triple in $targets; do
+    case "$triple" in x86_64-*) arch=x64 ;; *) arch=arm64 ;; esac
+    name="wa-linux-$arch-musl-$short"; asset="$name.tar.gz"; stage="$out/$name"
+    [ -f "$stage/bundle.manifest" ] || fail "bundle_incomplete: $stage/bundle.manifest is missing (build it first: --build-only)"
+    [ -f "$out/$asset" ] || fail "bundle_incomplete: $out/$asset is missing (build it first: --build-only)"
+    mval() { sed -n "s/^$1=//p" "$stage/bundle.manifest" | head -1; }
+    [ "$(mval source_commit)" = "$commit" ] || fail "commit_mismatch: the bundle records $(mval source_commit), not $commit"
+    [ "$(mval target_triple)" = "$triple" ] || fail "target_mismatch: the bundle records $(mval target_triple), not $triple"
+    [ "$(mval local_only)" = 0 ] || fail "local_bundle: the bundle was built with --local (a test artefact) and is not publishable"
+    manifest_sha=$(sha256sum "$stage/bundle.manifest" | cut -d' ' -f1)
+    size=$(wc -c < "$out/$asset" | tr -d ' ')
+    [ -n "$manifest_sha" ] && [ -n "$size" ] || fail "bundle_unmeasurable: $out/$asset"
+    if [ -f "$stage/scripts/linux/bootstrap.sh" ]; then
+      installer_sha=$(sha256sum "$stage/scripts/linux/bootstrap.sh" | cut -d' ' -f1)
+    fi
+    rows="${rows}$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s' "$triple" "$(mval arch)" "$manifest_sha" "$asset" "$size" "$(mval node_version)" "$(mval built_utc)")"$'\n'
+    say "bundle  $out/$asset ($size bytes, manifest sha256 $manifest_sha)"
+  done
+}
+
+build_channel() {
+  for triple in $targets; do
+    case "$triple" in x86_64-*) arch=x64 ;; *) arch=arm64 ;; esac
+    log="$out/build-$arch.log"
+    say "building $triple -> wa-linux-$arch-musl-$short.tar.gz"
+    if ! bash "$tree/scripts/release-linux.sh" --commit "$commit" --out "$out" --target "$triple" > "$log" 2>&1; then
+      tail -20 "$log" >&2
+      fail "build_failed: scripts/release-linux.sh --target $triple (log $log)"
+    fi
+  done
+  collect_rows
+}
+
+# <none> -> one SHA256SUMS over the archives, unsigned. A release can be revisited (a second target later, a
+# rerun after a stop): the rows already published stay, and only the rows for the archives about to be uploaded
+# are replaced - the rule scripts/release-linux.sh uses.
+write_sums() {
+  local sums_new="$out/.SHA256SUMS.$$"
+  : > "$sums_new" || fail "sums_unwritable: $sums_new"
+  if [ "$publish" = 1 ] && command -v gh >/dev/null 2>&1 && gh release view "$tag" --repo "$REPO" >/dev/null 2>&1; then
+    mkdir -p "$out/sums-prev"
+    gh release download "$tag" --repo "$REPO" --pattern SHA256SUMS --dir "$out/sums-prev" >/dev/null 2>&1 || true
+    if [ -s "$out/sums-prev/SHA256SUMS" ]; then
+      grep -v -F -f <(for asset in $assets; do printf ' %s\n' "$asset"; done) "$out/sums-prev/SHA256SUMS" >> "$sums_new" 2>/dev/null || true
+    fi
+    rm -rf "$out/sums-prev"
   fi
-  rm -rf "$out/sums-prev"
-fi
-for asset in $assets; do
-  ( cd "$out" && sha256sum "$asset" ) >> "$sums_new" || { rm -f "$sums_new"; fail "checksums_failed: sha256sum $asset"; }
-done
-LC_ALL=C sort -k2 "$sums_new" > "$sums" && rm -f "$sums_new" || fail 'checksums_failed: could not write SHA256SUMS'
-say "checksums $sums ($(wc -l < "$sums" | tr -d ' ') asset(s))"
+  for asset in $assets; do
+    ( cd "$out" && sha256sum "$asset" ) >> "$sums_new" || { rm -f "$sums_new"; fail "checksums_failed: sha256sum $asset"; }
+  done
+  LC_ALL=C sort -k2 "$sums_new" > "$sums" && rm -f "$sums_new" || fail 'checksums_failed: could not write SHA256SUMS'
+  say "checksums $sums ($(wc -l < "$sums" | tr -d ' ') asset(s))"
+}
 
-( cd "$tree" && bash scripts/sign-release.sh "$sums" "$sums.sig" ) \
-  || fail 'release_not_signed: the sums were not signed by wa-vault, so no channel entry may name these bytes (WA_VAULT_ADMIN_URL/WA_VAULT_ADMIN_TOKEN where the vault reads them)'
-say "signature $sums.sig ($(sed -n 's/^key //p' "$sums.sig"))"
-( cd "$tree" && . scripts/lib/release-signing.sh && wa_release_verify_sums "$out" ) \
-  || fail "release_key_not_trusted: the signature beside $sums does not verify against the keys $tree (and this node) trust; a machine installing from this entry would refuse it"
+verify_sums() {
+  [ -f "$sums" ] || fail "sums_missing: $sums (build it first: --build-only)"
+  [ -f "$sums.sig" ] || fail "release_not_signed: $sums.sig is missing: sign the sums where the vault answers (scripts/sign-release.sh), then --upload-only - a release without a signature is not installable and is never published"
+  ( cd "$tree" && . scripts/lib/release-signing.sh && wa_release_verify_sums "$out" ) \
+    || fail "release_key_not_trusted: the signature beside $sums does not verify against the keys $tree (and this node) trust; a machine installing from this entry would refuse it"
+  say "signature $sums.sig ($(sed -n 's/^key //p' "$sums.sig"))"
+}
 
-if [ "$publish" = 0 ]; then
-  say "built and signed, not published (--no-publish): $out"
-  say "channel  $targets"
-  exit 0
-fi
+sign_sums() {
+  ( cd "$tree" && bash scripts/sign-release.sh "$sums" "$sums.sig" ) \
+    || fail 'release_not_signed: the sums were not signed by wa-vault, so no channel entry may name these bytes (WA_VAULT_ADMIN_URL/WA_VAULT_ADMIN_TOKEN where the vault reads them; or --build-only, sign where the vault answers, then --upload-only)'
+  verify_sums
+}
 
-# ---- upload beside the node release, then READ IT BACK -----------------------------------------------------
-command -v gh >/dev/null 2>&1 || fail 'gh_missing: install the GitHub CLI (asked before the build; gh disappeared since)'
-notes="Linux prebuilt node bundle(s) for the public installer channel, source commit $commit.
+upload_and_index() {
+  command -v gh >/dev/null 2>&1 || fail 'gh_missing: install the GitHub CLI (asked before the build; gh disappeared since)'
+  local notes asset size listing
+  notes="Linux prebuilt node bundle(s) for the public installer channel, source commit $commit.
 Install a node on a fresh Linux machine - one command, no checkout and no toolchain:
   curl -fsSL https://raw.githubusercontent.com/$REPO/main/scripts/install.sh | sh
 The same command updates it. Verification: the signed SHA256SUMS beside these assets, and inside the bundle
 bundle.manifest -> files.sha256 -> every member, which the installer checks before it installs anything.
 reason: ${reason:-none stated}"
-if gh release view "$tag" --repo "$REPO" >/dev/null 2>&1; then
-  # shellcheck disable=SC2086
-  gh release upload "$tag" $paths "$sums" "$sums.sig" --repo "$REPO" --clobber || fail "publish_failed: gh release upload $tag"
-else
-  # shellcheck disable=SC2086
-  gh release create "$tag" $paths "$sums" "$sums.sig" --repo "$REPO" --target "$commit" --title "$tag" --notes "$notes" --prerelease \
-    || fail "publish_failed: gh release create $tag"
-fi
-# THE EFFECT, NOT THE COMMAND: ask the release what it carries and hold it to the bytes measured here.
-listing=$(gh release view "$tag" --repo "$REPO" --json assets 2>/dev/null) || fail "publish_not_readback: gh release view $tag answered nothing after the upload"
-for asset in $assets; do
-  size=$(printf '%s\n' "$rows" | awk -F'\t' -v a="$asset" '$4 == a { print $5; exit }')
-  case "$listing" in
-    *"\"name\":\"$asset\""*) ;;
-    *) fail "publish_not_readback: $tag does not list $asset after the upload: $(printf '%s' "$listing" | head -c 300)" ;;
-  esac
-  case "$listing" in
-    *"\"size\":$size"*) ;;
-    *) say "note: $asset is on $tag but its listed size did not match $size (gh reports the asset size; check it by hand)" ;;
-  esac
-done
-say "published https://github.com/$REPO/releases/download/$tag"
+  if gh release view "$tag" --repo "$REPO" >/dev/null 2>&1; then
+    # shellcheck disable=SC2086
+    gh release upload "$tag" $paths "$sums" "$sums.sig" --repo "$REPO" --clobber || fail "publish_failed: gh release upload $tag"
+  else
+    # shellcheck disable=SC2086
+    gh release create "$tag" $paths "$sums" "$sums.sig" --repo "$REPO" --target "$commit" --title "$tag" --notes "$notes" --prerelease \
+      || fail "publish_failed: gh release create $tag"
+  fi
+  # THE EFFECT, NOT THE COMMAND: ask the release what it carries and hold it to the bytes measured here.
+  listing=$(gh release view "$tag" --repo "$REPO" --json assets 2>/dev/null) || fail "publish_not_readback: gh release view $tag answered nothing after the upload"
+  for asset in $assets; do
+    size=$(printf '%s\n' "$rows" | awk -F'\t' -v a="$asset" '$4 == a { print $5; exit }')
+    case "$listing" in
+      *"\"name\":\"$asset\""*) ;;
+      *) fail "publish_not_readback: $tag does not list $asset after the upload: $(printf '%s' "$listing" | head -c 300)" ;;
+    esac
+    case "$listing" in
+      *"\"size\":$size"*) ;;
+      *) say "note: $asset is on $tag but its listed size did not match $size (gh reports the asset size; check it by hand)" ;;
+    esac
+  done
+  say "published https://github.com/$REPO/releases/download/$tag"
 
-# ---- the index entry: one write for the whole cut ----------------------------------------------------------
-index_file=$index
-command -v node >/dev/null 2>&1 || fail 'node_missing: the index is written with node (as scripts/release-linux.sh does, so the Windows tree can write it too)'
-node - "$index_file" "$commit" "$short" "$tag" "$REPO" "${installer_sha:-}" "$rows" <<'JS' || fail "index_update_failed: $index_file"
+  # ---- the index entry: one write for the whole cut --------------------------------------------------------
+  local index_file="$index"
+  command -v node >/dev/null 2>&1 || fail 'node_missing: the index is written with node (as scripts/release-linux.sh does, so the Windows tree can write it too)'
+  node - "$index_file" "$commit" "$short" "$tag" "$REPO" "${installer_sha:-}" "$rows" <<'JS' || fail "index_update_failed: $index_file"
 const fs = require('fs');
 const [file, commit, short, tag, repo, installer, rows] = process.argv.slice(2);
 const doc = JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -254,15 +277,40 @@ fs.writeFileSync(file, JSON.stringify(doc, null, 2) + '\n');
 console.log('linux-channel: index ' + file + ' (' + doc.releases.length + ' entries)');
 JS
 
-# ---- the channel has to be as new as the release it was cut with -------------------------------------------
-fresh_out=$(bash "$tree/scripts/check-linux-channel-fresh.sh" --index "$index_file" --repo "$tree" 2>&1)
-fresh_rc=$?
-say "$(printf '%s' "$fresh_out" | head -1)"
-case "$fresh_rc" in
-  0) ;;
-  1) fail "index_stale: $(printf '%s' "$fresh_out" | head -1)" ;;
-  *) fail "index_freshness_unknown: the channel could not be judged: $(printf '%s' "$fresh_out" | head -1)" ;;
-esac
-say "tag      $tag"
-say "index    $index_file (not committed here: the index is the trust root and a commit on main)"
+  # ---- the channel has to be as new as the release it was cut with -----------------------------------------
+  local fresh_out fresh_rc
+  fresh_out=$(bash "$tree/scripts/check-linux-channel-fresh.sh" --index "$index_file" --repo "$tree" 2>&1)
+  fresh_rc=$?
+  say "$(printf '%s' "$fresh_out" | head -1)"
+  case "$fresh_rc" in
+    0) ;;
+    1) fail "index_stale: $(printf '%s' "$fresh_out" | head -1)" ;;
+    *) fail "index_freshness_unknown: the channel could not be judged: $(printf '%s' "$fresh_out" | head -1)" ;;
+  esac
+  say "tag      $tag"
+  say "index    $index_file (not committed here: the index is the trust root and a commit on main)"
+}
+
+if [ "$upload_only" = 1 ]; then
+  collect_rows
+  verify_sums
+  upload_and_index
+  say 'done'
+  exit 0
+fi
+
+build_channel
+write_sums
+if [ "$build_only" = 1 ]; then
+  say "built, sums written, NOT signed (--build-only): $sums"
+  say 'next: sign it where the vault answers, then --upload-only'
+  exit 0
+fi
+sign_sums
+if [ "$publish" = 0 ]; then
+  say "built and signed, not published (--no-publish): $out"
+  say "channel  $targets"
+  exit 0
+fi
+upload_and_index
 say 'done'
