@@ -38,7 +38,19 @@ local position = {}
 for index, name in ipairs(land.STEPS) do position[name] = index end
 -- AFTER THE RING (Fable, 23/11, measured): a node deploys a commit only while HEAD == origin/main == that commit,
 -- and this step moves main, so publishing the channel first would refuse every tree deploy of the release.
-eq(position.linux, (position.deploy or 0) + 1, "the channel step comes right after the deploy")
+-- MEASURED 23/11 17:15Z on main 85593e74 (the rebase that went red here): the plan gained a `canaries` step
+-- between the deploy and the channel ("every feature this node runs proves itself, after the deploy
+-- read-back"), so `deploy + 1` is no longer the channel and the adjacency this row pinned was a fact about
+-- one plan rather than the invariant. The invariant is kept and NAMED as an allow-list: the channel is the
+-- first step after the ring, and the only steps it may be separated from the deploy by are ones that read
+-- the deployed bytes WITHOUT touching main - today exactly `canaries`. A new step in that gap has to be added
+-- here in its own right, which is the question this row asks of the next plan change.
+local between_ring_and_channel = {}
+for index = (position.deploy or 0) + 1, (position.linux or 0) - 1 do
+  between_ring_and_channel[#between_ring_and_channel + 1] = land.STEPS[index]
+end
+eq(table.concat(between_ring_and_channel, ","), "canaries",
+  "the channel step comes after the deploy, and only a step that does not move main may sit between them")
 eq(position.linux, (position.report or 0) - 1, "and the report is still last")
 ok(position.publish ~= nil and position.deploy ~= nil, "both neighbours exist")
 eq(land.EVENT_STEP.linux, "linux-channel", "its ledger row has a name of its own")
