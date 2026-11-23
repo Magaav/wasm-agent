@@ -113,7 +113,17 @@ test file in place, and fails there on the new assertions.
 - `scripts/test-fast-skip-count.sh`: ok; on the base: fails on the new Lua-row case.
 - `scripts/test-codemode-errors.lua`: `{"checks":10,"ok":true}` alone and at load 7.3.
 - `flock -o ~/Work/missions/.suite.lock env WA_FAST_ROWS=<the three Lua rows above> bash scripts/fast.sh`
-  (the G-wave narrowed run; its result is in the session report below).
+  (the G-wave narrowed run): **119 checks, 2 failed, 809 s** - and neither failure is this branch one:
+  - `lua scripts/test-land-linux.lua`: "the channel step comes right after the deploy (got 14, want 13)".
+    Run on the base (a detached worktree of 85593e74, the installed binary) it fails on that same line, so it
+    is red before this branch.
+  - `check esc-stops-pty`: "Esc brings the prompt back at once (300 ms idle, 120 ms per unit of load)" -
+    a timing row whose limit grows with the load average. It failed at load 14.85 and 13.4 and passes at 11.15
+    (18/18) on THIS branch, and passes on the base at 13.38: the row is load-bound, not code-bound, and this
+    branch does not touch it. It is a candidate for the same load treatment as test-codemode-errors.
+  The run also proves the new keeper in a REAL failure: its evidence directory holds
+  `test-land-linux.lua.log` - a failed LUA row that nothing named in `failed_rows`, which the base
+  would have deleted with the scratch.
 
 **Not run, by the G-wave rule:** the full suite, `scripts/test.sh`, `scripts/preflight.sh`,
 `wa land --until gate`. main-health on main is the orchestrator's, after the landing.
