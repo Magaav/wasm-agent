@@ -309,15 +309,21 @@ try {
   check('and the bar is still ONE bar after scrolling', groupsAfter.length === 1,
     'bar groups: ' + JSON.stringify(groupsAfter) + '\n' + scrolled);
 
+  // Is the view away from the newest output? The marker for that is the jump-to-bottom pill at the
+  // foot of the transcript (`more lines` + `Jump to bottom (Ctrl+PageDown)`). It replaced the old
+  // `(PgDn)` row, which is what this loop used to look for; both are the same fact, so the check
+  // reads either and cannot go stale when the marker changes again.
+  const awayFromBottom = text => text.includes('(PgDn)') || text.includes('Jump to bottom');
+
   // 2. ONE COPY OF THE OUTPUT, and the click.
   const settleBy = Date.now() + (SLOW_SECONDS + 30) * 1000;
   let settled = '';
   for (;;) {
     settled = screen_rows('live');
-    if (settled.includes('Both commands ran') && !settled.includes('(PgDn)')) break;
+    if (settled.includes('Both commands ran') && !awayFromBottom(settled)) break;
     if (Date.now() > settleBy) throw new Error('timed out waiting for the run to settle');
     // Back to the bottom the way the reader goes there (the PgUp above left the view scrolled).
-    if (settled.includes('(PgDn)')) tmux(['send-keys', '-t', 'live', 'NPage']);
+    if (awayFromBottom(settled)) tmux(['send-keys', '-t', 'live', 'NPage']);
     await sleep(150);
   }
   await sleep(700);

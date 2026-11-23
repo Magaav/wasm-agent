@@ -4196,6 +4196,12 @@ fn handle_mouse(state: &mut ConsoleInput, event: wa_term::selection::Mouse) {
         }
         Mouse::Press(row, col) => {
             clear_selection(state);
+            // What the pointer can press - a copy icon's row, an expandable line, the bar's thumb,
+            // the pinned request, the pill - is recorded by the last VIEW, and that view is the one
+            // the reader was looking at. Drawing it again here makes the maps and the geometry the
+            // press is reported in the same ones: one screenful of text per press, and a click can
+            // no longer land on a row some other frame put somewhere else.
+            let _ = state.transcript.view(width, rows);
             let over_transcript = row <= rows && state.nav.is_none();
             for gesture in keymap::gestures(Pose::Press) {
                 match gesture {
@@ -4737,9 +4743,12 @@ fn console_reader() {
                     data.extend_from_slice(&chunk[..n]);
                     let (keys, mice, pending) = wa_term::selection::take(&data);
                     state.mouse_pending = pending;
-                    // An error on the notice row stays until the next key: this is that key (a mouse
-                    // report counts, as any other press of the reader's does).
-                    if state.transcript.clear_notice() { state.transcript.dirty = true; }
+                    // An error on the notice row stays until the next KEY. A mouse report is not one:
+                    // the release of the very click that copied something arrives a few milliseconds
+                    // after the press that set the message, and clearing on it made "Copied N
+                    // characters" vanish before a reader could see it (measured: the tui-chrome row's
+                    // copy icon click reported nothing on screen).
+                    if !keys.is_empty() && state.transcript.clear_notice() { state.transcript.dirty = true; }
                     for event in mice { handle_mouse(&mut state, event); }
                     for &byte in &keys {
                         if let Some(panel) = state.panel.as_mut() { panel.feed(byte); continue; }
