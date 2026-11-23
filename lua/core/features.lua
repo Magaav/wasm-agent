@@ -35,6 +35,7 @@ M.env = {
   mesh_component = 'WA_MESH_COMPONENT',
   agent_core = 'WA_AGENT_CORE_COMPONENT',
   telemetry_sink = 'WA_TELEMETRY_SINK_COMPONENT',
+  graph = 'WA_GRAPH_COMPONENT',
 }
 
 local function decode(raw)
@@ -76,6 +77,15 @@ function M.resolve(feature)
     reason = on and 'active_component' or 'feature_off',
     fallback = 'features_capability_missing',
   }
+end
+
+-- IS THIS FEATURE SWITCHED ON AT ALL? `seam` below answers "which code answers its calls", which is a
+-- different question and is `false` for a feature that has no native path to fall back to. The graph is the
+-- first such row (docs/GRAPH.md, 23/11): off means the tool, the store and every capability are absent, not
+-- that a native version answers instead. Unknown is not yes - an id this cannot answer for answers `false`.
+function M.on(feature)
+  local entry = M.resolve(feature)
+  return type(entry) == 'table' and entry.enabled == true
 end
 
 -- What a gate asks: `active` is true when the component must answer this feature's calls. The reason

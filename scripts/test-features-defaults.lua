@@ -1,4 +1,5 @@
--- Every feature ON by default, and each one with a live off switch (docs/FEATURES.md, 08/11).
+-- Every feature ON by default, and each one with a live off switch (docs/FEATURES.md, 08/11) - every one
+-- but the graph, whose own row defaults OFF and says so (docs/GRAPH.md, 23/11).
 --
 -- What this proves, in one process with no restart:
 --   1. with no `policy.json` and no environment statement, every feature in the resolver's table is
@@ -8,8 +9,9 @@
 --      component is not there is `active: native` with `reason: component_missing` - reported, never a
 --      crash and never a silent fallback (item 5 of the job);
 --   3. the *whole table* turns off with one policy write (`"<id>": false` for each) and back on with
---      another, in the same process, one watch interval later: the off switch is live, and there are
---      eight of them;
+--      another, in the same process, one watch interval later: the off switch is live, and there are nine
+--      of them - the graph's own row being the one that is off until the policy says otherwise
+--      (docs/GRAPH.md, 23/11);
 --   4. one feature turned off does not touch the others (the switch is per feature, not a mode);
 --   5. the mesh's own switch is in the same answer (docs/MESH.md) so an operator can see whether the
 --      mesh is in use, not just which code would decide a call.
@@ -98,8 +100,16 @@ end
 local table_answer = features.status()
 check(type(table_answer) == 'table', 'the resolver answers without a policy file')
 local rows = (table_answer and table_answer.features) or {}
-check(#rows == 8, 'the resolver lists eight features, got ' .. tostring(#rows))
+check(#rows == 9, 'the resolver lists nine features, got ' .. tostring(#rows))
 for _, row in ipairs(rows) do
+  if row.feature == 'graph' then
+    -- THE ONE ROW THAT DEFAULTS OFF (docs/GRAPH.md, 23/11): nobody said anything, and the answer is off
+    -- with its own reason - not `feature_off`, which would say an operator wrote it.
+    check(row.enabled == false, 'graph is off by default')
+    check(row.source == 'default', 'and nobody said so, got ' .. tostring(row.source))
+    check(row.reason == 'default_off', 'with the default_off reason, got ' .. tostring(row.reason))
+    check(row.active == 'native', 'a dormant graph is not the component path, got ' .. tostring(row.active))
+  else
   check(row.enabled == true, tostring(row.feature) .. ' is enabled by default')
   check(row.source == 'default', tostring(row.feature) .. ' says the default did it, got ' .. tostring(row.source))
   if row.feature == 'memory' then
@@ -113,6 +123,7 @@ for _, row in ipairs(rows) do
     check(row.reason == 'default_on', tostring(row.feature) .. ' keeps saying why, got ' .. tostring(row.reason))
     check(type(row.installed) == 'string' and #row.installed == 64,
       tostring(row.feature) .. ' reports the verified pin it checked')
+  end
   end
 end
 check(type(table_answer.mesh) == 'table', 'the answer carries the mesh switch beside the table')
@@ -145,10 +156,11 @@ for _, id in ipairs({ 'selfloop', 'codemode', 'hooks', 'gateway', 'mesh_componen
   local row = entry(id)
   check(row and row.enabled == true, 'one switch does not turn ' .. id .. ' off')
 end
+check(entry('graph') and entry('graph').enabled == false, 'and memory off does not turn the graph on')
 
--------------------------------------------------- 4. the eighth switch works the same way
+-------------------------------------------------- 4. the ninth switch works the same way
 write_policy({ memory = false, selfloop = false, codemode = false, hooks = false, gateway = false,
-  mesh_component = false, agent_core = false, telemetry_sink = false })
+  mesh_component = false, agent_core = false, telemetry_sink = false, graph = false })
 after_watch()
 local all_off = true
 for _, row in ipairs((features.status() or {}).features or {}) do
@@ -159,11 +171,11 @@ for _, row in ipairs((features.status() or {}).features or {}) do
     checks = checks + 1
   end
 end
-check(all_off, 'every one of the eight switches is live in the same process')
+check(all_off, 'every one of the nine switches is live in the same process')
 
 -------------------------------------------------- 5. and back on, same process, no restart
 write_policy({ memory = true, selfloop = true, codemode = true, hooks = true, gateway = true,
-  mesh_component = true, agent_core = true, telemetry_sink = true })
+  mesh_component = true, agent_core = true, telemetry_sink = true, graph = true })
 after_watch()
 local all_on = true
 for _, row in ipairs((features.status() or {}).features or {}) do
@@ -173,10 +185,10 @@ for _, row in ipairs((features.status() or {}).features or {}) do
     checks = checks + 1
   end
 end
-check(all_on, 'all eight come back on from the policy file alone')
+check(all_on, 'all nine come back on from the policy file alone')
 
 if #failures > 0 then
   for _, failure in ipairs(failures) do print('FAIL ' .. failure) end
   error(('features defaults: %d failed of %d checks'):format(#failures, checks))
 end
-print(('features defaults: %d checks passed (every feature on by default, all eight switches live, component_missing reported, the mesh switch answered)'):format(checks))
+print(('features defaults: %d checks passed (every feature on by default but the graph, all nine switches live, component_missing reported, the mesh switch answered)'):format(checks))

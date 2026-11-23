@@ -1052,10 +1052,49 @@ fn a_healthy_store_is_never_quarantined_and_the_component_error_is_named() {
     assert!(line.contains("next=stop") && line.contains("use=graph_index_force"), "{line}");
 }
 
+/// Hold the graph ON for one test, the way a node that switched it on has it (docs/GRAPH.md). It exists
+/// because `enabled()` is process-wide and `cargo test` runs the tests of one binary in threads: a test
+/// that set the environment would be setting it for its neighbours. The lock inside keeps two tests from
+/// holding the switch at once, and the guard puts it back to "ask the resolver" when the test ends.
+#[cfg(test)]
+struct SwitchGuard(std::sync::MutexGuard<'static, ()>);
+#[cfg(test)]
+fn switch(value: bool) -> SwitchGuard {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let guard = LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    *TEST_SWITCH.lock().unwrap_or_else(|error| error.into_inner()) = Some(value);
+    SwitchGuard(guard)
+}
+#[cfg(test)]
+impl Drop for SwitchGuard {
+    fn drop(&mut self) {
+        *TEST_SWITCH.lock().unwrap_or_else(|error| error.into_inner()) = None;
+    }
+}
+
+/// EVERY GRAPH DOOR ANSWERS A DORMANT NODE BY NAME (docs/GRAPH.md, 23/11): with the switch off nothing is
+/// indexed and nothing is answered, and the answer says it did nothing and names the switch - it is not an
+/// empty success and not a component error.
+#[test]
+fn a_dormant_graph_refuses_every_door_by_name_and_touches_nothing() {
+    let _off = switch(false);
+    let answer = notify(json!({"path": "x/a.lua"}), None);
+    assert_eq!(answer["error"], json!("graph_dormant"), "the write hint refuses instead of claiming a queue: {answer}");
+    assert_eq!(answer["effect"], json!("none"));
+    assert!(answer["next"].as_str().unwrap_or_default().contains("WA_GRAPH_COMPONENT"), "the refusal names the switch: {answer}");
+    let read = run(json!({}), "stats", &[]);
+    assert_eq!(read["error"], json!("graph_dormant"), "a read capability refuses too: {read}");
+    let index = run(json!({}), "index", &[]);
+    assert_eq!(index["error"], json!("graph_dormant"), "and so does an explicit index: {index}");
+}
+
 #[test]
 fn a_write_hint_indexes_nothing_and_leaves_the_store_untouched() {
     // Item 0: `write`, `edit` and every native write used to enqueue a full index of the tree. Nothing
     // is parsed or written until a graph call asks, and the answer says so instead of staying silent.
+    // The node this test stands for has the graph switched ON (docs/GRAPH.md): off, the hint is refused
+    // before it reads anything, which the test above holds.
+    let _on = switch(true);
     let fixture = Fixture::new();
     let config = fixture.config();
     let store = per_root_store(&config.db, &config.root.canonicalize().unwrap());

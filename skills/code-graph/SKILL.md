@@ -5,6 +5,10 @@ description: Retrieve a ranked code symbol and its exact implementation, answer 
 
 # Symbol retrieval, dependency leads and patch impact
 
+**The graph is OFF by default on this node** (`docs/GRAPH.md`, 23/11). If `graph` is not among your tools,
+none of this applies to this turn: read with `read`/`grep` and do not try to call it. A node that switched it
+on gets the surface below.
+
 Whenever you use graph, include a brief final-answer assessment of whether it
 helped your reasoning and why, including a concrete limitation when it did not.
 Do not equate static leads with correctness or measured test coverage.

@@ -1490,6 +1490,11 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-model-route-servability.lua" "$BIN"
 # refused by name. A model trained on another harness writes them first, and the refusal used to arrive
 # only after the round was spent (change/edit-accepts-common-names, a turn note of 22/11).
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-edit-aliases.lua" "$BIN" --db "$DB.edit-aliases" | grep 'edit aliases ok'
+# THE GRAPH IS OFF BY DEFAULT (docs/GRAPH.md, 23/11), and this is the row that holds the default: with no
+# policy file the graph tool is not in the catalogue, a by-name call is refused as dormant, a write sends no
+# hint and no store appears; with "graph": true it is back. It runs with nothing set on purpose - the rows
+# below switch the feature on in their own home (scripts/lib/test-graph-on.lua) because they exercise it.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-graph-dormant.lua" "$BIN" --db "$DB.graph-dormant" | grep 'graph dormant ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-graph-tool.lua" "$BIN" --db "$DB.graph-tool" | grep 'graph tool ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-graph-freshness.lua" "$BIN" --db "$DB.graph-freshness" | grep 'graph freshness ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-graph-workspace.lua" "$BIN" --db "$DB.graph-workspace" | grep 'graph workspace ok'

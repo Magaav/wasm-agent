@@ -49,8 +49,9 @@ fn every_feature_is_declared_once_and_names_a_component_an_env_and_a_native_path
         assert!(!ids.contains(&spec.id), "duplicate feature id {}", spec.id);
         ids.push(spec.id);
     }
-    // The eight features of docs/FEATURES.md, and no others: adding one is a documented edit, not an
-    // accident of a table growing.
+    // The nine features of docs/FEATURES.md, and no others: adding one is a documented edit, not an
+    // accident of a table growing. The ninth is the graph, added on 23/11 as the first row that defaults
+    // OFF (docs/GRAPH.md) - which is why it also states its default here, beside the list.
     assert_eq!(
         ids,
         vec![
@@ -61,9 +62,14 @@ fn every_feature_is_declared_once_and_names_a_component_an_env_and_a_native_path
             "gateway",
             "mesh_component",
             "agent_core",
-            "telemetry_sink"
+            "telemetry_sink",
+            "graph"
         ]
     );
+    assert!(!spec("graph").expect("graph").default_enabled, "the graph is the row that defaults OFF");
+    for id in ["selfloop", "codemode", "hooks", "memory", "gateway", "mesh_component", "agent_core", "telemetry_sink"] {
+        assert!(spec(id).expect(id).default_enabled, "{id} keeps the 08/11 default of on");
+    }
     assert!(spec("nope").is_none());
 }
 
@@ -83,15 +89,59 @@ fn every_feature_is_on_by_default_with_its_component_installed() {
 }
 
 /// The 08/11 "every new feature on by default" statement, in one assertion over the shipped table: no
-/// policy, no environment, a verified component, and every feature routes to it.
+/// policy, no environment, a verified component, and every feature whose row defaults on routes to it.
+/// The graph is the row that does not, and the next test holds it to its own rule instead - the exception
+/// is asserted here rather than skipped, so a second row that starts defaulting off fails this test.
 #[test]
 fn the_whole_table_is_on_by_default() {
+    let mut off_by_default = Vec::new();
     for spec in FEATURES {
+        if !spec.default_enabled {
+            off_by_default.push(spec.id);
+            continue;
+        }
         let status = resolve(spec, None, &empty_policy(), &Installed::Verified("abc".into()));
         assert!(status.enabled, "{} is on by default", spec.id);
         assert_eq!(status.active, ActivePath::Component, "{} routes to its component", spec.id);
         assert_eq!(status.source, Source::Default);
     }
+    assert_eq!(off_by_default, vec!["graph"], "the only row that defaults OFF is the graph");
+}
+
+/// THE GRAPH IS OFF BY DEFAULT ON EVERY NODE FROM G (docs/GRAPH.md, 23/11): with no environment value,
+/// no policy value and a verified component, it answers off - and the reason says nobody said anything,
+/// which is a different statement from the operator writing `false`. Both switches turn it on, and the
+/// off state is not the component path.
+#[test]
+fn the_graph_is_off_by_default_and_either_switch_turns_it_on() {
+    let spec = spec("graph").expect("graph");
+    let installed = Installed::Verified("abc".into());
+    let off = resolve(spec, None, &empty_policy(), &installed);
+    assert!(!off.enabled, "no env, no policy: off");
+    assert_eq!(off.source, Source::Default);
+    assert_eq!(off.reason, REASON_DEFAULT_OFF, "why: nobody turned it on");
+    assert_eq!(off.active, ActivePath::Native, "a dormant graph is not the component path");
+    assert_eq!(off.to_json()["enabled"], Value::Bool(false));
+
+    let by_env = resolve(spec, Some("1"), &empty_policy(), &installed);
+    assert!(by_env.enabled, "WA_GRAPH_COMPONENT=1 turns it on");
+    assert_eq!(by_env.source, Source::Env);
+    assert_eq!(by_env.active, ActivePath::Component);
+
+    let by_policy = resolve(spec, None, &policy_with(&[("graph", Value::Bool(true))]), &installed);
+    assert!(by_policy.enabled, "policy.json features.graph=true turns it on");
+    assert_eq!(by_policy.source, Source::Policy);
+    assert_eq!(by_policy.active, ActivePath::Component);
+
+    let turned_off = resolve(spec, None, &policy_with(&[("graph", Value::Bool(false))]), &installed);
+    assert!(!turned_off.enabled);
+    assert_eq!(turned_off.reason, REASON_OFF, "the operator's false is not the default's reason");
+    assert_eq!(turned_off.source, Source::Policy);
+
+    // A typo must not read as either answer (the same rule as every other row).
+    let typo = resolve(spec, Some("maybe"), &empty_policy(), &installed);
+    assert!(!typo.enabled, "an unusable value is not permission to run the graph");
+    assert_eq!(typo.reason, REASON_ENV_INVALID);
 }
 
 /// The per-feature off switch, on the default: `features.<id>: false` is the native path, and the env
@@ -217,22 +267,27 @@ fn the_policy_section_is_parsed_and_a_broken_one_is_visible() {
     assert!(broken.error.as_deref().unwrap_or_default().starts_with("json:"));
 }
 
-/// 08/11: the file a deploy installs names every feature and turns every one **on**. Naming them
+/// The file a deploy installs names every feature and states the value the node will route: 08/11 made
+/// every one of them **on**, and the graph is the first **off** (docs/GRAPH.md, 23/11). Naming them
 /// explicitly (rather than relying on the default) is what makes the deploy's file say what the node
-/// routes, and it is what an operator edits one line of to turn a single feature off.
+/// routes, and it is what an operator edits one line of to turn a single feature on or off.
 #[test]
-fn the_shipped_default_names_every_feature_and_turns_every_one_on() {
+fn the_shipped_default_names_every_feature_at_its_own_default() {
     let default: Value = serde_json::from_str(include_str!("../../../policies/default.json"))
         .expect("policies/default.json parses");
     let features = default.get("features").and_then(Value::as_object).expect("a features section");
     for spec in FEATURES {
+        // Every row must be named, and named at the value its own row defaults to - so a spec whose
+        // default changes without the shipped file changing fails here, in either direction.
         assert_eq!(
             features.get(spec.id),
-            Some(&Value::Bool(true)),
-            "policies/default.json must ship {} as true",
-            spec.id
+            Some(&Value::Bool(spec.default_enabled)),
+            "policies/default.json must ship {} as {} (its own default)",
+            spec.id,
+            spec.default_enabled
         );
     }
+    assert_eq!(features.get("graph"), Some(&Value::Bool(false)), "the shipped file states the graph off");
     assert_eq!(features.len(), FEATURES.len(), "no feature in the default that this crate does not know");
     // ...and the file is a valid grant policy too: a shipped default its own engine refuses would be a
     // node with no capability rules at all.

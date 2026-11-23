@@ -1521,9 +1521,40 @@ fn wait_deadline(options: &Value) -> Instant {
     Instant::now() + Duration::from_millis(options.get("wait_ms").and_then(Value::as_u64).unwrap_or(60_000).clamp(1, 120_000))
 }
 
+/// IS THE GRAPH SWITCHED ON AT ALL? Off by default on every node from G (docs/GRAPH.md, 23/11). The
+/// switch is the `graph` row of the one feature resolver - `WA_GRAPH_COMPONENT=1`, or `"graph": true` in
+/// the `features` section of `policy.json` - so the tool's catalogue line, this store and the answer a
+/// caller gets cannot disagree about whether this node has a graph.
+fn enabled() -> bool {
+    // The same seam the component call has (`TEST_CALL`): a unit test drives the gate with an answer it
+    // sets rather than with the process environment, which is shared by every test in the binary. It does
+    // not exist in a release build.
+    #[cfg(test)]
+    if let Some(value) = *TEST_SWITCH.lock().unwrap_or_else(|error| error.into_inner()) {
+        return value;
+    }
+    wa_features::enabled("graph")
+}
+
+#[cfg(test)]
+pub(crate) static TEST_SWITCH: std::sync::Mutex<Option<bool>> = std::sync::Mutex::new(None);
+
+/// The one answer a dormant graph gives: named, with the switch that turns it on, and `effect: none`. A
+/// caller that reached a graph capability by another road than the tool (a pinned older Lua tree, a
+/// plugin, a test) is told why it got nothing, instead of being handed an index nobody asked to build.
+fn dormant() -> Option<Value> {
+    if enabled() {return None;}
+    Some(json!({
+        "error": "graph_dormant",
+        "effect": "none",
+        "next": "The code graph is OFF by default on this node (docs/GRAPH.md). Read with read/grep, or switch it on: WA_GRAPH_COMPONENT=1, or \"graph\": true in the features section of policy.json.",
+    }))
+}
+
 /// One read capability: resolve locations, register the root, run the tool.
 fn run(options: Value, tool: &str, extra: &[(&str, Value)]) -> Value {
     let outcome = (|| -> Result<Value, String> {
+        if let Some(refusal) = dormant() {return Ok(refusal);}
         let (root, db) = locations(&options, CONFIG.get())?;
         let entry = scheduler().entry(&root, &db)?;
         let deadline = if tool == "index" {Instant::now() + INDEX_BUDGET} else {wait_deadline(&options)};
@@ -1591,6 +1622,7 @@ pub extern "C-unwind" fn graph_notify(l: *mut LuaState) -> std::ffi::c_int {
 /// The answer keeps its shape and names why nothing was queued, so a caller is told, never left to guess.
 fn notify(options: Value, config: Option<&Config>) -> Value {
     let outcome = (|| -> Result<Value, String> {
+        if let Some(refusal) = dormant() {return Ok(refusal);}
         let root = if let Some(path) = opt_str(&options, "path") {
             if !indexable(&path) {return Ok(json!({"ok":true,"queued":false,"reason":"not_indexable_source"}));}
             let (root, _) = locations(&options, config)?;
@@ -1655,6 +1687,7 @@ pub extern "C-unwind" fn graph_impact(l: *mut LuaState) -> std::ffi::c_int {
 pub extern "C-unwind" fn graph_status(l: *mut LuaState) -> std::ffi::c_int {
     let options = json_arg(l, 1);
     let outcome = (|| -> Result<Value, String> {
+        if let Some(refusal) = dormant() {return Ok(refusal);}
         let (root, db) = locations(&options, CONFIG.get())?;
         let entry = scheduler().entry(&root, &db)?;
         let mut status = call(&entry, "status", json!({}), wait_deadline(&options));
@@ -1685,6 +1718,7 @@ pub extern "C-unwind" fn graph_patch_audit(l: *mut LuaState) -> std::ffi::c_int 
 pub extern "C-unwind" fn graph_snapshot(l: *mut LuaState) -> std::ffi::c_int {
     let request = json_arg(l, 1);
     let outcome = (|| -> Result<Value, String> {
+        if let Some(refusal) = dormant() {return Ok(refusal);}
         let db = opt_str(&request, "db").ok_or_else(|| "graph_snapshot_failed: db_names_no_store".to_string())?;
         let copy = opt_str(&request, "copy").ok_or_else(|| "graph_snapshot_failed: copy_names_no_destination".to_string())?;
         let wait = request.get("wait_ms").and_then(Value::as_u64).unwrap_or(15_000).clamp(1, 600_000);
@@ -1698,6 +1732,9 @@ pub extern "C-unwind" fn graph_snapshot(l: *mut LuaState) -> std::ffi::c_int {
 /// `wa serve` keeps the configured root refreshed for the life of the node; `WA_GRAPH_WATCH=0`
 /// disables the OS watcher (hints and per-call admission still keep answers exact).
 pub fn watch_configured() {
+    // A DORMANT NODE WATCHES NOTHING (docs/GRAPH.md): no scheduler entry, no recursive OS watch, no
+    // index, no store. This is the line that keeps `wa serve` from paying for a feature nobody asked for.
+    if !enabled() {return;}
     if let Some(config) = CONFIG.get() {
         if let Ok(root) = config.root.canonicalize() {
             let scheduler = scheduler();

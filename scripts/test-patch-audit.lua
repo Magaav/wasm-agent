@@ -1,6 +1,11 @@
 -- The patch audit must anchor changed lines and never turn leads into a safety verdict.
 -- The audit reads the graph, which is a WASI component: install the pinned one built from this tree into
 -- this test's own home, or skip by name on a machine that cannot build it (scripts/lib/test-components.lua).
+
+-- The graph is OFF by default on every node from G (docs/GRAPH.md, 23/11): this row drives it, so it
+-- switches it on in its own home and refuses if the switch did not take.
+local graph_on_ok, graph_on_why = dofile('scripts/lib/test-graph-on.lua').enable()
+if not graph_on_ok then error('graph-on: ' .. tostring(graph_on_why)) end
 local components = dofile('scripts/lib/test-components.lua')
 local seeded, why = components.require('graph')
 if not seeded then components.skip('patch-audit', why); return end

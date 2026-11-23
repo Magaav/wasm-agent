@@ -2,7 +2,7 @@
 //
 // The Lua side (lua/core/feature_health.lua) decides and records the verdicts; this file RENDERS the two
 // files it keeps, for the one command an operator types when something feels wrong. It is the same list and
-// the same words - the registry's own `stale_after_s`, and the five verdicts - and it deliberately computes
+// the same words - the registry's own `stale_after_s`, and the six verdicts - and it deliberately computes
 // the verdict from the same two facts (the last success, the last failure) instead of reading a cached one,
 // so `wa health` cannot disagree with `wa features` about a node it can see.
 //
@@ -13,8 +13,8 @@
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
-/// The five words the Lua module uses, so an operator reads one vocabulary: working, stale, failing,
-/// never, off-node.
+/// The six words the Lua module uses, so an operator reads one vocabulary: working, stale, failing,
+/// never, off-node, dormant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
     Working,
@@ -22,6 +22,10 @@ pub enum Verdict {
     Failing,
     Never,
     OffNode,
+    /// The row declares `"default": "off"` and this node's switch says off: nothing is broken and
+    /// nothing was proven - the graph's state everywhere (docs/GRAPH.md). Not red, because a feature
+    /// nobody switched on is not a feature that failed.
+    Dormant,
 }
 
 impl Verdict {
@@ -32,6 +36,7 @@ impl Verdict {
             Verdict::Failing => "failing",
             Verdict::Never => "never",
             Verdict::OffNode => "off-node",
+            Verdict::Dormant => "dormant",
         }
     }
 }
@@ -136,6 +141,37 @@ fn applies(config: &Path, role: &str) -> (bool, String) {
     (true, String::new())
 }
 
+/// IS THIS ROW DORMANT HERE? A row may declare `"default": "off"` - nothing runs unless the operator asks
+/// - and the only honest way to know whether the operator asked is the one resolver the node reads, not a
+/// second guess made from the row. Its inputs are the ones this process can see: the `features` section of
+/// `policy.json` BESIDE THIS REGISTRY (the node's own state directory, not the sentinel's environment),
+/// and this process's `WA_*_COMPONENT` override. `enabled` alone decides, so whether the component happens
+/// to be installed cannot turn the answer; a row whose component is missing is already off-node.
+fn dormant(config: &Path, feature: &Value, name: &str) -> (bool, String) {
+    let declared = feature.get("default").and_then(Value::as_str).unwrap_or("on");
+    if declared != "off" {
+        return (false, String::new());
+    }
+    let Some(spec) = wa_features::spec(name) else {
+        // A registry row this resolver has never heard of cannot be called dormant on a guess: it falls
+        // through to its ordinary verdict, which is a question an operator can act on.
+        return (false, String::new());
+    };
+    let bytes = std::fs::read(config.join("policy.json")).unwrap_or_default();
+    let policy = wa_features::parse_features(&bytes);
+    let env = std::env::var(spec.env).ok();
+    // The install state cannot change `enabled` (only `active`), and a row whose component is missing
+    // never reaches here - `applies` already answered off-node for it.
+    let status = wa_features::resolve(spec, env.as_deref(), &policy, &wa_features::Installed::Missing);
+    if status.enabled {
+        return (false, String::new());
+    }
+    (true, format!(
+        "{} is off by default on this node and nobody switched it on ({}: {}); nothing is broken and nothing is proven - docs/GRAPH.md",
+        name, status.source.as_str(), status.reason
+    ))
+}
+
 /// Every feature, in registry order. `Err` names the file that could not be read - a node without the
 /// registry is not a node with no features.
 pub fn rows(config: &Path, now: i64) -> Result<Vec<Row>, String> {
@@ -166,6 +202,12 @@ pub fn rows(config: &Path, now: i64) -> Result<Vec<Row>, String> {
         if !runs_here {
             verdict = Verdict::OffNode;
             detail = why_not;
+        } else {
+            let (is_dormant, why_dormant) = dormant(config, feature, &name);
+            if is_dormant {
+                verdict = Verdict::Dormant;
+                detail = why_dormant;
+            }
         }
         out.push(Row {
             name,
@@ -189,13 +231,14 @@ pub fn lines(config: &Path, now: i64) -> Vec<String> {
         Ok(rows) => {
             let count = |verdict: Verdict| rows.iter().filter(|row| row.verdict == verdict).count();
             let mut out = vec![format!(
-                "features:  {} listed  {} working  {} stale  {} failing  {} never  {} off-node",
+                "features:  {} listed  {} working  {} stale  {} failing  {} never  {} off-node  {} dormant",
                 rows.len(),
                 count(Verdict::Working),
                 count(Verdict::Stale),
                 count(Verdict::Failing),
                 count(Verdict::Never),
-                count(Verdict::OffNode)
+                count(Verdict::OffNode),
+                count(Verdict::Dormant)
             )];
             let width = rows.iter().map(|row| row.name.len()).max().unwrap_or(0);
             for row in rows {

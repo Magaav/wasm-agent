@@ -61,6 +61,10 @@ pub struct FeatureSpec {
     pub native: &'static str,
     /// One line, no trailing period: what the feature switches.
     pub summary: &'static str,
+    /// The default when neither the environment nor the policy file names the feature. Every feature
+    /// added since 08/11 defaults ON; the graph is the first that defaults OFF (docs/GRAPH.md, 23/11) and
+    /// says so here, so `wa features`, `host.features` and every gate read the same row.
+    pub default_enabled: bool,
 }
 
 /// Every feature this tree has a gate (or a built component) for. The order is the order the CLI and
@@ -73,6 +77,7 @@ pub const FEATURES: &[FeatureSpec] = &[
         env: "WA_SELFLOOP_COMPONENT",
         native: "lua/core/selfloop.lua",
         summary: "the wake/notes/probe state machine (component) instead of the Lua one",
+        default_enabled: DEFAULT_ENABLED,
     },
     FeatureSpec {
         id: "codemode",
@@ -80,6 +85,7 @@ pub const FEATURES: &[FeatureSpec] = &[
         env: "WA_CODEMODE_COMPONENT",
         native: "lua/core/codemode.lua",
         summary: "the code-mode guest protocol and tool table (component) instead of the Lua loop",
+        default_enabled: DEFAULT_ENABLED,
     },
     FeatureSpec {
         id: "hooks",
@@ -87,6 +93,7 @@ pub const FEATURES: &[FeatureSpec] = &[
         env: "WA_HOOKS_COMPONENT",
         native: "lua/core/hooks.lua",
         summary: "hook matching, ordering and the mods surface (component) instead of the Lua engine",
+        default_enabled: DEFAULT_ENABLED,
     },
     FeatureSpec {
         id: "memory",
@@ -94,6 +101,7 @@ pub const FEATURES: &[FeatureSpec] = &[
         env: "WA_MEMORY_COMPONENT",
         native: "lua/core/memory.lua",
         summary: "recall ranking, scope rules and retention (component) instead of the Lua store",
+        default_enabled: DEFAULT_ENABLED,
     },
     FeatureSpec {
         id: "gateway",
@@ -101,6 +109,7 @@ pub const FEATURES: &[FeatureSpec] = &[
         env: "WA_MODEL_GATEWAY_COMPONENT",
         native: "rust/wa-model-gateway",
         summary: "model routing, breakers and budgets (component) instead of the native gateway",
+        default_enabled: DEFAULT_ENABLED,
     },
     FeatureSpec {
         id: "mesh_component",
@@ -108,6 +117,7 @@ pub const FEATURES: &[FeatureSpec] = &[
         env: "WA_MESH_COMPONENT",
         native: "rust/wa-mesh",
         summary: "the mesh's admission and roster (component) instead of the native mesh",
+        default_enabled: DEFAULT_ENABLED,
     },
     FeatureSpec {
         id: "agent_core",
@@ -115,6 +125,7 @@ pub const FEATURES: &[FeatureSpec] = &[
         env: "WA_AGENT_CORE_COMPONENT",
         native: "rust/wa-host",
         summary: "one agent turn (component) instead of the native core",
+        default_enabled: DEFAULT_ENABLED,
     },
     FeatureSpec {
         id: "telemetry_sink",
@@ -122,6 +133,15 @@ pub const FEATURES: &[FeatureSpec] = &[
         env: "WA_TELEMETRY_SINK_COMPONENT",
         native: "rust/wa-telemetry-sink",
         summary: "span/metric batching and the sink (component) instead of the native sink",
+        default_enabled: DEFAULT_ENABLED,
+    },
+    FeatureSpec {
+        id: "graph",
+        component: "graph",
+        env: "WA_GRAPH_COMPONENT",
+        native: "nothing - the graph is dormant and read/grep answer (docs/GRAPH.md)",
+        summary: "the code graph: the `graph` tool, host.graph_* and the indexer (OFF by default)",
+        default_enabled: false,
     },
 ];
 
@@ -247,6 +267,10 @@ pub const REASON_OFF: &str = "feature_off";
 /// is kept distinct from [`REASON_COMPONENT`] so "nobody said anything" stays distinguishable from
 /// "the operator wrote `true`" on a node's table.
 pub const REASON_DEFAULT_ON: &str = "default_on";
+/// Neither the environment nor the policy named the feature and its own row defaults OFF: the graph, off
+/// on every node from G (docs/GRAPH.md). Kept distinct from [`REASON_OFF`] so "nobody said anything" stays
+/// distinguishable from "the operator wrote `false`".
+pub const REASON_DEFAULT_OFF: &str = "default_off";
 pub const REASON_COMPONENT_MISSING: &str = "component_missing";
 pub const REASON_PIN_MISMATCH: &str = "component_pin_mismatch";
 pub const REASON_ENV_INVALID: &str = "feature_env_invalid";
@@ -257,6 +281,11 @@ pub const REASON_POLICY_UNREADABLE: &str = "features_unreadable";
 /// One constant, because every gate and every test must agree about it: 08/11 turned every feature on by
 /// default, with the per-feature `false` as the switch.
 pub const DEFAULT_ENABLED: bool = true;
+
+/// The reason a spec's default carries, so the two halves of "nobody said anything" cannot drift.
+fn default_reason(enabled: bool) -> &'static str {
+    if enabled { REASON_DEFAULT_ON } else { REASON_DEFAULT_OFF }
+}
 
 /// What the policy file's `features` section says, including why it could not be read.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -289,11 +318,11 @@ pub fn resolve(spec: &FeatureSpec, env: Option<&str>, policy: &PolicyFeatures, i
         env: spec.env,
         native: spec.native,
         summary: spec.summary,
-        enabled: DEFAULT_ENABLED,
+        enabled: spec.default_enabled,
         source: Source::Default,
         installed: installed.clone(),
         active: ActivePath::Native,
-        reason: REASON_DEFAULT_ON.to_string(),
+        reason: default_reason(spec.default_enabled).to_string(),
     };
     // 1. the environment: an explicit 0/1 wins, an unusable value is refused by name.
     match env.map(parse_flag) {
@@ -323,9 +352,9 @@ pub fn resolve(spec: &FeatureSpec, env: Option<&str>, policy: &PolicyFeatures, i
                 Ok(None) => {
                     // 3. the default: on, and the component answers when it is there. A policy file that
                     // does not parse leaves every feature at that default and says why.
-                    status.enabled = DEFAULT_ENABLED;
+                    status.enabled = spec.default_enabled;
                     status.source = Source::Default;
-                    status.reason = REASON_DEFAULT_ON.to_string();
+                    status.reason = default_reason(spec.default_enabled).to_string();
                     if let Some(error) = &policy.error {
                         status.reason = format!("{REASON_POLICY_UNREADABLE}:{error}");
                     }
@@ -648,6 +677,14 @@ pub fn status(id: &str) -> Option<Status> {
 /// [`status`] says why - a gate that falls back never does it silently.
 pub fn active(id: &str) -> bool {
     status(id).map(|s| s.active == ActivePath::Component).unwrap_or(false)
+}
+
+/// Is the feature switched on at all on this node? This is the question a feature that has no native path
+/// asks (the graph: `docs/GRAPH.md`) - `active` answers "is its component the live path", which is a
+/// different question and is `false` for a dormant feature AND for a native one. An id nothing knows
+/// answers `false`: a name this tree does not have is not permission to run something.
+pub fn enabled(id: &str) -> bool {
+    status(id).map(|status| status.enabled).unwrap_or(false)
 }
 
 /// [`active`] plus the reason, for a gate that wants to log the fallback once.

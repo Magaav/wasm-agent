@@ -9,7 +9,8 @@
     "gateway": true,
     "mesh_component": true,
     "agent_core": true,
-    "telemetry_sink": true
+    "telemetry_sink": true,
+    "graph": false
   },
   "components": {
     "wa-whatsapp": {

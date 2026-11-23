@@ -328,6 +328,17 @@ end
 local STDIN_MAX_BYTES = 1048576
 M.STDIN_MAX_BYTES = STDIN_MAX_BYTES
 
+-- THE GRAPH IS OFF BY DEFAULT ON EVERY NODE FROM G (docs/GRAPH.md, 23/11). A dormant feature must cost the
+-- model nothing: no catalogue line, no `searchTools` hit, no schema bytes in the prompt. The switch is the
+-- `graph` row of the one feature resolver, so it is `policy.json`'s `features.graph` (live: the resolver
+-- re-reads the file about once a second) or `WA_GRAPH_COMPONENT=1` for this process - the same answer
+-- `wa features` prints and the host's own capabilities refuse by. Read per catalogue build, not once at
+-- load, so switching it on reaches the next turn without a restart.
+local function graph_offered()
+  local ok, on = pcall(function() return dofile('lua/core/features.lua').on('graph') end)
+  return ok and on == true
+end
+
 -- Available to everyone.
 M.shared = {
   schema("time", "Current local date/time on this node with its UTC offset, zone, weekday and epoch.", {}),
@@ -876,9 +887,16 @@ local CUES = {
 
 function M.snippet(name) return CUES[name] end
 
+-- THE CUE NAMES ARE THE ONES THE INDEX CAN USE. A cue belongs to a tool, and the graph's tool is not in the
+-- catalogue while the feature is dormant (docs/GRAPH.md): reporting its cue would be the same lie as
+-- offering the tool. The cue text itself stays in the table, so switching the graph on brings its index
+-- line back without a second edit.
 function M.cue_names()
   local names = {}
-  for name in pairs(CUES) do names[#names + 1] = name end
+  local graph = graph_offered()
+  for name in pairs(CUES) do
+    if graph or name ~= 'graph' then names[#names + 1] = name end
+  end
   table.sort(names)
   return names
 end
@@ -925,6 +943,18 @@ function M.catalog(role)
     for _, plugin in ipairs(plugins) do
       list[#list + 1] = schema_from(plugin.name, plugin.description or "", plugin.parameters)
     end
+  end
+  -- THE GRAPH IS OFF BY DEFAULT (docs/GRAPH.md, 23/11), and a dormant feature costs the model nothing: no
+  -- catalogue line, no `searchTools` hit, no schema bytes in the prompt. One filter over the assembled
+  -- list, because the graph arrives by several roads (its own admin schema, a plugin, a peer's connector)
+  -- and a rule that hid only one of them would be a rule with a hole in it. Asked per build, so the switch
+  -- reaches the next turn without a restart.
+  if not graph_offered() then
+    local kept = {}
+    for _, item in ipairs(list) do
+      if (item['function'] or {}).name ~= 'graph' then kept[#kept + 1] = item end
+    end
+    list = kept
   end
   return list
 end
@@ -1354,6 +1384,10 @@ local function reuse_own_client_claim(ctx,refused)
 end
 
 local function graph_hint(memory,ctx,path)
+  -- A DORMANT NODE CALLS NOTHING (docs/GRAPH.md): no hint is sent, so no scheduler entry, OS watch or
+  -- store can appear because a file was written. The write's answer carries no `graph_index` field at
+  -- all, which is the truth - there is no graph here to tell.
+  if not graph_offered() then return nil end
   if type(host.graph_notify)~='function' then return {error='graph_notify_unavailable'} end
   local root,err=patch_audit.workspace_root(memory,ctx)
   if err then return {error=err} end
@@ -2348,6 +2382,10 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     if not ok then return {error=tostring(result)} end
     return json.decode(result)
   elseif name == "graph" then
+    -- Off by default (docs/GRAPH.md): refused by name, before the module is loaded and before any store,
+    -- index or component call could exist. `searchTools` will not find it either - it reads the catalogue.
+    if not graph_offered() then return { error = "graph_dormant", effect = "none",
+      next = 'The code graph is OFF by default on this node (docs/GRAPH.md). Read with read/grep, or switch it on: WA_GRAPH_COMPONENT=1, or "graph": true in the features section of policy.json.' } end
     local graph = dofile("lua/core/graph.lua")
     local action = args.action or "explain"
     local root, root_err
