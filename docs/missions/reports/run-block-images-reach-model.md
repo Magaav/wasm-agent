@@ -210,3 +210,21 @@ row pins it now.
 10. `the picture was stored under a different digest than the one the peer named`
 11. `[Image #1] attached (11 KB, 800x600)` — and with a stray selection: `[Image #1] attached (11 KB, 4x1086) - that looks like a stray selection: paste again`
 12. `[Image #1] attached (11 KB)` (header not understood — no size is invented)
+
+## 11. The narrowed run (suite rule), measured
+
+`flock -o ~/Work/missions/.suite.lock env WA_FAST_ROWS=/tmp/rows-ok.txt bash scripts/fast.sh --jobs 6` with the 32
+rows this branch's paths map to (the planner's own rule: a changed `lua/core/*.lua` selects the rows named after
+it and every row that mentions it), plus the never-dropped core rows and every contract check:
+
+    fast: narrowed by the landing plan: 56 of 341 Lua rows
+    fast: lua 56/56 passed
+    fast: rust wa-capabilities ok (10s)
+    fast: prompt-docs ok
+    fast path ok (142 checks, 0 skipped, 554s)
+
+The first attempt was red in one row and that red was real: `scripts/test-refusal-contract.lua` refused
+`lua/core/refusal_codes.lua is stale` because the transfer adds six codes. `lua5.4 scripts/gen-refusal-codes.lua
+--write` regenerated it (`185fea03`), the row then reported `17353 checks passed`, and the run above is the one
+after it. `wa-capabilities` was also run directly with a scratch HOME: 391 passed, 0 failed.
+
