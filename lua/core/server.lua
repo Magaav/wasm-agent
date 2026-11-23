@@ -40,26 +40,15 @@ function wa_stt_tick() sttlib.safe_tick() end
 -- A change recorded for a file on ANOTHER NODE is verified and undone THERE (mission
 -- remote-edit-first-class, item 2). `changeset` holds the two texts in this node's content-addressed
 -- store and never writes a file itself; this is the seam through which it reaches one it does not own,
--- and it lives here because `nodeslib` is the only route to a peer's filesystem. Nothing is loosened:
--- the only caller is this node's own `/diff` undo route, which requires a master (wa_diff below), and
--- the peer answers as it does for any peer call - its own guards, its own workspace, its own refusal.
-changeset.set_file_host(function(node)
-  return {
-    -- The digest of the file's text as the peer has it, not the text: the read capability answers the
-    -- whole file's `version` for a one-line page too, so a 200 KB file is verified without moving it.
-    digest = function(path)
-      local answer = nodeslib.remote_call(node, "read", { path = path, offset = 1, limit = 1 })
-      if type(answer) ~= "table" then return nil, "node_no_answer" end
-      if type(answer.version) == "string" and answer.version ~= "" then return answer.version end
-      return nil, tostring(answer.error or "node_no_answer")
-    end,
-    write = function(path, text)
-      local answer = nodeslib.remote_call(node, "write", { path = path, content = text })
-      if type(answer) == "table" and answer.ok == true then return true end
-      return nil, tostring(type(answer) == "table" and (answer.error or "write_refused") or "node_no_answer")
-    end,
-  }
-end)
+-- and `nodeslib` - handed over below - is the only route to a peer's filesystem. Nothing is loosened:
+-- the peer answers as it does for any peer call - its own guards, its own workspace, its own refusal -
+-- and this node's identity signs the call.
+--
+-- The transport itself lives in `lua/core/remote_files.lua`, where it moved when the CLI chat needed to
+-- reach the same peer for its own /undo (mission remote-undo-works): one definition, two surfaces, and
+-- the server's own nodes module is passed in so the call is signed by THIS process's identity.
+local remote_files = dofile("lua/core/remote_files.lua")
+remote_files.install(changeset, nodeslib)
 
 memory.setup()
 local agent

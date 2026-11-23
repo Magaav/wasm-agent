@@ -1019,6 +1019,17 @@ function M.run(argv)
           if buys ~= "" then ui.say("        buys: " .. buys) end
         end
       end
+    elseif line == "/undo" then
+      -- The door to the undo the window's /diff route already performs (lua/core/undo_command.lua): it
+      -- puts back the files of the newest change THIS session recorded - here, or on the peer that holds
+      -- them - or refuses by name. A slash command is the reader's, so this never reaches the model.
+      local done, report = pcall(reload.require("lua/core/undo_command.lua").run,
+        { session_id = agent.session_id })
+      if not done then
+        ui.say(redact.text(tostring(report)))
+      else
+        for _, row in ipairs(report.lines or {}) do ui.say(row) end
+      end
     elseif line == "/session" then
       ui.say(agent.session_id)
     elseif line == "/wakes" or line == "/wake" or line:sub(1, 6) == "/wake " then

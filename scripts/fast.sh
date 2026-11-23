@@ -905,6 +905,15 @@ check linux-channel bash scripts/test-linux-channel.sh
   # operation row is read back too, so a fast row drawn without the fresh views is not a pass. The real
   # binary in a private tmux pty, as the rows above.
   WA_BIN="$bin" check chat-start-pty node scripts/test-chat-start-pty.mjs
+  # /UNDO IN A CHAT PUTS THE FILE BACK (mission remote-undo-works, 23/11): the `remote` tool's own
+  # description tells the model "the change is recorded here, so /undo restores that file there", and a
+  # chat had no /undo at all - typing it answered "unknown or incomplete command". This drives the REAL
+  # binary in a private tmux pty against a local SSE fixture: two turns write and then change a file,
+  # /undo prints the file, the machine and the version it restored, the file on disk is byte-for-byte
+  # what it was before the change with that version, the fixture's request count does NOT move (a slash
+  # command is the reader's, never the model's), and a second /undo refuses by name. A Lua double cannot
+  # see any of that: the door is in the REPL, so the row is a pty one.
+  WA_BIN="$bin" check undo-pty node scripts/test-undo-pty.mjs
   # THE RUN BLOCK, AS THE OPERATOR READS IT (Victor 21/11): a script the model writes inside run,
   # then only bash x2 and a four-kilobyte JSON blob where the two commands own output belonged. It
   # drives the REAL binary twice - wa chat --once and the interactive window in a private tmux pty -
