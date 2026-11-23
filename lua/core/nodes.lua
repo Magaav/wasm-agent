@@ -1969,6 +1969,39 @@ end
 
 -- Stream a turn on a peer. Direct: its SSE is forwarded live. Via the relay the
 -- stream is buffered there and replayed here, so the UI looks the same.
+-- WHAT A CALLING NODE DOES WITH A PEER'S ANSWER TO `/node/chat` (23/11, Fable's review). MEASURED in this tree
+-- before the change: any non-200 became `remote_unreachable` with the status as `detail`, and the body - which
+-- for a waiting deploy says `deploy_waiting`, `not_started` and `retry_after_seconds` - was thrown away. So the
+-- caller's model was told the peer was unreachable when the peer was alive, installing a build, and had run
+-- nothing: it could not tell a refusal to wait from a lost peer, and the one number that makes a retry sane was
+-- gone. This mapping is pure, so a test can pin it without a fleet.
+function M.chat_answer(response, name)
+  if type(response) ~= "table" then return { error = "remote_unreachable", node = name } end
+  local status = tonumber(response.status)
+  local body = tostring(response.body or "")
+  local ok, decoded = pcall(json.decode, body)
+  -- Only a REFUSAL is read this way: a 200 carries the turn's own stream, and calling it a deploy wait would turn
+  -- a working peer into a promise to retry (this row's own test caught the first version doing exactly that).
+  if ok and type(decoded) == "table" and decoded.error == "deploy_waiting" and status ~= nil and status ~= 200 then
+    local after = tonumber(decoded.retry_after_seconds)
+    return {
+      error = "remote_deploy_waiting",
+      node = name,
+      peer_error = "deploy_waiting",
+      not_started = true,
+      retryable = true,
+      retry_after_seconds = after,
+      detail = tostring(decoded.hint or ""),
+      message = string.format("%s is waiting for or installing a new build, so it started no turn and nothing "
+        .. "ran there. This is not a lost peer and nothing was lost: ask again in %s seconds (the peer says "
+        .. "when; it pauses running turns at their next step).",
+        tostring(name or "the peer"), after and tostring(after) or "a few"),
+    }
+  end
+  return { error = "remote_unreachable", node = name,
+    detail = response and (response.error or response.status) or nil }
+end
+
 function M.remote_chat(selector, text)
   local node = M.find(selector)
   if not node then return { error = "unknown_node:" .. tostring(selector) } end
@@ -2000,8 +2033,7 @@ function M.remote_chat(selector, text)
     end
     return { ok = true, node = node.name, transport = "relay" }
   end
-  return { error = "remote_unreachable", node = node.name,
-    detail = response and (response.error or response.status) or nil }
+  return M.chat_answer(response, node.name)
 end
 
 -- Can a call reach this peer without waiting out the relay hold? A peer with a direct endpoint, or one

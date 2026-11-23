@@ -324,6 +324,20 @@ want "$(cat "$SENT_DIR/failed/1700000000000000005-4242-00000000000000000000.json
   "admitted and not started" "and the failure record names the blocker"
 out="$(WA_DEPLOY_HOLD_BOUND=1 once_out)"
 same "$(installs)" "0" "a request that failed at its bound is not retried behind the operator's back"
+# WHAT THE OPERATOR (AND THE LANDING) READS AFTERWARDS (23/11, Fable's review 3). ~/Work/missions/install-local.sh
+# waits for the box to empty and then compares the installed Lua with main's, so a bound failure ends that landing
+# with "the installed lua/core differs from main's" - true and mute. The reason, the session and the way to ask
+# again must survive in the surface both of them read: `wa-sentinel status`.
+out="$(status_out)"
+want "$out" "0 waiting" "the queue shows the request is no longer waiting"
+if printf '%s' "$out" | grep -Eq 'requests:  0 waiting, [0-9]+ done, [1-9][0-9]* failed'; then
+  ok "and that it failed rather than vanished"
+else
+  fail "the failed request is not counted in the queue: $(printf '%s' "$out" | grep 'requests:' | head -1)"
+fi
+want "$out" "hold-bound:" "the queue names the phase that ended it"
+want "$out" "admitted and not started" "and the holder that blocked it, by name"
+want "$out" "re-request with: wa-sentinel request deploy --expected-sha 8082b42e1111" "and how to ask again"
 
 step "WA_DEPLOY_HOLD_BOUND=0 is the documented unbounded wait, and really is one"
 clear_request; rm -f "$INSTALLER_LOG"

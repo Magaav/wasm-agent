@@ -1921,9 +1921,32 @@ fn deploy_admission_refusal(
         }
         return None;
     }
-    Some(serde_json::json!({
+    // WHAT AN ANONYMOUS CALLER MAY LEARN (23/11, Fable's review). This refusal is answered BEFORE the credential
+    // is resolved, so the body is scoped to what the caller has proved: an unauthenticated call gets the reason,
+    // the fact that nothing ran and when to look again - and never the target commit, the request id or which lane
+    // of the box the request is in. The commit and the id are already on `/health` (the `sentinel` section) for a
+    // reader of this node's own state; an anonymous request is not one. Nothing here creates a session: `wa_identity`
+    // answers identity only, and `wa_admission` (which would create one) is never reached for a refused run.
+    let authenticated = resolve_identity(tx, &request.session, deadline).is_ok();
+    Some(deploy_refusal_body(&answer, authenticated))
+}
+
+/// The body of the door refusal. Split out so the two scopes are one function and a test can pin both: a caller
+/// that has not proved who it is never learns the commit, the request id or the lane.
+fn deploy_refusal_body(answer: &serde_json::Value, authenticated: bool) -> serde_json::Value {
+    let text = |key: &str| answer.get(key).and_then(serde_json::Value::as_str).unwrap_or("");
+    let hint = if authenticated { text("refusal") } else { text("redacted") };
+    if !authenticated {
+        return serde_json::json!({
+            "error": "deploy_waiting",
+            "hint": hint,
+            "not_started": true,
+            "retry_after_seconds": DEPLOY_WAITING_RETRY_SECONDS,
+        });
+    }
+    serde_json::json!({
         "error": answer.get("code").and_then(serde_json::Value::as_str).unwrap_or("deploy_waiting"),
-        "hint": answer.get("refusal").and_then(serde_json::Value::as_str).unwrap_or(""),
+        "hint": hint,
         "not_started": true,
         "effect": "none",
         "target": answer.get("to").cloned().unwrap_or(serde_json::Value::Null),
@@ -1932,7 +1955,7 @@ fn deploy_admission_refusal(
         // When to look again: the pause machinery makes a node idle in seconds, and a caller that retries
         // sooner only adds refusals. One number, so no client invents its own backoff.
         "retry_after_seconds": DEPLOY_WAITING_RETRY_SECONDS,
-    }))
+    })
 }
 
 /// How long a client refused for a waiting deploy should wait before asking again (`retry_after_seconds` in the
@@ -3657,6 +3680,49 @@ mod pending_queue_tests {
         let empty = queue_sessions_health(&[]);
         assert_eq!(empty["count"], serde_json::json!(0));
         assert_eq!(empty["entries"].as_array().map(Vec::len), Some(0));
+    }
+}
+
+#[cfg(test)]
+mod deploy_door_tests {
+    use super::deploy_refusal_body;
+    use serde_json::json;
+
+    fn answer() -> serde_json::Value {
+        json!({"waiting": true, "code": "deploy_waiting",
+            "refusal": "deploy_waiting: waiting for the install of 8082b42e1111 (deploy request 1795402546196179687-2690687, asked 3s ago). ...",
+            "redacted": "deploy_waiting: this node is waiting for or installing a new build. ...",
+            "to": "8082b42e11112222333344445555666677778888",
+            "id": "1795402546196179687-2690687", "source": "request"})
+    }
+
+    /// An unauthenticated caller is told the reason, that nothing ran, and when to look again - and NOTHING that
+    /// identifies the install (23/11, Fable's review 2). The refusals are answered before the credential is
+    /// resolved, so this is the only thing standing between an anonymous request and the commit it would install.
+    #[test]
+    fn an_anonymous_caller_never_learns_the_commit() {
+        let body = deploy_refusal_body(&answer(), false);
+        assert_eq!(body["error"], json!("deploy_waiting"));
+        assert_eq!(body["not_started"], json!(true));
+        assert!(body["retry_after_seconds"].as_u64().is_some_and(|value| value > 0));
+        assert!(body.get("target").is_none() && body.get("request").is_none() && body.get("source").is_none(),
+            "no target, no request id, no lane: {body}");
+        let hint = body["hint"].as_str().unwrap_or("");
+        assert!(hint.contains("deploy_waiting"), "the reason is still named: {hint}");
+        assert!(!hint.contains("8082b42e"), "not the commit: {hint}");
+        assert!(!hint.contains("1795402546196179687"), "not the request id: {hint}");
+    }
+
+    /// A caller whose credential resolved gets the actionable answer - and still no more than what `wa-sentinel
+    /// status` and `/health`'s `sentinel` section already show.
+    #[test]
+    fn an_authenticated_caller_is_told_which_install_and_which_request() {
+        let body = deploy_refusal_body(&answer(), true);
+        assert_eq!(body["target"], json!("8082b42e11112222333344445555666677778888"));
+        assert_eq!(body["request"], json!("1795402546196179687-2690687"));
+        assert_eq!(body["source"], json!("request"));
+        assert_eq!(body["effect"], json!("none"));
+        assert!(body["hint"].as_str().unwrap_or("").contains("8082b42e"), "the commit is in the full sentence");
     }
 }
 

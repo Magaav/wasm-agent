@@ -2575,6 +2575,19 @@ pub(crate) fn oldest_waiting_queued_at(dir: &Path) -> Option<u64> {
 /// protocol's own `state.json`, the queue record an operator reads, and `failed/` - and out of the box, so the
 /// next tick cannot re-announce the same hold for ever.
 fn fail_held_request(request: &Value, id: &str, path: &Path, detail: &str) -> Result<()> {
+    // THE LINE AN OPERATOR ACTS ON (23/11, Fable's review 3). `~/Work/missions/install-local.sh` waits for the box
+    // to empty and then compares the installed Lua with main's, so a request that failed at its bound ends that
+    // landing with "the installed lua/core differs from main's" - true, and mute about why and about what to do.
+    // The reason and the way back belong in the same record, because that record is what `wa-sentinel status`
+    // prints and what the next reader has.
+    let target = request.get("expected_sha").and_then(Value::as_str).or_else(|| request.get("target_commit").and_then(Value::as_str)).unwrap_or("");
+    let reason = request.get("reason").and_then(Value::as_str).unwrap_or("");
+    let retry = if target.is_empty() {
+        format!("re-request with: wa-sentinel request deploy --reason '{}'", reason.replace("'", ""))
+    } else {
+        format!("re-request with: wa-sentinel request deploy --expected-sha {target} --reason '{}'", reason.replace("'", ""))
+    };
+    let detail = &format!("{detail}; {retry}");
     if let Err(error) = deploy_protocol::record(request, id, "failed", detail) {
         audit("protocol-record-failed", id, &error.to_string());
     }

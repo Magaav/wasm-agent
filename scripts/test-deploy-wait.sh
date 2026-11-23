@@ -326,6 +326,26 @@ for _ in $(seq 1 8); do
   q="$(num "$(pick "$WORK/health-2d.json" queue)")"
   [ "$q" -gt "$door_max" ] && door_max="$q"
 done
+# 2e. THE SAME DOOR, ASKED BY A CALLER THAT PROVED NOTHING (23/11, Fable's review 2). The refusal is answered
+# before the credential is resolved, so the body is scoped to what the caller has proved: the reason, that nothing
+# ran, and when to look again - never the commit, the request id or which lane of the box the request is in.
+code=$(curl -s -o "$WORK/door-anon.body" -w '%{http_code}' -m 20 -X POST   -H 'x-wa-session: not-a-session'   --data "{\"text\":\"door turn anon\",\"thread\":\"$THREAD\"}"   "http://127.0.0.1:$PORT/chat" 2>/dev/null)
+body="$(cat "$WORK/door-anon.body" 2>/dev/null)"
+if [ "$code" = "503" ]; then ok "an unauthenticated turn is refused with 503"; else
+  fail "an unauthenticated turn answered HTTP ${code:-nothing} (body: $(printf '%s' "$body" | cut -c1-200))"
+fi
+want "$body" '"not_started":true' "and says it did not start"
+want "$body" 'deploy_waiting' "and names the refusal"
+want "$body" 'retry_after_seconds' "and when to look again"
+unwant "$body" '8082b42e1111' "but NOT the commit it would install"
+unwant "$body" '"target"' "no target field"
+unwant "$body" '"request"' "no request id"
+unwant "$body" '"source"' "and no lane of the box"
+# ... while the callers this node's own user makes (the three turns above, no credential header at all) get the
+# full sentence: the two scopes are asserted against each other, so a later change cannot quietly give both the
+# same body.
+want "$(cat "$WORK/door-1.body")" '8082b42e1111' "an authenticated caller is told which install is coming"
+
 for pid in "${DOOR_PIDS[@]}"; do wait "$pid" 2>/dev/null; done
 wait "$HOLDER_PID" 2>/dev/null
 printf '0' > "$WORK/delay"

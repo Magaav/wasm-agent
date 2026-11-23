@@ -267,10 +267,20 @@ function wa_deploy_admission(body)
   if operator then return json.encode({ waiting = false, operator = true }) end
   local refused, wait = pause.refuse(host.now())
   if not refused then return json.encode({ waiting = false }) end
+  -- Two sentences: the full one (commit, request id, lane) for a caller whose credential has been checked, and
+  -- one that names nothing (lua/core/deploy_wait.lua `refusal_redacted`) for one that has not. The caller decides
+  -- which it may answer with; this function never has to guess who it is talking to.
+  local redacted = refused
+  local loaded_wait, wait_module = pcall(dofile, "lua/core/deploy_wait.lua")
+  if loaded_wait and type(wait_module) == "table" and type(wait_module.refusal_redacted) == "function" then
+    local ok_redacted, text = pcall(wait_module.refusal_redacted)
+    if ok_redacted and type(text) == "string" and text ~= "" then redacted = text end
+  end
   return json.encode({
     waiting = true,
     code = "deploy_waiting",
     refusal = refused,
+    redacted = redacted,
     to = wait and wait.to or nil,
     id = wait and wait.id or nil,
     since = wait and wait.since or nil,
@@ -405,7 +415,13 @@ function wa_reply(text, session, node)
   if remote_target(node) then
     if resume_seq ~= nil then return json.encode({ error = "resume_requires_local_node" }) end
     local result = nodeslib.remote_call(node, "chat", { text = prompt or "" })
-    if result and result.error then return json.encode({ error = redact.text(tostring(result.error)) }) end
+    if result and result.error then
+      -- A deploy that is waiting on the peer is a named, retryable answer, not the peer being unreachable
+      -- (lua/core/nodes.lua `chat_answer`): the caller's model is told to ask again, and when.
+      return json.encode({ error = redact.text(tostring(result.error)), not_started = result.not_started or nil,
+        retryable = result.retryable or nil, retry_after_seconds = result.retry_after_seconds or nil,
+        node = result.node or nil, detail = result.message and redact.text(tostring(result.message)) or nil })
+    end
     return json.encode({ reply = result and result.reply or "" })
   end
   local bot, refusal = agent_for(session, node, thread)
@@ -439,7 +455,11 @@ function wa_reply_stream(text, session, node)
       return ""
     end
     local result = nodeslib.remote_chat(node, prompt or "")
-    if result and result.error then emit({ type = "error", error = redact.text(tostring(result.error)) }) end
+    if result and result.error then
+      emit({ type = "error", error = redact.text(tostring(result.error)), not_started = result.not_started or nil,
+        retryable = result.retryable or nil, retry_after_seconds = result.retry_after_seconds or nil,
+        node = result.node or nil, detail = result.message and redact.text(tostring(result.message)) or nil })
+    end
     return ""
   end
   local bot, refusal = agent_for(session, node, thread)
