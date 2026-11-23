@@ -88,6 +88,11 @@ Worktree `/home/victor/Work/missions/deploy-not-held-by-queued-turns/wt`, branch
 | `scripts/test-deploy-bound.sh` (extended) | a queued turn is named and is not "working"; past the bound with only a queued turn the request fails by name (record, audit line, out of the box) and is not retried; `WA_DEPLOY_HOLD_BOUND=0` waits unbounded | `scripts/test.sh:1351` and `scripts/fast.sh:870` (already wired; the new steps ride the row) |
 | `rust/wa-capabilities` `pending_queue_tests` (2 rows) | the registry names a run until it starts, one entry per run, never run_id 0; `queue_sessions` publishes count/named/entries and an empty queue is an empty answer | `scripts/fast.sh:733` (`cargo test -p wa-capabilities`, already wired; the rows ride it) |
 | `rust/wa-sentinel` `holders_tests` 9, 10, 11 | a queued turn is named and never called working, the unnamed remainder is still counted, the bound never passes over a turn that has not started, and a request name that is not a stamp is not a time | `scripts/test.sh:220` (`cargo test --manifest-path rust/wa-sentinel/Cargo.toml -- --test-threads=1`, already wired; the rows ride it) |
+| `scripts/test-deploy-wait.sh` step 2e (new) | the door's two scopes across processes: an unauthenticated `POST /chat` gets 503 with no commit, no `target`, no `request`, no `source`, while the authenticated turns of the same step do carry the commit | `scripts/test.sh:1350`, `scripts/fast.sh:869` |
+| `scripts/test-completion-deploy-wait.lua` (new, 10 checks) | a child settlement is held while a deploy waits and delivered exactly once after it, and a run the node refused returns the row to `ready` with the reason instead of `delivered` | globbed by `scripts/fast.sh` (not in `scripts/fast-path.exclude`) |
+| `scripts/test-peer-deploy-wait.lua` (new, 14 checks) | a peer's `503 deploy_waiting` is a named, retryable answer carrying `retry_after_seconds`; a 200, a 500, a 503 that is not the door and no answer keep their old meaning | globbed by `scripts/fast.sh` |
+| `rust/wa-capabilities` `deploy_door_tests` (new, 2 rows) | the anonymous refusal body carries no commit, no request id and no lane; the authenticated one carries them | `scripts/fast.sh:733` |
+| `rust/wa-sentinel` `stamp_seconds` row (new, row 11) | a request name that is not a stamp is not a time | `scripts/test.sh:220` |
 
 The three Lua rows that read the same deploy state as the new gate are green against this tree's binary:
 `scripts/test-deploy-wait.lua` (59 checks), `scripts/test-deploy-pause.lua` (23), `scripts/test-deploy-resume.lua`
@@ -122,7 +127,19 @@ Green in all three runs: the two rows this branch changes - `fast: deploy-wait o
 `fast: deploy-bound ok (589ms)` - plus the Rust rows of both crates this branch touches
 (`fast: rust wa-capabilities ok`, `fast: rust wa-sentinel ok`).
 
-**Discrimination, measured here** (`scripts/test-discriminates.sh ae3cbb37`):
+**Discrimination, measured here** (re-run for `bb0b78f4`): `scripts/test-discriminates.sh ae3cbb37` says
+`discriminates scripts/test-deploy-wait.sh`, `skipped scripts/test-deploy-bound.sh` (its own scratch build) and
+`unrevertable` for the two new Lua rows - the gate's rule is that a branch which changes `rust/` has Lua rows it
+cannot judge against the base binary. For the two new rows that judgment is made by hand here instead, in a
+`git worktree` of `ae3cbb37` with the branch's row copied in and the BASE Lua loaded by this tree's binary (the row
+is about Lua, which is what a deploy's revert would change):
+
+| row | on the base Lua at `ae3cbb37` |
+| --- | --- |
+| `scripts/test-completion-deploy-wait.lua` | **fails** at `no child-return wake is admitted while a deploy waits (enqueued 1)` - the base dispatched the settlement |
+| `scripts/test-peer-deploy-wait.lua` | **fails** at `a door refusal is named as a deploy wait, not as unreachable: remote_unreachable` - the base threw the body away |
+
+Earlier gate run (before those rows existed):
 `discriminates scripts/test-deploy-wait.sh`. The same gate reported `scripts/test-deploy-bound.sh` as *skipped*
 ("this tree's wa-sentinel did not build" inside its scratch worktree), so it was judged by hand instead: a
 `git worktree add /tmp/base-db ae3cbb37` with the branch's script copied in and its own target directory fails
