@@ -16,7 +16,7 @@ On disk a mission is `$MISSIONS_DIR/<name>` (default `~/Work/missions/<name>`):
 | --- | --- |
 | `brief.md` | the operator's brief, as given |
 | `note.md` | optional; a fix round's instructions, appended to the prompt |
-| `amend.log` | every amendment's delivery attempt: `<sha> <stamp> <state> <session> <receipt> <detail>`. One line per try, so the same file passed twice is ONE amendment (step 3b) |
+| `amend.log` | every amendment's delivery attempt: `<sha> <stamp> <state> <session> <receipt> <detail>`, the state being `queued` (the node took the note), `resumed` (a turn was seen running for it), `resume_failed` (the runner exited before the turn ran), `resume_unconfirmed`, `steer_unconfirmed` or `undelivered`. One line per try, so the same file passed twice is ONE amendment (step 3b) |
 | `amend-run.sh` | the runner `amend` writes for a resumed turn, so its rc lands in `done` like a launch's |
 | `env` | the mission's facts: `NAME BRANCH BASE BASE_SHA NODE WT TOOLCHAIN TARGET WA` - the one place |
 | `prompt.md` | `brief.md` + "Where you are": worktree, node, build dir, the rules |
@@ -276,9 +276,49 @@ context boundary, atomically with its read receipt, into its transcript as a use
   the one case where the text is already in the brief and only the delivery failed: then `amend.log` records
   `undelivered` and the same command delivers it later, once.
 
-Its fixture is `node scripts/test-mission-amend.mjs` (38 checks, on the fast path): a scratch repository, a
+Its fixture is `node scripts/test-mission-amend.mjs` (43 checks, on the fast path): a scratch repository, a
 scratch node store and a real `wa chat --once` against a local SSE fixture, with the amendment sent by another
 process while the first turn is held at its model request.
+
+#### A mission started the factory's way: `serve.env`, and a resume that really runs
+
+Measured 23/11 (`release-publishes-public-bundle` 01:30Z, `deploy-prunes-pins` 04:38Z), both ways it can fail:
+
+- **The environment arrives in one of two shapes.** `stage` writes `env` and the provider settings come from the
+  shell that runs `amend`; the factory's own launcher (`~/Work/missions/launch.sh` + `start.sh`) writes NO `env`
+  and keeps wa-serve's environment in `serve.env`, so there the provider settings ARE that file. The resumed
+  runner used to `. "$M/env"` alone: on a factory mission it died at once with
+  `<mission>/env: No such file or directory` while `amend.log` already said `resumed`. The runner now sources
+  `env` and `serve.env` (each, when it is there, with `set -a` so a child sees them), and when a mission has
+  neither the command refuses **by name** before anything says `resumed` (`no_provider_env` in `amend.log`).
+- **"Resumed" is a claim about a turn, not about a pid.** After the spawn, `amend` waits for the turn itself: the
+  node's run lease for that session saying `active` after the spawn, or the turn's own completed answer
+  (`</turn>`) in `out.log`. A runner that exits before that is `resume_failed`, quoting what it said, and the
+  command exits non-zero; a runner still there with no turn after `AMEND_RESUME_WAIT_SECONDS` (60) is
+  `resume_unconfirmed`, also non-zero - unknown is never yes. `resume_failed` is retryable: the same command
+  appends nothing and resumes the same session with the same text, unless its recorded pid is still alive (then
+  it refuses, because a second resume beside it is the second writer).
+- **NOT the CLI's `Thinking` line.** That line is printed when the model request STARTS (measured in the fixture:
+  a resumed turn whose provider answers nothing prints `Thinking · 0.0s · run 1` and then fails).
+- **Only a settled run is resumed.** The old test was "the state is not active", which read a run that settled,
+  a node that could not be asked and a run nobody can vouch for as one thing. A resume now needs the node's own
+  `settled`/`failed` word (or no run row at all); `unknown` refuses by name.
+- **Delivered is the node's receipt, read back.** A steering note needs its receipt id in the answer AND the
+  node asked again for that receipt (`queued` or `read`); no id is `steer_unconfirmed`, and the command exits
+  non-zero instead of calling an unconfirmed note delivered.
+
+The same two things through the CLI: `wa mission resume` keeps the provider settings (its runner sources `env`
+and `serve.env`) and reports `resume_failed` when its runner exits before a turn, and `wa mission amend <name>
+<file>` (or `--text <words>`) is the door to this same script - it finds `scripts/mission.sh` beside the
+missions root, in the runtime tree the binary was built from, or at `--script`, and passes the mission's own
+binary as `WA_BIN` because a child of `host.exec` has a scrubbed environment.
+
+Its fixture is `node scripts/test-mission-amend-resume.mjs` (29 checks, on the fast path): a mission laid out
+exactly as the factory's launcher lays one out (`serve.env` and no `env`), a real `wa chat --once` against a local
+SSE provider, the caller's own environment pointing at a port where nothing listens - so a turn that read the
+wrong environment cannot be mistaken for one that ran. It checks the in-flight steer, a settled resume whose
+model request really arrives, `resume_failed` for a provider that answers nothing, the refusal with no
+environment at all, `wa mission resume` and `wa mission amend`.
 
 ### 5. Verify, in the mission's own environment
 
