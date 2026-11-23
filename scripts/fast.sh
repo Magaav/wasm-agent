@@ -864,6 +864,10 @@ WA_BIN="$bin" check deploy-bound bash scripts/test-deploy-bound.sh
 # fast.sh runs under set -u: every incremented counter is initialised (test-fast-counters.sh).
 check fast-counters bash scripts/test-fast-counters.sh
 check install-front-door bash scripts/test-install.sh
+# THE PUBLIC LINUX CHANNEL (Fable 22/11): `wa release cut` publishes `releases/index-linux.json` too, and the
+# publisher, its refusals and the freshness verdict are judged here against a fake GitHub - no build, no
+# upload, no vault. 2 s.
+check linux-channel bash scripts/test-linux-channel.sh
   # The canonical runtime binding is decided in PREFLIGHT, before anything is built, and a refusal names
   # every worktree that is on branch main (measured 18/11: a deploy refused after ~4 minutes of build with
   # "exactly one canonical main checkout is required" and named neither path the operator had to choose

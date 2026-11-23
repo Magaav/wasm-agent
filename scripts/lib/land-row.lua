@@ -507,7 +507,7 @@ end
 local real_exec = land.exec
 local observed = { pushes = 0, main_pushes = 0, channel_pushes = 0, publish = 0, signs = 0, ships = 0, builds = 0 }
 local behaviour = { publish_fails = false, release_present = false, omit_sums = false,
-  gh_authed = true, gh_present = true }
+  gh_authed = true, gh_present = true, channel_fails = "", channel_wrong_commit = "" }
 
 local function with_vault(command)
   if vault_env == "" then return command end
@@ -547,6 +547,12 @@ land.exec = function(command, cwd, timeout)
   local routed = command
   if behaviour.omit_sums and command:find("publish%-artifacts%-branch%.sh") then
     routed = "WA_TEST_OMIT_SUMS=1 " .. command
+  end
+  -- THE CHANNEL STUB'S TWO KNOBS, handed to it the way a caller would hand a knob to a script: its own refusal
+  -- (`build_failed`, `index_stale`) and an index that names another commit (the read-back case).
+  if command:find("publish%-linux%-channel%.sh", 1) then
+    if behaviour.channel_fails ~= "" then routed = "WA_TEST_CHANNEL_FAIL=" .. behaviour.channel_fails .. " " .. routed end
+    if behaviour.channel_wrong_commit ~= "" then routed = "WA_TEST_CHANNEL_COMMIT=" .. behaviour.channel_wrong_commit .. " " .. routed end
   end
   return real_exec(with_vault(routed), cwd, timeout)
 end

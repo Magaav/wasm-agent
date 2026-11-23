@@ -3638,7 +3638,21 @@ impl.linux = function(run, options)
   end
   local short = tostring(sha):sub(1, 12)
   local tag = M.linux_tag(sha)
+  -- AN ALLOW-LIST, before anything is built or published: this channel publishes the two STATIC musl triples,
+  -- because a bundle that is not static needs a libc floor on the machine that installs it (the 30/10 defect
+  -- that made the first published bundle refuse on an older Ubuntu). A caller cannot widen it by naming a
+  -- triple the channel does not publish.
   local targets = linux_targets(options)
+  local allowed = {}
+  for target in tostring(M.LINUX_TARGETS):gmatch("%S+") do allowed[target] = true end
+  for _, target in ipairs(targets) do
+    if not allowed[target] then
+      return false, { error = "linux_target_unknown",
+        detail = "the public channel was not published for " .. short,
+        observed = "the channel is asked for " .. tostring(target) .. ", and it publishes " .. tostring(M.LINUX_TARGETS),
+        next = 'name only the triples the channel publishes (--linux-targets "' .. tostring(M.LINUX_TARGETS) .. '"), or publish that one by hand with scripts/publish-linux-channel.sh' }
+    end
+  end
   local artifacts = run.journal.artifacts or {}
   if artifacts.signed ~= true then
     return false, { error = "linux_unsigned_release",
