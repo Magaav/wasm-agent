@@ -247,4 +247,13 @@ check(#outside(noted) == 0, 'and nothing outside the kept set: ' .. table.concat
 local quiet = bash_result.slim_for('bash', { command = 'rg -n tools.bash lua/' }, answer)
 check(quiet.note == nil, 'a command that did not replace anything says nothing: ' .. tostring(quiet.note))
 
+--    THE REAL PATH (rule 14): one run block, the route a model's script takes - the unit checks above
+--    say the sentence is built, this says it arrives in an answer a script read.
+local rg_command = 'rg -rn run_tool_schema ' .. TREE .. '/lua/core/raw_code.lua'
+local lived = run('text(JSON.stringify(await tools.bash({command:"' .. rg_command .. '"})));')
+check(tostring(lived.note):find('--replace', 1, true) ~= nil,
+  'a run block that typed greps -rn into rg receives the sentence: ' .. tostring(lived.note))
+check(type(lived.stdout) == 'string' and #lived.stdout > 0,
+  'and the rewritten output is still delivered, not withheld: ' .. tostring(lived.stdout))
+
 print(json.encode({ ok = true, checks = checks, removed = #removed, slim_bytes = #json.encode(direct) }))
