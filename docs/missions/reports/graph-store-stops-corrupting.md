@@ -102,6 +102,13 @@ run, not by a query.
   `a_torn_table_page_is_never_repaired_and_a_refusal_writes_nothing` (the store is byte-identical after a
   refused repair). Wired through `cargo test -p wa-capabilities`, which `scripts/fast.sh` runs for the
   crates a change touches.
+* `the_scheduler_repairs_an_index_that_disagrees_with_its_table_instead_of_quarantining`
+  (`rust/wa-capabilities/src/graph_tests.rs`, `3fe15724`'s round): the scheduler is handed the verdict the
+  component answers for an index that disagrees with its table, and the test asserts no copy was taken, the
+  store is still in place, `integrity_check` passes and every row is kept. It names **no function this branch
+  adds**, so the land gate can run it against the base's own code - and there the same call quarantines
+  (base `quarantine_database` deletes then renames, so `state.quarantined` is not empty and the assertion
+  fails).
 * `scripts/test-graph-quarantine-evidence.lua` (`419160fb`): a Lua row, discovered by
   `scripts/lib/fast-rows.sh` (`scripts/test-*.lua` minus `scripts/fast-path.exclude`, which does not list
   it), so it runs on every fast path and gate. It builds its own scratch home and refuses the live one by

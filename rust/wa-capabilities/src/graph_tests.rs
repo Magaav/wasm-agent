@@ -889,3 +889,50 @@ fn a_torn_table_page_is_never_repaired_and_a_refusal_writes_nothing() {
     // And a store that is not there is not repaired into existence.
     assert!(matches!(repair_indexes(&dir.join("absent"), DB_FILE), Repair::Unavailable {..} | Repair::StillDamaged {..}), "no store, no repair");
 }
+
+#[test]
+fn the_scheduler_repairs_an_index_that_disagrees_with_its_table_instead_of_quarantining() {
+    // THE ASSERTION THAT FAILS ON THE BASE, and the one a review will look for: it names no function this
+    // branch adds, so the land gate can run it against the base's own code. The store is damaged the way the
+    // copy quarantined on 22/11 22:56 was - the table pages of a revision beside the index of the one before
+    // (see the report), no journal left to roll back - and the scheduler is handed the verdict the component
+    // answered for it. On the base that verdict moves 181 MB aside and starts a rebuild from nothing; here the
+    // indexes are rebuilt from the tables and the store stays.
+    let fixture = Fixture::new();
+    let dir = db_dir(&fixture.0.join("graph.db"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join(DB_FILE);
+    let older = fixture.0.join("older.db");
+    store_with_rows(&older, 60);
+    std::fs::copy(&older, &db).unwrap();
+    {
+        let connection = rusqlite::Connection::open(&db).unwrap();
+        let mut insert = connection.prepare("INSERT INTO t (b, c) VALUES (?1, ?2)").unwrap();
+        for i in 60..200 {insert.execute((format!("b{i}"), format!("c{i}"))).unwrap();}
+    }
+    let size = page_size(&db);
+    let root = rootpage(&db, "idx_b");
+    write_page(&db, root, size, &page_of(&older, root, size));
+    let rows_before: i64 = rusqlite::Connection::open(&db).unwrap()
+        .query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0)).unwrap();
+    let scheduler = test_scheduler();
+    let entry = test_entry(&fixture.0, &db);
+    entry.state.lock().unwrap().min_free_bytes = 1;
+    scheduler.failed(&entry, "graph_index_failed: database disk image is malformed".into());
+    let state = entry.state.lock().unwrap();
+    assert!(state.quarantined.is_empty(), "an index that disagrees with its table was thrown away: {:?}", state.quarantined);
+    assert_eq!(state.corruptions, 0, "nothing was quarantined, so nothing is counted as one");
+    drop(state);
+    assert!(db.exists(), "the store is still where it was");
+    let copies: Vec<String> = std::fs::read_dir(&dir).unwrap().flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("graph.db.malformed-")).collect();
+    assert!(copies.is_empty(), "a copy of the store was taken: {copies:?}");
+    // The store is repaired, not merely kept: it passes integrity_check and still holds every row.
+    let connection = rusqlite::Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let verdict: String = connection.query_row("PRAGMA integrity_check", [], |row| row.get(0)).unwrap();
+    assert_eq!(verdict, "ok", "the repaired store still does not pass integrity_check");
+    let rows_after: i64 = connection.query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0)).unwrap();
+    assert_eq!(rows_after, rows_before, "the repair lost rows");
+    assert!(!scheduler.ready.lock().unwrap().is_empty(), "the repaired store is re-queried");
+}
