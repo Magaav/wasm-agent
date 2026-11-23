@@ -579,3 +579,163 @@ box (`deploy_wait.read`), which is the same signal the pause uses.
 ### The proposal (branch `proposal/housekeeping-holds-no-install`, commit `5aba5a93`) - NOT merged
 
 ```diff
+diff --git a/rust/wa-sentinel/src/holders.rs b/rust/wa-sentinel/src/holders.rs
+index db283cc8..a7ab2848 100644
+--- a/rust/wa-sentinel/src/holders.rs
++++ b/rust/wa-sentinel/src/holders.rs
+@@ -54,25 +54,40 @@ pub(crate) struct Holder {
+     /// operation settled. It starts after an install, never before, so the install never waits on it (see the
+     /// module note, measurement 2).
+     pub completion: bool,
++    /// A NODE-INTERNAL pass: work the node does FOR ITSELF (`sync tick`, the housekeeping block of
++    /// rust/wa-capabilities/src/serve.rs `node_thread_loop`), with no session behind it and no turn to finish.
++    /// MEASURED (23/11, ~/.wasm-agent/sentinel/sentinel.log): it was named as the holder of six installs and held
++    /// each for 6-11 minutes (`span=661s`, `481s`, `422s`, `361s`, `602s`), because it is a single label around a
++    /// whole pass - so a node that had just decided it was quiet looked busy to the sentinel for as long as the
++    /// pass took, and `Verdict::Wait` waited it out.
++    pub housekeeping: bool,
++}
++
++/// The labels the node gives to its OWN housekeeping: an ALLOW-LIST, because a label this list does not know is
++/// not housekeeping - and an unknown label still holds the install ("unknown is not yes"). One entry today, with
++/// its prefix form so a later pass that says `sync tick: peers` is still recognised.
++pub(crate) fn is_housekeeping(label: &str) -> bool {
++    let label = label.trim();
++    label == "sync tick" || label.starts_with("sync tick:")
+ }
+ 
+ impl Holder {
+     fn new(session: impl Into<String>, label: impl Into<String>, ms: u64) -> Holder {
+-        Holder { session: session.into(), label: label.into(), ms, queued: false, completion: false }
++        Holder { session: session.into(), label: label.into(), ms, queued: false, completion: false, housekeeping: false }
+     }
+ 
+     pub(crate) fn admitted(session: impl Into<String>, label: impl Into<String>, ms: u64) -> Holder {
+-        Holder { session: session.into(), label: label.into(), ms, queued: true, completion: false }
++        Holder { session: session.into(), label: label.into(), ms, queued: true, completion: false, housekeeping: false }
+     }
+ 
+     /// A child completion, admitted and not started. Its own constructor, because "admitted and not started"
+     /// and "admitted, not started, and a completion" are the two answers the bound treats differently.
+     pub(crate) fn completion(session: impl Into<String>, label: impl Into<String>, ms: u64) -> Holder {
+-        Holder { session: session.into(), label: label.into(), ms, queued: true, completion: true }
++        Holder { session: session.into(), label: label.into(), ms, queued: true, completion: true, housekeeping: false }
+     }
+ 
+     fn counted(label: impl Into<String>, completion: bool) -> Holder {
+-        Holder { session: String::new(), label: label.into(), ms: 0, queued: false, completion }
++        Holder { session: String::new(), label: label.into(), ms: 0, queued: false, completion, housekeeping: false }
+     }
+ }
+ 
+@@ -106,11 +121,11 @@ pub(crate) fn holders_from(health: &Value) -> Vec<Holder> {
+             if entry.get("label").map(|label| label.is_null()).unwrap_or(true) {
+                 continue;
+             }
+-            holders.push(Holder::new(
+-                field_str(entry, "session"),
+-                field_str(entry, "label"),
+-                field_u64(entry, "busy_ms"),
+-            ));
++            let label = field_str(entry, "label");
++            let housekeeping = is_housekeeping(&label);
++            let mut holder = Holder::new(field_str(entry, "session"), label, field_u64(entry, "busy_ms"));
++            holder.housekeeping = housekeeping;
++            holders.push(holder);
+         }
+     }
+     if let Some(current) = health.get("current") {
+@@ -291,6 +306,12 @@ where
+         if holder.completion {
+             continue;
+         }
++        // A NODE-INTERNAL PASS IS NOT A TURN, so the install does not wait for it to finish: it is the node's own
++        // sync/retention, it holds no session and can never pause, and the node that the install brings up runs the
++        // same pass again (both are idempotent). Only labels on the allow-list (`is_housekeeping`) are skipped.
++        if holder.housekeeping {
++            continue;
++        }
+         if holder.session.is_empty() {
+             unnamed.get_or_insert_with(|| format!(
+                 "the holder `{}` names no session, so nothing proves it paused", holder.label));
+diff --git a/rust/wa-sentinel/src/holders_tests.rs b/rust/wa-sentinel/src/holders_tests.rs
+index 4c45683e..9a0680c6 100644
+--- a/rust/wa-sentinel/src/holders_tests.rs
++++ b/rust/wa-sentinel/src/holders_tests.rs
+@@ -94,9 +94,9 @@ fn current_is_a_holder_once() {
+ #[test]
+ fn holder_lines_name_the_session_and_its_duration() {
+     let holders = vec![
+-        holders::Holder { session: "8082b42e-1111-2222".into(), label: "POST /chat".into(), ms: 134_000, queued: false, completion: false },
+-        holders::Holder { session: "deadbeef-1111-2222".into(), label: "POST /chat".into(), ms: 9_000, queued: false, completion: false },
+-        holders::Holder { session: "".into(), label: "2 subagent(s) running, 0 queued".into(), ms: 0, queued: false, completion: false },
++        holders::Holder { session: "8082b42e-1111-2222".into(), label: "POST /chat".into(), ms: 134_000, queued: false, completion: false, housekeeping: false },
++        holders::Holder { session: "deadbeef-1111-2222".into(), label: "POST /chat".into(), ms: 9_000, queued: false, completion: false, housekeeping: false },
++        holders::Holder { session: "".into(), label: "2 subagent(s) running, 0 queued".into(), ms: 0, queued: false, completion: false, housekeeping: false },
+     ];
+     let lines = holders::holder_lines(&holders, |session| session.starts_with("8082b42e"));
+     assert_eq!(lines.len(), 3, "one line per holder: {lines:?}");
+@@ -109,9 +109,9 @@ fn holder_lines_name_the_session_and_its_duration() {
+ /// for this request and over nothing else - not a working session, not a subagent, not a run with no session.
+ #[test]
+ fn the_bound_passes_over_paused_sessions_only() {
+-    let working = holders::Holder { session: "8082b42e-1111".into(), label: "POST /chat".into(), ms: 120_000, queued: false, completion: false };
+-    let paused_one = holders::Holder { session: "aaaa1111-2222".into(), label: "POST /chat".into(), ms: 120_000, queued: false, completion: false };
+-    let nameless = holders::Holder { session: "".into(), label: "2 subagent(s) running, 0 queued".into(), ms: 0, queued: false, completion: false };
++    let working = holders::Holder { session: "8082b42e-1111".into(), label: "POST /chat".into(), ms: 120_000, queued: false, completion: false, housekeeping: false };
++    let paused_one = holders::Holder { session: "aaaa1111-2222".into(), label: "POST /chat".into(), ms: 120_000, queued: false, completion: false, housekeeping: false };
++    let nameless = holders::Holder { session: "".into(), label: "2 subagent(s) running, 0 queued".into(), ms: 0, queued: false, completion: false, housekeeping: false };
+ 
+     // Before the bound: held, whatever the holders are doing.
+     let early = holders::bound_verdict(10, 180, &[paused_one.clone()], |_| true);
+@@ -383,3 +383,38 @@ fn a_wait_that_never_ends_is_noticed_once() {
+     }
+     let _ = std::fs::remove_dir_all(&home);
+ }
++
++/// 16. A NODE-INTERNAL PASS DOES NOT HOLD AN INSTALL (proposal, 23/11 ~23:40Z; NOT landed). MEASURED in
++/// ~/.wasm-agent/sentinel/sentinel.log: `sync tick` was named as the holder of six installs and held each for 6-11
++/// minutes (`span=661s`, `481s`, `422s`, `361s`, `602s`), because one label covers a whole housekeeping pass - so a
++/// node that had just decided it was quiet read as busy for as long as the pass took.
++///
++/// The rule is an ALLOW-LIST: `is_housekeeping` knows `sync tick`, and a label it does not know still holds.
++#[test]
++fn a_node_internal_pass_does_not_hold_an_install() {
++    let body = health(
++        r#"{"ok":true,"queue":0,"operation_overdue":false,"current":null,
++             "node_threads":[{"id":0,"session":null,"label":"sync tick","state":"busy","busy_ms":600000}],
++             "workers":[],"subagents":{"queued":0,"running":0,"active":0}}"#,
++    );
++    let holders = holders::holders_from(&body);
++    assert_eq!(holders.len(), 1, "the pass is named as a holder: {holders:?}");
++    assert!(holders[0].housekeeping, "and it is known to be node-internal: {holders:?}");
++    assert_eq!(holders::bound_verdict(200, 180, &holders, |_| false), holders::Verdict::Proceed,
++        "the install does not wait for the node's own housekeeping pass");
++    assert!(holders::is_housekeeping("sync tick: peers"), "the prefix form is recognised too");
++    assert!(!holders::is_housekeeping("POST /chat"), "a run is not housekeeping");
++
++    // An UNKNOWN internal label is not on the allow-list: it holds, exactly as it did before this proposal.
++    let unknown = health(
++        r#"{"ok":true,"queue":0,"operation_overdue":false,"current":null,
++             "node_threads":[{"id":0,"session":null,"label":"some new maintenance pass","state":"busy","busy_ms":600000}],
++             "workers":[],"subagents":{"queued":0,"running":0,"active":0}}"#,
++    );
++    let holders = holders::holders_from(&unknown);
++    assert!(!holders[0].housekeeping, "a label the allow-list does not know is not housekeeping");
++    match holders::bound_verdict(200, 180, &holders, |_| false) {
++        holders::Verdict::Wait(why) => assert!(why.contains("names no session"), "{why:?}"),
++        other => panic!("an unknown internal label must still hold: {other:?}"),
++    }
++}
+```
+
+The tests that go with it, on the same branch:
+
+* `rust/wa-sentinel/src/holders_tests.rs::a_node_internal_pass_does_not_hold_an_install` - a node whose only
+  thread is `sync tick` PROCEEDS, an unknown internal label still WAITS, and `is_housekeeping` is asserted on the
+  allow-list rule (`holders 16 passed`);
+* a new step in `scripts/test-deploy-bound.sh` - the real sentinel binary against that `/health` body: the
+  installer runs (`deploy bound ok`).
+
+**Not landed, by instruction:** the branch is `proposal/housekeeping-holds-no-install` at `5aba5a93`, and this
+report commit only records it. Fable decides.
