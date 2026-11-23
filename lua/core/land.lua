@@ -375,7 +375,7 @@ end
 -- hosts differ: the build needs a toolchain, the signature needs the vault's admin listener, and the ship
 -- needs a git remote. Keeping them apart is what makes a rerun of one of them cheap - and a signature that
 -- arrives after a stopped run is not thrown away with the build.
-M.STEPS = { "collect", "plan", "review", "merge", "gate", "push", "main", "artifacts", "sign", "ship", "publish", "deploy", "linux", "report" }
+M.STEPS = { "collect", "plan", "review", "merge", "gate", "push", "main", "artifacts", "sign", "ship", "publish", "deploy", "canaries", "linux", "report" }
 
 -- ---------------------------------------------------------------- the LANDING (FACTORY.md rule 10)
 --
@@ -582,6 +582,7 @@ function M.plan_steps(category)
     steps.publish = skip("docs-only: no release to publish")
     steps.linux = skip("docs-only: nothing is compiled, so there is no bundle for the public channel either")
     steps.deploy = skip("docs-only: no node needs these bytes (a document is not loaded at runtime)")
+    steps.canaries = skip("docs-only: nothing was installed, so no node runs new bytes to prove")
   elseif category == "lua-scripts-only" then
     steps.artifacts = run("Lua tree record (manifest + SHA256SUMS over the shipped Lua tree): no cross-build, no node release")
     steps.artifacts.kind = "lua-tree"
@@ -590,6 +591,7 @@ function M.plan_steps(category)
     steps.publish = skip("a Lua-only round publishes no node release; the signed record is the round's evidence and the deploy is the transport")
     steps.linux = skip("a Lua-only round builds no bundle, and the public channel publishes prebuilt bundles: it moves with the next compiled release")
     steps.deploy = run("the ring, in order: the nodes take the Lua tree and keep their binary (the deploy's Lua fast path)")
+    steps.canaries = run("every feature this node runs proves itself, after the deploy read-back; a failed canary makes the release red by name")
   elseif category == "components" then
     steps.artifacts = run("components bundle only (scripts/publish-components.sh): build, verify against components.lock, print the repin line")
     steps.artifacts.kind = "components"
@@ -4131,6 +4133,68 @@ end
 -- update ITSELF (`lua/core/remote_update.lua`): this machine only asks and reads back, and "queued" is
 -- never reported as installed. `--rollback` runs the same ring in reverse and puts each node's kept pair
 -- back (`scripts/rollback-node.sh` through that node's own Sentinel).
+-- THE CANARIES, AFTER THE FLEET READ-BACK (Victor, 23/11): a node that took the new bytes must prove that
+-- its user-facing features still do their work.
+--
+-- Why a step here and not in the gate: the gate tests the TREE in a scratch home, and the deploy step's own
+-- read-back answers "which commit does this node run" - both of which a feature that installs correctly and
+-- then cannot do its job passes (the copilot reply was off for two days that way). This step is the first
+-- thing in the release loop that asks the INSTALLED node to exercise its own features.
+--
+-- The verdict is the node's own (lua/core/feature_canary.lua): a failed canary stops the run BY NAME, with
+-- the stage it broke in and the evidence file, and the `next` line says how to put the node back on the
+-- previous release. The step does not roll back by itself - a release that reverts a node on its own word
+-- would hide the failure instead of reporting it, and Fable's rule is that a rollback is a decision.
+impl.canaries = function(run, options)
+  local evidence = sink(run, "canaries")
+  local loaded, canaries = pcall(dofile, "lua/core/feature_canary.lua")
+  if not loaded or type(canaries) ~= "table" then
+    return false, { error = "canaries_unavailable",
+      observed = "lua/core/feature_canary.lua could not be loaded: " .. tostring(canaries),
+      next = "fix the tree this landing runs from; no node was asked anything" }
+  end
+  local opts = {}
+  if options.canary_dir then opts.dir = options.canary_dir end
+  local results, why = canaries.run_all(opts)
+  if not results then
+    return false, { error = "canaries_unreadable", observed = tostring(why),
+      next = "the feature registry or its canaries could not be read; check config/features/features.json" }
+  end
+  evidence("# canaries, after the deploy read-back\n")
+  for _, line in ipairs(canaries.lines(results)) do evidence(line .. "\n") end
+  local failed, ran = {}, 0
+  for _, result in ipairs(results) do
+    if not result.skipped then
+      ran = ran + 1
+      if not result.ok then
+        failed[#failed + 1] = string.format("%s (%s)", tostring(result.feature), tostring(result.stage))
+        evidence(string.format("failed: %s at stage %s: %s\n", tostring(result.feature), tostring(result.stage), tostring(result.detail)))
+      end
+    end
+  end
+  evidence(string.format("canaries: %d ran, %d failed, %d off-node (evidence: %s)\n", ran, #failed, #results - ran,
+    M.evidence_path(run.id, "canaries")))
+  -- THE SAME STOPPED FEATURES SPEAK TO THE OPERATOR'S CHANNEL ONCE, here as everywhere else: the release
+  -- step records and prints; the notice is lua/core/feature_notice.lua, and a send that failed is retried
+  -- by the next call rather than counted as sent.
+  local noticed = "not asked"
+  local ok_notice, feature_notice = pcall(dofile, "lua/core/feature_notice.lua")
+  if ok_notice and type(feature_notice) == "table" then
+    local ok_call, answer = pcall(feature_notice.notice)
+    noticed = ok_call and tostring((answer or {}).reason or "") or ("raised: " .. tostring(answer))
+  end
+  if #failed > 0 then
+    return false, { error = "canary_failed",
+      observed = "the node failed its own canaries: " .. table.concat(failed, ", ") .. " (notice: " .. noticed .. ")",
+      detail = "release is RED by name: " .. table.concat(failed, ", "),
+      evidence = M.evidence_path(run.id, "canaries"),
+      next = "put the node back on the previous release (wa update <node> --commit " .. tostring(run.journal.main_sha or run.journal.tree_commit or "<previous>") .. "), unless Fable says otherwise; then fix " .. tostring(failed[1]) .. " before cutting again",
+      notice = noticed }
+  end
+  return true, { canaries = ran, off_node = #results - ran, notice = noticed,
+    observed = string.format("%d canar(ies) ran and passed on this node; %d feature(s) it does not run were off-node", ran, #results - ran) }
+end
+
 impl.deploy = function(run, options)
   local evidence = sink(run, "deploy")
   local ok, remote_update = pcall(dofile, "lua/core/remote_update.lua")
