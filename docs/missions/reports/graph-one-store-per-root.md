@@ -9,8 +9,9 @@ store belongs to another root, and bounded at 8 stores / 2 GiB. A store that `PR
 calls ok is never quarantined. `graph_db_*` lines now reach one file under the node's home for every
 process, so they can be counted.
 
-**Item 6 (the fair comparison table) is NOT done** - see §7. The decision it was meant to answer is
-still open, and I do not pretend otherwise.
+**Item 6 is done and it decides against the graph** (§6b): on ten real questions it matches grep on nine,
+misses 10 of 23 call sites of `remote_call` (76 % of its edges are unresolved), costs 150-400x the time,
+and it cannot index this repo's full tree in one call at all.
 
 ## 1. Re-measured first: what the brief held, and what it did not
 
@@ -176,13 +177,74 @@ two roots to fight over.**
 * **Item 6, the fair comparison table, is not done** (see §7).
 * Nothing ran against a live peer, and no key, pin or installed file was touched.
 
+## 6b. Item 6, the decision table (measured through the tool, not raw SQL)
+
+Run with the `wa` binary and the `graph` component built from this branch, scratch HOME, a root holding
+only source (`lua/` + `rust/`, **642 files**), the tool called exactly as a model would
+(`graph {action:'explain', name:...}` through `tools.dispatch`). Ground truth: `rg -n` for the same
+name over the same tree; a *call site* is a line where the name is invoked, definitions excluded.
+
+**First index of that source-only tree: 457,114 ms (7 min 37 s), 65 MB store, 642 files, 46,413 nodes,
+162,358 edges of which 123,558 (76 %) are UNRESOLVED** (`dst IS NULL`). Fable's raw-SQL look measured
+64 % unresolved on the live store; through the tool on this tree it is 76 %.
+
+| # | question | graph callers | correct | wrong | missed | graph ms | graph bytes | grep call sites | grep ms | grep bytes |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | who calls `quarantine_database` | 1 | 1 | 0 | 0 | 1969 | 5,831 | 1 | 9 | 1,008 |
+| 2 | who calls `integrity_complaints` | 4 | 4 | 0 | 0 | 1412 | 6,378 | 4 | 9 | 1,034 |
+| 3 | who calls `index_only` | 1 | 1 | 0 | 0 | 1702 | 4,714 | 1 | 10 | 1,344 |
+| 4 | who calls `lock_store` | 5 | 5 | 0 | 0 | 1645 | 5,889 | 5 | 10 | 1,042 |
+| 5 | who calls `retain_quarantine` | 1 | 1 | 0 | 0 | 1336 | 4,412 | 1 | 9 | 922 |
+| 6 | who calls `repair_indexes` | 1 | 1 | 0 | 0 | 3500 | 3,173 | 1 | 8 | 540 |
+| 7 | what calls `remote_call` (18 files) | 15 | 13 | 0 | **10** | 3111 | 8,056 | 23 | 9 | 6,697 |
+| 8 | who calls `announce_change` | 2 | 2 | 0 | 0 | 2603 | 3,403 | 2 | 11 | 586 |
+| 9 | who calls `graph_hint` | 2 | 2 | 0 | 0 | 1474 | 2,772 | 2 | 8 | 264 |
+| 10 | who calls `resolve_path` | 7 | 7 | 0 | 0 | 3220 | 3,721 | 7 | 8 | 676 |
+
+What the table says, honestly:
+
+* **On nine of ten questions the graph is exactly right and exactly as complete as grep** - but those
+  nine are single-file private functions where grep cannot be wrong either, and the graph costs
+  **1.3-3.5 s and 2.7-6.4 KB per question against grep's 8-11 ms and 0.3-1.3 KB.** The graph's time is
+  dominated by content admission (capture + hash compare of all 642 files) on every call: that is what
+  buys freshness, and it is also why nobody would call it in a loop.
+* **On the one question with real fan-out (`remote_call`, 23 call sites in 18 files) the graph found 13
+  exactly, and returned 2 more that a naive `name(` grep cannot see** - `pcall(nodes.remote_call, ...)`
+  at `lua/core/orchestrator.lua:175` and `:185`, real callers, a genuine win for a caller-aware index.
+* **But it missed 10 real call sites**, all of one shape: `dofile('lua/core/nodes.lua').remote_call(...)`
+  (`lua/core/federation.lua:383,519,622`, and the same pattern in `remote_tools`/`remote_update`). Those
+  are the calls a model is asking about when it asks "what breaks if `nodes.remote_call`'s fourth
+  argument changes" - the graph answers with **13 of 23 call sites and no warning that 10 are missing**.
+  76 % unresolved edges is the mechanism.
+* **No wrong callers** were returned on any question once definitions were excluded (Fable's raw-SQL
+  noise from markdown and `reviews/` does not appear through the tool: the component's answers here are
+  source-role filtered), so the tool's filtering is real - it is recall, not precision, that fails.
+
+**What indexing source only does** (the second question item 6 asked): on this tree the source-only root
+is 642 files, 19 MB on disk, a 65 MB store and 7 min 37 s to build. The node's live store (which indexes
+`docs/`, `reviews/`, `build/`) holds 2,724 files and 135,192 nodes - four times the files and three times
+the nodes for the same code - and **70 of its paths no longer exist in the tree** (`build/linux-release/`,
+`reviews/`, `review-evidence/`). Markdown is 387 of those 2,724 files.
+
+**And the number that decides more than the table does: the full tree cannot be indexed in one call.**
+Against the whole worktree (2,654 indexable files) `graph {action:'index', force=true}` answered
+`graph_component_unavailable: component_deadline` after 609 s and left the store **empty** (0 files, 0
+nodes; the journal was rolled back). With item 0 in place nothing warm it in the background any more, so
+the graph on this repo is unusable until an index fits inside a call. That, not the table, is the first
+thing to fix if the graph is ever wanted.
+
+### The decision these numbers support
+
+The graph does **not** earn a line in the model's routing text, and the brief's "keep it dormant" is the
+right call. Equal to grep on trivial questions at 150-400x the cost, worse on the one question with real
+fan-out, and unable to index this repo's full tree in a single call. Reconsider only when (a) an index
+fits inside one call (or resumes across calls), and (b) unresolved edges are under ~10 %.
+
 ## 7. Deliberately not done / what is still open
 
-* **Item 6 (the decision number).** The table needs ten real impact questions answered twice - by the
-  `graph` tool and by grep+read - over an indexed copy of this repo, in a scratch HOME. That is hours of
-  indexing plus ten paired investigations, and this session did not have them. The decision (does the
-  graph earn a line in the routing text, or move out of the default bundle) is therefore **still open**,
-  and the honest state is: dormant, no longer expensive, not yet justified.
+* **Item 6 IS now done** - see §6b - but with one deviation that must be named: the ten questions were
+  answered over a **source-only root (642 files)**, because the full worktree could not be indexed in one
+  call (`component_deadline`). The table is therefore about this repo's code, not about its markdown.
 * **The 637-727 MB of quarantined copies** in `~/.wasm-agent/graph.db.d/` were left untouched - they are
   evidence and the brief named one of them explicitly. `scripts/reclaim-disk.mjs` is the supported tool
   when the operator decides they are no longer needed.
