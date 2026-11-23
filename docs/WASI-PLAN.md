@@ -540,3 +540,55 @@ So the omni-device answer is: **the component half is already portable (one arti
 the host half is six interfaces**. macOS and Termux are each a small port of (process, terminal, system)
 plus a real one for (keys); a browser host can run the guest only if the *chat* does not need a process,
 a terminal or a shared ledger - which today it does.
+
+## Decisions
+
+*Empty by design.* Fable reads this page, decides, and each decision is appended here with its reason.
+Part 2 (removing the native twin of ONE feature) waits for that go.
+
+## Every item of the brief, and where it is answered
+
+| item | where | measured? |
+| --- | --- | --- |
+| 1. lines, calls per day, cost per call, start cost, missing/trap behaviour, per feature | sections 1.1-1.4 | lines and costs measured here; **calls per day per path is not measured**: the node's ledger (`~/.wasm-agent/memory.db`) is refused by the secret guard (`secret_path_denied`) and the fleet is out of bounds for this mission (rule 13). What is measurable was measured: `wa features` says 8/8 `component`, and this node's retained logs (`~/.wasm-agent/logs/cli-stderr.log`, 19 KB) contain **zero** `served natively` lines |
+| 2. what "the component fails" means with no twin, and which features can be off | section 2 | the four states (missing, refusing, wedged, lying) were produced and observed; the ranking is reasoning on top of that |
+| 3. the removal order | section 3 | order and tests named per feature |
+| 4a. rows per component, and the subset's cost | section 4a | rows counted by `grep -rlF` over `scripts/test-*.lua`; full path 999 s; subset row content measured, wall time blocked by the shared suite lock (see there) |
+| 4b. what a one-component hot swap needs beyond `wa dev` | section 4b | `wa dev`'s own header, `publish-components.sh --check` run (0.55 s, refused `commit_not_on_pushed_branch`), `rg` for a pins-generated file (0) |
+| 4c. how much of a week is Lua inside agent-core | section 4c | `git log --since` counts |
+| 5. omni device | section 5 | targets from the two release indexes; per-family analysis |
+| 6. the host | section 6 | 151 capabilities, 1,887 entry lines, 188,893 native lines, WASI phase list fetched 23/11 |
+| 7. runtime optimizations | section 7 | every row has a number; two are answered "do not build" |
+| 8. upstream asks | section 8 | six asks, each with its measured cost, a reproduction and a live issue number |
+
+## How to re-measure any row
+
+Everything here is one of five commands. All of them are hermetic: a scratch `WASM_AGENT_HOME`, a
+`HOME` of their own, `WASM_AGENT_RENDEZVOUS=`/`WASM_AGENT_RELAY=`/`WASM_AGENT_MANAGED=0`, and components
+copied out of the node's install (never the live home).
+
+1. **Per-call, both ways**: a Lua script that calls one module's public function `N` times under
+   `os.clock`, run twice with `WA_<FEATURE>_COMPONENT=1` and `=0`. (The shape used here is in the mission
+   report, `docs/missions/reports/wasi-only-plan.md`.)
+2. **The floor of a crossing**: the same script calling `host.<seam>('{"op":"wb_no_such_op"}')`, which the
+   guest refuses after instantiate.
+3. **Start cost**: `python3 -c` around `subprocess.run("wa --db ...", env=...)` with `WA_SCRIPT` a no-op,
+   once with the cache, once with `~/.wasm-agent/cache/components` removed, once with `WA_COMPONENT_CACHE=0`.
+4. **agent-core's own split**: `WA_CORE_TIMING=1 wa --core-component <agent-core.wasm> <script.lua>`,
+   cold and warm.
+5. **A wedge, and the deadline**: `WA_MEMORY_COMPONENT=1 WA_MEMORY_COMPONENT_WASM=<memory-crash.wasm>
+   WA_MEMORY_COMPONENT_TIMEOUT_MS=200`, then `M.remember('wedge: ...')` - the call returns after
+   **203.2 ms** of CPU with `component_wedged` in the log and the native path answering.
+
+## What this page does not claim
+
+- It does not claim a fleet-wide call count per path (item 1): the ledger is refused to an agent tool by
+  the secret guard, and this mission may not call a live peer. The local evidence is in section 1 and in
+the checklist above.
+- It does not claim a wall time for the narrowed fast-path run: the run was queued behind the shared suite
+  lock (three other missions' runs and two installs) for its whole window here, and the queue itself is the
+  finding of section 4a.
+- It does not claim any line count as a parse: component "test-ish" lines are a bound (from the last
+  `#[cfg(test)]` to EOF, plus `tests*.rs`), and the capability line counts are entry functions, not their
+  transitive callees.
+- Nothing was installed, nothing was pushed, no peer was contacted, and `Part 2` has not started.
