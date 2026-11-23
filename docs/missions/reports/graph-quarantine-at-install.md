@@ -84,6 +84,46 @@ No assertion, limit or quarantine rule was removed; `quarantine_database` and `f
 * Wired: rows are discovered by `scripts/lib/fast-rows.sh` (`wa_fast_row_candidates`, `scripts/test-*.lua`
   minus `scripts/fast-path.exclude`), so this row runs on every fast-path and gate run; the two Rust tests
   are in `rust/wa-capabilities/src/graph_tests.rs` and run under `cargo test -p wa-capabilities`.
+* The component the row cannot run without is named in the row's own text (`WA_GRAPH_COMPONENT_WASM`), which
+  is the runner's contract: `scripts/lib/fast-row-exec.sh` installs a component into a row's own home, and
+  hands over the override, only for the components the row names. Without that line the first main-health
+  run of this row failed with `component_not_installed:graph` (`31b55a46`) - a missing fixture, not a
+  verdict. The row now refuses by name when the override is absent or names no file, and passes through the
+  fast path's own row executor (`lua_run`) with the component built from this tree: measured 23/11, exit 0,
+  `graph_db_journal_resolved ... outcome=rolled_back` and `revision 1 kept, 13 row(s) answered, no
+  quarantine copy`.
+* The landing's own quick step (`wa land`, `lua/core/land.lua` `impl.tests`) runs a branch's rows with the
+  binary this node runs but installed no components, so a component row read `component_not_installed:graph`
+  there and the preflight stopped on a missing fixture (`23/11`, round 2). It now installs THIS NODE's pinned
+  artifact - `<data>/components/<name>.wasm` with its `.wasm.sha256` and `.json` - into the row's own home and
+  points `WA_COMPONENTS_DIR` at it, exactly the directory the host resolves components from; a component this
+  node does not have is NAMED in the step as `not run here` (never counted green), which is the same division
+  of labour a Rust change already has. `ef258a86`, with `scripts/test-land-quick.lua` proving both halves (a
+  fake component arrives in the row's home; a missing one is named and not counted).
+* MEASURED WITH THE STEP ITSELF DOING THE COPY (23/11, `avell`): `lua/core/land.lua`'s own
+  `M.install_row_components` was driven from a node (`WA_SCRIPT=scratch/step-driver.lua`, `WASM_AGENT_HOME` a
+  scratch home holding the node's pinned `graph.wasm` + `.wasm.sha256` + `.json`); it returned
+  `WA_COMPONENTS_DIR=<row home>/components` and the row's home held all three files. With exactly that
+  environment the row then ran (`WA_SCRIPT=scripts/test-graph-crash-recovery.lua`, the node's installed binary)
+  and exited 0: `graph_db_journal_resolved ... outcome=rolled_back`, `revision 1 kept, 13 row(s) answered, no
+  quarantine copy`. The copy in that measurement is the step's, not a hand copy.
+* THE MODULE ALONE IS NOT A COMPONENT (`901d8fa3`, Fable's review of d61594ce): the step copied only
+  `<name>.wasm` while its own comment required the pin and the manifest, and the host refuses a component with
+  no pin - so a row handed the module would have looked provisioned and failed at the host. It now copies
+  `.wasm`, `.wasm.sha256` and `.json` in ONE copy, removes a half copy if that copy fails, and names the row
+  `not run here` instead. `scripts/test-land-quick.lua` asserts all three files arrive (`quick3c`) and that a
+  component with no pin is named and not counted green (`quick3u`); the machine's own row is green with 165
+  checks.
+* THAT LANDING CHANGE CANNOT HELP THE GATE THAT DEMANDED IT, and that is a bootstrap, not a bug: `wa land`
+  runs the **installed** `lua/core/land.lua` while the rows come from the merged tree, so a preflight uses the
+  old step until the branch is installed. Round 3 stopped on exactly that. So the row now provisions itself as
+  well (`4ed085fb`): if no `WA_GRAPH_COMPONENT_WASM`, no `graph.wasm` in `WA_COMPONENTS_DIR` and none in this
+  row's own home, it takes the component THIS NODE runs - the binary names the install (`wa` in `.local/bin`,
+  the components beside the node's data directory), the host resolves components per call - and copies the
+  three files (wasm, pin, manifest) into the row's own home. Nothing is built. Measured in the landing step's
+  shape with no component environment at all: exit 0, `graph_db_journal_resolved ... outcome=rolled_back`,
+  `revision 1 kept, 13 row(s) answered, no quarantine copy`; with no component anywhere and no `wa` on PATH:
+  `refused: no graph component: ...`, exit 1.
 
 **Discrimination, measured twice each on this node:**
 

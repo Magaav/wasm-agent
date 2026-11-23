@@ -15,6 +15,69 @@
 -- committed revision does not fall back to 1 as a rebuild's would.
 local json = dofile('lua/vendor/json.lua')
 local paths = dofile('lua/core/paths.lua')
+-- THE COMPONENT THIS ROW CANNOT RUN WITHOUT, NAMED SO THE RUNNER INSTALLS IT. scripts/fast.sh builds the
+-- components a run needs, and scripts/lib/fast-row-exec.sh installs one into the row's OWN home only when the
+-- row's text mentions its override - that string check IS the contract, so this line is it:
+--    WA_GRAPH_COMPONENT_WASM
+-- Without it the row finds a scratch home with no component, the node answers
+-- `component_not_installed:graph`, and the row fails as a missing fixture instead of on what it measures
+-- (measured 23/11, the first main-health run of this row). A row that still sees no component REFUSES BY
+-- NAME below rather than skipping: the runner promised it (scripts/fast.sh counts a promised component
+-- reported missing as a FAIL), so "cannot tell" is never "pass".
+local function file_at(path)
+  if type(path) ~= 'string' or path == '' then return false end
+  local answer = json.decode(host.exec('test -f ' .. "'" .. path:gsub("'", "'\\''") .. "'", paths.data(), 10))
+  return answer ~= nil and answer.code == 0
+end
+-- THREE WAYS TO GET THE COMPONENT, and the row tries all three before it says it cannot run.
+--
+--   1. `WA_GRAPH_COMPONENT_WASM`: scripts/lib/fast-row-exec.sh sets it for a row that names it, and installs
+--      the artifact into the row's own home;
+--   2. `WA_COMPONENTS_DIR`: any runner that installs the pinned artifact into a directory and points the host
+--      at it (the directory the host resolves components from, docs/COMPONENTS.md);
+--   3. THE NODE'S OWN COPY. `wa land`'s quick step (`lua/core/land.lua`) runs a row with the binary THIS NODE
+--      runs and a scratch HOME, and installs nothing - so a row that needs a component could only ever answer
+--      `component_not_installed` there (measured 23/11: two preflight rounds stopped on it, round 3 for the
+--      landing step itself). The binary names the install (FACTORY.md: the node's binary sits in its own
+--      `.local/bin`), the node's pinned components sit beside its data directory, and the host resolves a
+--      component per call - so copying the three files into this row's own home here is enough, and the first
+--      graph call finds them. Nothing is built: the artifact is the one the node already runs.
+--
+-- A row that still finds none REFUSES BY NAME. Never a skip: a test that cannot tell is not a pass.
+local override = host.getenv('WA_GRAPH_COMPONENT_WASM')
+local components = host.getenv('WA_COMPONENTS_DIR')
+-- COMPLETE OR NOT THERE AT ALL. The host refuses a component with no pin or with a manifest it cannot read, so a
+-- half artifact must not be mistaken for a provisioned one: that would turn "the runner installed nothing"
+-- into a host refusal three steps later. All three files, or the row does not run.
+local function complete(directory)
+  if type(directory) ~= 'string' or directory == '' then return false end
+  return file_at(directory .. '/graph.wasm') and file_at(directory .. '/graph.wasm.sha256') and
+    file_at(directory .. '/graph.json')
+end
+local function usable()
+  if file_at(override) then
+    local beside = tostring(override):match('^(.*)[/\\][^/\\]+$')
+    if complete(beside) then return true end
+  end
+  if complete(components) then return true end
+  return complete(paths.data() .. '/components')
+end
+if not usable() then
+  local where = json.decode(host.exec('command -v wa', paths.data(), 10))
+  local resolved = json.decode(host.exec('readlink -f ' .. "'" .. tostring(where and where.stdout or ''):gsub('%s+$', ''):gsub("'", "'\\''") .. "'", paths.data(), 10))
+  local binary = tostring(resolved and resolved.stdout or ''):gsub('%s+$', '')
+  local home = binary:match('^(.*)/%.local/bin/[^/]+$')
+  if home and file_at(home .. '/.wasm-agent/components/graph.wasm') then
+    host.exec('mkdir -p ' .. "'" .. paths.data() .. "/components'", paths.data(), 30)
+    host.exec('cp ' .. table.concat({
+      home .. '/.wasm-agent/components/graph.wasm',
+      home .. '/.wasm-agent/components/graph.wasm.sha256',
+      home .. '/.wasm-agent/components/graph.json',
+    }, ' ') .. ' ' .. "'" .. paths.data() .. "/components/'", paths.data(), 60)
+  end
+end
+assert(usable(), 'refused: no graph component: this row measures a store the real component reads, and this row home has none - no WA_GRAPH_COMPONENT_WASM, no graph.wasm in WA_COMPONENTS_DIR, and none beside the node the binary ' .. tostring(host.exec('command -v wa', paths.data(), 10)) .. ' names')
+
 local function q(s) return "'" .. s:gsub("'", "'\\''") .. "'" end
 local function decode(raw, what)
   local value = json.decode(raw)
