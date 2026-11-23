@@ -138,6 +138,43 @@ MEASURED here, on a base worktree of `5956ae15` (`git worktree add --detach /tmp
 * the five new `wa-term` tests name `cardable` and `Block::cards`, which the base does not have, so
   they cannot compile, let alone pass, there.
 
+## 23/11 14:20Z - the two red main-health rows that came back (fix `fe184b9f`)
+
+Landed as `edad0d39`; main-health on `7865a08e` then reported two rows that touch this work.
+
+**1. `scripts/test-script-writes-show-diff.lua`: "the created file is named Create(path)".** MEASURED, and
+the row was right to be red: my `~` rule was wrong. `lua/core/paths.lua` resolves the node's data
+directory as `$HOME/.wasm-agent`, so a row whose ambient HOME is ALREADY a state directory writes its
+scratch to `<X>/.wasm-agent/.wasm-agent/script-writes` - the doubled segment is **real**, not a test
+artifact, and it comes from the environment the row is handed, not from the test. The card then drew
+`● Create(~/.wasm-agent/.wasm-agent/script-writes/demo.txt)`: a `~` pointing INSIDE the agent, for a file
+in no home at all. So:
+
+* `lua/core/cli_view.lua` gains `tilde_home(home, state, data)`: the operator's home may stand for `~`,
+the node's own state directory (and anything under it) may not - the path stays absolute there. It is a
+pure function, and `M.place("home")` is its only caller.
+* the row now compares the heading against the card's own display rule
+(`diff_view.short_path(path, {cwd = cli_view.place('cwd'), home = cli_view.place('home')})`), so it no
+longer depends on where a runner puts HOME. The RULE is pinned by five new pure checks in
+`tests/diff-view.lua` (home with the state dir inside it; the state dir itself; under it; a scratch home
+that IS the node's home; no home), which the base cannot pass - `tilde_home` does not exist there.
+
+**2. `tmp-cleanliness`: ".\/test-diff-card-pty.mjs starts a tmux server without
+scripts/lib/tmux-session.mjs".** True: the row brought its own `-L wa-diff-card-pty-<pid>` server. It
+now takes the helper (`tmuxSession('wa-diff-card-pty')` + `killServer()`), like `fence-card-pty` and
+`undo-pty`. `scripts/test-tmp-cleanliness.mjs` reports my file `ok` now; the one FAIL left in that row's
+log is `scripts/test-esc-stops-pty.mjs`, another mission's file (`esc-stops-pty` is its own red row).
+
+Narrowed runs after the fix (this node, the tree's binary, `WASM_AGENT_LUA_ROOT` at this tree):
+
+| row | HOME=/home/victor | HOME=<scratch>/home | HOME=<scratch>/home/.wasm-agent |
+|-----|------------------|---------------------|--------------------------------|
+| `tests/diff-view.lua` | 78 checks ok | 78 ok | 78 ok |
+| `scripts/test-script-writes-show-diff.lua` | 38 ok | 38 ok | 38 ok |
+
+with `scripts/test-diff-card-pty.mjs` 23 ok (and no socket left behind), `scripts/test-tmp-cleanliness.mjs`
+green for this file, `scripts/test-cli-view.lua` 566 ok, `scripts/test-twin-render.lua` 19 ok.
+
 ## Not done, and what is unknown
 
 * **Word-level highlight inside a changed pair of lines** (item 6's second half) is NOT implemented.
