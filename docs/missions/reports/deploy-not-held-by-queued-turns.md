@@ -83,11 +83,11 @@ Worktree `/home/victor/Work/missions/deploy-not-held-by-queued-turns/wt`, branch
 
 | row | what it holds | wired |
 | --- | --- | --- |
-| `scripts/test-deploy-wait.sh` steps 2c, 2d (extended) | the queue is named on a real node; a waiting deploy refuses three automatic turns at the door with `503 deploy_waiting not_started`, no queue, no completion | `scripts/test.sh` (cross-process block, `gate_run`) and `scripts/fast.sh` |
+| `scripts/test-deploy-wait.sh` steps 2c, 2d (extended) | the queue is named on a real node; a waiting deploy refuses three automatic turns at the door with `503 deploy_waiting not_started`, no queue, no completion | `scripts/test.sh:1350` and `scripts/fast.sh:869` (already wired; the new steps ride the row) |
 | `scripts/test-deploy-wait.sh` steps 3, 4, 4b (timing hardened) | unchanged assertions; the request is now written once the turn is provably inside its first model call instead of after a 0.8 s sleep | same two |
-| `scripts/test-deploy-bound.sh` (extended) | a queued turn is named and is not "working"; past the bound with only a queued turn the request fails by name (record, audit line, out of the box) and is not retried; `WA_DEPLOY_HOLD_BOUND=0` waits unbounded | `scripts/test.sh` and `scripts/fast.sh` (already wired) |
-| `rust/wa-capabilities` `pending_queue_tests` (2 rows) | the registry names a run until it starts, one entry per run, never run_id 0; `queue_sessions` publishes count/named/entries and an empty queue is an empty answer | `cargo test -p wa-capabilities` (fast path's Rust rows) |
-| `rust/wa-sentinel` `holders_tests` 9, 10, 11 | a queued turn is named and never called working, the unnamed remainder is still counted, the bound never passes over a turn that has not started, and a request name that is not a stamp is not a time | `cargo test --manifest-path rust/wa-sentinel/Cargo.toml` (the sentinel's own rows) |
+| `scripts/test-deploy-bound.sh` (extended) | a queued turn is named and is not "working"; past the bound with only a queued turn the request fails by name (record, audit line, out of the box) and is not retried; `WA_DEPLOY_HOLD_BOUND=0` waits unbounded | `scripts/test.sh:1351` and `scripts/fast.sh:870` (already wired; the new steps ride the row) |
+| `rust/wa-capabilities` `pending_queue_tests` (2 rows) | the registry names a run until it starts, one entry per run, never run_id 0; `queue_sessions` publishes count/named/entries and an empty queue is an empty answer | `scripts/fast.sh:733` (`cargo test -p wa-capabilities`, already wired; the rows ride it) |
+| `rust/wa-sentinel` `holders_tests` 9, 10, 11 | a queued turn is named and never called working, the unnamed remainder is still counted, the bound never passes over a turn that has not started, and a request name that is not a stamp is not a time | `scripts/test.sh:220` (`cargo test --manifest-path rust/wa-sentinel/Cargo.toml -- --test-threads=1`, already wired; the rows ride it) |
 
 **Discrimination, measured here** (`scripts/test-discriminates.sh ae3cbb37`):
 `discriminates scripts/test-deploy-wait.sh`. The same gate reported `scripts/test-deploy-bound.sh` as *skipped*
