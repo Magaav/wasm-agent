@@ -415,6 +415,32 @@ minutes without starting), and the landing's own preflight - which is that same 
 red. That is the honest state: the rows above are measured on this base, the whole-path run on this base is the
 preflight's.
 
+## 10. The narrowed fast path on the final base, and the one row that is not this branch's
+
+Run on the branch tip `d1f90cca` on `85593e74`, under the suite lock, `WA_FAST_ROWS` = the nineteen land rows +
+`test-speed-board.lua` (30 of 350 Lua rows plus every contract check):
+
+    fast: lua 30/30 passed          prompt-docs ok   discrimination ok   landing-queue ok   deploy-wait ok
+    fast: linux-channel ok          cli-help ok      release-channel ok  install-front-door ok
+    FAIL esc-stops-pty (exit 1): bash: Esc brings the prompt back at once ... 790 ms (limit 466 ms at load 3.88)
+
+The run was cut at the pty tail by the harness (the operation's owner detached while a node install was
+pending), so it printed no summary line of its own; every check it reached before that line is listed above.
+
+`esc-stops-pty` is `change/esc-socket-per-thread`'s row (on main since `beae64c6`) and it is intermittent on
+this node, measured four times on THIS tree and binary with nothing else of this branch's running:
+
+    12:58Z  18 ok, 0 failed
+    14:44Z  17 ok, 1 failed    790 ms (limit 466 ms at load 3.88)
+    15:10Z  17 ok, 1 failed    894 ms (limit 422 ms at load 3.52)
+    15:15Z  17 ok, 1 failed    945 ms (limit 744 ms at load 6.20)
+
+This branch's diff contains no Rust at all and no pty, terminal, chat or opening file (`git diff --name-only
+85593e74..HEAD` lists nineteen files: `docs/missions/reports/...`, `lua/core/{cli_help,init,land}.lua`,
+`scripts/release-linux.sh`, `scripts/speed-board.sh`, four `scripts/lib/*`, eight `scripts/test-*` and
+`scripts/fast.sh` / `scripts/test.sh`). It is reported, not touched: loosening another mission's budget is
+not this branch's to do, and `main-health` measures that row on main with main's own build.
+
 ## 6. What was not verified, and what is open
 
 * **No real release was cut and nothing was pushed to origin.** The proof is the next cut; by the brief's own
