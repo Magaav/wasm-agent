@@ -474,3 +474,36 @@ hold is requeued only with `--include-legacy-holds`, an explicit operator decisi
 (the small residual risk: a revoke delivered before its own original, out of order).
 New audio arriving in a legacy-held chat after this version is transcribed (not
 posted) without that flag, because a revoke targets an earlier message.
+
+## The health line, and what a cut transcript says (2026-11-23)
+
+Three things were added because the pipeline could not answer for itself; all three are in the
+component, and the measurement behind them is in
+[missions/reports/whatsapp-transcription-works.md](missions/reports/whatsapp-transcription-works.md).
+
+* **A health line.** At start and every `health_every_seconds` (config, default 300, floor 30) the
+  component prints one line: `health: v=1 transcripts ok=<n> last=<RFC3339|-> chars=<n> failed=<n>
+  last_failure=<RFC3339|-> reason=<code|-> posting=<on|off> posted=<n> last_post=<RFC3339|-> index
+  written=<n> last=<RFC3339|->`. The last times are UTC instants, `-` means never, and the line
+  carries no chat, no message id and no text. It exists because "auto transcription is broken" and
+  "nothing was posted" are indistinguishable from outside: on 23/11 this component was transcribing
+  correctly (last success `12:04:19Z`) while posting was off, and the only way to know was to read
+  2 896 log lines by hand. `src/health.rs`, commit `772261ba`.
+* **A cut transcript is a pointer, not a silent cut.** A search hit keeps a `transcript` snippet and
+  adds `transcript_truncated`, `transcript_chars` and `transcript_full` (the exact
+  `whatsapp_message` call that returns the rest); `whatsapp_message` and `whatsapp_media` answer with
+  the whole stored transcript and its length. Before this the snippet was cut at 280 characters with
+  no flag and no way to read the rest, and `whatsapp_media` carried no transcript at all, so the only
+  path to the full text was transcribing audio this node had already transcribed. Commit `4012380f`.
+* **The durable part and the holds can be persisted.** `policies/default.json` refused `queue` and
+  `holds` (the reserved outbox part and the chat holds) on every write - 62 refusals in two days,
+  recorded only as a digest - so the durable queue B3 ported was not durable and a held chat was
+  forgotten. The allow-list now names both, and a test in `rust/wa-grant-policy` holds the shipped
+  file against every key the component writes. Commit `6af69e4a`.
+
+**Still open, and it is a configuration decision, not a code one:** this definition has no `config`
+block, so `post_transcripts` is off, `post_allow` is empty and `alerts` is off. Transcripts are made,
+indexed and searchable and nothing is ever delivered to a chat. The operator switch in this tree
+(`lua/core/server.lua`, `wa_whatsapp_posting`) still posts to the Go connector's HTTP API, removed on
+11/11, so there is no supported verb to turn posting on; the report's "Needs the orchestrator's OK"
+lists exactly what has to change.
