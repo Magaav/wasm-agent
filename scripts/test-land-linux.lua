@@ -38,8 +38,11 @@ eq(position.linux, (position.publish or 0) + 1, "the channel step comes right af
 eq(position.linux, (position.deploy or 0) - 1, "and right before the deploy: the ring rollout stays last")
 ok(position.publish ~= nil and position.deploy ~= nil, "both neighbours exist")
 eq(land.EVENT_STEP.linux, "linux-channel", "its ledger row has a name of its own")
-eq(land.linux_tag("0123456789abcdef0123456789abcdef01234567"), "wa-linux-0123456789ab",
-  "the channel tag is wa-linux-<sha12>: one release per commit, and never the node-<sha12> release")
+eq(land.version_tag("0.1.0"), "v0.1.0", "the channel tag IS the product version (Victor, 22/11)")
+eq(land.version_tag("v0.1.7"), "v0.1.7", "a version that already carries its v is not doubled")
+eq(land.parse_product_version("0.1.0") and land.format_product_version(land.parse_product_version("0.1.0")), "0.1.0",
+  "the number is parsed and formatted by one pair of functions")
+eq(land.parse_product_version("1.0"), nil, "a version this does not understand is refused, never bumped by accident")
 eq(land.LINUX_INDEX, "releases/index-linux.json", "the step writes the index the installer reads")
 
 -- ---------------------------------------------------------------- the step itself
@@ -109,7 +112,7 @@ local before = origin_main()
 local run = channel_run("linuxA")
 local passed, result = land.impl.linux(run, { signer = "local" })
 eq(passed, true, "the step publishes the channel (" .. tostring((not passed) and (result and result.observed or result)) .. ")")
-contains(tostring((result or {}).detail), "wa-linux-", "its answer names the channel tag")
+contains(tostring((result or {}).detail), "published v0.1.0", "its answer names the release it published")
 contains(tostring((result or {}).detail), "fresh", "and the live verdict the check gave")
 local after = origin_main()
 ok(after ~= before, "main moved")
@@ -118,11 +121,55 @@ eq(must("git -C " .. repo .. " diff --name-only " .. release_sha .. " " .. after
   "and that commit carries exactly one path (the allow-list, not a hope)")
 contains(live_channel(after), release_sha, "the live index names this release's commit")
 eq((run.journal.linux or {}).state, "published", "the journal records the publish")
-eq((run.journal.linux or {}).tag, land.linux_tag(release_sha), "with the tag")
+eq((run.journal.linux or {}).tag, "v0.1.0", "with the first release's version as the tag")
+eq((run.journal.linux or {}).version, "0.1.0", "and the version itself, from the tree's VERSION file")
 eq(#((run.journal.linux or {}).targets or {}), 2, "for both targets")
 eq((run.journal.linux or {}).index_commit, after, "and the commit that carries it")
 contains(tostring((run.journal.linux or {}).live), "fresh", "the freshness verdict is kept in the journal")
 eq(observed.channel_pushes, 1, "the index commit was pushed onto main once")
+
+-- -------- TWO RELEASES IN A ROW (Victor, 22/11): 0.1.0, then 0.1.1 - in VERSION, in the tag, in the index,
+-- and in the header line the version renders.
+local view = dofile("lua/core/cli_view.lua")
+local function header(product) return (view.banner({ product = product, version = "abc12345", workspace = "~/work" }):gsub("\n", " | ")) end
+contains(header("0.1.0"), "Welcome to wasm-agent! v0.1.0 \194\183 vabc12345", "the welcome line shows the version and the sha")
+-- The first cut's tag exists on the remote now (gh creates it), which is what makes the next number the next one.
+must("git -C " .. repo .. " tag -f v0.1.0 " .. release_sha, "the release tag gh created for the first cut")
+must("git -C " .. repo .. " push -q origin refs/tags/v0.1.0", "push that tag to the fixture's origin")
+local second = head()
+eq(must("git -C " .. repo .. " show origin/main:VERSION"), "0.1.0", "after the first cut the tree carries 0.1.0")
+must("git -C " .. repo .. " fetch -q origin main", "read main back")
+must("git -C " .. repo .. " reset -q --hard origin/main", "the next cut is made from the main the first one left")
+local second_run = channel_run("linuxH")
+local second_passed, second_result = land.impl.linux(second_run, { signer = "local" })
+eq(second_passed, true, "the second release publishes too (" ..
+  tostring((not second_passed) and (second_result and second_result.observed or second_result)) .. ")")
+eq((second_run.journal.linux or {}).version, "0.1.1", "and it is 0.1.1: one patch past the release it follows")
+eq((second_run.journal.linux or {}).tag, "v0.1.1", "with v0.1.1 as the tag")
+eq(must("git -C " .. repo .. " show origin/main:VERSION"), "0.1.1", "and VERSION on main says 0.1.1 - the ONE owner, written by the release")
+contains(live_channel(origin_main()), "\"tag\": \"v0.1.1\"", "the live index names v0.1.1")
+contains(header("0.1.1"), "Welcome to wasm-agent! v0.1.1", "and a build of it would show v0.1.1 in the header")
+-- A minor/major bump is Victor's word, quoted, or it does not happen - in both directions.
+fresh_fixture()
+local before_bump = origin_main()
+local bumped = channel_run("linuxI")
+local bumped_passed, bumped_result = land.impl.linux(bumped, { signer = "local", minor = true })
+eq(bumped_passed, false, "--minor without Victor's quoted instruction is refused")
+eq((bumped_result or {}).error, "linux_bump_not_authorised", "by name")
+contains(tostring((bumped_result or {}).observed), "bump_not_authorised", "and the answer says what is missing")
+contains(tostring((bumped_result or {}).next), "quote Victor", "and how to fix it: his words, quoted, in the notes")
+eq(origin_main(), before_bump, "main is untouched")
+-- ... and WITH his quoted instruction the same flag is allowed: 0.1.0 -> 0.2.0.
+must("git -C " .. repo .. " -c user.email=f@example.com -c user.name=Fixture commit -q --allow-empty -m 'notes: the minor instruction'", "a commit to read the notes from")
+R.write_file(repo .. "/docs/release/RELEASE_NOTES.md",
+  "# Release notes\n\nVictor: \"0.2.0 is a minor release: the channel and the node have separate lives now.\"\n")
+must("git -C " .. repo .. " add -A && git -C " .. repo .. " -c user.email=f@example.com -c user.name=Fixture commit -q -m 'notes: quote Victor'", "commit the quoted instruction")
+local allowed = channel_run("linuxJ")
+local allowed_passed, allowed_result = land.impl.linux(allowed, { signer = "local", minor = true })
+eq(allowed_passed, true, "with the quoted instruction the minor bump is allowed (" ..
+  tostring((not allowed_passed) and (allowed_result and allowed_result.observed or allowed_result)) .. ")")
+eq((allowed.journal.linux or {}).version, "0.2.0", "and it publishes 0.2.0")
+eq((allowed.journal.linux or {}).tag, "v0.2.0", "under the tag v0.2.0")
 
 -- -------- a second run of the same step publishes nothing twice
 local again_before = origin_main()
@@ -143,7 +190,7 @@ local routed_passed, routed_result = land.impl.linux(routed, { signer = "laptop"
 eq(routed_passed, true, "a run that signs on another node publishes the channel too (" ..
   tostring((not routed_passed) and (routed_result and routed_result.observed or routed_result)) .. ")")
 eq(R.state.sign_calls, sign_calls_before + 1, "and the sums were signed on that node, once")
-contains(tostring((routed_result or {}).detail), "wa-linux-", "its answer names the channel tag as well")
+contains(tostring((routed_result or {}).detail), "published v", "its answer names the release it published as well")
 contains(live_channel(origin_main()), routed_sha, "the live index names the release")
 
 R.stop_vault()

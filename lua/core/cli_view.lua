@@ -3528,14 +3528,23 @@ function M.banner(opts)
   -- as the marker: no component here spells the rule character itself, so a width fixed at composition
   -- time cannot hide in the banner (round 4, item 1).
   local divider = paint(opts.marker and M.RULE or M.expand_rules(M.RULE, limit), "border", live)
-  local lines = { divider,
-    paint(STAR, "matrix", live) .. " Welcome to " .. paint("wasm-agent", "bold", live) .. "!"
-      -- The product version, then the build's own name (Victor, 22/11): `v0.1.0 · vc6f890e3`. The product
-      -- version is one constant (`build_identity.PRODUCT_VERSION`) and a caller that has none says
-      -- nothing rather than inventing one.
-      .. ((opts.product and opts.product ~= "") and paint(" v" .. opts.product, "muted", live) or "")
-      .. (((opts.product and opts.product ~= "") and (opts.version and opts.version ~= "")) and paint(" \194\183 ", "muted", live) or "")
-      .. ((opts.version and opts.version ~= "") and paint("v" .. opts.version, "muted", live) or ""),
+  -- THE TWO FACTS ON ONE LINE (Victor, 22/11: "make v0.1.0 be reflected into the entrance; v1.0 is wrong ...
+  -- the welcome line shows it: 'x Welcome to wasm-agent! v0.1.0 - v<sha>'"). The product version says which
+  -- release a person is running; the label beside it says WHICH BYTES, because a version alone was the 18/11
+  -- lie. Each half is printed only when it is known - `unknown` and `unknown build` are left out rather than
+  -- shown as a word - so an older binary reads `Welcome to wasm-agent! v<sha>` and never `vunknown`.
+  local product = (opts.product and opts.product ~= "" and opts.product ~= "unknown") and opts.product or nil
+  local label = (opts.version and opts.version ~= "" and opts.version ~= "unknown build") and opts.version or nil
+  local welcome = paint(STAR, "matrix", live) .. " Welcome to " .. paint("wasm-agent", "bold", live) .. "!"
+  if product then welcome = welcome .. paint(" v" .. product, "muted", live) end
+  -- A commit label is prefixed with `v` (`v6a7f613d`); a release tag (`node-<sha12>`) and a pin already carry
+  -- their own word and are printed as they are.
+  local function with_v(word)
+    if word:sub(1, 1) == "v" or word:sub(1, 5) == "node-" then return word end
+    return "v" .. word
+  end
+  if label then welcome = welcome .. paint((product and " \194\183 " or " ") .. with_v(label), "muted", live) end
+  local lines = { divider, welcome,
     "",
     paint(fit("/help for help, /login to sign in to a provider"), "muted", live),
     "" }

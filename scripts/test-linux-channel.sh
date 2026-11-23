@@ -133,6 +133,8 @@ mkdir -p "$repo/scripts/lib" "$repo/releases"
 # tracked copy would make every case after the first one `source_dirty` (the publisher's own refusal) - which is
 # exactly what happened on the first run of this suite.
 printf 'releases/index-linux.json\n' > "$repo/.gitignore"
+# THE VERSION, the one owner of the number the channel publishes under (v<version>).
+printf '0.1.0\n' > "$repo/VERSION"
 cp "$ROOT/scripts/publish-linux-channel.sh" "$ROOT/scripts/check-linux-channel-fresh.sh" "$repo/scripts/"
 # The verifier is the REAL one: a signature is worth what the verifier says it is, so the fixture judges the
 # publisher's chain with the same code a node installs with.
@@ -320,11 +322,10 @@ else
   bad 'publish two targets' "$out"
 fi
 short=${NEW:0:12}
-[ -f "$FAKE_GH_STATE/wa-linux-$short/wa-linux-x64-musl-$short.tar.gz" ] && [ -f "$FAKE_GH_STATE/wa-linux-$short/wa-linux-arm64-musl-$short.tar.gz" ] \
+[ -f "$FAKE_GH_STATE/v0.1.0/wa-linux-x64-musl-$short.tar.gz" ] && [ -f "$FAKE_GH_STATE/v0.1.0/wa-linux-arm64-musl-$short.tar.gz" ] \
   && ok 'the release carries both archives' || bad 'both archives on the release' "$(ls -R "$FAKE_GH_STATE" 2>&1)"
-[ -f "$FAKE_GH_STATE/wa-linux-$short/SHA256SUMS.sig" ] && ok 'and the signed SHA256SUMS beside them (the installer refuses a release without it)' || bad 'signature uploaded'
-rows=$(grep -c "$short" "$FAKE_GH_STATE/wa-linux-$short/SHA256SUMS" 2>/dev/null || echo 0)
-[ "$rows" = 2 ] && ok 'one SHA256SUMS naming both archives (accumulated, not the last one winning)' || bad 'sums rows' "$(cat "$FAKE_GH_STATE/wa-linux-$short/SHA256SUMS" 2>&1)"
+[ -f "$FAKE_GH_STATE/v0.1.0/SHA256SUMS.sig" ] && ok 'and the signed SHA256SUMS beside them (the installer refuses a release without it)' || bad 'signature uploaded'
+grep -q "wa-linux-x64-musl-$short.tar.gz" "$FAKE_GH_STATE/v0.1.0/SHA256SUMS" 2>/dev/null   && grep -q "wa-linux-arm64-musl-$short.tar.gz" "$FAKE_GH_STATE/v0.1.0/SHA256SUMS" 2>/dev/null   && ok 'one SHA256SUMS naming both archives (accumulated, not the last one winning)' || bad 'sums rows' "$(cat "$FAKE_GH_STATE/v0.1.0/SHA256SUMS" 2>&1)"
 out=$(python3 - "$repo/releases/index-linux.json" "$NEW" <<'PY'
 import json, re, sys
 doc = json.load(open(sys.argv[1])); commit = sys.argv[2]
@@ -347,6 +348,14 @@ print("\n".join(problems) if problems else "OK")
 PY
 )
 [ "$out" = OK ] && ok 'each entry carries every field scripts/linux/bootstrap.sh validates, and they are newest-first' || bad 'entry contract' "$out"
+# THE TAG IS THE PRODUCT VERSION (Victor, 22/11): v0.1.0 from the tree's VERSION, not a per-commit tag.
+python3 - "$repo/releases/index-linux.json" <<'PY' > "$T/tagcheck" 2>&1
+import json, sys
+doc = json.load(open(sys.argv[1]))
+print(chr(10).join(sorted({str(r.get("tag")) for r in doc.get("releases", [])})))
+PY
+tag_seen=$(cat "$T/tagcheck")
+if [ "$tag_seen" = "v0.1.0" ]; then ok "every entry names the release v0.1.0 (the tree VERSION file)"; else bad "entry tag" "$tag_seen"; fi
 kept=$(grep -c '"tag"' "$repo/releases/index-linux.json")
 [ "$kept" -gt "$old_entries" ] && ok 'the older entries are kept below the new ones (the channel keeps its history)' || bad 'history kept' "$kept vs $old_entries"
 # Re-running is idempotent by EFFECT: the same two entries, not four.

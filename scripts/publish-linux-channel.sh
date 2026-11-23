@@ -9,8 +9,10 @@
 # installs from the INDEX; an existing node updates from a `node-<sha12>` release. Two channels, and only one
 # of them was being published.
 #
-# THE TAG: `wa-linux-<sha12>`, one release per commit - the shape the Android channel already uses
-# (`wa-android-<sha12>`, scripts/release-android.sh). Deliberately NOT the `node-<sha12>` release: that one's
+# THE TAG: `v<version>` - `v0.1.0`, then `v0.1.1`, one release per cut, from the tree's ONE version owner (the
+# `VERSION` file, which `wa release cut` writes). It used to be `wa-linux-<sha12>`, one tag per commit, and the
+# channel was a third numbering beside the product's (Victor, 22/11: "make v0.1.0 be reflected into the entrance
+# ... each release we add v0.1.0 then v0.1.1"). Deliberately NOT the `node-<sha12>` release: that one's
 # SHA256SUMS + SHA256SUMS.sig are the node binaries' own trust root (scripts/publish-node-binaries.sh), and a
 # second SHA256SUMS uploaded into it would silently re-point every node's verification at other bytes.
 #
@@ -31,7 +33,7 @@
 #   --commit SHA     the source commit (default HEAD; must be the checked-out HEAD, on origin/main unless the
 #                    tree is a fixture - release-linux.sh enforces that per target)
 #   --tree DIR       the checkout to build from (default: this script's repository)
-#   --tag TAG        the release tag (default wa-linux-<sha12>)
+#   --tag TAG        the release tag (default v<the tree's VERSION>, e.g. v0.1.0)
 #   --targets "T"    the triples to publish (default: x86_64-unknown-linux-musl aarch64-unknown-linux-musl)
 #   --out DIR        the build/channel directory (default <tree>/build/linux-channel)
 #   --index FILE     the index to write (default <tree>/releases/index-linux.json)
@@ -83,11 +85,14 @@ commit=$(git -C "$tree" rev-parse --verify -q "$commit^{commit}") || fail "commi
 [ -z "$(git -C "$tree" status --porcelain --untracked-files=no)" ] || fail 'source_dirty: commit before publishing a channel entry: the entry is the trust root for the bytes this tree would build'
 short=$(printf '%.12s' "$commit")
 
-tag=${tag:-wa-linux-$short}
+# THE VERSION IS THE TREE'S, not a second number decided here: the tag is `v` + the first line of `VERSION`.
+if [ -z "$tag" ]; then
+  [ -f "$tree/VERSION" ] || fail "version_missing: $tree/VERSION (the one owner of the product version; wa release cut writes it)"
+  tag="v$(sed -n '1p' "$tree/VERSION" | tr -d ' \r')"
+fi
 case "$tag" in
-  wa-linux-*) ;;
-  v[0-9]*) ;;
-  *) fail "tag_invalid: '$tag' (a channel release is wa-linux-<sha12>, or a v<semver> tag)" ;;
+  v[0-9]*.[0-9]*.[0-9]*) ;;
+  *) fail "tag_invalid: '$tag' (a channel release is v<major>.<minor>.<patch>, e.g. v0.1.0)" ;;
 esac
 
 # AN ALLOW-LIST, not a rejection list: the two static triples this channel publishes, because a bundle that is

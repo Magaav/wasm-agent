@@ -57,6 +57,20 @@ function M.native()
   return ok and decode(raw) or nil
 end
 
+--- The PRODUCT version (`0.1.0`), the number a person reads, or `unknown`.
+--
+-- It is not the identity (`M.label()` is: a version cannot tell two nodes apart - Victor, 18/11). It is the
+-- other half of the same line, and it comes from ONE owner: the tree's `VERSION` file, embedded in the binary
+-- at build time and read back through `host.build_identity()`. A binary older than that field answers
+-- `unknown`, which is the honest answer - never a made-up number and never the crate's own.
+function M.product_version(opts)
+  local o = opts or {}
+  local native = o.native
+  if native == nil then native = M.native() elseif native == false then native = nil end
+  local text = trim((native or {}).product_version)
+  return text ~= "" and text or "unknown"
+end
+
 --- Which of the four shapes a label is, read back from the string.
 --
 -- Presentation only: `install_label` already DECIDED, and this only says which case its answer belongs

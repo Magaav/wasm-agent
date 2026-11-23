@@ -439,6 +439,12 @@ local function setup_fixture()
   -- The channel's index and its freshness check are REAL (the check reads the fixture repository's own
   -- node-<sha12> tags), so the `linux` step is held to the same verdict a fresh machine would get.
   must("mkdir -p " .. repo .. "/releases", "create releases/")
+  -- THE PRODUCT VERSION (Victor, 22/11): one file, its own owner, and the release bumps it. The fixture starts
+  -- at 0.1.0 - the version the next release takes when no v0.1.0 tag exists yet.
+  write_file(repo .. "/VERSION", "0.1.0\n")
+  -- The release notes file a minor/major bump is authorised in (empty of quotes: nothing is authorised yet).
+  must("mkdir -p " .. repo .. "/docs/release", "create docs/release/")
+  write_file(repo .. "/docs/release/RELEASE_NOTES.md", "# Release notes\n\n## Quoted instructions\n\n(none yet)\n")
   write_file(repo .. "/releases/index-linux.json",
     "{\n  \"schema\": \"wasm-agent-linux-release-index\",\n  \"schema_version\": 1,\n  \"notes\": \"newest first\",\n  \"releases\": []\n}\n")
   must("cp -f " .. tree_root .. "/scripts/check-linux-channel-fresh.sh " .. repo .. "/scripts/check-linux-channel-fresh.sh",

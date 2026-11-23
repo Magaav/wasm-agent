@@ -3575,11 +3575,102 @@ end
 M.LINUX_TARGETS = "x86_64-unknown-linux-musl aarch64-unknown-linux-musl"
 M.LINUX_INDEX = "releases/index-linux.json"
 
--- <sha> -> the release tag the channel's bundles live under. One release per commit, the shape the Android
--- channel already uses (`wa-android-<sha12>`) - and deliberately NOT `node-<sha12>`, whose SHA256SUMS and
--- SHA256SUMS.sig are the node binaries' own trust root: a second SHA256SUMS there would re-point every node's
--- verification at other bytes.
-function M.linux_tag(sha) return "wa-linux-" .. tostring(sha or ""):sub(1, 12) end
+-- ---------------------------------------------------------------- the product version (`VERSION`)
+--
+-- ONE OWNER (Victor, 22/11): the `VERSION` file at the tree root. The binary embeds it at build time
+-- (`rust/wa-host/build.rs`, `rust/wa-capabilities/src/host.rs`), the welcome line and `wa --version` print it,
+-- and the RELEASE is the only thing that writes it. A release takes the next number: `v0.1.0` first, then
+-- 0.1.1, 0.1.2 ... - the patch moves by one per release, and minor/major move ONLY when the operator says so
+-- with `--minor`/`--major` AND Victor's own quoted instruction in `docs/release/RELEASE_NOTES.md` (he decides
+-- when a 1.0.0 is due: "[a 1.0.0] needs major changes so i need to say so").
+M.VERSION_FILE = "VERSION"
+M.VERSION_NOTES = "docs/release/RELEASE_NOTES.md"
+
+-- <text> -> {major, minor, patch} or nil. `0.1.0` and nothing else: a version this does not understand must not
+-- be bumped by accident.
+function M.parse_product_version(text)
+  local major, minor, patch = tostring(text or ""):match("^(%d+)%.(%d+)%.(%d+)$")
+  if not major then return nil end
+  return { major = tonumber(major), minor = tonumber(minor), patch = tonumber(patch) }
+end
+
+function M.format_product_version(version)
+  return string.format("%d.%d.%d", tonumber(version.major) or 0, tonumber(version.minor) or 0, tonumber(version.patch) or 0)
+end
+
+-- <version-or-text> -> the release tag the public channel publishes under (`v0.1.0`).
+function M.version_tag(version)
+  local text = tostring(version or "")
+  if text:sub(1, 1) == "v" then return text end
+  return "v" .. text
+end
+
+-- <tree> -> the version this tree carries, or nil + why. Read from the checkout, so a resume reads the same
+-- number the release was started from.
+function M.tree_version(tree)
+  local text = read(slashes(tree) .. "/" .. M.VERSION_FILE)
+  if not text then return nil, "version_file_missing: " .. M.VERSION_FILE .. " is not in this tree" end
+  local line = trim(first_line(text))
+  local parsed = M.parse_product_version(line)
+  if not parsed then
+    return nil, "version_invalid: " .. M.VERSION_FILE .. " holds '" .. line .. "' and this release bumps only d.d.d"
+  end
+  return parsed, nil
+end
+
+-- <tree> <current> <options> -> the version this release takes, and how it was decided. The TAGS are the facts:
+-- a number that already has a `v<number>` tag has been released, so the cut takes the next one - and a tree
+-- whose VERSION names a release with no tag yet takes that number as it is (that is the first cut).
+function M.next_version(tree, current, options)
+  options = options or {}
+  -- TAKEN means the release tag exists, and the REMOTE is the authority: `gh release create` makes the tag on
+  -- origin, and a tree that never fetched tags would happily cut the same number twice. One ls-remote per
+  -- candidate, and a remote that cannot be reached answers "not taken" only after the local check failed too -
+  -- which is the answer that publishes (and a duplicate tag is refused by gh, loudly, not silently).
+  local function taken(version)
+    local tag = M.version_tag(M.format_product_version(version))
+    if rev(tree, tag) ~= nil then return true end
+    return remote_tip(tree, M.origin(), "refs/tags/" .. tag) ~= nil
+  end
+  local candidate
+  if options.major then
+    candidate = { major = current.major + 1, minor = 0, patch = 0 }
+    while taken(candidate) do candidate.major = candidate.major + 1 end
+    return candidate, "explicit major bump"
+  end
+  if options.minor then
+    candidate = { major = current.major, minor = current.minor + 1, patch = 0 }
+    while taken(candidate) do candidate.minor = candidate.minor + 1 end
+    return candidate, "explicit minor bump"
+  end
+  candidate = { major = current.major, minor = current.minor, patch = current.patch }
+  if not taken(candidate) then return candidate, "VERSION names a release that has no tag yet" end
+  repeat candidate.patch = candidate.patch + 1 until not taken(candidate)
+  return candidate, "one patch past the newest release"
+end
+
+-- <tree> <kind> <version> -> true, or false + why. A minor or major bump is Victor's decision, and the ONLY
+-- evidence this accepts is his instruction QUOTED in the release notes file, naming the bump and the version it
+-- produces. A flag alone is never enough.
+function M.bump_is_authorised(tree, kind, version)
+  local text = read(slashes(tree) .. "/" .. M.VERSION_NOTES)
+  if not text then
+    return false, "notes_missing: " .. M.VERSION_NOTES .. " is not in this tree, so no " .. kind .. " bump can be authorised"
+  end
+  local text_version = M.format_product_version(version)
+  local want = M.version_tag(text_version)
+  for line in text:gmatch("[^\r\n]+") do
+    if line:find("Victor", 1, true) then
+      for quote in line:gmatch('"(.-)"') do
+        local lowered = quote:lower()
+        local names = quote:find(want, 1, true) or quote:find(text_version, 1, true)
+        if lowered:find(kind, 1, true) and names then return true, line end
+      end
+    end
+  end
+  return false, "bump_not_authorised: a " .. kind .. " bump needs Victor's quoted instruction naming " .. want ..
+    " in " .. M.VERSION_NOTES .. " - a flag alone never moves the minor or the major"
+end
 
 -- <options> -> the triples to publish, as a list. An unknown one is refused by the publisher too; here it is
 -- refused before the build (the allow-list is the channel's, and the channel publishes static musl only).
@@ -3637,7 +3728,31 @@ impl.linux = function(run, options)
       next = "wa release cut --run " .. tostring(run.id) .. " --resume" }
   end
   local short = tostring(sha):sub(1, 12)
-  local tag = M.linux_tag(sha)
+  -- THE VERSION IS DECIDED HERE, by the release, from the tree's `VERSION` file and the tags that exist
+  -- (`M.next_version`): `v0.1.0` for the first cut, one patch more for each after it. A minor or major bump is
+  -- refused unless Victor's quoted instruction is in the notes file.
+  local current, why_version = M.tree_version(tree)
+  if not current then
+    return false, { error = "linux_version_unreadable",
+      detail = "the channel was not published for " .. short .. " because this release has no version",
+      observed = tostring(why_version),
+      next = "add " .. M.VERSION_FILE .. " at the tree root (its current release number, e.g. 0.1.0) and cut again" }
+  end
+  if options.major or options.minor then
+    local kind = options.major and "major" or "minor"
+    local decided = M.next_version(tree, current, options)
+    local authorised, why_bump = M.bump_is_authorised(tree, kind, decided)
+    if not authorised then
+      return false, { error = "linux_bump_not_authorised",
+        detail = "the " .. kind .. " bump was refused, so nothing was published",
+        observed = tostring(why_bump),
+        next = "quote Victor's instruction naming " .. M.version_tag(M.format_product_version(decided)) .. " in " .. M.VERSION_NOTES ..
+          ", commit it, then wa release cut --run " .. tostring(run.id) .. " --resume" }
+    end
+  end
+  local next_version, version_why = M.next_version(tree, current, options)
+  local version_text = M.format_product_version(next_version)
+  local tag = M.version_tag(version_text)
   -- AN ALLOW-LIST, before anything is built or published: this channel publishes the two STATIC musl triples,
   -- because a bundle that is not static needs a libc floor on the machine that installs it (the 30/10 defect
   -- that made the first published bundle refuse on an older Ubuntu). A caller cannot widen it by naming a
@@ -3721,7 +3836,7 @@ impl.linux = function(run, options)
   if already then
     local passed, verdict = verify_live()
     if not passed then return false, verdict end
-    run.journal.linux = { tag = tag, targets = targets, state = "already_present", live = verdict }
+    run.journal.linux = { tag = tag, version = version_text, targets = targets, state = "already_present", live = verdict }
     return true, { detail = "the channel already names " .. short .. " for " .. #targets .. " target(s) on " .. M.origin() .. "/main (not published again; " .. tostring(verdict) .. ")" }
   end
 
@@ -3745,6 +3860,13 @@ impl.linux = function(run, options)
     end
   end
   local index = slashes(index_tree) .. "/" .. M.LINUX_INDEX
+  -- THE VERSION IS WRITTEN IN THE SAME COMMIT as the entry it names: one commit, one release, so the number a
+  -- person reads and the bytes a machine installs never disagree. Idempotent: a first cut of a tree whose
+  -- VERSION already says 0.1.0 writes the same bytes and stages nothing for it.
+  local version_path = slashes(index_tree) .. "/" .. M.VERSION_FILE
+  if not write(version_path, version_text .. "\n") then
+    return false, { error = "linux_version_write_failed", observed = "cannot write " .. version_path }
+  end
 
   -- THE PUBLISH: build, sign, verify, upload, write the entry. One command, so the standalone operator path and
   -- the release path are the same code (scripts/publish-linux-channel.sh).
@@ -3803,7 +3925,7 @@ impl.linux = function(run, options)
       next = "nothing was committed and main is untouched; the publisher's own words are in " .. M.evidence_path(run.id, "linux") }
   end
   -- THE COMMIT: exactly one path, staged and committed by name, so nothing else can travel with it.
-  local added = git(run, index_tree, "add -- " .. quote(M.LINUX_INDEX), 300)
+  local added = git(run, index_tree, "add -- " .. quote(M.VERSION_FILE) .. " " .. quote(M.LINUX_INDEX), 300)
   evidence(command_line("stage the index", "git add -- " .. M.LINUX_INDEX .. " (in " .. index_tree .. ")"))
   evidence((added.stdout or "") .. (added.stderr or ""))
   if (added.code or 1) ~= 0 then
@@ -3812,8 +3934,9 @@ impl.linux = function(run, options)
   local staged = git(run, index_tree, "diff --cached --name-only", 120)
   local staged_names = {}
   for line in tostring(staged.stdout or ""):gmatch("[^\r\n]+") do staged_names[#staged_names + 1] = trim(line) end
+  local may_move = { [M.LINUX_INDEX] = true, [M.VERSION_FILE] = true }
   for _, name in ipairs(staged_names) do
-    if name ~= M.LINUX_INDEX then
+    if not may_move[name] then
       return false, { error = "linux_index_path_not_allowed",
         observed = "the index commit would carry " .. name .. " as well as " .. M.LINUX_INDEX,
         next = "only the channel index may move in this commit; reset " .. index_tree .. " and resume" }
@@ -3821,7 +3944,8 @@ impl.linux = function(run, options)
   end
   local index_commit = rev(index_tree, "HEAD")
   if #staged_names > 0 then
-    local committed = git(run, index_tree, "commit -q -m " .. quote("releases: the public Linux channel " .. tag .. " for " .. short) .. " -- " .. quote(M.LINUX_INDEX), 600)
+    local message = "releases: " .. tag .. ", the public Linux channel for " .. short
+    local committed = git(run, index_tree, "commit -q -m " .. quote(message) .. " -- " .. quote(M.VERSION_FILE) .. " " .. quote(M.LINUX_INDEX), 600)
     evidence(command_line("commit the index", "git commit -m 'releases: the public Linux channel " .. tag .. " for " .. short .. "' -- " .. M.LINUX_INDEX))
     evidence((committed.stdout or "") .. (committed.stderr or ""))
     if (committed.code or 1) ~= 0 then
@@ -3867,10 +3991,10 @@ impl.linux = function(run, options)
   if rev(index_tree, "HEAD") == index_commit then
     git(run, tree, "worktree remove --force " .. quote(index_tree), 300)
   end
-  run.journal.linux = { tag = tag, targets = targets, state = "published", index_commit = index_commit,
-    index_base = base, entries = #targets, live = verdict }
-  return true, { detail = string.format("published %s (%d target(s)) and %s on %s/main = %s (read back, %s)",
-    tag, #targets, M.LINUX_INDEX, origin, tostring(index_commit):sub(1, 12), tostring(verdict)) }
+  run.journal.linux = { tag = tag, version = version_text, version_why = version_why, targets = targets,
+    state = "published", index_commit = index_commit, index_base = base, entries = #targets, live = verdict }
+  return true, { detail = string.format("published %s (%d target(s): %s) and %s on %s/main = %s (the version is %s; read back, %s)",
+    tag, #targets, tostring(version_why), M.LINUX_INDEX, origin, tostring(index_commit):sub(1, 12), version_text, tostring(verdict)) }
 end
 
 -- the ring, as configured: `--ring name:mode,...`, else `<config>/land/ring.json`, else M.RING.

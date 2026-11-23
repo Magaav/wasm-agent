@@ -33,6 +33,26 @@ echo "test-build-info: $WABIN"
 
 INFO="$("$WABIN" --build-info 2>&1)"
 [ -n "$INFO" ] && ok "the binary answers --build-info" || bad "the binary answered nothing"
+# THE PRODUCT VERSION (Victor, 22/11): one owner in the tree (VERSION), embedded at build time, and `version=` in
+# this document is it - not cargo's crate metadata, which says 0.1.0 on every node whatever it runs.
+TREE_VERSION="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)/VERSION"
+if [ -f "$TREE_VERSION" ]; then
+  WANT_VERSION="$(sed -n '1p' "$TREE_VERSION")"
+  echo "$INFO" | grep -qx "version=$WANT_VERSION" && ok "version= is the tree's product version ($WANT_VERSION)" \
+    || bad "version= is the product version" "$(echo "$INFO" | grep '^version=')"
+else
+  bad "the tree has a VERSION file" "$TREE_VERSION"
+fi
+# --version: the product version AND the sha of the bytes, on one line, in that order.
+VERSION_LINE="$("$WABIN" --version 2>&1 | head -1)"
+case "$VERSION_LINE" in
+  "wasm-agent v$WANT_VERSION "*) ok "--version prints the product version then the bytes' own name" ;;
+  *) bad "--version prints 'wasm-agent v<version> . v<sha>'" "$VERSION_LINE" ;;
+esac
+case "$VERSION_LINE" in
+  *"$WANT_VERSION"*"v"*) ok "--version carries both halves" ;;
+  *) bad "--version carries both halves" "$VERSION_LINE" ;;
+esac
 
 field() { printf '%s\n' "$INFO" | sed -n "s/^$1=//p" | head -1; }
 
