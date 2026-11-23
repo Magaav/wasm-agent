@@ -124,9 +124,10 @@ Measured with the same external lock (`scratch/probe-audit.lua`):
   (the append really appends, refuses outside its root; 64 checks, 13 capabilities compared).
 * `telemetry.audit` spools the row BEFORE answering `false` and returns `false, reason, "spooled"`; only if
   the spool cannot be written does it fall back to `owed` in memory and say so (`"memory"`).
-* `telemetry.flush_audit()`: spool rows first (oldest first), then `owed`, one patience for the first row and
-  one attempt for the rest, stop at the first refusal, keep the rest, rewrite the spool without what was
-  written. `telemetry.spool_pending()` reads the file and reports how many rows it holds.
+* `telemetry.flush_audit()`: **the flush TAKES, it never rewrites** (Fable's review r2 - see 3b). Spool rows
+  first (oldest first), then `owed`, one patience for the first row and one attempt for the rest, stop at the
+  first refusal, append the rest back. `telemetry.spool_pending()` reads the spool and every adoptable
+  private file and reports how many rows they hold.
 * `lua/core/agent.lua` flushes the spool at the START of a run (inside the start window, so a jammed ledger
   cannot stall the turn's first second - `pcall`, because a refusal must not stop the turn) and at the end.
 * A line in the spool that does not parse is KEPT and named (`unreadable_spool_line`), never deleted: a record
@@ -140,9 +141,67 @@ The cost is named rather than hidden: a jammed ledger can hold a redaction's tur
 existing before the answer does - accepted by Fable's review, and this is the line for the changelog. Ordinary
 accounting records keep the old, droppable path.
 
-Measured after the change, same external lock (`scratch/probe-audit.lua` is the pre-spool probe; the row below
-is the shippped path, `scripts/test-secret-audit.lua`, 48 checks): the refused record is spooled (mode 600,
-no secret in the file), a SIGKILLed process loses nothing, and the next process writes the row exactly once.
+Measured after the change (`scripts/test-secret-audit.lua`, 71 checks): the refused record is spooled (mode
+600, no secret in the file), a SIGKILLed process loses nothing, the next process writes the row exactly once,
+and an append that lands in the middle of a flush is in the ledger afterwards (3b).
+
+### 3b. The lost update in the spool, and the take that closes it - Fable's review r2
+
+**The race, as Fable named it:** `spool_rewrite` was a read-modify-write through `write_file`. Process A's
+flush reads the spool, process B appends a refused record, A writes the file back without B's line: B's record
+is gone - the exact loss this branch exists to stop, and two processes on one data dir (`wa serve` + workers)
+is the normal case here.
+
+**The fix, without a lock** (`lua/core/telemetry.lua` `M.flush_audit`, `spool_listing`, `spool_append_entries`,
+`spool_drop`):
+
+1. the flusher **renames** the spool to a private name it owns (`audit-spool.<uuid>.flushing`, atomic);
+2. it processes **that file** - every row to the ledger, one patience for the first, one attempt for the rest,
+   stopping at the first refusal;
+3. rows the ledger still refuses are **re-appended** to `audit-spool.jsonl` with `append_file` (an appender's
+   line can never be lost by an append), and only then is the private file removed - a file is not removed
+   before its rows are safe;
+4. a start-up flush **adopts any `*.flushing` file older than 60 s** (by the age `host.list_dir` reports, which
+   the host already answers - no new metadata reach) - a flusher that was killed. Adoption is itself a rename
+   to a name of the adopter's own, so two flushers can never both adopt one file.
+
+Appenders only ever append to `audit-spool.jsonl`. `harness_events.id` stays UNIQUE, so an adopted row that is
+already in the ledger is read as "already there" and the file is dropped without a second write.
+
+**Two more primitives, and why they add no reach.** `host.rename_file(from, to)` is the take: it **refuses an
+existing target** (so two flushers cannot win one file) and fsyncs both directory entries.
+`host.remove_file(path)` is the cleanup after the rows are safe. Neither reaches anywhere `write_file` could
+not already: `remove_file(p)` is what `write_file(p, "")` already did to a regular file, and a rename is a
+write plus a delete of the same paths. **`rename_file` is the primitive Fable's instruction names;
+`remove_file` is the one it does not** - it exists because the alternative was one 0-byte file left behind per
+recovery flush, and it is flagged here for approval. Both are `Effect::WritesFiles`, both are in
+`docs/HOST.md`'s inventory (whose drift test failed until the row was added - it named the capability), and the
+contract fake answers both and is judged on them: `rename_file`, `rename_file-existing-target`,
+`remove_file`, `remove_file-missing` (80 checks, 17 capabilities compared).
+
+**The test for it** (`scripts/test-secret-audit.lua` phase 4): a record is refused and spooled; the spool is
+taken by rename exactly as a flusher takes it; a SECOND record is refused and appended during that window; the
+taken file is aged 2 minutes like a killed flusher's; one flush then writes **both** - the taken record and the
+one appended during the flush - each exactly once, and both files are gone afterwards. With the rewrite that
+Fable found, the appended record would be dropped and the taken one never adopted; with a flush that rewrote
+anything, either would be lost.
+
+### 3c. The prompt prefix did not move a byte
+
+A new host capability changes nothing the model sees, and that must be measured, not believed:
+`scripts/probe-prompt-bytes.lua` on the base tree and on this branch, both run from paths of the SAME length
+(`…/secret-event-never-lost/wt` and `…/secret-event-never-lost/bs`, 53 characters each - the prompt embeds
+`<workdir>` and the AGENTS.md source path, so two trees at different path lengths differ by the path and by
+nothing else; that is exactly what the first comparison showed, 30 bytes, and a diff of the two dumps named
+the three path strings).
+
+    base   (2104a4d8): catalogue guest 23 / master 74, envelope 12 tools, envelope_bytes 8059,
+                       codemode_bytes 1388, system_bytes 21409, prompt_bytes 29468, retired 0
+    branch (this one): catalogue guest 23 / master 74, envelope 12 tools, envelope_bytes 8059,
+                       codemode_bytes 1388, system_bytes 21409, prompt_bytes 29468, retired 0
+
+IDENTICAL, byte for byte - the two probe lines compare equal as strings, and a dump of the full system prompt
+from each tree differs only in the two tree paths when the paths differ in length.
 
 ## 4. The test, and why it can fail
 
@@ -153,7 +212,7 @@ otherwise leaves untouched. The contract fake (`scripts/lib/contract-host.lua`) 
 one answer per statement and has no SQLite behind it, and this row needs the real schema and the real loop -
 so the injected answer is a wrapper around the real host, said in the file's own header.
 
-48 checks, four phases:
+71 checks, five phases:
 
 * (1) two refusals during the turn: the turn runs, the transcript has no secret, **and the
   `secret_redacted` row is in the ledger**, nothing owed, `drops().count == 0`, and the two refusals really
@@ -170,7 +229,9 @@ so the injected answer is a wrapper around the real host, said in the file's own
   this tree's binary from `WA_FAST_BIN`/`WA_BIN` - it refuses to run without one rather than pass), the child
   spools a refused record and is KILLED by `timeout -s KILL` (asserted: exit 137, and the ledger gained no row),
   and the parent - a NEW process - flushes it: exactly one row with the child's `run_id`, and a second flush
-  writes nothing more.
+  writes nothing more;
+* (4) the RACE of §3b: take by rename, a refused append during the window, an aged taken file, one flush -
+  both records in the ledger exactly once.
 
 Discrimination, measured rather than argued:
 
@@ -205,10 +266,11 @@ because `scripts/fast-path.exclude` does not list it (a `test-*.lua` not listed 
   rows under the suite lock (`flock -o ~/Work/missions/.suite.lock`, the operation ran 951 s) and never
   acquired it: two other missions' suites held it for the whole window; the waiting process was cancelled
   before it ran a single row (`scratch/fast.log` is 0 bytes), so nothing of this branch's fast run has a
-  verdict. What WAS run, individually and green, on this node AFTER Fable's three changes:
-  `test-secret-audit.lua` (48 checks, incl. the kill/restart proof), `test-contract-host.lua` (64 checks, 13
-  capabilities compared), the whole `cargo test -p wa-capabilities` crate (387 passed, 0 failed, `HOME`=scratch
-  the way the gate runs it - `scratch/rust-full.log`), `test-redact-secrets.lua` (23),
+  verdict. What WAS run, individually and green, on this node AFTER Fable's review r2:
+  `test-secret-audit.lua` (71 checks: the durable write, the keep-in-memory answer, the spool and its mode,
+  the kill/restart proof, and the take/append-race of §3b), `test-contract-host.lua` (80 checks, 17
+  capabilities compared), the whole `cargo test -p wa-capabilities` crate (388 passed, 0 failed, `HOME`=scratch
+  the way the gate runs it - `scratch/rust-full2.log`), `probe-prompt-bytes.lua` on base and branch (§3c),
   `test-redact-secrets.lua` (23), `test-telemetry-incremental.lua` (40 checks), `test-telemetry-lock-run.lua`,
   `test-telemetry-lock-holder.lua`, `test-hook-events.lua` (28), `test-durable-steering.lua`,
   `test-stalls.lua` (16); and the always-on contract checks the fast path runs, directly:
@@ -225,6 +287,14 @@ because `scripts/fast-path.exclude` does not list it (a `test-*.lua` not listed 
   about to write anyway. While refusals continue the spool GROWS (one line per refused record); nothing prunes
   it and nothing bounds its size on disk. That is the honest shape of a durable record with no sweeper, and it
   is the next thing to decide if a node ever sits jammed for hours while redacting.
+* **What the take does not protect against.** A flusher that dies AFTER its rows are in the ledger but BEFORE
+  the private file is removed leaves a file whose rows are already stored; the next flush adopts it and the
+  UNIQUE id answers "already there", so nothing is written twice and the file is dropped (asserted by the
+  second-flush check in every phase). A `*.flushing` file younger than 60 s is never adopted, so a flusher
+  slower than 60 s per flush (one patience is 20 s by default, and a flush stops at the first refusal) could
+  in principle have its file adopted by a start-up flush: the cost is a duplicate attempt, never a double row.
+* The row's phase (4) ages the taken file with `touch -d` (GNU coreutils). On a host without it the aging
+  step reports its own failure and the row fails loudly instead of passing.
 * The row's phase (3) needs this tree's binary (`WA_FAST_BIN`, or `WA_BIN` which `scripts/test.sh:1790` now
   sets). It REFUSES with a named reason when neither is given - it does not skip and it does not pass.
 * Out of scope, reported not changed: `lua/core/bash_mode.lua:69` (the operator's own `/bash` command) redacts
@@ -233,10 +303,11 @@ because `scripts/fast-path.exclude` does not list it (a `test-*.lua` not listed 
 
 ### What the harness caught on the way, and what it cost
 
-* The capability drift test (`capabilities::tests::documented_inventory_matches_the_live_registry`) went red as
-  soon as `append_file` was registered, and named the exact capability: `docs/HOST.md` carries a
-  hand-maintained inventory ("adding a capability is two edits: one entry in the registry, one row here"). The
-  row and a prose paragraph are in `docs/HOST.md` now, and that test is green.
+* The capability drift test (`capabilities::tests::documented_inventory_matches_the_live_registry`) went red
+  twice - once for `append_file` and once for `rename_file`/`remove_file` - and named the exact capability:
+  `docs/HOST.md` carries a hand-maintained inventory ("adding a capability is two edits: one entry in the
+  registry, one row here"). All three rows and a prose paragraph are in `docs/HOST.md` now, and that test is
+  green.
 * Two rows of the same crate (`operations::await_returns_at_its_own_wait`,
   `operations::adoption_survives_the_relay_deadline`) failed on my first run and passed on a second: they
   REFUSE to run when `HOME` is the operator's ("this test starts real operations, so HOME must be a scratch or
@@ -250,24 +321,25 @@ new row is not among them (it writes its leak file into its own scratch home, no
 
 ## 7. Texts to approve (new or changed operator-facing strings)
 
-1. `lua/core/agent.lua:3932-3935` - appended to the redaction status line ONLY when the record could not be
+1. `lua/core/agent.lua:3932-3934` - appended to the redaction status line ONLY when the record could not be
    written: `"; its audit record is not in the ledger yet (<reason>) - the node keeps it and retries"`
    (APPROVED by Fable's review of `d1777bce`, unchanged)
-2. `lua/core/agent.lua:2189-2191` (end of a turn, only when records are still owed):
+2. `lua/core/agent.lua:2190-2192` (end of a turn, only when records are still owed):
    `"%d security record(s) are not in the ledger: the ledger would not take them (%s)"` (APPROVED, unchanged)
-3. `lua/core/telemetry.lua:424-426` (node log line, one per record kept in the SPOOL):
+3. `lua/core/telemetry.lua:492-494` (node log line, one per record kept in the SPOOL):
    `"telemetry: the audit record %s is not in the ledger yet (%s) - it is kept and retried, this record is not lost"`
    (APPROVED once item 1 of the review is true - the record is on disk now, so it is)
-4. `lua/core/agent.lua:2192` (node log line, end of a turn):
+4. `lua/core/agent.lua:2193` (node log line, end of a turn):
    `"telemetry.audit: %d security record(s) not stored: %s"` (APPROVED, unchanged)
 5. Test row output (gate): `"secret audit ok (N checks)"`; refusal path: `"REFUSED test-secret-audit.lua: ..."`.
-6. **NEW, awaiting approval** - `lua/core/telemetry.lua:430-432`, the case where even the spool cannot be
+6. **NEW, awaiting approval** - `lua/core/telemetry.lua:498-500`, the case where even the spool cannot be
    written (no data directory, the host refused the append): `"telemetry: the audit record %s is not in the
    ledger yet (%s) and could not be spooled (%s) - it is kept in this process until the run ends"`. It exists
    because the approved line (3) would be a lie on that path, and the node must not go quiet there.
-7. **NEW, awaiting approval** - `lua/core/telemetry.lua:493-494`, node log line when a flush wrote rows but
-   the spool rewrite failed: `"telemetry: the audit spool could not be rewritten after a flush (%s); its rows
-   are in the ledger and a later flush will recognise them"`.
+7. **NEW, awaiting approval** - `lua/core/telemetry.lua:597-599`, node log line when a flush could not put the
+   still-refused rows back into the spool: `"telemetry: the audit spool could not be written back after a
+   flush (%s); the taken files are kept and will be adopted by the next flush"`. (The line that named a failed
+   spool REWRITE is gone with the rewrite itself; this replaces it.)
 
 ## 8. Proposed FACTORY.md / HANDOVER.md text (APPROVED by Fable's review, applied by the orchestrator - NOT written here)
 
