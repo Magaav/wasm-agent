@@ -400,6 +400,25 @@ local function operation_progress(dispatch, opts, record, state)
   if state.output_idle_ms ~= nil then entry.output_idle_ms = tonumber(state.output_idle_ms) end
   if state.promoted ~= nil then entry.promoted = state.promoted end
   entry.output_bytes = tonumber(state.output_bytes) or 0
+  -- WHAT IT IS WAITING ON, when the node knows (item 1, 23/11). The operation's own state carries
+  -- `blocked_on` + `blocked_note` when its process tree is parked on a file lock
+  -- (rust/wa-operation/src/blocked.rs): the measured case is a mission suite queued behind another
+  -- mission's ~/Work/missions/.suite.lock, which answered a bare "running" for 20-50 minutes and sent
+  -- workers probing with ps. The facts and the sentence travel together, so a pending answer says what a
+  -- human would have to run ps to find out.
+  --
+  -- Deliberately NOT added to M.PROGRESS_FIELDS: the sentence carries how long the lock has been held,
+  -- which changes every second, so fingerprinting it would read a wait that is still parked as progress
+  -- and the whole-budget bound (M.PENDING_ANSWER_LIMIT) would never count a parked wait at all.
+  if type(state.blocked_on) == "table" then
+    local facts = state.blocked_on
+    entry.blocked = { kind = tostring(facts.kind or "file_lock") }
+    if type(facts.lock_path) == "string" then entry.blocked.lock = facts.lock_path end
+    if tonumber(facts.holder_pid) then entry.blocked.holder_pid = math.floor(tonumber(facts.holder_pid)) end
+    if type(state.blocked_note) == "string" and state.blocked_note ~= "" then
+      entry.blocked_note = state.blocked_note
+    end
+  end
   local line = tail(dispatch, record.op, state)
   if line then entry.tail = line end
   return entry
