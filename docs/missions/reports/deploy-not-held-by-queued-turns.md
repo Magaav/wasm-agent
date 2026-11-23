@@ -93,9 +93,34 @@ The three Lua rows that read the same deploy state as the new gate are green aga
 `scripts/test-deploy-wait.lua` (59 checks), `scripts/test-deploy-pause.lua` (23), `scripts/test-deploy-resume.lua`
 (25).
 
-**The whole fast path was NOT run here**: my run of `flock -o ~/Work/missions/.suite.lock bash scripts/fast.sh`
-queued behind two other missions' suites on the shared lock and was cancelled rather than hold the queue for an
-hour; nothing of it had started. The land gate runs it.
+**The whole fast path, run three times (`f1326d6c`)**, each under `flock -o ~/Work/missions/.suite.lock`, waiting
+its turn in the lock queue (two runs waited ~20-30 minutes behind other missions' suites and were not cancelled):
+
+| run | result line |
+| --- | --- |
+| 1 (`61b489d3`) | `fast path FAILED (5 of 416 checks, 0 skipped, 1176s)` |
+| 2 (`61b489d3`) | `fast path FAILED (4 of 416 checks, 0 skipped, 592s)` |
+| 3 (`f1326d6c`) | `fast path FAILED (4 of 416 checks, 0 skipped, 618s)` |
+
+**Two of run 1's failures were mine, and are fixed in `f1326d6c`:** `scripts/test-refusal-contract.lua` and
+`scripts/test-regenerate.sh` both failed because `lua/core/nodes.lua` now names two refusal codes
+(`deploy_waiting`, `remote_deploy_waiting`) and the generated map `lua/core/refusal_codes.lua` was stale - fixed
+with the repo's own generator (`lua5.4 scripts/gen-refusal-codes.lua --write`: 593 codes from 106 modules), and
+both rows are green in runs 2 and 3.
+
+**The rest is load, named rather than smoothed over.** The failing set differs between runs - run 2 had
+`subagents::tests::health_shape_is_strict_and_a_cancelling_task_stays_active`, run 3 had
+`test-graph-quarantine-evidence.lua`, which passed in runs 1 and 2 - and every row that failed passes when run
+alone on this tree: `test-land-quick.lua` (176 checks), `test-graph-quarantine-evidence.lua`,
+`test-undo-pty.mjs` (17 ok, 0 failed; the same for `--remote`), and the subagents row 3/3 in a row. What they have
+in common is the machine: `test-land-quick.lua` runs 20 `git` commands against the shared canonical checkout and
+the pty rows are timing-bound, while this box was running other missions' suites and worktrees at load 5-7 (16
+cores) throughout. **Not proven green as a whole**: I did not get a clean 416-check line, and I did not exclude a
+row to manufacture one.
+
+Green in all three runs: the two rows this branch changes - `fast: deploy-wait ok (27279ms)` and
+`fast: deploy-bound ok (589ms)` - plus the Rust rows of both crates this branch touches
+(`fast: rust wa-capabilities ok`, `fast: rust wa-sentinel ok`).
 
 **Discrimination, measured here** (`scripts/test-discriminates.sh ae3cbb37`):
 `discriminates scripts/test-deploy-wait.sh`. The same gate reported `scripts/test-deploy-bound.sh` as *skipped*
