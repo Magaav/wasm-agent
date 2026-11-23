@@ -148,14 +148,23 @@ copy" - the rule this branch changes - and now asserts three, byte-for-byte cont
 ## 5. What a quarantine costs the user today, measured
 
 * The rename is cheap and stays: 182,599,680 B moved aside (same filesystem).
+* **A full rebuild of the same tree costs 88 s, measured on this node** (23/11 01:45 local): a scratch node
+  (installed build `vbfb06cc4`, its own scratch home) indexed `/home/victor/wasm-agent/checkout` - the root
+  every quarantine line names, 2,571 source files - through the scheduler, and was `ready` at
+  `committed_revision:1` after **88 s**, with a store of **181,657,600 B** holding 133,529 nodes / 378,959
+  edges / 2,679 files and passing `integrity_check`. That is the same size as the quarantined store
+  (182,599,680 B), so a quarantine costs the user about a minute and a half of no graph, per cycle.
 * **The rebuild is the cost.** The journal shows the same store quarantined 22/11 at 22:06:26 and again at
   22:25:13 (18 min 47 s later) and at 20:50:33 / 20:54:28 (3 min 55 s apart): whatever the rebuild produced
   was consumed within minutes - each cycle threw away a complete generation (115,947 nodes / 337,621 edges /
   2,605 files on the copy that survived) and re-parsed the tree in its place.
 * Between the quarantine and the rebuild finishing the graph answers nothing (`graph_index_failed ...
   next=Use bounded read/grep now`), which is what the caller sees.
-* The repair this branch adds costs **0.746 s** on the same 182,599,680 B store (measured), and keeps the
-  generation instead of re-deriving it - a rebuild starts at revision 1.
+* The repair this branch adds costs **0.746 s** on the same 182,599,680 B store (measured), against the
+  **88 s** rebuild - about 118x - and it keeps the generation instead of re-deriving it (a rebuild starts at
+  revision 1, so every caller's pinned revision moves and every answer between the two points is lost).
+* The rebuild measured above is also the answer to "how long does a quarantine cost": 88 s of indexing, of
+  which the first part is the copy-free rename and the rest is 2,571 files re-parsed.
 
 ## 5b. Texts to approve (verbatim, operator-facing)
 
