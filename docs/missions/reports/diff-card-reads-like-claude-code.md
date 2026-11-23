@@ -110,6 +110,29 @@ added band = **4.30:1**, just under AA. It is the syntax role, not the row, and 
   stopping at 40 with `… +20 lines (ctrl+o to expand)`, Ctrl+O drawing the hidden line, the Delete card
   and its gap, the same rows inside a 72-column screen after a resize, and `--continue`.
 
+## Checks run (this session, on this node)
+
+| check | result |
+|-------|--------|
+| `tests/diff-view.lua` through the tree's binary (`WASM_AGENT_LUA_ROOT` set) | `diff view ok (73 checks)` |
+| `scripts/test-script-writes-show-diff.lua` through the tree's binary | `script writes show a diff ok (37 checks)` |
+| `cargo test -p wa-term` (202 lib + 4 + 5 + 1) | green, five new card tests among them |
+| `cargo test -p wa-capabilities` (scratch HOME, prepared assets) | `389 passed; 0 failed` |
+| `node scripts/test-diff-card-pty.mjs` (this mission's new pty test) | `diff card pty: 23 ok, 0 failed` |
+| `node scripts/test-capability-inventory.mjs <bin> <fresh dir>` | `ok: true`, 151 entries |
+| `scripts/test-cli-view.lua` / `scripts/test-twin-render.lua` | `557 checks` / `19 checks`, green |
+| `scripts/test-fence-card-pty.mjs` / `scripts/test-reflow-blocks-pty.mjs` | `25 ok` / `32 ok` |
+
+The whole `bash scripts/fast.sh` was started under `flock -o ~/Work/missions/.suite.lock` and then
+CANCELLED by hand after ~15 minutes of queueing: four `wa land` gates and another mission's rows were
+ahead of it in the shared lock, and a queued run of mine behind a landing gate buys nothing the rows
+above do not already show. Nothing of this session was left running. The land gate runs the full path
+(and `scripts/test-discriminates.sh`) itself; the assertions it will run are the ones listed above,
+and every one of them fails on the base: the base folds the card (pty: "the whole diff is drawn"),
+emits `Added 2 lines, removed 1 lines` and the footnote and two number columns (`diff-view`), keeps the
+band as a foreground (the contrast check), and the five new wa-term tests name `cardable`/`cards`,
+which the base does not have.
+
 ## Not done, and what is unknown
 
 * **Word-level highlight inside a changed pair of lines** (item 6's second half) is NOT implemented.
