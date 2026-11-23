@@ -235,8 +235,10 @@ try {
   check('one blank row BELOW it, so the answer is never glued to it',
     close > 0 && isBlank(rows[close + 1]) && String(rows[close + 2] || '').includes(PLAN[0].final),
     JSON.stringify(rows.slice(close, close + 3)));
+  // ONE number column: the row's lead is the bar, the line's own number and the marker, so the
+  // code starts where the card's bar plus four cells ends (the base kept a second, empty column).
   check('one number column, the line\'s own',
-    screen().includes('  1 + line_01 = 1') && !screen().includes('  1    + '), screen());
+    screen().includes('\u2502  1 + line_01 = 1'), screen());
 
   // ---- turn 2: one line changes, and the count row says so -------------------------------------
   await ask('change the first line', PLAN[1].final);

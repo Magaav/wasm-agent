@@ -126,12 +126,17 @@ added band = **4.30:1**, just under AA. It is the syntax role, not the row, and 
 The whole `bash scripts/fast.sh` was started under `flock -o ~/Work/missions/.suite.lock` and then
 CANCELLED by hand after ~15 minutes of queueing: four `wa land` gates and another mission's rows were
 ahead of it in the shared lock, and a queued run of mine behind a landing gate buys nothing the rows
-above do not already show. Nothing of this session was left running. The land gate runs the full path
-(and `scripts/test-discriminates.sh`) itself; the assertions it will run are the ones listed above,
-and every one of them fails on the base: the base folds the card (pty: "the whole diff is drawn"),
-emits `Added 2 lines, removed 1 lines` and the footnote and two number columns (`diff-view`), keeps the
-band as a foreground (the contrast check), and the five new wa-term tests name `cardable`/`cards`,
-which the base does not have.
+above do not already show. Nothing of this session was left running. The land gate runs the full path (and `scripts/test-discriminates.sh`) itself. What it will see was
+MEASURED here, on a base worktree of `5956ae15` (`git worktree add --detach /tmp/dcard/base
+5956ae15`, this tree's test files copied in, this tree's binary where a binary is needed):
+
+* `lua tests/diff-view.lua` -> **21 FAIL lines and then a Lua error at line 371**: on the base there
+  is no `heading` row of coloured `parts` at all, so the file cannot even finish there;
+* `node scripts/test-diff-card-pty.mjs` -> **9 of its first 13 checks fail** (the heading, the count
+  row, the whole-diff row, both blank rows, the update, the bound) before the run stops at the
+  card that never opened;
+* the five new `wa-term` tests name `cardable` and `Block::cards`, which the base does not have, so
+  they cannot compile, let alone pass, there.
 
 ## Not done, and what is unknown
 
