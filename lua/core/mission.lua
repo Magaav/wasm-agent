@@ -659,12 +659,28 @@ set -uo pipefail
 [ -n "${WA_MISSION_CHILD:-}" ] && { echo 'mission: resume runner inside a runner (depth guard)' >&2; exit 94; }
 export WA_MISSION_CHILD=1
 M=$(cd "$(dirname "$0")" && pwd -P) || exit 97
-. "$M/env" || exit 98
 cd "$M" || exit 96
+# THE MISSION'S ENVIRONMENT, IN BOTH SHAPES IT ARRIVES IN (23/11, mission-resume-keeps-provider): `env` from
+# `wa mission launch`, and `serve.env` from the factory's own launcher/start.sh, which copies wa-serve's
+# environment. This used to be `. "$M/env"` alone and `wa mission resume` refused a factory mission as
+# not_staged. `set -a` is what carries the file's provider settings to the CLI: a sourced line is a shell
+# variable, and a child only sees exported ones.
+set -a
+env_files=0
+for env_file in "$M/env" "$M/serve.env"; do
+  [ -r "$env_file" ] || continue
+  . "$env_file" || { printf 'mission: %s could not be sourced\n' "$env_file" >&2; exit 98; }
+  env_files=$((env_files + 1))
+done
+set +a
+[ "$env_files" -gt 0 ] || { printf 'mission: neither %s/env nor %s/serve.env exists, so a resumed turn would start with no provider settings\n' "$M" "$M" >&2; exit 99; }
 unset WASM_AGENT_RAW_CODE  # native run(code=...) is the one execution path (Victor 21/11); never inherit another
-export RUSTUP_HOME="$TOOLCHAIN/rustup" CARGO_HOME="$TOOLCHAIN/cargo"
-export PATH="$TOOLCHAIN/cargo/bin:$PATH"
-export CARGO_TARGET_DIR="$TARGET"
+[ -n "${TOOLCHAIN:-}" ] && { export RUSTUP_HOME="$TOOLCHAIN/rustup" CARGO_HOME="$TOOLCHAIN/cargo"; export PATH="$TOOLCHAIN/cargo/bin:$PATH"; }
+[ -n "${TARGET:-}" ] && export CARGO_TARGET_DIR="$TARGET"
+# The mission's own wa when its environment names one, PATH otherwise: a factory mission's serve.env carries
+# no WA, and an empty command is how a resume turns into "nothing happened, quietly".
+WA=${WA:-$(command -v wa 2>/dev/null || true)}
+[ -n "$WA" ] || { printf 'mission: no wa to resume with: neither env nor PATH names one\n' >&2; exit 93; }
 ulimit -c 0 2>/dev/null || true
 ulimit -n 8192 2>/dev/null || true
 sid=$1; rc=1
@@ -701,15 +717,28 @@ function M.resume(args, ctx)
   local name, name_why = M.check_name(args.name)
   if not name then return { error = name_why } end
   local dir = M.dir(name, args.root)
-  if not M.exists(dir .. "/env") then return { error = "not_staged", detail = "not staged: " .. dir .. "/env missing" } end
+  -- THE MISSION IS STAGED WHEN IT HAS AN ENVIRONMENT A TURN CAN RUN IN, in either shape (23/11): `env` from
+  -- `wa mission launch` here, or `serve.env` from the factory's own start.sh. Refusing on `env` alone made a
+  -- factory mission unresumable BY THE CLI, and the runner that did start answered "No provider is configured".
+  if not M.exists(dir .. "/env") and not M.exists(dir .. "/serve.env") then
+    return { error = "not_staged", detail = "not staged: neither " .. dir .. "/env nor " .. dir .. "/serve.env is there" }
+  end
   local standing = M.launch_standing(dir)
   if standing and M.alive(standing) then
     return { error = "launch_refused", state = "launcher", why = "a launch is standing (pid " .. standing .. ")" }
   end
   local session = M.lock_field(dir, "SESSION") or M.recorded_session(dir)
   if not session then return { error = "no_session", detail = "no session id recorded for " .. name } end
-  if select(1, M.run_verdict(session, dir)) == "active" then
+  local verdict, verdict_why = M.run_verdict(session, dir)
+  if verdict == "active" then
     return { error = "launch_refused", state = "active", why = "the node holds a live run for session " .. session }
+  end
+  if verdict == "unknown" then
+    -- UNKNOWN IS NOT YES (the rule every other verb here keeps): a resume beside a run nobody can vouch for is
+    -- a second writer in one worktree, so it refuses by name and says what to read.
+    return { error = "run_unknown", state = "unknown", session = session,
+      why = "the node does not say that run is settled (" .. tostring(verdict_why) .. ")",
+      next_action = "wa steer " .. session .. " --status" }
   end
   if not args.force then
     local out = M.read_file(dir .. "/out.log") or ""
@@ -725,7 +754,10 @@ function M.resume(args, ctx)
     dir .. "/out.log", dir .. "/err.log")
   if not pid then return { error = spawn_why, effect = "unknown" } end
   M.write_file(dir .. "/launch.pid", tostring(pid) .. "\n")
-  -- "resumed" only once the session has answered: a missing session fails here, by name.
+  -- "RESUMED" IS A CLAIM ABOUT A TURN, NOT ABOUT A PID (23/11, the same rule scripts/mission.sh amend keeps):
+  -- a missing session fails here by name, and so does a runner that exited before the turn began - the CLI's
+  -- own words are quoted back instead of a success line (measured: "No provider is configured and nothing in
+  -- memory matched", with no model request at all).
   local start = #(M.read_file(dir .. "/out.log") or "")
   local step = 0
   while step < 600 do
@@ -733,14 +765,117 @@ function M.resume(args, ctx)
     if fresh:find("no such session", 1, true) then
       return { error = "session_not_found", session = session, detail = "the CLI did not find this session" }
     end
-    if fresh:find("Thinking", 1, true) or fresh:find("run ", 1, true) then
+    if fresh:find("Thinking", 1, true) or fresh:find("run ", 1, true) or fresh:find("</turn>", 1, true) then
       return { ok = true, resumed = session, pid = pid }
     end
-    if not M.alive(pid) then break end
+    if not M.alive(pid) then
+      local last_out, last_err = "", ""
+      for line in fresh:gmatch("[^\r\n]+") do if line:match("%S") then last_out = line end end
+      for line in (M.read_file(dir .. "/err.log") or ""):gmatch("[^\r\n]+") do if line:match("%S") then last_err = line end end
+      local done = ""
+      for line in (M.read_file(dir .. "/done") or ""):gmatch("[^\r\n]+") do if line:match("%S") then done = line end end
+      return { error = "resume_failed", session = session, pid = pid, exit = done,
+        detail = "the runner exited before any turn started (done: " .. done .. "); out.log: " .. last_out
+          .. " | err.log: " .. last_err }
+    end
     pcall(host.sleep, 100); step = step + 1
   end
   return { error = "resume_unconfirmed", session = session, pid = pid,
-    detail = "the runner is not answering yet; watch " .. dir .. "/out.log" }
+    detail = "the runner is running but no turn has started yet; watch " .. dir .. "/out.log" }
+end
+
+--------------------------------------------------------------------------- amend
+-- A CHANGE INTO A WORKER THAT IS ALREADY RUNNING, as one verb: THE SAME CODE as `scripts/mission.sh amend`
+-- (docs/MISSIONS.md 4b), never a second implementation - the script carries the measured rules (append with a
+-- UTC stamp, deliver through the product's own steering, resume a settled worker, and say "resumed" only once a
+-- turn is seen running). This function is the door: it finds that script, runs it, and returns its exit code and
+-- its words unchanged.
+--
+-- WHERE THE SCRIPT IS, in this order (an allow-list, and nothing found is a refusal by name):
+--   * an explicit `--script <path>` - a path the operator named is the path, so a missing one is refused;
+--   * `<missions root>/mission.sh` - the operator's installed copy, beside preflight.sh, exactly the way this
+--     file's preflight verb already finds its script;
+--   * `<runtime tree>/scripts/mission.sh`, the tree being WASM_AGENT_LUA_ROOT, then WA_LAND_REPO, then
+--     ~/wasm-agent/checkout - the tree the running binary was built from.
+-- THE MISSION'S OWN BINARY IS NAMED (WA_BIN): the script asks the node through `wa steer`, and a child of
+-- host.exec has a scrubbed environment whose PATH is not the operator's - the measured reason a resume spawned
+-- that way answered "No provider is configured". `host.runtime_info().binary_path` is the CLI running this.
+M.AMEND_SECONDS = 600
+
+function M.amend_script(root, explicit)
+  if explicit and explicit ~= "" then
+    local path = tostring(explicit)
+    if M.read_file(path) then return path end
+    return nil, path .. " (named with --script, and it cannot be read)"
+  end
+  local candidates = { root .. "/mission.sh" }
+  local tree = host.getenv("WASM_AGENT_LUA_ROOT")
+  if not tree or tree == "" then tree = host.getenv("WA_LAND_REPO") end
+  if not tree or tree == "" then tree = (host.getenv("HOME") or "") .. "/wasm-agent/checkout" end
+  candidates[#candidates + 1] = tree .. "/scripts/mission.sh"
+  for _, path in ipairs(candidates) do
+    if M.read_file(path) then return path end
+  end
+  return nil, table.concat(candidates, ", ")
+end
+
+function M.amend(args, ctx)
+  args = args or {}
+  local name, name_why = M.check_name(args.name)
+  if not name then return { error = name_why, effect = "none" } end
+  local root = args.root or M.root()
+  local dir = M.dir(name, root)
+  if not M.exists(dir) then return { error = "no_mission", detail = "no mission at " .. dir, effect = "none" } end
+  local script, why = M.amend_script(root, args.script)
+  if not script then
+    return { error = "amend_script_missing", effect = "none", detail = "no mission.sh among: " .. tostring(why),
+      next_action = "install it from the runtime tree: ln -s <runtime tree>/scripts/mission.sh " .. root .. "/mission.sh" }
+  end
+  local path, temporary = args.file, nil
+  if (not path or path == "") and args.text and tostring(args.text):match("%S") then
+    temporary = dir .. "/amend-input.txt"
+    local wrote, write_why = M.write_file(temporary, tostring(args.text) .. "\n")
+    if not wrote then return { error = "cannot_write_amendment", detail = tostring(write_why), effect = "none" } end
+    path = temporary
+  end
+  if not path or path == "" then
+    return { error = "file_required", effect = "none",
+      detail = "usage: wa mission amend <name> <file> | wa mission amend <name> --text <words>" }
+  end
+  local binary = args.wa
+  if (not binary or binary == "") and host.runtime_info then
+    local ok, raw = pcall(host.runtime_info)
+    if ok then
+      local decoded_ok, info = pcall(json.decode, type(raw) == "string" and raw or json.encode(raw))
+      if decoded_ok and type(info) == "table" and type(info.binary_path) == "string" and info.binary_path ~= "" then
+        binary = info.binary_path
+      end
+    end
+  end
+  local command = "MISSIONS_DIR=" .. string.format("%q", root)
+  if binary and binary ~= "" then command = command .. " WA_BIN=" .. string.format("%q", binary) end
+  command = command .. " bash " .. string.format("%q", script) .. " amend " .. string.format("%q", name)
+    .. " " .. string.format("%q", path)
+  local called, raw = pcall(host.exec, command, dir, M.AMEND_SECONDS)
+  if temporary then pcall(host.exec, "rm -f " .. string.format("%q", temporary), "", 20) end
+  if not called or type(raw) ~= "string" then return { error = "amend_not_run", detail = tostring(raw), effect = "unknown" } end
+  local decoded_ok, decoded = pcall(json.decode, raw)
+  if not decoded_ok or type(decoded) ~= "table" then
+    return { error = "amend_answer_unreadable", effect = "unknown" }
+  end
+  local code = tonumber(decoded.code) or -1
+  local text = tostring(decoded.stdout or "")
+  local problems = tostring(decoded.stderr or "")
+  local result = { name = name, exit = code, script = script, file = path, effect = "see output",
+    output = text, errors = problems }
+  if code ~= 0 then
+    -- THE SCRIPT'S OWN WORDS, unchained: a refusal and a failed resume are its sentences, and they name what to
+    -- fix. The exit code is the script's, so a shell caller reads the same number it would from the script.
+    local why = problems:match("([^\r\n]+)[\r\n]*$") or text:match("([^\r\n]+)[\r\n]*$") or ""
+    result.error = "amend_failed"
+    result.why = why
+  end
+  return result
 end
 
 return M
