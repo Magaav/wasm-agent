@@ -294,6 +294,40 @@ The line, exactly, with the sentence that saves the next operator a refused resu
     "what does this do" is exactly what must not deploy. A new verb that acts is added to lua/core/cli_help.lua
     (its list is what scripts/test-cli-help.sh drives).
 
+## 7. Round 1 of the gate: the channel row was red UNDER THE LANDING
+
+The preflight stopped the branch on one row:
+
+    land-quick: the branch's own tests are red: scripts/test-release-channel-e2e.lua
+    lua error: check failed: the release channel step publishes over the real scripts and the real signature
+      (linux_channel_build_failed: linux-channel: build_failed: scripts/release-linux.sh --target x86_64-unknown-linux-musl ...)
+
+**The cause was mine, and it was a test that only worked in the shell I ran it in.** The stand-ins (the build,
+`cargo`, the fake `gh`) lived in `scripts/test-release-channel-e2e.sh`, which put them on PATH before starting
+the row. The LANDING does not run that wrapper: it runs a branch's own row as `WA_SCRIPT=<row> wa`, so the row
+met the real `node` and `cargo`, the real shipping build failed in that fixture, and the step refused. Green by
+hand, red in the gate - and I had reported "rows run singly, all green" without ever running this row the way
+the landing runs it. That is the gap this round closes.
+
+**The fix (commit `test: the channel row owns its stand-ins, so the landing can run it`):**
+
+* the stand-ins moved INTO the row (`scripts/test-release-channel-e2e.lua`, "the stand-ins, IN THE ROW"): it
+  writes `node`, `cargo`, `cargo-zigbuild` and `rustc` into its own `<home>/e2e/bin`, installs the shared fake
+  GitHub, and computes the paths it asserts on (`gh_state`, not `os.getenv`);
+* every command the STEP runs goes through `land.exec`, which now prefixes the stand-ins' PATH and variables -
+  so the publisher and `scripts/release-linux.sh` (which `impl.linux` starts) see them;
+* `scripts/test-release-channel-e2e.sh` is a convenience for a human only: scratch HOME, guard, call. It owns
+  no part of the test any more, and says so.
+* **No assertion was deleted, no row removed from a list, no timeout raised.** The 20 checks are the same ones.
+
+**Verified, three ways:**
+
+    bash scripts/test-release-channel-e2e.sh                                 -> release-channel-e2e ok (20 checks)
+    WA_SCRIPT=scripts/test-release-channel-e2e.lua wa --db <db>               -> release-channel-e2e ok (20 checks)
+      (the landing's own invocation: plain PATH, scratch HOME, nothing set up for it)
+    the same row on 4b314af5, the landing's way                              -> fails: the channel step builds nothing
+      (linux_channel_build_failed, "no built binary at .../rust/target/..."), so it still discriminates.
+
 ## 6. What was not verified, and what is open
 
 * **No real release was cut and nothing was pushed to origin.** The proof is the next cut; by the brief's own

@@ -37,6 +37,88 @@ local shell = R.shell
 
 R.start_vault()
 
+-- ------------------------------------------------------------------ the stand-ins, IN THE ROW
+-- ROUND 1 OF THE GATE (23/11): this row was red when the LANDING ran it - "the branch's own tests are red:
+-- scripts/test-release-channel-e2e.lua" - and green by hand, because the hand ran
+-- scripts/test-release-channel-e2e.sh, which put the stand-ins on PATH, while the landing runs a branch's own
+-- row as `WA_SCRIPT=<row> wa` with no wrapper at all. A row that depends on the shell that ran it is not a row.
+-- So the row creates what it needs itself, and every command the STEP runs goes through land.exec, which carries
+-- that PATH and those variables into the publisher and the builder it starts.
+local home = host.paths().home
+local stub_dir = home .. "/e2e"
+local stub_bin = stub_dir .. "/bin"
+local gh_state = stub_dir .. "/gh"
+local build_root = home .. "/.wasm-agent/build/target"
+local cargo_dir = stub_dir .. "/cargo-target"
+local real_node = must("command -v node")
+must("rm -rf '" .. stub_dir .. "' && mkdir -p '" .. stub_bin .. "' '" .. gh_state .. "' '" .. build_root .. "' '" .. cargo_dir .. "'",
+  "the row's stand-in directory")
+-- THE FAKE GITHUB is the shared one (scripts/lib/fake-gh.sh): one fake, judged by two rows.
+must(". '" .. tree_root .. "/scripts/lib/fake-gh.sh' && wa_fake_gh_install '" .. stub_bin .. "'", "the fake GitHub")
+-- THE BUILD STAND-IN. `node scripts/codemode-build.mjs build <tree> --target <triple>` is the ONE call this row
+-- answers itself: the real shipping build compiles the whole node for two triples. The stand-in writes a
+-- RECEIPT of the real shape and a real executable at the path that receipt names - which is the point of the
+-- row, because the real build writes into the node's one build root (docs/ONEROOT.md), NOT into rust/target.
+-- Every other `node` call (the receipt reader, the index writer) is passed to the real node.
+write_file(stub_bin .. "/node", [[#!/usr/bin/env bash
+set -uo pipefail
+case "${1:-}" in
+  */codemode-build.mjs)
+    action=${2:-}; root=${3:-}; [ "$#" -ge 3 ] && shift 3
+    target=; while [ "$#" -gt 0 ]; do case "$1" in --target) target=${2:-}; shift 2 ;; *) shift ;; esac; done
+    [ "$action" = build ] || { printf 'stand-in: codemode-build.mjs only answers build\n' >&2; exit 1; }
+    [ "${WA_FAKE_BUILD_FAIL:-0}" = 1 ] && { printf 'stand-in: the build refused\n' >&2; exit 9; }
+    sha=$(git -C "$root" rev-parse HEAD) || exit 1
+    tree=$(git -C "$root" rev-parse 'HEAD^{tree}') || exit 1
+    sha=${WA_FAKE_BUILD_COMMIT:-$sha}; tree=${WA_FAKE_BUILD_TREE:-$tree}
+    dir="$WA_FAKE_BUILD_ROOT/tree-0123456789ab"; [ -n "$target" ] && dir="$dir/$target"
+    mkdir -p "$dir/release"
+    bin="$dir/release/wa"
+    body="#!/bin/sh
+# the fixture wa, built from $sha
+[ \"\$1\" = --version ] && { echo \"wa 0.1.0 (${sha:0:8})\"; exit 0; }
+exit 0"
+    printf '%s\n' "$body" > "$bin" || exit 1
+    chmod +x "$bin"
+    [ "${WA_FAKE_BUILD_NO_BINARY:-0}" = 1 ] && rm -f "$bin"
+    bin_sha=$(sha256sum "$bin" 2>/dev/null | cut -d' ' -f1)
+    if [ -n "$target" ]; then target_json="\"$target\""; else target_json=null; fi
+    printf '%s\n' "{\"build_schema\":1,\"kind\":\"codemode-offline-build\",\"ok\":true,\"target\":$target_json,\"binary\":\"$bin\",\"binary_sha256\":\"$bin_sha\",\"source_commit\":\"$sha\",\"source_tree\":\"$tree\",\"source_dirty\":false,\"root\":\"$(CDPATH= cd -- \"$root\" && pwd -P)\"}"
+    exit 0 ;;
+esac
+exec "$WA_REAL_NODE" "$@"
+]])
+-- THE CARGO STAND-IN: the calls scripts/release-linux.sh makes, and for the sentinel build the
+-- `compiler-artifact` message that NAMES the executable - cargo's own answer, which the script now reads
+-- instead of guessing a target directory. `zig` is not installed on a test machine.
+write_file(stub_bin .. "/cargo", [[#!/usr/bin/env bash
+set -uo pipefail
+case "${1:-}" in
+  --version) echo 'cargo 1.89.0 (fixture)'; exit 0 ;;
+  fetch) exit 0 ;;
+  build|zigbuild)
+    dir="$WA_FAKE_CARGO_DIR/release"; mkdir -p "$dir" || exit 1
+    body="#!/bin/sh
+echo \"wa-sentinel 0.1.0 (fixture)\""
+    printf '%s\n' "$body" > "$dir/wa-sentinel" || exit 1
+    chmod +x "$dir/wa-sentinel"
+    if [ "${WA_FAKE_CARGO_SILENT:-0}" != 1 ]; then
+      printf '%s\n' "{\"reason\":\"compiler-artifact\",\"target\":{\"kind\":[\"bin\"],\"name\":\"wa-sentinel\",\"crate_types\":[\"bin\"]},\"executable\":\"$dir/wa-sentinel\"}"
+    fi
+    printf '%s\n' '{"reason":"build-finished","success":true}'
+    printf '    Finished release profile (fixture)\n' >&2
+    exit 0 ;;
+esac
+printf 'stand-in cargo: unsupported %s\n' "$*" >&2; exit 1
+]])
+write_file(stub_bin .. "/rustc", "#!/bin/sh\nprintf 'rustc 1.89.0 (fixture %s)\\n' \"$*\"\n")
+must("chmod +x '" .. stub_bin .. "/node' '" .. stub_bin .. "/cargo' '" .. stub_bin .. "/rustc'" ..
+  " && ln -sf '" .. stub_bin .. "/cargo' '" .. stub_bin .. "/cargo-zigbuild'", "exec bits for the stand-ins")
+local step_env = table.concat({ "export PATH=" .. stub_bin .. ":$PATH", "FAKE_GH_STATE=" .. gh_state,
+  "WA_REAL_NODE=" .. real_node, "WA_FAKE_BUILD_ROOT=" .. build_root, "WA_FAKE_CARGO_DIR=" .. cargo_dir }, " ") .. "; "
+local routed_exec = land.exec
+land.exec = function(command, cwd, timeout) return routed_exec(step_env .. command, cwd, timeout) end
+
 -- THE TOOLCHAIN PRECONDITION, STANDING IN FOR ITSELF (and saying so): the real
 -- scripts/lib/build-requirements.sh stats a rustup toolchain, node and the pinned code-mode assets, and refuses
 -- on a fixture home. It is a precondition of a real build, not a fact this row can produce, and the real file is
@@ -128,7 +210,7 @@ contains(manifest, "target_triple=x86_64-unknown-linux-musl", "and the triple it
 contains(manifest, "local_only=0", "and says it is not a test bundle")
 -- the effect, not the command: the archive is ON the fake release, beside its signature
 local tag = tostring((run.journal.linux or {}).tag or "")
-contains(must("ls '" .. tostring(os.getenv("FAKE_GH_STATE") or "") .. "/" .. tag .. "' 2>/dev/null"), name .. ".tar.gz",
+contains(must("ls '" .. gh_state .. "/" .. tag .. "' 2>/dev/null"), name .. ".tar.gz",
   "the signed set was uploaded to the release " .. tag)
 local index_commit = tostring((run.journal.linux or {}).index_commit or "")
 eq(must("git -C " .. repo .. " diff --name-only " .. sha .. " " .. index_commit),
