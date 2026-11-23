@@ -1531,7 +1531,15 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
           local decoded_ok, decoded = pcall(json.decode, value)
           if decoded_ok and decoded ~= nil then value = decoded end
         end
-        if type(value) == 'table' then return value end
+        if type(value) == 'table' then
+          -- A picture the call brought back rides on the RUN result (lua/core/codemode.lua,
+          -- take_result_images): the value handed back here is the tool's own answer, so the transport
+          -- key travels with it. Without this a direct `read` of a PNG - which is this same one-line
+          -- script - would read the picture and then drop it, which is the failure this mission exists
+          -- to close.
+          if type(ran._images) == 'table' then value._images = ran._images end
+          return value
+        end
         return { value = value }
       end
       return ran

@@ -1230,6 +1230,13 @@ end
 
 -- Only built-in read results may promote an internal `_images` field into model
 -- input. A plugin result containing the same key is ordinary untrusted JSON.
+--
+-- A run block's pictures ride on the run result (lua/core/codemode.lua, take_result_images): the
+-- script's own built-in reads put them there, and they are promoted through THIS function, so one
+-- provider image message follows the complete tool-result block whether the picture came from a
+-- direct read or from a script. Nothing else can reach the key: codemode.lua sets it from its
+-- `read` calls only, and the fence is that name, not a shape - a plugin that answers `_images`
+-- inside a script keeps it as JSON in the script's value.
 local function take_tool_images(name,output)
   local images = {}
   local function take(value)
@@ -1237,7 +1244,7 @@ local function take_tool_images(name,output)
     for _, reference in ipairs(value._images or {}) do images[#images + 1] = reference end
     value._images = nil
   end
-  if name == "read" then
+  if name == "read" or name == "run" or name == "codemode" then
     take(output)
   end
   return images
