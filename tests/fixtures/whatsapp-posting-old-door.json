@@ -1,0 +1,90 @@
+{
+  "what": "The old operator door (wa_whatsapp_posting on base 41d6420c) real answers, recorded before it was replaced.",
+  "why": "FACTORY rule 14: parity first. The replacement keeps every field that still means something, with the same name and type, and keeps the refusal words a script may already match.",
+  "base_commit": "41d6420c",
+  "how": "WA_SCRIPT probe run with the tree's own binary against the BASE lua tree (WASM_AGENT_LUA_ROOT=/tmp/wa-base-41d6420c, WASM_AGENT_HOME a scratch dir); host.getenv and host.http were the only stubs, and host.http answered the connector envelope {status,body}. Measured 2026-11-23.",
+  "answers": [
+    {
+      "what": "status_no_connector_env",
+      "request": {
+        "action": "status"
+      },
+      "answer": {
+        "error": "whatsapp_posting_not_configured"
+      }
+    },
+    {
+      "what": "status_with_connector",
+      "request": {
+        "action": "status"
+      },
+      "answer": {
+        "ok": true,
+        "enabled": true,
+        "connection": "connected"
+      }
+    },
+    {
+      "what": "set_on",
+      "request": {
+        "action": "set",
+        "enabled": true
+      },
+      "answer": {
+        "ok": true,
+        "enabled": true
+      }
+    },
+    {
+      "what": "set_off",
+      "request": {
+        "action": "set",
+        "enabled": false
+      },
+      "answer": {
+        "ok": true,
+        "enabled": false
+      }
+    },
+    {
+      "what": "non_boolean",
+      "request": {
+        "action": "set",
+        "enabled": "yes"
+      },
+      "answer": {
+        "error": "posting_enabled_boolean_required"
+      }
+    },
+    {
+      "what": "bad_action",
+      "request": {
+        "action": "frobnicate"
+      },
+      "answer": {
+        "error": "invalid_posting_action"
+      }
+    },
+    {
+      "what": "bad_body",
+      "request": "not json",
+      "answer": {
+        "error": "invalid_posting_request"
+      }
+    },
+    {
+      "what": "forbidden_guest",
+      "request": {
+        "action": "status",
+        "session": "guest"
+      },
+      "answer": {
+        "error": "forbidden"
+      }
+    }
+  ],
+  "http_calls": [
+    "http://127.0.0.1:1//status"
+  ],
+  "measured_note": "The old door needed FIVE variables (URL, account, generation, read-token file, approval-token file) before it would even attempt the call; with all five set it made three HTTP POSTs in one session, every one to the URL above."
+}

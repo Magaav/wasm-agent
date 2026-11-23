@@ -501,9 +501,48 @@ component, and the measurement behind them is in
   forgotten. The allow-list now names both, and a test in `rust/wa-grant-policy` holds the shipped
   file against every key the component writes. Commit `6af69e4a`.
 
-**Still open, and it is a configuration decision, not a code one:** this definition has no `config`
-block, so `post_transcripts` is off, `post_allow` is empty and `alerts` is off. Transcripts are made,
-indexed and searchable and nothing is ever delivered to a chat. The operator switch in this tree
-(`lua/core/server.lua`, `wa_whatsapp_posting`) still posts to the Go connector's HTTP API, removed on
-11/11, so there is no supported verb to turn posting on; the report's "Needs the orchestrator's OK"
-lists exactly what has to change.
+## The operator switch: posting on the component (2026-11-23)
+
+`wa whatsapp posting ...` and `POST /whatsapp/posting` are the two doors of one switch
+(`lua/core/whatsapp_posting.lua`; the printing is `lua/core/whatsapp_posting_cli.lua`). They replace the
+door that POSTed to the Go connector's `/operator/posting` until 11/11 (`67c78621`): nothing in this
+tree calls that URL any more, and a request that still carries that API's fields (`account`,
+`generation`, `posting_url`, `target_url`) is refused by name, `whatsapp_posting_connector_removed`. A
+node whose environment still sets the connector's five variables is told so on every answer
+(`connector_removed.variables`, names only) instead of being silently ignored.
+
+The switch owns exactly four keys of the component's config - `post_transcripts`, `post_allow`,
+`alerts`, `language` - and leaves every other key (`stream_edits`, `held_chats`, `pair_phone`,
+`health_every_seconds`, the index settings) as it was. It writes through the services registry
+(`disable` -> `put` -> `enable`), because an enabled definition cannot be replaced and a change made any
+other way could not be rolled back by `wa services`; the boot decision (`enabled`) is put back exactly
+as it was, and a component that refuses to start on the new definition gets the old one back and keeps
+running it. The answer is not what was asked for: it is the health line the component printed after the
+restart (`posting=on|off`, `posted=<n>`, `last_post=<...>`), read from the run this verb started - a
+line from an earlier instance is not evidence, so only the tail after that run's own `clock:` line is
+read. A health line that cannot be read is a refusal by name (`whatsapp_posting_unverified`) that says
+`written=true`, and a mode the component did not reach is `whatsapp_posting_not_effective`.
+
+The allow list is an allow-list of accepted forms, exactly the ones the component's own gate matches
+(`posting.rs` `allowed`): `own`, `*`, or one exact chat JID (`<digits>@s.whatsapp.net`,
+`<digits>@lid`, `<id>@g.us`). An empty list is refused, and so is turning posting on without naming a
+scope - `post_transcripts: true` with nothing in the list is the shadow mode that made this page
+necessary. Two rules hold everywhere on this path: the allow list is never written to this repository,
+never logged and never echoed in a refusal (a refusal names the POSITION that failed, not the entry);
+and only a master may read or change it - the same authority as every other operator endpoint
+(`require_master` on the route, `users.is_master` in the module, a child agent refused).
+
+```sh
+wa whatsapp posting                      # what is stored, what the component reports
+wa whatsapp posting on | off             # the gate
+wa whatsapp posting allow own            # or: *, 5511999999999@s.whatsapp.net, 1203...@g.us
+wa whatsapp posting alerts on | off      # own-chat alert for a note that could not be transcribed
+wa whatsapp posting language en|pt|auto  # what the pipeline transcribes in
+```
+
+**Still open, and it is a configuration decision, not a code one:** the definition deployed on the
+serving node has no `config` block, so `post_transcripts` is off, `post_allow` is empty and `alerts`
+is off. Transcripts are made, indexed and searchable and nothing is ever delivered to a chat. The
+switch to change that exists now and is tested (`scripts/test-whatsapp-posting-toggle.lua`); turning it
+on is the orchestrator's call, with the recovered prior configuration (`post_allow: ["*"]`,
+`alerts: true`, `language: pt`).

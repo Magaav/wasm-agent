@@ -116,6 +116,14 @@ Configuration (the service definition's `config`):
 | `header_tag` | none | marker after the header (`🤖 _Copiloto_ · wasm`) to tell the component's posts from the Go connector's in the own chat during B2 |
 | `fresh_seconds` | `300` | the fresh window (`WA_WHATSAPP_FRESH_SECONDS` semantics) |
 
+The four keys that decide whether anything is delivered - `post_transcripts`, `post_allow`, `alerts` -
+and the `language` hint have an operator verb of their own: `wa whatsapp posting ...` and
+`POST /whatsapp/posting` (`lua/core/whatsapp_posting.lua`). It writes this definition through the
+registry below, restarts the component and answers with the health line the component prints; no other
+config key is touched. The transport it replaced (the Go connector's `/operator/posting`, removed on
+11/11) is refused by name. See
+[WHATSAPP-TRANSCRIPTION.md](WHATSAPP-TRANSCRIPTION.md), "The operator switch".
+
 Rules kept from the Go connector: a voice note not picked up within the window expires and is never
 transcribed late; a ready transcript not sent within the window is never posted; unknown sends never
 auto-retry; a voice note already recorded in kv is never processed again (re-delivery, restart);
@@ -454,6 +462,10 @@ No turn and no model: this is the door for a node declared model-less (`docs/MOD
 doors cannot disagree about what "enable" means, and the same master gate applies. A refusal names its
 reason and exits non-zero; a name nobody stores is `unknown service`, not a `not_running` that looks like
 success.
+
+A component whose behaviour is a *policy* rather than an instance has its own verb on top of these
+(`wa whatsapp posting`, and the same registry underneath), so the two doors cannot disagree about the
+definition it writes.
 
 A master on another node runs the same verbs through the **`services` peer capability** (same gate style
 as the WhatsApp read capabilities: `author_of` in `lua/core/server.lua`, then the registry's own
