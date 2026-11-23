@@ -236,7 +236,9 @@ Run singly against the tree's own binary (`WASM_AGENT_LUA_ROOT=<wt>`, scratch ho
 | **`scripts/test-remote-pending.lua`** | **RED — open blocker, see below** |
 | `rust wa-capabilities` unit tests | 392 passed, 1 failed: `host::tls_anchor_tests::...` (offline node; pre-existing) |
 
-### The one open blocker
+### The blocker this section used to describe (FIXED - see section 13)
+
+`scripts/test-remote-pending.lua` failed at "wait(op) resumes it" with
 
 `scripts/test-remote-pending.lua` fails at "wait(op) resumes it" with
 
@@ -303,4 +305,34 @@ intact; a call without the new fields is unchanged; an unknown node keeps its `u
     The parentheses read `(version unknown)` when the peer states no version, and the fields themselves in
     `error`/`field`/`peer`/`peer_version` are `peer_field_unsupported`, `stdin` (or `context`), the peer's
     name, and that version.
+
+
+## 13. The regression this validator caused, and its fix (23/11 ~20:50Z)
+
+`scripts/test-remote-pending.lua` was RED on main from this mission, at "wait(op) resumes it":
+
+```
+{"progress":{"reason":"unknown_argument:capability,node","state":"unknown"},"state":"pending","tool":"remote"}
+```
+
+**Cause, measured** (a temporary `WA_ARGS_DEBUG` line on the validator, since removed): `operation` was being
+dispatched with `{action, capability, id, node, …}`. The caller was not the product code — `tools.remote`
+strips `node` and `capability` before `nodes.remote_call` — it was the row's RELAY STAND-IN: its
+`capability == "operation"` branch forwarded the whole remote params table, so the peer's `operation` saw two
+fields its schema does not declare. Harmless while an unknown field was ignored; refused by name once it was
+not.
+
+**Fix**: the stand-in now forwards what the wire forwards (the capability's own arguments, without the routing
+words), with the reason written beside it. The validator is untouched — the mission's rule is that an internal
+re-dispatch passes it honestly, never that it is turned off for one.
+
+**Coverage added** to `scripts/test-tool-args-parity.lua` (section 4): for `operation`, `bash` and `grep`, a
+`remote` call crosses as its own capability, never carries `node`/`capability`, and carries each of the
+call's own arguments unchanged — 1060 checks in that row, green.
+
+**Rows after the fix** (singly, scratch home, the tree's own binary): `test-remote-pending` 90 checks,
+`test-remote-edit` 46, `test-federation` 49, `test-tool-args-parity` 1060, `test-tool-arguments` 40,
+`test-remote-field-support` 13 — all green.
+
+(§11's table above was measured before this fix; §13 supersedes its "open blocker" line.)
 

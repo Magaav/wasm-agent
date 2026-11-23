@@ -141,7 +141,17 @@ local function relay(name, params, raw)
       peer_caller, "master")
   end
   if params.capability == "operation" then
-    return tools.dispatch(memory, "operation", params, "master", peer_ctx)
+    -- THE WIRE CARRIES THE CAPABILITY'S OWN ARGUMENTS, never the routing words: `tools.remote` strips
+    -- `node` and `capability` before it calls nodes.remote_call (lua/core/tools.lua, remote_arguments), so the
+    -- peer's `operation` never sees them. This stand-in used to forward `params` whole, which handed
+    -- `operation` two fields its schema does not declare - harmless while an unknown field was ignored, and
+    -- refused BY NAME now that it is not (mission tool-args-honest-and-same-on-peers). The stand-in is
+    -- corrected to the seam it stands for, not the validator relaxed for it.
+    local args = {}
+    for key, value in pairs(params) do
+      if key ~= "node" and key ~= "capability" then args[key] = value end
+    end
+    return tools.dispatch(memory, "operation", args, "master", peer_ctx)
   end
   return { error = "relay_stand_in_unsupported", capability = tostring(params.capability) }
 end

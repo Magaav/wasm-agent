@@ -23,10 +23,15 @@ if reason then error('this test refuses to run (' .. reason .. ')') end
 
 local json = dofile('lua/vendor/json.lua')
 local memory = dofile('lua/core/memory.lua'); memory.setup()
+-- ONE nodes instance for this row and tools.lua, so the transport stand-in in section 4 is the one the
+-- remote branch calls (the pattern scripts/test-remote-edit.lua uses).
+local nodes = dofile('lua/core/nodes.lua')
+local real_dofile = dofile
+dofile = function(path) if path == 'lua/core/nodes.lua' then return nodes end return real_dofile(path) end
 local tools = dofile('lua/core/tools.lua')
+dofile = real_dofile
 -- The peer side must load THE SAME module table this row patched: `dofile` runs a file again, so the stub is
 -- installed before lua/core/server.lua reads its own copy of tools.lua.
-local real_dofile = dofile
 local real_dispatch = tools.dispatch
 local seen = {}
 tools.dispatch = function(_memory, name, args)
@@ -144,5 +149,38 @@ check(type(refused) == 'table' and refused.error == 'peer_bash_field_not_adoptab
   'a field adoption cannot carry is refused by name: ' .. json.encode(refused):sub(1, 240))
 check(#seen == 0, 'and nothing was started for it (no dispatch was made)')
 
+
+-- 4. THE ROUTING WORDS NEVER REACH THE PEER (regression of 23/11: the code-mode pending path re-dispatched
+-- `operation` with `capability` and `node` still attached, which the validator then refused by name - the
+-- stand-in was forwarding what the wire does not). `tools.remote` strips `node`/`capability` before
+-- nodes.remote_call, for every capability and for every field, so an internal re-dispatch passes the
+-- validator honestly instead of the validator being turned off for it.
+do
+  local real_remote_call = nodes.remote_call
+  local crossed = {}
+  nodes.remote_call = function(id, capability, args)
+    crossed[#crossed + 1] = { id = tostring(id), capability = capability, args = args }
+    return { ok = true, node = tostring(id), capability = capability }
+  end
+  local real_find = nodes.find
+  nodes.find = function(sel) return { node_id = 'parity-peer', name = 'parity-peer', online = true } end
+  for _, case in ipairs({ { 'operation', { action = 'await', id = 'op-1', wait_ms = 10 } },
+      { 'bash', { command = 'true' } }, { 'grep', { pattern = 'x', path = '/r' } } }) do
+    crossed = {}
+    local answer = real_dispatch(memory, 'remote', { node = 'parity-peer', capability = case[1],
+      args = case[2] }, 'master', { user_id = 'master' })
+    local sent = crossed[1] and crossed[1].args or {}
+    check(crossed[1] ~= nil and crossed[1].capability == case[1],
+      'a remote ' .. case[1] .. ' crosses as its own capability: ' .. json.encode(crossed[1] or {}):sub(1, 160))
+    check(sent.node == nil and sent.capability == nil,
+      'and never carries the routing words: ' .. json.encode(sent):sub(1, 200))
+    for key, value in pairs(case[2]) do
+      check(json.encode(sent[key]) == json.encode(value),
+        'the call\'s own argument ' .. key .. ' travels: ' .. json.encode(sent):sub(1, 160))
+    end
+  end
+  nodes.remote_call = real_remote_call
+  nodes.find = real_find
+end
 print(('tool args parity: %d check(s), %d failed'):format(checks, failed))
 if failed > 0 then os.exit(1) end

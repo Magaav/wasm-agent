@@ -41,7 +41,8 @@ local refused = dispatch('bash', { command = 'echo hi', stdin = 'x', nope = 1 })
 check(refused.error == 'unknown_argument:nope', 'an undeclared field is refused by name: ' .. json.encode(refused):sub(1, 300))
 check(refused.tool == 'bash', 'the refusal names the tool')
 check(refused.effect == 'none', 'the refusal has no effect')
-check(refused.note and refused.note:find('command', 1, true) ~= nil, 'the fix line lists the declared fields: ' .. tostring(refused.note))
+check(refused.message and refused.message:find('command', 1, true) ~= nil, 'the sentence lists the declared fields: ' .. tostring(refused.message))
+check(refused.fix and refused.fix:find('stdin', 1, true) ~= nil, 'and so does the fix line: ' .. tostring(refused.fix))
 check(contains(refused.accepted, 'stdin') and contains(refused.accepted, 'command'), 'the accepted list is the schema\'s own')
 
 -- 2. Nothing ran: the refusal comes before the shell, so a command that would leave a file leaves none.
@@ -96,7 +97,7 @@ check(validator.refusal('read', { path = '/x', image_bytes = true }, tools.param
 -- 7. A tool that declares no arguments refuses any field by name, and says that it declares none.
 local none = dispatch('nodes', { probe = true })
 check(none.error == 'unknown_argument:probe', 'a no-argument tool refuses a field by name: ' .. json.encode(none):sub(1, 200))
-check(tostring(none.note or ''):find('no arguments', 1, true) ~= nil, 'and says it declares no arguments: ' .. tostring(none.note))
+check(tostring(none.message or ''):find('no arguments', 1, true) ~= nil, 'and says it declares no arguments: ' .. tostring(none.message))
 
 -- 8. Unknown is not yes: a schema this node cannot read refuses nothing (the tool\'s own path answers it).
 check(validator.refusal('mcp_nowhere_anything', { whatever = 1 }, nil) == nil,
