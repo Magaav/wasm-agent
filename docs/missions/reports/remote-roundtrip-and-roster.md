@@ -64,6 +64,8 @@ Measured, alternating base worktree and this tree in one session, five samples p
   this tree **36 / 38 / 36 ms** (5.7x);
 * **the speed board's own row** (`scripts/speed/probe-remote.sh`, whole `wa call` process included):
   base 507 / 469 / 521 ms -> this tree **258 / 193 / 219 ms** (2.3x).
+* re-measured once more after every commit of this branch, one round each way, load 3 on 16 cores:
+  base **420 ms** (samples 379-458) -> this tree **188 ms** (samples 184-206).
 
 The row's floor is now the `wa call` CLI's own start (~190 ms of it is the binary before Lua runs), which
 the `start` row owns; that is named under "not done" below rather than folded into this number.
