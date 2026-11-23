@@ -106,7 +106,7 @@ stopped in its trap).
 
 | row | what it pins | wired |
 | --- | --- | --- |
-| `scripts/test-speed-stats.lua` (50 -> 64 checks) | one or two comparable points never make RED; the count in the reason; a lua install is never compared with scripts landings (0 of 3 of that kind); a kind-less line is counted and named; deltas say "landing kind differs" | fast path, every `scripts/test-*.lua` not in `scripts/fast-path.exclude` |
+| `scripts/test-speed-stats.lua` (50 -> 65 checks) | one or two comparable points never make RED; the count in the reason; a lua install is never compared with scripts landings (0 of 3 of that kind); a kind-less line is counted and named; deltas say "landing kind differs" | fast path, every `scripts/test-*.lua` not in `scripts/fast-path.exclude` |
 | `scripts/test-speed-board.lua` (30 -> 48 checks) | the end-to-end path: 2 points are not a verdict, 3 are; the line carries `/kind`; a 288 s install is not RED against 2 s scripts landings; a record with no kind has no verdict; every call is hermetic | same |
 | `scripts/test-main-health.sh` (32 -> 36 checks) | the binary comes from the run's own fast result, and a changed path is refused by name | `check main-health` in `scripts/fast.sh:1202` |
 | `scripts/test-fast-skip-count.sh` | a failed Lua row's log survives the run even when nothing named it | `check fast-counters`-style shell row, `scripts/fast.sh:987` region and `scripts/test.sh` |
@@ -117,7 +117,7 @@ test file in place, and fails there on the new assertions.
 
 ## Checks I ran (this node, avell)
 
-- `scripts/test-speed-stats.lua`: `speed-stats ok (64 checks)`.
+- `scripts/test-speed-stats.lua`: `speed-stats ok (65 checks)`.
 - `scripts/test-speed-board.lua`: `speed-board ok (48 checks)`.
 - `scripts/test-main-health.sh`: `test-main-health ok (36 checks)`; on the base: fails at case 10.
 - `scripts/test-fast-skip-count.sh`: ok; on the base: fails on the new Lua-row case.
