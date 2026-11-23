@@ -435,6 +435,10 @@ this node, measured four times on THIS tree and binary with nothing else of this
     15:10Z  17 ok, 1 failed    894 ms (limit 422 ms at load 3.52)
     15:15Z  17 ok, 1 failed    945 ms (limit 744 ms at load 6.20)
 
+ATTRIBUTED THE HARD WAY, not by reading the diff: the same row, from a worktree of `85593e74` itself (base Lua,
+no branch change), with the same binary, fails the same scenario - `715 ms (limit 368 ms at load 3.07)`,
+`esc-stops pty: 17 ok, 1 failed`. So it is red on main on this node right now, with or without this branch.
+
 This branch's diff contains no Rust at all and no pty, terminal, chat or opening file (`git diff --name-only
 85593e74..HEAD` lists nineteen files: `docs/missions/reports/...`, `lua/core/{cli_help,init,land}.lua`,
 `scripts/release-linux.sh`, `scripts/speed-board.sh`, four `scripts/lib/*`, eight `scripts/test-*` and
