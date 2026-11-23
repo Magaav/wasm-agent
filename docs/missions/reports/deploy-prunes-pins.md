@@ -125,6 +125,66 @@ New operator-facing lines (verbatim from the diff, `654b4a76`):
 8. deploy.sh note without node: `pin prune: node is not on PATH, so this deploy cannot tell which pins
    under <dir> are still wanted; nothing was removed`
 
+## Follow-up 23/11: every Lua fast-path deploy died at step 8b
+
+The first version of step 8b (`654b4a76`, landed as `70b24e52`) broke the path this node mostly runs. Measured
+in `~/.wasm-agent/sentinel/deploy.out`, on the deploys of `44479b7f`, `3665b1b7` and `e9a42d20`:
+
+```
+deploy: recorded in /home/victor/.local/bin/installed.txt
+/home/victor/wasm-agent/checkout/scripts/deploy.sh: line 2422: PIN_DIR: unbound variable
+```
+
+The install had already finished and been recorded; the `wa-deploy-*` unit was then marked failed and no pin
+was pruned - on exactly the deploys this laptop mostly runs.
+
+**Root cause, re-measured rather than guessed.** `scripts/deploy.sh` writes the bodies of its big blocks at
+**column 0**, so indentation says nothing about nesting. The pin step (3c) - and the `PIN_DIR` line I had moved
+two lines up, still in the same place - sits inside the `else` of `if [ "$LUA_FAST" = 1 ]; then` (line 899 on
+the base): the branch a Lua fast-path deploy never enters. Step 8b is in the shared tail every path reaches, so
+the assignment was skipped and the reference was not.
+
+That premise of the original brief ("keeps the running pin") was stale in a second way, and this is what hid
+it: **a Lua fast-path deploy creates no pin at all**, because the pin step is inside the build branch. The 22/11
+observation that the last installs recorded `build_pin=unpinned` was the symptom of the same structure.
+
+**Fix (this branch).**
+
+- `PIN_DIR="${WA_DEPLOY_PIN_DIR:-${TMPDIR:-/tmp}/wa-deploy-pins}"` is declared **before** the Lua fast-path
+  branch (immediately above its `LUA_FAST=0`), where both paths pass, with the measurement in its comment.
+- Step 8b is marked (`# wa-deploy-pin-prune: begin` / `end`) and reads `${PIN_DIR:-}` through a `case`: a path
+  that names no pin directory says so in a `note` and the install stands, so the step can never die under
+  `set -u` again even if the file is restructured.
+
+**Test.** `scripts/test-deploy-pin-prune.mjs` grows `fastPathBlock()`, which extracts the real step out of
+`scripts/deploy.sh` (by its markers, and on the older code by its unmarked step, so the row still runs) and
+executes it under `set -uo pipefail`, the deploy's own strictness:
+
+- no pin directory named: exit 0, a note naming the hole, and no `unbound variable`;
+- a pin directory whose command cannot run: exit 0, the failure named, "the install stands";
+- a real pin directory and the real CLI: the prune happens and exactly the kept set is left;
+- structurally last: the declaration's byte offset is before `if [ "$LUA_FAST" = 1 ]; then` - the placement
+  this bug was.
+
+On `origin/main` (`e9a42d20`, a separate worktree, no stash) the test fails with the production error itself:
+`FAIL step 8b survives a path that names no pin directory: exit 1: ... line 7: PIN_DIR: unbound variable`. On
+this branch: 65 checks, 0 skipped, 5 s.
+
+Re-run on this branch: `test-deploy-luafast-record.sh` (it extracts a neighbouring block of the same file),
+`test-deploy-policy-order.sh`, `test-deploy-ship.sh` - all pass; `check-deploy-shipped.mjs` (190 checks);
+`check-temp-retention.mjs` (`ok scripts/deploy.sh`).
+
+**Still not verified:** a real install of this branch. What would have caught this on the base is a real
+fast-path deploy inside the gate, and the gate does not run one; the extracted-block harness is the closest
+cheap thing, and it reproduces the failure exactly.
+
+Text to approve (new):
+
+9. `pin prune: this path names no pin directory (WA_DEPLOY_PIN_DIR is not set and PIN_DIR is empty), so nothing
+   under it was removed - the deploy's pin step and this one disagree about WA_DEPLOY_PIN_DIR, which is a hole
+   in this script, not a machine state`
+
+
 ## Open questions
 
 - The keep set is capped at two, which is what the brief asks for and what Victor's check measures. A

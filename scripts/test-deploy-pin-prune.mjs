@@ -276,6 +276,105 @@ function deployWiring() {
     /node is not on PATH, so this deploy cannot tell which pins/.test(block));
 }
 
+// ---- 9. the step every path reaches, run for real under set -u -------------------------------------
+// The defect this section exists for (measured 23/11 on avell, deploys of 44479b7f / 3665b1b7 / e9a42d20):
+// scripts/deploy.sh keeps its block bodies at column 0, so `PIN_DIR` sat inside the `else` of
+// `if [ "$LUA_FAST" = 1 ]` - a branch a Lua fast-path deploy never enters - while step 8b, which every path
+// reaches, read it. Every fast-path deploy therefore ended
+//   deploy.sh: line 2422: PIN_DIR: unbound variable
+// after "deploy: recorded in .../installed.txt", its wa-deploy-* unit was marked failed, and no pin was
+// pruned. Two things are asserted, and both fail on that code:
+//   a. the declaration is on every path: its line comes BEFORE the Lua fast-path branch (structural, on the
+//      real file - a placement is what the bug was);
+//   b. the step itself runs under `set -u` with no pin directory named (a named note, exit 0), with a pin
+//      directory whose command cannot run (a named note, exit 0), and with a real one (the prune actually
+//      happens) - the real block, extracted from scripts/deploy.sh between its own markers.
+function fastPathBlock() {
+  const text = fs.readFileSync(DEPLOY, 'utf8');
+  // Extracted by its own markers. The code before this change carries none, so the same extraction falls
+  // back to its unmarked step there: the runs below must reproduce what the real deploy did, not skip the
+  // row because a comment is missing.
+  const begin = text.indexOf('# wa-deploy-pin-prune: begin');
+  const end = text.indexOf('# wa-deploy-pin-prune: end');
+  const marked = begin > 0 && end > begin;
+  let block = '';
+  if (marked) block = text.slice(text.indexOf('\n', begin) + 1, end);
+  else {
+    const open = text.indexOf('if [ -d "$PIN_DIR" ];');
+    const stop = text.indexOf('echo "deploy: /health -> ', open);
+    if (open > 0 && stop > open) block = text.slice(open, stop);
+  }
+  check('the prune step can be extracted from deploy.sh on its own', /prune-pins --pin-dir/.test(block),
+    block.slice(0, 200));
+
+  const harness = path.join(WORK, 'step8b.sh');
+  const write = (pinDir, sourceRoot) => {
+    fs.writeFileSync(harness, [
+      '#!/usr/bin/env bash',
+      'set -uo pipefail',   // the deploy's own strictness: an unset variable is fatal
+      'note() { printf \'NOTE [%s]\\n\' "$*"; }',
+      `INSTALL_DIR=${JSON.stringify(INSTALL)}`,
+      `SOURCE_ROOT=${JSON.stringify(sourceRoot)}`,
+      pinDir === null ? 'unset PIN_DIR 2>/dev/null || true' : `PIN_DIR=${JSON.stringify(pinDir)}`,
+      block,
+      'printf \'STEP-8B-REACHED-THE-END\\n\'',
+    ].join('\n') + '\n');
+  };
+  const run = () => spawnSync('bash', [harness], {encoding: 'utf8', env: {...ENV}});
+
+  // a. no pin directory named on this path: the step says so and the deploy goes on. Under `set -u` the
+  //    code before this change dies here instead, which is exactly what the real deploy was doing.
+  write(null, CANONICAL);
+  const unnamed = run();
+  check('step 8b survives a path that names no pin directory', unnamed.status === 0,
+    `exit ${unnamed.status}: ${unnamed.stderr}`);
+  check('it does not die on an unset variable', !/unbound variable/.test(`${unnamed.stdout}${unnamed.stderr}`),
+    unnamed.stderr);
+  check('it names the hole instead of passing silently',
+    /NOTE \[pin prune: this path names no pin directory/.test(unnamed.stdout), unnamed.stdout);
+  check('it reaches its end', /STEP-8B-REACHED-THE-END/.test(unnamed.stdout), unnamed.stdout);
+
+  // b. a pin directory whose command cannot run: a named note, never a failure of the install.
+  const broken = path.join(WORK, 'no-scripts-here');
+  fs.mkdirSync(broken, {recursive: true});
+  write(PINS, broken);
+  const fails = run();
+  check('a prune that cannot run does not fail the step', fails.status === 0, `exit ${fails.status}: ${fails.stderr}`);
+  check('the failure is named, and says the install stands',
+    /NOTE \[pin prune: .*the install stands; the trees under .* are left as they are\]/.test(fails.stdout), fails.stdout);
+
+  // c. a real pin directory, through the real command: the prune happens.
+  const blockPins = path.join(WORK, 'pins-block');
+  for (const sha of [COMMITS[0], COMMITS[1], COMMITS[2]]) pinStep(sha, blockPins);
+  const before = pins(blockPins);
+  check('the block fixture holds three pins', before.length === 3, before.map(short).join(' '));
+  // The block runs the command out of $SOURCE_ROOT, so the fixture repository is given one (the real
+  // scripts, unchanged) - nothing else about the run is different from a deploy's.
+  const scripts = path.join(CANONICAL, 'scripts');
+  const hadScripts = fs.existsSync(scripts);
+  if (!hadScripts) fs.symlinkSync(path.join(REPO, 'scripts'), scripts);
+  try {
+    write(blockPins, CANONICAL);
+    const pruned = run();
+  check('step 8b carries the markers this test extracts it by', marked,
+    'deploy.sh has no # wa-deploy-pin-prune: begin/end pair');
+    check('the real block prunes through the real command', pruned.status === 0 &&
+      /pin prune: removed|pin prune: \d+ removed/.test(pruned.stdout), `exit ${pruned.status}: ${pruned.stdout}${pruned.stderr}`);
+    check('it leaves the kept set behind, and nothing more', pins(blockPins).length === 2,
+      pins(blockPins).map(short).join(' '));
+  } finally {
+    if (!hadScripts) fs.rmSync(scripts, {recursive: true, force: true});
+  }
+
+  // The placement last, because it is the structure behind the runs above: this file writes its block bodies
+  // at column 0, so the line's LINE say nothing - what decides is which branch it sits in.
+  const declared = text.indexOf('PIN_DIR="${WA_DEPLOY_PIN_DIR:-');
+  const branch = text.indexOf('if [ "$LUA_FAST" = 1 ]; then');
+  check('deploy.sh still has the Lua fast-path branch this rule is about', branch > 0);
+  check('the pin directory is declared on EVERY path, not inside the build branch',
+    declared > 0 && declared < branch, `PIN_DIR at ${declared}, the Lua fast-path branch at ${branch}`);
+}
+
 // ---- main ----------------------------------------------------------------------------------------
 (async () => {
   const started = Date.now();
@@ -286,6 +385,7 @@ function deployWiring() {
   livenessUnknown();
   removalFails();
   nameAllowList();
+  fastPathBlock();
   deployWiring();
   const seconds = Math.round((Date.now() - started) / 1000);
   console.log(`deploy-pin-prune: ${passed} check(s) ok, ${skipped} skipped in ${seconds}s (scratch ${WORK})`);
