@@ -12,7 +12,9 @@ binary the build actually made; and the three additions of 23/11 09:45Z, 10:50Z 
     (the same four commits as before the rebase: 3cefe6c5, 46d1ee99, 264351ce, c5331658 on base 4b314af5)
 
 The rebase onto `7865a08e` was clean (fast.sh and test.sh carry this branch's two added `check` lines after it),
-and the nine rows below were run again on the rebased branch: all green.
+and the nine rows below were run again on the rebased branch: all green. `origin/main` has since moved once more
+(`ad4576ee`, land-quick: diff-card-reads-like-claude-code), touching `lua/core/cli_view.lua`, `tests/diff-view.lua`,
+two rows and its own report - no overlap with anything this branch changes, so the landing's merge is a clean one.
 
 ## 1. What was measured, before anything was changed
 
