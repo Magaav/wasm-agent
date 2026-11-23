@@ -106,10 +106,13 @@ done
 ok
 # ...AND THE LIST IS JUDGED AGAINST THE TREE, not against the ten names above: a row that dofiles the land
 # harness IS part of the land row, so it must be never-dropped whatever it is called. A part added later
-# and left out of the core list is a row a narrowed run silently skips.
+# and left out of the core list is a row a narrowed run silently skips. The land-quick parts dofile
+# scripts/lib/land-quick.lua, which is the same fixtures with the quick row's scripted sentinel, health run
+# and fast path (23/11): they are land rows and are judged here, not skipped by the name of the file they
+# include.
 parts=0
 for row in scripts/test-*.lua; do
-  grep -q 'scripts/lib/land-row.lua' "$row" 2>/dev/null || continue
+  grep -q -e 'scripts/lib/land-row.lua' -e 'scripts/lib/land-quick.lua' "$row" 2>/dev/null || continue
   parts=$((parts + 1))
   grep -qx "$row" <<< "$core" || fail "$row uses the land harness but is not a never-dropped row"
 done

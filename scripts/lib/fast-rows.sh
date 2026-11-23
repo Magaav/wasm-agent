@@ -22,7 +22,8 @@
 # Sourced by scripts/fast.sh; exercised by scripts/test-fast-rows.sh (no node, no cargo, seconds).
 # THE NEVER-DROPPED ROWS. Two kinds, and a third entry is only added with the evidence for it:
 #
-#   * the row-environment probe and the ten `test-land-*.lua` parts: the run's own correctness and the landing
+#   * the row-environment probe and the land rows (`test-land-*.lua`: the ten parts of the landing machine's
+#     own row, and the quick row's five by subject since 23/11): the run's own correctness and the landing
 #     machine's own row. A narrowed run that lost any of them would go green saying less than a full one;
 #   * WHOLE-TREE ROWS: a row whose verdict depends on files it does not name, because the set it judges is
 #     enumerated from the repository - "every reachable module's refusal codes", "every tool's declared
@@ -57,6 +58,12 @@ wa_fast_core_rows() {
   # saying less than a full run, which is the failure this list exists to prevent - and the same rule put
   # scripts/test-land-quick.lua here on 22/11: the landing (`wa land <branch>`, FACTORY.md rule 10) is what
   # every round now ends with, so a narrowed run that dropped its row would never see a landing break.
+  # AND THAT SAME ROW IS FIVE PARTS BY SUBJECT SINCE 23/11 (mission land-quick-row-not-hung), for exactly the
+  # reason above and with the measurement this time: one row of 178 checks and ~3,200 `host.exec` calls took
+  # 112 s alone at load 12.8 and 145 s when eight copies ran at once - over the 120 s deadline, so the runner
+  # reported a row that had NOT deadlocked as HUNG, in four main-health runs on four different trees. The
+  # harness they share is scripts/lib/land-quick.lua; the five counts add up to the one row's 178, and every
+  # part is listed here for the reason every land part is.
   # scripts/test-event-ledger.lua is here for the same reason: it is the feed every other row and every
   # outside agent reads (docs/EVENTS.md).
   # scripts/test-land-health-program.lua too: it is the one row that proves the health step can START its
@@ -66,7 +73,9 @@ wa_fast_core_rows() {
     scripts/test-land-plan.lua scripts/test-land-resume.lua scripts/test-land-sign.lua \
     scripts/test-land-review.lua scripts/test-land-rows.lua scripts/test-land-resume-19-11.lua \
     scripts/test-land-marks.lua scripts/test-land-release.lua scripts/test-land-gate-rows.lua \
-    scripts/test-land-until.lua scripts/test-land-quick.lua scripts/test-land-health-program.lua \
+    scripts/test-land-until.lua scripts/test-land-quick.lua scripts/test-land-quick-tests.lua \
+    scripts/test-land-quick-components.lua scripts/test-land-quick-main.lua \
+    scripts/test-land-quick-install.lua scripts/test-land-health-program.lua \
     scripts/test-land-linux.lua \
     scripts/test-event-ledger.lua scripts/test-product-version.lua \
     scripts/test-refusal-contract.lua scripts/test-tool-schema-fidelity.lua scripts/test-codemode-parity.lua \
