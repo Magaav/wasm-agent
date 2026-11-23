@@ -120,8 +120,12 @@ local landing_row
 for _, candidate in ipairs(holes.rows) do if candidate.name == 'landing' then landing_row = candidate end end
 check(landing_row and landing_row.state == 'unknown' and not landing_row.red,
   'a record row that has not happened is unknown, never RED')
-check(stats.format_table({ holes_entry }, 'holes'):find('RED unavailable: no binary to measure', 1, true) ~= nil,
+local holes_table = stats.format_table({ holes_entry }, 'holes')
+check(holes_table:find('RED unavailable: no binary to measure', 1, true) ~= nil,
   'the table shows a live hole as RED with its reason')
+local no_number_line = holes_table:match('  remote_roundtrip[^\n]*')
+check(no_number_line ~= nil and no_number_line:find('%d%.%d%d') == nil,
+  'a row with no number prints no load - 0.00 would read as a measurement: ' .. tostring(no_number_line))
 
 -- A HOLE DOES NOT CONSUME THE WINDOW: a commit with no number cannot be the floor, and it must not push
 -- the last numbers that exist out of the window either (23/11: the eight commits of 'unavailable' after

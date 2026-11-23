@@ -351,7 +351,10 @@ function M.format_table(history, sha)
       state = (row.red and 'RED ' or '') .. row.state .. (row.reason and (': ' .. row.reason) or '')
     end
     lines[#lines + 1] = string.format('  %-24s %10s %8s %10s  %s', row.name,
-      row.ms and fmt_ms(row.ms) or '-', row.load and string.format('%.2f', row.load) or '-', change, state)
+      row.ms and fmt_ms(row.ms) or '-',
+      -- A row with no number prints NO load either: the 0 a hole carries is the absence of a measurement,
+      -- and `0.00` beside a RED row reads as a measurement taken on an idle machine (measured 23/11).
+      (row.state == 'ok' and row.load) and string.format('%.2f', row.load) or '-', change, state)
   end
   return table.concat(lines, '\n')
 end
