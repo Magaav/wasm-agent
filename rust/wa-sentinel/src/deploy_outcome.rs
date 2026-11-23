@@ -97,7 +97,7 @@ fn install_dir() -> PathBuf {
 /// The commit `installed.txt` names, or a sentence saying why it names none. Read at report time, never
 /// cached: the notice is evidence, and evidence about what is installed is only worth reading if it was read
 /// just now.
-fn installed_commit() -> String {
+pub(crate) fn installed_commit() -> String {
     let path = install_dir().join("installed.txt");
     match std::fs::read_to_string(&path) {
         Ok(text) => text

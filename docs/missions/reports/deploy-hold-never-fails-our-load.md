@@ -739,3 +739,86 @@ The tests that go with it, on the same branch:
 
 **Not landed, by instruction:** the branch is `proposal/housekeeping-holds-no-install` at `5aba5a93`, and this
 report commit only records it. Fable decides.
+
+## Addendum 5 (Fable, 23/11 ~23:50Z): a spawned installer always ends in a verdict; and `sync tick` stops starting
+
+### 1. LOST INSTALL REQUEST (G blocker): measured, then fixed
+
+**What happened to `1795474711` (ffd2a0a5), read-only:**
+
+* the request was held on holders (a worker turn, then `sync tick`, then `busy, names no holder`) until `1795475320`
+  (22:28:40Z), when the installer was spawned: `done/1795474711497868497-….json` says
+  `phase: spawned`, `detail: "deploy started detached (unit wa-deploy-1795475320-1196761, output appended to
+  …/sentinel/deploy.out) … no session was named, so no notice can be delivered for it (pass --session)"`, and its
+  request names `target_commit: ffd2a0a5dd92…`;
+* the installer **refused**: `sentinel/deploy.out`, last block - `--- deploy unit wa-deploy-1795475320-1196761 at
+  1795475320 script /home/victor/wasm-agent/checkout/scripts/deploy.sh reason land-quick
+  deploy-hold-never-fails-our-load (ffd2a0a5)` … `deploy: refused(component_proof_failed): the candidate binary did
+  not answer a graph call through the staged component; nothing installed`, and above it the cause:
+  `component: lua error: …:16: graph_index: graph_dormant`;
+* it wrote **none** of `binding.json`, `ack.json`, `intent.json` into `sentinel/deploy-protocol/<id>/` - so the
+  return engine (`sentinel_return` + the `onSentinelReturn` job, the owner of a protocol deploy's report) could not
+  observe it: `sentinel.log` `1795475660 return-observation-problem … cannot be observed: missing binding.json,
+  ack.json, intent.json`, then `1795475960 return-observation-retired … unchanged for 300s`;
+* the retired directory holds **only `result.json`** (523 bytes) - no protocol files at all;
+* `~/.local/bin/installed.txt` still named `commit=4425f670…`, and the box answered `0 waiting`. So: not installed,
+  not failed, not re-queued. The orchestrator re-requested it by hand at ~23:35Z.
+
+**Why the installer wrote nothing:** it refused *before* the protocol return step, at its component proof
+(`deploy.sh`'s `component_proof_failed`, caused by `graph_dormant`). The refusal is a legitimate outcome; what was
+missing is that nothing turned "installer ended, nothing installed" into a request outcome.
+
+**Fix (`installer_outcome.rs`, wired into `observation.rs`).** The lane that decides whether a protocol directory
+can still be observed no longer retires a directory whose installer already ended. It asks the installer's own
+three files instead:
+
+| fact | source |
+| --- | --- |
+| the commit the request asked for, and its reason | the sentinel's own `done/<id>.json` (the `spawned` record) |
+| what is installed | `installed.txt` beside the installed binary |
+| what the installer said | its block in `deploy.out`, found by the request's own reason (`--- deploy unit … reason <reason>`) |
+
+`verdict_of` is pure and answered in three ways: `Installed` (the record names the request's commit, or the
+installer's block ends `deploy: installed`), `Uninstalled(<the installer's line>)` (its block ends in any other
+terminal line, or there is no block at all - said as such), `Running` (a block with no terminal line: nothing is
+claimed). `fail_unobserved` then writes `failed/<id>.json` with `phase: unobserved` and that sentence, one queue
+record, ONE re-queue (`schedule_requeue`, the same once-per-request path the bound uses) and - when the request
+named a session - the exactly-once deploy-outcome notice; otherwise the audit line `deploy-unobserved-failed` is
+the notice, since a request with no session has nobody to wake (the record says so itself).
+
+So a request whose installer started now ends in exactly one of: **installed**, or **failed with the installer's
+reason and re-queued once**. Retiring an unobservable directory with nothing installed is no longer possible while
+the installer's verdict can be read.
+
+Tests: `installer_outcome_tests.rs` (6) - the measured case word for word, an install that reached the record, an
+installer with no terminal line (still `Running`), an earlier landing's `installed` never answering for this one,
+no target commit = no verdict, and `fail_unobserved` writing `failed/` + exactly one re-queue and doing nothing on
+a second pass. `rust/wa-sentinel` unit tests: **159 passed**.
+
+### 2. `sync tick`: Fable's alternative, implemented (the allow-list is gone)
+
+* **It does not START while a deploy waits or installs.** `serve.rs`'s housekeeping block now asks
+  `wa_deploy_pending()` (Lua, one predicate that reuses `deploy_pause.waiting`: the installer's marker, the request
+  box and the claimed lane) before starting `wa_sync_tick` and `wa_retention`. A reader that cannot answer returns
+  `0` (the previous behaviour) and the node prints one line - a broken reader must not silence the node's sync for
+  ever.
+* **A pass already running finishes, and yields before its network phase.** `wa_sync_tick` does the cheap phases
+  (update banner, backup *due* check - the snapshot itself already runs as a supervised operation) and then, if a
+  deploy is waiting, returns with `yielded: a deploy is waiting for or installing on this node` before the peer
+  push; the next quiet window after the install does it.
+* **Worst case, stated.** The sentinel's own record cannot say how long ONE pass lasts - its intervals are
+  observation spans across the 20 s cadence (the six installs' spans were 361-661 s in total, each a series of
+  passes), so I do not claim a per-pass number I did not measure. What is bounded now: a pass cannot *start* while
+  a deploy waits, and a pass that is running stops before its one network phase, which is the phase bounded by the
+  peer call's own timeout. If the residual (the cheap phases of an already-running pass) ever proves long enough
+  to matter, the next yield point belongs between the backup-due check and the banner refresh; that is where the
+  remaining work is, and it is milliseconds today.
+* **No label allow-list after the bound:** `holders.rs` is unchanged on this branch, and
+  `proposal/housekeeping-holds-no-install` stays **unmerged** (its allow-list is superseded by this).
+
+### Texts to approve (23/11, this review)
+
+21. `deploy <id> failed without a verdict: the installer ended and nothing was installed: <the installer's line>; it is re-queued automatically once, when this node is next quiet; re-request with: wa-sentinel request deploy --expected-sha <sha> --reason '<reason>'` - console, `failed/<id>.json`, the queue record, and audit `deploy-unobserved-failed`
+22. `return-observation-failed` audit line: `<problem>; the installer ended and nothing was installed, so the request failed with its own reason and was re-queued once (no retirement)`
+23. node log: `sync tick: yielded to a waiting deploy; the next quiet window does the rest`
+24. node stderr, once: `[sync] wa_deploy_pending unavailable, housekeeping starts as before: <error>`
