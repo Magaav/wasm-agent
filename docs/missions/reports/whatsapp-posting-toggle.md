@@ -211,6 +211,32 @@ Measured: **155 checks, 1 failed, 0 skipped, 694 s** (`wa-fast-result.json`; evi
   is the behaviour `scripts/lib/fast-rows.sh` promises; three of my 43 candidate rows are
   `scripts/fast-path.exclude`d and were removed from the request, not run.
 
+### After the review follow-up (`--all-chats`): the rows again
+
+The follow-up (`de5a0780`) changes `lua/core/whatsapp_posting.lua`, `lua/core/whatsapp_posting_cli.lua`
+and the row; by the tree's own inventory that maps to **one** row, `scripts/test-whatsapp-posting-toggle.lua`
+(no other `scripts/test-*.lua` names either module). Measured at `de5a0780`/`5ff24361`:
+
+* `scripts/test-whatsapp-posting-toggle.lua`: **140 checks, pass** (the follow-up's four new checks: `*`
+  refused without the flag and the refusal names it; nothing stored; `*` with `--all-chats` accepted and
+  the answer carrying the count the index answered; `status` carrying the same count; a count the index
+  cannot answer reported as `unverified` instead of a number; `own` unchanged, one step);
+* `scripts/test-host-return-docs.lua`: **10 checks, pass** (the docs this round touched);
+* the wider narrowed set the first run used (the 40 rows that read `lua/core/server.lua` or
+  `lua/core/init.lua`, plus core rows), re-run through the fast path's own per-row executor
+  (`scripts/lib/fast-row-exec.sh`: the same scratch home, cleared environment and watchdog it gives a
+  row): **40 pass, 0 fail**.
+
+**The front end, said plainly.** Three attempts to get the same verdict through `bash scripts/fast.sh
+--rows` after the follow-up ended with **exit 2 with no message**, in the trace right after the line
+`fast: components ... built from this tree` and before the first row (the first full run, before the
+follow-up, was green). The cause is **not proven**. One fact was measured: `WA_FAST_ROWS=/tmp/rows.txt` was
+a file this mission shared with every other mission on the machine, and it was **rewritten at 15:24 by
+another process** with 349 rows from another worktree - a request names a row this tree cannot run, which
+`scripts/lib/fast-rows.sh` refuses by name with exit 2. That mistake was mine (a shared path instead of a
+private one), and it also produced one accidental wider run whose 2 failures were rows absent from this
+tree (`scripts/test-tool-args-parity.lua`, `scripts/test-tool-arguments.lua`: "No such file or directory"),
+not failures of this change.
 Not run, by the brief: the unnarrowed `scripts/fast.sh`, `scripts/test.sh`, `scripts/test-preflight.sh`
 and `wa land --until gate`.
 
