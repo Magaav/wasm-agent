@@ -1,26 +1,29 @@
 # release-linux-reads-the-receipt
 
-Branch `change/release-linux-reads-the-receipt`, rebased onto `origin/main` = `c1337903` (three times, see
-section 8), nine commits plus this report, lands on green, no review. Mission: the public channel step publishes
-from the binary the build actually made; and the three additions of 23/11 09:45Z, 10:50Z and 11:20Z.
+Branch `change/release-linux-reads-the-receipt`, rebased onto `origin/main` = `85593e74` (four times, see
+section 8), eleven commits plus this report, lands on green, no review. Mission: the public channel step
+publishes from the binary the build actually made; and the three additions of 23/11 09:45Z, 10:50Z and 11:20Z.
 
-    git log --oneline c1337903..HEAD
-    e3870e26 test: the two new rows follow the runner's TMPDIR, and the channel row is never dropped
-    d762326c test: the channel row owns its stand-ins, so the landing can run it
-    83a6d527 report: main moved to ad4576ee by one unrelated landing (no overlap)
-    2ba5f3c5 report: rebased onto origin/main 7865a08e, rows re-run green
-    b5273f80 report: the channel step reads the receipt, and the three 23/11 additions
-    976ca882 land: a description change runs the description rows before it lands
-    b2c1a86d land: wa land mark linux --by-hand records a hand-published channel, and the board reads it
-    955584e7 cli: wa <verb> --help is a question and runs nothing, with a row that enumerates the acting verbs
-    2e6d22cd release-linux: stage the bundle from the build receipt, and a channel step row that runs the join
-    (the four item commits were 94c39059, fb6ca151, c7bd3d98, 000bbc5f on base 7865a08e; the two test commits
-     were b47c9081 and, before this round, nothing - the rows they fix are section 8's)
+    git log --oneline 85593e74..HEAD
+    407ab1bb test: the channel row names the steps it allows between the ring and the channel
+    10148157 report: the rebase onto 41d6420c, and what only the narrowed fast path found
+    bb8af9fb test: the two new rows follow the runner's TMPDIR, and the channel row is never dropped
+    45273183 test: the channel row owns its stand-ins, so the landing can run it
+    2d582e51 report: main moved to ad4576ee by one unrelated landing (no overlap)
+    eb49fbd4 report: rebased onto origin/main 7865a08e, rows re-run green
+    975017d8 report: the channel step reads the receipt, and the three 23/11 additions
+    a18c0918 land: a description change runs the description rows before it lands
+    7d54d172 land: wa land mark linux --by-hand records a hand-published channel, and the board reads it
+    5559f624 cli: wa <verb> --help is a question and runs nothing, with a row that enumerates the acting verbs
+    3ef96341 release-linux: stage the bundle from the build receipt, and a channel step row that runs the join
+    (the four item commits were 94c39059, fb6ca151, c7bd3d98, 000bbc5f on base 7865a08e; the two test
+     commits were b47c9081 and a970f559 before the rebases)
 
-Every rebase was clean, in the tree and in the rows: onto `7865a08e`, onto `41d6420c` (ten commits of other
-missions) and onto `c1337903` (fifteen, including `change/esc-socket-per-thread`). The narrowed fast path under
-the second one found two red rows no single-row run had shown; both are fixed (`e3870e26`) and section 8 records
-what the runner measured and what it did not.
+Every rebase was clean, in the tree: onto `7865a08e`, onto `41d6420c` (ten commits of other missions), onto
+`c1337903` (fifteen, including `change/esc-socket-per-thread`) and onto `85593e74` (twenty-seven, including the
+release plan's new `canaries` step). Two of them found a red row the branch had not seen - the narrowed fast
+path under the second (section 8) and the landing's own preflight under the fourth (section 9) - and both are
+fixed by naming what the row really means instead of a literal that happened to hold on one main.
 
 ## 1. What was measured, before anything was changed
 
@@ -337,7 +340,7 @@ the landing runs it. That is the gap this round closes.
     the same row on 4b314af5, the landing's way                              -> fails: the channel step builds nothing
       (linux_channel_build_failed, "no built binary at .../rust/target/..."), so it still discriminates.
 
-## 8. Rounds 2 and 3 of the gate: what only the fast PATH found
+## 8. Round 2 of the gate: what only the fast PATH found
 
 The first narrowed fast run on the rebased branch (`WA_FAST_ROWS` = the land rows + `test-speed-board.lua`, 29
 of 342 Lua rows plus every contract check, `flock -o` on the suite lock) was red on three checks. Two were this
@@ -373,6 +376,45 @@ a machine at load 10-32, not a regression from this branch.
 For the record, main-health's own run on `41d6420c` was red on one row - `scripts/test-speed-board.lua`
 (`speed-board: 5 FAIL of 30`), main's version of a row this branch rewrites; on this branch that row is green.
 
+## 9. Round 3 of the gate: main's new `canaries` step, and the preflight that caught it
+
+The landing's preflight on the rebase onto `85593e74` stopped the branch on one row:
+
+    land-quick: the branch's own tests are red: scripts/test-land-linux.lua
+    lua error: check failed: the channel step comes right after the deploy (got 14, want 13)
+
+main had gained a `canaries` step ("every feature this node runs proves itself, after the deploy read-back")
+between `deploy` and `linux`, so `position.deploy + 1` was no longer the channel. The adjacency was a fact about
+one plan; the invariant the row exists for is that the channel publishes AFTER the ring, because the channel
+moves main and a node deploys a commit only while `HEAD == origin/main ==` that commit.
+
+`407ab1bb` keeps the invariant and NAMES the allowance as an allow-list rather than widening a comparison: the
+steps between the deploy and the channel must be exactly `canaries` - a step that reads the deployed bytes without
+writing main - and any other step in that gap has to be added to the row in its own right. No assertion was
+deleted, the row still says the report is last, and it still counts 121 checks. (The discrimination check sees a
+MODIFIED row that passes on the base as `unchanged-verdict`, which does not block; this row discriminates anyway,
+because its by-hand cases need `wa land mark` from `7d54d172`.)
+
+Every row this branch touches, run SINGLY on `85593e74` (no suite lock, rule 15), all green:
+
+    test-land-linux.lua          land-linux ok (121)      test-land-rows.lua          land ok (137)
+    test-land-plan.lua           land ok (109)            test-land-gate-rows.lua     land ok (82)
+    test-land-until.lua          land ok (102)            test-land-marks.lua         land ok (27)
+    test-land-release.lua        land ok (72)             test-land-resume.lua        land ok (42)
+    test-land-quick-tests.lua    landing ok (49)          test-land-resume-19-11.lua  land ok (22)
+    test-release-channel-e2e.lua release-channel-e2e ok (20)  test-land-sign.lua      land ok (46)
+    test-land-review.lua         land ok (47)             test-land-health-program.lua ok (8)
+    test-land-quick.lua          landing ok (81)          test-land-quick-main.lua    landing ok (26)
+    test-land-quick-components.lua ok (12)               test-land-quick-install.lua landing ok (23)
+    test-land-gate-log.lua       land-gate-log ok (8)     test-speed-board.lua        speed-board ok (35)
+    test-cli-help.sh             cli-help ok (42)         test-release-channel-e2e.sh release-channel-e2e ok (20)
+
+The narrowed fast path itself was run on `41d6420c` (section 8: 29 of 342 Lua rows plus every contract check,
+594 s) and not again on `85593e74`: the suite lock was held by main-health and two missions (a run queued 25
+minutes without starting), and the landing's own preflight - which is that same run - is what found this round's
+red. That is the honest state: the rows above are measured on this base, the whole-path run on this base is the
+preflight's.
+
 ## 6. What was not verified, and what is open
 
 * **No real release was cut and nothing was pushed to origin.** The proof is the next cut; by the brief's own
@@ -380,24 +422,12 @@ For the record, main-health's own run on `41d6420c` was red on one row - `script
   must print `wasm-agent v0.1.2 · v<sha>`.
 * **The full cross build was not run here**: no `zig` on PATH on this node. The receipt/artifact plumbing is
   proved by the row and by a direct `cargo-zigbuild build --message-format=json` on a scratch crate.
-* **The full suite was not run** (the G-wave rule), and neither was a narrowed `fast.sh`: it queued on
-  `~/Work/missions/.suite.lock` behind another mission's run for 12 minutes, so the operation was cancelled and
-  the rows were run SINGLY instead (a single test file needs no suite lock, rule 15). Every one green, on this
-  branch, on this node:
-
-      bash scripts/test-linux-channel.sh          linux-channel: 32 checks passed
-      bash scripts/test-cli-help.sh               cli-help ok (42 checks) + cli-help-verbs ok (113 checks)
-      bash scripts/test-release-channel-e2e.sh    release-channel-e2e ok (20 checks)
-      scripts/test-land-plan.lua                  land ok (108 checks)
-      scripts/test-land-marks.lua                 land ok (27 checks)
-      scripts/test-land-release.lua               land ok (70 checks)
-      scripts/test-land-linux.lua                 land-linux ok (121 checks)
-      scripts/test-land-quick-tests.lua           landing ok (49 checks)
-      scripts/test-speed-board.lua                speed-board ok (35 checks)
-
-  `main-health` runs the whole check on main. The rows for the files this branch touches are: the nine above
-  (they cover `lua/core/init.lua`, `lua/core/cli_help.lua`, `lua/core/land.lua`, `scripts/release-linux.sh`,
-  `scripts/speed-board.sh`, `scripts/lib/*` and `scripts/fast.sh`'s two new lines).
+* **The full suite was not run** (the G-wave rule: a landing runs no gate, the gate runs at release). A NARROWED
+  `fast.sh` was run under the suite lock - `WA_FAST_ROWS` = the nineteen land rows plus `test-speed-board.lua`,
+  which came to 29 of 342 Lua rows plus every contract check, 594 s - and its two red rows are section 8. On
+  the final base (`85593e74`) every row this branch touches was run SINGLY instead (a single test file needs no
+  suite lock, rule 15) because the lock was held by main-health and two missions; the list with its counts is
+  section 9. `main-health` runs the whole check on main.
 * **`luac -p lua/core/land.lua` fails on base too** ("attempt to assign to const variable 'path'", line 1376);
   pre-existing, not this branch. Rows are the verdict, and they run.
 * **One self-inflicted incident, recorded so the next session does not repeat it.** A new test case at
