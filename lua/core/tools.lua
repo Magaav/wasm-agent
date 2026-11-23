@@ -2094,8 +2094,16 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     args.path = resolve_path(memory, ctx, args.path)
     -- The scope is what lets a later edit refuse an anchor it can prove came from a partial page
     -- (file_tools.page_key): the session is the unit that was served the bytes.
-    return file_tools.read(args,function(entry) return memory.store_image(entry) end,nil,
+    local read = file_tools.read(args,function(entry) return memory.store_image(entry) end,nil,
       ctx and ctx.session_id)
+    -- A caller on ANOTHER node can ask for the picture's bytes (lua/core/remote_image.lua): a reference
+    -- whose path is a file on this machine is useless there, and refusing it was the whole answer until
+    -- now (mission run-block-images-reach-model, item 3). Below the cap and only for this built-in read's
+    -- own picture; the bytes travel INSTEAD of the reference.
+    if args.image_bytes == true then
+      return dofile('lua/core/remote_image.lua').offer(read, memory.load_image)
+    end
+    return read
   elseif name == 'capture_inspect' then
     args.path=resolve_path(memory,ctx,args.path)
     return dofile('lua/core/capture_view.lua').inspect(args)
@@ -2496,7 +2504,11 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
         result.note = nil
         result.peer_binding, result.peer_operators, result.operator_basis = status.peer_binding, status.peer_operators, status.operator_basis
       else
-        result=nodeslib.remote_call(call.node, call.capability, call.args, options)
+        -- A read asks the peer for the picture's bytes as well: a peer that does not know the field
+        -- answers exactly what it answered before, and the refusal below is unchanged (an old node keeps
+        -- working; nothing is assumed about the peer's build).
+        local sent = call.capability == "read" and dofile('lua/core/remote_image.lua').request(call.args) or call.args
+        result=nodeslib.remote_call(call.node, call.capability, sent, options)
       end
       if type(result) == "table" and REMOTE_REFUSALS[result.error] then
         result.online_nodes = online_nodes()
@@ -2524,10 +2536,25 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
         path = tostring(target), ok = ok, error = result.error,
         before_text = wire and wire.before or nil, after_text = wire and wire.after or nil })
     end
-    if carries_local_images(result) then
+    -- A picture the peer sent (lua/core/remote_image.lua): verified against the digest it named, stored
+    -- HERE, and handed on as this node's own reference - the same content-addressed store and the same
+    -- provider route a local read uses. A picture that fails a check is a named refusal.
+    --
+    -- The adopt comes FIRST and the reference is attached AFTER the wrong-machine check below, because a
+    -- reference this node just wrote is a file that exists HERE: the check exists to refuse a path on the
+    -- wrong machine, and naming an adopted picture "on the wrong machine" would refuse the very transfer
+    -- this branch is here to accept (measured: the refusal fired on a successful adoption).
+    local adopted
+    if type(result) == "table" and result.image_data ~= nil then
+      local reference, problem = dofile('lua/core/remote_image.lua').adopt(memory, result)
+      if not reference then return problem end
+      adopted = reference
+    end
+    if carries_local_images(result) and not adopted then
       return {error="remote_image_transport_unsupported",capability=call.capability,
         note="The image was not returned as text or as a path on the wrong machine."}
     end
+    if adopted then result._images = { adopted } end
     -- The caller's own half of a file call on a peer (mission remote-edit-first-class): record the page
     -- THIS session was served there, and record the change in THIS session, with the node it happened
     -- on, so undo puts the peer's file back. A call addressed to this node needed neither - its own

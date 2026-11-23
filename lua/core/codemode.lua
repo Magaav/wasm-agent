@@ -561,8 +561,13 @@ end
 M.MAX_IMAGES = 4
 M.MAX_IMAGE_BYTES = 12 * 1000 * 1000
 
-local function take_result_images(state,call,value)
- if call.tool ~= 'read' or type(value) ~= 'table' then return end
+local function take_result_images(state,call,value,params)
+ -- The built-in read, and a PEER's read: the picture of the latter was verified against the digest the
+ -- peer named and stored in THIS node's store before it arrived here (lua/core/tools.lua,
+ -- lua/core/remote_image.lua), so it is this node's own reference and not a remote claim. Every other
+ -- name - a plugin's, a connector's - keeps its `_images` as ordinary JSON.
+ local peer_read = call.tool == 'remote' and type(params) == 'table' and params.capability == 'read'
+ if not (call.tool == 'read' or peer_read) or type(value) ~= 'table' then return end
  local references = value._images
  -- The node's private transport, never a script's data: it carries an absolute path in THIS node's
  -- attachment store. The read's own answer keeps path, type, mime, bytes, sha256 and version, which is
@@ -661,7 +666,7 @@ local function settle_call(s,call)
       success=type(value)~='table' or (not value.error and value.ok~=false)
       -- A picture this call brought back leaves the script's view here and rides out on the run's
       -- result (both loops settle through this one function, so both attach the same pictures).
-      take_result_images(s,call,value)
+      take_result_images(s,call,value,params)
      else value,success={error=tostring(result),effect='unknown',replay_allowed=false},false end
      local encoded=json.encode(value);local reference=output.store(encoded)
      value,success=script_value(value,success)

@@ -1255,6 +1255,11 @@ end
 -- direct read or from a script. Nothing else can reach the key: codemode.lua sets it from its
 -- `read` calls only, and the fence is that name, not a shape - a plugin that answers `_images`
 -- inside a script keeps it as JSON in the script's value.
+--
+-- `remote` is the third name, and it is the same rule read differently: a picture from a peer only
+-- becomes `_images` after lua/core/tools.lua's own verification stored it in THIS node's image store
+-- (lua/core/remote_image.lua, adopt), so the key is still this node's own, never a peer's word and never a
+-- plugin's JSON. A peer picture that failed a check keeps the named refusal instead of the key.
 local function take_tool_images(name,output)
   local images = {}
   local function take(value)
@@ -1262,7 +1267,7 @@ local function take_tool_images(name,output)
     for _, reference in ipairs(value._images or {}) do images[#images + 1] = reference end
     value._images = nil
   end
-  if name == "read" or name == "run" or name == "codemode" then
+  if name == "read" or name == "run" or name == "codemode" or name == "remote" then
     take(output)
   end
   return images
