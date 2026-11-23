@@ -275,29 +275,94 @@ else
   rm -rf "$work" 2>/dev/null
   exit 2
 fi
-# A FAILED ROW'S LOG OUTLIVES THE RUN (item 3 of the harness-fixes-2 round). The scratch work dir is
-# deleted on exit - that is why the reclaim above exists - so a failed row's own output died with it, and
-# the landing gate (lua/core/land.lua) could only report the one line it had already copied. A caller that
-# names a directory here gets every failed row's log copied into it BEFORE the cleanup: the run's evidence
-# then holds the words that failed, not a pointer to a directory that is gone.
-wa_fast_keep_failed_logs() {
-  [ -n "${WA_FAST_KEEP_LOGS:-}" ] || return 0
-  [ -d "$work/logs" ] || return 0
-  mkdir -p "$WA_FAST_KEEP_LOGS" 2>/dev/null || { echo "fast: refused(keep_logs_unwritable): cannot keep failed row logs in $WA_FAST_KEEP_LOGS" >&2; return 0; }
-  local kept=0 log
-  for log in "$work"/logs/*.log; do
-    [ -f "$log" ] || continue
-    cp "$log" "$WA_FAST_KEEP_LOGS/$(basename "$log")" 2>/dev/null && kept=$((kept + 1))
-  done
-  echo "fast: kept $kept failed row log(s) in $WA_FAST_KEEP_LOGS"
+# A FAILED ROW'S EVIDENCE OUTLIVES THE RUN (item 3 of the harness-fixes-2 round, extended 23/11).
+#
+# The scratch work dir is deleted on exit - that is why the reclaim above exists - so a failed row's own
+# output died with it, and the landing gate (lua/core/land.lua) could only report the one line it had
+# already copied. Three gaps were measured on 23/11, when two /undo pty rows failed in every fast.sh run
+# and passed when run by hand:
+#   * only `$work/logs/*.log` was kept, and a `check` row logs to `$work/check-<name>.log` - so a pty
+#     row's log was never kept at all, however the caller named a directory;
+#   * the directory a row KEEPS ITSELF ("scratch kept for diagnosis: <dir>") lived under `$work/tmp` and
+#     was deleted with it, so the evidence the row pointed at was already gone when anyone read it;
+#   * with no `WA_FAST_KEEP_LOGS` (a hand run, a health run that forgot it) nothing was kept at all.
+#
+# So: every failed row's log, the first line the row itself marked as a failure, and every directory a row
+# kept for diagnosis are copied BEFORE the cleanup, into the caller's directory when it named one and into
+# the worktree's own git dir otherwise. The default footprint is bounded (the last five runs), and a live
+# run's scratch is never reclaimed by another (the owner lock above).
+wa_fast_evidence_dir() {
+  if [ -n "${WA_FAST_KEEP_LOGS:-}" ]; then printf '%s' "$WA_FAST_KEEP_LOGS"; return 0; fi
+  local gd
+  gd=$(cd "$ROOT" && git rev-parse --absolute-git-dir 2>/dev/null) || gd=''
+  [ -n "$gd" ] || return 1
+  printf '%s' "$gd/wa-fast-evidence/$(date +%Y%m%dT%H%M%SZ)-$$"
 }
+# The log a row writes, of either kind: a `check` row (a pty row) writes check-<name>.log, a Lua row writes
+# logs/<its file>.log. Only the FAILED rows are asked for: a green row's log is not evidence, and copying
+# every row's log made 85 files for 6 failures (measured on this change's own first fast.sh run).
+wa_fast_row_logs() { # <row name>...
+  local name log
+  for name in "$@"; do
+    [ -n "$name" ] || continue
+    for log in "$work/check-$name.log" "$work/logs/$(basename "$name").log"; do
+      [ -f "$log" ] || continue
+      printf '%s\n' "$log"
+    done
+  done
+}
+wa_fast_keep_failed_logs() {
+  [ "${fails:-0}" -gt 0 ] || return 0
+  # One declaration per counter, and each with its =0 on the same statement: scripts/test-fast-counters.sh
+  # reads the shipped file for `(^|; |local )<name>=[0-9]`, and a counter packed into a shared `local`
+  # list ("local a b kept=0") is invisible to it - it read this one as never initialised.
+  local kept=0
+  local dirs=0
+  local dir log named
+  dir=$(wa_fast_evidence_dir) || { echo "fast: refused(keep_evidence_nowhere): no git dir to keep the failed rows' evidence in" >&2; return 0; }
+  mkdir -p "$dir" 2>/dev/null || { echo "fast: refused(keep_evidence_unwritable): cannot keep the failed rows' evidence in $dir" >&2; return 0; }
+  while IFS= read -r log; do
+    cp "$log" "$dir/$(basename "$log")" 2>/dev/null && kept=$((kept + 1))
+    # The directory the row kept for diagnosis, copied while it still exists.
+    while IFS= read -r named; do
+      named=${named#*kept for diagnosis: }; named=${named%% *}
+      [ -n "$named" ] && [ -d "$named" ] || continue
+      cp -a "$named" "$dir/$(basename "$named")" 2>/dev/null && dirs=$((dirs + 1))
+    done < <(grep -o 'kept for diagnosis: [^ ]*' "$log" 2>/dev/null)
+  done < <(wa_fast_row_logs ${failed_rows:-})
+  # One file that answers "what failed" without opening a log per row.
+  : > "$dir/failures.txt" 2>/dev/null || true
+  while IFS= read -r log; do
+    { wa_fast_row_failure_line "$log"; last_line_of "$log"; } | while IFS= read -r named; do
+      [ -n "$named" ] && printf '%s: %s\n' "$(basename "$log")" "$named"
+    done >> "$dir/failures.txt" 2>/dev/null || true
+  done < <(wa_fast_row_logs ${failed_rows:-})
+  echo "fast: kept $kept failed row log(s) and $dirs scratch dir(s) in $dir (what failed: $dir/failures.txt)"
+  # The default location is bounded: keep the five newest runs, so a broken main cannot fill the disk.
+  if [ -z "${WA_FAST_KEEP_LOGS:-}" ]; then
+    local root; root=$(dirname "$dir")
+    ls -1dt "$root"/*/ 2>/dev/null | tail -n +6 | while IFS= read -r named; do rm -rf "$named" 2>/dev/null; done
+  fi
+  # The keeper's own status is not the run's verdict: it runs from the EXIT trap, and a prune that found
+  # nothing to delete must not make a kept-evidence run look like a failure (`[ -z ... ]` returns 1).
+  return 0
+}
+# The first line the row ITSELF marked as a failure - the assertion, not the summary under it.
+wa_fast_row_failure_line() { # <log>
+  local log=$1 line
+  [ -s "$log" ] || return 0
+  line=$(grep -m1 -E '^(FAIL|FAILED|not ok)( |:|$)|^[A-Za-z0-9_.-]+: FAILED' "$log" 2>/dev/null | tr '\t' ' ')
+  [ -n "$line" ] || line=$(first_error_of "$log")
+  printf '%s' "$line" | cut -c1-300
+}
+export -f wa_fast_row_failure_line wa_fast_row_logs 2>/dev/null || true
 trap 'wa_fast_keep_failed_logs; rm -rf "$work"' EXIT
 
 # The build-time ledger: one line per build this run performs, printed in the summary
 # below, because "a module compiles faster" is a claim about a number (scripts/lib/build-times.sh).
 . "$ROOT/scripts/lib/build-times.sh"
 wa_build_times_init "$work/build-times.tsv"
-fails=0; envfails=0; skipped=0; ran=0
+fails=0; envfails=0; skipped=0; ran=0; failed_rows=''
 
 # ---- the environment this verdict belongs to ---------------------------------------------------------
 # A red row is a fact about the TREE only if the machine is named with it. Measured 11/12 on wa-desktop:
@@ -787,10 +852,19 @@ check() { name=$1; shift; s=$(fast_now_ms)
     echo "fast: $name ok (${ms}ms)"; record_row pass checks "$name" "$c" "$ms" 0 ''; return 0
   fi
   fails=$((fails + 1))
-  case "$WA_FAST_RETRY" in environment) envfails=$((envfails + 1)); echo "FAIL $name (exit $c, environment): $(last_line_of "$work/check-$name.log")"
-      record_row fail checks "$name" "$c" "$ms" 1 "$(first_error_of "$work/check-$name.log")" ;;
-    *) echo "FAIL $name (exit $c): $(tail -3 "$work/check-$name.log" | tr '\n' ' ')"
-      record_row fail checks "$name" "$c" "$ms" 0 "$(first_error_of "$work/check-$name.log")" ;; esac
+  failed_rows="$failed_rows $name"
+  # WHAT FAILED, IN THE ROW'S OWN WORDS (23/11). This reported `tail -3`, and a row whose failing
+  # assertion is followed by two more lines reported only green ones: twice per fast.sh run the two /undo
+  # pty rows read "ok - /help lists /undo ... 16 ok, 1 failed", with the failing check three lines up and
+  # its scratch directory already deleted. The row's own failure line and the path of its whole log are
+  # printed BEFORE the tail, so the next reader does not have to reproduce the run to learn what broke.
+  local why log="$work/check-$name.log"
+  why=$(wa_fast_row_failure_line "$log")
+  case "$WA_FAST_RETRY" in environment) envfails=$((envfails + 1)); echo "FAIL $name (exit $c, environment): $(last_line_of "$log")"
+      record_row fail checks "$name" "$c" "$ms" 1 "$(first_error_of "$log")" ;;
+    *) echo "FAIL $name (exit $c): ${why:-$(tail -3 "$log" | tr '\n' ' ')}"
+      echo "fast:   $name failed on that line; its whole log: $log"
+      record_row fail checks "$name" "$c" "$ms" 0 "$(first_error_of "$log")" ;; esac
 }
 WA_BIN="$bin" check prompt-docs bash scripts/sync-prompt-docs.sh --check
 if command -v node >/dev/null 2>&1; then

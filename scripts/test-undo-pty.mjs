@@ -48,7 +48,13 @@ if (!SCRATCH_ROOT) {
   console.error('undo-pty: no scratch root outside ' + REAL_HOME + '; refusing to run');
   process.exit(2);
 }
-const WORK = fs.mkdtempSync(path.join(SCRATCH_ROOT, 'wa-undo-pty-'));
+// THE ANSWER ROW HAS TO FIT ON THE SCREEN. The chat CLIPS a row to the terminal width, and the check
+// that the restored version is named reads ONE row: a longer scratch path (fast.sh's TMPDIR is
+// ~/.wa-scratch/wa-fast-XXXX/tmp, some thirty characters deeper than /tmp) pushed "version <hex>" off
+// the clipped row, and both /undo rows failed in every fast.sh run while passing by hand. So: 200
+// columns, not 110, and the shortest scratch name this root allows. Nothing the rows check is loosened -
+// the same version, on the same row, with room to be read.
+const WORK = fs.mkdtempSync(path.join(SCRATCH_ROOT, 'wu-'));
 const HOME = path.join(WORK, 'home');
 fs.mkdirSync(HOME, {recursive: true});
 if (path.resolve(HOME) === path.resolve(REAL_HOME) || HOME.startsWith(REAL_HOME + path.sep)) {
@@ -132,7 +138,7 @@ const ENV = {
   WASM_AGENT_PROVIDER_RETRIES: '0',
   WA_SKIP_UPDATE_CHECK: '1',
   WASM_AGENT_CLI_OPENING: 'off',
-  COLUMNS: '110',
+  COLUMNS: '200',
   LINES: '34',
 };
 
@@ -176,7 +182,7 @@ try {
     BIN, '--db', path.join(WORK, 'ledger.db'), 'chat',
   ].join(' ');
   tmux(['kill-server']);
-  const launch = tmux(['new-session', '-d', '-s', SESSION, '-x', '110', '-y', '34', '-c', WORK, command]);
+  const launch = tmux(['new-session', '-d', '-s', SESSION, '-x', '200', '-y', '34', '-c', WORK, command]);
   if (launch.status !== 0) throw new Error('tmux could not start the session: ' + launch.stderr);
   started = true;
 
