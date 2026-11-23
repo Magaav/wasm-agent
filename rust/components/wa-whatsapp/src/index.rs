@@ -2608,6 +2608,17 @@ fn message_json(record: &Record) -> serde_json::Value {
         "text": record.text,
         "own": record.own,
     });
+    // The whole stored transcript and OCR text, never a snippet: this op is the one a truncated hit
+    // points at (`transcript_full`/`ocr_full` in `crate::view::message`), so it has to answer with
+    // all of it or the pointer is a second dead end.
+    if !record.transcript.is_empty() {
+        message["transcript"] = serde_json::Value::String(record.transcript.clone());
+        message["transcript_chars"] = serde_json::Value::from(record.transcript.chars().count());
+    }
+    if !record.ocr.is_empty() {
+        message["ocr"] = serde_json::Value::String(record.ocr.clone());
+        message["ocr_chars"] = serde_json::Value::from(record.ocr.chars().count());
+    }
     if record.edited {
         message["edited"] = serde_json::Value::Bool(true);
     }
@@ -2680,6 +2691,17 @@ pub async fn media<S: Store>(store: &S, request: &seam::Verified) -> Result<serd
     answer["downloadable"] = serde_json::Value::Bool(
         record.media.as_ref().is_some_and(|media| media.downloadable) && !record.deleted && record.unsupported.is_empty(),
     );
+    // What was said about this file, whole: a caller asking for a note's media to OCR or transcribe it
+    // a second time can read the text this node already derived instead (2026-11-23, the same defect
+    // the search snippet had: `whatsapp_media` carried no transcript at all).
+    if !record.transcript.is_empty() {
+        answer["transcript"] = serde_json::Value::String(record.transcript.clone());
+        answer["transcript_chars"] = serde_json::Value::from(record.transcript.chars().count());
+    }
+    if !record.ocr.is_empty() {
+        answer["ocr"] = serde_json::Value::String(record.ocr.clone());
+        answer["ocr_chars"] = serde_json::Value::from(record.ocr.chars().count());
+    }
     Ok(seam::answer(seam::Op::Media, answer))
 }
 
@@ -2923,12 +2945,8 @@ fn hit_json(record: &Record, score: i64, chat_name: &str) -> serde_json::Value {
         meta["caption"] = serde_json::Value::String(record.text.clone());
         hit["media"] = meta;
     }
-    if !record.transcript.is_empty() {
-        hit["transcript"] = serde_json::Value::String(record::one_line(&record.transcript, seam::MAX_TEXT_CHARS));
-    }
-    if !record.ocr.is_empty() {
-        hit["ocr"] = serde_json::Value::String(record::one_line(&record.ocr, seam::MAX_TEXT_CHARS));
-    }
+    // The transcript and the OCR text come from `crate::view::message` now, with the flags that say a
+    // snippet is a snippet and the call that returns the rest - one shape for a hit and a read.
     hit
 }
 

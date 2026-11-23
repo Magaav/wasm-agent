@@ -2450,3 +2450,81 @@ fn one_person_under_a_lid_and_a_number_is_one_candidate() {
     assert_eq!(two["count"], 2, "{two}");
     assert_eq!(two["ambiguous"], true, "{two}");
 }
+
+/// A transcript is text this node already derived, so a search answer that cuts it must say so and
+/// must say exactly how to read the rest.
+///
+/// Measured on openclaw 23/11: a 371-character Portuguese note reached an agent as a 280-character
+/// snippet ending mid-word ("... o proced"), with no flag, no length and no pointer; `whatsapp_media`
+/// carried no transcript at all, so the only path to the whole text was re-transcribing audio that
+/// had already been transcribed. Nothing may be transcribed twice to read what was said.
+#[test]
+fn a_cut_transcript_says_so_and_the_two_exact_ops_return_it_whole() {
+    let store = Memory::new();
+    let voice = record::from_message(
+        &envelope("A1", 1_760_000_000_000),
+        &wap::Message {
+            audio_message: MessageField::some(wap::message::AudioMessage {
+                mimetype: Some("audio/ogg; codecs=opus".into()),
+                ptt: Some(true),
+                seconds: Some(37),
+                file_length: Some(40_000),
+                media_key: Some(vec![1; 32]),
+                direct_path: Some("/v/ptt".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    );
+    block_on(put(&store, &voice)).unwrap();
+    let said = format!("reuniao {}fim", "palavra ".repeat(seam::MAX_TEXT_CHARS / 4));
+    let total = said.chars().count();
+    assert!(total > seam::MAX_TEXT_CHARS, "the fixture has to be longer than a snippet: {total}");
+    assert!(block_on(attach_text(&store, CHAT, "A1", &said, Source::Transcript)).unwrap());
+
+    // The hit is a pointer, and it names the bound it hit.
+    let answer = block_on(search(&store, &search_request("reuniao"))).unwrap();
+    let hit = &answer["hits"][0];
+    let snippet = hit["transcript"].as_str().expect("a hit keeps a transcript snippet");
+    assert!(said.starts_with(snippet), "the snippet is the beginning of what was said");
+    assert_eq!(hit["transcript_truncated"], serde_json::Value::Bool(true), "{hit}");
+    assert_eq!(hit["transcript_chars"].as_u64().unwrap() as usize, total, "{hit}");
+    assert_eq!(hit["transcript_full"]["tool"], "whatsapp_message", "{hit}");
+    assert_eq!(hit["transcript_full"]["field"], "transcript", "{hit}");
+    assert_eq!(hit["transcript_full"]["chat"], CHAT);
+    assert_eq!(hit["transcript_full"]["id"], "A1");
+
+    // The call the hit names answers with every character that was stored.
+    let whole = verified(seam::Request { op: "message".into(), chat: Some(CHAT.into()), id: Some("A1".into()), ..Default::default() });
+    let exact = block_on(message(&store, &whole)).unwrap();
+    assert_eq!(exact["message"]["transcript"].as_str().unwrap(), said.as_str());
+    assert_eq!(exact["message"]["transcript_chars"].as_u64().unwrap() as usize, total);
+
+    // And the media metadata carries it, so a caller about to OCR or decode a file can read the text
+    // this node already holds instead of deriving it a second time.
+    let meta = verified(seam::Request { op: "media".into(), chat: Some(CHAT.into()), id: Some("A1".into()), ..Default::default() });
+    let meta = block_on(media(&store, &meta)).unwrap();
+    assert_eq!(meta["transcript"].as_str().unwrap(), said.as_str());
+    assert_eq!(meta["transcript_chars"].as_u64().unwrap() as usize, total);
+
+    // A transcript that fits is not called cut, and carries no pointer to nowhere.
+    let short = "chegou o pedido";
+    block_on(put(&store, &record::from_message(&envelope("A2", 1_760_000_002_000), &wap::Message {
+        audio_message: MessageField::some(wap::message::AudioMessage {
+            mimetype: Some("audio/ogg; codecs=opus".into()),
+            ptt: Some(true),
+            seconds: Some(3),
+            media_key: Some(vec![2; 32]),
+            direct_path: Some("/v/ptt2".into()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    })))
+    .unwrap();
+    assert!(block_on(attach_text(&store, CHAT, "A2", short, Source::Transcript)).unwrap());
+    let answer = block_on(search(&store, &search_request("pedido"))).unwrap();
+    let hit = &answer["hits"][0];
+    assert_eq!(hit["transcript"], short);
+    assert!(hit.get("transcript_truncated").is_none(), "a whole transcript is not flagged: {hit}");
+    assert!(hit.get("transcript_full").is_none(), "nothing to point at: {hit}");
+}

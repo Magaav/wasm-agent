@@ -30,7 +30,7 @@ use crate::wa::kernel::{drain, http as khttp, kv as kkv, lifecycle, speech, visi
 use crate::wasi::clocks::monotonic_clock;
 use crate::index::{self, Store as IndexStore};
 use crate::record::{self, Record};
-use crate::{alerts, export, exports, history, ocr, outbox, posting, privacy, queue, recognize, store, telemetry};
+use crate::{alerts, export, exports, health, history, ocr, outbox, posting, privacy, queue, recognize, store, telemetry};
 use wa_whatsapp_index as seam;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -834,6 +834,7 @@ async fn process(job: &AudioJob, language: &str, cfg: &posting::PostConfig) -> O
         Err(error) => {
             say!("transcript download failed {} reason={error}", privacy::at(&chat, &job.id));
             note(telemetry::Note::new("failed").about(&chat, &job.id).field("stage", "download").field("reason", &error.to_string()));
+            health::transcript_failed("download", now_ms());
             return Outcome::Retry("download".into());
         }
     };
@@ -847,6 +848,7 @@ async fn process(job: &AudioJob, language: &str, cfg: &posting::PostConfig) -> O
         Err(error) => {
             let reason = reason_of(&error);
             note(telemetry::Note::new("failed").about(&chat, &job.id).field("stage", "recognize").field("reason", &reason));
+            health::transcript_failed(&format!("recognize:{reason}"), now_ms());
             return if permanent(&reason) { Outcome::Permanent(reason) } else { Outcome::Retry(format!("stt_start:{reason}")) };
         }
     };
@@ -922,6 +924,7 @@ async fn process(job: &AudioJob, language: &str, cfg: &posting::PostConfig) -> O
             let reason = reason_of(&error);
             say!("transcript failed {} reason={reason}", privacy::at(&chat, &job.id));
             note(telemetry::Note::new("failed").about(&chat, &job.id).field("stage", "recognize").field("reason", &reason));
+            health::transcript_failed(&reason, now_ms());
             return if permanent(&reason) { Outcome::Permanent(reason) } else { Outcome::Retry(reason) };
         }
     };
@@ -935,6 +938,7 @@ async fn process(job: &AudioJob, language: &str, cfg: &posting::PostConfig) -> O
     let ready = now_ms();
     tracker.finish(ready.max(0) as u64);
     let chars = transcript.text.chars().count();
+    health::transcript_ok(chars, ready);
     say!(
         "transcript ready {} ms={} chars={chars} latency_ms={} download_ms={} wait_ms={} seconds={seconds} segments={}",
         privacy::at(&chat, &job.id),
@@ -1031,6 +1035,9 @@ async fn process(job: &AudioJob, language: &str, cfg: &posting::PostConfig) -> O
         first_ms - job.received_ms,
         done - job.received_ms
     );
+    if failure.is_none() {
+        health::posted(done);
+    }
     let mut v = base;
     v["posted"] = (failure.is_none()).into();
     v["message_ids"] = serde_json::json!(ids);
@@ -1609,6 +1616,7 @@ async fn index_inbox(enabled: bool) -> usize {
         });
     }
     say!("index: {indexed}/{total} records written, retried {retried}, lost {lost}");
+    health::indexed(indexed, now_ms());
     indexed
 }
 
@@ -2500,7 +2508,21 @@ async fn serve(config: serde_json::Value) {
         );
     }
     say!("wa-whatsapp: starting (pairing by {})", if pair_phone.is_some() { "code" } else { "QR" });
+    // The health line: once now, so a restart is dated, and then every health_every_seconds. A
+    // component that transcribes but never posts looks like a broken one from outside (23/11) - this
+    // line says the mode and the last time each of the three actually worked.
+    let posting_mode = if post.post { "on" } else { "off" };
+    say!("{}", health::line(posting_mode));
+    let health_every = std::time::Duration::from_secs(
+        config["health_every_seconds"].as_u64().unwrap_or(300).clamp(30, 86_400),
+    );
     let tasks = Tasks::start();
+    spawn_task(Box::pin(async move {
+        loop {
+            HostRuntime.sleep(health_every).await;
+            say!("{}", health::line(posting_mode));
+        }
+    }));
     let runtime = HostRuntime;
     say!("wa-whatsapp: starting the protocol task");
     spawn_task(Box::pin(async move {
