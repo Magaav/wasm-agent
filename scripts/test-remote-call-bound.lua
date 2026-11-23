@@ -79,6 +79,24 @@ for _, key in ipairs({ "code", "ok", "stdout", "stderr" }) do
     "and '" .. key .. "' agrees with the local answer: " .. tostring(answer[key]) .. " vs " .. tostring(local_answer[key]))
 end
 
+-- 2b. THE FIELD SET OF THE OLD PATH, AS A GOLDEN. Recorded from a real peer bash answer on the base
+-- commit (2104a4d8) through this same path - 41 fields - because a cut that removes two reads must not
+-- remove a field, and must not ADD the dispatcher's own "output was omitted" marks to an answer that
+-- carries the text. Measured 23/11: the first version of this cut leaked output_omitted=true, its hint
+-- ("ask for it with output=true") and stdout_omitted beside stdout="ok".
+local GOLDEN = { "adopted", "cleanup", "cleanup_budget_ms", "code", "containment", "cpu_priority",
+  "cwd", "cwd_requested", "cwd_source", "effective_cwd", "elapsed_ms", "last_output_elapsed_ms", "ok",
+  "operation_id", "output_bytes", "output_complete", "output_streams_closed", "output_truncated",
+  "overdue", "owner", "owner_boot", "owner_process_id", "process_exit_code", "process_exit_elapsed_ms",
+  "promoted", "session", "settled", "state", "status", "stderr", "stderr_bytes", "stderr_elided_bytes",
+  "stderr_path", "stderr_truncated", "stdout", "stdout_bytes", "stdout_elided_bytes", "stdout_path",
+  "stdout_truncated", "timeout_ms", "timing" }
+for _, key in ipairs(GOLDEN) do
+  check(answer[key] ~= nil, "the answer still carries the old path's field '" .. key .. "'")
+end
+check(answer.output_omitted == nil, "no false 'output omitted' mark beside a stdout it carries")
+check(answer.output_hint == nil, "and no hint telling a model to ask for output it already has")
+check(answer.stdout_omitted == nil, "and no per-stream omission mark on a stream that was read")
 -- 3. A second short call in the same peer session is bounded the same way: the saving is not a first-call
 --    effect, and nothing grows per call.
 local again, calls2 = counted_peer_bash("printf rcb-again", 30000)

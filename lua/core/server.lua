@@ -1113,6 +1113,13 @@ local function adopted_result(id, author, caller, settled_state)
     local state = toolslib.dispatch(memory, "operation", { action = "status", id = id }, "master", ctx)
     out = type(state) == "table" and state or {}
   end
+  -- A STREAM READ IN FULL HERE IS NOT "OMITTED". tools.lua's list/await pruning marks a body as omitted
+  -- (and adds a hint telling the model to ask with output=true) when the caller did not request output -
+  -- and the await answer this function may receive has been through it. Every stream is read in full just
+  -- below, so those marks would be a FALSE hint on an answer that carries the text: measured 23/11, the
+  -- peer's answer said output_omitted=true with stdout="ok" beside it. Cleared for the streams that were
+  -- really read, and the call-wide marks cleared only when both were.
+  local read_both = true
   for _, stream in ipairs({ "stdout", "stderr" }) do
     local page = toolslib.dispatch(memory, "operation",
       { action = "read", id = id, stream = stream, offset = 0, limit = stream == "stdout" and 24576 or 8192 },
@@ -1120,7 +1127,14 @@ local function adopted_result(id, author, caller, settled_state)
     if type(page) == "table" and type(page.content) == "string" then
       out[stream] = page.content
       out[stream .. "_bytes"] = tonumber(page.available_bytes) or #page.content
+      out[stream .. "_omitted"] = nil
+    else
+      read_both = false
     end
+  end
+  if read_both then
+    out.output_omitted = nil
+    out.output_hint = nil
   end
   out.operation_id = id
   out.adopted = true

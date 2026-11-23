@@ -103,6 +103,14 @@ the base commit** (`git worktree add /tmp/base-rr 2104a4d8`, rule 12 - no stash)
 | `scripts/test-tool-dispatch-cost.lua` (9 checks) | `scripts/test.sh` line 1435, fast path | `two dispatches load orchestration_mode once, loaded 4` |
 | `scripts/test-roster-sample-quick.lua` (15 checks) | `scripts/test.sh` line 1438, fast path | `and no CPU percentage it did not measure, got 64.4` (the roster row took the 120 ms full sample) |
 
+The last row has two halves. Its Lua half was run against the base *tree* with this tree's binary and fails
+there as shown. Its Rust half (`{quick:true}`) cannot fail against the base tree at all, because the host is
+the binary: at the base commit `host.system_resources` ignores every argument
+(`git show 2104a4d8:rust/wa-capabilities/src/host.rs`, the function's only statement is
+`push_json(l, &wa_host_support::system_resources::sample())`), so the base binary answers a measured
+`used_percent` for the quick call and the row's first three checks fail there. An older binary on a newer
+tree is harmless: it ignores the extra argument and simply pays the 120 ms.
+
 The bound row also pins the two things the cut must not break: the answer carries what the local
 synchronous `bash` answers (`code`, `ok`, `stdout`, `stderr`, compared field by field against
 `tools.dispatch('bash', ...)` in the same process), and **once one handle is adopted the reap's `list`
