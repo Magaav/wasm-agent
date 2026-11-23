@@ -229,6 +229,65 @@ function wa_admission(session, node, body)
     thread_note = thread_note })
 end
 
+-- THE ADMISSION GATE FOR A DEPLOY THAT IS WAITING (23/11): asked BEFORE the scheduler admits a run.
+--
+-- MEASURED (`~/.wasm-agent/sentinel/sentinel.log`, 23/11 02:20Z-02:31Z): the deploy for e9a42d20 was held for
+-- twenty-five minutes behind `10 turn(s) admitted and not started`. The refusal that existed
+-- (lua/core/agent.lua's run-time gate, lua/core/chat.lua's scripted one) is made INSIDE a turn or before a
+-- client posts one - and a turn that is admitted and waiting has not reached either. So each automatic turn
+-- that arrived while the deploy waited was admitted, ordered behind a running one, and counted in `/health`'s
+-- `queue`, which is exactly the state the sentinel cannot pass over (it names no session it can check a pause
+-- for) and must not pass over. The node never went idle, so the deploy never started.
+--
+-- This is the same judgment, asked at the door: while a build is WAITING for this node or being installed, a
+-- run is refused by name before the scheduler claims it - so nothing is queued, the node reaches idle in one
+-- step, and the caller gets an answer in the same round trip instead of waiting in a queue it cannot see.
+--
+-- Two exemptions, and only two, both of them the existing rule:
+--   * a PERSON'S turn: the body says `operator: true` (the window sends it; rust/wa-capabilities reads this
+--     function's answer and does not even ask for one), the same exemption lua/core/agent.lua carries;
+--   * a client that is not asking for a run at all - this function is only called for run routes.
+-- A peer's relayed turn, a wake, a child's completion and a scripted CLI run are all refused: none of them has
+-- a person waiting on it, and every one of them keeps the node from going idle.
+--
+-- The answer is a value, never an error, because the CALLER decides what to do with it: `waiting` is the whole
+-- verdict, `refusal` is the one sentence every other refusal path already says (lua/core/deploy_wait.lua), and
+-- `gate = "unavailable"` is the honest third answer - the reader could not be loaded, and the run's own gate
+-- will judge it at the top of the turn, which is where it was judged before this function existed.
+function wa_deploy_admission(body)
+  local loaded, pause = pcall(dofile, "lua/core/deploy_pause.lua")
+  if not loaded or type(pause) ~= "table" or type(pause.refuse) ~= "function" then
+    return json.encode({ waiting = false, gate = "unavailable", detail = tostring(pause) })
+  end
+  local operator = false
+  if type(body) == "string" and body:sub(1, 1) == "{" then
+    local ok, decoded = pcall(json.decode, body)
+    if ok and type(decoded) == "table" and decoded.operator == true then operator = true end
+  end
+  if operator then return json.encode({ waiting = false, operator = true }) end
+  local refused, wait = pause.refuse(host.now())
+  if not refused then return json.encode({ waiting = false }) end
+  -- Two sentences: the full one (commit, request id, lane) for a caller whose credential has been checked, and
+  -- one that names nothing (lua/core/deploy_wait.lua `refusal_redacted`) for one that has not. The caller decides
+  -- which it may answer with; this function never has to guess who it is talking to.
+  local redacted = refused
+  local loaded_wait, wait_module = pcall(dofile, "lua/core/deploy_wait.lua")
+  if loaded_wait and type(wait_module) == "table" and type(wait_module.refusal_redacted) == "function" then
+    local ok_redacted, text = pcall(wait_module.refusal_redacted)
+    if ok_redacted and type(text) == "string" and text ~= "" then redacted = text end
+  end
+  return json.encode({
+    waiting = true,
+    code = "deploy_waiting",
+    refusal = refused,
+    redacted = redacted,
+    to = wait and wait.to or nil,
+    id = wait and wait.id or nil,
+    since = wait and wait.since or nil,
+    source = wait and wait.source or nil,
+  })
+end
+
 -- Identity only, for a control route that is owner-scoped but must not be admitted as a run and must
 -- not create a conversation. Used by `POST /runs` (status/cancel). Invalid credentials are an error,
 -- never the default user.
@@ -356,7 +415,13 @@ function wa_reply(text, session, node)
   if remote_target(node) then
     if resume_seq ~= nil then return json.encode({ error = "resume_requires_local_node" }) end
     local result = nodeslib.remote_call(node, "chat", { text = prompt or "" })
-    if result and result.error then return json.encode({ error = redact.text(tostring(result.error)) }) end
+    if result and result.error then
+      -- A deploy that is waiting on the peer is a named, retryable answer, not the peer being unreachable
+      -- (lua/core/nodes.lua `chat_answer`): the caller's model is told to ask again, and when.
+      return json.encode({ error = redact.text(tostring(result.error)), not_started = result.not_started or nil,
+        retryable = result.retryable or nil, retry_after_seconds = result.retry_after_seconds or nil,
+        node = result.node or nil, detail = result.message and redact.text(tostring(result.message)) or nil })
+    end
     return json.encode({ reply = result and result.reply or "" })
   end
   local bot, refusal = agent_for(session, node, thread)
@@ -390,7 +455,11 @@ function wa_reply_stream(text, session, node)
       return ""
     end
     local result = nodeslib.remote_chat(node, prompt or "")
-    if result and result.error then emit({ type = "error", error = redact.text(tostring(result.error)) }) end
+    if result and result.error then
+      emit({ type = "error", error = redact.text(tostring(result.error)), not_started = result.not_started or nil,
+        retryable = result.retryable or nil, retry_after_seconds = result.retry_after_seconds or nil,
+        node = result.node or nil, detail = result.message and redact.text(tostring(result.message)) or nil })
+    end
     return ""
   end
   local bot, refusal = agent_for(session, node, thread)

@@ -224,4 +224,16 @@ function M.refusal(wait, now)
     .. "wa-sentinel request withdraw " .. tostring(wait and wait.id or "<id>")
 end
 
+-- THE SAME REFUSAL WITHOUT ANYTHING THAT IDENTIFIES THE INSTALL (23/11). A caller who has not proved who it is
+-- gets the reason, the fact that nothing ran and when to look again - never the commit, the request id, or which
+-- lane of the box the request is in (`/health` publishes those to a caller that is already trusted with the
+-- node's own state; an anonymous request is not). Composed here, beside `refusal`, so the two cannot drift about
+-- what the node is doing.
+function M.refusal_redacted()
+  return "deploy_waiting: this node is waiting for or installing a new build. This node starts no new turn while "
+    .. "a build is waiting for it or being installed - a turn in flight is exactly what keeps the node from going "
+    .. "idle - and this turn did not start. Nothing was lost: this is a wait, not a failure, and the work starts "
+    .. "again once the swap is done."
+end
+
 return M

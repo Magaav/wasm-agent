@@ -194,12 +194,30 @@ local function classify(state,profile_id,settlement,facts,report)
   return true,"evaluation","delivery_ready_to_evaluate"
 end
 
+-- The node's own answer to "may a new turn start right now": the one sentence a waiting or installing deploy
+-- answers with (`lua/core/deploy_pause.lua` -> `lua/core/deploy_wait.lua`), or nil. Loaded lazily and defended:
+-- a node whose deploy modules cannot be read is the pre-23/11 node, and this outbox keeps working exactly as it
+-- did (the run's own gate still refuses the turn), rather than stopping every child-return wake.
+local function deploy_hold()
+  local loaded, pause = pcall(dofile, 'lua/core/deploy_pause.lua')
+  if not loaded or type(pause) ~= 'table' or type(pause.refuse) ~= 'function' then return nil end
+  local ok, text = pcall(pause.refuse, host.now())
+  if not ok then return nil end
+  if type(text) ~= 'string' or text == '' then return nil end
+  return text
+end
+
 -- A refusal is not a failure: a wake that provably never started goes back to `ready` with the
 -- refusal recorded beside the reported state, and the retry pass below claims it again.
 local function deferred_detail(row,error)
   local note="wake not started: "..tostring(error or 'capacity unavailable')
   local detail=tostring(row.detail or "")
-  if detail:find("wake not started",1,true) then return detail end
+  -- THE SAME NOTE TWICE IS ONE NOTE (23/11, Fable's review). This used to keep the detail whenever it carried
+  -- `wake not started` anywhere, so a REASON could never be added to a row that had been retried for capacity,
+  -- and the caller could not tell whether its answer was already the row's. Now a note is appended when it is
+  -- new and the answer is byte-identical when it is not - which is what lets the deploy gate below skip its
+  -- UPDATE instead of rewriting 32 rows on every tick.
+  if detail == note or detail:sub(-#note) == note then return detail end
   return detail=='' and note or (detail..' | '..note)
 end
 
@@ -273,6 +291,26 @@ end
 
 function M.tick(api)
   if not nodes.is_master() or host.getenv('WASM_AGENT_COMPLETION_WAKE')=='0' then return end
+  -- NO CHILD-RETURN WAKE WHILE A DEPLOY WAITS (23/11, Fable's review). `lua/core/selfloop.lua`'s tick already
+  -- holds its wakes for this reason; this outbox had no such gate, so a `ready` settlement was admitted as a run
+  -- while a deploy waited - one more turn in the queue the deploy cannot pass over - and, because the run's own
+  -- gate refuses it at its first step, it came back refused and was recorded as DELIVERED. A reminder that never
+  -- fires is worse than a slow deploy. The row keeps its state and its time and is retried on a later tick,
+  -- exactly as a capacity refusal already is; nothing is claimed and nothing is dispatched.
+  --
+  -- ONE WRITE PER ROW, NOT ONE PER TICK: a tick runs several times a second, so a row already carrying this
+  -- sentence is left byte-identical and not written again (the first version of this gate wrote the same detail
+  -- back on every tick while it claimed nothing was written - measured by the row that now counts the UPDATEs).
+  local hold = deploy_hold()
+  if hold then
+    for _,row in ipairs(query("SELECT rowid AS cursor,* FROM child_completions WHERE state='ready' ORDER BY rowid LIMIT 32")) do
+      local detail=deferred_detail(row,hold)
+      if detail~=tostring(row.detail or '') then
+        exec("UPDATE child_completions SET detail=? WHERE child_id=? AND state='ready'",{detail,row.child_id})
+      end
+    end
+    return
+  end
   local boot=json.decode(host.runtime_info()).boot_id
   -- An accepted/dispatching wake from another boot is ambiguous, never replayed.
   exec("UPDATE child_completions SET state='unknown',detail='interrupted wake; inspect parent transcript before continuing' WHERE state IN ('dispatching','accepted','running') AND boot<>?",{boot})
@@ -335,6 +373,17 @@ function wa_completion_run(raw)
     ..'. Evaluation packet, assembled from its receipt when it settled - state, session, model, duration, usage and cost, and the artifact facts of its own checkout. Measured values only: anything absent says so rather than reading as a clean zero: '..packet
     ..'. Inspect its result and bounded original session evidence before accepting work. This is an automated status notification, not a human request or authorization to merge, deploy, expand permissions or start unrelated work. Continue only the already authorized task; report failures and uncertainty. Do not create recursive feedback work.'
   local ok,result=pcall(bot.run,bot,prompt)
+  -- A TURN THE NODE REFUSED IS NOT A DELIVERY (23/11). MEASURED: the run gate answers a waiting deploy with a
+  -- sentence and `turn_refused` set (`lua/core/agent.lua`), `pcall` succeeds, and this path recorded the row as
+  -- `delivered` with that sentence as a note - so the reminder the child earned was gone, on the one path whose
+  -- whole purpose is that a coordinator hears about its child. The row goes back to `ready` instead, with the
+  -- refusal beside it, and the next tick after the deploy delivers it once (the same shape a capacity refusal
+  -- already uses, and the same bound: a row is retried, never replayed as a new settlement).
+  if ok and type(result) == 'string' and bot.turn_refused ~= nil and tostring(bot.turn_refused) == result then
+    exec('UPDATE child_completions SET state=? WHERE child_id=? AND state=?',{'ready',row.child_id,'running'})
+    exec('UPDATE child_completions SET detail=? WHERE child_id=?',{deferred_detail(row,result),row.child_id})
+    return json.encode({not_started=true,deploy_waiting=result})
+  end
   if not ok then host.stream(json.encode({type='error',error=tostring(result)})) end
   exec('UPDATE child_completions SET state=?,detail=? WHERE child_id=?',{ok and 'delivered' or 'failed',ok and 'coordinator run finished; not task verification' or tostring(result),row.child_id})
   return json.encode(ok and {ok=true} or {error=tostring(result)})

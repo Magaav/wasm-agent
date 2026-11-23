@@ -2563,6 +2563,50 @@ pub(crate) fn oldest_waiting_queued_at(dir: &Path) -> Option<u64> {
 /// (2026-11-10), a deploy held behind long sessions looked exactly like a request that had been forgotten,
 /// and the watchdog then called the deploy silent. The state, the reason and the bound are one record, so
 /// `status`, the log line and the watchdog's own clock describe the same wait.
+/// Past its bound, a request that cannot be passed over FAILS BY NAME (23/11) - it is not retried silently.
+///
+/// MEASURED (`~/.wasm-agent/sentinel/sentinel.log`, 23/11 02:20Z-02:31Z): the deploy for e9a42d20 announced
+/// "deploy held: the node is busy ... the holder `10 turn(s) admitted and not started` names no session, so this
+/// request has no proof it paused" on every tick, twenty-five minutes after it was queued. Nothing ended the
+/// wait; the operator ended it by restarting `wa-serve`, which is not an operator interface.
+///
+/// So the bound is a wall on WAITING in both directions: past it the request either proceeds (every holder
+/// paused, above) or it fails here, with its reason in the three places every other outcome is recorded - the
+/// protocol's own `state.json`, the queue record an operator reads, and `failed/` - and out of the box, so the
+/// next tick cannot re-announce the same hold for ever.
+fn fail_held_request(request: &Value, id: &str, path: &Path, detail: &str) -> Result<()> {
+    // THE LINE AN OPERATOR ACTS ON (23/11, Fable's review 3). `~/Work/missions/install-local.sh` waits for the box
+    // to empty and then compares the installed Lua with main's, so a request that failed at its bound ends that
+    // landing with "the installed lua/core differs from main's" - true, and mute about why and about what to do.
+    // The reason and the way back belong in the same record, because that record is what `wa-sentinel status`
+    // prints and what the next reader has.
+    let target = request.get("expected_sha").and_then(Value::as_str).or_else(|| request.get("target_commit").and_then(Value::as_str)).unwrap_or("");
+    let reason = request.get("reason").and_then(Value::as_str).unwrap_or("");
+    let retry = if target.is_empty() {
+        format!("re-request with: wa-sentinel request deploy --reason '{}'", reason.replace("'", ""))
+    } else {
+        format!("re-request with: wa-sentinel request deploy --expected-sha {target} --reason '{}'", reason.replace("'", ""))
+    };
+    let detail = &format!("{detail}; {retry}");
+    if let Err(error) = deploy_protocol::record(request, id, "failed", detail) {
+        audit("protocol-record-failed", id, &error.to_string());
+    }
+    queue::observe(request, id, "failed", "hold-bound", detail);
+    let key = path.file_name().map(|name| name.to_string_lossy().to_string()).unwrap_or_default();
+    if key.is_empty() { bail!("hold_bound_failed_without_a_request_name: {detail}"); }
+    let claim = sentinel_dir().join("claimed").join(&key);
+    if claim_request(path, &claim)? {
+        let target = sentinel_dir().join("failed").join(&key);
+        wa_operation::atomic_json(&target, &json!({"request":request,"ok":false,"phase":"failed",
+            "detail":detail,"at":now_epoch(),"bound_failed":true}))?;
+        std::fs::remove_file(&claim)?;
+    }
+    let line = format!("the request failed at its bound: {detail}");
+    audit("hold-bound-failed", &format!("{} {key}", request["verb"].as_str().unwrap_or("request")), &line);
+    say(&line);
+    Ok(())
+}
+
 fn announce_hold(held: &mut Held, key: &str, verb: &str, why: &str, asked: &str) {
     let bound = deploy_idle_bound_secs();
     let why = format!("{why} (waiting for idle; running turns pause at their next step, bound {bound}s)");
@@ -2689,7 +2733,9 @@ fn process_requests(background: bool, held: &mut Held) -> Result<u32> {
             let asked_at = request_queued_at(&preview, protocol_id);
             let waited = now_epoch().saturating_sub(asked_at);
             let bound = hold_bound_secs();
-            if waited >= bound {
+            // `WA_DEPLOY_HOLD_BOUND=0` is the documented operator choice of an unbounded wait; it is bounded by
+            // nothing and now really is, rather than reading as "past the 0s bound" on every tick.
+            if bound > 0 && waited >= bound {
                 let holders = health().map(|body| holders::holders_from(&body)).unwrap_or_default();
                 match holders::bound_verdict(waited, bound, &holders, |session| paused_since(session, asked_at).is_some()) {
                     Ok(()) => {
@@ -2698,7 +2744,10 @@ fn process_requests(background: bool, held: &mut Held) -> Result<u32> {
                         say(&line);
                     }
                     Err(still) => {
-                        announce_hold(held,&key,verb,&format!("{why}; {still}"),asked);
+                        // Past the bound and still not safe to proceed: the answer is a NAMED failure, not another
+                        // announcement. `unknown is not yes` and `silence is not a wait` are the same rule here.
+                        fail_held_request(&preview, protocol_id, &path, &format!("{why}; {still}"))?;
+                        held.settled(&key);
                         continue;
                     }
                 }
@@ -3535,7 +3584,16 @@ fn recorded_target(request: &Value) -> Option<String> {
 /// A request file is named `<epoch-nanos>-<pid>-<sequence>.json`, so the first field is when it was queued
 /// even for a request written before `queued_at` was recorded.
 fn stamp_seconds(file_stem: &str) -> Option<u64> {
-    file_stem.split('-').next()?.parse::<u128>().ok().map(|nanos| (nanos / 1_000_000_000) as u64)
+    // A NAME THAT IS NOT A STAMP IS NOT A TIME (23/11). This used to take the first `-`-separated field as
+    // epoch NANOSECONDS whether or not it was one, so a hand-written `100-deploy.json` read as `1.0e-7s` after
+    // 1970: "queued for fifty-six years", which put it past every bound for ever. Nothing noticed while the
+    // bound only chose between two announcements; the bound is now a wall, and that reading would fail such a
+    // request on the tick it arrived. lua/core/deploy_wait.lua already required a stamp to look like one.
+    let digits = file_stem.split('-').next()?;
+    if digits.len() < 10 || !digits.bytes().all(|byte| byte.is_ascii_digit()) { return None; }
+    let nanos = digits.parse::<u128>().ok()?;
+    let seconds = (nanos / 1_000_000_000) as u64;
+    (seconds > 0).then_some(seconds)
 }
 
 /// Every request still waiting in `dir`, oldest first - the order the dispatcher performs them in.

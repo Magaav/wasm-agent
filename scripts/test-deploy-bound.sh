@@ -50,6 +50,7 @@ fail() { printf 'FAIL %s\n' "$*"; fails=$((fails + 1)); }
 ok()   { printf '    ok: %s\n' "$*"; }
 want() { case "$1" in *"$2"*) ok "$3" ;; *) fail "$3: expected '$2' in: $1" ;; esac; }
 unwant() { case "$1" in *"$2"*) fail "$3: unexpected '$2' in: $1" ;; *) ok "$3" ;; esac; }
+same() { if [ "$1" = "$2" ]; then ok "$3 (still $1)"; else fail "$3: expected $2, got $1"; fi }
 
 # A hole this row names itself, and says with the ONE spelling both judges read: `SKIP ` at the start of a
 # line (scripts/fast.sh collects `^SKIP `, and scripts/test-discriminates.sh records a skip as a named
@@ -169,6 +170,11 @@ SUBAGENT_BUSY='{"ok":true,"queue":0,"operation_overdue":false,"current":null,"no
 NAMED_NOTHING='{"ok":true,"queue":0,"operation_overdue":true,"current":null,"node_threads":[],"workers":[],"subagents":{"queued":0,"running":0,"active":0}}'
 IDLE='{"ok":true,"queue":0,"operation_overdue":false,"current":null,"node_threads":[],"workers":[],"subagents":{"queued":0,"running":0,"active":0}}'
 
+# Busy with turns ADMITTED AND NOT STARTED, as this node answers since 23/11: `queue` is the count, and
+# `queue_sessions` names the conversations behind it - one entry per admitted run. The second entry is a turn
+# the node could not name, which is the one a reader must still count and still never pass over.
+QUEUED_TURNS='{"ok":true,"queue":2,"operation_overdue":false,"current":null,"node_threads":[],"workers":[],"queue_sessions":{"count":2,"named":1,"truncated":false,"entries":[{"run_id":41,"session":"9b28c30d-1111-2222-3333-444455556666","node_thread":0,"kind":"run","waited_ms":45000},{"run_id":42,"session":"","node_thread":3,"kind":"completion","waited_ms":50}]},"subagents":{"queued":0,"running":0,"active":0}}'
+
 # A deploy request in the box, as the agent's request writer leaves it: verb, target, when it was asked for.
 write_request() { # <id> <queued-at>
   mkdir -p "$BOX"
@@ -227,14 +233,28 @@ unwant "$(installs)" "1" "nothing was installed"
 grep -q 'maintenance-deferred' "$SENT_DIR/sentinel.log" \
   && ok "the hold is written down" || fail "the hold left no line in the log"
 
-step "past the bound with a WORKING holder: still held, and the reason names the session"
+step "past the bound with a WORKING holder: not passed over, and the request fails BY NAME (23/11)"
 rm -f "$INSTALLER_LOG" "$PAUSED"/*.json
 out="$(WA_DEPLOY_HOLD_BOUND=1 once_out)"
 unwant "$(installs)" "1" "a working holder is not passed over"
 grep -q 'still working' "$SENT_DIR/sentinel.log" \
   && ok "the log names the session that blocks it" || fail "the hold did not say which session is still working"
+# THE BOUND IS A WALL ON WAITING IN BOTH DIRECTIONS: past it the request either proceeds (every holder
+# paused, step below) or it FAILS here. Measured 23/11: the deploy for e9a42d20 re-announced the same hold
+# every tick for twenty-five minutes and only ended when the operator restarted wa-serve.
+grep -q 'hold-bound-failed' "$SENT_DIR/sentinel.log" \
+  && ok "the failure is written down" || fail "a request past its bound left no failure line"
+if [ -s "$SENT_DIR/failed/1700000000000000000-4242-00000000000000000000.json" ]; then
+  ok "a request that cannot proceed is recorded in failed/ (with its reason)"
+else
+  fail "a request that failed at its bound left no record in failed/"
+fi
 
 step "past the bound with every holder paused: the install runs"
+# A FRESH REQUEST, because the step above ends its request at the bound now (a bound is a wall in both
+# directions). Same id and queue time, so nothing else about this step changes.
+clear_request
+write_request "1700000000000000000-4242-00000000000000000000" "$ASKED"
 pause_record "$SESSION" "$((NOW + 1))"
 pause_record "deadbeef-1111-2222-3333-444455556666" "$((NOW + 1))"
 rm -f "$INSTALLER_LOG"
@@ -277,6 +297,59 @@ busy_body "$IDLE"
 write_request "1700000000000000004-4242-00000000000000000000" "$ASKED"
 out="$(WA_DEPLOY_HOLD_BOUND=600 once_out)"
 if [ "$(installs)" = "1" ]; then ok "an idle node runs the deploy without waiting for any bound"; else fail "an idle node did not run the deploy: $out"; fi
+
+
+step "a turn admitted and not started is NAMED, and is not passed over (23/11)"
+clear_request; rm -f "$INSTALLER_LOG"; rm -rf "$PAUSED"
+busy_body "$QUEUED_TURNS"
+write_request "1700000000000000005-4242-00000000000000000000" "$ASKED"
+out="$(status_out)"
+want "$out" "busy:      2 holder(s) of the node" "both queued turns are holders"
+want "$out" "session 9b28c30d  admitted, not started 45s  not started yet" \
+  "the session the node named says it has NOT started (a count could never be asked whether it paused)"
+want "$out" "1 turn(s) admitted and not started" "and the turn the node could not name is still counted"
+unwant "$out" "session 9b28c30d  admitted, not started 45s  working" "a queued turn is never called working"
+
+step "past the bound with only queued turns: not passed over, and the request fails by name"
+out="$(WA_DEPLOY_HOLD_BOUND=1 once_out)"
+unwant "$(installs)" "1" "a turn that has not started cannot have paused, so it is not passed over"
+grep -q 'admitted and not started' "$SENT_DIR/sentinel.log" \
+  && ok "the log names the queued turn that blocks it" || fail "the failure did not name the queued turn"
+if [ -f "$BOX/1700000000000000005-4242-00000000000000000000.json" ]; then
+  fail "the request is still in the box: past its bound it must proceed or fail, never wait on"
+else
+  ok "the request left the box instead of waiting for ever"
+fi
+want "$(cat "$SENT_DIR/failed/1700000000000000005-4242-00000000000000000000.json" 2>/dev/null)" \
+  "admitted and not started" "and the failure record names the blocker"
+out="$(WA_DEPLOY_HOLD_BOUND=1 once_out)"
+same "$(installs)" "0" "a request that failed at its bound is not retried behind the operator's back"
+# WHAT THE OPERATOR (AND THE LANDING) READS AFTERWARDS (23/11, Fable's review 3). ~/Work/missions/install-local.sh
+# waits for the box to empty and then compares the installed Lua with main's, so a bound failure ends that landing
+# with "the installed lua/core differs from main's" - true and mute. The reason, the session and the way to ask
+# again must survive in the surface both of them read: `wa-sentinel status`.
+out="$(status_out)"
+want "$out" "0 waiting" "the queue shows the request is no longer waiting"
+if printf '%s' "$out" | grep -Eq 'requests:  0 waiting, [0-9]+ done, [1-9][0-9]* failed'; then
+  ok "and that it failed rather than vanished"
+else
+  fail "the failed request is not counted in the queue: $(printf '%s' "$out" | grep 'requests:' | head -1)"
+fi
+want "$out" "hold-bound:" "the queue names the phase that ended it"
+want "$out" "admitted and not started" "and the holder that blocked it, by name"
+want "$out" "re-request with: wa-sentinel request deploy --expected-sha 8082b42e1111" "and how to ask again"
+
+step "WA_DEPLOY_HOLD_BOUND=0 is the documented unbounded wait, and really is one"
+clear_request; rm -f "$INSTALLER_LOG"
+busy_body "$QUEUED_TURNS"
+write_request "1700000000000000006-4242-00000000000000000000" "$ASKED"
+out="$(WA_DEPLOY_HOLD_BOUND=0 once_out)"
+if [ -f "$BOX/1700000000000000006-4242-00000000000000000000.json" ]; then
+  ok "an operator who asked for no bound keeps the request waiting"
+else
+  fail "WA_DEPLOY_HOLD_BOUND=0 failed the request instead of waiting"
+fi
+unwant "$(installs)" "1" "and nothing is installed while it waits"
 
 if [ "$fails" -ne 0 ]; then
   echo "deploy bound: $fails failure(s)" >&2

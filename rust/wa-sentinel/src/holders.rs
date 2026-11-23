@@ -21,18 +21,27 @@ use serde_json::Value;
 /// One thing that keeps the node from being idle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Holder {
-    /// The conversation it writes, as `/health` names it. Empty when the snapshot names none - an operation, a
-    /// queued turn or a subagent run is work the node reports without a session.
+    /// The conversation it writes, as `/health` names it. Empty when the snapshot names none - an operation or
+    /// a subagent run is work the node reports without a session, and an OLDER node reports its queue that way
+    /// too (the count-only shape `/health` answered before 23/11).
     pub session: String,
-    /// What it is doing (`POST /chat`, `N subagents running`, ...).
+    /// What it is doing (`POST /chat`, `admitted, not started`, `N subagents running`, ...).
     pub label: String,
-    /// How long it has been busy, in milliseconds, when the snapshot says.
+    /// How long it has been busy (or queued), in milliseconds, when the snapshot says.
     pub ms: u64,
+    /// The node admitted this turn and has not started it. Not the same thing as a turn that is working, and
+    /// not the same thing as one that paused: nothing has run, so no pause record can exist for it (`/health`
+    /// names these under `queue_sessions`, one entry per admitted run).
+    pub queued: bool,
 }
 
 impl Holder {
     fn new(session: impl Into<String>, label: impl Into<String>, ms: u64) -> Holder {
-        Holder { session: session.into(), label: label.into(), ms }
+        Holder { session: session.into(), label: label.into(), ms, queued: false }
+    }
+
+    pub(crate) fn admitted(session: impl Into<String>, label: impl Into<String>, ms: u64) -> Holder {
+        Holder { session: session.into(), label: label.into(), ms, queued: true }
     }
 }
 
@@ -84,9 +93,29 @@ pub(crate) fn holders_from(health: &Value) -> Vec<Holder> {
             }
         }
     }
+    // WHICH conversations are queued, not only how many (23/11). MEASURED: a deploy for e9a42d20 was held for
+    // 25 minutes behind `10 turn(s) admitted and not started` - a holder with no session, so nothing could ask
+    // whether it had paused and the bound could never be satisfied. `/health` now names them under
+    // `queue_sessions` (`rust/wa-capabilities/src/serve.rs`, `pending_admitted`); a NODE THAT DOES NOT is still
+    // read correctly, as the single unnamed holder it can prove.
     let queue = field_u64(health, "queue");
-    if queue > 0 {
-        holders.push(Holder::new("", format!("{queue} turn(s) admitted and not started"), 0));
+    let mut named = 0u64;
+    if let Some(entries) = health.get("queue_sessions").and_then(|sessions| sessions.get("entries")).and_then(Value::as_array) {
+        for entry in entries {
+            let session = field_str(entry, "session");
+            // An entry with no session is counted below, in the holder that says so, rather than invented.
+            if session.is_empty() { continue; }
+            named += 1;
+            let label = match field_str(entry, "kind").as_str() {
+                "completion" => "child completion, admitted, not started",
+                _ => "admitted, not started",
+            };
+            holders.push(Holder::admitted(session, label, field_u64(entry, "waited_ms")));
+        }
+    }
+    let unnamed = queue.saturating_sub(named);
+    if unnamed > 0 {
+        holders.push(Holder::new("", format!("{unnamed} turn(s) admitted and not started"), 0));
     }
     if let Some(subagents) = health.get("subagents").and_then(Value::as_object) {
         let running = subagents.get("running").and_then(Value::as_u64).unwrap_or(0);
@@ -137,6 +166,9 @@ where
             };
             let state = if holder.session.is_empty() {
                 ""
+            } else if holder.queued {
+                // "working" would be a lie about a turn that has not run a single step.
+                "  not started yet"
             } else if paused(&holder.session) {
                 "  paused for the deploy"
             } else {
@@ -167,6 +199,12 @@ where
     for holder in holders {
         if holder.session.is_empty() {
             return Err(format!("the holder `{}` names no session, so this request has no proof it paused", holder.label));
+        }
+        // A TURN THAT HAS NOT STARTED IS NOT ONE THAT PAUSED. A pause record is written by a running turn at a
+        // step boundary (lua/core/deploy_pause.lua), so a queued turn can never have one for this request - and
+        // passing over it would start work under an install. It is reported, by name, and the request waits.
+        if holder.queued {
+            return Err(format!("session {} has a turn admitted and not started ({})", short(&holder.session), holder.label));
         }
         if !paused(&holder.session) {
             return Err(format!("session {} is still working ({})", short(&holder.session), holder.label));
