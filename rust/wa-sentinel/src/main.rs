@@ -2508,6 +2508,19 @@ pub(crate) fn hold_bound_secs() -> u64 {
         .unwrap_or(180)
 }
 
+/// How long a request may sit in `Verdict::Wait` on the SAME reason before the sentinel says so, once.
+///
+/// Fifteen minutes (Fable's review, 23/11 ~17:10Z). A Wait is deliberately endless - an unnamed holder is not a
+/// failure - but an endless wait nobody is told about is the silence this mission exists to remove. One notice
+/// after this many seconds on the same holder, naming it, and then silence again: not a failure, and not a wait
+/// that only the operator's own patience can find. `0` turns the notice off.
+pub(crate) fn hold_notice_secs() -> u64 {
+    std::env::var("WA_DEPLOY_HOLD_NOTICE")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(900)
+}
+
 /// When a request was asked for: the `queued_at` it recorded, or the epoch in the name it was written under
 /// (`<epoch-nanos>-<pid>-<sequence>.json`, `stamp_seconds`). The older file shape has no field, and a wait that
 /// cannot be measured is a wait nothing can bound.
@@ -2618,6 +2631,61 @@ fn fail_held_request(request: &Value, id: &str, path: &Path, detail: &str) -> Re
     audit("hold-bound-failed", &format!("{} {key}", request["verb"].as_str().unwrap_or("request")), &line);
     say(&line);
     Ok(())
+}
+
+/// Where the sentinel records how long a request has been WAITING on one reason, so the notice below survives
+/// a restart and does not depend on one process staying alive.
+pub(crate) fn held_dir() -> PathBuf {
+    sentinel_dir().join("held")
+}
+
+fn held_path(key: &str) -> PathBuf {
+    held_dir().join(key)
+}
+
+/// Since when `key` has been waiting for exactly this reason, and whether it has been told already.
+///
+/// A DIFFERENT reason is a different wait, so its clock starts again: the holder changed, and so did the fact an
+/// operator has to read. An unreadable record is not a reason to stay silent - it restarts the clock, which is
+/// the safe direction (a notice that comes late is better than one invented from a corrupt file).
+pub(crate) fn waiting_since(key: &str, reason: &str, now: u64) -> (u64, bool) {
+    let path = held_path(key);
+    let previous: Option<Value> = std::fs::read(&path).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok());
+    if let Some(previous) = previous {
+        let same = previous.get("reason").and_then(Value::as_str) == Some(reason);
+        let since = previous.get("since").and_then(Value::as_u64).unwrap_or(0);
+        if same && since > 0 {
+            return (since, previous.get("noticed").and_then(Value::as_bool).unwrap_or(false));
+        }
+    }
+    let _ = std::fs::create_dir_all(held_dir());
+    let _ = wa_operation::atomic_json(&path, &json!({"reason": reason, "since": now, "noticed": false}));
+    (now, false)
+}
+
+/// One notice, once, when a request has waited `after_secs` on the same reason. `None` before that, `None` after
+/// it has been made once, and `None` when the notice is turned off (`after_secs == 0`).
+///
+/// It is NOT a failure and it changes nothing about the request: the request keeps waiting. What it buys is that a
+/// holder which never resolves is seen by an operator instead of only by the landing's timeout.
+pub(crate) fn wait_notice(key: &str, reason: &str, now: u64, after_secs: u64) -> Option<String> {
+    if after_secs == 0 {
+        return None;
+    }
+    let (since, noticed) = waiting_since(key, reason, now);
+    if noticed || now.saturating_sub(since) < after_secs {
+        return None;
+    }
+    let _ = wa_operation::atomic_json(&held_path(key), &json!({"reason": reason, "since": since, "noticed": true}));
+    Some(format!(
+        "still waiting after {}s on the same holder, unchanged: {reason}. The request stays in the box; this is a notice, not a failure (wa-sentinel request withdraw <id> stops it)",
+        now.saturating_sub(since)
+    ))
+}
+
+/// The request stopped waiting (it ran, it failed, it was withdrawn): the next wait starts its own clock.
+pub(crate) fn clear_wait_clock(key: &str) {
+    let _ = std::fs::remove_file(held_path(key));
 }
 
 /// Where a request that failed at its bound waits for the next quiet moment.
@@ -2862,7 +2930,15 @@ fn process_requests(background: bool, held: &mut Held) -> Result<u32> {
                         // busy and names no holder" - which proves neither that a turn is running nor that one
                         // paused. The request keeps waiting and the line names what is missing; an operator reads
                         // it, and `wa-sentinel request withdraw` is the way out.
-                        announce_hold(held,&key,verb,&format!("{why}; {still}"),asked);
+                        let reason = format!("{why}; {still}");
+                        announce_hold(held,&key,verb,&reason,asked);
+                        // AND, ONCE, IF IT NEVER RESOLVES: fifteen minutes on the same holder says so out loud,
+                        // because a Wait has no bound and nothing else would ever end the silence (Fable's review,
+                        // 23/11 ~17:10Z). The clock lives in a file, so `once` and a long-running watcher agree.
+                        if let Some(notice) = wait_notice(&key, &reason, now_epoch(), hold_notice_secs()) {
+                            audit("hold-wait-notice", &format!("{verb} {key}"), &notice);
+                            say(&notice);
+                        }
                         continue;
                     }
                     holders::Verdict::Fail(still) => {
@@ -2879,6 +2955,7 @@ fn process_requests(background: bool, held: &mut Held) -> Result<u32> {
             }
         }
         held.settled(&key);
+        clear_wait_clock(&key);
         // Claim before working, not after. This used to read the request, do the work, and only then
         // remove the file - so a second runner (the watcher and a stray `once`, which is exactly what
         // happened) could pick up the same file while the first was still inside it, and run the

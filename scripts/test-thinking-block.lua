@@ -422,6 +422,28 @@ eq(chat.deploy_refused({ turn_refused = 'no_dispatchable_tools: ...' }), false,
   'every other refusal is still a failed turn')
 eq(chat.deploy_refused({}), false, 'and a run that refused nothing is not one')
 eq(chat.deploy_refused(nil), false, 'nor is no agent at all')
+-- 11c. THE EXIT CODE, IN ONE PLACE (Fable's review, 23/11 ~17:10Z). The reviewer's question was whether the rc=2
+--      refusal can ever reach a turn that is ALREADY RUNNING. It cannot: a refusal is decided at the pre-run gate
+--      (lua/core/chat.lua, before `agent.run`) or at the run's own session claim (lua/core/agent.lua, before
+--      anything is asked), and a turn that is mid-flight instead PAUSES - `deploy_pause.at_boundary` sets the
+--      reply and `completed`, leaves `turn_refused` nil, and the turn is a FINISHED one (exit 0). All four
+--      combinations are asserted here, and the paused one end to end by scripts/test-deploy-wait.sh step 4.
+eq(chat.exit_code(true, {}), 0, 'a turn that answered exits 0')
+eq(chat.exit_code(true, { turn_refused = 'deploy waiting: paused after this step' }), 0,
+  'and a turn that PAUSED for a deploy is a turn that answered: the pause sentence is a reply, not a refusal')
+eq(chat.exit_code(false, {}), 1, 'a turn that failed exits 1')
+eq(chat.exit_code(false, { turn_refused = 'deploy_waiting: waiting for the install of 8082b42e1111' }), 2,
+  'a turn refused by a waiting build exits 2, which the runners wait out instead of charging a round')
+eq(chat.exit_code(false, { turn_refused = 'no_dispatchable_tools: ...' }), 1,
+  'and every other refusal is still a failure')
+
+-- 11d. THE SENTENCE A SCRIPT READS: every refusal ends in the same words, so "is this a wait or a failure?" is a
+--      grep and not a judgment about prose (`deploy_wait.RETRY`). An anonymous caller gets it too.
+local wait_mod = dofile('lua/core/deploy_wait.lua')
+local refusal_text = wait_mod.refusal({ to = '8082b42e1111', id = '1795341684727384607-2971842', since = 100,
+  source = 'request' }, 160)
+has(refusal_text, 'retry when idle', 'a refusal says what a caller does about it')
+has(wait_mod.refusal_redacted(), 'retry when idle', 'and the redacted one says it too, so an anonymous caller knows')
 
 -- 12. round 3, item 1: the streak is per RUN. An agent object is reused across turns, and a counter that
 --     survived its run failed the next turn's FIRST offence as if it were the second. The counter is reset

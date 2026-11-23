@@ -215,7 +215,9 @@ clear_request() { rm -f "$BOX"/*.json; }
 # is quiet. A step that is not about that parks nothing, so it clears it - explicitly, never as a hidden side
 # effect of clear_request.
 clear_requeue() { rm -rf "$SENT_DIR/requeue"; }
-reset_box() { clear_request; clear_requeue; }
+# A wait's own clock lives in held/ (23/11, the fifteen-minute notice): a step that is not about it begins with
+# no such record, so "the notice was made once" is a fact about this step and not about the row's history.
+reset_box() { clear_request; clear_requeue; rm -rf "$SENT_DIR/held"; }
 pause_record() { # <session> <since> [file-name]
   mkdir -p "$PAUSED"
   printf '{"session":"%s","since":%s,"to":"%s","source":"request"}\n' "$1" "$2" "$SHA" \
@@ -350,6 +352,27 @@ grep -q 'an operation is overdue' "$SENT_DIR/sentinel.log" \
   && ok "and the log names it" || fail "the log did not name the overdue operation"
 [ -f "$BOX/1700000000000000007-4242-00000000000000000000.json" ] \
   && ok "and the request keeps waiting" || fail "an overdue operation failed the request"
+
+step "a Wait that never resolves is NOTICED once, and the request keeps waiting (23/11, Fable's review)"
+reset_box; rm -f "$INSTALLER_LOG"; rm -rf "$PAUSED"
+busy_body "$SUBAGENT_BUSY"
+write_request "1700000000000000012-4242-00000000000000000000" "$ASKED"
+out="$(WA_DEPLOY_HOLD_BOUND=1 WA_DEPLOY_HOLD_NOTICE=1 once_out)"
+if grep -q 'hold-wait-notice' "$SENT_DIR/sentinel.log"; then
+  fail "a wait that had just begun was announced as stuck"
+else
+  ok "a wait that has just begun says nothing extra"
+fi
+sleep 2
+out="$(WA_DEPLOY_HOLD_BOUND=1 WA_DEPLOY_HOLD_NOTICE=1 once_out)"
+grep -q 'hold-wait-notice' "$SENT_DIR/sentinel.log"   && ok "after the notice window the same holder is noticed, once" || fail "a stuck holder was never noticed: $out"
+want "$out" "still waiting after" "the notice says how long it has waited"
+want "$out" "names no session" "and names the holder it waits on"
+want "$out" "notice, not a failure" "and says the request is not being failed"
+[ -f "$BOX/1700000000000000012-4242-00000000000000000000.json" ]   && ok "the request is still in the box" || fail "a notice dropped the request"
+same "$(grep -c 'hold-wait-notice' "$SENT_DIR/sentinel.log")" "1"   "and it is made once, not once per tick"
+out="$(WA_DEPLOY_HOLD_BOUND=1 WA_DEPLOY_HOLD_NOTICE=1 once_out)"
+same "$(grep -c 'hold-wait-notice' "$SENT_DIR/sentinel.log")" "1" "a later tick does not repeat it"
 
 step "three workers mid-turn, each with a child completion, one session paused: it installs (23/11)"
 reset_box; rm -f "$INSTALLER_LOG"; rm -rf "$PAUSED"
