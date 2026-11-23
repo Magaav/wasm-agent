@@ -3180,4 +3180,32 @@ mod tests {
         let view = t.view(40, 4);
         assert!(view[0].contains(PIN_BAND) && view[0].contains("a question"), "{view:?}");
     }
+
+    /// NOT an assertion: a MEASUREMENT. 5,000 rows is one resumed session's replay, and the two rows
+    /// this view now reserves must not cost a frame anything the reader can feel. Run it on two
+    /// commits and compare, exactly as the report for this change did:
+    ///
+    ///   WA_FRAME_MS=1 cargo test -p wa-term --lib frame_cost -- --nocapture
+    ///
+    /// Two frames are measured, because they cost different things: FOLLOWING (bottom-anchored,
+    /// only what reaches the screen is wrapped - the usual frame while a stream arrives) and FROZEN
+    /// a page up (fixed position, the failing-measurement path that a reader is in while reading).
+    #[test]
+    fn frame_cost_of_a_5000_row_chat() {
+        if std::env::var("WA_FRAME_MS").is_err() { return }
+        let mut t = plain(Transcript::default());
+        t.block(false); t.write_marked("❯ a question about the whole session\n\n", true);
+        t.block(false);
+        for n in 0..5000 { t.write(&format!("line {n} of a long session\n")); }
+        let _ = t.view(120, 40); // the first frame fills the row-count cache
+        let start = std::time::Instant::now();
+        for _ in 0..2000 { let _ = t.view(120, 40); }
+        let following = start.elapsed() / 2000;
+        t.page(20);
+        let _ = t.view(120, 40);
+        let start = std::time::Instant::now();
+        for _ in 0..100 { let _ = t.view(120, 40); }
+        let frozen = start.elapsed() / 100;
+        println!("frame (5000 rows, 120x40): following {following:?}, frozen {frozen:?}");
+    }
 }
