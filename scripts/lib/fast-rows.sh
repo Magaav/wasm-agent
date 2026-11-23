@@ -38,6 +38,14 @@
 # found scripts/test-refusal-contract.lua reading the generated lua/core/refusal_codes.lua; and (2) a check
 # quantified over a NAMESPACE whose members other rounds add ("every tool", "each tool", "the whole
 # catalogue"), which found scripts/test-tool-schema-fidelity.lua and scripts/test-codemode-parity.lua.
+#   * scripts/test-wit-deps.lua is the third kind, added 22/11: it judges every WIT package this tree
+#     vendors, and the set it judges is the manifest in scripts/gen-wit-deps.lua, not a path a planner
+#     can map a change to - a round that adds a copy under some component's `wit/deps/` never selects
+#     it, and that copy then compiles against a contract nobody compared.
+#     The two connector rows are here for the same reason and arrived with it: test-email-connector.lua
+#     and test-whatsapp-send.lua already compare wa-email's and wa-whatsapp's snapshots with the published
+#     contract, byte for byte, and those snapshots are now a generator's output - a round that edits the
+#     canonical WIT never selects them, and the merge's regenerate would change what they judge.
 # scripts/test-fast-rows.sh proves the pairing in the other direction too: any row that reads a path
 # scripts/generators.txt declares as generated MUST be in this list, or the row fails and names it.
 wa_fast_core_rows() {
@@ -58,7 +66,9 @@ wa_fast_core_rows() {
     scripts/test-land-until.lua scripts/test-land-quick.lua \
     scripts/test-event-ledger.lua \
     scripts/test-refusal-contract.lua scripts/test-tool-schema-fidelity.lua scripts/test-codemode-parity.lua \
-    scripts/test-edit-aliases.lua
+    scripts/test-edit-aliases.lua \
+    scripts/test-wit-deps.lua \
+    scripts/test-email-connector.lua scripts/test-whatsapp-send.lua
 }
 
 # The rows this tree's fast path would run, one repo-relative path per line, cwd = the tree root: every
