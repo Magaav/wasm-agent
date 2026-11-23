@@ -10,6 +10,9 @@ local resources = dofile("lua/core/resources.lua")
 local changeset = dofile("lua/core/changeset.lua")
 local patch_audit = dofile("lua/core/patch_audit.lua")
 local provider = dofile("lua/core/provider.lua")
+-- The pixel size of a picture, read from its header - used for the one honest sentence a model that
+-- takes no image input is given instead of an image part (lua/core/image_meta.lua).
+local image_meta = dofile("lua/core/image_meta.lua")
 local memory = dofile("lua/core/memory.lua")
 local steering = dofile("lua/core/steering.lua")
 local telemetry = dofile("lua/core/telemetry.lua")
@@ -1157,17 +1160,32 @@ end
 -- A missing file is reported inside the text part rather than dropped: a message
 -- that silently lost its picture would let the model answer about something it
 -- never saw.
-local function image_message(images,text,missing_label)
+-- A model that declares it takes no image input (lua/core/model_window.lua, M.image_input) is given
+-- ONE honest sentence per picture instead of a part it cannot read: where the file is, its pixel size,
+-- its bytes. Never a base64 blob and never a reference table - a model that cannot see the picture can
+-- still say where it is, and the operator can open that file.
+local function no_image_sentence(reference,image)
+  local width,height = image_meta.size(memory.base64_decode(image.b64))
+  local size = (width and height) and (width .. "x" .. height) or "pixel size not read"
+  local path = tostring(reference.path or image.path or reference.name or "unknown path")
+  return "this model takes no image input; the file is at " .. path .. ", " .. size .. ", "
+    .. tostring(reference.bytes or "unknown") .. " bytes"
+end
+
+local function image_message(images,text,missing_label,model)
   if type(images) ~= "table" or #images == 0 then
     return { role = "user", content = text or "" }
   end
   local parts = {}
   if text and text ~= "" then parts[#parts + 1] = { type = "text", text = text } end
   local lost = {}
+  local shows_images = provider.image_input(model)
   for _, reference in ipairs(images) do
     local image = memory.load_image(reference)
     if image.missing then
       lost[#lost + 1] = tostring(reference.name or reference.sha256 or "image")
+    elseif not shows_images then
+      parts[#parts + 1] = { type = "text", text = no_image_sentence(reference,image) }
     else
       parts[#parts + 1] = {
         type = "image_url",
@@ -1187,25 +1205,25 @@ end
 
 -- A stored user message as a provider message. With no images it remains a plain
 -- string, preserving compatibility with every existing text-only conversation.
-local function user_message(message)
-  return image_message(message.images,message.content or "","image unavailable")
+local function user_message(message,model)
+  return image_message(message.images,message.content or "","image unavailable",model)
 end
 
-local function tool_image_message(images)
+local function tool_image_message(images,model)
   local names = {}
   for _, reference in ipairs(images or {}) do
     names[#names + 1] = tostring(reference.name or reference.sha256 or "image")
   end
   local label = (#names == 1 and "Image" or "Images") ..
     " returned by the preceding tool result" .. (#names > 0 and (": " .. table.concat(names, ", ")) or ".")
-  return image_message(images,label,"tool image unavailable")
+  return image_message(images,label,"tool image unavailable",model)
 end
 
 -- Chat Completions permits image parts on user messages, not tool messages. Keep
 -- every tool result contiguous with its assistant tool_calls, then insert one
 -- provider-only user image message after the complete result block. `_images`
 -- never crosses the provider boundary and never appears in the textual result.
-local function materialize_tool_images(messages)
+local function materialize_tool_images(messages,model)
   local index = 1
   while index <= #messages do
     if messages[index].role ~= "tool" then
@@ -1218,7 +1236,7 @@ local function materialize_tool_images(messages)
         after = after + 1
       end
       if #images > 0 then
-        table.insert(messages,after,tool_image_message(images))
+        table.insert(messages,after,tool_image_message(images,model))
         index = after + 1
       else
         index = after
@@ -1230,6 +1248,18 @@ end
 
 -- Only built-in read results may promote an internal `_images` field into model
 -- input. A plugin result containing the same key is ordinary untrusted JSON.
+--
+-- A run block's pictures ride on the run result (lua/core/codemode.lua, take_result_images): the
+-- script's own built-in reads put them there, and they are promoted through THIS function, so one
+-- provider image message follows the complete tool-result block whether the picture came from a
+-- direct read or from a script. Nothing else can reach the key: codemode.lua sets it from its
+-- `read` calls only, and the fence is that name, not a shape - a plugin that answers `_images`
+-- inside a script keeps it as JSON in the script's value.
+--
+-- `remote` is the third name, and it is the same rule read differently: a picture from a peer only
+-- becomes `_images` after lua/core/tools.lua's own verification stored it in THIS node's image store
+-- (lua/core/remote_image.lua, adopt), so the key is still this node's own, never a peer's word and never a
+-- plugin's JSON. A peer picture that failed a check keeps the named refusal instead of the key.
 local function take_tool_images(name,output)
   local images = {}
   local function take(value)
@@ -1237,7 +1267,7 @@ local function take_tool_images(name,output)
     for _, reference in ipairs(value._images or {}) do images[#images + 1] = reference end
     value._images = nil
   end
-  if name == "read" then
+  if name == "read" or name == "run" or name == "codemode" or name == "remote" then
     take(output)
   end
   return images
@@ -1421,7 +1451,7 @@ function M:build_context()
       -- skip the orphan
     elseif row.role == "user" then
       started = true
-      messages[#messages + 1] = user_message(row)
+      messages[#messages + 1] = user_message(row,self.model)
     elseif row.role == "assistant" then
       started = true
       local message = { role = "assistant", content = row.content or "" }
@@ -1537,7 +1567,7 @@ function M:build_context()
   for _, owed in ipairs(dofile('lua/core/ledger_defer.lua').pending(self.session_id)) do
     if owed.role == 'user' then
       messages[#messages + 1] = user_message({ content = owed.content or '',
-        images = type(owed.images) == 'table' and owed.images or {} })
+        images = type(owed.images) == 'table' and owed.images or {} },self.model)
     elseif owed.role == 'assistant' and tostring(owed.content or '') ~= '' then
       messages[#messages + 1] = { role = 'assistant', content = owed.content }
     end
@@ -1551,7 +1581,7 @@ function M:build_context()
         dropped_calls, dropped_results, moved_results, unnamed_calls, unnamed_results),
     })
   end
-  local built = materialize_tool_images(messages)
+  local built = materialize_tool_images(messages,self.model)
   -- A change that would have edited the prefix is delivered here, once, as a durable user-role note
   -- at the end of the conversation. The row is written to the transcript by prompt_cache, so every
   -- later request carries it in its natural position and nothing is repeated.
@@ -4067,7 +4097,7 @@ function M:run_body(text, images)
         _images = tool_images,
       }
     end
-    materialize_tool_images(messages)
+    materialize_tool_images(messages,self.model)
     -- An action ran, so the end-of-turn streak is over: it counts consecutive steps that ended WITHOUT
     -- one, and a model that acted has done what the last notice asked (the same reason the fake-answer
     -- streak ends on a real call).

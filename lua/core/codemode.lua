@@ -540,6 +540,80 @@ end
 -- rejected argument text in the validation refusal itself, the component only in its context, and
 -- `refusal.build` reads those two differently (a long input, a code with a detail). Making them one is
 -- a behaviour change for one engine, so it is a separate decision, not part of this merge.
+-- A picture the built-in `read` brought back, riding out of the script on the run's own result
+-- (mission run-block-images-reach-model).
+--
+-- WHY. The model is shown ONE tool, `run`; `await tools.read({path:"shot.png"})` inside a script is a
+-- call named `run`, and agent.lua promotes `_images` only for a call named `read`. MEASURED on
+-- 42f49385, a real run block and a real 800x600 PNG: the next provider request carried ZERO image
+-- parts, and the tool text carried the reference table itself -
+--   {"_images":[{"bytes":12226,"mime":"image/png","name":"shot.png","path":"/…/attachments/3c/3ca4….png",
+--    "sha256":"3ca48…"}],...}
+-- so the model was told where a picture it could not see happened to be stored. The references leave
+-- the loop here, and agent.lua turns them into ONE provider image message after the complete
+-- tool-result block - the same mechanism a direct read already uses, never a second one.
+--
+-- Only the BUILT-IN read may promote: `call.tool == 'read'` is this dispatcher's own name for it, and
+-- the key is removed from the answer before anything else reads it, so a plugin's `_images` is ordinary
+-- untrusted JSON that never reaches this list. The bounds are SPOKEN, never silent: a run that reads
+-- more than M.MAX_IMAGES pictures, or more than M.MAX_IMAGE_BYTES of them, attaches the ones that fit
+-- and names every dropped one - its file, its size and the bound it hit - on `images_dropped`.
+M.MAX_IMAGES = 4
+M.MAX_IMAGE_BYTES = 12 * 1000 * 1000
+
+local function take_result_images(state,call,value,params)
+ -- The built-in read, and a PEER's read: the picture of the latter was verified against the digest the
+ -- peer named and stored in THIS node's store before it arrived here (lua/core/tools.lua,
+ -- lua/core/remote_image.lua), so it is this node's own reference and not a remote claim. Every other
+ -- name - a plugin's, a connector's - keeps its `_images` as ordinary JSON.
+ local peer_read = call.tool == 'remote' and type(params) == 'table' and params.capability == 'read'
+ if not (call.tool == 'read' or peer_read) or type(value) ~= 'table' then return end
+ local references = value._images
+ -- The node's private transport, never a script's data: it carries an absolute path in THIS node's
+ -- attachment store. The read's own answer keeps path, type, mime, bytes, sha256 and version, which is
+ -- what a script acts on.
+ value._images = nil
+ if type(references) ~= 'table' then return end
+ for _, reference in ipairs(references) do
+  if type(reference) == 'table' then state.images[#state.images + 1] = reference end
+ end
+end
+
+-- The bound, and what the model is told when a picture does not fit. One sentence per dropped picture:
+-- silence would read as "the script saw nothing", and a bare count would not say which file to read again.
+local function attach_result_images(result,images)
+ if type(images) ~= 'table' or #images == 0 then return result end
+ local kept,total,dropped={},0,{}
+ for _, reference in ipairs(images) do
+  local bytes = tonumber(reference.bytes) or 0
+  local reason
+  if #kept >= M.MAX_IMAGES then
+   reason = 'at most ' .. M.MAX_IMAGES .. ' pictures ride out of one run result'
+  elseif total + bytes > M.MAX_IMAGE_BYTES then
+   reason = 'their total is capped at ' .. M.MAX_IMAGE_BYTES .. ' bytes'
+  end
+  if reason then
+   dropped[#dropped + 1] = { name = tostring(reference.name or reference.sha256 or 'image'),
+     bytes = bytes, reason = reason }
+  else
+   kept[#kept + 1] = reference
+   total = total + bytes
+  end
+ end
+ if #kept > 0 then result._images = kept end
+ if #dropped > 0 then
+  local named = {}
+  for _, item in ipairs(dropped) do
+   named[#named + 1] = item.name .. ' (' .. item.bytes .. ' bytes: ' .. item.reason .. ')'
+  end
+  result.images_dropped = dropped
+  result.images_note = 'A picture read in the script is attached to this result as an image. Read in '
+   .. 'the script but NOT attached: ' .. table.concat(named, '; ')
+   .. '. Read one again in a run of its own to see it.'
+ end
+ return result
+end
+
 local function settle_call(s,call)
  local value,success,admitted
  local ctx=s.ctx
@@ -590,6 +664,9 @@ local function settle_call(s,call)
       value=session_results.record(ctx,s.journal,{id=call.id,tool=call.tool,args=host.sha256(call.args or '{}'),
        args_value=params,result=host.sha256(json.encode(value)),ok=success},value)
       success=type(value)~='table' or (not value.error and value.ok~=false)
+      -- A picture this call brought back leaves the script's view here and rides out on the run's
+      -- result (both loops settle through this one function, so both attach the same pictures).
+      take_result_images(s,call,value,params)
      else value,success={error=tostring(result),effect='unknown',replay_allowed=false},false end
      local encoded=json.encode(value);local reference=output.store(encoded)
      value,success=script_value(value,success)
@@ -691,7 +768,7 @@ local function native_run(policy,memory,args,role,ctx,catalog,current_catalog,di
  local done
  -- What `settle_call` settles against: this script's records and this run's dispatch.
  local state={ctx=ctx,role=role,dispatch=dispatch,popts=popts,current_catalog=current_catalog,journal=journal,
-  calls=calls,attempts=attempts,selected=selected,lookup=lookup}
+  calls=calls,attempts=attempts,selected=selected,lookup=lookup,images={}}
  local function consume(events)
   for _,e in ipairs(events or {})do
    if e.type=='call' then pending[#pending+1]=e
@@ -753,6 +830,7 @@ local function native_run(policy,memory,args,role,ctx,catalog,current_catalog,di
  local skipped={};for _,call in ipairs(pending)do skipped[#skipped+1]={id=call.id,name=call.name,executed=false,effect='none',reason='script_finished_before_admission'}end
  local result={ok=ok and done and done.ok==true or false,error=not ok and tostring(problem) or done and not done.ok and done.error or nil,
   items=items,value=done and done.value,calls=calls,attempts=attempts,unexecuted=skipped,backend=response.backend or 'rust-wasmtime-quickjs-wasi',context_policy='only script output is model-facing; complete nested originals are retained by hash'}
+ attach_result_images(result,state.images)
  local presented,view=pcall(presentation.finish,result,selected)
  if presented then return view end
  result.ok=false;result.presentation_partial=true;result.presentation_error=tostring(view)
@@ -812,7 +890,7 @@ local function component_run(policy,memory,args,role,ctx,catalog,current_catalog
  local journal=session_results.load(memory,scope)
  -- What `settle_call` settles against, the same shape the native loop hands it.
  local state={ctx=ctx,role=role,dispatch=dispatch,popts=popts,current_catalog=current_catalog,journal=journal,
-  calls=calls,attempts=attempts,selected=selected,lookup=lookup}
+  calls=calls,attempts=attempts,selected=selected,lookup=lookup,images={}}
  local function failed(message)
   -- A live script whose component stopped answering: the calls already dispatched may have had
   -- effects, so this is `unknown` and it is never replayed (docs/CODEMODE.md).
@@ -893,6 +971,7 @@ local function component_run(policy,memory,args,role,ctx,catalog,current_catalog
   unexecuted=report.unexecuted or {},backend=opened.backend or 'rust-wasip2-wa:codemode',
   sandbox_calls=report.sandbox_calls,
   context_policy='only script output is model-facing; complete nested originals are retained by hash'}
+ attach_result_images(result,state.images)
  session_results.save(memory,scope,journal)
  local presented,view=pcall(presentation.finish,result,selected)
  if presented then return view end
