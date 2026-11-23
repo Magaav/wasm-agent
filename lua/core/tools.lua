@@ -1473,6 +1473,47 @@ local function announce_gone(ctx, reported)
 end
 M.announce_gone = announce_gone
 
+-- A BODY IS NEVER SILENTLY ALTERED (23/11). Measured first, because the ledger says the write path
+-- corrupts a file and the measurement says it does not: a body containing a LITERAL backslash-n (`A\nB`)
+-- went through tools.write and arrived as the four bytes it was (`od -c`: `A \ n B`), and the same body in
+-- a run call's raw block arrived byte for byte too. The double decoding the ledger reports (notes 83, 116:
+-- "a literal \n became a newline inside a Lua string") happens in the MODEL's own string literal, one layer
+-- above this one - the harness never sees the pre-decoding text, so it cannot undo it. What the harness can
+-- see is the file after the write, so it compares: a caller told ok=true about a file that does not hold
+-- the bytes it sent has no way to find out, and a body silently altered is the expensive class. A mismatch
+-- is a REFUSAL (effect unknown: something did happen to that path), never a success.
+local WRITE_VERIFY_MAX = 8 * 1024 * 1024
+function M.written_body(path, content, read_back)
+  -- nil when the file holds exactly `content` (or when nothing can be compared), else the refusal table.
+  if type(path) ~= 'string' or type(content) ~= 'string' then return nil end
+  local read = read_back or host.read_file
+  if type(read) ~= 'function' then return nil end
+  if #content > WRITE_VERIFY_MAX then
+    -- Not compared: say so on the way out rather than pretend. The size is the one fact that is cheap.
+    return { unverified = true, bytes_sent = #content, why = 'body_too_large_to_compare' }
+  end
+  local held = read(path)
+  if held == content then return nil end
+  if type(held) ~= 'string' then
+    return { error = 'write_unverified', effect = 'unknown', path = path, bytes_sent = #content,
+      note = 'the file could not be read back, so nothing here can say it holds the bytes this call sent: '
+        .. 'check it with tools.read before relying on it' }
+  end
+  local at = 1
+  local limit = math.min(#held, #content)
+  while at <= limit and held:byte(at) == content:byte(at) do at = at + 1 end
+  local function shown(text, from)
+    local piece = text:sub(from, from + 40)
+    return (piece:gsub('[^%g ]', function(ch) return string.format('\\%03d', ch:byte()) end))
+  end
+  return { error = 'write_mismatch', effect = 'unknown', path = path, at_byte = at,
+    bytes_sent = #content, bytes_on_disk = #held,
+    note = 'the file does not hold the bytes this call sent - they first differ at byte ' .. at
+      .. ' (sent ' .. #content .. ' bytes, the file holds ' .. #held .. '): sent "' .. shown(content, at)
+      .. '", on disk "' .. shown(held, at) .. '". Nothing here can say what wrote the rest, so this call '
+      .. 'does not report success.' }
+end
+
 function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
   args = args or {}
   local requested_cwd = args.cwd
@@ -2125,14 +2166,23 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     if before == nil then
       before = (host.path_kind and host.path_kind(path) == "file") and false or ""
     end
+    local verified
     local ok = host.write_file and host.write_file(path, args.content or "")
+    if ok then
+      local compared = M.written_body(path, args.content or "")
+      if compared and compared.error then return on_this_node(compared) end
+      verified = compared
+    end
     local notification=ok and graph_hint(memory,ctx,path) or nil
     -- Record what changed while the previous text is still in hand: this is what the diff
     -- topic shows and what its undo replays. A failed write records nothing.
     if ok and ctx and ctx.changes then
       changeset.record(ctx.changes, path, before, args.content or "")
     end
-    local written = { ok = ok and true or false, path = path, error=not ok and "write_failed" or nil, graph_index=notification }
+    local written = { ok = ok and true or false, path = path, error=not ok and "write_failed" or nil,
+      graph_index=notification }
+    -- A body too large to compare is named on the answer, so "ok" is not read as "the bytes were checked".
+    if verified and verified.unverified then written.body_unverified = verified.why end
     -- The caller on another node records this change in its own session (see the edit branch).
     if ok and ctx and ctx.peer_call and ctx.record_change == true then
       written.change = change_for_wire({ path = path, before = before, after = args.content or "" })
