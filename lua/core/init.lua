@@ -702,6 +702,10 @@ elseif command == "mission" then
   local request = { name = positional[1], base = positional[2], root = flags.root,
     message = flags.msg or flags.message, force = flags.force == true,
     repository = flags.repo or flags.repository, wa = flags.wa,
+    -- `amend` takes the text from a FILE (the script's own form) or from --text, which the verb writes to a
+    -- temporary file in the mission dir and removes again; the script is found, never guessed (mission.lua
+    -- M.amend_script), and --script names it explicitly.
+    file = flags.file or flags.f or positional[2], text = flags.text, script = flags.script,
     wait_seconds = tonumber(flags["wait-seconds"]) }
   local result
   if verb == "launch" then
@@ -712,11 +716,16 @@ elseif command == "mission" then
     result = mission.launch(request, ctx)
   elseif verb == "start" then result = mission.start(request, ctx)
   elseif verb == "resume" then result = mission.resume(request, ctx)
+  elseif verb == "amend" then
+    -- `wa mission amend <name> <file>`: the door to scripts/mission.sh amend, the one implementation of a
+    -- change that reaches a worker which is already running (docs/MISSIONS.md 4b).
+    result = mission.amend(request, ctx)
   elseif verb == "status" then result = mission.status(request, ctx)
   elseif verb == "stop" then result = mission.stop(request, ctx)
   elseif verb == "preflight" then result = mission.preflight(request, ctx)
   else
     print("usage: wa mission launch <name> <base> | start <name> | resume <name> [--msg <text>] | status [name] | stop <name>")
+    print("       wa mission amend <name> <file> | --text <words>   a change into a worker that is already running")
     print("       wa mission preflight <name>   the gate this branch will meet, run before anybody lands it")
     os.exit(2)
   end
@@ -747,6 +756,7 @@ elseif command == "help" then
   print("    resume [--list] [--session <id>] [prompt]   see and continue an unfinished thread")
   print("    chat [--continue|-c|--resume <id>] [--once|-p] [prompt]  one thread; --once exits after its turn(s)")
   print("    steer <session> \"<note>\" [--status]  queue a note for a session whose run is in flight")
+  print("    mission amend <name> <file> | --text <words>   a change into a running worker (scripts/mission.sh amend)")
   print("    paths  where this node keeps its files, and the config file it would read")
   print("    clean [--dry-run] [--days N] [--pin <path>] [--cap <percent>] [--status]  reclaim the node's one root")
   print("    approve [on|off|status|list|only|except|send|edit|reject|cancel]  approve outgoing WhatsApp drafts")

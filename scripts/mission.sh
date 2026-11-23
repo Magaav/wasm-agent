@@ -846,11 +846,30 @@ cmd_start() {
 #
 # WHY THE RESUME IS A RUNNER HERE AND NOT `wa mission resume`. The continuation is the documented CLI form
 # (`wa chat --resume <id> --once <text>`), started from this shell, so the turn inherits THIS environment.
-# `wa mission resume` spawns its runner through host.exec, and that child's environment is scrubbed: measured in
+# `wa mission resume` spawns its runner through host.exec, and a child of the node keeps no provider credential
+# (rust/wa-operation/src/lib.rs withholds `*_API_KEY`, `*_TOKEN`, `*_SECRET` ... from every tool child): measured in
 # this script's fixture, the resumed CLI answered "No provider is configured and nothing in memory matched" and
 # made no model request at all, because a mission's provider settings arrive exactly this way (start.sh hands
 # the worker wa-serve's serve.env). The runner keeps the two contracts the other runners keep - the rc goes into
 # `done`, and a turn refused with `deploy_waiting` is waited out rather than recorded as the mission's result.
+#
+# A MISSION'S ENVIRONMENT HAS TWO SHAPES, AND THE RUNNER MUST READ BOTH (measured 23/11). `stage` writes `env`
+# (NAME, WT, WA, TOOLCHAIN, TARGET) and the provider settings come from the shell that runs amend; the
+# factory's own launcher (`~/Work/missions/launch.sh` + `start.sh`) writes NO `env` at all - it keeps
+# wa-serve's environment in `serve.env`, so there the provider settings ARE that file. The runner used to
+# `. "$M/env"` unconditionally: on 23/11 01:30Z and 04:38Z (release-publishes-public-bundle,
+# deploy-prunes-pins) it died on its line 5 with "<mission>/env: No such file or directory", amend.log already
+# said "resumed", and no turn ran. So the runner sources `env` AND `serve.env` when each is there, and the
+# command REFUSES BY NAME before it writes anything when the mission has neither.
+#
+# "RESUMED" IS A CLAIM THAT A TURN RAN (23/11, the same failures). Saying it before the runner had run anything
+# is how a dead resume read as a live one for 15 minutes. So amend waits for the TURN ITSELF: the node's own run
+# lease for that session saying `active` after the spawn, or the turn's completed answer (`</turn>`) in out.log.
+# NOT the CLI's "Thinking" line - measured in the fixture, that is printed when the request STARTS, so a turn
+# whose provider answers nothing prints it and never answers. A runner that exits before any of that is
+# `resume_failed`, with its reason, and the command exits non-zero. Nothing is called delivered on a guess
+# either: a steering note needs the node's receipt id, and the node asked again for that receipt, or it is
+# `steer_unconfirmed`.
 
 # The last line amend.log carries for one amendment - the current state of that one delivery.
 amend_last() { # <mission dir> <sha>
@@ -882,6 +901,35 @@ amend_receipt() { # <session> <receipt id> -> "<state> <message_seq>"
   state=$(printf '%s' "$row" | sed -n 's/.*"state":"\([a-z]*\)".*/\1/p')
   seq=$(printf '%s' "$row" | sed -n 's/.*"message_seq":\([0-9][0-9]*\).*/\1/p')
   printf '%s %s' "${state:-unknown}" "${seq:--}"
+}
+
+# THE FILES A RESUMED TURN SOURCES. Two shapes, both real on this node: `env` from `stage`, `serve.env`
+# from the factory's own start.sh. Printed one per line in the order they are sourced, so the file this
+# command reports - and refuses on - is the same file the runner reads; nothing printed is the refusal.
+amend_env_files() { # <mission dir>
+  local f
+  for f in "$1/env" "$1/serve.env"; do
+    [ -r "$f" ] && printf '%s\n' "$f"
+  done
+}
+
+# HAS THE TURN THIS COMMAND STARTED ACTUALLY RUN? Two answers, both the product's own: the node's run lease
+# for the session saying `active` with an update AFTER the spawn (a run in flight named by the node, never
+# inferred from a pid), or the turn's own completed answer in out.log (`</turn>`, which a runner that never got
+# an answer cannot print). NOT "Thinking · 0.0s · run 1": that line is printed when the model request STARTS,
+# measured in this mission's own fixture - a resumed turn whose provider answers nothing prints it and then
+# fails, and calling that "resumed" is the same false success this check exists to end. Nothing else counts,
+# and "no news" is not a yes: differ.
+amend_turn_started() { # <mission dir> <session id> <epoch the resume started> <out.log offset>
+  local row state upd
+  row=$(steer_row "$2") || return 1
+  state=${row%% *}
+  upd=$(printf '%s' "$row" | awk '{print $2}')
+  upd=${upd%%.*}
+  case $upd in ''|*[!0-9]*) upd=0 ;; esac
+  [ "$state" = active ] && [ "$upd" -ge "$3" ] && return 0
+  tail -c +"$(( $4 + 1 ))" "$1/out.log" 2>/dev/null | grep -q '</turn>' && return 0
+  return 1
 }
 
 # WHICH SESSION IS THE WORKER. Three answers, in this order, because the worker's own line is late: the CLI
@@ -958,7 +1006,7 @@ cmd_amend() {
   # A REPEATED AMENDMENT IS NOT A SECOND ONE. The record decides, and only the node's receipt can say that the
   # first attempt never landed (`deferred`) or that nothing was ever delivered (`undelivered`).
   if [ -n "$prev" ]; then
-    local pstamp pstate psid precipit pdetail receipt
+    local pstamp pstate psid precipit pdetail receipt prun
     pstamp=$(printf '%s' "$prev" | awk '{print $2}')
     pstate=$(printf '%s' "$prev" | awk '{print $3}')
     psid=$(printf '%s' "$prev" | awk '{print $4}')
@@ -987,6 +1035,22 @@ cmd_amend() {
         return 0 ;;
       undelivered)
         say "mission: $pstamp (sha $sha) is already in $brief and was never delivered (${pdetail:-see amend.log}): delivering it now, without appending it again"
+        stamp=$pstamp ;;
+      resume_failed)
+        # THE RUNNER DIED, THE TEXT IS STILL UNDELIVERED: retrying is the whole point of recording the failure
+        # instead of saying "resumed". Nothing is appended a second time.
+        say "mission: $pstamp (sha $sha) is already in $brief and the resume it started never ran a turn (${pdetail:-see amend.log}): resuming it again now, without appending it twice"
+        stamp=$pstamp ;;
+      resume_unconfirmed)
+        # A RUNNER THAT MAY STILL BE ALIVE IS NOT A RETRY (23/11): a second resume beside it is the second writer
+        # this verb exists to prevent. Only once that pid is gone does the same command try again.
+        prun=$(printf '%s' "$pdetail" | sed -n 's/^pid=\([0-9][0-9]*\)$/\1/p')
+        if [ -n "$prun" ] && kill -0 "$prun" 2>/dev/null; then
+          say "mission: $pstamp (sha $sha) is in $brief and its resume runner (pid $prun) is still there without a turn, so nothing was started: a second resume beside it is a second writer"
+          say "mission: read $M/out.log and wa steer $psid --status, then run this command again once that pid is gone - the text is not appended twice"
+          return 1
+        fi
+        say "mission: $pstamp (sha $sha) is in $brief and no turn started for its resume (${pdetail:-see amend.log}); that runner is gone now, so it is resumed again without appending it twice"
         stamp=$pstamp ;;
       *)
         say "mission: already amended: $pstamp (sha $sha) is recorded as $pstate in $M/amend.log; nothing was appended and nothing was delivered"
@@ -1033,9 +1097,28 @@ cmd_amend() {
     answer=$("$wa" steer "$sid" --json "$label" 2>&1); rc=$?
     if [ "$rc" -eq 0 ]; then
       receipt=$(printf '%s' "$answer" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
-      amend_record "$M" "$sha" "$stamp" queued "$sid" "${receipt:--}" "run=$run"
-      say "mission: amendment $stamp queued for run $run (session $sid, receipt ${receipt:--}): the worker sees it at its next context boundary, once"
-      return 0
+      # DELIVERED IS THE NODE'S WORD, READ BACK (23/11). `wa steer` answering 0 says the note was accepted; the
+      # receipt is the row the run will consume, and its absence is not a delivery. So the id is required AND the
+      # node is asked to show it again: a receipt it cannot find means the note is not called delivered here.
+      if [ -z "$receipt" ]; then
+        amend_record "$M" "$sha" "$stamp" steer_unconfirmed "$sid" - no_receipt
+        say "mission: $stamp is in $brief, but the node's answer to the note carried no receipt id, so it is not called delivered: $answer"
+        say "mission: read it (wa steer $sid --status), then run this command again - the text is not appended twice"
+        return 1
+      fi
+      local confirm
+      confirm=$(amend_receipt "$sid" "$receipt")
+      case ${confirm%% *} in
+        queued|read)
+          amend_record "$M" "$sha" "$stamp" queued "$sid" "$receipt" "run=$run"
+          say "mission: amendment $stamp queued for run $run (session $sid, receipt $receipt, the node says ${confirm%% *}): the worker sees it at its next context boundary, once"
+          return 0 ;;
+        *)
+          amend_record "$M" "$sha" "$stamp" steer_unconfirmed "$sid" "$receipt" "receipt_${confirm%% *}"
+          say "mission: $stamp is in $brief and the node accepted the note (receipt $receipt), but it does not list that receipt (it answers '${confirm%% *}'), so it is not called delivered"
+          say "mission: read it (wa steer $sid --status), then run this command again - the text is not appended twice"
+          return 1 ;;
+      esac
     fi
     case $answer in
       *no_active_steering_target*)
@@ -1053,6 +1136,33 @@ cmd_amend() {
   # NOTHING IS IN FLIGHT: the worker is between turns (no done file) or has finished (done carries its rc).
   # Its next turn is a RESUME of that one session with the amendment as its message (see the header for why the
   # runner is written here instead of calling `wa mission resume`).
+  #
+  # ONLY A SETTLED RUN MAY BE RESUMED (23/11). "Not active" is three different facts - the run settled, the
+  # node could not be asked, the run was interrupted and nobody can vouch for it - and the old test ("the state
+  # is not active") read all three as "between turns". Measured 23/11 04:38Z on deploy-prunes-pins: a turn was
+  # in flight (the worker gate had resumed the same session and its "Thinking" line is in out.log) while amend
+  # said "not in flight" and started a second turn beside it. So a resume needs the node's own settled/failed
+  # word for that run, or no run row at all; 'unknown' refuses by name, because unknown is not yes and a resume
+  # beside a run nobody can vouch for is a second writer in one worktree.
+  case $state in
+    settled|failed|none) ;;
+    *)
+      amend_record "$M" "$sha" "$stamp" undelivered "$sid" - "run_$state"
+      say "mission: $stamp is in $brief, but the node does not say that run is settled: it says '$state' for session $sid, so nothing was resumed (a turn beside a run nobody can vouch for is a second writer)"
+      say "mission: read it (wa steer $sid --status), then run this command again once the node says settled - the text is already in the brief and is not appended twice"
+      return 1 ;;
+  esac
+  # THE PROVIDER SETTINGS, FOUND THE WAY THE MISSION WAS STARTED (23/11). A resumed turn with neither `env` nor
+  # `serve.env` starts with no provider at all: measured, it answers "No provider is configured and nothing in
+  # memory matched" and makes no model request - so it is refused HERE, by name, before anything says "resumed".
+  local env_list='' env_file
+  while IFS= read -r env_file; do [ -n "$env_file" ] && env_list="$env_list $env_file"; done <<<"$(amend_env_files "$M")"
+  if [ -z "${env_list# }" ]; then
+    amend_record "$M" "$sha" "$stamp" undelivered "$sid" - no_provider_env
+    say "mission: $stamp is in $brief, but this mission has neither $M/env nor $M/serve.env: a resumed turn would start with no provider settings, and a turn that cannot run is not a resume, so nothing was resumed"
+    say "mission: give it its environment (scripts/mission.sh stage writes env; the factory's own start.sh writes serve.env), then run this command again - the text is already in the brief and is not appended twice"
+    return 1
+  fi
   LOCK=$M/start.flock
   finished='no done file: the turn ended without one'
   [ -f "$M/done" ] && finished="done says $(cat "$M/done")"
@@ -1071,8 +1181,28 @@ cmd_amend() {
 # generated by scripts/mission.sh amend - re-written by the next amend; do not edit.
 set -uo pipefail
 M=$(cd "$(dirname "$0")" && pwd -P) || exit 97
-. "$M/env" || exit 98
 cd "$M" || exit 96
+# THE MISSION'S ENVIRONMENT, IN BOTH SHAPES IT ARRIVES IN (23/11): `env` from `stage`, `serve.env` from the
+# factory's own start.sh. This line used to be `. "$M/env"` alone, and on a factory mission it killed the
+# runner at once with "<mission>/env: No such file or directory" while amend.log already said "resumed"
+# (release-publishes-public-bundle 01:30Z, deploy-prunes-pins 04:38Z). `set -a` is what makes the file's
+# variables reach the CLI: a sourced line is a shell variable, and a child only sees exported ones.
+set -a
+env_files=0
+for env_file in "$M/env" "$M/serve.env"; do
+  [ -r "$env_file" ] || continue
+  . "$env_file" || { printf 'mission: %s could not be sourced\n' "$env_file" >&2; exit 98; }
+  env_files=$((env_files + 1))
+done
+set +a
+[ "$env_files" -gt 0 ] || { printf 'mission: neither %s/env nor %s/serve.env exists, so a resumed turn would start with no provider settings\n' "$M" "$M" >&2; exit 99; }
+unset WASM_AGENT_RAW_CODE  # native run(code=...) is the one execution path (Victor 21/11); never inherit another
+[ -n "${TOOLCHAIN:-}" ] && { export RUSTUP_HOME="$TOOLCHAIN/rustup" CARGO_HOME="$TOOLCHAIN/cargo"; export PATH="$TOOLCHAIN/cargo/bin:$PATH"; }
+[ -n "${TARGET:-}" ] && export CARGO_TARGET_DIR="$TARGET"
+# The mission's OWN wa when its env names one (a race arm runs with its own WASM_AGENT_HOME and binary), and
+# PATH otherwise, so a factory mission - whose serve.env carries no WA - is not left with an empty command.
+WA=${WA:-$(command -v wa 2>/dev/null || true)}
+[ -n "$WA" ] || { printf 'mission: no wa to resume with: neither env nor PATH names one\n' >&2; exit 93; }
 sid=$1; msg=$2
 rm -f "$M/done"
 printf -- '--- amend-resume %s session=%s\n' "$(date -u +%FT%TZ)" "$sid" >>"$M/out.log"
@@ -1104,6 +1234,10 @@ AMEND_RUNNER
     die "cannot write $M/amend-run.sh, so nothing was resumed: $stamp is in $brief and undelivered"
   fi
   chmod +x "$M/amend-run.sh" 2>/dev/null || true
+  local out_from err_from started wait_limit waited verdict why
+  out_from=$(wc -c <"$M/out.log" 2>/dev/null); out_from=${out_from:-0}
+  err_from=$(wc -c <"$M/err.log" 2>/dev/null); err_from=${err_from:-0}
+  started=$(date +%s)
   if command -v setsid >/dev/null 2>&1; then
     setsid nohup bash "$M/amend-run.sh" "$sid" "$label" >>"$M/out.log" 2>>"$M/err.log" </dev/null 9>&- &
   else
@@ -1112,9 +1246,35 @@ AMEND_RUNNER
   epid=$!
   exec 9>&-
   printf '%s\n' "$epid" > "$M/launch.pid"
-  amend_record "$M" "$sha" "$stamp" resumed "$sid" - "pid=$epid"
-  say "mission: amendment $stamp appended to $brief; the worker is not in flight (state $state; $finished), so session $sid is RESUMED with it (pid $epid): the amendment is the message of its next turn"
-  return 0
+  # "RESUMED" IS A CLAIM ABOUT A TURN, NOT ABOUT A PID (23/11). The spawn above says only that a shell exists;
+  # the measured failure is that amend said "resumed" for a runner that had already died. So the command WAITS
+  # for the turn itself - the node's run lease for this session active after the spawn, or the CLI's own first
+  # line of a turn in out.log - and calls it what it is when the runner is gone before that.
+  wait_limit=${AMEND_RESUME_WAIT_SECONDS:-60}; case $wait_limit in ''|*[!0-9]*|0) wait_limit=60 ;; esac
+  waited=0; verdict=''
+  while [ "$waited" -lt "$wait_limit" ]; do
+    if amend_turn_started "$M" "$sid" "$started" "$out_from"; then verdict=running; break; fi
+    kill -0 "$epid" 2>/dev/null || { verdict=died; break; }
+    sleep 1
+    waited=$((waited + 1))
+  done
+  case $verdict in
+    running)
+      amend_record "$M" "$sha" "$stamp" resumed "$sid" - "pid=$epid"
+      say "mission: amendment $stamp appended to $brief; the run for session $sid was $state ($finished), so it is RESUMED with the amendment as the message of its next turn (pid $epid), and that turn is running now"
+      return 0 ;;
+    died)
+      why=$( { tail -c +"$((out_from + 1))" "$M/out.log" 2>/dev/null | tail -3; tail -c +"$((err_from + 1))" "$M/err.log" 2>/dev/null | tail -3; } | grep -v '^[[:space:]]*$' | tail -4 | tr '\n' ' ')
+      amend_record "$M" "$sha" "$stamp" resume_failed "$sid" - "pid=$epid"
+      say "mission: resume_failed: $stamp is appended to $brief, but the runner (pid $epid) exited before the turn started ($(cat "$M/done" 2>/dev/null || echo 'no done file')), so session $sid never ran the amendment"
+      [ -n "$why" ] && say "mission: it said: $why"
+      say "mission: nothing is appended twice - fix what that line names and run this command again, and it resumes the same session with the same text"
+      return 1 ;;
+    *)
+      amend_record "$M" "$sha" "$stamp" resume_unconfirmed "$sid" - "pid=$epid"
+      say "mission: the resume runner (pid $epid) is still there, but no turn has started after ${wait_limit}s, so nothing is claimed as resumed: read $M/out.log and wa steer $sid --status, then run this command again once that runner is gone"
+      return 1 ;;
+  esac
 }
 one_status() { # <name>
   local name=$1 M; M=$(m_dir "$name")
