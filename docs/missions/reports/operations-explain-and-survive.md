@@ -306,6 +306,17 @@ While this addendum was being written, the narrowed run below sat behind the sui
 with `queue_position: 1` and `waiting_pid` naming this mission's own waiter — which is exactly what ledger notes
 0, 1, 3, 189, 244, 264 and 269 asked for, measured on the real node rather than in a fixture.
 
+## One thing this fix does NOT claim
+
+The fix is in the code-mode delivery (`settle_call`), which is the path the reported log shows
+(`tools.operation({action:"status", id})` inside a run block). After this session's third install, a wake arrived
+replaying a handle that had been recorded with `tier: "message"`, `input: "outcome_unknown"` and the message
+`{tool} raised instead of answering: operation_owner_not_attached ...` — the SAME failure, recorded on the model
+path rather than in a script. I did not chase that second surface to a line: the pending layer stored that
+handle's outcome before this fix existed, so it may be a replay of the old failure rather than a live raise, and
+this report will not call it either way without a measurement. Named here so the next reader measures it instead
+of assuming coverage.
+
 ## Texts, spelled (Fable, then this commit)
 
 * `owner_gone_note` now says the read is `tools.operation({action:"read", id})` (was the prose "(operation read)").
