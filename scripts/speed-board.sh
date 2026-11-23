@@ -163,15 +163,26 @@ measure_row() { # measure_row <name> <probe base name>
 # release journal), so the board only reads them back. Their load is the load at the moment they happened
 # where the record carries it, and the board's own load where it does not - said in the row's reason, so a
 # reader never mistakes a proxy for a measurement.
+# THE LANDING'S KIND TRAVELS WITH IT (mission speed-board-landing-kinds, 23/11). A landing is not one
+# cost - a scripts/docs-only landing is a fast-forward, a Lua install is a deploy, a Rust build is a deploy
+# that compiled the node - so the row is judged only against landings of its own kind
+# (scripts/lib/speed-stats.lua, M.LANDING_KINDS). The kind is NOT guessed here from the commit's diff: it is
+# read from the record land-quick writes when it lands, because only the landing knows which install it ran.
+# A record written before kinds existed carries none, and the row is then printed with its number and
+# 'no kind' as the reason it has no verdict - never compared with a landing of some other shape.
 record_landing() {
-  local file="${WA_SPEED_LANDINGS:-$missions/_quick/landings.jsonl}" line seconds load
+  local file="${WA_SPEED_LANDINGS:-$missions/_quick/landings.jsonl}" line seconds load kind
   line=$(grep -v '^[[:space:]]*$' "$file" 2>/dev/null | tail -1)
   if [ -z "$line" ]; then skip_row landing unknown "no landing recorded in $file yet"; return; fi
   seconds=$(printf '%s' "$line" | jq -r '.seconds // empty' 2>/dev/null)
   load=$(printf '%s' "$line" | jq -r '.load // empty' 2>/dev/null)
+  # The kind is the record's own word, and an empty or absent one stays absent: speed-stats names the row
+  # 'no_baseline' with the reason, and a kind this library does not know is not comparable with anything
+  # either (M.LANDING_KINDS is the allow-list, in one place).
+  kind=$(printf '%s' "$line" | jq -r '.kind // empty' 2>/dev/null)
   if [ -z "$seconds" ]; then skip_row landing unknown "the newest line of $file carries no seconds"; return; fi
   local ms=$(python3 -c "print(round(float('$seconds') * 1000))")
-  jq -n --argjson ms "$ms" --argjson load "${load:-$load_before}"      '{landing: {ms: $ms, samples: [$ms], load: $load, state: "ok",
+  jq -n --argjson ms "$ms" --argjson load "${load:-$load_before}" --arg kind "$kind"      '{landing: {ms: $ms, samples: [$ms], load: $load, state: "ok", kind: (if $kind == "" then null else $kind end),
       reason: (if $load == 0 then "the load beside it is the board own, the landing record carries none" else null end)}}'      > "$(row_file landing)"
 }
 
@@ -232,7 +243,9 @@ stats_lua judge "$history" "$entry_file" > "$verdict_file" 2>/dev/null || verdic
 # replace. And a hole in one of the four LIVE rows is RED itself (speed-stats judges it so, 23/11): a
 # board whose rows are all 'unavailable' must not read as fine, so it exits 3 with the row and the reason
 # named, exactly like a row that got slower.
-summary=$(jq -r '[.rows | to_entries[] | .key + "=" + (if .value.state == "ok" then ((.value.ms|tostring) + "ms@" + ((.value.load // 0)|tostring)) else .value.state end)] | join(" ")' "$entry_file" 2>/dev/null)
+# The one line the orchestrator reads. A landing carries its kind after the load (/lua, /scripts, /rust,
+# /held) because the number alone says nothing a reader can compare; a record with no kind says /nokind.
+summary=$(jq -r '[.rows | to_entries[] | .key + "=" + (if .value.state == "ok" then ((.value.ms|tostring) + "ms@" + ((.value.load // 0)|tostring)) + (if .key == "landing" then ("/" + (.value.kind // "nokind")) else "" end) else .value.state end)] | join(" ")' "$entry_file" 2>/dev/null)
 echo "speed-board: $(printf '%s' "$sha" | cut -c1-12) $summary (load $load_before)"
 if [ -n "$verdict_file" ]; then
   red=$(jq -r '.rows[] | select(.red == true) | if .hole == true then "\(.name): \(.state) - \(.reason // "no number and no reason")" else "\(.name): \(.ms) ms, \(.delta_pct * 10 | round / 10)% slower than the best of the last 10 commits at a comparable load (\(.best_ms) ms at \(.best_sha[0:12]))" end' "$verdict_file" 2>/dev/null)
