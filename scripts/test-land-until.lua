@@ -87,7 +87,8 @@ R.start_vault()
     "releases/index-linux.json", "and that commit carries exactly one path (an allow-list, not a hope)")
   local linux46 = step_of("case46", "linux") or {}
   eq(linux46.state, "done", "the linux step published the channel")
-  contains(tostring((journal_of("case46").linux or {}).tag or ""), "wa-linux-", "the journal records the channel tag")
+  contains(tostring((journal_of("case46").linux or {}).tag or ""), "v0.1.0",
+    "the journal records the release the channel published (v0.1.0, from the tree's VERSION)")
   contains(must("git -C " .. repo .. " show origin/main:releases/index-linux.json", "the live channel index"),
     main_before, "the live index on main names this release's commit")
   eq(must("git -C " .. repo .. " for-each-ref refs/heads/land"), "", "no landing branch exists")

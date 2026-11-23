@@ -182,7 +182,13 @@ its single path, and the live index naming the release), which is why they fail 
 14. `index_stale: <the freshness line>` / `index_freshness_unknown: the channel could not be judged: <the freshness line>`
 15. `index    <path> (not committed here: the index is the trust root and a commit on main)` (the standalone publisher) and the step's own `published <tag> (<n> target(s)) and releases/index-linux.json on <origin>/main = <sha12> (read back, <freshness>)`
 16. `linux_index_push_needs_credentials: ... next: the channel index is a commit on main and needs the credential that pushes main: run this step where that credential is (a desktop shell with gh signed in on this node)` - and `linux_index_not_fast_forward`, `linux_index_path_not_allowed`, `linux_index_invalid`, `linux_index_incomplete`, `linux_index_not_readback`, `linux_unsigned_release`
-17. the release report's new row: `| linux channel | published (wa-linux-<sha12>, 2 target(s)) |` and `| channel index | releases/index-linux.json <sha12> on main |`
+17. the release report's new rows: `| linux channel | published (v0.1.0, 2 target(s)) |` and `| channel index | releases/index-linux.json <sha12> on main |`
+18. **the entrance**: ``✻ Welcome to wasm-agent! v0.1.0 · v6a7f613d`` (a commit label is prefixed `v`; a `node-<sha12>` release tag and a pin are printed as they are; each half is printed only when it is known)
+19. **`wa --version`**: `wasm-agent v0.1.0 · v6a7f613d+dirty` (and `--build-info`'s `version=` is the same number)
+20. `linux_version_unreadable: <why> ... next: add VERSION at the tree root (its current release number, e.g. 0.1.0) and cut again`
+21. `linux_bump_not_authorised: <why> ... next: quote Victor's instruction naming v0.2.0 in docs/release/RELEASE_NOTES.md, commit it, then wa release cut --run <id> --resume`
+22. inside it: `bump_not_authorised: a minor bump needs Victor's quoted instruction naming v0.2.0 in docs/release/RELEASE_NOTES.md - a flag alone never moves the minor or the major` and `notes_missing: docs/release/RELEASE_NOTES.md is not in this tree, so no minor bump can be authorised`
+23. `published v0.1.0 (2 target(s): VERSION names a release that has no tag yet) and releases/index-linux.json on origin/main = <sha12> (the version is 0.1.0; read back, fresh: ...)`
 
 ## 6. What was NOT verified (and what would verify it)
 
@@ -201,3 +207,61 @@ its single path, and the live index naming the release), which is why they fail 
   file at a time, plus `luac5.4 -p` on every edited Lua file.
 - Nothing was published: no `gh release`, no upload, no change to the public `releases/index-linux.json`. The
   fixture's GitHub is a directory; its signing key is `tests/fixtures/release-sign/keys.txt`.
+
+## 7. The release owns the product version (added 22/11 23:55Z, `627fcc86`)
+
+Victor: "make v0.1.0 be reflected into the entrance; v1.0 is wrong. each release we add v0.1.0 then v0.1.1 and so on
+[a 1.0.0] needs major changes so i need to say so", and Fable's addition: "wa --version prints the product version
+and the sha, from the same source, with a test".
+
+**What was on the base first**: neither owner existed - no `VERSION` file at the tree root and no `PRODUCT_VERSION`
+in `lua/core/build_identity.lua` (measured on `6eb4b206`; that module reads the binary's identity and composes
+nothing). So this branch CREATES the owner rather than choosing between two: **`VERSION` at the tree root**, one
+line (`0.1.0`), read by everyone else. If the parallel `launch-opening` mission adds `PRODUCT_VERSION` to
+`build_identity.lua`, that constant must READ this file (or the file goes and the constant becomes the owner) -
+two numbers on one screen is the thing this change exists to end.
+
+- `rust/wa-host/build.rs` embeds the file as `PRODUCT_VERSION` (`include_str`-style read at build time, plus
+  `cargo:rerun-if-changed`), `rust/wa-host/src/build_info.rs::product_version()` trims it and `--build-info`'s
+  `version=` is now this number, not cargo's crate metadata.
+- `rust/wa-capabilities/src/host.rs` reads the same file (`PRODUCT_VERSION`) and puts `product_version` into the
+  `host.build_identity()` JSON, so every Lua surface reads it from the binary instead of keeping a copy.
+- `lua/core/build_identity.lua::product_version()`; `lua/core/chat.lua` hands it to the banner;
+  `lua/core/cli_view.lua::banner` prints `✻ Welcome to wasm-agent! v0.1.0 · v<sha>` (a commit label gets the `v`,
+  a `node-` release tag and a pin are printed as they are, and each half is printed only when it is known - never
+  `vunknown`).
+- `rust/wa-host/src/main.rs`: `wa --version` prints `wasm-agent v<version> · v<label>` - verified on a real build:
+  `wasm-agent v0.1.0 · v627fcc86+dirty`.
+- **`wa release cut` computes the next number** (`M.tree_version`, `M.next_version`): the tree's VERSION when that
+  number has no `v<n>` tag yet (the first cut is `v0.1.0`), otherwise one patch past the newest release tag. A tag
+  counts as taken LOCALLY or ON ORIGIN (`gh release create` makes it there; a tree that never fetched would cut
+  the same number twice). The `linux` step uses it as the channel release tag (`v0.1.0`, no more `wa-linux-<sha12>`
+  and no more `-alpha.N`), writes it into `VERSION` and commits that with the index entry - one commit, so the
+  number a person reads and the bytes a machine installs never disagree. The commit's allow-list is now exactly
+  `VERSION` and `releases/index-linux.json`.
+- **`--minor` / `--major` never move on their own**: the step refuses with `linux_bump_not_authorised` unless
+  `docs/release/RELEASE_NOTES.md` carries Victor's instruction QUOTED, naming the bump and the version it produces
+  (`Victor: "0.2.0 is a minor release: ..."`). A flag alone is never enough, and a tree without the notes file
+  refuses too (`notes_missing`).
+
+**Tests**
+
+- `scripts/test-land-linux.lua` (68 checks): two releases in a row give `0.1.0` then `0.1.1` in `VERSION` on main,
+  in the tag, and in the index entry - and the header text is held to `Welcome to wasm-agent! v0.1.0 · vabc12345` /
+  `v0.1.1`; `--minor` refused without the quote (`linux_bump_not_authorised`) and ALLOWED with it (`0.2.0`, tag
+  `v0.2.0`).
+- `scripts/test-product-version.lua` (16 checks, new, wired into the fast path's core rows): the reader's four
+  answers (a version, a two-digit patch, `unknown` for a binary older than the field, trimmed), the four header
+  shapes (version+sha, version+release tag, version+dirty sha, sha alone) and the ONE source: a binary built from
+  this commit reports this tree's `VERSION`.
+- `scripts/test-build-info.sh` (+3 checks) and `scripts/test-pin-label.sh` (rewritten): `--version` is held to
+  `wasm-agent v<version> · v<...>`, `version=` to the file. The pin row's old assertion - "never the crate's
+  0.1.0" (the 18/11 rule) - is REPLACED by the 22/11 one, not deleted: the line must carry the product version AND
+  the bytes' label, in that order. A version without a sha would be the 18/11 lie again.
+- `scripts/test-linux-channel.sh` (32 checks): the tree's `VERSION` decides the release tag (`v0.1.0`), the asset
+  names keep the sha, the sums name both archives.
+
+**Not verified here**: no real cut was run, so the version has never been bumped by a live release; the bump of
+`VERSION` across two real cuts is proved only by the fixture. `scripts/test-build-info.sh` was run against a
+release build of this tree (`27 checks, 0 failed`) and `scripts/test-pin-label.sh` (`11 checks, 0 failed`).
+
