@@ -109,6 +109,56 @@ ok(type(claimed_wait) == "string" and claimed_wait:find("deploy_waiting", 1, tru
   "a claim held while a build waits is the wait, not the run's failure", tostring(claimed_wait))
 -- THE SENTENCE A SCRIPT READS (Fable's review, 23/11 ~17:10Z): a refusal and a failure must be tellable
 -- apart without judging prose, so every refusal ends in the same words.
+-- A RESUME THAT WAS LOST IS A DEBT THE NODE PAYS (23/11, the G blocker). MEASURED on this laptop: two sessions
+-- paused for a deploy, each had scheduled its resume, the request they paused for was installed - and each resume
+-- row had been cut by that same install and left `unknown`, which is never replayed. Their sessions sat two hours
+-- until a factory watchdog existed. The ledger, the scheduler and the clock are injected here: no node, no files.
+local rows = {
+  { id = 'wake-lost-1', session_id = 'sess-a', owner = 'master' },
+  { id = 'wake-lost-2', session_id = 'sess-b', owner = 'master' },
+  { id = 'wake-lost-3', session_id = 'sess-c', owner = 'master' },  -- already owed by a NEWER pending row
+}
+local pending = { ['sess-c'] = true }
+local updates, armed = {}, {}
+local function q(sql, params)
+  if sql:find("status IN ('unknown'", 1, true) then return rows end
+  if sql:find("status IN ('pending'", 1, true) then
+    local session = tostring(params and params[1] or '')
+    return pending[session] and { { id = 'live-' .. session } } or {}
+  end
+  return {}
+end
+local function ex(sql, params) updates[#updates + 1] = { sql = sql, params = params }; return { changes = 1 } end
+local function schedule(args, session, owner)
+  armed[#armed + 1] = { args = args, session = session, owner = owner }
+  return { ok = true, wake = { id = 'new-' .. tostring(#armed) } }
+end
+
+-- WHILE A BUILD WAITS nothing is re-armed: the pause is doing its job.
+local held_back = pause.ensure_resumes(now, { read = marker_read, exec = ex, query = q, schedule = schedule })
+ok(held_back.waiting == true and held_back.rearmed == 0 and #armed == 0,
+  'a waiting deploy re-arms nothing', json.encode(held_back))
+
+-- THE DEPLOY IS OVER: every lost resume is re-armed by the node itself, once.
+local fixed = pause.ensure_resumes(now, { read = function() return nil end, exec = ex, query = q, schedule = schedule })
+ok(fixed.rearmed == 2, 'the two lost resumes are re-armed, and not the one a newer row already owes',
+  json.encode(fixed) .. ' armed=' .. tostring(#armed))
+ok(armed[1].session == 'sess-a' and armed[2].session == 'sess-b', 'each session is named exactly once')
+ok(type(armed[1].args.prompt) == 'string' and armed[1].args.prompt:find('resume that was armed for it was lost', 1, true) ~= nil,
+  'the wake carries the sentence a model can act on: ' .. tostring(armed[1].args.prompt):sub(1, 80))
+ok(tonumber(armed[1].args.in_seconds) == 0, 'and it is due now, not in a minute')
+local superseded = 0
+for _, row in ipairs(updates) do
+  if tostring(row.params[1]):find('a newer resume was armed', 1, true) then superseded = superseded + 1 end
+end
+ok(superseded == 2, 'the lost rows are marked superseded, so nothing is re-armed twice', tostring(superseded))
+
+-- AND ONCE IS ONCE: a later tick with no lost rows re-arms nothing.
+updates, armed = {}, {}
+rows = {}
+local again = pause.ensure_resumes(now, { read = function() return nil end, exec = ex, query = q, schedule = schedule })
+ok(again.rearmed == 0 and #armed == 0, 'a later tick re-arms nothing', json.encode(again))
+
 local refusal_text = pause.refuse(now, { read = marker_read })
 ok(type(refusal_text) == "string" and refusal_text:find("retry when idle", 1, true) ~= nil,
   'a refusal ends in retry-when-idle, so a runner can tell it from a failure', tostring(refusal_text))

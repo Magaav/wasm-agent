@@ -76,15 +76,51 @@ if mode == "due" then
   return
 end
 
+-- A PAUSE WHOSE RESUME WAS LOST, for one SESSION KIND (23/11; the G blocker). MEASURED: two sessions sat two hours
+-- after a resume that was armed and then cut by the very install it paused for (`unknown`, never replayed). The
+-- kinds differ only in who owns the process - a served chat, a `wa chat --once` worker, a self-wake - and the
+-- paused record and the resume row are the SAME for all three, which is why one guarantee covers them.
+-- DW_KIND=served|worker|selfwake; prints the session ids, comma-separated.
+if mode == "pause-lost" then
+  local now = os.time()
+  local kind = host.getenv("DW_KIND") or "worker"
+  local sessions = {}
+  for i = 1, tonumber(host.getenv("DW_COUNT") or "1") do
+    local id = memory.start_session("local", "chat",
+      { user_id = "master", node_id = "", title = "paused: " .. kind })
+    -- The record the pause writes (one file per session, read by the sentinel and by the health line).
+    pause.record_pause({ to = "8082b42e1111", source = "request", id = "1700000000123456789-4242-00000000000000000000" },
+      now, id, "master")
+    -- The wake the pause armed, and the outcome a cut dispatch leaves: `unknown`, which is never replayed.
+    local st = dofile("lua/core/selfloop.lua")
+    st.setup()
+    local armed = st.schedule({ in_seconds = 60, reason = pause.RESUME_REASON, prompt = pause.resume_prompt() },
+      { session_id = id, user_id = "master" })
+    if not (armed and armed.ok and armed.wake and armed.wake.id) then error("no resume row: " .. json.encode(armed)) end
+    if kind == "selfwake" then
+      -- A self-wake of the same session, due now: it is the row the session's own loop asked for, and it must not
+      -- be what brings the session back (the resume is).
+      st.schedule({ in_seconds = 0, reason = "the session's own loop", prompt = "carry on" },
+        { session_id = id, user_id = "master" })
+    end
+    local exec = function(sql, params) return json.decode(host.sql_exec(sql, json.encode(params or {}))) end
+    exec([[UPDATE self_wakes SET status='unknown', last_error=?, updated_at=? WHERE id=?]],
+      { "dispatch interrupted; not replayed", now, armed.wake.id })
+    sessions[#sessions + 1] = id
+  end
+  print("sessions=" .. table.concat(sessions, ","))
+  return
+end
+
 if mode == "tick" then
   local runs = 0
   local out = selfloop.tick({ now = os.time(), dispatch = function(row)
     runs = runs + 1
     return { accepted = true, run_id = runs }
   end })
-  print(string.format("dispatched=%d runs=%d deploy_waiting=%d deploy_wait_due=%d released=%d",
+  print(string.format("dispatched=%d runs=%d deploy_waiting=%d deploy_wait_due=%d released=%d rearmed=%d",
     tonumber(out.dispatched) or 0, runs, tonumber(out.deploy_waiting) or 0, tonumber(out.deploy_wait_due) or 0,
-    tonumber(out.released) or 0))
+    tonumber(out.released) or 0, tonumber(out.resume_rearmed) or 0))
   return
 end
 

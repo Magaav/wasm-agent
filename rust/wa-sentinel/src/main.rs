@@ -4095,6 +4095,14 @@ fn status() -> Result<()> {
     let done = std::fs::read_dir(sentinel_dir().join("done")).map(|d| d.count()).unwrap_or(0);
     let failed = std::fs::read_dir(sentinel_dir().join("failed")).map(|d| d.count()).unwrap_or(0);
     say(&format!("requests:  {pending} waiting, {done} done, {failed} failed"));
+    // THE HEALTH LINE (23/11, G blocker): how many sessions are paused for a deploy right now, and how long the
+    // oldest has been waiting. A pause is a promise this node resumes; a promise two hours old must be visible.
+    let (paused_count, paused_oldest) = paused_summary(now_epoch());
+    say(&format!("paused sessions: {paused_count}, oldest {}",
+        match paused_oldest {
+            Some(since) => age(now_epoch(), since),
+            None => "none".to_string(),
+        }));
     let parked = requeue_pending();
     if parked > 0 {
         say(&format!("requeue:   {parked} request(s) that failed at their bound run when the node is quiet enough"));
@@ -4156,6 +4164,36 @@ fn status() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Every session this node has recorded as paused for a deploy: how many, and since when the oldest one.
+///
+/// THE HEALTH LINE (23/11, G blocker): a pause is a promise the node resumes, and two of them outlived their deploy
+/// by two hours with nothing visible anywhere. One line, always printed, so "paused sessions: 0, oldest none" is a
+/// fact an operator can check rather than an absence they have to notice. The records are the ones
+/// lua/core/deploy_pause.lua writes at the moment a session pauses (`<data>/deploy-paused/<session>.json`).
+pub(crate) fn paused_summary(now: u64) -> (usize, Option<u64>) {
+    let mut count = 0usize;
+    let mut oldest: Option<u64> = None;
+    if let Ok(entries) = std::fs::read_dir(paused_dir()) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            count += 1;
+            let record: Value = std::fs::read(&path).ok()
+                .and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or(Value::Null);
+            let since = record.get("since").and_then(Value::as_u64).filter(|at| *at > 0);
+            // An undated record is still a pause the node owes: it is COUNTED, and it never reads as "none".
+            if let Some(since) = since {
+                if since <= now && oldest.map(|at| since < at).unwrap_or(true) {
+                    oldest = Some(since);
+                }
+            }
+        }
+    }
+    (count, oldest)
 }
 
 fn print_help() {

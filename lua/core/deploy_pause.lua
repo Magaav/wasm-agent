@@ -305,6 +305,85 @@ function M.record_pause(marker, now, session_id, user)
   return nil
 end
 
+-- A RESUME THAT IS NOT PENDING IS A DEBT THE NODE PAYS (23/11).
+--
+-- MEASURED on avell, twice in one evening: session 603425eb paused for the install of 7e38abe9 at 19:29:43Z and
+-- sat TWO HOURS, and 66c0d5c1 paused at 20:19:38Z and sat the same (their mission logs: "- the node owns session
+-- 603425eb... after a deploy pause: waiting for it to go quiet", then "--- still paused for a deploy after 2 h: no
+-- done written"). Both pause sentences said "scheduled a resume"; the request they paused for ended in the
+-- sentinel's `done/`; and `wa session status` now answers `0 wakes pending` for both - so the promise was ARMED
+-- and then LOST, not deferred. The one way a resume row leaves `pending` without a turn is the dispatch that was
+-- cut (the node replaced by the very install it paused for): the row ends `unknown` ("dispatch interrupted; not
+-- replayed`"), and nothing re-arms it because an unknown outcome is, by design, never replayed.
+--
+-- So the debt is read from the ledger, once the deploy is over: a resume row that ended unknown, failed or
+-- cancelled is re-armed NOW, with its own new row, and the old one is marked `superseded` so it is not re-armed
+-- again. Nothing else changes: a session whose resume is still pending or dispatching is left alone, and while a
+-- build waits or installs nothing is re-armed at all (that is the phase the pause is for).
+--
+-- `opts` exists for the test (scripts/test-deploy-pause.lua): exec, query, schedule and the clock are injected;
+-- a real caller passes nothing and gets the host's ledger, selfloop's scheduler and os.time().
+function M.ensure_resumes(now, opts)
+  opts = opts or {}
+  now = tonumber(now) or os.time()
+  local exec = opts.exec or host.sql_exec
+  local query = opts.query or host.sql_rows
+  if type(exec) ~= "function" or type(query) ~= "function" then
+    return { error = "no_ledger", rearmed = 0 }
+  end
+  if M.waiting(now, opts) then return { waiting = true, rearmed = 0 } end
+  local lost = query([[SELECT id, session_id, owner FROM self_wakes
+    WHERE reason=? AND status IN ('unknown','failed','cancelled')]], { M.RESUME_REASON }) or {}
+  local schedule = opts.schedule
+  if type(schedule) ~= "function" then
+    schedule = function(args, session, user)
+      return dofile("lua/core/selfloop.lua").schedule(args, { session_id = session, user_id = user })
+    end
+  end
+  local rearmed = 0
+  for _, row in ipairs(lost) do
+    local session = tostring(row.session_id or "")
+    if session ~= "" then
+      -- Still owed and already on its way (a newer row a later pause wrote): leave it.
+      local live = query([[SELECT id FROM self_wakes WHERE session_id=? AND reason=?
+        AND status IN ('pending','dispatching') LIMIT 1]], { session, M.RESUME_REASON }) or {}
+      if #live == 0 then
+        local owner = tostring(row.owner or "master")
+        local armed = schedule({ in_seconds = 0, reason = M.RESUME_REASON, prompt = M.resume_prompt() }, session, owner)
+        local wake = type(armed) == "table" and armed.wake or nil
+        if wake and wake.id then
+          pcall(exec, [[UPDATE self_wakes SET status='superseded', last_error=?, updated_at=? WHERE id=?]],
+            { "a newer resume was armed: " .. tostring(wake.id), now, row.id })
+          rearmed = rearmed + 1
+          pcall(M.say_rearmed, session, row.id, wake.id)
+        end
+      end
+    end
+  end
+  return { rearmed = rearmed }
+end
+
+-- Said once, on the log an operator reads, every time a lost resume is re-armed. Cheap on purpose: the fact is
+-- rare (twice in one evening, 23/11) and it is the only trace a re-arm leaves besides its ledger row.
+function M.say_rearmed(session, lost_id, new_id)
+  if type(host) ~= "table" or type(host.log) ~= "function" then return end
+  pcall(host.log, string.format(
+    "deploy pause: re-armed the LOST resume of session %s (wake %s had no outcome, new wake %s)",
+    tostring(session), tostring(lost_id), tostring(new_id)))
+end
+
+-- What the re-armed resume says. A NEW sentence (it goes to a model, so it is listed for approval): the session's
+-- own checkpoint is where the request it was doing is kept, and this wake carries no request text of its own.
+function M.resume_prompt()
+  return table.concat({
+    M.WAKE_MARK .. " The deploy this session paused for is OVER, and the resume that was armed for it was lost",
+    "(a dispatch cut by the install it was waiting for). Nothing was replayed and nothing was cut mid-call.",
+    "Re-establish the real state from the machine first (files, `git status`, processes, and this session's own",
+    'notes checkpoint under "Deploy pause"), then continue the request you were already working on and say',
+    "plainly what had already been done before the pause.",
+  }, "\n")
+end
+
 -- Returns how many rows it made due now. `opts.read` and `opts.query`/`opts.exec` are injected by the test
 -- (scripts/test-deploy-resume.lua); a real caller passes nothing and gets the host's own file and ledger.
 function M.release_due(now, opts)
