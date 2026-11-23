@@ -55,7 +55,7 @@ That last measurement is why the keep set cannot be "the commit in `installed.tx
 (`check deploy-pin-prune node scripts/test-deploy-pin-prune.mjs`, `scripts/fast.sh`, `8611f154`) and the
 gate (`gate_run node scripts/test-deploy-pin-prune.mjs`, `scripts/test.sh`, `8611f154`). It runs the real
 CLI against a real fixture repository and a real bare origin, with `HOME` and `WASM_AGENT_HOME` inside its
-own temporary directory (and refuses to run when they resolve to the real ones). 51 checks, 2 s:
+own temporary directory (and refuses to run when they resolve to the real ones). 52 checks, 2 s:
 
 - four deploys in a row (one of them the Lua fast path, record `build_pin=unpinned`) leave exactly two
   pins, and they are the commit installed and the one before it; the pin directory never holds more than
@@ -65,6 +65,7 @@ own temporary directory (and refuses to run when they resolve to the real ones).
 - a `--proc-root` that cannot be read removes nothing and says why;
 - a chmod-0555 pin directory makes the removal fail: exit 0, the failure named, the tree left in place;
 - a note, a file named like a commit and a symlink are not candidates;
+- a `--keep-max` that is not a positive integer is refused by name (exit 75, not read as 'no cap');
 - `scripts/deploy.sh`'s call site is after the final `record_installed`, hands over `--install-dir`, and
   its failure branch is a `note`.
 
@@ -93,6 +94,10 @@ above). **Not verified end to end:** `deploy.sh`'s own step 8b has never execute
 structurally by the test (call site, order, `--install-dir`, note-not-fail) and behaviourally by the CLI in
 a fixture, not by a real install. The first real proof is Victor's own check: after the next two local
 installs, `ls /tmp/wa-deploy-pins` should show two directories, the running sha and the one before.
+
+The record reading was also run against THIS node's real install, read-only (`--proc-root /nonexistent-proc`,
+so nothing could be removed): it kept `8862b60085fb` with the reason `installed.txt:commit=` and
+`8fccc83360dd` with `rollback/installed.txt:binary_commit=`, and all 7 pins were still there afterwards.
 
 At the time of writing, `/tmp/wa-deploy-pins` on this node held 7 pins (the base had 5; two more were
 created by main's own deploys during the session) - so the first install of this branch will remove five,
