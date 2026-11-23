@@ -341,6 +341,7 @@ function M.owed() return #owed end
 -- front of the next audit record.
 function M.flush_audit()
   if #owed == 0 then return 0, 0 end
+  if not M.setup() then return 0, #owed, "schema_unavailable" end
   local written, last = 0, nil
   local left = {}
   for _, row in ipairs(owed) do
@@ -404,7 +405,7 @@ function M.events(session_id, cursor, limit, since)
     -- between a measured zero and an absent number.
     return {events={}, next_cursor=tonumber(cursor) or 0, has_more=false, session_id=session_id,
       schema_version=1, available=false, reason="ledger_unreadable", detail=reason,
-      dropped_writes=drops.count}
+      dropped_writes=drops.count, audit_owed=#owed}
   end
   for _, row in ipairs(rows) do
     local ok, payload = pcall(json.decode, row.payload)
