@@ -243,6 +243,7 @@ return {
   ['no_executor']='codemode_pending.lua',
   ['no_identity']='nodes.lua',
   ['no_install_dir']='remote_update.lua',
+  ['no_ledger']='deploy_pause.lua',
   ['no_remote_update_record']='remote_update.lua',
   ['no_rendezvous']='nodes.lua',
   ['no_route']='nodes.lua',
