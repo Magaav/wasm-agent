@@ -309,3 +309,39 @@ For `HANDOVER.md`, in the graph paragraph:
 > `WA_GRAPH_COMPONENT=1`). While off it costs the prompt one line and the node no store, no worker and no
 > watch; the rows that exercise it switch it on in their own home (`scripts/lib/test-graph-on.lua`), and the
 > row that proves the default is `scripts/test-graph-dormant.lua`.
+
+## 9. The preflight round: the merge with main `c618da4f` (merge `2258f800`)
+
+The gate refused this branch on one row: `land-quick: merge conflict with main c618da4f in:
+docs/ENVELOPE.md lua/core/tools.lua`. Both conflicts are the same shape - **two independent additions at
+the same seam**: main added `STDIN_MAX_BYTES` (the stdin ceiling behind `bash {stdin=...}`) exactly where
+this branch added `graph_offered()`, and `docs/ENVELOPE.md` is generated, so its conflict was main's new
+`stdin`/`node`/`context` columns against this branch's removed `graph` row. Resolved by keeping BOTH blocks
+in `lua/core/tools.lua` (neither line of either change was dropped) and by REGENERATING the generated doc
+(`WA_BIN=... bash scripts/sync-prompt-docs.sh --write`), never by hand: against main `c618da4f` the
+regenerated `docs/ENVELOPE.md` differs by exactly one line, the graph's own catalogue row.
+
+Main changed none of this mission's other files between `4ba1c3d9` and `c618da4f`
+(`git diff --stat 4ba1c3d9..main -- rust/wa-features rust/wa-sentinel lua/core/feature_health.lua
+lua/core/features.lua lua/core/graph.lua lua/core/patch_audit.lua lua/core/subagents.lua
+config/features/features.json rust/wa-capabilities/src/graph.rs` is empty), so the Rust and Lua evidence in
+§4a still describes this tree.
+
+**The rows, after the merge** (narrowed `scripts/fast.sh`, 151 checks): every land row passes -
+`scripts/test-land-quick.lua`, `-tests`, `-components`, `-main`, `-install`, plus `test-land-plan`,
+`-rows`, `-gate-rows`, `-sign`, `-review`, `-marks`, `-resume`, `-until`, `-release`, `-linux` and the two
+contract checks `landing-queue`/`landing-baseline` - and every graph and feature row passes, mine included.
+Five checks were red, and **all five are red on main itself with the same binary**, measured here:
+
+| check | on this branch | on main `c618da4f` |
+|---|---|---|
+| `scripts/test-edit-aliases.lua` | `:37: an unknown option is refused by name: {"error":"unsupported_edit_option"...` | the same line, the same error |
+| `rust wa-capabilities` (`host::tls_anchor_tests::a_provider_call_refuses_a_private_ca_that_no_bundle_names`) | 400 passed, 1 failed | the same test fails (and on the base `4ba1c3d9` too) |
+| `tui-chrome-pty` | `a click on the icon cell reports Copied N characters...` | the same |
+| `run-block-pty` | `the interactive half FAILED - timed out waiting for the run to settle` | the same |
+| `esc-stops-pty` | `bash: Esc brings the prompt back at once (300 ms idle, 120 ms per unit of load, never over 2000)` | the same |
+
+The last three are the pty rows, and they failed **sequentially, one at a time**, on both trees while this
+machine carried `main-health`'s full suite: load average 14.3 on 16 cores during the branch run and 28.3
+during the main run. So the branch is as green as main is on this machine, and these five are named rather
+than quietly inherited.
