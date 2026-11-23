@@ -936,3 +936,41 @@ fn the_scheduler_repairs_an_index_that_disagrees_with_its_table_instead_of_quara
     assert_eq!(rows_after, rows_before, "the repair lost rows");
     assert!(!scheduler.ready.lock().unwrap().is_empty(), "the repaired store is re-queried");
 }
+
+#[test]
+fn a_component_verdict_of_malformed_over_a_healthy_store_is_its_own_event_and_not_a_repair() {
+    // THE UNEXPLAINED PAIR OF VERDICTS ABOUT ONE FILE: the component answers `database disk image is
+    // malformed` for a store `PRAGMA integrity_check` answers `ok` for. Nothing is reindexed and no copy is
+    // taken, so the line may not read `graph_db_repaired complaints=0 next=reindex` - that is a repair that
+    // never happened, and it is what the scheduler reported for this case (measured on this node 23/11
+    // 03:44 local: `graph.db.malformed-20261123T064420Z` reads `ok` natively with every row; see the
+    // report). The scheduler's own field is read here rather than stderr, so this test compiles against the
+    // base and fails there on the assertion, not on a missing symbol.
+    let fixture = Fixture::new();
+    let dir = db_dir(&fixture.0.join("graph.db"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join(DB_FILE);
+    // HERMETIC, AND SAID SO: this test writes only the fixture directory it has just created (`Fixture::new`
+    // under TMPDIR, removed on drop). It refuses a store anywhere else, which is what keeps a unit test from
+    // writing the node's own `graph.db.d` - on this node TMPDIR itself sits inside the node home
+    // (`~/.wasm-agent/tmp`), so "inside HOME" is not the fence; "inside the fixture" is.
+    assert!(db.starts_with(&fixture.0), "the store must be inside this test's own fixture, never a node store: {}", db.display());
+    store_with_rows(&db, 60);
+    assert_eq!(integrity_complaints(&db).unwrap(), vec!["ok".to_string()], "the store handed to the scheduler is healthy");
+    let before = std::fs::read(&db).unwrap();
+    let scheduler = test_scheduler();
+    let entry = test_entry(&fixture.0, &db);
+    entry.state.lock().unwrap().min_free_bytes = 1;
+    scheduler.failed(&entry, "graph_index_failed: database disk image is malformed".into());
+    let reported = entry.state.lock().unwrap().reported.clone().unwrap_or_default();
+    assert_eq!(reported, format!("graph_db_store_healthy root={} file={} next=retry", fixture.0.display(), DB_FILE),
+        "the healthy case is its own line and says what happens next");
+    assert!(!reported.contains("graph_db_repaired"), "nothing was reindexed, so no line may say it was: {reported}");
+    let copies: Vec<String> = std::fs::read_dir(&dir).unwrap().flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("graph.db.malformed-"))
+        .collect();
+    assert!(copies.is_empty(), "a healthy store was copied aside: {copies:?}");
+    assert_eq!(std::fs::read(&db).unwrap(), before, "a healthy store is kept byte for byte");
+    assert!(!scheduler.ready.lock().unwrap().is_empty(), "the component's answer is retried");
+}
