@@ -52,6 +52,28 @@ local wake = feature_canary.run("self-wake")
 eq(wake.ok, true, "the self-wake canary passes on this node (" .. tostring(wake.stage) .. ": " .. tostring(wake.detail) .. ")")
 eq(wake.stage, "delivered", "the self-wake canary names its last stage")
 
+-- 1b. EVERY FEATURE IN THE SHIPPED LIST HAS A CANARY THAT LOADS. A row whose module is absent would read
+--     as canary_missing at release time - a named red, but a red nobody sees until a release is cut. This
+--     is the check that makes 'a feature that ships without an exercise' fail HERE.
+local shipped = dofile("lua/core/feature_health.lua").rows()
+for _, row in ipairs(shipped or {}) do
+  local module_path = feature_canary.path(row.canary)
+  local loaded, module = pcall(dofile, module_path)
+  check(loaded and type(module) == "table" and type(module.run) == "function",
+    "the feature " .. row.name .. " has a loadable canary at " .. module_path)
+end
+
+-- 1c. and the whole list runs here without a single canary_missing: loopback canaries pass, and the
+--     features this node has no component for are named off-node rather than failed or silently dropped.
+local all = feature_canary.run_all()
+local missing = {}
+for _, result in ipairs(all or {}) do
+  if result.stage == "canary_missing" or result.stage == "canary_unloadable" or result.stage == "canary_malformed" then
+    missing[#missing + 1] = result.feature .. " (" .. tostring(result.stage) .. ")"
+  end
+end
+eq(#missing, 0, "every listed feature's canary loads: " .. table.concat(missing, ", "))
+
 -- 2. THE FIXTURES: a registry of their own, and canary modules that fail in the four ways a canary can.
 local canary_dir = test_home .. "/canaries"
 local task_dir = canary_dir .. "/tasks"
