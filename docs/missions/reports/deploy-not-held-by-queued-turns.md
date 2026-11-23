@@ -129,6 +129,118 @@ and never the node own ~/.wasm-agent (got /home/victor)`) and pass with `HOME=<s
    judges it` and `[serve] the deploy admission gate is unavailable ({detail}); the run's own gate judges it`.
 9. `lua/core/server.lua` `wa_deploy_admission` answer keys: `waiting`, `code`, `refusal`, `to`, `id`, `since`,
    `source`, `gate: unavailable`, `operator: true`.
+10. `lua/core/deploy_wait.lua` `refusal_redacted`, the anonymous door sentence verbatim: `deploy_waiting: this node
+    is waiting for or installing a new build. This node starts no new turn while a build is waiting for it or being
+    installed - a turn in flight is exactly what keeps the node from going idle - and this turn did not start.
+    Nothing was lost: this is a wait, not a failure, and the work starts again once the swap is done.`
+11. The anonymous 503 body: `{"error":"deploy_waiting","hint":<the sentence above>,"not_started":true,"retry_after_seconds":30}`
+    (`wa_deploy_admission`'s answer also carries the `redacted` key for it).
+12. A peer's answer, in the caller: `remote_deploy_waiting`, with `not_started`, `retryable`, `retry_after_seconds`,
+    `peer_error: deploy_waiting`, `detail` (the peer's hint) and the message: `<peer> is waiting for or installing a
+    new build, so it started no turn and nothing ran there. This is not a lost peer and nothing was lost: ask again
+    in <N> seconds (the peer says when; it pauses running turns at their next step).`
+13. The failed request's record ends with: `re-request with: wa-sentinel request deploy --expected-sha <sha>
+    --reason '<the original reason>'` (no `--expected-sha` when the request carried no target).
+14. A child settlement held by the outbox carries `wake not started: <the deploy_waiting sentence>` as its detail,
+    and `wa_completion_run` answers a refused turn with `{not_started: true, deploy_waiting: <sentence>}`.
+15. `lua/core/completions.lua` writes a held child settlement's detail as `deploy_waiting: waiting for the install
+    of <sha> (deploy request <id>, asked <n>s ago). ...` - the existing words, reused, not a new sentence.
+
+## Fable's review of `710c1567` - four points, answered (commit `c83e553c`)
+
+### 1a. A message a PERSON sent through a channel (WhatsApp / Telegram / mail)
+
+**Measured: in this tree no inbound channel message starts a turn by itself.** The channels are capabilities, not
+pumps: `wa:channel/messages` is a WIT seam with no host implementation (`docs/KERNEL.md:70`), WhatsApp/Telegram/mail
+arrive as tools a turn *calls* (`mcp_whatsapp_read`/`_search`/`_send`, `whatsapp_query.rs`, the `wa-whatsapp`
+component), so the message waits in the channel's own store until a turn reads it. A turn is started by exactly
+four things: `wa chat` at a terminal (`operator_present = true`, `lua/core/chat.lua:407` and `:1120`), the window's
+`POST /chat` with `operator: true` (`lua/core/server.lua:155`), a wake/resume (in-node, `lua/core/selfloop.lua`),
+and a peer's `/node/chat` (`lua/core/server.lua`, `wa_reply`). Only the last two are automatic, and both are
+covered below.
+
+So there is **no path in this tree where the door can drop a person's channel message** - and the two paths a
+person is actually on are exempt and asserted: a window turn is served while a deploy waits
+(`scripts/test-deploy-wait.sh` step 2), and a window turn already in flight is neither cut nor refused (step 4b).
+The honest gap: **a channel pump, when one is added, must say which of the two it is.** A pump that starts a turn
+for a person must send `operator: true` (and then it is exempt); a pump that cannot must leave the message in its
+store and start the turn after the deploy. Proposed for `FACTORY.md` below, and this is the one thing here that is
+not enforced by code, because the code it would guard does not exist yet.
+
+### 1b. A wake / scheduled turn, and a child's completion
+
+* **Wake: already refused durably, and tested.** `selfloop.tick` returns before dispatching any due wake while a
+deploy waits (or installs), writes the sentence into each due row's `last_error` and keeps its time; when the
+deploy ends, `deploy_pause.release_due` makes the paused sessions' resumes due in the same tick and each row fires
+once. Held by `scripts/test-deploy-wait.sh` steps 5 and 6, on a real node: a due wake does not run, and after the
+deploy "the held wakes run once" and "exactly once: a second tick dispatches nothing".
+* **Child completion: it WAS lost, and that is fixed here.** MEASURED at `710c1567`: `completions.tick` had no
+deploy gate, so a `ready` settlement was admitted as a run while a deploy waited (one more turn the deploy cannot
+pass over); the run's own gate then refused it at its first step, `pcall(bot.run, ...)` succeeded, and
+`wa_completion_run` recorded the row as `delivered` with the refusal as a note - so the summary a coordinator had
+earned was gone. Fixed in `c83e553c`: the outbox tick holds the whole outbox while a deploy waits (rows keep their
+state, and any row already `ready` gains the sentence as its detail), and a run that comes back refused returns
+the row to `ready` with the reason instead of `delivered`. Held by the new row
+`scripts/test-completion-deploy-wait.lua` (10 checks): held while a deploy waits, delivered exactly once after it,
+and a refused run is not a delivery.
+
+**Who retries, when, how many times:** the node does, on its own tick, once. There is no attempt counter for the
+deploy case and none is needed - the row is not consumed until it is delivered, so a deploy that takes ten minutes
+costs one delivery when it ends, not ten refusals. A send that is refused a second time after the deploy (capacity)
+keeps today's bounded retry (the row returns to `ready`, `deferred_detail` records it).
+
+### 1c. A peer's `/node/chat`
+
+**Measured at `710c1567`:** `nodes.remote_chat` turned every non-200 into `remote_unreachable` with the status as
+`detail` and **threw the body away**, so a peer that was alive, installing a build and had run nothing was reported
+to the caller's model as a lost peer, with `retry_after_seconds` discarded. Fixed in `c83e553c`: `nodes.chat_answer`
+maps a `503 deploy_waiting` to `remote_deploy_waiting`, `not_started`, `retryable`, `retry_after_seconds` and a
+sentence that says the peer started nothing and when to ask again; `server.lua` passes those fields through to the
+caller's turn. **It does not retry by itself**: the caller's model gets a named, numbered, retryable answer and
+decides, which is the same shape as every other peer refusal in this tree. A 500, a 503 that is not the door, a 200
+and no answer at all keep their old meaning. Held by the new row `scripts/test-peer-deploy-wait.lua` (14 checks).
+**Not verified with two live scratch nodes**: the mapping is pinned as a pure function and the route that uses it
+(`remote_chat` -> `chat_answer`) is the only caller; a two-node rendezvous fixture was judged not worth the risk of
+a relay storm on this machine (rule 13), and that gap is named rather than hidden.
+
+### 2. The 503 body before the credential is resolved
+
+Fixed in `c83e553c`. The order is: ask the gate (one Lua call, no session created), and only if it answers
+`waiting` resolve identity with `wa_identity` - which answers identity and **creates nothing** - and answer with
+one of two bodies:
+
+* unauthenticated: `error: deploy_waiting`, `hint` (`deploy_wait.lua refusal_redacted`: the same sentence with no
+  commit, no request id and no lane), `not_started: true`, `retry_after_seconds` - nothing else;
+* credential resolved: the same, plus `target`, `request`, `source` and `effect: none`.
+
+A resolver that cannot answer is treated as unauthenticated (fail closed). Held by two Rust rows
+(`serve::deploy_door_tests`) and, across processes, by `scripts/test-deploy-wait.sh` step 2e: an unauthenticated
+`POST /chat` is refused with 503 and its body contains no `8082b42e1111`, no `"target"`, no `"request"` and no
+`"source"`, while the authenticated turns of the same step do carry the commit - the two scopes are asserted
+against each other.
+
+### 3. What a deploy that fails at the wall leaves behind
+
+Measured (`~/Work/missions/install-local.sh`, `~/Work/missions/status.sh`):
+
+* `install-local.sh` waits for `wa-sentinel status`' `requests: N waiting` to reach 0, then compares
+  `~/.local/bin/lua-core/lua/core` with the checkout's and exits 1 with "the installed lua/core differs from
+  main's - the deploy did not take" if they differ. Before this branch a held request never left the box, so that
+  landing instead ended at its own 40-minute bound; **now the box empties at the 180 s wall** and the comparison is
+  what reports it.
+* `status.sh` compares `main` with `installed.txt`'s `commit=` and prints `DIFFERENT - local is behind main or ahead
+  of it`, and raises "this laptop does not run main's Lua" after 20 minutes. So it already shows main != installed.
+
+What was missing was the *reason* and the way back, and that is in the repo's own surface, `wa-sentinel status`
+(`fail_held_request`, `c83e553c`): the failure record now reads
+
+`hold-bound: the node is busy: ...; session 9b28c30d has a turn admitted and not started (admitted, not started);
+re-request with: wa-sentinel request deploy --expected-sha 8082b42e1111... --reason '<the original reason>'`
+
+and the box shows `0 waiting, ... , N failed`. Held by `scripts/test-deploy-bound.sh` (the failed request is
+counted, the phase is named, the blocking holder is named, and the re-request line is there).
+`install-local.sh` and `status.sh` live outside this branch, so their one-line form of the same sentence is
+proposed below rather than written.
 
 ## What is not done, and what remains unknown
 
@@ -137,11 +249,29 @@ and never the node own ~/.wasm-agent (got /home/victor)`) and pass with `HOME=<s
   in one conversation) on a scratch node, not the incident's process timeline. What is proven is the mechanism
   the hold line depends on (`queue` counts items in node-thread channels and names nobody) and that the door
   removes it.
-* The door refuses a run before the credential is resolved, so the refusal is answered to any local caller with
-  the same facts `/health` already publishes; the request id and target commit are in the existing `sentinel`
-  section of `/health`, so nothing new is disclosed. Named here so a reviewer can disagree.
+* The door's answer is scoped by the credential (`c83e553c`, Fable review 2), so an anonymous caller learns the
+  reason and when to retry and nothing that identifies the install.
 * `wa-sentinel`'s two bounds (180 s pass-over, 1800 s advertised) are still two numbers; this change makes the
   pass-over bound real rather than merging them. Merging them is an operator decision, not this brief's.
 * No release, no fleet update, no key retirement, nothing on a live peer; every test above ran on this node with
   its own scratch `WASM_AGENT_HOME`, and `~/.wasm-agent/graph.db.malformed-20261122T144358Z` was not touched.
+
+## Proposed text (not written): `FACTORY.md`
+
+Fable asked for proposals, never writes. Two lines:
+
+> A turn that a PERSON is waiting on says so (`operator: true`) and is never refused for a waiting deploy. A channel
+> adapter that cannot say it must leave the message in its own store and start the turn after the deploy - a
+> person's message is never dropped, and a refusal that spends it is a failure.
+
+> A refused turn must leave its work durable: the message, wake or settlement keeps its place and the reason, and is
+> delivered once when the deploy ends. A reminder that silently never fires is worse than a slow deploy.
+
+And one line for `~/Work/missions/install-local.sh` (outside this branch), so a landing ends with the reason rather
+than only the symptom:
+
+> `install-local: the deploy did not install <sha> - wa-sentinel status says why (failed at its bound behind
+> <session>; re-request with `wa-sentinel request deploy --expected-sha <sha> --reason ...`); the installed commit
+> is still <old>`
+
 
