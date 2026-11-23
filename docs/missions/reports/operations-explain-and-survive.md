@@ -232,3 +232,89 @@ exists to explain.
 > **A promotion is announced.** A foreground call whose shell exits leaving live descendants answers
 > `moved_to_background: true`, the measured milliseconds and the sentence `moved to the background after N s:
 > operation <id>, await it`, with the output so far — never a silently different kind of result.
+
+
+---
+
+# Addendum (23/11, P1 defect found by Fable): the answer was raised, not returned
+
+Reported: on a build containing this mission's work, `tools.operation({action:"status", id})` RAISED after an
+install detached the owner — five times in one worker's log
+(`missions/tool-args-honest-and-same-on-peers/out.log` ~45686-45693) — and that worker re-ran its rows four times
+because "what did that run print before it died" had no answer. Reproduced here first, on this node, against the
+handle my own narrowed fast run left behind when the node was swapped:
+`status` -> raised, `await` -> raised, `read` -> answered.
+
+## What actually raised (measured, not guessed)
+
+`lua/core/codemode.lua`, `settle_call`: the code-mode delivery marks a call failed when its ANSWER carries
+`error` or `ok:false` (`value=result; success=... (not value.error and value.ok~=false)`), and the sandbox
+rejects a delivered payload that carries those keys. A dead handle's record is exactly that shape, so the record
+was raised at the script instead of being handed over. Two measurements pinned it:
+
+* `tools.operation({action:"read", id, stream})` on a dead handle answered (its payload carries no `error`/`ok`),
+  while `read` on a MISSING operation raised (`No such file or directory (os error 2)`) — so the key, not the
+action, was the trigger;
+* `tools.bash({command:"exit 3"})` answers `ok:true, code:3` — a failed command is a value, which is why this was
+never seen on `bash`.
+
+## The fix (`2526ac03`)
+
+`settle_call` now treats the five READ-ONLY operation actions (`status`, `read`, `await`, `wait`, `list`) as what
+they are: a call that successfully READ a record. An allow-list, not a "not an effect" guess — `start` and
+`cancel` keep the strict rule, so a refused start still raises inside a script (pinned by the new row).
+
+For those actions the record travels with the OPERATION's own failure under `operation_error` and the same
+sentence under `reason`, and with `operation_ok=false` instead of `ok=false`; no `error` key, which is the key the
+sandbox rejects. Nothing about the operation is softened: `state: "outcome_unknown"`, the last recorded state, the
+exit code, `stdout_path`/`stderr_path` and their byte counts all still travel, and `read` still returns the bytes.
+
+## Test that fails on main
+
+`scripts/test-operation-answer-not-a-raise.lua` (new row, discovered by the fast path like every `scripts/test-*.lua`).
+It writes a REAL dead-owner record into its own scratch home and runs the REAL code-mode sandbox:
+
+* measured on a base worktree of `c1337903` (`git worktree add /tmp/base-ops2 c1337903`, same installed binary,
+  `WASM_AGENT_LUA_ROOT=/tmp/base-ops2`): exit 1,
+  `a status/read/await on a dead handle ANSWERS, it does not raise (the measured defect): Error: {"cleanup":"unknown",... "error":"operation_owner_not_attached; ..."}`;
+* on this branch: `operation answer not a raise ok (9 checks)`, exit 0.
+
+It pins four things: status answers `outcome_unknown`; `read` hands over the bytes the record already wrote;
+`await` answers the same record; `operation_ok == false` and `reason` carry the fact `ok`/`error` used to; and a
+REFUSED `start` still raises, so the strict half did not move.
+
+## Texts, spelled (Fable, then this commit)
+
+* `owner_gone_note` now says the read is `tools.operation({action:"read", id})` (was the prose "(operation read)").
+* `moved_to_background_note` now says `operation {id}, wait("{id}")` (was "operation {id}, await it").
+
+The assertions that quote them moved with them and were strengthened, not loosened: the wa-operation test now
+asserts the literal call text `tools.operation({action:"read", id})`, and the wa-capabilities test asserts
+`operation {id}, wait("{id}")` — the spelled call, not the prose.
+
+## Verification of the addendum
+
+* `cargo test -p wa-operation`: **59 passed, 0 failed, 3 ignored**.
+* `cargo test -p wa-capabilities -- promotion_says_so`: pass (run with `WA_CODEMODE_ALLOW_EMPTY=1`, as before).
+* `scripts/test-operation-answer-not-a-raise.lua`: 9 checks on the branch, fails on base (above).
+* Note for the next reader: the node reinstall reset `rustup`'s default toolchain for shells whose HOME is a
+  scratch directory; every cargo call above ran with `RUSTUP_HOME=/home/victor/.rustup CARGO_HOME=/home/victor/.cargo`
+  explicitly. That is an environment fact of the swap, not of this diff.
+
+## Texts to approve (added by this addendum)
+
+6. The delivery fields in `lua/core/codemode.lua` for a read-only operation answer: `operation_ok` (in place of
+   `ok` when the operation did not succeed), `operation_error` (in place of `error`) and `reason` (the same
+   sentence). A script that reads `r.operation_ok === false` and `r.reason` gets the fact; a script that expected a
+   raise for a dead handle no longer gets one — that is the defect being fixed.
+7. `owner_gone_note`, final text: `the process that started this operation is gone and the operation never
+   reported an outcome: its state above is the last one that process recorded. The output it wrote is on disk at
+   stdout_path/stderr_path and is readable by id: tools.operation({action:"read", id}). The exit code is only known
+   if the record carries one. Nothing was replayed and no success is claimed.`
+8. `moved_to_background_note`, final text: `moved to the background after {N.N}s: operation {id}, wait("{id}").
+   The shell itself exited with code {code} and its descendants are still supervised under the original timeout;
+   stdout/stderr below are what they had written when this answer was taken, and more may follow.`
+
+Cache cost of the addendum: nothing added to tool descriptions. A read-only operation answer inside a run block
+changes two key NAMES (`ok`->`operation_ok`, `error`->`operation_error` plus `reason`) — same bytes in, same bytes
+out, no growth. The two sentences are the same length as before (the spelled call replaces prose of the same size).
