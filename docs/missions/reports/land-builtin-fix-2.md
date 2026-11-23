@@ -1,6 +1,8 @@
 # land-builtin-fix-2: the health step's program, and the false main_red
 
-Branch `change/land-builtin-fix-2`, base 8862b600. Two defects left over from land-builtin-fix
+Branch `change/land-builtin-fix-2`, base bfb06cc4 (rebased from 8862b600 on 23/11; the only conflict was
+`scripts/lib/fast-rows.sh`, resolved by keeping every core row both sides had added - see section 7). Two
+defects left over from land-builtin-fix
 (a9d4617d): `wa land` stopped at `health` with `program_not_found` after every install, and the row that
 failure wrote was then read as a red main and refused the NEXT landing at merge.
 
@@ -22,18 +24,18 @@ honest was lost by teaching the reader which rows are measurements.
 
 ## 2. The fixes
 
-**fe991294 - the health run is started with a program path that exists after the swap.** `M.start_operation`
-now resolves the program through one function (`running_program`, `lua/core/land.lua:4008`): it takes
+**41ffaac6 - the health run is started with a program path that exists after the swap.** `M.start_operation`
+now resolves the program through one function (`running_program`, `lua/core/land.lua:4596`): it takes
 `runtime_info().binary_path`, strips a trailing ` (deleted)` - the file the install replaced is the file that
 now sits AT that path, i.e. the binary the landing just installed, which is what main must be judged with -
 and then applies the operation manager's own rule (`test -f`, a regular file) so the refusal can say what to
 do. A path with nothing at it is refused BY NAME and never satisfied by whatever `wa` is on PATH. `impl.health`
-(`:4050`) says in its own words that main was NOT measured when the run cannot start, instead of stopping with
+(`:4638`) says in its own words that main was NOT measured when the run cannot start, instead of stopping with
 a bare `program_not_found`.
 
-**1077e621 - the red-main rule reads a MEASUREMENT of main.** `wa land health-run` writes
-`data = { measured = "scripts/main-health.sh" }` beside its verdict (`lua/core/land.lua:4114`), and
-`M.main_red` (`:2617`) reads only rows carrying that marker (`measured_verdict`, `:2604`). A landing's health
+**d9616589 - the red-main rule reads a MEASUREMENT of main.** `wa land health-run` writes
+`data = { measured = "scripts/main-health.sh" }` beside its verdict (`lua/core/land.lua:4702`), and
+`M.main_red` (`:2706`) reads only rows carrying that marker (`measured_verdict`, `:2693`). A landing's health
 STEP writes a row with the same step name and no marker, because it answers a different question (did the step
 start the measurement). Such a row is now skipped in BOTH directions: it cannot red a green main (the 22/11
 refusal) and it cannot green a red one by accident - a green `started as operation ...` row no longer erases a
@@ -47,52 +49,57 @@ were not measured for this defect - they are out of this brief's scope and are n
 
 ## 3. Tests, and where they are wired
 
-* `scripts/test-land-health-program.lua` (new, **fe991294**) - the program, judged ACROSS PROCESSES: a copy of
+* `scripts/test-land-health-program.lua` (new, **41ffaac6**) - the program, judged ACROSS PROCESSES: a copy of
   this tree's binary renames a fresh file over its own path (the swap an install makes) and then calls
   `land.start_operation` against the REAL operation manager. It asserts (i) the premise (a replaced binary's
   path carries ` (deleted)`), (ii) the operation is accepted after the swap, (iii) with nothing at the path the
   call is refused by name, naming the rule and the path. 8 checks. Wired as a **core row** in
   `scripts/lib/fast-rows.sh` (`wa_fast_core_rows`), so a narrowed run keeps it; it is also a
   `scripts/test-*.lua` candidate, i.e. in `scripts/fast.sh`'s own row list.
-* `scripts/test-land-quick.lua` (**1077e621**) - case 5's rows now carry the marker; **5b** proves a failed
+* `scripts/test-land-quick.lua` (**d9616589**) - case 5's rows now carry the marker; **5b** proves a failed
   health STEP does not block a landing; **5c** proves a green STEP does not un-red a measured red; **5d** proves
   `health_run` writes the marker. 166 checks, green here.
-* `scripts/test-land-health-program.lua` (**8c9ad8e2**) also judges itself when `WA_FAST_BIN` is absent: it falls
+* `scripts/test-land-health-program.lua` (**e3138362**) also judges itself when `WA_FAST_BIN` is absent: it falls
   back to `runtime_info().binary_path` (the same path the health step uses) and copies that binary, so the
   discrimination harness does not skip it. Measured: standalone with no `WA_FAST_BIN` -> `land-health-program ok
   (8 checks)`; against the base's `lua/core/land.lua` -> `FAILED: after the swap the operation was ACCEPTED ...
   the answer was []`.
 
-Both new rows were run against the base worktree `/tmp/base-wt-8862b600` (a separate `git worktree`, never a
-stash):
-
-* `test-land-health-program.lua` on the base: `FAILED: after the swap the operation was ACCEPTED (not
-  program_not_found) (the answer was [])`.
-* `test-land-quick.lua` on the base: `lua error: check failed: a health STEP that failed is not a red main:
-  the landing runs (got 1, want 0)` - which is the 22/11 refusal itself.
-
-And by the gate's own harness, `bash scripts/test-discriminates.sh 8862b600` at 8c9ad8e2:
+Both new rows were first run by hand against the base worktree of 8862b600 (a separate `git worktree`, never
+a stash), and after the rebase by the gate's own harness, `bash scripts/test-discriminates.sh` with the default
+base `origin/main` = bfb06cc4 (HEAD 4cb5eb52):
 
 ```
 discriminates	scripts/test-land-health-program.lua	FAILED: after the swap the operation was ACCEPTED (not program_not_found) (the answer was [])
 discriminates	scripts/test-land-quick.lua	lua error: check failed: a health STEP that failed is not a red main: the landing runs (got 1, want 0)
-test-discriminates: 2 discriminating, 0 blocking, 0 not judged by this machine
+test-discriminates: 2 discriminating, 0 blocking, 0 not judged by this machine (0 skipped, 0 timed out, 0 environment)
 ```
 
-## 4. The suite: green, and one row named
+The `test-land-quick.lua` line is the 22/11 refusal itself, reproduced on the base's `lua/core/land.lua`.
+
+## 4. The suite: green for this branch, with main's own red named
 
 The whole fast path, narrowed to the land rows and run under the suite lock
 (`flock -o ~/Work/missions/.suite.lock env WA_FAST_ROWS=... bash scripts/fast.sh`):
 
 * **rerun: green.** `fast result ok (96 checks, 0 failed, 0 skipped)`, `fast path ok (96 checks, 0 skipped,
   594s)`, with `fast: install-guards ok (1682ms)`.
-* **first run: 1 of 96 failed, and it was not this branch.** `install-guards` failed 6 of its 72 checks in that
+* **after the rebase onto bfb06cc4: 1 of 104 failed, and it is main's own red.** `regenerate` (exit 1) names
+  `rust/components/svc-queue-echo/wit/deps/queue/queue.wit`, `rust/components/wa-email/wit/deps/queue/queue.wit`,
+  `rust/components/wa-whatsapp/wit/deps/queue/queue.wit`. Measured on a clean `git worktree` of bfb06cc4 (no branch
+  content at all): `test-regenerate FAILED: --outputs printed more than the one declared output:
+  lua/core/refusal_codes.lua`, followed by the same wit deps list. So the row is red on main, not here: this
+  branch touches no `wit/` path and no generator (`git diff --name-only bfb06cc4..HEAD` = `lua/core/land.lua`,
+  `scripts/lib/fast-rows.sh`, `docs/missions/reports/land-builtin-fix-2.md`,
+  `scripts/test-land-health-program.lua`, `scripts/test-land-quick.lua`). Every row that speaks to this branch's
+  subject is green in that run, including `land-quick` and `land-health-program`.
+* **first run (at 8862b600): 1 of 96 failed, and it was not this branch.** `install-guards` failed 6 of its 72 checks in that
   parallel run (exit 1, 1371 ms); the row passes standalone in this tree (72 checks, 0 failed) and in the base
   worktree of 8862b600 (72 checks, 0 failed), and this branch touches none of its subjects
   (`git diff --name-only 8862b600..HEAD` = `lua/core/land.lua`, `scripts/lib/fast-rows.sh`,
   `scripts/test-land-health-program.lua`, `scripts/test-land-quick.lua`). Named here as a flake of that row
   under parallel load, not as a pre-existing red: it is green in both runs of the tree that could have been the
-  cause, and green on the rerun of the same narrowed suite.`
+  cause, and green on the rerun of the same narrowed suite.
 
 ## 5. Texts to approve (new or changed, verbatim)
 
@@ -118,6 +125,23 @@ is green.
 * `health_run` records a `refused` verdict when `scripts/main-health.sh` cannot judge (no jq, no result file).
   That row is a measurement attempt, so it is marked like any other and it does not block a landing - the
   pre-existing rule, kept deliberately: a main-health that could not run is not a red main.
-* The four other consumers of `runtime_info().binary_path` listed in section 2 keep the raw marker; if one of
-  them hands the path to a program launcher, it has the same defect. Not measured, not claimed.
+* The other consumers of `runtime_info().binary_path` keep the raw marker; if one of them hands the path to a
+  program launcher, it has the same defect. Not measured, not claimed - with ONE exception found while
+  rebasing onto bfb06cc4: `M.review_binary` (`lua/core/land.lua:1896`, new in main since 8862b600) answers this
+  process's `binary_path` and hands it to the reviewer's launcher (`M.review_start`, called at `:1975`), so a
+  review started after an install - a resume that adds a branch - has the same `program_not_found` shape. It
+  is NOT changed here: it is not this brief's subject and no row of this branch would fail if it regressed.
+
+## 8. The rebase onto bfb06cc4 (preflight round 1)
+
+Main advanced from 8862b600 to bfb06cc4 while this branch was being written, and both touched
+`scripts/lib/fast-rows.sh`. The conflict was in `wa_fast_core_rows`: main added `scripts/test-land-linux.lua`,
+`scripts/test-product-version.lua`, `scripts/test-wit-deps.lua`, `scripts/test-email-connector.lua` and
+`scripts/test-whatsapp-send.lua`, and this branch added `scripts/test-land-health-program.lua`. Resolved by
+keeping EVERY row from both sides (no row removed, no list shortened); the resolved list holds 23 core rows
+and `bash -c '. ./scripts/lib/fast-rows.sh; wa_fast_core_rows'` names all six.
+
+Main also grew `lua/core/land.lua` by ~600 lines and `scripts/main-health.sh` by 19; no hunk of this branch
+conflicted there (`git rebase bfb06cc4` replayed `41ffaac6`, `d9616589`, `e3138362` unmodified). Both rows were
+re-run on the rebased tree: `land-health-program ok (8 checks)`, `landing ok (166 checks)`.
 
