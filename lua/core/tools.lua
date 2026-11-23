@@ -216,7 +216,19 @@ function M.remote_arguments(args, catalog)
             note = "`" .. key .. "` must be a non-empty string at the top level.", example = REMOTE_EXAMPLE }
         end
         local target = key == "node" and capability or value
-        if declares_param(catalog, target, key) then
+        -- BOTH MISSING, BOTH INSIDE: the pair is the remote call's own routing words, not a capability's
+        -- parameter. A call that names no capability at the top level cannot be addressing a capability's own
+        -- `node` argument, so hoisting the pair is the only reading that can be acted on - the mis-nested
+        -- shape weaker models produce (38 of 114 routed calls in the evidence behind this repair). The
+        -- ambiguity refusal below stays for the case where the top level DID name the capability: then the
+        -- inner `node` really could be either (mission tool-args-honest-and-same-on-peers: `read`/`grep`/
+        -- `write`/`edit`/`ls` now declare their own `node`, which is what made this pair ambiguous).
+        local pair_inside = function(want)
+          if params[want] ~= nil then return true end
+          return type(params.args) == "table" and params.args[want] ~= nil
+        end
+        local both_misnested = args.node == nil and args.capability == nil and pair_inside("node") and pair_inside("capability")
+        if declares_param(catalog, target, key) and not both_misnested then
           return nil, { error = "remote_" .. key .. "_ambiguous", found_in = where,
             note = "`" .. key .. "` is missing at the top level, and " .. tostring(target)
               .. " has its own `" .. key .. "` parameter, so the key inside " .. where

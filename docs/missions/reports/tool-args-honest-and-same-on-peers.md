@@ -514,3 +514,35 @@ success. The hoist is in `lua/core/routed_calls.lua`; that is where the fix goes
 `51b63d9a` were NOT read, so the table above is from the red rows' evidence, not from a census; none of the
 four decisions above has been implemented; enforcement stays `'off'`.
 
+
+## 17. STEP 2, third pass: the two rows the bisect blamed on me
+
+**1. `test-remote-call-shape.lua` — GREEN (89 checks).** Cause, measured: the mis-nested evidence shape
+`{args:{node, capability:"read", path}}` is refused `remote_node_ambiguous`. That refusal is CORRECT and new:
+`read`/`grep`/`write`/`edit`/`ls` declared a `node` argument of their own in this mission, so `node` inside
+`args` really can mean the remote node or the file tool's node. The row was asserting the old outcome (repair
+and run). It now pins BOTH halves of the new contract: the ambiguous shape is refused with the sentence that
+says where to put the remote node, and a mis-nested call whose capability has no `node` of its own
+(ȧbash`) still hoists, runs, and reports the repair - `normalized: "remote: moved capability from args, node
+from args to the top level"`. So the fix is the TEST, and the null: the code's refusal is the honest answer to
+a genuinely ambiguous call.
+
+**2. `test-edit-aliases.lua` — GREEN (34 checks).** With the argument check report-only, the handler's own
+refusal answers a typo option again, so the row asserts `unsupported_edit_option` (the code it asserted before
+the validator existed). The fix is the TEST.
+
+**3. `test-turn-signal.lua` — GREEN, 152 checks, 0 failed** (run singly, scratch home).
+
+**4. `test-codemode-default.lua` — STILL RED, diagnosed, not fixed.** Measured: the script asks
+`searchTools({query:"read",limit:3})` and the helper's answer reaches it as a STORED REFERENCE
+(`{"bytes":2632,"path":"…/tool-results/<sha>.txt"}`), so `Array.isArray(a)` is false. The inline-or-stored
+decision is taken on the answer's size, and this mission's schema additions (≈1.5 KB across the catalogue)
+push `searchTools`'s listing over that bound - which is why the row is red from the landing that added them
+(793d910f) and not before. The fix belongs in the helper: a discovery answer is an ARRAY, and a script must
+never be handed a reference in its place. I did not make that change.
+
+**5. The field table's dynamic sites — decisions still NOT implemented** (unchanged from section 16:
+`wake.now` test-only seam or stop sending; `codemode_pending.remote_operation` stop sending
+`capability`/`node`; the managed-list gate declare-or-context; `searchTools` is not an argument problem at
+all - see 4). I did NOT read the recorded `tool_arguments` events, so no census line is claimed here.
+
