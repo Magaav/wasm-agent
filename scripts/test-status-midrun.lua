@@ -133,9 +133,9 @@ check(observed.total.list_cost_known == true,
 check(math.abs((observed.total.list_cost or 0) - 0.00205426) < 1e-12,
   'and it is the sum: ' .. tostring(observed.total.list_cost))
 local priced = rows_text(status.session_lines(sid, { cached = true }))
-has(priced, 'list cost $0.0021', 'the Usage row shows the provider list cost, named')
-check(priced:find('cost unknown', 1, true) == nil,
-  'and no longer says cost unknown: ' .. string.format('%q', priced))
+has(priced, 'Cost     list $0.0021', 'the Cost row shows the provider list cost, named')
+check(priced:find('unknown', 1, true) == nil,
+  'and no longer says unknown anywhere: ' .. string.format('%q', priced))
 
 -- One call without a price makes the sum a hole, and a hole is unknown, not the other calls' sum.
 call_record('run-three', { prompt_tokens = 10, completion_tokens = 2 }, clock + 30)
@@ -143,7 +143,7 @@ local holed = telemetry.snapshot(sid)
 check(holed.total.list_cost_known == false,
   'one unpriced call makes the total unknown again: ' .. json.encode(holed.total))
 local holed_rows = rows_text(status.session_lines(sid, { cached = true }))
-has(holed_rows, 'cost unknown', 'and the row says unknown rather than a partial sum')
+has(holed_rows, 'Cost     unknown', 'and the row says unknown rather than a partial sum')
 
 -- ---- 6. the adapter carries the provider's field to the record --------------------------------
 local adapter = dofile('lua/core/adapters/openai_completions.lua')

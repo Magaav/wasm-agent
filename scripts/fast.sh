@@ -1049,6 +1049,23 @@ check linux-channel bash scripts/test-linux-channel.sh
   # against a local SSE fixture, and reads the rows back. A row of this run for the same reason
   # fence-card-pty is one: a view change cannot be judged by a Lua double alone.
   WA_BIN="$bin" check run-live-pty node scripts/test-run-live-pty.mjs
+  # A RUN BLOCK'S RESULT IS ONE ROW THE READER OPENS (chat-view-round-2, item 4, Victor 23/11: "script
+  # output should show 'script output · <n> chars' so we can expand"): the real binary in a private tmux
+  # pty against a local SSE fixture - one row with the count, Ctrl+O opens it in place and folds it back,
+  # and a script that threw is drawn OPEN with its error first. On the base this row fails: the result
+  # printed six preview rows and "the whole result is in /console".
+  WA_BIN="$bin" check script-output-pty node scripts/test-script-output-pty.mjs
+  # /STATUS DURING A RUN, WITH THE READING'S AGE AND THE PROVIDER'S OWN LIST COST (chat-view-round-2,
+  # item 1): the same binary and shape - `/usage` answers 37 %, the second completion holds 9 s while
+  # `/status` is typed into it, and the screen must show the bar with its age and never "limits
+  # unavailable", while the mid-run snapshot asks the provider nothing. On the base the age row and the
+  # cost row both fail.
+  WA_BIN="$bin" check status-midrun-pty node scripts/test-status-midrun-pty.mjs
+  # A COMMAND A RUN BLOCK RAN SAYS WHICH FILES IT CHANGED (chat-view-round-2, item 2): a scratch git
+  # work tree, a run block whose `tools.bash` CREATES a file, and the card that names it - the base
+  # emitted nothing for a script's command (the watcher sat after the managed-operation return) and
+  # `git status -uno` hid every created file even on the direct path.
+  WA_BIN="$bin" check bash-changes-pty node scripts/test-bash-changes-pty.mjs
   # THE WINDOW'S CHROME (change/tui-chrome, Victor 21/11): the input box grows to max(3, 30% of the
   # window), scrolls with the transcript's scrollbar and takes the wheel when the pointer is over it.
   # And a fenced card's copy icon sits after its corner, where a click on it still copies the content.

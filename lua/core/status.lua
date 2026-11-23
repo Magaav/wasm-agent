@@ -271,16 +271,25 @@ function M.session_lines(session_id, opts)
     if total.cache_known and tonumber(total.prompt) and total.prompt > 0 then
       parts[#parts + 1] = string.format("cache %.0f%%", 100 * (total.cacheRead or 0) / total.prompt)
     end
-    -- The cost, and WHOSE number it is. `cost` is priced from this node's rate snapshot (unknown for
-    -- a provider that publishes none); `list_cost` is the provider's OWN price for each call, summed -
-    -- opencode-go answers `opencode.list_cost` on every usage block (0.00102713 on a real call), so
-    -- "cost unknown" was a refusal to read a number the provider had already sent (Victor 23/11).
-    local cost
-    if total.cost_known then cost = string.format("$%.4f", tonumber(total.cost) or 0)
-    elseif total.list_cost_known then cost = string.format("list cost $%.4f", tonumber(total.list_cost) or 0)
-    else cost = "cost unknown" end
-    parts[#parts + 1] = cost
     lines[#lines + 1] = dim("Usage    ") .. table.concat(parts, dim("  \194\183  "))
+    -- THE COST, ON ITS OWN ROW AND NAMED FOR WHOSE NUMBER IT IS (Victor 23/11). It used to be the last
+    -- segment of the Usage row, which measured 55 cells on his screen and - measured in a pty at 100
+    -- columns on 23/11 - is CUT by the panel: the row the reader got ended at `out 100`, so a cost that
+    -- was there read as a cost that was missing. Short enough to survive any panel width.
+    -- `cost` is priced from this node's rate snapshot (unknown for a provider that publishes none);
+    -- `list_cost` is the provider's OWN price for each call, summed - opencode-go answers
+    -- `opencode.list_cost` on every usage block (0.00102713 on a real call), so "cost unknown" was a
+    -- refusal to read a number the provider had already sent.
+    if total.cost_known then
+      lines[#lines + 1] = dim("Cost     ") .. string.format("$%.4f", tonumber(total.cost) or 0)
+        .. dim("  \194\183  rated")
+    elseif total.list_cost_known then
+      lines[#lines + 1] = dim("Cost     ") .. string.format("list $%.4f", tonumber(total.list_cost) or 0)
+        .. dim("  \194\183  the provider's own list price, summed over " .. tostring(total.calls)
+          .. (total.calls == 1 and " call" or " calls"))
+    else
+      lines[#lines + 1] = dim("Cost     ") .. "unknown"
+    end
   else
     lines[#lines + 1] = dim("Usage    ") .. "not yet observed in this session"
   end
