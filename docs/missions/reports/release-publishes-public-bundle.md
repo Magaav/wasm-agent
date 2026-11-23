@@ -185,11 +185,12 @@ its single path, and the live index naming the release), which is why they fail 
 17. the release report's new rows: `| linux channel | published (v0.1.0, 2 target(s)) |` and `| channel index | releases/index-linux.json <sha12> on main |`
 18. **the entrance**: ``✻ Welcome to wasm-agent! v0.1.0 · v6a7f613d`` (a commit label is prefixed `v`; a `node-<sha12>` release tag and a pin are printed as they are; each half is printed only when it is known)
 19. **`wa --version`**: `wasm-agent v0.1.0 · v6a7f613d+dirty` (and `--build-info`'s `version=` is the same number)
-20. `linux_version_unreadable: <why> ... next: add VERSION at the tree root (its current release number, e.g. 0.1.0) and cut again`
-21. `linux_bump_not_authorised: <why> ... next: quote Victor's instruction naming v0.2.0 in docs/release/RELEASE_NOTES.md, commit it, then wa release cut --run <id> --resume`
-22. inside it: `bump_not_authorised: a minor bump needs Victor's quoted instruction naming v0.2.0 in docs/release/RELEASE_NOTES.md - a flag alone never moves the minor or the major` and `notes_missing: docs/release/RELEASE_NOTES.md is not in this tree, so no minor bump can be authorised`
-23. `published v0.1.0 (2 target(s): VERSION names a release that has no tag yet) and releases/index-linux.json on origin/main = <sha12> (the version is 0.1.0; read back, fresh: ...)`
-
+20. `version_already_released: main's lua/core/build_identity.lua says <N> and v<N> already exists in this clone|on origin: the previous release's bump commit is missing, so this cut would ship bytes whose tag is taken` + `next: publish the bump commit (a release writes the NEXT number into M.PRODUCT_VERSION), or set that line to the next number, then cut again`
+21. `release_bump_not_authorised: <why> ... next: quote Victor's instruction naming v0.2.0 in docs/release/RELEASE_NOTES.md and commit it, then wa release cut` (the preflight) and `linux_bump_not_authorised: <why> ... then wa release cut --run <id> --resume` (the step)
+22. inside them: `bump_not_authorised: a minor bump needs Victor's quoted instruction naming v0.2.0 in docs/release/RELEASE_NOTES.md - a flag alone never moves the minor or the major` and `notes_missing: docs/release/RELEASE_NOTES.md is not in this tree, so no minor bump can be authorised`
+23. `published v0.1.1 (2 target(s)) and releases/index-linux.json on origin/main = <sha12>: the released bytes say v0.1.1, and main's next cut is v0.1.2 (one patch past the release it follows); read back, fresh: ...`
+24. `main's number is <N> and v<N> does not exist yet` (the version row, ready) and the reader's documented fallback `a binary older than the field falls back to the tree's one constant`
+25. the bump commit's message: `releases: v0.1.1, the public Linux channel for <sha12> (main's next cut is v0.1.2)`
 ## 6. What was NOT verified (and what would verify it)
 
 - **No real cut was run** (the mission forbids it), so the real path - two musl bundles built by
@@ -237,13 +238,13 @@ known, never `vunknown`" rule and the `v` prefix on a commit label.
   `vunknown`).
 - `rust/wa-host/src/main.rs`: `wa --version` prints `wasm-agent v<version> · v<label>` - verified on a real build:
   `wasm-agent v0.1.0 · v627fcc86+dirty`.
-- **`wa release cut` computes the next number** (`M.tree_version`, `M.next_version`): the tree's VERSION when that
-  number has no `v<n>` tag yet (the first cut is `v0.1.0`), otherwise one patch past the newest release tag. A tag
-  counts as taken LOCALLY or ON ORIGIN (`gh release create` makes it there; a tree that never fetched would cut
-  the same number twice). The `linux` step uses it as the channel release tag (`v0.1.0`, no more `wa-linux-<sha12>`
-  and no more `-alpha.N`), writes it into `VERSION` and commits that with the index entry - one commit, so the
-  number a person reads and the bytes a machine installs never disagree. The commit's allow-list is now exactly
-  `lua/core/build_identity.lua` and `releases/index-linux.json`.
+- **`wa release cut` releases the tree's own number** (`M.tree_version`) and writes the BUMP behind it
+  (`M.bump_version`): main's `M.PRODUCT_VERSION` always names the release the tree WILL be cut as (Fable, 23/11),
+  so the bytes of a release print the number they are released as. The `linux` step uses that number as the channel
+  release tag (`v0.1.0`, no more `wa-linux-<sha12>` and no more `-alpha.N`), rewrites the constant to `N+1` in
+  place and commits that with the index entry - one commit, so the number a person reads and the bytes a machine
+  installs never disagree. The commit's allow-list is exactly `lua/core/build_identity.lua` and
+  `releases/index-linux.json`. See section 8 for the defect this replaced.
 - **`--minor` / `--major` never move on their own**: the step refuses with `linux_bump_not_authorised` unless
   `docs/release/RELEASE_NOTES.md` carries Victor's instruction QUOTED, naming the bump and the version it produces
   (`Victor: "0.2.0 is a minor release: ..."`). A flag alone is never enough, and a tree without the notes file
@@ -269,4 +270,88 @@ known, never `vunknown`" rule and the `v` prefix on a commit label.
 **Not verified here**: no real cut was run, so the version has never been bumped by a live release; the bump of
 `VERSION` across two real cuts is proved only by the fixture. `scripts/test-build-info.sh` was run against a
 release build of this tree (`27 checks, 0 failed`) and `scripts/test-pin-label.sh` (`11 checks, 0 failed`).
+
+## 8. Fable's review round (23/11): A the defect, B and C measured
+
+### A. The released bytes showed the PREVIOUS number - fixed
+
+The cut built the bundles from the release commit and only afterwards rewrote `M.PRODUCT_VERSION`, so the second
+cut published `v0.1.1` in the tag and the index while the `wa` a person installed printed `v0.1.0`. Fixed by
+changing what the number MEANS, not by an override: **main's constant is the release the tree WILL be cut as.**
+
+1. The cut releases `N`, the tree's own number - never "one past the tag" - so the bytes are built from a tree
+   whose constant IS `N` (`impl.linux`, `M.bump_version`).
+2. In the SAME commit as the index entry it writes `N+1` (patch) behind it, for the next cut; `--minor`/`--major`
+   change the BUMP (`N.minor+1.0`, `N.major+1.0.0`), with the same quoted-instruction rule, so a minor is decided
+   one release ahead. The commit message says both numbers.
+3. A number whose tag already exists (the previous release's bump commit never landed) is refused in the FIRST
+   second by the new `M.release_checks.version` row as `version_already_released` - before any artifact is built
+   or published. The step refuses it too (`version_already_released`), so a caller that reaches it without the
+   preflight gets the same answer; `release_bump_not_authorised` is refused at both ends for the same reason.
+4. `M.PRODUCT_VERSION = "0.1.1"`: v0.1.0 is being published by hand from 8862b600 tonight, so this branch
+   carries main's NEXT cut. The "first cut" special case is gone - the rule is one sentence now.
+
+**Evidence the released bytes print the released number** (two real builds, two constants):
+
+| tree's constant | `wa --version` of a binary built from it |
+| --- | --- |
+| `0.1.0` (commit `6a7f613d`, measured earlier) | `wasm-agent v0.1.0 · v6a7f613d+dirty` |
+| `0.1.1` (commit `85513ce5`, this branch) | `wasm-agent v0.1.1 · v85513ce5+dirty` |
+
+and the fixture holds the two cuts to it: for each cut, the RELEASED commit's `M.PRODUCT_VERSION` equals the tag it
+is published under and the index entry's `tag`, while main (one commit later) already carries the bump -
+`scripts/test-land-linux.lua`, 85 checks, including "the RELEASED commit's one owner says 0.1.0 - the number its
+bytes print" and "the released bytes of the second cut say 0.1.1 too". A binary built from 8862b600 (tonight's
+hand cut) prints `wasm-agent 8862b600` - that commit predates the `v<number> · v<sha>` line, so the hand cut's
+bytes name their commit and not a number; the `v0.1.0` release exists as a tag and an index entry, not in that
+binary's line.
+
+**Between releases the header shows the NEXT number beside the sha** (`v0.1.1 · v<sha>`) - the bytes in your hands
+are the release whose tag is the one before it. That is the shape Victor asked for, said here because it surprises:
+the number on main leads the release, the number in a release names itself.
+
+### B. What a fleet update does after a cut - MEASURED, and the step moved
+
+Measured in the code that decides it, not assumed:
+
+- `scripts/deploy-rendezvous.sh:10,13`: a node deploys only while `HEAD == EXPECTED` AND `origin/main == EXPECTED`
+  - otherwise `fail 'source is not origin/main'`.
+- `scripts/deploy.sh` (the canonical-tree gate, lines ~423-446): it builds nothing but a tree whose `HEAD` is
+  EXACTLY `origin/main` and clean; a tree that is behind waits up to 600 s and then fails `canonical_busy`.
+
+So with the channel step BEFORE the deploy (where I first wrote it), `main` was one commit past the released
+commit at deploy time: every tree deploy of the released commit would have been refused, and a cut whose deploy is
+refused is a cut that shipped to nobody. **The step now runs AFTER `deploy`** (`M.STEPS`, this commit): the ring
+takes the released commit while main is still that commit, and main moves afterwards.
+
+What the three per-node commands do after a cut (`main` = released + 1):
+
+| command | after a cut |
+| --- | --- |
+| `wa update mail --binary --commit <released>` | installs that commit's published binary; the binary path has no tree gate - works. |
+| `wa update nextcloud --release` | installs the published release into the node's prefix - no tree gate - works. |
+| `wa update openclaw --tree --commit <released>` | would need a canonical tree equal to `origin/main`, which is now the bump commit: it waits and then refuses. For a tree node, ask for main's tip (`wa update openclaw --tree`, no `--commit`), which installs the bump commit's bytes. |
+
+### C. The laptop's sentinel on the bump commit - MEASURED
+
+The bump commit touches exactly two paths: `lua/core/build_identity.lua` and `releases/index-linux.json`. Measured
+with the real classifier (`scripts/lib/node-binaries.sh`):
+
+- `lua/core/build_identity.lua` - **not** a compiled input;
+- `releases/index-linux.json` - **COMPILED** (any path with a slash that is not on the not-compiled list).
+
+So the bump commit's compiled-inputs digest differs from the released commit's and the node's next redeploy cannot
+reuse the published binary: it fast-forwards to main (the gate passes - `HEAD == origin/main`) and takes the cargo
+path, i.e. the ~5 minute rebuild Fable called acceptable. Not a refusal, not a red: the deploy builds and
+main-health measures the bump commit.
+
+One thing there WOULD have been red, and is fixed in this round: `scripts/test-opening.lua` pinned
+`identity.PRODUCT_VERSION == "0.1.0"` - landing this branch would have failed that row on the bump and every
+release after it, a red main-health caused by a test rather than by the code. It now asserts the SHAPE and the
+one-source rule (a `d.d.d` constant, never the alpha tag, every surface through the one reader) - stricter in what
+it covers, and it cannot go red because a release moved the number.
+
+The cheap alternative for C (add `releases/*` to the not-compiled list in `wa_compiled_input`) is NOT taken here:
+that function decides every node's binary reuse, and a one-line change to it is a fleet-wide measurement of its
+own. Recorded as the next step, not done in a review round.
 

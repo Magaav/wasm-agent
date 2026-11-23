@@ -71,7 +71,7 @@ local account_main = (must("git -C " .. repo .. " ls-remote origin refs/heads/ma
 eq(must("git -C " .. repo .. " rev-parse " .. account_main .. "~1"), account_journal.tree_commit,
   "the source of truth carries the landed tip under the channel's one commit")
 eq(must("git -C " .. repo .. " diff --name-only " .. account_journal.tree_commit .. " " .. account_main),
-  "releases/index-linux.json", "whose only path is the channel index")
+  "lua/core/build_identity.lua\nreleases/index-linux.json", "whose only paths are the one owner of the version and the channel index")
 local routed_main = false
 for _, call in ipairs(R.state.routed_calls or {}) do
   if call.node == "laptop" and call.kind == "main" then routed_main = true end

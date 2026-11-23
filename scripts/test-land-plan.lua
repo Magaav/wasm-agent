@@ -50,8 +50,8 @@ contains(must("git -C " .. repo .. " ls-remote oc-in refs/heads/" .. journal.lan
 -- it, carrying exactly one path, and the live channel it carries names this release.
 local main_tip = (must("git -C " .. repo .. " ls-remote origin refs/heads/main"):match("^(%x+)"))
 eq(must("git -C " .. repo .. " rev-parse " .. main_tip .. "^"), tip, "main is one commit past the landed tip: the channel index")
-eq(must("git -C " .. repo .. " diff --name-only " .. tip .. " " .. main_tip), "releases/index-linux.json",
-  "and that commit carries exactly one path (an allow-list)")
+eq(must("git -C " .. repo .. " diff --name-only " .. tip .. " " .. main_tip), "lua/core/build_identity.lua\nreleases/index-linux.json",
+  "and that commit carries exactly its two allow-listed paths (an allow-list)")
 contains(must("git -C " .. repo .. " show " .. main_tip .. ":releases/index-linux.json"), tip,
   "the live channel index names this release's commit")
 -- The release set, the signature and the reference.

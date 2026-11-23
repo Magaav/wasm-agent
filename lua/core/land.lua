@@ -359,7 +359,8 @@ end
 --
 -- Data, so a reader can check the order against the mission and a test can assert it: merge, gate, push
 -- the landed tip, fast-forward main, build and verify the release set, SIGN it, ship it as
--- `artifacts/node-<sha12>`, publish it, publish the PUBLIC LINUX CHANNEL for the same commit (`linux`), deploy.
+-- `artifacts/node-<sha12>`, publish it, deploy the ring, then publish the PUBLIC LINUX CHANNEL for the same
+-- commit (`linux`) - the order is a measurement, see `impl.linux`.
 -- `report` is last and runs even when the machine stopped, because a stop without a report is the thing this
 -- file exists to end.
 --
@@ -372,7 +373,7 @@ end
 -- hosts differ: the build needs a toolchain, the signature needs the vault's admin listener, and the ship
 -- needs a git remote. Keeping them apart is what makes a rerun of one of them cheap - and a signature that
 -- arrives after a stopped run is not thrown away with the build.
-M.STEPS = { "collect", "plan", "review", "merge", "gate", "push", "main", "artifacts", "sign", "ship", "publish", "linux", "deploy", "report" }
+M.STEPS = { "collect", "plan", "review", "merge", "gate", "push", "main", "artifacts", "sign", "ship", "publish", "deploy", "linux", "report" }
 
 -- ---------------------------------------------------------------- the LANDING (FACTORY.md rule 10)
 --
@@ -969,9 +970,9 @@ end
 -- { ready = bool, why = <text>, next = <the one command that fixes it> } and is a field of this table so a
 -- test (or an operator's wrapper) replaces it without a vault or GitHub.
 M.release_checks = {}
-M.RELEASE_CHECK_ORDER = { "signing", "publishing", "channel", "ancestry" }
+M.RELEASE_CHECK_ORDER = { "version", "signing", "publishing", "channel", "ancestry" }
 -- which step a check protects: a resume whose step is already settled does not ask again.
-M.RELEASE_CHECK_STEP = { signing = "sign", publishing = "publish", channel = "linux", ancestry = "artifacts" }
+M.RELEASE_CHECK_STEP = { version = "linux", signing = "sign", publishing = "publish", channel = "linux", ancestry = "artifacts" }
 
 function M.release_checks.signing(options)
   local signer, problem = M.signer(options)
@@ -1019,6 +1020,53 @@ function M.release_checks.publishing(options)
   return { ready = false, error = "release_publishing_not_ready",
     why = "gh here is missing or signed out (gh reads its token from the desktop keyring; a systemd unit or an ssh shell has no session bus to unlock it)",
     next = "gh auth login   (in a desktop terminal; or export GH_TOKEN there), then run wa release cut from that same shell" }
+end
+
+-- THE VERSION, asked in the FIRST SECOND (Fable, 23/11): the number on main is the release this tree WILL be cut
+-- as, and one that already has a tag means the bump commit from the previous release never landed - a cut now
+-- would publish bytes whose tag already exists, under a number nobody chose. That is a fact about the tree, so
+-- it is a precondition and not a failure at the end of the channel step (which runs after the node release is
+-- out). The same row holds an explicit bump to Victor's quoted instruction, because a minor is decided one
+-- release AHEAD now: the bump this release writes is the next cut's number.
+function M.release_checks.version(options)
+  local repo = M.repo()
+  if not repo then return { ready = true, why = "no checkout to ask (collect refuses that by name)" } end
+  local shown = M.exec("git -C " .. quote(slashes(repo)) .. " show " .. quote("origin/main:" .. M.VERSION_FILE), "", 120) or {}
+  if (shown.code or 1) ~= 0 then
+    return { ready = false, error = "release_version_not_ready",
+      why = "cannot read " .. M.VERSION_FILE .. " on origin/main in " .. slashes(repo),
+      next = "git -C " .. slashes(repo) .. " fetch " .. M.origin() .. " main   (then wa release cut)" }
+  end
+  local line = M.product_version_line(tostring(shown.stdout or ""))
+  local current = line and M.parse_product_version(line)
+  if not current then
+    return { ready = false, error = "release_version_not_ready",
+      why = M.VERSION_FILE .. " on origin/main has no usable M.PRODUCT_VERSION line (" .. tostring(line) .. ")",
+      next = "set M.PRODUCT_VERSION in " .. M.VERSION_FILE .. " to the number this release will be cut as" }
+  end
+  local release = M.format_product_version(current)
+  local tag = M.version_tag(release)
+  local where = rev(repo, tag) and "in this clone" or (remote_tip(repo, M.origin(), "refs/tags/" .. tag) and ("on " .. M.origin()))
+  if where then
+    return { ready = false, error = "version_already_released",
+      why = "main's " .. M.VERSION_FILE .. " says " .. release .. " and " .. tag .. " already exists " .. where ..
+        ": the previous release's bump commit is missing, so this cut would ship bytes whose tag is taken",
+      next = "publish the bump commit (a release writes the NEXT number into M.PRODUCT_VERSION), or set that line to the next number, then cut again" }
+  end
+  if options.major or options.minor then
+    local kind = options.major and "major" or "minor"
+    local bumped, _ = M.bump_version(current, options)
+    local authorised, why_bump = M.bump_is_authorised(repo, kind, bumped)
+    if not authorised then
+      return { ready = false, error = "release_bump_not_authorised",
+        why = tostring(why_bump),
+        next = "quote Victor's instruction naming " .. M.version_tag(M.format_product_version(bumped)) .. " in " ..
+          M.VERSION_NOTES .. " and commit it, then wa release cut" }
+    end
+    return { ready = true, why = "main's number is " .. release .. " (not yet released) and the " .. kind ..
+      " bump to " .. M.format_product_version(bumped) .. " is quoted in " .. M.VERSION_NOTES }
+  end
+  return { ready = true, why = "main's number is " .. release .. " and " .. tag .. " does not exist yet" }
 end
 
 -- The public channel needs a toolchain the node release does not: two STATIC musl bundles, built by
@@ -3555,9 +3603,15 @@ end
 -- fresh-install proof died on `core_lib_unreachable` - a 404 on a file that entry fetches - and an install from
 -- a stale entry works until the day a path it names moves, which is what made the lag silent.
 --
--- WHERE IT SITS: after `publish`, before `deploy`. Both are publishing steps for the same commit, and the ring
--- rollout stays the last thing a release does. A failure here is a failure of THIS step, named, with the three
--- earlier facts still true: the node release exists, it is signed, and it is published.
+-- WHERE IT SITS: after `deploy` (Fable, 23/11, measured). It was written between `publish` and `deploy`, and that
+-- was wrong: this step moves `main` by one commit (the bump below), and a node only deploys a commit while
+-- `HEAD == origin/main == that commit` (`scripts/deploy-rendezvous.sh:10,13`; `scripts/deploy.sh` builds nothing
+-- but a canonical tree that is exactly origin/main). Publishing the channel first therefore turned every tree
+-- deploy of the shocked release into `source is not origin/main`, and a cut whose deploy is refused is a cut
+-- that shipped to nobody. Now the ring takes the released commit first, and `main` moves afterwards - the bump
+-- is a one-line Lua change (`wa_compiled_input` says so), so the sentinel's next redeploy is cheap. A failure
+-- here is a failure of THIS step, named, with every earlier fact true: the release exists, it is signed, it is
+-- published, and the fleet has it.
 --
 -- THE INDEX IS A COMMIT, and this is the one place a release writes one. The channel is read from `main`
 -- (`raw.githubusercontent.com/<repo>/main/releases/index-linux.json`), so an entry that only existed in this
@@ -3628,35 +3682,18 @@ function M.tree_version(tree)
   return parsed, nil
 end
 
--- <tree> <current> <options> -> the version this release takes, and how it was decided. The TAGS are the facts:
--- a number that already has a `v<number>` tag has been released, so the cut takes the next one - and a tree
--- whose VERSION names a release with no tag yet takes that number as it is (that is the first cut).
-function M.next_version(tree, current, options)
+-- <current> <options> -> the number the NEXT cut takes, and how it was decided. This is the BUMP the release
+-- writes, not the release it publishes: Fable, 23/11 - "the constant on main always names the release this tree
+-- WILL be cut as", so the cut ships `current` and leaves `next` behind for the cut after it.
+function M.bump_version(current, options)
   options = options or {}
-  -- TAKEN means the release tag exists, and the REMOTE is the authority: `gh release create` makes the tag on
-  -- origin, and a tree that never fetched tags would happily cut the same number twice. One ls-remote per
-  -- candidate, and a remote that cannot be reached answers "not taken" only after the local check failed too -
-  -- which is the answer that publishes (and a duplicate tag is refused by gh, loudly, not silently).
-  local function taken(version)
-    local tag = M.version_tag(M.format_product_version(version))
-    if rev(tree, tag) ~= nil then return true end
-    return remote_tip(tree, M.origin(), "refs/tags/" .. tag) ~= nil
-  end
-  local candidate
   if options.major then
-    candidate = { major = current.major + 1, minor = 0, patch = 0 }
-    while taken(candidate) do candidate.major = candidate.major + 1 end
-    return candidate, "explicit major bump"
+    return { major = current.major + 1, minor = 0, patch = 0 }, "explicit major bump"
   end
   if options.minor then
-    candidate = { major = current.major, minor = current.minor + 1, patch = 0 }
-    while taken(candidate) do candidate.minor = candidate.minor + 1 end
-    return candidate, "explicit minor bump"
+    return { major = current.major, minor = current.minor + 1, patch = 0 }, "explicit minor bump"
   end
-  candidate = { major = current.major, minor = current.minor, patch = current.patch }
-  if not taken(candidate) then return candidate, "VERSION names a release that has no tag yet" end
-  repeat candidate.patch = candidate.patch + 1 until not taken(candidate)
-  return candidate, "one patch past the newest release"
+  return { major = current.major, minor = current.minor, patch = current.patch + 1 }, "one patch past the release it follows"
 end
 
 -- <tree> <kind> <version> -> true, or false + why. A minor or major bump is Victor's decision, and the ONLY
@@ -3748,21 +3785,35 @@ impl.linux = function(run, options)
       observed = tostring(why_version),
       next = "set M.PRODUCT_VERSION in " .. M.VERSION_FILE .. " (the current release number, e.g. 0.1.0) and cut again" }
   end
+  -- THE RELEASE IS THE TREE'S NUMBER (Fable, 23/11): the bundles are built from THIS commit, and the binary
+  -- `build.rs` embeds the constant of the tree it builds - so shipping `current` is what makes the installed
+  -- bytes say the same number as the tag and the index. The BUMP (`next`) is written behind it, for the cut
+  -- after this one.
+  local version_text = M.format_product_version(current)
+  local tag = M.version_tag(version_text)
+  -- THE SAME TWO FACTS AS THE PREFLIGHT (`M.release_checks.version`), checked AGAIN here: the preflight is the
+  -- first second and this is the last, and a version that is already released or an unquoted minor bump must be
+  -- refused at BOTH ends - a caller that reaches this step without the preflight gets the same answer.
+  if rev(tree, tag) or remote_tip(tree, M.origin(), "refs/tags/" .. tag) then
+    return false, { error = "version_already_released",
+      detail = "the public channel for " .. short .. " was not published: its version is already released",
+      observed = version_text .. " already has the tag " .. tag,
+      next = "main's M.PRODUCT_VERSION must name the NEXT release: publish the bump commit (a release writes it), then cut again" }
+  end
   if options.major or options.minor then
     local kind = options.major and "major" or "minor"
-    local decided = M.next_version(tree, current, options)
-    local authorised, why_bump = M.bump_is_authorised(tree, kind, decided)
+    local bumped, _ = M.bump_version(current, options)
+    local authorised, why_bump = M.bump_is_authorised(tree, kind, bumped)
     if not authorised then
       return false, { error = "linux_bump_not_authorised",
         detail = "the " .. kind .. " bump was refused, so nothing was published",
         observed = tostring(why_bump),
-        next = "quote Victor's instruction naming " .. M.version_tag(M.format_product_version(decided)) .. " in " .. M.VERSION_NOTES ..
+        next = "quote Victor's instruction naming " .. M.version_tag(M.format_product_version(bumped)) .. " in " .. M.VERSION_NOTES ..
           ", commit it, then wa release cut --run " .. tostring(run.id) .. " --resume" }
     end
   end
-  local next_version, version_why = M.next_version(tree, current, options)
-  local version_text = M.format_product_version(next_version)
-  local tag = M.version_tag(version_text)
+  local next_version, version_why = M.bump_version(current, options)
+  local next_text = M.format_product_version(next_version)
   -- AN ALLOW-LIST, before anything is built or published: this channel publishes the two STATIC musl triples,
   -- because a bundle that is not static needs a libc floor on the machine that installs it (the 30/10 defect
   -- that made the first published bundle refuse on an older Ubuntu). A caller cannot widen it by naming a
@@ -3846,8 +3897,10 @@ impl.linux = function(run, options)
   if already then
     local passed, verdict = verify_live()
     if not passed then return false, verdict end
-    run.journal.linux = { tag = tag, version = version_text, targets = targets, state = "already_present", live = verdict }
-    return true, { detail = "the channel already names " .. short .. " for " .. #targets .. " target(s) on " .. M.origin() .. "/main (not published again; " .. tostring(verdict) .. ")" }
+    run.journal.linux = { tag = tag, version = version_text, next_version = next_text, targets = targets,
+      state = "already_present", live = verdict }
+    return true, { detail = "the channel already names " .. short .. " (v" .. version_text .. ") for " .. #targets ..
+      " target(s) on " .. M.origin() .. "/main (not published again; " .. tostring(verdict) .. ")" }
   end
 
   -- A WORKTREE OF origin/main for the commit: the run's own tree is the release's commit and stays where it is.
@@ -3879,7 +3932,7 @@ impl.linux = function(run, options)
     return false, { error = "linux_version_write_failed", observed = "cannot read " .. version_path }
   end
   -- ONE LINE, rewritten in place: every other byte of the module stays as the release found it.
-  local rewritten = version_source:gsub([[M%.PRODUCT_VERSION%s*=%s*"[^"]*"]], "M.PRODUCT_VERSION = \"" .. version_text .. "\"", 1)
+  local rewritten = version_source:gsub([[M%.PRODUCT_VERSION%s*=%s*"[^"]*"]], "M.PRODUCT_VERSION = \"" .. next_text .. "\"", 1)
   if rewritten == version_source and version_source:find("M.PRODUCT_VERSION", 1, true) == nil then
     return false, { error = "linux_version_write_failed", observed = version_path .. " has no M.PRODUCT_VERSION line to write" }
   end
@@ -3963,7 +4016,7 @@ impl.linux = function(run, options)
   end
   local index_commit = rev(index_tree, "HEAD")
   if #staged_names > 0 then
-    local message = "releases: " .. tag .. ", the public Linux channel for " .. short
+    local message = "releases: " .. tag .. ", the public Linux channel for " .. short .. " (main's next cut is v" .. next_text .. ")"
     local committed = git(run, index_tree, "commit -q -m " .. quote(message) .. " -- " .. quote(M.VERSION_FILE) .. " " .. quote(M.LINUX_INDEX), 600)
     evidence(command_line("commit the index", "git commit -m 'releases: the public Linux channel " .. tag .. " for " .. short .. "' -- " .. M.LINUX_INDEX))
     evidence((committed.stdout or "") .. (committed.stderr or ""))
@@ -4010,10 +4063,11 @@ impl.linux = function(run, options)
   if rev(index_tree, "HEAD") == index_commit then
     git(run, tree, "worktree remove --force " .. quote(index_tree), 300)
   end
-  run.journal.linux = { tag = tag, version = version_text, version_why = version_why, targets = targets,
-    state = "published", index_commit = index_commit, index_base = base, entries = #targets, live = verdict }
-  return true, { detail = string.format("published %s (%d target(s): %s) and %s on %s/main = %s (the version is %s; read back, %s)",
-    tag, #targets, tostring(version_why), M.LINUX_INDEX, origin, tostring(index_commit):sub(1, 12), version_text, tostring(verdict)) }
+  run.journal.linux = { tag = tag, version = version_text, next_version = next_text, version_why = version_why,
+    targets = targets, state = "published", index_commit = index_commit, index_base = base, entries = #targets,
+    live = verdict }
+  return true, { detail = string.format("published %s (%d target(s)) and %s on %s/main = %s: the released bytes say v%s, and main's next cut is v%s (%s); read back, %s",
+    tag, #targets, M.LINUX_INDEX, origin, tostring(index_commit):sub(1, 12), version_text, next_text, tostring(version_why), tostring(verdict)) }
 end
 
 -- the ring, as configured: `--ring name:mode,...`, else `<config>/land/ring.json`, else M.RING.

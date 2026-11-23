@@ -38,6 +38,7 @@ R.start_vault()
   local function ready_checks()
     local asked = {}
     land.release_checks = {
+      version = function() asked.version = true return { ready = true, why = "stub: main's number is not released yet" } end,
       signing = function() asked.signing = true return { ready = true, why = "stub: the vault answers" } end,
       publishing = function() asked.publishing = true return { ready = true, why = "stub: gh is signed in" } end,
       channel = function() asked.channel = true return { ready = true, why = "stub: the musl toolchain is here" } end,
@@ -84,7 +85,7 @@ R.start_vault()
   local channel_main = origin_main()
   ok(channel_main ~= main_before, "a release now moves main by one commit: the channel index")
   eq(must("git -C " .. repo .. " diff --name-only " .. main_before .. " " .. channel_main, "the channel commit's paths"),
-    "releases/index-linux.json", "and that commit carries exactly one path (an allow-list, not a hope)")
+    "lua/core/build_identity.lua\nreleases/index-linux.json", "and that commit carries exactly its two allow-listed paths (an allow-list, not a hope)")
   local linux46 = step_of("case46", "linux") or {}
   eq(linux46.state, "done", "the linux step published the channel")
   contains(tostring((journal_of("case46").linux or {}).tag or ""), "v0.1.0",
@@ -106,6 +107,7 @@ R.start_vault()
 
   -- ------------------------------------------ case 47: the preconditions refuse in the first second
   land.release_checks = {
+    version = function() return { ready = true, why = "stub" } end,
     signing = function() return { ready = false, error = "release_signing_not_ready", why = "stub: the vault does not answer", next = "FIX-SIGNING" } end,
     publishing = function() return { ready = false, error = "release_publishing_not_ready", why = "stub: gh is signed out", next = "FIX-PUBLISHING" } end,
     ancestry = function() return { ready = true, why = "stub" } end,
@@ -134,17 +136,20 @@ R.start_vault()
   land.release_checks = real_checks
   behaviour.gh_authed = false
   local rows = land.release_preflight({ signer = "local" })
-  eq(rows[2].name, "publishing", "the second row is publishing")
-  eq(rows[2].ready, false, "a signed-out gh is not ready")
-  contains(rows[2].why, "keyring", "and the reason names the keyring")
-  contains(rows[2].next, "gh auth login", "and the fix is one command")
+  eq(rows[1].name, "version", "the first row is the version (it decides what the release IS)")
+  eq(rows[1].ready, true, "main's number has no release yet in the fixture")
+  contains(rows[1].why, "does not exist yet", "and the row says what it read")
+  eq(rows[3].name, "publishing", "the third row is publishing")
+  eq(rows[3].ready, false, "a signed-out gh is not ready")
+  contains(rows[3].why, "keyring", "and the reason names the keyring")
+  contains(rows[3].next, "gh auth login", "and the fix is one command")
   behaviour.gh_authed = true
   rows = land.release_preflight({ signer = "local" })
-  eq(rows[2].ready, true, "a signed-in gh is ready")
-  if R.state.vault_available then eq(rows[1].ready, true, "the scratch vault answers, so signing is ready") end
-  eq(rows[3].name, "channel", "the third row is the public channel's toolchain")
-  eq(rows[4].ready, true, "main contains the release this fixture published")
-  contains(rows[4].why, "previous release", "and the row says which fact it read")
+  eq(rows[3].ready, true, "a signed-in gh is ready")
+  if R.state.vault_available then eq(rows[2].ready, true, "the scratch vault answers, so signing is ready") end
+  eq(rows[4].name, "channel", "the fourth row is the public channel's toolchain")
+  eq(rows[5].ready, true, "main contains the release this fixture published")
+  contains(rows[5].why, "previous release", "and the row says which fact it read")
   -- The channel's check, both answers, with its own probe stubbed: what it reads is this host's toolchain, and a
   -- case may not depend on whether the machine that runs it has zig.
   do
@@ -199,7 +204,7 @@ R.start_vault()
   local resumed_main = origin_main()
   ok(resumed_main ~= main_before, "the resumed release published the channel, so main moved by one commit")
   eq(must("git -C " .. repo .. " diff --name-only " .. main_before .. " " .. resumed_main, "the channel commit's paths"),
-    "releases/index-linux.json", "and that commit carries exactly one path")
+    "lua/core/build_identity.lua\nreleases/index-linux.json", "and that commit carries exactly its two allow-listed paths")
   local linux48 = step_of("case48", "linux") or {}
   eq(linux48.state, "done", "the channel step is done on the resume")
 

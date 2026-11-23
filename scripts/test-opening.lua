@@ -37,10 +37,18 @@ ok(view_lib.PALETTE.accent == "d77757", "and accent is still the warm accent it 
 -- The product version is ONE constant, in the module that owns "what version is this"
 -- (lua/core/build_identity.lua) - never a second literal in the view, and never the alpha tag's number.
 local identity = dofile("lua/core/build_identity.lua")
-ok(identity.PRODUCT_VERSION == "0.1.0", "the product version is one constant and it is 0.1.0")
-ok(not has(view_lib.banner({ live = true, limit = 100 }), "0.1.0"),
+-- The number must not be PINNED to a literal here: a release writes that line (Fable, 23/11: "the constant on
+-- main always names the release this tree WILL be cut as"), and a row that says `== "0.1.0"` turns every
+-- release red - main-health included, which is exactly what a landing must never do. What is asserted is the
+-- SHAPE and the ONE-SOURCE rule: one constant, a version, never the alpha tag's number, and the banner draws
+-- the number it is handed rather than composing one.
+ok(tostring(identity.PRODUCT_VERSION):match("^%d+%.%d+%.%d+$") ~= nil,
+  "the product version is one constant and it is a version (" .. tostring(identity.PRODUCT_VERSION) .. ")")
+ok(not has(view_lib.banner({ live = true, limit = 100 }), tostring(identity.PRODUCT_VERSION)),
   "cli_view composes no product version of its own: it draws the one it is handed")
 ok(not has(tostring(identity.PRODUCT_VERSION), "alpha"), "and it is not derived from the public alpha tag")
+ok(identity.product_version({ native = { product_version = identity.PRODUCT_VERSION } }) == identity.PRODUCT_VERSION,
+  "and every surface reads it through the one reader")
 
 ok(view_lib.style("matrix") == MATRIX, "the role paints 24-bit 0;215;95, xterm 41")
 

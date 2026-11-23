@@ -34,8 +34,10 @@ local function live_channel(sha) return must("git -C " .. repo .. " show " .. sh
 -- ---------------------------------------------------------------- the step's place, and its name
 local position = {}
 for index, name in ipairs(land.STEPS) do position[name] = index end
-eq(position.linux, (position.publish or 0) + 1, "the channel step comes right after publish")
-eq(position.linux, (position.deploy or 0) - 1, "and right before the deploy: the ring rollout stays last")
+-- AFTER THE RING (Fable, 23/11, measured): a node deploys a commit only while HEAD == origin/main == that commit,
+-- and this step moves main, so publishing the channel first would refuse every tree deploy of the release.
+eq(position.linux, (position.deploy or 0) + 1, "the channel step comes right after the deploy")
+eq(position.linux, (position.report or 0) - 1, "and the report is still last")
 ok(position.publish ~= nil and position.deploy ~= nil, "both neighbours exist")
 eq(land.EVENT_STEP.linux, "linux-channel", "its ledger row has a name of its own")
 eq(land.version_tag("0.1.0"), "v0.1.0", "the channel tag IS the product version (Victor, 22/11)")
@@ -44,6 +46,34 @@ eq(land.parse_product_version("0.1.0") and land.format_product_version(land.pars
   "the number is parsed and formatted by one pair of functions")
 eq(land.parse_product_version("1.0"), nil, "a version this does not understand is refused, never bumped by accident")
 eq(land.LINUX_INDEX, "releases/index-linux.json", "the step writes the index the installer reads")
+
+-- ---------------------------------------------------------------- the precondition (first second, Fable 23/11)
+--
+-- `M.release_checks.version` decides whether the number main carries has ALREADY been released: if it has, the
+-- previous release's bump commit never landed, and a cut now would publish bytes under a tag nobody chose. It is
+-- a precondition, so it refuses before any artifact is built, the node release included.
+setup_fixture()
+land.candidates = function() return {} end
+local version_row = land.release_checks.version({})
+eq(version_row.ready, true, "main's number (0.1.0) has no release yet")
+contains(tostring(version_row.why), "0.1.0", "the row says which number it read")
+must("git -C " .. repo .. " tag -f v0.1.0 HEAD", "the tag the first release would create")
+local released_row = land.release_checks.version({})
+eq(released_row.ready, false, "a number whose tag already exists is not ready")
+eq(released_row.error, "version_already_released", "and the refusal is named version_already_released")
+contains(tostring(released_row.why), "v0.1.0", "naming the tag that is taken")
+contains(tostring(released_row.next), "NEXT number", "and the fix: the constant must name the next release")
+-- and the same fact on the remote, where `gh release create` puts the tag
+must("git -C " .. repo .. " tag -d v0.1.0", "clear the local tag")
+must("git -C " .. repo .. " push -q origin HEAD:refs/tags/v0.1.0", "the same tag on the fixture's origin")
+eq(land.release_checks.version({}).error, "version_already_released", "a tag on the remote counts as released too")
+must("git -C " .. repo .. " push -q origin :refs/tags/v0.1.0", "clean the remote tag")
+eq(land.release_checks.version({}).ready, true, "and with neither tag the number is releasable again")
+-- an unquoted minor bump is refused in the preflight as well as in the step
+local minor_row = land.release_checks.version({ minor = true })
+eq(minor_row.ready, false, "--minor without the quote is not ready")
+eq(minor_row.error, "release_bump_not_authorised", "named in the preflight too")
+contains(tostring(minor_row.next), "quote Victor", "with the one thing that authorises it")
 
 -- ---------------------------------------------------------------- the step itself
 --
@@ -117,12 +147,13 @@ contains(tostring((result or {}).detail), "fresh", "and the live verdict the che
 local after = origin_main()
 ok(after ~= before, "main moved")
 eq(must("git -C " .. repo .. " rev-parse " .. after .. "^1"), release_sha, "by exactly one commit, on top of the release")
-eq(must("git -C " .. repo .. " diff --name-only " .. release_sha .. " " .. after), "releases/index-linux.json",
-  "and that commit carries exactly one path (the allow-list, not a hope)")
+eq(must("git -C " .. repo .. " diff --name-only " .. release_sha .. " " .. after), "lua/core/build_identity.lua\nreleases/index-linux.json",
+  "and that commit carries exactly its two allow-listed paths (the allow-list, not a hope)")
 contains(live_channel(after), release_sha, "the live index names this release's commit")
 eq((run.journal.linux or {}).state, "published", "the journal records the publish")
 eq((run.journal.linux or {}).tag, "v0.1.0", "with the first release's version as the tag")
-eq((run.journal.linux or {}).version, "0.1.0", "and the version itself, from the tree's VERSION file")
+eq((run.journal.linux or {}).version, "0.1.0", "and the version itself, from the one owner in this tree")
+eq((run.journal.linux or {}).next_version, "0.1.1", "while main is left carrying 0.1.1 for the next cut")
 eq(#((run.journal.linux or {}).targets or {}), 2, "for both targets")
 eq((run.journal.linux or {}).index_commit, after, "and the commit that carries it")
 contains(tostring((run.journal.linux or {}).live), "fresh", "the freshness verdict is kept in the journal")
@@ -136,19 +167,28 @@ contains(header("0.1.0"), "Welcome to wasm-agent! v0.1.0 \194\183 vabc12345", "t
 -- The first cut's tag exists on the remote now (gh creates it), which is what makes the next number the next one.
 must("git -C " .. repo .. " tag -f v0.1.0 " .. release_sha, "the release tag gh created for the first cut")
 must("git -C " .. repo .. " push -q origin refs/tags/v0.1.0", "push that tag to the fixture's origin")
-local second = head()
-contains(must("git -C " .. repo .. " show origin/main:lua/core/build_identity.lua"), 'M.PRODUCT_VERSION = "0.1.0"',
-    "after the first cut the one owner says 0.1.0")
+-- THE DEFECT Fable found (23/11): the released bytes must say the number they are released as. The bundles are
+-- built from the RELEASED commit, whose constant is therefore the tag - and main, one commit later, carries the
+-- BUMP for the next cut. Both facts are read from git here, which is what `build.rs` embeds at build time.
+contains(must("git -C " .. repo .. " show " .. release_sha .. ":lua/core/build_identity.lua"),
+  'M.PRODUCT_VERSION = "0.1.0"', "the RELEASED commit's one owner says 0.1.0 - the number its bytes print")
+contains(must("git -C " .. repo .. " show origin/main:lua/core/build_identity.lua"), 'M.PRODUCT_VERSION = "0.1.1"',
+  "and main, one commit past it, already carries the BUMP for the next cut")
 must("git -C " .. repo .. " fetch -q origin main", "read main back")
 must("git -C " .. repo .. " reset -q --hard origin/main", "the next cut is made from the main the first one left")
 local second_run = channel_run("linuxH")
 local second_passed, second_result = land.impl.linux(second_run, { signer = "local" })
 eq(second_passed, true, "the second release publishes too (" ..
   tostring((not second_passed) and (second_result and second_result.observed or second_result)) .. ")")
-eq((second_run.journal.linux or {}).version, "0.1.1", "and it is 0.1.1: one patch past the release it follows")
+eq((second_run.journal.linux or {}).version, "0.1.1", "and the tree's own number - the bump the first cut wrote - is 0.1.1")
 eq((second_run.journal.linux or {}).tag, "v0.1.1", "with v0.1.1 as the tag")
-contains(must("git -C " .. repo .. " show origin/main:lua/core/build_identity.lua"), 'M.PRODUCT_VERSION = "0.1.1"',
-    "and the one owner on main says 0.1.1 - written by the release")
+local second_sha = tostring((second_run.journal.linux or {}).index_base or "")
+contains(must("git -C " .. repo .. " rev-parse " .. (second_run.journal.tree_commit or head())), "", "")
+contains(must("git -C " .. repo .. " show " .. tostring(second_run.journal.tree_commit) .. ":lua/core/build_identity.lua"),
+  'M.PRODUCT_VERSION = "0.1.1"', "the released bytes of the second cut say 0.1.1 too")
+eq((second_run.journal.linux or {}).next_version, "0.1.2", "and main is left carrying 0.1.2 for the third")
+contains(must("git -C " .. repo .. " show origin/main:lua/core/build_identity.lua"), 'M.PRODUCT_VERSION = "0.1.2"',
+    "and the one owner on main says 0.1.2 - the bump this release wrote")
 contains(live_channel(origin_main()), "\"tag\": \"v0.1.1\"", "the live index names v0.1.1")
 contains(header("0.1.1"), "Welcome to wasm-agent! v0.1.1", "and a build of it would show v0.1.1 in the header")
 -- A minor/major bump is Victor's word, quoted, or it does not happen - in both directions.
@@ -170,8 +210,11 @@ local allowed = channel_run("linuxJ")
 local allowed_passed, allowed_result = land.impl.linux(allowed, { signer = "local", minor = true })
 eq(allowed_passed, true, "with the quoted instruction the minor bump is allowed (" ..
   tostring((not allowed_passed) and (allowed_result and allowed_result.observed or allowed_result)) .. ")")
-eq((allowed.journal.linux or {}).version, "0.2.0", "and it publishes 0.2.0")
-eq((allowed.journal.linux or {}).tag, "v0.2.0", "under the tag v0.2.0")
+-- A minor is decided ONE RELEASE AHEAD (Fable, 23/11): the release published is still the tree's number, and the
+-- BUMP it leaves on main is the minor step - so the next cut is 0.2.0.
+eq((allowed.journal.linux or {}).version, "0.1.0", "the release published is still the tree's own number")
+eq((allowed.journal.linux or {}).tag, "v0.1.0", "under the tag v0.1.0")
+eq((allowed.journal.linux or {}).next_version, "0.2.0", "and the bump it writes is the minor step: the next cut is 0.2.0")
 
 -- -------- a second run of the same step publishes nothing twice
 local again_before = origin_main()
