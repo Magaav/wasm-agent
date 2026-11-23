@@ -289,6 +289,63 @@ git -C "$STAGE" push -q -f "$URL" "HEAD:refs/heads/artifacts/$TAG" || exit 8
 printf 'PUBLISHREADY artifacts/%s %s source=%s\n' "$TAG" "$(git -C "$STAGE" rev-parse HEAD)" "$COMMIT"
 ]]
 
+-- A stand-in for `scripts/publish-linux-channel.sh`, the publisher of the PUBLIC Linux channel (`wa release cut`'s
+-- `linux` step). What it keeps is the contract the step depends on: the flags it is called with (`--tree`,
+-- `--commit`, `--tag`, `--targets`, `--out`, `--index`), one index entry per target with the fields the real
+-- publisher writes, and the two refusals the step has to name (`build_failed`, `index_stale`). What it does not
+-- do is build, sign or upload: those are proved by scripts/test-linux-channel.sh against a fake GitHub, and by
+-- the next real cut.
+local CHANNEL_SCRIPT = [[
+#!/usr/bin/env bash
+set -uo pipefail
+commit=; tree=.; tag=; targets=; out=; index=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --commit) commit=$2; shift 2 ;;
+    --tree) tree=$2; shift 2 ;;
+    --tag) tag=$2; shift 2 ;;
+    --targets) targets=$2; shift 2 ;;
+    --out) out=$2; shift 2 ;;
+    --index) index=$2; shift 2 ;;
+    --reason) shift 2 ;;
+    *) shift ;;
+  esac
+done
+[ -n "$commit" ] && [ -n "$index" ] || { echo 'linux-channel: commit_value_required' >&2; exit 1; }
+case "${WA_TEST_CHANNEL_FAIL:-}" in
+  build) echo 'linux-channel: build_failed: the fixture refused the build' >&2; exit 1 ;;
+  stale) echo 'linux-channel: index_stale: the fixture says the channel is older than the newest release' >&2; exit 1 ;;
+esac
+mkdir -p "$out" 2>/dev/null || true
+commit=${WA_TEST_CHANNEL_COMMIT:-$commit}
+short=${commit:0:12}
+tag=${tag:-wa-linux-$short}
+{
+  printf '{\n  "schema": "wasm-agent-linux-release-index",\n  "schema_version": 1,\n  "notes": "newest first",\n  "releases": [\n'
+  first=1
+  for target in $targets; do
+    [ "$first" = 1 ] || printf ',\n'
+    first=0
+    printf '    {"tag": "%s", "commit": "%s", "commit_short": "%s", "target": "%s", "arch": "x64", "manifest_sha256": "%064d", "url": "https://example.invalid/%s/%s.tar.gz", "size": 1, "node_version": "24.22.1", "built_utc": "2026-11-22T00:00:00Z"}' "$tag" "$commit" "$short" "$target" 0 "$tag" "$target"
+  done
+  printf '\n  ]\n}\n'
+} > "$index" || { echo 'linux-channel: index_update_failed' >&2; exit 1; }
+# The sums, so a deferred signature (the routed signer: --build-only here, sign on the node, --upload-only here)
+# has something to sign and something to bring back - the same files the real publisher writes.
+{
+  for target in $targets; do
+    printf '%064d  %s-%s.tar.gz\n' 0 "$target" "$short"
+  done
+} > "$out/SHA256SUMS" || { echo 'linux-channel: checksums_failed' >&2; exit 1; }
+echo "linux-channel: checksums $out/SHA256SUMS"
+# `gh release create <tag> --target <commit>` makes the TAG as well as the release, so the fixture does the same:
+# a resume then meets a tag this very run created, which is the round-3 defect (a push that failed after it).
+git -C "$tree" tag -f "$tag" "$commit" >/dev/null 2>&1 || true
+echo "linux-channel: tag $tag"
+echo "linux-channel: index $index"
+exit 0
+]]
+
 -- A stand-in for the reviewer's DOOR, not for a reviewer of its own: `wa land` runs `wa eval reviewer <branch>
 -- ... --json <file>`, and this script speaks exactly that contract - it writes the answer where the real verb
 -- writes it, exits with what the real verb exits with, and records the arguments it was given so the test can
@@ -381,6 +438,23 @@ local function setup_fixture()
   write_file(repo .. "/a.txt", "base\n")
   write_file(repo .. "/scripts/publish-node-binaries.sh", PUBLISHER_SCRIPT)
   write_file(repo .. "/scripts/publish-artifacts-branch.sh", SHIPPER_SCRIPT)
+  write_file(repo .. "/scripts/publish-linux-channel.sh", CHANNEL_SCRIPT)
+  -- The channel's index and its freshness check are REAL (the check reads the fixture repository's own
+  -- node-<sha12> tags), so the `linux` step is held to the same verdict a fresh machine would get.
+  must("mkdir -p " .. repo .. "/releases", "create releases/")
+  -- THE PRODUCT VERSION (Victor, 22/11): ONE owner, `M.PRODUCT_VERSION` in lua/core/build_identity.lua, and the
+  -- release bumps that line. The fixture starts at 0.1.0 - the version the next release takes when no v0.1.0
+  -- tag exists yet.
+  must("mkdir -p " .. repo .. "/lua/core", "create lua/core/")
+  write_file(repo .. "/lua/core/build_identity.lua",
+    "-- fixture: the product version, the one line the release writes\nlocal M = {}\nM.PRODUCT_VERSION = \"0.1.0\"\nreturn M\n")
+  -- The release notes file a minor/major bump is authorised in (empty of quotes: nothing is authorised yet).
+  must("mkdir -p " .. repo .. "/docs/release", "create docs/release/")
+  write_file(repo .. "/docs/release/RELEASE_NOTES.md", "# Release notes\n\n## Quoted instructions\n\n(none yet)\n")
+  write_file(repo .. "/releases/index-linux.json",
+    "{\n  \"schema\": \"wasm-agent-linux-release-index\",\n  \"schema_version\": 1,\n  \"notes\": \"newest first\",\n  \"releases\": []\n}\n")
+  must("cp -f " .. tree_root .. "/scripts/check-linux-channel-fresh.sh " .. repo .. "/scripts/check-linux-channel-fresh.sh",
+    "copy the channel freshness check")
   -- The REAL signer, library and verifier: the signature this test checks is made and verified by the code
   -- that ships, not by a second implementation of it.
   for _, relative in ipairs({ "scripts/sign-release.sh", "scripts/lib/release-signing.sh", "scripts/lib/release_verify.py" }) do
@@ -405,7 +479,8 @@ local function setup_fixture()
     "#!/usr/bin/env bash\nset -u\nmkdir -p generated\nls *.txt | sort > generated/files.txt\n")
   must("mkdir -p " .. repo .. "/generated", "create the generated directory")
   write_file(repo .. "/generated/files.txt", "a.txt\n")
-  must("chmod +x scripts/publish-node-binaries.sh scripts/publish-artifacts-branch.sh scripts/sign-release.sh", "exec bits", repo)
+  must("chmod +x scripts/publish-node-binaries.sh scripts/publish-artifacts-branch.sh scripts/sign-release.sh " ..
+    "scripts/publish-linux-channel.sh scripts/check-linux-channel-fresh.sh", "exec bits", repo)
   must("git add -A && git commit -q -m base", "the base commit", repo)
   must("git push -q origin main && git push -q oc-in main", "publish the base", repo)
 
@@ -442,9 +517,9 @@ end
 -- command also carries the scratch vault's admin URL and token, exactly as the signing host's environment
 -- does - the token is never printed by the code under test, and this is the only place it exists.
 local real_exec = land.exec
-local observed = { pushes = 0, main_pushes = 0, publish = 0, signs = 0, ships = 0, builds = 0 }
+local observed = { pushes = 0, main_pushes = 0, channel_pushes = 0, publish = 0, signs = 0, ships = 0, builds = 0 }
 local behaviour = { publish_fails = false, release_present = false, omit_sums = false,
-  gh_authed = true, gh_present = true }
+  gh_authed = true, gh_present = true, channel_fails = "", channel_wrong_commit = "" }
 
 local function with_vault(command)
   if vault_env == "" then return command end
@@ -474,10 +549,22 @@ land.exec = function(command, cwd, timeout)
   if command:find("publish%-artifacts%-branch%.sh") then observed.ships = observed.ships + 1 end
   if command:find("publish%-node%-binaries%.sh") then observed.builds = observed.builds + 1 end
   if command:find(" push 'oc%-in' ") then observed.pushes = observed.pushes + 1 end
-  if command:find("push 'origin'") and command:find(" push ") then observed.main_pushes = observed.main_pushes + 1 end
+  -- The channel's index commit is pushed onto main by `impl.linux`, from its own worktree: counted apart, so
+  -- "the landing pushed no main" keeps its meaning and the channel's push has its own count.
+  if command:find("linux%-channel/index%-tree", 1) and command:find(" push ") then
+    observed.channel_pushes = observed.channel_pushes + 1
+  elseif command:find("push 'origin'") and command:find(" push ") then
+    observed.main_pushes = observed.main_pushes + 1
+  end
   local routed = command
   if behaviour.omit_sums and command:find("publish%-artifacts%-branch%.sh") then
     routed = "WA_TEST_OMIT_SUMS=1 " .. command
+  end
+  -- THE CHANNEL STUB'S TWO KNOBS, handed to it the way a caller would hand a knob to a script: its own refusal
+  -- (`build_failed`, `index_stale`) and an index that names another commit (the read-back case).
+  if command:find("publish%-linux%-channel%.sh", 1) then
+    if behaviour.channel_fails ~= "" then routed = "WA_TEST_CHANNEL_FAIL=" .. behaviour.channel_fails .. " " .. routed end
+    if behaviour.channel_wrong_commit ~= "" then routed = "WA_TEST_CHANNEL_COMMIT=" .. behaviour.channel_wrong_commit .. " " .. routed end
   end
   return real_exec(with_vault(routed), cwd, timeout)
 end
@@ -645,6 +732,7 @@ return {
   stop_vault = stop_vault,
   PUBLISHER_SCRIPT = PUBLISHER_SCRIPT,
   SHIPPER_SCRIPT = SHIPPER_SCRIPT,
+  CHANNEL_SCRIPT = CHANNEL_SCRIPT,
   FAKE_REVIEWER_SCRIPT = FAKE_REVIEWER_SCRIPT,
   review_home = review_home,
   FAKE_REVIEWER = FAKE_REVIEWER,

@@ -47,6 +47,13 @@ echo "work" > "$STATE/node.name"
 # WASM_AGENT_HOME is the HOME itself (rust/wa-host-support/src/paths.rs::resolve_home); the state
 # directory is <home>/.wasm-agent, which is $STATE.
 version() { HOME="$HOME_DIR" WASM_AGENT_HOME="$HOME_DIR" "$WABIN" --version 2>/dev/null; }
+# The one owner of the product version: the binary was built from THIS tree, so the version it prints is
+# this file.
+# The ONE owner of the product version: `M.PRODUCT_VERSION` in lua/core/build_identity.lua (the release
+# writes that line; the binary embeds it). This script reads it the same way the build does.
+TREE_VERSION="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)/lua/core/build_identity.lua"
+
+tree_version() { grep -m1 'M[.]PRODUCT_VERSION' "$TREE_VERSION" | sed 's/.*= *//' | tr -d '\"' | tr -d ' \r'; }
 
 # A pin for a DIFFERENT node must not mark this one. This is the finding: the ledger is fleet-wide.
 cat > "$PINFILE" <<'LEDGER'
@@ -113,9 +120,21 @@ OUT="$(version)"
 hides "...and the same in the other line order (commit= before state=)" "$OUT" "(pinned)"
 hides "...never echoing the commit it cleared" "$OUT" "33333333"
 
-# The bytes can always name a commit, and the version line says which: never the crate's 0.1.0.
-shows "the version line names the build" "$OUT" "wasm-agent "
-hides "...and never the crate version" "$OUT" "0.1.0"
+# THE VERSION LINE CARRIES TWO FACTS (Victor, 22/11: "make v0.1.0 be reflected into the entrance ... wa --version
+# prints the product version and the sha, from the same source"). It used to be asserted the other way round -
+# "never 0.1.0", because a node claimed the crate's version whatever it ran (18/11). Now the product version is
+# READ from the tree's VERSION file and the sha is printed beside it, so the line is held to both and to their
+# order: a version without a sha would be the 18/11 lie again.
+shows "the version line names the program" "$OUT" "wasm-agent v"
+shows "...the PRODUCT version, from the tree's VERSION file" "$OUT" "v$(tree_version)"
+# the separator is the middle dot the line uses (U+00B7); built with printf so this file stays ASCII
+DOT=$(printf '\302\267')
+shows "...and the bytes beside it, on the same line" "$OUT" " $DOT v"
+ok_line=$(printf '%s' "$OUT" | head -1)
+case "$ok_line" in
+  "wasm-agent v$(tree_version) "* ) ok "...in that order: version first, the sha after the separator" ;;
+  *) bad "the version line is '<program> v<version> . v<sha>'" "$ok_line" ;;
+esac
 
 printf 'test-pin-label: %s checks, %s failed\n' "$checks" "$failed"
 [ "$failed" = 0 ] || exit 1

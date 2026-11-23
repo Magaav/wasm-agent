@@ -22,11 +22,24 @@ include!(concat!(env!("OUT_DIR"), "/build_info.rs"));
 /// How the commit was learned: `git` in this checkout, or `env` from a stamper that built another tree.
 pub const COMMIT_SOURCE: &str = SOURCE;
 
+/// The PRODUCT version: the number a person reads (`0.1.0`), owned by the tree's `VERSION` file and written by
+/// `wa release cut` - never cargo's `CARGO_PKG_VERSION`, which is metadata and the same on every node.
+///
+/// WHY IT IS NOT THE IDENTITY (Victor, 18/11 vs 22/11): a version cannot tell two nodes apart - a hundred
+/// commits can share it - so the NAME of a build stays `label()`. The version is the other half of the same
+/// line: which release this is, and which bytes. Victor, 22/11: "make v0.1.0 be reflected into the entrance;
+/// v1.0 is wrong. each release we add v0.1.0 then v0.1.1 and so on".
+pub fn product_version() -> &'static str {
+    let text = PRODUCT_VERSION.trim();
+    if text.is_empty() { "unknown" } else { text }
+}
+
 /// The identity document, one `key=value` per line - the same shape `installed.txt` uses, so a record can
 /// be written by copying fields and a reader needs no parser beyond `sed -n 's/^key=//p'`.
 pub fn render() -> String {
     format!(
-        "version={VERSION}\ncommit={}\ntree={}\ndirty={}\nsource={}\nsource_shared={}\nbuilt_epoch={}\nancestors={}\nancestors_complete={}\nancestors_floor={}\n",
+        "version={}\ncommit={}\ntree={}\ndirty={}\nsource={}\nsource_shared={}\nbuilt_epoch={}\nancestors={}\nancestors_complete={}\nancestors_floor={}\n",
+        product_version(),
         if COMMIT.is_empty() { "unknown" } else { COMMIT },
         if TREE.is_empty() { "unknown" } else { TREE },
         DIRTY,

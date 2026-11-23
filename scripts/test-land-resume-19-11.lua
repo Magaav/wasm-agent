@@ -64,8 +64,19 @@ local account_code = land.run({ run = "case26", signer = "local", ring = SOLO_RI
 eq(account_code, 0, "a round with --account lands")
 local account_journal = journal_of("case26")
 eq(account_journal.main_account, "laptop", "main was fast-forwarded on the named node")
-eq(must("git -C " .. repo .. " ls-remote origin refs/heads/main"), account_journal.tree_commit .. "\trefs/heads/main",
-  "and the source of truth is at the landed tip")
+-- MAIN NOW CARRIES ONE MORE COMMIT THAN THE LANDING (Fable 22/11): the public channel's index entry is a commit
+-- on main (`impl.linux`). What the account node did is the fast-forward of the LANDED TIP, and that is read from
+-- the remote's own history - the tightening, not a loosening, of "the source of truth is at the landed tip".
+local account_main = (must("git -C " .. repo .. " ls-remote origin refs/heads/main"):match("^(%x+)"))
+eq(must("git -C " .. repo .. " rev-parse " .. account_main .. "~1"), account_journal.tree_commit,
+  "the source of truth carries the landed tip under the channel's one commit")
+eq(must("git -C " .. repo .. " diff --name-only " .. account_journal.tree_commit .. " " .. account_main),
+  "lua/core/build_identity.lua\nreleases/index-linux.json", "whose only paths are the one owner of the version and the channel index")
+local routed_main = false
+for _, call in ipairs(R.state.routed_calls or {}) do
+  if call.node == "laptop" and call.kind == "main" then routed_main = true end
+end
+ok(routed_main, "and the fast-forward of main ran on the node that holds the credential")
 local main_on_node, publish_on_node = false, false
 for _, call in ipairs(R.state.routed_calls) do
   if call.node == "laptop" and call.kind == "main" then main_on_node = true end

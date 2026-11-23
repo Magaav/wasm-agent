@@ -415,7 +415,11 @@ fn main() {
         });
     }
     if args.iter().any(|arg| arg == "--version" || arg == "-v") {
-        println!("wasm-agent {identity}");
+        // BOTH FACTS, from the same two sources the welcome line uses: the product version (the tree's VERSION
+        // file, embedded at build time) and the bytes' own name (commit, release tag or pin). A version alone
+        // says nothing about WHICH bytes - that was the 18/11 lie - and a sha alone does not say which release
+        // a person is running (Victor, 23/11).
+        println!("wasm-agent v{} \u{00b7} v{}", build_info::product_version(), identity);
         return;
     }
     // Every node and node-thread gets rg, including service launches with a sparse PATH. Installation

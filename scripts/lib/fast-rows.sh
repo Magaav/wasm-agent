@@ -63,8 +63,8 @@ wa_fast_core_rows() {
     scripts/test-land-plan.lua scripts/test-land-resume.lua scripts/test-land-sign.lua \
     scripts/test-land-review.lua scripts/test-land-rows.lua scripts/test-land-resume-19-11.lua \
     scripts/test-land-marks.lua scripts/test-land-release.lua scripts/test-land-gate-rows.lua \
-    scripts/test-land-until.lua scripts/test-land-quick.lua \
-    scripts/test-event-ledger.lua \
+    scripts/test-land-until.lua scripts/test-land-quick.lua scripts/test-land-linux.lua \
+    scripts/test-event-ledger.lua scripts/test-product-version.lua \
     scripts/test-refusal-contract.lua scripts/test-tool-schema-fidelity.lua scripts/test-codemode-parity.lua \
     scripts/test-edit-aliases.lua \
     scripts/test-wit-deps.lua \

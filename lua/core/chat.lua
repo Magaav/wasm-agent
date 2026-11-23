@@ -499,12 +499,17 @@ function M.run(argv)
       -- The build's OWN name, from the one function that composes it (lua/core/build_identity.lua):
       -- a release's tag, the commit (with +dirty), a pinned node's pin, or "unknown build". It was the
       -- literal 0.1.0 here, so every node claimed the crate's version whatever it was running.
+      -- The bytes' own name (a release tag, the commit, a pin: `lua/core/build_identity.lua`) and, beside it,
+      -- the PRODUCT version the tree's VERSION file owns. Two facts, one line: the version alone was every
+      -- node claiming the crate's 0.1.0 whatever it ran (Victor, 18/11), and the sha alone does not name the
+      -- release a person is running (Victor, 22/11).
       version = build_identity.label(),
       -- ONE composer for this line (cli_view.model_line): a dot with one space on each side.
       model = cli_view.model_line(mode, reasoning),
-      -- The product version, from the one constant that owns it (`build_identity.PRODUCT_VERSION`), beside
-      -- the build's own label: `✻ Welcome to wasm-agent! v0.1.0 · v<sha>`.
-      product = build_identity.PRODUCT_VERSION,
+      -- The product version, from the one owner (`VERSION`, embedded in the binary; the reader falls back to the
+      -- tree's value for a binary older than the field), beside the build's own label:
+      -- `\u273b Welcome to wasm-agent! v0.1.0 \u00b7 v<sha>` (Victor, 22/11).
+      product = build_identity.product_version(),
       database = host.getenv("WASM_AGENT_DB") or "~/.wasm-agent/memory.db",
       session = agent.session_id,
       continued = resume_last or session_id ~= nil,

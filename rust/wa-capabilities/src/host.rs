@@ -3553,7 +3553,11 @@ pub fn live_build_label() -> String {
     }
 }
 
-/// host.build_identity() -> JSON text of `{label, commit, dirty, known}` for the running binary.
+/// The product version this binary was built for: the build script reads its ONE owner
+/// (`M.PRODUCT_VERSION` in lua/core/build_identity.lua) and emits it here. A reader, never a copy.
+include!(concat!(env!("OUT_DIR"), "/product_version.rs"));
+
+/// host.build_identity() -> JSON text of `{label, commit, dirty, known, product_version}` for the running binary.
 ///
 /// One JSON string the caller decodes with lua/vendor/json.lua; it is a string, not a table.
 /// One reader for every surface that names the build: the welcome box, `wa --version` and the update
@@ -3567,6 +3571,10 @@ pub extern "C-unwind" fn build_identity(l: *mut LuaState) -> c_int {
         "known": build_label() != "unknown build",
         "commit": if commit.is_empty() { "unknown" } else { commit },
         "dirty": dirty,
+        // THE PRODUCT VERSION, from the tree's one VERSION file (embedded by this crate at build time, the
+        // same file wa-host embeds): the welcome box and every other surface read it here rather than keeping
+        // a copy. `unknown` when a build was stamped from a tree that has no VERSION file.
+        "product_version": PRODUCT_VERSION.trim(),
     }));
     1
 }

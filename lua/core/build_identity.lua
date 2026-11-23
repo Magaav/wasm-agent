@@ -36,11 +36,18 @@ M.UNKNOWN = "unknown build"
 -- It is a LITERAL and not a derivation, on purpose. The published tags are `v0.1.0-alpha.N`, the crate
 -- carries `0.1.0`, and every one of those is a build number; the product version is a product decision
 -- that Victor took (0.1.0 - "v1.0 is wrong", 22/11 - and it agrees with the crates and the tags) and
--- the release step owns next: when a release names itself, this is the one
--- line it changes, and nothing else in the tree spells the number. `label()` above stays what it is -
--- the build's own name - and the two are never conflated: this says what the product IS, the label says
--- which bytes are running.
-M.PRODUCT_VERSION = "0.1.0"
+-- THE RELEASE OWNS IT: when a release names itself, this is the ONE line it changes, and nothing else in the
+-- tree spells the number. `label()` above stays what it is - the build's own name - and the two are never
+-- conflated: this says what the product IS, the label says which bytes are running.
+--
+-- READERS, so the number is written once and nowhere else:
+--   * the BINARY embeds it at build time (`rust/wa-host/build.rs` and `rust/wa-capabilities/build.rs` both
+--     extract this line) - that is how a shell script or `wa --version` knows it without a checkout;
+--   * `wa release cut` reads it, computes the next one, and writes this line in the commit that publishes the
+--     release (`M.tree_version` / `M.next_version`, lua/core/land.lua);
+--   * `M.product_version()` below is the surface reader: the BINARY's answer first (an installed node has no
+--     tree), this constant when the binary is older than the field.
+M.PRODUCT_VERSION = "0.1.1"
 
 local function decode(raw)
   if type(raw) ~= "string" or raw == "" then return nil end
@@ -55,6 +62,24 @@ function M.native()
   if not (host and host.build_identity) then return nil end
   local ok, raw = pcall(host.build_identity)
   return ok and decode(raw) or nil
+end
+
+--- The PRODUCT version (`0.1.0`), the number a person reads, or `unknown`.
+--
+-- It is not the identity (`M.label()` is: a version cannot tell two nodes apart - Victor, 18/11). It is the
+-- other half of the same line, and it comes from ONE owner: the tree's `VERSION` file, embedded in the binary
+-- at build time and read back through `host.build_identity()`. A binary older than that field answers
+-- `unknown`, which is the honest answer - never a made-up number and never the crate's own.
+function M.product_version(opts)
+  local o = opts or {}
+  local native = o.native
+  if native == nil then native = M.native() elseif native == false then native = nil end
+  local text = trim((native or {}).product_version)
+  if text ~= "" then return text end
+  -- A binary older than the field: the tree's constant is the answer, because it is the LAST RELEASED
+  -- version (the release writes it) and a dev build between releases shows exactly that, with its own sha
+  -- beside it. Never a made-up number.
+  return M.PRODUCT_VERSION
 end
 
 --- Which of the four shapes a label is, read back from the string.

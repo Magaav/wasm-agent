@@ -3,6 +3,30 @@
 // moved with `quickjs.rs`; the embedded Lua tree stays in the binary's build script, where main.rs reads it.
 fn main() {
     generate_codemode_assets();
+    generate_product_version();
+}
+
+// THE PRODUCT VERSION, from its ONE owner (`M.PRODUCT_VERSION` in lua/core/build_identity.lua). This crate
+// answers `host.build_identity()` and cannot depend on wa-host, so it reads the same line with the same
+// extraction - a READER, never a second copy of the number (Victor, 22/11).
+fn generate_product_version() {
+    let manifest = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    let source = manifest.join("../../lua/core/build_identity.lua");
+    println!("cargo:rerun-if-changed={}", source.display());
+    let text = std::fs::read_to_string(&source).unwrap_or_default();
+    let marker = "M.PRODUCT_VERSION";
+    let version = text.find(marker)
+        .and_then(|at| {
+            let rest = &text[at + marker.len()..];
+            let start = rest.find('"')? + 1;
+            let end = rest[start..].find('"')? + start;
+            Some(rest[start..end].trim().to_string())
+        })
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "unknown".to_string());
+    let out = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
+    std::fs::write(out.join("product_version.rs"), format!("pub const PRODUCT_VERSION: &str = {version:?};\n"))
+        .expect("write the product version");
 }
 
 

@@ -2730,6 +2730,9 @@ gate_run bash scripts/test-deploy-ship.sh
 gate_run bash scripts/test-termux.sh
 # The Linux release channel's installer (scripts/linux/bootstrap.sh): index pick, libc detection, hash and
 # ELF refusals, Node choice, idempotent re-run - fixtures only, no network. Linux only: it installs ELF files.
+# The PUBLIC Linux channel's publisher: build (stubbed), sign (fixture key), verify, upload (fake GitHub), index,
+# and the freshness verdict - with the index left untouched by every refusal. Hermetic, 2 s.
+gate_run bash scripts/test-linux-channel.sh
 if [ "$(uname -s)" = Linux ]; then gate_run bash scripts/test-linux-release-fetch.sh
 else echo 'SKIP: Linux release channel fixture (needs a Linux host)'; SKIPPED=$((SKIPPED + 1)); fi
 # The one-command installer (scripts/install.sh): the platform matrix, the channel per platform, the
