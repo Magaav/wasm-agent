@@ -156,6 +156,28 @@ const REBUILD_LIMIT: usize = 3;
 /// The window `REBUILD_LIMIT` counts over. "in 24 h" is the operator's rule: a store that has failed
 /// to rebuild three times in a day is not going to be fixed by a fourth copy.
 const REBUILD_WINDOW: Duration = Duration::from_secs(24 * 3600);
+/// How many quarantine copies of ONE store are kept.
+///
+/// WHY THREE AND NOT ONE. `quarantine_database` used to delete every earlier `graph.db.malformed-*` of
+/// the same store before renaming the new one, so the copy that explains a quarantine was destroyed by
+/// the next quarantine. Measured twice on this node: the evidence file `graph.db.malformed-
+/// 20261122T144358Z` the mission brief named was gone 71 s after it was made, and so was
+/// `graph.db.malformed-20261123T000626Z` (docs/missions/reports/graph-quarantine-at-install.md). Three
+/// copies are one quarantine, the one before it and the one before that: enough to tell a single crash
+/// from a loop, which is the question a quarantine asks.
+const QUARANTINE_KEEP: usize = 3;
+/// The ceiling on the copies kept for one store, in bytes. The store measured 22/11 is 183 MB, so three
+/// copies (549 MB) fit; a bigger store is capped instead of filling the disk.
+const QUARANTINE_KEEP_BYTES: u64 = 1024 * 1024 * 1024;
+/// The error cap `PRAGMA integrity_check` is read with. SQLite stops at 100 complaints by default, and a
+/// truncated list cannot answer "is EVERY complaint about an index?" - the allow-list in `index_only` is
+/// only sound over the whole list. Measured on the store quarantined at 22/11 22:56: the default cap left
+/// 100 lines, and lifting it left 150, every one of them an index entry.
+const INTEGRITY_ERRORS: i64 = 100_000;
+/// Index repairs tried inside one failing streak. A store the component keeps calling malformed while
+/// `integrity_check` calls it healthy must not be re-repaired forever: past this the verdict is the one
+/// that was always taken - quarantine and rebuild.
+const REPAIR_LIMIT: u32 = 3;
 
 /// Delay before attempt `attempts + 1`: 2 s, 4 s, 8 s ... capped at `RETRY_MAX`.
 fn retry_delay(attempts: u32) -> Duration {
@@ -258,6 +280,8 @@ struct State {
     quarantined: Vec<PathBuf>,
     /// Consecutive quarantines, bounding a disk that keeps corrupting.
     corruptions: u32,
+    /// Index repairs tried in this streak, bounded by `REPAIR_LIMIT`.
+    repairs: u32,
     /// When the automatic rebuilds that did not succeed happened, epoch seconds, newest last. This is
     /// the 24 h budget: it survives a recovery (which clears it) and an `attempts` reset (a quarantine
     /// does that), because the copies a loop leaves behind are not about one streak.
@@ -461,6 +485,7 @@ impl Scheduler {
         state.failure = None;
         state.reported = None;
         state.corruptions = 0;
+        state.repairs = 0;
         state.rebuilds.clear();
         drop(state);
         if attempts > 0 {eprintln!("graph_index_recovered root={} after_failures={attempts}", entry.root.display());}
@@ -486,13 +511,15 @@ impl Scheduler {
         let now = epoch_seconds();
         let recent = rebuilds_in_window(&mut state.rebuilds, now);
         let floor = if state.min_free_bytes > 0 {state.min_free_bytes} else {rebuild_free_floor()};
-        let disk = if corrupt {
-            let dir = entry.db.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
-            Some(disk_answer(&dir, floor))
-        } else {None};
+        let dir = entry.db.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+        let file = entry.db.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_else(|| DB_FILE.to_string());
+        let disk = if corrupt {Some(disk_answer(&dir, floor))} else {None};
         let low = matches!(disk, Some(DiskAnswer::Low(_)));
         let over_budget = corrupt && recent >= REBUILD_LIMIT;
         let quarantine = corrupt && !low && !over_budget && state.corruptions < QUARANTINE_LIMIT && entry.db.exists();
+        // A repair is only attempted where a quarantine would be: the store is broken, there is room to
+        // fix it, and the copy budget is not spent. It writes nothing when the answer is not index-only.
+        let repair = quarantine && state.repairs < REPAIR_LIMIT;
         drop(state);
 
         // 1. Low disk: neither rename nor rebuild. `stopped` is the honest state - nothing further will
@@ -528,14 +555,48 @@ impl Scheduler {
             return;
         }
 
+        // 3. INDEX-ONLY DAMAGE IS REPAIRED, NOT REBUILT (measured 22/11, and it is not the first class):
+        //    the store quarantined at 22:56 was reported by `PRAGMA integrity_check(100000)` with 150
+        //    complaints, every one of them an index entry (149 `row N missing from index`, one
+        //    `wrong # of entries in index`), no table or page fault at all, and `REINDEX` took it to
+        //    `ok` in 0.746 s with all 115,947 nodes, 337,621 edges and 2,605 files still there. Today's
+        //    answer was to copy 183 MB aside and re-parse the whole tree. The repair runs under the
+        //    store's own lock, and quarantining is what still happens when the verdict is anything the
+        //    allow-list does not name.
+        if repair {
+            let mut state = entry.state.lock().unwrap();
+            state.repairs = state.repairs.saturating_add(1);
+            drop(state);
+            match repair_indexes(&dir, &file) {
+                Repair::Repaired {complaints} | Repair::Healthy {complaints} => {
+                    let line = format!("graph_db_repaired root={} file={file} complaints={complaints} next=reindex", entry.root.display());
+                    let mut state = entry.state.lock().unwrap();
+                    state.attempts = 0;
+                    state.stopped = false;
+                    state.retry_at = None;
+                    state.reported = Some(line.clone());
+                    drop(state);
+                    eprintln!("{line}");
+                    self.enqueue(&entry);
+                    return;
+                }
+                // Not index-only, or the rebuild of the indexes did not settle it: fall through to the
+                // quarantine, whose line carries the verdict measured on the store itself.
+                Repair::StillDamaged {verdict} => {eprintln!("graph_db_repair_refused root={} file={file} verdict={}", entry.root.display(), one_line(&verdict, 160));}
+                Repair::Unavailable {reason} => {eprintln!("graph_db_repair_unavailable root={} file={file} reason={}", entry.root.display(), one_line(&reason, 160));}
+            }
+        }
+
         if quarantine {
             let seconds = now;
             match quarantine_database(entry, &utc_stamp(seconds)) {
-                Ok(moved) if !moved.is_empty() => {
-                    let names: Vec<String> = moved.iter().map(|path| path.display().to_string()).collect();
+                Ok(quarantined) if !quarantined.moved.is_empty() => {
+                    let moved = quarantined.moved;
+                    let integrity = quarantined.integrity;
+                    let kept = quarantined.kept;
                     let mut state = entry.state.lock().unwrap();
                     state.corruptions = state.corruptions.saturating_add(1);
-                    state.quarantined.extend(moved);
+                    state.quarantined.extend(moved.iter().cloned());
                     // One copy is now on the disk and one rebuild is about to be attempted: count it
                     // against the 24 h budget before the attempt, so a rebuild that never returns still
                     // costs its copy. A success clears the budget in `recovered`.
@@ -548,10 +609,10 @@ impl Scheduler {
                     state.reported = Some(error.clone());
                     drop(state);
                     let disk_note = match disk {Some(DiskAnswer::Enough(free)) => format!(" free_bytes={free} floor_bytes={floor}"), Some(DiskAnswer::Unmeasurable) => " free_bytes=unknown".to_string(), _ => String::new()};
-                    // One line, with the reason: `moved` is one copy now, kept for evidence, and the
-                    // reason is what a human needs to tell a torn read from a damaged b-tree.
-                    eprintln!("graph_db_quarantined root={} moved={} reason={} next=rebuild{disk_note}",
-                        entry.root.display(), names.join(","), error.replace(char::is_whitespace, "_"));
+                    // One line, with the reason AND the verdict the store itself gave: `reason` is what
+                    // the component answered, `integrity` is what `PRAGMA integrity_check` said about the
+                    // copy that was kept, and `kept` is how many of this store's copies survive.
+                    eprintln!("{}", quarantine_line(&entry.root, &moved, &error, &integrity, kept, &disk_note));
                     self.enqueue(&entry);
                     return;
                 }
@@ -581,6 +642,7 @@ impl Scheduler {
         state.stopped = false;
         state.retry_at = None;
         state.corruptions = 0;
+        state.repairs = 0;
         state.reported = None;
         let now = epoch_seconds();
         rebuilds_in_window(&mut state.rebuilds, now);
@@ -877,32 +939,165 @@ fn roll_back_hot_journal(dir: &Path, file: &str) -> Result<Pending, String> {
     }
 }
 
-/// Move a malformed database - and SQLite's own siblings - aside under a timestamped name. It is
-/// derived state but still state: renamed, never deleted (skills/clean-disk rule 4). The rename runs
-/// under the same cross-process lock every graph call takes, so another node process sharing this
-/// database cannot keep writing into a file that is being moved.
+/// A text safe for a one-line log record: no whitespace, and bounded.
+fn one_line(text: &str, limit: usize) -> String {
+    let flat: String = text.chars().map(|c| if c.is_whitespace() {'_'} else {c}).collect();
+    if flat.chars().count() <= limit {return flat;}
+    let mut cut: String = flat.chars().take(limit).collect();
+    cut.push('~');
+    cut
+}
+
+/// The store named so that SQLite will not write to it: `immutable=1` means no journal, no `-shm` and no
+/// repair, which matters because this is asked BESIDE a store that is still the live one.
 ///
-/// ONE COPY PER STORE (13/11). Each detection used to leave its own copy, and a store that came back
-/// malformed after every rebuild left one copy per cycle: 77 files (~4 GB) in `graph.db.d/` on node
-/// `work` between 10/11 and 13/11, 30 more on `openclaw`. The copy that is about to be replaced is
-/// therefore removed first, by name and only for THIS store's own siblings, so the directory holds
-/// the newest quarantine and nothing else. `scripts/reclaim-disk.mjs` still reclaims a directory an
-/// older binary filled, keeping its newest copy.
-fn quarantine_database(entry: &Arc<Entry>, stamp: &str) -> std::io::Result<Vec<PathBuf>> {
+/// WHY NOT PLAIN READ-ONLY. A read-only connection to a store with a `-wal` beside it CREATED a `-shm`
+/// file when this was measured: `a_malformed_database_is_moved_aside_with_a_timestamp_and_never_deleted`
+/// moved three files where the store had two. A diagnosis must not leave anything behind.
+fn immutable_uri(store: &Path) -> String {
+    let text = store.to_string_lossy().replace('%', "%25").replace('?', "%3f").replace('#', "%23");
+    format!("file:{text}?immutable=1")
+}
+
+/// Every complaint `PRAGMA integrity_check` makes about `store`, read-only: `["ok"]` for a store that
+/// passes, otherwise the complaints in SQLite's own order, up to `INTEGRITY_ERRORS`.
+///
+/// READ-ONLY, SO IT IS DIAGNOSIS AND NEVER REPAIR. A store with a hot journal cannot be rolled back by a
+/// read-only opener, so a rollback-pending store reads here as the damage it is not - which is why `call`
+/// resolves the journal first, and why this answer chooses the repair below only together with a
+/// `REINDEX` that has to pass the same check afterwards.
+fn integrity_complaints(store: &Path) -> Result<Vec<String>, String> {
+    let connection = rusqlite::Connection::open_with_flags(immutable_uri(store),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI)
+        .map_err(|error| error.to_string())?;
+    let mut statement = connection.prepare(&format!("PRAGMA integrity_check({INTEGRITY_ERRORS})"))
+        .map_err(|error| error.to_string())?;
+    let mut rows = statement.query([]).map_err(|error| error.to_string())?;
+    let mut complaints = Vec::new();
+    while let Some(row) = rows.next().map_err(|error| error.to_string())? {
+        let text: String = row.get(0).map_err(|error| error.to_string())?;
+        if text == "ok" {return Ok(vec![text]);}
+        complaints.push(text);
+    }
+    if complaints.is_empty() {return Err("integrity_check answered nothing".to_string());}
+    Ok(complaints)
+}
+
+/// Is this complaint one that rebuilding the indexes repairs: the index disagrees with its table?
+///
+/// AN ALLOW-LIST OF THE TWO SHAPES MEASURED, not a block-list. Measured on the store quarantined on
+/// 22/11 at 22:56 (`graph.db.malformed-20261123T015417Z`, 182,599,680 B, copied out and read only): 150
+/// complaints, 149 `row <n> missing from index <name>` and one `wrong # of entries in index <name>`, no
+/// table, page or freelist fault at all. Everything else - `*** in database main ***`, `Freelist: ...`,
+/// `Tree N page M: ...`, `database disk image is malformed`, `file is not a database`, an empty index
+/// name - is NOT repaired: the repair path must refuse what it cannot guarantee, and a table whose pages
+/// are torn needs the rollback journal or a rebuild, never a REINDEX.
+fn index_only(complaint: &str) -> bool {
+    if let Some(rest) = complaint.strip_prefix("row ") {
+        let Some((number, tail)) = rest.split_once(' ') else {return false;};
+        let named = tail.strip_prefix("missing from index ").map(|name| !name.trim().is_empty()).unwrap_or(false);
+        return named && !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit());
+    }
+    complaint.strip_prefix("wrong # of entries in index ").map(|name| !name.trim().is_empty()).unwrap_or(false)
+}
+
+/// What an attempt to repair a store by rebuilding its indexes did.
+#[derive(Debug, PartialEq, Eq)]
+enum Repair {
+    /// Every complaint was an index entry, and after `REINDEX` the store passes `integrity_check`.
+    Repaired {complaints: usize},
+    /// The store passes `integrity_check` already: the component's verdict is not the store's, so the
+    /// index is not thrown away - nothing is copied and nothing is rebuilt.
+    Healthy {complaints: usize},
+    /// Not index-only, or the rebuild did not settle it. The verdict is why, and it is what the
+    /// quarantine line must carry.
+    StillDamaged {verdict: String},
+    /// The attempt could not be made at all (no lock, no store, an unreadable file).
+    Unavailable {reason: String},
+}
+
+/// Repair a store whose only complaints are index entries, by rebuilding the indexes (`REINDEX`).
+///
+/// The store's cross-process lock is held for the whole attempt - the read, the write and the re-check -
+/// so no component call and no snapshot can meet a half-rebuilt index. Nothing is deleted and nothing is
+/// copied: `REINDEX` derives every index from the table it indexes, which is the definition of an index.
+fn repair_indexes(dir: &Path, file: &str) -> Repair {
+    let lock = match lock_store(dir, file, None) {
+        Ok(Some(handle)) => handle,
+        Ok(None) => return Repair::Unavailable {reason: "the store's lock was not released before the repair".to_string()},
+        Err(error) => return Repair::Unavailable {reason: error.to_string()},
+    };
+    let answer = repair_under_lock(dir, file);
+    let _ = lock.unlock();
+    answer
+}
+
+fn repair_under_lock(dir: &Path, file: &str) -> Repair {
+    let db = dir.join(file);
+    if !db.exists() {return Repair::Unavailable {reason: format!("no store at {}", db.display())};}
+    let complaints = match integrity_complaints(&db) {
+        Ok(complaints) => complaints,
+        // SQLite refused to run the check at all (a torn page it cannot walk, a file it cannot read).
+        // That IS the verdict about the store, and it is never an index-only one, so the repair is not
+        // attempted and the quarantine is - exactly what happened before this path existed.
+        Err(verdict) => return Repair::StillDamaged {verdict},
+    };
+    if complaints.len() == 1 && complaints[0] == "ok" {return Repair::Healthy {complaints: 0};}
+    // UNKNOWN IS NOT YES. A list SQLite truncated at `INTEGRITY_ERRORS` cannot say that every complaint is
+    // an index entry, so it is neither repaired nor reported as repaired.
+    if complaints.len() as i64 >= INTEGRITY_ERRORS {
+        return Repair::StillDamaged {verdict: format!("integrity_check_truncated_at_{INTEGRITY_ERRORS}")};
+    }
+    if let Some(other) = complaints.iter().find(|complaint| !index_only(complaint)) {
+        return Repair::StillDamaged {verdict: other.clone()};
+    }
+    // Read-write and CANNOT CREATE: a repair of a store that vanished is not a repair of a new store.
+    let connection = match rusqlite::Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE) {
+        Ok(connection) => connection,
+        Err(error) => return Repair::StillDamaged {verdict: format!("reindex_unavailable: {error}")},
+    };
+    let _ = wa_sqlite::tune_wait(&connection);
+    if let Err(error) = connection.execute_batch("REINDEX") {
+        return Repair::StillDamaged {verdict: format!("reindex_failed: {error}")};
+    }
+    drop(connection);
+    let complaints = complaints.len();
+    match integrity_complaints(&db) {
+        Ok(after) if after.len() == 1 && after[0] == "ok" => Repair::Repaired {complaints},
+        Ok(after) => Repair::StillDamaged {verdict: after.into_iter().next().unwrap_or_else(|| "unknown".to_string())},
+        Err(reason) => Repair::StillDamaged {verdict: format!("integrity_after_reindex_unmeasurable: {reason}")},
+    }
+}
+
+/// What a quarantine left on the disk.
+#[derive(Debug)]
+struct Quarantined {
+    /// The files moved aside, this quarantine's own copies.
+    moved: Vec<PathBuf>,
+    /// The verdict `PRAGMA integrity_check` gave the store while it was still the store.
+    integrity: String,
+    /// How many of this store's copies survive the retention rule, this one included.
+    kept: usize,
+}
+
+/// Move a malformed database - and SQLite's own siblings - aside under a timestamped name. It is
+/// derived state but still state: renamed, never deleted while it is evidence (see `retain_quarantine`
+/// for the bound). The rename runs under the same cross-process lock every graph call takes, so another
+/// node process sharing this database cannot keep writing into a file that is being moved.
+fn quarantine_database(entry: &Arc<Entry>, stamp: &str) -> std::io::Result<Quarantined> {
     let dir = entry.db.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
     let file = entry.db.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_else(|| DB_FILE.to_string());
     let lock = match lock_store(&dir, &file, None)? {
         Some(handle) => handle,
         None => return Err(std::io::Error::other("the store's lock was not released")),
     };
-    let prefix = format!("{file}.malformed-");
-    if let Ok(entries) = std::fs::read_dir(&dir) {
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if !name.starts_with(&prefix) {continue;}
-            let _ = std::fs::remove_file(entry.path());
-        }
-    }
+    // The verdict is taken BEFORE the rename, because afterwards the store is a copy with a timestamp in
+    // its name and the question belongs to the store that was there.
+    let integrity = match integrity_complaints(&dir.join(&file)) {
+        Ok(complaints) => complaints.into_iter().next().unwrap_or_else(|| "unknown".to_string()),
+        // SQLite's own refusal is the verdict: it names the damage even when it cannot list it.
+        Err(verdict) => verdict,
+    };
     let mut moved = Vec::new();
     for suffix in ["", "-wal", "-shm", "-journal"] {
         let source = dir.join(format!("{file}{suffix}"));
@@ -910,8 +1105,59 @@ fn quarantine_database(entry: &Arc<Entry>, stamp: &str) -> std::io::Result<Vec<P
         let target = dir.join(format!("{file}.malformed-{stamp}{suffix}"));
         if std::fs::rename(&source, &target).is_ok() {moved.push(target);}
     }
+    let kept = retain_quarantine(&dir, &file, QUARANTINE_KEEP, QUARANTINE_KEEP_BYTES);
     let _ = lock.unlock();
-    Ok(moved)
+    Ok(Quarantined {moved, integrity, kept})
+}
+
+/// Keep the newest `keep` copies of ONE store, their total at most `budget` bytes, deleting only this
+/// store's own `<db>.malformed-*` names and only the oldest groups. Returns how many groups survive.
+///
+/// GROUPS, NOT FILES. A quarantine moves the database and its `-journal`/`-wal`/`-shm` siblings under one
+/// stamp, and one stamp is one evidence set: deleting the database of a group and keeping its journal
+/// would leave a copy that cannot be read at all. The stamp sorts as text (`YYYYMMDDTHHMMSSZ`), so the
+/// newest group is the greatest name and no mtime is trusted - a copy is not re-dated when it is read.
+///
+/// WHY A BOUND AT ALL. Keeping everything fills the disk: 77 copies (~4 GB) in `graph.db.d/` on node
+/// `work` between 10/11 and 13/11, 30 more on `openclaw`. Keeping ONE destroys the evidence for the
+/// quarantine before it, measured twice on 22/11. Three is the count that holds a streak; 1 GB is more
+/// than three copies of the 183 MB store this was measured on, and less than a disk.
+fn retain_quarantine(dir: &Path, file: &str, keep: usize, budget: u64) -> usize {
+    let prefix = format!("{file}.malformed-");
+    let mut groups: std::collections::BTreeMap<String, Vec<(PathBuf, u64)>> = std::collections::BTreeMap::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {return 0;};
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(rest) = name.strip_prefix(&prefix) else {continue;};
+        let (stamp, suffix) = match rest.split_once('-') {Some((stamp, suffix)) => (stamp, format!("-{suffix}")), None => (rest, String::new())};
+        if stamp.is_empty() || !matches!(suffix.as_str(), "" | "-wal" | "-shm" | "-journal") {continue;}
+        if !entry.file_type().map(|kind| kind.is_file()).unwrap_or(false) {continue;}
+        let size = entry.metadata().map(|meta| meta.len()).unwrap_or(0);
+        groups.entry(stamp.to_string()).or_default().push((entry.path(), size));
+    }
+    let mut kept = 0usize;
+    let mut bytes = 0u64;
+    for (index, files) in groups.values().rev().enumerate() {
+        let size: u64 = files.iter().map(|(_, size)| *size).sum();
+        // The newest group is always kept, even alone: a store bigger than the budget must still leave
+        // the copy that explains the quarantine it caused.
+        let fits = index == 0 || (kept < keep && bytes.saturating_add(size) <= budget);
+        if !fits {
+            for (path, _) in files {let _ = std::fs::remove_file(path);}
+            continue;
+        }
+        kept += 1;
+        bytes = bytes.saturating_add(size);
+    }
+    kept
+}
+
+/// The one line a quarantine prints. A function because it is what an operator reads in the journal, and
+/// because a test can hold its fields to account without starting a node.
+fn quarantine_line(root: &Path, moved: &[PathBuf], reason: &str, integrity: &str, kept: usize, disk_note: &str) -> String {
+    let names: Vec<String> = moved.iter().map(|path| path.display().to_string()).collect();
+    format!("graph_db_quarantined root={} moved={} reason={} integrity={} kept={kept} next=rebuild{disk_note}",
+        root.display(), names.join(","), one_line(reason, 120), one_line(integrity, 180))
 }
 
 /// A snapshot of one graph store, taken under the store's own lock.
@@ -1010,18 +1256,8 @@ fn contended(text: &str) -> bool {
 
 /// `PRAGMA integrity_check` on one store, read-only: `"ok"` or SQLite's first complaint.
 fn copy_verdict(store: &Path) -> Result<String, String> {
-    let connection = rusqlite::Connection::open_with_flags(store, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(|error| snapshot_failure(&error.to_string()))?;
-    let mut statement = connection.prepare("PRAGMA integrity_check")
-        .map_err(|error| snapshot_failure(&error.to_string()))?;
-    let mut rows = statement.query([]).map_err(|error| snapshot_failure(&error.to_string()))?;
-    let mut first: Option<String> = None;
-    while let Some(row) = rows.next().map_err(|error| snapshot_failure(&error.to_string()))? {
-        let text: String = row.get(0).map_err(|error| snapshot_failure(&error.to_string()))?;
-        if text == "ok" {return Ok(text);}
-        if first.is_none() {first = Some(text);}
-    }
-    Ok(first.unwrap_or_else(|| "unknown".to_string()))
+    let complaints = integrity_complaints(store).map_err(|error| snapshot_failure(&error))?;
+    Ok(complaints.into_iter().next().unwrap_or_else(|| "unknown".to_string()))
 }
 
 /// A changeset may name files by absolute host path (native changesets do); inside the component
