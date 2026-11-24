@@ -91,3 +91,81 @@ survivable.
 
 No new operator- or model-facing string: this round adds one document and one report, and changes no code,
 so there is no entry for the "Texts to approve" list beyond the two proposed blocks above.
+
+## Preflight round 1: the `land-quick` stop on `fix-authors`
+
+The preflight of `change/wasi-only-plan` stopped at `land-quick: fix-authors failed on
+change/wasi-only-plan`. Two things were true, and only one of them is in this branch.
+
+### 1. In this branch: the commits had no trailers (fixed here)
+
+Ten commits were authored `the owner` with no `Co-Authored-By:` trailer, which the
+landing's next guard refuses by name:
+
+```
+authorship: commit(s) authored as the owner with no Co-Authored-By: trailer - add them first
+```
+
+Fixed with the factory's own tool, as that guard says to:
+
+```
+bash ~/Work/missions/_orch/add-trailers.sh wasi-only-plan wasm-agent
+# tree unchanged; every commit now carries:
+#   Agent: wasm-agent mission=wasi-only-plan
+#   Co-Authored-By: wa worker (wasm-agent) <wa-worker@noreply.invalid>
+```
+
+The tree is byte-identical (asserted by that script and re-checked here:
+`git rev-parse HEAD^{tree}` before and after are both `179065cf0358fa30`), the commit messages are kept,
+and the branch was rewritten (unlanded history only). Re-running land-quick's own guard on the rewritten
+branch answers `GUARD OK`.
+
+### 2. In the factory script: `_orch/fix-authors.sh` exits 1 on the state it is meant to produce
+
+After the trailers, `fix-authors.sh change/wasi-only-plan` still exits **1** - and it does so for any
+branch whose commits are all owned by Victor, which is the normal state after `add-trailers.sh`. The
+cause is one line and it is reproduced without wa in it:
+
+```bash
+set -e
+F=$(for c in a b; do a=Victor; t=1795478517
+      [ "$t" -ge $CUT ] && [ "$a" != "$ON" ] && case "$a" in wasm-agent|avell-ship) echo $c; break;; esac; done)
+echo "reached F=[$F]"     # never printed
+```
+
+With `set -e`, the last iteration's failing `&&` chain makes the command substitution exit 1, so the
+**assignment** fails and the shell aborts before `[ -n "$F" ] || exit 0` - the "nothing to fix" path is
+unreachable. The trace ends at `+ F=` and the script returns 1 with no message, which is what the
+preflight saw.
+
+**Proposed diff** (one token; the factory scripts are outside this tree, so this is a proposal for the
+orchestrator, never applied here):
+
+```diff
+--- a/_orch/fix-authors.sh
++++ b/_orch/fix-authors.sh
+@@ -5,7 +5,7 @@ set -e; BR=$1; R=$HOME/wasm-agent/checkout; cd $R
+ CUT=1795474200; ON=$(git config user.name); OE=$(git config user.email)
+ TIP=$(git rev-parse "$BR"); MB=$(git merge-base "$BR" origin/main)
+ F=$(for c in $(git rev-list --reverse --no-merges $MB..$TIP); do a=$(git log -1 --format=%an $c); t=$(git log -1 --format=%ct $c)
+-      [ "$t" -ge $CUT ] && [ "$a" != "$ON" ] && case "$a" in wasm-agent|avell-ship) echo $c; break;; esac; done)
++      [ "$t" -ge $CUT ] && [ "$a" != "$ON" ] && case "$a" in wasm-agent|avell-ship) echo $c; break;; esac; done) || true
+ [ -n "$F" ] || exit 0
+```
+
+Verified on a copy of the script (`/tmp/wb/fa-patched.sh`, this branch): `patched_exit=0`, no ref moved,
+no worktree created. The unpatched script on the same branch: `exit=1`.
+
+### The rest of the dry run, checked here so round 2 does not stop elsewhere
+
+Run in a throwaway worktree of the current `origin/main` (`ffd2a0a5`), removed afterwards:
+
+| step land-quick takes before the gate | result |
+| --- | --- |
+| authorship guard | **OK** (every commit carries the two trailers) |
+| `git merge --no-ff change/wasi-only-plan` onto `origin/main` | **clean**, no conflicted path |
+| `scripts/regenerate.sh` + `git status --porcelain` | ok, **nothing left to commit** |
+| `scripts/gen-refusal-codes.lua --check` | **fresh** |
+| the branch's own `scripts/test-*.lua` rows | none: this branch adds no row and touches no `rust/`, so `land-quick` judges 0 rows and the install path is the docs-only one |
+
+No test was weakened, deleted or loosened: this round changes no test and no row list.
