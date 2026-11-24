@@ -416,7 +416,9 @@ function M.ensure_resumes(now, opts)
     end
   end
   if M.waiting(now, opts) then return { waiting = true, rearmed = 0, migration = migration } end
-  local lost = query([[SELECT id, session_id, owner, attempts FROM self_wakes WHERE ]] .. LOST_WHERE
+  -- THE CHAIN IS `resume_chain`, NOT `attempts` (24/11): `attempts` counts dispatch attempts and reaches the
+  -- hundreds on a real ledger, so reading it here abandoned 46 live resumes on the first tick after an install.
+  local lost = query([[SELECT id, session_id, owner, resume_chain FROM self_wakes WHERE ]] .. LOST_WHERE
     .. [[ AND created_at>=?]], { M.RESUME_REASON, cutoff }) or {}
   local schedule = opts.schedule
   if type(schedule) ~= "function" then
@@ -441,7 +443,7 @@ function M.ensure_resumes(now, opts)
       local live = query([[SELECT id FROM self_wakes WHERE session_id=? AND reason=?
         AND status IN ('pending','dispatching') LIMIT 1]], { session, M.RESUME_REASON }) or {}
       if #parked == 0 and #live == 0 then
-        local chain = (tonumber(row.attempts) or 0) + 1
+        local chain = (tonumber(row.resume_chain) or 0) + 1
         if chain > M.RESUME_MAX_REARMS then
           -- 2. THE CHAIN IS SPENT: this pause is over, and it says so instead of trying for ever.
           pcall(exec, [[UPDATE self_wakes SET status='resume_abandoned', last_error=?, updated_at=? WHERE id=?]],
@@ -462,7 +464,9 @@ function M.ensure_resumes(now, opts)
           local wake = type(armed) == "table" and armed.wake or nil
           if wake and wake.id then
             -- The chain is carried on the new row, so the next tick counts THIS attempt.
-            pcall(exec, "UPDATE self_wakes SET attempts=? WHERE id=?", { chain, wake.id })
+            -- The chain is carried on the new row's OWN column, so the next tick counts THIS attempt and nothing
+            -- about the dispatch counter.
+            pcall(exec, "UPDATE self_wakes SET resume_chain=? WHERE id=?", { chain, wake.id })
             pcall(exec, [[UPDATE self_wakes SET status='superseded', last_error=?, updated_at=? WHERE id=?]],
               { "a newer resume was armed: " .. tostring(wake.id), now, row.id })
             rearmed = rearmed + 1
@@ -473,6 +477,66 @@ function M.ensure_resumes(now, opts)
     end
   end
   return { rearmed = rearmed, abandoned = abandoned, migration = migration }
+end
+
+-- A PAUSE RECORD THAT CAN NEVER BE RESUMED IS CLOSED (24/11). The records are written at the moment a session
+-- pauses and nothing ever deleted one: `wa-sentinel status` counted 53 and said "oldest 1d", so the line that
+-- exists to show a promise in flight showed a graveyard. A record is CLOSED when it cannot describe a live pause:
+--
+--   * its `since` is older than M.RESUME_WINDOW_SECONDS (six hours) - no deploy waits that long, and the sentinel
+--     only reads a record at or after the request it is holding;
+--   * or its session no longer exists (ended, closed, deleted), so there is nobody to resume.
+--
+-- A record that is younger and whose session is live is LEFT ALONE, whatever else is happening: it is the proof the
+-- bound uses. `host.list_dir` is the host capability this needs (rust/wa-capabilities/src/host.rs), and `opts`
+-- carries an injected listing for the test.
+function M.sweep_records(now, opts)
+  opts = opts or {}
+  now = tonumber(now) or os.time()
+  local dir = M.paused_dir()
+  if not dir then return 0 end
+  local listing = opts.list or (host and host.list_dir)
+  if type(listing) ~= "function" then return 0 end
+  local ok, raw = pcall(listing, dir)
+  if not ok or type(raw) ~= "string" then return 0 end
+  local decoded_ok, decoded = pcall(json.decode, raw)
+  if not decoded_ok or type(decoded) ~= "table" then return 0 end
+  local exists = opts.session_exists
+  if type(exists) ~= "function" then
+    exists = function(session)
+      local loaded, row = pcall(function() return dofile("lua/core/memory.lua").session(session) end)
+      return loaded and type(row) == "table"
+    end
+  end
+  local remover = opts.remove or (host and host.delete_file)
+  local closed = 0
+  for _, entry in ipairs(decoded.entries or {}) do
+    local name = tostring(entry.name or "")
+    if name:sub(-5) == ".json" then
+      local path = dir .. "/" .. name
+      local reader = opts.read_file or (host and host.read_file)
+      local record = nil
+      if type(reader) == "function" then
+        local read_ok, text = pcall(reader, path)
+        if read_ok and type(text) == "string" then
+          local parsed_ok, parsed = pcall(json.decode, text)
+          if parsed_ok and type(parsed) == "table" then record = parsed end
+        end
+      end
+      local since = tonumber(record and record.since) or 0
+      local session = tostring((record and record.session) or name:sub(1, -6))
+      local stale = since == 0 or (now - since) > M.RESUME_WINDOW_SECONDS
+      if (stale or not exists(session)) and type(remover) == "function" then
+        if pcall(remover, path) then closed = closed + 1 end
+      end
+    end
+  end
+  if closed > 0 and type(host) == "table" and type(host.log) == "function" then
+    pcall(host.log, string.format(
+      "deploy pause: closed %d pause record(s) that can never be resumed (older than %ds, or their session is gone)",
+      closed, M.RESUME_WINDOW_SECONDS))
+  end
+  return closed
 end
 
 -- Said once, on the log an operator reads, every time a lost resume is re-armed. Cheap on purpose: the fact is
