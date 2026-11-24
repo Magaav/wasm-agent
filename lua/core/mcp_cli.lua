@@ -271,18 +271,19 @@ function M.run_cli(argv, opts)
   argv = argv or {}
   local emit = opts.print or print
   local verb = tostring(argv[1] or '')
+  local function usage()
+    emit('usage: wa mcp list [--all] [--width <columns>]   the MCP connectors this node can use')
+    emit('  --all     also print the rows the list folds away (other nodes, retired) and each connector')
+    emit('  --width   the column count to lay the rows out for (80 by default)')
+  end
   -- A question runs nothing: `wa mcp --help` is the usage and exit 0, like every read-only verb
   -- (lua/core/cli_help.lua lists only the verbs that ACT, and this one cannot).
   if verb == '--help' or verb == '-h' then
-    emit('usage: wa mcp list [--all] [--width <columns>]   the MCP connectors this node can use')
-    emit('  --all     also print the rows the list folds away (other nodes, retired) and each connector')
-    emit('  --width   the column count to lay the rows out for (80 by default)')
+    usage()
     return { ok = true, usage = true }
   end
   if verb ~= 'list' then
-    emit('usage: wa mcp list [--all] [--width <columns>]   the MCP connectors this node can use')
-    emit('  --all     also print the rows the list folds away (other nodes, retired) and each connector')
-    emit('  --width   the column count to lay the rows out for (80 by default)')
+    usage()
     return { ok = false, error = 'usage', exit = 2 }
   end
   local all, width, index = false, nil, 2

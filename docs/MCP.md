@@ -118,8 +118,20 @@ definition, plus the script files a custom one runs (built-in scripts ship with 
 replaced). The peer writes them into its own script directory, moves every path from the sender's home to
 its own, and registers the definition **disabled**. No credential travels: the answer names the vault
 entries to store there (`wa vault set <entry> --stdin`), then `/mcp <key> probe` and `/mcp <key> on`.
-`/mcp`'s first page says which connectors are built-in (they run a shipped script, e.g. Gmail's
-`mcp-mail.mjs`) and which are custom.
+`/mcp`'s first page is two groups of rows (`lua/core/mcp_list.lua`, 24/11): **wasm-agent built-in MCPs**
+(a connector that runs a shipped script - Gmail's `mcp-mail.mjs` - and the built-in WhatsApp service) and
+**User MCPs** (added on this node). A row is a mark, a short name (32 characters at most) and `"<n> tools"`,
+or - when the connector is not healthy - the state in at most two words (`needs token`, `server changed`,
+`not reachable`, `disabled`) in place of the count. A name is a name: a description never appears in a row,
+and nothing in a row is cut at 80 columns. The same connector on another node is not a row of its own: one
+folded row at the end, `On other nodes - <n> hidden`, opens to rows named `<connector> on <node>`; a retired
+registry entry is folded the same way under `<n> retired`, because its tools are no longer offered to the
+model. Enter on a row opens exactly what it opened before: the connector, its state, its error in full, its
+tools and their input fields, and the actions (`Reconnect`, `Turn on`/`Turn off`, `Sign in`).
+`wa mcp list` prints the same groups and the same columns as plain text, with no turn and no model
+(`lua/core/mcp_cli.lua`, `run_cli`); `wa mcp list --all` also prints what the list folds away, since a pipe
+cannot open a row. Built-in or added-here is decided once, by `mcp_command.origin_of`, and carried on the row
+as `origin`.
 
 ### What an approval covers, and what the kernel re-checks
 
