@@ -285,7 +285,15 @@ work=$(mktemp -d "$scratch_root/wa-fast-XXXXXX")
 # taken first and the pid is written only once this process provably holds it. A reclaim therefore can
 # never see "pid exists, nobody holds the lock" for a live run: if the pid file is there, the lock was
 # already held when it was written.
-exec 8>>"$work/lock" 2>/dev/null || true
+# NO `2>/dev/null` ON THIS LINE (Fable, 24/11). `exec` with only redirections applies them to the shell
+# for the rest of its life, so the `2>/dev/null` that used to sit here silenced EVERY later message of the
+# run - including the runner's own "fast: narrowed run REFUSED by <file>: ... is not a row this run can
+# execute", which left a plan that named one bad row looking like a silent exit 2 in eight seconds.
+# MEASURED 24/11: three runs of a narrowed plan naming scripts/test-update-treeless.lua (excluded by
+# scripts/fast-path.exclude) printed nothing on either stream and returned 2. If the lock cannot be
+# opened, bash says so and the flock below refuses by name; a run that cannot say why it stopped is the
+# defect this line was part of.
+exec 8>>"$work/lock" || true
 if flock -n 8 2>/dev/null; then
   printf '%s\n' "$$" > "$work/pid" 2>/dev/null || true
 else
