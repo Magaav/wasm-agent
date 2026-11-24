@@ -1100,6 +1100,10 @@ local function phase(name,fn)
   PHASE_BACKOFF[name] = { streak = streak, until_ms = (now_ms or 0) + wait_ms }
   if host.log then pcall(host.log,'tick '..name..' deferred: '..text..' (skip '..wait_ms..' ms)') end
 end
+-- The last self-loop tick: when it ran and what it said if it raised (read by /health's wake facts).
+local SELFLOOP_TICK_AT, SELFLOOP_TICK_ERROR, SELFLOOP_TICK_LOGGED = 0, "", ""
+function M.selfloop_tick_state() return { at = SELFLOOP_TICK_AT, error = SELFLOOP_TICK_ERROR } end
+
 function wa_orchestrator_tick()
   phase('orchestrator',function() dofile("lua/core/orchestrator.lua").tick(M) end)
   phase('completions',function() completions.tick(M) end)
@@ -1111,7 +1115,24 @@ function wa_orchestrator_tick()
   -- dispatches. This is the half that works with ONLY the node serving - no terminal, no reader
   -- (lua/core/handle_wake.lua).
   phase('handle-wake',function() dofile('lua/core/handle_wake.lua').sweep() end)
-  pcall(dofile('lua/core/selfloop.lua').tick)
+  -- THE TICK NEVER DIES SILENTLY (Fable 25/11, from the live stall). MEASURED: this was a bare `pcall`, so when
+  -- the tick raised - "no such column: run_id", on a ledger created before r8a3 - nothing anywhere said so: the
+  -- node answered /health, looked alive, and dispatched nothing for 2.5 hours. A raise is a fact with a name:
+  -- it is logged once per distinct error, and the last one is kept for /health's wake facts.
+  local called, failure = pcall(dofile('lua/core/selfloop.lua').tick)
+  SELFLOOP_TICK_AT = os.time()
+  if not called then
+    local reason = tostring(failure):gsub("^.*:%d+: ", ""):sub(1, 200)
+    SELFLOOP_TICK_ERROR = reason
+    if reason ~= SELFLOOP_TICK_LOGGED then
+      SELFLOOP_TICK_LOGGED = reason
+      if type(host) == "table" and type(host.log) == "function" then
+        pcall(host.log, "selfloop_tick_failed: " .. reason)
+      end
+    end
+  else
+    SELFLOOP_TICK_ERROR = ""
+  end
   return "ok"
 end
 
