@@ -183,63 +183,62 @@ added and two test call sites were not updated; the third was). Confirmed on the
 (`git show 51b63d9a:rust/wa-capabilities/src/operations.rs`, lines 3196 and 3249). Repaired in `97638750`
 by passing `None` at both call sites - test-only, no assertion touched.
 
-## Texts to approve (model- or operator-facing, verbatim)
+## Texts to approve - Fable's review of 24/11 ~05:05Z applied
 
-1. `lua/core/whatsapp.lua`, `mcp_whatsapp_read` description, added sentence: "The answer says how fresh it
-   is in the answer itself: as_of (the time of the newest message the index holds for this chat, null when
-   it holds none), as_of_iso and as_of_local, order (the key the page is sorted by, newest first), and
-   index (state current or catching_up, pending count, lag_ms). pending lists the ids the component has
-   accepted and not written yet - a message just sent appears there rather than being silently missing, so
-   read again in a second when it is not empty; as_of_regressed appears only when this answer is older than
-   one the node already gave for the chat. One person under two addresses (@lid and phone number) is one
-   history: a read by either returns the same messages, and addresses names both when they are joined."
-2. `lua/core/whatsapp.lua`, `mcp_whatsapp_search` description, added sentence: "The answer also says how
-   fresh it is: as_of (the time of the newest message it matched, with as_of_scope=matches), order (the key
-   the hits are sorted by), and index (state current or catching_up, how many records the component has
-   accepted and not written yet, and lag_ms: how far behind the newest message it has seen this answer is)."
-3. `lua/core/whatsapp.lua`, `mcp_whatsapp_send` description, added sentence: "The answer also says whether
-   the message is in the history a read answers from: in_history=true (the index holds it, so
-   mcp_whatsapp_read on that chat returns it now) or in_history=false with in_history_note (sent, not
-   indexed yet), which means reading the chat may not show it for a moment - nothing else does."
-4. `lua/core/whatsapp.lua`, `mcp_whatsapp_send_status` (hidden) description: "the same answer as
+Fable approved items 4, 5, 6, 9 and 10 as written and CUT 1, 2, 3, 7 and 8 (a description is paid on every
+request, an answer only when used), replacing them with three sentences that are now in the tree verbatim
+(`3f87f509`). The description bytes, measured on the `description` string of each tool (`origin/main` =
+`git show origin/main:lua/core/whatsapp.lua`, after = this branch):
+
+| tool | bytes on origin/main | bytes here | added |
+| --- | --- | --- | --- |
+| `mcp_whatsapp_read` | 967 | 1207 | +240 |
+| `mcp_whatsapp_search` | 774 | 916 | +142 |
+| `mcp_whatsapp_send` | 1760 | 1828 | +68 |
+
+1. `mcp_whatsapp_read`, added (approved): "The answer says how fresh it is (as_of, index, pending) and
+   whether a quiet answer is this chat or a stuck pipe (last_received_s, connected); read again in a second
+   when pending is not empty. One person under @lid and phone is one history."
+2. `mcp_whatsapp_search`, added (approved): "The answer says how it is sorted (order) and how fresh it is
+   (as_of, index, last_received_s, connected); every hit carries its time and chat."
+3. `mcp_whatsapp_send`, added (approved): "in_history says whether a read of the chat returns the message
+   yet."
+4. `mcp_whatsapp_send_status` (hidden), approved as written: "the same answer as
    mcp_whatsapp_send({id, wait_s:0}), including in_history for the message id it reports."
-5. New answer fields (not a sentence, quoted so the operator can see them): read - `as_of`, `as_of_iso`,
-   `as_of_local`, `order`, `index`, `pending`, `pending_note`, `as_of_regressed`, `addresses`,
-   `resolved_form`, `resolved_note`, `last_received_s`, `last_received_note`, `connected`,
-   `connected_note`; search - `as_of`, `as_of_iso`, `as_of_scope`, `order{by,key,direction,note}`,
-   `index`, `last_received_s`, `last_received_note`, `connected`, `connected_note`; a media record's view
-   - `text_reason` (`transcript_pending` | `ocr_pending` | `unsupported`) and the stand-in sentences
-   `transcript pending`, `ocr pending`, `not transcribed: <reason>`, `not read: <reason>`; send -
-   `in_history`, `in_history_note`.
-6. `lua/core/whatsapp.lua`, `mcp_whatsapp_search`, the new `order` parameter: "Omitted, a search of one
-   chat or one with no q answers newest first, and a search with q across the account answers best match
-   first. Say newest to get the tail of a conversation, or relevance to get the best match even when it
-   is old."
-7. `mcp_whatsapp_search` description, replaced sentence: "The answer also says how fresh it is: as_of
-   (the time of the newest message it matched, with as_of_scope=matches), order (which key the hits are
-   sorted by: newest first, or best match first - a relevance list is not a date list and says so), and
-   index (state current or catching_up, how many records the component has accepted and not written yet,
-   and lag_ms: how far behind the newest message it has seen this answer is). It also says whether the
-   pipe is alive: last_received_s (seconds since ANY message was received and indexed on this node, so a
-   quiet answer here can be told from a stuck pipe) and connected (the WhatsApp transport). Every hit
-   carries when it was sent (at, at_local, at_iso) and the chat it came from, so a search across chats
-   never mixes them unseen."
-8. `mcp_whatsapp_read` description, added: "last_received_s (seconds since any message was received and
-   indexed on this node) and connected (the transport) say whether a quiet answer is this chat or a
-   stuck pipe." and "resolved_form says which one was resolved (lid -> phone or phone -> lid), so the
-   alias never has to be tested by hand."
-9. Answer sentences inside the component: "newest message first: the top of this list is the newest
-   message that matched"; "best match first: this list is NOT in date order, so an older message may be
-   above a newer one; as_of says how new the newest match is"; "this node last wrote a message into its
-   index Ns ago, from any chat: a quiet answer here is this chat, not the pipe"; "this node has not
-   written any message into its index since it started"; "the WhatsApp transport is not connected:
-   nothing new can arrive until it reconnects, so an empty or old answer is the pipe and not the chat";
-   "asked by lid; the same person is also known by phone here, and this answer holds both".
-10. Canary report strings (`lua/core/canaries/whatsapp-index.lua`): "the index knows N chat(s); a read
-   answers as_of, order, index state, receive freshness and the transport, and a later read is never
-   older", and the refusal stages `read_capability_missing`,
-   `read_no_chat`, `read_unreadable`, `read_refused`, `read_no_as_of`, `read_no_order`,
-   `read_no_index_state`, `read_no_messages`, `read_no_receive_freshness`, `read_no_connected`, `read_went_backwards`, and the success line "a read answers as_of, order, index state, receive freshness and the transport, and a later read is never older".
+5. Answer fields, approved as written: read - `as_of`, `as_of_iso`, `as_of_local`, `order`, `index`,
+   `pending`, `as_of_regressed`, `addresses`, `resolved_form`, `resolved_note`, `last_received_s`,
+   `last_received_note`, `connected`, `connected_note`; search - `as_of`, `as_of_iso`, `as_of_scope`,
+   `order{by,key,direction,note}`, `index`, `last_received_s`, `last_received_note`, `connected`,
+   `connected_note`; a media record's view - `text_reason` (`transcript_pending` | `ocr_pending` |
+   `unsupported`) and the stand-in sentences `transcript pending`, `ocr pending`, `not transcribed: <reason>`,
+   `not read: <reason>`; send - `in_history`, `in_history_note`. `pending_note` is GONE (`3f87f509`): the
+   read description now says what to do about `pending`, so the field travels alone.
+6. `mcp_whatsapp_search`, the `order` parameter, approved as written: "Omitted, a search of one chat or one
+   with no q answers newest first, and a search with q across the account answers best match first. Say newest
+   to get the tail of a conversation, or relevance to get the best match even when it is old."
+7. Answer-side notes, now only where the field alone would misread, approved as written (`3f87f509`):
+   "best match first: this list is NOT in date order, so an older message may be above a newer one; as_of says
+   how new the newest match is"; "this node has not written any message into its index since it started: an
+   empty answer is the node, not the chat"; "the WhatsApp transport is not connected: nothing new can arrive
+   until it reconnects, so an empty or old answer is the pipe and not the chat"; "asked by lid; the same
+   person is also known by phone here, and this answer holds both". GONE for the same reason: the
+   newest-order note and the "this node last wrote a message Ns ago" note.
+8. Canary report strings, approved as written: "the index knows N chat(s); a read answers as_of, order,
+   index state, receive freshness and the transport, and a later read is never older", and the refusal
+   stages `read_capability_missing`, `read_no_chat`, `read_unreadable`, `read_refused`, `read_no_as_of`,
+   `read_no_order`, `read_no_index_state`, `read_no_messages`, `read_no_receive_freshness`, `read_no_connected`,
+   `read_went_backwards`.
+
+### One assertion per note, both halves (`3f87f509`)
+
+`index::tests::a_note_appears_only_in_the_case_it_explains` asserts, for each surviving note: absent on a
+healthy answer, present in its own case. Not connected - `connected_note` absent when connected, present
+when not. Never received - `last_received_note` absent when `last_received_s` has a number, present when it
+is null. Relevance order - the `note` is on `order` only when the order is relevance, absent for newest.
+Two addresses joined - `resolved_note`/`resolved_form` present when the alias joined two addresses, absent
+for a single-address chat. `pending` carries no note at all (asserted where the pending test used to check
+the note). The note builder lives in `view::note_freshness`, natively compiled, so this is measured by
+`cargo test` and not only on a live node.
 
 ## Checks run here (avell), narrowed as the brief asks
 
@@ -273,6 +272,19 @@ by passing `None` at both call sites - test-only, no assertion touched.
   is the 14 files above). I did **not** re-run them against a base worktree, so I name them as unrelated and
   unproven-on-base rather than as "pre-existing": the one pre-existing failure I did prove is the
   `foreground` arity above.
+
+### After Fable's description review (24/11 ~05:05Z): the same rows, run singly again
+
+`cargo test --manifest-path rust/components/wa-whatsapp/Cargo.toml` - **208 passed** (`3f87f509`).
+`bash scripts/test-component-pins.sh` - `11 of 11 pinned component(s) verified`, all 8 ops present
+(`3f87f509` repinned `wa-whatsapp` at 8,864,612 bytes, sha256 `06b7ced2c1e4…`, because the notes moved).
+`WA_BIN=<this build> bash scripts/sync-prompt-docs.sh --check` - `ok (4 blocks current)`: nothing derived
+from the descriptions changed, so nothing had to be regenerated.
+
+Singled out again, each with its own scratch home (no suite lock):
+`test-whatsapp-one.lua` 207 checks, `test-prompt-tool-names.lua` 286, `test-whatsapp-send.lua` 74,
+`test-whatsapp-one-surface.lua` 52, `test-return-shapes.lua` 39, `test-host-return-docs.lua` 10,
+`test-whatsapp-names.lua` 8 - all passed.
 
 ### Rows run SINGLY (orchestrator 24/11 ~04:08Z: do not wait on the shared suite lock)
 
