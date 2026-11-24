@@ -2732,7 +2732,9 @@ fn a_message_accepted_and_not_written_yet_is_named_pending_and_the_answer_says_i
     assert_eq!(behind["index"]["lag_ms"], 30_000, "how far behind the newest message it has SEEN");
     assert_eq!(behind["index"]["newest_seen_ms"], base() + 30_000);
     assert_eq!(behind["pending"], serde_json::json!(["SENT1"]));
-    assert!(behind["pending_note"].as_str().unwrap().contains("not in the index yet"));
+    // No note: the tool's own description says what to do about `pending` (Fable, 24/11), so a healthy
+    // answer carries the field alone. `pending` is the one field that cannot be misread.
+    assert!(behind.get("pending_note").is_none(), "no note beside a field that explains itself: {behind}");
     // The id is a message of another chat: it is not this read's pending list.
     let elsewhere = Pace { pending: vec![(OTHER.to_string(), "SENT2".to_string())], ..pending.clone() };
     let other = block_on(read_paced(&store, &asking, &elsewhere)).unwrap();
@@ -2746,6 +2748,46 @@ fn a_message_accepted_and_not_written_yet_is_named_pending_and_the_answer_says_i
     assert_eq!(after["index"]["state"], "current");
     assert_eq!(after["as_of"], base() + 30_000, "the sent message is in the history, and as_of says so");
     assert_eq!(after["messages"][0]["id"], "SENT1");
+}
+
+/// Fable (24/11 ~05:05Z): a note is sent ONLY where the field alone would be misread, and a healthy answer
+/// carries the fields alone. One assertion per note, both halves.
+#[test]
+fn a_note_appears_only_in_the_case_it_explains() {
+    // 1. Not connected: `connected: false` alone reads as a fact about this chat, so it carries a note.
+    let mut healthy = serde_json::json!({"ok": true});
+    crate::view::note_freshness(&mut healthy, Some(12), true);
+    assert_eq!(healthy["last_received_s"], 12);
+    assert_eq!(healthy["connected"], true);
+    assert!(healthy.get("connected_note").is_none(), "a connected node explains nothing: {healthy}");
+    assert!(healthy.get("last_received_note").is_none(), "a node that has received explains nothing: {healthy}");
+    let mut down = serde_json::json!({"ok": true});
+    crate::view::note_freshness(&mut down, Some(12), false);
+    assert!(down["connected_note"].as_str().unwrap().contains("not connected"), "{down}");
+    // 2. Never received: `last_received_s: null` alone reads as "the chat is quiet", which it is not.
+    let mut fresh_start = serde_json::json!({"ok": true});
+    crate::view::note_freshness(&mut fresh_start, None, true);
+    assert_eq!(fresh_start["last_received_s"], serde_json::Value::Null);
+    assert!(fresh_start["last_received_note"].as_str().unwrap().contains("not written any message"), "{fresh_start}");
+    assert!(fresh_start.get("connected_note").is_none(), "{fresh_start}");
+    // 3. Relevance order: a list in score order above a newer message, so it says it is not a date list.
+    assert!(search_order_block(seam::Order::Relevance)["note"].as_str().unwrap().contains("NOT in date order"));
+    assert!(search_order_block(seam::Order::Newest).get("note").is_none(), "newest first needs no note");
+    // 4. Two addresses joined: the answer holds more than the address asked about, so it says so - and a
+    // single-address answer carries no such note at all (asserted in
+    // `one_chat_is_one_history_under_both_of_its_addresses`, where the stranger has no `addresses`).
+    let store = Memory::new();
+    let lid = "72103978127549@lid";
+    let pn = "5511977776669@s.whatsapp.net";
+    block_on(put(&store, &direct(lid, "Laura", "J1", base(), "oi"))).unwrap();
+    block_on(put(&store, &direct(pn, "Laura", "J2", base() + 1_000, "oi de novo"))).unwrap();
+    block_on(remember_alias(&store, lid, pn)).unwrap();
+    let joined = read_of(&store, lid);
+    assert_eq!(joined["resolved_form"], "lid -> phone");
+    assert!(joined["resolved_note"].as_str().unwrap().contains("holds both"), "{joined}");
+    let alone = read_of(&store, "5511977776670@s.whatsapp.net");
+    assert!(alone.get("resolved_note").is_none(), "one address, no note: {alone}");
+    assert!(alone.get("resolved_form").is_none());
 }
 
 #[test]

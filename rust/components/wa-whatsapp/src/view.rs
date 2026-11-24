@@ -214,6 +214,31 @@ fn stand_in(record: &Record) -> Option<(String, &'static str)> {
     Some((format!("{word} pending"), pending))
 }
 
+/// Add the node's receive freshness and the transport to a read or search answer, with a note ONLY where
+/// the field alone would be misread (Fable, 24/11 ~05:05Z: a healthy answer carries the fields alone).
+///
+/// The two notes that survive: never received (a node that has written nothing yet is not a quiet chat) and
+/// not connected (nothing can arrive at all). Both are facts a reader cannot infer from the numbers:
+/// `last_received_s: null` and `connected: false` are exactly the cases where "nothing new" would be the
+/// wrong conclusion.
+pub(crate) fn note_freshness(body: &mut serde_json::Value, last_received_s: Option<i64>, connected: bool) {
+    body["last_received_s"] = match last_received_s {
+        Some(seconds) => serde_json::Value::from(seconds),
+        None => serde_json::Value::Null,
+    };
+    if last_received_s.is_none() {
+        body["last_received_note"] = serde_json::Value::String(
+            "this node has not written any message into its index since it started: an empty answer is the node, not the chat".into(),
+        );
+    }
+    body["connected"] = serde_json::Value::Bool(connected);
+    if !connected {
+        body["connected_note"] = serde_json::Value::String(
+            "the WhatsApp transport is not connected: nothing new can arrive until it reconnects, so an empty or old answer is the pipe and not the chat".into(),
+        );
+    }
+}
+
 /// The header a thread read and a search answer start with: which chat this is, in words, and how to
 /// read the page under it.
 ///

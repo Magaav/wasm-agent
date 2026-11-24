@@ -2156,22 +2156,7 @@ async fn query_tick(cfg: &IndexConfig) -> bool {
         if let Ok(body) = answer.as_mut() {
             if body.get("ok") == Some(&serde_json::Value::Bool(true)) {
                 let (last_received_s, connected) = receive_freshness(now_ms());
-                body["last_received_s"] = match last_received_s {
-                    Some(seconds) => serde_json::Value::from(seconds),
-                    None => serde_json::Value::Null,
-                };
-                body["last_received_note"] = match last_received_s {
-                    Some(seconds) => serde_json::Value::String(format!(
-                        "this node last wrote a message into its index {seconds}s ago, from any chat: a quiet answer here is this chat, not the pipe"
-                    )),
-                    None => serde_json::Value::String("this node has not written any message into its index since it started".into()),
-                };
-                body["connected"] = serde_json::Value::Bool(connected);
-                if !connected {
-                    body["connected_note"] = serde_json::Value::String(
-                        "the WhatsApp transport is not connected: nothing new can arrive until it reconnects, so an empty or old answer is the pipe and not the chat".into(),
-                    );
-                }
+                crate::view::note_freshness(body, last_received_s, connected);
             }
         }
     }

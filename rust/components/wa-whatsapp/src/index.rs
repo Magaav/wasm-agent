@@ -2689,7 +2689,6 @@ fn search_order_block(order: seam::Order) -> serde_json::Value {
             "by": "newest",
             "key": "ts",
             "direction": "newest_first",
-            "note": "newest message first: the top of this list is the newest message that matched",
         }),
         seam::Order::Relevance => serde_json::json!({
             "by": "relevance",
@@ -2979,10 +2978,10 @@ pub async fn read_paced<S: Store>(store: &S, request: &seam::Verified, pace: &Pa
         ));
     }
     if !pending.is_empty() {
+        // The field alone (the ids), because the tool's own description says what to do about it
+        // (Fable, 24/11: a healthy answer carries the fields alone, and a note only where the field
+        // would be misread).
         answer["pending"] = serde_json::Value::Array(pending);
-        answer["pending_note"] = serde_json::Value::String(
-            "accepted and not in the index yet: these ids are real messages this read cannot show; read again in a second".into(),
-        );
     }
     if let Some(regressed) = regressed {
         answer["as_of_regressed"] = regressed;
