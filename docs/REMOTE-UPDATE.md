@@ -9,7 +9,15 @@ wa update openclaw                          # origin/main, on openclaw, by openc
 wa update openclaw --commit <40-hex>        # one exact landed commit
 wa update openclaw --rendezvous             # the registry that node runs (scripts/deploy-rendezvous.sh)
 wa update openclaw --status [--id <record>] # what it installed, read from the peer's own files
+wa update openclaw --detach                 # ask, print the command that re-attaches, return
+wa update openclaw --follow                 # attach to the newest record and wait on it
 ```
+
+`wa update <node>` **follows by itself** (24/11): it asks, then reads the peer's own `status` - one call
+every 10 s, the peer's durable files are the answer - printing each state change with the time it took,
+until the node reports installed, failed or silent, and exits 0 only for installed. `--detach` returns
+at once; `--follow` attaches without asking for anything; `--status` stays the single read an agent
+parses, and `--json` implies it.
 
 The same two calls are a tool: `node_update {node, action, commit?, rendezvous?, id?}`.
 

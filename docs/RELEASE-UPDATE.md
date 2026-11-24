@@ -284,6 +284,59 @@ second. If a future editor moves this onto a hot route, that measurement is the 
 with `origin/main`; a release install runs the bootstrap's verified `--check`. It writes no request
 and installs nothing.
 
+### `wa update` follows the install it asked for (24/11)
+
+MEASURED on `work`, 24/11: `wa update` printed nothing while the deploy compiled 48 of 456 crates after
+three and a half minutes, and 361 s into a build that died it printed nothing at all. So the command now
+follows its own request to the end (`lua/core/update_follow.lua`):
+
+- the **first line** names the target and what the INSTALLER will do, and never more than that. A
+  release list that names this exact commit gives `install: published binary for <sha12> on <triple> —
+  download, no build`; otherwise it is ONE line, `no published binary is named for <sha12> here: the
+  installer looks for one built from the same inputs, and builds from source only if there is none
+  (minutes)` - because `scripts/deploy.sh` searches for a release built from the same compiled inputs
+  (`wa_node_release_digest_search`), and that finds a covering release for every scripts/Lua-only
+  landing. The words `building from source` are printed only when the installer itself says so
+  (`deploy: no published binary for this commit; building this tree`);
+- every change of phase prints one line with the elapsed time. A real build shows its bar and names the
+  source - `building 48/456 compiling wa-host (from source, on this machine) · 3m30s`; a published
+  install has no bar to draw and says `installing the published binary (no build) · 1m10s`. A waiting
+  install says what it waits for. Nothing is repeated while it does not change; a heartbeat every 30 s
+  shows the clock, so a cold build is never drawn as a dead one;
+- the final line names what happened: `installed <sha12> · 5m12s` and exit 0, or `failed: <reason> ·
+  <elapsed>`, then **the installer's own last lines** (up to eight of them, from `deploy.out` for this
+  request), then a `next:` line saying what this node still runs and where that output is - and exit 1.
+  Nobody needs to open a file to read why;
+- a request the sentinel never starts is not followed forever: past the installer's own idle bound
+  (`WA_DEPLOY_IDLE_BOUND`, 1800 s; `WA_UPDATE_FOLLOW_BOUND` overrides it, 0 waits forever) the line is
+  `stopped following after <elapsed>: the sentinel has not started this request (...); wa update
+  --follow picks it up again`, and the command exits 1. Nothing is cancelled: the request stays in the
+  box and the next `wa update --follow` reads it;
+- `--detach` writes the request and returns at once, naming the one command that re-attaches
+  (`wa update --follow`); `--follow` attaches to the newest deploy this node still has in flight and
+  asks for nothing. Ctrl-C stops following, not the install: the installer is a separate process the
+  sentinel spawned detached.
+
+Nothing here is a new protocol: the follower reads the files a deploy already writes (`deploy-result.json`,
+`build-status.json`, the sentinel's `queue/` and `failed|done/` records, `deploy-state.json`,
+`deploy-pending.json`, `deploy.out`) and matches the installer's verdict by **request id**, so the
+previous deploy's result is never read as this one's. `wa update <node>` follows the peer's own
+`status` instead (`docs/REMOTE-UPDATE.md`).
+
+### Answering "is this published?" locally
+
+`wa update --check` also answers, from the release list this node already holds
+(`<config>/update-check.json`, schema 2 - asset names included) and with no request:
+
+    release list: 5 entries, read 2026-11-24 12:49Z, newest node-<sha12>
+    this node (<sha12>): published binary for <sha12> on x86_64-unknown-linux-gnu (node-<sha12>)
+    behind by (<sha12>): no published binary for <sha12> on x86_64-unknown-linux-gnu
+
+Three answers and no fourth: `published`; `no published binary` (a release names the commit but carries
+no asset for this machine, or local ancestry proves the commit is newer than everything in the list, so
+nothing can name it yet); and `the release list cannot say` - an old commit outside the window, or a node
+whose list has never been read. The list's own date travels with the answer.
+
 ## An update installs the whole component set, and enables none of it
 
 A deploy carries two things that update separately from the core: the Lua tree, and the pinned WASI

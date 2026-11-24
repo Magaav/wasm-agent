@@ -585,6 +585,142 @@ local function feed_from_cache(cached)
   return feed
 end
 
+-- ---- what is published for ONE commit, from this node's own list -------------------------------
+--
+-- `wa update` must say, in its first line, whether the install will download or build (Fable/Victor,
+-- 24/11). The installer's decision is its own (`scripts/deploy.sh`: `wa_node_binary_reuse`, then the
+-- release digest search) and it needs the network; a command path may not make a request just to
+-- describe itself - the same rule that keeps a page load from costing one. What this node CAN answer
+-- without a request is what its release list already said: `update-check.json` (schema 2) carries every
+-- entry's asset names, so "is there a binary for commit X on this triple" is a lookup.
+--
+-- Three answers, and the third is not a guess:
+--   published  a release names this commit and carries this target's three assets
+--   none       a release names this commit but carries no asset for this machine, OR local ancestry
+--              proves the commit is newer than every entry in the list (no release can name it yet)
+--   unknown    no readable list, or a commit the list does not name and ancestry cannot order - the
+--              list holds the newest few releases, so an old commit falls in here and is never called
+--              "unpublished" on a guess
+function M.release_list(options)
+  local o = options or {}
+  local path = o.cache_path or M.cache_path(o.state_dir)
+  local cached = read_cache(path)
+  if not cached then return nil, "no_release_list", { path = path } end
+  local feed = feed_from_cache(cached)
+  if not feed then return nil, "release_list_unreadable", { path = path } end
+  return { feed = feed, checked_at = tonumber(cached.checked_at), path = path, error = trim(cached.error) }
+end
+
+-- `options.target` here is the TRIPLE (`x86_64-unknown-linux-gnu`), the spelling M.target and
+-- M.installable already use, and never a commit - a caller that means a commit passes it as `commit`.
+function M.published(commit, options)
+  local o = options or {}
+  local target = o.target
+  if target == nil then target = M.target(o) end
+  local shorthand = trim(commit):lower()
+  local answer = { schema = 1, commit = shorthand, target = target and trim(target) or "", state = "unknown" }
+  if #shorthand < 7 or shorthand:find("[^0-9a-f]") then
+    answer.reason = "no_commit"
+    return answer
+  end
+  local list, reason, meta = M.release_list(o)
+  answer.path = meta and meta.path or nil
+  if not list then
+    answer.reason = reason
+    return answer
+  end
+  answer.checked_at = list.checked_at
+  answer.window = #list.feed
+  for _, entry in ipairs(list.feed) do
+    if M.same_commit(shorthand, entry.sha12) then
+      answer.tag = entry.tag
+      answer.entry = entry
+      if M.installable(entry, target) then
+        answer.state, answer.reason = "published", "asset_for_target"
+      else
+        answer.state, answer.reason = "none", "no_asset_for_target"
+      end
+      return answer
+    end
+  end
+  -- Not in the window. Only local ancestry may turn that into `none`: if this commit is newer than every
+  -- entry the list holds, no entry can name it yet. Anything else stays unknown.
+  local newest = list.feed[1]
+  answer.newest = newest and newest.sha12 or nil
+  -- Ancestry, from the objects already in this node's tree, is the default order: it is what turns
+  -- "the list does not name it" into the provable "it is newer than everything in the list". A caller
+  -- with no tree (a release install) or no git gets `unknown`, which is the truth there.
+  local order = o.order
+  if order == nil and trim(o.tree) ~= "" then
+    order = function(installed, latest) return M.order_by_ancestry(o.tree, installed, latest) end
+  end
+  if newest and type(order) == "function" then
+    local called, verdict = pcall(order, { commit = shorthand, sha12 = shorthand }, newest)
+    if called and verdict == "newer" then
+      answer.state, answer.reason = "none", "newer_than_the_release_list"
+      return answer
+    end
+  end
+  answer.reason = "not_in_release_list"
+  return answer
+end
+
+-- The fact in one clause, without the consequence: "no published binary for <sha12> on <triple>". The
+-- caller that knows what happens next adds it - `wa update`'s first line says "building from source,
+-- minutes", which is why the two halves are separate sentences rather than one sentence with a switch.
+function M.published_line(answer)
+  if type(answer) ~= "table" then return nil end
+  local sha = trim(answer.commit) ~= "" and trim(answer.commit):sub(1, 12) or "this commit"
+  local triple = trim(answer.target) ~= "" and answer.target or "this machine"
+  local state = trim(answer.state)
+  if state == "published" then
+    return "published binary for " .. sha .. " on " .. triple .. (answer.tag and (" (" .. tostring(answer.tag) .. ")") or "")
+  elseif state == "none" then
+    return "no published binary for " .. sha .. " on " .. triple
+  end
+  return "the release list cannot say whether " .. sha .. " is published on " .. triple .. " (" ..
+    tostring(answer.reason or "no_release_list") .. ")"
+end
+
+-- (b)(i), 24/11: "is there a published artifact for the commit I am on, and for the one I am behind by",
+-- answered locally - the release list this node already has, no request. The list's own date travels with
+-- it: a fact about a five-day-old list is not a fact about now.
+function M.listing(options)
+  local o = options or {}
+  local list, reason, meta = M.release_list(o)
+  local listing = { lines = {}, list = list, reason = reason, path = meta and meta.path or nil }
+  if list then
+    local when = list.checked_at and os.date("!%Y-%m-%d %H:%MZ", math.floor(list.checked_at / 1000)) or "an unknown time"
+    listing.lines[#listing.lines + 1] = "release list: " .. #list.feed .. " entries, read " .. when ..
+      (list.feed[1] and (", newest " .. tostring(list.feed[1].tag or list.feed[1].sha12)) or "")
+  else
+    listing.lines[#listing.lines + 1] = "release list: not readable here (" .. tostring(reason) ..
+      "), so nothing is claimed about what is published"
+  end
+  -- `o.target` in THIS function is the commit this node is behind by; in `M.published` it is the triple.
+  -- The two spellings collide, so the per-commit lookups get a copy without either key rather than a
+  -- parameter that means two things.
+  local per_commit = {}
+  for key, value in pairs(o) do
+    if key ~= "target" and key ~= "installed" then per_commit[key] = value end
+  end
+  local installed = trim(o.installed):lower()
+  if #installed >= 7 then
+    local here = M.published(installed, per_commit)
+    listing.installed = here
+    listing.lines[#listing.lines + 1] = "this node (" .. installed:sub(1, 12) .. "): " .. tostring(M.published_line(here))
+  else
+    listing.lines[#listing.lines + 1] = "this node: its install record names no commit, so what it is published as cannot be asked"
+  end
+  local target = trim(o.target):lower()
+  if #target >= 7 and not (#installed >= 7 and M.same_commit(installed, target)) then
+    local there = M.published(target, per_commit)
+    listing.target = there
+    listing.lines[#listing.lines + 1] = "behind by (" .. target:sub(1, 12) .. "): " .. tostring(M.published_line(there))
+  end
+  return listing
+end
+
 local function write_cache(path, value)
   if not path then return end
   write(path, json.encode(value))

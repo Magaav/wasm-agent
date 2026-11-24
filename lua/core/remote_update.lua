@@ -1207,6 +1207,81 @@ function M.schedule_followup(session, node, reply, in_seconds)
   return scheduled
 end
 
+-- ---- following one remote update ----------------------------------------------------------------
+--
+-- `wa update <node>` does not return after asking (Fable/Victor, 24/11, slice 1). The person who typed it
+-- reads the peer's own answer until it settles, with the time it took - the same rule as the local form,
+-- and the same reason: a command that prints one line and stops has told nobody whether the install is
+-- still going, stuck, or dead. The peer's `status` action already answers queued/running/installed/failed/
+-- silent from its own durable files (`outcome_of`), so NOTHING NEW CROSSES THE BOUNDARY: this is a loop
+-- over a call that already exists.
+--
+-- The poll is SPACED (10 s). A fabric call every second for ten minutes is a relay storm, and this tree
+-- has already paid for one (19/11): a terminal command is not entitled to a node's whole attention.
+M.REMOTE_POLL = 10
+M.REMOTE_HEARTBEAT = 60
+M.REMOTE_DETACHED = "detached: the install continues on %s; re-attach with wa update %s --follow"
+
+-- `call` and the seams (`out`, `clock`, `sleep`, `poll`, `polls`, `seconds`) are parameters for the same
+-- reason as `event_ledger.follow`'s: a test drives the loop without a node, a port or a wall clock.
+function M.follow_remote(call, selector, id, options)
+  local o = type(options) == 'table' and options or {}
+  local out = o.out or function(line) print(line) end
+  local clock = o.clock or function() return tonumber(host.now and host.now() or os.time()) or os.time() end
+  local pause = o.sleep or function(seconds)
+    if host.sleep then host.sleep(math.max(1, math.floor(seconds * 1000))) end
+  end
+  local poll = tonumber(o.poll) or M.REMOTE_POLL
+  local started = clock()
+  local last_state, last_at, rounds, printed = nil, nil, 0, 0
+  local function elapsed(seconds)
+    local s = math.max(0, math.floor(tonumber(seconds) or 0))
+    if s >= 3600 then return string.format('%dh%02dm', math.floor(s / 3600), math.floor(s / 60) % 60) end
+    if s >= 60 then return string.format('%dm%02ds', math.floor(s / 60), s % 60) end
+    return s .. 's'
+  end
+  while true do
+    local now = clock()
+    local reply = M.status(call, selector, { id = id, session = o.session })
+    if type(reply) ~= 'table' then return { ok = false, state = 'unreadable', seconds = now - started, printed = printed } end
+    local state = trim(reply.state)
+    if state == '' then state = reply.error and 'refused' or 'queued' end
+    local label = tostring(reply.node or selector)
+    local detail = trim(reply.detail)
+    if state ~= last_state or not last_at or (now - last_at) >= M.REMOTE_HEARTBEAT then
+      local body
+      if state == 'installed' then
+        local commit = tostring(reply.installed_commit or reply.commit or ''):sub(1, 12)
+        body = 'installed ' .. commit .. ' on ' .. label
+      elseif state == 'failed' then
+        body = 'FAILED on ' .. label .. (detail ~= '' and (': ' .. detail) or '')
+      elseif state == 'silent' then
+        -- "NO ANSWER", not "SILENT": the peer did not report, and the word has to say what is missing rather
+        -- than describe a sound (Fable 24/11, D).
+        body = 'NO ANSWER from ' .. label .. (detail ~= '' and (': ' .. detail) or '')
+      else
+        body = label .. ': ' .. state .. (detail ~= '' and (' \226\128\148 ' .. detail) or '')
+      end
+      out(body .. ' \194\183 ' .. elapsed(now - started))
+      printed = printed + 1
+      last_state, last_at = state, now
+    end
+    if state == 'installed' or state == 'failed' or state == 'silent' then
+      return { ok = state == 'installed', state = state, reply = reply, seconds = now - started,
+        rounds = rounds, printed = printed }
+    end
+    if reply.error then
+      return { ok = false, state = 'refused', reply = reply, seconds = now - started, rounds = rounds, printed = printed }
+    end
+    rounds = rounds + 1
+    if (o.polls and rounds >= o.polls) or (o.seconds and (now - started) >= o.seconds) then
+      return { ok = false, state = state, unknown = true, timed_out = true, reply = reply,
+        seconds = now - started, rounds = rounds, printed = printed }
+    end
+    pause(poll)
+  end
+end
+
 -- What the peer would do, without asking it to do it. Read-only on both sides: one signed call whose
 -- handler (`M.check`) gathers facts and writes nothing.
 function M.inspect(call, selector, options)
@@ -1255,6 +1330,11 @@ function M.cli(argv)
       else options.await = value end
       index = index + 2
     elseif flag == '--status' or flag == '--watch' then options.status = true; index = index + 1
+    -- Follow by itself (Fable/Victor, 24/11, slice 1): `--detach` asks and returns, `--follow` attaches to
+    -- the newest record without asking for anything, and with neither `wa update <node>` waits for the
+    -- node's own answer and prints it with the time it took.
+    elseif flag == '--detach' then options.detach = true; index = index + 1
+    elseif flag == '--follow' then options.follow = true; index = index + 1
     elseif flag == '--commit' or flag == '--id' or flag == '--reason' or flag == '--session' or flag == '--node' then
       local key = flag:sub(3)
       local value = argv[index + 1]
@@ -1267,6 +1347,8 @@ function M.cli(argv)
     elseif flag == '--help' or flag == '-h' then
       print('wa update <node> [--commit <sha>] [--binary|--tree|--release] [--rendezvous] [--reason <text>] [--session <id>] [--json]')
       print('wa update <node> --status [--id <record>] [--json]')
+      print('wa update <node> [--follow|--detach]  asks, then follows the node\'s own answer until it settles')
+      print('  --follow   attach to the newest record without asking again; --detach asks and returns')
       print('wa update <node> --rollback   put back the pair that node\'s last install replaced, and PIN it there')
       print('wa update <node> --to <sha>   move it to that commit on purpose, and PIN it there')
       print('wa update <node> --pin [--commit <sha>] [--bytes <sha256>]   record a pin only; nothing is deployed')
@@ -1366,6 +1448,9 @@ function M.cli(argv)
         summary = 'pinned ' .. tostring(selector) .. ': ' .. tostring(written.summary) }
     end
   elseif options.status then reply = M.status(nodes.remote_call, selector, options)
+  -- `--follow` ASKS FOR NOTHING: it reads the newest record this caller asked for, and the loop below
+  -- waits on it. A second request would be a second install.
+  elseif options.follow then reply = M.status(nodes.remote_call, selector, options)
   else reply = M.request(nodes.remote_call, selector, options) end
   if as_json then
     print(json.encode(reply))
@@ -1391,6 +1476,28 @@ function M.cli(argv)
   end
   if reply.error then return 1 end
   if options.status and reply.state == 'failed' then return 1 end
+  -- FOLLOW BY ITSELF (slice 1, Fable/Victor 24/11). One command, and it says what happened:
+  --   * `--detach`: the line printed above names the one command that re-attaches, and this returns;
+  --   * `--follow`: attach to the newest record and wait on it (nothing is asked for);
+  --   * neither: a request was just written, so wait on THAT record;
+  --   * `--json` or `--status` or a pin verb: one answer, unchanged - an agent parses those, and a
+  --     command whose output shape a caller depends on does not start printing lines it did not print.
+  if not as_json and not options.pin and not options.unpin then
+    local attach = nil
+    if options.follow then
+      if reply.state == 'installed' or reply.state == 'failed' or reply.state == 'silent' then return reply.state == 'installed' and 0 or 1 end
+      attach = reply.record or ''
+    elseif not options.status and not options.detach and reply.ok ~= false then
+      attach = reply.record or ''
+    end
+    if options.detach and reply.record then
+      print(string.format(M.REMOTE_DETACHED, tostring(selector), tostring(selector)))
+    end
+    if attach ~= nil and not options.detach then
+      local result = M.follow_remote(nodes.remote_call, selector, attach, { session = options.session })
+      return result.ok == true and 0 or 1
+    end
+  end
   return 0
 end
 
