@@ -1,7 +1,102 @@
 # whatsapp-read-is-consistent (Victor, 23/11): a read never goes backwards, says how fresh it is, shows what was just sent
 
-Branch `change/whatsapp-read-is-consistent`, base `51b63d9a`. Worktree
-`/home/victor/Work/missions/whatsapp-read-is-consistent/wt`. Nothing is pushed.
+Branch `change/whatsapp-read-is-consistent`, rebased onto `origin/main` `9e22fbe1` (which carries the
+revert `6cbcc72e` of the first landing `efb9b331`); the change is re-applied on top of it in two
+commits (the change, then this report). Worktree `/home/victor/Work/missions/whatsapp-read-is-consistent/wt`. Nothing is pushed.
+
+# The three answers Fable asked for before any landing (24/11 ~10:00Z)
+
+The landing `efb9b331` was reverted on main (`6cbcc72e`) because `deploy.sh` refused it with
+`refused(component_not_installable)`. This section is the answer, measured, and it changes what the
+branch carries: **`components.lock` is now byte-identical to `origin/main`'s** - my two repin lines are
+gone - and the component change travels as source only, with the reason below.
+
+## 1. Why did a WhatsApp branch touch `wa-email` at all?
+
+Not because I rebuilt everything and wrote what came out - but the conclusion is the same: **`wa-email`'s own
+source is unchanged**, and its bytes still change, because a crate it compiles changed.
+
+* `rust/components/wa-email/Cargo.toml` depends on `wa-email-outbox` and `wa-email-index` (no `wa-queue`).
+* `rust/wa-email-outbox/Cargo.toml:28` is `wa-queue = { path = "../wa-queue" }`.
+* this branch changes `rust/wa-queue/src/{lib,queue,codec,tests}.rs` (the in-flight dedupe claim, `75bdd7b9`),
+  so `wa-queue` is a changed input of `wa-email`, and `test-component-pins.sh`'s transitive `path =`
+  closure said so by name.
+
+`wa-email`'s pin is **back to main's, byte for byte** (`ddbe326a…` 565,827 bytes), because a repin of it
+cannot be installed (answer 2) and its own sources did not move.
+
+## 2. Is the new `wa-whatsapp` pin what a clean tree build produces? No - and that is the finding
+
+Measured here, on the merged tip, same content, two paths (the worktree, and a `cp -a` copy of it at
+`/tmp/wt-b2`), each built by the shipped pipeline (`scripts/build-components.sh wa-whatsapp`):
+
+| build | path | bytes | sha256 |
+| --- | --- | --- | --- |
+| A | this worktree | 8,864,612 | `06b7ced2c1e46cd73a64d7032e6a96dc02a60fd5b167b13b816a74d6af0d71b4` |
+| B | `/tmp/wt-b2` (same content) | 8,864,959 | `4207f1faa7109f6d96ee185f4fd891c0826bb59b333915bc94c926f9d652d8db` |
+
+So the build is reproducible **inside one path** (two builds of this tree in this worktree gave
+`06b7ced2…` twice - the earlier `3f87f509` build and build A above) and **not across two paths**, which is
+the property `components.lock` already states in its own header ("Reproducible within one checkout, and
+still not across two") and `docs/COMPONENTS.md` measures: a component with a `path =` dependency carries
+Cargo's `-C metadata` for that dependency, whose source identity is its **canonical absolute path**; the
+path-dep components are `wa-whatsapp`, `wa-email`, `graph`, `mesh` and `model-gateway`.
+
+That is why the deploy refused: no release `components-<lock sha12>` exists for a fresh branch's lock, so
+it fell back to its own clean-tree build (a different directory), which cannot equal my pin. **My pin named
+bytes only my directory produces, so it was wrong to write it** - and `wa-whatsapp`'s pin is therefore back
+to main's too (`6e083809…` 8,840,589 bytes).
+
+**The fix that makes this class of landing possible exists and is not in main.** The
+`components-reproducible` mission (report `docs/missions/reports/components-reproducible.md`, commits
+`8911add6`, `197f9c6b`, `940e4dd6`, `740c9e5c`) pins the compiler (`COMPONENT_TOOLCHAIN=1.99.1`) and builds
+the tree from a constant path (`/tmp/wa-component-build/src`), after which the same eleven components build
+to the same eleven hashes from two checkouts. Checked here:
+`git merge-base --is-ancestor 8911add6 origin/main` is **false** for all four commits, and the
+`scripts/build-components.sh` on main has neither `COMPONENT_TOOLCHAIN` nor `WA_COMPONENT_BUILD_ROOT`.
+Until that lands, a component source change cannot be repinned by a mission from its own checkout: the pin
+must come from the machine that publishes (`scripts/publish-components.sh --from <dir>`, which prints the
+`gh release create` line for `components-<lock sha12>`), and a mission may not publish.
+
+## 3. The deploy's own component stage, run on the merged tip in a scratch install dir
+
+`source scripts/lib/deploy-components.sh; wa_components_prepare <repo> <stage> <install> $NAMES` - the exact
+function whose failure produced `refused(component_not_installable)` - with the merged tip as `<repo>`, a
+`mktemp -d` stage and install, and `components.lock` at main's pins. `rc=0`, no refusal, and:
+
+```
+component_source: agent-core /home/victor/.wasm-agent/components (pinned bytes)
+component_source: codemode /home/victor/.wasm-agent/components (pinned bytes)
+component_source: graph /home/victor/.wasm-agent/components (pinned bytes)
+component_source: hooks /home/victor/.wasm-agent/components (pinned bytes)
+component_source: memory /home/victor/.wasm-agent/components (pinned bytes)
+component_source: mesh /home/victor/.wasm-agent/components (pinned bytes)
+component_source: model-gateway /home/victor/.wasm-agent/components (pinned bytes)
+component_source: selfloop /home/victor/.wasm-agent/components (pinned bytes)
+component_source: telemetry-sink /home/victor/.wasm-agent/components (pinned bytes)
+component_source: wa-email /home/victor/.wasm-agent/components (pinned bytes)
+component_source: wa-whatsapp /home/victor/.wasm-agent/components (pinned bytes)
+```
+
+Nothing was written into `~/.local/bin` or the node's install (rule 12): the stage and the install dir were
+`/tmp/deployproof.*`, and the components directory was only read.
+
+## What this costs, said plainly
+
+With the lock at main's pins and the component source changed, `bash scripts/test-component-pins.sh` half 1
+is **RED** on this branch, by name: `wa-whatsapp source changed and its pin did not` and `wa-email source
+changed and its pin did not` (it lists `rust/wa-queue/src/*` for `wa-email`, `rust/components/wa-whatsapp/src/*`
+and the seam crates for `wa-whatsapp`). That is not a test I can satisfy honestly: the trailer it offers
+(`Components-Unchanged: <name> <why the bytes are the same>`) would be false, and pinning my own bytes is
+the install refusal that started this. The two ways out, both outside a mission's reach:
+
+1. land `components-reproducible` (constant build root + pinned toolchain), then this branch repins from
+   its own tree and any checkout reproduces it; or
+2. repin from the publishing machine and publish `components-<lock sha12>` before the deploy, which is the
+   release step the deploy error itself names.
+
+What that means for the fix being live: main's `wa-whatsapp` bytes do not carry this branch's changes, so
+openclaw keeps answering from the component it has until the next release rebuilds and repins it.
 
 ## A. Root cause of the backwards reads: a settled query answer was a cache
 
