@@ -181,9 +181,23 @@ CANDIDATE="$STAGE_BIN/wa"
 [ -x "$CANDIDATE" ] || refuse "node_binary_not_executable" "$CANDIDATE is not an executable file"
 note "node binary: staged from $BIN_TAG ($(wa_node_sha256 "$CANDIDATE"), manifest and signature verified)"
 BUILD_INFO="$("$CANDIDATE" --build-info 2>/dev/null | sed -n 's/^commit=//p' | head -1)"
-[ "$BUILD_INFO" = "$COMMIT" ] \
-  || refuse "binary_commit_mismatch" "the published binary names commit='$BUILD_INFO', this row asked for $COMMIT"
-note "the published binary runs and names commit=$BUILD_INFO"
+# WHICH COMMIT MUST THE BINARY NAME (24/11, after main's covering-release row landed)? The release the node
+# would install is either THIS commit's own build or an OLDER release built from the same compiled inputs
+# (`binary_release: <tag> <40-hex source commit>` - scripts/lib/node-binaries.sh), which is how a landing that
+# changes no compiled input installs without a binary of its own. In the first case the binary must name the
+# requested commit; in the second it must name the covering release's OWN source commit, and that commit must
+# be an ancestor of the requested one - "an older build of the same inputs" is then a fact, not a claim.
+COVERED_BY="$(printf '%s\n' "$BIN_OUT" | sed -n 's/^binary_release: .* \([0-9a-f]\{40\}\).*/\1/p' | head -1)"
+EXPECTED_COMMIT="${COVERED_BY:-$COMMIT}"
+[ "$BUILD_INFO" = "$EXPECTED_COMMIT" ] \
+  || refuse "binary_commit_mismatch" "the published binary names commit='$BUILD_INFO'; this row asked for $COMMIT and the release it resolved to is ${BIN_TAG}${COVERED_BY:+ (the build of $COVERED_BY)}, so its binary must name $EXPECTED_COMMIT"
+if [ -n "$COVERED_BY" ]; then
+  git -C "$ROOT" merge-base --is-ancestor "$COVERED_BY" "$COMMIT" 2>/dev/null \
+    || refuse "covering_release_not_an_ancestor" "$BIN_TAG is the build of $COVERED_BY, which is not an ancestor of $COMMIT; a release that does not precede this commit is not a build of the same tree's inputs"
+  note "the published binary runs and names commit=$BUILD_INFO (an older release of the same compiled inputs, ${BIN_TAG}, an ancestor of $SHORT)"
+else
+  note "the published binary runs and names commit=$BUILD_INFO"
+fi
 
 # ---- 2. the components, from the release this commit's lock names --------------------------------
 NAMES="$(wa_components_shipped "$TREE")" || refuse "components_lock_unreadable" "$TREE/components.lock"

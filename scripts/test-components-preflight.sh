@@ -147,8 +147,12 @@ if git -C "$ROOT" worktree add -q --detach "$WT" HEAD 2>/dev/null; then
   out="$(cd "$WT" && env -u WASM_AGENT_IN_TURN WA_DEPLOY_ROOT="$WT" WA_INSTALL_DIR="$W/live-install" WA_PORT=18471 \
     WA_RELEASE_API_BASE="http://127.0.0.1:1/api" HOME="$HOME" PATH="$NO_TOOLCHAIN" \
     bash scripts/deploy.sh --reason components-preflight-test 2>&1)"; rc=$?
-  if printf '%s' "$out" | grep -q 'cannot deploy from a turn running on the node'; then
-    skip "the real deploy's first lines" "this test runs inside a node turn, so the deploy's turn guard refuses first"
+  # THE DEPLOY'S TURN GUARD COMES FIRST AND HAS TWO REFUSALS: a turn ON the node ("cannot deploy from a turn")
+  # and a CLI turn with no sentinel supervising the node ("needs a sentinel supervising the node"). Either one
+  # stops the run before the preflight is reached, so the row says SKIP by name; anything else the deploy prints
+  # still has to be the preflight's own refusal, below.
+  if printf '%s' "$out" | grep -qE 'cannot deploy from a turn running on the node|needs a sentinel supervising the node'; then
+    skip "the real deploy's first lines" "the deploy's turn guard refused first (this test is running in a turn): $(printf '%s' "$out" | grep -m1 -oE 'cannot deploy from a turn[^.]*\.|needs a sentinel supervising the node[^)]*')"
   else
     ok "$([ "$rc" != 0 ] && echo 1)" "the deploy refuses a commit whose components cannot be supplied" "rc=$rc $(printf '%s' "$out" | tail -3)"
     ok "$(printf '%s' "$out" | grep -q 'refused(component_not_installable): this commit needs components-' && echo 1)" "with the sentence, in its first lines" "$(printf '%s' "$out" | head -6)"
