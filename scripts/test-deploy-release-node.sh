@@ -180,7 +180,7 @@ esac
 echo "  ok: the ledger row says '[deploy] installed', naming the new tree commit bbbb5555eeee (and not 'nothing was installed')"
 
 # ---------------------------------------------------------------------------------------- 2. a marker with NO install
-pause_a_turn b release-case-b
+pause_a_turn b release-case-a
 echo "  ok: a second turn paused for a second marker (1 model request)"
 sleep 1
 # THE UPDATE THAT DID NOT HAPPEN: the marker goes, the installed record does NOT move.
@@ -200,5 +200,14 @@ case "$LINE" in
   *) echo "  FAIL: the did-not-happen line does not name the target the marker carried: $(printf '%s' "$LINE" | head -c 160)"; exit 1 ;;
 esac
 echo "  ok: the ledger row says '[deploy] the update did not happen', naming the marker's target"
+
+# THE CRITERION IS PER SESSION: two installs two minutes apart (here: seconds apart, which is stricter) cost ONE
+# resume turn each for the SAME conversation - at most two, never one per install per row.
+SESSIONS=$(ledger "SELECT COUNT(DISTINCT session_id) FROM self_wakes WHERE reason='deploy pending: resume after the node swap';")
+[ "${SESSIONS:-0}" = "1" ] || { echo "  FAIL: the two installs were served in $SESSIONS conversations, expected the same one"; exit 1; }
+RESUMES=$(ledger "SELECT COUNT(*) FROM self_wakes WHERE reason='deploy pending: resume after the node swap';")
+[ "${RESUMES:-0}" = "2" ] || { echo "  FAIL: the ledger holds $RESUMES resume rows, expected exactly 2 (one per install) in that session"; exit 1; }
+echo "  ok: TWO installs in ONE conversation cost exactly TWO resume turns (one per install), for one session"
+
 echo "deploy-release-node ok: a real scratch node decides the release line from the INSTALLED RECORD - installed after a scripts-only install, did-not-happen when the marker goes and nothing was installed"
 

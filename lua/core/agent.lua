@@ -2049,6 +2049,12 @@ function M:note_interruption()
 end
 
 function M:run(text, images)
+  -- ONE PAUSE PER RUN, NOT ONE PER AGENT OBJECT (r8c, measured 24/11). deploy_pause.at_boundary marks the run it
+  -- paused (self.deploy_pause) so the same run cannot pause twice. A SERVED conversation keeps ONE agent object per
+  -- thread (lua/core/server.lua's agent_for), so that mark outlived the run and the thread never paused again:
+  -- measured on a scratch node, a second install in the same thread paused nothing at all and the turn simply
+  -- answered. The mark belongs to the RUN, so the run's start is where it is cleared.
+  self.deploy_pause = nil
   -- THE PREAMBLE IS MEASURED AND BOUNDED FROM HERE (change/start-instant, 22/11). The clock used to start
   -- in run_body, past steering.begin() and the run's own telemetry row - which is where a held ledger
   -- write lock is actually paid (measured with a 10 s hold: 9.26 s of this function against 200 ms of
