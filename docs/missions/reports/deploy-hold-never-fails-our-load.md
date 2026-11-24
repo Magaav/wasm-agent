@@ -1055,3 +1055,35 @@ re-run; the same step, the same behaviour as the four earlier observations today
     capability is missing)
 28. `deploy pause: sweep ran: <n> record(s) seen, <m> closed` (once a day, even when nothing was closed)
 29. `superseded: too old to fire` - the `last_error` of a resume row the invariant retires
+
+### r5.1 (Fable's review of r5, 24/11 ~01:55Z): `dispatching` spans the whole turn
+
+**(1) WHEN a resume row leaves `dispatching`: at turn END, never at start.**
+
+* `lua/core/selfloop.lua:1200-1201` (the component-plan path) and `:1509-1510` (the inline path) claim a due row with
+  `UPDATE self_wakes SET status='dispatching', boot=?, attempts=attempts+1, updated_at=? WHERE id=? AND
+  status='pending'` - i.e. at DISPATCH, before the turn starts;
+* `M.finish` (`:1214`) writes `delivered`/`failed` (`:1228`, `:1232`) and is called after the run returns
+  (`:1355`, `M.finish(row, ok, result, ...)`), i.e. at turn END.
+
+So a row is `dispatching` for the entire turn. **`M.stale_seconds()` is `max(60, WA_SELF_WAKE_STALE_SECONDS or
+1800)` (`:166-167`) - 1800 s**, and r5's `300` was both the wrong number and the wrong owner (this module cannot
+load `selfloop`, which loads it).
+
+**(2) The reclaim now requires that NOTHING HAPPENED.** Two facts, not one: the row older than the bound **and** no
+message for its session at or after the row's `updated_at` (`SELECT COUNT(*) FROM messages WHERE session_id=? AND
+created_at>=?`). That is ae2a9231's exact shape - dispatched, `last_error='deploy ended: resumed now'`, and nothing
+written afterwards. A long turn writing messages is untouched, so no second resume is ever paid beside a running
+turn. The bound is `deploy_pause.wait_stale_seconds()` (the same `WA_SELF_WAKE_STALE_SECONDS`, floor 60), and the
+reclaim counts `changed.changes`, not `pcall`'s boolean.
+
+**(3) Tests, both directions.**
+
+| case | assertion |
+| --- | --- |
+| `dispatching` 400 s, NO session activity | reclaimed as `unknown`, and **exactly one** re-arm for that session |
+| `dispatching` 400 s, WITH messages after the dispatch (a long turn in progress) | **untouched**, no `status='unknown'` statement, **ZERO** new wakes |
+| `dispatching` 400 s with the default bound (1800 s) | inside the tick's own bound: nothing reclaimed |
+
+`scripts/test-deploy-pause.lua`: **113 checks**; `scripts/test-selfloop-pause.lua`: **116**;
+`scripts/test-deploy-bound.sh`: `deploy bound ok`; `scripts/test-deploy-wait.sh`: `deploy wait ok`.

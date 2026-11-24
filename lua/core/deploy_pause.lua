@@ -331,6 +331,20 @@ end
 --      Re-arming over a person's decision would override them, which no repair may do;
 --   4. NOTHING IS RE-ARMED WHILE A BUILD WAITS OR INSTALLS: that is the phase the pause is for.
 M.RESUME_WINDOW_SECONDS = 6 * 3600
+
+-- HOW LONG A `dispatching` ROW MAY STAY WITHOUT A TURN (24/11, Fable's review of r5). `selfloop.M.stale_seconds()`
+-- is `max(60, WA_SELF_WAKE_STALE_SECONDS or 1800)` - 1800 s, i.e. the same knob reconcile uses; r5 hardcoded 300,
+-- which was both the wrong number and the wrong owner. Read here through the same variable, because this module
+-- cannot load selfloop (selfloop loads this one).
+function M.wait_stale_seconds()
+  local raw
+  if type(host) == "table" and type(host.getenv) == "function" then
+    local ok, value = pcall(host.getenv, "WA_SELF_WAKE_STALE_SECONDS")
+    if ok then raw = value end
+  end
+  if raw == nil and os and os.getenv then raw = os.getenv("WA_SELF_WAKE_STALE_SECONDS") end
+  return math.max(60, tonumber(raw) or 1800)
+end
 M.RESUME_MAX_REARMS = 2
 M.RESUME_BACKOFF_SECONDS = 30
 M.MIGRATION_MARKER = "resume-migration-1"
@@ -433,11 +447,33 @@ function M.ensure_resumes(now, opts)
   --   * `pending` long past its due time: while a deploy waits the tick re-stamps every overdue row and dispatches
   --     none (`selfloop.lua:1386-1391`). MEASURED: a 22/11 row, due 2026-11-22 10:45Z, attempts 1, last_error
   --     `deploy_waiting: ...`, rewritten by every install since.
-  local stale_secs = tonumber(opts.stale_seconds) or 300
+  local stale_secs = tonumber(opts.stale_seconds) or M.wait_stale_seconds()
   local reclaimed = 0
-  local killed = pcall(exec, [[UPDATE self_wakes SET status='unknown', last_error='dispatch interrupted; not replayed',
-    updated_at=? WHERE reason=? AND status='dispatching' AND updated_at<?]], { now, M.RESUME_REASON, now - stale_secs })
-  if killed then reclaimed = reclaimed + 1 end
+  -- RECLAIM ONLY "DISPATCHED AND NOTHING HAPPENED" (24/11, Fable's review of r5). A resume row leaves
+  -- `dispatching` at the END of its turn, not at the start (`selfloop.lua:1200`/`:1509` claim it, `:1214`/`:1355`
+  -- finish it), so a row may legitimately be `dispatching` for the whole turn - and most worker turns are longer
+  -- than any stale bound. Reclaiming on age alone would declare such a turn lost and pay a SECOND resume turn
+  -- beside it. So the age is only a filter; the decision needs the session to show no activity since the row was
+  -- dispatched: no message at or after its `updated_at`, which is ae2a9231's exact shape (dispatched, and
+  -- `last_error = 'deploy ended: resumed now'` with nothing written afterwards).
+  local stale_rows = query([[SELECT id, session_id, updated_at FROM self_wakes
+    WHERE reason=? AND status='dispatching' AND updated_at<?]], { M.RESUME_REASON, now - stale_secs }) or {}
+  for _, row in ipairs(stale_rows) do
+    local session = tostring(row.session_id or "")
+    local dispatched_at = tonumber(row.updated_at) or 0
+    local quiet = false
+    if session ~= "" then
+      local seen = query([[SELECT COUNT(*) AS n FROM messages WHERE session_id=? AND created_at>=?]],
+        { session, dispatched_at }) or {}
+      quiet = (tonumber(seen[1] and seen[1].n) or 0) == 0
+    end
+    if quiet then
+      local changed = exec([[UPDATE self_wakes SET status='unknown',
+        last_error='dispatch interrupted; not replayed', updated_at=? WHERE id=? AND status='dispatching']],
+        { now, row.id })
+      reclaimed = reclaimed + tonumber(type(changed) == "table" and changed.changes or 0)
+    end
+  end
   pcall(exec, [[UPDATE self_wakes SET status='superseded', due_at=NULL, last_error='superseded: too old to fire',
     updated_at=? WHERE reason=? AND status='pending' AND created_at<?]], { now, M.RESUME_REASON, cutoff })
   if M.waiting(now, opts) then return { waiting = true, rearmed = 0, migration = migration, stale = reclaimed } end

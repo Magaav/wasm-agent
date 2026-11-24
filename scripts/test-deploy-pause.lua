@@ -350,24 +350,93 @@ local function invariant_ledger(rows)
   return self_
 end
 
--- 1. A `dispatching` ROW THAT NEVER RAN A TURN IS LOST, not dispatching for ever: past `stale_seconds` it becomes
--- `unknown` and then the chain rule re-arms it inside the window.
-local dispatching = invariant_ledger({ { id = "ae2a9231", session_id = "sess-ae2a", owner = "master",
-  attempts = 1, resume_chain = 0, status = "unknown", created_at = fresh(),
-  last_error = "deploy ended: resumed now" } })
-local armed_d, schedule_d = scheduler()
-local out_d = pause.ensure_resumes(now, { read = function() return nil end, exec = dispatching.ex,
-  query = dispatching.q, schedule = schedule_d, session_exists = function() return true end,
-  migrated = function() return true end, stale_seconds = 300 })
-local reclaimed = false
-for _, row in ipairs(dispatching.updates) do
-  local sql = tostring(row.sql)
-  if sql:find("status='unknown'", 1, true) and sql:find("status='dispatching'", 1, true) then reclaimed = true end
+-- 1. A `dispatching` ROW IS RECLAIMED ONLY WHEN NOTHING HAPPENED (24/11, Fable's review of r5). The row leaves
+-- `dispatching` at the END of its turn (selfloop.lua:1214/:1355), so age alone is not evidence: a long turn is
+-- dispatching for its whole length, and reclaiming it would pay a SECOND resume turn beside it.
+--
+-- Two cases, both 400 s old against a 300 s bound (the bound is explicit here so the test is about the decision and
+-- not about the knob), both seeded with ae2a9231's shape: dispatched, last_error 'deploy ended: resumed now'.
+local function dispatch_ledger(messages_after)
+  local row = { id = "ae2a9231", session_id = "sess-ae2a", owner = "master", attempts = 1, resume_chain = 0,
+    status = "dispatching", created_at = now - 3600, updated_at = now - 400,
+    last_error = "deploy ended: resumed now" }
+  local ledger_ = { rows = { row }, updates = {}, messages_after = messages_after }
+  function ledger_.q(sql, params)
+    params = params or {}
+    if sql:find("FROM messages", 1, true) then
+      return { { n = ledger_.messages_after } }
+    end
+    if sql:find("FROM self_wake_pauses", 1, true) then return {} end
+    if sql:find("FROM self_wakes", 1, true) then
+      if sql:find("status='dispatching'", 1, true) then
+        local out = {}
+        for _, candidate in ipairs(ledger_.rows) do
+          if candidate.status == "dispatching" and candidate.updated_at < (tonumber(params[2]) or 0) then
+            out[#out + 1] = { id = candidate.id, session_id = candidate.session_id, updated_at = candidate.updated_at }
+          end
+        end
+        return out
+      end
+      if sql:find("status IN ('pending','dispatching')", 1, true) then return {} end
+      local cutoff = tonumber(params[2]) or 0
+      local out = {}
+      for _, candidate in ipairs(ledger_.rows) do
+        local lost = candidate.status == "unknown" or candidate.status == "failed"
+          or (candidate.status == "cancelled" and tostring(candidate.last_error):find("cancelled before execution", 1, true) ~= nil)
+        if lost and tonumber(candidate.created_at or 0) >= cutoff then out[#out + 1] = candidate end
+      end
+      return out
+    end
+    return {}
+  end
+  function ledger_.ex(sql, params)
+    ledger_.updates[#ledger_.updates + 1] = { sql = sql, params = params }
+    -- the fake follows the write, so the next query sees what the statement did
+    if tostring(sql):find("status='unknown'", 1, true) and tostring(sql):find("status='dispatching'", 1, true) then
+      for _, candidate in ipairs(ledger_.rows) do
+        if candidate.id == params[2] then candidate.status = "unknown" end
+      end
+      return { changes = 1 }
+    end
+    return { changes = 1 }
+  end
+  return ledger_
 end
-ok(reclaimed, "a dispatching row past the stale bound is reclaimed as unknown, not left dispatching")
-ok(out_d.rearmed == 1 and armed_d[1].session == "sess-ae2a",
-  "and the reclaimed resume is re-armed inside the window", json.encode(out_d))
 
+-- 1a. DISPATCHED AND NOTHING HAPPENED: reclaimed, and exactly ONE re-arm.
+local silent = dispatch_ledger(0)
+local armed_s, schedule_s = scheduler()
+local out_s = pause.ensure_resumes(now, { read = function() return nil end, exec = silent.ex, query = silent.q,
+  schedule = schedule_s, session_exists = function() return true end, migrated = function() return true end,
+  stale_seconds = 300 })
+local reclaimed_stmt = false
+for _, update in ipairs(silent.updates) do
+  if tostring(update.sql):find("status='unknown'", 1, true) then reclaimed_stmt = true end
+end
+ok(reclaimed_stmt, "a dispatching row with no activity is reclaimed")
+ok(out_s.rearmed == 1 and #armed_s == 1 and armed_s[1].session == "sess-ae2a",
+  "and revived with exactly one resume wake", json.encode(out_s))
+
+-- 1b. A LONG TURN IN PROGRESS: a message after the dispatch means the turn is alive - untouched, ZERO new wakes.
+local alive = dispatch_ledger(3)
+local armed_a, schedule_a = scheduler()
+local out_a = pause.ensure_resumes(now, { read = function() return nil end, exec = alive.ex, query = alive.q,
+  schedule = schedule_a, session_exists = function() return true end, migrated = function() return true end,
+  stale_seconds = 300 })
+for _, update in ipairs(alive.updates) do
+  ok(not tostring(update.sql):find("status='unknown'", 1, true),
+    "a dispatching row whose session is writing is never reclaimed", tostring(update.sql))
+end
+ok(out_a.rearmed == 0 and #armed_a == 0,
+  "and NO second resume is paid beside a running turn", json.encode(out_a) .. " armed=" .. tostring(#armed_a))
+
+-- 1c. THE BOUND IS THE TICK'S OWN KNOB, 1800 s, not the 300 r5 hardcoded: a row 400 s old is not stale by default.
+local young = dispatch_ledger(0)
+local armed_y, schedule_y = scheduler()
+pause.ensure_resumes(now, { read = function() return nil end, exec = young.ex, query = young.q,
+  schedule = schedule_y, session_exists = function() return true end, migrated = function() return true end })
+ok(#armed_y == 0, "a 400 s dispatching row is inside the tick's own 1800 s bound, so nothing is reclaimed")
+ok(pause.wait_stale_seconds() >= 60, "and the bound never falls below a minute")
 -- 2. A `pending` ROW OVERDUE PAST THE WINDOW CAN NEVER FIRE (the 22/11 row): it is retired, not re-stamped for ever.
 local pending = invariant_ledger({})
 local out_p = pause.ensure_resumes(now, { read = function() return nil end, exec = pending.ex, query = pending.q,
