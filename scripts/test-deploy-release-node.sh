@@ -1,20 +1,24 @@
 #!/usr/bin/env bash
-# A REAL SCRATCH NODE RELEASES A PAUSE THAT NEVER HAPPENED (r8c 1, the row Fable asked for).
+# THE RELEASE LINE ON A REAL SCRATCH NODE, BOTH WAYS (r8c 1, Fable 24/11).
 #
-# Everything here is the product's own, on a node of its own: a scratch `wa serve` (own HOME, own port, own ledger),
-# a REAL session paused by a REAL deploy-pending marker written into THAT node's data dir, the marker then REMOVED
-# with no swap - the shape a failed install leaves (measured 24/11: seven sessions sat 20-37 minutes; the 16:48Z
-# and 17:06Z signals were a test leak writing the real marker, not an install).
+# Everything here is the product's own, on a node of its own: a scratch `wa serve` (own HOME, own port, own ledger), a
+# REAL session paused by a REAL deploy-pending marker written into THAT node's data dir, and then two endings of the
+# same pause:
 #
-# What it asserts, end to end through the node's own placement tick:
-#   * while the marker is live the turn PAUSES and spends no model request;
-#   * when the marker goes with nothing installed, the pause is RELEASED: exactly ONE resume turn runs (one request
-#     at the loopback model), and the ledger row it came from carries the machine's own line,
-#     "[deploy] the update did not happen" - read back from the node's ledger, not from a variable in the row.
+#   1. A SCRIPTS-ONLY INSTALL: `installed.txt`'s `lua_tree=` moves (the binary's commit, `host.build_identity`, does
+#      NOT - measured 24/11: 9a0c589a before and after ffb5153e). The pause was taken on the old tree, the record was
+#      then rewritten the way a scripts-only deploy writes it, and the marker goes with the install done: the node's
+#      own tick must release ONE resume turn and its ledger row must carry "[deploy] installed", naming the NEW tree
+#      commit - not "nothing was installed".
+#   2. A MARKER REMOVED WITH NO INSTALL: the record does not move. The same tick must release ONE resume turn whose
+#      row carries "[deploy] the update did not happen".
 #
-# Fences: the real ~/.wasm-agent is never touched (HOME and WASM_AGENT_HOME are the scratch dir, and the marker is
-# written THERE); the vault and provider variables are cleared; the only port bound is this row's; the only pids
-# signalled are the ones it started.
+# Both lines are read back from the node's OWN ledger with sqlite3, not from a variable in this row, and every turn is
+# counted at the loopback model: one request per turn, no more.
+#
+# Fences: the real ~/.wasm-agent is never touched (HOME and WASM_AGENT_HOME are the scratch dir, the record is written
+# THERE), the vault and provider variables are cleared, only this row's port is bound, and the only pids signalled are
+# the ones it started.
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -40,6 +44,15 @@ trap cleanup EXIT
 mkdir -p "$WORK/home/.wasm-agent/components"
 DATA="$WORK/home/.wasm-agent"
 MARKER="$DATA/deploy-pending.json"
+# The node's OWN install directory (`update.install_dir()`: WA_INSTALL_DIR, else <home>/.local/bin) - inside the scratch
+# home, never the machine's.
+INSTALL="$WORK/home/.local/bin"
+record() { # <commit> <lua_tree> - the shape scripts/deploy.sh:1975 writes
+  mkdir -p "$INSTALL"
+  printf 'commit=%s\nlua_tree=%s\nlua_fast_path=1\nat=%s\n' "$1" "$2" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$INSTALL/installed.txt"
+}
+LEDGER="file:$DATA/memory.db?mode=ro"
+ledger() { sqlite3 "$LEDGER" "$1" 2>/dev/null; }
 
 # ---------------------------------------------------------------------------------------- the loopback model
 # One answer per request, and every request is APPENDED to a file: the count is the number of turns that reached
@@ -54,24 +67,24 @@ createServer((request, response) => {
   request.on('data', (chunk) => { body += chunk; });
   request.on('end', () => {
     if (!request.url.includes('/chat/completions')) { response.writeHead(404).end('{}'); return; }
-    appendFileSync(count, 'request\n');
+    appendFileSync(count, Date.now() + ' request\n');
     const n = Number(readFileSync(count, 'utf8').trim().split('\n').filter(Boolean).length);
     const head = { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' };
     const send = (payload) => response.write('data: ' + JSON.stringify(payload) + '\n\n');
     response.writeHead(200, head);
-    if (n === 1) {
-      // ONE IN-FLIGHT TURN, NOT A REFUSED ONE: a turn that has not started is REFUSED by a waiting build (that is
-      // `deploy_waiting`, measured here first), and the pause is the rule for a turn already running. A slow tool
-      // gives the row a window to write the marker between two step boundaries.
+    if (n === 1 || n === 3) {
+      // ONE IN-FLIGHT TURN PER PAUSE, NOT A REFUSED ONE: a turn that has not started is REFUSED by a waiting build
+      // (that is `deploy_waiting`, measured here first), and the pause is the rule for a turn already running. A slow
+      // tool gives this row a window to write the marker between two step boundaries.
       send({ id: 'stub', object: 'chat.completion.chunk', model: 'stub-model',
         choices: [{ index: 0, delta: { role: 'assistant', tool_calls: [{ index: 0, id: 'call_1', type: 'function',
-          function: { name: 'bash', arguments: JSON.stringify({ command: 'sleep 3' }) } }] }, finish_reason: null }],
+          function: { name: 'bash', arguments: JSON.stringify({ command: 'sleep 8' }) } }] }, finish_reason: null }],
         usage: { prompt_tokens: 5, completion_tokens: 5, total_tokens: 10 } });
       send({ id: 'stub', object: 'chat.completion.chunk', model: 'stub-model',
         choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] });
     } else {
       send({ id: 'stub', object: 'chat.completion.chunk', model: 'stub-model',
-        choices: [{ index: 0, delta: { role: 'assistant', content: 'resumed' }, finish_reason: null }],
+        choices: [{ index: 0, delta: { role: 'assistant', content: 'ok' }, finish_reason: null }],
         usage: { prompt_tokens: 5, completion_tokens: 5, total_tokens: 10 } });
       send({ id: 'stub', object: 'chat.completion.chunk', model: 'stub-model',
         choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] });
@@ -83,15 +96,24 @@ JS
 COUNT="$WORK/requests.txt"; : > "$COUNT"
 node "$WORK/model.mjs" "$MP" "$COUNT" > "$WORK/model.log" 2>&1 & MODEL=$!
 for _ in $(seq 1 60); do grep -q listening "$WORK/model.log" 2>/dev/null && break; sleep 0.1; done
+requests() { wc -l < "$COUNT" | tr -d ' '; }
+wait_requests() { # <n> <seconds>
+  local want=$1 budget=$2
+  for _ in $(seq 1 "$((budget * 2))"); do [ "$(requests)" -ge "$want" ] && return 0; sleep 0.1; done
+  return 1
+}
 
 # ---------------------------------------------------------------------------------------- the scratch node
 export HOME="$WORK/home" WASM_AGENT_HOME="$WORK/home" WASM_AGENT_LUA_ROOT="$ROOT"
+unset WA_INSTALL_DIR
 export WA_COMPONENTS_DIR="$WORK/home/.wasm-agent/components"
 export WASM_AGENT_RENDEZVOUS="" WASM_AGENT_RELAY="" WASM_AGENT_MANAGED=0
 export WASM_AGENT_PROVIDER=opencode-go WASM_AGENT_LLM_BASE_URL="http://127.0.0.1:$MP/v1"
 export WASM_AGENT_LLM_API_KEY=stub-key-not-a-secret WASM_AGENT_LLM_MODEL=stub-model
 unset WASM_AGENT_VAULT_URL WASM_AGENT_OPENCODE_GO_VAULT_URL OPENAI_API_KEY OPENCODE_GO_API_KEY
 
+# THE PAUSE IS TAKEN ON THIS RECORD: the bytes and the tree the node installs now.
+record 42507780 42507780
 "$BIN" --db "$DATA/memory.db" serve --port "$PORT" --client-port "$CP" --ui "$ROOT/ui" > "$WORK/serve.log" 2>&1 & SERVER=$!
 code=""
 for _ in $(seq 1 160); do
@@ -101,47 +123,82 @@ for _ in $(seq 1 160); do
 done
 [ "${code:-}" = "200" ] || { echo "  FAIL: the scratch node did not come up on $PORT"; tail -12 "$WORK/serve.log"; exit 1; }
 
-echo "deploy-release-node (node on $PORT, home $WORK/home, marker $MARKER)"
-# THE TURN IS IN FLIGHT FIRST (a turn that has not started is REFUSED by a waiting build - `deploy_waiting` -
-# and the pause is the rule for a turn already running), then the marker appears mid-turn.
-curl -sN -m 90 -X POST --data "finish the release check" "http://127.0.0.1:$PORT/chat" > "$WORK/turn.txt" 2>&1 & TURN=$!
-for _ in $(seq 1 60); do [ "$(wc -l < "$COUNT" | tr -d ' ')" -ge 1 ] && break; sleep 0.5; done
-NOW=$(date +%s)
-printf '{"to":"deadbeefcafe","state":"deploy_pending","since":%s,"bound_seconds":120,"by":"scripts/test-deploy-release-node.sh"}' \
-  "$NOW" > "$MARKER"
-wait "$TURN" 2>/dev/null; TURN=""
-paused=$(grep -c "deploy pending\|deploy waiting\|paused after" "$WORK/turn.txt" || true)
-[ "$paused" -ge 1 ] || { echo "  FAIL: the in-flight turn did not pause when the marker appeared"; tail -3 "$WORK/turn.txt"; exit 1; }
-spent=$(wc -l < "$COUNT" | tr -d ' ')
-[ "$spent" = "1" ] || { echo "  FAIL: the paused turn spent $spent model request(s), expected 1 (its first round)"; exit 1; }
+echo "deploy-release-node (node on $PORT, home $WORK/home, record $INSTALL/installed.txt)"
+
+# ---------------------------------------------------------------------------------------- 1. a SCRIPTS-ONLY install
+# The turn is IN FLIGHT first (a turn that has not started is REFUSED by a waiting build - `deploy_waiting` - and the
+# pause is the rule for a turn already running), then the marker appears mid-turn.
+# WHAT HAPPENED, printed when a case fails: the turn's own bytes, the node's ledger rows and the log this row writes.
+dump() {
+  echo "    turn: $(head -c 200 "$WORK/turn-$1.txt" 2>/dev/null | tr '\n' ' ')"
+  echo "    wakes: $(ledger "SELECT id||' '||status||' '||substr(replace(prompt,char(10),' '),1,60) FROM self_wakes ORDER BY created_at;" | tr '\n' '|')"
+  echo "    sessions: $(ledger "SELECT id||' '||substr(objective,1,12)||' '||created_at FROM sessions ORDER BY created_at;" | tr '\n' '|')"
+  echo "    requests: $(requests) -> $(tr '\n' '|' < "$COUNT")"
+  echo "    log: $(grep -iE 'deploy|pause|refus' "$WORK/serve.log" | tail -6 | tr '\n' '|')"
+}
+
+pause_a_turn() { # <case> <thread>
+  local before; before=$(requests)
+  local body; body=$(printf '{"text":"finish the release check","thread":"%s"}' "$2")
+  curl -sN -m 90 -X POST --data "$body" "http://127.0.0.1:$PORT/chat" > "$WORK/turn-$1.txt" 2>&1 & TURN=$!
+  wait_requests "$((before + 1))" 60 || { echo "  FAIL: the turn never reached the model"; tail -5 "$WORK/turn-$1.txt"; exit 1; }
+  local now; now=$(date +%s)
+  printf '{"to":"deadbeefcafe","state":"deploy_pending","since":%s,"bound_seconds":120,"by":"scripts/test-deploy-release-node.sh"}' \
+    "$now" > "$MARKER"
+  echo "  ok: the marker appeared mid-turn on thread $2 (since $now)"
+  wait "$TURN" 2>/dev/null; TURN=""
+  grep -q "deploy pending\|deploy waiting\|paused after" "$WORK/turn-$1.txt" \
+    || { echo "  FAIL: the in-flight turn did not pause when the marker appeared"; dump "$1"; exit 1; }
+  local spent; spent=$(requests)
+  [ "$spent" = "$((before + 1))" ] || { echo "  FAIL: the paused turn spent $((spent - before)) model request(s), expected 1 (its first round)"; exit 1; }
+}
+pause_a_turn a release-case-a
 echo "  ok: the in-flight turn paused for the marker (1 model request, its first round)"
-sleep 3
+sleep 1
 
-# THE INSTALL THAT NEVER HAPPENED: the marker goes, nothing was installed. The node's own tick must release the
-# pause - one resume turn, which reaches the model exactly once.
+# THE INSTALL THAT DID HAPPEN, AND ONLY SWAPPED THE TREE: the bytes' commit does not move (42507780 before and after),
+# the Lua tree does - which is exactly the scripts-only install whose release used to say "nothing was installed".
+record 42507780 bbbb5555eeee6666
 rm -f "$MARKER"
-released=""
-for _ in $(seq 1 60); do
-  n=$(wc -l < "$COUNT" | tr -d ' ')
-  if [ "$n" -ge 2 ]; then released="yes"; break; fi
-  sleep 1
-done
-[ -n "$released" ] || { echo "  FAIL: the pause was never released (no resume turn in 60 s)"; tail -12 "$WORK/serve.log"; exit 1; }
+wait_requests 2 60 || { echo "  FAIL: the pause was never released (no resume turn in 60 s)"; tail -12 "$WORK/serve.log"; exit 1; }
 sleep 4
-spent=$(wc -l < "$COUNT" | tr -d ' ')
-if [ "$spent" != "2" ]; then
-  echo "  FAIL: the release spent $spent model request(s) in total, expected 2 (the paused round + exactly ONE resume turn)"
-  grep -c "kept\|deploy" "$WORK/serve.log" >/dev/null 2>&1 || true
-  exit 1
-fi
+spent=$(requests)
+[ "$spent" = "2" ] || { echo "  FAIL: the release spent $spent model request(s) in total, expected 2 (the paused round + exactly ONE resume turn)"; exit 1; }
 echo "  ok: the release ran exactly ONE resume turn (1 new request at the model)"
+LINE=$(ledger "SELECT prompt FROM self_wakes WHERE reason='deploy pending: resume after the node swap' ORDER BY created_at DESC LIMIT 1;")
+case "$LINE" in
+  *"[deploy] installed"*) : ;;
+  *) echo "  FAIL: the released row does not say the build is installed: $(printf '%s' "$LINE" | head -c 160)"; exit 1 ;;
+esac
+case "$LINE" in
+  *"nothing was installed"*) echo "  FAIL: after a real scripts-only install the row says nothing was installed"; exit 1 ;;
+esac
+case "$LINE" in
+  *bbbb5555eeee*) : ;;
+  *) echo "  FAIL: the installed line does not name the tree the install put there (bbbb5555eeee): $(printf '%s' "$LINE" | head -c 160)"; exit 1 ;;
+esac
+echo "  ok: the ledger row says '[deploy] installed', naming the new tree commit bbbb5555eeee (and not 'nothing was installed')"
 
-# THE MACHINE'S OWN LINE, read back from the node's ledger (not from a variable in this row).
-LINE=$(sqlite3 "file:$DATA/memory.db?mode=ro" "SELECT COUNT(*) FROM self_wakes WHERE prompt LIKE '%the update did not happen%';" 2>/dev/null)
-if [ "${LINE:-0}" -lt 1 ]; then
-  echo "  FAIL: no wake row in the node's ledger carries the line 'the update did not happen'"
-  sqlite3 "file:$DATA/memory.db?mode=ro" "SELECT reason, substr(prompt,1,60) FROM self_wakes ORDER BY created_at DESC LIMIT 3;" 2>/dev/null | sed 's/^/    /'
-  exit 1
-fi
-echo "  ok: the ledger row carries the machine line 'the update did not happen' ($LINE row(s))"
-echo "deploy-release-node ok: a scratch node releases a pause whose update did not happen, with one resume turn that says so"
+# ---------------------------------------------------------------------------------------- 2. a marker with NO install
+pause_a_turn b release-case-b
+echo "  ok: a second turn paused for a second marker (1 model request)"
+sleep 1
+# THE UPDATE THAT DID NOT HAPPEN: the marker goes, the installed record does NOT move.
+rm -f "$MARKER"
+wait_requests 4 60 || { echo "  FAIL: the second pause was never released"; tail -12 "$WORK/serve.log"; exit 1; }
+sleep 4
+spent=$(requests)
+[ "$spent" = "4" ] || { echo "  FAIL: the row spent $spent model request(s) in total, expected 4 (two paused rounds + one resume each)"; exit 1; }
+echo "  ok: the second release also ran exactly ONE resume turn (1 new request)"
+LINE=$(ledger "SELECT prompt FROM self_wakes WHERE reason='deploy pending: resume after the node swap' ORDER BY created_at DESC LIMIT 1;")
+case "$LINE" in
+  *"[deploy] the update did not happen"*) : ;;
+  *) echo "  FAIL: a marker removed with no install did not say the update did not happen: $(printf '%s' "$LINE" | head -c 160)"; exit 1 ;;
+esac
+case "$LINE" in
+  *deadbeefcafe*) : ;;
+  *) echo "  FAIL: the did-not-happen line does not name the target the marker carried: $(printf '%s' "$LINE" | head -c 160)"; exit 1 ;;
+esac
+echo "  ok: the ledger row says '[deploy] the update did not happen', naming the marker's target"
+echo "deploy-release-node ok: a real scratch node decides the release line from the INSTALLED RECORD - installed after a scripts-only install, did-not-happen when the marker goes and nothing was installed"
+

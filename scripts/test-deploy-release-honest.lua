@@ -54,10 +54,11 @@ local function marker(since, bound)
     since = since, bound_seconds = bound, by = "scripts/test-deploy-release-honest.lua" }))
   check(ok, "the installer's marker is written at " .. MARKER)
 end
-local function unpause(session)
-  local answer = pause.at_boundary({ session_id = session, user_id = "master" }, "finish the request",
-    { now = T0, no_record = true, notes = function() end,
-      schedule = function(args) return selfloop.schedule(args, { session_id = session, user_id = "master" }) end })
+local function unpause(session, extra)
+  local opts = { now = T0, no_record = true, notes = function() end,
+    schedule = function(args) return selfloop.schedule(args, { session_id = session, user_id = "master" }) end }
+  for key, value in pairs(extra or {}) do opts[key] = value end
+  local answer = pause.at_boundary({ session_id = session, user_id = "master" }, "finish the request", opts)
   check(type(answer) == "table" and type(answer.wake) == "table", "the turn paused and armed one resume: " .. json.encode(answer))
   return answer.wake.id
 end
@@ -91,26 +92,71 @@ check((row.prompt or ""):find("finish the request", 1, true) ~= nil,
 eq(row.status, "dispatching", "the row is claimed by the release and handed over once")
 
 
--- ---- 3. THE SAME FUNCTION AFTER A REAL SWAP SAYS *INSTALLED*, NOT "nothing was installed" ---------
--- Fable's blocker: release_due is also the normal path after a real install, so the did-not-happen text was being
--- prepended to every resumed worker. The line comes from a FACT: the build recorded when the pause was taken vs the
--- build now (host.build_identity). Here the record names an OLDER build, which is what a swap leaves.
-local swap_session = memory.start_session("local", "chat", { id = "r8c-swap", user_id = "master", title = "swap" })
-marker(T0 - 60, 900)          -- a LIVE install: the turn pauses and arms its resume, as a real one does
-local swap_wake = unpause(swap_session)
-marker(T0 - 3600, 900)        -- and by the time it is released the marker is long past its bound (the swap happened)
-
+-- ---- 3. THE LINE IS DECIDED BY THE INSTALLED RECORD, NOT BY THE BINARY'S COMMIT -------------------
+-- Fable's blocker: release_due is also the normal path after a REAL install, and `host.build_identity` is the
+-- BINARY's commit, which a scripts-only install does not move (measured 24/11: 9a0c589a before and after ffb5153e;
+-- fe108a8c and 42507780 today). Comparing it before and after told every resumed worker "nothing was installed"
+-- after most real installs. The fact that DOES move is the installed record - `installed.txt`'s `lua_tree=` and
+-- `commit=`, the pair change/version-names-the-tree prints - so the pause records it and the release compares it.
+-- Both are read from the node's OWN install directory (`update.install_dir()`: WA_INSTALL_DIR or <home>/.local/bin)
+-- and written in the shape scripts/deploy.sh writes. A row cannot run a whole install; the shell row
+-- (scripts/test-deploy-release-node.sh) runs the same fact on a real scratch node, end to end.
 local record_dir = pause.paused_dir()
-pcall(host.write_file, record_dir .. "/" .. swap_session .. ".json",
-  json.encode({ session = swap_session, since = T0 - 60, build = "aaaa1111bbbb2222" }))
+local install_dir = dofile("lua/core/update.lua").install_dir()
+local scratch_root = os.getenv("GATE_ROOT") or os.getenv("TMPDIR") or ""
+check(scratch_root ~= "" and install_dir:sub(1, #scratch_root) == scratch_root,
+  "the install record under test lives in this row's scratch home (" .. tostring(install_dir) .. "), never the machine's")
+local function install_record(commit, tree)
+  local ok = host.write_file(install_dir .. "/installed.txt",
+    "commit=" .. commit .. "\n" .. (tree and ("lua_tree=" .. tree .. "\n") or "") .. "at=2026-11-24T16:00:00Z\n")
+  check(ok == true, "the installed record is written at " .. install_dir .. "/installed.txt")
+end
+
+-- 3a. THE PAUSE RECORDS THE INSTALLED RECORD - written by the product, not typed by this row. The shape below is a
+-- PREBUILT deploy's: `commit=` is the bytes, `lua_tree=` the tree installed beside them, and the two move separately.
+install_record("cccc3333dddd4444", "aaaa1111bbbb2222")
+local swap_session = memory.start_session("local", "chat", { id = "r8c-swap", user_id = "master", title = "swap" })
+marker(T0 - 60, 900)
+local swap_wake = unpause(swap_session, { no_record = false })
+local recorded = json.decode(host.read_file(record_dir .. "/" .. swap_session .. ".json") or "{}")
+eq(tostring(recorded.installed_tree), "aaaa1111bbbb2222", "the pause record names the tree this node runs")
+eq(tostring(recorded.installed_commit), "cccc3333dddd4444", "and the bytes separately (a deploy can move only one of them)")
+
+-- 3b. A SCRIPTS-ONLY INSTALL MOVES THE TREE AND NOT THE BYTES: the release says "installed", naming the new tree.
+install_record("cccc3333dddd4444", "bbbb5555eeee6666")
+marker(T0 - 3600, 900)
 sent = { count = 0, ids = {} }
 selfloop.tick({ now = T0 + 6, dispatch = counted })
 local swap_row = rows("SELECT * FROM self_wakes WHERE id=?", { swap_wake })[1]
 check((swap_row.prompt or ""):find(pause.INSTALLED, 1, true) ~= nil,
-  "after a real swap the release says the build is installed: " .. tostring(swap_row.prompt):sub(1, 160))
+  "a scripts-only install makes the release say the build is installed: " .. tostring(swap_row.prompt):sub(1, 160))
 check((swap_row.prompt or ""):find(pause.NOT_HAPPENED, 1, true) == nil,
   "and it does NOT tell the worker that nothing was installed")
-check((swap_row.prompt or ""):find("aaaa1111bbbb", 1, true) ~= nil, "naming the build it was paused on")
+check((swap_row.prompt or ""):find("bbbb5555eeee", 1, true) ~= nil, "naming the tree the install put there")
+check((swap_row.prompt or ""):find("aaaa1111bbbb", 1, true) ~= nil, "and the tree the pause was taken on")
+
+-- 3c. THE OTHER ROW FABLE ASKED FOR: a marker REMOVED with no install (the record does not move) says "did not happen".
+local gone_session = memory.start_session("local", "chat", { id = "r8c-gone", user_id = "master", title = "gone" })
+marker(T0 - 30, 900)
+local gone_wake = unpause(gone_session, { no_record = false })
+marker(T0 - 3600, 900)   -- the installer is gone and installed.txt still names bbbb5555eeee6666
+sent = { count = 0, ids = {} }
+selfloop.tick({ now = T0 + 7, dispatch = counted })
+local gone_row = rows("SELECT * FROM self_wakes WHERE id=?", { gone_wake })[1]
+check((gone_row.prompt or ""):find(pause.NOT_HAPPENED, 1, true) ~= nil,
+  "a marker that goes with nothing installed says the update did not happen: " .. tostring(gone_row.prompt):sub(1, 160))
+check((gone_row.prompt or ""):find(pause.INSTALLED, 1, true) == nil, "and does not claim an install")
+check((gone_row.prompt or ""):find("deadbeefcafe", 1, true) ~= nil,
+  "naming the target the marker carried - read from the marker as the installer wrote it, expiry aside")
+
+-- 3d. UNKNOWN IS NOT YES: with no record on one side the rule cannot say "installed", and it does not.
+eq(pause.install_moved(nil, { tree = "bbbb5555eeee6666", commit = "" }), nil,
+  "no record at the pause is 'cannot tell', not installed")
+eq(pause.install_moved({ tree = "aaaa", commit = "" }, { tree = "aaaa", commit = "" }), false,
+  "the same record twice is not an install")
+eq(pause.install_moved({ tree = "aaaa", commit = "1111" }, { tree = "aaaa", commit = "2222" }), true,
+  "a deploy that moves only the bytes is still an install")
+
 
 -- ---- 4. ONE RESUME ROW PER SESSION - AND A HELD SESSION IS NOT TOUCHED -------------------------
 -- Fable 24/11, the blocker: the first version of that supersede kept the earliest pending resume in the WHOLE TABLE,

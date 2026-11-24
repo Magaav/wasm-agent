@@ -136,33 +136,93 @@ end
 M.NOT_HAPPENED = "[deploy] the update did not happen"
 M.INSTALLED = "[deploy] installed"
 
--- THE BUILD THIS NODE RUNS, from the node itself (host.build_identity, the same label /health reports). A release
--- line is decided by COMPARING builds, never by assuming: the pause records the build it was taken on, and the
--- release compares it with the build now.
-function M.build_now()
-  if type(host) == "table" and type(host.build_identity) == "function" then
-    local ok, value = pcall(host.build_identity)
-    if ok and type(value) == "string" and value ~= "" then return value end
+-- THE INSTALLED RECORD IS THE FACT A RELEASE IS DECIDED BY (Fable 24/11, the blocker).
+--
+-- MEASURED (avell, 24/11): `host.build_identity` is the BINARY's commit, and a scripts-only install does not move it
+-- (9a0c589a before and after ffb5153e; fe108a8c and 42507780 today). Comparing it before and after a pause therefore
+-- answers "the binary did not change" on most real installs, and every resumed worker was told "[deploy] the update did
+-- not happen: nothing was installed" - the opposite of what had just happened. The fact that DOES move is the installed
+-- record: `installed.txt`'s `lua_tree=` (the tree a Lua fast-path or prebuilt deploy swaps) and its `commit=` (the
+-- bytes) - the same pair `change/version-names-the-tree` prints, read through the ONE reader of that file
+-- (lua/core/update.lua's `installed_record`), so a release and `wa --version` cannot disagree about it.
+--
+-- Recorded AT THE PAUSE and read again AT THE RELEASE: `{ tree, commit }`, either field empty when the record does not
+-- name it. `tree` falls back to `commit`, which is the identity of a record written by a release install (the release
+-- bootstrap writes no `lua_tree=`; scripts/deploy.sh writes it on every deploy since the Lua fast path).
+function M.installed_identity(opts)
+  opts = opts or {}
+  local record = opts.record
+  if type(record) ~= "table" then
+    local loaded, update = pcall(dofile, "lua/core/update.lua")
+    if not loaded or type(update) ~= "table" or type(update.installed_record) ~= "function" then return nil end
+    local dir = opts.install
+    if type(dir) ~= "string" or dir == "" then
+      local named_ok, named = pcall(function() return update.install_dir() end)
+      if named_ok and type(named) == "string" and named ~= "" then dir = named end
+    end
+    if type(dir) ~= "string" or dir == "" then return nil end
+    local read_ok, answer = pcall(update.installed_record, dir)
+    if not read_ok or type(answer) ~= "table" then return nil end
+    record = answer
   end
-  return "unknown"
+  local commit = type(record.commit) == "string" and record.commit or ""
+  local tree = type(record.lua_tree) == "string" and record.lua_tree or ""
+  if tree == "" then tree = commit end
+  if tree == "" and commit == "" then return nil end
+  return { tree = tree, commit = commit }
 end
 
--- The build recorded when the pause was taken, for this session, if a record names it.
-function M.paused_build(session_id, opts)
+-- Did the installed record MOVE between the pause and the release? True only for two records that both name a fact and
+-- disagree in one of them - `lua_tree=` alone is enough, so a deploy that swaps only the tree still counts. nil is
+-- "cannot tell" (one side has no record), and nil is NEVER read as installed: unknown is not yes.
+function M.install_moved(was, now)
+  if type(was) ~= "table" or type(now) ~= "table" then return nil end
+  if was.tree ~= "" and now.tree ~= "" and was.tree ~= now.tree then return true end
+  if was.commit ~= "" and now.commit ~= "" and was.commit ~= now.commit then return true end
+  return false
+end
+
+-- What this session's pause record says the installed record was, or nil when it names none (a record written before
+-- this change, or an install directory that could be read at neither moment).
+--
+-- The reader is `opts.read_file` and NOT `opts.read`: in the release path `opts.read` is the DEPLOY MARKER reader
+-- (selfloop.tick passes its own), so the earlier version of this read was handed a path and answered a marker.
+function M.paused_identity(session_id, opts)
   opts = opts or {}
   local dir = opts.dir or M.paused_dir()
   if not dir or type(session_id) ~= "string" or session_id == "" then return nil end
-  local reader = opts.read or (type(host) == "table" and host.read_file or nil)
+  local reader = opts.read_file or (type(host) == "table" and host.read_file or nil)
   if type(reader) ~= "function" then return nil end
-  local ok, body = pcall(reader, dir .. "/" .. session_id .. ".json")
+  local safe = session_id:gsub("[^%w%-_]", "")
+  if safe == "" then return nil end
+  local ok, body = pcall(reader, dir .. "/" .. safe .. ".json")
   if not ok or type(body) ~= "string" or body == "" then return nil end
   local decoded_ok, record = pcall(json.decode, body)
   if not decoded_ok or type(record) ~= "table" then return nil end
-  local build = record.build
-  if type(build) == "string" and build ~= "" then return build end
-  return nil
+  local tree = type(record.installed_tree) == "string" and record.installed_tree or ""
+  local commit = type(record.installed_commit) == "string" and record.installed_commit or ""
+  if tree == "" and commit == "" then return nil end
+  return { tree = tree, commit = commit }
 end
 
+-- THE INSTALLED LINE, naming the record it read (never a build label guessed off the node): the tree now, and the tree
+-- the pause recorded.
+function M.installed_text(was, now)
+  local function name(identity)
+    if type(identity) ~= "table" then return "unknown" end
+    if type(identity.tree) == "string" and identity.tree ~= "" then return identity.tree end
+    if type(identity.commit) == "string" and identity.commit ~= "" then return identity.commit end
+    return "unknown"
+  end
+  return table.concat({
+    M.INSTALLED .. ": this node now runs " .. name(now):sub(1, 12) .. " (was " .. name(was):sub(1, 12) .. ").",
+    "The pause this turn took was for that install and it completed, so the work continues on the new build.",
+    "This is the same request continuing, not a new one: verify the machine (`wa --version`) before you claim",
+    "anything about what was installed.",
+  }, "\n")
+end
+
+-- THE "DID NOT HAPPEN" LINE, and it names the target the marker carried and how far past its bound the release is.
 function M.not_happened_text(marker, now)
   marker = marker or {}
   now = tonumber(now) or os.time()
@@ -184,7 +244,10 @@ end
 -- which is the honest answer - the line then says the update did not happen and names no target.
 function M.marker_on_disk(opts)
   opts = opts or {}
-  local reader = opts.read or (host and host.read_file)
+  -- `opts.read_file`, never `opts.read`: in the release path `opts.read` is the DEPLOY MARKER reader
+  -- (selfloop.tick passes `opts.deploy_marker`), so a file reader under that name was handed a path and answered a
+  -- marker - this line therefore named no target at all from the tick. The row asserts the target is named.
+  local reader = opts.read_file or (host and host.read_file)
   local path = opts.path or M.path()
   if type(reader) ~= "function" or not path then return nil end
   local ok, body = pcall(reader, path)
@@ -247,7 +310,7 @@ function M.at_boundary(self, request, opts)
   -- the holders that keep the node busy AND tell a paused holder from a working one, because the sentinel's
   -- 3-minute bound may only pass over sessions that are already paused. One file per session, written where
   -- the pause is decided: <data>/deploy-paused/<session>.json (read by rust/wa-sentinel/src/main.rs).
-  if not opts.no_record then pcall(M.record_pause, marker, now, self.session_id, self.user) end
+  if not opts.no_record then pcall(M.record_pause, marker, now, self.session_id, self.user, opts) end
   -- The checkpoint the resumed turn reads: the goal, where it stopped and what it had already done.
   local notes = opts.notes or function()
     local selfloop = dofile("lua/core/selfloop.lua")
@@ -393,9 +456,11 @@ end
 
 function M.record_pause(marker, now, session_id, user, opts)
   opts = opts or {}
-  -- THE BUILD THE PAUSE WAS TAKEN ON (Fable 24/11): without it a release cannot tell a real install from an install
-  -- that never happened, and after a SUCCESSFUL swap every resumed worker was being told nothing was installed.
-  if opts.build == nil then opts = { dir = opts.dir, write = opts.write, read = opts.read, build = M.build_now() } end
+  -- THE INSTALLED RECORD AS IT STANDS WHEN THE PAUSE IS TAKEN (Fable 24/11): the release decides 'installed' by
+  -- comparing this with the record it reads then, so the fact is written here rather than inferred later. The first
+  -- version stored an `opts.build` and never wrote it into the file, so no release could ever say 'installed'.
+  local identity = opts.installed
+  if type(identity) ~= "table" then identity = M.installed_identity(opts) end
   if type(session_id) ~= "string" or session_id == "" then return nil end
   opts = opts or {}
   local dir = opts.dir or M.paused_dir()
@@ -412,6 +477,10 @@ function M.record_pause(marker, now, session_id, user, opts)
     source = marker.source or "install",
     request = marker.id,
     by = tostring(user or marker.owner or ""),
+    -- THE FACTS A RELEASE COMPARES (see M.installed_identity): the tree and the bytes the installed record named when
+    -- this pause was taken. Absent when the record names neither - and absent is never read as 'installed'.
+    installed_tree = type(identity) == "table" and identity.tree or nil,
+    installed_commit = type(identity) == "table" and identity.commit or nil,
   }))
   if ok then
     M.note("paused", session_id, {
@@ -1073,7 +1142,10 @@ function M.release_due(now, opts)
   -- opposite of what had just happened. The line is decided PER SESSION from two facts: the build recorded when
   -- that session's pause was taken, and the build this node runs now. A different build is the swap and names both;
   -- the same build (or none recorded) is the did-not-happen text Fable approved.
-  local now_build = M.build_now()
+  -- THE TWO RECORDS, both read through the one installed-record reader: what this session's pause recorded and what
+  -- the install directory says now. `install_moved` is true only for two records that disagree; nil (cannot tell) is
+  -- never read as installed.
+  local now_identity = M.installed_identity(opts)
   local released = query([[SELECT id, session_id FROM self_wakes WHERE status='pending' AND reason=? AND due_at>?
     ORDER BY due_at, created_at]], { M.RESUME_REASON, now })
   local changes = 0
@@ -1081,15 +1153,10 @@ function M.release_due(now, opts)
     local session = tostring(row.session_id or "")
     -- A held session's row is neither released nor stamped: its own release decides when it fires.
     if not is_held(session) then
-      local was_build = M.paused_build(session, opts)
+      local was_identity = M.paused_identity(session, opts)
       local text
-      if was_build and now_build ~= "unknown" and was_build ~= now_build then
-        text = table.concat({
-          M.INSTALLED .. ": this node now runs " .. tostring(now_build):sub(1, 12) .. " (was " .. tostring(was_build):sub(1, 12) .. ").",
-          "The pause this turn took was for that install and it completed, so the work continues on the new build.",
-          "This is the same request continuing, not a new one: verify the machine (`wa --version`) before you claim",
-          "anything about what was installed.",
-        }, "\n")
+      if M.install_moved(was_identity, now_identity) == true then
+        text = M.installed_text(was_identity, now_identity)
       else
         text = M.not_happened_text(opts.released_marker or M.marker_on_disk(opts), now)
       end
