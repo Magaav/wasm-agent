@@ -149,6 +149,9 @@ exit 2
 STUB
 chmod +x "$INST/wa-sentinel"
 
+# The row never asks the network anything: the release list is the fixture written above, and the
+# feed checks are off (`wa update --check` also reads the published release feed, which is a request).
+export WA_UPDATE_CHECK=0 WA_OFFLINE=1
 export FIXTURE_STATUS="$SANDBOX/build-status.json" FIXTURE_QUEUE="$SENTINEL/queue" \
   FIXTURE_RESULT="$INST/deploy-result.json" FIXTURE_INSTALLED="$INST/installed.txt" \
   FIXTURE_REQUESTS="$SENTINEL/requests" FIXTURE_DEPLOYOUT="$SENTINEL/deploy.out" \
@@ -168,7 +171,23 @@ run_update() { # <args...> -> output in $W/out.txt, exit code in $CODE
   CODE=$?
 }
 
-# ---- 1. the first line names the target and the way it will install -------------------------------
+# ---- 1. `wa update --check` answers for BOTH commits, locally -------------------------------------
+# (b)(i), Fable 24/11: "is there a published artifact for the commit I am on, and for the one I am behind
+# by". The node's record is set to the PUBLISHED commit, the tree to the unpublishable one, so both
+# answers are different facts and neither can be produced by accident.
+printf 'commit=%s\nsource_commit_hint=%s\n' "$P12" "$P12" > "$INST/installed.txt"
+run_update --check
+[ "$CODE" = 0 ] || fail "--check is a question and must exit 0 (it exited $CODE)"
+grep -q "this node ($P12): published binary for $P12 on x86_64-unknown-linux-gnu" "$W/out.txt" \
+  || fail '--check must say what the commit this node RUNS is published as'
+grep -q "behind by ($T12): no published binary for $T12 on x86_64-unknown-linux-gnu" "$W/out.txt" \
+  || fail '--check must say what the commit it is BEHIND BY is published as'
+grep -q 'release list: 1 entries, read ' "$W/out.txt" || fail '--check must date the list it answered from'
+[ -f "$SANDBOX/sentinel/requests" ] && [ -n "$(ls -A "$SANDBOX/sentinel/requests" 2>/dev/null)" ] \
+  && fail '--check wrote a deploy request; it is a question'
+echo '  ok: --check answered for the installed commit and for the one behind it, from the local list'
+
+# ---- 2. the first line names the target and the way it will install -------------------------------
 export FIXTURE_OUTCOME=ok FIXTURE_LEAD=1
 START=$(date +%s)
 run_update
@@ -188,7 +207,7 @@ grep -q 'proving' "$W/out.txt" || fail 'the later phases were not printed'
 [ "$ELAPSED" -le 60 ] || fail "the follow took $ELAPSED s for a 5 s fixture deploy"
 echo "  ok: the first line named the target and the build, every phase printed with its clock, the final line named $T12, exit 0"
 
-# ---- 2. a deploy that FAILS is reported: phase, reason, elapsed, next step, exit 1 -----------------
+# ---- 3. a deploy that FAILS is reported: phase, reason, elapsed, next step, exit 1 -----------------
 rm -f "$SANDBOX/build-status.json" "$INST/deploy-result.json"
 export FIXTURE_OUTCOME=fail
 run_update
@@ -199,7 +218,7 @@ grep -q "next: this node still runs" "$W/out.txt" || fail 'a failure must say wh
 grep -q "$SENTINEL/deploy.out" "$W/out.txt" || fail "a failure must name the installer's own output"
 echo '  ok: the failure printed its phase, reason, elapsed time and next step, and exited 1'
 
-# ---- 3. --detach returns at once and names the one command that re-attaches -----------------------
+# ---- 4. --detach returns at once and names the one command that re-attaches -----------------------
 rm -f "$SANDBOX/build-status.json" "$INST/deploy-result.json"
 export FIXTURE_OUTCOME=ok FIXTURE_LEAD=6
 START=$(date +%s)
@@ -212,7 +231,7 @@ grep -q 'wa update --follow re-attaches' "$W/out.txt" || fail '--detach must nam
 grep -q "installed $T12" "$W/out.txt" && fail '--detach must not wait for the final line'
 echo "  ok: --detach returned in ${DETACH_S}s and named the command that re-attaches"
 
-# ---- 4. --follow attaches to the deploy already in flight ------------------------------------------
+# ---- 5. --follow attaches to the deploy already in flight ------------------------------------------
 run_update --follow
 [ "$CODE" = 0 ] || fail "--follow over a deploy that installed must exit 0 (it exited $CODE)"
 grep -q 'following the newest deploy on this node' "$W/out.txt" || fail '--follow must say which deploy it attached to'

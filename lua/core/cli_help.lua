@@ -30,10 +30,11 @@ local M = {}
 -- reader (and the row) can tell an answer from an execution.
 M.ACTING = {
   { verb = "update", lines = {
-    "usage: wa update [--check]   update THIS node (tree: the Sentinel deploy; release: the verified bundle)",
-    "       wa update <node> [--commit <sha>] [--binary|--tree|--release] [--reason <text>] [--json]",
+    "usage: wa update [--check] [--detach|--follow]   update THIS node (tree: the Sentinel deploy; release: the verified bundle)",
+    "       wa update <node> [--commit <sha>] [--binary|--tree|--release] [--reason <text>] [--json] [--detach|--follow]",
     "       wa update <node> --status | --rollback | --to <sha> | --pin | --unpin",
-    "  --check is read-only: it says whether this node is behind what an update would install" } },
+    "  --check is read-only: it says whether this node is behind what an update would install",
+    "  --follow follows the install to its end, and is the default; --detach asks and returns at once" } },
   { verb = "land", lines = {
     "usage: wa land --ready | --branches a,b [--dry-run] [--no-deploy]   the landing pipeline, as one machine",
     "       wa land --resume | status [--run <id>] | ready <branch> <sha>   continue, read, or record a READY line",

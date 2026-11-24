@@ -284,6 +284,46 @@ second. If a future editor moves this onto a hot route, that measurement is the 
 with `origin/main`; a release install runs the bootstrap's verified `--check`. It writes no request
 and installs nothing.
 
+### `wa update` follows the install it asked for (24/11)
+
+MEASURED on `work`, 24/11: `wa update` printed nothing while the deploy compiled 48 of 456 crates after
+three and a half minutes, and 361 s into a build that died it printed nothing at all. So the command now
+follows its own request to the end (`lua/core/update_follow.lua`):
+
+- the **first line** names the target and the way it will install - `install: published binary for
+  <sha12> on <triple> — download, no build`, or `no published binary for <sha12> on <triple>: building
+  from source, minutes`;
+- every change of phase prints one line with the elapsed time (`waiting: ...`, `building 48/456
+  compiling wa-host · 3m30s`, `installing: stopping the node and switching binaries`), with a heartbeat
+  every 30 s while nothing changes - a cold build is never drawn as a dead one;
+- the final line names what happened: `installed <sha12> · 5m12s` and exit 0, or `failed: <reason> ·
+  <elapsed>` plus a `next:` line saying what this node still runs and where the installer's own output
+  is, and exit 1;
+- `--detach` writes the request and returns at once, naming the one command that re-attaches
+  (`wa update --follow`); `--follow` attaches to the newest deploy this node still has in flight and
+  asks for nothing. Ctrl-C stops following, not the install: the installer is a separate process the
+  sentinel spawned detached.
+
+Nothing here is a new protocol: the follower reads the files a deploy already writes (`deploy-result.json`,
+`build-status.json`, the sentinel's `queue/` and `failed|done/` records, `deploy-state.json`,
+`deploy-pending.json`, `deploy.out`) and matches the installer's verdict by **request id**, so the
+previous deploy's result is never read as this one's. `wa update <node>` follows the peer's own
+`status` instead (`docs/REMOTE-UPDATE.md`).
+
+### Answering "is this published?" locally
+
+`wa update --check` also answers, from the release list this node already holds
+(`<config>/update-check.json`, schema 2 - asset names included) and with no request:
+
+    release list: 5 entries, read 2026-11-24 12:49Z, newest node-<sha12>
+    this node (<sha12>): published binary for <sha12> on x86_64-unknown-linux-gnu (node-<sha12>)
+    behind by (<sha12>): no published binary for <sha12> on x86_64-unknown-linux-gnu
+
+Three answers and no fourth: `published`; `no published binary` (a release names the commit but carries
+no asset for this machine, or local ancestry proves the commit is newer than everything in the list, so
+nothing can name it yet); and `the release list cannot say` - an old commit outside the window, or a node
+whose list has never been read. The list's own date travels with the answer.
+
 ## An update installs the whole component set, and enables none of it
 
 A deploy carries two things that update separately from the core: the Lua tree, and the pinned WASI

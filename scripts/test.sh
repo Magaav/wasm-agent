@@ -979,6 +979,16 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-backup-locks.lua" "$BIN" --db "$DB.
 # stub: a live check that dropped a request into the operator's real request box could install a
 # placeholder over the node that is running. It also asserts that it did not.
 WA_BIN="$BIN" bash scripts/test-update.sh 8874 | grep "the real sentinel's request box is untouched"
+# `wa update` FOLLOWS THE INSTALL IT ASKED FOR (Fable/Victor 24/11, slice 1). MEASURED on work the same day:
+# nothing was printed while a deploy compiled 48 of 456 crates after 3.5 minutes, and nothing at all when a
+# build died 361 s in. This row drives the REAL command against a scratch node whose stub deploy writes the
+# same files a real one writes (`scripts/lib/build-status.sh`, `queue::observe`, `write_result`) and asserts:
+# the first line names target and download-or-build; every phase prints with its elapsed time; the final line
+# names the commit (exit 0); a failed build prints phase, reason, elapsed and next (exit 1); `--detach`
+# returns in under 4 s naming the re-attach command; `--follow` attaches to the deploy in flight; and
+# `--check` answers for the installed commit and the one behind it from the local release list. It refuses a
+# home inside the operator's store (scripts/lib/scratch-home.sh) and touches no node but its own.
+WA_BIN="$BIN" gate_run bash scripts/test-update-follow.sh | grep 'update follow ok'
 # The idle wait before an upgrade is bounded by *lack of progress*, not wall time. A legitimate
 # 40-minute turn must not make every queued upgrade wait, fail, and retry while the node stays busy.
 # No test may run the installer with the operator's real data dir: one run pauses every session here.
