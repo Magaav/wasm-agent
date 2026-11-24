@@ -123,6 +123,7 @@ rule can only narrow what the manifest declared.
 wa features             one line per feature: installed sha, enabled, source, active path, reason
                         plus the mesh's own switch (`mesh: on (default: roster verified)`, docs/MESH.md)
 wa features --json      the same as data: {"ok":true,"policy":"…","features":[…],"policy_error":…}
+wa features canary [name|json]   run the canaries (all, or one) and print the verdicts              ← the Lua core
 ```
 
 `wa features` answers before the interpreter boots (like `wa --capability-digest`), so it works on a node
