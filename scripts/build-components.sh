@@ -228,7 +228,35 @@ if [ "${WA_COMPONENTS_REPRO:-1}" != 0 ] && [ "${WA_COMPONENT_STABLE_ROOT:-1}" !=
     # Checked like the root, and before anything is deleted inside it: a symlink here would point the
     # rm below, and copy_tree's, at whatever it names.
     wa_component_build_root_prepare "$BUILD_SRC" || exit 2
-    copy_tree "$BUILD_SRC" || { echo "error: cannot copy this tree into $BUILD_SRC" >&2; exit 2; }
+    # A SWITCHED TREE MUST NOT INHERIT ANOTHER TREE'S ARTIFACTS (measured 24/11 on avell, mission
+    # deploy-hold-r8a4). Cargo decides what to recompile by MTIME, and the copy preserves the mtimes of the
+    # checkout it came from: build this tree's `selfloop` (09:58), build another worktree's at 10:04, come
+    # back, and cargo answers `warm, nothing to compile` for the FIRST tree while the artifacts in the target
+    # directory are the SECOND tree's - identical size, another sha256, and the component that ships is the
+    # one this tree does not have. Measured exactly that: `selfloop` installed with the other tree's
+    # 880aef08 while `lib.rs` in the build root held this tree's source.
+    #
+    # So the tree is compared with the one this build root last held (the hash, kept beside it so it cannot
+    # change the hash of what it describes): the same tree keeps every mtime and the cache stays warm, and a
+    # DIFFERENT tree is installed and then touched, so every input is newer than any artifact built from the
+    # tree before it. The price is a real rebuild whenever the tree changes, which is exactly the run that
+    # needs one.
+    stage="$(mktemp -d "$BUILD_ROOT/.stage-XXXXXX")" || { echo "error: cannot stage under $BUILD_ROOT" >&2; exit 2; }
+    copy_tree "$stage" || { rm -rf "$stage"; echo "error: cannot copy this tree into $stage" >&2; exit 2; }
+    tree_hash="$(wa_component_tree_hash "$stage")"
+    hash_file="$BUILD_ROOT/.src-tree-hash"
+    recorded=""
+    [ -f "$hash_file" ] && recorded="$(cat "$hash_file" 2>/dev/null || true)"
+    if [ "$recorded" = "$tree_hash" ]; then
+      rm -rf "$stage"
+    else
+      rm -rf "$BUILD_SRC"
+      mkdir -p "$BUILD_SRC" || { rm -rf "$stage"; echo "error: cannot install $BUILD_SRC" >&2; exit 2; }
+      tar -C "$stage" -cf - . | tar -C "$BUILD_SRC" -xf - || { rm -rf "$stage"; echo "error: cannot install $BUILD_SRC" >&2; exit 2; }
+      rm -rf "$stage"
+      find "$BUILD_SRC" -type f -print0 2>/dev/null | xargs -0 -r touch 2>/dev/null || true
+      printf '%s' "$tree_hash" > "$hash_file" 2>/dev/null || true
+    fi
   else
     stage="$(mktemp -d "$BUILD_ROOT/.stage-XXXXXX")" || { echo "error: cannot stage under $BUILD_ROOT" >&2; exit 2; }
     copy_tree "$stage" || { rm -rf "$stage"; echo "error: cannot copy this tree into $stage" >&2; exit 2; }
