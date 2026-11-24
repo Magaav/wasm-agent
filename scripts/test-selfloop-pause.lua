@@ -570,6 +570,45 @@ check(tostring(rows[1].id) == tostring(first.wake.id), "and it is the row that w
 check(tonumber(rows[1].created_at) == r6_now - 3600, "keeping the OLDEST created_at for the window: " .. tostring(rows[1].created_at))
 check(tonumber(rows[1].resume_chain) == 2, "and the LARGEST chain: " .. tostring(rows[1].resume_chain))
 check(tostring(rows[1].status) == "pending", "pending again, with B's prompt: " .. tostring(rows[1].prompt))
+-- (5) NO SILENT DISPATCH (r7, 24/11). MEASURED on the live node: resume wakes ed7970e3, 7e34cac9 and b076ba0e were
+-- each CLAIMED (`dispatching`, attempts 1) and then nothing at all - no run row, no message, no journal line - three
+-- times, until the operator's watchdog resumed the session by hand. Two places could be silent and both now speak:
+-- the dispatch (one line naming the wake, the session and the queue's own receipt) and the completion run (a row that
+-- went back to `pending` and a line saying it did NOT run).
+local silent_session = memory.start_session("local", "chat", { id = "r7-acceptance", user_id = "master", node_id = "n",
+  title = "a session whose last run answered" })
+host.sql_exec([[INSERT INTO messages(id,session_id,seq,role,content,created_at) VALUES(?,?,?,?,?,?)]],
+  json.encode({ host.uuid(), silent_session, 1, "user", "do the thing", r6_now }))
+host.sql_exec([[INSERT INTO messages(id,session_id,seq,role,content,created_at) VALUES(?,?,?,?,?,?)]],
+  json.encode({ host.uuid(), silent_session, 2, "assistant", "paused for the deploy", r6_now }))
+local silent_wake = selfloop.schedule({ in_seconds = 0, reason = pause_mod.RESUME_REASON, prompt = "resume" },
+  { session_id = silent_session, user_id = "master" })
+check(silent_wake and silent_wake.ok, "a resume wake exists for that session")
+-- the live state: claimed, and nothing else has happened
+host.sql_exec([[UPDATE self_wakes SET status='dispatching', attempts=1, updated_at=? WHERE id=?]],
+  json.encode({ r6_now, silent_wake.wake.id }))
+-- (a) the dispatch names itself: one line, whatever the queue answered
+local dispatch_row = (json.decode(host.sql_query([[SELECT id, owner, session_id, reason FROM self_wakes WHERE id=?]],
+  json.encode({ silent_wake.wake.id })) or "[]") or {})[1]
+local receipt = selfloop.dispatch_default(dispatch_row)
+check(type(receipt) == "table", "the dispatch answers a receipt: " .. json.encode(receipt))
+-- (b) a completion run that answers an error writes the row and a line, never silence
+local noted = selfloop.note_dispatch_failure({ id = silent_wake.wake.id, session_id = silent_session },
+  { error = "self_wake_not_dispatching" })
+check(type(noted) == "table" and noted.noted == true, "the failure is noted: " .. json.encode(noted))
+check(noted.retried == true, "and a still-claimed row goes back to pending so it retries")
+local silent_row = (json.decode(host.sql_query([[SELECT status, last_error, due_at FROM self_wakes WHERE id=?]],
+  json.encode({ silent_wake.wake.id })) or "[]") or {})[1] or {}
+check(tostring(silent_row.status) == "pending", "the row is not left dispatching: " .. json.encode(silent_row))
+check(tostring(silent_row.last_error):find("dispatch_failed", 1, true) ~= nil,
+  "and it says why on the row: " .. tostring(silent_row.last_error))
+check(tonumber(silent_row.due_at) ~= nil, "with a time to try again: " .. tostring(silent_row.due_at))
+-- (c) and the completion entry point reports it too: the self_wake branch of wa_completion_run never swallows
+dofile("lua/core/completions.lua") -- defines the global the node-thread calls
+local answer = wa_completion_run(json.encode({ kind = "self_wake", id = "no-such-wake",
+  owner = "master", session_id = silent_session }))
+check(type(answer) == "string" and tostring(answer):find("error", 1, true) ~= nil,
+  "a self_wake the node cannot admit answers an error (and the row/log got it): " .. tostring(answer):sub(1, 120))
 for _, name in ipairs({ "pause", "resume", "paused", "cancel_requested", "cancelled_stop", "settle_interrupted", "defer_refused" }) do
   check(type(selfloop[name]) == "function", "the module exposes " .. name)
 end

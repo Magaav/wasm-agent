@@ -334,7 +334,15 @@ function wa_completion_run(raw)
   -- serialization and cancel flag) but is not a child settlement: `lua/core/selfloop.lua` owns its
   -- admission and its transcript turn. Routed here because the run half is the same node-thread.
   if type(args)=='table' and args.kind=='self_wake' then
-    local ok,result=pcall(dofile('lua/core/selfloop.lua').run_wake,args)
+    local module=dofile('lua/core/selfloop.lua')
+    local ok,result=pcall(module.run_wake,args)
+    -- NO SILENT PATH (r7, 24/11): a wake that raised, or answered an error, used to write NOTHING - the row stayed
+    -- `dispatching` and no line named it (measured: three resume wakes of session e540de37, on the live node). The row
+    -- and the log get the outcome here, every time.
+    local failed = (not ok) or type(result)~='table' or result.error~=nil
+    if failed and type(module.note_dispatch_failure)=='function' then
+      pcall(module.note_dispatch_failure, args, ok and result or {error=tostring(result)})
+    end
     return json.encode(ok and result or {error=tostring(result)})
   end
   local row=query('SELECT * FROM child_completions WHERE child_id=? AND owner=? AND parent_session=?',{args.id,args.owner,args.session_id})[1]

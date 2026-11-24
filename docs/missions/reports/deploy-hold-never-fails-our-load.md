@@ -1579,3 +1579,47 @@ is asserted in the row, and a future edit to any of the three breaks it.
 **Rows:** `test-deploy-resume.lua` **25 checks** (main's row, green, its assertion unchanged); `test-deploy-pause.lua`
 **101**; `test-selfloop-pause.lua` **161**; `test-handle-wake.lua` 17; `test-cli-wake-row.lua` 30;
 `test-deploy-bound.sh` `deploy bound ok`; `test-deploy-wait.sh` `deploy wait ok`.
+
+### r7: the silent dispatch, and what is NOT fixed (24/11 ~05:10Z)
+
+**Measured on the live node** (`4c720beb`): resume wakes `ed7970e3`, `7e34cac9` and `b076ba0e` of session `e540de37`
+were each CLAIMED (`dispatching`, attempts 1) and then nothing at all - no run row, no message, no journal line -
+three times, until the operator's watchdog resumed the session by hand. The reclaim worked; it re-armed into the same
+silent dead end.
+
+**(1) No silent path - done, and tested.** Two places could be silent, and both now speak:
+
+* `M.dispatch_default` writes **one line per dispatch**: `selfloop: dispatched wake <id> of session <id> (reason …):
+  <the queue's own receipt>`. An `accepted` receipt that never becomes a run is now a line an operator can grep;
+* `wa_completion_run`'s `self_wake` branch, on a raise or an error answer, calls `selfloop.note_dispatch_failure`:
+  the row goes back to `pending` with a due time and `last_error = 'dispatch_failed: …'` when it is still claimed,
+  and one line reads `selfloop: wake <id> of session <id> did NOT run: <why> (row back to pending, retried)`.
+
+Test (`scripts/test-selfloop-pause.lua`, real stores, the row claimed exactly as the live node had it): the dispatch
+answers a receipt and names itself; `note_dispatch_failure` puts the row back to `pending` with `dispatch_failed` and a
+`due_at`; and `wa_completion_run` on a wake it cannot admit answers an error **and** writes the row/line. Measured
+output in the run: `wake aa5ad7cf… of session r7-acceptance did NOT run: self_wake_not_dispatching (row back to
+pending, retried)` and `wake no-such-wake … did NOT run: self_wake_not_admitted`.
+
+**(2) Making the case run - NOT fixed, and here is exactly how far the evidence goes.**
+
+* `M.run_wake` is not the gap: called with a claimed row for a session whose last run is `completed/answered`, it goes
+  straight to the turn (reproduced: the call blocked on the absent provider in a script run, which is a turn being
+  attempted, not a silent return);
+* the row's only writes on the live node were the claim itself (`updated_at 04:37:08`) and nothing after, so neither
+  `run_wake`'s deferral branches nor `finish` were reached - the completion work item never arrived at
+  `wa_completion_run`, or arrived with an `args` shape that failed its first check;
+* everything between the claim and that entry lives in the node (`host.enqueue_completion` → scheduler admission →
+  node-thread `Work::Completion` → `lua.call_string("wa_completion_run")`), and the node's journal is not readable
+  from this shell (`journalctl --user -u wa-serve` answers `-- No entries --`, no such unit is listed) - so the one
+  artefact that would name the gap is the one I cannot read.
+
+The fix for (2) is therefore **installed as observability, not as a repair**: the next install gives the dispatch its
+own line with the queue's receipt, which names the gap on the first repeat. I am not claiming the resume runs.
+
+**Rows:** `test-deploy-resume.lua` 25; `test-deploy-pause.lua` 101; `test-selfloop-pause.lua` **169** (was 161);
+`test-handle-wake.lua` 17; `test-cli-wake-row.lua` 30; `test-deploy-bound.sh` `deploy bound ok`;
+`test-deploy-wait.sh` `deploy wait ok`.
+
+**Texts to approve (r7):** the two new lines above - `selfloop: dispatched wake <id> of session <id> (reason …):
+<receipt>` and `selfloop: wake <id> of session <id> did NOT run: <why> (row back to pending, retried)`.

@@ -1297,6 +1297,31 @@ function M.defer_refused(row, refusal, opts)
   return { deferred = true, wake_id = row.id, due_at = next_at, deploy_waiting = tostring(refusal or "") }
 end
 
+-- A WAKE THAT WAS DISPATCHED AND THEN RAISED OR ANSWERED AN ERROR WROTE NOTHING (r7, 24/11): the row stayed
+-- `dispatching` for ever and no line named it. Called by `wa_completion_run` on every non-run outcome: the row goes
+-- back to `pending` with a due time when it is still this wake's to retry, or keeps whatever the run did, and one log
+-- line names the wake, its session and the reason.
+function M.note_dispatch_failure(args, answer)
+  args = args or {}
+  local id = tostring(args.id or args.wake_id or "")
+  local reason = type(answer) == "table" and tostring(answer.error or answer.status or answer.detail or "") or tostring(answer)
+  if id == "" then return { error = "wake_dispatch_failure_without_an_id" } end
+  local now = tonumber(host.now()) or os.time()
+  local row = query("SELECT * FROM self_wakes WHERE id=?", { id })[1]
+  local retried = false
+  if row and tostring(row.status) == "dispatching" then
+    exec([[UPDATE self_wakes SET status='pending', due_at=?, last_error=?, updated_at=? WHERE id=? AND status='dispatching']],
+      { now + backoff(tonumber(row.attempts) or 0), "dispatch_failed: " .. reason:sub(1, 300), now, id })
+    retried = true
+  end
+  if type(host) == "table" and type(host.log) == "function" then
+    pcall(host.log, string.format("selfloop: wake %s of session %s did NOT run: %s%s",
+      id, tostring(args.session_id or (row and row.session_id) or ""), reason:sub(1, 300),
+      retried and " (row back to pending, retried)" or ""))
+  end
+  return { noted = true, retried = retried }
+end
+
 function M.run_wake(args)
   M.setup()
   args = args or {}
@@ -1598,9 +1623,17 @@ function M.dispatch_default(row)
   local ok, raw = pcall(host.enqueue_completion, json.encode({
     kind = "self_wake", id = row.id, wake_id = row.id, owner = row.owner, session_id = row.session_id,
   }))
-  if not ok then return { error = "wake_dispatch_failed: " .. slug(raw) } end
-  local receipt = type(raw) == "string" and json.decode(raw) or raw
-  if type(receipt) ~= "table" then return { error = "wake_dispatch_answer_unreadable" } end
+  local receipt = ok and (type(raw) == "string" and json.decode(raw) or raw) or { error = "wake_dispatch_failed: " .. slug(raw) }
+  if type(receipt) ~= "table" then receipt = { error = "wake_dispatch_answer_unreadable" } end
+  -- A DISPATCH IS A FACT WITH A NAME (r7, 24/11). MEASURED on the live node: resume wakes ed7970e3, 7e34cac9 and
+  -- b076ba0e were each claimed (`dispatching`, attempts 1) and then NOTHING - no run, no message, no journal line -
+  -- three times, until the operator's watchdog resumed the session by hand. Nothing anywhere named the wake, so the
+  -- failure was invisible. This line is the dispatch's own record: which wake, which session, and what the node's
+  -- queue answered. A receipt that is `accepted` and never becomes a run is now a line an operator can grep.
+  if type(host) == "table" and type(host.log) == "function" then
+    pcall(host.log, string.format("selfloop: dispatched wake %s of session %s (reason %s): %s",
+      tostring(row.id), tostring(row.session_id), tostring(row.reason):sub(1, 40), tostring(json.encode(receipt)):sub(1, 200)))
+  end
   return receipt
 end
 
