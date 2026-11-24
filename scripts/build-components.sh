@@ -138,37 +138,14 @@ printf 'component toolchain: %s (pinned: %s); wasi-sdk: %s\n' "$(rustc -V 2>/dev
 # path dependency differ still - that is Cargo's `-C metadata` (docs/COMPONENTS.md, "Reproducible
 # builds", measured) - but a build input that can be one constant should not be a per-checkout path.
 
-# Install the wrapper where every checkout of the same wrapper source shares exactly one path, and
-# print that directory. Content-addressed: a changed wrapper is a different path, an unchanged one is
-# the same path in every checkout and after every reboot. `cp` to a temporary name then `mv` so a
-# concurrent build never picks up half a file.
-install_wrapper() {
-  local ext hash dir native
-  case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) ext=".exe" ;; *) ext="" ;; esac
-  hash=$({ cat rust/wa-remap-rustc/Cargo.toml rust/wa-remap-rustc/src/main.rs scripts/wa-remap-rustc; } 2>/dev/null | sha_stdin | cut -c1-16)
-  if [ -z "$hash" ]; then echo "error: cannot read the wrapper sources (rust/wa-remap-rustc)" >&2; return 1; fi
-  dir="${WA_REMAP_DIR:-${TMPDIR:-/tmp}/wa-remap-rustc}/$hash"
-  mkdir -p "$dir" || return 1
-  if [ ! -f "$dir/wa-remap-rustc$ext" ]; then
-    if [ -n "$ext" ]; then
-      # The native twin is compiled, not a `.cmd`: cmd.exe re-parses every argument and refuses a
-      # command line over 8191 characters, and `windows-sys` alone passes one `--check-cfg`
-      # argument naming ~250 features - that is what broke the wa-whatsapp build
-      # (rust/wa-remap-rustc/src/main.rs).
-      cargo build --release --manifest-path rust/wa-remap-rustc/Cargo.toml >/dev/null || {
-        echo "error: cannot build the component-build wrapper (rust/wa-remap-rustc)" >&2; return 1; }
-      native="${CARGO_TARGET_DIR:-$PWD/rust/target}/release/wa-remap-rustc.exe"
-      case "$native" in /*|[A-Za-z]:/*|[A-Za-z]:\\*) ;; *) native="$PWD/$native" ;; esac
-      [ -f "$native" ] || { echo "error: the wrapper build produced no $native" >&2; return 1; }
-      cp "$native" "$dir/.wa-remap-rustc$ext.tmp.$$" && mv "$dir/.wa-remap-rustc$ext.tmp.$$" "$dir/wa-remap-rustc$ext"
-    else
-      # A POSIX host needs no compile: the wrapper is the `exec` in scripts/wa-remap-rustc.
-      cp scripts/wa-remap-rustc "$dir/.wa-remap-rustc.tmp.$$" && chmod 755 "$dir/.wa-remap-rustc.tmp.$$" &&
-        mv "$dir/.wa-remap-rustc.tmp.$$" "$dir/wa-remap-rustc"
-    fi || { echo "error: cannot install the wrapper in $dir" >&2; return 1; }
-  fi
-  printf '%s\n' "$dir"
-}
+# THE WRAPPER DIRECTORY IS CHOSEN AND PROVED ELSEWHERE (24/11, work). It used to be installed here, and it
+# trusted a file it had not tested (-f only) and a directory it had not tested at all - which is how the
+# fallback build on work died with "could not execute process wa-remap-rustc ... Permission denied (os
+# error 13)" after two minutes of toolchain fetch. scripts/lib/component-remap-wrapper.sh installs it,
+# repairs a copy without its execute bit, refuses a directory this process cannot execute files from (a
+# noexec /tmp, a directory another user owns) and falls back by name; the test is
+# scripts/test-component-build-wrapper.sh. Nothing about it reaches the bytes (docs/COMPONENTS.md, 24/11).
+. "$PWD/scripts/lib/component-remap-wrapper.sh"
 
 # The byte helpers, before anything uses them (the build root below hashes a tree; the install hashes
 # the module it wrote). The implementation is scripts/lib/component-build-root.sh, so the publisher and
@@ -292,7 +269,7 @@ if [ "${WA_COMPONENTS_REPRO:-1}" != 0 ]; then
   add_c_remap "$CHECKOUT" /wasm-build
   add_c_remap "$CARGO_HOME_DIR" /cargo-home
   if [ -n "${WASI_SYSROOT:-}" ]; then add_c_remap "$(tree_path "$SDK")" /wasi-sdk; fi
-  WRAPPER_DIR="$(install_wrapper)" || exit 2
+  WRAPPER_DIR="$(wa_remap_wrapper_dir "$PWD")" || exit 2
   export PATH="$WRAPPER_DIR:$PATH"
   export RUSTC_WRAPPER=wa-remap-rustc
   # The wrapper reads its roots from here: it lives outside the checkout, so it cannot derive them.

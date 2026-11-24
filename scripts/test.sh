@@ -569,6 +569,40 @@ command -v cygpath >/dev/null 2>&1 && export WA_COMPONENTS_DIR="$(cygpath -w "$G
 # sha256 and size check, the atomic swap and the rollback. No toolchain, no node: the component itself
 # is proved by the graph tests below and by scripts/check-graph-component.lua during a deploy.
 gate_run bash scripts/test-deploy-components.sh
+# THE FALLBACK BUILD'S RUSTC WRAPPER, AND THE REFUSAL A NODE WITHOUT A TOOLCHAIN OWES (24/11, work). The
+# wrapper install trusted a file it had not tested and a directory it had not tested at all, so on work the
+# deploy's fallback build died with "could not execute process wa-remap-rustc ... Permission denied (os error
+# 13)" after two minutes of toolchain fetch, naming none of it. This row proves the install repairs a copy
+# without its execute bit, refuses (by name) a directory this process cannot write or execute from, never
+# quietly replaces an explicit WA_REMAP_DIR, falls back from an unusable TMPDIR to the home cache saying why,
+# and that a PATH without cargo/rustup refuses the component stage AT ONCE with component_build_impossible
+# instead of starting a build. No network, no cargo, no node.
+gate_run bash scripts/test-component-build-wrapper.sh
+# IS A PUBLISHED COMMIT INSTALLABLE BY DOWNLOAD? (24/11). Publishing is per landing and covered the node
+# binary only, while a node also needs the components bundle named by the sha256 of components.lock - so a
+# landing that moved the lock published a binary whose bundle was never made (components-df6f97708c72: HTTP
+# 404) and every node without a toolchain refused the update, with nothing saying which asset was missing.
+# This row asks every URL the node release and that commit's lock name for a HEAD, against a LOCAL stand-in
+# of the channel (no network, no gh, no node): complete, the 24/11 shape (bundle absent), a missing
+# signature, a missing manifest, a channel that does not answer (unknown, never complete), and that the tag
+# asked for is the one the COMMIT's lock names rather than the working tree's.
+gate_run bash scripts/test-release-completeness.sh
+# THE LANDING'S SECOND PUBLISH (24/11). Publishing covered the node binary only, so a landing that moved
+# components.lock published a binary whose components bundle was never made (components-df6f97708c72: HTTP
+# 404) and no node without a toolchain could update. The row proves the step in scripts/lib/landing-components-
+# publish.sh: OFF by default (nothing uploaded, the log says this landing is not installable by download and
+# names the flag), unknown when the channel cannot answer (never "missing, so publish"), and with
+# WA_PUBLISH_COMPONENTS=1 the bundle verified by the REAL publish-components.sh and uploaded with every pinned
+# asset plus components.lock, --latest=false, under components-<sha12 of the lock>, over an existing tag rather
+# than recreating it, and refused when the bytes are not the pins. gh is a shim that only records its
+# arguments; no network, no cargo, no node.
+gate_run bash scripts/test-publish-components-at-landing.sh
+# THE COMPONENTS QUESTION, ASKED BEFORE A DEPLOY TOUCHES ANYTHING (24/11, work 20:56Z: "wa update" spent
+# 117 s - a binary download, then two minutes of toolchain fetch for a fallback build - and died inside cargo,
+# for an answer available in its first second: the bundle its lock names was not published and the node could
+# not build one). scripts/lib/deploy-components.sh's wa_components_preflight, and scripts/deploy.sh's own first
+# lines, are that question: local bytes first (no network), then the channel, then "can this node build it".
+gate_run bash scripts/test-components-preflight.sh
 # The shipped set: a component is shipped by being PINNED (`components.lock`), and a deploy installs,
 # records and rolls back that whole set (docs/FEATURES.md). Proves the lock (production set, no fixture),
 # the set's install/rollback/refusal mechanics on a fixture lock, and - when this checkout has built
@@ -588,6 +622,21 @@ gate_run bash scripts/test-component-lock-rebuild.sh
 # side (verify, cache, the refusals, the disk-conditioned fallback, and the order of the calls inside
 # scripts/deploy.sh) and the publish side (--check, --from, every way a manifest can be wrong).
 gate_run bash scripts/test-deploy-node-binaries.sh
+# IS THIS COMMIT INSTALLABLE BY DOWNLOAD? The row that was missing (24/11): work's update downloaded and
+# verified node-9a0c589adfa0 and then had no components bundle to install - components-df6f97708c72 is
+# HTTP 404, because publishing is per landing and covers the node binary only - so a node without a
+# toolchain could not install the landing at all, and nothing said so before the fleet step. The row asks
+# the node's own question on a scratch HOME with no cargo/rustup/rustc/zig on PATH and empty caches: the
+# binary from its release, every pinned component from components-<sha12 of the lock>, installed, and the
+# pair proves itself through scripts/check-component-proof.lua. It reads the real release channel and it is
+# RED until the assets it needs are published, so the gate does not spend a network round on it unless
+# asked: WA_INSTALLABLE_BY_DOWNLOAD=1 bash scripts/test-installable-by-download.sh [<commit>].
+if [ "${WA_INSTALLABLE_BY_DOWNLOAD:-0}" = 1 ]; then
+  gate_run bash scripts/test-installable-by-download.sh
+else
+  echo "SKIP: installable-by-download (needs the network and the published release channel; WA_INSTALLABLE_BY_DOWNLOAD=1 runs it, and it is the cut condition before the fleet step)"
+  SKIPPED=$((SKIPPED + 1))
+fi
 # THE VERIFIED BYTES MUST BE INSTALLABLE (21/11, hand fix 3 of the node-7ddbfa98036a rollout). A release asset
 # arrives 0644; wa_node_binary_download verified the signature, every sha256 and every size and left the bit off,
 # and scripts/upgrade.sh refuses a candidate without it ("no new binary to install") - so release-install.sh, the

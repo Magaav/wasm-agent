@@ -55,7 +55,13 @@ M.CACHE_MS = 15 * 60 * 1000
 -- served node asks on its housekeeping tick, so the only cost of a shorter value is file reads.
 M.READ_MEMO_MS = 60 * 1000
 M.DEFAULT_REPO = "Magaav/wasm-agent"
-M.DEFAULT_PER_PAGE = 5
+-- THE WINDOW IS BOUNDED, AND THE BOUND IS STATED (24/11). It was 5, so a node read the five releases
+-- GitHub happened to return and called the first of them the newest - on this node that was
+-- node-d2fbd140934e (published 16:42Z) while node-9a0c589adfa0 (17:20Z) and node-525780e13623 (17:08Z)
+-- were newer and node-4615449f4f02 (16:50Z) was not in the window at all. 20 is the bound the line
+-- below names; every entry is ordered by publish time (`by_published`) before anything calls one of
+-- them "newest".
+M.DEFAULT_PER_PAGE = 20
 -- `wa update --check` REFRESHES before it answers (Fable, 24/11): it is the one place a person ASKS, and a
 -- check that decides from a three-day-old list is not a check. The refresh is bounded - this many seconds
 -- for the list, and the same again for the installer's digest walk - and a refresh that fails is said out
@@ -195,6 +201,32 @@ end
 
 -- ---- the published side -----------------------------------------------------
 
+-- NEWEST MEANS NEWEST BY PUBLISH TIME (24/11). Measured on this node's own cache that evening: the
+-- five entries arrived as node-d2fbd140934e (published 16:42:32Z), node-9a0c589adfa0 (17:20:43Z),
+-- node-8844132aa843 (16:16:32Z), node-5bb28d8a1f51 (15:50:15Z), node-525780e13623 (17:08:58Z), and
+-- `wa update --check` said "newest node-d2fbd140934e" - three of the five were newer than the entry it
+-- named. GitHub's release list orders by CREATION, not by `published_at`, so "the first entry" is not
+-- "the newest published release", and a bounded page of it can miss the newest one entirely.
+-- Everything that asks "newest" sorts by `published_at` first: the parser, the cache reader (a cache
+-- written by an older node is in the API's order), and therefore `latest`, `newest_installable` and
+-- the line `wa update --check` prints. An entry with no `published_at` sorts LAST: a fact that is not
+-- there cannot be the newest, and guessing it is how the wrong tag got named.
+local function by_published(entries)
+  local decorated = {}
+  for index, entry in ipairs(type(entries) == "table" and entries or {}) do
+    decorated[#decorated + 1] = { entry = entry, at = trim(entry.published_at or ""), index = index }
+  end
+  table.sort(decorated, function(left, right)
+    if left.at == right.at then return left.index < right.index end
+    if left.at == "" then return false end
+    if right.at == "" then return true end
+    return left.at > right.at
+  end)
+  local sorted = {}
+  for _, item in ipairs(decorated) do sorted[#sorted + 1] = item.entry end
+  return sorted
+end
+
 -- The body of `GET /repos/<owner>/<repo>/releases?per_page=5`: a list, newest first. A single object
 -- is accepted too so a fixture can be one release. Drafts are skipped; pre-releases are not, because
 -- a node-<sha12> release is the binary of a commit whether GitHub calls it a pre-release or not.
@@ -227,7 +259,7 @@ function M.parse_feed(text)
     end
   end
   if #list == 0 then return nil, "no_node_release" end
-  return list
+  return by_published(list)
 end
 
 -- ---- what this machine can install ------------------------------------------
@@ -574,7 +606,7 @@ local function feed_from_cache(cached)
         end
       end
     end
-    if #feed > 0 then return feed end
+    if #feed > 0 then return by_published(feed) end
   end
   -- A hand-written fixture from before schema 2. It carries no asset names, so no entry in it can be
   -- proven installable here; the shape survives only so an old fixture still parses.
@@ -589,7 +621,7 @@ local function feed_from_cache(cached)
       feed[#feed + 1] = { tag = "node-" .. other, sha12 = other }
     end
   end
-  return feed
+  return by_published(feed)
 end
 
 -- ---- what is published for ONE commit, from this node's own list -------------------------------
@@ -799,8 +831,17 @@ function M.listing(options)
     local read = trim(o.read)
     local when = read ~= "" and read
       or (list.checked_at and os.date("!%Y-%m-%d %H:%MZ", math.floor(list.checked_at / 1000)) or "an unknown time")
+    -- The prefix stays exactly "release list: N entries, read <when>" (the follow row and the gate grep it),
+    -- and the order and the bound are named AFTER it, so nobody reads N entries as "the N newest": they are
+    -- the newest page of a stated size, ordered by publish time (`by_published`), with the newest one dated.
+    local newest = list.feed[1]
+    local newest_at = newest and trim(newest.published_at or "") or ""
+    local bound = M.per_page()
     local line = "release list: " .. #list.feed .. " entries, read " .. when ..
-      (list.feed[1] and (", newest " .. tostring(list.feed[1].tag or list.feed[1].sha12)) or "")
+      (newest and (", newest " .. tostring(newest.tag or newest.sha12) ..
+        (newest_at ~= "" and (" (published " .. newest_at .. ")") or " (published time unknown)")) or "") ..
+      ", ordered by publish time, out of at most " .. tostring(bound) .. " asked for" ..
+      (#list.feed >= bound and " (so anything older than the oldest entry here is not in it)" or "")
     local failed = trim(o.refresh_failed)
     if failed ~= "" then
       line = line .. "; the refresh just now failed (" .. failed .. "), so this is the list as it stood"

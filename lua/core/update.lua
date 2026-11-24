@@ -695,6 +695,46 @@ end
 -- installed commit with origin/main (a fetch, no merge); a release install asks the bootstrap's verified
 -- check. Read-only either way. The release feed alone could not answer for a tree install - it records a
 -- commit, not a tag - so it said "cannot tell" on every tree node.
+-- THE BOUND THE COMPONENTS QUESTION RUNS TO (Fable, 24/11): 10 seconds, the same bound the release-list
+-- refresh uses (M.REFRESH_SECONDS in lua/core/update_banner.lua) - a check is a question a person is
+-- waiting on, so a channel that accepts a connection and then says nothing answers UNKNOWN inside this
+-- bound instead of holding the command open. scripts/check-release-complete.sh --components states the
+-- same 10 seconds on its own curl calls; `timeout` below keeps the bound even if that is bypassed.
+local CHECK_COMPONENTS_SECONDS = 10
+
+-- CAN THIS COMMIT BE INSTALLED BY DOWNLOAD? - the question `wa update --check` did not ask (24/11).
+--
+-- MEASURED on work at 20:56Z: `wa update` downloaded and verified node-9a0c589adfa0, found no components bundle
+-- for its lock (components-df6f97708c72: HTTP 404), spent two minutes fetching a toolchain for the fallback
+-- build, and died inside cargo - 117 s for an answer available in the first second. A check that is behind
+-- is not the same answer as "and the node can install it", so this asks the second question too, through
+-- scripts/check-release-complete.sh --components (one request, and the two facts a person needs kept apart:
+-- is the bundle published, and can THIS node build one instead).
+--
+-- A tree old enough not to carry that script, or a question that cannot be answered, is UNKNOWN - never
+-- "fine": an unanswerable question is not a yes (the rule four bugs of 23-24/11 were found by).
+local function publishability(tree, commit)
+  if type(tree) ~= "string" or tree == "" or type(commit) ~= "string" or commit == "" then return nil end
+  local script = slashes(tree) .. "/scripts/check-release-complete.sh"
+  local present = shell("test -f " .. quote(script) .. " && echo yes")
+  if not present or (present.code or 1) ~= 0 then return nil end
+  -- BOUNDED, and by TWO guards: the script's own curl bound (10 s per request, --components) and this
+  -- `timeout`, which holds even if the script is an older one that has no bound of its own. `timeout`
+  -- is not everywhere; without it the script's own bound still applies and the answer says which ran.
+  local guard = ""
+  local have = shell("command -v timeout >/dev/null 2>&1 && echo yes")
+
+  if have and (have.code or 1) == 0 then guard = "timeout " .. tostring(CHECK_COMPONENTS_SECONDS + 5) .. " " end
+  local run = shell(guard .. "bash " .. quote(script) .. " " .. quote(commit) .. " --components 2>&1")
+  local text = trim(run and run.stdout or "")
+  if text == "" then return nil end
+  local fields = {}
+  for key, value in text:gmatch("([%w_]+)=([^%s]+)") do fields[key] = value end
+  local note = text:match('note="(.-)"')
+  if not fields.components then return nil end
+  return { state = fields.components, tag = fields.tag, buildable = fields.buildable, note = note }
+end
+
 function M.check(options)
   options = options or {}
   local facts = M.facts(options)
@@ -750,8 +790,34 @@ function M.check(options)
     return { ok = true, status = "current", tree = facts.tree, installed = installed, target = main,
       message = "installed " .. installed .. " is origin/main; nothing to update." }
   end
-  return { ok = true, status = "behind", tree = facts.tree, installed = installed, target = main, behind = behind,
+  -- BEHIND IS NOT INSTALLABLE (24/11). The full id, because the components question is asked about a COMMIT
+  -- (its components.lock is what names the bundle), and answered before the node pays for anything.
+  local full_main = trim(git(facts.tree, "rev-parse origin/main") or "")
+  if full_main == "" then full_main = trim(git(facts.tree, "rev-parse " .. quote(main)) or "") end
+  local pub = publishability(facts.tree, full_main)
+  local answer = { ok = true, status = "behind", tree = facts.tree, installed = installed, target = main, behind = behind,
     message = "installed " .. installed .. " is " .. behind .. " commit(s) behind origin/main " .. main .. "; `wa update` installs it." }
+  if pub then
+    answer.components_release = pub.tag
+    answer.components_state = pub.state
+    answer.can_build_components = pub.buildable
+    if pub.state == "published" then
+      answer.installable_by_download = true
+    elseif pub.state == "missing" and pub.buildable == "yes" then
+      -- It can be installed, but by a BUILD: a different cost, and the operator should know which one.
+      answer.installable_by_download = "by_a_build"
+    elseif pub.state == "missing" then
+      answer.installable_by_download = false
+    else
+      answer.installable_by_download = "unknown"
+    end
+    if pub.note and pub.note ~= "" then answer.message = answer.message .. " " .. pub.note .. "." end
+  else
+    -- No script beside this tree, or it could not be run: say unknown instead of implying the update is fine.
+    answer.installable_by_download = "unknown"
+    answer.message = answer.message .. " Whether this node can install it by download is unknown: this tree has no scripts/check-release-complete.sh to ask, or it could not be run."
+  end
+  return answer
 end
 
 function M.run(options)

@@ -75,6 +75,19 @@ RUNNER="${WA_PUBLISH_RUNNER:-}"
 TARGET_DIR_FLAG=""
 say() { printf 'publish-node-binaries: %s\n' "$*"; }
 fail() { printf 'publish-node-binaries: %s\n' "$*" >&2; exit "${2:-2}"; }
+# WHERE THIS SCRIPT'S OWN LIBS ARE: beside it, not beside --repo. A copy of this publisher into a fixture tree
+# (scripts/test-land-signing.sh does exactly that) must keep building and publishing binaries, so the two steps
+# this file learned on 24/11 are sourced when they are there and REFUSED BY NAME when they are not - a
+# --publish run then says it cannot answer the components question instead of guessing at it.
+SELF="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)"
+_STEPS_OK=1
+for _lib in release-completeness.sh landing-components-publish.sh; do
+  if [ -f "$SELF/scripts/lib/$_lib" ]; then . "$SELF/scripts/lib/$_lib"; else _STEPS_OK=0; fi
+done
+if [ "$_STEPS_OK" != 1 ]; then
+  components_step() { say "components: scripts/lib/landing-components-publish.sh is not beside this publisher, so this run cannot publish the components bundle or say whether the landing is installable by download"; return 2; }
+  publish_report() { say "installable-by-download: unknown (scripts/lib/release-completeness.sh is not beside this publisher)"; return 2; }
+fi
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --repo) [ "$#" -ge 2 ] || fail 'repo_value_required'; ROOT="$2"; shift 2 ;;
@@ -365,6 +378,13 @@ if [ "$ENSURE" = 1 ]; then
   done
   if [ -z "$ensure_missing" ]; then
     say "covered: $ensure_tag covers the compiled inputs of $COMMIT for $MANIFEST_TRIPLES (source_commit $ensure_commit); nothing to build or publish"
+    # ...except the components bundle, which no release of any commit covers: it is keyed by the sha256 of
+    # THIS commit's components.lock. A landing that only moves the lock lands here, and it is exactly the
+    # landing whose nodes could not update at all (24/11).
+    if [ "$PUBLISH" = 1 ]; then
+      components_step || true
+      publish_report
+    fi
     exit 0
   fi
   say "not covered for$ensure_missing; building $MANIFEST_TRIPLES (a deploy of $COMMIT needs this release)"
@@ -831,6 +851,8 @@ if [ "$PUBLISH" = 1 ]; then
       || fail "publish_failed: gh release create $TAG" 8
     say "published $TAG: https://github.com/$REPO_SLUG/releases/tag/$TAG"
   fi
+  components_step || true
+  publish_report
 fi
 say "A node then needs nothing but this: bash scripts/deploy.sh (it fetches $TAG for its own triple,"
 say "checks source_commit and every sha256/size, caches it under <install>/node-binaries/$SHORT)${RUN_DONE:+; ran: $RUN_DONE}"
