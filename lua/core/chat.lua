@@ -772,14 +772,6 @@ function M.run(argv)
     end
     -- The session id goes to stderr, so stdout stays the run's own output for a caller capturing it,
     -- and the id is still there to resume the thread or steer a later run of it.
-    -- The message survives a refusal (r8a/12): the turn did not start, so the words go to the session's next turn.
-    if not ran_ok and prompt ~= "" then
-      local kept = M.keep_refused_message(agent.session_id, prompt, agent.user, agent.turn_refused)
-      if kept then
-        print("  kept: the start was refused, so this message is session " .. agent.session_id
-          .. "'s next turn (wake " .. kept .. ")")
-      end
-    end
     -- A RUN REFUSED BY A WAITING BUILD IS NOT A FAILED ONE (23/11): `not started` is the third word the runners
     -- already act on (exit 2 with `deploy_waiting`, docs/SCRIPTED-RUNS.md) - a turn that wrote nothing and ran
     -- nothing was never "failed".
@@ -1434,27 +1426,6 @@ M.start_notice = start_notice
 -- `completed`, and `turn_refused` stays nil), so it exits 0 and its work resumes from the wake it scheduled.
 -- `scripts/test-thinking-block.lua` asserts all four combinations, and `scripts/test-deploy-wait.sh` step 4
 -- asserts the paused one end to end (rc=0 with a deploy waiting).
--- A REFUSED START DOES NOT EAT THE MESSAGE (r8a/12, Fable 24/11). MEASURED at 10:50Z: two briefs were silently
--- lost - one refused `run_resource_refused` because the session's claim was held by its own duplicate node run, one
--- refused `deploy_waiting` because an install was waiting. The CLI printed the refusal, exited, and the message never
--- entered the session. A message a person (or a runner) handed to the CLI is a promise: if the turn could not start,
--- the message becomes the session's next turn as a pending wake, and the CLI says so. It is never dropped.
-function M.keep_refused_message(session_id, message, owner, refusal)
-  if type(message) ~= "string" or message == "" then return nil end
-  if type(session_id) ~= "string" or session_id == "" then return nil end
-  local loaded, selfloop = pcall(dofile, "lua/core/selfloop.lua")
-  if not loaded or type(selfloop) ~= "table" or type(selfloop.schedule) ~= "function" then return nil end
-  local armed = selfloop.schedule({
-    in_seconds = 60,
-    reason = "kept: the start was refused, so this message is the session's next turn",
-    prompt = message,
-  }, { session_id = session_id, user_id = tostring(owner or "master") })
-  if type(armed) == "table" and type(armed.wake) == "table" and armed.wake.id then
-    return tostring(armed.wake.id)
-  end
-  return nil
-end
-
 function M.exit_code(ok, agent)
   if ok then return 0 end
   if M.deploy_refused(agent) then return 2 end
