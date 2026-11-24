@@ -1,0 +1,125 @@
+# one-resume-per-install - ready-1 (r8c 1 blockers + r8c 2 loss)
+
+STACKED: this branch (change/one-resume-per-install) is on change/deploy-hold-r8c, which is on
+change/selfloop-ledger-upgrade-2, on origin/main ffb5153e. Commits from this round, none pushed:
+
+| commit | what |
+| --- | --- |
+| 718ce523 | r8c 1 BLOCKER: the release collapses the resume queue PER SESSION and leaves a held session alone |
+| 04689288 | r8c 1 BLOCKER: the "[deploy] installed" line is decided by installed.txt (tree + bytes), not by host.build_identity |
+| b2b78338 | r8c 2 LOSS: a different kept message is APPENDED, bounded, and the row says when the bound cut |
+| 4b11bede | the two Lua rows were wired nowhere; they are rows of scripts/test.sh now |
+
+Built and run HERE on avell (16 cores), CARGO_TARGET_DIR=/home/victor/wasm-agent/target/m-one-resume-per-install,
+cargo build --release --offline with WA_CODEMODE_ALLOW_EMPTY=1 (the code-mode asset bundle is not needed by these
+rows; nothing here touches code mode). Every suite run under flock -o ~/Work/missions/.suite.lock.
+
+## The brief's premises, re-measured before writing code
+
+* The supersede really had no session in it (lua/core/deploy_pause.lua, release_due: "... ORDER BY due_at,
+  created_at LIMIT 1" inside a pcall), so it kept one row in the whole table. Confirmed by running the brief's
+  shape (three paused sessions + one parked) against it: ZERO resume turns released.
+* host.build_identity is the binary's commit (rust/wa-host build_info::COMMIT), and scripts/deploy.sh:1975 writes
+  lua_tree=$COMMIT / lua_fast_path= into installed.txt. Confirmed.
+* Two premises of the previous round were WRONG, and both are part of the blocker:
+  1. record_pause stored opts.build = M.build_now() and NEVER wrote it into the pause record, and paused_build read
+     record.build. The "installed" branch could not fire from the product's own data; the only test that saw it
+     green wrote build= into the record by hand.
+  2. In the release path opts.read IS the deploy-marker reader (selfloop.tick passes opts.deploy_marker), so
+     paused_build and marker_on_disk were handing a marker reader a path and treating the answer as a pause record
+     or a marker. The did-not-happen line therefore never named the marker's target from the tick.
+
+## r8c 1 BLOCKER - one resume row per SESSION (718ce523)
+
+release_due now collapses per session_id (each session keeps its own oldest pending resume - the row the release
+then stamps), skips every session in self_wake_pauses on BOTH halves (nothing superseded, nothing made due: a
+parked session's resume still fires once, after its own release), and logs a failing collapse by name instead of
+swallowing it.
+
+Row: scripts/test-deploy-release-honest.lua section 4 - the brief's shape: THREE paused sessions carrying 2, 3 and
+4 queued resume rows plus ONE parked session with two overdue rows (the 24/11 shape). RED before the commit: "ONE
+resume turn per paused session: three paused sessions, three turns, and none for the parked one: expected 3, got
+0". GREEN after: 60 checks - three turns, one per paused session, each session left with exactly one
+pending-or-dispatching row, and the parked session's rows keep their status, time and prompt.
+
+## r8c 1 BLOCKER - the installed line is a fact about the RECORD (04689288)
+
+M.installed_identity reads installed.txt through the one reader of that file (update.installed_record, the reader
+change/version-names-the-tree uses) and answers { tree = lua_tree or commit, commit }. record_pause writes
+installed_tree/installed_commit into the session's pause record; release_due reads it again and M.install_moved
+answers true only for two records that disagree in one field (a scripts-only install moves the tree alone, a
+release install names only commit=). "Cannot tell" is nil and is NEVER read as installed. M.build_now and
+M.paused_build are gone. marker_on_disk and the pause record read opts.read_file, not opts.read.
+
+Rows, both from the brief:
+
+* scripts/test-deploy-release-honest.lua section 3: the pause record names the tree and the bytes the product read
+  (written by record_pause, read back from the real pause-record file); a scripts-only install (tree moves, bytes
+  do not) makes the release say "[deploy] installed", naming bbbb5555eeee and "was aaaa1111bbbb"; a marker that
+  goes with the record unchanged says "[deploy] the update did not happen", naming the marker's target; and
+  install_moved(nil, x) is nil. RED before: "the pause record names the tree this node runs: expected
+  aaaa1111bbbb2222, got nil".
+* scripts/test-deploy-release-node.sh (a real scratch node, own HOME, port, ledger; a real turn in flight; two cases
+  end to end, each counted at the loopback model): a scripts-only install gives the ledger row "[deploy] installed",
+  naming bbbb5555eeee, with exactly one resume turn; a marker removed with no install gives "[deploy] the update did
+  not happen", naming deadbeefcafe, with exactly one resume turn. GREEN on this branch. RED on the base (my row, the
+  base Lua, 0d12413b) - and it reproduces Fable's blocker on a real node: "FAIL: the released row does not say the
+  build is installed: [deploy] the update did not happen: nothing was installed." after lua_tree= had moved.
+
+## r8c 2 LOSS - a different kept message is appended (b2b78338)
+
+selfloop.keep_prompt_text(kept, message, limit) appends in order ("\n\n" between messages), adds nothing when the
+words are already the last thing kept (the identical-nudge collapse stays), and bounds the row at
+M.KEPT_PROMPT_LIMIT (8000): the NEWEST words stay whole, the oldest go, the cut lands on a UTF-8 boundary, and
+M.KEPT_CUT_TEXT is the first line so a session reading part of what was kept does not read as if it held all of it.
+keep_pending_message answers appended/cut beside the id it reused.
+
+Row: scripts/test-kept-message-one.lua - both messages of a different-message row stay, in arrival order; the same
+nudge again adds no copy; a 5000 + 4000 character pair leaves ONE row bounded at the module's limit, keeping the
+newest message whole, saying it cut, and dropping the oldest. RED before: "both messages are kept, in the order they
+arrived ...: expected finish the mission step / and then report, got and then report". GREEN after: 36 checks.
+
+## Regression rows (all green on this branch)
+
+test-deploy-pause.lua (116 checks), test-deploy-wait.lua (59), test-deploy-resume.lua (25),
+test-completion-deploy-wait.lua (16), test-peer-deploy-wait.lua (14), test-session-park.lua,
+test-selfloop-no-starve.lua, test-selfloop-pause.lua. Each on its own scratch HOME/WASM_AGENT_HOME under flock -o.
+
+Wiring (rule 3): scripts/test-deploy-release-honest.lua and scripts/test-kept-message-one.lua were written in the
+previous round and run by NOTHING; both are rows of scripts/test.sh now (4b11bede), beside the deploy rows.
+scripts/test-deploy-release-node.sh was already a fast-path row (check deploy-release-node).
+
+## Findings this round did NOT fix (each needs its own row)
+
+1. A SERVED CONVERSATION PAUSES ONCE AND NEVER AGAIN. lua/core/server.lua's agent_for caches ONE agent per thread,
+   deploy_pause.at_boundary sets self.deploy_pause = marker and nothing clears it, so the next turn on that thread
+   returns nil before reading the marker. MEASURED while writing the node row: the second pause never happened on
+   the same thread (4 requests, no pause) and happened at once on a new thread. wa chat --once workers get a fresh
+   process per turn, so this bites the node's own served thread - and it is the opposite direction from the brief's
+   over-resume case, so it is not what produced 9a7edd49's three resumes.
+2. The over-resume mechanism itself (the SECOND part of the brief, to be MEASURED) is untouched here.
+
+## Texts to approve
+
+1. "[kept] the earlier kept messages were cut here: a kept prompt is bounded at %d characters, and the most recent
+   messages are what this row keeps" - NEW (selfloop.KEPT_CUT_TEXT), the first line of a kept prompt that had to
+   drop the oldest messages. %d is selfloop.KEPT_PROMPT_LIMIT (8000).
+2. "[deploy] installed: this node now runs <tree> (was <tree>)." - the wording is unchanged; the two values are now
+   installed.txt's lua_tree=/commit= instead of the binary's build label (which never moved on a scripts-only
+   install).
+3. "deploy pause: the per-session resume collapse FAILED (the release still runs): <error>" - NEW, an operator log
+   line; the same failure used to be swallowed by a bare pcall.
+4. Test rows (operator output, not the model's): "  ok: the marker appeared mid-turn on thread <thread> (since
+   <epoch>)", "  ok: the ledger row says '[deploy] installed', naming the new tree commit bbbb5555eeee (and not
+   'nothing was installed')", "  ok: the ledger row says '[deploy] the update did not happen', naming the marker's
+   target", and the failure dump (turn:, wakes:, sessions:, requests:, log:) that scripts/test-deploy-release-node.sh
+   prints when a case fails.
+
+## Not done in this round
+
+* The acceptance row of the SECOND part (one model request per paused session per install, two installs two minutes
+  apart) is not written; the mechanism is not measured yet.
+* The full scripts/test.sh and the fast path were not run as a whole in this round; the rows above were run
+  individually under the suite lock.
+* docs/KERNEL.md / docs/SELF-LOOP.md are not updated for installed_tree/installed_commit or KEPT_PROMPT_LIMIT.
+
