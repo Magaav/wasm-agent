@@ -131,3 +131,13 @@ identically on `origin/main` 39e862d6 (measured in a clean worktree of that comm
   them productive for the compile and needs the marker's own "about to swap" phase, not this file.
 * The sentinel's RUNNING lane (above), which is the long-term fix and needs a binary.
 
+
+## Which deploy the fix takes effect on
+
+The sentinel runs the installer from the TREE BEING DEPLOYED when it can (`resolve_deploy_script`,
+rust/wa-sentinel/src/main.rs:1987: "The tree being deployed carries the installer that matches it"), and falls back to
+the copy beside the binary on a release-bundle install. So on a node whose runtime tree is a checkout (this node and
+the mission nodes) the deploy that ships this change already writes the running state; on a bundle install the script
+beside the binary is the previous deploy's, and the state starts with the NEXT deploy. Either way `scripts/lib/deploy-alive.sh`
+is shipped by the deploy that installs this, so the second one has both halves.
+
