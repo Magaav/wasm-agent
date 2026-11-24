@@ -1087,3 +1087,53 @@ reclaim counts `changed.changes`, not `pcall`'s boolean.
 
 `scripts/test-deploy-pause.lua`: **113 checks**; `scripts/test-selfloop-pause.lua`: **116**;
 `scripts/test-deploy-bound.sh`: `deploy bound ok`; `scripts/test-deploy-wait.sh`: `deploy wait ok`.
+
+### r5c (Fable, 24/11 ~01:55Z): the claim is the primary signal
+
+**(A) A failed lookup can never reclaim.** r4b's pattern was back: `query(...) or {}` on the messages lookup turns a
+`db is locked` into `n = 0`, i.e. `quiet = true`, i.e. a duplicate turn. Every lookup is now `pcall`ed and must answer
+a TABLE; anything else keeps the row. (The same rule covers the claim lookup and the list of stale rows itself.)
+
+**(B) The bound.** `M.RESUME_DISPATCH_BOUND_SECONDS = 300`, this module's own constant, for RESUME rows only. The
+1800 s `selfloop.M.stale_seconds()` stays the bound for every other wake - at 1800 s the operator's watchdog
+(~20 min) beats the node to a lost dispatch. `wait_stale_seconds()` was removed rather than left as a second owner.
+
+**(C) Three facts, and the claim comes first.** A `dispatching` resume row is reclaimed only when ALL hold:
+
+1. it is past `RESUME_DISPATCH_BOUND_SECONDS`;
+2. **no run claim is held for its session by THIS boot** - `SELECT boot FROM claims WHERE key='session:<id>'`, the
+   claim `lua/core/agent.lua` takes at the start of a turn (`rust/wa-capabilities/src/resources.rs`), the one that
+   answered `resource_busy` today. A turn holds it before it writes any message, so it is the primary signal and
+   messages are the secondary;
+3. **zero messages** for the session at or after the row's `updated_at`.
+
+**(D) What a restart does to a claim: IT SURVIVES.**
+
+* `claims` is a table with `key, principal, session, run, boot, uncertain` (`resources.rs:363-365`); it is opened by
+  `Store::open`, and nothing sweeps it at boot - there is no boot hook in the module at all;
+* a row is dropped only by the run's own `finish`, or reclaimed lazily when a LATER run claims the same session and
+  `lease_released(root, boot)` proves the old process gone (`resources.rs:46-59`, `lease_released` locks
+  `<boot>.lease.sqlite`);
+* so a claim left by a process that was killed mid-turn persists with its old `boot`, and the measured shape
+  `{"boot":"7d72…","key":"session:…"}` is exactly that. Counting it as "a turn is running" would block the reclaim
+  for ever, so **only a claim whose `boot` is the one running now counts** - and the boot is injectable
+  (`opts.boot`) for the tests, because a script run's `runtime_info` names the test interpreter.
+
+**Tests (seven cases, real-row shapes).**
+
+| case | assertion |
+| --- | --- |
+| quiet and unclaimed | exactly ONE re-arm for that session |
+| claim held by THIS boot, no message yet (a long first tool call) | untouched, ZERO new wakes |
+| claim from ANOTHER boot (dead process) | reclaimed - a dead claim does not block |
+| claim lookup raises | untouched |
+| messages lookup fails | untouched (r4b's exact defect) |
+| messages written since the dispatch | untouched, zero wakes |
+| 200 s (inside the 300 s bound) | untouched |
+
+`scripts/test-deploy-pause.lua`: **98 checks** (the three earlier loop-assertions were replaced by these seven cases;
+no assertion was deleted, the count is lower only because those loops asserted once per update row);
+`scripts/test-selfloop-pause.lua`: **116**; `scripts/test-deploy-bound.sh`: `deploy bound ok`;
+`scripts/test-deploy-wait.sh`: `deploy wait ok`.
+
+Texts: none new (the reclaim writes `dispatch interrupted; not replayed`, already approved as text 12's sibling).

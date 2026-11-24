@@ -332,19 +332,11 @@ end
 --   4. NOTHING IS RE-ARMED WHILE A BUILD WAITS OR INSTALLS: that is the phase the pause is for.
 M.RESUME_WINDOW_SECONDS = 6 * 3600
 
--- HOW LONG A `dispatching` ROW MAY STAY WITHOUT A TURN (24/11, Fable's review of r5). `selfloop.M.stale_seconds()`
--- is `max(60, WA_SELF_WAKE_STALE_SECONDS or 1800)` - 1800 s, i.e. the same knob reconcile uses; r5 hardcoded 300,
--- which was both the wrong number and the wrong owner. Read here through the same variable, because this module
--- cannot load selfloop (selfloop loads this one).
-function M.wait_stale_seconds()
-  local raw
-  if type(host) == "table" and type(host.getenv) == "function" then
-    local ok, value = pcall(host.getenv, "WA_SELF_WAKE_STALE_SECONDS")
-    if ok then raw = value end
-  end
-  if raw == nil and os and os.getenv then raw = os.getenv("WA_SELF_WAKE_STALE_SECONDS") end
-  return math.max(60, tonumber(raw) or 1800)
-end
+-- HOW LONG A RESUME ROW MAY BE `dispatching` BEFORE IT COUNTS AS LOST (r5c, Fable, 24/11). 300 s, and it is this
+-- module's own number: `selfloop.M.stale_seconds()` (1800 s) stays the bound for every OTHER wake, because at 1800 s
+-- the operator's watchdog (~20 min) would beat the node to a lost dispatch. Named here, not hardcoded at the use site.
+M.RESUME_DISPATCH_BOUND_SECONDS = 300
+
 M.RESUME_MAX_REARMS = 2
 M.RESUME_BACKOFF_SECONDS = 30
 M.MIGRATION_MARKER = "resume-migration-1"
@@ -447,31 +439,59 @@ function M.ensure_resumes(now, opts)
   --   * `pending` long past its due time: while a deploy waits the tick re-stamps every overdue row and dispatches
   --     none (`selfloop.lua:1386-1391`). MEASURED: a 22/11 row, due 2026-11-22 10:45Z, attempts 1, last_error
   --     `deploy_waiting: ...`, rewritten by every install since.
-  local stale_secs = tonumber(opts.stale_seconds) or M.wait_stale_seconds()
+  local bound = tonumber(opts.stale_seconds) or M.RESUME_DISPATCH_BOUND_SECONDS
   local reclaimed = 0
-  -- RECLAIM ONLY "DISPATCHED AND NOTHING HAPPENED" (24/11, Fable's review of r5). A resume row leaves
-  -- `dispatching` at the END of its turn, not at the start (`selfloop.lua:1200`/`:1509` claim it, `:1214`/`:1355`
-  -- finish it), so a row may legitimately be `dispatching` for the whole turn - and most worker turns are longer
-  -- than any stale bound. Reclaiming on age alone would declare such a turn lost and pay a SECOND resume turn
-  -- beside it. So the age is only a filter; the decision needs the session to show no activity since the row was
-  -- dispatched: no message at or after its `updated_at`, which is ae2a9231's exact shape (dispatched, and
-  -- `last_error = 'deploy ended: resumed now'` with nothing written afterwards).
-  local stale_rows = query([[SELECT id, session_id, updated_at FROM self_wakes
-    WHERE reason=? AND status='dispatching' AND updated_at<?]], { M.RESUME_REASON, now - stale_secs }) or {}
+  -- RECLAIM NEEDS THREE FACTS, AND A FAILED LOOKUP IS NOT ONE OF THEM (r5c, Fable, 24/11).
+  --
+  --   1. the row is past M.RESUME_DISPATCH_BOUND_SECONDS;
+  --   2. NO run claim is held for the session by THIS boot. The claim is the primary signal - it is what
+  --      lua/core/agent.lua takes at the start of a turn (`session:<id>`, rust/wa-capabilities/src/resources.rs) and
+  --      what answered `resource_busy` today - and a turn holds it from its first step, before any message exists;
+  --   3. ZERO messages since the dispatch.
+  --
+  -- A claim CARRIES the process's `boot` and NOTHING releases it at a restart: `resources.rs` has no boot sweep, the
+  -- row is only dropped by the run's own `finish` or reclaimed lazily when some later run claims the same session
+  -- (its `lease_released` test). MEASURED shape today: {"boot":"7d72...","key":"session:..."}. So a claim from a
+  -- DEAD boot must not block this reclaim for ever: only a claim whose boot is the one running now counts.
+  --
+  -- A `query` that raises, or that answers something which is not a table, keeps the row: a duplicate resume turn
+  -- is the expensive direction, and `query(...) or {}` is how r4b turned a db error into `quiet = true`.
+  local stale_ok, stale_rows = pcall(query, [[SELECT id, session_id, updated_at FROM self_wakes
+    WHERE reason=? AND status='dispatching' AND updated_at<?]], { M.RESUME_REASON, now - bound })
+  if not stale_ok or type(stale_rows) ~= "table" then stale_rows = {} end
+  -- `opts.boot` exists for the test (scripts/test-deploy-pause.lua): a script run's runtime_info names the test
+  -- interpreter's boot, not the one a fixture is simulating.
+  local boot = tostring(opts.boot or "")
+  if boot == "" and type(host) == "table" and type(host.runtime_info) == "function" then
+    local info_ok, info = pcall(host.runtime_info)
+    if info_ok and type(info) == "string" then
+      local decoded_ok, decoded = pcall(json.decode, info)
+      if decoded_ok and type(decoded) == "table" then boot = tostring(decoded.boot_id or "") end
+    end
+  end
   for _, row in ipairs(stale_rows) do
     local session = tostring(row.session_id or "")
     local dispatched_at = tonumber(row.updated_at) or 0
-    local quiet = false
     if session ~= "" then
-      local seen = query([[SELECT COUNT(*) AS n FROM messages WHERE session_id=? AND created_at>=?]],
-        { session, dispatched_at }) or {}
-      quiet = (tonumber(seen[1] and seen[1].n) or 0) == 0
-    end
-    if quiet then
-      local changed = exec([[UPDATE self_wakes SET status='unknown',
-        last_error='dispatch interrupted; not replayed', updated_at=? WHERE id=? AND status='dispatching']],
-        { now, row.id })
-      reclaimed = reclaimed + tonumber(type(changed) == "table" and changed.changes or 0)
+      local claim_ok, claims = pcall(query, "SELECT boot FROM claims WHERE key=?", { "session:" .. session })
+      local claim_known = claim_ok and type(claims) == "table"
+      local held_now = false
+      if claim_known then
+        for _, claim in ipairs(claims) do
+          -- THIS boot only: a claim left by a process that is gone cannot be running a turn.
+          if boot ~= "" and tostring(claim.boot or "") == boot then held_now = true end
+        end
+      end
+      local seen_ok, seen = pcall(query, [[SELECT COUNT(*) AS n FROM messages WHERE session_id=? AND created_at>=?]],
+        { session, dispatched_at })
+      local quiet_known = seen_ok and type(seen) == "table" and type(seen[1]) == "table"
+      local quiet = quiet_known and (tonumber(seen[1].n) or 0) == 0
+      if claim_known and quiet_known and not held_now and quiet then
+        local changed = exec([[UPDATE self_wakes SET status='unknown',
+          last_error='dispatch interrupted; not replayed', updated_at=? WHERE id=? AND status='dispatching']],
+          { now, row.id })
+        reclaimed = reclaimed + tonumber(type(changed) == "table" and changed.changes or 0)
+      end
     end
   end
   pcall(exec, [[UPDATE self_wakes SET status='superseded', due_at=NULL, last_error='superseded: too old to fire',
