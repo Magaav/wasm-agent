@@ -122,25 +122,79 @@ if command == "update" or command == "--update" then
       return
     end
   end
+  -- ONE COMMAND, AND IT TELLS YOU WHAT HAPPENED (Fable/Victor, 24/11, slice 1). Parsed before anything
+  -- acts: `--follow` attaches to a deploy already in flight and asks for nothing; `--detach` writes the
+  -- request and returns; with neither, `wa update` writes the request and follows it to its end.
+  -- MEASURED on `work`, 24/11: `wa update` printed nothing for minutes while a build ran, and 361 s into
+  -- a build that died it printed nothing at all. Nobody should have to know a file path, or a second
+  -- command, to learn what the install they started is doing or how it ended.
+  local check, follow_only, detach = false, false, false
+  for i = 2, #args do
+    local flag = tostring(args[i])
+    if flag == "--check" then check = true
+    elseif flag == "--follow" then follow_only = true
+    elseif flag == "--detach" then detach = true end
+  end
   local remote = dofile("lua/core/remote_update.lua").cli(args)
   if remote ~= nil then os.exit(remote) end
-  local check = false
-  for i = 2, #args do if args[i] == "--check" then check = true end end
   local updater = dofile("lua/core/update.lua")
-  local report = check and updater.check({}) or updater.run({ reason = "requested with `wa update`" })
   local redact = dofile("lua/core/redact.lua")
+  local follow = dofile("lua/core/update_follow.lua")
   if check then
+    local report = updater.check({})
     print(redact.text(report.message or json.encode(report)))
     -- The published release, as a second, separate fact (the window's banner reads the same check).
     local feed = updater.run({ check = true })
     if feed.release and feed.release.state == "behind" then print(redact.text("release feed: " .. feed.release.message)) end
+    -- (b)(i), Fable 24/11: "is there a published artifact for the commit I am on, and for the one I am
+    -- behind by", answered locally from the release list this node already has. `listing` makes no
+    -- request; a list it cannot read is reported as unreadable, never guessed at.
+    if report.tree then
+      local banner_ok, banner = pcall(dofile, "lua/core/update_banner.lua")
+      if banner_ok and type(banner) == "table" and type(banner.listing) == "function" then
+        local listing = banner.listing({ installed = report.installed, target = report.target, tree = report.tree })
+        for _, line in ipairs(listing.lines or {}) do print(redact.text(line)) end
+      end
+    end
+    return
+  end
+  local report, started_at
+  if follow_only then
+    -- No request is written: attach to the newest deploy this node still has in flight, and say so
+    -- plainly when there is none.
+    local request, why = follow.latest({})
+    if not request then
+      print(redact.text("nothing to follow: " .. tostring(why) .. "; `wa update` starts a new one"))
+      os.exit(1)
+    end
+    report = { ok = true, request = request }
+    print(redact.text("following the newest deploy on this node: " .. tostring(request)))
   else
+    started_at = tonumber(host.now and host.now() or os.time())
+    report = updater.run({ reason = "requested with `wa update`" })
+    -- THE FIRST LINE SAYS WHAT THIS INSTALL IS: a download or a build, and how long that class takes.
+    -- Printed before the queue line because it answers the question a person asks when the screen has
+    -- shown nothing for a minute.
+    if report.ok == true then
+      for _, line in ipairs(follow.plan({ target = report.commit or "", tree = report.tree, install = report.install }).lines) do
+        print(redact.text(line))
+      end
+    end
     print(redact.text(report.message or json.encode(report)))
     if report.release and report.release.state == "behind" then print(redact.text("release: " .. report.release.message)) end
     if report.observed and not report.ok then print(redact.text("observed: " .. tostring(report.observed))) end
+    if report.next then print(redact.text("next: " .. tostring(report.next))) end
+    if report.ok == false then os.exit(1) end
   end
-  if report.next then print(redact.text("next: " .. report.next)) end
-  if report.ok == false then os.exit(1) end
+  if detach and not follow_only then
+    print(redact.text(follow.DETACHED))
+    return
+  end
+  print(redact.text(follow.HINT))
+  local result = follow.follow({ request = report.request,
+    started_at = started_at or tonumber(host.now and host.now() or os.time()),
+    target = report.commit or "", install = report.install })
+  if result.ok ~= true then os.exit(1) end
   return
 end
 
