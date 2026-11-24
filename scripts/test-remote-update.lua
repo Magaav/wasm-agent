@@ -130,13 +130,39 @@ host = {
     if command:find(" request run", 1, true) then
       return wrapper(0, "  requested run: " .. sentinel_dir .. "/requests/1700000000-22.json\n", "")
     end
-    if command:find("chmod %+x", 1) then return wrapper(0, "", "") end
+    -- A claim that cannot be MADE (mkdir unanswered) is not a claim that was lost: the row drives that.
+  if break_claim and command:find("mkdir ", 1, true) then return "{}" end
+  if command:find("chmod %+x", 1) then return wrapper(0, "", "") end
     if command:find("^ls %-1t ", 1) then return wrapper(0, listing((command:match("^ls %-1t '([^']+)'") or "")), "") end
     -- `test -s` and anything else the module asks about this machine: answered for real.
     return real_host.exec(command, cwd)
   end,
 }
 setmetatable(host, { __index = function(_, key) return real_host[key] end })
+
+-- THE NODE'S OPERATION MANAGER, as the accept seam uses it (lua/core/accepted.lua, host.operation).
+-- A start is RECORDED and not run: this row then runs the child's own code in-process
+-- (remote.run_accepted below), which is exactly what `wa update --accept <id>` runs, so the seam and the
+-- tail are both exercised on one machine without a second process. A status answers what this row sets,
+-- so a phase is never invented by the fixture.
+started_operations = {}
+operations = {}
+break_claim = false
+host.operation = function(action, payload)
+  local request = json.decode(payload or "{}") or {}
+  if action == "start" then
+    local id = "op-" .. tostring(#started_operations + 1)
+    operations[id] = { request = request, settled = false, code = nil }
+    started_operations[#started_operations + 1] = { id = id, request = request }
+    return json.encode({ operation_id = id, state = "accepted", settled = false })
+  elseif action == "status" then
+    local entry = operations[request.id]
+    if not entry then return json.encode({ error = "operation_not_found" }) end
+    return json.encode({ operation_id = request.id, settled = entry.settled == true,
+      state = entry.settled and "done" or "running", code = entry.code })
+  end
+  return json.encode({ error = "operation_action_unknown", action = tostring(action) })
+end
 
 -- One audit line per admit/refuse/settle, captured the way the node captures its own log.
 emit = function(event)
@@ -228,15 +254,72 @@ ok(refused and refused.error == "forbidden_role", "a guest is refused", refused 
 ok(#issued_matching("request deploy") == 0, "and no install was asked for")
 ok(#issued_matching("git") == 0, "and the guest could not even move this node's tree")
 ok(head == BASE, "the tree did not move for a guest")
+-- A REFUSED ROLE WRITES NO ACCEPT RECORD (review): the role check is the FIRST thing serve() does, so a
+-- caller this node will not admit must leave nothing behind - no claim, no accept record, no operation.
+local accepted_dir = dofile("lua/core/accepted.lua").root(remote.accept_root())
+local before_accepts = #(listing(accepted_dir) or "")
+local refused_guest = remote.serve({ action = "request", commit = TARGET }, GUEST)
+ok(refused_guest and refused_guest.error == "forbidden_role", "a guest is refused before anything else",
+  refused_guest and tostring(refused_guest.error))
+ok(#(listing(accepted_dir) or "") == before_accepts, "and no accept record exists for it",
+  listing(accepted_dir))
+
 
 -- ---- 2. a master is admitted, and the peer's own installer door is used -------------------------
 issued, log_lines = {}, {}
 local admitted = remote.serve({ action = "request", commit = TARGET, reason = "the fabric update test",
   session = "session-1" }, MASTER)
-ok(admitted and admitted.ok == true and admitted.status == "queued", "a master is admitted",
-  admitted and (admitted.error or admitted.status))
+-- ACCEPTED, NOT QUEUED (mission fleet-update-survives-a-slow-relay, item 2): the pre-update backup and
+-- the sentinel request are 108 s on `work` against a 42 s relay deadline, so they are handed to a child
+-- of this node's own operation manager and the peer answers at once. The child runs the SAME update.run()
+-- the inline path ran, and this row runs it in-process below - so what follows still checks the record
+-- that deploy writes, not a promise.
+ok(admitted and admitted.ok == true and admitted.state == "accepted", "a master is admitted at once",
+  admitted and (admitted.error or admitted.state))
+ok(admitted.detached == true, "and the answer says the work is detached, not done")
 ok(head == TARGET, "the peer's tree is at the requested landed commit", head)
 ok(admitted.record ~= nil and admitted.record ~= "", "the answer names an audit record")
+local spawned = started_operations[#started_operations]
+ok(spawned ~= nil, "the accept started one operation on this node")
+local spawn_args = spawned and spawned.request and spawned.request.args or {}
+ok(spawn_args[#spawn_args - 1] == "--accept" and spawn_args[#spawn_args] == admitted.record,
+  "the child is `wa update --accept <the id this request was accepted under>`", table.concat(spawn_args, " "))
+-- THE SAME ID AGAIN STARTS NOTHING (item 2): a caller whose relay deadline expired retries, and a
+-- retry must not run a second update.
+local before_retry = #started_operations
+local retried = remote.serve({ action = "request", commit = TARGET, reason = "the fabric update test",
+  session = "session-1", id = admitted.record }, MASTER)
+ok(retried and retried.ok == true and retried.already == true and retried.record == admitted.record,
+  "a retry with the same request id is answered from the record, not run again",
+  retried and tostring(retried.error or retried.already))
+ok(#started_operations == before_retry, "and it started nothing new")
+local tail = remote.run_accepted(admitted.record)
+ok(tail and tail.ok == true and tail.already ~= true, "the detached tail ran and queued the deploy", json.encode(tail or {}))
+-- ONCE (review item b): the verb that prepares a deploy is a claim. A second run for the same id answers
+-- what it is and starts NOTHING - one request, one deploy, however many times it is asked.
+local second_tail = remote.run_accepted(admitted.record)
+ok(second_tail and second_tail.already == true, "the verb twice starts nothing the second time",
+  second_tail and (second_tail.error or tostring(second_tail.already)))
+ok(#started_operations == before_retry, "and no second operation was started for it (the child IS this call, in a real run)", tostring(#started_operations))
+ok(#issued_matching("request deploy") == 1, "nor a second sentinel request: one deploy for one id",
+  table.concat(issued, " | "))
+operations[spawned.id].settled = true
+operations[spawned.id].code = 0
+-- The phase the caller polls is the accept record's own (not the deploy's outcome, which section 5 reads
+-- from installed.txt): after the tail has queued the deploy it answers "queued", which is a phase and
+-- not the word "installed".
+-- A CHILD STARTED FOR AN ID THIS NODE CANNOT FIND IS A FAILURE, NOT A QUIET RETURN (review item a):
+-- the deploying call writes its record BEFORE it starts the child, so a missing record means the child
+-- has no work - and an accept left reading "accepted" forever is exactly what that ordering bug did.
+local orphan = remote.run_accepted("orphan-request-id-0001")
+ok(orphan.ok == false and orphan.error == "accept_record_missing",
+  "a child with no record fails by name", orphan and tostring(orphan.error))
+local orphan_phase = remote.accept_phase("orphan-request-id-0001")
+ok(orphan_phase.record == true and orphan_phase.state == "failed",
+  "and the accept it settles says failed", tostring(orphan_phase.state))
+local phase = remote.accept_phase(admitted.record)
+ok(phase.record == true and phase.state == "queued", "the phase is readable by the id the caller holds",
+  tostring(phase.record) .. "/" .. tostring(phase.state))
 local deploy_calls = issued_matching("request deploy")
 ok(#deploy_calls == 1, "exactly one deploy request was written", tostring(#deploy_calls))
 ok(deploy_calls[1]:find("--if-no-pending", 1, true) ~= nil, "and it dedupes like the local /update")
@@ -263,7 +346,29 @@ for _, line in ipairs(log_lines) do
     and line:find(TARGET:sub(1, 12), 1, true) then audited = true end
 end
 ok(audited, "the audit LINE carries the requester id and the commit prefix")
-ok(#log_lines == 1, "one line per admitted request, not a stream", tostring(#log_lines))
+-- One line per EVENT, never a stream: the accept writes "accepted" and the tail writes "admitted", which
+-- is the whole point of separating them - an operator reading the node's log sees when it took the
+-- request and when it queued the deploy, two facts that used to be one and were lost when the caller's
+-- deadline expired in between.
+ok(#log_lines == 2, "exactly one accepted line and one admitted line for one request", tostring(#log_lines) .. ": " .. table.concat(log_lines, " | "))
+ok(log_lines[1]:find("remote-update accepted", 1, true) ~= nil, "the first line is the accept", tostring(log_lines[1]))
+
+-- A CLAIM THAT CANNOT BE MADE IS NOT A CLAIM THAT WAS LOST (Fable's review of a+b): with mkdir
+-- unanswered the node cannot prove the run has not already happened, so the accept is settled FAILED with
+-- that reason - never answered "already", which would leave the caller polling "accepted" forever.
+local unclaimable_request = remote.serve({ action = "request", commit = TARGET, reason = "claim test" }, MASTER)
+ok(unclaimable_request and unclaimable_request.ok == true, "a second request is accepted",
+  unclaimable_request and tostring(unclaimable_request.error))
+local accepted_dir_before = listing(accepted_dir)
+break_claim = true
+local unclaimable = remote.run_accepted(unclaimable_request.record)
+break_claim = false
+ok(unclaimable and unclaimable.ok == false and unclaimable.error == "accept_claim_unavailable",
+  "a claim that cannot be made is refused by name, not answered already", json.encode(unclaimable or {}))
+local unclaimable_phase = remote.accept_phase(unclaimable_request.record)
+ok(unclaimable_phase.state == "failed", "and the accept it settles says failed, so no caller polls forever", tostring(unclaimable_phase.state))
+ok(accepted_dir_before ~= nil, "(the records directory is readable)")
+
 
 -- ---- 4. a commit that is not on main, a tree that cannot fast-forward, a dirty tree -------------
 issued = {}
@@ -510,6 +615,10 @@ local forced_ok = remote.serve({ action = "request", commit = TARGET, force_note
   reason = "the operator overrode the pin" }, MASTER)
 ok(forced_ok.ok == true, "a forced deploy WITH a reason is admitted",
   tostring(forced_ok.error or forced_ok.status))
+-- the deploy door is detached now: the tail is what writes the installer's command line
+local forced_tail = remote.run_accepted(forced_ok.record)
+ok(forced_tail and forced_tail.ok == true, "and its detached tail queued it",
+  forced_tail and tostring(forced_tail.detail))
 local forced_record = forced_ok.record and remote.record(forced_ok.record) or {}
 ok(forced_record.forced == true, "and the node's own record says it was forced")
 ok(forced_record.force_note == "forced past pin x", "with the note the coordinator sent",

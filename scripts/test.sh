@@ -1287,6 +1287,11 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-remote-refusals.lua" "$BIN" --db "$
 # the real pending executor over a relay stand-in, so adoption, wait(op), cancel(op) and the
 # exactly-once append are measured without a second machine and without the real fleet.
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-remote-pending.lua" "$BIN" --db "$DB.remote-pending" | grep 'remote pending ok'
+# THE FLEET STEP'S OWN PATH, END TO END (mission fleet-update-survives-a-slow-relay, item c): two real
+# processes, a real relay that withholds the answer past the master's deadline, and the product's own
+# discovery, authority and relay loop on both sides. It starts its own scratch rendezvous, a real
+# `wa serve` for the peer and a relay process; nothing builds anything and no live node is touched.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-accept-two-process.lua" "$BIN" --db "$DB.accept-two-process" | grep 'accept two process ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-run-counts.lua" "$BIN" --db "$DB.run-counts" | grep 'run counts ok'
 # The turn note (#33): the <turn> block kept and stripped from the answer, the day roll-up `wa turns
 # --day` answers, the split keeping every byte on both sides of the block, the stored note drawn as

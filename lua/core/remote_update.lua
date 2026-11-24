@@ -175,7 +175,15 @@ local function new_record(kind, target, reason, caller, args)
   local identity = nodes.identity() or {}
   return {
     schema = RECORD_SCHEMA,
-    id = host.uuid(),
+    -- THE ID IS THE IDEMPOTENCY KEY (item 2). A master sends the id it wrote its own pending record
+    -- under (args.id), so the record on this node, the answer this node gives, and the read-back a
+    -- caller makes after its deadline expired are ONE name - and a retried request can never start a
+    -- second update. An older caller that names none gets a fresh uuid, exactly as before.
+    id = (function()
+      local asked = trim(args and args.id)
+      if asked ~= '' and asked:match('^[%w%-_%.]+$') and not asked:find('%.%.', 1, true) then return asked end
+      return host.uuid()
+    end)(),
     kind = kind,
     state = 'requested',
     requested_at = math.floor(host.now()),
@@ -584,6 +592,41 @@ function M.admit(args, caller)
   end
   record.server.install = facts.install
   record.server.tree = facts.tree and slashes(facts.tree) or nil
+  -- ACCEPT FIRST (mission fleet-update-survives-a-slow-relay, item 2). The deploy door is the slow one
+  -- - measured on `work` 24/11: 101 s of pre-update backup plus 6-10 s of facts and fetch - and the
+  -- relay holds a queued call 42 s. So the id is claimed and recorded BEFORE any of that work, which is
+  -- what makes a retry unable to start a second update and what a caller reads back by id after its
+  -- deadline expired. The cheap, decisive refusals below still answer synchronously: they are the same
+  -- checks in the same order, they just now also land on the record that already names the id.
+  local accept = dofile('lua/core/accepted.lua')
+  local accept_root = M.accept_root()
+  local claimed = nil
+  if kind == 'node' then
+    local opened = accept.accept({ root = accept_root, id = record.id, kind = 'remote-update',
+      detail = { commit = commit, reason = record.reason, session = trim(args.session),
+        requester = { node_id = tostring(record.requester.node_id or ''), name = tostring(record.requester.name or '') } } })
+    if opened.ok ~= true then
+      return { error = tostring(opened.error or 'accept_refused'), effect = 'none', capability = M.CAPABILITY,
+        observed = tostring(opened.observed or ''), next = opened.next,
+        message = 'this node could not take the request, so nothing was started.' }
+    end
+    if opened.already then
+      -- A SECOND REQUEST UNDER ONE ID STARTS NOTHING. It answers what the first one is doing, which is
+      -- exactly what a caller whose relay deadline expired needs to read.
+      local existing = M.record(record.id)
+      local phase = M.accept_phase(record.id)
+      return { ok = true, already = true, status = tostring((existing and existing.state) or phase.state or 'accepted'),
+        state = tostring((existing and existing.state) or phase.state or 'accepted'),
+        record = record.id, kind = (existing and existing.kind) or kind,
+        commit = (existing and existing.target_commit) or commit,
+        detail = (existing and existing.detail) or phase.detail,
+        target_node = { node_id = tostring((nodes.identity() or {}).node_id or ''), name = tostring(nodes.node_name() or '') },
+        requested_at = (existing and existing.requested_at) or nil,
+        message = 'this id was already accepted on this node: nothing new was started, and the answer is what that request is doing.',
+        next = 'read it back with {action="status", id="' .. record.id .. '"}' }
+    end
+    claimed = opened
+  end
   if rollback then
     -- The commit a rollback is about is the one being replaced, and it is read (not guessed) from the
     -- install record: an operator asking later needs to know what was undone.
@@ -658,6 +701,13 @@ function M.admit(args, caller)
   -- A RELEASE INSTALL MOVES NO TREE: there is nothing to fast-forward, and the commit is the one the
   -- signed manifest names and release-install.sh verifies. installed_contains is asked of the install
   -- record afterwards, exactly as it is after a tree deploy.
+  local function refuse(answer)
+    if claimed then
+      accept.finish({ root = accept_root, id = claimed.id, state = 'failed',
+        detail = tostring(answer.error or 'refused') .. (answer.observed and (' - ' .. tostring(answer.observed)) or '') })
+    end
+    return answer
+  end
   local prepared, refusal = nil, nil
   if kind == 'release' then
     prepared = { commit = commit, tree = facts.tree }
@@ -675,7 +725,7 @@ function M.admit(args, caller)
     -- A refusal is recorded too, and the answer names the record: "why not" is evidence an operator
     -- reads on the peer, not an error word the master has to guess about.
     refusal.audit_id = record.id
-    return routed(refusal)
+    return routed(refuse(refusal))
   end
   record.target_commit = prepared.commit
   record.server.origin_main = prepared.origin_main
@@ -684,7 +734,53 @@ function M.admit(args, caller)
   if kind == 'rendezvous' then done, error = request_rendezvous(record)
   elseif kind == 'binary' then done, error = request_binary(record)
   elseif kind == 'release' then done, error = request_release(record)
-  else done, error = request_node(record) end
+  else
+    -- THE TAIL RUNS DETACHED (item 2): the pre-update backup and the sentinel request are what made the
+    -- accept 108 s against a 42 s deadline. They are handed to a child of this node's own operation
+    -- manager (lua/core/accepted.lua), which outlives this peer call, and the caller is answered
+    -- "accepted" at once. The child is this same product (`wa update --accept <id>`), so there is still
+    -- ONE answer to "what a deploy is": M.run_accepted below runs the same update.run() the inline path
+    -- runs, and writes the same record fields.
+    if claimed then
+      -- THE RECORD GOES DOWN BEFORE THE CHILD EXISTS (review item a). The child finds its work by
+      -- reading THIS record, so a child started first could read nothing - and M.run_accepted would have
+      -- to answer "nothing to do" while the caller had already been told "accepted", leaving the
+      -- request accepted forever. The record is written here, the child is started below, and the
+      -- operation id is added to the same record afterwards.
+      record.state = 'accepted'
+      record.accept = { at = claimed.accepted_at, detached = false }
+      if not write_record(record) then
+        accept.finish({ root = accept_root, id = record.id, state = 'failed',
+          detail = 'the accept record could not be written, so no child was started' })
+        return { error = 'accept_record_not_written', effect = 'none', capability = M.CAPABILITY, id = record.id,
+          observed = 'the request was claimed and its record could not be written to ' .. accept_root,
+          message = 'nothing was started: a deploy nobody can read back by id is a deploy nobody can check.',
+          next = 'check that ' .. accept_root .. ' is writable by this node, then ask again' }
+      end
+    end
+    local spawned = claimed and M.spawn_accepted(record) or nil
+    if spawned and spawned.ok == true then
+      record.accept.detached = true
+      record.accept.operation = tostring(spawned.operation and spawned.operation.id or '')
+      audit('accepted', record, 'detached: operation ' .. tostring(spawned.operation and spawned.operation.id or 'unknown'))
+      write_record(record)
+      local identity = nodes.identity() or {}
+      return routed({ ok = true, status = 'accepted', state = 'accepted', record = record.id, kind = kind,
+        commit = record.target_commit, detached = true,
+        operation = tostring(spawned.operation and spawned.operation.id or ''),
+        target_node = { node_id = tostring(identity.node_id or ''), name = tostring(nodes.node_name() or '') },
+        requester = record.requester.name ~= '' and record.requester.name or record.requester.node_id,
+        requested_at = record.requested_at,
+        message = 'accepted: this node is preparing the deploy (the pre-update backup, then the request to its own Sentinel) detached from this call. This is not installed yet.',
+        next = 'read it back with {action="status", id="' .. record.id .. '"}: accepted, then running, then installed or failed' })
+    end
+    -- NO DETACHED PATH (an older host with no operation manager, or a start that was refused): the work
+    -- runs inside this call, as it always did, and the answer SAYS so - a caller that waited 100 s is
+    -- told why rather than left to guess.
+    record.inline = true
+    record.inline_because = tostring(spawned and spawned.error or 'no_accept')
+    done, error = request_node(record)
+  end
   if not done then
     error.effect = 'none'
     error.capability = M.CAPABILITY
@@ -825,6 +921,183 @@ local function outcome_of(record)
   return outcome
 end
 
+-- WHERE THE ACCEPT RECORDS LIVE, and what they say. One directory, named by the id the master sent, so
+-- the deploy record (this file's own <id>.json), the caller's pending record and the accept record are
+-- one name read from three places - never a second answer to "what happened to my request".
+function M.accept_root() return M.dir() .. '/accepted' end
+
+-- The generic phase of one id (lua/core/accepted.lua), in this module's words: a tail that finished
+-- QUEUED a deploy request, and "done" here must never read as "installed" - only the installer's own
+-- installed.txt says that, and outcome_of is what reads it.
+function M.accept_phase(id)
+  local ok, accept = pcall(dofile, 'lua/core/accepted.lua')
+  if not ok or type(accept) ~= 'table' then return { record = false, state = 'unknown', detail = 'lua/core/accepted.lua could not be loaded' } end
+  local status = accept.status({ root = M.accept_root(), id = id })
+  local record = accept.record(M.accept_root(), id) or {}
+  local detail = record.detail or {}
+  local state = tostring(status.state or 'unknown')
+  if state == 'done' then state = 'queued' end
+  -- The accept record's `detail` is the table the accepting call stored (commit, reason, requester); a
+  -- LATER phase detail is a sentence. Only the sentence goes in the summary (a table printed as
+  -- "table: 0x..." reached the caller's one-line answer, measured by the two-process row).
+  local phase_detail = type(status.detail) == 'string' and status.detail
+    or (type(record.detail) == 'string' and record.detail or nil)
+  return {
+    record = status.record == true, state = state, detail = phase_detail,
+    detached = status.detached, operation = status.operation or (record.operation and record.operation.id),
+    accepted_at = status.accepted_at or record.accepted_at, start_problem = status.start_problem,
+    commit = tostring(detail.commit or ''),
+    requester_node_id = tostring(detail.requester and detail.requester.node_id or ''),
+    summary = status.summary,
+  }
+end
+
+-- The node's own binary, by the path the host knows (the same one lua/core/idle_reads.lua uses). Both
+-- fallbacks are named rather than guessed: an install path with no binary is a refusal, not a blank.
+local function node_program()
+  if type(host.runtime_info) == 'function' then
+    local ok, raw = pcall(host.runtime_info)
+    local info = ok and decode(raw) or nil
+    local path = slashes(tostring(info and info.binary_path or ''))
+    if path ~= '' then return path end
+  end
+  local install = slashes(update.install_dir())
+  if install == '' then return '' end
+  return install .. '/' .. update.binary_name()
+end
+
+-- THE DETACHED CHILD: this same product, run as `wa update --accept <id>` through the node's own
+-- operation manager. It is one process, started by the accept and outliving the peer call, and it runs
+-- M.run_accepted below - the same update.run() the inline path runs.
+function M.spawn_accepted(record)
+  local accept = dofile('lua/core/accepted.lua')
+  local program = node_program()
+  if program == '' then
+    return { ok = false, error = 'node_program_unknown',
+      observed = 'this node could not name its own binary, so the deploy could not be started detached' }
+  end
+  local argv = { 'update', '--accept', tostring(record.id) }
+  -- The ledger this process was TOLD to use, never a default the child would resolve for itself - the
+  -- same rule lua/core/idle_reads.lua follows.
+  local db = tostring(host.getenv('WASM_AGENT_DB') or '')
+  if db ~= '' then table.insert(argv, 1, '--db'); table.insert(argv, 2, db) end
+  local started = accept.detach({ root = M.accept_root(), id = record.id, kind = 'remote-update',
+    detail = { commit = record.target_commit, reason = record.reason,
+      requester = { node_id = tostring(record.requester.node_id or ''), name = tostring(record.requester.name or '') } },
+    program = program, args = argv, timeout_seconds = 3600, owner = accept.OWNER })
+  return started
+end
+
+-- THE DETACHED SIDE: `wa update --accept <id>` on the node that accepted the request. It reads the two
+-- records the accepting call left behind, runs the same update.run() the inline path runs, and writes
+-- the same fields - then settles the accept record, which is what a polling caller reads.
+function M.run_accepted(record_id)
+  local id = trim(record_id)
+  local ok_accept, accept = pcall(dofile, 'lua/core/accepted.lua')
+  if not ok_accept or type(accept) ~= 'table' then return { error = 'update_unavailable', detail = 'lua/core/accepted.lua could not be loaded' } end
+  local root = M.accept_root()
+  local record = M.record(id)
+  if not record then
+    -- A CHILD STARTED FOR AN ID THIS NODE CANNOT FIND IS A FAILURE, AND IT SAYS SO (review item a).
+    -- The deploying call writes its record BEFORE it starts this child, so a missing record is not "the
+    -- tail has not run yet" - it is a child whose work does not exist. The accept is settled FAILED here
+    -- so a caller polling it learns that, instead of reading "accepted" forever, and nothing is prepared.
+    -- (This branch used to be pasted from read_status and read a `caller` that does not exist here.)
+    local detail = 'no deploy record names this id on this node, so nothing was prepared'
+    accept.finish({ root = root, id = id, state = 'failed', detail = detail })
+    return { ok = false, error = 'accept_record_missing', id = id, effect = 'none', detail = detail,
+      message = 'the child that prepares this deploy found no record to prepare, so the request failed.',
+      next = "read the accept record and this node's log; nothing was backed up and nothing was queued" }
+  end
+  -- ONCE (review item b): this verb is a claim, and only the caller that wins it runs. `wa update
+  -- --accept <id>` on an id that is running, queued, done or failed answers what it is and starts
+  -- nothing - one request, one deploy, however many times it is asked.
+  -- THE PHASE DECIDES FIRST: an id that is running, queued, done or failed is answered, never run again
+  -- (review item b). The claim below closes the race between two callers that both read "accepted"; this
+  -- check is what makes a SECOND verb after a finished run answer instead of queueing a second deploy.
+  local opened = M.accept_phase(id)
+  if opened.record then
+    local state = tostring(opened.state or '')
+    -- AN ALLOW-LIST, because `unknown` must never read as "go ahead": only an id nobody has claimed yet
+    -- (no state), or one whose work detach() has started (`running`), may run. Everything else - queued,
+    -- done, failed, accepted-and-already-claimed - is answered and starts nothing.
+    local may_run = (state == '' or state == 'accepted' or state == 'running')
+    if not may_run then
+      return { ok = true, already = true, state = state, record = id,
+        detail = tostring(opened.detail or ('this id is already ' .. state)),
+        message = 'this id is already ' .. state .. ' on this node: nothing new was started',
+        next = 'read it back with {action="status", id="' .. id .. '"}' }
+    end
+  end
+  local claim = accept.claim_running({ root = root, id = id })
+  if claim.ok ~= true and claim.error then
+    -- A CLAIM THAT COULD NOT BE MADE IS NOT A CLAIM THAT WAS LOST (Fable's review of a+b). With mkdir
+    -- unanswered this node cannot prove the run has not already happened, and answering "already" would
+    -- leave the caller polling "accepted" until its deadline for a run nobody started. So the accept is
+    -- settled FAILED with the reason, and the answer says nothing ran.
+    local detail = tostring(claim.error) .. (claim.observed and (' - ' .. tostring(claim.observed)) or '')
+    accept.finish({ root = root, id = id, state = 'failed', detail = 'the one-run claim could not be made: ' .. detail })
+    return { ok = false, error = tostring(claim.error), id = id, record = id, effect = 'none', detail = detail,
+      message = 'this node could not prove this deploy had not already run, so nothing was started and the request is settled failed.',
+      next = 'check that the records directory ' .. root .. ' is writable by this node, then ask again' }
+  end
+  if claim.ok ~= true then
+    local phase = M.accept_phase(id)
+    local state = tostring(phase.state or record.state or 'accepted')
+    return { ok = true, already = true, state = state, record = id,
+      detail = tostring(claim.detail or ('this id is already ' .. state)),
+      message = 'this id is already ' .. state .. ' on this node: nothing new was started',
+      next = 'read it back with {action="status", id="' .. id .. '"}' }
+  end
+  accept.finish({ root = root, id = id, state = 'running', detail = 'preparing the deploy on this node (backup, then the sentinel request)' })
+  local options = { skip_source_sync = true, expected_commit = tostring(record.target_commit or ''),
+    reason = tostring(record.reason or ''), signed_request = true,
+    -- THE OPERATOR'S OVERRIDE CROSSES THIS BOUNDARY OR IT DOES NOT EXIST (the same rule O3 wrote into
+    -- the other doors): an accept that dropped `forced` would have the tail queue an ordinary deploy, and
+    -- deploy.sh would refuse it on the node's own pin one step later with the reason lost.
+    force = record.forced == true }
+  local session = trim(record.requester and record.requester.session)
+  if session ~= '' then options.session_id = session end
+  -- The same seam install_dir/sentinel_dir travel by on the inline path (M.facts_options, set by a
+  -- fixture and never by the module): the detached side must be told which install it is preparing, or a
+  -- test's child would read this machine's real one.
+  for key, value in pairs(M.facts_options or {}) do options[key] = value end
+  local ran, verdict = pcall(update.run, options)
+  local detail, state
+  if not ran then
+    state = 'failed'
+    detail = 'the deploy could not be prepared on this node: ' .. tostring(verdict)
+  elseif verdict == nil then
+    state, detail = 'failed', 'update.run answered nothing'
+  elseif verdict.ok ~= true or verdict.status ~= 'queue' then
+    state = 'failed'
+    detail = tostring(verdict.error or verdict.status or 'update_refused')
+      .. (verdict.observed and (' - ' .. tostring(verdict.observed)) or '')
+    record.state, record.outcome = tostring(verdict.status or 'refused'), 'refused'
+  else
+    state = 'done'
+    detail = "queued: this node's own Sentinel performs the deploy under its existing rules (not installed yet)"
+    record.state = 'queued'
+    record.door = 'deploy'
+    record.request_path = tostring(verdict.request or '')
+    record.sentinel_request_id = request_id_of(record.request_path)
+    record.sentinel = tostring(verdict.sentinel or '')
+    if verdict.backup then record.backup = verdict.backup end
+    if record.accept then record.accept.detached = true end
+  end
+  record.detail = detail
+  if state == 'failed' then
+    record.state = record.state or 'failed'
+    record.outcome = record.outcome or 'failed'
+  end
+  write_record(record)
+  audit(state == 'failed' and 'refused' or 'admitted', record, detail)
+  accept.finish({ root = root, id = id, state = state, detail = detail,
+    result = { request = record.request_path, sentinel_request_id = record.sentinel_request_id } })
+  return { ok = state ~= 'failed', state = record.state, detail = detail, record = id,
+    request = record.request_path }
+end
+
 -- One record, as the master reads it. The first time an outcome is known it is written into the
 -- record, so the peer keeps its own durable answer even after the sentinel's folders are swept.
 function M.read_status(args, caller)
@@ -850,6 +1123,28 @@ function M.read_status(args, caller)
       note = 'a remote update record is readable by the node that asked for it' }
   end
   local outcome = outcome_of(record)
+  -- A REFUSED DEPLOY IS NOT "QUEUED" (found by scripts/test-accept-two-process.lua): outcome_of answers
+  -- `queued` for a record whose install it cannot see, and a request the node REFUSED - origin/main
+  -- unavailable, tree dirty, sentinel stopped - stayed `queued` for as long as anyone asked, which is the
+  -- same lie as reporting a deadline as a refusal, pointing the other way. The record's own outcome is
+  -- the evidence, and it is reported as failed with the peer's reason.
+  if (tostring(record.outcome or '') == 'refused' or tostring(record.state or '') == 'refused')
+    and outcome.state ~= 'installed' and outcome.state ~= 'failed' then
+    outcome.state = 'failed'
+    outcome.refused = true
+    outcome.detail = tostring(record.detail or record.state or 'refused')
+  end
+  -- WHILE THE DETACHED TAIL RUNS, THE RECORD SAYS WHAT IT IS DOING. outcome_of answers "queued" for a
+  -- request whose deploy has not been handed over yet; the accept record knows whether this node has
+  -- started (running) or is still preparing (accepted), which is the answer a caller polls for.
+  if tostring(record.state or '') == 'accepted' and record.outcome == nil and outcome.state == 'queued' then
+    local phase = M.accept_phase(id)
+    if phase.record and phase.state then
+      outcome.state = phase.state
+      outcome.detail = phase.detail or outcome.detail
+      outcome.detached = phase.detached
+    end
+  end
   local reply = {
     ok = true, record = id, kind = record.kind, commit = record.target_commit,
     state = outcome.state, detail = outcome.detail,
@@ -1092,8 +1387,30 @@ function M.request(call, selector, options)
   local mode = trim(options.mode)
   if mode ~= '' and mode ~= 'tree' then args.mode = mode end
   if options.rollback == true then args.rollback = true end
+  -- THE ID THE WHOLE REQUEST IS KNOWN BY (item 2). The master names it and remembers it BEFORE the call,
+  -- so a deadline that expires mid-flight still leaves a name to read back on both sides - and a retry
+  -- that reuses it cannot start a second update on the node.
+  local request_id = trim(options.id)
+  if request_id == '' then request_id = host.uuid() end
+  args.id = request_id
+  remember(request_id, { node = tostring(selector), selector = tostring(selector), state = 'sent',
+    commit = trim(options.commit), session = trim(options.session), requested_at = math.floor(host.now()),
+    requested_by = 'this node' })
   local reply = call(selector, M.CAPABILITY, args)
-  if type(reply) ~= 'table' then return { ok = false, error = 'remote_answer_unreadable', node = tostring(selector) } end
+  if type(reply) ~= 'table' then return { ok = false, error = 'remote_answer_unreadable', node = tostring(selector), id = request_id } end
+  if reply.not_known_yet == true or tostring(reply.error or '') == 'not_known_yet' then
+    -- NOT A REFUSAL (item 2). The deadline expired before that node answered, and whether the request
+    -- ran is not known: the answer says exactly that, keeps the id, and names the read-back. MEASURED
+    -- 24/11: two `wa update work` runs were reported as `remote_refused ... layer node` this way, while
+    -- the node went on working for another 66 s.
+    remember(request_id, { state = 'unknown', not_known_yet = true, reason = tostring(reply.reason or '') })
+    return { ok = false, error = 'not_known_yet', not_known_yet = true, refused = false, state = 'unknown',
+      id = request_id, node = reply.node or tostring(selector), reason = reply.reason, layer = reply.layer,
+      retryable = reply.retryable == true,
+      message = tostring(reply.message or 'the deadline passed before that node answered'),
+      summary = string.format('NOT KNOWN YET: %s did not answer inside the deadline; whether it accepted the request is unknown, and it was NOT refused.', tostring(reply.node or selector)),
+      next = 'read it back: wa update ' .. tostring(selector) .. ' --status --id ' .. tostring(request_id) }
+  end
   local record_id = tostring(reply.record or reply.audit_id or '')
   if record_id ~= '' then
     remember(record_id, {

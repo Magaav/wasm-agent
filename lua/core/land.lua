@@ -4311,10 +4311,34 @@ impl.canaries = function(run, options)
         unproven[#unproven + 1] = node .. " (the call raised: " .. tostring(answer) .. ")"
         evidence(string.format("%s: NOT PROVEN - the call raised: %s\n", node, tostring(answer)))
       else
+        local function deadline_answer(value)
+          -- THE RELAY'S DEADLINE IS NOT A REFUSAL HERE EITHER (item 2). A relay timeout says nothing
+          -- about the node - only that its answer did not arrive in time - so it is retried once and,
+          -- if it is still not known, named as NOT KNOWN YET rather than as a node that refused. The
+          -- node is still NOT PROVEN (unknown is never green); what changes is which fact is written.
+          if type(value) ~= "table" then return false end
+          if value.not_known_yet == true or tostring(value.error or "") == "not_known_yet" then return true end
+          local detail = tostring(value.detail or value.reason or "")
+          return detail == "relay_timeout" or detail == "relay_request_timeout" or detail == "node_no_answer"
+        end
         local document, refused = canary_answer(answer)
+        if not document and deadline_answer(answer) then
+          local retry_ok, retried = pcall(ask_node, options, node)
+          if retry_ok then
+            local second, why = canary_answer(retried)
+            if second then
+              document, refused, answer = second, nil, retried
+            else
+              refused = tostring(why)
+            end
+          end
+        end
         if not document then
           unproven[#unproven + 1] = node .. " (" .. tostring(refused) .. ")"
-          evidence(string.format("%s: NOT PROVEN - %s\n", node, tostring(refused)))
+          local because = deadline_answer(answer)
+            and ("NOT KNOWN YET: the relay did not carry an answer inside the deadline (" .. tostring(refused) .. "); the node was not proven, and nothing here says it refused")
+            or tostring(refused)
+          evidence(string.format("%s: NOT PROVEN - %s\n", node, because))
         else
           nodes_answered = nodes_answered + 1
           evidence("## " .. node .. "\n")
@@ -4447,7 +4471,20 @@ impl.deploy = function(run, options)
     end
     local reply = remote_update.request(M.call(), node, request_for(node, mode_, why))
     row.state = tostring(reply and (reply.state or reply.status or reply.error) or "no_answer")
-    row.record = reply and tostring(reply.record or "") or ""
+    row.record = reply and tostring(reply.record or reply.id or "") or ""
+    if reply and (reply.not_known_yet == true or tostring(reply.error or "") == "not_known_yet") then
+      -- NOT A REFUSAL, AND NOT A FAILURE YET (mission fleet-update-survives-a-slow-relay, item 2). The
+      -- relay's deadline expired before the node answered. The request carries the id it was sent
+      -- under, so the wave loop below READS IT BACK until the deploy deadline instead of ending the row
+      -- on the relay's clock: measured 24/11, the node was 66 s from its own answer when the relay gave
+      -- up, and the operator was told the node had refused.
+      row.state = "not_known_yet"
+      row.retry_unknown = true
+      row.detail = tostring(reply.message or reply.summary or "the relay did not carry an answer inside the deadline")
+      row.seconds = now() - row.started_at
+      evidence(json.encode(row) .. "\n")
+      return row
+    end
     if not reply or reply.error then
       row.state = "refused"
       row.detail = reply and (tostring(reply.error) .. (reply.observed and (": " .. tostring(reply.observed)) or "")) or "no answer from the node"
@@ -4471,10 +4508,23 @@ impl.deploy = function(run, options)
     row.verified = (status and status.verified == true) or false
     row.detail = status and status.detail or row.detail
     row.seconds = now() - (row.started_at or now())
+    if state == "unknown" and row.retry_unknown then
+      -- The node has the id (the request named it) and has not written its deploy record yet: that is
+      -- the pre-update backup running, not a node that lost the request. Keep reading until the deploy
+      -- deadline, and only then say the phase is unknown (unknown is not yes, and not a no either).
+      return false
+    end
     return state == "installed" or state == "failed" or state == "silent" or state == "unknown"
   end
   local function failure_for(row)
     if row.state == "installed" then return nil end
+    if row.state == "not_known_yet" then
+      return { error = "deploy_not_known",
+        detail = string.format("node %s (%s): NOT KNOWN YET after %ss - the relay did not carry an answer inside the deadline, and the read-back named no phase. It was NOT refused: the node may still be working.",
+          row.node, row.mode, tostring(row.seconds or "?")),
+        observed = row.record ~= "" and ("record " .. row.record) or "",
+        next = "read it back on that node: wa update " .. tostring(row.node) .. " --status" .. (row.record ~= "" and (" --id " .. row.record) or "") .. "; then `wa land --resume` continues at this step" }
+    end
     return { error = "deploy_failed",
       detail = string.format("node %s (%s) is %s after %ss: %s", row.node, row.mode, row.state, tostring(row.seconds or "?"), tostring(row.detail or "")),
       observed = row.record ~= "" and ("record " .. row.record) or "",

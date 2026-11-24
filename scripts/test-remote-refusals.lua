@@ -107,7 +107,7 @@ check(d==nil and p=='remote_reply_unverified','tampered signed reply refused')
 -- 2. remote_call through the relay: node layer vs relay layer.
 relay_script={{status=200,body={ok=true,status=200,body='{"error":"unknown_caller"}'}}}
 r=nodes.remote_call('signer','bash',{command='true'})
-check(r.error=='remote_refused' and r.reason=='unknown_caller' and r.layer=='node' and r.node_status==200 and r.transport=='relay' and r.verified==false,'node refusal through the relay')
+check(r.error=='remote_refused' and r.reason=='unknown_caller' and r.layer=='node' and r.node_status==200 and r.transport=='relay' and r.verified==false,'node refusal through the relay: '..json.encode(r))
 relay_script={{status=200,body={ok=true,status=403,body='{"error":"binding_route_not_granted"}'}}}
 r=nodes.remote_call('signer','bash',{command='true'})
 check(r.error=='remote_refused' and r.reason=='binding_route_not_granted' and r.node_status==403,'node non-200 refusal keeps the node status')
