@@ -1,8 +1,26 @@
 # node-reports-its-wake-state (G, Fable 24/11) - ready-2
 
-**Ready-2.** Branch `change/node-reports-its-wake-state`, now STACKED on `change/version-names-the-tree`
-(e32b6a76), which is itself on `origin/main` 42507780. Nothing pushed: the orchestrator lands it after the r8c
-install. One Rust build, no second install.
+**Ready-4, UNSTACKED (gate, round 1).** Branch `change/node-reports-its-wake-state` now stands on `origin/main`
+(345e51be) **alone**: ONE commit of this work, `c5536e84`, plus this report's commit. Nothing pushed.
+
+**Why it changed after the approval.** The preflight refused the branch with `foreign commit(s) on
+change/node-reports-its-wake-state` - it had been stacked on another change branch, so four of its commits were
+that branch's, not this work, and land-quick stops on a branch that carries another change's commits (the gate
+is right: landing this branch would have landed someone else's change under it). The fix was measured, not
+assumed:
+
+- the branch was reset onto `origin/main` and only this work's diff reapplied (`git diff <other branch tip>..<my
+tip>` is this work and nothing else - checked: no file of that change appears in it);
+- `git diff <pre-unstack tip>` is now EXACTLY that other change's ten files back to origin/main's content
+  (its report, docs/INSTALL.md, docs/RELEASE-UPDATE.md, lua/core/init.lua, update_banner.lua,
+  rust/wa-host/src/build_info.rs, test-check-listing.lua, test-update-follow.sh, test-version-names-the-tree.sh,
+  and its eight `scripts/test.sh` lines) - and nothing else differs, so every line this branch adds is its own;
+- a FRESH release binary was built from origin/main on that tree (`wa --version` -> `v345e51be+...`) and every
+  row below was re-run on it, because a clean patch is not a tested tree.
+
+The commit table below therefore names the PRE-UNSTACK commits - the history that carried each hunk, kept at
+`refs/heads/backup/pre-unstack-1795554553` in that worktree so the table stays readable. The branch itself is
+one commit: every hunk in the table is in `c5536e84`.
 
 | what | commit |
 |---|---|
@@ -170,13 +188,18 @@ which is why the bound in 1c is sized to a cold start and not to a guess.
 
 ## 2. One Rust install, not two (measured, not assumed)
 
-The stack is real: `git log` is `... e32b6a76 (change/version-names-the-tree) <- my commits <- merge origin/main`.
+The stack WAS real (it was rebased onto that other branch, and refused for it - see the top of this report):
+`git log` used to read `... e32b6a76 (the other branch) <- my commits <- merge origin/main`.
 **There was no `serve.rs` conflict to resolve**: the version branch changes `rust/wa-host/src/build_info.rs`,
 `lua/core/init.lua` and `lua/core/update_banner.lua`, and REACHES `/health` through the `build` label's
 composer (`serve.rs` mentions it in comments only - measured: `git diff origin/main..e32b6a76 --stat` lists
 no `rust/wa-capabilities` file). Its `scripts/test.sh` addition is at line ~1006 and mine at ~2836, so the
-rebase applied clean, five commits, no conflict markers. One release build of the stacked tree, and one
-`cargo test -p wa-watchdog` run (both below).
+stack applied clean, five commits, no conflict markers. That measurement is also why the UNSTACK was safe to
+do in one step: this work never needed that branch's bytes, only its build.
+
+After the gate refused the stack (top of this report) the branch carries NONE of that change: its tree is
+`origin/main` + this work, and `git diff <pre-unstack tip>` is exactly that change's ten files back to
+origin/main's content and nothing else.
 
 ## 3. The canary rename (commit 9)
 
@@ -229,7 +252,7 @@ The stall was **24/11** (15:15Z-17:55Z; the tick-failure commit that closed it, 
 incident. NOT fixed, because it is history: the commit MESSAGES of 9c009cbb, e254e16a and 60691c09, and the
 reports those rounds wrote, still say 25/11.
 
-## What was run here, after the stack and the final build
+## What was run here, after the unstack and the final build
 
 | row | result |
 |---|---|
@@ -244,9 +267,9 @@ reports those rounds wrote, still say 25/11.
 | `cargo test -p wa-watchdog --lib` | **pass**, 47 tests (44 on the base plus the waiting body, the missing-field bodies and the 600 s row on a 3 s process) |
 | `WA_BIN=<this tree> bash scripts/test-ledger-upgrade.sh` | **pass**: the released ledger upgrades, columns equal a fresh ledger's, a wake on it is dispatched by one tick |
 | `WA_SCRIPT=scripts/bench-wake-facts.lua` (0 / 1,000 / 10,000 rows) | the numbers above |
-| `cargo build --release` of the stacked tree | **pass** (one build) |
+| `cargo build --release` of the UNSTACKED tree (origin/main + this work) | **pass**; `wa --version` -> `v345e51be+...`, so the rows below ran on a binary built from this tree |
 
-**Pre-existing failures on this machine, each run on a worktree of the stack's base e32b6a76 and failing
+**Pre-existing failures on this machine, each run on a worktree of the base and failing
 there identically:**
 
 * `cargo test -p wa-watchdog --test integration`: `a_crashing_kernel_is_restarted_with_a_growing_backoff`
