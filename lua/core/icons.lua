@@ -194,11 +194,56 @@ function M.resolve(session_choice, opts)
   end
   if #seen > 0 then return seen[1] end
   local record = opts.record or M.record()
-  if not (record and record["wa Icons"] == true) then
-    return { set = "unicode", source = "default (wa Icons is not installed, so the glyphs a stock font has)" }
-  end
+  -- THE FACE IS ASKED EVEN WHEN NOTHING SAYS wa Icons WAS INSTALLED (item 6, Victor 23/11). Measured on
+  -- the work node: on a container (and on an ssh session) there is no setup record at all -
+  -- <data>/setup/fonts.json is missing, because `wa setup fonts` never ran inside it - and this returned
+  -- "unicode" here without ever asking WHICH FACE draws the icon code points in this terminal. A window
+  -- that HAS a Nerd Font, or our own wa Icons, therefore drew the stock glyphs and nobody was told why.
+  -- The record is only where the setup wrote down what it did; the face is the measurement, and it is
+  -- asked whatever the record says.
   local face = faces.face(opts.face or { record = record })
-  return { set = face.set, source = face.why }
+  -- glued == nil is the face's own "cannot tell": the terminal could not be measured, or the font
+  -- question could not be answered on this machine. That is the one state the reader is told about
+  -- (`M.notice_line`), because it is the one state a config line fixes.
+  return { set = face.set, source = face.why, unknown = face.glued == nil }
+end
+
+-- REMEMBER THE CHOICE (item 6, Victor 23/11): `icons = <set>` in this node's config file, the line
+-- `M.from_config` already reads - so the reader who types `/icons wa` once is not asked again at the next
+-- restart. The file is <config>/env (paths.config_file); this line is lowercase and is read by this module
+-- alone, which is why it cannot collide with a KEY=VALUE setting.
+function M.remember(set_name)
+  local set = M.valid(set_name)
+  if not set then return nil, "icons_unknown_set:" .. tostring(set_name) .. " (wa|nerd|unicode|ascii)" end
+  local ok, paths = pcall(dofile, "lua/core/paths.lua")
+  if not ok or type(paths) ~= "table" then return nil, "icons_no_config: lua/core/paths.lua could not be read" end
+  local file = paths.config_file()
+  local text = (host and host.read_file and host.read_file(file)) or ""
+  if type(text) ~= "string" then text = "" end
+  local lines, found = {}, false
+  for line in (text .. "\n"):gmatch("([^\n]*)\n") do
+    if line:match("^%s*icons%s*=") then
+      lines[#lines + 1] = "icons = " .. set
+      found = true
+    elseif not (line == "" and #lines == 0 and text == "") then
+      lines[#lines + 1] = line
+    end
+  end
+  while #lines > 0 and lines[#lines] == "" do table.remove(lines) end
+  if not found then lines[#lines + 1] = "icons = " .. set end
+  local written = table.concat(lines, "\n") .. "\n"
+  local wrote, problem = pcall(host.write_file, file, written)
+  if not wrote then return nil, "icons_cannot_write: " .. file .. ": " .. tostring(problem) end
+  return file
+end
+
+-- THE ONE LINE a reader is told when the set was chosen BY DEFAULT and the font could not be measured,
+-- and nil in every other case: an explicit choice (a config line, WA_ICONS, /icons) is a choice, and a
+-- face that WAS measured needs no advice. `unknown` is the resolver's own flag, never a guess here.
+M.NOTICE = "icons: %s (font unknown here). If your terminal has wa Icons: /icons wa"
+function M.notice_line(set_name, unknown)
+  if not unknown then return nil end
+  return string.format(M.NOTICE, tostring(set_name or "unicode"))
 end
 
 -- The set's own table. An unknown set is a named refusal here rather than a table of nils.

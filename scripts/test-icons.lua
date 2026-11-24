@@ -296,6 +296,65 @@ eq(select(1, view_lib.icon_set()), "unicode", "cli_view reports the set it is dr
 -- Put the process back the way it was found, so a later row in the same interpreter is unaffected.
 view_lib.use_icons("nerd")
 
+-- ---- item 6: the unknown font, the one line, and the remembered choice -------------------
+--
+-- Victor, 23/11: on a tty where the font cannot be known (a container, an ssh session) wa says so ONCE and
+-- names the command that fixes it, and `/icons wa` is remembered for this node's user, so it is typed once.
+-- The measured premise (lua/core/icons.lua:183 resolve, :198): with no setup record the resolver answered
+-- "unicode" and the terminal-face check was never reached. Both halves are held here - the face IS asked,
+-- and its answer says whether it could tell.
+
+-- (a) A machine with no terminal in its ancestry: the face cannot be measured, so the set is the stock
+-- glyphs AND the resolver says it could not tell - which is exactly what the start-up line is for.
+local blind = icons.resolve(nil, { record = {},
+  face = { observation = { terminal = nil, seen = { "bash", "sshd" }, stats = {} } } })
+eq(blind.set, "unicode", "an unmeasurable terminal still gets the stock glyphs")
+eq(blind.unknown, true, "and the resolver says the font could not be known here")
+eq(icons.notice_line(blind.set, blind.unknown),
+  "icons: unicode (font unknown here). If your terminal has wa Icons: /icons wa",
+  "the ONE line the start says: which set draws, why, and the command that makes it ours")
+-- (b) A face that WAS measured says nothing: advice about an unknown font would be false there.
+eq(icons.notice_line("nerd", false), nil, "a measured face gets no notice")
+eq(icons.notice_line("unicode", false), nil, "and neither does a set the reader chose")
+-- (c) An explicit /icons is not an unknown font.
+view_lib.use_icons("unicode")
+eq(view_lib.icons_notice(), "", "an explicit set silences the line")
+-- (d) The choice is REMEMBERED: `icons = <set>` in this node's config file, read back by the same reader that
+-- decides the default. The row refuses the operator's own home, like every row that writes.
+do
+  local home = (host.getenv("WASM_AGENT_HOME") or ""):gsub("\\\\", "/"):gsub("/+$", "")
+  local operator = ((host.getenv("HOME") or "") .. "/.wasm-agent"):gsub("\\\\", "/"):gsub("/+$", "")
+  if home == "" or home:lower() == operator:lower() then
+    ok(false, "refusing to write a config line in the operator's own home (" .. home .. ")")
+  else
+    local file, why = icons.remember("wa")
+    ok(file ~= nil, "the choice is written to a config file: " .. tostring(file or why))
+    eq(icons.from_config(host.read_file(file or "")), "wa",
+      "and the reader that decides the default reads it back")
+    -- A restart: no session choice, no record, no measurable font - the config line alone decides.
+    local env_choice = (host.getenv("WA_ICONS") or ""):gsub("%s", "")
+    local resumed = icons.resolve(nil, { record = {},
+      face = { observation = { terminal = nil, seen = {}, stats = {} } } })
+    if env_choice == "" then
+      eq(resumed.set, "wa", "a restart draws wa: the config line decides before the font is asked")
+      ok(tostring(resumed.source):find("config", 1, true) ~= nil,
+        "and says where that came from: " .. tostring(resumed.source))
+    else
+      ok(false, "WA_ICONS is set in this environment, so this row cannot say the config line decided (" .. env_choice .. ")")
+    end
+    ok(not resumed.unknown, "a remembered choice is not an unknown font, so no notice is due")
+    -- Written twice, the line is REPLACED rather than repeated: a config that grows a line per /icons is a
+    -- file nobody can read in a month.
+    icons.remember("nerd")
+    local text = host.read_file(file or "") or ""
+    local seen = 0
+    for line in text:gmatch("[^\n]+") do if line:match("^%s*icons%s*=") then seen = seen + 1 end end
+    eq(seen, 1, "the config file holds ONE icons line however many times it was set")
+    eq(icons.from_config(text), "nerd", "and it is the last one chosen")
+    icons.remember("wa")
+  end
+end
+
 print(string.format("icons: %s (%d checks, %d failed, 0 skipped)",
   failed == 0 and "ok" or "FAILED", checks, failed))
 os.exit(failed == 0 and 0 or 1)
