@@ -22,10 +22,18 @@ S="$(mktemp -d "${TMPDIR:-/tmp}/one-turn-XXXXXX")"
 mkdir -p "$S/home/.wasm-agent"
 COUNT="$S/requests.txt"
 : > "$COUNT"
-cleanup() { pkill -f "stub-provider.py" 2>/dev/null; rm -rf "$S"; }
+# THE STUB THIS ROW STARTED, AND NOTHING ELSE (the node-ops rule on stopping processes): a `pkill -f
+# stub-provider.py` killed any other stub on the machine, and this row is a harness check now - it runs
+# beside other work. The pid is the one `$!` names, and `cleanup` waits for it so no orphan outlives the row.
+STUB_PID=""
+cleanup() {
+  if [ -n "$STUB_PID" ]; then kill "$STUB_PID" 2>/dev/null; wait "$STUB_PID" 2>/dev/null; fi
+  rm -rf "$S"
+}
 trap cleanup EXIT
 STUB_PORT=0 STUB_COUNT_FILE="$COUNT" STUB_SLEEP_SECONDS="${STUB_SLEEP_SECONDS:-0}" STUB_REPLY="stub reply" \
   python3 "$ROOT/scripts/lib/stub-provider.py" > "$S/port.txt" 2>&1 &
+STUB_PID=$!
 for _ in $(seq 1 60); do grep -q listening "$S/port.txt" 2>/dev/null && break; sleep 0.1; done
 PORT=$(grep -o '[0-9]*$' "$S/port.txt" | tail -1)
 [ -n "$PORT" ] || { echo "FAIL: the stub never listened"; cat "$S/port.txt"; exit 1; }
