@@ -126,6 +126,25 @@ if not (mesh_port and node_port and client_port and rendezvous_port and own_node
 end
 rendezvous_url = "http://127.0.0.1:" .. tostring(rendezvous_port)
 
+-- Is this directory outside every git checkout? Asked of git, never guessed from the path.
+local function outside_any_repo(dir)
+  if type(dir) ~= "string" or dir == "" then return false end
+  local code = sh("git -C " .. string.format("%q", dir) .. " rev-parse --show-toplevel >/dev/null 2>&1")
+  return code ~= 0
+end
+local scratch, scratch_why
+for _, candidate in ipairs({ os.getenv("TMPDIR"), "/tmp", os.getenv("GATE_ROOT") }) do
+  if outside_any_repo(candidate) then scratch, scratch_why = candidate, "not a git checkout" break end
+end
+if not scratch then
+  print("SKIP two-node pair: every scratch candidate (TMPDIR, /tmp, GATE_ROOT) is inside a git checkout, "
+    .. "and the fleet key this pair needs refuses one")
+  return
+end
+scratch = tostring(scratch):gsub("/+$", "")
+local root = scratch .. "/two-node-pair-" .. tostring(os.time()) .. "-" .. tostring(math.random(100000, 999999))
+print("two-node: the pair's tree is " .. root .. " (" .. scratch_why .. ")")
+
 local function field(text, name)
   return tostring(text):match('"' .. name .. '":"([^"]*)"')
 end
