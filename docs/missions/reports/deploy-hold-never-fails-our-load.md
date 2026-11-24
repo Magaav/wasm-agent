@@ -1488,3 +1488,33 @@ different prompt. Asserted: `replaced = true`; exactly ONE resume row for the se
 | `scripts/test-deploy-wait.sh` | `deploy wait ok` (one run hit the known step-6 flake, green on the re-run) |
 
 No new texts: (2) reuses the `deploy_waiting` sentence, and the sweep's lines were approved as 26 and 28.
+
+### r6b (Fable, 24/11 ~03:05Z): a dispatching row is not replaced, and `finish` cannot overwrite a re-armed row
+
+**The defect.** `M.schedule` replaced any resume row in `('pending','dispatching')`. A RESUMED turn that is running
+holds its own row `X` as `dispatching`; when it pauses again for the next install, the pause arms a resume, `schedule`
+replaced `X` (same id, back to `pending`), and then that turn ended with `M.finish(X)` writing
+`status='delivered', due_at=NULL WHERE id=?` - over the new resume. LOST. That is the back-to-back install sequence of
+this evening.
+
+**(a) Only a `pending` row is replaced.** A `dispatching` row is the turn that is pausing RIGHT NOW: it ends
+`delivered` through `finish`, so the new resume must be its own row. It still inherits the chain's **oldest
+`created_at`** and its **`resume_chain`** (the max), so re-arming can neither extend the six-hour window nor reset the
+cap of two.
+
+**(b) The belt.** `M.finish` guards both of its writes with `AND status='dispatching'`: a row that someone re-armed
+while its turn ran is not overwritten by that turn's ending.
+
+**Tests** (real stores, `selfloop.setup`, `claim_due`/`finish` as the node uses them, clock read from the row):
+
+| case | assertion |
+| --- | --- |
+| resumed turn `dispatching`, the pause arms a new resume | `replaced ~= true` and a different id - the pause does not take the running row |
+| that new row | `created_at` = the dispatching row's (two hours back), so the window cannot be extended |
+| `finish(X, ok)`, then the ledger | exactly ONE `pending` resume for the session, it is the NEW row, status `pending`, chain carried |
+| the belt | a row set back to `pending` while its turn ran is STILL `pending` after `finish` (never `delivered`) |
+| two pending rows (c67c0609's shape) | still collapse to one, oldest `created_at`, largest chain |
+
+**Rows:** `test-selfloop-pause.lua` **156 checks** (was 146); `test-deploy-pause.lua` 100; `test-handle-wake.lua` 17;
+`test-cli-wake-row.lua` 30; `test-deploy-bound.sh` `deploy bound ok`; `test-deploy-wait.sh` `deploy wait ok`.
+No new texts.

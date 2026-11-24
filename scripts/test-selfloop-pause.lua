@@ -471,6 +471,53 @@ pcall(host.remove_file, marker)
 
 -- (3) AT MOST ONE PENDING RESUME PER SESSION, seeded from c67c0609's real shape (two resume rows for one session):
 -- arming B while A is pending REPLACES it - one row, the OLDEST created_at, the LARGEST chain.
+-- (3b) A RESUMED TURN THAT PAUSES AGAIN: its own row is `dispatching` (the turn running now), the pause arms a NEW
+-- resume, and when that turn ends `finish` must not land on the new row. MEASURED shape of the back-to-back installs:
+-- replacing the dispatching row let `finish` write `delivered` over the new resume and lose it.
+local paused_run_session = memory.start_session("local", "chat", { user_id = "master", node_id = "n", title = "r6 resumed" })
+local row_x = selfloop.schedule({ in_seconds = 0, reason = pause_mod.RESUME_REASON, prompt = "resume X" },
+  { session_id = paused_run_session, user_id = "master" })
+check(row_x and row_x.ok, "row X is armed")
+host.sql_exec([[UPDATE self_wakes SET created_at=?, resume_chain=1 WHERE id=?]],
+  json.encode({ r6_now - 7200, row_x.wake.id }))
+local claimed_x = selfloop.claim_due(paused_run_session, "master", { now = r6_now })
+check(claimed_x and claimed_x.id == row_x.wake.id, "and the node claimed it: X is `dispatching`, the turn is running")
+-- the turn pauses again, so deploy_pause arms a resume for the NEXT install, the way at_boundary does
+local armed_on_pause = selfloop.schedule({ in_seconds = 60, reason = pause_mod.RESUME_REASON, prompt = "resume Y" },
+  { session_id = paused_run_session, user_id = "master", resume_chain = 1 })
+check(armed_on_pause and armed_on_pause.ok, "the pause armed a second resume")
+check(armed_on_pause.replaced ~= true and tostring(armed_on_pause.wake.id) ~= tostring(row_x.wake.id),
+  "a DISPATCHING row is not replaced: the new resume is its own row")
+check(tonumber((json.decode(host.sql_query([[SELECT created_at FROM self_wakes WHERE id=?]],
+  json.encode({ armed_on_pause.wake.id })) or "[]") or {})[1].created_at) == r6_now - 7200,
+  "and it INHERITS the chain's oldest created_at, so re-arming cannot extend the window")
+-- now the running turn ends the way a finished run does
+selfloop.finish(claimed_x, true, "turn finished", { now = r6_now })
+local after_rows = json.decode(host.sql_query([[SELECT id, status, created_at, resume_chain FROM self_wakes
+  WHERE session_id=? AND reason=?]], json.encode({ paused_run_session, pause_mod.RESUME_REASON })) or "[]") or {}
+local pending_after = 0
+for _, row in ipairs(after_rows) do if row.status == "pending" then pending_after = pending_after + 1 end end
+check(pending_after == 1, "after the turn ends there is exactly ONE pending resume: " .. json.encode(after_rows))
+for _, row in ipairs(after_rows) do
+  if tostring(row.id) == tostring(armed_on_pause.wake.id) then
+    check(row.status == "pending", "and it is the NEW row, not overwritten by the finish: " .. json.encode(row))
+    check(tonumber(row.resume_chain) == 1, "with the chain carried over: " .. tostring(row.resume_chain))
+  end
+end
+
+-- (3c) THE BELT: a row that someone re-armed WHILE the turn ran is never overwritten by that turn's ending - `finish`
+-- writes only where the row is still `dispatching`.
+local belt_session = memory.start_session("local", "chat", { user_id = "master", node_id = "n", title = "r6 belt" })
+local belt_row = selfloop.schedule({ in_seconds = 0, reason = pause_mod.RESUME_REASON, prompt = "belt" },
+  { session_id = belt_session, user_id = "master" })
+local belt_claimed = selfloop.claim_due(belt_session, "master", { now = r6_now })
+check(belt_claimed and belt_claimed.id == belt_row.wake.id, "the belt row is claimed")
+host.sql_exec([[UPDATE self_wakes SET status='pending' WHERE id=?]], json.encode({ belt_row.wake.id }))
+selfloop.finish(belt_claimed, true, "turn finished", { now = r6_now })
+local belt_after = (json.decode(host.sql_query([[SELECT status FROM self_wakes WHERE id=?]],
+  json.encode({ belt_row.wake.id })) or "[]") or {})[1] or {}
+check(tostring(belt_after.status) == "pending",
+  "finish does NOT overwrite a row that was re-armed meanwhile: " .. json.encode(belt_after))
 local one_session = memory.start_session("local", "chat", { user_id = "master", node_id = "n", title = "r6 one" })
 local first = selfloop.schedule({ in_seconds = 60, reason = pause_mod.RESUME_REASON, prompt = "A" },
   { session_id = one_session, user_id = "master" })

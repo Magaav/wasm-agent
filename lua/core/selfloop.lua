@@ -460,15 +460,26 @@ function M.schedule(args, ctx)
     local loaded, pause = pcall(dofile, "lua/core/deploy_pause.lua")
     if loaded and type(pause) == "table" then resume_reason = pause.RESUME_REASON end
   end
+  local inherited_created, inherited_chain
   if resume_reason ~= nil and reason == resume_reason then
-    local existing = query([[SELECT * FROM self_wakes WHERE session_id=? AND reason=?
-      AND status IN ('pending','dispatching') ORDER BY created_at LIMIT 1]], { session.id, reason })[1]
-    if existing then
-      local chain = math.max(tonumber(existing.resume_chain) or 0, tonumber(args.resume_chain) or 0)
+    -- ONLY A `pending` ROW IS REPLACED (r6b, 24/11). A `dispatching` row is the turn that is pausing RIGHT NOW: it
+    -- ends `delivered` through `M.finish`, so replacing it would let that finish land on the new resume and lose it -
+    -- the back-to-back install case of this evening. The new row is owed instead, and it INHERITS the chain's oldest
+    -- `created_at` and its count, so a session cannot stay resumable for ever by re-arming.
+    local pending_row = query([[SELECT * FROM self_wakes WHERE session_id=? AND reason=? AND status='pending'
+      ORDER BY created_at LIMIT 1]], { session.id, reason })[1]
+    if pending_row then
+      local chain = math.max(tonumber(pending_row.resume_chain) or 0, tonumber(args.resume_chain) or 0)
       exec([[UPDATE self_wakes SET status='pending', prompt=?, due_at=?, updated_at=?, last_error='', resume_chain=?
-        WHERE id=?]], { prompt, due_at, now, chain, existing.id })
-      local row = query("SELECT * FROM self_wakes WHERE id=?", { existing.id })[1]
+        WHERE id=?]], { prompt, due_at, now, chain, pending_row.id })
+      local row = query("SELECT * FROM self_wakes WHERE id=?", { pending_row.id })[1]
       return { ok = true, wake = view(row, now), replaced = true }
+    end
+    local running = query([[SELECT * FROM self_wakes WHERE session_id=? AND reason=? AND status='dispatching'
+      ORDER BY created_at LIMIT 1]], { session.id, reason })[1]
+    if running then
+      inherited_created = tonumber(running.created_at)
+      inherited_chain = tonumber(running.resume_chain) or 0
     end
   end
   local id = host.uuid()
@@ -487,8 +498,13 @@ function M.schedule(args, ctx)
       exec("UPDATE self_wakes SET due_at=? WHERE id=?", { due_at, id })
     end
   end
+  if inherited_created ~= nil or inherited_chain ~= nil or tonumber(args.resume_chain) ~= nil then
+    local chain = math.max(inherited_chain or 0, tonumber(args.resume_chain) or 0)
+    exec([[UPDATE self_wakes SET created_at=?, resume_chain=? WHERE id=?]],
+      { inherited_created or at, chain, id })
+  end
   local row = query("SELECT * FROM self_wakes WHERE id=?", { id })[1]
-  return { ok = true, wake = view(row, at) }
+  return { ok = true, wake = view(row, at), inherited = inherited_created ~= nil }
 end
 
 -- The pending wake facts for a session (the footer's and the window's one read).
@@ -1250,11 +1266,13 @@ function M.finish(row, ok, detail, opts)
   if every and every > 0 then
     status = "pending"
     exec([[UPDATE self_wakes SET status=?, due_at=?, probe_result='', event_json='', updated_at=?,
-      last_error=? WHERE id=?]], { status, now + every, now, ok and "" or slug(detail), row.id })
+      last_error=? WHERE id=? AND status='dispatching']], { status, now + every, now, ok and "" or slug(detail), row.id })
     return { status = status, due_at = now + every }
   end
+  -- THE BELT (r6b): a row that someone re-armed while this turn ran is NOT overwritten by this turn's ending. Without
+  -- the guard, `delivered` landed on the new resume and lost it (the back-to-back install case, measured tonight).
   exec([[UPDATE self_wakes SET status=?, due_at=NULL, probe_result='', event_json='', updated_at=?,
-    last_error=? WHERE id=?]], { status, now, ok and "" or slug(detail), row.id })
+    last_error=? WHERE id=? AND status='dispatching']], { status, now, ok and "" or slug(detail), row.id })
   return { status = status, due_at = nil }
 end
 
