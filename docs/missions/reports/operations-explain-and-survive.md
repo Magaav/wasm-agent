@@ -541,3 +541,16 @@ root list per session, a separate reviewable change. It is reported here rather 
 
 `flock -o ~/Work/missions/.suite.lock env WA_BIN=~/.local/bin/wa WA_FAST_ROWS=/tmp/rows-ops.txt bash scripts/fast.sh`
 at `99684528` (plus the report commit that follows it): see the verdict recorded at the end of this file.
+
+
+### Why two earlier narrowed attempts exited 2 with an empty log (diagnosed, not hand-waved)
+
+The rows file I passed named `scripts/test-workspace-cwd.lua`, and that row is listed in
+`scripts/fast-path.exclude`: `wa_fast_row_filter` refuses it by name
+(`fast_narrow:unknown_row: scripts/test-workspace-cwd.lua is not a row this run can execute`) and `scripts/fast.sh`
+exits 2 with "nothing ran; a plan that names a row this runner cannot execute has to be fixed, not obeyed" - which is
+the runner's own rule working, and the reason that row also refused to run standalone. The refusal text reached
+neither of the operation's two redirected streams, so the log simply stopped after the components line; the cause was
+found by sourcing `scripts/lib/fast-rows.sh` and calling `wa_fast_row_filter` with the same file by hand. Row list
+fixed, run restarted. (That the refusal was invisible through the redirect is worth knowing for the next reader: an
+exit 2 with a short log is this, not a hang.)
