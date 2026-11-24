@@ -213,7 +213,13 @@ cp "$UPGRADE" "$fake/scripts/upgrade.sh"
 cp "$ROOT/scripts/lib/glibc-floor.sh" "$ROOT/scripts/lib/service-target.sh" \
    "$ROOT/scripts/lib/install-record.sh" "$ROOT/scripts/lib/node-pins.sh" "$fake/scripts/lib/"
 printf 'turn_owner() { :; }\nsentinel_supervises() { return 1; }\n' > "$fake/scripts/lib/turn-guard.sh"
-out="$(WA_INSTALL_DIR="$inst" WA_GLIBC_HOST=2.35 bash "$fake/scripts/upgrade.sh" "$candidate" 2>&1)"; rc=$?
+# ITS OWN DATA DIR (24/11). This runs a copy of the REAL upgrade.sh, so it inherits whatever state dir the
+# environment names - and upgrade.sh writes the deploy-pending signal there ("${WASM_AGENT_DATA:-
+# ${WASM_AGENT_HOME:-$HOME}/.wasm-agent}/deploy-pending.json", :648) before it waits, which makes every
+# running turn on this machine pause. This case is refused at the glibc guard (:172) long before the signal,
+# so it never leaked - but it is one case away from doing so, and the rule is the environment, not luck.
+mkdir -p "$WORK/home" "$WORK/data"
+out="$(HOME="$WORK/home" WASM_AGENT_HOME="$WORK/home" WASM_AGENT_DATA="$WORK/data"   WA_INSTALL_DIR="$inst" WA_GLIBC_HOST=2.35 bash "$fake/scripts/upgrade.sh" "$candidate" 2>&1)"; rc=$?
 expect_status 3 "$rc" "upgrade.sh with a candidate needing GLIBC_2.39 on a 2.35 host"
 contains "$out" "glibc_floor_exceeded:" "upgrade.sh names the glibc refusal"
 contains "$out" "needs GLIBC_2.39" "upgrade.sh names the candidate's version"
