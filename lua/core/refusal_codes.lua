@@ -284,6 +284,7 @@ return {
   ['old_text_required']='file_tools.lua',
   ['only_read_and_grep_steps']='diagnose.lua',
   ['operation_host_unavailable']='accepted.lua',
+  ['operation_kind_unknown']='accepted.lua',
   ['operation_start_refused']='accepted.lua',
   ['orchestration_delegate_required']='orchestration_mode.lua',
   ['orchestration_enabled_required']='orchestration_mode.lua',

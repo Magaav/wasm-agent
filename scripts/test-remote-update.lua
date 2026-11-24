@@ -130,7 +130,9 @@ host = {
     if command:find(" request run", 1, true) then
       return wrapper(0, "  requested run: " .. sentinel_dir .. "/requests/1700000000-22.json\n", "")
     end
-    if command:find("chmod %+x", 1) then return wrapper(0, "", "") end
+    -- A claim that cannot be MADE (mkdir unanswered) is not a claim that was lost: the row drives that.
+  if break_claim and command:find("mkdir ", 1, true) then return "{}" end
+  if command:find("chmod %+x", 1) then return wrapper(0, "", "") end
     if command:find("^ls %-1t ", 1) then return wrapper(0, listing((command:match("^ls %-1t '([^']+)'") or "")), "") end
     -- `test -s` and anything else the module asks about this machine: answered for real.
     return real_host.exec(command, cwd)
@@ -145,6 +147,7 @@ setmetatable(host, { __index = function(_, key) return real_host[key] end })
 -- so a phase is never invented by the fixture.
 started_operations = {}
 operations = {}
+break_claim = false
 host.operation = function(action, payload)
   local request = json.decode(payload or "{}") or {}
   if action == "start" then
@@ -349,6 +352,23 @@ ok(audited, "the audit LINE carries the requester id and the commit prefix")
 -- deadline expired in between.
 ok(#log_lines == 2, "exactly one accepted line and one admitted line for one request", tostring(#log_lines) .. ": " .. table.concat(log_lines, " | "))
 ok(log_lines[1]:find("remote-update accepted", 1, true) ~= nil, "the first line is the accept", tostring(log_lines[1]))
+
+-- A CLAIM THAT CANNOT BE MADE IS NOT A CLAIM THAT WAS LOST (Fable's review of a+b): with mkdir
+-- unanswered the node cannot prove the run has not already happened, so the accept is settled FAILED with
+-- that reason - never answered "already", which would leave the caller polling "accepted" forever.
+local unclaimable_request = remote.serve({ action = "request", commit = TARGET, reason = "claim test" }, MASTER)
+ok(unclaimable_request and unclaimable_request.ok == true, "a second request is accepted",
+  unclaimable_request and tostring(unclaimable_request.error))
+local accepted_dir_before = listing(accepted_dir)
+break_claim = true
+local unclaimable = remote.run_accepted(unclaimable_request.record)
+break_claim = false
+ok(unclaimable and unclaimable.ok == false and unclaimable.error == "accept_claim_unavailable",
+  "a claim that cannot be made is refused by name, not answered already", json.encode(unclaimable or {}))
+local unclaimable_phase = remote.accept_phase(unclaimable_request.record)
+ok(unclaimable_phase.state == "failed", "and the accept it settles says failed, so no caller polls forever", tostring(unclaimable_phase.state))
+ok(accepted_dir_before ~= nil, "(the records directory is readable)")
+
 
 -- ---- 4. a commit that is not on main, a tree that cannot fast-forward, a dirty tree -------------
 issued = {}

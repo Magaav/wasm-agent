@@ -164,7 +164,18 @@ function M.start_operation(opts)
   if program == '' then return { ok = false, error = 'program_required' } end
   local argv = {}
   for _, value in ipairs((opts and opts.args) or {}) do argv[#argv + 1] = tostring(value) end
-  local request = { program = program, args = argv, kind = trim(opts.kind) ~= '' and trim(opts.kind) or 'command',
+  -- THE HOST'S kind IS AN ALLOW-LIST (command, build, test, deploy) and it is about how the operation
+  -- runs, not about what the caller thinks it is doing: passing this module's own vocabulary was refused
+  -- by the host - operation_kind_unknown:remote-update - which scripts/test-accept-two-process.lua found
+  -- on the first run. The caller's word for the work lives in the record (`kind`), and the host is told
+  -- `command` unless the caller names one of ITS words.
+  local HOST_KINDS = { command = true, build = true, test = true, deploy = true }
+  local asked_kind = trim(opts.operation_kind)
+  if asked_kind ~= '' and not HOST_KINDS[asked_kind] then
+    return { ok = false, error = 'operation_kind_unknown', observed = asked_kind,
+      allowed = { 'command', 'build', 'test', 'deploy' } }
+  end
+  local request = { program = program, args = argv, kind = asked_kind ~= '' and asked_kind or 'command',
     timeout_seconds = tonumber(opts.timeout_seconds) or 1800, owner = trim(opts.owner) ~= '' and trim(opts.owner) or M.OWNER }
   if trim(opts.cwd) ~= '' then request.cwd = trim(opts.cwd) end
   local ok, receipt = pcall(host.operation, 'start', json.encode(request))
@@ -260,8 +271,12 @@ function M.detach(opts)
       observed = 'the work was started detached and its record could not be written to ' .. root,
       next = 'read the operation back on that node: operation ' .. tostring(record.operation and record.operation.id or 'unknown') }
   end
-  return { ok = true, id = id, state = record.state, detached = record.detached,
+  -- ok MEANS THE WORK IS RUNNING. A start the host refused still writes the record (start_problem names
+  -- it) but it is NOT success: the caller that trusted `ok` answered "accepted" for a request nothing
+  -- was ever going to do, which is the same lie the deadline used to tell, one layer down.
+  return { ok = started.ok == true, id = id, state = record.state, detached = record.detached,
     accepted_at = record.accepted_at, operation = record.operation, detail = record.detail,
+    error = (not started.ok) and started.error or nil, observed = (not started.ok) and started.observed or nil,
     root = root, summary = M.summary(record) }
 end
 

@@ -937,8 +937,13 @@ function M.accept_phase(id)
   local detail = record.detail or {}
   local state = tostring(status.state or 'unknown')
   if state == 'done' then state = 'queued' end
+  -- The accept record's `detail` is the table the accepting call stored (commit, reason, requester); a
+  -- LATER phase detail is a sentence. Only the sentence goes in the summary (a table printed as
+  -- "table: 0x..." reached the caller's one-line answer, measured by the two-process row).
+  local phase_detail = type(status.detail) == 'string' and status.detail
+    or (type(record.detail) == 'string' and record.detail or nil)
   return {
-    record = status.record == true, state = state, detail = status.detail or record.detail,
+    record = status.record == true, state = state, detail = phase_detail,
     detached = status.detached, operation = status.operation or (record.operation and record.operation.id),
     accepted_at = status.accepted_at or record.accepted_at, start_problem = status.start_problem,
     commit = tostring(detail.commit or ''),
@@ -1025,6 +1030,17 @@ function M.run_accepted(record_id)
     end
   end
   local claim = accept.claim_running({ root = root, id = id })
+  if claim.ok ~= true and claim.error then
+    -- A CLAIM THAT COULD NOT BE MADE IS NOT A CLAIM THAT WAS LOST (Fable's review of a+b). With mkdir
+    -- unanswered this node cannot prove the run has not already happened, and answering "already" would
+    -- leave the caller polling "accepted" until its deadline for a run nobody started. So the accept is
+    -- settled FAILED with the reason, and the answer says nothing ran.
+    local detail = tostring(claim.error) .. (claim.observed and (' - ' .. tostring(claim.observed)) or '')
+    accept.finish({ root = root, id = id, state = 'failed', detail = 'the one-run claim could not be made: ' .. detail })
+    return { ok = false, error = tostring(claim.error), id = id, record = id, effect = 'none', detail = detail,
+      message = 'this node could not prove this deploy had not already run, so nothing was started and the request is settled failed.',
+      next = 'check that the records directory ' .. root .. ' is writable by this node, then ask again' }
+  end
   if claim.ok ~= true then
     local phase = M.accept_phase(id)
     local state = tostring(phase.state or record.state or 'accepted')
@@ -1107,6 +1123,17 @@ function M.read_status(args, caller)
       note = 'a remote update record is readable by the node that asked for it' }
   end
   local outcome = outcome_of(record)
+  -- A REFUSED DEPLOY IS NOT "QUEUED" (found by scripts/test-accept-two-process.lua): outcome_of answers
+  -- `queued` for a record whose install it cannot see, and a request the node REFUSED - origin/main
+  -- unavailable, tree dirty, sentinel stopped - stayed `queued` for as long as anyone asked, which is the
+  -- same lie as reporting a deadline as a refusal, pointing the other way. The record's own outcome is
+  -- the evidence, and it is reported as failed with the peer's reason.
+  if (tostring(record.outcome or '') == 'refused' or tostring(record.state or '') == 'refused')
+    and outcome.state ~= 'installed' and outcome.state ~= 'failed' then
+    outcome.state = 'failed'
+    outcome.refused = true
+    outcome.detail = tostring(record.detail or record.state or 'refused')
+  end
   -- WHILE THE DETACHED TAIL RUNS, THE RECORD SAYS WHAT IT IS DOING. outcome_of answers "queued" for a
   -- request whose deploy has not been handed over yet; the accept record knows whether this node has
   -- started (running) or is still preparing (accepted), which is the answer a caller polls for.
