@@ -24,6 +24,20 @@
 -- this row started. No live node, no fleet, no relay.
 if not host then error("this row runs under the node (WA_SCRIPT), not plain Lua") end
 local json = dofile("lua/vendor/json.lua")
+-- THE PROVIDER KEYS THIS ROW STANDS IN FOR (the reason it once passed alone and failed in the runner:
+-- the runner gives a row no model at all, and a shell that has one must not decide the verdict either).
+-- The agent is asked for a round here and `provider.complete_with` is this row's stub; these five names
+-- are what make it ask at all. Nothing is sent anywhere: the agent never reaches a socket.
+local real_getenv = host.getenv
+host.getenv = function(key)
+  if key == "WASM_AGENT_RAW_CODE" then return nil end
+  if key == "WASM_AGENT_CODEMODE" then return "native" end
+  if key == "WASM_AGENT_LLM_API_KEY" then return "fixture_key_not_a_credential" end
+  if key == "WASM_AGENT_PROVIDER" then return "opencode-go" end
+  if key == "WASM_AGENT_LLM_MODEL" then return "deepseek-v4.1-flash" end
+  return real_getenv(key)
+end
+
 -- ONE INSTANCE of lua/core/nodes.lua for this process: the modules under test are loaded through
 -- dofile, so a stub set on a second instance is never read by lua/core/tools.lua's own calls.
 local original_dofile = dofile
@@ -330,7 +344,21 @@ local function body()
     end
     -- A failure here must say WHY: the block's own answer and the tool text are the two facts that
     -- tell a refused picture from a run block that never reached the peer.
-    if #parts ~= 1 then
+    if rounds == 0 then
+      -- NO PROVIDER ROUND HAPPENED AT ALL. Under the runner this row can be CANCELLED mid-way (the
+      -- fast path's watchdog signals the row's process group at its deadline), and a cancelled run stops
+      -- before its first model call: that is not a verdict about the picture, so it is named as a skip
+      -- with the reason - never a pass, and never a red attributed to this code.
+      local cancelled = type(host.run_cancelled) == "function" and host.run_cancelled() == true
+      if cancelled then
+        skip("the picture in the model's request", "this row was cancelled before its first model round")
+      else
+        error(string.format("the agent run made no model round at all (rounds=0, cancelled=%s); the "
+          .. "picture step cannot be judged", tostring(cancelled)), 0)
+      end
+    elseif #parts == 1 then
+      checks = checks + 1 -- the claim itself: one image part, counted like every other check
+    else
       -- SAY WHAT HAPPENED: a second round that never came (the run block still pending under load) and a
       -- round that came without the picture are different faults, and the row must not reduce both to "0".
       local roles = {}
