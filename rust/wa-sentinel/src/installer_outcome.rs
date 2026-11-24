@@ -130,6 +130,32 @@ pub(crate) fn verdict(id: &str) -> Option<Outcome> {
     Some(verdict_of(&target, &installed, &log, reason))
 }
 
+/// THE RETRY THIS REQUEST IS OWED, as a command that can run.
+///
+/// MEASURED (24/11): the hint named the request's recorded target as `--expected-sha`, and `deploy.sh` refuses
+/// an expected SHA that is not exactly HEAD and origin/main of its tree - so on `work` the hint read
+/// `--expected-sha 74d48431 ...`, a command that could only be refused (`expected SHA is not exact
+/// origin/main`). A hint therefore carries `--expected-sha` only when the request DEMANDED one and a deploy
+/// would still take that commit; otherwise it asks for what this queue installs anyway - origin/main - with no
+/// pin, and says which of the two absences it is.
+fn retry_hint(request: &Value) -> String {
+    let reason = request.get("reason").and_then(Value::as_str).unwrap_or("").replace('\'', "");
+    let expected = request.get("expected_sha").and_then(Value::as_str).unwrap_or("");
+    if !expected.is_empty() && deploy_protocol::expected_sha_accepted(expected) {
+        return format!(
+            "re-request with: wa-sentinel request deploy --reason '{reason}' --expected-sha {expected} (that commit is still exactly origin/main, so deploy.sh accepts it)"
+        );
+    }
+    format!(
+        "re-request with: wa-sentinel request deploy --reason '{reason}' (no --expected-sha: {})",
+        if expected.is_empty() {
+            "this request demanded no commit, and a commit it only recorded when it was written is not a pin deploy.sh would accept"
+        } else {
+            "the commit it demanded is not exactly origin/main now, and deploy.sh refuses an expected SHA that is not"
+        }
+    )
+}
+
 /// THE REQUEST A SPAWNED INSTALLER NEVER FINISHED ENDS HERE: `failed/` with the installer's own reason, one queue
 /// record, and one re-queue for the next quiet moment - never a retirement and never a silence.
 ///
@@ -149,9 +175,7 @@ pub(crate) fn fail_unobserved(id: &str, why: &str) -> Result<bool> {
     if !request.is_object() {
         return Ok(false);
     }
-    let retry = format!("re-request with: wa-sentinel request deploy --expected-sha {} --reason '{}'",
-        request.get("target_commit").and_then(Value::as_str).unwrap_or(""),
-        request.get("reason").and_then(Value::as_str).unwrap_or("").replace('\'', ""));
+    let retry = retry_hint(&request);
     let detail = format!("the installer ended and nothing was installed: {why}; it is re-queued automatically once, when this node is next quiet; {retry}");
     wa_operation::atomic_json(&failed_path, &json!({
         "request": request, "ok": false, "phase": "unobserved", "detail": detail, "at": now_epoch()

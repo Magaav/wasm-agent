@@ -60,6 +60,20 @@ end
 local live = wait.decode(request(), "1700000000000000000-1-0.json", NOW)
 eq(live.verb, "deploy", "a deploy is a wait")
 eq(live.to, SHA, "the wait names the commit that is coming")
+-- THE COMMIT THE TEXTS NAME (24/11). A request carries the commit it DEMANDED when it has one
+-- (`--expected-sha`: deploy.sh revalidates it and installs nothing else) and otherwise the target it RECORDED
+-- when it was written. That recorded value is now what a deploy would install - on `work` it was a host bundle's
+-- main seven days behind, while the installer built HEAD (docs/DEPLOY-TARGET.md) - and the pause line an
+-- operator reads is composed from this field, so it names the commit that is actually coming.
+local awaiting = wait.decode(json.encode({ verb = "deploy", target_commit = SHA, queued_at = NOW - 10 }),
+  "1700000000000000000-1-0.json", NOW)
+eq(awaiting.to, SHA, "a request that only recorded a target names it")
+local both = wait.decode(json.encode({ verb = "deploy", expected_sha = SHA,
+  target_commit = "74d48431a1b2c3d4e5f60718293a4b5c6d7e8f90", queued_at = NOW - 10 }),
+  "1700000000000000000-1-0.json", NOW)
+eq(both.to, SHA, "a demanded commit outranks the recorded target")
+says(pause.say(awaiting), SHA:sub(1, 12), "the pause line's (target commit ...) names the commit that is coming")
+says(pause.not_happened_text(awaiting, NOW), SHA:sub(1, 12), "and so does the line for an install that did not happen")
 eq(live.since, NOW - 120, "and when it was asked for")
 eq(live.source, "request", "a file in the box is a request")
 eq(live.bound_seconds, wait.DEFAULT_BOUND, "with the harness bound when none is given")

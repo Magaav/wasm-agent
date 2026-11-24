@@ -1419,6 +1419,11 @@ gate_run bash scripts/test-session-park.sh
 # marker covering only the swap. A real node refuses new turns and holds due wakes while it waits; the real
 # sentinel binary names each holder and, past its bound, proceeds over the sessions that have PAUSED only.
 WA_BIN="$BIN" gate_run bash scripts/test-deploy-wait.sh
+# WHAT A REQUEST RECORDS WHEN A NAMED MAIN IS BEHIND ORIGIN (24/11, G blocker): the real sentinel writes the
+# request in a fixture repository whose `wa.deployRemote` main is seven days behind origin/main, and the
+# node's own Lua reads the box and prints the pause, 'did not happen' and release lines. Every one of them
+# must name the commit a deploy would install, never the bundle's stale main.
+WA_BIN="$BIN" gate_run bash scripts/test-deploy-target.sh
 # A PAUSE'S RELEASE SAYS WHAT HAPPENED, DECIDED BY THE INSTALLED RECORD (r8c 1, mission one-resume-per-install):
 # the pause record names installed.txt's tree and bytes, a scripts-only install makes the release say
 # "[deploy] installed", a marker gone with nothing installed says "[deploy] the update did not happen", the resume

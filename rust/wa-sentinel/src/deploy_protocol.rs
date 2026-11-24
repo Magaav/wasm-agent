@@ -516,6 +516,24 @@ pub(crate) fn target_commit_at(root: &Path) -> Result<String> {
     Ok(commit)
 }
 
+/// Whether `deploy.sh` would accept `sha` as `--expected-sha` right now: rule 2's tail requires it to be
+/// exactly HEAD and exactly origin/main of the tree a deploy would build, and it refuses anything else
+/// (`scripts/deploy.sh`, the `EXPECTED_SHA` block - "expected SHA is not exact origin/main"). A text that
+/// NAMES a `--expected-sha` command asks this first, so the command it offers is never one the installer
+/// must refuse (measured 24/11: the retry hint offered the stale bundle's main).
+pub(crate) fn expected_sha_accepted_at(root: &Path, sha: &str) -> bool {
+    let sha = sha.trim();
+    if sha.len() != 40 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) { return false; }
+    git_answer(root, &["rev-parse", "HEAD"]).as_deref() == Some(sha)
+        && git_answer(root, &["rev-parse", "origin/main"]).as_deref() == Some(sha)
+}
+
+/// `expected_sha_accepted_at` over the tree a deploy would build. A deploy root that cannot be read is a "no":
+/// a hint may say less, but it may not offer a command nobody can show the installer would take.
+pub(crate) fn expected_sha_accepted(sha: &str) -> bool {
+    deploy_root().is_some_and(|root| expected_sha_accepted_at(&root, sha))
+}
+
 /// Select only the configured runtime repository's PRIMARY checkout. No request-supplied path.
 /// Revalidate at dispatch; deploy.sh revalidates the source SHA before building and before swapping.
 fn canonical_root() -> Result<PathBuf> {
