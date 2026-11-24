@@ -125,6 +125,49 @@ function M.prompt(request, marker)
   }, "\n")
 end
 
+-- THE LINE A RELEASED SESSION READS WHEN NO UPDATE HAPPENED (r8c 1, Fable 24/11).
+--
+-- MEASURED (deploy-hold-never-fails-our-load/paused-evidence.log, 24/11): seven sessions sat 20-37 minutes after a
+-- pause whose install never swapped anything (16:48Z and 17:06Z were a TEST LEAK writing the node's real
+-- deploy-pending.json, not an install), and their resume wakes stayed pending until the watchdog. A pause is a
+-- promise to continue; when the thing it waited for DID NOT HAPPEN the continuation must say so in the machine's
+-- own words - a model that reads "the node is installing a new build" and then finds no new build has to invent
+-- what happened, which is exactly the kind of guess this tree refuses to make.
+M.NOT_HAPPENED = "[deploy] the update did not happen"
+
+function M.not_happened_text(marker, now)
+  marker = marker or {}
+  now = tonumber(now) or os.time()
+  local target = tostring(marker.to or marker.commit or "")
+  local since = tonumber(marker.since) or 0
+  local bound = tonumber(marker.bound_seconds) or M.DEFAULT_BOUND
+  local how = since > 0 and string.format(" (the marker asked at %s, bound %ds, %ds past it)",
+    os.date("!%Y-%m-%dT%H:%M:%SZ", since), bound, math.max(0, now - (since + bound))) or ""
+  return table.concat({
+    M.NOT_HAPPENED .. ": nothing was installed" .. (target ~= "" and (" (target commit " .. target:sub(1, 12) .. ")") or "") .. how .. ".",
+    "The pause this turn took was for an install that did not complete, so there is no new build to prove and no",
+    "interrupted work to redo: this is the same request continuing on the same bytes. Verify the machine",
+    "(`wa --version`, `git status`) before you claim anything about what was installed.",
+  }, "\n")
+end
+
+-- The marker on disk AS DATA, expiry ignored: the release line has to describe the install it waited for even when
+-- the reason it is releasing is that the marker went stale (r8c 1). A marker that cannot be read is no marker,
+-- which is the honest answer - the line then says the update did not happen and names no target.
+function M.marker_on_disk(opts)
+  opts = opts or {}
+  local reader = opts.read or (host and host.read_file)
+  local path = opts.path or M.path()
+  if type(reader) ~= "function" or not path then return nil end
+  local ok, body = pcall(reader, path)
+  if not ok or type(body) ~= "string" or body == "" then return nil end
+  local decoded_ok, marker = pcall(json.decode, body)
+  if not decoded_ok or type(marker) ~= "table" then return nil end
+  marker.since = tonumber(marker.since) or 0
+  marker.bound_seconds = tonumber(marker.bound_seconds) or M.DEFAULT_BOUND
+  return marker
+end
+
 function M.say(marker)
   local left = math.max(0, (tonumber(marker.since) or 0) + (tonumber(marker.bound_seconds) or M.DEFAULT_BOUND) - os.time())
   return "deploy pending: the node is installing a new build; paused after this step and scheduled a resume"
@@ -949,8 +992,15 @@ function M.release_due(now, opts)
   for _, row in ipairs(waiting) do
     if type(row) == "table" then M.note("released", tostring(row.session_id or ""), { wake = row.id, at = now }) end
   end
-  local changed = exec([[UPDATE self_wakes SET due_at=?, updated_at=?, last_error='deploy ended: resumed now'
-    WHERE status='pending' AND reason=? AND due_at>?]], { now, now, M.RESUME_REASON, now })
+  -- A RELEASE IS ONE RESUME TURN PER SESSION, AND IT SAYS WHAT THE PAUSE WAITED FOR (r8c 1). The marker this
+  -- node read is passed in (`opts.released_marker`): the tick knows whether it saw an expired marker or none at
+  -- all, and the line it stamps is the machine's own statement - "the update did not happen" - not a silence a
+  -- model would have to fill in. `prompt` is prepended, so the continuation the model was already given stays
+  -- below it, exactly as written when the pause was taken.
+  local text = M.not_happened_text(opts.released_marker or M.marker_on_disk(opts), now)
+  local changed = exec([[UPDATE self_wakes SET due_at=?, updated_at=?, last_error='deploy ended: resumed now',
+    prompt = ? || char(10) || char(10) || prompt
+    WHERE status='pending' AND reason=? AND due_at>?]], { now, now, text, M.RESUME_REASON, now })
   return tonumber(type(changed) == "table" and changed.changes or 0) or 0
 end
 
