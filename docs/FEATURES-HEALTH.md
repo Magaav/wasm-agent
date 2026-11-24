@@ -64,7 +64,11 @@ A canary that cannot run is not a pass: `canary_missing`, `canary_unloadable`, `
 
 ## The release step
 
-`wa release cut` runs `canaries` immediately after `deploy` (the fleet read-back). A failed canary stops the
+`wa release cut` runs `canaries` immediately after `deploy` (the fleet read-back). It runs them on THIS node
+through `lua/core/feature_canary.lua` and asks every deployed node its own question,
+`wa features canary json` (`lua/core/land.lua`, `ask_node`), which must therefore work from an
+INSTALLED build - embedded modules, no checkout, no `--db` - not only from a tree (Fable 24/11,
+change/canary-verb-installed; `scripts/test-features-canary-installed.sh` is the row that keeps it true). A failed canary stops the
 run BY NAME - the feature, the stage, and the evidence file - and the step's `next` line carries the
 rollback command for the commit the release installed, because a release that reverts a node on its own
 word would hide the failure instead of reporting it. A docs-only round skips the step, saying nothing was

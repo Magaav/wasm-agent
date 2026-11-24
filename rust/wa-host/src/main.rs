@@ -59,6 +59,17 @@ fn core_source(name: &str) -> String {
     }
 }
 
+/// Whether `name` is a module of the Lua tree this binary carries: a relative `lua/...*.lua` name, with no
+/// `..` and no absolute prefix. It is the one shape a `WA_SCRIPT` path may have when it is not a file on
+/// this machine (a loopback canary's task, an installed node's own module), and it is what decides whether
+/// the carried tree is asked for the source instead of a panic (Fable 24/11, G).
+fn is_lua_tree_name(name: &str) -> bool {
+    name.starts_with("lua/")
+        && name.ends_with(".lua")
+        && !name.contains("..")
+        && !std::path::Path::new(name).is_absolute()
+}
+
 /// An installed Lua tree: Lua-only deploys install `lua-core/` beside the binary instead of
 /// recompiling it (scripts/deploy.sh fast path). It replaces the compiled-in copy - not dev mode:
 /// no WASM_AGENT_LUA_ROOT semantics, no checkout paths - and only when its manifest verifies:
@@ -347,7 +358,18 @@ fn main() {
     // model, no ledger and no node, and it must be answerable on a node whose core will not start.
     // `HOME` is already resolved above, so `policy_path()` and the component directory are the ones a
     // running node would use.
-    if args.first().is_some_and(|arg| arg == "features") {
+    // A VERB IS NOT THE TABLE (Fable 24/11, G). `wa features canary [name|json]` and every other verb are
+    // the Lua core's (`lua/core/features_cli.lua`), and this fast path swallowed them: on this laptop's
+    // installed build 53bb69b1, `wa features canary self-wake` printed only the table and exited 3, and
+    // `wa features canary json` printed the table too - the exact command the release step asks every node
+    // (`lua/core/land.lua`, ask_node -> "wa features canary json", parsed by canary_answer), so the fleet's
+    // canary collect could never be answered by an installed node.
+    //
+    // So this path answers only the shapes it implements - `features` with no argument, or with `--json` -
+    // and anything else falls through to the interpreter, which is the one place those verbs live. The
+    // fast path keeps its property (it needs no model, no ledger and no node) for the two shapes it keeps.
+    let features_verb = args.iter().skip(1).any(|arg| !arg.starts_with('-'));
+    if !features_verb && args.first().is_some_and(|arg| arg == "features") {
         let policy = wa_features::policy_path();
         let list = wa_features::status_all();
         // The mesh's own switch (docs/MESH.md), beside the table: `mesh_component` says which *code*
@@ -669,7 +691,23 @@ fn main() {
         if lua_root().is_none() {
             eprintln!("lua root unset: using embedded modules; edits under lua/ are NOT under test");
         }
-        let source = std::fs::read_to_string(&script).unwrap_or_else(|e| panic!("read {script}: {e}"));
+        // THE SCRIPT A CHILD IS ASKED TO RUN MAY NOT BE ON THIS FILESYSTEM (Fable 24/11, G). A loopback
+        // canary spawns the node with `WA_SCRIPT=lua/core/canaries/tasks/<name>.lua`, a path inside the lua
+        // tree; on a checkout that is a file, and on an INSTALLED node the very same module lives in this
+        // binary (or in the installed lua tree) and nowhere on disk. MEASURED on the installed build
+        // 53bb69b1, run from a directory that is not a checkout: every loopback canary died with
+        //   "read lua/core/canaries/tasks/self-wake.lua: No such file or directory (os error 2)"
+        // so the canary verb could not answer on a node at all. The file is still preferred when it is
+        // there (that is what a test editing `lua/` runs), and a name that is in neither is an error that
+        // names the path - never a silent substitute.
+        let source = match std::fs::read_to_string(&script) {
+            Ok(source) => source,
+            Err(error) if is_lua_tree_name(&script) => {
+                eprintln!("script {script}: {error}; reading the same module from the lua tree this binary carries");
+                core_source(&script)
+            }
+            Err(error) => panic!("read {script}: {error}"),
+        };
         if let Err(error) = lua.do_string(&source, &script) {
             host::restore_input();
             eprintln!("lua error: {error}");
