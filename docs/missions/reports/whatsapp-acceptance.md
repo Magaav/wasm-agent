@@ -277,7 +277,9 @@ mesh mount, not this pairing).
 - `ec984d89` - the one script (`scripts/whatsapp-acceptance.mjs`), the in-node driver
   (`scripts/lib/whatsapp-acceptance-call.lua`), the guard test (`scripts/test-whatsapp-acceptance.mjs`, 43
   checks) and its fast-path row in `scripts/fast.sh`.
-- the commit that adds this report.
+- `5ee0498d` - this report, the table and the per-cell mapping.
+- `6668a1cc` - the guard test's discrimination measured on a separate worktree of `e832e152` (exit 1, 31 of
+  33 checks failing there).
 
 The commit trailers name the model as `claude`: the session carries no exact model id, and inventing one
 would be a false record.
