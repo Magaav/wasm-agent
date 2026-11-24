@@ -1183,6 +1183,11 @@ check release-channel bash scripts/test-release-channel-e2e.sh
   check run-key-ui node scripts/test-run-key-ui.mjs
   check wave-current-user-record node scripts/test-wave-current-user-record.mjs
   check whatsapp-lifecycle node scripts/test-whatsapp-lifecycle.mjs
+  # The acceptance table's own contracts (scripts/whatsapp-acceptance.mjs): every verb of the one surface is
+  # a row, a live run refuses a missing or malformed own-chat target, the own-chat guard is in the driver
+  # BEFORE the dispatch, and the driver redacts before it prints. No node is started here - the table itself
+  # is a G run (--mode live, the operator's own chat).
+  check whatsapp-acceptance node scripts/test-whatsapp-acceptance.mjs
   check agent-benchmark-forced node scripts/test-agent-benchmark-forced.mjs
   check agent-benchmark-proxy node scripts/test-agent-benchmark-proxy.mjs
   check delivery-intent-race node scripts/test-delivery-intent-race.mjs
