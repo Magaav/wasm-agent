@@ -9,7 +9,7 @@
 # refused, and `2>/dev/null` threw away the one fact that would have said whether it was slow, a 404 or a
 # dropped connection.
 #
-# WHAT THIS ROW MEASURES, all against a LOCAL stub HTTP server (tests/fixtures/http-stub/server.py on
+# WHAT THIS ROW MEASURES, all against a LOCAL stub HTTP server (scripts/lib/http-stub.py on
 # 127.0.0.1, no network, no fleet), through the real functions (wa_node_fetch_asset /
 # wa_node_binary_download from scripts/lib/node-binaries.sh):
 #   a. a 55 MB body served at 300 kB/s - a transfer that takes OVER 120 s - succeeds and verifies;
@@ -83,7 +83,7 @@ export PATH
 STUB_ROOT="$WORK/stub"
 PORT_FILE="$WORK/port"
 mkdir -p "$STUB_ROOT"
-python3 "$ROOT/tests/fixtures/http-stub/server.py" "$STUB_ROOT" "$PORT_FILE" >"$WORK/stub.out" 2>&1 &
+python3 "$ROOT/scripts/lib/http-stub.py" "$STUB_ROOT" "$PORT_FILE" >"$WORK/stub.out" 2>&1 &
 STUB_PID=$!
 for _ in $(seq 1 100); do [ -s "$PORT_FILE" ] && break; sleep 0.1; done
 [ -s "$PORT_FILE" ] || { cat "$WORK/stub.out" >&2; fail "the stub server did not name its port"; }

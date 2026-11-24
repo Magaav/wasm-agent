@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 """A local stub HTTP server for the asset-download rows (scripts/test-node-download.sh).
 
+    python3 scripts/lib/http-stub.py <root-dir> <port-file>
+
+It lives HERE, beside release-fixture-sign.py, and not under tests/: a fixture that a runner can execute is a
+TEST to scripts/test-discriminates.sh (anything under tests/ with a runner extension), and this file has no
+verdict of its own - it would be run against the base with no arguments and reported unclassified, blocking a
+landing over a fact about the harness. It is a fixture: one test starts it and talks to it.
+
 No network: it binds 127.0.0.1:0 and writes the chosen port into a file. It serves whatever files the caller
 put in its root directory, and the BEHAVIOUR OF ONE FILE is chosen by SIDECAR FILES beside it, so one base
 URL serves every row at once and the rows go through the real downloader (there is no mode in the URL):
