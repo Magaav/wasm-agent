@@ -539,9 +539,8 @@ end
 local run_dirs, run_dirs_owed = {}, {}
 
 function M.workdir(session_id)
-  -- The directory this process already decided for the session: no ledger read on the turn's start path (the
-  -- reads are cheap, but the start path should not need them at all once the run has decided).
-  if run_dirs[session_id] then return run_dirs[session_id] end
+  -- The LEDGER is the one answer (a read costs nothing behind a held write lock - measured 0 ms - so there is
+  -- no cache to go stale here; the expensive half was the WRITE, and that is deferred, not cached away).
   local ok, worktree = pcall(memory.session_worktree, session_id)
   if ok and type(worktree) == "string" and worktree ~= "" then return worktree end
   -- THE SAME DIRECTORY THE COMMANDS RUN IN (Fable 24/11, item 3). This is what the system prompt's
