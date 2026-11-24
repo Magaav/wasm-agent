@@ -166,7 +166,10 @@ kill_stubs() {
 trap 'kill_stubs; rm -rf "$W"' EXIT
 
 run_update() { # <args...> -> output in $W/out.txt, exit code in $CODE
-  WASM_AGENT_HOME="$HOMEDIR" WA_INSTALL_DIR="$INST" WASM_AGENT_LUA_ROOT="$ROOT" \
+  # WASM_AGENT_DATA is pinned as well as WASM_AGENT_HOME: `paths.data()` prefers it when a caller's
+  # environment exports it, and a row that inherited it would read and write a REAL store while every
+  # other path in it was a fixture (the class of accident the orchestrator's 24/11 note names).
+  WASM_AGENT_DATA="$SANDBOX" WASM_AGENT_HOME="$HOMEDIR" WA_INSTALL_DIR="$INST" WASM_AGENT_LUA_ROOT="$ROOT" \
     "$BIN" --db "$W/node.db" update "$@" > "$W/out.txt" 2>&1
   CODE=$?
 }
