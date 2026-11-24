@@ -1417,9 +1417,21 @@ end
 -- "cancelled"/"failed"/nil). Resolved lazily: this module is loaded BY lua/core/handle_wake.lua, which loads
 -- selfloop, so a top-level require would be a cycle; a read that cannot reach the store answers nil, which
 -- means "no wake", the same as no wake at all.
+-- dofile RE-EXECUTES the file on every call, and announce() asks this once per settled handle at the end of
+-- every script, so the module is resolved once and kept (re-loading a 1400-line module per handle is a cost
+-- nobody asked for). A module that cannot be loaded is remembered as "not there" and answers nil, which reads
+-- as "no wake" - the same thing no wake at all means.
+local selfloop_module
+local function wake_store()
+  if selfloop_module ~= nil then return selfloop_module or nil end
+  local ok, module = pcall(dofile, "lua/core/selfloop.lua")
+  selfloop_module = (ok and type(module) == "table") and module or false
+  return selfloop_module or nil
+end
+
 function M.handle_wake_state(op)
-  local ok, selfloop = pcall(dofile, "lua/core/selfloop.lua")
-  if not ok or type(selfloop) ~= "table" or type(selfloop.handle_wake_state) ~= "function" then return nil end
+  local selfloop = wake_store()
+  if not selfloop or type(selfloop.handle_wake_state) ~= "function" then return nil end
   local called, status = pcall(selfloop.handle_wake_state, op)
   return called and status or nil
 end
@@ -1427,8 +1439,8 @@ end
 -- Withdraw the pending wake for a handle this script has just announced (never an error for the caller: a
 -- wake that cannot be reached is a wake the runner's own idempotence still protects).
 function M.withdraw_wake(op)
-  local ok, selfloop = pcall(dofile, "lua/core/selfloop.lua")
-  if not ok or type(selfloop) ~= "table" or type(selfloop.withdraw_handle_wake) ~= "function" then return false end
+  local selfloop = wake_store()
+  if not selfloop or type(selfloop.withdraw_handle_wake) ~= "function" then return false end
   local called, done = pcall(selfloop.withdraw_handle_wake, op)
   return called and done == true
 end
