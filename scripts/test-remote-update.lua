@@ -287,6 +287,15 @@ operations[spawned.id].code = 0
 -- The phase the caller polls is the accept record's own (not the deploy's outcome, which section 5 reads
 -- from installed.txt): after the tail has queued the deploy it answers "queued", which is a phase and
 -- not the word "installed".
+-- A CHILD STARTED FOR AN ID THIS NODE CANNOT FIND IS A FAILURE, NOT A QUIET RETURN (review item a):
+-- the deploying call writes its record BEFORE it starts the child, so a missing record means the child
+-- has no work - and an accept left reading "accepted" forever is exactly what that ordering bug did.
+local orphan = remote.run_accepted("orphan-request-id-0001")
+ok(orphan.ok == false and orphan.error == "accept_record_missing",
+  "a child with no record fails by name", orphan and tostring(orphan.error))
+local orphan_phase = remote.accept_phase("orphan-request-id-0001")
+ok(orphan_phase.record == true and orphan_phase.state == "failed",
+  "and the accept it settles says failed", tostring(orphan_phase.state))
 local phase = remote.accept_phase(admitted.record)
 ok(phase.record == true and phase.state == "queued", "the phase is readable by the id the caller holds",
   tostring(phase.record) .. "/" .. tostring(phase.state))

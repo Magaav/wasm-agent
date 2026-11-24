@@ -741,11 +741,27 @@ function M.admit(args, caller)
     -- "accepted" at once. The child is this same product (`wa update --accept <id>`), so there is still
     -- ONE answer to "what a deploy is": M.run_accepted below runs the same update.run() the inline path
     -- runs, and writes the same record fields.
+    if claimed then
+      -- THE RECORD GOES DOWN BEFORE THE CHILD EXISTS (review item a). The child finds its work by
+      -- reading THIS record, so a child started first could read nothing - and M.run_accepted would have
+      -- to answer "nothing to do" while the caller had already been told "accepted", leaving the
+      -- request accepted forever. The record is written here, the child is started below, and the
+      -- operation id is added to the same record afterwards.
+      record.state = 'accepted'
+      record.accept = { at = claimed.accepted_at, detached = false }
+      if not write_record(record) then
+        accept.finish({ root = accept_root, id = record.id, state = 'failed',
+          detail = 'the accept record could not be written, so no child was started' })
+        return { error = 'accept_record_not_written', effect = 'none', capability = M.CAPABILITY, id = record.id,
+          observed = 'the request was claimed and its record could not be written to ' .. accept_root,
+          message = 'nothing was started: a deploy nobody can read back by id is a deploy nobody can check.',
+          next = 'check that ' .. accept_root .. ' is writable by this node, then ask again' }
+      end
+    end
     local spawned = claimed and M.spawn_accepted(record) or nil
     if spawned and spawned.ok == true then
-      record.state = 'accepted'
-      record.accept = { at = claimed.accepted_at, detached = true,
-        operation = tostring(spawned.operation and spawned.operation.id or '') }
+      record.accept.detached = true
+      record.accept.operation = tostring(spawned.operation and spawned.operation.id or '')
       audit('accepted', record, 'detached: operation ' .. tostring(spawned.operation and spawned.operation.id or 'unknown'))
       write_record(record)
       local identity = nodes.identity() or {}
@@ -977,23 +993,16 @@ function M.run_accepted(record_id)
   local root = M.accept_root()
   local record = M.record(id)
   if not record then
-    -- THE TAIL HAS NOT LAID THE DEPLOY DOWN YET, or it never will. That is the ordinary state of a
-    -- request whose caller's deadline expired inside the pre-update backup, and it is NOT "unknown":
-    -- the accept record says whether this node has the request and what it is doing with it.
-    local phase = M.accept_phase(id)
-    if phase.record then
-      if phase.requester_node_id ~= '' and phase.requester_node_id ~= tostring(caller.node_id or '') then
-        return { error = 'not_your_record', id = id, effect = 'none',
-          note = 'a remote update record is readable by the node that asked for it' }
-      end
-      return { ok = true, record = id, state = phase.state, detail = phase.detail,
-        accepted = true, detached = phase.detached == true, operation = phase.operation,
-        commit = phase.commit, requested_at = phase.accepted_at,
-        message = 'accepted on that node: ' .. tostring(phase.state or 'accepted') .. (phase.detail and (' - ' .. tostring(phase.detail)) or ''),
-        next = 'ask again with the same --id: accepted and running are not installed' ..
-          (phase.start_problem and ('; the detached start was refused: ' .. tostring(phase.start_problem.error or 'unknown')) or '') }
-    end
-    return { error = 'unknown_remote_update', id = id, effect = 'none' }
+    -- A CHILD STARTED FOR AN ID THIS NODE CANNOT FIND IS A FAILURE, AND IT SAYS SO (review item a).
+    -- The deploying call writes its record BEFORE it starts this child, so a missing record is not "the
+    -- tail has not run yet" - it is a child whose work does not exist. The accept is settled FAILED here
+    -- so a caller polling it learns that, instead of reading "accepted" forever, and nothing is prepared.
+    -- (This branch used to be pasted from read_status and read a `caller` that does not exist here.)
+    local detail = 'no deploy record names this id on this node, so nothing was prepared'
+    accept.finish({ root = root, id = id, state = 'failed', detail = detail })
+    return { ok = false, error = 'accept_record_missing', id = id, effect = 'none', detail = detail,
+      message = 'the child that prepares this deploy found no record to prepare, so the request failed.',
+      next = "read the accept record and this node's log; nothing was backed up and nothing was queued" }
   end
   accept.finish({ root = root, id = id, state = 'running', detail = 'preparing the deploy on this node (backup, then the sentinel request)' })
   local options = { skip_source_sync = true, expected_commit = tostring(record.target_commit or ''),
