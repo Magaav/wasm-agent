@@ -68,6 +68,12 @@ local SCHEMA = {
     status TEXT NOT NULL DEFAULT 'pending',
     reason TEXT NOT NULL DEFAULT '',
     prompt TEXT NOT NULL DEFAULT '',
+    -- THE RUN THE NODE ADMITTED FOR THIS WAKE (r8a, Fable 24/11). MEASURED live: a resume's completion was admitted
+    -- to a busy lane and its row went `unknown` inside the reconciler while the run was still QUEUED, so the reclaim
+    -- re-armed a duplicate that queued BEHIND on the same lane - never helping, and costing a paid turn later. The
+    -- row now remembers which run it became, so "is this wake still alive?" is answered by the node's own queue rather
+    -- than by a clock.
+    run_id INTEGER,
     due_at REAL,
     every_seconds REAL,
     on_topics TEXT NOT NULL DEFAULT '[]',
@@ -1779,6 +1785,11 @@ function M.dispatch_default(row)
   -- three times, until the operator's watchdog resumed the session by hand. Nothing anywhere named the wake, so the
   -- failure was invisible. This line is the dispatch's own record: which wake, which session, and what the node's
   -- queue answered. A receipt that is `accepted` and never becomes a run is now a line an operator can grep.
+  -- The admitted run goes ON THE ROW (r8a): the durable marker `ensure_resumes` needs, so a queued or running run is
+  -- live and a genuine loss is still repaired.
+  if type(receipt) == "table" and receipt.accepted and tonumber(receipt.run_id) then
+    pcall(exec, [[UPDATE self_wakes SET run_id=? WHERE id=?]], { tonumber(receipt.run_id), tostring(row.id) })
+  end
   if type(host) == "table" and type(host.log) == "function" then
     pcall(host.log, string.format("selfloop: dispatched wake %s of session %s (reason %s): %s",
       tostring(row.id), tostring(row.session_id), tostring(row.reason):sub(1, 40), tostring(json.encode(receipt)):sub(1, 200)))
