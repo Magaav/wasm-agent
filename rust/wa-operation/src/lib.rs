@@ -58,6 +58,54 @@ pub const DENY_ENV_SUFFIXES: &[&str] = &[
     "_SECRET_ACCESS_KEY", "_PRIVATE_KEY",
 ];
 
+/// The `GIT_*` names a tool child may keep: every one of them changes how git behaves, none of them can
+/// choose a repository, an index or a working tree.
+///
+/// MEASURED 24/11 (`docs/missions/reports/session-isolation-git.md`): a commit made by the deploy-hold
+/// worker landed in another live session's worktree - 783ae80c in whatsapp-read's `wt47`, carrying that
+/// worktree's staged `components.lock` and its HEAD, while the command itself said `cd <its own wt> &&
+/// git commit`. An explicit `cd` beats any working directory, so only git's own environment can do that,
+/// and this was the boundary that let it through: the child inherited the node's environment minus
+/// `DENY_ENV`, which names credentials and no git variable at all. Git exports `GIT_DIR` and
+/// `GIT_INDEX_FILE` to every hook it runs, so a node started from under a git hook hands them to every
+/// session it serves - for the life of that node, in every worktree at once.
+///
+/// The rule is the FAMILY, not a list of the names we know: a `GIT_*` name this list does not carry is
+/// withheld, so a name git invents next year cannot re-open it. Withheld today, by shape:
+/// `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_COMMON_DIR`, `GIT_OBJECT_DIRECTORY`,
+/// `GIT_ALTERNATE_OBJECT_DIRECTORIES`, `GIT_NAMESPACE`, `GIT_PREFIX`, `GIT_QUARANTINE_PATH`,
+/// `GIT_CEILING_DIRECTORIES`, `GIT_DISCOVERY_ACROSS_FILESYSTEM`, `GIT_GRAFT_FILE`, `GIT_SHALLOW_FILE`.
+/// A session that needs one of those says so in the command (`git --git-dir=... --work-tree=...`) where
+/// its own transcript shows it, instead of inheriting it from a machine.
+///
+/// What is kept, and why each is not a way to pick a repository: the config SOURCE
+/// (`GIT_CONFIG_GLOBAL`/`_SYSTEM`/`_NOSYSTEM`/`_PARAMETERS`/`_COUNT`/`_KEY_*`/`_VALUE_*`) - measured
+/// 24/11, `core.worktree` in a global config or in `GIT_CONFIG_PARAMETERS` does NOT move
+/// `rev-parse --show-toplevel`, git reads it from the repository's own config; the transport
+/// (`GIT_SSH*`); the prompt (`GIT_TERMINAL_PROMPT`, `GIT_ASKPASS`); the pager/editor and the trace
+/// switches. The identity and date names are NOT kept: a commit's author is the repository's
+/// configured identity (`AGENTS.md`), and a name or date inherited from a hook would stamp a session's
+/// commit with something nobody asked for.
+pub const GIT_ENV_KEEP: &[&str] = &[
+    "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT", "GIT_TERMINAL_PROMPT", "GIT_ASKPASS", "GIT_SSH", "GIT_SSH_COMMAND",
+    "GIT_SSH_VARIANT", "GIT_PAGER", "GIT_EDITOR", "GIT_SEQUENCE_EDITOR", "GIT_MERGE_AUTOEDIT",
+    "GIT_MERGE_VERBOSITY", "GIT_FLUSH", "GIT_ADVICE", "GIT_OPTIONAL_LOCKS", "GIT_TRACE",
+    "GIT_TRACE_PACKET", "GIT_TRACE_PERFORMANCE", "GIT_TRACE_SETUP", "GIT_TRACE_SHALLOW",
+    "GIT_TRACE_CURL", "GIT_TRACE_CURL_NO_DATA", "GIT_TRACE2", "GIT_TRACE2_EVENT",
+    "GIT_TRACE2_PERF", "GIT_TRACE_REDACT",
+];
+
+/// Is this a `GIT_*` name a tool child must not inherit? The keep list is consulted by exact name for the
+/// listed names, and by prefix for the two families git spells per entry (`GIT_CONFIG_KEY_<n>` and
+/// `GIT_CONFIG_VALUE_<n>`, which a config count indexes).
+fn git_env_withheld(name: &str) -> bool {
+    if !name.starts_with("GIT_") {
+        return false;
+    }
+    !GIT_ENV_KEEP.iter().any(|kept| *kept == name)
+}
+
 /// The node's own re-grant: the names its policy lists under "tool_env_allow" in policy.json.
 ///
 /// Process-wide because the policy is: one node, one file, one answer for every child it starts
@@ -80,7 +128,11 @@ pub(crate) fn denied_env(name: &str) -> bool {
     let upper = name.to_ascii_uppercase();
     let named = upper == "API_KEY"
         || DENY_ENV_SUFFIXES.iter().any(|suffix| upper.ends_with(suffix))
-        || DENY_ENV.iter().any(|denied| *denied == upper);
+        || DENY_ENV.iter().any(|denied| *denied == upper)
+        // A git name that could choose the repository, the index or the working tree is withheld by
+        // FAMILY (see `GIT_ENV_KEEP`): that is the class of accident where one session's command
+        // commits in another session's worktree.
+        || git_env_withheld(&upper);
     // A per-node allow-list re-grants the exact names its operator listed, and nothing by shape: an
     // allowed GH_TOKEN does not allow every *_TOKEN name.
     named && !env_allow().iter().any(|allowed| *allowed == upper)
