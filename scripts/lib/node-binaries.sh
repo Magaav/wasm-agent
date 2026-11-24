@@ -411,6 +411,14 @@ wa_node_tag_base() {
 
 # <repo> <limit> -> the newest `node-<sha12>` release tags, one per line, newest first, at most <limit>.
 #
+# THE LIST IS PAGED (24/11). A release list is read for one question - "is any published release built
+# from these compiled inputs" - and the answer for a release older than the first page is still "yes".
+# Measured 24/11: the digest search looked at the newest 14 releases and gave up on a commit whose
+# compiled inputs a release further down would have matched, so every install of that commit built
+# (207.8-369.0 s here, 361.4 s to failure on work). The pages are 100 tags, the walk stops at <limit>,
+# at the end of the pages, or at WA_NODE_RELEASE_LIST_SECONDS (default 25) - a bound that is named in
+# the refusal, because a search that stopped early must not read as "nothing is published".
+#
 # WHERE THE LIST COMES FROM, in this order, so a test never touches the network and a node with no token
 # still gets an answer:
 #   1. WA_NODE_BINARIES_URL=<dir> with a `releases.txt` in it (one tag per line, newest first) - the stub a
@@ -422,6 +430,7 @@ wa_node_tag_base() {
 # Anything that is not `node-<twelve hex>` is not this channel's release and is dropped here, once.
 wa_node_release_list() {
   local repo="$1" limit="${2:-20}" base="${WA_NODE_BINARIES_URL:-}" dir tags
+  local budget="${WA_NODE_RELEASE_LIST_SECONDS:-25}" started page=1 batch seen=0
   [ -d "$repo" ] && repo="$(wa_node_release_repo "$repo")"
   case "$base" in file://*) base="${base#file://}" ;; esac
   if [ -n "$base" ] && [ -d "$base" ]; then
@@ -436,9 +445,21 @@ wa_node_release_list() {
     return 0
   fi
   if command -v gh >/dev/null 2>&1; then
-    tags="$(gh api "repos/$repo/releases?per_page=$limit" --jq '.[].tag_name' 2>/dev/null \
-      | grep -E '^node-[0-9a-f]{12}$' | head -n "$limit")"
-    if [ -n "$tags" ]; then printf '%s\n' "$tags"; return 0; fi
+    # THE LIMIT IS THE CALLER'S, NOT THE PAGE'S (24/11, Fable's review). A page carries 100 tags and
+    # this loop kept whole pages, so `wa_node_release_list <repo> 20` answered with up to 100 - a bound
+    # that lied about itself. The walk is collected and cut to <limit> before it is printed.
+    tags="$(
+      started=$SECONDS; page=1; seen=0
+      while [ "$seen" -lt "$limit" ] && [ $((SECONDS - started)) -lt "$budget" ] && [ "$page" -le 50 ]; do
+        batch="$(timeout "$budget" gh api "repos/$repo/releases?per_page=100&page=$page" --jq '.[].tag_name' 2>/dev/null \
+          | grep -E '^node-[0-9a-f]{12}$' || true)"
+        [ -n "$batch" ] || break
+        printf '%s\n' "$batch"
+        seen=$((seen + $(printf '%s\n' "$batch" | grep -c .)))
+        page=$((page + 1))
+      done
+    )"
+    if [ -n "$tags" ]; then printf '%s\n' "$tags" | head -n "$limit"; return 0; fi
   fi
   command -v curl >/dev/null 2>&1 || return 0
   curl -fsSL -m 60 "https://api.github.com/repos/$repo/releases?per_page=$limit" 2>/dev/null \
@@ -763,13 +784,25 @@ wa_node_cached_digest_entries() {
 wa_node_release_digest_search() {
   local repo="$1" commit="$2" triple="$3" cache_root="$4"
   local want tag short tmp entry source digest pin out rc seen file published
+  local started stopped=""
+  started=$SECONDS
   want="$(wa_compiled_inputs_digest "$repo" "$commit" 2>/dev/null)" || {
     printf 'node_compiled_inputs_unavailable: %s has no readable compiled-input digest, so no published release can be matched to it\n' "${commit:-?}" >&2
     return 8
   }
   [ -n "$want" ] || { printf 'node_compiled_inputs_unavailable: no sha256 tool for the compiled-input digest\n' >&2; return 8; }
   seen=0
-  for tag in $(wa_node_release_list "$repo" "${WA_NODE_RELEASE_SEARCH:-20}"); do
+  for tag in $(wa_node_release_list "$repo" "${WA_NODE_RELEASE_SEARCH:-200}"); do
+    # THE SCAN IS BOUNDED IN SECONDS, not only in tags (24/11). Reading one manifest costs one network
+    # round trip (measured: 96 releases in 112.2 s, about 1.1 s each), so an unbounded walk of every
+    # release would put two minutes in front of a deploy's build decision. The default is 20 s, and a
+    # walk that stops at the bound SAYS SO - a search that stopped early must never read as "nothing is
+    # published". The cheap fix for the long tail is one cumulative digest index published with each
+    # release, so the whole answer is one fetch (named in the report, not done here).
+    if [ $((SECONDS - started)) -ge "${WA_NODE_RELEASE_DIGEST_SECONDS:-20}" ]; then
+      stopped="stopped at the ${WA_NODE_RELEASE_DIGEST_SECONDS:-20}s bound"
+      break
+    fi
     seen=$((seen + 1))
     short="${tag#node-}"
     entry="$cache_root/$short/$triple"
@@ -860,8 +893,8 @@ wa_node_release_digest_search() {
     printf '%s\nrelease_tag=%s\nrelease_commit=%s\n' "$entry" "node-$short" "$source"
     return 0
   done
-  printf 'node_release_unavailable: none of the newest %s published releases was built from the compiled inputs of %s (compiled_inputs=%s) for %s\n' \
-    "$seen" "${commit:0:12}" "$want" "$triple" >&2
+  printf 'node_release_unavailable: none of the newest %s published releases scanned was built from the compiled inputs of %s (compiled_inputs=%s) for %s (paged list, %s; WA_NODE_RELEASE_SEARCH=%s, WA_NODE_RELEASE_DIGEST_SECONDS=%s)\n' \
+    "$seen" "${commit:0:12}" "$want" "$triple" "${stopped:-the whole list}" "${WA_NODE_RELEASE_SEARCH:-200}" "${WA_NODE_RELEASE_DIGEST_SECONDS:-20}" >&2
   return 8
 }
 

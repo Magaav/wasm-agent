@@ -1013,6 +1013,13 @@ else
   # installed path, while a rename is all-or-nothing.
   phase upgrading installing
   { cp -f "$NEW" "$INSTALLED.new" && mv -f "$INSTALLED.new" "$INSTALLED"; } || { rm -f "$INSTALLED.new"; SWAP_OK=0; }
+  # THE MODE IS SET, NOT INHERITED (24/11, Fable): the copy to `.new` takes the source's mode and the
+  # rename keeps it, so an asset that arrived 0644 (a release built or uploaded by a different path) would
+  # install a node that cannot be executed - and the swap below would report success. One chmod makes the
+  # result the same whatever the source carried.
+  if [ "${SWAP_OK:-1}" != 0 ] && command -v chmod >/dev/null 2>&1; then
+    chmod 0755 "$INSTALLED" 2>/dev/null || true
+  fi
   say "installed $(basename "$NEW") over $INSTALLED"
 fi
 UI_OK=$SWAP_OK

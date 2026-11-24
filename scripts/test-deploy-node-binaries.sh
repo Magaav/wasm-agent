@@ -631,6 +631,88 @@ ok
 # /c mount reports every file executable, so a probe decides rather than the test's own assumption.
 exec_probe="$WORK/exec-probe"; printf '#!/bin/sh\n' > "$exec_probe"; chmod 644 "$exec_probe" 2>/dev/null
 if [ ! -x "$exec_probe" ]; then
+# 9. THE DIGEST SEARCH IS NOT CAPPED AT THE FIRST PAGE (24/11). A release published 25 places down is
+#    still the right answer for a commit whose compiled inputs it carries; the search used to look at the
+#    newest 20 and build instead. Measured on the real channel: listing every tag costs 3.4 s, and reading
+#    every manifest costs about 1.1 s each, which is why the walk has a seconds bound as well as a count.
+stub_wide="$WORK/digest-wide"; mkdir -p "$stub_wide"
+: > "$stub_wide/releases.txt"
+for n in $(seq 1 24); do
+  filler="$(printf 'aaa%037d' "$n")"
+  mk_release "$stub_wide" "$filler" "$(wa_compiled_inputs_digest "$digrepo" "$C_RUST")"
+  printf 'node-%s\n' "${filler:0:12}" >> "$stub_wide/releases.txt"
+done
+mk_release "$stub_wide" "$C_DOCS2" "$DIG_BASE"
+printf 'node-%s\n' "${C_DOCS2:0:12}" >> "$stub_wide/releases.txt"
+i="$(fresh digest-wide)"
+out="$(WA_NODE_BINARIES_URL="$stub_wide" wa_node_binary_source_resolve "$digrepo" "$C_DOCS" "$X64" "$i" 2>&1)"
+expect_status 0 "$?" "a digest match 25 releases down the list"
+contains "$out" "release_tag=node-${C_DOCS2:0:12}" "the release past the old window is the one used"
+
+# 10. A WALK THAT STOPS EARLY SAYS SO. With no time to look, the refusal names the bound instead of
+#     claiming the channel has nothing - the difference between "not published" and "not looked at".
+stub_bound="$WORK/digest-bound"; mkdir -p "$stub_bound"
+mk_release "$stub_bound" "$C_RUST" "$(wa_compiled_inputs_digest "$digrepo" "$C_RUST")"
+printf 'node-%s\n' "${C_RUST:0:12}" > "$stub_bound/releases.txt"
+i="$(fresh digest-bound)"
+out="$(WA_NODE_RELEASE_DIGEST_SECONDS=0 WA_NODE_BINARIES_URL="$stub_bound" wa_node_binary_source_resolve "$digrepo" "$C_DOCS" "$X64" "$i" 2>&1)"
+expect_status 8 "$?" "a digest walk with no time to look"
+contains "$out" "stopped at the 0s bound" "the refusal says the walk stopped at its bound"
+contains "$out" "none of the newest 0 published releases" "and how far it got, without claiming the channel is empty"
+
+
+# 11. THE DOWNLOAD PATH REFUSES A TAMPERED RELEASE BEFORE ANYTHING IS WRITTEN (24/11). The rows above
+#     prove the second gate (wa_node_verify_dir / --from) on a manifest that disagrees; these run the whole
+#     download - manifest, signed sums, payload - and check the two facts that matter: the refusal is
+#     NAMED, and no cache entry is left behind that a later deploy would read as a hit.
+#     Measured on the real published bytes (node-5bb28d8a1f51) the same way: a changed byte is rc 5
+#     node_hash_mismatch, a missing SHA256SUMS.sig is rc 2 release_unsigned, a manifest naming another
+#     commit is rc 2 node_manifest_commit_mismatch, and none of them left a .complete marker.
+flat_stub() { # <dir> <commit> <digest> -> a flat release stub (the shape a bare release download has)
+  local dir="$1" short tagged
+  short="$(wa_node_short_sha "$2")"
+  mk_release "$dir" "$2" "$3"
+  tagged="$dir/node-$short"
+  cp -f "$tagged/"* "$dir"/
+  # The tag subdirectory is REMOVED: wa_node_tag_base would otherwise read the sums and their signature
+  # from it, so a row that deletes the root's signature would still find one and pass. A flat release has
+  # exactly one copy of every asset, which is also the shape a real release download leaves on disk.
+  rm -rf "$tagged"
+}
+prebuilt_absent() { # <cache> <commit> <triple> <what>
+  local cache="$1" short
+  short="$(wa_node_short_sha "$2")"
+  [ ! -f "$cache/$short/$3/.complete" ] || fail "$4: a refused download left a COMPLETE cache entry, which the next deploy reads as a verified release"
+  ok
+}
+tamper_stub="$WORK/tamper"; rm -rf "$tamper_stub"; mkdir -p "$tamper_stub"
+flat_stub "$tamper_stub" "$C_BASE" "$DIG_BASE"
+tamper_short="$(wa_node_short_sha "$C_BASE")"
+# (a) unsigned: the sums are there, the signature is not.
+unsigned_stub="$WORK/tamper-unsigned"; rm -rf "$unsigned_stub"; cp -a "$tamper_stub" "$unsigned_stub"
+rm -f "$unsigned_stub/SHA256SUMS.sig"
+tcache="$WORK/tamper-cache-unsigned"
+out="$(WA_NODE_BINARIES_URL="$unsigned_stub" wa_node_binary_download "$digrepo" "$C_BASE" "$X64" "$tcache" 2>&1)"
+expect_status 2 "$?" "a release whose sums are not signed"
+contains "$out" "release_unsigned:" "the unsigned refusal is named"
+prebuilt_absent "$tcache" "$C_BASE" "$X64" "the unsigned release"
+# (b) a single changed byte in the payload, with the signed sums untouched.
+bitten_stub="$WORK/tamper-bitten"; rm -rf "$bitten_stub"; cp -a "$tamper_stub" "$bitten_stub"
+printf 'X' | dd of="$bitten_stub/wa-$X64-$tamper_short" bs=1 seek=64 conv=notrunc status=none 2>/dev/null   || fail "could not change one byte of the fixture payload"
+bcache="$WORK/tamper-cache-bitten"
+out="$(WA_NODE_BINARIES_URL="$bitten_stub" wa_node_binary_download "$digrepo" "$C_BASE" "$X64" "$bcache" 2>&1)"
+expect_status 5 "$?" "a payload with one changed byte"
+contains "$out" "node_hash_mismatch:" "the hash refusal is named"
+prebuilt_absent "$bcache" "$C_BASE" "$X64" "the tampered payload"
+# (c) the manifest names another commit than the one asked for: the release is intact and signed, and
+#     it is still not this commit's build.
+foreign_stub="$WORK/tamper-foreign"; rm -rf "$foreign_stub"; cp -a "$tamper_stub" "$foreign_stub"
+sed -i.bak "s/^source_commit=.*/source_commit=$C_RUST/" "$foreign_stub/node-$tamper_short.manifest" 2>/dev/null   || sed -i '' "s/^source_commit=.*/source_commit=$C_RUST/" "$foreign_stub/node-$tamper_short.manifest"
+out="$(wa_node_verify_dir "$foreign_stub" "$C_BASE" "$X64" 2>&1)"
+expect_status 2 "$?" "a manifest that names another commit"
+contains "$out" "node_manifest_commit_mismatch:" "the commit refusal is named"
+
+
   [ -x "$si_install/wa-sentinel" ] || fail "the installed prebuilt supervisor is not executable"
   ok
 else

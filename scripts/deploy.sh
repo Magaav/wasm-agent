@@ -1832,6 +1832,15 @@ else
   echo "deploy: sentinel $SENTINEL_NAME installed"
   SENTINEL_HASH="$(sha256sum < "$INSTALL_DIR/$SENTINEL_NAME" 2>/dev/null | awk '{print $1}')"
 fi
+# THE MODE IS SET, NOT INHERITED (24/11, Fable). `cp -f` over an existing file keeps the DESTINATION's
+# mode and a fresh copy takes the source's, so what ends up installed depended on what happened to be at
+# the destination - a supervisor left 0644 by an older path would be "installed" un-runnable, and the only
+# thing that noticed was a test that happened to build its fixture at 0644. Every install is executable
+# now, whatever was there before or arrives in the asset. `chmod` is a no-op on the Windows shell this
+# block also runs in, hence the guard.
+if [ -f "$INSTALL_DIR/$SENTINEL_NAME" ] && command -v chmod >/dev/null 2>&1; then
+  chmod 0755 "$INSTALL_DIR/$SENTINEL_NAME" 2>/dev/null || true
+fi
 # wa-deploy-sentinel-install: end
 
 # The install's facts are true HERE - the node's bytes, the sentinel's bytes, the shipped upgrade.sh - so the

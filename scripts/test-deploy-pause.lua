@@ -534,3 +534,43 @@ local other_problem = pause.claim_wait({ ok = false, error = "resource_store_fai
 ok(other_problem == nil, "another claim failure is not a deploy wait", tostring(other_problem))
 ok(pause.claim_wait({ ok = true }, now, { read = marker_read }) == nil, "a claim that was granted is not a wait")
 print('deploy claim wait ok (' .. checks .. ' checks)')
+
+-- 4. THE PAUSE LOG (24/11). A per-session record answers "is this holder paused", which is the sentinel's
+--    question; counting how many sessions an install paused, and how long each waited, needs the two
+--    moments written down. Both writers are injected here: this test must not touch the node's own data
+--    directory, and a log that cannot be written must never cost a pause or a resume.
+local appended = {}
+local function sink(path, text)
+  appended[#appended + 1] = { path = path, text = text }
+  return true
+end
+local log_path = "/tmp/scratch-home/deploy-paused/pauses.jsonl"
+local wrote = pause.note("paused", "sess-log-1", { source = "install", request = "req-1", to = "abc123" },
+  { path = log_path, append = sink })
+ok(wrote == log_path, "a pause is noted to the log the caller named", tostring(wrote))
+ok(#appended == 1 and appended[1].path == log_path, "exactly one row was appended", tostring(#appended))
+local row = json.decode(appended[1].text)
+ok(row.event == "paused" and row.session == "sess-log-1" and row.source == "install" and row.request == "req-1",
+  "the row names the event, the session and the request", appended[1].text)
+ok(type(row.at) == "number" and row.at > 0, "and when it happened", tostring(row.at))
+ok(appended[1].text:sub(-1) == "\n", "one JSON object per line, newline-terminated", appended[1].text)
+ok(pause.note("paused", "", {}, { path = log_path, append = sink }) == nil,
+  "no session, no row: a log line without a session cannot be counted")
+ok(pause.note("paused", "sess-log-2", {}, { path = log_path, append = function() return false end }) == nil,
+  "a writer that refuses is not a pause failure, it is no row")
+-- The pause itself still happens when the log cannot be written: the record is the pause, the log is the count.
+local records = {}
+local rec = pause.record_pause({ to = "abc123", source = "install", id = "req-1" }, now, "sess-log-3", "master",
+  { dir = "/tmp/scratch-home/deploy-paused", write = function(path, text) records[#records + 1] = text; return true end,
+    path = log_path, append = function() return false end })
+ok(rec == "/tmp/scratch-home/deploy-paused/sess-log-3.json", "the per-session record is written where the pause lives", tostring(rec))
+ok(#records == 1 and #appended == 1, "and a refused log line added nothing", tostring(#appended))
+ok(pause.record_pause({ to = "abc123" }, now, "sess-log-4", "master",
+  { dir = "/tmp/scratch-home/deploy-paused",
+    write = function(path, text) records[#records + 1] = text; return true end,
+    path = log_path, append = sink }) == "/tmp/scratch-home/deploy-paused/sess-log-4.json",
+  "a log that accepts gets its row")
+local rel = json.decode(appended[#appended].text)
+ok(rel.event == "paused" and rel.session == "sess-log-4", "the second pause row is the second session",
+  appended[#appended].text)
+print('deploy pause log ok (' .. checks .. ' checks)')
