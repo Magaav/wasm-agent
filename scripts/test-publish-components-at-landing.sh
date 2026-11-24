@@ -99,6 +99,8 @@ for _ in $(seq 1 50); do
   sleep 0.1
 done
 export WA_RELEASE_API_BASE="http://127.0.0.1:$PORT/api"
+WA_RELEASE_DOWNLOAD_BASE_LOCAL="http://127.0.0.1:$PORT"
+export WA_RELEASE_DOWNLOAD_BASE_LOCAL
 
 # ---- 1. OFF by default: nothing is uploaded, and the log says what this landing is ------------------
 unset WA_PUBLISH_COMPONENTS WA_COMPONENTS_BUNDLE
@@ -126,20 +128,49 @@ ok "$(printf '%s' "$create" | grep -q -- '--latest=false' && echo 1)" "never as 
 ok "$(printf '%s' "$create" | grep -q 'svc-alpha.wasm' && printf '%s' "$create" | grep -q 'svc-alpha.json' && printf '%s' "$create" | grep -q 'components.lock' && echo 1)" "with every pinned asset and the lock itself" "$create"
 ok "$([ -f "$OUT/components-release/svc-alpha.wasm" ] && [ -f "$OUT/components-release/components.lock" ] && echo 1)" "from a bundle directory the real publisher verified against the lock"
 
-# ---- 4. the tag exists: upload over it, never recreate ------------------------------------------------
+# ---- 4. an existing tag is COMPLETED, never replaced (Fable, 24/11; Victor: nothing overwritten) ---------
+# The release exists and already holds most of the set; one asset is missing. The step must ask every asset
+# for its status and upload ONLY the missing one, never --clobber.
 cat > "$W/bin/gh" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$GH_LOG"
 exit 0
 SH
 chmod +x "$W/bin/gh"
+DIST="$W/srv/Magaav/wasm-agent/releases/download/$LOCK_TAG"
+API_TAG="$W/srv/api/repos/Magaav/wasm-agent/releases/tags/$LOCK_TAG"
+# THE ASSET STATUSES ARE ASKED OF THE DOWNLOAD URLS, so the stand-in must serve them: without this the
+# step would ask github.com about a fixture tag, get 404 for every asset, and upload all of them (measured
+# here before the export: "holds 0 of 3").
+export WA_RELEASE_DOWNLOAD_BASE="$WA_RELEASE_DOWNLOAD_BASE_LOCAL"
+make_tag() { mkdir -p "$DIST" "$(dirname "$API_TAG")"; touch "$API_TAG"; for name in svc-alpha; do
+  printf 'x' > "$DIST/$name.wasm"; printf 'x' > "$DIST/$name.json"; done; printf 'x' > "$DIST/components.lock"; }
+make_tag; rm -f "$DIST/svc-alpha.json"   # exactly one asset missing
 : > "$GH_LOG"
-WA_PUBLISH_COMPONENTS=1 WA_COMPONENTS_BUNDLE="$BUNDLE" components_step >/dev/null 2>&1; rc=$?
-ok "$([ "$rc" = 0 ] && echo 1)" "an existing tag is re-published" "rc=$rc"
-ok "$(grep -q '^release upload ' "$GH_LOG" && echo 1)" "by uploading over it" "$(head -3 "$GH_LOG")"
+out="$(WA_PUBLISH_COMPONENTS=1 WA_COMPONENTS_BUNDLE="$BUNDLE" components_step 2>&1)"; rc=$?
+ok "$([ "$rc" = 0 ] && echo 1)" "an existing tag with a missing asset is completed" "rc=$rc $out"
+ok "$(grep -q '^release upload ' "$GH_LOG" && echo 1)" "by an upload" "$(head -3 "$GH_LOG")"
 ok "$(! grep -q '^release create ' "$GH_LOG" && echo 1)" "and never by creating it again" "$(head -3 "$GH_LOG")"
-ok "$(grep -q -- '--clobber' "$GH_LOG" && echo 1)" "with --clobber, the same idempotence the node release has" "$(head -3 "$GH_LOG")"
+ok "$(! grep -q -- '--clobber' "$GH_LOG" && echo 1)" "WITHOUT --clobber: a published asset is never replaced" "$(head -3 "$GH_LOG")"
+ok "$(grep '^release upload ' "$GH_LOG" | grep -q 'svc-alpha.json' && echo 1)" "and the upload names the missing asset" "$(grep '^release upload ' "$GH_LOG")"
+ok "$(! grep '^release upload ' "$GH_LOG" | grep -q 'svc-alpha.wasm' && echo 1)" "while the assets already there are not uploaded again" "$(grep '^release upload ' "$GH_LOG")"
+ok "$(printf '%s' "$out" | grep -q 'uploading only the missing: *svc-alpha.json' && echo 1)" "and says how many it found and which it added" "$out"
 
+# ...and a tag that already holds EVERYTHING is left alone.
+make_tag
+: > "$GH_LOG"
+out="$(WA_PUBLISH_COMPONENTS=1 WA_COMPONENTS_BUNDLE="$BUNDLE" components_step 2>&1)"; rc=$?
+ok "$([ "$rc" = 0 ] && echo 1)" "a complete tag answers 0" "rc=$rc $out"
+ok "$(! grep -q '^release upload \|^release create ' "$GH_LOG" && echo 1)" "and uploads or creates nothing at all" "$(cat "$GH_LOG")"
+ok "$(printf '%s' "$out" | grep -q 'already holds every asset' && echo 1)" "and says every asset is already there and nothing was replaced" "$out"
+
+# ...and a status that cannot be read is a REFUSAL, never an upload over an asset nobody can see.
+: > "$GH_LOG"
+out="$(WA_PUBLISH_COMPONENTS=1 WA_COMPONENTS_BUNDLE="$BUNDLE" WA_RELEASE_DOWNLOAD_BASE="http://127.0.0.1:1" components_step 2>&1)"; rc=$?
+ok "$([ "$rc" != 0 ] && echo 1)" "an asset whose status cannot be read refuses the publish" "rc=$rc $out"
+ok "$(printf '%s' "$out" | grep -q 'components_publish_unanswerable' && echo 1)" "by name: components_publish_unanswerable" "$(printf '%s' "$out" | tail -2)"
+ok "$(! grep -q '^release upload \|^release create ' "$GH_LOG" && echo 1)" "and nothing was uploaded" "$(cat "$GH_LOG")"
+unset WA_RELEASE_DOWNLOAD_BASE
 # ---- 5. a bundle that is not the pins is refused, and nothing is uploaded ------------------------------
 printf 'tampered\n' > "$BUNDLE/svc-alpha.wasm"
 : > "$GH_LOG"
