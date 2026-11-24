@@ -536,7 +536,45 @@ end
 function M.workdir(session_id)
   local ok, worktree = pcall(memory.session_worktree, session_id)
   if ok and type(worktree) == "string" and worktree ~= "" then return worktree end
+  -- THE SAME DIRECTORY THE COMMANDS RUN IN (Fable 24/11, item 3). This is what the system prompt's
+  -- <workdir> block and the project-instructions lookup name (agent.lua:1389-1390 -> 877), and it used
+  -- to be the SERVING PROCESS's directory - so a node-served turn told the model one tree while its
+  -- commands ran in another. Same precedence as the tool layer (lua/core/tools.lua, session_dir):
+  -- worktree, else the directory recorded on the session, else the node's own.
+  if type(memory.session_cwd) == "function" then
+    local recorded_ok, recorded = pcall(memory.session_cwd, session_id)
+    if recorded_ok and type(recorded) == "string" and recorded ~= "" then return recorded end
+  end
   return dofile("lua/core/platform.lua").cwd()
+end
+
+-- The directory a run would START in, before anything is recorded: the bound worktree, else this
+-- PROCESS's directory - which for an attended run is the person's terminal, and that is exactly what
+-- makes an attended run's record meaningful (M.record_run_directory).
+local function process_directory(session_id)
+  local ok, worktree = pcall(memory.session_worktree, session_id)
+  if ok and type(worktree) == "string" and worktree ~= "" then return worktree end
+  return dofile("lua/core/platform.lua").cwd()
+end
+
+-- Record the session's directory for this run (Fable 24/11, items 1-2).
+--
+-- ATTENDED RUNS RE-RECORD: the person's terminal directory is what they mean, so `wa chat` resumed from
+-- another directory runs there. NODE-SERVED turns NEVER overwrite: a wake, a resume after a deploy pause,
+-- a job or a peer's call has no person in it, and its own process directory is incidental - it uses the
+-- last recorded directory.
+--
+-- WHO IS ATTENDED is the NATIVE origin of this run, never a body field or a model argument
+-- (rust/wa-capabilities/src/serve.rs:397-408 default "cli"; :2874 "completion" for the same local path;
+-- :2931 "interactive"/"control"/"background" when the NODE serves the run; :2997 "remote" for a peer's
+-- call; :406 "job" for a job). So attended = "cli" or "completion" - the terminal's own process.
+-- Answers the directory the session now records.
+function M.record_run_directory(session_id, origin)
+  if type(session_id) ~= "string" or session_id == "" then return "" end
+  if type(memory.session_cwd) ~= "function" or type(memory.set_session_cwd) ~= "function" then return "" end
+  local attended = origin == "cli" or origin == "completion"
+  if not attended and memory.session_cwd(session_id) ~= "" then return memory.session_cwd(session_id) end
+  return memory.set_session_cwd(session_id, process_directory(session_id))
 end
 
 local function parent_dir(dir)
@@ -1988,11 +2026,8 @@ function M:run(text, images)
   -- not overwrite it: the user's shell was where the session began. Inside a pcall because a ledger that
   -- refuses must not stop the turn - the record is a fact about where work starts, not a precondition.
   pcall(function()
-    local memory = dofile('lua/core/memory.lua')
-    local id = self.session_id
-    if type(id) ~= 'string' or id == '' then return end
-    if type(memory.session_cwd) ~= 'function' or type(memory.set_session_cwd) ~= 'function' then return end
-    if memory.session_cwd(id) == '' then memory.set_session_cwd(id, M.workdir(id)) end
+    local origin = (json.decode(host.runtime_info()) or {}).run_origin
+    M.record_run_directory(self.session_id, origin)
   end)
   -- NO NEW TURN WHILE A DEPLOY WAITS OR INSTALLS (22/11).
   --

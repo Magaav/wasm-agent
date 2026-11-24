@@ -29,6 +29,7 @@ local home = tostring(host.getenv and host.getenv('HOME') or '')
 assert(not home:match('/%.wasm%-agent$') or data:find('scratch', 1, true) or data:find('/tmp/', 1, true)
   or data:find('wa%-test'), 'this row starts real operations; it refused to run in ' .. data)
 local memory = dofile('lua/core/memory.lua'); memory.setup()
+local agent = dofile('lua/core/agent.lua')
 local tools = dofile('lua/core/tools.lua')
 local platform = dofile('lua/core/platform.lua')
 local checks = 0
@@ -70,6 +71,31 @@ check(norm(settled.effective_cwd) ~= norm(platform.cwd()),
 local written = host.read_file and host.read_file(run_dir .. '/where.txt') or nil
 check(type(written) == 'string' and norm(written) == norm(run_dir), 'and the shell really wrote there: ' .. tostring(written))
 
+-- 1b + 1c. ATTENDED RE-RECORDS, NODE-SERVED NEVER DOES (Fable 24/11).
+-- The session started in run_dir; the person resumes it from a CLI whose directory is another one - the
+-- directory they mean. A node-served turn (a wake, a resume after a deploy pause, a peer's call) has no
+-- person in it, so it must NOT overwrite the record with its own process directory.
+check(memory.session_cwd(plain) == run_dir, 'the session records where it started: ' .. tostring(memory.session_cwd(plain)))
+-- An attended run records THIS PROCESS's directory (the person's terminal), never the old value: the row's
+-- own process is at platform.cwd(), so that is what it must record.
+local resumed = agent.record_run_directory(plain, 'cli')
+check(norm(resumed) == norm(platform.cwd()), 'an attended run re-records the terminal it is served from: ' .. tostring(resumed))
+check(norm(resumed) ~= norm(run_dir), 'and not the directory the session started in: ' .. tostring(resumed))
+-- Now the person resumes from B: the session records B, and the work follows the person.
+memory.set_session_cwd(plain, asked_dir)
+local from_b = dispatch('operation', { action = 'start', command = 'pwd > where.txt', cwd = '' }, ctx1)
+from_b = record(dispatch('operation', { action = 'await', id = from_b.operation_id, wait_ms = 20000 }, ctx1), ctx1)
+check(norm(from_b.effective_cwd) == norm(asked_dir), 'and the work runs there: ' .. tostring(from_b.effective_cwd))
+check(from_b.cwd_source == 'session_run', 'still reported as the session\'s directory: ' .. tostring(from_b.cwd_source))
+for _, served in ipairs({ 'interactive', 'background', 'remote', 'job' }) do
+  local kept = agent.record_run_directory(plain, served)
+  check(norm(kept) == norm(asked_dir), 'a node-served turn (' .. served .. ') does not overwrite it: ' .. tostring(kept))
+end
+local after_wake = dispatch('operation', { action = 'start', command = 'pwd > where.txt', cwd = '' }, ctx1)
+after_wake = record(dispatch('operation', { action = 'await', id = after_wake.operation_id, wait_ms = 20000 }, ctx1), ctx1)
+check(norm(after_wake.effective_cwd) == norm(asked_dir), 'so work after a node-served turn still runs where the person was: ' .. tostring(after_wake.effective_cwd))
+memory.set_session_cwd(plain, run_dir)
+
 -- 4. RESUMED: the same record through `status`, after the settle.
 local again = dispatch('operation', { action = 'status', id = started.operation_id }, ctx1)
 check(norm(again.effective_cwd) == norm(run_dir), 'a resumed handle reports the directory it started in: ' .. tostring(again.effective_cwd))
@@ -104,5 +130,18 @@ check(type(refused_op) == 'table' and refused_op.error == 'session_cwd_gone',
   'a gone session directory refuses operation start too: ' .. tostring(type(refused_op) == 'table' and refused_op.error))
 check(host.read_file(base .. '/gone.txt') == nil or (host.read_file(base .. '/gone.txt') or '') == '',
   'and no shell ran: nothing was written')
+
+-- 7. THE MODEL'S CONTEXT NAMES THE SAME DIRECTORY THE COMMANDS RUN IN (Fable 24/11, item 3). The system
+-- prompt's <workdir> block and the project-instructions lookup both read agent.M.workdir(session)
+-- (lua/core/agent.lua:1389-1390 -> 877); the commands read the tool layer's session directory. They agree, or
+-- the model is told one tree while its work happens in another.
+local prompt_dir = agent.workdir(plain)
+check(norm(prompt_dir) == norm(run_dir), 'the prompt\'s workdir is the directory the commands run in: ' .. tostring(prompt_dir))
+local prompt_bound = agent.workdir(bound)
+check(norm(prompt_bound) == norm(tree_dir), 'and a bound worktree is what both answer: ' .. tostring(prompt_bound))
+local gate_row = dofile('lua/core/done_gate.lua')
+if type(gate_row.session_cwd) == 'function' then
+  check(norm(gate_row.session_cwd(plain)) == norm(run_dir), 'the done-gate check runs in the same tree: ' .. tostring(gate_row.session_cwd(plain)))
+end
 
 print('operation cwd ok (' .. checks .. ' checks)')

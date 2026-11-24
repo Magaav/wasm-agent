@@ -132,6 +132,13 @@ end
 function M.session_cwd(session_id)
   local ok, worktree = pcall(function() return dep("memory").session_worktree(session_id) end)
   if ok and type(worktree) == "string" and worktree ~= "" then return worktree end
+  -- THE SAME RULE THE AGENT USES (24/11): the directory recorded on the session comes before the node's
+  -- own, or a check would run in a different tree than the commands it checks.
+  local memory = dep("memory")
+  if type(memory.session_cwd) == "function" then
+    local recorded_ok, recorded = pcall(memory.session_cwd, session_id)
+    if recorded_ok and type(recorded) == "string" and recorded ~= "" then return recorded end
+  end
   local platform_ok, cwd = pcall(function() return dep("platform").cwd() end)
   if platform_ok and type(cwd) == "string" then return cwd end
   return ""
