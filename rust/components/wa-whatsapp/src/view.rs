@@ -98,6 +98,17 @@ pub fn message(record: &Record, quote: Option<&str>) -> serde_json::Value {
         "text": snippet,
         "text_truncated": snippet.chars().count() < record.body().chars().count(),
     });
+    // A voice note, an image or a video never answers with an empty `text`: "this note says nothing" and
+    // "nothing has read this note yet" are different facts, and an empty string reports the first. 23/11:
+    // a voice note answered `text: ""` in read and in search, and reading it meant opening the component's
+    // store by hand. `text_reason` says which gap it is, so a caller knows whether to wait or to ask for
+    // the transcript itself.
+    if view["text"].as_str() == Some("") {
+        if let Some((text, reason)) = stand_in(record) {
+            view["text"] = serde_json::Value::String(text);
+            view["text_reason"] = serde_json::Value::String(reason.to_string());
+        }
+    }
     if view["text_truncated"] == serde_json::Value::Bool(true) {
         // Long text is a pointer: the exact call that returns the stored bytes.
         view["full"] = serde_json::json!({
@@ -183,6 +194,49 @@ pub fn message(record: &Record, quote: Option<&str>) -> serde_json::Value {
         view["target"] = serde_json::Value::String(record.target.clone());
     }
     view
+}
+
+/// What a media record says when nothing has read it yet, and the word that names which gap it is.
+///
+/// `None` for every kind this does not apply to (a text message with no text is its own fact, and a
+/// deletion keeps that meaning: `deleted` is the word there). A record with a stated reason keeps it -
+/// `media_too_large`, `view_once`, `ephemeral_media_not_retained` are the answers a caller can act on.
+fn stand_in(record: &Record) -> Option<(String, &'static str)> {
+    let (word, reason) = match record.kind.as_str() {
+        "voice" | "audio" => ("transcript", "not transcribed"),
+        "image" | "video" | "sticker" => ("ocr", "not read"),
+        _ => return None,
+    };
+    if !record.unsupported.is_empty() {
+        return Some((format!("{reason}: {}", record.unsupported), "unsupported"));
+    }
+    let pending = if word == "transcript" { "transcript_pending" } else { "ocr_pending" };
+    Some((format!("{word} pending"), pending))
+}
+
+/// Add the node's receive freshness and the transport to a read or search answer, with a note ONLY where
+/// the field alone would be misread (Fable, 24/11 ~05:05Z: a healthy answer carries the fields alone).
+///
+/// The two notes that survive: never received (a node that has written nothing yet is not a quiet chat) and
+/// not connected (nothing can arrive at all). Both are facts a reader cannot infer from the numbers:
+/// `last_received_s: null` and `connected: false` are exactly the cases where "nothing new" would be the
+/// wrong conclusion.
+pub(crate) fn note_freshness(body: &mut serde_json::Value, last_received_s: Option<i64>, connected: bool) {
+    body["last_received_s"] = match last_received_s {
+        Some(seconds) => serde_json::Value::from(seconds),
+        None => serde_json::Value::Null,
+    };
+    if last_received_s.is_none() {
+        body["last_received_note"] = serde_json::Value::String(
+            "this node has not written any message into its index since it started: an empty answer is the node, not the chat".into(),
+        );
+    }
+    body["connected"] = serde_json::Value::Bool(connected);
+    if !connected {
+        body["connected_note"] = serde_json::Value::String(
+            "the WhatsApp transport is not connected: nothing new can arrive until it reconnects, so an empty or old answer is the pipe and not the chat".into(),
+        );
+    }
 }
 
 /// The header a thread read and a search answer start with: which chat this is, in words, and how to
@@ -312,6 +366,41 @@ mod tests {
         let view = message(&gone, None);
         assert_eq!(view["deleted"], true);
         assert_eq!(view["text"], "");
+    }
+
+    #[test]
+    fn a_voice_note_with_no_transcript_says_so_instead_of_an_empty_text() {
+        // 23/11: a voice note answered `text: ""`, so "read an audio" meant opening the store by hand.
+        let view = message(&record("voice", ""), None);
+        assert_eq!(view["text"], "transcript pending", "never an empty string: {view}");
+        assert_eq!(view["text_reason"], "transcript_pending");
+        // A note the node cannot transcribe carries the reason it holds, not a guess.
+        let mut refused = record("voice", "");
+        refused.unsupported = "media_too_large".into();
+        let view = message(&refused, None);
+        assert_eq!(view["text"], "not transcribed: media_too_large");
+        assert_eq!(view["text_reason"], "unsupported");
+        // An image nobody has read yet is the same shape, with its own word.
+        let view = message(&record("image", ""), None);
+        assert_eq!(view["text"], "ocr pending");
+        assert_eq!(view["text_reason"], "ocr_pending");
+    }
+
+    #[test]
+    fn a_voice_note_with_a_transcript_answers_with_the_transcript_and_its_way_to_the_whole() {
+        // The transcript is the text of the note, and a long one is a pointer to `whatsapp_message`
+        // (4012380f put the transcript on read; this measures that it is what `text` carries).
+        let mut note = record("voice", "");
+        note.transcript = "bom dia, o boleto vence amanhã".into();
+        let view = message(&note, None);
+        assert_eq!(view["text"], "bom dia, o boleto vence amanhã");
+        assert_eq!(view["transcript"], "bom dia, o boleto vence amanhã");
+        assert!(view.get("text_reason").is_none(), "nothing is pending when the note was read");
+        note.transcript = "a".repeat(seam::MAX_TEXT_CHARS + 10);
+        let view = message(&note, None);
+        assert_eq!(view["transcript_truncated"], true);
+        assert_eq!(view["transcript_full"]["tool"], "whatsapp_message");
+        assert_eq!(view["transcript_full"]["field"], "transcript");
     }
 
     #[test]

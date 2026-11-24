@@ -75,11 +75,37 @@ fn the_answer_the_component_settled_is_the_tool_answer() {
         serde_json::json!({"chat": "5511999999999@lid", "messages": [{"id": "3EB01", "text": "oi"}], "count": 1}),
     );
     queue.done_by(taken.id, "wa-whatsapp", &serde_json::to_vec(&answer).unwrap()).unwrap();
-    // Now the same call reads the answer instead of the queue.
-    let answer = ask_in(&queue, seam::Op::Read, &args, 2_000, BUILD);
+    // The answer the component settled is the tool's answer (decoded from the job record: a settled
+    // job is never replayed to a later caller).
+    let settled = queue.job(taken.id).expect("job").expect("the record");
+    let answer = super::settled_answer(seam::Op::Read, &settled);
     assert_eq!(answer["ok"], true);
     assert_eq!(answer["op"], "read");
     assert_eq!(answer["messages"][0]["id"], "3EB01");
+}
+
+/// The read contract of 23/11, at the tool: a read answers the index as it is NOW. A read that has
+/// already settled must never be handed to the next caller, because the picture in it is a picture of
+/// the past - the account node measured three reads of one chat in a row answering 15:40, 16:15 and
+/// 15:44, with nothing saying any of them was old.
+#[test]
+fn a_settled_read_is_not_replayed_to_the_next_caller() {
+    let (_host, queue) = queue("no-replay");
+    let args = serde_json::json!({"chat": "5511999999999@lid", "limit": 3});
+    let first = ask_in(&queue, seam::Op::Read, &args, 1, BUILD);
+    assert_eq!(first["error"], "whatsapp_read_slow");
+    let id = first["id"].as_u64().expect("the job id");
+    let wa_queue::TakeOutcome::Job(taken) = queue.take(seam::QUEUE, "wa-whatsapp", None).unwrap() else {
+        panic!("the job must be takeable");
+    };
+    assert_eq!(taken.id.0, id);
+    let answer = seam::answer(seam::Op::Read, serde_json::json!({"chat": "5511999999999@lid", "messages": [{"id": "3EB01"}], "count": 1}));
+    queue.done_by(taken.id, "wa-whatsapp", &serde_json::to_vec(&answer).unwrap()).unwrap();
+    // Asking again after the first answer settled asks the index again: it is a DIFFERENT job, so it
+    // cannot carry the picture the first one took.
+    let again = ask_in(&queue, seam::Op::Read, &args, 1, BUILD);
+    let second = again["id"].as_u64().expect("the second job id");
+    assert_ne!(second, id, "a settled read must not answer the next read");
 }
 
 #[test]
@@ -147,7 +173,10 @@ fn a_backfill_takes_count_as_its_limit_and_needs_no_chat() {
     );
     let answer = seam::answer(seam::Op::Backfill, body);
     queue.done_by(taken.id, "wa-whatsapp", &serde_json::to_vec(&answer).unwrap()).unwrap();
-    let answer = ask_in(&queue, seam::Op::Backfill, &args, 2_000, BUILD);
+    // The decode of what the component settled (a settled job is never replayed to a later caller:
+    // `a_settled_read_is_not_replayed_to_the_next_caller`).
+    let settled = queue.job(taken.id).expect("job").expect("the record");
+    let answer = super::settled_answer(seam::Op::Backfill, &settled);
     assert_eq!(answer["ok"], true);
     assert_eq!(answer["op"], "backfill");
     assert_eq!(answer["count"], 1);
@@ -335,8 +364,10 @@ fn a_settled_refusal_is_the_tools_own_error_and_not_a_dead_letter() {
     let refusal = seam::Refusal::new("bad_op", "op must be one of search, read, contacts");
     let body = serde_json::to_vec(&seam::terminal_refusal("contacts", &refusal)).unwrap();
     queue.done_by(wa_queue::JobId(id), COMPONENT, &body).expect("settle the refusal");
-    // The same call reads the same job (the request is the dedupe key) and answers its own word.
-    let answer = ask_in(&queue, seam::Op::Contacts, &args, 50, BUILD);
+    // The settled refusal is answered by its own word (a settled job is never replayed to a later
+    // caller: `a_settled_read_is_not_replayed_to_the_next_caller`).
+    let settled = queue.job(wa_queue::JobId(id)).expect("job").expect("the record");
+    let answer = super::settled_answer(seam::Op::Contacts, &settled);
     assert_eq!(answer["error"], "whatsapp_contacts_bad_op", "{answer}");
     assert_eq!(answer["state"], "refused");
     assert_eq!(answer["ok"], false);
