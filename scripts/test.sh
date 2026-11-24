@@ -1003,6 +1003,13 @@ gate_run bash scripts/test-watchdog.sh | grep 'test-watchdog: ok'
 # The fast path own per-row watchdog: a hung row names itself and takes every child it forked with it
 # (scripts/lib/fast-watchdog.sh; measured 18/11 on avell - a fixture child outlived its row).
 gate_run bash scripts/test-fast-watchdog.sh | grep 'test-fast-watchdog: ok'
+# A RUN THAT CANNOT SAY WHY IT STOPPED IS THE DEFECT (Fable, 24/11). scripts/fast.sh opened its owner lock
+# with `exec 8>>"$work/lock" 2>/dev/null`, and `exec` with only redirections applies them to the shell for
+# the rest of its life: every later message of the run went to /dev/null, the runner's own "narrowed run
+# REFUSED ... is not a row this run can execute" included. MEASURED three times on 24/11: a narrowed plan
+# naming one excluded row exited 2 in eight seconds with nothing on either stream. This row drives that
+# exact plan and asserts the refusal is printed and names the bad row.
+gate_run bash scripts/test-fast-stderr.sh | grep 'test-fast-stderr: ok'
 gate_run bash scripts/test-gate-cargo-codemode.sh | grep 'test-gate-cargo-codemode: ok'
 gate_run bash scripts/test-fast-watchdog-reap.sh | grep 'test-fast-watchdog-reap: ok'
 gate_run bash scripts/test-scratch-home.sh | grep 'test-scratch-home: ok'
