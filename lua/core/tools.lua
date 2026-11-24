@@ -638,7 +638,7 @@ M.admin = {
     params = { type = "object", description = "Values for the spell's declared parameters." },
     binary = { type = "string", description = "For an `upgrade` step: the wa binary to install. Defaults to the step's own value." },
     path = { type = "string", description = "Where to write the plan. Defaults to <state>/spell-plans/<name>.json." } }, { "name" }),
-  schema("remote", "Run a capability on another wasm-agent node (peer). Nodes are discovered by ed25519 key through the rendezvous, so the name or node_id is enough. Put the capability's own parameters at this same level, flat: {\"node\":\"<name>\",\"capability\":\"bash\",\"command\":\"ls\"} or {\"node\":\"<name>\",\"capability\":\"read\",\"path\":\"/etc/hosts\"} or {\"node\":\"<name>\",\"capability\":\"edit\",\"path\":\"...\",\"edits\":[{\"old_text\":\"...\",\"new_text\":\"...\"}]}: an edit there is the edit you know here - exactly-once match, the nearest region on a miss, the read-before-edit fence judged by what this session read on that node - and the change is recorded here, so /undo restores that file there. Text reads work; image results are refused until the node protocol has bounded binary transfer. Inside codemode tools.remote runs the read-only capabilities (read, ls, grep, sessions, session, search_messages, recall, read-only bash ...); effects run here, outside. capability:\"batch\" with calls:[{capability,...},...] runs up to 8 reads in one round trip.", {
+  schema("remote", "Run a capability on another wasm-agent node (peer). Nodes are discovered by ed25519 key through the rendezvous, so the name or node_id is enough. Put the capability's own parameters at this same level, flat: {\"node\":\"<name>\",\"capability\":\"bash\",\"command\":\"ls\"} or {\"node\":\"<name>\",\"capability\":\"read\",\"path\":\"/etc/hosts\"} or {\"node\":\"<name>\",\"capability\":\"edit\",\"path\":\"...\",\"edits\":[{\"old_text\":\"...\",\"new_text\":\"...\"}]}: an edit there is the edit you know here - exactly-once match, the nearest region on a miss, the read-before-edit fence judged by what this session read on that node - and the change is recorded here, so /undo restores that file there. Text reads work. A picture read (png, jpeg, gif, webp, up to 1000000 bytes) returns the picture with this call's result; not inside a calls batch. Inside codemode tools.remote runs the read-only capabilities (read, ls, grep, sessions, session, search_messages, recall, read-only bash ...); effects run here, outside. capability:\"batch\" with calls:[{capability,...},...] runs up to 8 reads in one round trip.", {
     node = { type = "string", description = "Peer name or node_id (the nodes tool lists them)." },
     capability = { type = "string", description = "Tool to run on that node, e.g. bash, read, client, shell." },
     command = { type = "string", description = "For bash/shell: the command." },
@@ -1556,8 +1556,29 @@ local function remote_batch(memory, args, role, ctx)
   local failed = 0
   for index, entry in ipairs(entries) do
     local value = results[index]
-    if carries_local_images(value) then
-      value = { error = "remote_image_transport_unsupported", capability = entry.capability }; results[index] = value
+    -- A picture that a peer sent as BYTES (image_data) is refused here too: a batch never asked for
+    -- bytes (`image_bytes` is a single call's field), and adopting one into an entry with no image
+    -- message to ride on would put a megabyte of base64 in the script's JSON. A peer that answers it
+    -- anyway gets the same named refusal rather than a leak.
+    local sent_bytes = type(value) == "table" and type(value.image_data) == "table"
+    if carries_local_images(value) or sent_bytes then
+      -- A PICTURE DOES NOT TRAVEL IN A BATCH (mission run-images-two-node, item 2). One call carries one
+      -- picture because the picture rides out with THAT call's own result (lua/core/remote_image.lua: the
+      -- caller verifies the digest the peer named, stores the bytes here, and hands the pipeline this
+      -- node's own reference). Eight ordered text entries have no such place, and the answer must never
+      -- be a path on the other machine - so the entry is refused BY NAME and the refusal says the one
+      -- form that works, with this node and this path in it, instead of leaving the model to guess.
+      local path = tostring(entry.args and entry.args.path or "")
+      local name = tostring((value._images or {})[1] and (value._images[1].name or value._images[1].sha256) or "image")
+      value = { error = "remote_image_batch_unsupported", capability = entry.capability, node = node.name,
+        path = path, image = name,
+        note = "The picture " .. name .. " on " .. tostring(node.name) .. " was not sent: a calls batch "
+          .. "carries text only (1-8 reads in one signed round trip). Read it as its own call - "
+          .. "tools.remote({node:\"" .. tostring(node.name) .. "\",capability:\"read\",path:\"" .. path
+          .. "\"}) - and the picture arrives with that call result, up to 1000000 bytes.",
+        fix = 'send {"node":"' .. tostring(node.name) .. '","capability":"read","path":"' .. path
+          .. '"} as its own remote call, not as an entry of calls' }
+      results[index] = value
     end
     if type(value) ~= "table" or value.error or value.ok == false then failed = failed + 1 end
     -- A page read in a BATCH was still served to this session (mission remote-edit-first-class). Without
@@ -2792,6 +2813,16 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
         local snapshot = file_tools.page_snapshot(ctx.session_id, call.args.path, target)
         options.read_pages = { record = snapshot or false }
       end
+    elseif not node.local_node and call.capability == "bash" and type(ctx) == "table"
+        and ctx.watch_changes == true then
+      -- THE FILES A PEER'S COMMAND CHANGED, ASKED FOR (mission run-images-two-node, item 5). The
+      -- caller's branch below turns a `changes` list into one row per file, and the peer's bash branch
+      -- answers that list to a caller that asked - but nothing ever asked on a real call: the option was
+      -- set for edit and write only, so a `bash` on a peer came back without it and the reader saw no row
+      -- at all (measured in a pty on a scratch pair, 24/11: the command created the file, the answer was
+      -- `exit 0`, and no card was drawn). A session that watches its changes asks; a bare dispatch, a
+      -- script and a peer call from another node do not, so nobody pays for a list nobody draws.
+      options = { record_change = true }
     end
     local result
     if node.local_node then

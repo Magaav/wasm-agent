@@ -350,6 +350,7 @@ return {
   ['remote_effect_outside_codemode']='tools.lua',
   ['remote_error']='nodes.lua',
   ['remote_http_']='nodes.lua',
+  ['remote_image_batch_unsupported']='tools.lua',
   ['remote_image_digest_mismatch']='remote_image.lua',
   ['remote_image_invalid']='remote_image.lua',
   ['remote_image_store_failed']='remote_image.lua',

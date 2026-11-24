@@ -95,11 +95,19 @@ check(created_entry.path == 'made.txt' and created_entry.created == true,
 -- The transport is the one thing a test cannot have: `dofile('lua/core/nodes.lua')` answers a stub, the
 -- seam scripts/test-federation.lua uses. Everything else (the branch, the event, the queue) is real.
 local real_dofile = dofile
+local sent_options, asked = nil, nil
 local stub = {
   find = function(selector) return { name = tostring(selector), node_id = 'peer-1', online = true,
     local_node = false } end,
-  remote_call = function(_, capability, args)
+  remote_call = function(_, capability, args, options)
+    sent_options, asked = options, args
     if capability ~= 'bash' then return { error = 'unexpected_capability' } end
+    -- The peer answers the list only to a caller that ASKED (lua/core/tools.lua, the bash branch's
+    -- for_caller). A stub that answered it unasked would hide exactly the fault item 5 found: the
+    -- caller never set the option, so a real peer sent no list and no card was drawn.
+    if not (type(options) == 'table' and options.record_change == true) then
+      return { ok = true, code = 0, stdout = 'hello\\n', stderr = '', operation_id = 'op-peer' }
+    end
     return { ok = true, code = 0, stdout = 'hello\\n', stderr = '', operation_id = 'op-peer',
       changes = { { path = 'srv/app/main.py', added = 3, removed = 0, created = true } } }
   end,
@@ -131,6 +139,22 @@ local row = rows[1] or {}
 check(row.node == 'peer-one' and row.path == 'srv/app/main.py' and row.created == true
   and row.added == 3 and row.removed == 0, 'naming the node, the path and the counts: ' .. json.encode(row))
 check(result.changes == nil, 'and the model\'s value carries no list: a card is the reader\'s')
+check(type(sent_options) == 'table' and sent_options.record_change == true,
+  'a session that watches its changes ASKS the peer for the list: ' .. json.encode(sent_options))
+
+-- ---- a caller that does not watch asks for nothing ------------------------------------------
+-- A bare dispatch, a script or a peer call from another node draws no card, so it pays for no list.
+do
+  sent_options, asked = nil, nil
+  local quiet = { session_id = sid, user_id = 'master' }
+  local value = caller_tools.dispatch(memory, 'remote', { node = 'peer-one', capability = 'bash',
+    command = 'python edit.py' }, 'master', quiet)
+  check(type(value) == 'table' and value.error == nil, 'a call with no listener still answers: '
+    .. tostring(value and value.error))
+  check(sent_options == nil or sent_options.record_change ~= true,
+    'and it never asks the peer for a change list: ' .. json.encode(sent_options))
+  check(value.changes == nil, 'and nothing is carried back for a reader who is not there')
+end
 
 -- ---- the view: the row the CLI draws --------------------------------------------------------
 local view_lib = real_dofile('lua/core/cli_view.lua')

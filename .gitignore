@@ -68,3 +68,6 @@ tmp-*
 # before anything can stage them; .githooks/pre-commit refuses a forced add as well.
 harness-evaluator/tasks/
 harness-evaluator/state/
+
+# A runner row own scratch (scripts/fast.sh, the land dry run): never part of the tree.
+.wa-scratch/
