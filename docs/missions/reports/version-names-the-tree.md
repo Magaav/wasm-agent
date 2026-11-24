@@ -1,6 +1,8 @@
 # version-names-the-tree - `wa --version` and /health name the commit the node actually runs
 
-Branch `change/version-names-the-tree`, base `origin/main` = fe108a8c (the landing of slice 1 + A-D).
+Branch `change/version-names-the-tree`, rebased onto `origin/main` = 42507780 (started from fe108a8c, the landing
+of slice 1 + A-D; the branch moved twice while this round ran). Commits after the rebase: `a7f2dd15` (the
+fix, the row, the docs) and `5885ba82` (this report).
 
 ## What was measured, on this node, before any change
 
