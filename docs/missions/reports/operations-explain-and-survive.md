@@ -377,3 +377,71 @@ not the diff: three installs landed inside this session.
 Cache cost of the addendum: nothing added to tool descriptions. A read-only operation answer inside a run block
 changes two key NAMES (`ok`->`operation_ok`, `error`->`operation_error` plus `reason`) — same bytes in, same bytes
 out, no growth. The two sentences are the same length as before (the spelled call replaces prose of the same size).
+
+
+---
+
+# Addendum 2 (24/11): where an operation actually starts (G blocker, Fable)
+
+Reported by change/worker-write-guard (`docs/missions/reports/worker-write-guard.md`, section 15) and re-measured
+here: an operation's starting directory came from `sessions.worktree` ALONE. A session with no bound worktree -
+every mission worker, every plain CLI session, every `peer:<node>` call - answered `""`, and `wa-operation` then
+let the child inherit the SERVING PROCESS's directory. Under the worker's own CLI that is the mission directory,
+so it looked right; when the NODE serves the turn (a resumed session after a deploy pause, a wake, a job) the same
+code ran the work in the node's own directory, the canonical checkout. That is a correctness defect for every
+user, not a display problem.
+
+Branch rebased onto `origin/main` = `0d8657e5`; this work is `f7c5a472`.
+
+## What changed
+
+* **`lua/core/memory.lua`** - a `sessions.run_cwd` column (added through the existing `add_column` migration, so an
+  existing database gains it and keeps `''`), plus `M.session_cwd` / `M.set_session_cwd`. `''` is the old
+  behaviour, so a session that never ran is unchanged.
+* **`lua/core/agent.lua`** - the run records its directory on the session at start, using `agent.workdir` (which
+  already resolves the worktree first). The FIRST run decides and a later run does not overwrite it: the user's
+  shell was where the session began. Inside a `pcall`, because a ledger that refuses must not stop a turn.
+* **`lua/core/tools.lua`** - `session_cwd` answers the worktree, else the recorded directory, else `""` (nothing
+  recorded: the only remaining case that borrows the node's directory); a new `session_cwd_refusal` turns a
+  recorded directory that is GONE into a refusal BY NAME (`session_cwd_gone`, `effect: "none"`, with the two ways
+  out) for both `bash` and `operation start`, instead of substituting the node's own; `launch_cwd` now reports an
+  honest source - `explicit`, `caller_session`, `session_workspace`, `session_run`, `node`; and a peer call for
+  `bash`/`operation` carries the caller's session directory as an ordinary `cwd` argument
+  (`peer_args_with_cwd`), which the receiving node records as `explicit` - it came from the caller, and the
+  record says so rather than pretending a session there owns it.
+* **The START receipt** already carries `cwd`, `cwd_requested`, `cwd_source` and `effective_cwd` on main (verified
+  by a live call in this session, and pinned now by the row's own case 6). Nothing was added there.
+
+## The row
+
+`scripts/test-operation-cwd.lua` (new, discovered by the fast path like every `scripts/test-*.lua`), 18 checks on
+this branch. It drives the real dispatcher and real processes in a scratch home:
+
+1. a session with no worktree, whose first run recorded a directory, runs THERE and not where the serving process
+   is - the assertion also checks `effective_cwd ~= platform.cwd()`, and that the shell really wrote its `pwd`
+   there;
+2. a session with a worktree still runs in the worktree, reported `session_workspace`;
+3. an explicit `cwd` wins over both and is reported `explicit`;
+4. a resumed handle (`status` after `await`) reports the directory it started in;
+5. a recorded directory that is GONE refuses `bash` and `operation start` with `session_cwd_gone`, claims no
+   effect, names the two ways out, and nothing is written;
+6. the START receipt carries `cwd_source` and `effective_cwd`, so a caller learns where its work runs without a
+   second call.
+
+Measured on a base worktree of `origin/main` (`git worktree add /tmp/base-cwd origin/main`, same binary,
+`WASM_AGENT_LUA_ROOT=/tmp/base-cwd`): `lua error: ...:54: attempt to call a nil value (field 'session_cwd')`, exit
+1 - it fails on main, and it fails at the first thing main cannot do.
+
+Not covered by this row, said plainly: the SENDING half of a peer call (a live peer is forbidden here and the row
+starts none). The receiving half - a call whose arguments carry `cwd` uses it and records `explicit` - is case 3.
+
+## Texts to approve (added by this addendum)
+
+9. The refusal a gone session directory answers, `lua/core/tools.lua`: `session_cwd_gone` with
+   `note = "this session's directory (<path>) is not there any more, so nothing was started. The node does not
+   substitute its own directory for a session's: bind a worktree (session_worktree) or pass cwd explicitly."`
+10. The new `cwd_source` value `session_run` (`session_workspace` and `node` already existed), and `caller_session`
+    on a peer call's arguments.
+
+Cache cost: none. No tool description changed; the new string appears only in a refusal, and `cwd_source` already
+travelled on every operation record (`node` until now, `session_run` where the truth changed).
