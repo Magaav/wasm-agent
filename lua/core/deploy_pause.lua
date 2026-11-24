@@ -331,6 +331,12 @@ end
 --      Re-arming over a person's decision would override them, which no repair may do;
 --   4. NOTHING IS RE-ARMED WHILE A BUILD WAITS OR INSTALLS: that is the phase the pause is for.
 M.RESUME_WINDOW_SECONDS = 6 * 3600
+
+-- HOW LONG A RESUME ROW MAY BE `dispatching` BEFORE IT COUNTS AS LOST (r5c, Fable, 24/11). 300 s, and it is this
+-- module's own number: `selfloop.M.stale_seconds()` (1800 s) stays the bound for every OTHER wake, because at 1800 s
+-- the operator's watchdog (~20 min) would beat the node to a lost dispatch. Named here, not hardcoded at the use site.
+M.RESUME_DISPATCH_BOUND_SECONDS = 300
+
 M.RESUME_MAX_REARMS = 2
 M.RESUME_BACKOFF_SECONDS = 30
 M.MIGRATION_MARKER = "resume-migration-1"
@@ -339,6 +345,53 @@ M.MIGRATION_MARKER = "resume-migration-1"
 -- NODE cancelled the dispatch. The predicate is here, in one place, because the migration and the per-tick pass
 -- must agree about which rows are debts.
 local LOST_WHERE = "reason=? AND (status IN ('unknown','failed') OR (status='cancelled' AND last_error LIKE 'cancelled before execution%'))"
+
+local function sweep_stamp_path()
+  local ok, paths = pcall(dofile, "lua/core/paths.lua")
+  if not ok then return nil end
+  return paths.data() .. "/pause-sweep.last"
+end
+
+-- ROWS FROM THE HOST, WHATEVER SHAPE IT ANSWERS (r5d, 24/11). `host.sql_rows` answers JSON *text*; an injected fake
+-- in a test answers a table. Requiring a table meant that on the live node EVERY lookup here read as failed - the
+-- reclaim never ran - while the tests passed. The normalisation is one place, so no caller can half-read an answer.
+local function rows_of(answer)
+  if type(answer) == "table" then return answer end
+  if type(answer) == "string" then
+    local ok, decoded = pcall(json.decode, answer)
+    if ok and type(decoded) == "table" then return decoded end
+  end
+  return nil
+end
+
+-- IS A RUN CLAIM HELD FOR THIS SESSION? ASKED OF THE STORE THAT HOLDS IT (r5d, 24/11).
+--
+-- The claims are NOT in the ledger: they are `<data>/resources/claims.sqlite` (`resources.rs:354-361`), and their
+-- `boot` is the uuid `Store::open` mints, not `runtime_info().boot_id`. So neither a SQL select here nor a boot
+-- comparison in this module can answer it; the store can, because `inventory_at` (resources.rs:281-321) computes
+-- each claim's liveness itself: "held" (its own boot), "lease_released" (that process is gone), "unavailable",
+-- "unverifiable".
+--
+-- Returns "held" | "free" | "unknown", and ONLY "free" may unblock a reclaim: no capability, a raise, a shape this
+-- code does not know, or an unknown liveness all answer "unknown", which keeps the row.
+local function claim_state_of(session, opts)
+  if type(opts.claim_state) == "function" then return opts.claim_state(session) end
+  if type(host) ~= "table" or type(host.resource) ~= "function" then return "unknown" end
+  local asked, raw = pcall(host.resource, "list", "{}")
+  if not asked or type(raw) ~= "string" then return "unknown" end
+  local decoded_ok, decoded = pcall(json.decode, raw)
+  if not decoded_ok or type(decoded) ~= "table" or type(decoded.claims) ~= "table" then return "unknown" end
+  local key = "session:" .. tostring(session or "")
+  for _, entry in ipairs(decoded.claims) do
+    if tostring(entry.key or "") == key then
+      local liveness = tostring(entry.liveness or "")
+      if liveness == "lease_released" then return "free" end
+      if liveness == "held" or liveness == "held_or_unavailable" then return "held" end
+      return "unknown"
+    end
+  end
+  return "free"
+end
 
 local function marker_path()
   local ok, paths = pcall(dofile, "lua/core/paths.lua")
@@ -393,21 +446,52 @@ end
 -- `opts` exists for the test (scripts/test-deploy-pause.lua): exec, query, schedule, the session check, the
 -- migration marker and the clock are injected; a real caller passes nothing and gets the host's ledger,
 -- selfloop's scheduler and os.time().
+-- THE INVARIANT ENFORCED HERE, IN THIS ORDER (r5d, 24/11): every resume row reaches a terminal state inside the
+-- window. One function, one set of facts, and every lookup is pcall'ed: a lookup that fails or cannot be made
+-- KEEPS the row (a duplicate resume turn is the expensive direction).
 function M.ensure_resumes(now, opts)
   opts = opts or {}
   now = tonumber(now) or os.time()
-  local exec = opts.exec or host.sql_exec
-  local query = opts.query or host.sql_rows
-  if type(exec) ~= "function" or type(query) ~= "function" then
+  -- THE HOST TAKES ITS PARAMS AS JSON TEXT, a test seam takes a table (r5e, 24/11). memory.lua and selfloop.lua wrap
+  -- `host.sql_exec`/`host.sql_rows` with json.encode for exactly this reason; this module passed a Lua table straight
+  -- to the host, so its statements carried no bound values and matched nothing - the reclaim computed every fact
+  -- right and then wrote nothing (measured: stale=1, seen=0, claims=[], `reclaimed=0`).
+  local raw_exec = opts.exec or host.sql_exec
+  local raw_query = opts.query or host.sql_rows
+  if type(raw_exec) ~= "function" or type(raw_query) ~= "function" then
     return { error = "no_ledger", rearmed = 0 }
   end
+  -- How many rows a statement CHANGED, from either shape of answer (the host answers JSON text).
+  local function changes_of(answer)
+    if type(answer) == "table" then return tonumber(answer.changes) or 0 end
+    if type(answer) == "string" then
+      local ok, decoded = pcall(json.decode, answer)
+      if ok and type(decoded) == "table" then return tonumber(decoded.changes) or 0 end
+    end
+    return 0
+  end
+  -- THE HOST TAKES ITS PARAMS AS JSON TEXT; A SEAM TAKES A TABLE (r5g, 24/11). The contract is decided by WHICH
+  -- function is used, not by comparing function values: a host function is a fresh closure on every access, so
+  -- `fn == host.sql_rows` was never true, `encode_for` handed the host a Lua table, and EVERY statement in this
+  -- module ran with its WHERE values unbound - `reason=?` matched nothing, `COUNT(*) ... created_at>=?` counted 0
+  -- (so a running turn looked quiet), and the reclaim's UPDATE carried no id. Measured with the probe: the same
+  -- statement standalone returned the row, inside the call it returned none.
+  local exec = function(statement, params)
+    if opts.exec then return raw_exec(statement, params) end
+    return raw_exec(statement, json.encode(params or {}))
+  end
+  local query = function(statement, params)
+    if opts.query then return raw_query(statement, params) end
+    return raw_query(statement, json.encode(params or {}))
+  end
   local cutoff = now - M.RESUME_WINDOW_SECONDS
+
   -- 1. THE ONE-TIME MIGRATION: rows older than the window are retired, and it says how many.
   local migration = 0
   if not migrated(opts) then
     local retired = exec([[UPDATE self_wakes SET status='superseded', last_error='superseded: too old to resume',
       updated_at=? WHERE ]] .. LOST_WHERE .. [[ AND created_at<?]], { now, M.RESUME_REASON, cutoff })
-    migration = tonumber(type(retired) == "table" and retired.changes or 0) or 0
+    migration = changes_of(retired)
     record_migrated(opts, migration)
     if type(host) == "table" and type(host.log) == "function" then
       pcall(host.log, string.format(
@@ -415,11 +499,90 @@ function M.ensure_resumes(now, opts)
         migration, M.RESUME_WINDOW_SECONDS))
     end
   end
-  if M.waiting(now, opts) then return { waiting = true, rearmed = 0, migration = migration } end
-  -- THE CHAIN IS `resume_chain`, NOT `attempts` (24/11): `attempts` counts dispatch attempts and reaches the
-  -- hundreds on a real ledger, so reading it here abandoned 46 live resumes on the first tick after an install.
+
+  -- 2. A `dispatching` ROW THAT NOTHING HAPPENED TO IS LOST, at this module's own 300 s bound.
+  --
+  -- A resume row leaves `dispatching` at the END of its turn, not at the start (`selfloop.lua:1200`/`:1509` claim it
+  -- before the turn; `:1214`/`:1355` finish it after), so age is a filter and never the evidence. Three facts, and
+  -- only one answer may unblock a reclaim:
+  --   * the RUN CLAIM, asked of the store that holds it - `host.resource("list")`, whose `inventory_at`
+  --     (rust/wa-capabilities/src/resources.rs:281-321) computes liveness itself: "held" (the store's own boot),
+  --     "lease_released" (that process is gone), "held_or_unavailable", "unverifiable". The claims are NOT in the
+  --     ledger (they are `<data>/resources/claims.sqlite`), and their `boot` is the uuid Store::open mints, not
+  --     `runtime_info().boot_id` - two mistakes measured on the live node on 24/11; asking the store answers both;
+  --   * ZERO messages for the session at or after the row's `updated_at`;
+  --   * both lookups must ANSWER: a raise, a missing capability, an unknown shape or an unknown liveness keeps the row.
+  local bound = tonumber(opts.stale_seconds) or M.RESUME_DISPATCH_BOUND_SECONDS
+  local reclaimed = 0
+  local stale_ok, stale_answer = pcall(query, [[SELECT id, session_id, updated_at FROM self_wakes
+    WHERE reason=? AND status='dispatching' AND updated_at<?]], { M.RESUME_REASON, now - bound })
+  local stale_rows = stale_ok and rows_of(stale_answer) or nil
+  if type(stale_rows) == "table" then
+    do
+      local seen, dbg = pcall(host.getenv, "WA_PAUSE_DEBUG")
+      if seen and type(dbg) == "string" and dbg ~= "" then
+        local encoded_ok, encoded = pcall(json.encode, stale_rows)
+        pcall(host.log, string.format("debug stale: ok=%s n=%s bound=%s now=%s threshold=%s params=%s rows=%s",
+          tostring(stale_ok), tostring(#stale_rows), tostring(bound), tostring(now),
+          tostring(now - bound), json.encode({ M.RESUME_REASON, now - bound }),
+          encoded_ok and encoded:sub(1, 200) or tostring(stale_answer)))
+      end
+    end
+    for _, row in ipairs(stale_rows) do
+      local session = tostring(row.session_id or "")
+      local dispatched_at = tonumber(row.updated_at) or 0
+      if session ~= "" then
+        local answered, state = pcall(claim_state_of, session, opts)
+        if not answered or type(state) ~= "string" then state = "unknown" end
+        local seen_ok, seen_answer = pcall(query,
+          [[SELECT COUNT(*) AS n FROM messages WHERE session_id=? AND created_at>=?]], { session, dispatched_at })
+        local seen = seen_ok and rows_of(seen_answer) or nil
+        local quiet_known = type(seen) == "table" and type(seen[1]) == "table"
+        local quiet = quiet_known and (tonumber(seen[1].n) or 0) == 0
+        do
+          local seen, dbg = pcall(host.getenv, "WA_PAUSE_DEBUG")
+          if seen and type(dbg) == "string" and dbg ~= "" then
+            pcall(host.log, string.format("debug loop: row=%s state=%s quiet=%s known=%s seen=%s dispatched_at=%s now=%s",
+              tostring(row.id), tostring(state), tostring(quiet), tostring(quiet_known),
+              tostring(seen and "?"), tostring(dispatched_at), tostring(now)))
+          end
+        end
+        if state == "free" and quiet_known and quiet then
+          local changed = exec([[UPDATE self_wakes SET status='unknown',
+            last_error='dispatch interrupted; not replayed', updated_at=? WHERE id=? AND status='dispatching']],
+            { now, row.id })
+          reclaimed = reclaimed + changes_of(changed)
+        end
+      end
+    end
+  end
+
+  -- 3. A `pending` ROW OVERDUE PAST THE WINDOW CAN NEVER FIRE (the 22/11 row): retired, not re-stamped for ever.
+  -- It runs BEFORE the waiting gate, because a deploy that never ends must not hold a dead row hostage.
+  pcall(exec, [[UPDATE self_wakes SET status='superseded', due_at=NULL, last_error='superseded: too old to fire',
+    updated_at=? WHERE reason=? AND status='pending' AND created_at<?]], { now, M.RESUME_REASON, cutoff })
+
+  if M.waiting(now, opts) then
+    return { waiting = true, rearmed = 0, migration = migration, reclaimed = reclaimed }
+  end
+
+  -- 4. A LOST ROW INSIDE THE WINDOW IS RE-ARMED under the chain rule; outside it, the migration has retired it.
   local lost = query([[SELECT id, session_id, owner, resume_chain FROM self_wakes WHERE ]] .. LOST_WHERE
-    .. [[ AND created_at>=?]], { M.RESUME_REASON, cutoff }) or {}
+    .. [[ AND created_at>=?]], { M.RESUME_REASON, cutoff })
+  lost = rows_of(lost) or {}
+  -- THE PROBE (24/11): the query, its ENCODED params and the raw answer, from inside the call.
+  do
+    local seen, dbg = pcall(host.getenv, "WA_PAUSE_DEBUG")
+    if seen and type(dbg) == "string" and dbg ~= "" then
+      local params = json.encode({ M.RESUME_REASON, cutoff })
+      local encoded_ok, encoded = pcall(json.encode, lost)
+      local all_ok, all = pcall(json.encode, host.sql_rows([[SELECT id, status, reason, created_at FROM self_wakes]], json.encode({})))
+      all = all_ok and all or tostring(all)
+      pcall(host.log, string.format("debug lost: n=%s raw=%s params=%s now=%s ALL=%s",
+        tostring(#(rows_of(lost) or {})), encoded_ok and encoded:sub(1, 200) or tostring(encoded),
+        params, tostring(now), tostring(all):sub(1, 400)))
+    end
+  end
   local schedule = opts.schedule
   if type(schedule) ~= "function" then
     schedule = function(args, session, user)
@@ -429,23 +592,44 @@ function M.ensure_resumes(now, opts)
   local exists = opts.session_exists
   if type(exists) ~= "function" then
     exists = function(session)
-      local ok, row = pcall(function() return dofile("lua/core/memory.lua").session(session) end)
-      return ok and type(row) == "table"
+      local loaded, row = pcall(function() return dofile("lua/core/memory.lua").session(session) end)
+      if not loaded then return nil end
+      return type(row) == "table"
     end
   end
   local rearmed, abandoned = 0, 0
+  -- A DIAGNOSTIC THE NEXT PROBE USES (24/11): `WA_PAUSE_DEBUG=1` prints how many rows the re-arm pass sees and the
+  -- two bounds. MEASURED with it in scripts/test-selfloop-pause.lua's live-shaped case: `lost=0` there, while the same
+  -- statement run standalone against the same ledger returns the row - so the remaining defect is in what this call
+  -- passes to the query (or what it sees at that instant), not in the SQL, the window or the row. Off by default.
+  if type(host) == "table" and type(host.getenv) == "function" then
+    local seen, dbg = pcall(host.getenv, "WA_PAUSE_DEBUG")
+    if seen and type(dbg) == "string" and dbg ~= "" then
+      pcall(host.log, string.format("debug ensure_resumes: lost=%d cutoff=%s now=%s reason=%s",
+        #lost, tostring(cutoff), tostring(now), tostring(M.RESUME_REASON)))
+    end
+  end
   for _, row in ipairs(lost) do
     local session = tostring(row.session_id or "")
-    if session ~= "" and exists(session) then
-      -- A PARKED session is one nobody may resume: the operator held it (lua/core/session_park.lua), and the
-      -- tick skips its rows for the same reason.
-      local parked = query("SELECT session_id FROM self_wake_pauses WHERE session_id=? LIMIT 1", { session }) or {}
+    local alive = exists(session)
+    if session ~= "" and alive == true then
+      local parked = query("SELECT session_id FROM self_wake_pauses WHERE session_id=? LIMIT 1", { session })
+      parked = rows_of(parked) or {}
       local live = query([[SELECT id FROM self_wakes WHERE session_id=? AND reason=?
-        AND status IN ('pending','dispatching') LIMIT 1]], { session, M.RESUME_REASON }) or {}
+        AND status IN ('pending','dispatching') LIMIT 1]], { session, M.RESUME_REASON })
+      live = rows_of(live) or {}
+      if type(host) == "table" and type(host.getenv) == "function" then
+        local dbg = pcall(host.getenv, "WA_PAUSE_DEBUG")
+        if dbg then
+          local shown = ""
+          for _, entry in ipairs(live) do shown = shown .. tostring(entry.id) .. "," end
+          pcall(host.log, string.format("debug ensure_resumes: session=%s alive=%s parked=%d live=%d [%s] chain=%s window=%s",
+            tostring(session), tostring(alive), #parked, #live, shown, tostring(row.resume_chain), tostring(tonumber(row.created_at))))
+        end
+      end
       if #parked == 0 and #live == 0 then
         local chain = (tonumber(row.resume_chain) or 0) + 1
         if chain > M.RESUME_MAX_REARMS then
-          -- 2. THE CHAIN IS SPENT: this pause is over, and it says so instead of trying for ever.
           pcall(exec, [[UPDATE self_wakes SET status='resume_abandoned', last_error=?, updated_at=? WHERE id=?]],
             { string.format("resume_abandoned: %d re-arm(s) and no turn", chain - 1), now, row.id })
           pcall(M.mark_abandoned, session, "the resume could not run after " .. tostring(chain - 1) .. " re-arm(s)", opts)
@@ -463,9 +647,6 @@ function M.ensure_resumes(now, opts)
           }, session, tostring(row.owner or "master"))
           local wake = type(armed) == "table" and armed.wake or nil
           if wake and wake.id then
-            -- The chain is carried on the new row, so the next tick counts THIS attempt.
-            -- The chain is carried on the new row's OWN column, so the next tick counts THIS attempt and nothing
-            -- about the dispatch counter.
             pcall(exec, "UPDATE self_wakes SET resume_chain=? WHERE id=?", { chain, wake.id })
             pcall(exec, [[UPDATE self_wakes SET status='superseded', last_error=?, updated_at=? WHERE id=?]],
               { "a newer resume was armed: " .. tostring(wake.id), now, row.id })
@@ -476,20 +657,11 @@ function M.ensure_resumes(now, opts)
       end
     end
   end
-  return { rearmed = rearmed, abandoned = abandoned, migration = migration }
+  return { rearmed = rearmed, abandoned = abandoned, migration = migration, reclaimed = reclaimed }
 end
 
--- A PAUSE RECORD THAT CAN NEVER BE RESUMED IS CLOSED (24/11). The records are written at the moment a session
--- pauses and nothing ever deleted one: `wa-sentinel status` counted 53 and said "oldest 1d", so the line that
--- exists to show a promise in flight showed a graveyard. A record is CLOSED when it cannot describe a live pause:
---
---   * its `since` is older than M.RESUME_WINDOW_SECONDS (six hours) - no deploy waits that long, and the sentinel
---     only reads a record at or after the request it is holding;
---   * or its session no longer exists (ended, closed, deleted), so there is nobody to resume.
---
--- A record that is younger and whose session is live is LEFT ALONE, whatever else is happening: it is the proof the
--- bound uses. `host.list_dir` is the host capability this needs (rust/wa-capabilities/src/host.rs), and `opts`
--- carries an injected listing for the test.
+-- Said once, on the log an operator reads, every time a lost resume is re-armed. Cheap on purpose: the fact is
+-- rare (twice in one evening, 23/11) and it is the only trace a re-arm leaves besides its ledger row.
 function M.sweep_records(now, opts)
   opts = opts or {}
   now = tonumber(now) or os.time()
@@ -512,7 +684,17 @@ function M.sweep_records(now, opts)
       return type(row) == "table"
     end
   end
-  local remover = opts.remove or (host and host.delete_file)
+  -- THE CAPABILITY THAT EXISTS (r5, 24/11). This asked for `host.delete_file`, which the host does not have (the
+  -- name is `host.remove_file`, rust/wa-capabilities/src/host.rs:1690), so `remover` was nil on every live tick and
+  -- the sweep silently closed nothing, for nine minutes and 39 stale records. A sweep that cannot remove is a
+  -- fact an operator must read once, not a silent 0.
+  local remover = opts.remove or (host and host.remove_file)
+  if type(remover) ~= "function" then
+    if type(host) == "table" and type(host.log) == "function" then
+      pcall(host.log, "deploy pause: the sweep has no host.remove_file, so no pause record can be closed")
+    end
+    return 0
+  end
   local closed = 0
   for _, entry in ipairs(decoded.entries or {}) do
     local name = tostring(entry.name or "")
@@ -540,11 +722,30 @@ function M.sweep_records(now, opts)
         local modified = tonumber(entry.modified) or 0
         by_age = modified > 0 and ((now - modified) > M.RESUME_WINDOW_SECONDS) or false
       end
+      -- A RECORD THAT CANNOT BE DATED IS JUDGED ONLY BY ITS FILE (24/11, Fable's rule): with no `since` there is no
+      -- session to be sure of either - the name may belong to a file caught mid-write - so "gone" may not close it.
       local looked, verdict = pcall(exists, session)
-      local gone = looked and verdict == false
+      local gone = since > 0 and looked and verdict == false
       if (by_age or gone) and type(remover) == "function" then
         if pcall(remover, path) then closed = closed + 1 end
       end
+    end
+  end
+  -- A SWEEP THAT RAN MUST BE VISIBLE (r5, Fable's Q1): `closed 0` and `never ran` were the same output for nine
+  -- minutes on the live node. One line a day even when it closes nothing, so `/health`'s counts and the log can be
+  -- compared with a fact.
+  local day = math.floor(now / 86400)
+  local stamp_reader = opts.read_file or (host and host.read_file)
+  local stamp_writer = opts.write_file or (host and host.write_file)
+  local last_day = opts.last_sweep_day
+  if last_day == nil and type(stamp_reader) == "function" then
+    local ok, text = pcall(stamp_reader, sweep_stamp_path())
+    last_day = ok and tonumber(text) or nil
+  end
+  if tonumber(last_day) ~= day and type(stamp_writer) == "function" then
+    pcall(stamp_writer, sweep_stamp_path(), tostring(day))
+    if type(host) == "table" and type(host.log) == "function" then
+      pcall(host.log, string.format("deploy pause: sweep ran: %d record(s) seen, %d closed", #(decoded.entries or {}), closed))
     end
   end
   if closed > 0 and type(host) == "table" and type(host.log) == "function" then

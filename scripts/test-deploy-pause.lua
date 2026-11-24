@@ -318,6 +318,171 @@ local closed_e = pause.sweep_records(now, {
 ok(closed_e == 0 and #errored_removed == 0,
   "a lookup that raises keeps the record: a transient error is not a dead session",
   json.encode({ closed = closed_e, removed = errored_removed }))
+-- THE ONE INVARIANT, ONE TEST PER LOST STATE (r5, 24/11), each seeded from a REAL row.
+--
+-- dispatching: ae2a9231's shape (status dispatching, attempts 1, resume_chain 0, last_error
+--   'deploy ended: resumed now', no message after the pause) - reconcile owns that bound, but the seam's plan owns
+--   the other tick path, so a node whose component bytes are older never reconciles;
+-- pending: the 22/11 row (due 2026-11-22 10:45Z, attempts 1, last_error 'deploy_waiting: waiting for the install of
+--   unknown ...'), which the tick re-stamps on every install and never dispatches.
+local function invariant_ledger(rows)
+  local self_ = { rows = rows, updates = {}, parked = {} }
+  function self_.q(sql, params)
+    params = params or {}
+    if sql:find("FROM self_wake_pauses", 1, true) then return {} end
+    if sql:find("FROM self_wakes", 1, true) then
+      if sql:find("status IN ('pending','dispatching')", 1, true) then return {} end
+      local cutoff = tonumber(params[2]) or 0
+      local out = {}
+      for _, row in ipairs(self_.rows) do
+        local lost = row.status == "unknown" or row.status == "failed"
+          or (row.status == "cancelled" and tostring(row.last_error):find("cancelled before execution", 1, true) ~= nil)
+        if lost and tonumber(row.created_at or 0) >= cutoff then out[#out + 1] = row end
+      end
+      return out
+    end
+    return {}
+  end
+  function self_.ex(sql, params)
+    self_.updates[#self_.updates + 1] = { sql = sql, params = params }
+    return { changes = 1 }
+  end
+  return self_
+end
+
+-- 1. A `dispatching` RESUME ROW IS RECLAIMED ONLY WHEN NOTHING HAPPENED (r5c/r5d, Fable, 24/11).
+--
+-- The row leaves `dispatching` at the END of its turn (selfloop.lua:1214/:1355), so age is a filter. Three facts are
+-- needed: past M.RESUME_DISPATCH_BOUND_SECONDS; the RUN CLAIM answered by the resources store (NOT the ledger: the
+-- claims are in `<data>/resources/claims.sqlite`, and `claim_state` is injected here because the live-shaped test in
+-- scripts/test-selfloop-pause.lua exercises the real store); and zero messages since the dispatch. Any answer that
+-- is not positively "free" - held, unknown, a raise, no capability - keeps the row.
+local THIS_SESSION = "sess-ae2a"
+local function dispatch_ledger(opts)
+  opts = opts or {}
+  local row = { id = "ae2a9231", session_id = THIS_SESSION, owner = "master", attempts = 1, resume_chain = 0,
+    status = "dispatching", created_at = now - 3600, updated_at = now - 400,
+    last_error = "deploy ended: resumed now" }
+  local ledger_ = { rows = { row }, updates = {}, messages = opts.messages or 0, fail_messages = opts.fail_messages }
+  function ledger_.q(sql, params)
+    params = params or {}
+    if sql:find("FROM messages", 1, true) then
+      if ledger_.fail_messages then error("database is locked") end
+      return { { n = ledger_.messages } }
+    end
+    if sql:find("FROM self_wake_pauses", 1, true) then return {} end
+    if sql:find("FROM self_wakes", 1, true) then
+      if sql:find("status='dispatching'", 1, true) then
+        local out = {}
+        for _, candidate in ipairs(ledger_.rows) do
+          if candidate.status == "dispatching" and candidate.updated_at < (tonumber(params[2]) or 0) then
+            out[#out + 1] = { id = candidate.id, session_id = candidate.session_id, updated_at = candidate.updated_at }
+          end
+        end
+        return out
+      end
+      if sql:find("status IN ('pending','dispatching')", 1, true) then return {} end
+      local cutoff = tonumber(params[2]) or 0
+      local out = {}
+      for _, candidate in ipairs(ledger_.rows) do
+        local lost = candidate.status == "unknown" or candidate.status == "failed"
+          or (candidate.status == "cancelled" and tostring(candidate.last_error):find("cancelled before execution", 1, true) ~= nil)
+        if lost and tonumber(candidate.created_at or 0) >= cutoff then out[#out + 1] = candidate end
+      end
+      return out
+    end
+    return {}
+  end
+  function ledger_.ex(sql, params)
+    ledger_.updates[#ledger_.updates + 1] = { sql = sql, params = params }
+    if tostring(sql):find("status='unknown'", 1, true) then
+      for _, candidate in ipairs(ledger_.rows) do
+        if candidate.id == params[2] then candidate.status = "unknown" end
+      end
+    end
+    return { changes = 1 }
+  end
+  return ledger_
+end
+local function run(ledger_, claim)
+  local armed, schedule = scheduler()
+  local asked = 0
+  local out_ = pause.ensure_resumes(now, { read = function() return nil end, exec = ledger_.ex,
+    query = ledger_.q, schedule = schedule, session_exists = function() return true end,
+    migrated = function() return true end, stale_seconds = 300,
+    claim_state = function() asked = asked + 1; if type(claim) == "function" then return claim() end return claim end })
+  return out_, armed, asked
+end
+
+-- 1a. QUIET AND UNCLAIMED: reclaimed, and exactly ONE re-arm.
+local quiet = dispatch_ledger({})
+local out_q, armed_q = run(quiet, "free")
+ok(out_q.rearmed == 1 and #armed_q == 1 and armed_q[1].session == THIS_SESSION,
+  "quiet and unclaimed: exactly one resume wake", json.encode(out_q))
+
+-- 1b. THE CLAIM IS HELD (a long first tool call writes no message yet): untouched, zero wakes.
+local held_rows = dispatch_ledger({})
+local out_c, armed_c, asked_c = run(held_rows, "held")
+ok(asked_c == 1, "the claim was asked of the store, once per stale row")
+ok(out_c.rearmed == 0 and #armed_c == 0,
+  "a held claim means the turn is alive: no second resume", json.encode(out_c))
+
+-- 1c. THE CLAIM ANSWER IS UNKNOWN (no capability, a raise, an empty boot): untouched.
+for _, answer in ipairs({ "unknown", function() error("resources: unavailable") end }) do
+  local unknown_rows = dispatch_ledger({})
+  local out_u, armed_u = run(unknown_rows, answer)
+  ok(out_u.rearmed == 0 and #armed_u == 0,
+    "an unknown claim answer keeps the row", json.encode(out_u))
+end
+
+-- 1d. THE STORE SAYS THE LEASE IS RELEASED (the holder is gone): reclaimed.
+local released = dispatch_ledger({})
+local out_r, armed_r = run(released, "free")
+ok(out_r.rearmed == 1 and #armed_r == 1, "a released lease does not block", json.encode(out_r))
+
+-- 1e. THE MESSAGES LOOKUP FAILS: untouched (r4b's defect, exactly).
+local bad_messages = dispatch_ledger({ fail_messages = true })
+local out_bm, armed_bm = run(bad_messages, "free")
+ok(out_bm.rearmed == 0 and #armed_bm == 0,
+  "a messages lookup that fails keeps the row", json.encode(out_bm))
+
+-- 1f. A LONG TURN THAT HAS WRITTEN: untouched, zero wakes.
+local alive = dispatch_ledger({ messages = 3 })
+local out_a, armed_a = run(alive, "free")
+ok(out_a.rearmed == 0 and #armed_a == 0,
+  "messages since the dispatch mean a running turn: no second resume", json.encode(out_a))
+
+-- 1g. THE BOUND IS THIS MODULE'S OWN 300 s, named, and not the tick's 1800.
+ok(pause.RESUME_DISPATCH_BOUND_SECONDS == 300, "the resume bound is 300 s, its own constant")
+local young = dispatch_ledger({})
+for _, candidate in ipairs(young.rows) do candidate.updated_at = now - 200 end
+local out_y, armed_y = run(young, "free")
+ok(out_y.rearmed == 0 and #armed_y == 0, "a 200 s dispatching row is inside the bound: nothing reclaimed")
+-- 2. A `pending` ROW OVERDUE PAST THE WINDOW CAN NEVER FIRE (the 22/11 row): it is retired, not re-stamped for ever.
+local pending = invariant_ledger({})
+local out_p = pause.ensure_resumes(now, { read = function() return nil end, exec = pending.ex, query = pending.q,
+  schedule = function() error("nothing may be armed for a dead row") end, session_exists = function() return true end,
+  migrated = function() return true end, stale_seconds = 300 })
+local fired = nil
+for _, row in ipairs(pending.updates) do
+  local sql = tostring(row.sql)
+  if sql:find("too old to fire", 1, true) then fired = row end
+end
+ok(fired ~= nil, "an overdue pending row past the window is retired: " .. json.encode({ updates = #pending.updates }))
+ok(tostring(fired and fired.sql):find("status='pending'", 1, true) ~= nil,
+  "and the statement is scoped to pending rows only: " .. tostring(fired and fired.sql))
+ok(out_p.rearmed == 0, "nothing is armed for it", json.encode(out_p))
+
+-- 3. A WAITING DEPLOY neither re-arms nor retires: the two states above are handled BEFORE that gate, so a stuck
+-- row is not held hostage by a deploy that never ends, and a live one is not touched while it waits.
+local waiting_rows = invariant_ledger({ { id = "w2", session_id = "sess-w2", owner = "master", attempts = 3,
+  resume_chain = 0, status = "unknown", created_at = fresh() } })
+local armed_w, schedule_w = scheduler()
+local held_w = pause.ensure_resumes(now, { read = marker_read, exec = waiting_rows.ex, query = waiting_rows.q,
+  schedule = schedule_w, session_exists = function() return true end, migrated = function() return true end })
+ok(held_w.waiting == true and held_w.rearmed == 0 and #armed_w == 0,
+  "a waiting deploy still re-arms nothing", json.encode(held_w))
+ok(#waiting_rows.updates > 0, "but the invariant statements ran first (the reclaim and the retire)")
 local refusal_text = pause.refuse(now, { read = marker_read })
 ok(type(refusal_text) == "string" and refusal_text:find("retry when idle", 1, true) ~= nil,
   'a refusal ends in retry-when-idle, so a runner can tell it from a failure', tostring(refusal_text))
