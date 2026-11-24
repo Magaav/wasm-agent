@@ -690,6 +690,22 @@ check(tostring(back_row.status) == "pending", "it comes back as pending, never f
 check(tostring(back_row.last_error):find("completion_queue_full", 1, true) ~= nil,
   "and the row names the refusal: " .. tostring(back_row.last_error))
 check(tonumber(back_row.due_at) ~= nil and tonumber(back_row.due_at) > r6_now, "with a due time to try again")
+-- (12) A REFUSED START KEEPS THE MESSAGE (r8a/12, Fable 24/11). MEASURED at 10:50Z: two briefs were lost -
+-- `run_resource_refused` (the session's claim was held by its own duplicate node run) and `deploy_waiting` (an
+-- install was waiting). The CLI printed the refusal, exited, and the words never entered the session. Both kinds must
+-- now leave the message as the session's next turn.
+local chat_ok, chat = pcall(dofile, "lua/core/chat.lua")
+check(chat_ok and type(chat) == "table" and type(chat.keep_refused_message) == "function",
+  "chat exposes keep_refused_message")
+for _, refusal in ipairs({ "run_resource_refused: {\"error\":\"resource_busy\"}", "deploy_waiting: an install is waiting" }) do
+  local kept = chat.keep_refused_message(silent_session, "the brief that must survive: " .. refusal, "master", refusal)
+  check(type(kept) == "string", "a refused start keeps the message (" .. refusal:sub(1, 20) .. "): " .. tostring(kept))
+  local kept_row = (json.decode(host.sql_query([[SELECT prompt, status FROM self_wakes WHERE id=?]],
+    json.encode({ kept })) or "[]") or {})[1] or {}
+  check(tostring(kept_row.status) == "pending", "and it is a pending turn of that session: " .. json.encode(kept_row))
+  check(tostring(kept_row.prompt) == "the brief that must survive: " .. refusal,
+    "with the message itself as its prompt: " .. tostring(kept_row.prompt))
+end
 for _, name in ipairs({ "pause", "resume", "paused", "cancel_requested", "cancelled_stop", "settle_interrupted", "defer_refused" }) do
   check(type(selfloop[name]) == "function", "the module exposes " .. name)
 end

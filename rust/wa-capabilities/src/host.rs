@@ -574,7 +574,18 @@ pub(crate) fn run_cancel_requested() -> bool {
     RUN_CANCEL_PROBE.get().map(|probe| probe()).unwrap_or(false) || cli_interrupted() || crate::subagents::cancel_requested()
 }
 
-    /// Answers JSON text (one string the caller decodes with `lua/vendor/json.lua`), never a Lua table.
+/// Answers JSON text (one string the caller decodes with `lua/vendor/json.lua`), never a Lua table.
+/// host.run_state(run_id) -> JSON text of {state: "queued"|"running"|"unknown"}
+///
+/// The Lua side asks this about the run a wake was admitted as (r8a): a resume whose completion is queued or running
+/// is LIVE, and re-arming it would spend a second paid turn behind the first.
+pub extern "C-unwind" fn run_state(l: *mut LuaState) -> c_int {
+    let run_id = unsafe { wa_host_support::lua::lua_tointegerx(l, 1, std::ptr::null_mut()) } as u64;
+    push_json(l, &json!({"state": crate::serve::run_state(run_id)}));
+    1
+}
+
+/// Answers JSON text (one string the caller decodes with `lua/vendor/json.lua`), never a Lua table.
 /// host.run_cancelled() -> JSON text of {cancelled, run_cancel, subagent_cancel}
 ///
 /// `cancelled` is true while either source is set. A foreground run's scoped

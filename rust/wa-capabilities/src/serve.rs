@@ -206,6 +206,15 @@ fn pending_started(run_id: u64) {
     if let Ok(mut list) = pending_registry().lock() { list.retain(|entry| entry.run_id != run_id); }
 }
 
+/// host.run_state(run_id) (r8a): `queued`, `running` or `unknown`, from the same facts /health publishes - the
+/// pending list (admitted, not yet picked up) and the scheduler's live run records.
+pub fn run_state(run_id: u64) -> &'static str {
+    if pending_snapshot().iter().any(|entry| entry.run_id == run_id) {
+        return "queued";
+    }
+    scheduler::run_state(run_id)
+}
+
 fn pending_snapshot() -> Vec<PendingRun> {
     pending_registry().lock().map(|list| list.clone()).unwrap_or_default()
 }

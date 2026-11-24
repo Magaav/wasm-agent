@@ -68,6 +68,12 @@ local SCHEMA = {
     status TEXT NOT NULL DEFAULT 'pending',
     reason TEXT NOT NULL DEFAULT '',
     prompt TEXT NOT NULL DEFAULT '',
+    -- THE RUN THE NODE ADMITTED FOR THIS WAKE (r8a, Fable 24/11). MEASURED live: a resume's completion was admitted
+    -- to a busy lane and its row went `unknown` inside the reconciler while the run was still QUEUED, so the reclaim
+    -- re-armed a duplicate that queued BEHIND on the same lane - never helping, and costing a paid turn later. The
+    -- row now remembers which run it became, so "is this wake still alive?" is answered by the node's own queue rather
+    -- than by a clock.
+    run_id INTEGER,
     due_at REAL,
     every_seconds REAL,
     on_topics TEXT NOT NULL DEFAULT '[]',
@@ -1284,6 +1290,48 @@ function M.finish(row, ok, detail, opts)
   return { status = status, due_at = nil }
 end
 
+-- ONE RESUME TURN PER INTERRUPTION (r8a, Fable 24/11). Two paid turns for one pause were measured live: at 10:19:17Z
+-- a handle wake ("a pending call settled", run 1359) and at 10:21:02Z the deploy resume (run 1360) - six assistant
+-- steps for one interruption; and three resumes of another session sat queued on one lane. So a resume that RUNS
+-- withdraws, before it starts:
+--   * every other resume row of the session that has not run (status pending/dispatching), and
+--   * every pending HANDLE wake of the same session: a deploy resume and a handle settle due together are ONE
+--     interruption, not two (11).
+-- A superseded row's completion answers `self_wake_not_dispatching` and spends no model turn, so whichever route
+-- delivers first wins - node dispatch, re-arm, attended CLI resume or the watchdog.
+function M.withdraw_siblings(row, now)
+  if type(row) ~= "table" or tostring(row.session_id or "") == "" then return { withdrawn = 0 } end
+  local stamp = tonumber(now) or (tonumber(host.now()) or os.time())
+  -- Read the candidates and decide in Lua: a row is a sibling when it is another RESUME of this session or a HANDLE
+  -- wake of it. Matching the reason exactly in SQL was brittle (the stored reason carries the request's own words),
+  -- and a rule that silently matches nothing is the defect class this mission removes.
+  local candidates = query([[SELECT id, reason FROM self_wakes
+    WHERE session_id=? AND id<>? AND status IN ('pending','dispatching')]], { tostring(row.session_id), tostring(row.id) })
+  candidates = type(candidates) == "table" and candidates or {}
+  local withdrawn = 0
+  for _, candidate in ipairs(candidates) do
+    local id = tostring(candidate.id or "")
+    local reason = tostring(candidate.reason or "")
+    local is_handle = id:match("^handle:") ~= nil
+    -- Same reason, or the same opening words: a resume row's stored reason carries the request's own words after the
+    -- shared prefix, so an exact match matched nothing on the live ledger.
+    local wanted = tostring(row.reason or "")
+    local is_resume = reason == wanted or (wanted ~= "" and reason:sub(1, 24) == wanted:sub(1, 24))
+    if is_handle or is_resume then
+      local done = exec([[UPDATE self_wakes SET status='superseded', last_error=?, updated_at=?
+        WHERE id=? AND status IN ('pending','dispatching')]],
+        { is_handle and "superseded: folded into the resume of this session" or "superseded: another resume of this session ran",
+          stamp, id })
+      withdrawn = withdrawn + (type(done) == "table" and tonumber(done.changes) or 0)
+    end
+  end
+  if withdrawn > 0 and type(host) == "table" and type(host.log) == "function" then
+    pcall(host.log, string.format("selfloop: resume of session %s withdrew %d other wake(s) before they ran",
+      tostring(row.session_id), withdrawn))
+  end
+  return { withdrawn = withdrawn }
+end
+
 -- The scheduler's entry (`wa_completion_run` with kind="self_wake").
 -- A WAKE WHOSE TURN THE NODE REFUSED FOR A WAITING BUILD HAS NOT BEEN DELIVERED (23/11).
 --
@@ -1447,22 +1495,10 @@ function M.run_wake(args)
     deferred.session_busy = true
     return deferred
   end
-    -- ONE RESUME TURN PER INTERRUPTION (r8a, Fable 24/11). MEASURED live: runs 1350, 1351 and 1352 of session
-  -- 587c16b6 were all still queued on node-thread 2 (waited 1331/1027/720 s), and as the code stood all three would
-  -- have run when the lane freed - four paid turns for one pause; and at 10:15Z a re-arm queued BEHIND the session's
-  -- own running turn. So a resume that RUNS withdraws its siblings first: every other resume row of this session that
-  -- has not run is marked superseded HERE, before it is started, and a superseded row's own completion answers
-  -- `self_wake_not_dispatching` and spends no model turn. Whichever route delivers first wins - node, re-arm, an
-  -- attended CLI resume or the watchdog - because they all go through this function to run.
+    -- ONE RESUME TURN PER INTERRUPTION (r8a): the withdrawal itself lives in `M.withdraw_siblings`, so a row can
+  -- assert it without starting a turn.
   if tostring(row.reason or "") == tostring(dep("deploy_pause").RESUME_REASON) then
-    local withdrawn = exec([[UPDATE self_wakes SET status='superseded', last_error=?, updated_at=?
-      WHERE session_id=? AND reason=? AND id<>? AND status IN ('pending','dispatching')]],
-      { "superseded: another resume of this session ran", now, row.session_id, row.reason, row.id })
-    local changed = type(withdrawn) == "table" and tonumber(withdrawn.changes) or 0
-    if changed > 0 and type(host) == "table" and type(host.log) == "function" then
-      pcall(host.log, string.format("selfloop: resume of session %s withdrew %d other resume row(s) before they ran",
-        tostring(row.session_id), changed))
-    end
+    M.withdraw_siblings(row, now)
   end
 -- A wake whose only input is a settled handle IS the wake-only round (21/11): counted here, where
   -- the step is about to run, so the number is turns and not sweeps (lua/core/counters.lua).
@@ -1768,6 +1804,11 @@ function M.dispatch_default(row)
   -- three times, until the operator's watchdog resumed the session by hand. Nothing anywhere named the wake, so the
   -- failure was invisible. This line is the dispatch's own record: which wake, which session, and what the node's
   -- queue answered. A receipt that is `accepted` and never becomes a run is now a line an operator can grep.
+  -- The admitted run goes ON THE ROW (r8a): the durable marker `ensure_resumes` needs, so a queued or running run is
+  -- live and a genuine loss is still repaired.
+  if type(receipt) == "table" and receipt.accepted and tonumber(receipt.run_id) then
+    pcall(exec, [[UPDATE self_wakes SET run_id=? WHERE id=?]], { tonumber(receipt.run_id), tostring(row.id) })
+  end
   if type(host) == "table" and type(host.log) == "function" then
     pcall(host.log, string.format("selfloop: dispatched wake %s of session %s (reason %s): %s",
       tostring(row.id), tostring(row.session_id), tostring(row.reason):sub(1, 40), tostring(json.encode(receipt)):sub(1, 200)))
