@@ -452,6 +452,16 @@ measured:
   features, which the components in the gate happened to stay under. `rust/wa-remap-rustc` is the
   compiled twin (no dependencies): Cargo starts it directly, it adds the same flags, waits for the
   real compiler and forwards its exit code. `scripts/build-components.sh` compiles it on demand.
+**The wrapper's own directory comes from `TMPDIR` and does not reach the bytes (measured 24/11).**
+`WA_REMAP_DIR` still defaults to `${TMPDIR:-/tmp}/wa-remap-rustc/<hash of the wrapper sources>`, which moves
+with `TMPDIR` while the build root no longer does - so it was measured rather than assumed: `graph` built
+twice with `TMPDIR=/tmp/tA` and `TMPDIR=/tmp/tB`, distinct target directories, both cold, is
+`0539d026…`, 8,187,401 bytes (the pin) in both cases; the two installed wrapper directories differ in path
+only (same content hash), `RUSTC_WRAPPER` is the bare name `wa-remap-rustc` (`scripts/build-components.sh:269`),
+and neither `TMPDIR`, the wrapper's name, the build root nor the checkout appears anywhere in the artifact
+(0 occurrences each, grepped). A directory chosen by the environment is fine when nothing it holds is a
+build input; the root was not, which is why the root is literal.
+
 * The wrapper is installed once per wrapper source at a path every checkout shares -
   `${TMPDIR:-/tmp}/wa-remap-rustc/<first 16 hex of the sha256 of the wrapper sources>` (`WA_REMAP_DIR`
   overrides) - and that directory goes first on `PATH`. `RUSTC_WRAPPER` is the bare name

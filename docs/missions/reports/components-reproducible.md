@@ -180,6 +180,43 @@ building through the shipped pipeline: **11 of 11 SAME and each is its pin** - `
 `wa-whatsapp ff244623…`. The lock's new sha256 is `bf373b6924dd…`, so the release tag for it is
 `components-bf373b6924dd` (nothing was published).
 
+### Post-review (24/11): the deploy's own path, and TMPDIR
+
+**The deploy as this laptop takes it** - no `WA_DEPLOY_COMPONENT_SOURCE`, no cache for the new lock, a
+scratch install directory, on the merged tip. The installed copy holds the pre-23/11 bytes for six
+components and nothing for the five that moved, and no bundle exists for `components-bf373b6924dd`, so the
+stage had to build from the tree. It did, and every staged byte is the pin:
+
+```
+component_source: agent-core /home/victor/.wasm-agent/components (pinned bytes)
+component_source: codemode this tree (no pinned bytes available: component_release_unavailable: codemode is not cached and the components-bf373b6924dd bundle could not be fetched)
+component_source: graph this tree (no pinned bytes available: … graph …)
+component_source: hooks /home/victor/.wasm-agent/components (pinned bytes)
+component_source: memory /home/victor/.wasm-agent/components (pinned bytes)
+component_source: mesh this tree (no pinned bytes available: … mesh …)
+component_source: model-gateway this tree (no pinned bytes available: … model-gateway …)
+component_source: selfloop /home/victor/.wasm-agent/components (pinned bytes)
+component_source: telemetry-sink /home/victor/.wasm-agent/components (pinned bytes)
+component_source: wa-email this tree (no pinned bytes available: … wa-email …)
+component_source: wa-whatsapp this tree (no pinned bytes available: … wa-whatsapp …)
+component_not_installable absent
+drift: 0 of 11
+```
+
+Six built (`codemode` because its pin moved with the toolchain on 23/11, the other five with the root), five
+from the node's pinned copy, eleven staged, zero drift, `component_not_installable` absent. **Wall time:
+59,332 ms** for the stage - with the cargo cache already warm for this toolchain and target directory; a
+cold machine pays the full build (the cold eleven-component build on this node was ~4 minutes). Nothing was
+missing: `wasi-sdk 34.0` was found, so `graph` (C inside) built here.
+
+**Does `WA_REMAP_DIR`'s `${TMPDIR:-/tmp}` reach the bytes?** No, measured, and it stays as it is: `graph`
+built twice with `TMPDIR=/tmp/tA` and `TMPDIR=/tmp/tB` and distinct target directories, both cold, is
+`0539d026…` / 8,187,401 bytes **both times, and that is the pin**. The two wrapper directories differ in
+path only (same content hash `778bbaafe2fe97a7`), `RUSTC_WRAPPER` is the bare name `wa-remap-rustc`
+(`scripts/build-components.sh:269`), so the resolved path is neither a flag nor Cargo's `-C metadata`, and
+neither `TMPDIR` value, the wrapper's name, the build root nor the checkout appears in the artifact (0
+occurrences each).
+
 ## Rows run, and what they said
 
 No full suite was run (the G-wave rule). Run singly: `scripts/test-component-lock-rebuild.sh` (base red,
