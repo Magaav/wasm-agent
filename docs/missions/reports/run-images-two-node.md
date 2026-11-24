@@ -243,10 +243,9 @@ line. Nothing was created by hand, and no host capability was stood in for.
 
 ## The rows, measured
 
-Every row below was run singly with the binary `scripts/fast.sh` builds for this tree
-(`/home/victor/wasm-agent/target/m-run-images-two-node/release/wa`, built from this tree at
-`b5275831`, code-mode assets embedded), against this tree and against a worktree of the base commit
-(`git worktree add /tmp/base-two-node HEAD` - never a stash):
+Every row below was run singly (this tree's binary, `scripts/fast.sh`'s own release build with
+code-mode assets embedded) and against a worktree of the base commit (`git worktree add /tmp/base-two-node
+HEAD` - never a stash):
 
 | row | this tree | base tree |
 | --- | --- | --- |
@@ -255,16 +254,21 @@ Every row below was run singly with the binary `scripts/fast.sh` builds for this
 | `scripts/test-remote-image.lua` | pass, 47 checks | fails: `... expected remote_image_batch_unsupported, got remote_image_transport_unsupported` |
 | `scripts/test-peer-bash-changes.lua` | pass, 17 checks | fails: 4 of 17, first `the caller emits one row per file: 0` |
 
-**The narrowed runner run did not complete, and this is what stopped it.** `scripts/fast.sh` narrowed to
-`/tmp/rows-run-images-two-node.txt` was started three times under the suite lock. The first was killed
-by a node install (the deploy pause that replaced this session's owner: `operation_owner_not_attached`,
-nothing ran). The second ran and reported 31/33: it built this tree's binary with code-mode assets, and
-its two failures were the two faults this branch then fixed (`d1982e9e` - the batch's byte answer was
-not refused, and the row's image check said only "0"). The third waited 10 minutes behind two other
-missions' runs that held `~/Work/missions/.suite.lock` (32 and 22 minutes at the time of writing) and
-was cancelled rather than left queued when this session ended: no work of this branch is running.
-So the contract checks and the never-dropped core rows have no runner verdict from this session - the
-first run's own verdict for them was green (31/33 with exactly the two rows above red). The run's
-other red, `esc-stops-pty` (`scripts/test-esc-stops-pty.mjs`, a pty row this branch does not touch),
-is PRE-EXISTING and measured: `17 ok, 1 failed` with `FAIL - bash: Esc ends the run at once ...` in
-this tree AND in the base worktree `/tmp/base-two-node`, same check, same words.
+**The narrowed runner run, finally measured.** `scripts/fast.sh` narrowed to six rows of this branch
+(plus the never-dropped core rows and every contract check) at `5d292c55`:
+
+    fast: narrowed by the landing plan: 30 of 366 Lua rows
+    fast: lua 30/30 passed
+    fast result FAILED (128 checks, 2 failed, 0 skipped)
+
+Both reds are PRE-EXISTING and measured with the same words in this tree and in the base worktree:
+`esc-stops-pty` (`17 ok, 1 failed`, `FAIL - bash: Esc ends the run at once ...`) and `install-guards`
+(`72 checks, 6 failed`). Neither file is touched by this branch.
+
+Getting there took four runs, and the reason is worth recording: the first was killed by the node
+install (`operation_owner_not_attached`, nothing ran); the second reported `31/33` with the two faults
+this branch then fixed; the third and fourth showed the two-node row red IN THE RUNNER while it was
+green alone. That was the row's own fault, not the product's: `rounds=0` said the agent never asked for
+a model round, because the row relied on THE CALLING SHELL exporting `WASM_AGENT_LLM_*`. It now stands
+in for those five names itself (`5d292c55`), the way `scripts/test-remote-image.lua` already did, and
+it passes under `env -i` with nothing of the operator's: 38 checks.
