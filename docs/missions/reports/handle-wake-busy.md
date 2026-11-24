@@ -170,3 +170,19 @@ and passes on the fix: `handle wake busy ok (33 checks)`.
 The other rows were re-run on the fixed tip, all green: `test-handle-wake` 21, `test-codemode-pending` 108,
 `test-codemode-wait-shape` 25, `test-operation-survives-turn` 16, `test-cli-wake-row` 30, `test-deploy-pause`
 100, `test-selfloop-pause` 129.
+
+
+## One corner this fix does NOT close, named
+
+A wake whose turn STARTS (so `claim_due` leaves it `dispatching` and `M.announce` marks the handle reported) and
+then FAILS before the model reads its prompt - a provider error, a preflight refusal that is not a resource
+refusal - ends the row `failed`, and the handle stays `reported`, so a later script will not announce it
+either. The news did reach a turn's input in the ordinary case (the wake prompt carries the answer), and the
+failure is recorded by `lua/core/run_failure.lua`; but a turn that dies before the model call means the model
+never saw it.
+
+Closing it properly means clearing `reported` on the handle when a wake turn fails terminally, which needs
+selfloop to reach the pending index for an op whose SCOPE it does not know (the scope is on the handle record,
+not on the wake row). That is a small contract of its own - a `codemode_pending.clear_reported(op)` that walks
+the scope indexes - and it is a separate, reviewable change rather than a line smuggled into this one. Named
+here so the next reader measures it instead of assuming the one-notice contract covers it.
