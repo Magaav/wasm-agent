@@ -274,6 +274,26 @@ by passing `None` at both call sites - test-only, no assertion touched.
   unproven-on-base rather than as "pre-existing": the one pre-existing failure I did prove is the
   `foreground` arity above.
 
+### Rows run SINGLY (orchestrator 24/11 ~04:08Z: do not wait on the shared suite lock)
+
+The narrowed `fast.sh` run below did complete - it queued ~40 minutes behind another mission's
+`flock ~/Work/missions/.suite.lock` before it could start - but the rows that matter for this diff were
+ALSO run singly, each with its own scratch `WASM_AGENT_HOME` and a scratch component directory, no lock,
+through the same binary the fast path builds (`target/m-whatsapp-read-is-consistent/release/wa`):
+
+| row | result |
+| --- | --- |
+| `scripts/test-whatsapp-one.lua` | 207 checks passed |
+| `scripts/test-prompt-tool-names.lua` | 286 checks, 0 skipped |
+| `scripts/test-whatsapp-send.lua` | 74 checks, 0 skipped |
+| `scripts/test-whatsapp-one-surface.lua` | 52 checks |
+| `scripts/test-return-shapes.lua` | 39 checks |
+| `scripts/test-host-return-docs.lua` | 10 checks (40 JSON-text capabilities documented) |
+| `scripts/test-whatsapp-names.lua` | 8 checks |
+
+All seven passed. The narrowed run is kept below as the record of the whole-check pass (the contract
+checks inside `scripts/fast.sh` that a single row cannot run), not as the evidence for these rows.
+
 ### The narrowed run after the 24/11 items
 
 `flock -o ~/Work/missions/.suite.lock env WA_FAST_ROWS=<rows> bash scripts/fast.sh` with
