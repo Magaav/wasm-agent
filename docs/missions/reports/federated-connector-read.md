@@ -117,8 +117,14 @@ be blamed on the stub. `scripts/test-federated-connector-read-node.lua` is one n
 (`setup | local | call`), run as a `wa --script` process in each home; run on its own it prints
 `SKIP …` because it has no verdict without the harness (`39079381`).
 
-Wired into **`scripts/test.sh`**, beside the two-node speech row:
-`gate_run node scripts/test-federated-connector-read.mjs "$BIN"` (`8cb49201`).
+Wired in **two** places, because "joins main-health" means "runs in the fast path" —
+`scripts/main-health.sh` records a verdict about main by running `scripts/fast.sh`:
+
+- **`scripts/test.sh:1749`** — `gate_run node scripts/test-federated-connector-read.mjs "$BIN"`, beside the
+  two-node speech row (`8cb49201`);
+- **`scripts/fast.sh:1299`** — `WA_BIN="$bin" check federated-connector-read node
+  scripts/test-federated-connector-read.mjs` (`9863a226`), measured at **3.8 s** wall on this node, so it
+  costs the fast path four seconds to be able to say the cross-node connector read is green.
 
 Hermetic: every `WA_*`/`WASM_AGENT_*` variable (vault included) is dropped before any child starts, and the
 harness refuses to run when `WASM_AGENT_HOME` is the real `~/.wasm-agent`. It honours an inherited
