@@ -220,6 +220,36 @@ New or changed model- or operator-facing strings, verbatim. Field names first, t
 19. `SKIP this file is one node's half of scripts/test-federated-connector-read.mjs; it has no verdict of its own`
 20. `  work kept: <path>` (only with `WA_FED_KEEP=1`)
 
+## 6b. The second round (`c066c713`): nothing outlives the call, and the old peer named
+
+Fable's G-blocker round, with the measurements in `ready-fix.md`:
+
+- **The leftover is ~30 s, not 3600 s.** Measured on a matched buggy build: the read session's row sits
+  `accepted` under `relay:<rid>` for ~25-30 s and then settles by its own idle timer (`idle_ms=30000`);
+  3600 is the operation's timeout cap. During that window `/health` carries the id in `operations` — the
+  field `wa-sentinel`'s `activity_of` reads — so a deploy asked for in the window is held with "the node
+  is busy: a run, a subagent or an operation is in flight". After it, idle.
+- **An operation whose process is gone does not stay running**: read from another process it answers
+  `settled:true, state:"outcome_unknown"` with `operation_owner_not_attached` and an `owner_gone_note`.
+  No restart item is needed, and `health()` (unsettled only) does not hold maintenance for it.
+- **The fix** is one exit in `lua/core/mcp_session.lua` (`done()`): a peer call closes the session it
+  started, on success, on every failure return and on timeout, under the owner the start receipt answered.
+  A node's own turn keeps its pooled session. `Caller::owns` is untouched, and the row proves it: a second
+  relay id is refused by name on the first one's operation.
+- **The old peer is named, not excused** (`lua/core/federation.lua`, allow-listed on exactly
+  `mcp_session_startup_failed` + `operation_not_yours`): `<peer> runs a build that cannot serve connector
+  calls for another node; update <peer>`, with the inner cause, the owner, and the statement that the
+  connector server was not contacted. A caller cannot cancel an operation another node owns, and does not
+  pretend to.
+- **The row is 13 checks** now: the read through `federation.call` (the model's route), the write door, the
+  relay lane's owner, the foreign relay id refused by name, and nothing left running. `WA_FED_PEER_BIN`
+  runs the same row against an un-updated peer (11 checks).
+- **Red on `2d7ac300`** (the base Fable named), matched build + its own Lua: **3 of 13** — the read, the
+  write, and "nothing the federated read started is still running on the peer".
+- **Still not proved**: the direct (non-relay) carrier and the mesh carrier (the scratch peer never got an
+  endpoint into the roster), and the sentinel's own `request` command was not run — the hop from the
+  measured `/health` body to "held: node busy" is its code, cited line by line.
+
 ## 7. What this report does NOT claim
 
 - **The direct (non-relay) cross-node arm was not proved.** In the scratch fixture the peer's roster entry

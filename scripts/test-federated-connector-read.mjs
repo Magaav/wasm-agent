@@ -233,7 +233,6 @@ async function main() {
     WASM_AGENT_RENDEZVOUS: service, WASM_AGENT_RELAY: service});
   const answer = call.call || {};
   if (OLD_PEER) {
-    console.log('  (route detail: ' + JSON.stringify(call).slice(0, 700) + ')');
     // A CALLER CANNOT FIX A PEER. What it must do is say so: the peer's own inner refusal stays in `detail`
     // and `peer_detail`, and the answer names the node and the one action that works.
     check(answer.error === 'peer_connector_needs_update',
@@ -262,8 +261,10 @@ async function main() {
     return finish(fails === 0 ? 0 : 1);
   }
   const echoed = answer.result && answer.result.structuredContent && answer.result.structuredContent.value;
-  check(answer.ok === true && echoed && echoed.federated === 1,
-    'the federated connector read answers the caller', JSON.stringify(call).slice(0, 600));
+  // The payload is the one `through_federation` sent, because this check drives the MODEL'S route
+  // (federation.call), not the capability underneath it: that is the path a peer_<node>__<tool> call takes.
+  check(answer.ok === true && echoed && echoed.through === 'federation',
+    'the federated connector read answers the caller (through federation.call)', JSON.stringify(call).slice(0, 600));
 
   // (c) THE SECOND DOOR: a tool the registry declares a WRITE goes through the one-shot client, not the read
   // pool, and names its own owner on its start and its await. It failed the same way and is fixed the same way.
