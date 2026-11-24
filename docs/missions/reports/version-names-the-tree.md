@@ -85,6 +85,50 @@ Also green on the same binary: `scripts/test-version-prints-once.sh` (10 checks 
 (`cargo test -p wa-host build_info`: 13 passed, including the new
 `install_label_names_the_tree_when_the_bytes_are_older`).
 
+## Checks run
+
+Narrowed fast path (`WA_FAST_ROWS=/tmp/rows-version.txt`: `test-build-identity.lua`,
+`test-cli-notice.lua`, `test-cli-view.lua`, `test-update-banner.lua`; no full suite, no suite lock),
+`CARGO_TARGET_DIR=/home/victor/wasm-agent/target/m-version-names-the-tree`.
+
+The row this change adds, and the rows around it, on a binary built from this commit:
+
+    scripts/test-version-names-the-tree.sh    version names the tree: ok (7 checks)
+    scripts/test-version-prints-once.sh       version-once ok (10 checks)
+    scripts/test-build-info.sh                test-build-info: 23 checks, 0 failed
+    scripts/test-health-build-label.sh        health build label: ok (5 checks)
+    cargo test -p wa-host build_info          13 passed, 0 failed
+    scripts/test-land-plan.lua                land ok (109 checks)   <- a canary row, see below
+
+and red on the PRE-CHANGE binary (the installed build 9a0c589a):
+
+    FAIL --version does not name the tree fe108a8cac89 (it said: wasm-agent v0.1.2 · v9a0c589a)
+    FAIL /health says '9a0c589a' and not the tree fe108a8cac89
+
+The narrowed run reported failures in both of its passes, and **none of them was this change**. The
+lesson is worth writing down, because it cost two runs:
+
+- the FIRST pass graded a binary this session built by hand with plain `cargo build`, which leaves
+  `WA_BUILD_SOURCE_COMMIT` empty. `lua/core/build_status.lua` reads that compile-time stamp
+  (`host.runtime_info`), so its `relation` answered `unknown` and the land rows' canaries said
+  `release-update (identity_unknown)`, while `test-build-info.sh` compared a dirty build against a clean
+  commit. With the stamp the runner uses
+  (`WA_BUILD_SOURCE_COMMIT=$(git rev-parse HEAD) WA_BUILD_SOURCE_TREE=$(git rev-parse HEAD^{tree})`) those
+  rows are green - `test-build-info: 23 checks, 0 failed`, relation `fresh` - and
+  `scripts/test-land-plan.lua` passes singly (`land ok (109 checks)`).
+- the SECOND pass (a stamped binary) still shows 20 of 139 checks failing, none of them on a file this
+  branch touches, and every one with an environmental cause on the evidence itself: `install-guards` fails
+  with `upgrade: refused inside a turn running on the node it would replace` (this machine has live chat
+  sessions), `deploy-bound` with `held 31s, past the 1s bound ... none of the 2 holder(s) ... can be hurt`,
+  the pty rows (`run-live-pty`, `script-output-pty`, `bash-changes-pty`, `run-block-pty`) against the model
+  provider, `release-channel`/`test-release-channel-e2e` on a real `release-linux.sh` build, and the ten
+  `test-land-*` rows, which pass singly with this exact binary and time out only under the parallel run.
+  `main-health` owns them, and the bill is a function of how loaded this node was, not of this diff (which
+  touches one Rust function, one doc, one row and one wiring line).
+
+The four Lua rows this change could reach - `test-build-identity`, `test-cli-notice`, `test-cli-view`,
+`test-update-banner` - **pass** in both passes.
+
 ## Texts to approve
 
 1. `wasm-agent v<product> · v<bytes 8 hex> · tree <tree 12 hex>` - the version line when the install runs a
