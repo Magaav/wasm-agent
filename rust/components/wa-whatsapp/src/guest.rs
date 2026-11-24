@@ -2022,6 +2022,19 @@ async fn ocr_tick(cfg: &IndexConfig) -> bool {
     true
 }
 
+/// What the node itself can say about the pipe: when it last wrote a message into the index, and whether
+/// the transport is up.
+///
+/// "This chat is quiet" and "the pipe is stuck" are different facts, and 23/11 an agent spent four
+/// sources telling them apart (log uptime, another chat, the alias, the group). `last_received_s` is
+/// seconds since ANY message was received and indexed on this node; `connected` is the transport, read
+/// from the one place that knows it (the client this instance holds and its own bot state).
+fn receive_freshness(now: i64) -> (Option<i64>, bool) {
+    let last = health::snapshot().last_index_ms;
+    let connected = CLIENT.with(|client| client.borrow().is_some()) && !matches!(bot(), outbox::Bot::Stopped);
+    (last.map(|last| ((now - last).max(0)) / 1000), connected)
+}
+
 /// Most pending ids one read or search answer lists by name. The count is exact (`pending_total`); the
 /// list is the tail, which is what a caller's own just-sent message is in.
 const PACE_PENDING: usize = 8;
@@ -2122,7 +2135,7 @@ async fn query_tick(cfg: &IndexConfig) -> bool {
         }
     };
     let op = request.op;
-    let answer = match op {
+    let mut answer = match op {
         // Both answer with how caught up the writer is (`index::Pace`): the records this component has
         // accepted and not written yet, and whether a catch-up is running. A read that cannot show a
         // message it already has says so (`pending`) instead of answering with the picture from before it.
@@ -2136,6 +2149,32 @@ async fn query_tick(cfg: &IndexConfig) -> bool {
         // Which chat a name means (`whatsapp_contacts`), and the same resolution `read` uses.
         seam::Op::Contacts => index::contacts(&IndexKv, &request).await,
     };
+    // A read or a search describes the index, so it also says how fresh the index itself is: the node's
+    // own receive freshness and the transport, in the same result. A refusal is left alone - it answers
+    // a question about the request, not about the index.
+    if matches!(op, seam::Op::Read | seam::Op::Search) {
+        if let Ok(body) = answer.as_mut() {
+            if body.get("ok") == Some(&serde_json::Value::Bool(true)) {
+                let (last_received_s, connected) = receive_freshness(now_ms());
+                body["last_received_s"] = match last_received_s {
+                    Some(seconds) => serde_json::Value::from(seconds),
+                    None => serde_json::Value::Null,
+                };
+                body["last_received_note"] = match last_received_s {
+                    Some(seconds) => serde_json::Value::String(format!(
+                        "this node last wrote a message into its index {seconds}s ago, from any chat: a quiet answer here is this chat, not the pipe"
+                    )),
+                    None => serde_json::Value::String("this node has not written any message into its index since it started".into()),
+                };
+                body["connected"] = serde_json::Value::Bool(connected);
+                if !connected {
+                    body["connected_note"] = serde_json::Value::String(
+                        "the WhatsApp transport is not connected: nothing new can arrive until it reconnects, so an empty or old answer is the pipe and not the chat".into(),
+                    );
+                }
+            }
+        }
+    }
     match answer {
         Ok(answer) => {
             // The answer is already bounded (`wa_whatsapp_index::bound`): the queue refuses an oversized

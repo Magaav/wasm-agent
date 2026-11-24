@@ -2755,10 +2755,135 @@ fn a_search_says_how_new_its_newest_match_is_and_how_caught_up_the_writer_is() {
     let answer = block_on(search(&store, &search_request("boleto"))).unwrap();
     assert_eq!(answer["as_of"], base(), "{answer}");
     assert_eq!(answer["as_of_scope"], "matches", "a search is not one chat, and says so");
-    assert_eq!(answer["order"]["direction"], "newest_first");
+    // A search with terms and no chat narrows to relevance (item G), and says so in the answer.
+    assert_eq!(answer["order"]["by"], "relevance");
+    assert_eq!(answer["order"]["direction"], "best_first");
     assert_eq!(answer["index"]["state"], "current");
     // Nothing matched: no as_of, and the shape is still the same shape.
     let none = block_on(search(&store, &search_request("inexistente"))).unwrap();
     assert_eq!(none["as_of"], serde_json::Value::Null);
     assert_eq!(none["index"]["state"], "current");
+}
+
+#[test]
+fn a_chat_scoped_search_answers_newest_first_and_says_so() {
+    // Item G (23/11): a search of one chat answered OLD audios by relevance and a reader took the list
+    // for the tail of the conversation. Scoped to a chat, the default is newest first, and the answer
+    // names the order and the newest match's time (`as_of`) so "nothing newer" is never inferred.
+    let store = Memory::new();
+    block_on(put(&store, &direct(FRESH_CHAT, "Ana", "G1", base(), "segue o boleto antigo"))).unwrap();
+    block_on(put(&store, &direct(FRESH_CHAT, "Ana", "G2", base() + 60_000, "segue o boleto novo"))).unwrap();
+    let ask = verified(seam::Request { op: "search".into(), q: Some("boleto".into()), chat: Some(FRESH_CHAT.into()), ..Default::default() });
+    let answer = block_on(search(&store, &ask)).unwrap();
+    let ids: Vec<&str> = answer["hits"].as_array().unwrap().iter().map(|hit| hit["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, vec!["G2", "G1"], "newest first: {answer}");
+    assert_eq!(answer["order"]["by"], "newest");
+    assert_eq!(answer["order"]["key"], "ts");
+    assert_eq!(answer["order"]["direction"], "newest_first");
+    assert_eq!(answer["as_of"], base() + 60_000);
+    // Every hit carries when it was sent, so a list can be read in time.
+    assert_eq!(answer["hits"][0]["at"], base() + 60_000);
+    assert!(answer["hits"][0]["at_iso"].as_str().unwrap().ends_with('Z'));
+    // The caller may still ask for relevance, and then the answer says which order that was.
+    let by_relevance = verified(seam::Request { op: "search".into(), q: Some("boleto".into()), chat: Some(FRESH_CHAT.into()), order: Some("relevance".into()), ..Default::default() });
+    let answer = block_on(search(&store, &by_relevance)).unwrap();
+    assert_eq!(answer["order"]["by"], "relevance");
+    assert_eq!(answer["order"]["key"], "score");
+    assert!(answer["order"]["note"].as_str().unwrap().contains("NOT in date order"), "a relevance list says it is not a date list: {answer}");
+    assert_eq!(answer["as_of"], base() + 60_000, "even by relevance, as_of says how new the newest match is");
+}
+
+#[test]
+fn a_search_with_no_terms_answers_newest_first_and_a_relevance_search_keeps_its_order() {
+    let store = Memory::new();
+    block_on(put(&store, &direct(FRESH_CHAT, "Ana", "N1", base(), "primeiro"))).unwrap();
+    block_on(put(&store, &direct(FRESH_CHAT, "Ana", "N2", base() + 5_000, "segundo"))).unwrap();
+    // No query terms: "what arrived" is the question, so newest first.
+    let plain = verified(seam::Request { op: "search".into(), chat: Some(FRESH_CHAT.into()), ..Default::default() });
+    let answer = block_on(search(&store, &plain)).unwrap();
+    assert_eq!(answer["hits"][0]["id"], "N2", "{answer}");
+    assert_eq!(answer["order"]["by"], "newest");
+    // Terms across the account: relevance, which the answer says out loud.
+    let across = verified(seam::Request { op: "search".into(), q: Some("segundo".into()), ..Default::default() });
+    let answer = block_on(search(&store, &across)).unwrap();
+    assert_eq!(answer["order"]["by"], "relevance");
+}
+
+#[test]
+fn a_message_this_node_sent_is_in_search_the_moment_its_record_is_written() {
+    // Item C, the evidence of 24/11: after a send the component reports as delivered, a search did not
+    // return the message, so delivery was confirmed only from the component log. The component writes
+    // the sent record into the index before the send answers, and this is that record: the same store
+    // answers a search for its text and a read of its chat.
+    let store = Memory::new();
+    let sent = Record {
+        chat: FRESH_CHAT.into(),
+        id: "SENT9".into(),
+        sender: FRESH_CHAT.into(),
+        own: true,
+        ts: base() + 90_000,
+        received: base() + 90_000,
+        kind: "text".into(),
+        text: "mensagem que acabei de mandar".into(),
+        source: crate::record::SOURCE_LIVE.into(),
+        ..Record::default()
+    };
+    assert!(block_on(search(&store, &search_request("acabei"))).unwrap()["hits"].as_array().unwrap().is_empty(), "nothing yet");
+    block_on(put(&store, &sent)).unwrap();
+    let hits = block_on(search(&store, &search_request("acabei"))).unwrap();
+    assert_eq!(hits["count"], 1, "a message this node sent is searchable at once: {hits}");
+    assert_eq!(hits["hits"][0]["id"], "SENT9");
+    assert_eq!(hits["hits"][0]["chat"], FRESH_CHAT);
+    assert_eq!(hits["as_of"], base() + 90_000);
+    let read = read_of(&store, FRESH_CHAT);
+    assert_eq!(read["messages"][0]["id"], "SENT9", "and a read of the chat holds it: {read}");
+    assert_eq!(read["as_of"], base() + 90_000);
+}
+
+#[test]
+fn a_chat_whose_last_two_messages_are_a_text_and_a_voice_note_reads_both_with_the_transcript_inline() {
+    // Item D, the evidence of 24/11: the useful answer was a text and the new request a voice note, and
+    // without the transcript inline a reader would have missed it. Both are in the thread, in order, and
+    // the note carries its transcript as `text` (plus `transcript` and the way to the whole one).
+    let store = Memory::new();
+    let mut note = direct(FRESH_CHAT, "Ana", "V2", base() + 1_000, "");
+    note.kind = "voice".into();
+    note.transcript = "item quatro: revisar o contrato".into();
+    block_on(put(&store, &direct(FRESH_CHAT, "Ana", "T1", base(), "resposta util"))).unwrap();
+    block_on(put(&store, &note)).unwrap();
+    let read = read_of(&store, FRESH_CHAT);
+    let messages = read["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0]["id"], "V2", "newest first: {read}");
+    assert_eq!(messages[0]["text"], "item quatro: revisar o contrato", "the note's text IS the transcript");
+    assert_eq!(messages[0]["transcript"], "item quatro: revisar o contrato");
+    assert_eq!(messages[0]["kind"], "voice");
+    assert_eq!(messages[1]["id"], "T1");
+    assert_eq!(messages[1]["text"], "resposta util");
+    assert_eq!(read["as_of"], base() + 1_000);
+    // ...and a search finds the voice note by what was said in it.
+    let hits = block_on(search(&store, &search_request("revisar"))).unwrap();
+    assert_eq!(hits["count"], 1, "a search finds a note by its transcript: {hits}");
+    assert_eq!(hits["hits"][0]["id"], "V2");
+    assert_eq!(hits["hits"][0]["text"], "item quatro: revisar o contrato");
+}
+
+#[test]
+fn a_search_that_mixes_chats_labels_every_hit_with_its_chat_and_a_read_never_mixes_them() {
+    // What "among messages from other chats" means for a read: a read is one chat by construction (it
+    // refuses without one), and a search that spans chats labels every row with the chat it came from,
+    // so a message is never read as belonging to the conversation the reader had in mind.
+    let store = Memory::new();
+    block_on(put(&store, &direct(FRESH_CHAT, "Ana", "M1", base(), "o boleto da Ana"))).unwrap();
+    block_on(put(&store, &direct(OTHER, "Bia", "M2", base() + 1_000, "o boleto da Bia"))).unwrap();
+    let hits = block_on(search(&store, &search_request("boleto"))).unwrap();
+    assert_eq!(hits["count"], 2);
+    let chats: Vec<&str> = hits["hits"].as_array().unwrap().iter().map(|hit| hit["chat"].as_str().unwrap()).collect();
+    assert!(chats.contains(&FRESH_CHAT) && chats.contains(&OTHER), "each hit names its chat: {hits}");
+    for hit in hits["hits"].as_array().unwrap() {
+        assert!(hit["chat_name"].as_str().is_some_and(|name| !name.is_empty()), "and the chat's name: {hit}");
+    }
+    // A read without a chat is refused, not answered with a mixture.
+    let bare = seam::Request { op: "read".into(), ..Default::default() }.validate();
+    assert_eq!(bare.unwrap_err().code, "chat_required");
 }

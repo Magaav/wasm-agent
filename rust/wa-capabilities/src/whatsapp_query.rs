@@ -197,6 +197,8 @@ fn request_of(op: seam::Op, args: &Value) -> Result<seam::Verified, seam::Refusa
         before: text("before"),
         limit: limit.map(|value| value.min(u32::MAX as u64) as u32),
         max_bytes: args.get("max_bytes").and_then(Value::as_u64),
+        // `search` only (`seam::Order`); the seam refuses it on any other op rather than ignoring it.
+        order: args.get("order").and_then(Value::as_str).map(str::to_string),
     };
     request.validate()
 }

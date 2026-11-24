@@ -2502,7 +2502,7 @@ pub async fn search_paced<S: Store>(store: &S, request: &seam::Verified, pace: &
                 "hits": [], "count": 0, "note": "q has no searchable token",
                 "as_of": serde_json::Value::Null, "as_of_iso": serde_json::Value::Null,
                 "as_of_scope": "matches",
-                "order": order_block(),
+                "order": search_order_block(order_of(request)),
                 "index": index_state(pace, 0),
             }),
         ));
@@ -2546,13 +2546,24 @@ pub async fn search_paced<S: Store>(store: &S, request: &seam::Verified, pace: &
         };
         hits.push((score, hit_json(&record, score, &chat_name)));
     }
-    // Best first; between equals, the newest first; between those, a stable id order so one query
-    // answered twice returns the same order.
-    hits.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| {
-        let a_ts = a.1["ts"].as_i64().unwrap_or(0);
-        let b_ts = b.1["ts"].as_i64().unwrap_or(0);
-        b_ts.cmp(&a_ts).then_with(|| a.1["id"].as_str().cmp(&b.1["id"].as_str()))
-    }));
+    // The order this answer is in, decided once: `newest` for a chat-scoped search or one with no query
+    // terms (what a person means by "what is new"), `relevance` otherwise (what a person means by
+    // searching). An explicit `order` always wins, and the answer says which one it used either way.
+    let order = order_of(request);
+    match order {
+        seam::Order::Newest => hits.sort_by(|a, b| {
+            let a_ts = a.1["ts"].as_i64().unwrap_or(0);
+            let b_ts = b.1["ts"].as_i64().unwrap_or(0);
+            b_ts.cmp(&a_ts).then_with(|| a.1["id"].as_str().cmp(&b.1["id"].as_str()))
+        }),
+        // Best first; between equals, the newest first; between those, a stable id order so one query
+        // answered twice returns the same order.
+        seam::Order::Relevance => hits.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| {
+            let a_ts = a.1["ts"].as_i64().unwrap_or(0);
+            let b_ts = b.1["ts"].as_i64().unwrap_or(0);
+            b_ts.cmp(&a_ts).then_with(|| a.1["id"].as_str().cmp(&b.1["id"].as_str()))
+        })),
+    }
     let total = hits.len();
     // How new the newest thing this search matched is. A search is not one chat, so the scope is said
     // out loud rather than passing a match's time off as the index's own freshness.
@@ -2576,7 +2587,7 @@ pub async fn search_paced<S: Store>(store: &S, request: &seam::Verified, pace: &
             "as_of": if as_of > 0 { serde_json::Value::from(as_of) } else { serde_json::Value::Null },
             "as_of_iso": if as_of > 0 { serde_json::Value::String(crate::view::iso(as_of)) } else { serde_json::Value::Null },
             "as_of_scope": "matches",
-            "order": order_block(),
+            "order": search_order_block(order),
             "index": index_state(pace, as_of),
         }),
     ))
@@ -2652,6 +2663,41 @@ fn index_state(pace: &Pace, as_of: i64) -> serde_json::Value {
 /// The order a read answers in, said out loud so a caller can page it and compare two answers.
 fn order_block() -> serde_json::Value {
     serde_json::json!({"key": "ts", "direction": "newest_first", "cursor": "next_before"})
+}
+
+/// Which order a search answers in: the caller's, else the default the question itself implies.
+///
+/// A search narrowed to one chat is a question about a conversation, and a search with no query terms is
+/// a question about what arrived: both mean "newest first". A search with terms across the account is a
+/// question about relevance, and stays there unless the caller says otherwise.
+fn order_of(request: &seam::Verified) -> seam::Order {
+    request.order.unwrap_or_else(|| {
+        if request.chat.is_some() || request.q.is_none() {
+            seam::Order::Newest
+        } else {
+            seam::Order::Relevance
+        }
+    })
+}
+
+/// The order a search answered in. A search is not one chat and has no cursor: it says which key it
+/// sorted by, so "newest" is never inferred from a relevance list (23/11: a search of old audios
+/// answered them by relevance and a reader took the list for the tail of the conversation).
+fn search_order_block(order: seam::Order) -> serde_json::Value {
+    match order {
+        seam::Order::Newest => serde_json::json!({
+            "by": "newest",
+            "key": "ts",
+            "direction": "newest_first",
+            "note": "newest message first: the top of this list is the newest message that matched",
+        }),
+        seam::Order::Relevance => serde_json::json!({
+            "by": "relevance",
+            "key": "score",
+            "direction": "best_first",
+            "note": "best match first: this list is NOT in date order, so an older message may be above a newer one; as_of says how new the newest match is",
+        }),
+    }
 }
 
 /// The addresses one chat is known by: the one asked for, and the other form when the index learned the
@@ -2921,6 +2967,16 @@ pub async fn read_paced<S: Store>(store: &S, request: &seam::Verified, pace: &Pa
         // The other address this chat is known by, said out loud: a caller that passes the phone number
         // and a caller that passes the `@lid` are reading the same messages.
         answer["addresses"] = serde_json::Value::Array(addresses.iter().map(|address| serde_json::Value::String(address.clone())).collect());
+        // ...and WHICH form was resolved, in words, so nobody tests the alias by hand (23/11: an agent
+        // read the same chat under both forms and the group to find out whether the alias was why
+        // nothing was new).
+        let form = |jid: &str| if jid.ends_with("@lid") { "lid" } else { "phone" };
+        answer["resolved_form"] = serde_json::Value::String(format!("{} -> {}", form(&addresses[0]), form(&addresses[1])));
+        answer["resolved_note"] = serde_json::Value::String(format!(
+            "asked by {}; the same person is also known by {} here, and this answer holds both",
+            form(&addresses[0]),
+            form(&addresses[1])
+        ));
     }
     if !pending.is_empty() {
         answer["pending"] = serde_json::Value::Array(pending);

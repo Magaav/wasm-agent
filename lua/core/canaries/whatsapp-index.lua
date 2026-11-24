@@ -33,6 +33,13 @@ local function read_once(chat)
   if type(answer.messages) ~= 'table' then
     return { ok = false, stage = 'read_no_messages', detail = 'the read carried no message list' }
   end
+  -- Item B (23/11): "this chat is quiet" and "the pipe is stuck" are told apart in the same result.
+  if answer.last_received_s ~= nil and type(answer.last_received_s) ~= 'number' then
+    return { ok = false, stage = 'read_no_receive_freshness', detail = 'last_received_s is not a number of seconds' }
+  end
+  if type(answer.connected) ~= 'boolean' then
+    return { ok = false, stage = 'read_no_connected', detail = 'the read did not say whether the transport is connected' }
+  end
   return { ok = true, as_of = answer.as_of }
 end
 
@@ -62,7 +69,7 @@ function M.run()
     if second.as_of < first.as_of then
       return false, 'read_went_backwards', 'a later read answered an older picture (as_of went from a later time to an earlier one)'
     end
-    return true, 'read', 'the index knows ' .. #list .. ' chat(s); a read answers as_of, order newest-first and a current writer'
+    return true, 'read', 'the index knows ' .. #list .. ' chat(s); a read answers as_of, order, index state, receive freshness and the transport, and a later read is never older'
   end)
   if not ran then return false, 'send_attempted', tostring(ok) end
   return ok, stage, detail
