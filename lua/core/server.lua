@@ -1950,18 +1950,6 @@ function wa_managed_capabilities()
 end
 
 function wa_node_call(payload, from, public_key, ts, signature, mesh)
-  -- THE ATTESTATION ARRIVES AS JSON TEXT ON THE REAL PATH (measured 24/11 on a scratch pair). The host
-  -- hands every argument over with `lua_pushlstring` (rust/wa-host-support/src/lua.rs `call_string`), so
-  -- the mount's signed proof reaches this function as a string, while scripts/test-mesh-attest.lua hands
-  -- over the table it decoded itself. Refusing the string form meant the second trust basis of
-  -- docs/MESH.md section 9 item 2 never applied on a real call: a roster-authorized peer the rendezvous
-  -- had not seen fell back to nodeslib.verify_caller and was refused `unknown_caller`, and the mount's
-  -- own one-shot admission (set immediately before this call) had nothing to widen. Both shapes are the
-  -- same proof, so both are accepted; an unreadable string is left alone and refuses exactly as before.
-  if type(mesh) == "string" and mesh ~= "" then
-    local decoded_attestation, value = pcall(json.decode, mesh)
-    if decoded_attestation and type(value) == "table" then mesh = value end
-  end
   local ok, request = pcall(json.decode, payload)
   if not ok or type(request) ~= "table" then return json.encode({ error = "bad_request" }) end
   local capability = request.capability or ""
