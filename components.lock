@@ -244,7 +244,13 @@ memory 51815e2d8d9595df6b2188097d5a97d97545be69a7804f46a54c8767cb8307f5 207332
 # for this lock.
 mesh e59495e4894b52cfb1e189eb51fff769db423ca4015446d25cd2ebb4c610fa0a 209983
 model-gateway 827afeb60f67991c832acc6f5c62dc346582ee0cbb6fd0d89f4ca517bbcb40b8 404558
-selfloop 880aef087fa43d284a05b7b17627efe78dafae46d62b83fc2f0c60a780f33894 247771
+# 24/11 repin of selfloop alone (change/selfloop-no-starve: the plan's own query excludes a held session's
+# rows, so a row this tick cannot dispatch never takes the slot a dispatchable row needs, and the
+# component's read grant gains self_wake_pauses). 247771 -> 247835 bytes; every other pin is unchanged
+# and its bytes are the ones published in components-880aef087fa4. Built on avell by
+# `scripts/build-components.sh selfloop`, and twice (a real rebuild and a warm second run) for the same
+# sha256, with the toolchain and build root this file pins.
+selfloop 949c657d3dcd365095425133d755e6023ddc3fe7bd5735d87064872346cff0a8 247835
 telemetry-sink 33ee82c5be016d8a834dd8c1269e7dfefa892a71546366f49e6f8396d9633138 152728
 wa-email 4621a8cc140c23e14f41d693f1c3debd3a27986a1eb9e729fc40c191a44b598c 565827
 # 17/11 repin of wa-whatsapp alone (change/codeact: contacts folds a @lid chat and its phone-number chat

@@ -34,7 +34,7 @@
       "name": "self-wake",
       "role": "any",
       "canary": "self-wake",
-      "last_success": "lua/core/selfloop.lua: a wake was delivered to the session that asked for it",
+      "last_success": "lua/core/selfloop.lua: a wake due now is dispatched by the node's own tick (M.tick) within one tick, and settled delivered - even behind more overdue rows of a parked session than the plan takes",
       "stale_after_s": 86400
     },
     {

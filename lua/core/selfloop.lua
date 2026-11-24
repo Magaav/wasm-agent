@@ -1595,14 +1595,28 @@ function M.tick(opts)
     out.deferred = (tonumber(out.deferred) or 0) + #due
     return out
   end
-  -- The sessions whose schedule is held (an interrupted run), read once per tick: a held session's rows
-  -- are left exactly as they are - pending, in their order - so the tick dispatches none of them and a
-  -- resume fires each one once. Read here rather than filtered in SQL on both paths, because the
-  -- component's plan is a fixed shape and the node's half of the tick owns the dispatch decision.
+  -- A ROW THAT CANNOT BE DISPATCHED THIS TICK NEVER TAKES A SLOT (Fable 24/11 12:55Z, the wake starvation).
+  --
+  -- MEASURED on the live node: no self-wake was dispatched between 10:27Z and 12:55Z while a parked session
+  -- (icons 5f0fb651) had 13 overdue rows. The plan hands the tick the 8 earliest-due pending rows (DUE_LIMIT,
+  -- rust/components/selfloop/src/logic.rs:31) and this loop then skipped every one of them, because its
+  -- session is held - so every page of every tick was 8 held rows and nothing else was ever reached. The
+  -- proof is the canary: a wake of a FREE session, due 12:39:04Z, was still pending an hour later.
+  --
+  -- The hold is therefore part of the plan's own query, on BOTH paths (the component's plan and the native
+  -- row query below): a held row is not a candidate, so it can never consume a slot a dispatchable row needs.
+  -- The rows are left exactly as they were - pending, in their order - so a resume fires each one once. The set
+  -- is still read here as the guard for a node whose installed component predates that exclusion: such a row is
+  -- skipped, never dispatched.
   local held = {}
   for _, row in ipairs(query("SELECT session_id FROM self_wake_pauses", {})) do
     held[tostring(row.session_id)] = true
   end
+  -- The held rows that are due, counted over the whole ledger and once for both paths: the number the page used
+  -- to report only when a held row happened to land among its first 8.
+  local held_due = query([[SELECT COUNT(*) AS n FROM self_wakes WHERE status='pending' AND due_at IS NOT NULL
+    AND due_at<=? AND session_id IN (SELECT session_id FROM self_wake_pauses)]], { now })[1]
+  out.paused = tonumber(held_due and held_due.n) or 0
   -- The state machine's half (which rows are due, what a probe decided, who won the claim, what the
   -- scheduler said) is the component's; the node's half (running the probe, dispatching the turn) is
   -- this loop's, on both paths.
@@ -1613,8 +1627,10 @@ function M.tick(opts)
       local probe_fn = opts.probe or M.run_probe
       for _, row in ipairs(plan.due or {}) do
         local skip = false
+        -- Not reachable through the plan, whose query excludes a held session (see the block above): kept as
+        -- the guard for a node running a component older than that exclusion, and already counted in
+        -- out.paused.
         if held[tostring(row.session_id or "")] then
-          out.paused = out.paused + 1
           skip = true
         end
         if not skip and tostring(row.probe or "") ~= "" then
@@ -1671,14 +1687,17 @@ function M.tick(opts)
     updated_at=? WHERE status='dispatching' AND updated_at<?]], { now, now - stale })
   out.reconciled = tonumber(old.changes) or 0
 
-  local rows = query("SELECT * FROM self_wakes WHERE status='pending' AND due_at IS NOT NULL AND due_at<=? ORDER BY due_at LIMIT 8",
+  -- A HELD SESSION'S ROWS ARE NOT CANDIDATES, IN THE QUERY ITSELF (Fable 24/11: one parked session's 13 overdue
+  -- rows filled every page of 8 and no other wake on the node was dispatched for two hours). The page is the 8
+  -- earliest DISPATCHABLE rows, so a row this tick cannot dispatch never takes a slot from one it can.
+  local rows = query([[SELECT * FROM self_wakes WHERE status='pending' AND due_at IS NOT NULL AND due_at<=?
+    AND session_id NOT IN (SELECT session_id FROM self_wake_pauses) ORDER BY due_at LIMIT 8]],
     { now })
   local probe_fn = opts.probe or M.run_probe
   for _, row in ipairs(rows) do
     local skip = false
     if held[tostring(row.session_id or "")] then
-      out.paused = out.paused + 1
-      skip = true
+      skip = true -- already counted in out.paused above
     end
     if not skip and tostring(row.probe or "") ~= "" then
       local role = (dep("users").find(row.owner) or {}).role or "master"

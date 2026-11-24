@@ -123,6 +123,13 @@ wa_completion_run → selfloop.run_wake → agent.run  →  selfloop.finish
 * The claim is a compare-and-set, so a CLI beside a served node cannot dispatch the same wake twice.
 * Delivery failures at the scheduler (`not_started`, e.g. queue full) put the row back with a bounded
   backoff (5s, 10s, ... up to 60s), so a busy node defers a wake instead of losing it.
+* **A wake that cannot be dispatched never takes a slot.** The tick's page is the 8 earliest-due
+  (`DUE_LIMIT`, `rust/components/selfloop/src/logic.rs:31`) **dispatchable** rows, on both paths: a row
+  of a held session (an interrupt, a park) is excluded by the plan's own query, not skipped after it was
+  read. Measured 24/11: one parked session's 13 overdue rows filled every page for two hours and no other
+  wake on the node was dispatched - a canary wake of a FREE session, due 12:39:04Z, was still pending an
+  hour later (Fable 24/11 12:55Z). Nothing is dropped: a held row keeps its id, its time and its prompt,
+  and `out.paused` counts every held-but-due row, not only those that happened to land in the page.
 
 ## Interrupt and resume: the schedule follows the run
 
@@ -344,3 +351,18 @@ dispatches nothing for minutes of fake clock with no error recorded, a resume fi
 once in its own order, an overdue repeating wake fires once rather than once per missed interval, a
 cancelled turn settles `cancelled` and is never retried, and a user message, an event wake, the footer
 fact and `selfloop.resume` all behave as the operator described.
+
+`scripts/test-selfloop-no-starve.lua` (self-contained, same runner, a real ledger in a scratch home, a
+counted scheduler stub, both paths): a row this tick cannot dispatch never takes a slot - 9 rows of each
+shape (a parked session's overdue rows, a backoff that has not elapsed, another process's claim, and the
+deploy gate with the installer's real `deploy-pending.json` marker) ahead of one free due row: one tick,
+one dispatch, and the obstruction untouched; for the gate, no turn while the marker is there and every
+row dispatched exactly once after it goes. The component half runs the same shapes through the seam and
+fails the row if any call fell back to the native path.
+
+`wa features canary self-wake` (`lua/core/canaries/tasks/self-wake.lua`, the `self-wake` row of
+`config/features/features.json`) runs the same two facts in a child node with its own home, so a release's
+per-node canary step catches it on every fleet node: a wake due now is dispatched by ONE call of the
+node's own tick (`M.tick`, the function a served node's placement thread calls), and it is still
+dispatched behind 9 overdue rows of a parked session - more than the plan's 8. On the code before
+24/11 that stage answers `dispatched 0, paused 8`, which is the live failure in one line.
