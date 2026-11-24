@@ -1413,23 +1413,89 @@ function M.begin(dispatch, opts)
   return index
 end
 
+-- The wake that carried this handle's news, as the store sees it - one of selfloop.STATUS_* ("pending",
+-- "dispatching", "delivered", "cancelled", "failed", "unknown") or nil when no wake was ever scheduled.
+-- Resolved lazily: this module is loaded BY lua/core/handle_wake.lua, which loads
+-- selfloop, so a top-level require would be a cycle; a read that cannot reach the store answers nil, which
+-- means "no wake", the same as no wake at all.
+-- dofile RE-EXECUTES the file on every call, and announce() asks this once per settled handle at the end of
+-- every script, so the module is resolved once and kept (re-loading a 1400-line module per handle is a cost
+-- nobody asked for). A module that cannot be loaded is remembered as "not there" and answers nil, which reads
+-- as "no wake" - the same thing no wake at all means.
+local selfloop_module
+local function wake_store()
+  if selfloop_module ~= nil then return selfloop_module or nil end
+  local ok, module = pcall(dofile, "lua/core/selfloop.lua")
+  selfloop_module = (ok and type(module) == "table") and module or false
+  return selfloop_module or nil
+end
+
+function M.handle_wake_state(op)
+  local selfloop = wake_store()
+  if not selfloop or type(selfloop.handle_wake_state) ~= "function" then return nil end
+  local called, status = pcall(selfloop.handle_wake_state, op)
+  return called and status or nil
+end
+
+-- Withdraw the pending wake for a handle this script has just announced (never an error for the caller: a
+-- wake that cannot be reached is a wake the runner's own idempotence still protects).
+-- Both questions are answered by the store that writes the statuses (selfloop.STATUS_*, wake_is_notice,
+-- wake_is_owed), so this module cannot drift from it. A store this process cannot load answers "not the
+-- notice" - the side that still tells the model: one announcement too many is cheaper than silence, and the
+-- withdrawal is then a no-op the store ignores anyway.
+function M.wake_is_notice(status)
+  local selfloop = wake_store()
+  if not selfloop or type(selfloop.wake_is_notice) ~= "function" then return false end
+  local called, answer = pcall(selfloop.wake_is_notice, status)
+  return called and answer == true
+end
+
+function M.wake_is_owed(status)
+  local selfloop = wake_store()
+  if not selfloop or type(selfloop.wake_is_owed) ~= "function" then return false end
+  local called, answer = pcall(selfloop.wake_is_owed, status)
+  return called and answer == true
+end
+
+function M.withdraw_wake(op)
+  local selfloop = wake_store()
+  if not selfloop or type(selfloop.withdraw_handle_wake) ~= "function" then return false end
+  local called, done = pcall(selfloop.withdraw_handle_wake, op)
+  return called and done == true
+end
+
 function M.announce(scope)
   local index = M.open(scope)
   if index.count == 0 then return nil end
   local out, changed = {}, false
   for _, record in pairs(index.ops) do
     if record.state ~= "running" and record.state ~= "unknown" and record.reported == false then
-      -- The value, not only its hash: an announced handle is read by a model that never called wait() on
-      -- it, so the row must be the answer itself (the same flat shape), with the retained hash beside it
-      -- for a later results.get(). A handle whose blob cannot be read is announced by name instead of
-      -- silently answering an empty object.
-      local value, why = M.retained(record.op, scope)
-      local entry = M.flat_entry(record.op, record.tool, record.state, value,
-        record.state ~= "done" and record.error or nil, record.result)
-      if value == nil and why then entry.result_error = tostring(why) end
-      out[#out + 1] = entry
-      record.reported = true
-      changed = true
+      -- THE IN-TURN NOTICE AND THE WAKE ARE ONE NOTICE (G blocker, Fable 24/11). Three orders are possible,
+      -- and each must tell the model exactly once:
+      --   * the wake is IN FLIGHT ('dispatching': a turn holds it and is running now) or DELIVERED: that turn is
+      --     the notice, so this script says nothing and marks it reported. In flight is the case that was
+      --     missed first - the wake's own turn's scripts would otherwise repeat the news in pending_settled;
+      --   * a wake is still PENDING: this script is the notice, so the row is withdrawn here and delivers
+      --     nothing new - zero extra turns;
+      --   * no wake at all: this script is the notice, as it always was.
+      local wake = M.handle_wake_state(record.op)
+      if M.wake_is_notice(wake) then
+        record.reported = true
+        changed = true
+      else
+        -- The value, not only its hash: an announced handle is read by a model that never called wait() on
+        -- it, so the row must be the answer itself (the same flat shape), with the retained hash beside it
+        -- for a later results.get(). A handle whose blob cannot be read is announced by name instead of
+        -- silently answering an empty object.
+        local value, why = M.retained(record.op, scope)
+        local entry = M.flat_entry(record.op, record.tool, record.state, value,
+          record.state ~= "done" and record.error or nil, record.result)
+        if value == nil and why then entry.result_error = tostring(why) end
+        out[#out + 1] = entry
+        record.reported = true
+        changed = true
+        if M.wake_is_owed(wake) then M.withdraw_wake(record.op) end
+      end
     end
   end
   if changed then M.save(scope, index) end
@@ -1466,9 +1532,15 @@ function M.wake_settled(dispatch, opts, scope, on_settled)
           local value = record.result and select(1, M.retained(record.op, scope)) or nil
           local called, scheduled = pcall(on_settled or function() return false end, record, value)
           if called and scheduled then
+            -- SCHEDULING IS NOT DELIVERY (G blocker, Fable 24/11). This used to set both `woke_at` and
+            -- `reported`, and `reported` is what silences the in-turn notice (M.announce below). So a wake
+            -- that was scheduled and then never delivered - measured on the live node: eight settle wakes
+            -- refused `run_resource_refused ... resource_busy` because the session's own turn held the run
+            -- claim - took the news away from both routes at once, and the model heard nothing unless it
+            -- polled. `woke_at` alone gives exactly-once SCHEDULING (the same sweep, a restart and a second
+            -- process all read it), and `reported` now flips only when a path actually reaches the model:
+            -- the in-turn announce below, or the wake's own delivered turn.
             record.woke_at = now_seconds()
-            -- The wake IS the report: a second one from the next script would be the same news twice.
-            record.reported = true
             woken = woken + 1
           end
         end

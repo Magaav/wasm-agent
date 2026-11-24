@@ -85,20 +85,43 @@ local reloaded=dofile('lua/core/handle_wake.lua')
 reloaded.sweep()
 check(#wake_rows()==before,'a restart between settle and wake does not schedule it twice: '
  ..json.encode({before=before,after=#wake_rows()}):sub(1,200))
+-- THE ONE-NOTICE CONTRACT (G blocker, Fable 24/11). Before this, scheduling the wake also marked the handle
+-- `reported`, so a script that ran before the wake was claimed was told NOTHING - and a wake whose turn was
+-- then refused (a busy session) meant the model never heard at all. Now the script IS the notice when it gets
+-- there first, and the wake scheduled for the same handle is withdrawn so it cannot say the same thing again.
 local announced=pending.announce(scope)
-local repeated=false
-for _,entry in ipairs(type(announced)=='table' and announced or {})do if entry.op==short_op then repeated=true end end
-check(repeated==false,'and the next script does not announce it a second time')
+local told_once=false
+for _,entry in ipairs(type(announced)=='table' and announced or {})do if entry.op==short_op then told_once=true end end
+check(told_once==true,'the next script tells the model the call settled: '..json.encode(announced or {}):sub(1,200))
+local withdrawn=wake_row(short_op)
+check(withdrawn==nil or tostring(withdrawn.status)=='cancelled',
+ 'and the wake scheduled for it is withdrawn, so it cannot spend a turn repeating it: '..json.encode(withdrawn or {}):sub(1,200))
+local second=pending.announce(scope)
+local said_again=false
+for _,entry in ipairs(type(second)=='table' and second or {})do if entry.op==short_op then said_again=true end end
+check(said_again==false,'and a second script says nothing: exactly once, by construction')
 -- The effect ran once: the wake scheduled a turn, it never re-ran anything.
 local retained,why=pending.retained(short_op,scope)
 check(type(retained)=='table' and tostring(retained.stdout or ''):find('woke up',1,true)~=nil,
  'the handle keeps its own answer for results.get: '..tostring(why))
 
 -- 3. The route both surfaces use: the row is claimable, which is exactly what the node's placement
--- tick and the CLI's idle prompt do with a due wake.
+-- tick and the CLI's idle prompt do with a due wake. Its own handle, because the script above already
+-- WITHDREW the first one's (that is the one-notice contract, and both halves have to be true).
+local idle=pending.invoke(dispatch,opts,'bash',{command='sleep 1; echo while nobody looked'},'{"command":"sleep 1; echo while nobody looked"}',0)
+local idle_op=tostring(idle.op)
+if host.sleep then host.sleep(2500) end
+handle_wake.sweep()
 local claimed=selfloop.claim_due(sid,owner)
-check(type(claimed)=='table' and tostring(claimed.id)=='handle:'..short_op,
- 'the CLI idle prompt / node tick claims this row as a due wake: '..json.encode(claimed or {}):sub(1,200))
+check(type(claimed)=='table' and tostring(claimed.id)=='handle:'..idle_op,
+ 'the CLI idle prompt / node tick claims a due wake as its own row: '..json.encode(claimed or {}):sub(1,200))
+selfloop.finish(claimed,true,'a delivered wake',{now=host.now()})
+check(tostring((wake_prompt(idle_op) or {}).status)=='delivered',
+ 'and delivering it closes the row: '..json.encode(wake_prompt(idle_op) or {}):sub(1,160))
+local after_delivery=pending.announce(scope)
+local repeated_after_wake=false
+for _,entry in ipairs(type(after_delivery)=='table' and after_delivery or {})do if entry.op==idle_op then repeated_after_wake=true end end
+check(repeated_after_wake==false,'a handle whose wake was delivered is not announced again in a script')
 
 -- Leave nothing running: the long call is stopped, and the row is settled the way a failed turn settles.
 local stopped=pending.cancel(dispatch,opts,long_op)
