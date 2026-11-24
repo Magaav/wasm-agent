@@ -732,7 +732,7 @@ fn lane_state(age_ms: u64, held_ms: Option<u64>, stall_seconds: u64, held_bound_
 /// it was demonstrably waiting. The lane knows its run id (`node_thread_run_id`), and the operation's owner names
 /// the same number, so that pair is what is matched; a session match is kept as the fallback for an operation
 /// adopted another way (an op a session started outside a run).
-fn waiting_op_for_run(ops: &[serde_json::Value], run_id: u64, session: &str) -> Option<String> {
+fn waiting_op_for_run(ops: &[serde_json::Value], run_id: u64, session: &str) -> Option<(String, bool)> {
     let owned = format!("run:{run_id}");
     let by_owner = (run_id != 0).then(|| ops.iter()
         .find(|op| op.get("owner").and_then(|value| value.as_str()) == Some(owned.as_str())));
@@ -744,8 +744,15 @@ fn waiting_op_for_run(ops: &[serde_json::Value], run_id: u64, session: &str) -> 
         if run_id != 0 || session.is_empty() { return None; }
         ops.iter().find(|op| op.get("session").and_then(|value| value.as_str()) == Some(session))
     })();
-    by_owner.flatten().or(by_session)
-        .and_then(|op| op.get("operation_id").and_then(|value| value.as_str()).map(str::to_string))
+    by_owner.flatten().or(by_session).and_then(|op| {
+        let id = op.get("operation_id").and_then(|value| value.as_str()).map(str::to_string)?;
+        // AN OVERDUE OPERATION IS NOT PROOF OF LIFE (r8b 5b, Fable 24/11). `overdue` is the operation's own
+        // word for "past the deadline it declared and still unsettled" - the case the supervisor acts on - so a
+        // lane waiting on it is not alive because of it. The id is still returned, so /health can say what the
+        // lane is stuck behind, but the caller must not let it out of "stalled".
+        let overdue = op.get("overdue").and_then(|value| value.as_bool()).unwrap_or(false);
+        Some((id, overdue))
+    })
 }
 
 fn node_thread_is_stalled(index: usize) -> bool {
@@ -1510,10 +1517,17 @@ mod execution_path_tests {
                        serde_json::json!({"operation_id": "op-session", "session": "s-3", "owner": "session"})];
         // THE RUN THE LANE IS EXECUTING IS THE IDENTITY (measured: a turn's operation answers owner "run:1" and a
         // session that is the run's own scope, not the conversation).
-        assert_eq!(super::waiting_op_for_run(&ops, 7, ""), Some("op-own".to_string()));
+        assert_eq!(super::waiting_op_for_run(&ops, 7, ""), Some(("op-own".to_string(), false)));
         assert_eq!(super::waiting_op_for_run(&ops, 9, ""), None, "another run's operation is not this lane's");
+        // AN OVERDUE OPERATION IS NOT PROOF OF LIFE (r8b 5b): the id is still reported (so /health can say what
+        // the lane is stuck behind) with `true`, and the caller passes None to lane_state, which is "stalled".
+        let overdue = vec![serde_json::json!({"operation_id": "op-late", "session": "s-4", "owner": "run:11",
+            "overdue": true})];
+        assert_eq!(super::waiting_op_for_run(&overdue, 11, ""), Some(("op-late".to_string(), true)));
+        assert_eq!(super::lane_state(31_000, None, 30, 120, None), "stalled",
+            "a lane waiting on an OVERDUE operation is stalled: the operation is not proof of life");
         // The session is the fallback for an operation adopted outside a run.
-        assert_eq!(super::waiting_op_for_run(&ops, 0, "s-3"), Some("op-session".to_string()));
+        assert_eq!(super::waiting_op_for_run(&ops, 0, "s-3"), Some(("op-session".to_string(), false)));
         // ...and ONLY for a lane with no run: a lane that knows its run is answered by that run alone, or it is
         // not waiting at all. (Run 9 owns nothing; session s-3 has an operation; the answer must be None.)
         assert_eq!(super::waiting_op_for_run(&ops, 9, "s-3"), None,
@@ -1641,8 +1655,14 @@ fn health_body_for(session: &str, node_wide: bool, owner: &str) -> Vec<u8> {
                     .and_then(|slots| slots.get(index))
                     .and_then(|slot| slot.lock().ok().and_then(|guard| guard.clone()));
                 let run = busy.as_ref().is_some_and(|(label, _)| label.starts_with("POST /chat"));
-                let lane_waiting = waiting_op_for_run(&lane_operations, node_thread_run_id(index).unwrap_or(0),
+                let lane_waiting_op = waiting_op_for_run(&lane_operations, node_thread_run_id(index).unwrap_or(0),
                     node_thread_session(index).as_deref().unwrap_or(""));
+                // Only a LIVE operation keeps the lane out of "stalled"; an overdue one is named in
+                // `waiting_operation` (so a reader sees what it is stuck behind) and flagged
+                // `waiting_operation_overdue`, and the state says "stalled" - both facts, not one.
+                let lane_overdue = lane_waiting_op.as_ref().map(|(_, overdue)| *overdue).unwrap_or(false);
+                let lane_waiting: Option<String> = lane_waiting_op.map(|(id, _)| id);
+                let lane_live_wait = if lane_overdue { None } else { lane_waiting.as_deref() };
                 if current.is_none() && run {
                     if let Some((label, started)) = &busy {
                         current = Some(serde_json::json!({"label":label,"ms":now_ms().saturating_sub(*started),"node_thread_id":index,"session":node_thread_session(index),"run_id":node_thread_run_id(index),"run_key":node_thread_run_id(index).map(|id|id.to_string())}));
@@ -1660,7 +1680,10 @@ fn health_body_for(session: &str, node_wide: bool, owner: &str) -> Vec<u8> {
                     // and a "child completion" label, and /health called it busy the whole time. `stalled` names
                     // it, with the label, the session and how long it has been held, so it is not invisible again.
                     "state": lane_state(age, node_thread_busy_for_ms(index), stall_seconds(), node_stall_seconds(),
-                        lane_waiting.as_deref()),
+                        lane_live_wait),
+                    // An operation past its own deadline is a fact the state does not hide: the lane is stalled AND
+                    // this is what it is stuck behind.
+                    "waiting_operation_overdue": lane_overdue,
                     // WHICH OPERATION THIS LANE IS WAITING ON (r8b item 5): the id, so "is it alive?" is answered by
                     // the operation's own state and a reader never has to guess from a beat that only comes on polls.
                     "waiting_operation": lane_waiting,
