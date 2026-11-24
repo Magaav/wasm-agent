@@ -185,6 +185,12 @@ functions' own seams (a fixture feed instead of a request, a `covering` answer i
 Red on the base (the same row, `WASM_AGENT_LUA_ROOT` at the canonical checkout):
 `lua error: attempt to call a nil value (field 'refresh')` - the function does not exist there.
 
+Narrowed fast path (rows: `test-check-listing`, `test-update-banner`, `test-build-identity`,
+`test-cli-notice`, `test-cli-view`), 578 s: **all five pass**. The run reports 5 of 140 checks red -
+`deploy-bound`, `esc-stops-pty`, `install-guards`, `release-channel`, `test-release-channel-e2e` -
+which is the same load/live-session set this round already named, and none of them is on a file this
+change touches.
+
 `scripts/test-update-follow.sh`'s `--check` case now asserts the installer's fallback sentence (it runs with
 `WA_UPDATE_CHECK=0 WA_OFFLINE=1`, so the digest walk refuses by name); the whole row is green (8 cases).
 
