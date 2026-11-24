@@ -251,6 +251,16 @@ ok(refused and refused.error == "forbidden_role", "a guest is refused", refused 
 ok(#issued_matching("request deploy") == 0, "and no install was asked for")
 ok(#issued_matching("git") == 0, "and the guest could not even move this node's tree")
 ok(head == BASE, "the tree did not move for a guest")
+-- A REFUSED ROLE WRITES NO ACCEPT RECORD (review): the role check is the FIRST thing serve() does, so a
+-- caller this node will not admit must leave nothing behind - no claim, no accept record, no operation.
+local accepted_dir = dofile("lua/core/accepted.lua").root(remote.accept_root())
+local before_accepts = #(listing(accepted_dir) or "")
+local refused_guest = remote.serve({ action = "request", commit = TARGET }, GUEST)
+ok(refused_guest and refused_guest.error == "forbidden_role", "a guest is refused before anything else",
+  refused_guest and tostring(refused_guest.error))
+ok(#(listing(accepted_dir) or "") == before_accepts, "and no accept record exists for it",
+  listing(accepted_dir))
+
 
 -- ---- 2. a master is admitted, and the peer's own installer door is used -------------------------
 issued, log_lines = {}, {}

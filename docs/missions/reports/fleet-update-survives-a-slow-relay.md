@@ -2,8 +2,11 @@
 
 Mission dir: `/home/victor/Work/missions/fleet-update-survives-a-slow-relay`
 Worktree: `wt`, branch `change/fleet-update-survives-a-slow-relay`, base `origin/main @ 53bb69b1`.
-Commits: `ca344b11` (the seam + a deadline is not a refusal), `83b49ede` (accept fast / detached / poll
-by id), `0c6afffc` (entry guards ask by real path - the cause of work's failed install).
+Commits, rebased onto `origin/main @ 525780e1`: `df677e69` (the seam + a deadline is not a refusal),
+`1e004eed` (accept fast / detached / poll by id), `96cee9a2` (review a: the record is written before the
+child), `3d8a8f40` (review b: one id, one run), `670f5563` + this one (report). The entry-guard fix is no
+longer on this branch: it landed on `main` as `ce1feb5b` (`land-quick: merge change/fleet-update-entry`),
+and the rebase dropped my `0c6afffc` as an already-applied patch.
 Nothing was pushed. Nothing on a live node was written: every read below is `wa call work bash` read-only
 (`tools.remote`), and no update was requested on `work`.
 
@@ -218,3 +221,69 @@ and the answer names the read-back.
   exit code in `update.lua`'s `shell()` reading as success (`sentinel_unverifiable` with `code=nil`);
   (3) `wa land`'s deploy step on work once the entry-guard fix is installed there (the release's fleet
   step will then build instead of dying at 361 s).
+
+---
+
+## 8. Fable's review, 24/11 ~17:10Z: what changed, and the one item still open
+
+### 8.1 Question 1 (not blocking): why did 23/11's build run cargo through the same symlink?
+
+**It did not - yesterday's build failed the same way, three times, and was worked around by hand.** From
+work's own `sentinel/deploy.out` (read-only):
+
+| when (23/11) | what the log says |
+|---|---|
+| 1795437043 (retry 2) | the codemode cargo step hit its `1800000ms` spawnSync timeout on a cold build |
+| 1795438155 (retry 3) | "pin dir now on an exec filesystem (`/tmp/wa-deploy-pins -> /home/agent/.wasm-agent/pins`)" |
+| retry 3 block | `building ccbd3cdd... from pinned worktree /tmp/wa-deploy-pins/ccbd3cdd...` then `compiled 0 + 5 crate(s)` |
+| retry 4 block | `building 7865a08e... from pinned worktree /tmp/wa-deploy-pins/7865a08e...` -> `compiled 0 + 5 crate(s)` -> **`no built binary at .../deploy-7865a08e3222/release/wa`** |
+| next block | `compiled 0 + 0 crate(s)` -> `no built binary` again |
+| 1795442006 (retry 7) | "shipping build run **directly by the agent** - v7865a08e, native_checked:true, receipt sha 9e86f6ef matches release/wa; deploy should reuse it" -> `compiled 0 + 0 crate(s)` -> installed |
+
+So the guard misfired on every pinned build after the pin dir became a symlink (23/11 12:47), and the
+`wa` that shipped that day was built by the agent running the shipping build **from a real path**, then
+reused by deploy.sh. Today's failure is the same defect reaching a deploy that had no by-hand binary to
+reuse. (Not an explanation gap; the row `scripts/test-main-module-entry.mjs` now proves the defect and
+the fix - on `main` as `ce1feb5b`.)
+
+### 8.2 Review a (order) - `96cee9a2`
+
+The record is written BEFORE the child is started; the operation id is added to the same record after
+the start; a write that fails starts nothing and answers `accept_record_not_written`. The child's
+no-record branch settles the accept **failed** with `accept_record_missing` and returns that refusal -
+it used to be pasted from `read_status` and read a `caller` that does not exist in that scope (Fable was
+right: it would have raised on that path). Row: the child for an unknown id fails by name and settles
+the accept failed.
+
+### 8.3 Review b (once) - `3d8a8f40`
+
+Two layers, both needed: `accepted.claim_running` is an atomic `mkdir` claim beside the record (released
+by the only terminal writer, `finish`), and `run_accepted` checks the id's own phase first with an
+ALLOW-LIST - only an id nobody has claimed, or one whose work `detach()` has started (`running`), may
+run; `queued`/`done`/`failed` are answered with the phase and start nothing. (The subtlety: `detach()`
+leaves the record `running` because it has just started this very verb, so `running` must be allowed.)
+Row: the verb twice starts nothing the second time, no second operation, **exactly one `request deploy`
+for one id**, and the first call does not answer `already`.
+
+Plus the assertion Fable asked for: **a refused role leaves no accept record** (the role check is the
+first thing `serve()` does), in the same row. `scripts/test-remote-update.lua` is 146 checks.
+
+### 8.4 Review c (the real row) - OPEN, and why I did not hand in a half-version
+
+The two-real-process row is **not written**. I had a first attempt (deleted, uncommitted) with the wire
+stubbed, and Fable is right that it proves nothing about the path the fleet step uses; I stopped rather
+than land it. What it needs, with what this session measured while failing at it:
+
+* processes: the row's own `wa` process (master, REAL `host.http`, no stub), a relay process on a fresh
+  127.0.0.1 port (holds the first `update` answer longer than the master's deadline, then answers the
+  relay's own `{ok:true,status:504,body:'{"error":"relay_request_timeout"}'}`, and re-serves the stored
+  answer to a retry of the same rid), and a real `wa serve` for the peer with its own scratch HOME;
+* the peer needs authorization to admit the master: the cheapest honest route is the one
+  `scripts/test-two-node-images.lua` already built - a scratch `wa rendezvous`, both nodes registered, the
+  admin list applied, a signed roster (`wa fleet keygen` / `wa fleet sign`) - plus, for the deploy to get
+  past `preconditions`, a fixture `wa-sentinel` (preflight JSON + a `request deploy` that writes a request
+  file) and a real two-commit scratch git repo as the runtime tree;
+* two traps measured here, so the next session does not pay for them again: loading `lua/core/nodes.lua`
+  with the transport names answered before the load **blocks in the load** (nothing printed, `host.http`
+  never reached), and installing a virtual clock (`host.sleep` advancing the test's time) before loading
+  `lua/core/update.lua` **blocks in that load**. Load first, stub afterwards.

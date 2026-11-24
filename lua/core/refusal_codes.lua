@@ -6,7 +6,8 @@
 return {
   ['accept_claim_unavailable']='accepted.lua',
   ['accept_id_invalid']='accepted.lua',
-  ['accept_record_not_written']='accepted.lua',
+  ['accept_record_missing']='remote_update.lua',
+  ['accept_record_not_written']='accepted.lua, remote_update.lua',
   ['accept_state_unknown']='accepted.lua',
   ['access_package_invalid']='access.lua',
   ['access_requires_master']='access.lua',
