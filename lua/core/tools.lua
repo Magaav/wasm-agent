@@ -1119,6 +1119,10 @@ local function session_dir(memory, ctx)
     local ok, path = pcall(memory.session_worktree, ctx.session_id)
     if ok and type(path) == "string" and path ~= "" then return path, "worktree" end
   end
+  -- THIS TURN'S OWN DECISION, when the run that is serving it made one (an attended run re-records the
+  -- person's terminal directory, lua/core/agent.lua M.record_run_directory). It travels in the context, so the
+  -- prompt's directory, this answer and the child's cwd are one tree for the length of the turn.
+  if type(ctx.run_dir) == "string" and ctx.run_dir ~= "" then return ctx.run_dir end
   if memory.session_cwd then
     local ok, run = pcall(memory.session_cwd, ctx.session_id)
     if ok and type(run) == "string" and run ~= "" then return run, "run" end
@@ -1849,8 +1853,16 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     local scope=''
     if args.calls~=nil or args.cursor~=nil then
       local workspace=memory and ctx.session_id and memory.session_workspace and memory.session_workspace(ctx.session_id) or nil
+      -- THE SCOPE IS WHO, NOT WHERE (red on main, 24/11). This hash used to include the session's working
+      -- directory, and a session's directory can now legitimately CHANGE while it runs: the first run of a
+      -- session RECORDS it (lua/core/agent.lua, M.record_run_directory), so a cursor issued before the first
+      -- run and resumed after it computed a different hash and answered
+      -- `batch_cursor_scope_changed` to a session that had done nothing wrong (measured:
+      -- scripts/test-codemode-model-boundary.lua, "the cached continuation answers after the live files
+      -- changed"). The identity that matters is the session and its workspace binding; the retained page is
+      -- absolute content, so resuming it from another directory discloses nothing new.
       scope=host.sha256(json.encode({kind='routed_read_batch',user=ctx.user_id or user_id,role=role,
-        session=ctx.session_id or '',cwd=memory and session_cwd(memory,ctx) or platform.cwd(),workspace=workspace,profile=ctx.subagent and ctx.subagent.allowed or nil}))
+        session=ctx.session_id or '',workspace=workspace,profile=ctx.subagent and ctx.subagent.allowed or nil}))
     end
     return dofile('lua/core/routed_calls.lua').invoke(routed_catalog() or M.all(role),args,ctx,scope,function(target,parameters,fragment)
       local original=ctx.tool_arguments_json;ctx.tool_arguments_json=fragment

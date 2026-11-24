@@ -532,15 +532,37 @@ function M.environment_note(role, opts)
   return nil
 end
 
--- The directory a session works in: its own worktree when it has one, else the node's cwd.
-function M.workdir(session_id)
+-- The directory a session works in: its own worktree when it has one, else the directory its first run was
+-- served from, else the node's cwd.
+--
+-- ZERO LEDGER CALLS OF OUR OWN BEFORE THE FIRST PROMPT (Fable 24/11, round two: "the session cwd must cost
+-- NOTHING before the first prompt. No ledger read before the first prompt"). The caller that builds the prompt
+-- already holds the session row (agent.lua:1425, memory.session - SELECT *, so worktree and run_cwd travel with
+-- it), so this answers from THAT row and makes no query of its own. The ledger is still the one answer when no
+-- row is passed (a tool path, a done-gate check, a row in a test): the query happens there, not here.
+local run_dirs, run_dirs_owed = {}, {}
+
+function M.workdir(session_id, session)
+  -- THE SAME DIRECTORY THE COMMANDS RUN IN (Fable 24/11, item 3): the system prompt's <workdir> block and the
+  -- project-instructions lookup name this, and it used to be the SERVING PROCESS's directory - a node-served
+  -- turn told the model one tree while its commands ran in another.
+  if type(session) == "table" then
+    local bound = session.worktree
+    if type(bound) == "string" and bound ~= "" then return bound end
+    -- An ATTENDED run in this process re-records the person's terminal directory, and its prompt must name that
+    -- directory rather than the one an earlier run recorded (M.record_run_directory decides it in memory).
+    local decided = run_dirs[session_id]
+    if type(decided) == "string" and decided ~= "" then return decided end
+    local recorded = session.run_cwd
+    if type(recorded) == "string" and recorded ~= "" then return recorded end
+    return dofile("lua/core/platform.lua").cwd()
+  end
+  -- No row in hand: the ledger, as before. Reads cost 0 ms behind a held write lock (measured); the expensive
+  -- half was the WRITE, and that is deferred to the run's end, not cached away.
   local ok, worktree = pcall(memory.session_worktree, session_id)
   if ok and type(worktree) == "string" and worktree ~= "" then return worktree end
-  -- THE SAME DIRECTORY THE COMMANDS RUN IN (Fable 24/11, item 3). This is what the system prompt's
-  -- <workdir> block and the project-instructions lookup name (agent.lua:1389-1390 -> 877), and it used
-  -- to be the SERVING PROCESS's directory - so a node-served turn told the model one tree while its
-  -- commands ran in another. Same precedence as the tool layer (lua/core/tools.lua, session_dir):
-  -- worktree, else the directory recorded on the session, else the node's own.
+  local decided = run_dirs[session_id]
+  if type(decided) == "string" and decided ~= "" then return decided end
   if type(memory.session_cwd) == "function" then
     local recorded_ok, recorded = pcall(memory.session_cwd, session_id)
     if recorded_ok and type(recorded) == "string" and recorded ~= "" then return recorded end
@@ -548,33 +570,60 @@ function M.workdir(session_id)
   return dofile("lua/core/platform.lua").cwd()
 end
 
--- The directory a run would START in, before anything is recorded: the bound worktree, else this
--- PROCESS's directory - which for an attended run is the person's terminal, and that is exactly what
--- makes an attended run's record meaningful (M.record_run_directory).
-local function process_directory(session_id)
-  local ok, worktree = pcall(memory.session_worktree, session_id)
-  if ok and type(worktree) == "string" and worktree ~= "" then return worktree end
-  return dofile("lua/core/platform.lua").cwd()
-end
-
 -- Record the session's directory for this run (Fable 24/11, items 1-2).
 --
--- ATTENDED RUNS RE-RECORD: the person's terminal directory is what they mean, so `wa chat` resumed from
--- another directory runs there. NODE-SERVED turns NEVER overwrite: a wake, a resume after a deploy pause,
--- a job or a peer's call has no person in it, and its own process directory is incidental - it uses the
--- last recorded directory.
+-- ATTENDED RUNS RE-RECORD: the person's terminal directory is what they mean, so a chat resumed from another
+-- directory runs there. NODE-SERVED turns NEVER overwrite: a wake, a resume after a deploy pause, a job or a
+-- peer's call has no person in it, and its own process directory is incidental.
 --
 -- WHO IS ATTENDED is the NATIVE origin of this run, never a body field or a model argument
 -- (rust/wa-capabilities/src/serve.rs:397-408 default "cli"; :2874 "completion" for the same local path;
--- :2931 "interactive"/"control"/"background" when the NODE serves the run; :2997 "remote" for a peer's
--- call; :406 "job" for a job). So attended = "cli" or "completion" - the terminal's own process.
--- Answers the directory the session now records.
+-- :2931 "interactive"/"control"/"background" when the NODE serves the run; :2997 "remote" for a peer's call;
+-- :406 "job" for a job). So attended = "cli" or "completion" - the terminal's own process.
+--
+-- NO LEDGER CALL AT ALL HERE (round two): the decision is this process's own directory, kept in memory and
+-- handed to the tools through the turn's context (ctx.run_dir), and the row is READ AND WRITTEN by
+-- M.flush_run_directory where the run has already ended. A node-served run decides nothing and writes nothing.
 function M.record_run_directory(session_id, origin)
   if type(session_id) ~= "string" or session_id == "" then return "" end
   if type(memory.session_cwd) ~= "function" or type(memory.set_session_cwd) ~= "function" then return "" end
   local attended = origin == "cli" or origin == "completion"
-  if not attended and memory.session_cwd(session_id) ~= "" then return memory.session_cwd(session_id) end
-  return memory.set_session_cwd(session_id, process_directory(session_id))
+  if not attended then
+    run_dirs[session_id], run_dirs_owed[session_id] = nil, nil
+    return ""
+  end
+  local decided = dofile("lua/core/platform.lua").cwd()
+  run_dirs[session_id] = decided
+  run_dirs_owed[session_id] = true
+  return decided
+end
+
+-- What THIS process decided for a live run, without touching the ledger: the turn's tool calls read it through
+-- ctx.run_dir (lua/core/tools.lua, session_cwd) so that the prompt's directory, the file tools and the commands
+-- all name one tree inside the turn. Empty when this process decided nothing (a node-served run).
+function M.run_directory(session_id)
+  local decided = session_id and run_dirs[session_id]
+  return type(decided) == "string" and decided or ""
+end
+
+-- THE START PATH DOES NOT WRITE THE LEDGER (red on main, 24/11). Recording the directory used to call
+-- memory.set_session_cwd right at the run's start, and a held write lock makes that UPDATE wait for the whole
+-- hold: measured 7654 ms behind an 8 s hold (reads are free - session_worktree and session_cwd both answered
+-- in 0 ms), and scripts/test-start-instant.lua measured 1143 ms of it before the first model call, against its
+-- contract that a turn starts the model in under 1 s whatever the ledger is doing.
+--
+-- So the decision is made from data the run already has and kept in memory (the turn itself is consistent:
+-- M.workdir reads the same cache), and the ONE write happens when the run has ENDED - the place where the run
+-- already writes its own record, and where waiting for a busy ledger costs the end of a turn instead of its
+-- start. A process killed before its run ends leaves the old row: the next node-served turn then behaves as it
+-- did before this mission (the node's own directory) until a run of that session finishes and records it.
+function M.flush_run_directory(session_id)
+  if type(session_id) ~= "string" or not run_dirs_owed[session_id] then return false end
+  local directory = run_dirs[session_id]
+  if type(directory) ~= "string" or directory == "" then return false end
+  local ok = pcall(memory.set_session_cwd, session_id, directory)
+  if ok then run_dirs_owed[session_id] = nil end
+  return ok
 end
 
 local function parent_dir(dir)
@@ -1415,7 +1464,7 @@ function M:build_context()
   local transport_refusal=raw_code_lib.transport_refusal(settings.provider, self.model or settings.model)
   if transport_refusal then error(transport_refusal.text,0) end
   -- One policy for every thread, pinned with the context the tools and the prompt are built from.
-  local code_ctx={session_id=self.session_id,user_id=self.user,role=self.role,subagent=self.subagent}
+  local code_ctx={session_id=self.session_id,user_id=self.user,role=self.role,subagent=self.subagent,run_dir=M.run_directory(self.session_id)}
   self.codemode_policy=dofile('lua/core/codemode_policy.lua').pin(memory,self.role,code_ctx)
   if self.subagent then
     -- A child deliberately does NOT read the operator instruction file: those
@@ -1424,7 +1473,7 @@ function M:build_context()
     agents, agents_path = nil, nil
     tool_list = M.subagent_tool_list(self.subagent,self.role,code_ctx)
   else
-    workdir = M.workdir(self.session_id)
+    workdir = M.workdir(self.session_id, session)
     agents = M.project_instructions(self.role, workdir)
     agents_path = #agents > 0 and agents[#agents].path or nil
     tool_list,self.envelope_mode = tools.envelope(self.role,code_ctx)
@@ -2236,6 +2285,9 @@ function M:run(text, images)
       done_gate.note_turn(self.gate, { run_id = self.run_id })
     end)
   end
+  -- The directory this run decided on, recorded now that the run has ended (see M.flush_run_directory: the start
+  -- path must not wait for a busy ledger).
+  pcall(M.flush_run_directory, self.session_id)
   provider.unpin()
   self.reserve_summary=nil
   self.on_call_start=nil

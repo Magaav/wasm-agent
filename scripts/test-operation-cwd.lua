@@ -88,7 +88,11 @@ from_b = record(dispatch('operation', { action = 'await', id = from_b.operation_
 check(norm(from_b.effective_cwd) == norm(asked_dir), 'and the work runs there: ' .. tostring(from_b.effective_cwd))
 check(from_b.cwd_source == 'session_run', 'still reported as the session\'s directory: ' .. tostring(from_b.cwd_source))
 for _, served in ipairs({ 'interactive', 'background', 'remote', 'job' }) do
-  local kept = agent.record_run_directory(plain, served)
+  agent.record_run_directory(plain, served)
+  -- The LEDGER, not a return value: a node-served turn decides nothing, so the row must stay exactly as the
+  -- person left it (Fable 24/11 round two: the decision is made in memory and the row is written at the run's
+  -- END, so "did it overwrite" is a question about the row).
+  local kept = memory.session_cwd(plain)
   check(norm(kept) == norm(asked_dir), 'a node-served turn (' .. served .. ') does not overwrite it: ' .. tostring(kept))
 end
 local after_wake = dispatch('operation', { action = 'start', command = 'pwd > where.txt', cwd = '' }, ctx1)

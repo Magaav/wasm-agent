@@ -117,7 +117,12 @@ local TOOL_RUNS = 0
 -- fail with a bogus 'syntax error near body'. Anything else goes to the real reader untouched.
 local read_original = host.read_file
 host.read_file = function(path)
-  if path == 'DESIGN.md' then TOOL_RUNS = TOOL_RUNS + 1; return 'file body' end
+  -- THE TOOL ASKS FOR ITS PATH RESOLVED IN THE SESSION'S DIRECTORY (24/11). A session now has a directory even
+  -- without a bound worktree (lua/core/tools.lua, resolve_path -> session_cwd), so the read this run makes
+  -- arrives as <session dir>/DESIGN.md rather than the bare name it used to be. The stub answers for the file
+  -- the tool asked for, not for one spelling of it; the assertion it feeds (exactly ONE execution, never
+  -- re-run after the outage) is unchanged.
+  if path == 'DESIGN.md' or tostring(path):match('DESIGN%.md$') then TOOL_RUNS = TOOL_RUNS + 1; return 'file body' end
   return read_original(path)
 end
 local calls = 0
