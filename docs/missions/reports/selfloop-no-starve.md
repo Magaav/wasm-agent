@@ -12,8 +12,12 @@ Committed locally, **never pushed**.
 | --- | --- |
 | `d17ac6a5` | `selfloop: a row this tick cannot dispatch never takes the plan's slot` - the fix, on both paths, plus `scripts/test-selfloop-no-starve.lua` |
 | `7da20968` | `features: the self-wake canary exercises the node's own tick (red on the 24/11 code)` - the post-install canary |
+| `89ef378f` | `build: a switched tree must not reuse another tree's component artifacts` - the shared build root handed the gate another tree's wasm, plus the `selfloop` repin |
+| this file | the report itself (its own commit) |
 
-Both are on `change/selfloop-no-starve`, in this order, and each lands alone. `git -C <wt> log -1
+All of them are on `change/selfloop-no-starve`, in this order, and the first two land alone (the fix, then
+the canary). The third exists because the land gate could not go green without it - see "A build trap" -
+and the fourth is this report. `git -C <wt> log -1
 --stat` after each showed the commit is this session's (author `Victor <vic.scar@gmail.com>`, the
 configured identity) and touched exactly these files:
 
@@ -140,6 +144,8 @@ refuses to run outside a scratch home (`scripts/lib/test-home-guard.lua`).
 | `scripts/test-deploy-pause.lua` | `deploy claim wait ok (101 checks)` |
 | `scripts/test-feature-canary.lua` (runs the shipping canaries through the runner) | `feature-canary ok (62 checks)` |
 | `node scripts/check-features-registry.mjs` | `features-registry ok (14 rows, ...)` |
+| `scripts/test-component-pins.sh` (artifact in `build/components-pinned/`) | `selfloop: source and pin moved together`, `11 of 11 pinned component(s) verified` |
+| `scripts/fast.sh`, narrowed to the touched rows | `fast path FAILED (2 of 137 checks, 0 skipped, 610s)`: the two pre-existing rows below; everything else green, this change's row included |
 | `wa features canary self-wake`, this tree / `caa1a936` | PASS `delivered` / FAIL `no-starve` (quoted above) |
 
 **Pre-existing failure, not this branch's.** `scripts/test-selfloop-component.lua` fails on `caa1a936`
@@ -149,15 +155,55 @@ separate worktree of `caa1a936` with the component built from that same commit (
 not caused by this change and is left alone here; it is a real native/component drift on `main` for the
 next mission to fix.
 
-## A build trap worth recording
+## A build trap, fixed
 
-`scripts/build-components.sh` builds in the shared root `/tmp/wa-component-build/src` and reuses cargo's
-mtime cache there. Building the component from a SECOND worktree right after the first silently handed
-back the FIRST tree's artifact (same sha256, `self_wake_pauses` still in the bytes) because the copied
-sources were older than the artifact. Measured here, and the red proof above was re-taken after
-`touch`ing the base tree's `rust/components/selfloop/src/*.rs` and rebuilding (the honest base artifact
-is `880aef08...`, 247771 bytes - the `components.lock` pin - while this tree's build is `949c657d...`,
-247835 bytes). Any future "the base component" measurement must check the bytes, not the exit code.
+`scripts/build-components.sh` builds in the shared root `/tmp/wa-component-build/src` and Cargo decides
+what to recompile by MTIME, while the copy keeps the mtimes of the checkout it came from. Building the
+component from a SECOND worktree and coming back made Cargo answer `warm, nothing to compile` for the
+first tree while the artifacts in the target directory were the second tree's - same size, another
+sha256. Measured twice here:
+
+* a "base component" build that silently produced this tree's fixed bytes (`949c657d`, with
+  `self_wake_pauses` in them), which is why the base half of the red proof was re-taken after
+  `touch`ing the base tree's sources; and
+* the FAST PATH installing `selfloop.wasm` `880aef08` (the other tree's bytes, no
+  `self_wake_pauses`) into the row's own home while `/tmp/wa-component-build/src/lib.rs` held this tree's
+  source - my row passed alone and failed inside the gate, at `held: one tick dispatches the free row`.
+
+`89ef378f` fixes it: the tree is compared with the one the build root last held (the hash is kept BESIDE
+the directory, so it cannot describe itself); the same tree keeps every mtime and the cache stays warm, a
+DIFFERENT tree is installed and then touched, so every input is newer than any artifact built from the
+tree before it. Verified by switching three times in a row: base `->` `880aef08`, this tree `->`
+`949c657d`, this tree again (warm) `->` `949c657d`.
+
+The same commit repins `components.lock`: `selfloop 949c657d... 247835` (was `880aef08... 247771`).
+`scripts/test-component-pins.sh` (with the built artifact placed in this worktree's
+`build/components-pinned/`, so the check judges real bytes and not a skip) answers
+`selfloop: source and pin moved together (949c657d... 247835)`, `source and pins agree`,
+`11 of 11 pinned component(s) verified`.
+
+## The gate run
+
+`scripts/fast.sh` narrowed to the rows this change touches (`WA_FAST_ROWS`), under
+`flock -o ~/Work/missions/.suite.lock`, `CARGO_TARGET_DIR=/home/victor/wasm-agent/target/m-deploy-hold-r8a4`:
+
+```
+fast path FAILED (2 of 137 checks, 0 skipped, 610s)
+  check-esc-stops-pty       FAIL - bash: Esc gives back a usable prompt at once (300 ms idle, ...)
+  test-selfloop-component   PARITY: schedule a time wake differs
+```
+
+Both are PRE-EXISTING and were measured on a separate worktree of `caa1a936` (the base):
+
+* `check-esc-stops-pty` - `scripts/test-esc-stops-pty.mjs` run twice against the base tree here: "17 ok,
+  1 failed" both times (and "15 ok, 3 failed" on a second run in THIS tree), i.e. a timing row on this
+  machine, on a path this change does not touch.
+* `test-selfloop-component.lua` - the same `inherited` parity failure on base, quoted above.
+
+Everything else in that run is green, including `scripts/test-selfloop-no-starve.lua` (both halves),
+`scripts/test-selfloop.lua`, `scripts/test-selfloop-pause.lua`, `scripts/test-session-park.lua`,
+`scripts/test-deploy-pause.lua`, `scripts/test-feature-canary.lua`, `scripts/test-features-gate.lua` and
+`check-component-pins`.
 
 ## Unknowns, stated
 
