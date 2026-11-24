@@ -5114,14 +5114,44 @@ fn opening_wait() -> i32 {
     (wait as i32).clamp(1, 150)
 }
 
-/// One beat of the opening: a resize or the end of the budget ends it, otherwise one frame is drawn.
+/// Where the chat's output region ends, ready for `Opening::region_bottom`: the editor's own rows from the
+/// bottom (`out_bottom`: footer, the box, the status line), one less because the opening counts from 0.
+///
+/// This is the ONE number the star's cell is measured from, and it is asked of the code that OWNS those
+/// rows - `TerminalEditor::out_bottom`, the same layout the status line above the box is on - never
+/// estimated here. `None` until the box has been laid out (`host.input_editor`): a target computed from an
+/// editor with no rows is not a target (rule 1).
+fn opening_region_bottom(state: &ConsoleInput) -> Option<usize> {
+    let editor = state.editor.as_ref().filter(|editor| editor.row > 0)?;
+    Some(editor.out_bottom().saturating_sub(1))
+}
+
+/// One beat of the opening: a window that changed size RETARGETS it, the end of the budget ends it,
+/// otherwise one frame is drawn.
 fn opening_tick(state: &mut ConsoleInput) {
     let Some(opening) = state.opening.as_ref() else { return };
     let (width, height) = (opening.width(), opening.height());
-    // A window that changed size ends the opening: the simple answer to "it must survive a resize",
-    // and the one that cannot leave a frame drawn for a width the window no longer has.
+    // A RESIZE RETARGETS (Victor, 23/11: the star must land where the chat prints it). The sequence keeps
+    // playing on the new screen, and the star's cell is recomputed for the new window - the same block,
+    // wrapped at the new width, hanging from the new output region's last row. A window that no longer
+    // holds the box (under the opening's own floor) has no such cell: that ends it, exactly as a window
+    // under 60x14 never had an opening at all.
     if let Some((columns, rows)) = console_size() {
-        if columns as usize != width || rows as usize != height { finish_opening(state); return; }
+        if columns as usize != width || rows as usize != height {
+            if columns < OPENING_MIN_COLUMNS || rows < OPENING_MIN_ROWS {
+                finish_opening(state);
+                return;
+            }
+            // The chat's own rows first, so the opening reads the layout of the window that exists now.
+            if state.editor.as_ref().is_some_and(|editor| editor.row > 0) {
+                resize_console(state, columns as usize, rows as usize);
+            }
+            let bottom = opening_region_bottom(state);
+            if let Some(opening) = state.opening.as_mut() {
+                opening.resize(columns as usize, rows as usize);
+                if let Some(bottom) = bottom { opening.region_bottom(bottom); }
+            }
+        }
     }
     if state.opening_until.is_some_and(|until| std::time::Instant::now() >= until) {
         finish_opening(state);
@@ -5221,8 +5251,16 @@ pub extern "C-unwind" fn opening_header(l: *mut LuaState) -> c_int {
         .unwrap_or_default();
     let (lock, _) = console_input();
     let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+    // The rows the block will be drawn on, asked of the editor that owns them, in the same breath as the
+    // block itself: the block is laid out at the window's width (`transcript::wrap_rows`, its own) and hung
+    // from the output region's last row, so the last frame of the opening is the first frame of the chat.
+    let bottom = opening_region_bottom(&state);
     let ok = match state.opening.as_mut() {
-        Some(opening) if !lines.is_empty() => { opening.header(&lines); true }
+        Some(opening) if !lines.is_empty() => {
+            opening.header(&lines);
+            if let Some(bottom) = bottom { opening.region_bottom(bottom); }
+            true
+        }
         _ => false,
     };
     unsafe { wa_host_support::lua::lua_pushboolean(l, if ok { 1 } else { 0 }) };

@@ -2348,9 +2348,16 @@ function METHODS:welcome_painted()
   if not stored then return nil end
   local opts = {}
   for key, value in pairs(stored) do opts[key] = value end
+  -- THE RULE STAYS A MARKER (Victor, 23/11: the star must land where the chat prints it). The opening
+  -- draws this block on the alternate screen and the chat draws it again behind it, and a rule is its
+  -- width: only the renderer that knows the width can expand it. For the opening that renderer is
+  -- `rust/wa-term/src/transcript.rs`'s `expand_rule` - the transcript's own, at the width the opening is
+  -- drawing at, so a window resized DURING the opening gets a rule of the new width and a block of the new
+  -- height. Expanded here it was pinned at the width it was painted at, and a narrowed window then laid
+  -- the opening's block out one row taller than the chat's - the star missed its cell by that row.
   if self:transcript() then
     opts.marker, opts.limit = true, 1000000
-    return M.expand_rules(M.banner(opts), self.limit)
+    return M.banner(opts)
   end
   opts.limit = self.limit
   return M.banner(opts)

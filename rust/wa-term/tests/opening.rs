@@ -70,7 +70,13 @@ impl Pty {
     /// stdout and its own session with the slave as the controlling terminal, which is what makes
     /// `isatty` and the raw editor behave the way they do in a terminal.
     fn spawn(bin: &Path, dir: &Path, env: &[(&str, &str)], args: &[&str]) -> Pty {
-        let mut winsize = libc::winsize { ws_row: ROWS as u16, ws_col: COLUMNS as u16, ws_xpixel: 0, ws_ypixel: 0 };
+        Pty::spawn_sized(bin, dir, env, args, COLUMNS as u16, ROWS as u16)
+    }
+
+    /// The same, on a pty of a given size: `the_star_lands_in_the_cell_the_chat_prints_it_in` measures the
+    /// same start at three windows, and the size is the whole point of it.
+    fn spawn_sized(bin: &Path, dir: &Path, env: &[(&str, &str)], args: &[&str], columns: u16, rows: u16) -> Pty {
+        let mut winsize = libc::winsize { ws_row: rows, ws_col: columns, ws_xpixel: 0, ws_ypixel: 0 };
         let mut master: libc::c_int = -1;
         let mut slave: libc::c_int = -1;
         let opened = unsafe {
@@ -169,8 +175,10 @@ impl Pty {
     }
 
     /// The screen those bytes leave, read through the render tests' terminal in memory.
-    fn screen(&self) -> Vt {
-        let mut vt = Vt::new(COLUMNS, ROWS);
+    fn screen(&self) -> Vt { self.screen_sized(COLUMNS, ROWS) }
+
+    fn screen_sized(&self, columns: usize, rows: usize) -> Vt {
+        let mut vt = Vt::new(columns, rows);
         vt.feed(&self.bytes);
         vt
     }
@@ -185,6 +193,10 @@ impl Pty {
 /// The environment of every run: an allow-list (no vault, no relay, no provider), a scratch home, and a
 /// rendezvous that goes nowhere - nothing here can reach a real node.
 fn environment(home: &Path, db: &Path) -> Vec<(String, String)> {
+    environment_sized(home, db, COLUMNS, ROWS)
+}
+
+fn environment_sized(home: &Path, db: &Path, columns: usize, rows: usize) -> Vec<(String, String)> {
     vec![
         ("PATH".into(), "/usr/bin:/bin".into()),
         ("HOME".into(), home.display().to_string()),
@@ -196,8 +208,8 @@ fn environment(home: &Path, db: &Path) -> Vec<(String, String)> {
         ("WASM_AGENT_RELAY".into(), String::new()),
         ("WASM_AGENT_MANAGED".into(), "0".into()),
         ("WA_SKIP_UPDATE_CHECK".into(), "1".into()),
-        ("COLUMNS".into(), COLUMNS.to_string()),
-        ("LINES".into(), ROWS.to_string()),
+        ("COLUMNS".into(), columns.to_string()),
+        ("LINES".into(), rows.to_string()),
         ("WA_OPENING_MS".into(), "700".into()),
         ("LEDGER".into(), db.display().to_string()),
     ]
@@ -220,6 +232,24 @@ fn pairs(env: &[(String, String)]) -> Vec<(&str, &str)> {
 fn started(bytes: &[u8]) -> bool {
     let text = String::from_utf8_lossy(bytes);
     text.contains("/ for commands") && text.contains("Warning") == false
+}
+
+/// The welcome line's star on a screen, read from the CELLS the terminal in memory ended up with (never
+/// from where the process said it drew it): (row, column, and whether the cell wears the matrix green).
+/// `None` when the screen holds no `\u{273b}` at all - a screen without the welcome line cannot be asked
+/// where its star is, and that is a refusal, not a pass.
+fn star_cell(vt: &Vt) -> Option<(usize, usize, bool)> {
+    let rows = vt.rows();
+    for (index, row) in rows.iter().enumerate() {
+        let sgrs = vt.sgr(index);
+        for (column, ch) in row.chars().enumerate() {
+            if ch == '\u{273b}' {
+                let matrix = sgrs.get(column).is_some_and(|sgr| sgr.contains("38;2;0;175;0"));
+                return Some((index + 1, column, matrix));
+            }
+        }
+    }
+    None
 }
 
 /// A session id is the one thing two starts cannot share; it is the same 36 characters in the same row, so
@@ -409,13 +439,80 @@ fn a_key_during_the_opening_is_in_the_draft_and_ends_it() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// A window that changes size DURING the opening RETARGETS it (Victor, 23/11, item 3): the sequence keeps
+/// playing, the block is laid out again at the new width, and the star lands in the cell the chat prints it
+/// in at the NEW size. The row before this change asserted the opposite (a resize ended the opening),
+/// because ending it was the old answer to "a frame for a width the window no longer has".
 #[test]
-fn a_resize_ends_the_opening() {
+fn a_resize_retargets_the_opening_and_the_star_lands_on_the_new_size() {
     let Some(bin) = binary() else {
-        eprintln!("SKIP opening resize: no wa binary (WA_BIN)");
+        eprintln!("SKIP opening resize target: no wa binary (WA_BIN)");
         return;
     };
-    let dir = scratch("resize");
+    let dir = scratch("resizetarget");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let db = dir.join("ledger.db");
+    // At its real length: this row reads the block's frame, and a shortened budget can end the animation
+    // before the chat has handed the block over.
+    let mut env = environment(&home, &db);
+    for (key, value) in env.iter_mut() { if key == "WA_OPENING_MS" { *value = "2000".to_string(); } }
+    let args = vec!["--db", db.to_str().unwrap(), "chat"];
+
+    let mut pty = Pty::spawn(&bin, &dir, &pairs(&env), &args);
+    let playing = pty.read_until(Duration::from_secs(30), |bytes| {
+        String::from_utf8_lossy(bytes).contains("\u{1b}[?1049h")
+    });
+    assert!(playing, "the opening is playing before the window changes");
+    // Long enough for the start to have composed the welcome block, far from the end of the 2 s budget.
+    std::thread::sleep(Duration::from_millis(500));
+    let resized_at = Instant::now();
+    pty.resize(80, 24);
+    let ended = pty.read_until(Duration::from_secs(15), |bytes| {
+        String::from_utf8_lossy(bytes).contains("\u{1b}[?1049l")
+    });
+    let ended_ms = resized_at.elapsed().as_millis();
+    pty.read_quiet(Duration::from_millis(700), Duration::from_secs(15));
+    let bytes = pty.bytes.clone();
+    pty.stop();
+
+    assert!(ended, "the retargeted opening still ends, on its own budget");
+    assert!(ended_ms > 300, "a resize does not end it: it kept playing {ended_ms} ms past the resize");
+
+    let text = String::from_utf8_lossy(&bytes).to_string();
+    let left = text.find("\u{1b}[?1049l").expect("the opening gave the reader's screen back");
+    let mut opening = Vt::new(80, 24);
+    opening.feed(&bytes[..left]);
+    let mut chat = Vt::new(80, 24);
+    chat.feed(&bytes);
+    std::fs::remove_dir_all(&dir).ok();
+
+    assert!(opening.rows().iter().any(|row| row.contains("Welcome to wasm-agent!")),
+        "the last frame of the new window is the block at its new width: {:?}", opening.rows());
+    let landed = star_cell(&opening).expect("the last opening frame has a star");
+    let printed = star_cell(&chat).expect("the chat's screen has the welcome star");
+    assert_eq!(landed, printed,
+        "80x24 after the resize: the star of the last opening frame ({landed:?}) is the cell the chat
+        prints it in ({printed:?})
+--- last opening frame ---
+{}
+--- chat ---
+{}",
+        opening.rows().join("
+"), chat.rows().join("
+"));
+    assert!(printed.2, "in the matrix green");
+}
+
+/// A window that no longer holds the box ends it, exactly as a window under 60x14 never had an opening:
+/// there is no output region to put a block on, so there is no cell to land in (item 3's second half).
+#[test]
+fn a_resize_under_the_openings_floor_ends_it() {
+    let Some(bin) = binary() else {
+        eprintln!("SKIP opening resize floor: no wa binary (WA_BIN)");
+        return;
+    };
+    let dir = scratch("resizefloor");
     let home = dir.join("home");
     std::fs::create_dir_all(&home).unwrap();
     let db = dir.join("ledger.db");
@@ -428,19 +525,16 @@ fn a_resize_ends_the_opening() {
     });
     assert!(playing, "the opening is playing before the window changes");
     let resized_at = Instant::now();
-    pty.resize(80, 20);
+    pty.resize(50, 12);
     let ended = pty.read_until(Duration::from_secs(10), |bytes| {
         String::from_utf8_lossy(bytes).contains("\u{1b}[?1049l")
     });
     let ended_ms = resized_at.elapsed().as_millis();
-    pty.read_quiet(Duration::from_millis(500), Duration::from_secs(5));
-    let screen = normalise(&pty.screen().rows());
     pty.stop();
     std::fs::remove_dir_all(&dir).ok();
 
-    assert!(ended, "a resize ends the opening rather than leaving a frame for a width the window has not");
+    assert!(ended, "a window under the opening's floor ends it rather than leaving a frame for it");
     assert!(ended_ms < 1500, "and at once: {ended_ms} ms after the resize");
-    assert!(row_with(&screen, "Welcome to wasm-agent!") != "", "with the header drawn at the new size");
 }
 
 #[test]
@@ -542,4 +636,88 @@ fn the_window_too_small_for_the_box_gets_no_opening() {
     let text = String::from_utf8_lossy(&bytes).to_string();
     assert_eq!(animation_frames(&bytes), 0, "a window under 60x14 has no opening");
     assert!(!text.contains("\u{1b}[?1049h"), "and never takes the alternate screen");
+}
+
+/// THE STAR LANDS WHERE THE CHAT PRINTS IT (Victor, 23/11: "right now the supernova shrinks into its very
+/// top left then it moves suddenly to the very bottom of the terminal ... ideally it should collapse into
+/// the exact position it will be printed").
+///
+/// Measured in a real pty, at three window sizes, on the cells a terminal in memory ended up holding:
+/// the star of the LAST frame of the opening (the alternate screen, read up to the byte that gives the
+/// screen back) is the star of the chat's own screen - the same row, the same column, and the same matrix
+/// green - so there is nothing between the two frames for the eye to follow but the star it was already
+/// looking at.
+///
+/// On the code before this the opening drew its header at the TOP (row 2, column 1) and the chat draws the
+/// same block at the bottom of the screen, so the star jumped the height of the window the moment the
+/// alternate screen was left: this row is the measurement of that jump, and it fails there.
+#[test]
+fn the_star_lands_in_the_cell_the_chat_prints_it_in() {
+    let Some(bin) = binary() else {
+        eprintln!("SKIP opening star: no wa binary (WA_BIN)");
+        return;
+    };
+    for (columns, rows) in [(80u16, 24u16), (120, 40), (200, 60)] {
+        let dir = scratch(&format!("star{columns}x{rows}"));
+        let home = dir.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let db = dir.join("ledger.db");
+        // AT ITS REAL LENGTH. The budget is a test's knob (`WA_OPENING_MS`), and a shortened one can end the
+        // animation in the middle of the acts - before the chat has handed its block over - which measures
+        // the budget, not the star. This row reads the frame the block is drawn on, so it gives the opening
+        // the time it has in a real start.
+        let mut env = environment_sized(&home, &db, columns as usize, rows as usize);
+        for (key, value) in env.iter_mut() {
+            if key == "WA_OPENING_MS" { *value = "2000".to_string(); }
+        }
+        let args = vec!["--db", db.to_str().unwrap(), "chat"];
+
+        let mut pty = Pty::spawn_sized(&bin, &dir, &pairs(&env), &args, columns, rows);
+        let played = pty.read_until(Duration::from_secs(30), |bytes| started(bytes));
+        pty.read_quiet(Duration::from_millis(700), Duration::from_secs(15));
+        let bytes = pty.bytes.clone();
+        pty.stop();
+        assert!(played, "{columns}x{rows}: the start finished, so both screens exist");
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        assert!(text.contains("\u{1b}[?1049h"), "{columns}x{rows}: the opening played");
+        let left = text.find("\u{1b}[?1049l").expect("the opening gave the reader's screen back");
+
+        // The last frame of the opening: everything up to the byte that leaves the alternate screen.
+        let mut opening = Vt::new(columns as usize, rows as usize);
+        opening.feed(&bytes[..left]);
+        // The chat's own screen: the whole stream, the alternate screen included.
+        let mut chat = Vt::new(columns as usize, rows as usize);
+        chat.feed(&bytes);
+
+        // The frame this row reads must be the BLOCK's frame, the one the chat's first frame repeats: if the
+        // start never handed the block over inside the budget, the last frame is an act and there is nothing
+        // to compare - that is a refusal by name, never a comparison of two different pictures.
+        assert!(opening.rows().iter().any(|row| row.contains("Welcome to wasm-agent!")),
+            "{columns}x{rows}: the opening ended before the welcome block was handed over (the block is what
+            the chat draws, so this frame cannot be compared with it): {:?}", opening.rows());
+        let landed = star_cell(&opening).unwrap_or_else(|| panic!(
+            "{columns}x{rows}: the last opening frame has no star to land on: {:?}", opening.rows()));
+        let printed = star_cell(&chat).unwrap_or_else(|| panic!(
+            "{columns}x{rows}: the chat's screen has no welcome star: {:?}", chat.rows()));
+        assert_eq!(landed, printed,
+            "{columns}x{rows}: the star of the last opening frame ({landed:?}) is the cell the chat prints
+            it in ({printed:?})
+--- last opening frame ---
+{}
+--- chat ---
+{}",
+            opening.rows().join("
+"), chat.rows().join("
+"));
+        assert!(landed.2, "{columns}x{rows}: and both wear the matrix green, one source (PALETTE.matrix)");
+        // The block, not only its star: the rule above it is the window's width on both screens. The rule
+        // reaches a renderer as a MARKER and is expanded at the width it draws at, so this is also the row
+        // that says the opening expands it from the same marker, at the same width, as the transcript.
+        let rule = "\u{2500}".repeat(columns as usize);
+        assert_eq!(opening.row(landed.0 - 2), rule,
+            "{columns}x{rows}: the opening's rule is the window's width");
+        assert_eq!(chat.row(landed.0 - 2), rule,
+            "{columns}x{rows}: and it is the chat's own rule, on the chat's own row");
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
