@@ -7,12 +7,14 @@
 -- Its own home (`WASM_AGENT_HOME`, set by the caller) and its own database: it must not touch the
 -- running node's graph. No network, no model, no inference: one index of a two-file fixture and
 -- the queries the graph tool itself makes.
--- THE SWITCH THIS PROOF NEEDS, NAMED HERE (docs/GRAPH.md, 23/11). The graph is OFF by default on a node, and
--- a deploy's proof process turns it on for its own call (`WA_GRAPH_COMPONENT=1`, scripts/deploy.sh step 3e)
--- because what is being proved is the STAGED COMPONENT, not the node's default. If that setting ever went
--- missing, every `host.graph_*` below would answer `graph_dormant` before the component was touched and this
--- script would fail as if the bytes were wrong - a proof of nothing that reads as a broken install. So it
--- says which of the two it is, by name.
+-- THE SWITCH THIS CHECK NEEDS, NAMED HERE (docs/GRAPH.md, 23/11). The graph is OFF by default on a node, so
+-- this check - which proves the GRAPH component's own answers - needs the feature switched on for its own
+-- process (`WA_GRAPH_COMPONENT=1`; `scripts/test-deploy-component-proof.lua` does that, in its own home).
+-- It is deliberately NO LONGER part of the deploy: a deploy proof must not depend on an optional feature
+-- (Fable, 24/11), and `scripts/check-component-proof.lua` proves the same seam through `memory`, which is on
+-- by default. If the switch is missing here, every `host.graph_*` below would answer `graph_dormant` before
+-- the component was touched and the script would fail as if the bytes were wrong - so it says which of the
+-- two it is, by name.
 local features = dofile('lua/core/features.lua')
 assert(features.on('graph'),
   'check-graph-component: the graph is switched off in THIS process (set WA_GRAPH_COMPONENT=1 or features.graph), so the staged component cannot be proved - the refusal is the switch, not the component')

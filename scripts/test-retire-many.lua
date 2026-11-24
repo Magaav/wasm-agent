@@ -129,19 +129,44 @@ check(#searched==2 and searched[1].count>=1 and searched[2].count>=1,'each histo
 
 -- 1e. symbol_source_many -> Promise.all(graph{symbol_source}): the same selector semantics, the same
 -- delivered refusal when this node has no graph host (both forms answer it, so the parity still holds).
+-- ON A NODE WHOSE GRAPH IS ON - the state this leg was written for. The graph is OFF by default
+-- (docs/GRAPH.md, 23/11), and a dormant graph is not offered in the catalogue at all, so a leg that ran
+-- unconditionally failed on every node that ships (main-health, 24/11, after the graph-dormant merge).
+-- The leg is KEPT rather than dropped: the retirement claim for `symbol_source_many` IS "Promise.all of
+-- tools.graph is its replacement", and dropping it would stop testing that wherever the graph is used. On
+-- the default dormant node the row asserts the truth instead - the name is absent from the catalogue and a
+-- script that calls it is refused - while the graph's own answers are covered by test-graph-tool.lua and
+-- test-graph-dormant.lua.
+local features=dofile('lua/core/features.lua')
+local graph_feature=features.resolve('graph')
+if graph_feature.enabled then
 local symbol_source=ask('const one = (p) => p.then(r => r, e => ({error: String((e && e.message) || e)})); const items = '..q({{path='lua/core/json.lua',name='encode',line=1}})..';'
   ..' const out = await Promise.all(items.map(x => one(tools.graph({action:"symbol_source",path:x.path,name:x.name,line:x.line}))));'
   ..' return out.map(r => ({source: typeof r.source === "string", error: r.error||null}));','graph parity')
 check(type(symbol_source)=='table' and #symbol_source==1,'one graph answer per selector')
 check(symbol_source[1] and (symbol_source[1].source==true or type(symbol_source[1].error)=='string'),
   'a symbol source answers source text or the host\'s own refusal: '..q(symbol_source))
+else
+-- THE DEFAULT NODE: the graph is dormant, and the honest assertions are that it is not offered and that a
+-- script naming it is refused by the dispatcher - not that a parity it cannot perform holds.
+local in_catalog=false
+for _,item in ipairs(catalog) do if item['function'] and item['function'].name=='graph' then in_catalog=true end end
+check(in_catalog==false,'a dormant graph is not offered in the catalogue')
+local refused_graph=ask('try { await tools.graph({action:"symbol_source",path:"lua/core/json.lua",name:"encode",line:1});'
+  ..' return {answered:true}; } catch (e) { return {error:String((e&&e.message)||e)}; }','dormant graph refusal')
+check(type(refused_graph.error)=='string' and refused_graph.error:find('not a tool',1,true)~=nil,
+  'a script naming the dormant graph is refused by the dispatcher: '..q(refused_graph))
+end
 -- The graph action list the model reads no longer offers the batch action, and the tool refuses it.
 local graph_schema
 for _,item in ipairs(catalog) do if item['function'].name=='graph' then graph_schema=item['function'] end end
-local offered=false
-for _,action in ipairs((graph_schema.parameters.properties.action.enum or {})) do if action=='symbol_source_many' then offered=true end end
-check(offered==false,'graph no longer offers the symbol_source_many action')
-
+if graph_schema then
+  local offered=false
+  for _,action in ipairs((graph_schema.parameters.properties.action.enum or {})) do if action=='symbol_source_many' then offered=true end end
+  check(offered==false,'graph no longer offers the symbol_source_many action')
+else
+  check(graph_feature.enabled==false,'the graph is absent from the catalogue only because it is dormant')
+end
 -- 1f. write_many/edit_many -> serial writes and edits. Effects are admitted one at a time: the second
 -- call in the same script sees the first one's bytes, and a Promise.all of writes lands each exactly once.
 local wrote=ask('await tools.write({path:'..q(root..'/w1.txt')..',content:"one\\n"});'
@@ -256,7 +281,11 @@ check(never.error and host.read_file(root..'/never.txt')==nil,'the retired write
 -- who still remembers an old name is sent to; the check below requires it to carry the one sentence.
 local HISTORICAL={'docs/measurements/','docs/CODEMODE-PRESENTATION-JOURNAL.md','docs/CODEMODE-MODEL-BOUNDARY-JOURNAL.md',
   'docs/GRAPH-REPAIR-JOURNAL.md','docs/release/','reviews/','fixtures/','benchmarks/','docs/WHATSAPP-REVIEW.md',
-  'docs/SUBSCRIPTION-BUFFER-RECOVERY.md','docs/BATCH-TOOLS.md'}
+  'docs/SUBSCRIPTION-BUFFER-RECOVERY.md','docs/BATCH-TOOLS.md',
+  -- Mission reports are dated records of work done, like the journals above: a report that names a
+  -- retired batch while explaining why it was retired is history, not an offer. The exemption is a
+  -- PREFIX so no report can become a place to keep an offer alive without this list changing.
+  'docs/missions/'}
 local function historical(path)
   for _,prefix in ipairs(HISTORICAL) do if path:sub(1,#prefix)==prefix then return true end end
   return false
