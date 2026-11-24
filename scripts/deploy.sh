@@ -184,20 +184,46 @@ write_result() { # ok detail
 # A refusal is evidence: the gate saying no, with a reason, at a moment. Printing to stderr is not enough -
 # after the fact, "did it refuse anything?" has to be answerable. Every refusal is appended to
 # <install>/deploy.log with the time, what it was about, and why.
+# NOTHING THAT CAN REFUSE RUNS AFTER THE SWAP (24/11). upgrade.sh restarts the node; from that moment the
+# new bytes SERVE, so a refusal there leaves a node running bytes nobody recorded - exactly what work hit
+# at 22:17Z: an interim installed.txt (commit=, record_role=interim), no lua_tree=, no binary_commit=, the
+# new scripts never shipped, and `refused(build_commit_mismatch)` 94 s into a deploy that had already
+# succeeded. Every post-swap problem is therefore RECORDED in installed.txt and named, and the run exits 3
+# ("installed, with problems") - an exit code that says do not read this as a clean success, without
+# pretending the install did not happen. The one check that must refuse (are the bytes the commit they
+# were taken for?) runs BEFORE the swap, on the staged binary.
+SWAPPED=0
+POST_SWAP_PROBLEMS=0
+POST_SWAP_LOG=""
+post_swap_problem() { # <what>
+  POST_SWAP_PROBLEMS=$((POST_SWAP_PROBLEMS + 1))
+  POST_SWAP_LOG="${POST_SWAP_LOG}${POST_SWAP_LOG:+; }$1"
+  note "post-swap problem: $1"
+}
+# Append what went wrong to the record that already exists. The interim record is what a half state leaves;
+# a line appended to it is at least a fact a reader can see, and it is never written over a final record's
+# identity lines.
+record_post_swap_problems() {
+  [ -n "${INSTALL_DIR:-}" ] && [ -f "$INSTALL_DIR/installed.txt" ] || return 0
+  { printf 'post_swap_problem_count=%s\n' "$POST_SWAP_PROBLEMS"
+    printf 'post_swap_problem=%s\n' "$(printf '%s' "$POST_SWAP_LOG" | tr '\r\n' '  ' | cut -c1-1000)"
+  } >> "$INSTALL_DIR/installed.txt" 2>/dev/null || true
+}
+
+# THE ONE fail() THE WHOLE SCRIPT USES. Before the swap it refuses (exit 2, nothing replaced). AFTER it, it
+# records and exits 3: the node is running the new build, so the record must exist and the problem must be
+# in it, not in a refusal that pretends nothing was installed.
 fail() {
-  echo "deploy: $*" >&2
-  wa_status_unfollow
-  wa_status failed "${WA_STATUS_PHASE:-preflight}: $(printf '%s' "$*" | cut -c1-90)"
-  printf '%s\t%s\t%s\t%s\n' "$(date +%Y-%m-%dT%H:%M:%S%z)" "${COMMIT:-unknown}" "${BRANCH:-unknown}" "$*" \
-    >> "$INSTALL_DIR/deploy.log" 2>/dev/null
-  write_result false "$*"
-  # A requested deploy is answered, including when the answer is no - but not from here. The report belongs to
-  # the sentinel that spawned this script (`deploy_outcome`), which settles it from the `result.json` written
-  # just above, from this process's exit status, or from its own watchdog. It used to be queued here, and that
-  # is exactly the defect measured on 2026-11-10: this process is the one the swap kills, so a wake written
-  # only by its last lines is a wake that never arrives when it matters. A hand-run deploy passes no --session
-  # and has nobody to wake; a refusal at a shell is read by the person at the shell.
-  exit 1
+  local message="$*" rc="${2:-2}"
+  if [ "${SWAPPED:-0}" = 1 ]; then
+    post_swap_problem "$(printf '%s' "$message" | tr '\r\n' '  ' | cut -c1-600)"
+    record_post_swap_problems
+    printf 'deploy: installed, but %s\n' "$message" >&2
+    printf 'deploy: the node is running the new build and this is recorded in installed.txt (post_swap_problem=); this is NOT a clean success (exit 3).\n' >&2
+    exit 3
+  fi
+  printf 'deploy: %s\n' "$message" >&2
+  exit "$rc"
 }
 
 # A deploy that INSTALLED the node and only failed to bring a watcher back is not a failed build.
@@ -975,6 +1001,19 @@ BINARY_DIR=""
 BINARY_TRIPLE=""
 SENTINEL_SOURCE=""
 BINARY_STAGE="$INSTALL_DIR/node-binary.next"
+
+# NOTHING THAT CAN REFUSE RUNS AFTER THE SWAP (24/11). upgrade.sh restarts the node; from that moment the
+# new bytes SERVE, so a refusal there leaves a node running bytes nobody recorded - which is what work hit
+# at 22:17Z (an interim installed.txt, no lua_tree=, no binary_commit=, the scripts never shipped). Every
+# post-swap problem is therefore RECORDED and named, and the deploy exits 3 (installed, with problems) at
+# the end: the exit code says "do not trust this as a clean success" without pretending nothing happened.
+POST_SWAP_PROBLEMS=0
+POST_SWAP_LOG=""
+post_swap_problem() { # <phase> <what>
+  POST_SWAP_PROBLEMS=$((POST_SWAP_PROBLEMS + 1))
+  POST_SWAP_LOG="${POST_SWAP_LOG}${POST_SWAP_LOG:+; }$1: $2"
+  note "post-swap problem ($1): $2"
+}
 if [ "${WA_DEPLOY_BUILD_ONLY:-0}" = 1 ]; then
   echo "deploy: WA_DEPLOY_BUILD_ONLY=1 - this tree builds its own binary; no published one is installed"
 elif ! command -v wa_node_binaries_prepare >/dev/null 2>&1; then
@@ -1031,9 +1070,32 @@ BINARY_LINES
         BINARY_SOURCE_COMMIT=""
       else
         BINARY_PROVENANCE="prebuilt-release"
+        # BINARY_COMMIT IS THIS TREE'S COMMIT, AND BINARY_SOURCE_COMMIT IS THE RELEASE'S (24/11). They are
+        # the same id for a release of this commit and DIFFERENT for a covering release - the newest
+        # published build whose compiled inputs digest matches, which is what a scripts-only landing
+        # installs. The bytes are a build of BINARY_SOURCE_COMMIT; the tree this deploy installs is
+        # BINARY_COMMIT. Conflating the two made deploy.sh expect the bytes to report HEAD, refuse the
+        # install AFTER the swap (refused(build_commit_mismatch) on work, 22:17Z) and leave the interim
+        # record - a node running new bytes with nothing recorded about them.
         BINARY_COMMIT="$(git rev-parse HEAD)"
-        BINARY_RELEASE="${BINARY_RELEASE:-$(wa_node_release_tag "$BINARY_COMMIT")}"
+        BINARY_RELEASE="${BINARY_RELEASE:-$(wa_node_release_tag "$BINARY_SOURCE_COMMIT" 2>/dev/null || wa_node_release_tag "$BINARY_COMMIT")}"
         BINARY_SOURCE_COMMIT="${BINARY_SOURCE_COMMIT:-$BINARY_COMMIT}"
+      fi
+      # THE COMMIT THE STAGED BYTES MUST REPORT, AND THE PROOF OF IT, HERE - BEFORE ANYTHING IS REPLACED.
+      # A check that can refuse belongs on this side of the swap: after upgrade.sh has restarted the node,
+      # a refusal leaves the half state this rule exists to prevent (new bytes running, the interim record
+      # as the install's last word). The staged binary is executed, exactly as the prove gate below executes
+      # it, and it must name the commit it was taken for: the release's own source commit for a prebuilt
+      # install (which is HEAD when the release is this commit's build), never the deployed tree when that
+      # differs - the tree is recorded as commit=, the bytes as binary_commit=.
+      BINARY_EXPECT_COMMIT="${BINARY_SOURCE_COMMIT:-${BINARY_COMMIT:-$COMMIT}}"
+      if command -v wa_build_info >/dev/null 2>&1; then
+        STAGED_INFO="$(wa_build_info "$NEW")" || STAGED_INFO=""
+        STAGED_COMMIT="$(wa_build_field "$STAGED_INFO" commit 2>/dev/null)"
+        if [ -n "$STAGED_COMMIT" ] && [ "$STAGED_COMMIT" != unknown ] && ! wa_same_commit "$STAGED_COMMIT" "$BINARY_EXPECT_COMMIT"; then
+          fail "refused(build_commit_mismatch): the staged binary at $NEW reports commit ${STAGED_COMMIT:0:12} but this deploy took it for ${BINARY_EXPECT_COMMIT:0:12} (release ${BINARY_RELEASE:-unknown}) - the bytes are not the commit they were taken for (a stale cache entry, a mislabelled release, or a manifest whose source_commit is not the build's). Nothing has been replaced and nothing was recorded."
+        fi
+        [ "$STAGED_COMMIT" = unknown ] && note "the staged binary cannot report its own build; the record below will say binary_commit=unknown and why"
       fi
       # The supervisor comes from the SAME verified directory, and it must still be the bytes the manifest
       # pins. WHY (openclaw, 06/11, the first prebuilt deploy of 75ac2964): the node installed and the
@@ -1760,6 +1822,8 @@ if [ "$UPGRADE_STATUS" = "3" ]; then
   fail "the node upgraded, but its script or install record failed (exit 3); inspect the live pid and installed.txt"
 fi
 [ "$UPGRADE_STATUS" = "0" ] || fail "upgrade.sh failed (exit $UPGRADE_STATUS); its own output is in $INSTALL_DIR/deploy-upgrade.log"
+# FROM HERE THE NEW BYTES SERVE: every failure below is recorded, never a refusal (see fail()).
+SWAPPED=1
 
 # 7. Verify that the node answering is *this* install: the listener's pid must be the pid the install
 #    recorded. Without this, a second node on the port answers /health and the deploy reports success for
@@ -1901,9 +1965,13 @@ record_installed() {
   # Which id this deploy EXPECTS is still a fact worth checking, so it is stated and compared: this commit for
   # a build, the release manifest's source commit for a prebuilt install, and the binary's existing commit
   # for a Lua fast-path deploy (which installs no binary at all).
+  # THE BYTES ARE THE RELEASE'S BUILD, NOT THIS TREE'S (24/11): for a prebuilt install the id the binary
+  # must report is the RELEASE's source commit (BINARY_SOURCE_COMMIT), which equals this tree's commit when
+  # the release is that commit's own build and differs when the release covers it. Expecting HEAD here is
+  # what refused a correct covering install on work at 22:17Z, after the swap.
   record_expected="$COMMIT"
   case "${BINARY_PROVENANCE:-}" in
-    prebuilt-*) [ -n "${BINARY_COMMIT:-}" ] && record_expected="$BINARY_COMMIT" ;;
+    prebuilt-*) record_expected="${BINARY_SOURCE_COMMIT:-${BINARY_COMMIT:-$COMMIT}}" ;;
   esac
   [ "${LUA_FAST:-0}" = 1 ] && [ -n "${INSTALLED_BINARY_COMMIT:-}" ] && record_expected="$INSTALLED_BINARY_COMMIT"
   record_commit=""; record_tree=unknown; record_dirty=unknown; record_build=absent
@@ -1924,7 +1992,13 @@ record_installed() {
       note "the installed binary cannot report its own build (build_info=absent): installed.txt records commit=unknown, not this deploy's intention"
     fi
   elif ! wa_same_commit "$record_commit" "$record_expected"; then
-    fail "refused(build_commit_mismatch): the binary installed at $INSTALLED_BIN_FOR_RECORD reports commit ${record_commit:0:12} but this deploy meant to install ${record_expected:0:12} - the bytes are not the commit they were taken for (a stale build artifact, a reused target directory, or a mislabelled release). Nothing was recorded over the previous record."
+    # NOT A REFUSAL ANY MORE (24/11). The bytes were proved against the release they were taken for BEFORE
+    # the swap (the staged binary's --build-info, above); by the time this runs upgrade.sh has restarted the
+    # node, so refusing here would leave the state this check exists to prevent - new bytes running under an
+    # INTERIM record. A disagreement now means the swap installed something other than the bytes this deploy
+    # proved, which is a fact to record loudly (post_swap_problem= below, and the bytes' own answer as
+    # binary_commit=), not a reason to leave the install unrecorded.
+    post_swap_problem recording "the installed binary reports commit ${record_commit:0:12} but this deploy proved ${record_expected:0:12}; the record names the bytes' own answer and record_expected="
   fi
   # COMMIT= IS THE LUA TREE'S ON A FAST-PATH INSTALL (21/11), and that is not a belief: the tree at $COMMIT is
   # what this deploy installed beside the binary it kept, and commit= is what every reader of this record asks
@@ -1938,18 +2012,30 @@ record_installed() {
   if [ "${LUA_FAST:-0}" = 1 ]; then
     record_commit="$COMMIT"
   fi
+  # A COVERING PREBUILT INSTALL IS TWO FACTS, and commit= is the one every reader asks about the INSTALL
+  # (24/11): the tree this deploy installed, exactly as a Lua fast-path deploy records it, while the bytes
+  # are binary_commit= below. Written as the bytes' commit instead, a node that installed a covering build
+  # of a later scripts-only commit reported itself behind main on every update check - the same defect the
+  # fast path fixed on 21/11, one path over.
+  if [ "${BINARY_PROVENANCE:-}" = prebuilt-release ] && [ -n "${BINARY_SOURCE_COMMIT:-}" ] && [ "$BINARY_SOURCE_COMMIT" != "$COMMIT" ]; then
+    record_commit="$COMMIT"
+  fi
   # A prebuilt record's commit= is the manifest's 40-hex identity or it is not a record of a verified
   # install: a short id is a name that can collide, and it would be the id the checks downstream compare.
   # Checked BEFORE the write, so a record no reader can act on is never the one that lands.
   case "${BINARY_PROVENANCE:-}" in
     prebuilt-*)
       if [ "${#record_commit}" != 40 ] || [ -n "$(printf '%s' "$record_commit" | tr -d '0123456789abcdef')" ]; then
-        fail "installed.txt would record commit=$record_commit for a prebuilt install, which is not a 40-hex commit id; the record must name the id the manifest was verified against"
+        post_swap_problem recording "commit=$record_commit is not a 40-hex id, so the record names it as unknown with record_id_why="
+        record_id_why="commit=$record_commit is not a 40-hex commit id"
+        record_commit=unknown
       fi
       # ...and the commit the BYTES are a build of, when that is another one (the digest fallback): it is
       # the id a later fast-path deploy reads back as binary_commit=, so it is held to the same rule.
       if [ -n "${BINARY_SOURCE_COMMIT:-}" ] && { [ "${#BINARY_SOURCE_COMMIT}" != 40 ] || [ -n "$(printf '%s' "$BINARY_SOURCE_COMMIT" | tr -d '0123456789abcdef')" ]; }; then
-        fail "installed.txt would record binary_source_commit=$BINARY_SOURCE_COMMIT, which is not a 40-hex commit id; the record must name the id the manifest's source_commit was verified against"
+        post_swap_problem recording "binary_source_commit=$BINARY_SOURCE_COMMIT is not a 40-hex id, so binary_commit= is recorded as unknown with binary_id_why="
+        BINARY_ID_WHY="binary_source_commit=$BINARY_SOURCE_COMMIT is not a 40-hex commit id"
+        BINARY_SOURCE_COMMIT=""
       fi ;;
   esac
   # `install_dir=` is the record's own statement of where it was written, and of which directory the machine
@@ -1980,14 +2066,21 @@ record_installed() {
   # hand-placed binary - and WHERE the build ran is a separate fact, because a reader that conflates the
   # two would have to guess, and a node that installs a published binary must be able to say so.
   if [ -n "${BINARY_RELEASE:-}" ]; then
-    # binary_commit= keeps its meaning for its existing readers (the Lua fast path reads it back as the
-    # commit whose build the installed binary is): the bytes' own commit. binary_source_commit= is the same
-    # fact under the name a digest-fallback install needs - the release's source commit, which differs from
-    # this tree's commit= exactly when the install reused an older commit's compiled inputs.
-    printf 'binary_source=%s\nbinary_release=%s\nbinary_commit=%s\nbinary_source_commit=%s\n' \
-      "${BINARY_PROVENANCE:-prebuilt-release}" "$BINARY_RELEASE" \
-      "${BINARY_SOURCE_COMMIT:-${BINARY_COMMIT:-$COMMIT}}" "${BINARY_SOURCE_COMMIT:-${BINARY_COMMIT:-$COMMIT}}" >> "$record_tmp" \
-      || fail "node installed, but the binary source lines could not be written"
+    # A PREBUILT RECORD NAMES BOTH FACTS (24/11, Fable): commit= above is the TREE this deploy installed (and
+    # lua_tree= says the same, as the fast path does), while binary_commit= is the commit the installed BYTES
+    # are a build of - the release's source commit, which differs from commit= exactly when the release covers
+    # a later scripts-only tree. record_expected= is what was proved against the staged binary BEFORE the
+    # swap, kept in the record so a reader can see the proof and not only its outcome. A malformed id is
+    # named in a *_why= line rather than substituted with a plausible one.
+    if [ -n "${BINARY_ID_WHY:-}" ]; then binary_commit_said=unknown; else binary_commit_said="${BINARY_SOURCE_COMMIT:-${BINARY_COMMIT:-$COMMIT}}"; fi
+    {
+      printf 'binary_source=%s\nbinary_release=%s\nbinary_commit=%s\n' \
+        "${BINARY_PROVENANCE:-prebuilt-release}" "$BINARY_RELEASE" "$binary_commit_said"
+      [ -z "${BINARY_ID_WHY:-}" ] || printf 'binary_id_why=%s\n' "$BINARY_ID_WHY"
+      printf 'binary_source_commit=%s\n' "$binary_commit_said"
+      printf 'record_expected=%s\n' "$record_expected"
+      [ -z "${record_id_why:-}" ] || printf 'record_id_why=%s\n' "$record_id_why"
+    } >> "$record_tmp" || fail "node installed, but the binary source lines could not be written"
   fi
   # Appended as its own line, only when this commit is a release: a command substitution would strip the
   # newline and leave `reason=` and `release=` sharing a line, which no reader parses.
@@ -2542,6 +2635,14 @@ fi
 if [ -f "$ROOT/scripts/lib/seeded-agents-md.sh" ]; then
   . "$ROOT/scripts/lib/seeded-agents-md.sh"
   retire_seeded_agents_md "$SENTINEL_CONFIG" "$ROOT/scripts/lib/seeded-agents-md.sha256" || true
+fi
+if [ "$POST_SWAP_PROBLEMS" -gt 0 ]; then
+  # The install happened; the problems are named in the record and in this result, and the exit code says
+  # the difference between "installed cleanly" and "installed, with N things wrong".
+  record_post_swap_problems
+  write_result false "installed $COMMIT with $POST_SWAP_PROBLEMS post-swap problem(s): $POST_SWAP_LOG"
+  echo "deploy: INSTALLED WITH $POST_SWAP_PROBLEMS PROBLEM(S) - the node runs $COMMIT and installed.txt records each one as post_swap_problem=: $POST_SWAP_LOG" >&2
+  exit 3
 fi
 write_result true "installed $COMMIT; watcher ${SENTINEL_NEW_PID:-${SENTINEL_WATCH_PID:-none}}"
 wa_phase ""
