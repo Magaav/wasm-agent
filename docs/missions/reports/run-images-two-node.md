@@ -220,6 +220,25 @@ Each row was ALSO run alone with this tree's release binary (which the runner bu
 two-node row fails at the change-row check and `test-peer-bash-changes` at `the caller emits one row per
 file: 0`, and `test-remote-image` at `expected remote_image_batch_unsupported`.
 
+## The land gate: red once, and why
+
+The first preflight of this branch was red on `land-quick` with `key_path_in_git_checkout`: the landing's
+dry run puts its scratch root INSIDE the land worktree (`.wa-scratch`, a git checkout), and
+`wa fleet keygen` refuses a key path there by its own guard - a key must never be something `git add`
+reaches. The row now picks the pair's tree from the first candidate git says is NOT a repository
+(`TMPDIR`, then `/tmp`, then `GATE_ROOT`), prints which it chose, and skips with a named reason if every
+candidate is a checkout. The home the runner hands the row stays where the scratch-home guard requires
+it; only the pair's own tree moves. No assertion was deleted, no row dropped, no timeout raised.
+
+Measured after the fix, in the preflight's own shape (`GATE_ROOT` and `TMPDIR` both inside this
+worktree): 51 checks, 0 skips. And the preflight itself:
+
+    preflight green (quick, no gate): change/run-images-two-node on main b9ec52280260 in 8s
+    land-quick: change/run-images-two-node merged onto main b9ec5228 -> 8584ce36 (9 files)
+
+The narrowed runner run on the same tip (`d1be28a0`): `lua 34/34 passed`, `132 checks, 1 failed` -
+`esc-stops-pty`, the pre-existing red below.
+
 ## Pre-existing failures, measured on the base tree
 
 Both are outside this branch's files and fail with the same words and counts in this tree and in a
