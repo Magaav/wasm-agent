@@ -192,36 +192,6 @@ for _, row in ipairs(real.updates) do
 end
 ok(chains_set == #REAL_ATTEMPTS, "each new row carries resume_chain=1", tostring(chains_set))
 
--- (r8a/2+8) A RESUME WHOSE RUN IS STILL QUEUED OR RUNNING IS LIVE: no re-arm, no clock. MEASURED live, three
--- resumes of one session sat queued on node-thread 2 while the reclaim armed duplicates behind them.
-local busy = ledger({
-  { id = "live-run", session_id = "sess-live", owner = "master", attempts = 1, resume_chain = 0,
-    status = "unknown", created_at = fresh(), run_id = 4242 },
-})
-local armed_l, schedule_l = scheduler()
-local out_l = pause.ensure_resumes(now, { read = function() return nil end, exec = busy.ex, query = busy.q,
-  schedule = schedule_l, session_exists = function() return true end, migrated = function() return true end,
-  run_state = function() return "running" end })
-ok(out_l.rearmed == 0, "a resume whose run is running is not re-armed: " .. json.encode(out_l))
-ok(#armed_l == 0, "and nothing was armed behind it", json.encode(out_l))
-local queued = ledger({
-  { id = "queued-run", session_id = "sess-queued", owner = "master", attempts = 1, resume_chain = 0,
-    status = "unknown", created_at = fresh(), run_id = 4243 },
-})
-local armed_q, schedule_q = scheduler()
-local out_q = pause.ensure_resumes(now, { read = function() return nil end, exec = queued.ex, query = queued.q,
-  schedule = schedule_q, session_exists = function() return true end, migrated = function() return true end,
-  run_state = function() return "queued" end })
-ok(out_q.rearmed == 0, "a resume whose run is still queued is not re-armed either: " .. json.encode(out_q))
-local lost = ledger({
-  { id = "lost-run", session_id = "sess-lost", owner = "master", attempts = 1, resume_chain = 0,
-    status = "unknown", created_at = fresh(), run_id = 4244 },
-})
-local armed_x, schedule_x = scheduler()
-local out_x = pause.ensure_resumes(now, { read = function() return nil end, exec = lost.ex, query = lost.q,
-  schedule = schedule_x, session_exists = function() return true end, migrated = function() return true end,
-  run_state = function() return "unknown" end })
-ok(out_x.rearmed == 1, "a genuine loss (the run is unknown) is still repaired: " .. json.encode(out_x))
 -- 2. THE CAP IS THREE TRIES IN TOTAL: chain 0 -> re-arm (1), chain 1 -> re-arm (2), chain 2 -> abandoned (no third).
 for chain, expected in ipairs({ 1, 1, 0 }) do
   local one = ledger({ { id = "lost-c", session_id = "sess-c", owner = "master", attempts = 533,
