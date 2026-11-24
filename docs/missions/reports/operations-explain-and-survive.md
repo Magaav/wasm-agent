@@ -445,3 +445,39 @@ starts none). The receiving half - a call whose arguments carry `cwd` uses it an
 
 Cache cost: none. No tool description changed; the new string appears only in a refusal, and `cwd_source` already
 travelled on every operation record (`node` until now, `session_run` where the truth changed).
+
+### Verification (row by row, singly - see why below)
+
+`cargo` was not needed: this diff is Lua only (`memory.lua`, `agent.lua`, `tools.lua`).
+
+| row | verdict |
+| --- | --- |
+| `scripts/test-operation-cwd.lua` (new) | 18 checks |
+| `scripts/test-federation.lua` | 49 checks |
+| `scripts/test-remote-pending.lua` | 90 checks |
+| `scripts/test-remote-edit.lua` | 46 checks |
+| `scripts/test-remote-field-support.lua` | 13 checks, 0 failed |
+| `scripts/test-session-isolation.lua` | 141 checks, 0 failed |
+| `scripts/test-tool-dispatch-cost.lua` | 9 checks |
+| `scripts/test-codemode-pending.lua` | 108 checks |
+| `scripts/test-codemode-wait-shape.lua` | 25 checks |
+| `scripts/test-handle-wake.lua` | 17 checks |
+| `scripts/test-operation-answer-not-a-raise.lua` | 9 checks |
+| `scripts/test-operation-blocked-on.lua` | 13 checks |
+| `scripts/test-operation-survives-turn.lua` | 16 checks, 0 failed |
+| `scripts/test-tool-env-allow.lua` | 11 checks, **4 failed - and the same 4 fail on a base worktree of `origin/main`** (pre-existing on main, `FAIL naming the variable itself`); this diff touches no env-allow code |
+
+`scripts/test-workspace-cwd.lua` was NOT run: it needs `WA_CWD_SOURCE`, a fixture the full runner plants, and this diff changes no worktree branch - the precedence it depends on (a worktree beats a recorded directory) is pinned by case 2 of the new row.
+
+**Why singly and not the narrowed suite.** `flock -o ~/Work/missions/.suite.lock env WA_BIN=~/.local/bin/wa
+WA_FAST_ROWS=/tmp/rows-ops.txt bash scripts/fast.sh` was started and sat in the queue for 25 minutes, 5th-6th in
+line behind two long fast runs and a `main-health` full check of main (its own `blocked_note` named each holder and
+my queue position, which is the earlier mission's fix earning its keep), with an empty log the whole time. It was
+cancelled before it started - nothing ran, nothing was lost - and every row in its list was run singly instead,
+which rule 15 allows (a single test file needs no suite lock). That is an environment fact of this node tonight:
+the suite lock was continuously held, and a queued run does not survive a node install, which this session had
+five of.
+
+One more measurement while cancelling, for the earlier brief's item (d)(241): `cancel` on that queued operation
+answered `running` - the id came back still running, and the handle had to be read again to learn it had settled
+(cancelled, log empty). Premise 241 reproduces on this branch; it is not fixed here and is named, not claimed.
