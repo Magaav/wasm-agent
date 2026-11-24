@@ -1339,3 +1339,93 @@ file.
 
 **Rows:** `test-deploy-pause.lua` **100 checks**; `test-selfloop-pause.lua` **129**; `test-deploy-bound.sh`
 `deploy bound ok`; `test-deploy-wait.sh` `deploy wait ok`.
+
+## Addendum 8 (Fable, 24/11 ~02:55Z): the sweep is behind the deploy gate; a resume fires during an install
+
+Read-only. **What I can and cannot read here:** `~/.wasm-agent/memory.db` is refused to this shell
+(`secret_path_denied`), and the node's journal is not present in this user's `journalctl` (no `wa-serve` unit is listed
+and `journalctl --user -u wa-serve.service --since '02:15'` answers `-- No entries --`), so "no line in the journal" is
+not something I can confirm or deny - it is the orchestrator's read. Everything below is either the product's own
+`wa` path, a scratch node seeded with the live files, or the code.
+
+### (2) THE SWEEP: measured cause, and it is placement, not the code
+
+Scratch node, `WASM_AGENT_HOME` with the LIVE layout and two LIVE records copied in
+(`8057f11d…json` since 1795359808, `c67c0609…json` since 1795486711), then the tick the node runs:
+
+```
+records=2
+--- tick WITHOUT a deploy waiting
+[lua] deploy pause: migration: 0 lost resume row(s) older than 21600s marked superseded (too old to resume)
+[lua] deploy pause: sweep ran: 2 record(s) seen, 1 closed
+[lua] deploy pause: closed 1 pause record(s) that can never be resumed (older than 21600s, or their session is gone)
+records after=1      stamp=20781        <- <data>/pause-sweep.last written
+--- tick WITH the installer marker up (<data>/deploy-pending.json, fresh, bound 1800)
+[lua] deploy pause: migration: 0 lost resume row(s) older than 21600s marked superseded (too old to resume)
+records after=2      stamp=none          <- the sweep did not run at all
+```
+
+So none of the early returns is the cause: `paused_dir()` is right, `host.list_dir` answers a JSON string with
+`entries` and `modified` (checked directly: `TYPE=string`, `HEAD={"entries":[{"kind":"file","modified":…}]}`),
+`host.remove_file` exists, and the live records carry `since`/`session` as expected. **`selfloop.tick` returns at the
+deploy-waiting gate before reaching `deploy_pause.sweep_records`** (the gate is at `selfloop.lua:1385`, the sweep call is
+last in the tick), so on every tick where a deploy waits or installs - which is most of the evening on this node -,
+the sweep is skipped, and the stale count only grows.
+
+The gate itself is right for DISPATCH (no new turn while a build waits); it is wrong for a sweep that only CLOSES
+records older than the window: a record older than six hours cannot be the pause of a deploy that is installing now.
+
+### (1a) Rows -> messages: what I can derive, and the SELECTs that settle it
+
+The producer is identifiable from the text, because the three sentences come from three different functions:
+
+| seq | text (opening) | produced by |
+| --- | --- | --- |
+| 232 | "The deploy this session paused for is OVER, and the resume that was armed for it was lost" | `deploy_pause.resume_prompt()` - only the RE-ARMED wake carries it |
+| 238 | "The node is installing a new build (e832e152…), so this turn paused" | `deploy_pause.prompt(request, marker)` - the pause's own continuation, armed by a turn that paused at its boundary |
+| 252 | "…a new build (unknown)…" | the same function with a marker that names no commit - a different pause event |
+
+Row `96049abb` (created 02:17:34, `attempts=2`, delivered) is the re-armed one, so it produced 232. Row `4f831a72`
+(created 02:18:31) is a pause-armed resume, and 238's pause fits its timeline (turn starts ~02:18:31, pauses at
+02:21:41 for e832e152). 252 needs a pause-armed row created around 02:24:23; if only two rows exist, its wake is one of
+these two re-armed - which the SELECTs below answer exactly:
+
+```sql
+-- the rows of that session, with their prompts, in creation order
+SELECT id, status, attempts, resume_chain, created_at, updated_at, substr(prompt, 1, 90)
+  FROM self_wakes WHERE session_id = 'c67c0609-6205-4937-831e-1464ef8f2c04'
+  ORDER BY created_at;
+-- the three messages, to match prompt text against the ledger's own rows
+SELECT seq, role, created_at, substr(content, 1, 120)
+  FROM messages WHERE session_id = 'c67c0609-6205-4937-831e-1464ef8f2c04' AND seq IN (232, 238, 252);
+```
+
+### (1b) Does `attempts` count dispatch tries or deliveries? TRIES - from the code
+
+`selfloop.lua:1200-1201` (component-plan claim) and `:1509-1510` (inline claim) both write
+`UPDATE self_wakes SET status='dispatching', boot=?, attempts=attempts+1, updated_at=? WHERE id=? AND status='pending'`:
+the increment happens at the CLAIM, i.e. every time the row is dispatched to a run. A delivery is `M.finish` writing
+`status='delivered'` (`:1228`, `:1232`) and is not counted anywhere. So `attempts=2` on `96049abb` means two claims
+(one cut, one that ran) and one delivery - **no row delivered twice**: a second delivery would need the row back in
+`pending` for a second full dispatch, and a resume row only returns to `pending` through a deferral (which is a
+non-delivery) or `every_seconds` (resume rows have none).
+
+### (1c) Did a resume fire while e832e152 was still installing? YES - and it is r6
+
+Seq 238 is the *pause* sentence of an automated turn that names e832e152: the turn therefore STARTED while that
+install had not ended, spent a model call, and paused at its next boundary. From the code the window is exact:
+`run_wake` checks `deploy_pause.refuse` once, at the top (`selfloop.lua:1262`); `deploy_pause.at_boundary` is only
+called for `round > 1` (`agent.lua:2748`), so a wake that starts just before the installer marker appears always spends
+its first model call before it can pause - a paid turn that the install did not need.
+
+### r6, proposed (not written)
+
+1. **The sweep moves next to the invariant statements, before the waiting gate** - a record older than the window is
+   closed whatever is installing. Test: a tick with `<data>/deploy-pending.json` up and one record older than the
+   window → the record is gone and `pause-sweep.last` exists; the live-shaped scratch measurement above is the
+   fixture (two live records, the live layout).
+2. **A resume turn does not spend a model call on an install that is already waiting**: in `run_wake`, after the
+   claim and before `bot.run`, re-read `deploy_pause.refuse` (the gate it already asks at the top) and defer the row
+   with `M.defer_refused` if a build is waiting. Test: a wake dispatched, then the marker written, then the run →
+   zero model calls (a stub provider counts them) and the row back to `pending`; and with no marker → the turn runs.
+3. Texts: none new if (2) reuses `deploy_waiting`'s sentence.
