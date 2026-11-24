@@ -243,6 +243,43 @@ findmnt -no TARGET,OPTIONS /tmp
 stat -c '%a %U %n' /tmp/wa-remap-rustc/*/ /tmp/wa-remap-rustc/*/wa-remap-rustc
 ```
 
+## Rebase onto origin/main 65e3daef (de476ed8)
+
+The preflight refused the landing with `land-quick: merge conflict with main 65e3daef in:
+lua/core/update_banner.lua`. Main had moved the same file (f24f9ba6, the refresh + `M.covering` + the line
+built from `o.read` / `o.refresh_failed`), so the last commit was rebased by hand keeping BOTH sides:
+
+* main keeps its refresh first `read just now` / `refresh_failed` wording, its `M.REFRESH_SECONDS` and
+  `M.HTTP_SECONDS`, and `M.covering`; the line is still built once into `line` and still starts with
+  `release list: N entries, read <when>`;
+* this branch adds, after that prefix, `newest <tag> (published <when>), ordered by publish time, out of at
+  most <bound> asked for` (and the "anything older is not in it" clause when the page is full), and keeps
+  `M.DEFAULT_PER_PAGE = 20` with `by_published` applied by the parser and the cache reader.
+
+Two rows then went red for reasons main had introduced, and neither was weakened:
+
+1. `scripts/test-installable-by-download.sh` refused a CORRECT release with `binary_commit_mismatch`:
+   main's resolution installs an older release built from the same compiled inputs for a commit that
+   changes none, so `wa_node_binaries_prepare` prints `binary_release: <tag> <40-hex source commit>`. The
+   row now expects the binary to name the requested commit when the release is that commit's own build, and
+   the covering release's source commit otherwise - and it CHECKS that the source commit is an ancestor of
+   the requested one (`git merge-base --is-ancestor`), refusing `covering_release_not_an_ancestor`
+   otherwise. Measured: the row is GREEN for main's own HEAD, with no commit argument:
+   `installable by download: 65e3daefd089 (node-65e3daefd089, components-df6f97708c72, 11 components)` - the
+   binary is node-39e862d60bad's build (an ancestor, same compiled inputs), 11 components verified against
+   65e3daef's lock, the pair proved through the memory component, no toolchain fetched.
+2. `scripts/test-components-preflight.sh` counted the deploy's SECOND turn-guard refusal as a failure: the
+   guard refuses a turn on the node ("cannot deploy from a turn running on the node it would replace") and a
+   CLI turn with no sentinel ("deploying from a CLI turn needs a sentinel supervising the node"). Which one
+   fires depends on the process tree the test runs in. The row now skips BY NAME on either, quoting it, and
+   every other output still has to be the preflight's own `refused(component_not_installable)` sentence.
+
+Rows re-run after the rebase, all green: test-update-banner 249/0, test-check-listing (main's new row for
+the same line) 10/0, test-update-release 16, test-update-all 43, test-update-follow.sh ok,
+test-component-build-wrapper 29/0, test-release-completeness 23/0, test-publish-components-at-landing 20/0,
+test-components-preflight 11/0 + 1 named SKIP, test-deploy-components 74, test-installable-by-download
+green on 65e3daef.
+
 ## Pre-existing failures, named (measured on a separate worktree of 345e51be)
 
 * `scripts/test-node-binaries.sh` - FAILS identically on the base commit: its fixture expects `not_on_main:`
@@ -251,6 +288,11 @@ stat -c '%a %U %n' /tmp/wa-remap-rustc/*/ /tmp/wa-remap-rustc/*/wa-remap-rustc
 * `scripts/test-update-treeless.lua` - 8 of 10 rows fail on the base commit too (run with the node's own
   binary in a scratch home): the fixture's pinned commits are not in this checkout's history. Not this
   branch's.
+* `scripts/test-deploy-components-shipped.sh` - fails on origin/main 65e3daef itself (measured in a separate
+  worktree of 65e3daef): `components.lock pins 'agent-core codemode graph hooks memory mesh
+  model-gateway selfloop telemetry-sink wa-email wa-whatsapp', expected '... wa-email'` - the test's
+  expected list is stale by one component (wa-whatsapp is pinned). Not this branch's, and not
+  touched here: it belongs to whoever moved the lock.
 
 ## Texts to approve (new or changed operator/model-facing strings, verbatim)
 
