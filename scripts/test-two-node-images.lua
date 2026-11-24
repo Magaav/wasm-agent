@@ -328,7 +328,10 @@ local function body()
       end
       if message.role == "tool" then tool_text = tostring(message.content) end
     end
-    ok(#parts == 1, "the provider request on this node carries one image part for the peer's picture: " .. #parts)
+    -- A failure here must say WHY: the block's own answer and the tool text are the two facts that
+    -- tell a refused picture from a run block that never reached the peer.
+    ok(#parts == 1, "the provider request on this node carries one image part for the peer's picture, got "
+      .. #parts .. "; tool text: " .. tostring(tool_text):sub(1, 400))
     local payload = tostring(parts[1] and parts[1].image_url and parts[1].image_url.url or "")
       :match("^data:[^;]+;base64,(.*)$")
     ok(payload == source_b64, "and it is that picture, byte for byte")

@@ -1467,7 +1467,12 @@ local function remote_batch(memory, args, role, ctx)
   local failed = 0
   for index, entry in ipairs(entries) do
     local value = results[index]
-    if carries_local_images(value) then
+    -- A picture that a peer sent as BYTES (image_data) is refused here too: a batch never asked for
+    -- bytes (`image_bytes` is a single call's field), and adopting one into an entry with no image
+    -- message to ride on would put a megabyte of base64 in the script's JSON. A peer that answers it
+    -- anyway gets the same named refusal rather than a leak.
+    local sent_bytes = type(value) == "table" and type(value.image_data) == "table"
+    if carries_local_images(value) or sent_bytes then
       -- A PICTURE DOES NOT TRAVEL IN A BATCH (mission run-images-two-node, item 2). One call carries one
       -- picture because the picture rides out with THAT call's own result (lua/core/remote_image.lua: the
       -- caller verifies the digest the peer named, stores the bytes here, and hands the pipeline this

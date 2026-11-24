@@ -57,8 +57,18 @@ nodes.remote_call = function(selector, capability, args)
   -- An entry that read a picture answers the reference this node cannot use - the case the batch
   -- refusal below has to name.
   if capability == 'batch' and answer ~= nil then
+    -- What a peer answers a batch entry with: the REFERENCE it holds (a path on ITS machine), never
+    -- bytes - a batch does not carry the `image_bytes` request. The third entry answers bytes anyway,
+    -- which no peer should send and the batch must still refuse rather than hand on.
+    local reference = { name = 'red-64x48.png', mime = 'image/png', bytes = 125,
+      sha256 = answer.image_data and answer.image_data.sha256 or string.rep('f', 64),
+      path = '/on/the/other/machine/red-64x48.png' }
     local results = {}
-    for index = 1, #((args or {}).calls or {}) do results[index] = answer end
+    for index = 1, #((args or {}).calls or {}) do
+      if index == 3 then results[index] = answer
+      else results[index] = { type = 'image', mime = 'image/png', bytes = 125,
+        sha256 = reference.sha256, path = reference.path, _images = { reference } } end
+    end
     return { batch = 1, results = results }
   end
   return { error = 'fixture_peer_answered_nothing' }
@@ -267,8 +277,8 @@ end
 do
   answer = fresh()
   local batch = tools.dispatch(memory, 'remote', { node = 'scratch-peer', capability = 'batch',
-    calls = { { capability = 'read', path = PICTURE }, { capability = 'ls', path = '/tmp' } } }, 'master',
-    { user_id = 'master' })
+    calls = { { capability = 'read', path = PICTURE }, { capability = 'ls', path = '/tmp' },
+      { capability = 'read', path = PICTURE } } }, 'master', { user_id = 'master' })
   local entry = (type(batch) == 'table' and batch.results or {})[1] or {}
   eq(entry.error, 'remote_image_batch_unsupported', 'a picture read inside calls is refused by name: '
     .. json.encode(entry))
@@ -279,6 +289,14 @@ do
   eq(entry.capability, 'read', 'the entry says which capability was refused')
   ok(entry._images == nil, 'and no path from the other machine is handed on')
   ok(type(batch.failed) == 'number' and batch.failed >= 1, 'the batch counts it as a failed entry')
+  local second = (type(batch) == 'table' and batch.results or {})[2] or {}
+  ok(second.error == nil or second.error == 'remote_image_batch_unsupported',
+    'an entry that read no picture answers what it always did: ' .. json.encode(second))
+  local third = (type(batch) == 'table' and batch.results or {})[3] or {}
+  eq(third.error, 'remote_image_batch_unsupported',
+    'and a peer that sent raw bytes in a batch entry is refused the same way, never handed on: '
+      .. json.encode({ error = third.error, keys = (function() local k = {} for key in pairs(third) do k[#k+1] = key end table.sort(k) return k end)() }))
+  ok(third.image_data == nil, 'the bytes are dropped from the entry')
   answer = nil
 end
 
