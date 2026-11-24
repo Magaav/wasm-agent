@@ -452,12 +452,16 @@ local out_a, armed_a = run(alive, "free")
 ok(out_a.rearmed == 0 and #armed_a == 0,
   "messages since the dispatch mean a running turn: no second resume", json.encode(out_a))
 
--- 1g. THE BOUND IS ONE NUMBER, SHARED WITH THE TICK'S OWN RECONCILE.
--- ONE NUMBER, ONE MEANING (24/11): the reclaim is the seam-independent twin of the tick's own reconcile, so it
--- uses reconcile's bound - asserted against that function rather than against a literal, so the two cannot drift.
-ok(pause.RESUME_DISPATCH_BOUND_SECONDS == dofile("lua/core/selfloop.lua").stale_seconds(),
-  "the resume bound is the tick's own stale bound, not a second number: " .. tostring(pause.RESUME_DISPATCH_BOUND_SECONDS)
-    .. " vs " .. tostring(dofile("lua/core/selfloop.lua").stale_seconds()))
+-- 1g. THE THREE BOUNDS, IN THEIR INTENDED ORDER (24/11): the RESUME bound is SHORTER than the operator's watchdog and
+-- both are shorter than reconcile's own bound. The order is the design: the node must resume a paused session before
+-- the watchdog would, and the reclaim of a resume row is a different question from reconcile's "was any dispatch
+-- interrupted" - which is why the numbers differ and this asserts the relation rather than equality.
+local selfloop_mod = dofile("lua/core/selfloop.lua")
+local watchdog_trigger = 900 + 600 -- a paused marker older than 15 min, plus the watchdog's own 600 s
+ok(pause.RESUME_DISPATCH_BOUND_SECONDS < watchdog_trigger,
+  "the resume bound beats the watchdog: " .. tostring(pause.RESUME_DISPATCH_BOUND_SECONDS) .. " < " .. tostring(watchdog_trigger))
+ok(watchdog_trigger < selfloop_mod.stale_seconds(),
+  "and the watchdog beats reconcile's bound: " .. tostring(watchdog_trigger) .. " < " .. tostring(selfloop_mod.stale_seconds()))
 local young = dispatch_ledger({})
 for _, candidate in ipairs(young.rows) do candidate.updated_at = now - 200 end
 local out_y, armed_y = run(young, "free")

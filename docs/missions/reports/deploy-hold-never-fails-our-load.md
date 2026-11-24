@@ -1547,3 +1547,35 @@ old copy survived), so the sweep runs once.
 **Rows:** `test-deploy-resume.lua` **25 checks** (main's row, green); `test-deploy-pause.lua` **100**;
 `test-selfloop-pause.lua` **161** (was 156); `test-handle-wake.lua` 17; `test-cli-wake-row.lua` 30;
 `test-deploy-bound.sh` `deploy bound ok`; `test-deploy-wait.sh` `deploy wait ok`.
+
+### r6d: the bound stays 300 s - the ROW was the conflict, not the bound
+
+**Restored:** `RESUME_DISPATCH_BOUND_SECONDS = 300`, named as the RESUME bound and documented against reconcile's
+1800 s: the two answer different questions. Reconcile asks "was any row's dispatch interrupted?"; the resume bound asks
+"will the node resume this paused session before the operator's watchdog?" - and the watchdog fires on a paused marker
+older than 15 min plus its own 600 s, i.e. **1500 s**. A resume bound at or past that would make the watchdog, not the
+node, the thing that resumes a session, which is what this mission exists to prevent. Claim and message checks are
+unchanged and still gate it.
+
+**The row was the conflict.** `scripts/test-deploy-resume.lua:95` dispatched the resume with a stub that took no run
+claim and wrote no message - which is byte for byte the "dispatched and nothing happened" shape the reclaim exists for,
+so the repair revived it and the row counted an extra dispatch. A real dispatch holds `session:<id>` in the resources
+store before any model call (`lua/core/agent.lua`, `rust/wa-capabilities/src/resources.rs`). **The stub now takes that
+claim, for real, through `lua/core/resources.lua`, for the turn's duration** - so the row is shaped like the product:
+dispatching WITH its claim, which nothing may call lost. Line 95's assertion is untouched; only how the stub dispatches
+changed, and that change is this paragraph.
+
+**The bound relation is asserted, not the equality** (`scripts/test-deploy-pause.lua`):
+
+| number | value |
+| --- | --- |
+| `RESUME_DISPATCH_BOUND_SECONDS` | 300 |
+| the operator's watchdog trigger (15 min marker + its 600 s) | 1500 |
+| `selfloop.stale_seconds()` (reconcile) | 1800 |
+
+`ok(300 < 1500)` and `ok(1500 < 1800)` - so the order that makes the node, never the watchdog, the thing that resumes
+is asserted in the row, and a future edit to any of the three breaks it.
+
+**Rows:** `test-deploy-resume.lua` **25 checks** (main's row, green, its assertion unchanged); `test-deploy-pause.lua`
+**101**; `test-selfloop-pause.lua` **161**; `test-handle-wake.lua` 17; `test-cli-wake-row.lua` 30;
+`test-deploy-bound.sh` `deploy bound ok`; `test-deploy-wait.sh` `deploy wait ok`.
