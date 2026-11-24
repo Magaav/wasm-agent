@@ -1225,3 +1225,40 @@ fixture.
 
 **Rows:** `test-deploy-pause.lua` **100 checks**; `test-selfloop-pause.lua` **126**; `test-deploy-bound.sh`
 `deploy bound ok`; `test-deploy-wait.sh` `deploy wait ok`.
+
+### r5f: the probe's result, and the honest state of install #1
+
+Fable's named probe was run (`WA_PAUSE_DEBUG=1` prints, once per `ensure_resumes` call, how many rows the re-arm
+pass sees and the two bounds):
+
+```
+debug ensure_resumes: lost=0 cutoff=1795464328 now=1795485928 reason=deploy pending: resume after the node swap
+```
+
+**The SQL is not the problem.** The identical statement, run standalone against the same ledger, returns the row:
+`SELECT id, session_id, owner, resume_chain FROM self_wakes WHERE reason=? AND (status IN ('unknown','failed') OR
+(status='cancelled' AND last_error LIKE 'cancelled before execution%')) AND created_at>=?` returns `{...}` for a row
+that is `unknown` with that reason and a fresh `created_at`. And `host.sql_rows`' param shape is right: every host
+call in the module was re-read for it - `host.sql_exec`/`host.sql_rows` take JSON text (r5e's fix, wrapped in the
+module), `host.write_file`/`read_file`/`remove_file` take plain paths and a string body, `host.resource("list", "{}")`
+takes its args as text, `host.list_dir(path)` a path, `host.getenv(name)` a name. No other call in this file passes a
+table where the host wants text.
+
+So the remaining defect is in what that call passes to the query, or in what it sees at that instant - not in the
+SQL, the window, the bound or the row. The probe is committed as a supported diagnostic (off unless the variable is
+set; its first version printed always, because `pcall(host.getenv, ...)`'s boolean was read as the answer).
+
+**State of the acceptance, said plainly: NOT met.**
+
+| half | state |
+| --- | --- |
+| a HELD claim keeps a dispatching row (no duplicate turn) | green, live-shaped, real store |
+| a RELEASED claim lets the same row be reclaimed | green, live-shaped (measured `rearmed=1`, row `superseded` in the diagnostic) |
+| that same call RE-ARMS it (one new pending resume row, chain 1) | **not green**: `lost=0` inside the call, so nothing is armed; the row ends `unknown` and the session is left paused |
+
+So install #1 for a lost resume is still not guaranteed by this branch, and the branch should not land on the
+strength of this round. The next step is one line: print `lost` (the raw value, not its length) and the encoded
+params from inside the call, which the committed probe does not yet do.
+
+**Rows:** `test-deploy-pause.lua` **100 checks**; `test-selfloop-pause.lua` **126**; `test-deploy-bound.sh`
+`deploy bound ok`; `test-deploy-wait.sh` `deploy wait ok`.

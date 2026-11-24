@@ -562,6 +562,17 @@ function M.ensure_resumes(now, opts)
     end
   end
   local rearmed, abandoned = 0, 0
+  -- A DIAGNOSTIC THE NEXT PROBE USES (24/11): `WA_PAUSE_DEBUG=1` prints how many rows the re-arm pass sees and the
+  -- two bounds. MEASURED with it in scripts/test-selfloop-pause.lua's live-shaped case: `lost=0` there, while the same
+  -- statement run standalone against the same ledger returns the row - so the remaining defect is in what this call
+  -- passes to the query (or what it sees at that instant), not in the SQL, the window or the row. Off by default.
+  if type(host) == "table" and type(host.getenv) == "function" then
+    local seen, dbg = pcall(host.getenv, "WA_PAUSE_DEBUG")
+    if seen and type(dbg) == "string" and dbg ~= "" then
+      pcall(host.log, string.format("debug ensure_resumes: lost=%d cutoff=%s now=%s reason=%s",
+        #lost, tostring(cutoff), tostring(now), tostring(M.RESUME_REASON)))
+    end
+  end
   for _, row in ipairs(lost) do
     local session = tostring(row.session_id or "")
     local alive = exists(session)
