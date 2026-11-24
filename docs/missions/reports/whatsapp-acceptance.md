@@ -2,7 +2,7 @@
 
 Mission: `whatsapp-acceptance` (brief in the mission directory; Fable 23/11 ~18:00Z, rows added 23/11
 ~23:00-23:55Z and ~19:55Z). Branch `change/whatsapp-acceptance`, rebased onto `origin/main`
-`4615449f` - which CONTAINS the gate the brief waited for, `d2fbd140` (land-quick merge of
+`18b83398` - which CONTAINS the gate the brief waited for, `d2fbd140` (land-quick merge of
 `change/whatsapp-read-return`, "whatsapp-read-is-consistent" with `full_text`/`text_cut`'s real
 equivalents; see §4).
 
@@ -47,7 +47,7 @@ contract's names are `transcript_full` (a pointer object `{tool: "whatsapp_messa
 the cut marker in the body itself, and `text_reason` (`transcript_pending`, `ocr_pending`,
 `unsupported`); the row that covers them is `row/long-body-pointer` in §4.
 
-## 3. The table (this node, `--mode scratch`, against `origin/main` 4615449f)
+## 3. The table (this node, `--mode scratch`, against `origin/main` 18b83398)
 
 ```
 site      tool                          verdict  ms     bytes  what the model receives / why
@@ -282,8 +282,10 @@ call - there is none today.
 - `d5082ca1` - this report, the table and the per-cell mapping.
 - `b6ea3b28` - the guard test's discrimination measured on a separate worktree of `e832e152`.
 - `76fd4820` - the report naming the commits that built it.
-- the commit that carries this rebase: the three-site table re-run against `origin/main` `4615449f`, the
-  four landed-contract cells, the twelve rows with the test that covers each, and §10.
+- `da233b24` - the table re-run against the read contract (origin/main `4615449f`, the gate `d2fbd140`), the
+  four contract cells, the twelve covered rows, the synthetic probe's one exception, and §10.
+- the commit that carries this second rebase: the same table re-run on `18b83398` (same 18 pass / 48
+  not-run / 0 fail, orphan-tests green with 361 wired), and this section.
 
 The commit trailers name the model as `claude`: the session carries no exact model id, and inventing one
 would be a false record.
