@@ -441,6 +441,13 @@ way round, and neither file was touched by the merge. Fixed in `c81dca04`:
   asserts the invariant in both states - `graph_index` is the graph's answer (a table) or absent, never another
   shape - and, from the resolver, that a dormant graph leaves it absent. The header comment says the same.
 
-Measured on `change/red-rows-graph-dormant` (base `0d8657e5`) through the fast path with both rows plus the
-graph, feature and deploy-proof rows: **lua 34/34 passed**. Neither row loosens an assertion: each one now
+One more thing the rebase surfaced: `scripts/test-retire-many.lua`'s doc gate (its section 4) scans every
+`.md`/`.json` under `docs/` and `skills/` for the retired names, and this report - which names them while
+explaining what was retired - is the kind of dated record that gate already exempts (journals, reviews,
+the mapping table). `docs/missions/` is now on that list, as a PREFIX so no report can become a place to
+keep an offer alive without the list changing.
+
+Measured on the rebased tip (both branches as `change/deploy-graph-proof` on `e832e152`) through the fast
+path with the deploy-component-proof, retire-many, write-node-receipt, graph-dormant, features-defaults
+and graph-tool rows: **lua 35/35 passed**. Neither row loosens an assertion: each one now
 asserts the state its node is in instead of the state the author's node happened to be in.

@@ -281,7 +281,11 @@ check(never.error and host.read_file(root..'/never.txt')==nil,'the retired write
 -- who still remembers an old name is sent to; the check below requires it to carry the one sentence.
 local HISTORICAL={'docs/measurements/','docs/CODEMODE-PRESENTATION-JOURNAL.md','docs/CODEMODE-MODEL-BOUNDARY-JOURNAL.md',
   'docs/GRAPH-REPAIR-JOURNAL.md','docs/release/','reviews/','fixtures/','benchmarks/','docs/WHATSAPP-REVIEW.md',
-  'docs/SUBSCRIPTION-BUFFER-RECOVERY.md','docs/BATCH-TOOLS.md'}
+  'docs/SUBSCRIPTION-BUFFER-RECOVERY.md','docs/BATCH-TOOLS.md',
+  -- Mission reports are dated records of work done, like the journals above: a report that names a
+  -- retired batch while explaining why it was retired is history, not an offer. The exemption is a
+  -- PREFIX so no report can become a place to keep an offer alive without this list changing.
+  'docs/missions/'}
 local function historical(path)
   for _,prefix in ipairs(HISTORICAL) do if path:sub(1,#prefix)==prefix then return true end end
   return false
