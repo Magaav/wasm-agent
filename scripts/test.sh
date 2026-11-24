@@ -588,6 +588,21 @@ gate_run bash scripts/test-component-lock-rebuild.sh
 # side (verify, cache, the refusals, the disk-conditioned fallback, and the order of the calls inside
 # scripts/deploy.sh) and the publish side (--check, --from, every way a manifest can be wrong).
 gate_run bash scripts/test-deploy-node-binaries.sh
+# IS THIS COMMIT INSTALLABLE BY DOWNLOAD? The row that was missing (24/11): work's update downloaded and
+# verified node-9a0c589adfa0 and then had no components bundle to install - components-df6f97708c72 is
+# HTTP 404, because publishing is per landing and covers the node binary only - so a node without a
+# toolchain could not install the landing at all, and nothing said so before the fleet step. The row asks
+# the node's own question on a scratch HOME with no cargo/rustup/rustc/zig on PATH and empty caches: the
+# binary from its release, every pinned component from components-<sha12 of the lock>, installed, and the
+# pair proves itself through scripts/check-component-proof.lua. It reads the real release channel and it is
+# RED until the assets it needs are published, so the gate does not spend a network round on it unless
+# asked: WA_INSTALLABLE_BY_DOWNLOAD=1 bash scripts/test-installable-by-download.sh [<commit>].
+if [ "${WA_INSTALLABLE_BY_DOWNLOAD:-0}" = 1 ]; then
+  gate_run bash scripts/test-installable-by-download.sh
+else
+  echo "SKIP: installable-by-download (needs the network and the published release channel; WA_INSTALLABLE_BY_DOWNLOAD=1 runs it, and it is the cut condition before the fleet step)"
+  SKIPPED=$((SKIPPED + 1))
+fi
 # THE VERIFIED BYTES MUST BE INSTALLABLE (21/11, hand fix 3 of the node-7ddbfa98036a rollout). A release asset
 # arrives 0644; wa_node_binary_download verified the signature, every sha256 and every size and left the bit off,
 # and scripts/upgrade.sh refuses a candidate without it ("no new binary to install") - so release-install.sh, the
