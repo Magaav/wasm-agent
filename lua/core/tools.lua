@@ -2705,6 +2705,16 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
         local snapshot = file_tools.page_snapshot(ctx.session_id, call.args.path, target)
         options.read_pages = { record = snapshot or false }
       end
+    elseif not node.local_node and call.capability == "bash" and type(ctx) == "table"
+        and ctx.watch_changes == true then
+      -- THE FILES A PEER'S COMMAND CHANGED, ASKED FOR (mission run-images-two-node, item 5). The
+      -- caller's branch below turns a `changes` list into one row per file, and the peer's bash branch
+      -- answers that list to a caller that asked - but nothing ever asked on a real call: the option was
+      -- set for edit and write only, so a `bash` on a peer came back without it and the reader saw no row
+      -- at all (measured in a pty on a scratch pair, 24/11: the command created the file, the answer was
+      -- `exit 0`, and no card was drawn). A session that watches its changes asks; a bare dispatch, a
+      -- script and a peer call from another node do not, so nobody pays for a list nobody draws.
+      options = { record_change = true }
     end
     local result
     if node.local_node then

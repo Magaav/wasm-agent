@@ -11,6 +11,10 @@ local changeset = dofile("lua/core/changeset.lua")
 local provider = dofile("lua/core/provider.lua")
 local windowlib = dofile("lua/core/model_window.lua")
 local agentlib = dofile("lua/core/agent.lua")
+-- The files a peer command changed, for the caller that draws them (mission run-images-two-node,
+-- item 5): the same module lua/core/tools.lua snapshots around a local command, so one change reads the
+-- same whichever machine ran it.
+local bash_changes = dofile("lua/core/bash_changes.lua")
 local users = dofile("lua/core/users.lua")
 local toolslib = dofile("lua/core/tools.lua")
 local nodeslib = dofile("lua/core/nodes.lua")
@@ -1317,7 +1321,26 @@ local function adopted_open(caller, author)
   return open, nil, reaped
 end
 
-local function adopt_bash(args, caller, author)
+-- The list a caller that draws rows receives: path, line counts, and whether the file was created or
+-- deleted. The same five names lua/core/tools.lua sends for a local command, and no text at all.
+local function adopted_changes(watched, answer)
+  if watched == nil or type(answer) ~= "table" or answer.error ~= nil then return nil end
+  local files, refused = bash_changes.changed(watched)
+  if (not files or #files == 0) and (not refused or #refused == 0) then return nil end
+  local summary = {}
+  for _, item in ipairs(files or {}) do
+    local added, removed = changeset.line_delta(item.before_text or "", item.after_text or "")
+    summary[#summary + 1] = { path = item.path, added = added, removed = removed,
+      created = (item.before_text or "") == "", deleted = item.deleted == true }
+  end
+  for _, item in ipairs(refused or {}) do
+    summary[#summary + 1] = { path = item.path, refused = tostring(item.why or "unreadable") }
+  end
+  answer.changes = summary
+  return summary
+end
+
+local function adopt_bash(args, caller, author, request)
   local budget = math.max(1000, math.floor(tonumber(args.budget_ms) or 0))
   local command = type(args.command) == "string" and args.command or ""
   if command == "" then return { error = "command_required", effect = "none" } end
@@ -1364,6 +1387,17 @@ local function adopt_bash(args, caller, author)
       end
     end
   end
+  -- THE FILES THIS COMMAND CHANGES, ASKED FOR BY THE CALLER (mission run-images-two-node, item 5). A peer
+  -- command is ADOPTED here - supervised as this node's own operation - so it never passes the bash branch
+  -- of lua/core/tools.lua where a local command's change list is computed. A caller that draws rows
+  -- (record_change, the same word a write or edit uses) asked for the list; the snapshot is taken around
+  -- the operation exactly as lua/core/bash_changes.lua documents, and only the paths and their line counts
+  -- travel back - never a file's text. A command that outlives this call's hold answers no list: the
+  -- snapshot belongs to the window this call observed, and nothing is claimed about the rest.
+  local watched = nil
+  if type(request) == "table" and request.record_change == true then
+    watched = bash_changes.before(args.cwd)
+  end
   local started = wa_peer_dispatch("operation", start, caller, author)
   local id = type(started) == "table" and tostring(started.operation_id or "") or ""
   if id == "" then
@@ -1392,6 +1426,7 @@ local function adopt_bash(args, caller, author)
       -- A command that fitted the budget answers its own result, and the reap this call performed (if
       -- any) still travels with it: the fact belongs to the CALL, not to the shape of its answer.
       local settled_answer = adopted_result(id, author, caller, state)
+      adopted_changes(watched, settled_answer)
       if #reaped > 0 then
         settled_answer.reaped = reaped
         settled_answer.reaped_note = "an earlier adopted command of yours outlived the ceiling this node "
@@ -1407,6 +1442,7 @@ local function adopt_bash(args, caller, author)
   local final = toolslib.dispatch(memory, "operation", { action = "status", id = id }, "master", ctx)
   if type(final) == "table" and (final.settled == true or tostring(final.state or "") == "settled") then
     local final_answer = adopted_result(id, author, caller, final)
+    adopted_changes(watched, final_answer)
     if #reaped > 0 then
       final_answer.reaped = reaped
       final_answer.reaped_note = "an earlier adopted command of yours outlived the ceiling this node gave "
@@ -1656,7 +1692,7 @@ function wa_peer_dispatch(capability, args, caller, author, request)
   -- relay's own dispatch (node_capability's fallthrough) and a test can reach - so what is checked is
   -- what runs.
   if capability == "bash" and type(args) == "table" and tonumber(args.budget_ms) then
-    return adopt_bash(args, caller, author)
+    return adopt_bash(args, caller, author, request)
   end
   -- The caller's role, not a hard-coded one: `verify_peer` proved it is a master, and passing
   -- the proof through means a future caller that is not a master cannot inherit these tools by
