@@ -1001,6 +1001,10 @@ WA_BIN="$bin" check deploy-bound bash scripts/test-deploy-bound.sh
 # the environment, so a scratch home alone did not stop a paid turn). It was an orphan until main-health said so
 # (one commit, change/one-turn-wired): a row that nothing runs is a proof nobody uses.
 WA_BIN="$bin" check one-turn bash scripts/test-one-turn.sh
+# A TURN WAITING ON ITS OWN OPERATION IS NOT A DEAD LANE (r8b item 5): a real node, a real turn that starts a
+# backgrounded operation and polls it, and /health that must name the operation and never call the lane stalled
+# while it runs. The stall bound is dropped to 2 s so the mechanism is measured in seconds.
+WA_BIN="$bin" check health-waiting-on-op bash scripts/test-health-waiting-on-op.sh
 # fast.sh runs under set -u: every incremented counter is initialised (test-fast-counters.sh).
 check fast-counters bash scripts/test-fast-counters.sh
 check install-front-door bash scripts/test-install.sh
