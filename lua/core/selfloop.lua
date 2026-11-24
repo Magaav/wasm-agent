@@ -1292,6 +1292,43 @@ end
 -- session claim, the claim is held by a turn the deploy paused, and the run does not start (lua/core/agent.lua,
 -- deploy_pause.claim_wait). The row goes back with a new time, exactly as the gate's own deferral does, so the wake
 -- is performed after the swap instead of being consumed by its own refusal.
+-- The two codes the runtime uses for "the session's run claim is held by another live run"
+-- (lua/core/run_failure.lua names the same pair). An ALLOW-LIST: a wake is put back only for a refusal that
+-- says "try again when the claim is free", never for a failure that means something else.
+local RESOURCE_REFUSALS = { "run_resource_refused", "resource_busy" }
+
+function M.resource_refused(text)
+  local message = tostring(text or "")
+  for _, code in ipairs(RESOURCE_REFUSALS) do
+    if message:find(code, 1, true) then return true end
+  end
+  return false
+end
+
+-- THE WAKE THAT CARRIED THIS HANDLE'S NEWS IS NOT OWED ANY MORE (G blocker, Fable 24/11).
+--
+-- A script that has just been told (lua/core/codemode_pending.lua, M.announce) means the model already knows
+-- the call settled, so the durable wake for that handle must deliver NOTHING NEW - otherwise the same news
+-- arrives twice, once in the turn and once in a turn of its own. Only a PENDING row is withdrawn: a row that
+-- was already claimed or delivered keeps its record, because that turn really happened.
+function M.withdraw_handle_wake(op)
+  M.setup()
+  local id = "handle:" .. tostring(op or "")
+  if id == "handle:" then return false end
+  local write = exec("UPDATE self_wakes SET status='cancelled', last_error='announced in turn', updated_at=? "
+    .. "WHERE id=? AND status='pending'", { clock({}), id })
+  return (tonumber(write and write.changes) or 0) == 1
+end
+
+-- What became of the wake that carried this handle's news: "pending", "claimed", "delivered", "cancelled",
+-- "failed", or nil when no wake was ever scheduled for it. Read-only, one row by its own id.
+function M.handle_wake_state(op)
+  M.setup()
+  local rows = query("SELECT status FROM self_wakes WHERE id=?", { "handle:" .. tostring(op or "") })
+  local status = rows[1] and rows[1].status
+  return type(status) == "string" and status or nil
+end
+
 function M.defer_refused(row, refusal, opts)
   opts = opts or {}
   local now = tonumber(opts.now) or os.time()
@@ -1455,6 +1492,16 @@ function M.run_wake(args)
   -- with its time, exactly as a deploy wait does. The race is one statement wide, so the row is kept, not failed.
   if ok and dep("resources").is_busy_refusal(bot.turn_refused) then
     return M.defer_refused(row, "session_busy", { now = clock({}) })
+  end
+  -- A WAKE WHOSE TURN WAS REFUSED BECAUSE THE SESSION WAS BUSY HAS NOT BEEN DELIVERED EITHER (G blocker,
+  -- Fable 24/11). The gate above catches the refusal the agent RETURNS; a session claim held by another live
+  -- run is the same situation arriving by the other door - the agent RAISES
+  -- `run_resource_refused: {"error":"resource_busy", ...}`. Measured on the live node 24/11: eight settle
+  -- wakes in ninety minutes ended `status='failed'` with that text and no due_at, so the model was never told
+  -- its call had settled unless it happened to poll. Same treatment as the gate's own deferral below: the row
+  -- goes back with a new time and is performed once the claim is released.
+  if not ok and M.resource_refused(result) then
+    return M.defer_refused(row, tostring(result), { now = clock({}) })
   end
   if not ok and M.cancelled_stop(result) then
     local settled = M.settle_interrupted(row, { now = clock({}) })
