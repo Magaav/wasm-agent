@@ -159,6 +159,34 @@ ok "$(printf '%s' "$line" | grep -q '"installable":"no"' && echo 1)" "the json r
 ok "$(printf '%s' "$line" | grep -q "\"missing\":\"$LOCK_TAG/svc-a.wasm\"" && echo 1)" "and names the missing asset" "$line"
 ok "$(printf '%s' "$line" | grep -q "\"sha\":\"$COMMIT\"" && echo 1)" "keyed by the commit" "$line"
 
+# ---- 7. --components: the one question a check and a deploy owe first -------------------------------
+# Missing bundle + no toolchain on PATH -> the sentence and exit 1; with a cargo/rustup on PATH -> exit 0,
+# because a build can supply them (a different cost, and the row says which).
+NO_TOOLCHAIN="$W/bin-notoolchain"
+mkdir -p "$NO_TOOLCHAIN"
+for t in bash sh git curl python3 sha256sum mkdir wc tr awk sed grep stat id uname dirname basename mktemp cp mv rm chmod cat date env; do
+  p="$(command -v $t 2>/dev/null)" && ln -sf "$p" "$NO_TOOLCHAIN/$t" 2>/dev/null
+done
+out="$(PATH="$NO_TOOLCHAIN" bash "$ROOT/scripts/check-release-complete.sh" "$COMMIT" --repo "$REPO" --components 2>&1)"; rc=$?
+ok "$([ "$rc" = 1 ] && echo 1)" "--components says rc 1 when the bundle is missing and this node cannot build it" "rc=$rc $out"
+ok "$(printf '%s' "$out" | grep -q "this commit needs $LOCK_TAG, which is not published; this node cannot build it" && echo 1)" "with the sentence a person needs" "$out"
+WITH="$W/bin-withtoolchain"
+mkdir -p "$WITH"
+for t in "$NO_TOOLCHAIN"/*; do ln -sf "$t" "$WITH/$(basename "$t")" 2>/dev/null; done
+printf '#!/bin/sh\nexit 0\n' > "$WITH/cargo"; chmod +x "$WITH/cargo"
+printf '#!/bin/sh\nexit 0\n' > "$WITH/rustup"; chmod +x "$WITH/rustup"
+out="$(PATH="$WITH" bash "$ROOT/scripts/check-release-complete.sh" "$COMMIT" --repo "$REPO" --components 2>&1)"; rc=$?
+ok "$([ "$rc" = 0 ] && echo 1)" "and rc 0 when a build could supply them" "rc=$rc $out"
+ok "$(printf '%s' "$out" | grep -q 'buildable=yes' && echo 1)" "saying so in its fields" "$out"
+mkdir -p "$DIST/$LOCK_TAG"
+for name in svc-a svc-b; do printf 'x' > "$DIST/$LOCK_TAG/$name.wasm"; printf 'x' > "$DIST/$LOCK_TAG/$name.json"; done
+printf 'x' > "$DIST/$LOCK_TAG/components.lock"
+mkdir -p "$W/srv/api/repos/Magaav/wasm-agent/releases/tags"
+touch "$W/srv/api/repos/Magaav/wasm-agent/releases/tags/$LOCK_TAG"
+out="$(PATH="$NO_TOOLCHAIN" bash "$ROOT/scripts/check-release-complete.sh" "$COMMIT" --repo "$REPO" --components 2>&1)"; rc=$?
+ok "$([ "$rc" = 0 ] && echo 1)" "and rc 0 with components=published when the bundle is there" "rc=$rc $out"
+ok "$(printf '%s' "$out" | grep -q 'components=published' && echo 1)" "naming the state in a field" "$out"
+
 printf 'release completeness ok (%d checks, %d failed)\n' "$checks" "$failed"
 [ "$failed" = 0 ] || exit 1
 exit 0

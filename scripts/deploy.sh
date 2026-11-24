@@ -86,7 +86,7 @@ WA_LIB="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/lib/service-target.sh"
 # whoever asked for it sees the same progress, and a missing toolchain is named (or fetched) before a build.
 # node-pins is the NODE's own pin record (what a rollback left here), read before anything is replaced:
 # a deploy that builds first and asks later has already spent the build (round-3 item 6).
-for wa_lib_part in build-status build-requirements deploy-components node-binaries glibc-floor retire-unshipped install-record node-pins runtime-binding node-runtime sentinel-unit; do
+for wa_lib_part in build-status build-requirements deploy-components release-completeness node-binaries glibc-floor retire-unshipped install-record node-pins runtime-binding node-runtime sentinel-unit; do
   [ -f "$(dirname "$0")/lib/$wa_lib_part.sh" ] && . "$(dirname "$0")/lib/$wa_lib_part.sh"
 done
 # The one writer of installed.txt and the one ancestry verdict (scripts/lib/install-record.sh). A deploy
@@ -391,6 +391,30 @@ cd "$ROOT" || fail "cannot enter the worktree to deploy from: $ROOT"
 # fact recorded about where the deploy came from names this directory. If it is a canonical checkout a
 # landing may move it at any moment; the build reads a pinned worktree instead (step 3c).
 SOURCE_ROOT="$ROOT"
+
+# 0e. THE COMPONENTS, ASKED BEFORE ANYTHING IS TOUCHED (24/11, work at 20:56Z). The update downloaded and
+#     verified node-9a0c589adfa0, then found no bundle for its lock (components-df6f97708c72: HTTP 404),
+#     spent two minutes fetching a toolchain for a fallback build, and died inside cargo - 117 s for an
+#     answer that was available in the first second. A core and its components are ONE install
+#     (docs/KERNEL.md, stream C), so a deploy whose components cannot be supplied has nothing to do here:
+#     it says which bundle is missing and why this node cannot make one, and stops before the binary
+#     decision, the build, or the download.
+#
+#     The question costs one sha256 per component and no network when they are already installed; the
+#     channel is asked only when something is missing. An UNANSWERABLE question (no network, no lib) is a
+#     note, not a refusal: the deploy then goes on and fails later where it can say more.
+if command -v wa_components_preflight >/dev/null 2>&1 && command -v wa_components_shipped >/dev/null 2>&1; then
+  PREFLIGHT_NAMES="$(wa_components_shipped "$ROOT" 2>/dev/null)"
+  if [ -n "$PREFLIGHT_NAMES" ]; then
+    PREFLIGHT_SAID="$(wa_components_preflight "$ROOT" "$INSTALL_DIR" $PREFLIGHT_NAMES 2>&1)"; PREFLIGHT_RC=$?
+    case "$PREFLIGHT_RC" in
+      0) [ -z "$PREFLIGHT_SAID" ] || note "$PREFLIGHT_SAID" ;;
+      2) note "$PREFLIGHT_SAID" ;;
+      *) fail "refused(component_not_installable): $PREFLIGHT_SAID. The components are the other half of this install, so nothing was fetched, built or installed. Publish that bundle where its bytes were pinned (bash scripts/publish-components.sh, then the gh line it prints), install it from a directory (WA_DEPLOY_COMPONENT_SOURCE=<dir> holding <name>.wasm and <name>.json for every pinned name), or give this node a toolchain (cargo and rustup) and let the deploy build them." ;;
+    esac
+  fi
+fi
+
 # Arm the checkout's git hooks by default (CRLF, main guard, generated prompt docs). Advisory: a
 # config write cannot dirty the tree, and a failure here never stops a deploy.
 [ -f "$ROOT/scripts/setup-hooks.sh" ] && bash "$ROOT/scripts/setup-hooks.sh" "$ROOT" || true
@@ -2248,6 +2272,7 @@ ship_file "$ROOT/scripts/lib/runtime-binding.sh" "$INSTALL_DIR/scripts/lib/runti
 ship_file "$ROOT/scripts/lib/node-runtime.sh" "$INSTALL_DIR/scripts/lib/node-runtime.sh" "scripts/lib/node-runtime.sh beside deploy.sh (which node, and a named refusal when there is none)"
 
 ship_file "$ROOT/scripts/lib/deploy-components.sh" "$INSTALL_DIR/scripts/lib/deploy-components.sh" "scripts/lib/deploy-components.sh beside deploy.sh"
+ship_file "$ROOT/scripts/lib/release-completeness.sh" "$INSTALL_DIR/scripts/lib/release-completeness.sh" "scripts/lib/release-completeness.sh beside deploy.sh (the question about a published components bundle, asked before anything is touched)"
 # ...and the node-binary resolver, for the same reason the component lib is shipped: `request deploy` runs the
 # INSTALLED copy of this script, and a copy with no resolver beside it does not refuse - it notes "no
 # node-binaries helper" and builds the tree, which is the one thing a node without a toolchain (openclaw, 2

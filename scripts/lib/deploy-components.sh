@@ -100,6 +100,56 @@ wa_component_build_blockers() {
   return 0
 }
 
+# <repo> <install_dir> <name>...  -- CAN THIS DEPLOY SUPPLY THE PINNED COMPONENTS? Asked BEFORE anything is
+# fetched or built (24/11, work 20:56Z): the update downloaded and verified the node binary, then spent two
+# minutes fetching a toolchain, then failed on the components - and the whole run was doomed from its first
+# second, because the bundle its lock names was not published and the node had nothing to build with.
+#
+# Returns 0 when every pinned name is already here (installed or cached for this lock), or the bundle is
+# published, or this node can build it, or an operator named a directory (WA_DEPLOY_COMPONENT_SOURCE);
+# 1 with the one sentence a person needs on stdout when none of those is true; 2 when the question cannot be
+# answered at all (no network, no lib beside the deploy) - and 2 is NOT a refusal: the deploy goes on and
+# fails later where it can say more, which is exactly what it did before this function existed.
+#
+# The local half costs a sha256 per component and no network; the channel is asked only when something is
+# missing, so a repeat deploy on a node that has its components asks nobody.
+wa_components_preflight() {
+  local repo="$1" install="$2" name cdir cache lock_sha pin pin_sha missing="" tag slug state rc blockers
+  shift 2
+  lock_sha="$(wa_component_lock_sha "$repo")" || return 2
+  cdir="$(wa_components_dir)"
+  cache="$(wa_component_cache_root "$install")/$lock_sha"
+  for name in "$@"; do
+    pin="$(wa_component_pin "$repo" "$name")" || return 2
+    pin_sha="${pin%% *}"
+    [ "$(wa_component_sha256 "$cdir/$name.wasm" 2>/dev/null)" = "$pin_sha" ] && continue
+    if [ -f "$cache/.complete" ] && [ "$(wa_component_sha256 "$cache/$name.wasm" 2>/dev/null)" = "$pin_sha" ]; then continue; fi
+    missing="$missing $name"
+  done
+  [ -z "$missing" ] && return 0
+  [ -n "${WA_DEPLOY_COMPONENT_SOURCE:-}" ] && return 0
+  tag="$(wa_component_release_tag "$repo")" || return 2
+  if ! command -v wa_release_tag_state >/dev/null 2>&1 && [ -f "$repo/scripts/lib/release-completeness.sh" ]; then
+    . "$repo/scripts/lib/release-completeness.sh" 2>/dev/null || true
+  fi
+  if ! command -v wa_release_tag_state >/dev/null 2>&1; then
+    printf 'components_unknown: scripts/lib/release-completeness.sh is not beside this deploy, so whether %s is published could not be asked\n' "$tag"
+    return 2
+  fi
+  slug="$(wa_component_release_repo "$repo")"
+  state="$(wa_release_tag_state "$slug" "$tag")"; rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    2) printf 'components_unknown: %s could not be asked whether %s is published (%s); unknown is not published\n' "$slug" "$tag" "$state"; return 2 ;;
+  esac
+  # NOT PUBLISHED. Only a build can supply them now, and a build is what a node without a toolchain spends two
+  # minutes discovering it cannot do.
+  if blockers="$(wa_component_build_blockers)"; then return 0; fi
+  printf 'this commit needs %s, which is not published; this node cannot build it (%s missing on PATH), and %s %s not installed or cached here' \
+    "$tag" "$blockers" "${missing# }" "$([ "$(printf '%s' "$missing" | wc -w)" = 1 ] && echo is || echo are)"
+  return 1
+}
+
 # <repo> <name> <out_dir>
 #
 # Stage one component into <out_dir> and verify it against components.lock.

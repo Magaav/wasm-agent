@@ -597,6 +597,12 @@ gate_run bash scripts/test-release-completeness.sh
 # than recreating it, and refused when the bytes are not the pins. gh is a shim that only records its
 # arguments; no network, no cargo, no node.
 gate_run bash scripts/test-publish-components-at-landing.sh
+# THE COMPONENTS QUESTION, ASKED BEFORE A DEPLOY TOUCHES ANYTHING (24/11, work 20:56Z: "wa update" spent
+# 117 s - a binary download, then two minutes of toolchain fetch for a fallback build - and died inside cargo,
+# for an answer available in its first second: the bundle its lock names was not published and the node could
+# not build one). scripts/lib/deploy-components.sh's wa_components_preflight, and scripts/deploy.sh's own first
+# lines, are that question: local bytes first (no network), then the channel, then "can this node build it".
+gate_run bash scripts/test-components-preflight.sh
 # The shipped set: a component is shipped by being PINNED (`components.lock`), and a deploy installs,
 # records and rolls back that whole set (docs/FEATURES.md). Proves the lock (production set, no fixture),
 # the set's install/rollback/refusal mechanics on a fixture lock, and - when this checkout has built
