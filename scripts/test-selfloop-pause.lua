@@ -609,6 +609,40 @@ local answer = wa_completion_run(json.encode({ kind = "self_wake", id = "no-such
   owner = "master", session_id = silent_session }))
 check(type(answer) == "string" and tostring(answer):find("error", 1, true) ~= nil,
   "a self_wake the node cannot admit answers an error (and the row/log got it): " .. tostring(answer):sub(1, 120))
+-- (6) THE ABANDONED RESUME SAYS SO, ONCE (r7-add, Fable 24/11). When the re-arm chain is spent the pause
+-- record says `abandoned: true` and the session simply stopped: nothing said so to the person who opened it. The
+-- line is read from that record, printed before any prompt, marked shown in the same record, and it never reaches
+-- the model - the function is a file read and a file write.
+local notice_dir = data_dir .. "/deploy-paused"
+local notice_session = memory.start_session("local", "chat", { user_id = "master", node_id = "n", title = "r7-add" })
+local function notice_record(session, extra)
+  local body = { session = session, since = r6_now - 600, to = "unknown", source = "install", request = "r1", by = "master" }
+  for k, v in pairs(extra or {}) do body[k] = v end
+  pcall(host.write_file, notice_dir .. "/" .. session .. ".json", json.encode(body))
+  return notice_dir .. "/" .. session .. ".json"
+end
+local notice_mod = dofile("lua/core/deploy_pause.lua")
+notice_mod.paused_dir = function() return notice_dir end
+-- (a) an abandoned resume: the line, ONCE, and no model call
+local ab_path = notice_record(notice_session, { abandoned = true, abandoned_at = r6_now - 60 })
+local runs_before = tonumber((json.decode(host.sql_query([[SELECT COUNT(*) AS n FROM runs]], "[]") or "[]") or {})[1].n) or 0
+local shown = notice_mod.abandoned_notice(notice_session)
+check(type(shown) == "table" and shown.text == notice_mod.ABANDONED_TEXT,
+  "an abandoned resume shows its one line: " .. json.encode(shown))
+check(shown.text == "this session was paused by an update and could not be resumed automatically; send any message to continue",
+  "verbatim, as Fable approved it")
+local runs_after = tonumber((json.decode(host.sql_query([[SELECT COUNT(*) AS n FROM runs]], "[]") or "[]") or {})[1].n) or 0
+check(runs_after == runs_before, "and it is not a model turn: runs unchanged (" .. runs_before .. ")")
+check(notice_mod.abandoned_notice(notice_session) == nil, "shown once: opening again says nothing")
+-- (b) a session that resumed normally shows nothing
+local normal_session = memory.start_session("local", "chat", { user_id = "master", node_id = "n", title = "r7-add normal" })
+notice_record(normal_session, {})
+check(notice_mod.abandoned_notice(normal_session) == nil, "a normal resume shows nothing")
+-- (c) the counter counts it, with the oldest age
+local counted = notice_mod.abandoned_count({ now = r6_now })
+check(type(counted) == "table" and tonumber(counted.count) >= 1, "the counter counts abandoned resumes: " .. json.encode(counted))
+check(tonumber(counted.oldest_age_seconds) ~= nil, "and reports the oldest age: " .. tostring(counted.oldest_age_seconds))
+check(tonumber(counted.count) < 2, "the one that showed, and the normal one, are not counted: " .. json.encode(counted))
 for _, name in ipairs({ "pause", "resume", "paused", "cancel_requested", "cancelled_stop", "settle_interrupted", "defer_refused" }) do
   check(type(selfloop[name]) == "function", "the module exposes " .. name)
 end

@@ -136,6 +136,16 @@ function M.lines()
   }
   local unfinished = M.unfinished()
   if unfinished then lines[#lines + 1] = "unfinished " .. unfinished end
+  -- AN ABANDONED RESUME IS A DEBT NOBODY SEES (r7-add): the session stopped and only the record knows. The count
+  -- and the oldest age, counted from the records themselves (`deploy_pause.abandoned_count`), never a model call.
+  local ok_pause, pause = pcall(dofile, "lua/core/deploy_pause.lua")
+  if ok_pause and type(pause) == "table" and type(pause.abandoned_count) == "function" then
+    local counted = pause.abandoned_count()
+    if counted and (tonumber(counted.count) or 0) > 0 then
+      lines[#lines + 1] = "abandoned resumes " .. tostring(counted.count)
+        .. (counted.oldest_age_seconds and (" (oldest " .. M.age_text(counted.oldest_age_seconds) .. ")") or "")
+    end
+  end
   lines[#lines + 1] = "tools     " .. M.tools()
   lines[#lines + 1] = "tree      " .. M.working_tree()
   -- The node's one root: how big it is, how full its filesystem is against the cap, and when the last

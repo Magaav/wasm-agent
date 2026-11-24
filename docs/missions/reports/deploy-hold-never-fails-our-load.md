@@ -1663,3 +1663,49 @@ started.
 
 **Rows after r8:** build `exit=0` (34.95s); `test-deploy-resume.lua` 25, `test-selfloop-pause.lua` 169 (re-run against
 the rebuilt binary).
+
+### r7-add: the abandoned resume says so, once (24/11 ~06:50Z)
+
+**Texts to approve (verbatim - Fable's proposed line, shipped exactly):**
+
+    this session was paused by an update and could not be resumed automatically; send any message to continue
+
+**What it does.** `deploy_pause.abandoned_notice(session)` reads `<data>/deploy-paused/<session>.json`; if it says
+`abandoned: true` and not yet shown, it prints that one line at the moment the session is opened
+(`wa chat --continue` / `--resume` / `--session`, plain view and TUI alike, before any prompt), and marks
+`abandoned_shown` in the same record so it is said **once per abandoned pause**. It is a file read and a file write:
+no provider, no run row, no paid turn - the test asserts the `runs` count is unchanged across the call.
+`deploy_pause.abandoned_count()` feeds `wa status` as `abandoned resumes N (oldest <age>)`; `wa-sentinel status`
+already counts them (verified on the live node: `paused sessions: 8, oldest 4h ago, stale: 0, abandoned: 4`).
+
+**Test** (`scripts/test-selfloop-pause.lua`, real files under `<data>/deploy-paused`): an abandoned record shows the
+line once and verbatim with `runs` unchanged; a second open shows nothing; a session that resumed normally shows
+nothing; the counter counts the abandoned one, reports the oldest age, and does not count the normal one.
+**177 checks** (was 169).
+
+### r7c: diagnosed with citations, NOT fixed (the honest boundary of this round)
+
+* **(2) placement - why other sessions were pinned to the stalled thread.** `pick_run_node_thread`
+  (`rust/wa-capabilities/src/serve.rs:756`) sets `floor = interactive_reserve()` for background work
+  (`:354`), and the comment above it states node-threads 0 and 1 are that reserve - so **the only lane a completion
+  may take is index >= 2, i.e. thread 2**. That is why all four completions are on thread 2 while thread 0 sat idle:
+  by design, and the design has no escape route. Its idle filter also judges a lane by *label* and *beat*
+  (`node_thread_busy_label`, `node_thread_age_ms`, `:766-775`), never by *progress*: a lane blocked inside Lua still
+  beats, so once the label cleared it stayed eligible. Growth was closed because `ceiling = run_capacity()-1`
+  (`:376`) allowed no slot beyond 2, so `spawn_node_thread` (`:637`) had nothing to give.
+* **(1) the stall - where it waits.** The node-thread loop (`serve.rs:2862-2872`) does `begin_work("child completion")`
+  and then `lua.call_string("wa_completion_run")`; it never returned, so the block is **inside Lua**, on the session's
+  run claim held by the attended CLI turn. The Lua side of that decision is `lua/core/agent.lua:2055-2061` with
+  `deploy_pause.claim_wait` (`lua/core/deploy_pause.lua:252`), which only *classifies* a busy claim - it does not
+  bound the wait, and nothing on this path frees the node-thread. That is the one-line fact the fix must change:
+  bounded wait, deferral, row back to pending, one log line.
+* **The spin.** `wa-placement` (`serve.rs:2388`) loops `wa_orchestrator_tick` then `sleep(2s)`; 49% CPU for 29 min
+  means the sleep was never reached - the spin is inside `wa_orchestrator_tick` (Lua), not in the loop.
+
+**Not done:** both fixes and their node-level test; the RED report for a lane stalled past a bound; the reclaim's
+activity check narrowed to this wake's own run; and the answer to *is (2) present in v0.1.1* - I did not read the tag.
+
+### Correction to an earlier handover
+
+Two turns reported "empty output" from `bash`. That was **my** mistake, not the node's: the bash result carries
+`stdout`, and I was reading `.output`, so every result read as empty. Nothing about the node was ever silent to me.
