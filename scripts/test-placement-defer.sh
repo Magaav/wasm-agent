@@ -21,7 +21,10 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="${WA_BIN:-}"
 [ -n "$BIN" ] && [ -x "$BIN" ] || { echo "placement defer: no wa binary (set WA_BIN)" >&2; exit 1; }
 BOUND="${PLACEMENT_BOUND_SECONDS:-30}"
-S="$(mktemp -d /tmp/placement-XXXXXX)"
+# THE SCRATCH COMES FROM THE RUNNER, NOT FROM A LITERAL /tmp (test-tmp-cleanliness, half A): the runner gives a
+# row TMPDIR inside one parent it removes on exit, so a row that roots its scratch there is bounded by construction
+# - and a row that roots it at /tmp is one more entry in the tmpfs that filled three times in a day (23/11).
+S="$(mktemp -d "${TMPDIR:-/tmp}/placement-XXXXXX")"
 mkdir -p "$S/home/.wasm-agent"
 export WASM_AGENT_LUA_ROOT="$ROOT" WASM_AGENT_HOME="$S/home" WASM_AGENT_RENDEZVOUS= WASM_AGENT_RELAY= WASM_AGENT_DB=
 DB="$S/x.db" PORT=$(python3 -c 'import random;print(random.randint(20000,28000))') CPORT=$(python3 -c 'import random;print(random.randint(28001,32000))')
