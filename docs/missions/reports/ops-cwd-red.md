@@ -113,3 +113,83 @@ argued:
 So nothing that this branch changes is red, and no row on this branch was made red by this branch: the two rows
 I did touch (`test-network-outage-recovery.lua` fixture, and the product files) pass, and the third row of the
 original report (`test-start-instant.lua`) passes with the held-lock case included.
+
+
+## Round two (Fable, 24/11 ~08:35Z): the start path costs NOTHING, and the board's numbers
+
+Fable's rule is stricter than my first fix: not "the start path does not WAIT on the ledger" but "no ledger
+read before the first prompt at all". Both rows below were still true of my first fix, and both are now fixed.
+
+**What the first fix still did before the first prompt.** `M.workdir` (the prompt's `<workdir>` block) called
+`memory.session_worktree` and then `memory.session_cwd`, and `M.record_run_directory` called `memory.session_cwd`
+to decide whether anything was recorded - three ledger calls, cheap only because a read happens to answer from
+WAL in 0 ms behind a held write lock. Cheap is not the contract.
+
+**What it does now (this commit).**
+
+* `lua/core/agent.lua`, `M.workdir(session_id, session)`: the caller that builds the prompt ALREADY holds the
+  session row (`agent.lua:1425`, `memory.session` = `SELECT *`, so `worktree` and `run_cwd` travel with it).
+  The prompt passes that row and `M.workdir` answers from it - **no query of its own**. When no row is passed
+  (a tool path, a done-gate check, a row in a test) it reads the ledger exactly as before.
+* `lua/core/agent.lua`, `M.record_run_directory`: **no ledger call at all**. An attended run (`cli` /
+  `completion`) decides THIS process's directory and keeps it in memory; a node-served run (`interactive`,
+  `background`, `remote`, `job`) decides nothing and writes nothing.
+* `ctx.run_dir` (set in the turn's `code_ctx`) carries that decision to the tool layer, so
+  `lua/core/tools.lua` `session_cwd` answers worktree -> this turn's decision -> the recorded row. The prompt's
+  directory, the file tools and the commands name ONE tree inside the turn.
+* `M.flush_run_directory` at the run's END does the read and the one write. That is where the run already
+  writes its own record, and a busy ledger there costs the end of a turn, not its start.
+
+**Measured, not asserted** - every `memory.session_cwd` / `session_worktree` / `set_session_cwd` wrapped in a
+counter, then `record_run_directory(sid, 'cli')` + `M.workdir(sid, row)` (the whole start-path surface):
+
+    session_cwd=0
+    session_worktree=0
+    set_session_cwd=0
+    start_path_ledger_calls=0
+    flush wrote=true session_cwd_after=/home/victor/Work/missions/ops-cwd-red/wt
+
+**The speed board, before and after** (`bash scripts/speed-board.sh --measure --bin ~/.local/bin/wa --root
+<tree> --samples 3`; median of three, load recorded beside each row):
+
+| row | BEFORE (`main` c8b3a911, carries the red) | AFTER (this branch) |
+| --- | --- | --- |
+| `start` | 261 ms @ load 1.46 | 252 ms @ load 1.42 |
+| `first_token` | 211 ms @ load 1.46 | 207 ms @ load 1.42 |
+
+An idle ledger never paid for the write, so the board could not see 1143 ms - that number only exists behind a
+HELD write lock, which is what `scripts/test-start-instant.lua` creates (and it passes with `start-instant ok`).
+The board says what Fable asked it to say: the start path is unchanged at ~250 ms on both sides, and the
+zero-call measurement above says why it can no longer move with the ledger.
+
+**The two correctness rows, each with its mechanism and who was wrong**
+
+* `scripts/test-codemode-model-boundary.lua:35` (the cached continuation answers after the live files changed):
+  **the PRODUCT was wrong.** `lua/core/tools.lua`, the `tool_call` branch hashed `cwd = session_cwd(...)` into the
+  routed-read cursor's scope, and this mission made a session's directory something that settles after its first
+  run - so a cursor issued before that run reported `batch_cursor_scope_changed` to a session that had done
+  nothing wrong. Fixed in the product: the scope hashes WHO (user, role, session, workspace binding, subagent
+  profile) and not WHERE; the retained page is absolute content, so resuming it from another directory
+  discloses nothing new, and a cursor from another session or workspace is still refused.
+* `scripts/test-network-outage-recovery.lua:56` (the tool call is not re-run after an outage, got 0 executions):
+  **the ROW's assumption was wrong, and its assertion is untouched.** `lua/core/tools.lua` `resolve_path`
+  resolves a relative path in the session's directory, which this mission made non-empty, so the read arrives as
+  `<session dir>/DESIGN.md`. The row stubbed `host.read_file` for the exact string `DESIGN.md`; the stub missed,
+  the real reader ran, the file was absent, the tool answered an error and `TOOL_RUNS` stayed 0. The stub now
+  answers for the file the tool asked for (`path == 'DESIGN.md' or path:match('DESIGN%.md$')`). What the row
+  asserts - exactly ONE execution, never re-run after the outage - is unchanged and exactly as strong.
+
+
+## The narrowed run after round two
+
+    flock -o ~/Work/missions/.suite.lock env WA_BIN=~/.local/bin/wa WA_FAST_ROWS=/tmp/rows-red.txt \
+      bash scripts/fast.sh
+
+**`fast result FAILED (136 checks, 1 failed, 0 skipped)`, `fast path FAILED (1 of 136, 0 skipped, 681s)`** -
+down from three failures to ONE, the load-sensitive `esc-stops-pty` timing row, which fails identically on a
+base worktree of `origin/main` (`esc-stops pty: -1 ok, 1 failed`), and which this branch does not touch.
+`check-tmp-cleanliness` and `check-install-guards`, red at the previous tip, pass here.
+
+Every row singly on this tip: `start-instant ok`, `operation cwd ok (31 checks)`, boundary seed
+`665 checks ok` + restart `43 checks ok`, `network outage recovery ok (34 checks)`, `session-isolation 141
+checks, 0 failed`, `remote pending ok (90 checks)`, `handle wake: 17 checks`.

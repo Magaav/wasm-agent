@@ -1119,6 +1119,10 @@ local function session_dir(memory, ctx)
     local ok, path = pcall(memory.session_worktree, ctx.session_id)
     if ok and type(path) == "string" and path ~= "" then return path, "worktree" end
   end
+  -- THIS TURN'S OWN DECISION, when the run that is serving it made one (an attended run re-records the
+  -- person's terminal directory, lua/core/agent.lua M.record_run_directory). It travels in the context, so the
+  -- prompt's directory, this answer and the child's cwd are one tree for the length of the turn.
+  if type(ctx.run_dir) == "string" and ctx.run_dir ~= "" then return ctx.run_dir end
   if memory.session_cwd then
     local ok, run = pcall(memory.session_cwd, ctx.session_id)
     if ok and type(run) == "string" and run ~= "" then return run, "run" end
