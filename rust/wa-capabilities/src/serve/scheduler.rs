@@ -554,6 +554,23 @@ pub fn admit_if_idle(
     }
 }
 
+/// THE STATE OF A RUN THE NODE KNOWS (r8a, Fable 24/11): `queued`, `running`, or `unknown`. This is the answer the
+/// Lua side needs to stop treating a resume whose completion is still queued as lost - the defect that made the
+/// reclaim re-arm a duplicate that queued BEHIND on the same lane (measured: runs 1350, 1351, 1352 of 587c16b6).
+pub fn run_state(run_id: u64) -> &'static str {
+    if let Some(scheduler) = global() {
+        let inner = scheduler.inner.lock().unwrap_or_else(|poison| poison.into_inner());
+        if let Some(record) = inner.runs.get(&run_id) {
+            return match record.state {
+                RunState::Queued => "queued",
+                RunState::Running => "running",
+                _ => "unknown",
+            };
+        }
+    }
+    "unknown"
+}
+
 pub fn mark_running(run_id: u64) {
     if let Some(scheduler) = global() {
         scheduler.mark_running(run_id);
