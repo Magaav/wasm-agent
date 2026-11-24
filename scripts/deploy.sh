@@ -487,6 +487,11 @@ BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 # git bundle (remote `host`) before it is pushed anywhere, and the sentinel deploys it. The rules are the
 # same against every named main: behind ANY of them refuses, and HEAD must be ON one of them. A tree behind
 # origin/main is still refused when the other remote is ahead, so a stale laptop cannot undo GitHub's main.
+# THE RULE IS STATED ONCE, in docs/DEPLOY-TARGET.md, and the sentinel's recorded target
+# (rust/wa-sentinel/src/deploy_protocol.rs, target_commit_at) follows that statement: a change to it
+# belongs in both places in one commit. Measured 24/11: the sentinel recorded a host bundle's main
+# seven days behind because it read the named remote instead of the rule below, while this loop
+# installed HEAD - and every text that spoke by the record named the stale commit.
 MAIN_REFS=""
 for MAIN_REMOTE in origin $(git config --get-all wa.deployRemote 2>/dev/null); do
   case " $MAIN_REFS " in *" $MAIN_REMOTE/main "*) continue ;; esac
