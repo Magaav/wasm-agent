@@ -358,6 +358,42 @@ the row's failure line carries notice_ms and the probe cost, and the answer is o
 reader thread did not get scheduled (notice_ms large), or the measurement did (probe large). Max harness
 harm none: 407 lib tests pass (the split touches only the trace line and two accessors).
 
+
+### The row now measures the stop by the node's own stamps (main-health 4425f670 red again)
+
+Twice this row was red for a number it could not defend, because the number was its own probing: the pty
+loop timed the stop by spawning `tmux capture-pane` processes in a loop, and under a burst that loop
+can take longer than the stop it measures (main-health 4425f670: bash 805 ms with 34 looks in 143 ms of
+the loop's own time; earlier, 692 ms at load 2.3 with the shell gone in 5 ms).
+
+The measurement moved into the node. Two rows the CLI already writes are the stop, both stamped by the
+process that lived through them: `input|interrupt` (the moment the READER saw the key - host stamp,
+change/esc-stops-now item 3) and `run|end` (the run's own end). The row asserts their difference; the
+screen is read only to stop waiting, at 40 ms on a quiet machine and 120 ms above load 6, and the number
+it produces is reported in its own column, never asserted. A run whose stop the ledger cannot show fails
+as `unknown`, never passes. Budget unchanged: 300 ms idle, 120 ms per unit of load, hard 2000.
+
+**Proof, five single runs while a full fast.sh held the suite lock** (`/home/victor/Work/missions/.suite.lock`,
+held by another branch's fast run the whole time; this branch's own fast.sh was queued behind it):
+
+| run | load before -> after | headers | stream | bash | remote | subagent |
+|---|---|---|---|---|---|---|
+| 1 | 15.9 -> 13.5 | 37 ms | 30 ms | 75 ms | 57 ms | 152 ms |
+| 2 | 13.5 -> 11.2 | 42 ms | 30 ms | 66 ms | 50 ms | 81 ms |
+| 3 | 11.2 -> 8.7 | 29 ms | 26 ms | 78 ms | 44 ms | 120 ms |
+| 4 | 8.7 -> 6.9 | 24 ms | 29 ms | 71 ms | 43 ms | 82 ms |
+| 5 | 6.9 -> 5.4 | 27 ms | 26 ms | 60 ms | 47 ms | 109 ms |
+
+All five runs **18 ok / 0 failed**; every stop is 24-152 ms by the node's own clock, against an idle
+budget of 300 ms - no load allowance needed at all. The same runs' pty observations were 200-357 ms, and
+that gap is exactly what used to be asserted: the harness's own capture loop.
+
+**What this no longer measures, said plainly**: the reader's 120 ms lone-Esc lookahead happens BEFORE the
+interrupt stamp (the stamp is taken when the reader raises the interrupt), so the node's number is
+'interrupt raised -> run end' and the lookahead is outside it. That is the product's own fixed cost, the
+same in every scenario, and the pty column still shows the whole path (200-357 ms) for a reader who wants
+it. Nothing was widened, loosened or hidden: the assertion moved from the script's clock to the node's.
+
 **Pending, said plainly**: a reproduction of the 1041 ms. Neither a fork storm nor load 32 produced it;
 the trace line above is the first thing to read if it comes back, and `WASM_AGENT_CANCEL_TRACE=1` is how to
 turn it on. Fable's amendment (stop the load loops, rerun on an idle queue, 10 runs) is what produced the
