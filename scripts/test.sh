@@ -2132,6 +2132,12 @@ WASM_AGENT_MODEL_LIMITS='{"test-model":{"context":200000,"reserve":40000}}' \
 # the welcome box printed the literal 0.1.0 on every node until this. The one function supplies the
 # banner, wa --version, /health and the update banner, so a divergence is this test.
 WA_SCRIPT=scripts/test-build-identity.lua "$BIN" --db "$DB.identity" | grep "build identity ok"
+# AND THE `v` IN FRONT OF THAT NAME IS ADDED ONCE (Fable, 24/11): a node installed from the public channel has
+# `release=v0.1.1` in its installed.txt and `wa --version` printed `wasm-agent v0.1.1 . vv0.1.1` - every fleet
+# node is a channel install, so every one of them would have printed `vv0.1.2` after the next update. The row drives
+# the real binary with four install records: a channel release, a `binary_release`, a `node-<sha12>` tag and no
+# record at all.
+WA_BIN="$BIN" gate_run bash scripts/test-version-prints-once.sh
 # A terminal resize, in every component that draws a rule, a box or a right-aligned part: each is
 # rendered at 80, 200 and back at 60 and must fit the terminal it is drawn in - a width measured once
 # left the welcome rule and the code-mode box at the old size, and wider than a shrunk window (Victor,

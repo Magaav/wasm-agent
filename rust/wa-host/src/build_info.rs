@@ -99,6 +99,27 @@ pub fn short_id(id: &str) -> String {
     id.chars().take(8).collect()
 }
 
+/// A label AS A TERMINAL SHOWS IT: the one rule for the `v` a reader sees in front of it.
+///
+/// A commit label is prefixed (`v2104a4d8`); a `node-<sha12>` release tag and a label that already
+/// carries its own `v` are printed as they are. MEASURED 24/11 on a machine installed from the public
+/// channel: `wa --version` answered `wasm-agent v0.1.1 . vv0.1.1`, because `--version` prefixed a
+/// label that was already the published release tag (`installed.txt`'s `release=v0.1.1`, written by
+/// `scripts/linux/bootstrap.sh`). EVERY node `scripts/install.sh` installs is one of those, so every
+/// one of them would have printed `vv0.1.2` after the next update - and nothing failed: a version line
+/// is read by people, not by a check.
+///
+/// `lua/core/cli_view.lua`'s `with_v` is the same rule for the welcome box (a Lua surface cannot call
+/// this function), and `scripts/test-version-prints-once.sh` holds both surfaces to one table of cases
+/// against the binaries themselves.
+pub fn display_label(label: &str) -> String {
+    if label.starts_with('v') || label.starts_with("node-") {
+        label.to_string()
+    } else {
+        format!("v{label}")
+    }
+}
+
 pub fn install_label(state: &std::path::Path, install: &std::path::Path, node_name: &str, node_id: &str) -> String {
     let base = label();
     let field = |path: &std::path::Path, key: &str| -> Option<String> {
@@ -319,6 +340,20 @@ mod tests {
         assert_eq!(contains(""), Contains::Unknown("no_commit_named"));
         assert_eq!(contains("abc"), Contains::Unknown("commit_too_short"));
         assert_eq!(contains("zzzzzzzz"), Contains::Unknown("commit_not_hex"));
+    }
+
+    /// THE `v` IS DECIDED IN ONE PLACE, and a label that already names a release does not get a second
+    /// one. The four shapes a label can have, as `install_label` composes them.
+    #[test]
+    fn a_label_is_prefixed_once() {
+        assert_eq!(display_label("2104a4d8"), "v2104a4d8", "a commit label is prefixed");
+        assert_eq!(display_label("2104a4d8+dirty"), "v2104a4d8+dirty", "dirty or not");
+        assert_eq!(display_label("v0.1.1"), "v0.1.1",
+            "a published channel release already carries its v - this was the doubled one");
+        assert_eq!(display_label("node-7fa1b2c3d4e5"), "node-7fa1b2c3d4e5",
+            "a node release tag is printed as it is");
+        assert_eq!(display_label("abc12345 (pinned)"), "vabc12345 (pinned)",
+            "a pin is a commit label with a word after it, and keeps the one v");
     }
 
     /// A pin for ANOTHER node does not mark this one "(pinned)" - the ledger is fleet-wide, and the
