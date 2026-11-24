@@ -17,6 +17,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {isMain} from './main-module.mjs';
 
 export function cargoExecutable(file, name = '') {
   let raw;
@@ -39,7 +40,7 @@ export function cargoExecutable(file, name = '') {
   return found;
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isMain(import.meta.url)) {
   const [file, name] = process.argv.slice(2);
   if (!file) { console.error('usage: cargo-executable.mjs <artifacts.json> [bin-name]'); process.exit(1); }
   try { process.stdout.write(cargoExecutable(file, name || '') + '\n'); }

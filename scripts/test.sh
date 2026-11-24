@@ -256,6 +256,10 @@ else
 fi
 gate_run node scripts/test-install-isolation.mjs
 gate_run node scripts/test-gate-check.mjs
+# AN ENTRY GUARD ASKS BY REAL PATH (24/11, work): the host build of a deploy ran through a symlinked pin
+# worktree and did NOTHING - empty output, exit 0 - so the deploy died 361 s later with 'no built binary'
+# and no line saying why. Cheap: it never builds, and it keeps the fragile idiom from being copied.
+gate_run node scripts/test-main-module-entry.mjs
 gate_run node scripts/test-landing-queue.mjs
 gate_run node scripts/test-deploy-pin-prune.mjs
 run_proof_fixture producer 16 node scripts/test-producer-admission.mjs

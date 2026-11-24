@@ -7,6 +7,7 @@ import crypto from 'node:crypto';
 import {spawnSync} from 'node:child_process';
 import {DatabaseSync} from 'node:sqlite';
 import {fileURLToPath} from 'node:url';
+import {isMain} from './lib/main-module.mjs';
 const sha=x=>crypto.createHash('sha256').update(x).digest('hex');
 const key=x=>{const normalized=path.resolve(x).replaceAll('\\','/');return process.platform==='win32'?normalized.toLowerCase():normalized;};
 const quote=x=>`'${x.replaceAll("'","'\\''")}'`;
@@ -128,7 +129,7 @@ export function retire(plan,store,resolutions=[]) {
     return {ok:true,wave_id:plan.wave_id,main:plan.main,retired:plan.worktrees.length,local:plan.local.length,remote:plan.remote.length,note:'Retirement settled; final wave verification still required.'};
   } finally { db.close(); }
 }
-if(process.argv[1] && path.resolve(process.argv[1])===fileURLToPath(import.meta.url)) {
+if(process.argv[1] && isMain(import.meta.url)) {
   try {
     const [verb,file,store,resolutionFile]=process.argv.slice(2),plan=JSON.parse(fs.readFileSync(file,'utf8'));
     const result=verb==='guard'?guard(plan,fs.readFileSync(0,'utf8')):verb==='apply'?retire(plan,path.resolve(store),resolutionFile?JSON.parse(fs.readFileSync(resolutionFile,'utf8')):[]):fail('usage: guard PLAN | apply PLAN PRIVATE-STATE [RESOLUTIONS]');

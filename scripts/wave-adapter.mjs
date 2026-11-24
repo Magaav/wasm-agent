@@ -10,6 +10,7 @@ import {fileURLToPath} from 'node:url';
 import {ownerInventory,frozenOwners} from './lib/wave-owners.mjs';
 import {activityInventory,sourceOfConfig,orcaView} from './lib/wave-activity.mjs';
 import {location} from './wave-entry.mjs';
+import {isMain} from './lib/main-module.mjs';
 const hash=x=>crypto.createHash('sha256').update(x).digest('hex');
 const key=x=>{const p=path.resolve(x).replaceAll('\\','/').replace(/^\/\/\?\//,'');return process.platform==='win32'?p.toLowerCase():p;};
 function command(argv,cwd,env={}){const r=spawnSync(argv[0],argv.slice(1),{cwd,env:{...process.env,...env},encoding:'utf8',windowsHide:true,timeout:30000,maxBuffer:32*1024*1024});if(r.status!==0)throw Error(r.stderr || r.error?.message || 'adapter_command_failed');return r.stdout.trim();}
@@ -118,7 +119,7 @@ export function runtimeRetirement(config,target) {
   const result=native(config,{kind:'retire',item:{...item,evidence:JSON.stringify(owner)}});
   if(result.ok!==true)throw Error(result.error);return {ok:true,worktree:target,retired_under_session_fence:true,workspace:result.workspace};
 }
-if(process.argv[1] && path.resolve(process.argv[1])===fileURLToPath(import.meta.url)) {
+if(process.argv[1] && isMain(import.meta.url)) {
   try {
     const [action,file,a,b]=process.argv.slice(2),config=JSON.parse(fs.readFileSync(file,'utf8'));
     const main=process.env.WA_WAVE_MAIN || git(config.repo,'rev-parse','HEAD'),wave_id=process.env.WA_WAVE_ID,target=process.env.WA_WAVE_TARGET;

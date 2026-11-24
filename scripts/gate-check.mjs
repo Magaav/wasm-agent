@@ -7,6 +7,7 @@ import {spawn} from 'node:child_process';
 import {createRequire} from 'node:module';
 import {fileURLToPath} from 'node:url';
 import {catalog} from './gate-checks.mjs';
+import {isMain} from './lib/main-module.mjs';
 const require=createRequire(import.meta.url);
 const {verdict}=require('./lib/test-verdict.cjs');
 export const hash=bytes=>crypto.createHash('sha256').update(bytes).digest('hex');
@@ -87,7 +88,7 @@ export async function executeChecks(repo, ids, {jobs=1, output=null, emit=true, 
     limits:'memory admission uses declared estimates, not OS quotas; no per-child CPU/RAM/I/O sampling; concurrency hard bound 4; no test-result cache',at:new Date().toISOString()};
   fs.writeFileSync(path.join(root,'checks.json'),JSON.stringify(receipt,null,2)+'\n');return receipt;
 }
-if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)) {
+if(isMain(import.meta.url)) {
   const [mode,...args]=process.argv.slice(2),repo=process.cwd();
   try {
     if(mode==='list')console.log(JSON.stringify(catalog(repo),null,2));

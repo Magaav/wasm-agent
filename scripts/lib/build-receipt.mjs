@@ -16,6 +16,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {isMain} from './main-module.mjs';
 
 class Refusal extends Error {
   constructor(name, detail) { super(name + ': ' + detail); this.reason = name; this.detail = detail; }
@@ -63,7 +64,7 @@ export function readBuildReceipt(file, expect = {}) {
 // `node scripts/lib/build-receipt.mjs <receipt.json> [--commit SHA] [--tree SHA] [--target TRIPLE] [--root DIR]`
 // -> one `field=value` line per field on stdout (the bundle.manifest's own shape, so a caller reads it with the
 // same `sed -n 's/^binary=//p'`), or a named refusal on stderr with exit 1.
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isMain(import.meta.url)) {
   const args = process.argv.slice(2), expect = {};
   let file = null;
   for (let i = 0; i < args.length; i++) {

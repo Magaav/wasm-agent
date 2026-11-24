@@ -5,6 +5,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import {fileURLToPath} from 'node:url';
 import {spawnSync} from 'node:child_process';
+import {isMain} from './main-module.mjs';
 const runners=new Set(['skills/parallel-evolution/scripts/finish.mjs','scripts/merge-lane.mjs']);
 const digest=b=>crypto.createHash('sha256').update(b).digest('hex');
 function requireFact(value,message){if(!value)throw Error(message);}
@@ -64,4 +65,4 @@ export function findFullProof(repo,tree){
  for(const root of roots)for(const name of ['wa-finish-gate.json','wa-combined-gate.json']){try{const file=path.resolve(root,gitText(root,'rev-parse','--git-path',name)),receipt=JSON.parse(fs.readFileSync(file));const storageOwner=name==='wa-combined-gate.json'?receipt.owner_repo:receipt.repo;if(!storageOwner||path.resolve(storageOwner)!==path.resolve(root))continue;const proof=fullProof(receipt,tree,{ownerRepo:root});if(proof.verified)return {...proof,receipt:file};}catch{}}
  return {verified:false,reason:'no complete identity-bound identical-tree smoke evidence'};
 }
-if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){try{const [repo,tree]=process.argv.slice(2);const proof=findFullProof(path.resolve(repo||'.'),tree);console.log(JSON.stringify(proof));if(!proof.verified)process.exitCode=2;}catch(error){console.error(error.message);process.exitCode=2;}}
+if(isMain(import.meta.url)){try{const [repo,tree]=process.argv.slice(2);const proof=findFullProof(path.resolve(repo||'.'),tree);console.log(JSON.stringify(proof));if(!proof.verified)process.exitCode=2;}catch(error){console.error(error.message);process.exitCode=2;}}

@@ -50,6 +50,7 @@ import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import { procUse as procEvidence, procUseNote } from './lib/proc-use.mjs';
+import {isMain} from './lib/main-module.mjs';
 
 const require = createRequire(import.meta.url);
 // A managed session worktree's name is derived from the session id by `lua/core/workspaces.lua`: the id
@@ -1063,7 +1064,7 @@ export { neverTouch, decodeScratchName, pendingRollbackEvidence, rollbackPins, d
 
 // Only when this file is the program. An import gets the predicates and no pass, so a test never
 // removes anything by loading the module.
-const asProgram = process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url;
+const asProgram = process.argv[1] && isMain(import.meta.url);
 if (asProgram) {
   try {
     process.exitCode = main();

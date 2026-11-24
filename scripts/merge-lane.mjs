@@ -67,6 +67,7 @@ import {findFullProof,retainFullProof} from './lib/full-gate-proof.mjs';
 import {evaluate} from './delivery-admission.mjs';
 import {readRecord} from './lib/delivery-store.mjs';
 import {procUse, procUseNote} from './lib/proc-use.mjs';
+import {isMain} from './lib/main-module.mjs';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const AUDIT = process.env.WA_MERGE_LANE_AUDIT || path.join(here, '..', 'skills', 'git-orchestrator', 'scripts', 'audit.mjs');
 // A named identity, because an automatic merge has to be attributable. It is not the
@@ -1274,7 +1275,7 @@ async function main() {
   return exitCode;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+if (isMain(import.meta.url)) {
   try {
     process.exitCode = await main();
   } catch (error) {
