@@ -587,6 +587,16 @@ gate_run bash scripts/test-component-build-wrapper.sh
 # signature, a missing manifest, a channel that does not answer (unknown, never complete), and that the tag
 # asked for is the one the COMMIT's lock names rather than the working tree's.
 gate_run bash scripts/test-release-completeness.sh
+# THE LANDING'S SECOND PUBLISH (24/11). Publishing covered the node binary only, so a landing that moved
+# components.lock published a binary whose components bundle was never made (components-df6f97708c72: HTTP
+# 404) and no node without a toolchain could update. The row proves the step in scripts/lib/landing-components-
+# publish.sh: OFF by default (nothing uploaded, the log says this landing is not installable by download and
+# names the flag), unknown when the channel cannot answer (never "missing, so publish"), and with
+# WA_PUBLISH_COMPONENTS=1 the bundle verified by the REAL publish-components.sh and uploaded with every pinned
+# asset plus components.lock, --latest=false, under components-<sha12 of the lock>, over an existing tag rather
+# than recreating it, and refused when the bytes are not the pins. gh is a shim that only records its
+# arguments; no network, no cargo, no node.
+gate_run bash scripts/test-publish-components-at-landing.sh
 # The shipped set: a component is shipped by being PINNED (`components.lock`), and a deploy installs,
 # records and rolls back that whole set (docs/FEATURES.md). Proves the lock (production set, no fixture),
 # the set's install/rollback/refusal mechanics on a fixture lock, and - when this checkout has built
