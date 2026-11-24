@@ -78,26 +78,37 @@ M.TABLE = {
     ballSevenEighths = "\243\176\170\164",
     ballFull = "\243\176\170\165",
   },
-  -- Glyphs a stock terminal font has, so this set needs nothing installed. The ball keeps NINE slots
-  -- but a stock font has five distinct circle pictures (U+25CB, U+25D4, U+25D1, U+25D5, U+25CF), so the
-  -- ladder repeats them - a coarser reading of the same number, never a different number. M.FILL is the
-  -- promise that makes the repetition honest: it never goes DOWN as the window fills.
+  -- THE STOCK-FONT SET, REBUILT FROM MEASUREMENT (item 7, Victor 23/11: "that is horrible ... our
+  -- quality should be the same everywhere"). The set this replaces drew U+25B8, U+25F7, U+21BB, U+25A4,
+  -- U+25D1, U+25CB and U+25CF: the first four are not in JetBrains Mono or Liberation Mono at all (the
+  -- terminal took them from a fallback face), U+25D1 is missing from JetBrains Mono, and every one of
+  -- them is East-Asian-Ambiguous - a CJK-locale terminal may spend two cells on one. It was also the one
+  -- set that kept a space after each icon, so the no-font row was WIDER than ours; it is GLUED like wa.
+  --
+  -- MEASURED (scripts/test-unicode-icons.py is the row that keeps this honest): every glyph below is
+  -- East-Asian Width Narrow or Neutral - never Ambiguous, never an emoji - is present in the stock
+  -- monospace faces installed on this node, and advances EXACTLY one cell in each: JetBrains Mono
+  -- 600/1000, Liberation Mono 1229/2048, Noto Sans Mono 600/1000, Adwaita Mono 600/1000. DejaVu Sans
+  -- Mono, Menlo, Consolas and Cascadia Code are NOT installed here; that row names them as unmeasured
+  -- rather than claiming them, and every glyph used here is ASCII, Latin-1 or a square/circle those
+  -- faces all carry. The nine slots use FIVE pictures, and M.FILL is the promise that makes the
+  -- repetition honest: it never goes DOWN as the window fills.
   unicode = {
-    gap = " ",
-    steps = "\226\150\184",                     -- U+25B8, a step forward
-    clock = "\226\151\183",                     -- U+25F7
-    turns = "\226\134\187",                     -- U+21BB
-    cache = "\226\150\164",                     -- U+25A4, a store
-    check = "\226\156\147",                     -- U+2713
-    ballEmpty = "\226\151\139",                 -- U+25CB
-    ballEighth = "\226\151\148",                -- U+25D4
-    ballQuarter = "\226\151\148",               -- U+25D4
-    ballThreeEighths = "\226\151\145",          -- U+25D1
-    ballHalf = "\226\151\145",                  -- U+25D1
-    ballFiveEighths = "\226\151\149",           -- U+25D5
+    gap = "",
+    steps = "\226\128\186",                     -- U+203A, a step forward
+    clock = "~",                                -- ASCII: elapsed
+    turns = "#",                                -- ASCII: a count of runs
+    cache = "=",                                -- ASCII: served from cache, the same as before
+    check = "+",                                -- ASCII: U+2713 is NOT in Liberation Mono or Noto
+    ballEmpty = "\226\150\171",                 -- U+25AB, white small square
+    ballEighth = "\226\151\166",                -- U+25E6, a ring
+    ballQuarter = "\226\151\166",               -- U+25E6
+    ballThreeEighths = "\226\151\148",          -- U+25D4, a quarter black
+    ballHalf = "\226\151\148",                  -- U+25D4
+    ballFiveEighths = "\226\151\149",           -- U+25D5, all but the upper-left quadrant
     ballThreeQuarters = "\226\151\149",         -- U+25D5
-    ballSevenEighths = "\226\151\143",          -- U+25CF
-    ballFull = "\226\151\143",                  -- U+25CF
+    ballSevenEighths = "\226\150\170",          -- U+25AA, black small square
+    ballFull = "\226\150\170",                  -- U+25AA
   },
   -- Words and brackets, for a terminal with nothing: no glyph can be missing, and the row still says
   -- the same thing.
@@ -194,11 +205,56 @@ function M.resolve(session_choice, opts)
   end
   if #seen > 0 then return seen[1] end
   local record = opts.record or M.record()
-  if not (record and record["wa Icons"] == true) then
-    return { set = "unicode", source = "default (wa Icons is not installed, so the glyphs a stock font has)" }
-  end
+  -- THE FACE IS ASKED EVEN WHEN NOTHING SAYS wa Icons WAS INSTALLED (item 6, Victor 23/11). Measured on
+  -- the work node: on a container (and on an ssh session) there is no setup record at all -
+  -- <data>/setup/fonts.json is missing, because `wa setup fonts` never ran inside it - and this returned
+  -- "unicode" here without ever asking WHICH FACE draws the icon code points in this terminal. A window
+  -- that HAS a Nerd Font, or our own wa Icons, therefore drew the stock glyphs and nobody was told why.
+  -- The record is only where the setup wrote down what it did; the face is the measurement, and it is
+  -- asked whatever the record says.
   local face = faces.face(opts.face or { record = record })
-  return { set = face.set, source = face.why }
+  -- glued == nil is the face's own "cannot tell": the terminal could not be measured, or the font
+  -- question could not be answered on this machine. That is the one state the reader is told about
+  -- (`M.notice_line`), because it is the one state a config line fixes.
+  return { set = face.set, source = face.why, unknown = face.glued == nil }
+end
+
+-- REMEMBER THE CHOICE (item 6, Victor 23/11): `icons = <set>` in this node's config file, the line
+-- `M.from_config` already reads - so the reader who types `/icons wa` once is not asked again at the next
+-- restart. The file is <config>/env (paths.config_file); this line is lowercase and is read by this module
+-- alone, which is why it cannot collide with a KEY=VALUE setting.
+function M.remember(set_name)
+  local set = M.valid(set_name)
+  if not set then return nil, "icons_unknown_set:" .. tostring(set_name) .. " (wa|nerd|unicode|ascii)" end
+  local ok, paths = pcall(dofile, "lua/core/paths.lua")
+  if not ok or type(paths) ~= "table" then return nil, "icons_no_config: lua/core/paths.lua could not be read" end
+  local file = paths.config_file()
+  local text = (host and host.read_file and host.read_file(file)) or ""
+  if type(text) ~= "string" then text = "" end
+  local lines, found = {}, false
+  for line in (text .. "\n"):gmatch("([^\n]*)\n") do
+    if line:match("^%s*icons%s*=") then
+      lines[#lines + 1] = "icons = " .. set
+      found = true
+    elseif not (line == "" and #lines == 0 and text == "") then
+      lines[#lines + 1] = line
+    end
+  end
+  while #lines > 0 and lines[#lines] == "" do table.remove(lines) end
+  if not found then lines[#lines + 1] = "icons = " .. set end
+  local written = table.concat(lines, "\n") .. "\n"
+  local wrote, problem = pcall(host.write_file, file, written)
+  if not wrote then return nil, "icons_cannot_write: " .. file .. ": " .. tostring(problem) end
+  return file
+end
+
+-- THE ONE LINE a reader is told when the set was chosen BY DEFAULT and the font could not be measured,
+-- and nil in every other case: an explicit choice (a config line, WA_ICONS, /icons) is a choice, and a
+-- face that WAS measured needs no advice. `unknown` is the resolver's own flag, never a guess here.
+M.NOTICE = "icons: %s (font unknown here). If your terminal has wa Icons: /icons wa"
+function M.notice_line(set_name, unknown)
+  if not unknown then return nil end
+  return string.format(M.NOTICE, tostring(set_name or "unicode"))
 end
 
 -- The set's own table. An unknown set is a named refusal here rather than a table of nils.
@@ -215,6 +271,59 @@ function M.glyph(name, set_name)
   local glyph = set[name]
   if glyph == nil then return nil, "icons_no_such_icon:" .. tostring(name) end
   return glyph, set.gap
+end
+
+-- ---- the ONE line that puts the font on the DRAWING machine (item 7, Victor 23/11) ---------------
+--
+-- A container cannot install a font for the terminal that DRAWS its output: the font has to land on the
+-- machine with the window, which may have no wa at all. So the release carries the font itself
+-- (waIcons-Regular.ttf, an asset of every node release - scripts/publish-node-binaries.sh), the same
+-- bytes as assets/fonts/waIcons-Regular.ttf, and it is covered by that release SIGNED SHA256SUMS (the
+-- vault release-signing key signs that list, and a release without a valid signature is never published).
+--
+-- AND ONLY WHEN THE ASSET EXISTS (Fable, 24/11): the running build knows from `release_fonts`, embedded by
+-- rust/wa-capabilities/build.rs from the presence of this tree's own assets/fonts/waIcons-Regular.ttf - the
+-- file the publisher refuses a release without - and from its own label, which names the tag the assets live
+-- under. A build that cannot stand behind the URL prints the REASON instead (M.FONT_ABSENT / M.NO_RELEASE),
+-- never a dead link.
+M.FONT_ASSET = "waIcons-Regular.ttf"
+M.FONT_REPO = "Magaav/wasm-agent"
+
+-- The tag a release's assets live under, from the label of the bytes that are running - or nil when that
+-- label is not a release. THREE SHAPES, and each exists in this tree's own words:
+--   * `node-<sha12>` - every node release (`scripts/lib/node-binaries.sh`, wa_node_release_tag); `installed.txt`
+--     records it as binary_release, so an installed node's label IS its release tag;
+--   * `vX.Y.Z[-pre]` - a product release tag (`wa release cut`). A TAGGED RELEASE'S ASSETS LIVE UNDER ITS OWN
+--     TAG, NOT under `node-<sha>`: the link must name the tag the release was published with, which is why this
+--     reads the label instead of re-deriving it;
+--   * `<sha>` / `<sha> (pinned)` - a dev build, or a commit an operator pinned. Neither was published, so
+--     there is no release to name and no link to print.
+function M.release_tag(label)
+  local text = tostring(label or "")
+  if text:match("%s+%([^%)]*%)") then return nil end
+  local sha = text:match("^node%-(%x%x%x%x%x%x%x%x%x%x%x%x)$")
+  if sha then return "node-" .. sha end
+  if text:match("^v%d+%.%d+%.%d+[%w%.%-]*$") then return text end
+  return nil
+end
+
+-- WHAT THE LINE DOWNLOADS, and from where: this build's own release - under its own tag, `node-<sha12>` or a
+-- product tag - at https://github.com/<repo>/releases/download/<tag>/waIcons-Regular.ttf, one font file, no
+-- installer, no shell pipeline and no token, listed in that release's SIGNED SHA256SUMS.
+--
+-- AND NOTHING WHEN IT CANNOT STAND: a link is printed only when the build's tree carries the font
+-- (`release_fonts`, embedded at build time - the publisher refuses a set without that file, so the two agree)
+-- AND the label names a release. Otherwise the reason is returned instead, never a dead URL.
+M.FONT_ABSENT = "font_absent: this build's tree has no %s, so its release ships no icon font and there is no link to print (a build cut before item 7 has none)"
+M.NO_RELEASE = "no_release: these bytes are not a release (label %s), so there is no release asset to name - install a node release, or copy assets/fonts/%s by hand"
+function M.fetch_line(label, opts)
+  opts = opts or {}
+  if opts.fonts ~= true then return nil, string.format(M.FONT_ABSENT, M.FONT_ASSET) end
+  local tag = M.release_tag(label)
+  if not tag then return nil, string.format(M.NO_RELEASE, tostring(label or ""), M.FONT_ASSET) end
+  return string.format(
+    "curl -fsSL https://github.com/%s/releases/download/%s/%s -o ~/.local/share/fonts/%s && fc-cache -f ~/.local/share/fonts",
+    M.FONT_REPO, tag, M.FONT_ASSET, M.FONT_ASSET), nil
 end
 
 -- The nine balls, in context_ball's order.

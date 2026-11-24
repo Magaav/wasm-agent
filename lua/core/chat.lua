@@ -528,6 +528,27 @@ function M.run(argv)
     -- layout); the opening needs the very same bytes for its last beat, and it needs them now, long
     -- before its 2 s are up - it holds on the turning cloud until they arrive, and skips the
     -- translation if they never do, which is a slower start's honest ending.
+    -- THE LINES UNDER THE BLOCK, BEFORE IT IS HANDED OVER (Victor, 23/11). The opening paints the block
+    -- this start wrote (`view:welcome_painted`), and a note added AFTER the hand-over is in the chat's
+    -- block but not in the animation's - one row of difference, and the star lands one row off.
+    local icons_notice = cli_view.icons_notice()
+    if icons_notice and icons_notice ~= "" then
+      -- Once at start, and only while the font cannot be measured here (item 6, Victor 23/11): a container
+      -- or an ssh session has no terminal in its ancestry, so wa says which glyphs it is drawing and the
+      -- one command that makes them ours. A config line silences it (`/icons wa` writes one).
+      view:note(cli_view.paint("  " .. icons_notice, "dim", view.live))
+    end
+    -- The reload source, said on the line under the banner as well as on the status bar: a reader who is
+    -- about to edit a command file needs to know that this session will pick the edit up, and from where.
+    -- Written ABOVE the hand-over for the same reason the icons notice is (Victor, 23/11): it is a line of
+    -- the block, and the block the opening paints is the block this start wrote.
+    if reload.status() then
+      -- A line of the welcome block, so it is drawn again with the block when the window changes width
+      -- (`METHODS:note`): printed straight to the terminal it was the same stale-width row the banner
+      -- rule was, one line quieter.
+      view:note(cli_view.paint("  \194\183 " .. reload.status() .. ": the UI and commands come from "
+        .. tostring(reload.root()), "warning", view.live))
+    end
     if opening and host.opening_header then
       local painted = view:welcome_painted()
       if painted then
@@ -536,15 +557,6 @@ function M.run(argv)
         local ok, handed = pcall(host.opening_header, json.encode({ lines = lines }))
         if not ok or handed == false then opening = false end
       end
-    end
-    -- The reload source, said on the line under the banner as well as on the status bar: a reader who is
-    -- about to edit a command file needs to know that this session will pick the edit up, and from where.
-    if reload.status() then
-      -- A line of the welcome block, so it is drawn again with the block when the window changes width
-      -- (`METHODS:note`): printed straight to the terminal it was the same stale-width row the banner
-      -- rule was, one line quieter.
-      view:note(cli_view.paint("  \194\183 " .. reload.status() .. ": the UI and commands come from "
-        .. tostring(reload.root()), "warning", view.live))
     end
   end
 
@@ -1205,10 +1217,31 @@ function M.run(argv)
         local set, source = view_lib.icon_set()
         ui.say("  icons " .. tostring(set) .. "  (" .. tostring(source) .. ")")
         ui.say("  choose: wa (wa Icons, glued), nerd, unicode, ascii")
+        -- THE FONT ON THE DRAWING MACHINE (item 7, Victor 23/11): while this window is not drawing wa Icons,
+        -- the one line that puts the font on the machine whose terminal shows these rows - a container cannot
+        -- install it for the window it is drawn in. Nothing is printed when no release can be named.
+        if tostring(set) ~= "wa" then
+          -- The link, or the reason it cannot stand (Fable, 24/11): `release_fonts` says whether the tree these
+          -- bytes were built from carries the font (the publisher refuses a release without it), and the label
+          -- says which release tag the assets live under - `node-<sha12>`, or a product tag. Neither, and the
+          -- reader is told why instead of being sent to a 404.
+          local icons_lib = dofile("lua/core/icons.lua")
+          local identity = dofile("lua/core/build_identity.lua").identity()
+          local line, why = icons_lib.fetch_line(identity.label, { fonts = identity.fonts })
+          if line then ui.say("  wa Icons on this machine: " .. line)
+          elseif why then ui.say("  " .. why) end
+        end
       else
         local chosen, why = view_lib.use_icons(asked)
         if not chosen then ui.say("  " .. tostring(why))
-        else ui.say("  icons " .. asked) end
+        else
+          -- REMEMBERED FOR THIS NODE'S USER (item 6, Victor 23/11): `icons = <set>` in the config file, so
+          -- a reader on a machine whose font cannot be measured types it once and every later start here
+          -- draws it - and stops saying why it could not tell.
+          local file, problem = dofile("lua/core/icons.lua").remember(asked)
+          if file then ui.say("  icons " .. asked .. "  (remembered in " .. file .. ")")
+          else ui.say("  icons " .. asked .. "  (this session only: " .. tostring(problem) .. ")") end
+        end
       end
     elseif line == "/stats" then
       local stats = memory.stats()

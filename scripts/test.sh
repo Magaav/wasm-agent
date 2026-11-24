@@ -2082,6 +2082,16 @@ gate_run env WA_BIN="$BIN" cargo test --release --offline --manifest-path rust/C
 # needs no glyph at all. The proof is a CELL count - the glued row must be exactly its gapped icons
 # narrower than the spaced one - because a table lookup cannot notice a character that costs a cell.
 WA_SCRIPT=scripts/test-icons.lua "$BIN" --db "$DB.icons" | grep "icons: ok"
+# THE UNKNOWN-FONT LINE AND THE REMEMBERED CHOICE (item 6, Victor 23/11), across TWO starts of the same
+# node in a real pty: on a tty whose font cannot be measured wa says the line once, `/icons wa` writes
+# `icons = wa` into this node's config file, and the next start neither repeats the line nor forgets the set.
+# It SKIPS by name when the gate hands it no binary.
+gate_run env WA_BIN="$BIN" cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-term --test icons
+# THE STOCK-FONT SET, MEASURED IN THE FONT FILES (item 7, Victor 23/11): every glyph of the unicode set is
+# East-Asian Narrow/Neutral, present in the machine's stock monospace faces, and exactly one cell wide in
+# each - read out of the fonts' own cmap and hmtx. A family that is not installed is NAMED as unmeasured,
+# never counted as a pass.
+gate_run python3 scripts/test-unicode-icons.py | grep "unicode-icons: ok"
 # WHICH face draws those icons in THIS terminal (item 5, Victor 21/11): the glued wa set only where
 # wa Icons really is the face, a window older than its config spaced, and an unknown terminal unicode.
 # The /proc walk runs across two REAL processes (a copy of the shell named foot), because that is where

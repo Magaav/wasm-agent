@@ -9,7 +9,16 @@
 //! - then the rest of the header, unchanged. This module is that sequence and nothing else: it owns no
 //! screen, no clock and no keys. `Opening::step` answers the bytes of the next frame and `Opening::delay` how long that
 //! frame is held; the host's reader thread - the one thread that owns the terminal and the keys -
-//! writes them, and ends the opening the moment a key arrives or the window changes size.
+//! writes them, and ends the opening the moment a key arrives. A window that changes size does not end
+//! it: the same sequence is retargeted onto the new screen (`Opening::resize`).
+//!
+//! WHERE THE STAR LANDS (Victor, 23/11: "it should collapse into the exact position it will be printed"):
+//! the last beat draws the welcome block on the rows the CHAT will draw it on, and the collapse falls
+//! into the star of that block's title line. The block is placed from the output region's last row - the
+//! host's `TerminalEditor::out_bottom`, the layout the input box and the status row are on, rows from the
+//! bottom - and it is laid out with the transcript's own `wrap_rows` and `expand_rule`, so a line that
+//! wraps wraps the same way here. The last frame of the alternate screen is therefore the first frame of
+//! the reader's own screen, cell for cell, and nothing moves when the animation ends.
 //!
 //! Why the frames are a function of a step counter and not of the wall clock: a reader thread that is
 //! descheduled must not make the animation skip into its end, and a test can walk the whole thing
@@ -19,6 +28,8 @@
 //! It runs on the ALTERNATE screen, and every write the chat makes is held while it does (the host's
 //! `terminal_editor::hold`). So what the reader ends up on is exactly the screen today's start writes
 //! - the same bytes, in the same order - with no glyph left over and no scrollback moved.
+
+use crate::transcript::{expand_rule, wrap_rows};
 
 /// How long the whole opening may take, keys aside. The sketch runs ~6 s on purpose; the CLI may not.
 pub const TOTAL_MS: u64 = 2000;
@@ -184,13 +195,22 @@ struct Point { u: (f32, f32, f32), v: f32, glyph: char }
 /// One lit cell of a supernova frame, before it is rounded onto the grid.
 struct Lit { row: f32, col: f32, z: f32, sgr: u16, ch: char }
 
-/// The header as the view painted it.
+/// The header as the view painted it, and as the chat's transcript will draw it at the window's width.
 struct Header {
-    /// The banner's lines, parsed into cells: line 0 is the rule, line 1 the star and the title.
-    lines: Vec<Vec<Cell>>,
+    /// The painted lines, exactly as the view handed them over: the rule still the MARKER (`\u{1}r\u{1}`),
+    /// which `transcript::expand_rule` turns into this frame's width - the expansion the chat's own
+    /// transcript does at draw time, so a resize follows the window on both screens.
+    painted: Vec<String>,
+    /// The rows the transcript draws for the block at this width, in order: `wrap_rows` may turn one
+    /// painted line into several, and the block's height (which the star's cell is measured from) is the
+    /// number of THESE, not of the painted lines.
+    rows: Vec<Row>,
     /// For each cell of line 1, the alien glyph to show until that cell is decoded (`None`: not a letter).
     alien: Vec<Option<char>>,
 }
+
+/// One row of the block as the chat draws it: `wrap_rows` may split one painted line into several.
+struct Row { line: usize, first: bool, cells: Vec<Cell> }
 
 pub struct Opening {
     width: usize,
@@ -212,6 +232,14 @@ pub struct Opening {
     t: f32,
     step: usize,
     header: Option<Header>,
+    /// The 0-based row of the chat's output region's last row: where it prints the block's LAST line, and
+    /// so the row every other line of the block - and the star the collapse falls into - is placed from.
+    /// The host sets it from `TerminalEditor::out_bottom`, the layout the input box and the status row are
+    /// on (rows from the bottom), when the block arrives and again on every resize. A screen with no box
+    /// ends its output on its last row, which is the default.
+    region_bottom: usize,
+    /// The next frame must blank the screen first: a resize leaves the old width's cells behind.
+    repaint: bool,
     finished: bool,
 }
 
@@ -248,7 +276,7 @@ impl Opening {
         }).collect();
         Opening { width, height, palette, pool, grid: vec![Cell::default(); width * height],
             shown: vec![Cell::default(); width * height], rain, points, ring, cam: ring * 3.2, centre, rot: 0.0, rng, t: 0.0, step: 0,
-            header: None, finished: false }
+            header: None, region_bottom: height - 1, repaint: false, finished: false }
     }
 
     pub fn width(&self) -> usize { self.width }
@@ -259,21 +287,93 @@ impl Opening {
     /// translate, so a slow start does not lengthen the opening - the star lands in its cell, the
     /// screen comes back, and the header is simply there, exactly as a start today writes it.
     pub fn header(&mut self, lines: &[String]) {
+        self.header = Some(Header { painted: lines.to_vec(), rows: Vec::new(), alien: Vec::new() });
+        self.relayout();
+    }
+
+    /// Lay the block out the way the chat's transcript WILL lay it out: `wrap_rows` and `expand_rule` are
+    /// its own functions, not copies, so a line that wraps there wraps here, on the same row and with the
+    /// same continuation. The block's height follows, and the star's cell with it. Called when the block
+    /// arrives and on every resize, because both the width and the block are the chat's.
+    fn relayout(&mut self) {
+        let Some(header) = self.header.take() else { return };
         let mut palette = std::mem::take(&mut self.palette);
-        let mut parsed: Vec<Vec<Cell>> = lines.iter().map(|line| parse(line, &mut palette)).collect();
-        for row in parsed.iter_mut() { row.truncate(self.width); }
+        let mut rows = Vec::new();
         let mut letters = Vec::new();
-        if let Some(title) = parsed.get(1) {
-            for (index, cell) in title.iter().enumerate() {
-                // The star and the one space after it are not a word: the title starts at cell 2.
-                letters.push(if index < 2 { None } else { alien(cell.ch) });
+        for (line, painted) in header.painted.iter().enumerate() {
+            let expanded = expand_rule(painted, self.width);
+            for (index, row) in wrap_rows(&expanded, self.width).iter().enumerate() {
+                let mut cells = parse(row, &mut palette);
+                cells.truncate(self.width);
+                if line == 1 && index == 0 {
+                    for (column, cell) in cells.iter().enumerate() {
+                        // The star and the one space after it are not a word: the title starts at cell 2.
+                        letters.push(if column < 2 { None } else { alien(cell.ch) });
+                    }
+                }
+                rows.push(Row { line, first: index == 0, cells });
             }
         }
         self.palette = palette;
-        self.header = Some(Header { lines: parsed, alien: letters });
+        self.header = Some(Header { rows, alien: letters, ..header });
     }
 
-    fn lines(&self) -> usize { self.header.as_ref().map(|header| header.lines.len()).unwrap_or(0) }
+    fn lines(&self) -> usize { self.header.as_ref().map(|header| header.painted.len()).unwrap_or(0) }
+    fn rows(&self) -> usize { self.header.as_ref().map(|header| header.rows.len()).unwrap_or(0) }
+
+    /// The row a block of `rows` lines starts on when its LAST line is the output region's last row.
+    fn top_of(&self, rows: usize) -> usize {
+        let bottom = self.region_bottom.min(self.height.saturating_sub(1));
+        bottom.saturating_sub(rows.saturating_sub(1))
+    }
+
+    /// The row the block's first line is drawn on. The chat prints the block's last line on its output
+    /// region's last row and the rest above it, so the block is placed from there: the last frame of the
+    /// opening puts a line on the row the chat's first frame puts it on.
+    fn block_top(&self) -> usize { self.top_of(self.rows()) }
+
+    /// The cell the welcome line's star is printed in on the chat's first frame: the block's second line
+    /// (the title), column 0. The collapse falls into it and the landing frames leave the star in it, so
+    /// the block's own star - the same glyph, the same matrix green - is drawn over the same cell and the
+    /// reader's eye has nothing to follow.
+    ///
+    /// Without a block there is no cell to land in. The star then lands where it landed before this (row
+    /// 1), which a real start never reaches: the view hands the block over long before the collapse, and
+    /// only a start that never composed one - a slow start's honest ending - arrives here.
+    pub fn star_cell(&self) -> (usize, usize) {
+        if self.header.is_none() { return (if self.height > 1 { 1 } else { 0 }, 0); }
+        ((self.block_top() + 1).min(self.height.saturating_sub(1)), 0)
+    }
+
+    /// Where the chat's output region ends, as a 0-based row: the host's `TerminalEditor::out_bottom`,
+    /// one less. The block hangs from it, so this is the ONE number that decides where the star lands.
+    pub fn region_bottom(&mut self, row: usize) { self.region_bottom = row.min(self.height.saturating_sub(1)); }
+
+    /// The window changed size while the opening plays: the same sequence on a new screen. The rain is
+    /// re-drawn on the new grid, the cloud re-centred, and the block laid out again at the new width - so
+    /// the star's cell is the cell the chat will print it in at THIS size.
+    pub fn resize(&mut self, width: usize, height: usize) {
+        let width = width.max(1);
+        let height = height.max(1);
+        if width == self.width && height == self.height { return; }
+        self.width = width;
+        self.height = height;
+        self.grid = vec![Cell::default(); width * height];
+        self.shown = vec![Cell::default(); width * height];
+        self.rain = Rain { age: vec![None; width * height], glyph: vec![' '; width * height],
+            heads: vec![None; width] };
+        for head in self.rain.heads.iter_mut() {
+            *head = if self.rng.unit() < 0.35 {
+                Some(Head { y: -6.0 * self.rng.unit(), speed: 0.6 + 0.9 * self.rng.unit() })
+            } else { None };
+        }
+        self.ring = (width as f32 * 0.20).min(height as f32 * 0.72);
+        self.centre = (height as f32 / 2.0, width as f32 / 2.0);
+        self.cam = self.ring * 3.2;
+        self.region_bottom = height - 1;
+        self.repaint = true;
+        self.relayout();
+    }
     fn title_cells(&self) -> usize { self.header.as_ref().map(|header| header.alien.len().saturating_sub(2)).unwrap_or(0) }
     fn acts(&self) -> usize { RAIN_FRAMES + IGNITE_FRAMES + NOVA_FRAMES + HANG_FRAMES + COLLAPSE_FRAMES + LAND_FRAMES }
 
@@ -354,8 +454,9 @@ impl Opening {
     /// cell, and the star landing.
     fn act_frame(&mut self, index: usize) {
         for cell in self.grid.iter_mut() { *cell = Cell::default(); }
-        // The header's star sits on row 1, column 0: the sketch's STAR_Y, STAR_X.
-        let star = (if self.height > 1 { 1 } else { 0 }, 0);
+        // The star sits where the chat will print it: the welcome line's star cell, from the block's own
+        // layout (`star_cell`) - the sketch's STAR_Y, STAR_X, now the reader's own screen.
+        let star = self.star_cell();
         if index < RAIN_FRAMES {
             self.rain_step(0.10);
             self.draw_rain(0.0);
@@ -587,16 +688,21 @@ impl Opening {
 
     // ---- the header --------------------------------------------------------------------------
 
-    /// `k` cells of the title are translated, the next `flicker` are being decoded, and `lines` lines of
-    /// the block are on the screen.
-    fn draw_header(&mut self, k: usize, flicker: usize, lines: usize) {
+    /// `k` cells of the title are translated, the next `flicker` are being decoded, and `shown` painted
+    /// lines of the block are on the screen - with every continuation row of a line that wraps.
+    ///
+    /// The block is drawn where the chat draws it (`top_of`), on the rows the transcript wraps it into, so
+    /// the last frame of the alternate screen and the first frame of the reader's own screen are one
+    /// picture: the rule, the green star, the title and the lines under it, on the same cells.
+    fn draw_header(&mut self, k: usize, flicker: usize, shown: usize) {
         let Some(header) = self.header.take() else { return };
-        for (row, cells) in header.lines.iter().enumerate() {
-            if row >= lines || row >= self.height { break; }
-            for (column, cell) in cells.iter().enumerate() {
-                if column >= self.width { break; }
+        let top = self.top_of(header.rows.len());
+        for (offset, row) in header.rows.iter().enumerate() {
+            if row.line >= shown { continue; }
+            let y = top + offset;
+            for (column, cell) in row.cells.iter().enumerate() {
                 let mut cell = *cell;
-                if row == 1 && column >= 2 {
+                if row.line == 1 && row.first && column >= 2 {
                     let index = column - 2;
                     if let Some(glyph) = header.alien.get(column).copied().flatten() {
                         if index >= k + flicker {
@@ -609,7 +715,7 @@ impl Opening {
                         }
                     }
                 }
-                self.put(row, column, cell.ch, cell.sgr);
+                self.put(y, column, cell.ch, cell.sgr);
             }
         }
         self.header = Some(header);
@@ -626,6 +732,9 @@ impl Opening {
     /// own SGR. A frame that changes nothing writes nothing.
     fn render(&mut self) -> String {
         let mut out = String::new();
+        // A resize leaves the old width's cells on the alternate screen; blanking it is the one thing only
+        // this side knows is needed, and it happens INSIDE the frame, before anything is drawn on it.
+        if self.repaint { out.push_str("\x1b[2J"); self.repaint = false; }
         for row in 0..self.height {
             let mut column = 0;
             while column < self.width {
@@ -856,12 +965,17 @@ mod tests {
             previous = now;
         }
         assert!(previous < 10, "and it ends a point, in the star's cell: {previous} columns wide");
+        let (row, column) = opening.star_cell();
         let mut landed = false;
         for _ in 0..LAND_FRAMES {
             opening.step();
-            if opening.text()[1].starts_with('\u{273b}') { landed = true; }
+            if opening.text()[row].chars().nth(column) == Some('\u{273b}') { landed = true; }
         }
-        assert!(landed, "then the star lands in that cell: {:?}", opening.text()[1]);
+        assert!(landed, "then the star lands in that cell, over the frames it cools in: {:?}", opening.text()[row]);
+        // One frame more is the last of the three landing frames - white, the trail's bright green, then the
+        // matrix green - and it is the frame the block's own star is drawn over.
+        opening.step();
+        assert_eq!(opening.sgr_at(row, column), matrix(), "and it rests in the matrix green the block's own star wears");
     }
 
     #[test]
@@ -871,12 +985,19 @@ mod tests {
         let frames = run_all(&mut opening);
         assert_eq!(frames, opening.frames(), "every frame the plan promised was drawn");
         let screen = opening.text();
-        assert_eq!(screen[0], "\u{2500}".repeat(40), "the rule, at its own width");
-        assert!(screen[1].starts_with("\u{273b} Welcome to wasm-agent! v0.1.0 \u{b7} v23791f56"),
-            "the title is translated back: {:?}", screen[1]);
-        assert_eq!(opening.sgr_at(1, 0), matrix(), "and its star is the matrix green");
-        assert!(screen[3].starts_with("/help for help"), "the rest of the block follows: {:?}", screen[3]);
-        assert!(screen[5].starts_with("cwd: "), "line by line: {:?}", screen[5]);
+        // The block hangs from the output region's last row - a 24-row screen with no box ends it on row
+        // 23, the default - so its last line is ON that row and the rest above it, where the chat's first
+        // frame puts them. Six painted lines, none of them wider than the window: six rows.
+        let top = 23 - 5;
+        assert_eq!(screen[top], "\u{2500}".repeat(40), "the rule, at its own width");
+        assert!(screen[top + 1].starts_with("\u{273b} Welcome to wasm-agent! v0.1.0 \u{b7} v23791f56"),
+            "the title is translated back: {:?}", screen[top + 1]);
+        let (row, column) = opening.star_cell();
+        assert_eq!((row, column), (top + 1, 0), "the block's star is the cell the collapse fell into");
+        assert_eq!(opening.sgr_at(row, column), matrix(), "and it is the matrix green");
+        assert!(screen[top + 3].starts_with("/help for help"), "the rest of the block follows: {:?}", screen[top + 3]);
+        assert!(screen[top + 5].starts_with("cwd: "), "line by line: {:?}", screen[top + 5]);
+        assert_eq!(top + 5, 23, "and its last line is the region's last row, not the screen's top");
     }
 
     #[test]
@@ -886,7 +1007,8 @@ mod tests {
         for _ in 0..opening.acts() { opening.step(); }
         opening.step();
         let screen = opening.text();
-        let row = &screen[1];
+        let (star, _) = opening.star_cell();
+        let row = &screen[star];
         assert_eq!(row.chars().count(), 43, "the title keeps its cells: {row:?}");
         assert!(row.contains(ALIEN[22]), "'w' is its alien glyph at the start: {row:?}");
         assert!(!row.contains("Welcome"), "nothing is decoded yet: {row:?}");
@@ -901,7 +1023,8 @@ mod tests {
         // One beat of the translation moves the title row and nothing else.
         let next = opening.step().expect("a translated frame");
         assert!(next.len() < 400, "one row of a title, not a screenful: {} bytes", next.len());
-        assert!(!next.contains("\x1b[1;1H"), "the rule did not move");
+        let rule_row = format!("\x1b[{};1H", opening.star_cell().0);
+        assert!(!next.contains(&rule_row), "the rule did not move");
     }
 
     #[test]
@@ -934,6 +1057,61 @@ mod tests {
     }
 
     #[test]
+    fn the_star_lands_in_the_cell_the_block_prints_it_in() {
+        // The whole of Victor's 23/11 remark, as one assertion per size: the supernova falls into the cell
+        // the welcome line's star is printed in, and the block is on the rows the chat's first frame draws
+        // it on - its LAST line on the output region's last row, which is the number the host hands over.
+        for (width, height) in [(80usize, 24usize), (120, 40), (200, 60)] {
+            let mut opening = Opening::new(width, height, 21);
+            let bottom = height - 4; // the chat's output region with the input box under it
+            opening.region_bottom(bottom);
+            // A block whose model line is longer than a narrow window: it WRAPS, and the block's height -
+            // and so the star's row - has to follow the wrap, not the number of painted lines.
+            let mut painted = header();
+            painted[5] = format!("model: {}", "reasoning high \u{b7} ".repeat(width / 10));
+            opening.header(&painted);
+            assert_eq!(opening.block_top() + opening.rows(), bottom + 1,
+                "the block's last line is the output region's last row at {width}x{height}");
+            let (row, column) = opening.star_cell();
+            assert_eq!(column, 0, "the star is the first cell of its line");
+            assert_eq!(row, opening.block_top() + 1, "and it is on the block's second line (the title)");
+            for _ in 0..opening.acts() - LAND_FRAMES { opening.step(); }
+            for _ in 0..LAND_FRAMES {
+                opening.step();
+                assert_eq!(opening.text()[row].chars().nth(column), Some('\u{273b}'),
+                    "the star lands in the title's cell at {width}x{height}: {:?}", opening.text()[row]);
+            }
+            // The landing cools from white to the trail's bright green to the matrix green, and the last of
+            // those THREE frames is the one the block then draws its star over: same glyph, same colour.
+            assert_eq!(opening.sgr_at(row, column), matrix(), "the landing rests in the matrix green");
+            // And the block then draws the same glyph, in the same colour, over the same cell.
+            run_all(&mut opening);
+            assert_eq!(opening.text()[row].chars().nth(column), Some('\u{273b}'),
+                "the block's own star is the star that landed at {width}x{height}");
+            assert_eq!(opening.sgr_at(row, column), matrix(), "in the same matrix green");
+        }
+    }
+
+    #[test]
+    fn a_resize_retargets_the_star_and_re_lays_the_block() {
+        // A window that changes size while the opening plays: the same block, wrapped at the new width,
+        // ending on the new output region's last row - so the star's cell is the cell the chat will use at
+        // THAT size, not the one it was composed at.
+        let mut opening = Opening::new(120, 40, 22);
+        opening.region_bottom(36);
+        opening.header(&header());
+        let before = opening.star_cell();
+        opening.resize(80, 24);
+        opening.region_bottom(20);
+        let after = opening.star_cell();
+        assert_ne!(before, after, "the star followed the window: {before:?} then {after:?}");
+        assert_eq!(opening.block_top() + opening.rows(), 21, "the block ends on the new region's last row");
+        assert_eq!(after, (opening.block_top() + 1, 0));
+        run_all(&mut opening);
+        assert_eq!(opening.text()[after.0].chars().nth(after.1), Some('\u{273b}'));
+    }
+
+    #[test]
     fn the_header_arriving_late_still_gets_translated() {
         // The view composes the banner after the opening has started (it needs the model and the
         // session). The frames that ran before it arrived cost only their own beats.
@@ -941,6 +1119,7 @@ mod tests {
         for _ in 0..RAIN_FRAMES { opening.step(); }
         opening.header(&header());
         assert!(run_all(&mut opening) + RAIN_FRAMES > opening.acts());
-        assert!(opening.text()[1].contains("Welcome to wasm-agent!"));
+        let (star, _) = opening.star_cell();
+        assert!(opening.text()[star].contains("Welcome to wasm-agent!"));
     }
 }

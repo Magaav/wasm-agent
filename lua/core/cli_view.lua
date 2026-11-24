@@ -353,7 +353,9 @@ function M.use_icons(name)
   BALLS = {}
   for index = 2, 9 do BALLS[index - 1] = nine[index] end
   M.GAP, M.GLYPH, M.BALLS = GAP, GLYPH, BALLS
-  active = { set = icons.valid(name), source = "use_icons" }
+  -- An explicit choice is not an unknown font: the reader picked this set, so the start-up advice about
+  -- the font has nothing left to say (item 6, Victor 23/11).
+  active = { set = icons.valid(name), source = "use_icons", unknown = false }
   return true
 end
 
@@ -366,6 +368,14 @@ assert(M.use_icons(active.set))
 -- tells an operator WHY this window draws what it draws - which face wa found, and when the window
 -- started. The resolved source is put back here, and /icons <set> keeps saying what the operator did.
 active.source = resolved.source
+active.unknown = resolved.unknown
+
+-- The line this CLI says ONCE at start when the icon set was chosen by default and the font this terminal
+-- draws with cannot be measured here (a container, an ssh session) - and "" in every other case. The words
+-- live beside the sets they are about (`lua/core/icons.lua` M.NOTICE).
+function M.icons_notice()
+  return icons.notice_line(active.set, active.unknown) or ""
+end
 
 
 -- ONE function decides which ball a context percentage wears: five bands, each starting at its own
@@ -2348,12 +2358,23 @@ function METHODS:welcome_painted()
   if not stored then return nil end
   local opts = {}
   for key, value in pairs(stored) do opts[key] = value end
-  if self:transcript() then
-    opts.marker, opts.limit = true, 1000000
-    return M.expand_rules(M.banner(opts), self.limit)
-  end
-  opts.limit = self.limit
-  return M.banner(opts)
+  -- THE RULE STAYS A MARKER (Victor, 23/11: the star must land where the chat prints it). The opening
+  -- draws this block on the alternate screen and the chat draws it again behind it, and a rule is its
+  -- width: only the renderer that knows the width can expand it. For the opening that renderer is
+  -- `rust/wa-term/src/transcript.rs`'s `expand_rule` - the transcript's own, at the width the opening is
+  -- drawing at, so a window resized DURING the opening gets a rule of the new width and a block of the new
+  -- height. Expanded here it was pinned at the width it was painted at, and a narrowed window then laid
+  -- the opening's block out one row taller than the chat's - the star missed its cell by that row.
+  if self:transcript() then opts.marker, opts.limit = true, 1000000
+  else opts.limit = self.limit end
+  local block = M.banner(opts)
+  -- THE NOTES GO WITH IT (Victor, 23/11). `render_welcome` writes the lines a note adds INSIDE the block's
+  -- own frame, so a hand-over that left them out handed the opening a block one or two rows shorter than
+  -- the one the chat draws - and the star it collapsed into was exactly that many rows off the cell the
+  -- chat prints it in. This is also why the notes are written BEFORE the block is handed over (chat.lua).
+  local notes = self.welcome_notes or {}
+  if #notes > 0 then block = block .. "\n" .. table.concat(notes, "\n") end
+  return block
 end
 
 -- A line of the welcome block that is not the box itself: what this CLI is running from, said under

@@ -107,6 +107,12 @@ cp "$ROOT/scripts/lib/shared-commit.sh" "$fixture/scripts/lib/"
 # that is really a missing file - measured on change/release-glibc alone, 18/11, where this row was red.
 cp "$ROOT/scripts/lib/glibc-floor.sh" "$fixture/scripts/lib/"
 cp "$ROOT/scripts/publish-node-binaries.sh" "$ROOT/scripts/publish-lua-tree.sh" "$fixture/scripts/"
+# THE FONT THE RELEASE CARRIES (item 7, Victor 23/11). The publisher copies assets/fonts/waIcons-Regular.ttf
+# beside the binaries and lists it in the signed SHA256SUMS, so a fixture without it is refused with
+# font_missing - a mirror of the requirements, not a loosening: the real tree always has this file, and the
+# release must carry it or `/icons` would print a URL that 404s.
+mkdir -p "$fixture/assets/fonts"
+cp "$ROOT/assets/fonts/waIcons-Regular.ttf" "$fixture/assets/fonts/"
 cp "$ROOT/scripts/check-disk-floor.sh" "$fixture/scripts/"
 printf 'return {}\n' > "$fixture/lua/core/init.lua"
 printf 'return {}\n' > "$fixture/lua/core/agent.lua"

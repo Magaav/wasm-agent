@@ -114,6 +114,9 @@ function M.identity(opts)
     commit = trim((native or {}).commit) ~= "" and trim((native or {}).commit) or "unknown",
     dirty = trim((native or {}).dirty) ~= "" and trim((native or {}).dirty) or "unknown",
     known = known and true or false,
+    -- Does the tree these bytes were built from carry wa Icons (item 7)? A binary older than the field says
+    -- nil, and nil is NOT a yes: `/icons` prints its "no font in this release" line rather than a link.
+    fonts = (native or {}).release_fonts == true,
     source = classify(label, known),
     -- The crate's version, for a script that wants a number, or "" when the binary did not state one.
     -- It used to fall back to the literal 0.1.0 - the invented version this module exists to stop - so a

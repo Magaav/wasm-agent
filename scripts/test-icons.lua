@@ -51,11 +51,86 @@ for _, set_name in ipairs(icons.SETS) do
   end
 end
 
--- THE A2 DECISION, as a test: wa Icons is GLUED (no gap); every other set keeps the one space.
+-- THE LAYOUT, set by set (item 7, Victor 23/11): wa Icons is GLUED, and so is the unicode set now - "a
+-- terminal without our font looks the same except for the glyph shapes". nerd keeps its one space (19/11:
+-- that face draws its glyphs WIDER than their cell, so gluing them collides with the value), and ascii's
+-- glyphs are words, which carry their own separator.
 eq(icons.set("wa").gap, "", "wa is glued: the value starts in the icon's own cell")
-for _, set_name in ipairs({ "nerd", "unicode", "ascii" }) do
-  eq(icons.set(set_name).gap, " ", set_name .. " keeps the one space Victor chose for plain fonts")
+eq(icons.set("unicode").gap, "", "unicode is glued too: the no-font row has the SAME layout as ours")
+for _, set_name in ipairs({ "nerd", "ascii" }) do
+  eq(icons.set(set_name).gap, " ", set_name .. " keeps the space its own glyphs need")
 end
+
+-- EVERY GLYPH OF THE STOCK SET IS ONE OF THE MEASURED ONES (item 7). The characters below are what
+-- scripts/test-unicode-icons.py measured one cell wide in this node's stock monospace faces, and what the
+-- Unicode East-Asian-Width table calls Narrow or Neutral; a glyph swapped in without that measurement
+-- fails here, by name - this row cannot open a font file from Lua.
+local MEASURED_NARROW = { ["~"] = true, ["#"] = true, ["="] = true, ["+"] = true,
+  ["\226\128\186"] = true,  -- U+203A
+  ["\226\150\171"] = true,  -- U+25AB
+  ["\226\151\166"] = true,  -- U+25E6
+  ["\226\151\148"] = true,  -- U+25D4
+  ["\226\151\149"] = true,  -- U+25D5
+  ["\226\150\170"] = true,  -- U+25AA
+}
+for _, icon in ipairs(NAMES) do
+  local glyph = icons.set("unicode")[icon]
+  ok(MEASURED_NARROW[glyph] == true,
+    "unicode." .. icon .. " is a glyph measured one cell wide in the stock faces (" .. tostring(glyph) .. ")")
+end
+
+-- THE FONT ON THE DRAWING MACHINE (item 7): ONE line, from THIS build's own release - and it is printed only
+-- when the release asset can stand behind it (Fable, 24/11): the build embeds whether its tree carries the font
+-- (rust/wa-capabilities/build.rs RELEASE_FONTS, which the publisher's own font_missing refusal mirrors), and the
+-- label names the tag the assets live under.
+local function fetch_box(label, fonts) return icons.fetch_line(label, { fonts = fonts }) end
+
+local node_link, node_why = fetch_box("node-0123456789ab", true)
+ok(type(node_link) == "string" and node_link:find(
+  "https://github.com/Magaav/wasm-agent/releases/download/node-0123456789ab/waIcons-Regular.ttf", 1, true) ~= nil,
+  "a node release's link names that release's tag: " .. tostring(node_link))
+ok(node_why == nil, "and needs no reason")
+ok(type(node_link) == "string" and node_link:find("curl -fsSL", 1, true) == 1 and node_link:find("fc-cache", 1, true) ~= nil,
+  "with curl and the font cache rebuild, and nothing else: " .. tostring(node_link))
+
+-- A TAGGED RELEASE uses ITS OWN tag - its assets live under it, not under node-<sha> (Fable, 24/11).
+local tagged = fetch_box("v0.1.2", true)
+ok(type(tagged) == "string" and tagged:find(
+  "https://github.com/Magaav/wasm-agent/releases/download/v0.1.2/waIcons-Regular.ttf", 1, true) ~= nil,
+  "a product release's link uses its own tag: " .. tostring(tagged))
+ok(type(fetch_box("v0.1.3-rc.1", true)) == "string", "and so does a pre-release tag")
+eq(icons.release_tag("node-0123456789ab"), "node-0123456789ab", "a node tag is read back as itself")
+eq(icons.release_tag("v0.1.2"), "v0.1.2", "a product tag is read back as itself")
+eq(icons.release_tag("d0e345a1"), nil, "a commit label is not a release")
+eq(icons.release_tag("d0e345a1 (pinned)"), nil, "and a pinned commit is not one either")
+
+-- A BUILD WHOSE RELEASE HAS NO FONT prints the reason, never a dead link (Fable, 24/11: text 5's reason).
+local absent, absent_why = fetch_box("node-0123456789ab", false)
+eq(absent, nil, "no link when the tree carries no font, however release-like the label is")
+ok(type(absent_why) == "string" and absent_why:find("font_absent:", 1, true) == 1,
+  "the reason is said instead: " .. tostring(absent_why))
+eq(fetch_box("node-0123456789ab", nil), nil, "and an unknown answer is not a yes")
+local dev, dev_why = fetch_box("d0e345a1", true)
+eq(dev, nil, "a dev commit names no release")
+ok(type(dev_why) == "string" and dev_why:find("no_release:", 1, true) == 1,
+  "and says so: " .. tostring(dev_why))
+
+-- THIS TREE REALLY CARRIES THE FONT, and its build says so: the two facts that make the link stand on a
+-- release. The row reads the file itself, so deleting it fails here rather than in a 404 months later.
+local wanted = ((type(host) == "table") and host.getenv and host.getenv("WASM_AGENT_LUA_ROOT")) or "."
+-- `host.read_file` answers TEXT only (a font is refused as read_file_not_text), so the file is asked about the
+-- way a shell asks: `test -s`. A row that cannot ask refuses, never passes.
+local jlib = dofile("lua/vendor/json.lua")
+local asked, raw = pcall(host.exec, "test -s " .. wanted .. "/assets/fonts/waIcons-Regular.ttf", "", 10)
+local font_code
+do
+  local decoded = nil
+  if asked and type(raw) == "string" then local d, value = pcall(jlib.decode, raw); if d then decoded = value end end
+  font_code = type(decoded) == "table" and tonumber(decoded.code) or nil
+end
+ok(font_code == 0, "this tree carries assets/fonts/waIcons-Regular.ttf (test -s answered " .. tostring(font_code) .. ")")
+local identity = dofile("lua/core/build_identity.lua").identity()
+ok(identity.fonts == true, "and the running binary's build says its tree carries it (release_fonts)")
 
 -- Nine states in every set that has a ball (the brief keeps all nine in wa/nerd/unicode).
 for _, set_name in ipairs({ "wa", "nerd", "unicode" }) do
@@ -238,8 +313,8 @@ ok(tostring(older.source):find("NERD", 1, true) == nil and tostring(older.source
 
 -- (c) a terminal nobody can identify: the unicode set, never the glued one.
 local blind = resolved_face(NO_TERMINAL, FOOT_INI)
-eq(blind.set, "unicode", "a terminal that cannot be identified gets the SPACED unicode set")
-eq(icons.set(blind.set).gap, " ", "and it is spaced")
+eq(blind.set, "unicode", "a terminal that cannot be identified gets the stock-font unicode set")
+eq(icons.set(blind.set).gap, "", "and it is GLUED like wa (item 7): one layout, so the no-font row looks the same")
 ok(tostring(blind.source):find("ancestry", 1, true) ~= nil,
   "and says what it could not see: " .. tostring(blind.source))
 
@@ -295,6 +370,65 @@ eq(select(1, view_lib.icon_set()), "unicode", "cli_view reports the set it is dr
 
 -- Put the process back the way it was found, so a later row in the same interpreter is unaffected.
 view_lib.use_icons("nerd")
+
+-- ---- item 6: the unknown font, the one line, and the remembered choice -------------------
+--
+-- Victor, 23/11: on a tty where the font cannot be known (a container, an ssh session) wa says so ONCE and
+-- names the command that fixes it, and `/icons wa` is remembered for this node's user, so it is typed once.
+-- The measured premise (lua/core/icons.lua:183 resolve, :198): with no setup record the resolver answered
+-- "unicode" and the terminal-face check was never reached. Both halves are held here - the face IS asked,
+-- and its answer says whether it could tell.
+
+-- (a) A machine with no terminal in its ancestry: the face cannot be measured, so the set is the stock
+-- glyphs AND the resolver says it could not tell - which is exactly what the start-up line is for.
+local blind = icons.resolve(nil, { record = {},
+  face = { observation = { terminal = nil, seen = { "bash", "sshd" }, stats = {} } } })
+eq(blind.set, "unicode", "an unmeasurable terminal still gets the stock glyphs")
+eq(blind.unknown, true, "and the resolver says the font could not be known here")
+eq(icons.notice_line(blind.set, blind.unknown),
+  "icons: unicode (font unknown here). If your terminal has wa Icons: /icons wa",
+  "the ONE line the start says: which set draws, why, and the command that makes it ours")
+-- (b) A face that WAS measured says nothing: advice about an unknown font would be false there.
+eq(icons.notice_line("nerd", false), nil, "a measured face gets no notice")
+eq(icons.notice_line("unicode", false), nil, "and neither does a set the reader chose")
+-- (c) An explicit /icons is not an unknown font.
+view_lib.use_icons("unicode")
+eq(view_lib.icons_notice(), "", "an explicit set silences the line")
+-- (d) The choice is REMEMBERED: `icons = <set>` in this node's config file, read back by the same reader that
+-- decides the default. The row refuses the operator's own home, like every row that writes.
+do
+  local home = (host.getenv("WASM_AGENT_HOME") or ""):gsub("\\\\", "/"):gsub("/+$", "")
+  local operator = ((host.getenv("HOME") or "") .. "/.wasm-agent"):gsub("\\\\", "/"):gsub("/+$", "")
+  if home == "" or home:lower() == operator:lower() then
+    ok(false, "refusing to write a config line in the operator's own home (" .. home .. ")")
+  else
+    local file, why = icons.remember("wa")
+    ok(file ~= nil, "the choice is written to a config file: " .. tostring(file or why))
+    eq(icons.from_config(host.read_file(file or "")), "wa",
+      "and the reader that decides the default reads it back")
+    -- A restart: no session choice, no record, no measurable font - the config line alone decides.
+    local env_choice = (host.getenv("WA_ICONS") or ""):gsub("%s", "")
+    local resumed = icons.resolve(nil, { record = {},
+      face = { observation = { terminal = nil, seen = {}, stats = {} } } })
+    if env_choice == "" then
+      eq(resumed.set, "wa", "a restart draws wa: the config line decides before the font is asked")
+      ok(tostring(resumed.source):find("config", 1, true) ~= nil,
+        "and says where that came from: " .. tostring(resumed.source))
+    else
+      ok(false, "WA_ICONS is set in this environment, so this row cannot say the config line decided (" .. env_choice .. ")")
+    end
+    ok(not resumed.unknown, "a remembered choice is not an unknown font, so no notice is due")
+    -- Written twice, the line is REPLACED rather than repeated: a config that grows a line per /icons is a
+    -- file nobody can read in a month.
+    icons.remember("nerd")
+    local text = host.read_file(file or "") or ""
+    local seen = 0
+    for line in text:gmatch("[^\n]+") do if line:match("^%s*icons%s*=") then seen = seen + 1 end end
+    eq(seen, 1, "the config file holds ONE icons line however many times it was set")
+    eq(icons.from_config(text), "nerd", "and it is the last one chosen")
+    icons.remember("wa")
+  end
+end
 
 print(string.format("icons: %s (%d checks, %d failed, 0 skipped)",
   failed == 0 and "ok" or "FAILED", checks, failed))

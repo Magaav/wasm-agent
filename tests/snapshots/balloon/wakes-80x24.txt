@@ -1,5 +1,5 @@
-row 23 (status bar): ↻ 0 Σ↑0 Σ↓0
+row 23 (status bar): #0 Σ↑0 Σ↓0
 row 22 (wake row):  (no row - the chat keeps it)
 
-row 23 (status bar): ↻ 0 Σ↑0 Σ↓0
+row 23 (status bar): #0 Σ↑0 Σ↓0
 row 22 (wake row):  ⏰ 1 wake · next 11:55

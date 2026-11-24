@@ -206,15 +206,18 @@ files="$(git --git-dir="$WORK/dropbox.git" ls-tree -r --name-only "$readback" | 
 # the set too - the shipped PUBLISH.sh names it, and measured 13/11 the ref held PUBLISH.sh, the manifest
 # and the payloads while that line asked for a file the commit did not hold: a publish that fails on a
 # missing file, after a human was told to paste it. Both rules, one list.
-want="PUBLISH.sh SHA256SUMS SHA256SUMS.sig node-$SHORT.manifest wa-sentinel-$TRIPLE-$SHORT wa-$TRIPLE-$SHORT "
+# The release carries ONE more file since item 7 (Victor 23/11): the icon font a drawing machine needs,
+# because `/icons` prints a curl of it (lua/core/icons.lua M.fetch_line). It is a signed asset like the
+# payloads - it is in SHA256SUMS - so it travels in the same commit and is listed here exactly.
+want="PUBLISH.sh SHA256SUMS SHA256SUMS.sig node-$SHORT.manifest wa-sentinel-$TRIPLE-$SHORT wa-$TRIPLE-$SHORT waIcons-Regular.ttf "
 [ "$files" = "$want" ] || fail "the commit holds '$files', expected exactly '$want'"
 ok
 contains "$(cat "$P")" "SHA256SUMS" "PUBLISH.sh names SHA256SUMS (which is why the commit must carry it)"
 sums="$(git --git-dir="$WORK/dropbox.git" cat-file -p "$readback:SHA256SUMS")"
 contains "$sums" "$wa_sha  wa-$TRIPLE-$SHORT" "SHA256SUMS pins the payload the manifest pins"
 contains "$sums" "$sen_sha  wa-sentinel-$TRIPLE-$SHORT" "SHA256SUMS pins the supervisor too"
-contains "$(git --git-dir="$WORK/dropbox.git" cat-file -p "$readback:SHA256SUMS" | grep -c .)" "3" \
-  "SHA256SUMS holds one row per payload and the manifest"
+contains "$(git --git-dir="$WORK/dropbox.git" cat-file -p "$readback:SHA256SUMS" | grep -c .)" "4" \
+  "SHA256SUMS holds one row per payload, the manifest, and the icon font (item 7)"
 # ...and the shipped signature is about the shipped SHA256SUMS, by the key the vault made in this run:
 # signed sums that nobody can verify are decoration, and a node verifies them before it installs
 # (scripts/lib/release-signing.sh, rust/wa-host/src/release.rs).
