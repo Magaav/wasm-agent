@@ -225,6 +225,11 @@ fn queue_sessions_health(pending: &[PendingRun]) -> serde_json::Value {
             "node_thread": entry.node_thread,
             "kind": entry.kind,
             "waited_ms": now_ms().saturating_sub(entry.since_ms),
+            // RED BY NAME PAST THE BOUND (r7c): a completion that has waited longer than the bound is the defect
+            // this round exists for, and /health names its session and how long, instead of leaving it to be
+            // inferred from a number nobody compares.
+            "over_bound": now_ms().saturating_sub(entry.since_ms) >= completion_wait_bound_seconds().saturating_mul(1000),
+            "bound_seconds": completion_wait_bound_seconds(),
         })).collect::<Vec<_>>(),
     })
 }
@@ -297,6 +302,31 @@ fn build_core(bridge: Option<&'static CoreBridge>, factory: &(dyn Fn() -> Lua + 
 static POOL: OnceLock<Pool> = OnceLock::new();
 static NODE_THREAD_BEATS: OnceLock<Vec<AtomicU64>> = OnceLock::new();
 static NODE_THREAD_BUSY: OnceLock<Vec<Mutex<Option<(String, u64)>>>> = OnceLock::new();
+/// Which run lanes are LENT to background work (r7c). A borrow is held for the run, not for a clock, and it is
+/// handed back when that run ends (`end_work`), so a person's next run never waits behind a wake for longer than
+/// the wake itself - and at most `borrowable_reserve()` lanes are ever lent at once.
+static BORROWED_LANES: OnceLock<Vec<std::sync::atomic::AtomicBool>> = OnceLock::new();
+
+fn borrowed_reserve(index: usize) -> bool {
+    BORROWED_LANES.get().and_then(|lanes| lanes.get(index)).map(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)).unwrap_or(false)
+}
+
+fn mark_borrowed(index: usize) {
+    if let Some(lanes) = BORROWED_LANES.get() {
+        if let Some(flag) = lanes.get(index) {
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+fn release_borrow(index: usize) {
+    if let Some(lanes) = BORROWED_LANES.get() {
+        if let Some(flag) = lanes.get(index) {
+            flag.store(false, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
 /// Which session each node-thread is currently running, if any.
 ///
 /// This is what makes concurrent *runs* safe. A run is routed by session: the same session always goes to
@@ -382,6 +412,26 @@ fn run_capacity() -> usize {
 fn is_control_route(request: &Request) -> bool {
     let path = split_path(&request.path).0;
     path == "/subagents" || (request.method == "POST" && matches!(path.as_str(), "/provider" | "/model" | "/reasoning"))
+}
+
+/// BACKGROUND MAY BORROW ONE RESERVE LANE (r7c, Fable 24/11). A single background lane is not a pool: when its
+/// one turn legitimately works for twenty minutes, every other session's wake waits behind it, and "the lane has
+/// made no progress" does not help because there is nowhere else to go. The rule, as a number: with a reserve of
+/// `interactive_reserve()` lanes, at most `borrowable()` of them may be lent to background work, so a person's next
+/// run always finds a lane of its own; a borrowed lane is handed back the moment the background run ends, and
+/// `borrowed_reserve()` (the borrow is held for the run, not for a time) is what /health reports.
+fn borrowable_for(reserve: usize) -> usize {
+    if reserve <= 1 { 0 } else { 1 }
+}
+
+fn borrowable_reserve() -> usize {
+    borrowable_for(interactive_reserve())
+}
+
+/// The bound past which a waiting completion is RED in /health: a wake that has queued longer than this is the
+/// defect class this round exists for, and the line names it.
+fn completion_wait_bound_seconds() -> u64 {
+    env_usize("WASM_AGENT_COMPLETION_WAIT_SECONDS", 30) as u64
 }
 
 /// The admission deadline, including queue residence and resolver wait. It never holds the listener.
@@ -613,6 +663,51 @@ fn node_thread_busy_label(index: usize) -> Option<String> {
         .map(|(label, _)| label)
 }
 
+/// How long the current label has been held, in ms. A node-thread that BEATS is not proof that it PROGRESSES:
+/// MEASURED (24/11) a lane sat inside `wa_completion_run` for 29 minutes while its beat kept the "idle" test
+/// happy, and every other session's completion queued behind it. Progress is the only honest test.
+fn node_thread_busy_for_ms(index: usize) -> Option<u64> {
+    let since = NODE_THREAD_BUSY
+        .get()
+        .and_then(|slots| slots.get(index))
+        .and_then(|slot| slot.lock().ok().and_then(|guard| guard.clone()))
+        .map(|(_, since)| since)?;
+    Some(now_ms().saturating_sub(since))
+}
+
+/// The bound past which a held label counts as STALLED, not busy: long enough for a real turn's slow host call,
+/// short enough that a person does not wait behind a dead lane (`WASM_AGENT_NODE_STALL_SECONDS` overrides it).
+fn node_stall_seconds() -> u64 {
+    std::env::var("WASM_AGENT_NODE_STALL_SECONDS").ok().and_then(|v| v.parse().ok()).unwrap_or(120)
+}
+
+/// The rule itself, pure so it can be asserted without the process-wide busy table other tests share.
+fn held_past_bound(held_ms: u64, bound_seconds: u64) -> bool {
+    held_ms >= bound_seconds.saturating_mul(1000)
+}
+
+/// The state a lane reports (r7c, Fable 24/11). "stalled" is the WEDGED case only - the beat is dead, `age_ms`
+/// past `stall_seconds()` - because a lane working a long turn still beats, and painting it red would make every
+/// turn longer than two minutes look like a dead node (measured: 79230887 after the restart was working and would
+/// have read stalled). A lane holding a label is "busy", with `held_seconds` beside it; the RED-by-name signal is a
+/// COMPLETION WAITING past `completion_wait_bound_seconds()` (`over_bound`), never a lane at work.
+fn lane_state(age_ms: u64, held_ms: Option<u64>, stall_seconds: u64, held_bound_seconds: u64) -> &'static str {
+    if stall_seconds > 0 && age_ms >= stall_seconds.saturating_mul(1000) {
+        "stalled"
+    } else if held_ms.map(|held| held >= held_bound_seconds.saturating_mul(1000)).unwrap_or(false) {
+        // A lane at work for longer than the bound is BUSY - `held_seconds` says how long - never stalled.
+        "busy"
+    } else if age_ms < 1000 {
+        "alive"
+    } else {
+        "busy"
+    }
+}
+
+fn node_thread_is_stalled(index: usize) -> bool {
+    node_thread_busy_for_ms(index).map(|held| held_past_bound(held, node_stall_seconds())).unwrap_or(false)
+}
+
 /// The conversation a node-thread holds, if any. `/health` reports it, and the window uses it to
 /// scope an in-flight run to its own conversation instead of assuming any chat run is its own.
 fn node_thread_session(index: usize) -> Option<String> {
@@ -639,12 +734,18 @@ fn spawn_node_thread(slots: &mut Vec<Option<std::sync::mpsc::SyncSender<Work>>>,
     // `min_index`/`max_index` keep a spawned node-thread inside its lane. Background work starts at the
     // interactive reserve, and run node-threads stop below the control floor; gaps are `None`, which is
     // exactly what an unused slot is.
+    // A SLOT IS NOT A THREAD (r8, 24/11): the completion path hands its `Work::Completion` to `slots[index]` and counts
+    // it admitted. If the slot exists but no thread is reading it, the item waits for ever and nothing says so - the
+    // shape measured after the 04:37:03Z boot. This line names the spawn; the interpreter build's own line follows it.
+    eprintln!("[spawn] run node-thread requested (min {min_index}, max {max_index})");
     let index = (min_index..slots.len().min(max_index + 1))
         .find(|index| slots[*index].is_none())
         .unwrap_or_else(|| slots.len().max(min_index));
     if index > max_index {
+        eprintln!("[spawn] refused: no free slot between {min_index} and {max_index}");
         return None;
     }
+    eprintln!("[spawn] run node-thread at slot {index}");
     // Building an interpreter opens the database (`expect` on failure) on the accept thread; a full disk or
     // a permissions change then took the whole node down. A failed build is now one refused request (503,
     // the caller retries) and a log line, and the next spawn tries again. On the component core the same
@@ -765,7 +866,7 @@ fn pick_run_node_thread(class: scheduler::RunClass, claimed: &std::collections::
     let beats = NODE_THREAD_BEATS.get()?;
     let mut idle: Vec<usize> = live_node_thread_ids()
         .into_iter()
-        .filter(|index| *index >= floor && *index <= ceiling && !claimed.contains(index) && node_thread_busy_label(*index).is_none() && !node_thread_is_wedged(*index))
+        .filter(|index| *index >= floor && *index <= ceiling && !claimed.contains(index) && node_thread_busy_label(*index).is_none() && !node_thread_is_wedged(*index) && !node_thread_is_stalled(*index))
         .filter(|index| {
             // A node-thread that has not beaten is as idle as one that never existed; a node-thread that has gone
             // quiet is not idle, whatever its label says.
@@ -780,6 +881,34 @@ fn pick_run_node_thread(class: scheduler::RunClass, claimed: &std::collections::
     if !idle.is_empty() {
         let start = pool.next.fetch_add(1, Ordering::Relaxed);
         return Some(idle[start % idle.len()]);
+    }
+    // NOTHING ELIGIBLE - and a background run still has to run somewhere (24/11). When every lane a completion
+    // could legally use is stalled, waiting for the interactive reserve to free is a promise nobody keeps: measured,
+    // four completions of three sessions sat 1761 s behind one dead lane while an idle reserve lane existed. A
+    // stalled lane is not a person's next run, so a reserve lane that is idle and not stalled is offered to
+    // background work as the last resort, and the line says so.
+    if background {
+        let reserve: Vec<usize> = live_node_thread_ids()
+            .into_iter()
+            .filter(|index| *index < floor && *index <= ceiling && !claimed.contains(index)
+                && node_thread_busy_label(*index).is_none() && !node_thread_is_wedged(*index) && !node_thread_is_stalled(*index))
+            .collect();
+        if borrowable_reserve() > 0 {
+            if let Some(index) = reserve.first().copied() {
+                let borrowed = reserve.iter().filter(|lane| borrowed_reserve(**lane)).count();
+                if borrowed < borrowable_reserve() {
+                    mark_borrowed(index);
+                    eprintln!("[placement] no background lane is eligible (busy or stalled): background run borrows reserve node-thread {index} ({borrowed} already borrowed); it is handed back when the run ends");
+                    return Some(index);
+                }
+                // The line said "refusing" and the code QUEUES, one paragraph below: the saturated branch hands the
+                // item to a background lane's bounded queue - what /health shows as `queue_sessions` with its
+                // waited_ms - and if that lane refuses the send (queue full) admission answers `not_started`, the
+                // wake's row goes back to `pending` with a due time and a line (r7, `M.note_dispatch_failure`). The
+                // item always comes back; it is never dropped. The words now say exactly that.
+                eprintln!("[placement] no background lane is eligible and the borrow is spent ({}/{}); it queues on a background lane's bounded queue and is visible in /health until it runs, or comes back as pending if that queue refuses", borrowed, borrowable_reserve());
+            }
+        }
     }
     // No idle node-thread: grow the pool if the ceiling allows. `spawn_node_thread` never reuses node-thread 0 (it is
     // always running), so a spawned node-thread is always outside the interactive reserve.
@@ -881,6 +1010,8 @@ fn begin_work(label: String) {
 
 fn end_work() {
     let index = node_thread_id();
+    // A borrowed lane goes back the moment its run ends (r7c): the borrow is for the run, never for a clock.
+    release_borrow(index);
     if index == 0 {
         if let Ok(mut slot) = IN_FLIGHT.lock() {
             *slot = None;
@@ -1308,6 +1439,42 @@ fn execution_path_health() -> serde_json::Value {
 
 #[cfg(test)]
 mod execution_path_tests {
+    /// r7c (Fable, 24/11): a lane held ten minutes with a LIVE BEAT is busy, not stalled. Stalled is the wedged case
+    /// - a dead beat - and painting a working node red would make every long turn look like a dead node.
+    #[test]
+    fn a_lane_held_ten_minutes_with_a_live_beat_is_busy_not_stalled() {
+        // Live beat (age 200 ms), label held ten minutes: BUSY, with held_seconds, never stalled.
+        assert_eq!(super::lane_state(200, Some(600_000), 30, 120), "busy", "ten minutes of work with a live beat is busy");
+        assert_eq!(super::lane_state(200, None, 30, 120), "alive");
+        assert_eq!(super::lane_state(5_000, Some(1_000), 30, 120), "busy");
+        // A dead beat past the stall bound is the wedged case, whatever the label says.
+        assert_eq!(super::lane_state(31_000, Some(600_000), 30, 120), "stalled");
+    }
+
+    /// r7c (Fable, 24/11): one background lane is not a pool. With a reserve of two lanes, exactly one may be lent
+    /// to background work, so a person's next run always finds a lane of its own; with a reserve of one, nothing is
+    /// lent, because lending it would leave the person with no lane at all.
+    #[test]
+    fn background_borrows_at_most_one_reserve_lane() {
+        assert_eq!(super::borrowable_for(1), 0, "a single reserve lane is never lent");
+        assert_eq!(super::borrowable_for(2), 1, "two reserve lanes: one may be lent");
+        assert_eq!(super::borrowable_for(4), 1, "more reserve lanes still lend only one");
+        assert!(super::completion_wait_bound_seconds() > 0, "the wait bound is a real number of seconds");
+    }
+
+    /// r7c (24/11): the beat says the loop is turning, not that the work advances. MEASURED live: one lane sat
+    /// 29 minutes inside a completion while its label never changed, /health called it busy, and placement kept
+    /// offering it. Progress is the test, and this is the rule - pure, because the busy table is process-wide and
+    /// other tests in this binary write it.
+    #[test]
+    fn a_lane_that_beats_but_does_not_progress_is_stalled() {
+        assert!(super::held_past_bound(600_000, 120), "a label held ten minutes is a stall");
+        assert!(super::held_past_bound(120_000, 120), "the bound itself counts");
+        assert!(!super::held_past_bound(119_999, 120), "a second short of it is still work");
+        assert!(!super::held_past_bound(0, 120), "a label taken this instant is busy, not stalled");
+        assert!(super::node_stall_seconds() > 0, "the bound is a real number of seconds");
+    }
+
     use super::execution_path_from;
 
     /// Nothing set anywhere is the ordinary case: one path, no refusal.
@@ -1413,7 +1580,15 @@ fn health_body_for(session: &str, node_wide: bool, owner: &str) -> Vec<u8> {
                     "session": node_thread_session(index),
                     "run_id": node_thread_run_id(index),
                     "run_key": node_thread_run_id(index).map(|id|id.to_string()),
-                    "state": if age >= stall_seconds() * 1000 { "stalled" } else if age < 1000 { "alive" } else { "busy" },
+                    // A LANE THAT BEATS BUT DOES NOT PROGRESS IS STALLED (r7c, 24/11): the beat only says the loop
+                    // is turning. Measured: one lane sat 29 minutes inside `wa_completion_run` with a fresh beat
+                    // and a "child completion" label, and /health called it busy the whole time. `stalled` names
+                    // it, with the label, the session and how long it has been held, so it is not invisible again.
+                    "state": lane_state(age, node_thread_busy_for_ms(index), stall_seconds(), node_stall_seconds()),
+                    "held_seconds": node_thread_busy_for_ms(index).map(|held| held / 1000),
+                    "held_past_bound": node_thread_is_stalled(index),
+                    "held_bound_seconds": node_stall_seconds(),
+                    "borrowed": borrowed_reserve(index),
                     "age_ms": age,
                     "busy_ms": busy.as_ref().map(|(_, started)| now_ms().saturating_sub(*started)),
                     "label": busy.as_ref().map(|(label, _)| label.clone()),
@@ -2391,6 +2566,7 @@ pub fn run(first: Core, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, 
     // inside the first millisecond of the process, so 0 would be ambiguous between "never" and "at time 0".
     let _ = NODE_THREAD_BEATS.set((0..=ceiling).map(|_| AtomicU64::new(u64::MAX)).collect());
     let _ = NODE_THREAD_BUSY.set((0..=ceiling).map(|_| Mutex::new(None)).collect());
+    let _ = BORROWED_LANES.set((0..=ceiling).map(|_| std::sync::atomic::AtomicBool::new(false)).collect());
     let _ = NODE_THREAD_SESSION.set((0..=ceiling).map(|_| Mutex::new(None)).collect());
     let _ = NODE_THREAD_RUN.set((0..=ceiling).map(|_| Mutex::new(None)).collect());
     let _ = POOL.set(Pool {
@@ -3797,7 +3973,20 @@ pub(crate) fn enqueue_completion(body: &str) -> serde_json::Value {
     if session.is_empty() || owner.is_empty() || POOL.get().is_none() {
         return serde_json::json!({"error":"completion_runtime_unavailable","not_started":true});
     }
-    match scheduler::admit(session,owner,scheduler::RunClass::Background,pick_run_node_thread) {
+    let admitted = scheduler::admit(session,owner,scheduler::RunClass::Background,pick_run_node_thread);
+    // NAMED, EVERY TIME (r8, 24/11). MEASURED on the live node: after the boot at 04:37:03Z not one self_wake was ever
+    // delivered - the claims were accepted (`dispatching`, attempts 1) and the journal said nothing at all about them,
+    // so the link that dropped the item could not be identified. This is that link's own line: what was admitted, to
+    // which node-thread, and the refusal by name when there was one.
+    match &admitted {
+        scheduler::Decision::Run { node_thread, run_id, .. } =>
+            eprintln!("[completion] admitted run {run_id} of session {session} to node-thread {node_thread}"),
+        scheduler::Decision::Behind { node_thread, run_id, .. } =>
+            eprintln!("[completion] admitted run {run_id} of session {session} BEHIND, node-thread {node_thread}"),
+        scheduler::Decision::Refused(reason) =>
+            eprintln!("[completion] refused for session {session}: {}", reason.as_error().0),
+    }
+    match admitted {
         scheduler::Decision::Run {run_id,node_thread,cancel,sockets}
         | scheduler::Decision::Behind {run_id,node_thread,cancel,sockets} => {
             let recorded=scheduler::global().is_some_and(|s| s.record_request(run_id,body).is_ok());

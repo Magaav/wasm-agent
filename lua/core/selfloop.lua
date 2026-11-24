@@ -1273,6 +1273,14 @@ function M.finish(row, ok, detail, opts)
   -- the guard, `delivered` landed on the new resume and lost it (the back-to-back install case, measured tonight).
   exec([[UPDATE self_wakes SET status=?, due_at=NULL, probe_result='', event_json='', updated_at=?,
     last_error=? WHERE id=? AND status='dispatching']], { status, now, ok and "" or slug(detail), row.id })
+  -- A ROW THAT WAS NEVER CLAIMED IS STILL THE CALLER'S TO SETTLE (r7c, 24/11). MEASURED at
+  -- scripts/test-selfloop.lua:193: an event wake and a message wake were settled by their publishers and stayed
+  -- `pending`, so a new interpreter saw three pending wakes instead of one (red on 4c720beb, green on 85d4d950).
+  -- The belt above is unchanged and still protects a row someone RE-ARMED: that row has been claimed at least
+  -- once (`attempts >= 1`), and this second write cannot touch it.
+  exec([[UPDATE self_wakes SET status=?, due_at=NULL, probe_result='', event_json='', updated_at=?,
+    last_error=? WHERE id=? AND status='pending' AND (attempts IS NULL OR attempts=0)]],
+    { status, now, ok and "" or slug(detail), row.id })
   return { status = status, due_at = nil }
 end
 
@@ -1295,6 +1303,31 @@ function M.defer_refused(row, refusal, opts)
   if not called then return { error = tostring(changed) } end
   if type(changed) == "table" and tonumber(changed.changes) == 0 then return { error = "wake_not_pending" } end
   return { deferred = true, wake_id = row.id, due_at = next_at, deploy_waiting = tostring(refusal or "") }
+end
+
+-- A WAKE THAT WAS DISPATCHED AND THEN RAISED OR ANSWERED AN ERROR WROTE NOTHING (r7, 24/11): the row stayed
+-- `dispatching` for ever and no line named it. Called by `wa_completion_run` on every non-run outcome: the row goes
+-- back to `pending` with a due time when it is still this wake's to retry, or keeps whatever the run did, and one log
+-- line names the wake, its session and the reason.
+function M.note_dispatch_failure(args, answer)
+  args = args or {}
+  local id = tostring(args.id or args.wake_id or "")
+  local reason = type(answer) == "table" and tostring(answer.error or answer.status or answer.detail or "") or tostring(answer)
+  if id == "" then return { error = "wake_dispatch_failure_without_an_id" } end
+  local now = tonumber(host.now()) or os.time()
+  local row = query("SELECT * FROM self_wakes WHERE id=?", { id })[1]
+  local retried = false
+  if row and tostring(row.status) == "dispatching" then
+    exec([[UPDATE self_wakes SET status='pending', due_at=?, last_error=?, updated_at=? WHERE id=? AND status='dispatching']],
+      { now + backoff(tonumber(row.attempts) or 0), "dispatch_failed: " .. reason:sub(1, 300), now, id })
+    retried = true
+  end
+  if type(host) == "table" and type(host.log) == "function" then
+    pcall(host.log, string.format("selfloop: wake %s of session %s did NOT run: %s%s",
+      id, tostring(args.session_id or (row and row.session_id) or ""), reason:sub(1, 300),
+      retried and " (row back to pending, retried)" or ""))
+  end
+  return { noted = true, retried = retried }
 end
 
 function M.run_wake(args)
@@ -1335,6 +1368,24 @@ function M.run_wake(args)
     exec([[UPDATE self_wakes SET status='pending', due_at=?, updated_at=?, last_error=?
       WHERE id=? AND status='dispatching']], { row.due_at, now, deploy_text:sub(1, 400), row.id })
     return { deferred = true, wake_id = row.id, deploy_waiting = deploy_text }
+  end
+  -- THE SESSION IS BEING RUN SOMEWHERE ELSE RIGHT NOW: DEFER, DO NOT WAIT (r7c, 24/11).
+  -- MEASURED on the live node: a resume wake's completion was handed a node-thread, could not take its session's
+  -- claim because an attended CLI turn held it, and the node-thread never came back - 29 minutes, with three other
+  -- sessions' wakes queued behind it and 1 761 s recorded on the queue. The claim is asked of the store that holds
+  -- it (`deploy_pause.claim_state`, the r5d rule) BEFORE the turn: `held` costs this wake one row write, one log
+  -- line and a due time, and the node-thread is free before a turn is ever attempted. `unknown` is not a yes and it
+  -- is not a wait either: the run's own claim still decides, and `agent.lua` refuses that turn with the same words
+  -- instead of blocking - which is the belt this pre-check does not need to be perfect.
+  local claim_state = dep("deploy_pause").claim_state(row.session_id)
+  if claim_state == "held" then
+    local deferred = M.defer_refused(row, "session_busy", { now = now })
+    if type(host) == "table" and type(host.log) == "function" then
+      pcall(host.log, string.format("selfloop: wake %s of session %s deferred: another run holds the session claim",
+        tostring(row.id), tostring(row.session_id)))
+    end
+    deferred.session_busy = true
+    return deferred
   end
   -- A wake whose only input is a settled handle IS the wake-only round (21/11): counted here, where
   -- the step is about to run, so the number is turns and not sweeps (lua/core/counters.lua).
@@ -1398,6 +1449,12 @@ function M.run_wake(args)
   -- A REFUSAL FOR A WAITING BUILD IS A WAIT, NOT A DELIVERED WAKE (23/11): same row, same time, put back.
   if ok and dep("deploy_pause").is_refusal(bot.turn_refused) then
     return M.defer_refused(row, tostring(bot.turn_refused), { now = clock({}) })
+  end
+  -- THE SAME FOR A SESSION ANOTHER RUN TOOK BETWEEN THE PRE-CHECK AND THE TURN (r7c, 24/11): `agent.lua` refuses
+  -- that turn with `resources.BUSY_REFUSAL` instead of blocking its node-thread, and the wake goes back to pending
+  -- with its time, exactly as a deploy wait does. The race is one statement wide, so the row is kept, not failed.
+  if ok and dep("resources").is_busy_refusal(bot.turn_refused) then
+    return M.defer_refused(row, "session_busy", { now = clock({}) })
   end
   if not ok and M.cancelled_stop(result) then
     local settled = M.settle_interrupted(row, { now = clock({}) })
@@ -1598,9 +1655,17 @@ function M.dispatch_default(row)
   local ok, raw = pcall(host.enqueue_completion, json.encode({
     kind = "self_wake", id = row.id, wake_id = row.id, owner = row.owner, session_id = row.session_id,
   }))
-  if not ok then return { error = "wake_dispatch_failed: " .. slug(raw) } end
-  local receipt = type(raw) == "string" and json.decode(raw) or raw
-  if type(receipt) ~= "table" then return { error = "wake_dispatch_answer_unreadable" } end
+  local receipt = ok and (type(raw) == "string" and json.decode(raw) or raw) or { error = "wake_dispatch_failed: " .. slug(raw) }
+  if type(receipt) ~= "table" then receipt = { error = "wake_dispatch_answer_unreadable" } end
+  -- A DISPATCH IS A FACT WITH A NAME (r7, 24/11). MEASURED on the live node: resume wakes ed7970e3, 7e34cac9 and
+  -- b076ba0e were each claimed (`dispatching`, attempts 1) and then NOTHING - no run, no message, no journal line -
+  -- three times, until the operator's watchdog resumed the session by hand. Nothing anywhere named the wake, so the
+  -- failure was invisible. This line is the dispatch's own record: which wake, which session, and what the node's
+  -- queue answered. A receipt that is `accepted` and never becomes a run is now a line an operator can grep.
+  if type(host) == "table" and type(host.log) == "function" then
+    pcall(host.log, string.format("selfloop: dispatched wake %s of session %s (reason %s): %s",
+      tostring(row.id), tostring(row.session_id), tostring(row.reason):sub(1, 40), tostring(json.encode(receipt)):sub(1, 200)))
+  end
   return receipt
 end
 

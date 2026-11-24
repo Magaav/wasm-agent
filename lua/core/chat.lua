@@ -555,6 +555,17 @@ function M.run(argv)
   -- fires once at its next claim. A reader who closes this without continuing leaves them held, and the
   -- footer says `2 wakes paused`.
   if resume_last or session_id then
+    -- THE ABANDONED RESUME SAYS SO, ONCE (r7-add): the re-arm chain is spent, so this session will never
+    -- continue by itself. One line, before any prompt, plain view and TUI alike, never a model turn.
+    do
+      local notice_ok, pause = pcall(dofile, "lua/core/deploy_pause.lua")
+      if notice_ok and type(pause) == "table" and type(pause.abandoned_notice) == "function" then
+        local notice = pause.abandoned_notice(agent.session_id)
+        if notice and notice.text then
+          print(cli_view.paint("  " .. notice.text, "dim", view.live))
+        end
+      end
+    end
     local resumed_ok, resumed = pcall(function()
       return dofile("lua/core/selfloop.lua").resume(agent.session_id)
     end)

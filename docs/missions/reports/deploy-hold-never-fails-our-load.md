@@ -1579,3 +1579,295 @@ is asserted in the row, and a future edit to any of the three breaks it.
 **Rows:** `test-deploy-resume.lua` **25 checks** (main's row, green, its assertion unchanged); `test-deploy-pause.lua`
 **101**; `test-selfloop-pause.lua` **161**; `test-handle-wake.lua` 17; `test-cli-wake-row.lua` 30;
 `test-deploy-bound.sh` `deploy bound ok`; `test-deploy-wait.sh` `deploy wait ok`.
+
+### r7: the silent dispatch, and what is NOT fixed (24/11 ~05:10Z)
+
+**Measured on the live node** (`4c720beb`): resume wakes `ed7970e3`, `7e34cac9` and `b076ba0e` of session `e540de37`
+were each CLAIMED (`dispatching`, attempts 1) and then nothing at all - no run row, no message, no journal line -
+three times, until the operator's watchdog resumed the session by hand. The reclaim worked; it re-armed into the same
+silent dead end.
+
+**(1) No silent path - done, and tested.** Two places could be silent, and both now speak:
+
+* `M.dispatch_default` writes **one line per dispatch**: `selfloop: dispatched wake <id> of session <id> (reason …):
+  <the queue's own receipt>`. An `accepted` receipt that never becomes a run is now a line an operator can grep;
+* `wa_completion_run`'s `self_wake` branch, on a raise or an error answer, calls `selfloop.note_dispatch_failure`:
+  the row goes back to `pending` with a due time and `last_error = 'dispatch_failed: …'` when it is still claimed,
+  and one line reads `selfloop: wake <id> of session <id> did NOT run: <why> (row back to pending, retried)`.
+
+Test (`scripts/test-selfloop-pause.lua`, real stores, the row claimed exactly as the live node had it): the dispatch
+answers a receipt and names itself; `note_dispatch_failure` puts the row back to `pending` with `dispatch_failed` and a
+`due_at`; and `wa_completion_run` on a wake it cannot admit answers an error **and** writes the row/line. Measured
+output in the run: `wake aa5ad7cf… of session r7-acceptance did NOT run: self_wake_not_dispatching (row back to
+pending, retried)` and `wake no-such-wake … did NOT run: self_wake_not_admitted`.
+
+**(2) Making the case run - NOT fixed, and here is exactly how far the evidence goes.**
+
+* `M.run_wake` is not the gap: called with a claimed row for a session whose last run is `completed/answered`, it goes
+  straight to the turn (reproduced: the call blocked on the absent provider in a script run, which is a turn being
+  attempted, not a silent return);
+* the row's only writes on the live node were the claim itself (`updated_at 04:37:08`) and nothing after, so neither
+  `run_wake`'s deferral branches nor `finish` were reached - the completion work item never arrived at
+  `wa_completion_run`, or arrived with an `args` shape that failed its first check;
+* everything between the claim and that entry lives in the node (`host.enqueue_completion` → scheduler admission →
+  node-thread `Work::Completion` → `lua.call_string("wa_completion_run")`), and the node's journal is not readable
+  from this shell (`journalctl --user -u wa-serve` answers `-- No entries --`, no such unit is listed) - so the one
+  artefact that would name the gap is the one I cannot read.
+
+The fix for (2) is therefore **installed as observability, not as a repair**: the next install gives the dispatch its
+own line with the queue's receipt, which names the gap on the first repeat. I am not claiming the resume runs.
+
+**Rows:** `test-deploy-resume.lua` 25; `test-deploy-pause.lua` 101; `test-selfloop-pause.lua` **169** (was 161);
+`test-handle-wake.lua` 17; `test-cli-wake-row.lua` 30; `test-deploy-bound.sh` `deploy bound ok`;
+`test-deploy-wait.sh` `deploy wait ok`.
+
+**Texts to approve (r7):** the two new lines above - `selfloop: dispatched wake <id> of session <id> (reason …):
+<receipt>` and `selfloop: wake <id> of session <id> did NOT run: <why> (row back to pending, retried)`.
+
+### r8: the completion path after a fresh boot - the links, and the one that can park silently (24/11 ~05:30Z)
+
+**What the orchestrator's journal shows** (04:37:03Z boot, `wa-serve.service` PID 755496): not one self_wake delivered;
+the 04:37:08 claims still `dispatching` 35 min later; the journal carries no line from the scheduler, the node-thread or
+`wa_completion_run`. So the item was **accepted and parked** - a link answered "yes" and then nothing read it.
+
+**(a) The links, and what each one writes today** (`rust/wa-capabilities/src/serve.rs`):
+
+| # | link | line | logs? |
+| 1 | `host.enqueue_completion` (Lua host fn) | `serve.rs:1777` -> `serve::enqueue_completion` | **no** (r7 added the caller's line in Lua) |
+| 2 | scheduler admission | `scheduler::admit(session, owner, Background, pick_run_node_thread)` | **was no** - now **yes** (r8) |
+| 3 | node-thread choice | `serve.rs:756` `pick_run_node_thread`, falls through to `spawn_node_thread` on an empty pool | no |
+| 4 | slot spawn | `serve.rs:637` `spawn_node_thread` - reserves `slots[index]`, builds an interpreter | **was no** for the reservation - now **yes** (r8) |
+| 5 | delivery | `Work::Completion` in the node-thread loop -> `lua.call_string("wa_completion_run")` | logged only if the script raises |
+
+The link that can park an item **silently after a restart** is **3 -> 4**: `pick_run_node_thread` (L756) prefers a
+*live* id from `live_node_thread_ids()`; when none is live it grows the pool and returns the new slot's index
+(L784-790) **without any line saying a slot was reserved**, and from then on the item is counted admitted. If that
+slot's thread is not yet in its loop - the spawn happens behind an interpreter build, and the boot line itself reads
+`reads: 0 warm, up to 4, spawned on demand` (`serve.rs:2433`) - the item waits in a channel no thread drains: no run,
+no journal line, row `dispatching` for ever. That is exactly the measured shape, and it was invisible.
+
+**(b) Done:** three new lines, each at the decision rather than near it:
+* `[completion] admitted run <id> of session <id> to node-thread <n>` / `... BEHIND, node-thread <n>` /
+  `[completion] refused for session <id>: <reason>` - `scheduler::admit`'s answer is now matched and named;
+* `[spawn] run node-thread requested (min <i>, max <j>)`, `[spawn] run node-thread at slot <n>`,
+  `[spawn] refused: no free slot between <i> and <j>` - at the spawn, so a slot without a thread is named.
+With r7's Lua line (`selfloop: dispatched wake <id> …: <receipt>`), the next repeat will say which link took the item
+and whether a thread was there to read it.
+
+**NOT done, carried by name:** (c) the boot test that enqueues a completion right after startup and asserts a run or a
+logged refusal - it needs a spawned `serve` path, and an assertion written without it would be a claim rather than a
+test; (d) narrowing the reclaim's activity check to the wake's **own** run - the row carries no run id today, so a
+column (or a link table) comes first, then the check; (B) the abandoned-resume line (`resume_abandoned` -> one visible,
+model-free line on opening the session, counted by `wa-sentinel status` and `wa status`) - the queued red-r7-add, not
+started.
+
+**Rows after r8:** build `exit=0` (34.95s); `test-deploy-resume.lua` 25, `test-selfloop-pause.lua` 169 (re-run against
+the rebuilt binary).
+
+### r7-add: the abandoned resume says so, once (24/11 ~06:50Z)
+
+**Texts to approve (verbatim - Fable's proposed line, shipped exactly):**
+
+    this session was paused by an update and could not be resumed automatically; send any message to continue
+
+**What it does.** `deploy_pause.abandoned_notice(session)` reads `<data>/deploy-paused/<session>.json`; if it says
+`abandoned: true` and not yet shown, it prints that one line at the moment the session is opened
+(`wa chat --continue` / `--resume` / `--session`, plain view and TUI alike, before any prompt), and marks
+`abandoned_shown` in the same record so it is said **once per abandoned pause**. It is a file read and a file write:
+no provider, no run row, no paid turn - the test asserts the `runs` count is unchanged across the call.
+`deploy_pause.abandoned_count()` feeds `wa status` as `abandoned resumes N (oldest <age>)`; `wa-sentinel status`
+already counts them (verified on the live node: `paused sessions: 8, oldest 4h ago, stale: 0, abandoned: 4`).
+
+**Test** (`scripts/test-selfloop-pause.lua`, real files under `<data>/deploy-paused`): an abandoned record shows the
+line once and verbatim with `runs` unchanged; a second open shows nothing; a session that resumed normally shows
+nothing; the counter counts the abandoned one, reports the oldest age, and does not count the normal one.
+**177 checks** (was 169).
+
+### r7c: diagnosed with citations, NOT fixed (the honest boundary of this round)
+
+* **(2) placement - why other sessions were pinned to the stalled thread.** `pick_run_node_thread`
+  (`rust/wa-capabilities/src/serve.rs:756`) sets `floor = interactive_reserve()` for background work
+  (`:354`), and the comment above it states node-threads 0 and 1 are that reserve - so **the only lane a completion
+  may take is index >= 2, i.e. thread 2**. That is why all four completions are on thread 2 while thread 0 sat idle:
+  by design, and the design has no escape route. Its idle filter also judges a lane by *label* and *beat*
+  (`node_thread_busy_label`, `node_thread_age_ms`, `:766-775`), never by *progress*: a lane blocked inside Lua still
+  beats, so once the label cleared it stayed eligible. Growth was closed because `ceiling = run_capacity()-1`
+  (`:376`) allowed no slot beyond 2, so `spawn_node_thread` (`:637`) had nothing to give.
+* **(1) the stall - where it waits.** The node-thread loop (`serve.rs:2862-2872`) does `begin_work("child completion")`
+  and then `lua.call_string("wa_completion_run")`; it never returned, so the block is **inside Lua**, on the session's
+  run claim held by the attended CLI turn. The Lua side of that decision is `lua/core/agent.lua:2055-2061` with
+  `deploy_pause.claim_wait` (`lua/core/deploy_pause.lua:252`), which only *classifies* a busy claim - it does not
+  bound the wait, and nothing on this path frees the node-thread. That is the one-line fact the fix must change:
+  bounded wait, deferral, row back to pending, one log line.
+* **The spin.** `wa-placement` (`serve.rs:2388`) loops `wa_orchestrator_tick` then `sleep(2s)`; 49% CPU for 29 min
+  means the sleep was never reached - the spin is inside `wa_orchestrator_tick` (Lua), not in the loop.
+
+**Not done:** both fixes and their node-level test; the RED report for a lane stalled past a bound; the reclaim's
+activity check narrowed to this wake's own run; and the answer to *is (2) present in v0.1.1* - I did not read the tag.
+
+### Correction to an earlier handover
+
+Two turns reported "empty output" from `bash`. That was **my** mistake, not the node's: the bash result carries
+`stdout`, and I was reading `.output`, so every result read as empty. Nothing about the node was ever silent to me.
+
+### r7c: the placement and the defer, fixed (24/11 ~07:10Z)
+
+Fable's question is answered (by Fable): `pick_run_node_thread`/`interactive_reserve` exist in v0.1.1
+(`serve.rs:284`, `:686`), so (2) is an old defect. Fixed here.
+
+**(2) Placement - the smaller change, and why it is the right one.** A lane is now ineligible when the label it
+holds has been held past a bound (`node_thread_busy_for_ms`, `held_past_bound`, `node_stall_seconds`, default 120 s,
+`WASM_AGENT_NODE_STALL_SECONDS`). I chose this over counting progress events because the start time of the label is
+**already recorded** (`NODE_THREAD_BUSY` stores `(label, since)`), so the rule is three lines and needs no new state;
+and when every run lane is busy or stalled, a background completion may take an idle, non-stalled **reserve** lane as
+the last resort, with `[placement] no run lane is eligible ... background run takes reserve node-thread N`. That is
+the one behaviour change of substance: the reserve exists so a burst of wakes cannot starve a person, and a person is
+not served by a lane that has stopped making progress.
+
+**(3) /health** (`health_body_for`): the per-lane entry now reports `state: "stalled"` when the label is held past the
+bound, plus `stalled: true` and `stalled_after_seconds` - the label and the session were already there. A lane that
+beats but does not progress is no longer called busy.
+
+**(1) The defer.** `selfloop.run_wake` asks `deploy_pause.claim_state` (the r5d rule, read from the claim store's
+liveness) **before** the turn: `held` costs the wake one row write, one line
+(`selfloop: wake <id> of session <id> deferred: another run holds the session claim`) and a `due_at`; the
+node-thread is free before a turn is attempted. Measured in the row: `185 checks passed`, and the line appears.
+
+**(6) `scripts/test-selfloop.lua:193`** (red since r6d): `finish` only wrote `WHERE status='dispatching'`, so a wake
+that was settled while still `pending` (an event or message wake its publisher had already settled) never moved. It
+now also settles a row that was **never claimed** (`status='pending' AND attempts=0`); a re-armed row has been
+claimed, so r6b's belt still protects it. Row: `{"checks":109,"ok":true}`.
+
+**Rust unit test:** `a_lane_that_beats_but_does_not_progress_is_stalled` asserts the pure rule. To run it I had to
+repair the crate's **lib test target**, which did not compile before this round: two `foreground(...)` calls in
+`operations.rs` tests were missing their `stdin` argument. Result: `404 passed, 4 failed` - the four are
+`operations::*` tests that refuse to run with `HOME=/home/victor` (they need `scripts/test.sh`'s `GATE_HOME`), none
+of them mine and none of them new.
+
+**NOT done, named:**
+* **(4) the spin.** `serve.rs:2388` spawns `wa-placement`, which loops `wa_orchestrator_tick` and then sleeps 2 s;
+  49 % CPU for 29 minutes means `wa_orchestrator_tick` (`lua/core/subagents.lua:1056`) never returned, so the spin
+  is inside the tick - most likely its sqlite-busy path (`phase`, `subagents.lua:~1040`) re-raising without backoff.
+  Not fixed; the measurement stands.
+* **(5) the sentinel.** `wa-sentinel status` already distinguishes "admitted, not started" per holder, yet the restart
+  request was held by "session 79230887 is still working (child completion)" - so the restart bound uses a different
+  rule than the status line, and I did not locate it in `rust/wa-sentinel/src/main.rs` this round. `recover` on a
+  unit-owned node (`wa-serve.service`) is likewise untouched.
+
+### Landing gate round 1: the branch is rebased onto main 4c720beb (24/11 ~07:30Z)
+
+The gate was red on `land-quick`: `rust/wa-capabilities/src/operations.rs` conflicted. **Main already carried the two
+`foreground(..., None)` arguments** that I repaired in r7c, so the rebase took main's side and my version of that
+repair was dropped - the credit in the r7c addendum for fixing the lib-test target belongs to main, not to this
+branch. Everything else rebased cleanly (`git merge-tree` against main: 0 conflicts).
+
+Rows re-run on the rebased tip (`build=0`): deploy-resume 25, deploy-pause 101, selfloop 109 (ok), selfloop-component
+30, selfloop-pause 185, handle-wake 17, cli-wake-row 30, deploy-bound ok, deploy-wait ok.
+
+### r7c-fix: a second place for background work (Fable's gap, 24/11 ~07:50Z)
+
+Fable is right: with one background lane the defer fixes BLOCKED and not BUSY. A's resumed turn can legitimately
+work for twenty minutes, and every other session's wake waits behind it - "no progress counts as busy" cannot help
+when there is nowhere else to go.
+
+**Choice: (b), the smaller one.** Background may **borrow one idle reserve lane** when no background lane is eligible
+(busy or stalled), and hands it back in `end_work` - the borrow is held for the run, never for a clock. Sizing is a
+pure rule:
+
+    borrowable_for(reserve) = 0 if reserve <= 1 else 1     // interactive_reserve() defaults to 2
+
+and the lines it writes:
+
+    [placement] no background lane is eligible (busy or stalled): background run borrows reserve node-thread N (0 already borrowed); it is handed back when the run ends
+    [placement] no background lane is eligible and the borrow is spent (1/1); refusing rather than queueing behind a busy lane
+
+**Interactive latency risk, stated:** at most ONE reserve lane is ever lent, so with the default reserve of two a
+person's next run still has a lane of its own; on an idle node the borrow never triggers at all (the background lane
+is eligible), so the added latency there is **zero by construction**. In the saturated case the worst added wait is
+the duration of one background run on a borrowed lane, never more than one run. MEASURED where it can be measured
+here: the two timing-sensitive rows pass unchanged (`deploy bound ok`, `deploy wait ok`).
+
+**/health:** each waiting completion already carried `waited_ms`, `session`, `kind`, `node_thread`; it now carries
+`over_bound` and `bound_seconds` (default 30 s, `WASM_AGENT_COMPLETION_WAIT_SECONDS`), so anything waiting past the
+bound is red by name rather than inferred. Each lane carries `borrowed` next to `stalled`.
+
+**Tests:** `background_borrows_at_most_one_reserve_lane` (reserve 1 lends nothing; 2 lends one; 4 still lends one)
+and `a_lane_that_beats_but_does_not_progress_is_stalled`. Serve module: **47 passed, 0 failed**.
+
+**Still not done:** the node-level B test in both shapes needs a spawned `serve` (A attended; A's resume plus B's
+wake; B starts within the bound). This round proves the rule, not the node. (4) the tick spin and (5) the sentinel
+remain open, as reported.
+
+### r7c final round: the node-level B test (shape 1), and the spin measured and handed to H (24/11 ~08:20Z)
+
+**(A) The node-level test exists and is green: `scripts/test-placement-defer.sh`.** It starts a REAL scratch `wa
+serve` (own home, own db, own ports), writes the fixture through the real modules
+(`scripts/lib/placement-fixture.lua`: session A with a resume wake, session B with a time wake), then has a SECOND
+process take A's claim the way an attended turn does (`scripts/lib/placement-hold.lua`, `resources.begin` + a long
+`host.sleep`, released on exit). Measured output on the branch:
+
+    placement defer ok (B started in 2s, A deferred, no lane stalled)
+    queue_ok=1 count=0
+
+and the node's own journal from that run:
+
+    [completion] admitted run 2 of session placement-b to node-thread 2
+    [placement] no background lane is eligible (busy or stalled): background run borrows reserve node-thread 0 ...
+    [lua] selfloop: wake ... of session placement-a deferred: another run holds the session claim
+
+So B ran on the background lane while A's completion took a borrowed reserve lane, A deferred with its line, and
+`/health` reported `count=0` waiting completions - `over_bound` never true.
+
+**What this does NOT prove, said plainly.** Shape 2 (A's resume running a LONG turn on the only background lane)
+is **not** delivered: the node has no provider stub that can sleep inside a turn, so no row can make a lane busy for
+minutes. And the "must fail on 4c720beb" requirement is **not met**: I built main's binary and ran the same row
+against it - it **fails only on the admission line**, which does not exist on main, while its behavioural assertions
+(B started in seconds, A deferred) **pass** there, because shape 1 does not need the borrow when the background lane
+is free. The borrow is therefore proven by its unit rule and by this shape-1 run, not by a saturated node. Shape 2
+needs a stub provider first; that is the next step, not a claim I can make now.
+
+**(4) The spin: one attempt, measured, then stopped as instructed.**
+* Baseline, idle scratch node, 30 s sample of the `wa-placement` LWP from `/proc/<tid>/stat`: **2060 ms CPU = 6 %**.
+* The attempt: `phase` in `lua/core/subagents.lua` now backs off per phase on a lock (2 s doubling to 16 s, reset on
+  the first success) instead of asking again on the next two-second tick.
+* After: **1940 ms CPU = 6 %**. The busy branch is never entered on a healthy node, so the idle cost did not move.
+* Verdict: **the first attempt does not hold; the idle cost moves to H** with these numbers. The backoff stays
+  because it is correct and free, but it is not the fix for an idle thread burning 6 % of a core - that is the
+  tick's own queries every two seconds, and it needs H's "idle costs nothing" work.
+* The 49 % seen live was a node with four queued completions and a stalled lane: work, not an idle spin.
+
+**(5) The sentinel stays with H week 1, as instructed.**
+
+**Rows:** deploy-resume 25, deploy-pause 101, selfloop 109, selfloop-pause 185, handle-wake 17, cli-wake-row 30,
+placement defer ok.
+
+### r7 final: what happens after the borrow is spent, and the red signal turned the right way round (24/11 ~08:45Z)
+
+**(a) The line said "refusing"; the code QUEUES.** `pick_run_node_thread` after the borrow-spent line
+(`serve.rs:900`) falls through to the saturated branch (`serve.rs:905-914`), which picks a background lane
+(`index >= floor, <= ceiling, not wedged`) and hands the completion to **that lane's bounded queue** - which is
+exactly what `/health` reports as `queue_sessions` with `waited_ms` and now `over_bound`. If that lane refuses the
+send (queue full) admission answers `not_started`, and `selfloop.tick` puts the row back to `pending` with
+`due_at = now + backoff(attempts)` and `last_error = completion_queue_full` (`lua/core/selfloop.lua:1631-1637`),
+counting it as `deferred`. It comes back; it is never `failed` and never dropped. The words now say that, and the
+comment above them names the three outcomes.
+
+**Assertion that proves it comes back** (`scripts/test-selfloop-pause.lua`, row 8): a tick whose dispatch answers
+`{not_started = true, error = "completion_queue_full"}` leaves the wake `pending` with a due time, names the
+refusal on the row, and the tick reports `unknown = 0`. `191 checks passed`.
+
+**(b) The red signal was the wrong way round; fixed.** `lane_state(age_ms, held_ms, stall_seconds, held_bound)`:
+`stalled` is the WEDGED case only (the beat is dead, `age_ms` past `stall_seconds()`); a lane whose label has been
+held past the bound is **`busy`** with `held_seconds` beside it (`held_past_bound` is informational, not a state).
+So 79230887 mid-turn after the restart - working, holding a label for minutes - reads `busy`, not `stalled`. The
+RED-by-name signal is a **completion waiting past `completion_wait_bound_seconds()`**: `over_bound` on each
+`queue_sessions` entry, which the placement row already asserts (`queue_ok=1 count=0`).
+
+**Readers checked:** nothing in `lua/` or the CLI keys on the per-lane `state` word for health (the only "stalled"
+in Lua is `done_gate`'s own outcome), and `wa-sentinel status` builds its busy lines from the request/queue tables,
+not from this field - so the change is contained in `serve.rs` and the canaries that read `over_bound` get the
+signal they should.
+
+**Assertion:** `a_lane_held_ten_minutes_with_a_live_beat_is_busy_not_stalled` - `lane_state(200, Some(600_000), 30,
+120) == "busy"`, and `lane_state(31_000, Some(600_000), 30, 120) == "stalled"` (dead beat). Serve module:
+**48 passed, 0 failed**.

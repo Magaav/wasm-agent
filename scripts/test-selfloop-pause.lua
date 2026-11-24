@@ -570,6 +570,126 @@ check(tostring(rows[1].id) == tostring(first.wake.id), "and it is the row that w
 check(tonumber(rows[1].created_at) == r6_now - 3600, "keeping the OLDEST created_at for the window: " .. tostring(rows[1].created_at))
 check(tonumber(rows[1].resume_chain) == 2, "and the LARGEST chain: " .. tostring(rows[1].resume_chain))
 check(tostring(rows[1].status) == "pending", "pending again, with B's prompt: " .. tostring(rows[1].prompt))
+-- (5) NO SILENT DISPATCH (r7, 24/11). MEASURED on the live node: resume wakes ed7970e3, 7e34cac9 and b076ba0e were
+-- each CLAIMED (`dispatching`, attempts 1) and then nothing at all - no run row, no message, no journal line - three
+-- times, until the operator's watchdog resumed the session by hand. Two places could be silent and both now speak:
+-- the dispatch (one line naming the wake, the session and the queue's own receipt) and the completion run (a row that
+-- went back to `pending` and a line saying it did NOT run).
+local silent_session = memory.start_session("local", "chat", { id = "r7-acceptance", user_id = "master", node_id = "n",
+  title = "a session whose last run answered" })
+host.sql_exec([[INSERT INTO messages(id,session_id,seq,role,content,created_at) VALUES(?,?,?,?,?,?)]],
+  json.encode({ host.uuid(), silent_session, 1, "user", "do the thing", r6_now }))
+host.sql_exec([[INSERT INTO messages(id,session_id,seq,role,content,created_at) VALUES(?,?,?,?,?,?)]],
+  json.encode({ host.uuid(), silent_session, 2, "assistant", "paused for the deploy", r6_now }))
+local silent_wake = selfloop.schedule({ in_seconds = 0, reason = pause_mod.RESUME_REASON, prompt = "resume" },
+  { session_id = silent_session, user_id = "master" })
+check(silent_wake and silent_wake.ok, "a resume wake exists for that session")
+-- the live state: claimed, and nothing else has happened
+host.sql_exec([[UPDATE self_wakes SET status='dispatching', attempts=1, updated_at=? WHERE id=?]],
+  json.encode({ r6_now, silent_wake.wake.id }))
+-- (a) the dispatch names itself: one line, whatever the queue answered
+local dispatch_row = (json.decode(host.sql_query([[SELECT id, owner, session_id, reason FROM self_wakes WHERE id=?]],
+  json.encode({ silent_wake.wake.id })) or "[]") or {})[1]
+local receipt = selfloop.dispatch_default(dispatch_row)
+check(type(receipt) == "table", "the dispatch answers a receipt: " .. json.encode(receipt))
+-- (b) a completion run that answers an error writes the row and a line, never silence
+local noted = selfloop.note_dispatch_failure({ id = silent_wake.wake.id, session_id = silent_session },
+  { error = "self_wake_not_dispatching" })
+check(type(noted) == "table" and noted.noted == true, "the failure is noted: " .. json.encode(noted))
+check(noted.retried == true, "and a still-claimed row goes back to pending so it retries")
+local silent_row = (json.decode(host.sql_query([[SELECT status, last_error, due_at FROM self_wakes WHERE id=?]],
+  json.encode({ silent_wake.wake.id })) or "[]") or {})[1] or {}
+check(tostring(silent_row.status) == "pending", "the row is not left dispatching: " .. json.encode(silent_row))
+check(tostring(silent_row.last_error):find("dispatch_failed", 1, true) ~= nil,
+  "and it says why on the row: " .. tostring(silent_row.last_error))
+check(tonumber(silent_row.due_at) ~= nil, "with a time to try again: " .. tostring(silent_row.due_at))
+-- (c) and the completion entry point reports it too: the self_wake branch of wa_completion_run never swallows
+dofile("lua/core/completions.lua") -- defines the global the node-thread calls
+local answer = wa_completion_run(json.encode({ kind = "self_wake", id = "no-such-wake",
+  owner = "master", session_id = silent_session }))
+check(type(answer) == "string" and tostring(answer):find("error", 1, true) ~= nil,
+  "a self_wake the node cannot admit answers an error (and the row/log got it): " .. tostring(answer):sub(1, 120))
+-- (6) THE ABANDONED RESUME SAYS SO, ONCE (r7-add, Fable 24/11). When the re-arm chain is spent the pause
+-- record says `abandoned: true` and the session simply stopped: nothing said so to the person who opened it. The
+-- line is read from that record, printed before any prompt, marked shown in the same record, and it never reaches
+-- the model - the function is a file read and a file write.
+local notice_dir = data_dir .. "/deploy-paused"
+local notice_session = memory.start_session("local", "chat", { user_id = "master", node_id = "n", title = "r7-add" })
+local function notice_record(session, extra)
+  local body = { session = session, since = r6_now - 600, to = "unknown", source = "install", request = "r1", by = "master" }
+  for k, v in pairs(extra or {}) do body[k] = v end
+  pcall(host.write_file, notice_dir .. "/" .. session .. ".json", json.encode(body))
+  return notice_dir .. "/" .. session .. ".json"
+end
+local notice_mod = dofile("lua/core/deploy_pause.lua")
+notice_mod.paused_dir = function() return notice_dir end
+-- (a) an abandoned resume: the line, ONCE, and no model call
+local ab_path = notice_record(notice_session, { abandoned = true, abandoned_at = r6_now - 60 })
+local runs_before = tonumber((json.decode(host.sql_query([[SELECT COUNT(*) AS n FROM runs]], "[]") or "[]") or {})[1].n) or 0
+local shown = notice_mod.abandoned_notice(notice_session)
+check(type(shown) == "table" and shown.text == notice_mod.ABANDONED_TEXT,
+  "an abandoned resume shows its one line: " .. json.encode(shown))
+check(shown.text == "this session was paused by an update and could not be resumed automatically; send any message to continue",
+  "verbatim, as Fable approved it")
+local runs_after = tonumber((json.decode(host.sql_query([[SELECT COUNT(*) AS n FROM runs]], "[]") or "[]") or {})[1].n) or 0
+check(runs_after == runs_before, "and it is not a model turn: runs unchanged (" .. runs_before .. ")")
+check(notice_mod.abandoned_notice(notice_session) == nil, "shown once: opening again says nothing")
+-- (b) a session that resumed normally shows nothing
+local normal_session = memory.start_session("local", "chat", { user_id = "master", node_id = "n", title = "r7-add normal" })
+notice_record(normal_session, {})
+check(notice_mod.abandoned_notice(normal_session) == nil, "a normal resume shows nothing")
+-- (c) the counter counts it, with the oldest age
+local counted = notice_mod.abandoned_count({ now = r6_now })
+check(type(counted) == "table" and tonumber(counted.count) >= 1, "the counter counts abandoned resumes: " .. json.encode(counted))
+check(tonumber(counted.oldest_age_seconds) ~= nil, "and reports the oldest age: " .. tostring(counted.oldest_age_seconds))
+check(tonumber(counted.count) < 2, "the one that showed, and the normal one, are not counted: " .. json.encode(counted))
+-- (7) A WAKE ON A SESSION HELD BY ANOTHER LIVE RUN DEFERS AT ONCE (r7c, 24/11). MEASURED live: a resume
+-- completion took a node-thread and never returned because its session was mid-turn in an attended CLI run; that
+-- lane then held three other sessions' wakes for 29 minutes. The rule: the wake costs one line and a due time, and
+-- the lane is free before a turn is attempted. This uses the REAL claim store - the held claim below is taken the
+-- same way agent.lua takes it - and asserts the call returns immediately, not after a wait.
+local busy_session = memory.start_session("local", "chat", { user_id = "master", node_id = "n", title = "r7c held" })
+-- The held state is a real claim in the store, taken exactly the way a turn takes it.
+local resources = dofile("lua/core/resources.lua")
+local held = resources.begin({ session_id = busy_session, user_id = "master", run_id = "run-held-1" })
+check(held and held.ok == true, "the test itself holds the session claim: " .. json.encode(held))
+check(pause_mod.claim_state(busy_session) == "held", "the store says the session is held")
+local busy_wake = selfloop.schedule({ in_seconds = 0, reason = pause_mod.RESUME_REASON, prompt = "resume" },
+  { session_id = busy_session, user_id = "master" })
+host.sql_exec([[UPDATE self_wakes SET status='dispatching', attempts=1, updated_at=? WHERE id=?]],
+  json.encode({ r6_now, busy_wake.wake.id }))
+local started_at = os.clock()
+local answer = selfloop.run_wake({ id = busy_wake.wake.id, owner = "master", session_id = busy_session })
+local elapsed = os.clock() - started_at
+check(type(answer) == "table" and answer.session_busy == true,
+  "the wake on a held session defers instead of waiting: " .. json.encode(answer))
+check(elapsed < 5, "and it returns at once, not after a wait: " .. tostring(elapsed) .. "s")
+local busy_row = (json.decode(host.sql_query([[SELECT status, last_error, due_at FROM self_wakes WHERE id=?]],
+  json.encode({ busy_wake.wake.id })) or "[]") or {})[1] or {}
+check(tostring(busy_row.status) == "pending", "the row is back to pending: " .. json.encode(busy_row))
+check(tostring(busy_row.last_error):find("session_busy", 1, true) ~= nil,
+  "and it says why: " .. tostring(busy_row.last_error))
+check(tonumber(busy_row.due_at) ~= nil and tonumber(busy_row.due_at) > r6_now, "with a time to try again")
+resources.finish({ session_id = busy_session, user_id = "master", run_id = "run-held-1" })
+check(pause_mod.claim_state(busy_session) == "free", "with the claim released the session is not held")
+-- (8) A COMPLETION THAT CANNOT BE ADMITTED COMES BACK (r7c, Fable 24/11). The placement line used to say
+-- "refusing rather than queueing" while the code actually queued on a background lane with a bounded queue; if that
+-- queue refuses the send, admission answers `not_started`, and the wake must return to `pending` with a due time -
+-- never `failed`, never gone. This is that path, driven through the tick with the same answer a full queue gives.
+local back_wake = selfloop.schedule({ in_seconds = 0, reason = "a wake that meets a full background queue", prompt = "retry",
+  now = r6_now }, { session_id = silent_session, user_id = "master" })
+check(back_wake and back_wake.ok, "the wake exists")
+local tick_out = selfloop.tick({ now = r6_now + 1, dispatch = function()
+  return { not_started = true, error = "completion_queue_full" }
+end })
+check(tonumber(tick_out.deferred) >= 1, "the tick defers completions the node could not admit: " .. json.encode(tick_out))
+check(tonumber(tick_out.unknown) == 0, "and none of them becomes unknown: " .. json.encode(tick_out))
+local back_row = (json.decode(host.sql_query([[SELECT status, last_error, due_at FROM self_wakes WHERE id=?]],
+  json.encode({ back_wake.wake.id })) or "[]") or {})[1] or {}
+check(tostring(back_row.status) == "pending", "it comes back as pending, never failed and never gone: " .. json.encode(back_row))
+check(tostring(back_row.last_error):find("completion_queue_full", 1, true) ~= nil,
+  "and the row names the refusal: " .. tostring(back_row.last_error))
+check(tonumber(back_row.due_at) ~= nil and tonumber(back_row.due_at) > r6_now, "with a due time to try again")
 for _, name in ipairs({ "pause", "resume", "paused", "cancel_requested", "cancelled_stop", "settle_interrupted", "defer_refused" }) do
   check(type(selfloop[name]) == "function", "the module exposes " .. name)
 end

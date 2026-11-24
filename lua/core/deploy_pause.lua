@@ -330,6 +330,77 @@ end
 --      bare 'cancelled', which is what `wa wake cancel` and an escalation write (lua/core/selfloop.lua:612, :822).
 --      Re-arming over a person's decision would override them, which no repair may do;
 --   4. NOTHING IS RE-ARMED WHILE A BUILD WAITS OR INSTALLS: that is the phase the pause is for.
+
+-- ONE LINE A PERSON SEES, NEVER A MODEL TURN (r7-add, Fable 24/11).
+--
+-- When the re-arm chain is spent the row becomes `resume_abandoned` and the pause record says
+-- `abandoned: true` - but the person opening the session saw an ordinary thread and nothing else, so the
+-- session simply stopped and nothing said so. This is the one visible line: read from the record when the
+-- session is opened (`wa chat --continue` / `--resume` / `--session`, the TUI and the plain view alike),
+-- printed before any prompt, and MARKED SHOWN in the same record so it is said once per abandoned pause.
+-- It costs no provider call: it is a file read and a file write, and nothing here can reach the agent.
+M.ABANDONED_TEXT = "this session was paused by an update and could not be resumed automatically; send any message to continue"
+
+-- Returns the text once and nil afterwards; nil for a session that never paused, resumed normally, or is
+-- still waiting. `opts.now` is only for a test; the record carries its own times.
+function M.abandoned_notice(session_id, opts)
+  if type(session_id) ~= "string" or session_id == "" then return nil end
+  local dir = M.paused_dir()
+  if not dir then return nil end
+  if type(host) ~= "table" or type(host.read_file) ~= "function" or type(host.write_file) ~= "function" then
+    return nil
+  end
+  local safe = session_id:gsub("[^%w%-_]", "")
+  if safe == "" then return nil end
+  local path = dir .. "/" .. safe .. ".json"
+  local ok, body = pcall(host.read_file, path)
+  if not ok or type(body) ~= "string" or body == "" then return nil end
+  local decoded = json.decode(body)
+  if type(decoded) ~= "table" or decoded.abandoned ~= true or decoded.abandoned_shown == true then return nil end
+  decoded.abandoned_shown = true
+  decoded.abandoned_shown_at = tonumber((opts or {}).now) or os.time()
+  pcall(host.write_file, path, json.encode(decoded))
+  return { session = session_id, text = M.ABANDONED_TEXT, abandoned_at = decoded.abandoned_at }
+end
+
+-- The count and the age of the oldest, for `wa status` and `wa health`: a session abandoned and never opened
+-- is a debt nobody sees, and the number is what makes it visible without opening each one.
+function M.abandoned_count(opts)
+  opts = opts or {}
+  local dir = M.paused_dir()
+  if not dir then return { count = 0 } end
+  local lister = opts.list or (type(host) == "table" and host.list_dir) or nil
+  if type(lister) ~= "function" then return { count = 0 } end
+  local ok, listing = pcall(lister, dir)
+  if not ok then return { count = 0 } end
+  -- `host.list_dir` answers a JSON text (`{entries:[...]}`), the same shape the sweep reads at :768.
+  local entries = listing
+  if type(entries) == "string" then
+    local decoded = json.decode(entries)
+    entries = type(decoded) == "table" and (decoded.entries or decoded) or nil
+  elseif type(entries) == "table" then
+    entries = entries.entries or entries
+  end
+  if type(entries) ~= "table" then return { count = 0 } end
+  local count, oldest = 0, nil
+  local now = tonumber(opts.now) or os.time()
+  for _, entry in ipairs(entries) do
+    local name = type(entry) == "string" and entry or (type(entry) == "table" and entry.name) or nil
+    if name and name:match("%.json$") then
+      -- A lister may answer bare names or paths; both have to read, so a path is not joined twice.
+      local path = name:match("^/") and name or (dir .. "/" .. name)
+      local read_ok, body = pcall(host.read_file, path)
+      local rec = read_ok and type(body) == "string" and json.decode(body) or nil
+      if type(rec) == "table" and rec.abandoned == true then
+        count = count + 1
+        local at = tonumber(rec.abandoned_at) or tonumber(rec.since)
+        if at and (not oldest or at < oldest) then oldest = at end
+      end
+    end
+  end
+  return { count = count, oldest_age_seconds = oldest and math.max(0, now - oldest) or nil }
+end
+
 M.RESUME_WINDOW_SECONDS = 6 * 3600
 
 -- HOW LONG A RESUME ROW MAY BE `dispatching` BEFORE IT COUNTS AS LOST (r5c, Fable, 24/11). 300 s, and it is this
@@ -382,6 +453,7 @@ end
 -- Returns "held" | "free" | "unknown", and ONLY "free" may unblock a reclaim: no capability, a raise, a shape this
 -- code does not know, or an unknown liveness all answer "unknown", which keeps the row.
 local function claim_state_of(session, opts)
+  opts = opts or {}
   if type(opts.claim_state) == "function" then return opts.claim_state(session) end
   if type(host) ~= "table" or type(host.resource) ~= "function" then return "unknown" end
   local asked, raw = pcall(host.resource, "list", "{}")
@@ -399,6 +471,12 @@ local function claim_state_of(session, opts)
   end
   return "free"
 end
+
+-- The same answer, for a caller that is not a resume sweep: `lua/core/selfloop.lua` asks it before a wake spends a
+-- turn (r7c, 24/11) - a wake whose session another run is working must defer, not queue a node-thread behind a
+-- person's turn. One implementation, asked of the store that holds the claim (the r5d rule), so the sweep and the
+-- wake can never disagree about who is running a session.
+M.claim_state = function(session, opts) return claim_state_of(session, opts or {}) end
 
 local function marker_path()
   local ok, paths = pcall(dofile, "lua/core/paths.lua")
