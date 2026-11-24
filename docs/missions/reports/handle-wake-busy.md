@@ -128,3 +128,45 @@ Rows: `test-handle-wake-busy` (new), `test-handle-wake`, `test-handle-wake-turn`
 
 Nothing failed, so there is no pre-existing red to name in this row's run: the load-sensitive `esc-stops-pty` row
 that failed in the operations-explain-and-survive runs did not fire here.
+
+
+## Review 24/11: a wake IN FLIGHT was not recognised as the notice
+
+Bug in the first cut, found by the orchestrator: `M.announce` treated `"delivered"` and `"claimed"` as
+"the wake already told the model", but `self_wakes` has no `claimed` status. A wake in flight is
+`status='dispatching'` (`lua/core/selfloop.lua`, `claim_due`: `UPDATE self_wakes SET status='dispatching'`),
+and `finish` writes `delivered` only at the turn's end. So while the wake's OWN turn was running, that turn's
+first script fell into the announce branch and put the handle in `pending_settled` again - the same news twice
+in one turn - and `withdraw_wake` could not help, because the row was no longer `pending`.
+The first row never hit it: its "delivered first" case only looked after `finish`.
+
+### The fix (`624cf185`)
+
+* the STATUS VOCABULARY IS NAMED ONCE, in the module that writes it: `selfloop.STATUS_PENDING`,
+  `selfloop.STATUS_DISPATCHING`, `selfloop.STATUS_DELIVERED`, plus `selfloop.wake_is_notice(status)`
+  (in flight OR delivered) and `selfloop.wake_is_owed(status)` (pending, i.e. withdrawable);
+* `lua/core/codemode_pending.lua` asks the store instead of comparing literals
+  (`M.wake_is_notice` / `M.wake_is_owed`, delegated through the cached module reference), so the two modules
+  cannot drift again - the drift was the bug;
+* a store this process cannot load answers "not the notice": the model is told rather than silenced, and the
+  withdrawal is then a no-op the store ignores anyway. The unsafe direction (silence) is never taken by
+  accident.
+
+### The case the row now has
+
+`scripts/test-handle-wake-busy.lua`, case A2 (**33 checks** now): a settled handle's wake is claimed through the
+product's own `selfloop.claim_due`, which leaves it `dispatching`; a script INSIDE that turn calls
+`pending.announce` and must not contain the handle; `selfloop.finish` then makes the row `delivered`, and the
+handle is still never announced in a script afterwards. The statuses in the row are read from
+`selfloop.STATUS_*`, never typed as literals.
+
+**It fails on the previous tip** (`f3b9df59`, a worktree of it):
+
+    lua error: ...:29: a script INSIDE the wake's own turn does not repeat what that turn is telling:
+    [{"cleanup":"terminated", ... }]   <- the in-flight handle, announced a second time
+
+and passes on the fix: `handle wake busy ok (33 checks)`.
+
+The other rows were re-run on the fixed tip, all green: `test-handle-wake` 21, `test-codemode-pending` 108,
+`test-codemode-wait-shape` 25, `test-operation-survives-turn` 16, `test-cli-wake-row` 30, `test-deploy-pause`
+100, `test-selfloop-pause` 129.
