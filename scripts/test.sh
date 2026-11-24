@@ -598,6 +598,12 @@ gate_run bash scripts/test-deploy-node-binaries.sh
 # fetched again (and that a hand-edited entry is not).
 gate_run bash scripts/test-release-install-exec.sh
 gate_run bash scripts/test-node-binaries.sh
+# THE TRANSFER ITSELF (24/11, the `wa update` that refused on `work`): a release-asset download with NO
+# total-time cap, a STALL window instead, resume on a partial file, and a refusal that names curl's exit, the
+# HTTP status, the bytes and the attempts - plus the progress line a follower reads. Every row is against a
+# local stub HTTP server on 127.0.0.1 (tests/fixtures/http-stub/server.py): no network, no fleet. The 55 MB row
+# is a real >120 s transfer, which is why this is here and not in scripts/fast.sh.
+gate_run bash scripts/test-node-download.sh
 # The glibc floor at both ends: the bytes an artifact needs against the libc the installing host has
 # (18/11, mail: a published binary needed GLIBC_2.39 on a glibc 2.35 node and was down two days). Hermetic -
 # fixture ELFs, a stand-in host version, and the three installers' own refusals.

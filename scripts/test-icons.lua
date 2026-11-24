@@ -92,6 +92,15 @@ ok(type(node_link) == "string" and node_link:find(
 ok(node_why == nil, "and needs no reason")
 ok(type(node_link) == "string" and node_link:find("curl -fsSL", 1, true) == 1 and node_link:find("fc-cache", 1, true) ~= nil,
   "with curl and the font cache rebuild, and nothing else: " .. tostring(node_link))
+-- A FONT IS A RELEASE ASSET TOO, so it gets the same transfer rules as the binaries (24/11): a bounded
+-- connect, a stall window instead of a cap on the whole file, and resume on a partial file. The cap is what
+-- refused a 55 MB asset on work; a font line with --max-time would be the same mistake.
+ok(type(node_link) == "string" and node_link:find("--connect-timeout", 1, true) ~= nil,
+  "the font transfer bounds the connect: " .. tostring(node_link))
+ok(type(node_link) == "string" and node_link:find("--speed-time", 1, true) ~= nil and node_link:find("--speed-limit", 1, true) ~= nil,
+  "the font transfer bounds a STALL, not the whole file: " .. tostring(node_link))
+ok(type(node_link) == "string" and node_link:find("--max-time", 1, true) == nil and node_link:find(" -m ", 1, true) == nil,
+  "the font transfer carries no total-time cap: " .. tostring(node_link))
 
 -- A TAGGED RELEASE uses ITS OWN tag - its assets live under it, not under node-<sha> (Fable, 24/11).
 local tagged = fetch_box("v0.1.2", true)
