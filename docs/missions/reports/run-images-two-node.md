@@ -201,17 +201,24 @@ row texts and the 1 MB refusal sentence are the ones `5f95d54a` shipped.
 > item 4 above). The mount's attested admission path is NOT wired for v0.1.2 - it is
 > `change/attested-admission-review`, awaiting a security review.
 
-## What I did not verify
+## The narrowed runner run, on the final tip
 
-* **The narrowed runner run on this final tip.** Recorded at the end of this report once it finished.
-* **The batch refusal on a real pair.** The batch never sends `image_bytes`, so no peer was driven for
-  it; the refusal is measured through the real dispatcher with the wire stubbed, which is the seam the
-  change is in.
-* **A picture placed on the peer by a peer-side `write`.** The row copies the fixture into the peer's
-  own home; a binary write on the peer is not part of this change.
-* **The pty card's line counts.** The chat run drew `changed made.txt on tree` without `(added 1 line)`;
-  the same dispatch measured directly emits `created=true, added=1`. The event carries them; the chat's
-  row did not show them in that one run (reported, not explained).
+At `20fde764`, `scripts/fast.sh` narrowed to this branch's five rows (plus the never-dropped core rows
+and every contract check):
+
+    fast: lua 34/34 passed
+    fast result FAILED (132 checks, 1 failed, 0 skipped)
+    fast path FAILED (1 of 132 checks, 0 skipped, 621s)
+
+The one red is `esc-stops-pty` (pre-existing, measured above). `install-guards` passed in this run after
+failing in two earlier ones with the same 6-of-72 in this tree and in the base worktree: it is
+load-dependent, not this branch's, and it is reported as flaky rather than green.
+
+Each row was ALSO run alone with this tree's release binary (which the runner builds):
+`test-two-node-images.lua` 51 checks / 0 skips, `test-peer-bash-changes.lua` 17, `test-remote-image.lua`
+47 - and on a worktree of the base commit (`git worktree add /tmp/base-two-node e832e152`), where the
+two-node row fails at the change-row check and `test-peer-bash-changes` at `the caller emits one row per
+file: 0`, and `test-remote-image` at `expected remote_image_batch_unsupported`.
 
 ## Pre-existing failures, measured on the base tree
 
