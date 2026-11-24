@@ -86,17 +86,116 @@ local function request_reader()
   return request_module or nil
 end
 
+-- THE DEPLOY THAT IS RUNNING IS AN INSTALL IN PROGRESS (r8c 21:15-21:27Z, Fable 24/11).
+--
+-- MEASURED on this node: the sentinel CLAIMED the request for 39e862d6 and started deploy.sh detached, moving the
+-- request to `done/` 8 s later; deploy.sh then fetched and COMPILED for 430 s and wrote the deploy-pending marker
+-- only after the build (it belongs to scripts/upgrade.sh, which runs then). For those 430 s there was no request, no
+-- claimed request and no marker, so release_due concluded the install was over: two paused sessions were released,
+-- each ran a paid resume turn that found installed.txt unchanged and was told "[deploy] the update did not happen",
+-- and the marker then paused them again for a second release and a second paid turn. One install, two turns each.
+--
+-- The deploy's own state closes that hole (scripts/lib/deploy-alive.sh writes it at the start of scripts/deploy.sh
+-- and its exit trap clears it). It is not a second state machine: `M.waiting` treats it as one more reason an
+-- install is in progress, so every caller that already refuses or pauses for a waiting build does so for a running
+-- one too, and release_due releases only when there is no request, no claimed request, no marker AND no live deploy.
+M.ALIVE_FILE = "deploy-alive.json"
+-- How long a recorded deploy may hold a session when the reader CANNOT look at the process table (no /proc). The
+-- installer's own wait is 1800 s (scripts/upgrade.sh DEPLOY_IDLE_BOUND), and a compile is minutes (430 s measured),
+-- so this is the same bound: a killed deploy on such a host holds a session for at most this long, and then the
+-- release says the update did not happen, which by then is true.
+M.ALIVE_BOUND = 1800
+
+function M.alive_path()
+  local ok, paths = pcall(dofile, "lua/core/paths.lua")
+  if not ok then return nil end
+  return paths.data() .. "/" .. M.ALIVE_FILE
+end
+
+-- The start time a pid began at (field 22 of /proc/<pid>/stat, clock ticks since boot) and its state letter, or
+-- nil when the file cannot be read. A pid on its own is NOT enough: pids are recycled, and a recycled one would hold
+-- every session for the life of a stranger - so the record carries the start time and the reader compares it.
+function M.pid_start(pid, opts)
+  pid = tonumber(pid)
+  if not pid or pid <= 0 then return nil end
+  opts = opts or {}
+  local reader = opts.read_file or (type(host) == "table" and host.read_file or nil)
+  if type(reader) ~= "function" then return nil end
+  local ok, body = pcall(reader, "/proc/" .. tostring(math.floor(pid)) .. "/stat")
+  if not ok or type(body) ~= "string" or body == "" then return nil end
+  -- `comm` may contain spaces and parentheses: everything up to the LAST ')' is the pid and the command, and the
+  -- fields after it start at field 3 (state); starttime (field 22) is the 20th of them.
+  local tail = body:match("%)%s*(.*)$")
+  if not tail then return nil end
+  local fields = {}
+  for word in tail:gmatch("%S+") do fields[#fields + 1] = word end
+  local start = tonumber(fields[20])
+  if not start then return nil end
+  return start, fields[1]
+end
+
+-- Can this machine's process table be read at all? `/proc/1/stat` is on every Linux, and absent on Windows and in a
+-- sandbox that hides /proc; the answer decides whether a missing pid means "the deploy is gone" (release now) or
+-- "cannot tell" (hold until the record's own bound).
+function M.proc_available(opts)
+  if opts and opts.proc_available ~= nil then return opts.proc_available == true end
+  return M.pid_start(1, opts) ~= nil
+end
+
+-- The deploy's own running state, or nil and why there is none. The same shape the marker and a claimed request
+-- answer in (`to`, `since`, `bound_seconds`, `source`), so no caller can tell them apart in the wrong way.
+function M.alive(now, opts)
+  opts = opts or {}
+  now = tonumber(now) or os.time()
+  local path = opts.alive_path or M.alive_path()
+  if not path then return nil, "no_path" end
+  local reader = opts.read_file or (type(host) == "table" and host.read_file or nil)
+  if type(reader) ~= "function" then return nil, "unreadable" end
+  local ok, body = pcall(reader, path)
+  if not ok or type(body) ~= "string" or body == "" then return nil, "absent" end
+  local decoded_ok, state = pcall(json.decode, body)
+  if not decoded_ok or type(state) ~= "table" then return nil, "unreadable" end
+  local since = tonumber(state.since) or 0
+  local bound = tonumber(state.bound_seconds) or M.ALIVE_BOUND
+  if bound <= 0 then bound = M.ALIVE_BOUND end
+  if since <= 0 then return nil, "no_since" end
+  if now > since + bound then return nil, "expired" end
+  local pid = tonumber(state.pid)
+  if not pid or pid <= 0 then return nil, "no_pid" end
+  local answer = { source = "deploy", to = tostring(state.commit or state.to or ""), since = since,
+    bound_seconds = bound, by = "the deploy's own running state", pid = pid }
+  local measured, proc_state = M.pid_start(pid, opts)
+  if measured ~= nil then
+    -- A LIVE PID IS ONLY THIS DEPLOY IF IT IS THE SAME PROCESS (start time) AND NOT A ZOMBIE (a killed child its
+    -- parent has not reaped yet is on the table but is not running).
+    if proc_state == "Z" then return nil, "zombie" end
+    local recorded = tonumber(state.pid_start)
+    if recorded ~= nil and measured ~= recorded then return nil, "pid_recycled" end
+    return answer
+  end
+  if M.proc_available(opts) then return nil, "not_running" end
+  -- NO PROCESS TABLE TO ASK: the record's own bound is the only thing that can end this hold, and the answer says so
+  -- rather than pretending the deploy is proven alive.
+  answer.unverified = true
+  return answer
+end
+
+
 function M.waiting(now, opts)
   opts = opts or {}
   now = tonumber(now) or os.time()
   local marker = (opts.read or M.read)(now)
   if marker then return marker end
   local module = request_reader()
-  if not module then return nil end
-  local read = opts.read_request or module.read
-  local found = read(now, opts.request)
-  if found then return found end
-  return nil
+  if module then
+    local read = opts.read_request or module.read
+    local found = read(now, opts.request)
+    if found then return found end
+  end
+  -- AND A DEPLOY THAT IS RUNNING IS AN INSTALL IN PROGRESS (r8c 21:15Z): the request file has left the box and the
+  -- installer's marker is not written until its build is done, so this is the only thing that says the install is
+  -- still coming. `M.alive` answers the same shape the other two do, so every caller treats it the same way.
+  return M.alive(now, opts)
 end
 
 -- How long after the pause the session asks to continue. Long enough for a swap and a restart, short

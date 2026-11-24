@@ -1427,6 +1427,12 @@ GATE_ROOT="$GATE_ROOT" WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-kept-message
 # suspected "gap" is covered by the CLAIMED lane; a due resume held by a waiting deploy spends no resume turn; and a
 # session that paused three times inside one install is owed ONE paid resume turn, not three.
 GATE_ROOT="$GATE_ROOT" WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-resume-window.lua" "$BIN" --db "$DB.resume-window" | grep 'resume window ok'
+# A DEPLOY THAT IS RUNNING HOLDS A PAUSED SESSION (r8c 21:15Z): the sentinel detaches the deploy and moves the request
+# to done/ in 8 s, so for the minutes a Rust install compiles there is no request, no claimed request and no marker -
+# the deploy's own running state is what says the install is still coming. Its reader's judgement (start time,
+# zombie, recycled pid, the record's own bound, no /proc), the wait every caller sees, and the release that must not
+# happen while it runs.
+GATE_ROOT="$GATE_ROOT" WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-deploy-alive.lua" "$BIN" --db "$DB.deploy-alive" | grep 'deploy alive ok'
 WA_BIN="$BIN" gate_run bash scripts/test-deploy-bound.sh
 # The installer's own pause marker is the other half of the same signal: its bytes, its atomic write and its
 # clear (`scripts/lib/deploy-signal.sh`). Its reader's judgement is the Lua row above.

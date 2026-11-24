@@ -1173,7 +1173,24 @@ if ! wa_deploy_lock_claim "$DEPLOY_LOCK" "$DEPLOY_LOCK_LOG" "$SOURCE_ROOT"; then
   fail "${WA_DEPLOY_LOCK_REASON:-another deploy/onStale build holds $DEPLOY_LOCK; nothing built}"
 fi
 DEPLOY_LOCK_HELD=1
-trap 'wa_deploy_lock_release "$DEPLOY_LOCK" "$DEPLOY_LOCK_LOG"' EXIT
+# THE DEPLOY SAYS IT IS RUNNING, FROM HERE UNTIL IT EXITS (r8c 21:15Z). The sentinel starts this script DETACHED and
+# moves the request to `done/` the moment it has started it; this script then fetches and COMPILES for minutes and
+# writes the installer's marker only after the build, so for that whole stretch no request, no claimed request and no
+# marker said an install was coming - and every paused session was released into a paid turn that found installed.txt
+# unchanged and was told the update did not happen (two sessions, two turns each, measured 24/11 21:15-21:27Z).
+# scripts/lib/deploy-alive.sh writes one small file, this trap clears it, and lua/core/deploy_pause.lua holds the
+# sessions while the pid it names is alive. Best effort on purpose: a file that cannot be written must never stop an
+# install - what it costs is said on the deploy's own log.
+DEPLOY_ALIVE_DIR="${WASM_AGENT_DATA:-${WASM_AGENT_HOME:-$HOME}/.wasm-agent}"
+DEPLOY_ALIVE_LIB="$ROOT/scripts/lib/deploy-alive.sh"
+[ -r "$DEPLOY_ALIVE_LIB" ] && . "$DEPLOY_ALIVE_LIB"
+if command -v wa_deploy_alive_write >/dev/null 2>&1; then
+  wa_deploy_alive_write "$DEPLOY_ALIVE_DIR" "${WA_DEPLOY_IDLE_BOUND:-1800}" "${COMMIT:-unknown}" \
+    || say "could not write the deploy-running state in $DEPLOY_ALIVE_DIR: a session paused in this deploy may be resumed while it compiles"
+else
+  say "the deploy-alive library is missing ($DEPLOY_ALIVE_LIB): a session paused in this deploy may be resumed while it compiles"
+fi
+trap 'command -v wa_deploy_alive_clear >/dev/null 2>&1 && wa_deploy_alive_clear "$DEPLOY_ALIVE_DIR"; wa_deploy_lock_release "$DEPLOY_LOCK" "$DEPLOY_LOCK_LOG"' EXIT
 
 # 3c. PIN THE COMMIT THE BUILD READS. The build used to read the tree this command was pointed at, and on
 #     wasm_the_first a landing merged into the canonical checkout while a deploy was staging it: the staged
@@ -2233,6 +2250,7 @@ ship_file "$ROOT/scripts/lib/turn-guard.sh" "$INSTALL_DIR/scripts/lib/turn-guard
 ship_file "$ROOT/scripts/lib/build-status.sh" "$INSTALL_DIR/scripts/lib/build-status.sh" "scripts/lib/build-status.sh beside deploy.sh"
 ship_file "$ROOT/scripts/lib/deploy-lock.sh" "$INSTALL_DIR/scripts/lib/deploy-lock.sh" "scripts/lib/deploy-lock.sh beside deploy.sh (the build lock a dead holder cannot block)"
 ship_file "$ROOT/scripts/lib/deploy-signal.sh" "$INSTALL_DIR/scripts/lib/deploy-signal.sh" "scripts/lib/deploy-signal.sh beside deploy.sh (the deploy-pending signal)"
+ship_file "$ROOT/scripts/lib/deploy-alive.sh" "$INSTALL_DIR/scripts/lib/deploy-alive.sh" "scripts/lib/deploy-alive.sh beside deploy.sh (the deploy runs for minutes before it writes the deploy-pending signal)"
 # ...and the unit a deploy installs when the machine has nothing outside owning the watcher: the NEXT deploy
 # runs the copy beside the binary, and without this file the branch that gives a fresh install a supervisor
 # would quietly fall back to the path that cannot start one.

@@ -216,6 +216,15 @@ end
 -- What a turn that did NOT start says: the wait, and that nothing was lost. The first word is a name the
 -- log, the tests and `wa session status` can match on (`deploy_waiting`), like `no_dispatchable_tools`.
 function M.refusal(wait, now)
+  -- A DEPLOY THAT IS RUNNING IS NOT A REQUEST TO WITHDRAW (r8c 21:15Z): it is a detached process with no file in the
+  -- box left to withdraw, so the sentence names it and says when it ends instead of naming a `request withdraw` that
+  -- would refuse.
+  if tostring((wait or {}).source) == "deploy" then
+    return "deploy_waiting: " .. M.say(wait, now) .. ". This node starts no new turn while a deploy is being "
+      .. "installed - a turn in flight is exactly what keeps the node from going idle - and this turn did not "
+      .. "start. Nothing was lost: this is a wait, not a failure, and the work starts again once the swap is done. "
+      .. "A running turn pauses after its current step instead (lua/core/deploy_pause.lua). " .. M.RETRY
+  end
   return "deploy_waiting: " .. M.say(wait, now) .. ". This node starts no new turn while a build is "
     .. "waiting for it or being installed - a turn in flight is exactly what keeps the node from going "
     .. "idle - and this turn did not start. Nothing was lost: this is a wait, not a failure, and the work "
