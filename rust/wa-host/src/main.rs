@@ -419,7 +419,12 @@ fn main() {
         // file, embedded at build time) and the bytes' own name (commit, release tag or pin). A version alone
         // says nothing about WHICH bytes - that was the 18/11 lie - and a sha alone does not say which release
         // a person is running (Victor, 23/11).
-        println!("wasm-agent v{} \u{00b7} v{}", build_info::product_version(), identity);
+        // THE `v` IS THE ONE build_info::display_label ADDS, never a literal here: a label that already
+        // names a release (`v0.1.1`, the tag `scripts/linux/bootstrap.sh` writes into installed.txt) is
+        // printed as it is. A literal `v{}` printed `vv0.1.1` on every node installed from the public
+        // channel, measured 24/11 (scripts/test-version-prints-once.sh).
+        println!("wasm-agent v{} \u{00b7} {}", build_info::product_version(),
+            build_info::display_label(&identity));
         return;
     }
     // Every node and node-thread gets rg, including service launches with a sparse PATH. Installation

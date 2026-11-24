@@ -990,6 +990,9 @@ check install-front-door bash scripts/test-install.sh
 # publisher, its refusals and the freshness verdict are judged here against a fake GitHub - no build, no
 # upload, no vault. 2 s.
 check linux-channel bash scripts/test-linux-channel.sh
+# ONE `v` IN THE VERSION LINE (Fable, 24/11): `wa --version` on a node installed from the public channel printed
+# `vv0.1.1` (the label IS the published release tag). Four install records through the real binary, no network.
+check version-once bash scripts/test-version-prints-once.sh
 # `wa <verb> --help` IS A QUESTION AND RUNS NOTHING (Fable 23/11): every acting verb the tree declares, held to a
 # usage line, exit 0 and no other output - measured 09:30Z, `wa update --help` ran a local update. Hermetic, ~10 s.
 check cli-help bash scripts/test-cli-help.sh
