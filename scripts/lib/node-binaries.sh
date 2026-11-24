@@ -445,16 +445,21 @@ wa_node_release_list() {
     return 0
   fi
   if command -v gh >/dev/null 2>&1; then
-    started=$SECONDS
-    while [ "$seen" -lt "$limit" ] && [ $((SECONDS - started)) -lt "$budget" ] && [ "$page" -le 50 ]; do
-      batch="$(timeout "$budget" gh api "repos/$repo/releases?per_page=100&page=$page" --jq '.[].tag_name' 2>/dev/null \
-        | grep -E '^node-[0-9a-f]{12}$' || true)"
-      [ -n "$batch" ] || break
-      printf '%s\n' "$batch"
-      seen=$((seen + $(printf '%s\n' "$batch" | grep -c .)))
-      page=$((page + 1))
-    done
-    [ "$seen" -gt 0 ] && return 0
+    # THE LIMIT IS THE CALLER'S, NOT THE PAGE'S (24/11, Fable's review). A page carries 100 tags and
+    # this loop kept whole pages, so `wa_node_release_list <repo> 20` answered with up to 100 - a bound
+    # that lied about itself. The walk is collected and cut to <limit> before it is printed.
+    tags="$(
+      started=$SECONDS; page=1; seen=0
+      while [ "$seen" -lt "$limit" ] && [ $((SECONDS - started)) -lt "$budget" ] && [ "$page" -le 50 ]; do
+        batch="$(timeout "$budget" gh api "repos/$repo/releases?per_page=100&page=$page" --jq '.[].tag_name' 2>/dev/null \
+          | grep -E '^node-[0-9a-f]{12}$' || true)"
+        [ -n "$batch" ] || break
+        printf '%s\n' "$batch"
+        seen=$((seen + $(printf '%s\n' "$batch" | grep -c .)))
+        page=$((page + 1))
+      done
+    )"
+    if [ -n "$tags" ]; then printf '%s\n' "$tags" | head -n "$limit"; return 0; fi
   fi
   command -v curl >/dev/null 2>&1 || return 0
   curl -fsSL -m 60 "https://api.github.com/repos/$repo/releases?per_page=$limit" 2>/dev/null \
