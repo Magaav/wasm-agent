@@ -88,6 +88,34 @@ if [ "$bad" != 0 ]; then
 fi
 ok; ok
 
+# ---- the node SAYS SO, once per name, and names itself --------------------------------------
+# A node that carries a git name says so out loud (rust/wa-operation/src/lib.rs, report_git_env_withheld):
+# once per name per serving pid, with that pid and ITS OWN command line, so the next occurrence names its
+# own source instead of costing the investigation this mission was. Two spawns of one node must leave ONE
+# line - a line per spawn would bury the log a session reads.
+mkdir -p "$S/home-c"
+cp "$S/home-a/.gitconfig" "$S/home-c/.gitconfig"
+env -u WASM_AGENT_VAULT_URL -u WASM_AGENT_OPENCODE_GO_VAULT_URL     HOME="$S/home-c" WASM_AGENT_HOME="$S/home-c" WASM_AGENT_LUA_ROOT="$ROOT"     WASM_AGENT_RENDEZVOUS= WASM_AGENT_RELAY= WASM_AGENT_MANAGED=0     GIT_DIR="$HOOK_GIT_DIR" GIT_INDEX_FILE="$HOOK_GIT_DIR/index" GIT_WORK_TREE="$S1"     WA_SCRIPT="$ROOT/scripts/test-git-env-isolation-report.lua"     "$BIN" --db "$S/report.db" >"$S/c.log" 2>&1 &
+pidc=$!
+wait "$pidc"; cc=$?
+[ "$cc" = 0 ] || no "the reporting node exited $cc: $(tail -2 "$S/c.log" | tr '\n' ' ')"
+grep -q 'git env report ok' "$S/c.log" || no "the reporting node printed no verdict: $(tail -2 "$S/c.log" | tr '\n' ' ')"
+ok
+line=$(grep -c '\[tool-env\] withheld GIT_DIR from a tool child' "$S/c.log")
+[ "$line" = 1 ] || no "the node reported GIT_DIR withheld $line time(s) for two spawns, wanted exactly once"
+ok
+index_line=$(grep -c '\[tool-env\] withheld GIT_INDEX_FILE from a tool child' "$S/c.log")
+[ "$index_line" = 1 ] || no "GIT_INDEX_FILE was reported $index_line time(s), wanted once"
+ok
+grep -q "pid $pidc cmdline" "$S/c.log"   || no "the line does not name the serving pid $pidc: $(grep 'withheld GIT_DIR' "$S/c.log" | tail -1)"
+ok
+grep -q "$S/report.db" "$S/c.log"   || no "the line does not carry the serving process's own command line: $(grep 'withheld GIT_DIR' "$S/c.log" | tail -1)"
+ok
+if grep 'withheld GIT_DIR' "$S/c.log" | grep -q 'printenv'; then
+  no "the line carries the CHILD's command line, not the serving process's"
+fi
+ok
+
 # ---- and now from git itself, not from the sessions' own bookkeeping ------------------------
 subjects_a="$(gitq -C "$S1" log --format=%s)"
 subjects_b="$(gitq -C "$S2" log --format=%s)"

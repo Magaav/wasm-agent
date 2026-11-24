@@ -177,13 +177,60 @@ pub fn scrub_git_env(command: &mut std::process::Command) {
     }
 }
 
+/// The `GIT_*` names this serving process has already reported, so a node that hands its children a redirect
+/// says so ONCE per name instead of on every spawn (a session starts hundreds of children a minute, and a
+/// line per spawn would bury the node's own log). The key carries the pid as well as the name: the report is
+/// about ONE serving process, and a restarted node owes its reader the line again.
+static REPORTED_GIT_ENV: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+
+/// This process's own command line, so a reader of the log line can tell WHICH node exported the name.
+/// `/proc/self/cmdline` is NUL-separated and is what the kernel records; the argument list is the fallback
+/// for a platform without it.
+fn serving_cmdline() -> String {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(raw) = std::fs::read("/proc/self/cmdline") {
+            let text = String::from_utf8_lossy(&raw).replace('\0', " ");
+            let text = text.trim().to_string();
+            if !text.is_empty() {
+                return text;
+            }
+        }
+    }
+    std::env::args().collect::<Vec<_>>().join(" ")
+}
+
+/// Say it once per (name, serving pid): the node's own environment carries a git name that could choose the
+/// repository every child of it commits in (see `GIT_ENV_KEEP`). Naming the serving pid and its command line
+/// is the point - the next occurrence names its own source instead of costing an investigation like the one
+/// in `docs/missions/reports/session-isolation-git.md`.
+fn report_git_env_withheld(name: &str) {
+    let key = format!("{}|{}", std::process::id(), name);
+    let reported = REPORTED_GIT_ENV.get_or_init(|| Mutex::new(std::collections::HashSet::new()));
+    let mut seen = match reported.lock() { Ok(guard) => guard, Err(poisoned) => poisoned.into_inner() };
+    if !seen.insert(key) {
+        return;
+    }
+    drop(seen);
+    eprintln!(
+        "[tool-env] withheld {name} from a tool child: this node's own environment carries it, and it can point a git command at another repository - the child runs with it removed, whatever directory it cd's into. Reported once per name and serving process: pid {} cmdline {}",
+        std::process::id(),
+        serving_cmdline()
+    );
+}
+
 /// Remove the denied names from a child's inherited environment. Called by both platform spawns before
 /// `spec.env` is applied, so a granted name can still be handed over explicitly.
 #[allow(dead_code)]
 pub(crate) fn scrub_inherited_env(command: &mut std::process::Command) {
     for (name, _) in std::env::vars_os() {
         let name = name.to_string_lossy().to_string();
-        if denied_env(&name) { command.env_remove(&name); }
+        if denied_env(&name) {
+            command.env_remove(&name);
+            // A git name that could choose a repository is also SAID, once per serving process, with the pid
+            // and command line of the node that carries it.
+            if git_env_withheld(&name.to_ascii_uppercase()) { report_git_env_withheld(&name); }
+        }
     }
 }
 
