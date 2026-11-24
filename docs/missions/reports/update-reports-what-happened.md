@@ -107,6 +107,60 @@ On the base (`origin/main`, a separate worktree - never a stash) the same row fa
 `the first line must name the target and download-or-build, got: queued: the sentinel will deploy ...`, which is
 the command as it was.
 
+It passes with the tree's own binary built by this run
+(`/home/victor/wasm-agent/target/m-update-reports-what-happened/release/wa`, build aa897656) as well as with
+the installed one, and `scripts/test-update.sh` (the `/update` route row) still passes beside it.
+
+## Checks run, and what they said
+
+Narrowed fast path (`WA_FAST_ROWS=/tmp/rows-update-follow.txt`, no full suite, no suite lock), 603 s, on this
+node with `CARGO_TARGET_DIR=/home/victor/wasm-agent/target/m-update-reports-what-happened`:
+
+    fast: narrowed by the landing plan (/tmp/rows-update-follow.txt): 37 of 369 Lua rows
+    fast result FAILED (136 checks, 1 failed, 1 skipped)
+
+The eight Lua rows this change touches all **pass**: `test-update-banner.lua`, `test-cli-notice.lua`,
+`test-cli-view.lua`, `test-remote-update.lua`, `test-node-dispatch-wiring.lua`, `test-update-watcher.lua`,
+`test-update-release.lua`, `test-update-all.lua`. The one skip is `test-cli-view.lua`'s
+`reserve agreement: no WASM_AGENT_MODEL_LIMITS fixture` (it is declared: `scripts/test.sh` runs that file
+again with one).
+
+The one failure is **pre-existing on main and not this branch's**:
+
+    FAIL orphan-tests: scripts/test-one-turn.sh: orphaned and not declared in scripts/test-orphans.json
+
+`scripts/test-one-turn.sh` is tracked in the base (`git log -1 -- scripts/test-one-turn.sh` = cdb44ef7, a
+commit that is not this branch's, and the file is present in the base worktree), so any round's full check fails
+it; nothing in this branch adds, moves or wires a `scripts/test-*.sh` that `scripts/test-orphans.json` does not
+know. `scripts/test-update-follow.sh` is wired into `scripts/test.sh` (line 987) and is not an orphan.
+
+Also run singly, on the tree's binary: `scripts/test-update-follow.sh` (`update follow ok`) and
+`scripts/test-update.sh` (the `/update` route: "the real sentinel's request box is untouched"). The fast
+path's own `cli-help` contract check passed with the new usage lines.
+
+## A defect in the runner, found while running this
+
+The first three narrowed runs of this round exited 2 after eight seconds with **nothing on any stream**. The
+cause is `scripts/fast.sh:288`:
+
+    exec 8>>"$work/lock" 2>/dev/null || true
+
+`exec` with only redirections applies them to the shell for the rest of its life, so from that line on **the
+run's stderr is `/dev/null`** - including the runner's own refusal
+(`fast: narrowed run REFUSED by <file>: ... is not a row this run can execute`), its `--jobs` progress and any
+`set -x` trace. A plan that names one bad row makes the run vanish. Proposed (NOT applied here - the runner
+is not this brief's subject and another round may own it):
+
+    --- a/scripts/fast.sh
+    +++ b/scripts/fast.sh
+    @@ -288 +288 @@
+    -exec 8>>"$work/lock" 2>/dev/null || true
+    +exec 8>>"$work/lock" || true
+
+(and, so a broken lock is still quiet, wrap the open in a subshell test:
+`if ! { exec 8>>"$work/lock"; } 2>/dev/null; then ...; fi` - which does not leak the redirection).
+The rows file correctly named every row; the runner could not say why it refused.
+
 ## Texts to approve
 
 Every string this branch adds, verbatim (U+00B7 is the `·` in each line; U+2014 the `—`):
