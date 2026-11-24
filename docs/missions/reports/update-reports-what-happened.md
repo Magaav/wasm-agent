@@ -116,11 +116,35 @@ the installed one, and `scripts/test-update.sh` (the `/update` route row) still 
 
 ## Checks run, and what they said
 
-Narrowed fast path (`WA_FAST_ROWS=/tmp/rows-update-follow.txt`, no full suite, no suite lock), 603 s, on this
-node with `CARGO_TARGET_DIR=/home/victor/wasm-agent/target/m-update-reports-what-happened`:
+Narrowed fast path (`WA_FAST_ROWS=/tmp/rows-update-follow.txt`, no full suite, no suite lock), on this node
+with `CARGO_TARGET_DIR=/home/victor/wasm-agent/target/m-update-reports-what-happened`.
+
+Before the rebase (base 5bb28d8a), 603 s:
 
     fast: narrowed by the landing plan (/tmp/rows-update-follow.txt): 37 of 369 Lua rows
     fast result FAILED (136 checks, 1 failed, 1 skipped)
+
+After the rebase onto 2cdc2dc1, 516 s (the numbers the reviewer should read):
+
+    fast: narrowed by the landing plan (/tmp/rows-update-follow.txt): 37 of 369 Lua rows
+    fast: lua 37/37 passed (60 excluded: scripts/fast-path.exclude)
+    fast result FAILED (139 checks, 2 failed, 0 skipped)
+
+The two failures are the runner's own never-dropped contract checks, both **load- and holder-sensitive and
+outside this change** (no file this branch touches is on their path):
+
+    FAIL deploy-bound:   expected one install, saw 0: deploy proceeding: held 31s, past the 1s bound, and
+                         none of the 2 holder(s) of the node can be hurt by it
+    FAIL esc-stops-pty:  bash: Esc gives back a usable prompt at once (300 ms idle, 120 ms per unit of load,
+                         never over 2000)
+
+`deploy-bound` failed the same way in both runs while this node was installing and two sessions were live
+(the check needs the node's holders to pause and an install to land inside a bound); `esc-stops-pty` passed in
+the earlier runs and failed only in the one that ran beside an install. Neither was run singly: per the
+orchestrator's 24/11 urgent note a row that drives `scripts/deploy.sh`/`scripts/upgrade.sh` goes through the
+narrowed runner only - and `scripts/test-update-follow.sh`, the row this branch adds, never runs either script
+(its installer is a stub and its whole home is scratch, guarded by `scripts/lib/scratch-home.sh`). `main-health`
+owns those two.
 
 The eight Lua rows this change touches all **pass**: `test-update-banner.lua`, `test-cli-notice.lua`,
 `test-cli-view.lua`, `test-remote-update.lua`, `test-node-dispatch-wiring.lua`, `test-update-watcher.lua`,
