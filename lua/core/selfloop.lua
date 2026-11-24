@@ -392,6 +392,38 @@ local function entry_matches(entry, topic, payload, row)
   return false
 end
 
+-- ONE KEPT TURN PER SESSION (r8c 2, Fable 24/11). MEASURED: session 99946441 accumulated SEVEN pending
+-- "kept: the start was refused, so this message is the session's next turn" rows between 16:35Z and 16:49Z.
+-- The writer was lua/core/chat.lua's `keep_refused_message`, which scheduled a NEW wake on every refused start -
+-- so a runner that retried the same message seven times queued the same promise seven times, and the session's
+-- next turn would have replayed that message up to seven times. r8a3's merge/withdraw could not help: it folds
+-- RESUMES and `handle:` wakes (M.withdraw_siblings), and a kept message is neither.
+--
+-- The rule: a session has at most ONE pending kept message. A later refusal RE-ARMS that row with the words as
+-- they stand now (the latest message is the one kept) instead of adding another, and answers the id of the row
+-- it reused so the CLI's line names a wake that exists.
+function M.keep_pending_message(session_id, owner, prompt, reason, opts)
+  M.setup()
+  session_id, owner = tostring(session_id or ""), tostring(owner or "master")
+  prompt, reason = tostring(prompt or ""), tostring(reason or "")
+  if session_id == "" or prompt == "" or reason == "" then return nil end
+  local now = clock(opts)
+  local seconds = tonumber(opts and opts.in_seconds) or 60
+  local existing = query([[SELECT id FROM self_wakes WHERE session_id=? AND owner=? AND reason=?
+    AND status='pending' ORDER BY created_at LIMIT 1]], { session_id, owner, reason })[1]
+  if existing then
+    exec([[UPDATE self_wakes SET prompt=?, due_at=?, updated_at=? WHERE id=? AND status='pending']],
+      { prompt, now + seconds, now, tostring(existing.id) })
+    return { ok = true, id = tostring(existing.id), reused = true }
+  end
+  local armed = M.schedule({ in_seconds = seconds, reason = reason, prompt = prompt },
+    { session_id = session_id, user_id = owner })
+  if type(armed) == "table" and type(armed.wake) == "table" and armed.wake.id then
+    return { ok = true, id = tostring(armed.wake.id), reused = false }
+  end
+  return nil
+end
+
 function M.schedule(args, ctx)
   M.setup()
   args = args or {}

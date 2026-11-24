@@ -1444,14 +1444,13 @@ function M.keep_refused_message(session_id, message, owner, refusal)
   if type(session_id) ~= "string" or session_id == "" then return nil end
   local loaded, selfloop = pcall(dofile, "lua/core/selfloop.lua")
   if not loaded or type(selfloop) ~= "table" or type(selfloop.schedule) ~= "function" then return nil end
-  local armed = selfloop.schedule({
-    in_seconds = 60,
-    reason = "kept: the start was refused, so this message is the session's next turn",
-    prompt = message,
-  }, { session_id = session_id, user_id = tostring(owner or "master") })
-  if type(armed) == "table" and type(armed.wake) == "table" and armed.wake.id then
-    return tostring(armed.wake.id)
-  end
+  -- ONE KEPT TURN PER SESSION (r8c 2): seven refusals of the same session used to mean seven queued copies of
+  -- the same message (measured: session 99946441, 16:35-16:49Z). The dedupe lives in the module that owns the
+  -- ledger (`selfloop.keep_pending_message`), so a CLI, a runner and a test all get the same rule.
+  if type(selfloop.keep_pending_message) ~= "function" then return nil end
+  local armed = selfloop.keep_pending_message(session_id, owner, message,
+    "kept: the start was refused, so this message is the session's next turn", { in_seconds = 60 })
+  if type(armed) == "table" and armed.id then return tostring(armed.id) end
   return nil
 end
 
