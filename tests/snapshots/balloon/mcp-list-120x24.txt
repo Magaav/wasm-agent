@@ -1,0 +1,16 @@
+MCP servers
+
+5 servers
+
+wasm-agent built-in MCPs
+❯ ✔ Gmail                            2 tools
+  ✔ WhatsApp                         3 tools
+
+User MCPs
+  ✔ Quarterly reports from the acco… 3 tools
+  ! Filesystem reads                   not reachable
+  ! Gated reports                      needs token
+  On other nodes - 2 hidden
+  1 retired
+
+Enter opens a connector · Esc or ← closes

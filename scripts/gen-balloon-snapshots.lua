@@ -28,6 +28,8 @@ end
 -- ---- /mcp, AFTER: the balloon the reader walks (one screen, then a connector, then its tools) ----------
 local set = mcp.views(fixture.mcp_view())
 snapshot('mcp-list-80x24.txt', balloon.text({ set.views[1] }, WIDTH))
+-- The same list at 120 columns (the brief's second capture): a wide window reads the same rows, uncut.
+snapshot('mcp-list-120x24.txt', balloon.text({ set.views[1] }, 120))
 -- The connector that is connected, with its actions underneath.
 local whatsapp = 2
 snapshot('mcp-detail-80x24.txt', balloon.text({ set.views[whatsapp] }, WIDTH))

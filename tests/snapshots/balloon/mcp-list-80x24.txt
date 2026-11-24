@@ -1,10 +1,16 @@
-Services
+MCP servers
 
-4 services · 1 built-in, 3 MCP · 2 connected · 5 tools callable now
+5 servers
 
-❯  1. WhatsApp           built-in · account on openclaw · connected · 36 chats
-   2. whatsapp_native    MCP · on openclaw · connected · 1 tool
-   3. Filesystem reads   MCP · on this node · failed · no tool · probe failed: …
-   4. Gated reports      MCP · on this node · needs login · no tool · 401 unaut…
+wasm-agent built-in MCPs
+❯ ✔ Gmail                            2 tools
+  ✔ WhatsApp                         3 tools
 
-Enter opens a service · Esc or ← closes
+User MCPs
+  ✔ Quarterly reports from the acco… 3 tools
+  ! Filesystem reads                   not reachable
+  ! Gated reports                      needs token
+  On other nodes - 2 hidden
+  1 retired
+
+Enter opens a connector · Esc or ← closes
