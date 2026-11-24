@@ -94,7 +94,7 @@ WA_FIXTURE_ROOT="$ROOT"; export WA_FIXTURE_ROOT
 fixture="$WORK/fixture"
 mkdir -p "$fixture/scripts/lib" "$fixture/config" "$fixture/lua/core" "$fixture/lua/vendor"
 cp "$ROOT/scripts/lib/node-binaries.sh" "$ROOT/scripts/lib/lua-tree.sh" "$ROOT/scripts/lib/release-signing.sh" \
-   "$ROOT/scripts/lib/release_verify.py" "$ROOT/scripts/lib/build-requirements.sh" "$fixture/scripts/lib/"
+   "$ROOT/scripts/lib/release_verify.py" "$ROOT/scripts/lib/build-requirements.sh" "$ROOT/scripts/lib/download-asset.sh" "$fixture/scripts/lib/"
 # ...and the one answer to "does the remote have this commit?" (scripts/lib/shared-commit.sh), which the
 # publisher sources before it will publish anything. Measured 18/11, merging the round that added it: the
 # publisher refused with shared_commit_lib_missing on this fixture's FIRST call, because the libs copied here
