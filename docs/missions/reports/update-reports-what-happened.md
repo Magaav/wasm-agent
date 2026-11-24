@@ -74,6 +74,36 @@ key before it calls `M.published` - the two meanings are named in a comment wher
 
 `lua/core/init.lua`: the plan line is printed **first**, then the queue line; `--detach` returns; otherwise the
 command follows and its exit code is the install's. `--check` also prints `M.listing`'s lines (b)(i).
+
+**Fable's items A-D (24/11, after reading slice 1), all in `8df6d571`'s successor on this branch:**
+
+- **A - the plan line claims only what the installer will do.** `M.plan` now has two outcomes and no third: a
+  release list that names this exact commit gives text #1; everything else gives ONE line, `no published
+  binary is named for <sha12> here: the installer looks for one built from the same inputs, and builds from
+  source only if there is none (minutes)`. `M.declared` reads the installer's own answer from `deploy.out`,
+  and `M.build_declared_line` prints text #2 (`no published binary for <sha12> on <triple>: building from
+  source, minutes`) **once**, only after `deploy: no published binary for this commit` appears. #3 and #4 are
+  gone, folded into the one line.
+- **B - no bar without a build.** When `deploy.out` says `deploy: installing the published binary`, the phase
+  line is `installing the published binary (no build)` and the n/total bar is not printed at all; the bar form
+  belongs to a real build and carries `(from source, on this machine)`.
+- **C - the installer's own last lines on a failure.** `M.evidence_lines` reads the last section of
+  `deploy.out` (this request's), drops the `--- deploy ... ---` header and empty lines, keeps at most eight,
+  and `M.follow` prints them above the `next:` line. The path stays in `next:` for more.
+- **D - `NO ANSWER from <node>: <detail> · <elapsed>`** replaces `SILENT on <node>` in the remote follow
+  (`remote_update.lua`).
+
+**Two facts the report must state (asked for by Fable):**
+
+1. **What ends a follow the sentinel never performs.** Not a timeout of this module's own: the installer's
+   own idle bound, `WA_DEPLOY_IDLE_BOUND` (1800 s, `scripts/upgrade.sh`), read as `M.UNPERFORMED_BOUND` and
+   overridable with `WA_UPDATE_FOLLOW_BOUND` (0 = wait forever, the pre-change behaviour). While the request
+   has not started (`queued`, `waiting`, `unknown` are the only phases), past that bound `wa update` prints
+   `stopped following after <elapsed>: the sentinel has not started this request (<phase>); wa update
+   --follow picks it up again` and exits 1. Nothing is cancelled; the request stays in the box.
+2. **On a non-terminal stdout it prints a line only on change** - a change of body (the phase, n/m, the
+   crate, what it waits for) or the 30 s heartbeat - and a terminal snapshot always prints. That is what
+   keeps a five-minute build to a handful of lines instead of one per second.
 `lua/core/remote_update.lua`: `wa update <node>` asks, then reads the peer's own `status` every 10 s (one
 fabric call; a per-second poll is the relay storm this tree already paid for on 19/11) and prints each state
 change with its clock; `--detach` returns; `--follow` attaches to the newest record without asking for anything;
@@ -130,8 +160,24 @@ After the rebase onto 2cdc2dc1, 516 s (the numbers the reviewer should read):
     fast: lua 37/37 passed (60 excluded: scripts/fast-path.exclude)
     fast result FAILED (139 checks, 2 failed, 0 skipped)
 
-The two failures are the runner's own never-dropped contract checks, both **load- and holder-sensitive and
-outside this change** (no file this branch touches is on their path):
+With Fable's items A-D in (the final run of this round), 563 s:
+
+    fast: lua 36/37 passed (60 excluded: scripts/fast-path.exclude)
+    fast result FAILED (141 checks, 4 failed, 0 skipped)
+
+The eight rows this change touches all pass again (`test-update-banner`, `test-cli-notice`, `test-cli-view`,
+`test-remote-update`, `test-node-dispatch-wiring`, `test-update-watcher`, `test-update-release`,
+`test-update-all`). The four failures are all outside this change and all load-sensitive:
+
+    FAIL scripts/test-release-channel-e2e.lua / release-channel: linux_channel_build_failed: linux-channel:
+         build_failed: scripts/release-linux.sh --target x86_64-unknown-linux-musl (a real release build)
+    FAIL deploy-bound:   expected one install, saw 1: deploy proceeding: held 30s, past the 1s bound ...
+    FAIL esc-stops-pty:  bash: Esc gives back a usable prompt at once (300 ms idle, 120 ms per unit of load)
+
+The first two did not fail that way in the two earlier runs of this round (release-channel passed in 4249 ms
+then); this node was building for other missions throughout. The earlier two failures were the runner's own
+never-dropped contract checks, both **load- and holder-sensitive and outside this change** (no file this
+branch touches is on their path):
 
     FAIL deploy-bound:   expected one install, saw 0: deploy proceeding: held 31s, past the 1s bound, and
                          none of the 2 holder(s) of the node can be hurt by it
@@ -193,9 +239,8 @@ The rows file correctly named every row; the runner could not say why it refused
 Every string this branch adds, verbatim (U+00B7 is the `·` in each line; U+2014 the `—`):
 
 1. `install: published binary for <sha12> on <triple> — download, no build`
-2. `no published binary for <sha12> on <triple>: building from source, minutes`
-3. `install: the release list here cannot say whether <sha12> is published on <triple> (<reason>): the installer tries a published binary first and builds if there is none (minutes)`
-4. `install: the published binary is used when one exists for this node's commit; otherwise it builds here (minutes)` (no target commit known)
+2. `no published binary is named for <sha12> here: the installer looks for one built from the same inputs, and builds from source only if there is none (minutes)` - **the only first line besides #1** (Fable's item A); with no target commit it reads `no published binary is named for this commit here: ...`
+3. `no published binary for <sha12> on <triple>: building from source, minutes` - printed **only** when the installer's own `deploy.out` says it is building (text #2, once)
 5. `following: Ctrl-C stops following; the install continues (wa update --follow re-attaches)`
 6. `detached: the install continues without this terminal; wa update --follow re-attaches`
 7. `following the newest deploy on this node: <request path>`
@@ -211,10 +256,11 @@ Every string this branch adds, verbatim (U+00B7 is the `·` in each line; U+2014
 16. `no phase reported yet: waiting for the sentinel to observe this request · <elapsed>`
 17. `installing: stopping the node and switching binaries (<phase>) · <elapsed>`
 18. `failed: upgrade.sh stopped in <phase> · <elapsed>` and `failed: <the sentinel's detail> · <elapsed>`
-19. `building <n>/<total> <phase> <crate> (published binary, no build) · <elapsed>` and the same with `(from source, on this machine)` - the installer's own declaration from `deploy.out`
+19. `building <n>/<total> <phase> <crate> (from source, on this machine) · <elapsed>` - the bar form, for a real build only (item B); and `installing the published binary (no build) · <elapsed>` with no bar at all for the published path
 20. ` (<by>: paused turns, bound <n>s, <n>s left)` - appended to a waiting line when `deploy-pending.json` says so
 21. remote: `<node>: <state> — <detail> · <elapsed>`, `installed <sha12> on <node> · <elapsed>`,
-    `FAILED on <node>: <detail> · <elapsed>`, `SILENT on <node>: <detail> · <elapsed>`
+    `FAILED on <node>: <detail> · <elapsed>`, `NO ANSWER from <node>: <detail> · <elapsed>` (item D - it replaced
+    `SILENT on <node>`)
 22. remote: `detached: the install continues on <node>; re-attach with wa update <node> --follow`
 23. `--check`: `release list: <n> entries, read <YYYY-MM-DD HH:MMZ>, newest <tag>`,
     `release list: not readable here (<reason>), so nothing is claimed about what is published`,
@@ -226,6 +272,9 @@ Every string this branch adds, verbatim (U+00B7 is the `·` in each line; U+2014
     `  --follow follows the install to its end, and is the default; --detach asks and returns at once`;
     `wa update <node> --help` gains `wa update <node> [--follow|--detach]  asks, then follows the node's own answer until it settles` and
     `  --follow   attach to the newest record without asking again; --detach asks and returns`
+26. bound: `stopped following after <elapsed>: the sentinel has not started this request (<phase>); wa update --follow picks it up again`
+27. a failure's evidence: the installer's own lines, indented two spaces and printed above `next:` (at most
+    eight, from this request's section of `deploy.out`; the words are the installer's, never this module's)
 
 ## What I could NOT verify, and the limits of this slice
 
@@ -244,9 +293,10 @@ Every string this branch adds, verbatim (U+00B7 is the `·` in each line; U+2014
   `deploy-result.json` separating installed from follow-on failure (2).
 - **`--detach` under 4 s** is asserted for the fixture; a real node's `wa update` also takes a backup before it
   writes the request, which is not part of that 4 s here.
-- The remote follow is exercised by nothing yet: `scripts/test-remote-update.lua` does not drive
-  `M.follow_remote`. It is a loop over the existing `status` action, but a loop that is not run is not proved -
-  named here rather than claimed.
+- **KNOWN GAP: `M.follow_remote` has no row.** It is a loop over the peer's existing `status` action (one
+  call every 10 s, `remote_update.lua`), and the only test that could prove it needs two scratch homes on one
+  machine, a signed roster and a scratch rendezvous - a row this round did NOT write. `scripts/test-remote-update.lua`
+  passes and does not drive it. It is named as a gap, not claimed as proved.
 
 ## Left for the next slice (unchanged from the brief)
 

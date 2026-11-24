@@ -158,7 +158,7 @@ if command == "update" or command == "--update" then
     end
     return
   end
-  local report, started_at
+  local report, started_at, plan
   if follow_only then
     -- No request is written: attach to the newest deploy this node still has in flight, and say so
     -- plainly when there is none.
@@ -176,9 +176,8 @@ if command == "update" or command == "--update" then
     -- Printed before the queue line because it answers the question a person asks when the screen has
     -- shown nothing for a minute.
     if report.ok == true then
-      for _, line in ipairs(follow.plan({ target = report.commit or "", tree = report.tree, install = report.install }).lines) do
-        print(redact.text(line))
-      end
+      plan = follow.plan({ target = report.commit or "", tree = report.tree, install = report.install })
+      for _, line in ipairs(plan.lines) do print(redact.text(line)) end
     end
     print(redact.text(report.message or json.encode(report)))
     if report.release and report.release.state == "behind" then print(redact.text("release: " .. report.release.message)) end
@@ -191,9 +190,11 @@ if command == "update" or command == "--update" then
     return
   end
   print(redact.text(follow.HINT))
+  -- `triple` travels into the follow because the one line that may say "building from source" names the
+  -- machine's channel: it is printed only when the installer itself declared a build.
   local result = follow.follow({ request = report.request,
     started_at = started_at or tonumber(host.now and host.now() or os.time()),
-    target = report.commit or "", install = report.install })
+    target = report.commit or "", triple = plan and plan.triple or nil, install = report.install })
   if result.ok ~= true then os.exit(1) end
   return
 end

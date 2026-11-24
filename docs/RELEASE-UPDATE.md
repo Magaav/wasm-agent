@@ -290,15 +290,28 @@ MEASURED on `work`, 24/11: `wa update` printed nothing while the deploy compiled
 three and a half minutes, and 361 s into a build that died it printed nothing at all. So the command now
 follows its own request to the end (`lua/core/update_follow.lua`):
 
-- the **first line** names the target and the way it will install - `install: published binary for
-  <sha12> on <triple> — download, no build`, or `no published binary for <sha12> on <triple>: building
-  from source, minutes`;
-- every change of phase prints one line with the elapsed time (`waiting: ...`, `building 48/456
-  compiling wa-host · 3m30s`, `installing: stopping the node and switching binaries`), with a heartbeat
-  every 30 s while nothing changes - a cold build is never drawn as a dead one;
+- the **first line** names the target and what the INSTALLER will do, and never more than that. A
+  release list that names this exact commit gives `install: published binary for <sha12> on <triple> —
+  download, no build`; otherwise it is ONE line, `no published binary is named for <sha12> here: the
+  installer looks for one built from the same inputs, and builds from source only if there is none
+  (minutes)` - because `scripts/deploy.sh` searches for a release built from the same compiled inputs
+  (`wa_node_release_digest_search`), and that finds a covering release for every scripts/Lua-only
+  landing. The words `building from source` are printed only when the installer itself says so
+  (`deploy: no published binary for this commit; building this tree`);
+- every change of phase prints one line with the elapsed time. A real build shows its bar and names the
+  source - `building 48/456 compiling wa-host (from source, on this machine) · 3m30s`; a published
+  install has no bar to draw and says `installing the published binary (no build) · 1m10s`. A waiting
+  install says what it waits for. Nothing is repeated while it does not change; a heartbeat every 30 s
+  shows the clock, so a cold build is never drawn as a dead one;
 - the final line names what happened: `installed <sha12> · 5m12s` and exit 0, or `failed: <reason> ·
-  <elapsed>` plus a `next:` line saying what this node still runs and where the installer's own output
-  is, and exit 1;
+  <elapsed>`, then **the installer's own last lines** (up to eight of them, from `deploy.out` for this
+  request), then a `next:` line saying what this node still runs and where that output is - and exit 1.
+  Nobody needs to open a file to read why;
+- a request the sentinel never starts is not followed forever: past the installer's own idle bound
+  (`WA_DEPLOY_IDLE_BOUND`, 1800 s; `WA_UPDATE_FOLLOW_BOUND` overrides it, 0 waits forever) the line is
+  `stopped following after <elapsed>: the sentinel has not started this request (...); wa update
+  --follow picks it up again`, and the command exits 1. Nothing is cancelled: the request stays in the
+  box and the next `wa update --follow` reads it;
 - `--detach` writes the request and returns at once, naming the one command that re-attaches
   (`wa update --follow`); `--follow` attaches to the newest deploy this node still has in flight and
   asks for nothing. Ctrl-C stops following, not the install: the installer is a separate process the

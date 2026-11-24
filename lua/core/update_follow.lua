@@ -84,7 +84,14 @@ end
 M.elapsed = elapsed
 
 M.POLL = 1        -- seconds between reads; the deploy writes build-status.json many times a second
-M.HEARTBEAT = 30  -- seconds: an unchanged phase still says so, so a long build never looks dead
+M.HEARTBEAT = 30  -- seconds: an unchanged phase says so again at this interval, and only then
+-- HOW LONG A FOLLOW WAITS FOR A REQUEST THE SENTINEL HAS NOT STARTED. A queued deploy can be held by
+-- design (the node is busy, a turn is finishing), so the bound is the installer's OWN idle bound -
+-- `WA_DEPLOY_IDLE_BOUND`, 1800 s, the number `scripts/upgrade.sh` writes into deploy-pending.json - and
+-- not a number invented here. Past it `wa update` stops following, says the request is still queued, and
+-- names the command that picks it up; nothing is cancelled and the request stays where it is.
+-- `WA_UPDATE_FOLLOW_BOUND` overrides it; 0 waits forever (the pre-24/11 behaviour).
+M.UNPERFORMED_BOUND = 1800
 -- The one sentence about what Ctrl-C does, printed once when the follow starts.
 M.HINT = "following: Ctrl-C stops following; the install continues (wa update --follow re-attaches)"
 M.DETACHED = "detached: the install continues without this terminal; wa update --follow re-attaches"
@@ -208,12 +215,17 @@ function M.state(options)
   -- still shows how long the install has really taken, not how long it has been watched.
   local queued = id ~= "" and decode(p.queue .. "/" .. id .. ".json") or nil
   local origin = tonumber(type(queued) == "table" and queued.queued_at) or started
+  -- WHICH PATH THE INSTALLER TOOK, from its own words. Read once per snapshot: it decides whether a phase
+  -- has an n/total to show at all (there is no build when it installs a published binary) and whether the
+  -- word "build" may be printed (Fable 24/11, A and B).
+  local declared = M.declared(o, p)
 
   local function snap(fields)
     fields.at = now
     fields.id = id
     fields.started_at = started
     fields.clock_from = fields.clock_from or origin
+    fields.declared = fields.declared or declared
     fields.sources = fields.sources or {}
     return fields
   end
@@ -298,13 +310,22 @@ function M.state(options)
     end
   end
 
-  -- 5. THE BUILD'S PROGRESS, with the installer's own declaration of WHICH path it took when it said it.
+  -- 5. THE INSTALLER SAID IT IS INSTALLING A PUBLISHED BINARY: there is no n/total to show, because there
+  --    is no build. "building 456/456 proving (published binary, no build)" contradicted itself (Fable
+  --    24/11, B): the published path says what it is doing and drops the bar.
+  if declared == "published" then
+    return snap({ key = "downloading", body = "installing the published binary (no build)", sources = { p.deploy_out } })
+  end
+
+  -- 6. THE BUILD'S PROGRESS. The n/total form belongs to a real build only, and says so when the installer
+  --    declared one ("from source, on this machine"); before it has spoken, the bar says nothing about the
+  --    path rather than guessing one.
   if type(build) == "table" and trim(build.state) == "building" and fresh_epoch(build.at, started and (started - 1)) then
     local phase = trim(build.phase)
     local crate = trim(build.crate)
     local body = "building " .. duration(build) .. (phase ~= "" and phase or "working")
     if crate ~= "" and phase == "compiling" then body = body .. " " .. crate end
-    body = body .. M.path_text(o, p)
+    if declared == "build" then body = body .. " (from source, on this machine)" end
     return snap({ key = "building", clock_from = tonumber(build.started_at) or started, body = body,
       done = tonumber(build.done), total = tonumber(build.total), sources = { p.build } })
   end
@@ -357,16 +378,40 @@ function M.hold_text(options, paths_in)
 end
 
 -- The installer's own answer to download-or-build, read from its output (`deploy: installing the published
--- binary` / `deploy: no published binary for this commit; building this tree`). Empty until it says.
-function M.path_text(options, paths_in)
+-- binary` / `deploy: no published binary for this commit; building this tree`). `nil` until it says - and
+-- nil is NOT "build": the plan line says the installer looks for a covered release first, and the word
+-- "build" is printed only when the installer itself says so (Fable 24/11, A).
+function M.declared(options, paths_in)
   local p = paths_in or M.paths(options)
   local text = read(p.deploy_out)
-  if not text then return "" end
+  if not text then return nil end
   -- Only the LAST deploy's words: each deploy appends a header (`--- deploy ... ---`) before its output.
   local last = text:match("%-%-%- deploy [^\r\n]*%-%-%-(.*)$") or text
-  if last:match("deploy: installing the published binary") then return " (published binary, no build)" end
-  if last:match("deploy: no published binary for this commit") then return " (from source, on this machine)" end
-  return ""
+  if last:match("deploy: installing the published binary") then return "published" end
+  if last:match("deploy: no published binary for this commit") then return "build" end
+  return nil
+end
+
+-- The installer's own last lines for this request, at most eight non-empty ones. Printed above the `next:`
+-- line of a failure: the reason is usually the last thing it said, and nobody should need a file path to
+-- read it (Victor, 24/11). Empty when it said nothing - never filled with words of this module's own.
+function M.evidence_lines(options, limit)
+  local p = (options and options.paths) or M.paths(options)
+  local text = read(p.deploy_out)
+  if not text then return {} end
+  local section = text:match("%-%-%- deploy [^\r\n]*%-%-%-(.*)$") or text
+  local lines = {}
+  for line in tostring(section):gmatch("[^\r\n]+") do
+    local value = trim(line)
+    -- The `--- deploy ... ---` header is this module's separator, not the installer's word, and an empty
+    -- line carries nothing a reader can act on.
+    if value ~= "" and value:sub(1, 10) ~= "--- deploy" then lines[#lines + 1] = value end
+  end
+  local keep = math.max(0, math.floor(tonumber(limit) or 8))
+  local first = math.max(1, #lines - keep + 1)
+  local kept = {}
+  for index = first, #lines do kept[#kept + 1] = lines[index] end
+  return kept
 end
 
 -- The sentence with its clock. `now` defaults to the snapshot's own time, so a caller that already has
@@ -408,14 +453,26 @@ function M.follow(options)
     if host.sleep then host.sleep(math.max(1, math.floor(seconds * 1000))) end
   end
   local poll = tonumber(o.poll) or M.POLL
+  local bound = tonumber(o.bound)
+  if bound == nil then
+    bound = tonumber(trim(host.getenv and host.getenv("WA_UPDATE_FOLLOW_BOUND") or "")) or M.UNPERFORMED_BOUND
+  end
   local started = clock()
   local rounds, printed = 0, 0
   local last_body, last_at = nil, nil
+  local declared_printed = false
   while true do
     local now = clock()
     local snapshot = M.state({ paths = o.paths, id = o.id, request = o.request,
       started_at = o.started_at, target = o.target, now = now })
     local body = trim(snapshot.body)
+    -- THE INSTALLER SAID IT IS BUILDING: only now may the word "build" be printed (Fable 24/11, A). Once.
+    if not declared_printed and snapshot.declared == "build" then
+      out(M.build_declared_line(o))
+      printed = printed + 1
+      declared_printed = true
+      last_body, last_at = body, now
+    end
     if body ~= last_body or not last_at or (now - last_at) >= M.HEARTBEAT then
       out(M.text(snapshot, now))
       printed = printed + 1
@@ -423,6 +480,11 @@ function M.follow(options)
     end
     if snapshot.terminal then
       if snapshot.ok ~= true then
+        -- THE INSTALLER'S OWN LAST LINES, above the advice: nobody should need a file path to read why.
+        for _, line in ipairs(M.evidence_lines(o, 8)) do
+          out("  " .. line)
+          printed = printed + 1
+        end
         local advice = M.next_line(o, snapshot)
         if advice then out(advice); printed = printed + 1 end
       end
@@ -430,12 +492,33 @@ function M.follow(options)
         seconds = now - started, rounds = rounds, printed = printed }
     end
     rounds = rounds + 1
+    -- A REQUEST THE SENTINEL HAS NOT STARTED does not hold a terminal forever: past the installer's own
+    -- idle bound, stop following and say so, with the one command that picks it up again.
+    local idle = snapshot.key == "queued" or snapshot.key == "waiting" or snapshot.key == "unknown"
+    if idle and bound > 0 and (now - (tonumber(o.started_at) or started)) >= bound then
+      out("stopped following after " .. elapsed(now - (tonumber(o.started_at) or started)) ..
+        ": the sentinel has not started this request (" .. body .. "); wa update --follow picks it up again")
+      printed = printed + 1
+      return { ok = false, state = snapshot.key, body = body, unknown = true, unperformed = true,
+        seconds = now - started, rounds = rounds, printed = printed }
+    end
     if (o.polls and rounds >= o.polls) or (o.seconds and (now - started) >= o.seconds) then
       return { ok = false, state = snapshot.key, body = body, unknown = true, timed_out = true,
         seconds = now - started, rounds = rounds, printed = printed }
     end
     pause(poll)
   end
+end
+
+-- The line printed the moment the installer says it is building (text #2 of the approved list): until then
+-- `wa update` may only say the installer LOOKS for a covered release, because that is what it does.
+function M.build_declared_line(options)
+  local o = options or {}
+  local sha = trim(o.target):sub(1, 12)
+  if sha == "" then sha = "this commit" end
+  local triple = trim(o.triple)
+  if triple == "" then triple = "this machine" end
+  return "no published binary for " .. sha .. " on " .. triple .. ": building from source, minutes"
 end
 
 -- ---- the first line: download or build ---------------------------------------
@@ -459,17 +542,20 @@ function M.plan(options)
     or "this machine"
   local lines = {}
   local state = answer and trim(answer.state) or "unknown"
+  -- TWO LINES AND NO THIRD (Fable 24/11, A). "No published binary ... building from source" is a claim this
+  -- command cannot make: `scripts/deploy.sh` then SEARCHES for a release built from the same compiled inputs
+  -- (`wa_node_release_digest_search`), and that finds a covering release for every scripts/Lua-only landing -
+  -- which is most of them. So: a binary for this exact commit, named, when the release list names one; and
+  -- otherwise ONE line that says what the installer actually does. The word "building" is printed only when
+  -- the installer says it is building (`M.build_declared_line`, once its own output says so).
   if sha == "" then
-    -- No target named: still say what the install will do, without pretending to know the commit.
-    lines[#lines + 1] = "install: the published binary is used when one exists for this node's commit; otherwise it builds here (minutes)"
+    lines[#lines + 1] = "no published binary is named for this commit here: the installer looks for one built from " ..
+      "the same inputs, and builds from source only if there is none (minutes)"
   elseif state == "published" then
     lines[#lines + 1] = "install: published binary for " .. sha .. " on " .. triple .. " \226\128\148 download, no build"
-  elseif state == "none" then
-    lines[#lines + 1] = "no published binary for " .. sha .. " on " .. triple .. ": building from source, minutes"
   else
-    local why = (answer and trim(answer.reason) ~= "") and answer.reason or "no_release_list"
-    lines[#lines + 1] = "install: the release list here cannot say whether " .. sha .. " is published on " .. triple ..
-      " (" .. tostring(why) .. "): the installer tries a published binary first and builds if there is none (minutes)"
+    lines[#lines + 1] = "no published binary is named for " .. sha .. " here: the installer looks for one built from " ..
+      "the same inputs, and builds from source only if there is none (minutes)"
   end
   return { lines = lines, published = answer, target = sha, triple = triple }
 end

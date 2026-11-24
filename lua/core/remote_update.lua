@@ -1256,7 +1256,9 @@ function M.follow_remote(call, selector, id, options)
       elseif state == 'failed' then
         body = 'FAILED on ' .. label .. (detail ~= '' and (': ' .. detail) or '')
       elseif state == 'silent' then
-        body = 'SILENT on ' .. label .. (detail ~= '' and (': ' .. detail) or '')
+        -- "NO ANSWER", not "SILENT": the peer did not report, and the word has to say what is missing rather
+        -- than describe a sound (Fable 24/11, D).
+        body = 'NO ANSWER from ' .. label .. (detail ~= '' and (': ' .. detail) or '')
       else
         body = label .. ': ' .. state .. (detail ~= '' and (' \226\128\148 ' .. detail) or '')
       end
