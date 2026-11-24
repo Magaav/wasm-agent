@@ -904,3 +904,23 @@ Also changed in the row, and said plainly: the six cases of step 7b now run on *
 25. `wa-sentinel status`: `paused sessions: <live>, oldest <age>, stale: <n>, abandoned: <m>`
 26. node log, once per sweep that closes anything: `deploy pause: closed <n> pause record(s) that can never be resumed
     (older than 21600s, or their session is gone)`
+
+### r4.1 (Fable's review of the r4 diff, 24/11 ~01:00Z): a record is closed only on a POSITIVE fact
+
+Two fixes in `deploy_pause.sweep_records`, both required before landing:
+
+* **(a) a lookup that fails is not a dead session.** The default lookup now answers three ways - `true` live,
+  `false` positively gone, `nil` the lookup itself failed (a locked ledger, a module error) - and only a positive
+  `false` deletes. Before this, `pcall` collapsing to `false` on a transient error deleted a live pause record.
+* **(b) an unreadable or undated record is judged by its FILE's age.** `since == 0` (a record caught mid-write) is
+  no longer deleted at once: `host.list_dir` gives the file's `modified` time, and the record is closed only when the
+  file itself is older than the window. A young half-written record is kept - unreadable is not dead.
+
+Tests (the two Fable asked for, plus one on the same path): a lookup that raises keeps the record (`closed == 0`,
+`removed == {}`); a half-written young file is kept; and the undated record in the existing sweep case is now given
+an OLD mtime, so it still proves a deletion. `scripts/test-deploy-pause.lua`: **84 checks**.
+
+One flake, named again: `scripts/test-deploy-wait.sh` step 6 ("the held wakes run once the deploy ends") failed once
+in this pass and passed on an immediate re-run with nothing changed - the same step, and the same behaviour, as the
+three earlier observations of it today (before r4 as well). It is not touched by this change; it is load-dependent
+and it is named here rather than called fixed.

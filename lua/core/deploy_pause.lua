@@ -501,11 +501,15 @@ function M.sweep_records(now, opts)
   if not ok or type(raw) ~= "string" then return 0 end
   local decoded_ok, decoded = pcall(json.decode, raw)
   if not decoded_ok or type(decoded) ~= "table" then return 0 end
+  -- THREE ANSWERS, because two were not enough (24/11, Fable's review of r4): true = live, false = POSITIVELY gone,
+  -- nil = the lookup itself failed (a locked ledger, a module error). A failed lookup is not a fact, and a record is
+  -- only deleted on a fact.
   local exists = opts.session_exists
   if type(exists) ~= "function" then
     exists = function(session)
       local loaded, row = pcall(function() return dofile("lua/core/memory.lua").session(session) end)
-      return loaded and type(row) == "table"
+      if not loaded then return nil end
+      return type(row) == "table"
     end
   end
   local remover = opts.remove or (host and host.delete_file)
@@ -525,8 +529,20 @@ function M.sweep_records(now, opts)
       end
       local since = tonumber(record and record.since) or 0
       local session = tostring((record and record.session) or name:sub(1, -6))
-      local stale = since == 0 or (now - since) > M.RESUME_WINDOW_SECONDS
-      if (stale or not exists(session)) and type(remover) == "function" then
+      -- A RECORD IS CLOSED ONLY ON A POSITIVE FACT (24/11, Fable's review of r4):
+      --   * dated and older than the window: closed;
+      --   * undated or unreadable (a record caught mid-write): judged by the FILE's own age, so a young one is kept;
+      --   * its session is provably gone: closed. A lookup that raised is not a fact and keeps the record.
+      local by_age
+      if since > 0 then
+        by_age = (now - since) > M.RESUME_WINDOW_SECONDS
+      else
+        local modified = tonumber(entry.modified) or 0
+        by_age = modified > 0 and ((now - modified) > M.RESUME_WINDOW_SECONDS) or false
+      end
+      local looked, verdict = pcall(exists, session)
+      local gone = looked and verdict == false
+      if (by_age or gone) and type(remover) == "function" then
         if pcall(remover, path) then closed = closed + 1 end
       end
     end

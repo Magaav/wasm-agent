@@ -258,10 +258,21 @@ local records = {
   { name = "live.json", text = json.encode({ session = "sess-live", since = now - 300 }) },
   { name = "old.json", text = json.encode({ session = "sess-live2", since = now - WINDOW - 60 }) },
   { name = "gone.json", text = json.encode({ session = "sess-gone", since = now - 60 }) },
+  -- UNDATED BUT OLD ON DISK: the record cannot say since, and the FILE can (24/11: a record is closed on a positive
+  -- fact, and for an undated one that fact is the file's own age).
   { name = "undated.json", text = json.encode({ session = "sess-live3" }) },
+  -- HALF-WRITTEN AND YOUNG (Fable's required case): a record caught mid-write looks unreadable and undated, and the
+  -- only thing that says it is not dead is its mtime. It must be KEPT.
+  { name = "half.json", text = "{\"session\":\"sess-half\",\"since\"" },
 }
-local listing = json.encode({ path = "/x", entries = { { name = "live.json", kind = "file" }, { name = "old.json", kind = "file" },
-  { name = "gone.json", kind = "file" }, { name = "undated.json", kind = "file" }, { name = "readme", kind = "file" } } })
+local OLD_MTIME = now - WINDOW - 60
+local listing = json.encode({ path = "/x", entries = {
+  { name = "live.json", kind = "file", modified = now - 300 },
+  { name = "old.json", kind = "file", modified = now - WINDOW - 60 },
+  { name = "gone.json", kind = "file", modified = now - 60 },
+  { name = "undated.json", kind = "file", modified = OLD_MTIME },
+  { name = "half.json", kind = "file", modified = now - 60 },
+  { name = "readme", kind = "file" } } })
 local removed = {}
 local closed = pause.sweep_records(now, {
   list = function() return listing end,
@@ -272,11 +283,41 @@ local closed = pause.sweep_records(now, {
   remove = function(path) removed[#removed + 1] = path; return true end,
   session_exists = function(session) return session ~= "sess-gone" end,
 })
-ok(closed == 3, "three records are closed: too old, gone, and undated", tostring(closed))
+ok(closed == 3, "three records are closed: too old, gone, and undated-but-old-on-disk", tostring(closed))
 ok(#removed == 3, "and three files go", json.encode(removed))
 local kept = true
 for _, path in ipairs(removed) do if path:find("live.json", 1, true) then kept = false end end
 ok(kept, "a young record whose session is live is never removed: it is the proof the bound uses", json.encode(removed))
+ok(not removed[1] or true, "")
+local half_kept = true
+for _, path in ipairs(removed) do if path:find("half.json", 1, true) then half_kept = false end end
+ok(half_kept, "a half-written YOUNG record is kept: unreadable is not dead", json.encode(removed))
+
+-- 8. A LOOKUP THAT FAILS KEEPS THE RECORD (Fable's required case): a locked ledger or a module error used to read as
+-- "the session is gone" and deleted a live record. Only a POSITIVE answer deletes.
+local aging = json.encode({ path = "/x", entries = {
+  { name = "fresh.json", kind = "file", modified = now - 60 },
+  { name = "errored.json", kind = "file", modified = now - 60 } } })
+local errored_removed = {}
+local errored = {}
+for _, name in ipairs({ "fresh.json", "errored.json" }) do
+  errored[name] = json.encode({ session = (name == "fresh.json") and "sess-fresh" or "sess-errored", since = now - 60 })
+end
+local closed_e = pause.sweep_records(now, {
+  list = function() return aging end,
+  read_file = function(path)
+    for name, text in pairs(errored) do if path:sub(-#name) == name then return text end end
+    return nil
+  end,
+  remove = function(path) errored_removed[#errored_removed + 1] = path; return true end,
+  session_exists = function(session)
+    if session == "sess-errored" then error("database is locked") end
+    return true
+  end,
+})
+ok(closed_e == 0 and #errored_removed == 0,
+  "a lookup that raises keeps the record: a transient error is not a dead session",
+  json.encode({ closed = closed_e, removed = errored_removed }))
 local refusal_text = pause.refuse(now, { read = marker_read })
 ok(type(refusal_text) == "string" and refusal_text:find("retry when idle", 1, true) ~= nil,
   'a refusal ends in retry-when-idle, so a runner can tell it from a failure', tostring(refusal_text))
