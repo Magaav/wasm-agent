@@ -136,6 +136,30 @@ end
 M.NOT_HAPPENED = "[deploy] the update did not happen"
 M.INSTALLED = "[deploy] installed"
 
+-- THE THIRD ANSWER: WHEN THE FACTS ARE NOT THERE, SAY THAT (Fable 24/11).
+--
+-- `install_moved` answers nil when either side is missing: a pause record with no `installed_tree`/`installed_commit`
+-- - which is every record written by the code that ran BEFORE this change, and therefore every session paused by THIS
+-- very install - or an install record that cannot be read. Falling through to the did-not-happen line in that case
+-- told those sessions "nothing was installed" right after it installed: the same lie, in the other direction. So the
+-- release says only what it can see: the pause ended, the tree this node runs now, and that what it ran before was
+-- not recorded, so this line cannot say whether an install completed.
+M.UNKNOWN = "[deploy] the pause ended"
+M.UNREADABLE = "an install whose record could not be read"
+function M.unknown_text(now)
+  local named = M.UNREADABLE
+  if type(now) == "table" then
+    if type(now.tree) == "string" and now.tree ~= "" then named = now.tree:sub(1, 12)
+    elseif type(now.commit) == "string" and now.commit ~= "" then named = now.commit:sub(1, 12) end
+  end
+  return table.concat({
+    M.UNKNOWN .. ": this node runs " .. named
+      .. ". What it ran before the pause was not recorded, so this line cannot say whether an install completed.",
+    "This is the same request continuing, not a new one: verify the machine (`wa --version`, `git status`) before you claim anything about what was installed.",
+  }, "\n")
+end
+
+
 -- THE INSTALLED RECORD IS THE FACT A RELEASE IS DECIDED BY (Fable 24/11, the blocker).
 --
 -- MEASURED (avell, 24/11): `host.build_identity` is the BINARY's commit, and a scripts-only install does not move it
@@ -1154,11 +1178,17 @@ function M.release_due(now, opts)
     -- A held session's row is neither released nor stamped: its own release decides when it fires.
     if not is_held(session) then
       local was_identity = M.paused_identity(session, opts)
+      -- THREE ANSWERS, NEVER TWO (Fable 24/11): moved is true (the record moved: an install), false (both identities
+      -- known and equal: the update did not happen), or nil (one side missing: UNKNOWN, and it says so instead of
+      -- claiming the did-not-happen that would be a lie after a real install).
+      local moved = M.install_moved(was_identity, now_identity)
       local text
-      if M.install_moved(was_identity, now_identity) == true then
+      if moved == true then
         text = M.installed_text(was_identity, now_identity)
-      else
+      elseif moved == false then
         text = M.not_happened_text(opts.released_marker or M.marker_on_disk(opts), now)
+      else
+        text = M.unknown_text(now_identity)
       end
       local changed = exec([[UPDATE self_wakes SET due_at=?, updated_at=?, last_error='deploy ended: resumed now',
         prompt = ? || char(10) || char(10) || prompt

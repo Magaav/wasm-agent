@@ -197,3 +197,58 @@ which is what "one pause per run" always meant, and the acceptance row now runs 
   deliveries/messages plus the code.
 * No new model- or operator-facing strings in this part (the run-start reset and the measurement row add none).
 
+
+## ready-3 - when the fact is UNKNOWN, the release says unknown
+
+Fable's ONE thing before the stack lands: `install_moved` returns nil when the pause record has no
+`installed_tree`/`installed_commit` - which is every record written by the code that ran BEFORE this change, and
+therefore every session paused by the install that is landing - or when the install record cannot be read, and the
+release fell through to the did-not-happen line in both cases: "[deploy] the update did not happen: nothing was
+installed", right after it installed.
+
+The release now has THREE answers, never two (`lua/core/deploy_pause.lua`, `release_due`):
+
+| `install_moved` | line |
+| --- | --- |
+| `true` (an identity moved) | `[deploy] installed: this node now runs <now> (was <was>).` - unchanged |
+| `false` (both identities known and equal) | `[deploy] the update did not happen: nothing was installed ...` - unchanged |
+| `nil` (one side missing) | `M.unknown_text(now)`, below |
+
+`M.unknown_text` says, verbatim:
+
+```
+[deploy] the pause ended: this node runs <now12>. What it ran before the pause was not recorded, so this line cannot say whether an install completed.
+This is the same request continuing, not a new one: verify the machine (`wa --version`, `git status`) before you claim anything about what was installed.
+```
+
+with `<now12>` = the install record's tree, first 12 characters (`bbbb5555eeee` in the row below), or
+`an install whose record could not be read` when that is unknown too (Fable's second form).
+
+Rows in `scripts/test-deploy-release-honest.lua` (81 checks, from 60):
+
+* section 2 - a pause taken with NO pause record and a node with no install record: the released row carries the
+  unknown line, names "an install whose record could not be read", and does NOT carry the did-not-happen line nor the
+  installed one; the continuation prompt and the one-turn-per-session assertions are unchanged;
+* 3e - **a pause record without the two fields** (the shape every record written by the code before this change has:
+  asserted as `installed_tree == nil`, `installed_commit == nil` on the product's own record file), with the install
+  record readable by the time of the release: the row carries the unknown line naming `bbbb5555eeee`, and neither
+  the did-not-happen nor the installed line;
+* 3f - a pause record that DOES name the tree, and an install record that cannot be read at the release: the unknown
+  line, naming that the record could not be read, and neither of the other two.
+
+RED before this commit: "the module names the line a release carries when it cannot tell (got nil)". GREEN after:
+81 checks. The real scratch-node row (`scripts/test-deploy-release-node.sh`) is unchanged and still green, both cases:
+its two pauses DO have records with identities, so its two answers stay "installed" and "the update did not happen".
+Regressions green: `test-deploy-pause` 116, `test-deploy-wait` 59, `test-deploy-resume` 25, `test-resume-window` 41,
+`test-selfloop-pause` 200, `test-kept-message-one` 36 - each on its own scratch home under `flock -o`.
+
+Texts to approve (continuing ready-1's list):
+
+5. `"[deploy] the pause ended: this node runs %s. What it ran before the pause was not recorded, so this line cannot
+   say whether an install completed."` - NEW (`pause.M.unknown_text`); `%s` is the tree's first 12 characters, or
+   `an install whose record could not be read`.
+6. `"an install whose record could not be read"` - NEW (`pause.M.UNREADABLE`), the `<now12>` of the line above when
+   the install record itself could not be read.
+   (The second line of the unknown text is the wording the installed and did-not-happen lines already carry, so it is
+   not a new string.)
+

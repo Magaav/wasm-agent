@@ -75,7 +75,10 @@ eq(sent.count, 0, "and spends no turn")
 eq(tonumber(rows("SELECT due_at FROM self_wakes WHERE id=?", { live_wake })[1].due_at), tonumber(before.due_at),
   "the armed resume keeps its own time while the install is live")
 
--- ---- 2. the installer is gone (past its bound): ONE resume turn, and it says what happened ------
+-- ---- 2. the installer is gone (past its bound): ONE resume turn - and it says only what it CAN say ------
+-- This pause was taken with NO pause record at all (the turn paused without one), and at this moment in the row the
+-- node has no install record either. So the release knows NEITHER side: it must not claim the update did not happen
+-- (Fable 24/11), it says what it can see - that the pause ended, on an install whose record could not be read.
 marker(T0 - 3600, 900)   -- since + bound is an hour in the past: an installer that never came back
 sent = { count = 0, ids = {} }
 local released = selfloop.tick({ now = T0 + 5, dispatch = counted })
@@ -83,10 +86,16 @@ eq(sent.count, 1, "exactly ONE resume turn is spent for the paused session")
 eq(sent.ids[1], live_wake, "and it is the resume this pause armed, not another row")
 eq(released.released, 1, "the tick reports the release (one row)")
 local row = rows("SELECT * FROM self_wakes WHERE id=?", { live_wake })[1]
-check(type(pause.NOT_HAPPENED) == "string" and pause.NOT_HAPPENED ~= "",
-  "the module names the line a release carries (got " .. tostring(pause.NOT_HAPPENED) .. ")")
-check((row.prompt or ""):find(pause.NOT_HAPPENED, 1, true) ~= nil,
-  "the released turn carries the machine's own line (" .. pause.NOT_HAPPENED .. "): " .. tostring(row.prompt):sub(1, 160))
+check(type(pause.UNKNOWN) == "string" and pause.UNKNOWN ~= "",
+  "the module names the line a release carries when it cannot tell (got " .. tostring(pause.UNKNOWN) .. ")")
+check((row.prompt or ""):find(pause.UNKNOWN, 1, true) ~= nil,
+  "an unknown pause says the pause ended (" .. pause.UNKNOWN .. "): " .. tostring(row.prompt):sub(1, 200))
+check((row.prompt or ""):find(pause.NOT_HAPPENED, 1, true) == nil,
+  "and it does NOT claim the update did not happen - nothing recorded what this node ran before")
+check((row.prompt or ""):find("an install whose record could not be read", 1, true) ~= nil,
+  "naming the side it could not read: " .. tostring(row.prompt):sub(1, 200))
+check((row.prompt or ""):find("what was installed", 1, true) ~= nil,
+  "and still telling the model to verify the machine before claiming anything")
 check((row.prompt or ""):find("finish the request", 1, true) ~= nil,
   "and the request the turn was continuing stays in it, below the line")
 eq(row.status, "dispatching", "the row is claimed by the release and handed over once")
@@ -156,6 +165,49 @@ eq(pause.install_moved({ tree = "aaaa", commit = "" }, { tree = "aaaa", commit =
   "the same record twice is not an install")
 eq(pause.install_moved({ tree = "aaaa", commit = "1111" }, { tree = "aaaa", commit = "2222" }), true,
   "a deploy that moves only the bytes is still an install")
+
+
+-- 3e. A PAUSE RECORD WITHOUT THE INSTALLED FIELDS IS "UNKNOWN", NEVER "did not happen" (Fable 24/11). That is the
+-- shape of every record written by the code running before this change - so every session paused by THIS install
+-- would be told "nothing was installed" right after it installed, which is the same lie in the other direction.
+pcall(host.remove_file, install_dir .. "/installed.txt")   -- the record cannot be read when this pause is taken
+local unknown_session = memory.start_session("local", "chat", { id = "r8c-unknown", user_id = "master", title = "unknown" })
+marker(T0 - 60, 900)
+local unknown_wake = unpause(unknown_session, { no_record = false })
+local bare = json.decode(host.read_file(record_dir .. "/" .. unknown_session .. ".json") or "{}")
+eq(bare.installed_tree, nil, "this pause record names no installed tree (the shape the code before this change wrote)")
+eq(bare.installed_commit, nil, "and no bytes")
+install_record("cccc3333dddd4444", "bbbb5555eeee6666")     -- ... and by the release the install's record IS readable
+marker(T0 - 3600, 900)
+sent = { count = 0, ids = {} }
+selfloop.tick({ now = T0 + 8, dispatch = counted })
+local unknown_row = rows("SELECT * FROM self_wakes WHERE id=?", { unknown_wake })[1]
+check((unknown_row.prompt or ""):find(pause.UNKNOWN, 1, true) ~= nil,
+  "a record with no installed fields gives the unknown line: " .. tostring(unknown_row.prompt):sub(1, 200))
+check((unknown_row.prompt or ""):find("bbbb5555eeee", 1, true) ~= nil,
+  "naming the tree this node runs, twelve characters")
+check((unknown_row.prompt or ""):find(pause.NOT_HAPPENED, 1, true) == nil,
+  "and it never says the update did not happen")
+check((unknown_row.prompt or ""):find(pause.INSTALLED, 1, true) == nil,
+  "and never claims it did")
+
+-- 3f. THE OTHER SIDE UNREADABLE BY THE RELEASE: the pause recorded the record and, by the release, there is none.
+local lost_session = memory.start_session("local", "chat", { id = "r8c-lost-record", user_id = "master", title = "lost" })
+marker(T0 - 60, 900)
+local lost_wake = unpause(lost_session, { no_record = false })
+local known = json.decode(host.read_file(record_dir .. "/" .. lost_session .. ".json") or "{}")
+eq(tostring(known.installed_tree), "bbbb5555eeee6666", "this pause record names the tree the node ran")
+pcall(host.remove_file, install_dir .. "/installed.txt")   -- the record cannot be read at the release
+marker(T0 - 3600, 900)
+sent = { count = 0, ids = {} }
+selfloop.tick({ now = T0 + 9, dispatch = counted })
+local lost_row = rows("SELECT * FROM self_wakes WHERE id=?", { lost_wake })[1]
+check((lost_row.prompt or ""):find(pause.UNKNOWN, 1, true) ~= nil,
+  "an unreadable install record gives the unknown line: " .. tostring(lost_row.prompt):sub(1, 200))
+check((lost_row.prompt or ""):find("an install whose record could not be read", 1, true) ~= nil,
+  "naming that it could not be read rather than naming a tree")
+check((lost_row.prompt or ""):find(pause.NOT_HAPPENED, 1, true) == nil, "and it does not say the update did not happen")
+install_record("cccc3333dddd4444", "bbbb5555eeee6666")
 
 
 -- ---- 4. ONE RESUME ROW PER SESSION - AND A HELD SESSION IS NOT TOUCHED -------------------------
