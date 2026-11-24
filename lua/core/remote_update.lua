@@ -1004,6 +1004,35 @@ function M.run_accepted(record_id)
       message = 'the child that prepares this deploy found no record to prepare, so the request failed.',
       next = "read the accept record and this node's log; nothing was backed up and nothing was queued" }
   end
+  -- ONCE (review item b): this verb is a claim, and only the caller that wins it runs. `wa update
+  -- --accept <id>` on an id that is running, queued, done or failed answers what it is and starts
+  -- nothing - one request, one deploy, however many times it is asked.
+  -- THE PHASE DECIDES FIRST: an id that is running, queued, done or failed is answered, never run again
+  -- (review item b). The claim below closes the race between two callers that both read "accepted"; this
+  -- check is what makes a SECOND verb after a finished run answer instead of queueing a second deploy.
+  local opened = M.accept_phase(id)
+  if opened.record then
+    local state = tostring(opened.state or '')
+    -- AN ALLOW-LIST, because `unknown` must never read as "go ahead": only an id nobody has claimed yet
+    -- (no state), or one whose work detach() has started (`running`), may run. Everything else - queued,
+    -- done, failed, accepted-and-already-claimed - is answered and starts nothing.
+    local may_run = (state == '' or state == 'accepted' or state == 'running')
+    if not may_run then
+      return { ok = true, already = true, state = state, record = id,
+        detail = tostring(opened.detail or ('this id is already ' .. state)),
+        message = 'this id is already ' .. state .. ' on this node: nothing new was started',
+        next = 'read it back with {action="status", id="' .. id .. '"}' }
+    end
+  end
+  local claim = accept.claim_running({ root = root, id = id })
+  if claim.ok ~= true then
+    local phase = M.accept_phase(id)
+    local state = tostring(phase.state or record.state or 'accepted')
+    return { ok = true, already = true, state = state, record = id,
+      detail = tostring(claim.detail or ('this id is already ' .. state)),
+      message = 'this id is already ' .. state .. ' on this node: nothing new was started',
+      next = 'read it back with {action="status", id="' .. id .. '"}' }
+  end
   accept.finish({ root = root, id = id, state = 'running', detail = 'preparing the deploy on this node (backup, then the sentinel request)' })
   local options = { skip_source_sync = true, expected_commit = tostring(record.target_commit or ''),
     reason = tostring(record.reason or ''), signed_request = true,

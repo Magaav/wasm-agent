@@ -265,6 +265,42 @@ function M.detach(opts)
     root = root, summary = M.summary(record) }
 end
 
+-- ONE ID, ONE RUN OF ITS WORK (review item b). `mkdir` either creates the claim or it does not, so a
+-- retry, a second operator, or the same verb twice can never run the tail for one id: the caller that
+-- loses is answered with the id's own phase and starts nothing. The claim lives beside the record and is
+-- removed by M.finish, which is the only terminal write.
+--
+-- A claim left behind by a process that DIED is not cleared here on purpose: whether that run got
+-- anywhere is not knowable from the claim, and re-running a deploy that may have queued one is the
+-- double update this module exists to prevent. M.status reports the phase, and a record whose work
+-- settled without a terminal write says exactly that.
+function M.claim_running(opts)
+  opts = type(opts) == 'table' and opts or {}
+  local id = trim(opts.id)
+  if not M.valid_id(id) then return { ok = false, error = 'accept_id_invalid' } end
+  local root = M.root(opts.root)
+  local path = root .. '/' .. tostring(id) .. '.running'
+  local result = shell('mkdir -p ' .. quote(root) .. ' && mkdir ' .. quote(path) .. ' 2>/dev/null')
+  if not result or result.code == nil then
+    return { ok = false, error = 'accept_claim_unavailable',
+      observed = 'mkdir answered ' .. json.encode(result or {}) }
+  end
+  if (result.code or 1) ~= 0 then
+    local record = M.record(root, id) or {}
+    return { ok = false, claimed = false, state = tostring(record.state or 'unknown'),
+      detail = 'this id has already been claimed for its one run on this node, so nothing was started' }
+  end
+  return { ok = true, claimed = true }
+end
+
+function M.release_running(opts)
+  opts = type(opts) == 'table' and opts or {}
+  local id = trim(opts.id)
+  if not M.valid_id(id) then return false end
+  local result = shell('rmdir ' .. quote(M.root(opts.root) .. '/' .. tostring(id) .. '.running') .. ' 2>/dev/null')
+  return result ~= nil and (result.code or 1) == 0
+end
+
 -- The detached process' own terminal write, and the only writer of done/failed.
 function M.finish(opts)
   opts = type(opts) == 'table' and opts or {}
@@ -276,6 +312,7 @@ function M.finish(opts)
   local record = save(M.root(opts.root), id, { state = state, detail = tostring(opts.detail or ''),
     finished_at = math.floor(host.now()), result = type(opts.result) == 'table' and opts.result or nil })
   if not record then return { ok = false, error = 'accept_record_not_written' } end
+  if M.TERMINAL[state] then M.release_running({ root = opts.root, id = id }) end
   return { ok = true, id = id, state = record.state, detail = record.detail }
 end
 

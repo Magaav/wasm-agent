@@ -281,7 +281,15 @@ ok(retried and retried.ok == true and retried.already == true and retried.record
   retried and tostring(retried.error or retried.already))
 ok(#started_operations == before_retry, "and it started nothing new")
 local tail = remote.run_accepted(admitted.record)
-ok(tail and tail.ok == true, "the detached tail ran and queued the deploy", tail and tostring(tail.detail))
+ok(tail and tail.ok == true and tail.already ~= true, "the detached tail ran and queued the deploy", json.encode(tail or {}))
+-- ONCE (review item b): the verb that prepares a deploy is a claim. A second run for the same id answers
+-- what it is and starts NOTHING - one request, one deploy, however many times it is asked.
+local second_tail = remote.run_accepted(admitted.record)
+ok(second_tail and second_tail.already == true, "the verb twice starts nothing the second time",
+  second_tail and (second_tail.error or tostring(second_tail.already)))
+ok(#started_operations == before_retry, "and no second operation was started for it (the child IS this call, in a real run)", tostring(#started_operations))
+ok(#issued_matching("request deploy") == 1, "nor a second sentinel request: one deploy for one id",
+  table.concat(issued, " | "))
 operations[spawned.id].settled = true
 operations[spawned.id].code = 0
 -- The phase the caller polls is the accept record's own (not the deploy's outcome, which section 5 reads
