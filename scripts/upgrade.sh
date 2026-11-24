@@ -28,6 +28,11 @@ say() { printf '  %s\n' "$*"; }
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # A node cannot replace itself; a CLI turn may, through the sentinel (scripts/lib/turn-guard.sh).
 . "$ROOT/scripts/lib/turn-guard.sh" 2>/dev/null || . "$(dirname "$0")/lib/turn-guard.sh"
+# THE SELF-WAKE RULE (r8c item G), the same judge scripts/verify-install.sh runs: /health.wakes, judged in
+# one place. Printed here, never gated - an install must not be rolled back for a wake the node owes itself
+# (the post-install check and the watchdog decide that, by name); what this must not do is stay silent.
+HAVE_WAKE_RULE=0
+[ -f "$ROOT/scripts/lib/health-wakes.sh" ] && { . "$ROOT/scripts/lib/health-wakes.sh"; HAVE_WAKE_RULE=1; }
 # The glibc floor this candidate was built for, against the libc this host runs. Sourced from beside this
 # script the same way turn-guard.sh is (an installed copy has its libs shipped beside it), and used below
 # before anything is staged or proved.
@@ -1107,6 +1112,10 @@ if [ "$STARTED" = "1" ] && [ "$UI_OK" = "1" ] && wait_health; then
     record_install || { say "node upgraded, but final installed.txt could not be recorded"; exit 3; }
     phase upgrading verifying
     say "upgraded and recorded: $(health)"
+    # The node's own loop, named: GREEN, or every RED it can name (scripts/lib/health-wakes.sh).
+    if [ "$HAVE_WAKE_RULE" = "1" ]; then
+      say "self-wake loop: $(health | wa_health_wakes_verdict 2>&1 | tr '\n' ' ' | sed 's/ *$//')"
+    fi
     # Keep this one binary/UI backup for recovery after the deployment verdict.
     exit 0
   fi

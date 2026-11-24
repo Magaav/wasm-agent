@@ -2834,6 +2834,18 @@ run_proof_fixture policy 62 node scripts/test-subagents-policy.cjs "$BIN"
 run_proof_fixture children 18 node scripts/test-subagents.cjs "$BIN"
 run_proof_fixture fleet 20 node scripts/test-orchestrator.cjs "$BIN"
 gate_run node scripts/test-completion-wake.cjs "$BIN"
+# THE NODE REPORTS ITS OWN WAKE STATE (Fable 24/11, from the live stall: 2.5 hours of zero dispatch while /health
+# answered and the loopback canary stayed green, because that canary runs a CHILD node with a fresh ledger). A
+# real scratch node - own HOME, WASM_AGENT_HOME/DATA/DB, own port, stub provider - must show a due wake
+# dispatched with last_tick ok, and must NAME selfloop_tick_failed, with the oldest dispatchable age growing,
+# when a column its tick reads is dropped from its own ledger. `wakes` is /health's, so nothing here costs a turn.
+gate_run node scripts/test-node-wake-facts.cjs "$BIN"
+# THE RULE EVERY READER OF THE FACTS RUNS (r8c item G, approved 24/11). Four reds by name - wakes_unknown,
+# selfloop_tick_failed, self_wake_stalled, wakes_not_publishing - each produced on a REAL scratch node and judged
+# by the SHIPPED judge (scripts/lib/health-wakes.sh for the shell readers, run end to end through
+# scripts/verify-install.sh, and the same rule in jq), plus the green case. Not a copy of the rule: a row that
+# re-implemented it would pass while the shipped judge was wrong.
+gate_run node scripts/test-health-wakes-rule.cjs "$BIN"
 if [ "${OS:-}" = "Windows_NT" ]; then
   gate_run python scripts/test-sentinel-owned-job.py --repo "$PWD" --evidence "$(git rev-parse --git-path owned-return-gate-$$)"
   run_proof_fixture sentinelInstall 30 python scripts/test-sentinel-owned-job.py --repo "$PWD" --evidence "$(git rev-parse --git-path private-install-gate-$$)" --script "$PWD/scripts/test-sentinel-private-install.cjs" --deadline 1800

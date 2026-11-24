@@ -92,7 +92,7 @@ local function canary_module(name, body)
 end
 canary_module("childfails", table.concat({
   "local runner = dofile('lua/core/feature_canary.lua')",
-  "local M = { mode = 'loopback' }",
+  "local M = { mode = 'child-node' }",
   "function M.run(ctx)",
   "  local child = runner.child(ctx, {}, { env = { 'WA_SCRIPT=" .. task_dir .. "/broken.lua' } })",
   "  if child.code == 0 then return true, 'done', 'it passed' end",
@@ -207,5 +207,10 @@ eq(reported.elsewhere.verdict, "off-node", "an absent component reads off-node")
 local lines = feature_canary.lines(results)
 contains(table.concat(lines, "\n"), "canaries: 1 passed, 6 failed, 0 off, 1 off-node", "the summary counts every class")
 contains(table.concat(lines, "\n"), "FAIL", "a failure is printed, not hidden")
+-- WHOSE CODE PASSED (r8c item G): the printed line names the mode, because "self-wake PASS delivered" read as
+-- "this node's own loop works" while the node delivered nothing for 2.5 hours on 24/11. The mode is the fact a
+-- reader needs: a child node the canary spawned, or a read this process made.
+contains(table.concat(lines, "\n"), "PASS  read: done", "a passing canary prints the mode it ran in")
+contains(table.concat(lines, "\n"), "FAIL  child-node: turn: ", "a failing child-node canary prints its mode and stage")
 
 print(string.format("feature-canary ok (%d checks)", checks))

@@ -98,6 +98,20 @@ static UI_SEEN_MS: AtomicU64 = AtomicU64::new(0);
 /// that can say "the UI reported this at 12:04" is a node whose window can be diagnosed without a log dive.
 static UI_ERROR: Mutex<Option<(String, u64)>> = Mutex::new(None);
 
+/// The node's OWN wake state, as its last placement tick reported it (`wa_orchestrator_tick` ->
+/// `selfloop.wake_facts`, `lua/core/selfloop.lua`), with the monotonic millisecond it arrived.
+///
+/// MEASURED 24/11: this laptop's node delivered ZERO self-wakes for 2.5 hours (15:15Z -> 17:55Z). The tick
+/// raised "no such column: run_id" before its claim loop; /health answered normally the whole time and the
+/// loopback self-wake canary passed throughout, because that canary runs a CHILD node with a fresh ledger.
+/// Nothing said the live node's loop was dead, and the only symptom was the absence of deliveries.
+///
+/// Published HERE rather than computed in /health, for the reason /health exists: the accept thread answers it
+/// with no interpreter at all, and a wedged or dead interpreter is exactly when a watcher asks. The facts are
+/// additive; `known: false` is a named answer and never a healthy one - a reader that treats a missing field
+/// as "fine" is the blindness this field ends.
+static WAKES: Mutex<Option<(serde_json::Value, u64)>> = Mutex::new(None);
+
 /// Replay window for an active run after its browser connection goes away. Events through the latest
 /// transcript checkpoint are already recoverable from the session ledger, so only the unsaved tail is
 /// retained here. This is process memory and is discarded as soon as the run settles.
@@ -1408,6 +1422,57 @@ fn emit_run_finished(session: &str, run_id: u64) {
 /// Which Lua core this node runs, and what the agent-core instance pool has done (docs/KERNEL.md,
 /// "A2.4"). `mode` is always present so a client never has to infer it; the pool numbers are present
 /// only when the component core is in use, because a native node has no pool to report.
+/// Store what one placement tick answered about the node's own wakes (`{"wakes": {...}}`).
+///
+/// An answer this process cannot read is reported by NAME rather than dropped: a fact nobody can read is not a
+/// fact that says the loop is healthy ("unknown is not yes"), and the tick's own raise below is the same rule.
+fn publish_wakes(answer: &str) {
+    let facts = serde_json::from_str::<serde_json::Value>(answer)
+        .ok()
+        .and_then(|value| value.get("wakes").cloned())
+        .filter(|value| value.is_object());
+    let value = match facts {
+        Some(facts) => facts,
+        None => serde_json::json!({
+            "known": false,
+            "reason": "wake_facts_unreadable",
+            "note": "the placement tick answered without wake facts",
+            "answer": answer.chars().take(200).collect::<String>(),
+        }),
+    };
+    if let Ok(mut slot) = WAKES.lock() { *slot = Some((value, now_ms())); }
+}
+
+/// The same, for a tick call that did not return at all: the Lua entry raised or the bridge refused it.
+fn publish_wakes_failed(error: &str) {
+    let value = serde_json::json!({
+        "known": false,
+        "reason": "tick_call_failed",
+        "error": error.chars().take(200).collect::<String>(),
+    });
+    if let Ok(mut slot) = WAKES.lock() { *slot = Some((value, now_ms())); }
+}
+
+/// `/health`'s `wakes`: the last tick's facts, plus how long ago they were published. `published_age_ms` is the
+/// age of the ANSWER, not of the loop - a tick that stopped running leaves the last facts in place, and this is
+/// the number that grows while nothing republishes them.
+fn wakes_health() -> serde_json::Value {
+    let published = WAKES.lock().ok().and_then(|slot| slot.clone());
+    match published {
+        Some((mut facts, at)) => {
+            if let Some(object) = facts.as_object_mut() {
+                object.insert("published_age_ms".into(), serde_json::json!(now_ms().saturating_sub(at)));
+            }
+            facts
+        }
+        None => serde_json::json!({
+            "known": false,
+            "reason": "wakes_not_reported_yet",
+            "note": "no placement tick has published wake facts since this node started",
+        }),
+    }
+}
+
 fn core_health() -> serde_json::Value {
     let pool = POOL.get();
     let bridge = pool.and_then(|pool| pool.bridge);
@@ -1931,6 +1996,11 @@ fn health_body_for(session: &str, node_wide: bool, owner: &str) -> Vec<u8> {
         // The sentinel queue: every request it was asked to perform, its state, its current step and
         // its failures. Without this the only account of a queued restart was a log line.
         "sentinel": sentinel_queue_health(),
+        // THE NODE'S OWN WAKE STATE (Fable 24/11, from the live stall): the last placement tick's outcome by name
+        // (`ok` / `selfloop_tick_failed`), the due and dispatchable counts, the age of the oldest dispatchable
+        // due row and the last dispatch time. Additive: nothing above moved. `known: false` is a named answer,
+        // so a watcher can refuse to call an unknown loop healthy instead of reading silence as health.
+        "wakes": wakes_health(),
     })
     .to_string()
     .into_bytes()
@@ -2671,8 +2741,16 @@ pub fn run(first: Core, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, 
         }
     };
     std::thread::Builder::new().name("wa-placement".into()).spawn(move || loop {
-        if let Err(error) = placement.call_string("wa_orchestrator_tick", &[]) {
-            eprintln!("[placement] {error}");
+        // WHAT THE NODE'S OWN WAKE STATE IS, published from the one thread that runs the tick (Fable 24/11, from
+        // the live stall: 2.5 hours of zero dispatch with /health answering). `wa_orchestrator_tick` answers the
+        // facts even when the tick itself raised, so a dead loop is named by the same call that moves it; a call
+        // that does not return is named too, and neither is ever stored as healthy.
+        match placement.call_string("wa_orchestrator_tick", &[]) {
+            Ok(answer) => publish_wakes(&answer),
+            Err(error) => {
+                publish_wakes_failed(&error);
+                eprintln!("[placement] {error}");
+            }
         }
         std::thread::sleep(std::time::Duration::from_secs(2));
     }).expect("placement node-thread");

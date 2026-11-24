@@ -20,7 +20,13 @@
 --     'unknown' rendered as 'fine' is exactly the bug.
 --
 -- WHAT A CANARY IS ON THE DISK: a module at <canary dir>/<row.canary>.lua returning
---   { mode = 'loopback'|'read', run = function(ctx) -> ok, stage, detail }
+--   { mode = 'child-node'|'read', run = function(ctx) -> ok, stage, detail }
+--
+-- `child-node` means what it says: the exercise runs in a PROCESS THIS NODE SPAWNS, with its own home and
+-- ledger (feature_canary.child), so it can only prove that the CODE works - never that the LIVE node's own
+-- loop is alive. It was called `loopback` until 24/11, and that word read as "this node": on 24/11 the
+-- node delivered zero self-wakes for 2.5 hours while `self-wake PASS` kept printing, because the canary's
+-- child had a fresh ledger and a counted dispatcher. The live node's own state is /health.wakes.
 -- The registry row names it (canary), and scripts/check-features-registry.mjs refuses a row whose module
 -- is not there - a feature that ships without an exercise fails a check.
 local json = dofile('lua/vendor/json.lua')
@@ -70,7 +76,7 @@ function M.dir(named) return named or getenv('WA_CANARY_DIR') or M.DIR end
 
 function M.path(canary, dir) return M.dir(dir) .. '/' .. tostring(canary) .. '.lua' end
 
--- The binary a loopback canary spawns: the node's own. WA_BIN is how the suite hands a row the binary of
+-- The binary a child-node canary spawns: the node's own. WA_BIN is how the suite hands a row the binary of
 -- the tree under test; a node answers from its PATH. With neither, the canary is refused by name - a
 -- canary that cannot spawn the node must not report that the feature works.
 function M.binary()
@@ -166,7 +172,7 @@ function M.run(feature, opts)
   end
   local scratch, scratch_why = make_scratch(row.canary)
   local ctx = {
-    feature = row.name, canary = row.canary, row = row, mode = module.mode or 'loopback',
+    feature = row.name, canary = row.canary, row = row, mode = module.mode or 'child-node',
     scratch = scratch, home = paths.config(), now = tonumber(host.now()) or 0,
   }
   local called, ok, ran_stage, ran_detail = pcall(module.run, ctx)
@@ -236,10 +242,14 @@ function M.lines(results)
       out[#out + 1] = string.format('  %-22s OFF   %s: %s', result.feature, tostring(result.stage), tostring(result.detail))
     elseif result.ok then
       passed = passed + 1
-      out[#out + 1] = string.format('  %-22s PASS  %s', result.feature, tostring(result.stage))
+      -- THE MODE IS PART OF THE VERDICT (r8c item G). "self-wake PASS delivered" read as "this node's own
+      -- loop works" while the node delivered nothing for 2.5 hours on 24/11; the line now says WHOSE code was
+      -- exercised: a child-node the canary spawned, or a read this process made - never the live node's loop,
+      -- which is /health.wakes.
+      out[#out + 1] = string.format('  %-22s PASS  %s: %s', result.feature, tostring(result.mode or 'child-node'), tostring(result.stage))
     else
       failed = failed + 1
-      out[#out + 1] = string.format('  %-22s FAIL  %s: %s', result.feature, tostring(result.stage), tostring(result.detail))
+      out[#out + 1] = string.format('  %-22s FAIL  %s: %s: %s', result.feature, tostring(result.mode or 'child-node'), tostring(result.stage), tostring(result.detail))
     end
   end
   table.insert(out, 1, string.format('canaries: %d passed, %d failed, %d off, %d off-node', passed, failed, off, skipped))

@@ -5,7 +5,7 @@
 -- and no provider is called.
 local feature_canary = dofile('lua/core/feature_canary.lua')
 
-local M = { mode = 'loopback' }
+local M = { mode = 'child-node' }
 
 function M.run(ctx)
   local child = feature_canary.child(ctx, {}, { env = { 'WA_SCRIPT=lua/core/canaries/tasks/chat-turn.lua' } })
