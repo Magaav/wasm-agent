@@ -1090,12 +1090,16 @@ end
 -- `cwd` argument (the receiving side records it as `source = "explicit"`, honestly: it came from the
 -- caller, not from a session there). Nothing is invented: no directory on this side means no cwd is added,
 -- and the peer's answer says the node's own directory was used.
+-- Forward declaration: a Lua local is in scope only from its definition, and this file is one chunk, so the
+-- helper below would otherwise call the GLOBAL of that name, which is nil (measured: tools.lua:1097, caught by
+-- scripts/test-federation.lua before this shipped). Assigned right after session_cwd is defined.
+local session_cwd_for_peer
 local function peer_args_with_cwd(memory, ctx, capability, args)
   if capability ~= "bash" and capability ~= "operation" then return args end
   if type(args) ~= "table" then return args end
   if args.cwd ~= nil and args.cwd ~= "" then return args end
-  local cwd = session_cwd(memory, ctx)
-  if cwd == nil or cwd == "" then return args end
+  local cwd = session_cwd_for_peer and session_cwd_for_peer(memory, ctx) or ""
+  if cwd == "" then return args end
   local copy = {}
   for key, value in pairs(args) do copy[key] = value end
   copy.cwd = cwd
@@ -1145,6 +1149,8 @@ end
 -- directory is not this session's: substituting it is how an operation came to run in the canonical
 -- checkout, and a silent substitution also turns "your worktree was released" into a write in the wrong
 -- tree. Answers nil when there is nothing to refuse (no directory, or it is there).
+session_cwd_for_peer = session_cwd
+
 local function session_cwd_refusal(path)
   if type(path) ~= "string" or path == "" then return nil end
   if not host.list_dir then return nil end
