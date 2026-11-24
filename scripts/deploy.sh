@@ -571,6 +571,10 @@ if [ -n "$MAIN_REFS" ]; then
     || fail "this tree's commit $(git rev-parse --short HEAD) is not on $(printf '%s' "$MAIN_REFS" | sed 's/ / or /g'); merge it to main and deploy from there - an unmerged deploy leaves main behind the live node"
 fi
 COMMIT="$(git rev-parse --short HEAD)"
+# THE FULL ID, for the record (24/11): `COMMIT` is a display id (12 hex) and installed.txt names ids a reader
+# compares - a covering install records commit= as the TREE it installed, and a 12-hex value there is refused
+# by the record's own 40-hex rule.
+COMMIT_FULL="$(git rev-parse HEAD)"
 # The release this commit IS, when it is one. Recorded at install so the node can answer "am I behind?"
 # without resolving a tag back to a commit over the network: `lua/core/release.lua` compares tags, and
 # an install with no tag answers `unknown` rather than "up to date". Empty is a fact (a commit that was
@@ -1007,13 +1011,6 @@ BINARY_STAGE="$INSTALL_DIR/node-binary.next"
 # at 22:17Z (an interim installed.txt, no lua_tree=, no binary_commit=, the scripts never shipped). Every
 # post-swap problem is therefore RECORDED and named, and the deploy exits 3 (installed, with problems) at
 # the end: the exit code says "do not trust this as a clean success" without pretending nothing happened.
-POST_SWAP_PROBLEMS=0
-POST_SWAP_LOG=""
-post_swap_problem() { # <phase> <what>
-  POST_SWAP_PROBLEMS=$((POST_SWAP_PROBLEMS + 1))
-  POST_SWAP_LOG="${POST_SWAP_LOG}${POST_SWAP_LOG:+; }$1: $2"
-  note "post-swap problem ($1): $2"
-}
 if [ "${WA_DEPLOY_BUILD_ONLY:-0}" = 1 ]; then
   echo "deploy: WA_DEPLOY_BUILD_ONLY=1 - this tree builds its own binary; no published one is installed"
 elif ! command -v wa_node_binaries_prepare >/dev/null 2>&1; then
@@ -2017,8 +2014,8 @@ record_installed() {
   # are binary_commit= below. Written as the bytes' commit instead, a node that installed a covering build
   # of a later scripts-only commit reported itself behind main on every update check - the same defect the
   # fast path fixed on 21/11, one path over.
-  if [ "${BINARY_PROVENANCE:-}" = prebuilt-release ] && [ -n "${BINARY_SOURCE_COMMIT:-}" ] && [ "$BINARY_SOURCE_COMMIT" != "$COMMIT" ]; then
-    record_commit="$COMMIT"
+  if [ "${BINARY_PROVENANCE:-}" = prebuilt-release ] && [ -n "${BINARY_SOURCE_COMMIT:-}" ] && [ "$BINARY_SOURCE_COMMIT" != "$COMMIT_FULL" ]; then
+    record_commit="$COMMIT_FULL"
   fi
   # A prebuilt record's commit= is the manifest's 40-hex identity or it is not a record of a verified
   # install: a short id is a name that can collide, and it would be the id the checks downstream compare.
