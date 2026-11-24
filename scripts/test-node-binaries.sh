@@ -94,6 +94,9 @@ cp "$ROOT/scripts/lib/node-binaries.sh" "$ROOT/scripts/lib/build-requirements.sh
 # The signature gate lives beside it, and the fixture stands in for a checkout: both files, or a release
 # could not be verified at all (which the lib refuses by name, correctly).
 cp "$ROOT/scripts/lib/release-signing.sh" "$fixture/scripts/lib/"
+# ...and the shared transfer (scripts/lib/download-asset.sh) those libs source: a fixture without it refuses
+# every download by name (node_download_lib_missing), which is correct but would prove nothing here.
+cp "$ROOT/scripts/lib/download-asset.sh" "$fixture/scripts/lib/"
 mkdir -p "$fixture/scripts/lib" "$fixture/config"
 cp "$ROOT/scripts/lib/release_verify.py" "$fixture/scripts/lib/"
 cp "$ROOT/config/release-keys.txt" "$fixture/config/"

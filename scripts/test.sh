@@ -598,6 +598,12 @@ gate_run bash scripts/test-deploy-node-binaries.sh
 # fetched again (and that a hand-edited entry is not).
 gate_run bash scripts/test-release-install-exec.sh
 gate_run bash scripts/test-node-binaries.sh
+# THE TRANSFER ITSELF (24/11, the `wa update` that refused on `work`): a release-asset download with NO
+# total-time cap, a STALL window instead, resume on a partial file, and a refusal that names curl's exit, the
+# HTTP status, the bytes and the attempts - plus the progress line a follower reads. Every row is against a
+# local stub HTTP server on 127.0.0.1 (tests/fixtures/http-stub/server.py): no network, no fleet. The 55 MB row
+# is a real >120 s transfer, which is why this is here and not in scripts/fast.sh.
+gate_run bash scripts/test-node-download.sh
 # The glibc floor at both ends: the bytes an artifact needs against the libc the installing host has
 # (18/11, mail: a published binary needed GLIBC_2.39 on a glibc 2.35 node and was down two days). Hermetic -
 # fixture ELFs, a stand-in host version, and the three installers' own refusals.
@@ -1413,6 +1419,11 @@ gate_run bash scripts/test-session-park.sh
 # marker covering only the swap. A real node refuses new turns and holds due wakes while it waits; the real
 # sentinel binary names each holder and, past its bound, proceeds over the sessions that have PAUSED only.
 WA_BIN="$BIN" gate_run bash scripts/test-deploy-wait.sh
+# WHAT A REQUEST RECORDS WHEN A NAMED MAIN IS BEHIND ORIGIN (24/11, G blocker): the real sentinel writes the
+# request in a fixture repository whose `wa.deployRemote` main is seven days behind origin/main, and the
+# node's own Lua reads the box and prints the pause, 'did not happen' and release lines. Every one of them
+# must name the commit a deploy would install, never the bundle's stale main.
+WA_BIN="$BIN" gate_run bash scripts/test-deploy-target.sh
 # A PAUSE'S RELEASE SAYS WHAT HAPPENED, DECIDED BY THE INSTALLED RECORD (r8c 1, mission one-resume-per-install):
 # the pause record names installed.txt's tree and bytes, a scripts-only install makes the release say
 # "[deploy] installed", a marker gone with nothing installed says "[deploy] the update did not happen", the resume

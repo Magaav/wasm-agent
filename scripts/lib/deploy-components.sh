@@ -28,6 +28,17 @@
 # Sourced by scripts/deploy.sh (and shipped beside it) and exercised by
 # scripts/test-deploy-components.sh.
 
+# THE TRANSFER ITSELF is the shared one (scripts/lib/download-asset.sh): no total-time cap, a stall window,
+# resume on a partial file, a refusal that names the HTTP status / byte count / curl exit, and progress into
+# the phase file a follower reads. Sourced here so a component bundle and a node binary cannot drift into two
+# different download behaviours (24/11: a `-m 60` cap refused a bundle on a slow minute and said only
+# "unreachable").
+if ! command -v wa_download_asset >/dev/null 2>&1; then
+  _wa_download_lib="$(dirname "${BASH_SOURCE[0]}")/download-asset.sh"
+  if [ -f "$_wa_download_lib" ]; then . "$_wa_download_lib"; fi
+  unset _wa_download_lib
+fi
+
 # Where this machine's node reads components from. Same expression as
 # `components::component_dir()` in rust/wa-kernel-runtime/src/components.rs: an explicit WA_COMPONENTS_DIR
 # wins, else the home directory's `.wasm-agent/components`.
@@ -240,7 +251,7 @@ wa_component_cache_root() {
 #   WA_COMPONENT_RELEASE_URL=https://...        the base URL of the assets
 #   unset                                       `gh release download`, then the public release URL
 wa_component_fetch_assets() {
-  local repo="$1" tag="$2" name="$3" dest="$4" base="${5:-}" asset local_base url_base
+  local repo="$1" tag="$2" name="$3" dest="$4" base="${5:-}" asset local_base url_base out rc reason
   [ -d "$repo" ] && repo="$(wa_component_release_repo "$repo")"
   local assets="$name.wasm $name.json components.lock"
   local_base=""
@@ -264,27 +275,43 @@ wa_component_fetch_assets() {
     return 0
   fi
   if [ -n "$url_base" ]; then
-    command -v curl >/dev/null 2>&1 || return 8
+    command -v wa_download_asset >/dev/null 2>&1 || {
+      echo "component_download_lib_missing: scripts/lib/download-asset.sh is not beside this tree, so the $name bundle cannot be fetched" >&2
+      return 8
+    }
     for asset in $assets; do
-      curl -fsSL -m 60 "$url_base/$asset" -o "$dest/$asset" 2>/dev/null \
-        || { echo "component_release_unreachable: $url_base/$asset" >&2; rm -f "$dest/$asset"; return 8; }
+      # THE SAME TRANSFER AS A NODE BINARY: the reason is the downloader's own, under this vocabulary.
+      if reason="$(wa_download_asset "$url_base/$asset" "$dest/$asset" "$asset")"; then continue; fi
+      echo "component_release_unreachable: ${reason#node_release_unreachable: }" >&2
+      rm -f "$dest/$asset" "$dest/$asset.part" "$dest/$asset.part.hdr" "$dest/$asset.part.code" "$dest/$asset.part.err"
+      return 8
     done
     return 0
   fi
   if command -v gh >/dev/null 2>&1; then
-    if gh release download "$tag" -R "$repo" -D "$dest" \
-      -p "$name.wasm" -p "$name.json" -p components.lock >/dev/null 2>&1 \
-      && [ -f "$dest/$name.wasm" ] && [ -f "$dest/$name.json" ] && [ -f "$dest/components.lock" ]; then
+    out="$(gh release download "$tag" -R "$repo" -D "$dest" \
+      -p "$name.wasm" -p "$name.json" -p components.lock 2>&1)"; rc=$?
+    if [ "$rc" -eq 0 ] && [ -f "$dest/$name.wasm" ] && [ -f "$dest/$name.json" ] && [ -f "$dest/components.lock" ]; then
       return 0
     fi
-    # gh without a token on the node, a release that is not there yet: the anonymous URL may still work.
-    echo "component_release_gh_failed: gh could not download $tag from $repo; trying the public asset URL" >&2
+    # gh without a token on the node, a release that is not there yet: the anonymous URL may still work. gh's
+    # OWN last line is kept - a missing token, a rate limit and a missing asset otherwise sound the same.
+    echo "component_release_gh_failed: gh could not download $tag from $repo (exit $rc: $(printf '%s\n' "$out" | sed '/^[[:space:]]*$/d' | tail -n 1)); trying the public asset URL" >&2
     rm -f "$dest/$name.wasm" "$dest/$name.json" "$dest/components.lock"
   fi
-  command -v curl >/dev/null 2>&1 || return 8
+  command -v curl >/dev/null 2>&1 || {
+    echo "component_release_unreachable: $name: no curl and no gh on this host, so nothing can be fetched" >&2
+    return 8
+  }
+  command -v wa_download_asset >/dev/null 2>&1 || {
+    echo "component_download_lib_missing: scripts/lib/download-asset.sh is not beside this tree, so the $name bundle cannot be fetched" >&2
+    return 8
+  }
   for asset in $assets; do
-    curl -fsSL -m 60 "https://github.com/$repo/releases/download/$tag/$asset" -o "$dest/$asset" 2>/dev/null \
-      || { echo "component_release_unreachable: https://github.com/$repo/releases/download/$tag/$asset" >&2; rm -f "$dest/$asset"; return 8; }
+    if reason="$(wa_download_asset "https://github.com/$repo/releases/download/$tag/$asset" "$dest/$asset" "$asset")"; then continue; fi
+    echo "component_release_unreachable: ${reason#node_release_unreachable: }" >&2
+    rm -f "$dest/$asset" "$dest/$asset.part" "$dest/$asset.part.hdr" "$dest/$asset.part.code" "$dest/$asset.part.err"
+    return 8
   done
   return 0
 }

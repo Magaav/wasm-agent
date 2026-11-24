@@ -3285,7 +3285,7 @@ fn request(args: &[String]) -> Result<()> {
     if verb == "deploy" && !fields.contains_key("expected-sha") {
         match deploy_protocol::target_commit() {
             Some(commit) => { fields.insert("target_commit".into(), json!(commit.clone())); recorded_commit = Some(commit); }
-            None => say("no target commit recorded: origin/main of the deploy tree could not be read"),
+            None => say("no target commit recorded: the commit a deploy of the deploy tree would install could not be read"),
         }
     }
     if let Some(sha) = fields.remove("expected-sha") {
@@ -3350,7 +3350,7 @@ fn request(args: &[String]) -> Result<()> {
     say("the sentinel performs it - it is the only thing that stops or starts this node");
     if let Some(commit) = &recorded_commit {
         // The commit is a fact about this request, not about main: main may move before it runs.
-        say(&format!("target commit {commit} recorded (origin/main now; a later move of main does not change this request)"));
+        say(&format!("target commit {commit} recorded (what a deploy now would install; a later move of main does not change this request)"));
     }
     // What the queue implies, at the moment of writing. A verb that replaces the node runs only when the node
     // is idle - and the turn writing the request is exactly what makes the node busy, so continuing it is how

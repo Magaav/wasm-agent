@@ -209,6 +209,155 @@ fn a_named_deploy_remote_is_the_recorded_main() {
     assert_eq!(deploy_protocol::target_commit_at(&repo).unwrap(), unpushed, "the named remote's main");
 }
 
+
+/// 3c. THE MEASURED DEFECT (24/11, `work`): the checkout names a `host` bundle whose main is SEVEN DAYS
+/// BEHIND origin/main, and the sentinel recorded that stale tip as the target of EVERY request - while
+/// `deploy.sh` built HEAD (which was origin/main) and installed `345e51be`. What a request records is what a
+/// deploy would install, by the rule stated once in docs/DEPLOY-TARGET.md.
+#[test]
+fn a_named_main_behind_origin_records_what_a_deploy_would_install() {
+    // Spawns git: hold ENV_LOCK, which the tests that blank PATH hold while they do.
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let scratch = Scratch::new("named-main-behind");
+    let repo = scratch.dir.join("repo");
+    std::fs::create_dir_all(&repo).expect("repo directory");
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["-c", "commit.gpgsign=false", "commit", "--allow-empty", "-q", "-m", "the bundle tip"]);
+    let stale = git(&repo, &["rev-parse", "HEAD"]);
+    git(&repo, &["-c", "commit.gpgsign=false", "commit", "--allow-empty", "-q", "-m", "the seven days after it"]);
+    let main = git(&repo, &["rev-parse", "HEAD"]);
+    git(&repo, &["update-ref", "refs/remotes/origin/main", &main]);
+    git(&repo, &["update-ref", "refs/remotes/host/main", &stale]);
+    git(&repo, &["config", "wa.deployRemote", "host"]);
+    assert_eq!(git(&repo, &["rev-list", "--count", "HEAD..host/main"]), "0",
+        "the fixture: HEAD is not behind the bundle, so deploy.sh builds it");
+    assert_eq!(git(&repo, &["rev-list", "--count", "host/main..HEAD"]), "1",
+        "the fixture: the bundle IS behind HEAD, which is what made every recorded target stale");
+    assert_eq!(deploy_protocol::target_commit_at(&repo).unwrap(), main,
+        "the recorded target is what a deploy would install (HEAD, which is origin/main) - not the stale bundle main {stale}");
+}
+
+/// 3d. THE CASE THE NAMED REMOTE WAS BUILT FOR (the laptop sandbox, 29/10), unchanged: its bundle main is
+/// AHEAD of origin/main, because its operator's main arrives there before it is pushed anywhere. HEAD is on
+/// that main and behind none of them, so the recorded target is still that main - the same value it recorded
+/// before the rule was written down.
+#[test]
+fn a_named_main_ahead_of_origin_records_that_main() {
+    // Spawns git: hold ENV_LOCK, which the tests that blank PATH hold while they do.
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let scratch = Scratch::new("named-main-ahead");
+    let repo = scratch.dir.join("repo");
+    std::fs::create_dir_all(&repo).expect("repo directory");
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["-c", "commit.gpgsign=false", "commit", "--allow-empty", "-q", "-m", "published"]);
+    let published = git(&repo, &["rev-parse", "HEAD"]);
+    git(&repo, &["update-ref", "refs/remotes/origin/main", &published]);
+    git(&repo, &["-c", "commit.gpgsign=false", "commit", "--allow-empty", "-q", "-m", "not pushed yet"]);
+    let ahead = git(&repo, &["rev-parse", "HEAD"]);
+    git(&repo, &["update-ref", "refs/remotes/host/main", &ahead]);
+    git(&repo, &["config", "wa.deployRemote", "host"]);
+    assert_eq!(git(&repo, &["rev-list", "--count", "HEAD..origin/main"]), "0", "the fixture: HEAD is behind nothing");
+    assert_eq!(deploy_protocol::target_commit_at(&repo).unwrap(), ahead,
+        "a named main ahead of origin is what deploy.sh builds, and what is recorded");
+    assert_ne!(deploy_protocol::target_commit_at(&repo).unwrap(), published,
+        "and never origin/main's tip when that is behind the tree");
+}
+
+/// 3e. A tree that is on no named main is one deploy.sh refuses, so nothing it holds is a candidate for what
+/// will be installed: the record names origin/main - the commit a deploy installs once the tree is fixed.
+#[test]
+fn a_tree_that_is_on_no_named_main_records_origin_main() {
+    // Spawns git: hold ENV_LOCK, which the tests that blank PATH hold while they do.
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let scratch = Scratch::new("not-on-main");
+    let repo = scratch.dir.join("repo");
+    std::fs::create_dir_all(&repo).expect("repo directory");
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["-c", "commit.gpgsign=false", "commit", "--allow-empty", "-q", "-m", "main"]);
+    let main = git(&repo, &["rev-parse", "HEAD"]);
+    git(&repo, &["update-ref", "refs/remotes/origin/main", &main]);
+    git(&repo, &["checkout", "-q", "-b", "change/unmerged"]);
+    git(&repo, &["-c", "commit.gpgsign=false", "commit", "--allow-empty", "-q", "-m", "the unmerged change"]);
+    assert_eq!(git(&repo, &["rev-list", "--count", "HEAD..origin/main"]), "0",
+        "the fixture: not behind - the only reason to refuse it is that it is on no main");
+    assert_eq!(deploy_protocol::target_commit_at(&repo).unwrap(), main, "origin/main, the commit a deploy installs");
+}
+
+/// 3f. THROUGH THE DOOR AN OPERATOR USES, not through the function alone: `request deploy` in that checkout
+/// writes the request file the node then reads (`deploy_wait`'s pause line, `installer_outcome`'s verdict),
+/// and the `target_commit` in it is what a deploy would install - not the named remote's stale main.
+#[test]
+fn a_request_written_in_that_checkout_records_what_a_deploy_would_install() {
+    // Spawns git and writes a request: hold ENV_LOCK, which every test that touches the environment holds.
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let scratch = Scratch::new("request-written");
+    let repo = scratch.dir.join("repo");
+    std::fs::create_dir_all(&repo).expect("repo directory");
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["-c", "commit.gpgsign=false", "commit", "--allow-empty", "-q", "-m", "the bundle tip"]);
+    let stale = git(&repo, &["rev-parse", "HEAD"]);
+    git(&repo, &["-c", "commit.gpgsign=false", "commit", "--allow-empty", "-q", "-m", "the seven days after it"]);
+    let main = git(&repo, &["rev-parse", "HEAD"]);
+    git(&repo, &["update-ref", "refs/remotes/origin/main", &main]);
+    git(&repo, &["update-ref", "refs/remotes/host/main", &stale]);
+    git(&repo, &["config", "wa.deployRemote", "host"]);
+
+    let home = scratch.dir.join("home");
+    let install = scratch.dir.join("install");
+    std::fs::create_dir_all(&home).expect("scratch home");
+    std::fs::create_dir_all(&install).expect("scratch install");
+    // The one refusal that matters in a test that writes a request: this is not the node's own store.
+    let node_store = std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".wasm-agent").join("sentinel"));
+    assert_ne!(Some(home.join(".wasm-agent").join("sentinel")), node_store,
+        "the scratch store must never be the node's own sentinel directory");
+    let restore: Vec<(&str, Option<std::ffi::OsString>)> = ["WASM_AGENT_HOME", "WA_DEPLOY_ROOT", "WA_INSTALL_DIR"]
+        .into_iter()
+        .map(|key| (key, std::env::var_os(key)))
+        .collect();
+    std::env::set_var("WASM_AGENT_HOME", &home);
+    std::env::set_var("WA_DEPLOY_ROOT", &repo);
+    std::env::set_var("WA_INSTALL_DIR", &install);
+
+    let args: Vec<String> = ["deploy", "--reason", "read the box afterwards"].iter().map(|s| s.to_string()).collect();
+    request(&args).expect("the request is written");
+
+    let box_dir = sentinel_dir().join("requests");
+    let mut files: Vec<PathBuf> = std::fs::read_dir(&box_dir).expect("the request box")
+        .flatten().map(|entry| entry.path()).filter(|path| path.extension().and_then(|e| e.to_str()) == Some("json"))
+        .collect();
+    files.sort();
+    assert_eq!(files.len(), 1, "one request was written: {files:?}");
+    let written: Value = serde_json::from_slice(&std::fs::read(&files[0]).expect("the request file")).expect("request json");
+    assert_eq!(written["target_commit"], json!(main),
+        "the request names what a deploy would install, not the bundle's stale main {stale}: {written}");
+    assert_eq!(written.get("expected_sha"), None, "and it demands no commit: the legacy door names no expected SHA");
+
+    for (key, value) in restore {
+        match value { Some(v) => std::env::set_var(key, v), None => std::env::remove_var(key) }
+    }
+}
+
+/// 3g. THE RULE IS STATED ONCE (docs/DEPLOY-TARGET.md) and both halves cite that statement - deploy.sh rule 2,
+/// which decides what may be installed, and `target_commit_at`, which records what a request asked for. The two
+/// drifted on `work` (24/11) precisely because each carried its own idea of "main"; a citation is not prose a
+/// test can judge, but its absence is, and absence is how the next drift starts.
+///
+/// Read from the files rather than embedded (`include_str!`): a citation that is reverted would then break the
+/// crate's compilation instead of failing one test with the sentence below.
+#[test]
+fn the_target_rule_is_stated_once_and_both_halves_cite_it() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+    let read = |relative: &str| std::fs::read_to_string(root.join(relative))
+        .unwrap_or_else(|error| panic!("{relative} is not readable: {error}"));
+    let doc = read("docs/DEPLOY-TARGET.md");
+    assert!(doc.contains("## The rule"), "the one statement has its own section");
+    assert!(doc.contains("A deploy installs **HEAD**"), "and it says what a deploy installs");
+    assert!(read("rust/wa-sentinel/src/deploy_protocol.rs").contains("docs/DEPLOY-TARGET.md"),
+        "the sentinel half cites the statement (target_commit_at)");
+    assert!(read("scripts/deploy.sh").contains("docs/DEPLOY-TARGET.md"),
+        "deploy.sh rule 2 cites the statement");
+}
+
 /// The timestamp an operator reads is UTC and unambiguous, and it is the queue time, not "now".
 #[test]
 fn queue_times_are_utc_stamps() {

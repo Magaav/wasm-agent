@@ -46,6 +46,15 @@ if ! command -v wa_release_verify_sums >/dev/null 2>&1; then
   if [ -f "$_wa_release_signing_lib" ]; then . "$_wa_release_signing_lib"; fi
   unset _wa_release_signing_lib
 fi
+# THE DOWNLOAD ITSELF lives in its own file (scripts/lib/download-asset.sh): no total-time cap, a stall
+# window instead, resume on a partial file, a refusal that names the HTTP status / byte count / curl exit,
+# and progress into the phase file a follower reads. Sourced here - and by scripts/lib/deploy-components.sh -
+# so every release asset of this channel goes through ONE implementation (24/11).
+if ! command -v wa_download_asset >/dev/null 2>&1; then
+  _wa_download_lib="$(dirname "${BASH_SOURCE[0]}")/download-asset.sh"
+  if [ -f "$_wa_download_lib" ]; then . "$_wa_download_lib"; fi
+  unset _wa_download_lib
+fi
 
 # <file> -> sha256 on stdout; 7 when no sha tool exists. Same expression as the component lib, on
 # purpose: a deploy that can verify one pin can verify the other.
@@ -484,8 +493,13 @@ wa_node_asset_names() {
 #                                            use, and the way a hand-copied release is tried)
 #   WA_NODE_BINARIES_URL=https://...         the base URL of the assets
 #   unset                                    `gh release download`, then the public release URL
+#
+# THE REFUSAL SAYS WHY (24/11): an HTTP status, bytes received of bytes expected, seconds and attempts, and
+# curl's exit code in words - never "unreachable" alone, and never the URL (it can carry a token or a
+# signed query, and a refusal is logged). scripts/lib/download-asset.sh is where that is implemented for
+# every asset of the release: manifest, SHA256SUMS, .sig, TRUSTED-KEYS, both binaries.
 wa_node_fetch_asset() {
-  local repo="$1" tag="$2" asset="$3" dest="$4" base="${5:-}" local_base url_base
+  local repo="$1" tag="$2" asset="$3" dest="$4" base="${5:-}" local_base url_base out rc
   [ -d "$repo" ] && repo="$(wa_node_release_repo "$repo")"
   mkdir -p "$dest" || { printf 'node_cache_unwritable: %s
 ' "$dest"; return 8; }
@@ -511,26 +525,41 @@ wa_node_fetch_asset() {
     return 0
   fi
   if [ -n "$url_base" ]; then
-    command -v curl >/dev/null 2>&1 || { printf 'node_release_unreachable: no curl for %s
-' "$url_base"; return 8; }
-    curl -fsSL -m 120 "$url_base/$asset" -o "$dest/$asset" 2>/dev/null       || { printf 'node_release_unreachable: %s/%s
-' "$url_base" "$asset"; rm -f "$dest/$asset"; return 8; }
-    return 0
+    command -v wa_download_asset >/dev/null 2>&1 || {
+      printf 'node_download_lib_missing: scripts/lib/download-asset.sh is not beside this tree, so %s cannot be fetched\n' "$asset"
+      return 8
+    }
+    # NO TOTAL-TIME CAP, STALL DETECTION, RESUME, AND A REFUSAL THAT SAYS WHY (scripts/lib/download-asset.sh).
+    # Measured 24/11: `-m 120` on this line refused a 55.3 MB asset on `work`, and the same asset arrived from
+    # the same host in 13.6 s twenty-five minutes later; `2>/dev/null` had thrown away the one fact that would
+    # have said which of slow, 404 or dropped it was.
+    out="$(wa_download_asset "$url_base/$asset" "$dest/$asset" "$(wa_download_label "$asset")")"; rc=$?
+    [ -z "$out" ] || printf '%s\n' "$out"
+    [ "$rc" -eq 0 ] && return 0
+    rm -f "$dest/$asset" "$dest/$asset.part" "$dest/$asset.part.hdr" "$dest/$asset.part.code" "$dest/$asset.part.err"
+    return 8
   fi
   if command -v gh >/dev/null 2>&1; then
-    if gh release download "$tag" -R "$repo" -D "$dest" -p "$asset" >/dev/null 2>&1 && [ -f "$dest/$asset" ]; then
+    out="$(gh release download "$tag" -R "$repo" -D "$dest" -p "$asset" 2>&1)"; rc=$?
+    if [ "$rc" -eq 0 ] && [ -f "$dest/$asset" ]; then
       return 0
     fi
-    # gh without a token on the node, or a release that is not there yet: the anonymous URL may work.
-    printf 'node_release_gh_failed: gh could not download %s/%s; trying the public asset URL
-' "$tag" "$asset"
+    # gh without a token on the node, or a release that is not there yet: the anonymous URL may work. gh's
+    # OWN last line is kept - a missing token, a rate limit and a missing asset otherwise sound the same.
+    printf 'node_release_gh_failed: gh could not download %s/%s (exit %s: %s); trying the public asset URL\n' \
+      "$tag" "$asset" "$rc" "$(printf '%s\n' "$out" | sed '/^[[:space:]]*$/d' | tail -n 1)"
     rm -f "$dest/$asset"
   fi
-  command -v curl >/dev/null 2>&1 || { printf 'node_release_unreachable: no curl and no gh for %s
-' "$tag"; return 8; }
-  curl -fsSL -m 120 "https://github.com/$repo/releases/download/$tag/$asset" -o "$dest/$asset" 2>/dev/null     || { printf 'node_release_unreachable: %s/%s
-' "$tag" "$asset"; rm -f "$dest/$asset"; return 8; }
-  return 0
+  command -v curl >/dev/null 2>&1 || { printf 'node_release_unreachable: %s/%s: no curl and no gh on this host, so nothing can be fetched\n' "$tag" "$asset"; return 8; }
+  command -v wa_download_asset >/dev/null 2>&1 || {
+    printf 'node_download_lib_missing: scripts/lib/download-asset.sh is not beside this tree, so %s cannot be fetched\n' "$asset"
+    return 8
+  }
+  out="$(wa_download_asset "https://github.com/$repo/releases/download/$tag/$asset" "$dest/$asset" "$(wa_download_label "$asset")")"; rc=$?
+  [ -z "$out" ] || printf '%s\n' "$out"
+  [ "$rc" -eq 0 ] && return 0
+  rm -f "$dest/$asset" "$dest/$asset.part" "$dest/$asset.part.hdr" "$dest/$asset.part.code" "$dest/$asset.part.err"
+  return 8
 }
 
 # <repo> <tag> <dir> -> 0 when this release's `SHA256SUMS` is signed by a key this node trusts.

@@ -487,6 +487,11 @@ BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 # git bundle (remote `host`) before it is pushed anywhere, and the sentinel deploys it. The rules are the
 # same against every named main: behind ANY of them refuses, and HEAD must be ON one of them. A tree behind
 # origin/main is still refused when the other remote is ahead, so a stale laptop cannot undo GitHub's main.
+# THE RULE IS STATED ONCE, in docs/DEPLOY-TARGET.md, and the sentinel's recorded target
+# (rust/wa-sentinel/src/deploy_protocol.rs, target_commit_at) follows that statement: a change to it
+# belongs in both places in one commit. Measured 24/11: the sentinel recorded a host bundle's main
+# seven days behind because it read the named remote instead of the rule below, while this loop
+# installed HEAD - and every text that spoke by the record named the stale commit.
 MAIN_REFS=""
 for MAIN_REMOTE in origin $(git config --get-all wa.deployRemote 2>/dev/null); do
   case " $MAIN_REFS " in *" $MAIN_REMOTE/main "*) continue ;; esac
@@ -2271,6 +2276,10 @@ ship_file "$ROOT/scripts/lib/deploy-components.sh" "$INSTALL_DIR/scripts/lib/dep
 # node-binaries helper" and builds the tree, which is the one thing a node without a toolchain (openclaw, 2
 # cores, no disk for ~600 crates) cannot do. Measured 06/11: the prebuilt path was reached only from the tree.
 ship_file "$ROOT/scripts/lib/node-binaries.sh" "$INSTALL_DIR/scripts/lib/node-binaries.sh" "scripts/lib/node-binaries.sh beside deploy.sh"
+# ...and the shared transfer both resolvers source (scripts/lib/download-asset.sh). The installed copy is what
+# the sentinel runs: without this line a tree-less node refuses every asset by name
+# (node_download_lib_missing / component_download_lib_missing) - correct, and useless for installing.
+ship_file "$ROOT/scripts/lib/download-asset.sh" "$INSTALL_DIR/scripts/lib/download-asset.sh" "scripts/lib/download-asset.sh beside deploy.sh (the one asset transfer)"
 # ...and the glibc floor, which both deploy.sh and upgrade.sh source (scripts/lib/glibc-floor.sh): an
 # installed copy that cannot measure the artifact's floor against this host's libc is the copy that would
 # install a binary the node cannot start.
