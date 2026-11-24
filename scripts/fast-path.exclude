@@ -54,6 +54,8 @@ scripts/test-subagents-profiles.lua  # lua error: [string "scripts/test-subagent
 scripts/test-vault-keys.lua  # lua error: [string "scripts/test-vault-keys.lua"]:16: the test runs against its own store 
 scripts/test-tool-env-allow.lua  # half of a two-invocation test: scripts/test-tool-env-allow.sh runs this script twice (withheld, then granted by a policy) and is a check of this fast path; run alone it has no policy and no second mode
 scripts/test-session-isolation.lua  # its environment sections need canaries a bare row cannot invent: scripts/test-session-isolation.sh exports them and is a check of this fast path
+scripts/test-git-env-isolation.lua  # a session of the two this row starts, not a row: scripts/test-git-env-isolation.sh names its worktree, its scratch and its label, and is a check of this fast path
+scripts/test-git-env-isolation-report.lua  # the third node of that same row, which keeps its stderr and reads the line: scripts/test-git-env-isolation.sh is the check
 scripts/test-vault-login.lua  # lua error: [string "scripts/test-vault-login.lua"]:37: attempt to call a nil value (field 
 scripts/test-wave-autoflush.lua  # lua error: [string "scripts/test-wave-autoflush.lua"]:19: assertion failed!
 scripts/test-wave-autoflush-restart.lua  # lua error: [string "scripts/test-wave-autoflush-restart.lua"]:4: assertion failed!

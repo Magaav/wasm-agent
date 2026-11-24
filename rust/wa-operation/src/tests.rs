@@ -1717,3 +1717,34 @@ fn a_handle_whose_owner_is_gone_names_its_output_and_cancels_at_once() {
     assert_eq!(cancelled["stdout_bytes"], 30, "and it still names the output: {cancelled}");
     drop(reader); remove_fixture(base);
 }
+
+/// A `GIT_*` name that can choose a repository, an index or a working tree is never inherited by a tool
+/// child (report `docs/missions/reports/session-isolation-git.md`): the deploy-hold worker's commit landed
+/// in another live session's worktree because the child kept the node's own `GIT_DIR` and `GIT_INDEX_FILE`.
+///
+/// This is the RULE, on the function both spawns call. What it does to a real child is the row
+/// `scripts/test-git-env-isolation.sh`, which crosses two processes - a rule test alone cannot see that.
+#[test]
+fn a_git_name_that_can_choose_a_repository_is_withheld_from_tool_children() {
+    for name in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY",
+                 "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_PREFIX", "GIT_QUARANTINE_PATH",
+                 "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_SHALLOW_FILE",
+                 "GIT_GRAFT_FILE", "GIT_REPLACE_REF_BASE"] {
+        assert!(denied_env(name), "{name} must not be inherited by a tool child");
+    }
+    // A name git adds after this line is withheld too: the family is the rule, not the list.
+    assert!(denied_env("GIT_SOMETHING_GIT_ADDS_NEXT_YEAR"));
+    // The names that cannot pick a repository still arrive, so a hermetic config, an ssh wrapper and a
+    // terminal that must not prompt keep working in a child.
+    for name in GIT_ENV_KEEP {
+        assert!(!denied_env(name), "{name} is on the keep list and must still arrive");
+    }
+    // A name or a date is not inherited either: a commit is authored by the repository's identity.
+    assert!(denied_env("GIT_AUTHOR_NAME") && denied_env("GIT_COMMITTER_DATE"));
+    // Case is not a way past it (the rule upper-cases the name it is handed).
+    assert!(denied_env("git_dir") && denied_env("Git_Work_Tree"));
+    // The credential rule this list already carried is untouched, and nothing else was swept in with it.
+    assert!(denied_env("OPENAI_API_KEY") && denied_env("GH_TOKEN"));
+    assert!(!denied_env("PATH") && !denied_env("HOME") && !denied_env("WASM_AGENT_HOME"));
+}
+
