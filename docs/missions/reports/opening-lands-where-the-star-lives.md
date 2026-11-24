@@ -81,17 +81,28 @@ a frame for a width the window no longer has) is stronger in the first: the fram
 
 ## 4. Start time did not grow
 
-Two numbers, both from the speed board's own machinery, on this node (16 cores), before = the base commit
-ffd2a0a5's binary, after = this branch:
+Three sizes, before = the base commit ffd2a0a5's binary, after = this branch (2be61e78, built from a clean
+tree), the same env on both: a pty, a scratch home, the same Lua, the opening at its real 2 s budget.
+Interleaved, one warm-up run of each discarded per size, then three samples each, the MEDIAN in the table and
+the samples underneath - the pre-opening start (interpreter boot, ledger open) is the noisy part, so a single
+sample says nothing. Two numbers per size, as asked: the OPENING'S LENGTH and the TIME TO THE FIRST PROMPT.
 
-* **cold start** (`scripts/speed/probe-cold-start.py`, the board's `start` row: process start -> the prompt is
-  up in a real pty), 7 samples: **308 ms before, 293 ms after** (medians);
-* **the opening's own length** (pty, `ESC[?1049h` -> `ESC[?1049l`), 3 samples each, both binaries built from a
-  CLEAN tree: **1966/1962/1968 ms before, 1968/1964/1965 ms after** - the same sequence, and the 2000 ms
-  budget (`TOTAL_MS`) is untouched. Measured with a DIRTY build first and it read 2000 ms: the label was
-  `v…+dirty`, six cells longer than the base's, which is four more decode frames at 16 ms - a property of the
-  label, not of the change. Nothing in the acts, the delays, `header_frames` or `planned_ms` moved (the diff
-  of `opening.rs` touches none of them).
+* **cold start, no opening** (`scripts/speed/probe-cold-start.py`, the board's `start` row: process start ->
+  the prompt is up in a real pty), 7 samples: **308 ms before, 293 ms after** (medians);
+* **per size, with the opening on**:
+
+| window | opening's length (base -> branch) | time to the first prompt (base -> branch) |
+|---|---|---|
+| 80x24  | **1985 ms -> 1986 ms** | **2515 ms -> 2543 ms** (base 2589/2515/2396, branch 2608/2373/2543) |
+| 120x40 | **2000 ms -> 2000 ms** | **2628 ms -> 2548 ms** (base 2633/2594/2628, branch 2548/2642/2461) |
+| 200x60 | **2001 ms -> 2001 ms** | **2516 ms -> 2393 ms** (base 2516/2544/2362, branch 2538/2372/2393) |
+
+The opening's length is unchanged to the millisecond at all three sizes - it is the 2000 ms budget, and no frame
+or delay moved. Time to the first prompt is unchanged within the spread ONE binary alone shows on this loaded
+node (+-130 ms: the branch is +28 ms at 80x24, -80 ms at 120x40, -123 ms at 200x60). Nothing here is a slower
+start. A first, cold-cache run of the new binary read +450 ms; that is the page cache of a 78 MB binary, not the
+code, which is why the table is warm and interleaved (cold start, no opening, was also measured both ways: 308 ->
+293 ms).
 
 ## 5. The tests
 
@@ -119,7 +130,8 @@ ffd2a0a5's binary, after = this branch:
 * the notice and the reload note are written BEFORE the block is handed to the opening (see 2).
 
 Tests: `scripts/test-icons.lua` (the resolver's unknown answer, the exact sentence, the silence of an explicit
-set, the config line, and that repeated `/icons` leaves ONE line - 256 checks) and `rust/wa-term/tests/icons.rs`
+set, the config line, and that repeated `/icons` keeps ONE line - and, for item 7, the measured glyphs, the two
+release-tag forms of the font link and its two refusal reasons - 267 checks) and `rust/wa-term/tests/icons.rs`
 (new): two real starts on a pty whose PATH has no shell in it - so the font genuinely cannot be measured - the
 line appears exactly once, `/icons wa` writes one config line, and the second start neither repeats the line
 nor forgets the set. Wired in `scripts/test.sh` beside the opening pty row.
@@ -207,8 +219,32 @@ wa Icons on this machine: curl -fsSL https://github.com/Magaav/wasm-agent/releas
   release's `SHA256SUMS` - the file the vault's `release-signing` key SIGNS (`SHA256SUMS.sig`) and that a
   release is not published without. It can be checked with the sums the reader already trusts:
   `curl -fsSL .../SHA256SUMS | grep waIcons` and `sha256sum -c`;
-* the line is printed only when the set in force is not `wa`, and only when a release can be named: a dev tree
-  whose label is not a commit prints nothing rather than a guessed URL (`icons.fetch_line`);
+* IT IS PRINTED ONLY WHEN THE URL CAN STAND (Fable, 24/11; `2be61e78`). Two facts decide, both from the
+  running build:
+  1. **does this build's release carry the font?** `rust/wa-capabilities/build.rs:31-38` embeds
+     `RELEASE_FONTS = assets/fonts/waIcons-Regular.ttf exists in the tree this binary was compiled from` - the
+     same file `scripts/publish-node-binaries.sh:412` copies beside the binaries and 
+     `:413` REFUSES a release without (`font_missing`), so "this tree has the font" is exactly why a release
+     built from it has the asset. `host.build_identity` answers it (`rust/wa-capabilities/src/host.rs:3826`,
+     `"release_fonts"`) and `lua/core/build_identity.lua` carries it as `identity.fonts`. A binary older than
+     the field answers nil, and nil is NOT a yes;
+  2. **which tag do this build's assets live under?** `icons.release_tag` reads it from the bytes' own label,
+     never re-derives it: `node-<sha12>` (a node release - `scripts/lib/node-binaries.sh:251`, and what
+     `installed.txt` records as `binary_release`), or a PRODUCT TAG `vX.Y.Z[-pre]`;
+  and when either says no, `/icons` prints the REASON instead of a dead link: `font_absent:` when the tree has
+  no font, `no_release:` when these bytes are not a release. Measured on this node (a dev build): label
+  `d0e345a1+dirty`, fonts true, line nil, reason `no_release: ...`.
+* **A TAGGED RELEASE USES ITS OWN TAG, not `node-<sha12>`.** Its assets are published under the release tag
+  it was cut with (`gh release create <TAG>`, `scripts/publish-node-binaries.sh:818-826`), so the link must
+  name that tag; re-deriving `node-<sha12>` from the commit would 404 for every product release. Both forms are
+  implemented and asserted in `scripts/test-icons.lua` (`node-0123456789ab`, `v0.1.2`, `v0.1.3-rc.1`). Today's
+  node releases are `node-<sha12>` and no `vX.Y.Z` release has been cut yet.
+* **DOES THE LANDING/PUBLISH STEP UPLOAD THE FONT?** Yes, from `5df877b7`: `scripts/publish-node-binaries.sh:713`
+  puts `waIcons-Regular.ttf` in `$assets`, and `:800-805` turns that list into `$asset_paths` for
+  `gh release create`/`gh release upload` (`:818-826`), so it is in the release AND in its `SHA256SUMS` (the
+  list the vault's `release-signing` key signs). `scripts/publish-artifacts-branch.sh:119-127` carries it into
+  the artifacts commit the same way. The URL the orchestrator can curl after the install is
+  `https://github.com/Magaav/wasm-agent/releases/download/node-<sha12>/waIcons-Regular.ttf`.
 * WHAT IS NOT YET TRUE: the font is an asset of the NEXT published release - the ones already on GitHub were
   cut before this change, so their `node-<sha12>` has no font beside it. Until the next release ships, the same
   bytes are at the commit-pinned path `https://raw.githubusercontent.com/Magaav/wasm-agent/<commit>/assets/fonts/waIcons-Regular.ttf`.
@@ -224,6 +260,12 @@ wa Icons on this machine: curl -fsSL https://github.com/Magaav/wasm-agent/releas
 5. `font_absent: <out>/waIcons-Regular.ttf is not in this set, so this release ships no icons (a set built before item 7 has none)`
    - `scripts/publish-artifacts-branch.sh`, printed for a set that predates the font; never for a set this
      tree's publisher made (that one refuses with `font_missing` instead).
+6. `font_absent: this build's tree has no waIcons-Regular.ttf, so its release ships no icon font and there is no link to print (a build cut before item 7 has none)`
+   - `lua/core/icons.lua` M.FONT_ABSENT: `/icons` says this instead of text 4 on a build whose tree carries no
+     font.
+7. `no_release: these bytes are not a release (label <label>), so there is no release asset to name - install a node release, or copy assets/fonts/waIcons-Regular.ttf by hand`
+   - `lua/core/icons.lua` M.NO_RELEASE: `/icons` says this instead of text 4 on a build that is not a release
+     (a dev tree, a pinned commit) even though its tree carries the font.
 
 ## Deviations and open facts
 
@@ -248,7 +290,7 @@ wa Icons on this machine: curl -fsSL https://github.com/Magaav/wasm-agent/releas
 
 ## Rows run (each singly, this branch)
 
-* Lua: `test-opening.lua` (44 ok), `test-icons.lua` (256 ok), `test-cli-view.lua` (566 ok),
+* Lua: `test-opening.lua` (44 ok), `test-icons.lua` (267 ok), `test-cli-view.lua` (566 ok),
   `test-icon-face.lua` (44 ok), `test-font-setup.lua` (183 ok);
 * Python: `scripts/test-unicode-icons.py` (ok: 14 glyphs, 4 faces measured, 4 named unmeasured);
 * Rust: `cargo test -p wa-term --lib opening::` (16 ok), `--test opening` (7 ok), `--test icons` (1 ok); the two
