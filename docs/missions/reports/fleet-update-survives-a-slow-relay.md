@@ -2,9 +2,10 @@
 
 Mission dir: `/home/victor/Work/missions/fleet-update-survives-a-slow-relay`
 Worktree: `wt`, branch `change/fleet-update-survives-a-slow-relay`, base `origin/main @ 53bb69b1`.
-Commits, rebased onto `origin/main @ 525780e1`: `df677e69` (the seam + a deadline is not a refusal),
-`1e004eed` (accept fast / detached / poll by id), `96cee9a2` (review a: the record is written before the
-child), `3d8a8f40` (review b: one id, one run), `670f5563` + this one (report). The entry-guard fix is no
+Commits, rebased onto `origin/main @ fe108a8c` (the 24/11 landing that restructured `wa update`; the
+`--accept` entry point was re-resolved by hand in `lua/core/init.lua`, keeping BOTH sides): `ee59a4fd` (the seam + a deadline is not a refusal),
+`89eb3325` (accept fast / detached / poll by id), `1f9f9e3c` (review a: the record is written before the
+child), `1ad0b114` (review b: one id, one run), `34ed7000` + this one (report). The entry-guard fix is no
 longer on this branch: it landed on `main` as `ce1feb5b` (`land-quick: merge change/fleet-update-entry`),
 and the rebase dropped my `0c6afffc` as an already-applied patch.
 Nothing was pushed. Nothing on a live node was written: every read below is `wa call work bash` read-only
@@ -48,7 +49,7 @@ the relay's deadline was printed as `remote_refused ... layer "node"` - "the nod
 
 ## 2. The fix (item 2) and the seam the pull design reuses
 
-**`lua/core/accepted.lua` (new, commit `ca344b11`) - the reusable piece, and it is not about deploys.**
+**`lua/core/accepted.lua` (new, commit `ee59a4fd`) - the reusable piece, and it is not about deploys.**
 One request, two lifetimes:
 
 * `accepted.accept{root, id, kind, detail}` - claims the id with an atomic `mkdir`, writes the record,
@@ -66,7 +67,7 @@ One request, two lifetimes:
 Idempotency is the id and the claim is the `mkdir`: **a retried request can never start a second
 update**. The future pull design calls the same five functions with a different `program`/kind.
 
-**`lua/core/remote_update.lua` (commit `83b49ede`)** - the deploy door now uses it:
+**`lua/core/remote_update.lua` (commit `89eb3325`)** - the deploy door now uses it:
 the id is the master's own (`args.id`) so the master's pending record, the node's audit record and the
 accept record are one name; the cheap decisive checks stay synchronous (every refusal a caller reads
 today it still reads, and reads again by id); the expensive tail - backup, then the sentinel request -
@@ -76,7 +77,7 @@ operation manager runs it inline exactly as before and the answer says so (`inli
 `unknown_remote_update`, and the tail's `done` maps to the deploy's own word `queued`, never
 `installed`. The other doors (rendezvous/binary/release/rollback) are untouched.
 
-**`lua/core/nodes.lua` (commit `ca344b11`)** - a deadline is not a refusal: the deadline codes (an
+**`lua/core/nodes.lua` (commit `ee59a4fd`)** - a deadline is not a refusal: the deadline codes (an
 allow-list, `relay_request_timeout` now among them) answer `{error:"not_known_yet", not_known_yet:true,
 state:"unknown", retryable:true, id/rid, next:"read it back by id"}`; every other non-200 keeps the
 refusal rendering it had. The `remote_error` branch keeps its code (rows read it) and gains
@@ -246,7 +247,7 @@ reused by deploy.sh. Today's failure is the same defect reaching a deploy that h
 reuse. (Not an explanation gap; the row `scripts/test-main-module-entry.mjs` now proves the defect and
 the fix - on `main` as `ce1feb5b`.)
 
-### 8.2 Review a (order) - `96cee9a2`
+### 8.2 Review a (order) - `1f9f9e3c`
 
 The record is written BEFORE the child is started; the operation id is added to the same record after
 the start; a write that fails starts nothing and answers `accept_record_not_written`. The child's
@@ -255,7 +256,7 @@ it used to be pasted from `read_status` and read a `caller` that does not exist 
 right: it would have raised on that path). Row: the child for an unknown id fails by name and settles
 the accept failed.
 
-### 8.3 Review b (once) - `3d8a8f40`
+### 8.3 Review b (once) - `1ad0b114`
 
 Two layers, both needed: `accepted.claim_running` is an atomic `mkdir` claim beside the record (released
 by the only terminal writer, `finish`), and `run_accepted` checks the id's own phase first with an
@@ -270,7 +271,7 @@ first thing `serve()` does), in the same row. `scripts/test-remote-update.lua` i
 
 ### 8.4 Review c (the real row) - DONE: two real processes, green here, red on base
 
-`scripts/test-accept-two-process.lua` (commit `f0ad8a31`, wired into `scripts/test.sh` beside
+`scripts/test-accept-two-process.lua` (commit `7e4e47de`, wired into `scripts/test.sh` beside
 `test-remote-pending`). It starts the fleet's own path on this machine and touches no live node:
 
 * THIS process is the master - a real `wa`, the real `lua/core/nodes.lua` remote_call, the real signed
