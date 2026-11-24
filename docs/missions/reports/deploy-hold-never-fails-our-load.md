@@ -831,3 +831,76 @@ a second pass. `rust/wa-sentinel` unit tests: **159 passed**.
 22. `return-observation-failed` audit line: `<problem>; the installer ended and nothing was installed, so the request failed with its own reason and was re-queued once (no retirement)`
 23. node log: `sync tick: yielded to a waiting deploy; the next quiet window does the rest`
 24. node stderr, once: `[sync] wa_deploy_pending unavailable, housekeeping starts as before: <error>`
+
+## Addendum 6 (r4, Fable, 24/11 ~00:55Z): the repair counted the wrong column
+
+### What was wrong (measured on this laptop after `bd37681f`, read-only, by Fable)
+
+The first tick after the install (`00:32:20-28Z`) marked **46 resume rows in 16 live factory sessions**
+`resume_abandoned`. Their `self_wakes.attempts` values: 2,3,4,5,6,7,9,11,13,73,82,199,249,308,464,486,533. Cause:
+the chain cap read `attempts`, a column that already counts DISPATCH attempts, so every recent lost resume hit
+"max 2 re-arms" on its first pass and the repair did nothing for any of them (the safe direction - 0 wakes fired -
+and the wrong result). Separately, `paused sessions: 53, oldest 1d` counted every `<data>/deploy-paused/*.json`
+ever written, and nothing deleted one; the migration retired 86 rows, as designed.
+
+### 1. A dedicated chain counter (never `attempts`)
+
+`self_wakes` gains **`resume_chain INTEGER NOT NULL DEFAULT 0`**, added by the same conditional `ALTER TABLE` this
+table already uses for `kind` (`lua/core/selfloop.lua`, `M.setup`). `deploy_pause.ensure_resumes` reads and writes
+only that column; `attempts` is neither read nor written by the repair again, and the unit test asserts that no
+statement of the repair writes `attempts`.
+
+### 2. The health line counts what is live, and dead records are closed
+
+* `paused_summary` (`main.rs`) counts a record as **live** only when its `since` is inside the same window the repair
+  uses (`pause_window_secs()` = 6 h, documented as the same number as `deploy_pause.RESUME_WINDOW_SECONDS`); the
+  rest are **stale**. The line is now
+  `paused sessions: <live>, oldest <age of the oldest live>, stale: <n>, abandoned: <m>`.
+* `deploy_pause.sweep_records` closes the records that can never be resumed: older than the window, or their session
+  no longer exists (ended/closed). A young record whose session is live is never touched - it is the proof the
+  bound uses. It runs **last in the node's tick**, because called early it moved a released resume's dispatch out of
+  that tick (measured: `test-deploy-wait.sh` step 6 failed twice in a row, green once the call moved to the end).
+
+### 3. Tests, and how the fixtures match the real ledger
+
+**How I checked the shapes this time (Fable's item 4).** The fixture rows in `scripts/test-deploy-pause.lua` are the
+ledger's own numbers, copied from Fable's read-only select of the 16 factory sessions - `attempts`
+`2,3,4,5,6,7,9,11,13,73,82,199,249,308,464,486,533`, status `unknown`, reason
+`deploy pending: resume after the node swap`, `resume_chain = 0` - and not zeroes. I could not re-run that select
+myself: `~/.wasm-agent/memory.db` is refused to the agent's shell by the node's own guard (`secret_path_denied`,
+`lua/core/secret_guard.lua`: "it holds the MCP registry, every connector's approval and the session ledger, so an
+agent tool neither reads nor writes it"), and `wa` exposes no verb for raw wake rows. So the shapes are Fable's
+measurement, quoted, and every one of them asserts the outcome the bug broke: **exactly one re-arm, whatever
+`attempts` says** (`rearmed == 17, abandoned == 0`, and `resume_chain=1` written on each new row).
+
+* the cap is asserted on the same real shapes: `resume_chain` 0 -> re-arm, 1 -> re-arm (backoff doubled), 2 ->
+  `resume_abandoned` with the pause record marked - **three tries in total**;
+* an operator's `cancelled` is still final and the node's own `cancelled before execution` is still re-armed, on
+  rows with `attempts` 73 and 464;
+* gone/parked sessions are not woken (attempts 199, 249); a seven-hour-old row is not woken and the migration
+  reports what it retired; a waiting deploy re-arms nothing;
+* `sweep_records` closes exactly the old, the gone and the undated record, keeps the young live one, and never looks
+  at a non-JSON entry.
+
+### Rows run for r4
+
+| row | result |
+| --- | --- |
+| `scripts/test-deploy-pause.lua` | `deploy claim wait ok (81 checks)` |
+| `scripts/test-deploy-wait.sh` | `deploy wait ok` |
+| `scripts/test-deploy-bound.sh` | `deploy bound ok` |
+| `scripts/test-selfloop-pause.lua` | `self-loop pause: 113 checks passed` |
+| `scripts/test-handle-wake.lua` | `handle wake: 17 checks` |
+| `scripts/test-cli-wake-row.lua` | `cli wake row ok (30 checks)` |
+| `rust/wa-sentinel` unit tests | `159 passed; 0 failed` |
+
+Also changed in the row, and said plainly: the six cases of step 7b now run on **their own ledger** (a tick
+ dispatches at most eight due rows, so six cases sharing one measured each other's backlog - the dispatch assertion
+ moved between cases from run to run), and the dispatch assertion allows up to twelve ticks instead of one, because
+ the re-armed row is armed a second out and the node's real cadence is five ticks a second.
+
+### Texts to approve (r4)
+
+25. `wa-sentinel status`: `paused sessions: <live>, oldest <age>, stale: <n>, abandoned: <m>`
+26. node log, once per sweep that closes anything: `deploy pause: closed <n> pause record(s) that can never be resumed
+    (older than 21600s, or their session is gone)`
