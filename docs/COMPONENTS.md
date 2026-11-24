@@ -470,7 +470,8 @@ path. How all three inputs are pinned, measured 23/11 on avell (main 0d8657e5):
 | input | what it used to be | where it is pinned now |
 | --- | --- | --- |
 | the compiler | the node's default rustc: 1.99.1 when the pins were made, 1.100.0 on 23/11 | `scripts/build-components.sh` asks rustup for **1.99.1** by name (and installs it when the node lacks it) and exports `RUSTUP_TOOLCHAIN`; `components.lock` records it; every run prints `component toolchain: rustc 1.99.1 ...; wasi-sdk: 34.0` |
-| the build root | whatever checkout the build ran in | `$WA_COMPONENT_BUILD_ROOT/src` - `/tmp/wa-component-build/src` by default: one path for every checkout |
+| the build root | whatever checkout the build ran in | **one literal path**: `/tmp/wa-component-build` on POSIX, `C:/wa-component-build` on Windows, `scripts/lib/component-build-root.sh`; `/src` inside it is where the build runs. Not `${TMPDIR:-/tmp}` - that was the first cut's mistake, and a root that moves with an environment variable is constant only where the variable is unset (macOS always sets it) |
+| which of the two, and with which compiler | nothing recorded it | `components.lock` carries `# BUILD-ROOT:` and `# TOOLCHAIN:`; a run that would use another pair is refused BY NAME (`build_root_mismatch`, `toolchain_mismatch`) by `scripts/publish-components.sh` and `scripts/test-component-lock-rebuild.sh`, instead of producing bytes that read as a drift |
 | wasi-sdk | the newest `~/wasi-sdk*` found | named in `components.lock` (34.0) and printed by every run |
 
 The compiler is not a detail: one source, `agent-core`, is 393,860 bytes / `68c5d849…` under rustc
@@ -480,9 +481,27 @@ needed two compilers at once and a node could only ever reproduce part of it. `W
 builds with the node's default compiler and `WA_COMPONENT_STABLE_ROOT=0` builds in the checkout: both are
 named diagnosis aids, and neither produces shipped bytes.
 
+**The root is a build input, measured (24/11).** Moving it from the `${TMPDIR:-/tmp}`-derived path to the
+literal `/tmp/wa-component-build` moved `graph`, `mesh`, `model-gateway`, `wa-email` and `wa-whatsapp` -
+all five with a `path =` dependency - and left `agent-core`, `codemode`, `hooks`, `memory`, `selfloop` and
+`telemetry-sink` byte-identical, while main changed no file of any of the eleven. That is why the root is
+recorded and checked rather than assumed.
+
+**A fixed path under a shared /tmp is guarded, not trusted.** The root is created `0700`, and an existing
+one is refused by name when it is a symlink (`build_root_is_a_symlink`), not a directory, not owned by
+this user (`build_root_not_owned`), or group- or world-writable
+(`build_root_group_or_world_writable`) - never chmod-ed silently. A `src-<hash>` directory (the no-flock
+path) is reused only after its own tree is hashed again and agrees with the hash in its name; a directory
+whose name and content disagree is replaced. Measured: the three checks refuse the real root when it is
+made 0777 or swapped for a symlink, before anything is built. The uid branch is the one this host cannot
+exercise as itself.
+
 Measured with all three pinned: the same eleven components build to the same eleven sha256 from two
 different checkout paths, and `bash scripts/publish-components.sh` with no `--from` prints
-`all 11 match components.lock`.
+`all 11 match components.lock` - and the deploy's own component stage (`scripts/deploy.sh` step 3e,
+`wa_components_prepare`) stages those eleven bytes, verified against the lock, with no
+`component_not_installable`; where no bundle for the lock is published yet, its local fallback builds the
+component and gets the pin (`graph` `0539d026…` 8,187,401 bytes, measured 24/11).
 
 **Status, measured (06/11, cargo 1.98.1, wasi-sdk 34, two checkout paths):** a component without a path
 dependency reproduces byte for byte - `svc-echo` 194,439 bytes, sha256 `480d8bed…` from both paths, the
@@ -595,7 +614,8 @@ build match the pin" is `scripts/test-component-lock-rebuild.sh` (23/11) instead
 components - `agent-core hooks mesh graph` by default, `--all` for the eleven - through the shipped
 pipeline into a private directory, compares each artifact's sha256 AND size to its own line, greps it
 for a leaked checkout or build-root path, and rebuilds one component without the constant build root to
-prove the copy is a location and not an input. It runs in `scripts/test.sh` (it needs wasi-sdk and
+prove the copy is a location and not an input. It is the release gate's own row (`scripts/test.sh:580`, `gate_run bash
+scripts/test-component-lock-rebuild.sh`) - the cut refuses when a fresh build is not the pin - and it needs wasi-sdk and
 minutes), not in `scripts/fast.sh`. Measured both ways: on the base commit it fails (`hooks` 217,693
 bytes against the pinned 215,897 - the compiler), on this tree all four pass.
 
