@@ -153,16 +153,32 @@ impl Pty {
 
 fn count(haystack: &str, needle: &str) -> usize { haystack.match_indices(needle).count() }
 
+/// The END of a session's bytes, for a failure message: a whole pty dump is unreadable and the tail is where
+/// the answer is.
+fn tail(text: &str, chars: usize) -> String {
+    let mut kept: Vec<char> = text.chars().rev().take(chars).collect();
+    kept.reverse();
+    kept.into_iter().collect()
+}
+
 fn start_finished(bytes: &[u8]) -> bool { String::from_utf8_lossy(bytes).contains("/ for commands") }
 
-/// The path wa printed for the config file it wrote, taken from its own answer: the test never guesses
-/// where that file lives.
-fn written_path(text: &str) -> Option<String> {
-    let at = text.rfind("(remembered in ")? + "(remembered in ".len();
-    let rest = &text[at..];
-    let end = rest.find(')')?;
-    let path = rest[..end].trim().to_string();
-    if path.is_empty() { None } else { Some(path) }
+/// The config file wa wrote, found on DISK rather than parsed out of its answer (measured 24/11: a reply
+/// line is clipped at the window's width, and under the fast runner the scratch path is long enough for the
+/// closing bracket to be cut - so an answer that named the file was read as one that did not).
+///
+/// The rule is `lua/core/paths.lua`'s: the config file is `<data>/env`, and the host answers data =
+/// `$WASM_AGENT_HOME/.wasm-agent`. The walk is there so a path rule that moves is a NAMED failure in this
+/// row, not a silent pass: one level deep, any `env` that holds an `icons` line.
+fn config_file(home: &Path) -> Option<PathBuf> {
+    let direct = home.join(".wasm-agent/env");
+    if direct.is_file() { return Some(direct); }
+    let entries = std::fs::read_dir(home).ok()?;
+    for entry in entries.flatten() {
+        let candidate = entry.path().join("env");
+        if candidate.is_file() { return Some(candidate); }
+    }
+    None
 }
 
 #[test]
@@ -192,11 +208,14 @@ fn the_unknown_font_line_is_said_once_and_icons_wa_survives_a_restart() {
         String::from_utf8_lossy(bytes).contains("remembered in")
     });
     let first = pty.text();
-    assert!(answered, "/icons wa answered: {:?}", first.chars().rev().take(400).collect::<String>().chars().rev().collect::<String>());
-    let file = written_path(&first).unwrap_or_else(|| panic!("/icons wa named the file it wrote: {}", first));
+    assert!(answered, "/icons wa answered: {:?}", tail(&first, 400));
+    assert!(first.contains("remembered") && !first.contains("this session only"),
+        "the answer says the choice was written, not that it was only for this session: {:?}", tail(&first, 300));
     pty.stop();
 
-    let written = std::fs::read_to_string(&file).unwrap_or_else(|problem| panic!("the config file {file} is readable: {problem}"));
+    let file = config_file(&home).unwrap_or_else(|| panic!(
+        "/icons wa wrote no config file under {}: nothing names where it went", home.display()));
+    let written = std::fs::read_to_string(&file).unwrap_or_else(|problem| panic!("the config file {} is readable: {problem}", file.display()));
     let lines: Vec<&str> = written.lines().filter(|line| line.trim_start().starts_with("icons")).collect();
     assert_eq!(lines, vec!["icons = wa"],
         "the config file holds one icons line, and it is the choice: {written:?}");

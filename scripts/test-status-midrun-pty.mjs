@@ -183,8 +183,13 @@ try {
   } catch { between = screen(); }
   check('a `/status` between runs draws the provider\'s limits', between.includes('37%'), between);
   check('and the age row is not invented for a reading taken now', !/as of \d+ (min|h|d) ago/.test(between), between);
+  // THE "unknown" HERE IS THE COST'S (Victor, 23/11 11:05Z: "cost unknown"). The assertion used to forbid the
+  // word ANYWHERE on the screen, which is a different thing: from 24/11 the CLI says "icons: unicode (font
+  // unknown here) ..." on a tty whose font cannot be measured, and that sentence is about glyphs, not money
+  // (measured 24/11: the panel read 'Cost list $0.0010' and this line still failed). Narrowed to the row it
+  // names, and strengthened on that row: the cost must be there, in full.
   check('the panel shows the provider list cost instead of "cost unknown"',
-    /Cost\s+list \$0\.0010/.test(between) && !/unknown/.test(between), between);
+    /Cost\s+list \$0\.0010/.test(between) && !/Cost\s+unknown/.test(between), between);
   // The panel is a balloon: Esc closes it, and the next line must reach the chat rather than the page.
   tmux(['send-keys', '-t', SESSION, 'Escape']);
   try {
