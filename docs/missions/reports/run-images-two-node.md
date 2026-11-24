@@ -233,8 +233,12 @@ it; only the pair's own tree moves. No assertion was deleted, no row dropped, no
 Measured after the fix, in the preflight's own shape (`GATE_ROOT` and `TMPDIR` both inside this
 worktree): 51 checks, 0 skips. And the preflight itself:
 
-    preflight green (quick, no gate): change/run-images-two-node on main b9ec52280260 in 8s
-    land-quick: change/run-images-two-node merged onto main b9ec5228 -> 8584ce36 (9 files)
+    preflight green (quick, no gate): change/run-images-two-node on main b9ec52280260 in 7s
+    land-quick: change/run-images-two-node merged onto main b9ec5228 -> d46925b9 (8 files)
+
+(9 files in the first green run: two of them were fixtures my own reproduction had left in the
+worktree and swept in with git add -A. They are gone and the .wa-scratch directory is ignored now,
+so a runner scratch can never ride into a commit again.)
 
 The narrowed runner run on the same tip (`d1be28a0`): `lua 34/34 passed`, `132 checks, 1 failed` -
 `esc-stops-pty`, the pre-existing red below.
