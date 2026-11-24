@@ -83,7 +83,63 @@ check(!/record\.fields\.chat\b/.test(driver) && !/record\.fields\.text\b/.test(d
   "the driver never reports a chat or a message body as a field");
 check(script.includes("function scrub("), "the script re-checks every value before printing it");
 
-// ---- 5. the scratch-home guard ---------------------------------------------------------------
+// ---- 5. live mode is DEFAULT-DENY, and the plan says so ------------------------------------------
+// Fable 24/11: in live mode a step that names NO chat is refused by name before any dispatch, unless it
+// is one of the few read-only questions about the ACCOUNT itself. The allow-list is stated here
+// independently of the driver, so the two have to agree:
+//   approve {action:list|policy}  - the operator's gate, read-only forms
+//   send/send_status in their resume form (an id, never a chat; the resume never sends)
+const FIXTURE_OWN = "000000000000000@s.whatsapp.net";
+const livePlanRun = spawnSync(process.execPath, [SCRIPT, "--print-plan", "--mode", "live", "--own-chat", FIXTURE_OWN], {encoding: "utf8", timeout: 30000});
+check(livePlanRun.status === 0, "--print-plan --mode live exits 0", livePlanRun.stderr);
+let livePlan = null;
+try { livePlan = JSON.parse(livePlanRun.stdout); } catch { livePlan = null; }
+check(livePlan && Array.isArray(livePlan.steps) && livePlan.steps.length > 4, "the live plan is readable JSON with its steps");
+const steps = (livePlan && livePlan.steps) || [];
+const toolOf = (step) => step.tool;
+const chatOf = (step) => (step.args && step.args.chat);
+const allowListed = (step) => {
+  const args = step.args || {};
+  if (toolOf(step) === "mcp_whatsapp_approve") return args.action === "list" || args.action === "policy";
+  if (toolOf(step) === "mcp_whatsapp_send" || toolOf(step) === "mcp_whatsapp_send_status") {
+    // The resume form carries the job id it got from an earlier step (reuse) or an explicit id/cancel; the
+    // driver fills it in at run time, so the PLAN states it as a reuse.
+    const reuse = step.reuse && step.reuse.id !== undefined;
+    return reuse || args.id !== undefined || args.ids !== undefined || args.draft !== undefined || args.cancel !== undefined;
+  }
+  return false;
+};
+const chatless = steps.filter((step) => chatOf(step) === undefined);
+check(chatless.every(allowListed), "every live step with no chat argument is on the allow-list",
+  chatless.filter((step) => !allowListed(step)).map((step) => step.id).join(", "));
+check(steps.some((step) => chatOf(step) === FIXTURE_OWN), "the live plan does read the own chat");
+check(chatless.length > 0 && chatless.length <= 6, "the allow-listed chat-less steps are a short list", String(chatless.length));
+// NOTHING about other people's entries: no lookup by name, no account-wide history sync.
+check(!steps.some((step) => toolOf(step) === "mcp_whatsapp_contacts"), "contacts (a lookup in other people's entries) is not in the live plan");
+check(!steps.some((step) => toolOf(step) === "mcp_whatsapp_backfill"), "backfill (an account-wide history sync) is not in the live plan");
+// Every step that names a chat names the OWN chat, or a shape no account can own (a validation probe).
+for (const step of steps) {
+  const chat = chatOf(step);
+  if (chat === undefined) continue;
+  const synthetic = step.synthetic === true && !/^[0-9]+@(s\.whatsapp\.net|lid|g\.us)$/.test(chat);
+  const ownOrGuard = chat === FIXTURE_OWN || step.id === "guard/other-chat" || synthetic;
+  check(ownOrGuard, "live step " + step.id + " names the own chat (or is the guard/probe row)", chat);
+}
+// The scratch plan keeps both cells: they are how the scratch table proves those tools at all.
+const scratchPlanRun = spawnSync(process.execPath, [SCRIPT, "--print-plan"], {encoding: "utf8", timeout: 30000});
+let scratchPlan = null;
+try { scratchPlan = JSON.parse(scratchPlanRun.stdout); } catch { scratchPlan = null; }
+const scratchTools = ((scratchPlan && scratchPlan.steps) || []).map(toolOf);
+check(scratchTools.includes("mcp_whatsapp_contacts"), "the scratch plan still calls contacts");
+check(scratchTools.includes("mcp_whatsapp_backfill"), "the scratch plan still calls backfill");
+check(spawnSync(process.execPath, [SCRIPT, "--print-plan", "--mode", "live"], {encoding: "utf8", timeout: 30000}).status === 2,
+  "--print-plan --mode live without --own-chat exits 2");
+// And the driver really refuses: the word, and its position before the dispatch it protects.
+check(driver.includes("refused_no_chat_in_live"), "the driver refuses a chat-less live step by name");
+check(driver.indexOf("refused_no_chat_in_live") < driver.indexOf("pcall(tools.dispatch"), "the default-deny runs BEFORE the dispatch");
+check(driver.includes("chat_less_allowed(record.tool, args)"), "the default-deny consults the allow-list");
+
+// ---- 6. the scratch-home guard ---------------------------------------------------------------
 check(script.includes("refusing to run"), "a run that would write in the node home refuses");
 check(script.includes("REAL_HOME"), "the refusal is about the operator's own node home");
 

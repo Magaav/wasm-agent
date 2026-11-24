@@ -148,7 +148,7 @@ const FLOWS = [
 
 // ---- arguments -------------------------------------------------------------------------------------
 function parseArgs(argv) {
-  const opts = {mode: "scratch", bin: process.env.WA_BIN || "", ownChat: "", json: "", keep: false, allowForeign: false};
+  const opts = {mode: "scratch", bin: process.env.WA_BIN || "", ownChat: "", json: "", keep: false, printPlan: false};
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--mode") opts.mode = argv[++i];
@@ -156,6 +156,7 @@ function parseArgs(argv) {
     else if (arg === "--own-chat") opts.ownChat = argv[++i];
     else if (arg === "--json") opts.json = argv[++i];
     else if (arg === "--keep") opts.keep = true;
+    else if (arg === "--print-plan") opts.printPlan = true;
     else if (arg === "--help" || arg === "-h") { console.log("usage: whatsapp-acceptance.mjs [--mode scratch|live] [--own-chat <jid>] [--bin <wa>] [--json <path>] [--keep]"); process.exit(0); }
     else { console.error("whatsapp-acceptance: unknown argument " + arg); process.exit(2); }
   }
@@ -260,43 +261,54 @@ function freePort() {
 // ---- the plans -------------------------------------------------------------------------------------
 // One plan per site: the steps the driver runs, in the order a model would need them. `chat` is a fixture
 // in scratch mode and the configured own chat in live mode - the only difference between the two runs.
-function planFor(site, ownChat) {
+function planFor(site, ownChat, live = ownChat !== "") {
+  // In live mode the chat is the configured own chat and NOTHING else runs: a chat-less step is
+  // default-denied by the driver (scripts/lib/whatsapp-acceptance-call.lua, chat_less_allowed), and two
+  // steps do not run at all - a lookup by name across other people's entries (contacts) and an
+  // account-wide history sync (backfill). Neither is an acceptance of the own chat (Fable, 24/11).
   const chat = ownChat || FIXTURE.chat;
   const steps = [
-    {id: "contacts", tool: "mcp_whatsapp_contacts", args: {q: "ana", limit: 3}},
-    {id: "search", tool: "mcp_whatsapp_search", args: {q: FIXTURE.query, chat, limit: 5}},
-    {id: "read", tool: "mcp_whatsapp_read", args: {chat, limit: 5}},
-    {id: "reactions", tool: "mcp_whatsapp_reactions", args: {chat, id: FIXTURE.message}},
-    {id: "media", tool: "mcp_whatsapp_media", args: {chat, id: FIXTURE.message}},
-    {id: "download", tool: "mcp_whatsapp_download", args: {chat, id: FIXTURE.message, max_bytes: 524288}},
-    {id: "backfill", tool: "mcp_whatsapp_backfill", args: {count: 10}},
-    {id: "send", tool: "mcp_whatsapp_send", args: {chat, text: FIXTURE.text, wait_s: 0}},
-    {id: "send/resume", tool: "mcp_whatsapp_send", args: {wait_s: 0}, reuse: {id: "send", key: "id"}},
+    {id: "contacts", tool: "mcp_whatsapp_contacts", args: {q: "ana", limit: 3}, effect: "read"},
+    {id: "search", tool: "mcp_whatsapp_search", args: {q: FIXTURE.query, chat, limit: 5}, effect: "read"},
+    {id: "read", tool: "mcp_whatsapp_read", args: {chat, limit: 5}, effect: "read"},
+    {id: "reactions", tool: "mcp_whatsapp_reactions", args: {chat, id: FIXTURE.message}, effect: "read"},
+    {id: "media", tool: "mcp_whatsapp_media", args: {chat, id: FIXTURE.message}, effect: "read"},
+    {id: "download", tool: "mcp_whatsapp_download", args: {chat, id: FIXTURE.message, max_bytes: 524288}, effect: "write"},
+    {id: "backfill", tool: "mcp_whatsapp_backfill", args: {count: 10}, effect: "write"},
+    {id: "send", tool: "mcp_whatsapp_send", args: {chat, text: FIXTURE.text, wait_s: 0}, effect: "write"},
+    {id: "send/resume", tool: "mcp_whatsapp_send", args: {wait_s: 0}, effect: "read", reuse: {id: "send", key: "id"}},
     // The same chat + text + reply_to is ONE job (never a second message), and a job still queued can be
     // taken out of the queue: both are answerable without a paired device, so both are proved here.
-    {id: "send/dedupe", tool: "mcp_whatsapp_send", args: {chat, text: FIXTURE.text, wait_s: 0}},
-    {id: "send/cancel", tool: "mcp_whatsapp_send", args: {}, reuse: {id: "send", key: "id", as: "cancel"}},
-    {id: "send_status", tool: "mcp_whatsapp_send_status", args: {}, reuse: {id: "send", key: "id"}},
-    {id: "approve", tool: "mcp_whatsapp_approve", args: {action: "list"}},
-    {id: "approve/policy", tool: "mcp_whatsapp_approve", args: {action: "policy"}},
+    {id: "send/dedupe", tool: "mcp_whatsapp_send", args: {chat, text: FIXTURE.text, wait_s: 0}, effect: "write"},
+    {id: "send/cancel", tool: "mcp_whatsapp_send", args: {}, effect: "read", reuse: {id: "send", key: "id", as: "cancel"}},
+    {id: "send_status", tool: "mcp_whatsapp_send_status", args: {}, effect: "read", reuse: {id: "send", key: "id"}},
+    {id: "approve", tool: "mcp_whatsapp_approve", args: {action: "list"}, effect: "read"},
+    {id: "approve/policy", tool: "mcp_whatsapp_approve", args: {action: "policy"}, effect: "read"},
     // The landed read contract's own refusals (whatsapp-read-is-consistent): an unknown search order, a
     // search with no narrowing, and a malformed chat are refused BY NAME by the seam before any queue, so
     // these cells are measurable on a machine with no device - and a regression in that refusals is
     // exactly what a canary should catch.
-    {id: "search/order-newest", tool: "mcp_whatsapp_search", args: {q: FIXTURE.query, chat, order: "newest", limit: 5}},
-    {id: "search/order-unknown", tool: "mcp_whatsapp_search", args: {q: FIXTURE.query, order: "sideways"}},
-    {id: "search/no-narrowing", tool: "mcp_whatsapp_search", args: {}},
-    {id: "read/malformed-chat", tool: "mcp_whatsapp_read", args: {chat: "1-2-3@g.us", limit: 1}, synthetic: true},
+    {id: "search/order-newest", tool: "mcp_whatsapp_search", args: {q: FIXTURE.query, chat, order: "newest", limit: 5}, effect: "read"},
+    // The order refusal is about the WORD, so it runs against the chat this run is allowed to read; in
+    // scratch mode it is the fixture chat as well.
+    {id: "search/order-unknown", tool: "mcp_whatsapp_search", args: {q: FIXTURE.query, chat, order: "sideways"}, effect: "read"},
+    // A search with no narrowing names no chat and no term: it is a scratch-mode cell only. In live mode
+    // the driver's default-deny refuses it, which is the point of the guard, so it is not planned there.
+    ...(live ? [] : [{id: "search/no-narrowing", tool: "mcp_whatsapp_search", args: {}, effect: "read"}]),
+    {id: "read/malformed-chat", tool: "mcp_whatsapp_read", args: {chat: "1-2-3@g.us", limit: 1}, synthetic: true, effect: "read"},
     // THE GUARD ROW: a target that is not the configured own chat. In live mode this MUST be refused
-    // before any call; in scratch mode the own chat is empty and the row says so (not a pass).
-    {id: "guard/other-chat", tool: "mcp_whatsapp_read", args: {chat: FIXTURE.foreign_chat, limit: 1}},
+    // before any call; in scratch mode the own chat is a fixture and the same refusal is measured.
+    {id: "guard/other-chat", tool: "mcp_whatsapp_read", args: {chat: FIXTURE.foreign_chat, limit: 1}, effect: "read"},
     // Names an older build answered, and a name the component exposes that this surface does not: the
-    // answer must be the one sentence that names the replacement, never a silent success.
-    {id: "foreign/read_newest", tool: "mcp_whatsapp_native_read_newest_deadbeef", args: {}},
-    {id: "foreign/whatsapp_read", tool: "whatsapp_read", args: {chat}},
-    {id: "foreign/operator", tool: "whatsapp_operator", args: {}},
+    // answer must be the one sentence that names the replacement, never a silent success. They carry the
+    // chat as well, so the live guard needs no exception for them (the rename table answers first).
+    {id: "foreign/read_newest", tool: "mcp_whatsapp_native_read_newest_deadbeef", args: {chat}, effect: "read"},
+    {id: "foreign/whatsapp_read", tool: "whatsapp_read", args: {chat}, effect: "read"},
+    {id: "foreign/operator", tool: "whatsapp_operator", args: {chat}, effect: "read"},
   ];
-  return {site, own_chat: ownChat, steps};
+  // Two steps never run in live mode (they name no chat and are not about the own chat).
+  const planned = live ? steps.filter((step) => step.id !== "contacts" && step.id !== "backfill") : steps;
+  return {site, own_chat: ownChat, live, mode: live ? "live" : "scratch", steps: planned};
 }
 
 // ---- verdicts --------------------------------------------------------------------------------------
@@ -444,6 +456,15 @@ function render(cells, flows) {
 
 // ---- main ------------------------------------------------------------------------------------------
 async function main() {
+  // --print-plan writes the plan and exits: no node, no binary, no call. It is how the live plan's own
+  // guard test (scripts/test-whatsapp-acceptance.mjs) can assert that no chat-less step outside the
+  // allow-list exists, and how the report's live-calls table is produced.
+  if (OPTS.printPlan) {
+    if (OPTS.mode === "live" && !OPTS.ownChat) fail(2, "--mode live needs --own-chat <jid>: the run touches the operator's own chat and nothing else");
+    if (OPTS.mode === "live" && !/^[0-9]{5,}@(s\.whatsapp\.net|lid|g\.us)$/.test(OPTS.ownChat)) fail(2, "--own-chat is not an exact chat JID (<digits>@s.whatsapp.net, @lid or @g.us)");
+    process.stdout.write(JSON.stringify(planFor("account", OPTS.mode === "live" ? OPTS.ownChat : "", OPTS.mode === "live"), null, 1) + NL);
+    return;
+  }
   const bin = OPTS.bin || ["/home/victor/wasm-agent/target/m-whatsapp-acceptance/debug/wa", path.join(ROOT, "rust/target/debug/wa")].find((c) => existsSync(c)) || "";
   if (!bin || !existsSync(bin)) fail(2, "no wa binary: pass --bin, or set WA_BIN (this run builds nothing)");
   OPTS.bin = bin;
@@ -463,19 +484,63 @@ async function main() {
       if (!OPTS.ownChat) fail(2, "--mode live needs --own-chat <jid>: the run touches the operator's own chat and nothing else");
       if (!/^[0-9]{5,}@(s.whatsapp.net|lid|g.us)$/.test(OPTS.ownChat)) fail(2, "--own-chat is not an exact chat JID (<digits>@s.whatsapp.net, @lid or @g.us)");
       const node = {site: "account", home: process.env.HOME || "", cwd: process.cwd(), data: process.env.WASM_AGENT_HOME || path.join(process.env.HOME || "", ".wasm-agent"), tmp: process.env.TMPDIR || "/tmp"};
-      const plan = planFor("account", OPTS.ownChat);
+      const plan = planFor("account", OPTS.ownChat, true);
       const ran = runPlan({root, rendezvousUrl: ""}, node, plan, {});
       collect(cells, flows, "account", ran.rows, OPTS.ownChat);
+      // The posting-status read is the one account question that is not a model tool: it is the operator's
+      // own door ("wa whatsapp posting status --json", lua/core/whatsapp_posting_cli.lua), read-only, and
+      // it prints no message, no chat and no transcript. Live mode records it as its own row.
+      const status = runOnce(["whatsapp", "posting", "status", "--json"], process.env, process.cwd());
+      let keys = [], postingOn = null;
+      try {
+        const body = JSON.parse(status.stdout);
+        keys = Object.keys(body).sort().slice(0, 12);
+        postingOn = typeof body.on === "boolean" ? body.on : (typeof body.posting === "boolean" ? body.posting : null);
+      } catch { /* an unparsable answer is a red row below, never a pass */ }
+      const complied = status.code === 0 && postingOn !== null;
+      cells.push({site: "account", tool: "posting status (wa whatsapp posting status --json)", hidden: true,
+        verdict: complied ? "PASS" : "FAIL", ms: status.ms, bytes: (status.stdout || "").length,
+        shape: keys.length ? "{" + keys.join(",") + "}" : "",
+        why: complied ? "the posting switch was read on the account node: on=" + String(postingOn) + " (read-only; no chat, no text)"
+          : "the posting-status read did not answer a switch (exit " + status.code + ")"});
+      // The two steps live mode does not run say so, instead of reading as "not executed".
+      for (const tool of ["mcp_whatsapp_contacts", "mcp_whatsapp_backfill"]) {
+        cells.push({site: "account", tool, verdict: "NOT-RUN", ms: 0, bytes: 0, shape: "",
+          why: tool === "mcp_whatsapp_contacts"
+            ? "not planned in live mode: a lookup by name searches other people's entries, which is not an acceptance of the own chat (Fable, 24/11) - it is a scratch-mode cell"
+            : "not planned in live mode: an account-wide history sync is not an acceptance of the own chat (Fable, 24/11) - it is a scratch-mode cell"});
+      }
     } else {
       const fleet = await startFleet(root, bin);
       // The guard is exercised with the FIXTURE chat standing in for the account's own chat: the row
       // that names another chat must be refused, and every other step must use the fixture.
       const ownChat = FIXTURE.chat;
       for (const site of SITES) {
-        const plan = planFor(site, ownChat);
+        const plan = planFor(site, ownChat, false);
         const extra = site === "account" ? {} : {WASM_AGENT_WHATSAPP_OWNER: fleet.nodes.account.name, WASM_AGENT_RENDEZVOUS: fleet.rendezvousUrl};
         const ran = runPlan({root, rendezvousUrl: fleet.rendezvousUrl}, fleet.nodes[site], plan, extra);
         collect(cells, flows, site, ran.rows, ownChat);
+      }
+      // THE LIVE GUARD, PROVED (no account needed): the same node runs a live-shaped plan - live:true and an
+      // own chat - whose two chat-less steps are NOT on the allow-list, plus one that is. The first two must
+      // be refused by name before any dispatch; the third must still answer.
+      const denyPlan = {site: "account", own_chat: FIXTURE.chat, live: true, steps: [
+        {id: "deny/contacts", tool: "mcp_whatsapp_contacts", args: {q: "ana"}},
+        {id: "deny/search", tool: "mcp_whatsapp_search", args: {q: FIXTURE.query}},
+        {id: "deny/allow-approve", tool: "mcp_whatsapp_approve", args: {action: "list"}},
+      ]};
+      const denied = runPlan({root, rendezvousUrl: fleet.rendezvousUrl}, fleet.nodes.account, denyPlan, {});
+      for (const [id, label, expectRefused] of [["deny/contacts", "live guard: a chat-less lookup by name", true],
+        ["deny/search", "live guard: a chat-less search", true],
+        ["deny/allow-approve", "live guard: an allow-listed approval-gate read still answers", false]]) {
+        const row = denied.rows.find((entry) => entry.id === id) || {};
+        const refused = row.error === "refused_no_chat_in_live";
+        cells.push({site: "account", tool: label, hidden: true,
+          verdict: expectRefused === refused ? "PASS" : "FAIL", ms: row.ms || 0, bytes: row.bytes || 0,
+          shape: (row.shape || "").slice(0, 96),
+          why: expectRefused === refused
+            ? (expectRefused ? "refused by name with refused_no_chat_in_live before any dispatch (scripts/lib/whatsapp-acceptance-call.lua chat_less_allowed)" : "answered, as the allow-list says it must")
+            : "expected " + (expectRefused ? "a refusal" : "an answer") + " and got " + (row.error || (row.fields && row.fields.error) || "nothing")});
       }
     }
   } finally {

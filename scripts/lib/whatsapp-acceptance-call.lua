@@ -33,6 +33,38 @@ if not ok_plan or type(plan) ~= "table" or type(plan.steps) ~= "table" then
   os.exit(2)
 end
 local own_chat = type(plan.own_chat) == "string" and plan.own_chat or ""
+-- `live` is the script's own word for "this run is against the operator's account", and it is what the
+-- default-deny below keys on. It is NOT inferred from own_chat: a scratch run sets an own chat too, so it
+-- can measure the chat guard with a fixture target, and it still wants contacts and backfill.
+local live = plan.live == true
+
+-- CHAT-LESS STEPS ARE DEFAULT-DENY IN LIVE MODE (Fable, 24/11). In live mode every step must name the
+-- configured own chat; a step that names NO chat is refused by name before any dispatch, unless it is one
+-- of the few read-only questions about the ACCOUNT ITSELF, listed here one by one:
+--
+--   * the operator's approval gate, read-only forms only: list (what is waiting) and policy (the switch);
+--   * the resume forms of a send this run queued - a job id, never a chat, and the resume NEVER sends
+--     (lua/core/whatsapp.lua M.is_wait: "the second form sends nothing and reads what the queue knows");
+--     the hidden send_status is the same read under its older name.
+--
+-- Everything else - a lookup by name, an account-wide history sync, a media fetch - is refused here and
+-- stays in scratch mode, where it names a fixture chat.
+local CHATLESS_ALLOWED = {
+  ["mcp_whatsapp_approve"] = { ["list"] = true, ["policy"] = true },
+  ["mcp_whatsapp_send"] = { ["wait"] = true },
+  ["mcp_whatsapp_send_status"] = { ["wait"] = true },
+}
+
+--- Is this chat-less step one the live mode may run? One table, read by the guard and by the test.
+function chat_less_allowed(tool, args)
+  local rule = CHATLESS_ALLOWED[tostring(tool or "")]
+  if not rule then return false end
+  if rule["wait"] then
+    -- The resume form: a job id (or a draft handle), and nothing to send to.
+    return (args.id ~= nil or args.ids ~= nil or args.draft ~= nil or args.cancel ~= nil) == true
+  end
+  return rule[tostring(args.action or "")] == true
+end
 local site = type(plan.site) == "string" and plan.site or "account"
 
 -- ---- redaction ----------------------------------------------------------------------------------
@@ -120,6 +152,16 @@ for _, step in ipairs(plan.steps) do
   -- one that cannot name a person: the seam refuses the shape before anything is queued (the cell proves it).
   local WELL_FORMED = "^%d+@(s%.whatsapp%.net|lid|g%.us)$"
   local synthetic = step.synthetic == true and type(args.chat) == "string" and not args.chat:match(WELL_FORMED)
+  -- DEFAULT-DENY: with an own chat configured, a step that names no chat at all is refused unless it is on
+  -- the allow-list above. This runs BEFORE the dispatch, like the chat guard, so a refused step is a
+  -- refusal and not a call that happened.
+  if live and type(args.chat) ~= "string" and step.synthetic ~= true and not chat_less_allowed(record.tool, args) then
+    record.ok = false
+    record.error = "refused_no_chat_in_live"
+    record.state = "refused"
+    print("ACCEPTANCE " .. json.encode(record))
+    goto continue
+  end
   if own_chat ~= "" and type(args.chat) == "string" and args.chat ~= own_chat and not synthetic then
     record.ok = false
     record.error = "refused_not_own_chat"
