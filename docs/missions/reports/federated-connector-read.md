@@ -182,6 +182,18 @@ fail fail on `codemode_not_enabled`, not on the receipt.
 The 70 were **not** re-run with a release binary: that is a ~35-minute suite on this node, and this session
 does not claim they pass. They are named as unjudged, which is what they are.
 
+**The fast-path wiring itself is measured**, with the Lua rows narrowed (`WA_FAST_ROWS`, one row) so the run
+is minutes rather than the whole suite — 139 checks, 22 failed, and among them:
+
+    fast: federated-connector-read ok (3999ms)
+
+The 22 are the same families as the full run and none is this branch's: the ten always-on
+`scripts/test-land-*.lua` rows (each `host_error: disk_cap_refused_before_launch` — this node's own disk
+guard, `/home` at 81 % when the run was made), the `*-pty` rows, `build-info`, `install-guards`,
+`mission-amend-resume`, `release-channel`, `tmp-cleanliness`, `codemode-parity`, `edit-aliases`, and
+`rust wa-capabilities` — whose one failure is the pre-existing `run_state` line above. No mcp, federation,
+operations or session row failed in either run.
+
 ## 6. Texts to approve
 
 New or changed model- or operator-facing strings, verbatim. Field names first, then the gate's own lines.
