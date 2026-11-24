@@ -122,6 +122,18 @@ gap that is not this branch's (their RED is the hand run recorded above, from th
   rendezvous. The scratch base is `/tmp` because on this node `TMPDIR` is inside `~/.wasm-agent`, which
   `scripts/lib/scratch-home.lua` refuses (measured 24/11).
 
+## Where the new rows are wired
+
+* `cargo test --offline --manifest-path rust/wa-sentinel/Cargo.toml -- --test-threads=1` - the one crate
+  command at `scripts/test.sh:220` and `scripts/fast.sh:834` runs every unit test in the crate, so the two
+  `src/*_tests.rs` files are wired by being in it (no separate line needed);
+* `scripts/test-deploy-target.sh` - `scripts/test.sh:1426` (beside the deploy-wait row) and
+  `scripts/fast.sh:1007` (the fast path's own row, `check deploy-target`);
+* the new checks in `scripts/test-deploy-wait.lua` - that file is already a row of both gates
+  (`scripts/test.sh:1421` via `scripts/test-deploy-wait.sh`, `scripts/fast.sh:1003`), and every
+  `scripts/test-*.lua` is also swept by the fast path (`scripts/fast.sh:10`), so the checks run twice over
+  the same file and neither wiring had to be added.
+
 ## Texts to approve
 
 1. `no target commit recorded: the commit a deploy of the deploy tree would install could not be read`
