@@ -481,3 +481,63 @@ five of.
 One more measurement while cancelling, for the earlier brief's item (d)(241): `cancel` on that queued operation
 answered `running` - the id came back still running, and the handle had to be read again to learn it had settled
 (cancelled, log empty). Premise 241 reproduces on this branch; it is not fixed here and is named, not claimed.
+
+
+## Addendum 3 (24/11, Fable's landing decisions): attended vs node-served, and the directory the context names
+
+Commit `99684528`. Fable approved texts 9-10 and asked for one behaviour decision and one added case.
+
+### 1. An ATTENDED run re-records; a node-served turn never does
+
+`lua/core/agent.lua`, `M.record_run_directory(session_id, origin)`:
+
+* **attended** (`origin == "cli"` or `"completion"`) re-records the session's directory, using THIS process's
+directory (`process_directory`: the bound worktree if there is one, else `platform.cwd()`). So `wa chat` resumed
+from B runs in B, as it did before this change when the CLI served the turn;
+* **node-served** (`"interactive"`, `"control"`, `"background"`, `"remote"`, `"job"`) NEVER overwrite: they run
+with the last recorded directory;
+* `cwd_source` is still `session_run` - the value is the session's directory whichever run recorded it.
+
+**How a run knows it is attended, with file:line.** The origin is the NATIVE one, never a body field or a model
+argument: `rust/wa-capabilities/src/serve.rs:397` declares `CURRENT_RUN_ORIGIN`, defaulting to `"cli"`;
+`:408` is the accessor `current_run_origin()` (and `:406` forces `"job"` when `WA_JOB_DELIVERY_ID`/
+`WA_JOB_EVENT_FILE` is set); `:2874` sets `"completion"` and `:2951` `"cli"` for the local paths; `:2931` sets
+`"interactive"`/`"control"`/`"background"` when the NODE serves the run; `:2997` sets `"remote"` for a peer's
+call. The value reaches Lua as `runtime_info().run_origin` (`rust/wa-capabilities/src/host.rs:3887`) and is read
+once per run at `lua/core/agent.lua:2055`; `M:run` passes it to `M.record_run_directory`. Attended therefore means
+exactly "the terminal's own process": `cli` (wa chat, wa chat --once) and `completion`.
+
+### 2. The row's new case (all green, 31 checks)
+
+`scripts/test-operation-cwd.lua` now starts a session in A, records it, then:
+
+* an ATTENDED run re-records, and the value is this process's own directory (what the person's terminal is), not
+the directory the session started in;
+* the work then runs in the resumed directory, still reported `session_run`;
+* for EACH node-served origin (`interactive`, `background`, `remote`, `job`) the record does not move, and an
+operation started after such a turn still runs where the person was;
+* the prompt/command agreement below.
+
+### 3. Does the context shown to the model name the working directory? YES, in two places - both now the same value
+
+| place | before | now |
+| --- | --- | --- |
+| the system prompt's `<workdir path="...">` block, `lua/core/agent.lua:877-879`, fed by `M.workdir(self.session_id)` at `lua/core/agent.lua:1389` | the WORKTREE if bound, else the SERVING PROCESS's cwd - so a node-served turn told the model the canonical checkout while its commands ran elsewhere | worktree -> the directory recorded on the session -> node cwd (`agent.lua:536`), the same precedence the tool layer uses |
+| the project-instructions lookup (which `AGENTS.md` files are read), `lua/core/agent.lua:1390` -> `M.project_instructions` -> `:591` | same process directory | the same value as above, because it is the same variable |
+
+Also made to agree, for the same reason (a check that runs in another tree checks the wrong tree):
+`lua/core/done_gate.lua` `M.session_cwd` now resolves worktree -> recorded directory -> node cwd.
+
+The row pins the agreement: `agent.workdir(session)` equals the `effective_cwd` of an operation that session
+started, for an unbound session and for a worktree session, and `done_gate.session_cwd` matches.
+
+**One adjacent divergence I did NOT change, named:** `lua/core/skills.lua:102` roots skill discovery at
+`platform.cwd()` (walking up to the checkout root), so a NODE-served turn discovers skills from the node's own
+tree even though its commands run in the session's directory. That is not a path the context *states*, it is which
+skills exist - and fixing it means threading a session id through `skills.list/find/content` and keying the cached
+root list per session, a separate reviewable change. It is reported here rather than silently changed.
+
+### 4. The narrowed rows on the final tip
+
+`flock -o ~/Work/missions/.suite.lock env WA_BIN=~/.local/bin/wa WA_FAST_ROWS=/tmp/rows-ops.txt bash scripts/fast.sh`
+at `99684528` (plus the report commit that follows it): see the verdict recorded at the end of this file.
