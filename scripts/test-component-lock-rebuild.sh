@@ -66,6 +66,18 @@ trap 'rm -rf "$OUT"' EXIT
 say "out: $OUT (private; the node's own component directory is never written)"
 say "components: ${names[*]}"
 
+# THE GUARD THAT SAYS WHY A DIFFERENCE IS NOT A BUILD FAULT: the root and the compiler are recorded in
+# components.lock, and a run that would build elsewhere cannot be the pins - refused by name, not
+# reported as a drift. The library that knows them is not a test file, so it is absent when this test is
+# run against an older tree; then the byte comparison below still does the real job and this line says
+# the guard did not run (never that it passed).
+if [ -f scripts/lib/component-build-root.sh ]; then
+  . scripts/lib/component-build-root.sh
+  wa_component_build_inputs_match_lock "$ROOT" ||     cfail 'build_inputs_differ_from_the_lock: this run would not build where, or with what, components.lock records (the line above says which); nothing was rebuilt, so nothing was judged'
+else
+  say 'build-root guard NOT CHECKED: scripts/lib/component-build-root.sh is missing, so this run cannot say its build root and compiler are the ones components.lock records'
+fi
+
 # THE BUILD, through the shipped pipeline and nothing else: the same script a deploy falls back to and a
 # publish uses, so what is measured is what ships - not a build with this test's own flags.
 WA_COMPONENTS_DIR="$OUT/shipped" bash scripts/build-components.sh "${names[@]}" || \

@@ -13,6 +13,10 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export PATH="$HOME/.cargo/bin:$PATH"
+# The build root and the compiler are part of the artifact, and three files have to agree on them: this
+# one builds, scripts/publish-components.sh publishes and scripts/test-component-lock-rebuild.sh judges.
+# One library holds the literal defaults, the refusal by name, and the ownership/permission checks.
+. "$PWD/scripts/lib/component-build-root.sh"
 
 # --- THE COMPILER IS AN INPUT, and it is pinned -----------------------------------------------
 # A component's bytes are the bytes of the compiler that built it. Measured on avell 23/11, one
@@ -25,18 +29,20 @@ export PATH="$HOME/.cargo/bin:$PATH"
 # rustup fetches it once per node.
 # WA_COMPONENT_TOOLCHAIN=node builds with the node's default compiler. That is a diagnosis aid - it
 # shows what the compiler contributes - and never where a pinned artifact comes from.
-COMPONENT_TOOLCHAIN="${WA_COMPONENT_TOOLCHAIN:-1.99.1}"
+COMPONENT_TOOLCHAIN="${WA_COMPONENT_TOOLCHAIN:-$(wa_component_lock_toolchain "$PWD")}"
 if [ "$COMPONENT_TOOLCHAIN" != node ]; then
   command -v rustup >/dev/null 2>&1 || {
     echo "error: component builds are pinned to rustc $COMPONENT_TOOLCHAIN (components.lock) and rustup is not on PATH; install rustup, or WA_COMPONENT_TOOLCHAIN=node for a build whose bytes are not the pinned ones" >&2
     exit 2
   }
   if ! rustup toolchain list 2>/dev/null | grep -q "^$COMPONENT_TOOLCHAIN"; then
-    echo "component toolchain $COMPONENT_TOOLCHAIN is not installed; fetching it (rustup toolchain install, with both wasm targets)" >&2
+    printf 'component toolchain %s is not installed; fetching exactly: rustup toolchain install %s --profile minimal --target wasm32-wasip2 --target wasm32-wasip1\n'       "$COMPONENT_TOOLCHAIN" "$COMPONENT_TOOLCHAIN" >&2
     rustup toolchain install "$COMPONENT_TOOLCHAIN" --profile minimal --target wasm32-wasip2 --target wasm32-wasip1 >&2 || {
       echo "error: cannot install rustc $COMPONENT_TOOLCHAIN (offline?); the pinned component bytes need it" >&2
       exit 2
     }
+    # What was actually installed, by version and commit - a channel name is a request, not an answer.
+    printf 'component toolchain fetched: %s [%s]\n'       "$(rustup run "$COMPONENT_TOOLCHAIN" rustc -V 2>/dev/null)" "$(rustup run "$COMPONENT_TOOLCHAIN" rustc -Vv 2>/dev/null | awk '/^commit-hash/{print $2}')" >&2
   fi
   export RUSTUP_TOOLCHAIN="$COMPONENT_TOOLCHAIN"
 fi
@@ -165,9 +171,10 @@ install_wrapper() {
 }
 
 # The byte helpers, before anything uses them (the build root below hashes a tree; the install hashes
-# the module it wrote).
-sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum < "$1" | awk '{print $1}'; else shasum -a 256 < "$1" | awk '{print $1}'; fi; }
-sha_stdin() { if command -v sha256sum >/dev/null 2>&1; then sha256sum | awk '{print $1}'; else shasum -a 256 | awk '{print $1}'; fi; }
+# the module it wrote). The implementation is scripts/lib/component-build-root.sh, so the publisher and
+# the check that judges the pins cannot drift from the build.
+sha() { wa_component_sha "$1"; }
+sha_stdin() { wa_component_sha_stdin; }
 
 # --- The build root is a CONSTANT path, never this checkout's ----------------------------------
 # Cargo's source identity for a `path =` package is its canonical absolute path; that hash travels into
@@ -196,7 +203,13 @@ sha_stdin() { if command -v sha256sum >/dev/null 2>&1; then sha256sum | awk '{pr
 #    needs no lock because it is never written twice - the price is a cold build per changed tree.
 # WA_COMPONENT_STABLE_ROOT=0 turns both off and builds in the checkout, which is how the path's
 # contribution is shown (like WA_COMPONENTS_REPRO=0 for the remapping).
-BUILD_ROOT="${WA_COMPONENT_BUILD_ROOT:-${TMPDIR:-/tmp}/wa-component-build}"
+# ONE LITERAL PATH (scripts/lib/component-build-root.sh): `/tmp/wa-component-build`, or
+# `C:/wa-component-build` on Windows, and `WA_COMPONENT_BUILD_ROOT` as the only override. It was
+# `${TMPDIR:-/tmp}/...` in the first cut, which is one path only where TMPDIR is unset - macOS always sets
+# it, so does many a container - and a build there is a different path, and different bytes, silently.
+# A fixed directory under a shared /tmp is also a place another local user can prepare, so creating it and
+# reusing it are both checked by name (0700, a real directory, ours, not group- or world-writable).
+BUILD_ROOT="$(wa_component_build_root)"
 copy_tree() { # <destination>: this checkout's whole build input, as it is now
   local dst="$1"
   rm -rf "$dst" && mkdir -p "$dst" || return 1
@@ -206,23 +219,37 @@ if [ "${WA_COMPONENTS_REPRO:-1}" != 0 ] && [ "${WA_COMPONENT_STABLE_ROOT:-1}" !=
   case "$BUILD_ROOT" in
     "$PWD"|"$PWD"/*) echo "error: WA_COMPONENT_BUILD_ROOT ($BUILD_ROOT) is inside this checkout; the build root must live outside the tree it copies" >&2; exit 2 ;;
   esac
-  mkdir -p "$BUILD_ROOT" || { echo "error: cannot create the build root $BUILD_ROOT" >&2; exit 2; }
+  wa_component_build_root_prepare "$BUILD_ROOT" || exit 2
   if [ -z "${WA_COMPONENT_SRC_ROOT:-}" ] && command -v flock >/dev/null 2>&1; then
     exec flock -o "$BUILD_ROOT/.src.lock" env WA_COMPONENT_SRC_ROOT="$BUILD_ROOT/src" "$0" "$@"
   fi
   if [ -n "${WA_COMPONENT_SRC_ROOT:-}" ]; then
     BUILD_SRC="$WA_COMPONENT_SRC_ROOT"
+    # Checked like the root, and before anything is deleted inside it: a symlink here would point the
+    # rm below, and copy_tree's, at whatever it names.
+    wa_component_build_root_prepare "$BUILD_SRC" || exit 2
     copy_tree "$BUILD_SRC" || { echo "error: cannot copy this tree into $BUILD_SRC" >&2; exit 2; }
   else
     stage="$(mktemp -d "$BUILD_ROOT/.stage-XXXXXX")" || { echo "error: cannot stage under $BUILD_ROOT" >&2; exit 2; }
     copy_tree "$stage" || { rm -rf "$stage"; echo "error: cannot copy this tree into $stage" >&2; exit 2; }
-    tree_hash="$( { cd "$stage" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum; } | sha_stdin | cut -c1-16)"
+    tree_hash="$(wa_component_tree_hash "$stage")"
     BUILD_SRC="$BUILD_ROOT/src-$tree_hash"
-    if [ -d "$BUILD_SRC" ]; then rm -rf "$stage"; else mv "$stage" "$BUILD_SRC" || { echo "error: cannot install $BUILD_SRC" >&2; exit 2; }; fi
+    if [ -d "$BUILD_SRC" ]; then
+      # A NAME IS NOT A PROOF: the hash in the directory's own name is recomputed from the tree inside it,
+      # and the directory is reused only when the two agree. A directory that says one thing and holds
+      # another is replaced (after the same ownership/permission check as the root), never built in.
+      if wa_component_build_root_prepare "$BUILD_SRC" && [ "$(wa_component_tree_hash "$BUILD_SRC")" = "$tree_hash" ]; then
+        rm -rf "$stage"
+      else
+        rm -rf "$stage" "$BUILD_SRC"
+        mv "$stage" "$BUILD_SRC" || { echo "error: cannot install $BUILD_SRC" >&2; exit 2; }
+      fi
+    else
+      mv "$stage" "$BUILD_SRC" || { echo "error: cannot install $BUILD_SRC" >&2; exit 2; }
+    fi
   fi
   cd "$BUILD_SRC" || { echo "error: cannot enter the build root $BUILD_SRC" >&2; exit 2; }
-  printf 'component build root: %s
-' "$BUILD_SRC" >&2
+  printf 'component build root: %s\n' "$BUILD_SRC" >&2
 fi
 
 if [ "${WA_COMPONENTS_REPRO:-1}" != 0 ]; then

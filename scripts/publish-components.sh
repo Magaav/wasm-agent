@@ -114,6 +114,14 @@ fi
 
 if [ -z "$FROM" ]; then
   command -v cargo >/dev/null 2>&1 || fail 'cargo_missing: the build half of this script needs cargo and, for a component with C inside, wasi-sdk (WASI_SDK=<dir>)'
+  # WHERE the build happens and WITH WHAT is part of the artifact, so a run that would build somewhere
+  # else (a stray WA_COMPONENT_BUILD_ROOT, WA_COMPONENT_TOOLCHAIN=node, a TMPDIR that used to move the
+  # root) is refused BY NAME here - before anything is built - instead of producing bytes that then read
+  # as a mystery drift against the lock. components.lock records both ("# TOOLCHAIN:", "# BUILD-ROOT:").
+  . "$ROOT/scripts/lib/component-build-root.sh"
+  if ! wa_component_build_inputs_match_lock "$REPO_ROOT"; then
+    fail 'build_inputs_differ_from_the_lock: this run would not build where, or with what, components.lock records (the line above says which), so its bytes cannot be the pins. Nothing was built.' 5
+  fi
   say "building $(printf '%s ' $names)into $OUT (needs wasi-sdk for a component with C inside)"
   mkdir -p "$OUT" || fail "bundle_unwritable: $OUT"
   # build-components.sh installs into WA_COMPONENTS_DIR: build straight into the bundle directory, so
