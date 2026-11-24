@@ -452,6 +452,7 @@ return {
   ['self_wake_vetoed']='selfloop.lua',
   ['selfloop_forbidden_session']='selfloop.lua',
   ['selfloop_requires_session']='selfloop.lua',
+  ['selfloop_tick_failed']='selfloop.lua',
   ['selfloop_unknown_session']='selfloop.lua',
   ['sentinel_refused']='remote_update.lua, update.lua',
   ['sentinel_stopped']='update.lua',
