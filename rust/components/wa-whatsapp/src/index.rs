@@ -2465,6 +2465,12 @@ fn parse_candidate(key: &[u8]) -> Option<Candidate> {
 /// `whatsapp_search`: full text (accent-folded) over text, captions, filenames and transcripts, with
 /// the chat/kind/sender/window filters applied on the loaded records.
 pub async fn search<S: Store>(store: &S, request: &seam::Verified) -> Result<serde_json::Value, String> {
+    search_paced(store, request, &Pace::default()).await
+}
+
+/// The same search, told how caught up the writer is: the answer says it too (`index`), and how new the
+/// newest thing it matched is (`as_of`, scoped to the matches - a search is not one chat).
+pub async fn search_paced<S: Store>(store: &S, request: &seam::Verified, pace: &Pace) -> Result<serde_json::Value, String> {
     let tokens = request.q.as_deref().map(record::tokenize).unwrap_or_default();
     let mut narrowed_list: Option<Vec<Candidate>> = None;
     if !tokens.is_empty() {
@@ -2492,7 +2498,13 @@ pub async fn search<S: Store>(store: &S, request: &seam::Verified) -> Result<ser
         // than answering with the newest messages as though they matched.
         return Ok(seam::answer(
             seam::Op::Search,
-            serde_json::json!({"hits": [], "count": 0, "note": "q has no searchable token"}),
+            serde_json::json!({
+                "hits": [], "count": 0, "note": "q has no searchable token",
+                "as_of": serde_json::Value::Null, "as_of_iso": serde_json::Value::Null,
+                "as_of_scope": "matches",
+                "order": search_order_block(order_of(request)),
+                "index": index_state(pace, 0),
+            }),
         ));
     }
 
@@ -2534,14 +2546,33 @@ pub async fn search<S: Store>(store: &S, request: &seam::Verified) -> Result<ser
         };
         hits.push((score, hit_json(&record, score, &chat_name)));
     }
-    // Best first; between equals, the newest first; between those, a stable id order so one query
-    // answered twice returns the same order.
-    hits.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| {
-        let a_ts = a.1["ts"].as_i64().unwrap_or(0);
-        let b_ts = b.1["ts"].as_i64().unwrap_or(0);
-        b_ts.cmp(&a_ts).then_with(|| a.1["id"].as_str().cmp(&b.1["id"].as_str()))
-    }));
+    // The order this answer is in, decided once: `newest` for a chat-scoped search or one with no query
+    // terms (what a person means by "what is new"), `relevance` otherwise (what a person means by
+    // searching). An explicit `order` always wins, and the answer says which one it used either way.
+    let order = order_of(request);
+    match order {
+        seam::Order::Newest => hits.sort_by(|a, b| {
+            let a_ts = a.1["ts"].as_i64().unwrap_or(0);
+            let b_ts = b.1["ts"].as_i64().unwrap_or(0);
+            b_ts.cmp(&a_ts).then_with(|| a.1["id"].as_str().cmp(&b.1["id"].as_str()))
+        }),
+        // Best first; between equals, the newest first; between those, a stable id order so one query
+        // answered twice returns the same order.
+        seam::Order::Relevance => hits.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| {
+            let a_ts = a.1["ts"].as_i64().unwrap_or(0);
+            let b_ts = b.1["ts"].as_i64().unwrap_or(0);
+            b_ts.cmp(&a_ts).then_with(|| a.1["id"].as_str().cmp(&b.1["id"].as_str()))
+        })),
+    }
     let total = hits.len();
+    // How new the newest thing this search matched is. A search is not one chat, so the scope is said
+    // out loud rather than passing a match's time off as the index's own freshness.
+    let as_of = hits
+        .iter()
+        .map(|(_, hit)| hit["ts"].as_i64().unwrap_or(0))
+        .max()
+        .unwrap_or(0)
+        .max(0);
     let kept: Vec<serde_json::Value> = hits.into_iter().take(request.limit as usize).map(|(_, hit)| hit).collect();
     Ok(seam::answer(
         seam::Op::Search,
@@ -2553,8 +2584,222 @@ pub async fn search<S: Store>(store: &S, request: &seam::Verified) -> Result<ser
             "candidates": candidates,
             "limit": request.limit,
             "truncated": total > kept.len() || candidates > LOAD_BUDGET,
+            "as_of": if as_of > 0 { serde_json::Value::from(as_of) } else { serde_json::Value::Null },
+            "as_of_iso": if as_of > 0 { serde_json::Value::String(crate::view::iso(as_of)) } else { serde_json::Value::Null },
+            "as_of_scope": "matches",
+            "order": search_order_block(order),
+            "index": index_state(pace, as_of),
         }),
     ))
+}
+
+/// How current the writer was when an answer was built.
+///
+/// The component fills it from its own lanes (the pipeline inboxes); `Pace::default()` is "nothing is
+/// waiting and nothing is late", which is what a native test with a store of its own has.
+#[derive(Clone, Debug, Default)]
+pub struct Pace {
+    /// `(chat, id)` of records the component has accepted and not yet written to the index.
+    pub pending: Vec<(String, String)>,
+    /// How many records are waiting in total, so `index.pending` is a count and `pending` a list.
+    pub pending_total: usize,
+    /// The newest message time the component has SEEN and not yet written; 0 = nothing is waiting.
+    pub newest_seen: i64,
+    /// True when a catch-up the component knows about is running (offline resume, history sync): the
+    /// index is knowingly behind the phone.
+    pub catching_up: bool,
+}
+
+thread_local! {
+    /// The highest `as_of` this process has answered for each chat, so a read that would go backwards
+    /// says so instead of quietly answering with an older picture (the owner's rule of 23/11: *a read
+    /// never goes backwards*). One process, bounded, best effort: a restart starts the memory again,
+    /// and the field it guards (`as_of_regressed`) is then simply absent.
+    static SERVED: std::cell::RefCell<HashMap<String, i64>> = std::cell::RefCell::new(HashMap::new());
+}
+
+/// Most chats the monotonic guard remembers. Past it the memory is dropped rather than grown: the guard
+/// is a warning about an answer, not a ledger.
+const SERVED_CHATS: usize = 512;
+
+/// Record `as_of` for `chat`; `Some((was, now))` when this answer is OLDER than one already given for
+/// the same chat, which is the case the answer must name.
+pub fn observe_as_of(chat: &str, as_of: i64) -> Option<(i64, i64)> {
+    if as_of <= 0 {
+        return None;
+    }
+    SERVED.with(|seen| {
+        let mut seen = seen.borrow_mut();
+        let previous = seen.get(chat).copied().unwrap_or(0);
+        if previous > as_of {
+            return Some((previous, as_of));
+        }
+        if previous < as_of {
+            if previous == 0 && seen.len() >= SERVED_CHATS {
+                seen.clear();
+            }
+            seen.insert(chat.to_string(), as_of);
+        }
+        None
+    })
+}
+
+/// The `index` block every read and search answer carries: is this picture current, and how far behind
+/// the newest message the component has SEEN it is.
+///
+/// `state: "catching_up"` is the component saying it knows it is behind: records it has accepted and not
+/// written, or a catch-up running. It is never a guess about messages that never arrived.
+fn index_state(pace: &Pace, as_of: i64) -> serde_json::Value {
+    let pending = pace.pending_total.max(pace.pending.len());
+    let catching_up = pace.catching_up || pending > 0;
+    serde_json::json!({
+        "state": if catching_up { "catching_up" } else { "current" },
+        "pending": pending,
+        "lag_ms": (pace.newest_seen - as_of).max(0),
+        "newest_seen_ms": if pace.newest_seen > 0 { serde_json::Value::from(pace.newest_seen) } else { serde_json::Value::Null },
+    })
+}
+
+/// The order a read answers in, said out loud so a caller can page it and compare two answers.
+fn order_block() -> serde_json::Value {
+    serde_json::json!({"key": "ts", "direction": "newest_first", "cursor": "next_before"})
+}
+
+/// Which order a search answers in: the caller's, else the default the question itself implies.
+///
+/// A search narrowed to one chat is a question about a conversation, and a search with no query terms is
+/// a question about what arrived: both mean "newest first". A search with terms across the account is a
+/// question about relevance, and stays there unless the caller says otherwise.
+fn order_of(request: &seam::Verified) -> seam::Order {
+    request.order.unwrap_or_else(|| {
+        if request.chat.is_some() || request.q.is_none() {
+            seam::Order::Newest
+        } else {
+            seam::Order::Relevance
+        }
+    })
+}
+
+/// The order a search answered in. A search is not one chat and has no cursor: it says which key it
+/// sorted by, so "newest" is never inferred from a relevance list (23/11: a search of old audios
+/// answered them by relevance and a reader took the list for the tail of the conversation).
+fn search_order_block(order: seam::Order) -> serde_json::Value {
+    match order {
+        seam::Order::Newest => serde_json::json!({
+            "by": "newest",
+            "key": "ts",
+            "direction": "newest_first",
+        }),
+        seam::Order::Relevance => serde_json::json!({
+            "by": "relevance",
+            "key": "score",
+            "direction": "best_first",
+            "note": "best match first: this list is NOT in date order, so an older message may be above a newer one; as_of says how new the newest match is",
+        }),
+    }
+}
+
+/// The addresses one chat is known by: the one asked for, and the other form when the index learned the
+/// alias (`ix/al`). One chat is ONE history (23/11: `@lid` and the phone number are the same person, and
+/// a read by either returns the same messages - they used to be two histories that answered
+/// differently).
+async fn addresses_of<S: Store>(store: &S, chat: &str) -> Result<Vec<String>, String> {
+    let mut out = vec![chat.to_string()];
+    if let Some(other) = alias_of(store, chat).await? {
+        if other != chat && !out.contains(&other) {
+            out.push(other);
+        }
+    }
+    Ok(out)
+}
+
+/// The newest record the index holds for one address: that address's `as_of`.
+async fn newest_of<S: Store>(store: &S, chat: &str) -> Result<i64, String> {
+    let prefix = format!("{PREFIX}m/{chat}/");
+    for (key, value) in store.scan(prefix.as_bytes(), None, 8).await? {
+        let Some(candidate) = parse_candidate(&key) else { continue };
+        // A reaction is not a message of the thread: it is folded onto its target.
+        if serde_json::from_slice::<Record>(&value).map(|record| record.kind == "reaction").unwrap_or(false) {
+            continue;
+        }
+        if let Ok(inv) = u64::from_str_radix(&candidate.inv, 16) {
+            return Ok((u64::MAX - inv) as i64);
+        }
+    }
+    Ok(0)
+}
+
+/// One address's newest records after the cursor, newest first, for a merged thread read.
+struct AddressPage {
+    records: Vec<(String, Record)>,
+    more: bool,
+}
+
+async fn address_page<S: Store>(store: &S, chat: &str, before: Option<&str>, want: usize) -> Result<AddressPage, String> {
+    let mut cursor = match before {
+        Some(before) => Some(before_cursor(store, chat, before).await?),
+        None => None,
+    };
+    let prefix = format!("{PREFIX}m/{chat}/");
+    let mut records: Vec<(String, Record)> = Vec::new();
+    let mut more = false;
+    loop {
+        let page = store.scan(prefix.as_bytes(), cursor.clone(), PAGE).await?;
+        if page.is_empty() {
+            break;
+        }
+        cursor = page.last().map(|(key, _)| key.clone());
+        let short = page.len() < PAGE;
+        for (key, value) in page {
+            let Some(candidate) = parse_candidate(&key) else { continue };
+            let Ok(record) = serde_json::from_slice::<Record>(&value) else { continue };
+            // A reaction is folded onto its target, never a bubble of its own in a thread read.
+            if record.kind == "reaction" {
+                continue;
+            }
+            if records.len() >= want {
+                more = true;
+                break;
+            }
+            records.push((candidate.inv, record));
+        }
+        if more || short {
+            break;
+        }
+    }
+    Ok(AddressPage { records, more })
+}
+
+async fn load_any<S: Store>(store: &S, addresses: &[String], id: &str) -> Result<Option<Record>, String> {
+    for address in addresses {
+        if let Some(record) = load(store, address, id).await? {
+            return Ok(Some(record));
+        }
+    }
+    Ok(None)
+}
+
+async fn quoted_snippet_any<S: Store>(store: &S, addresses: &[String], record: &Record) -> Result<Option<String>, String> {
+    if record.quoted.is_empty() {
+        return Ok(None);
+    }
+    Ok(load_any(store, addresses, &record.quoted).await?.map(|quoted| quoted.snippet(seam::MAX_TEXT_CHARS)))
+}
+
+async fn fold_reactions_any<S: Store>(store: &S, addresses: &[String], record: &Record) -> Result<Vec<serde_json::Value>, String> {
+    let rows = fold_reactions(store, &record.chat, &record.id).await?;
+    if !rows.is_empty() {
+        return Ok(rows);
+    }
+    for address in addresses {
+        if address != &record.chat {
+            let rows = fold_reactions(store, address, &record.id).await?;
+            if !rows.is_empty() {
+                return Ok(rows);
+            }
+        }
+    }
+    Ok(Vec::new())
 }
 
 /// `whatsapp_read`: one thread, newest first, reactions folded onto the messages they answer.
@@ -2566,7 +2811,19 @@ pub async fn search<S: Store>(store: &S, request: &seam::Verified) -> Result<ser
 ///
 /// The answer is a header plus a page of messages: `chat` (name, type, participants, unread), the
 /// messages in [`crate::view::message`]'s shape, and `next_before` as the cursor for the older page.
+///
+/// Since 23/11 it also says how fresh it is, in the answer itself: `as_of` (the time of the newest
+/// message the index holds for this chat), `index` (`state`, `pending`, `lag_ms`), `order` (the key the
+/// page is sorted by, so two answers can be compared), `pending` (ids the component has accepted and not
+/// written yet - a message just sent is here, never silently missing), and `as_of_regressed` when this
+/// answer is older than one this process already gave for the same chat (a retention pass or a restored
+/// month), which is the only honest reason a read may go backwards.
 pub async fn read<S: Store>(store: &S, request: &seam::Verified) -> Result<serde_json::Value, String> {
+    read_paced(store, request, &Pace::default()).await
+}
+
+/// The same read, told how caught up the writer is (`Pace`).
+pub async fn read_paced<S: Store>(store: &S, request: &seam::Verified, pace: &Pace) -> Result<serde_json::Value, String> {
     let mut resolved: serde_json::Value = serde_json::Value::Null;
     let chat = match (&request.chat, &request.chat_name) {
         (Some(chat), _) => chat.jid(),
@@ -2602,46 +2859,63 @@ pub async fn read<S: Store>(store: &S, request: &seam::Verified) -> Result<serde
             return Ok(seam::refusal(seam::Op::Read, "chat_required", "read needs the exact chat JID, or a name to resolve"))
         }
     };
-    let mut cursor = match &request.before {
-        None => None,
-        Some(before) => Some(before_cursor(store, &chat, before).await?),
-    };
-    let mut messages: Vec<serde_json::Value> = Vec::new();
+    // One chat is one history under every address it is known by (the alias row), so a read by the
+    // `@lid` and a read by the phone number answer with the same messages.
+    let addresses = addresses_of(store, &chat).await?;
+    let limit = request.limit as usize;
+    let mut merged: Vec<(String, Record)> = Vec::new();
     let mut has_more = false;
-    let prefix = format!("{PREFIX}m/{chat}/");
-    'pages: loop {
-        let page = store.scan(prefix.as_bytes(), cursor.clone(), PAGE).await?;
-        if page.is_empty() {
-            break;
+    for address in &addresses {
+        let page = address_page(store, address, request.before.as_deref(), limit).await?;
+        has_more = has_more || page.more;
+        merged.extend(page.records);
+    }
+    // Newest first by key (`inv` is inverted time), then by id, so one address's page and the other's
+    // interleave exactly as one ordered history.
+    merged.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.id.cmp(&b.1.id)));
+    let mut seen_ids: HashSet<String> = HashSet::new();
+    merged.retain(|(_, record)| seen_ids.insert(record.id.clone()));
+    if merged.len() > limit {
+        merged.truncate(limit);
+        has_more = true;
+    }
+    let mut messages: Vec<serde_json::Value> = Vec::with_capacity(merged.len());
+    for (_, record) in &merged {
+        let quote = quoted_snippet_any(store, &addresses, record).await?;
+        let mut message = crate::view::message(record, quote.as_deref());
+        let folded = fold_reactions_any(store, &addresses, record).await?;
+        if !folded.is_empty() {
+            message["reactions"] = serde_json::Value::Array(folded);
         }
-        cursor = page.last().map(|(key, _)| key.clone());
-        let short = page.len() < PAGE;
-        for (key, value) in page {
-            if parse_candidate(&key).is_none() {
-                continue;
-            }
-            let Ok(record) = serde_json::from_slice::<Record>(&value) else { continue };
-            // A reaction is folded onto its target, never a bubble of its own in a thread read.
-            if record.kind == "reaction" {
-                continue;
-            }
-            if messages.len() >= request.limit as usize {
-                has_more = true;
-                break 'pages;
-            }
-            let quote = quoted_snippet(store, &chat, &record).await?;
-            let mut message = crate::view::message(&record, quote.as_deref());
-            let folded = fold_reactions(store, &chat, &record.id).await?;
-            if !folded.is_empty() {
-                message["reactions"] = serde_json::Value::Array(folded);
-            }
-            messages.push(message);
-        }
-        if short {
-            break;
-        }
+        messages.push(message);
     }
     let next_before = messages.last().and_then(|message| message["id"].as_str()).map(str::to_string);
+    // `as_of` is the time of the newest message the index holds for this chat, from every address it is
+    // known by: the one number a caller can compare with the previous answer.
+    let mut as_of = 0i64;
+    for address in &addresses {
+        as_of = as_of.max(newest_of(store, address).await?);
+    }
+    // A message the component accepted and has not written yet: named, never silently missing. The
+    // list is the caller's own writes in the common case (a send answers as soon as the wire took it),
+    // and an id the index DOES hold is not pending any more.
+    let mut pending: Vec<serde_json::Value> = Vec::new();
+    for (waiting_chat, id) in &pace.pending {
+        // Only this thread's records: a pending id of another chat is that chat's business.
+        if !addresses.iter().any(|address| address == waiting_chat) {
+            continue;
+        }
+        if load_any(store, &addresses, id).await?.is_none() {
+            pending.push(serde_json::Value::String(id.clone()));
+        }
+    }
+    let written = pace.pending.len().saturating_sub(pending.len());
+    let counted = Pace {
+        pending: Vec::new(),
+        pending_total: pace.pending_total.saturating_sub(written),
+        newest_seen: pace.newest_seen,
+        catching_up: pace.catching_up,
+    };
     // The header: which chat this is, in words. A card is what the index observed; an index written
     // before the card existed answers with the address and says so.
     let card = card_of(store, &chat).await?;
@@ -2659,7 +2933,16 @@ pub async fn read<S: Store>(store: &S, request: &seam::Verified) -> Result<serde
         _ => Vec::new(),
     };
     let header = crate::view::chat_header(&chat, group, &name, source, participants, messages.len() as u32);
-    Ok(seam::answer(
+    let regressed = observe_as_of(&chat, as_of).map(|(was, now)| {
+        serde_json::json!({
+            "was_ms": was,
+            "was_iso": crate::view::iso(was),
+            "now_ms": now,
+            "now_iso": crate::view::iso(now),
+            "reason": "the index holds no message as new as the one this chat last answered with: a retention pass or a restored month took records out of it, and nothing newer is being hidden",
+        })
+    });
+    let mut answer = seam::answer(
         seam::Op::Read,
         serde_json::json!({
             "chat": chat,
@@ -2670,19 +2953,40 @@ pub async fn read<S: Store>(store: &S, request: &seam::Verified) -> Result<serde
             "has_more": has_more,
             "next_before": next_before,
             "limit": request.limit,
+            "as_of": if as_of > 0 { serde_json::Value::from(as_of) } else { serde_json::Value::Null },
+            "as_of_iso": if as_of > 0 { serde_json::Value::String(crate::view::iso(as_of)) } else { serde_json::Value::Null },
+            "as_of_local": if as_of > 0 { serde_json::Value::String(crate::view::local(as_of)) } else { serde_json::Value::Null },
+            "order": order_block(),
+            // The ids that turned out to be indexed already are not waiting any more: the count says
+            // what is still behind the wire, not what this answer happened to list.
+            "index": index_state(&counted, as_of),
         }),
-    ))
-}
-
-/// The snippet a reply quotes, when the quoted message is in this chat's index.
-///
-/// `None` is "the index does not have it", which the view writes as an empty quote: a partial
-/// history must not look like a message that quoted nothing.
-async fn quoted_snippet<S: Store>(store: &S, chat: &str, record: &Record) -> Result<Option<String>, String> {
-    if record.quoted.is_empty() {
-        return Ok(None);
+    );
+    if addresses.len() > 1 {
+        // The other address this chat is known by, said out loud: a caller that passes the phone number
+        // and a caller that passes the `@lid` are reading the same messages.
+        answer["addresses"] = serde_json::Value::Array(addresses.iter().map(|address| serde_json::Value::String(address.clone())).collect());
+        // ...and WHICH form was resolved, in words, so nobody tests the alias by hand (23/11: an agent
+        // read the same chat under both forms and the group to find out whether the alias was why
+        // nothing was new).
+        let form = |jid: &str| if jid.ends_with("@lid") { "lid" } else { "phone" };
+        answer["resolved_form"] = serde_json::Value::String(format!("{} -> {}", form(&addresses[0]), form(&addresses[1])));
+        answer["resolved_note"] = serde_json::Value::String(format!(
+            "asked by {}; the same person is also known by {} here, and this answer holds both",
+            form(&addresses[0]),
+            form(&addresses[1])
+        ));
     }
-    Ok(load(store, chat, &record.quoted).await?.map(|quoted| quoted.snippet(seam::MAX_TEXT_CHARS)))
+    if !pending.is_empty() {
+        // The field alone (the ids), because the tool's own description says what to do about it
+        // (Fable, 24/11: a healthy answer carries the fields alone, and a note only where the field
+        // would be misread).
+        answer["pending"] = serde_json::Value::Array(pending);
+    }
+    if let Some(regressed) = regressed {
+        answer["as_of_regressed"] = regressed;
+    }
+    Ok(answer)
 }
 
 /// `whatsapp_message`: one exact message by `(chat, id)`, with its full stored text.

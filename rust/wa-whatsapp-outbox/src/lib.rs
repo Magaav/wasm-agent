@@ -345,6 +345,15 @@ pub struct Outcome {
     /// deleted goes out as a plain message, and this says why (`QUOTE_DROPPED_DELETED`).
     #[serde(default)]
     pub note: String,
+    /// True when the message the component sent is already in the message index, so a read of that chat
+    /// issued the moment this answer arrives holds it.
+    ///
+    /// READ YOUR WRITES (23/11): the component writes the record of its own send at send time instead
+    /// of queueing it for the next pipeline tick, and this flag is that write's receipt. The model used
+    /// to confirm delivery by searching the text back, because nothing said the message was in the
+    /// history; `false` is "not indexed yet", never "sent" dressed as "there".
+    #[serde(default)]
+    pub in_history: bool,
 }
 
 /// The sentence a send carries when its quote was dropped. WhatsApp's quote re-publishes the quoted
@@ -353,9 +362,14 @@ pub struct Outcome {
 pub const QUOTE_DROPPED_DELETED: &str = "sent without the quote: the quoted message was deleted by its author";
 
 impl Outcome {
-    /// A plain send: the message went out exactly as it was asked for.
+    /// A plain send: the message went out exactly as it was asked for, and is not in the index yet.
     pub fn sent(message_id: &str) -> Outcome {
-        Outcome { message_id: message_id.to_string(), note: String::new() }
+        Outcome { message_id: message_id.to_string(), note: String::new(), in_history: false }
+    }
+
+    /// The same, with the receipt of the index write that goes with it.
+    pub fn indexed(message_id: &str, in_history: bool) -> Outcome {
+        Outcome { message_id: message_id.to_string(), note: String::new(), in_history }
     }
 }
 
@@ -426,6 +440,7 @@ pub fn status(
 ) -> serde_json::Value {
     let outcome = result.and_then(Outcome::decode);
     let message_id = outcome.as_ref().map(|outcome| outcome.message_id.clone());
+    let in_history = outcome.as_ref().map(|outcome| outcome.in_history);
     let note = outcome.map(|outcome| outcome.note).unwrap_or_default();
     let state = state_word(state);
     let mut answer = serde_json::json!({
@@ -436,6 +451,16 @@ pub fn status(
     });
     if let Some(message_id) = message_id {
         answer["message_id"] = serde_json::Value::String(message_id);
+    }
+    if let Some(in_history) = in_history {
+        // The receipt a caller needs instead of searching the text back: is this message in the index
+        // a read of that chat answers from?
+        answer["in_history"] = serde_json::Value::Bool(in_history);
+        if !in_history {
+            answer["in_history_note"] = serde_json::Value::String(
+                "sent, but the message is not in the index yet: a read of this chat may not show it for a moment".into(),
+            );
+        }
     }
     if !note.is_empty() {
         // What changed to make the send safe, in the words the operator reads: the quote was dropped,
@@ -678,12 +703,32 @@ mod tests {
         assert!(settled.get("note").is_none(), "a plain send changes nothing and says nothing");
     }
 
+    /// READ YOUR WRITES (23/11): the answer says whether the message it reports is in the history a read
+    /// answers from, so nobody confirms a delivery by searching the text back. `false` is "sent, not
+    /// indexed yet", and it carries the sentence that says so.
+    #[test]
+    fn status_says_whether_the_sent_message_is_in_the_history() {
+        let here = status(12, "done", 1, Some(&Outcome::indexed("3EB0A", true).encode()), None);
+        assert_eq!(here["message_id"], "3EB0A");
+        assert_eq!(here["in_history"], true);
+        assert!(here.get("in_history_note").is_none(), "nothing to explain when it is there");
+        let later = status(13, "done", 1, Some(&Outcome::indexed("3EB0B", false).encode()), None);
+        assert_eq!(later["in_history"], false);
+        assert!(
+            later["in_history_note"].as_str().unwrap_or_default().contains("not in the index yet"),
+            "the reason a read may not show it: {later}"
+        );
+        // A job that has not answered yet says nothing about the index, because there is nothing to say.
+        let queued = status(14, "queued", 0, None, None);
+        assert!(queued.get("in_history").is_none(), "{queued}");
+    }
+
     /// The reviewed rule (Fable, 23/11 ~20:30Z): a send whose quote was dropped goes out and the answer
     /// says so, in this sentence. The quote is dropped because WhatsApp re-publishes the quoted text, and
     /// what its author deleted is kept for the operator, not sent back to the chat.
     #[test]
     fn status_carries_the_note_when_the_quote_was_dropped() {
-        let outcome = Outcome { message_id: "3EB0".into(), note: QUOTE_DROPPED_DELETED.into() };
+        let outcome = Outcome { message_id: "3EB0".into(), note: QUOTE_DROPPED_DELETED.into(), in_history: true };
         let answer = status(11, "done", 1, Some(&outcome.encode()), None);
         assert_eq!(answer["state"], "done");
         assert_eq!(answer["message_id"], "3EB0", "the message went out: only the quote was dropped");
