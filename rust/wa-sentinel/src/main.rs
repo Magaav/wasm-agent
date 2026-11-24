@@ -512,9 +512,16 @@ pub(crate) fn node_activity() -> Option<bool> {
 /// graceful maintenance treats as busy. Scalars and arrays for `subagents` are rejected: the
 /// contract is one object, not "whatever looks like a count".
 pub(crate) fn activity_of(value: &Value) -> Option<bool> {
-    if !value.get("ok").and_then(Value::as_bool)? {
-        return Some(false); // stalled
-    }
+    // A STALLED NODE IS NOT A BUSY ONE (r8b (i), Fable 24/11). `ok:false` is how the runtime says a lane's beat
+    // is gone; the old first line read that as "busy", so a dead lane held every restart and every deploy behind
+    // an idle gate that could never open, and the node needed a human. The contract is NOT loosened: every field
+    // below is still required (a body missing one is ambiguous, which is still busy), and "not busy" needs the
+    // whole picture - no run in flight, no queue, no operation, no subagent - plus the runtime saying the stall
+    // is a stall. A node that refuses runs for another reason (`run_journal_failed`) stays busy: interrupting it
+    // is not what it needs.
+    let ok = value.get("ok").and_then(Value::as_bool)?;
+    let stalled_worker = value.get("worker").and_then(Value::as_str).map(|word| word == "stalled").unwrap_or(false);
+    let journal_failed = value.get("run_journal_failed").and_then(Value::as_bool).unwrap_or(false);
     // These are required by the health contract. The old code defaulted `current`/`queue` to idle,
     // which is how a supervisor stops a node whose state it cannot actually see.
     let current = value.get("current")?;
@@ -529,14 +536,31 @@ pub(crate) fn activity_of(value: &Value) -> Option<bool> {
     if overdue {
         return Some(false);
     }
-    // `workers` must be present, and each child must be an object with a string state. A malformed
-    // child is ambiguous, not alive.
+    // A STALLED NODE IS NOT A BUSY ONE, BUT ONLY AN EMPTY ONE IS IDLE (r8b (i), Fable 24/11, corrected in
+    // change/deploy-hold-r8b-2): the first cut of this returned Some(true) HERE - before the operations and
+    // subagents checks below - so a stalled node with an unsettled background operation or a running subagent
+    // read IDLE, and graceful maintenance (a deploy, a restart) would have killed that work. The decision is
+    // therefore made at the END, after every other fact has been read; what a stall may skip is only the
+    // "every worker is alive" loop, because that is the state the word describes.
+    let stalled_now = !ok && stalled_worker && !journal_failed;
+    // `workers` must be present and every child an object with a string state, whatever the state says (a
+    // malformed child is ambiguous, never idle).
     let workers = value.get("workers")?.as_array()?;
-    for worker in workers {
-        let state = worker.as_object()?.get("state")?.as_str()?;
-        if state != "alive" {
-            return Some(false);
+    if !stalled_now {
+        for worker in workers {
+            let state = worker.as_object()?.get("state")?.as_str()?;
+            if state != "alive" {
+                return Some(false);
+            }
         }
+    } else {
+        // Still validated when the stall is what is being read: a malformed entry is ambiguous, not idle.
+        for worker in workers {
+            worker.as_object()?.get("state")?.as_str()?;
+        }
+    }
+    if !ok && !stalled_now {
+        return Some(false); // not ok, and not the wedge this supervisor can clear: busy
     }
     // `execution_schema` is the runtime declaring which execution summary it reports. Schema 1
     // requires `subagents`; a legacy body may omit both. Any *other* schema is one this sentinel
@@ -621,6 +645,12 @@ pub(crate) fn activity_of(value: &Value) -> Option<bool> {
                 }
             }
         }
+    }
+    // EVERYTHING ELSE SAID IDLE: now the stall can be honoured. A dead lane with nothing in flight has no work
+    // to interrupt, so maintenance may proceed; with the `stalled_now` guard above, an operation, a subagent or
+    // a pending run has already answered Some(false) long before this line.
+    if stalled_now {
+        return Some(true);
     }
     Some(true)
 }
@@ -2057,6 +2087,29 @@ fn verb_recover(reason:&str)->Result<String> {
             return Ok(format!("node recovered through the watchdog ({answer}); interrupted effects must be reconciled"));
         }
         watchdog::Plan::Refuse { detail } => bail!("{detail}"),
+    }
+    // A NODE THE OS OWNS IS RECOVERED THROUGH ITS UNIT (r8b (i), Fable 24/11). MEASURED on this laptop: the
+    // node is run by `wa-serve.service` (systemd --user), so the pid on the port is NOT the pid this sentinel
+    // recorded - it never started it - and `stop_node_verified` refused with "refusing to stop pid N ... it is
+    // not the node this sentinel started (record pid M)". The only remedy was a human `systemctl restart`.
+    //
+    // A livelock guard is the wrong fix and killing a pid the unit owns is worse (systemd restarts it, and two
+    // serves on one port is the 61,117-restart incident). The unit IS the supervisor, so recovery is a fact
+    // asked of it: `systemctl restart <unit>` stops what it owns and starts the same bytes, and the MainPID it
+    // reports becomes the record. When no unit owns this install the pid path below runs exactly as before.
+    if let Some(unit) = owning_unit(&binary) {
+        say(&format!("asking {unit} to restart the node (the OS owns it, not this watcher)"));
+        let pid = start_via_unit(&unit)?;
+        let mut up = false;
+        for _ in 0..start_wait_secs().saturating_mul(2) {
+            if node_is_up() { up = true; break; }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        if !up {
+            bail!("recovery restarted {unit} (MainPID {pid}) but health was not confirmed within {}s", start_wait_secs());
+        }
+        audit("recover", "unit restart of the installed bytes", reason);
+        return Ok(format!("node recovered through {unit} (MainPID {pid}); interrupted effects must be reconciled"));
     }
     if pid_on_port(node_port()).is_some() {stop_node_verified(reason,false)?;}
     start_and_verify(&binary,reason).map_err(|error|anyhow::anyhow!("recovery started the node but health was not confirmed: {error}"))?;
@@ -4667,6 +4720,47 @@ mod self_update_tests {
         let busy_run = json!({"ok": true, "current": {"label": "POST /chat"}, "queue": 0,
             "operation_overdue": false, "workers": [{"id": 0, "state": "busy"}]});
         assert_eq!(activity_of(&busy_run), Some(false));
+
+        // A STALLED NODE IS NOT A BUSY ONE (r8b (i)): a dead lane used to hold every restart and deploy behind
+        // an idle gate that could never open, and the node needed a human. The whole picture is required - no
+        // run, no queue, no operation, no subagent - and the runtime must say the stall is a stall.
+        let stalled_idle = json!({"ok": false, "worker": "stalled", "run_journal_failed": false,
+            "current": null, "queue": 0, "operation_overdue": false, "execution_schema": 1, "operations": [],
+            "subagents": {"queued": 0, "running": 0, "active": 0},
+            "workers": [{"id": 0, "state": "stalled"}]});
+        assert_eq!(activity_of(&stalled_idle), Some(true),
+            "a stalled node with nothing in flight has no work to interrupt");
+        // ...but a stalled node that still has a run in flight is busy, whatever the lane says.
+        let stalled_with_run = json!({"ok": false, "worker": "stalled", "run_journal_failed": false,
+            "current": {"label": "POST /chat"}, "queue": 0, "operation_overdue": false, "execution_schema": 1,
+            "operations": [], "subagents": {"queued": 0, "running": 0, "active": 0},
+            "workers": [{"id": 0, "state": "stalled"}]});
+        assert_eq!(activity_of(&stalled_with_run), Some(false));
+        // ...AND AN UNSETTLED OPERATION OR A RUNNING SUBAGENT IS STILL WORK (r8b (i), the ordering bug): the first
+        // cut answered idle before these checks, so a deploy or a restart would have killed that work.
+        let stalled_with_operation = json!({"ok": false, "worker": "stalled", "run_journal_failed": false,
+            "current": null, "queue": 0, "operation_overdue": false, "execution_schema": 1,
+            "operations": [{"operation_id": "op-1", "state": "running", "overdue": false}],
+            "subagents": {"queued": 0, "running": 0, "active": 0},
+            "workers": [{"id": 0, "state": "stalled"}]});
+        assert_eq!(activity_of(&stalled_with_operation), Some(false),
+            "a stalled node with an unsettled background operation is not idle");
+        let stalled_with_subagent = json!({"ok": false, "worker": "stalled", "run_journal_failed": false,
+            "current": null, "queue": 0, "operation_overdue": false, "execution_schema": 1, "operations": [],
+            "subagents": {"queued": 0, "running": 1, "active": 1},
+            "workers": [{"id": 0, "state": "stalled"}]});
+        assert_eq!(activity_of(&stalled_with_subagent), Some(false),
+            "a stalled node with a running subagent is not idle");
+        // ...and a node that refuses runs for another reason is not a wedge this supervisor can clear.
+        let journal_failed = json!({"ok": false, "worker": "stalled", "run_journal_failed": true,
+            "current": null, "queue": 0, "operation_overdue": false, "execution_schema": 1, "operations": [],
+            "subagents": {"queued": 0, "running": 0, "active": 0},
+            "workers": [{"id": 0, "state": "stalled"}]});
+        assert_eq!(activity_of(&journal_failed), Some(false));
+        // A body that says ok:false without saying it is a stall is still ambiguous-busy, not idle.
+        let not_ok_unknown = json!({"ok": false, "current": null, "queue": 0, "operation_overdue": false,
+            "workers": [{"id": 0, "state": "busy"}]});
+        assert_eq!(activity_of(&not_ok_unknown), Some(false));
 
         let queued = json!({"ok": true, "current": null, "queue": 3, "operation_overdue": false,
             "workers": [{"id": 0, "state": "alive"}]});
