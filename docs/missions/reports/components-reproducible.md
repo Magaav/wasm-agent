@@ -96,7 +96,11 @@ No full suite was run (the G-wave rule). Run singly: `scripts/test-component-loc
 branch green - above), `scripts/test-component-pins.sh` (exit 0: 6 of 11 verified against a private copy of
 the bytes, 5 `SKIP … no reachable copy` for the newly pinned names - correct until a bundle exists),
 `scripts/test-publish-shared-commit.sh` (43 checks, 0 failed), `scripts/test-deploy-components.sh` (74
-checks, ok), `scripts/test-repro-components.sh` (see below).
+checks, ok), `scripts/test-repro-components.sh` (green: `ok: 2 component(s) reproduce byte for byte from two
+checkout paths` - `svc-echo` `f841ec2f…` 191,647 bytes and `graph` `4e907b1f…` 8,187,401 bytes from two
+differently named paths, no path leaked, and `graph` is the one with C inside AND a path dependency),
+`scripts/test-devloop.sh` (22 checks, 0 skipped), `scripts/test-discriminates.sh` (the land gate's own
+check of this branch: `discriminates scripts/test-component-lock-rebuild.sh`, 1 discriminating, 0 blocking).
 
 Two rows are RED and are **pre-existing on the base**, verified by running them in a tree extracted from
 `0d8657e5`:
