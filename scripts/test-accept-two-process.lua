@@ -64,9 +64,15 @@ local why = guard.reason({ home = os.getenv("WASM_AGENT_HOME") or "",
 if why then error("this row refuses to run (" .. why .. ")") end
 
 local checks = 0
+-- `stop_cleanup` is set once processes exist: a FAILED check must not leave a rendezvous, a serve and a
+-- relay running on this machine (measured while building this row: a killed debug run left three of them).
+local stop_cleanup = nil
 local function ok(value, label, detail)
   checks = checks + 1
-  if not value then error("FAIL " .. label .. (detail and (" - " .. tostring(detail)) or ""), 2) end
+  if not value then
+    if stop_cleanup then pcall(stop_cleanup) end
+    error("FAIL " .. label .. (detail and (" - " .. tostring(detail)) or ""), 2)
+  end
   print("  ok: " .. label)
 end
 local function eq(got, want, label)
@@ -162,6 +168,7 @@ local function stop_all()
     started[name] = nil
   end
 end
+stop_cleanup = stop_all
 local function health(port)
   local answered, raw = pcall(host.http, "GET", "http://127.0.0.1:" .. tostring(port) .. "/health", json.encode({}), "")
   if not answered or type(raw) ~= "string" then return nil end
