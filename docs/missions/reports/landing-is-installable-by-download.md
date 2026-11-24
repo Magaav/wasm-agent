@@ -15,6 +15,9 @@ inside a measured output block are kept verbatim, because they are what the run 
 | e8e308d4 | the harness asks the channel the way a node does (gh first), so a rate-limited API is not a skip |
 | 8a5e1104 | the release list: newest by publish time, a stated bound, and what the five were |
 | de476ed8 | rebase onto 65e3daef: a covering release is a legitimate answer, and the deploy's second turn refusal |
+| df24d6f4 | the landing COMPLETES an existing components release, never replaces an asset (no `--clobber`) |
+| 4f496eee | the components question runs to a stated 10 s bound; a request cut by the bound is never a 200 |
+| 5be6aa95 | test-deploy-components-shipped green on main: three stale expectations, none loosened |
 
 ## What was measured, before and after
 
@@ -280,6 +283,44 @@ test-component-build-wrapper 29/0, test-release-completeness 23/0, test-publish-
 test-components-preflight 11/0 + 1 named SKIP, test-deploy-components 74, test-installable-by-download
 green on 65e3daef.
 
+## Three changes from the review (df24d6f4, 4f496eee, 5be6aa95)
+
+**1 - complete, never replace (df24d6f4).** `gh release upload --clobber` is gone from
+`scripts/lib/landing-components-publish.sh`. `components_step` no longer reads "the tag exists" as "the
+bundle is complete" - which is exactly the 24/11 shape (the node binary published, the bundle made later, a
+node refusing an asset nobody uploaded). It names the set the lock owes, asks every asset for its status
+whether the tag exists or not, and then: complete -> "already holds every asset (N of N); nothing was
+uploaded and nothing was replaced"; incomplete -> upload ONLY the assets that answered 404, saying which
+("holds 2 of 3 assets; uploading only the missing: svc-alpha.json"); no tag -> create; a status that
+cannot be read -> `components_publish_unanswerable` with the flag on (an upload there could replace an
+asset nobody can see) or `installability is UNKNOWN, not assumed` with it off. The upload runs without
+`--clobber`, so gh itself refuses to overwrite. Rows: 29 checks, 0 failed - the missing one uploaded and
+named, the present ones not re-uploaded, no `--clobber` anywhere, a complete tag left alone, an unreadable
+status refused.
+
+**2 - a stated 10 s bound, and a cut request is never a 200 (4f496eee).** `wa_release_seconds()` in
+`scripts/lib/release-completeness.sh` (WA_RELEASE_SECONDS, default 20) bounds every request that file makes;
+`check-release-complete.sh --components` states 10 seconds (the same bound as the update refresh) and
+`lua/core/update.lua` carries `CHECK_COMPONENTS_SECONDS = 10` plus a `timeout 15` guard around the call.
+The row found a real defect on the way: `curl -s -o /dev/null -m N -w '%{http_code}'` prints the status it
+read from the headers even when -m cuts the transfer, so a host that accepts a connection and sends nothing
+looked like 200 - "published" about an asset nobody sent. Both status functions now ask curl's EXIT STATUS
+first and answer `unknown (... the request did not complete: curl 28)`. Row: a stub that accepts and stalls
+(`scripts/lib/http-stub.py`, `.stall` of 0 bytes) answers `components=unknown`, exit 2, elapsed 10 s - the
+row fails if it answers sooner than 8 s or later than 20 s, so the bound is measured, not claimed.
+
+**3 - the pre-existing red, fixed (5be6aa95).** `scripts/test-deploy-components-shipped.sh` had three
+stale expectations, each hidden behind the one before it: `SHIPPED` listed ten components while the lock
+pins eleven (wa-whatsapp has been pinned since 11/11); the row looked for `graph component ok` in
+deploy.sh after the deploy moved its proof to the memory component (the graph is off by default) - it now
+asserts three things about the current contract; and two `active:component` rows sat outside the
+`$missing` guard whose SKIP said they were skipped, so a run with no artifacts asserted a component it
+never installed. `publish-components.sh --check` is now called with the publisher's own named exception
+(ALLOW_UNPUSHED_COMMIT=1 + reason), because pushability is a fact about the branch and that row is about
+the plan. Measured: 56 checks, 0 failed, 2 named SKIPs without artifacts; 64 checks, 0 failed WITH the
+real artifacts (all 25 components built here with rustc 1.99.1 and wasi-sdk 34), so the rows behind the
+new guard really run.
+
 ## Pre-existing failures, named (measured on a separate worktree of 345e51be)
 
 * `scripts/test-node-binaries.sh` - FAILS identically on the base commit: its fixture expects `not_on_main:`
@@ -319,6 +360,18 @@ green on 65e3daef.
 8. `installable by download: <sha12> (node-<sha12>, <tag>, <n> components) on <triple>` (harness),
    `installable-by-download: <verdict>` (publisher report), and update.lua's fields
    `components_release`, `components_state`, `can_build_components`, `installable_by_download`.
+9. `release list: <n> entries, read <when>, newest <tag> (published <when>), ordered by publish time, out
+   of at most <bound> asked for` - see the Addition above.
+10. `components: <tag> already holds every asset (<n> of <m>); nothing was uploaded and nothing was
+    replaced` / `components: <tag> holds <n> of <m> assets; uploading only the missing:<assets>` /
+    `components: <tag> exists but holds <n> of <m> assets (missing:<assets>); a node cannot install this
+    commit by download until they are there. WA_PUBLISH_COMPONENTS=1 uploads only the missing ones -
+    nothing already published is replaced` / `<tag> is at <url> (completed: added <assets>; no published
+    asset was replaced)`.
+11. `components_publish_unanswerable: <tag>/<asset> answered '<status>', so this run cannot tell whether it
+    is published - uploading could replace an asset nobody can see; nothing was uploaded and nothing was
+    replaced`.
+12. `unknown (the request did not complete: curl <code>)` - a transfer cut by the bound is not an answer.
 
 ## What this branch did NOT do
 
