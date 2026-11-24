@@ -58,12 +58,20 @@ eq(tostring(kept[1].prompt), "finish the mission step", "the kept words are the 
 check(tonumber(kept[1].due_at) and tonumber(kept[1].due_at) > (tonumber(kept[1].created_at) or 0),
   "and the row is armed ahead of its own creation time (the promise is still fresh): " .. tostring(kept[1].due_at))
 
--- ---- 2. a different message REPLACES the words, and is still one row ---------------------------
+-- ---- 2. a DIFFERENT message is APPENDED, and it is still one row -------------------------------
+-- Fable 24/11: replacing the kept prompt with the newest one loses a person's earlier message silently. Two DIFFERENT
+-- messages from a person are two things they said; the row keeps both, in the order they arrived.
 local again = chat.keep_refused_message(session, "and then report", "master", "deploy_waiting: still waiting")
 eq(again, ids[1], "a later, different message reuses the same kept turn")
 kept = kept_rows(session)
 eq(#kept, 1, "still ONE row")
-eq(tostring(kept[1].prompt), "and then report", "the words are the latest refusal's - the message a person just handed over")
+eq(tostring(kept[1].prompt), "finish the mission step\n\nand then report",
+  "both messages are kept, in the order they arrived (the newest alone would drop the earlier one silently)")
+-- AND THE SAME NUDGE AGAIN ADDS NOTHING: a runner retrying one message must not grow the row it already has.
+local repeat_id = chat.keep_refused_message(session, "and then report", "master", "deploy_waiting: still waiting")
+eq(repeat_id, ids[1], "the same nudge again reuses the row")
+eq(tostring(kept_rows(session)[1].prompt), "finish the mission step\n\nand then report",
+  "and adds no copy of itself to the kept prompt")
 
 -- ---- 3. once it runs, the next refusal arms a fresh one ----------------------------------------
 local later = os.time() + 600   -- the writer's instance runs on the real clock (chat loads its own copy)
@@ -88,5 +96,28 @@ eq(#kept_rows(legacy), 5, "no new row is added to the five")
 local pending = 0
 for _, row in ipairs(kept_rows(legacy)) do if tostring(row.status) == "pending" then pending = pending + 1 end end
 eq(pending, 1, "and exactly ONE of them is still pending: the rest are superseded")
+
+
+-- ---- 5. THE KEPT PROMPT IS BOUNDED, AND IT SAYS WHEN THE BOUND CUT ---------------------------------
+-- A person can hand over more than a prompt can hold. The bound is the module's (M.KEPT_PROMPT_LIMIT), and a kept
+-- prompt that had to drop something must SAY so: a session reading part of what was kept as if it were all of it is
+-- the same silent loss the append rule exists to stop.
+local bound_session = memory.start_session("local", "chat", { id = "r8c-kept-bound", user_id = "master", title = "bound" })
+local first_words = "first: " .. string.rep("a", 5000)
+local cut_id = chat.keep_refused_message(bound_session, first_words, "master", "deploy_waiting: a build waits")
+check(type(cut_id) == "string", "the first message is kept (" .. tostring(cut_id) .. ")")
+local newest_words = "newest: " .. string.rep("z", 4000)
+local too_big = chat.keep_refused_message(bound_session, newest_words, "master", "deploy_waiting: a build waits")
+eq(too_big, cut_id, "a second message that would overflow the row reuses it")
+local bounded = kept_rows(bound_session)
+eq(#bounded, 1, "and the session still has ONE kept row")
+local bounded_text = tostring(bounded[1].prompt)
+check(#bounded_text <= selfloop.KEPT_PROMPT_LIMIT,
+  "the kept prompt is bounded at " .. tostring(selfloop.KEPT_PROMPT_LIMIT) .. " characters (got " .. #bounded_text .. ")")
+check(bounded_text:find("newest: zzzz", 1, true) ~= nil, "and the newest message is kept whole")
+check(bounded_text:find(string.format(selfloop.KEPT_CUT_TEXT, selfloop.KEPT_PROMPT_LIMIT), 1, true) ~= nil,
+  "with the module's own line saying the earlier kept messages were cut: " .. bounded_text:sub(1, 120))
+check(bounded_text:find("first: ", 1, true) == nil, "and the oldest part is what went")
+
 
 print("kept-message-one ok (" .. checks .. " checks): one kept turn per session, re-armed, never queued seven times")

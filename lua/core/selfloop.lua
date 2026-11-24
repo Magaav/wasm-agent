@@ -416,20 +416,61 @@ function M.keep_pending_message(session_id, owner, prompt, reason, opts)
     WHERE session_id=? AND reason=? AND status='pending' AND id NOT IN (
       SELECT id FROM (SELECT id FROM self_wakes WHERE session_id=? AND reason=? AND status='pending'
         ORDER BY created_at LIMIT 1))]], { now, session_id, reason, session_id, reason })
-  local existing = query([[SELECT id FROM self_wakes WHERE session_id=? AND owner=? AND reason=?
+  local existing = query([[SELECT id, prompt FROM self_wakes WHERE session_id=? AND owner=? AND reason=?
     AND status='pending' ORDER BY created_at LIMIT 1]], { session_id, owner, reason })[1]
   if existing then
+    -- APPEND, DO NOT REPLACE (r8c 2, Fable 24/11): two DIFFERENT messages from a person are two things they said, and
+    -- the first version kept only the newest - message A refused and kept, then message B refused and kept, left B
+    -- alone and A gone with nothing said. The row now holds both in the order they arrived, bounded (M.KEPT_PROMPT_LIMIT)
+    -- and saying so when the bound cuts. The same words again add nothing, so a runner retrying one message still
+    -- leaves one copy.
+    local words, cut = M.keep_prompt_text(existing.prompt, prompt)
     exec([[UPDATE self_wakes SET prompt=?, due_at=?, updated_at=? WHERE id=? AND status='pending']],
-      { prompt, now + seconds, now, tostring(existing.id) })
-    return { ok = true, id = tostring(existing.id), reused = true }
+      { words, now + seconds, now, tostring(existing.id) })
+    return { ok = true, id = tostring(existing.id), reused = true, appended = (words ~= tostring(existing.prompt or "")) or nil,
+      cut = cut or nil }
   end
-  local armed = M.schedule({ in_seconds = seconds, reason = reason, prompt = prompt },
+  local new_words, new_cut = M.keep_prompt_text("", prompt)
+  local armed = M.schedule({ in_seconds = seconds, reason = reason, prompt = new_words },
     { session_id = session_id, user_id = owner })
   if type(armed) == "table" and type(armed.wake) == "table" and armed.wake.id then
-    return { ok = true, id = tostring(armed.wake.id), reused = false }
+    return { ok = true, id = tostring(armed.wake.id), reused = false, cut = new_cut or nil }
   end
   return nil
 end
+
+-- THE BOUND ON WHAT A SESSION KEEPS (r8c 2, Fable 24/11). A kept prompt is what the session's next turn reads, and a
+-- person can hand over more than a prompt holds: the row keeps their messages in order and stops at this many
+-- characters, keeping the NEWEST words (the ones just handed over) and cutting the oldest.
+M.KEPT_PROMPT_LIMIT = 8000
+-- Said INSIDE the prompt when the bound cut: a session holding part of what was kept must not read as if it held all
+-- of it. `%d` is the limit, so the line cannot disagree with the rule.
+M.KEPT_CUT_TEXT = "[kept] the earlier kept messages were cut here: a kept prompt is bounded at %d characters, and the most recent messages are what this row keeps"
+
+-- The kept prompt after one more message: append in order, never duplicate the same words, bound at the tail so the
+-- newest message survives whole, and cut on a UTF-8 boundary (a Lua string is bytes, and half a character is not a
+-- message). `cut` is true when something went, so the caller can say so where it reports.
+function M.keep_prompt_text(kept, message, limit)
+  kept, message = tostring(kept or ""), tostring(message or "")
+  limit = tonumber(limit) or M.KEPT_PROMPT_LIMIT
+  if kept == "" then
+    kept = message
+  elseif message ~= "" and kept ~= message and kept:sub(-(#message + 2)) ~= "\n\n" .. message then
+    kept = kept .. "\n\n" .. message
+  end
+  if #kept <= limit then return kept, false end
+  local notice = string.format(M.KEPT_CUT_TEXT, limit)
+  local room = limit - #notice - 1
+  if room < 1 then return notice:sub(1, limit), true end
+  local start = #kept - room + 1
+  while start <= #kept do
+    local byte = kept:byte(start)
+    if byte < 0x80 or byte >= 0xC0 then break end
+    start = start + 1
+  end
+  return notice .. "\n" .. kept:sub(start), true
+end
+
 
 function M.schedule(args, ctx)
   M.setup()
