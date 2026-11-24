@@ -994,6 +994,13 @@ check session-park bash scripts/test-session-park.sh
 # Their Lua halves (scripts/test-deploy-wait.lua) are fast-path rows by name.
 WA_BIN="$bin" check deploy-wait bash scripts/test-deploy-wait.sh
 WA_BIN="$bin" check deploy-bound bash scripts/test-deploy-bound.sh
+# ONE TURN, ONE PROVIDER REQUEST (r8a/4, 8ef62fea): the instrument every later paid-turn assertion needs - a
+# turn against a stub provider this row owns, asserting exactly ONE request for one turn. It needs no live
+# node and no real provider: its own `wa chat --once --offline` in a scratch home, a loopback stub on an
+# ephemeral port, and the vault variables UNSET (the row's header says why: lua/core/vault.lua reads them from
+# the environment, so a scratch home alone did not stop a paid turn). It was an orphan until main-health said so
+# (one commit, change/one-turn-wired): a row that nothing runs is a proof nobody uses.
+WA_BIN="$bin" check one-turn bash scripts/test-one-turn.sh
 # fast.sh runs under set -u: every incremented counter is initialised (test-fast-counters.sh).
 check fast-counters bash scripts/test-fast-counters.sh
 check install-front-door bash scripts/test-install.sh
