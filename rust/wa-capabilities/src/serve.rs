@@ -3140,7 +3140,24 @@ fn node_thread_loop(
             }
         }
         let quiet = now_ms().saturating_sub(LAST_SERVED_MS.load(Ordering::Relaxed)) >= 2000;
-        if std::time::Instant::now() >= next_sync && QUEUED.load(Ordering::Relaxed) == 0 && quiet {
+        // A DEPLOY THAT IS WAITING OR INSTALLING STOPS THE NODE'S OWN HOUSEKEEPING FROM STARTING (23/11, G blocker;
+        // Fable's choice over an allow-list after the bound). MEASURED: `sync tick` was named as the holder of six
+        // installs and each waited 6-11 minutes on it. A pass already running finishes - the Lua side has its own
+        // yield point before the network phase - and a caller that cannot read the signal gets "0", the previous
+        // behaviour, with one printed line: a broken reader must not silence the node's sync for ever.
+        let deploy_pending = || -> bool {
+            match lua.call_string("wa_deploy_pending", &[]) {
+                Ok(answer) => answer.trim() == "1",
+                Err(error) => {
+                    static REPORTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                    if !REPORTED.swap(true, Ordering::Relaxed) {
+                        eprintln!("[sync] wa_deploy_pending unavailable, housekeeping starts as before: {error}");
+                    }
+                    false
+                }
+            }
+        };
+        if std::time::Instant::now() >= next_sync && QUEUED.load(Ordering::Relaxed) == 0 && quiet && !deploy_pending() {
             next_sync = std::time::Instant::now() + std::time::Duration::from_secs(20);
             begin_work("sync tick".to_string());
             if let Err(error) = lua.call_string("wa_sync_tick", &[]) {
@@ -3149,7 +3166,7 @@ fn node_thread_loop(
             end_work();
             beat();
         }
-        if index == 0 && std::time::Instant::now() >= next_retention && QUEUED.load(Ordering::Relaxed) == 0 && quiet {
+        if index == 0 && std::time::Instant::now() >= next_retention && QUEUED.load(Ordering::Relaxed) == 0 && quiet && !deploy_pending() {
             next_retention = std::time::Instant::now() + std::time::Duration::from_secs(86_400);
             begin_work("retention".to_string());
             match lua.call_string("wa_retention", &[]) {

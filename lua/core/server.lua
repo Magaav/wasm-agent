@@ -2395,6 +2395,27 @@ function wa_sync_apply(payload, from, public_key, ts, signature)
 end
 
 -- Push everything after each peer's cursor. Called on a timer by the host.
+-- IS A DEPLOY WAITING FOR OR INSTALLING ON THIS NODE? (23/11, G blocker; Fable's choice over an allow-list.)
+--
+-- The node's own housekeeping (`wa_sync_tick`, `wa_retention`) held installs for minutes because one label covers a
+-- whole pass - measured in ~/.wasm-agent/sentinel/sentinel.log: six installs held 6-11 minutes each. The answer is
+-- not to wave the label through after the bound (an allow-list that grows is how the next unnamed holder gets waved
+-- through); it is that housekeeping does not START while a deploy waits, and a pass already running may finish.
+--
+-- One predicate, reusing the signal the pause itself uses (`deploy_pause.waiting`: the installer's marker, the
+-- request box and the claimed lane), so a node that stops starting turns for an install also stops starting its own
+-- background work. A caller that cannot read the signal gets "0" - the previous behaviour - and says so in its own
+-- log line; a broken reader must not silence the node's sync for ever.
+function wa_deploy_pending()
+  local loaded, pause = pcall(dofile, "lua/core/deploy_pause.lua")
+  if not loaded or type(pause) ~= "table" or type(pause.waiting) ~= "function" then
+    return "0"
+  end
+  local ok, marker = pcall(pause.waiting, host.now())
+  if not ok then return "0" end
+  return marker and "1" or "0"
+end
+
 function wa_sync_tick()
   -- The update banner's cache, at most one request per fifteen minutes. This is the quiet
   -- housekeeping tick (node-thread 0, nobody waiting) - the same place the sync push already pays for
@@ -2408,6 +2429,13 @@ function wa_sync_tick()
   -- and a child that ran this tick was never a script run in the first place.
   local script_run = host.script_run ~= nil and host.script_run() or false
   if not script_run then pcall(update_banner.tick) end
+  -- YIELD POINT (23/11): a pass that STARTED before the request arrived does the cheap phases above and then stops
+  -- before the one that talks to a peer over the network. Nothing is lost - the next quiet window after the install
+  -- does it - and the node stops being "busy with sync tick" for the length of a network call an install is waiting on.
+  if wa_deploy_pending() == "1" then
+    if not script_run then pcall(host.log, "sync tick: yielded to a waiting deploy; the next quiet window does the rest") end
+    return "yielded: a deploy is waiting for or installing on this node"
+  end
   -- The periodic backup (item 1 of the node-ops round): at most one snapshot per WA_BACKUP_INTERVAL_S,
   -- due-checked here because this is the one place a node already does recurring work with nobody
   -- waiting - and TAKEN in a supervised operation, not here (item 10 of the round).

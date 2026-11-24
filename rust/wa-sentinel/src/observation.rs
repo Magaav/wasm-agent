@@ -229,7 +229,29 @@ impl Observations {
                 self.save();
             }
             Verdict::Quiet => {}
-            Verdict::Retire => self.retire(id, &problem, now),
+            Verdict::Retire => {
+                // A REQUEST A SPAWNED INSTALLER NEVER FINISHED IS NOT A DIRECTORY TO RETIRE (23/11, G blocker).
+                // MEASURED: ffd2a0a5's installer refused the install and wrote none of the protocol files, so this
+                // lane retired the directory as unobservable - and the request ended nowhere: not installed, not
+                // failed, not re-queued, and the box said `0 waiting`. The installer's own three files answer it.
+                match installer_outcome::verdict(id) {
+                    Some(installer_outcome::Outcome::Uninstalled(why)) => {
+                        match installer_outcome::fail_unobserved(id, &why) {
+                            Ok(true) => audit("return-observation-failed", id,
+                                &format!("{problem}; the installer ended and nothing was installed, so the request failed with its own reason and was re-queued once (no retirement)")),
+                            Ok(false) => {}
+                            Err(error) => audit("return-observation-failed", id, &format!("{problem}; could not record the installer's failure: {error:#}")),
+                        }
+                        self.forget(id);
+                        return;
+                    }
+                    // Still running: a live installer is neither a retirement nor a silence - the watchdog and the
+                    // installer's own progress record already speak for it.
+                    Some(installer_outcome::Outcome::Running) => return,
+                    Some(installer_outcome::Outcome::Installed) | None => {}
+                }
+                self.retire(id, &problem, now)
+            }
         }
     }
 

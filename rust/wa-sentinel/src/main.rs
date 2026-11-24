@@ -88,6 +88,9 @@ mod deploy_protocol;
 mod deploy_bootstrap;
 // One deploy, one report, written on disk before the installer starts and settled by whichever process
 // outlives it: the sentinel's wait on the child, the installer's own result file, or the watchdog.
+mod installer_outcome;
+#[path = "installer_outcome_tests.rs"]
+mod installer_outcome_tests;
 mod deploy_outcome;
 mod sentinel_return;
 #[cfg(test)]
@@ -173,7 +176,7 @@ pub(crate) fn sentinel_dir() -> PathBuf {
     dir
 }
 
-fn log_path() -> PathBuf {
+pub(crate) fn log_path() -> PathBuf {
     sentinel_dir().join("sentinel.log")
 }
 
@@ -2707,7 +2710,7 @@ pub(crate) fn requeue_dir() -> PathBuf {
 /// node was busy with the very workers the deploy had paused, and the landing that asked for it got nothing but a
 /// `failed/` record - so the operator had to notice and ask again by hand. Once is the bound: the request that
 /// comes back carries `requeued`, and a second failure at its bound is terminal (it is not re-queued for ever).
-fn schedule_requeue(request: &Value, key: &str, detail: &str) -> Result<()> {
+pub(crate) fn schedule_requeue(request: &Value, key: &str, detail: &str) -> Result<()> {
     let dir = requeue_dir();
     std::fs::create_dir_all(&dir)?;
     let stored = json!({"request": request, "detail": detail, "at": now_epoch()});
