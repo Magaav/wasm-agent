@@ -969,6 +969,11 @@ if command -v node >/dev/null 2>&1; then
 # check here and its .lua half is declared not-a-row in scripts/fast-path.exclude.
 # The session-isolation suite holds the canaries its own environment sections withhold
 WA_BIN="$bin" check session-isolation bash scripts/test-session-isolation.sh
+# A session's git never inherits another repository: two real nodes, each with its own home and
+# database, started from a parent that carries GIT_DIR/GIT_INDEX_FILE/GIT_WORK_TREE the way a hook does,
+# committing 50 times each into its own worktree of ONE repository at the same moment (24/11: a deploy
+# worker's commit landed in another live session's worktree). Seconds to a minute, no ports, no provider.
+WA_BIN="$bin" check git-env-isolation bash scripts/test-git-env-isolation.sh
 WA_BIN="$bin" check tool-env-allow bash scripts/test-tool-env-allow.sh
 # A session whose mission was stopped must STAY stopped (22/11): the verb a stop recipe runs parks it,
 # its due wake is held rather than dropped or dispatched, `wa chat --resume`/`--continue` refuse it by name,
