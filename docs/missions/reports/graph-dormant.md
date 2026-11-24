@@ -368,7 +368,7 @@ The deploy proved the staged `graph` component on the candidate binary before in
 `scripts/check-graph-component.lua`), and with the graph off by default that proof answered `graph_dormant`
 before the component was touched. My first repair set `WA_GRAPH_COMPONENT=1` for the proof - and Fable's
 steer ruled exactly that out: **a deploy proof must not depend on an optional feature at all**. The final
-shape, on `change/deploy-component-proof`:
+shape, on `change/deploy-graph-proof`:
 
 * `scripts/check-component-proof.lua` (new, and the deploy now runs it instead of the graph proof) proves two
   properties, with no feature switch anywhere:
@@ -419,3 +419,28 @@ Narrowed run after the steer (138 checks): **every one of the 40 Lua rows passed
 (`scripts/test-install-guards.sh`, 72 checks, the same 6 failures - `scripts/upgrade.sh` refuses inside a turn
 running on the node it would replace, and this run was made from such a turn). Neither file is touched by this
 branch.
+
+## 11. The two rows that read the dormant graph the wrong way round (main-health 460/462, both reds bisect to the merge)
+
+Two rows were green on `ad3fb3c5^` and red on `ad3fb3c5`, run singly - both read the node's graph state the wrong
+way round, and neither file was touched by the merge. Fixed in `c81dca04`:
+
+* `scripts/test-retire-many.lua` (1e, `symbol_source_many -> Promise.all(tools.graph(...))`) called `tools.graph`
+  on a node where the graph is off by default, where the name is not in the catalogue at all: `TypeError:
+  tools.graph is not a tool here`. The leg is **kept, not dropped**: the retirement claim for
+  `symbol_source_many` IS "Promise.all of `tools.graph` is its replacement", and dropping it would stop testing
+  that wherever the graph is used. It is now gated on the real resolver (`lua/core/features.lua`): on a node
+  that runs the graph it runs unchanged; on the default dormant node the row asserts what is true there - the
+  name is absent from the catalogue and a script that calls it is refused by the dispatcher (`not a tool`), and
+  the "no `symbol_source_many` action" check no longer indexes a schema that is not there. The graph's own
+  answers stay covered by `scripts/test-graph-tool.lua` and `scripts/test-graph-dormant.lua`.
+* `scripts/test-write-node-receipt.lua:76` asserted `type(got.w.graph_index) == 'table'` with the message "the
+  write receipt still carries graph_index" - which with a dormant graph contradicted its own receipt.
+  `lua/core/tools.lua` sets `graph_index` only when the graph answered (`if result.applied then
+  result.graph_index = graph_hint(...) end`), so on a dormant node the field is correctly absent. The row now
+  asserts the invariant in both states - `graph_index` is the graph's answer (a table) or absent, never another
+  shape - and, from the resolver, that a dormant graph leaves it absent. The header comment says the same.
+
+Measured on `change/red-rows-graph-dormant` (base `0d8657e5`) through the fast path with both rows plus the
+graph, feature and deploy-proof rows: **lua 34/34 passed**. Neither row loosens an assertion: each one now
+asserts the state its node is in instead of the state the author's node happened to be in.
